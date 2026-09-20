@@ -21,6 +21,7 @@ import { attemptUsageFromGatewayUsage, EMPTY_ATTEMPT_USAGE } from "../orchestrat
 import { CapabilityGatewayDeniedError, type ProviderBudgetReservation } from "../orchestration/capability-gateway.ts";
 import type { ArtifactContract, AttemptUsageSnapshot, ExecutionGrant } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
+import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
 import { WorkerActionJournal } from "./worker-action-journal.ts";
 import type { AppliedActionsReport, WorkerAction } from "./worker-actions.ts";
 import type { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
@@ -163,6 +164,12 @@ export interface WorkerAttemptExecutorOptions {
 	agentControl: Pick<WorkerAgentControlCoordinator, "acknowledgeMailboxMessage" | "mailboxMessagesForConversation">;
 	applyActions?(actions: readonly WorkerAction[], actionJournal?: WorkerActionJournal): AppliedActionsReport;
 	warn(message: string): void;
+	/**
+	 * Live worker supervision. Called once per executed tool call with what actually happened on this
+	 * attempt. Supervision is advisory: it never blocks the call it observes, and a failure inside it
+	 * is swallowed by its own owner rather than failing the worker.
+	 */
+	observeWorkerProgress?(observation: WorkerProgressObservation): Promise<unknown> | unknown;
 }
 
 function workerCompletionCallbackFailure(error: unknown): Error {
@@ -257,6 +264,43 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 } {
 	const changedFiles = new Set(options.conversation.getChangedFiles(options.durableHandle.attemptId));
 	const toolIssues = new Set<string>();
+	const attemptStartedAt = Date.now();
+	const recentToolNames: string[] = [];
+	let executedToolCalls = 0;
+	let changedFileCountAtChurnWindowStart = changedFiles.size;
+	/**
+	 * One live supervision observation per executed tool call. The deterministic churn check runs
+	 * first, because repeated broad validation with no new implementation needs no semantic judgment.
+	 */
+	const observeToolCall = async (toolName: string): Promise<void> => {
+		if (!options.observeWorkerProgress) return;
+		executedToolCalls++;
+		recentToolNames.push(toolName);
+		if (recentToolNames.length > 8) recentToolNames.shift();
+		const observation: WorkerProgressObservation = {
+			agentId: options.agentId,
+			objectiveId: options.durableHandle.objectiveId,
+			taskId: options.durableHandle.taskId,
+			attemptId: options.durableHandle.attemptId,
+			role: options.grant.role,
+			mission: options.request.instructions,
+			toolCalls: executedToolCalls,
+			elapsedMs: Date.now() - attemptStartedAt,
+			changedFiles: [...changedFiles],
+			recentFailures: [...toolIssues],
+			recentToolNames: [...recentToolNames],
+			changedFileCountAtWindowStart: changedFileCountAtChurnWindowStart,
+			changedFileCount: changedFiles.size,
+		};
+		if (changedFiles.size > changedFileCountAtChurnWindowStart) {
+			changedFileCountAtChurnWindowStart = changedFiles.size;
+		}
+		try {
+			await options.observeWorkerProgress(observation);
+		} catch {
+			// Supervision must not fail the worker it observes.
+		}
+	};
 	const recordChangedFile = (filePath: string): void => {
 		changedFiles.add(filePath);
 		try {
@@ -654,6 +698,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 													}
 												}
 												signal.throwIfAborted();
+												await observeToolCall(toolCall.name);
 												return undefined;
 											} catch (error) {
 												retainCallbackFailure(error);

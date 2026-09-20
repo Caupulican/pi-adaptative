@@ -22,6 +22,12 @@ import {
 	PROJECT_RULE_REPAIR_CUSTOM_TYPE,
 	SessionProjectRules,
 } from "../../../src/core/project-rules/session-project-rules.ts";
+import type { LiveWorkerAttempt } from "../../../src/core/supervision/types.ts";
+import { WorkerSemanticSupervisor } from "../../../src/core/supervision/worker-semantic-supervisor.ts";
+import {
+	isValidationChurn,
+	WorkerSupervisionCoordinator,
+} from "../../../src/core/supervision/worker-supervision-coordinator.ts";
 import { createRcSdkHarness } from "../rc-sdk-harness.ts";
 
 /** Tool results still present on the compacted projection, which the audit entry never inflates. */
@@ -415,6 +421,127 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 			expect(hookResult?.isError).toBe(true);
 			expect(hookResult?.content?.[0]?.text).toContain("Mutation rejected by project rules");
 			expect(hookResult?.content?.[0]?.text).toContain("RepairWork");
+		});
+	});
+
+	describe("Worker supervision live hook (RCG-014, RCG-044)", () => {
+		function attempt(overrides: Partial<LiveWorkerAttempt> = {}): LiveWorkerAttempt & { agentId: string } {
+			return {
+				agentId: "agent-1",
+				objectiveId: "obj-1",
+				taskId: "task-1",
+				attemptId: "att-1",
+				role: "implementer",
+				mission: "implement the change",
+				toolCalls: 6,
+				elapsedMs: 30_000,
+				changedFiles: [],
+				recentFailures: [],
+				...overrides,
+			};
+		}
+
+		function coordinatorWith(supervisor: WorkerSemanticSupervisor) {
+			const steered: { agentId: string; directive: string }[] = [];
+			const cancelled: { agentId: string; reason: string }[] = [];
+			const coordinator = new WorkerSupervisionCoordinator({
+				supervisor,
+				control: {
+					steerWorker: (agentId, directive) => {
+						steered.push({ agentId, directive });
+					},
+					cancelWorker: (agentId, reason) => {
+						cancelled.push({ agentId, reason });
+					},
+				},
+			});
+			return { coordinator, steered, cancelled };
+		}
+
+		it("RCG-044: a short worker is not assessed at all", async () => {
+			const { coordinator, steered } = coordinatorWith(new WorkerSemanticSupervisor({}));
+			const verdict = await coordinator.observe(attempt({ toolCalls: 1, elapsedMs: 200 }));
+			expect(verdict).toBeUndefined();
+			expect(steered).toEqual([]);
+		});
+
+		it("RCG-044: a stall steers once, and a repeated stall reroutes through root control", async () => {
+			const { coordinator, steered, cancelled } = coordinatorWith(new WorkerSemanticSupervisor({ debounceMs: 0 }));
+
+			const first = await coordinator.observe(attempt({ isStalled: true }));
+			expect(first?.action).toBe("steer_once");
+			expect(steered).toHaveLength(1);
+			expect(steered[0]?.agentId).toBe("agent-1");
+
+			const second = await coordinator.observe(attempt({ isStalled: true }));
+			expect(second?.action).toBe("stop_and_reroute");
+			expect(cancelled).toHaveLength(1);
+			expect(cancelled[0]?.agentId).toBe("agent-1");
+		});
+
+		it("RCG-014: repeated broad validation with no new implementation steers back to implementing", async () => {
+			const { coordinator, steered } = coordinatorWith(new WorkerSemanticSupervisor({ debounceMs: 0 }));
+			const verdict = await coordinator.observe({
+				...attempt(),
+				recentToolNames: ["bash", "bash", "bash"],
+				changedFileCountAtWindowStart: 2,
+				changedFileCount: 2,
+			});
+
+			expect(verdict?.action).toBe("steer_once");
+			expect(verdict?.reason_codes).toContain("validation_churn_without_implementation");
+			expect(steered[0]?.directive).toContain("STOP VERIFICATION CHURN");
+			expect(steered[0]?.directive).toContain("Full regression belongs to VERIFY");
+
+			// New implementation in the same window is not churn.
+			expect(
+				isValidationChurn({
+					recentToolNames: ["bash", "bash", "bash"],
+					changedFileCountAtWindowStart: 2,
+					changedFileCount: 3,
+				}),
+			).toBe(false);
+		});
+
+		it("RCG-044: the supervisor has no path to completing the root objective", async () => {
+			const { coordinator, steered, cancelled } = coordinatorWith(new WorkerSemanticSupervisor({ debounceMs: 0 }));
+			const verdict = await coordinator.observe(attempt());
+			// A worker making progress produces a silent continue: no control action at all.
+			expect(verdict?.action).toBe("continue");
+			expect(verdict?.summaryEvent).toBeUndefined();
+			expect(steered).toEqual([]);
+			expect(cancelled).toEqual([]);
+			// The action vocabulary itself contains no terminal outcome.
+			expect(coordinator.getSignals().every((signal) => signal.action !== ("complete" as never))).toBe(true);
+		});
+
+		it("RCG-044: a failed assessment never fails the worker it observes", async () => {
+			const failing = new WorkerSemanticSupervisor({ debounceMs: 0 });
+			failing.observe = async () => {
+				throw new Error("supervision transport unavailable");
+			};
+			const errors: unknown[] = [];
+			const coordinator = new WorkerSupervisionCoordinator({
+				supervisor: failing,
+				control: {
+					steerWorker: () => {
+						throw new Error("must not be reached");
+					},
+					cancelWorker: () => {
+						throw new Error("must not be reached");
+					},
+				},
+				onSupervisionError: (error) => errors.push(error),
+			});
+			await expect(coordinator.observe(attempt())).resolves.toBeUndefined();
+			expect(errors).toHaveLength(1);
+		});
+
+		it("RCG-044: the live session binds supervision to its own worker control surface", async () => {
+			const harness = await createRcSdkHarness();
+			expect(harness.session.workerSupervision).toBeInstanceOf(WorkerSupervisionCoordinator);
+			expect(harness.session.workerSupervision.getSignals()).toEqual([]);
+			expect(harness.session.workerSupervision.getPendingRootRequests()).toEqual([]);
 		});
 	});
 

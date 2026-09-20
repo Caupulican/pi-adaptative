@@ -208,6 +208,8 @@ import type {
 } from "./settings-manager.ts";
 import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
+import { WorkerSemanticSupervisor } from "./supervision/worker-semantic-supervisor.ts";
+import { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
@@ -420,6 +422,8 @@ export class AgentSession {
 	private readonly _ownerRules: DurableOwnerRuleStore;
 	/** Root semantic project rules, consulted at mutation acceptance, postflight and completion. */
 	private readonly _projectRules: SessionProjectRules;
+	/** Live worker supervision, bound to the real worker lifecycle and root worker control. */
+	private readonly _workerSupervision: WorkerSupervisionCoordinator;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -431,6 +435,32 @@ export class AgentSession {
 		this._ownerRules = new DurableOwnerRuleStore({
 			agentDir: config.agentDir ?? getAgentDir(),
 			projectKey: config.cwd,
+		});
+		this._workerSupervision = new WorkerSupervisionCoordinator({
+			supervisor: new WorkerSemanticSupervisor({
+				// Resolved per observation: the steering plane is bound after construction, and a
+				// session without one supervises on its deterministic stall/repetition signals alone.
+				decisionEngine: {
+					evaluate: async (program, state, options) => {
+						const engine = this._steeringPlane?.decisionEngine;
+						if (!engine) return {};
+						return createRetentionDecisionEngine(engine).evaluate(program as never, state, options as never);
+					},
+				},
+			}),
+			control: {
+				// The supervisor reaches the root's existing worker control surface and nothing else.
+				steerWorker: (agentId, directive) => {
+					this._backgroundLanes.sendWorkerAgentMessage(agentId, directive);
+				},
+				cancelWorker: (agentId, reason) => {
+					this._backgroundLanes.cancelWorkerAgent(agentId, reason);
+				},
+			},
+			onIntervention: (signal) => {
+				if (!signal.summaryEvent) return;
+				this._emit({ type: "warning", message: signal.summaryEvent });
+			},
 		});
 		this._projectRules = new SessionProjectRules({
 			cwd: config.cwd,
@@ -669,6 +699,9 @@ export class AgentSession {
 			getForegroundThinkingLevel: () => this.thinkingLevel,
 			getForegroundToolNames: () => this.getActiveToolNames(),
 			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
+			// Live worker supervision: one observation per executed worker tool call, applied through
+			// the root's existing worker-agent control surface.
+			observeWorkerProgress: (observation) => this._workerSupervision.observe(observation),
 			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
 			getEdgeGrants: () => this.getEdgeGrants(),
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
@@ -1405,6 +1438,11 @@ export class AgentSession {
 	/** Diagnostic readiness gate for adaptive runtime components. */
 	get adaptiveReadiness(): AdaptiveRuntimeReadiness | undefined {
 		return this._adaptiveReadiness;
+	}
+
+	/** Live worker supervision bound to the real worker lifecycle. */
+	get workerSupervision(): WorkerSupervisionCoordinator {
+		return this._workerSupervision;
 	}
 
 	/** Root semantic project rules: mutation acceptance, task postflight and completion. */

@@ -76,6 +76,7 @@ import { TYPESAFE_PROVIDER } from "../review/typesafe-contract.ts";
 import { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../settings-manager.ts";
+import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
 import { executeToolkitScript } from "../toolkit/script-runner.ts";
 import { disposeShellSessionLanes } from "../tools/shell-lane-pool.ts";
 import { disposePersistentShellSession } from "../tools/shell-session.ts";
@@ -221,6 +222,8 @@ export interface WorkerDelegationControllerDeps {
 	getForegroundToolNames?(): readonly string[];
 	isDelegateToolActive(): boolean;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
+	/** Live worker supervision hook; one observation per executed worker tool call. */
+	observeWorkerProgress?(observation: WorkerProgressObservation): Promise<unknown> | unknown;
 	emit(event: AgentSessionEvent): void;
 	notifyWorkerTerminalHandoff(records: readonly WorkerTerminalHandoffRecord[]): Promise<void>;
 	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
@@ -3230,6 +3233,7 @@ export class WorkerDelegationController {
 						})
 				: undefined,
 			warn: (message) => this.safeWarn(message),
+			...(this.deps.observeWorkerProgress ? { observeWorkerProgress: this.deps.observeWorkerProgress } : {}),
 		});
 		// Held for this specialist across the whole execution and released only after the finally has
 		// awaited tool-surface disposal: a terminal record is not evidence that its resources are gone.
