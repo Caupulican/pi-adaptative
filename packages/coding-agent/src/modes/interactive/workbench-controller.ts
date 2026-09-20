@@ -25,9 +25,9 @@ import {
 	isActiveWorkerLane,
 	projectSpecialistLanes,
 } from "./components/agents-overlay.ts";
-import { type DecisionGraphModel, shortModelRef } from "./components/decision-graph-model.ts";
+import type { DecisionGraphModel } from "./components/decision-graph-model.ts";
 import { formatGraphDuration } from "./components/decision-graph-render.ts";
-import { formatRouteValue } from "./components/operator-pov-bar.ts";
+import { formatRouteValue, shortModelName } from "./components/operator-pov-bar.ts";
 import { fullConversationText } from "./components/question-conversation.ts";
 import {
 	CHECKS_SECTION,
@@ -38,6 +38,8 @@ import {
 	type WorkbenchGeometry,
 	type WorkbenchSection,
 } from "./components/workbench.ts";
+import { metaRow } from "./components/workbench-pane.ts";
+import { createJevEvaluationPreview, type PreviewAttribution } from "./components/workbench-tool-preview.ts";
 import { theme } from "./theme/theme.ts";
 import { WorkspaceObservation } from "./workbench-workspace.ts";
 
@@ -64,6 +66,8 @@ interface WorkbenchPorts {
 	clock?: (running: boolean) => void;
 	/** Who decides and who executes, read at render time so the Decider's clock and verdict stay live. */
 	team?: () => WorkbenchTeamFacts;
+	/** Who a foreground receipt belongs to at the moment it is created: the root on its active model. */
+	attribution?: () => PreviewAttribution;
 }
 
 /** Live facts behind the Team hierarchy: the decider's state, the root's model and route, the lanes. */
@@ -89,6 +93,8 @@ export class WorkbenchController {
 	private previews: Component[] = [];
 	private readonly invocations = new ToolInvocationReport();
 	private fileEffects = 0;
+	/** Jev previews by evaluation id: a later verdict note replaces the preview in place. */
+	private readonly jevPreviews = new Map<string, Component>();
 	/** Evidence of the previous cycle stays on screen until the new cycle produces its own. */
 	private staleEvidence = false;
 	private selecting = false;
@@ -134,6 +140,7 @@ export class WorkbenchController {
 		this.observationTurn++;
 		this.submissionEpoch = undefined;
 		this.previews = [];
+		this.jevPreviews.clear();
 		this.invocations.reset();
 		this.fileEffects = 0;
 		this.staleEvidence = false;
@@ -183,7 +190,38 @@ export class WorkbenchController {
 		if (!this.staleEvidence) return;
 		this.staleEvidence = false;
 		this.previews = [];
+		this.jevPreviews.clear();
 		this.fileEffects = 0;
+	}
+
+	/** The attribution a receipt created now carries; absent when the host gives none. */
+	attribution(): PreviewAttribution | undefined {
+		return this.ports.attribution?.();
+	}
+
+	/**
+	 * A settled Jev evaluation is Execution evidence like a file effect or a command: one preview per
+	 * evaluation in the cycle's order, replaced in place when its verdict is noted later, bounded by
+	 * the same preview limit. The invocation report is never touched: Jev is not a tool call.
+	 */
+	recordJevEvaluation(record: SemanticEvaluationRecord): void {
+		if (this.disposed) return;
+		this.beginEvidence();
+		const preview = createJevEvaluationPreview(record);
+		const existing = this.jevPreviews.get(record.evaluationId);
+		if (existing) {
+			const index = this.previews.indexOf(existing);
+			if (index >= 0) this.previews[index] = preview;
+			else this.previews.push(preview);
+		} else {
+			this.previews.push(preview);
+		}
+		this.jevPreviews.set(record.evaluationId, preview);
+		while (this.previews.length > this.previewLimit()) {
+			const dropped = this.previews.shift();
+			for (const [id, candidate] of this.jevPreviews) if (candidate === dropped) this.jevPreviews.delete(id);
+		}
+		this.refreshExecution();
 	}
 
 	private publishHeadline(): void {
@@ -214,19 +252,23 @@ export class WorkbenchController {
 		const patch = sanitizeBinaryOutput(stripAnsi(result.patch.slice(0, 16_384))).split("\n", 60);
 		const count = result.paths.length;
 		this.fileEffects += count;
-		// This is current workspace evidence, not an attribution claim or an agent-only diff.
+		// Current workspace evidence, not an agent-only diff: it is attributed to the root plus whoever
+		// else was running in the tree at the time, with no model claimed for it.
+		const workers = (this.snapshot?.laneRecords ?? []).filter(isActiveWorkerLane).length;
+		const by = theme.fg("muted", workers ? `root + ${workers} ${workers === 1 ? "worker" : "workers"}` : "root");
+		const title = theme.fg("toolTitle", `Observed ${count} workspace changes`);
+		const titleWidth = `Observed ${count} workspace changes`.length;
 		let preview: Text | undefined;
 		this.previews.push({
 			render: (width) => {
 				preview ??= new Text(
-					theme.fg("toolTitle", `Observed ${count} workspace changes`) +
-						`\n${paths}\n` +
+					`${paths}\n` +
 						theme.fg("dim", "Current diff; may include prior or concurrent edits") +
 						`\n${patch.map((line) => theme.fg(line.startsWith("+") ? "toolDiffAdded" : line.startsWith("-") ? "toolDiffRemoved" : "toolDiffContext", line)).join("\n")}`,
 					0,
 					0,
 				);
-				return preview.render(width);
+				return [metaRow(title, by, width, titleWidth), ...preview.render(width)];
 			},
 			invalidate: () => {
 				preview = undefined;
@@ -580,7 +622,7 @@ function renderRootRow(facts: WorkbenchTeamFacts): string {
 		projection.active_actors.some((actor) => actor.kind === "root") &&
 		projection.phase !== "done" &&
 		projection.control.owner !== "user";
-	const model = shortModelRef(route.activeModel ?? route.rootModel);
+	const model = shortModelName(route.activeModel ?? route.rootModel);
 	const glyph = running ? theme.fg("accent", "●") : theme.fg("muted", "○");
 	const task = running ? `  ${theme.fg("muted", projection.current_action)}` : "";
 	return `  ${glyph} ${theme.fg("text", "root")} · ${theme.fg(running ? "accent" : "muted", model)}${task}`;
@@ -590,11 +632,11 @@ function renderRootRow(facts: WorkbenchTeamFacts): string {
 export function renderRoutingRows(facts: WorkbenchTeamFacts): string[] {
 	const rows: string[] = [];
 	if (facts.route.switched && facts.route.activeModel !== facts.route.rootModel) {
-		rows.push(`    ${formatRouteValue(facts.route)} → ${shortModelRef(facts.route.activeModel)} for root`);
+		rows.push(`    ${formatRouteValue(facts.route)} → ${shortModelName(facts.route.activeModel)} for root`);
 	}
 	for (const lane of facts.lanes) {
 		if ((lane.status !== "queued" && lane.status !== "running") || !lane.profileId || !lane.modelRef) continue;
-		rows.push(`    profile ${lane.profileId} → ${shortModelRef(lane.modelRef)} for ${lane.label ?? lane.laneId}`);
+		rows.push(`    profile ${lane.profileId} → ${shortModelName(lane.modelRef)} for ${lane.label ?? lane.laneId}`);
 	}
 	return rows.map((row) => theme.fg("muted", row));
 }

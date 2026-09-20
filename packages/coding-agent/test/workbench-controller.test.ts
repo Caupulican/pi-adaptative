@@ -5,6 +5,7 @@ import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import { createBackgroundToolTerminalMessage } from "../src/core/background-tool-task-controller.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { WorkbenchComponent, type WorkbenchSection } from "../src/modes/interactive/components/workbench.ts";
+import { createWorkbenchToolPreview } from "../src/modes/interactive/components/workbench-tool-preview.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import {
 	buildWorkbenchSections,
@@ -381,6 +382,66 @@ describe("Workbench input boundary", () => {
 			expect(rendered).not.toContain("negative outcomes");
 			expect(rendered).not.toContain("running");
 		}
+		controller.dispose();
+	});
+	it("records Jev evaluations as Execution evidence with attribution, replacing a preview when its verdict is noted", () => {
+		const view = new WorkbenchComponent({
+			conversation: new Container(),
+			editor: new Container(),
+			dock: [],
+			brand: "pi",
+			viewportRows: () => 40,
+		});
+		const controller = new WorkbenchController(view, {
+			keybindings: new KeybindingsManager(),
+			isInteractive: () => true,
+			requestRender() {},
+			messages: () => [],
+			copy: async () => {},
+			notice() {},
+			previewLimit: () => 2,
+			attribution: () => ({ kind: "root", label: "root", modelRef: "xai/grok-4.6" }),
+		});
+		view.applyGeometry({ rows: 12, collapsed: false, inspector: "hidden", executionMaximized: false });
+		controller.beginCycle();
+		const base = {
+			evaluationId: "e1",
+			programId: "system-one:verify",
+			label: "verify",
+			startedAt: 1000,
+			endedAt: 3500,
+			durationMs: 2500,
+		};
+		controller.recordJevEvaluation({ ...base, outcome: "ok" });
+		controller.recordJevEvaluation({ ...base, outcome: "ok", verdict: "pass", reasons: ["all criteria hold"] });
+		const rendered = stripAnsi(view.render(110).join("\n"));
+		expect(rendered.match(/◆ Jev verify/g)?.length).toBe(1);
+		expect(rendered).toMatch(/◆ Jev verify\s+Jev · system one · pass · 2\.5s/);
+		expect(rendered).toContain("all criteria hold");
+		expect(rendered).toContain("Completed: 0");
+		controller.record(
+			createWorkbenchToolPreview(
+				"edit",
+				{ path: "src/a.ts" },
+				{ isError: false, content: [], details: { diff: "+1 x\n-1 y" } },
+				controller.attribution(),
+			),
+			{ toolCallId: "t1", isError: false, details: {} },
+		);
+		const withTool = stripAnsi(view.render(110).join("\n"));
+		expect(withTool).toMatch(/edit · src\/a\.ts\s+\+1 −1\s+root · grok-4\.6/);
+		controller.recordJevEvaluation({
+			...base,
+			evaluationId: "e2",
+			label: "objective route",
+			outcome: "failed",
+			reasons: ["engine timeout"],
+		});
+		const bounded = stripAnsi(view.render(110).join("\n"));
+		expect(bounded).not.toContain("◆ Jev verify");
+		expect(bounded).toContain("◆ Jev objective route");
+		expect(bounded).toContain("failed · 2.5s");
+		expect(bounded).toContain("engine timeout");
 		controller.dispose();
 	});
 	it("retains a visible file-effect receipt when observation finishes after the agent stops", async () => {

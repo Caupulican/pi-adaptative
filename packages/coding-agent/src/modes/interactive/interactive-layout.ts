@@ -157,8 +157,11 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 	const unsubscribeOperatorProjection = host.session.operatorProjection.subscribe(() => host.ui.requestRender());
 	// The stage log fires on every transition; the graph pane's timers and lit stage follow it.
 	const unsubscribeStageChange = host.session.operatorProjection.onStageChange(() => host.ui.requestRender());
-	// Every settled Jev evaluation changes the Decider row and the graph's judge level.
-	const unsubscribeSemantic = host.session.onSemanticEvaluation(() => host.ui.requestRender());
+	// Every settled Jev evaluation is Execution evidence and changes the Decider row and the graph.
+	const unsubscribeSemantic = host.session.onSemanticEvaluation((record) => {
+		host.workbench?.recordJevEvaluation(record);
+		host.ui.requestRender();
+	});
 	const humanInput: HumanInputTally = { asked: 0, answered: 0 };
 	const unsubscribeHumanInput = subscribeHumanInputActivity(host.session.sessionManager, (activity) => {
 		if (activity.phase === "waiting") {
@@ -247,6 +250,12 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		// Only the operator changes the work area; what they chose last time is where it starts.
 		geometry: { save: (geometry) => host.settingsManager.setWorkbenchSettings(geometry) },
 		graph: () => composeDecisionGraph(host, humanInput),
+		// A foreground receipt is the root's, on the model actually answering; the running worker
+		// (which may be `active_actors[0]`) never produces foreground receipts.
+		attribution: () => {
+			const route = host.session.getForegroundRouteSnapshot();
+			return { kind: "root", label: "root", modelRef: route.activeModel ?? route.rootModel ?? undefined };
+		},
 		team: () => ({
 			projection: host.session.operatorProjection.getProjection(),
 			health: host.session.getSemanticPlaneHealth(),

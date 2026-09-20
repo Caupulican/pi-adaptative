@@ -12,7 +12,7 @@ import type { DecisionStage, DecisionStageLogView } from "../../../core/operator
 import type { OperatorProjection } from "../../../core/operator-projection/types.ts";
 import type { SemanticEvaluationRecord } from "../../../core/system-one/semantic-evaluation-ledger.ts";
 import type { SemanticPlaneHealth } from "../../../core/system-one/semantic-plane-health.ts";
-import { formatRouteValue } from "./operator-pov-bar.ts";
+import { formatRouteValue, shortModelName } from "./operator-pov-bar.ts";
 
 export type DecisionPlanStepStatus = "done" | "active" | "pending" | "blocked" | "failed" | "cancelled";
 export type DecisionCheckStatus = "pending" | "satisfied" | "failed";
@@ -99,13 +99,6 @@ export interface DecisionGraphModel {
 	readonly hasRunningClock: boolean;
 	readonly stageLogEmpty: boolean;
 	readonly nowMs: number;
-}
-
-/** The text after the provider prefix; the operator recognises the model by it. */
-export function shortModelRef(ref: string | null | undefined): string {
-	if (!ref) return "none";
-	const slash = ref.indexOf("/");
-	return slash === -1 ? ref : ref.slice(slash + 1);
 }
 
 const STAGE_DOING: Readonly<Record<DecisionStage, string>> = {
@@ -205,7 +198,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 			id: "root",
 			kind: "root",
 			label: "root",
-			model: shortModelRef(route.activeModel ?? route.rootModel),
+			model: shortModelName(route.activeModel ?? route.rootModel),
 			...(routed ? { routeText: formatRouteValue(route) } : {}),
 			...(rootRunning ? { task: projection.current_action } : {}),
 			running: rootRunning,
@@ -227,7 +220,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 				id: lane.laneId,
 				kind: participantKind(lane),
 				label: lane.label ?? `worker ${lane.laneId.slice(0, 8)}`,
-				...(lane.modelRef ? { model: shortModelRef(lane.modelRef) } : {}),
+				...(lane.modelRef ? { model: shortModelName(lane.modelRef) } : {}),
 				...(lane.profileId ? { routeText: `profile ${lane.profileId}` } : {}),
 				...(lane.label ? { task: lane.label } : {}),
 				...(parseTime(lane.startedAt) !== undefined ? { startedAt: parseTime(lane.startedAt) } : {}),
@@ -260,7 +253,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 
 	const routing: { text: string; live: boolean }[] = [];
 	if (routed)
-		routing.push({ text: `${formatRouteValue(route)} → ${shortModelRef(route.activeModel)} for root`, live: true });
+		routing.push({ text: `${formatRouteValue(route)} → ${shortModelName(route.activeModel)} for root`, live: true });
 	for (const lane of laneParticipants) {
 		if (lane.routeText && lane.model)
 			routing.push({ text: `${lane.routeText} → ${lane.model} for ${lane.label}`, live: lane.running });

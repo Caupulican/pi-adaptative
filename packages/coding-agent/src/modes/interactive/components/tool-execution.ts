@@ -27,7 +27,7 @@ import { convertToPng } from "../../../utils/image-convert.ts";
 import { type ThemeBg, theme } from "../theme/theme.ts";
 import { questionConversationText } from "./question-conversation.ts";
 import { renderTitleBadge, titleBadge } from "./tool-title.ts";
-import { createWorkbenchToolPreview } from "./workbench-tool-preview.ts";
+import { createWorkbenchToolPreview, type PreviewAttribution } from "./workbench-tool-preview.ts";
 
 export interface ToolExecutionOptions {
 	showImages?: boolean;
@@ -485,9 +485,9 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/** Requested once at the live terminal event, never while replaying retained tool history. */
-	getWorkbenchPreview(): Component | undefined {
+	getWorkbenchPreview(by?: PreviewAttribution): Component | undefined {
 		if (!this.result || this.isPartial || this.deferResultUntilExpanded) return undefined;
-		return createWorkbenchToolPreview(this.toolName, this.args, this.result);
+		return createWorkbenchToolPreview(this.toolName, this.args, this.result, by);
 	}
 
 	getConversationComponent(): Component | undefined {

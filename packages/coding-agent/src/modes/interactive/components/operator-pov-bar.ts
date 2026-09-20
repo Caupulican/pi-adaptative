@@ -47,7 +47,7 @@ export interface OperatorPovSegment {
 export const OPERATOR_POV_SEPARATOR = " | ";
 
 /** The short model name an operator recognises: the id without its provider prefix. */
-function shortModelName(ref: string | null): string {
+export function shortModelName(ref: string | null | undefined): string {
 	if (!ref) return "none";
 	const slash = ref.indexOf("/");
 	return slash === -1 ? ref : ref.slice(slash + 1);

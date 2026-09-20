@@ -348,7 +348,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			if (["task_steps", "goal", "delegate"].includes(event.toolName) || carriesVerification) {
 				host.refreshActivityLane();
 			}
-			host.workbench?.record(component?.getWorkbenchPreview(), {
+			host.workbench?.record(component?.getWorkbenchPreview(host.workbench.attribution()), {
 				toolCallId: event.toolCallId,
 				isError: event.isError,
 				details: event.result.details,
