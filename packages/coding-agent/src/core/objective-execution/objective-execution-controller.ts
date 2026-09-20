@@ -155,6 +155,31 @@ export interface ObjectiveExecutionControllerDeps {
 	onDisagreementTelemetry?(event: DisagreementTelemetryEvent): void;
 	onHumanEdgeRequest?(request: HumanEdgeRequest): Promise<boolean> | boolean;
 	getRouteProposedAction?(route: ObjectiveRoute): ProposedAction;
+	/**
+	 * Root semantic project rules. A blocking violation queues durable RepairWork and stops the
+	 * transition it was found at: postflight does not advance, completion does not finalize.
+	 */
+	projectRules?: {
+		validateTaskPostflight(input: {
+			objectiveId: string;
+			taskId: string;
+			changedFiles: readonly string[];
+			signal?: AbortSignal;
+		}): Promise<{ passed: boolean; violations: readonly { consequence: string; explanation: string }[] }>;
+		validateCompletion(input: {
+			objectiveId: string;
+			changedFiles: readonly string[];
+			signal?: AbortSignal;
+		}): Promise<{ passed: boolean; violations: readonly { consequence: string; explanation: string }[] }>;
+	};
+}
+
+/** A rule violation blocks when the owner marked the rule critical or high. */
+function ruleViolationBlocks(result: { passed: boolean; violations: readonly { consequence: string }[] }): boolean {
+	return (
+		!result.passed &&
+		result.violations.some((violation) => violation.consequence === "critical" || violation.consequence === "high")
+	);
 }
 
 export const ROUTE_DECISION_PROGRAM = createDecisionProgram({
@@ -987,6 +1012,30 @@ export class ObjectiveExecutionController {
 						}
 					}
 
+					// RCG-043: completion project rules. A blocking violation queues repair work and
+					// refuses the completion candidate; it never finalizes on a violated rule.
+					if (this.deps.projectRules) {
+						const completionRules = await this.deps.projectRules.validateCompletion({
+							objectiveId,
+							changedFiles: artifacts.map((artifact) => artifact.path),
+							signal,
+						});
+						if (ruleViolationBlocks(completionRules)) {
+							if (this.deps.runtime.ensureRepairTasks) {
+								await this.deps.runtime.ensureRepairTasks(
+									objectiveId,
+									completionFailuresToRepairWork(
+										completionRules.violations.map((violation) => ({
+											gate_id: `project_rule:${violation.explanation}`,
+										})),
+										objectiveId,
+									),
+								);
+							}
+							break;
+						}
+					}
+
 					// 2. PH-151: CompletionCoordinator mechanical/common gates
 					const completionContext: CompletionEvaluationContext = {
 						runtime,
@@ -1351,6 +1400,32 @@ export class ObjectiveExecutionController {
 			// 6. Ingest evidence & validate postflight
 			await this.deps.evidence?.ingestLatest?.(objectiveId);
 			await this.deps.systemOne?.validateObjectivePostflight?.(objectiveId);
+
+			// RCG-042: task postflight project rules. A blocking violation queues repair work and
+			// stops this cycle rather than letting the objective advance past it.
+			if (this.deps.projectRules) {
+				const postflightState = await this._resolveCanonicalEvidenceState(objectiveId, runtime);
+				const postflight = await this.deps.projectRules.validateTaskPostflight({
+					objectiveId,
+					taskId: route.task_id ?? objectiveId,
+					changedFiles: postflightState.artifacts.map((artifact) => artifact.path),
+					signal,
+				});
+				if (ruleViolationBlocks(postflight)) {
+					if (this.deps.runtime.ensureRepairTasks) {
+						await this.deps.runtime.ensureRepairTasks(
+							objectiveId,
+							completionFailuresToRepairWork(
+								postflight.violations.map((violation) => ({
+									gate_id: `project_rule:${violation.explanation}`,
+								})),
+								objectiveId,
+							),
+						);
+					}
+					continue;
+				}
+			}
 
 			// 7. Stall evaluation
 			let stall: StallEvaluation;

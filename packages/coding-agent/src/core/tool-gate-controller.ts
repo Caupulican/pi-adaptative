@@ -66,6 +66,33 @@ export interface ToolGateControllerDeps {
 	checkDirectScriptExecution?(toolName: string, args: unknown, cwd?: string): BeforeToolCallResult | undefined;
 	/** System One semantic control plane controller, if active for this session/run. */
 	getSystemOneController?(): SystemOneController | undefined;
+	/**
+	 * Mutation-acceptance rule hook. A blocking violation converts the mutation's own result into an
+	 * error carrying the violation, so the transition does not proceed on an accepted mutation.
+	 */
+	validateMutationAcceptance?(input: {
+		toolName: string;
+		changedFiles: readonly string[];
+	}): Promise<{ blocked: boolean; explanation?: string; repairId?: string } | undefined>;
+}
+
+/** File paths a mutation tool call names in its own arguments. */
+export function collectMutatedPaths(toolName: string, args: unknown): string[] {
+	if (!toolName.includes("edit") && !toolName.includes("write")) return [];
+	const record = args as Record<string, unknown> | undefined;
+	const paths: string[] = [];
+	for (const key of ["path", "file_path", "filePath", "file"]) {
+		const value = record?.[key];
+		if (typeof value === "string" && value.trim()) paths.push(value);
+	}
+	const edits = record?.edits;
+	if (Array.isArray(edits)) {
+		for (const edit of edits) {
+			const editPath = (edit as Record<string, unknown> | undefined)?.path;
+			if (typeof editPath === "string" && editPath.trim()) paths.push(editPath);
+		}
+	}
+	return [...new Set(paths)];
 }
 
 export class ToolGateController {
@@ -330,6 +357,34 @@ export class ToolGateController {
 					tool: toolCall.name,
 				});
 			}
+			// Mutation acceptance: project rules are evaluated on the files this call actually changed,
+			// before the successful result is accepted into the transcript. A blocking violation makes
+			// this result an error; the RepairWork it queued is durable on the session.
+			if (!resolvedIsError) {
+				const changedFiles = collectMutatedPaths(toolCall.name, args);
+				if (changedFiles.length > 0 && this.deps.validateMutationAcceptance) {
+					const verdict = await this.deps.validateMutationAcceptance({
+						toolName: toolCall.name,
+						changedFiles,
+					});
+					if (verdict?.blocked) {
+						const repair = verdict.repairId ? ` RepairWork ${verdict.repairId} is queued.` : "";
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Mutation rejected by project rules: ${verdict.explanation ?? "rule violation"}.${repair}`,
+								},
+							],
+							details,
+							isError: true,
+							usage,
+							terminate,
+						};
+					}
+				}
+			}
+
 			if (
 				content === result.content &&
 				details === result.details &&

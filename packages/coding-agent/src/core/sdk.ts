@@ -1003,6 +1003,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			charter,
 			cwd,
 			getOwnerRules,
+			projectRules: session.projectRules,
 		});
 
 		session.attachAdaptiveRuntime(stack);

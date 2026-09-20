@@ -18,6 +18,10 @@ import {
 } from "../../../src/core/adaptive/index.ts";
 import { RETENTION_AUDIT_CUSTOM_TYPE } from "../../../src/core/compaction/evidence-retention-projection.ts";
 import { DurableOwnerRuleStore, normalizeOwnerRule } from "../../../src/core/project-rules/durable-owner-rules.ts";
+import {
+	PROJECT_RULE_REPAIR_CUSTOM_TYPE,
+	SessionProjectRules,
+} from "../../../src/core/project-rules/session-project-rules.ts";
 import { createRcSdkHarness } from "../rc-sdk-harness.ts";
 
 /** Tool results still present on the compacted projection, which the audit entry never inflates. */
@@ -252,6 +256,165 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 					undefined,
 				),
 			).rejects.toThrow(/ExpertBinding/);
+		});
+	});
+
+	describe("Semantic project rules live hooks (RCG-041..RCG-043)", () => {
+		const AGENTS_MD = [
+			"# Development Rules",
+			"",
+			"## Code Quality",
+			"",
+			"- Never use inline imports (`await import()`); top-level imports only.",
+			"- Never commit unless the user asks.",
+		].join("\n");
+
+		it("RCG-041: a normal SDK session compiles trusted rules and blocks a violating mutation", async () => {
+			const harness = await createRcSdkHarness({
+				agentsFiles: [{ path: "AGENTS.md", content: AGENTS_MD }],
+			});
+
+			const rules = harness.session.projectRules.getRules();
+			expect(rules.length).toBeGreaterThan(0);
+			const inlineImportRule = rules.find((rule) => rule.text.includes("inline imports"));
+			expect(inlineImportRule).toBeDefined();
+			// "Never" makes it the owner's blocking class; the deterministic heuristic owns the check.
+			expect(inlineImportRule?.consequence).toBe("critical");
+			expect(inlineImportRule?.owner).toBe("deterministic");
+			// Provenance is the trusted source, not arbitrary repository text.
+			expect(rules.every((rule) => rule.source.path === "AGENTS.md")).toBe(true);
+
+			const violating = join(harness.cwd, "offender.ts");
+			writeFileSync(violating, "export async function load() { return await import('./other.ts'); }\n");
+			const result = await harness.session.projectRules.validateMutation({ changedFiles: [violating] });
+
+			expect(result.passed).toBe(false);
+			expect(result.violations[0]?.explanation).toContain("Inline dynamic import");
+			expect(result.repairWork).toBeDefined();
+		});
+
+		it("RCG-045: a blocking violation queues durable RepairWork on the session", async () => {
+			const harness = await createRcSdkHarness({
+				agentsFiles: [{ path: "AGENTS.md", content: AGENTS_MD }],
+			});
+			const violating = join(harness.cwd, "offender.ts");
+			writeFileSync(violating, "const mod = await import('./x.ts');\n");
+			await harness.session.projectRules.validateMutation({ changedFiles: [violating] });
+
+			const queued = harness.session.getQueuedRuleRepairWork();
+			expect(queued).toHaveLength(1);
+			expect(queued[0]?.blocking).toBe(true);
+			expect(queued[0]?.required_verifications).toContain("project_rule_recheck");
+
+			const persisted = harness.session.sessionManager
+				.getBranch()
+				.filter((entry) => entry.type === "custom" && entry.customType === PROJECT_RULE_REPAIR_CUSTOM_TYPE);
+			expect(persisted).toHaveLength(1);
+		});
+
+		it("RCG-041: a compliant mutation passes silently", async () => {
+			const harness = await createRcSdkHarness({
+				agentsFiles: [{ path: "AGENTS.md", content: AGENTS_MD }],
+			});
+			const compliant = join(harness.cwd, "clean.ts");
+			writeFileSync(compliant, "import { join } from 'node:path';\nexport const p = join('a', 'b');\n");
+			const result = await harness.session.projectRules.validateMutation({ changedFiles: [compliant] });
+			expect(result.passed).toBe(true);
+			expect(result.summaryEvent).toBeUndefined();
+			expect(harness.session.getQueuedRuleRepairWork()).toEqual([]);
+		});
+
+		it("RCG-046: a critical semantic rule that cannot be evaluated fails closed", async () => {
+			const harness = await createRcSdkHarness({
+				agentsFiles: [{ path: "AGENTS.md", content: "- Never leave a TODO in shipped code.\n" }],
+				decisions: { failWith: new Error("semantic transport unavailable") },
+			});
+			const file = join(harness.cwd, "todo.ts");
+			writeFileSync(file, "// TODO: finish\nexport const x = 1;\n");
+			const result = await harness.session.projectRules.validateMutation({ changedFiles: [file] });
+
+			expect(result.passed).toBe(false);
+			expect(result.violations[0]?.ruleId).toBe("critical_rule_eval_failure");
+			expect(result.violations[0]?.consequence).toBe("critical");
+		});
+
+		it("RCG-042, RCG-043: postflight and completion evaluate their own phase rules and block", async () => {
+			const phaseRules = [
+				"## Code Quality",
+				"- Never use inline imports (`await import()`); top-level imports only.",
+				"",
+				"## Task postflight",
+				"- Never leave a postflight obligation unmet.",
+				"",
+				"## Completion",
+				"- Never complete with an unresolved release blocker.",
+			].join("\n");
+			const harness = await createRcSdkHarness({
+				agentsFiles: [{ path: "AGENTS.md", content: phaseRules }],
+				// The semantic engine confirms both phase rules are violated.
+				decisions: { fallback: { kind: "boolean", probabilityTrue: 0.93 } },
+			});
+
+			const rules = harness.session.projectRules.getRules();
+			expect(rules.some((rule) => rule.phase === "task_postflight")).toBe(true);
+			expect(rules.some((rule) => rule.phase === "completion")).toBe(true);
+
+			const postflight = await harness.session.projectRules.validateTaskPostflight({
+				objectiveId: "obj-1",
+				taskId: "task-1",
+				changedFiles: ["src/thing.ts"],
+			});
+			expect(postflight.passed).toBe(false);
+			expect(SessionProjectRules.blocks(postflight)).toBe(true);
+
+			const completion = await harness.session.projectRules.validateCompletion({
+				objectiveId: "obj-1",
+				changedFiles: ["src/thing.ts"],
+			});
+			expect(completion.passed).toBe(false);
+			expect(SessionProjectRules.blocks(completion)).toBe(true);
+			expect(harness.session.getQueuedRuleRepairWork().length).toBe(2);
+		});
+
+		it("RCG-046: durable owner rules become blocking rules at all three phases", async () => {
+			const harness = await createRcSdkHarness();
+			harness.replyWith("ok");
+			await harness.session.prompt("no TDD, mandatory, fast paced only");
+
+			const ownerRuleIds = harness.session.projectRules
+				.getRules()
+				.filter((rule) => rule.source.path === "owner:instruction");
+			expect(ownerRuleIds.map((rule) => rule.phase).sort()).toEqual(["completion", "mutation", "task_postflight"]);
+			expect(ownerRuleIds.every((rule) => rule.consequence === "critical")).toBe(true);
+		});
+
+		it("RCG-041: the live mutation-acceptance hook turns a violating write into an error result", async () => {
+			const harness = await createRcSdkHarness({
+				agentsFiles: [{ path: "AGENTS.md", content: AGENTS_MD }],
+			});
+			const violating = join(harness.cwd, "offender.ts");
+			writeFileSync(violating, "const mod = await import('./x.ts');\n");
+
+			// The hook the session installs on the live tool gate, exercised by its real signature.
+			const gate = (
+				harness.session as unknown as {
+					_toolGate: {
+						afterToolCall(
+							input: unknown,
+						): Promise<{ isError?: boolean; content?: { type: string; text?: string }[] } | undefined>;
+					};
+				}
+			)._toolGate;
+			const hookResult = await gate.afterToolCall({
+				toolCall: { id: "call-1", name: "write", arguments: { path: violating } },
+				args: { path: violating },
+				result: { content: [{ type: "text", text: "wrote 1 file" }] },
+				isError: false,
+			});
+
+			expect(hookResult?.isError).toBe(true);
+			expect(hookResult?.content?.[0]?.text).toContain("Mutation rejected by project rules");
+			expect(hookResult?.content?.[0]?.text).toContain("RepairWork");
 		});
 	});
 

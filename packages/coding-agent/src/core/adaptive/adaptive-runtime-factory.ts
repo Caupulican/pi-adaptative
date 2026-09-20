@@ -22,7 +22,10 @@ import { ExpertSelectionService } from "../expert-routing/service.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ModelAdaptationStore } from "../models/adaptation-store.ts";
 import type { FitnessStore } from "../models/fitness-store.ts";
-import { ObjectiveExecutionController } from "../objective-execution/objective-execution-controller.ts";
+import {
+	ObjectiveExecutionController,
+	type ObjectiveExecutionControllerDeps,
+} from "../objective-execution/objective-execution-controller.ts";
 import type { TaskProfileWriterPort } from "../orchestration/task-profile-writer.ts";
 import type { WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import type { RuntimeUpdateController } from "../runtime-update-controller.ts";
@@ -105,6 +108,8 @@ export interface CreateAdaptiveRuntimeStackOptions {
 	readonly isSynthetic?: boolean;
 	/** Durable owner development rules, propagated into every synthesized mission. */
 	readonly getOwnerRules?: () => string;
+	/** Root semantic project rules, consulted at task postflight and completion. */
+	readonly projectRules?: ObjectiveExecutionControllerDeps["projectRules"];
 }
 
 /**
@@ -373,6 +378,7 @@ function assembleAdaptiveRuntimeStack(
 		outcomeRecorder: expertOutcomeRecorder,
 		executionCharter: charter,
 		workerDispatcher: (options as any).workerDispatcher,
+		projectRules: options.projectRules,
 	});
 
 	// 9. Adaptive runtime readiness

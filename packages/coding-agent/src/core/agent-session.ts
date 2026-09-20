@@ -169,6 +169,8 @@ import {
 	type OwnerRulePolicy,
 	renderOwnerRulesForMission,
 } from "./project-rules/durable-owner-rules.ts";
+import { PROJECT_RULE_REPAIR_CUSTOM_TYPE, SessionProjectRules } from "./project-rules/session-project-rules.ts";
+import type { RuleRepairWork } from "./project-rules/types.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { engageEmergencyStop, liftEmergencyStop } from "./provider-admission/emergency-stop.ts";
 import { ProviderAdmissionLedger, providerAdmissionDir } from "./provider-admission/ledger.ts";
@@ -416,6 +418,8 @@ export class AgentSession {
 	private _adaptiveReadiness?: AdaptiveRuntimeReadiness;
 	/** Durable owner development rules, restored from disk so they outlive compaction and restart. */
 	private readonly _ownerRules: DurableOwnerRuleStore;
+	/** Root semantic project rules, consulted at mutation acceptance, postflight and completion. */
+	private readonly _projectRules: SessionProjectRules;
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
@@ -427,6 +431,26 @@ export class AgentSession {
 		this._ownerRules = new DurableOwnerRuleStore({
 			agentDir: config.agentDir ?? getAgentDir(),
 			projectKey: config.cwd,
+		});
+		this._projectRules = new SessionProjectRules({
+			cwd: config.cwd,
+			// Only instruction files the active profile already admitted are rule sources; arbitrary
+			// repository text never gets to author a rule that blocks a transition.
+			getTrustedRuleSources: () =>
+				this._resourceLoader
+					.getAgentsFiles()
+					.agentsFiles.flatMap((file) => (file.content ? [{ path: file.path, content: file.content }] : [])),
+			getOwnerRulePolicies: () => this._ownerRules.list(),
+			getDecisionEngine: () => this._steeringPlane?.decisionEngine,
+			recordRepairWork: (repair) => {
+				this.sessionManager.appendCustomEntry(PROJECT_RULE_REPAIR_CUSTOM_TYPE, repair);
+			},
+			emitViolation: (result) => {
+				this._emit({
+					type: "warning",
+					message: `Project rule violation blocks this transition: ${result.summaryEvent ?? result.violations[0]?.explanation ?? "unspecified"}`,
+				});
+			},
 		});
 		// The provider stream chain (perf profile, idle watchdog, machine-wide admission) is built and
 		// installed exactly once, here; see session-stream-chain.ts.
@@ -1322,6 +1346,15 @@ export class AgentSession {
 			checkDirectScriptExecution: (toolName, args, cwd) =>
 				this._runtimeBuilder.checkDirectScriptExecution(toolName, args, cwd),
 			getSystemOneController: () => this._systemOneController,
+			validateMutationAcceptance: async ({ changedFiles }) => {
+				const result = await this._projectRules.validateMutation({ changedFiles });
+				if (!SessionProjectRules.blocks(result)) return { blocked: false };
+				return {
+					blocked: true,
+					explanation: result.violations[0]?.explanation,
+					repairId: result.repairWork?.repair_id,
+				};
+			},
 		});
 
 		// Always subscribe to agent events for internal handling
@@ -1372,6 +1405,16 @@ export class AgentSession {
 	/** Diagnostic readiness gate for adaptive runtime components. */
 	get adaptiveReadiness(): AdaptiveRuntimeReadiness | undefined {
 		return this._adaptiveReadiness;
+	}
+
+	/** Root semantic project rules: mutation acceptance, task postflight and completion. */
+	get projectRules(): SessionProjectRules {
+		return this._projectRules;
+	}
+
+	/** Durable RepairWork queued by a blocking project-rule violation. */
+	getQueuedRuleRepairWork(): readonly RuleRepairWork[] {
+		return this._projectRules.getQueuedRepairWork();
 	}
 
 	/** Durable owner development rules in force for this project. */

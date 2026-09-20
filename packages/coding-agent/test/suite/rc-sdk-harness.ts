@@ -165,6 +165,8 @@ export interface RcSdkHarnessOptions {
 	charter?: ExecutionCharter;
 	prompt?: string;
 	tools?: string[];
+	/** Trusted instruction files the session compiles project rules from. */
+	agentsFiles?: Array<{ path: string; content?: string }>;
 }
 
 /** Creates a session the way production creates one, with every live port bound. */
@@ -216,7 +218,7 @@ export async function createRcSdkHarness(options: RcSdkHarnessOptions = {}): Pro
 		modelRegistry,
 		model,
 		settingsManager: SettingsManager.inMemory({ edge: { allow: [] } }),
-		resourceLoader: createTestResourceLoader(),
+		resourceLoader: createTestResourceLoader(options.agentsFiles ? { agentsFiles: options.agentsFiles } : {}),
 		steeringPlane,
 		charter: options.charter,
 		prompt: options.prompt,

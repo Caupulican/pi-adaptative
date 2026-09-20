@@ -26,6 +26,8 @@ export async function createTestExtensionsResult(
 
 export interface CreateTestResourceLoaderOptions {
 	extensionsResult?: LoadExtensionsResult;
+	/** Trusted instruction files, for tests that exercise project-rule compilation. */
+	agentsFiles?: Array<{ path: string; content?: string }>;
 }
 
 export function createTestResourceLoader(options: CreateTestResourceLoaderOptions = {}): ResourceLoader {
@@ -48,7 +50,7 @@ export function createTestResourceLoader(options: CreateTestResourceLoaderOption
 		getActiveThemes() {
 			return this.getThemes().themes;
 		},
-		getAgentsFiles: () => ({ agentsFiles: [] }),
+		getAgentsFiles: () => ({ agentsFiles: options.agentsFiles ?? [] }),
 		getAgentsDiagnostics: () => [],
 		getDiscoverableSkillPaths: () => [],
 		getDiscoverablePromptPaths: () => [],
