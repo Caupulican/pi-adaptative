@@ -1,6 +1,7 @@
 export type WorkerSupervisionAction =
 	| "continue"
 	| "steer_once"
+	| "steer_now"
 	| "request_verifier"
 	| "stop_and_reroute"
 	| "request_specialist"

@@ -55,7 +55,11 @@ import {
 	validateObjectiveRoute,
 } from "./objective-route.ts";
 import { composeObjectiveRoute } from "./objective-route-policy.ts";
-import { projectBoundedCombinedState, type SemanticRouteJudgments } from "./objective-route-projector.ts";
+import {
+	projectBoundedCombinedState,
+	type RouteHistoryEntry,
+	type SemanticRouteJudgments,
+} from "./objective-route-projector.ts";
 import { ObjectiveStallDetector, type StallEvaluation } from "./objective-stall-fingerprint.ts";
 
 export type ExecutionLoopMode = "legacy_goal" | "objective_shadow" | "objective_primary" | "start_only" | "interactive";
@@ -109,6 +113,10 @@ export interface ObjectiveExecutionControllerDeps {
 	};
 	checkpoints?: {
 		recordRoute(route: ObjectiveRoute): Promise<void>;
+		/** Who ran the route once it ran: root, worker, wait, terminal. */
+		recordRouteOutcome?(route: ObjectiveRoute, executor: string): Promise<void>;
+		/** The objective's recent routes, oldest first, for the judge's history block. */
+		recentRoutes?(objectiveId: string, limit: number): Promise<readonly RouteHistoryEntry[]>;
 	};
 	stalls?: {
 		evaluate(objectiveId: string): Promise<StallEvaluation>;
@@ -319,6 +327,7 @@ export class ObjectiveExecutionController {
 	private cycleCounter = 0;
 	private _lastBinding?: ExpertBinding;
 	private _lastRoute?: ObjectiveRoute;
+	private _lastExecutor?: string;
 	private ownerBlockerSink?: (blocker: string | undefined) => void;
 
 	/** The route the last run cycle evaluated; the session's loop reads it to name a wait or a stop. */
@@ -334,7 +343,15 @@ export class ObjectiveExecutionController {
 		executors: Partial<
 			Pick<
 				ObjectiveExecutionControllerDeps,
-				"rootExecutor" | "waiter" | "retrieval" | "verifier" | "systemOne" | "completionProfile" | "mode"
+				| "rootExecutor"
+				| "waiter"
+				| "retrieval"
+				| "verifier"
+				| "systemOne"
+				| "completionProfile"
+				| "mode"
+				| "checkpoints"
+				| "stalls"
 			>
 		>,
 	): void {
@@ -483,6 +500,9 @@ export class ObjectiveExecutionController {
 			stall = await this.deps.stalls.evaluate(objectiveId);
 		}
 
+		// The ledger's recent routes are part of what the judge sees: repetition is a fact, not a hunch.
+		const history = (await this.deps.checkpoints?.recentRoutes?.(objectiveId, 6)) ?? [];
+
 		// Evaluate semantic route via SteeringPlane JEV-004 (PH-113: JEV-004 route owner)
 		let semantic: SemanticRouteJudgments = {};
 
@@ -492,6 +512,7 @@ export class ObjectiveExecutionController {
 				const stateProjection = projectBoundedCombinedState(objectiveId, runtime, {
 					stallTurns: stall.stallTurns,
 					strategyFingerprint: stall.fingerprint,
+					history,
 				});
 
 				const evaluation = await this.deps.decisions.evaluateOrFallback(ROUTE_DECISION_PROGRAM, stateProjection, {
@@ -542,6 +563,7 @@ export class ObjectiveExecutionController {
 				const stateProjection = projectBoundedCombinedState(objectiveId, runtime, {
 					stallTurns: stall.stallTurns,
 					strategyFingerprint: stall.fingerprint,
+					history,
 				});
 				const cert = await this.deps.steeringPlane.requireCertificate("JEV-004", stateProjection, {
 					objectiveId,
@@ -763,6 +785,7 @@ export class ObjectiveExecutionController {
 			// 3. Evaluate route
 			const route = await this.evaluateRouteOnce(objectiveId, { signal });
 			this._lastRoute = route;
+			this._lastExecutor = undefined;
 
 			// 4. Authority Envelope / Execution Charter gate (FIN-070..FIN-074, ZH-001..ZH-012)
 			const proposedAction = this.deps.getRouteProposedAction
@@ -1475,6 +1498,9 @@ export class ObjectiveExecutionController {
 					break;
 			}
 
+			await this.deps.checkpoints?.recordRouteOutcome?.(route, this._lastExecutor ?? route.route);
+			this._lastExecutor = undefined;
+
 			// 6. Ingest evidence & validate postflight
 			await this.deps.evidence?.ingestLatest?.(objectiveId);
 			await this.deps.systemOne?.validateObjectivePostflight?.(objectiveId);
@@ -1537,9 +1563,11 @@ export class ObjectiveExecutionController {
 			route.route !== "review" &&
 			!route.reason_codes.includes("independent_verification_required")
 		) {
+			this._lastExecutor = "root";
 			await this.deps.rootExecutor.execute(route, signal);
 			return undefined;
 		}
+		this._lastExecutor = escalated ? "worker:escalated" : "worker";
 		const dispatcher = escalated
 			? this.deps.workerDispatcher?.dispatchEscalated
 			: this.deps.workerDispatcher?.dispatch;

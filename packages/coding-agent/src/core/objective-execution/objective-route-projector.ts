@@ -111,6 +111,41 @@ export interface BoundedCombinedStateProjection {
 		readonly stall_turns: number;
 		readonly strategy_fingerprint: string;
 	};
+	/** What System One already decided for this objective, oldest first, from the decision ledger. */
+	readonly history: {
+		readonly recent_routes: readonly {
+			readonly route: string;
+			readonly reason_codes: readonly string[];
+			readonly executor?: string;
+		}[];
+		readonly repeated_route_count: number;
+	};
+}
+
+/** A prior route as the projection shows it to the judge. */
+export interface RouteHistoryEntry {
+	readonly route: string;
+	readonly reasonCodes: readonly string[];
+	readonly evidenceMarker: number;
+	readonly executor?: string;
+}
+
+/** Consecutive identical routes at the tail of the history, on unchanged evidence. */
+export function repeatedRouteCount(history: readonly RouteHistoryEntry[]): number {
+	const last = history.at(-1);
+	if (!last) return 0;
+	let count = 0;
+	for (let index = history.length - 1; index >= 0; index--) {
+		const entry = history[index]!;
+		if (
+			entry.route !== last.route ||
+			entry.evidenceMarker !== last.evidenceMarker ||
+			entry.reasonCodes.join(",") !== last.reasonCodes.join(",")
+		)
+			break;
+		count++;
+	}
+	return count;
 }
 
 /**
@@ -125,6 +160,7 @@ export function projectBoundedCombinedState(
 		beforeDigest?: string;
 		afterDigest?: string;
 		systemOneState?: ExecutionState;
+		history?: readonly RouteHistoryEntry[];
 	},
 ): BoundedCombinedStateProjection {
 	const obj = runtime.objectives[objectiveId];
@@ -187,6 +223,14 @@ export function projectBoundedCombinedState(
 			after_digest: options?.afterDigest ?? `digest_tasks_${tasks.length}`,
 			stall_turns: options?.stallTurns ?? 0,
 			strategy_fingerprint: options?.strategyFingerprint ?? "init",
+		},
+		history: {
+			recent_routes: (options?.history ?? []).map((entry) => ({
+				route: entry.route,
+				reason_codes: entry.reasonCodes,
+				...(entry.executor ? { executor: entry.executor } : {}),
+			})),
+			repeated_route_count: repeatedRouteCount(options?.history ?? []),
 		},
 	};
 }

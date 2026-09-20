@@ -235,8 +235,14 @@ export class WorkerSemanticSupervisor {
 				attempt.isStalled ||
 				attempt.isRepeating
 			) {
-				// FR-065: Anti-oscillation (one steer + grace period, then stop and reroute)
-				if (priorSteeringCount === 0) {
+				// FR-065: Anti-oscillation (one steer + grace period, then stop and reroute). Off-track
+				// work is redirected now, not at the worker's next turn; a stall waits for that turn.
+				if (priorSteeringCount === 0 && (answers.work_off_track ?? 0) > 0.5) {
+					action = "steer_now";
+					this.steeringInterventions.set(attempt.attemptId, 1);
+					summaryEvent = "Worker redirected now · work off the mission";
+					reasonCodes.push("worker_off_track_steer_now");
+				} else if (priorSteeringCount === 0) {
 					action = "steer_once";
 					this.steeringInterventions.set(attempt.attemptId, 1);
 					summaryEvent = "Worker steering initiated · progress stalled or strategy repeating";

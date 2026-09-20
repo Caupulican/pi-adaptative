@@ -173,6 +173,7 @@ import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
+import { LedgerRouteCheckpoints } from "./objective-execution/ledger-route-checkpoints.ts";
 import { DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import type { DecisionStageSink } from "./operator-projection/decision-stage-log.ts";
 import { type DeliveryState, SessionOperatorProjection } from "./operator-projection/session-operator-projection.ts";
@@ -241,6 +242,7 @@ import {
 	type SemanticPlaneHealth,
 	SemanticPlaneHealthRecorder,
 } from "./system-one/semantic-plane-health.ts";
+import { createSessionWorkerControl, type SystemOneWorkerControl } from "./system-one/worker-control.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
 import { captureSessionTaskDirectoryContext } from "./tasks/task-directory-context.ts";
@@ -464,6 +466,7 @@ export class AgentSession {
 	private _adaptationProjection?: AdaptationProjection;
 	private _deliveryState: DeliveryState = "none";
 	private _foregroundControl?: SystemOneForegroundControl;
+	private _workerControl?: SystemOneWorkerControl;
 	/** Admitted outward-facing tool calls still running; DELIVER ends when the last one ends. */
 	private readonly _deliveryToolCalls = new Set<string>();
 	private _operatorBlocker?: string;
@@ -560,13 +563,10 @@ export class AgentSession {
 				},
 			}),
 			control: {
-				// The supervisor reaches the root's existing worker control surface and nothing else.
-				steerWorker: (agentId, directive) => {
-					this._backgroundLanes.sendWorkerAgentMessage(agentId, directive);
-				},
-				cancelWorker: (agentId, reason) => {
-					this._backgroundLanes.cancelWorkerAgent(agentId, reason);
-				},
+				// The supervisor reaches System One's worker levers and nothing else.
+				steerWorker: (agentId, directive, delivery) =>
+					this.systemOneWorkerControl.steerWorker(agentId, directive, delivery ?? "queue"),
+				cancelWorker: (agentId, reason) => this.systemOneWorkerControl.cancelWorker(agentId, reason),
 			},
 			onIntervention: (signal) => {
 				if (!signal.summaryEvent) return;
@@ -1838,6 +1838,26 @@ export class AgentSession {
 		return this._foregroundControl;
 	}
 
+	/** System One's cancel and steer levers over workers, through the root's worker control surface. */
+	get systemOneWorkerControl(): SystemOneWorkerControl {
+		this._workerControl ??= createSessionWorkerControl({
+			cancelWorkerAgent: (agentId, reason) => {
+				this._backgroundLanes.cancelWorkerAgent(agentId, reason);
+			},
+			followUpWorkerAgent: (agentId, message) =>
+				this._backgroundLanes.followUpSessionRootWorkerAgent(agentId, message),
+			interruptWorkerAgent: (agentId) => this._backgroundLanes.interruptWorkerAgent(agentId),
+			queueWorkerAgentMessage: (agentId, message) => {
+				this._backgroundLanes.sendSessionRootWorkerAgentMessage(agentId, message);
+			},
+			resumeWorkerAgent: (agentId) => this._backgroundLanes.resumeWorkerAgent(agentId),
+			recordDirective: (agentId, directive) =>
+				this._operatorProjection.eventBridge.recordSupervisorIntervention(agentId, directive),
+			emitWarning: (message) => this._emit({ type: "warning", message }),
+		});
+		return this._workerControl;
+	}
+
 	/** The objective loop's wait: the running attempts' agents, on the goal's worker-wait bound. */
 	private async _waitForObjectiveWorkers(context: unknown): Promise<void> {
 		const attempts =
@@ -1960,9 +1980,17 @@ export class AgentSession {
 			stack.objectiveController.setOwnerBlockerSink((blocker) => this.setOperatorBlocker(blocker));
 			// The executors System One routes to live on this session: the root turn, the worker wait
 			// and System One's own completion transaction.
+			const ledgerRoutes = new LedgerRouteCheckpoints({
+				getLedger: () => this.getDecisionLedger(),
+				sessionId: this.sessionManager.getSessionId(),
+				cwd: this._cwd,
+				getSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
+			});
 			stack.objectiveController.bindSessionExecutors({
 				rootExecutor: this._goals.objectiveRootExecutor(),
 				waiter: { wait: (context) => this._waitForObjectiveWorkers(context) },
+				checkpoints: ledgerRoutes,
+				stalls: ledgerRoutes,
 				...(this._systemOneController
 					? {
 							systemOne: {

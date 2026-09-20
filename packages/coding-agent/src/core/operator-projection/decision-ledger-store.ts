@@ -45,6 +45,20 @@ export interface DecisionLedgerSessionRow {
 	readonly evaluations: number;
 }
 
+/** One System One route as the ledger keeps it: what was decided, from what evidence, who executed it. */
+export interface RouteDecisionRow {
+	readonly sessionId: string;
+	readonly cwd: string;
+	readonly objectiveId: string;
+	readonly cycleId: string;
+	readonly route: string;
+	readonly reasonCodes: readonly string[];
+	readonly decidedAt: number;
+	/** A monotone proxy for "new evidence since": objective evidence plus tasks plus attempts. */
+	readonly evidenceMarker: number;
+	readonly executor?: string;
+}
+
 export interface DecisionLedgerStoreOptions {
 	readonly databasePath: string;
 	readonly busyTimeoutMs?: number;
@@ -114,6 +128,19 @@ export class DecisionLedgerStore {
 			);
 			CREATE INDEX IF NOT EXISTS semantic_evaluations_session ON semantic_evaluations (session_id, started_at);
 			CREATE INDEX IF NOT EXISTS semantic_evaluations_cwd ON semantic_evaluations (cwd, started_at);
+			CREATE TABLE IF NOT EXISTS route_decisions (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				session_id TEXT NOT NULL,
+				cwd TEXT NOT NULL,
+				objective_id TEXT NOT NULL,
+				cycle_id TEXT NOT NULL,
+				route TEXT NOT NULL,
+				reason_codes TEXT NOT NULL,
+				decided_at INTEGER NOT NULL,
+				evidence_marker INTEGER NOT NULL,
+				executor TEXT
+			);
+			CREATE INDEX IF NOT EXISTS route_decisions_objective ON route_decisions (session_id, objective_id, id);
 		`);
 		this.database
 			.prepare("INSERT OR IGNORE INTO ledger_meta (key, value) VALUES ('schema_version', ?)")
@@ -278,6 +305,74 @@ export class DecisionLedgerStore {
 			});
 		}
 		return out;
+	}
+
+	/** Records a route System One decided; the executor is noted once the route ran. */
+	recordRoute(row: Omit<RouteDecisionRow, "executor">): void {
+		this.database
+			.prepare(
+				`INSERT INTO route_decisions (session_id, cwd, objective_id, cycle_id, route, reason_codes, decided_at, evidence_marker)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				row.sessionId,
+				row.cwd,
+				row.objectiveId,
+				row.cycleId,
+				row.route,
+				JSON.stringify(row.reasonCodes),
+				row.decidedAt,
+				row.evidenceMarker,
+			);
+	}
+
+	noteRouteExecutor(sessionId: string, cycleId: string, executor: string): void {
+		this.database
+			.prepare("UPDATE route_decisions SET executor = ? WHERE session_id = ? AND cycle_id = ?")
+			.run(executor, sessionId, cycleId);
+	}
+
+	/** The objective's recent routes, oldest first, bounded. */
+	recentRoutes(sessionId: string, objectiveId: string, limit: number): RouteDecisionRow[] {
+		const rows = this.database
+			.prepare("SELECT * FROM route_decisions WHERE session_id = ? AND objective_id = ? ORDER BY id DESC LIMIT ?")
+			.all(sessionId, objectiveId, Math.max(1, Math.floor(limit)));
+		const out: RouteDecisionRow[] = [];
+		for (const row of rows) {
+			const cwd = asText(row.cwd);
+			const cycleId = asText(row.cycle_id);
+			const route = asText(row.route);
+			const decidedAt = asInteger(row.decided_at);
+			const evidenceMarker = asInteger(row.evidence_marker);
+			if (
+				cwd === undefined ||
+				cycleId === undefined ||
+				route === undefined ||
+				decidedAt === undefined ||
+				evidenceMarker === undefined
+			)
+				continue;
+			let reasonCodes: string[] = [];
+			try {
+				const parsed: unknown = JSON.parse(asText(row.reason_codes) ?? "[]");
+				if (Array.isArray(parsed)) reasonCodes = parsed.filter((item): item is string => typeof item === "string");
+			} catch {
+				reasonCodes = [];
+			}
+			const executor = asText(row.executor);
+			out.push({
+				sessionId,
+				cwd,
+				objectiveId,
+				cycleId,
+				route,
+				reasonCodes,
+				decidedAt,
+				evidenceMarker,
+				...(executor !== undefined ? { executor } : {}),
+			});
+		}
+		return out.reverse();
 	}
 
 	/** Recent evaluations of a session, newest first, bounded. */

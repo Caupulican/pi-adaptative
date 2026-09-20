@@ -19,8 +19,8 @@ import type { WorkerSemanticSupervisor } from "./worker-semantic-supervisor.ts";
  * control, keyed the same way (`agentId`). The supervisor adds no new authority.
  */
 export interface WorkerControlPort {
-	/** Deliver one steering message to a running worker. */
-	steerWorker(agentId: string, directive: string): Promise<void> | void;
+	/** Deliver one steering message: for the worker's next model turn, or now (interrupt, queue, resume). */
+	steerWorker(agentId: string, directive: string, delivery?: "queue" | "now"): Promise<void> | void;
 	/** Stop a running worker so the root can reroute its work. */
 	cancelWorker(agentId: string, reason: string): Promise<void> | void;
 }
@@ -58,6 +58,9 @@ export const VALIDATION_CHURN_DIRECTIVE = [
 
 const STALL_DIRECTIVE =
 	"Progress has stalled or the same strategy is repeating. Change approach before the next tool call.";
+/** A worker judged off track is interrupted and redirected now; waiting for its next turn wastes the turn. */
+const OFF_TRACK_DIRECTIVE =
+	"System One: the current work is off the mission. Stop the current line of work, return to the mission's open requirements, and say what you are doing next.";
 
 /** Tool names whose repeated use with no file change is validation, not implementation. */
 const BROAD_VALIDATION_TOOLS: readonly string[] = ["bash", "run_process", "python"];
@@ -162,7 +165,9 @@ export class WorkerSupervisionCoordinator {
 		if (action === "continue") return;
 
 		if (action === "steer_once") {
-			await this.deps.control.steerWorker(observation.agentId, verdict.explanation ?? STALL_DIRECTIVE);
+			await this.deps.control.steerWorker(observation.agentId, verdict.explanation ?? STALL_DIRECTIVE, "queue");
+		} else if (action === "steer_now") {
+			await this.deps.control.steerWorker(observation.agentId, verdict.explanation ?? OFF_TRACK_DIRECTIVE, "now");
 		} else if (action === "stop_and_reroute") {
 			await this.deps.control.cancelWorker(
 				observation.agentId,
