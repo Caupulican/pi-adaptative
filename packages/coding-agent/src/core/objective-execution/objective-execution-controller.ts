@@ -8,10 +8,12 @@ import { randomUUID } from "node:crypto";
 import type {
 	AdaptiveCapabilityController,
 	AdaptiveResolutionController,
+	MaterializedSpecialist,
 	SpecialistSynthesisController,
 } from "../adaptive/index.ts";
 import type { AuthorityEnvelope, ProposedAction } from "../autonomy/authority-envelope.ts";
 import {
+	compileExecutionCharter,
 	DurableAuthorityBlockLedger,
 	type ExecutionCharter,
 	evaluateCharterAuthority,
@@ -29,6 +31,7 @@ import type {
 	ExpertSelectionService,
 } from "../expert-routing/index.ts";
 import { buildWorkerCapabilityRequest, NoEligibleExpertError } from "../expert-routing/index.ts";
+import type { WorkerResultContract } from "../orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import type { SystemOneSteeringPlane } from "../steering/index.ts";
 import type { FinalCompletionVerdict } from "../system-one/policy.ts";
@@ -120,6 +123,15 @@ export interface ObjectiveExecutionControllerDeps {
 		dispatch(route: ObjectiveRoute, signal?: AbortSignal, binding?: ExpertBinding): Promise<void>;
 		continueWorker(route: ObjectiveRoute, signal?: AbortSignal, binding?: ExpertBinding): Promise<void>;
 		dispatchEscalated(route: ObjectiveRoute, signal?: AbortSignal, binding?: ExpertBinding): Promise<void>;
+		dispatchSpecialist?(input: {
+			specialist: MaterializedSpecialist;
+			taskId: string;
+			attemptId?: string;
+			leaseId?: string;
+			fencingToken?: number;
+			expiresAt?: string;
+			signal?: AbortSignal;
+		}): Promise<WorkerResultContract>;
 	};
 	expertSelector?: ExpertSelectionService;
 	outcomeRecorder?: ExpertOutcomeRecorder;
@@ -294,6 +306,87 @@ export class ObjectiveExecutionController {
 
 	getAuthorityBlockLedger(): DurableAuthorityBlockLedger {
 		return this.authorityBlockLedger;
+	}
+
+	async step(options: {
+		objectiveId: string;
+		action?: string;
+		input?: Record<string, unknown>;
+		signal?: AbortSignal;
+	}): Promise<{ action: string; executed: boolean; result?: unknown }> {
+		const { objectiveId, action = "escalate_capability", input, signal } = options;
+		signal?.throwIfAborted();
+
+		if (action === "escalate_capability") {
+			const route: ObjectiveRoute = {
+				schema_version: "1.0",
+				cycle_id: `cycle-${objectiveId}`,
+				objective_id: objectiveId,
+				route: "escalate_capability",
+				reason_codes: ["explicit_step"],
+			};
+			const charter =
+				this.deps.executionCharter ??
+				compileExecutionCharter({
+					objectiveId,
+					prompt: (input?.description as string) ?? `Escalate capability for ${objectiveId}`,
+				});
+			const rawRuntime = this.deps.runtime as any;
+			const runtime: TaskRuntimeProjection =
+				rawRuntime?.objectives && rawRuntime?.tasks
+					? (rawRuntime as TaskRuntimeProjection)
+					: typeof rawRuntime?.reconcileObjective === "function"
+						? await rawRuntime.reconcileObjective(objectiveId)
+						: typeof rawRuntime?.getSnapshot === "function"
+							? rawRuntime.getSnapshot()
+							: rawRuntime;
+
+			if (this.deps.specialistSynthesis) {
+				const needInput = (input?.need as Record<string, unknown>) ?? {};
+				const specialist = await this.deps.specialistSynthesis.resolveOrCreate({
+					objectiveId,
+					taskId: `${objectiveId}-spec-${this.cycleCounter}`,
+					need: {
+						specialty: (needInput.domain as string) ?? "ui_ux",
+						purpose: (input?.description as string) ?? (needInput.mission as string) ?? "Specialist mission",
+						authorityRole: (input?.role as string) ?? "implementer",
+						mission: (input?.title as string) ?? (needInput.mission as string) ?? "Specialist mission",
+					},
+					charter,
+					signal,
+				});
+
+				const taskRunner = (rawRuntime?.createTask ? rawRuntime : runtime) as any;
+				const snapshot = taskRunner?.getSnapshot?.();
+				if (snapshot && !snapshot.objectives?.[objectiveId]) {
+					taskRunner?.createObjective?.({
+						objectiveId,
+						title: (input?.title as string) ?? `Objective ${objectiveId}`,
+						description: (input?.description as string) ?? `Objective ${objectiveId}`,
+					});
+				}
+				const specTaskId = `${objectiveId}-spec-${++this.cycleCounter}`;
+				const workerResult = await this.runSpecialistWorkerExecution(
+					taskRunner,
+					specialist,
+					specTaskId,
+					objectiveId,
+					route,
+					signal,
+				);
+
+				return {
+					action,
+					executed: true,
+					result: workerResult,
+				};
+			}
+		}
+
+		return {
+			action,
+			executed: false,
+		};
 	}
 
 	async evaluateRouteOnce(
@@ -780,13 +873,27 @@ export class ObjectiveExecutionController {
 								specialty: "code_architecture_specialist",
 								purpose: `Fulfill specialist need for ${objectiveId} (${resolution.action || "targeted expert synthesis"})`,
 							};
-							await this.deps.specialistSynthesis.resolveOrCreate({
+							const specialist = await this.deps.specialistSynthesis.resolveOrCreate({
 								objectiveId,
 								taskId: `${objectiveId}-spec-${this.cycleCounter}`,
 								need,
 								charter,
 								signal,
 							});
+
+							// ERC-040..ERC-045: Materialized specialist becomes durable task, attempt, and worker execution
+							const specTaskId = `${objectiveId}-spec-${this.cycleCounter}`;
+							await this.runSpecialistWorkerExecution(
+								runtime,
+								specialist,
+								specTaskId,
+								objectiveId,
+								route,
+								signal,
+								this.cycleCounter,
+							);
+
+							// ERC-046: Objective resumes
 							break;
 						}
 
@@ -1618,5 +1725,98 @@ export class ObjectiveExecutionController {
 			semantic_gate_unavailable: "semantic_gate_unavailable",
 		};
 		return this.buildBundle(objectiveId, statusMap[result.status] ?? "unrecoverable", runtime);
+	}
+
+	private async runSpecialistWorkerExecution(
+		runtime: any,
+		specialist: MaterializedSpecialist,
+		specTaskId: string,
+		objectiveId: string,
+		route: ObjectiveRoute,
+		signal?: AbortSignal,
+		evidenceRevision?: number,
+	): Promise<WorkerResultContract | undefined> {
+		const specTask = runtime?.createTask?.({
+			objectiveId,
+			title: specialist.spec.mission,
+			description: specialist.spec.purpose,
+			role: specialist.spec.authority_role,
+		}) ?? { taskId: specTaskId };
+		const specGrantId = `grant-${specTaskId}`;
+		const specAttempt = runtime?.queueAttempt?.(
+			specTask.taskId,
+			{
+				taskId: specTask.taskId,
+				profileId: specialist.profileId,
+				instructions: specialist.spec.mission,
+				resourcePointerIds: [],
+			},
+			specGrantId,
+		) ?? { attemptId: `att-${specTaskId}` };
+		(specAttempt as any).profileId = specialist.profileId;
+		const specLease = runtime?.leaseAttempt?.(specAttempt.attemptId, `owner-spec-${specialist.specialistId}`, 60000);
+		if (specLease) {
+			runtime?.startAttempt?.(specAttempt.attemptId, specLease.leaseId, specLease.fencingToken);
+		}
+
+		let workerResult: WorkerResultContract | undefined;
+		if (this.deps.workerDispatcher?.dispatchSpecialist) {
+			workerResult = await this.deps.workerDispatcher.dispatchSpecialist({
+				specialist,
+				taskId: specTask.taskId,
+				attemptId: specAttempt.attemptId,
+				leaseId: specLease?.leaseId,
+				fencingToken: specLease?.fencingToken,
+				expiresAt: specLease?.expiresAt,
+				signal,
+			});
+		} else if (this.deps.workerDispatcher?.dispatch) {
+			await this.deps.workerDispatcher.dispatch(route, signal, {
+				model_id: specialist.expert.modelId,
+				provider: specialist.expert.providerId,
+				routing_band: specialist.expert.routingBand as any,
+				capability_tier: specialist.expert.capabilityTier as any,
+				thinking_level: "high",
+				work_class: "implement",
+				worker_role: specialist.spec.authority_role,
+			} as any);
+		}
+
+		if (workerResult) {
+			const aligned: WorkerResultContract = {
+				...workerResult,
+				objectiveId,
+				taskId: specTask.taskId,
+				attemptId: specAttempt.attemptId,
+				leaseId: specLease?.leaseId ?? workerResult.leaseId,
+				fencingToken: specLease?.fencingToken ?? workerResult.fencingToken,
+			};
+			runtime?.finishAttempt?.(aligned);
+
+			const normalizedEvidence = {
+				resultId: workerResult.resultId,
+				status: workerResult.status,
+				summary: workerResult.summary,
+				artifacts: workerResult.artifacts ?? [],
+				changedFiles:
+					(workerResult as any).claim?.changedFiles ?? (workerResult.artifacts ?? []).map((a: any) => a.uri) ?? [],
+				toolCalls: workerResult.usage?.toolCalls ?? 0,
+				usage: workerResult.usage,
+				modelBinding: specialist.expert,
+			};
+			if (this.deps.systemOne?.recordHostEvidence) {
+				await this.deps.systemOne.recordHostEvidence(normalizedEvidence);
+			}
+
+			if (this.deps.specialistSynthesis?.evaluateEffectiveness) {
+				await this.deps.specialistSynthesis.evaluateEffectiveness(specialist, normalizedEvidence, {
+					objectiveId,
+					taskId: specTask.taskId,
+					evidenceRevision,
+				});
+			}
+		}
+
+		return workerResult;
 	}
 }

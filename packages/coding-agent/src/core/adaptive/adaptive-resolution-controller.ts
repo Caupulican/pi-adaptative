@@ -30,6 +30,7 @@ export interface AdaptiveResolutionInput {
 
 export interface AdaptiveResolution {
 	readonly dimension: AdaptiveDimension;
+	readonly specialty?: string;
 	readonly action: string;
 	readonly certificateId: string;
 	readonly reasonCodes: readonly string[];
@@ -86,11 +87,14 @@ export class AdaptiveResolutionController {
 			},
 		);
 
-		// Interpret lowest adequate adaptation dimension
-		// Interpret lowest adequate adaptation dimension from typed Jev
+		// Interpret lowest adequate adaptation dimension from typed Jev (ERC-050)
 		const answers = cert.answers;
 		const lowestChoice = (answers.lowest_adequate_adaptation as { choice?: string })?.choice;
+		const requiredSpecialtyChoice =
+			(answers.required_specialty as { choice?: string })?.choice ??
+			(typeof answers.required_specialty === "string" ? answers.required_specialty : undefined);
 		const specialistDomainChoice =
+			requiredSpecialtyChoice ??
 			(answers.specialist_domain as { choice?: string })?.choice ??
 			(answers.domain as string) ??
 			(answers.specialty as string);
@@ -98,27 +102,28 @@ export class AdaptiveResolutionController {
 			`${input.request ?? ""} ${(input as any).prompt ?? ""} ${input.objectiveDescription ?? ""} ${JSON.stringify(input.recentEvidence ?? "")}`.toLowerCase();
 		const isUiRegex = /\b(ui|ux|ui_ux|visual|design|frontend|interface|gui|layout)\b/i.test(reqText);
 		const isCapNeed = /\b(tool|script|capability|extension|patch|missing)\b/i.test(reqText);
-		const isUiNeed =
-			(lowestChoice === "specialist" && (specialistDomainChoice === "ui_ux" || isUiRegex)) ||
-			(isUiRegex && !isCapNeed);
 
+		// Jev owns dimension; regex is only a secondary fallback hint (ERC-050, ERC-051)
 		let dimension: AdaptiveDimension = "strategy";
 		if (lowestChoice === "expert_reroute") {
 			dimension = "expert_reroute";
-		} else if (lowestChoice === "specialist") {
+		} else if (lowestChoice === "specialist" || requiredSpecialtyChoice) {
 			dimension = "specialist";
 		} else if (lowestChoice === "capability") {
 			dimension = "capability";
 		} else if (lowestChoice === "runtime") {
 			dimension = "runtime";
-		} else if (isCapNeed && !isUiRegex) {
-			dimension = "capability";
-		} else if (isUiNeed || (cert.directive === "resolve_capability" && cert.answers.specialist_gap_present)) {
-			dimension = "specialist";
-		} else if (isCapNeed || cert.directive === "resolve_capability") {
-			dimension = "capability";
 		} else if (cert.directive === "synthesize_capability") {
 			dimension = "runtime";
+		} else if (cert.directive === "resolve_capability") {
+			dimension = cert.answers.specialist_gap_present ? "specialist" : "capability";
+		} else {
+			// Fallback hints when typed Jev does not specify lowestChoice
+			if (isUiRegex && !isCapNeed) {
+				dimension = "specialist";
+			} else if (isCapNeed) {
+				dimension = "capability";
+			}
 		}
 
 		const kindMap: Record<AdaptiveDimension, AdaptationNodeKind> = {
@@ -146,7 +151,7 @@ export class AdaptiveResolutionController {
 		let runtimeNeed: Record<string, unknown> | undefined;
 
 		if (dimension === "specialist") {
-			const domain = specialistDomainChoice || (isUiNeed ? "ui_ux" : "architecture");
+			const domain = specialistDomainChoice || (isUiRegex ? "ui_ux" : "architecture");
 			const isVisual =
 				domain === "ui_ux" ||
 				domain.toLowerCase().includes("ui") ||
@@ -225,6 +230,7 @@ export class AdaptiveResolutionController {
 
 		return {
 			dimension,
+			specialty: specialistNeed?.specialty,
 			action: cert.directive,
 			certificateId: cert.certificate_id,
 			reasonCodes: [cert.directive, `dimension_${dimension}`],

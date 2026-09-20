@@ -36,6 +36,7 @@ import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { isContextOverflow } from "@caupulican/pi-ai/overflow";
 import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
 import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
+import { type CompactionAuditStats, EvidenceRetentionPlanner } from "./compaction/evidence-retention-planner.ts";
 import { packSupersededHostRecords } from "./context-gc.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
@@ -170,6 +171,7 @@ export interface CompactionControllerDeps {
 		provider?: string,
 	): Promise<CompactionResult>;
 	onCompactionSettled?(): void;
+	retentionPlanner?: EvidenceRetentionPlanner;
 }
 
 export async function runCompactionWithRetry<T>(options: {
@@ -214,10 +216,25 @@ export class CompactionController {
 	private overflowRecoveryAttempted = false;
 	private providerRecoveryAttempted = false;
 	private ineffectiveThresholdFrontier: IneffectiveThresholdFrontier | undefined;
+	private retentionPlanner?: EvidenceRetentionPlanner;
 	private readonly deps: CompactionControllerDeps;
 
-	constructor(deps: CompactionControllerDeps) {
+	constructor(deps: CompactionControllerDeps = {} as CompactionControllerDeps) {
 		this.deps = deps;
+		if (deps?.retentionPlanner) {
+			this.retentionPlanner = deps.retentionPlanner;
+		}
+	}
+
+	getRetentionPlanner(): EvidenceRetentionPlanner {
+		if (!this.retentionPlanner) {
+			this.retentionPlanner = this.deps?.retentionPlanner ?? new EvidenceRetentionPlanner();
+		}
+		return this.retentionPlanner;
+	}
+
+	getRetentionAuditStats(): CompactionAuditStats | undefined {
+		return this.retentionPlanner?.getLastAuditStats();
 	}
 
 	private async buildCompactionInstructions(customInstructions?: string): Promise<string | undefined> {

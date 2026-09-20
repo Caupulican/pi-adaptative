@@ -1334,6 +1334,35 @@ export class AgentSession {
 		return this._adaptiveReadiness;
 	}
 
+	/** Skill vault controller managing active and cached skills. */
+	get skillVault(): SkillVaultController {
+		return this._skillVault;
+	}
+
+	/** Background lane controller managing worker and research lanes. */
+	get backgroundLanes(): BackgroundLaneController {
+		return this._backgroundLanes;
+	}
+
+	/**
+	 * Attach assembled adaptive runtime stack components to this live session.
+	 */
+	attachAdaptiveRuntime(stack: {
+		readiness?: AdaptiveRuntimeReadiness;
+		steeringPlane?: SystemOneSteeringPlane;
+		objectiveController?: ObjectiveExecutionController;
+	}): void {
+		if (stack.readiness) {
+			this._adaptiveReadiness = stack.readiness;
+		}
+		if (stack.steeringPlane) {
+			this._steeringPlane = stack.steeringPlane;
+		}
+		if (stack.objectiveController) {
+			this._objectiveExecutionController = stack.objectiveController;
+		}
+	}
+
 	private async _getRequiredRequestAuth(model: Model<Api>): Promise<RequestAuth> {
 		const result = await this._modelRegistry.getApiKeyAndHeaders(model);
 		if (!result.ok) {

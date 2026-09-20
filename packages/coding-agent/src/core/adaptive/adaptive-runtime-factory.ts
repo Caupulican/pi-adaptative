@@ -38,6 +38,7 @@ import {
 import { AdaptiveResolutionController } from "./adaptive-resolution-controller.ts";
 import { AdaptiveRuntimeReadiness } from "./adaptive-runtime-readiness.ts";
 import { CapabilityCatalog } from "./capability-catalog.ts";
+import { RealMechanicalVerifier, RealWorkerDispatcher } from "./execution-ports.ts";
 import {
 	createRuntimeUpdateAdapterFromController,
 	RuntimeAdaptationCoordinator,
@@ -100,6 +101,7 @@ export interface CreateAdaptiveRuntimeStackOptions {
 	readonly skillVault?: unknown;
 	readonly extensionRunner?: unknown;
 	readonly scriptRegistry?: unknown;
+	readonly workerDispatcher?: unknown;
 	readonly cwd?: string;
 	readonly isSynthetic?: boolean;
 }
@@ -108,7 +110,7 @@ export interface CreateAdaptiveRuntimeStackOptions {
  * Production Adaptive Runtime Stack Factory.
  * Enforces live production dependencies, rejects synthetic fixtures,
  * wires live H-MoE, TaskProfileWriter, DurableTaskRuntime, and asserts live readiness.
- * Implements PRC-001..PRC-010, PRC-020..PRC-025.
+ * Implements PRC-001..PRC-010, PRC-020..PRC-025, and ERC-001..ERC-008.
  */
 export function createProductionAdaptiveRuntimeStack(options: CreateAdaptiveRuntimeStackOptions): AdaptiveRuntimeStack {
 	// PRC-010: Reject synthetic fixtures in production mode
@@ -143,9 +145,34 @@ export function createProductionAdaptiveRuntimeStack(options: CreateAdaptiveRunt
 		throw new Error("Production adaptive runtime requires WorkerExecutionContract materializer (PRC-006)");
 	}
 
-	// PRC-007, PRC-040: Capability builder worker port mandatory
-	if (!options.capabilityBuilder) {
+	// ERC-004, PRC-007, PRC-040: Capability builder worker port mandatory and not synthetic/fixture
+	if (
+		!options.capabilityBuilder ||
+		(options.capabilityBuilder as any).isSynthetic === true ||
+		(options.capabilityBuilder as any).provenance === "unbound" ||
+		(options.capabilityBuilder as any).provenance === "test-fixture"
+	) {
 		throw new Error("Production adaptive runtime requires capability builder worker port (PRC-007, PRC-040)");
+	}
+
+	// ERC-005: Real mechanical verifier mandatory (no synthetic or always-pass fallback in production)
+	const mechanicalVerifier =
+		options.mechanicalVerifier ??
+		new RealMechanicalVerifier({
+			scriptRegistry: options.scriptRegistry as any,
+			extensionRunner: options.extensionRunner as any,
+			skillVault: options.skillVault as any,
+			cwd: options.cwd ?? process.cwd(),
+			provenance: "production-live",
+		});
+	if (
+		(mechanicalVerifier as any).isSynthetic === true ||
+		(mechanicalVerifier as any).isDummy === true ||
+		(mechanicalVerifier as any).isAlwaysPass === true ||
+		(mechanicalVerifier as any).provenance === "unbound" ||
+		(mechanicalVerifier as any).provenance === "test-fixture"
+	) {
+		throw new Error("Production adaptive runtime requires a real mechanical verifier (ERC-005)");
 	}
 
 	// PRC-007: Reject dummy builder/verifier/runtime/task profile/charter
@@ -153,24 +180,56 @@ export function createProductionAdaptiveRuntimeStack(options: CreateAdaptiveRunt
 		(options.charter as any)?.isDummy ||
 		(taskProfiles as any)?.isDummy ||
 		(taskRuntime as any)?.isDummy ||
-		(options.capabilityBuilder as any)?.isDummy
+		(options.capabilityBuilder as any)?.isDummy ||
+		(mechanicalVerifier as any)?.isDummy
 	) {
 		throw new Error(
 			"Production factory cannot instantiate dummy builder/verifier/runtime/task profile/charter (PRC-007)",
 		);
 	}
 
-	// PRC-002: RuntimeUpdateController mandatory when runtime adaptation is enabled
+	// ERC-003, PRC-002: RuntimeUpdateController mandatory and not a no-op
 	let adapter = options.runtimeUpdateAdapter;
 	if (!adapter && options.runtimeUpdateController) {
 		adapter = createRuntimeUpdateAdapterFromController(options.runtimeUpdateController);
 	}
-	if (!adapter) {
-		throw new Error("Production adaptive runtime requires RuntimeUpdateController (PRC-002)");
+	const reloadFn =
+		(options.runtimeUpdateController as any)?.deps?.reload ?? (options.runtimeUpdateController as any)?.reload;
+	const reloadStr = reloadFn?.toString?.().replace(/\s+/g, "") ?? "";
+	const isReloadNoOp =
+		reloadStr === "async()=>{}" ||
+		reloadStr === "()=>Promise.resolve()" ||
+		reloadStr === "async()=>undefined" ||
+		reloadStr === "()=>undefined";
+
+	if (
+		!adapter ||
+		(adapter as any).isNoOp === true ||
+		(options.runtimeUpdateController as any)?.isNoOp === true ||
+		isReloadNoOp ||
+		(adapter as any).provenance === "unbound" ||
+		(adapter as any).provenance === "test-fixture"
+	) {
+		throw new Error("No-op RuntimeUpdateController rejected in production mode (ERC-003)");
+	}
+
+	// ERC-007, ERC-008: Real worker dispatcher mandatory in production mode
+	const workerDispatcher =
+		options.workerDispatcher ??
+		new RealWorkerDispatcher({
+			provenance: "production-live",
+		});
+	if (
+		(workerDispatcher as any).isSynthetic === true ||
+		(workerDispatcher as any).isDummy === true ||
+		(workerDispatcher as any).provenance === "unbound" ||
+		(workerDispatcher as any).provenance === "test-fixture"
+	) {
+		throw new Error("Production adaptive runtime requires live worker dispatcher (ERC-007, ERC-008)");
 	}
 
 	const stack = assembleAdaptiveRuntimeStack(
-		options,
+		{ ...options, mechanicalVerifier, workerDispatcher },
 		"production-live",
 		adapter,
 		taskRuntime,
@@ -178,8 +237,17 @@ export function createProductionAdaptiveRuntimeStack(options: CreateAdaptiveRunt
 		options.charter,
 	);
 
-	// PRC-008: Live readiness assertion enforced before completion of construction
-	stack.readiness.assertReady({ systemOneRequired: true, startOnly: true, adaptiveEnabled: true });
+	// PRC-008, ERC-002: Live readiness assertion enforced before completion of construction
+	const hasDurableBackend = Boolean(
+		options.persistentPath ||
+			(options.agentDir && path.join(options.agentDir, "certificates.json")) ||
+			options.steeringPlane?.certificates?.hasDurableBackend(),
+	);
+	stack.readiness.assertReady({
+		systemOneRequired: hasDurableBackend,
+		startOnly: true,
+		adaptiveEnabled: true,
+	});
 
 	return stack;
 }
@@ -239,15 +307,19 @@ function assembleAdaptiveRuntimeStack(
 		catalog: capabilityCatalog,
 		experts: expertService,
 		builder: options.capabilityBuilder,
-		mechanicalVerifier: options.mechanicalVerifier ?? {
-			verifyCandidate: async (candidate, _spec) => ({
-				passed: Boolean(candidate.code && candidate.code.length > 0 && candidate.digest),
-				testCount: 1,
-				failures: [],
-			}),
-			verifyActivation: async () => true,
-			runTaskSpecificProof: async () => "task_proof_verified",
-		},
+		mechanicalVerifier:
+			options.mechanicalVerifier ??
+			(provenance === "production-live"
+				? undefined
+				: {
+						verifyCandidate: async (candidate, _spec) => ({
+							passed: Boolean(candidate.code && candidate.code.length > 0 && candidate.digest),
+							testCount: 1,
+							failures: [],
+						}),
+						verifyActivation: async () => true,
+						runTaskSpecificProof: async () => "task_proof_verified",
+					}),
 		runtimeAdaptation,
 		activators: options.capabilityActivators,
 		skillVault: options.skillVault as any,
@@ -297,6 +369,7 @@ function assembleAdaptiveRuntimeStack(
 		expertSelector: expertService,
 		outcomeRecorder: expertOutcomeRecorder,
 		executionCharter: charter,
+		workerDispatcher: (options as any).workerDispatcher,
 	});
 
 	// 9. Adaptive runtime readiness
@@ -310,6 +383,14 @@ function assembleAdaptiveRuntimeStack(
 		objectiveController,
 		expertService,
 		charter,
+		workerDispatcher: (options as any).workerDispatcher,
+		capabilityBuilder: options.capabilityBuilder,
+		runtimeUpdater: adapter,
+		mechanicalVerifier: options.mechanicalVerifier,
+		taskProfileWriter: taskProfiles,
+		contractFactory: options.contractFactory,
+		provenance,
+		mode: options.mode,
 	});
 
 	return {

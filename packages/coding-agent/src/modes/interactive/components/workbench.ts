@@ -33,6 +33,8 @@ export interface WorkbenchOptions {
 	viewportRows: () => number;
 	/** Mounted for focus/lifecycle but not permanently reserved above the conversation. */
 	header?: Component;
+	/** Operator status slot directly under the headline. */
+	operatorStatus?: Component;
 }
 
 export const PLAN_SECTION = "Work plan";
@@ -118,6 +120,7 @@ export class WorkbenchComponent extends Container {
 	}
 	readonly conversation: ConversationWindow;
 	private readonly options: WorkbenchOptions;
+	private operatorStatus?: Component;
 	private sections: WorkbenchSection[] = [];
 	private headlineState: WorkbenchHeadline = {};
 	private execution?: Component;
@@ -210,8 +213,10 @@ export class WorkbenchComponent extends Container {
 	constructor(options: WorkbenchOptions) {
 		super();
 		this.options = options;
+		this.operatorStatus = options.operatorStatus;
 		for (const child of [
 			options.header,
+			options.operatorStatus,
 			options.conversation,
 			options.activity,
 			...options.dock,
@@ -252,6 +257,16 @@ export class WorkbenchComponent extends Container {
 	}
 	setHeadline(headline: WorkbenchHeadline): void {
 		this.headlineState = headline;
+	}
+	setOperatorStatus(component: Component | undefined): void {
+		if (this.operatorStatus === component) return;
+		if (this.operatorStatus) this.removeChild(this.operatorStatus);
+		this.operatorStatus = component;
+		if (component) this.addChild(component);
+		this.frameRevision++;
+	}
+	getOperatorStatus(): Component | undefined {
+		return this.operatorStatus;
 	}
 	setExecution(
 		component: Component | undefined,
@@ -755,7 +770,8 @@ export class WorkbenchComponent extends Container {
 		// The live row is reserved even when idle so the geometry never jumps between turns.
 		const activity = this.options.activity?.render(inner).slice(0, 1) ?? [];
 		const liveRow = activity.length ? gutter(activity[0]!) : "";
-		const head = [this.headline(columns)];
+		const operatorRows = this.operatorStatus?.render(columns) ?? [];
+		const head = [this.headline(columns), ...operatorRows];
 		const available = total - head.length - 1 - dockRows.length;
 		this.lastAvailable = available;
 		this.workLeft = 0;

@@ -119,6 +119,8 @@ export class FooterComponent implements Component {
 	private autoCompactEnabled = true;
 	/** One status row when the width allows (Workbench); otherwise the classic stacked rows. */
 	private compact = false;
+	private operatorFooter = false;
+	private diagnosticsMode = false;
 	private session: AgentSession;
 	private footerData: ReadonlyFooterDataProvider;
 	private usageSnapshot?: FooterUsageSnapshot;
@@ -137,6 +139,18 @@ export class FooterComponent implements Component {
 
 	setCompact(compact: boolean): void {
 		this.compact = compact;
+	}
+
+	setOperatorFooter(enabled: boolean): void {
+		this.operatorFooter = enabled;
+	}
+
+	setDiagnosticsMode(enabled: boolean): void {
+		this.diagnosticsMode = enabled;
+	}
+
+	isDiagnosticsMode(): boolean {
+		return this.diagnosticsMode;
 	}
 
 	setAutoCompactEnabled(enabled: boolean): void {
@@ -221,6 +235,21 @@ export class FooterComponent implements Component {
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
+
+		if (this.operatorFooter && !this.diagnosticsMode) {
+			let pwd = formatCwdForFooter(
+				this.session.sessionManager.getCwd(),
+				process.env.HOME || process.env.USERPROFILE,
+			);
+			const branch = this.footerData.getGitBranch();
+			if (branch) pwd = `${pwd} (${branch})`;
+			const sessionName = this.session.sessionManager.getSessionName();
+			if (sessionName) pwd = `${pwd} • ${sessionName}`;
+
+			const leftParts = [theme.fg("dim", pwd), theme.fg("dim", "Jev ✓"), theme.fg("dim", `ctx ${contextPercent}%`)];
+			const left = leftParts.join("  ·  ");
+			return [truncateToWidth(left, width, "…")];
+		}
 
 		// Replace home directory with ~
 		let pwd = formatCwdForFooter(this.session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);

@@ -212,6 +212,8 @@ export interface EstablishedCapability {
 	readonly spec: CapabilitySpec;
 	readonly record: CapabilityRecord;
 	readonly isExisting: boolean;
+	readonly active?: boolean;
+	readonly activationProof?: Record<string, unknown>;
 	readonly activation?: {
 		readonly active: boolean;
 		readonly method: string;
@@ -231,4 +233,10 @@ export interface MaterializedSpecialist {
 	readonly profileId: string;
 	readonly executionContract: Record<string, unknown>;
 	readonly isExisting: boolean;
+}
+
+export type PortProvenance = "production-live" | "custom-live" | "test-fixture" | "unbound";
+
+export interface ProvenancedPort {
+	readonly provenance?: PortProvenance;
 }

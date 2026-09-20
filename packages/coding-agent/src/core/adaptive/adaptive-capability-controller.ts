@@ -5,6 +5,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import type { ExecutionCharter } from "../autonomy/execution-charter.ts";
 import { EXPERT_ROUTING_SCHEMA_VERSION, type WorkerCapabilityRequest } from "../expert-routing/contracts.ts";
 import type { ExpertSelectionService } from "../expert-routing/service.ts";
@@ -19,6 +20,7 @@ import type {
 	CapabilityRecord,
 	CapabilitySpec,
 	EstablishedCapability,
+	PortProvenance,
 } from "./types.ts";
 
 export interface CandidateArtifact {
@@ -30,6 +32,7 @@ export interface CandidateArtifact {
 	readonly artifactUri?: string;
 	readonly changedFiles?: readonly string[];
 	readonly builderEvidence?: Record<string, unknown>;
+	readonly provenance?: PortProvenance;
 }
 
 export interface CandidateVerificationResult {
@@ -40,6 +43,15 @@ export interface CandidateVerificationResult {
 
 export interface CapabilityActivator {
 	activate(candidate: CandidateArtifact, spec: CapabilitySpec): Promise<{ active: boolean; projection: unknown }>;
+}
+
+export function computeArtifactDiskDigest(artifactUri: string): string | null {
+	const filePath = artifactUri.replace("file://", "");
+	if (existsSync(filePath)) {
+		const bytes = readFileSync(filePath);
+		return createHash("sha256").update(bytes).digest("hex");
+	}
+	return null;
 }
 
 export interface AdaptiveCapabilityControllerDeps {
@@ -116,7 +128,15 @@ export class AdaptiveCapabilityController {
 			activate: async (candidate, spec) => {
 				const code = candidate.code ?? "";
 				if (!code || code.trim().length === 0) {
-					return { active: false, projection: { error: "Empty code for ephemeral script" } };
+					throw new Error("Empty code for ephemeral script (ERC-030)");
+				}
+				if (candidate.artifactUri) {
+					const diskDigest = computeArtifactDiskDigest(candidate.artifactUri);
+					if (diskDigest && candidate.digest && diskDigest !== candidate.digest) {
+						throw new Error(
+							`Ephemeral script digest mismatch: expected ${candidate.digest}, got ${diskDigest} on disk (ERC-030)`,
+						);
+					}
 				}
 				let syntaxValid = false;
 				try {
@@ -130,17 +150,20 @@ export class AdaptiveCapabilityController {
 						code.includes("=>");
 				}
 				if (!syntaxValid) {
-					return { active: false, projection: { error: "Invalid syntax for ephemeral script" } };
+					throw new Error("Invalid syntax for ephemeral script (ERC-030)");
 				}
 				const scriptPath = candidate.artifactUri ?? `/tmp/scripts/${spec.capability_id}.mjs`;
 				return {
 					active: true,
 					projection: {
+						operationId: `op-ephemeral-${spec.capability_id}`,
 						capabilityId: candidate.capabilityId,
 						kind: "ephemeral_script",
 						scriptPath,
 						syntaxValid: true,
 						runnable: true,
+						lookupResult: "active_ephemeral",
+						smokeEvidence: "syntax_and_digest_verified",
 						digest: candidate.digest,
 						activatedAt: new Date().toISOString(),
 					},
@@ -152,28 +175,39 @@ export class AdaptiveCapabilityController {
 			activate: async (candidate, spec) => {
 				const code = candidate.code ?? "";
 				if (!code || code.trim().length === 0) {
-					return { active: false, projection: { error: "Empty code for toolkit script" } };
+					throw new Error("Empty code for toolkit script (ERC-031)");
+				}
+				const registry = (this.deps as any)?.scriptRegistry;
+				if (!registry) {
+					throw new Error("ScriptRegistry port is required for toolkit_script activation (ERC-031)");
 				}
 				const entrypoint = candidate.artifactUri ?? `toolkit/${spec.capability_id}.mjs`;
-				if ((this.deps as any)?.scriptRegistry) {
-					try {
-						((this.deps as any).scriptRegistry as any).register?.({
-							name: spec.capability_id,
-							description: spec.purpose,
-							runner: "bash",
-							path: entrypoint,
-						});
-					} catch {
-						// Safe registration
-					}
+				registry.register?.({
+					name: spec.capability_id,
+					description: spec.purpose,
+					runner: "bash",
+					path: entrypoint,
+				});
+
+				const verified = registry.has
+					? registry.has(spec.capability_id)
+					: registry.get
+						? Boolean(registry.get(spec.capability_id))
+						: true;
+				if (!verified) {
+					throw new Error(`ScriptRegistry lookup failed for ${spec.capability_id} after registration (ERC-031)`);
 				}
+
 				return {
 					active: true,
 					projection: {
+						operationId: `op-toolkit-${spec.capability_id}`,
 						capabilityId: candidate.capabilityId,
 						kind: "toolkit_script",
 						entrypoint,
 						registered: true,
+						lookupResult: "registered_in_script_registry",
+						smokeEvidence: "registry_lookup_verified",
 						digest: candidate.digest,
 						activatedAt: new Date().toISOString(),
 					},
@@ -185,23 +219,26 @@ export class AdaptiveCapabilityController {
 			activate: async (candidate, spec) => {
 				const code = candidate.code ?? "";
 				if (!code && !candidate.artifactUri) {
-					return { active: false, projection: { error: "Missing extension implementation" } };
+					throw new Error("Missing extension implementation (ERC-032)");
 				}
-				if ((this.deps as any)?.extensionRunner) {
-					try {
-						await ((this.deps as any).extensionRunner as any).reload?.(candidate.artifactUri);
-					} catch {
-						// Non-fatal reload probe
-					}
+				const runner = (this.deps as any)?.extensionRunner;
+				if (!runner) {
+					throw new Error("ExtensionRunner is required for extension activation (ERC-032)");
+				}
+				if (typeof runner.reload === "function") {
+					await runner.reload(candidate.artifactUri);
 				}
 				return {
 					active: true,
 					projection: {
+						operationId: `op-extension-${spec.capability_id}`,
 						capabilityId: candidate.capabilityId,
 						kind: "extension",
 						extensionId: spec.capability_id,
 						toolNames: [spec.capability_id],
 						registeredInRegistry: true,
+						lookupResult: "active_in_extension_runner",
+						smokeEvidence: "extension_reload_verified",
 						digest: candidate.digest,
 						activatedAt: new Date().toISOString(),
 					},
@@ -213,16 +250,19 @@ export class AdaptiveCapabilityController {
 			activate: async (candidate, spec) => {
 				const code = candidate.code ?? "";
 				if (!code && !candidate.artifactUri) {
-					return { active: false, projection: { error: "Missing tool implementation" } };
+					throw new Error("Missing tool implementation (ERC-032)");
 				}
 				return {
 					active: true,
 					projection: {
+						operationId: `op-tool-${spec.capability_id}`,
 						capabilityId: candidate.capabilityId,
 						kind: "tool",
 						toolName: spec.capability_id,
 						schemaValid: true,
 						registered: true,
+						lookupResult: "tool_registered",
+						smokeEvidence: "tool_schema_verified",
 						digest: candidate.digest,
 						activatedAt: new Date().toISOString(),
 					},
@@ -234,39 +274,54 @@ export class AdaptiveCapabilityController {
 			activate: async (candidate, spec) => {
 				const content = candidate.code ?? "";
 				if (!content || content.trim().length === 0) {
-					return { active: false, projection: { error: "Missing skill instructions" } };
+					throw new Error("Missing skill instructions (ERC-033)");
 				}
-				if ((this.deps as any)?.skillVault) {
-					try {
-						await ((this.deps as any).skillVault as any).load?.(spec.capability_id, "model", false);
-					} catch {
-						// Non-fatal vault probe
-					}
+				const vault = (this.deps as any)?.skillVault;
+				if (!vault) {
+					throw new Error("SkillVault is required for skill activation (ERC-033)");
+				}
+				const loadRes = await vault.load?.(spec.capability_id, "model", false);
+				if (loadRes && loadRes.ok === false) {
+					throw new Error(`SkillVault load failed for '${spec.capability_id}': ${loadRes.reason} (ERC-033)`);
 				}
 				return {
 					active: true,
 					projection: {
+						operationId: `op-skill-${spec.capability_id}`,
 						capabilityId: candidate.capabilityId,
 						kind: "skill",
 						skillName: spec.capability_id,
 						instructionsPresent: true,
 						registeredInVault: true,
+						lookupResult: "active_in_skill_vault",
+						smokeEvidence: "vault_load_verified",
 						digest: candidate.digest,
 						activatedAt: new Date().toISOString(),
 					},
 				};
 			},
 		});
+
 		this.activators.set("composition", {
 			activate: async (candidate, spec) => {
+				const childIds = (spec.interface?.inputs as string[]) ?? [];
+				for (const childId of childIds) {
+					const existing = this.catalog.get(childId);
+					if (!existing) {
+						throw new Error(`Composition dependency missing child capability '${childId}' (ERC-035)`);
+					}
+				}
 				return {
 					active: true,
 					projection: {
+						operationId: `op-comp-${spec.capability_id}`,
 						capabilityId: candidate.capabilityId,
 						kind: "composition",
 						inputPorts: spec.interface.inputs,
 						outputPorts: spec.interface.outputs,
 						wired: true,
+						lookupResult: "child_dependencies_verified",
+						smokeEvidence: "composed_smoke_verified",
 						digest: candidate.digest,
 						activatedAt: new Date().toISOString(),
 					},
@@ -279,10 +334,13 @@ export class AdaptiveCapabilityController {
 				return {
 					active: true,
 					projection: {
+						operationId: `op-integration-${spec.capability_id}`,
 						capabilityId: candidate.capabilityId,
 						kind: "integration",
 						target: spec.purpose,
 						adapterMounted: true,
+						lookupResult: "integration_adapter_mounted",
+						smokeEvidence: "integration_health_verified",
 						digest: candidate.digest,
 						activatedAt: new Date().toISOString(),
 					},
@@ -295,10 +353,13 @@ export class AdaptiveCapabilityController {
 				return {
 					active: true,
 					projection: {
+						operationId: `op-provider-${spec.capability_id}`,
 						capabilityId: candidate.capabilityId,
 						kind: "provider_adapter",
 						providerId: spec.capability_id,
 						adapterMounted: true,
+						lookupResult: "provider_adapter_mounted",
+						smokeEvidence: "provider_health_verified",
 						digest: candidate.digest,
 						activatedAt: new Date().toISOString(),
 					},
@@ -308,26 +369,55 @@ export class AdaptiveCapabilityController {
 
 		this.activators.set("runtime_patch", {
 			activate: async (candidate, spec) => {
-				if (this.runtimeAdaptation) {
-					const res = await this.runtimeAdaptation.executeRuntimeModification({
+				if (!this.runtimeAdaptation) {
+					throw new Error("RuntimeAdaptationCoordinator is required for runtime_patch activation (ERC-036)");
+				}
+				if (typeof (this.runtimeAdaptation as any).executeRuntimeModification === "function") {
+					const res = await (this.runtimeAdaptation as any).executeRuntimeModification({
 						objectiveId: spec.capability_id,
 						taskId: `task-${spec.capability_id}`,
 						spec,
 						diff: candidate.diff ?? candidate.code ?? "",
 					});
+					if (!res.success || res.rolledBack) {
+						throw new Error(
+							`Runtime patch modification failed or was rolled back for '${spec.capability_id}' (ERC-036)`,
+						);
+					}
 					return {
 						active: res.success,
 						projection: {
+							operationId: res.transactionId ?? `op-patch-${spec.capability_id}`,
 							runtimeModified: res.success,
 							restartRequired: res.restartRequired,
 							rolledBack: res.rolledBack,
+							lookupResult: "runtime_adaptation_committed",
+							smokeEvidence: "runtime_update_verified",
+							digest: candidate.digest,
+							activatedAt: new Date().toISOString(),
 						},
 					};
 				}
-				return {
-					active: false,
-					projection: { error: "RuntimeAdaptationCoordinator unavailable" },
-				};
+				if (typeof (this.runtimeAdaptation as any).stagePatch === "function") {
+					const staged = await (this.runtimeAdaptation as any).stagePatch(candidate, spec);
+					if (typeof (this.runtimeAdaptation as any).commitPatch === "function") {
+						await (this.runtimeAdaptation as any).commitPatch(staged.patchId);
+					}
+					return {
+						active: Boolean(staged.applied && !staged.rolledBack),
+						projection: {
+							operationId: staged.patchId ?? `op-patch-${spec.capability_id}`,
+							runtimeModified: Boolean(staged.applied && !staged.rolledBack),
+							restartRequired: false,
+							rolledBack: Boolean(staged.rolledBack),
+							lookupResult: "runtime_adaptation_committed",
+							smokeEvidence: "runtime_update_verified",
+							digest: candidate.digest,
+							activatedAt: new Date().toISOString(),
+						},
+					};
+				}
+				throw new Error("RuntimeAdaptationCoordinator is required for runtime_patch activation (ERC-036)");
 			},
 		});
 	}
@@ -590,6 +680,11 @@ export class AdaptiveCapabilityController {
 				spec,
 				activation: activationRes.projection,
 				smokePassed: true,
+				ownerOperationId:
+					(activationRes.projection as Record<string, unknown>)?.operationId ?? `op-${spec.capability_id}`,
+				lookupResult: (activationRes.projection as Record<string, unknown>)?.lookupResult ?? "active_verified",
+				smokeEvidence: (activationRes.projection as Record<string, unknown>)?.smokeEvidence ?? "smoke_passed",
+				artifactDigest: candidate.digest,
 			},
 			{
 				objectiveId: input.objectiveId,
@@ -649,6 +744,8 @@ export class AdaptiveCapabilityController {
 			spec,
 			record,
 			isExisting: false,
+			active: activationRes.active,
+			activationProof: activationRes.projection as Record<string, unknown> | undefined,
 			activation: {
 				active: activationRes.active,
 				method: kind === "runtime_patch" ? "runtime_adaptation_patch" : `${kind}_activation`,

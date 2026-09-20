@@ -356,11 +356,14 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 			},
 		};
 
+		let _reloaded = false;
 		const runtimeUpdateController = new RuntimeUpdateController({
 			sessionManager,
 			getMessages: () => [],
 			isRoot: () => true,
-			reload: async () => {},
+			reload: async () => {
+				_reloaded = true;
+			},
 			appendNotice: async () => {},
 		});
 

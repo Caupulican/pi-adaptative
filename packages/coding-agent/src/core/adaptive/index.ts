@@ -36,6 +36,14 @@ export {
 	type WideResolutionResult,
 } from "./capability-resolution.ts";
 export {
+	RealCapabilityBuilder,
+	type RealCapabilityBuilderDeps,
+	RealMechanicalVerifier,
+	type RealMechanicalVerifierDeps,
+	RealScriptRegistry,
+	RealWorkerDispatcher,
+} from "./execution-ports.ts";
+export {
 	type RollbackSnapshot,
 	RuntimeAdaptationCoordinator,
 	RuntimeAdaptationUnavailableError,
@@ -64,6 +72,8 @@ export {
 	type CapabilitySpecProof,
 	type EstablishedCapability,
 	type MaterializedSpecialist,
+	type PortProvenance,
+	type ProvenancedPort,
 	type SpecialistCognitiveRequirements,
 	type SpecialistContextPolicy,
 	type SpecialistLifetime,

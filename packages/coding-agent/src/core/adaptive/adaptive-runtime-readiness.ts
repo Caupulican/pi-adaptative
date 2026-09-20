@@ -14,6 +14,7 @@ import type { AdaptiveCapabilityController } from "./adaptive-capability-control
 import type { AdaptiveResolutionController } from "./adaptive-resolution-controller.ts";
 import type { RuntimeAdaptationCoordinator } from "./runtime-adaptation-coordinator.ts";
 import type { SpecialistSynthesisController } from "./specialist-synthesis-controller.ts";
+import type { PortProvenance } from "./types.ts";
 
 export interface AdaptiveRuntimeReadinessDeps {
 	readonly steeringPlane?: SystemOneSteeringPlane;
@@ -25,6 +26,15 @@ export interface AdaptiveRuntimeReadinessDeps {
 	readonly objectiveController?: ObjectiveExecutionController;
 	readonly expertService?: ExpertSelectionService;
 	readonly charter?: ExecutionCharter;
+	readonly workerDispatcher?: unknown;
+	readonly capabilityBuilder?: unknown;
+	readonly runtimeUpdater?: unknown;
+	readonly mechanicalVerifier?: unknown;
+	readonly taskProfileWriter?: unknown;
+	readonly contractFactory?: unknown;
+	readonly isUnbound?: boolean;
+	readonly mode?: "production" | "test";
+	readonly provenance?: PortProvenance;
 }
 
 export interface AdaptiveRuntimeStatus {
@@ -60,6 +70,12 @@ export class AdaptiveRuntimeReadiness {
 	getStatus(): AdaptiveRuntimeStatus {
 		const issues: string[] = [];
 
+		if (this.deps.isUnbound === true) {
+			issues.push(
+				"Session adaptive ports are unbound (Phase A). Complete Phase B adaptive binding before asserting readiness (ERC-002)",
+			);
+		}
+
 		const steeringPlane = Boolean(this.deps.steeringPlane);
 		const adaptiveResolution = Boolean(this.deps.adaptiveResolution);
 		const specialistSynthesis = Boolean(this.deps.specialistSynthesis);
@@ -78,6 +94,62 @@ export class AdaptiveRuntimeReadiness {
 		if (!hmoeService) issues.push("expertService (ExpertSelectionService H-MoE) is not wired");
 		if (!runtimeAdaptation) issues.push("runtimeAdaptation (RuntimeAdaptationCoordinator) is not wired");
 		if (!objectiveExecution) issues.push("objectiveController (ObjectiveExecutionController) is not wired");
+
+		const isProduction = this.deps.mode === "production" || this.deps.provenance === "production-live";
+		if (isProduction) {
+			if (!this.deps.workerDispatcher) {
+				issues.push("workerDispatcher is not wired (ERC-007)");
+			} else if (
+				(this.deps.workerDispatcher as any).provenance === "unbound" ||
+				(this.deps.workerDispatcher as any).provenance === "test-fixture"
+			) {
+				issues.push("workerDispatcher has non-live provenance (ERC-008)");
+			}
+
+			if (!this.deps.capabilityBuilder) {
+				issues.push("capabilityBuilder is not wired (ERC-004)");
+			} else if (
+				(this.deps.capabilityBuilder as any).isSynthetic === true ||
+				(this.deps.capabilityBuilder as any).isDummy === true
+			) {
+				issues.push("capabilityBuilder is synthetic or dummy (ERC-004)");
+			} else if (
+				(this.deps.capabilityBuilder as any).provenance === "unbound" ||
+				(this.deps.capabilityBuilder as any).provenance === "test-fixture"
+			) {
+				issues.push("capabilityBuilder has non-live provenance (ERC-008)");
+			}
+
+			if (!this.deps.runtimeUpdater && !this.deps.runtimeAdaptation) {
+				issues.push("runtimeUpdater is not wired (ERC-003)");
+			} else if ((this.deps.runtimeUpdater as any)?.isNoOp === true) {
+				issues.push("runtimeUpdater is a no-op implementation (ERC-003)");
+			} else if (
+				(this.deps.runtimeUpdater as any)?.provenance === "unbound" ||
+				(this.deps.runtimeUpdater as any)?.provenance === "test-fixture"
+			) {
+				issues.push("runtimeUpdater has non-live provenance (ERC-008)");
+			}
+
+			if (!this.deps.mechanicalVerifier) {
+				issues.push("mechanicalVerifier is not wired (ERC-005)");
+			} else if (
+				(this.deps.mechanicalVerifier as any).isSynthetic === true ||
+				(this.deps.mechanicalVerifier as any).isDummy === true ||
+				(this.deps.mechanicalVerifier as any).isAlwaysPass === true
+			) {
+				issues.push("mechanicalVerifier is synthetic or always-pass (ERC-005)");
+			} else if (
+				(this.deps.mechanicalVerifier as any).provenance === "unbound" ||
+				(this.deps.mechanicalVerifier as any).provenance === "test-fixture"
+			) {
+				issues.push("mechanicalVerifier has non-live provenance (ERC-008)");
+			}
+
+			if (this.deps.charter && (this.deps.charter as any).isDummy === true) {
+				issues.push("ExecutionCharter is a dummy charter (ERC-007)");
+			}
+		}
 
 		const steeringModel = this.deps.steeringPlane?.policy?.model?.id;
 		const steeringMode = this.deps.steeringPlane?.policy?.mode;

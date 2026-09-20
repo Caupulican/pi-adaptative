@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:pi:operator-projection:1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "objective_id",
+    "title",
+    "phase",
+    "phase_index",
+    "phase_count",
+    "current_action",
+    "why",
+    "health",
+    "active_actors",
+    "proof"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "objective_id": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "phase": {
+      "enum": [
+        "understand",
+        "plan",
+        "build",
+        "adapt",
+        "verify",
+        "deliver",
+        "blocked",
+        "done"
+      ]
+    },
+    "phase_index": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "phase_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "current_action": {
+      "type": "string"
+    },
+    "why": {
+      "type": "string"
+    },
+    "next_action": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "health": {
+      "enum": [
+        "normal",
+        "attention",
+        "blocked",
+        "complete"
+      ]
+    },
+    "active_actors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "adaptation": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true
+    },
+    "proof": {
+      "type": "object",
+      "required": [
+        "satisfied",
+        "total",
+        "failing",
+        "pending"
+      ],
+      "properties": {
+        "satisfied": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failing": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "context": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true
+    }
+  }
+}

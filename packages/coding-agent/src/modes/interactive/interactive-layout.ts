@@ -11,6 +11,7 @@ import type { SettingsManager } from "../../core/settings-manager.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { type ActivityLaneComponent, isBackgroundToolActivityItem } from "./components/activity-lane.ts";
 import type { FooterComponent } from "./components/footer.ts";
+import { OperatorStatusComponent } from "./components/operator-status.ts";
 import { isConversationMessage } from "./components/question-conversation.ts";
 import { WorkbenchComponent } from "./components/workbench.ts";
 import type { ExtensionUiHost } from "./extension-ui-host.ts";
@@ -47,11 +48,33 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 	host.extensionUiHost.renderWidgets();
 	// One status row when the width allows; the status band should use the width, not stack.
 	host.footer.setCompact(true);
+	host.footer.setOperatorFooter(true);
+	const operatorStatus = new OperatorStatusComponent({
+		getProjection: () => {
+			return {
+				schema_version: "1.0",
+				objective_id: host.session.sessionManager.getLeafId() ?? "default",
+				title: host.session.sessionManager.getSessionName() || path.basename(host.session.sessionManager.getCwd()),
+				phase: "understand",
+				phase_index: 1,
+				phase_count: 5,
+				current_action: "Ready for operator instructions",
+				why: "Standing by for user directives",
+				next_action: null,
+				health: "normal",
+				active_actors: [{ id: "root", kind: "root", label: "Root orchestrator" }],
+				adaptation: null,
+				proof: { satisfied: 0, total: 1, failing: 0, pending: 1 },
+				context: null,
+			};
+		},
+	});
 	const view = new WorkbenchComponent({
 		conversation: host.chatContainer,
 		editor: host.editorContainer,
 		header: host.headerContainer,
 		activity: host.activityLane,
+		operatorStatus,
 		brand: APP_NAME,
 		title: () => host.session.sessionManager.getSessionName() || path.basename(host.session.sessionManager.getCwd()),
 		dock: [host.pendingMessagesContainer, host.statusContainer, host.widgetContainerAbove, host.footer],
@@ -122,7 +145,7 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 	});
 	const stored = host.settingsManager.getWorkbenchSettings();
 	view.setMouseMode(stored.mouse === "on");
-	view.applyGeometry(stored);
+	view.applyGeometry({ ...stored, collapsed: stored.collapsed ?? true });
 	host.workbenchInputCleanup = host.ui.addInputListener((data) => host.workbench?.handleInput(data));
 	host.ui.addChild(view);
 }

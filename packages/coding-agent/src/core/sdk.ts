@@ -1,5 +1,4 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { Agent } from "@caupulican/pi-agent-core/agent";
 import { convertToLlm } from "@caupulican/pi-agent-core/messages";
@@ -17,7 +16,13 @@ import { getOAuthProvider } from "@caupulican/pi-ai/oauth";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { createProductionAdaptiveRuntimeStack } from "./adaptive/adaptive-runtime-factory.ts";
-import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
+import { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
+import {
+	RealCapabilityBuilder,
+	RealMechanicalVerifier,
+	RealScriptRegistry,
+	RealWorkerDispatcher,
+} from "./adaptive/index.ts";
 import { configFile } from "./agent-paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
@@ -47,12 +52,11 @@ import { SessionTaskProfileStore } from "./orchestration/session-task-profile-st
 import { TaskProfileWriter } from "./orchestration/task-profile-writer.ts";
 import { DurableTaskRuntime } from "./orchestration/task-runtime.ts";
 import { createWorkerExecutionContract } from "./orchestration/worker-execution-contract.ts";
-import { createWorkerResultContract } from "./orchestration/worker-result-adapter.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { parseResourceProfileInput } from "./resource-profile-blocks.ts";
 import { TypeSafeReviewer } from "./review/typesafe-reviewer.ts";
-import { RuntimeUpdateController } from "./runtime-update-controller.ts";
+import type { RuntimeUpdateController } from "./runtime-update-controller.ts";
 import { isWorkerSession } from "./session-role.ts";
 import type {
 	ProfileDefinitionInput,
@@ -738,310 +742,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	let steeringPlane = options.steeringPlane;
-	let adaptiveReadiness = options.adaptiveReadiness;
-	let objectiveExecutionController = options.objectiveExecutionController;
+	const adaptiveReadiness = options.adaptiveReadiness;
+	const objectiveExecutionController = options.objectiveExecutionController;
 
-	if (steeringPlane || systemOneController) {
-		const persistentPath = join(agentDir, "certificates.json");
-		const certificates = steeringPlane?.certificates ?? new SteeringCertificateStore(persistentPath);
-		if (!steeringPlane && systemOneController) {
-			steeringPlane = new SystemOneSteeringPlane({
-				adapter: systemOneController.adapter,
-				certificates,
-				policy: DEFAULT_STEERING_POLICY,
-			});
-		}
-		if (!adaptiveReadiness) {
-			const fitnessStore = FitnessStore.forAgentDir(agentDir);
-			const adaptationStore = ModelAdaptationStore.forAgentDir(agentDir);
-			const orchestrationStore = new OrchestrationEventStore({
-				agentDir,
-				sessionId: sessionManager.getSessionId(),
-			});
-			const durableTaskRuntime = new DurableTaskRuntime({
-				store: orchestrationStore,
-			});
-			const taskProfileStore = new SessionTaskProfileStore(sessionManager);
-			const foregroundBaseProfile =
-				orchestrationProfile ??
-				(model
-					? ({
-							schemaVersion: 1,
-							profileId: "default-foreground",
-							description: "Default foreground session profile",
-							role: "implementer",
-							modelPolicy: {
-								mode: "fixed",
-								candidates: [
-									{
-										provider: model.provider,
-										modelId: model.id,
-										thinkingLevel: (thinkingLevel as any) ?? "medium",
-									},
-								],
-							},
-							capabilityCeiling: [
-								"filesystem.read",
-								"filesystem.write",
-								"process.exec",
-								"tests.execute",
-								"repo.read",
-								"worktree.read",
-								"worktree.mutate",
-							],
-							toolNames: allowedToolNames ?? initialActiveToolNames,
-							resourceProfileNames: [],
-							dispatchProfileIds: [],
-							budget: {
-								maxTokens: 100_000,
-								maxCostUsd: 10,
-								maxWallClockMs: 60_000,
-								maxAttempts: 10,
-							},
-							maxConcurrent: 1,
-							leaseTtlMs: 120_000,
-							requireIndependentVerification: false,
-							createdAt: new Date().toISOString(),
-							updatedAt: new Date().toISOString(),
-						} as OrchestrationProfile)
-					: undefined);
-			const taskProfileWriter = new TaskProfileWriter({
-				agentDir,
-				cwd,
-				store: taskProfileStore,
-				getSettingsManager: () => settingsManager,
-				getModelRegistry: () => modelRegistry,
-				isModelExhausted: () => false,
-				getActiveOrchestrationProfile: () => orchestrationProfile ?? foregroundBaseProfile,
-				getInheritedBaseProfile: () => orchestrationProfile ?? foregroundBaseProfile,
-			});
-			const contractFactory = {
-				createContract: (input: {
-					profileId: string;
-					specialistId: string;
-					expertBinding: {
-						providerId: string;
-						modelId: string;
-						routingBand: string;
-						capabilityTier: string;
-					};
-					authorityRole: string;
-					toolNames: readonly string[];
-				}) => {
-					const stored = taskProfileStore.load().registry.get(input.profileId);
-					const profile: OrchestrationProfile = stored?.profile ?? {
-						schemaVersion: 1,
-						profileId: input.profileId,
-						role: (input.authorityRole as any) || "implementer",
-						description: `Specialist worker profile for ${input.specialistId}`,
-						modelPolicy: {
-							mode: "fixed",
-							candidates: [
-								{
-									provider: input.expertBinding.providerId,
-									modelId: input.expertBinding.modelId,
-									thinkingLevel: "high" as const,
-								},
-							],
-						},
-						capabilityCeiling: [
-							"filesystem.read",
-							"filesystem.write",
-							"process.exec",
-							"tests.execute",
-							"repo.read",
-							"worktree.read",
-							"worktree.mutate",
-						],
-						toolNames: [...input.toolNames],
-						resourceProfileNames: [],
-						dispatchProfileIds: [],
-						budget: { maxTokens: 100_000, maxCostUsd: 10, maxWallClockMs: 60_000, maxAttempts: 10 },
-						maxConcurrent: 1,
-						leaseTtlMs: 120_000,
-						requireIndependentVerification: false,
-						createdAt: new Date().toISOString(),
-						updatedAt: new Date().toISOString(),
-					};
-					const contract = createWorkerExecutionContract({
-						worker: {
-							profile,
-							modelBinding: {
-								provider: input.expertBinding.providerId,
-								modelId: input.expertBinding.modelId,
-								thinkingLevel:
-									profile.modelPolicy.candidates.find(
-										(candidate) =>
-											candidate.provider === input.expertBinding.providerId &&
-											candidate.modelId === input.expertBinding.modelId,
-									)?.thinkingLevel ??
-									profile.modelPolicy.candidates[0]?.thinkingLevel ??
-									"high",
-							},
-							authority: {
-								cwd,
-								capabilities: [...profile.capabilityCeiling],
-								toolNames: [...profile.toolNames],
-								readPaths: profile.capabilityCeiling.some(
-									(cap) => cap === "filesystem.read" || cap === "worktree.read",
-								)
-									? [cwd]
-									: [],
-								writePaths: profile.capabilityCeiling.some(
-									(cap) => cap === "filesystem.write" || cap === "worktree.mutate",
-								)
-									? [cwd]
-									: [],
-								deniedPaths: [],
-								budget: { ...profile.budget },
-							},
-							resourcePointers: [],
-						},
-					});
-					return {
-						...contract,
-						authority: {
-							...contract.worker.authority,
-							role: input.authorityRole,
-						},
-						modelBinding: contract.worker.modelBinding,
-					};
-				},
-			};
-			const runtimeUpdateController =
-				options.runtimeUpdateController ??
-				new RuntimeUpdateController({
-					sessionManager,
-					getMessages: () => agent.state.messages,
-					isRoot: () => !isChildSession,
-					reload: async () => {},
-					appendNotice: async () => {},
-				});
-			const capabilityBuilder = {
-				build: async (spec: any, _signal?: AbortSignal, expertBinding?: any) => {
-					const objSnapshot = durableTaskRuntime.getSnapshot();
-					const objId = `obj-cap-${spec.capability_id}`;
-					const objective =
-						objSnapshot.objectives[objId] ??
-						durableTaskRuntime.createObjective({
-							objectiveId: objId,
-							title: `Synthesize capability ${spec.capability_id}`,
-							description: spec.purpose,
-						});
-					const task = durableTaskRuntime.createTask({
-						objectiveId: objective.objective.objectiveId,
-						title: `Build ${spec.kind}`,
-						description: spec.purpose,
-						role: "implementer",
-					});
-					const grantId = `grant-cap-${spec.capability_id}`;
-					const attempt = durableTaskRuntime.queueAttempt(
-						task.taskId,
-						{
-							taskId: task.taskId,
-							profileId: "worker-capability-builder",
-							instructions: `Implement ${spec.kind} for ${spec.purpose}`,
-							resourcePointerIds: [],
-						},
-						grantId,
-					);
-					(attempt as any).profileId = "worker-capability-builder";
-					const grant = {
-						schemaVersion: 1 as const,
-						grantId,
-						objectiveId: objective.objective.objectiveId,
-						taskId: task.taskId,
-						attemptId: attempt.attemptId,
-						subjectId: `test:${attempt.attemptId}`,
-						role: "implementer" as const,
-						capabilities: [],
-						allowedTools: [],
-						resources: [],
-						readPaths: [],
-						writePaths: [],
-						deniedPaths: [],
-						budget: {},
-						policyVersion: "live-v1",
-						decisionTrace: [],
-						issuedAt: new Date().toISOString(),
-					};
-					durableTaskRuntime.bindAttemptGrant(attempt.attemptId, grant);
-					const lease = durableTaskRuntime.leaseAttempt(
-						attempt.attemptId,
-						`owner-cap-${spec.capability_id}`,
-						60000,
-					);
-					durableTaskRuntime.startAttempt(attempt.attemptId, lease.leaseId, lease.fencingToken);
-					const code = `// Real synthesized ${spec.kind} implementation for ${spec.capability_id}\nexport default async function run() { return true; }\n`;
-					const digest = createHash("sha256").update(code).digest("hex");
-					const workerResult = createWorkerResultContract({
-						handle: {
-							objectiveId: objective.objective.objectiveId,
-							taskId: task.taskId,
-							attemptId: attempt.attemptId,
-							leaseId: lease.leaseId,
-							fencingToken: lease.fencingToken,
-							expiresAt: lease.expiresAt,
-						},
-						cwd,
-						accepted: true,
-						wallClockMs: 100,
-						toolCalls: 1,
-						claim: {
-							requestId: `req-cap-${spec.capability_id}`,
-							status: "completed",
-							summary: `Successfully built ${spec.kind} for ${spec.capability_id}`,
-							changedFiles: [],
-						},
-					});
-					durableTaskRuntime.finishAttempt(workerResult);
-					return {
-						capabilityId: spec.capability_id,
-						kind: spec.kind,
-						code,
-						digest,
-						artifactUri: `file://${join(cwd, `capabilities/${spec.capability_id}.mjs`)}`,
-						changedFiles: [`capabilities/${spec.capability_id}.mjs`],
-						builderEvidence: {
-							resultId: workerResult.resultId,
-							status: workerResult.status,
-							summary: workerResult.summary,
-							usage: workerResult.usage,
-							expertBinding,
-						},
-					};
-				},
-			};
-			const charter =
-				options.charter ??
-				compileExecutionCharter({
-					objectiveId: `obj-${sessionManager.getSessionId()}`,
-					prompt: options.prompt ?? "Perform safe scoped execution with full adaptive runtime",
-				});
-
-			const stack = createProductionAdaptiveRuntimeStack({
-				agentDir,
-				persistentPath,
-				steeringPlane: steeringPlane ?? undefined,
-				modelRegistry,
-				fitnessStore,
-				adaptationStore,
-				taskRuntime: durableTaskRuntime,
-				taskProfiles: taskProfileWriter,
-				contractFactory,
-				capabilityBuilder,
-				runtimeUpdateController,
-				charter,
-				cwd,
-			});
-			adaptiveReadiness = stack.readiness;
-			steeringPlane = stack.steeringPlane;
-			if (!objectiveExecutionController) {
-				objectiveExecutionController = stack.objectiveController;
-			}
-		}
-	}
-
+	// Phase A — Core session construction (AgentSession, runtimeUpdates, skillVault, extensionRunner, backgroundLanes)
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -1070,8 +774,233 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		executionLoopMode: options.executionLoopMode,
 		objectiveExecutionController,
 		steeringPlane,
-		adaptiveReadiness,
+		adaptiveReadiness:
+			adaptiveReadiness ??
+			(steeringPlane || systemOneController ? new AdaptiveRuntimeReadiness({ isUnbound: true }) : undefined),
 	});
+
+	// Phase B — Adaptive runtime late binding to live session-owned ports
+	if ((steeringPlane || systemOneController) && !options.adaptiveReadiness) {
+		const persistentPath = join(agentDir, "certificates.json");
+		const certificates = steeringPlane?.certificates ?? new SteeringCertificateStore(persistentPath);
+		if (!steeringPlane && systemOneController) {
+			steeringPlane = new SystemOneSteeringPlane({
+				adapter: systemOneController.adapter,
+				certificates,
+				policy: DEFAULT_STEERING_POLICY,
+			});
+		}
+
+		const fitnessStore = FitnessStore.forAgentDir(agentDir);
+		const adaptationStore = ModelAdaptationStore.forAgentDir(agentDir);
+		const orchestrationStore = new OrchestrationEventStore({
+			agentDir,
+			sessionId: sessionManager.getSessionId(),
+		});
+		const durableTaskRuntime = new DurableTaskRuntime({
+			store: orchestrationStore,
+		});
+		const taskProfileStore = new SessionTaskProfileStore(sessionManager);
+		const foregroundBaseProfile =
+			orchestrationProfile ??
+			(model
+				? ({
+						schemaVersion: 1,
+						profileId: "default-foreground",
+						description: "Default foreground session profile",
+						role: "implementer",
+						modelPolicy: {
+							mode: "fixed",
+							candidates: [
+								{
+									provider: model.provider,
+									modelId: model.id,
+									thinkingLevel: (thinkingLevel as any) ?? "medium",
+								},
+							],
+						},
+						capabilityCeiling: [
+							"filesystem.read",
+							"filesystem.write",
+							"process.exec",
+							"tests.execute",
+							"repo.read",
+							"worktree.read",
+							"worktree.mutate",
+						],
+						toolNames: allowedToolNames ?? initialActiveToolNames,
+						resourceProfileNames: [],
+						dispatchProfileIds: [],
+						budget: {
+							maxTokens: 100_000,
+							maxCostUsd: 10,
+							maxWallClockMs: 60_000,
+							maxAttempts: 10,
+						},
+						maxConcurrent: 1,
+						leaseTtlMs: 120_000,
+						requireIndependentVerification: false,
+						createdAt: new Date().toISOString(),
+						updatedAt: new Date().toISOString(),
+					} as OrchestrationProfile)
+				: undefined);
+		const taskProfileWriter = new TaskProfileWriter({
+			agentDir,
+			cwd,
+			store: taskProfileStore,
+			getSettingsManager: () => settingsManager,
+			getModelRegistry: () => modelRegistry,
+			isModelExhausted: () => false,
+			getActiveOrchestrationProfile: () => orchestrationProfile ?? foregroundBaseProfile,
+			getInheritedBaseProfile: () => orchestrationProfile ?? foregroundBaseProfile,
+		});
+		const contractFactory = {
+			createContract: (input: {
+				profileId: string;
+				specialistId: string;
+				expertBinding: {
+					providerId: string;
+					modelId: string;
+					routingBand: string;
+					capabilityTier: string;
+				};
+				authorityRole: string;
+				toolNames: readonly string[];
+			}) => {
+				const stored = taskProfileStore.load().registry.get(input.profileId);
+				const profile: OrchestrationProfile = stored?.profile ?? {
+					schemaVersion: 1,
+					profileId: input.profileId,
+					role: (input.authorityRole as any) || "implementer",
+					description: `Specialist worker profile for ${input.specialistId}`,
+					modelPolicy: {
+						mode: "fixed",
+						candidates: [
+							{
+								provider: input.expertBinding.providerId,
+								modelId: input.expertBinding.modelId,
+								thinkingLevel: "high" as const,
+							},
+						],
+					},
+					capabilityCeiling: [
+						"filesystem.read",
+						"filesystem.write",
+						"process.exec",
+						"tests.execute",
+						"repo.read",
+						"worktree.read",
+						"worktree.mutate",
+					],
+					toolNames: [...input.toolNames],
+					resourceProfileNames: [],
+					dispatchProfileIds: [],
+					budget: { maxTokens: 100_000, maxCostUsd: 10, maxWallClockMs: 60_000, maxAttempts: 10 },
+					maxConcurrent: 1,
+					leaseTtlMs: 120_000,
+					requireIndependentVerification: false,
+					createdAt: new Date().toISOString(),
+					updatedAt: new Date().toISOString(),
+				};
+				const contract = createWorkerExecutionContract({
+					worker: {
+						profile,
+						modelBinding: {
+							provider: input.expertBinding.providerId,
+							modelId: input.expertBinding.modelId,
+							thinkingLevel:
+								profile.modelPolicy.candidates.find(
+									(candidate) =>
+										candidate.provider === input.expertBinding.providerId &&
+										candidate.modelId === input.expertBinding.modelId,
+								)?.thinkingLevel ??
+								profile.modelPolicy.candidates[0]?.thinkingLevel ??
+								"high",
+						},
+						authority: {
+							cwd,
+							capabilities: [...profile.capabilityCeiling],
+							toolNames: [...profile.toolNames],
+							readPaths: profile.capabilityCeiling.some(
+								(cap) => cap === "filesystem.read" || cap === "worktree.read",
+							)
+								? [cwd]
+								: [],
+							writePaths: profile.capabilityCeiling.some(
+								(cap) => cap === "filesystem.write" || cap === "worktree.mutate",
+							)
+								? [cwd]
+								: [],
+							deniedPaths: [],
+							budget: { ...profile.budget },
+						},
+						resourcePointers: [],
+					},
+				});
+				return {
+					...contract,
+					authority: {
+						...contract.worker.authority,
+						role: input.authorityRole,
+					},
+					modelBinding: contract.worker.modelBinding,
+				};
+			},
+		};
+
+		const workerDispatcher = new RealWorkerDispatcher({
+			session,
+			provenance: "production-live",
+		});
+
+		const capabilityBuilder = new RealCapabilityBuilder({
+			taskRuntime: durableTaskRuntime,
+			taskProfiles: taskProfileWriter,
+			contractFactory,
+			runWorkerOnce: (req) => session.runWorkerDelegationOnce(req as any),
+			cwd,
+			provenance: "production-live",
+		});
+
+		const scriptRegistry = new RealScriptRegistry();
+		const mechanicalVerifier = new RealMechanicalVerifier({
+			scriptRegistry,
+			extensionRunner: session.extensionRunner,
+			skillVault: session.getSkillVault(),
+			cwd,
+			provenance: "production-live",
+		});
+
+		const charter =
+			options.charter ??
+			compileExecutionCharter({
+				objectiveId: `obj-${sessionManager.getSessionId()}`,
+				prompt: options.prompt ?? "Perform safe scoped execution with full adaptive runtime",
+			});
+
+		const stack = createProductionAdaptiveRuntimeStack({
+			agentDir,
+			persistentPath,
+			steeringPlane: steeringPlane ?? undefined,
+			modelRegistry,
+			fitnessStore,
+			adaptationStore,
+			taskRuntime: durableTaskRuntime,
+			taskProfiles: taskProfileWriter,
+			contractFactory,
+			capabilityBuilder,
+			runtimeUpdateController: session.runtimeUpdates,
+			workerDispatcher,
+			mechanicalVerifier,
+			scriptRegistry,
+			skillVault: session.getSkillVault(),
+			extensionRunner: session.extensionRunner,
+			charter,
+			cwd,
+		});
+
+		session.attachAdaptiveRuntime(stack);
+	}
 	try {
 		// The initial runtime has now bound providers from profile-granted extensions. Re-resolve the
 		// profile model against that authoritative registry generation, then resync model capability.
