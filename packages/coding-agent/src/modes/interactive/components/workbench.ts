@@ -69,6 +69,16 @@ export const DEFAULT_UPPER_ROWS: WorkAreaRows = "half";
 /** The conversation never drops below this many rows, whatever the operator gives the work area. */
 export const MIN_CONVERSATION_ROWS = 6;
 export const MAX_UPPER_ROWS = 60;
+/** The diagram's node block plus the pane's gutters; below this the drawing would clip, so the graph folds. */
+export const MIN_GRAPH_WIDTH = 48;
+/** The chat never drops below this; the graph folds before the conversation becomes a column of stubs. */
+export const MIN_CHAT_WIDTH = 40;
+export const DEFAULT_GRAPH_FRACTION = 0.32;
+export const MIN_GRAPH_FRACTION = 0.25;
+export const MAX_GRAPH_FRACTION = 0.5;
+
+/** How the Decision graph draws the loop. */
+export type WorkbenchGraphView = "list" | "diagram";
 
 /** Explicit rows the operator chose, or "half": an even split that follows the terminal's height. */
 export type WorkAreaRows = number | "half";
@@ -80,6 +90,9 @@ export type WorkbenchHit =
 	| "divider"
 	| "split"
 	| "columnSplit"
+	| "graph"
+	| "graphTitle"
+	| "graphSplit"
 	| "inspectorTitle"
 	| "executionTitle"
 	| "upper"
@@ -95,6 +108,9 @@ export interface WorkbenchGeometry {
 	inspectorFraction?: number;
 	layout?: WorkbenchLayout;
 	conversationFraction?: number;
+	graph?: "shown" | "hidden";
+	graphFraction?: number;
+	graphView?: WorkbenchGraphView;
 }
 
 export function clampUpperRows(rows: number): number {
@@ -154,6 +170,9 @@ export class WorkbenchComponent extends Container {
 	private readonly executionPane = new WorkbenchPane();
 	private inspectorFraction = DEFAULT_INSPECTOR_FRACTION;
 	private conversationFraction = DEFAULT_CONVERSATION_FRACTION;
+	private graphHidden = false;
+	private graphFraction = DEFAULT_GRAPH_FRACTION;
+	private graphView: WorkbenchGraphView = "diagram";
 	private columns = false;
 	private lastColumns = 0;
 	private workLeft = 0;
@@ -332,6 +351,9 @@ export class WorkbenchComponent extends Container {
 			inspectorFraction: this.inspectorFraction,
 			layout: this.columns ? "columns" : "stacked",
 			conversationFraction: this.conversationFraction,
+			graph: this.graphHidden ? "hidden" : "shown",
+			graphFraction: this.graphFraction,
+			graphView: this.graphView,
 		};
 	}
 	applyGeometry(geometry: WorkbenchGeometry): void {
@@ -342,6 +364,25 @@ export class WorkbenchComponent extends Container {
 		if (geometry.inspectorFraction !== undefined) this.resizeInspector(geometry.inspectorFraction);
 		if (geometry.layout !== undefined) this.columns = geometry.layout === "columns";
 		if (geometry.conversationFraction !== undefined) this.resizeConversation(geometry.conversationFraction);
+		if (geometry.graph !== undefined) this.graphHidden = geometry.graph === "hidden";
+		if (geometry.graphFraction !== undefined) this.resizeGraph(geometry.graphFraction);
+		if (geometry.graphView !== undefined) this.graphView = geometry.graphView;
+	}
+	/** Hide or show the Decision graph beside the conversation. */
+	toggleGraph(): void {
+		this.graphHidden = !this.graphHidden;
+	}
+	setGraphView(view: WorkbenchGraphView): void {
+		this.graphView = view;
+	}
+	cycleGraphView(): void {
+		this.graphView = this.graphView === "list" ? "diagram" : "list";
+	}
+	getGraphView(): WorkbenchGraphView {
+		return this.graphView;
+	}
+	resizeGraph(fraction: number): void {
+		this.graphFraction = Math.max(MIN_GRAPH_FRACTION, Math.min(MAX_GRAPH_FRACTION, fraction));
 	}
 	resizeUpper(rows: number): void {
 		this.upperLimit = clampUpperRows(rows);

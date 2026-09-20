@@ -699,6 +699,12 @@ export interface WorkbenchSettings {
 	conversationFraction?: number;
 	/** Previews Execution retains per cycle (4..200); the transcript keeps the complete record. */
 	previews?: number;
+	/** The Decision graph pane beside the conversation: shown, or hidden by the operator. */
+	graph?: "shown" | "hidden";
+	/** The graph's share of the conversation zone (0.25..0.5). */
+	graphFraction?: number;
+	/** How the graph draws the loop: the stage list with timers, or the diagram composed per task. */
+	graphView?: "list" | "diagram";
 }
 
 export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> = Object.freeze({
@@ -711,6 +717,9 @@ export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> =
 	layout: "stacked",
 	conversationFraction: 0.5,
 	previews: 24,
+	graph: "shown",
+	graphFraction: 0.32,
+	graphView: "diagram",
 });
 
 export interface ReasoningSettings {
@@ -4096,6 +4105,14 @@ export class SettingsManager {
 				0.7,
 			),
 			previews: sanitizeIntegerSetting(stored.previews, DEFAULT_WORKBENCH_SETTINGS.previews, 4, 200),
+			graph: stored.graph === "hidden" ? "hidden" : DEFAULT_WORKBENCH_SETTINGS.graph,
+			graphFraction: sanitizeNumberSetting(
+				stored.graphFraction,
+				DEFAULT_WORKBENCH_SETTINGS.graphFraction,
+				0.25,
+				0.5,
+			),
+			graphView: stored.graphView === "list" ? "list" : DEFAULT_WORKBENCH_SETTINGS.graphView,
 		};
 	}
 

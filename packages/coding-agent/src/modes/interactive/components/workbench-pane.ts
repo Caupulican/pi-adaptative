@@ -42,15 +42,27 @@ export function labelRow(title: string, meta: string, width: number): string {
 	return metaRow(theme.bold(theme.fg("text", title)), theme.fg("muted", meta), width, visibleWidth(title));
 }
 
-export type WorkbenchPaneTitleAction = "showInspector" | "hideInspector" | "maximize" | "layout";
+export type WorkbenchPaneTitleAction =
+	| "showInspector"
+	| "hideInspector"
+	| "maximize"
+	| "layout"
+	| "graphList"
+	| "graphDiagram"
+	| "hideGraph";
 
 export interface WorkbenchPaneTitleButton {
 	action: WorkbenchPaneTitleAction;
 	label: string;
+	/** A two-state choice (List | Diagram) marks the active one; plain chips leave it unset. */
+	selected?: boolean;
 }
 
-export function titleChip(label: string): string {
-	return theme.fg("accent", ` ${label} `);
+/** `true` follows the newest rows; `{ row }` keeps that row in view. The operator's scroll wins over both. */
+export type WorkbenchPaneFollow = boolean | { readonly row: number };
+
+export function titleChip(label: string, selected = false): string {
+	return selected ? theme.bold(theme.fg("accent", ` ${label} `)) : theme.fg("accent", ` ${label} `);
 }
 
 /** Small current-evidence viewport on a surface tone. It owns scroll position, not task/history state. */
@@ -89,9 +101,16 @@ export class WorkbenchPane {
 		return this.titleActions.length > 0;
 	}
 
+	/** Content-row index under a pointer, or undefined outside the content rectangle. */
+	rowAt(column: number, row: number): number | undefined {
+		if (column < this.x || column >= this.x + this.width || row < this.y || row >= this.y + this.height) {
+			return undefined;
+		}
+		return this.offset + (row - this.y);
+	}
+
 	scrollAt(column: number, row: number, delta: number): boolean {
-		if (column < this.x || column >= this.x + this.width || row < this.y || row >= this.y + this.height) return false;
-		return this.scrollBy(delta);
+		return this.rowAt(column, row) === undefined ? false : this.scrollBy(delta);
 	}
 
 	/** Scroll without a pointer: the keyboard path for a terminal that keeps its mouse. */
@@ -122,7 +141,7 @@ export class WorkbenchPane {
 		y: number,
 		width: number,
 		height: number,
-		follow = false,
+		follow: WorkbenchPaneFollow = false,
 		actions: readonly WorkbenchPaneTitleButton[] = [],
 	): string[] {
 		if (height <= 0 || width <= 0) {
@@ -136,7 +155,12 @@ export class WorkbenchPane {
 		this.count = lines.length;
 		this.titleActions = [];
 		const end = Math.max(0, lines.length - this.height);
-		this.offset = follow && !this.pinned ? end : Math.min(this.offset, end);
+		let target = Math.min(this.offset, end);
+		if (!this.pinned) {
+			if (follow === true) target = end;
+			else if (typeof follow === "object") target = follow.row - Math.floor(this.height * 0.55);
+		}
+		this.offset = Math.max(0, Math.min(end, target));
 		const range =
 			lines.length > this.height && this.height > 0
 				? `${this.offset + 1}-${Math.min(lines.length, this.offset + this.height)}/${lines.length} ↕`
@@ -152,7 +176,7 @@ export class WorkbenchPane {
 			let column = x + 1 + titleWidth;
 			actions.forEach((action, index) => {
 				this.titleActions.push({ action: action.action, start: column, end: column + actionWidths[index]! });
-				parts.push(titleChip(action.label));
+				parts.push(titleChip(action.label, action.selected ?? false));
 				column += actionWidths[index]! + 2;
 			});
 			heading = ` ${labelRow(title, combinedMeta, titleWidth)}${parts.join("  ")} `;

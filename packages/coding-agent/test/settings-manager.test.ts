@@ -2247,6 +2247,9 @@ describe("workbench settings", () => {
 			layout: "stacked",
 			conversationFraction: 0.5,
 			previews: 24,
+			graph: "shown",
+			graphFraction: 0.32,
+			graphView: "diagram",
 		});
 		manager.setWorkbenchSettings({ rows: 200, inspector: "hidden", executionMaximized: true, collapsed: true });
 		expect(manager.getWorkbenchSettings()).toMatchObject({

@@ -406,6 +406,9 @@ describe("Workbench layout", () => {
 			inspectorFraction: 0.3,
 			layout: "stacked",
 			conversationFraction: 0.5,
+			graph: "shown",
+			graphFraction: 0.32,
+			graphView: "diagram",
 		});
 		view.applyGeometry({ rows: 4, collapsed: false, inspector: "hidden", executionMaximized: false });
 		const applied = view.render(110).map(stripAnsi);
@@ -419,6 +422,9 @@ describe("Workbench layout", () => {
 			inspectorFraction: 0.3,
 			layout: "stacked",
 			conversationFraction: 0.5,
+			graph: "shown",
+			graphFraction: 0.32,
+			graphView: "diagram",
 		});
 		// Maximizing a collapsed work area opens it; rows outside the clamp are clamped.
 		view.applyGeometry({ rows: 500, collapsed: true, inspector: "shown", executionMaximized: false });
@@ -431,6 +437,9 @@ describe("Workbench layout", () => {
 			inspectorFraction: 0.3,
 			layout: "stacked",
 			conversationFraction: 0.5,
+			graph: "shown",
+			graphFraction: 0.32,
+			graphView: "diagram",
 		});
 		// Resizing from the even split starts from the rows it currently has, then becomes explicit.
 		view.applyGeometry({ rows: "half", collapsed: false, inspector: "shown", executionMaximized: false });

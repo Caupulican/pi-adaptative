@@ -122,6 +122,9 @@ describe("Workbench input boundary", () => {
 				inspectorFraction: 0.3,
 				layout: "stacked",
 				conversationFraction: 0.5,
+				graph: "shown",
+				graphFraction: 0.32,
+				graphView: "diagram",
 			},
 			{
 				rows: "half",
@@ -131,6 +134,9 @@ describe("Workbench input boundary", () => {
 				inspectorFraction: 0.3,
 				layout: "stacked",
 				conversationFraction: 0.5,
+				graph: "shown",
+				graphFraction: 0.32,
+				graphView: "diagram",
 			},
 			{
 				rows: 17,
@@ -140,6 +146,9 @@ describe("Workbench input boundary", () => {
 				inspectorFraction: 0.3,
 				layout: "stacked",
 				conversationFraction: 0.5,
+				graph: "shown",
+				graphFraction: 0.32,
+				graphView: "diagram",
 			},
 			{
 				rows: 17,
@@ -149,6 +158,9 @@ describe("Workbench input boundary", () => {
 				inspectorFraction: 0.3,
 				layout: "stacked",
 				conversationFraction: 0.5,
+				graph: "shown",
+				graphFraction: 0.32,
+				graphView: "diagram",
 			},
 		]);
 	});
