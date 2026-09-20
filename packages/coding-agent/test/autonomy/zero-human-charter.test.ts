@@ -99,6 +99,33 @@ describe("Zero-Human Execution Charter & Start-Only Autonomy (ZH-001..ZH-012)", 
 			expect(evalPush.outcome).toBe("deny");
 		});
 
+		it("a push grant never authorizes a force push", () => {
+			const charter = compileExecutionCharter({
+				objectiveId: "obj-force-push",
+				initialGrants: { git: { push: true, force_push: false } },
+			});
+			expect(evaluateCharterAuthority(charter, { kind: "git_push", pushRequested: true }).outcome).toBe("allow");
+			for (const action of [
+				{ kind: "git_force_push" },
+				{ kind: "force_push" },
+				{ kind: "git_push", pushRequested: true, forcePushRequested: true },
+			]) {
+				const decision = evaluateCharterAuthority(charter, action);
+				expect(decision.outcome).toBe("deny");
+				if (decision.outcome === "deny") expect(decision.missingAuthority).toBe("git:force_push");
+			}
+		});
+
+		it("an explicit force_push grant permits it", () => {
+			const charter = compileExecutionCharter({
+				objectiveId: "obj-force-push-granted",
+				initialGrants: { git: { push: true, force_push: true } },
+			});
+			const decision = evaluateCharterAuthority(charter, { kind: "git_force_push", forcePushRequested: true });
+			expect(decision.outcome).toBe("allow");
+			if (decision.outcome === "allow") expect(decision.grantRef).toBe("charter:git.force_push");
+		});
+
 		it("ZH-011: worker messages cannot expand charter authority", () => {
 			const charter = compileExecutionCharter({
 				objectiveId: "obj-untrusted-worker",

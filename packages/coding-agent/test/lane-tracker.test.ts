@@ -141,6 +141,21 @@ describe("LaneTracker", () => {
 	});
 });
 
+describe("LaneTracker labels", () => {
+	it("carries a bounded label onto the lane record", () => {
+		const { tracker } = createTracker();
+		const record = tracker.start({ type: "research", label: "  Where   is retry logic?\n" });
+		expect(record.label).toBe("Where is retry logic?");
+
+		const long = tracker.start({ type: "research", label: "x".repeat(200) });
+		expect(long.label).toHaveLength(120);
+		expect(long.label?.endsWith("\u2026")).toBe(true);
+
+		expect(tracker.start({ type: "research" }).label).toBeUndefined();
+		expect(tracker.start({ type: "research", label: "   " }).label).toBeUndefined();
+	});
+});
+
 describe("LaneTracker memory bounds", () => {
 	it("evicts oldest terminal lanes beyond the in-memory cap, never active ones", () => {
 		const { tracker } = createTracker();

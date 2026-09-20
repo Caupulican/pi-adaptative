@@ -176,6 +176,20 @@ export function evaluateCharterAuthority(charter: ExecutionCharter, action: Prop
 		};
 	}
 
+	// Force-push check, deliberately ABOVE the plain push check: a force push rewrites published
+	// history, so a `git.push` grant never authorizes it and an ungranted force push is denied even
+	// when pushing is allowed.
+	if (action.forcePushRequested || action.kind === "force_push" || action.kind === "git_force_push") {
+		if (!charter.git.force_push) {
+			return {
+				outcome: "deny",
+				reason: "Git force push is not authorized in the execution charter",
+				missingAuthority: "git:force_push",
+			};
+		}
+		return { outcome: "allow", grantRef: "charter:git.force_push" };
+	}
+
 	// Push check
 	if (action.pushRequested || action.kind === "push" || action.kind === "git_push") {
 		if (!charter.git.push) {

@@ -97,9 +97,12 @@ function settings(overrides: Partial<RouterSettings> = {}): RouterSettings {
 
 interface ControllerFixture {
 	controller: ModelRouterController;
+	agent: { state: { model: TestModel; thinkingLevel: string; messages: unknown[]; systemPrompt: string } };
 	agentDir: string;
 	expertSelect: ReturnType<typeof vi.fn>;
+	expertRelease: ReturnType<typeof vi.fn>;
 	isolatedCompletion: ReturnType<typeof vi.fn>;
+	spawnedUsageReportIds: string[];
 	setSettings(next: Partial<RouterSettings>): void;
 	setPool(models: TestModel[] | undefined): void;
 }
@@ -111,6 +114,12 @@ function createController(options: {
 	exhausted?: TestModel[];
 	expertPick?: TestModel;
 	withExpertSelector?: boolean;
+	/** Makes the expert selector reject, as an exhausted capacity pool does. */
+	expertError?: string;
+	/** Judge model returned by resolveLaneModel, plus the usage its completion reports. */
+	judgeModel?: TestModel;
+	/** Makes the routed-turn system-prompt build throw, as a setup failure does. */
+	buildSystemPromptError?: string;
 }): ControllerFixture {
 	const agentDir = mkdtempSync(join(tmpdir(), "pi-router-modes-"));
 	let current = settings(options.settings);
@@ -125,13 +134,27 @@ function createController(options: {
 		isUsingSubscription: isSubscription,
 	};
 	const expertSelect = vi.fn(async (request: WorkerCapabilityRequest) => {
+		if (options.expertError) throw new Error(options.expertError);
 		const pick = options.expertPick ?? subBig;
 		return {
 			primary: { provider: pick.provider, model_id: pick.id, thinking_level: "off" },
+			bindings: [{ provider: pick.provider, model_id: pick.id }],
 			request,
 		};
 	});
-	const isolatedCompletion = vi.fn(async () => ({}) as never);
+	const expertRelease = vi.fn(() => undefined);
+	const spawnedUsageReportIds: string[] = [];
+	const judgeUsage = {
+		input: 10,
+		output: 5,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 15,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.002 },
+	};
+	const isolatedCompletion = vi.fn(
+		async () => ({ text: "tier: cheap", stopReason: "stop", usage: judgeUsage }) as never,
+	);
 	const agent = { state: { model: apiCheap, thinkingLevel: "off", messages: [], tools: [], systemPrompt: "" } };
 	const deps: ModelRouterControllerDeps = {
 		getAgent: () => agent as unknown as Agent,
@@ -153,27 +176,41 @@ function createController(options: {
 		getBaseSystemPrompt: () => "",
 		runAgentPrompt: async () => {},
 		runAgentContinuation: async () => {},
-		buildSystemPromptForToolNames: () => "",
+		buildSystemPromptForToolNames: () => {
+			if (options.buildSystemPromptError) throw new Error(options.buildSystemPromptError);
+			return "";
+		},
 		refreshCurrentModelFromRegistry: () => {},
 		runIsolatedCompletion: isolatedCompletion,
-		addSpawnedUsage: () => undefined,
+		addSpawnedUsage: (_usage, opts) => {
+			spawnedUsageReportIds.push(opts.reportId);
+			return opts.reportId;
+		},
 		emit: () => {},
 		emitAutonomyTelemetry: () => {},
-		resolveLaneModel: () => undefined,
+		resolveLaneModel: () => options.judgeModel,
 		resolveCurationModelIfFit: () => undefined,
 		getToolProbeVerdict: () => undefined,
 		getCandidatePool: () =>
 			resolveRouterCandidatePool(scoped ? { source: "enabled_models", models: scoped } : undefined, registry),
 		isUsingSubscription: isSubscription,
 		...(options.withExpertSelector
-			? { expertSelector: { select: expertSelect } as unknown as ExpertSelectionService }
+			? {
+					expertSelector: {
+						select: expertSelect,
+						release: expertRelease,
+					} as unknown as ExpertSelectionService,
+				}
 			: {}),
 	};
 	return {
 		controller: new ModelRouterController(deps),
+		agent,
 		agentDir,
 		expertSelect,
+		expertRelease,
 		isolatedCompletion,
+		spawnedUsageReportIds,
 		setSettings: (next) => {
 			current = { ...current, ...next };
 		},
@@ -444,6 +481,55 @@ describe("H-MoE bounded to the pool (F001-033, F001-056, F001-092)", () => {
 		expect(routed?.decision.selection).toBe("hmoe");
 	});
 
+	it("F1: a foreground expert selection releases its capacity lease immediately", async () => {
+		const fixture = createController({
+			settings: { selectionMode: "auto" },
+			pool: [subCheap, subBig],
+			withExpertSelector: true,
+			expertPick: subBig,
+		});
+		const routed = await fixture.controller.resolveTurnRouteJudged(RESEARCH_PROMPT);
+		expect(routed?.model).toBe(subBig);
+		// A foreground turn reads a ranking; it must not hold a worker slot afterwards.
+		expect(fixture.expertSelect).toHaveBeenCalledTimes(1);
+		expect(fixture.expertRelease).toHaveBeenCalledTimes(1);
+		expect(fixture.expertRelease.mock.calls[0]?.[0]).toBe(await fixture.expertSelect.mock.results[0]?.value);
+
+		// Repeated routed turns keep the reserve/release counts equal, so slots never accumulate.
+		await fixture.controller.resolveTurnRouteJudged(RESEARCH_PROMPT);
+		await fixture.controller.previewRouteLive(RESEARCH_PROMPT);
+		expect(fixture.expertRelease.mock.calls.length).toBe(fixture.expertSelect.mock.calls.length);
+	});
+
+	it("F1: a failing expert selection is named in status and leaves the baseline route intact", async () => {
+		const fixture = createController({
+			settings: { selectionMode: "auto" },
+			pool: [apiBig],
+			withExpertSelector: true,
+			expertError: "capacity exhausted for api-provider/api-max",
+		});
+		const routed = await fixture.controller.resolveTurnRouteJudged(RESEARCH_PROMPT);
+		expect(routed?.model).toBe(apiBig);
+		expect(routed?.decision.selection).toBe("auto");
+		expect(fixture.expertRelease).not.toHaveBeenCalled();
+		expect(fixture.controller.getStatus()).toContain(
+			"H-MoE: unavailable (capacity exhausted for api-provider/api-max)",
+		);
+	});
+
+	it("F2: two judged resolutions of the same prompt record two spawned-usage entries", async () => {
+		// A read-only question takes the static fast path and never consults the judge; an
+		// implementation prompt does.
+		const fixture = createController({
+			settings: { mediumModel: "api-provider/api-mini", judgeEnabled: true, judgeModel: "api-provider/api-max" },
+			judgeModel: apiBig,
+		});
+		await fixture.controller.resolveTurnRouteJudged(MODIFY_PROMPT);
+		await fixture.controller.resolveTurnRouteJudged(MODIFY_PROMPT);
+		expect(fixture.spawnedUsageReportIds).toHaveLength(2);
+		expect(new Set(fixture.spawnedUsageReportIds).size).toBe(2);
+	});
+
 	it("an expert pick outside the pool is rejected and the deterministic pool choice stands", async () => {
 		const fixture = createController({
 			settings: { selectionMode: "auto" },
@@ -561,6 +647,43 @@ describe("H-MoE bounded to the pool (F001-033, F001-056, F001-092)", () => {
 			"single",
 		);
 		expect(unprobedSubscription.primary.model_id).toBe("api-max");
+	});
+});
+
+describe("Routed turn state restoration (F3)", () => {
+	const decision = (): RouteDecision => ({
+		tier: "cheap",
+		risk: "read-only",
+		confidence: 1,
+		reasonCode: "read_only_question",
+		reasons: [],
+	});
+
+	it("F3: a throw while installing the swap restores the session instead of stranding it", async () => {
+		const fixture = createController({
+			settings: { selectionMode: "auto" },
+			buildSystemPromptError: "system prompt build failed",
+		});
+		await expect(
+			fixture.controller.runRoutedTurn(
+				[{ role: "user", content: [{ type: "text", text: "explain" }], timestamp: Date.now() }],
+				subBig,
+				decision(),
+			),
+		).rejects.toThrow("system prompt build failed");
+
+		// The setup failed after the model was swapped: the session must be back on its own model,
+		// the POV must not claim a routed turn, and the cheap-turn buffer must be gone so the next
+		// message is persisted by the host instead of being swallowed.
+		expect(fixture.agent.state.model).toBe(apiCheap);
+		expect(fixture.controller.getForegroundRouteSnapshot().switched).toBe(false);
+		expect(
+			fixture.controller.captureSessionMessage({
+				role: "user",
+				content: [{ type: "text", text: "next" }],
+				timestamp: Date.now(),
+			} as never),
+		).toBe(false);
 	});
 });
 

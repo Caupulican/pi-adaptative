@@ -6,6 +6,7 @@
  * snapshots. Terminal lane records are persisted separately via `session-lane-record.ts`.
  */
 
+import { deriveWorkerTaskLabel } from "../delegation/worker-task-label.ts";
 import {
 	AGENT_BINDING_STATUSES,
 	type AgentBindingStatus,
@@ -167,13 +168,17 @@ export class LaneTracker {
 		}
 	}
 
-	enqueue(args: { type: LaneType; goalId?: string; worktreeLaneKey?: string }): LaneRecord {
+	enqueue(args: { type: LaneType; label?: string; goalId?: string; worktreeLaneKey?: string }): LaneRecord {
 		const laneId = `${args.type}-${this._nextLaneNumber++}`;
 		const record: LaneRecord = {
 			laneId,
 			type: args.type,
 			status: "queued",
 		};
+		// Bounding happens here, at the one place a record is minted, so no caller can persist an
+		// unbounded label and every lane kind reads the same way in the operator's view.
+		const label = args.label === undefined ? undefined : deriveWorkerTaskLabel(args.label, "");
+		if (label) record.label = label;
 		if (args.goalId !== undefined) record.goalId = args.goalId;
 		if (args.worktreeLaneKey !== undefined) record.worktreeLaneKey = args.worktreeLaneKey;
 		this._lanes.set(laneId, record);
@@ -191,7 +196,13 @@ export class LaneTracker {
 	}
 
 	/** Start or restart a caller-named lane. The supplied id is its durable logical identity. */
-	startNamed(args: { laneId: string; type: LaneType; goalId?: string; worktreeLaneKey?: string }): LaneRecord {
+	startNamed(args: {
+		laneId: string;
+		type: LaneType;
+		label?: string;
+		goalId?: string;
+		worktreeLaneKey?: string;
+	}): LaneRecord {
 		if (!args.laneId) throw new TypeError("A named lane requires a non-empty laneId.");
 		const record: LaneRecord = {
 			laneId: args.laneId,
@@ -199,6 +210,8 @@ export class LaneTracker {
 			status: "running",
 			startedAt: this._now(),
 		};
+		const label = args.label === undefined ? undefined : deriveWorkerTaskLabel(args.label, "");
+		if (label) record.label = label;
 		if (args.goalId !== undefined) record.goalId = args.goalId;
 		if (args.worktreeLaneKey !== undefined) record.worktreeLaneKey = args.worktreeLaneKey;
 		this._lanes.set(record.laneId, record);
@@ -215,7 +228,7 @@ export class LaneTracker {
 		return { ...next };
 	}
 
-	start(args: { type: LaneType; goalId?: string; worktreeLaneKey?: string }): LaneRecord {
+	start(args: { type: LaneType; label?: string; goalId?: string; worktreeLaneKey?: string }): LaneRecord {
 		const record = this.enqueue(args);
 		return this.markRunning(record.laneId) as LaneRecord;
 	}

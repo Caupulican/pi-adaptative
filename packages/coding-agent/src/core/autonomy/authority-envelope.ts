@@ -40,6 +40,8 @@ export interface ProposedAction {
 	readonly targetPath?: string;
 	readonly networkRequested?: boolean;
 	readonly pushRequested?: boolean;
+	/** A history-rewriting push. Never covered by a plain push grant. */
+	readonly forcePushRequested?: boolean;
 	readonly deployRequested?: boolean;
 	readonly deployTarget?: string;
 	readonly publishRequested?: boolean;
@@ -114,7 +116,7 @@ export function validateProposedAction(action: ProposedAction, envelope: Authori
 		};
 	}
 
-	if (action.pushRequested && envelope.external.push !== true) {
+	if ((action.pushRequested || action.forcePushRequested) && envelope.external.push !== true) {
 		return {
 			allowed: false,
 			edgeType: "irreversible_external",

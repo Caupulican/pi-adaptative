@@ -218,6 +218,17 @@ export interface ModelRouterControllerDeps {
 }
 
 const ROUTE_PREVIEW_MAX_CANDIDATES = 8;
+const EXPERT_FAILURE_REASON_MAX_LENGTH = 160;
+
+/** One bounded line naming why expert selection failed, safe to show in router status. */
+function boundedExpertFailureReason(error: unknown): string {
+	const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim();
+	const bounded =
+		message.length > EXPERT_FAILURE_REASON_MAX_LENGTH
+			? `${message.slice(0, EXPERT_FAILURE_REASON_MAX_LENGTH - 1)}…`
+			: message;
+	return bounded || "unknown error";
+}
 
 function formatFitnessVerdict(verdict: FitnessGateVerdict): string {
 	if (verdict.fit) return verdict.probed ? "fit" : "unprobed";
@@ -237,6 +248,10 @@ export class ModelRouterController {
 	private _isModelRouterRetry = false;
 	private _lastModelRouterDecision?: ModelRouterDecisionStatus;
 	private _lastModelRouterSkipReason?: string;
+	/** Why the last expert selection failed, if it did. Not a skip: the baseline route still ran. */
+	private _lastExpertSelectionFailure?: string;
+	/** Per-invocation sequence so two judge calls on identical text are two ledger entries. */
+	private _routeJudgeCallSeq = 0;
 	private _lastModelRouterIntent?: ModelRouterIntent;
 	/** The routed turn currently executing, with the root model it swapped away from. */
 	private _activeRoutedTurn?: { rootModel: Model<Api> | undefined; routedModel: Model<Api>; decision: RouteDecision };
@@ -783,7 +798,8 @@ export class ModelRouterController {
 		prompt: string,
 		signal?: AbortSignal,
 	): Promise<Model<Api> | undefined> {
-		if (!this.deps.expertSelector) return undefined;
+		const selector = this.deps.expertSelector;
+		if (!selector) return undefined;
 		try {
 			const workClass = tier === "cheap" ? "retrieve" : "implement";
 			const consequence = tier === "expensive" ? "critical" : tier === "cheap" ? "low" : "medium";
@@ -800,19 +816,31 @@ export class ModelRouterController {
 				allowedModelRefs: routerPoolModelRefs(pool),
 				preferSubscription: (settings.poolPreference ?? "subscription-first") === "subscription-first",
 			});
-			const selection = await this.deps.expertSelector.select(request, { signal });
-			const chosen = selection.primary;
-			const model = this.deps.getModelRegistry().find(chosen.provider, chosen.model_id);
-			if (
-				model &&
-				isModelInRouterPool(pool, model) &&
-				this.deps.getModelRegistry().hasConfiguredAuth(model) &&
-				!this.deps.isModelExhausted(model)
-			) {
-				return model;
+			const selection = await selector.select(request, { signal });
+			this._lastExpertSelectionFailure = undefined;
+			try {
+				const chosen = selection.primary;
+				const model = this.deps.getModelRegistry().find(chosen.provider, chosen.model_id);
+				if (
+					model &&
+					isModelInRouterPool(pool, model) &&
+					this.deps.getModelRegistry().hasConfiguredAuth(model) &&
+					!this.deps.isModelExhausted(model)
+				) {
+					return model;
+				}
+			} finally {
+				// A foreground turn consumes a ranking, not a worker slot. The capacity lease exists
+				// for work that runs on the expert; here the binding is read and done, so it is
+				// released immediately. Holding it would exhaust the per-expert slots after a
+				// handful of routed turns or previews and silently end H-MoE refinement.
+				selector.release(selection);
 			}
-		} catch {
-			// fall back to default resolution
+		} catch (error) {
+			// The route still falls back to the baseline model, but a real failure must be visible
+			// rather than swallowed: an exhausted capacity pool and an unreachable selector look
+			// identical from the outside otherwise.
+			this._lastExpertSelectionFailure = boundedExpertFailureReason(error);
 		}
 		return undefined;
 	}
@@ -909,7 +937,11 @@ export class ModelRouterController {
 				kind: "route-judge",
 				label: "router-judge",
 				sessionId: this.deps.getSessionManager().getSessionId(),
-				identity: prompt,
+				// The prompt alone collapses separate judge calls on the same text (a preview then
+				// the real turn, or a repeated "continue") into one ledger entry, so the second call
+				// is spent but never recorded. The sequence is read once per completed judge call,
+				// which keeps a retried report of that same call idempotent.
+				identity: [prompt, String(this._routeJudgeCallSeq++)],
 			});
 		}
 
@@ -1096,6 +1128,11 @@ export class ModelRouterController {
 				formatRouterPoolSummary(this.deps.getCandidatePool()),
 			),
 		];
+		if (this._lastExpertSelectionFailure) {
+			lines.push(
+				`${formatLabel ? formatLabel("H-MoE:") : "H-MoE:"} unavailable (${this._lastExpertSelectionFailure})`,
+			);
+		}
 		const pinsOutsidePool = this._pinsOutsideCandidatePool();
 		if (pinsOutsidePool.length > 0) {
 			lines.push(formatLabel ? formatLabel("Pool exceptions:") : "Pool exceptions:");
@@ -1145,10 +1182,6 @@ export class ModelRouterController {
 		const previousModelRouterSessionBuffer = this._modelRouterSessionBuffer;
 		const previousModelRouterEscalationRequested = this._modelRouterEscalationRequested;
 		const previousActiveRoutedTurn = this._activeRoutedTurn;
-		// The POV snapshot reads this: the root is what the finally below restores, never a guess.
-		if (routeDecision) {
-			this._activeRoutedTurn = { rootModel: previousModel, routedModel, decision: routeDecision };
-		}
 		const bufferRoutedTurn = routeDecision?.tier === "cheap";
 		const originalHistoryLength = agent.state.messages.length;
 		let retryModel: Model<Api> | undefined;
@@ -1162,76 +1195,84 @@ export class ModelRouterController {
 				}
 			: undefined;
 		let thrownError: unknown;
-		if (routeDecision) {
-			this._lastModelRouterDecision = completedDecision;
-		}
-		this._activeModelRouterIntent = routeDecision
-			? routeDecision.tier === "cheap"
-				? "research"
-				: "modify"
-			: undefined;
-		this._activeModelRouterRoute = routeDecision;
-		if (bufferRoutedTurn) {
-			this._modelRouterSessionBuffer = createModelRouterSessionBuffer();
-			this._modelRouterEscalationRequested = false;
-		}
-		const routerThinkingSettings = this.deps.getSettingsManager().getModelRouterSettings();
-		const configuredThinking = !routeDecision
-			? undefined
-			: routeDecision.reasonCode === "executor_direct"
-				? routerThinkingSettings.executorThinking
-				: routeDecision.tier === "cheap"
-					? routerThinkingSettings.cheapThinking
-					: routeDecision.tier === "medium"
-						? routerThinkingSettings.mediumThinking
-						: routeDecision.tier === "expensive"
-							? routerThinkingSettings.expensiveThinking
-							: undefined;
-		const routedThinkingLevel = clampThinkingLevel(
-			routedModel,
-			configuredThinking ?? previousThinkingLevel,
-		) as ThinkingLevel;
-		const modelChanged = !modelsAreEqual(this.deps.getModel(), routedModel);
-		const thinkingChanged = routedThinkingLevel !== previousThinkingLevel;
-		if (modelChanged || thinkingChanged) {
-			agent.state.model = routedModel;
-			// Per-tier thinking: a configured tier/executor thinking level overrides the inherited
-			// session thinking for THIS routed turn only; unset falls back to exactly today's
-			// inherit-and-clamp behavior. Executor routes carry tier "cheap" too, so reasonCode is
-			// checked first — otherwise an executor turn would silently pick up cheapThinking instead.
-			// The judge's own completion has a separate knob (judgeThinking) applied at its call site.
-			agent.state.thinkingLevel = routedThinkingLevel;
-			// Capability tool-filtering follows the ROUTED model for the turn. Without this a
-			// cheap/local routed model inherits the session model's full tool surface — schemas it
-			// pays for on every request and may not be able to drive at all.
-			if (modelChanged) {
-				const routedProfile = deriveModelCapabilityProfile({
-					contextWindow: routedModel.contextWindow,
-					mode: this.deps.getSettingsManager().getModelCapabilitySettings().mode,
-				});
-				const allowed = new Set(
-					filterToolNamesForCapability(
-						previousTurnTools.map((tool) => tool.name),
-						routedProfile,
-						routedModel,
-					),
-				);
-				if (allowed.size !== previousTurnTools.length) {
-					agent.state.tools = previousTurnTools.filter((tool) => allowed.has(tool.name));
-					// Agent owns a defensive copy on assignment. Fence against the installed array,
-					// not our input array, so restoration works without overwriting live tool changes.
-					swappedTools = agent.state.tools;
+		// Every statement that installs swap state runs INSIDE the try whose finally restores it.
+		// A throw during setup — a settings read, thinking clamp, capability derivation, tool
+		// filtering, the system-prompt build — would otherwise leave the session on the routed
+		// model, the POV snapshot stuck at switched, and a cheap turn's buffer swallowing messages.
+		try {
+			// The POV snapshot reads this: the root is what the finally below restores, never a guess.
+			if (routeDecision) {
+				this._activeRoutedTurn = { rootModel: previousModel, routedModel, decision: routeDecision };
+				this._lastModelRouterDecision = completedDecision;
+			}
+			this._activeModelRouterIntent = routeDecision
+				? routeDecision.tier === "cheap"
+					? "research"
+					: "modify"
+				: undefined;
+			this._activeModelRouterRoute = routeDecision;
+			if (bufferRoutedTurn) {
+				this._modelRouterSessionBuffer = createModelRouterSessionBuffer();
+				this._modelRouterEscalationRequested = false;
+			}
+			const routerThinkingSettings = this.deps.getSettingsManager().getModelRouterSettings();
+			const configuredThinking = !routeDecision
+				? undefined
+				: routeDecision.reasonCode === "executor_direct"
+					? routerThinkingSettings.executorThinking
+					: routeDecision.tier === "cheap"
+						? routerThinkingSettings.cheapThinking
+						: routeDecision.tier === "medium"
+							? routerThinkingSettings.mediumThinking
+							: routeDecision.tier === "expensive"
+								? routerThinkingSettings.expensiveThinking
+								: undefined;
+			const routedThinkingLevel = clampThinkingLevel(
+				routedModel,
+				configuredThinking ?? previousThinkingLevel,
+			) as ThinkingLevel;
+			const modelChanged = !modelsAreEqual(this.deps.getModel(), routedModel);
+			const thinkingChanged = routedThinkingLevel !== previousThinkingLevel;
+			if (modelChanged || thinkingChanged) {
+				agent.state.model = routedModel;
+				// Per-tier thinking: a configured tier/executor thinking level overrides the inherited
+				// session thinking for THIS routed turn only; unset falls back to exactly today's
+				// inherit-and-clamp behavior. Executor routes carry tier "cheap" too, so reasonCode is
+				// checked first — otherwise an executor turn would silently pick up cheapThinking instead.
+				// The judge's own completion has a separate knob (judgeThinking) applied at its call site.
+				agent.state.thinkingLevel = routedThinkingLevel;
+				// Capability tool-filtering follows the ROUTED model for the turn. Without this a
+				// cheap/local routed model inherits the session model's full tool surface — schemas it
+				// pays for on every request and may not be able to drive at all.
+				if (modelChanged) {
+					const routedProfile = deriveModelCapabilityProfile({
+						contextWindow: routedModel.contextWindow,
+						mode: this.deps.getSettingsManager().getModelCapabilitySettings().mode,
+					});
+					const allowed = new Set(
+						filterToolNamesForCapability(
+							previousTurnTools.map((tool) => tool.name),
+							routedProfile,
+							routedModel,
+						),
+					);
+					if (allowed.size !== previousTurnTools.length) {
+						agent.state.tools = previousTurnTools.filter((tool) => allowed.has(tool.name));
+						// Agent owns a defensive copy on assignment. Fence against the installed array,
+						// not our input array, so restoration works without overwriting live tool changes.
+						swappedTools = agent.state.tools;
+					}
+				}
+				// The routed prompt follows the routed tool surface and keeps provider-neutral delegation
+				// guidance whenever delegate remains active, including same-model thinking overrides.
+				// Per-turn only; a live extension override is preserved rather than silently replaced.
+				if (agent.state.systemPrompt === this.deps.getBaseSystemPrompt()) {
+					swappedSystemPrompt = this.deps.buildSystemPromptForToolNames(
+						agent.state.tools.map((tool) => tool.name),
+					);
+					agent.state.systemPrompt = swappedSystemPrompt;
 				}
 			}
-			// The routed prompt follows the routed tool surface and keeps provider-neutral delegation
-			// guidance whenever delegate remains active, including same-model thinking overrides.
-			// Per-turn only; a live extension override is preserved rather than silently replaced.
-			if (agent.state.systemPrompt === this.deps.getBaseSystemPrompt()) {
-				swappedSystemPrompt = this.deps.buildSystemPromptForToolNames(agent.state.tools.map((tool) => tool.name));
-				agent.state.systemPrompt = swappedSystemPrompt;
-			}
-		}
-		try {
 			if (continueFromCanonicalHistory) await this.deps.runAgentContinuation(signal);
 			else await this.deps.runAgentPrompt(messages, signal);
 			// Speculative muscle-retry: an executor-routed turn is a bet that the

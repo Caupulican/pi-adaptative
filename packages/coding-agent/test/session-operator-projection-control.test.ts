@@ -250,4 +250,12 @@ describe("Operator control projection", () => {
 		expect(projection.control.owner).toBe("system_one");
 		expect(projection.active_actors[0]).toMatchObject({ kind: "worker", label: "settings" });
 	});
+
+	it("renders a labelled research lane as a named specialist", () => {
+		const projection = projectionFor({
+			goal: goal("active", [requirement({})]),
+			lanes: [{ laneId: "research-1", type: "research", status: "running", label: "retry/backoff sources" }],
+		});
+		expect(projection.active_actors[0]).toMatchObject({ kind: "specialist", label: "retry/backoff sources" });
+	});
 });

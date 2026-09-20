@@ -167,7 +167,7 @@ export class ResearchLaneController {
 		this._isRunning = true;
 		this.deps.onContinuationActivity?.();
 		this.seedHistory();
-		const startedRecord = this.lanes.start({ type: "research", goalId: demand.goalId });
+		const startedRecord = this.lanes.start({ type: "research", label: demand.query, goalId: demand.goalId });
 		this._persistedRunCount++;
 		const deregisterInFlight = registerInFlightWork(
 			this.deps.getAgentDir(),
