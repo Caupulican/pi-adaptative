@@ -588,6 +588,50 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 			expect(allowed.allowed).toBe(true);
 		});
 
+		it("RCG-045: each authority clause governs its own class and no clause subsumes another", async () => {
+			const bareCharter = compileExecutionCharter({
+				objectiveId: "obj-1",
+				prompt: "Perform safe scoped execution with full adaptive runtime",
+			});
+
+			// An operator grant recorded at the edge must actually unblock the class it names. A
+			// shell-execution clause that fired on any command string would silently defeat it.
+			const withEdgeGrant = new ExternalCapabilityAcquisitionGate({
+				charter: bareCharter,
+				getGrantedAuthority: () => ({ allowPackageInstalls: true, allowNetworkDownloads: true }),
+			});
+			const granted = await withEdgeGrant.evaluateAcquisition({
+				objectiveId: "obj-1",
+				source: "left-pad@1.3.0",
+				command: "npm install left-pad@1.3.0",
+			});
+			expect(granted.allowed).toBe(true);
+			expect(granted.record.deterministic_findings).toEqual([]);
+
+			// Shell execution governs externally-obtained script content, and only that.
+			const scriptWithoutShellGrant = await new ExternalCapabilityAcquisitionGate({
+				charter: bareCharter,
+				getGrantedAuthority: () => ({ allowPackageInstalls: true }),
+			}).evaluateAcquisition({
+				objectiveId: "obj-1",
+				source: "setup",
+				scriptContent: "echo hi",
+				checksum: "abc",
+			});
+			expect(scriptWithoutShellGrant.allowed).toBe(false);
+			expect(scriptWithoutShellGrant.record.deterministic_findings.map((finding) => finding.id)).toContain(
+				"charter-shell-execution-prohibited",
+			);
+
+			// A plain command with no acquisition class of its own is not a shell-execution denial.
+			const plainCommand = await new ExternalCapabilityAcquisitionGate({
+				charter: bareCharter,
+			}).evaluateAcquisition({ objectiveId: "obj-1", source: "build", command: "make build" });
+			expect(plainCommand.record.deterministic_findings.map((finding) => finding.id)).not.toContain(
+				"charter-shell-execution-prohibited",
+			);
+		});
+
 		it("RCG-045: a hard deny dominates any semantic answer", async () => {
 			const gate = new ExternalCapabilityAcquisitionGate({
 				charter: compileExecutionCharter({

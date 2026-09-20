@@ -170,11 +170,15 @@ export class ExternalCapabilityAcquisitionGate {
 			});
 		}
 
-		if ((!authority.allowShellExecution && request.scriptContent) ?? request.command) {
+		// Shell execution governs running externally-obtained script content. It deliberately does not
+		// fire on the mere presence of a command: that would subsume the package-install and
+		// network-download clauses, making both dead and defeating an operator's own edge grant.
+		const hasScriptContent = typeof request.scriptContent === "string" && request.scriptContent.length > 0;
+		if (!authority.allowShellExecution && hasScriptContent) {
 			deterministicFindings.push({
 				id: "charter-shell-execution-prohibited",
 				level: "deny",
-				message: "Script or command execution is not authorized by the execution charter.",
+				message: "Executing externally-obtained script content is not authorized by the execution charter.",
 			});
 		}
 
