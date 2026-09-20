@@ -1,5 +1,6 @@
-import { visibleWidth } from "@caupulican/pi-tui";
+import { type Component, Container, CURSOR_MARKER, Text, TUI, visibleWidth } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
+import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import type { DecisionStageLogView } from "../src/core/operator-projection/decision-stage-log.ts";
 import { DecisionStageLog } from "../src/core/operator-projection/decision-stage-log.ts";
@@ -13,6 +14,7 @@ import {
 	renderDecisionDiagram,
 	renderDecisionList,
 } from "../src/modes/interactive/components/decision-graph-render.ts";
+import { WorkbenchComponent } from "../src/modes/interactive/components/workbench.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -417,5 +419,161 @@ describe("Decision graph rendering", () => {
 		expect(list.stageAt[list.currentRow]).toBe("verify");
 		expect(text.some((row) => row.includes("◆ verify criterion 3"))).toBe(true);
 		expect(text.some((row) => row.includes("CHECKS") && row.includes("1/2"))).toBe(true);
+	});
+});
+
+describe("Workbench conversation zone with the Decision graph", () => {
+	beforeAll(() => initTheme("dark"));
+
+	function setup(rows = 40) {
+		const conversation = new Container();
+		conversation.addChild(new Text("conversation body", 0, 0));
+		const editor = new Container();
+		editor.addChild(new Text("input row", 0, 0));
+		const view = new WorkbenchComponent({
+			conversation,
+			editor,
+			dock: [new Text("status", 0, 0)],
+			brand: "pi",
+			viewportRows: () => rows,
+		});
+		view.applyGeometry({ rows: 8, collapsed: false, inspector: "shown", executionMaximized: false });
+		view.setInspector([{ title: "Work plan", meta: "1 / 3", body: ["active step"] }]);
+		view.setExecution(new Text("fn main() {}", 0, 0));
+		view.setDecisionGraph(() => buildDecisionGraphModel(SCENARIOS.workerDispatched!()));
+		return view;
+	}
+
+	it("draws the graph pane left of the chat with one rule from the header down and a ┬ junction on the divider", () => {
+		const view = setup();
+		const frame = view.render(120);
+		const text = frame.map(stripAnsi);
+		for (const row of frame) expect(visibleWidth(row)).toBeLessThanOrEqual(120);
+		expect(frame.length).toBe(40);
+		const header = text[view.conversationTop - 1]!;
+		expect(header).toMatch(/^ Decision graph .*List .*Diagram .*Hide .*│\s+Conversation/);
+		const ruleColumn = header.indexOf("│");
+		expect(ruleColumn).toBe(Math.max(48, Math.floor(120 * 0.32)));
+		for (let row = view.conversationTop - 1; row < view.conversationTop + view.conversationHeight; row++) {
+			expect([...text[row]!][ruleColumn], `row ${row}`).toBe("│");
+		}
+		expect([...text[view.dividerRow]!][ruleColumn]).toBe("┬");
+		expect([...text[view.dividerRow]!][Math.floor(120 * 0.3)]).toBe("┴");
+		expect(view.conversationLeft).toBe(ruleColumn + 3);
+		expect(view.conversationWidth).toBe(120 - ruleColumn - 4);
+		expect(text.slice(view.conversationTop, view.conversationTop + view.conversationHeight).join("\n")).toMatch(
+			/SYSTEM ONE · JEV/,
+		);
+		expect(view.hitTest(2, view.conversationTop - 1)).toBe("graphTitle");
+		expect(view.hitTest(2, view.conversationTop + 1)).toBe("graph");
+		expect(view.hitTest(ruleColumn, view.conversationTop + 1)).toBe("graphSplit");
+		expect(view.hitTest(ruleColumn + 4, view.conversationTop - 1)).toBe("conversationHeader");
+		expect(view.hitTest(ruleColumn + 4, view.conversationTop + 1)).toBe("conversation");
+		expect(view.paneTitleAction(header.indexOf("List"), view.conversationTop - 1)).toBe("graphList");
+		expect(view.paneTitleAction(header.indexOf("Hide"), view.conversationTop - 1)).toBe("hideGraph");
+		expect(view.headerAction(header.indexOf("Copy conversation") + 1)).toBe("copyAll");
+	});
+
+	it("folds the graph when hidden, without a source, or when the zone cannot hold both minimums; a fold keeps the fraction", () => {
+		const view = setup();
+		view.resizeGraph(0.4);
+		view.render(120);
+		expect(view.conversationWidth).toBe(120 - Math.max(48, Math.floor(120 * 0.4)) - 4);
+		view.render(80);
+		expect(view.conversationWidth).toBe(78);
+		expect(view.geometry().graphFraction).toBeCloseTo(0.4);
+		view.render(92);
+		expect(view.conversationWidth).toBe(92 - 48 - 4);
+		view.toggleGraph();
+		view.render(120);
+		expect(view.conversationWidth).toBe(118);
+		expect(view.geometry().graph).toBe("hidden");
+		expect(view.hitTest(2, view.conversationTop + 1)).toBe("conversation");
+		view.toggleGraph();
+		view.setDecisionGraph(undefined);
+		view.render(120);
+		expect(view.conversationWidth).toBe(118);
+	});
+
+	it("resizes the graph from the gutter, switches views from the chips, and opens a stage's detail on click", () => {
+		const view = setup();
+		view.render(120);
+		view.resizeGraphFromPointer(50);
+		expect(view.geometry().graphFraction).toBeCloseTo(50 / 120);
+		view.setGraphView("list");
+		const list = view.render(120).map(stripAnsi);
+		const header = list[view.conversationTop - 1]!;
+		expect(header).toContain("List");
+		const stageRow = [...Array(view.conversationHeight).keys()]
+			.map((offset) => view.conversationTop + offset)
+			.find((row) => view.graphStageAt(2, row) === "dispatch");
+		expect(stageRow).toBeDefined();
+		view.setGraphView("diagram");
+		view.toggleGraphStage(view.graphStageAt(2, stageRow!)!);
+		expect(view.getSelectedGraphStage()).toBe("dispatch");
+		expect(view.getGraphView()).toBe("list");
+		const expanded = view
+			.render(120)
+			.map(stripAnsi)
+			.slice(view.conversationTop, view.conversationTop + view.conversationHeight)
+			.join("\n");
+		expect(expanded).toContain("reason: goal_active");
+		view.toggleGraphStage("dispatch");
+		expect(view.getSelectedGraphStage()).toBeUndefined();
+	});
+
+	it("keeps every row exact through terminal resizes with the graph shown", async () => {
+		const terminal = new VirtualTerminal(120, 36);
+		terminal.write("\x1b[?1049h\x1b[H");
+		const ui = new TUI(terminal, true);
+		const chat = new Container();
+		chat.addChild(new Text("conversation remains visible", 0, 0));
+		const editor: Component = { render: () => [`> prompt${CURSOR_MARKER}`], invalidate() {} };
+		const editorContainer = new Container();
+		editorContainer.addChild(editor);
+		const view = new WorkbenchComponent({
+			conversation: chat,
+			editor: editorContainer,
+			dock: [new Text("status at bottom", 0, 0)],
+			brand: "pi",
+			viewportRows: () => terminal.rows,
+		});
+		view.setInspector([{ title: "Work plan", meta: "1 / 2", body: ["current step"] }]);
+		view.setExecution(new Text("Edit file.ts", 0, 0));
+		view.setDecisionGraph(() => buildDecisionGraphModel(SCENARIOS.twoWorkersAndCapability!()));
+		ui.addChild(view);
+		ui.setFocus(editor);
+		ui.start();
+		try {
+			await terminal.waitForRender();
+			expect(terminal.getViewport()[view.conversationTop - 1]).toMatch(/^ Decision graph .*│\s+Conversation/);
+			for (const [columns, rows] of [
+				[60, 20],
+				[140, 45],
+				[200, 40],
+				[80, 24],
+				[120, 36],
+			]) {
+				terminal.resize(columns!, rows!);
+				await terminal.waitForRender();
+				const viewport = terminal.getViewport();
+				expect(viewport.at(-3)).toContain("> prompt");
+				expect(terminal.getCursorPosition()).toEqual({ x: 9, y: rows! - 3 });
+				for (const line of viewport) expect(visibleWidth(line), `${columns}x${rows}`).toBeLessThanOrEqual(columns!);
+				const graphShown = columns! >= 90;
+				expect(viewport[view.conversationTop - 1]!.startsWith(" Decision graph"), `${columns}x${rows}`).toBe(
+					graphShown,
+				);
+				if (graphShown) {
+					const ruleColumn = [...viewport[view.conversationTop - 1]!].indexOf("│");
+					expect([...viewport[view.dividerRow]!][ruleColumn]).toMatch(/[┬┼]/);
+					for (let row = view.conversationTop; row < view.conversationTop + view.conversationHeight; row++) {
+						expect([...viewport[row]!][ruleColumn], `${columns}x${rows} row ${row}`).toBe("│");
+					}
+				}
+			}
+		} finally {
+			ui.stop();
+		}
 	});
 });

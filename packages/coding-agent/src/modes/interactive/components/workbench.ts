@@ -1,8 +1,11 @@
 import { type Component, Container, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
+import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
 import { theme } from "../theme/theme.ts";
 import { ActionTranscriptComponent } from "./action-transcript.ts";
 import { BashExecutionComponent } from "./bash-execution.ts";
 import { ConversationWindow } from "./conversation-window.ts";
+import type { DecisionGraphModel } from "./decision-graph-model.ts";
+import { DecisionGraphPane } from "./decision-graph-pane.ts";
 import { keyText } from "./keybinding-hints.ts";
 import {
 	fitRow,
@@ -113,6 +116,11 @@ export interface WorkbenchGeometry {
 	graphView?: WorkbenchGraphView;
 }
 
+/** One-cell left gutter; rows that already fit skip the grapheme scan (the width lookup is cached per string). */
+function gutter(line: string, inner: number): string {
+	return line ? ` ${visibleWidth(line) <= inner ? line : truncateToWidth(line, inner, "")}` : "";
+}
+
 export function clampUpperRows(rows: number): number {
 	return Math.max(2, Math.min(MAX_UPPER_ROWS, Math.floor(rows)));
 }
@@ -168,6 +176,12 @@ export class WorkbenchComponent extends Container {
 	private mouseMode = false;
 	private readonly inspectorPane = new WorkbenchPane();
 	private readonly executionPane = new WorkbenchPane();
+	private readonly graphPane = new DecisionGraphPane();
+	/** Composes the Decision graph's model per frame; unset, the zone is chat only. */
+	private graphSource?: () => DecisionGraphModel | undefined;
+	/** The conversation zone of the last frame; the graph gutter drag resolves against it. */
+	private zoneLeft = 0;
+	private zoneWidth = 0;
 	private inspectorFraction = DEFAULT_INSPECTOR_FRACTION;
 	private conversationFraction = DEFAULT_CONVERSATION_FRACTION;
 	private graphHidden = false;
@@ -316,6 +330,31 @@ export class WorkbenchComponent extends Container {
 	scrollUpper(column: number, row: number, delta: number): boolean {
 		return this.inspectorPane.scrollAt(column, row, delta) || this.executionPane.scrollAt(column, row, delta);
 	}
+	/** The Decision graph's model source; the pane draws whatever it returns each frame. */
+	setDecisionGraph(source: (() => DecisionGraphModel | undefined) | undefined): void {
+		this.graphSource = source;
+		if (!source) this.graphPane.reset();
+	}
+	scrollGraph(column: number, row: number, delta: number): boolean {
+		return this.graphPane.scrollAt(column, row, delta);
+	}
+	/** The stage under a pointer on the Decision graph, for click-to-expand. */
+	graphStageAt(column: number, row: number): DecisionStage | undefined {
+		return this.graphPane.stageAtPoint(column, row);
+	}
+	/** Open or close a stage's detail; the detail is drawn by the List view, so a click switches to it. */
+	toggleGraphStage(stage: DecisionStage): void {
+		this.graphPane.toggleStage(stage);
+		if (this.graphPane.getSelectedStage() !== undefined) this.graphView = "list";
+	}
+	getSelectedGraphStage(): DecisionStage | undefined {
+		return this.graphPane.getSelectedStage();
+	}
+	/** Pointer column on the graph | chat gutter: the graph's share of the conversation zone. */
+	resizeGraphFromPointer(column: number): void {
+		if (this.zoneWidth <= 0) return;
+		this.resizeGraph((column - this.zoneLeft) / this.zoneWidth);
+	}
 	/** Page the Execution pane from the keyboard; paging to the end resumes following new evidence. */
 	pageExecution(direction: number): boolean {
 		return this.executionPane.pageBy(direction);
@@ -429,9 +468,14 @@ export class WorkbenchComponent extends Container {
 		if (row !== undefined) {
 			if (this.inspectorPane.containsTitle(column, row)) return this.inspectorPane.titleAction(column);
 			if (this.executionPane.containsTitle(column, row)) return this.executionPane.titleAction(column);
+			if (this.graphPane.containsTitle(column, row)) return this.graphPane.titleAction(column);
 			return undefined;
 		}
-		return this.inspectorPane.titleAction(column) ?? this.executionPane.titleAction(column);
+		return (
+			this.inspectorPane.titleAction(column) ??
+			this.executionPane.titleAction(column) ??
+			this.graphPane.titleAction(column)
+		);
 	}
 	inspectorHasTitleActions(): boolean {
 		return this.inspectorPane.hasTitleActions();
@@ -453,6 +497,13 @@ export class WorkbenchComponent extends Container {
 		}
 		return buttons;
 	}
+	private graphTitleButtons(): WorkbenchPaneTitleButton[] {
+		return [
+			{ action: "graphList", label: "List", selected: this.graphView === "list" },
+			{ action: "graphDiagram", label: "Diagram", selected: this.graphView === "diagram" },
+			{ action: "hideGraph", label: "Hide" },
+		];
+	}
 	headerAction(column: number): "latest" | "copyAll" | "layout" | undefined {
 		return this.headerButtons.find((button) => column >= button.start && column < button.end)?.action;
 	}
@@ -466,7 +517,21 @@ export class WorkbenchComponent extends Container {
 		) {
 			return "conversation";
 		}
-		if (row === this.conversationTop - 1 && (this.columnSplitStart < 0 || column < this.columnSplitStart)) {
+		if (this.graphPane.containsTitle(column, row)) return "graphTitle";
+		if (
+			this.graphRuleColumn >= 0 &&
+			row >= this.conversationTop - 1 &&
+			row < this.conversationTop + this.conversationHeight &&
+			Math.abs(column - this.graphRuleColumn) <= 1
+		) {
+			return "graphSplit";
+		}
+		if (this.graphPane.rowAt(column, row) !== undefined) return "graph";
+		if (
+			row === this.conversationTop - 1 &&
+			column >= this.conversationLeft - 1 &&
+			(this.columnSplitStart < 0 || column < this.columnSplitStart)
+		) {
 			return "conversationHeader";
 		}
 		if (row === this.dividerRow) {
@@ -535,7 +600,7 @@ export class WorkbenchComponent extends Container {
 		return ` ${metaRow(left, where ? theme.fg("dim", where) : "", inner, leftWidth)} `;
 	}
 
-	private conversationHeader(columns: number): string {
+	private conversationHeader(columns: number, originX = 0): string {
 		const inner = Math.max(0, columns - 2);
 		const following = this.conversation.following;
 		const stateText = following ? " · Following latest" : " · Reading";
@@ -552,7 +617,7 @@ export class WorkbenchComponent extends Container {
 			const widths = shown.map((button) => visibleWidth(button.label) + 2);
 			const total = widths.reduce((sum, width) => sum + width, 0) + Math.max(0, shown.length - 1) * 2;
 			if (headingWidth + (shown.length ? 2 : 0) + total > inner) continue;
-			let column = 1 + inner - total;
+			let column = originX + 1 + inner - total;
 			const parts: string[] = [];
 			shown.forEach((button, index) => {
 				this.headerButtons.push({ action: button.action, start: column, end: column + widths[index]! });
@@ -756,6 +821,64 @@ export class WorkbenchComponent extends Container {
 		];
 	}
 
+	/**
+	 * The graph's width inside a conversation zone, or 0 when it folds: hidden, no source, a zone too
+	 * narrow for side-by-side, or one that cannot give the graph its minimum beside a readable chat.
+	 * A fold never writes the setting; the operator's fraction returns with the width.
+	 */
+	resolvedGraphWidth(zoneWidth: number): number {
+		if (this.graphHidden || !this.graphSource || zoneWidth < SIDE_BY_SIDE_MIN_COLUMNS) return 0;
+		const width = Math.min(
+			Math.max(MIN_GRAPH_WIDTH, Math.floor(zoneWidth * this.graphFraction)),
+			zoneWidth - 2 - MIN_CHAT_WIDTH,
+		);
+		return width >= MIN_GRAPH_WIDTH ? width : 0;
+	}
+
+	/**
+	 * The conversation zone: its header row and `height` rows below it. With the graph shown, the
+	 * Decision graph pane takes the left of every row (its title beside the conversation header) and
+	 * the one-column rule between them runs from the header down; folded, the zone is the chat alone
+	 * and its rows are exactly what they were before the graph existed.
+	 */
+	private renderZone(originX: number, zoneWidth: number, top: number, height: number): string[] {
+		this.zoneLeft = originX;
+		this.zoneWidth = zoneWidth;
+		this.conversationTop = top + 1;
+		this.conversationHeight = height;
+		const graphWidth = this.resolvedGraphWidth(zoneWidth);
+		const model = graphWidth > 0 ? this.graphSource?.() : undefined;
+		if (!model) {
+			this.graphPane.hide();
+			const inner = Math.max(1, zoneWidth - 2);
+			this.conversationLeft = originX + 1;
+			this.conversationWidth = inner;
+			const body = this.conversation.render(inner, height).map((line) => gutter(line, inner));
+			while (body.length < height) body.push("");
+			return [this.conversationHeader(zoneWidth, originX), ...body];
+		}
+		const rightX = graphWidth + 2;
+		const rightWidth = Math.max(1, zoneWidth - rightX);
+		const inner = Math.max(1, rightWidth - 2);
+		this.conversationLeft = originX + rightX + 1;
+		this.conversationWidth = inner;
+		this.graphRuleColumn = originX + graphWidth;
+		const left = this.graphPane.draw(
+			model,
+			this.graphView,
+			originX,
+			top,
+			graphWidth,
+			height + 1,
+			this.graphTitleButtons(),
+		);
+		const body = this.conversation.render(inner, height).map((line) => gutter(line, inner));
+		while (body.length < height) body.push("");
+		const right = [this.conversationHeader(rightWidth, originX + rightX), ...body];
+		const rule = theme.fg("borderMuted", "│");
+		return left.map((line, row) => `${line}${rule} ${right[row] ?? ""}`);
+	}
+
 	private renderColumns(
 		columns: number,
 		available: number,
@@ -776,17 +899,9 @@ export class WorkbenchComponent extends Container {
 		this.upperTop = head.length;
 		this.upperHeight = available;
 		this.dividerRow = -1;
-		const leftInner = Math.max(1, leftWidth - 2);
-		this.conversationLeft = 1;
-		this.conversationWidth = leftInner;
-		this.conversationTop = head.length + 1;
-		this.conversationHeight = Math.max(0, available - 1);
-		const gutterLeft = (line: string) =>
-			line ? ` ${visibleWidth(line) <= leftInner ? line : truncateToWidth(line, leftInner, "")}` : "";
-		const header = this.conversationHeader(leftWidth);
-		const body = this.conversation.render(leftInner, this.conversationHeight).map(gutterLeft);
-		while (body.length < this.conversationHeight) body.push("");
-		const left = [header, ...body].map((line) => fitRow(line, leftWidth));
+		const left = this.renderZone(0, leftWidth, head.length, Math.max(0, available - 1)).map((line) =>
+			fitRow(line, leftWidth),
+		);
 		const right = this.renderUpper(rightWidth, available, head.length, rightX);
 		const main = left.map((line, row) => `${line}  ${fitRow(right[row] ?? "", rightWidth)}`);
 		return [...head, ...main, liveRow, ...dockRows];
@@ -797,6 +912,7 @@ export class WorkbenchComponent extends Container {
 		this.frameRevision++;
 		this.inspectorPane.hide();
 		this.executionPane.hide();
+		this.graphPane.hide();
 		this.splitStart = -1;
 		this.splitEnd = -1;
 		this.columnSplitStart = -1;
@@ -821,9 +937,6 @@ export class WorkbenchComponent extends Container {
 				: [];
 			return [...Array.from({ length: remaining - dock.length }, () => ""), ...dock, ...nativeEditor];
 		}
-		// Rows that already fit skip the grapheme scan; the width lookup is cached per string.
-		const gutter = (line: string) =>
-			line ? ` ${visibleWidth(line) <= inner ? line : truncateToWidth(line, inner, "")}` : "";
 		// Title strip, divider, conversation header, three conversation rows, the live row, the POV
 		// row and the editor's two rules stay.
 		const dockBudget = Math.max(0, total - editor.length - 10);
@@ -837,16 +950,16 @@ export class WorkbenchComponent extends Container {
 		const rule = theme.fg("borderMuted", "─".repeat(columns));
 		const dockRows = [
 			...povRows.map((line) => surfaceRow(line, columns)),
-			...above.map((line) => surfaceRow(gutter(line), columns)),
+			...above.map((line) => surfaceRow(gutter(line, inner), columns)),
 			rule,
-			...editor.map(gutter),
+			...editor.map((line) => gutter(line, inner)),
 			rule,
-			...below.map(gutter),
+			...below.map((line) => gutter(line, inner)),
 			this.hintRow(columns),
 		];
 		// The live row is reserved even when idle so the geometry never jumps between turns.
 		const activity = this.options.activity?.render(inner).slice(0, 1) ?? [];
-		const liveRow = activity.length ? gutter(activity[0]!) : "";
+		const liveRow = activity.length ? gutter(activity[0]!, inner) : "";
 		const head = [this.headline(columns)];
 		const available = total - head.length - 1 - dockRows.length;
 		this.lastAvailable = available;
@@ -860,18 +973,12 @@ export class WorkbenchComponent extends Container {
 		this.upperTop = head.length;
 		this.upperHeight = upper.length;
 		this.dividerRow = head.length + upper.length;
-		this.conversationTop = this.dividerRow + 2;
-		this.conversationWidth = inner;
-		this.conversationHeight = Math.max(0, available - upper.length - 2);
-		const header = this.conversationHeader(columns);
-		const body = this.conversation.render(inner, this.conversationHeight).map(gutter);
-		while (body.length < this.conversationHeight) body.push("");
+		const zone = this.renderZone(0, columns, this.dividerRow + 1, Math.max(0, available - upper.length - 2));
 		return [
 			...head,
 			...upper,
 			this.divider(columns, upper.length > 0, this.dividerJunctions()),
-			header,
-			...body,
+			...zone,
 			liveRow,
 			...dockRows,
 		];
