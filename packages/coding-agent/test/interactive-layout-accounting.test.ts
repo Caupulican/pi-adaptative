@@ -1,6 +1,7 @@
 import { Container } from "@caupulican/pi-tui";
 import { beforeAll, expect, it } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { DecisionStageLog } from "../src/core/operator-projection/decision-stage-log.ts";
 import { ActiveToolCallRegistry } from "../src/modes/interactive/components/active-tool-call-registry.ts";
 import { ActivityLaneComponent } from "../src/modes/interactive/components/activity-lane.ts";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
@@ -43,7 +44,14 @@ it("counts one invocation once while foreground and background handoff observati
 					context: null,
 				}),
 				subscribe: () => () => {},
+				onStageChange: () => () => {},
+				getStageLog: () => new DecisionStageLog().view(0),
 			},
+			getTaskStepsStateSnapshot: () => undefined,
+			getGoalStateSnapshot: () => undefined,
+			getVerificationObligations: () => [],
+			getSemanticEvaluations: () => [],
+			getLaneRecords: () => [],
 			getForegroundRouteSnapshot: () => ({
 				rootModel: "fixture/model",
 				activeModel: "fixture/model",
@@ -64,6 +72,7 @@ it("counts one invocation once while foreground and background handoff observati
 		widgetContainerAbove: new Container(),
 		widgetContainerBelow: new Container(),
 		footer: { setCompact() {}, setOperatorFooter() {}, render: () => [], invalidate() {} },
+		footerDataProvider: { getGitBranch: () => null },
 		activityLane: lane,
 		keybindings: new KeybindingsManager(),
 		settingsManager: settings,
