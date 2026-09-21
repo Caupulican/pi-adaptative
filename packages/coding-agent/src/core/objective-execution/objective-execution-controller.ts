@@ -1274,7 +1274,16 @@ export class ObjectiveExecutionController {
 									);
 									await this.deps.runtime.ensureRepairTasks(objectiveId, repairs);
 								}
-								break;
+								const reasonCodes = ["primary_completion_failed", ...(c25.failed_semantic_predicates ?? [])];
+								const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime, {
+									reasonCodes,
+								});
+								return {
+									status: "unrecoverable",
+									reasonCodes,
+									cycleCount: this.cycleCounter,
+									deliveryBundle: bundle,
+								};
 							}
 						}
 

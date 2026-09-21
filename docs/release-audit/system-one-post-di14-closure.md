@@ -36,4 +36,4 @@
 - Implementation: `b6f69ad526bdb541f575811275ee2bc4a90ff755`
 - Message: Close remaining post-DI14 System One integrity defects
 - Pushed to `origin/main` (SHA stamp follows this file)
-- Gate 3 run() regression: `packages/coding-agent/test/system-one/post-di14-closure.test.ts` drives `ObjectiveExecutionController.run()` with a store-backed `executeCompletionTransaction` that honors `persistTerminal`, fails JEV-027 after inner semantic pass, and asserts `store.phase !== "complete"` and `result.status` is not complete.
+- Gate 3 run() regression: `packages/coding-agent/test/system-one/post-di14-closure.test.ts` drives `ObjectiveExecutionController.run()` with a store-backed `executeCompletionTransaction` that honors `persistTerminal`. Inner semantic pass then JEV-025 fail returns terminal `unrecoverable` (does not `break` into the route loop). JEV-027 fail after receipts is the same store-not-complete assertion. Both assert `persistTerminal === false` and `store.phase !== "complete"`.
