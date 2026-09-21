@@ -9,7 +9,7 @@
 - Current `main` at RC-00: `2215bdc436d57592fb09dc60c1da47788181cde3`
 - Newer commits since review (do not reset):
   - `2215bdc43` — Scope GitHub CI to the commit and run the full suite on tags
-- Closing SHA: (pending RC-12)
+- Closing SHA: `b6f69ad526bdb541f575811275ee2bc4a90ff755`
 
 ## RC-00 review of newer commits
 
