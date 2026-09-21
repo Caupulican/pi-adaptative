@@ -190,8 +190,9 @@ describe("Zero-Human Execution Charter & Start-Only Autonomy (ZH-001..ZH-012)", 
 		});
 
 		it("ZH-003 & ZH-004: authorized commit and push execute automatically on completion", async () => {
-			const commitFn = vi.fn().mockResolvedValue(undefined);
-			const pushFn = vi.fn().mockResolvedValue(undefined);
+			const sha = "abc1234deadbeef";
+			const commitFn = vi.fn(async () => ({ sha }));
+			const pushFn = vi.fn(async () => ({ ref: "refs/heads/main", remote: "origin" }));
 
 			const charter = compileExecutionCharter({
 				objectiveId: "obj-zh-003",
@@ -209,6 +210,13 @@ describe("Zero-Human Execution Charter & Start-Only Autonomy (ZH-001..ZH-012)", 
 				gitExecutor: {
 					commit: commitFn,
 					push: pushFn,
+					proveDelivery: async () => ({
+						head: sha,
+						remote: "origin",
+						ref: "refs/heads/main",
+						observedSha: sha,
+						attributableResidue: [],
+					}),
 				},
 			});
 
@@ -237,8 +245,8 @@ describe("Zero-Human Execution Charter & Start-Only Autonomy (ZH-001..ZH-012)", 
 		});
 
 		it("ZH-005 & ZH-006: authorized publish and deploy execute automatically without human prompt", async () => {
-			const publishFn = vi.fn().mockResolvedValue(undefined);
-			const deployFn = vi.fn().mockResolvedValue(undefined);
+			const publishFn = vi.fn(async () => ({ id: "pub-1" }));
+			const deployFn = vi.fn(async () => ({ id: "dep-1" }));
 
 			const charter = compileExecutionCharter({
 				objectiveId: "obj-zh-005",
@@ -254,6 +262,8 @@ describe("Zero-Human Execution Charter & Start-Only Autonomy (ZH-001..ZH-012)", 
 				releaseExecutor: {
 					publish: publishFn,
 					deploy: deployFn,
+					provePublish: async () => ({ publicationId: "pub-1" }),
+					proveDeploy: async (target: string) => ({ target, deploymentId: "dep-1" }),
 				},
 			});
 

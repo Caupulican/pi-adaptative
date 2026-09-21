@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { compileExecutionCharter } from "../../src/core/autonomy/execution-charter.ts";
 import { resolveEffectiveCompletionProfile } from "../../src/core/decision/completion-profile.ts";
+import { createRepoGitDelivery } from "../../src/core/objective-execution/delivery-proof.ts";
 import { ObjectiveExecutionController } from "../../src/core/objective-execution/objective-execution-controller.ts";
 import type { TaskRuntimeProjection } from "../../src/core/orchestration/task-runtime.ts";
 import { SystemOneController, TerminalCompletionConflictError } from "../../src/core/system-one/controller.ts";
@@ -519,5 +520,126 @@ describe("FC-03 receipt binding", () => {
 		expect(result?.status).not.toBe("complete");
 		expect(store.phase).not.toBe("complete");
 		expect(result?.deliveryBundle?.side_effects?.commit?.state).toBe("failed");
+	});
+
+	it("a tag whose observed commit differs from the proven commit is not complete", async () => {
+		const sha = "abc1234deadbeef";
+		const controller = new ObjectiveExecutionController({
+			mode: "objective_primary",
+			completionProfile: "mechanical",
+			runtime: { reconcileObjective: async () => runtime("obj-1") },
+			executionCharter: compileExecutionCharter({
+				objectiveId: "obj-1",
+				prompt: "ship",
+				initialGrants: { git: { commit: true, create_tag: true } },
+			}),
+			gitExecutor: {
+				commit: async () => ({ sha }),
+				tag: async () => ({ tag: "v1" }),
+				proveDelivery: async () => ({
+					head: sha,
+					remote: "origin",
+					ref: "refs/heads/main",
+					observedSha: sha,
+					attributableResidue: [],
+				}),
+				proveTag: async () => ({ tag: "v1", commitSha: "other-sha" }),
+			},
+			steeringPlane: {
+				policy: { mode: "system_one_optional" },
+				requireCertificate: async (checkpoint: string) => certificate(checkpoint),
+			} as never,
+			repoRoot: gitRepo(),
+		});
+		const result = await controller.run("obj-1");
+		expect(result.status).not.toBe("complete");
+		expect(result.deliveryBundle?.side_effects?.tag?.state).toBe("failed");
+	});
+
+	it("a publish id the proof port does not observe is not complete", async () => {
+		const controller = new ObjectiveExecutionController({
+			mode: "objective_primary",
+			completionProfile: "mechanical",
+			runtime: { reconcileObjective: async () => runtime("obj-1") },
+			executionCharter: compileExecutionCharter({
+				objectiveId: "obj-1",
+				prompt: "ship",
+				initialGrants: { release: { package_publish: true } },
+			}),
+			releaseExecutor: {
+				publish: async () => ({ id: "pub-1" }),
+				provePublish: async () => ({ publicationId: "pub-other" }),
+			},
+			steeringPlane: {
+				policy: { mode: "system_one_optional" },
+				requireCertificate: async (checkpoint: string) => certificate(checkpoint),
+			} as never,
+			repoRoot: gitRepo(),
+		});
+		const result = await controller.run("obj-1");
+		expect(result.status).not.toBe("complete");
+		expect(result.deliveryBundle?.side_effects?.publish?.state).toBe("failed");
+	});
+
+	it("a deploy id the proof port does not observe is not complete", async () => {
+		const controller = new ObjectiveExecutionController({
+			mode: "objective_primary",
+			completionProfile: "mechanical",
+			runtime: { reconcileObjective: async () => runtime("obj-1") },
+			executionCharter: compileExecutionCharter({
+				objectiveId: "obj-1",
+				prompt: "ship",
+				initialGrants: { release: { deploy_targets: ["production"] } },
+			}),
+			releaseExecutor: {
+				deploy: async () => ({ id: "dep-1" }),
+				proveDeploy: async () => ({ target: "production", deploymentId: "dep-other" }),
+			},
+			steeringPlane: {
+				policy: { mode: "system_one_optional" },
+				requireCertificate: async (checkpoint: string) => certificate(checkpoint),
+			} as never,
+			repoRoot: gitRepo(),
+		});
+		const result = await controller.run("obj-1");
+		expect(result.status).not.toBe("complete");
+		expect(result.deliveryBundle?.side_effects?.deploy?.[0]?.state).toBe("failed");
+	});
+
+	it("the session git delivery port commits, pushes to a local remote, and proves that SHA", async () => {
+		const root = gitRepo();
+		const bare = mkdtempSync(join(tmpdir(), "pi-final-remote-"));
+		execFileSync("git", ["init", "--bare"], { cwd: bare });
+		execFileSync("git", ["remote", "add", "origin", bare], { cwd: root });
+		writeFileSync(join(root, "README.md"), "two\n");
+		writeFileSync(join(root, "leftover.txt"), "residue\n");
+		const delivery = createRepoGitDelivery(root);
+		const committed = await delivery.commit("two");
+		const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+		expect(committed.sha).toBe(head);
+		const pushed = await delivery.push();
+		const proof = await delivery.proveDelivery({
+			candidateDigest: "digest",
+			candidateRevision: head,
+			candidateUntrackedPaths: ["leftover.txt"],
+			remote: pushed.remote,
+			ref: pushed.ref,
+		});
+		expect(proof.head).toBe(committed.sha);
+		expect(proof.observedSha).toBe(committed.sha);
+		expect(proof.remote).toBe("origin");
+		expect(proof.ref).toBe(pushed.ref);
+		expect(proof.attributableResidue).toEqual([]);
+		writeFileSync(join(root, "leftover.txt"), "still\n");
+		const residue = await delivery.proveDelivery({
+			candidateDigest: "digest",
+			candidateRevision: head,
+			candidateUntrackedPaths: ["leftover.txt"],
+			remote: pushed.remote,
+			ref: pushed.ref,
+		});
+		expect(residue.attributableResidue).toContain("leftover.txt");
+		const tagged = await delivery.tag("v1");
+		expect(await delivery.proveTag(tagged.tag)).toEqual({ tag: "v1", commitSha: committed.sha });
 	});
 });

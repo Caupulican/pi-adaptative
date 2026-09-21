@@ -86,6 +86,13 @@ class TestERCJevAdapter implements JevAdapter {
 					id === "unhandled_edge_cases" ||
 					id === "hidden_regressions" ||
 					id === "assumption_violations" ||
+					id === "required_behavior_unverified" ||
+					id === "material_claim_unsupported" ||
+					id === "out_of_scope_change_present" ||
+					id === "missing_requirement" ||
+					id === "hidden_assumption" ||
+					id === "plausible_regression_not_tested" ||
+					id === "conclusion_overstates_evidence" ||
 					id === "duplicate_responsibility_introduced" ||
 					id === "unintentional_duplicate_remaining"
 				) {
@@ -109,6 +116,8 @@ class TestERCJevAdapter implements JevAdapter {
 					selected = "implementer";
 				} else if (id === "required_specialty") {
 					selected = "quantum_crypto";
+				} else if (id === "completion_verdict" && keys.includes("complete")) {
+					selected = "complete";
 				}
 				const probs: Record<string, number> = {};
 				for (const k of keys) {

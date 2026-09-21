@@ -59,7 +59,17 @@ import {
 	type SideEffectReceipt,
 	sideEffectSucceeded,
 } from "./delivery-bundle.ts";
-import { type DeliveryProofObservation, type DeliveryProofQuery, proveCommitAndPush } from "./delivery-proof.ts";
+import {
+	type DeliveryProofObservation,
+	type DeliveryProofQuery,
+	type DeployProofObservation,
+	type PublishProofObservation,
+	proveCommitAndPush,
+	proveDeployReceipt,
+	provePublishReceipt,
+	proveTagReceipt,
+	type TagProofObservation,
+} from "./delivery-proof.ts";
 import { completionFailuresToRepairWork, type RepairWork } from "./objective-repair-work.ts";
 import {
 	type ObjectiveRoute,
@@ -188,10 +198,13 @@ export interface ObjectiveExecutionControllerDeps {
 		tag?(name?: string): Promise<{ tag: string } | undefined>;
 		/** Observed HEAD, remote SHA, and candidate residue. No network call lives in the controller. */
 		proveDelivery?(query: DeliveryProofQuery): Promise<DeliveryProofObservation>;
+		proveTag?(tag: string): Promise<TagProofObservation>;
 	};
 	releaseExecutor?: {
 		publish?(): Promise<{ id: string } | undefined>;
 		deploy?(target: string): Promise<{ id: string } | undefined>;
+		provePublish?(publicationId: string): Promise<PublishProofObservation>;
+		proveDeploy?(target: string): Promise<DeployProofObservation>;
 	};
 	steeringPlane?: SystemOneSteeringPlane;
 	adaptiveResolution?: AdaptiveResolutionController;
@@ -418,6 +431,7 @@ export class ObjectiveExecutionController {
 				| "pendingSupervisionRequests"
 				| "consumePendingSupervisionRequest"
 				| "repoRoot"
+				| "gitExecutor"
 			>
 		>,
 	): void {
@@ -1284,12 +1298,16 @@ export class ObjectiveExecutionController {
 					if (evalResult.verdict === "complete") {
 						// 3. PH-152, FC-063: JEV-025 primary semantic completion (proof-bearing)
 						if (this.deps.steeringPlane) {
+							const description = String(objRecord?.objective?.description ?? "");
+							const bugFix =
+								objectiveId.toLowerCase().includes("bug") || description.toLowerCase().includes("bug");
 							const c25 = await this.deps.steeringPlane.requireCertificate(
 								"JEV-025",
 								{
 									...canonicalProofState,
 									mechanicalVerdict: evalResult.verdict,
 									evalResultDetails: evalResult,
+									bugFix,
 								},
 								{ objectiveId, evidenceRevision, signal },
 							);
@@ -1335,8 +1353,14 @@ export class ObjectiveExecutionController {
 							});
 							steeringCertRefs.push(c26.certificate_id);
 
-							const hiddenRegressions = (c26.answers.hidden_regressions as { value?: boolean })?.value === true;
-							if (c26.semantic_outcome !== "pass" || hiddenRegressions) {
+							const adverseChallengeIds = [
+								"hidden_regressions",
+								"plausible_regression_not_tested",
+								"missing_requirement",
+								"hidden_assumption",
+								"conclusion_overstates_evidence",
+							].filter((id) => (c26.answers[id] as { value?: boolean } | undefined)?.value === true);
+							if (c26.semantic_outcome !== "pass" || adverseChallengeIds.length > 0) {
 								if (this.deps.runtime.ensureRepairTasks) {
 									const repairs = completionFailuresToRepairWork(
 										(c26.failed_semantic_predicates ?? ["hidden_regressions_or_edge_concern"]).map((p) => ({
@@ -1348,7 +1372,7 @@ export class ObjectiveExecutionController {
 								}
 								const reasonCodes = [
 									"adversarial_completion_failed",
-									...(hiddenRegressions ? ["hidden_regressions"] : []),
+									...adverseChallengeIds,
 									...(c26.failed_semantic_predicates ?? []),
 								];
 								const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime, {
@@ -1433,6 +1457,11 @@ export class ObjectiveExecutionController {
 						let reportedPushRef: string | undefined;
 						let reportedPushRemote: string | undefined;
 						let pushError: string | undefined;
+						let reportedTag: string | undefined;
+						let tagError: string | undefined;
+						let reportedPublicationId: string | undefined;
+						let publishError: string | undefined;
+						const reportedDeploys: { target: string; id?: string; error?: string }[] = [];
 						if (activeCharter) {
 							if (activeCharter.git.commit) {
 								if (!this.deps.gitExecutor?.commit) {
@@ -1452,21 +1481,19 @@ export class ObjectiveExecutionController {
 							}
 							if (activeCharter.git.create_tag) {
 								if (!this.deps.gitExecutor?.tag) {
-									sideEffects.tag = { state: "failed", error: "Git tag unavailable" };
-								} else
+									tagError = "Git tag unavailable";
+								} else {
 									try {
 										const tagRes = await this.deps.gitExecutor.tag();
 										if (tagRes && typeof tagRes === "object" && "tag" in tagRes && tagRes.tag) {
-											sideEffects.tag = { state: "succeeded", detail: { tag: String(tagRes.tag) } };
+											reportedTag = String(tagRes.tag);
 										} else {
-											sideEffects.tag = { state: "failed", error: "Missing tag" };
+											tagError = "Missing tag";
 										}
 									} catch (error) {
-										sideEffects.tag = {
-											state: "failed",
-											error: error instanceof Error ? error.message : String(error),
-										};
+										tagError = error instanceof Error ? error.message : String(error);
 									}
+								}
 							}
 							if (activeCharter.git.push) {
 								if (!this.deps.gitExecutor?.push) {
@@ -1486,53 +1513,37 @@ export class ObjectiveExecutionController {
 							}
 							if (activeCharter.release.package_publish) {
 								if (!this.deps.releaseExecutor?.publish) {
-									sideEffects.publish = { state: "failed", error: "Package publish unavailable" };
-								} else
+									publishError = "Package publish unavailable";
+								} else {
 									try {
 										const pubRes = await this.deps.releaseExecutor.publish();
 										if (pubRes && typeof pubRes === "object" && "id" in pubRes && pubRes.id) {
-											sideEffects.publish = {
-												state: "succeeded",
-												detail: { publicationId: String(pubRes.id) },
-											};
+											reportedPublicationId = String(pubRes.id);
 										} else {
-											sideEffects.publish = { state: "failed", error: "Missing id" };
+											publishError = "Missing id";
 										}
 									} catch (error) {
-										sideEffects.publish = {
-											state: "failed",
-											error: error instanceof Error ? error.message : String(error),
-										};
+										publishError = error instanceof Error ? error.message : String(error);
 									}
+								}
 							}
 							if (activeCharter.release.deploy_targets.length > 0) {
 								if (!this.deps.releaseExecutor?.deploy) {
-									sideEffects.deploy = activeCharter.release.deploy_targets.map((target) => ({
-										state: "failed" as const,
-										detail: { target },
-										error: "Deploy unavailable",
-									}));
+									for (const target of activeCharter.release.deploy_targets) {
+										reportedDeploys.push({ target, error: "Deploy unavailable" });
+									}
 								} else {
-									sideEffects.deploy = [];
 									for (const target of activeCharter.release.deploy_targets) {
 										try {
 											const depRes = await this.deps.releaseExecutor.deploy(target);
 											if (depRes && typeof depRes === "object" && "id" in depRes && depRes.id) {
-												sideEffects.deploy.push({
-													state: "succeeded",
-													detail: { target, deploymentId: String(depRes.id) },
-												});
+												reportedDeploys.push({ target, id: String(depRes.id) });
 											} else {
-												sideEffects.deploy.push({
-													state: "failed",
-													detail: { target },
-													error: "Missing id",
-												});
+												reportedDeploys.push({ target, error: "Missing id" });
 											}
 										} catch (error) {
-											sideEffects.deploy.push({
-												state: "failed",
-												detail: { target },
+											reportedDeploys.push({
+												target,
 												error: error instanceof Error ? error.message : String(error),
 											});
 										}
@@ -1574,6 +1585,65 @@ export class ObjectiveExecutionController {
 						});
 						if (provenReceipts.commit) sideEffects.commit = provenReceipts.commit;
 						if (provenReceipts.push) sideEffects.push = provenReceipts.push;
+						if (activeCharter?.git.create_tag) {
+							let tagObservation: TagProofObservation | undefined;
+							if (reportedTag && tagError === undefined && this.deps.gitExecutor?.proveTag) {
+								try {
+									tagObservation = await this.deps.gitExecutor.proveTag(reportedTag);
+								} catch (error) {
+									tagError = error instanceof Error ? error.message : String(error);
+								}
+							}
+							const provenCommitSha =
+								sideEffects.commit?.state === "proven" ? sideEffects.commit.detail.sha : undefined;
+							sideEffects.tag = proveTagReceipt({
+								reportedTag,
+								tagError,
+								commitSha: provenCommitSha,
+								observation: tagObservation,
+							});
+						}
+						if (activeCharter?.release.package_publish) {
+							let publishObservation: PublishProofObservation | undefined;
+							if (
+								reportedPublicationId &&
+								publishError === undefined &&
+								this.deps.releaseExecutor?.provePublish
+							) {
+								try {
+									publishObservation = await this.deps.releaseExecutor.provePublish(reportedPublicationId);
+								} catch (error) {
+									publishError = error instanceof Error ? error.message : String(error);
+								}
+							}
+							sideEffects.publish = provePublishReceipt({
+								reportedId: reportedPublicationId,
+								error: publishError,
+								observation: publishObservation,
+							});
+						}
+						if (reportedDeploys.length > 0) {
+							sideEffects.deploy = [];
+							for (const deployment of reportedDeploys) {
+								let observation: DeployProofObservation | undefined;
+								let error = deployment.error;
+								if (deployment.id && error === undefined && this.deps.releaseExecutor?.proveDeploy) {
+									try {
+										observation = await this.deps.releaseExecutor.proveDeploy(deployment.target);
+									} catch (caught) {
+										error = caught instanceof Error ? caught.message : String(caught);
+									}
+								}
+								sideEffects.deploy.push(
+									proveDeployReceipt({
+										target: deployment.target,
+										reportedId: deployment.id,
+										error,
+										observation,
+									}),
+								);
+							}
+						}
 
 						const requiredReceiptFailed =
 							sideEffects.commit?.state === "failed" ||

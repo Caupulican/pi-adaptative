@@ -6,6 +6,7 @@ import {
 	SystemOneSteeringPlane,
 } from "../../../src/core/index.ts";
 import type { JevAdapter, JevEvaluationRequest, JevEvaluationResponse } from "../../../src/core/system-one/adapter.ts";
+import { ExecutionStore } from "../../../src/core/system-one/execution-state.ts";
 
 class TestJevAdapter implements JevAdapter {
 	async evaluate(request: JevEvaluationRequest): Promise<JevEvaluationResponse> {
@@ -28,7 +29,15 @@ class TestJevAdapter implements JevAdapter {
 						id === "release_risk_critical" ||
 						id === "unhandled_edge_cases" ||
 						id === "hidden_regressions" ||
-						id === "assumption_violations"
+						id === "assumption_violations" ||
+						id === "required_behavior_unverified" ||
+						id === "material_claim_unsupported" ||
+						id === "out_of_scope_change_present" ||
+						id === "duplicate_responsibility_introduced" ||
+						id === "missing_requirement" ||
+						id === "hidden_assumption" ||
+						id === "plausible_regression_not_tested" ||
+						id === "conclusion_overstates_evidence"
 					) {
 						answers[id] = { type: "noul", noul: 0.05 };
 					} else {
@@ -48,6 +57,8 @@ class TestJevAdapter implements JevAdapter {
 						selected = keys.includes("unique") ? "unique" : keys[0];
 					} else if (id === "route") {
 						selected = keys.includes("completion_candidate") ? "completion_candidate" : keys[0];
+					} else if (id === "completion_verdict" && keys.includes("complete")) {
+						selected = "complete";
 					}
 					const probs: Record<string, number> = {};
 					for (const k of keys) {
@@ -123,15 +134,26 @@ describe("regression: system-one-steering-runtime-bundle", () => {
 			gitExecutor: {
 				commit: async () => {
 					executedSideEffects.push("git:commit");
+					return { sha: "abc1234deadbeef" };
 				},
 				push: async () => {
 					executedSideEffects.push("git:push");
+					return { ref: "refs/heads/main", remote: "origin" };
 				},
+				proveDelivery: async () => ({
+					head: "abc1234deadbeef",
+					remote: "origin",
+					ref: "refs/heads/main",
+					observedSha: "abc1234deadbeef",
+					attributableResidue: [],
+				}),
 			},
 			releaseExecutor: {
 				deploy: async (target: string) => {
 					executedSideEffects.push(`deploy:${target}`);
+					return { id: "dep-1" };
 				},
+				proveDeploy: async (target: string) => ({ target, deploymentId: "dep-1" }),
 			},
 			decisions: {
 				evaluateOrFallback: async () =>
@@ -149,6 +171,13 @@ describe("regression: system-one-steering-runtime-bundle", () => {
 				evaluate: () => ({ disposition: "accept", reason: "ok", failedChecks: [] }),
 			} as any,
 			systemOne: {
+				adapter: { provenance: "native_calibrated" as const },
+				snapshot: () =>
+					new ExecutionStore({
+						run_id: "bundle",
+						objective: { request: "ship", normalized_goal: "ship", acceptance_criteria: [] },
+						repo: { root: "/workspace", baseline_revision: "r0" },
+					}).snapshot(),
 				async executeCompletionTransaction() {
 					return {
 						verdict: "complete",

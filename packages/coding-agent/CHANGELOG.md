@@ -12,6 +12,8 @@
 - JEV-026 failure returns terminal `unrecoverable` instead of resuming the route loop. The goal tool's semantic completion check does not persist terminal complete.
 - Omitted `persistTerminal` does not persist store complete. A required commit or push with no executor is a failed receipt, not a thrown `Git commit unavailable`.
 - A push receipt is proven only when its remote is the remote the delivery proof port observed. A reported remote that disagrees is not complete.
+- The live session commits and pushes through a local git delivery port and proves the resulting SHA. Tag, publish, and deploy receipts are proven by that same kind of observation instead of the executor's returned id alone.
+- Steering question packs are loaded with a normal import. JEV-025 and JEV-026 grade that completion catalog. A missing retired id such as `acceptance_satisfied` is not a failure.
 
 ## [0.99.38] - 2026-09-21
 

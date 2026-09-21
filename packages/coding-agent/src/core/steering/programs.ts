@@ -4,8 +4,10 @@
  * Implements typed Decision Kernel integration (PH-001..PH-005, PH-011, PH-066).
  */
 
-import type { DecisionDefinition } from "../decision/primitives.ts";
+import type { ChoiceOption, DecisionDefinition, ScoreLevel } from "../decision/primitives.ts";
 import { createDecisionProgram, type DecisionProgram } from "../decision/program.ts";
+import { getQuestionPack } from "../system-one/catalog.ts";
+import type { ValidationStage } from "../system-one/types.ts";
 import { canonicalDigest } from "./canonical.ts";
 import type { SteeringCertificateQuestionPackRef } from "./types.ts";
 
@@ -56,15 +58,42 @@ function compileCandidateFitChoices(
 	return options;
 }
 
-function _buildDecisionsFromPack(packName: any, decisions: any[]) {
-	const { getQuestionPack } = require("../system-one/catalog.ts");
-	const pack = getQuestionPack(packName);
-	for (const [id, q] of Object.entries(pack) as [string, any][]) {
-		decisions.push({
-			kind: q.type === "choice" ? "choice" : q.type === "score" ? "score" : "boolean",
-			id,
-			instruction: q.instructions,
-		});
+function buildDecisionsFromPack(stage: ValidationStage, decisions: DecisionDefinition[]): void {
+	const pack = getQuestionPack(stage);
+	for (const [id, question] of Object.entries(pack)) {
+		if (question.type === "choice") {
+			const options: Record<string, ChoiceOption> = {};
+			if (question.criteria && !Array.isArray(question.criteria)) {
+				for (const [key, description] of Object.entries(question.criteria)) {
+					options[key] = { description: String(description) };
+				}
+			}
+			if (Object.keys(options).length === 0) {
+				options.none = { description: "No catalog option" };
+			}
+			decisions.push({
+				kind: "choice",
+				id,
+				instruction: question.instructions,
+				options,
+			});
+		} else if (question.type === "score") {
+			const levels: ScoreLevel[] = Array.isArray(question.criteria)
+				? question.criteria.map((description, value) => ({ value, description: String(description) }))
+				: [{ value: 0, description: question.instructions }];
+			decisions.push({
+				kind: "score",
+				id,
+				instruction: question.instructions,
+				levels,
+			});
+		} else {
+			decisions.push({
+				kind: "boolean",
+				id,
+				instruction: question.instructions,
+			});
+		}
 	}
 }
 export function compileDecisionProgramForCheckpoint(checkpointId: string, state: unknown): DecisionProgram {
@@ -472,12 +501,12 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 		}
 
 		case "JEV-025": {
-			_buildDecisionsFromPack("completion", decisions);
+			buildDecisionsFromPack("completion", decisions);
 			break;
 		}
 
 		case "JEV-026": {
-			_buildDecisionsFromPack("completion_challenge", decisions);
+			buildDecisionsFromPack("completion_challenge", decisions);
 			break;
 		}
 

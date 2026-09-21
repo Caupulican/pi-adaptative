@@ -347,6 +347,7 @@ export class SystemOneSteeringPlane {
 		checkpointId: string,
 		answers: Record<string, unknown>,
 		directive: SteeringDirective,
+		state?: unknown,
 	): {
 		semantic_outcome: SteeringSemanticOutcome;
 		failed_semantic_predicates: readonly string[];
@@ -542,14 +543,34 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-025": {
-				if (!this.isTruthy(answers.acceptance_satisfied)) failed.push("acceptance_satisfied");
-				if (!this.isTruthy(answers.requirements_complete)) failed.push("requirements_complete");
-				if (!this.isTruthy(answers.verification_conclusive)) failed.push("verification_conclusive");
+				const record = state && typeof state === "object" ? (state as Record<string, unknown>) : {};
+				const bugFix = record.bugFix === true || record.isBugFix === true;
+				if (!this.isTruthy(answers.implementation_matches_goal)) failed.push("implementation_matches_goal");
+				if (bugFix && !this.isTruthy(answers.root_cause_addressed)) failed.push("root_cause_addressed");
+				if (this.isTruthy(answers.required_behavior_unverified)) failed.push("required_behavior_unverified");
+				if (this.isTruthy(answers.material_claim_unsupported)) failed.push("material_claim_unsupported");
+				if (this.isTruthy(answers.out_of_scope_change_present)) failed.push("out_of_scope_change_present");
+				if (this.isTruthy(answers.duplicate_responsibility_introduced))
+					failed.push("duplicate_responsibility_introduced");
+				if (this.getChoiceValue(answers.completion_verdict) !== "complete") failed.push("completion_verdict");
+				if (answers.acceptance_satisfied !== undefined && !this.isTruthy(answers.acceptance_satisfied)) {
+					failed.push("acceptance_satisfied");
+				}
+				if (answers.requirements_complete !== undefined && !this.isTruthy(answers.requirements_complete)) {
+					failed.push("requirements_complete");
+				}
+				if (answers.verification_conclusive !== undefined && !this.isTruthy(answers.verification_conclusive)) {
+					failed.push("verification_conclusive");
+				}
 				if (failed.length > 0) outcome = "repair";
 				break;
 			}
 
 			case "JEV-026": {
+				if (this.isTruthy(answers.missing_requirement)) failed.push("missing_requirement");
+				if (this.isTruthy(answers.hidden_assumption)) failed.push("hidden_assumption");
+				if (this.isTruthy(answers.plausible_regression_not_tested)) failed.push("plausible_regression_not_tested");
+				if (this.isTruthy(answers.conclusion_overstates_evidence)) failed.push("conclusion_overstates_evidence");
 				if (this.isTruthy(answers.unhandled_edge_cases)) failed.push("no_unhandled_edge_cases");
 				if (this.isTruthy(answers.hidden_regressions)) failed.push("no_hidden_regressions");
 				if (this.isTruthy(answers.assumption_violations)) failed.push("no_assumption_violations");
@@ -915,6 +936,7 @@ export class SystemOneSteeringPlane {
 			request.checkpointId,
 			answers,
 			directive,
+			request.state,
 		);
 
 		const certificate: SteeringCertificate = {

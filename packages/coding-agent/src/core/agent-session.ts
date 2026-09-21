@@ -172,6 +172,7 @@ import { ModelAdaptationStore, type ModelToolProbe } from "./models/adaptation-s
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import type { PrismLlamaCppRuntime } from "./models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "./models/local-runtime.ts";
+import { createRepoGitDelivery } from "./objective-execution/delivery-proof.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import { LedgerRouteCheckpoints } from "./objective-execution/ledger-route-checkpoints.ts";
 import { DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
@@ -2038,6 +2039,7 @@ export class AgentSession {
 				pendingSupervisionRequests: () => this._workerSupervision.getPendingRootRequests(),
 				consumePendingSupervisionRequest: (signalId) => this._workerSupervision.consumePendingRootRequest(signalId),
 				repoRoot: this._cwd,
+				gitExecutor: createRepoGitDelivery(this._cwd),
 				...(() => {
 					const systemOneController = this._systemOneController;
 					return systemOneController

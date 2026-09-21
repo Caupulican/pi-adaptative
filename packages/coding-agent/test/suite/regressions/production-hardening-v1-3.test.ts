@@ -35,6 +35,7 @@ import {
 	WaiverStore,
 } from "../../../src/core/index.ts";
 import type { JevAdapter, JevEvaluationRequest, JevEvaluationResponse } from "../../../src/core/system-one/adapter.ts";
+import { ExecutionStore } from "../../../src/core/system-one/execution-state.ts";
 
 class MockTypedJevAdapter implements JevAdapter {
 	evaluateCalls: JevEvaluationRequest[] = [];
@@ -66,6 +67,13 @@ class MockTypedJevAdapter implements JevAdapter {
 						id === "unhandled_edge_cases" ||
 						id === "hidden_regressions" ||
 						id === "assumption_violations" ||
+						id === "required_behavior_unverified" ||
+						id === "material_claim_unsupported" ||
+						id === "out_of_scope_change_present" ||
+						id === "missing_requirement" ||
+						id === "hidden_assumption" ||
+						id === "plausible_regression_not_tested" ||
+						id === "conclusion_overstates_evidence" ||
 						id === "duplicate_responsibility_introduced" ||
 						id === "unintentional_duplicate_remaining"
 					) {
@@ -87,6 +95,8 @@ class MockTypedJevAdapter implements JevAdapter {
 						selected = keys.includes("unique") ? "unique" : keys[0];
 					} else if (id === "route") {
 						selected = keys.includes("completion_candidate") ? "completion_candidate" : keys[0];
+					} else if (id === "completion_verdict" && keys.includes("complete")) {
+						selected = "complete";
 					}
 					const probs: Record<string, number> = {};
 					for (const k of keys) {
@@ -688,21 +698,39 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 				gitExecutor: {
 					commit: async () => {
 						executedSideEffects.push("git:commit");
+						return { sha: "abc1234deadbeef" };
 					},
 					push: async () => {
 						executedSideEffects.push("git:push");
+						return { ref: "refs/heads/main", remote: "origin" };
 					},
+					proveDelivery: async () => ({
+						head: "abc1234deadbeef",
+						remote: "origin",
+						ref: "refs/heads/main",
+						observedSha: "abc1234deadbeef",
+						attributableResidue: [],
+					}),
 				},
 				releaseExecutor: {
 					deploy: async (target: string) => {
 						executedSideEffects.push(`deploy:${target}`);
+						return { id: "dep-1" };
 					},
+					proveDeploy: async (target: string) => ({ target, deploymentId: "dep-1" }),
 				},
 				actionPolicy: {
 					evaluateChoice: () => ({ action: "accept", reason: "ok" }),
 					evaluate: () => ({ disposition: "accept", reason: "ok", failedChecks: [] }),
 				} as any,
 				systemOne: {
+					adapter: { provenance: "native_calibrated" as const },
+					snapshot: () =>
+						new ExecutionStore({
+							run_id: "e2e-complete",
+							objective: { request: "ship", normalized_goal: "ship", acceptance_criteria: [] },
+							repo: { root: "/workspace", baseline_revision: "r0" },
+						}).snapshot(),
 					async executeCompletionTransaction() {
 						return {
 							verdict: "complete",
@@ -756,6 +784,13 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 					evaluate: () => ({ disposition: "accept", reason: "ok", failedChecks: [] }),
 				} as any,
 				systemOne: {
+					adapter: { provenance: "native_calibrated" as const },
+					snapshot: () =>
+						new ExecutionStore({
+							run_id: "e2e-no-executor",
+							objective: { request: "ship", normalized_goal: "ship", acceptance_criteria: [] },
+							repo: { root: "/workspace", baseline_revision: "r0" },
+						}).snapshot(),
 					async executeCompletionTransaction() {
 						return {
 							verdict: "complete",
@@ -768,7 +803,9 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 				},
 			});
 
-			await expect(controller.run("obj-e2e-no-executor")).rejects.toThrow(/gitExecutor\.commit is unavailable/);
+			const result = await controller.run("obj-e2e-no-executor");
+			expect(result.status).not.toBe("complete");
+			expect(result.deliveryBundle?.side_effects?.commit?.state).toBe("failed");
 		});
 	});
 
