@@ -8,7 +8,9 @@
 - Bundle reviewed head: `565098ec453b69495322aa3cd4207ac8aac0fa5c`
 - Broken release baseline: `2b6de7054bcdb130bc90347707cbb3ba87b9bb05`
 - Current branch: `main`
-- Current HEAD: `565098ec453b69495322aa3cd4207ac8aac0fa5c` (pre-repair; recovery commit follows)
+- Current HEAD: `56571b576`
+- Recovery commit: `56571b576` (`fix(system-one): gates read live objective truth and Jev outcomes control the next route`)
+- Reviewed baseline still: `565098ec453b69495322aa3cd4207ac8aac0fa5c`
 - Last updated: 2026-09-20
 - Agent/run identifier: grok-goal-5b3e99df1a5e
 
@@ -117,7 +119,7 @@ Jev **is** the active semantic gate on the production tool-admission path and on
 - command: targeted vitest twice (`wo09-run1.log`, `wo09-run2.log`) — 88 passed / 88 passed
 - command: `npm run check` — exit 0
 - command: `check:release-readiness`, `check:contract-doctrine`, `check:clones`, `check:coordinator-boundaries` — all exit 0
-- commit: pending local recovery commit; GitHub `ci.yml` not run (no push)
+- commit: `56571b576`; GitHub `ci.yml` not run (no push)
 
 ## Resume next action
 
