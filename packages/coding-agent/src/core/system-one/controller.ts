@@ -667,23 +667,14 @@ export class SystemOneController {
 			}
 		}
 
-		// 6. Update state phase according to verdict. Inner semantic evaluation
-		// (persistTerminal: false) must not independently set terminal complete.
-		// Terminal complete itself goes through commitTerminalCompletion only.
-		const persistTerminal = options?.persistTerminal !== false;
-		if (finalVerdict.verdict === "complete" && persistTerminal) {
-			await this.commitTerminalCompletion(
-				{
-					objectiveId: this.store.runId,
-					candidateDigest: `semantic:${this.store.runId}`,
-				},
-				{ signal: options?.signal },
-			);
-		} else if (finalVerdict.verdict === "blocked_external") {
+		// 6. Update state phase according to verdict. Omitted or explicit
+		// persistTerminal does not persist terminal complete. Only
+		// commitTerminalCompletion, called by the outer objective finalization, does.
+		if (finalVerdict.verdict === "blocked_external") {
 			this.store.transitionPhase("blocked_external", true);
 		} else if (finalVerdict.verdict === "rework") {
 			this.store.transitionPhase("replan_required", true);
-		} else {
+		} else if (this.store.phase !== "complete") {
 			this.store.transitionPhase("verifying", true);
 		}
 

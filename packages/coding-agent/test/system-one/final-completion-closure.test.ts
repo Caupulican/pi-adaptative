@@ -119,7 +119,7 @@ async function deliver(options?: {
 	readonly observedSha?: string;
 	readonly residue?: readonly string[];
 	readonly push?: "ok" | "throw";
-	readonly grants?: boolean;
+	readonly grants?: boolean | "missing";
 	readonly wireTerminal?: boolean;
 	readonly calibrated?: boolean;
 	readonly profile?: "mechanical" | "semantic_enhanced" | "mechanical_plus_reviewer" | "system_one_required";
@@ -167,20 +167,24 @@ async function deliver(options?: {
 						prompt: "ship",
 						initialGrants: { git: { commit: true, push: true } },
 					}),
-					gitExecutor: {
-						commit: async () => ({ sha }),
-						push: async () => {
-							if (options?.push === "throw") throw new Error("rejected");
-							return { ref: "refs/heads/main", remote: "origin" };
-						},
-						proveDelivery: async () => ({
-							head,
-							remote: "origin",
-							ref: "refs/heads/main",
-							observedSha,
-							attributableResidue: options?.residue ?? [],
-						}),
-					},
+					...(options?.grants === "missing"
+						? {}
+						: {
+								gitExecutor: {
+									commit: async () => ({ sha }),
+									push: async () => {
+										if (options?.push === "throw") throw new Error("rejected");
+										return { ref: "refs/heads/main", remote: "origin" };
+									},
+									proveDelivery: async () => ({
+										head,
+										remote: "origin",
+										ref: "refs/heads/main",
+										observedSha,
+										attributableResidue: options?.residue ?? [],
+									}),
+								},
+							}),
 				}
 			: {}),
 		...(options?.boundSystemOne === false
@@ -314,6 +318,18 @@ describe("FC-01 terminal complete", () => {
 		});
 		expect(result?.status).not.toBe("complete");
 		expect(store.phase).not.toBe("complete");
+	});
+
+	it("required commit and push without an executor do not throw and are not complete", async () => {
+		const { result, store } = await deliver({
+			profile: "mechanical",
+			steeringMode: "system_one_optional",
+			grants: "missing",
+		});
+		expect(result?.status).not.toBe("complete");
+		expect(store.phase).not.toBe("complete");
+		expect(result?.deliveryBundle?.side_effects?.commit?.state).toBe("failed");
+		expect(result?.deliveryBundle?.side_effects?.push?.state).toBe("failed");
 	});
 
 	it("rejects terminal completion from an invalid phase", async () => {

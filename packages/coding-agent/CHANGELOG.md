@@ -10,6 +10,7 @@
 - JEV-025 failure after an inner semantic completion pass returns terminal `unrecoverable` and leaves the execution store non-complete. It no longer `break`s back into the route loop, which could hang `run()` when the next cycle still selected `completion_candidate`.
 - Outer objective completion persists System One phase `complete` once, after required receipts and JEV-027. A weaker completion profile cannot downgrade active `system_one_required` steering. A required commit or push is complete only when the delivery proof port shows HEAD and the observed remote SHA are that commit and no candidate residue remains.
 - JEV-026 failure returns terminal `unrecoverable` instead of resuming the route loop. The goal tool's semantic completion check does not persist terminal complete.
+- Omitted `persistTerminal` does not persist store complete. A required commit or push with no executor is a failed receipt, not a thrown `Git commit unavailable`.
 
 ## [0.99.38] - 2026-09-21
 

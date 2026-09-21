@@ -267,7 +267,7 @@ describe("System One Completion Gate", () => {
 		const result = await controller.executeCompletionTransaction(true);
 		expect(result.verdict).toBe("complete");
 		expect(result.failed_gates).toHaveLength(0);
-		// Harness successfully transitioned to complete (R-002)
-		expect(store.phase).toBe("complete");
+		// Omitted persistTerminal does not persist the store. Outer finalization does.
+		expect(store.phase).not.toBe("complete");
 	});
 });

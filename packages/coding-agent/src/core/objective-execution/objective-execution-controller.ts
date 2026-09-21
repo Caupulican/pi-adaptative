@@ -1435,91 +1435,107 @@ export class ObjectiveExecutionController {
 						let pushError: string | undefined;
 						if (activeCharter) {
 							if (activeCharter.git.commit) {
-								if (!this.deps.gitExecutor?.commit) throw new Error("Git commit unavailable");
-								try {
-									const commitRes = await this.deps.gitExecutor.commit();
-									if (commitRes && typeof commitRes === "object" && "sha" in commitRes && commitRes.sha) {
-										reportedCommitSha = String(commitRes.sha);
-									} else {
-										commitError = "Missing sha";
+								if (!this.deps.gitExecutor?.commit) {
+									commitError = "Git commit unavailable";
+								} else {
+									try {
+										const commitRes = await this.deps.gitExecutor.commit();
+										if (commitRes && typeof commitRes === "object" && "sha" in commitRes && commitRes.sha) {
+											reportedCommitSha = String(commitRes.sha);
+										} else {
+											commitError = "Missing sha";
+										}
+									} catch (error) {
+										commitError = error instanceof Error ? error.message : String(error);
 									}
-								} catch (error) {
-									commitError = error instanceof Error ? error.message : String(error);
 								}
 							}
 							if (activeCharter.git.create_tag) {
-								if (!this.deps.gitExecutor?.tag) throw new Error("Git tag unavailable");
-								try {
-									const tagRes = await this.deps.gitExecutor.tag();
-									if (tagRes && typeof tagRes === "object" && "tag" in tagRes && tagRes.tag) {
-										sideEffects.tag = { state: "succeeded", detail: { tag: String(tagRes.tag) } };
-									} else {
-										sideEffects.tag = { state: "failed", error: "Missing tag" };
+								if (!this.deps.gitExecutor?.tag) {
+									sideEffects.tag = { state: "failed", error: "Git tag unavailable" };
+								} else
+									try {
+										const tagRes = await this.deps.gitExecutor.tag();
+										if (tagRes && typeof tagRes === "object" && "tag" in tagRes && tagRes.tag) {
+											sideEffects.tag = { state: "succeeded", detail: { tag: String(tagRes.tag) } };
+										} else {
+											sideEffects.tag = { state: "failed", error: "Missing tag" };
+										}
+									} catch (error) {
+										sideEffects.tag = {
+											state: "failed",
+											error: error instanceof Error ? error.message : String(error),
+										};
 									}
-								} catch (error) {
-									sideEffects.tag = {
-										state: "failed",
-										error: error instanceof Error ? error.message : String(error),
-									};
-								}
 							}
 							if (activeCharter.git.push) {
-								if (!this.deps.gitExecutor?.push) throw new Error("Git push unavailable");
-								try {
-									const pushRes = await this.deps.gitExecutor.push();
-									if (pushRes && typeof pushRes === "object" && "ref" in pushRes && pushRes.ref) {
-										reportedPushRef = String(pushRes.ref);
-										if ("remote" in pushRes && pushRes.remote) reportedPushRemote = String(pushRes.remote);
-									} else {
-										pushError = "Missing ref";
+								if (!this.deps.gitExecutor?.push) {
+									pushError = "Git push unavailable";
+								} else
+									try {
+										const pushRes = await this.deps.gitExecutor.push();
+										if (pushRes && typeof pushRes === "object" && "ref" in pushRes && pushRes.ref) {
+											reportedPushRef = String(pushRes.ref);
+											if ("remote" in pushRes && pushRes.remote) reportedPushRemote = String(pushRes.remote);
+										} else {
+											pushError = "Missing ref";
+										}
+									} catch (error) {
+										pushError = error instanceof Error ? error.message : String(error);
 									}
-								} catch (error) {
-									pushError = error instanceof Error ? error.message : String(error);
-								}
 							}
 							if (activeCharter.release.package_publish) {
-								if (!this.deps.releaseExecutor?.publish) throw new Error("Package publish unavailable");
-								try {
-									const pubRes = await this.deps.releaseExecutor.publish();
-									if (pubRes && typeof pubRes === "object" && "id" in pubRes && pubRes.id) {
+								if (!this.deps.releaseExecutor?.publish) {
+									sideEffects.publish = { state: "failed", error: "Package publish unavailable" };
+								} else
+									try {
+										const pubRes = await this.deps.releaseExecutor.publish();
+										if (pubRes && typeof pubRes === "object" && "id" in pubRes && pubRes.id) {
+											sideEffects.publish = {
+												state: "succeeded",
+												detail: { publicationId: String(pubRes.id) },
+											};
+										} else {
+											sideEffects.publish = { state: "failed", error: "Missing id" };
+										}
+									} catch (error) {
 										sideEffects.publish = {
-											state: "succeeded",
-											detail: { publicationId: String(pubRes.id) },
+											state: "failed",
+											error: error instanceof Error ? error.message : String(error),
 										};
-									} else {
-										sideEffects.publish = { state: "failed", error: "Missing id" };
 									}
-								} catch (error) {
-									sideEffects.publish = {
-										state: "failed",
-										error: error instanceof Error ? error.message : String(error),
-									};
-								}
 							}
 							if (activeCharter.release.deploy_targets.length > 0) {
-								if (!this.deps.releaseExecutor?.deploy) throw new Error("Deploy unavailable");
-								sideEffects.deploy = [];
-								for (const target of activeCharter.release.deploy_targets) {
-									try {
-										const depRes = await this.deps.releaseExecutor.deploy(target);
-										if (depRes && typeof depRes === "object" && "id" in depRes && depRes.id) {
-											sideEffects.deploy.push({
-												state: "succeeded",
-												detail: { target, deploymentId: String(depRes.id) },
-											});
-										} else {
+								if (!this.deps.releaseExecutor?.deploy) {
+									sideEffects.deploy = activeCharter.release.deploy_targets.map((target) => ({
+										state: "failed" as const,
+										detail: { target },
+										error: "Deploy unavailable",
+									}));
+								} else {
+									sideEffects.deploy = [];
+									for (const target of activeCharter.release.deploy_targets) {
+										try {
+											const depRes = await this.deps.releaseExecutor.deploy(target);
+											if (depRes && typeof depRes === "object" && "id" in depRes && depRes.id) {
+												sideEffects.deploy.push({
+													state: "succeeded",
+													detail: { target, deploymentId: String(depRes.id) },
+												});
+											} else {
+												sideEffects.deploy.push({
+													state: "failed",
+													detail: { target },
+													error: "Missing id",
+												});
+											}
+										} catch (error) {
 											sideEffects.deploy.push({
 												state: "failed",
 												detail: { target },
-												error: "Missing id",
+												error: error instanceof Error ? error.message : String(error),
 											});
 										}
-									} catch (error) {
-										sideEffects.deploy.push({
-											state: "failed",
-											detail: { target },
-											error: error instanceof Error ? error.message : String(error),
-										});
 									}
 								}
 							}
