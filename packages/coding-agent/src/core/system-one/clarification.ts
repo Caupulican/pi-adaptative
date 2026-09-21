@@ -34,8 +34,17 @@ export interface ClarificationDecisionEngine {
 		state?: Record<string, unknown>,
 		options?: { consequence?: string; signal?: AbortSignal },
 	): Promise<{
-		answers?: Record<string, { type?: string; noul?: number; choice?: string; value?: boolean | number }>;
-		results?: Record<string, { kind?: string; confidence?: { value?: number }; selected?: unknown }>;
+		answers?: Record<string, any>;
+		results?: Record<
+			string,
+			{
+				kind?: string;
+				confidence?: { value?: number };
+				selected?: unknown;
+				value?: boolean;
+				probabilityTrue?: number;
+			}
+		>;
 	}>;
 }
 
@@ -88,14 +97,11 @@ export function clarificationQuestionIdentity(text: string): string {
 	return text.replace(/\s+/gu, " ").trim().toLowerCase();
 }
 
-function readBoolean(
-	answers: Record<string, { type?: string; noul?: number; choice?: string; value?: boolean | number }> | undefined,
-	id: string,
-): boolean | undefined {
-	const answer = answers?.[id];
-	if (!answer) return undefined;
-	if (typeof answer.value === "boolean") return answer.value;
-	if (typeof answer.noul === "number") return answer.noul >= SEMANTIC_TRUE_THRESHOLD;
+function readBoolean(results: Record<string, any> | undefined, id: string): boolean | undefined {
+	const res = results?.[id];
+	if (!res) return undefined;
+	if (typeof res.probabilityTrue === "number") return res.probabilityTrue >= SEMANTIC_TRUE_THRESHOLD;
+	if (typeof res.value === "boolean") return res.value;
 	return undefined;
 }
 
@@ -183,7 +189,7 @@ export async function evaluateClarificationNeed(input: ClarificationNeedInput): 
 			consequence: "high",
 			signal: input.signal,
 		});
-		answers = evaluation.answers;
+		answers = (evaluation.results ?? evaluation.answers) as any;
 	} catch (error) {
 		return {
 			decision: "ask",

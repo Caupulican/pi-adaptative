@@ -49,10 +49,10 @@ function noulOf(value: unknown): number | undefined {
 	if (value === true) return 1;
 	if (value === false) return 0;
 	if (value && typeof value === "object") {
-		const record = value as { noul?: unknown; value?: unknown; probabilityTrue?: unknown };
-		if (typeof record.noul === "number" && Number.isFinite(record.noul)) return record.noul;
+		const record = value as { probabilityTrue?: unknown; noul?: unknown; value?: unknown };
 		if (typeof record.probabilityTrue === "number" && Number.isFinite(record.probabilityTrue))
 			return record.probabilityTrue;
+		if (typeof record.noul === "number" && Number.isFinite(record.noul)) return record.noul;
 		if (typeof record.value === "number" && Number.isFinite(record.value)) return record.value;
 		if (record.value === true) return 1;
 		if (record.value === false) return 0;
@@ -238,7 +238,7 @@ export class WorkerSemanticSupervisor {
 						signal,
 					});
 					answers = requireSupervisionAnswers(
-						(evalRes.answers ?? (evalRes.results as Record<string, unknown>) ?? {}) as Record<string, unknown>,
+						(evalRes.results ?? evalRes.answers ?? {}) as Record<string, unknown>,
 					);
 				} else {
 					// Unbound supervisor (tests / no plane): local stall/repeat heuristics, never empty answers.
