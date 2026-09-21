@@ -69,6 +69,26 @@ describe("System One StateProjector", () => {
 		expect(externalUntrusted.trust).toBe("external_untrusted_text");
 	});
 
+	it("projects a tool-gate step only from a real plan step or goal, never from an empty objective", () => {
+		const request = { tool: "typesafe_review", intent: "Invoke tool typesafe_review", impact: "read_only" as const };
+		const plain = new ExecutionStore({
+			run_id: "plain-session",
+			objective: { request: "", normalized_goal: "", acceptance_criteria: [] },
+			repo: { root: "/repo", baseline_revision: "rev-1" },
+		});
+		const projector = new StateProjector();
+		expect(projector.toolGate(plain.snapshot(), request)).not.toHaveProperty("current_step");
+
+		const withGoal = new ExecutionStore({
+			run_id: "goal-session",
+			objective: { request: "Fix the parser", normalized_goal: "Fix the parser", acceptance_criteria: [] },
+			repo: { root: "/repo", baseline_revision: "rev-1" },
+		});
+		expect(projector.toolGate(withGoal.snapshot(), request)).toMatchObject({
+			current_step: { goal: "Fix the parser" },
+		});
+	});
+
 	it("builds a cold completion projection from authoritative state, not worker summary (R-048, R-049)", () => {
 		const store = new ExecutionStore({
 			run_id: "cold-completion-run",

@@ -32,6 +32,18 @@ export interface SessionForegroundControlDeps {
 
 export const SYSTEM_ONE_ABORT_PREFIX = "system_one:";
 
+/**
+ * The System One reason inside an aborted assistant message's error text, which the agent loop
+ * writes as `… (system_one:<reason>)`; undefined for an operator or harness abort.
+ */
+export function systemOneAbortReason(errorMessage: string | undefined): string | undefined {
+	if (!errorMessage) return undefined;
+	const start = errorMessage.indexOf(`(${SYSTEM_ONE_ABORT_PREFIX}`);
+	if (start < 0) return undefined;
+	const reason = errorMessage.slice(start + SYSTEM_ONE_ABORT_PREFIX.length + 1).replace(/\)$/, "");
+	return reason.length > 0 ? reason : undefined;
+}
+
 export function createSessionForegroundControl(deps: SessionForegroundControlDeps): SystemOneForegroundControl {
 	return {
 		cancelTurn(reason) {

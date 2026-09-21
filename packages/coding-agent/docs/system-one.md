@@ -47,9 +47,14 @@ event:
   is idle; a worker's attempt is interrupted, the directive queued on its mailbox, and the attempt
   resumed.
 
-The tool gate uses them: a `replan` verdict cancels the turn so the loop routes again, a `confirm`
-verdict queues a scope steer and allows the call. The worker supervisor redirects a worker judged off
-the mission now, steers a stalled one at its next turn, and reroutes a repeated stall.
+The tool gate does not pull the cancel lever: a `replan` verdict refuses that one call (the rest of
+the batch and the operator's turn continue; the verdict is ledger evidence the objective loop routes
+on at its next cycle), and a `confirm` verdict queues a scope steer and allows the call. Relevance is
+judged only against a real plan step or goal; a plain session with no objective is never asked
+whether a call is relevant to nothing. Inside the objective loop a System One cancel of the root's
+own turn is a re-route (the next cycle routes again); only the operator's interruption stops the
+loop. The worker supervisor redirects a worker judged off the mission now, steers a stalled one at
+its next turn, and reroutes a repeated stall.
 
 ## The decision ledger
 

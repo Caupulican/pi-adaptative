@@ -20,6 +20,7 @@ import type { ObjectiveRoute, ObjectiveTerminalResult } from "../objective-execu
 import { budgetedTokens } from "../orchestration/capability-gateway.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
+import { systemOneAbortReason } from "../system-one/foreground-control.ts";
 import { buildObjectiveRoutePrompt, GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
 import {
 	GoalBudgetExhaustedError,
@@ -190,6 +191,12 @@ export class GoalSessionController {
 			if (PROVIDER_FAILURE_REASONS.has(classified.reason)) {
 				return { outcome: "errored", errorMessage: lastAssistant.errorMessage };
 			}
+		}
+		if (lastAssistant?.stopReason === "aborted") {
+			// System One's own cancel names itself in the aborted message; the loop routes again.
+			// Every other abort is the operator's (or the harness's) and stops the loop.
+			const rerouted = systemOneAbortReason(lastAssistant.errorMessage);
+			if (rerouted !== undefined) return { outcome: "rerouted", errorMessage: rerouted };
 		}
 		return { outcome: isInterruptedAssistantStopReason(lastAssistant?.stopReason) ? "interrupted" : "completed" };
 	}
@@ -733,6 +740,11 @@ export class GoalSessionController {
 				});
 				const outcome = this.getContinuationTurnOutcome(firstTurnEntryIndex);
 				if (outcome.outcome === "interrupted") throw new ObjectiveRootTurnInterruptedError();
+				if (outcome.outcome === "rerouted") {
+					// The route ran until System One cancelled it; the next cycle routes on the ledger.
+					this.deps.emitWarning(`System One re-routed the root turn: ${outcome.errorMessage ?? "cancelled"}`);
+					return;
+				}
 				if (outcome.outcome === "errored")
 					throw new ObjectiveRootTurnErroredError(outcome.errorMessage ?? "provider error");
 			},

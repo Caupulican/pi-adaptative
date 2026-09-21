@@ -612,9 +612,13 @@ Pinned by `packages/coding-agent/test/goal-session-primary-loop.test.ts` and
 path, a named abort). A steer is either queued for the next model turn or delivered now by
 interrupting the running turn and sending it once the foreground is idle; for a worker, "now"
 interrupts the attempt, queues the directive on its mailbox and resumes it. Both work from inside the
-running turn and every directive is an operator event. The tool gate's replan verdict cancels the
-turn so the loop routes again; its confirm verdict queues a scope steer; a worker judged off the
-mission is redirected now, a stalled one at its next turn, a repeated stall rerouted.
+running turn and every directive is an operator event. The tool gate never pulls the cancel lever:
+its replan verdict refuses that one call (the batch and the operator's turn continue, and the
+objective loop re-routes on the ledger at its next cycle), its confirm verdict queues a scope steer,
+and relevance is judged only against a real step or goal, never against an empty objective. A
+System One cancel of the root's own turn inside the objective loop is a re-route, not a stop; only
+the operator's interruption stops the loop. A worker judged off the mission is redirected now, a
+stalled one at its next turn, a repeated stall rerouted.
 Pinned by `packages/coding-agent/test/system-one-foreground-control.test.ts` and
 `packages/coding-agent/test/system-one-worker-control.test.ts`.
 
@@ -757,6 +761,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-21 | The tool gate's replan verdict refuses one call and never cancels the turn; relevance is judged only against a real step or goal; a System One cancel of the root turn inside the objective loop is a re-route, the operator's interruption a stop. |
 | 2026-09-21 | `decision_ledger_read` joins the default root tool surface with its own 100-token schema allowance; aggregate ceiling 5,670, base subtotal unchanged at 4,500. |
 | 2026-09-21 | System One integration: `objective_primary` drives the goal loop (root and workers as routed executors, completion only through the coordinator, goal follows the objective's terminal), cancel/steer levers for the root and for workers, and the decision ledger as a route input. New section "System One". |
 | 2026-09-17 | Provider completion retains its admitted account identity. Successful recovery requires a request start strictly newer than the stored cooldown, so late or unowned successes cannot erase sibling limits. Cancellation during transport creation releases admission immediately. |

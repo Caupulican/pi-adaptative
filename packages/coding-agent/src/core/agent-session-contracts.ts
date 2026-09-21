@@ -368,11 +368,13 @@ export interface GoalContinuationOnceResult {
 
 /**
  * How a submitted continuation turn ended. `interrupted` is an owner abort and leaves the goal
- * untouched; `errored` is the provider failing after the loop's own retries, which the goal must
- * record instead of staying silently `active` until someone reopens the session.
+ * untouched; `rerouted` is System One's own cancel of the turn (a named `system_one:` abort), which
+ * the objective loop answers by routing again at its next cycle; `errored` is the provider failing
+ * after the loop's own retries, which the goal must record instead of staying silently `active`
+ * until someone reopens the session.
  */
 export interface GoalContinuationTurnOutcome {
-	outcome: "completed" | "interrupted" | "errored";
+	outcome: "completed" | "interrupted" | "rerouted" | "errored";
 	errorMessage?: string;
 }
 

@@ -66,6 +66,9 @@ describe("System One foreground control", () => {
 			await harness.session.prompt("Check the tree");
 			const assistants = harness.session.agent.state.messages.filter((message) => message.role === "assistant");
 			expect(assistants.at(-1)?.stopReason).toBe("aborted");
+			// The cancel names itself in the transcript: the operator sees who aborted and why, and the
+			// objective loop tells a System One re-route from an operator interruption by this text.
+			expect(assistants.at(-1)?.errorMessage).toBe("Operation aborted (system_one:replan: off-step tool call)");
 			const directives = harness.session.operatorProjection
 				.getVisibleEvents()
 				.filter((event) => event.title === "System One directed root")

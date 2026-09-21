@@ -95,7 +95,7 @@ describe("ToolGateController publishes one gate outcome per tool call", () => {
 		]);
 	});
 
-	it("System One's replan verdict cancels the turn at once and blocks the call; confirm queues a steer and allows", async () => {
+	it("System One's replan verdict blocks that one call and never touches the turn; confirm queues a steer and allows", async () => {
 		const { cwd } = scope();
 		const directives: string[] = [];
 		let outcome: "replan" | "confirm" = "replan";
@@ -126,9 +126,10 @@ describe("ToolGateController publishes one gate outcome per tool call", () => {
 				undefined,
 			);
 		const blocked = await call({ path: "src/a.ts" });
-		expect(blocked).toMatchObject({ block: true });
-		expect((blocked as { reason: string }).reason).toContain("cancelled this turn to re-route");
-		expect(directives).toEqual(["cancel:replan: off the current step"]);
+		expect(blocked).toMatchObject({ block: true, reason: "System One asks to re-plan: off the current step" });
+		// The cancel lever is never pulled by the gate: a replan verdict is one refused call, the
+		// batch and the operator's turn continue, and the objective loop re-routes on the ledger.
+		expect(directives).toEqual([]);
 		outcome = "confirm";
 		expect(await call({ path: "src/a.ts" })).toBeUndefined();
 		expect(directives.at(-1)).toMatch(/^steer:queue:System One: the read call/);

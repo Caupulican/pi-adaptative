@@ -143,10 +143,19 @@ export function decidePreflight(
  * R-034: Tool authorization MUST be decided by deterministic capability, ownership, path, environment.
  * Evaluates tool_call_relevant, tool_call_semantic_scope_risk, repo_text_injection_like.
  */
+export interface ToolGateDecisionOptions {
+	/**
+	 * Whether the projection carried a `current_step` for the relevance question to compare against.
+	 * Without one (a plain session with no objective) the relevance answer is not evidence of anything.
+	 */
+	relevanceEvaluable?: boolean;
+}
+
 export function decideToolGate(
 	answers: Record<string, unknown>,
 	impact: ToolImpact,
 	config: SystemOneConfig = DEFAULT_SYSTEM_ONE_CONFIG,
+	options: ToolGateDecisionOptions = {},
 ): "allow" | "confirm" | "block" | "replan" {
 	// Check prompt injection first
 	const injectionAns = (answers.repo_text_injection_like as { noul?: number } | undefined)?.noul ?? 0;
@@ -156,11 +165,13 @@ export function decideToolGate(
 		return "block";
 	}
 
-	// Tool relevance
-	const relevantAns = (answers.tool_call_relevant as { noul?: number } | undefined)?.noul ?? 0;
-	const relevantEval = evaluateNoul(relevantAns, "required_true", config.thresholds);
-	if (relevantEval === "hard_fail") {
-		return "replan";
+	// Tool relevance, only when there was a step to be relevant to.
+	if (options.relevanceEvaluable !== false) {
+		const relevantAns = (answers.tool_call_relevant as { noul?: number } | undefined)?.noul ?? 0;
+		const relevantEval = evaluateNoul(relevantAns, "required_true", config.thresholds);
+		if (relevantEval === "hard_fail") {
+			return "replan";
+		}
 	}
 
 	// Semantic scope risk score (0 to 3)

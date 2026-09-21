@@ -169,16 +169,17 @@ export class StateProjector {
 		state: ExecutionState,
 		toolRequest: { tool: string; intent: string; impact: ToolImpact; args?: unknown },
 	): Record<string, unknown> {
-		const activeStep = state.plan.steps.find((s) => s.status === "active") || {
-			goal: state.objective.normalized_goal,
-		};
+		// A plain session has no objective (empty normalized goal) and no plan step; asking whether a
+		// call is relevant to nothing yields "not relevant" for every call. Relevance is evaluable
+		// only against a real step or a real goal, and the projection says so by omitting the step.
+		const activeStep = state.plan.steps.find((s) => s.status === "active");
+		const stepGoal = activeStep?.goal ?? state.objective.normalized_goal;
+		const currentStep = stepGoal.trim().length > 0 ? { goal: this._redact(stepGoal) } : undefined;
 
 		const untrustedText = toolRequest.args ? this._redact(JSON.stringify(toolRequest.args)) : "";
 
 		return {
-			current_step: {
-				goal: this._redact(activeStep.goal),
-			},
+			...(currentStep ? { current_step: currentStep } : {}),
 			tool_request: {
 				tool: toolRequest.tool,
 				intent: this._redact(toolRequest.intent),

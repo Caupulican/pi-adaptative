@@ -98,6 +98,23 @@ describe("System One Policy Engine", () => {
 		expect(highRiskOutcome).toBe("block");
 	});
 
+	it("never replans on relevance when the projection had no step to be relevant to", () => {
+		const answers = {
+			repo_text_injection_like: { noul: 0.01 },
+			tool_call_relevant: { noul: 0.02 },
+			tool_call_semantic_scope_risk: { score: 0, confidence: 0.9 },
+		};
+		expect(decideToolGate(answers, "read_only")).toBe("replan");
+		expect(decideToolGate(answers, "read_only", undefined, { relevanceEvaluable: true })).toBe("replan");
+		// A plain session: no objective, no plan step. The relevance answer is not evidence.
+		expect(decideToolGate(answers, "read_only", undefined, { relevanceEvaluable: false })).toBe("allow");
+		expect(
+			decideToolGate({ ...answers, repo_text_injection_like: { noul: 0.95 } }, "read_only", undefined, {
+				relevanceEvaluable: false,
+			}),
+		).toBe("block");
+	});
+
 	it("routes postflight to rollback on scope violation and replan on invalidation", () => {
 		// Scope violation routes to rollback
 		const rollbackPost = decidePostflight({

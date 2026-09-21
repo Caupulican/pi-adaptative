@@ -289,16 +289,12 @@ export class ToolGateController {
 				}
 				const foreground = this.deps.getForegroundControl?.();
 				if (systemOneResult.outcome === "replan") {
-					// The call is not relevant to the current step: System One cancels the turn at once
-					// (the operator's Esc) so the loop routes again instead of letting the turn drift.
+					// The call is not relevant to the current step. Refusal is scoped to this one call:
+					// the rest of the batch and the turn go on, and the verdict is ledger evidence the
+					// objective loop routes on at its next cycle. Cancelling the turn here killed every
+					// sibling call and the operator's own request (field-observed on a plain session).
 					const reason = systemOneResult.reason ?? `tool ${toolCall.name} is not relevant to the current step`;
-					foreground?.cancelTurn(`replan: ${reason}`);
-					return {
-						block: true,
-						reason: foreground
-							? `System One cancelled this turn to re-route: ${reason}`
-							: `System One asks to re-plan: ${reason}`,
-					};
+					return { block: true, reason: `System One asks to re-plan: ${reason}` };
 				}
 				if (systemOneResult.outcome === "confirm" && foreground) {
 					// Broad scope on a non-destructive call: allowed, with a steer the next model turn reads.

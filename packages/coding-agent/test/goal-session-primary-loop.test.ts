@@ -1,4 +1,5 @@
 import { SessionManager } from "@caupulican/pi-agent-core/session";
+import type { AssistantMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { GoalSessionController } from "../src/core/goals/goal-session-controller.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
@@ -45,7 +46,33 @@ function scriptedController(
 	return { controller: controller as unknown as ObjectiveExecutionController, routed };
 }
 
-function session(controller: ObjectiveExecutionController, prompts: string[]) {
+/** An assistant turn as the session records it after a prompt; `errorMessage` names an abort. */
+function assistantTurn(stopReason: "stop" | "aborted", errorMessage?: string): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "" }],
+		api: "openai-responses",
+		provider: "faux",
+		model: "faux-1",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason,
+		...(errorMessage ? { errorMessage } : {}),
+		timestamp: Date.now(),
+	} as AssistantMessage;
+}
+
+function session(
+	controller: ObjectiveExecutionController,
+	prompts: string[],
+	options: { afterPrompt?: (sessionManager: SessionManager, text: string) => void; warnings?: string[] } = {},
+) {
 	const sessionManager = SessionManager.inMemory();
 	let ordinal = 0;
 	const goals = new GoalSessionController({
@@ -59,8 +86,11 @@ function session(controller: ObjectiveExecutionController, prompts: string[]) {
 		prompt: async (text) => {
 			prompts.push(text);
 			ordinal++;
+			options.afterPrompt?.(sessionManager, text);
 		},
-		emitWarning: () => {},
+		emitWarning: (message) => {
+			options.warnings?.push(message);
+		},
 		getExecutionLoopMode: () => "objective_primary",
 		getObjectiveExecutionController: () => controller,
 	});
@@ -91,6 +121,45 @@ describe("System One primary loop", () => {
 		expect(prompts[1]).toContain("System One route: verify");
 		expect(loop).toMatchObject({ turnsSubmitted: 2, stopReason: "worker_in_flight" });
 		expect(goals.getState()?.status).toBe("active");
+	});
+
+	it("a System One cancel of the root turn re-routes at the next cycle; the operator's interruption stops the loop", async () => {
+		const prompts: string[] = [];
+		const warnings: string[] = [];
+		const rerouted = scriptedController([
+			{ kind: "root", route: "implement" },
+			{ kind: "root", route: "verify" },
+			{ kind: "wait" },
+		]);
+		const goals = session(rerouted.controller, prompts, {
+			warnings,
+			afterPrompt: (sessionManager) => {
+				// The first root turn is cancelled by System One (a named abort); the second completes.
+				sessionManager.appendMessage(
+					prompts.length === 1
+						? assistantTurn("aborted", "Operation aborted (system_one:replan: off the current step)")
+						: assistantTurn("stop"),
+				);
+			},
+		});
+		const loop = await goals.continueLoop({ maxTurns: 0, maxStallTurns: 3 });
+		expect(rerouted.routed).toEqual(["implement", "verify", "wait_for_worker"]);
+		expect(loop).toMatchObject({ turnsSubmitted: 2, stopReason: "worker_in_flight" });
+		expect(warnings).toEqual(["System One re-routed the root turn: replan: off the current step"]);
+
+		const interrupted = scriptedController([
+			{ kind: "root", route: "implement" },
+			{ kind: "root", route: "verify" },
+		]);
+		const stopped = session(interrupted.controller, [], {
+			afterPrompt: (sessionManager) => {
+				sessionManager.appendMessage(assistantTurn("aborted", "Operation aborted"));
+			},
+		});
+		const halted = await stopped.continueLoop({ maxTurns: 0, maxStallTurns: 3 });
+		expect(interrupted.routed).toEqual(["implement"]);
+		expect(halted).toMatchObject({ stopReason: "turn_interrupted" });
+		expect(stopped.getState()?.status).toBe("active");
 	});
 
 	it("stops at the turn limit, and blocks the goal when the objective ends unrecoverable", async () => {

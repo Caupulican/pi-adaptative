@@ -229,7 +229,9 @@ export class SystemOneController {
 			toolRequest.impact,
 		);
 
-		const outcome = decideToolGate(answers, toolRequest.impact, this.config);
+		const outcome = decideToolGate(answers, toolRequest.impact, this.config, {
+			relevanceEvaluable: projection.current_step !== undefined,
+		});
 		this.sealDecision(decision, outcome, evaluationId);
 
 		this.store.recordToolEvent({

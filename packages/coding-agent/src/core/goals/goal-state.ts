@@ -246,8 +246,8 @@ export type GoalEvent =
 			tokens: number;
 			/** Exact model spend attributed to the goal-owned execution. */
 			spendUsd: number;
-			/** Host-observed outcome of the submitted continuation turn. */
-			outcome?: "completed" | "interrupted" | "errored";
+			/** Host-observed outcome of the submitted continuation turn; `rerouted` is System One's own cancel. */
+			outcome?: "completed" | "interrupted" | "rerouted" | "errored";
 			/** Authoritative turn ordinal captured before pass submission to prevent replay. */
 			completionTurn?: number;
 			now: string;
@@ -445,6 +445,7 @@ export function isGoalEvent(value: unknown): value is GoalEvent {
 				(value.outcome === undefined ||
 					value.outcome === "completed" ||
 					value.outcome === "interrupted" ||
+					value.outcome === "rerouted" ||
 					value.outcome === "errored") &&
 				hasOptionalFiniteNumber(value, "completionTurn")
 			);
