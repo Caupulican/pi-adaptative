@@ -107,7 +107,8 @@ export class WorkerSupervisionCoordinator {
 				!this.consumedRootRequestIds.has(signal.signal_id) &&
 				(signal.action === "request_specialist" ||
 					signal.action === "request_capability" ||
-					signal.action === "request_verifier"),
+					signal.action === "request_verifier" ||
+					signal.action === "mark_external_block"),
 		);
 	}
 

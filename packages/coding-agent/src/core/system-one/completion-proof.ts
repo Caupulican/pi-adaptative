@@ -1,5 +1,4 @@
-import { execSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import type { CandidateSnapshot } from "./candidate-snapshot.ts";
 import type { ExecutionState } from "./types.ts";
 
 export interface CompletionProofGate {
@@ -15,29 +14,8 @@ export interface CompletionProof {
 	failed_reasons: { id: string; required_next_proof?: string; detail?: string }[];
 }
 
-export function buildCompletionProof(execState: ExecutionState, _candidateRevision: string): CompletionProof {
-	let digest = "";
-	try {
-		const diff = execSync("git diff HEAD", { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-		const untrackedStr = execSync("git ls-files --others --exclude-standard", {
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-		const untracked = untrackedStr.trim().split("\n").filter(Boolean);
-		let untrackedContent = "";
-		for (const f of untracked) {
-			untrackedContent += require("fs").readFileSync(f, "utf8");
-		}
-		digest = createHash("sha256")
-			.update(diff + untrackedContent)
-			.digest("hex");
-	} catch (e) {
-		throw new Error(`Failed to generate candidate digest: ${e instanceof Error ? e.message : String(e)}`);
-	}
-
-	if (!digest) {
-		digest = "empty_diff"; // Just to have a digest if there's no diff
-	}
+export function buildCompletionProof(execState: ExecutionState, snapshot: CandidateSnapshot): CompletionProof {
+	const digest = snapshot.digest;
 
 	const failed_reasons: { id: string; required_next_proof?: string; detail?: string }[] = [];
 	const gates: CompletionProofGate[] = [];

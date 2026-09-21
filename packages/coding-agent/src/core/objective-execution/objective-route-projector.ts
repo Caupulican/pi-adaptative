@@ -99,6 +99,7 @@ export interface BoundedCombinedStateProjection {
 		readonly failed_retryable_tasks: readonly string[];
 	};
 	readonly integrity: {
+		readonly state: "available" | "unavailable";
 		readonly fresh_evidence: readonly string[];
 		readonly stale_evidence_count: number;
 		readonly open_hypotheses: readonly string[];
@@ -160,6 +161,8 @@ export function projectBoundedCombinedState(
 		beforeDigest?: string;
 		afterDigest?: string;
 		systemOneState?: ExecutionState;
+		candidateDigest?: string;
+		integrityState?: "available" | "unavailable";
 		history?: readonly RouteHistoryEntry[];
 	},
 ): BoundedCombinedStateProjection {
@@ -178,6 +181,7 @@ export function projectBoundedCombinedState(
 		.map((t) => (t.task as { taskId?: string; id?: string }).taskId ?? (t.task as { id?: string }).id ?? "");
 
 	const sys = options?.systemOneState;
+	const integrityAvailable = options?.integrityState === "available" || sys !== undefined;
 	const verifications = sys?.verification ?? [];
 	const hypotheses = sys?.hypotheses ?? [];
 	const changes = sys?.changes ?? [];
@@ -212,15 +216,16 @@ export function projectBoundedCombinedState(
 			failed_retryable_tasks: failedRetryableTasks,
 		},
 		integrity: {
+			state: integrityAvailable ? "available" : "unavailable",
 			fresh_evidence: freshEvidence,
-			stale_evidence_count: failedVerifications.length,
-			open_hypotheses: openHypotheses,
-			failed_verifications: failedVerifications,
-			recent_changes: recentChanges,
+			stale_evidence_count: integrityAvailable ? failedVerifications.length : 0,
+			open_hypotheses: integrityAvailable ? openHypotheses : ["unknown"],
+			failed_verifications: integrityAvailable ? failedVerifications : ["integrity_state_unavailable"],
+			recent_changes: integrityAvailable ? recentChanges : ["unknown"],
 		},
 		progress: {
 			before_digest: options?.beforeDigest ?? "unknown",
-			after_digest: options?.afterDigest ?? "unknown",
+			after_digest: options?.afterDigest ?? options?.candidateDigest ?? "unknown",
 			stall_turns: options?.stallTurns ?? 0,
 			strategy_fingerprint: options?.strategyFingerprint ?? "init",
 		},

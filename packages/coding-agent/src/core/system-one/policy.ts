@@ -26,6 +26,18 @@ export interface FinalCompletionVerdict {
  * Evaluate a Noul probability against calibrated thresholds.
  * R-038: For Noul, policy MUST distinguish probability of yes from certainty; a value near 0 can be a highly certain no.
  */
+export function noulFromAnswer(answer: unknown, fallback: boolean): number | boolean {
+	if (typeof answer === "boolean" || typeof answer === "number") return answer;
+	if (answer && typeof answer === "object") {
+		const record = answer as { noul?: unknown; boolean?: unknown; value?: unknown };
+		if (typeof record.noul === "number" && Number.isFinite(record.noul)) return record.noul;
+		if (typeof record.boolean === "boolean") return record.boolean;
+		if (typeof record.value === "boolean") return record.value;
+		if (typeof record.value === "number" && Number.isFinite(record.value)) return record.value;
+	}
+	return fallback;
+}
+
 export function evaluateNoul(
 	p: number | boolean,
 	direction: "required_true" | "required_false",
@@ -470,8 +482,7 @@ export function decideFinalCompletion(input: {
 	const { primaryAnswers } = input;
 
 	// implementation_matches_goal (required_true, hard pass)
-	const goalMatchAns =
-		(primaryAnswers.implementation_matches_goal as { boolean?: boolean } | undefined)?.boolean ?? false;
+	const goalMatchAns = noulFromAnswer(primaryAnswers.implementation_matches_goal, false);
 	if (evaluateNoul(goalMatchAns, "required_true", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-implementation_matches_goal",
@@ -482,7 +493,7 @@ export function decideFinalCompletion(input: {
 
 	// root_cause_addressed for bug fixes (R-015, R-057)
 	if (input.isBugFix) {
-		const rootCauseAns = (primaryAnswers.root_cause_addressed as { boolean?: boolean } | undefined)?.boolean ?? false;
+		const rootCauseAns = noulFromAnswer(primaryAnswers.root_cause_addressed, false);
 		if (evaluateNoul(rootCauseAns, "required_true", config.thresholds) !== "hard_pass") {
 			failedGates.push({
 				id: "JEV-root_cause_addressed",
@@ -493,8 +504,7 @@ export function decideFinalCompletion(input: {
 	}
 
 	// required_behavior_unverified (required_false)
-	const unverifiedAns =
-		(primaryAnswers.required_behavior_unverified as { boolean?: boolean } | undefined)?.boolean ?? true;
+	const unverifiedAns = noulFromAnswer(primaryAnswers.required_behavior_unverified, true);
 	if (evaluateNoul(unverifiedAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-required_behavior_unverified",
@@ -504,8 +514,7 @@ export function decideFinalCompletion(input: {
 	}
 
 	// material_claim_unsupported (required_false)
-	const unsuppClaimAns =
-		(primaryAnswers.material_claim_unsupported as { boolean?: boolean } | undefined)?.boolean ?? true;
+	const unsuppClaimAns = noulFromAnswer(primaryAnswers.material_claim_unsupported, true);
 	if (evaluateNoul(unsuppClaimAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-material_claim_unsupported",
@@ -515,8 +524,7 @@ export function decideFinalCompletion(input: {
 	}
 
 	// out_of_scope_change_present (required_false)
-	const outOfScopeAns =
-		(primaryAnswers.out_of_scope_change_present as { boolean?: boolean } | undefined)?.boolean ?? true;
+	const outOfScopeAns = noulFromAnswer(primaryAnswers.out_of_scope_change_present, true);
 	if (evaluateNoul(outOfScopeAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-out_of_scope_change_present",
@@ -526,8 +534,7 @@ export function decideFinalCompletion(input: {
 	}
 
 	// duplicate_responsibility_introduced (required_false)
-	const dupRespAns =
-		(primaryAnswers.duplicate_responsibility_introduced as { boolean?: boolean } | undefined)?.boolean ?? true;
+	const dupRespAns = noulFromAnswer(primaryAnswers.duplicate_responsibility_introduced, true);
 	if (evaluateNoul(dupRespAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-duplicate_responsibility_introduced",
@@ -565,7 +572,7 @@ export function decideFinalCompletion(input: {
 	const { challengeAnswers } = input;
 
 	// missing_requirement (required_false)
-	const missingReqAns = (challengeAnswers.missing_requirement as { boolean?: boolean } | undefined)?.boolean ?? true;
+	const missingReqAns = noulFromAnswer(challengeAnswers.missing_requirement, true);
 	if (evaluateNoul(missingReqAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-CHALLENGE-missing_requirement",
@@ -575,7 +582,7 @@ export function decideFinalCompletion(input: {
 	}
 
 	// hidden_assumption (required_false)
-	const hiddenAssumpAns = (challengeAnswers.hidden_assumption as { boolean?: boolean } | undefined)?.boolean ?? true;
+	const hiddenAssumpAns = noulFromAnswer(challengeAnswers.hidden_assumption, true);
 	if (evaluateNoul(hiddenAssumpAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-CHALLENGE-hidden_assumption",
@@ -585,8 +592,7 @@ export function decideFinalCompletion(input: {
 	}
 
 	// plausible_regression_not_tested (required_false)
-	const regressionAns =
-		(challengeAnswers.plausible_regression_not_tested as { boolean?: boolean } | undefined)?.boolean ?? true;
+	const regressionAns = noulFromAnswer(challengeAnswers.plausible_regression_not_tested, true);
 	if (evaluateNoul(regressionAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-CHALLENGE-plausible_regression_not_tested",
@@ -596,8 +602,7 @@ export function decideFinalCompletion(input: {
 	}
 
 	// conclusion_overstates_evidence (required_false)
-	const overstatesAns =
-		(challengeAnswers.conclusion_overstates_evidence as { boolean?: boolean } | undefined)?.boolean ?? true;
+	const overstatesAns = noulFromAnswer(challengeAnswers.conclusion_overstates_evidence, true);
 	if (evaluateNoul(overstatesAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-CHALLENGE-conclusion_overstates_evidence",

@@ -22,9 +22,20 @@ export interface DeliveryVerificationRecord {
 	readonly detail?: string;
 }
 
-export interface SideEffectReceipt<T = unknown> {
-	readonly state: "attempted" | "succeeded" | "proven";
-	readonly detail: T;
+export type SideEffectReceipt<T> =
+	| { readonly state: "attempted"; readonly detail: T }
+	| { readonly state: "succeeded"; readonly detail: T }
+	| { readonly state: "proven"; readonly detail: T }
+	| { readonly state: "failed"; readonly error: string; readonly detail?: T };
+
+export function sideEffectSucceeded<T>(
+	receipt: SideEffectReceipt<T> | undefined,
+): receipt is Exclude<SideEffectReceipt<T>, { state: "failed" }> {
+	return receipt !== undefined && receipt.state !== "failed";
+}
+
+export function sideEffectDetail<T>(receipt: SideEffectReceipt<T> | undefined): T | undefined {
+	return receipt && receipt.state !== "failed" ? receipt.detail : receipt?.detail;
 }
 
 export interface CommitReceipt {
@@ -72,6 +83,13 @@ export interface DeliveryBundle {
 	readonly required_next_proof?: readonly string[];
 	readonly changed_files?: readonly string[];
 	readonly diff_digest?: string;
+	readonly candidate_snapshot?: {
+		readonly repoRoot: string;
+		readonly baseRevision: string;
+		readonly candidateRevision: string;
+		readonly digest: string;
+		readonly untrackedPaths: readonly string[];
+	};
 	readonly side_effects?: {
 		readonly commit?: SideEffectReceipt<CommitReceipt>;
 		readonly push?: SideEffectReceipt<PushReceipt>;
@@ -98,6 +116,7 @@ export function buildDeliveryBundle(input: {
 	readonly requiredNextProof?: readonly string[];
 	readonly changedFiles?: readonly string[];
 	readonly diffDigest?: string;
+	readonly candidateSnapshot?: DeliveryBundle["candidate_snapshot"];
 	readonly steeringCertificateRefs?: readonly string[];
 	readonly specialistRefs?: readonly string[];
 	readonly capabilityRefs?: readonly string[];
@@ -140,6 +159,7 @@ export function buildDeliveryBundle(input: {
 		required_next_proof: input.requiredNextProof,
 		changed_files: input.changedFiles,
 		diff_digest: input.diffDigest,
+		candidate_snapshot: input.candidateSnapshot,
 		side_effects: input.sideEffects,
 	};
 }

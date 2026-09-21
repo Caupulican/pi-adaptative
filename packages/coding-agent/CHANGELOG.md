@@ -3,6 +3,7 @@
 ### Changed
 
 - GitHub CI on ordinary main/PR commits runs only the tests that commit touched, including consumer workspaces of a changed package. `npm run check` is Linux-only and skipped for test-file-only commits. A lockfile-only commit is Linux check-only. The complete Linux/Windows suite runs when a version tag is published.
+- System One completion uses one worktree-rooted candidate snapshot, fails closed when execution state is missing under `system_one_required`, consumes `mark_external_block` once onto `blocked_external`, and certifies the final delivery bundle after typed push/publish/deploy receipts.
 
 ## [0.99.38] - 2026-09-21
 

@@ -16,6 +16,9 @@ export {
 	type DeliveryBundle,
 	type DeliveryTerminalStatus,
 	type DeliveryVerificationRecord,
+	type SideEffectReceipt,
+	sideEffectDetail,
+	sideEffectSucceeded,
 } from "./delivery-bundle.ts";
 export {
 	GoalCompatibilityAdapter,

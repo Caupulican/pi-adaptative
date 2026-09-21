@@ -5,8 +5,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { execSync } from "child_process";
-import { createHash } from "crypto";
 import type {
 	AdaptiveCapabilityController,
 	AdaptiveResolutionController,
@@ -36,8 +34,14 @@ import { buildWorkerCapabilityRequest, NoEligibleExpertError } from "../expert-r
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import type { SystemOneSteeringPlane } from "../steering/index.ts";
+import {
+	type CandidateSnapshot,
+	candidateSnapshotIdentity,
+	captureCandidateSnapshot,
+} from "../system-one/candidate-snapshot.ts";
 import type { SystemOneControlDirective } from "../system-one/control-directive.ts";
 import type { FinalCompletionVerdict } from "../system-one/policy.ts";
+import type { ExecutionState } from "../system-one/types.ts";
 import {
 	CompletionCoordinator,
 	type CompletionEvaluationContext,
@@ -48,6 +52,8 @@ import {
 	type DeliveryArtifact,
 	type DeliveryBundle,
 	type DeliveryTerminalStatus,
+	type SideEffectReceipt,
+	sideEffectSucceeded,
 } from "./delivery-bundle.ts";
 import { completionFailuresToRepairWork, type RepairWork } from "./objective-repair-work.ts";
 import {
@@ -88,10 +94,11 @@ export interface ObjectiveExecutionControllerDeps {
 	};
 	systemOne?: {
 		adapter?: { provenance?: string };
+		snapshot?(): ExecutionState;
 		evaluateObjectiveRoute?(objectiveId: string, options?: { signal?: AbortSignal }): Promise<SemanticRouteJudgments>;
 		executeCompletionTransaction?(
 			isBugFix: boolean,
-			options?: { signal?: AbortSignal },
+			options?: { signal?: AbortSignal; persistTerminal?: boolean },
 		): Promise<FinalCompletionVerdict>;
 		validateObjectivePostflight?(objectiveId: string): Promise<void>;
 		recordHostEvidence?(evidence: unknown): Promise<void>;
@@ -99,6 +106,7 @@ export interface ObjectiveExecutionControllerDeps {
 		consumeControlDirective?(): SystemOneControlDirective | undefined;
 		noteControlDirective?(directive: SystemOneControlDirective): void;
 	};
+	repoRoot?: string;
 	decisions?: DecisionEngineRouter;
 	actionPolicy?: DecisionActionPolicy;
 	authorityEnvelope?: AuthorityEnvelope;
@@ -169,13 +177,13 @@ export interface ObjectiveExecutionControllerDeps {
 	executionCharter?: ExecutionCharter;
 	authorityBlockLedger?: DurableAuthorityBlockLedger;
 	gitExecutor?: {
-		commit?(message?: string): Promise<void>;
-		push?(): Promise<void>;
-		tag?(name?: string): Promise<void>;
+		commit?(message?: string): Promise<{ sha: string } | undefined>;
+		push?(): Promise<{ ref: string } | undefined>;
+		tag?(name?: string): Promise<{ tag: string } | undefined>;
 	};
 	releaseExecutor?: {
-		publish?(): Promise<void>;
-		deploy?(target: string): Promise<void>;
+		publish?(): Promise<{ id: string } | undefined>;
+		deploy?(target: string): Promise<{ id: string } | undefined>;
 	};
 	steeringPlane?: SystemOneSteeringPlane;
 	adaptiveResolution?: AdaptiveResolutionController;
@@ -331,28 +339,12 @@ export const ROUTE_DECISION_PROGRAM = createDecisionProgram({
 	],
 });
 
-function computeDiffDigest(): string {
+function captureOptionalSnapshot(repoRoot: string | undefined): CandidateSnapshot | undefined {
+	if (!repoRoot) return undefined;
 	try {
-		const cp = require("child_process");
-		const diff = cp.execSync("git diff HEAD", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-		const untrackedStr = cp.execSync("git ls-files --others --exclude-standard", {
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "ignore"],
-		});
-		const untracked = untrackedStr.trim().split("\n").filter(Boolean);
-		const fs = require("fs");
-		let untrackedContent = "";
-		for (const f of untracked) {
-			try {
-				untrackedContent += fs.readFileSync(f, "utf8");
-			} catch (_e) {}
-		}
-		return require("crypto")
-			.createHash("sha256")
-			.update(diff + untrackedContent)
-			.digest("hex");
-	} catch (_e) {
-		return "unknown";
+		return captureCandidateSnapshot(repoRoot);
+	} catch {
+		return undefined;
 	}
 }
 
@@ -396,6 +388,7 @@ export class ObjectiveExecutionController {
 				| "ownerRequired"
 				| "pendingSupervisionRequests"
 				| "consumePendingSupervisionRequest"
+				| "repoRoot"
 			>
 		>,
 	): void {
@@ -521,7 +514,8 @@ export class ObjectiveExecutionController {
 		objectiveId: string,
 		options?: { signal?: AbortSignal; legacyActionHint?: string },
 	): Promise<ObjectiveRoute> {
-		const initialDigest = computeDiffDigest();
+		const routeSnapshot = captureOptionalSnapshot(this.deps.repoRoot);
+		const initialDigest = routeSnapshot?.digest ?? "unknown";
 		options?.signal?.throwIfAborted();
 		const cycleId = `cycle_${++this.cycleCounter}_${randomUUID().slice(0, 8)}`;
 
@@ -565,7 +559,10 @@ export class ObjectiveExecutionController {
 					strategyFingerprint: stall.fingerprint,
 					history,
 					beforeDigest: initialDigest,
-					afterDigest: computeDiffDigest(),
+					afterDigest: captureOptionalSnapshot(this.deps.repoRoot)?.digest ?? "unknown",
+					systemOneState: this.deps.systemOne?.snapshot?.(),
+					candidateDigest: routeSnapshot?.digest,
+					integrityState: this.deps.systemOne?.snapshot ? "available" : "unavailable",
 				});
 
 				const evaluation = await this.deps.decisions.evaluateOrFallback(ROUTE_DECISION_PROGRAM, stateProjection, {
@@ -618,7 +615,10 @@ export class ObjectiveExecutionController {
 					strategyFingerprint: stall.fingerprint,
 					history,
 					beforeDigest: initialDigest,
-					afterDigest: computeDiffDigest(),
+					afterDigest: captureOptionalSnapshot(this.deps.repoRoot)?.digest ?? "unknown",
+					systemOneState: this.deps.systemOne?.snapshot?.(),
+					candidateDigest: routeSnapshot?.digest,
+					integrityState: this.deps.systemOne?.snapshot ? "available" : "unavailable",
 				});
 				const cert = await this.deps.steeringPlane.requireCertificate("JEV-004", stateProjection, {
 					objectiveId,
@@ -1135,27 +1135,21 @@ export class ObjectiveExecutionController {
 						(await this.deps.runtime.getSourceRevision?.(objectiveId)) ?? String(evidenceRevision);
 					const limitations = (await this.deps.runtime.getLimitations?.(objectiveId)) ?? [];
 					const acceptanceEvidence = objRecord?.evidence ?? [];
-					let diffDigest = "";
-					try {
-						const diff = execSync("git diff HEAD && git ls-files --others --exclude-standard", {
-							encoding: "utf8",
-							stdio: ["ignore", "pipe", "ignore"],
-						});
-						diffDigest = createHash("sha256").update(diff).digest("hex");
-					} catch (_e) {
-						diffDigest = "unknown";
-					}
+					const candidateSnapshot = captureOptionalSnapshot(this.deps.repoRoot);
+					const diffDigest = candidateSnapshot?.digest ?? "unknown";
+					const snapshotIdentity = candidateSnapshot ? candidateSnapshotIdentity(candidateSnapshot) : undefined;
 
 					const canonicalProofState = {
 						objectiveId,
 						cycleCount: this.cycleCounter,
 						evidenceRevision,
-						sourceRevision,
+						sourceRevision: candidateSnapshot?.candidateRevision ?? sourceRevision,
 						verificationMatrix,
 						acceptanceEvidence,
 						acceptanceCriteria: objRecord?.objective?.acceptanceCriteria ?? [],
 						evidenceRefs: objRecord?.evidence?.map((e) => e.evidenceId) ?? [],
 						diffDigest,
+						candidateSnapshot: snapshotIdentity,
 						artifacts,
 						limitations,
 					};
@@ -1225,14 +1219,20 @@ export class ObjectiveExecutionController {
 					// 2. PH-151: CompletionCoordinator mechanical/common gates
 					const completionContext: CompletionEvaluationContext = {
 						runtime,
+						getExecutionState: this.deps.systemOne?.snapshot ? () => this.deps.systemOne!.snapshot!() : undefined,
 						getSourceRevision: this.deps.runtime.getSourceRevision?.bind(this.deps.runtime),
 						getArtifacts: this.deps.runtime.getArtifacts?.bind(this.deps.runtime),
 						getLimitations: this.deps.runtime.getLimitations?.bind(this.deps.runtime),
+						repoRoot: this.deps.repoRoot,
+						candidateSnapshot,
 						reviewer: this.deps.reviewer,
 						semanticEvaluator: this.deps.systemOne?.executeCompletionTransaction
 							? {
 									evaluateCompletion: async (_objId, opts) => {
-										const verdict = await this.deps.systemOne!.executeCompletionTransaction!(false, opts);
+										const verdict = await this.deps.systemOne!.executeCompletionTransaction!(false, {
+											...opts,
+											persistTerminal: false,
+										});
 										return {
 											passed: verdict.verdict === "complete",
 											decisionRef: (verdict as { decision_id?: string }).decision_id,
@@ -1241,13 +1241,9 @@ export class ObjectiveExecutionController {
 									},
 								}
 							: undefined,
-						hasCalibratedEngine: () => {
-							const _candidate = this.deps.decisions?.select(ROUTE_DECISION_PROGRAM, "critical");
-							const isSysOneCalibrated =
-								Boolean(this.deps.systemOne?.executeCompletionTransaction) &&
-								(this.deps.systemOne as any)?.adapter?.provenance === "native_calibrated";
-							return isSysOneCalibrated;
-						},
+						hasCalibratedEngine: () =>
+							Boolean(this.deps.systemOne?.executeCompletionTransaction) &&
+							this.deps.systemOne?.adapter?.provenance === "native_calibrated",
 					};
 
 					const evalResult = await CompletionCoordinator.evaluate(objectiveId, profile, completionContext, {
@@ -1372,126 +1368,79 @@ export class ObjectiveExecutionController {
 							}
 						}
 
-						await this._recordCompletionOutcomes(objectiveId, route, { verificationPassed: true });
-
-						// 9. PH-106, PH-158: Execute all charter-required final side effects
-						const sideEffects: any = {};
+						const sideEffects: {
+							commit?: SideEffectReceipt<{ sha: string }>;
+							tag?: SideEffectReceipt<{ tag: string }>;
+							push?: SideEffectReceipt<{ ref: string }>;
+							publish?: SideEffectReceipt<{ publicationId: string }>;
+							deploy?: SideEffectReceipt<{ target: string; deploymentId?: string }>[];
+						} = {};
 						if (activeCharter) {
 							if (activeCharter.git.commit) {
 								if (!this.deps.gitExecutor?.commit) throw new Error("Git commit unavailable");
 								try {
 									const commitRes = await this.deps.gitExecutor.commit();
-									if (typeof commitRes === "object" && commitRes && "sha" in commitRes) {
-										sideEffects.commit = {
-											state: "attempted",
-											detail: { sha: String((commitRes as any).sha) },
-										};
+									if (commitRes && typeof commitRes === "object" && "sha" in commitRes && commitRes.sha) {
+										sideEffects.commit = { state: "succeeded", detail: { sha: String(commitRes.sha) } };
 									} else {
 										sideEffects.commit = { state: "failed", error: "Missing sha" };
 									}
-								} catch (e: any) {
-									sideEffects.commit = { state: "failed", error: e.message };
+								} catch (error) {
+									sideEffects.commit = {
+										state: "failed",
+										error: error instanceof Error ? error.message : String(error),
+									};
 								}
 							}
 							if (activeCharter.git.create_tag) {
 								if (!this.deps.gitExecutor?.tag) throw new Error("Git tag unavailable");
 								try {
 									const tagRes = await this.deps.gitExecutor.tag();
-									if (typeof tagRes === "object" && tagRes && "tag" in tagRes) {
-										sideEffects.tag = { state: "attempted", detail: { tag: String((tagRes as any).tag) } };
+									if (tagRes && typeof tagRes === "object" && "tag" in tagRes && tagRes.tag) {
+										sideEffects.tag = { state: "succeeded", detail: { tag: String(tagRes.tag) } };
 									} else {
 										sideEffects.tag = { state: "failed", error: "Missing tag" };
 									}
-								} catch (e: any) {
-									sideEffects.tag = { state: "failed", error: e.message };
+								} catch (error) {
+									sideEffects.tag = {
+										state: "failed",
+										error: error instanceof Error ? error.message : String(error),
+									};
 								}
 							}
-						}
-
-						const bundleBase =
-							evalResult.deliveryBundle ?? (await this.buildBundle(objectiveId, "complete", runtime));
-
-						let enrichedBundle = buildDeliveryBundle({
-							...bundleBase,
-							objectiveId,
-							terminalStatus: "complete",
-							sourceRevision: bundleBase.source_revision,
-							artifacts: [
-								...(bundleBase.artifacts ?? []),
-								...(sideEffects.commit && sideEffects.commit.state !== "failed"
-									? [
-											{
-												path: "git:commit",
-												description: `Commit ${sideEffects.commit.detail.sha}`,
-												hash: sideEffects.commit.detail.sha,
-											},
-										]
-									: []),
-							],
-							finalCommit: sideEffects.commit?.detail?.sha,
-							pushRefs: sideEffects.push?.detail?.ref ? [sideEffects.push.detail.ref] : undefined,
-							sideEffects,
-						});
-
-						// JEV-027 Two-phase check (evaluates actual side effect results)
-						if (this.deps.steeringPlane) {
-							const c27 = await this.deps.steeringPlane.requireCertificate("JEV-027", enrichedBundle, {
-								objectiveId,
-								evidenceRevision,
-								signal,
-							});
-							steeringCertRefs.push(c27.certificate_id);
-							if (c27.semantic_outcome !== "pass") {
-								// Rollback local state unconditionally (push hasn't happened yet)
-								if (sideEffects.tag && sideEffects.tag.state !== "failed") {
-									try {
-										require("child_process").execSync(`git tag -d ${sideEffects.tag.detail.tag}`);
-									} catch (_e) {}
-								}
-								if (sideEffects.commit && sideEffects.commit.state !== "failed") {
-									try {
-										require("child_process").execSync("git reset --soft HEAD~1");
-									} catch (_e) {}
-								}
-
-								return {
-									status: "unrecoverable",
-									reasonCodes: ["delivery_certificate_rejected"],
-									cycleCount: this.cycleCounter,
-									deliveryBundle: enrichedBundle,
-								};
-							}
-						}
-
-						// Post-verify irreversible side effects
-						if (activeCharter) {
 							if (activeCharter.git.push) {
 								if (!this.deps.gitExecutor?.push) throw new Error("Git push unavailable");
 								try {
 									const pushRes = await this.deps.gitExecutor.push();
-									if (typeof pushRes === "object" && pushRes && "ref" in pushRes) {
-										sideEffects.push = { state: "succeeded", detail: { ref: String((pushRes as any).ref) } };
+									if (pushRes && typeof pushRes === "object" && "ref" in pushRes && pushRes.ref) {
+										sideEffects.push = { state: "succeeded", detail: { ref: String(pushRes.ref) } };
 									} else {
 										sideEffects.push = { state: "failed", error: "Missing ref" };
 									}
-								} catch (e: any) {
-									sideEffects.push = { state: "failed", error: e.message };
+								} catch (error) {
+									sideEffects.push = {
+										state: "failed",
+										error: error instanceof Error ? error.message : String(error),
+									};
 								}
 							}
 							if (activeCharter.release.package_publish) {
 								if (!this.deps.releaseExecutor?.publish) throw new Error("Package publish unavailable");
 								try {
 									const pubRes = await this.deps.releaseExecutor.publish();
-									if (typeof pubRes === "object" && pubRes && "id" in pubRes) {
+									if (pubRes && typeof pubRes === "object" && "id" in pubRes && pubRes.id) {
 										sideEffects.publish = {
 											state: "succeeded",
-											detail: { publicationId: String((pubRes as any).id) },
+											detail: { publicationId: String(pubRes.id) },
 										};
 									} else {
 										sideEffects.publish = { state: "failed", error: "Missing id" };
 									}
-								} catch (e: any) {
-									sideEffects.publish = { state: "failed", error: e.message };
+								} catch (error) {
+									sideEffects.publish = {
+										state: "failed",
+										error: error instanceof Error ? error.message : String(error),
+									};
 								}
 							}
 							if (activeCharter.release.deploy_targets.length > 0) {
@@ -1500,33 +1449,134 @@ export class ObjectiveExecutionController {
 								for (const target of activeCharter.release.deploy_targets) {
 									try {
 										const depRes = await this.deps.releaseExecutor.deploy(target);
-										if (typeof depRes === "object" && depRes && "id" in depRes) {
+										if (depRes && typeof depRes === "object" && "id" in depRes && depRes.id) {
 											sideEffects.deploy.push({
 												state: "succeeded",
-												detail: { target, deploymentId: String((depRes as any).id) },
+												detail: { target, deploymentId: String(depRes.id) },
 											});
 										} else {
-											sideEffects.deploy.push({ state: "failed", detail: { target }, error: "Missing id" });
+											sideEffects.deploy.push({
+												state: "failed",
+												detail: { target },
+												error: "Missing id",
+											});
 										}
-									} catch (e: any) {
-										sideEffects.deploy.push({ state: "failed", detail: { target }, error: e.message });
+									} catch (error) {
+										sideEffects.deploy.push({
+											state: "failed",
+											detail: { target },
+											error: error instanceof Error ? error.message : String(error),
+										});
 									}
 								}
 							}
 						}
 
-						// Final bundle
-						enrichedBundle = buildDeliveryBundle({
-							...bundleBase,
+						const requiredReceiptFailed =
+							sideEffects.commit?.state === "failed" ||
+							sideEffects.tag?.state === "failed" ||
+							sideEffects.push?.state === "failed" ||
+							sideEffects.publish?.state === "failed" ||
+							(sideEffects.deploy ?? []).some((receipt) => receipt.state === "failed");
+
+						const bundleBase =
+							evalResult.deliveryBundle ?? (await this.buildBundle(objectiveId, "complete", runtime));
+						const commitDetail = sideEffectSucceeded(sideEffects.commit) ? sideEffects.commit.detail : undefined;
+						const pushDetail = sideEffectSucceeded(sideEffects.push) ? sideEffects.push.detail : undefined;
+						const terminalStatus: DeliveryTerminalStatus = requiredReceiptFailed ? "unrecoverable" : "complete";
+						let enrichedBundle = buildDeliveryBundle({
 							objectiveId,
-							terminalStatus: "complete",
-							sourceRevision: bundleBase.source_revision,
-							artifacts: enrichedBundle.artifacts,
-							finalCommit: enrichedBundle.final_commit,
-							pushRefs: sideEffects.push ? [sideEffects.push.detail.ref] : undefined,
+							terminalStatus,
+							sourceRevision: candidateSnapshot?.candidateRevision ?? bundleBase.source_revision,
+							diffDigest: candidateSnapshot?.digest ?? bundleBase.diff_digest,
+							acceptance: bundleBase.acceptance,
+							verification: bundleBase.verification,
+							limitations: bundleBase.limitations,
+							artifacts: [
+								...(bundleBase.artifacts ?? []),
+								...(commitDetail
+									? [
+											{
+												path: "git:commit",
+												description: `Commit ${commitDetail.sha}`,
+												hash: commitDetail.sha,
+											},
+										]
+									: []),
+							],
+							finalCommit: commitDetail?.sha,
+							pushRefs: pushDetail ? [pushDetail.ref] : undefined,
 							sideEffects,
+							candidateSnapshot: snapshotIdentity,
 							steeringCertificateRefs: steeringCertRefs.length > 0 ? steeringCertRefs : undefined,
+							assuranceProfileRequested: bundleBase.assurance_profile_requested,
+							assuranceProfileUsed: bundleBase.assurance_profile_used,
+							decisionRefs: bundleBase.decision_refs,
+							reviewerRefs: bundleBase.reviewer_refs,
 						});
+
+						if (requiredReceiptFailed) {
+							return {
+								status: "unrecoverable",
+								reasonCodes: ["delivery_side_effect_failed"],
+								cycleCount: this.cycleCounter,
+								deliveryBundle: enrichedBundle,
+							};
+						}
+
+						if (this.deps.steeringPlane) {
+							const c27 = await this.deps.steeringPlane.requireCertificate(
+								"JEV-027",
+								{
+									...enrichedBundle,
+									candidateSnapshot: snapshotIdentity,
+								},
+								{
+									objectiveId,
+									evidenceRevision,
+									signal,
+								},
+							);
+							steeringCertRefs.push(c27.certificate_id);
+							if (c27.semantic_outcome !== "pass") {
+								enrichedBundle = buildDeliveryBundle({
+									...enrichedBundle,
+									objectiveId,
+									terminalStatus: "unrecoverable",
+									sourceRevision: enrichedBundle.source_revision,
+									sideEffects,
+									steeringCertificateRefs: steeringCertRefs,
+									failedGates: ["delivery_certificate_rejected", ...(c27.failed_semantic_predicates ?? [])],
+								});
+								return {
+									status: "unrecoverable",
+									reasonCodes: ["delivery_certificate_rejected"],
+									cycleCount: this.cycleCounter,
+									deliveryBundle: enrichedBundle,
+								};
+							}
+							enrichedBundle = buildDeliveryBundle({
+								objectiveId,
+								terminalStatus: "complete",
+								sourceRevision: enrichedBundle.source_revision,
+								acceptance: enrichedBundle.acceptance,
+								verification: enrichedBundle.verification,
+								artifacts: enrichedBundle.artifacts,
+								limitations: enrichedBundle.limitations,
+								diffDigest: enrichedBundle.diff_digest,
+								finalCommit: enrichedBundle.final_commit,
+								pushRefs: enrichedBundle.push_refs,
+								sideEffects,
+								candidateSnapshot: snapshotIdentity,
+								steeringCertificateRefs: steeringCertRefs,
+								assuranceProfileRequested: enrichedBundle.assurance_profile_requested,
+								assuranceProfileUsed: enrichedBundle.assurance_profile_used,
+								decisionRefs: enrichedBundle.decision_refs,
+								reviewerRefs: enrichedBundle.reviewer_refs,
+							});
+						}
+
+						await this._recordCompletionOutcomes(objectiveId, route, { verificationPassed: true });
 
 						return {
 							status: "complete",

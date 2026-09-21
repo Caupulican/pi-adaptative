@@ -1034,7 +1034,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			loopMode: executionLoopMode,
 			completionProfile:
 				systemOneSettings.completionProfile ??
-				(steeringPlane || systemOneController ? "semantic_enhanced" : "mechanical"),
+				(steeringPlane?.policy.mode === "system_one_required" ||
+				DEFAULT_STEERING_POLICY.mode === "system_one_required"
+					? "system_one_required"
+					: steeringPlane || systemOneController
+						? "semantic_enhanced"
+						: "mechanical"),
 			taskProfiles: taskProfileWriter,
 			contractFactory,
 			capabilityBuilder,

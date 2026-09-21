@@ -13,7 +13,8 @@
 			"strategy_repetition",
 			"needs_independent_verification",
 			"specialist_gap_present",
-			"capability_gap_present"
+			"capability_gap_present",
+			"external_block_present"
 		],
 		"incompleteAnswers": {}
 	},

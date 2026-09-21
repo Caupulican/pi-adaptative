@@ -37,6 +37,7 @@ const SEVEN = [
 	"needs_independent_verification",
 	"specialist_gap_present",
 	"capability_gap_present",
+	"external_block_present",
 ] as const;
 
 beforeAll(() => initTheme("dark"));
@@ -455,6 +456,44 @@ describe("next-release hardening", () => {
 		const escalated = await controller.evaluateRouteOnce("o");
 		expect(escalated.route).toBe("escalate_capability");
 		expect(consumed).toEqual(["sig-spec-1"]);
+	});
+
+	it("consumes mark_external_block once when the composed route is blocked_external", async () => {
+		const pending = [
+			{
+				signal_id: "sig-ext-1",
+				action: "mark_external_block" as const,
+				reason_codes: ["external_block_detected"],
+			},
+		];
+		const consumed: string[] = [];
+		const controller = new ObjectiveExecutionController({
+			mode: "objective_primary",
+			runtime: {
+				reconcileObjective: async () =>
+					({
+						lastOrdinal: 0,
+						agents: {},
+						objectives: {},
+						tasks: {},
+						attempts: {},
+						checkpoints: {},
+						approvals: {},
+						notifications: {},
+					}) as TaskRuntimeProjection,
+			},
+			pendingSupervisionRequests: () => pending.filter((item) => !consumed.includes(item.signal_id)),
+			consumePendingSupervisionRequest: (signalId) => {
+				consumed.push(signalId);
+			},
+		});
+		const blocked = await controller.evaluateRouteOnce("o");
+		expect(blocked.route).toBe("blocked_external");
+		expect(blocked.reason_codes).toContain("external_dependency_unavailable");
+		expect(consumed).toEqual(["sig-ext-1"]);
+		const again = await controller.evaluateRouteOnce("o");
+		expect(again.route).not.toBe("blocked_external");
+		expect(consumed).toEqual(["sig-ext-1"]);
 	});
 
 	it("does not draw an affirmative DELIVER branch while proof is still open", () => {

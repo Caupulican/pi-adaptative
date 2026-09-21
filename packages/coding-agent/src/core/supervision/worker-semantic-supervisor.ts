@@ -31,6 +31,7 @@ export interface WorkerSemanticSupervisorDeps {
 	debounceMs?: number;
 	minToolCalls?: number;
 	minElapsedMs?: number;
+	maxFailures?: number;
 }
 
 export const WORKER_SUPERVISION_DECISION_IDS = [
@@ -90,6 +91,8 @@ export class WorkerSemanticSupervisor {
 	private readonly steeringInterventions = new Map<string, number>();
 	private readonly inFlightAssessments = new Set<string>();
 	private readonly consecutiveFailures = new Map<string, number>();
+	private readonly openBreakers = new Set<string>();
+	private readonly maxFailures: number;
 
 	constructor(deps: WorkerSemanticSupervisorDeps) {
 		this.steering = deps.steering;
@@ -97,6 +100,7 @@ export class WorkerSemanticSupervisor {
 		this.debounceMs = deps.debounceMs ?? 5000;
 		this.minToolCalls = deps.minToolCalls ?? 2;
 		this.minElapsedMs = deps.minElapsedMs ?? 3000;
+		this.maxFailures = deps.maxFailures ?? 3;
 	}
 
 	getPriorSteeringCount(attemptId: string): number {
@@ -149,6 +153,10 @@ export class WorkerSemanticSupervisor {
 
 	async observe(attempt: LiveWorkerAttempt, signal?: AbortSignal): Promise<WorkerSupervisionSignal | undefined> {
 		signal?.throwIfAborted();
+
+		if (this.openBreakers.has(attempt.attemptId)) {
+			return undefined;
+		}
 
 		if (!this.shouldAssess(attempt)) {
 			return undefined;
@@ -269,7 +277,8 @@ export class WorkerSemanticSupervisor {
 			} catch (err) {
 				const fails = (this.consecutiveFailures.get(attempt.attemptId) ?? 0) + 1;
 				this.consecutiveFailures.set(attempt.attemptId, fails);
-				if (fails >= 3) {
+				if (fails >= this.maxFailures) {
+					this.openBreakers.add(attempt.attemptId);
 					return {
 						schema_version: "1.0",
 						signal_id: `sig-${randomUUID().slice(0, 8)}`,

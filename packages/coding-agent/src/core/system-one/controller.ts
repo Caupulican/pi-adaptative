@@ -538,6 +538,7 @@ export class SystemOneController {
 		options?: {
 			externalGate?: (snapshot: ExecutionState) => Promise<IntegrityGateResult | undefined>;
 			signal?: AbortSignal;
+			persistTerminal?: boolean;
 		},
 	): Promise<FinalCompletionVerdict> {
 		this.syncCanonicalTruth();
@@ -612,8 +613,10 @@ export class SystemOneController {
 			}
 		}
 
-		// 6. Update state phase according to verdict
-		if (finalVerdict.verdict === "complete") {
+		// 6. Update state phase according to verdict. Inner semantic evaluation
+		// (persistTerminal: false) must not independently set terminal complete.
+		const persistTerminal = options?.persistTerminal !== false;
+		if (finalVerdict.verdict === "complete" && persistTerminal) {
 			// Harness policy transitions to complete (R-002)
 			this.store.transitionPhase("complete", true);
 			if (this.hookCoordinator?.hasExtensions()) {

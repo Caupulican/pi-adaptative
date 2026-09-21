@@ -2037,14 +2037,16 @@ export class AgentSession {
 					getResumableHumanInputSnapshot(this.sessionManager)?.status === "pending",
 				pendingSupervisionRequests: () => this._workerSupervision.getPendingRootRequests(),
 				consumePendingSupervisionRequest: (signalId) => this._workerSupervision.consumePendingRootRequest(signalId),
+				repoRoot: this._cwd,
 				...(() => {
 					const systemOneController = this._systemOneController;
 					return systemOneController
 						? {
 								systemOne: {
 									get adapter() {
-										return (systemOneController as any)?.adapter;
+										return systemOneController.adapter;
 									},
+									snapshot: () => systemOneController.store.snapshot(),
 									executeCompletionTransaction: (isBugFix, options) =>
 										this._systemOneController!.executeCompletionTransaction(isBugFix, options),
 									validateObjectivePostflight: (objectiveId) =>
