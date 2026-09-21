@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- The POV bar shows a required-Jev failure as `BLOCKED` with `CONTROL S1` and `JEV degraded`, not ordinary `WORKING` progress.
 - System One gates now read the live goal, durable task evidence and open verifications (a hydrated projection of that canonical truth), so route, tool gate, preflight, postflight and completion no longer judge an empty in-memory store. A real objective with no criteria, or completion with no live objective, cannot pass. Unresolved verification obligations fail completion. After persist/dispose/reconstruct, the next hydrate sees the same requirements.
 - Preflight `retrieve` / `replan` / `test` / `escalate` skip the current root turn and become the next objective route; only `block` throws. Postflight `rollback` / `replan` / `verify` / `retrieve_more` / `completion_candidate` / `blocked` are consumed by `composeObjectiveRoute` instead of being discarded. Tool-gate `replan` is stored as `refused` (never `allowed`) and `afterToolCall` writes `succeeded` / `failed` on the same `call_id`.
 - `objective_primary` without a live `ObjectiveExecutionController` fails closed with a diagnostic that names the missing binding; it does not run the legacy loop. Under `system_one_required`, a required steering checkpoint cannot be satisfied by `synthetic_self_report` / generic structured-LLM fallback.

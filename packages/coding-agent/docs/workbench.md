@@ -36,7 +36,7 @@ WORKING build: Simplifying settings | CONTROL S1 | NEXT verify 5 open criteria |
 - **NEXT**: the canonical next action. **ACTOR**: root, or the running worker/specialist.
 - **ROOT** / **ACTIVE**: the persistent session model and the model actually executing; they are shown separately only while a routed turn has swapped the model, otherwise one **MODEL** slot.
 - **ROUTE**: who chose the active model — `direct`, `manual:<model>`, `<tier> via model-router`, `<tier> via model-router/H-MoE`, or `escalated→<model> via model-router`. Jev is never credited with a model choice.
-- **JEV**: the semantic plane's observed state — `off` (no plane), `ready` (bound, no evaluation yet), `eval` (a real evaluation in flight), `ok`, `degraded` (the last evaluation failed).
+- **JEV**: the semantic plane's observed state — `off` (no plane), `ready` (bound, no evaluation yet), `eval` (a real evaluation in flight), `ok`, `degraded` (the last evaluation failed). A required-Jev failure is `BLOCKED` with `CONTROL S1` and `JEV degraded`; it is not ordinary `WORKING` progress.
 - **COST**: the session's canonical current cost, with `(sub $…)` for spawned cost when present. **PROOF** and **CTX**: the projection's proof counters and context usage.
 
 While an owner question is open the leading segment reads `NEEDS INPUT <question>` with `CONTROL USER` and a `BLOCK <question>` segment; the question itself stays in the normal question dialog:

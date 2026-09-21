@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { GoalContinuationDecision } from "../src/core/goals/goal-continuation-controller.ts";
 import type { GoalState, GoalStatus, Requirement } from "../src/core/goals/goal-state.ts";
+import type { DecisionStageSink } from "../src/core/operator-projection/decision-stage-log.ts";
 import {
 	type LiveLaneView,
 	type PendingOwnerQuestion,
@@ -235,6 +236,42 @@ describe("Operator control projection", () => {
 				continuation: continuation({ reasonCode: "goal_active" }),
 			}).control,
 		).toEqual({ owner: "system_one", state: "deciding", reasonCode: "goal_active" });
+		expect(projectionFor({ goal: active, route: route("replan"), busy: true }).control).toEqual({
+			owner: "system_one",
+			state: "executing",
+			reasonCode: "replan_required",
+		});
+		expect(projectionFor({ goal: active, route: route("blocked_external") }).control).toEqual({
+			owner: "system_one",
+			state: "deciding",
+			reasonCode: "blocked_external_required",
+		});
+	});
+
+	it("reopens the stage log when the session sink key changes, so a swapped session is not the previous clock", () => {
+		const rowsA: { rowId: number; endedAt?: number }[] = [];
+		const sinkA: DecisionStageSink = {
+			open: () => {
+				const rowId = rowsA.length + 1;
+				rowsA.push({ rowId });
+				return rowId;
+			},
+			close: (rowId, endedAt) => {
+				const row = rowsA.find((entry) => entry.rowId === rowId);
+				if (row) row.endedAt = endedAt;
+			},
+			load: () => [],
+		};
+		const sinkB: DecisionStageSink = { open: () => 1, close: () => {}, load: () => [] };
+		let key = "session-a";
+		const projection = new SessionOperatorProjection({
+			...depsFor({ busy: true }),
+			getStageSink: () => ({ key, sink: key === "session-a" ? sinkA : sinkB }),
+		});
+		projection.getProjection();
+		expect(projection.getStageLog(1_000).open).toBeDefined();
+		key = "session-b";
+		expect(projection.getStageLog(2_000).open).toBeUndefined();
 	});
 
 	it("is System One deciding for the ordinary active reason codes", () => {

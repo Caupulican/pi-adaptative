@@ -270,6 +270,32 @@ describe("Operator POV bar", () => {
 		expect(withWorker).toContain("ACTOR worker settings");
 	});
 
+	it("a required Jev failure is BLOCKED with JEV degraded and CONTROL S1, not ordinary WORKING", () => {
+		const row = renderPlain(
+			source({
+				projection: {
+					phase: "blocked",
+					health: "blocked",
+					why: "system one required but unavailable",
+					current_action: "system one required but unavailable",
+					next_action: null,
+					control: {
+						owner: "system_one",
+						state: "deciding",
+						reasonCode: "system_one_required_but_unavailable",
+					},
+				},
+				health: { state: "degraded", lastFailure: "synthetic_self_report" },
+			}),
+			240,
+		);
+		expect(row).toContain("BLOCKED");
+		expect(row).toContain("CONTROL S1");
+		expect(row).toContain("JEV degraded");
+		expect(row).not.toContain("WORKING");
+		expect(row).not.toContain("JEV ok");
+	});
+
 	it("F001-031: an owner question leads with NEEDS INPUT and carries the BLOCK text", () => {
 		const row = renderPlain(
 			source({
