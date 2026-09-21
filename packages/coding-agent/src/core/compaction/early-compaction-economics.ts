@@ -27,6 +27,10 @@ export interface EarlyCompactionEconomicsInput {
 	readonly lastEarlyDecisionAtTokens?: number;
 	readonly hysteresisTokens: number;
 	readonly minSavingsUsd: number;
+	/** Prefix was dropped (model switch, TTL, or an explicit cache reset). Hysteresis must not block a reassess. */
+	readonly cacheInvalidated?: boolean;
+	readonly modelSwitched?: boolean;
+	readonly tierChanged?: boolean;
 }
 
 function usd(tokens: number, perMillion: number): number {
@@ -44,7 +48,9 @@ export function projectEarlyCompactionEconomics(input: EarlyCompactionEconomicsI
 			detail: "cache/input prices missing; no fabricated savings",
 		};
 	}
+	const cacheInvalidated = Boolean(input.cacheInvalidated || input.modelSwitched || input.tierChanged);
 	if (
+		!cacheInvalidated &&
 		input.lastEarlyDecisionAtTokens !== undefined &&
 		Math.abs(input.currentTokens - input.lastEarlyDecisionAtTokens) < input.hysteresisTokens
 	) {

@@ -59,8 +59,9 @@ export interface WorkbenchPaneTitleButton {
 }
 
 /**
- * `true` follows the newest rows until the operator scrolls away. `{ row }` centres that row when it
- * changes (a new current stage) and otherwise leaves the operator's scroll alone.
+ * `true` follows the newest rows until the operator scrolls away. `{ row, key }` centres that row
+ * when the row or key changes and otherwise leaves the operator's scroll alone. Wheel and page pin
+ * a `{ row, key }` viewport even on the last page, so a later focusKey change cannot yank it.
  */
 export type WorkbenchPaneFollow =
 	| boolean
@@ -86,6 +87,8 @@ export class WorkbenchPane {
 	private followedKey?: string;
 	/** Pinned viewport has newer progress off-screen. */
 	private newerProgress = false;
+	/** Last render used `{ row, key }` follow; wheel/page then pin even at the last page. */
+	private followByKey = false;
 	private titleActions: { action: WorkbenchPaneTitleAction; start: number; end: number }[] = [];
 
 	reset(): void {
@@ -94,6 +97,7 @@ export class WorkbenchPane {
 		this.followedRow = undefined;
 		this.followedKey = undefined;
 		this.newerProgress = false;
+		this.followByKey = false;
 		this.hide();
 	}
 
@@ -133,7 +137,10 @@ export class WorkbenchPane {
 		const step = Math.sign(delta) * Math.min(Math.abs(delta), this.height);
 		const end = Math.max(0, this.count - this.height);
 		this.offset = Math.max(0, Math.min(end, this.offset + step));
-		this.pinned = this.offset < end;
+		// Tail-follow (`true`) unpins at the newest page so new rows keep landing in view.
+		// `{ row, key }` follow pins on any operator scroll, including landing on the last page:
+		// offset === end is not "resume auto-follow" when the followed node is not the tail.
+		this.pinned = this.followByKey ? true : this.offset < end;
 		return true;
 	}
 
@@ -168,6 +175,7 @@ export class WorkbenchPane {
 		this.height = Math.max(0, height - 1);
 		this.count = lines.length;
 		this.titleActions = [];
+		this.followByKey = typeof follow === "object";
 		const end = Math.max(0, lines.length - this.height);
 		let target = Math.min(this.offset, end);
 		if (typeof follow === "object") {

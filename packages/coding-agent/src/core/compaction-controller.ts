@@ -247,6 +247,8 @@ export class CompactionController {
 	private providerRecoveryAttempted = false;
 	private ineffectiveThresholdFrontier: IneffectiveThresholdFrontier | undefined;
 	private lastEarlyEconomicsAtTokens: number | undefined;
+	private lastEarlyEconomicsModelId: string | undefined;
+	private lastEarlyEconomicsInputPrice: number | undefined;
 	private retentionPlanner?: EvidenceRetentionPlanner;
 	private activeRetentionDecisions?: readonly EvidenceRetentionDecision[];
 	private lastAppliedRetentionAudit?: AppliedRetentionAudit;
@@ -1245,10 +1247,17 @@ export class CompactionController {
 
 	private shouldProceedEarlyEconomics(
 		contextTokens: number,
-		model: { cost?: { input?: number; cacheRead?: number; cacheWrite?: number } },
+		model: { id: string; cost?: { input?: number; cacheRead?: number; cacheWrite?: number } },
 		settings: CompactionSettings,
 	): boolean {
 		const usage = this.recentCacheUsage();
+		const modelSwitched = this.lastEarlyEconomicsModelId !== undefined && this.lastEarlyEconomicsModelId !== model.id;
+		const inputPrice = model.cost?.input;
+		const tierChanged =
+			this.lastEarlyEconomicsInputPrice !== undefined &&
+			inputPrice !== undefined &&
+			this.lastEarlyEconomicsInputPrice !== inputPrice;
+		const cacheInvalidated = modelSwitched || tierChanged;
 		const verdict = projectEarlyCompactionEconomics({
 			currentTokens: contextTokens,
 			compactableTokens: Math.max(0, contextTokens - settings.keepRecentTokens),
@@ -1256,15 +1265,20 @@ export class CompactionController {
 			recentCacheWriteTokens: usage.write,
 			cacheReadUsdPerMillion: model.cost?.cacheRead,
 			cacheWriteUsdPerMillion: model.cost?.cacheWrite,
-			inputUsdPerMillion: model.cost?.input,
+			inputUsdPerMillion: inputPrice,
 			estimatedSummaryTokens: Math.min(4000, Math.max(256, Math.floor(contextTokens * 0.05))),
 			horizonTurns: 8,
 			lastEarlyDecisionAtTokens: this.lastEarlyEconomicsAtTokens,
 			hysteresisTokens: 2000,
 			minSavingsUsd: 0.001,
+			cacheInvalidated,
+			modelSwitched,
+			tierChanged,
 		});
 		if (verdict.proceed || (verdict.reason !== "insufficient_evidence" && verdict.reason !== "hysteresis")) {
 			this.lastEarlyEconomicsAtTokens = contextTokens;
+			this.lastEarlyEconomicsModelId = model.id;
+			this.lastEarlyEconomicsInputPrice = inputPrice;
 		}
 		if (verdict.proceed) return true;
 		this.deps.emit({ type: "compaction_start", reason: "threshold" });

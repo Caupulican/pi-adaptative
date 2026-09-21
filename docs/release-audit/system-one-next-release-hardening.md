@@ -50,13 +50,14 @@ See `{SCRATCH}/session-forensics.md`. Ledger: 27 `worker supervision` failed `Mi
 ## Compaction economics
 
 - Early planner: `projectEarlyCompactionEconomics`; missing prices → `insufficient_evidence`; hot hit-ratio ≥ 0.7 → `hot_cache`
+- Hysteresis: token-delta only while the prefix is intact; skipped when `cacheInvalidated` / `modelSwitched` / `tierChanged` (COMPACTION_ECONOMICS case 6)
 - Hysteresis stamp: not on `insufficient_evidence` or `hysteresis`
 - Safety/recovery: unchanged
 
 ## TUI
 
 - false DELIVER: List and Diagram require open checks = 0
-- semantic focus: `graphFocusKey`; pinned `new`
+- semantic focus: `graphFocusKey`; wheel/page pin `{row,key}` including last page; pinned `new`
 - deliver-with-open-checks: pending yes-node is current
 
 ## Jev (implementer Gate I)
@@ -69,7 +70,8 @@ See `{SCRATCH}/session-forensics.md`. Ledger: 27 `worker supervision` failed `Mi
 ## Gate J
 
 - v0.99.36 print-mode session `01a0c27f`: 2 workers, files correct, tool-gate Jev ok; supervision failed `TypeSafe evidence must be finite, acyclic JSON` (boolean `criteria: undefined`). Fixed in v0.99.37.
-- v0.99.37 installed binary print-mode session `01a0c2a6`: 2 workers (`worker_completed`), `hello-a.txt`=`alpha`, `hello-b.txt`=`beta`; tool-gate `jev-1.13.0` allow ×2; no TypeSafe JSON error. One truthful degraded supervision row: confidence 0.62 < 0.75. Workers not aborted. cacheRead 86189.
+- v0.99.37 installed binary print-mode session `01a0c2a6`: 2 workers (`worker_completed`), `hello-a.txt`=`alpha`, `hello-b.txt`=`beta`; tool-gate `jev-1.13.0` allow ×2; no TypeSafe JSON error. One truthful degraded supervision row: confidence 0.62 < 0.75. Workers not aborted. cacheRead 86189. No verify/planner (file-write only).
+- v0.99.37 Gate J3 session `01a0c2c9-4a4b-7461-a7ef-0f64e03b52da` (`xai/grok-4.6`): 2 workers, files correct, `node --test` bash `piVerification.status=passed`, `compaction_end skipReason=early compaction deferred: hot_cache (hit ratio 1.00; preserve prefix)` ×2. cacheRead 195392. No TypeSafe JSON error.
 
 ## Resume next action
 

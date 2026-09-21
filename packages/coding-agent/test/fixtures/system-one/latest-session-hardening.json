@@ -1,7 +1,7 @@
 {
 	"sessionId": "01a0c214-1607-723c-aa91-03f970c23058",
 	"cwd": "/home/caudev/GitHub/mine/AIdeas",
-	"note": "Sanitized field fixture. No secrets. Ledger counts from 2026-09-21 live agent dir.",
+	"note": "Sanitized field fixture. No secrets. Ledger counts from 2026-09-21 live agent dir. incompleteAnswers is the field-empty reviewer payload; graph is proof-open; compaction.hotCache is the hot-prefix usage that must defer.",
 	"workerSupervision": {
 		"checkpoint": "JEV-WORKER-SUPERVISION",
 		"failedCount": 27,
@@ -20,9 +20,28 @@
 	"graph": {
 		"proof": { "satisfied": 1, "total": 4, "pending": 3 },
 		"next": "verify 3 open criteria",
-		"forbidden": "goal satisfied? -> yes -> DELIVER"
+		"forbidden": "goal satisfied? -> yes -> DELIVER",
+		"checks": [
+			{ "text": "a", "status": "satisfied" },
+			{ "text": "b", "status": "pending" },
+			{ "text": "c", "status": "pending" },
+			{ "text": "d", "status": "pending" }
+		]
 	},
 	"compaction": {
-		"earlyThresholdWithoutCacheProof": true
+		"earlyThresholdWithoutCacheProof": true,
+		"hotCache": {
+			"currentTokens": 80000,
+			"compactableTokens": 40000,
+			"recentCacheReadTokens": 90000,
+			"recentCacheWriteTokens": 1000,
+			"cacheReadUsdPerMillion": 0.3,
+			"cacheWriteUsdPerMillion": 3.75,
+			"inputUsdPerMillion": 3,
+			"estimatedSummaryTokens": 2000,
+			"horizonTurns": 8,
+			"hysteresisTokens": 2000,
+			"minSavingsUsd": 0.001
+		}
 	}
 }

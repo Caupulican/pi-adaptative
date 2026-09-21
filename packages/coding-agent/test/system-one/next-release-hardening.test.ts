@@ -15,12 +15,16 @@ import { WorkerSemanticSupervisor } from "../../src/core/supervision/worker-sema
 import { WorkerSupervisionCoordinator } from "../../src/core/supervision/worker-supervision-coordinator.ts";
 import { classifyJevFailure, JevAdapterFailure, SystemOneJevAdapter } from "../../src/core/system-one/adapter.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG } from "../../src/core/system-one/config.ts";
-import { buildDecisionGraphModel } from "../../src/modes/interactive/components/decision-graph-model.ts";
+import {
+	buildDecisionGraphModel,
+	type DecisionCheckStatus,
+} from "../../src/modes/interactive/components/decision-graph-model.ts";
 import {
 	composeDecisionDiagram,
 	renderDecisionDiagram,
 	renderDecisionList,
 } from "../../src/modes/interactive/components/decision-graph-render.ts";
+import { WorkbenchPane } from "../../src/modes/interactive/components/workbench-pane.ts";
 import { graphChecksFromVerificationObligations } from "../../src/modes/interactive/interactive-layout.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../src/utils/ansi.ts";
@@ -44,18 +48,145 @@ function noulAnswers(overrides: Record<string, number> = {}): Record<string, { t
 	return answers;
 }
 
-describe("next-release hardening", () => {
-	it("replays the sanitized latest-session fixture against the shipped checkpoint compiler", () => {
-		const fixturePath = join(
-			dirname(fileURLToPath(import.meta.url)),
-			"../fixtures/system-one/latest-session-hardening.json",
-		);
-		const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
-			workerSupervision: { sevenQuestions: string[]; incompleteAnswers: Record<string, unknown> };
+type HardeningFixture = {
+	workerSupervision: { sevenQuestions: string[]; incompleteAnswers: Record<string, unknown> };
+	graph: {
+		proof: { satisfied: number; total: number; pending: number };
+		next: string;
+		checks: Array<{ text: string; status: DecisionCheckStatus }>;
+	};
+	compaction: {
+		hotCache: {
+			currentTokens: number;
+			compactableTokens: number;
+			recentCacheReadTokens: number;
+			recentCacheWriteTokens: number;
+			cacheReadUsdPerMillion: number;
+			cacheWriteUsdPerMillion: number;
+			inputUsdPerMillion: number;
+			estimatedSummaryTokens: number;
+			horizonTurns: number;
+			hysteresisTokens: number;
+			minSavingsUsd: number;
 		};
+	};
+};
+
+function loadHardeningFixture(): HardeningFixture {
+	const fixturePath = join(
+		dirname(fileURLToPath(import.meta.url)),
+		"../fixtures/system-one/latest-session-hardening.json",
+	);
+	return JSON.parse(readFileSync(fixturePath, "utf8")) as HardeningFixture;
+}
+
+function pendingGraphProjection(fixture: HardeningFixture): OperatorProjection {
+	return {
+		schema_version: "1.0",
+		objective_id: "g",
+		title: "t",
+		phase: "build",
+		phase_index: 3,
+		phase_count: 6,
+		current_action: "implement",
+		why: "w",
+		next_action: fixture.graph.next,
+		health: "normal",
+		control: { owner: "system_one", state: "deciding", reasonCode: "goal_active" },
+		active_actors: [{ id: "root", kind: "root", label: "Root" }],
+		adaptation: null,
+		proof: { ...fixture.graph.proof, failing: 0 },
+		context: null,
+	};
+}
+
+describe("next-release hardening", () => {
+	it("replays the sanitized latest-session fixture against shipped adapter, diagram, and economics", async () => {
+		const fixture = loadHardeningFixture();
 		const program = compileDecisionProgramForCheckpoint("JEV-WORKER-SUPERVISION", {});
 		expect(program.decisions.map((d) => d.id)).toEqual(fixture.workerSupervision.sevenQuestions);
 		expect(Object.keys(fixture.workerSupervision.incompleteAnswers)).toEqual([]);
+
+		const adapter = new SystemOneJevAdapter(
+			{
+				evaluate: async () => ({
+					request: { model: "jev-1.13.0" },
+					response: { model: "jev-1.13.0", answers: fixture.workerSupervision.incompleteAnswers },
+					elapsedMs: 1,
+				}),
+			},
+			DEFAULT_SYSTEM_ONE_CONFIG,
+			{ getApiKey: () => "test-key", sleep: async () => {} },
+		);
+		const questions = Object.fromEntries(
+			fixture.workerSupervision.sevenQuestions.map((id) => [id, { type: "noul" }]),
+		);
+		try {
+			await adapter.evaluate({ state: {}, questions });
+			expect.fail("expected JevAdapterFailure");
+		} catch (error) {
+			expect(error).toBeInstanceOf(JevAdapterFailure);
+			expect((error as JevAdapterFailure).kind).toBe("invalid_response");
+			expect((error as JevAdapterFailure).originalMessage).toContain("meaningful_progress");
+		}
+
+		const log = new DecisionStageLog();
+		const projection = pendingGraphProjection(fixture);
+		log.observe(projection, Date.parse("2026-09-21T00:00:00.000Z"));
+		const model = buildDecisionGraphModel({
+			projection,
+			stageLog: log.view(Date.parse("2026-09-21T00:00:10.000Z")),
+			health: { state: "ok" },
+			evaluations: [],
+			route: {
+				rootModel: "m",
+				activeModel: "m",
+				source: "direct",
+				tier: null,
+				risk: null,
+				reasonCode: null,
+				switched: false,
+			},
+			lanes: [],
+			plan: [{ title: "step", status: "active" }],
+			checks: fixture.graph.checks,
+			receipts: { actions: 1, fileEffects: 0, failures: 0 },
+			backgroundTools: [],
+			nowMs: Date.parse("2026-09-21T00:00:10.000Z"),
+		});
+		const branch = composeDecisionDiagram(model).find((level) => level.kind === "branch");
+		expect(branch && branch.kind === "branch" ? branch.yes.lit : true).toBe(false);
+		expect(renderDecisionDiagram(model, 80).rows.map(stripAnsi).join("\n")).not.toContain("DELIVER");
+		expect(renderDecisionList(model, 80).rows.map(stripAnsi).join("\n")).toMatch(/pending · 3 open/);
+
+		const hot = projectEarlyCompactionEconomics(fixture.compaction.hotCache);
+		expect(hot.proceed).toBe(false);
+		if (!hot.proceed) expect(hot.reason).toBe("hot_cache");
+	});
+
+	it("unpinned {row,key} follow recenters when the key changes", () => {
+		const pane = new WorkbenchPane();
+		const lines = Array.from({ length: 40 }, (_, i) => `row-${i}`);
+		const first = (follow: { row: number; key: string }) =>
+			stripAnsi(pane.render("Decision graph", "", lines, 0, 0, 48, 8, follow)[1] ?? "").trim();
+		expect(first({ row: 10, key: "stage:build/eval:" })).toContain("row-7");
+		expect(first({ row: 20, key: "stage:build/eval:Jev" })).toContain("row-17");
+	});
+
+	it("wheel and page to the diagram end pin {row,key} follow so a later key change keeps offset and shows new", () => {
+		const pane = new WorkbenchPane();
+		const lines = Array.from({ length: 40 }, (_, i) => `row-${i}`);
+		const draw = (key: string) => pane.render("Decision graph", "", lines, 0, 0, 48, 8, { row: 10, key });
+		draw("stage:build/eval:");
+		expect(pane.pageBy(1)).toBe(true);
+		for (let i = 0; i < 8; i++) expect(pane.scrollBy(40)).toBe(true);
+		const pinned = draw("stage:build/eval:");
+		const pinnedFirst = stripAnsi(pinned[1] ?? "").trim();
+		expect(pinnedFirst).toContain("row-33");
+		expect(stripAnsi(pinned[0] ?? "")).not.toMatch(/\bnew\b/);
+		const after = draw("stage:build/eval:Jev");
+		expect(stripAnsi(after[1] ?? "").trim()).toBe(pinnedFirst);
+		expect(stripAnsi(after[0] ?? "")).toMatch(/\bnew\b/);
 	});
 
 	it("registers seven first-class JEV-WORKER-SUPERVISION decisions, not generic approved", () => {
@@ -501,6 +632,23 @@ describe("next-release hardening", () => {
 		});
 		expect(hysteresis.proceed).toBe(false);
 		if (!hysteresis.proceed) expect(hysteresis.reason).toBe("hysteresis");
+		const afterSwitch = projectEarlyCompactionEconomics({
+			currentTokens: 81_000,
+			compactableTokens: 40_000,
+			recentCacheReadTokens: 100,
+			recentCacheWriteTokens: 50_000,
+			cacheReadUsdPerMillion: 0.3,
+			cacheWriteUsdPerMillion: 0.01,
+			inputUsdPerMillion: 0.01,
+			estimatedSummaryTokens: 100,
+			horizonTurns: 20,
+			lastEarlyDecisionAtTokens: 80_000,
+			hysteresisTokens: 2000,
+			minSavingsUsd: 0.0000001,
+			modelSwitched: true,
+			cacheInvalidated: true,
+		});
+		expect(afterSwitch.proceed).toBe(true);
 	});
 
 	it("keeps diagram rows within width across the adversarial width matrix while proof is pending", () => {

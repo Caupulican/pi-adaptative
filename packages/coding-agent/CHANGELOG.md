@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- A `{ row, key }` graph pane pins on wheel/page even on the last page, so a later `focusKey` change cannot yank a viewport the operator scrolled to the end of. Pinned follow still shows `new`.
+- Early-compaction hysteresis no longer blocks a reassess after a model switch, tier change, or other cache invalidation (COMPACTION_ECONOMICS case 6). Token-delta hysteresis still applies when the prefix is intact.
+
 ## [0.99.37] - 2026-09-21
 
 ### Fixed
