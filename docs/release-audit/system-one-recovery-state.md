@@ -8,21 +8,28 @@
 - Bundle reviewed head: `565098ec453b69495322aa3cd4207ac8aac0fa5c`
 - Broken release baseline: `2b6de7054bcdb130bc90347707cbb3ba87b9bb05`
 - Current branch: `main`
-- Current HEAD: `56571b576`
-- Recovery commit: `56571b576` (`fix(system-one): gates read live objective truth and Jev outcomes control the next route`)
+- Current HEAD: `45f72d1f5e229315535ba58776b324fb0eb5c05d`
+- Recovery commits:
+  - `56571b576` — gates read live objective truth; Jev outcomes control the next route
+  - `30b5a3ba4` — durable audit SHA stamp
+  - `45f72d1f5` — required-Jev failure is BLOCKED with CONTROL S1
+- CI-gated SHA: `45f72d1f5e229315535ba58776b324fb0eb5c05d`
+- GitHub `ci.yml` run: [35554017867](https://github.com/Caupulican/pi-adaptative/actions/runs/35554017867) `conclusion=success` (10/10 jobs, including Windows build/check/test and all four Windows coding-agent shards)
 - Reviewed baseline still: `565098ec453b69495322aa3cd4207ac8aac0fa5c`
-- Last updated: 2026-09-20
+- Last updated: 2026-09-21
 - Agent/run identifier: grok-goal-5b3e99df1a5e
 
 ## Working tree
 
 ```text
-(clean at census; recovery edits in progress after this file)
+(clean after recording CI success)
 ```
 
 ## Newer commits reconciled
 
-- none after `565098ec453b69495322aa3cd4207ac8aac0fa5c`
+- `56571b576` — System One live-truth + executable preflight/postflight + fail-closed primary
+- `30b5a3ba4` — audit SHA stamp
+- `45f72d1f5` — Workbench required-Jev BLOCKED projection (CI-gated HEAD)
 
 Post-release commits that remain and must not be reset:
 
@@ -83,7 +90,7 @@ Jev **is** the active semantic gate on the production tool-admission path and on
 | WO-09 | VERIFIED | (this recovery commit) | wo09-run1.log + wo09-run2.log both 105 passed | | includes workbench-decision-graph |
 | WO-AUTH | VERIFIED | (this recovery commit) | synthetic reject | required-rejects-synthetic | mechanical `none` still allowed |
 | WO-TUI | VERIFIED | (this recovery commit) | operator-pov-bar + session-operator-projection-control + workbench-decision-graph | | required-Jev BLOCKED+degraded; session-sink swap |
-| WO-10 | FIXED_UNVERIFIED | | npm run check exit 0; milestone gates exit 0 | | GitHub ci.yml on the recovery SHA is not available until push |
+| WO-10 | VERIFIED | `45f72d1f5` | npm run check exit 0; milestone gates exit 0; ci.yml 35554017867 success | | 10/10 jobs including Windows |
 
 ## Findings B1–B11 vs current source
 
@@ -116,14 +123,14 @@ Jev **is** the active semantic gate on the production tool-admission path and on
 
 - command: `typesafe-review run .../jev-gate-confirm/packets` then `.../jev-repair-confirm/packets`
 - result: 8/8 packets `gate_passed`, model `jev-1.13.0`, all required Choices `yes` at confidence >= 0.97 (repair packets all 1.00)
-- command: targeted vitest twice (`wo09-run1.log`, `wo09-run2.log`) — 88 passed / 88 passed
+- command: targeted vitest twice (`wo09-run1.log`, `wo09-run2.log`) — 105 passed / 105 passed
 - command: `npm run check` — exit 0
 - command: `check:release-readiness`, `check:contract-doctrine`, `check:clones`, `check:coordinator-boundaries` — all exit 0
-- commit: `56571b576`; GitHub `ci.yml` not run (no push)
+- command: `gh run view 35554017867` — `conclusion=success` on `45f72d1f5e229315535ba58776b324fb0eb5c05d`
 
 ## Resume next action
 
-Push the recovery commit when the owner authorizes it, then require `ci.yml` success on that exact SHA (including Windows cancellation jobs). Do not treat local full vitest as a substitute.
+None. Recovery candidate `45f72d1f5` has green `ci.yml` including Windows jobs.
 
 ## TUI visibility status
 
