@@ -22,7 +22,7 @@ import { compileDecisionProgramForCheckpoint } from "../steering/programs.ts";
  * happens to speak it (same local-port convention as the project-rule and supervision controllers).
  */
 export interface ClarificationDecisionProgram {
-	readonly schema_version: "1.0";
+	readonly schema_version: "2.0";
 	readonly program_id: string;
 	readonly description: string;
 	readonly decisions: readonly unknown[];
@@ -109,7 +109,7 @@ function readBoolean(
 function buildClarificationProgram(state: Record<string, unknown>): ClarificationDecisionProgram {
 	const compiled = compileDecisionProgramForCheckpoint("JEV-001", state);
 	return {
-		schema_version: "1.0",
+		schema_version: "2.0",
 		program_id: compiled.id,
 		description: "Objective clarification sufficiency (JEV-001 admission questions).",
 		decisions: compiled.decisions.filter((decision) => decision.kind === "boolean"),

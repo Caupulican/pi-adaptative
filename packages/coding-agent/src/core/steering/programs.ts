@@ -9,7 +9,7 @@ import { createDecisionProgram, type DecisionProgram } from "../decision/program
 import { canonicalDigest } from "./canonical.ts";
 import type { SteeringCertificateQuestionPackRef } from "./types.ts";
 
-export type QuestionKind = "noul" | "choice" | "score";
+export type QuestionKind = "boolean" | "choice" | "score";
 
 export interface SteeringQuestionDef {
 	readonly id: string;
@@ -906,10 +906,10 @@ export const STEERING_QUESTION_PACKS: Record<string, SteeringQuestionPack> = {
 		version: "1.0",
 		checkpointIds: ["JEV-001", "JEV-002", "JEV-003"],
 		questions: [
-			{ id: "objective_coherent", kind: "noul", description: "Is the objective clear and coherent?" },
+			{ id: "objective_coherent", kind: "boolean", description: "Is the objective clear and coherent?" },
 			{
 				id: "acceptance_complete",
-				kind: "noul",
+				kind: "boolean",
 				description: "Are all requested behaviors covered in acceptance criteria?",
 			},
 			{
@@ -917,14 +917,18 @@ export const STEERING_QUESTION_PACKS: Record<string, SteeringQuestionPack> = {
 				kind: "score",
 				description: "How severe is remaining ambiguity (0=none, 3=fatal)?",
 			},
-			{ id: "missing_information", kind: "noul", description: "Is critical information missing?" },
+			{ id: "missing_information", kind: "boolean", description: "Is critical information missing?" },
 			{
 				id: "requested_delivery_class",
 				kind: "choice",
 				description: "Target deliverable class",
 				options: ["code_fix", "new_feature", "refactor", "investigation", "release", "full_system"],
 			},
-			{ id: "capability_sensitive", kind: "noul", description: "Does this require special tools or capabilities?" },
+			{
+				id: "capability_sensitive",
+				kind: "boolean",
+				description: "Does this require special tools or capabilities?",
+			},
 		],
 	},
 	worker_supervision: {
@@ -934,27 +938,31 @@ export const STEERING_QUESTION_PACKS: Record<string, SteeringQuestionPack> = {
 		questions: [
 			{
 				id: "meaningful_progress",
-				kind: "noul",
+				kind: "boolean",
 				description: "Is the worker making meaningful progress on its mission?",
 			},
-			{ id: "worker_stuck", kind: "noul", description: "Is the worker stuck or making no progress?" },
-			{ id: "work_off_track", kind: "noul", description: "Has the worker drifted off-track from the mission?" },
+			{ id: "worker_stuck", kind: "boolean", description: "Is the worker stuck or making no progress?" },
+			{ id: "work_off_track", kind: "boolean", description: "Has the worker drifted off-track from the mission?" },
 			{
 				id: "strategy_repetition",
-				kind: "noul",
+				kind: "boolean",
 				description: "Is the worker repeating failing strategies without modification?",
 			},
 			{
 				id: "needs_independent_verification",
-				kind: "noul",
+				kind: "boolean",
 				description: "Is the implementation finished and ready for independent verification?",
 			},
 			{
 				id: "specialist_gap_present",
-				kind: "noul",
+				kind: "boolean",
 				description: "Does this require a different domain specialist?",
 			},
-			{ id: "capability_gap_present", kind: "noul", description: "Is the worker missing an essential capability?" },
+			{
+				id: "capability_gap_present",
+				kind: "boolean",
+				description: "Is the worker missing an essential capability?",
+			},
 		],
 	},
 	objective_route: {
@@ -962,7 +970,11 @@ export const STEERING_QUESTION_PACKS: Record<string, SteeringQuestionPack> = {
 		version: "1.0",
 		checkpointIds: ["JEV-004", "JEV-005", "JEV-006", "JEV-024"],
 		questions: [
-			{ id: "work_remaining", kind: "noul", description: "Is there material work remaining to reach completion?" },
+			{
+				id: "work_remaining",
+				kind: "boolean",
+				description: "Is there material work remaining to reach completion?",
+			},
 			{
 				id: "missing_work_class",
 				kind: "choice",
@@ -979,7 +991,7 @@ export const STEERING_QUESTION_PACKS: Record<string, SteeringQuestionPack> = {
 			},
 			{
 				id: "evidence_sufficient",
-				kind: "noul",
+				kind: "boolean",
 				description: "Is fresh evidence sufficient for the next transition?",
 			},
 			{
@@ -989,24 +1001,24 @@ export const STEERING_QUESTION_PACKS: Record<string, SteeringQuestionPack> = {
 			},
 			{
 				id: "strategy_repetition",
-				kind: "noul",
+				kind: "boolean",
 				description: "Is the current failed strategy repeating without fresh evidence?",
 			},
-			{ id: "context_stale", kind: "noul", description: "Has the working context drifted or become stale?" },
+			{ id: "context_stale", kind: "boolean", description: "Has the working context drifted or become stale?" },
 			{
 				id: "independent_worker_required",
-				kind: "noul",
+				kind: "boolean",
 				description: "Is an independent worker or verifier required?",
 			},
 			{
 				id: "capability_escalation_required",
-				kind: "noul",
+				kind: "boolean",
 				description: "Does the task need capability escalation?",
 			},
-			{ id: "capability_gap_suspected", kind: "noul", description: "Is a missing capability gap suspected?" },
+			{ id: "capability_gap_suspected", kind: "boolean", description: "Is a missing capability gap suspected?" },
 			{
 				id: "completion_plausible",
-				kind: "noul",
+				kind: "boolean",
 				description: "Is the objective plausibly complete on current proof?",
 			},
 		],
@@ -1024,7 +1036,7 @@ export function findPackForCheckpoint(checkpointId: string): SteeringQuestionPac
 		id: `pi:steering:pack:${checkpointId}:1.0`,
 		version: "1.0",
 		checkpointIds: [checkpointId],
-		questions: [{ id: "approved", kind: "noul", description: `Approval for checkpoint ${checkpointId}` }],
+		questions: [{ id: "approved", kind: "boolean", description: `Approval for checkpoint ${checkpointId}` }],
 	};
 }
 

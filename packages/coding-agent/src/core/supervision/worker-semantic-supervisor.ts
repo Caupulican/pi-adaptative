@@ -41,6 +41,7 @@ export const WORKER_SUPERVISION_DECISION_IDS = [
 	"needs_independent_verification",
 	"specialist_gap_present",
 	"capability_gap_present",
+	"external_block_present",
 ] as const;
 
 function noulOf(value: unknown): number | undefined {
@@ -224,6 +225,11 @@ export class WorkerSemanticSupervisor {
 								kind: "boolean",
 								instruction: "Is the worker missing an essential capability?",
 							},
+							{
+								id: "external_block_present",
+								kind: "boolean",
+								instruction: "Is the worker blocked by an external dependency or system?",
+							},
 						],
 					};
 
@@ -244,6 +250,7 @@ export class WorkerSemanticSupervisor {
 						needs_independent_verification: 0.1,
 						specialist_gap_present: 0.1,
 						capability_gap_present: 0.1,
+						external_block_present: 0.1,
 					};
 				}
 				this.consecutiveFailures.delete(attempt.attemptId);
@@ -265,6 +272,10 @@ export class WorkerSemanticSupervisor {
 				action = "request_specialist";
 				summaryEvent = "Specialist requested · worker mission requires specialist domain";
 				reasonCodes.push("specialist_gap_detected");
+			} else if (answers.external_block_present > 0.5) {
+				action = "mark_external_block";
+				summaryEvent = "External block detected · worker is waiting on external dependencies";
+				reasonCodes.push("external_block_detected");
 			} else if (answers.capability_gap_present > 0.5) {
 				action = "request_capability";
 				summaryEvent = "Capability requested · worker mission requires synthesized capability";

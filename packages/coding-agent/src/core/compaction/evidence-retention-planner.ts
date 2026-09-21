@@ -37,7 +37,7 @@ export interface CompactionAuditStats {
 }
 
 export interface DecisionEngineProgram {
-	readonly schema_version: "1.0";
+	readonly schema_version: "2.0";
 	readonly program_id: string;
 	readonly description: string;
 	readonly decisions: readonly unknown[];
@@ -49,7 +49,7 @@ export interface DecisionEngine {
 		state?: Record<string, unknown>,
 		options?: { consequence?: string; signal?: AbortSignal },
 	): Promise<{
-		answers?: Record<string, { type?: string; noul?: number; choice?: string; value?: boolean | number }>;
+		answers?: Record<string, { type?: string; boolean?: boolean; choice?: string; value?: boolean | number }>;
 		results?: Record<string, { kind?: string; confidence?: { value?: number }; selected?: unknown }>;
 	}>;
 }
@@ -85,20 +85,20 @@ export function buildRetentionProgram(pairs: readonly ToolCallResultPair[]): Dec
 	for (const pair of pairs) {
 		decisions.push({
 			id: `keep_call::${pair.callId}`,
-			kind: "noul",
+			kind: "boolean",
 			type: "noul",
 			instruction: `Does knowing operation '${pair.toolName}' (id: ${pair.callId}) occurred remain useful to completing the current objective?`,
 		});
 		decisions.push({
 			id: `keep_result::${pair.callId}`,
-			kind: "noul",
+			kind: "boolean",
 			type: "noul",
 			instruction: `Does the exact result of '${pair.toolName}' (id: ${pair.callId}) remain useful enough that truncating would risk losing important proof?`,
 		});
 	}
 
 	return {
-		schema_version: "1.0",
+		schema_version: "2.0",
 		program_id: `retention_eval_${Date.now()}`,
 		description: "Evidence-preserving compaction retention evaluation",
 		decisions,
@@ -116,7 +116,7 @@ export async function applyConservativeRetentionPolicy(
 	pairs: readonly ToolCallResultPair[],
 	evaluation:
 		| {
-				answers?: Record<string, { type?: string; noul?: number; value?: boolean | number }>;
+				answers?: Record<string, { type?: string; boolean?: boolean; value?: boolean | number }>;
 				results?: Record<string, { kind?: string; confidence?: { value?: number }; selected?: unknown }>;
 		  }
 		| undefined,

@@ -12,7 +12,7 @@ import type {
 } from "./types.ts";
 
 export interface DecisionEngineProgram {
-	readonly schema_version: "1.0";
+	readonly schema_version: "2.0";
 	readonly program_id: string;
 	readonly description: string;
 	readonly decisions: readonly unknown[];
@@ -24,7 +24,7 @@ export interface DecisionEngine {
 		state?: Record<string, unknown>,
 		options?: { consequence?: string; signal?: AbortSignal },
 	): Promise<{
-		answers?: Record<string, { type?: string; noul?: number; choice?: string; value?: boolean | number }>;
+		answers?: Record<string, { type?: string; boolean?: boolean; choice?: string; value?: boolean | number }>;
 		results?: Record<string, { kind?: string; confidence?: { value?: number }; selected?: unknown }>;
 	}>;
 }
@@ -306,12 +306,12 @@ export class SemanticProjectRuleController {
 		if (semantic.length > 0) {
 			if (this.decisionEngine) {
 				const program: DecisionEngineProgram = {
-					schema_version: "1.0",
+					schema_version: "2.0",
 					program_id: `rule_program_${Date.now()}`,
 					description: `Evaluate semantic project rules for phase ${phase}`,
 					decisions: semantic.map((r) => ({
 						id: `violate::${r.rule_id}`,
-						kind: "noul",
+						kind: "boolean",
 						type: "noul",
 						instruction: `Does the change violate the following project rule? Rule: "${r.text}"`,
 					})),
