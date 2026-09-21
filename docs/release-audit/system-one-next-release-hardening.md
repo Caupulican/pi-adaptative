@@ -67,6 +67,7 @@ See `{SCRATCH}/session-forensics.md`. Ledger: 27 `worker supervision` failed `Mi
 - `{SCRATCH}/jev-gate-i-3-results`: list 1.00, consume 1.00; hysteresis-no-stamp 0.34 (badly formed) rewritten
 - `{SCRATCH}/jev-gate-i-3b-results`: hysteresis-token-in-if 1.00
 - `{SCRATCH}/jev-gate-i-037-results`: 10/10 gate_passed confidence 1.00 against tagged v0.99.37 sources (omit undefined criteria, pending obligations, serialize throw, requirePass false, observer returns undefined, seven ids, POV CONTROL/ACTOR/ROUTE/JEV, JEV ok label, resumable human-input snapshot, native_calibrated)
+- `{SCRATCH}/jev-skeptic-fixes-results`: pin-at-end, followByKey stamp, hysteresis `!cacheInvalidated`, controller flags 4/4 at 1.00; formatted controller reconfirm 1.00
 
 ## Gate J
 
