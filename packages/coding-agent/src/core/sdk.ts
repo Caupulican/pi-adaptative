@@ -46,6 +46,7 @@ import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
 import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
+import { observeDeliveryAdmission } from "./objective-execution/delivery-intent.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import { SessionObjectiveRuntime } from "./objective-execution/session-objective-runtime.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
@@ -1006,6 +1007,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			compileExecutionCharter({
 				objectiveId: `obj-${sessionManager.getSessionId()}`,
 				prompt: options.prompt ?? "Perform safe scoped execution with full adaptive runtime",
+				admission: observeDeliveryAdmission(cwd),
 			});
 
 		// The objective loop routes over the goal the owner started: reconcile it into the durable

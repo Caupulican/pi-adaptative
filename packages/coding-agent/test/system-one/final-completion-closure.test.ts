@@ -183,12 +183,19 @@ async function deliver(options?: {
 					executionCharter: compileExecutionCharter({
 						objectiveId,
 						prompt: "ship",
-						initialGrants: { git: { commit: true, push: true } },
+						initialGrants: {
+							git: { commit: true, push: true, push_remote: "origin", push_ref: "refs/heads/main" },
+						},
 					}),
 					...(options?.grants === "missing"
 						? {}
 						: {
 								gitExecutor: {
+									inspectCandidate: async () => ({
+										parent: "parent-approved",
+										tree: "tree-approved",
+										digest: "unused",
+									}),
 									commit: async () => ({ sha }),
 									push: async () => {
 										if (options?.push === "throw") throw new Error("rejected");
@@ -196,6 +203,8 @@ async function deliver(options?: {
 									},
 									proveDelivery: async () => ({
 										head,
+										parent: "parent-approved",
+										tree: "tree-approved",
 										remote: options?.observedRemote ?? "origin",
 										ref: "refs/heads/main",
 										observedSha,
@@ -550,13 +559,20 @@ describe("FC-03 receipt binding", () => {
 			executionCharter: compileExecutionCharter({
 				objectiveId: "obj-1",
 				prompt: "ship",
-				initialGrants: { git: { commit: true, create_tag: true } },
+				initialGrants: { git: { commit: true, create_tag: true, tag_name: "v1" } },
 			}),
 			gitExecutor: {
+				inspectCandidate: async () => ({
+					parent: "parent-approved",
+					tree: "tree-approved",
+					digest: "unused",
+				}),
 				commit: async () => ({ sha }),
 				tag: async () => ({ tag: "v1" }),
 				proveDelivery: async () => ({
 					head: sha,
+					parent: "parent-approved",
+					tree: "tree-approved",
 					remote: "origin",
 					ref: "refs/heads/main",
 					observedSha: sha,
@@ -583,7 +599,9 @@ describe("FC-03 receipt binding", () => {
 			executionCharter: compileExecutionCharter({
 				objectiveId: "obj-1",
 				prompt: "ship",
-				initialGrants: { release: { package_publish: true } },
+				initialGrants: {
+					release: { package_publish: true, package_name: "pkg", package_version: "1.0.0" },
+				},
 			}),
 			releaseExecutor: {
 				publish: async () => ({ id: "pub-1" }),
@@ -625,35 +643,46 @@ describe("FC-03 receipt binding", () => {
 		expect(result.deliveryBundle?.side_effects?.deploy?.[0]?.state).toBe("failed");
 	});
 
-	it("the session git delivery port commits, pushes to a local remote, and proves that SHA", async () => {
+	it("the session git delivery port commits owned paths, pushes the frozen upstream, and proves that tree", async () => {
 		const root = gitRepo();
 		const bare = mkdtempSync(join(tmpdir(), "pi-final-remote-"));
 		execFileSync("git", ["init", "--bare"], { cwd: bare });
 		execFileSync("git", ["remote", "add", "origin", bare], { cwd: root });
-		writeFileSync(join(root, "README.md"), "two\n");
-		writeFileSync(join(root, "leftover.txt"), "residue\n");
 		const delivery = createRepoGitDelivery(root);
-		const committed = await delivery.commit("two");
+		writeFileSync(join(root, "README.md"), "two\n");
+		const certified = await delivery.certifyOwnedCandidate(["README.md"]);
+		const committed = await delivery.commit({
+			message: "two",
+			paths: ["README.md"],
+			approvedParent: certified.parent,
+			approvedTreeOid: certified.tree,
+		});
 		const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
 		expect(committed.sha).toBe(head);
-		trackUpstream(root, "origin");
-		const pushed = await delivery.push();
+		expect(committed.tree).toBe(certified.tree);
+		expect(committed.parent).toBe(certified.parent);
+		const branch = trackUpstream(root, "origin");
+		const pushed = await delivery.push({ remote: "origin", ref: `refs/heads/${branch}` });
 		const proof = await delivery.proveDelivery({
-			candidateDigest: "digest",
-			candidateRevision: head,
+			candidateDigest: certified.digest,
+			candidateRevision: certified.parent,
+			approvedTreeOid: certified.tree,
+			approvedParent: certified.parent,
 			candidateUntrackedPaths: ["leftover.txt"],
 			remote: pushed.remote,
 			ref: pushed.ref,
 		});
 		expect(proof.head).toBe(committed.sha);
+		expect(proof.tree).toBe(certified.tree);
+		expect(proof.parent).toBe(certified.parent);
 		expect(proof.observedSha).toBe(committed.sha);
 		expect(proof.remote).toBe("origin");
 		expect(proof.ref).toBe(pushed.ref);
 		expect(proof.attributableResidue).toEqual([]);
 		writeFileSync(join(root, "leftover.txt"), "still\n");
 		const residue = await delivery.proveDelivery({
-			candidateDigest: "digest",
-			candidateRevision: head,
+			candidateDigest: certified.digest,
+			candidateRevision: certified.parent,
 			candidateUntrackedPaths: ["leftover.txt"],
 			remote: pushed.remote,
 			ref: pushed.ref,
@@ -668,13 +697,20 @@ describe("FC-03 receipt binding", () => {
 		const bare = mkdtempSync(join(tmpdir(), "pi-final-detached-"));
 		execFileSync("git", ["init", "--bare"], { cwd: bare });
 		execFileSync("git", ["remote", "add", "origin", bare], { cwd: root });
-		writeFileSync(join(root, "README.md"), "two\n");
 		const delivery = createRepoGitDelivery(root);
-		await delivery.commit("two");
+		writeFileSync(join(root, "README.md"), "two\n");
+		const certified = await delivery.certifyOwnedCandidate(["README.md"]);
+		await delivery.commit({
+			message: "two",
+			paths: ["README.md"],
+			approvedParent: certified.parent,
+			approvedTreeOid: certified.tree,
+		});
 		const branch = trackUpstream(root, "origin");
-		await delivery.push();
+		const frozen = { remote: "origin", ref: `refs/heads/${branch}` };
+		await delivery.push(frozen);
 		execFileSync("git", ["checkout", "--detach"], { cwd: root });
-		await expect(delivery.push()).rejects.toThrow("Detached HEAD cannot be pushed");
+		await expect(delivery.push(frozen)).rejects.toThrow("Detached HEAD cannot be pushed");
 		const remote = execFileSync("git", ["rev-parse", `refs/heads/${branch}`], { cwd: bare, encoding: "utf8" }).trim();
 		const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
 		expect(remote).toBe(head);
@@ -688,17 +724,23 @@ describe("FC-03 receipt binding", () => {
 		const bare = mkdtempSync(join(tmpdir(), "pi-final-upstream-"));
 		execFileSync("git", ["init", "--bare"], { cwd: bare });
 		execFileSync("git", ["remote", "add", "upstream", bare], { cwd: root });
-		writeFileSync(join(root, "README.md"), "two\n");
 		const delivery = createRepoGitDelivery(root);
-		await delivery.commit("two");
-		await expect(delivery.push()).rejects.toThrow(/no upstream/);
+		writeFileSync(join(root, "README.md"), "two\n");
+		const certified = await delivery.certifyOwnedCandidate(["README.md"]);
+		await delivery.commit({
+			message: "two",
+			paths: ["README.md"],
+			approvedParent: certified.parent,
+			approvedTreeOid: certified.tree,
+		});
+		await expect(delivery.push({ remote: "upstream", ref: "refs/heads/main" })).rejects.toThrow(/no upstream/);
 		const before = execFileSync("git", ["for-each-ref", "--format=%(refname)", "refs/heads"], {
 			cwd: bare,
 			encoding: "utf8",
 		}).trim();
 		expect(before).toBe("");
 		const branch = trackUpstream(root, "upstream");
-		const pushed = await delivery.push();
+		const pushed = await delivery.push({ remote: "upstream", ref: `refs/heads/${branch}` });
 		expect(pushed.remote).toBe("upstream");
 		expect(pushed.ref).toBe(`refs/heads/${branch}`);
 		const remote = execFileSync("git", ["rev-parse", pushed.ref], { cwd: bare, encoding: "utf8" }).trim();
@@ -710,9 +752,15 @@ describe("FC-03 receipt binding", () => {
 		const root = gitRepo();
 		execFileSync("git", ["config", "tag.gpgsign", "true"], { cwd: root });
 		execFileSync("git", ["config", "user.signingkey", "0000000000000000"], { cwd: root });
-		writeFileSync(join(root, "README.md"), "two\n");
 		const delivery = createRepoGitDelivery(root);
-		await delivery.commit("two");
+		writeFileSync(join(root, "README.md"), "two\n");
+		const certified = await delivery.certifyOwnedCandidate(["README.md"]);
+		await delivery.commit({
+			message: "two",
+			paths: ["README.md"],
+			approvedParent: certified.parent,
+			approvedTreeOid: certified.tree,
+		});
 		await expect(delivery.tag("v-sign")).rejects.toThrow(/sign/i);
 		const listed = execFileSync("git", ["tag", "--list"], { cwd: root, encoding: "utf8" });
 		expect(listed).not.toContain("v-sign");
@@ -788,7 +836,7 @@ describe("completion catalog thresholds and release binding", () => {
 		expect(requestsBugFix("obj", "debugging notes")).toBe(false);
 	});
 
-	it("binds npm publish only for a public package, and deploy from script stdout or a status script", async () => {
+	it("binds npm publish only for a public package and does not promote a deploy script", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-release-"));
 		expect(createRepoReleaseDelivery(root)).toBeUndefined();
 		writeFileSync(join(root, "package.json"), JSON.stringify({ name: "pkg", version: "1.0.0", private: true }));
@@ -798,33 +846,31 @@ describe("completion catalog thresholds and release binding", () => {
 		expect(typeof publishOnly?.publish).toBe("function");
 		expect(typeof publishOnly?.provePublish).toBe("function");
 		expect(publishOnly?.deploy).toBeUndefined();
-		writeFileSync(join(root, "id.js"), "process.stdout.write('dep-stdout');\n");
-		writeFileSync(
-			join(root, "package.json"),
-			JSON.stringify({ name: "pkg", version: "1.0.0", private: true, scripts: { deploy: "node id.js" } }),
-		);
-		const stdoutDeploy = createRepoReleaseDelivery(root);
-		expect(stdoutDeploy?.publish).toBeUndefined();
-		await expect(stdoutDeploy?.proveDeploy?.("staging")).rejects.toThrow("Deploy proof unavailable");
-		await expect(stdoutDeploy?.deploy?.("staging")).resolves.toEqual({ id: "dep-stdout" });
-		await expect(stdoutDeploy?.proveDeploy?.("staging")).resolves.toEqual({
-			target: "staging",
-			deploymentId: "dep-stdout",
-		});
-		writeFileSync(join(root, "deploy.js"), "process.exit(0);\n");
-		writeFileSync(join(root, "status.js"), "process.stdout.write('dep-1');\n");
 		writeFileSync(
 			join(root, "package.json"),
 			JSON.stringify({
 				name: "pkg",
 				version: "1.0.0",
 				private: true,
-				scripts: { deploy: "node deploy.js", "deploy:status": "node status.js" },
+				scripts: { deploy: "node danger.js", "deploy:status": "node status.js" },
 			}),
 		);
-		const deploy = createRepoReleaseDelivery(root);
-		expect(deploy?.publish).toBeUndefined();
-		await expect(deploy?.deploy?.("staging")).resolves.toEqual({ id: "dep-1" });
-		await expect(deploy?.proveDeploy?.("staging")).resolves.toEqual({ target: "staging", deploymentId: "dep-1" });
+		expect(createRepoReleaseDelivery(root)?.deploy).toBeUndefined();
+		expect(createRepoReleaseDelivery(root)?.publish).toBeUndefined();
+		const trusted = createRepoReleaseDelivery(root, {
+			adapters: [
+				{
+					id: "trusted-staging",
+					targets: ["staging"],
+					deploy: async () => ({ id: "claimed" }),
+					observe: async () => ({ deploymentId: "observed" }),
+				},
+			],
+		});
+		await expect(trusted?.deploy?.("staging")).resolves.toEqual({ id: "claimed" });
+		await expect(trusted?.proveDeploy?.("staging")).resolves.toEqual({
+			target: "staging",
+			deploymentId: "observed",
+		});
 	});
 });

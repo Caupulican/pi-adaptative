@@ -58,6 +58,20 @@ export interface DeployReceipt {
 	readonly deploymentId?: string;
 }
 
+export interface GithubReleaseReceipt {
+	readonly repository?: string;
+	readonly tag?: string;
+}
+
+export interface DeliverySideEffects {
+	readonly commit?: SideEffectReceipt<CommitReceipt>;
+	readonly push?: SideEffectReceipt<PushReceipt>;
+	readonly deploy?: readonly SideEffectReceipt<DeployReceipt>[];
+	readonly tag?: SideEffectReceipt<{ tag: string }>;
+	readonly publish?: SideEffectReceipt<PublishReceipt>;
+	readonly github_release?: SideEffectReceipt<GithubReleaseReceipt>;
+}
+
 export interface DeliveryBundle {
 	readonly schema_version: "2.0";
 	readonly objective_id: string;
@@ -91,13 +105,7 @@ export interface DeliveryBundle {
 		readonly digest: string;
 		readonly untrackedPaths: readonly string[];
 	};
-	readonly side_effects?: {
-		readonly commit?: SideEffectReceipt<CommitReceipt>;
-		readonly push?: SideEffectReceipt<PushReceipt>;
-		readonly deploy?: readonly SideEffectReceipt<DeployReceipt>[];
-		readonly tag?: SideEffectReceipt<{ tag: string }>;
-		readonly publish?: SideEffectReceipt<PublishReceipt>;
-	};
+	readonly side_effects?: DeliverySideEffects;
 }
 
 export function buildDeliveryBundle(input: {
@@ -126,13 +134,7 @@ export function buildDeliveryBundle(input: {
 	readonly finalCommit?: string;
 	readonly pushRefs?: readonly string[];
 	readonly publicationRefs?: readonly string[];
-	readonly sideEffects?: {
-		readonly commit?: SideEffectReceipt<CommitReceipt>;
-		readonly push?: SideEffectReceipt<PushReceipt>;
-		readonly deploy?: readonly SideEffectReceipt<DeployReceipt>[];
-		readonly tag?: SideEffectReceipt<{ tag: string }>;
-		readonly publish?: SideEffectReceipt<PublishReceipt>;
-	};
+	readonly sideEffects?: DeliverySideEffects;
 }): DeliveryBundle {
 	return {
 		schema_version: "2.0",

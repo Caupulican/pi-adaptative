@@ -1058,8 +1058,8 @@ export async function continueSync(deps: WorktreeSyncEngineDeps, args: ContinueS
 			};
 		}
 		if (unmerged.length > 0) {
-			const add = await runGit(deps, lane.worktreePath, ["add", "-A"]);
-			if (add.code !== 0) return gitError("git add -A failed while staging conflict resolutions", add);
+			const add = await runGit(deps, lane.worktreePath, ["add", "--", ...unmerged]);
+			if (add.code !== 0) return gitError("git add of resolved paths failed", add);
 		}
 		const cont = await runGitEnv(deps, lane.worktreePath, ["rebase", "--continue"]);
 		if (cont.code === 0 && !(await isRebaseActive(deps, lane.worktreePath))) {

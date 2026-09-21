@@ -344,19 +344,16 @@ export class ExecutionStore {
 	}
 
 	/**
-	 * The one store mutation that records terminal complete.
-	 * A second call with the same proof is a duplicate. A different proof or a phase that
-	 * cannot finish is rejected and does not transition again.
+	 * Whether this proof would become the terminal record. Does not write.
+	 * `apply` means the store is still open for this proof.
 	 */
-	noteTerminalProof(
+	classifyTerminalProof(
 		ref: string,
 	):
-		| { readonly outcome: "applied" }
+		| { readonly outcome: "apply" }
 		| { readonly outcome: "duplicate" }
 		| { readonly outcome: "rejected"; readonly reason: "conflict" | "invalid_phase" | "empty_proof" } {
-		if (!ref.trim()) {
-			return { outcome: "rejected", reason: "empty_proof" };
-		}
+		if (!ref.trim()) return { outcome: "rejected", reason: "empty_proof" };
 		const existing = this.state.completion.final_summary_ref ?? "";
 		if (this.state.phase === "complete" || this.state.completion.terminal_status === "complete") {
 			if (existing === ref) return { outcome: "duplicate" };
@@ -369,6 +366,22 @@ export class ExecutionStore {
 		) {
 			return { outcome: "rejected", reason: "invalid_phase" };
 		}
+		return { outcome: "apply" };
+	}
+
+	/**
+	 * The one store mutation that records terminal complete.
+	 * A second call with the same proof is a duplicate. A different proof or a phase that
+	 * cannot finish is rejected and does not transition again.
+	 */
+	noteTerminalProof(
+		ref: string,
+	):
+		| { readonly outcome: "applied" }
+		| { readonly outcome: "duplicate" }
+		| { readonly outcome: "rejected"; readonly reason: "conflict" | "invalid_phase" | "empty_proof" } {
+		const decision = this.classifyTerminalProof(ref);
+		if (decision.outcome !== "apply") return decision;
 		this.state.completion.final_summary_ref = ref;
 		this.state.completion.terminal_status = "complete";
 		this.transitionPhase("complete", true);

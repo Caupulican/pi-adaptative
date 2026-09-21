@@ -1,0 +1,304 @@
+import type { ExecutionCharter } from "../autonomy/execution-charter.ts";
+import type { DeliverySideEffects } from "./delivery-bundle.ts";
+import { unresolvedError } from "./delivery-intent.ts";
+import {
+	type ApprovedCandidateTree,
+	candidateTreeDigest,
+	type DeliveryProofObservation,
+	type DeliveryProofQuery,
+	type DeployProofObservation,
+	type OwnedCommitRequest,
+	type PublishProofObservation,
+	proveCommitAndPush,
+	proveDeployReceipt,
+	provePublishReceipt,
+	proveTagReceipt,
+	type TagProofObservation,
+} from "./delivery-proof.ts";
+
+export interface DeliveryGitExecutor {
+	commit?(request?: OwnedCommitRequest): Promise<{ sha: string; tree?: string; parent?: string } | undefined>;
+	push?(
+		target?: { readonly remote: string; readonly ref: string },
+		signal?: AbortSignal,
+	): Promise<{ ref: string; remote?: string } | undefined>;
+	tag?(name?: string, signal?: AbortSignal): Promise<{ tag: string } | undefined>;
+	proveDelivery?(query: DeliveryProofQuery, signal?: AbortSignal): Promise<DeliveryProofObservation>;
+	proveTag?(tag: string, signal?: AbortSignal): Promise<TagProofObservation>;
+	inspectCandidate?(): Promise<ApprovedCandidateTree>;
+	certifyOwnedCandidate?(paths: readonly string[], signal?: AbortSignal): Promise<ApprovedCandidateTree>;
+}
+
+export interface DeliveryReleaseExecutor {
+	publish?(): Promise<{ id: string } | undefined>;
+	deploy?(target: string): Promise<{ id: string } | undefined>;
+	provePublish?(publicationId: string): Promise<PublishProofObservation>;
+	proveDeploy?(target: string): Promise<DeployProofObservation>;
+}
+
+export interface DeliveryExecutionInput {
+	readonly charter?: ExecutionCharter;
+	readonly git?: DeliveryGitExecutor;
+	readonly release?: DeliveryReleaseExecutor;
+	readonly signal?: AbortSignal;
+	readonly candidateUntrackedPaths: readonly string[];
+	readonly attributedPaths: readonly string[];
+}
+
+function messageOf(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Exact side effects for one frozen DeliveryIntent.
+ * Completion does not run these. Finalization does not run these.
+ */
+export async function executeDelivery(input: DeliveryExecutionInput): Promise<DeliverySideEffects> {
+	const charter = input.charter;
+	if (!charter) return {};
+	const intent = charter.delivery;
+	const gitBlocked = intent.baselineDirty && (charter.git.commit || charter.git.push);
+	const sideEffects: {
+		commit?: DeliverySideEffects["commit"];
+		tag?: DeliverySideEffects["tag"];
+		push?: DeliverySideEffects["push"];
+		publish?: DeliverySideEffects["publish"];
+		deploy?: DeliverySideEffects["deploy"];
+		github_release?: DeliverySideEffects["github_release"];
+	} = {};
+
+	let approved: ApprovedCandidateTree | undefined;
+	let reportedCommitSha: string | undefined;
+	let commitError: string | undefined;
+	let reportedPushRef: string | undefined;
+	let reportedPushRemote: string | undefined;
+	let pushError: string | undefined;
+	let reportedTag: string | undefined;
+	let tagError: string | undefined;
+	let reportedPublicationId: string | undefined;
+	let publishError: string | undefined;
+	const reportedDeploys: { target: string; id?: string; error?: string }[] = [];
+
+	if (charter.git.commit) {
+		if (gitBlocked) commitError = "delivery_unsafe_unowned_changes";
+		else if (!input.git?.commit) commitError = "Git commit unavailable";
+		else {
+			try {
+				if (input.git.inspectCandidate) approved = await input.git.inspectCandidate();
+				else if (input.git.certifyOwnedCandidate) {
+					approved = await input.git.certifyOwnedCandidate(input.attributedPaths, input.signal);
+				} else commitError = "candidate_tree_unavailable";
+				if (commitError === undefined && approved) {
+					const request: OwnedCommitRequest | undefined = input.git.certifyOwnedCandidate
+						? {
+								paths: input.attributedPaths,
+								approvedParent: approved.parent,
+								approvedTreeOid: approved.tree,
+								message: intent.git.commit ? intent.git.commit.message : undefined,
+								signal: input.signal,
+							}
+						: undefined;
+					const commitRes = await input.git.commit(request);
+					if (commitRes && typeof commitRes === "object" && "sha" in commitRes && commitRes.sha) {
+						reportedCommitSha = String(commitRes.sha);
+					} else commitError = "Missing sha";
+				}
+			} catch (error) {
+				commitError = messageOf(error);
+			}
+		}
+	}
+
+	if (charter.git.create_tag) {
+		const blocked = unresolvedError(intent, "tag_push") ?? unresolvedError(intent, "tag");
+		if (blocked) tagError = blocked;
+		else if (!intent.git.tag) tagError = "tag_name_required";
+		else if (!input.git?.tag) tagError = "Git tag unavailable";
+		else {
+			try {
+				const tagRes = await input.git.tag(intent.git.tag.name, input.signal);
+				if (tagRes && typeof tagRes === "object" && "tag" in tagRes && tagRes.tag) reportedTag = String(tagRes.tag);
+				else tagError = "Missing tag";
+			} catch (error) {
+				tagError = messageOf(error);
+			}
+		}
+	}
+
+	if (charter.git.push) {
+		const frozen = intent.git.push;
+		if (gitBlocked) pushError = "delivery_unsafe_unowned_changes";
+		else if (!frozen) pushError = unresolvedError(intent, "push") ?? "push_upstream_unavailable";
+		else if (!input.git?.push) pushError = "Git push unavailable";
+		else {
+			try {
+				const pushRes = await input.git.push(frozen, input.signal);
+				if (pushRes && typeof pushRes === "object" && "ref" in pushRes && pushRes.ref) {
+					reportedPushRef = String(pushRes.ref);
+					reportedPushRemote = "remote" in pushRes && pushRes.remote ? String(pushRes.remote) : frozen.remote;
+					if (reportedPushRemote !== frozen.remote || reportedPushRef !== frozen.ref) {
+						pushError = "push_upstream_drift";
+					}
+				} else pushError = "Missing ref";
+			} catch (error) {
+				pushError = messageOf(error);
+			}
+		}
+	}
+
+	if (charter.release.package_publish) {
+		const blocked = unresolvedError(intent, "package_publish");
+		if (blocked) publishError = blocked;
+		else if (!input.release?.publish) publishError = "Package publish unavailable";
+		else {
+			try {
+				const pubRes = await input.release.publish();
+				if (pubRes && typeof pubRes === "object" && "id" in pubRes && pubRes.id) {
+					reportedPublicationId = String(pubRes.id);
+				} else publishError = "Missing id";
+			} catch (error) {
+				publishError = messageOf(error);
+			}
+		}
+	}
+
+	if (charter.release.deploy_targets.length > 0) {
+		if (!input.release?.deploy) {
+			for (const target of charter.release.deploy_targets)
+				reportedDeploys.push({ target, error: "Deploy unavailable" });
+		} else {
+			for (const target of charter.release.deploy_targets) {
+				try {
+					const depRes = await input.release.deploy(target);
+					if (depRes && typeof depRes === "object" && "id" in depRes && depRes.id) {
+						reportedDeploys.push({ target, id: String(depRes.id) });
+					} else reportedDeploys.push({ target, error: "Missing id" });
+				} catch (error) {
+					reportedDeploys.push({ target, error: messageOf(error) });
+				}
+			}
+		}
+	}
+
+	if (charter.release.github_release) {
+		sideEffects.github_release = {
+			state: "failed",
+			error: "github_release_unsupported",
+			...(intent.githubRelease ? { detail: intent.githubRelease } : {}),
+		};
+	}
+
+	const commitRequired = charter.git.commit;
+	const pushRequired = charter.git.push;
+	const needsDeliveryProof =
+		(commitRequired && commitError === undefined && reportedCommitSha !== undefined) ||
+		(pushRequired && pushError === undefined && reportedPushRef !== undefined);
+	let observation: DeliveryProofObservation | undefined;
+	if (needsDeliveryProof && input.git?.proveDelivery) {
+		try {
+			observation = await input.git.proveDelivery(
+				{
+					candidateDigest: approved ? candidateTreeDigest(approved.tree) : "",
+					candidateRevision: approved?.parent ?? "",
+					candidateUntrackedPaths: input.candidateUntrackedPaths,
+					approvedTreeOid: approved?.tree,
+					approvedParent: approved?.parent,
+					remote: intent.git.push ? intent.git.push.remote : reportedPushRemote,
+					ref: intent.git.push ? intent.git.push.ref : reportedPushRef,
+				},
+				input.signal,
+			);
+		} catch (error) {
+			const message = messageOf(error);
+			if (commitRequired && commitError === undefined) commitError = message;
+			if (pushRequired && pushError === undefined) pushError = message;
+		}
+	}
+	const provenReceipts = proveCommitAndPush({
+		commitRequired,
+		pushRequired,
+		reportedCommitSha,
+		commitError,
+		reportedPushRef,
+		reportedPushRemote,
+		pushError,
+		candidateDigest: approved ? candidateTreeDigest(approved.tree) : undefined,
+		candidateRevision: approved?.parent,
+		approvedTreeOid: approved?.tree,
+		approvedParent: approved?.parent,
+		observation,
+	});
+	if (provenReceipts.commit) sideEffects.commit = provenReceipts.commit;
+	if (provenReceipts.push) sideEffects.push = provenReceipts.push;
+
+	if (charter.git.create_tag) {
+		let tagObservation: TagProofObservation | undefined;
+		if (reportedTag && tagError === undefined && input.git?.proveTag) {
+			try {
+				tagObservation = await input.git.proveTag(reportedTag, input.signal);
+			} catch (error) {
+				tagError = messageOf(error);
+			}
+		}
+		const provenCommitSha = sideEffects.commit?.state === "proven" ? sideEffects.commit.detail.sha : undefined;
+		sideEffects.tag = proveTagReceipt({
+			reportedTag,
+			tagError,
+			commitSha: provenCommitSha,
+			observation: tagObservation,
+		});
+	}
+
+	if (charter.release.package_publish) {
+		let publishObservation: PublishProofObservation | undefined;
+		if (reportedPublicationId && publishError === undefined && input.release?.provePublish) {
+			try {
+				publishObservation = await input.release.provePublish(reportedPublicationId);
+			} catch (error) {
+				publishError = messageOf(error);
+			}
+		}
+		sideEffects.publish = provePublishReceipt({
+			reportedId: reportedPublicationId,
+			error: publishError,
+			observation: publishObservation,
+		});
+	}
+
+	if (reportedDeploys.length > 0) {
+		const deployReceipts: NonNullable<DeliverySideEffects["deploy"]>[number][] = [];
+		for (const deployment of reportedDeploys) {
+			let deployObservation: DeployProofObservation | undefined;
+			let error = deployment.error;
+			if (deployment.id && error === undefined && input.release?.proveDeploy) {
+				try {
+					deployObservation = await input.release.proveDeploy(deployment.target);
+				} catch (caught) {
+					error = messageOf(caught);
+				}
+			}
+			deployReceipts.push(
+				proveDeployReceipt({
+					target: deployment.target,
+					reportedId: deployment.id,
+					error,
+					observation: deployObservation,
+				}),
+			);
+		}
+		sideEffects.deploy = deployReceipts;
+	}
+
+	return sideEffects;
+}
+
+export function deliveryReceiptFailed(sideEffects: DeliverySideEffects): boolean {
+	return (
+		sideEffects.commit?.state === "failed" ||
+		sideEffects.tag?.state === "failed" ||
+		sideEffects.push?.state === "failed" ||
+		sideEffects.publish?.state === "failed" ||
+		sideEffects.github_release?.state === "failed" ||
+		(sideEffects.deploy ?? []).some((receipt) => receipt.state === "failed")
+	);
+}

@@ -677,6 +677,7 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 			const charter = compileExecutionCharter({
 				objectiveId: "obj-e2e-complete",
 				prompt: "commit and push all changes and deploy to staging",
+				initialGrants: { git: { push_remote: "origin", push_ref: "refs/heads/main" } },
 			});
 
 			const executedSideEffects: string[] = [];
@@ -696,6 +697,7 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 					getLimitations: () => [],
 				},
 				gitExecutor: {
+					inspectCandidate: async () => ({ parent: "parent-approved", tree: "tree-approved", digest: "unused" }),
 					commit: async () => {
 						executedSideEffects.push("git:commit");
 						return { sha: "abc1234deadbeef" };
@@ -706,6 +708,8 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 					},
 					proveDelivery: async () => ({
 						head: "abc1234deadbeef",
+						parent: "parent-approved",
+						tree: "tree-approved",
 						remote: "origin",
 						ref: "refs/heads/main",
 						observedSha: "abc1234deadbeef",

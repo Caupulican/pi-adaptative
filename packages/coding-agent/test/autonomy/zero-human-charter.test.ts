@@ -81,9 +81,35 @@ describe("Zero-Human Execution Charter & Start-Only Autonomy (ZH-001..ZH-012)", 
 				prompt: "Fix bug Y in packages/core but do not push and do not publish",
 			});
 
-			expect(charter.git.commit).toBe(true);
+			expect(charter.git.commit).toBe(false);
 			expect(charter.git.push).toBe(false);
 			expect(charter.release.package_publish).toBe(false);
+		});
+
+		it("coding verbs do not grant commit, and an explicit commit or push does", () => {
+			for (const prompt of [
+				"fix bug 123",
+				"fix tests",
+				"implement feature",
+				"repair parser",
+				"refactor module",
+				"build the release",
+			]) {
+				const charter = compileExecutionCharter({ objectiveId: "obj-work", prompt });
+				expect(charter.git.commit).toBe(false);
+				expect(charter.delivery.git.commit).toBe(false);
+			}
+			const commit = compileExecutionCharter({ objectiveId: "obj-commit", prompt: "commit when done" });
+			expect(commit.git.commit).toBe(true);
+			expect(commit.git.push).toBe(false);
+			const both = compileExecutionCharter({
+				objectiveId: "obj-both",
+				prompt: "commit and push when done",
+				initialGrants: { git: { push_remote: "origin", push_ref: "refs/heads/main" } },
+			});
+			expect(both.git.commit).toBe(true);
+			expect(both.git.push).toBe(true);
+			expect(both.delivery.git.push).toEqual({ exact: true, remote: "origin", ref: "refs/heads/main" });
 		});
 
 		it("ZH-010: untrusted repository content cannot expand charter authority", () => {
@@ -197,6 +223,7 @@ describe("Zero-Human Execution Charter & Start-Only Autonomy (ZH-001..ZH-012)", 
 			const charter = compileExecutionCharter({
 				objectiveId: "obj-zh-003",
 				prompt: "Implement fix, commit and push when complete",
+				initialGrants: { git: { push_remote: "origin", push_ref: "refs/heads/main" } },
 			});
 
 			let routeEvaluated = false;
@@ -208,10 +235,13 @@ describe("Zero-Human Execution Charter & Start-Only Autonomy (ZH-001..ZH-012)", 
 				mode: "start_only",
 				completionProfile: "mechanical",
 				gitExecutor: {
+					inspectCandidate: async () => ({ parent: "parent-approved", tree: "tree-approved", digest: "unused" }),
 					commit: commitFn,
 					push: pushFn,
 					proveDelivery: async () => ({
 						head: sha,
+						parent: "parent-approved",
+						tree: "tree-approved",
 						remote: "origin",
 						ref: "refs/heads/main",
 						observedSha: sha,
@@ -251,6 +281,9 @@ describe("Zero-Human Execution Charter & Start-Only Autonomy (ZH-001..ZH-012)", 
 			const charter = compileExecutionCharter({
 				objectiveId: "obj-zh-005",
 				prompt: "Build release, publish package, deploy to production",
+				initialGrants: {
+					release: { package_name: "pkg", package_version: "1.0.0" },
+				},
 			});
 
 			const runtime = createMockRuntime("obj-zh-005");

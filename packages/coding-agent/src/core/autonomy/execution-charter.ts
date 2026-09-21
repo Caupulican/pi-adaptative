@@ -8,6 +8,13 @@
  * produce an AuthorityBlockRecord and trigger alternative route search without mid-run prompts.
  */
 
+import {
+	compileDeliveryIntent,
+	type DeliveryAdmission,
+	type DeliveryInitialGitGrant,
+	type DeliveryInitialReleaseGrant,
+	type DeliveryIntent,
+} from "../objective-execution/delivery-intent.ts";
 import type { ProposedAction } from "./authority-envelope.ts";
 
 export const EXECUTION_CHARTER_SCHEMA_VERSION = "1.0" as const;
@@ -45,6 +52,8 @@ export interface ExecutionCharter {
 	readonly git: ExecutionCharterGitPolicy;
 	readonly release: ExecutionCharterReleasePolicy;
 	readonly acquisition: ExecutionCharterAcquisitionPolicy;
+	/** Exact high-impact delivery authority. Frozen at this compilation. */
+	readonly delivery: DeliveryIntent;
 	readonly secret_scopes?: readonly string[];
 	readonly max_cost_usd?: number | null;
 	readonly notification?: "terminal_only" | "status_on_request";
@@ -73,10 +82,12 @@ export interface CompileExecutionCharterInput {
 	maxCostUsd?: number | null;
 	notification?: "terminal_only" | "status_on_request";
 	initialGrants?: {
-		git?: Partial<ExecutionCharterGitPolicy>;
-		release?: Partial<ExecutionCharterReleasePolicy>;
+		git?: DeliveryInitialGitGrant;
+		release?: DeliveryInitialReleaseGrant;
 		acquisition?: Partial<ExecutionCharterAcquisitionPolicy>;
 	};
+	/** Worktree and package facts read once at admission. Omitted means no repo observation. */
+	admission?: DeliveryAdmission;
 }
 
 /**
@@ -84,19 +95,17 @@ export interface CompileExecutionCharterInput {
  * Strictly ignores untrusted content (worker outputs, repository text, web content) from expanding authority.
  */
 export function compileExecutionCharter(input: CompileExecutionCharterInput): ExecutionCharter {
-	const prompt = (input.prompt ?? "").toLowerCase();
+	const rawPrompt = input.prompt ?? "";
+	const prompt = rawPrompt.toLowerCase();
 
 	// Check explicit denials first
 	const denyPush = /\b(do\s+not\s+push|don't\s+push|no\s+push|never\s+push|without\s+push)\b/i.test(prompt);
 	const denyCommit = /\b(do\s+not\s+commit|don't\s+commit|no\s+commit|without\s+commit)\b/i.test(prompt);
 	const denyPublish = /\b(do\s+not\s+publish|don't\s+publish|no\s+publish|without\s+publish)\b/i.test(prompt);
 
-	// Check authorizations
-	const grantPush =
-		!denyPush && (/\b(push|commit\s+and\s+push)\b/i.test(prompt) || Boolean(input.initialGrants?.git?.push));
-	const grantCommit =
-		!denyCommit &&
-		(/\b(commit|commit\s+and\s+push|fix\s+bug|fix)\b/i.test(prompt) || Boolean(input.initialGrants?.git?.commit));
+	// Check authorizations. Work verbs do not grant commit: fix, implement, repair, refactor, build.
+	const grantPush = !denyPush && (/\bpush\b/i.test(prompt) || Boolean(input.initialGrants?.git?.push));
+	const grantCommit = !denyCommit && (/\bcommit\b/i.test(prompt) || Boolean(input.initialGrants?.git?.commit));
 	const grantPublish =
 		!denyPublish &&
 		(/\b(publish|npm\s+publish|package\s+publish)\b/i.test(prompt) ||
@@ -104,7 +113,11 @@ export function compileExecutionCharter(input: CompileExecutionCharterInput): Ex
 	const grantGithubRelease =
 		/\b(github\s+release|create\s+release|tag\s+and\s+release)\b/i.test(prompt) ||
 		Boolean(input.initialGrants?.release?.github_release);
-	const grantCreateTag = /\b(tag|create\s+tag)\b/i.test(prompt) || Boolean(input.initialGrants?.git?.create_tag);
+	const tagNameFromPrompt = rawPrompt.match(
+		/\b(?:create\s+)?tag\s+(?!and\b|to\b|when\b|the\b|a\b)([A-Za-z0-9._/-]+)/i,
+	);
+	const explicitTagName = input.initialGrants?.git?.tag_name?.trim() || tagNameFromPrompt?.[1];
+	const grantCreateTag = Boolean(explicitTagName) || Boolean(input.initialGrants?.git?.create_tag);
 	const grantCreateBranch =
 		/\b(branch|create\s+branch)\b/i.test(prompt) || Boolean(input.initialGrants?.git?.create_branch);
 	const grantForcePush = Boolean(input.initialGrants?.git?.force_push); // force push is never granted from bare prompt text
@@ -132,6 +145,17 @@ export function compileExecutionCharter(input: CompileExecutionCharterInput): Ex
 	if (deployMatch?.[1] && !["when", "after", "if", "only"].includes(deployMatch[1])) {
 		deployTargets.add(deployMatch[1]);
 	}
+	const delivery = compileDeliveryIntent({
+		grantCommit,
+		grantPush,
+		grantTag: grantCreateTag,
+		grantPublish,
+		grantGithubRelease,
+		deployTargets: Array.from(deployTargets),
+		git: { ...input.initialGrants?.git, ...(explicitTagName ? { tag_name: explicitTagName } : {}) },
+		release: input.initialGrants?.release,
+		admission: input.admission,
+	});
 
 	return {
 		schema_version: "1.0",
@@ -156,6 +180,7 @@ export function compileExecutionCharter(input: CompileExecutionCharterInput): Ex
 			network_downloads: grantNetworkDownloads,
 			package_installs: grantPackageInstalls,
 		},
+		delivery,
 		secret_scopes: input.secretScopes ? [...input.secretScopes] : undefined,
 		max_cost_usd: input.maxCostUsd ?? null,
 		notification: input.notification ?? "terminal_only",

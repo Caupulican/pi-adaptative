@@ -109,6 +109,7 @@ describe("regression: system-one-steering-runtime-bundle", () => {
 		const charter = compileExecutionCharter({
 			objectiveId: "obj-bundle-test",
 			prompt: "commit and push all changes and deploy to production",
+			initialGrants: { git: { push_remote: "origin", push_ref: "refs/heads/main" } },
 		});
 
 		const mockRuntimeProjection = {
@@ -132,6 +133,7 @@ describe("regression: system-one-steering-runtime-bundle", () => {
 				getLimitations: () => [],
 			},
 			gitExecutor: {
+				inspectCandidate: async () => ({ parent: "parent-approved", tree: "tree-approved", digest: "unused" }),
 				commit: async () => {
 					executedSideEffects.push("git:commit");
 					return { sha: "abc1234deadbeef" };
@@ -142,6 +144,8 @@ describe("regression: system-one-steering-runtime-bundle", () => {
 				},
 				proveDelivery: async () => ({
 					head: "abc1234deadbeef",
+					parent: "parent-approved",
+					tree: "tree-approved",
 					remote: "origin",
 					ref: "refs/heads/main",
 					observedSha: "abc1234deadbeef",

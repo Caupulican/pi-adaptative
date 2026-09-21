@@ -70,6 +70,7 @@ const PROVEN_SHA = "abc1234deadbeef";
 
 function provenGit(options?: { push?: "ok" | "throw" }) {
 	return {
+		inspectCandidate: async () => ({ parent: "parent-approved", tree: "tree-approved", digest: "unused" }),
 		commit: async () => ({ sha: PROVEN_SHA }),
 		push: async () => {
 			if (options?.push === "throw") throw new Error("rejected");
@@ -77,6 +78,8 @@ function provenGit(options?: { push?: "ok" | "throw" }) {
 		},
 		proveDelivery: async () => ({
 			head: PROVEN_SHA,
+			parent: "parent-approved",
+			tree: "tree-approved",
 			remote: "origin",
 			ref: "refs/heads/main",
 			observedSha: PROVEN_SHA,
@@ -164,7 +167,7 @@ async function runWithFailedDeliveryCheckpoint(failedCheckpoint: "JEV-025" | "JE
 		executionCharter: compileExecutionCharter({
 			objectiveId: "obj-1",
 			prompt: "ship",
-			initialGrants: { git: { commit: true, push: true } },
+			initialGrants: { git: { commit: true, push: true, push_remote: "origin", push_ref: "refs/heads/main" } },
 		}),
 		gitExecutor: provenGit(),
 		systemOne: {
@@ -334,7 +337,7 @@ describe("post-DI14 closure gates", () => {
 			executionCharter: compileExecutionCharter({
 				objectiveId: "obj-1",
 				prompt: "ship",
-				initialGrants: { git: { commit: true, push: true } },
+				initialGrants: { git: { commit: true, push: true, push_remote: "origin", push_ref: "refs/heads/main" } },
 			}),
 			gitExecutor: provenGit({ push: "throw" }),
 			systemOne: {
@@ -360,7 +363,7 @@ describe("post-DI14 closure gates", () => {
 			executionCharter: compileExecutionCharter({
 				objectiveId: "obj-1",
 				prompt: "ship",
-				initialGrants: { git: { commit: true, push: true } },
+				initialGrants: { git: { commit: true, push: true, push_remote: "origin", push_ref: "refs/heads/main" } },
 			}),
 			gitExecutor: provenGit(),
 			systemOne: {

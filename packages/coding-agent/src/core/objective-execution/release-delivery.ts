@@ -1,6 +1,7 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { PackagePublishIntent } from "./delivery-intent.ts";
 import type { DeployProofObservation, PublishProofObservation } from "./delivery-proof.ts";
 
 interface PackageManifest {
@@ -10,12 +11,23 @@ interface PackageManifest {
 	readonly scripts?: unknown;
 }
 
+export interface TrustedDeployAdapter {
+	readonly id: string;
+	readonly targets: readonly string[];
+	deploy(target: string, options?: { readonly signal?: AbortSignal }): Promise<{ id: string }>;
+	/** Independent of deploy()'s return value. Stdout from deploy is not proof. */
+	observe(target: string, options?: { readonly signal?: AbortSignal }): Promise<{ deploymentId: string }>;
+}
+
 export interface RepoReleaseDelivery {
 	publish?(): Promise<{ id: string }>;
 	provePublish?(publicationId: string): Promise<PublishProofObservation>;
 	deploy?(target: string): Promise<{ id: string }>;
 	proveDeploy?(target: string): Promise<DeployProofObservation>;
 }
+
+const RELEASE_TIMEOUT_MS = 120_000;
+const RELEASE_OUTPUT_MAX_BYTES = 1_048_576;
 
 function readManifest(repoRoot: string): PackageManifest | undefined {
 	try {
@@ -27,44 +39,11 @@ function readManifest(repoRoot: string): PackageManifest | undefined {
 	}
 }
 
-function scriptsOf(manifest: PackageManifest | undefined): Record<string, string> {
-	const scripts = manifest?.scripts;
-	if (!scripts || typeof scripts !== "object" || Array.isArray(scripts)) return {};
-	const out: Record<string, string> = {};
-	for (const [name, command] of Object.entries(scripts)) {
-		if (typeof command === "string" && command.length > 0) out[name] = command;
-	}
-	return out;
-}
-
-function publishableId(manifest: PackageManifest | undefined): string | undefined {
+function publishableIdentity(manifest: PackageManifest | undefined): { name: string; version: string } | undefined {
 	if (!manifest || manifest.private === true) return undefined;
 	if (typeof manifest.name !== "string" || manifest.name.length === 0) return undefined;
 	if (typeof manifest.version !== "string" || manifest.version.length === 0) return undefined;
-	return `${manifest.name}@${manifest.version}`;
-}
-
-function isDeployScript(name: string): boolean {
-	if (name === "deploy") return true;
-	if (!name.startsWith("deploy:") || name.endsWith(":status")) return false;
-	const target = name.slice("deploy:".length);
-	return target.length > 0 && !target.includes(":");
-}
-
-function hasDeploy(scripts: Record<string, string>): boolean {
-	return Object.keys(scripts).some(isDeployScript);
-}
-
-function deployScriptFor(scripts: Record<string, string>, target: string): string | undefined {
-	if (scripts[`deploy:${target}`]) return `deploy:${target}`;
-	if (scripts.deploy) return "deploy";
-	return undefined;
-}
-
-function statusScriptFor(scripts: Record<string, string>, target: string): string | undefined {
-	if (scripts[`deploy:${target}:status`]) return `deploy:${target}:status`;
-	if (scripts["deploy:status"]) return "deploy:status";
-	return undefined;
+	return { name: manifest.name, version: manifest.version };
 }
 
 function npmInvocation(configured: readonly string[] | undefined): { command: string; args: string[] } {
@@ -75,7 +54,7 @@ function npmInvocation(configured: readonly string[] | undefined): { command: st
 	return { command: process.platform === "win32" ? "npm.cmd" : "npm", args: [] };
 }
 
-function run(command: string, args: readonly string[], cwd: string): Promise<string> {
+function run(command: string, args: readonly string[], cwd: string, signal?: AbortSignal): Promise<string> {
 	return new Promise((resolve, reject) => {
 		execFile(
 			command,
@@ -83,12 +62,16 @@ function run(command: string, args: readonly string[], cwd: string): Promise<str
 			{
 				cwd,
 				encoding: "utf8",
-				maxBuffer: 8 * 1024 * 1024,
+				maxBuffer: RELEASE_OUTPUT_MAX_BYTES,
+				timeout: RELEASE_TIMEOUT_MS,
+				signal,
 				env: { ...process.env, NPM_CONFIG_YES: "false", GIT_TERMINAL_PROMPT: "0" },
 			},
 			(error, stdout, stderr) => {
 				if (error) {
-					const detail = String(stderr || error.message).trim();
+					const detail = String(stderr || error.message)
+						.trim()
+						.slice(0, 500);
 					reject(new Error(detail || error.message));
 					return;
 				}
@@ -98,71 +81,118 @@ function run(command: string, args: readonly string[], cwd: string): Promise<str
 	});
 }
 
+function registryArgs(registry: string | undefined): string[] {
+	return registry ? ["--registry", registry] : [];
+}
+
+function readNpmRegistry(repoRoot: string, command: string, args: readonly string[]): string | undefined {
+	try {
+		const value = execFileSyncRegistry(command, [...args, "config", "get", "registry"], repoRoot);
+		if (!value || value === "undefined" || value === "null") return undefined;
+		return value;
+	} catch {
+		return undefined;
+	}
+}
+
+function execFileSyncRegistry(command: string, args: readonly string[], cwd: string): string {
+	return execFileSync(command, args, {
+		cwd,
+		encoding: "utf8",
+		timeout: 15_000,
+		maxBuffer: RELEASE_OUTPUT_MAX_BYTES,
+		env: { ...process.env, NPM_CONFIG_YES: "false", GIT_TERMINAL_PROMPT: "0" },
+	}).trim();
+}
+
 /**
- * Publish and deploy for the session repo. Absent when the repo has neither a publishable
- * package nor a deploy script. Publish does not run package lifecycle scripts.
- * A status script is an independent deployment id. Without one, the id is the deploy script's stdout.
+ * Publish for a public package, and deploy only through trusted adapters passed at admission.
+ * A package.json `deploy` script is an ordinary npm script. It is not a deployment adapter.
+ * Publish does not run package lifecycle scripts. Proof never reuses deploy stdout.
  */
 export function createRepoReleaseDelivery(
 	repoRoot: string,
-	options?: { readonly npmCommand?: readonly string[] },
+	options?: {
+		readonly npmCommand?: readonly string[];
+		readonly packageIntent?: PackagePublishIntent | false;
+		readonly adapters?: readonly TrustedDeployAdapter[];
+		readonly signal?: AbortSignal;
+	},
 ): RepoReleaseDelivery | undefined {
-	const initial = readManifest(repoRoot);
-	const publishable = publishableId(initial) !== undefined;
-	const deployable = hasDeploy(scriptsOf(initial));
-	if (!publishable && !deployable) return undefined;
+	const manifestIdentity = publishableIdentity(readManifest(repoRoot));
+	const intent = options?.packageIntent;
+	const grantedIntent = intent === false || intent === undefined ? undefined : intent;
+	const publishIdentity =
+		grantedIntent?.packageName && grantedIntent.version
+			? { name: grantedIntent.packageName, version: grantedIntent.version, registry: grantedIntent.registry }
+			: intent === undefined && manifestIdentity
+				? { name: manifestIdentity.name, version: manifestIdentity.version, registry: undefined }
+				: undefined;
+	const adapters = options?.adapters ?? [];
+	if (!publishIdentity && adapters.length === 0) return undefined;
 	const npm = npmInvocation(options?.npmCommand);
-	const observedDeployIds = new Map<string, string>();
+	const frozenRegistry = publishIdentity
+		? (publishIdentity.registry ?? readNpmRegistry(repoRoot, npm.command, npm.args))
+		: undefined;
+	const publishFrozen = publishIdentity ? { ...publishIdentity, registry: frozenRegistry } : undefined;
 
-	async function npmRun(script: string, target: string): Promise<string> {
-		return run(npm.command, [...npm.args, "run", script, "--silent", "--", target], repoRoot);
+	function adapterFor(target: string): TrustedDeployAdapter | undefined {
+		return adapters.find((adapter) => adapter.targets.includes(target));
 	}
 
 	return {
-		...(publishable
+		...(publishFrozen
 			? {
 					async publish() {
-						const id = publishableId(readManifest(repoRoot));
-						if (!id) throw new Error("Package publish unavailable");
-						await run(npm.command, [...npm.args, "publish", "--ignore-scripts"], repoRoot);
-						return { id };
+						const current = publishableIdentity(readManifest(repoRoot));
+						if (!current || current.name !== publishFrozen.name || current.version !== publishFrozen.version) {
+							throw new Error("package_identity_mismatch");
+						}
+						const registryNow = readNpmRegistry(repoRoot, npm.command, npm.args);
+						if (publishFrozen.registry && registryNow && registryNow !== publishFrozen.registry) {
+							throw new Error("package_registry_mismatch");
+						}
+						await run(
+							npm.command,
+							[...npm.args, "publish", "--ignore-scripts", ...registryArgs(publishFrozen.registry)],
+							repoRoot,
+							options?.signal,
+						);
+						return { id: `${publishFrozen.name}@${publishFrozen.version}` };
 					},
 					async provePublish(publicationId: string) {
-						const at = publicationId.lastIndexOf("@");
-						if (at <= 0) throw new Error("Package publish proof id has no version");
-						const name = publicationId.slice(0, at);
+						const expected = `${publishFrozen.name}@${publishFrozen.version}`;
+						if (publicationId !== expected) throw new Error("publish_id_mismatch");
 						const parsed = JSON.parse(
-							await run(npm.command, [...npm.args, "view", publicationId, "version", "--json"], repoRoot),
+							await run(
+								npm.command,
+								[...npm.args, "view", expected, "version", "--json", ...registryArgs(publishFrozen.registry)],
+								repoRoot,
+								options?.signal,
+							),
 						) as unknown;
-						if (typeof parsed !== "string" || parsed.length === 0) {
-							throw new Error("Package publish proof did not return a version");
+						if (typeof parsed !== "string" || parsed !== publishFrozen.version) {
+							throw new Error("publish_id_mismatch");
 						}
-						return { publicationId: `${name}@${parsed}` };
+						return { publicationId: expected };
 					},
 				}
 			: {}),
-		...(deployable
+		...(adapters.length > 0
 			? {
 					async deploy(target: string) {
-						const scripts = scriptsOf(readManifest(repoRoot));
-						const script = deployScriptFor(scripts, target);
-						if (!script) throw new Error(`Deploy unavailable for ${target}`);
-						const status = statusScriptFor(scripts, target);
-						const stdout = await npmRun(script, target);
-						const id = status ? await npmRun(status, target) : stdout;
-						if (!id) {
-							throw new Error(
-								status ? "Deploy status returned an empty id" : "Deploy script did not report a deployment id",
-							);
-						}
-						observedDeployIds.set(target, id);
-						return { id };
+						const adapter = adapterFor(target);
+						if (!adapter) throw new Error(`Deploy unavailable for ${target}`);
+						const deployed = await adapter.deploy(target, { signal: options?.signal });
+						if (!deployed.id) throw new Error("Deploy adapter did not report a deployment id");
+						return { id: deployed.id };
 					},
 					async proveDeploy(target: string) {
-						const status = statusScriptFor(scriptsOf(readManifest(repoRoot)), target);
-						const id = status ? await npmRun(status, target) : observedDeployIds.get(target);
-						if (!id) throw new Error(status ? "Deploy status returned an empty id" : "Deploy proof unavailable");
-						return { target, deploymentId: id };
+						const adapter = adapterFor(target);
+						if (!adapter) throw new Error("deploy_proof_unavailable");
+						const observed = await adapter.observe(target, { signal: options?.signal });
+						if (!observed.deploymentId) throw new Error("deploy_proof_unavailable");
+						return { target, deploymentId: observed.deploymentId };
 					},
 				}
 			: {}),

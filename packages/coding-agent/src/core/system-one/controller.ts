@@ -44,6 +44,14 @@ export class TerminalCompletionConflictError extends Error {
 	}
 }
 
+/** The terminal hook refused or failed before complete was stored. The store is unchanged. */
+export class TerminalHookRejectedError extends Error {
+	constructor(detail: string) {
+		super(detail || "terminal_hook_rejected");
+		this.name = "TerminalHookRejectedError";
+	}
+}
+
 export function terminalProofRef(input: TerminalCompletionProof): string {
 	if (!input.objectiveId.trim() || !input.candidateDigest.trim()) return "";
 	return [
@@ -553,23 +561,34 @@ export class SystemOneController {
 	 * and runs the terminal hook once. A duplicate proof does not transition or hook again.
 	 */
 	async commitTerminalCompletion(input: TerminalCompletionProof, options?: { signal?: AbortSignal }): Promise<void> {
-		const noted = this.store.noteTerminalProof(terminalProofRef(input));
-		if (noted.outcome === "duplicate") return;
-		if (noted.outcome === "rejected") {
-			throw new TerminalCompletionConflictError(noted.reason);
+		const ref = terminalProofRef(input);
+		const classified = this.store.classifyTerminalProof(ref);
+		if (classified.outcome === "duplicate") return;
+		if (classified.outcome === "rejected") {
+			throw new TerminalCompletionConflictError(classified.reason);
 		}
+		// Read-only notification. It runs before complete is stored, so a refusal cannot leave a
+		// persisted complete that a later mutation or a failed hook then contradicts.
 		if (this.hookCoordinator?.hasExtensions()) {
-			await this.hookCoordinator.runHook(
+			const hookResult = await this.hookCoordinator.runHook(
 				"terminal",
 				{
 					schema_version: "1.0",
 					run_id: this.store.runId,
 					session_id: this.store.runId,
 					hook: "terminal",
-					impact: "repo_mutation",
+					impact: "read_only",
 				},
 				{ signal: options?.signal },
 			);
+			if (hookResult.decision !== "allow") {
+				throw new TerminalHookRejectedError(hookResult.reasonCodes.join("; ") || hookResult.decision);
+			}
+		}
+		const noted = this.store.noteTerminalProof(ref);
+		if (noted.outcome === "duplicate") return;
+		if (noted.outcome === "rejected") {
+			throw new TerminalCompletionConflictError(noted.reason);
 		}
 	}
 
