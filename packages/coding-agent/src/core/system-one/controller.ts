@@ -127,54 +127,64 @@ export class SystemOneController {
 		if (evaluationId !== undefined) this.evaluationObserver?.noteVerdict(evaluationId, policyResult);
 	}
 
+	private activeEvaluations = 0;
+
+	get isEvaluating(): boolean {
+		return this.activeEvaluations > 0;
+	}
+
 	private async runStageValidation(
 		stage: ValidationStage,
 		stateView: Record<string, unknown>,
 		impact: ToolImpact = "read_only",
 		omitQuestions: readonly string[] = [],
 	): Promise<{ decision: ValidationDecision; answers: Record<string, unknown>; evaluationId: string | undefined }> {
-		const questions = selectQuestions(stage, omitQuestions);
-		const questionsHash = hashQuestions(questions);
-		const stateHash = this.store.computeStateHash();
-		const pinnedModel = this.config.model.production || SYSTEM_ONE_PINNED_MODEL;
-
-		const evaluationId = this.evaluationObserver?.start({
-			programId: `system-one:${stage}`,
-			consequence: consequenceForImpact(impact),
-			model: pinnedModel,
-		});
-		let response: Awaited<ReturnType<JevAdapter["evaluate"]>>;
+		this.activeEvaluations++;
 		try {
-			response = await this.adapter.evaluate(
-				{
-					model: pinnedModel,
-					state: stateView,
-					questions,
-				},
-				{ impact },
-			);
-		} catch (error) {
-			if (evaluationId !== undefined) this.evaluationObserver?.settleFailed(evaluationId, error);
-			throw error;
+			const questions = selectQuestions(stage, omitQuestions);
+			const questionsHash = hashQuestions(questions);
+			const stateHash = this.store.computeStateHash();
+			const pinnedModel = this.config.model.production || SYSTEM_ONE_PINNED_MODEL;
+
+			const evaluationId = this.evaluationObserver?.start({
+				programId: `system-one:${stage}`,
+				consequence: consequenceForImpact(impact),
+				model: pinnedModel,
+			});
+			let response: Awaited<ReturnType<JevAdapter["evaluate"]>>;
+			try {
+				response = await this.adapter.evaluate(
+					{
+						model: pinnedModel,
+						state: stateView,
+						questions,
+					},
+					{ impact },
+				);
+			} catch (error) {
+				if (evaluationId !== undefined) this.evaluationObserver?.settleFailed(evaluationId, error);
+				throw error;
+			}
+			if (evaluationId !== undefined) this.evaluationObserver?.settleOk(evaluationId);
+
+			const decision: ValidationDecision = {
+				id: `DEC-${stage}-${Date.now()}`,
+				stage,
+				model: response.model,
+				question_catalog_version: SYSTEM_ONE_CATALOG_VERSION,
+				questions_hash: questionsHash,
+				state_hash: stateHash,
+				answers: response.answers,
+				policy_result: "pending",
+				timestamp: new Date().toISOString(),
+				usage: response.usage,
+				latency_ms: response.latency_ms,
+			};
+
+			return { decision, answers: response.answers, evaluationId };
+		} finally {
+			this.activeEvaluations--;
 		}
-		// The policy result is decided by the caller; the record settles now and gets its verdict then.
-		if (evaluationId !== undefined) this.evaluationObserver?.settleOk(evaluationId);
-
-		const decision: ValidationDecision = {
-			id: `DEC-${stage}-${Date.now()}`,
-			stage,
-			model: response.model,
-			question_catalog_version: SYSTEM_ONE_CATALOG_VERSION,
-			questions_hash: questionsHash,
-			state_hash: stateHash,
-			answers: response.answers,
-			policy_result: "pending",
-			timestamp: new Date().toISOString(),
-			usage: response.usage,
-			latency_ms: response.latency_ms,
-		};
-
-		return { decision, answers: response.answers, evaluationId };
 	}
 
 	/**

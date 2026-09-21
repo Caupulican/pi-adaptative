@@ -1395,7 +1395,8 @@ export class InteractiveMode {
 			if (!text) {
 				// Enter on an empty editor while a message waits behind the running turn: the second
 				// Enter means "stop and take it now", the one gesture Escape-then-retype used to be.
-				if ((this.session.isStreaming || this.session.isRetrying) && this.hasQueuedMessages())
+				const workState = this.session.getSessionWorkState();
+				if ((workState.busy || this.session.isStreaming || this.session.isRetrying) && this.hasQueuedMessages())
 					await this.sendQueuedMessagesNow();
 				return;
 			}
@@ -1456,15 +1457,17 @@ export class InteractiveMode {
 
 			// Other input submitted during work is steering. Slash/bang text must not execute
 			// commands that would interrupt the current stream or compaction.
-			if (this.session.isCompacting) {
-				const images = this.takeClipboardImagesForText(text);
-				this.queueCompactionMessage(text, queueAsFollowUp ? "followUp" : "steer", images);
-				return;
-			}
-			if (this.session.isStreaming || this.session.isRetrying) {
+			const workState = this.session.getSessionWorkState();
+			if (workState.busy) {
 				const images = this.takeClipboardImagesForText(text);
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
+				if (this.session.isCompacting) {
+					this.queueCompactionMessage(text, queueAsFollowUp ? "followUp" : "steer", images);
+					this.updatePendingMessagesDisplay();
+					this.ui.requestRender();
+					return;
+				}
 				try {
 					await this.session.prompt(text, {
 						streamingBehavior: queueAsFollowUp ? "followUp" : "steer",

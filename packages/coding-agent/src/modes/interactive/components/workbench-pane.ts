@@ -49,7 +49,8 @@ export type WorkbenchPaneTitleAction =
 	| "layout"
 	| "graphList"
 	| "graphDiagram"
-	| "hideGraph";
+	| "hideGraph"
+	| "followCurrent";
 
 export interface WorkbenchPaneTitleButton {
 	action: WorkbenchPaneTitleAction;
@@ -63,9 +64,7 @@ export interface WorkbenchPaneTitleButton {
  * when the row or key changes and otherwise leaves the operator's scroll alone. Wheel and page pin
  * a `{ row, key }` viewport even on the last page, so a later focusKey change cannot yank it.
  */
-export type WorkbenchPaneFollow =
-	| boolean
-	| { readonly row: number; readonly key?: string; readonly newerProgress?: boolean };
+export type WorkbenchPaneFollow = boolean | { row: number; key?: string; newerProgress?: boolean };
 
 export function titleChip(label: string, selected = false): string {
 	return selected ? theme.bold(theme.fg("accent", ` ${label} `)) : theme.fg("accent", ` ${label} `);
@@ -90,6 +89,19 @@ export class WorkbenchPane {
 	/** Last render used `{ row, key }` follow; wheel/page then pin even at the last page. */
 	private followByKey = false;
 	private titleActions: { action: WorkbenchPaneTitleAction; start: number; end: number }[] = [];
+
+	unpin(): void {
+		this.pinned = false;
+		this.newerProgress = false;
+	}
+
+	isPinned(): boolean {
+		return this.pinned;
+	}
+
+	hasNewerProgress(): boolean {
+		return this.newerProgress;
+	}
 
 	reset(): void {
 		this.offset = 0;

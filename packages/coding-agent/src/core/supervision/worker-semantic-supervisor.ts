@@ -266,7 +266,15 @@ export class WorkerSemanticSupervisor {
 				action = "request_verifier";
 				summaryEvent = "Verification requested · implementation complete, independent proof missing";
 				reasonCodes.push("independent_verification_needed");
-			} else if (answers.worker_stuck > 0.5 || answers.strategy_repetition > 0.5 || answers.work_off_track > 0.5) {
+			} else if (
+				answers.worker_stuck > 0.5 ||
+				answers.strategy_repetition > 0.5 ||
+				answers.work_off_track > 0.5 ||
+				answers.meaningful_progress < 0.3
+			) {
+				if (answers.meaningful_progress < 0.3) {
+					reasonCodes.push("meaningful_progress_insufficient");
+				}
 				// FR-065: Anti-oscillation (one steer + grace period, then stop and reroute). Off-track
 				// work is redirected now, not at the worker's next turn; a stall waits for that turn.
 				if (priorSteeringCount === 0 && answers.work_off_track > 0.5) {
@@ -277,8 +285,13 @@ export class WorkerSemanticSupervisor {
 				} else if (priorSteeringCount === 0) {
 					action = "steer_once";
 					this.noteSteering(attempt.attemptId);
-					summaryEvent = "Worker steering initiated · progress stalled or strategy repeating";
-					reasonCodes.push("worker_stuck_steer_once");
+					summaryEvent =
+						answers.meaningful_progress < 0.3
+							? "Worker steering initiated · insufficient meaningful progress"
+							: "Worker steering initiated · progress stalled or strategy repeating";
+					reasonCodes.push(
+						answers.meaningful_progress < 0.3 ? "meaningful_progress_insufficient" : "worker_stuck_steer_once",
+					);
 				} else {
 					action = "stop_and_reroute";
 					summaryEvent = "Worker rerouted · implementation stalled after repeated test failure";

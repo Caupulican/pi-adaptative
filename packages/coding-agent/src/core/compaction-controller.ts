@@ -36,7 +36,12 @@ import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { isContextOverflow } from "@caupulican/pi-ai/overflow";
 import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
 import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
-import { projectEarlyCompactionEconomics } from "./compaction/early-compaction-economics.ts";
+import { DEFAULT_CACHE_TTL_MS } from "./cache-miss-notice.ts";
+import {
+	projectEarlyCompactionEconomics,
+	resolveEffectiveModelPricing,
+	usd,
+} from "./compaction/early-compaction-economics.ts";
 import {
 	type CompactionAuditStats,
 	type EvidenceRetentionDecision,
@@ -103,6 +108,18 @@ interface ActiveCompactionLifecycle {
 	compactionId: string;
 	latestCompactionEntryId?: string;
 	endAttempted: boolean;
+}
+
+export interface EarlyCompactionFeedback {
+	readonly predictedSavingsUsd: number;
+	readonly tokensBefore: number;
+	tokensAfter?: number;
+	readonly horizonTurns: number;
+	observedTurns: number;
+	totalObservedActualCostUsd?: number;
+	baselineProjectedCostUsd?: number;
+	actualSavedUsd?: number;
+	predictionErrorUsd?: number;
 }
 
 type CompactionLifecycleOutcome = "success" | "failure" | "cancelled" | "fallback";
@@ -249,6 +266,12 @@ export class CompactionController {
 	private lastEarlyEconomicsAtTokens: number | undefined;
 	private lastEarlyEconomicsModelId: string | undefined;
 	private lastEarlyEconomicsInputPrice: number | undefined;
+	private pendingEarlyCompactionPrediction?: {
+		predictedSavingsUsd: number;
+		tokensBefore: number;
+		horizonTurns: number;
+	};
+	private earlyCompactionFeedback?: EarlyCompactionFeedback;
 	private retentionPlanner?: EvidenceRetentionPlanner;
 	private activeRetentionDecisions?: readonly EvidenceRetentionDecision[];
 	private lastAppliedRetentionAudit?: AppliedRetentionAudit;
@@ -833,6 +856,10 @@ export class CompactionController {
 			return this.deps.runAutoCompaction("provider_recovery", true);
 		}
 
+		if (assistantMessage.stopReason !== "error") {
+			this.recordFeedbackTurn(assistantMessage);
+		}
+
 		let contextTokens: number;
 		if (assistantMessage.stopReason === "error") {
 			const messages = this.deps.agent.state.messages;
@@ -1234,39 +1261,149 @@ export class CompactionController {
 		}
 	}
 
-	private recentCacheUsage(): { read: number; write: number } {
+	private recentCacheUsage(): { read: number; write: number; epochTurns: number } {
 		let read = 0;
 		let write = 0;
-		for (const message of this.deps.agent.state.messages) {
-			if (message.role !== "assistant" || !("usage" in message) || !message.usage) continue;
-			read += message.usage.cacheRead ?? 0;
-			write += message.usage.cacheWrite ?? 0;
+		let epochTurns = 0;
+		const messages = this.deps.agent.state.messages;
+		let lastAssistant: (typeof messages)[number] | undefined;
+
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message.role !== "assistant" || !("usage" in message) || !message.usage) {
+				if ("type" in message && message.type === "compaction") break;
+				continue;
+			}
+			const usage = message.usage;
+			const provider = "provider" in message ? (message.provider as string) : undefined;
+			const model = "model" in message ? (message.model as string) : undefined;
+			const timestamp =
+				"timestamp" in message && typeof message.timestamp === "number" ? message.timestamp : undefined;
+
+			if (lastAssistant) {
+				const lastProvider = "provider" in lastAssistant ? (lastAssistant.provider as string) : undefined;
+				const lastModel = "model" in lastAssistant ? (lastAssistant.model as string) : undefined;
+				const lastTimestamp =
+					"timestamp" in lastAssistant && typeof lastAssistant.timestamp === "number"
+						? lastAssistant.timestamp
+						: undefined;
+
+				// 1. Model switch boundary
+				if (
+					(provider && lastProvider && provider !== lastProvider) ||
+					(model && lastModel && model !== lastModel)
+				) {
+					break;
+				}
+				// 2. TTL/idle gap boundary
+				if (timestamp && lastTimestamp && Math.abs(lastTimestamp - timestamp) > DEFAULT_CACHE_TTL_MS) {
+					break;
+				}
+			}
+
+			// 3. Observed miss boundary: if cacheRead was 0 after having observed cache reads
+			if (epochTurns > 0 && (usage.cacheRead ?? 0) === 0 && (usage.input ?? 0) > 1000) {
+				break;
+			}
+
+			read += usage.cacheRead ?? 0;
+			write += usage.cacheWrite ?? 0;
+			epochTurns++;
+			lastAssistant = message;
+
+			// Bounded epoch observations (at most 10 epoch turns)
+			if (epochTurns >= 10) break;
 		}
-		return { read, write };
+		return { read, write, epochTurns };
+	}
+
+	private recordFeedbackTurn(assistantMessage: AssistantMessage): void {
+		if (!this.earlyCompactionFeedback) return;
+		if (this.earlyCompactionFeedback.observedTurns >= this.earlyCompactionFeedback.horizonTurns) return;
+
+		const usage = assistantMessage.usage;
+		if (!usage) return;
+
+		this.earlyCompactionFeedback.observedTurns++;
+		const model = this.deps.getModel();
+		const pricing = model ? resolveEffectiveModelPricing(model, usage.input ?? 0) : undefined;
+		if (pricing) {
+			const turnCost =
+				usd(usage.input ?? 0, pricing.input) +
+				usd(usage.cacheRead ?? 0, pricing.cacheRead) +
+				usd(usage.cacheWrite ?? 0, pricing.cacheWrite);
+			this.earlyCompactionFeedback.totalObservedActualCostUsd =
+				(this.earlyCompactionFeedback.totalObservedActualCostUsd ?? 0) + turnCost;
+			const tokensSaved = Math.max(
+				0,
+				this.earlyCompactionFeedback.tokensBefore - (this.earlyCompactionFeedback.tokensAfter ?? 0),
+			);
+			const baselineTurnCost = turnCost + usd(tokensSaved, pricing.input);
+			this.earlyCompactionFeedback.baselineProjectedCostUsd =
+				(this.earlyCompactionFeedback.baselineProjectedCostUsd ?? 0) + baselineTurnCost;
+			const actualSaved =
+				this.earlyCompactionFeedback.baselineProjectedCostUsd -
+				this.earlyCompactionFeedback.totalObservedActualCostUsd;
+			this.earlyCompactionFeedback.actualSavedUsd = actualSaved;
+			this.earlyCompactionFeedback.predictionErrorUsd =
+				actualSaved - this.earlyCompactionFeedback.predictedSavingsUsd;
+		}
+	}
+
+	getEarlyCompactionFeedback(): EarlyCompactionFeedback | undefined {
+		return this.earlyCompactionFeedback;
 	}
 
 	private shouldProceedEarlyEconomics(
 		contextTokens: number,
-		model: { id: string; cost?: { input?: number; cacheRead?: number; cacheWrite?: number } },
+		model:
+			| Model<Api>
+			| {
+					id: string;
+					cost?: {
+						input?: number;
+						output?: number;
+						cacheRead?: number;
+						cacheWrite?: number;
+						tiers?: readonly {
+							inputTokensAbove: number;
+							input?: number;
+							cacheRead?: number;
+							cacheWrite?: number;
+						}[];
+					};
+					longContextPricing?: { thresholdTokens: number; inputMultiplier: number; outputMultiplier: number };
+			  },
 		settings: CompactionSettings,
 	): boolean {
 		const usage = this.recentCacheUsage();
 		const modelSwitched = this.lastEarlyEconomicsModelId !== undefined && this.lastEarlyEconomicsModelId !== model.id;
-		const inputPrice = model.cost?.input;
+
+		const prePricing = resolveEffectiveModelPricing(model, contextTokens);
+		const compactableTokens = Math.max(0, contextTokens - settings.keepRecentTokens);
+		const estimatedSummaryTokens = Math.min(4000, Math.max(256, Math.floor(contextTokens * 0.05)));
+		const postTokens = Math.max(0, contextTokens - compactableTokens + estimatedSummaryTokens);
+		const postPricing = resolveEffectiveModelPricing(model, postTokens);
+
+		const inputPrice = prePricing?.input ?? model.cost?.input;
 		const tierChanged =
 			this.lastEarlyEconomicsInputPrice !== undefined &&
 			inputPrice !== undefined &&
 			this.lastEarlyEconomicsInputPrice !== inputPrice;
 		const cacheInvalidated = modelSwitched || tierChanged;
+
 		const verdict = projectEarlyCompactionEconomics({
 			currentTokens: contextTokens,
-			compactableTokens: Math.max(0, contextTokens - settings.keepRecentTokens),
+			compactableTokens,
 			recentCacheReadTokens: usage.read,
 			recentCacheWriteTokens: usage.write,
-			cacheReadUsdPerMillion: model.cost?.cacheRead,
-			cacheWriteUsdPerMillion: model.cost?.cacheWrite,
+			cacheReadUsdPerMillion: prePricing?.cacheRead ?? model.cost?.cacheRead,
+			cacheWriteUsdPerMillion: prePricing?.cacheWrite ?? model.cost?.cacheWrite,
 			inputUsdPerMillion: inputPrice,
-			estimatedSummaryTokens: Math.min(4000, Math.max(256, Math.floor(contextTokens * 0.05))),
+			postCompactionInputUsdPerMillion: postPricing?.input,
+			postCompactionCacheReadUsdPerMillion: postPricing?.cacheRead,
+			postCompactionCacheWriteUsdPerMillion: postPricing?.cacheWrite,
+			estimatedSummaryTokens,
 			horizonTurns: 8,
 			lastEarlyDecisionAtTokens: this.lastEarlyEconomicsAtTokens,
 			hysteresisTokens: 2000,
@@ -1280,7 +1417,14 @@ export class CompactionController {
 			this.lastEarlyEconomicsModelId = model.id;
 			this.lastEarlyEconomicsInputPrice = inputPrice;
 		}
-		if (verdict.proceed) return true;
+		if (verdict.proceed) {
+			this.pendingEarlyCompactionPrediction = {
+				predictedSavingsUsd: verdict.projectedSavingsUsd,
+				tokensBefore: contextTokens,
+				horizonTurns: 8,
+			};
+			return true;
+		}
 		this.deps.emit({ type: "compaction_start", reason: "threshold" });
 		this.deps.emit({
 			type: "compaction_end",
@@ -1400,6 +1544,18 @@ export class CompactionController {
 			result.retention,
 		);
 		this.deps.refreshAfterCompaction();
+		if (this.pendingEarlyCompactionPrediction) {
+			this.earlyCompactionFeedback = {
+				predictedSavingsUsd: this.pendingEarlyCompactionPrediction.predictedSavingsUsd,
+				tokensBefore: this.pendingEarlyCompactionPrediction.tokensBefore,
+				tokensAfter: this.measureLiveContextTokens(),
+				horizonTurns: this.pendingEarlyCompactionPrediction.horizonTurns,
+				observedTurns: 0,
+				totalObservedActualCostUsd: 0,
+				baselineProjectedCostUsd: 0,
+			};
+			this.pendingEarlyCompactionPrediction = undefined;
+		}
 		const savedEntry = this.deps.sessionManager
 			.getEntries()
 			.find((entry) => entry.type === "compaction" && entry.summary === result.summary) as

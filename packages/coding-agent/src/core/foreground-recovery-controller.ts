@@ -47,6 +47,7 @@ export interface ForegroundRecoveryControllerDeps {
 	/** Runs at an idle Agent boundary while foreground submission authority is still held. */
 	settleRuntimeUpdate?(signal?: AbortSignal): Promise<"continue" | "stop" | undefined>;
 	isCompacting?: () => boolean;
+	isExtendedBusy?: () => boolean;
 }
 
 /** Owns the complete logical foreground run plus retry/failover/compaction recovery ordering. */
@@ -118,7 +119,8 @@ export class ForegroundRecoveryController {
 			this.isRunActive ||
 			this.deps.agent.state.isStreaming ||
 			this.isRetrying ||
-			this.deps.isCompacting?.() === true
+			this.deps.isCompacting?.() === true ||
+			this.deps.isExtendedBusy?.() === true
 		);
 	}
 

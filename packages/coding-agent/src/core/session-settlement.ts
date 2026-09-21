@@ -13,6 +13,10 @@ export interface SessionSettlementState {
 	isStreaming: boolean;
 	isCompacting: boolean;
 	pendingMessageCount: number;
+	isRetrying?: boolean;
+	isForegroundBusy?: boolean;
+	hasRunningWorker?: boolean;
+	hasRunningTool?: boolean;
 }
 
 /**
@@ -37,9 +41,9 @@ export function hasRunningBackgroundedToolCall(records: readonly BackgroundToolT
  * event channel, and emitting a second terminal-looking event there made every settled single-turn
  * prompt trail `agent_end` with one — which four pinned event-order tests correctly rejected.
  *
- * Streaming, compaction and pending-message state cover retry-pending, compaction-retry and
- * queued-follow-up: by the time this is consulted the routed turn has resolved every retry it will
- * run this cycle, so none of those can be true without one of these flags reflecting it.
+ * Streaming, compaction, retry, foreground leases and pending-message state cover retry-pending,
+ * compaction-retry and queued-follow-up: by the time this is consulted the routed turn has resolved
+ * every retry it will run this cycle, so none of those can be true without one of these flags reflecting it.
  *
  * The fourth condition is the idle lanes. Goal auto-continue and the research lane are scheduled
  * from the same prompt tail that consults this, on debounce timers — so a run whose next turn is
@@ -47,5 +51,8 @@ export function hasRunningBackgroundedToolCall(records: readonly BackgroundToolT
  * Settled means nothing further will happen without new input, which an armed continuation breaks.
  */
 export function isSessionSettled(state: SessionSettlementState, hasPendingIdleContinuation: boolean): boolean {
+	if (state.isRetrying || state.isForegroundBusy || state.hasRunningWorker || state.hasRunningTool) {
+		return false;
+	}
 	return !state.isStreaming && !state.isCompacting && state.pendingMessageCount === 0 && !hasPendingIdleContinuation;
 }

@@ -205,6 +205,7 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		getRouteSnapshot: () => host.session.getForegroundRouteSnapshot(),
 		getSemanticPlaneHealth: () => host.session.getSemanticPlaneHealth(),
 		getCostSummary: () => host.session.getCostSummary(),
+		getSessionWorkState: () => host.session.getSessionWorkState(),
 	});
 	const humanInput = subscribeInteractiveLayout(host);
 	const view = new WorkbenchComponent({

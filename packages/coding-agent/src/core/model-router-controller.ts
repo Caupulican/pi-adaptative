@@ -805,6 +805,11 @@ export class ModelRouterController {
 			const consequence = tier === "expensive" ? "critical" : tier === "cheap" ? "low" : "medium";
 			const pool = this.deps.getCandidatePool();
 			const settings = this.deps.getSettingsManager().getModelRouterSettings();
+			const preferSub =
+				settings.hmoePreference === "prefer_subscription" ||
+				(settings.hmoePreference === undefined &&
+					(settings.poolPreference ?? "subscription-first") === "subscription-first");
+			const preferLoc = settings.hmoePreference === "prefer_local";
 			const request = buildWorkerCapabilityRequest({
 				objectiveId: "foreground-session",
 				taskId: `fg-${Date.now().toString(36)}`,
@@ -814,7 +819,12 @@ export class ModelRouterController {
 				metadata: { prompt },
 				// The pool is a hard boundary for H-MoE too: candidates are generated inside it.
 				allowedModelRefs: routerPoolModelRefs(pool),
-				preferSubscription: (settings.poolPreference ?? "subscription-first") === "subscription-first",
+				preferSubscription: preferSub,
+				preferLocal: preferLoc,
+				hmoePreset: settings.hmoePreset,
+				hmoeWeights: settings.hmoeWeights,
+				hmoeTeamStrategy: settings.hmoeTeamStrategy,
+				hmoeIndependence: settings.hmoeIndependence,
 			});
 			const selection = await selector.select(request, { signal });
 			this._lastExpertSelectionFailure = undefined;

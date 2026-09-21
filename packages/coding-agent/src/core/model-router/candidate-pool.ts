@@ -36,11 +36,27 @@ const ROUTER_POOL_SOURCE_LABELS: Record<CustomizedRouterPoolSource, string> = {
 export function resolveRouterCandidatePool(
 	pool: RouterPoolState | undefined,
 	registry: { getAvailable(): Model<Api>[] },
+	options?: { isRuntimeDisabled?: (runtime: "ollama" | "llamacpp" | "transformers") => boolean },
 ): RouterCandidatePool {
+	const filterDisabled = (models: readonly Model<Api>[]): Model<Api>[] => {
+		if (!options?.isRuntimeDisabled) return [...models];
+		return models.filter((m) => {
+			if (m.provider === "ollama" && options.isRuntimeDisabled?.("ollama")) return false;
+			if (m.provider === "hf-transformers" && options.isRuntimeDisabled?.("transformers")) return false;
+			if (
+				(m.provider === "llama-cpp" || m.provider === "prism-llamacpp") &&
+				options.isRuntimeDisabled?.("llamacpp")
+			) {
+				return false;
+			}
+			return true;
+		});
+	};
+
 	if (pool && pool.models.length > 0) {
-		return { customized: true, source: pool.source, models: pool.models };
+		return { customized: true, source: pool.source, models: filterDisabled(pool.models) };
 	}
-	return { customized: false, source: "all_enabled", models: registry.getAvailable() };
+	return { customized: false, source: "all_enabled", models: filterDisabled(registry.getAvailable()) };
 }
 
 export function isModelInRouterPool(pool: RouterCandidatePool, model: Model<Api>): boolean {

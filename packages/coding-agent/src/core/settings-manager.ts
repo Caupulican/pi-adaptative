@@ -13,6 +13,16 @@ import { EDGE_CLASSES, type EdgeClass, isEdgeClass } from "./autonomy/edge-polic
 import { DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS } from "./background-tool-task-controller.ts";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "./context-gc.ts";
 import { type CostGuardSettings, DEFAULT_COST_GUARD_SETTINGS } from "./cost-guard.ts";
+import type {
+	HmoeIndependence,
+	HmoePreference,
+	HmoePreset,
+	HmoeTeamStrategy,
+	HmoeWeights,
+} from "./expert-routing/contracts.ts";
+
+export type { HmoeIndependence, HmoePreference, HmoePreset, HmoeTeamStrategy, HmoeWeights };
+
 import {
 	DEFAULT_GOAL_AUTO_CONTINUE,
 	DEFAULT_GOAL_AUTO_CONTINUE_DELAY_MS,
@@ -286,6 +296,79 @@ export function isModelRouterPoolPreference(value: unknown): value is ModelRoute
 	return typeof value === "string" && (MODEL_ROUTER_POOL_PREFERENCES as readonly string[]).includes(value);
 }
 
+export const HMOE_PRESETS: readonly HmoePreset[] = [
+	"balanced",
+	"quality",
+	"subscription-first",
+	"cost",
+	"speed",
+	"local-first",
+	"custom",
+];
+
+export const HMOE_TEAM_STRATEGIES: readonly HmoeTeamStrategy[] = [
+	"single",
+	"primary_critic",
+	"independent_verifier",
+	"adaptive_team",
+];
+
+export const HMOE_INDEPENDENCE_LEVELS: readonly HmoeIndependence[] = [
+	"none",
+	"fresh_context",
+	"distinct_profile",
+	"distinct_model",
+	"distinct_family",
+	"distinct_provider",
+];
+
+export const HMOE_PREFERENCES: readonly HmoePreference[] = ["prefer_subscription", "prefer_local", "neutral"];
+
+export function isHmoePreset(value: unknown): value is HmoePreset {
+	return typeof value === "string" && (HMOE_PRESETS as readonly string[]).includes(value);
+}
+
+export function isHmoeTeamStrategy(value: unknown): value is HmoeTeamStrategy {
+	return typeof value === "string" && (HMOE_TEAM_STRATEGIES as readonly string[]).includes(value);
+}
+
+export function isHmoeIndependence(value: unknown): value is HmoeIndependence {
+	return typeof value === "string" && (HMOE_INDEPENDENCE_LEVELS as readonly string[]).includes(value);
+}
+
+export function isHmoePreference(value: unknown): value is HmoePreference {
+	return typeof value === "string" && (HMOE_PREFERENCES as readonly string[]).includes(value);
+}
+
+export function normalizeHmoeWeights(value: unknown): HmoeWeights | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const input = value as Record<string, unknown>;
+	const result: HmoeWeights = {};
+	const keys: (keyof HmoeWeights)[] = [
+		"ability",
+		"reliability",
+		"operational",
+		"capabilityFit",
+		"reasoningFit",
+		"contextFit",
+		"probeFit",
+		"outcomeFit",
+		"cost",
+		"latency",
+		"availability",
+		"localResourceFit",
+		"diversity",
+		"privacy",
+	];
+	for (const key of keys) {
+		const val = input[key];
+		if (typeof val === "number" && !Number.isNaN(val)) {
+			result[key] = Math.max(0, Math.min(1, val));
+		}
+	}
+	return Object.keys(result).length > 0 ? result : undefined;
+}
+
 export interface ModelRouterSettings {
 	enabled?: boolean; // default: false — routing is opt-in until escalation safeguards are complete
 	selectionMode?: ModelRouterSelectionMode; // default: manual — existing installs keep exact-pin behavior
@@ -307,6 +390,11 @@ export interface ModelRouterSettings {
 	expensiveThinking?: ThinkingLevel;
 	executorThinking?: ThinkingLevel; // thinking level for the executor-direct lane
 	judgeThinking?: ThinkingLevel; // thinking level for the routing judge's own completion; unset keeps today's "off"
+	hmoePreset?: HmoePreset;
+	hmoeTeamStrategy?: HmoeTeamStrategy;
+	hmoeIndependence?: HmoeIndependence;
+	hmoePreference?: HmoePreference;
+	hmoeWeights?: HmoeWeights;
 }
 
 export const DEFAULT_RESEARCH_LANE_ENABLED = false;
@@ -750,6 +838,16 @@ export interface ReasoningSettings {
 	bookkeepingThinking?: ThinkingLevel | "inherit";
 }
 
+export interface LocalRuntimeConfig {
+	enabled?: boolean;
+}
+
+export interface LocalRuntimesSettings {
+	ollama?: LocalRuntimeConfig;
+	llamacpp?: LocalRuntimeConfig;
+	transformers?: LocalRuntimeConfig;
+}
+
 export interface Settings {
 	lastChangelogVersion?: string;
 	defaultProvider?: string;
@@ -840,6 +938,7 @@ export interface Settings {
 	bedrock?: BedrockScopeSettings; // User-level verified profile/region/model scope for Amazon Bedrock
 	toolkit?: ToolkitSettings; // User's blessed daily-ops script registry for run_toolkit_script
 	modelRouter?: ModelRouterSettings; // Opt-in deterministic cheap/expensive model routing foundation
+	localRuntimes?: LocalRuntimesSettings; // Operator controls to enable/disable local runtimes (ollama, llamacpp, transformers)
 	toolRepair?: ToolRepairSettings; // Tool-recovery logging plus teach and text-protocol switches
 	failover?: FailoverSettings; // Provider quota behavior; metered quota always halts for explicit user choice
 	autoLearn?: AutoLearnSettings; // Root current-session reflection plus explicitly invoked Auto Learn compatibility settings
@@ -1339,6 +1438,12 @@ function normalizeModelRouterSettings(value: unknown): ModelRouterSettings | und
 		const candidate = input[key];
 		if (isThinkingLevel(candidate)) settings[key] = candidate;
 	}
+	if (isHmoePreset(input.hmoePreset)) settings.hmoePreset = input.hmoePreset;
+	if (isHmoeTeamStrategy(input.hmoeTeamStrategy)) settings.hmoeTeamStrategy = input.hmoeTeamStrategy;
+	if (isHmoeIndependence(input.hmoeIndependence)) settings.hmoeIndependence = input.hmoeIndependence;
+	if (isHmoePreference(input.hmoePreference)) settings.hmoePreference = input.hmoePreference;
+	const weights = normalizeHmoeWeights(input.hmoeWeights);
+	if (weights) settings.hmoeWeights = weights;
 	return Object.keys(settings).length > 0 ? settings : undefined;
 }
 
@@ -3250,6 +3355,11 @@ export class SettingsManager {
 			if (router.expensiveThinking !== undefined) merged.expensiveThinking = router.expensiveThinking;
 			if (router.executorThinking !== undefined) merged.executorThinking = router.executorThinking;
 			if (router.judgeThinking !== undefined) merged.judgeThinking = router.judgeThinking;
+			if (router.hmoePreset !== undefined) merged.hmoePreset = router.hmoePreset;
+			if (router.hmoeTeamStrategy !== undefined) merged.hmoeTeamStrategy = router.hmoeTeamStrategy;
+			if (router.hmoeIndependence !== undefined) merged.hmoeIndependence = router.hmoeIndependence;
+			if (router.hmoePreference !== undefined) merged.hmoePreference = router.hmoePreference;
+			if (router.hmoeWeights !== undefined) merged.hmoeWeights = router.hmoeWeights;
 		}
 		return Object.keys(merged).length > 0 ? merged : undefined;
 	}
@@ -3271,6 +3381,11 @@ export class SettingsManager {
 		expensiveThinking?: ThinkingLevel;
 		executorThinking?: ThinkingLevel;
 		judgeThinking?: ThinkingLevel;
+		hmoePreset?: HmoePreset;
+		hmoeTeamStrategy?: HmoeTeamStrategy;
+		hmoeIndependence?: HmoeIndependence;
+		hmoePreference?: HmoePreference;
+		hmoeWeights?: HmoeWeights;
 	} {
 		const profileSettings = this.getProfileModelRouterSettings();
 		const settings = {
@@ -3304,6 +3419,11 @@ export class SettingsManager {
 			judgeThinking: isThinkingLevel(this.settings.modelRouter?.judgeThinking)
 				? this.settings.modelRouter?.judgeThinking
 				: undefined,
+			hmoePreset: this.settings.modelRouter?.hmoePreset,
+			hmoeTeamStrategy: this.settings.modelRouter?.hmoeTeamStrategy,
+			hmoeIndependence: this.settings.modelRouter?.hmoeIndependence,
+			hmoePreference: this.settings.modelRouter?.hmoePreference,
+			hmoeWeights: this.settings.modelRouter?.hmoeWeights,
 		};
 		return {
 			enabled: profileSettings?.enabled ?? settings.enabled,
@@ -3322,6 +3442,11 @@ export class SettingsManager {
 			expensiveThinking: profileSettings?.expensiveThinking ?? settings.expensiveThinking,
 			executorThinking: profileSettings?.executorThinking ?? settings.executorThinking,
 			judgeThinking: profileSettings?.judgeThinking ?? settings.judgeThinking,
+			hmoePreset: profileSettings?.hmoePreset ?? settings.hmoePreset,
+			hmoeTeamStrategy: profileSettings?.hmoeTeamStrategy ?? settings.hmoeTeamStrategy,
+			hmoeIndependence: profileSettings?.hmoeIndependence ?? settings.hmoeIndependence,
+			hmoePreference: profileSettings?.hmoePreference ?? settings.hmoePreference,
+			hmoeWeights: profileSettings?.hmoeWeights ?? settings.hmoeWeights,
 		};
 	}
 
@@ -3347,6 +3472,11 @@ export class SettingsManager {
 			expensiveThinking: isThinkingLevel(settings.expensiveThinking) ? settings.expensiveThinking : undefined,
 			executorThinking: isThinkingLevel(settings.executorThinking) ? settings.executorThinking : undefined,
 			judgeThinking: isThinkingLevel(settings.judgeThinking) ? settings.judgeThinking : undefined,
+			hmoePreset: isHmoePreset(settings.hmoePreset) ? settings.hmoePreset : undefined,
+			hmoeTeamStrategy: isHmoeTeamStrategy(settings.hmoeTeamStrategy) ? settings.hmoeTeamStrategy : undefined,
+			hmoeIndependence: isHmoeIndependence(settings.hmoeIndependence) ? settings.hmoeIndependence : undefined,
+			hmoePreference: isHmoePreference(settings.hmoePreference) ? settings.hmoePreference : undefined,
+			hmoeWeights: normalizeHmoeWeights(settings.hmoeWeights),
 		};
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);
@@ -3358,6 +3488,34 @@ export class SettingsManager {
 
 		this.globalSettings.modelRouter = normalized;
 		this.markModified("modelRouter");
+		this.save();
+	}
+
+	isLocalRuntimeEnabled(runtime: "ollama" | "llamacpp" | "transformers"): boolean {
+		const cfg = this.settings.localRuntimes?.[runtime];
+		return cfg?.enabled ?? true;
+	}
+
+	setLocalRuntimeEnabled(
+		runtime: "ollama" | "llamacpp" | "transformers",
+		enabled: boolean,
+		scope: SettingsScope = "global",
+	): void {
+		const current = this.settings.localRuntimes ?? {};
+		const updated: LocalRuntimesSettings = {
+			...current,
+			[runtime]: { ...current[runtime], enabled },
+		};
+		if (scope === "project") {
+			const projectSettings = structuredClone(this.projectSettings);
+			projectSettings.localRuntimes = updated;
+			this.markProjectModified("localRuntimes");
+			this.saveProjectSettings(projectSettings);
+			return;
+		}
+
+		this.globalSettings.localRuntimes = updated;
+		this.markModified("localRuntimes");
 		this.save();
 	}
 

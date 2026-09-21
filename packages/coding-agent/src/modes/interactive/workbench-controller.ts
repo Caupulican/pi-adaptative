@@ -395,6 +395,7 @@ export class WorkbenchController {
 		else if (keys.matches(data, "app.workbench.layout")) this.changeGeometry(() => this.view.toggleLayout());
 		else if (keys.matches(data, "app.graph.toggle")) this.changeGeometry(() => this.view.toggleGraph());
 		else if (keys.matches(data, "app.graph.view")) this.changeGeometry(() => this.view.cycleGraphView());
+		else if (keys.matches(data, "app.graph.follow")) this.changeGeometry(() => this.view.followCurrentGraph());
 		else if (keys.matches(data, "app.execution.maximize"))
 			this.changeGeometry(() => this.view.toggleExecutionMaximized());
 		else {
@@ -485,6 +486,7 @@ export class WorkbenchController {
 				const titleAction = this.view.paneTitleAction(column, row);
 				if (titleAction === "graphList") this.changeGeometry(() => this.view.setGraphView("list"));
 				else if (titleAction === "graphDiagram") this.changeGeometry(() => this.view.setGraphView("diagram"));
+				else if (titleAction === "followCurrent") this.changeGeometry(() => this.view.followCurrentGraph());
 				else if (titleAction === "hideGraph") this.changeGeometry(() => this.view.toggleGraph());
 			} else if (action === "down" && button === "left" && hit === "graph") {
 				// A stage row opens its detail; the detail lives in the List view, so the view may switch.

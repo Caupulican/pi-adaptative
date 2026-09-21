@@ -974,6 +974,10 @@ export class GoalSessionController {
 		this.stopActiveGoal("budget_limited", reason);
 	}
 
+	markLivenessFaultBlocked(reason: string): boolean {
+		return this.stopActiveGoal("blocked", reason);
+	}
+
 	private stopActiveGoal(status: "blocked" | "usage_limited" | "budget_limited", reason: string): boolean {
 		const state = this.getState();
 		const stopped = stopGoalFromSystem(state, { status, reason }, new Date().toISOString());

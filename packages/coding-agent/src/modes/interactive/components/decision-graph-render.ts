@@ -281,8 +281,15 @@ type DiagramLevel =
 
 function graphFocusKey(model: DecisionGraphModel): string {
 	const evaluating = model.decider.evaluating?.label ?? "";
+	const evalId = model.decider.last?.evaluationId ?? "";
+	const evalCount = model.decider.evaluations;
 	const open = model.checks.filter((check) => check.status !== "satisfied").length;
-	return `stage:${model.current?.stage ?? "idle"}/branch:${model.goal.branch}/eval:${evaluating}/next:${model.next ?? ""}/loop:${model.loop}/open:${open}`;
+	const activeParticipants = model.participants
+		.filter((p) => p.running)
+		.map((p) => `${p.id}:${p.acted}`)
+		.join(",");
+	const proof = `${model.evidence.actions}:${model.evidence.fileEffects}:${model.evidence.failures}`;
+	return `obj:${model.objectiveId}/stage:${model.current?.stage ?? "idle"}/loop:${model.current?.loop ?? model.loop}/branch:${model.goal.branch}/eval:${evaluating}:${evalId}:${evalCount}/proof:${proof}/parts:${activeParticipants}/open:${open}/next:${model.next ?? ""}`;
 }
 
 function goalYesNode(

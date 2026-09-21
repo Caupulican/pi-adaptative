@@ -12,6 +12,9 @@ import {
 	type ExpertConsequence,
 	type ExpertIndependenceLevel,
 	type ExpertWorkClass,
+	type HmoePreset,
+	type HmoeTeamStrategy,
+	type HmoeWeights,
 	type WorkerCapabilityRequest,
 } from "./contracts.ts";
 
@@ -68,6 +71,16 @@ export interface BuildWorkerCapabilityRequestInput {
 	allowedModelRefs?: readonly string[];
 	/** Rank adequate subscription-backed candidates first, after hard admission. */
 	preferSubscription?: boolean;
+	/** Rank adequate local candidates first, after hard admission. */
+	preferLocal?: boolean;
+	/** Operator H-MoE preset (balanced, quality, subscription-first, cost, speed, local-first, custom). */
+	hmoePreset?: HmoePreset;
+	/** Operator H-MoE weights for ability, operational, reliability and subordinate components. */
+	hmoeWeights?: HmoeWeights;
+	/** Operator team strategy. */
+	hmoeTeamStrategy?: HmoeTeamStrategy;
+	/** Operator independence level override. */
+	hmoeIndependence?: ExpertIndependenceLevel;
 }
 
 export function routeToWorkClass(routeName?: string): ExpertWorkClass {
@@ -102,12 +115,14 @@ export function buildWorkerCapabilityRequest(input: BuildWorkerCapabilityRequest
 	const taskId = input.taskId ?? input.task?.taskId ?? `task-${Date.now().toString(36)}`;
 	const role = input.role ?? input.task?.role ?? "generalist";
 
-	// Determine independence level from decision signals
-	let independenceLevel: ExpertIndependenceLevel = "none";
-	if (input.decisionSignals?.independentWorkerRequired) {
-		independenceLevel = consequence === "critical" ? "distinct_provider" : "distinct_model";
-	} else if (workClass === "verify" || workClass === "review") {
-		independenceLevel = "distinct_model";
+	// Determine independence level from decision signals or operator setting
+	let independenceLevel: ExpertIndependenceLevel = input.hmoeIndependence ?? "none";
+	if (!input.hmoeIndependence) {
+		if (input.decisionSignals?.independentWorkerRequired) {
+			independenceLevel = consequence === "critical" ? "distinct_provider" : "distinct_model";
+		} else if (workClass === "verify" || workClass === "review") {
+			independenceLevel = "distinct_model";
+		}
 	}
 
 	// Extract failure signatures and excluded expert IDs from prior attempts
@@ -195,5 +210,9 @@ export function buildWorkerCapabilityRequest(input: BuildWorkerCapabilityRequest
 		failure_signatures: failureSignatures,
 		...(input.allowedModelRefs ? { allowed_model_refs: [...input.allowedModelRefs] } : {}),
 		...(input.preferSubscription !== undefined ? { prefer_subscription: input.preferSubscription } : {}),
+		...(input.preferLocal !== undefined ? { prefer_local: input.preferLocal } : {}),
+		...(input.hmoePreset ? { hmoe_preset: input.hmoePreset } : {}),
+		...(input.hmoeWeights ? { hmoe_weights: input.hmoeWeights } : {}),
+		...(input.hmoeTeamStrategy ? { team_strategy: input.hmoeTeamStrategy } : {}),
 	};
 }

@@ -23,6 +23,10 @@ import type {
 	AutonomySettings,
 	ContextCurationSettings,
 	ContextPromptEnforcementSettings,
+	HmoeIndependence,
+	HmoePreference,
+	HmoePreset,
+	HmoeTeamStrategy,
 	LearningPolicySettings,
 	MemoryRetrievalSettings,
 	ModelCapabilitySettings,
@@ -56,6 +60,10 @@ import {
 	DEFAULT_WORKER_DELEGATION_MAX_USD,
 	DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
 	DEFAULT_WORKER_DELEGATION_WRITE_ENABLED,
+	HMOE_INDEPENDENCE_LEVELS,
+	HMOE_PREFERENCES,
+	HMOE_PRESETS,
+	HMOE_TEAM_STRATEGIES,
 	MAX_WORKER_DELEGATION_MAX_USD,
 } from "../../../core/settings-manager.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
@@ -2399,6 +2407,34 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 						() => done(),
 					),
 			},
+			{
+				id: "model-router-hmoe-preset",
+				label: "H-MoE preset",
+				description: "Numeric policy preset for ability, operational, and reliability weighting",
+				currentValue: this.state.hmoePreset ?? "balanced",
+				values: [...HMOE_PRESETS],
+			},
+			{
+				id: "model-router-hmoe-team",
+				label: "H-MoE team strategy",
+				description: "Selection mode for single model, primary+critic, independent verifier, or adaptive team",
+				currentValue: this.state.hmoeTeamStrategy ?? "single",
+				values: [...HMOE_TEAM_STRATEGIES],
+			},
+			{
+				id: "model-router-hmoe-independence",
+				label: "H-MoE independence",
+				description: "Independence level required when selecting verifier or critic models",
+				currentValue: this.state.hmoeIndependence ?? "none",
+				values: [...HMOE_INDEPENDENCE_LEVELS],
+			},
+			{
+				id: "model-router-hmoe-preference",
+				label: "H-MoE preference",
+				description: "Ordering preference among adequate candidates after hard admission",
+				currentValue: this.state.hmoePreference ?? "prefer_subscription",
+				values: [...HMOE_PREFERENCES],
+			},
 		];
 
 		this.mountSettingsList(
@@ -2419,6 +2455,18 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 						break;
 					case "model-router-fitness-gate":
 						this.state = { ...this.state, fitnessGate: newValue === "true" };
+						break;
+					case "model-router-hmoe-preset":
+						this.state = { ...this.state, hmoePreset: newValue as HmoePreset };
+						break;
+					case "model-router-hmoe-team":
+						this.state = { ...this.state, hmoeTeamStrategy: newValue as HmoeTeamStrategy };
+						break;
+					case "model-router-hmoe-independence":
+						this.state = { ...this.state, hmoeIndependence: newValue as HmoeIndependence };
+						break;
+					case "model-router-hmoe-preference":
+						this.state = { ...this.state, hmoePreference: newValue as HmoePreference };
 						break;
 					default:
 						return;

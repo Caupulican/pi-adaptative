@@ -92,6 +92,8 @@ export interface LocalRuntimeControllerDeps {
 	resolveConfiguredTierModel(tier: "medium" | "expensive"): Model<Api> | undefined;
 	/** `${provider}/${id}` label for a model, for warning/confirm text. */
 	formatModel(model: Model<Api>): string;
+	/** Check whether an operator disabled a given local runtime in settings. */
+	isRuntimeDisabled?(runtime: "ollama" | "llamacpp" | "transformers"): boolean;
 }
 
 export class LocalRuntimeController {
@@ -189,8 +191,21 @@ export class LocalRuntimeController {
 	/** Three-way readiness dispatch shared by ensureIsolatedModelReady/ensureForegroundModelReady/
 	 * ensureRouteModelReady — one place to add a new managed-local kind instead of tripling a ternary. */
 	private async ensureManagedLocalReadiness(model: Model<Api>): Promise<LocalRuntimeReadiness> {
-		if (model.provider === OLLAMA_PROVIDER) return this.ensureLocalModelReady(model);
-		if (model.provider === HF_TRANSFORMERS_PROVIDER) return this.ensureTransformersModelReady(model);
+		if (model.provider === OLLAMA_PROVIDER) {
+			if (this.deps.isRuntimeDisabled?.("ollama")) {
+				return { ready: false, reason: "runtime disabled: ollama is disabled by operator settings" };
+			}
+			return this.ensureLocalModelReady(model);
+		}
+		if (model.provider === HF_TRANSFORMERS_PROVIDER) {
+			if (this.deps.isRuntimeDisabled?.("transformers")) {
+				return { ready: false, reason: "runtime disabled: transformers is disabled by operator settings" };
+			}
+			return this.ensureTransformersModelReady(model);
+		}
+		if (this.deps.isRuntimeDisabled?.("llamacpp")) {
+			return { ready: false, reason: "runtime disabled: llama.cpp / prism is disabled by operator settings" };
+		}
 		return this.ensurePrismLlamaCppModelReady(model);
 	}
 

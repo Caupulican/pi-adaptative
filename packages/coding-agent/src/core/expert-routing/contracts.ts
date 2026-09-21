@@ -20,6 +20,31 @@ export type ExpertIndependenceLevel =
 	| "distinct_family"
 	| "distinct_provider";
 
+export type HmoePreset = "balanced" | "quality" | "subscription-first" | "cost" | "speed" | "local-first" | "custom";
+
+export type HmoeTeamStrategy = "single" | "primary_critic" | "independent_verifier" | "adaptive_team";
+
+export type HmoeIndependence = ExpertIndependenceLevel;
+
+export type HmoePreference = "prefer_subscription" | "prefer_local" | "neutral";
+
+export interface HmoeWeights {
+	ability?: number;
+	reliability?: number;
+	operational?: number;
+	capabilityFit?: number;
+	reasoningFit?: number;
+	contextFit?: number;
+	probeFit?: number;
+	outcomeFit?: number;
+	cost?: number;
+	latency?: number;
+	availability?: number;
+	localResourceFit?: number;
+	diversity?: number;
+	privacy?: number;
+}
+
 export type ExpertRuntimeKind = "remote" | "local" | "managed-local";
 
 export type ExpertPrivacyClass = "remote_allowed" | "local_preferred" | "local_only";
@@ -82,14 +107,21 @@ export interface WorkerCapabilityRequest {
 	capability_escalation_requested?: boolean;
 	failure_signatures?: readonly string[];
 
-	/**
-	 * Hard candidate allowlist as `provider/model_id` refs — the operator's customized Models pool.
+	/** Hard candidate allowlist as `provider/model_id` refs — the operator's customized Models pool.
 	 * When present, candidate generation never materializes a model outside it and admission
 	 * rejects any that slipped through; no automatic route may leave the pool.
 	 */
 	allowed_model_refs?: readonly string[];
 	/** Rank adequate subscription-backed candidates ahead of metered ones, after hard admission. */
 	prefer_subscription?: boolean;
+	/** Rank adequate local candidates ahead of remote ones, after hard admission. */
+	prefer_local?: boolean;
+	/** Operator H-MoE preset (balanced, quality, subscription-first, cost, speed, local-first, custom). */
+	hmoe_preset?: HmoePreset;
+	/** Operator H-MoE weights for ability, operational, reliability and subordinate components. */
+	hmoe_weights?: HmoeWeights;
+	/** Operator team strategy. */
+	team_strategy?: HmoeTeamStrategy;
 }
 
 export interface ExpertDescriptor {
@@ -192,6 +224,11 @@ export interface ExpertFeatureVector {
 	 */
 	subscriptionPreferred: number;
 	/**
+	 * 1 when the request prefers local candidates and this candidate is local/managed-local;
+	 * recorded for the trace.
+	 */
+	localPreferred?: number;
+	/**
 	 * Probe evidence on the lane this request uses, read from the same FitnessStore lane as
 	 * `roleProbeFitness`. The ranking policy orders by this class ABOVE the subscription
 	 * preference: a known-unfit expert is never preferred for being subscription-backed.
@@ -233,6 +270,7 @@ export interface ExpertSelectionTrace {
 	owner_pin_applied?: boolean;
 	exploration?: boolean;
 	created_at?: string;
+	effective_policy?: Record<string, unknown>;
 }
 
 export interface ExpertCapacityLease {

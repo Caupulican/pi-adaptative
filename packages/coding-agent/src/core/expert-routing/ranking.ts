@@ -55,13 +55,24 @@ export class ExpertRankingPolicy {
 		}
 
 		const traceId = options?.traceId ?? randomUUID();
+		const effectiveMode: ExpertSelectionMode =
+			request.team_strategy === "adaptive_team" ? "committee" : (request.team_strategy ?? mode);
+
+		const isLocal = (cand: ScoredExpertCandidate) => {
+			const rk = cand.candidate.descriptor.runtime_kind;
+			return rk === "local" || rk === "managed-local";
+		};
+
 		// Ordering after hard admission (every candidate here is already admitted): adequacy class
-		// first, so a known-unfit expert never outranks a known-fit one; then the subscription
-		// preference WITHIN a class; then the existing evidence score. Who pays is a preference
-		// among adequate experts, never authority over adequacy.
+		// first, so a known-unfit expert never outranks a known-fit one; then local/subscription
+		// preference WITHIN a class; then the existing evidence score.
 		const sorted = [...candidates].sort((a, b) => {
 			const adequacyDelta = adequacyRank(b.features) - adequacyRank(a.features);
 			if (adequacyDelta !== 0) return adequacyDelta;
+			if (request.prefer_local) {
+				const localDelta = (isLocal(b) ? 1 : 0) - (isLocal(a) ? 1 : 0);
+				if (localDelta !== 0) return localDelta;
+			}
 			if (request.prefer_subscription) {
 				const classDelta = (b.features.subscriptionPreferred ?? 0) - (a.features.subscriptionPreferred ?? 0);
 				if (classDelta !== 0) return classDelta;
@@ -104,7 +115,7 @@ export class ExpertRankingPolicy {
 			});
 		};
 
-		switch (mode) {
+		switch (effectiveMode) {
 			case "single": {
 				selectedCandidates = [sorted[0]];
 				break;
@@ -193,7 +204,7 @@ export class ExpertRankingPolicy {
 			primary: bindings[0],
 			team: bindings,
 			bindings,
-			mode,
+			mode: effectiveMode,
 			traceId,
 			exploration: false,
 			ownerPinApplied: false,

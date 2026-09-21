@@ -3,6 +3,7 @@ import type { SessionCostSummary } from "../../../core/cost/cost-summary.ts";
 import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
 import { isIdleProjection } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { OperatorProjection } from "../../../core/operator-projection/types.ts";
+import type { SessionWorkState } from "../../../core/session-work-state.ts";
 import { type SemanticPlaneHealth, semanticPlaneHealthLabel } from "../../../core/system-one/semantic-plane-health.ts";
 import { theme } from "../theme/theme.ts";
 
@@ -16,6 +17,7 @@ export interface OperatorPovSource {
 	getRouteSnapshot(): ForegroundRouteSnapshot;
 	getSemanticPlaneHealth(): SemanticPlaneHealth;
 	getCostSummary(): Pick<SessionCostSummary, "currentCost" | "subagentCost" | "subagentReports">;
+	getSessionWorkState?(): SessionWorkState;
 }
 
 export type OperatorPovSegmentId =
@@ -88,38 +90,60 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 	const segments: OperatorPovSegment[] = [];
 
 	const control = projection.control;
-	// The operator owning control is the one fact that outranks the phase: the run cannot advance
-	// until they answer, so the leading segment says that instead of what the loop was doing.
-	const needsInput = control.owner === "user";
-	// Nothing runs while the session is idle, so the lane says READY, never WORKING on a placeholder.
-	const idle = !needsInput && isIdleProjection(projection);
-	const phaseLabel = needsInput
-		? "NEEDS INPUT"
-		: projection.phase === "blocked"
-			? "BLOCKED"
-			: projection.phase === "done"
-				? "DONE"
-				: idle
-					? "READY"
-					: "WORKING";
+	const workState = source.getSessionWorkState?.();
+	const livenessFault = Boolean(workState?.livenessFault);
+	const needsInput = control.owner === "user" || workState?.phase === "waiting_user";
+	const idle =
+		!needsInput && !livenessFault && (workState ? workState.phase === "idle" : isIdleProjection(projection));
+
+	let phaseLabel = "WORKING";
+	let phaseTone: "accent" | "warning" | "error" | "success" | undefined;
+	let phaseValue = projection.current_action;
+
+	if (livenessFault) {
+		phaseLabel = "LIVENESS FAULT";
+		phaseTone = "error";
+		phaseValue = workState?.faultReason ?? projection.why ?? "active objective without execution path";
+	} else if (needsInput) {
+		phaseLabel = "NEEDS INPUT";
+		phaseTone = "warning";
+		phaseValue = projection.why || "waiting for your input";
+	} else if (projection.phase === "blocked" || workState?.phase === "blocked") {
+		phaseLabel = "BLOCKED";
+		phaseTone = "error";
+		phaseValue = projection.why || "execution blocked";
+	} else if (projection.phase === "done" || workState?.phase === "done") {
+		phaseLabel = "DONE";
+		phaseTone = "success";
+		phaseValue = projection.current_action || "objective completed";
+	} else if (idle) {
+		phaseLabel = "READY";
+		phaseTone = undefined;
+		phaseValue = projection.current_action || "Ready";
+	} else if (workState?.phase === "system_one_evaluating") {
+		phaseLabel = "S1 EVAL";
+		phaseTone = "accent";
+		phaseValue = projection.current_action || "System One evaluating";
+	} else if (workState?.phase === "continuation_armed") {
+		phaseLabel = "CONTINUING";
+		phaseTone = "accent";
+		phaseValue = projection.current_action || "Continuation armed";
+	} else if (workState?.phase === "retrying") {
+		phaseLabel = "RETRYING";
+		phaseTone = "warning";
+		phaseValue = projection.why || projection.current_action || "Retrying transient failure";
+	} else {
+		phaseLabel = "WORKING";
+		phaseTone = undefined;
+		phaseValue = `${projection.phase}: ${projection.current_action}`;
+	}
+
 	segments.push({
 		id: "working",
 		label: phaseLabel,
-		value: needsInput
-			? projection.why
-			: projection.phase === "blocked"
-				? projection.why
-				: projection.phase === "done" || idle
-					? projection.current_action
-					: `${projection.phase}: ${projection.current_action}`,
+		value: phaseValue,
 		dropOrder: 0,
-		tone: needsInput
-			? "warning"
-			: projection.phase === "blocked"
-				? "error"
-				: projection.phase === "done"
-					? "success"
-					: undefined,
+		tone: phaseTone,
 	});
 
 	segments.push({

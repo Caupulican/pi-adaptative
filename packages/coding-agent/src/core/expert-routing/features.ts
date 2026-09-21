@@ -217,14 +217,90 @@ export class ExpertFeatureBuilder {
 			wOperational = 0.5;
 		}
 
-		const abilityScore =
-			capabilityFit * 0.25 +
-			reasoningFit * 0.25 +
-			contextFit * 0.15 +
-			roleProbeFitness * 0.15 +
-			taskOutcomeFitness * 0.2;
+		let subAbilityCap = 0.25;
+		let subAbilityReason = 0.25;
+		let subAbilityCtx = 0.15;
+		let subAbilityProbe = 0.15;
+		let subAbilityOutcome = 0.2;
 
-		const operationalScore = costUtility * 0.4 + latencyUtility * 0.3 + availability * 0.2 + localResourceFit * 0.1;
+		let subOpCost = 0.4;
+		let subOpLatency = 0.3;
+		let subOpAvail = 0.2;
+		let subOpLocal = 0.1;
+
+		if (request.hmoe_preset) {
+			switch (request.hmoe_preset) {
+				case "quality":
+					wAbility = 0.6;
+					wReliability = 0.3;
+					wOperational = 0.1;
+					break;
+				case "cost":
+					wAbility = 0.25;
+					wReliability = 0.15;
+					wOperational = 0.6;
+					subOpCost = 0.6;
+					subOpLatency = 0.2;
+					subOpAvail = 0.1;
+					subOpLocal = 0.1;
+					break;
+				case "speed":
+					wAbility = 0.25;
+					wReliability = 0.15;
+					wOperational = 0.6;
+					subOpLatency = 0.6;
+					subOpCost = 0.2;
+					subOpAvail = 0.1;
+					subOpLocal = 0.1;
+					break;
+				case "local-first":
+					wAbility = 0.3;
+					wReliability = 0.2;
+					wOperational = 0.5;
+					subOpLocal = 0.5;
+					subOpCost = 0.2;
+					subOpLatency = 0.2;
+					subOpAvail = 0.1;
+					break;
+				case "subscription-first":
+				case "balanced":
+					wAbility = 0.4;
+					wReliability = 0.3;
+					wOperational = 0.3;
+					break;
+				case "custom":
+					break;
+			}
+		}
+
+		if (request.hmoe_weights) {
+			const hw = request.hmoe_weights;
+			if (hw.ability !== undefined) wAbility = hw.ability;
+			if (hw.operational !== undefined) wOperational = hw.operational;
+			if (hw.reliability !== undefined) wReliability = hw.reliability;
+			if (hw.capabilityFit !== undefined) subAbilityCap = hw.capabilityFit;
+			if (hw.reasoningFit !== undefined) subAbilityReason = hw.reasoningFit;
+			if (hw.contextFit !== undefined) subAbilityCtx = hw.contextFit;
+			if (hw.probeFit !== undefined) subAbilityProbe = hw.probeFit;
+			if (hw.outcomeFit !== undefined) subAbilityOutcome = hw.outcomeFit;
+			if (hw.cost !== undefined) subOpCost = hw.cost;
+			if (hw.latency !== undefined) subOpLatency = hw.latency;
+			if (hw.availability !== undefined) subOpAvail = hw.availability;
+			if (hw.localResourceFit !== undefined) subOpLocal = hw.localResourceFit;
+		}
+
+		const abilityScore =
+			capabilityFit * subAbilityCap +
+			reasoningFit * subAbilityReason +
+			contextFit * subAbilityCtx +
+			roleProbeFitness * subAbilityProbe +
+			taskOutcomeFitness * subAbilityOutcome;
+
+		const operationalScore =
+			costUtility * subOpCost +
+			latencyUtility * subOpLatency +
+			availability * subOpAvail +
+			localResourceFit * subOpLocal;
 
 		const reliabilityScore = recentSuccessLowerBound - failurePenalty - verifierRejectionPenalty - repetitionPenalty;
 
@@ -237,6 +313,9 @@ export class ExpertFeatureBuilder {
 				privacyBonus +
 				explorationBonus,
 		);
+
+		const isLocal = desc.runtime_kind === "local" || desc.runtime_kind === "managed-local";
+		const localPreferred = request.prefer_local && isLocal ? 1 : 0;
 
 		return {
 			capabilityFit,
@@ -258,6 +337,7 @@ export class ExpertFeatureBuilder {
 			privacyBonus,
 			explorationBonus,
 			subscriptionPreferred,
+			localPreferred,
 			adequacyClass,
 			totalScore,
 		};

@@ -11,8 +11,9 @@
  * wrappers unchanged.
  */
 
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, rmSync, statSync } from "node:fs";
 import { totalmem } from "node:os";
+import { join } from "node:path";
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai";
 import {
@@ -313,11 +314,11 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 			return;
 		}
 
-		if (action === "remove") {
+		if (action === "remove" || action === "unregister") {
 			const ref = rest[0];
 			const confirmed = rest[1] === "confirm";
 			if (!ref) {
-				host.showStatus("Usage: /models remove <ref> confirm");
+				host.showStatus(`Usage: /models ${action} <ref> confirm`);
 				return;
 			}
 			const source = normalizeModelSource(ref);
@@ -334,6 +335,52 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 				return;
 			}
 			await removeLocalModel(host, ref, confirmed);
+			return;
+		}
+
+		if (action === "uninstall" || action === "purge") {
+			const ref = rest[0];
+			const confirmed = rest[1] === "confirm";
+			if (!ref) {
+				host.showStatus(`Usage: /models ${action} <ref> confirm`);
+				return;
+			}
+			const source = normalizeModelSource(ref);
+			if (source.type === "transformers") {
+				await uninstallTransformersModel(host, source.modelId, confirmed);
+				return;
+			}
+			if (source.type === "prism-llamacpp") {
+				await uninstallPrismLlamaCppModel(host, source.modelId, confirmed);
+				return;
+			}
+			if (source.type === "needle") {
+				await removeNeedleModel(host, confirmed);
+				return;
+			}
+			await removeLocalModel(host, ref, confirmed);
+			return;
+		}
+
+		if (action === "uninstall-runtime") {
+			const runtime = rest[0];
+			const confirmed = rest[1] === "confirm";
+			if (!runtime) {
+				host.showStatus("Usage: /models uninstall-runtime <prism> confirm");
+				return;
+			}
+			await uninstallRuntime(host, runtime, confirmed);
+			return;
+		}
+
+		if (action === "enable" || action === "disable") {
+			const runtime = rest[0];
+			if (runtime !== "ollama" && runtime !== "llamacpp" && runtime !== "transformers") {
+				host.showStatus(`Usage: /models ${action} <ollama | llamacpp | transformers>`);
+				return;
+			}
+			host.session.settingsManager.setLocalRuntimeEnabled(runtime, action === "enable");
+			host.showStatus(`Local runtime ${runtime} is now ${action}d.`);
 			return;
 		}
 
@@ -719,6 +766,139 @@ async function removePrismLlamaCppModel(host: LocalModelHost, modelId: string, c
 				? " Its llama-server was stopped."
 				: ` No llama-server tracked by this session — if one is still running (started by a different pi process or session), stop it manually on port ${PRISM_LLAMACPP_SERVE_PORT}.`),
 	);
+}
+
+async function uninstallTransformersModel(host: LocalModelHost, modelId: string, confirmed: boolean): Promise<void> {
+	const runtime = host.getTransformersRuntime(modelId);
+	const status = await runtime.detect();
+	const sanitized = modelId.replace(/\//g, "--");
+	const candidates = [
+		join(status.cacheDir, "hub", `models--${sanitized}`),
+		join(status.cacheDir, `models--${sanitized}`),
+	];
+	const artifactDir = candidates.find((p) => existsSync(p));
+	let sizeBytes = 0;
+	if (artifactDir) {
+		try {
+			sizeBytes = statSync(artifactDir).size;
+		} catch {}
+	}
+	const gb = (sizeBytes / 1e9).toFixed(2);
+	if (!confirmed) {
+		host.showStatus(
+			[
+				`Uninstalling ${modelId} will delete:`,
+				`  - the ${HF_TRANSFORMERS_PROVIDER}/${modelId} entry in models.json`,
+				`  - its cached fitness report for this host`,
+				artifactDir
+					? `  - downloaded model weights (${gb} GB) at ${artifactDir}`
+					: `  - no cached weights found under ${status.cacheDir}`,
+				`It will stop this session's Transformers sidecar if running.`,
+				`Run: /models uninstall hf.co/${modelId} confirm`,
+			].join("\n"),
+		);
+		return;
+	}
+	runtime.stop();
+	if (artifactDir && existsSync(artifactDir)) {
+		try {
+			rmSync(artifactDir, { recursive: true, force: true });
+		} catch (e) {
+			host.showStatus(`Failed to delete weights: ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+	const registration = unregisterTransformersModel({ agentDir: getAgentDir(), modelId });
+	if (!registration.ok) {
+		host.showStatus(`Remove failed: ${registration.reason}`);
+		return;
+	}
+	FitnessStore.forAgentDir(getAgentDir()).remove(`${HF_TRANSFORMERS_PROVIDER}/${modelId}`);
+	host.session.modelRegistry.refresh();
+	host.showStatus(`${modelId} uninstalled: weights deleted (${gb} GB), registration and fitness dropped.`);
+}
+
+async function uninstallPrismLlamaCppModel(host: LocalModelHost, modelId: string, confirmed: boolean): Promise<void> {
+	const runtime = getPrismLlamaCppRuntime(host);
+	const descriptor = PRISM_LLAMACPP_DESCRIPTORS[modelId];
+	const modelFile = descriptor ? join(runtime.modelsDir(), descriptor.file) : undefined;
+	const mmprojFile = descriptor?.mmprojFile ? join(runtime.modelsDir(), descriptor.mmprojFile) : undefined;
+	let totalSize = 0;
+	if (modelFile && existsSync(modelFile)) {
+		try {
+			totalSize += statSync(modelFile).size;
+		} catch {}
+	}
+	if (mmprojFile && existsSync(mmprojFile)) {
+		try {
+			totalSize += statSync(mmprojFile).size;
+		} catch {}
+	}
+	const gb = (totalSize / 1e9).toFixed(2);
+	if (!confirmed) {
+		host.showStatus(
+			[
+				`Uninstalling ${modelId} will delete:`,
+				`  - the ${PRISM_LLAMACPP_PROVIDER}/${modelId} entry in models.json`,
+				`  - its cached fitness report for this host`,
+				`  - downloaded GGUF weights (${gb} GB) under ${runtime.modelsDir()}`,
+				`Its llama-server will be stopped if this session started it.`,
+				`Run: /models uninstall hf.co/${modelId} confirm`,
+			].join("\n"),
+		);
+		return;
+	}
+	const stopped = runtime.stop();
+	if (modelFile && existsSync(modelFile)) {
+		try {
+			rmSync(modelFile, { force: true });
+		} catch {}
+	}
+	if (mmprojFile && existsSync(mmprojFile)) {
+		try {
+			rmSync(mmprojFile, { force: true });
+		} catch {}
+	}
+	const registration = unregisterPrismLlamaCppModel({ agentDir: getAgentDir(), modelId });
+	if (!registration.ok) {
+		host.showStatus(`Remove failed: ${registration.reason}`);
+		return;
+	}
+	FitnessStore.forAgentDir(getAgentDir()).remove(`${PRISM_LLAMACPP_PROVIDER}/${modelId}`);
+	host.session.modelRegistry.refresh();
+	host.showStatus(
+		`${modelId} uninstalled: GGUF weights deleted (${gb} GB), registration and fitness dropped.` +
+			(stopped.stopped ? " Its llama-server was stopped." : ""),
+	);
+}
+
+async function uninstallRuntime(host: LocalModelHost, runtimeName: string, confirmed: boolean): Promise<void> {
+	if (runtimeName === "prism" || runtimeName === "llamacpp" || runtimeName === "prism-llamacpp") {
+		const runtime = getPrismLlamaCppRuntime(host);
+		const runtimeDir = runtime.runtimeDir();
+		if (!existsSync(runtimeDir)) {
+			host.showStatus(`Prism llama.cpp runtime is not installed at ${runtimeDir}.`);
+			return;
+		}
+		if (!confirmed) {
+			host.showStatus(
+				[
+					`Uninstalling prism llama.cpp runtime will delete:`,
+					`  - Pi-owned runtime binaries and manifest under ${runtimeDir}`,
+					`Run: /models uninstall-runtime prism confirm`,
+				].join("\n"),
+			);
+			return;
+		}
+		runtime.stop();
+		try {
+			rmSync(runtimeDir, { recursive: true, force: true });
+			host.showStatus(`Prism llama.cpp runtime binaries deleted from ${runtimeDir}.`);
+		} catch (e) {
+			host.showStatus(`Failed to delete runtime binaries: ${e instanceof Error ? e.message : String(e)}`);
+		}
+		return;
+	}
+	host.showStatus(`Unknown runtime: ${runtimeName}. Supported: prism`);
 }
 
 /**

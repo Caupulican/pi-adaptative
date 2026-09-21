@@ -254,6 +254,57 @@ export class SystemOneSteeringPlane {
 			};
 		}
 
+		if (checkpointId === "JEV-WORKER-SUPERVISION") {
+			const specGap = answers.specialist_gap_present as { noul?: number } | undefined;
+			const capGap = answers.capability_gap_present as { noul?: number } | undefined;
+			const indepVerif = answers.needs_independent_verification as { noul?: number } | undefined;
+			const stuck = answers.worker_stuck as { noul?: number } | undefined;
+			const rep = answers.strategy_repetition as { noul?: number } | undefined;
+			const offTrack = answers.work_off_track as { noul?: number } | undefined;
+			const progress = answers.meaningful_progress as { noul?: number } | undefined;
+
+			if ((specGap?.noul ?? 0) > 0.5) {
+				return {
+					action: "reroute_expert",
+					reasonCodes: ["specialist_gap_detected"],
+					metadata: { dimension: "specialist" },
+				};
+			}
+			if ((capGap?.noul ?? 0) > 0.5) {
+				return {
+					action: "resolve_capability",
+					reasonCodes: ["capability_gap_detected"],
+					metadata: { dimension: "capability" },
+				};
+			}
+			if ((indepVerif?.noul ?? 0) > 0.5) {
+				return {
+					action: "independent_review",
+					reasonCodes: ["independent_verification_needed"],
+				};
+			}
+			if (
+				(stuck?.noul ?? 0) > 0.5 ||
+				(rep?.noul ?? 0) > 0.5 ||
+				(offTrack?.noul ?? 0) > 0.5 ||
+				(progress?.noul !== undefined && progress.noul < 0.3)
+			) {
+				const reasons: string[] = [];
+				if ((offTrack?.noul ?? 0) > 0.5) reasons.push("worker_off_track");
+				if ((stuck?.noul ?? 0) > 0.5) reasons.push("worker_stuck");
+				if ((rep?.noul ?? 0) > 0.5) reasons.push("strategy_repetition");
+				if (progress?.noul !== undefined && progress.noul < 0.3) reasons.push("meaningful_progress_insufficient");
+				return {
+					action: "replan",
+					reasonCodes: reasons.length > 0 ? reasons : ["worker_supervision_steer"],
+				};
+			}
+			return {
+				action: "continue_current_work",
+				reasonCodes: ["worker_progressing_normally"],
+			};
+		}
+
 		return { action: "continue_current_work", reasonCodes };
 	}
 

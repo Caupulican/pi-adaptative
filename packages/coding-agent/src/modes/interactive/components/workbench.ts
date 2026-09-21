@@ -430,6 +430,9 @@ export class WorkbenchComponent extends Container {
 	cycleGraphView(): void {
 		this.graphView = this.graphView === "list" ? "diagram" : "list";
 	}
+	followCurrentGraph(): void {
+		this.graphPane.unpin();
+	}
 	getGraphView(): WorkbenchGraphView {
 		return this.graphView;
 	}
@@ -511,11 +514,15 @@ export class WorkbenchComponent extends Container {
 		return buttons;
 	}
 	private graphTitleButtons(): WorkbenchPaneTitleButton[] {
-		return [
+		const buttons: WorkbenchPaneTitleButton[] = [
 			{ action: "graphList", label: "List", selected: this.graphView === "list" },
 			{ action: "graphDiagram", label: "Diagram", selected: this.graphView === "diagram" },
-			{ action: "hideGraph", label: "Hide" },
 		];
+		if (this.graphPane.isPinned() || this.graphPane.hasNewerProgress()) {
+			buttons.push({ action: "followCurrent", label: "Follow current" });
+		}
+		buttons.push({ action: "hideGraph", label: "Hide" });
+		return buttons;
 	}
 	headerAction(column: number): "latest" | "copyAll" | "layout" | undefined {
 		return this.headerButtons.find((button) => column >= button.start && column < button.end)?.action;

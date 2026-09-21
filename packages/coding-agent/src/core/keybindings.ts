@@ -47,6 +47,7 @@ export interface AppKeybindings {
 	"app.execution.pageDown": true;
 	"app.graph.toggle": true;
 	"app.graph.view": true;
+	"app.graph.follow": true;
 	"app.workbench.layout": true;
 	"app.clipboard.pasteImage": true;
 	"app.transcript.open": true;
@@ -191,6 +192,10 @@ export const KEYBINDINGS = {
 	"app.graph.view": {
 		defaultKeys: "alt+l",
 		description: "Switch the Decision graph between List and Diagram",
+	},
+	"app.graph.follow": {
+		defaultKeys: "alt+f",
+		description: "Follow current decision graph stage and clear scroll pin",
 	},
 	"app.workbench.layout": {
 		defaultKeys: "alt+p",

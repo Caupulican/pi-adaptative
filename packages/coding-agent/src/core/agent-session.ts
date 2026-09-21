@@ -224,6 +224,7 @@ import { createSessionShutdownTracker } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { buildSessionStreamFn, isRawStreamSimpleFn } from "./session-stream-chain.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
+import { deriveSessionWorkState, type SessionWorkState } from "./session-work-state.ts";
 import type {
 	MemorySystem,
 	ResourceProfileFilterSettings,
@@ -757,6 +758,7 @@ export class AgentSession {
 			emit: (event) => this._emit(event),
 			resolveConfiguredTierModel: (tier) => this._modelRouter.resolveConfiguredTierModel(tier),
 			formatModel: (model) => formatModelRouterModel(model),
+			isRuntimeDisabled: (runtime) => !this.settingsManager.isLocalRuntimeEnabled(runtime),
 		});
 		this._localPrefixWarm = new LocalPrefixWarmController({
 			getStreamFn: () => this.agent.streamFn,
@@ -1116,6 +1118,17 @@ export class AgentSession {
 			onSuccessfulAssistant: () => this._compaction.resetOverflowRecovery(),
 			settleRuntimeUpdate: (signal) => this.runtimeUpdates.settle(signal),
 			isCompacting: () => this._compaction.isCompacting,
+			isExtendedBusy: () => {
+				return (
+					(this._systemOneController?.isEvaluating ?? false) ||
+					this._reflectionTurnLifecycle.inFlight ||
+					this._backgroundLanes
+						.getLaneRecords()
+						.some((lane) => lane.status === "queued" || lane.status === "running") ||
+					hasRunningBackgroundedToolCall(this._backgroundToolTasks.list()) ||
+					this._backgroundLanes.hasPendingIdleContinuation()
+				);
+			},
 			prepareRun: async () => {
 				this.agent.state.systemPrompt = this._systemPromptBuilder.enforceSystemPromptBudget(this.systemPrompt);
 				await this._toolProtocol.ensureActiveModelProtocol();
@@ -1171,7 +1184,10 @@ export class AgentSession {
 			getToolProbeVerdict: (model) => this._toolProtocol.getToolProbeVerdict(model),
 			// The pool is the operator's Models configuration (startup enabledModels / --models, an
 			// SDK scope, or a live Models-selector edit), or every authed model when uncustomized.
-			getCandidatePool: () => resolveRouterCandidatePool(this._routerPool, this._modelRegistry),
+			getCandidatePool: () =>
+				resolveRouterCandidatePool(this._routerPool, this._modelRegistry, {
+					isRuntimeDisabled: (r) => !this.settingsManager.isLocalRuntimeEnabled(r),
+				}),
 			isUsingSubscription: (model) => this._modelRegistry.isUsingSubscription(model),
 		});
 		this._foregroundLifecycle = new ForegroundLifecycleAdapter(
@@ -1774,7 +1790,9 @@ export class AgentSession {
 
 	/** The router's candidate pool as the operator configured it, with its provenance. */
 	getRouterCandidatePool(): RouterCandidatePool {
-		return resolveRouterCandidatePool(this._routerPool, this._modelRegistry);
+		return resolveRouterCandidatePool(this._routerPool, this._modelRegistry, {
+			isRuntimeDisabled: (r) => !this.settingsManager.isLocalRuntimeEnabled(r),
+		});
 	}
 
 	/** The persisted `/toolprobe` record for a model, or undefined when never probed. */
@@ -3140,6 +3158,76 @@ export class AgentSession {
 		return this._foregroundRecovery.getActivitySnapshot(this.sessionManager.getSessionId());
 	}
 
+	getSessionWorkState(): SessionWorkState {
+		const activity = this.getForegroundActivity();
+		const hasRunningWorker = this._backgroundLanes
+			.getLaneRecords()
+			.some((lane) => lane.status === "queued" || lane.status === "running");
+		const hasRunningTool = hasRunningBackgroundedToolCall(this._backgroundToolTasks.list());
+		const hasPendingContinuation = this._backgroundLanes.hasPendingIdleContinuation();
+		const goalSnapshot = this.getGoalStateSnapshot();
+		const isBlocked = goalSnapshot?.status === "blocked";
+		const isDone = goalSnapshot?.status === "completed";
+
+		const isAwaitingUser = getResumableHumanInputSnapshot(this.sessionManager)?.status === "pending";
+		const isObjectiveActive = goalSnapshot ? isGoalExecutionActive(goalSnapshot.status) : false;
+		const hasActiveExecutionOrOwner =
+			this.isStreaming ||
+			this.isCompacting ||
+			this.isRetrying ||
+			this._foregroundRecovery.isRunActive ||
+			activity.epoch !== undefined ||
+			(this._systemOneController?.isEvaluating ?? false) ||
+			hasRunningWorker ||
+			hasRunningTool ||
+			hasPendingContinuation ||
+			isAwaitingUser;
+
+		const livenessFault = Boolean(isObjectiveActive && !hasActiveExecutionOrOwner);
+
+		return deriveSessionWorkState({
+			isStreaming: this.isStreaming,
+			isCompacting: this.isCompacting,
+			isRetrying: this.isRetrying,
+			hasSubmissionLease: activity.epoch !== undefined,
+			isRunActive: this._foregroundRecovery.isRunActive,
+			isSystemOneEvaluating: this._systemOneController?.isEvaluating ?? false,
+			hasRunningWorker,
+			hasRunningTool,
+			hasPendingContinuation,
+			isAwaitingUser,
+			isBlocked,
+			isDone,
+			livenessFault,
+			epoch: activity.epoch,
+			sessionId: this.sessionManager.getSessionId(),
+			objectiveId: goalSnapshot?.goalId,
+		});
+	}
+
+	/**
+	 * Watchdog for orphaned objectives (F2 / OC-03):
+	 * Detects an active objective with no owner, worker, evaluation, or continuation.
+	 * Bounded recovery schedules an idle continuation pass; otherwise transitions to blocked.
+	 */
+	checkOrphanedObjectiveWatchdog(): boolean {
+		const workState = this.getSessionWorkState();
+		if (!workState.livenessFault) return false;
+
+		// Bounded recovery: try scheduling continuation from idle
+		if (!isInterruptedAssistantStopReason(this._findLastAssistantMessage()?.stopReason)) {
+			this._backgroundLanes.scheduleGoalAutoContinueFromIdle();
+			if (this._backgroundLanes.hasPendingIdleContinuation()) {
+				return false;
+			}
+		}
+
+		// Recovery exhausted or not allowed: block explicitly
+		return this._goals.markLivenessFaultBlocked(
+			workState.faultReason ?? "Liveness fault: objective has no active owner, worker, evaluation, or continuation",
+		);
+	}
+
 	subscribeForegroundActivity(listener: () => void): () => void {
 		return this._foregroundRecovery.subscribeActivity(listener);
 	}
@@ -3751,6 +3839,7 @@ export class AgentSession {
 
 		// Extension-only, and read after the lanes are scheduled so an armed continuation is visible.
 		if (isSessionSettled(this, this._backgroundLanes.hasPendingIdleContinuation())) {
+			this.checkOrphanedObjectiveWatchdog();
 			await this._extensionRunner.emit({ type: "agent_settled" });
 		}
 	}

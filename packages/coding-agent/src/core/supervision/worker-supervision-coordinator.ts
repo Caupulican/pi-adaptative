@@ -88,7 +88,7 @@ export function isValidationChurn(observation: {
 export class WorkerSupervisionCoordinator {
 	private readonly deps: WorkerSupervisionCoordinatorDeps;
 	private readonly signals: WorkerSupervisionSignal[] = [];
-	private readonly lastErrorFingerprint = new Map<string, string>();
+	private readonly lastErrorTimestamp = new Map<string, number>();
 	private readonly consumedRootRequestIds = new Set<string>();
 
 	constructor(deps: WorkerSupervisionCoordinatorDeps) {
@@ -134,15 +134,22 @@ export class WorkerSupervisionCoordinator {
 			// Supervision is advisory. A failed assessment must never fail the worker it observes;
 			// the worker keeps running and no intervention is applied on unknown state.
 			const text = error instanceof Error ? error.message : String(error);
-			const fingerprint = `${observation.attemptId}:${observation.evidenceRevision ?? 0}:${text}`;
-			if (this.lastErrorFingerprint.get(observation.attemptId) !== fingerprint) {
-				this.lastErrorFingerprint.set(observation.attemptId, fingerprint);
+			const fingerprint = `${observation.attemptId}:${text}`;
+			const lastReportedAt = this.lastErrorTimestamp.get(fingerprint) ?? 0;
+			const now = Date.now();
+			// F12: Debounce repeated identical evaluation errors for the same worker attempt by 30 seconds
+			if (now - lastReportedAt > 30_000) {
+				this.lastErrorTimestamp.set(fingerprint, now);
 				this.deps.onSupervisionError?.(error);
 			}
 			return undefined;
 		}
 		if (!verdict) return undefined;
-		this.lastErrorFingerprint.delete(observation.attemptId);
+		for (const key of this.lastErrorTimestamp.keys()) {
+			if (key.startsWith(`${observation.attemptId}:`)) {
+				this.lastErrorTimestamp.delete(key);
+			}
+		}
 		this.signals.push(verdict);
 		await this.apply(verdict, observation);
 		return verdict;

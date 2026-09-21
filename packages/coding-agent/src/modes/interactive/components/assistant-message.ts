@@ -136,7 +136,8 @@ export class AssistantMessageComponent extends Container {
 		);
 		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
 		this.visibleOutput =
-			hasVisibleContent || (!hasToolCalls && (message.stopReason === "aborted" || message.stopReason === "error"));
+			hasVisibleContent ||
+			(!hasToolCalls && (message.stopReason === "aborted" || message.stopReason === "error" || !this.isStreaming));
 
 		if (hasVisibleContent) {
 			this.contentContainer.addChild(new Spacer(1));
@@ -227,6 +228,9 @@ export class AssistantMessageComponent extends Container {
 				const errorMsg = message.errorMessage || "Unknown error";
 				this.contentContainer.addChild(new Spacer(1));
 				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), 1, 0));
+			} else if (!this.isStreaming) {
+				this.contentContainer.addChild(new Spacer(1));
+				this.contentContainer.addChild(new Text(theme.fg("muted", "(No response received from model)"), 1, 0));
 			}
 		}
 	}

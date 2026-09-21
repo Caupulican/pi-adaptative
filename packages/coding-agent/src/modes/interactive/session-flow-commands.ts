@@ -772,7 +772,9 @@ const IMMEDIATE_GOAL_CONTROL_PATTERN =
 	/^\/goal(?: +(?:status|resume|pause|complete|clear|close|cancel|reopen(?: +\S+)?))?$/;
 
 export interface GoalEditorSubmitHost {
-	readonly session: Pick<AgentSession, "isCompacting" | "isStreaming" | "isRetrying">;
+	readonly session: Pick<AgentSession, "isCompacting" | "isStreaming" | "isRetrying"> & {
+		getSessionWorkState?: () => { busy: boolean };
+	};
 	readonly editor: Pick<EditorComponent, "setText">;
 	handleGoalCommand(text: string): Promise<void>;
 	showError(message: string): void;
@@ -785,7 +787,9 @@ export async function tryHandleGoalEditorSubmit(
 	host: GoalEditorSubmitHost,
 ): Promise<boolean> {
 	if (text !== "/goal" && !text.startsWith("/goal ")) return false;
-	const workIsActive = host.session.isCompacting || host.session.isStreaming || host.session.isRetrying;
+	const workIsActive =
+		host.session.getSessionWorkState?.().busy ??
+		(host.session.isCompacting || host.session.isStreaming || host.session.isRetrying);
 	if (workIsActive && (queueAsFollowUp || !IMMEDIATE_GOAL_CONTROL_PATTERN.test(text))) return false;
 	host.editor.setText("");
 	try {

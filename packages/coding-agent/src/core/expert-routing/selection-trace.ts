@@ -56,5 +56,13 @@ export function buildSelectionTrace(
 		owner_pin_applied: plan.ownerPinApplied,
 		exploration: plan.exploration,
 		created_at: new Date().toISOString(),
+		effective_policy: {
+			preset: request.hmoe_preset ?? "balanced",
+			team_strategy: request.team_strategy ?? plan.mode,
+			independence: request.independence_level ?? "none",
+			prefer_subscription: request.prefer_subscription ?? false,
+			prefer_local: request.prefer_local ?? false,
+			weights: request.hmoe_weights,
+		},
 	};
 }
