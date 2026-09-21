@@ -2,7 +2,8 @@
 
 ### Fixed
 
-- The Decision graph no longer opens an `understand` stage with a running clock at session start: an idle session (no objective, no turn) records no stage, the graph materializes on the first prompt or goal, and a turn without a goal is one `build` pass by the root that closes when the turn ends. The idle placeholder rows this wrote before stay in the ledger untouched.
+- The Decision graph no longer opens an `understand` stage with a running clock at session start: an idle session (no objective, no turn) records no stage, the graph materializes on the first prompt or goal, and a turn without a goal is one `build` pass by the root that closes when the turn ends. The idle placeholder rows this wrote before stay in the ledger and are excluded when it is read, so rehydrated timers and replays carry no clock that measured nothing.
+- The POV lane reads `READY` with the current action while the session is idle instead of `WORKING understand: …`, and a paused, limited or cancelled objective projects that idle state (`Objective cancelled`) instead of a running `plan` or `build` phase with a clock.
 
 ## [0.99.34] - 2026-09-21
 

@@ -116,6 +116,15 @@ describe("DecisionStageLog", () => {
 		});
 		expect(isIdleProjection(idle)).toBe(true);
 		expect(
+			isIdleProjection(
+				projection({
+					phase: "understand",
+					control: { owner: "root", state: "deciding", reasonCode: "objective_cancelled" },
+				}),
+			),
+		).toBe(true);
+		expect(isIdleProjection(projection({ phase: "understand" }))).toBe(false);
+		expect(
 			isIdleProjection(projection({ control: { owner: "root", state: "executing", reasonCode: "no_objective" } })),
 		).toBe(false);
 		const log = new DecisionStageLog();
@@ -236,6 +245,36 @@ describe("DecisionStageLog", () => {
 		const resumed = new DecisionStageLog({ sink });
 		expect(resumed.view(6000).entries.map((entry) => entry.stage)).toEqual(["understand"]);
 		expect(resumed.view(6000).totals.build).toEqual({ elapsedMs: 0, passes: 0 });
+	});
+
+	it("leaves the placeholder idle rows an older build wrote out of every read", () => {
+		const dir = mkdtempSync(join(tmpdir(), "decision-ledger-"));
+		dirs.push(dir);
+		const store = new DecisionLedgerStore({ databasePath: join(dir, "state", "decision-ledger.sqlite") });
+		// The row the placeholder projection used to write at session start, closed when work began.
+		const legacy = store.openStage("session-old", "/repo", {
+			objectiveId: "session-old",
+			stage: "understand",
+			enteredAt: 1000,
+			loop: 1,
+			reasonCode: "no_objective",
+			note: "Ready for operator instructions",
+		});
+		store.closeStage(legacy, 31_000);
+		store.openStage("session-old", "/repo", {
+			objectiveId: "goal-9",
+			stage: "understand",
+			enteredAt: 31_000,
+			loop: 1,
+			reasonCode: "goal_active",
+			note: "Framing the request",
+		});
+		expect(store.loadStages("session-old").map((row) => [row.stage, row.reasonCode])).toEqual([
+			["understand", "goal_active"],
+		]);
+		const resumed = new DecisionStageLog({ sink: store.stageSink("session-old", "/repo") });
+		expect(resumed.view(40_000).totals.understand).toEqual({ elapsedMs: 9_000, passes: 1 });
+		store.close();
 	});
 
 	it("persists into the SQLite decision ledger, keyed by session, and reads back per session", () => {

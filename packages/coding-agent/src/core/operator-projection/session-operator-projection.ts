@@ -435,8 +435,9 @@ export class SessionOperatorProjection {
 		if (adaptation) return "adapt";
 		if (proof.total > 0 && proof.pending === 0 && proof.failing === 0 && goal) return "verify";
 		if (lanes.length > 0) return "build";
-		// No objective: a running foreground turn is the root's own work; idle is readiness, not work.
-		if (!goal) return this.deps.isForegroundBusy() ? "build" : "understand";
+		// No objective, or one that is not executing (paused, limited, cancelled): a running foreground
+		// turn is the root's own work; otherwise the session is idle, which is readiness, not work.
+		if (!goal || isDormantGoal(goal)) return this.deps.isForegroundBusy() ? "build" : "understand";
 		// A goal with no decomposition yet is still being planned; one with requirements is building.
 		return goal.requirements.length === 0 ? "plan" : "build";
 	}
@@ -453,7 +454,8 @@ export class SessionOperatorProjection {
 		const suffix = fast ? ` · ${FAST_ITERATION_INDICATOR}` : "";
 		switch (phase) {
 			case "understand":
-				return goal ? `Framing ${goal.userGoal}` : "Ready for operator instructions";
+				if (!goal) return "Ready for operator instructions";
+				return isDormantGoal(goal) ? `Objective ${goal.status.replace("_", " ")}` : `Framing ${goal.userGoal}`;
 			case "plan":
 				return `Decomposing ${goal?.userGoal ?? "the objective"}`;
 			case "build":
@@ -478,7 +480,7 @@ export class SessionOperatorProjection {
 		blocker: string | undefined,
 	): string {
 		if (blocker) return blocker;
-		if (phase === "understand" && !goal) return "Standing by for user directives";
+		if (phase === "understand" && (!goal || isDormantGoal(goal))) return "Standing by for user directives";
 		if (phase === "verify") return `${proof.satisfied}/${proof.total} acceptance criteria satisfied`;
 		if (phase === "done") return `Delivered with ${proof.satisfied}/${proof.total} criteria satisfied`;
 		return goal?.userGoal ?? "Advancing the objective";
@@ -501,6 +503,11 @@ export class SessionOperatorProjection {
 			...(lane.startedAt ? { elapsedMs: Math.max(0, Date.now() - Date.parse(lane.startedAt)) } : {}),
 		}));
 	}
+}
+
+/** A goal that exists but is not executing and is not terminal-visible: paused, limited or cancelled. */
+function isDormantGoal(goal: GoalState): boolean {
+	return !isGoalExecutionActive(goal.status) && goal.status !== "completed" && goal.status !== "blocked";
 }
 
 function phaseIndex(phase: OperatorPhase): number {

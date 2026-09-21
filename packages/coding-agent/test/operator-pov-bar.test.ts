@@ -71,6 +71,33 @@ function renderPlain(src: OperatorPovSource, width: number): string {
 }
 
 describe("Operator POV bar", () => {
+	it("reads READY with the current action while the session is idle, WORKING once a turn runs", () => {
+		const idle = renderPlain(
+			source({
+				projection: {
+					phase: "understand",
+					current_action: "Ready for operator instructions",
+					next_action: null,
+					control: { owner: "root", state: "deciding", reasonCode: "no_objective" },
+				},
+			}),
+			240,
+		);
+		expect(idle.startsWith(" READY Ready for operator instructions")).toBe(true);
+		expect(idle).not.toContain("WORKING");
+		const turn = renderPlain(
+			source({
+				projection: {
+					phase: "build",
+					current_action: "Working the operator's turn",
+					control: { owner: "root", state: "executing", reasonCode: "no_objective" },
+				},
+			}),
+			240,
+		);
+		expect(turn.startsWith(" WORKING build: Working the operator's turn")).toBe(true);
+	});
+
 	it("F001-001/003/004..011: one `|`-separated row carrying every operator fact", () => {
 		const lines = new OperatorPovBarComponent(
 			source({

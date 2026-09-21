@@ -106,6 +106,17 @@ describe("Operator control projection", () => {
 		expect(turn.control).toEqual({ owner: "root", state: "executing", reasonCode: "no_objective" });
 	});
 
+	it("projects a paused, limited or cancelled objective as idle, never a running phase", () => {
+		for (const status of ["paused", "usage_limited", "budget_limited", "cancelled"] as const) {
+			const projection = new SessionOperatorProjection(depsFor({ goal: goal(status, [requirement()]) }));
+			const published = projection.getProjection();
+			expect(published.phase).toBe("understand");
+			expect(published.current_action).toBe(`Objective ${status.replace("_", " ")}`);
+			expect(published.control).toEqual({ owner: "root", state: "deciding", reasonCode: `objective_${status}` });
+			expect(projection.getStageLog(1_000).open).toBeUndefined();
+		}
+	});
+
 	it("opens no stage while idle and records the turn without a goal as one build pass", () => {
 		const deps = depsFor({});
 		let busy = false;

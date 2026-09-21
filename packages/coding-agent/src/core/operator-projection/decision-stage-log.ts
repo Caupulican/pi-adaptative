@@ -105,13 +105,23 @@ const REPAIR_REASON_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * An idle session: no objective and no turn running. The root owns control and is deciding nothing
- * (`no_objective`); there is no loop, so there is no stage and no clock. The projection's placeholder
- * `understand` phase describes readiness, not work.
+ * An idle session: the root owns control, is deciding nothing, and the projection sits on its
+ * readiness phase. That is a session with no objective, or one whose objective is paused, limited or
+ * cancelled, with no turn running. There is no loop, so there is no stage and no clock; an active
+ * objective being framed has System One as owner and is not idle.
  */
 export function isIdleProjection(projection: OperatorProjection): boolean {
 	const { control } = projection;
-	return control.owner === "root" && control.state === "deciding" && control.reasonCode === "no_objective";
+	return control.owner === "root" && control.state === "deciding" && projection.phase === "understand";
+}
+
+/**
+ * A row the placeholder projection wrote before idle sessions were excluded: `understand` opened at
+ * session start with no objective. The ledger is append-only, so the rows stay; reads leave them out
+ * so timers and replays do not carry a clock that measured nothing.
+ */
+export function isLegacyIdleStageRow(row: { stage: string; reasonCode?: string }): boolean {
+	return row.stage === "understand" && row.reasonCode === "no_objective";
 }
 
 /**

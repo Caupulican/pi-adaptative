@@ -17,6 +17,7 @@ import type {
 	DecisionStageSinkEntry,
 	DecisionStageStoredEntry,
 } from "./decision-stage-log.ts";
+import { isLegacyIdleStageRow } from "./decision-stage-log.ts";
 
 export const DECISION_LEDGER_SCHEMA_VERSION = 1;
 
@@ -211,6 +212,7 @@ export class DecisionLedgerStore {
 			const endedAt = asInteger(row.ended_at);
 			const reasonCode = asText(row.reason_code);
 			const note = asText(row.note);
+			if (isLegacyIdleStageRow({ stage, ...(reasonCode !== undefined ? { reasonCode } : {}) })) continue;
 			entries.push({
 				rowId: id,
 				objectiveId,
