@@ -1235,9 +1235,11 @@ export class ObjectiveExecutionController {
 							: undefined,
 						hasCalibratedEngine: () => {
 							const candidate = this.deps.decisions?.select(ROUTE_DECISION_PROGRAM, "critical");
+							const isSysOneCalibrated =
+								Boolean(this.deps.systemOne?.executeCompletionTransaction) &&
+								(this.deps.systemOne as any)?.adapter?.provenance === "native_calibrated";
 							return (
-								candidate?.capabilities().confidenceProvenance === "native_calibrated" ||
-								Boolean(this.deps.systemOne?.executeCompletionTransaction)
+								candidate?.capabilities().confidenceProvenance === "native_calibrated" || isSysOneCalibrated
 							);
 						},
 					};
@@ -1327,30 +1329,7 @@ export class ObjectiveExecutionController {
 						// 6. Release artifact/mechanical gates
 
 						// 7. PH-155, FC-065: JEV-027 delivery-claim truth
-						if (this.deps.steeringPlane) {
-							const c27 = await this.deps.steeringPlane.requireCertificate(
-								"JEV-027",
-								{
-									...canonicalProofState,
-									deliveryClaimsVerified: true,
-									steeringCertRefs: [...steeringCertRefs],
-								},
-								{ objectiveId, evidenceRevision, signal },
-							);
-							steeringCertRefs.push(c27.certificate_id);
-
-							if (c27.semantic_outcome !== "pass") {
-								const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime, {
-									reasonCodes: ["delivery_truth_rejected", ...(c27.failed_semantic_predicates ?? [])],
-								});
-								return {
-									status: "unrecoverable",
-									reasonCodes: ["delivery_truth_rejected"],
-									cycleCount: this.cycleCounter,
-									deliveryBundle: bundle,
-								};
-							}
-						}
+						// 7. JEV-027 moved to after side effects
 
 						// 8. PH-156, PH-157, FC-066: JEV-028 gates publish AND/OR deploy
 						const activeCharter = this.deps.executionCharter;
