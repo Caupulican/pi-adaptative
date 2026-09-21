@@ -341,6 +341,20 @@ export function getQuestionPack(stage: ValidationStage): Readonly<QuestionPack> 
  * Compute the SHA-256 hash of a question pack.
  */
 export function hashQuestionPack(stage: ValidationStage): string {
+	return hashQuestions(getQuestionPack(stage));
+}
+
+/** The SHA-256 hash of the questions actually sent, so a decision record names what Jev answered. */
+export function hashQuestions(questions: Readonly<QuestionPack>): string {
+	return createHash("sha256").update(JSON.stringify(questions)).digest("hex");
+}
+
+/**
+ * A stage's pack without the questions the projection cannot ground. A question whose subject is
+ * absent from the state view is never sent: its answer would be noise the policy has to ignore.
+ */
+export function selectQuestions(stage: ValidationStage, omit: readonly string[]): Readonly<QuestionPack> {
 	const pack = getQuestionPack(stage);
-	return createHash("sha256").update(JSON.stringify(pack)).digest("hex");
+	if (omit.length === 0) return pack;
+	return Object.fromEntries(Object.entries(pack).filter(([name]) => !omit.includes(name)));
 }

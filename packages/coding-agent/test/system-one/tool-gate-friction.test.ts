@@ -56,6 +56,52 @@ describe("Tool Gate Friction Remediations", () => {
 		expect(gateResult?.block).toBeFalsy();
 	});
 
+	it("sends the relevance question only when the projection carries a step; a plain session is never asked", async () => {
+		const sent: string[][] = [];
+		const adapter = {
+			evaluate: async (input: { questions: Record<string, unknown> }) => {
+				sent.push(Object.keys(input.questions).sort());
+				return {
+					model: "jev-1.13.0",
+					// "Not relevant" on purpose: without a step it must not be asked, and cannot replan.
+					answers: {
+						repo_text_injection_like: { noul: 0.01 },
+						tool_call_relevant: { noul: 0.02 },
+						tool_call_semantic_scope_risk: { score: 0, confidence: 0.9 },
+					},
+					latency_ms: 5,
+				};
+			},
+		};
+		const request = { tool: "typesafe_review", intent: "Invoke tool typesafe_review", impact: "read_only" as const };
+
+		const plain = new ExecutionStore({
+			run_id: "plain-session",
+			objective: { request: "", normalized_goal: "", acceptance_criteria: [], constraints: [] },
+			repo: { root: "/repo", baseline_revision: "rev-0" },
+		});
+		const plainOutcome = await new SystemOneController({ store: plain, adapter }).validateToolGate(request);
+		expect(plainOutcome.outcome).toBe("allow");
+		expect(sent.at(-1)).toEqual(["repo_text_injection_like", "tool_call_semantic_scope_risk"]);
+		expect(plainOutcome.decision?.questions_hash).toBeDefined();
+
+		const withGoal = new ExecutionStore({
+			run_id: "goal-session",
+			objective: {
+				request: "Fix the parser",
+				normalized_goal: "Fix the parser",
+				acceptance_criteria: [],
+				constraints: [],
+			},
+			repo: { root: "/repo", baseline_revision: "rev-0" },
+		});
+		const goalOutcome = await new SystemOneController({ store: withGoal, adapter }).validateToolGate(request);
+		expect(goalOutcome.outcome).toBe("replan");
+		expect(sent.at(-1)).toEqual(["repo_text_injection_like", "tool_call_relevant", "tool_call_semantic_scope_risk"]);
+		// The decision names the questions Jev actually answered, so the two records hash differently.
+		expect(goalOutcome.decision?.questions_hash).not.toBe(plainOutcome.decision?.questions_hash);
+	});
+
 	it("Control plane tools bypass repo-mutation injection gates", async () => {
 		const store = new ExecutionStore({
 			run_id: "control-plane-run",

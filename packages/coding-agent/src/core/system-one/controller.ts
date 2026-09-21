@@ -2,7 +2,7 @@ import type { Consequence } from "../decision/primitives.ts";
 import type { IntegrityGateResult } from "../hooks/index.ts";
 import type { JevAdapter } from "./adapter.ts";
 import { AuditStore } from "./audit.ts";
-import { getQuestionPack, hashQuestionPack, SYSTEM_ONE_CATALOG_VERSION, SYSTEM_ONE_PINNED_MODEL } from "./catalog.ts";
+import { hashQuestions, SYSTEM_ONE_CATALOG_VERSION, SYSTEM_ONE_PINNED_MODEL, selectQuestions } from "./catalog.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import type { ExecutionStore } from "./execution-state.ts";
 import type { IntegrityHookCoordinator } from "./integrity-hooks.ts";
@@ -92,9 +92,10 @@ export class SystemOneController {
 		stage: ValidationStage,
 		stateView: Record<string, unknown>,
 		impact: ToolImpact = "read_only",
+		omitQuestions: readonly string[] = [],
 	): Promise<{ decision: ValidationDecision; answers: Record<string, unknown>; evaluationId: string | undefined }> {
-		const questions = getQuestionPack(stage);
-		const questionsHash = hashQuestionPack(stage);
+		const questions = selectQuestions(stage, omitQuestions);
+		const questionsHash = hashQuestions(questions);
 		const stateHash = this.store.computeStateHash();
 		const pinnedModel = this.config.model.production || SYSTEM_ONE_PINNED_MODEL;
 
@@ -223,15 +224,16 @@ export class SystemOneController {
 
 		// 2. Semantic tool gate
 		const projection = this.projector.toolGate(this.store.snapshot(), toolRequest);
+		// No step to be relevant to (a plain session): the relevance question is not sent at all.
+		const relevanceEvaluable = projection.current_step !== undefined;
 		const { decision, answers, evaluationId } = await this.runStageValidation(
 			"tool_gate",
 			projection,
 			toolRequest.impact,
+			relevanceEvaluable ? [] : ["tool_call_relevant"],
 		);
 
-		const outcome = decideToolGate(answers, toolRequest.impact, this.config, {
-			relevanceEvaluable: projection.current_step !== undefined,
-		});
+		const outcome = decideToolGate(answers, toolRequest.impact, this.config, { relevanceEvaluable });
 		this.sealDecision(decision, outcome, evaluationId);
 
 		this.store.recordToolEvent({
