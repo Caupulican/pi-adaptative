@@ -44,8 +44,9 @@ export interface CommitReceipt {
 }
 
 export interface PushReceipt {
+	readonly remote: string;
 	readonly ref: string;
-	readonly remote?: string;
+	readonly observedSha: string;
 }
 
 export interface PublishReceipt {

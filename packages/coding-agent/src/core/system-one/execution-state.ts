@@ -343,6 +343,38 @@ export class ExecutionStore {
 		this.state.updated_at = new Date().toISOString();
 	}
 
+	/**
+	 * The one store mutation that records terminal complete.
+	 * A second call with the same proof is a duplicate. A different proof or a phase that
+	 * cannot finish is rejected and does not transition again.
+	 */
+	noteTerminalProof(
+		ref: string,
+	):
+		| { readonly outcome: "applied" }
+		| { readonly outcome: "duplicate" }
+		| { readonly outcome: "rejected"; readonly reason: "conflict" | "invalid_phase" | "empty_proof" } {
+		if (!ref.trim()) {
+			return { outcome: "rejected", reason: "empty_proof" };
+		}
+		const existing = this.state.completion.final_summary_ref ?? "";
+		if (this.state.phase === "complete" || this.state.completion.terminal_status === "complete") {
+			if (existing === ref) return { outcome: "duplicate" };
+			return { outcome: "rejected", reason: "conflict" };
+		}
+		if (
+			this.state.phase === "aborted" ||
+			this.state.phase === "blocked_external" ||
+			this.state.phase === "rollback_required"
+		) {
+			return { outcome: "rejected", reason: "invalid_phase" };
+		}
+		this.state.completion.final_summary_ref = ref;
+		this.state.completion.terminal_status = "complete";
+		this.transitionPhase("complete", true);
+		return { outcome: "applied" };
+	}
+
 	getObjective(): Readonly<Objective> {
 		return this.state.objective;
 	}

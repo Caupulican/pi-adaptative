@@ -26,6 +26,35 @@ import { StateProjector } from "./projector.ts";
 import type { SemanticEvaluationObserver } from "./semantic-evaluation-ledger.ts";
 import type { ExecutionState, ToolImpact, ValidationDecision, ValidationStage } from "./types.ts";
 
+export interface TerminalCompletionProof {
+	readonly objectiveId: string;
+	readonly candidateDigest: string;
+	readonly deliveryCertificateId?: string;
+	readonly finalCommit?: string;
+	readonly pushRefs?: readonly string[];
+}
+
+export class TerminalCompletionConflictError extends Error {
+	readonly reason: "conflict" | "invalid_phase" | "empty_proof";
+
+	constructor(reason: "conflict" | "invalid_phase" | "empty_proof") {
+		super(`Terminal completion rejected: ${reason}`);
+		this.name = "TerminalCompletionConflictError";
+		this.reason = reason;
+	}
+}
+
+export function terminalProofRef(input: TerminalCompletionProof): string {
+	if (!input.objectiveId.trim() || !input.candidateDigest.trim()) return "";
+	return [
+		input.objectiveId,
+		input.candidateDigest,
+		input.deliveryCertificateId ?? "",
+		input.finalCommit ?? "",
+		...(input.pushRefs ?? []),
+	].join("\n");
+}
+
 export interface SystemOneControllerDeps {
 	store: ExecutionStore;
 	adapter: JevAdapter;
@@ -520,6 +549,31 @@ export class SystemOneController {
 	}
 
 	/**
+	 * The one production finalization. Records the proof, transitions phase to complete once,
+	 * and runs the terminal hook once. A duplicate proof does not transition or hook again.
+	 */
+	async commitTerminalCompletion(input: TerminalCompletionProof, options?: { signal?: AbortSignal }): Promise<void> {
+		const noted = this.store.noteTerminalProof(terminalProofRef(input));
+		if (noted.outcome === "duplicate") return;
+		if (noted.outcome === "rejected") {
+			throw new TerminalCompletionConflictError(noted.reason);
+		}
+		if (this.hookCoordinator?.hasExtensions()) {
+			await this.hookCoordinator.runHook(
+				"terminal",
+				{
+					schema_version: "1.0",
+					run_id: this.store.runId,
+					session_id: this.store.runId,
+					hook: "terminal",
+					impact: "repo_mutation",
+				},
+				{ signal: options?.signal },
+			);
+		}
+	}
+
+	/**
 	 * Two-stage completion transaction.
 	 * R-001: The worker MUST NOT mark a run complete. It may only emit completion_candidate=true.
 	 * R-002: Only the deterministic policy engine may transition phase to complete.
@@ -615,23 +669,16 @@ export class SystemOneController {
 
 		// 6. Update state phase according to verdict. Inner semantic evaluation
 		// (persistTerminal: false) must not independently set terminal complete.
+		// Terminal complete itself goes through commitTerminalCompletion only.
 		const persistTerminal = options?.persistTerminal !== false;
 		if (finalVerdict.verdict === "complete" && persistTerminal) {
-			// Harness policy transitions to complete (R-002)
-			this.store.transitionPhase("complete", true);
-			if (this.hookCoordinator?.hasExtensions()) {
-				await this.hookCoordinator.runHook(
-					"terminal",
-					{
-						schema_version: "1.0",
-						run_id: this.store.runId,
-						session_id: this.store.runId,
-						hook: "terminal",
-						impact: "repo_mutation",
-					},
-					{ signal: options?.signal },
-				);
-			}
+			await this.commitTerminalCompletion(
+				{
+					objectiveId: this.store.runId,
+					candidateDigest: `semantic:${this.store.runId}`,
+				},
+				{ signal: options?.signal },
+			);
 		} else if (finalVerdict.verdict === "blocked_external") {
 			this.store.transitionPhase("blocked_external", true);
 		} else if (finalVerdict.verdict === "rework") {

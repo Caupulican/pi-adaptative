@@ -36,6 +36,7 @@ import {
 	isUnscopedBedrockProxy,
 } from "./bedrock-scope.ts";
 import { recoverBedrockSsoAuthentication } from "./bedrock-sso-login.ts";
+import { resolveEffectiveCompletionProfile } from "./decision/completion-profile.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { resolveFastModeServiceTier } from "./fast-mode.ts";
@@ -1032,14 +1033,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			taskRuntime: durableTaskRuntime,
 			objectiveRuntime,
 			loopMode: executionLoopMode,
-			completionProfile:
-				systemOneSettings.completionProfile ??
-				(steeringPlane?.policy.mode === "system_one_required" ||
-				DEFAULT_STEERING_POLICY.mode === "system_one_required"
-					? "system_one_required"
-					: steeringPlane || systemOneController
-						? "semantic_enhanced"
-						: "mechanical"),
+			completionProfile: resolveEffectiveCompletionProfile({
+				requestedProfile: systemOneSettings.completionProfile,
+				steeringMode: steeringPlane?.policy.mode,
+				systemOneBound: Boolean(steeringPlane || systemOneController),
+			}),
 			taskProfiles: taskProfileWriter,
 			contractFactory,
 			capabilityBuilder,

@@ -66,6 +66,25 @@ function runtime(objectiveId = "obj-1"): TaskRuntimeProjection {
 	};
 }
 
+const PROVEN_SHA = "abc1234deadbeef";
+
+function provenGit(options?: { push?: "ok" | "throw" }) {
+	return {
+		commit: async () => ({ sha: PROVEN_SHA }),
+		push: async () => {
+			if (options?.push === "throw") throw new Error("rejected");
+			return { ref: "refs/heads/main", remote: "origin" };
+		},
+		proveDelivery: async () => ({
+			head: PROVEN_SHA,
+			remote: "origin",
+			ref: "refs/heads/main",
+			observedSha: PROVEN_SHA,
+			attributableResidue: [] as string[],
+		}),
+	};
+}
+
 function attempt(id = "a1"): LiveWorkerAttempt {
 	return {
 		objectiveId: "o",
@@ -147,10 +166,7 @@ async function runWithFailedDeliveryCheckpoint(failedCheckpoint: "JEV-025" | "JE
 			prompt: "ship",
 			initialGrants: { git: { commit: true, push: true } },
 		}),
-		gitExecutor: {
-			commit: async () => ({ sha: "abc1234deadbeef" }),
-			push: async () => ({ ref: "refs/heads/main" }),
-		},
+		gitExecutor: provenGit(),
 		systemOne: {
 			adapter: passingAdapter,
 			snapshot: () => store.snapshot(),
@@ -269,6 +285,7 @@ describe("post-DI14 closure gates", () => {
 		expect(innerVerdicts).toEqual(["complete"]);
 		expect(store.phase).not.toBe("complete");
 		expect(result.status).not.toBe("complete");
+		expect(result.reasonCodes).toContain("delivery_certificate_rejected");
 	});
 
 	it("Gate 4: same worktree digest is stable; tracked, untracked, rename, and revision mutate it", () => {
@@ -319,12 +336,7 @@ describe("post-DI14 closure gates", () => {
 				prompt: "ship",
 				initialGrants: { git: { commit: true, push: true } },
 			}),
-			gitExecutor: {
-				commit: async () => ({ sha: "abc1234deadbeef" }),
-				push: async () => {
-					throw new Error("rejected");
-				},
-			},
+			gitExecutor: provenGit({ push: "throw" }),
 			systemOne: {
 				evaluateObjectiveRoute: async () => ({ workRemaining: false, missingWorkClass: "none" }),
 			},
@@ -334,7 +346,7 @@ describe("post-DI14 closure gates", () => {
 		expect(result.status).not.toBe("complete");
 		expect(result.deliveryBundle?.side_effects?.push?.state).toBe("failed");
 		expect(result.deliveryBundle?.push_refs).toBeUndefined();
-		expect(result.deliveryBundle?.side_effects?.commit?.state).toBe("succeeded");
+		expect(result.deliveryBundle?.side_effects?.commit?.state).toBe("proven");
 	});
 
 	it("Gate 6: JEV-027 payload includes the final push receipt", async () => {
@@ -350,10 +362,7 @@ describe("post-DI14 closure gates", () => {
 				prompt: "ship",
 				initialGrants: { git: { commit: true, push: true } },
 			}),
-			gitExecutor: {
-				commit: async () => ({ sha: "abc1234deadbeef" }),
-				push: async () => ({ ref: "refs/heads/main" }),
-			},
+			gitExecutor: provenGit(),
 			systemOne: {
 				evaluateObjectiveRoute: async () => ({ workRemaining: false, missingWorkClass: "none" }),
 			},

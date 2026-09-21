@@ -8,6 +8,7 @@
 ### Fixed
 
 - JEV-025 failure after an inner semantic completion pass returns terminal `unrecoverable` and leaves the execution store non-complete. It no longer `break`s back into the route loop, which could hang `run()` when the next cycle still selected `completion_candidate`.
+- Outer objective completion persists System One phase `complete` once, after required receipts and JEV-027. A weaker completion profile cannot downgrade active `system_one_required` steering. A required commit or push is complete only when the delivery proof port shows HEAD and the observed remote SHA are that commit and no candidate residue remains.
 
 ## [0.99.38] - 2026-09-21
 

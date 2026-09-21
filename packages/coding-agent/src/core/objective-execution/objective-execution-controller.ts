@@ -20,6 +20,7 @@ import {
 } from "../autonomy/execution-charter.ts";
 import { DurableHumanEdgeLedger, type HumanEdgeRequest, requiresHumanEdge } from "../autonomy/human-edge.ts";
 import { DecisionActionPolicy } from "../decision/action-policy.ts";
+import { resolveEffectiveCompletionProfile } from "../decision/completion-profile.ts";
 import type { DecisionEngineRouter } from "../decision/engine-router.ts";
 import type { CompletionAssuranceProfile } from "../decision/policy.ts";
 import { createDecisionProgram } from "../decision/program.ts";
@@ -40,6 +41,7 @@ import {
 	captureCandidateSnapshot,
 } from "../system-one/candidate-snapshot.ts";
 import type { SystemOneControlDirective } from "../system-one/control-directive.ts";
+import { TerminalCompletionConflictError, type TerminalCompletionProof } from "../system-one/controller.ts";
 import type { FinalCompletionVerdict } from "../system-one/policy.ts";
 import type { ExecutionState } from "../system-one/types.ts";
 import {
@@ -49,12 +51,15 @@ import {
 } from "./completion-coordinator.ts";
 import {
 	buildDeliveryBundle,
+	type CommitReceipt,
 	type DeliveryArtifact,
 	type DeliveryBundle,
 	type DeliveryTerminalStatus,
+	type PushReceipt,
 	type SideEffectReceipt,
 	sideEffectSucceeded,
 } from "./delivery-bundle.ts";
+import { type DeliveryProofObservation, type DeliveryProofQuery, proveCommitAndPush } from "./delivery-proof.ts";
 import { completionFailuresToRepairWork, type RepairWork } from "./objective-repair-work.ts";
 import {
 	type ObjectiveRoute,
@@ -100,6 +105,7 @@ export interface ObjectiveExecutionControllerDeps {
 			isBugFix: boolean,
 			options?: { signal?: AbortSignal; persistTerminal?: boolean },
 		): Promise<FinalCompletionVerdict>;
+		commitTerminalCompletion?(input: TerminalCompletionProof, options?: { signal?: AbortSignal }): Promise<void>;
 		validateObjectivePostflight?(objectiveId: string): Promise<void>;
 		recordHostEvidence?(evidence: unknown): Promise<void>;
 		peekControlDirective?(): SystemOneControlDirective | undefined;
@@ -178,8 +184,10 @@ export interface ObjectiveExecutionControllerDeps {
 	authorityBlockLedger?: DurableAuthorityBlockLedger;
 	gitExecutor?: {
 		commit?(message?: string): Promise<{ sha: string } | undefined>;
-		push?(): Promise<{ ref: string } | undefined>;
+		push?(): Promise<{ ref: string; remote?: string } | undefined>;
 		tag?(name?: string): Promise<{ tag: string } | undefined>;
+		/** Observed HEAD, remote SHA, and candidate residue. No network call lives in the controller. */
+		proveDelivery?(query: DeliveryProofQuery): Promise<DeliveryProofObservation>;
 	};
 	releaseExecutor?: {
 		publish?(): Promise<{ id: string } | undefined>;
@@ -1141,7 +1149,11 @@ export class ObjectiveExecutionController {
 
 				case "completion_candidate": {
 					// FIN-060: Single completion owner via CompletionCoordinator
-					const profile = this.deps.completionProfile ?? "semantic_enhanced";
+					const profile = resolveEffectiveCompletionProfile({
+						requestedProfile: this.deps.completionProfile,
+						steeringMode: this.deps.steeringPlane?.policy.mode,
+						systemOneBound: Boolean(this.deps.systemOne || this.deps.steeringPlane),
+					});
 					const steeringCertRefs: string[] = [];
 
 					// FC-070, FC-071, FC-072: Canonical proof state on real projection without asserted verificationPassed:true
@@ -1397,27 +1409,29 @@ export class ObjectiveExecutionController {
 						}
 
 						const sideEffects: {
-							commit?: SideEffectReceipt<{ sha: string }>;
+							commit?: SideEffectReceipt<CommitReceipt>;
 							tag?: SideEffectReceipt<{ tag: string }>;
-							push?: SideEffectReceipt<{ ref: string }>;
+							push?: SideEffectReceipt<PushReceipt>;
 							publish?: SideEffectReceipt<{ publicationId: string }>;
 							deploy?: SideEffectReceipt<{ target: string; deploymentId?: string }>[];
 						} = {};
+						let reportedCommitSha: string | undefined;
+						let commitError: string | undefined;
+						let reportedPushRef: string | undefined;
+						let reportedPushRemote: string | undefined;
+						let pushError: string | undefined;
 						if (activeCharter) {
 							if (activeCharter.git.commit) {
 								if (!this.deps.gitExecutor?.commit) throw new Error("Git commit unavailable");
 								try {
 									const commitRes = await this.deps.gitExecutor.commit();
 									if (commitRes && typeof commitRes === "object" && "sha" in commitRes && commitRes.sha) {
-										sideEffects.commit = { state: "succeeded", detail: { sha: String(commitRes.sha) } };
+										reportedCommitSha = String(commitRes.sha);
 									} else {
-										sideEffects.commit = { state: "failed", error: "Missing sha" };
+										commitError = "Missing sha";
 									}
 								} catch (error) {
-									sideEffects.commit = {
-										state: "failed",
-										error: error instanceof Error ? error.message : String(error),
-									};
+									commitError = error instanceof Error ? error.message : String(error);
 								}
 							}
 							if (activeCharter.git.create_tag) {
@@ -1441,15 +1455,13 @@ export class ObjectiveExecutionController {
 								try {
 									const pushRes = await this.deps.gitExecutor.push();
 									if (pushRes && typeof pushRes === "object" && "ref" in pushRes && pushRes.ref) {
-										sideEffects.push = { state: "succeeded", detail: { ref: String(pushRes.ref) } };
+										reportedPushRef = String(pushRes.ref);
+										if ("remote" in pushRes && pushRes.remote) reportedPushRemote = String(pushRes.remote);
 									} else {
-										sideEffects.push = { state: "failed", error: "Missing ref" };
+										pushError = "Missing ref";
 									}
 								} catch (error) {
-									sideEffects.push = {
-										state: "failed",
-										error: error instanceof Error ? error.message : String(error),
-									};
+									pushError = error instanceof Error ? error.message : String(error);
 								}
 							}
 							if (activeCharter.release.package_publish) {
@@ -1499,6 +1511,40 @@ export class ObjectiveExecutionController {
 								}
 							}
 						}
+
+						const commitRequired = Boolean(activeCharter?.git.commit);
+						const pushRequired = Boolean(activeCharter?.git.push);
+						const needsDeliveryProof =
+							(commitRequired && commitError === undefined && reportedCommitSha !== undefined) ||
+							(pushRequired && pushError === undefined && reportedPushRef !== undefined);
+						let observation: DeliveryProofObservation | undefined;
+						if (needsDeliveryProof && this.deps.gitExecutor?.proveDelivery) {
+							try {
+								observation = await this.deps.gitExecutor.proveDelivery({
+									candidateDigest: candidateSnapshot?.digest ?? diffDigest,
+									candidateRevision: candidateSnapshot?.candidateRevision ?? sourceRevision,
+									candidateUntrackedPaths: candidateSnapshot?.untracked.map((file) => file.path) ?? [],
+									remote: reportedPushRemote,
+									ref: reportedPushRef,
+								});
+							} catch (error) {
+								const message = error instanceof Error ? error.message : String(error);
+								if (commitRequired && commitError === undefined) commitError = message;
+								if (pushRequired && pushError === undefined) pushError = message;
+							}
+						}
+						const provenReceipts = proveCommitAndPush({
+							commitRequired,
+							pushRequired,
+							reportedCommitSha,
+							commitError,
+							reportedPushRef,
+							reportedPushRemote,
+							pushError,
+							observation,
+						});
+						if (provenReceipts.commit) sideEffects.commit = provenReceipts.commit;
+						if (provenReceipts.push) sideEffects.push = provenReceipts.push;
 
 						const requiredReceiptFailed =
 							sideEffects.commit?.state === "failed" ||
@@ -1605,6 +1651,32 @@ export class ObjectiveExecutionController {
 						}
 
 						await this._recordCompletionOutcomes(objectiveId, route, { verificationPassed: true });
+
+						if (this.deps.systemOne?.commitTerminalCompletion) {
+							try {
+								await this.deps.systemOne.commitTerminalCompletion(
+									{
+										objectiveId,
+										candidateDigest: candidateSnapshot?.digest ?? diffDigest,
+										deliveryCertificateId: steeringCertRefs[steeringCertRefs.length - 1],
+										finalCommit: enrichedBundle.final_commit,
+										pushRefs: enrichedBundle.push_refs,
+									},
+									{ signal },
+								);
+							} catch (error) {
+								if (!(error instanceof TerminalCompletionConflictError)) throw error;
+								const rejected = await this.buildBundle(objectiveId, "unrecoverable", runtime, {
+									reasonCodes: ["terminal_completion_rejected", error.reason],
+								});
+								return {
+									status: "unrecoverable",
+									reasonCodes: ["terminal_completion_rejected", error.reason],
+									cycleCount: this.cycleCounter,
+									deliveryBundle: rejected,
+								};
+							}
+						}
 
 						return {
 							status: "complete",

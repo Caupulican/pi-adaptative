@@ -2049,6 +2049,8 @@ export class AgentSession {
 									snapshot: () => systemOneController.store.snapshot(),
 									executeCompletionTransaction: (isBugFix, options) =>
 										this._systemOneController!.executeCompletionTransaction(isBugFix, options),
+									commitTerminalCompletion: (input, options) =>
+										this._systemOneController!.commitTerminalCompletion(input, options),
 									validateObjectivePostflight: (objectiveId) =>
 										this._systemOneController!.validateObjectivePostflight(objectiveId),
 									peekControlDirective: () => this._systemOneController!.peekControlDirective(),
