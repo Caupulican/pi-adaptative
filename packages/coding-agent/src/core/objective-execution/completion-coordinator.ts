@@ -1,3 +1,4 @@
+import { buildCompletionProof } from "../system-one/completion-proof.ts";
 /**
  * Completion Coordinator.
  * Single owner for objective completion gating, assurance profiles, and delivery bundle creation.
@@ -27,6 +28,7 @@ export interface IndependentReviewerVerdict {
 
 export interface CompletionEvaluationContext {
 	readonly runtime: TaskRuntimeProjection;
+	readonly getExecutionState?: () => import("../system-one/types.ts").ExecutionState;
 	readonly getSourceRevision?: (objectiveId: string) => Promise<string> | string;
 	readonly getArtifacts?: (objectiveId: string) => Promise<readonly DeliveryArtifact[]> | readonly DeliveryArtifact[];
 	readonly getLimitations?: (objectiveId: string) => Promise<readonly string[]> | readonly string[];
@@ -121,7 +123,29 @@ export class CompletionCoordinator {
 			candidateRevision = resolveGitRevision(context.cwd);
 		}
 
-		// 2. Rebuild acceptance matrix
+		// 2. Evaluate deterministic proof
+		const execState = context.getExecutionState?.();
+		if (!execState) {
+			throw new Error("CompletionCoordinator requires getExecutionState to compute CompletionProof");
+		}
+		const proof = buildCompletionProof(execState, candidateRevision);
+
+		for (const gate of proof.gates) {
+			deterministicGateRecords.push({
+				gateId: gate.id,
+				status: gate.status,
+				required: gate.required,
+				detail: gate.details,
+			});
+		}
+
+		for (const reason of proof.failed_reasons) {
+			failedGates.push(reason.id);
+			if (reason.required_next_proof) {
+				requiredNextProof.push(reason.required_next_proof);
+			}
+		}
+
 		const objective = context.runtime.objectives[objectiveId];
 		const rawCriteria =
 			objective?.objective.acceptanceCriteria ??
@@ -130,65 +154,6 @@ export class CompletionCoordinator {
 			[];
 		const requiredCriteria = rawCriteria.map((c) => (typeof c === "string" ? c : c.id));
 		const evidenceList = objective?.evidence ?? [];
-
-		let allCriteriaSatisfied = true;
-		for (const crit of requiredCriteria) {
-			const hasEvidence = evidenceList.some((e) => {
-				const eAny = e as { criterionId?: string; requirement_id?: string; id?: string };
-				return eAny.criterionId === crit || eAny.requirement_id === crit || eAny.id === crit;
-			});
-			if (!hasEvidence) {
-				allCriteriaSatisfied = false;
-				failedGates.push(`criterion_unresolved:${crit}`);
-				requiredNextProof.push(`provide_evidence_for:${crit}`);
-			}
-		}
-		deterministicGateRecords.push({
-			gateId: "acceptance_criteria",
-			status: allCriteriaSatisfied ? "passed" : "failed",
-			required: true,
-			detail: allCriteriaSatisfied
-				? `All ${requiredCriteria.length} required criteria satisfied.`
-				: `Missing evidence for criteria.`,
-		});
-
-		// 3. Verify required mechanical obligations (tasks / builds / tests / static analysis)
-		const tasks = Object.values(context.runtime.tasks);
-		const openTasks = tasks.filter((t) => t.task.status === "pending" || t.task.status === "running");
-		if (openTasks.length > 0) {
-			failedGates.push("open_tasks_remain");
-			requiredNextProof.push("complete_open_tasks");
-			deterministicGateRecords.push({
-				gateId: "open_tasks",
-				status: "failed",
-				required: true,
-				detail: `${openTasks.length} tasks remain uncompleted.`,
-			});
-		} else {
-			deterministicGateRecords.push({
-				gateId: "open_tasks",
-				status: "passed",
-				required: true,
-			});
-		}
-
-		const failedTasks = tasks.filter((t) => t.task.status === "failed");
-		if (failedTasks.length > 0) {
-			failedGates.push("failed_tasks_present");
-			requiredNextProof.push("resolve_failed_tasks");
-			deterministicGateRecords.push({
-				gateId: "failed_tasks",
-				status: "failed",
-				required: true,
-				detail: `${failedTasks.length} tasks have failed status.`,
-			});
-		} else {
-			deterministicGateRecords.push({
-				gateId: "failed_tasks",
-				status: "passed",
-				required: true,
-			});
-		}
 
 		// 4. Verify hard constraints (budget, cancellation)
 		if (objective?.objective.status === "cancelled") {

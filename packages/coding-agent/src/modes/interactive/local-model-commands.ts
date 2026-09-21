@@ -314,27 +314,43 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 			return;
 		}
 
-		if (action === "remove" || action === "unregister") {
-			const ref = rest[0];
-			const confirmed = rest[1] === "confirm";
+		async function handleRemovalAction(
+			actionName: string,
+			restArgs: string[],
+			h: LocalModelHost,
+			transformersOp: (host: LocalModelHost, id: string, confirmed: boolean) => Promise<void>,
+			prismOp: (host: LocalModelHost, id: string, confirmed: boolean) => Promise<void>,
+			needleOp: (host: LocalModelHost, confirmed: boolean) => Promise<void>,
+			localOp: (host: LocalModelHost, ref: string, confirmed: boolean) => Promise<void>,
+		) {
+			const ref = restArgs[0];
+			const confirmed = restArgs[1] === "confirm";
 			if (!ref) {
-				host.showStatus(`Usage: /models ${action} <ref> confirm`);
+				h.showStatus(`Usage: /models ${actionName} <ref> confirm`);
 				return;
 			}
 			const source = normalizeModelSource(ref);
 			if (source.type === "transformers") {
-				await removeTransformersModel(host, source.modelId, confirmed);
-				return;
+				await transformersOp(h, source.modelId, confirmed);
+			} else if (source.type === "prism-llamacpp") {
+				await prismOp(h, source.modelId, confirmed);
+			} else if (source.type === "needle") {
+				await needleOp(h, confirmed);
+			} else {
+				await localOp(h, ref, confirmed);
 			}
-			if (source.type === "prism-llamacpp") {
-				await removePrismLlamaCppModel(host, source.modelId, confirmed);
-				return;
-			}
-			if (source.type === "needle") {
-				await removeNeedleModel(host, confirmed);
-				return;
-			}
-			await removeLocalModel(host, ref, confirmed);
+		}
+
+		if (action === "remove" || action === "unregister") {
+			await handleRemovalAction(
+				action,
+				rest,
+				host,
+				removeTransformersModel,
+				removePrismLlamaCppModel,
+				removeNeedleModel,
+				removeLocalModel,
+			);
 			return;
 		}
 
@@ -699,6 +715,23 @@ export async function removeLocalModel(host: LocalModelHost, ref: string, confir
 	host.showStatus(`${ref} removed: weights deleted, registration and fitness report dropped.`);
 }
 
+async function performRegistrationDrop(
+	host: LocalModelHost,
+	modelId: string,
+	provider: string,
+	unregister: (args: { agentDir: string; modelId: string }) => { ok: boolean; reason?: string },
+	successMessage: string,
+) {
+	const registration = unregister({ agentDir: getAgentDir(), modelId });
+	if (!registration.ok) {
+		host.showStatus(`Remove failed: ${registration.reason}`);
+		return;
+	}
+	FitnessStore.forAgentDir(getAgentDir()).remove(`${provider}/${modelId}`);
+	host.session.modelRegistry.refresh();
+	host.showStatus(successMessage);
+}
+
 async function removeTransformersModel(host: LocalModelHost, modelId: string, confirmed: boolean): Promise<void> {
 	const runtime = host.getTransformersRuntime(modelId);
 	const status = await runtime.detect();
@@ -715,14 +748,11 @@ async function removeTransformersModel(host: LocalModelHost, modelId: string, co
 		return;
 	}
 	runtime.stop();
-	const registration = unregisterTransformersModel({ agentDir: getAgentDir(), modelId });
-	if (!registration.ok) {
-		host.showStatus(`Remove failed: ${registration.reason}`);
-		return;
-	}
-	FitnessStore.forAgentDir(getAgentDir()).remove(`${HF_TRANSFORMERS_PROVIDER}/${modelId}`);
-	host.session.modelRegistry.refresh();
-	host.showStatus(
+	await performRegistrationDrop(
+		host,
+		modelId,
+		HF_TRANSFORMERS_PROVIDER,
+		unregisterTransformersModel,
 		`${modelId} registration and fitness report dropped; cached weights remain under ${status.cacheDir}.`,
 	);
 }
@@ -753,14 +783,11 @@ async function removePrismLlamaCppModel(host: LocalModelHost, modelId: string, c
 		return;
 	}
 	const stopped = runtime.stop();
-	const registration = unregisterPrismLlamaCppModel({ agentDir: getAgentDir(), modelId });
-	if (!registration.ok) {
-		host.showStatus(`Remove failed: ${registration.reason}`);
-		return;
-	}
-	FitnessStore.forAgentDir(getAgentDir()).remove(`${PRISM_LLAMACPP_PROVIDER}/${modelId}`);
-	host.session.modelRegistry.refresh();
-	host.showStatus(
+	await performRegistrationDrop(
+		host,
+		modelId,
+		PRISM_LLAMACPP_PROVIDER,
+		unregisterPrismLlamaCppModel,
 		`${modelId} registration and fitness report dropped; downloaded weights remain under ${runtime.modelsDir()}.` +
 			(stopped.stopped
 				? " Its llama-server was stopped."
@@ -807,14 +834,13 @@ async function uninstallTransformersModel(host: LocalModelHost, modelId: string,
 			host.showStatus(`Failed to delete weights: ${e instanceof Error ? e.message : String(e)}`);
 		}
 	}
-	const registration = unregisterTransformersModel({ agentDir: getAgentDir(), modelId });
-	if (!registration.ok) {
-		host.showStatus(`Remove failed: ${registration.reason}`);
-		return;
-	}
-	FitnessStore.forAgentDir(getAgentDir()).remove(`${HF_TRANSFORMERS_PROVIDER}/${modelId}`);
-	host.session.modelRegistry.refresh();
-	host.showStatus(`${modelId} uninstalled: weights deleted (${gb} GB), registration and fitness dropped.`);
+	await performRegistrationDrop(
+		host,
+		modelId,
+		HF_TRANSFORMERS_PROVIDER,
+		unregisterTransformersModel,
+		`${modelId} uninstalled: weights deleted (${gb} GB), registration and fitness dropped.`,
+	);
 }
 
 async function uninstallPrismLlamaCppModel(host: LocalModelHost, modelId: string, confirmed: boolean): Promise<void> {

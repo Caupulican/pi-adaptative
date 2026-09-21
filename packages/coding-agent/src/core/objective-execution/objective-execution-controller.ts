@@ -5,6 +5,8 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { execSync } from "child_process";
+import { createHash } from "crypto";
 import type {
 	AdaptiveCapabilityController,
 	AdaptiveResolutionController,
@@ -329,6 +331,18 @@ export const ROUTE_DECISION_PROGRAM = createDecisionProgram({
 	],
 });
 
+function computeDiffDigest(): string {
+	try {
+		const diff = require("child_process").execSync("git diff HEAD && git ls-files --others --exclude-standard", {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		return require("crypto").createHash("sha256").update(diff).digest("hex");
+	} catch (_e) {
+		return "unknown";
+	}
+}
+
 export class ObjectiveExecutionController {
 	private readonly deps: ObjectiveExecutionControllerDeps;
 	private readonly defaultStallDetector: ObjectiveStallDetector;
@@ -536,6 +550,8 @@ export class ObjectiveExecutionController {
 					stallTurns: stall.stallTurns,
 					strategyFingerprint: stall.fingerprint,
 					history,
+					beforeDigest: "unknown",
+					afterDigest: computeDiffDigest(),
 				});
 
 				const evaluation = await this.deps.decisions.evaluateOrFallback(ROUTE_DECISION_PROGRAM, stateProjection, {
@@ -587,64 +603,32 @@ export class ObjectiveExecutionController {
 					stallTurns: stall.stallTurns,
 					strategyFingerprint: stall.fingerprint,
 					history,
+					beforeDigest: "unknown",
+					afterDigest: computeDiffDigest(),
 				});
 				const cert = await this.deps.steeringPlane.requireCertificate("JEV-004", stateProjection, {
 					objectiveId,
 					signal: options?.signal,
 				});
 
-				const wrAns = cert.answers.work_remaining as { boolean?: boolean; noul?: number } | undefined;
-				const cwccAns = cert.answers.current_worker_can_continue as
-					| { boolean?: boolean; noul?: number }
-					| undefined;
-				const iwrAns = cert.answers.independent_worker_required as { boolean?: boolean; noul?: number } | undefined;
-				const cerAns = cert.answers.capability_escalation_required as
-					| { boolean?: boolean; noul?: number }
-					| undefined;
+				const wrAns = cert.answers.work_remaining as { boolean?: boolean } | undefined;
+				const cwccAns = cert.answers.current_worker_can_continue as { boolean?: boolean } | undefined;
+				const iwrAns = cert.answers.independent_worker_required as { boolean?: boolean } | undefined;
+				const cerAns = cert.answers.capability_escalation_required as { boolean?: boolean } | undefined;
 				const spAns = cert.answers.semantic_progress as { level?: number; score?: number } | undefined;
-				const csAns = cert.answers.context_stale as { boolean?: boolean; noul?: number } | undefined;
-				const srAns = cert.answers.strategy_repetition as { boolean?: boolean; noul?: number } | undefined;
+				const csAns = cert.answers.context_stale as { boolean?: boolean } | undefined;
+				const srAns = cert.answers.strategy_repetition as { boolean?: boolean } | undefined;
 				const mwcAns = cert.answers.missing_work_class as { choice?: string } | undefined;
 
 				semantic = {
-					workRemaining:
-						typeof wrAns?.boolean === "boolean"
-							? wrAns.boolean
-							: wrAns?.noul !== undefined
-								? wrAns.noul >= 0.5
-								: undefined,
+					workRemaining: typeof wrAns?.boolean === "boolean" ? wrAns.boolean : undefined,
 					missingWorkClass: mwcAns?.choice as SemanticRouteJudgments["missingWorkClass"],
-					currentWorkerCanContinue:
-						typeof cwccAns?.boolean === "boolean"
-							? cwccAns.boolean
-							: cwccAns?.noul !== undefined
-								? cwccAns.noul >= 0.5
-								: undefined,
-					independentWorkerRequired:
-						typeof iwrAns?.boolean === "boolean"
-							? iwrAns.boolean
-							: iwrAns?.noul !== undefined
-								? iwrAns.noul >= 0.5
-								: undefined,
-					capabilityEscalationRequired:
-						typeof cerAns?.boolean === "boolean"
-							? cerAns.boolean
-							: cerAns?.noul !== undefined
-								? cerAns.noul >= 0.5
-								: undefined,
+					currentWorkerCanContinue: typeof cwccAns?.boolean === "boolean" ? cwccAns.boolean : undefined,
+					independentWorkerRequired: typeof iwrAns?.boolean === "boolean" ? iwrAns.boolean : undefined,
+					capabilityEscalationRequired: typeof cerAns?.boolean === "boolean" ? cerAns.boolean : undefined,
 					semanticProgress: spAns?.level ?? spAns?.score,
-					contextStale:
-						typeof csAns?.boolean === "boolean"
-							? csAns.boolean
-							: csAns?.noul !== undefined
-								? csAns.noul >= 0.5
-								: undefined,
-					strategyRepetition:
-						typeof srAns?.boolean === "boolean"
-							? srAns.boolean
-							: srAns?.noul !== undefined
-								? srAns.noul >= 0.5
-								: undefined,
+					contextStale: typeof csAns?.boolean === "boolean" ? csAns.boolean : undefined,
+					strategyRepetition: typeof srAns?.boolean === "boolean" ? srAns.boolean : undefined,
 				};
 			} catch (err) {
 				if (this.deps.steeringPlane.policy.mode === "system_one_required") {
@@ -1137,7 +1121,16 @@ export class ObjectiveExecutionController {
 						(await this.deps.runtime.getSourceRevision?.(objectiveId)) ?? String(evidenceRevision);
 					const limitations = (await this.deps.runtime.getLimitations?.(objectiveId)) ?? [];
 					const acceptanceEvidence = objRecord?.evidence ?? [];
-					const diffDigest = "";
+					let diffDigest = "";
+					try {
+						const diff = execSync("git diff HEAD && git ls-files --others --exclude-standard", {
+							encoding: "utf8",
+							stdio: ["ignore", "pipe", "ignore"],
+						});
+						diffDigest = createHash("sha256").update(diff).digest("hex");
+					} catch (_e) {
+						diffDigest = "unknown";
+					}
 
 					const canonicalProofState = {
 						objectiveId,
@@ -1370,111 +1363,120 @@ export class ObjectiveExecutionController {
 						await this._recordCompletionOutcomes(objectiveId, route, { verificationPassed: true });
 
 						// 9. PH-106, PH-158: Execute all charter-required final side effects (throw on missing executor)
-						const sideEffectEvidence: {
-							commitSha?: string;
-							pushedRef?: string;
-							tag?: string;
-							publicationId?: string;
-							deployments?: { target: string; result: unknown }[];
-						} = {};
-
+						const sideEffects: any = {};
 						if (activeCharter) {
 							if (activeCharter.git.commit) {
-								if (!this.deps.gitExecutor?.commit) {
-									throw new Error(
-										"Git commit is required by charter but gitExecutor.commit is unavailable (PH-106)",
-									);
-								}
+								if (!this.deps.gitExecutor?.commit) throw new Error("Git commit unavailable");
 								const commitRes = await this.deps.gitExecutor.commit();
-								sideEffectEvidence.commitSha =
+								const sha =
 									typeof commitRes === "object" && commitRes && "sha" in commitRes
-										? String((commitRes as { sha: unknown }).sha)
+										? String((commitRes as any).sha)
 										: "committed";
-							}
-							if (activeCharter.git.push) {
-								if (!this.deps.gitExecutor?.push) {
-									throw new Error(
-										"Git push is required by charter but gitExecutor.push is unavailable (PH-106)",
-									);
-								}
-								const pushRes = await this.deps.gitExecutor.push();
-								sideEffectEvidence.pushedRef =
-									typeof pushRes === "object" && pushRes && "ref" in pushRes
-										? String((pushRes as { ref: unknown }).ref)
-										: "pushed";
+								sideEffects.commit = { state: "attempted", detail: { sha } };
 							}
 							if (activeCharter.git.create_tag) {
-								if (!this.deps.gitExecutor?.tag) {
-									throw new Error(
-										"Git tag is required by charter but gitExecutor.tag is unavailable (PH-106)",
-									);
-								}
+								if (!this.deps.gitExecutor?.tag) throw new Error("Git tag unavailable");
 								const tagRes = await this.deps.gitExecutor.tag();
-								sideEffectEvidence.tag =
+								const tag =
 									typeof tagRes === "object" && tagRes && "tag" in tagRes
-										? String((tagRes as { tag: unknown }).tag)
+										? String((tagRes as any).tag)
 										: "tagged";
-							}
-							if (activeCharter.release.package_publish) {
-								if (!this.deps.releaseExecutor?.publish) {
-									throw new Error(
-										"Package publish is required by charter but releaseExecutor.publish is unavailable (PH-106)",
-									);
-								}
-								const pubRes = await this.deps.releaseExecutor.publish();
-								sideEffectEvidence.publicationId =
-									typeof pubRes === "object" && pubRes && "id" in pubRes
-										? String((pubRes as { id: unknown }).id)
-										: "published";
-							}
-							if (activeCharter.release.deploy_targets.length > 0) {
-								if (!this.deps.releaseExecutor?.deploy) {
-									throw new Error(
-										"Deployment is required by charter but releaseExecutor.deploy is unavailable (PH-106)",
-									);
-								}
-								sideEffectEvidence.deployments = [];
-								for (const target of activeCharter.release.deploy_targets) {
-									const depRes = await this.deps.releaseExecutor.deploy(target);
-									sideEffectEvidence.deployments.push({ target, result: depRes });
-								}
+								sideEffects.tag = { state: "attempted", detail: { tag } };
 							}
 						}
 
-						// 10 & 11. PH-159, PH-160: Rebuild DeliveryBundle afterward with exact side-effect evidence
 						const bundleBase =
 							evalResult.deliveryBundle ?? (await this.buildBundle(objectiveId, "complete", runtime));
-						const enrichedBundle = buildDeliveryBundle({
+
+						let enrichedBundle = buildDeliveryBundle({
+							...bundleBase,
 							objectiveId,
 							terminalStatus: "complete",
 							sourceRevision: bundleBase.source_revision,
-							acceptance: bundleBase.acceptance,
-							verification: bundleBase.verification,
 							artifacts: [
 								...(bundleBase.artifacts ?? []),
-								...(sideEffectEvidence.commitSha
+								...(sideEffects.commit
 									? [
 											{
 												path: "git:commit",
-												description: `Commit ${sideEffectEvidence.commitSha}`,
-												hash: sideEffectEvidence.commitSha,
+												description: `Commit ${sideEffects.commit.detail.sha}`,
+												hash: sideEffects.commit.detail.sha,
 											},
 										]
 									: []),
 							],
-							finalCommit: sideEffectEvidence.commitSha,
-							pushRefs: sideEffectEvidence.pushedRef ? [sideEffectEvidence.pushedRef] : undefined,
-							limitations: bundleBase.limitations,
-							decisionRefs: bundleBase.decision_refs,
+							finalCommit: sideEffects.commit?.detail?.sha,
+							sideEffects,
+						});
+
+						// JEV-027 Two-phase check
+						if (this.deps.steeringPlane) {
+							const c27 = await this.deps.steeringPlane.requireCertificate("JEV-027", enrichedBundle, {
+								objectiveId,
+								evidenceRevision,
+								signal,
+							});
+							steeringCertRefs.push(c27.certificate_id);
+							if (c27.semantic_outcome !== "pass") {
+								return {
+									status: "unrecoverable",
+									reasonCodes: ["delivery_certificate_rejected"],
+									cycleCount: this.cycleCounter,
+									deliveryBundle: enrichedBundle,
+								};
+							}
+						}
+
+						// Post-verify side effects
+						if (activeCharter) {
+							if (activeCharter.git.push) {
+								if (!this.deps.gitExecutor?.push) throw new Error("Git push unavailable");
+								const pushRes = await this.deps.gitExecutor.push();
+								const ref =
+									typeof pushRes === "object" && pushRes && "ref" in pushRes
+										? String((pushRes as any).ref)
+										: "pushed";
+								sideEffects.push = { state: "succeeded", detail: { ref } };
+							}
+							if (activeCharter.release.package_publish) {
+								if (!this.deps.releaseExecutor?.publish) throw new Error("Package publish unavailable");
+								const pubRes = await this.deps.releaseExecutor.publish();
+								const id =
+									typeof pubRes === "object" && pubRes && "id" in pubRes
+										? String((pubRes as any).id)
+										: "published";
+								sideEffects.publish = { state: "succeeded", detail: { publicationId: id } };
+							}
+							if (activeCharter.release.deploy_targets.length > 0) {
+								if (!this.deps.releaseExecutor?.deploy) throw new Error("Deploy unavailable");
+								sideEffects.deploy = [];
+								for (const target of activeCharter.release.deploy_targets) {
+									const depRes = await this.deps.releaseExecutor.deploy(target);
+									sideEffects.deploy.push({
+										state: "succeeded",
+										detail: {
+											target,
+											deploymentId:
+												typeof depRes === "object" && depRes && "id" in depRes
+													? String((depRes as any).id)
+													: "deployed",
+										},
+									});
+								}
+							}
+						}
+
+						// Final bundle
+						enrichedBundle = buildDeliveryBundle({
+							...bundleBase,
+							objectiveId,
+							terminalStatus: "complete",
+							sourceRevision: bundleBase.source_revision,
+							artifacts: enrichedBundle.artifacts,
+							finalCommit: enrichedBundle.final_commit,
+							pushRefs: sideEffects.push ? [sideEffects.push.detail.ref] : undefined,
+							sideEffects,
 							steeringCertificateRefs: steeringCertRefs.length > 0 ? steeringCertRefs : undefined,
-							usage: bundleBase.usage,
-							assuranceProfileRequested: bundleBase.assurance_profile_requested,
-							assuranceProfileUsed: bundleBase.assurance_profile_used,
-							reviewerRefs: bundleBase.reviewer_refs,
-							failedGates: bundleBase.failed_gates,
-							requiredNextProof: bundleBase.required_next_proof,
-							changedFiles: bundleBase.changed_files,
-							diffDigest: bundleBase.diff_digest,
 						});
 
 						return {
