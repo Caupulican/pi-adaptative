@@ -219,18 +219,21 @@ export function renderDecisionList(
 		}
 	}
 	arrow("back to System One");
+	const openChecks = model.checks.filter((check) => check.status !== "satisfied").length;
 	const verdict: [string, ThemeColor] =
-		model.goal.branch === "delivered"
+		model.goal.branch === "delivered" && openChecks === 0
 			? ["yes → delivered", "success"]
-			: model.goal.branch === "deliver"
+			: model.goal.branch === "deliver" && openChecks === 0
 				? ["yes → deliver", "success"]
-				: model.blocked
-					? [`blocked → replan`, "warning"]
-					: model.goal.branch === "repair"
-						? [`no → repair (loop ${model.loop})`, "warning"]
-						: model.goal.branch === "clarify"
-							? ["not yet → ask you", "warning"]
-							: ["pending", "dim"];
+				: openChecks > 0
+					? [`pending · ${openChecks} open`, "dim"]
+					: model.blocked
+						? [`blocked → replan`, "warning"]
+						: model.goal.branch === "repair"
+							? [`no → repair (loop ${model.loop})`, "warning"]
+							: model.goal.branch === "clarify"
+								? ["not yet → ask you", "warning"]
+								: ["pending", "dim"];
 	head("goal satisfied?", theme.fg(verdict[1], verdict[0]));
 	return { rows, stageAt, currentRow, focusKey: graphFocusKey(model) };
 }
@@ -304,7 +307,7 @@ function goalYesNode(
 	return {
 		text: pending > 0 ? `pending · ${pending} open` : "pending",
 		tone: "dim",
-		current: false,
+		current: currentStage === "deliver",
 		stage: "deliver",
 		lit: false,
 	};
@@ -432,18 +435,14 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 		});
 	}
 	levels.push({ kind: "level", nodes: evidenceNodes });
-	if (evaluating || model.decider.evaluations) {
+	if (!evaluating && model.decider.evaluations) {
 		const last = model.decider.last;
 		levels.push({
 			kind: "level",
 			nodes: [
 				{
-					text: evaluating
-						? `◆ Jev ${evaluating.label}  ${formatGraphDuration(now - evaluating.startedAt)}`
-						: `◆ Jev · ${model.decider.evaluations} evaluation${model.decider.evaluations > 1 ? "s" : ""}${last ? ` · last ${last.label} → ${last.verdict ?? last.outcome}` : ""}`,
+					text: `◆ Jev · ${model.decider.evaluations} evaluation${model.decider.evaluations > 1 ? "s" : ""}${last ? ` · last ${last.label} → ${last.verdict ?? last.outcome}` : ""}`,
 					tone: JEV_TONE,
-					bold: Boolean(evaluating),
-					current: Boolean(evaluating),
 				},
 			],
 		});

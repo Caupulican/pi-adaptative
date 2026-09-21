@@ -84,6 +84,8 @@ export class WorkbenchPane {
 	private followedRow?: number;
 	/** Semantic focus last followed; a new key re-anchors even when the row number is unchanged. */
 	private followedKey?: string;
+	/** Pinned viewport has newer progress off-screen. */
+	private newerProgress = false;
 	private titleActions: { action: WorkbenchPaneTitleAction; start: number; end: number }[] = [];
 
 	reset(): void {
@@ -91,6 +93,7 @@ export class WorkbenchPane {
 		this.pinned = false;
 		this.followedRow = undefined;
 		this.followedKey = undefined;
+		this.newerProgress = false;
 		this.hide();
 	}
 
@@ -174,14 +177,21 @@ export class WorkbenchPane {
 			if (rowChanged) this.followedRow = follow.row;
 			if (!this.pinned && (keyChanged || rowChanged)) {
 				target = follow.row - Math.floor(this.height * 0.55);
+				this.newerProgress = false;
+			} else if (this.pinned && (keyChanged || rowChanged || follow.newerProgress === true)) {
+				this.newerProgress = true;
 			}
-		} else if (follow && !this.pinned) target = end;
+		} else if (follow && !this.pinned) {
+			target = end;
+			this.newerProgress = false;
+		}
 		this.offset = Math.max(0, Math.min(end, target));
+		if (!this.pinned) this.newerProgress = false;
 		const range =
 			lines.length > this.height && this.height > 0
 				? `${this.offset + 1}-${Math.min(lines.length, this.offset + this.height)}/${lines.length} ↕`
 				: "";
-		const combinedMeta = [meta, range].filter(Boolean).join(" · ");
+		const combinedMeta = [meta, range, this.newerProgress ? "new" : ""].filter(Boolean).join(" · ");
 		const actionWidths = actions.map((action) => visibleWidth(action.label) + 2);
 		const actionTotal =
 			actionWidths.reduce((sum, actionWidth) => sum + actionWidth, 0) + Math.max(0, actions.length - 1) * 2;

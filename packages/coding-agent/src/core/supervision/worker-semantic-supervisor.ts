@@ -33,6 +33,42 @@ export interface WorkerSemanticSupervisorDeps {
 	minElapsedMs?: number;
 }
 
+export const WORKER_SUPERVISION_DECISION_IDS = [
+	"meaningful_progress",
+	"worker_stuck",
+	"work_off_track",
+	"strategy_repetition",
+	"needs_independent_verification",
+	"specialist_gap_present",
+	"capability_gap_present",
+] as const;
+
+function noulOf(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isFinite(value)) return value;
+	if (value === true) return 1;
+	if (value === false) return 0;
+	if (value && typeof value === "object") {
+		const record = value as { noul?: unknown; value?: unknown };
+		if (typeof record.noul === "number" && Number.isFinite(record.noul)) return record.noul;
+		if (typeof record.value === "number" && Number.isFinite(record.value)) return record.value;
+		if (record.value === true) return 1;
+		if (record.value === false) return 0;
+	}
+	return undefined;
+}
+
+function requireSupervisionAnswers(raw: Record<string, unknown>): Record<string, number> {
+	const answers: Record<string, number> = {};
+	for (const id of WORKER_SUPERVISION_DECISION_IDS) {
+		const noul = noulOf(raw[id]);
+		if (noul === undefined) {
+			throw new Error(`Missing answer for boolean decision '${id}'`);
+		}
+		answers[id] = noul;
+	}
+	return answers;
+}
+
 /**
  * WorkerSemanticSupervisor:
  * Bounded live supervision of workers to detect stalls, repetitions, gaps, and readiness for verification.
@@ -60,6 +96,13 @@ export class WorkerSemanticSupervisor {
 
 	getPriorSteeringCount(attemptId: string): number {
 		return this.steeringInterventions.get(attemptId) ?? 0;
+	}
+
+	/** Share anti-oscillation with deterministic churn steers on the same attempt. */
+	noteSteering(attemptId: string): number {
+		const next = this.getPriorSteeringCount(attemptId) + 1;
+		this.steeringInterventions.set(attemptId, next);
+		return next;
 	}
 
 	/**
@@ -115,6 +158,8 @@ export class WorkerSemanticSupervisor {
 			recentFailures: attempt.recentFailures ? [...attempt.recentFailures] : [],
 			evidenceRevision: attempt.evidenceRevision ?? 1,
 			priorSteeringCount,
+			isStalled: Boolean(attempt.isStalled),
+			isRepeating: Boolean(attempt.isRepeating),
 		};
 
 		this.inFlightAssessments.add(attempt.attemptId);
@@ -122,7 +167,7 @@ export class WorkerSemanticSupervisor {
 
 		try {
 			let certId = `cert-supervision-${Date.now()}`;
-			const answers: Record<string, number> = {};
+			let answers: Record<string, number>;
 
 			if (this.steering) {
 				const cert = await this.steering.requireCertificate("JEV-WORKER-SUPERVISION", state, {
@@ -132,10 +177,7 @@ export class WorkerSemanticSupervisor {
 					signal,
 				});
 				certId = cert.certificate_id;
-				const rawAnswers = (cert.answers ?? {}) as Record<string, any>;
-				for (const [k, v] of Object.entries(rawAnswers)) {
-					answers[k] = typeof v?.noul === "number" ? v.noul : typeof v === "number" ? v : v === true ? 1.0 : 0.0;
-				}
+				answers = requireSupervisionAnswers((cert.answers ?? {}) as Record<string, unknown>);
 			} else if (this.decisionEngine) {
 				const program = {
 					schema_version: "1.0",
@@ -191,24 +233,20 @@ export class WorkerSemanticSupervisor {
 					consequence: "medium",
 					signal,
 				});
-				const rawAnswers = evalRes.answers ?? (evalRes.results as any) ?? {};
-				for (const [k, v] of Object.entries(rawAnswers)) {
-					answers[k] =
-						typeof (v as any)?.noul === "number"
-							? (v as any).noul
-							: typeof (v as any)?.value === "number"
-								? (v as any).value
-								: 0.0;
-				}
+				answers = requireSupervisionAnswers(
+					(evalRes.answers ?? (evalRes.results as Record<string, unknown>) ?? {}) as Record<string, unknown>,
+				);
 			} else {
-				// Default heuristics if no steering engine is attached
-				answers.meaningful_progress = attempt.isStalled ? 0.1 : 0.9;
-				answers.worker_stuck = attempt.isStalled ? 0.9 : 0.1;
-				answers.strategy_repetition = attempt.isRepeating ? 0.9 : 0.1;
-				answers.work_off_track = 0.1;
-				answers.needs_independent_verification = 0.1;
-				answers.specialist_gap_present = 0.1;
-				answers.capability_gap_present = 0.1;
+				// Unbound supervisor (tests / no plane): local stall/repeat heuristics, never empty answers.
+				answers = {
+					meaningful_progress: attempt.isStalled ? 0.1 : 0.9,
+					worker_stuck: attempt.isStalled ? 0.9 : 0.1,
+					strategy_repetition: attempt.isRepeating ? 0.9 : 0.1,
+					work_off_track: 0.1,
+					needs_independent_verification: 0.1,
+					specialist_gap_present: 0.1,
+					capability_gap_present: 0.1,
+				};
 			}
 
 			// FR-064: Deterministic Intervention Policy
@@ -216,35 +254,29 @@ export class WorkerSemanticSupervisor {
 			let summaryEvent: string | undefined;
 			const reasonCodes: string[] = [];
 
-			if ((answers.specialist_gap_present ?? 0) > 0.5) {
+			if (answers.specialist_gap_present > 0.5) {
 				action = "request_specialist";
 				summaryEvent = "Specialist requested · worker mission requires specialist domain";
 				reasonCodes.push("specialist_gap_detected");
-			} else if ((answers.capability_gap_present ?? 0) > 0.5) {
+			} else if (answers.capability_gap_present > 0.5) {
 				action = "request_capability";
 				summaryEvent = "Capability requested · worker mission requires synthesized capability";
 				reasonCodes.push("capability_gap_detected");
-			} else if ((answers.needs_independent_verification ?? 0) > 0.5) {
+			} else if (answers.needs_independent_verification > 0.5) {
 				action = "request_verifier";
 				summaryEvent = "Verification requested · implementation complete, independent proof missing";
 				reasonCodes.push("independent_verification_needed");
-			} else if (
-				(answers.worker_stuck ?? 0) > 0.5 ||
-				(answers.strategy_repetition ?? 0) > 0.5 ||
-				(answers.work_off_track ?? 0) > 0.5 ||
-				attempt.isStalled ||
-				attempt.isRepeating
-			) {
+			} else if (answers.worker_stuck > 0.5 || answers.strategy_repetition > 0.5 || answers.work_off_track > 0.5) {
 				// FR-065: Anti-oscillation (one steer + grace period, then stop and reroute). Off-track
 				// work is redirected now, not at the worker's next turn; a stall waits for that turn.
-				if (priorSteeringCount === 0 && (answers.work_off_track ?? 0) > 0.5) {
+				if (priorSteeringCount === 0 && answers.work_off_track > 0.5) {
 					action = "steer_now";
-					this.steeringInterventions.set(attempt.attemptId, 1);
+					this.noteSteering(attempt.attemptId);
 					summaryEvent = "Worker redirected now · work off the mission";
 					reasonCodes.push("worker_off_track_steer_now");
 				} else if (priorSteeringCount === 0) {
 					action = "steer_once";
-					this.steeringInterventions.set(attempt.attemptId, 1);
+					this.noteSteering(attempt.attemptId);
 					summaryEvent = "Worker steering initiated · progress stalled or strategy repeating";
 					reasonCodes.push("worker_stuck_steer_once");
 				} else {

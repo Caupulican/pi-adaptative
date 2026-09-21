@@ -89,6 +89,7 @@ export class WorkerSupervisionCoordinator {
 	private readonly deps: WorkerSupervisionCoordinatorDeps;
 	private readonly signals: WorkerSupervisionSignal[] = [];
 	private readonly lastErrorFingerprint = new Map<string, string>();
+	private readonly consumedRootRequestIds = new Set<string>();
 
 	constructor(deps: WorkerSupervisionCoordinatorDeps) {
 		this.deps = deps;
@@ -103,10 +104,15 @@ export class WorkerSupervisionCoordinator {
 	getPendingRootRequests(): readonly WorkerSupervisionSignal[] {
 		return this.signals.filter(
 			(signal) =>
-				signal.action === "request_specialist" ||
-				signal.action === "request_capability" ||
-				signal.action === "request_verifier",
+				!this.consumedRootRequestIds.has(signal.signal_id) &&
+				(signal.action === "request_specialist" ||
+					signal.action === "request_capability" ||
+					signal.action === "request_verifier"),
 		);
+	}
+
+	consumePendingRootRequest(signalId: string): void {
+		this.consumedRootRequestIds.add(signalId);
 	}
 
 	/**
@@ -148,21 +154,34 @@ export class WorkerSupervisionCoordinator {
 	 * applied through the same control surface as any other steer.
 	 */
 	async steerValidationChurn(agentId: string, attempt: LiveWorkerAttempt): Promise<WorkerSupervisionSignal> {
+		const prior = this.deps.supervisor.getPriorSteeringCount(attempt.attemptId);
+		const reroute = prior > 0;
+		if (!reroute) this.deps.supervisor.noteSteering(attempt.attemptId);
 		const verdict: WorkerSupervisionSignal = {
 			schema_version: "1.0",
 			signal_id: `sig-churn-${attempt.attemptId}-${this.signals.length + 1}`,
 			objective_id: attempt.objectiveId,
 			task_id: attempt.taskId,
 			attempt_id: attempt.attemptId,
-			action: "steer_once",
+			action: reroute ? "stop_and_reroute" : "steer_once",
 			certificate_id: "deterministic:validation_churn",
-			reason_codes: ["validation_churn_without_implementation"],
+			reason_codes: reroute
+				? ["validation_churn_without_implementation", "worker_stalled_repeated_reroute"]
+				: ["validation_churn_without_implementation"],
 			created_at: new Date().toISOString(),
-			explanation: VALIDATION_CHURN_DIRECTIVE,
-			summaryEvent: "Worker steered · repeated broad validation with no new implementation",
+			explanation: reroute
+				? "Worker rerouted · repeated broad validation after a prior steer"
+				: VALIDATION_CHURN_DIRECTIVE,
+			summaryEvent: reroute
+				? "Worker rerouted · repeated broad validation with no new implementation"
+				: "Worker steered · repeated broad validation with no new implementation",
 		};
 		this.signals.push(verdict);
-		await this.deps.control.steerWorker(agentId, VALIDATION_CHURN_DIRECTIVE);
+		if (reroute) {
+			await this.deps.control.cancelWorker(agentId, verdict.summaryEvent ?? "validation churn reroute");
+		} else {
+			await this.deps.control.steerWorker(agentId, VALIDATION_CHURN_DIRECTIVE);
+		}
 		this.deps.onIntervention?.(verdict);
 		return verdict;
 	}

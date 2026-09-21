@@ -33,6 +33,11 @@ export interface RouteCompositionInput {
 		readonly objectiveRoute: ObjectiveRouteName;
 		readonly reasonCodes: readonly string[];
 	};
+	/** Root-owned worker-supervision request after the worker is no longer in flight. */
+	readonly supervisionRequest?: {
+		readonly action: "request_specialist" | "request_capability" | "request_verifier";
+		readonly reasonCodes: readonly string[];
+	};
 }
 
 /**
@@ -76,6 +81,34 @@ export function composeObjectiveRoute(input: RouteCompositionInput): ObjectiveRo
 	}
 	if (input.ownerRequired) {
 		return buildRoute(cycleId, objectiveId, "owner_required", ["owner_authorization_required"], input);
+	}
+
+	if (input.supervisionRequest?.action === "request_specialist") {
+		return buildRoute(
+			cycleId,
+			objectiveId,
+			"escalate_capability",
+			["specialist_gap_detected", ...input.supervisionRequest.reasonCodes],
+			input,
+		);
+	}
+	if (input.supervisionRequest?.action === "request_capability") {
+		return buildRoute(
+			cycleId,
+			objectiveId,
+			"escalate_capability",
+			["capability_gap_detected", ...input.supervisionRequest.reasonCodes],
+			input,
+		);
+	}
+	if (input.supervisionRequest?.action === "request_verifier") {
+		return buildRoute(
+			cycleId,
+			objectiveId,
+			"verify",
+			["independent_verification_needed", ...input.supervisionRequest.reasonCodes],
+			input,
+		);
 	}
 
 	if (input.systemOneDirective) {

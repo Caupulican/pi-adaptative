@@ -155,6 +155,13 @@ export interface ObjectiveExecutionControllerDeps {
 	rootExecutor?: { execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void> };
 	/** The owner's authority is what the objective waits on right now: an open question or an operator blocker. */
 	ownerRequired?(objectiveId: string): boolean;
+	/** Unconsumed specialist/capability/verifier requests from live worker supervision. */
+	pendingSupervisionRequests?(): readonly {
+		readonly signal_id: string;
+		readonly action: string;
+		readonly reason_codes?: readonly string[];
+	}[];
+	consumePendingSupervisionRequest?(signalId: string): void;
 	mode?: ExecutionLoopMode;
 	executionCharter?: ExecutionCharter;
 	authorityBlockLedger?: DurableAuthorityBlockLedger;
@@ -359,6 +366,8 @@ export class ObjectiveExecutionController {
 				| "checkpoints"
 				| "stalls"
 				| "ownerRequired"
+				| "pendingSupervisionRequests"
+				| "consumePendingSupervisionRequest"
 			>
 		>,
 	): void {
@@ -653,6 +662,13 @@ export class ObjectiveExecutionController {
 			this.deps.systemOne?.peekControlDirective?.() ?? this.deps.systemOne?.consumeControlDirective?.();
 		const consumedWithoutPeek =
 			pendingDirective !== undefined && this.deps.systemOne?.peekControlDirective === undefined;
+		const pendingSupervision = requiredWorkerInFlight ? undefined : this.deps.pendingSupervisionRequests?.()[0];
+		const supervisionAction =
+			pendingSupervision?.action === "request_specialist" ||
+			pendingSupervision?.action === "request_capability" ||
+			pendingSupervision?.action === "request_verifier"
+				? pendingSupervision.action
+				: undefined;
 		const route = composeObjectiveRoute({
 			cycleId,
 			objectiveId,
@@ -662,6 +678,14 @@ export class ObjectiveExecutionController {
 			ownerRequired: this.deps.ownerRequired?.(objectiveId) ?? false,
 			strategyRepetition: stall.repeatedWithoutNewEvidence,
 			semantic,
+			...(supervisionAction && pendingSupervision
+				? {
+						supervisionRequest: {
+							action: supervisionAction,
+							reasonCodes: pendingSupervision.reason_codes ?? [],
+						},
+					}
+				: {}),
 			...(pendingDirective
 				? {
 						systemOneDirective: {
@@ -671,6 +695,21 @@ export class ObjectiveExecutionController {
 					}
 				: {}),
 		});
+		if (supervisionAction && pendingSupervision) {
+			const adopted =
+				(supervisionAction === "request_specialist" &&
+					route.route === "escalate_capability" &&
+					route.reason_codes.includes("specialist_gap_detected")) ||
+				(supervisionAction === "request_capability" &&
+					route.route === "escalate_capability" &&
+					route.reason_codes.includes("capability_gap_detected")) ||
+				(supervisionAction === "request_verifier" &&
+					route.route === "verify" &&
+					route.reason_codes.includes("independent_verification_needed"));
+			if (adopted) {
+				this.deps.consumePendingSupervisionRequest?.(pendingSupervision.signal_id);
+			}
+		}
 		if (pendingDirective) {
 			const adopted = route.route === pendingDirective.objectiveRoute;
 			if (adopted && !consumedWithoutPeek) {

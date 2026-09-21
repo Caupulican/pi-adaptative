@@ -44,8 +44,9 @@ class TestReleaseFreezeJevAdapter {
 		if (Array.isArray(request.program?.questions)) {
 			questions.push(...request.program.questions);
 		}
-		if (Array.isArray(request.program?.decisions)) {
-			for (const d of request.program.decisions) {
+		const decisionList = request.decisions ?? request.program?.decisions;
+		if (Array.isArray(decisionList)) {
+			for (const d of decisionList) {
 				if (d.id) questions.push(d.id);
 			}
 		}
@@ -70,7 +71,8 @@ class TestReleaseFreezeJevAdapter {
 			} else if (
 				q === "specialist_gap_present" ||
 				q === "capability_gap_present" ||
-				q === "needs_independent_verification"
+				q === "needs_independent_verification" ||
+				q === "work_off_track"
 			) {
 				answers[q] = { type: "noul", noul: 0.1 };
 			} else {

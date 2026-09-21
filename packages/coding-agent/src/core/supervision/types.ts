@@ -50,4 +50,6 @@ export interface SupervisionObservationState {
 	readonly recentFailures: readonly string[];
 	readonly evidenceRevision: number;
 	readonly priorSteeringCount: number;
+	readonly isStalled: boolean;
+	readonly isRepeating: boolean;
 }

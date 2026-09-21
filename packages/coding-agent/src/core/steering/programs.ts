@@ -889,9 +889,7 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 		}
 
 		default: {
-			// Generic fallback program for unrecognized checkpoint
-			decisions.push({ kind: "boolean", id: "approved", instruction: `Approve checkpoint ${checkpointId}` });
-			break;
+			throw new Error(`Unrecognized steering checkpoint '${checkpointId}'`);
 		}
 	}
 

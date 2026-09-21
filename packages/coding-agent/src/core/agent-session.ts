@@ -2016,6 +2016,8 @@ export class AgentSession {
 				ownerRequired: () =>
 					this._operatorBlocker !== undefined ||
 					getResumableHumanInputSnapshot(this.sessionManager)?.status === "pending",
+				pendingSupervisionRequests: () => this._workerSupervision.getPendingRootRequests(),
+				consumePendingSupervisionRequest: (signalId) => this._workerSupervision.consumePendingRootRequest(signalId),
 				...(this._systemOneController
 					? {
 							systemOne: {

@@ -1263,7 +1263,7 @@ export class CompactionController {
 			hysteresisTokens: 2000,
 			minSavingsUsd: 0.001,
 		});
-		if (verdict.proceed || verdict.reason !== "insufficient_evidence") {
+		if (verdict.proceed || (verdict.reason !== "insufficient_evidence" && verdict.reason !== "hysteresis")) {
 			this.lastEarlyEconomicsAtTokens = contextTokens;
 		}
 		if (verdict.proceed) return true;

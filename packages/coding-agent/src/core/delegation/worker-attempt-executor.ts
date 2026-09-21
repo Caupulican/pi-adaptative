@@ -277,6 +277,24 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		executedToolCalls++;
 		recentToolNames.push(toolName);
 		if (recentToolNames.length > 8) recentToolNames.shift();
+		const lastTool = recentToolNames.at(-1);
+		const isRepeating = recentToolNames.length >= 3 && recentToolNames.slice(-3).every((name) => name === lastTool);
+		const isStalled = changedFiles.size === 0 && executedToolCalls >= 4 && (isRepeating || toolIssues.size > 0);
+		let outputTail = "";
+		try {
+			const messages = options.conversation.getProviderContext().messages;
+			for (let index = messages.length - 1; index >= 0; index--) {
+				const message = messages[index];
+				if (message.role !== "assistant" || !("content" in message) || !Array.isArray(message.content)) continue;
+				const text = message.content.flatMap((content) => (content.type === "text" ? [content.text] : [])).join("");
+				if (text) {
+					outputTail = text.slice(-2000);
+					break;
+				}
+			}
+		} catch {
+			outputTail = "";
+		}
 		const observation: WorkerProgressObservation = {
 			agentId: options.agentId,
 			objectiveId: options.durableHandle.objectiveId,
@@ -291,6 +309,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			recentToolNames: [...recentToolNames],
 			changedFileCountAtWindowStart: changedFileCountAtChurnWindowStart,
 			changedFileCount: changedFiles.size,
+			outputTail,
+			isRepeating,
+			isStalled,
 		};
 		if (changedFiles.size > changedFileCountAtChurnWindowStart) {
 			changedFileCountAtChurnWindowStart = changedFiles.size;

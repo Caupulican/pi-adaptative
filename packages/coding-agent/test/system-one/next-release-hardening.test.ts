@@ -3,8 +3,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { projectEarlyCompactionEconomics } from "../../src/core/compaction/early-compaction-economics.ts";
+import { ObjectiveExecutionController } from "../../src/core/objective-execution/objective-execution-controller.ts";
+import { composeObjectiveRoute } from "../../src/core/objective-execution/objective-route-policy.ts";
 import { DecisionStageLog } from "../../src/core/operator-projection/decision-stage-log.ts";
 import type { OperatorProjection } from "../../src/core/operator-projection/types.ts";
+import type { TaskRuntimeProjection } from "../../src/core/orchestration/task-runtime.ts";
 import { compileDecisionProgramForCheckpoint } from "../../src/core/steering/programs.ts";
 import { WorkerSemanticSupervisor } from "../../src/core/supervision/worker-semantic-supervisor.ts";
 import { WorkerSupervisionCoordinator } from "../../src/core/supervision/worker-supervision-coordinator.ts";
@@ -14,6 +17,7 @@ import { buildDecisionGraphModel } from "../../src/modes/interactive/components/
 import {
 	composeDecisionDiagram,
 	renderDecisionDiagram,
+	renderDecisionList,
 } from "../../src/modes/interactive/components/decision-graph-render.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../src/utils/ansi.ts";
@@ -157,6 +161,168 @@ describe("next-release hardening", () => {
 		expect(errors[0]).toContain("meaningful_progress");
 	});
 
+	it("rejects a successful reviewer payload with empty answers as invalid_response", async () => {
+		const adapter = new SystemOneJevAdapter(
+			{
+				evaluate: async () => ({
+					request: { model: "jev-1.13.0" },
+					response: { model: "jev-1.13.0", answers: {} },
+					elapsedMs: 1,
+				}),
+			},
+			DEFAULT_SYSTEM_ONE_CONFIG,
+			{ getApiKey: () => "test-key", sleep: async () => {} },
+		);
+		try {
+			await adapter.evaluate({
+				state: {},
+				questions: { meaningful_progress: { type: "noul" }, worker_stuck: { type: "noul" } },
+			});
+			expect.fail("expected JevAdapterFailure");
+		} catch (error) {
+			expect(error).toBeInstanceOf(JevAdapterFailure);
+			expect((error as JevAdapterFailure).kind).toBe("invalid_response");
+			expect((error as JevAdapterFailure).originalMessage).toContain("meaningful_progress");
+		}
+	});
+
+	it("does not treat empty steering answers as a silent continue", async () => {
+		const supervisor = new WorkerSemanticSupervisor({
+			debounceMs: 0,
+			minToolCalls: 0,
+			minElapsedMs: 0,
+			steering: {
+				requireCertificate: async () => ({ certificate_id: "cert-empty", answers: {} }),
+			},
+		});
+		await expect(
+			supervisor.observe({
+				objectiveId: "o",
+				taskId: "t",
+				attemptId: "a-empty",
+				role: "worker",
+				mission: "fix",
+				elapsedMs: 9000,
+				toolCalls: 4,
+			}),
+		).rejects.toThrow("Missing answer for boolean decision 'meaningful_progress'");
+	});
+
+	it("fails closed on an unrecognized steering checkpoint instead of compiling approved", () => {
+		expect(() => compileDecisionProgramForCheckpoint("JEV-NOT-A-CHECKPOINT", {})).toThrow(
+			"Unrecognized steering checkpoint 'JEV-NOT-A-CHECKPOINT'",
+		);
+	});
+
+	it("anti-oscillates validation churn: first steer, repeated churn reroutes", async () => {
+		const steered: string[] = [];
+		const cancelled: string[] = [];
+		const coordinator = new WorkerSupervisionCoordinator({
+			supervisor: new WorkerSemanticSupervisor({ debounceMs: 0, minToolCalls: 0, minElapsedMs: 0 }),
+			control: {
+				steerWorker: (agentId) => {
+					steered.push(agentId);
+				},
+				cancelWorker: (agentId) => {
+					cancelled.push(agentId);
+				},
+			},
+		});
+		const churn = {
+			agentId: "w1",
+			objectiveId: "o",
+			taskId: "t",
+			attemptId: "a-churn",
+			role: "worker",
+			mission: "fix",
+			elapsedMs: 9000,
+			toolCalls: 4,
+			recentToolNames: ["bash", "bash", "bash"] as const,
+			changedFileCountAtWindowStart: 1,
+			changedFileCount: 1,
+		};
+		const first = await coordinator.observe(churn);
+		expect(first?.action).toBe("steer_once");
+		expect(steered).toEqual(["w1"]);
+		const second = await coordinator.observe(churn);
+		expect(second?.action).toBe("stop_and_reroute");
+		expect(cancelled).toEqual(["w1"]);
+	});
+
+	it("composes a pending specialist request into escalate_capability after workers are not in flight", () => {
+		const waiting = composeObjectiveRoute({
+			cycleId: "c1",
+			objectiveId: "o",
+			requiredWorkerInFlight: true,
+			supervisionRequest: {
+				action: "request_specialist",
+				reasonCodes: ["specialist_gap_detected"],
+			},
+		});
+		expect(waiting.route).toBe("wait_for_worker");
+		const ready = composeObjectiveRoute({
+			cycleId: "c2",
+			objectiveId: "o",
+			supervisionRequest: {
+				action: "request_specialist",
+				reasonCodes: ["specialist_gap_detected"],
+			},
+		});
+		expect(ready.route).toBe("escalate_capability");
+		expect(ready.reason_codes).toContain("specialist_gap_detected");
+		const owner = composeObjectiveRoute({
+			cycleId: "c3",
+			objectiveId: "o",
+			ownerRequired: true,
+			supervisionRequest: {
+				action: "request_specialist",
+				reasonCodes: ["specialist_gap_detected"],
+			},
+		});
+		expect(owner.route).toBe("owner_required");
+		expect(owner.reason_codes).not.toContain("specialist_gap_detected");
+	});
+
+	it("does not consume a pending specialist request while owner_required wins", async () => {
+		const pending = [
+			{
+				signal_id: "sig-spec-1",
+				action: "request_specialist" as const,
+				reason_codes: ["specialist_gap_detected"],
+			},
+		];
+		const consumed: string[] = [];
+		let ownerRequired = true;
+		const controller = new ObjectiveExecutionController({
+			mode: "objective_primary",
+			runtime: {
+				reconcileObjective: async () =>
+					({
+						lastOrdinal: 0,
+						agents: {},
+						objectives: {},
+						tasks: {},
+						attempts: {},
+						checkpoints: {},
+						approvals: {},
+						notifications: {},
+					}) as TaskRuntimeProjection,
+			},
+			ownerRequired: () => ownerRequired,
+			pendingSupervisionRequests: () => pending.filter((item) => !consumed.includes(item.signal_id)),
+			consumePendingSupervisionRequest: (signalId) => {
+				consumed.push(signalId);
+			},
+		});
+		const blocked = await controller.evaluateRouteOnce("o");
+		expect(blocked.route).toBe("owner_required");
+		expect(consumed).toEqual([]);
+		ownerRequired = false;
+		const escalated = await controller.evaluateRouteOnce("o");
+		expect(escalated.route).toBe("escalate_capability");
+		expect(consumed).toEqual(["sig-spec-1"]);
+	});
+
 	it("does not draw an affirmative DELIVER branch while proof is still open", () => {
 		const log = new DecisionStageLog();
 		log.observe(
@@ -279,7 +445,13 @@ describe("next-release hardening", () => {
 		});
 		const branch = composeDecisionDiagram(model).find((level) => level.kind === "branch");
 		expect(branch && branch.kind === "branch" ? branch.yes.lit : true).toBe(false);
+		expect(branch && branch.kind === "branch" ? branch.yes.current : false).toBe(true);
 		expect(renderDecisionDiagram(model, 80).rows.map(stripAnsi).join("\n")).not.toContain("DELIVER");
+		const list = renderDecisionList(model, 80).rows.map(stripAnsi).join("\n");
+		expect(list).not.toMatch(/yes → deliver/i);
+		expect(list).toMatch(/pending · 3 open/);
+		const diagram = renderDecisionDiagram(model, 80);
+		expect(diagram.currentRow).toBeGreaterThan(0);
 	});
 
 	it("defers early compaction when the cache is hot or prices are missing", () => {

@@ -187,14 +187,30 @@ export class SystemOneJevAdapter implements JevAdapter {
 					);
 				}
 
+				const questionIds = Object.keys(input.questions ?? {});
+				const answers = result.response.answers;
+				if (questionIds.length > 0) {
+					const missing = questionIds.filter((id) => answers?.[id] === undefined);
+					if (missing.length > 0) {
+						throw new JevAdapterFailure(
+							"invalid_response",
+							`Incomplete Jev answers: missing '${missing[0]}'`,
+							impact,
+						);
+					}
+				}
+
 				return {
 					model: returnedModel,
-					answers: result.response.answers,
+					answers,
 					usage: result.response.usage,
 					latency_ms,
 				};
 			} catch (error) {
 				lastError = error;
+				if (error instanceof JevAdapterFailure) {
+					throw error;
+				}
 				// If model drift was detected, do not retry
 				if (error instanceof Error && error.message.includes("Model drift detected")) {
 					throw error;
