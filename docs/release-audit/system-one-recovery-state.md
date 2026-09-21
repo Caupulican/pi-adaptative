@@ -118,6 +118,7 @@ Jev **is** the active semantic gate on the production tool-admission path and on
 - 2026-09-20 — ExecutionStore remains a hydrated projection, not a second authority. Canonical truth is GoalState + DurableTaskRuntime + verification obligations.
 - 2026-09-20 — Dead SystemOneController stage packs (intake/claim/duplicate/patch/drift) are not blindly wired; production owners are SteeringPlane JEV-001..003 / JEV-041 / JEV-025 / stall+JEV-004. Preflight/tool-gate/postflight/completion stay on SystemOneController and must become executable.
 - 2026-09-20 — Jev is the active tool-admission and default steering-plane gate (confirmed). Recovery makes preflight/postflight and required-mode provenance match that.
+- 2026-09-21 — System One control directives survive wait/owner cycles: peek then consume only if `route.route` matches the directive.
 
 ## Last verified command results
 
