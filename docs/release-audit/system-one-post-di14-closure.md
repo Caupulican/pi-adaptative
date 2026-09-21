@@ -33,4 +33,6 @@
 
 ## Closing record
 
-Filled at RC-12.
+- Implementation: `b6f69ad526bdb541f575811275ee2bc4a90ff755`
+- Message: Close remaining post-DI14 System One integrity defects
+- Pushed to `origin/main` (SHA stamp follows this file)
