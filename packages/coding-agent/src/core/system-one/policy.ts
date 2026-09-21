@@ -27,10 +27,14 @@ export interface FinalCompletionVerdict {
  * R-038: For Noul, policy MUST distinguish probability of yes from certainty; a value near 0 can be a highly certain no.
  */
 export function evaluateNoul(
-	p: number,
+	p: number | boolean,
 	direction: "required_true" | "required_false",
 	thresholds: SystemOneThresholds = DEFAULT_SYSTEM_ONE_CONFIG.thresholds,
 ): NoulEvaluation {
+	if (typeof p === "boolean") {
+		if (direction === "required_true") return p ? "hard_pass" : "hard_fail";
+		return !p ? "hard_pass" : "hard_fail";
+	}
 	if (typeof p !== "number" || Number.isNaN(p) || p < 0 || p > 1) {
 		return "hard_fail";
 	}
@@ -97,17 +101,17 @@ export function decidePreflight(
 	config: SystemOneConfig = DEFAULT_SYSTEM_ONE_CONFIG,
 ): "allow" | "retrieve" | "replan" | "test" | "block" | "escalate" {
 	// step_relevant (noul: required_true)
-	const stepRelevantAns = (answers.step_relevant as { noul?: number } | undefined)?.noul ?? 0;
+	const stepRelevantAns = (answers.step_relevant as { boolean?: boolean } | undefined)?.boolean ?? false;
 	const stepRelevant = evaluateNoul(stepRelevantAns, "required_true", config.thresholds);
 	if (stepRelevant === "hard_fail") return "replan";
 
 	// unsupported_assumption_present (noul: required_false)
-	const assumptionAns = (answers.unsupported_assumption_present as { noul?: number } | undefined)?.noul ?? 1;
+	const assumptionAns = (answers.unsupported_assumption_present as { boolean?: boolean } | undefined)?.boolean ?? true;
 	const assumptionEval = evaluateNoul(assumptionAns, "required_false", config.thresholds);
 	if (assumptionEval === "hard_fail") return "retrieve";
 
 	// evidence_sufficient_to_act (noul: required_true)
-	const evidenceAns = (answers.evidence_sufficient_to_act as { noul?: number } | undefined)?.noul ?? 0;
+	const evidenceAns = (answers.evidence_sufficient_to_act as { boolean?: boolean } | undefined)?.boolean ?? false;
 	const evidenceEval = evaluateNoul(evidenceAns, "required_true", config.thresholds);
 	if (evidenceEval === "hard_fail" || evidenceEval === "ambiguous") return "retrieve";
 
@@ -158,7 +162,7 @@ export function decideToolGate(
 	options: ToolGateDecisionOptions = {},
 ): "allow" | "confirm" | "block" | "replan" {
 	// Check prompt injection first
-	const injectionAns = (answers.repo_text_injection_like as { noul?: number } | undefined)?.noul ?? 0;
+	const injectionAns = (answers.repo_text_injection_like as { boolean?: boolean } | undefined)?.boolean ?? false;
 	const injectionEval = evaluateNoul(injectionAns, "required_false", config.thresholds);
 	if (injectionEval === "hard_fail") {
 		// Injection-like text detected
@@ -167,7 +171,7 @@ export function decideToolGate(
 
 	// Tool relevance, only when there was a step to be relevant to.
 	if (options.relevanceEvaluable !== false) {
-		const relevantAns = (answers.tool_call_relevant as { noul?: number } | undefined)?.noul ?? 0;
+		const relevantAns = (answers.tool_call_relevant as { boolean?: boolean } | undefined)?.boolean ?? false;
 		const relevantEval = evaluateNoul(relevantAns, "required_true", config.thresholds);
 		if (relevantEval === "hard_fail") {
 			return "replan";
@@ -197,19 +201,19 @@ export function decidePostflight(
 	config: SystemOneConfig = DEFAULT_SYSTEM_ONE_CONFIG,
 ): "continue" | "verify" | "retrieve_more" | "replan" | "rollback" | "completion_candidate" | "blocked" {
 	// Check scope violation
-	const scopeViolAns = (answers.scope_violation as { noul?: number } | undefined)?.noul ?? 0;
+	const scopeViolAns = (answers.scope_violation as { boolean?: boolean } | undefined)?.boolean ?? false;
 	if (evaluateNoul(scopeViolAns, "required_false", config.thresholds) === "hard_fail") {
 		return "rollback";
 	}
 
 	// Check replan required
-	const replanAns = (answers.replan_required as { noul?: number } | undefined)?.noul ?? 0;
+	const replanAns = (answers.replan_required as { boolean?: boolean } | undefined)?.boolean ?? false;
 	if (evaluateNoul(replanAns, "required_false", config.thresholds) === "hard_fail") {
 		return "replan";
 	}
 
 	// Check conclusions supported
-	const conclAns = (answers.conclusions_supported as { noul?: number } | undefined)?.noul ?? 1;
+	const conclAns = (answers.conclusions_supported as { boolean?: boolean } | undefined)?.boolean ?? true;
 	if (evaluateNoul(conclAns, "required_true", config.thresholds) === "hard_fail") {
 		return "retrieve_more";
 	}
@@ -466,7 +470,8 @@ export function decideFinalCompletion(input: {
 	const { primaryAnswers } = input;
 
 	// implementation_matches_goal (required_true, hard pass)
-	const goalMatchAns = (primaryAnswers.implementation_matches_goal as { noul?: number } | undefined)?.noul ?? 0;
+	const goalMatchAns =
+		(primaryAnswers.implementation_matches_goal as { boolean?: boolean } | undefined)?.boolean ?? false;
 	if (evaluateNoul(goalMatchAns, "required_true", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-implementation_matches_goal",
@@ -477,7 +482,7 @@ export function decideFinalCompletion(input: {
 
 	// root_cause_addressed for bug fixes (R-015, R-057)
 	if (input.isBugFix) {
-		const rootCauseAns = (primaryAnswers.root_cause_addressed as { noul?: number } | undefined)?.noul ?? 0;
+		const rootCauseAns = (primaryAnswers.root_cause_addressed as { boolean?: boolean } | undefined)?.boolean ?? false;
 		if (evaluateNoul(rootCauseAns, "required_true", config.thresholds) !== "hard_pass") {
 			failedGates.push({
 				id: "JEV-root_cause_addressed",
@@ -488,7 +493,8 @@ export function decideFinalCompletion(input: {
 	}
 
 	// required_behavior_unverified (required_false)
-	const unverifiedAns = (primaryAnswers.required_behavior_unverified as { noul?: number } | undefined)?.noul ?? 1;
+	const unverifiedAns =
+		(primaryAnswers.required_behavior_unverified as { boolean?: boolean } | undefined)?.boolean ?? true;
 	if (evaluateNoul(unverifiedAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-required_behavior_unverified",
@@ -498,7 +504,8 @@ export function decideFinalCompletion(input: {
 	}
 
 	// material_claim_unsupported (required_false)
-	const unsuppClaimAns = (primaryAnswers.material_claim_unsupported as { noul?: number } | undefined)?.noul ?? 1;
+	const unsuppClaimAns =
+		(primaryAnswers.material_claim_unsupported as { boolean?: boolean } | undefined)?.boolean ?? true;
 	if (evaluateNoul(unsuppClaimAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-material_claim_unsupported",
@@ -508,7 +515,8 @@ export function decideFinalCompletion(input: {
 	}
 
 	// out_of_scope_change_present (required_false)
-	const outOfScopeAns = (primaryAnswers.out_of_scope_change_present as { noul?: number } | undefined)?.noul ?? 1;
+	const outOfScopeAns =
+		(primaryAnswers.out_of_scope_change_present as { boolean?: boolean } | undefined)?.boolean ?? true;
 	if (evaluateNoul(outOfScopeAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-out_of_scope_change_present",
@@ -518,7 +526,8 @@ export function decideFinalCompletion(input: {
 	}
 
 	// duplicate_responsibility_introduced (required_false)
-	const dupRespAns = (primaryAnswers.duplicate_responsibility_introduced as { noul?: number } | undefined)?.noul ?? 1;
+	const dupRespAns =
+		(primaryAnswers.duplicate_responsibility_introduced as { boolean?: boolean } | undefined)?.boolean ?? true;
 	if (evaluateNoul(dupRespAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-duplicate_responsibility_introduced",
@@ -556,7 +565,7 @@ export function decideFinalCompletion(input: {
 	const { challengeAnswers } = input;
 
 	// missing_requirement (required_false)
-	const missingReqAns = (challengeAnswers.missing_requirement as { noul?: number } | undefined)?.noul ?? 1;
+	const missingReqAns = (challengeAnswers.missing_requirement as { boolean?: boolean } | undefined)?.boolean ?? true;
 	if (evaluateNoul(missingReqAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-CHALLENGE-missing_requirement",
@@ -566,7 +575,7 @@ export function decideFinalCompletion(input: {
 	}
 
 	// hidden_assumption (required_false)
-	const hiddenAssumpAns = (challengeAnswers.hidden_assumption as { noul?: number } | undefined)?.noul ?? 1;
+	const hiddenAssumpAns = (challengeAnswers.hidden_assumption as { boolean?: boolean } | undefined)?.boolean ?? true;
 	if (evaluateNoul(hiddenAssumpAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-CHALLENGE-hidden_assumption",
@@ -576,7 +585,8 @@ export function decideFinalCompletion(input: {
 	}
 
 	// plausible_regression_not_tested (required_false)
-	const regressionAns = (challengeAnswers.plausible_regression_not_tested as { noul?: number } | undefined)?.noul ?? 1;
+	const regressionAns =
+		(challengeAnswers.plausible_regression_not_tested as { boolean?: boolean } | undefined)?.boolean ?? true;
 	if (evaluateNoul(regressionAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-CHALLENGE-plausible_regression_not_tested",
@@ -586,7 +596,8 @@ export function decideFinalCompletion(input: {
 	}
 
 	// conclusion_overstates_evidence (required_false)
-	const overstatesAns = (challengeAnswers.conclusion_overstates_evidence as { noul?: number } | undefined)?.noul ?? 1;
+	const overstatesAns =
+		(challengeAnswers.conclusion_overstates_evidence as { boolean?: boolean } | undefined)?.boolean ?? true;
 	if (evaluateNoul(overstatesAns, "required_false", config.thresholds) !== "hard_pass") {
 		failedGates.push({
 			id: "JEV-CHALLENGE-conclusion_overstates_evidence",

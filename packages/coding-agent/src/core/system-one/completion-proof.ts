@@ -18,11 +18,21 @@ export interface CompletionProof {
 export function buildCompletionProof(_execState: ExecutionState, _candidateRevision: string): CompletionProof {
 	let digest = "unknown";
 	try {
-		const diff = execSync("git diff HEAD && git ls-files --others --exclude-standard", {
+		const diff = execSync("git diff HEAD", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+		const untrackedStr = execSync("git ls-files --others --exclude-standard", {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
 		});
-		digest = createHash("sha256").update(diff).digest("hex");
+		const untracked = untrackedStr.trim().split("\n").filter(Boolean);
+		let untrackedContent = "";
+		for (const f of untracked) {
+			try {
+				untrackedContent += require("fs").readFileSync(f, "utf8");
+			} catch (_e) {}
+		}
+		digest = createHash("sha256")
+			.update(diff + untrackedContent)
+			.digest("hex");
 	} catch (_e) {
 		// ignore
 	}

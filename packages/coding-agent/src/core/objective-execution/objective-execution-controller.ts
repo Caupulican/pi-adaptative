@@ -333,11 +333,24 @@ export const ROUTE_DECISION_PROGRAM = createDecisionProgram({
 
 function computeDiffDigest(): string {
 	try {
-		const diff = require("child_process").execSync("git diff HEAD && git ls-files --others --exclude-standard", {
+		const cp = require("child_process");
+		const diff = cp.execSync("git diff HEAD", { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+		const untrackedStr = cp.execSync("git ls-files --others --exclude-standard", {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
 		});
-		return require("crypto").createHash("sha256").update(diff).digest("hex");
+		const untracked = untrackedStr.trim().split("\n").filter(Boolean);
+		const fs = require("fs");
+		let untrackedContent = "";
+		for (const f of untracked) {
+			try {
+				untrackedContent += fs.readFileSync(f, "utf8");
+			} catch (_e) {}
+		}
+		return require("crypto")
+			.createHash("sha256")
+			.update(diff + untrackedContent)
+			.digest("hex");
 	} catch (_e) {
 		return "unknown";
 	}
@@ -508,6 +521,7 @@ export class ObjectiveExecutionController {
 		objectiveId: string,
 		options?: { signal?: AbortSignal; legacyActionHint?: string },
 	): Promise<ObjectiveRoute> {
+		const initialDigest = computeDiffDigest();
 		options?.signal?.throwIfAborted();
 		const cycleId = `cycle_${++this.cycleCounter}_${randomUUID().slice(0, 8)}`;
 
@@ -550,7 +564,7 @@ export class ObjectiveExecutionController {
 					stallTurns: stall.stallTurns,
 					strategyFingerprint: stall.fingerprint,
 					history,
-					beforeDigest: "unknown",
+					beforeDigest: initialDigest,
 					afterDigest: computeDiffDigest(),
 				});
 
@@ -603,7 +617,7 @@ export class ObjectiveExecutionController {
 					stallTurns: stall.stallTurns,
 					strategyFingerprint: stall.fingerprint,
 					history,
-					beforeDigest: "unknown",
+					beforeDigest: initialDigest,
 					afterDigest: computeDiffDigest(),
 				});
 				const cert = await this.deps.steeringPlane.requireCertificate("JEV-004", stateProjection, {
@@ -1362,26 +1376,85 @@ export class ObjectiveExecutionController {
 
 						await this._recordCompletionOutcomes(objectiveId, route, { verificationPassed: true });
 
-						// 9. PH-106, PH-158: Execute all charter-required final side effects (throw on missing executor)
+						// 9. PH-106, PH-158: Execute all charter-required final side effects
 						const sideEffects: any = {};
 						if (activeCharter) {
 							if (activeCharter.git.commit) {
 								if (!this.deps.gitExecutor?.commit) throw new Error("Git commit unavailable");
-								const commitRes = await this.deps.gitExecutor.commit();
-								const sha =
-									typeof commitRes === "object" && commitRes && "sha" in commitRes
-										? String((commitRes as any).sha)
-										: "committed";
-								sideEffects.commit = { state: "attempted", detail: { sha } };
+								try {
+									const commitRes = await this.deps.gitExecutor.commit();
+									if (typeof commitRes === "object" && commitRes && "sha" in commitRes) {
+										sideEffects.commit = {
+											state: "attempted",
+											detail: { sha: String((commitRes as any).sha) },
+										};
+									} else {
+										sideEffects.commit = { state: "failed", error: "Missing sha" };
+									}
+								} catch (e: any) {
+									sideEffects.commit = { state: "failed", error: e.message };
+								}
 							}
 							if (activeCharter.git.create_tag) {
 								if (!this.deps.gitExecutor?.tag) throw new Error("Git tag unavailable");
-								const tagRes = await this.deps.gitExecutor.tag();
-								const tag =
-									typeof tagRes === "object" && tagRes && "tag" in tagRes
-										? String((tagRes as any).tag)
-										: "tagged";
-								sideEffects.tag = { state: "attempted", detail: { tag } };
+								try {
+									const tagRes = await this.deps.gitExecutor.tag();
+									if (typeof tagRes === "object" && tagRes && "tag" in tagRes) {
+										sideEffects.tag = { state: "attempted", detail: { tag: String((tagRes as any).tag) } };
+									} else {
+										sideEffects.tag = { state: "failed", error: "Missing tag" };
+									}
+								} catch (e: any) {
+									sideEffects.tag = { state: "failed", error: e.message };
+								}
+							}
+							if (activeCharter.git.push) {
+								if (!this.deps.gitExecutor?.push) throw new Error("Git push unavailable");
+								try {
+									const pushRes = await this.deps.gitExecutor.push();
+									if (typeof pushRes === "object" && pushRes && "ref" in pushRes) {
+										sideEffects.push = { state: "succeeded", detail: { ref: String((pushRes as any).ref) } };
+									} else {
+										sideEffects.push = { state: "failed", error: "Missing ref" };
+									}
+								} catch (e: any) {
+									sideEffects.push = { state: "failed", error: e.message };
+								}
+							}
+							if (activeCharter.release.package_publish) {
+								if (!this.deps.releaseExecutor?.publish) throw new Error("Package publish unavailable");
+								try {
+									const pubRes = await this.deps.releaseExecutor.publish();
+									if (typeof pubRes === "object" && pubRes && "id" in pubRes) {
+										sideEffects.publish = {
+											state: "succeeded",
+											detail: { publicationId: String((pubRes as any).id) },
+										};
+									} else {
+										sideEffects.publish = { state: "failed", error: "Missing id" };
+									}
+								} catch (e: any) {
+									sideEffects.publish = { state: "failed", error: e.message };
+								}
+							}
+							if (activeCharter.release.deploy_targets.length > 0) {
+								if (!this.deps.releaseExecutor?.deploy) throw new Error("Deploy unavailable");
+								sideEffects.deploy = [];
+								for (const target of activeCharter.release.deploy_targets) {
+									try {
+										const depRes = await this.deps.releaseExecutor.deploy(target);
+										if (typeof depRes === "object" && depRes && "id" in depRes) {
+											sideEffects.deploy.push({
+												state: "succeeded",
+												detail: { target, deploymentId: String((depRes as any).id) },
+											});
+										} else {
+											sideEffects.deploy.push({ state: "failed", detail: { target }, error: "Missing id" });
+										}
+									} catch (e: any) {
+										sideEffects.deploy.push({ state: "failed", detail: { target }, error: e.message });
+									}
+								}
 							}
 						}
 
@@ -1395,7 +1468,7 @@ export class ObjectiveExecutionController {
 							sourceRevision: bundleBase.source_revision,
 							artifacts: [
 								...(bundleBase.artifacts ?? []),
-								...(sideEffects.commit
+								...(sideEffects.commit && sideEffects.commit.state !== "failed"
 									? [
 											{
 												path: "git:commit",
@@ -1406,10 +1479,11 @@ export class ObjectiveExecutionController {
 									: []),
 							],
 							finalCommit: sideEffects.commit?.detail?.sha,
+							pushRefs: sideEffects.push?.detail?.ref ? [sideEffects.push.detail.ref] : undefined,
 							sideEffects,
 						});
 
-						// JEV-027 Two-phase check
+						// JEV-027 Two-phase check (evaluates actual side effect results)
 						if (this.deps.steeringPlane) {
 							const c27 = await this.deps.steeringPlane.requireCertificate("JEV-027", enrichedBundle, {
 								objectiveId,
@@ -1418,51 +1492,26 @@ export class ObjectiveExecutionController {
 							});
 							steeringCertRefs.push(c27.certificate_id);
 							if (c27.semantic_outcome !== "pass") {
+								// Rollback local state if push was not successful
+								if (!sideEffects.push || sideEffects.push.state === "failed") {
+									if (sideEffects.tag && sideEffects.tag.state !== "failed") {
+										try {
+											require("child_process").execSync(`git tag -d ${sideEffects.tag.detail.tag}`);
+										} catch (_e) {}
+									}
+									if (sideEffects.commit && sideEffects.commit.state !== "failed") {
+										try {
+											require("child_process").execSync("git reset --soft HEAD~1");
+										} catch (_e) {}
+									}
+								}
+
 								return {
 									status: "unrecoverable",
 									reasonCodes: ["delivery_certificate_rejected"],
 									cycleCount: this.cycleCounter,
 									deliveryBundle: enrichedBundle,
 								};
-							}
-						}
-
-						// Post-verify side effects
-						if (activeCharter) {
-							if (activeCharter.git.push) {
-								if (!this.deps.gitExecutor?.push) throw new Error("Git push unavailable");
-								const pushRes = await this.deps.gitExecutor.push();
-								const ref =
-									typeof pushRes === "object" && pushRes && "ref" in pushRes
-										? String((pushRes as any).ref)
-										: "pushed";
-								sideEffects.push = { state: "succeeded", detail: { ref } };
-							}
-							if (activeCharter.release.package_publish) {
-								if (!this.deps.releaseExecutor?.publish) throw new Error("Package publish unavailable");
-								const pubRes = await this.deps.releaseExecutor.publish();
-								const id =
-									typeof pubRes === "object" && pubRes && "id" in pubRes
-										? String((pubRes as any).id)
-										: "published";
-								sideEffects.publish = { state: "succeeded", detail: { publicationId: id } };
-							}
-							if (activeCharter.release.deploy_targets.length > 0) {
-								if (!this.deps.releaseExecutor?.deploy) throw new Error("Deploy unavailable");
-								sideEffects.deploy = [];
-								for (const target of activeCharter.release.deploy_targets) {
-									const depRes = await this.deps.releaseExecutor.deploy(target);
-									sideEffects.deploy.push({
-										state: "succeeded",
-										detail: {
-											target,
-											deploymentId:
-												typeof depRes === "object" && depRes && "id" in depRes
-													? String((depRes as any).id)
-													: "deployed",
-										},
-									});
-								}
 							}
 						}
 
