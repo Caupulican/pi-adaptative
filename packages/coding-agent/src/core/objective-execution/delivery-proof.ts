@@ -55,14 +55,20 @@ export function proveCommitAndPush(input: {
 	}
 
 	if (observation && pushNeedsProof && pushError === undefined) {
-		const remote = input.reportedPushRemote || observation.remote;
 		const ref = input.reportedPushRef ?? "";
 		const expectedSha = input.reportedCommitSha ?? observation.head;
 		const commitRejected = input.commitRequired && provenCommit === undefined;
-		if (!remote || observation.ref !== ref || observation.observedSha !== expectedSha || commitRejected) {
-			pushError = "push_sha_mismatch";
+		const remoteDisagrees = input.reportedPushRemote !== undefined && input.reportedPushRemote !== observation.remote;
+		if (
+			!observation.remote ||
+			remoteDisagrees ||
+			observation.ref !== ref ||
+			observation.observedSha !== expectedSha ||
+			commitRejected
+		) {
+			pushError = remoteDisagrees ? "push_remote_mismatch" : "push_sha_mismatch";
 		} else {
-			provenPush = { remote, ref, observedSha: observation.observedSha };
+			provenPush = { remote: observation.remote, ref, observedSha: observation.observedSha };
 		}
 	}
 

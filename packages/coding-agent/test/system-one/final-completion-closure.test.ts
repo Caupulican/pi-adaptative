@@ -117,6 +117,8 @@ async function deliver(options?: {
 	readonly commitSha?: string;
 	readonly head?: string;
 	readonly observedSha?: string;
+	readonly reportedRemote?: string;
+	readonly observedRemote?: string;
 	readonly residue?: readonly string[];
 	readonly push?: "ok" | "throw";
 	readonly grants?: boolean | "missing";
@@ -174,11 +176,11 @@ async function deliver(options?: {
 									commit: async () => ({ sha }),
 									push: async () => {
 										if (options?.push === "throw") throw new Error("rejected");
-										return { ref: "refs/heads/main", remote: "origin" };
+										return { ref: "refs/heads/main", remote: options?.reportedRemote ?? "origin" };
 									},
 									proveDelivery: async () => ({
 										head,
-										remote: "origin",
+										remote: options?.observedRemote ?? "origin",
 										ref: "refs/heads/main",
 										observedSha,
 										attributableResidue: options?.residue ?? [],
@@ -447,6 +449,26 @@ describe("FC-03 receipt binding", () => {
 		expect(result?.status).not.toBe("complete");
 		expect(store.phase).not.toBe("complete");
 		expect(result?.deliveryBundle?.side_effects?.commit?.state).toBe("failed");
+	});
+
+	it("a push whose reported remote differs from the observed remote is not complete", async () => {
+		const sha = "abc1234deadbeef";
+		const { result, store } = await deliver({
+			commitSha: sha,
+			head: sha,
+			observedSha: sha,
+			reportedRemote: "origin",
+			observedRemote: "upstream",
+			profile: "mechanical",
+			steeringMode: "system_one_optional",
+			wireTerminal: false,
+		});
+		expect(result?.status).not.toBe("complete");
+		expect(store.phase).not.toBe("complete");
+		expect(result?.deliveryBundle?.side_effects?.push?.state).toBe("failed");
+		if (result?.deliveryBundle?.side_effects?.push?.state === "failed") {
+			expect(result.deliveryBundle.side_effects.push.error).toBe("push_remote_mismatch");
+		}
 	});
 
 	it("a push whose observed sha differs from the commit sha is not complete", async () => {
