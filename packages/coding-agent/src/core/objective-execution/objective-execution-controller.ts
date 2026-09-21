@@ -85,6 +85,7 @@ export interface ObjectiveExecutionControllerDeps {
 		getLimitations?(objectiveId: string): Promise<readonly string[]> | readonly string[];
 	};
 	systemOne?: {
+		adapter?: { provenance?: string };
 		evaluateObjectiveRoute?(objectiveId: string, options?: { signal?: AbortSignal }): Promise<SemanticRouteJudgments>;
 		executeCompletionTransaction?(
 			isBugFix: boolean,

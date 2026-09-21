@@ -22,6 +22,30 @@ export interface DeliveryVerificationRecord {
 	readonly detail?: string;
 }
 
+export interface SideEffectReceipt<T = unknown> {
+	readonly state: "attempted" | "succeeded" | "proven";
+	readonly detail: T;
+}
+
+export interface CommitReceipt {
+	readonly sha: string;
+	readonly message?: string;
+}
+
+export interface PushReceipt {
+	readonly ref: string;
+	readonly remote?: string;
+}
+
+export interface PublishReceipt {
+	readonly publicationId: string;
+}
+
+export interface DeployReceipt {
+	readonly target: string;
+	readonly deploymentId?: string;
+}
+
 export interface DeliveryBundle {
 	readonly schema_version: "2.0";
 	readonly objective_id: string;
@@ -48,6 +72,13 @@ export interface DeliveryBundle {
 	readonly required_next_proof?: readonly string[];
 	readonly changed_files?: readonly string[];
 	readonly diff_digest?: string;
+	readonly side_effects?: {
+		readonly commit?: SideEffectReceipt<CommitReceipt>;
+		readonly push?: SideEffectReceipt<PushReceipt>;
+		readonly deploy?: readonly SideEffectReceipt<DeployReceipt>[];
+		readonly tag?: SideEffectReceipt<{ tag: string }>;
+		readonly publish?: SideEffectReceipt<PublishReceipt>;
+	};
 }
 
 export function buildDeliveryBundle(input: {
@@ -75,6 +106,13 @@ export function buildDeliveryBundle(input: {
 	readonly finalCommit?: string;
 	readonly pushRefs?: readonly string[];
 	readonly publicationRefs?: readonly string[];
+	readonly sideEffects?: {
+		readonly commit?: SideEffectReceipt<CommitReceipt>;
+		readonly push?: SideEffectReceipt<PushReceipt>;
+		readonly deploy?: readonly SideEffectReceipt<DeployReceipt>[];
+		readonly tag?: SideEffectReceipt<{ tag: string }>;
+		readonly publish?: SideEffectReceipt<PublishReceipt>;
+	};
 }): DeliveryBundle {
 	return {
 		schema_version: "2.0",
@@ -102,5 +140,6 @@ export function buildDeliveryBundle(input: {
 		required_next_proof: input.requiredNextProof,
 		changed_files: input.changedFiles,
 		diff_digest: input.diffDigest,
+		side_effects: input.sideEffects,
 	};
 }
