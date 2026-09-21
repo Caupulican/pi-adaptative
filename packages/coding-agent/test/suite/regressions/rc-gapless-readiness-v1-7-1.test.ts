@@ -772,7 +772,8 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 			const rows = component.render(200);
 			expect(rows).toHaveLength(1);
 			const row = stripAnsi(rows[0]);
-			expect(row).toContain("WORKING understand:");
+			// An idle session reads READY with the projection's own action, never a literal.
+			expect(row).toContain("READY Ready for operator instruction");
 			expect(row).toContain("ROUTE direct");
 			expect(row).toContain("JEV ready");
 			expect(row).toContain("COST $");

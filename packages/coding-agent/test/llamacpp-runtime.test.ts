@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
+import type { OwnedProcessHandle } from "@caupulican/pi-agent-core/process-tree";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	BONSAI_27B,
@@ -22,6 +23,8 @@ function fakeChild(pid: number | undefined): ManagedRuntimeChild {
 	let child: ManagedRuntimeChild;
 	child = {
 		pid,
+		exitCode: null,
+		signalCode: null,
 		kill: () => true,
 		unref: () => {},
 		on: ((_event: string, _listener: (...args: unknown[]) => void) => child) as ManagedRuntimeChild["on"],
@@ -813,8 +816,8 @@ describe("serve", () => {
 				backend: "cpu",
 			});
 			const binaryPath = join(agentDir, "runtimes", "prism-llamacpp", "bin", "llama-server");
-			const terminate = vi.fn<(pid: number) => void>();
-			const untrack = vi.fn<(pid: number) => void>();
+			const terminate = vi.fn<(child: OwnedProcessHandle) => void>();
+			const untrack = vi.fn<(child: OwnedProcessHandle) => void>();
 			const sleeps: number[] = [];
 			const runtime = new PrismLlamaCppRuntime({
 				agentDir,
@@ -837,8 +840,8 @@ describe("serve", () => {
 			});
 			expect(result).toEqual({ ok: false, error: "health-timeout" });
 			expect(sleeps).toHaveLength(3);
-			expect(terminate).toHaveBeenCalledWith(4244);
-			expect(untrack).toHaveBeenCalledWith(4244);
+			expect(terminate).toHaveBeenCalledWith(expect.objectContaining({ pid: 4244 }));
+			expect(untrack).toHaveBeenCalledWith(expect.objectContaining({ pid: 4244 }));
 			expect(runtime.isRunning()).toBe(false);
 		} finally {
 			rmSync(agentDir, { recursive: true, force: true });
@@ -854,9 +857,9 @@ describe("serve", () => {
 				backend: "cpu",
 			});
 			const binaryPath = join(agentDir, "runtimes", "prism-llamacpp", "bin", "llama-server");
-			const terminate = vi.fn<(pid: number) => void>();
-			const untrack = vi.fn<(pid: number) => void>();
-			const track = vi.fn<(pid: number) => void>();
+			const terminate = vi.fn<(child: OwnedProcessHandle) => void>();
+			const untrack = vi.fn<(child: OwnedProcessHandle) => void>();
+			const track = vi.fn<(child: OwnedProcessHandle) => void>();
 			let up = false;
 			const runtime = new PrismLlamaCppRuntime({
 				agentDir,
@@ -877,12 +880,12 @@ describe("serve", () => {
 				},
 			});
 			await runtime.serve({ modelPath: "/models/m.gguf", modelAlias: "acme/m", port: 8126, numCtx: 4096 });
-			expect(track).toHaveBeenCalledWith(4245);
+			expect(track).toHaveBeenCalledWith(expect.objectContaining({ pid: 4245 }));
 			expect(runtime.isRunning()).toBe(true);
 
 			expect(runtime.stop()).toEqual({ stopped: true });
-			expect(untrack).toHaveBeenCalledWith(4245);
-			expect(terminate).toHaveBeenCalledWith(4245);
+			expect(untrack).toHaveBeenCalledWith(expect.objectContaining({ pid: 4245 }));
+			expect(terminate).toHaveBeenCalledWith(expect.objectContaining({ pid: 4245 }));
 			expect(runtime.isRunning()).toBe(false);
 
 			expect(runtime.stop()).toEqual({ stopped: false });

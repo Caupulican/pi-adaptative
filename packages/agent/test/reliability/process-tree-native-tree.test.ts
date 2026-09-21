@@ -221,7 +221,8 @@ describe("native process-tree termination on this host", () => {
 		const tree = await startLiveTree();
 		expect(isProcessAlive(tree.grandchildPid)).toBe(true);
 
-		const result = killTreeNow(tree.child.pid as number);
+		// The owned handle authorizes the kill; no host-ancestry snapshot runs on this path.
+		const result = killTreeNow(tree.child);
 
 		expect(result).toEqual({ success: true });
 		await withDeadline(tree.childExited, "the child exit event");

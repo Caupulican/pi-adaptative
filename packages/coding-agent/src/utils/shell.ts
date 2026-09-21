@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
-import { killTreeNow } from "@caupulican/pi-agent-core/process-tree";
+import { killTreeNow, type OwnedProcessHandle } from "@caupulican/pi-agent-core/process-tree";
 import { spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
 import { withoutHarnessLaunchEnv } from "../core/harness-environment.ts";
@@ -275,33 +275,34 @@ export function getShellEnv(
 }
 
 /**
- * Detached child processes must be tracked so they can be killed on parent
- * shutdown signals (SIGHUP/SIGTERM).
+ * Detached child processes must be tracked so they can be killed on parent shutdown signals
+ * (SIGHUP/SIGTERM). The handle is kept, not the pid: an owned live handle authorizes its own tree
+ * kill, while a bare pid would have to pass the host-ancestry gate, whose observer can fail.
  */
-const trackedDetachedChildPids = new Set<number>();
+const trackedDetachedChildren = new Map<number, OwnedProcessHandle>();
 
-export function trackDetachedChildPid(pid: number): void {
-	trackedDetachedChildPids.add(pid);
+export function trackDetachedChild(child: OwnedProcessHandle): void {
+	if (child.pid !== undefined) trackedDetachedChildren.set(child.pid, child);
 }
 
-export function untrackDetachedChildPid(pid: number): void {
-	trackedDetachedChildPids.delete(pid);
+export function untrackDetachedChild(child: OwnedProcessHandle): void {
+	if (child.pid !== undefined) trackedDetachedChildren.delete(child.pid);
 }
 
 export function killTrackedDetachedChildren(): void {
-	for (const pid of trackedDetachedChildPids) {
-		killProcessTree(pid);
+	for (const child of trackedDetachedChildren.values()) {
+		killProcessTree(child);
 	}
-	trackedDetachedChildPids.clear();
+	trackedDetachedChildren.clear();
 }
 
 /**
- * Kill a process and all its children (cross-platform).
+ * Kill an owned process and all its children (cross-platform).
  *
  * Windows dispatches tree kill via synchronous `taskkill /F /T /PID <pid>`. Callers awaiting
  * full directory/handle release must still synchronize on the child process's terminal `close`
  * event to ensure Node and OS handles have completed teardown before directory removal.
  */
-export function killProcessTree(pid: number): void {
-	killTreeNow(pid);
+export function killProcessTree(child: OwnedProcessHandle): void {
+	killTreeNow(child);
 }

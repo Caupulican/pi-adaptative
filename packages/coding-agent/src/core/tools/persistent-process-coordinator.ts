@@ -9,7 +9,7 @@
 
 import type { ChildProcess } from "node:child_process";
 import { setChildProcessLoopRef } from "../../utils/child-process-ref.ts";
-import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
+import { killProcessTree, trackDetachedChild, untrackDetachedChild } from "../../utils/shell.ts";
 
 export interface PersistentChildHandlers {
 	onStdout(data: Buffer): void;
@@ -65,7 +65,7 @@ export class PersistentProcessCoordinator {
 		}
 		if (this.currentChild) throw new Error("Persistent process coordinator already owns a child");
 		this.currentChild = child;
-		if (child.pid) trackDetachedChildPid(child.pid);
+		trackDetachedChild(child);
 		this.trackTerminal(child);
 
 		child.stdout?.on("data", (data: Buffer) => {
@@ -112,7 +112,7 @@ export class PersistentProcessCoordinator {
 		// handle has been unref'd. Re-arm the already-installed close observer before killing so
 		// strict teardown can distinguish physical handle release from process exit.
 		setChildProcessLoopRef(child, true);
-		if (child.pid) killProcessTree(child.pid);
+		killProcessTree(child);
 		try {
 			child.kill();
 		} catch {
@@ -171,7 +171,7 @@ export class PersistentProcessCoordinator {
 
 	private clear(child: ChildProcess): boolean {
 		if (this.currentChild !== child) return false;
-		if (child.pid) untrackDetachedChildPid(child.pid);
+		untrackDetachedChild(child);
 		this.currentChild = null;
 		return true;
 	}

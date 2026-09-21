@@ -74,8 +74,14 @@ function classifySignalError(error: unknown): "gone" | "failed" {
 	return (error as NodeJS.ErrnoException).code === "ESRCH" ? "gone" : "failed";
 }
 
+/**
+ * The handle a caller holds for a process it spawned. Ownership of a live handle, not the host's
+ * ancestry, authorizes terminating that process tree; see {@link authorizeOwnedTermination}.
+ */
+export type OwnedProcessHandle = Pick<ChildProcess, "pid" | "exitCode" | "signalCode">;
+
 /** Never turn a malformed PID into POSIX group/broadcast semantics or kill our own host. */
-function isProtectedTerminationTarget(pid: number, onDiagnostic?: (message: string) => void): boolean {
+function isInvalidTerminationPid(pid: number, onDiagnostic?: (message: string) => void): boolean {
 	if (!isPositiveSafePid(pid) || pid > 2_147_483_647) {
 		onDiagnostic?.(`Process target ${pid} is not a valid termination PID`);
 		return true;
@@ -84,6 +90,15 @@ function isProtectedTerminationTarget(pid: number, onDiagnostic?: (message: stri
 		onDiagnostic?.(`Process target ${pid} is the system root, calling process, or direct parent`);
 		return true;
 	}
+	return false;
+}
+
+/**
+ * A pid-only request proves nothing about the target, so the host's ancestry decides: an unknown
+ * ancestry refuses, and a protected ancestor or process group refuses.
+ */
+function isProtectedTerminationTarget(pid: number, onDiagnostic?: (message: string) => void): boolean {
+	if (isInvalidTerminationPid(pid, onDiagnostic)) return true;
 	const protectedIds = readProcessTerminationProtection(onDiagnostic);
 	if (protectedIds === undefined) return true;
 	if (protectedIds.has(pid)) {
@@ -94,15 +109,35 @@ function isProtectedTerminationTarget(pid: number, onDiagnostic?: (message: stri
 }
 
 /**
- * Signal the process group, falling back to the pid itself.
+ * A live process this process spawned cannot be its host, an ancestor, or its process group: every
+ * ancestor predates the child, live PIDs are unique, and a PID still in use as a group or session
+ * id is never reissued while that use lasts. Ownership of the live handle therefore authorizes the
+ * tree kill by itself. Reading the host's ancestry here adds nothing but an observer that can fail,
+ * and on Windows that observer is a cold PowerShell/CIM enumeration a loaded host pushes past its
+ * bound, which used to refuse the harness its own children. The ancestry gate stays where it means
+ * something: pid-only requests ({@link killTreeNow} with a number).
+ *
+ * Returns the pid to signal, or undefined when the handle is not a live, valid target.
+ */
+function authorizeOwnedTermination(
+	child: OwnedProcessHandle,
+	onDiagnostic?: (message: string) => void,
+): number | undefined {
+	const pid = child.pid;
+	if (pid === undefined || isChildTerminal(child)) return undefined;
+	return isInvalidTerminationPid(pid, onDiagnostic) ? undefined : pid;
+}
+
+/**
+ * Signal the process group, falling back to the pid itself. The target is already authorized:
+ * either an owned live handle or a pid that passed the ancestry gate.
  *
  * `gone` requires BOTH attempts to answer ESRCH. A missing group followed by a denied direct signal
  * (or vice versa) is a contradiction, not proof of death: the surviving evidence says the pid is
  * still there and merely unreachable, so the result stays `failed` and the caller keeps its
  * uncertainty.
  */
-function signalTree(pid: number, signal: NodeJS.Signals): SignalDelivery {
-	if (isProtectedTerminationTarget(pid)) return "failed";
+function signalAuthorizedTree(pid: number, signal: NodeJS.Signals): SignalDelivery {
 	let groupOutcome: "gone" | "failed";
 	try {
 		process.kill(-pid, signal);
@@ -118,7 +153,7 @@ function signalTree(pid: number, signal: NodeJS.Signals): SignalDelivery {
 	}
 }
 
-function isChildTerminal(child: ChildProcess): boolean {
+function isChildTerminal(child: OwnedProcessHandle): boolean {
 	return child.exitCode !== null || child.signalCode !== null;
 }
 
@@ -151,10 +186,10 @@ export interface KillTreeNowResult {
 
 /** Graceful tree kill: SIGTERM → child exit event or one-shot deadline → SIGKILL. */
 export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<KillTreeOutcome> {
-	const pid = child.pid;
-	if (pid === undefined || isChildTerminal(child)) return Promise.resolve("already_dead");
-	if (isProtectedTerminationTarget(pid, opts?.onDiagnostic)) {
-		opts?.onDiagnostic?.(`Refusing to terminate protected, invalid, or unverified process target ${pid}`);
+	if (child.pid === undefined || isChildTerminal(child)) return Promise.resolve("already_dead");
+	const pid = authorizeOwnedTermination(child, opts?.onDiagnostic);
+	if (pid === undefined) {
+		opts?.onDiagnostic?.(`Refusing to terminate invalid process target ${child.pid}`);
 		return Promise.resolve("failed");
 	}
 
@@ -193,7 +228,7 @@ export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<K
 
 		if (process.platform === "win32") {
 			escalated = true;
-			const outcome = killTreeNow(pid);
+			const outcome = taskkillTree(pid);
 			if (!outcome.success && outcome.error) {
 				opts?.onDiagnostic?.(`Windows taskkill failed: ${outcome.error}`);
 			}
@@ -209,7 +244,7 @@ export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<K
 			return;
 		}
 
-		const termDelivery = signalTree(pid, "SIGTERM");
+		const termDelivery = signalAuthorizedTree(pid, "SIGTERM");
 		if (termDelivery === "gone") {
 			settle("already_dead");
 			return;
@@ -229,7 +264,7 @@ export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<K
 				return;
 			}
 			escalated = true;
-			const killDelivery = signalTree(pid, "SIGKILL");
+			const killDelivery = signalAuthorizedTree(pid, "SIGKILL");
 			if (killDelivery === "failed") {
 				// The signal never reached the GROUP, so the descendants it targets were never observed.
 				// The root pid's own liveness has a narrower scope and cannot stand in for them: a group
@@ -255,36 +290,58 @@ export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<K
 	});
 }
 
-/** Immediate tree kill (SIGKILL / synchronous taskkill). */
-export function killTreeNow(pid: number): KillTreeNowResult {
-	let protectionFailure: string | undefined;
-	if (
-		isProtectedTerminationTarget(pid, (message) => {
-			protectionFailure = message;
-		})
-	) {
-		return {
-			success: false,
-			error: `Refusing to terminate protected, invalid, or unverified process target ${pid}${protectionFailure ? `: ${protectionFailure}` : ""}`,
-		};
+/** Windows tree kill for an authorized pid: synchronous `taskkill /F /T`. */
+function taskkillTree(pid: number): KillTreeNowResult {
+	const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+	const result = spawnSync(taskkill, ["/F", "/T", "/PID", String(pid)], {
+		stdio: "ignore",
+		timeout: 10_000,
+		windowsHide: true,
+	});
+	if (result.error) {
+		return { success: false, error: result.error.message };
 	}
-	if (process.platform === "win32") {
-		const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
-		const result = spawnSync(taskkill, ["/F", "/T", "/PID", String(pid)], {
-			stdio: "ignore",
-			timeout: 10_000,
-			windowsHide: true,
-		});
-		if (result.error) {
-			return { success: false, error: result.error.message };
-		}
-		if (result.status !== 0) {
-			return { success: false, error: `taskkill exited with code ${result.status}` };
-		}
-		return { success: true };
+	if (result.status !== 0) {
+		return { success: false, error: `taskkill exited with code ${result.status}` };
 	}
+	return { success: true };
+}
+
+/**
+ * Immediate tree kill (SIGKILL / synchronous taskkill).
+ *
+ * An owned live handle is authorized by ownership; a bare pid must pass the ancestry gate, which
+ * refuses the host, its ancestors, its process groups, and any target whose ancestry cannot be read.
+ */
+export function killTreeNow(target: number | OwnedProcessHandle): KillTreeNowResult {
+	let refusal: string | undefined;
+	const onDiagnostic = (message: string) => {
+		refusal = message;
+	};
+	let pid: number | undefined;
+	if (typeof target === "number") {
+		pid = isProtectedTerminationTarget(target, onDiagnostic) ? undefined : target;
+		if (pid === undefined) {
+			return {
+				success: false,
+				error: `Refusing to terminate protected, invalid, or unverified process target ${target}${refusal ? `: ${refusal}` : ""}`,
+			};
+		}
+	} else {
+		if (target.pid !== undefined && isChildTerminal(target)) {
+			return { success: false, error: `Owned process ${target.pid} already exited; nothing was signalled` };
+		}
+		pid = authorizeOwnedTermination(target, onDiagnostic);
+		if (pid === undefined) {
+			return {
+				success: false,
+				error: `Refusing to terminate invalid owned process target ${target.pid}${refusal ? `: ${refusal}` : ""}`,
+			};
+		}
+	}
+	if (process.platform === "win32") return taskkillTree(pid);
 	// `success` means the signal was delivered, never that the tree is proven gone; the caller still
 	// owns confirming termination.
-	const success = signalTree(pid, "SIGKILL") === "delivered";
+	const success = signalAuthorizedTree(pid, "SIGKILL") === "delivered";
 	return { success, ...(success ? {} : { error: "Failed to send SIGKILL" }) };
 }

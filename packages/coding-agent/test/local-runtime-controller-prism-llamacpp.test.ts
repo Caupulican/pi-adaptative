@@ -37,6 +37,8 @@ function fakeChild(pid: number): ManagedRuntimeChild {
 	let child: ManagedRuntimeChild;
 	child = {
 		pid,
+		exitCode: null,
+		signalCode: null,
 		kill: () => true,
 		unref: () => {},
 		on: ((_event: string, _listener: (...args: unknown[]) => void) => child) as ManagedRuntimeChild["on"],

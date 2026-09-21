@@ -111,7 +111,8 @@ export function runtimeSleep(ms: number): Promise<void> {
 	return sleep(ms);
 }
 
-export type ManagedRuntimeChild = Pick<ChildProcess, "pid" | "kill" | "unref" | "on">;
+/** Terminal-state fields ride along so the owned handle can authorize its own tree kill. */
+export type ManagedRuntimeChild = Pick<ChildProcess, "pid" | "kill" | "unref" | "on" | "exitCode" | "signalCode">;
 export interface ManagedRuntimeSpawnOptions {
 	detached?: boolean;
 	stdio?: "ignore";

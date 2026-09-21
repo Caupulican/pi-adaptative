@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Terminating a process tree the caller owns (`killTree(child)`, and `killTreeNow` given the live `ChildProcess` handle) is authorized by ownership and no longer reads the host's process ancestry: a live process we spawned cannot be our host, an ancestor or our process group. The ancestry gate stays for pid-only `killTreeNow(pid)` requests. On Windows the ancestry observer is a cold PowerShell/CIM enumeration that a loaded host pushes past its five-second bound, which used to refuse the harness its own children and made the native process-tree control test fail on slow runners.
+
 ## [0.99.34] - 2026-09-21
 
 ## [0.99.33] - 2026-09-20

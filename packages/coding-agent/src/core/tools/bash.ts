@@ -32,8 +32,8 @@ import {
 	missingWorkingDirectoryMessage,
 	type PlatformShellToolName,
 	type ShellSessionContext,
-	trackDetachedChildPid,
-	untrackDetachedChildPid,
+	trackDetachedChild,
+	untrackDetachedChild,
 } from "../../utils/shell.ts";
 import type { ManagedToolResolver } from "../../utils/tools-manager.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
@@ -227,7 +227,7 @@ function createLocalShellOperations(
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
 		});
-		if (child.pid) trackDetachedChildPid(child.pid);
+		trackDetachedChild(child);
 		const terminationController = new AbortController();
 		const onAbort = () => terminationController.abort();
 		let silenceKilled = false;
@@ -265,7 +265,7 @@ function createLocalShellOperations(
 			return { exitCode: terminal.code, initialCwd: cwd };
 		} finally {
 			silenceWatchdog?.disarm();
-			if (child.pid) untrackDetachedChildPid(child.pid);
+			untrackDetachedChild(child);
 			if (signal) signal.removeEventListener("abort", onAbort);
 		}
 	};

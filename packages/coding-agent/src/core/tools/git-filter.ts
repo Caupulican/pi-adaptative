@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { getAgentDir } from "../../config.ts";
 import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { createSafeWriteStream } from "../../utils/safe-write-stream.ts";
-import { trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
+import { trackDetachedChild, untrackDetachedChild } from "../../utils/shell.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import { hasShellOnlySyntax, isChangeDirectoryInvocation, parseShellCommandSequence } from "./shell-command-parser.ts";
 
@@ -119,7 +119,7 @@ export async function runGitQuery(
 		stdio: ["ignore", "pipe", "pipe"],
 		windowsHide: true,
 	});
-	if (child.pid) trackDetachedChildPid(child.pid);
+	trackDetachedChild(child);
 
 	const stdoutChunks: Buffer[] = [];
 	const stderrChunks: Buffer[] = [];
@@ -204,7 +204,7 @@ export async function runGitQuery(
 			rawBytes: Buffer.concat([stderrBuffer, stdoutBuffer]),
 		};
 	} finally {
-		if (child.pid) untrackDetachedChildPid(child.pid);
+		untrackDetachedChild(child);
 		if (overflowStream !== undefined && !overflowStreamEnded) overflowStream.end();
 	}
 }

@@ -8,7 +8,7 @@ import {
 	POWERSHELL_SESSION_STDERR_READY_MARKER,
 	POWERSHELL_STARTUP_PROBE_TIMEOUT_MS,
 } from "../../utils/powershell-session-protocol.ts";
-import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
+import { killProcessTree, trackDetachedChild, untrackDetachedChild } from "../../utils/shell.ts";
 
 const MAX_STARTUP_DIAGNOSTIC_BYTES = 16 * 1024;
 const READY_BYTES = Buffer.from(POWERSHELL_SESSION_READY_MARKER, "latin1");
@@ -122,7 +122,7 @@ async function startFirstUsableSession(
 		// A warm start is spawned before anything owns it, and it is unreferenced so it cannot hold
 		// the loop open — which also means nothing would ever reap it. Track it so shutdown kills it
 		// like any other detached child; the claimer untracks it when it takes ownership.
-		if (child.pid) trackDetachedChildPid(child.pid);
+		trackDetachedChild(child);
 		try {
 			return await waitForReady(child, options.cwd, options.env, options.startupTimeoutMs);
 		} catch {
@@ -157,19 +157,19 @@ export async function claimCliPowerShellWarmStart(): Promise<ReadyCliPowerShellS
 	if (!ready) return null;
 	if (ready.child.exitCode !== null || ready.child.signalCode !== null || ready.child.killed) {
 		ready.releaseStartupListeners();
-		if (ready.child.pid) untrackDetachedChildPid(ready.child.pid);
+		untrackDetachedChild(ready.child);
 		return null;
 	}
 	// Ownership transfers to the caller, which tracks the child itself.
-	if (ready.child.pid) untrackDetachedChildPid(ready.child.pid);
+	untrackDetachedChild(ready.child);
 	return ready;
 }
 
 /** Kill an unowned warm-start child and stop tracking it. Safe to call more than once. */
 function releaseWarmStartChild(child: ChildProcess): void {
-	if (child.pid) untrackDetachedChildPid(child.pid);
+	untrackDetachedChild(child);
 	try {
-		if (child.exitCode === null && child.signalCode === null && child.pid) killProcessTree(child.pid);
+		if (child.exitCode === null && child.signalCode === null) killProcessTree(child);
 	} catch {
 		// Best-effort reaping of a process nothing owns.
 	}

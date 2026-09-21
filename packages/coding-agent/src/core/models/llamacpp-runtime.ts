@@ -1,11 +1,11 @@
-import type { ChildProcess } from "node:child_process";
 import { type Dirent, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { arch as osArch, platform as osPlatform } from "node:os";
 import { dirname, join, relative } from "node:path";
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import type { OwnedProcessHandle } from "@caupulican/pi-agent-core/process-tree";
 import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
-import { killProcessTree, trackDetachedChildPid, untrackDetachedChildPid } from "../../utils/shell.ts";
+import { killProcessTree, trackDetachedChild, untrackDetachedChild } from "../../utils/shell.ts";
 import { modelsDir as agentModelsDir, runtimesDir as agentRuntimesDir } from "../agent-paths.ts";
 import {
 	deriveHostLocalInferenceProfile,
@@ -17,6 +17,7 @@ import {
 	extractZipArchive,
 	fetchRuntimeDownload,
 	installRuntimeArchive,
+	type ManagedRuntimeChild,
 	type ManagedRuntimeSpawn,
 	removePartialDownload,
 	requireRuntimeStdin,
@@ -178,9 +179,9 @@ export interface PrismDownloadResult {
 export type PrismServeResult = { ok: true; baseUrl: string } | { ok: false; error: string };
 
 export interface PrismProcessLifecycle {
-	track(pid: number): void;
-	untrack(pid: number): void;
-	terminate(pid: number): void;
+	track(child: OwnedProcessHandle): void;
+	untrack(child: OwnedProcessHandle): void;
+	terminate(child: OwnedProcessHandle): void;
 }
 
 interface PrismInstallManifest {
@@ -252,7 +253,7 @@ export class PrismLlamaCppRuntime {
 	private readonly _healthPollIntervalMs: number;
 	private readonly _profile: LocalInferenceProfile;
 	private readonly _processLifecycle: PrismProcessLifecycle;
-	private _child: Pick<ChildProcess, "pid" | "kill" | "unref" | "on"> | undefined;
+	private _child: ManagedRuntimeChild | undefined;
 
 	constructor(args: {
 		agentDir: string;
@@ -271,8 +272,8 @@ export class PrismLlamaCppRuntime {
 		this._healthPollAttempts = args.deps?.healthPollAttempts ?? DEFAULT_HEALTH_POLL_ATTEMPTS;
 		this._healthPollIntervalMs = args.deps?.healthPollIntervalMs ?? DEFAULT_HEALTH_POLL_INTERVAL_MS;
 		this._processLifecycle = args.deps?.processLifecycle ?? {
-			track: trackDetachedChildPid,
-			untrack: untrackDetachedChildPid,
+			track: trackDetachedChild,
+			untrack: untrackDetachedChild,
 			terminate: killProcessTree,
 		};
 	}
@@ -563,7 +564,7 @@ export class PrismLlamaCppRuntime {
 			stdio: "ignore",
 			env: process.env,
 		});
-		if (child.pid) this._processLifecycle.track(child.pid);
+		if (child.pid) this._processLifecycle.track(child);
 		child.unref?.();
 		child.on("exit", () => {
 			if (this._child === child) {
@@ -590,8 +591,8 @@ export class PrismLlamaCppRuntime {
 		if (!child) return { stopped: false };
 		this._child = undefined;
 		if (child.pid) {
-			this._processLifecycle.untrack(child.pid);
-			this._processLifecycle.terminate(child.pid);
+			this._processLifecycle.untrack(child);
+			this._processLifecycle.terminate(child);
 		}
 		return { stopped: true };
 	}
