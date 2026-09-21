@@ -48,8 +48,10 @@ function noulOf(value: unknown): number | undefined {
 	if (value === true) return 1;
 	if (value === false) return 0;
 	if (value && typeof value === "object") {
-		const record = value as { noul?: unknown; value?: unknown };
+		const record = value as { noul?: unknown; value?: unknown; probabilityTrue?: unknown };
 		if (typeof record.noul === "number" && Number.isFinite(record.noul)) return record.noul;
+		if (typeof record.probabilityTrue === "number" && Number.isFinite(record.probabilityTrue))
+			return record.probabilityTrue;
 		if (typeof record.value === "number" && Number.isFinite(record.value)) return record.value;
 		if (record.value === true) return 1;
 		if (record.value === false) return 0;
@@ -85,6 +87,7 @@ export class WorkerSemanticSupervisor {
 	private readonly lastAssessmentAt = new Map<string, number>();
 	private readonly steeringInterventions = new Map<string, number>();
 	private readonly inFlightAssessments = new Set<string>();
+	private readonly consecutiveFailures = new Map<string, number>();
 
 	constructor(deps: WorkerSemanticSupervisorDeps) {
 		this.steering = deps.steering;
@@ -169,84 +172,88 @@ export class WorkerSemanticSupervisor {
 			let certId = `cert-supervision-${Date.now()}`;
 			let answers: Record<string, number>;
 
-			if (this.steering) {
-				const cert = await this.steering.requireCertificate("JEV-WORKER-SUPERVISION", state, {
-					objectiveId: attempt.objectiveId,
-					taskId: attempt.taskId,
-					evidenceRevision: state.evidenceRevision,
-					signal,
-				});
-				certId = cert.certificate_id;
-				answers = requireSupervisionAnswers((cert.answers ?? {}) as Record<string, unknown>);
-			} else if (this.decisionEngine) {
-				const program = {
-					schema_version: "1.0",
-					program_id: `supervision_eval_${Date.now()}`,
-					description: "Live worker supervision assessment",
-					decisions: [
-						{
-							id: "meaningful_progress",
-							kind: "noul",
-							type: "noul",
-							instruction: "Is the worker making meaningful progress?",
-						},
-						{
-							id: "worker_stuck",
-							kind: "noul",
-							type: "noul",
-							instruction: "Is the worker stuck or making no progress?",
-						},
-						{
-							id: "work_off_track",
-							kind: "noul",
-							type: "noul",
-							instruction: "Has the worker drifted off-track from the mission?",
-						},
-						{
-							id: "strategy_repetition",
-							kind: "noul",
-							type: "noul",
-							instruction: "Is the worker repeating failing strategies without modification?",
-						},
-						{
-							id: "needs_independent_verification",
-							kind: "noul",
-							type: "noul",
-							instruction: "Is the implementation finished and ready for independent verification?",
-						},
-						{
-							id: "specialist_gap_present",
-							kind: "noul",
-							type: "noul",
-							instruction: "Does this require a different domain specialist?",
-						},
-						{
-							id: "capability_gap_present",
-							kind: "noul",
-							type: "noul",
-							instruction: "Is the worker missing an essential capability?",
-						},
-					],
-				};
+			try {
+				if (this.steering) {
+					const cert = await this.steering.requireCertificate("JEV-WORKER-SUPERVISION", state, {
+						objectiveId: attempt.objectiveId,
+						taskId: attempt.taskId,
+						evidenceRevision: state.evidenceRevision,
+						signal,
+					});
+					certId = cert.certificate_id;
+					answers = requireSupervisionAnswers((cert.answers ?? {}) as Record<string, unknown>);
+				} else if (this.decisionEngine) {
+					const program = {
+						schema_version: "2.0",
+						id: `supervision_eval_${Date.now()}`,
+						version: "1.0.0",
+						description: "Live worker supervision assessment",
+						decisions: [
+							{
+								id: "meaningful_progress",
+								kind: "boolean",
+								instruction: "Is the worker making meaningful progress?",
+							},
+							{
+								id: "worker_stuck",
+								kind: "boolean",
+								instruction: "Is the worker stuck or making no progress?",
+							},
+							{
+								id: "work_off_track",
+								kind: "boolean",
+								instruction: "Has the worker drifted off-track from the mission?",
+							},
+							{
+								id: "strategy_repetition",
+								kind: "boolean",
+								instruction: "Is the worker repeating failing strategies without modification?",
+							},
+							{
+								id: "needs_independent_verification",
+								kind: "boolean",
+								instruction: "Is the implementation finished and ready for independent verification?",
+							},
+							{
+								id: "specialist_gap_present",
+								kind: "boolean",
+								instruction: "Does this require a different domain specialist?",
+							},
+							{
+								id: "capability_gap_present",
+								kind: "boolean",
+								instruction: "Is the worker missing an essential capability?",
+							},
+						],
+					};
 
-				const evalRes = await this.decisionEngine.evaluate(program, state as any, {
-					consequence: "medium",
-					signal,
-				});
-				answers = requireSupervisionAnswers(
-					(evalRes.answers ?? (evalRes.results as Record<string, unknown>) ?? {}) as Record<string, unknown>,
-				);
-			} else {
-				// Unbound supervisor (tests / no plane): local stall/repeat heuristics, never empty answers.
-				answers = {
-					meaningful_progress: attempt.isStalled ? 0.1 : 0.9,
-					worker_stuck: attempt.isStalled ? 0.9 : 0.1,
-					strategy_repetition: attempt.isRepeating ? 0.9 : 0.1,
-					work_off_track: 0.1,
-					needs_independent_verification: 0.1,
-					specialist_gap_present: 0.1,
-					capability_gap_present: 0.1,
-				};
+					const evalRes = await this.decisionEngine.evaluate(program as any, state as any, {
+						consequence: "medium",
+						signal,
+					});
+					answers = requireSupervisionAnswers(
+						(evalRes.answers ?? (evalRes.results as Record<string, unknown>) ?? {}) as Record<string, unknown>,
+					);
+				} else {
+					// Unbound supervisor (tests / no plane): local stall/repeat heuristics, never empty answers.
+					answers = {
+						meaningful_progress: attempt.isStalled ? 0.1 : 0.9,
+						worker_stuck: attempt.isStalled ? 0.9 : 0.1,
+						strategy_repetition: attempt.isRepeating ? 0.9 : 0.1,
+						work_off_track: 0.1,
+						needs_independent_verification: 0.1,
+						specialist_gap_present: 0.1,
+						capability_gap_present: 0.1,
+					};
+				}
+				this.consecutiveFailures.delete(attempt.attemptId);
+			} catch (err) {
+				const fails = (this.consecutiveFailures.get(attempt.attemptId) ?? 0) + 1;
+				this.consecutiveFailures.set(attempt.attemptId, fails);
+				if (fails >= 3) {
+					return undefined; // Capped repeated identical failed evaluations
+				}
+				throw err;
 			}
 
 			// FR-064: Deterministic Intervention Policy
