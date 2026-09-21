@@ -610,8 +610,8 @@ describe("AgentSession compaction characterization", () => {
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 
-		// Large text message that exceeds the threshold (contextWindow 2000 - reserveTokens 1000 = 1000 tokens ≈ 4000 chars)
-		const longText = "a".repeat(6000);
+		// Exceed the hard trigger after 25% reserve clamp (window 2000 → hard at 1500 tokens).
+		const longText = "a".repeat(20_000);
 		const usageLessAssistant = createAssistant(harness, {
 			stopReason: "stop",
 			totalTokens: 0,
@@ -647,7 +647,7 @@ describe("AgentSession compaction characterization", () => {
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
 
-		const longText = "a".repeat(6000);
+		const longText = "a".repeat(20_000);
 		const usageLessErrorAssistant = createAssistant(harness, {
 			stopReason: "error",
 			errorMessage: "generic error",

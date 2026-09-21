@@ -178,7 +178,7 @@ describe("auto-compaction applies the compacted context (offline pipeline)", () 
 		// Hard trigger for this model (adapted reserve clamps to 25% of window):
 		// contextWindow - min(reserve, window*0.25). Fake usage must exceed it.
 		const contextWindow = model.contextWindow ?? 200_000;
-		const hugeUsage = Math.floor(contextWindow * 0.9);
+		const hugeUsage = Math.max(1, contextWindow - 1);
 
 		const agent = new Agent({
 			getApiKey: () => "test-key",

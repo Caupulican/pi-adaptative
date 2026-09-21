@@ -255,7 +255,7 @@ describe("AgentSession compaction honors local-model readiness (offline pipeline
 	function createSession(localRuntimeDeps: LocalRuntimeDeps, tripAutoCompactionThreshold: boolean) {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const contextWindow = model.contextWindow ?? 200_000;
-		const hugeUsage = Math.floor(contextWindow * 0.9);
+		const hugeUsage = Math.max(1, contextWindow - 1);
 		const smallUsage = 200;
 
 		const agent = new Agent({

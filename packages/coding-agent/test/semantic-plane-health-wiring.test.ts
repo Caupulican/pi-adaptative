@@ -1,8 +1,36 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { SemanticDecisionEngine } from "../src/core/decision/engine.ts";
-import type { DecisionEvaluation } from "../src/core/decision/evaluation.ts";
+import { createDecisionEvaluation, type DecisionEvaluation } from "../src/core/decision/evaluation.ts";
 import { SystemOneSteeringPlane } from "../src/core/steering/system-one-steering-plane.ts";
+import { WORKER_SUPERVISION_DECISION_IDS } from "../src/core/supervision/worker-semantic-supervisor.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
+
+function supervisionEvaluation(): DecisionEvaluation {
+	const results = Object.fromEntries(
+		WORKER_SUPERVISION_DECISION_IDS.map((id) => [
+			id,
+			{
+				kind: "boolean" as const,
+				value: false,
+				probabilityTrue: 0.1,
+				confidence: {
+					value: 0.9,
+					provenance: "native_calibrated" as const,
+					isCalibrated: true,
+					noulProbabilityTrue: 0.1,
+				},
+			},
+		]),
+	);
+	return createDecisionEvaluation({
+		programId: "pi:steering:program:JEV-WORKER-SUPERVISION:1.0",
+		programVersion: "1.0.0",
+		engineId: "faux-plane",
+		model: "faux/jev",
+		confidenceProvenance: "native_calibrated",
+		results,
+	});
+}
 
 let harness: Harness | undefined;
 
@@ -36,7 +64,7 @@ function deferredEngine(): {
 			evaluate: (): Promise<DecisionEvaluation> => {
 				state.calls += 1;
 				return new Promise<DecisionEvaluation>((resolve, reject) => {
-					release = () => resolve({ program_id: "p", results: {} } as unknown as DecisionEvaluation);
+					release = () => resolve(supervisionEvaluation());
 					fail = reject;
 				});
 			},
