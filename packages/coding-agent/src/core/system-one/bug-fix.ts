@@ -1,4 +1,4 @@
-/** The same bug-fix text the objective controller already uses for JEV-019. */
+/** A bug-fix request names the word bug, bugs, or bugfix. The letter sequence inside debug does not count. */
 export function requestsBugFix(id: string, description: string | undefined): boolean {
-	return id.toLowerCase().includes("bug") || (description ?? "").toLowerCase().includes("bug");
+	return /\bbugs?\b|\bbug[-_]?fix\b/i.test(`${id}\n${description ?? ""}`);
 }

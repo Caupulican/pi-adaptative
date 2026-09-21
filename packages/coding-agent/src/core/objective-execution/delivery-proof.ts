@@ -1,7 +1,4 @@
 import { execFile } from "node:child_process";
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { CommitReceipt, PublishReceipt, PushReceipt, SideEffectReceipt } from "./delivery-bundle.ts";
 
 /** Mechanical observation supplied by the git executor. Generic completion does not open a network connection. */
@@ -202,40 +199,20 @@ function attributableResidue(porcelain: string, candidateUntrackedPaths: readonl
 	return residue;
 }
 
-let noninteractiveGpg: string | undefined;
-
-/** git's gpg.program is one executable, so batch pinentry has to live in that executable. */
-function gpgProgram(): string {
-	if (noninteractiveGpg) return noninteractiveGpg;
-	const dir = join(tmpdir(), "pi-adaptative-gpg");
-	mkdirSync(dir, { recursive: true });
-	const script = join(dir, "gpg-batch.mjs");
-	writeFileSync(
-		script,
-		[
-			"#!/usr/bin/env node",
-			"import { spawnSync } from 'node:child_process';",
-			"const child = spawnSync('gpg', ['--batch', '--pinentry-mode', 'error', ...process.argv.slice(2)], { stdio: 'inherit' });",
-			"if (child.error) { process.stderr.write(child.error.message + '\\n'); process.exit(1); }",
-			"process.exit(child.status ?? 1);",
-			"",
-		].join("\n"),
-	);
-	if (process.platform === "win32") {
-		const cmd = join(dir, "gpg-batch.cmd");
-		writeFileSync(cmd, `@echo off\r\nnode "%~dp0gpg-batch.mjs" %*\r\n`);
-		noninteractiveGpg = cmd;
-		return cmd;
-	}
-	chmodSync(script, 0o755);
-	noninteractiveGpg = script;
-	return script;
-}
-
-async function currentBranchRef(repoRoot: string): Promise<string> {
+/** The branch's own upstream. No remote name or ref is assumed. */
+async function trackedUpstream(repoRoot: string): Promise<{ remote: string; ref: string }> {
 	const branch = await gitText(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
 	if (branch === "HEAD") throw new Error("Detached HEAD cannot be pushed");
-	return `refs/heads/${branch}`;
+	let remote = "";
+	let ref = "";
+	try {
+		remote = await gitText(repoRoot, ["config", "--get", `branch.${branch}.remote`]);
+		ref = await gitText(repoRoot, ["config", "--get", `branch.${branch}.merge`]);
+	} catch {
+		throw new Error(`Branch ${branch} has no upstream`);
+	}
+	if (!remote || !ref.startsWith("refs/")) throw new Error(`Branch ${branch} has no upstream`);
+	return { remote, ref };
 }
 
 /** Local git commit, push, and proof. Network stays inside this executor, not in completion control flow. */
@@ -251,25 +228,26 @@ export function createRepoGitDelivery(repoRoot: string): {
 			const status = await gitText(repoRoot, ["status", "--porcelain"]);
 			if (status) {
 				await gitText(repoRoot, ["add", "-A"]);
-				await gitText(repoRoot, ["-c", `gpg.program=${gpgProgram()}`, "commit", "-m", message]);
+				await gitText(repoRoot, ["commit", "-m", message]);
 			}
 			return { sha: await gitText(repoRoot, ["rev-parse", "HEAD"]) };
 		},
 		async push() {
-			const remote = "origin";
-			const ref = await currentBranchRef(repoRoot);
-			await gitText(repoRoot, ["push", remote, `HEAD:${ref}`]);
-			return { remote, ref };
+			const tracked = await trackedUpstream(repoRoot);
+			await gitText(repoRoot, ["push", tracked.remote, `HEAD:${tracked.ref}`]);
+			return tracked;
 		},
 		async tag(name = "objective") {
-			// -m keeps tag.gpgsign from opening an editor. The gpg program fails instead of prompting.
-			await gitText(repoRoot, ["-c", `gpg.program=${gpgProgram()}`, "tag", "-m", name, name]);
+			// -m supplies the message git asks for when this repo signs or annotates tags.
+			await gitText(repoRoot, ["tag", "-m", name, name]);
 			return { tag: name };
 		},
 		async proveDelivery(query) {
 			const head = await gitText(repoRoot, ["rev-parse", "HEAD"]);
-			const remote = query.remote ?? "origin";
-			const ref = query.ref ?? (await currentBranchRef(repoRoot));
+			const tracked =
+				query.remote && query.ref ? { remote: query.remote, ref: query.ref } : await trackedUpstream(repoRoot);
+			const remote = tracked.remote;
+			const ref = tracked.ref;
 			const listed = await gitText(repoRoot, ["ls-remote", remote, ref]);
 			const observedSha = listed.split(/\s+/)[0] ?? "";
 			if (!observedSha) {

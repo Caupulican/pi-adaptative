@@ -10,9 +10,17 @@ import { ObjectiveExecutionController } from "../../src/core/objective-execution
 import { createRepoReleaseDelivery } from "../../src/core/objective-execution/release-delivery.ts";
 import type { TaskRuntimeProjection } from "../../src/core/orchestration/task-runtime.ts";
 import { SystemOneSteeringPlane } from "../../src/core/steering/system-one-steering-plane.ts";
+import { requestsBugFix } from "../../src/core/system-one/bug-fix.ts";
 import { SystemOneController, TerminalCompletionConflictError } from "../../src/core/system-one/controller.ts";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
 import { IntegrityHookCoordinator } from "../../src/core/system-one/integrity-hooks.ts";
+
+function trackUpstream(root: string, remote: string): string {
+	const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+	execFileSync("git", ["config", `branch.${branch}.remote`, remote], { cwd: root });
+	execFileSync("git", ["config", `branch.${branch}.merge`, `refs/heads/${branch}`], { cwd: root });
+	return branch;
+}
 
 function gitRepo(): string {
 	const root = mkdtempSync(join(tmpdir(), "pi-final-completion-"));
@@ -628,6 +636,7 @@ describe("FC-03 receipt binding", () => {
 		const committed = await delivery.commit("two");
 		const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
 		expect(committed.sha).toBe(head);
+		trackUpstream(root, "origin");
 		const pushed = await delivery.push();
 		const proof = await delivery.proveDelivery({
 			candidateDigest: "digest",
@@ -662,7 +671,7 @@ describe("FC-03 receipt binding", () => {
 		writeFileSync(join(root, "README.md"), "two\n");
 		const delivery = createRepoGitDelivery(root);
 		await delivery.commit("two");
-		const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+		const branch = trackUpstream(root, "origin");
 		await delivery.push();
 		execFileSync("git", ["checkout", "--detach"], { cwd: root });
 		await expect(delivery.push()).rejects.toThrow("Detached HEAD cannot be pushed");
@@ -672,6 +681,29 @@ describe("FC-03 receipt binding", () => {
 		if (branch !== "main") {
 			expect(() => execFileSync("git", ["rev-parse", "refs/heads/main"], { cwd: bare })).toThrow();
 		}
+	});
+
+	it("a push uses the branch upstream and does not invent origin", async () => {
+		const root = gitRepo();
+		const bare = mkdtempSync(join(tmpdir(), "pi-final-upstream-"));
+		execFileSync("git", ["init", "--bare"], { cwd: bare });
+		execFileSync("git", ["remote", "add", "upstream", bare], { cwd: root });
+		writeFileSync(join(root, "README.md"), "two\n");
+		const delivery = createRepoGitDelivery(root);
+		await delivery.commit("two");
+		await expect(delivery.push()).rejects.toThrow(/no upstream/);
+		const before = execFileSync("git", ["for-each-ref", "--format=%(refname)", "refs/heads"], {
+			cwd: bare,
+			encoding: "utf8",
+		}).trim();
+		expect(before).toBe("");
+		const branch = trackUpstream(root, "upstream");
+		const pushed = await delivery.push();
+		expect(pushed.remote).toBe("upstream");
+		expect(pushed.ref).toBe(`refs/heads/${branch}`);
+		const remote = execFileSync("git", ["rev-parse", pushed.ref], { cwd: bare, encoding: "utf8" }).trim();
+		const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+		expect(remote).toBe(head);
 	});
 
 	it("tag.gpgsign failure does not create an unsigned tag", async () => {
@@ -748,7 +780,15 @@ describe("completion catalog thresholds and release binding", () => {
 		expect(challenged.failed_semantic_predicates).toContain("missing_requirement");
 	});
 
-	it("binds npm publish only for a public package and deploy only with a status script", async () => {
+	it("names bug and bugfix, and does not treat debug as a bug fix", () => {
+		expect(requestsBugFix("bug-obj", "t")).toBe(true);
+		expect(requestsBugFix("obj", "fix the bugs")).toBe(true);
+		expect(requestsBugFix("obj", "bugfix the parser")).toBe(true);
+		expect(requestsBugFix("debug-obj", "run the debugger")).toBe(false);
+		expect(requestsBugFix("obj", "debugging notes")).toBe(false);
+	});
+
+	it("binds npm publish only for a public package, and deploy from script stdout or a status script", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-release-"));
 		expect(createRepoReleaseDelivery(root)).toBeUndefined();
 		writeFileSync(join(root, "package.json"), JSON.stringify({ name: "pkg", version: "1.0.0", private: true }));
@@ -758,11 +798,19 @@ describe("completion catalog thresholds and release binding", () => {
 		expect(typeof publishOnly?.publish).toBe("function");
 		expect(typeof publishOnly?.provePublish).toBe("function");
 		expect(publishOnly?.deploy).toBeUndefined();
+		writeFileSync(join(root, "id.js"), "process.stdout.write('dep-stdout');\n");
 		writeFileSync(
 			join(root, "package.json"),
-			JSON.stringify({ name: "pkg", version: "1.0.0", private: true, scripts: { deploy: "echo go" } }),
+			JSON.stringify({ name: "pkg", version: "1.0.0", private: true, scripts: { deploy: "node id.js" } }),
 		);
-		expect(createRepoReleaseDelivery(root)?.deploy).toBeUndefined();
+		const stdoutDeploy = createRepoReleaseDelivery(root);
+		expect(stdoutDeploy?.publish).toBeUndefined();
+		await expect(stdoutDeploy?.proveDeploy?.("staging")).rejects.toThrow("Deploy proof unavailable");
+		await expect(stdoutDeploy?.deploy?.("staging")).resolves.toEqual({ id: "dep-stdout" });
+		await expect(stdoutDeploy?.proveDeploy?.("staging")).resolves.toEqual({
+			target: "staging",
+			deploymentId: "dep-stdout",
+		});
 		writeFileSync(join(root, "deploy.js"), "process.exit(0);\n");
 		writeFileSync(join(root, "status.js"), "process.stdout.write('dep-1');\n");
 		writeFileSync(

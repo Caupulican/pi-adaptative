@@ -51,13 +51,8 @@ function isDeployScript(name: string): boolean {
 	return target.length > 0 && !target.includes(":");
 }
 
-function isStatusScript(name: string): boolean {
-	return name === "deploy:status" || (name.startsWith("deploy:") && name.endsWith(":status"));
-}
-
-function hasProvableDeploy(scripts: Record<string, string>): boolean {
-	const names = Object.keys(scripts);
-	return names.some(isDeployScript) && names.some(isStatusScript);
+function hasDeploy(scripts: Record<string, string>): boolean {
+	return Object.keys(scripts).some(isDeployScript);
 }
 
 function deployScriptFor(scripts: Record<string, string>, target: string): string | undefined {
@@ -105,7 +100,8 @@ function run(command: string, args: readonly string[], cwd: string): Promise<str
 
 /**
  * Publish and deploy for the session repo. Absent when the repo has neither a publishable
- * package nor a deploy script paired with a status script that prints the deployment id.
+ * package nor a deploy script. Publish does not run package lifecycle scripts.
+ * A status script is an independent deployment id. Without one, the id is the deploy script's stdout.
  */
 export function createRepoReleaseDelivery(
 	repoRoot: string,
@@ -113,9 +109,10 @@ export function createRepoReleaseDelivery(
 ): RepoReleaseDelivery | undefined {
 	const initial = readManifest(repoRoot);
 	const publishable = publishableId(initial) !== undefined;
-	const deployable = hasProvableDeploy(scriptsOf(initial));
+	const deployable = hasDeploy(scriptsOf(initial));
 	if (!publishable && !deployable) return undefined;
 	const npm = npmInvocation(options?.npmCommand);
+	const observedDeployIds = new Map<string, string>();
 
 	async function npmRun(script: string, target: string): Promise<string> {
 		return run(npm.command, [...npm.args, "run", script, "--silent", "--", target], repoRoot);
@@ -127,7 +124,7 @@ export function createRepoReleaseDelivery(
 					async publish() {
 						const id = publishableId(readManifest(repoRoot));
 						if (!id) throw new Error("Package publish unavailable");
-						await run(npm.command, [...npm.args, "publish"], repoRoot);
+						await run(npm.command, [...npm.args, "publish", "--ignore-scripts"], repoRoot);
 						return { id };
 					},
 					async provePublish(publicationId: string) {
@@ -149,18 +146,22 @@ export function createRepoReleaseDelivery(
 					async deploy(target: string) {
 						const scripts = scriptsOf(readManifest(repoRoot));
 						const script = deployScriptFor(scripts, target);
+						if (!script) throw new Error(`Deploy unavailable for ${target}`);
 						const status = statusScriptFor(scripts, target);
-						if (!script || !status) throw new Error(`Deploy unavailable for ${target}`);
-						await npmRun(script, target);
-						const id = await npmRun(status, target);
-						if (!id) throw new Error("Deploy status returned an empty id");
+						const stdout = await npmRun(script, target);
+						const id = status ? await npmRun(status, target) : stdout;
+						if (!id) {
+							throw new Error(
+								status ? "Deploy status returned an empty id" : "Deploy script did not report a deployment id",
+							);
+						}
+						observedDeployIds.set(target, id);
 						return { id };
 					},
 					async proveDeploy(target: string) {
 						const status = statusScriptFor(scriptsOf(readManifest(repoRoot)), target);
-						if (!status) throw new Error(`Deploy unavailable for ${target}`);
-						const id = await npmRun(status, target);
-						if (!id) throw new Error("Deploy status returned an empty id");
+						const id = status ? await npmRun(status, target) : observedDeployIds.get(target);
+						if (!id) throw new Error(status ? "Deploy status returned an empty id" : "Deploy proof unavailable");
 						return { target, deploymentId: id };
 					},
 				}

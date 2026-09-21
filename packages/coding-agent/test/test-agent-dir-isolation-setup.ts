@@ -1,3 +1,4 @@
+import "../../../scripts/vitest-worker-parent-exit.ts";
 import "./test-launch-env-setup.ts";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

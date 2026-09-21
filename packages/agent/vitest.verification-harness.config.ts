@@ -6,6 +6,7 @@ export default defineConfig({
 		globals: true,
 		environment: "node",
 		testTimeout: 30_000,
+		setupFiles: ["../../scripts/vitest-worker-parent-exit.ts"],
 		execArgv: ["--conditions=pi-source", "--expose-gc"],
 		experimental: { viteModuleRunner: false },
 		include: [

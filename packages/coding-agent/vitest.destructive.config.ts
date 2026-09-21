@@ -16,6 +16,7 @@ export default defineConfig({
 		// worker/goal runs per test; generous relative to the default suite's 30s (blueprint §0.4:
 		// full suite budget is 15 minutes, not per-test).
 		testTimeout: 120_000,
+		setupFiles: ["../../scripts/vitest-worker-parent-exit.ts"],
 		execArgv: ["--conditions=pi-source"],
 		experimental: {
 			viteModuleRunner: false,

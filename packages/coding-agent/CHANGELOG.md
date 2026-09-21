@@ -14,7 +14,8 @@
 - A push receipt is proven only when its remote is the remote the delivery proof port observed. A reported remote that disagrees is not complete.
 - The live session commits and pushes through a local git delivery port and proves the resulting SHA. Tag, publish, and deploy receipts are proven by that same kind of observation instead of the executor's returned id alone.
 - Steering question packs are loaded with a normal import. JEV-025 and JEV-026 grade that completion catalog at the same hard-pass thresholds as `decideFinalCompletion`. A missing retired id such as `acceptance_satisfied` is not a failure.
-- The inner completion transaction receives the objective's bug-fix flag. Commit and tag follow git's signing config, with a tag message so signing does not open an editor. A detached HEAD push fails. The session binds npm publish or deploy only when the repo has a publishable package or a deploy script with a status script.
+- The inner completion transaction receives the objective's bug-fix flag. Commit and tag use the repo's own signer, with a tag message so an annotated tag does not open an editor. A push goes to that branch's configured upstream. A detached HEAD or a branch with no upstream is not pushed. The session binds npm publish or deploy only when the repo has a publishable package or a deploy script.
+- A bug-fix match is the word `bug`, `bugs`, or `bugfix`. `debug` is not a bug fix. `npm publish` does not run package lifecycle scripts. A deploy script without a status script is proven from its own stdout.
 
 ## [0.99.38] - 2026-09-21
 

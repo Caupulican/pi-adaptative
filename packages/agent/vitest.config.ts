@@ -15,6 +15,7 @@ export default defineConfig({
 				: []),
 		],
 		testTimeout: 30000, // 30 seconds for API calls
+		setupFiles: ["../../scripts/vitest-worker-parent-exit.ts"],
 		execArgv: ["--conditions=pi-source", "--expose-gc"],
 		experimental: { viteModuleRunner: false },
 	},
