@@ -56,6 +56,17 @@ function compileCandidateFitChoices(
 	return options;
 }
 
+function _buildDecisionsFromPack(packName: any, decisions: any[]) {
+	const { getQuestionPack } = require("../system-one/catalog.ts");
+	const pack = getQuestionPack(packName);
+	for (const [id, q] of Object.entries(pack) as [string, any][]) {
+		decisions.push({
+			kind: q.type === "choice" ? "choice" : q.type === "score" ? "score" : "boolean",
+			id,
+			instruction: q.instructions,
+		});
+	}
+}
 export function compileDecisionProgramForCheckpoint(checkpointId: string, state: unknown): DecisionProgram {
 	const decisions: DecisionDefinition[] = [];
 	const s = (state ?? {}) as Record<string, unknown>;
@@ -461,50 +472,12 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 		}
 
 		case "JEV-025": {
-			decisions.push(
-				{
-					kind: "boolean",
-					id: "acceptance_satisfied",
-					instruction: "Are all objective acceptance criteria proven satisfied?",
-				},
-				{
-					kind: "boolean",
-					id: "requirements_complete",
-					instruction: "Are all requested deliverables fully present?",
-				},
-				{
-					kind: "boolean",
-					id: "verification_conclusive",
-					instruction: "Is verification evidence deterministic and fresh?",
-				},
-			);
+			_buildDecisionsFromPack("completion", decisions);
 			break;
 		}
 
 		case "JEV-026": {
-			// Cold adversarial challenge
-			decisions.push(
-				{
-					kind: "boolean",
-					id: "unhandled_edge_cases",
-					instruction: "Are unhandled edge cases or defects present?",
-				},
-				{
-					kind: "boolean",
-					id: "hidden_regressions",
-					instruction: "Are hidden regressions or broken invariants suspected?",
-				},
-				{
-					kind: "boolean",
-					id: "assumption_violations",
-					instruction: "Does delivery rely on unverified assumptions?",
-				},
-				{
-					kind: "boolean",
-					id: "adversarial_approved",
-					instruction: "Does the implementation pass adversarial challenge?",
-				},
-			);
+			_buildDecisionsFromPack("completion_challenge", decisions);
 			break;
 		}
 
@@ -884,6 +857,11 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 					id: "capability_gap_present",
 					instruction: "Is the worker missing an essential capability?",
 				},
+				{
+					kind: "boolean",
+					id: "external_block_present",
+					instruction: "Is the worker blocked by an external dependency or system?",
+				},
 			);
 			break;
 		}
@@ -962,6 +940,11 @@ export const STEERING_QUESTION_PACKS: Record<string, SteeringQuestionPack> = {
 				id: "capability_gap_present",
 				kind: "boolean",
 				description: "Is the worker missing an essential capability?",
+			},
+			{
+				id: "external_block_present",
+				kind: "boolean",
+				description: "Is the worker blocked by an external dependency or system?",
 			},
 		],
 	},

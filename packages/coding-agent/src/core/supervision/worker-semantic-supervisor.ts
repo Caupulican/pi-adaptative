@@ -86,6 +86,7 @@ export class WorkerSemanticSupervisor {
 	private readonly minElapsedMs: number;
 
 	private readonly lastAssessmentAt = new Map<string, number>();
+	private readonly lastAssessmentHash = new Map<string, string>();
 	private readonly steeringInterventions = new Map<string, number>();
 	private readonly inFlightAssessments = new Set<string>();
 	private readonly consecutiveFailures = new Map<string, number>();
@@ -128,6 +129,13 @@ export class WorkerSemanticSupervisor {
 			return false;
 		}
 
+		const tail = attempt.outputTail ? attempt.outputTail.slice(-2000) : "";
+		const hashStr = `${attempt.evidenceRevision ?? 1}:${tail}:${Boolean(attempt.isStalled)}:${Boolean(attempt.isRepeating)}`;
+		const lastHash = this.lastAssessmentHash.get(attempt.attemptId);
+		if (lastHash === hashStr) {
+			return false; // No material state change
+		}
+
 		return true;
 	}
 
@@ -168,6 +176,10 @@ export class WorkerSemanticSupervisor {
 
 		this.inFlightAssessments.add(attempt.attemptId);
 		this.lastAssessmentAt.set(attempt.attemptId, Date.now());
+		this.lastAssessmentHash.set(
+			attempt.attemptId,
+			`${state.evidenceRevision}:${tail}:${state.isStalled}:${state.isRepeating}`,
+		);
 
 		try {
 			let certId = `cert-supervision-${Date.now()}`;

@@ -121,6 +121,9 @@ export class CompletionCoordinator {
 		}
 		if (candidateRevision === "HEAD" || !candidateRevision) {
 			candidateRevision = resolveGitRevision(context.cwd);
+			if (candidateRevision === "HEAD" || !candidateRevision) {
+				throw new Error("Unable to resolve exact candidate revision for completion proof");
+			}
 		}
 
 		// 2. Evaluate deterministic proof

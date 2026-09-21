@@ -643,7 +643,7 @@ export class AdaptiveCapabilityController {
 				spec,
 				candidateDigest: candidate.digest,
 				candidateKind: candidate.kind,
-				mechanicalPassed: true,
+				mechanicalVerification: verification,
 				testCount: verification.testCount,
 			},
 			{
@@ -694,11 +694,11 @@ export class AdaptiveCapabilityController {
 			{
 				spec,
 				activation: activationRes.projection,
-				smokePassed: true,
+				smokeVerification: activationRes.projection,
 				ownerOperationId:
 					(activationRes.projection as Record<string, unknown>)?.operationId ?? `op-${spec.capability_id}`,
-				lookupResult: (activationRes.projection as Record<string, unknown>)?.lookupResult ?? "active_verified",
-				smokeEvidence: (activationRes.projection as Record<string, unknown>)?.smokeEvidence ?? "smoke_passed",
+				lookupResult: (activationRes.projection as Record<string, unknown>)?.lookupResult ?? "unknown",
+				smokeEvidence: (activationRes.projection as Record<string, unknown>)?.smokeEvidence ?? "unknown",
 				artifactDigest: candidate.digest,
 			},
 			{

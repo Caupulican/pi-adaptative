@@ -195,7 +195,7 @@ export class RuntimeAdaptationCoordinator {
 					spec: input.spec,
 					candidateDigest: candidateRevision,
 					candidateKind: "runtime_patch",
-					mechanicalPassed: true,
+					mechanicalVerification: input.taskProof ?? "unknown",
 				},
 				{
 					objectiveId: input.objectiveId,

@@ -1349,7 +1349,7 @@ export class ObjectiveExecutionController {
 										objectiveId,
 										publishRequested: Boolean(activeCharter.release.package_publish),
 										deployTargets: activeCharter.release.deploy_targets,
-										releaseReady: true,
+										releaseRules: activeCharter.release,
 									},
 									{ objectiveId, evidenceRevision, signal },
 								);

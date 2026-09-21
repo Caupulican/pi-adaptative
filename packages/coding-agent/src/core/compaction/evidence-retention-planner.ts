@@ -134,21 +134,25 @@ export async function applyConservativeRetentionPolicy(
 		const resultAns = evaluation?.answers?.[resultKey] ?? (evaluation?.results?.[resultKey] as any);
 
 		const callProb =
-			typeof callAns?.noul === "number"
-				? callAns.noul
-				: typeof callAns?.value === "number"
-					? callAns.value
-					: typeof callAns?.confidence?.value === "number"
-						? callAns.confidence.value
+			typeof callAns?.probabilityTrue === "number"
+				? callAns.probabilityTrue
+				: typeof callAns?.noul === "number"
+					? callAns.noul
+					: typeof callAns?.value === "boolean"
+						? callAns.value
+							? 1.0
+							: 0.0
 						: 1.0; // Default to retain if uncertain
 
 		const resultProb =
-			typeof resultAns?.noul === "number"
-				? resultAns.noul
-				: typeof resultAns?.value === "number"
-					? resultAns.value
-					: typeof resultAns?.confidence?.value === "number"
-						? resultAns.confidence.value
+			typeof resultAns?.probabilityTrue === "number"
+				? resultAns.probabilityTrue
+				: typeof resultAns?.noul === "number"
+					? resultAns.noul
+					: typeof resultAns?.value === "boolean"
+						? resultAns.value
+							? 1.0
+							: 0.0
 						: 1.0; // Default to retain if uncertain
 
 		let disposition: RetentionDisposition;
