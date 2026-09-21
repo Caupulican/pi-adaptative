@@ -92,7 +92,9 @@ export interface ObjectiveExecutionControllerDeps {
 		): Promise<FinalCompletionVerdict>;
 		validateObjectivePostflight?(objectiveId: string): Promise<void>;
 		recordHostEvidence?(evidence: unknown): Promise<void>;
+		peekControlDirective?(): SystemOneControlDirective | undefined;
 		consumeControlDirective?(): SystemOneControlDirective | undefined;
+		noteControlDirective?(directive: SystemOneControlDirective): void;
 	};
 	decisions?: DecisionEngineRouter;
 	actionPolicy?: DecisionActionPolicy;
@@ -647,7 +649,10 @@ export class ObjectiveExecutionController {
 			}
 		}
 
-		const systemOneDirective = this.deps.systemOne?.consumeControlDirective?.();
+		const pendingDirective =
+			this.deps.systemOne?.peekControlDirective?.() ?? this.deps.systemOne?.consumeControlDirective?.();
+		const consumedWithoutPeek =
+			pendingDirective !== undefined && this.deps.systemOne?.peekControlDirective === undefined;
 		const route = composeObjectiveRoute({
 			cycleId,
 			objectiveId,
@@ -657,15 +662,23 @@ export class ObjectiveExecutionController {
 			ownerRequired: this.deps.ownerRequired?.(objectiveId) ?? false,
 			strategyRepetition: stall.repeatedWithoutNewEvidence,
 			semantic,
-			...(systemOneDirective
+			...(pendingDirective
 				? {
 						systemOneDirective: {
-							objectiveRoute: systemOneDirective.objectiveRoute,
-							reasonCodes: systemOneDirective.reasonCodes,
+							objectiveRoute: pendingDirective.objectiveRoute,
+							reasonCodes: pendingDirective.reasonCodes,
 						},
 					}
 				: {}),
 		});
+		if (pendingDirective) {
+			const adopted = route.route === pendingDirective.objectiveRoute;
+			if (adopted && !consumedWithoutPeek) {
+				this.deps.systemOne?.consumeControlDirective?.();
+			} else if (!adopted && consumedWithoutPeek) {
+				this.deps.systemOne?.noteControlDirective?.(pendingDirective);
+			}
+		}
 
 		validateObjectiveRoute(route);
 		await this.deps.checkpoints?.recordRoute?.(route);

@@ -3,13 +3,16 @@ import { describe, expect, it } from "vitest";
 import { executeSystemOnePreflight } from "../../src/core/agent-session-guards.ts";
 import { GoalSessionController } from "../../src/core/goals/goal-session-controller.ts";
 import { applyGoalEvent, createGoalState } from "../../src/core/goals/goal-state.ts";
+import { ObjectiveExecutionController } from "../../src/core/objective-execution/objective-execution-controller.ts";
 import { composeObjectiveRoute } from "../../src/core/objective-execution/objective-route-policy.ts";
+import type { TaskRuntimeProjection } from "../../src/core/orchestration/task-runtime-state.ts";
 import { DEFAULT_STEERING_POLICY } from "../../src/core/steering/policy.ts";
 import {
 	SystemOneSteeringPlane,
 	SystemOneSteeringUnavailableError,
 } from "../../src/core/steering/system-one-steering-plane.ts";
 import { projectCanonicalTruth } from "../../src/core/system-one/canonical-truth.ts";
+import { directiveFromPreflight } from "../../src/core/system-one/control-directive.ts";
 import { SystemOneController } from "../../src/core/system-one/controller.ts";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
 import { ToolGateController } from "../../src/core/tool-gate-controller.ts";
@@ -243,6 +246,69 @@ describe("System One recovery WO-09 production paths", () => {
 		const result = await executeSystemOnePreflight(controller, 0);
 		expect(result.proceed).toBe(false);
 		expect(controller.peekControlDirective()?.objectiveRoute).toBe("retrieve");
+	});
+
+	it("evaluateRouteOnce keeps a retrieve directive through wait_for_worker and owner_required, then reroutes", async () => {
+		const systemOne = new SystemOneController({
+			store: emptyStore("directive-after-wait"),
+			adapter: { evaluate: async () => ({ model: "jev-1.13.0", answers: {}, latency_ms: 1 }) },
+		});
+		const pending = directiveFromPreflight("retrieve");
+		if (!pending) throw new Error('directiveFromPreflight("retrieve") must return a directive');
+		systemOne.noteControlDirective(pending);
+
+		let workerInFlight = true;
+		let ownerRequired = false;
+		const runtimeSnapshot = (): TaskRuntimeProjection =>
+			({
+				lastOrdinal: 1,
+				agents: {},
+				objectives: {},
+				tasks: {},
+				attempts: workerInFlight
+					? {
+							a1: {
+								attemptId: "a1",
+								taskId: "t1",
+								status: "running",
+								dispatch: {},
+								checkpointIds: [],
+								createdAt: "T0",
+								updatedAt: "T0",
+							},
+						}
+					: {},
+				checkpoints: {},
+				approvals: {},
+				notifications: {},
+			}) as TaskRuntimeProjection;
+
+		const controller = new ObjectiveExecutionController({
+			mode: "objective_primary",
+			runtime: { reconcileObjective: async () => runtimeSnapshot() },
+			ownerRequired: () => ownerRequired,
+			systemOne: {
+				peekControlDirective: () => systemOne.peekControlDirective(),
+				consumeControlDirective: () => systemOne.consumeControlDirective(),
+				noteControlDirective: (directive) => systemOne.noteControlDirective(directive),
+			},
+		});
+
+		const waiting = await controller.evaluateRouteOnce("goal:fix-parser");
+		expect(waiting.route).toBe("wait_for_worker");
+		expect(systemOne.peekControlDirective()?.objectiveRoute).toBe("retrieve");
+
+		workerInFlight = false;
+		ownerRequired = true;
+		const blocked = await controller.evaluateRouteOnce("goal:fix-parser");
+		expect(blocked.route).toBe("owner_required");
+		expect(systemOne.peekControlDirective()?.objectiveRoute).toBe("retrieve");
+
+		ownerRequired = false;
+		const retrieved = await controller.evaluateRouteOnce("goal:fix-parser");
+		expect(retrieved.route).toBe("retrieve");
+		expect(retrieved.reason_codes).toContain("system_one_preflight_retrieve");
+		expect(systemOne.peekControlDirective()).toBeUndefined();
 	});
 
 	it("composeObjectiveRoute executes a System One retrieve directive after waits/owner checks", () => {

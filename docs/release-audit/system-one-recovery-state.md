@@ -110,7 +110,7 @@ Jev **is** the active semantic gate on the production tool-admission path and on
 
 ## Discovered blockers not in original review
 
-- none yet
+- `evaluateRouteOnce` consumed a System One retrieve/replan/verify directive before `composeObjectiveRoute`. A `wait_for_worker` / `owner_required` / cancel winner dropped it. Peek, compose, consume only if that directive became the route; re-note if consume-without-peek already ate it.
 
 ## Decisions
 

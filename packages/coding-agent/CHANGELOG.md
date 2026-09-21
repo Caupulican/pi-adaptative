@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- A System One retrieve/replan/verify directive is no longer discarded when the current cycle must wait for a worker or the owner: the route peeks the directive, wait/owner still win, and the next cycle adopts it.
 - The POV bar shows a required-Jev failure as `BLOCKED` with `CONTROL S1` and `JEV degraded`, not ordinary `WORKING` progress.
 - System One gates now read the live goal, durable task evidence and open verifications (a hydrated projection of that canonical truth), so route, tool gate, preflight, postflight and completion no longer judge an empty in-memory store. A real objective with no criteria, or completion with no live objective, cannot pass. Unresolved verification obligations fail completion. After persist/dispose/reconstruct, the next hydrate sees the same requirements.
 - Preflight `retrieve` / `replan` / `test` / `escalate` skip the current root turn and become the next objective route; only `block` throws. Postflight `rollback` / `replan` / `verify` / `retrieve_more` / `completion_candidate` / `blocked` are consumed by `composeObjectiveRoute` instead of being discarded. Tool-gate `replan` is stored as `refused` (never `allowed`) and `afterToolCall` writes `succeeded` / `failed` on the same `call_id`.

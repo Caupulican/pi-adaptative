@@ -2010,7 +2010,9 @@ export class AgentSession {
 									this._systemOneController!.executeCompletionTransaction(isBugFix, options),
 								validateObjectivePostflight: (objectiveId) =>
 									this._systemOneController!.validateObjectivePostflight(objectiveId),
+								peekControlDirective: () => this._systemOneController!.peekControlDirective(),
 								consumeControlDirective: () => this._systemOneController!.consumeControlDirective(),
+								noteControlDirective: (directive) => this._systemOneController!.noteControlDirective(directive),
 							},
 						}
 					: {}),
