@@ -37,12 +37,14 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 				questions[d.id] = {
 					type: "noul",
 					instructions: d.instruction,
-					criteria: d.criteria
+					...(d.criteria
 						? {
-								true: d.criteria.true ?? "Condition holds true",
-								false: d.criteria.false ?? "Condition does not hold",
+								criteria: {
+									true: d.criteria.true ?? "Condition holds true",
+									false: d.criteria.false ?? "Condition does not hold",
+								},
 							}
-						: undefined,
+						: {}),
 				};
 			} else if (d.kind === "choice") {
 				const criteria: Record<string, string> = {};

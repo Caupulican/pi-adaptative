@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- TypeSafe boolean questions no longer send `criteria: undefined`, which TypeSafe rejects as non-JSON and which made live worker-supervision evaluations fail closed with `TypeSafe evidence must be finite, acyclic JSON`.
+- Active verification obligations on the Decision graph are `pending` open checks, not a failed requirement branch.
+
 ## [0.99.36] - 2026-09-21
 
 ### Fixed

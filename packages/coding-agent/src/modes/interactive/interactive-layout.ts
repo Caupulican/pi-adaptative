@@ -55,6 +55,16 @@ export interface InteractiveLayoutHost {
 	humanInputTally?: HumanInputTally;
 }
 
+/** Active obligations are unresolved open work, not a failed requirement branch. */
+export function graphChecksFromVerificationObligations(
+	obligations: ReadonlyArray<{ id: string; command?: string }>,
+): DecisionGraphInput["checks"] {
+	return obligations.map((obligation) => ({
+		text: obligation.command ?? obligation.id,
+		status: "pending",
+	}));
+}
+
 const PLAN_STEP_STATUS: Readonly<Record<TaskStepStatus, DecisionPlanStepStatus>> = {
 	pending: "pending",
 	in_progress: "active",
@@ -108,10 +118,7 @@ function composeDecisionGraph(host: InteractiveLayoutHost, humanInput: HumanInpu
 								: ("pending" as const),
 				}))
 			: []),
-		...session.getVerificationObligations().map((obligation) => ({
-			text: obligation.command ?? obligation.id,
-			status: "failed" as const,
-		})),
+		...graphChecksFromVerificationObligations(session.getVerificationObligations()),
 	];
 	return buildDecisionGraphModel({
 		projection,

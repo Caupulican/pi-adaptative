@@ -3,11 +3,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
 import { projectEarlyCompactionEconomics } from "../../src/core/compaction/early-compaction-economics.ts";
+import { TypeSafeSystemOneDecisionEngine } from "../../src/core/decision/engines/typesafe-system-one-engine.ts";
 import { ObjectiveExecutionController } from "../../src/core/objective-execution/objective-execution-controller.ts";
 import { composeObjectiveRoute } from "../../src/core/objective-execution/objective-route-policy.ts";
 import { DecisionStageLog } from "../../src/core/operator-projection/decision-stage-log.ts";
 import type { OperatorProjection } from "../../src/core/operator-projection/types.ts";
 import type { TaskRuntimeProjection } from "../../src/core/orchestration/task-runtime.ts";
+import { serializeEvaluation } from "../../src/core/review/typesafe-contract.ts";
 import { compileDecisionProgramForCheckpoint } from "../../src/core/steering/programs.ts";
 import { WorkerSemanticSupervisor } from "../../src/core/supervision/worker-semantic-supervisor.ts";
 import { WorkerSupervisionCoordinator } from "../../src/core/supervision/worker-supervision-coordinator.ts";
@@ -19,6 +21,7 @@ import {
 	renderDecisionDiagram,
 	renderDecisionList,
 } from "../../src/modes/interactive/components/decision-graph-render.ts";
+import { graphChecksFromVerificationObligations } from "../../src/modes/interactive/interactive-layout.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../src/utils/ansi.ts";
 
@@ -570,5 +573,42 @@ describe("next-release hardening", () => {
 			minSavingsUsd: 0.0000001,
 		});
 		expect(chosen.proceed).toBe(true);
+	});
+
+	it("omits undefined noul criteria so TypeSafe can serialize JEV-WORKER-SUPERVISION questions", async () => {
+		let captured: { state?: unknown; questions?: Record<string, unknown> } | undefined;
+		const engine = new TypeSafeSystemOneDecisionEngine({
+			evaluate: async (input) => {
+				captured = input;
+				return { model: "jev-1.13.0", answers: noulAnswers(), latency_ms: 1 };
+			},
+		});
+		await engine.evaluate(compileDecisionProgramForCheckpoint("JEV-WORKER-SUPERVISION", {}), {
+			objectiveId: "o",
+			mission: "write hello",
+		});
+		expect(captured?.questions).toBeDefined();
+		for (const question of Object.values(captured?.questions ?? {})) {
+			expect(question).not.toHaveProperty("criteria");
+		}
+		expect(() =>
+			serializeEvaluation({
+				model: "jev-1.13.0",
+				state: captured?.state,
+				questions: captured?.questions,
+			}),
+		).not.toThrow();
+	});
+
+	it("maps active verification obligations as pending graph checks, not failed", () => {
+		const checks = graphChecksFromVerificationObligations([
+			{ id: "verify-1", command: "npm test" },
+			{ id: "verify-2" },
+		]);
+		expect(checks).toEqual([
+			{ text: "npm test", status: "pending" },
+			{ text: "verify-2", status: "pending" },
+		]);
+		expect(checks.every((check) => check.status !== "failed")).toBe(true);
 	});
 });
