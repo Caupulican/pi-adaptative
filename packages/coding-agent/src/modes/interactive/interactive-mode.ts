@@ -1808,12 +1808,12 @@ export class InteractiveMode {
 	}
 
 	private syncForegroundActivity(): void {
-		const activity = this.session.getForegroundActivity();
+		const activity = this.session.getSessionWorkState();
 		if (activity.busy && activity.epoch !== undefined) {
 			this.workbench?.beginCycle(this.session.sessionManager.getCwd(), activity.epoch);
 		}
 		this.activityLane?.setParentVisible(this.workingVisible && !this.workingIndicatorOptions);
-		this.activityLane?.syncForegroundActivity(activity);
+		this.activityLane?.syncForegroundActivity({ ...activity, sessionId: activity.sessionId ?? "unknown" });
 		if (activity.busy && this.workingVisible && this.workingIndicatorOptions && !this.loadingAnimation) {
 			this.loadingAnimation = this.createWorkingLoader();
 			this.statusContainer.addChild(this.loadingAnimation);

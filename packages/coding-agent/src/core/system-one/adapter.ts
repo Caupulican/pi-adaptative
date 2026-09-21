@@ -26,7 +26,10 @@ export interface JevAdapterEvaluateOptions {
 	timeoutMs?: number;
 }
 
+import type { ConfidenceProvenance } from "../decision/confidence.ts";
+
 export interface JevAdapter {
+	readonly provenance?: ConfidenceProvenance;
 	evaluate(input: JevEvaluationRequest, options?: JevAdapterEvaluateOptions): Promise<JevEvaluationResponse>;
 }
 
@@ -95,6 +98,7 @@ export interface SystemOneJevAdapterDeps {
  * R-067: Rate-limit retries MUST use bounded backoff.
  */
 export class SystemOneJevAdapter implements JevAdapter {
+	readonly provenance: ConfidenceProvenance = "native_calibrated";
 	private readonly reviewer: SystemOneReviewerLike;
 	private readonly config: SystemOneConfig;
 	private readonly pinnedModel: string;

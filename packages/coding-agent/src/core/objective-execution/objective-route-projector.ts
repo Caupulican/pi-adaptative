@@ -219,8 +219,8 @@ export function projectBoundedCombinedState(
 			recent_changes: recentChanges,
 		},
 		progress: {
-			before_digest: options?.beforeDigest ?? "digest_start",
-			after_digest: options?.afterDigest ?? `digest_tasks_${tasks.length}`,
+			before_digest: options?.beforeDigest ?? "unknown",
+			after_digest: options?.afterDigest ?? "unknown",
 			stall_turns: options?.stallTurns ?? 0,
 			strategy_fingerprint: options?.strategyFingerprint ?? "init",
 		},

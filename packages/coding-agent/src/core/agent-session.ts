@@ -551,7 +551,7 @@ export class AgentSession {
 					question: question.header || question.question,
 				};
 			},
-			isForegroundBusy: () => this._foregroundRecovery.isBusy,
+			isForegroundBusy: () => this.getSessionWorkState().busy,
 			// The invalidation signal for both branch-walking reads above: every input they derive
 			// from is a persisted session entry.
 			getSessionEntryCount: () => this.sessionManager.getEntryCount(),
@@ -899,7 +899,7 @@ export class AgentSession {
 			// to this controller's own `continueGoalLoopExclusive` guard, so routing through it here would
 			// recurse into the guard from inside itself instead of driving the actual continuation pass.
 			continueGoalLoop: (options) => this._goals.continueLoop(options),
-			isForegroundBusy: () => this._foregroundRecovery.isBusy,
+			isForegroundBusy: () => this.getSessionWorkState().busy,
 			waitForForegroundIdle: () => this._foregroundRecovery.waitForIdle(),
 			collectWorkspaceSources: (args) => this._collectWorkspaceSources(args),
 			getPathAliasTable: () => this._pipeline.peekPathAliasTable(),
@@ -1413,7 +1413,7 @@ export class AgentSession {
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			recordManagedLane: (event) => this._backgroundLanes.recordManagedLane(event),
 			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
-			isForegroundBusy: () => this._foregroundRecovery.isBusy,
+			isForegroundBusy: () => this.getSessionWorkState().busy,
 			getPendingMessageCount: () => this.pendingMessageCount,
 			isStreaming: () => this.isStreaming,
 			isCompacting: () => this.isCompacting,
@@ -3388,7 +3388,7 @@ export class AgentSession {
 		await this._reflectionTurnLifecycle.preemptFor(options);
 
 		const submissionLease = this._foregroundRecovery.tryAcquireSubmission();
-		if (!submissionLease && this._foregroundRecovery.isBusy && options?.streamingBehavior) {
+		if (!submissionLease && this.getSessionWorkState().busy && options?.streamingBehavior) {
 			const run = this._streamingPromptSubmissionTail.then(
 				() => this._runPromptSubmission(text, options),
 				() => this._runPromptSubmission(text, options),
@@ -3930,7 +3930,7 @@ export class AgentSession {
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
 			this._pendingNextTurnMessages.push(appMessage);
-		} else if (this._foregroundRecovery.isBusy && !this._foregroundRecovery.ownsSubmission(submissionLease)) {
+		} else if (this.getSessionWorkState().busy && !this._foregroundRecovery.ownsSubmission(submissionLease)) {
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(appMessage);
 			} else {

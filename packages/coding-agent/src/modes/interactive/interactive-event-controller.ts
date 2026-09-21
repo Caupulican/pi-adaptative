@@ -131,17 +131,17 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 
 		case "routing_end":
 			host.activityLane?.remove("runtime:routing");
-			if (!host.session.isStreaming && host.loadingAnimation && !host.session.getForegroundActivity().busy)
+			if (!host.session.isStreaming && host.loadingAnimation && !host.session.getSessionWorkState().busy)
 				host.stopWorkingLoader();
 			host.ui.requestRender();
 			break;
 
 		case "agent_start": {
-			const activity = host.session.getForegroundActivity();
+			const activity = host.session.getSessionWorkState();
 			if (activity.busy && activity.epoch !== undefined) {
 				host.workbench?.beginCycle(host.session.sessionManager.getCwd(), activity.epoch);
 			}
-			host.activityLane?.syncForegroundActivity(activity);
+			host.activityLane?.syncForegroundActivity({ ...activity, sessionId: activity.sessionId ?? "unknown" });
 			host.activityLane?.update(RUNTIME_TURN_ACTIVITY_ID, host.getWorkingLoaderMessage());
 			host.clearActiveToolCalls();
 			if (host.settingsManager.getShowTerminalProgress()) host.ui.terminal.setProgress(true);
@@ -371,7 +371,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 				const failed = finalAssistant?.stopReason === "error" || finalAssistant?.stopReason === "aborted";
 				host.activityLane?.setForegroundOutcome(failed ? "failure" : "success", failed ? "Turn failed" : "Done");
 			}
-			if (host.loadingAnimation && !host.session.getForegroundActivity().busy) {
+			if (host.loadingAnimation && !host.session.getSessionWorkState().busy) {
 				host.loadingAnimation.stop();
 				host.loadingAnimation = undefined;
 				host.statusContainer.clear();
@@ -462,7 +462,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			}
 			void host.flushCompactionQueue({ willRetry: event.willRetry });
 			if (host.loadingAnimation) {
-				if (host.session.getForegroundActivity().busy)
+				if (host.session.getSessionWorkState().busy)
 					host.loadingAnimation.setMessage(host.getWorkingLoaderMessage());
 				else host.stopWorkingLoader();
 			}
