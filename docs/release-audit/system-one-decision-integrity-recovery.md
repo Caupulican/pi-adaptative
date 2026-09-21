@@ -2,8 +2,8 @@
 
 ## Exact revisions
 - Start HEAD: d434cd60d041f232491af37aab7da9d1f3fc2b5c
-- Final HEAD: TBD
-- Pushed: TBD
+- Final HEAD: d1045ff8b
+- Pushed: yes
 
 ## Work Orders
 | ID | Status | Notes |
@@ -23,7 +23,7 @@
 | DI-11 | DONE | Semantic provenance hardened on mandatory gates |
 | DI-12 | DONE | Long-horizon counterfactual harness created |
 | DI-13 | DONE | Durable audit created |
-| DI-14 | OPEN | Delivery pending |
+| DI-14 | DONE | Validation gate, bug hunt, and fixes completed. Pushed to origin/main. |
 
 ## Validation
 - `npm run check`
@@ -31,7 +31,12 @@
 - `scripts/install-standalone.test.mjs` (flaky test noted, bounds staging cleanup)
 
 ## Bug Hunt Findings
-TBD
+- Hunt 1 (Contract Drift): Fixed `programs.ts` JEV-025 and JEV-026 duplicate definitions.
+- Hunt 3 (Self-certified truth): Replaced `mechanicalPassed` and `smokePassed` booleans with actual receipts.
+- Hunt 4 (Placeholder evidence): Replaced `active_verified` and `smoke_passed` with `unknown` and threw an error when `candidateRevision` falls back to `HEAD`.
+- Hunt 9 (Operator illusion): Fixed by resolving contract drift in `programs.ts`.
+- Hunt 10 (Adversarial long-task effectiveness): Removed `elapsedMs` from `shouldAssess` hash.
+- Hunt 11 (Provider leakage): Fixed truth/confidence inversion in `evidence-retention-planner.ts`.
 
 ## Known limitations
 - TBD
