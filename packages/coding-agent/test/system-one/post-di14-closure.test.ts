@@ -152,6 +152,106 @@ describe("post-DI14 closure gates", () => {
 		expect(store.phase).not.toBe("complete");
 	});
 
+	it("Gate 3: run() inner semantic pass then JEV-027 fail leaves store and objective not complete", async () => {
+		const store = new ExecutionStore({
+			run_id: "run-outer",
+			objective: {
+				request: "do it",
+				normalized_goal: "do it",
+				acceptance_criteria: [{ id: "c1", text: "c1", required: true }],
+			},
+			repo: { root: "/workspace", baseline_revision: "r0" },
+		});
+		store.recordVerification({
+			kind: "unit_test",
+			status: "passed",
+			covers_acceptance_ids: ["c1"],
+		});
+		const passingAdapter = {
+			provenance: "native_calibrated" as const,
+			evaluate: async (input: { questions?: Record<string, unknown> }) => {
+				if (input.questions && Object.hasOwn(input.questions, "missing_requirement")) {
+					return {
+						model: "jev-1.13.0",
+						answers: {
+							missing_requirement: { noul: 0.01 },
+							hidden_assumption: { noul: 0.01 },
+							plausible_regression_not_tested: { noul: 0.01 },
+							conclusion_overstates_evidence: { noul: 0.01 },
+						},
+						latency_ms: 1,
+					};
+				}
+				return {
+					model: "jev-1.13.0",
+					answers: {
+						implementation_matches_goal: { noul: 0.99 },
+						root_cause_addressed: { noul: 0.99 },
+						required_behavior_unverified: { noul: 0.01 },
+						material_claim_unsupported: { noul: 0.01 },
+						out_of_scope_change_present: { noul: 0.01 },
+						duplicate_responsibility_introduced: { noul: 0.01 },
+						completion_verdict: {
+							choice: "complete",
+							confidence: 0.99,
+							probabilities: { complete: 0.99, rework: 0.01 },
+						},
+					},
+					latency_ms: 1,
+				};
+			},
+		};
+		const systemOne = new SystemOneController({ store, adapter: passingAdapter });
+		const persistFlags: Array<boolean | undefined> = [];
+		const innerVerdicts: string[] = [];
+		const controller = new ObjectiveExecutionController({
+			mode: "objective_primary",
+			completionProfile: "system_one_required",
+			runtime: {
+				reconcileObjective: async () => runtime("obj-1"),
+			},
+			executionCharter: compileExecutionCharter({
+				objectiveId: "obj-1",
+				prompt: "ship",
+				initialGrants: { git: { commit: true, push: true } },
+			}),
+			gitExecutor: {
+				commit: async () => ({ sha: "abc1234deadbeef" }),
+				push: async () => ({ ref: "refs/heads/main" }),
+			},
+			systemOne: {
+				adapter: passingAdapter,
+				snapshot: () => store.snapshot(),
+				evaluateObjectiveRoute: async () => ({ workRemaining: false, missingWorkClass: "none" }),
+				executeCompletionTransaction: async (isBugFix, options) => {
+					persistFlags.push(options?.persistTerminal);
+					const verdict = await systemOne.executeCompletionTransaction(isBugFix, options);
+					innerVerdicts.push(verdict.verdict);
+					return verdict;
+				},
+			},
+			steeringPlane: {
+				policy: { mode: "system_one_required" },
+				requireCertificate: async (checkpoint: string) => ({
+					certificate_id: `c-${checkpoint}`,
+					semantic_outcome: checkpoint === "JEV-027" ? "fail" : "pass",
+					answers: {
+						work_remaining: { boolean: false },
+						missing_work_class: { choice: "none" },
+					},
+					directive: checkpoint === "JEV-024" ? "completion_candidate" : "allow",
+					failed_semantic_predicates: checkpoint === "JEV-027" ? ["delivery_claim_untrue"] : undefined,
+				}),
+			} as never,
+			repoRoot: gitRepo(),
+		});
+		const result = await controller.run("obj-1");
+		expect(persistFlags).toEqual([false]);
+		expect(innerVerdicts).toEqual(["complete"]);
+		expect(store.phase).not.toBe("complete");
+		expect(result.status).not.toBe("complete");
+	});
+
 	it("Gate 4: same worktree digest is stable; tracked, untracked, rename, and revision mutate it", () => {
 		const root = gitRepo();
 		const first = captureCandidateSnapshot(root);
