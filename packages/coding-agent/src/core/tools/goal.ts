@@ -28,6 +28,7 @@ import {
 } from "../goals/goal-tool-core.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import { awaitPreflight } from "../preflight.ts";
+import { requestsBugFix } from "../system-one/bug-fix.ts";
 import type { SystemOneController } from "../system-one/controller.ts";
 import {
 	emptyOrchestrationCall,
@@ -903,9 +904,10 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					}
 					const systemOne = deps.getSystemOneController?.();
 					if (systemOne) {
-						const completionDecision = await systemOne.executeCompletionTransaction(false, {
-							persistTerminal: false,
-						});
+						const completionDecision = await systemOne.executeCompletionTransaction(
+							requestsBugFix(result.state.goalId, result.state.userGoal),
+							{ persistTerminal: false },
+						);
 						if (completionDecision.verdict !== "complete") {
 							const reasons = completionDecision.failed_gates.map((g) => g.reason).join("; ");
 							return goalExecutionError(

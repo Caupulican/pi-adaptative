@@ -7,7 +7,9 @@ import { compileExecutionCharter } from "../../src/core/autonomy/execution-chart
 import { resolveEffectiveCompletionProfile } from "../../src/core/decision/completion-profile.ts";
 import { createRepoGitDelivery } from "../../src/core/objective-execution/delivery-proof.ts";
 import { ObjectiveExecutionController } from "../../src/core/objective-execution/objective-execution-controller.ts";
+import { createRepoReleaseDelivery } from "../../src/core/objective-execution/release-delivery.ts";
 import type { TaskRuntimeProjection } from "../../src/core/orchestration/task-runtime.ts";
+import { SystemOneSteeringPlane } from "../../src/core/steering/system-one-steering-plane.ts";
 import { SystemOneController, TerminalCompletionConflictError } from "../../src/core/system-one/controller.ts";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
 import { IntegrityHookCoordinator } from "../../src/core/system-one/integrity-hooks.ts";
@@ -17,6 +19,8 @@ function gitRepo(): string {
 	execFileSync("git", ["init"], { cwd: root });
 	execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
 	execFileSync("git", ["config", "user.name", "test"], { cwd: root });
+	execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: root });
+	execFileSync("git", ["config", "tag.gpgsign", "false"], { cwd: root });
 	writeFileSync(join(root, "README.md"), "one\n");
 	execFileSync("git", ["add", "README.md"], { cwd: root });
 	execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "init"], { cwd: root });
@@ -128,6 +132,7 @@ async function deliver(options?: {
 	readonly profile?: "mechanical" | "semantic_enhanced" | "mechanical_plus_reviewer" | "system_one_required";
 	readonly steeringMode?: "system_one_required" | "system_one_optional";
 	readonly boundSystemOne?: boolean;
+	readonly objectiveId?: string;
 }) {
 	const sha = options?.commitSha ?? "abc1234deadbeef";
 	const head = options?.head ?? sha;
@@ -158,15 +163,17 @@ async function deliver(options?: {
 	]);
 	const adapter = passingAdapter();
 	const systemOne = new SystemOneController({ store, adapter, hookCoordinator: hooks });
+	const objectiveId = options?.objectiveId ?? "obj-1";
+	let seenBugFix: boolean | undefined;
 	const grants = options?.grants !== false;
 	const controller = new ObjectiveExecutionController({
 		mode: "objective_primary",
 		...(options?.profile ? { completionProfile: options.profile } : {}),
-		runtime: { reconcileObjective: async () => runtime("obj-1") },
+		runtime: { reconcileObjective: async () => runtime(objectiveId) },
 		...(grants
 			? {
 					executionCharter: compileExecutionCharter({
-						objectiveId: "obj-1",
+						objectiveId,
 						prompt: "ship",
 						initialGrants: { git: { commit: true, push: true } },
 					}),
@@ -203,7 +210,10 @@ async function deliver(options?: {
 						executeCompletionTransaction: (
 							isBugFix: boolean,
 							callOptions?: { signal?: AbortSignal; persistTerminal?: boolean },
-						) => systemOne.executeCompletionTransaction(isBugFix, callOptions),
+						) => {
+							seenBugFix = isBugFix;
+							return systemOne.executeCompletionTransaction(isBugFix, callOptions);
+						},
 						...(options?.wireTerminal === false
 							? {}
 							: {
@@ -230,16 +240,17 @@ async function deliver(options?: {
 			: {}),
 		repoRoot: gitRepo(),
 	});
-	const result = await controller.run("obj-1");
-	return { result, store, systemOne, terminalHooks: () => terminalHooks };
+	const result = await controller.run(objectiveId);
+	return { result, store, systemOne, terminalHooks: () => terminalHooks, seenBugFix: () => seenBugFix };
 }
 
 describe("FC-01 terminal complete", () => {
 	it("outer success persists complete once and runs the terminal hook once", async () => {
-		const { result, store, systemOne, terminalHooks } = await deliver({
+		const { result, store, systemOne, terminalHooks, seenBugFix } = await deliver({
 			profile: "system_one_required",
 			steeringMode: "system_one_required",
 		});
+		expect(seenBugFix()).toBe(false);
 		expect(result?.status).toBe("complete");
 		expect(store.phase).toBe("complete");
 		expect(terminalHooks()).toBe(1);
@@ -641,5 +652,131 @@ describe("FC-03 receipt binding", () => {
 		expect(residue.attributableResidue).toContain("leftover.txt");
 		const tagged = await delivery.tag("v1");
 		expect(await delivery.proveTag(tagged.tag)).toEqual({ tag: "v1", commitSha: committed.sha });
+	});
+
+	it("a detached HEAD push fails and does not write refs/heads/main", async () => {
+		const root = gitRepo();
+		const bare = mkdtempSync(join(tmpdir(), "pi-final-detached-"));
+		execFileSync("git", ["init", "--bare"], { cwd: bare });
+		execFileSync("git", ["remote", "add", "origin", bare], { cwd: root });
+		writeFileSync(join(root, "README.md"), "two\n");
+		const delivery = createRepoGitDelivery(root);
+		await delivery.commit("two");
+		const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+		await delivery.push();
+		execFileSync("git", ["checkout", "--detach"], { cwd: root });
+		await expect(delivery.push()).rejects.toThrow("Detached HEAD cannot be pushed");
+		const remote = execFileSync("git", ["rev-parse", `refs/heads/${branch}`], { cwd: bare, encoding: "utf8" }).trim();
+		const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+		expect(remote).toBe(head);
+		if (branch !== "main") {
+			expect(() => execFileSync("git", ["rev-parse", "refs/heads/main"], { cwd: bare })).toThrow();
+		}
+	});
+
+	it("tag.gpgsign failure does not create an unsigned tag", async () => {
+		const root = gitRepo();
+		execFileSync("git", ["config", "tag.gpgsign", "true"], { cwd: root });
+		execFileSync("git", ["config", "user.signingkey", "0000000000000000"], { cwd: root });
+		writeFileSync(join(root, "README.md"), "two\n");
+		const delivery = createRepoGitDelivery(root);
+		await delivery.commit("two");
+		await expect(delivery.tag("v-sign")).rejects.toThrow(/sign/i);
+		const listed = execFileSync("git", ["tag", "--list"], { cwd: root, encoding: "utf8" });
+		expect(listed).not.toContain("v-sign");
+	});
+});
+
+describe("completion catalog thresholds and release binding", () => {
+	const directive = { action: "continue_current_work" as const, reasonCodes: [] };
+	const plane = new SystemOneSteeringPlane();
+	const strong = {
+		implementation_matches_goal: { noul: 0.96 },
+		root_cause_addressed: { noul: 0.5 },
+		required_behavior_unverified: { noul: 0.05 },
+		material_claim_unsupported: { noul: 0.05 },
+		out_of_scope_change_present: { noul: 0.05 },
+		duplicate_responsibility_introduced: { noul: 0.05 },
+		completion_verdict: { choice: "complete", confidence: 0.96, probabilities: { complete: 0.96, rework: 0.04 } },
+	};
+
+	it("a bug-fix objective passes isBugFix into the inner completion transaction", async () => {
+		const { seenBugFix, result } = await deliver({
+			objectiveId: "bug-obj",
+			profile: "system_one_required",
+			steeringMode: "system_one_required",
+		});
+		expect(seenBugFix()).toBe(true);
+		expect(result?.status).toBe("complete");
+	});
+
+	it("JEV-025 requires the completion policy hard pass, not a 0.5 noul", () => {
+		const weak = plane.evaluateSemanticOutcome(
+			"JEV-025",
+			{ ...strong, implementation_matches_goal: { noul: 0.9 } },
+			directive,
+		);
+		expect(weak.semantic_outcome).toBe("repair");
+		expect(weak.failed_semantic_predicates).toContain("implementation_matches_goal");
+		expect(plane.evaluateSemanticOutcome("JEV-025", strong, directive).semantic_outcome).toBe("pass");
+		const bug = plane.evaluateSemanticOutcome("JEV-025", strong, directive, { bugFix: true });
+		expect(bug.failed_semantic_predicates).toContain("root_cause_addressed");
+	});
+
+	it("JEV-026 requires a confident no on the challenge pack", () => {
+		const passed = plane.evaluateSemanticOutcome(
+			"JEV-026",
+			{
+				missing_requirement: { noul: 0.05 },
+				hidden_assumption: { noul: 0.05 },
+				plausible_regression_not_tested: { noul: 0.05 },
+				conclusion_overstates_evidence: { noul: 0.05 },
+			},
+			directive,
+		);
+		expect(passed.semantic_outcome).toBe("pass");
+		const challenged = plane.evaluateSemanticOutcome(
+			"JEV-026",
+			{
+				missing_requirement: { noul: 0.2 },
+				hidden_assumption: { noul: 0.05 },
+				plausible_regression_not_tested: { noul: 0.05 },
+				conclusion_overstates_evidence: { noul: 0.05 },
+			},
+			directive,
+		);
+		expect(challenged.failed_semantic_predicates).toContain("missing_requirement");
+	});
+
+	it("binds npm publish only for a public package and deploy only with a status script", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-release-"));
+		expect(createRepoReleaseDelivery(root)).toBeUndefined();
+		writeFileSync(join(root, "package.json"), JSON.stringify({ name: "pkg", version: "1.0.0", private: true }));
+		expect(createRepoReleaseDelivery(root)).toBeUndefined();
+		writeFileSync(join(root, "package.json"), JSON.stringify({ name: "pkg", version: "1.0.0" }));
+		const publishOnly = createRepoReleaseDelivery(root);
+		expect(typeof publishOnly?.publish).toBe("function");
+		expect(typeof publishOnly?.provePublish).toBe("function");
+		expect(publishOnly?.deploy).toBeUndefined();
+		writeFileSync(
+			join(root, "package.json"),
+			JSON.stringify({ name: "pkg", version: "1.0.0", private: true, scripts: { deploy: "echo go" } }),
+		);
+		expect(createRepoReleaseDelivery(root)?.deploy).toBeUndefined();
+		writeFileSync(join(root, "deploy.js"), "process.exit(0);\n");
+		writeFileSync(join(root, "status.js"), "process.stdout.write('dep-1');\n");
+		writeFileSync(
+			join(root, "package.json"),
+			JSON.stringify({
+				name: "pkg",
+				version: "1.0.0",
+				private: true,
+				scripts: { deploy: "node deploy.js", "deploy:status": "node status.js" },
+			}),
+		);
+		const deploy = createRepoReleaseDelivery(root);
+		expect(deploy?.publish).toBeUndefined();
+		await expect(deploy?.deploy?.("staging")).resolves.toEqual({ id: "dep-1" });
+		await expect(deploy?.proveDeploy?.("staging")).resolves.toEqual({ target: "staging", deploymentId: "dep-1" });
 	});
 });

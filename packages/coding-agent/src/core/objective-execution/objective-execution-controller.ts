@@ -35,6 +35,7 @@ import { buildWorkerCapabilityRequest, NoEligibleExpertError } from "../expert-r
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import type { SystemOneSteeringPlane } from "../steering/index.ts";
+import { requestsBugFix } from "../system-one/bug-fix.ts";
 import {
 	type CandidateSnapshot,
 	candidateSnapshotIdentity,
@@ -432,6 +433,7 @@ export class ObjectiveExecutionController {
 				| "consumePendingSupervisionRequest"
 				| "repoRoot"
 				| "gitExecutor"
+				| "releaseExecutor"
 			>
 		>,
 	): void {
@@ -1172,6 +1174,7 @@ export class ObjectiveExecutionController {
 
 					// FC-070, FC-071, FC-072: Canonical proof state on real projection without asserted verificationPassed:true
 					const objRecord = runtime.objectives[objectiveId];
+					const bugFix = requestsBugFix(objectiveId, objRecord?.objective?.description);
 					const { evidenceRevision, artifacts, verificationMatrix } = await this._resolveCanonicalEvidenceState(
 						objectiveId,
 						runtime,
@@ -1274,7 +1277,7 @@ export class ObjectiveExecutionController {
 						semanticEvaluator: this.deps.systemOne?.executeCompletionTransaction
 							? {
 									evaluateCompletion: async (_objId, opts) => {
-										const verdict = await this.deps.systemOne!.executeCompletionTransaction!(false, {
+										const verdict = await this.deps.systemOne!.executeCompletionTransaction!(bugFix, {
 											...opts,
 											persistTerminal: false,
 										});
@@ -1298,9 +1301,6 @@ export class ObjectiveExecutionController {
 					if (evalResult.verdict === "complete") {
 						// 3. PH-152, FC-063: JEV-025 primary semantic completion (proof-bearing)
 						if (this.deps.steeringPlane) {
-							const description = String(objRecord?.objective?.description ?? "");
-							const bugFix =
-								objectiveId.toLowerCase().includes("bug") || description.toLowerCase().includes("bug");
 							const c25 = await this.deps.steeringPlane.requireCertificate(
 								"JEV-025",
 								{
@@ -2101,10 +2101,7 @@ export class ObjectiveExecutionController {
 			}
 
 			// PRC-050, PRC-051: JEV-019 raw proof state (no asserted causalityVerified: true)
-			const isBugFix = Boolean(
-				objectiveId.toLowerCase().includes("bug") ||
-					(objRecord?.objective?.description?.toLowerCase().includes("bug") ?? false),
-			);
+			const isBugFix = requestsBugFix(objectiveId, objRecord?.objective?.description);
 			if (isBugFix) {
 				await this.deps.steeringPlane.requireCertificate(
 					"JEV-019",

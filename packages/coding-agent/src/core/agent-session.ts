@@ -175,6 +175,7 @@ import type { OllamaRuntime, TransformersRuntime } from "./models/local-runtime.
 import { createRepoGitDelivery } from "./objective-execution/delivery-proof.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import { LedgerRouteCheckpoints } from "./objective-execution/ledger-route-checkpoints.ts";
+import { createRepoReleaseDelivery } from "./objective-execution/release-delivery.ts";
 import { DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import type { DecisionStageSink } from "./operator-projection/decision-stage-log.ts";
 import { type DeliveryState, SessionOperatorProjection } from "./operator-projection/session-operator-projection.ts";
@@ -2040,6 +2041,12 @@ export class AgentSession {
 				consumePendingSupervisionRequest: (signalId) => this._workerSupervision.consumePendingRootRequest(signalId),
 				repoRoot: this._cwd,
 				gitExecutor: createRepoGitDelivery(this._cwd),
+				...(() => {
+					const releaseExecutor = createRepoReleaseDelivery(this._cwd, {
+						npmCommand: this.settingsManager.getNpmCommand(),
+					});
+					return releaseExecutor ? { releaseExecutor } : {};
+				})(),
 				...(() => {
 					const systemOneController = this._systemOneController;
 					return systemOneController

@@ -12,6 +12,7 @@ import type { DecisionEvaluation } from "../decision/evaluation.ts";
 import { isForbiddenRequiredProvenance } from "../decision/policy.ts";
 import type { DecisionProgram } from "../decision/program.ts";
 import type { JevAdapter } from "../system-one/adapter.ts";
+import { evaluateChoice, evaluateNoul, noulFromAnswer } from "../system-one/policy.ts";
 import { type SemanticEvaluationObserver, verdictFromCertificate } from "../system-one/semantic-evaluation-ledger.ts";
 import { canonicalDigest } from "./canonical.ts";
 import { SteeringCertificateStore } from "./certificate-store.ts";
@@ -308,6 +309,32 @@ export class SystemOneSteeringPlane {
 		return { action: "continue_current_work", reasonCodes };
 	}
 
+	private hardPass(answer: unknown, direction: "required_true" | "required_false"): boolean {
+		const fallback = direction !== "required_true";
+		return evaluateNoul(noulFromAnswer(answer, fallback), direction) === "hard_pass";
+	}
+
+	private hardComplete(answer: unknown): boolean {
+		if (!answer || typeof answer !== "object") return false;
+		const record = answer as {
+			choice?: unknown;
+			selected?: unknown;
+			confidence?: unknown;
+			probabilities?: unknown;
+			distribution?: unknown;
+		};
+		const choice =
+			typeof record.choice === "string"
+				? record.choice
+				: typeof record.selected === "string"
+					? record.selected
+					: undefined;
+		const probabilities = (record.probabilities ?? record.distribution) as Record<string, number> | undefined;
+		if (!choice || typeof record.confidence !== "number" || !probabilities) return false;
+		const verdict = evaluateChoice({ choice, confidence: record.confidence, probabilities }, "hard");
+		return verdict.accepted && verdict.choice === "complete";
+	}
+
 	private isTruthy(ans: unknown, threshold = 0.5): boolean {
 		if (ans == null) return false;
 		if (typeof ans === "object") {
@@ -545,21 +572,35 @@ export class SystemOneSteeringPlane {
 			case "JEV-025": {
 				const record = state && typeof state === "object" ? (state as Record<string, unknown>) : {};
 				const bugFix = record.bugFix === true || record.isBugFix === true;
-				if (!this.isTruthy(answers.implementation_matches_goal)) failed.push("implementation_matches_goal");
-				if (bugFix && !this.isTruthy(answers.root_cause_addressed)) failed.push("root_cause_addressed");
-				if (this.isTruthy(answers.required_behavior_unverified)) failed.push("required_behavior_unverified");
-				if (this.isTruthy(answers.material_claim_unsupported)) failed.push("material_claim_unsupported");
-				if (this.isTruthy(answers.out_of_scope_change_present)) failed.push("out_of_scope_change_present");
-				if (this.isTruthy(answers.duplicate_responsibility_introduced))
+				if (!this.hardPass(answers.implementation_matches_goal, "required_true"))
+					failed.push("implementation_matches_goal");
+				if (bugFix && !this.hardPass(answers.root_cause_addressed, "required_true"))
+					failed.push("root_cause_addressed");
+				if (!this.hardPass(answers.required_behavior_unverified, "required_false"))
+					failed.push("required_behavior_unverified");
+				if (!this.hardPass(answers.material_claim_unsupported, "required_false"))
+					failed.push("material_claim_unsupported");
+				if (!this.hardPass(answers.out_of_scope_change_present, "required_false"))
+					failed.push("out_of_scope_change_present");
+				if (!this.hardPass(answers.duplicate_responsibility_introduced, "required_false"))
 					failed.push("duplicate_responsibility_introduced");
-				if (this.getChoiceValue(answers.completion_verdict) !== "complete") failed.push("completion_verdict");
-				if (answers.acceptance_satisfied !== undefined && !this.isTruthy(answers.acceptance_satisfied)) {
+				if (!this.hardComplete(answers.completion_verdict)) failed.push("completion_verdict");
+				if (
+					answers.acceptance_satisfied !== undefined &&
+					!this.hardPass(answers.acceptance_satisfied, "required_true")
+				) {
 					failed.push("acceptance_satisfied");
 				}
-				if (answers.requirements_complete !== undefined && !this.isTruthy(answers.requirements_complete)) {
+				if (
+					answers.requirements_complete !== undefined &&
+					!this.hardPass(answers.requirements_complete, "required_true")
+				) {
 					failed.push("requirements_complete");
 				}
-				if (answers.verification_conclusive !== undefined && !this.isTruthy(answers.verification_conclusive)) {
+				if (
+					answers.verification_conclusive !== undefined &&
+					!this.hardPass(answers.verification_conclusive, "required_true")
+				) {
 					failed.push("verification_conclusive");
 				}
 				if (failed.length > 0) outcome = "repair";
@@ -567,14 +608,32 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-026": {
-				if (this.isTruthy(answers.missing_requirement)) failed.push("missing_requirement");
-				if (this.isTruthy(answers.hidden_assumption)) failed.push("hidden_assumption");
-				if (this.isTruthy(answers.plausible_regression_not_tested)) failed.push("plausible_regression_not_tested");
-				if (this.isTruthy(answers.conclusion_overstates_evidence)) failed.push("conclusion_overstates_evidence");
-				if (this.isTruthy(answers.unhandled_edge_cases)) failed.push("no_unhandled_edge_cases");
-				if (this.isTruthy(answers.hidden_regressions)) failed.push("no_hidden_regressions");
-				if (this.isTruthy(answers.assumption_violations)) failed.push("no_assumption_violations");
-				if (answers.adversarial_approved !== undefined && !this.isTruthy(answers.adversarial_approved)) {
+				if (!this.hardPass(answers.missing_requirement, "required_false")) failed.push("missing_requirement");
+				if (!this.hardPass(answers.hidden_assumption, "required_false")) failed.push("hidden_assumption");
+				if (!this.hardPass(answers.plausible_regression_not_tested, "required_false"))
+					failed.push("plausible_regression_not_tested");
+				if (!this.hardPass(answers.conclusion_overstates_evidence, "required_false"))
+					failed.push("conclusion_overstates_evidence");
+				if (
+					answers.unhandled_edge_cases !== undefined &&
+					!this.hardPass(answers.unhandled_edge_cases, "required_false")
+				)
+					failed.push("no_unhandled_edge_cases");
+				if (
+					answers.hidden_regressions !== undefined &&
+					!this.hardPass(answers.hidden_regressions, "required_false")
+				)
+					failed.push("no_hidden_regressions");
+				if (
+					answers.assumption_violations !== undefined &&
+					!this.hardPass(answers.assumption_violations, "required_false")
+				) {
+					failed.push("no_assumption_violations");
+				}
+				if (
+					answers.adversarial_approved !== undefined &&
+					!this.hardPass(answers.adversarial_approved, "required_true")
+				) {
 					failed.push("adversarial_approved");
 				}
 				if (failed.length > 0) outcome = "repair";

@@ -1,4 +1,7 @@
 import { execFile } from "node:child_process";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { CommitReceipt, PublishReceipt, PushReceipt, SideEffectReceipt } from "./delivery-bundle.ts";
 
 /** Mechanical observation supplied by the git executor. Generic completion does not open a network connection. */
@@ -159,13 +162,23 @@ export function proveDeployReceipt(input: {
 
 function gitOutput(repoRoot: string, args: readonly string[]): Promise<string> {
 	return new Promise((resolve, reject) => {
-		execFile("git", [...args], { cwd: repoRoot, encoding: "utf8", maxBuffer: 8 * 1024 * 1024 }, (error, stdout) => {
-			if (error) {
-				reject(error);
-				return;
-			}
-			resolve(String(stdout).replace(/\n$/, ""));
-		});
+		execFile(
+			"git",
+			[...args],
+			{
+				cwd: repoRoot,
+				encoding: "utf8",
+				maxBuffer: 8 * 1024 * 1024,
+				env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+			},
+			(error, stdout) => {
+				if (error) {
+					reject(error);
+					return;
+				}
+				resolve(String(stdout).replace(/\n$/, ""));
+			},
+		);
 	});
 }
 
@@ -189,6 +202,42 @@ function attributableResidue(porcelain: string, candidateUntrackedPaths: readonl
 	return residue;
 }
 
+let noninteractiveGpg: string | undefined;
+
+/** git's gpg.program is one executable, so batch pinentry has to live in that executable. */
+function gpgProgram(): string {
+	if (noninteractiveGpg) return noninteractiveGpg;
+	const dir = join(tmpdir(), "pi-adaptative-gpg");
+	mkdirSync(dir, { recursive: true });
+	const script = join(dir, "gpg-batch.mjs");
+	writeFileSync(
+		script,
+		[
+			"#!/usr/bin/env node",
+			"import { spawnSync } from 'node:child_process';",
+			"const child = spawnSync('gpg', ['--batch', '--pinentry-mode', 'error', ...process.argv.slice(2)], { stdio: 'inherit' });",
+			"if (child.error) { process.stderr.write(child.error.message + '\\n'); process.exit(1); }",
+			"process.exit(child.status ?? 1);",
+			"",
+		].join("\n"),
+	);
+	if (process.platform === "win32") {
+		const cmd = join(dir, "gpg-batch.cmd");
+		writeFileSync(cmd, `@echo off\r\nnode "%~dp0gpg-batch.mjs" %*\r\n`);
+		noninteractiveGpg = cmd;
+		return cmd;
+	}
+	chmodSync(script, 0o755);
+	noninteractiveGpg = script;
+	return script;
+}
+
+async function currentBranchRef(repoRoot: string): Promise<string> {
+	const branch = await gitText(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
+	if (branch === "HEAD") throw new Error("Detached HEAD cannot be pushed");
+	return `refs/heads/${branch}`;
+}
+
 /** Local git commit, push, and proof. Network stays inside this executor, not in completion control flow. */
 export function createRepoGitDelivery(repoRoot: string): {
 	commit(message?: string): Promise<{ sha: string }>;
@@ -202,27 +251,25 @@ export function createRepoGitDelivery(repoRoot: string): {
 			const status = await gitText(repoRoot, ["status", "--porcelain"]);
 			if (status) {
 				await gitText(repoRoot, ["add", "-A"]);
-				await gitText(repoRoot, ["-c", "commit.gpgsign=false", "commit", "-m", message]);
+				await gitText(repoRoot, ["-c", `gpg.program=${gpgProgram()}`, "commit", "-m", message]);
 			}
 			return { sha: await gitText(repoRoot, ["rev-parse", "HEAD"]) };
 		},
 		async push() {
-			let branch = await gitText(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"]);
-			if (branch === "HEAD") branch = "main";
 			const remote = "origin";
-			const ref = `refs/heads/${branch}`;
+			const ref = await currentBranchRef(repoRoot);
 			await gitText(repoRoot, ["push", remote, `HEAD:${ref}`]);
 			return { remote, ref };
 		},
 		async tag(name = "objective") {
-			// tag.gpgsign turns a bare `git tag` into an annotated tag and then fails with no message.
-			await gitText(repoRoot, ["-c", "tag.gpgsign=false", "tag", "--no-sign", name]);
+			// -m keeps tag.gpgsign from opening an editor. The gpg program fails instead of prompting.
+			await gitText(repoRoot, ["-c", `gpg.program=${gpgProgram()}`, "tag", "-m", name, name]);
 			return { tag: name };
 		},
 		async proveDelivery(query) {
 			const head = await gitText(repoRoot, ["rev-parse", "HEAD"]);
 			const remote = query.remote ?? "origin";
-			const ref = query.ref ?? `refs/heads/${await gitText(repoRoot, ["rev-parse", "--abbrev-ref", "HEAD"])}`;
+			const ref = query.ref ?? (await currentBranchRef(repoRoot));
 			const listed = await gitText(repoRoot, ["ls-remote", remote, ref]);
 			const observedSha = listed.split(/\s+/)[0] ?? "";
 			if (!observedSha) {
