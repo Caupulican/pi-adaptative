@@ -2037,19 +2037,26 @@ export class AgentSession {
 					getResumableHumanInputSnapshot(this.sessionManager)?.status === "pending",
 				pendingSupervisionRequests: () => this._workerSupervision.getPendingRootRequests(),
 				consumePendingSupervisionRequest: (signalId) => this._workerSupervision.consumePendingRootRequest(signalId),
-				...(this._systemOneController
-					? {
-							systemOne: {
-								executeCompletionTransaction: (isBugFix, options) =>
-									this._systemOneController!.executeCompletionTransaction(isBugFix, options),
-								validateObjectivePostflight: (objectiveId) =>
-									this._systemOneController!.validateObjectivePostflight(objectiveId),
-								peekControlDirective: () => this._systemOneController!.peekControlDirective(),
-								consumeControlDirective: () => this._systemOneController!.consumeControlDirective(),
-								noteControlDirective: (directive) => this._systemOneController!.noteControlDirective(directive),
-							},
-						}
-					: {}),
+				...(() => {
+					const systemOneController = this._systemOneController;
+					return systemOneController
+						? {
+								systemOne: {
+									get adapter() {
+										return (systemOneController as any)?.adapter;
+									},
+									executeCompletionTransaction: (isBugFix, options) =>
+										this._systemOneController!.executeCompletionTransaction(isBugFix, options),
+									validateObjectivePostflight: (objectiveId) =>
+										this._systemOneController!.validateObjectivePostflight(objectiveId),
+									peekControlDirective: () => this._systemOneController!.peekControlDirective(),
+									consumeControlDirective: () => this._systemOneController!.consumeControlDirective(),
+									noteControlDirective: (directive) =>
+										this._systemOneController!.noteControlDirective(directive),
+								},
+							}
+						: {};
+				})(),
 				...(this._executionLoopMode ? { mode: this._executionLoopMode } : {}),
 			});
 		}
