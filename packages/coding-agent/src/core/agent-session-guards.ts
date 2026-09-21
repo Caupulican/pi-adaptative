@@ -116,12 +116,18 @@ export function handleToolValidationEscalation(deps: SessionGuardDeps, event: To
 export async function executeSystemOnePreflight(
 	controller: SystemOneController | undefined,
 	messageCount: number,
-): Promise<void> {
-	if (!controller) return;
+): Promise<{ proceed: boolean }> {
+	if (!controller) return { proceed: true };
+	controller.syncCanonicalTruth();
+	if (!controller.hasLiveObjective()) return { proceed: true };
 	const preflight = await controller.validatePreflight(String(messageCount + 1));
 	if (preflight.route === "block") {
 		throw new Error(`System One preflight rejected: ${preflight.decision.policy_result}`);
 	}
+	if (preflight.route !== "allow") {
+		return { proceed: false };
+	}
+	return { proceed: true };
 }
 
 export async function executeSystemOnePostflight(
@@ -130,6 +136,8 @@ export async function executeSystemOnePostflight(
 	aborted?: boolean,
 ): Promise<void> {
 	if (!controller || aborted) return;
+	controller.syncCanonicalTruth();
+	if (!controller.hasLiveObjective()) return;
 	await controller.validatePostflight(String(messageCount));
 }
 

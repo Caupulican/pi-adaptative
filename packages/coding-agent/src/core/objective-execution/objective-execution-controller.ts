@@ -34,6 +34,7 @@ import { buildWorkerCapabilityRequest, NoEligibleExpertError } from "../expert-r
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import type { SystemOneSteeringPlane } from "../steering/index.ts";
+import type { SystemOneControlDirective } from "../system-one/control-directive.ts";
 import type { FinalCompletionVerdict } from "../system-one/policy.ts";
 import {
 	CompletionCoordinator,
@@ -91,6 +92,7 @@ export interface ObjectiveExecutionControllerDeps {
 		): Promise<FinalCompletionVerdict>;
 		validateObjectivePostflight?(objectiveId: string): Promise<void>;
 		recordHostEvidence?(evidence: unknown): Promise<void>;
+		consumeControlDirective?(): SystemOneControlDirective | undefined;
 	};
 	decisions?: DecisionEngineRouter;
 	actionPolicy?: DecisionActionPolicy;
@@ -381,6 +383,12 @@ export class ObjectiveExecutionController {
 		return this.deps.mode ?? "objective_shadow";
 	}
 
+	private throwIfRequiredSemantic(err: unknown): void {
+		if (this.deps.steeringPlane?.policy.mode === "system_one_required" || this.getMode() === "objective_primary") {
+			throw err;
+		}
+	}
+
 	getHumanEdgeLedger(): DurableHumanEdgeLedger {
 		return this.humanEdgeLedger;
 	}
@@ -558,8 +566,8 @@ export class ObjectiveExecutionController {
 					contextStale: cs?.kind === "boolean" ? cs.value : undefined,
 					strategyRepetition: sr?.kind === "boolean" ? sr.value : undefined,
 				};
-			} catch {
-				// Fallback to deterministic route policy
+			} catch (err) {
+				this.throwIfRequiredSemantic(err);
 			}
 		} else if (this.deps.steeringPlane) {
 			try {
@@ -634,11 +642,12 @@ export class ObjectiveExecutionController {
 		} else if (this.deps.systemOne?.evaluateObjectiveRoute) {
 			try {
 				semantic = await this.deps.systemOne.evaluateObjectiveRoute(objectiveId, { signal: options?.signal });
-			} catch {
-				// Fallback to deterministic rule set
+			} catch (err) {
+				this.throwIfRequiredSemantic(err);
 			}
 		}
 
+		const systemOneDirective = this.deps.systemOne?.consumeControlDirective?.();
 		const route = composeObjectiveRoute({
 			cycleId,
 			objectiveId,
@@ -648,6 +657,14 @@ export class ObjectiveExecutionController {
 			ownerRequired: this.deps.ownerRequired?.(objectiveId) ?? false,
 			strategyRepetition: stall.repeatedWithoutNewEvidence,
 			semantic,
+			...(systemOneDirective
+				? {
+						systemOneDirective: {
+							objectiveRoute: systemOneDirective.objectiveRoute,
+							reasonCodes: systemOneDirective.reasonCodes,
+						},
+					}
+				: {}),
 		});
 
 		validateObjectiveRoute(route);

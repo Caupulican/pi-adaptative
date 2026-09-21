@@ -8,7 +8,7 @@ Date: 2026-09-19
 | Subsystem | Source Location | Responsibility & Invariants |
 |---|---|---|
 | **Execution Truth** | `packages/coding-agent/src/core/orchestration/task-runtime.ts` (`DurableTaskRuntime`) | Owns objectives, tasks, attempts, worker assignments, capability grants, leases/fencing, checkpoints, dependencies, budgets, and durable execution events. Mechanical execution authority. |
-| **Integrity & Epistemic Truth** | `packages/coding-agent/src/core/system-one/controller.ts`, `execution-state.ts` (`SystemOneController`, `ExecutionState`) | Owns observations, claims, hypotheses, evidence freshness, changes, verification gates, semantic validation, policy packs, canary redaction, and atomic completion transactions. |
+| **Integrity & Epistemic Truth** | GoalState + DurableTaskRuntime + verification obligations, projected into `ExecutionStore` by `projectCanonicalTruth` before every System One stage | Canonical observations, claims, criteria, verification and completion facts. `ExecutionStore` is a hydrated projection, not a second mutable authority. `SystemOneController` owns stage-pack evaluation (preflight, tool gate, postflight, completion transaction) on that projection. |
 | **Loop Execution (Target)** | `packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts` (`ObjectiveExecutionController`) | Deterministic loop owner. Owns reconciliation, route composition, dispatch/wait/replan/repair, completion transaction invocation, and explicit terminal reasons. |
 | **Semantic Referee** | `packages/coding-agent/src/core/system-one/` (`TypeSafeSystemOneDriver`, `jev-1.13.0`) | Semantic referee for decomposed questions (`work_remaining`, `missing_work_class`, `independent_worker_required`, `capability_escalation_required`, `external_blocker_present`, `semantic_progress`, `context_stale`, `strategy_repetition`). Does NOT own loop scheduling, terminal authority, or provider/model selection. |
 | **Model Selection** | `packages/coding-agent/src/core/autonomy/model-router.ts`, `capability-gateway.ts` | Selects exact provider and model within configured policy. Jev selects work class, Pi selects who executes. |
@@ -21,9 +21,9 @@ Date: 2026-09-19
 2. **Authority Hierarchy**:
    `deterministic code / policy > mechanical evidence > semantic validation > worker assertion`
 3. **Model Selection Independence**: Jev evaluates semantic work class; the existing model router and capability gateway select the concrete worker model.
-4. **Terminal Gating**: `complete` is not a standard route; it is only committed via `SystemOneController.executeCompletionTransaction`.
+4. **Terminal Gating**: `complete` is not a standard route; it is only committed via the completion coordinator, which may call `SystemOneController.executeCompletionTransaction` on the hydrated projection. Empty or disconnected objective state cannot complete.
 5. **Worker Boundary**: Workers propose `completion_candidate`; only the harness commits completion.
 6. **Rollout Modes**:
    - `legacy_goal`: Original `GoalLoopController` active.
    - `objective_shadow`: `GoalLoopController` active; `ObjectiveExecutionController` computes route in shadow mode and records disagreement telemetry.
-   - `objective_primary`: `ObjectiveExecutionController` drives continuation; legacy goal tools route through `GoalCompatibilityAdapter`.
+   - `objective_primary`: `ObjectiveExecutionController` drives continuation; legacy goal tools route through `GoalCompatibilityAdapter`. Missing controller/runtime bindings fail closed and name the missing binding.

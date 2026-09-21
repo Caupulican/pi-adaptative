@@ -71,3 +71,17 @@ export class DefaultDecisionEnginePolicy implements DecisionEnginePolicy {
 		return score;
 	}
 }
+
+/**
+ * Policy for `system_one_required`: calibrated Jev or mechanical `none`.
+ * Generic LLM `synthetic_self_report` cannot satisfy a required checkpoint.
+ */
+export class RequiredSystemOneDecisionPolicy extends DefaultDecisionEnginePolicy {
+	constructor() {
+		super(["native_calibrated", "none", "derived_calibrated_probability"], true);
+	}
+}
+
+export function isForbiddenRequiredProvenance(provenance: string): boolean {
+	return provenance === "synthetic_self_report" || provenance === "heuristic";
+}

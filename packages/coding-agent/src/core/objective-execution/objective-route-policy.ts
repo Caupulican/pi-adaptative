@@ -28,6 +28,11 @@ export interface RouteCompositionInput {
 	readonly attemptId?: string | null;
 	readonly targetRequirementIds?: readonly string[];
 	readonly targetHypothesisIds?: readonly string[];
+	/** Executable System One preflight/postflight/tool-gate outcome, translated into a route. */
+	readonly systemOneDirective?: {
+		readonly objectiveRoute: ObjectiveRouteName;
+		readonly reasonCodes: readonly string[];
+	};
 }
 
 /**
@@ -71,6 +76,16 @@ export function composeObjectiveRoute(input: RouteCompositionInput): ObjectiveRo
 	}
 	if (input.ownerRequired) {
 		return buildRoute(cycleId, objectiveId, "owner_required", ["owner_authorization_required"], input);
+	}
+
+	if (input.systemOneDirective) {
+		return buildRoute(
+			cycleId,
+			objectiveId,
+			input.systemOneDirective.objectiveRoute,
+			[...input.systemOneDirective.reasonCodes],
+			input,
+		);
 	}
 
 	// 4. Repeated strategy / stale context

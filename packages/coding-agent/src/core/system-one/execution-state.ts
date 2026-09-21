@@ -23,6 +23,7 @@ import type {
 	RepoState,
 	SourceRef,
 	ToolEvent,
+	ToolEventStatus,
 	ToolImpact,
 	ValidationDecision,
 	VerificationKind,
@@ -62,6 +63,19 @@ export interface ExecutionStoreOptions {
 		languages?: string[];
 	};
 	initial_plan?: PlanStep[];
+}
+
+/** Canonical goal/runtime/verification folded into the System One store. Not a second authority. */
+export interface CanonicalHydration {
+	request: string;
+	normalized_goal: string;
+	acceptance_criteria: AcceptanceCriterion[];
+	constraints: Constraint[];
+	non_goals: string[];
+	current_revision: string;
+	plan_steps: PlanStep[];
+	observations: Observation[];
+	verification: VerificationRun[];
 }
 
 const VALID_ACTIONS = new Set(["inspect", "retrieve", "edit", "build", "test", "verify", "replan", "report", "none"]);
@@ -333,6 +347,33 @@ export class ExecutionStore {
 		return this.state.objective;
 	}
 
+	hasLiveObjective(): boolean {
+		return this.state.objective.request.trim().length > 0 || this.state.objective.normalized_goal.trim().length > 0;
+	}
+
+	/**
+	 * Replace objective, plan, observations, and verification from canonical session truth.
+	 * Tool events, decisions, claims, and completion records stay with this store.
+	 */
+	hydrateFromCanonical(input: CanonicalHydration): void {
+		this.state.objective = {
+			request: input.request,
+			normalized_goal: input.normalized_goal,
+			acceptance_criteria: input.acceptance_criteria,
+			constraints: input.constraints,
+			non_goals: input.non_goals,
+		};
+		this.state.plan = {
+			version: this.state.plan.version,
+			rationale_ref: this.state.plan.rationale_ref ?? null,
+			steps: input.plan_steps,
+		};
+		this.state.observations = input.observations;
+		this.state.verification = input.verification;
+		this.state.repo.current_revision = input.current_revision;
+		this.state.updated_at = new Date().toISOString();
+	}
+
 	getRepo(): Readonly<RepoState> {
 		return this.state.repo;
 	}
@@ -506,6 +547,8 @@ export class ExecutionStore {
 		input_payload?: unknown;
 		output_payload?: unknown;
 		observation_ids?: string[];
+		call_id?: string;
+		reason?: string;
 	}): ToolEvent {
 		this.toolEventCounter++;
 		const id = `TE-${this.toolEventCounter}`;
@@ -528,9 +571,33 @@ export class ExecutionStore {
 			input_hash,
 			output_hash,
 			observation_ids: input.observation_ids ?? [],
+			...(input.call_id ? { call_id: input.call_id } : {}),
+			...(input.reason ? { reason: input.reason } : {}),
 		};
 
 		this.state.tool_events.push(event);
+		this.state.updated_at = new Date().toISOString();
+		return event;
+	}
+
+	/** Update the matching tool event's terminal status after execution. */
+	updateToolEvent(
+		match: { id?: string; call_id?: string },
+		patch: { status: ToolEventStatus; output_payload?: unknown; reason?: string; observation_ids?: string[] },
+	): ToolEvent | undefined {
+		const event = [...this.state.tool_events].reverse().find((candidate) => {
+			if (match.id && candidate.id === match.id) return true;
+			if (match.call_id && candidate.call_id === match.call_id) return true;
+			return false;
+		});
+		if (!event) return undefined;
+		event.status = patch.status;
+		event.timestamp = new Date().toISOString();
+		if (patch.reason !== undefined) event.reason = patch.reason;
+		if (patch.observation_ids) event.observation_ids = patch.observation_ids;
+		if (patch.output_payload !== undefined) {
+			event.output_hash = createHash("sha256").update(JSON.stringify(patch.output_payload)).digest("hex");
+		}
 		this.state.updated_at = new Date().toISOString();
 		return event;
 	}

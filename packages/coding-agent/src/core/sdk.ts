@@ -39,6 +39,7 @@ import { recoverBedrockSsoAuthentication } from "./bedrock-sso-login.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { resolveFastModeServiceTier } from "./fast-mode.ts";
+import { ObjectivePrimaryBindingError } from "./goals/goal-session-controller.ts";
 import type { IntegrityExtension } from "./hooks/index.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
@@ -70,6 +71,7 @@ import { SteeringCertificateStore } from "./steering/certificate-store.ts";
 import { DEFAULT_STEERING_POLICY } from "./steering/policy.ts";
 import { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import { SystemOneJevAdapter } from "./system-one/adapter.ts";
+import { projectCanonicalTruth } from "./system-one/canonical-truth.ts";
 import { createSystemOneConfig } from "./system-one/config.ts";
 import { SystemOneController } from "./system-one/controller.ts";
 import { ExecutionStore } from "./system-one/execution-state.ts";
@@ -1066,6 +1068,34 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 
 		session.attachAdaptiveRuntime({ ...stack, charter });
+	}
+
+	if (systemOneController) {
+		systemOneController.setTruthSource(() => {
+			let currentRevision = systemOneController.store.getRepo().current_revision;
+			try {
+				currentRevision =
+					execFileSync("git", ["rev-parse", "HEAD"], {
+						cwd,
+						encoding: "utf-8",
+						stdio: ["ignore", "pipe", "ignore"],
+					}).trim() || currentRevision;
+			} catch {
+				// Non-git directory
+			}
+			return projectCanonicalTruth({
+				goal: session.getGoalStateSnapshot(),
+				runtime: session.backgroundLanes.getTaskRuntimeSnapshot(),
+				verificationObligations: session.getVerificationObligations(),
+				lastRoute: session.objectiveExecutionController?.getLastRoute(),
+				currentRevision,
+			});
+		});
+		systemOneController.syncCanonicalTruth();
+	}
+	if (executionLoopMode === "objective_primary" && !session.objectiveExecutionController) {
+		await session.disposeAndWait();
+		throw new ObjectivePrimaryBindingError("ObjectiveExecutionController");
 	}
 	try {
 		// The initial runtime has now bound providers from profile-granted extensions. Re-resolve the

@@ -280,6 +280,7 @@ export class ToolGateController {
 					intent: `Invoke tool ${toolCall.name}`,
 					impact,
 					args,
+					call_id: toolCall.id,
 				});
 				if (systemOneResult.outcome === "block") {
 					return {
@@ -377,6 +378,11 @@ export class ToolGateController {
 			selection?.complete(toolCall.id, !resolvedIsError, content);
 
 			const systemOne = this.deps.getSystemOneController?.();
+			systemOne?.recordToolTerminal({
+				call_id: toolCall.id,
+				succeeded: !resolvedIsError,
+				output: content,
+			});
 			if (systemOne?.hookCoordinator?.hasExtensions()) {
 				const isMutation = toolCall.name.includes("edit") || toolCall.name.includes("write");
 				if (isMutation) {

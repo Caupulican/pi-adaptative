@@ -153,7 +153,15 @@ export interface Plan {
 	steps: PlanStep[];
 }
 
-export type ToolEventStatus = "requested" | "allowed" | "denied" | "running" | "succeeded" | "failed";
+export type ToolEventStatus =
+	| "requested"
+	| "allowed"
+	| "denied"
+	| "refused"
+	| "running"
+	| "succeeded"
+	| "failed"
+	| "aborted";
 
 export interface ToolEvent {
 	id: string;
@@ -165,6 +173,10 @@ export interface ToolEvent {
 	input_hash?: string | null;
 	output_hash?: string | null;
 	observation_ids?: string[];
+	/** Correlates the gate record with the actual tool call id. */
+	call_id?: string;
+	/** Why the event was refused, denied, or aborted. */
+	reason?: string;
 }
 
 export type ChangeKind = "create" | "modify" | "delete" | "rename";

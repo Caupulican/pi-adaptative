@@ -73,6 +73,17 @@ export interface GoalSessionControllerDeps {
 	getObjectiveExecutionController?(): ObjectiveExecutionController | undefined;
 }
 
+/** `objective_primary` without the named binding must not fall through to the legacy loop. */
+export class ObjectivePrimaryBindingError extends Error {
+	readonly missingBinding: string;
+
+	constructor(missingBinding: string) {
+		super(`objective_primary cannot start: missing required binding '${missingBinding}'`);
+		this.name = "ObjectivePrimaryBindingError";
+		this.missingBinding = missingBinding;
+	}
+}
+
 export type ChatGoalAdmission =
 	| { status: "not_explicit" }
 	| { status: "started"; state: GoalState }
@@ -797,10 +808,25 @@ export class GoalSessionController {
 		}
 	}
 
-	continueOnce(options: GoalContinuationOnceOptions): Promise<GoalContinuationOnceResult> {
+	/**
+	 * Primary mode needs the live objective controller; missing that binding is a reject, not legacy.
+	 */
+	private withPrimaryOrLegacy<T>(
+		run: (controller: ObjectiveExecutionController) => Promise<T>,
+		legacy: () => Promise<T>,
+	): Promise<T> {
+		const mode = this.deps.getExecutionLoopMode?.() ?? this.deps.getObjectiveExecutionController?.()?.getMode();
+		if (mode !== "objective_primary") return legacy();
 		const controller = this.primaryController();
-		if (controller) return this.continuePrimaryOnce(controller, options);
-		return this.loop.continueGoalOnce(options);
+		if (!controller) return Promise.reject(new ObjectivePrimaryBindingError("ObjectiveExecutionController"));
+		return run(controller);
+	}
+
+	continueOnce(options: GoalContinuationOnceOptions): Promise<GoalContinuationOnceResult> {
+		return this.withPrimaryOrLegacy(
+			(controller) => this.continuePrimaryOnce(controller, options),
+			() => this.loop.continueGoalOnce(options),
+		);
 	}
 
 	/**
@@ -834,9 +860,10 @@ export class GoalSessionController {
 	}
 
 	continueLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
-		const controller = this.primaryController();
-		if (controller) return this.continuePrimaryLoop(controller, options);
-		return this.loop.continueGoalLoop(options);
+		return this.withPrimaryOrLegacy(
+			(controller) => this.continuePrimaryLoop(controller, options),
+			() => this.loop.continueGoalLoop(options),
+		);
 	}
 
 	/** Cycles until a terminal, a wait, the turn or wall-clock limit, or a cycle that moved nothing. */

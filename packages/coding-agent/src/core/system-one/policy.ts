@@ -257,11 +257,39 @@ export function evaluateDeterministicCompletionGates(state: ExecutionState): {
 	const gates: CompletionGate[] = [];
 	const failedReasons: CompletionRejectionDetail[] = [];
 
-	// Gate: G-OBJ: Acceptance criteria satisfied or waived
+	// Gate: G-OBJ: a live objective's required acceptance criteria are satisfied or waived.
+	// Empty criteria on a real objective, or completion with no objective, must not pass.
+	const liveObjective = state.objective.request.trim().length > 0 || state.objective.normalized_goal.trim().length > 0;
 	const unsatisfiedACs = state.objective.acceptance_criteria.filter(
 		(ac) => ac.required && ac.status !== "satisfied" && ac.status !== "waived",
 	);
-	if (unsatisfiedACs.length > 0) {
+	if (!liveObjective) {
+		gates.push({
+			id: "G-OBJ",
+			kind: "deterministic",
+			required: true,
+			status: "failed",
+			details: "No live objective",
+		});
+		failedReasons.push({
+			id: "G-OBJ",
+			reason: "No live objective is bound; completion cannot run against an empty store.",
+			required_next_proof: "Bind the current objective requirements before requesting completion.",
+		});
+	} else if (state.objective.acceptance_criteria.length === 0) {
+		gates.push({
+			id: "G-OBJ",
+			kind: "deterministic",
+			required: true,
+			status: "failed",
+			details: "Live objective has no acceptance criteria",
+		});
+		failedReasons.push({
+			id: "G-OBJ",
+			reason: "Live objective has no acceptance criteria; empty criteria must not make completion easier.",
+			required_next_proof: "Record required acceptance criteria and evidence before completion.",
+		});
+	} else if (unsatisfiedACs.length > 0) {
 		gates.push({
 			id: "G-OBJ",
 			kind: "deterministic",
@@ -335,6 +363,27 @@ export function evaluateDeterministicCompletionGates(state: ExecutionState): {
 		});
 	} else {
 		gates.push({ id: "G-BUILD", kind: "deterministic", required: true, status: "passed" });
+	}
+
+	// Gate: G-VERIFY: unresolved non-test/non-build verification (open obligations) cannot complete.
+	const openVerify = state.verification.filter(
+		(v) => v.status === "failed" && v.kind !== "unit_test" && v.kind !== "integration_test" && v.kind !== "compile",
+	);
+	if (openVerify.length > 0) {
+		gates.push({
+			id: "G-VERIFY",
+			kind: "deterministic",
+			required: true,
+			status: "failed",
+			details: `Unresolved verification: ${openVerify.map((v) => v.id).join(", ")}`,
+		});
+		failedReasons.push({
+			id: "G-VERIFY",
+			reason: `Required verification is missing or failing: ${openVerify.map((v) => v.id).join(", ")}.`,
+			required_next_proof: "Resolve open verification obligations before completion.",
+		});
+	} else {
+		gates.push({ id: "G-VERIFY", kind: "deterministic", required: true, status: "passed" });
 	}
 
 	// Gate: G-EVIDENCE: Completion-critical claims must have fresh supporting evidence (R-054)

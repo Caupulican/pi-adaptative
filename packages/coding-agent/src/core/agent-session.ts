@@ -2008,6 +2008,9 @@ export class AgentSession {
 							systemOne: {
 								executeCompletionTransaction: (isBugFix, options) =>
 									this._systemOneController!.executeCompletionTransaction(isBugFix, options),
+								validateObjectivePostflight: (objectiveId) =>
+									this._systemOneController!.validateObjectivePostflight(objectiveId),
+								consumeControlDirective: () => this._systemOneController!.consumeControlDirective(),
 							},
 						}
 					: {}),
@@ -3678,20 +3681,22 @@ export class AgentSession {
 		this._goals.setStartAuthority(goalToolStartAuthority);
 		try {
 			this._toolProtocol.resetTurnState();
-			await executeSystemOnePreflight(this._systemOneController, this.agent.state.messages.length);
-			await this._modelRouter.runRoutedTurn(
-				messages,
-				routedTurnModel,
-				routedTurnRouteDecision,
-				true,
-				false,
-				submissionSignal,
-			);
-			await executeSystemOnePostflight(
-				this._systemOneController,
-				this.agent.state.messages.length,
-				submissionSignal?.aborted,
-			);
+			const preflight = await executeSystemOnePreflight(this._systemOneController, this.agent.state.messages.length);
+			if (preflight.proceed) {
+				await this._modelRouter.runRoutedTurn(
+					messages,
+					routedTurnModel,
+					routedTurnRouteDecision,
+					true,
+					false,
+					submissionSignal,
+				);
+				await executeSystemOnePostflight(
+					this._systemOneController,
+					this.agent.state.messages.length,
+					submissionSignal?.aborted,
+				);
+			}
 			// A cancelled submission records no outcome. Cancelled before the run, the last assistant
 			// message is the PREVIOUS turn's and scoring it here would count that turn twice; cancelled
 			// mid-run, the response is a fragment that is nobody's verdict on the protocol.

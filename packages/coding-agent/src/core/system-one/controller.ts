@@ -4,7 +4,13 @@ import type { JevAdapter } from "./adapter.ts";
 import { AuditStore } from "./audit.ts";
 import { hashQuestions, SYSTEM_ONE_CATALOG_VERSION, SYSTEM_ONE_PINNED_MODEL, selectQuestions } from "./catalog.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
-import type { ExecutionStore } from "./execution-state.ts";
+import {
+	directiveFromPostflight,
+	directiveFromPreflight,
+	directiveFromToolReplan,
+	type SystemOneControlDirective,
+} from "./control-directive.ts";
+import type { CanonicalHydration, ExecutionStore } from "./execution-state.ts";
 import type { IntegrityHookCoordinator } from "./integrity-hooks.ts";
 import {
 	decideFinalCompletion,
@@ -30,6 +36,8 @@ export interface SystemOneControllerDeps {
 	hookCoordinator?: IntegrityHookCoordinator;
 	/** The session's one Jev evaluation sink; every stage validation reports through it. */
 	evaluationObserver?: SemanticEvaluationObserver;
+	/** Live goal/runtime/verification projection; called before every stage. */
+	truthSource?: () => CanonicalHydration | undefined;
 }
 
 /** The consequence class a stage's tool impact maps to, for the evaluation record. */
@@ -58,6 +66,8 @@ export class SystemOneController {
 	readonly config: SystemOneConfig;
 	readonly hookCoordinator?: IntegrityHookCoordinator;
 	private evaluationObserver?: SemanticEvaluationObserver;
+	private truthSource?: () => CanonicalHydration | undefined;
+	private pendingDirective?: SystemOneControlDirective;
 
 	constructor(deps: SystemOneControllerDeps) {
 		this.store = deps.store;
@@ -67,11 +77,40 @@ export class SystemOneController {
 		this.config = deps.config ?? DEFAULT_SYSTEM_ONE_CONFIG;
 		this.hookCoordinator = deps.hookCoordinator;
 		this.evaluationObserver = deps.evaluationObserver;
+		this.truthSource = deps.truthSource;
 	}
 
 	/** Binds the session's evaluation sink; late-bound because the controller is built before the session. */
 	setEvaluationObserver(observer: SemanticEvaluationObserver | undefined): void {
 		this.evaluationObserver = observer;
+	}
+
+	/** Late-bound: the session exists after the controller is constructed. */
+	setTruthSource(source: (() => CanonicalHydration | undefined) | undefined): void {
+		this.truthSource = source;
+	}
+
+	syncCanonicalTruth(): void {
+		const hydration = this.truthSource?.();
+		if (hydration) this.store.hydrateFromCanonical(hydration);
+	}
+
+	hasLiveObjective(): boolean {
+		return this.store.hasLiveObjective();
+	}
+
+	noteControlDirective(directive: SystemOneControlDirective): void {
+		this.pendingDirective = directive;
+	}
+
+	peekControlDirective(): SystemOneControlDirective | undefined {
+		return this.pendingDirective;
+	}
+
+	consumeControlDirective(): SystemOneControlDirective | undefined {
+		const directive = this.pendingDirective;
+		this.pendingDirective = undefined;
+		return directive;
 	}
 
 	/**
@@ -141,12 +180,17 @@ export class SystemOneController {
 	/**
 	 * Validate task intake.
 	 */
+	/**
+	 * Stage-pack intake. Production admission is SteeringPlane JEV-001..003.
+	 * Kept for tests and hooks; not the production objective-admission owner.
+	 */
 	async validateIntake(): Promise<{
 		objectiveClear: boolean;
 		taskKind: string;
 		externalBlockerPresent: boolean;
 		decision: ValidationDecision;
 	}> {
+		this.syncCanonicalTruth();
 		const projection = this.projector.intake(this.store.snapshot());
 		const { decision, answers, evaluationId } = await this.runStageValidation("intake", projection);
 
@@ -178,6 +222,7 @@ export class SystemOneController {
 		route: "allow" | "retrieve" | "replan" | "test" | "block" | "escalate";
 		decision: ValidationDecision;
 	}> {
+		this.syncCanonicalTruth();
 		const projection = this.projector.preflight(this.store.snapshot(), stepId);
 		const { decision, answers, evaluationId } = await this.runStageValidation("preflight", projection);
 
@@ -187,6 +232,8 @@ export class SystemOneController {
 		if (route === "replan") {
 			this.store.transitionPhase("replan_required", true);
 		}
+		const directive = directiveFromPreflight(route);
+		if (directive) this.noteControlDirective(directive);
 
 		return { route, decision };
 	}
@@ -196,28 +243,33 @@ export class SystemOneController {
 	 * R-020 / R-034 / R-035: Deterministic checks first; Jev cannot override deterministic denials.
 	 */
 	async validateToolGate(
-		toolRequest: { tool: string; intent: string; impact: ToolImpact; args?: unknown },
+		toolRequest: { tool: string; intent: string; impact: ToolImpact; args?: unknown; call_id?: string },
 		deterministicCheck?: () => { allowed: boolean; reason?: string },
 	): Promise<{
 		outcome: "allow" | "confirm" | "block" | "replan";
 		reason?: string;
 		decision?: ValidationDecision;
+		toolEventId?: string;
 	}> {
+		this.syncCanonicalTruth();
 		// 1. Run deterministic checks first (R-020, R-034)
 		if (deterministicCheck) {
 			const det = deterministicCheck();
 			if (!det.allowed) {
 				// Deterministic failure cannot be overridden by Jev (R-035)
-				this.store.recordToolEvent({
+				const denied = this.store.recordToolEvent({
 					tool: toolRequest.tool,
 					intent: toolRequest.intent,
 					impact: toolRequest.impact,
 					status: "denied",
 					input_payload: toolRequest.args,
+					call_id: toolRequest.call_id,
+					reason: det.reason,
 				});
 				return {
 					outcome: "block",
 					reason: det.reason ?? "Blocked by deterministic tool authorization gate",
+					toolEventId: denied.id,
 				};
 			}
 		}
@@ -236,15 +288,32 @@ export class SystemOneController {
 		const outcome = decideToolGate(answers, toolRequest.impact, this.config, { relevanceEvaluable });
 		this.sealDecision(decision, outcome, evaluationId);
 
-		this.store.recordToolEvent({
+		const status = outcome === "block" ? "denied" : outcome === "replan" ? "refused" : "allowed";
+		if (outcome === "replan") {
+			this.noteControlDirective(directiveFromToolReplan(toolRequest.tool));
+		}
+		const event = this.store.recordToolEvent({
 			tool: toolRequest.tool,
 			intent: toolRequest.intent,
 			impact: toolRequest.impact,
-			status: outcome === "block" ? "denied" : "allowed",
+			status,
 			input_payload: toolRequest.args,
+			call_id: toolRequest.call_id,
+			reason: outcome === "replan" ? "not relevant to the current step" : undefined,
 		});
 
-		return { outcome, decision };
+		return { outcome, decision, toolEventId: event.id };
+	}
+
+	/** Record the real terminal after the call ran. No-op when the gate never admitted this call_id. */
+	recordToolTerminal(input: { call_id: string; succeeded: boolean; output?: unknown; aborted?: boolean }): void {
+		this.store.updateToolEvent(
+			{ call_id: input.call_id },
+			{
+				status: input.aborted ? "aborted" : input.succeeded ? "succeeded" : "failed",
+				output_payload: input.output,
+			},
+		);
 	}
 
 	/**
@@ -255,6 +324,7 @@ export class SystemOneController {
 		nextStatus: "continue" | "verify" | "retrieve_more" | "replan" | "rollback" | "completion_candidate" | "blocked";
 		decision: ValidationDecision;
 	}> {
+		this.syncCanonicalTruth();
 		const projection = this.projector.postflight(this.store.snapshot(), stepId);
 		const { decision, answers, evaluationId } = await this.runStageValidation("postflight", projection);
 
@@ -268,14 +338,29 @@ export class SystemOneController {
 		} else if (nextStatus === "completion_candidate") {
 			this.store.transitionPhase("completion_candidate", true);
 		}
+		const directive = directiveFromPostflight(nextStatus);
+		if (directive) this.noteControlDirective(directive);
 
 		return { nextStatus, decision };
+	}
+
+	/**
+	 * Production postflight owner for the objective loop. Skips a second Jev call when
+	 * the foreground preflight/postflight already recorded a control directive this cycle.
+	 */
+	async validateObjectivePostflight(objectiveId: string): Promise<void> {
+		const pending = this.peekControlDirective();
+		if (pending?.source === "preflight" || pending?.source === "postflight") return;
+		this.syncCanonicalTruth();
+		if (!this.hasLiveObjective()) return;
+		await this.validatePostflight(objectiveId);
 	}
 
 	/**
 	 * Validate claim against cited evidence.
 	 * R-009 / R-010: Every material claim MUST reference fresh evidence.
 	 */
+	/** Stage-pack claim check. Production evidence authority is CompletionCoordinator + runtime evidence. */
 	async validateClaimEvidence(
 		claimId: string,
 		evidenceId: string,
@@ -283,6 +368,7 @@ export class SystemOneController {
 		relationship: "supports" | "partially_supports" | "contradicts" | "insufficient" | "unrelated";
 		decision: ValidationDecision;
 	}> {
+		this.syncCanonicalTruth();
 		const projection = this.projector.evidenceCheck(this.store.snapshot(), claimId, evidenceId);
 		const { decision, answers, evaluationId } = await this.runStageValidation("evidence_check", projection);
 
@@ -326,8 +412,7 @@ export class SystemOneController {
 	}
 
 	/**
-	 * Duplicate logic check: deterministic candidate discovery followed by Jev semantic equivalence check.
-	 * R-013 / R-014: Deterministic repository search MUST produce duplicate-logic candidates before Jev judges semantic equivalence.
+	 * Duplicate logic stage pack. Production owner is SemanticResponsibilityController + SteeringPlane JEV-041..045.
 	 */
 	async validateDuplicateLogic(
 		candidateExistingLogic: string,
@@ -337,6 +422,7 @@ export class SystemOneController {
 		reusePreferable: "reuse_existing" | "extract_shared" | "separate_required" | "insufficient_evidence";
 		decision: ValidationDecision;
 	}> {
+		this.syncCanonicalTruth();
 		const projection = this.projector.duplicateLogic(candidateExistingLogic, proposedLogic);
 		const { decision, answers, evaluationId } = await this.runStageValidation("duplicate_logic", projection);
 
@@ -352,8 +438,7 @@ export class SystemOneController {
 	}
 
 	/**
-	 * Patch review before completing unit of change.
-	 * R-056: The final diff MUST pass semantic scope review.
+	 * Patch-review stage pack. Production owner is SteeringPlane JEV-025 / completion challenge.
 	 */
 	async validatePatchReview(changeIds: string[]): Promise<{
 		addressesNeed: boolean;
@@ -362,6 +447,7 @@ export class SystemOneController {
 		regressionSurfaceScore: number;
 		decision: ValidationDecision;
 	}> {
+		this.syncCanonicalTruth();
 		const projection = this.projector.patchReview(this.store.snapshot(), changeIds);
 		const { decision, answers, evaluationId } = await this.runStageValidation("patch_review", projection);
 
@@ -389,8 +475,7 @@ export class SystemOneController {
 	}
 
 	/**
-	 * Drift and loop detection pack.
-	 * R-045: Loop detection.
+	 * Drift stage pack. Production owner is ObjectiveStallDetector + JEV-004 strategy_repetition.
 	 */
 	async validateDriftLoop(): Promise<{
 		goalDrift: boolean;
@@ -398,6 +483,7 @@ export class SystemOneController {
 		staleContextDependency: boolean;
 		decision: ValidationDecision;
 	}> {
+		this.syncCanonicalTruth();
 		const projection = this.projector.driftCheck(this.store.snapshot());
 		const { decision, answers, evaluationId } = await this.runStageValidation("drift_loop", projection);
 
@@ -444,6 +530,7 @@ export class SystemOneController {
 			signal?: AbortSignal;
 		},
 	): Promise<FinalCompletionVerdict> {
+		this.syncCanonicalTruth();
 		// 1. Evaluate all deterministic gates first (R-020, R-035)
 		const detResult = evaluateDeterministicCompletionGates(this.store.snapshot());
 		for (const g of detResult.gates) {

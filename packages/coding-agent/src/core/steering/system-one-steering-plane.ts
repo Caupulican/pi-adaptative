@@ -9,6 +9,7 @@ import type { SemanticDecisionEngine } from "../decision/engine.ts";
 import type { DecisionEngineRouter } from "../decision/engine-router.ts";
 import { TypeSafeSystemOneDecisionEngine } from "../decision/engines/typesafe-system-one-engine.ts";
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
+import { isForbiddenRequiredProvenance } from "../decision/policy.ts";
 import type { DecisionProgram } from "../decision/program.ts";
 import type { JevAdapter } from "../system-one/adapter.ts";
 import { type SemanticEvaluationObserver, verdictFromCertificate } from "../system-one/semantic-evaluation-ledger.ts";
@@ -771,6 +772,15 @@ export class SystemOneSteeringPlane {
 			throw new SystemOneSteeringUnavailableError(
 				`No decision engine configured for checkpoint ${request.checkpointId}.`,
 			);
+		}
+
+		if (this.policy.mode === "system_one_required") {
+			const provenance = evaluation.engine.confidence_provenance;
+			if (isForbiddenRequiredProvenance(provenance)) {
+				throw new SystemOneSteeringUnavailableError(
+					`Required checkpoint ${request.checkpointId} cannot be satisfied by ${provenance} provenance (engine ${evaluation.engine.id}).`,
+				);
+			}
 		}
 
 		if (!evaluation?.results || Object.keys(evaluation.results).length === 0) {

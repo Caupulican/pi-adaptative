@@ -49,12 +49,35 @@ event:
 
 The tool gate does not pull the cancel lever: a `replan` verdict refuses that one call (the rest of
 the batch and the operator's turn continue; the verdict is ledger evidence the objective loop routes
-on at its next cycle), and a `confirm` verdict queues a scope steer and allows the call. Relevance is
-judged only against a real plan step or goal; a plain session with no objective is never asked
-whether a call is relevant to nothing. Inside the objective loop a System One cancel of the root's
-own turn is a re-route (the next cycle routes again); only the operator's interruption stops the
-loop. The worker supervisor redirects a worker judged off the mission now, steers a stalled one at
-its next turn, and reroutes a repeated stall.
+on at its next cycle), records the event as `refused` (never `allowed`), and a `confirm` verdict
+queues a scope steer and allows the call. After the call runs, the same `call_id` is updated to
+`succeeded` or `failed` so postflight sees the terminal, not admission. Relevance is judged only
+against a real plan step or goal; a plain session with no objective is never asked whether a call is
+relevant to nothing, and preflight/postflight Jev packs are skipped when there is no live objective.
+Inside the objective loop a System One cancel of the root's own turn is a re-route (the next cycle
+routes again); only the operator's interruption stops the loop. The worker supervisor redirects a
+worker judged off the mission now, steers a stalled one at its next turn, and reroutes a repeated
+stall.
+
+Preflight outcomes other than `allow` skip the current root turn and become the next
+`composeObjectiveRoute` input (`retrieve`, `replan`, `deterministic_test`, `escalate_capability`,
+`blocked_external`). Postflight outcomes similarly select the next route (`verify`, `retrieve`,
+`replan`, `completion_candidate`, `blocked_external`); they are not discarded.
+
+`objective_primary` without a live `ObjectiveExecutionController` fails closed and names that
+binding; it never continues on the legacy loop. Under `system_one_required`, a required steering
+checkpoint must come from calibrated Jev or mechanical `none` — `synthetic_self_report` cannot
+satisfy it.
+
+Every System One stage hydrates `ExecutionStore` from the live goal, durable task evidence and open
+verification obligations before it evaluates. That store is a projection, not a second authority.
+Completion cannot pass an empty or disconnected objective, empty required criteria on a real
+objective, or unresolved verification.
+
+Production owners: SteeringPlane JEV-001..003 for admission, JEV-004 for routing, JEV-024/025/026
+for completion, JEV-041.. for semantic dedup. `SystemOneController` stage packs for intake, claim
+check, duplicate logic, patch review and drift remain callable for tests/hooks; they are not a
+second production control path.
 
 ## The decision ledger
 
