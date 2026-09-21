@@ -110,4 +110,5 @@ verified with node scripts/run-tsc.mjs --noEmit and npx biome check .
 - release/tag created: NO (strictly adheres to bundle rule: no release, no tag, no full test suite)
 
 ## Resume next action
-Remediated Jev program gaps (schema 2.0, boolean kind, exact probability extraction) and implemented consecutive failure ceiling (3) to prevent Execution flooding, aligned Steering Question Packs to boolean kind, and added missing external_block_present Jev evaluation to align with worker supervision actions (F10).\nAll work orders OC-00 through OC-16 complete. Ready for final commit and push.
+Remediated Jev program gaps (schema 2.0, boolean kind, exact probability extraction) and implemented consecutive failure ceiling (3) to prevent Execution flooding, aligned Steering Question Packs to boolean kind, and added missing external_block_present Jev evaluation to align with worker supervision actions (F10), and fully decoupled generic System One infrastructure (WorkerSemanticSupervisor, ClarificationDecisionEngine, SemanticProjectRuleController) from the specific provider API by prioritizing DecisionResult.probabilityTrue over legacy raw noul responses.
+All work orders OC-00 through OC-16 complete. Ready for final commit and push.
