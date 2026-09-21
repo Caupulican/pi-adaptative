@@ -258,7 +258,19 @@ export class WorkerSemanticSupervisor {
 				const fails = (this.consecutiveFailures.get(attempt.attemptId) ?? 0) + 1;
 				this.consecutiveFailures.set(attempt.attemptId, fails);
 				if (fails >= 3) {
-					return undefined; // Capped repeated identical failed evaluations
+					return {
+						schema_version: "1.0",
+						signal_id: `sig-${randomUUID().slice(0, 8)}`,
+						objective_id: attempt.objectiveId,
+						task_id: attempt.taskId,
+						attempt_id: attempt.attemptId,
+						action: "stop_and_reroute",
+						certificate_id: "circuit-breaker-tripped",
+						reason_codes: ["supervision_fault", "circuit_breaker_tripped"],
+						created_at: new Date().toISOString(),
+						explanation: "Supervision circuit breaker tripped due to consecutive evaluation failures",
+						summaryEvent: "Worker rerouted · supervisor offline or continuously failing",
+					};
 				}
 				throw err;
 			}

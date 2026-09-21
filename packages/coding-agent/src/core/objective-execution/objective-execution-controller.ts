@@ -666,7 +666,8 @@ export class ObjectiveExecutionController {
 		const supervisionAction =
 			pendingSupervision?.action === "request_specialist" ||
 			pendingSupervision?.action === "request_capability" ||
-			pendingSupervision?.action === "request_verifier"
+			pendingSupervision?.action === "request_verifier" ||
+			pendingSupervision?.action === "mark_external_block"
 				? pendingSupervision.action
 				: undefined;
 		const route = composeObjectiveRoute({
@@ -705,7 +706,10 @@ export class ObjectiveExecutionController {
 					route.reason_codes.includes("capability_gap_detected")) ||
 				(supervisionAction === "request_verifier" &&
 					route.route === "verify" &&
-					route.reason_codes.includes("independent_verification_needed"));
+					route.reason_codes.includes("independent_verification_needed")) ||
+				(supervisionAction === "mark_external_block" &&
+					route.route === "blocked_external" &&
+					route.reason_codes.includes("external_dependency_unavailable"));
 			if (adopted) {
 				this.deps.consumePendingSupervisionRequest?.(pendingSupervision.signal_id);
 			}

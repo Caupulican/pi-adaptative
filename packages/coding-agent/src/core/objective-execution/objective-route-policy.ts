@@ -35,7 +35,7 @@ export interface RouteCompositionInput {
 	};
 	/** Root-owned worker-supervision request after the worker is no longer in flight. */
 	readonly supervisionRequest?: {
-		readonly action: "request_specialist" | "request_capability" | "request_verifier";
+		readonly action: "request_specialist" | "request_capability" | "request_verifier" | "mark_external_block";
 		readonly reasonCodes: readonly string[];
 	};
 }
@@ -83,6 +83,15 @@ export function composeObjectiveRoute(input: RouteCompositionInput): ObjectiveRo
 		return buildRoute(cycleId, objectiveId, "owner_required", ["owner_authorization_required"], input);
 	}
 
+	if (input.supervisionRequest?.action === "mark_external_block") {
+		return buildRoute(
+			cycleId,
+			objectiveId,
+			"blocked_external",
+			["external_dependency_unavailable", ...input.supervisionRequest.reasonCodes],
+			input,
+		);
+	}
 	if (input.supervisionRequest?.action === "request_specialist") {
 		return buildRoute(
 			cycleId,

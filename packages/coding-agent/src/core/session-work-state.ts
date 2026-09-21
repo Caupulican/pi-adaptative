@@ -28,6 +28,7 @@ export interface SessionWorkStateInput {
 	readonly hasSubmissionLease: boolean;
 	readonly isRunActive: boolean;
 	readonly isSystemOneEvaluating?: boolean;
+	readonly isSemanticEvaluating?: boolean;
 	readonly hasRunningWorker?: boolean;
 	readonly hasRunningTool?: boolean;
 	readonly hasPendingContinuation?: boolean;
@@ -79,7 +80,7 @@ export function deriveSessionWorkState(input: SessionWorkStateInput): SessionWor
 	} else if (input.isStreaming) {
 		phase = "llm_streaming";
 		label = "Streaming response";
-	} else if (input.isSystemOneEvaluating) {
+	} else if (input.isSystemOneEvaluating || input.isSemanticEvaluating) {
 		phase = "system_one_evaluating";
 		label = "System One evaluating";
 	} else if (input.hasRunningWorker) {

@@ -1121,6 +1121,7 @@ export class AgentSession {
 			isExtendedBusy: () => {
 				return (
 					(this._systemOneController?.isEvaluating ?? false) ||
+					this._semanticPlaneHealth.getHealth(true).state === "evaluating" ||
 					this._reflectionTurnLifecycle.inFlight ||
 					this._backgroundLanes
 						.getLaneRecords()
@@ -3178,6 +3179,7 @@ export class AgentSession {
 			this._foregroundRecovery.isRunActive ||
 			activity.epoch !== undefined ||
 			(this._systemOneController?.isEvaluating ?? false) ||
+			this._semanticPlaneHealth.getHealth(true).state === "evaluating" ||
 			hasRunningWorker ||
 			hasRunningTool ||
 			hasPendingContinuation ||
@@ -3192,6 +3194,7 @@ export class AgentSession {
 			hasSubmissionLease: activity.epoch !== undefined,
 			isRunActive: this._foregroundRecovery.isRunActive,
 			isSystemOneEvaluating: this._systemOneController?.isEvaluating ?? false,
+			isSemanticEvaluating: this._semanticPlaneHealth.getHealth(true).state === "evaluating",
 			hasRunningWorker,
 			hasRunningTool,
 			hasPendingContinuation,
