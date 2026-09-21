@@ -25,13 +25,14 @@ permissions:
   contents: write
 
 jobs:
+  # Tag publication is what runs the complete Linux/Windows matrix. Ordinary
+  # main/PR commits do not.
   quality-gate:
     permissions:
       contents: read
     uses: ./.github/workflows/ci.yml
     with:
       ref: ${{ github.event.inputs.tag || github.ref_name }}
-      skip_tests: true
 
   build:
     runs-on: ubuntu-latest
@@ -398,6 +399,7 @@ jobs:
   release-provenance:
     name: Verify exact-commit release provenance
     if: github.event_name == 'push' || inputs.verify_only != true
+    needs: [quality-gate]
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -418,6 +420,8 @@ jobs:
         run: |
           release_sha="$(git rev-parse "${RELEASE_TAG}^{commit}")"
           node scripts/release-ci-proof.mjs "$release_sha" "$GITHUB_REPOSITORY"
+          parent="$(git rev-parse "${release_sha}^")"
+          node scripts/verify-release-metadata-diff.mjs "$parent" "$release_sha"
 
           successful_run_ids() {
             workflow="$1"

@@ -20,6 +20,7 @@ export const TEST_HARNESS_ISOLATION_TESTS = Object.freeze([
 	"scripts/release-adoption.test.mjs",
 	"scripts/release-adoption-execution.test.mjs",
 	"scripts/workspace-test-plan.test.mjs",
+	"scripts/ci-affected.test.mjs",
 	"scripts/ci-workflow-performance.test.mjs",
 ]);
 

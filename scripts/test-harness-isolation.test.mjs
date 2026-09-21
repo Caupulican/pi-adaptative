@@ -401,9 +401,7 @@ function assertCoverageStepSemantics(workflow) {
 		.map((line) => line.trim())
 		.join(" ");
 	assert.match(condition, /runner\.os == 'Linux'/u);
-	assert.match(condition, /inputs\.skip_tests != true/u);
-	assert.match(condition, /github\.event_name != 'push'/u);
-	assert.match(condition, /!startsWith\(github\.event\.head_commit\.message, 'Release v'\)/u);
+	assert.match(condition, /needs\.plan\.outputs\.coverage == 'true'/u);
 	assert.ok(
 		step.some((line) => line === "        run: npm run coverage:verification-harness"),
 		"coverage step must actively invoke the root coverage command",
@@ -513,19 +511,16 @@ test("the verification coverage CI assertion rejects commented and detached step
 	);
 });
 
-test("the release command requires exact-HEAD GitHub CI before version mutation without a local full suite", () => {
+test("the release command never runs a local full suite and mutates version only after a clean tree", () => {
 	const source = readFileSync(releasePath, "utf8");
 	const packageJson = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
 	const cleanWorktreeCheck = 'const status = run("git status --porcelain", { silent: true });';
-	const exactHeadCiCheck = "assertHeadCiSucceeded(preflightSha);";
 	const versionMutation = "const version = bumpOrSetVersion(RELEASE_TARGET);";
 
 	assert.doesNotMatch(source, /run\("\.\/test\.sh"\)/, "release preparation must never run the full suite locally");
-	assert.ok(source.indexOf(cleanWorktreeCheck) < source.indexOf(exactHeadCiCheck), "cleanliness must be checked first");
-	assert.ok(source.indexOf(exactHeadCiCheck) < source.indexOf(versionMutation), "exact-HEAD CI must precede version mutation");
+	assert.doesNotMatch(source, /assertHeadCiSucceeded/u);
+	assert.ok(source.indexOf(cleanWorktreeCheck) < source.indexOf(versionMutation), "cleanliness must be checked before version mutation");
 
-	// Lexical pins: these fast checks are a backstop alongside the execution-proof test below,
-	// which is what actually defeats remapping/wrapper/run()-weakening bypasses of this gate.
 	assert.equal(packageJson.scripts["release:patch"], "node scripts/release.mjs patch");
 	assert.equal(packageJson.scripts["release:minor"], "node scripts/release.mjs minor");
 	assert.equal(packageJson.scripts["release:major"], "node scripts/release.mjs major");
@@ -621,55 +616,10 @@ function createReleaseExecutionProofFixture(context, ciConclusion) {
 }
 
 test(
-	"release.mjs aborts before mutation when exact-HEAD GitHub CI is red (execution proof)",
+	"release.mjs does not require GitHub CI before version mutation and never runs a local suite (execution proof)",
 	{ skip: process.platform === "win32" },
 	(context) => {
 		const fixture = createReleaseExecutionProofFixture(context, "failure");
-		const aiPackagePath = join(fixture.workDir, "packages", "ai", "package.json");
-		const versionBefore = JSON.parse(readFileSync(aiPackagePath, "utf8")).version;
-
-		const result = spawnSync(process.execPath, [releasePath, "patch"], {
-			cwd: fixture.workDir,
-			encoding: "utf8",
-			env: fixture.releaseEnv,
-		});
-
-		assert.notEqual(result.status, 0, `${result.stdout}\n${result.stderr}`);
-		assert.match(result.stderr, new RegExp(`HEAD ${fixture.headSha} ci\\.yml concluded failure`));
-		assert.equal(existsSync(fixture.testShCapture), false, "red CI must stop before any local test command");
-		assert.equal(existsSync(fixture.npmCapture), false, "red CI must stop before version mutation");
-
-		const localTags = fixture.git(["tag", "-l"]).trim();
-		assert.equal(localTags, "", "no tag may be created locally when the test gate fails");
-
-		const originTags = spawnSync("git", ["tag", "-l"], {
-			cwd: fixture.originDir,
-			encoding: "utf8",
-			env: fixture.releaseEnv,
-		}).stdout.trim();
-		assert.equal(originTags, "", "no tag may be pushed to origin when the test gate fails");
-
-		const originLog = spawnSync("git", ["log", "--oneline", "main"], {
-			cwd: fixture.originDir,
-			encoding: "utf8",
-			env: fixture.releaseEnv,
-		}).stdout.trim();
-		assert.equal(
-			originLog.split("\n").length,
-			1,
-			"origin/main must not receive a release commit when the test gate fails",
-		);
-
-		const versionAfter = JSON.parse(readFileSync(aiPackagePath, "utf8")).version;
-		assert.equal(versionAfter, versionBefore, "version must not be bumped when the test gate fails");
-	},
-);
-
-test(
-	"release.mjs delegates the full suite to successful exact-HEAD GitHub CI (execution proof)",
-	{ skip: process.platform === "win32" },
-	(context) => {
-		const fixture = createReleaseExecutionProofFixture(context, "success");
 		const result = spawnSync(process.execPath, [releasePath, "patch"], {
 			cwd: fixture.workDir,
 			encoding: "utf8",
@@ -677,8 +627,8 @@ test(
 		});
 
 		assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
-		assert.match(result.stdout, new RegExp(`HEAD ${fixture.headSha} already has a successful ci\\.yml run`));
-		assert.match(result.stdout, /GitHub Actions is the full-suite authority/);
+		assert.doesNotMatch(result.stdout + result.stderr, /ci\.yml concluded failure/);
+		assert.match(result.stdout, /GitHub Actions on the version tag is the full-suite authority/);
 		assert.equal(existsSync(fixture.testShCapture), false, "release preparation must not invoke local ./test.sh");
 		const npmCalls = readFileSync(fixture.npmCapture, "utf8")
 			.trim()
@@ -703,7 +653,7 @@ test(
 		fixture.git(["add", "packages/ai/CHANGELOG.md"]);
 		fixture.git(["commit", "-m", "Add [Unreleased] section for next cycle"]);
 		fixture.git(["push", "origin", "main"]);
-		const repairHeadSha = fixture.setCiConclusion("success");
+		fixture.setCiConclusion("success");
 
 		const result = spawnSync(process.execPath, [releasePath, "repair"], {
 			cwd: fixture.workDir,
@@ -712,7 +662,6 @@ test(
 		});
 
 		assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
-		assert.match(result.stdout, new RegExp(`HEAD ${repairHeadSha} already has a successful ci\\.yml run`));
 		assert.match(result.stdout, /Repairing prepared version 1\.0\.0 without another version bump/);
 		assert.equal(existsSync(fixture.testShCapture), false, "repair must not invoke local ./test.sh");
 		const npmCalls = readFileSync(fixture.npmCapture, "utf8")

@@ -1,5 +1,4 @@
 import { execFileSync } from "node:child_process";
-import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const REQUIRED_JOBS = new Map([
@@ -36,22 +35,16 @@ export function requireCiProof(sha, repo, read = readCommand) {
 	throw new Error(`ci.yml has no successful complete Linux/Windows matrix for tested commit ${sha}`);
 }
 
-/** Release metadata may inherit its parent's proof only after the shared metadata-diff gate passes. */
+/** Tag publication proves the tagged tree itself; there is no parent-inheritance skip. */
 export function requireReleaseCiProof(sha, repo, read = readCommand) {
-	let testedSha = sha;
-	const subject = read("git", ["show", "-s", "--format=%s", sha]).trim();
-	if (/^(?:Release v|Repair release v)\d+\.\d+\.\d+$/u.test(subject)) {
-		testedSha = read("git", ["rev-parse", `${sha}^`]).trim();
-		read(process.execPath, [join(import.meta.dirname, "verify-release-metadata-diff.mjs"), testedSha, sha]);
-	}
-	return requireCiProof(testedSha, repo, read);
+	return requireCiProof(sha, repo, read);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
 	try {
 		const [sha, repo] = process.argv.slice(2);
 		if (!/^[a-f0-9]{40}$/iu.test(sha ?? "") || !repo) throw new Error("Usage: release-ci-proof.mjs <sha> <repo>");
-		const run = requireReleaseCiProof(sha, repo);
+		const run = requireCiProof(sha, repo);
 		console.log(`Complete CI matrix proven by run ${run}`);
 	} catch (error) {
 		console.error(`::error::${error.message}`);

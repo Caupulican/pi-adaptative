@@ -10,37 +10,36 @@
  *   node scripts/release.mjs adopt
  *   node scripts/release.mjs status
  *
- * The release flow is split into two gated phases so a CI failure never costs a version number:
+ * The release flow is split into two gated phases. The complete ci.yml matrix runs
+ * only on the version tag (build-binaries.yml quality-gate), not on ordinary commits.
  *
  * PREPARE (major|minor|patch|x.y.z) - a pure function of the committed tree, no tag:
- * 1. Preflight: on main, clean tree, origin/main is an ancestor of HEAD, prospective tag unused,
- *    and HEAD already has a successful ci.yml run. Refuse immediately if CI is missing, pending,
- *    or red — do not buy a second full matrix by bumping a tree Windows has not already passed.
- * 2. Treat successful exact-HEAD GitHub CI as the full-suite authority. The release command
- *    never runs the full suite locally.
+ * 1. Preflight: on main, clean tree, origin/main is an ancestor of HEAD, prospective tag unused.
+ * 2. The release command never runs the full suite locally. GitHub Actions on the tag is
+ *    the full-suite authority.
  * 3. Bump version via npm run version:xxx or set an explicit version.
  * 4. Update CHANGELOG.md files: [Unreleased] -> [version] - date.
  * 5. Run checks.
- * 6. Commit "Release vX.Y.Z" and push main. CI on that commit is build+check only;
- *    the complete suite already ran on the preflight SHA in GitHub Actions.
+ * 6. Commit "Release vX.Y.Z" and push main.
  * 7. Add new [Unreleased] sections to changelogs, commit, and push main again.
  * Any failure during steps 3-7 resets the local tree back to the preflight commit.
  *
  * REPAIR - recover an untagged prepared version after a gate exposed a required fix:
- * - Require successful exact-HEAD CI, the original Release commit in current main's ancestry,
- *   a free version tag, and empty next-cycle changelog sections.
+ * - Require the original Release commit in current main's ancestry, a free version tag,
+ *   and empty next-cycle changelog sections.
  * - Remove only those empty sections, commit "Repair release vX.Y.Z", and push it as the new
  *   release candidate without another version bump. Restore the next-cycle sections afterward.
- * - Promote the repaired candidate through exact-SHA CI and destructive gates normally.
+ * - Promote the repaired candidate through the destructive gate, then tag.
  *
  * PROMOTE (automatic after prepare, or standalone via `promote` to resume later):
- * 8. Locate the "Release vX.Y.Z" commit and poll GitHub Actions (workflow ci.yml) for its
- *    conclusion on that exact SHA.
- * 9. Poll destructive.yml on the same SHA. If none exists, push `release-vX.Y.Z` at that
+ * 8. Locate the "Release vX.Y.Z" commit.
+ * 9. Poll destructive.yml on that exact SHA. If none exists, push `release-vX.Y.Z` at that
  *     SHA and dispatch workflow_dispatch on that branch (GitHub rejects a raw SHA ref).
- * 10. Only on success of both: create and push the vX.Y.Z tag, which triggers build-binaries.yml.
- * On CI failure or timeout, no tag is created; rerun `npm run release:promote` to resume once
- * CI is fixed or rerun. Never rerun the prepare step (release:patch/minor/major) for the same
+ * 10. Only on destructive success: create and push the vX.Y.Z tag, which triggers
+ *     build-binaries.yml. That workflow runs the complete ci.yml matrix as quality-gate
+ *     and publishes assets only after that matrix and provenance succeed.
+ * If the tag workflow fails, rerun that tag workflow or delete the tag, fix, then
+ * `npm run release:repair`. Never rerun prepare (release:patch/minor/major) for the same
  * version once its release commit has been pushed.
  */
 
@@ -48,9 +47,7 @@ import { execSync } from "child_process";
 import { readFileSync, writeFileSync, readdirSync, existsSync } from "fs";
 import { join } from "path";
 import { parseGithubOriginSlug } from "./github-origin.mjs";
-import { requireCiProof, requireReleaseCiProof } from "./release-ci-proof.mjs";
 import {
-	interpretHeadWorkflow,
 	matchesReleaseCandidateSubject,
 	partitionReleaseChanges,
 	pickWorkflowConclusion,
@@ -72,10 +69,9 @@ if (RELEASE_TARGET !== "promote" && !isPrepareTarget && !isRepairTarget && !isAd
 	process.exit(1);
 }
 
-const CI_WORKFLOW = "ci.yml";
 const DESTRUCTIVE_WORKFLOW = "destructive.yml";
-const CI_POLL_INTERVAL_MS = 20_000;
-const CI_POLL_TIMEOUT_MS = 60 * 60_000; // ci.yml's own per-OS job timeout is 20m; leave headroom for runner queueing.
+const CI_POLL_INTERVAL_MS = Number.parseInt(process.env.PI_RELEASE_WORKFLOW_POLL_INTERVAL_MS ?? "", 10) || 20_000;
+const CI_POLL_TIMEOUT_MS = Number.parseInt(process.env.PI_RELEASE_WORKFLOW_POLL_TIMEOUT_MS ?? "", 10) || 60 * 60_000;
 
 class ReleaseCommandError extends Error {}
 
@@ -299,28 +295,8 @@ function preflight(prospectiveVersion, recoveredPaths = new Set()) {
 	assertTagIsFree(prospectiveVersion);
 
 	const preflightSha = run("git rev-parse HEAD", { silent: true }).trim();
-	assertHeadCiSucceeded(preflightSha);
 	console.log(`  Preflight OK at ${preflightSha} (prospective version ${prospectiveVersion})\n`);
 	return preflightSha;
-}
-
-function assertHeadCiSucceeded(sha) {
-	const repo = getRepoSlug();
-	const listing = run(
-		`gh run list -R ${shellQuote(repo)} --workflow=${CI_WORKFLOW} --json headSha,status,conclusion --limit 30`,
-		{ silent: true, ignoreError: true },
-	);
-	if (!listing) {
-		console.error(`Error: could not list ${CI_WORKFLOW} runs for ${repo}.`);
-		process.exit(1);
-	}
-	const verdict = interpretHeadWorkflow(pickWorkflowConclusion(JSON.parse(listing), sha), sha, CI_WORKFLOW);
-	if (!verdict.ok) {
-		console.error(`Error: ${verdict.error}`);
-		process.exit(1);
-	}
-	console.log(`  HEAD ${sha} already has a successful ${CI_WORKFLOW} run`);
-	requireCiProof(sha, repo);
 }
 
 function rollbackToPreflightSha(preflightSha) {
@@ -334,9 +310,8 @@ function prepareRelease() {
 	const preflightSha = preflight(prospectiveVersion);
 
 	try {
-		// 2. Exact-HEAD CI is the only full-suite authority. Preflight fails closed unless that
-		// immutable tree succeeded, so no local full-suite process can be hidden in release prepare.
-		console.log(`GitHub Actions is the full-suite authority for exact HEAD ${preflightSha}; no local suite is run.\n`);
+		// 2. The tag workflow is the full-suite authority. Prepare never runs the local suite.
+		console.log(`GitHub Actions on the version tag is the full-suite authority; no local suite is run.\n`);
 
 		// 3. Bump or set version
 		const version = bumpOrSetVersion(RELEASE_TARGET);
@@ -479,10 +454,6 @@ async function waitForWorkflow(sha, workflow, options = {}) {
 	throw new Error(`Timed out after ${Math.round(CI_POLL_TIMEOUT_MS / 60_000)}m waiting for ${workflow} on ${sha}.`);
 }
 
-async function waitForCi(sha) {
-	return waitForWorkflow(sha, CI_WORKFLOW);
-}
-
 async function waitForDestructive(sha, version) {
 	return waitForWorkflow(sha, DESTRUCTIVE_WORKFLOW, {
 		dispatchIfMissing: true,
@@ -521,15 +492,6 @@ async function promoteRelease(versionArg) {
 		if (taggedSha !== releaseSha) throw new Error(`Existing ${tag} does not name release candidate ${releaseSha}.`);
 	}
 
-	const conclusion = await waitForCi(releaseSha);
-	if (conclusion !== "success") {
-		throw new Error(
-			`CI did not succeed for release commit ${releaseSha} (conclusion: ${conclusion}). No tag was created. ` +
-				'Fix or rerun CI, then run "npm run release:promote" to resume.',
-		);
-	}
-
-	requireReleaseCiProof(releaseSha, getRepoSlug());
 	const destructive = await waitForDestructive(releaseSha, version);
 	if (destructive !== "success") {
 		throw new Error(
@@ -543,7 +505,7 @@ async function promoteRelease(versionArg) {
 		console.log(`\n=== ${tag} already promoted ===\n`);
 		return;
 	}
-	console.log(`  CI succeeded for ${releaseSha}. Tagging ${tag}...`);
+	console.log(`  Destructive suite succeeded for ${releaseSha}. Tagging ${tag}...`);
 	try {
 		// Release tags are plain lightweight refs. Disable host-level forced tag
 		// signing/annotation (tag.gpgSign) so tagging never depends on local

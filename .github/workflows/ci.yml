@@ -1,38 +1,65 @@
 name: CI
 
+# Push/PR run only the tests that commit actually touched. The complete
+# Linux/Windows matrix is the release tag (build-binaries.yml quality-gate)
+# and manual dispatch.
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
   workflow_call:
     inputs:
       ref:
         description: Exact commit or tag to validate
         required: false
         type: string
-      skip_tests:
-        description: Skip tests; exact-preflight-HEAD GitHub CI already passed the complete suite
-        required: false
-        type: boolean
-        default: false
 
 concurrency:
-  # PR updates cancel the previous PR run. Pushes use the commit SHA so a later
-  # main commit (the post-release [Unreleased] section) cannot cancel CI on the
-  # Release vX.Y.Z commit that promote polls.
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
+  plan:
+    name: Plan affected tests
+    runs-on: ubuntu-latest
+    outputs:
+      quality_job: ${{ steps.plan.outputs.quality_job }}
+      check: ${{ steps.plan.outputs.check }}
+      coding_agent: ${{ steps.plan.outputs.coding_agent }}
+      os: ${{ steps.plan.outputs.os }}
+      non_coding_agent_workspaces: ${{ steps.plan.outputs.non_coding_agent_workspaces }}
+      coverage: ${{ steps.plan.outputs.coverage }}
+      long_session: ${{ steps.plan.outputs.long_session }}
+      native_process: ${{ steps.plan.outputs.native_process }}
+      windows_incident: ${{ steps.plan.outputs.windows_incident }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Plan
+        id: plan
+        env:
+          CI_FULL_SUITE: ${{ github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' }}
+          CI_EVENT_NAME: ${{ github.event_name }}
+          CI_BEFORE: ${{ github.event.before }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          CI_COMMIT_SUBJECT: ${{ github.event.head_commit.message || github.event.pull_request.title }}
+        run: node scripts/ci-affected.mjs
+
   build-check-test:
     name: Build, check, test (${{ matrix.os }})
+    needs: plan
+    if: needs.plan.outputs.quality_job == 'true'
     strategy:
       fail-fast: false
-      # Job-level `if` cannot see `matrix` (evaluated before expansion). Compute
-      # the OS list instead: skip Windows when tests are already proven.
       matrix:
-        os: ${{ fromJSON((inputs.skip_tests || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'Release v'))) && '["ubuntu-latest"]' || '["ubuntu-latest","windows-latest"]') }}
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
     runs-on: ${{ matrix.os }}
     # Includes hosted-runner package-manager variance plus bounded execution; tests remain separately sharded below.
     timeout-minutes: 20
@@ -50,17 +77,11 @@ jobs:
           cache: npm
 
       - name: Install Linux system dependencies
-        if: >
-          runner.os == 'Linux' &&
-          inputs.skip_tests != true &&
-          (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
+        if: runner.os == 'Linux'
         run: ./scripts/install-linux-ci-deps.sh
 
       - name: Install Windows system dependencies
-        if: >
-          runner.os == 'Windows' &&
-          inputs.skip_tests != true &&
-          (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
+        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           # Chocolatey's community feed is the first source; when it is unreachable (it was, on
@@ -96,6 +117,9 @@ jobs:
           node node_modules/vite/bin/vite.js --version
 
       - name: Build
+        if: >
+          needs.plan.outputs.non_coding_agent_workspaces != '[]' ||
+          needs.plan.outputs.coding_agent == 'true'
         # Deterministic CI: builds are hermetic by default (see
         # packages/ai/scripts/model-catalog-generation-policy.ts) and use the COMMITTED model
         # catalogs instead of refetching live pricing that can drift between the release commit
@@ -104,36 +128,39 @@ jobs:
         run: npm run build
 
       - name: Check
+        if: >
+          runner.os == 'Linux' &&
+          needs.plan.outputs.check == 'true'
         run: npm run check
 
       # A contract test may change only alongside docs/doctrine.md (see contracts.json). The
       # pre-commit chain checks the staged tree; a push is checked over its commit range.
       - name: Contract-doctrine gate
-        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        if: runner.os == 'Linux'
         shell: bash
+        env:
+          CI_BEFORE: ${{ github.event.before }}
+          CI_EVENT_NAME: ${{ github.event_name }}
         run: |
-          # The checkout is shallow: fetch the push's base so the range diff has both ends. A base
-          # that no longer exists (a force-push) falls back to the head commit alone.
-          if git fetch --no-tags --depth=1 origin "${{ github.event.before }}"; then
-            node scripts/check-contract-doctrine.mjs --range "${{ github.event.before }}..${{ github.sha }}"
-          else
-            git fetch --no-tags --deepen=1 origin
-            node scripts/check-contract-doctrine.mjs --range "HEAD~1..HEAD"
+          if [ "$CI_EVENT_NAME" = "push" ] && [ -n "$CI_BEFORE" ] && [ "$CI_BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            if git fetch --no-tags --depth=1 origin "$CI_BEFORE"; then
+              node scripts/check-contract-doctrine.mjs --range "$CI_BEFORE..${{ github.sha }}"
+              exit $?
+            fi
           fi
+          git fetch --no-tags --deepen=1 origin
+          node scripts/check-contract-doctrine.mjs --range "HEAD~1..HEAD"
 
       - name: Verification-harness coverage gate
         if: >
           runner.os == 'Linux' &&
-          inputs.skip_tests != true &&
-          (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
+          needs.plan.outputs.coverage == 'true'
         run: npm run coverage:verification-harness
 
       # Contract gate: a short goal session must stay append-only (reuse p50 >= 0.98, appends >= 95%)
       # with flat per-request host work. Two seconds; the full Profile workflow stays on demand.
       - name: Long-session contract gate
-        if: >
-          inputs.skip_tests != true &&
-          (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
+        if: needs.plan.outputs.long_session == 'true'
         working-directory: packages/coding-agent
         env:
           PI_PROFILE_LONG_SESSION: '1'
@@ -144,20 +171,16 @@ jobs:
         run: npx vitest run test/profiling/host-long-session.profile.test.ts --pool=forks
 
       - name: Test non-coding-agent workspaces
-        if: >
-          inputs.skip_tests != true &&
-          (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
+        if: needs.plan.outputs.non_coding_agent_workspaces != '[]'
         env:
           NODE_OPTIONS: --conditions=pi-source
           PI_VITEST_ISOLATE_NATIVE_PROCESS: "1"
-        run: npm test -- packages/tui packages/ai packages/agent
+        run: npm test -- ${{ join(fromJSON(needs.plan.outputs.non_coding_agent_workspaces), ' ') }}
 
       # This is native OS success control, not a resource-contention test. Keep the same assertions
       # on both platforms after parallel CPU/memory benchmarks; timeout refusal remains unit-tested.
       - name: Test native process-tree control alone
-        if: >
-          inputs.skip_tests != true &&
-          (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
+        if: needs.plan.outputs.native_process == 'true'
         working-directory: packages/agent
         env:
           NODE_OPTIONS: --conditions=pi-source
@@ -166,8 +189,7 @@ jobs:
       - name: Test native incident collector with Windows PowerShell 5.1
         if: >
           runner.os == 'Windows' &&
-          inputs.skip_tests != true &&
-          (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
+          needs.plan.outputs.windows_incident == 'true'
         shell: pwsh
         working-directory: packages/coding-agent
         env:
@@ -178,9 +200,8 @@ jobs:
 
   coding-agent-test:
     name: Coding-agent test (${{ matrix.os }}, shard ${{ matrix.shard }}/4)
-    if: >
-      inputs.skip_tests != true &&
-      (github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'Release v'))
+    needs: plan
+    if: needs.plan.outputs.coding_agent == 'true'
     strategy:
       fail-fast: false
       matrix:

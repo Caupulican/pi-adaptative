@@ -8,7 +8,6 @@ import {
 	computeReleaseAllowlist,
 	parsePorcelainPath,
 	partitionReleaseChanges,
-	interpretHeadWorkflow,
 	matchesReleaseCandidateSubject,
 	pickWorkflowConclusion,
 	stripEmptyUnreleasedSection,
@@ -53,8 +52,7 @@ test("lockstep workspace package files are on the release allowlist", () => {
 test("release provenance delegates metadata paths to the release-staging owner", () => {
 	const workflow = readFileSync(join(repoRoot, ".github", "workflows", "build-binaries.yml"), "utf8");
 	assert.match(workflow, /node scripts\/release-ci-proof\.mjs "\$release_sha" "\$GITHUB_REPOSITORY"/);
-	const proof = readFileSync(join(repoRoot, "scripts", "release-ci-proof.mjs"), "utf8");
-	assert.match(proof, /verify-release-metadata-diff\.mjs/u);
+	assert.match(workflow, /verify-release-metadata-diff\.mjs "\$parent" "\$release_sha"/);
 	assert.doesNotMatch(workflow, /mapfile -d '' changed_paths/);
 
 	const releasePaths = [
@@ -108,23 +106,6 @@ test("pickWorkflowConclusion prefers success over a cancelled run on the same SH
 		pickWorkflowConclusion([{ headSha: sha, status: "in_progress", conclusion: null }], sha),
 		{ state: "pending", status: "in_progress" },
 	);
-});
-
-test("interpretHeadWorkflow refuses prepare unless HEAD CI already succeeded", () => {
-	const sha = "def456";
-	assert.deepEqual(interpretHeadWorkflow({ state: "completed", conclusion: "success" }, sha, "ci.yml"), {
-		ok: true,
-	});
-	const pending = interpretHeadWorkflow({ state: "pending", status: "in_progress" }, sha, "ci.yml");
-	assert.equal(pending.ok, false);
-	assert.match(pending.error, /in_progress/);
-	assert.match(pending.error, /Do not start a versioned release/);
-	const failed = interpretHeadWorkflow({ state: "completed", conclusion: "failure" }, sha, "ci.yml");
-	assert.equal(failed.ok, false);
-	assert.match(failed.error, /red tree/);
-	const missing = interpretHeadWorkflow({ state: "missing" }, sha, "ci.yml");
-	assert.equal(missing.ok, false);
-	assert.match(missing.error, /has no ci.yml run/);
 });
 
 test("release candidate subjects include an explicit repair without matching unrelated commits", () => {

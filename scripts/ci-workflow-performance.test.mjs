@@ -107,7 +107,7 @@ function withInstallerHarness(options, fn) {
 }
 
 test("normal CI keeps small workspaces on the quality job and shards coding-agent four ways", () => {
-	assert.match(workflow, /run: npm test -- packages\/tui packages\/ai packages\/agent/u);
+	assert.match(workflow, /join\(fromJSON\(needs\.plan\.outputs\.non_coding_agent_workspaces\), ' '\)/u);
 	assert.match(workflow, /^  coding-agent-test:\n/mu);
 	assert.match(workflow, /shard: \[1, 2, 3, 4\]/u);
 	assert.match(workflow, /--shard=\$\{\{ matrix\.shard \}\}\/4/u);
@@ -122,8 +122,8 @@ function assertNativeProcessPhase(source) {
 	assert.equal(parallel.length, 1);
 	assert.equal(native.length, 1, "native process control must remain a mandatory quality phase");
 	assert(steps.indexOf(native[0]) > steps.indexOf(parallel[0]), "native control must follow the parallel suite");
-	const condition = (step) => step.match(/\n        if: >\n([\s\S]*?)(?=\n        [a-z])/u)?.[1].trim();
-	assert.equal(condition(native[0]), condition(parallel[0]), "both OS jobs must run the native phase whenever the parallel suite runs");
+	assert.match(parallel[0], /needs\.plan\.outputs\.non_coding_agent_workspaces != '\[\]'/u);
+	assert.match(native[0], /needs\.plan\.outputs\.native_process == 'true'/u);
 	assert.match(parallel[0], /PI_VITEST_ISOLATE_NATIVE_PROCESS: "1"/u);
 	assert.equal((source.match(/PI_VITEST_ISOLATE_NATIVE_PROCESS/gu) ?? []).length, 1, "exclusion must be scoped to the parallel step");
 	assert.doesNotMatch(native[0], /continue-on-error|PI_VITEST_ISOLATE_NATIVE_PROCESS/u);
@@ -203,16 +203,13 @@ test("normal CI reserves twenty minutes for runner setup plus bounded suite exec
 	assert.match(shardJob, /^    timeout-minutes: 20$/mu);
 });
 
-test("release fast paths skip every coding-agent shard after the exact suite already passed", () => {
-	const qualityJob = workflow.slice(0, workflow.indexOf("  coding-agent-test:"));
-	assert.match(qualityJob, /runner\.os == 'Linux' &&\n\s+inputs\.skip_tests != true/u);
-	assert.match(qualityJob, /runner\.os == 'Windows' &&\n\s+inputs\.skip_tests != true/u);
-
-	const shardJobStart = workflow.indexOf("  coding-agent-test:");
-	assert.notEqual(shardJobStart, -1);
-	const shardJob = workflow.slice(shardJobStart);
-	assert.match(shardJob, /inputs\.skip_tests != true/u);
-	assert.match(shardJob, /!startsWith\(github\.event\.head_commit\.message, 'Release v'\)/u);
+test("ordinary commits plan affected tests; the tag quality-gate runs the full matrix", () => {
+	assert.match(workflow, /^  plan:\n/mu);
+	assert.match(workflow, /CI_FULL_SUITE:.*workflow_call.*workflow_dispatch/u);
+	assert.match(workflow, /needs\.plan\.outputs\.coding_agent == 'true'/u);
+	assert.match(workflow, /needs\.plan\.outputs\.check == 'true'/u);
+	assert.doesNotMatch(workflow, /skip_tests/u);
+	assert.doesNotMatch(releaseWorkflow, /skip_tests: true/u);
 });
 
 test("release publishes standalone installer assets and no npm distribution job", () => {
@@ -273,9 +270,10 @@ test("direct tag publication proves a full tested tree and exact-commit destruct
 	assert.match(provenanceJob, /^      actions: read$/mu);
 	assert.match(provenanceJob, /git rev-parse "\$\{RELEASE_TAG\}\^\{commit\}"/u);
 	assert.match(provenanceJob, /node scripts\/release-ci-proof\.mjs "\$release_sha" "\$GITHUB_REPOSITORY"/u);
+	assert.match(provenanceJob, /verify-release-metadata-diff\.mjs "\$parent" "\$release_sha"/u);
 	assert.doesNotMatch(provenanceJob, /git diff --name-only -z/u);
-	assert.match(releaseScript, /requireCiProof\(sha, repo\)/u);
-	assert.match(releaseScript, /requireReleaseCiProof\(releaseSha, getRepoSlug\(\)\)/u);
+	assert.doesNotMatch(releaseScript, /requireCiProof|requireReleaseCiProof|assertHeadCiSucceeded/u);
+	assert.match(provenanceJob, /^    needs: \[quality-gate\]$/mu);
 	assert.match(provenanceJob, /verify_workflow destructive\.yml "\$release_sha"/u);
 	assert.match(provenanceJob, /\.headSha == \$sha/u);
 	assert.match(provenanceJob, /\.status == "completed"/u);

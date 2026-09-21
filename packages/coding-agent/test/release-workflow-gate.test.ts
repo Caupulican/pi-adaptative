@@ -38,7 +38,7 @@ describe("release workflow quality gate", () => {
 			"quality-gate:\n    permissions:\n      contents: read\n    uses: ./.github/workflows/ci.yml",
 		);
 		expect(release).toContain(`ref: \${{ github.event.inputs.tag || github.ref_name }}`);
-		expect(release).toContain("skip_tests: true");
+		expect(release).not.toContain("skip_tests: true");
 		expect(release).toContain("verify-release-binary-performance:");
 		expect(release).toContain("needs: [benchmark-linux-binary, verify-windows-binary]");
 		expect(release).toContain("name: Enforce Windows performance budgets");

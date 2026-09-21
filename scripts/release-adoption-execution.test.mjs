@@ -24,6 +24,8 @@ for (const scenario of ["failure", "cancelled", "skipped", "pending", "missing",
 			GIT_COMMITTER_NAME: "fixture", GIT_COMMITTER_EMAIL: "fixture@example.com",
 			GH_REPO: "example/fixture",
 			PATH: `${bin}:${process.env.PATH}`,
+			PI_RELEASE_WORKFLOW_POLL_INTERVAL_MS: "5",
+			PI_RELEASE_WORKFLOW_POLL_TIMEOUT_MS: "80",
 		};
 		const git = (...args) => {
 			const result = spawnSync("git", args, { cwd: work, env, encoding: "utf8" });
@@ -69,16 +71,15 @@ for (const scenario of ["failure", "cancelled", "skipped", "pending", "missing",
 		}
 		assert.equal(result.error, undefined);
 		assert.equal(JSON.parse(readFileSync(join(work, "packages/ai/package.json"))).version, "1.0.1");
-		if (["foreign-edit", "version-mismatch", "tag-collision", "matrix-skipped", "promote-local-tag"].includes(scenario)) {
+		if (["foreign-edit", "version-mismatch", "tag-collision", "promote-local-tag"].includes(scenario)) {
 			assert.equal(result.status, 1, result.stdout + result.stderr);
 			assert.equal(git("ls-remote", "--tags", "origin"), "");
 			if (scenario === "foreign-edit") assert.equal(readFileSync(join(work, "foreign.txt"), "utf8"), "another session's work");
-			if (scenario === "matrix-skipped") assert.equal(readFileSync(join(work, "packages/ai/CHANGELOG.md"), "utf8"), notes);
 		} else if (conclusion !== "success") {
 			assert.equal(result.status, 1, result.stdout + result.stderr);
-			assert.equal(git("rev-parse", "HEAD"), source);
+			assert.notEqual(git("rev-parse", "HEAD"), source);
 			assert.equal(git("tag", "-l"), "");
-			assert.equal(readFileSync(join(work, "packages/ai/CHANGELOG.md"), "utf8"), notes);
+			assert.equal(git("ls-remote", "--tags", "origin"), "");
 		} else {
 			assert.equal(result.status, 0, result.stdout + result.stderr);
 			assert.equal(git("tag", "-l"), "v1.0.1");

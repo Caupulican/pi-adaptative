@@ -49,26 +49,16 @@ test("proof binds successful runs to the requested SHA and examines the complete
 	}
 });
 
-test("metadata candidates inherit only a parent proven equivalent by the shared diff gate", () => {
-	const release = "a".repeat(40);
-	const parent = "b".repeat(40);
-	for (const subject of ["Release v1.0.1", "Repair release v1.0.1", "Actual source change"]) {
-		let diffChecked = false;
-		const read = (command, args) => {
-			if (command === "git") return args[0] === "show" ? subject : parent;
-			if (command === process.execPath) { diffChecked = true; assert.deepEqual(args.slice(1), [parent, release]); return ""; }
-			const expected = subject === "Actual source change" ? release : parent;
-			if (args[1] === "list") {
-				assert.equal(args[args.indexOf("--commit") + 1], expected);
-				assert.equal(diffChecked, expected === parent);
-				return JSON.stringify([{ headSha: expected, databaseId: 1, status: "completed", conclusion: "success" }]);
-			}
-			return JSON.stringify({ jobs: completeCiJobs() });
-		};
-		assert.equal(requireReleaseCiProof(release, "owner/repo", read), 1);
-	}
-	assert.throws(() => requireReleaseCiProof(release, "owner/repo", (command, args) => {
-		if (command === "git") return args[0] === "show" ? "Release v1.0.1" : parent;
-		throw new Error("untested production change");
-	}), /untested production/);
+test("release proof examines the exact tagged SHA", () => {
+	const sha = "a".repeat(40);
+	const complete = completeCiJobs();
+	const read = (command, args) => {
+		assert.equal(command, "gh");
+		if (args[1] === "list") {
+			assert.equal(args[args.indexOf("--commit") + 1], sha);
+			return JSON.stringify([{ headSha: sha, databaseId: 1, status: "completed", conclusion: "success" }]);
+		}
+		return JSON.stringify({ jobs: complete });
+	};
+	assert.equal(requireReleaseCiProof(sha, "owner/repo", read), 1);
 });
