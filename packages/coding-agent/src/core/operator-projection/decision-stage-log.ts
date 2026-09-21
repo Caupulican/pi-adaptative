@@ -105,6 +105,16 @@ const REPAIR_REASON_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * An idle session: no objective and no turn running. The root owns control and is deciding nothing
+ * (`no_objective`); there is no loop, so there is no stage and no clock. The projection's placeholder
+ * `understand` phase describes readiness, not work.
+ */
+export function isIdleProjection(projection: OperatorProjection): boolean {
+	const { control } = projection;
+	return control.owner === "root" && control.state === "deciding" && control.reasonCode === "no_objective";
+}
+
+/**
  * The stage a projection is in. Evaluated in this order on purpose: a reviewable lane outranks a
  * verification reason code (reviewing a returned worker is the owner's stage, not repair), repair
  * outranks verify (`verification_repair_required` is in both sets), and a running worker while a red
@@ -175,14 +185,19 @@ export class DecisionStageLog {
 	/**
 	 * Observes one published projection. Returns true when a new stage entry opened, so the caller
 	 * can wake the elapsed ticker. Same stage as the open entry records nothing: the clock keeps
-	 * running off `enteredAt`.
+	 * running off `enteredAt`. An idle projection opens nothing and closes whatever was open: the
+	 * loop is not running, so no stage is and no clock runs.
 	 */
 	observe(projection: OperatorProjection, now: number): boolean {
 		if (this.objectiveId !== undefined && this.objectiveId !== projection.objective_id)
 			this.reset(projection.objective_id, now);
 		this.objectiveId = projection.objective_id;
-		const stage = deriveDecisionStage(projection);
 		const open = this.entries.at(-1);
+		if (isIdleProjection(projection)) {
+			if (open !== undefined && open.endedAt === undefined) this.closeOpen(now);
+			return false;
+		}
+		const stage = deriveDecisionStage(projection);
 		if (open !== undefined && open.endedAt === undefined && open.stage === stage) return false;
 		if (open !== undefined && open.endedAt === undefined) this.closeOpen(now);
 		if (stage === "repair" && open?.stage !== "repair") this.loop += 1;

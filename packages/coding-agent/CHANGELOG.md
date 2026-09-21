@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- The Decision graph no longer opens an `understand` stage with a running clock at session start: an idle session (no objective, no turn) records no stage, the graph materializes on the first prompt or goal, and a turn without a goal is one `build` pass by the root that closes when the turn ends. The idle placeholder rows this wrote before stay in the ledger untouched.
+
 ## [0.99.34] - 2026-09-21
 
 ### Added

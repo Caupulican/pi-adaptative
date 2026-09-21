@@ -8,7 +8,11 @@
 
 import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
 import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
-import type { DecisionStage, DecisionStageLogView } from "../../../core/operator-projection/decision-stage-log.ts";
+import {
+	type DecisionStage,
+	type DecisionStageLogView,
+	isIdleProjection,
+} from "../../../core/operator-projection/decision-stage-log.ts";
 import type { OperatorProjection } from "../../../core/operator-projection/types.ts";
 import type { SemanticEvaluationRecord } from "../../../core/system-one/semantic-evaluation-ledger.ts";
 import type { SemanticPlaneHealth } from "../../../core/system-one/semantic-plane-health.ts";
@@ -232,7 +236,10 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 
 	const routed = route.switched && route.activeModel !== route.rootModel;
 	const rootRunning =
-		projection.active_actors.some((actor) => actor.kind === "root") && projection.phase !== "done" && !waiting;
+		projection.active_actors.some((actor) => actor.kind === "root") &&
+		projection.phase !== "done" &&
+		!waiting &&
+		!isIdleProjection(projection);
 	const rootActed =
 		input.receipts.actions > 0 ||
 		stageLog.entries.some((entry) => entry.stage === "build" || entry.stage === "repair");

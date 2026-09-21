@@ -435,7 +435,8 @@ export class SessionOperatorProjection {
 		if (adaptation) return "adapt";
 		if (proof.total > 0 && proof.pending === 0 && proof.failing === 0 && goal) return "verify";
 		if (lanes.length > 0) return "build";
-		if (!goal) return "understand";
+		// No objective: a running foreground turn is the root's own work; idle is readiness, not work.
+		if (!goal) return this.deps.isForegroundBusy() ? "build" : "understand";
 		// A goal with no decomposition yet is still being planned; one with requirements is building.
 		return goal.requirements.length === 0 ? "plan" : "build";
 	}
@@ -456,7 +457,7 @@ export class SessionOperatorProjection {
 			case "plan":
 				return `Decomposing ${goal?.userGoal ?? "the objective"}`;
 			case "build":
-				return `${lanes[0]?.label ?? "Implementing"}${suffix}`;
+				return `${lanes[0]?.label ?? (goal ? "Implementing" : "Working the operator's turn")}${suffix}`;
 			case "adapt":
 				return `${adaptation?.label ?? "Adapting the runtime"}${suffix}`;
 			case "verify":

@@ -8,6 +8,7 @@ import {
 	type DecisionStageSink,
 	type DecisionStageStoredEntry,
 	deriveDecisionStage,
+	isIdleProjection,
 } from "../src/core/operator-projection/decision-stage-log.ts";
 import type {
 	ActiveActor,
@@ -106,6 +107,30 @@ describe("DecisionStageLog", () => {
 	const dirs: string[] = [];
 	afterEach(() => {
 		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("opens nothing for an idle projection and closes the open entry when the session goes idle", () => {
+		const idle = projection({
+			phase: "understand",
+			control: { owner: "root", state: "deciding", reasonCode: "no_objective" },
+		});
+		expect(isIdleProjection(idle)).toBe(true);
+		expect(
+			isIdleProjection(projection({ control: { owner: "root", state: "executing", reasonCode: "no_objective" } })),
+		).toBe(false);
+		const log = new DecisionStageLog();
+		expect(log.observe(idle, 1000)).toBe(false);
+		expect(log.view(2000).entries).toEqual([]);
+		expect(log.view(2000).open).toBeUndefined();
+		expect(
+			log.observe(projection({ control: { owner: "root", state: "executing", reasonCode: "no_objective" } }), 3000),
+		).toBe(true);
+		expect(log.view(3500).open?.stage).toBe("build");
+		expect(log.observe(idle, 4000)).toBe(false);
+		const view = log.view(9000);
+		expect(view.open).toBeUndefined();
+		expect(view.entries).toHaveLength(1);
+		expect(view.totals.build).toEqual({ elapsedMs: 1000, passes: 1 });
 	});
 
 	it("records transitions with accumulated totals, pass counts and the loop counter", () => {

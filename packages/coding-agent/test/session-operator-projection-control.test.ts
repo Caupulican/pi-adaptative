@@ -96,6 +96,34 @@ describe("Operator control projection", () => {
 		});
 	});
 
+	it("reads an idle session as readiness and a turn without a goal as the root building", () => {
+		const idle = projectionFor({});
+		expect(idle.phase).toBe("understand");
+		expect(idle.current_action).toBe("Ready for operator instructions");
+		const turn = projectionFor({ busy: true });
+		expect(turn.phase).toBe("build");
+		expect(turn.current_action).toBe("Working the operator's turn");
+		expect(turn.control).toEqual({ owner: "root", state: "executing", reasonCode: "no_objective" });
+	});
+
+	it("opens no stage while idle and records the turn without a goal as one build pass", () => {
+		const deps = depsFor({});
+		let busy = false;
+		const projection = new SessionOperatorProjection({ ...deps, isForegroundBusy: () => busy });
+		projection.getProjection();
+		expect(projection.getStageLog(1_000).entries).toEqual([]);
+		expect(projection.getStageLog(1_000).open).toBeUndefined();
+		busy = true;
+		projection.getProjection();
+		expect(projection.getStageLog(2_000).open?.stage).toBe("build");
+		busy = false;
+		projection.getProjection();
+		const view = projection.getStageLog(3_000);
+		expect(view.open).toBeUndefined();
+		expect(view.entries.map((entry) => [entry.stage, entry.endedAt !== undefined])).toEqual([["build", true]]);
+		expect(view.totals.build.passes).toBe(1);
+	});
+
 	it("treats the no-goal `missing_goal_state` verdict as no objective, never an owner question", () => {
 		const projection = projectionFor({
 			continuation: continuation({
