@@ -903,7 +903,9 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					}
 					const systemOne = deps.getSystemOneController?.();
 					if (systemOne) {
-						const completionDecision = await systemOne.executeCompletionTransaction(false);
+						const completionDecision = await systemOne.executeCompletionTransaction(false, {
+							persistTerminal: false,
+						});
 						if (completionDecision.verdict !== "complete") {
 							const reasons = completionDecision.failed_gates.map((g) => g.reason).join("; ");
 							return goalExecutionError(

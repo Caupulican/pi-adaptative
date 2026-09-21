@@ -223,7 +223,7 @@ async function deliver(options?: {
 			: {}),
 		repoRoot: gitRepo(),
 	});
-	const result = options?.fail === "JEV-026" ? await controller.runCycles("obj-1", 1) : await controller.run("obj-1");
+	const result = await controller.run("obj-1");
 	return { result, store, systemOne, terminalHooks: () => terminalHooks };
 }
 
@@ -285,13 +285,14 @@ describe("FC-01 terminal complete", () => {
 		expect(store.phase).not.toBe("complete");
 	});
 
-	it("JEV-026 fail leaves the store not complete", async () => {
+	it("JEV-026 fail returns unrecoverable and leaves the store not complete", async () => {
 		const { result, store } = await deliver({
 			fail: "JEV-026",
 			profile: "system_one_required",
 			steeringMode: "system_one_required",
 		});
-		expect(result?.status).not.toBe("complete");
+		expect(result?.status).toBe("unrecoverable");
+		expect(result?.reasonCodes).toContain("adversarial_completion_failed");
 		expect(store.phase).not.toBe("complete");
 	});
 

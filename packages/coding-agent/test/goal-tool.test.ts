@@ -6,6 +6,8 @@ import type { GoalFileEvidenceResolution, GoalFileEvidenceResolver } from "../sr
 import { cancelPersistedGoal } from "../src/core/goals/goal-lifecycle.ts";
 import type { GoalState } from "../src/core/goals/goal-state.ts";
 import { resolveSessionUserEvidence } from "../src/core/goals/session-goal-evidence.ts";
+import { SystemOneController } from "../src/core/system-one/controller.ts";
+import { ExecutionStore } from "../src/core/system-one/execution-state.ts";
 import {
 	createGoalLifecycleToolDefinitions,
 	createGoalToolDefinition,
@@ -486,6 +488,75 @@ describe("goal tool", () => {
 		);
 		expect(completed.isError).not.toBe(true);
 		expect(state?.status).toBe("completed");
+	});
+
+	it("goal completion asks System One not to persist terminal complete", async () => {
+		const store = new ExecutionStore({
+			run_id: "goal-complete",
+			objective: {
+				request: "Ship",
+				normalized_goal: "Ship",
+				acceptance_criteria: [{ id: "AC-1", text: "shipped", required: true }],
+				constraints: [{ id: "C-1", text: "stay in scope", severity: "hard" }],
+			},
+			repo: { root: "/workspace", baseline_revision: "rev-0" },
+		});
+		store.recordVerification({
+			kind: "unit_test",
+			status: "passed",
+			covers_acceptance_ids: ["AC-1"],
+		});
+		store.verifyConstraint("C-1");
+		const systemOne = new SystemOneController({
+			store,
+			adapter: {
+				evaluate: async (input: { questions?: Record<string, unknown> }) => {
+					if (input.questions && Object.hasOwn(input.questions, "missing_requirement")) {
+						return {
+							model: "jev-1.13.0",
+							answers: {
+								missing_requirement: { noul: 0.01 },
+								hidden_assumption: { noul: 0.01 },
+								plausible_regression_not_tested: { noul: 0.01 },
+								conclusion_overstates_evidence: { noul: 0.01 },
+							},
+							latency_ms: 1,
+						};
+					}
+					return {
+						model: "jev-1.13.0",
+						answers: {
+							implementation_matches_goal: { noul: 0.99 },
+							root_cause_addressed: { noul: 0.99 },
+							required_behavior_unverified: { noul: 0.01 },
+							material_claim_unsupported: { noul: 0.01 },
+							out_of_scope_change_present: { noul: 0.01 },
+							duplicate_responsibility_introduced: { noul: 0.01 },
+							completion_verdict: {
+								choice: "complete",
+								confidence: 0.99,
+								probabilities: { complete: 0.99, rework: 0.01 },
+							},
+						},
+						latency_ms: 1,
+					};
+				},
+			},
+		});
+		let state: GoalState | undefined;
+		const tool = createGoalToolDefinition({
+			getGoalState: () => state,
+			saveGoalState: (next) => {
+				state = next;
+			},
+			getSystemOneController: () => systemOne,
+			now: () => "T0",
+		});
+		await tool.execute("start", { action: "start", goalId: "g1", userGoal: "Ship" }, undefined, undefined, ctx);
+		const completed = await tool.execute("complete", { action: "complete" }, undefined, undefined, ctx);
+		expect(completed.isError).not.toBe(true);
+		expect(state?.status).toBe("completed");
+		expect(store.phase).not.toBe("complete");
 	});
 
 	it("reads a blocked ledger without exposing owner resume authority", async () => {

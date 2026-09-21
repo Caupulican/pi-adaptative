@@ -1346,7 +1346,20 @@ export class ObjectiveExecutionController {
 									);
 									await this.deps.runtime.ensureRepairTasks(objectiveId, repairs);
 								}
-								break;
+								const reasonCodes = [
+									"adversarial_completion_failed",
+									...(hiddenRegressions ? ["hidden_regressions"] : []),
+									...(c26.failed_semantic_predicates ?? []),
+								];
+								const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime, {
+									reasonCodes,
+								});
+								return {
+									status: "unrecoverable",
+									reasonCodes,
+									cycleCount: this.cycleCounter,
+									deliveryBundle: bundle,
+								};
 							}
 						}
 
