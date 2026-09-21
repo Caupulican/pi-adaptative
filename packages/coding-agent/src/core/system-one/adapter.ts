@@ -47,6 +47,38 @@ export interface SystemOneReviewerLike {
 
 export type TypeSafeReviewerLike = SystemOneReviewerLike;
 
+export type JevFailureKind =
+	| "invalid_response"
+	| "unavailable"
+	| "rate_limit"
+	| "timeout"
+	| "cancelled"
+	| "model_drift";
+
+export class JevAdapterFailure extends Error {
+	readonly kind: JevFailureKind;
+	readonly originalMessage: string;
+
+	constructor(kind: JevFailureKind, originalMessage: string, impact: string) {
+		super(`Jev System One ${kind} for impact '${impact}': ${originalMessage}`);
+		this.name = "JevAdapterFailure";
+		this.kind = kind;
+		this.originalMessage = originalMessage;
+	}
+}
+
+export function classifyJevFailure(error: unknown, aborted: boolean): JevFailureKind {
+	if (aborted) return "cancelled";
+	const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
+	if (/Model drift detected/i.test(text)) return "model_drift";
+	if (/AbortError|aborted/i.test(text)) return "cancelled";
+	if (/timeout|ETIMEDOUT/i.test(text)) return "timeout";
+	if (/\b429\b|rate limit/i.test(text)) return "rate_limit";
+	if (/\b401\b|\b403\b|\b503\b|ECONNREFUSED|unavailable|ENOTFOUND/i.test(text)) return "unavailable";
+	if (/Missing answer|Invalid noul|Invalid choice|question coverage|incomplete/i.test(text)) return "invalid_response";
+	return "unavailable";
+}
+
 export interface SystemOneJevAdapterDeps {
 	sleep?: (ms: number) => Promise<void>;
 	getApiKey?: () => Promise<string | undefined> | string | undefined;
@@ -181,19 +213,10 @@ export class SystemOneJevAdapter implements JevAdapter {
 			}
 		}
 
-		// R-066: Failure policy handling
-		// If read-only and configured to allow with audit:
-		if (impact === "read_only" && this.config.failure_policy.jev_unavailable_read_only === "allow_with_audit") {
-			return {
-				model: targetModel,
-				answers: {},
-				latency_ms: Date.now() - started,
-			};
-		}
-
-		// Otherwise fail closed (repo mutation or external side effect)
-		throw new Error(
-			`Jev System One unavailable for impact '${impact}': ${lastError instanceof Error ? lastError.message : String(lastError)} (R-066)`,
-		);
+		const original = lastError instanceof Error ? lastError.message : String(lastError);
+		const kind = classifyJevFailure(lastError, Boolean(options?.signal?.aborted));
+		// Never turn an invalid/incomplete typed response into empty successful answers.
+		// Advisory callers catch JevAdapterFailure and continue without a fake evaluation.
+		throw new JevAdapterFailure(kind, original, impact);
 	}
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SystemOneJevAdapter } from "../../src/core/system-one/adapter.ts";
+import { JevAdapterFailure, SystemOneJevAdapter } from "../../src/core/system-one/adapter.ts";
 import { AuditStore } from "../../src/core/system-one/audit.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG } from "../../src/core/system-one/config.ts";
 import {
@@ -35,7 +35,7 @@ describe("System One Adapter and Audit", () => {
 		).rejects.toThrow("Model drift detected");
 	});
 
-	it("applies failure policy: degrades open on read-only with audit, fails closed on repo mutation (R-066)", async () => {
+	it("applies failure policy: never returns empty answers; preserves original 503 as unavailable", async () => {
 		const failingReviewer = {
 			evaluate: async () => {
 				throw new Error("TypeSafe API 503 Service Unavailable");
@@ -47,14 +47,24 @@ describe("System One Adapter and Audit", () => {
 			getApiKey: () => "test-valid-user-key-12345",
 		});
 
-		const readOnlyRes = await adapter.evaluate(
-			{
-				state: { test: true },
-				questions: { test: { type: "noul", instructions: "test" } },
-			},
-			{ impact: "read_only" },
-		);
-		expect(readOnlyRes.answers).toEqual({});
+		await expect(
+			adapter.evaluate(
+				{
+					state: { test: true },
+					questions: { test: { type: "noul", instructions: "test" } },
+				},
+				{ impact: "read_only" },
+			),
+		).rejects.toBeInstanceOf(JevAdapterFailure);
+		await expect(
+			adapter.evaluate(
+				{
+					state: { test: true },
+					questions: { test: { type: "noul", instructions: "test" } },
+				},
+				{ impact: "read_only" },
+			),
+		).rejects.toThrow("503 Service Unavailable");
 
 		await expect(
 			adapter.evaluate(
@@ -64,7 +74,7 @@ describe("System One Adapter and Audit", () => {
 				},
 				{ impact: "repo_mutation" },
 			),
-		).rejects.toThrow("Jev System One unavailable for impact 'repo_mutation'");
+		).rejects.toThrow("503 Service Unavailable");
 	});
 
 	it("persists full decision and tool action audit trail and provides explanation (R-040, R-041)", () => {

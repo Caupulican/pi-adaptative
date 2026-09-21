@@ -60,7 +60,7 @@ export class DecisionGraphPane extends WorkbenchPane {
 			y,
 			width,
 			height,
-			{ row: composed.currentRow },
+			{ row: composed.currentRow, key: composed.focusKey },
 			actions,
 		);
 	}

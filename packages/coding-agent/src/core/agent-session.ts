@@ -560,13 +560,22 @@ export class AgentSession {
 		});
 		this._workerSupervision = new WorkerSupervisionCoordinator({
 			supervisor: new WorkerSemanticSupervisor({
-				// Resolved per observation: the steering plane is bound after construction, and a
-				// session without one supervises on its deterministic stall/repetition signals alone.
-				decisionEngine: {
-					evaluate: async (program, state, options) => {
-						const engine = this._recordingSemanticEngine();
-						if (!engine) return {};
-						return createRetentionDecisionEngine(engine).evaluate(program as never, state, options as never);
+				// First-class SteeringPlane checkpoint. The compaction retention adapter is not this bridge.
+				steering: {
+					requireCertificate: async (checkpoint, payload, context) => {
+						const plane = this._steeringPlane;
+						if (!plane) {
+							throw new Error("System One steering plane is not bound for worker supervision");
+						}
+						const certificate = await plane.requireCertificate(checkpoint, payload, {
+							...context,
+							requirePass: false,
+							consequence: "medium",
+						});
+						return {
+							certificate_id: certificate.certificate_id,
+							answers: certificate.answers,
+						};
 					},
 				},
 			}),
@@ -583,6 +592,10 @@ export class AgentSession {
 					signal.attempt_id,
 					signal.explanation ?? signal.summaryEvent,
 				);
+			},
+			onSupervisionError: (error) => {
+				const message = error instanceof Error ? error.message : String(error);
+				this._emit({ type: "warning", message: `Worker supervision degraded: ${message}` });
 			},
 		});
 		this._projectRules = new SessionProjectRules({

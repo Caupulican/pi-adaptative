@@ -612,6 +612,11 @@ export class SystemOneSteeringPlane {
 				break;
 			}
 
+			case "JEV-WORKER-SUPERVISION": {
+				// Valid adverse answers (stuck/off-track/gap) are judgments, not protocol failures.
+				break;
+			}
+
 			default: {
 				if (answers.approved !== undefined && !this.isTruthy(answers.approved)) {
 					failed.push("approved");

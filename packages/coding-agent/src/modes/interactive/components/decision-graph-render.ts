@@ -17,6 +17,8 @@ export interface DecisionGraphRows {
 	readonly stageAt: readonly (DecisionStage | undefined)[];
 	/** The row a following pane keeps in view: the current stage (List) or the current node (Diagram). */
 	readonly currentRow: number;
+	/** Semantic focus identity; row number alone is not stable across a reflow. */
+	readonly focusKey: string;
 }
 
 /** The decider's tone: the label tone marks System One and Jev everywhere in the Workbench. */
@@ -99,7 +101,7 @@ export function renderDecisionList(
 
 	if (model.stageLogEmpty) {
 		push(theme.fg("dim", "No task yet · the graph composes when work starts"));
-		return { rows, stageAt, currentRow };
+		return { rows, stageAt, currentRow, focusKey: graphFocusKey(model) };
 	}
 
 	if (model.you.present) {
@@ -230,7 +232,7 @@ export function renderDecisionList(
 							? ["not yet → ask you", "warning"]
 							: ["pending", "dim"];
 	head("goal satisfied?", theme.fg(verdict[1], verdict[0]));
-	return { rows, stageAt, currentRow };
+	return { rows, stageAt, currentRow, focusKey: graphFocusKey(model) };
 }
 
 /* ============================================================ Diagram view */
@@ -273,6 +275,40 @@ type DiagramLevel =
 			readonly no?: DiagramNode & { readonly loop?: string };
 	  }
 	| { readonly kind: "next"; readonly text: string };
+
+function graphFocusKey(model: DecisionGraphModel): string {
+	const evaluating = model.decider.evaluating?.label ?? "";
+	const open = model.checks.filter((check) => check.status !== "satisfied").length;
+	return `stage:${model.current?.stage ?? "idle"}/branch:${model.goal.branch}/eval:${evaluating}/next:${model.next ?? ""}/loop:${model.loop}/open:${open}`;
+}
+
+function goalYesNode(
+	model: DecisionGraphModel,
+	currentStage: DecisionStage | undefined,
+	clock: (isCur: boolean) => string,
+): DiagramNode & { readonly lit: boolean } {
+	const pending = model.checks.filter((check) => check.status !== "satisfied").length;
+	const delivered = model.goal.branch === "delivered" && pending === 0;
+	const delivering = (model.goal.branch === "deliver" || currentStage === "deliver") && pending === 0;
+	if (delivered || delivering) {
+		return {
+			text: delivered ? "delivered" : "DELIVER",
+			clock: clock(currentStage === "deliver"),
+			tone: delivered ? "success" : "accent",
+			bold: delivering,
+			current: currentStage === "deliver",
+			stage: "deliver",
+			lit: true,
+		};
+	}
+	return {
+		text: pending > 0 ? `pending · ${pending} open` : "pending",
+		tone: "dim",
+		current: false,
+		stage: "deliver",
+		lit: false,
+	};
+}
 
 /** Levels derived from the task; nothing here is fixed. */
 export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[] {
@@ -423,15 +459,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 			bold: Boolean(evaluating),
 			current: Boolean(evaluating) && currentStage === "verify",
 		},
-		yes: {
-			text: "DELIVER",
-			clock: clock(currentStage === "deliver"),
-			tone: currentStage === "deliver" ? "accent" : model.goal.branch === "delivered" ? "success" : "dim",
-			bold: currentStage === "deliver",
-			current: currentStage === "deliver",
-			stage: "deliver",
-			lit: currentStage === "deliver" || model.goal.branch === "delivered",
-		},
+		yes: goalYesNode(model, currentStage, clock),
 		...(repairTaken || model.blocked
 			? {
 					no: {
@@ -726,5 +754,5 @@ export function renderDecisionDiagram(model: DecisionGraphModel, width: number):
 			}
 		}
 	}
-	return { rows, stageAt, currentRow };
+	return { rows, stageAt, currentRow, focusKey: graphFocusKey(model) };
 }

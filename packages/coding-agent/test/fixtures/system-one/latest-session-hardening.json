@@ -1,0 +1,28 @@
+{
+	"sessionId": "01a0c214-1607-723c-aa91-03f970c23058",
+	"cwd": "/home/caudev/GitHub/mine/AIdeas",
+	"note": "Sanitized field fixture. No secrets. Ledger counts from 2026-09-21 live agent dir.",
+	"workerSupervision": {
+		"checkpoint": "JEV-WORKER-SUPERVISION",
+		"failedCount": 27,
+		"secondaryDecoder": "Missing answer for boolean decision 'meaningful_progress'",
+		"sevenQuestions": [
+			"meaningful_progress",
+			"worker_stuck",
+			"work_off_track",
+			"strategy_repetition",
+			"needs_independent_verification",
+			"specialist_gap_present",
+			"capability_gap_present"
+		],
+		"incompleteAnswers": {}
+	},
+	"graph": {
+		"proof": { "satisfied": 1, "total": 4, "pending": 3 },
+		"next": "verify 3 open criteria",
+		"forbidden": "goal satisfied? -> yes -> DELIVER"
+	},
+	"compaction": {
+		"earlyThresholdWithoutCacheProof": true
+	}
+}

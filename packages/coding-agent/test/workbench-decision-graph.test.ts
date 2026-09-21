@@ -407,7 +407,8 @@ describe("Decision graph rendering", () => {
 		const delivered = renderDecisionDiagram(buildDecisionGraphModel(SCENARIOS.delivered!()), 64)
 			.rows.map(stripAnsi)
 			.join("\n");
-		expect(delivered).toContain("DELIVER");
+		expect(delivered).toMatch(/delivered/i);
+		expect(delivered).not.toMatch(/yes → DELIVER/);
 		expect(delivered).not.toContain("next →");
 	});
 

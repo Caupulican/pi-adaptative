@@ -36,6 +36,7 @@ import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { isContextOverflow } from "@caupulican/pi-ai/overflow";
 import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
 import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
+import { projectEarlyCompactionEconomics } from "./compaction/early-compaction-economics.ts";
 import {
 	type CompactionAuditStats,
 	type EvidenceRetentionDecision,
@@ -245,6 +246,7 @@ export class CompactionController {
 	private overflowRecoveryAttempted = false;
 	private providerRecoveryAttempted = false;
 	private ineffectiveThresholdFrontier: IneffectiveThresholdFrontier | undefined;
+	private lastEarlyEconomicsAtTokens: number | undefined;
 	private retentionPlanner?: EvidenceRetentionPlanner;
 	private activeRetentionDecisions?: readonly EvidenceRetentionDecision[];
 	private lastAppliedRetentionAudit?: AppliedRetentionAudit;
@@ -513,6 +515,9 @@ export class CompactionController {
 		if (requestNeed === "early" && envelopeNeed === "early") return { action: "send" };
 		// Early compaction is a cost optimization: one paid summary is its complete budget.
 		if (requestNeed === "early" && input.attempt > 0) return { action: "send" };
+		if (requestNeed === "early" && !this.shouldProceedEarlyEconomics(input.requestTokens, model, settings)) {
+			return { action: "send" };
+		}
 		if (this.isRunning()) {
 			if (requestNeed === "early") return { action: "send" };
 			throw new ProviderRequestEnvelopeOverflowError(
@@ -853,7 +858,11 @@ export class CompactionController {
 				if (usageIsPostCompaction) contextTokens = Math.max(contextTokens, estimate.tokens);
 			}
 		}
-		if (shouldCompact(contextTokens, contextWindow, settings, model?.autoCompactionTriggerTokens)) {
+		const need = assessCompactionNeed(contextTokens, contextWindow, settings, model?.autoCompactionTriggerTokens);
+		if (need !== "none") {
+			if (need === "early" && model && !this.shouldProceedEarlyEconomics(contextTokens, model, settings)) {
+				return false;
+			}
 			if (model) {
 				// The ineffective-threshold-frontier guard must not compare against `contextTokens`
 				// above: that value can be dominated by the F13 usage-less/stale-usage whole-history
@@ -1221,6 +1230,53 @@ export class CompactionController {
 		} catch {
 			this.ineffectiveThresholdFrontier = undefined;
 		}
+	}
+
+	private recentCacheUsage(): { read: number; write: number } {
+		let read = 0;
+		let write = 0;
+		for (const message of this.deps.agent.state.messages) {
+			if (message.role !== "assistant" || !("usage" in message) || !message.usage) continue;
+			read += message.usage.cacheRead ?? 0;
+			write += message.usage.cacheWrite ?? 0;
+		}
+		return { read, write };
+	}
+
+	private shouldProceedEarlyEconomics(
+		contextTokens: number,
+		model: { cost?: { input?: number; cacheRead?: number; cacheWrite?: number } },
+		settings: CompactionSettings,
+	): boolean {
+		const usage = this.recentCacheUsage();
+		const verdict = projectEarlyCompactionEconomics({
+			currentTokens: contextTokens,
+			compactableTokens: Math.max(0, contextTokens - settings.keepRecentTokens),
+			recentCacheReadTokens: usage.read,
+			recentCacheWriteTokens: usage.write,
+			cacheReadUsdPerMillion: model.cost?.cacheRead,
+			cacheWriteUsdPerMillion: model.cost?.cacheWrite,
+			inputUsdPerMillion: model.cost?.input,
+			estimatedSummaryTokens: Math.min(4000, Math.max(256, Math.floor(contextTokens * 0.05))),
+			horizonTurns: 8,
+			lastEarlyDecisionAtTokens: this.lastEarlyEconomicsAtTokens,
+			hysteresisTokens: 2000,
+			minSavingsUsd: 0.001,
+		});
+		if (verdict.proceed || verdict.reason !== "insufficient_evidence") {
+			this.lastEarlyEconomicsAtTokens = contextTokens;
+		}
+		if (verdict.proceed) return true;
+		this.deps.emit({ type: "compaction_start", reason: "threshold" });
+		this.deps.emit({
+			type: "compaction_end",
+			reason: "threshold",
+			result: undefined,
+			aborted: false,
+			willRetry: false,
+			skipReason: `early compaction deferred: ${verdict.reason} (${verdict.detail})`,
+		});
+		return false;
 	}
 
 	private emitIneffectiveThresholdSkip(): void {

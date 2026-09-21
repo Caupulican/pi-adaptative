@@ -431,7 +431,9 @@ export class SessionOperatorProjection {
 		if (blocker) return "blocked";
 		if (goal?.status === "blocked") return "blocked";
 		if (goal?.status === "completed") return "done";
-		if (this.deps.getDeliveryState() === "in_progress") return "deliver";
+		if (this.deps.getDeliveryState() === "in_progress" && proof.pending === 0 && proof.failing === 0) {
+			return "deliver";
+		}
 		if (adaptation) return "adapt";
 		if (proof.total > 0 && proof.pending === 0 && proof.failing === 0 && goal) return "verify";
 		if (lanes.length > 0) return "build";

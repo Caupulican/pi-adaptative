@@ -62,7 +62,9 @@ export interface WorkbenchPaneTitleButton {
  * `true` follows the newest rows until the operator scrolls away. `{ row }` centres that row when it
  * changes (a new current stage) and otherwise leaves the operator's scroll alone.
  */
-export type WorkbenchPaneFollow = boolean | { readonly row: number };
+export type WorkbenchPaneFollow =
+	| boolean
+	| { readonly row: number; readonly key?: string; readonly newerProgress?: boolean };
 
 export function titleChip(label: string, selected = false): string {
 	return selected ? theme.bold(theme.fg("accent", ` ${label} `)) : theme.fg("accent", ` ${label} `);
@@ -80,12 +82,15 @@ export class WorkbenchPane {
 	private pinned = false;
 	/** The row a `{ row }` follow last centred; the pane re-anchors only when it changes. */
 	private followedRow?: number;
+	/** Semantic focus last followed; a new key re-anchors even when the row number is unchanged. */
+	private followedKey?: string;
 	private titleActions: { action: WorkbenchPaneTitleAction; start: number; end: number }[] = [];
 
 	reset(): void {
 		this.offset = 0;
 		this.pinned = false;
 		this.followedRow = undefined;
+		this.followedKey = undefined;
 		this.hide();
 	}
 
@@ -163,8 +168,11 @@ export class WorkbenchPane {
 		const end = Math.max(0, lines.length - this.height);
 		let target = Math.min(this.offset, end);
 		if (typeof follow === "object") {
-			if (follow.row !== this.followedRow) {
-				this.followedRow = follow.row;
+			const keyChanged = follow.key !== undefined && follow.key !== this.followedKey;
+			const rowChanged = follow.row !== this.followedRow;
+			if (keyChanged) this.followedKey = follow.key;
+			if (rowChanged) this.followedRow = follow.row;
+			if (!this.pinned && (keyChanged || rowChanged)) {
 				target = follow.row - Math.floor(this.height * 0.55);
 			}
 		} else if (follow && !this.pinned) target = end;

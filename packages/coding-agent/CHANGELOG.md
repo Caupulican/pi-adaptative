@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- Worker supervision is a first-class `JEV-WORKER-SUPERVISION` checkpoint with seven bounded judgments. The live session binds it to the SteeringPlane, not the compaction retention adapter. Invalid Jev/provider responses throw `JevAdapterFailure` with the original sanitized cause; they never become empty successful `answers` that a decoder reports as missing `meaningful_progress`. Observer failures are degraded, debounced, and do not abort the worker.
+- Early (pre-hard-boundary) compaction is deferred unless cache-read/write and input prices support positive projected savings; a hot high-hit cache is preserved. Missing prices yield no fabricated savings claim. Hard overflow and provider-recovery compaction are unchanged.
+- The Decision graph no longer lights `yes → DELIVER` while proof is still open. Follow uses a semantic focus key, not only the current row number, so a reflowing diagram still tracks the active node unless the operator pinned the viewport.
+
 ## [0.99.35] - 2026-09-21
 
 ### Fixed

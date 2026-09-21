@@ -71,7 +71,8 @@ export type SteeringCheckpointId =
 	| "JEV-042"
 	| "JEV-043"
 	| "JEV-044"
-	| "JEV-045";
+	| "JEV-045"
+	| "JEV-WORKER-SUPERVISION";
 
 export type SteeringDirectiveAction =
 	| "continue_current_work"

@@ -88,6 +88,7 @@ export function isValidationChurn(observation: {
 export class WorkerSupervisionCoordinator {
 	private readonly deps: WorkerSupervisionCoordinatorDeps;
 	private readonly signals: WorkerSupervisionSignal[] = [];
+	private readonly lastErrorFingerprint = new Map<string, string>();
 
 	constructor(deps: WorkerSupervisionCoordinatorDeps) {
 		this.deps = deps;
@@ -126,10 +127,16 @@ export class WorkerSupervisionCoordinator {
 		} catch (error) {
 			// Supervision is advisory. A failed assessment must never fail the worker it observes;
 			// the worker keeps running and no intervention is applied on unknown state.
-			this.deps.onSupervisionError?.(error);
+			const text = error instanceof Error ? error.message : String(error);
+			const fingerprint = `${observation.attemptId}:${observation.evidenceRevision ?? 0}:${text}`;
+			if (this.lastErrorFingerprint.get(observation.attemptId) !== fingerprint) {
+				this.lastErrorFingerprint.set(observation.attemptId, fingerprint);
+				this.deps.onSupervisionError?.(error);
+			}
 			return undefined;
 		}
 		if (!verdict) return undefined;
+		this.lastErrorFingerprint.delete(observation.attemptId);
 		this.signals.push(verdict);
 		await this.apply(verdict, observation);
 		return verdict;

@@ -847,6 +847,47 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 			break;
 		}
 
+		case "JEV-WORKER-SUPERVISION": {
+			decisions.push(
+				{
+					kind: "boolean",
+					id: "meaningful_progress",
+					instruction: "Is the worker making meaningful progress on its mission?",
+				},
+				{
+					kind: "boolean",
+					id: "worker_stuck",
+					instruction: "Is the worker stuck or making no progress?",
+				},
+				{
+					kind: "boolean",
+					id: "work_off_track",
+					instruction: "Has the worker drifted off-track from the mission?",
+				},
+				{
+					kind: "boolean",
+					id: "strategy_repetition",
+					instruction: "Is the worker repeating failing strategies without modification?",
+				},
+				{
+					kind: "boolean",
+					id: "needs_independent_verification",
+					instruction: "Is the implementation finished and ready for independent verification?",
+				},
+				{
+					kind: "boolean",
+					id: "specialist_gap_present",
+					instruction: "Does this require a different domain specialist?",
+				},
+				{
+					kind: "boolean",
+					id: "capability_gap_present",
+					instruction: "Is the worker missing an essential capability?",
+				},
+			);
+			break;
+		}
+
 		default: {
 			// Generic fallback program for unrecognized checkpoint
 			decisions.push({ kind: "boolean", id: "approved", instruction: `Approve checkpoint ${checkpointId}` });
@@ -886,6 +927,36 @@ export const STEERING_QUESTION_PACKS: Record<string, SteeringQuestionPack> = {
 				options: ["code_fix", "new_feature", "refactor", "investigation", "release", "full_system"],
 			},
 			{ id: "capability_sensitive", kind: "noul", description: "Does this require special tools or capabilities?" },
+		],
+	},
+	worker_supervision: {
+		id: "pi:steering:pack:worker_supervision:1.0",
+		version: "1.0",
+		checkpointIds: ["JEV-WORKER-SUPERVISION"],
+		questions: [
+			{
+				id: "meaningful_progress",
+				kind: "noul",
+				description: "Is the worker making meaningful progress on its mission?",
+			},
+			{ id: "worker_stuck", kind: "noul", description: "Is the worker stuck or making no progress?" },
+			{ id: "work_off_track", kind: "noul", description: "Has the worker drifted off-track from the mission?" },
+			{
+				id: "strategy_repetition",
+				kind: "noul",
+				description: "Is the worker repeating failing strategies without modification?",
+			},
+			{
+				id: "needs_independent_verification",
+				kind: "noul",
+				description: "Is the implementation finished and ready for independent verification?",
+			},
+			{
+				id: "specialist_gap_present",
+				kind: "noul",
+				description: "Does this require a different domain specialist?",
+			},
+			{ id: "capability_gap_present", kind: "noul", description: "Is the worker missing an essential capability?" },
 		],
 	},
 	objective_route: {
