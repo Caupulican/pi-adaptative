@@ -122,10 +122,10 @@ describe("subscription OAuth providers", () => {
 			expect(requests[0].fields).toEqual({
 				client_id: "b1a00492-073a-47ea-816f-4c329264a828",
 				scope: "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write workspaces:read workspaces:write",
-				referrer: "pi",
+				referrer: "grok-build",
 			});
 			for (const request of requests) {
-				expect(request.headers.get("x-grok-client-version")).toBe("1.0.34");
+				expect(request.headers.get("x-grok-client-version")).toBe("1.0.40");
 				expect(request.headers.get("x-grok-client-surface")).toBe("cli");
 				expect(request.headers.get("content-type")).toBe("application/x-www-form-urlencoded");
 				expect(request.headers.get("x-xai-token-auth")).toBeNull();
@@ -245,6 +245,40 @@ describe("subscription OAuth providers", () => {
 		});
 
 		await expect(xaiOAuthProvider.login(callbacks())).rejects.toThrow("xAI returned invalid OAuth credentials");
+	});
+
+	it("keeps xAI user id and email from the token response and refresh", async () => {
+		const payload = Buffer.from(JSON.stringify({ user_id: "jwt-user", email: "jwt@example.com" })).toString(
+			"base64url",
+		);
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+			const url = String(input);
+			if (url.endsWith("/device/code")) {
+				return Response.json({
+					device_code: "device",
+					user_code: "ABCD-EFGH",
+					verification_uri: "https://auth.x.ai/activate",
+					interval: 1,
+					expires_in: 600,
+				});
+			}
+			return Response.json({
+				access_token: `header.${payload}.sig`,
+				refresh_token: "refresh-1",
+				expires_in: 3600,
+			});
+		});
+		const credentials = await xaiOAuthProvider.login(callbacks());
+		expect(credentials.userId).toBe("jwt-user");
+		expect(credentials.email).toBe("jwt@example.com");
+
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			Response.json({ access_token: "access-2", refresh_token: "refresh-2", expires_in: 3600 }),
+		);
+		const refreshed = await refreshXaiToken("refresh-1", { previous: credentials });
+		expect(refreshed.userId).toBe("jwt-user");
+		expect(refreshed.email).toBe("jwt@example.com");
+		expect(refreshed.access).toBe("access-2");
 	});
 
 	it("surfaces 'error: description' when a token refresh fails", async () => {

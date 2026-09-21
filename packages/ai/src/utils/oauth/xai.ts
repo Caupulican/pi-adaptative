@@ -12,7 +12,7 @@ const XAI_DEVICE_CODE_URL = "https://auth.x.ai/oauth2/device/code";
 const XAI_TOKEN_URL = "https://auth.x.ai/oauth2/token";
 const DEFAULT_TOKEN_LIFETIME_SECONDS = 3600;
 const XAI_CLI_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
-const XAI_CLI_VERSION_HEADERS = { "x-grok-client-version": "1.0.34" } as const;
+const XAI_CLI_VERSION_HEADERS = { "x-grok-client-version": "1.0.40" } as const;
 const XAI_DEVICE_FLOW_HEADERS = {
 	...XAI_CLI_VERSION_HEADERS,
 	"x-grok-client-surface": "cli",
@@ -22,7 +22,7 @@ const XAI_CLI_PROXY_HEADERS = {
 	"X-XAI-Token-Auth": "xai-grok-cli",
 	"x-authenticateresponse": "authenticate-response",
 	"x-grok-client-identifier": "grok-shell",
-	"x-grok-client-mode": "headless",
+	"x-grok-client-mode": "interactive",
 } as const;
 
 type JsonObject = Record<string, unknown>;
@@ -133,19 +133,59 @@ function parseDeviceCode(body: JsonObject): XaiDeviceCode {
 	};
 }
 
-function credentialsFromTokenResponse(body: JsonObject, previousRefreshToken?: string): OAuthCredentials {
-	return parseOAuthTokenCredentials(
+function nonEmptyString(value: unknown): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const trimmed = value.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function jwtClaims(token: unknown): JsonObject | undefined {
+	if (typeof token !== "string") return undefined;
+	const payload = token.split(".")[1];
+	if (!payload) return undefined;
+	try {
+		const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as unknown;
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+		return parsed as JsonObject;
+	} catch {
+		return undefined;
+	}
+}
+
+function identityValue(body: JsonObject, keys: readonly string[]): string | undefined {
+	for (const source of [body, jwtClaims(body.id_token), jwtClaims(body.access_token)]) {
+		if (!source) continue;
+		for (const key of keys) {
+			const value = nonEmptyString(source[key]);
+			if (value) return value;
+		}
+	}
+	return undefined;
+}
+
+function credentialsFromTokenResponse(
+	body: JsonObject,
+	previous?: { refresh?: string; userId?: unknown; email?: unknown },
+): OAuthCredentials {
+	const credentials = parseOAuthTokenCredentials(
 		{ ...body, expires_in: body.expires_in === undefined ? DEFAULT_TOKEN_LIFETIME_SECONDS : body.expires_in },
 		"xAI",
 		5 * 60,
-		previousRefreshToken,
+		previous?.refresh,
 	);
+	const userId = identityValue(body, ["user_id", "userId"]) ?? nonEmptyString(previous?.userId);
+	const email = identityValue(body, ["email"]) ?? nonEmptyString(previous?.email);
+	return {
+		...credentials,
+		...(userId ? { userId } : {}),
+		...(email ? { email } : {}),
+	};
 }
 
 async function requestDeviceCode(signal?: AbortSignal): Promise<XaiDeviceCode> {
 	const response = await postForm(
 		XAI_DEVICE_CODE_URL,
-		{ client_id: XAI_CLIENT_ID, scope: XAI_SCOPE, referrer: "pi" },
+		{ client_id: XAI_CLIENT_ID, scope: XAI_SCOPE, referrer: "grok-build" },
 		{ signal, headers: XAI_DEVICE_FLOW_HEADERS },
 	);
 	if (!response.ok) throw requestFailure("device authorization", response);
@@ -202,7 +242,7 @@ export async function loginXai(callbacks: OAuthLoginCallbacks): Promise<OAuthCre
 
 export async function refreshXaiToken(
 	refreshToken: string,
-	options?: { signal?: AbortSignal },
+	options?: { signal?: AbortSignal; previous?: OAuthCredentials },
 ): Promise<OAuthCredentials> {
 	const response = await postForm(
 		XAI_TOKEN_URL,
@@ -214,7 +254,11 @@ export async function refreshXaiToken(
 		{ signal: options?.signal, headers: XAI_DEVICE_FLOW_HEADERS },
 	);
 	if (!response.ok) throw requestFailure("token refresh", response);
-	return credentialsFromTokenResponse(response.body, refreshToken);
+	return credentialsFromTokenResponse(response.body, {
+		refresh: refreshToken,
+		userId: options?.previous?.userId,
+		email: options?.previous?.email,
+	});
 }
 
 export const xaiOAuthProvider: OAuthProviderInterface = {
@@ -223,9 +267,11 @@ export const xaiOAuthProvider: OAuthProviderInterface = {
 	isSubscription: true,
 	loginLabel: "Sign in with SuperGrok or X Premium",
 	login: loginXai,
-	refreshToken: (credentials) => refreshXaiToken(credentials.refresh),
+	refreshToken: (credentials) => refreshXaiToken(credentials.refresh, { previous: credentials }),
 	getApiKey: (credentials) => credentials.access,
-	modifyModels(models: Model<Api>[]): Model<Api>[] {
+	modifyModels(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[] {
+		const userId = nonEmptyString(credentials.userId);
+		const email = nonEmptyString(credentials.email);
 		return models.map((model) => {
 			if (model.provider !== "xai" || model.api !== "openai-responses") return model;
 			return {
@@ -235,6 +281,8 @@ export const xaiOAuthProvider: OAuthProviderInterface = {
 					...model.headers,
 					...XAI_CLI_PROXY_HEADERS,
 					"x-grok-model-override": model.id,
+					...(userId ? { "x-userid": userId } : {}),
+					...(email ? { "x-email": email } : {}),
 				},
 				compat: {
 					...model.compat,

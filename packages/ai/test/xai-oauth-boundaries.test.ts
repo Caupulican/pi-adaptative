@@ -29,7 +29,7 @@ describe("xAI OAuth input and cancellation boundaries", () => {
 		expect(fetch.mock.calls[0]?.[1]?.redirect).toBe("error");
 		expect(fetch.mock.calls[0]?.[1]?.headers).toMatchObject({
 			"x-grok-client-surface": "cli",
-			"x-grok-client-version": "1.0.34",
+			"x-grok-client-version": "1.0.40",
 		});
 	});
 	it("does not request or display a device code after pre-abort", async () => {

@@ -339,6 +339,27 @@ export const ROUTE_DECISION_PROGRAM = createDecisionProgram({
 	],
 });
 
+function routeStateProjection(
+	deps: ObjectiveExecutionControllerDeps,
+	objectiveId: string,
+	runtime: TaskRuntimeProjection,
+	stall: StallEvaluation,
+	history: readonly RouteHistoryEntry[],
+	initialDigest: string,
+	routeSnapshot: CandidateSnapshot | undefined,
+) {
+	return projectBoundedCombinedState(objectiveId, runtime, {
+		stallTurns: stall.stallTurns,
+		strategyFingerprint: stall.fingerprint,
+		history,
+		beforeDigest: initialDigest,
+		afterDigest: captureOptionalSnapshot(deps.repoRoot)?.digest ?? "unknown",
+		systemOneState: deps.systemOne?.snapshot?.(),
+		candidateDigest: routeSnapshot?.digest,
+		integrityState: deps.systemOne?.snapshot ? "available" : "unavailable",
+	});
+}
+
 function captureOptionalSnapshot(repoRoot: string | undefined): CandidateSnapshot | undefined {
 	if (!repoRoot) return undefined;
 	try {
@@ -554,16 +575,15 @@ export class ObjectiveExecutionController {
 		if (this.deps.decisions) {
 			try {
 				// FIN-034: Use bounded combined state projection
-				const stateProjection = projectBoundedCombinedState(objectiveId, runtime, {
-					stallTurns: stall.stallTurns,
-					strategyFingerprint: stall.fingerprint,
+				const stateProjection = routeStateProjection(
+					this.deps,
+					objectiveId,
+					runtime,
+					stall,
 					history,
-					beforeDigest: initialDigest,
-					afterDigest: captureOptionalSnapshot(this.deps.repoRoot)?.digest ?? "unknown",
-					systemOneState: this.deps.systemOne?.snapshot?.(),
-					candidateDigest: routeSnapshot?.digest,
-					integrityState: this.deps.systemOne?.snapshot ? "available" : "unavailable",
-				});
+					initialDigest,
+					routeSnapshot,
+				);
 
 				const evaluation = await this.deps.decisions.evaluateOrFallback(ROUTE_DECISION_PROGRAM, stateProjection, {
 					signal: options?.signal,
@@ -610,16 +630,15 @@ export class ObjectiveExecutionController {
 			}
 		} else if (this.deps.steeringPlane) {
 			try {
-				const stateProjection = projectBoundedCombinedState(objectiveId, runtime, {
-					stallTurns: stall.stallTurns,
-					strategyFingerprint: stall.fingerprint,
+				const stateProjection = routeStateProjection(
+					this.deps,
+					objectiveId,
+					runtime,
+					stall,
 					history,
-					beforeDigest: initialDigest,
-					afterDigest: captureOptionalSnapshot(this.deps.repoRoot)?.digest ?? "unknown",
-					systemOneState: this.deps.systemOne?.snapshot?.(),
-					candidateDigest: routeSnapshot?.digest,
-					integrityState: this.deps.systemOne?.snapshot ? "available" : "unavailable",
-				});
+					initialDigest,
+					routeSnapshot,
+				);
 				const cert = await this.deps.steeringPlane.requireCertificate("JEV-004", stateProjection, {
 					objectiveId,
 					signal: options?.signal,

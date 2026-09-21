@@ -184,6 +184,18 @@ describe("xAI Responses lane (grok-4.6 xhigh)", () => {
 });
 
 describe("xAI Grok CLI subscription schema", () => {
+	it("adds account headers only when the stored token identity is present", () => {
+		const modified = xaiOAuthProvider.modifyModels?.([getModel("xai", "grok-4.6")], {
+			access: "oauth-access",
+			refresh: "oauth-refresh",
+			expires: Date.now() + 60_000,
+			userId: "user-1",
+			email: "user@example.com",
+		})?.[0];
+		expect(modified?.headers?.["x-userid"]).toBe("user-1");
+		expect(modified?.headers?.["x-email"]).toBe("user@example.com");
+	});
+
 	it("routes OAuth subscription models through the Grok CLI proxy without changing API-key models", () => {
 		const apiModel = getModel("xai", "grok-4.6");
 		const modified = xaiOAuthProvider.modifyModels?.([apiModel], {
@@ -200,9 +212,9 @@ describe("xAI Grok CLI subscription schema", () => {
 			headers: {
 				"X-XAI-Token-Auth": "xai-grok-cli",
 				"x-authenticateresponse": "authenticate-response",
-				"x-grok-client-version": "1.0.34",
+				"x-grok-client-version": "1.0.40",
 				"x-grok-client-identifier": "grok-shell",
-				"x-grok-client-mode": "headless",
+				"x-grok-client-mode": "interactive",
 				"x-grok-model-override": "grok-4.6",
 			},
 			compat: { requestFormat: "xai-cli", supportsLongCacheRetention: false },
@@ -303,11 +315,13 @@ describe("xAI Grok CLI subscription schema", () => {
 		expect(headers.get("authorization")).toBe("Bearer oauth-access");
 		expect(headers.get("x-xai-token-auth")).toBe("xai-grok-cli");
 		expect(headers.get("x-authenticateresponse")).toBe("authenticate-response");
-		expect(headers.get("x-grok-client-version")).toBe("1.0.34");
+		expect(headers.get("x-grok-client-version")).toBe("1.0.40");
 		expect(headers.get("x-grok-client-surface")).toBeNull();
 		expect(headers.get("x-grok-client-identifier")).toBe("grok-shell");
-		expect(headers.get("x-grok-client-mode")).toBe("headless");
+		expect(headers.get("x-grok-client-mode")).toBe("interactive");
 		expect(headers.get("x-grok-model-override")).toBe("grok-4.6");
+		expect(headers.get("x-userid")).toBeNull();
+		expect(headers.get("x-email")).toBeNull();
 		expect(body).toMatchObject({
 			model: "grok-4.6",
 			prompt_cache_key: "session-capture",

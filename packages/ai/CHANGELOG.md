@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- xAI subscription OAuth and proxy requests use the inspected Grok CLI 1.0.40 identity: client version `1.0.40`, device referrer `grok-build`, and proxy mode `interactive`. Proxy requests send `x-userid` and `x-email` only when the token response includes those values.
+
 ## [0.99.38] - 2026-09-21
 
 ## [0.99.37] - 2026-09-21
