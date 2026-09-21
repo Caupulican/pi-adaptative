@@ -1242,13 +1242,11 @@ export class ObjectiveExecutionController {
 								}
 							: undefined,
 						hasCalibratedEngine: () => {
-							const candidate = this.deps.decisions?.select(ROUTE_DECISION_PROGRAM, "critical");
+							const _candidate = this.deps.decisions?.select(ROUTE_DECISION_PROGRAM, "critical");
 							const isSysOneCalibrated =
 								Boolean(this.deps.systemOne?.executeCompletionTransaction) &&
 								(this.deps.systemOne as any)?.adapter?.provenance === "native_calibrated";
-							return (
-								candidate?.capabilities().confidenceProvenance === "native_calibrated" || isSysOneCalibrated
-							);
+							return isSysOneCalibrated;
 						},
 					};
 
@@ -1408,6 +1406,65 @@ export class ObjectiveExecutionController {
 									sideEffects.tag = { state: "failed", error: e.message };
 								}
 							}
+						}
+
+						const bundleBase =
+							evalResult.deliveryBundle ?? (await this.buildBundle(objectiveId, "complete", runtime));
+
+						let enrichedBundle = buildDeliveryBundle({
+							...bundleBase,
+							objectiveId,
+							terminalStatus: "complete",
+							sourceRevision: bundleBase.source_revision,
+							artifacts: [
+								...(bundleBase.artifacts ?? []),
+								...(sideEffects.commit && sideEffects.commit.state !== "failed"
+									? [
+											{
+												path: "git:commit",
+												description: `Commit ${sideEffects.commit.detail.sha}`,
+												hash: sideEffects.commit.detail.sha,
+											},
+										]
+									: []),
+							],
+							finalCommit: sideEffects.commit?.detail?.sha,
+							pushRefs: sideEffects.push?.detail?.ref ? [sideEffects.push.detail.ref] : undefined,
+							sideEffects,
+						});
+
+						// JEV-027 Two-phase check (evaluates actual side effect results)
+						if (this.deps.steeringPlane) {
+							const c27 = await this.deps.steeringPlane.requireCertificate("JEV-027", enrichedBundle, {
+								objectiveId,
+								evidenceRevision,
+								signal,
+							});
+							steeringCertRefs.push(c27.certificate_id);
+							if (c27.semantic_outcome !== "pass") {
+								// Rollback local state unconditionally (push hasn't happened yet)
+								if (sideEffects.tag && sideEffects.tag.state !== "failed") {
+									try {
+										require("child_process").execSync(`git tag -d ${sideEffects.tag.detail.tag}`);
+									} catch (_e) {}
+								}
+								if (sideEffects.commit && sideEffects.commit.state !== "failed") {
+									try {
+										require("child_process").execSync("git reset --soft HEAD~1");
+									} catch (_e) {}
+								}
+
+								return {
+									status: "unrecoverable",
+									reasonCodes: ["delivery_certificate_rejected"],
+									cycleCount: this.cycleCounter,
+									deliveryBundle: enrichedBundle,
+								};
+							}
+						}
+
+						// Post-verify irreversible side effects
+						if (activeCharter) {
 							if (activeCharter.git.push) {
 								if (!this.deps.gitExecutor?.push) throw new Error("Git push unavailable");
 								try {
@@ -1455,63 +1512,6 @@ export class ObjectiveExecutionController {
 										sideEffects.deploy.push({ state: "failed", detail: { target }, error: e.message });
 									}
 								}
-							}
-						}
-
-						const bundleBase =
-							evalResult.deliveryBundle ?? (await this.buildBundle(objectiveId, "complete", runtime));
-
-						let enrichedBundle = buildDeliveryBundle({
-							...bundleBase,
-							objectiveId,
-							terminalStatus: "complete",
-							sourceRevision: bundleBase.source_revision,
-							artifacts: [
-								...(bundleBase.artifacts ?? []),
-								...(sideEffects.commit && sideEffects.commit.state !== "failed"
-									? [
-											{
-												path: "git:commit",
-												description: `Commit ${sideEffects.commit.detail.sha}`,
-												hash: sideEffects.commit.detail.sha,
-											},
-										]
-									: []),
-							],
-							finalCommit: sideEffects.commit?.detail?.sha,
-							pushRefs: sideEffects.push?.detail?.ref ? [sideEffects.push.detail.ref] : undefined,
-							sideEffects,
-						});
-
-						// JEV-027 Two-phase check (evaluates actual side effect results)
-						if (this.deps.steeringPlane) {
-							const c27 = await this.deps.steeringPlane.requireCertificate("JEV-027", enrichedBundle, {
-								objectiveId,
-								evidenceRevision,
-								signal,
-							});
-							steeringCertRefs.push(c27.certificate_id);
-							if (c27.semantic_outcome !== "pass") {
-								// Rollback local state if push was not successful
-								if (!sideEffects.push || sideEffects.push.state === "failed") {
-									if (sideEffects.tag && sideEffects.tag.state !== "failed") {
-										try {
-											require("child_process").execSync(`git tag -d ${sideEffects.tag.detail.tag}`);
-										} catch (_e) {}
-									}
-									if (sideEffects.commit && sideEffects.commit.state !== "failed") {
-										try {
-											require("child_process").execSync("git reset --soft HEAD~1");
-										} catch (_e) {}
-									}
-								}
-
-								return {
-									status: "unrecoverable",
-									reasonCodes: ["delivery_certificate_rejected"],
-									cycleCount: this.cycleCounter,
-									deliveryBundle: enrichedBundle,
-								};
 							}
 						}
 
