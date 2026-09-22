@@ -23,6 +23,13 @@ import { promises as fsPromises, mkdirSync, unlinkSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { type FaultableFs, nodeFs } from "./faultable-fs.ts";
+import {
+	isTransientWin32FsError as isTransientRenameErrorOnWin32,
+	WIN32_TRANSIENT_RETRY_ATTEMPTS as RENAME_RETRY_ATTEMPTS,
+	WIN32_TRANSIENT_RETRY_MAX_MS as RENAME_RETRY_MAX_TIMEOUT_MS,
+	WIN32_TRANSIENT_RETRY_MIN_MS as RENAME_RETRY_MIN_TIMEOUT_MS,
+	retryTransientWin32Sync,
+} from "./win32-transient-fs.ts";
 
 /**
  * Bounded rename retry budget for the win32-only transient-rename handling below (see
@@ -34,10 +41,6 @@ import { type FaultableFs, nodeFs } from "./faultable-fs.ts";
  * millisecond-scale window Defender/the Windows Search indexer hold a freshly-written file open
  * without FILE_SHARE_DELETE before releasing it.
  */
-const RENAME_RETRY_ATTEMPTS = 9;
-const RENAME_RETRY_MIN_TIMEOUT_MS = 10;
-const RENAME_RETRY_MAX_TIMEOUT_MS = 200;
-
 /**
  * On win32, antivirus (e.g. Windows Defender's real-time scanner) and the Windows Search indexer
  * routinely open a freshly-written file for a brief scan without `FILE_SHARE_DELETE`, which makes a
@@ -47,26 +50,12 @@ const RENAME_RETRY_MAX_TIMEOUT_MS = 200;
  * transient (a POSIX rename either succeeds or fails for a real, non-transient reason), so retry is
  * gated strictly to win32 to keep POSIX behavior byte-identical to a bare rename.
  */
-function isTransientRenameErrorOnWin32(err: unknown): boolean {
-	if (process.platform !== "win32") return false;
-	if (typeof err !== "object" || err === null) return false;
-	const code = (err as { code?: string }).code;
-	return code === "EPERM" || code === "EACCES" || code === "EBUSY";
-}
-
-/** Sync counterpart of the rename-retry policy; see {@link isTransientRenameErrorOnWin32}. */
+/** Sync counterpart of the rename-retry policy; see {@link isTransientWin32FsError}. */
 function renameSyncWithRetry(tmpPath: string, filePath: string, fs: FaultableFs, beforeCommit?: () => void): void {
-	for (let attempt = 0; attempt <= RENAME_RETRY_ATTEMPTS; attempt++) {
+	retryTransientWin32Sync(() => {
 		beforeCommit?.();
-		try {
-			fs.renameSync(tmpPath, filePath);
-			return;
-		} catch (err) {
-			if (!isTransientRenameErrorOnWin32(err) || attempt === RENAME_RETRY_ATTEMPTS) throw err;
-			const backoffMs = Math.min(RENAME_RETRY_MIN_TIMEOUT_MS * 2 ** attempt, RENAME_RETRY_MAX_TIMEOUT_MS);
-			blockingSleepMs(backoffMs);
-		}
-	}
+		fs.renameSync(tmpPath, filePath);
+	});
 }
 
 /** Async counterpart of the rename-retry policy; see {@link isTransientRenameErrorOnWin32}. */
