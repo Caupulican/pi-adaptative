@@ -4,16 +4,18 @@ import type { ExecutionState, ToolImpact } from "./types.ts";
  * Secret redaction patterns.
  * R-032: Secrets, tokens, credentials, private keys, and configured sensitive patterns MUST be redacted before remote Jev calls.
  */
+// Every prefix-anchored token pattern starts at a token boundary: without it, `sk-` inside
+// `task-automation-controller.ts` reads as an OpenAI key and blocks the whole Jev request.
 export const SECRET_PATTERNS: readonly RegExp[] = Object.freeze([
-	/apikey_[A-Za-z0-9_-]+/g,
-	/sk-ant-[A-Za-z0-9_-]{20,}/g,
-	/sk-[A-Za-z0-9_-]{20,}/g,
-	/AIza[0-9A-Za-z-_]{35}/g,
-	/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}/g,
-	/github_pat_[A-Za-z0-9_]{22,}/g,
-	/glpat-[A-Za-z0-9_-]{20,}/g,
-	/xox[baprs]-[A-Za-z0-9_-]+/g,
-	/(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}/g,
+	/(?<![A-Za-z0-9])apikey_[A-Za-z0-9_-]+/g,
+	/(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}/g,
+	/(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}/g,
+	/(?<![A-Za-z0-9])AIza[0-9A-Za-z-_]{35}/g,
+	/(?<![A-Za-z0-9])(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}/g,
+	/(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{22,}/g,
+	/(?<![A-Za-z0-9])glpat-[A-Za-z0-9_-]{20,}/g,
+	/(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9_-]+/g,
+	/(?<![A-Za-z0-9])(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}/g,
 	/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi,
 	/-----BEGIN\s+(?:[A-Z0-9_-]+\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(?:[A-Z0-9_-]+\s+)?PRIVATE\s+KEY-----/g,
 	/(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|password)\s*[:=]\s*["'][^"']+["']/gi,
