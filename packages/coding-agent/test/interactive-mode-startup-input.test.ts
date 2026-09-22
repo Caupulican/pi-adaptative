@@ -24,6 +24,13 @@ type SubmitContext = {
 		isStreaming: boolean;
 		isRetrying: boolean;
 		isBashRunning: boolean;
+		getSessionWorkState: () => {
+			phase: "llm_streaming" | "idle";
+			busy: boolean;
+			label: string;
+			sessionId: string;
+			epoch: number;
+		};
 		getSteeringMessages: () => readonly string[];
 		getFollowUpMessages: () => readonly string[];
 		takeQueuedMessages: () => { steering: QueuedInput[]; followUp: QueuedInput[] };
@@ -103,6 +110,16 @@ function createSubmitContext(): SubmitContext {
 			isStreaming: false,
 			isRetrying: false,
 			isBashRunning: false,
+			getSessionWorkState() {
+				const busy = this.isStreaming || this.isRetrying || this.isCompacting;
+				return {
+					phase: busy ? ("llm_streaming" as const) : ("idle" as const),
+					busy,
+					label: busy ? "Working" : "Ready",
+					sessionId: "fixture",
+					epoch: 1,
+				};
+			},
 			getSteeringMessages: () => queued.steering.map((entry) => entry.text),
 			getFollowUpMessages: () => queued.followUp.map((entry) => entry.text),
 			takeQueuedMessages: vi.fn(() => {

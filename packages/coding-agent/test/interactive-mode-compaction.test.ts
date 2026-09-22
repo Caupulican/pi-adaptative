@@ -38,7 +38,16 @@ describe("InteractiveMode compaction events", () => {
 			isInitialized: true,
 			footer: { invalidate: vi.fn() },
 			retryEscapeHandler: originalEscape as (() => void) | undefined,
-			session: { getForegroundActivity: () => ({ sessionId: "fixture", epoch: 1, busy: true }) },
+			session: {
+				getForegroundActivity: () => ({ sessionId: "fixture", epoch: 1, busy: true }),
+				getSessionWorkState: () => ({
+					phase: "llm_streaming" as const,
+					busy: true,
+					label: "Streaming response",
+					sessionId: "fixture",
+					epoch: 1,
+				}),
+			},
 			getWorkingLoaderMessage: () => "Working...",
 			retryCountdown: { dispose } as unknown,
 			defaultEditor: { onEscape: vi.fn() },

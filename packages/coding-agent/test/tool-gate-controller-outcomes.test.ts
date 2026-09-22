@@ -87,10 +87,10 @@ describe("ToolGateController publishes one gate outcome per tool call", () => {
 				} as Parameters<typeof controller.beforeToolCall>[0],
 				undefined,
 			);
-		expect(await call("bash", { command: "git push origin main" })).toBeUndefined();
+		expect(await call("bash", { command: "npm publish" })).toBeUndefined();
 		expect(await call("read", { path: "src/a.ts" })).toBeUndefined();
 		expect(noted).toEqual([
-			{ id: "call-1", classes: ["git.publish"] },
+			{ id: "call-1", classes: ["package.publish"] },
 			{ id: "call-2", classes: [] },
 		]);
 	});

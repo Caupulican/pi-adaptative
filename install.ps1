@@ -206,8 +206,19 @@ function Invoke-VersionSmoke([string]$Executable, [string]$Version) {
         $output = $env:PI_INSTALL_TEST_VERSION_OUTPUT.Trim()
         $exitCode = 0
     } else {
-        $output = (& $Executable --version 2>&1 | Out-String).Trim()
-        $exitCode = $LASTEXITCODE
+        # The proof runs a copy of the staged tree. Executing pi.exe inside the staging
+        # directory leaves that image mapped, and Windows then denies the activation rename.
+        # The executable can also read files beside itself, so the copy keeps that tree.
+        $sourceDir = Split-Path -Parent $Executable
+        $copyDir = Join-Path ([System.IO.Path]::GetTempPath()) ("pi-smoke-" + [Guid]::NewGuid().ToString("N"))
+        try {
+            Copy-Item -LiteralPath $sourceDir -Destination $copyDir -Recurse
+            $copy = Join-Path $copyDir (Split-Path -Leaf $Executable)
+            $output = (& $copy --version 2>&1 | Out-String).Trim()
+            $exitCode = $LASTEXITCODE
+        } finally {
+            Remove-Item -LiteralPath $copyDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
     if ($exitCode -ne 0 -or $output -ne $expected) {
         Fail "staged pi.exe --version did not report exactly $expected."

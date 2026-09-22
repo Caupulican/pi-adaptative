@@ -1153,7 +1153,6 @@ export class AgentSession {
 				return (
 					(this._systemOneController?.isEvaluating ?? false) ||
 					this._semanticPlaneHealth.getHealth(true).state === "evaluating" ||
-					this._reflectionTurnLifecycle.inFlight ||
 					(!isOwnIdleContinuationAdmission() && this._backgroundLanes.hasPendingIdleContinuation())
 				);
 			},

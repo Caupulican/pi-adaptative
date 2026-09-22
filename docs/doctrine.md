@@ -336,7 +336,9 @@ asked questions the owner had already answered with the handoff. What remains is
 capability envelope (a tool without its capability, a denied or unlisted tool, a path outside the
 allowed roots) and the literal edge classes above — and `bash`/`python` stay explicit host-trust
 execution boundaries (`session-role.ts`): no gate reads Python source or shell text for intent, and
-none claims to contain arbitrary process code. Pinned by
+none claims to contain arbitrary process code. The session proof of an ungranted class uses
+`npm publish` (`package.publish`). Root bash refuses a git invocation before the edge confirmer,
+so that proof is not a git command. Pinned by
 `packages/coding-agent/test/python-tool-registration.test.ts`,
 `packages/coding-agent/test/edge-policy.test.ts` and
 `packages/coding-agent/test/agent-session-edge.test.ts` and
@@ -618,7 +620,8 @@ objective loop re-routes on the ledger at its next cycle), its confirm verdict q
 and relevance is judged only against a real step or goal, never against an empty objective. A
 System One cancel of the root's own turn inside the objective loop is a re-route, not a stop; only
 the operator's interruption stops the loop. A worker judged off the mission is redirected now, a
-stalled one at its next turn, a repeated stall rerouted.
+stalled one at its next turn, a repeated stall rerouted. The off-step cancel proof uses `echo status`.
+A git read never reaches the tool body on root bash, so that proof is not a git command.
 Pinned by `packages/coding-agent/test/system-one-foreground-control.test.ts` and
 `packages/coding-agent/test/system-one-worker-control.test.ts`.
 

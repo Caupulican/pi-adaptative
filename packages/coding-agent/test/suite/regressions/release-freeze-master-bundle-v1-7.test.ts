@@ -72,7 +72,8 @@ class TestReleaseFreezeJevAdapter {
 				q === "specialist_gap_present" ||
 				q === "capability_gap_present" ||
 				q === "needs_independent_verification" ||
-				q === "work_off_track"
+				q === "work_off_track" ||
+				q === "external_block_present"
 			) {
 				answers[q] = { type: "noul", noul: 0.1 };
 			} else {
@@ -414,6 +415,7 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 						needs_independent_verification: { type: "noul", noul: 0.1 },
 						specialist_gap_present: { type: "noul", noul: 0.1 },
 						capability_gap_present: { type: "noul", noul: 0.1 },
+						external_block_present: { type: "noul", noul: 0.1 },
 					},
 				}),
 			};

@@ -38,7 +38,7 @@ describe("the edge in a session", () => {
 		const harness = await createHarness({ baseToolsOverride: [bash.tool], settings: { edge: { allow: [] } } });
 		try {
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("bash", { command: "git push origin main" })], {
+				fauxAssistantMessage([fauxToolCall("bash", { command: "npm publish" })], {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage("Done"),
@@ -48,7 +48,7 @@ describe("the edge in a session", () => {
 			const text = lastToolResultText(harness);
 			expect(text).toContain(EDGE_CONFIRMATION_REQUIRED);
 			expect(text).toContain("goal grant_edge");
-			expect(text).toContain("/edge allow git.publish");
+			expect(text).toContain("/edge allow package.publish");
 		} finally {
 			await harness.cleanup();
 		}
@@ -64,30 +64,30 @@ describe("the edge in a session", () => {
 		});
 		try {
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("bash", { command: "git status && npm install" })], {
+				fauxAssistantMessage([fauxToolCall("bash", { command: "npm test" })], {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage("Done"),
 			]);
 			await harness.session.prompt("Check the tree");
-			expect(bash.commands).toEqual(["git status && npm install"]);
+			expect(bash.commands).toEqual(["npm test"]);
 			expect(asked).toBe(0);
 
-			harness.session.grantEdge("git.publish", "operator", { note: "release day" });
+			harness.session.grantEdge("package.publish", "operator", { note: "release day" });
 			expect(harness.session.getEdgeGrants()).toEqual([
-				expect.objectContaining({ class: "git.publish", source: "operator", note: "release day" }),
+				expect.objectContaining({ class: "package.publish", source: "operator", note: "release day" }),
 			]);
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("bash", { command: "git push" })], { stopReason: "toolUse" }),
+				fauxAssistantMessage([fauxToolCall("bash", { command: "npm publish" })], { stopReason: "toolUse" }),
 				fauxAssistantMessage("Done"),
 			]);
-			await harness.session.prompt("Push");
-			expect(bash.commands).toEqual(["git status && npm install", "git push"]);
+			await harness.session.prompt("Publish");
+			expect(bash.commands).toEqual(["npm test", "npm publish"]);
 			expect(asked).toBe(0);
 
-			expect(harness.session.revokeEdge("git.publish")).toBe(true);
+			expect(harness.session.revokeEdge("package.publish")).toBe(true);
 			expect(harness.session.getEdgeGrants()).toEqual([]);
-			expect(harness.session.revokeEdge("git.publish")).toBe(false);
+			expect(harness.session.revokeEdge("package.publish")).toBe(false);
 		} finally {
 			await harness.cleanup();
 		}
@@ -130,17 +130,17 @@ describe("the edge in a session", () => {
 		const bash = bashSpy();
 		const harness = await createHarness({
 			baseToolsOverride: [bash.tool],
-			settings: { edge: { allow: ["git.publish", "bogus"] } },
+			settings: { edge: { allow: ["package.publish", "bogus"] } },
 		});
 		try {
-			expect(harness.session.getEdgeGrants()).toEqual([{ class: "git.publish", source: "settings" }]);
-			expect(harness.session.revokeEdge("git.publish")).toBe(false);
+			expect(harness.session.getEdgeGrants()).toEqual([{ class: "package.publish", source: "settings" }]);
+			expect(harness.session.revokeEdge("package.publish")).toBe(false);
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("bash", { command: "git push --tags" })], { stopReason: "toolUse" }),
+				fauxAssistantMessage([fauxToolCall("bash", { command: "npm publish" })], { stopReason: "toolUse" }),
 				fauxAssistantMessage("Done"),
 			]);
-			await harness.session.prompt("Push tags");
-			expect(bash.commands).toEqual(["git push --tags"]);
+			await harness.session.prompt("Publish");
+			expect(bash.commands).toEqual(["npm publish"]);
 		} finally {
 			await harness.cleanup();
 		}

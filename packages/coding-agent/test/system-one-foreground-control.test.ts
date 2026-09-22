@@ -60,7 +60,7 @@ describe("System One foreground control", () => {
 		session = harness.session;
 		try {
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("bash", { command: "git status" })], { stopReason: "toolUse" }),
+				fauxAssistantMessage([fauxToolCall("bash", { command: "echo status" })], { stopReason: "toolUse" }),
 				fauxAssistantMessage("should not be reached"),
 			]);
 			await harness.session.prompt("Check the tree");

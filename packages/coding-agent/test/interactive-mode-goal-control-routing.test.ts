@@ -38,6 +38,12 @@ function createHarness(busy: BusyState, initialStatus: "active" | "blocked" = "b
 			isStreaming: busy === "streaming",
 			isRetrying: busy === "retrying",
 			isCompacting: busy === "compacting",
+			getSessionWorkState: () => ({
+				phase: busy === "streaming" ? "llm_streaming" : busy === "retrying" ? "retrying" : "compacting",
+				busy: true,
+				label: "Working",
+				sessionId: "fixture",
+			}),
 			getGoalStateSnapshot: () => controller.getState(),
 			saveGoalStateSnapshot: vi.fn(
 				(state: GoalState, expected?: Parameters<GoalSessionController["saveState"]>[1]) =>

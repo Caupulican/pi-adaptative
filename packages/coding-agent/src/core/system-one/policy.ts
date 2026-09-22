@@ -113,17 +113,17 @@ export function decidePreflight(
 	config: SystemOneConfig = DEFAULT_SYSTEM_ONE_CONFIG,
 ): "allow" | "retrieve" | "replan" | "test" | "block" | "escalate" {
 	// step_relevant (noul: required_true)
-	const stepRelevantAns = (answers.step_relevant as { boolean?: boolean } | undefined)?.boolean ?? false;
+	const stepRelevantAns = noulFromAnswer(answers.step_relevant, false);
 	const stepRelevant = evaluateNoul(stepRelevantAns, "required_true", config.thresholds);
 	if (stepRelevant === "hard_fail") return "replan";
 
 	// unsupported_assumption_present (noul: required_false)
-	const assumptionAns = (answers.unsupported_assumption_present as { boolean?: boolean } | undefined)?.boolean ?? true;
+	const assumptionAns = noulFromAnswer(answers.unsupported_assumption_present, true);
 	const assumptionEval = evaluateNoul(assumptionAns, "required_false", config.thresholds);
 	if (assumptionEval === "hard_fail") return "retrieve";
 
 	// evidence_sufficient_to_act (noul: required_true)
-	const evidenceAns = (answers.evidence_sufficient_to_act as { boolean?: boolean } | undefined)?.boolean ?? false;
+	const evidenceAns = noulFromAnswer(answers.evidence_sufficient_to_act, false);
 	const evidenceEval = evaluateNoul(evidenceAns, "required_true", config.thresholds);
 	if (evidenceEval === "hard_fail" || evidenceEval === "ambiguous") return "retrieve";
 
@@ -174,7 +174,7 @@ export function decideToolGate(
 	options: ToolGateDecisionOptions = {},
 ): "allow" | "confirm" | "block" | "replan" {
 	// Check prompt injection first
-	const injectionAns = (answers.repo_text_injection_like as { boolean?: boolean } | undefined)?.boolean ?? false;
+	const injectionAns = noulFromAnswer(answers.repo_text_injection_like, false);
 	const injectionEval = evaluateNoul(injectionAns, "required_false", config.thresholds);
 	if (injectionEval === "hard_fail") {
 		// Injection-like text detected
@@ -183,7 +183,7 @@ export function decideToolGate(
 
 	// Tool relevance, only when there was a step to be relevant to.
 	if (options.relevanceEvaluable !== false) {
-		const relevantAns = (answers.tool_call_relevant as { boolean?: boolean } | undefined)?.boolean ?? false;
+		const relevantAns = noulFromAnswer(answers.tool_call_relevant, false);
 		const relevantEval = evaluateNoul(relevantAns, "required_true", config.thresholds);
 		if (relevantEval === "hard_fail") {
 			return "replan";
@@ -213,19 +213,19 @@ export function decidePostflight(
 	config: SystemOneConfig = DEFAULT_SYSTEM_ONE_CONFIG,
 ): "continue" | "verify" | "retrieve_more" | "replan" | "rollback" | "completion_candidate" | "blocked" {
 	// Check scope violation
-	const scopeViolAns = (answers.scope_violation as { boolean?: boolean } | undefined)?.boolean ?? false;
+	const scopeViolAns = noulFromAnswer(answers.scope_violation, false);
 	if (evaluateNoul(scopeViolAns, "required_false", config.thresholds) === "hard_fail") {
 		return "rollback";
 	}
 
 	// Check replan required
-	const replanAns = (answers.replan_required as { boolean?: boolean } | undefined)?.boolean ?? false;
+	const replanAns = noulFromAnswer(answers.replan_required, false);
 	if (evaluateNoul(replanAns, "required_false", config.thresholds) === "hard_fail") {
 		return "replan";
 	}
 
 	// Check conclusions supported
-	const conclAns = (answers.conclusions_supported as { boolean?: boolean } | undefined)?.boolean ?? true;
+	const conclAns = noulFromAnswer(answers.conclusions_supported, true);
 	if (evaluateNoul(conclAns, "required_true", config.thresholds) === "hard_fail") {
 		return "retrieve_more";
 	}

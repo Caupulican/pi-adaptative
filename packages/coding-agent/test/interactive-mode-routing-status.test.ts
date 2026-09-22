@@ -16,6 +16,13 @@ describe("foreground lease activity adapter", () => {
 		const host = {
 			session: {
 				getForegroundActivity: () => ({ sessionId: "s", busy, epoch: busy ? 1 : undefined }),
+				getSessionWorkState: () => ({
+					phase: busy ? ("llm_streaming" as const) : ("idle" as const),
+					busy,
+					label: busy ? "Streaming response" : "Ready",
+					sessionId: "s",
+					epoch: busy ? 1 : undefined,
+				}),
 				sessionManager: { getCwd: () => "/fixture" },
 			},
 			workbench: { beginCycle: vi.fn() },
@@ -238,7 +245,11 @@ describe("InteractiveMode routing_start/routing_end status lane", () => {
 		const fakeThis = {
 			isInitialized: true,
 			footer: { invalidate: vi.fn() },
-			session: { isStreaming: false, getForegroundActivity: () => ({ busy: false }) },
+			session: {
+				isStreaming: false,
+				getForegroundActivity: () => ({ busy: false }),
+				getSessionWorkState: () => ({ phase: "idle" as const, busy: false, label: "Ready", sessionId: "s" }),
+			},
 			loadingAnimation: { stop: vi.fn() },
 			activityLane: { remove: vi.fn() },
 			stopWorkingLoader: vi.fn(),
@@ -260,7 +271,17 @@ describe("InteractiveMode routing_start/routing_end status lane", () => {
 		const host = {
 			isInitialized: true,
 			footer: { invalidate: vi.fn() },
-			session: { isStreaming: false, getForegroundActivity: () => ({ sessionId: "s", epoch: 1, busy: true }) },
+			session: {
+				isStreaming: false,
+				getForegroundActivity: () => ({ sessionId: "s", epoch: 1, busy: true }),
+				getSessionWorkState: () => ({
+					phase: "llm_streaming" as const,
+					busy: true,
+					label: "Streaming response",
+					sessionId: "s",
+					epoch: 1,
+				}),
+			},
 			loadingAnimation: loader as typeof loader | undefined,
 			workingVisible: true,
 			workingIndicatorOptions: {},
@@ -336,7 +357,10 @@ describe("InteractiveMode routing_start/routing_end status lane", () => {
 		const host = {
 			isInitialized: true,
 			footer: { invalidate: vi.fn() },
-			session: { getForegroundActivity: () => ({ busy: false }) },
+			session: {
+				getForegroundActivity: () => ({ busy: false }),
+				getSessionWorkState: () => ({ phase: "idle" as const, busy: false, label: "Ready", sessionId: "s" }),
+			},
 			loadingAnimation: undefined as typeof loader | undefined,
 			workingVisible: true,
 			workingIndicatorOptions: {},

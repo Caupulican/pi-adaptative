@@ -99,8 +99,9 @@ export function clarificationQuestionIdentity(text: string): string {
 
 function readBoolean(results: Record<string, any> | undefined, id: string): boolean | undefined {
 	const res = results?.[id];
-	if (!res) return undefined;
+	if (!res || typeof res !== "object") return undefined;
 	if (typeof res.probabilityTrue === "number") return res.probabilityTrue >= SEMANTIC_TRUE_THRESHOLD;
+	if (typeof res.noul === "number") return res.noul >= SEMANTIC_TRUE_THRESHOLD;
 	if (typeof res.value === "boolean") return res.value;
 	return undefined;
 }
