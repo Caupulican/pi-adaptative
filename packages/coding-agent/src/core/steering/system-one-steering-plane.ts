@@ -12,6 +12,7 @@ import type { DecisionEvaluation } from "../decision/evaluation.ts";
 import { isForbiddenRequiredProvenance } from "../decision/policy.ts";
 import type { DecisionProgram } from "../decision/program.ts";
 import type { JevAdapter } from "../system-one/adapter.ts";
+import { type AuthorityKind, authorityForCheckpoint, decideByAuthority } from "../system-one/authority-line.ts";
 import { evaluateChoice, evaluateNoul, noulFromAnswer } from "../system-one/policy.ts";
 import { type SemanticEvaluationObserver, verdictFromCertificate } from "../system-one/semantic-evaluation-ledger.ts";
 import { canonicalDigest } from "./canonical.ts";
@@ -49,17 +50,20 @@ export class SystemOneSteeringUnavailableError extends Error {
 	}
 }
 
-export class SteeringConfidenceTooLowError extends Error {
+/**
+ * The engine gave no judgment for a checkpoint. Carries what the judgment would have decided, so the
+ * caller applies the authority line: reversible work proceeds with the outage visible, an objective
+ * transition holds, an irreversible operation goes to the operator.
+ */
+export class SteeringJudgmentUnavailableError extends SystemOneSteeringUnavailableError {
 	readonly checkpointId: string;
-	readonly confidence: number;
-	readonly required: number;
+	readonly authority: AuthorityKind;
 
-	constructor(checkpointId: string, confidence: number, required: number) {
-		super(`Confidence for checkpoint ${checkpointId} (${confidence}) is below required threshold (${required}).`);
-		this.name = "SteeringConfidenceTooLowError";
+	constructor(checkpointId: string, authority: AuthorityKind, cause: unknown) {
+		super(cause instanceof Error ? cause.message : String(cause));
+		this.name = "SteeringJudgmentUnavailableError";
 		this.checkpointId = checkpointId;
-		this.confidence = confidence;
-		this.required = required;
+		this.authority = authority;
 	}
 }
 
@@ -85,6 +89,8 @@ export class SystemOneSteeringPlane {
 	 * it is never read across calls.
 	 */
 	private openDoubts: string[] = [];
+	/** Evidence passes already requested per (objective, task, checkpoint, evidence revision). */
+	private readonly gatherCounts = new Map<string, number>();
 
 	constructor(deps: SystemOneSteeringPlaneDeps = {}) {
 		this.certificates = deps.certificates ?? new SteeringCertificateStore(deps.persistentPath);
@@ -1016,7 +1022,10 @@ export class SystemOneSteeringPlane {
 		) {
 			Object.assign(answers, (evaluation as unknown as Record<string, unknown>).rawAnswers);
 		}
+		// Confidence belongs to Choice, Score and Set answers only. A Noul has none (TypeSafe docs): its
+		// probability is the certainty, and its band already says whether it settled anything.
 		const confidences: number[] = [];
+		const lowConfidence: string[] = [];
 
 		for (const d of program.decisions) {
 			const result = evaluation.results[d.id];
@@ -1035,7 +1044,6 @@ export class SystemOneSteeringPlane {
 					band: result.band,
 					confidence: result.confidence.value,
 				};
-				confidences.push(result.confidence.value);
 			} else if (result.kind === "choice") {
 				answers[d.id] = {
 					type: "choice",
@@ -1045,7 +1053,6 @@ export class SystemOneSteeringPlane {
 					margin: result.margin,
 					confidence: result.confidence.value,
 				};
-				confidences.push(result.confidence.value);
 			} else if (result.kind === "score") {
 				answers[d.id] = {
 					type: "score",
@@ -1055,7 +1062,6 @@ export class SystemOneSteeringPlane {
 					probabilities: result.distribution,
 					confidence: result.confidence.value,
 				};
-				confidences.push(result.confidence.value);
 			} else if (result.kind === "set") {
 				answers[d.id] = {
 					type: "set",
@@ -1063,23 +1069,26 @@ export class SystemOneSteeringPlane {
 					memberships: result.memberships,
 					confidence: result.confidence.value,
 				};
+			}
+			if (result.kind === "choice" || result.kind === "score" || result.kind === "set") {
 				confidences.push(result.confidence.value);
+				if (result.confidence.value < thresholds.minimumConfidence) lowConfidence.push(d.id);
 			}
 		}
 
-		// PH-006, PH-007: Weakest-link confidence across required judgments. No global _confidence!
-		const actionConfidence = confidences.length > 0 ? Math.min(...confidences) : 0.0;
-		if (actionConfidence < thresholds.minimumConfidence) {
-			throw new SteeringConfidenceTooLowError(request.checkpointId, actionConfidence, thresholds.minimumConfidence);
-		}
+		// A low-confidence answer is a doubt about that decision, routed like an ambiguous band. It never
+		// throws: an exception here used to end the whole objective run.
+		const actionConfidence = confidences.length > 0 ? Math.min(...confidences) : 1;
 
 		const directive = this.composeDirective(request.checkpointId, answers, program);
-		const { semantic_outcome, failed_semantic_predicates, unsure_semantic_predicates } = this.evaluateSemanticOutcome(
-			request.checkpointId,
-			answers,
-			directive,
-			request.state,
-		);
+		const judged = this.evaluateSemanticOutcome(request.checkpointId, answers, directive, request.state);
+		const failed_semantic_predicates = judged.failed_semantic_predicates;
+		const unsure_semantic_predicates = [
+			...judged.unsure_semantic_predicates,
+			...lowConfidence.filter((id) => !judged.unsure_semantic_predicates.includes(id)),
+		];
+		const semantic_outcome =
+			judged.semantic_outcome === "pass" && lowConfidence.length > 0 ? "gather_more" : judged.semantic_outcome;
 
 		const certificate: SteeringCertificate = {
 			schema_version: "1.0",
@@ -1150,18 +1159,38 @@ export class SystemOneSteeringPlane {
 		const objectiveId = options.objectiveId ?? "obj_default";
 		const evidenceRevision = options.evidenceRevision ?? 1;
 
-		const result = await this.evaluate({
-			checkpointId,
-			objectiveId,
-			taskId: options.taskId,
-			workUnitId: options.workUnitId,
-			state,
-			evidenceRevision,
-			consequence: options.consequence,
-			parentCertificateIds: options.parentCertificateIds,
-			// The abort reaches the engine: an aborted checkpoint settles as cancelled, not failed.
-			signal: options.signal,
-		});
+		const authority = authorityForCheckpoint(checkpointId);
+		let result: SteeringResult;
+		try {
+			result = await this.evaluate({
+				checkpointId,
+				objectiveId,
+				taskId: options.taskId,
+				workUnitId: options.workUnitId,
+				state,
+				evidenceRevision,
+				consequence: options.consequence,
+				parentCertificateIds: options.parentCertificateIds,
+				// The abort reaches the engine: an aborted checkpoint settles as cancelled, not failed.
+				signal: options.signal,
+			});
+		} catch (error) {
+			if (error instanceof SystemOneSteeringUnavailableError && !(error instanceof SteeringJudgmentUnavailableError))
+				throw new SteeringJudgmentUnavailableError(checkpointId, authority, error);
+			throw error;
+		}
+
+		// An ambiguous judgment asks for evidence at most GATHER_MORE_LIMIT times on the same evidence
+		// revision. After that, reversible work proceeds with the doubt on the certificate; an objective
+		// transition keeps failing closed (it never closes on a doubt).
+		if (result.certificate.semantic_outcome === "gather_more") {
+			const key = `${objectiveId}\u0000${options.taskId ?? ""}\u0000${checkpointId}\u0000${evidenceRevision}`;
+			const gatherCount = this.gatherCounts.get(key) ?? 0;
+			this.gatherCounts.set(key, gatherCount + 1);
+			if (decideByAuthority(authority, "ambiguous", gatherCount).action === "proceed_with_doubt") {
+				return result.certificate;
+			}
+		}
 
 		const requirePass = options.requirePass ?? true;
 		if (requirePass && result.certificate.semantic_outcome !== "pass") {

@@ -29,9 +29,8 @@ import {
 	SpecialistMaterializationError,
 	SpecialistSynthesisController,
 	SteeringCertificateStore,
-	SteeringConfidenceTooLowError,
+	SteeringSemanticFailedError,
 	SystemOneSteeringPlane,
-	SystemOneSteeringUnavailableError,
 	WaiverStore,
 } from "../../../src/core/index.ts";
 import type { JevAdapter, JevEvaluationRequest, JevEvaluationResponse } from "../../../src/core/system-one/adapter.ts";
@@ -228,16 +227,18 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 			).rejects.toThrow();
 		});
 
-		it("PH-007: weakest-link confidence across decisions gates checkpoint", async () => {
+		it("PH-007: an ambiguous noul does not pass the checkpoint; it asks for more evidence", async () => {
 			const adapter = new MockTypedJevAdapter();
 			// One low confidence answer lowers the entire certificate confidence
 			adapter.overrides = {
 				objective_coherent: { type: "noul", noul: 0.5 },
 			};
 			const plane = new SystemOneSteeringPlane({ adapter, policy: DEFAULT_STEERING_POLICY });
-			await expect(
-				plane.requireCertificate("JEV-001", { phase: "intake" }, { objectiveId: "obj-low-conf" }),
-			).rejects.toThrow(SteeringConfidenceTooLowError);
+			const error = await plane
+				.requireCertificate("JEV-001", { phase: "intake" }, { objectiveId: "obj-low-conf" })
+				.catch((e: unknown) => e);
+			expect(error).toBeInstanceOf(SteeringSemanticFailedError);
+			expect((error as SteeringSemanticFailedError).outcome).toBe("gather_more");
 		});
 	});
 
@@ -814,7 +815,7 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 	});
 
 	describe("Cluster 12: Jev Outage and Resilience (PH-010, PH-171)", () => {
-		it("Jev outage in system_one_required mode halts transition fail-closed without completing", async () => {
+		it("Jev outage in system_one_required mode proceeds on deterministic facts and never completes", async () => {
 			const adapter = new MockTypedJevAdapter();
 			adapter.shouldFail = true;
 
@@ -845,8 +846,13 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 				},
 			});
 
-			// Outage during admission throws SystemOneSteeringUnavailableError and halts
-			await expect(controller.run("obj-outage-1")).rejects.toThrow(SystemOneSteeringUnavailableError);
+			// Admission and routing steer reversible work: an outage lets the objective proceed on
+			// deterministic facts (here to the implement executor, which this fixture lacks). It never
+			// completes on an outage.
+			const result = await controller.run("obj-outage-1");
+			expect(result.status).not.toBe("complete");
+			expect(result.reasonCodes).toContain("missing_required_executor:workerDispatcher.dispatch");
+			expect(adapter.evaluateCalls.length).toBeGreaterThan(0);
 		});
 	});
 });

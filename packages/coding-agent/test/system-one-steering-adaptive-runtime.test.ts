@@ -26,7 +26,7 @@ import {
 	SpecialistCatalog,
 	SpecialistSynthesisController,
 	SteeringCertificateStore,
-	SteeringConfidenceTooLowError,
+	SteeringSemanticFailedError,
 	SystemOneSteeringPlane,
 	SystemOneSteeringUnavailableError,
 	WaiverStore,
@@ -162,7 +162,7 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 			expect(fetched).toEqual(cert);
 		});
 
-		it("throws SteeringConfidenceTooLowError when confidence is below required threshold (S1A-010)", async () => {
+		it("routes an ambiguous admission answer to gather_more instead of a confidence exception (S1A-010)", async () => {
 			const mockAdapter = new MockJevAdapter();
 			// Default consequence for medium is 0.75, so probability 0.50 yields confidence 0.50 (low confidence error)
 			mockAdapter.evaluateResponse = {
@@ -176,9 +176,11 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 				policy: DEFAULT_STEERING_POLICY,
 			});
 
-			await expect(
-				plane.requireCertificate("JEV-001", { phase: "intake" }, { objectiveId: "obj-101" }),
-			).rejects.toThrow(SteeringConfidenceTooLowError);
+			const error = await plane
+				.requireCertificate("JEV-001", { phase: "intake" }, { objectiveId: "obj-101" })
+				.catch((e: unknown) => e);
+			expect(error).toBeInstanceOf(SteeringSemanticFailedError);
+			expect((error as SteeringSemanticFailedError).outcome).toBe("gather_more");
 		});
 	});
 

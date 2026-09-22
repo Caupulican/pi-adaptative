@@ -27,7 +27,7 @@ export {
 } from "./programs.ts";
 export {
 	isCertificateSemanticallyPassed,
-	SteeringConfidenceTooLowError,
+	SteeringJudgmentUnavailableError,
 	SystemOneSteeringPlane,
 	type SystemOneSteeringPlaneDeps,
 	SystemOneSteeringUnavailableError,

@@ -36,7 +36,11 @@ import type {
 import { buildWorkerCapabilityRequest, NoEligibleExpertError } from "../expert-routing/index.ts";
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
-import type { SystemOneSteeringPlane } from "../steering/index.ts";
+import {
+	SteeringJudgmentUnavailableError,
+	SteeringSemanticFailedError,
+	type SystemOneSteeringPlane,
+} from "../steering/index.ts";
 import { requestsBugFix } from "../system-one/bug-fix.ts";
 import {
 	type CandidateSnapshot,
@@ -693,7 +697,14 @@ export class ObjectiveExecutionController {
 					strategyRepetition: settledAnswer(cert.answers.strategy_repetition),
 				};
 			} catch (err) {
-				if (this.deps.steeringPlane.policy.mode === "system_one_required") {
+				// Routing is reversible work. An unsettled route judgment gathers evidence; an outage routes
+				// on deterministic facts alone. Anything else keeps its required-mode failure.
+				if (err instanceof SteeringSemanticFailedError && err.outcome === "gather_more") {
+					semantic = { missingWorkClass: "insufficient_evidence" };
+				} else if (
+					!isReversibleDoubtOrOutage(err) &&
+					this.deps.steeringPlane.policy.mode === "system_one_required"
+				) {
 					throw err;
 				}
 			}
@@ -895,19 +906,22 @@ export class ObjectiveExecutionController {
 					constraints: objective?.constraints ?? [],
 					acceptanceCriteria: objective?.acceptanceCriteria ?? [],
 				};
-				const c1 = await this.deps.steeringPlane.requireCertificate("JEV-001", admissionState, {
-					objectiveId,
-					signal,
-				});
-				const c2 = await this.deps.steeringPlane.requireCertificate("JEV-002", admissionState, {
-					objectiveId,
-					signal,
-				});
-				const c3 = await this.deps.steeringPlane.requireCertificate("JEV-003", admissionState, {
-					objectiveId,
-					signal,
-				});
-				this.admissionCerts.set(objectiveId, [c1.certificate_id, c2.certificate_id, c3.certificate_id]);
+				// Admission steers reversible work: an outage or an unsettled answer does not end the objective.
+				// The route's own evidence gathering answers what admission could not; a decisive failure
+				// (an incoherent objective) still stops here.
+				const admitted: string[] = [];
+				for (const checkpointId of ["JEV-001", "JEV-002", "JEV-003"] as const) {
+					try {
+						const cert = await this.deps.steeringPlane.requireCertificate(checkpointId, admissionState, {
+							objectiveId,
+							signal,
+						});
+						admitted.push(cert.certificate_id);
+					} catch (err) {
+						if (!isReversibleDoubtOrOutage(err)) throw err;
+					}
+				}
+				this.admissionCerts.set(objectiveId, admitted);
 			}
 
 			// 1. Check deterministic terminals
@@ -2214,4 +2228,10 @@ export class ObjectiveExecutionController {
 
 		return workerResult;
 	}
+}
+
+/** A judgment that reversible work may proceed past: an outage, or an ambiguous answer. */
+function isReversibleDoubtOrOutage(err: unknown): boolean {
+	if (err instanceof SteeringJudgmentUnavailableError) return err.authority === "reversible_work";
+	return err instanceof SteeringSemanticFailedError && err.outcome === "gather_more";
 }

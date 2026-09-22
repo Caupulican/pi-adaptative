@@ -496,6 +496,8 @@ export class AgentSession {
 	private _localCommitBranch?: string;
 	/** unset: written rules apply. ask: the request differs and the user has not chosen. user: the request is above the files. */
 	private _ruleAuthority: "unset" | "ask" | "user" | "written" = "unset";
+	/** The last classification could not run. Kept so the model is told once per outage, not per turn. */
+	private _deliveryClassificationUnavailable = false;
 	private _adaptationProjection?: AdaptationProjection;
 	private _deliveryState: DeliveryState = "none";
 	private _foregroundControl?: SystemOneForegroundControl;
@@ -2421,9 +2423,16 @@ export class AgentSession {
 		if (outcome.status === "unavailable") {
 			// The binding is left exactly as it was -- but a silent "nothing changed" would read as a
 			// classified "the user imposed nothing", which is how a stated no-push limit gets lost.
-			// The model is told the limit was not registered so it honours the request itself.
-			return deliveryClassificationUnavailableNote(outcome.reason, this._localCommitBranch);
+			// The model is told the limit was not registered so it honours the request itself. Once
+			// per outage, not once per turn: the note stays true while the outage lasts, and
+			// re-appending it every turn is the trailing-record churn the append-only prefix avoids.
+			const firstOfOutage = !this._deliveryClassificationUnavailable;
+			this._deliveryClassificationUnavailable = true;
+			return firstOfOutage
+				? deliveryClassificationUnavailableNote(outcome.reason, this._localCommitBranch)
+				: undefined;
 		}
+		this._deliveryClassificationUnavailable = false;
 		const classified = outcome.classification;
 		this._localCommitBranch = resolveDeliveryBinding(
 			this._localCommitBranch,
@@ -4008,10 +4017,10 @@ export class AgentSession {
 		this._goals.setStartAuthority(goalToolStartAuthority);
 		try {
 			this._toolProtocol.resetTurnState();
-			const ruleConflict = await this._enableCapabilitiesAuthorizedByUser(userRequest);
-			if (ruleConflict) {
+			const requestNote = await this._enableCapabilitiesAuthorizedByUser(userRequest);
+			if (requestNote) {
 				messages.push(
-					createCustomMessage("rule_conflict", ruleConflict, false, undefined, new Date().toISOString()),
+					createCustomMessage("request_authority", requestNote, false, undefined, new Date().toISOString()),
 				);
 			}
 			const preflight = await executeSystemOnePreflight(this._systemOneController, this.agent.state.messages.length);
