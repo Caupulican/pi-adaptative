@@ -643,6 +643,17 @@ export class AgentSession {
 				const message = error instanceof Error ? error.message : String(error);
 				this._emit({ type: "warning", message: `Worker supervision degraded: ${message}` });
 			},
+			// Stale only when the attempt is known to have ended; an unknown status is not evidence of that.
+			isAttemptLive: (attemptId) => {
+				const status = this._backgroundLanes.getTaskRuntimeSnapshot()?.attempts[attemptId]?.status;
+				return (
+					status === undefined ||
+					status === "queued" ||
+					status === "leased" ||
+					status === "running" ||
+					status === "suspended"
+				);
+			},
 		});
 		this._projectRules = new SessionProjectRules({
 			cwd: config.cwd,

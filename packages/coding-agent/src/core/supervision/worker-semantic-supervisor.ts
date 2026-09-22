@@ -36,6 +36,12 @@ export interface WorkerSemanticSupervisorDeps {
 	maxFailures?: number;
 }
 
+/**
+ * Tool calls a worker makes after a steer before it can be rerouted for the same problem: one full
+ * observation window (the churn check's window), enough for the steer to reach a model turn and show.
+ */
+export const STEER_GRACE_TOOL_CALLS = 3;
+
 export const WORKER_SUPERVISION_DECISION_IDS = [
 	"meaningful_progress",
 	"worker_stuck",
@@ -107,6 +113,7 @@ export class WorkerSemanticSupervisor {
 	private readonly lastAssessmentAt = new Map<string, number>();
 	private readonly lastAssessmentHash = new Map<string, string>();
 	private readonly steeringInterventions = new Map<string, number>();
+	private readonly steeredAtToolCalls = new Map<string, number>();
 	private readonly inFlightAssessments = new Set<string>();
 	private readonly consecutiveFailures = new Map<string, number>();
 	private readonly openBreakers = new Set<string>();
@@ -125,11 +132,42 @@ export class WorkerSemanticSupervisor {
 		return this.steeringInterventions.get(attemptId) ?? 0;
 	}
 
-	/** Share anti-oscillation with deterministic churn steers on the same attempt. */
-	noteSteering(attemptId: string): number {
+	/**
+	 * Share anti-oscillation with deterministic churn steers on the same attempt. `toolCalls` is the
+	 * attempt's executed tool-call count when the steer was sent, the start of its grace window.
+	 */
+	noteSteering(attemptId: string, toolCalls = 0): number {
 		const next = this.getPriorSteeringCount(attemptId) + 1;
 		this.steeringInterventions.set(attemptId, next);
+		this.steeredAtToolCalls.set(attemptId, toolCalls);
 		return next;
+	}
+
+	/**
+	 * Whether the worker has had the chance to act on its last steer: a full observation window of tool
+	 * calls made after the steer was sent. A steer is delivered at the worker's next model turn, so a
+	 * reroute before then cancels a worker that never saw the correction.
+	 */
+	steerGraceElapsed(attemptId: string, toolCalls: number): boolean {
+		const steeredAt = this.steeredAtToolCalls.get(attemptId);
+		return steeredAt === undefined || toolCalls - steeredAt >= STEER_GRACE_TOOL_CALLS;
+	}
+
+	/**
+	 * The evidence an assessment is about. An unchanged key is not assessed again. Whether the steer's
+	 * grace window has elapsed is part of it: a stalled worker's evidence never changes, and the
+	 * assessment after the window is the one that can reroute it.
+	 */
+	private assessmentKey(attempt: LiveWorkerAttempt): string {
+		const tail = attempt.outputTail ? attempt.outputTail.slice(-2000) : "";
+		return [
+			attempt.evidenceRevision ?? 1,
+			tail,
+			Boolean(attempt.isStalled),
+			Boolean(attempt.isRepeating),
+			this.getPriorSteeringCount(attempt.attemptId),
+			this.steerGraceElapsed(attempt.attemptId, attempt.toolCalls),
+		].join(":");
 	}
 
 	/**
@@ -151,9 +189,7 @@ export class WorkerSemanticSupervisor {
 			return false;
 		}
 
-		const tail = attempt.outputTail ? attempt.outputTail.slice(-2000) : "";
-		const priorSteeringCount = this.getPriorSteeringCount(attempt.attemptId);
-		const hashStr = `${attempt.evidenceRevision ?? 1}:${tail}:${Boolean(attempt.isStalled)}:${Boolean(attempt.isRepeating)}:${priorSteeringCount}`;
+		const hashStr = this.assessmentKey(attempt);
 		const lastHash = this.lastAssessmentHash.get(attempt.attemptId);
 		if (lastHash === hashStr) {
 			return false; // No material state change
@@ -203,10 +239,7 @@ export class WorkerSemanticSupervisor {
 
 		this.inFlightAssessments.add(attempt.attemptId);
 		this.lastAssessmentAt.set(attempt.attemptId, Date.now());
-		this.lastAssessmentHash.set(
-			attempt.attemptId,
-			`${state.evidenceRevision}:${tail}:${state.isStalled}:${state.isRepeating}:${state.priorSteeringCount}`,
-		);
+		this.lastAssessmentHash.set(attempt.attemptId, this.assessmentKey(attempt));
 
 		try {
 			let certId = `cert-supervision-${Date.now()}`;
@@ -304,12 +337,12 @@ export class WorkerSemanticSupervisor {
 				// work is redirected now, not at the worker's next turn; a stall waits for that turn.
 				if (priorSteeringCount === 0 && risk(answers.work_off_track)) {
 					action = "steer_now";
-					this.noteSteering(attempt.attemptId);
+					this.noteSteering(attempt.attemptId, attempt.toolCalls);
 					summaryEvent = "Worker redirected now · work off the mission";
 					reasonCodes.push("worker_off_track_steer_now");
 				} else if (priorSteeringCount === 0) {
 					action = "steer_once";
-					this.noteSteering(attempt.attemptId);
+					this.noteSteering(attempt.attemptId, attempt.toolCalls);
 					summaryEvent =
 						answers.meaningful_progress < 0.3
 							? "Worker steering initiated · insufficient meaningful progress"
@@ -317,6 +350,11 @@ export class WorkerSemanticSupervisor {
 					reasonCodes.push(
 						answers.meaningful_progress < 0.3 ? "meaningful_progress_insufficient" : "worker_stuck_steer_once",
 					);
+				} else if (!this.steerGraceElapsed(attempt.attemptId, attempt.toolCalls)) {
+					// The worker has not yet had a window to act on the steer it was sent.
+					action = "continue";
+					summaryEvent = undefined;
+					reasonCodes.push("steer_grace_pending");
 				} else {
 					action = "stop_and_reroute";
 					summaryEvent = "Worker rerouted · implementation stalled after repeated test failure";

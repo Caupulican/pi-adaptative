@@ -498,7 +498,11 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 			expect(steered).toHaveLength(1);
 			expect(steered[0]?.agentId).toBe("agent-1");
 
-			const second = await coordinator.observe(attempt({ isStalled: true }));
+			// Within the grace window the worker has not yet seen the steer: no reroute.
+			expect((await coordinator.observe(attempt({ isStalled: true, toolCalls: 7 })))?.action).not.toBe(
+				"stop_and_reroute",
+			);
+			const second = await coordinator.observe(attempt({ isStalled: true, toolCalls: 9 }));
 			expect(second?.action).toBe("stop_and_reroute");
 			expect(cancelled).toHaveLength(1);
 			expect(cancelled[0]?.agentId).toBe("agent-1");

@@ -349,7 +349,7 @@ describe("next-release hardening", () => {
 		);
 	});
 
-	it("anti-oscillates validation churn: first steer, repeated churn reroutes", async () => {
+	it("anti-oscillates validation churn: steer, a grace window after the steer, then reroute; never for a verifier", async () => {
 		const steered: string[] = [];
 		const cancelled: string[] = [];
 		const coordinator = new WorkerSupervisionCoordinator({
@@ -363,24 +363,30 @@ describe("next-release hardening", () => {
 				},
 			},
 		});
-		const churn = {
-			agentId: "w1",
+		const churn = (toolCalls: number, role = "implementer", attemptId = "a-churn") => ({
+			agentId: role === "implementer" ? "w1" : "v1",
 			objectiveId: "o",
 			taskId: "t",
-			attemptId: "a-churn",
-			role: "worker",
+			attemptId,
+			role,
 			mission: "fix",
 			elapsedMs: 9000,
-			toolCalls: 4,
+			toolCalls,
 			recentToolNames: ["bash", "bash", "bash"] as const,
 			changedFileCountAtWindowStart: 1,
 			changedFileCount: 1,
-		};
-		const first = await coordinator.observe(churn);
-		expect(first?.action).toBe("steer_once");
+		});
+		expect((await coordinator.observe(churn(4)))?.action).toBe("steer_once");
 		expect(steered).toEqual(["w1"]);
-		const second = await coordinator.observe(churn);
-		expect(second?.action).toBe("stop_and_reroute");
+		// Still inside the window the steer needs to reach a model turn: no reroute yet.
+		expect((await coordinator.observe(churn(5)))?.action).not.toBe("stop_and_reroute");
+		expect(cancelled).toEqual([]);
+		// A full window of churn calls after the steer: reroute.
+		expect((await coordinator.observe(churn(7)))?.action).toBe("stop_and_reroute");
+		expect(cancelled).toEqual(["w1"]);
+		// Running validation is a verifier's job, not churn.
+		const verifying = await coordinator.observe(churn(4, "verifier", "a-verify"));
+		expect(verifying?.certificate_id).not.toBe("deterministic:validation_churn");
 		expect(cancelled).toEqual(["w1"]);
 	});
 

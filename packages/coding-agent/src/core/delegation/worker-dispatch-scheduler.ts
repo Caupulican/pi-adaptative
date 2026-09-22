@@ -70,6 +70,11 @@ export class WorkerDispatchScheduler {
 	private readonly queued = new Map<string, WorkerDelegationRequest>();
 	private readonly queuedDeregisters = new Map<string, () => void>();
 	private readonly running = new Map<string, Promise<WorkerDelegationRunOutcome>>();
+	/** Lanes enqueued while their previous run was still settling; queued when that run finishes. */
+	private readonly deferred = new Map<
+		string,
+		{ record: LaneRecord; request: WorkerDelegationRequest; recovered: boolean; priority: boolean }
+	>();
 	private readonly preflights = new Map<string, symbol>();
 	private readonly validated = new Set<string>();
 	private readonly pendingCancellations = new Map<string, PendingCancellation>();
@@ -122,11 +127,13 @@ export class WorkerDispatchScheduler {
 	}
 
 	enqueue(record: LaneRecord, request: WorkerDelegationRequest, recovered = false, priority = false): void {
-		if (
-			this.queued.has(record.laneId) ||
-			this.running.has(record.laneId) ||
-			this.pendingCancellations.has(record.laneId)
-		) {
+		if (this.running.has(record.laneId)) {
+			// The previous run is still unwinding (an interrupt aborted it and a resume followed at once):
+			// queue the lane the moment that run settles, instead of dropping the resume.
+			this.deferred.set(record.laneId, { record, request, recovered, priority });
+			return;
+		}
+		if (this.queued.has(record.laneId) || this.pendingCancellations.has(record.laneId)) {
 			return;
 		}
 		if (!this.hasQueueCapacity(priority)) throw new Error("worker_dispatch_queue_full");
@@ -316,11 +323,22 @@ export class WorkerDispatchScheduler {
 
 	private finishTrackedRun(laneId: string): void {
 		this.running.delete(laneId);
+		const deferred = this.deferred.get(laneId);
+		this.deferred.delete(laneId);
 		if (this.options.isDisposed()) {
 			// A disposed generation has no future scheduler signal. Its durable state is recovered by the
 			// next generation, so do not leak this generation's process-local reload blocker.
 			this.removePendingCancellation(laneId);
 			return;
+		}
+		if (deferred) {
+			try {
+				this.enqueue(deferred.record, deferred.request, deferred.recovered, deferred.priority);
+			} catch (error) {
+				this.warnBestEffort(
+					`Worker ${laneId} could not be requeued after its run settled: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 		}
 		this.redrainBestEffort(laneId);
 	}
@@ -458,6 +476,7 @@ export class WorkerDispatchScheduler {
 	}
 
 	cancelQueued(): void {
+		this.deferred.clear();
 		for (const laneId of [...this.queued.keys()]) {
 			// The controller owns durable cancellation and any pre-admission resources (for example a
 			// write reservation). Disposal must still visit every lane and release every process-local
@@ -484,7 +503,9 @@ export class WorkerDispatchScheduler {
 	}
 
 	dropQueued(laneId: string): boolean {
-		if (!this.queued.has(laneId)) return false;
+		// A cancel also withdraws a resume that was waiting for the previous run to settle.
+		const hadDeferred = this.deferred.delete(laneId);
+		if (!this.queued.has(laneId)) return hadDeferred;
 		this.removeQueued(laneId);
 		this.settleLaneObservers(laneId, { state: "cancelled", reasonCode: "worker_dispatch_dropped" });
 		return true;

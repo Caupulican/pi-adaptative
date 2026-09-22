@@ -387,8 +387,8 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 			expect(signal1!.summaryEvent).toBeDefined();
 			expect(supervisor.getPriorSteeringCount(stalledAttempt.attemptId)).toBe(1);
 
-			// Second intervention on repeated stall after grace: stop_and_reroute
-			const signal2 = await supervisor.assessWorker(stalledAttempt);
+			// Second intervention on repeated stall after grace (a full window of tool calls): stop_and_reroute
+			const signal2 = await supervisor.assessWorker({ ...stalledAttempt, toolCalls: stalledAttempt.toolCalls + 3 });
 			expect(signal2).toBeDefined();
 			expect(signal2!.action).toBe("stop_and_reroute");
 			expect(signal2!.summaryEvent).toBeDefined();

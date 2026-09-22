@@ -533,3 +533,62 @@ describe("WorkerDispatchScheduler wait state", () => {
 		}
 	});
 });
+
+describe("WorkerDispatchScheduler resume while the previous run settles", () => {
+	function harness() {
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-scheduler-resume-"));
+		const settle: Array<() => void> = [];
+		const run = vi.fn(
+			() =>
+				new Promise<{ started: true }>((resolve) => {
+					settle.push(() => resolve({ started: true }));
+				}),
+		);
+		const scheduler = new WorkerDispatchScheduler({
+			agentDir,
+			isDisposed: () => false,
+			admit: () => ({ action: "start" }),
+			getRecord: () => record(0),
+			run,
+			cancel: vi.fn(),
+			warn: vi.fn(),
+		});
+		return { agentDir, settle, run, scheduler };
+	}
+
+	it("queues a lane enqueued during its previous run as soon as that run settles", async () => {
+		const { agentDir, settle, run, scheduler } = harness();
+		try {
+			scheduler.enqueue(record(0), { instructions: "first run" });
+			scheduler.drain();
+			expect(run).toHaveBeenCalledTimes(1);
+			// An interrupt aborted the run; the resume arrives before it has unwound.
+			scheduler.enqueue(record(0), { instructions: "resumed" });
+			expect(run).toHaveBeenCalledTimes(1);
+			settle.shift()?.();
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(run).toHaveBeenCalledTimes(2);
+		} finally {
+			for (const done of settle) done();
+			scheduler.cancelQueued();
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+
+	it("a cancel withdraws a resume that was waiting for the previous run", async () => {
+		const { agentDir, settle, run, scheduler } = harness();
+		try {
+			scheduler.enqueue(record(0), { instructions: "first run" });
+			scheduler.drain();
+			scheduler.enqueue(record(0), { instructions: "resumed" });
+			expect(scheduler.dropQueued("worker-0")).toBe(true);
+			settle.shift()?.();
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(run).toHaveBeenCalledTimes(1);
+		} finally {
+			for (const done of settle) done();
+			scheduler.cancelQueued();
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+});

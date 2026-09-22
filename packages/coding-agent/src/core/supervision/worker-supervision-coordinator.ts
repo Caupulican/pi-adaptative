@@ -32,6 +32,8 @@ export interface WorkerSupervisionCoordinatorDeps {
 	onIntervention?(signal: WorkerSupervisionSignal): void;
 	/** A failed assessment, reported as a diagnostic rather than failing the observed worker. */
 	onSupervisionError?(error: unknown): void;
+	/** Whether an attempt is still live (not terminal); a request from a finished attempt is stale. */
+	isAttemptLive?(attemptId: string): boolean;
 }
 
 /** One live worker observation, assembled by the lane that is actually running the worker. */
@@ -102,14 +104,22 @@ export class WorkerSupervisionCoordinator {
 
 	/** Signals the root has not yet acted on that ask for a new owner (specialist, capability, verifier). */
 	getPendingRootRequests(): readonly WorkerSupervisionSignal[] {
-		return this.signals.filter(
-			(signal) =>
-				!this.consumedRootRequestIds.has(signal.signal_id) &&
-				(signal.action === "request_specialist" ||
-					signal.action === "request_capability" ||
-					signal.action === "request_verifier" ||
-					signal.action === "mark_external_block"),
-		);
+		// One request per (attempt, action), the newest, and only while that attempt is live: every tool
+		// call can re-emit the same fact, and a finished attempt's request no longer describes the work.
+		const latest = new Map<string, WorkerSupervisionSignal>();
+		for (const signal of this.signals) {
+			if (this.consumedRootRequestIds.has(signal.signal_id)) continue;
+			if (
+				signal.action !== "request_specialist" &&
+				signal.action !== "request_capability" &&
+				signal.action !== "request_verifier" &&
+				signal.action !== "mark_external_block"
+			)
+				continue;
+			if (this.deps.isAttemptLive && !this.deps.isAttemptLive(signal.attempt_id)) continue;
+			latest.set(`${signal.attempt_id}\u0000${signal.action}`, signal);
+		}
+		return [...latest.values()];
 	}
 
 	consumePendingRootRequest(signalId: string): void {
@@ -124,9 +134,12 @@ export class WorkerSupervisionCoordinator {
 		observation: WorkerProgressObservation,
 		signal?: AbortSignal,
 	): Promise<WorkerSupervisionSignal | undefined> {
-		// The deterministic churn check needs no semantic judgment and runs first.
-		if (isValidationChurn(observation)) {
-			return this.steerValidationChurn(observation.agentId, observation);
+		// The deterministic churn check needs no semantic judgment and runs first. It applies to the role
+		// whose job is building: re-running validation is a verifier's or explorer's work, not churn.
+		if (observation.role === "implementer" && isValidationChurn(observation)) {
+			const steered = this.deps.supervisor.getPriorSteeringCount(observation.attemptId) > 0;
+			if (!steered || this.deps.supervisor.steerGraceElapsed(observation.attemptId, observation.toolCalls))
+				return this.steerValidationChurn(observation.agentId, observation);
 		}
 		let verdict: WorkerSupervisionSignal | undefined;
 		try {
@@ -164,7 +177,7 @@ export class WorkerSupervisionCoordinator {
 	async steerValidationChurn(agentId: string, attempt: LiveWorkerAttempt): Promise<WorkerSupervisionSignal> {
 		const prior = this.deps.supervisor.getPriorSteeringCount(attempt.attemptId);
 		const reroute = prior > 0;
-		if (!reroute) this.deps.supervisor.noteSteering(attempt.attemptId);
+		if (!reroute) this.deps.supervisor.noteSteering(attempt.attemptId, attempt.toolCalls);
 		const verdict: WorkerSupervisionSignal = {
 			schema_version: "1.0",
 			signal_id: `sig-churn-${attempt.attemptId}-${this.signals.length + 1}`,
@@ -198,10 +211,11 @@ export class WorkerSupervisionCoordinator {
 		const action: WorkerSupervisionAction = verdict.action;
 		if (action === "continue") return;
 
+		// The worker receives the directive; the signal's explanation is the operator's label for it.
 		if (action === "steer_once") {
-			await this.deps.control.steerWorker(observation.agentId, verdict.explanation ?? STALL_DIRECTIVE, "queue");
+			await this.deps.control.steerWorker(observation.agentId, STALL_DIRECTIVE, "queue");
 		} else if (action === "steer_now") {
-			await this.deps.control.steerWorker(observation.agentId, verdict.explanation ?? OFF_TRACK_DIRECTIVE, "now");
+			await this.deps.control.steerWorker(observation.agentId, OFF_TRACK_DIRECTIVE, "now");
 		} else if (action === "stop_and_reroute") {
 			await this.deps.control.cancelWorker(
 				observation.agentId,
