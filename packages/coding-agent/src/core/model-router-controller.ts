@@ -44,9 +44,17 @@ import type {
 import type { RouteDecision } from "./autonomy/contracts.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
 import { latestUserPromptText } from "./context/message-text.ts";
+import type { ExpertSelectionPlan } from "./expert-routing/contracts.ts";
 import { buildWorkerCapabilityRequest } from "./expert-routing/request-builder.ts";
 import type { ExpertSelectionService } from "./expert-routing/service.ts";
-import { runIsolatedTextCompletion } from "./isolated-text-completion.ts";
+import {
+	ALL_ROUTE_CATEGORIES,
+	CATEGORY_THINKING,
+	CATEGORY_TIER,
+	type CategoryOutcome,
+	chooseRouteCategory,
+	type RouteChoiceJudge,
+} from "./expert-routing/system-one-choice.ts";
 import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
@@ -71,7 +79,6 @@ import {
 	type FitnessGateVerdict,
 } from "./model-router/fitness-gate.ts";
 import { classifyModelRouterRoute, type ModelRouterIntent } from "./model-router/intent-classifier.ts";
-import { ROUTE_JUDGE_MAX_OUTPUT_TOKENS, runRouteJudge } from "./model-router/route-judge.ts";
 import type { LiveRoutePreview, RoutePreview } from "./model-router/route-preview.ts";
 import {
 	bufferModelRouterSessionCustomMessage,
@@ -93,7 +100,6 @@ import { isLocalOrManagedRouterModel, shouldEscalateModelRouterTool } from "./mo
 import type { ModelToolProbeVerdict } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import type { SettingsManager } from "./settings-manager.ts";
-import { reportSpawnedUsage } from "./spawned-usage.ts";
 import { runReflexInterpreterCompletion } from "./toolkit/reflex-interpreter.ts";
 
 /** Canonical `provider/id` label for a routed/resolved model, as it appears in decisions and status. */
@@ -102,7 +108,13 @@ export function formatModelRouterModel(model: Model<Api>): string {
 }
 
 /** Who owns the model that is executing the foreground turn right now. */
-export type ForegroundRouteSource = "direct" | "manual" | "model_router" | "model_router_hmoe" | "model_router_retry";
+export type ForegroundRouteSource =
+	| "direct"
+	| "manual"
+	| "model_router"
+	| "model_router_hmoe"
+	| "model_router_system_one"
+	| "model_router_retry";
 
 /**
  * Bounded live view of foreground routing for the operator POV. `rootModel` is the persistent
@@ -123,30 +135,14 @@ export interface ForegroundRouteSnapshot {
 function foregroundRouteSourceFor(decision: RouteDecision, retry: boolean): ForegroundRouteSource {
 	if (retry) return "model_router_retry";
 	if (decision.selection === "hmoe") return "model_router_hmoe";
+	if (decision.selection === "system_one") return "model_router_system_one";
 	if (decision.selection === "auto") return "model_router";
 	return "manual";
 }
 
-const ROUTE_JUDGE_STATIC_FAST_PATH_REASON_CODES = new Set([
-	"empty_prompt",
-	"read_only_question",
-	"release_or_publish",
-	"security_or_auth",
-	"destructive_or_git_history",
-	"settings_or_self_modification",
-	"architecture_or_ambiguous",
-]);
-
-function shouldSkipRouteJudgeForStaticDecision(decision: RouteDecision): boolean {
-	return ROUTE_JUDGE_STATIC_FAST_PATH_REASON_CODES.has(decision.reasonCode);
-}
-
-function withJudgeUnavailableFallback(decision: RouteDecision, reason: string): RouteDecision {
-	return {
-		...decision,
-		reasonCode: "judge_unavailable_fallback",
-		reasons: [...decision.reasons, reason],
-	};
+/** Facts no routing choice may override: an image needs image input, the context must fit the window. */
+function fitsTurnFacts(model: Model<Api>, facts: { hasImages: boolean; contextTokens: number }): boolean {
+	return (!facts.hasImages || model.input.includes("image")) && facts.contextTokens <= model.contextWindow;
 }
 
 function persistModelRouterDecision(
@@ -211,6 +207,14 @@ export interface ModelRouterControllerDeps {
 	getToolProbeVerdict(model: Model<Api>): ModelToolProbeVerdict | undefined;
 	/** The router's candidate pool: the operator's Models configuration, or every authed model. */
 	getCandidatePool(): RouterCandidatePool;
+	/**
+	 * The owner's live model policy (model-router/owner-model-policy.ts). A model it disallows is never
+	 * allocated: a pin to one reallocates that tier from the pool, and a disallowed foreground model
+	 * is routed away from even while the router is off.
+	 */
+	isModelAllowed?(model: Model<Api>): boolean;
+	/** System One, when bound: it judges the kind of model and thinking a routed turn needs. */
+	getRouteJudge?(): RouteChoiceJudge | undefined;
 	/** Canonical subscription ownership (ModelRegistry.isUsingSubscription); never a hand-written list. */
 	isUsingSubscription(model: Model<Api>): boolean;
 	/** Optional shared expert selection service for exact model/expert resolution (H-MoE, HMOE-012). */
@@ -251,7 +255,6 @@ export class ModelRouterController {
 	/** Why the last expert selection failed, if it did. Not a skip: the baseline route still ran. */
 	private _lastExpertSelectionFailure?: string;
 	/** Per-invocation sequence so two judge calls on identical text are two ledger entries. */
-	private _routeJudgeCallSeq = 0;
 	private _lastModelRouterIntent?: ModelRouterIntent;
 	/** The routed turn currently executing, with the root model it swapped away from. */
 	private _activeRoutedTurn?: { rootModel: Model<Api> | undefined; routedModel: Model<Api>; decision: RouteDecision };
@@ -283,8 +286,17 @@ export class ModelRouterController {
 	isTierAutoSelected(tier: AutoSelectionTier): boolean {
 		const mode = this.deps.getSettingsManager().getModelRouterSettings().selectionMode ?? "manual";
 		if (mode === "auto") return true;
-		if (mode === "hybrid") return !this._tierPattern(tier);
+		const pattern = this._tierPattern(tier);
+		if (pattern && this._pinDisallowed(pattern)) return true;
+		if (mode === "hybrid") return !pattern;
 		return false;
+	}
+
+	/** A pin to a model the owner's policy disallows: its tier is allocated from the pool instead. */
+	private _pinDisallowed(pattern: string): boolean {
+		if (!this.deps.isModelAllowed) return false;
+		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this.deps.getModelRegistry() });
+		return resolved.model !== undefined && !this.deps.isModelAllowed(resolved.model);
 	}
 
 	/**
@@ -636,7 +648,12 @@ export class ModelRouterController {
 
 	private _resolveModelRouterTurnRoute(prompt: string): { decision: RouteDecision; model: Model<Api> } | undefined {
 		const settings = this.deps.getSettingsManager().getModelRouterSettings();
-		if (!settings.enabled) {
+		// Off means "keep the session model"; a session model the owner's policy now disallows is
+		// reallocated anyway, since keeping it is exactly what the owner ruled out.
+		const isModelAllowed = this.deps.isModelAllowed;
+		const current = isModelAllowed ? this.deps.getModel() : undefined;
+		const reallocate = current !== undefined && isModelAllowed?.(current) === false;
+		if (!settings.enabled && !reallocate) {
 			this._lastModelRouterSkipReason = "disabled";
 			return undefined;
 		}
@@ -665,8 +682,11 @@ export class ModelRouterController {
 			decision.tier === "cheap" ? "cheap model" : decision.tier === "medium" ? "medium model" : "expensive model";
 
 		// AUTO / unpinned-HYBRID tier: the tier is decided above; the exact model is selected from the
-		// candidate pool, subscription-first by default, never outside the pool.
-		if (this.isTierAutoSelected(decision.tier)) {
+		// candidate pool, subscription-first by default, never outside the pool. A reallocation away
+		// from a disallowed session model selects from the pool whatever the tier's mode.
+		if (reallocate)
+			decision.reasons = [...decision.reasons, "Session model is outside the owner's model policy; reallocated"];
+		if (reallocate || this.isTierAutoSelected(decision.tier)) {
 			const auto = this.selectAutoTierModel(decision.tier);
 			if (!auto.chosen) {
 				if (decision.tier === "medium") {
@@ -808,7 +828,9 @@ export class ModelRouterController {
 		tier: "cheap" | "medium" | "expensive",
 		prompt: string,
 		signal?: AbortSignal,
-	): Promise<Model<Api> | undefined> {
+		facts: { hasImages?: boolean; contextTokens?: number } = {},
+		category?: Extract<CategoryOutcome, { kind: "chosen" }>,
+	): Promise<{ model: Model<Api>; thinkingLevel: string; decidedBy?: ExpertSelectionPlan["decidedBy"] } | undefined> {
 		const selector = this.deps.expertSelector;
 		if (!selector) return undefined;
 		try {
@@ -828,6 +850,10 @@ export class ModelRouterController {
 				consequence,
 				decisionSignals: { suggestedTier: tier },
 				metadata: { prompt },
+				// Facts no judgment may override: an image needs a model that reads images, and the
+				// context the turn sends must fit the window.
+				...(facts.hasImages ? { requiredCapabilities: ["image_input"] } : {}),
+				...(facts.contextTokens ? { minimumContextWindow: facts.contextTokens } : {}),
 				// The pool is a hard boundary for H-MoE too: candidates are generated inside it.
 				allowedModelRefs: routerPoolModelRefs(pool),
 				preferSubscription: preferSub,
@@ -837,7 +863,11 @@ export class ModelRouterController {
 				hmoeTeamStrategy: settings.hmoeTeamStrategy,
 				hmoeIndependence: settings.hmoeIndependence,
 			});
-			const selection = await selector.select(request, { signal });
+			const selection = await selector.select(request, {
+				signal,
+				requestText: prompt,
+				...(category ? { category } : {}),
+			});
 			this._lastExpertSelectionFailure = undefined;
 			try {
 				const chosen = selection.primary;
@@ -848,7 +878,11 @@ export class ModelRouterController {
 					this.deps.getModelRegistry().hasConfiguredAuth(model) &&
 					!this.deps.isModelExhausted(model)
 				) {
-					return model;
+					return {
+						model,
+						thinkingLevel: chosen.thinking_level,
+						...(selection.decidedBy ? { decidedBy: selection.decidedBy } : {}),
+					};
 				}
 			} finally {
 				// A foreground turn consumes a ranking, not a worker slot. The capacity lease exists
@@ -868,146 +902,114 @@ export class ModelRouterController {
 
 	async resolveTurnRouteJudged(
 		prompt: string,
-		options?: { skipJudge?: boolean },
+		options?: { skipJudge?: boolean; hasImages?: boolean; contextTokens?: number },
 	): Promise<{ decision: RouteDecision; model: Model<Api> } | undefined> {
 		const baseline = this._resolveModelRouterTurnRoute(prompt);
 		if (!baseline) return undefined;
-
-		// H-MoE refines only an AUTO-selected tier: a manual pin is authoritative (MANUAL, and a
-		// pinned tier in HYBRID) and is never replaced by the expert selector.
 		const baselineTier = baseline.decision.tier;
-		if (
-			this.deps.expertSelector &&
-			(baselineTier === "cheap" || baselineTier === "medium" || baselineTier === "expensive") &&
-			this.isTierAutoSelected(baselineTier)
-		) {
-			const expertModel = await this.resolveExpertTurnModel(baselineTier, prompt, this.deps.getReflectionSignal());
-			if (expertModel) {
-				baseline.decision.model = formatModelRouterModel(expertModel);
-				baseline.decision.selection = "hmoe";
-				baseline.decision.reasons = [
-					...baseline.decision.reasons,
-					`H-MoE selected ${formatModelRouterModel(expertModel)}`,
-				];
-				baseline.model = expertModel;
-			}
-		}
+		// Internally generated turns (goal continuation, lane follow-ups) keep the deterministic route: a
+		// 20-turn loop must not buy 20 allocation judgments. Deterministic executor routes are decided.
+		if (options?.skipJudge || baseline.decision.reasonCode === "executor_direct") return baseline;
+		if (baselineTier !== "cheap" && baselineTier !== "medium" && baselineTier !== "expensive") return baseline;
+		const signal = this.deps.getReflectionSignal();
+		const facts = { hasImages: options?.hasImages === true, contextTokens: options?.contextTokens ?? 0 };
 
-		if (options?.skipJudge) return baseline;
-		// Deterministic executor routes need no judge (Level-0 already decided).
-		if (baseline.decision.reasonCode === "executor_direct") return baseline;
-
-		const settings = this.deps.getSettingsManager().getModelRouterSettings();
-		if (!settings.judgeEnabled) return baseline;
-		if (shouldSkipRouteJudgeForStaticDecision(baseline.decision)) return baseline;
-		const judgePattern = settings.judgeModel ?? settings.mediumModel;
-		if (!judgePattern) return baseline;
-		const judgeModel = this.deps.resolveLaneModel(judgePattern);
-		if (!judgeModel) {
-			return {
-				decision: withJudgeUnavailableFallback(
-					baseline.decision,
-					`routing judge unavailable: ${judgePattern} did not resolve; baseline kept`,
-				),
-				model: baseline.model,
-			};
-		}
-		if (settings.fitnessGate) {
-			const verdict = this._evaluateModelFitness("router_judge", judgeModel);
-			if (!verdict.fit) {
-				return {
-					decision: {
-						...baseline.decision,
-						reasons: [
-							...baseline.decision.reasons,
-							`routing judge skipped: ${formatModelRouterModel(judgeModel)} unfit (${this._formatFitnessFailure(verdict)})`,
-						],
-					},
-					model: baseline.model,
-				};
-			}
-		}
-
-		let spentUsage: Usage | undefined;
-		const judged = await runRouteJudge({
-			prompt,
-			baseline: baseline.decision,
-			signal: this.deps.getReflectionSignal(),
-			complete: async ({ systemPrompt, userPrompt, signal }) => {
-				const completion = await runIsolatedTextCompletion(this.deps, {
-					systemPrompt,
-					userPrompt,
-					model: judgeModel,
-					// Per-tier thinking: judgeThinking overrides the judge's own completion; unset
-					// keeps today's "off" (the judge is a cheap classification call by default).
-					thinkingLevel: settings.judgeThinking ?? "off",
-					maxTokens: ROUTE_JUDGE_MAX_OUTPUT_TOKENS,
-					signal,
-					// The judge system prompt is static — the provider can cache the prefix.
-					cacheRetention: "short",
-					// Stable per-lane synthetic affinity key so repeat judge calls hit the same
-					// cache-warm backend.
-					laneKind: "route-judge",
-				});
-				spentUsage = completion.usage;
-				return completion;
-			},
-		});
-		if (spentUsage) {
-			reportSpawnedUsage(this.deps, spentUsage, {
-				kind: "route-judge",
-				label: "router-judge",
-				sessionId: this.deps.getSessionManager().getSessionId(),
-				// The prompt alone collapses separate judge calls on the same text (a preview then
-				// the real turn, or a repeated "continue") into one ledger entry, so the second call
-				// is spent but never recorded. The sequence is read once per completed judge call,
-				// which keeps a retried report of that same call idempotent.
-				identity: [prompt, String(this._routeJudgeCallSeq++)],
-			});
-		}
-
-		if (!judged.verdict || judged.decision.tier === baseline.decision.tier) {
-			// Same tier (or judge fell back): keep the baseline model, carry the annotated decision.
-			return { decision: judged.decision, model: baseline.model };
-		}
-
-		const judgedTier = judged.decision.tier;
-		if (judgedTier !== "cheap" && judgedTier !== "medium" && judgedTier !== "expensive") {
-			return { decision: baseline.decision, model: baseline.model };
-		}
-
-		const judgedTierAuto = this.isTierAutoSelected(judgedTier);
-		if (this.deps.expertSelector && judgedTierAuto) {
-			const expertModel = await this.resolveExpertTurnModel(judgedTier, prompt, this.deps.getReflectionSignal());
-			if (expertModel) {
-				return {
-					decision: { ...judged.decision, model: formatModelRouterModel(expertModel), selection: "hmoe" },
-					model: expertModel,
-				};
-			}
-		}
-
-		const judgedModel = this.resolveConfiguredTierModel(judgedTier);
-		if (!judgedModel) {
-			return {
-				decision: {
-					...baseline.decision,
-					reasons: [
-						...baseline.decision.reasons,
-						`Route judge chose ${judgedTier} but no model resolves for that tier; baseline kept`,
-					],
-				},
-				model: baseline.model,
-			};
-		}
-		return {
+		// System One judges the kind of model and thinking the work needs; its category names a tier.
+		const judge = this.deps.getRouteJudge?.();
+		const judged = judge
+			? await chooseRouteCategory(judge, { request: prompt, available: ALL_ROUTE_CATEGORIES, signal })
+			: undefined;
+		const category = judged?.kind === "chosen" ? judged : undefined;
+		const tier = category ? CATEGORY_TIER[category.category] : baselineTier;
+		const judgedReasons = category
+			? [`System One judged ${category.category} (${category.stage}; ${category.reasons.join("; ")})`]
+			: judged?.kind === "fallback"
+				? [`System One route not judged: ${judged.reason}`]
+				: [];
+		const route = (model: Model<Api>, selection: RouteDecision["selection"], detail: string) => ({
 			decision: {
-				...judged.decision,
-				model: formatModelRouterModel(judgedModel),
-				selection: judgedTierAuto ? "auto" : "manual",
+				...baseline.decision,
+				tier,
+				model: formatModelRouterModel(model),
+				selection,
+				...(category
+					? {
+							thinkingLevel: clampThinkingLevel(model, CATEGORY_THINKING[category.category]),
+							confidence: category.confidence,
+						}
+					: {}),
+				reasons: [...baseline.decision.reasons, ...judgedReasons, detail],
 			},
-			model: judgedModel,
-		};
+			model,
+		});
+
+		// The owner's pin for that tier runs it, in any selection mode, when it can: authenticated,
+		// allowed by the owner's model policy, not exhausted, and able to take this turn's facts.
+		const pinned = this._usablePin(tier, facts);
+		if (pinned.model) return route(pinned.model, category ? "system_one" : "manual", `owner pin for ${tier}`);
+		const pinNote = pinned.reason ? [`${tier} pin not used: ${pinned.reason}`] : [];
+
+		if (this.deps.expertSelector && this.isTierAutoSelected(tier)) {
+			const expert = await this.resolveExpertTurnModel(tier, prompt, signal, facts, category);
+			if (expert) {
+				const bySystemOne = expert.decidedBy?.kind === "system_one";
+				const picked = route(
+					expert.model,
+					bySystemOne ? "system_one" : "hmoe",
+					`${bySystemOne ? "System One" : "H-MoE ranking"} selected ${formatModelRouterModel(expert.model)}${
+						expert.decidedBy ? ` (${expert.decidedBy.reasons.join("; ")})` : ""
+					}`,
+				);
+				if (bySystemOne) picked.decision.thinkingLevel = expert.thinkingLevel;
+				picked.decision.reasons = [...pinNote, ...picked.decision.reasons];
+				return picked;
+			}
+		}
+		// The tier's automatic pick, bound by the same facts as a pin: the baseline's own pick is replaced
+		// when the tier changed or when it cannot take this turn (a text-only model for an image).
+		const baselineFits = fitsTurnFacts(baseline.model, facts);
+		if ((tier !== baselineTier || !baselineFits) && (this.isTierAutoSelected(tier) || !baselineFits)) {
+			const auto = this.selectAutoTierModel(tier).candidates.find(
+				(candidate) => candidate.admitted && fitsTurnFacts(candidate.model, facts),
+			);
+			if (auto) {
+				const picked = route(auto.model, "auto", `auto-selected ${auto.ref} for ${tier}`);
+				picked.decision.reasons = [...pinNote, ...picked.decision.reasons];
+				return picked;
+			}
+		}
+		baseline.decision.reasons = [...baseline.decision.reasons, ...judgedReasons, ...pinNote];
+		return baseline;
+	}
+
+	/**
+	 * The owner's pin for a tier when it can take this turn, or why not. A pin is the owner's choice
+	 * and wins over any automatic pick; it yields only to facts: missing auth, the owner's model
+	 * policy, quota, no working tool path, a text-only model for an image, a window too small.
+	 */
+	private _usablePin(
+		tier: AutoSelectionTier,
+		facts: { hasImages: boolean; contextTokens: number },
+	): { model?: Model<Api>; reason?: string } {
+		const pattern = this._tierPattern(tier);
+		if (!pattern) return {};
+		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this.deps.getModelRegistry() }).model;
+		if (!resolved) return { reason: `${pattern} does not resolve` };
+		const ref = formatModelRouterModel(resolved);
+		if (!this.deps.getModelRegistry().hasConfiguredAuth(resolved)) return { reason: `${ref} has no auth` };
+		if (this.deps.isModelAllowed?.(resolved) === false)
+			return { reason: `${ref} is outside the owner's model policy` };
+		if (this.deps.isModelExhausted(resolved)) return { reason: `${ref} quota exhausted` };
+		if (isLocalOrManagedRouterModel(resolved) && this.deps.getToolProbeVerdict(resolved) === "none")
+			return { reason: `${ref} has no working tool-call path` };
+		if (!fitsTurnFacts(resolved, facts))
+			return {
+				reason:
+					facts.hasImages && !resolved.input.includes("image")
+						? `${ref} cannot read images`
+						: `${ref} window is smaller than the context`,
+			};
+		return { model: resolved };
 	}
 
 	/**
@@ -1239,15 +1241,17 @@ export class ModelRouterController {
 			const routerThinkingSettings = this.deps.getSettingsManager().getModelRouterSettings();
 			const configuredThinking = !routeDecision
 				? undefined
-				: routeDecision.reasonCode === "executor_direct"
-					? routerThinkingSettings.executorThinking
-					: routeDecision.tier === "cheap"
-						? routerThinkingSettings.cheapThinking
-						: routeDecision.tier === "medium"
-							? routerThinkingSettings.mediumThinking
-							: routeDecision.tier === "expensive"
-								? routerThinkingSettings.expensiveThinking
-								: undefined;
+				: routeDecision.thinkingLevel
+					? (routeDecision.thinkingLevel as ThinkingLevel)
+					: routeDecision.reasonCode === "executor_direct"
+						? routerThinkingSettings.executorThinking
+						: routeDecision.tier === "cheap"
+							? routerThinkingSettings.cheapThinking
+							: routeDecision.tier === "medium"
+								? routerThinkingSettings.mediumThinking
+								: routeDecision.tier === "expensive"
+									? routerThinkingSettings.expensiveThinking
+									: undefined;
 			const routedThinkingLevel = clampThinkingLevel(
 				routedModel,
 				configuredThinking ?? previousThinkingLevel,
@@ -1260,7 +1264,6 @@ export class ModelRouterController {
 				// session thinking for THIS routed turn only; unset falls back to exactly today's
 				// inherit-and-clamp behavior. Executor routes carry tier "cheap" too, so reasonCode is
 				// checked first — otherwise an executor turn would silently pick up cheapThinking instead.
-				// The judge's own completion has a separate knob (judgeThinking) applied at its call site.
 				agent.state.thinkingLevel = routedThinkingLevel;
 				// Capability tool-filtering follows the ROUTED model for the turn. Without this a
 				// cheap/local routed model inherits the session model's full tool surface — schemas it

@@ -11,7 +11,7 @@ const yes = { type: "noul", noul: 0.97 };
 const no = { type: "noul", noul: 0.03 };
 const unsure = { type: "noul", noul: 0.6 };
 
-/** A real System One controller whose Jev answers the unsettled-item Nouls from the evidence it is sent. */
+/** A real System One controller whose System One answers the unsettled-item Nouls from the evidence it is sent. */
 function systemOne(judge: (statement: string, evidence: string) => [unknown, unknown]) {
 	const seen: { statement: string; evidence: string }[] = [];
 	const controller = new SystemOneController({

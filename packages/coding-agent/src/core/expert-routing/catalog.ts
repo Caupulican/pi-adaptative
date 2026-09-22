@@ -4,12 +4,15 @@
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
+import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import { resolveCapabilityTier } from "../capability-tier.ts";
 import { deriveModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ModelAdaptationStore } from "../models/adaptation-store.ts";
 import type { FitnessStore } from "../models/fitness-store.ts";
+import type { ModelPerfProfile } from "../models/perf-profile.ts";
 import type { WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
+import { buildCapabilityCard } from "./capability-card.ts";
 import type {
 	ExpertCandidate,
 	ExpertCandidateState,
@@ -28,6 +31,9 @@ export interface ExpertCatalogDeps {
 	isModelExhausted?: (model: Model<Api>) => boolean;
 	localRuntimeKeys?: readonly string[];
 }
+
+/** The reply size a measured decode speed is converted at to compare candidates' latency. */
+const LATENCY_REFERENCE_OUTPUT_TOKENS = 1_000;
 
 export class ExpertCatalog {
 	private readonly deps: ExpertCatalogDeps;
@@ -92,6 +98,12 @@ export class ExpertCatalog {
 				candidates.push({
 					descriptor,
 					state: candidateState,
+					card: buildCapabilityCard(model, {
+						subscription: candidateState.subscriptionBacked === true,
+						// The probe evidence is read per request lane by the feature builder, which sets it.
+						evidence: "unprobed",
+						...(this._perf(model) ? { perf: this._perf(model) } : {}),
+					}),
 				});
 			}
 		}
@@ -138,20 +150,17 @@ export class ExpertCatalog {
 		return "remote_allowed";
 	}
 
-	private _resolveCandidateThinkingLevels(model: Model<Api>, request: WorkerCapabilityRequest): readonly string[] {
-		if (!model.reasoning) {
-			return ["off"];
-		}
+	/**
+	 * Every thinking level the model supports: which one fits the task is System One's judgment (a fast
+	 * model at a higher level can beat a slower one at a lower level), not a table by work class.
+	 */
+	private _resolveCandidateThinkingLevels(model: Model<Api>, _request: WorkerCapabilityRequest): readonly string[] {
+		return getSupportedThinkingLevels(model);
+	}
 
-		if (request.consequence === "critical" || request.work_class === "verify" || request.work_class === "review") {
-			return ["high", "medium"];
-		}
-
-		if (request.work_class === "investigate" || request.work_class === "implement") {
-			return ["medium", "low"];
-		}
-
-		return ["low", "off"];
+	/** The host's measured speed for a model, when it has served requests here. */
+	private _perf(model: Model<Api>): ModelPerfProfile | undefined {
+		return this.deps.adaptationStore?.get(`${model.provider}/${model.id}`).perf;
 	}
 
 	private _resolveCandidateState(model: Model<Api>): ExpertCandidateState {
@@ -164,17 +173,22 @@ export class ExpertCatalog {
 				: false;
 
 		// Calculate approximate cost per token or call with explicit provenance
-		const costPerMillion = model.cost?.input ? model.cost.input * 1_000_000 : 0;
+		// Model prices are already quoted per million tokens.
+		const costPerMillion = model.cost?.input ?? 0;
 		const estimatedCostUsd = costPerMillion > 0 ? (costPerMillion / 1_000_000) * 2000 : 0;
 		const costProvenance = model.cost?.input ? "provider_pricing" : "unknown";
 
-		// Latency from adaptation perf if present, otherwise unknown/fallback
-		const store = this.deps.adaptationStore as any;
-		const adaptationProfile =
-			typeof store?.getProfile === "function" ? store.getProfile(model.id) : store?.get?.(model.id);
-		const perf = adaptationProfile?.perf;
-		const estimatedLatencyMs = perf?.meanMs && perf.meanMs > 0 ? perf.meanMs : model.reasoning ? 1500 : 500;
-		const latencyProvenance = perf?.meanMs && perf.meanMs > 0 ? "measured_host" : "unknown";
+		// Latency from the host's measured decode speed: the time to write a reference reply of
+		// LATENCY_REFERENCE_OUTPUT_TOKENS. The perf profile records tokens per second, never a mean
+		// duration, so reading a duration from it always fell back to a guess.
+		const decode = this._perf(model)?.decodeTokensPerSecond;
+		const measured = decode !== undefined && decode > 0;
+		const estimatedLatencyMs = measured
+			? (LATENCY_REFERENCE_OUTPUT_TOKENS / decode) * 1000
+			: model.reasoning
+				? 1500
+				: 500;
+		const latencyProvenance = measured ? "measured_host" : "unknown";
 
 		return {
 			authenticated,

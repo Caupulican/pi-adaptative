@@ -15,7 +15,6 @@ export type FitnessRole =
 	| "router-cheap"
 	| "router-medium"
 	| "router-expensive"
-	| "judge"
 	| "learning"
 	| "none";
 
@@ -51,11 +50,6 @@ const FITNESS_ROLE_ITEMS: readonly SelectItem[] = [
 		value: "router-expensive",
 		label: "Router: expensive tier",
 		description: "Handles high-impact/architecture turns (model router settings)",
-	},
-	{
-		value: "judge",
-		label: "Routing judge",
-		description: "Routing-only tier verdicts; needs strong instruction following",
 	},
 	{
 		value: "learning",

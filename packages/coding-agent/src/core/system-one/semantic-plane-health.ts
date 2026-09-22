@@ -225,20 +225,28 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver {
  * The operator label for a health state, as the normal-mode POV bar shows it. Every state has a
  * word an operator can act on; there is deliberately no "?" state.
  */
-export function semanticPlaneHealthLabel(health: SemanticPlaneHealth): string {
+/** The short name the operator bar shows System One under. */
+export const SYSTEM_ONE_BAR_LABEL = "S1";
+
+/** The state word for a health state, without the System One label. */
+export function semanticPlaneHealthValue(health: SemanticPlaneHealth): string {
 	switch (health.state) {
 		case "ok":
-			return "JEV ok";
+			return "ok";
 		case "degraded": {
 			// Which evaluation is failing and how, so the operator can tell an outage from one bad input.
 			const detail = [health.lastFailedLabel, health.lastFailureKind].filter(Boolean).join(" ");
-			return detail ? `JEV degraded · ${detail}` : "JEV degraded";
+			return detail ? `degraded · ${detail}` : "degraded";
 		}
 		case "evaluating":
-			return "JEV eval";
+			return "eval";
 		case "unknown":
-			return "JEV ready";
+			return "ready";
 		default:
-			return "JEV off";
+			return "off";
 	}
+}
+
+export function semanticPlaneHealthLabel(health: SemanticPlaneHealth): string {
+	return `${SYSTEM_ONE_BAR_LABEL} ${semanticPlaneHealthValue(health)}`;
 }

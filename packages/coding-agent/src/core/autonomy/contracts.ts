@@ -49,7 +49,7 @@ export interface PathScopeDecision {
  * pool ranking (`auto`), or the H-MoE expert selector (`hmoe`). Absent on decisions persisted before
  * the field existed, which read as `manual` (the only selection that existed then).
  */
-export type RouteSelectionSource = "manual" | "auto" | "hmoe";
+export type RouteSelectionSource = "manual" | "auto" | "hmoe" | "system_one";
 
 export interface RouteDecision {
 	tier: ModelTier;
@@ -61,6 +61,8 @@ export interface RouteDecision {
 	fallbackFrom?: ModelTier;
 	createdAt?: string;
 	selection?: RouteSelectionSource;
+	/** The thinking level chosen with the model; the tier's configured level applies when absent. */
+	thinkingLevel?: string;
 }
 
 export interface CapabilityEnvelope {
@@ -153,7 +155,7 @@ export interface WorkerClaim {
 	evidence?: EvidenceBundle;
 	changedFiles: readonly string[];
 	blockers?: readonly string[];
-	/** Findings the worker could not settle (Jev left them below the gate, or the evidence ran out).
+	/** Findings the worker could not settle (System One left them below the gate, or the evidence ran out).
 	 * Reported honestly instead of rounded up; the parent reviews them and they reach the owner. */
 	inconclusive?: readonly string[];
 	/** Inconclusive findings System One settled on the ladder, with the verdict and who reached it. */

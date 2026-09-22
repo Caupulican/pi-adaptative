@@ -45,7 +45,7 @@ describe("claims against deliveries", () => {
 		]);
 	});
 
-	it("claims nothing when Jev could not settle whether the answer states it", () => {
+	it("claims nothing when System One could not settle whether the answer states it", () => {
 		const receipts = collectClaimReceipts(turn("git push origin main", true));
 		expect(judgeClaims({ states_pushed: { type: "noul", noul: 0.5 } }, receipts)).toEqual([]);
 	});

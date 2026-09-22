@@ -406,7 +406,7 @@ describe("packaged TypeSafe reviewer", () => {
 	});
 	it("is authorized by semantic judgment, which a read-only grant keeps", () => {
 		// The host brokers the call and holds the credential: network or credential authority is neither
-		// needed nor sufficient, and a read-only reviewer still gets Jev.
+		// needed nor sufficient, and a read-only reviewer still gets System One.
 		expect(envelopeHasToolCapability(["network.http", "credentials.use"], "typesafe_review")).toBe(false);
 		expect(envelopeHasToolCapability(["semantic.judge"], "typesafe_review")).toBe(true);
 		expect(capabilitySurvivesReadOnly("semantic.judge")).toBe(true);

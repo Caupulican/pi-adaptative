@@ -11,16 +11,16 @@ import { metaRow } from "./workbench-pane.ts";
 
 /** Who produced a piece of evidence, captured when the preview is created, never re-derived later. */
 export interface PreviewAttribution {
-	readonly kind: "root" | "worker" | "jev";
+	readonly kind: "root" | "worker" | "system-one";
 	readonly label: string;
 	readonly modelRef?: string;
 }
 
-const JEV_TONE = "customMessageLabel";
+const SYSTEM_ONE_TONE = "customMessageLabel";
 
-/** `actor · model` as the preview title's right side; Jev names its plane instead of a model. */
+/** `actor · model` as the preview title's right side; System One names its plane instead of a model. */
 export function attributionText(by: PreviewAttribution): string {
-	return by.kind === "jev" ? `${by.label} · system one` : `${by.label} · ${shortModelName(by.modelRef)}`;
+	return by.kind === "system-one" ? "system one" : `${by.label} · ${shortModelName(by.modelRef)}`;
 }
 
 interface PreviewResult {
@@ -30,21 +30,21 @@ interface PreviewResult {
 }
 
 /**
- * A settled Jev evaluation as Execution evidence, on the cyan tone: `◆ Jev <label>` with
- * `Jev · system one` and `<verdict> · <duration>` on the right, its reasons as the body. A failed
+ * A settled System One evaluation as Execution evidence, on the cyan tone: `◆ System One <label>` with
+ * `system one` and `<verdict> · <duration>` on the right, its reasons as the body. A failed
  * evaluation reads as a failure; a cancelled one is dim and says so.
  */
-export function createJevEvaluationPreview(record: SemanticEvaluationRecord): Component {
+export function createSystemOneEvaluationPreview(record: SemanticEvaluationRecord): Component {
 	const failed = record.outcome === "failed";
 	const cancelled = record.outcome === "cancelled";
-	const tone = failed ? "error" : cancelled ? "dim" : JEV_TONE;
+	const tone = failed ? "error" : cancelled ? "dim" : SYSTEM_ONE_TONE;
 	const label = sanitizeBinaryOutput(stripAnsi(record.label)).slice(0, 200);
-	const titleText = `◆ Jev ${label}`;
+	const titleText = `◆ System One ${label}`;
 	const title = theme.fg(tone, titleText);
 	const outcome = failed ? "failed" : cancelled ? "cancelled" : (record.verdict ?? "ok");
 	const right = theme.fg(
 		"muted",
-		`${attributionText({ kind: "jev", label: "Jev" })} · ${outcome} · ${formatGraphDuration(record.durationMs)}`,
+		`${attributionText({ kind: "system-one", label: "System One" })} · ${outcome} · ${formatGraphDuration(record.durationMs)}`,
 	);
 	const reasons = (record.reasons ?? [])
 		.slice(0, 6)

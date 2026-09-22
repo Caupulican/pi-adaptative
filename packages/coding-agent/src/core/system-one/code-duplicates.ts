@@ -2,7 +2,7 @@
  * Semantic code deduplication at the moment duplication is created.
  *
  * When an edit or write adds a function, deterministic code extracts it, finds existing functions that
- * share its distinctive identifiers, and asks Jev one Noul per candidate in a single request: does the
+ * share its distinctive identifiers, and asks System One one Noul per candidate in a single request: does the
  * new code do the same job as this one, however it is written? A decisive yes is reported in the
  * edit's own tool result, naming the existing function to reuse. The edit itself is never undone:
  * this steers reversible work, it does not refuse it.
@@ -289,8 +289,8 @@ export function scaledToMachine(base: number): number {
 	return Math.max(1, Math.round(base * factor));
 }
 
-/** Concurrent Jev requests a scan keeps in flight; Jev evaluates each request's questions in parallel too. */
-export const JEV_SCAN_CONCURRENCY = scaledToMachine(16);
+/** Concurrent System One requests a scan keeps in flight; System One evaluates each request's questions in parallel too. */
+export const SYSTEM_ONE_SCAN_CONCURRENCY = scaledToMachine(16);
 
 /** String interning: every distinct string gets a stable small integer for the arena. */
 class Interner {
@@ -501,11 +501,11 @@ export function isTestPath(path: string): boolean {
 export interface DuplicateFinding {
 	readonly unit: CodeUnit;
 	readonly candidate: CodeUnit;
-	/** A hard-pass Jev judgment. A provisional one is shown, not acted on. */
+	/** A hard-pass System One judgment. A provisional one is shown, not acted on. */
 	readonly decisive: boolean;
 }
 
-/** What judges duplicates: the System One controller's batched Jev evaluation. */
+/** What judges duplicates: the System One controller's batched System One evaluation. */
 export interface DuplicateJudge {
 	evaluateCodeDuplicates(
 		pairs: readonly { readonly unit: CodeUnit; readonly candidates: readonly CodeUnit[] }[],
@@ -527,8 +527,8 @@ export function duplicateQuestionId(unitIndex: number, candidateIndex: number): 
 /**
  * Reviews one successful edit/write for new code that duplicates existing logic. Returns the note to
  * append to the tool result, or undefined. Structure and calls find the candidates; whether they do
- * the same job is Jev's judgment, asked for every pair in one request. An outage is reported once until
- * Jev answers again.
+ * the same job is System One's judgment, asked for every pair in one request. An outage is reported once until
+ * System One answers again.
  */
 export class CodeDuplicateReviewer {
 	private readonly deps: CodeDuplicateReviewerDeps;
@@ -615,7 +615,7 @@ export class CodeDuplicateReviewer {
 export interface SemanticDuplicateVerdict {
 	readonly unit: CodeUnit;
 	readonly candidate: CodeUnit;
-	/** Probability the two do the same job; NaN when Jev returned no answer for the pair. */
+	/** Probability the two do the same job; NaN when System One returned no answer for the pair. */
 	readonly probability: number;
 	readonly band: NoulBand | "missing";
 }
@@ -630,7 +630,7 @@ export interface SemanticDuplicateScan {
 
 /** Candidate pairs below this similarity are not worth a judgment in a whole-repository scan. */
 const SCAN_MIN_SIMILARITY = 0.5;
-/** Questions per Jev request in a scan: Jev evaluates them in parallel, so a request carries many. */
+/** Questions per System One request in a scan: System One evaluates them in parallel, so a request carries many. */
 const SCAN_QUESTIONS_PER_REQUEST = 25;
 
 /** Score every indexed unit as a probe across worker threads that share the arena without copies. */
@@ -674,9 +674,9 @@ async function scoreAllUnits(
 }
 
 /**
- * Judge every indexed unit against its closest candidates, each unordered pair once: the Jev
+ * Judge every indexed unit against its closest candidates, each unordered pair once: the System One
  * counterpart of a clone report. Candidates are scored across worker threads over the shared arena;
- * Jev requests are batched and kept in flight concurrently.
+ * System One requests are batched and kept in flight concurrently.
  */
 export async function scanSemanticDuplicates(options: {
 	readonly index: SemanticUnitIndex;
@@ -730,7 +730,7 @@ export async function scanSemanticDuplicates(options: {
 			}
 		}
 	};
-	await Promise.all(Array.from({ length: options.concurrency ?? JEV_SCAN_CONCURRENCY }, worker));
+	await Promise.all(Array.from({ length: options.concurrency ?? SYSTEM_ONE_SCAN_CONCURRENCY }, worker));
 	verdicts.sort((a, b) => (b.probability || 0) - (a.probability || 0));
 	return { units: units.length, pairs: pairs.length, requests: batches.length, failedRequests, verdicts };
 }

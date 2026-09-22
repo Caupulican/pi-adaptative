@@ -116,7 +116,7 @@ describe("#31 real interactive smoke — install-ollama confirm through Interact
 	it("renders the real confirm dialog, resolves it on a real Enter keypress, and completes the turn on the local model", async () => {
 		const { deps, extractCalls } = installableThenBootableDeps();
 		const harness = await createHarness({
-			settings: { modelRouter: { enabled: true, cheapModel: "ollama/qwen3:0.6b", judgeEnabled: false } },
+			settings: { modelRouter: { enabled: true, cheapModel: "ollama/qwen3:0.6b" } },
 			localRuntimeDeps: deps,
 		});
 		const ollamaFaux = registerFauxProvider({ provider: "ollama", models: [{ id: "qwen3:0.6b" }] });

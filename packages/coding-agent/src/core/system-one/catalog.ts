@@ -20,6 +20,15 @@ export type QuestionPack = Record<string, QuestionDefinition>;
  * A hard yes is what enables capabilities that were still off.
  */
 export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freeze({
+	changes_model_pools: Object.freeze({
+		type: "boolean",
+		instructions:
+			"Does `user_request` change which kinds of language models may be used: subscription models, pay-per-use API models, or local models?",
+		criteria: Object.freeze({
+			true: "The user turns a kind of model on or off. 'only use subscription models', 'no API models', 'you can use API models again', 'turn off subscription models', and 'use local models only' change it.",
+			false: "The user names no kind of model, or only picks one model for one task. 'fix the bug', 'use grok for this', and 'hello' do not change it.",
+		}),
+	}),
 	capabilities_authorized: Object.freeze({
 		type: "boolean",
 		instructions:
@@ -217,6 +226,9 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 
 	// Built per evaluation: two Nouls per unsettled item (system-one/unsettled-ladder.ts).
 	unsettled_item: Object.freeze({}),
+
+	// Built per evaluation: one Choice over the eligible (model, thinking) options (expert-routing/system-one-choice.ts).
+	route_choice: Object.freeze({}),
 
 	// One atomic question per claim kind. Each asks only what the answer SAYS; whether it happened is
 	// read from the turn's receipts in code (claim-delivery.ts), never judged from the answer's own words.
@@ -487,4 +499,38 @@ export function toTypeSafeEvaluationQuestions(
 		};
 	}
 	return wire;
+}
+
+/**
+ * Per pool, what the request does to it. Asked only after `changes_model_pools` did not come back a
+ * clear no, so an ordinary turn pays one question for this, not three.
+ */
+export function modelPoolQuestions(): QuestionPack {
+	const described = {
+		subscription: "models covered by a subscription plan (a flat monthly plan, not billed per request)",
+		metered: "pay-per-use API models billed per token through an API key",
+		local: "models running on this machine",
+	} as const;
+	return Object.fromEntries(
+		Object.entries(described).map(([pool, what]) => [
+			`model_pool_${pool}`,
+			{
+				type: "choice",
+				instructions: `What does \`user_request\` do to ${what}?`,
+				criteria: {
+					enable: `Turns them on, or allows them again. 'you can use them again', 'enable them', 'use only these' (for this kind).`,
+					disable: `Turns them off or rules them out. 'no more of these', 'turn them off', 'only use another kind' (this kind is excluded).`,
+					unchanged: "Says nothing about this kind of model.",
+				},
+			},
+		]),
+	);
+}
+
+/** The narrower yes/no asked when a pool Choice lands between 0.80 and 0.90. */
+export function modelPoolFollowUp(pool: string, enable: boolean): QuestionDefinition {
+	return {
+		type: "boolean",
+		instructions: `Does \`user_request\` ${enable ? "allow" : "rule out"} ${pool === "metered" ? "pay-per-use API" : pool} models?`,
+	};
 }

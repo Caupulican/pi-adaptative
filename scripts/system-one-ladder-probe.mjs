@@ -1,19 +1,19 @@
 #!/usr/bin/env node
 /**
- * Live measurement of the questions the unsettled-item ladder asks Jev. Each case has a known right
+ * Live measurement of the questions the unsettled-item ladder asks System One. Each case has a known right
  * answer. A case that settles the WRONG way fails the probe: that is the property the ladder rests
  * on. A case that stays open where it should have settled is reported as conservative (it reaches
- * the owner instead), not as a failure. Re-run it when the Jev model or a question's wording changes.
+ * the owner instead), not as a failure. Re-run it when the System One model or a question's wording changes.
  * Needs a TypeSafe key and network, so it is a report, not part of `npm run check`.
  *
- * usage: node --conditions=pi-source scripts/jev-ladder-probe.mjs
+ * usage: node --conditions=pi-source scripts/system-one-ladder-probe.mjs
  */
 import { isDecisivelyFalse } from "../packages/coding-agent/src/core/decision/noul.ts";
 import { groundConsultAnswer } from "../packages/coding-agent/src/core/system-one/owner-question-routing.ts";
 import { RESERVED_DECISION_KINDS, verdictAt } from "../packages/coding-agent/src/core/system-one/unsettled-ladder.ts";
-import { liveSystemOneController } from "./jev-live.mjs";
+import { liveSystemOneController } from "./system-one-live.mjs";
 
-const controller = liveSystemOneController("jev-ladder-probe");
+const controller = liveSystemOneController("system-one-ladder-probe");
 
 const ITEMS = [
 	["The tests that were run passed", "[bash] ============ 12 passed in 0.84s ============", "confirmed"],

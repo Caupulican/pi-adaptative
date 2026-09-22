@@ -262,6 +262,7 @@ describe("System One recovery WO-09 production paths", () => {
 		expect(await controller.classifyUserRequest("commit and push this")).toEqual({
 			status: "classified",
 			classification: {
+				mayChangeModelPools: false,
 				capabilitiesAuthorized: true,
 				localCommitsOnly: false,
 				liftsDeliveryBlock: false,
@@ -285,6 +286,7 @@ describe("System One recovery WO-09 production paths", () => {
 		expect(await denied.classifyUserRequest("what does this function do")).toEqual({
 			status: "classified",
 			classification: {
+				mayChangeModelPools: false,
 				capabilitiesAuthorized: false,
 				localCommitsOnly: false,
 				liftsDeliveryBlock: false,
@@ -319,11 +321,17 @@ describe("System One recovery WO-09 production paths", () => {
 			},
 		});
 		// No written rules and every edge class already granted: only the delivery axis is live.
-		// The handoff question is always live: it decides where owner questions go, rules or not.
+		// The handoff and model-pool questions are always live: the owner may change either any turn.
 		await controller.classifyUserRequest("hi", "", { capabilitiesPending: false });
-		expect(asked.at(-1)).toEqual(["local_commits_only", "lifts_delivery_block", "full_handoff"]);
+		expect(asked.at(-1)).toEqual([
+			"changes_model_pools",
+			"local_commits_only",
+			"lifts_delivery_block",
+			"full_handoff",
+		]);
 		await controller.classifyUserRequest("hi", "", { capabilitiesPending: true });
 		expect(asked.at(-1)).toEqual([
+			"changes_model_pools",
 			"capabilities_authorized",
 			"local_commits_only",
 			"lifts_delivery_block",
@@ -331,6 +339,7 @@ describe("System One recovery WO-09 production paths", () => {
 		]);
 		await controller.classifyUserRequest("hi", "AGENTS.md: never push", { capabilitiesPending: false });
 		expect(asked.at(-1)).toEqual([
+			"changes_model_pools",
 			"local_commits_only",
 			"lifts_delivery_block",
 			"rules_differ",

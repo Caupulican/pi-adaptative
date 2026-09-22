@@ -384,7 +384,7 @@ describe("Workbench input boundary", () => {
 		}
 		controller.dispose();
 	});
-	it("records Jev evaluations as Execution evidence with attribution, replacing a preview when its verdict is noted", () => {
+	it("records System One evaluations as Execution evidence with attribution, replacing a preview when its verdict is noted", () => {
 		const view = new WorkbenchComponent({
 			conversation: new Container(),
 			editor: new Container(),
@@ -412,11 +412,11 @@ describe("Workbench input boundary", () => {
 			endedAt: 3500,
 			durationMs: 2500,
 		};
-		controller.recordJevEvaluation({ ...base, outcome: "ok" });
-		controller.recordJevEvaluation({ ...base, outcome: "ok", verdict: "pass", reasons: ["all criteria hold"] });
+		controller.recordSystemOneEvaluation({ ...base, outcome: "ok" });
+		controller.recordSystemOneEvaluation({ ...base, outcome: "ok", verdict: "pass", reasons: ["all criteria hold"] });
 		const rendered = stripAnsi(view.render(110).join("\n"));
-		expect(rendered.match(/◆ Jev verify/g)?.length).toBe(1);
-		expect(rendered).toMatch(/◆ Jev verify\s+Jev · system one · pass · 2\.5s/);
+		expect(rendered.match(/◆ System One verify/g)?.length).toBe(1);
+		expect(rendered).toMatch(/◆ System One verify\s+system one · pass · 2\.5s/);
 		expect(rendered).toContain("all criteria hold");
 		expect(rendered).toContain("Completed: 0");
 		controller.record(
@@ -430,7 +430,7 @@ describe("Workbench input boundary", () => {
 		);
 		const withTool = stripAnsi(view.render(110).join("\n"));
 		expect(withTool).toMatch(/edit · src\/a\.ts\s+\+1 −1\s+root · grok-4\.6/);
-		controller.recordJevEvaluation({
+		controller.recordSystemOneEvaluation({
 			...base,
 			evaluationId: "e2",
 			label: "objective route",
@@ -438,8 +438,8 @@ describe("Workbench input boundary", () => {
 			reasons: ["engine timeout"],
 		});
 		const bounded = stripAnsi(view.render(110).join("\n"));
-		expect(bounded).not.toContain("◆ Jev verify");
-		expect(bounded).toContain("◆ Jev objective route");
+		expect(bounded).not.toContain("◆ System One verify");
+		expect(bounded).toContain("◆ System One objective route");
 		expect(bounded).toContain("failed · 2.5s");
 		expect(bounded).toContain("engine timeout");
 		controller.dispose();

@@ -100,4 +100,29 @@ While a routed turn runs, the POV bar shows `ROOT` (the session model the turn r
 `ACTIVE` (the model executing now) and `ROUTE` with the authority that chose it — `direct`,
 `manual:<model>`, `<tier> via model-router`, `<tier> via model-router/H-MoE` or
 `escalated→<model> via model-router`. Jev is never named as the selector; its own slot reports only
-its observed state (`JEV off | ready | eval | ok | degraded`). See `workbench.md`.
+its observed state (`S1 off | ready | eval | ok | degraded`). See `workbench.md`.
+
+## Model pools by request
+
+Models fall in three pools: subscription (a flat plan, not billed per request), metered (pay-per-use API
+keys) and local. The owner turns pools on and off by saying so in the session ("we can only use
+subscription models", "enable the API models again", "no local models"). System One reads the change;
+the policy then governs every allocation from the next pick on: foreground turns, workers, background
+lanes and the stronger-model consult. A pin or the session model outside the policy is reallocated from
+the allowed pool, even with the router off, never refused. A change that would leave no model to
+allocate is refused with the reason and the previous policy stays. System One itself is not a pool.
+
+## System One allocation
+
+When System One is bound, a routed turn is allocated in three steps. System One judges which kind of
+model and thinking the work needs (one Choice over flash-light, flash-deep, strong-medium, strong-deep),
+and each category names a tier. The owner's pin for that tier runs it, in any selection mode, whenever
+the pin has auth, is allowed by the model policy, is not exhausted, has a working tool path and can take
+the turn (reads images when there is one, fits the context). Otherwise H-MoE picks inside the category
+from facts: a model the probes graded unfit sorts last; System One judges which models are lightweight
+speed variants and which are superseded by a later version of the same model; flash models are ordered
+by measured turn time on this host, first token included; a model that runs the category's thinking
+level exactly comes before one that only reaches it by clamping. Confidence at 0.90 decides; otherwise
+the question narrows to the two leading options and decides there; a leader from 0.80 may stand for a
+reversible route with its doubt recorded. `npm run probe:system-one-route` measures the choice on the
+machine's real models.

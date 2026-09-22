@@ -21,8 +21,8 @@ export interface DecisionGraphRows {
 	readonly focusKey: string;
 }
 
-/** The decider's tone: the label tone marks System One and Jev everywhere in the Workbench. */
-const JEV_TONE: ThemeColor = "customMessageLabel";
+/** The decider's tone: the label tone marks System One everywhere in the Workbench. */
+const SYSTEM_ONE_TONE: ThemeColor = "customMessageLabel";
 const TITLE_TONE: ThemeColor = "customMessageLabel";
 
 import { formatCompactDuration } from "../../../core/util/format-duration.ts";
@@ -120,12 +120,12 @@ export function renderDecisionList(
 
 	const evaluating = model.decider.evaluating;
 	head(
-		"SYSTEM ONE · JEV",
+		"SYSTEM ONE",
 		evaluating
-			? theme.fg(JEV_TONE, `◆ evaluating  ${formatGraphDuration(now - evaluating.startedAt)}`)
+			? theme.fg(SYSTEM_ONE_TONE, `◆ evaluating  ${formatGraphDuration(now - evaluating.startedAt)}`)
 			: theme.fg("dim", model.decider.doing),
 	);
-	if (evaluating) push(theme.fg(JEV_TONE, `  ◆ ${evaluating.label}`));
+	if (evaluating) push(theme.fg(SYSTEM_ONE_TONE, `  ◆ ${evaluating.label}`));
 	else if (model.decider.last)
 		push(
 			theme.fg(
@@ -157,7 +157,7 @@ export function renderDecisionList(
 					event.severity === "failure" ? "error" : event.severity === "warning" ? "warning" : "muted";
 				push(theme.fg(tone, `      · ${event.title}`), stage.stage);
 			}
-			if (stage.current && evaluating) push(theme.fg(JEV_TONE, `      ◆ ${evaluating.label}`), stage.stage);
+			if (stage.current && evaluating) push(theme.fg(SYSTEM_ONE_TONE, `      ◆ ${evaluating.label}`), stage.stage);
 		}
 	}
 	if (model.next && model.goal.branch !== "delivered") item("·", "dim", `next → ${model.next}`, "dim");
@@ -167,11 +167,11 @@ export function renderDecisionList(
 		`ROUTER · H-MoE${model.participants.some((p) => p.kind === "capability") ? " · CAPABILITY" : ""}`,
 		model.routing.length ? "" : theme.fg("dim", "no routed choice"),
 	);
-	for (const choice of model.routing) push(theme.fg(choice.live ? JEV_TONE : "dim", `  · ${choice.text}`));
+	for (const choice of model.routing) push(theme.fg(choice.live ? SYSTEM_ONE_TONE : "dim", `  · ${choice.text}`));
 	for (const capability of model.participants.filter((p) => p.kind === "capability"))
 		push(
 			theme.fg(
-				capability.running ? JEV_TONE : "muted",
+				capability.running ? SYSTEM_ONE_TONE : "muted",
 				`  ◇ capability ${capability.label} · ${capability.task ?? "active"}`,
 			),
 		);
@@ -187,7 +187,7 @@ export function renderDecisionList(
 						? model.you.waiting
 							? "waiting for you"
 							: evaluating
-								? "waiting for Jev"
+								? "waiting for System One"
 								: ""
 						: (participant.task ?? ""),
 				);
@@ -195,7 +195,7 @@ export function renderDecisionList(
 			participant.running ? "●" : "○",
 			participant.running ? "success" : "dim",
 			participantText(participant),
-			participant.running ? (participant.kind === "root" ? undefined : JEV_TONE) : "muted",
+			participant.running ? (participant.kind === "root" ? undefined : SYSTEM_ONE_TONE) : "muted",
 			right,
 		);
 	}
@@ -222,9 +222,9 @@ export function renderDecisionList(
 	if (model.doubts.length) {
 		// The open doubts, named. A judgment that settled nothing is why the loop is going round
 		// again, and it used to be invisible: drawn either as a quiet pass or as nothing at all.
-		head("DOUBTS", theme.fg(JEV_TONE, `${model.doubts.length} open`));
+		head("DOUBTS", theme.fg(SYSTEM_ONE_TONE, `${model.doubts.length} open`));
 		for (const doubt of model.doubts.slice(0, MAX_DOUBTS)) {
-			item("?", JEV_TONE, doubt.text, "muted", theme.fg("dim", `  ${doubt.label}`));
+			item("?", SYSTEM_ONE_TONE, doubt.text, "muted", theme.fg("dim", `  ${doubt.label}`));
 		}
 	}
 	arrow("back to System One");
@@ -244,7 +244,7 @@ export function renderDecisionList(
 			: model.goal.branch === "deliver" && !openNote
 				? ["yes → deliver", "success"]
 				: openNote
-					? [`not closed · ${openNote}`, doubts > 0 ? JEV_TONE : "dim"]
+					? [`not closed · ${openNote}`, doubts > 0 ? SYSTEM_ONE_TONE : "dim"]
 					: model.blocked
 						? [`blocked → replan`, "warning"]
 						: model.goal.branch === "repair"
@@ -338,7 +338,7 @@ function goalYesNode(
 		.join(" · ");
 	return {
 		text: note ? `not closed · ${note}` : "not closed",
-		tone: doubts > 0 ? JEV_TONE : "dim",
+		tone: doubts > 0 ? SYSTEM_ONE_TONE : "dim",
 		stage: "deliver",
 		lit: false,
 	};
@@ -372,7 +372,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 	levels.push({
 		kind: "box",
 		node: {
-			text: "SYSTEM ONE · JEV",
+			text: "SYSTEM ONE",
 			tone: s1cur ? "accent" : undefined,
 			bold: s1cur,
 			stage: currentStage && s1Stages.includes(currentStage) ? currentStage : undefined,
@@ -380,8 +380,8 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 		sub: evaluating
 			? `◆ ${evaluating.label}  ${formatGraphDuration(now - evaluating.startedAt)}`
 			: model.decider.doing,
-		subTone: evaluating ? JEV_TONE : "muted",
-		boxTone: s1cur || evaluating ? JEV_TONE : "muted",
+		subTone: evaluating ? SYSTEM_ONE_TONE : "muted",
+		boxTone: s1cur || evaluating ? SYSTEM_ONE_TONE : "muted",
 	});
 	if (model.stages.length) {
 		levels.push({
@@ -420,7 +420,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 			text: participantText(participant),
 			tone: participant.running
 				? participant.kind === "capability"
-					? JEV_TONE
+					? SYSTEM_ONE_TONE
 					: "accent"
 				: participant.acted
 					? undefined
@@ -428,7 +428,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 			bold: participant.running,
 			stage: participant.kind === "root" ? "build" : participant.kind === "capability" ? undefined : "dispatch",
 			...(participant.routeText
-				? { sub: participant.routeText, subTone: JEV_TONE as ThemeColor }
+				? { sub: participant.routeText, subTone: SYSTEM_ONE_TONE as ThemeColor }
 				: participant.running && participant.task
 					? {
 							sub: `${participant.task}${participant.startedAt !== undefined ? ` ${formatGraphDuration(now - participant.startedAt)}` : ""}`,
@@ -464,8 +464,8 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 			kind: "level",
 			nodes: [
 				{
-					text: `◆ Jev · ${model.decider.evaluations} evaluation${model.decider.evaluations > 1 ? "s" : ""}${last ? ` · last ${last.label} → ${last.verdict ?? last.outcome}` : ""}`,
-					tone: JEV_TONE,
+					text: `◆ System One · ${model.decider.evaluations} evaluation${model.decider.evaluations > 1 ? "s" : ""}${last ? ` · last ${last.label} → ${last.verdict ?? last.outcome}` : ""}`,
+					tone: SYSTEM_ONE_TONE,
 				},
 			],
 		});
@@ -479,7 +479,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 			items: model.doubts.slice(0, MAX_DOUBTS).map((doubt) => ({
 				text: doubt.text,
 				glyph: "?",
-				glyphTone: JEV_TONE,
+				glyphTone: SYSTEM_ONE_TONE,
 				tone: "muted" as ThemeColor,
 			})),
 		});
@@ -491,7 +491,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 		kind: "branch",
 		question: {
 			text: `goal satisfied?${evaluating && /^(verify|completion)/.test(evaluating.label) ? `  ◆ ${formatGraphDuration(now - evaluating.startedAt)}` : ""}`,
-			tone: evaluating ? JEV_TONE : model.decider.last ? undefined : "dim",
+			tone: evaluating ? SYSTEM_ONE_TONE : model.decider.last ? undefined : "dim",
 			bold: Boolean(evaluating),
 		},
 		yes: goalYesNode(model, currentStage),
@@ -642,7 +642,7 @@ export function renderDecisionDiagram(model: DecisionGraphModel, width: number):
 						left + Math.floor(boxWidth / 2),
 						boxWidth - 2,
 						level.subTone,
-						level.subTone === JEV_TONE,
+						level.subTone === SYSTEM_ONE_TONE,
 					),
 					{ col: left + boxWidth - 1, text: "│", tone: level.boxTone },
 				]);

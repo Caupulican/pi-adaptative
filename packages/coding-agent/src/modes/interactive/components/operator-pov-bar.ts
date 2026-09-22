@@ -4,7 +4,11 @@ import type { ForegroundRouteSnapshot } from "../../../core/model-router-control
 import { isIdleProjection } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { OperatorProjection } from "../../../core/operator-projection/types.ts";
 import type { SessionWorkState } from "../../../core/session-work-state.ts";
-import { type SemanticPlaneHealth, semanticPlaneHealthLabel } from "../../../core/system-one/semantic-plane-health.ts";
+import {
+	type SemanticPlaneHealth,
+	SYSTEM_ONE_BAR_LABEL,
+	semanticPlaneHealthValue,
+} from "../../../core/system-one/semantic-plane-health.ts";
 import { theme } from "../theme/theme.ts";
 
 /**
@@ -29,7 +33,7 @@ export type OperatorPovSegmentId =
 	| "root"
 	| "active"
 	| "route"
-	| "jev"
+	| "system-one"
 	| "cost"
 	| "proof"
 	| "ctx";
@@ -71,6 +75,8 @@ export function formatRouteValue(route: ForegroundRouteSnapshot): string {
 			return `escalated→${shortModelName(route.activeModel)} via model-router`;
 		case "model_router_hmoe":
 			return `${route.tier ?? "routed"} via model-router/H-MoE`;
+		case "model_router_system_one":
+			return `${route.tier ?? "routed"} via model-router/System One`;
 		default: {
 			const tier = route.tier ?? "routed";
 			return route.risk === "read-only" ? `${tier}/read-only via model-router` : `${tier} via model-router`;
@@ -190,11 +196,10 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		dropOrder: 0,
 	});
 
-	const jev = semanticPlaneHealthLabel(health);
 	segments.push({
-		id: "jev",
-		label: jev.slice(0, 3),
-		value: jev.slice(4),
+		id: "system-one",
+		label: SYSTEM_ONE_BAR_LABEL,
+		value: semanticPlaneHealthValue(health),
 		dropOrder: 0,
 		tone: health.state === "degraded" ? "warning" : undefined,
 	});
@@ -260,7 +265,7 @@ function isLeftSegment(segment: OperatorPovSegment): boolean {
  * PROOF, CTX) anchored to the right edge, so those columns never move while the left text changes
  * length. The left text truncates first; right segments drop in priority order, then extensions
  * shed, then values compact, only when the width cannot hold them beside a minimal left block.
- * Routing, Jev and cost are never dropped: an operator must always be able to answer who is
+ * Routing, System One and cost are never dropped: an operator must always be able to answer who is
  * running and what it costs, even on a narrow terminal.
  */
 export function layoutOperatorPovSegments(
@@ -316,7 +321,7 @@ export function layoutOperatorPovSegments(
 /**
  * OperatorPovBarComponent: the one normal-mode operator status surface. A single `|`-separated row
  * answering who is working, on what, what comes next, which model is actually executing (and which
- * root model it will return to), who chose it, what Jev is doing, and what the session has cost.
+ * root model it will return to), who chose it, what System One is doing, and what the session has cost.
  */
 export class OperatorPovBarComponent implements Component {
 	private readonly source: OperatorPovSource;

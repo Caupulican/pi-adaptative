@@ -40,6 +40,7 @@ import type {
 	ModelToolProbeVerdict,
 	NativeToolProbeGrade,
 } from "./models/adaptation-store.ts";
+import type { ModelPerfProfile } from "./models/perf-profile.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { ToolRecoveryLoggerStats } from "./tool-recovery-logger.ts";
@@ -229,6 +230,11 @@ export class ToolProtocolController {
 
 	getToolProbeVerdict(model: Model<Api>): ModelToolProbeVerdict | undefined {
 		return this.deps.adaptationStore.get(this.modelRef(model)).toolProbe?.status;
+	}
+
+	/** Measured prefill/decode speed for a model on this host, when it has served requests here. */
+	getPerfProfile(model: Model<Api>): ModelPerfProfile | undefined {
+		return this.deps.adaptationStore.get(this.modelRef(model)).perf;
 	}
 
 	/** The full persisted `/toolprobe` record (status, grade, time), for calibration evidence views. */

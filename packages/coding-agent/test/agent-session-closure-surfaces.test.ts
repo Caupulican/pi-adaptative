@@ -136,7 +136,7 @@ describe("Session closure surfaces", () => {
 
 	it("reports the semantic plane's observed health", async () => {
 		const harness = await createRcSdkHarness();
-		expect(semanticPlaneHealthLabel(harness.session.getSemanticPlaneHealth())).toBe("JEV ready");
+		expect(semanticPlaneHealthLabel(harness.session.getSemanticPlaneHealth())).toBe("S1 ready");
 
 		const engine = (
 			harness.session as unknown as {

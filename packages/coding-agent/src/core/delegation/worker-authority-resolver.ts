@@ -96,6 +96,10 @@ export interface WorkerAuthorityResolutionInput {
 	isModelExhausted(model: Model<Api>): boolean;
 	/** True while the model's account has a live machine-wide limit (see provider-admission/limit-state.ts). */
 	isModelLimited?(model: Model<Api>): boolean;
+	/** The owner's live model policy; a worker bound to a model it disallows is reallocated. */
+	isModelAllowed?(model: Model<Api>): boolean;
+	/** The best model the policy allows, for a worker whose own binding it disallows. */
+	allocateAllowedModel?(): Model<Api> | undefined;
 }
 
 export type WorkerAuthorityResolution =
@@ -294,8 +298,23 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		input.isModelLimited,
 	);
 	if (!binding) return { ok: false, reason: "orchestration_model_required" };
-	const resolvedModel = resolvePinnedOrchestrationModel(binding, input.modelRegistry, input.isModelExhausted);
-	if (!resolvedModel) return { ok: false, reason: "orchestration_model_unavailable" };
+	const boundModel = resolvePinnedOrchestrationModel(binding, input.modelRegistry, input.isModelExhausted);
+	if (!boundModel) return { ok: false, reason: "orchestration_model_unavailable" };
+	// The owner's model policy outranks any binding, pins included: the work is reallocated to an
+	// allowed model instead of running on one the owner ruled out.
+	let resolvedModel = boundModel;
+	if (input.isModelAllowed && !input.isModelAllowed(boundModel.model)) {
+		const allowed = input.allocateAllowedModel?.();
+		if (!allowed) return { ok: false, reason: "orchestration_model_policy_no_allowed_model" };
+		resolvedModel = {
+			model: allowed,
+			binding: {
+				provider: allowed.provider,
+				modelId: allowed.id,
+				thinkingLevel: resolveModelThinkingLevel(allowed, boundModel.binding.thinkingLevel),
+			},
+		};
+	}
 	if (
 		input.modelPin &&
 		((input.authority?.model !== undefined &&

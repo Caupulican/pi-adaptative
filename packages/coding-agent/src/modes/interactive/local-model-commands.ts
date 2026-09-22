@@ -85,12 +85,7 @@ const MODEL_ROUTER_THINKING_FALLBACK_LEVELS: readonly ThinkingLevel[] = [
 ];
 
 type RouterThinkingLevel = ThinkingLevel | typeof MODEL_ROUTER_THINKING_INHERIT_VALUE;
-type ModelRouterThinkingField =
-	| "cheapThinking"
-	| "mediumThinking"
-	| "expensiveThinking"
-	| "executorThinking"
-	| "judgeThinking";
+type ModelRouterThinkingField = "cheapThinking" | "mediumThinking" | "expensiveThinking" | "executorThinking";
 
 /** Narrow seam for persisting a probed model's role — matches the fitness-role test. */
 export interface AssignRoleHost {
@@ -1159,9 +1154,6 @@ function getModelRouterThinkingField(role: FitnessRole): ModelRouterThinkingFiel
 	if (role === "executor") {
 		return "executorThinking";
 	}
-	if (role === "judge") {
-		return "judgeThinking";
-	}
 	return undefined;
 }
 
@@ -1322,9 +1314,7 @@ export function assignFitnessRole(host: AssignRoleHost, modelRef: string, role: 
 				? "mediumModel"
 				: role === "router-expensive"
 					? "expensiveModel"
-					: role === "judge"
-						? "judgeModel"
-						: "learningModel";
+					: "learningModel";
 	host.settingsManager.setModelRouterSettings({ ...router, [field]: modelRef });
 	const hint = router.enabled ? "" : " Model router is currently disabled — enable it in /settings → Model Router.";
 	host.showStatus(`${modelRef} set as ${role.replace("router-", "router ")} model.${hint}`);

@@ -287,7 +287,7 @@ export class WorkerSemanticSupervisor {
 				const fails = (this.consecutiveFailures.get(attempt.attemptId) ?? 0) + 1;
 				this.consecutiveFailures.set(attempt.attemptId, fails);
 				if (fails >= this.maxFailures) {
-					// The observer failed, not the worker: stop spending Jev calls on this attempt and let
+					// The observer failed, not the worker: stop spending System One calls on this attempt and let
 					// the worker keep running. The failure still reaches the caller once, below.
 					this.openBreakers.add(attempt.attemptId);
 					throw new WorkerSupervisionPausedError(attempt.attemptId, fails, err);

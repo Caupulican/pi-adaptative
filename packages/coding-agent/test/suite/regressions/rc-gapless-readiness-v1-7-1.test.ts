@@ -779,7 +779,7 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 			// An idle session reads READY with the projection's own action, never a literal.
 			expect(row).toContain("READY Ready for operator instruction");
 			expect(row).toContain("ROUTE direct");
-			expect(row).toContain("JEV ready");
+			expect(row).toContain("S1 ready");
 			expect(row).toContain("COST $");
 		});
 
@@ -822,7 +822,7 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 		it("RCG-054: footer health is observed, never a constant", async () => {
 			const healthy = await createRcSdkHarness();
 			expect(healthy.session.getSemanticPlaneHealth().state).toBe("unknown");
-			expect(semanticPlaneHealthLabel(healthy.session.getSemanticPlaneHealth())).toBe("JEV ready");
+			expect(semanticPlaneHealthLabel(healthy.session.getSemanticPlaneHealth())).toBe("S1 ready");
 
 			// One real evaluation moves it to ok.
 			await healthy.session.projectRules.validateMutation({ changedFiles: [] });
@@ -844,7 +844,7 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 				{},
 			);
 			expect(healthy.session.getSemanticPlaneHealth().state).toBe("ok");
-			expect(semanticPlaneHealthLabel(healthy.session.getSemanticPlaneHealth())).toBe("JEV ok");
+			expect(semanticPlaneHealthLabel(healthy.session.getSemanticPlaneHealth())).toBe("S1 ok");
 
 			// A failed evaluation degrades it; the footer must not keep showing a tick.
 			const failing = await createRcSdkHarness({
@@ -870,7 +870,7 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 				),
 			).rejects.toThrow();
 			expect(failing.session.getSemanticPlaneHealth().state).toBe("degraded");
-			expect(semanticPlaneHealthLabel(failing.session.getSemanticPlaneHealth())).toMatch(/^JEV degraded( · .+)?$/);
+			expect(semanticPlaneHealthLabel(failing.session.getSemanticPlaneHealth())).toMatch(/^S1 degraded( · .+)?$/);
 		});
 
 		it("RCG-055: the fast-iteration indicator appears only while the owner rule is in force", async () => {

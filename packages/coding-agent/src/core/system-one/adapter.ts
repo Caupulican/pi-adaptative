@@ -174,7 +174,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 		const signal =
 			deadline && options?.signal ? AbortSignal.any([options.signal, deadline]) : (deadline ?? options?.signal);
 		const timedOut = () =>
-			new JevAdapterFailure("timeout", `Jev evaluation exceeded its ${timeoutMs} ms budget`, impact);
+			new JevAdapterFailure("timeout", `System One evaluation exceeded its ${timeoutMs} ms budget`, impact);
 
 		while (attempts < maxAttempts) {
 			if (deadline?.aborted && !options?.signal?.aborted) throw timedOut();

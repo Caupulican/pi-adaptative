@@ -83,7 +83,7 @@ export function parseConsultReply(reply: string, model: string): OwnerQuestionCo
 }
 
 /**
- * The model finds, Jev decides. An answer grounded in the request stands only when the request
+ * The model finds, System One decides. An answer grounded in the request stands only when the request
  * contains the quoted basis (a fact code checks) and System One judges, decisively, that the basis
  * settles the question. An answer grounded in judgment stands only when System One judges,
  * decisively, that the question is none of the kinds the owner reserves. Anything short of that, an
@@ -116,7 +116,7 @@ export async function groundConsultAnswer(
 				? consult
 				: unsettled(`the decision may be one the owner reserves (${reserved.join(", ")})`);
 		}
-		// Whether the request holds the quote is a fact; whether the quote backs the answer is Jev's.
+		// Whether the request holds the quote is a fact; whether the quote backs the answer is System One's.
 		if (!quotedIn(consult.basis, input.request)) return unsettled("the owner's request does not contain its basis");
 		const answers = await judge.evaluateConsultGrounding(
 			{ basis: consult.basis, question: input.question, answer: consult.answer },

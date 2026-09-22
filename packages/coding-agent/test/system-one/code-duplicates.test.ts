@@ -101,7 +101,7 @@ describe("semantic code deduplication", () => {
 		expect(index.candidates(copy!)[0]?.structuralSimilarity).toBe(1);
 	});
 
-	it("asks Jev once for every new unit and candidate, and steers only on a decisive duplicate", async () => {
+	it("asks System One once for every new unit and candidate, and steers only on a decisive duplicate", async () => {
 		const root = repo();
 		const calls: { unit: CodeUnit; candidates: readonly CodeUnit[] }[][] = [];
 		const warnings: string[] = [];
@@ -131,7 +131,7 @@ describe("semantic code deduplication", () => {
 		const reviewer = new CodeDuplicateReviewer({
 			getController: () => ({
 				evaluateCodeDuplicates: async () => {
-					throw new Error("jev down");
+					throw new Error("System One down");
 				},
 			}),
 			warn: (message) => warnings.push(message),

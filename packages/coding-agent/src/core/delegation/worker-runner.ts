@@ -80,8 +80,8 @@ export interface WorkerRunnerOptions {
 	applyActions?: (actions: readonly WorkerAction[]) => AppliedActionsReport;
 	/** Enables the constrained direct-argv operator role prompt. */
 	processCapable?: boolean;
-	/** The lane holds `typesafe_review`: the prompt asks the worker to validate findings with Jev. */
-	jevCapable?: boolean;
+	/** The lane holds `typesafe_review`: the prompt asks the worker to validate findings with System One. */
+	systemOneCapable?: boolean;
 	/** Session cwd — the baseline for relative changed-file and envelope paths in parent
 	 * validation. Defaults to process.cwd(). */
 	cwd?: string;
@@ -394,11 +394,11 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		execute: (signal) =>
 			options.complete({
 				systemPrompt: options.verificationSubjectTaskId
-					? buildVerifierSystemPrompt(options.verificationSubjectTaskId, options.jevCapable === true)
+					? buildVerifierSystemPrompt(options.verificationSubjectTaskId, options.systemOneCapable === true)
 					: buildWorkerSystemPrompt({
 							write: writeCapable,
 							process: options.processCapable === true,
-							jev: options.jevCapable === true,
+							systemOne: options.systemOneCapable === true,
 						}),
 				userPrompt: buildWorkerUserPrompt(options.request),
 				signal,

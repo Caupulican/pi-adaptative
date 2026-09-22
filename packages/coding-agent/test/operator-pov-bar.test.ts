@@ -117,7 +117,7 @@ describe("Operator POV bar", () => {
 		expect(row.startsWith(" WORKING build: Simplifying settings")).toBe(true);
 		expect(
 			row.endsWith(
-				"CONTROL S1 | NEXT verify 5 open criteria | ACTOR root | ROOT gpt-5.6 | ACTIVE claude-sonnet-4-6 | ROUTE medium via model-router/H-MoE | JEV ok | COST $0.083 | PROOF 0/5 | CTX 11.6%",
+				"CONTROL S1 | NEXT verify 5 open criteria | ACTOR root | ROOT gpt-5.6 | ACTIVE claude-sonnet-4-6 | ROUTE medium via model-router/H-MoE | S1 ok | COST $0.083 | PROOF 0/5 | CTX 11.6%",
 			),
 		).toBe(true);
 		expect(row).toHaveLength(240);
@@ -173,11 +173,11 @@ describe("Operator POV bar", () => {
 	});
 
 	it("F001-020..025: Jev labels map from observed health and never render `?`", () => {
-		expect(semanticPlaneHealthLabel({ state: "unbound" })).toBe("JEV off");
-		expect(semanticPlaneHealthLabel({ state: "unknown" })).toBe("JEV ready");
-		expect(semanticPlaneHealthLabel({ state: "evaluating", inFlight: 1 })).toBe("JEV eval");
-		expect(semanticPlaneHealthLabel({ state: "ok" })).toBe("JEV ok");
-		expect(semanticPlaneHealthLabel({ state: "degraded", lastFailure: "boom" })).toBe("JEV degraded");
+		expect(semanticPlaneHealthLabel({ state: "unbound" })).toBe("S1 off");
+		expect(semanticPlaneHealthLabel({ state: "unknown" })).toBe("S1 ready");
+		expect(semanticPlaneHealthLabel({ state: "evaluating", inFlight: 1 })).toBe("S1 eval");
+		expect(semanticPlaneHealthLabel({ state: "ok" })).toBe("S1 ok");
+		expect(semanticPlaneHealthLabel({ state: "degraded", lastFailure: "boom" })).toBe("S1 degraded");
 		expect(
 			semanticPlaneHealthLabel({
 				state: "degraded",
@@ -185,7 +185,7 @@ describe("Operator POV bar", () => {
 				lastFailedLabel: "worker supervision",
 				lastFailureKind: "invalid_request",
 			}),
-		).toBe("JEV degraded · worker supervision invalid_request");
+		).toBe("S1 degraded · worker supervision invalid_request");
 		for (const state of ["unbound", "unknown", "evaluating", "ok", "degraded"] as const) {
 			expect(renderPlain(source({ health: { state } }), 200)).not.toContain("?");
 		}
@@ -244,13 +244,13 @@ describe("Operator POV bar", () => {
 		expect(narrow).not.toContain("ACTOR root");
 		expect(narrow).toContain("ACTIVE claude-sonnet-4-6");
 		expect(narrow).toContain("ROUTE medium via model-router");
-		expect(narrow).toContain("JEV ready");
+		expect(narrow).toContain("S1 ready");
 		expect(narrow).toContain("COST $0.083");
 		const tight = layoutOperatorPovSegments(segments, 109, { plain: true });
 		// ROUTE compacts and WORKING text shortens before any routing/cost truth is cut from the right.
 		expect(tight).toContain("ACTIVE claude-sonnet-4-6");
 		expect(tight).toContain("ROUTE medium via router");
-		expect(tight).toContain("JEV ready");
+		expect(tight).toContain("S1 ready");
 		expect(tight).toContain("COST $0.083");
 		expect(tight).toContain("WORKING build: S");
 		expect(stripAnsi(tight).length).toBeLessThanOrEqual(109);
@@ -278,7 +278,7 @@ describe("Operator POV bar", () => {
 		expect(withWorker).toContain("ACTOR worker settings");
 	});
 
-	it("a required Jev failure is BLOCKED with JEV degraded and CONTROL S1, not ordinary WORKING", () => {
+	it("a required Jev failure is BLOCKED with S1 degraded and CONTROL S1, not ordinary WORKING", () => {
 		const row = renderPlain(
 			source({
 				projection: {
@@ -299,9 +299,9 @@ describe("Operator POV bar", () => {
 		);
 		expect(row).toContain("BLOCKED");
 		expect(row).toContain("CONTROL S1");
-		expect(row).toContain("JEV degraded");
+		expect(row).toContain("S1 degraded");
 		expect(row).not.toContain("WORKING");
-		expect(row).not.toContain("JEV ok");
+		expect(row).not.toContain("S1 ok");
 	});
 
 	it("F001-031: an owner question leads with NEEDS INPUT and carries the BLOCK text", () => {
@@ -365,7 +365,7 @@ describe("Operator POV bar", () => {
 		const tight = layoutOperatorPovSegments(segments, 115, { plain: true });
 		expect(tight).toContain("CONTROL USER");
 		expect(tight).toContain("ACTIVE claude-sonnet-4-6");
-		expect(tight).toContain("JEV ready");
+		expect(tight).toContain("S1 ready");
 		expect(tight).toContain("COST $0.083");
 		expect(tight).not.toContain("?");
 	});
@@ -378,7 +378,7 @@ describe("Operator POV bar", () => {
 		recorder.settleCancelled(recorder.start({ programId: "retention_eval_3" }));
 		expect(recorder.getHealth(true).state).toBe("ok");
 		expect(recorder.getLastEvaluation()).toMatchObject({ label: "retention", outcome: "cancelled" });
-		expect(semanticPlaneHealthLabel(recorder.getHealth(true))).toBe("JEV ok");
+		expect(semanticPlaneHealthLabel(recorder.getHealth(true))).toBe("S1 ok");
 	});
 
 	it("keeps a worker actor longer than a root actor", () => {

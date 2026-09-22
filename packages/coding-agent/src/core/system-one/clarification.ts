@@ -77,7 +77,7 @@ export interface ClarificationNeedInput {
 }
 
 /**
- * How long the question waits on System One before it goes to the owner anyway. Jev's measured p90 is
+ * How long the question waits on System One before it goes to the owner anyway. System One's measured p90 is
  * under half a second (decision ledger, 2026-09-22); ten times that leaves room for a slow request
  * without leaving the owner staring at a question that has not been shown.
  */

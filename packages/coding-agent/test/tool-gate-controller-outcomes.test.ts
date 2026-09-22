@@ -95,7 +95,7 @@ describe("ToolGateController publishes one gate outcome per tool call", () => {
 		]);
 	});
 
-	it("a tool call makes no Jev evaluation; System One records it with an intent built from its arguments", async () => {
+	it("a tool call makes no System One evaluation; System One records it with an intent built from its arguments", async () => {
 		const { cwd } = scope();
 		const recorded: { tool: string; args?: unknown; impact: string; call_id: string }[] = [];
 		let evaluations = 0;

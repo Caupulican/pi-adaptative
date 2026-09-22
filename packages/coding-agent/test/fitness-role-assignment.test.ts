@@ -36,9 +36,6 @@ describe("/fitness role assignment", () => {
 		assignFitnessRole.call(ctx, "ollama/qwen3:1.7b", "router-cheap");
 		expect(ctx.settingsManager.getModelRouterSettings().cheapModel).toBe("ollama/qwen3:1.7b");
 		expect(ctx.statuses.some((line) => line.includes("router is currently disabled"))).toBe(true);
-
-		assignFitnessRole.call(ctx, "ollama/pi-lifter:latest", "judge");
-		expect(ctx.settingsManager.getModelRouterSettings().judgeModel).toBe("ollama/pi-lifter:latest");
 	});
 
 	it("executor role persists modelRouter.executorModel", () => {

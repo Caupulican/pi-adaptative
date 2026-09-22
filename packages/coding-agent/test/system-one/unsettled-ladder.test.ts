@@ -54,7 +54,7 @@ describe("the unsettled-item ladder", () => {
 		expect(first.calls[0]?.every((check) => check.evidence === evidence)).toBe(true);
 	});
 
-	it("climbs to a stronger model's fact, and Jev decides both the fact and what it settles", async () => {
+	it("climbs to a stronger model's fact, and System One decides both the fact and what it settles", async () => {
 		const passes = judge(
 			[[unsure, unsure]],
 			[
@@ -104,7 +104,7 @@ describe("the unsettled-item ladder", () => {
 		expect(outcome.unsettled[0]?.missing).toContain("the evidence does not show");
 	});
 
-	it("reports what the stronger model says is missing, and spends at most two Jev passes", async () => {
+	it("reports what the stronger model says is missing, and spends at most two System One passes", async () => {
 		const passes = judge([[unsure, unsure]]);
 		const consult = async (): Promise<ItemConsult> => ({
 			kind: "missing",
@@ -122,11 +122,14 @@ describe("the unsettled-item ladder", () => {
 	it("keeps every item open and named when System One is down, unbound, or has nothing to read", async () => {
 		const down = {
 			evaluateUnsettledItems: async () => {
-				throw new Error("Jev down");
+				throw new Error("System One down");
 			},
 		};
 		const outage = await settleUnsettledItems({ getJudge: () => down }, { items: ["x"], evidence });
-		expect(outage).toEqual({ settled: [], unsettled: [{ item: "x", missing: "System One unavailable: Jev down" }] });
+		expect(outage).toEqual({
+			settled: [],
+			unsettled: [{ item: "x", missing: "System One unavailable: System One down" }],
+		});
 		const unbound = await settleUnsettledItems({ getJudge: () => undefined }, { items: ["x"], evidence });
 		expect(unbound.unsettled[0]?.missing).toBe("System One is not bound");
 		const empty = judge();

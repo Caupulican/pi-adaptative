@@ -3,7 +3,7 @@
  * receipts do not show?
  *
  * Receipts are mechanical facts read from the turn's tool calls and results — never model text.
- * Jev answers one atomic question per claim kind ("does the answer state that X?"); code combines
+ * System One answers one atomic question per claim kind ("does the answer state that X?"); code combines
  * each settled answer with the receipt for X. A claim the receipts contradict is corrected before
  * the turn ends; a claim no receipt backs stays visible as a doubt.
  */
@@ -96,7 +96,7 @@ export function collectClaimReceipts(turnMessages: readonly AgentMessage[]): Cla
 	return { tests, commits, pushes, publishes, filesChanged, toolCalls, succeededToolCalls };
 }
 
-/** Cheap gate before spending a Jev call: an answer that names none of the claim kinds claims none. */
+/** Cheap gate before spending a System One call: an answer that names none of the claim kinds claims none. */
 const CLAIM_VOCABULARY =
 	/\b(?:test|tests|tested|pass|passes|passed|passing|green|commit|committed|push|pushed|publish|published|released|created|updated|modified|changed|edited|wrote|written|fixed)\b/i;
 
@@ -125,7 +125,7 @@ function judgeDelivery(kind: ClaimKind, receipt: DeliveryReceipt, label: string)
 }
 
 /**
- * Combine Jev's settled "does the answer state X?" with the receipt for X. An answer Jev could not
+ * Combine System One's settled "does the answer state X?" with the receipt for X. An answer System One could not
  * settle claims nothing here: acting on an unsettled reading would be inventing the claim.
  */
 export function judgeClaims(answers: Record<string, unknown>, receipts: ClaimReceipts): ClaimFinding[] {
@@ -211,7 +211,7 @@ export class AnswerClaimChecker {
 	/** Returns the correction prompt when a claim is contradicted; undefined otherwise. */
 	/**
 	 * Every claim finding for an answer against the messages its work produced, or undefined when
-	 * nothing was checked (no controller, no claim vocabulary, or Jev unavailable, reported once).
+	 * nothing was checked (no controller, no claim vocabulary, or System One unavailable, reported once).
 	 */
 	async findings(finalAnswer: string, messages: readonly AgentMessage[]): Promise<ClaimFinding[] | undefined> {
 		const controller = this.deps.getController();

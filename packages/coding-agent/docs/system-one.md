@@ -47,10 +47,10 @@ event:
   is idle; a worker's attempt is interrupted, the directive queued on its mailbox, and the attempt
   resumed.
 
-The tool gate does not ask Jev about a single call. Each admitted call is recorded with an intent
+The tool gate does not ask System One about a single call. Each admitted call is recorded with an intent
 built from its own arguments (`bash command=…`, `edit path=…`) and its terminal (`succeeded` or
 `failed`) is written on the same `call_id`, so postflight judges the step's relevance and scope over
-real events. Preflight and postflight Jev packs run only with a live objective; the claim check and
+real events. Preflight and postflight System One packs run only with a live objective; the claim check and
 the duplicate review run in every session.
 Inside the objective loop a System One cancel of the root's own turn is a re-route (the next cycle
 routes again); only the operator's interruption stops the loop. The worker supervisor redirects a
@@ -104,7 +104,7 @@ Only Choice and Score answers are gated on confidence; a Noul's probability is i
 ## Claims against deliveries
 
 After every turn the final answer's claims (tests pass, committed, pushed, published, files changed)
-are asked of Jev one atomic question each, and each settled "the answer states X" is combined in code
+are asked of System One one atomic question each, and each settled "the answer states X" is combined in code
 with the turn's receipts: test verification records, git commit/push and publish exit status, and
 successful edits. A contradicted claim buys one correction turn; an unbacked one is a warning.
 
@@ -114,16 +114,16 @@ verifier inspected nothing or its last test run failed.
 
 ## Findings nobody could settle
 
-A worker holding `typesafe_review` confirms findings with atomic Jev questions and lists what stays
+A worker holding `typesafe_review` confirms findings with atomic System One questions and lists what stays
 unsettled in its result's `inconclusive`, instead of rounding it up or rewording a question to pass.
-Each item climbs a ladder (`system-one/unsettled-ladder.ts`), at most two Jev passes, each with
+Each item climbs a ladder (`system-one/unsettled-ladder.ts`), at most two System One passes, each with
 evidence the last one did not have:
 
 1. System One judges the item against the worker's own tool results: two one-condition Nouls,
    "shown true" and "shown false". Only a `hard_pass` band settles it, either way.
 2. A stronger model (the router's expensive tier) names the fact in those results that settles it;
    System One judges that the results state the fact and that the fact settles the item. The model
-   finds; Jev decides.
+   finds; System One decides.
 3. What stays open goes to the owner. With the owner in the loop the parent is told to ask them;
    under a handoff it is written to `<agentDir>/follow-ups/<sessionId>.md` and the run continues with
    everything that does not depend on it. It never closes an objective and never authorizes an
@@ -142,20 +142,20 @@ under a handoff.
 
 A handed-off owner question follows the same rule. A stronger model may answer it on a basis copied
 from the owner's request, which code checks is in the request (case, punctuation and spacing folded)
-and Jev judges backs the answer; or on its own judgment, which stands only when Jev decisively finds
+and System One judges backs the answer; or on its own judgment, which stands only when System One decisively finds
 the question is none of the kinds the owner reserves: scope, spending, accepting a risk, an
 irreversible or outward action, or a matter of taste the request does not settle.
 
-The ladder's questions are worded from live measurement, and `npm run probe:jev-ladder` re-measures
-them against live Jev with cases of known answer. It fails only when a case settles the wrong way;
-a case left open reaches the owner and is reported as conservative. Re-run it when the Jev model or
+The ladder's questions are worded from live measurement, and `npm run probe:system-one-ladder` re-measures
+them against live System One with cases of known answer. It fails only when a case settles the wrong way;
+a case left open reaches the owner and is reported as conservative. Re-run it when the System One model or
 a question changes.
 
 ## Semantic duplicates
 
 A successful edit or write that adds a function is checked against a semantic unit index of the
 repository (files from the resident FFF index or the managed ripgrep listing, refreshed by mtime).
-Candidates rank by IDF-weighted shared calls and normalized-token fingerprints; Jev judges every
+Candidates rank by IDF-weighted shared calls and normalized-token fingerprints; System One judges every
 (new unit, candidate) pair in one request. A decisive duplicate is appended to the edit's result,
 naming the function to reuse; a provisional one is a warning. `npm run scan:semantic-duplicates`
 judges every production unit against its closest candidates, batched and concurrent (scaled to the

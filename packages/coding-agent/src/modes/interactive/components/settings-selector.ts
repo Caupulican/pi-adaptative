@@ -1870,7 +1870,6 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 		this.state.mediumThinking = keepSupportedThinking(this.state.mediumThinking, this.state.mediumModel);
 		this.state.expensiveThinking = keepSupportedThinking(this.state.expensiveThinking, this.state.expensiveModel);
 		this.state.executorThinking = keepSupportedThinking(this.state.executorThinking, this.state.executorModel);
-		this.state.judgeThinking = keepSupportedThinking(this.state.judgeThinking, this.state.judgeModel);
 		this.scope = scope;
 		const cheapModelOptions = buildModelRouterRoleModelOptions({
 			currentValue: this.state.cheapModel,
@@ -1908,14 +1907,6 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 			unsetLabel: tierUnsetLabel,
 			pool,
 		});
-		const judgeModelOptions = buildModelRouterRoleModelOptions({
-			currentValue: this.state.judgeModel,
-			configuredModelOptions: modelOptions,
-			currentModelPattern,
-			includeActive: false,
-			unsetDescription: "Clear judge model; routing judge falls back to the medium model",
-			pool,
-		});
 		const executorModelOptions = buildModelRouterRoleModelOptions({
 			currentValue: this.state.executorModel,
 			configuredModelOptions: modelOptions,
@@ -1935,11 +1926,6 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 			buildModelRouterThinkingOptions(
 				"Inherit the session thinking level for this turn, clamped to the routed model",
 				levelsForModel(modelPattern),
-			);
-		const judgeThinkingOptions = () =>
-			buildModelRouterThinkingOptions(
-				"Use today's default of off for the routing judge's own completion",
-				levelsForModel(this.state.judgeModel),
 			);
 		this.addChild(new Text(theme.bold(theme.fg("accent", "Model Router")), 0, 0));
 		this.addChild(new Spacer(1));
@@ -2103,36 +2089,6 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 					),
 			},
 			{
-				id: "model-router-judge",
-				label: "Judge model",
-				description: "Pick the routing-judge model; unset falls back to the medium model",
-				currentValue: routerTierValue(this.state.judgeModel, this.state.judgeThinking, "medium fallback"),
-				submenu: (_currentValue, done) =>
-					new ModelSelectionSubmenu(
-						judgeModelOptions,
-						this.state.judgeModel ?? MODEL_ROUTER_UNSET_MODEL_VALUE,
-						(value) => {
-							const judgeModel = value === MODEL_ROUTER_UNSET_MODEL_VALUE ? undefined : value;
-							this.state = {
-								...this.state,
-								judgeModel,
-								judgeThinking: keepSupportedThinking(this.state.judgeThinking, judgeModel),
-							};
-							onChange({ ...this.state }, this.scope);
-							done(routerTierValue(this.state.judgeModel, this.state.judgeThinking, "medium fallback"));
-						},
-						() => done(),
-						{
-							title: "Routing Judge Model",
-							description: "Choose from configured models. Type to filter; manual is fallback.",
-							customTitle: "Custom Routing Judge Model",
-							customDescription: "Enter a provider/model pattern from pi --list-models.",
-							customEmptyHint: "empty clears the setting",
-							customEmptyValue: MODEL_ROUTER_UNSET_MODEL_VALUE,
-						},
-					),
-			},
-			{
 				id: "model-router-executor",
 				label: "Executor model",
 				description: "Pick the local executor lane model; unset disables direct toolkit execution",
@@ -2282,30 +2238,6 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 							};
 							onChange({ ...this.state }, this.scope);
 							done(this.state.executorThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL);
-						},
-						() => done(),
-					),
-			},
-			{
-				id: "model-router-judge-thinking",
-				label: "Judge thinking",
-				description:
-					"Thinking-level override for the routing judge's own completion; (inherit) keeps today's default of off",
-				currentValue: this.state.judgeThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL,
-				submenu: (_currentValue, done) =>
-					new SelectSubmenu(
-						"Judge Thinking",
-						"Select a thinking-level override for the routing judge's own completion, or inherit today's off default",
-						judgeThinkingOptions(),
-						this.state.judgeThinking ?? MODEL_ROUTER_INHERIT_THINKING_VALUE,
-						(value) => {
-							this.state = {
-								...this.state,
-								judgeThinking:
-									value === MODEL_ROUTER_INHERIT_THINKING_VALUE ? undefined : (value as ThinkingLevel),
-							};
-							onChange({ ...this.state }, this.scope);
-							done(this.state.judgeThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL);
 						},
 						() => done(),
 					),

@@ -3,6 +3,8 @@
  * Conforms to schemas in core/expert-routing/schemas/ and MASTER_SPEC.md.
  */
 
+import type { ModelCapabilityCard } from "./capability-card.ts";
+
 export const EXPERT_ROUTING_SCHEMA_VERSION = "1.0" as const;
 
 export type ExpertSelectionMode =
@@ -187,6 +189,8 @@ export interface ExpertCandidateState {
 export interface ExpertCandidate {
 	descriptor: ExpertDescriptor;
 	state: ExpertCandidateState;
+	/** The model's capability facts, which System One reads when it chooses; host-side only. */
+	card?: ModelCapabilityCard;
 }
 
 /** What the probe record says about this candidate on the request's lane. */
@@ -257,6 +261,12 @@ export interface ExpertSelectionPlan {
 	traceId: string;
 	exploration: boolean;
 	ownerPinApplied: boolean;
+	/** Who chose the primary: System One's judgment, or the deterministic ranking (with why). */
+	decidedBy?: {
+		readonly kind: "system_one" | "ranking";
+		readonly confidence?: number;
+		readonly reasons: readonly string[];
+	};
 }
 
 export interface ExpertSelectionTrace {

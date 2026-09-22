@@ -600,7 +600,7 @@ export class ActivityLaneComponent implements Component {
 	private parentVisible = true;
 	/** Runs only while timed work is live, so the elapsed figure advances; never keeps the process alive. */
 	private ticker?: ReturnType<typeof setInterval>;
-	/** Clocks on screen the lane does not own (the Decision graph's stage and Jev evaluation). */
+	/** Clocks on screen the lane does not own (the Decision graph's stage and System One evaluation). */
 	private readonly externalClocks = new Set<string>();
 
 	constructor(

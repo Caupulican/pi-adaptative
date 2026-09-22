@@ -815,7 +815,7 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 	});
 
 	describe("Cluster 12: Jev Outage and Resilience (PH-010, PH-171)", () => {
-		it("Jev outage in system_one_required mode proceeds on deterministic facts and never completes", async () => {
+		it("System One outage in system_one_required mode proceeds on deterministic facts and never completes", async () => {
 			const adapter = new MockTypedJevAdapter();
 			adapter.shouldFail = true;
 

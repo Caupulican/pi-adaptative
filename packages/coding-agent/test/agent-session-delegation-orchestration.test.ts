@@ -149,7 +149,7 @@ describe("AgentSession provider-neutral delegation orchestration", () => {
 				{ id: "luna", reasoning: true, contextWindow: 372_000 },
 			],
 			settings: {
-				modelRouter: { enabled: true, judgeEnabled: false, cheapModel: "faux/luna", cheapThinking: "max" },
+				modelRouter: { enabled: true, cheapModel: "faux/luna", cheapThinking: "max" },
 			},
 		});
 		try {
@@ -186,7 +186,7 @@ describe("AgentSession provider-neutral delegation orchestration", () => {
 		const harness = await createHarness({
 			models: [{ id: "sol", reasoning: true, contextWindow: 372_000 }],
 			settings: {
-				modelRouter: { enabled: true, judgeEnabled: false, cheapModel: "faux/sol", cheapThinking: "max" },
+				modelRouter: { enabled: true, cheapModel: "faux/sol", cheapThinking: "max" },
 			},
 		});
 		try {

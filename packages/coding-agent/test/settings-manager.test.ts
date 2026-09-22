@@ -548,7 +548,6 @@ describe("SettingsManager", () => {
 				mediumModel: "anthropic/claude-medium-4-5",
 				expensiveModel: "anthropic/claude-sonnet-4-5",
 				learningModel: "anthropic/claude-haiku-4-5",
-				judgeEnabled: true,
 				fitnessGate: false,
 			});
 			expect(manager.getAutoLearnSettings()).toMatchObject({ model: "anthropic/claude-haiku-4-5" });
@@ -579,7 +578,6 @@ describe("SettingsManager", () => {
 				mediumModel: "anthropic/claude-medium-4-5",
 				expensiveModel: "anthropic/claude-sonnet-4-5",
 				learningModel: "openai/gpt-5.4",
-				judgeEnabled: true,
 				fitnessGate: false,
 			});
 		});
@@ -607,7 +605,6 @@ describe("SettingsManager", () => {
 					mediumThinking: "medium",
 					expensiveThinking: "max",
 					executorThinking: "minimal",
-					judgeThinking: "ultra",
 				},
 				"global",
 			);
@@ -617,7 +614,6 @@ describe("SettingsManager", () => {
 			expect(settings.mediumThinking).toBe("medium");
 			expect(settings.expensiveThinking).toBe("max");
 			expect(settings.executorThinking).toBe("minimal");
-			expect(settings.judgeThinking).toBe("ultra");
 		});
 
 		it("drops an invalid per-tier thinking level read from disk but keeps a valid sibling", () => {

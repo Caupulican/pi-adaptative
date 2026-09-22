@@ -131,16 +131,6 @@ export const DEFAULT_MODEL_SUGGESTIONS: readonly ModelSuggestion[] = [
 		note: "Pi pins the provider's group-128 Q2_0 artifact and its matched Prism llama.cpp runtime.",
 	},
 	{
-		name: "Ternary-Bonsai-8B",
-		pullRef: "hf.co/prism-ml/Ternary-Bonsai-8B-gguf:Q2_0",
-		role: "Routing judge (larger machines)",
-		toolCalling: false,
-		assignRole: "judge",
-		rationale:
-			"A judge candidate for machines with more headroom — too slow on ~16GB-class hardware in this research, kept for a bigger box.",
-		note: "Heavy: confirm tok/s with /fitness before assigning it. Pi pins the Q2_0 artifact and matched Prism llama.cpp runtime.",
-	},
-	{
 		name: "needle (function-call tester, 26M)",
 		pullRef: "hf.co/Cactus-Compute/needle",
 		role: "Standalone function-call test bench (not a chat/lane model)",

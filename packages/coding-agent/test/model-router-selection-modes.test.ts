@@ -22,6 +22,7 @@ import {
 	resolveRouterCandidatePool,
 	routerPoolModelRefs,
 } from "../src/core/model-router/candidate-pool.ts";
+import { OwnerModelPolicy } from "../src/core/model-router/owner-model-policy.ts";
 import { formatRoutePreview } from "../src/core/model-router/route-preview.ts";
 import { formatModelRouterStatus } from "../src/core/model-router/status.ts";
 import { ModelRouterController, type ModelRouterControllerDeps } from "../src/core/model-router-controller.ts";
@@ -89,7 +90,6 @@ function settings(overrides: Partial<RouterSettings> = {}): RouterSettings {
 		enabled: true,
 		selectionMode: "manual",
 		poolPreference: "subscription-first",
-		judgeEnabled: false,
 		fitnessGate: false,
 		...overrides,
 	};
@@ -120,6 +120,10 @@ function createController(options: {
 	judgeModel?: TestModel;
 	/** Makes the routed-turn system-prompt build throw, as a setup failure does. */
 	buildSystemPromptError?: string;
+	/** The owner's live model policy, as the session binds it. */
+	policy?: OwnerModelPolicy;
+	/** System One's route category answer, as the session binds it. */
+	routeCategory?: string;
 }): ControllerFixture {
 	const agentDir = mkdtempSync(join(tmpdir(), "pi-router-modes-"));
 	let current = settings(options.settings);
@@ -191,8 +195,23 @@ function createController(options: {
 		resolveLaneModel: () => options.judgeModel,
 		resolveCurationModelIfFit: () => undefined,
 		getToolProbeVerdict: () => undefined,
-		getCandidatePool: () =>
-			resolveRouterCandidatePool(scoped ? { source: "enabled_models", models: scoped } : undefined, registry),
+		getCandidatePool: () => {
+			const pool = resolveRouterCandidatePool(
+				scoped ? { source: "enabled_models", models: scoped } : undefined,
+				registry,
+			);
+			return options.policy ? { ...pool, models: options.policy.allowed(pool.models) } : pool;
+		},
+		...(options.policy ? { isModelAllowed: (model: Model<Api>) => options.policy!.allows(model) } : {}),
+		...(options.routeCategory
+			? {
+					getRouteJudge: () => ({
+						evaluateRouteChoice: async () => ({
+							route_choice: { choice: options.routeCategory, confidence: 0.97 },
+						}),
+					}),
+				}
+			: {}),
 		isUsingSubscription: isSubscription,
 		...(options.withExpertSelector
 			? {
@@ -234,6 +253,65 @@ function resolve(
 const RESEARCH_PROMPT = "Explain this code block";
 const MODIFY_PROMPT = "Implement the new settings submenu and update the tests";
 const EXPENSIVE_PROMPT = "Rewrite the core architecture of the router";
+
+describe("System One picks the tier; the owner's pin runs it", () => {
+	it("a pinned tier takes System One's category, in auto mode too, at the category's thinking", async () => {
+		const { controller } = createController({
+			settings: { enabled: true, selectionMode: "auto", expensiveModel: "api-provider/api-max" },
+			routeCategory: "strong_deep",
+		});
+		const routed = await controller.resolveTurnRouteJudged(RESEARCH_PROMPT);
+		expect(routed?.model).toBe(apiBig);
+		expect(routed?.decision).toMatchObject({ tier: "expensive", selection: "system_one" });
+		expect(routed?.decision.reasons.join(" ")).toContain("owner pin for expensive");
+	});
+
+	it("a pin yields only to facts: a text-only pin does not take an image", async () => {
+		const { controller } = createController({
+			settings: { enabled: true, selectionMode: "auto", expensiveModel: "api-provider/api-max" },
+			routeCategory: "strong_deep",
+		});
+		const routed = await controller.resolveTurnRouteJudged(RESEARCH_PROMPT, { hasImages: true });
+		expect(routed?.model).not.toBe(apiBig);
+		expect(routed?.decision.reasons.join(" ")).toContain("cannot read images");
+	});
+});
+
+describe("The owner's model policy reallocates, never refuses", () => {
+	const policy = () => new OwnerModelPolicy({ isSubscription, isLocal: () => false });
+
+	it("routes away from a metered session model the owner ruled out, even with the router off", () => {
+		const subscriptionOnly = policy();
+		expect(subscriptionOnly.apply({ metered: false }, ALL)).toMatchObject({ kind: "applied" });
+		const { controller } = createController({ settings: { enabled: false }, policy: subscriptionOnly });
+		const route = resolve(controller, MODIFY_PROMPT);
+		expect(route && isSubscription(route.model)).toBe(true);
+		expect(route?.decision.reasons.join(" ")).toContain("reallocated");
+	});
+
+	it("keeps the session model, with the router off, while the policy allows it", () => {
+		const { controller } = createController({ settings: { enabled: false }, policy: policy() });
+		expect(resolve(controller, MODIFY_PROMPT)).toBeUndefined();
+	});
+
+	it("treats a pin to a disallowed model as an allocated tier, and a lifted pool comes back", () => {
+		const live = policy();
+		live.apply({ metered: false }, ALL);
+		const { controller } = createController({
+			settings: { enabled: true, selectionMode: "manual", mediumModel: `${apiBig.provider}/${apiBig.id}` },
+			policy: live,
+		});
+		expect(controller.isTierAutoSelected("medium")).toBe(true);
+		live.apply({ metered: true, subscription: false }, ALL);
+		expect(controller.isTierAutoSelected("medium")).toBe(false);
+	});
+
+	it("refuses a change that would leave nothing to allocate, and keeps the policy", () => {
+		const live = policy();
+		expect(live.apply({ subscription: false, metered: false, local: false }, ALL)).toMatchObject({ kind: "refused" });
+		expect(live.policy).toEqual({ subscription: true, metered: true, local: true });
+	});
+});
 
 describe("Router candidate pool (F001-030..034)", () => {
 	it("F001-031: an uncustomized Models configuration means every authed model", () => {
@@ -515,19 +593,6 @@ describe("H-MoE bounded to the pool (F001-033, F001-056, F001-092)", () => {
 		expect(fixture.controller.getStatus()).toContain(
 			"H-MoE: unavailable (capacity exhausted for api-provider/api-max)",
 		);
-	});
-
-	it("F2: two judged resolutions of the same prompt record two spawned-usage entries", async () => {
-		// A read-only question takes the static fast path and never consults the judge; an
-		// implementation prompt does.
-		const fixture = createController({
-			settings: { mediumModel: "api-provider/api-mini", judgeEnabled: true, judgeModel: "api-provider/api-max" },
-			judgeModel: apiBig,
-		});
-		await fixture.controller.resolveTurnRouteJudged(MODIFY_PROMPT);
-		await fixture.controller.resolveTurnRouteJudged(MODIFY_PROMPT);
-		expect(fixture.spawnedUsageReportIds).toHaveLength(2);
-		expect(new Set(fixture.spawnedUsageReportIds).size).toBe(2);
 	});
 
 	it("an expert pick outside the pool is rejected and the deterministic pool choice stands", async () => {

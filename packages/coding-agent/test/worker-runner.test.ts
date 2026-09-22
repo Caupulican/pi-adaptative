@@ -172,8 +172,8 @@ describe("buildWorkerSystemPrompt", () => {
 		expect(prompt).toContain("run_process");
 		expect(prompt).not.toContain("Delegate useful independent");
 		expect(prompt).not.toContain("workspace tools are read-only");
-		// The fullest role prompt, Jev included, must fit the smallest class that may hold typesafe_review.
-		const fullest = buildWorkerSystemPrompt({ write: true, process: true, jev: true });
+		// The fullest role prompt, System One included, must fit the smallest class that may hold typesafe_review.
+		const fullest = buildWorkerSystemPrompt({ write: true, process: true, systemOne: true });
 		expect(fullest).toContain("typesafe_review");
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT.length + 2 + fullest.length).toBeLessThanOrEqual(
 			MODEL_CAPABILITY_SYSTEM_PROMPT_MAX_CHARS.chat ?? 0,

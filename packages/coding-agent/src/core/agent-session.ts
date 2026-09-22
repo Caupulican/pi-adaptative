@@ -166,6 +166,7 @@ import {
 	type RouterPoolState,
 	resolveRouterCandidatePool,
 } from "./model-router/candidate-pool.ts";
+import { describePolicy, type ModelPoolPolicy, OwnerModelPolicy } from "./model-router/owner-model-policy.ts";
 import type { LiveRoutePreview, RoutePreview } from "./model-router/route-preview.ts";
 import { isLocalOrManagedRouterModel } from "./model-router/tool-escalation.ts";
 import {
@@ -532,6 +533,14 @@ export class AgentSession {
 		deliverToOwner: (items) => {
 			this._deliverToOwner(items);
 		},
+	});
+	/**
+	 * Which model pools the owner allows this session. System One reads changes from the owner's own
+	 * words; every allocation reads it when it picks, so a change applies to the next pick.
+	 */
+	private readonly _modelPolicy = new OwnerModelPolicy({
+		isSubscription: (model) => this._modelRegistry.isUsingSubscription(model),
+		isLocal: (model) => isLocalOrManagedRouterModel(model),
 	});
 	/** Findings nothing could settle this turn, delivered to the owner by the host when the turn ends. */
 	private _pendingOwnerItems: string[] = [];
@@ -1007,6 +1016,12 @@ export class AgentSession {
 			reviewNewCode: ({ toolName, args, cwd }) => this._codeDuplicates.review(toolName, args, cwd),
 			reviewWorkerReport: (input) => this._answerClaims.workerReportBlockers(input),
 			settleInconclusive: (input) => this._settleWorkerInconclusive(input),
+			isModelAllowed: (model) => this._modelPolicy.allows(model),
+			// Allocated from the policy-filtered pool, the same way a routed turn picks.
+			allocateAllowedModel: () =>
+				this._modelRouter.selectAutoTierModel("medium").chosen?.model ??
+				this._modelRouter.selectAutoTierModel("expensive").chosen?.model ??
+				this._modelRouter.selectAutoTierModel("cheap").chosen?.model,
 			recordObjectiveMutation: (event) => {
 				const objectiveId = this.objectiveMutationId();
 				if (event.kind === "shell") this._mutationLedger.markShellUnsafe(objectiveId);
@@ -1315,10 +1330,12 @@ export class AgentSession {
 			getToolProbeVerdict: (model) => this._toolProtocol.getToolProbeVerdict(model),
 			// The pool is the operator's Models configuration (startup enabledModels / --models, an
 			// SDK scope, or a live Models-selector edit), or every authed model when uncustomized.
-			getCandidatePool: () =>
-				resolveRouterCandidatePool(this._routerPool, this._modelRegistry, {
-					isRuntimeDisabled: (r) => !this.settingsManager.isLocalRuntimeEnabled(r),
-				}),
+			getCandidatePool: () => {
+				const pool = this.getRouterCandidatePool();
+				return { ...pool, models: this._modelPolicy.allowed(pool.models) };
+			},
+			isModelAllowed: (model) => this._modelPolicy.allows(model),
+			getRouteJudge: () => this._systemOneController,
 			isUsingSubscription: (model) => this._modelRegistry.isUsingSubscription(model),
 		});
 		this._foregroundLifecycle = new ForegroundLifecycleAdapter(
@@ -1845,7 +1862,7 @@ export class AgentSession {
 			model: engine.model,
 			capabilities: () => engine.capabilities(),
 			evaluate: async (program, state, options) => {
-				// The in-flight record is what lets the POV bar show `JEV eval` only while a real
+				// The in-flight record is what lets the POV bar show `S1 eval` only while a real
 				// evaluation runs and the Decision graph say what Jev is judging; settlement below
 				// always closes it and keeps the verdict for the ledger.
 				const evaluationId = this._semanticPlaneHealth.start({
@@ -2518,6 +2535,7 @@ export class AgentSession {
 		this._deliveryClassificationUnavailable = false;
 		const classified = outcome.classification;
 		this._handoff = classified.fullHandoff;
+		if (classified.mayChangeModelPools) await this._applyModelPoolChange(controller, request);
 		this._localCommitBranch = resolveDeliveryBinding(
 			this._localCommitBranch,
 			{ blocksPush: classified.localCommitsOnly, liftsPushBlock: classified.liftsDeliveryBlock },
@@ -2536,6 +2554,41 @@ export class AgentSession {
 			return this._ruleAuthority === "user" ? RULE_SETTLED_USER_NOTE : RULE_SETTLED_WRITTEN_NOTE;
 		}
 		return undefined;
+	}
+
+	/** The owner's words may turn a model pool on or off; the policy changes for the next allocation. */
+	private async _applyModelPoolChange(controller: SystemOneController, request: string): Promise<void> {
+		let evaluated: Awaited<ReturnType<SystemOneController["evaluateModelPools"]>>;
+		try {
+			evaluated = await controller.evaluateModelPools(request);
+		} catch (error) {
+			this._emit({
+				type: "warning",
+				message: `Model policy not changed: System One could not read the request (${error instanceof Error ? error.message : String(error)})`,
+			});
+			return;
+		}
+		for (const doubt of evaluated.doubts) this._emit({ type: "warning", message: `Model policy: ${doubt}` });
+		// Only models that can actually run count: a pool that is on but has no authenticated model, or
+		// a local runtime that is off, allocates nothing.
+		const runnable = this.getRouterCandidatePool().models.filter((model) =>
+			this._modelRegistry.hasConfiguredAuth(model),
+		);
+		const outcome = this._modelPolicy.apply(evaluated.change, runnable);
+		if (outcome.kind === "applied")
+			this._emit({ type: "warning", message: `Model policy: ${describePolicy(outcome.policy)}` });
+		else if (outcome.kind === "refused")
+			this._emit({ type: "warning", message: `Model policy not changed: ${outcome.reason}` });
+	}
+
+	/** The owner's current model pool policy. */
+	getModelPolicy(): ModelPoolPolicy {
+		return this._modelPolicy.policy;
+	}
+
+	/** Whether the owner's model policy allows allocating this model. */
+	isModelAllowed(model: Model<Api>): boolean {
+		return this._modelPolicy.allows(model);
 	}
 
 	grantEdge(edgeClass: EdgeClass, source: "operator" | "instructions", details: EdgeGrantDetails = {}): void {
@@ -3904,9 +3957,13 @@ export class AgentSession {
 			this._emit({ type: "routing_start" });
 
 			const resolvedRouteInfo = await this._modelRouter.resolveTurnRouteJudged(expandedText, {
-				// Internally generated turns (goal continuation, lane follow-ups) never consult the judge:
-				// the regex floor already classified them, and a 20-turn loop must not buy 20 judge calls.
+				// Internally generated turns (goal continuation, lane follow-ups) keep the deterministic
+				// route: the classifier already placed them, and a 20-turn loop must not buy 20 evaluations.
 				skipJudge: options?.autoContinueGoal === false,
+				// Facts the route cannot be chosen without: an image needs a model that reads images, and the
+				// context this turn sends must fit the window.
+				hasImages: (currentImages?.length ?? 0) > 0,
+				contextTokens: this.getContextUsage()?.tokens ?? 0,
 			});
 			// #27: a route landing on a local (ollama) model must not hard-fail the turn just because
 			// the server isn't up yet — boot/reuse it here, or escalate to a non-local tier.

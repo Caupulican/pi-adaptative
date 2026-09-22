@@ -566,7 +566,7 @@ describe("Workbench conversation zone with the Decision graph", () => {
 		expect(view.conversationLeft).toBe(ruleColumn + 3);
 		expect(view.conversationWidth).toBe(120 - ruleColumn - 4);
 		expect(text.slice(view.conversationTop, view.conversationTop + view.conversationHeight).join("\n")).toMatch(
-			/SYSTEM ONE · JEV/,
+			/SYSTEM ONE/,
 		);
 		expect(view.hitTest(2, view.conversationTop - 1)).toBe("graphTitle");
 		expect(view.hitTest(2, view.conversationTop + 1)).toBe("graph");

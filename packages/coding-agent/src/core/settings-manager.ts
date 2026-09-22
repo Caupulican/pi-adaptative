@@ -377,9 +377,7 @@ export interface ModelRouterSettings {
 	mediumModel?: string; // model pattern for normal scoped implementation, edits, and refactors
 	expensiveModel?: string; // model pattern for modify/tool-heavy turns
 	learningModel?: string; // model pattern for explicit/background learning and skill-creator work; automatic reflection uses the current session turn
-	judgeEnabled?: boolean; // default: true — the routing judge runs automatically whenever the router is enabled and a judge model resolves
 	fitnessGate?: boolean; // default: false — opt-in; blocks tier models whose probed relevant lane failed (Class B, subtractive)
-	judgeModel?: string; // model pattern for the routing-only judge; unset falls back to mediumModel
 	executorModel?: string; // model pattern for the local executor lane (direct toolkit commands); unset disables it
 	// Per-tier thinking: overrides the inherited-and-clamped session thinking level for a routed
 	// turn on that tier only (see agent-session.ts's routed-turn swap). Unset reproduces today's
@@ -389,7 +387,6 @@ export interface ModelRouterSettings {
 	mediumThinking?: ThinkingLevel;
 	expensiveThinking?: ThinkingLevel;
 	executorThinking?: ThinkingLevel; // thinking level for the executor-direct lane
-	judgeThinking?: ThinkingLevel; // thinking level for the routing judge's own completion; unset keeps today's "off"
 	hmoePreset?: HmoePreset;
 	hmoeTeamStrategy?: HmoeTeamStrategy;
 	hmoeIndependence?: HmoeIndependence;
@@ -1410,31 +1407,18 @@ function normalizeModelRouterSettings(value: unknown): ModelRouterSettings | und
 	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
 	const input = value as Record<string, unknown>;
 	const settings: ModelRouterSettings = {};
-	for (const key of ["enabled", "judgeEnabled", "fitnessGate"] as const) {
+	for (const key of ["enabled", "fitnessGate"] as const) {
 		if (typeof input[key] === "boolean") settings[key] = input[key];
 	}
 	if (isModelRouterSelectionMode(input.selectionMode)) settings.selectionMode = input.selectionMode;
 	if (isModelRouterPoolPreference(input.poolPreference)) settings.poolPreference = input.poolPreference;
-	for (const key of [
-		"cheapModel",
-		"mediumModel",
-		"expensiveModel",
-		"learningModel",
-		"judgeModel",
-		"executorModel",
-	] as const) {
+	for (const key of ["cheapModel", "mediumModel", "expensiveModel", "learningModel", "executorModel"] as const) {
 		const candidate = input[key];
 		if (typeof candidate !== "string") continue;
 		const trimmed = candidate.trim();
 		if (trimmed) settings[key] = trimmed;
 	}
-	for (const key of [
-		"cheapThinking",
-		"mediumThinking",
-		"expensiveThinking",
-		"executorThinking",
-		"judgeThinking",
-	] as const) {
+	for (const key of ["cheapThinking", "mediumThinking", "expensiveThinking", "executorThinking"] as const) {
 		const candidate = input[key];
 		if (isThinkingLevel(candidate)) settings[key] = candidate;
 	}
@@ -3342,19 +3326,16 @@ export class SettingsManager {
 			if (router.enabled !== undefined) merged.enabled = router.enabled;
 			if (router.selectionMode !== undefined) merged.selectionMode = router.selectionMode;
 			if (router.poolPreference !== undefined) merged.poolPreference = router.poolPreference;
-			if (router.judgeEnabled !== undefined) merged.judgeEnabled = router.judgeEnabled;
 			if (router.fitnessGate !== undefined) merged.fitnessGate = router.fitnessGate;
 			if (router.cheapModel !== undefined) merged.cheapModel = router.cheapModel;
 			if (router.mediumModel !== undefined) merged.mediumModel = router.mediumModel;
 			if (router.expensiveModel !== undefined) merged.expensiveModel = router.expensiveModel;
 			if (router.learningModel !== undefined) merged.learningModel = router.learningModel;
-			if (router.judgeModel !== undefined) merged.judgeModel = router.judgeModel;
 			if (router.executorModel !== undefined) merged.executorModel = router.executorModel;
 			if (router.cheapThinking !== undefined) merged.cheapThinking = router.cheapThinking;
 			if (router.mediumThinking !== undefined) merged.mediumThinking = router.mediumThinking;
 			if (router.expensiveThinking !== undefined) merged.expensiveThinking = router.expensiveThinking;
 			if (router.executorThinking !== undefined) merged.executorThinking = router.executorThinking;
-			if (router.judgeThinking !== undefined) merged.judgeThinking = router.judgeThinking;
 			if (router.hmoePreset !== undefined) merged.hmoePreset = router.hmoePreset;
 			if (router.hmoeTeamStrategy !== undefined) merged.hmoeTeamStrategy = router.hmoeTeamStrategy;
 			if (router.hmoeIndependence !== undefined) merged.hmoeIndependence = router.hmoeIndependence;
@@ -3372,15 +3353,12 @@ export class SettingsManager {
 		mediumModel?: string;
 		expensiveModel?: string;
 		learningModel?: string;
-		judgeEnabled: boolean;
-		judgeModel?: string;
 		executorModel?: string;
 		fitnessGate: boolean;
 		cheapThinking?: ThinkingLevel;
 		mediumThinking?: ThinkingLevel;
 		expensiveThinking?: ThinkingLevel;
 		executorThinking?: ThinkingLevel;
-		judgeThinking?: ThinkingLevel;
 		hmoePreset?: HmoePreset;
 		hmoeTeamStrategy?: HmoeTeamStrategy;
 		hmoeIndependence?: HmoeIndependence;
@@ -3400,9 +3378,7 @@ export class SettingsManager {
 			mediumModel: this.settings.modelRouter?.mediumModel?.trim() || undefined,
 			expensiveModel: this.settings.modelRouter?.expensiveModel?.trim() || undefined,
 			learningModel: this.settings.modelRouter?.learningModel?.trim() || undefined,
-			judgeEnabled: this.settings.modelRouter?.judgeEnabled ?? true,
 			fitnessGate: this.settings.modelRouter?.fitnessGate ?? false,
-			judgeModel: this.settings.modelRouter?.judgeModel?.trim() || undefined,
 			executorModel: this.settings.modelRouter?.executorModel?.trim() || undefined,
 			cheapThinking: isThinkingLevel(this.settings.modelRouter?.cheapThinking)
 				? this.settings.modelRouter?.cheapThinking
@@ -3415,9 +3391,6 @@ export class SettingsManager {
 				: undefined,
 			executorThinking: isThinkingLevel(this.settings.modelRouter?.executorThinking)
 				? this.settings.modelRouter?.executorThinking
-				: undefined,
-			judgeThinking: isThinkingLevel(this.settings.modelRouter?.judgeThinking)
-				? this.settings.modelRouter?.judgeThinking
 				: undefined,
 			hmoePreset: this.settings.modelRouter?.hmoePreset,
 			hmoeTeamStrategy: this.settings.modelRouter?.hmoeTeamStrategy,
@@ -3433,15 +3406,12 @@ export class SettingsManager {
 			mediumModel: profileSettings?.mediumModel?.trim() || settings.mediumModel,
 			expensiveModel: profileSettings?.expensiveModel?.trim() || settings.expensiveModel,
 			learningModel: profileSettings?.learningModel?.trim() || settings.learningModel,
-			judgeEnabled: profileSettings?.judgeEnabled ?? settings.judgeEnabled,
 			fitnessGate: profileSettings?.fitnessGate ?? settings.fitnessGate,
-			judgeModel: profileSettings?.judgeModel?.trim() || settings.judgeModel,
 			executorModel: profileSettings?.executorModel?.trim() || settings.executorModel,
 			cheapThinking: profileSettings?.cheapThinking ?? settings.cheapThinking,
 			mediumThinking: profileSettings?.mediumThinking ?? settings.mediumThinking,
 			expensiveThinking: profileSettings?.expensiveThinking ?? settings.expensiveThinking,
 			executorThinking: profileSettings?.executorThinking ?? settings.executorThinking,
-			judgeThinking: profileSettings?.judgeThinking ?? settings.judgeThinking,
 			hmoePreset: profileSettings?.hmoePreset ?? settings.hmoePreset,
 			hmoeTeamStrategy: profileSettings?.hmoeTeamStrategy ?? settings.hmoeTeamStrategy,
 			hmoeIndependence: profileSettings?.hmoeIndependence ?? settings.hmoeIndependence,
@@ -3463,15 +3433,12 @@ export class SettingsManager {
 			mediumModel: settings.mediumModel?.trim() || undefined,
 			expensiveModel: settings.expensiveModel?.trim() || undefined,
 			learningModel: settings.learningModel?.trim() || undefined,
-			judgeEnabled: settings.judgeEnabled ?? true,
 			fitnessGate: settings.fitnessGate ?? false,
-			judgeModel: settings.judgeModel?.trim() || undefined,
 			executorModel: settings.executorModel?.trim() || undefined,
 			cheapThinking: isThinkingLevel(settings.cheapThinking) ? settings.cheapThinking : undefined,
 			mediumThinking: isThinkingLevel(settings.mediumThinking) ? settings.mediumThinking : undefined,
 			expensiveThinking: isThinkingLevel(settings.expensiveThinking) ? settings.expensiveThinking : undefined,
 			executorThinking: isThinkingLevel(settings.executorThinking) ? settings.executorThinking : undefined,
-			judgeThinking: isThinkingLevel(settings.judgeThinking) ? settings.judgeThinking : undefined,
 			hmoePreset: isHmoePreset(settings.hmoePreset) ? settings.hmoePreset : undefined,
 			hmoeTeamStrategy: isHmoeTeamStrategy(settings.hmoeTeamStrategy) ? settings.hmoeTeamStrategy : undefined,
 			hmoeIndependence: isHmoeIndependence(settings.hmoeIndependence) ? settings.hmoeIndependence : undefined,

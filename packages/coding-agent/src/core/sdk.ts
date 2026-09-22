@@ -1032,6 +1032,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			modelRegistry,
 			fitnessStore,
 			adaptationStore,
+			...(systemOneController ? { getSelectionJudge: () => systemOneController } : {}),
 			taskRuntime: durableTaskRuntime,
 			objectiveRuntime,
 			loopMode: executionLoopMode,

@@ -84,7 +84,7 @@ export interface HumanInputTally {
 
 /**
  * The Decision graph's model, composed per frame from the session's own live state: the operator
- * projection and its stage log, the Jev ledger, the router's foreground snapshot, lane records, the
+ * projection and its stage log, the System One ledger, the router's foreground snapshot, lane records, the
  * task's steps and the goal's requirements (what it needs), verification obligations (what it must
  * pass), the cycle's receipts and the lane's background tools. Nothing here is a second state machine.
  */
@@ -147,7 +147,7 @@ function composeDecisionGraph(host: InteractiveLayoutHost, humanInput: HumanInpu
 }
 
 /**
- * The layout's session listeners: projection publishes, stage-log transitions, settled Jev
+ * The layout's session listeners: projection publishes, stage-log transitions, settled System One
  * evaluations and questions to the operator. Bound to `host.session` as it is now, so the mode
  * calls this again after it swaps the session (resume, new session) and disposes the previous set
  * first; `mountInteractiveLayout` calls it once at mount.
@@ -158,9 +158,9 @@ export function subscribeInteractiveLayout(host: InteractiveLayoutHost): HumanIn
 	const unsubscribeOperatorProjection = session.operatorProjection.subscribe(() => host.ui.requestRender());
 	// The stage log fires on every transition; the graph pane's timers and lit stage follow it.
 	const unsubscribeStageChange = session.operatorProjection.onStageChange(() => host.ui.requestRender());
-	// Every settled Jev evaluation is Execution evidence and changes the Decider row and the graph.
+	// Every settled System One evaluation is Execution evidence and changes the Decider row and the graph.
 	const unsubscribeSemantic = session.onSemanticEvaluation((record) => {
-		host.workbench?.recordJevEvaluation(record);
+		host.workbench?.recordSystemOneEvaluation(record);
 		host.ui.requestRender();
 	});
 	const humanInput: HumanInputTally = host.humanInputTally ?? { asked: 0, answered: 0 };

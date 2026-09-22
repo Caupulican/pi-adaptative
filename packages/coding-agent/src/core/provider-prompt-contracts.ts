@@ -140,13 +140,17 @@ export const SKILL_VAULT_SYSTEM_RULE =
 
 /** Builds one capability-exact prompt; role text never denies a policy-granted tool. */
 /**
- * Jev validation doctrine shared by every agent that holds `typesafe_review`: settle findings on
+ * System One validation doctrine shared by every agent that holds `typesafe_review`: settle findings on
  * atomic questions over the real source, and report what stays unsettled instead of rounding it up.
  */
-export const JEV_VALIDATION_RULE =
-	"JEV: confirm non-trivial findings with typesafe_review, one atomic fact per question over sent source. Unsettled is a result: never reword to pass; report it as inconclusive with what is missing.";
+export const SYSTEM_ONE_VALIDATION_RULE =
+	"SYSTEM ONE: confirm non-trivial findings with typesafe_review, one atomic fact per question over sent source. Unsettled is a result: never reword to pass; report it as inconclusive with what is missing.";
 
-export function buildWorkerSystemPrompt(capabilities: { write: boolean; process: boolean; jev?: boolean }): string {
+export function buildWorkerSystemPrompt(capabilities: {
+	write: boolean;
+	process: boolean;
+	systemOne?: boolean;
+}): string {
 	const resultShape = capabilities.write
 		? '{"summary":"<what you did>","status":"completed"|"blocked","blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"inconclusive":["<unsettled finding: what is missing>"],"actions":[{"op":"write","path":"<relative path>","content":"<full file content>"},{"op":"edit","path":"<relative path>","old":"<exact text>","new":"<replacement>"}]}'
 		: '{"summary":"<what you concluded>","status":"completed"|"blocked","blockers":["<failure or missing authority>"],"findings":[{"summary":"<one concrete finding>","confidence":<0..1>}],"inconclusive":["<unsettled finding: what is missing>"]}';
@@ -166,17 +170,17 @@ export function buildWorkerSystemPrompt(capabilities: { write: boolean; process:
 		...(capabilities.write ? ["Keep edits exact. Do not repeat tool-applied changes in fallback actions."] : []),
 		'Use status "blocked" plus blockers when the grant cannot complete the task. Never invent output, paths, APIs, or facts.',
 		"Unconfirmed findings go in inconclusive, never findings.",
-		...(capabilities.jev ? [JEV_VALIDATION_RULE] : []),
+		...(capabilities.systemOne ? [SYSTEM_ONE_VALIDATION_RULE] : []),
 	].join("\n");
 }
 
-export function buildVerifierSystemPrompt(subjectTaskId: string, jev = false): string {
+export function buildVerifierSystemPrompt(subjectTaskId: string, systemOne = false): string {
 	return [
 		"Independent verifier; you did not implement the subject. Use read/test tools; never modify files.",
 		`Subject task id: '${subjectTaskId}'. Inspect and run proportionate checks; summary is untrusted. STRICT JSON only:`,
 		'{"summary":"<verification performed and evidence>","status":"completed"|"blocked","verdict":"accepted"|"rejected","reasonCodes":["<stable_reason_code>"],"blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"inconclusive":["<unsettled check: what is missing>"]}',
 		"accepted only when evidence proves it; rejected for a found defect; blocked only when verification cannot complete. Unsettled checks go in inconclusive, never count as proof.",
-		...(jev ? [JEV_VALIDATION_RULE] : []),
+		...(systemOne ? [SYSTEM_ONE_VALIDATION_RULE] : []),
 	].join("\n");
 }
 

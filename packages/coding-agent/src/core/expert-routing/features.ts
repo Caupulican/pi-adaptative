@@ -191,8 +191,12 @@ export class ExpertFeatureBuilder {
 		const localResourceFit = desc.runtime_kind !== "remote" ? 0.9 : 0.7;
 
 		// 3. Strategic Features
-		const diversityBonus = desc.runtime_kind !== "remote" ? 0.1 : 0.0;
-		const privacyBonus = desc.privacy_class === "local_only" ? 0.2 : 0.0;
+		// Both reward a property only when the request asked for it. Unconditional, they added 0.3 to
+		// every local model, so a tiny local model outranked every strong one for any work.
+		const wantsLocality = request.local_only === true || request.prefer_local === true;
+		const wantsIndependence = request.independence_level !== undefined && request.independence_level !== "none";
+		const diversityBonus = wantsIndependence && desc.runtime_kind !== "remote" ? 0.1 : 0.0;
+		const privacyBonus = wantsLocality && desc.privacy_class === "local_only" ? 0.2 : 0.0;
 		const explorationBonus = 0.0;
 		// Recorded for the trace; the ranking policy applies it as a class ordering, so totalScore
 		// keeps its existing evidence meaning.

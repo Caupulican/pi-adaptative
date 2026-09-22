@@ -11,6 +11,9 @@ export interface LaneModelResolverDeps {
 	getModelRegistry(): ModelRegistry;
 	getSettingsManager(): SettingsManager;
 	isModelExhausted(model: Model<Api>): boolean;
+	/** The owner's live model policy; a lane model it disallows is reallocated. */
+	isModelAllowed?(model: Model<Api>): boolean;
+	allocateAllowedModel?(): Model<Api> | undefined;
 }
 
 export type LaneShipment =
@@ -37,6 +40,12 @@ export class LaneModelResolver {
 	}
 
 	resolveModel(configuredPattern: string | undefined): Model<Api> | undefined {
+		const model = this.resolveConfiguredModel(configuredPattern);
+		if (!model || !this.deps.isModelAllowed || this.deps.isModelAllowed(model)) return model;
+		return this.deps.allocateAllowedModel?.();
+	}
+
+	private resolveConfiguredModel(configuredPattern: string | undefined): Model<Api> | undefined {
 		if (configuredPattern) {
 			const resolved = resolveCliModel({
 				cliModel: configuredPattern,

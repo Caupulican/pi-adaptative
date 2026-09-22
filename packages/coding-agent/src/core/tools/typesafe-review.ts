@@ -2,7 +2,7 @@ import { compactRetainedDetails } from "@caupulican/pi-agent-core/message-retent
 import type { Usage } from "@caupulican/pi-ai";
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 import { type Static, Type } from "typebox";
-import { JEV_VALIDATION_RULE } from "../provider-prompt-contracts.ts";
+import { SYSTEM_ONE_VALIDATION_RULE } from "../provider-prompt-contracts.ts";
 import { evaluationInputSchema, getEvaluationUsage, reviewInputSchema } from "../review/typesafe-contract.ts";
 import type { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
 import {
@@ -111,10 +111,10 @@ export function createTypeSafeReviewToolDefinition(
 			"Check typesafe_review status at work start. When enabled and authenticationVerified are true, use Jev for semantic decisions and reviews throughout work, in any domain.",
 			"Batch independent narrow questions with complete relevant source, tests, prior findings and limitations; never hide adverse evidence. Reproduce bug candidates before fixing.",
 			"Approval requires every expected verdict and high/max confidence; fix findings or add missing evidence. Never reroll unchanged evidence for a better score. Credentials belong in /login typesafe, never tool arguments.",
-			JEV_VALIDATION_RULE,
+			SYSTEM_ONE_VALIDATION_RULE,
 		],
 		parameters,
-		// Independent Jev calls in one turn run together: evidence saves are synchronous under the
+		// Independent System One calls in one turn run together: evidence saves are synchronous under the
 		// session bundle lock and the reviewer holds no per-call state.
 		async execute(toolCallId: string, input: Static<typeof schema>, signal?: AbortSignal) {
 			const onResponse = (attempts: readonly TypeSafeTransportAttempt[]): void => {

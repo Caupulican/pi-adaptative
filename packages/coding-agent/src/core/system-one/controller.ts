@@ -1,9 +1,20 @@
+import { isDecisivelyTrue } from "../decision/noul.ts";
 import type { Consequence } from "../decision/primitives.ts";
+import {
+	lightweightQuestionId,
+	ROUTE_CHOICE_QUESTION_ID,
+	supersededQuestionId,
+} from "../expert-routing/system-one-choice.ts";
 import type { IntegrityGateResult } from "../hooks/index.ts";
+import { MODEL_POOLS, type ModelPool, type ModelPoolChange } from "../model-router/owner-model-policy.ts";
 import type { JevAdapter } from "./adapter.ts";
 import { AuditStore } from "./audit.ts";
+import { confidenceGate } from "./authority-line.ts";
 import {
 	hashQuestions,
+	modelPoolFollowUp,
+	modelPoolQuestions,
+	type QuestionDefinition,
 	type QuestionPack,
 	SYSTEM_ONE_CATALOG_VERSION,
 	SYSTEM_ONE_PINNED_MODEL,
@@ -33,7 +44,7 @@ import {
 	noulFromAnswer,
 } from "./policy.ts";
 import { StateProjector } from "./projector.ts";
-import type { SemanticEvaluationObserver } from "./semantic-evaluation-ledger.ts";
+import { doubtReason, type SemanticEvaluationObserver } from "./semantic-evaluation-ledger.ts";
 import type { ExecutionState, ToolImpact, ValidationDecision, ValidationStage } from "./types.ts";
 import { CONSULT_GROUNDING_QUESTIONS, RESERVED_DECISION_KINDS, unsettledQuestionId } from "./unsettled-ladder.ts";
 
@@ -52,6 +63,8 @@ const RULE_AUTHORITY_QUESTION_IDS: ReadonlySet<string> = new Set([
 export const USER_REQUEST_RULE_BUDGET = 8_000;
 
 export interface UserRequestClassification {
+	/** Not a clear no: the request may turn a kind of model on or off; ask the pool questions. */
+	readonly mayChangeModelPools: boolean;
 	readonly capabilitiesAuthorized: boolean;
 	readonly localCommitsOnly: boolean;
 	readonly liftsDeliveryBlock: boolean;
@@ -336,6 +349,13 @@ export class SystemOneController {
 		return {
 			status: "classified",
 			classification: {
+				mayChangeModelPools:
+					"changes_model_pools" in asked &&
+					evaluateNoul(
+						noulFromAnswer(response.answers.changes_model_pools, false),
+						"required_true",
+						this.config.thresholds,
+					) !== "hard_fail",
 				capabilitiesAuthorized: hardYes("capabilities_authorized"),
 				localCommitsOnly: hardYes("local_commits_only"),
 				liftsDeliveryBlock: hardYes("lifts_delivery_block"),
@@ -345,6 +365,52 @@ export class SystemOneController {
 				requestHolds: hardYes("request_holds"),
 			},
 		};
+	}
+
+	/**
+	 * What the request does to each model pool. A pool Choice at 0.90 or above decides; one between
+	 * 0.80 and 0.90 is settled by a narrower yes/no follow-up in a second request, all such pools at
+	 * once; anything lower changes nothing and is reported as a doubt.
+	 */
+	async evaluateModelPools(
+		request: string,
+		signal?: AbortSignal,
+	): Promise<{ change: ModelPoolChange; doubts: string[] }> {
+		const state = { user_request: this.projector.redactText(request.trim().slice(0, 4_000)) };
+		const questions = modelPoolQuestions();
+		const first = await this.runStageValidation("intake", state, "read_only", [], questions, signal);
+		const change: ModelPoolChange = {};
+		const doubts: string[] = [];
+		const followUps: QuestionPack = {};
+		for (const pool of MODEL_POOLS) {
+			const answer = first.answers[`model_pool_${pool}`] as { choice?: unknown; confidence?: unknown } | undefined;
+			if (answer?.choice !== "enable" && answer?.choice !== "disable") continue;
+			const enable = answer.choice === "enable";
+			const gate = confidenceGate(answer.confidence);
+			if (gate === "decide") change[pool] = enable;
+			else if (gate === "ask_more")
+				followUps[`${pool}:${enable ? "enable" : "disable"}`] = modelPoolFollowUp(pool, enable);
+			else doubts.push(`${pool} models: "${answer.choice}" at confidence ${String(answer.confidence)}, not applied`);
+		}
+		const reasons = MODEL_POOLS.map((pool) => {
+			const answer = first.answers[`model_pool_${pool}`] as { choice?: unknown; confidence?: unknown } | undefined;
+			return `${pool}: ${String(answer?.choice)} (${String(answer?.confidence)})`;
+		});
+		this.sealDecision(first.decision, "evaluated", first.evaluationId, [...reasons, ...doubts.map(doubtReason)]);
+		if (Object.keys(followUps).length === 0) return { change, doubts };
+		const second = await this.runStageValidation("intake", state, "read_only", [], followUps, signal);
+		for (const id of Object.keys(followUps)) {
+			const [pool, direction] = id.split(":") as [ModelPool, "enable" | "disable"];
+			if (isDecisivelyTrue(second.answers[id])) change[pool] = direction === "enable";
+			else doubts.push(`${pool} models: "${direction}" not confirmed by the follow-up, not applied`);
+		}
+		this.sealDecision(
+			second.decision,
+			"evaluated",
+			second.evaluationId,
+			Object.keys(followUps).map((id) => `${id} P=${probabilityText(second.answers[id])}`),
+		);
+		return { change, doubts };
 	}
 
 	async validateIntake(): Promise<{
@@ -469,7 +535,7 @@ export class SystemOneController {
 	}
 
 	/**
-	 * Record a tool call the deterministic gates admitted. No Jev call: relevance and scope are judged
+	 * Record a tool call the deterministic gates admitted. No System One call: relevance and scope are judged
 	 * once per step in postflight, over these events, where the step and its evidence are known.
 	 */
 	recordToolCall(toolRequest: { tool: string; args?: unknown; impact: ToolImpact; call_id: string }): void {
@@ -486,7 +552,7 @@ export class SystemOneController {
 	/**
 	 * Ask what the final answer claims, one atomic question per claim kind. Runs with or without a live
 	 * objective: a plain session's answer is the user's delivery too. The receipts are combined with
-	 * these answers in code; Jev never judges whether something happened from the answer's own words.
+	 * these answers in code; System One never judges whether something happened from the answer's own words.
 	 */
 	async evaluateAnswerClaims(finalAnswer: string): Promise<Record<string, unknown>> {
 		const { decision, answers, evaluationId } = await this.runStageValidation("claim_delivery", {
@@ -499,7 +565,7 @@ export class SystemOneController {
 	}
 
 	/**
-	 * Every (new unit, candidate) pair in ONE request: Jev evaluates the questions in parallel, so a
+	 * Every (new unit, candidate) pair in ONE request: System One evaluates the questions in parallel, so a
 	 * change adding three functions with five candidates each costs one call, not three. Each unit and
 	 * candidate rides in the state under the key its question names.
 	 */
@@ -563,7 +629,7 @@ export class SystemOneController {
 		checks.forEach((check, index) => {
 			state[`s${index}`] = this.projector.redactText(check.statement);
 			state[`e${index}`] = this.projector.redactText(check.evidence);
-			// Wording measured against live Jev (docs/system-one.md): refutation is asked as "contradict",
+			// Wording measured against live System One (docs/system-one.md): refutation is asked as "contradict",
 			// with criteria naming what a contradicting result looks like.
 			questions[unsettledQuestionId("shows_true", index)] = {
 				type: "boolean",
@@ -638,6 +704,95 @@ export class SystemOneController {
 		);
 		const reasons = Object.keys(CONSULT_GROUNDING_QUESTIONS).map((id) => `${id} P=${probabilityText(answers[id])}`);
 		this.sealDecision(decision, "evaluated", evaluationId, reasons);
+		return answers;
+	}
+
+	/**
+	 * Which kind of model and thinking a request needs: one Choice over the route categories
+	 * (expert-routing/system-one-choice.ts). Code then picks the model inside the category.
+	 */
+	async evaluateRouteChoice(
+		input: { readonly request: string; readonly options: readonly { id: string; description: string }[] },
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>> {
+		const questions: QuestionPack = {
+			[ROUTE_CHOICE_QUESTION_ID]: {
+				type: "choice",
+				instructions:
+					"Which kind of model and thinking does `request` need? Pick the lightest option that fully meets the task; a heavier one only when the task needs it.",
+				criteria: Object.fromEntries(input.options.map((option) => [option.id, option.description])),
+			},
+		};
+		const { decision, answers, evaluationId } = await this.runStageValidation(
+			"route_choice",
+			{ request: this.projector.redactText(input.request.slice(0, 4_000)) },
+			"read_only",
+			[],
+			questions,
+			signal,
+		);
+		const answer = answers[ROUTE_CHOICE_QUESTION_ID] as { choice?: unknown; confidence?: unknown } | undefined;
+		const chosen = input.options.find((option) => option.id === answer?.choice);
+		this.sealDecision(decision, "evaluated", evaluationId, [
+			`chose ${chosen?.description.split(";")[0] ?? String(answer?.choice)} at confidence ${String(answer?.confidence)} of ${input.options.length} options`,
+		]);
+		return answers;
+	}
+
+	/** Per model, whether it is a lightweight variant built for speed and low cost: one Noul each, one request. */
+	evaluateLightweightModels(
+		input: { readonly models: readonly { id: string; description: string }[] },
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>> {
+		return this.evaluatePerModel(input.models, lightweightQuestionId, "lightweight", signal, (index) => ({
+			type: "boolean",
+			instructions: `Is \`m${index}\` a lightweight variant built for speed and low cost (a flash, mini, lite, fast or spark variant) rather than a full-size model?`,
+		}));
+	}
+
+	/** Per model, whether a later version of the same model is among the others: one Noul each, one request. */
+	evaluateSupersededModels(
+		input: { readonly models: readonly { id: string; description: string }[] },
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>> {
+		return this.evaluatePerModel(input.models, supersededQuestionId, "superseded", signal, (index) => ({
+			type: "boolean",
+			instructions: `Is a later version of the same model as \`m${index}\` among \`models\`?`,
+			criteria: {
+				true: "The same model family and tier with a higher version number, such as Flash 3.8 for Flash 3.6",
+				false: "No higher version of this same model; a different family, or another effort preset of the same version, does not count",
+			},
+		}));
+	}
+
+	/** One Noul per model over the models' facts (`m<i>`, and `models` for the whole list), in one request. */
+	private async evaluatePerModel(
+		models: readonly { id: string; description: string }[],
+		questionId: (index: number) => string,
+		label: string,
+		signal: AbortSignal | undefined,
+		question: (index: number) => QuestionDefinition,
+	): Promise<Record<string, unknown>> {
+		const state: Record<string, unknown> = { models: models.map((model) => model.description) };
+		const questions: QuestionPack = {};
+		models.forEach((model, index) => {
+			state[`m${index}`] = model.description;
+			questions[questionId(index)] = question(index);
+		});
+		const { decision, answers, evaluationId } = await this.runStageValidation(
+			"route_choice",
+			state,
+			"read_only",
+			[],
+			questions,
+			signal,
+		);
+		this.sealDecision(
+			decision,
+			"evaluated",
+			evaluationId,
+			models.map((model, index) => `${model.id} P(${label})=${probabilityText(answers[questionId(index)])}`),
+		);
 		return answers;
 	}
 

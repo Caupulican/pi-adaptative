@@ -1824,7 +1824,14 @@ export class ObjectiveExecutionController {
 				priorAttempts,
 			});
 			try {
-				selectionResult = await this.deps.expertSelector.select(request, { signal });
+				// System One judges the category from the objective's own words; the ranking only falls back.
+				const objectiveRecord = runtime.objectives[objectiveId]?.objective;
+				selectionResult = await this.deps.expertSelector.select(request, {
+					signal,
+					requestText: [objectiveRecord?.title, objectiveRecord?.description, route.route]
+						.filter(Boolean)
+						.join("\n"),
+				});
 				binding = selectionResult.primary;
 				this._lastBinding = binding;
 				this.attemptBindings.set(taskId, { binding, route });

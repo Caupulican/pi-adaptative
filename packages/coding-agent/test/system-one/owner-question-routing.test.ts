@@ -88,7 +88,7 @@ describe("owner question routing", () => {
 		}
 	});
 
-	describe("the model finds, Jev decides", () => {
+	describe("the model finds, System One decides", () => {
 		const consult = {
 			kind: "answered" as const,
 			answer: "keep it",
@@ -101,7 +101,7 @@ describe("owner question routing", () => {
 		it("keeps an answer only when the request shows its basis and the basis settles the question", async () => {
 			const both = judge(undefined, yes);
 			expect(await groundConsultAnswer(both, input)).toEqual(consult);
-			// The quote is checked in code; Jev judges only whether it backs the answer.
+			// The quote is checked in code; System One judges only whether it backs the answer.
 			expect(both.grounding).toEqual([{ basis: consult.basis, question: input.question, answer: consult.answer }]);
 		});
 
@@ -126,13 +126,13 @@ describe("owner question routing", () => {
 		it("never lets an outage or a missing judge pass the answer through", async () => {
 			const down = {
 				evaluateUnsettledItems: async () => {
-					throw new Error("Jev down");
+					throw new Error("System One down");
 				},
 				evaluateReservedDecision: async () => {
-					throw new Error("Jev down");
+					throw new Error("System One down");
 				},
 				evaluateConsultGrounding: async () => {
-					throw new Error("Jev down");
+					throw new Error("System One down");
 				},
 			};
 			expect((await groundConsultAnswer(down, input)).kind).toBe("needs_owner");

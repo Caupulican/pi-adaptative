@@ -88,6 +88,8 @@ export class ExpertAdmissionPolicy {
 			for (const cap of request.required_capabilities) {
 				if (cap === "reasoning" && desc.thinking_level === "off") {
 					reasons.push("thinking_unsupported");
+				} else if (cap === "image_input" && candidate.card?.image !== true) {
+					reasons.push("image_input_unsupported");
 				} else if (cap.startsWith("tier:")) {
 					const requiredTier = cap.slice("tier:".length);
 					if (desc.capability_tier && desc.capability_tier !== requiredTier) {

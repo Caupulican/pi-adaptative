@@ -39,7 +39,7 @@ import {
 	type WorkbenchSection,
 } from "./components/workbench.ts";
 import { metaRow } from "./components/workbench-pane.ts";
-import { createJevEvaluationPreview, type PreviewAttribution } from "./components/workbench-tool-preview.ts";
+import { createSystemOneEvaluationPreview, type PreviewAttribution } from "./components/workbench-tool-preview.ts";
 import { theme } from "./theme/theme.ts";
 import { WorkspaceObservation } from "./workbench-workspace.ts";
 
@@ -93,7 +93,7 @@ export class WorkbenchController {
 	private previews: Component[] = [];
 	private readonly invocations = new ToolInvocationReport();
 	private fileEffects = 0;
-	/** Jev previews by evaluation id: a later verdict note replaces the preview in place. */
+	/** System One previews by evaluation id: a later verdict note replaces the preview in place. */
 	private readonly jevPreviews = new Map<string, Component>();
 	/** Evidence of the previous cycle stays on screen until the new cycle produces its own. */
 	private staleEvidence = false;
@@ -200,14 +200,14 @@ export class WorkbenchController {
 	}
 
 	/**
-	 * A settled Jev evaluation is Execution evidence like a file effect or a command: one preview per
+	 * A settled System One evaluation is Execution evidence like a file effect or a command: one preview per
 	 * evaluation in the cycle's order, replaced in place when its verdict is noted later, bounded by
-	 * the same preview limit. The invocation report is never touched: Jev is not a tool call.
+	 * the same preview limit. The invocation report is never touched: System One is not a tool call.
 	 */
-	recordJevEvaluation(record: SemanticEvaluationRecord): void {
+	recordSystemOneEvaluation(record: SemanticEvaluationRecord): void {
 		if (this.disposed) return;
 		this.beginEvidence();
-		const preview = createJevEvaluationPreview(record);
+		const preview = createSystemOneEvaluationPreview(record);
 		const existing = this.jevPreviews.get(record.evaluationId);
 		if (existing) {
 			const index = this.previews.indexOf(existing);
@@ -587,18 +587,18 @@ export function workTitle(items: readonly ActivityLaneItem[]): string | undefine
 	return live("task") ?? live("goal");
 }
 
-const JEV_TONE = "customMessageLabel";
+const SYSTEM_ONE_TONE = "customMessageLabel";
 
 /**
- * The Decider group: System One with Jev, first in the Team. What it is doing comes from the
+ * The Decider group: System One with System One, first in the Team. What it is doing comes from the
  * semantic plane's in-flight evaluation, its last verdict, and who holds control — never a literal.
  */
 export function renderDeciderRows(facts: WorkbenchTeamFacts, nowMs: number): string[] {
 	const evaluating = facts.health.inFlightEvaluations?.at(-1);
 	const owner = facts.projection.control.owner;
-	const name = theme.fg(JEV_TONE, "System One · Jev");
+	const name = theme.fg(SYSTEM_ONE_TONE, "System One · Jev");
 	const state = evaluating
-		? theme.fg(JEV_TONE, `judging ${evaluating.label} ${formatGraphDuration(nowMs - evaluating.startedAt)}`)
+		? theme.fg(SYSTEM_ONE_TONE, `judging ${evaluating.label} ${formatGraphDuration(nowMs - evaluating.startedAt)}`)
 		: facts.last
 			? theme.fg(
 					facts.last.outcome === "failed" ? "error" : "muted",
@@ -607,7 +607,7 @@ export function renderDeciderRows(facts: WorkbenchTeamFacts, nowMs: number): str
 						: `${facts.last.outcome} · ${facts.last.label}`,
 				)
 			: theme.fg("dim", facts.health.state === "unbound" ? "off" : "ready");
-	const glyph = evaluating ? theme.fg(JEV_TONE, "◆") : theme.fg("muted", "◇");
+	const glyph = evaluating ? theme.fg(SYSTEM_ONE_TONE, "◆") : theme.fg("muted", "◇");
 	const control =
 		owner === "system_one"
 			? theme.fg("accent", "decides next")
@@ -648,7 +648,7 @@ export function renderRoutingRows(facts: WorkbenchTeamFacts): string[] {
 /**
  * Work plan and Team blocks for the inspector. Long plans show a bounded, prioritized slice; a
  * finished plan or an idle team folds to one summary row without deleting anything. With `team`
- * facts the Team is a hierarchy: Decider (System One · Jev) first, Executors (root, then the lanes)
+ * facts the Team is a hierarchy: Decider (System One · System One) first, Executors (root, then the lanes)
  * second, Routing last and only while a routed choice is live.
  */
 export function buildWorkbenchSections(

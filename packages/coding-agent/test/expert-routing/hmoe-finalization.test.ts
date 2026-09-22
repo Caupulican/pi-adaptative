@@ -223,6 +223,7 @@ describe("H-MoE Finalization & Review Remediation (HM11-001..HM11-087)", () => {
 						provider: "anthropic",
 						id: "claude-3-5-haiku",
 						api: "chat",
+						input: ["text"],
 						maxContextTokens: 100000,
 					},
 				],

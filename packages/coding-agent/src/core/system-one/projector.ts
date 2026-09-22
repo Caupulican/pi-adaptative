@@ -5,7 +5,7 @@ import type { ExecutionState, ToolImpact } from "./types.ts";
  * R-032: Secrets, tokens, credentials, private keys, and configured sensitive patterns MUST be redacted before remote Jev calls.
  */
 // Every prefix-anchored token pattern starts at a token boundary: without it, `sk-` inside
-// `task-automation-controller.ts` reads as an OpenAI key and blocks the whole Jev request.
+// `task-automation-controller.ts` reads as an OpenAI key and blocks the whole System One request.
 export const SECRET_PATTERNS: readonly RegExp[] = Object.freeze([
 	/(?<![A-Za-z0-9])apikey_[A-Za-z0-9_-]+/g,
 	/(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}/g,

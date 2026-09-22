@@ -48,6 +48,8 @@ export function formatRouteSelectionSource(selection: RouteSelectionSource | und
 	switch (selection) {
 		case "hmoe":
 			return "router/H-MoE";
+		case "system_one":
+			return "router/System One";
 		case "auto":
 			return "router";
 		case "manual":

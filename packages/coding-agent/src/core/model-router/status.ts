@@ -34,8 +34,6 @@ export type ModelRouterStatusSettings = {
 	learningModel?: string;
 	executorModel?: string;
 	executorThinking?: ThinkingLevel;
-	judgeModel?: string;
-	judgeThinking?: ThinkingLevel;
 };
 
 const MODEL_ROUTER_INHERIT_THINKING_LABEL = "(inherit)";
@@ -113,7 +111,9 @@ function formatDecision(decision: ModelRouterDecisionStatus): string {
 		outcomeText = "failed";
 	}
 	// Selection provenance is shown only when it was recorded; older decisions carry none.
-	const selectionText = selection ? `, selected by ${selection === "hmoe" ? "H-MoE" : selection}` : "";
+	const selectionText = selection
+		? `, selected by ${selection === "hmoe" ? "H-MoE" : selection === "system_one" ? "System One" : selection}`
+		: "";
 	return `${tier}/${risk} -> ${decision.routedModel} (${reasonCode}, ${outcomeText}${selectionText})`;
 }
 
@@ -163,7 +163,6 @@ export function formatModelRouterStatus(
 			settings.fitnessGate ? fitnessStatuses?.expensive : undefined,
 		),
 		formatModelWithThinking(formatLabel("Executor model:"), settings.executorModel, settings.executorThinking),
-		formatModelWithThinking(formatLabel("Judge model:"), settings.judgeModel, settings.judgeThinking),
 		`${formatLabel("Learning model:")} ${settings.learningModel ?? "active"}`,
 	];
 	if (!settings.enabled) {

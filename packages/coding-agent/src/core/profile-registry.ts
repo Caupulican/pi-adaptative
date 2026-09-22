@@ -145,28 +145,15 @@ function normalizeThinking(value: unknown): ThinkingLevel | undefined {
 function normalizeModelRouterSettings(value: unknown): ModelRouterSettings | undefined {
 	if (!isRecordObject(value)) return undefined;
 	const settings: ModelRouterSettings = {};
-	for (const key of ["enabled", "judgeEnabled", "fitnessGate"] as const) {
+	for (const key of ["enabled", "fitnessGate"] as const) {
 		const candidate = value[key];
 		if (typeof candidate === "boolean") settings[key] = candidate;
 	}
-	for (const key of [
-		"cheapModel",
-		"mediumModel",
-		"expensiveModel",
-		"learningModel",
-		"judgeModel",
-		"executorModel",
-	] as const) {
+	for (const key of ["cheapModel", "mediumModel", "expensiveModel", "learningModel", "executorModel"] as const) {
 		const candidate = asNonEmptyString(value[key]);
 		if (candidate) settings[key] = candidate;
 	}
-	for (const key of [
-		"cheapThinking",
-		"mediumThinking",
-		"expensiveThinking",
-		"executorThinking",
-		"judgeThinking",
-	] as const) {
+	for (const key of ["cheapThinking", "mediumThinking", "expensiveThinking", "executorThinking"] as const) {
 		const candidate = asNonEmptyString(value[key]);
 		if (!candidate) continue;
 		if (!isValidThinkingLevel(candidate)) {

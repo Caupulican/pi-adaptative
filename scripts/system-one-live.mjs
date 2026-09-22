@@ -1,5 +1,5 @@
 /**
- * A System One controller bound to live Jev, for scripts that measure or use Jev outside a session.
+ * A System One controller bound to live System One, for scripts that measure or use System One outside a session.
  * Needs a TypeSafe key (TYPESAFE_API_KEY or ~/.config/typesafe/.env) and network. Scripts importing
  * this run with `node --conditions=pi-source`, so workspace packages resolve to their sources, the
  * way tests resolve them, never to a stale gitignored dist.
@@ -14,8 +14,8 @@ import { SystemOneController } from "../packages/coding-agent/src/core/system-on
 import { ExecutionStore } from "../packages/coding-agent/src/core/system-one/execution-state.ts";
 
 export const repositoryRoot = resolve(import.meta.dirname, "..");
-/** The Jev model live scripts evaluate with. */
-export const JEV_LIVE_MODEL = "jev-1.13.0";
+/** The System One model live scripts evaluate with. */
+export const SYSTEM_ONE_LIVE_MODEL = "jev-1.13.0";
 
 function readKey() {
 	if (process.env.TYPESAFE_API_KEY?.trim()) return process.env.TYPESAFE_API_KEY.trim();
@@ -31,8 +31,8 @@ export function liveSystemOneController(scriptName) {
 		console.error(`${scriptName}: no TypeSafe key (TYPESAFE_API_KEY or ~/.config/typesafe/.env)`);
 		process.exit(2);
 	}
-	const config = createSystemOneConfig({ enabled: true, provider: "typesafe", productionModel: JEV_LIVE_MODEL });
-	const reviewer = new TypeSafeReviewer({ provider: "typesafe", model: JEV_LIVE_MODEL, getApiKey: async () => key });
+	const config = createSystemOneConfig({ enabled: true, provider: "typesafe", productionModel: SYSTEM_ONE_LIVE_MODEL });
+	const reviewer = new TypeSafeReviewer({ provider: "typesafe", model: SYSTEM_ONE_LIVE_MODEL, getApiKey: async () => key });
 	const adapter = new SystemOneJevAdapter(reviewer, config, { getApiKey: async () => key, getUserKeys: async () => [key] });
 	const store = new ExecutionStore({
 		run_id: scriptName,

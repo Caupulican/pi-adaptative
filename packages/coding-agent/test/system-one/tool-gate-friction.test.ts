@@ -142,7 +142,7 @@ describe("Tool Gate Friction Remediations", () => {
 		expect(gateResult?.block).toBeFalsy();
 	});
 
-	it("An ordinary tool call makes no Jev call and is recorded for the step's postflight judgment", async () => {
+	it("An ordinary tool call makes no System One call and is recorded for the step's postflight judgment", async () => {
 		const store = new ExecutionStore({
 			run_id: "untrusted-run",
 			objective: { request: "Normal", normalized_goal: "Normal", acceptance_criteria: [], constraints: [] },
@@ -182,7 +182,7 @@ describe("Tool Gate Friction Remediations", () => {
 			context: { messages: [] } as any,
 		});
 
-		// No per-call Jev evaluation; the call is recorded with an intent built from its arguments.
+		// No per-call System One evaluation; the call is recorded with an intent built from its arguments.
 		expect(semanticGateCalled).toBe(false);
 		const event = store.snapshot().tool_events.at(-1);
 		expect(event).toMatchObject({ tool: "edit", status: "allowed", call_id: "call-3" });

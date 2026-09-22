@@ -107,7 +107,7 @@ export interface HarnessOptions {
 	/** Owner-authored profile used by delegate calls; independent from the foreground profile. */
 	workerOrchestrationProfile?: OrchestrationProfile;
 	additionalOrchestrationProfiles?: readonly OrchestrationProfile[];
-	/** System One controller bound to the session, as the SDK binds one when Jev is configured. */
+	/** System One controller bound to the session, as the SDK binds one when System One is configured. */
 	systemOneController?: AgentSessionConfig["systemOneController"];
 }
 

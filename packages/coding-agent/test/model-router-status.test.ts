@@ -22,7 +22,6 @@ describe("model router status formatting", () => {
 		expect(text).toContain("Medium model: medium · thinking (inherit)");
 		expect(text).toContain("Expensive model: expensive · thinking (inherit)");
 		expect(text).toContain("Executor model: unset · thinking (inherit)");
-		expect(text).toContain("Judge model: unset · thinking (inherit)");
 		expect(text).toContain("Learning model: learner");
 		expect(text).toContain("Routing: inactive (disabled)");
 		expect(text).toContain("Latest intent: none");

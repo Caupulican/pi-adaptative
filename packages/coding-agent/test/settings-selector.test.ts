@@ -979,7 +979,6 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B");
 		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -1154,7 +1153,7 @@ describe("settings selector", () => {
 					expensiveModel: "openai/gpt-5.4",
 					learningModel: "active",
 					cheapThinking: "low",
-					judgeThinking: "high",
+					mediumThinking: "high",
 				},
 			}),
 			makeCallbacks(),
@@ -1172,7 +1171,6 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B"); // down to "Cheap thinking"; scrolls all 5 thinking rows into view
 		const output = selector.render(180).join("\n");
 
@@ -1180,7 +1178,6 @@ describe("settings selector", () => {
 		expect(output).toContain("Medium thinking");
 		expect(output).toContain("Expensive thinking");
 		expect(output).toContain("Executor thinking");
-		expect(output).toContain("Judge thinking");
 		expect(output).toContain("low");
 		expect(output).toContain("high");
 		expect(output).toContain("(inherit)");
@@ -1202,7 +1199,6 @@ describe("settings selector", () => {
 
 		selector.getSettingsList().handleInput("model router");
 		selector.getSettingsList().handleInput("\r");
-		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
@@ -1249,7 +1245,6 @@ describe("settings selector", () => {
 
 		selector.getSettingsList().handleInput("model router");
 		selector.getSettingsList().handleInput("\r");
-		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
@@ -1300,7 +1295,6 @@ describe("settings selector", () => {
 		selector.getSettingsList().handleInput("\r");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B");
 		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
@@ -1348,7 +1342,7 @@ describe("settings selector", () => {
 
 		selector.getSettingsList().handleInput("model router");
 		selector.getSettingsList().handleInput("\r");
-		for (let index = 0; index < 13; index++) selector.getSettingsList().handleInput("\x1b[B");
+		for (let index = 0; index < 12; index++) selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\r");
 		const output = selector.render(180).join("\n");
 
@@ -1373,7 +1367,6 @@ describe("settings selector", () => {
 
 		selector.getSettingsList().handleInput("model router");
 		selector.getSettingsList().handleInput("\r");
-		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
@@ -1406,59 +1399,6 @@ describe("settings selector", () => {
 		);
 	});
 
-	it("sets the judge thinking level from the Model Router submenu", () => {
-		const onModelRouterChange = vi.fn();
-		const selector = new SettingsSelectorComponent(
-			makeConfig({
-				modelRouter: {
-					enabled: true,
-					cheapModel: "openai/gpt-5.4",
-					expensiveModel: "openai/gpt-5.4",
-					learningModel: "active",
-				},
-			}),
-			makeCallbacks({ onModelRouterChange }),
-		);
-
-		selector.getSettingsList().handleInput("model router");
-		selector.getSettingsList().handleInput("\r");
-		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B");
-		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers
-		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B");
-		selector.getSettingsList().handleInput("\x1b[B"); // down to "Judge thinking"
-		selector.getSettingsList().handleInput("\r"); // open Judge Thinking picker; preselects "(inherit)"
-		selector.getSettingsList().handleInput("\x1b[B"); // (inherit) -> off
-		selector.getSettingsList().handleInput("\x1b[B"); // off -> minimal
-		selector.getSettingsList().handleInput("\x1b[B"); // minimal -> low
-		selector.getSettingsList().handleInput("\x1b[B"); // low -> medium
-		selector.getSettingsList().handleInput("\r"); // select "medium"
-
-		expect(onModelRouterChange).toHaveBeenCalledWith(
-			{
-				enabled: true,
-				selectionMode: "manual",
-				poolPreference: "subscription-first",
-				cheapModel: "openai/gpt-5.4",
-				expensiveModel: "openai/gpt-5.4",
-				learningModel: "active",
-				judgeThinking: "medium",
-			},
-			"global",
-		);
-	});
-
 	it("clears a per-tier thinking override back to (inherit) from the Model Router submenu", () => {
 		const onModelRouterChange = vi.fn();
 		const selector = new SettingsSelectorComponent(
@@ -1476,7 +1416,6 @@ describe("settings selector", () => {
 
 		selector.getSettingsList().handleInput("model router");
 		selector.getSettingsList().handleInput("\r");
-		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		selector.getSettingsList().handleInput("\x1b[B");
 		// +3: Selection mode, Candidate pool, Pool preference rows precede the tier pickers

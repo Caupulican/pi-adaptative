@@ -806,7 +806,7 @@ describe("next-release hardening", () => {
 	});
 });
 
-describe("Jev request integrity and bounds", () => {
+describe("System One request integrity and bounds", () => {
 	it("names the JSON path of non-JSON evidence and never retries a request the harness built wrong", async () => {
 		expect(() => serializeEvaluation({ state: { changedFiles: ["a", undefined] } })).toThrow(
 			/got undefined\) at \$\.state\.changedFiles\[1\]/,

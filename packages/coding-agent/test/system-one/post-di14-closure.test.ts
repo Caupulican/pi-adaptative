@@ -424,7 +424,7 @@ describe("post-DI14 closure gates", () => {
 		expect(result.assuranceProfileUsed).toBeUndefined();
 	});
 
-	it("Gate 8: open breaker pauses supervision for the attempt, makes no further Jev calls, and never cancels the worker", async () => {
+	it("Gate 8: open breaker pauses supervision for the attempt, makes no further System One calls, and never cancels the worker", async () => {
 		let calls = 0;
 		const supervisor = new WorkerSemanticSupervisor({
 			debounceMs: 0,

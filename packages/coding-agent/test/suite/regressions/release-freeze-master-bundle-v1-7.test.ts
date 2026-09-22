@@ -653,7 +653,7 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 			expect(build).toContain("PROOF 7/9");
 			expect(build).toContain("MODEL gpt-5.6");
 			expect(build).toContain("ROUTE direct");
-			expect(build).toContain("JEV ready");
+			expect(build).toContain("S1 ready");
 			expect(build).toContain("COST $0.021");
 
 			// Blocked state (FR-135): the block reason is the WORKING slot's whole content.

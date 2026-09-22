@@ -625,7 +625,7 @@ path, a named abort). A steer is either queued for the next model turn or delive
 interrupting the running turn and sending it once the foreground is idle; for a worker, "now"
 interrupts the attempt, queues the directive on its mailbox and resumes it. Both work from inside the
 running turn and every directive is an operator event. The tool gate never pulls the cancel lever.
-Jev never judges a single tool call: the call is recorded with an intent built from its own
+System One never judges a single tool call: the call is recorded with an intent built from its own
 arguments, and relevance and scope are judged once per step in postflight. A preflight route is
 recorded and does not skip the turn.
 A hard yes that the user authorized the work enables every edge capability that is still off, and
@@ -647,7 +647,7 @@ low-confidence answer is a doubt routed to `gather_more`, never an exception tha
 Pinned by `packages/coding-agent/test/system-one/authority-line.test.ts`.
 
 **Every answer's claims are checked against the turn's receipts** (`system-one/claim-delivery.ts`), with or
-without a live objective. Jev answers one atomic question per claim kind (the answer states tests
+without a live objective. System One answers one atomic question per claim kind (the answer states tests
 passed, a commit, a push, a publish, changed files); code combines each settled answer with the
 turn's mechanical receipts. A claim the receipts contradict buys one correction turn; one no receipt
 backs is an unverified-claim warning. Pinned by `packages/coding-agent/test/system-one/claim-delivery.test.ts`.
@@ -655,18 +655,18 @@ backs is an unverified-claim warning. Pinned by `packages/coding-agent/test/syst
 **What no agent could settle climbs a ladder, then reaches the owner** (`system-one/unsettled-ladder.ts`).
 A worker reports findings it could not confirm as `inconclusive`, never rounded up. System One judges
 each against the worker's own tool results; then a stronger model names the settling fact and System
-One judges it; each pass carries new evidence, at most two. The model finds, Jev decides. What stays
+One judges it; each pass carries new evidence, at most two. The model finds, System One decides. What stays
 open goes to the owner: asked through the parent with the owner in the loop, written to the follow-up
 document under a handoff while the run continues around it. `typesafe_review` is authorized by
 `semantic.judge`, which read-only grants keep. Pinned by
 `packages/coding-agent/test/system-one/unsettled-ladder.test.ts` and
 `packages/coding-agent/test/worker-inconclusive-ladder.test.ts`.
 
-**Jev catches logic that is duplicated but written differently** (`system-one/code-duplicates.ts`). Token
+**System One catches logic that is duplicated but written differently** (`system-one/code-duplicates.ts`). Token
 clone detection finds copies; it cannot see two functions that do the same job with different names
 and structure. A semantic unit index ranks candidates by IDF-weighted shared calls and normalized-token
 fingerprints, with rarity measured from the index, never listed by hand; identical structure ranks a
-candidate but is not the same job. Jev judges every (new unit, candidate) pair of an edit in one
+candidate but is not the same job. System One judges every (new unit, candidate) pair of an edit in one
 request and a decisive duplicate is reported in the edit's result, naming the function to reuse.
 `npm run scan:semantic-duplicates` runs the same judgment over every production unit.
 Pinned by `packages/coding-agent/test/system-one/code-duplicates.test.ts`.

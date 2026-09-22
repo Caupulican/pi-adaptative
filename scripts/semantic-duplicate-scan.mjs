@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Semantic duplicate scan: every production code unit judged by Jev against its closest candidates.
- * The Jev counterpart of the jscpd clone gate: it finds logic that does the same job written differently,
+ * Semantic duplicate scan: every production code unit judged by System One against its closest candidates.
+ * The System One counterpart of the jscpd clone gate: it finds logic that does the same job written differently,
  * which token-level clone detection cannot see. Needs a TypeSafe key (TYPESAFE_API_KEY or
  * ~/.config/typesafe/.env) and network, so it is a report, not part of `npm run check`.
  *
@@ -12,11 +12,11 @@ import { resolve } from "node:path";
 import {
 	harnessFileLister,
 	isTestPath,
-	JEV_SCAN_CONCURRENCY,
+	SYSTEM_ONE_SCAN_CONCURRENCY,
 	SemanticUnitIndex,
 	scanSemanticDuplicates,
 } from "../packages/coding-agent/src/core/system-one/code-duplicates.ts";
-import { JEV_LIVE_MODEL, liveSystemOneController, repositoryRoot } from "./jev-live.mjs";
+import { SYSTEM_ONE_LIVE_MODEL, liveSystemOneController, repositoryRoot } from "./system-one-live.mjs";
 
 const outIndex = process.argv.indexOf("--out");
 const out = outIndex > 0 ? resolve(process.argv[outIndex + 1]) : undefined;
@@ -41,7 +41,7 @@ const counts = (band) => scan.verdicts.filter((v) => v.band === band).length;
 const report = [
 	"# Semantic duplicate scan",
 	"",
-	`${scan.units} units, ${scan.pairs} candidate pairs judged by ${JEV_LIVE_MODEL} in ${scan.requests} requests (${JEV_SCAN_CONCURRENCY} concurrent), ${seconds} s; failed requests: ${scan.failedRequests}.`,
+	`${scan.units} units, ${scan.pairs} candidate pairs judged by ${SYSTEM_ONE_LIVE_MODEL} in ${scan.requests} requests (${SYSTEM_ONE_SCAN_CONCURRENCY} concurrent), ${seconds} s; failed requests: ${scan.failedRequests}.`,
 	`Same job (hard_pass): ${counts("hard_pass")}. Provisional (soft_pass): ${counts("soft_pass")}. Unsettled: ${counts("ambiguous")}.`,
 	...section("hard_pass", "Same job, written differently"),
 	...section("soft_pass", "Provisional"),

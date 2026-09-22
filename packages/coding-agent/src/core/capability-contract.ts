@@ -12,7 +12,7 @@ export const HARNESS_CAPABILITIES = [
 	"repo.read",
 	"memory.query",
 	"memory.mutate",
-	/** Ask the host-brokered semantic judge (Jev) for a verdict. Credentials never leave the host,
+	/** Ask the host-brokered semantic judge (System One) for a verdict. Credentials never leave the host,
 	 * nothing local changes, and the harness already sends the same kind of state for System One. */
 	"semantic.judge",
 	"settings.read",

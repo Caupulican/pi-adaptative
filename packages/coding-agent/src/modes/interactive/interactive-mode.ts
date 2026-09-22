@@ -1125,7 +1125,7 @@ export class InteractiveMode {
 		this.applyRuntimeSettings();
 		await this.bindCurrentSessionExtensions();
 		this.subscribeToAgent();
-		// The Workbench's own listeners (projection, stage log, Jev ledger, questions) follow the session too.
+		// The Workbench's own listeners (projection, stage log, System One ledger, questions) follow the session too.
 		if (this.workbench) subscribeInteractiveLayout(this as unknown as InteractiveLayoutHost);
 		this.subscribeToExtensionsChanged();
 		await this.updateAvailableProviderCount();

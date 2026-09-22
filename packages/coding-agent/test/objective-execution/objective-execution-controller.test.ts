@@ -546,7 +546,7 @@ describe("Objective Execution Controller & Jev Substrate (OEL-001 to OEL-045)", 
 			} as never,
 		});
 		expect((await controller.evaluateRouteOnce("goal:route")).route).toBe("implement");
-		// Jev says the strategy is repeating: the route must replan, not keep implementing.
+		// System One says the strategy is repeating: the route must replan, not keep implementing.
 		strategyRepetition = noul(0.96, "hard_pass");
 		const repeating = await controller.evaluateRouteOnce("goal:route");
 		expect(repeating.route).toBe("replan");

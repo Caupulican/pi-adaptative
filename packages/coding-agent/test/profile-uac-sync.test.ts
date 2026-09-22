@@ -28,7 +28,6 @@ describe("profile UAC persistence and registry synchronization", () => {
 		soul: "Use the scoped situation.",
 		modelRouter: {
 			enabled: true,
-			judgeEnabled: false,
 			cheapModel: "openai-codex/gpt-5.6-luna",
 			cheapThinking: "low" as const,
 		},
@@ -46,7 +45,7 @@ describe("profile UAC persistence and registry synchronization", () => {
 			model: "openai-codex/gpt-5.6-terra",
 			thinking: "max",
 			soul: "Use the scoped situation.",
-			modelRouter: { enabled: true, judgeEnabled: false, cheapThinking: "low" },
+			modelRouter: { enabled: true, cheapThinking: "low" },
 		});
 		expect(sessionManager.getActiveProfileSoul()).toBe("Use the scoped situation.");
 		expect(sessionManager.getResourceProfileFilter("tools")).toEqual({
@@ -55,7 +54,6 @@ describe("profile UAC persistence and registry synchronization", () => {
 		});
 		expect(sessionManager.getModelRouterSettings()).toMatchObject({
 			enabled: true,
-			judgeEnabled: false,
 			cheapThinking: "low",
 		});
 
@@ -76,7 +74,7 @@ describe("profile UAC persistence and registry synchronization", () => {
 				model: "openai-codex/gpt-5.6-terra",
 				thinking: "max",
 				soul: "Use the scoped situation.",
-				modelRouter: { enabled: true, judgeEnabled: false, cheapThinking: "low" },
+				modelRouter: { enabled: true, cheapThinking: "low" },
 			});
 			expect(fresh.getActiveResourceProfileNames()).toEqual([profileName]);
 			expect(fresh.getResourceProfileFilter("tools")).toEqual({
@@ -85,7 +83,6 @@ describe("profile UAC persistence and registry synchronization", () => {
 			});
 			expect(fresh.getModelRouterSettings()).toMatchObject({
 				enabled: true,
-				judgeEnabled: false,
 				cheapModel: "openai-codex/gpt-5.6-luna",
 				cheapThinking: "low",
 			});
@@ -106,19 +103,16 @@ describe("profile UAC persistence and registry synchronization", () => {
 				soul: "Coordinate the full harness.",
 				modelRouter: {
 					enabled: true,
-					judgeEnabled: false,
 					fitnessGate: true,
 					cheapModel: "openai-codex/gpt-5.6-luna",
 					mediumModel: "openai-codex/gpt-5.6-terra",
 					expensiveModel: "openai-codex/gpt-5.6-sol",
 					learningModel: "openai-codex/gpt-5.6-luna",
-					judgeModel: "openai-codex/gpt-5.6-terra",
 					executorModel: "openai-codex/gpt-5.6-luna",
 					cheapThinking: "low",
 					mediumThinking: "high",
 					expensiveThinking: "ultra",
 					executorThinking: "minimal",
-					judgeThinking: "max",
 				},
 				resources: {
 					extensions: { allow: ["review-extension"] },
@@ -134,19 +128,16 @@ describe("profile UAC persistence and registry synchronization", () => {
 		const router = settingsManager.getModelRouterSettings();
 		expect(router).toMatchObject({
 			enabled: true,
-			judgeEnabled: false,
 			fitnessGate: true,
 			cheapModel: "openai-codex/gpt-5.6-luna",
 			mediumModel: "openai-codex/gpt-5.6-terra",
 			expensiveModel: "openai-codex/gpt-5.6-sol",
 			learningModel: "openai-codex/gpt-5.6-luna",
-			judgeModel: "openai-codex/gpt-5.6-terra",
 			executorModel: "openai-codex/gpt-5.6-luna",
 			cheapThinking: "low",
 			mediumThinking: "high",
 			expensiveThinking: "ultra",
 			executorThinking: "minimal",
-			judgeThinking: "max",
 		});
 		expect(settingsManager.getActiveProfileSoul()).toBe("Coordinate the full harness.");
 		expect(settingsManager.getResourceProfileFilter("tools")).toEqual({
@@ -156,7 +147,6 @@ describe("profile UAC persistence and registry synchronization", () => {
 
 		const saved = JSON.parse(readFileSync(join(agentDir, "profiles", "orchestrated.json"), "utf-8"));
 		expect(saved.soul).toBe("Coordinate the full harness.");
-		expect(saved.modelRouter.judgeThinking).toBe("max");
 	});
 
 	it("updates a basename-named reusable profile without dropping its metadata", () => {

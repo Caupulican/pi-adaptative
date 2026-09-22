@@ -8,12 +8,12 @@
  *      results. Settled only on a decisive band, either way.
  *   2. Still unsettled: a stronger model looks for the one fact in that evidence that settles it,
  *      and System One judges both that the evidence states the fact and that the fact settles the
- *      item. The model finds; Jev decides. A model's word alone settles nothing.
+ *      item. The model finds; System One decides. A model's word alone settles nothing.
  *   3. Still unsettled: it goes to the owner. With the owner in the loop the parent asks them;
  *      under a handoff it is written to the owner's follow-up document and the work goes on around it.
  *
  * Each rung is one evidence pass with evidence the previous pass did not have, so the ladder spends at
- * most {@link GATHER_MORE_LIMIT} Jev passes and never re-asks Jev on unchanged evidence.
+ * most {@link GATHER_MORE_LIMIT} System One passes and never re-asks System One on unchanged evidence.
  */
 
 import { isDecisivelyTrue } from "../decision/noul.ts";
@@ -92,7 +92,7 @@ export const RESERVED_DECISION_KINDS: Readonly<
 
 /**
  * A consult answer grounded in the request: whether the quoted basis backs the answer. Whether the
- * request contains the quote is a fact code checks (`quotedIn`), not a question for Jev.
+ * request contains the quote is a fact code checks (`quotedIn`), not a question for System One.
  */
 export const CONSULT_GROUNDING_QUESTIONS: Readonly<
 	Record<
@@ -158,13 +158,13 @@ export async function settleUnsettledItems(
 	if (items.length === 0) return { settled: [], unsettled: [] };
 	const judge = deps.getJudge();
 	if (!judge) return { settled: [], unsettled: items.map((item) => ({ item, missing: "System One is not bound" })) };
-	// No results to judge is not a question for Jev: there is nothing it could read an answer from.
+	// No results to judge is not a question for System One: there is nothing it could read an answer from.
 	if (!input.evidence.trim())
 		return { settled: [], unsettled: items.map((item) => ({ item, missing: "the agent recorded no tool results" })) };
 	let passes = 0;
 
 	const settled: SettledItem[] = [];
-	// Rung 1: the agent's own tool results, which it did not send to Jev itself.
+	// Rung 1: the agent's own tool results, which it did not send to System One itself.
 	let open: { item: string; missing: string }[];
 	try {
 		passes += 1;
@@ -187,7 +187,7 @@ export async function settleUnsettledItems(
 	}
 	if (open.length === 0 || !deps.consult || passes >= GATHER_MORE_LIMIT) return { settled, unsettled: open };
 
-	// Rung 2: a stronger model names the settling fact; Jev judges the fact and what it settles.
+	// Rung 2: a stronger model names the settling fact; System One judges the fact and what it settles.
 	const consults = await Promise.all(
 		open.map((entry) =>
 			deps

@@ -19,6 +19,7 @@ import { ExpertOutcomeRecorder } from "../expert-routing/outcome-recorder.ts";
 import { ExpertOutcomeStore } from "../expert-routing/outcome-store.ts";
 import { ExpertRankingPolicy } from "../expert-routing/ranking.ts";
 import { ExpertSelectionService } from "../expert-routing/service.ts";
+import type { RouteChoiceJudge } from "../expert-routing/system-one-choice.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ModelAdaptationStore } from "../models/adaptation-store.ts";
 import type { FitnessStore } from "../models/fitness-store.ts";
@@ -93,6 +94,8 @@ export interface CreateAdaptiveRuntimeStackOptions {
 	readonly modelRegistry?: ModelRegistry;
 	readonly fitnessStore?: FitnessStore;
 	readonly adaptationStore?: ModelAdaptationStore;
+	/** System One, when bound: H-MoE's selection asks it to choose the primary expert. */
+	readonly getSelectionJudge?: () => RouteChoiceJudge | undefined;
 	readonly modelPinPolicy?: WorkerModelPinPolicy;
 	readonly isModelExhausted?: (model: Model<Api>) => boolean;
 	readonly taskProfiles?: TaskProfileWriterPort;
@@ -320,7 +323,12 @@ function assembleAdaptiveRuntimeStack(
 		isModelExhausted: options.isModelExhausted,
 	});
 	const expertAdmission = new ExpertAdmissionPolicy();
-	const expertFeatures = new ExpertFeatureBuilder();
+	// The feature builder reads the same probe and measurement stores as the catalog; without them
+	// the ranking ignored probe fitness and measured speed in production.
+	const expertFeatures = new ExpertFeatureBuilder({
+		...(options.fitnessStore ? { fitnessStore: options.fitnessStore } : {}),
+		...(options.adaptationStore ? { adaptationStore: options.adaptationStore } : {}),
+	});
 	const expertRanking = new ExpertRankingPolicy();
 	const expertCapacity = new ExpertCapacityService();
 	const expertOutcomeStore = new ExpertOutcomeStore();
@@ -332,6 +340,7 @@ function assembleAdaptiveRuntimeStack(
 		expertRanking,
 		expertCapacity,
 		expertOutcomeStore,
+		options.getSelectionJudge,
 	);
 
 	// 3. Runtime adaptation coordinator

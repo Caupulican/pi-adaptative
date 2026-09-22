@@ -284,6 +284,10 @@ export interface WorkerDelegationControllerDeps {
 		messages: readonly Message[];
 		signal?: AbortSignal;
 	}): Promise<{ settled: readonly string[]; unsettled: readonly string[]; ownerFollowUp?: string }>;
+	/** The owner's live model policy; a worker bound to a model it disallows is reallocated. */
+	isModelAllowed?(model: Model<Api>): boolean;
+	/** The best model the policy allows, for a worker whose own binding it disallows. */
+	allocateAllowedModel?(): Model<Api> | undefined;
 	/** Parent objective mutation ledger. Workers do not keep a second ownership record. */
 	recordObjectiveMutation?(event: {
 		readonly kind: "owned_write" | "shell";
@@ -808,10 +812,24 @@ export class WorkerDelegationController {
 			},
 			...(this.deps.getForegroundToolNames ? { foregroundToolNames: this.deps.getForegroundToolNames() } : {}),
 			...(this.deps.getCapabilityEnvelope() ? { foregroundEnvelope: this.deps.getCapabilityEnvelope() } : {}),
+			...this.authorityBase(),
+		});
+	}
+
+	/** What every worker authority resolution reads from the host: cwd, models, and the owner's model policy. */
+	private authorityBase(): Pick<
+		WorkerAuthorityResolutionInput,
+		"cwd" | "modelRegistry" | "isModelExhausted" | "isModelAllowed" | "allocateAllowedModel"
+	> {
+		return {
 			cwd: this.deps.getCwd(),
 			modelRegistry: this.deps.getModelRegistry(),
 			isModelExhausted: (model) => this.deps.isModelExhausted(model),
-		});
+			...(this.deps.isModelAllowed
+				? { isModelAllowed: (model: Model<Api>) => this.deps.isModelAllowed!(model) }
+				: {}),
+			...(this.deps.allocateAllowedModel ? { allocateAllowedModel: () => this.deps.allocateAllowedModel!() } : {}),
+		};
 	}
 
 	/** Read-only durable worker projection. Undefined means the delegate capability never loaded. */
@@ -904,9 +922,7 @@ export class WorkerDelegationController {
 		const admitted = resolveWorkerAuthority({
 			base: resolved.resolved,
 			...(modelPin ? { modelPin: modelPin.binding } : {}),
-			cwd: this.deps.getCwd(),
-			modelRegistry: this.deps.getModelRegistry(),
-			isModelExhausted: (model) => this.deps.isModelExhausted(model),
+			...this.authorityBase(),
 		});
 		return admitted.ok
 			? { ok: true, shipment: admitted.shipment }
