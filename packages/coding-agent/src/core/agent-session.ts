@@ -175,7 +175,12 @@ import type { OllamaRuntime, TransformersRuntime } from "./models/local-runtime.
 import { createRepoGitDelivery } from "./objective-execution/delivery-proof.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import { LedgerRouteCheckpoints } from "./objective-execution/ledger-route-checkpoints.ts";
-import { createRepoReleaseDelivery } from "./objective-execution/release-delivery.ts";
+import { ObjectiveMutationLedger } from "./objective-execution/objective-mutation-ledger.ts";
+import {
+	createRepoReleaseDelivery,
+	type TrustedDeployAdapter,
+	TrustedDeployAdapterRegistry,
+} from "./objective-execution/release-delivery.ts";
 import { DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import type { DecisionStageSink } from "./operator-projection/decision-stage-log.ts";
 import { type DeliveryState, SessionOperatorProjection } from "./operator-projection/session-operator-projection.ts";
@@ -330,6 +335,8 @@ export class AgentSession {
 	private readonly _bash: BashExecutionController;
 	private readonly _profileFilter: ProfileFilterController;
 	private readonly _toolGate: ToolGateController;
+	private readonly _mutationLedger = new ObjectiveMutationLedger();
+	private readonly _deployAdapters = new TrustedDeployAdapterRegistry();
 	private readonly _toolSelection: ToolSelectionController;
 	private readonly _toolPerformanceStore: ToolPerformanceStore;
 	private readonly _modelAdaptationStore: ModelAdaptationStore;
@@ -905,6 +912,11 @@ export class AgentSession {
 			waitForForegroundIdle: () => this._foregroundRecovery.waitForIdle(),
 			collectWorkspaceSources: (args) => this._collectWorkspaceSources(args),
 			getPathAliasTable: () => this._pipeline.peekPathAliasTable(),
+			recordObjectiveMutation: (event) => {
+				const objectiveId = this.objectiveMutationId();
+				if (event.kind === "shell") this._mutationLedger.markShellUnsafe(objectiveId);
+				else if (event.path) this._mutationLedger.recordOwnedWrite(objectiveId, event.cwd, event.path);
+			},
 		});
 		this._memory = new MemoryController({
 			acquireSystemSwitchLease: () => {
@@ -1601,6 +1613,13 @@ export class AgentSession {
 					repairId: result.repairWork?.repair_id,
 				};
 			},
+			noteOwnedWrites: (paths, cwd) => {
+				const objectiveId = this.objectiveMutationId();
+				for (const filePath of paths) this._mutationLedger.recordOwnedWrite(objectiveId, cwd, filePath);
+			},
+			noteShellMutation: () => {
+				this._mutationLedger.markShellUnsafe(this.objectiveMutationId());
+			},
 		});
 
 		// Always subscribe to agent events for internal handling
@@ -1641,6 +1660,15 @@ export class AgentSession {
 	/** Objective execution controller, if active for this session. */
 	get objectiveExecutionController(): ObjectiveExecutionController | undefined {
 		return this._objectiveExecutionController;
+	}
+
+	/** Operator or trusted plugin registration. Repository scripts are not adapters. */
+	registerTrustedDeployAdapter(adapter: TrustedDeployAdapter): void {
+		this._deployAdapters.register(adapter);
+	}
+
+	private objectiveMutationId(): string {
+		return this._executionCharter?.objective_id ?? this.sessionId;
 	}
 
 	/** System One steering plane driving semantic validation and certification. */
@@ -1993,6 +2021,7 @@ export class AgentSession {
 			// Authority for external acquisition comes from this charter and nowhere else; the gate is
 			// only constructed once a real charter exists.
 			this._executionCharter = stack.charter;
+			this._mutationLedger.bindObjective(stack.charter.objective_id);
 			const decisionEngine = this._semanticDecisionEngine();
 			this._acquisitionGate = new ExternalCapabilityAcquisitionGate({
 				charter: stack.charter,
@@ -2041,9 +2070,23 @@ export class AgentSession {
 				consumePendingSupervisionRequest: (signalId) => this._workerSupervision.consumePendingRootRequest(signalId),
 				repoRoot: this._cwd,
 				gitExecutor: createRepoGitDelivery(this._cwd),
+				attributedMutationPaths: () => {
+					const objectiveId = this.objectiveMutationId();
+					this._mutationLedger.reconcile(objectiveId, this._cwd);
+					return this._mutationLedger.provenOwnedPaths(objectiveId);
+				},
+				deliveryBlockReason: () => {
+					const objectiveId = this.objectiveMutationId();
+					this._mutationLedger.reconcile(objectiveId, this._cwd);
+					return this._mutationLedger.deliveryBlockReason(objectiveId);
+				},
+				ownedPathDigests: () => this._mutationLedger.ownedDigests(this.objectiveMutationId()),
 				...(() => {
+					const packageIntent = this._executionCharter?.delivery.packagePublish ?? false;
 					const releaseExecutor = createRepoReleaseDelivery(this._cwd, {
 						npmCommand: this.settingsManager.getNpmCommand(),
+						packageIntent,
+						adapters: this._deployAdapters,
 					});
 					return releaseExecutor ? { releaseExecutor } : {};
 				})(),

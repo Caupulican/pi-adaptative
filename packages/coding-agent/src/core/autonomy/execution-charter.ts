@@ -104,7 +104,15 @@ export function compileExecutionCharter(input: CompileExecutionCharterInput): Ex
 	const denyPublish = /\b(do\s+not\s+publish|don't\s+publish|no\s+publish|without\s+publish)\b/i.test(prompt);
 
 	// Check authorizations. Work verbs do not grant commit: fix, implement, repair, refactor, build.
-	const grantPush = !denyPush && (/\bpush\b/i.test(prompt) || Boolean(input.initialGrants?.git?.push));
+	// `push tag <name>` is a tag push, not a branch push. Strip those spans before looking for branch push.
+	const branchPushPrompt = rawPrompt
+		.replace(/\bcreate\s+and\s+push\s+tag\s+[A-Za-z0-9._/-]+/gi, " ")
+		.replace(/\bpush\s+tag\s+[A-Za-z0-9._/-]+/gi, " ");
+	const grantPush = !denyPush && (/\bpush\b/i.test(branchPushPrompt) || Boolean(input.initialGrants?.git?.push));
+	const grantTagPush =
+		!denyPush &&
+		(/\b(?:create\s+and\s+push|push)\s+tag\s+(?!and\b|to\b|when\b|the\b|a\b)[A-Za-z0-9._/-]+/i.test(rawPrompt) ||
+			Boolean(input.initialGrants?.git?.tag_push));
 	const grantCommit = !denyCommit && (/\bcommit\b/i.test(prompt) || Boolean(input.initialGrants?.git?.commit));
 	const grantPublish =
 		!denyPublish &&
@@ -152,7 +160,11 @@ export function compileExecutionCharter(input: CompileExecutionCharterInput): Ex
 		grantPublish,
 		grantGithubRelease,
 		deployTargets: Array.from(deployTargets),
-		git: { ...input.initialGrants?.git, ...(explicitTagName ? { tag_name: explicitTagName } : {}) },
+		git: {
+			...input.initialGrants?.git,
+			...(explicitTagName ? { tag_name: explicitTagName } : {}),
+			...(grantTagPush ? { tag_push: true } : {}),
+		},
 		release: input.initialGrants?.release,
 		admission: input.admission,
 	});

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { withoutInheritedGitLocation } from "../exec.ts";
 import type { CommitReceipt, PublishReceipt, PushReceipt, SideEffectReceipt } from "./delivery-bundle.ts";
 
 /**
@@ -105,11 +106,13 @@ export function proveCommitAndPush(input: {
 		const expectedSha = input.commitRequired ? (input.reportedCommitSha ?? observation.head) : observation.head;
 		const commitRejected = input.commitRequired && provenCommit === undefined;
 		const remoteDisagrees = input.reportedPushRemote !== undefined && input.reportedPushRemote !== observation.remote;
-		const dirtyWithoutCommit =
+		const headDrifted =
 			!input.commitRequired &&
-			(observation.attributableResidue.length > 0 ||
-				(input.candidateRevision !== undefined && observation.head !== input.candidateRevision));
-		if (dirtyWithoutCommit) {
+			(input.candidateRevision === undefined || observation.head !== input.candidateRevision);
+		const dirtyWithoutCommit = !input.commitRequired && observation.attributableResidue.length > 0;
+		if (headDrifted && !dirtyWithoutCommit) {
+			pushError = "stale_candidate";
+		} else if (dirtyWithoutCommit) {
 			pushError = "commit_required_for_dirty_candidate";
 		} else if (
 			!observation.remote ||
@@ -168,35 +171,41 @@ export interface TagProofObservation {
 
 export interface PublishProofObservation {
 	readonly publicationId: string;
+	readonly packageName?: string;
+	readonly version?: string;
+	readonly registry?: string;
+	readonly integrity?: string;
+	readonly shasum?: string;
 }
 
 export interface DeployProofObservation {
 	readonly target: string;
 	readonly deploymentId: string;
+	readonly deployedRevision?: string;
+	readonly artifactDigest?: string;
 }
 
 export function proveTagReceipt(input: {
 	readonly reportedTag?: string;
 	readonly tagError?: string;
-	readonly commitSha?: string;
+	readonly expectedTargetSha?: string;
 	readonly observation?: TagProofObservation;
-}): SideEffectReceipt<{ tag: string }> {
+}): SideEffectReceipt<{ tag: string; targetSha: string }> {
 	if (input.tagError) return { state: "failed", error: input.tagError };
 	if (!input.reportedTag) return { state: "failed", error: "Missing tag" };
+	if (!input.expectedTargetSha) return { state: "failed", error: "tag_target_unspecified" };
 	if (!input.observation) return { state: "failed", error: "tag_proof_unavailable" };
 	if (input.observation.tag !== input.reportedTag) return { state: "failed", error: "tag_name_mismatch" };
-	if (
-		!input.observation.commitSha ||
-		(input.commitSha !== undefined && input.observation.commitSha !== input.commitSha)
-	) {
+	if (!input.observation.commitSha || input.observation.commitSha !== input.expectedTargetSha) {
 		return { state: "failed", error: "tag_commit_mismatch" };
 	}
-	return { state: "proven", detail: { tag: input.observation.tag } };
+	return { state: "proven", detail: { tag: input.observation.tag, targetSha: input.observation.commitSha } };
 }
 
 export function provePublishReceipt(input: {
 	readonly reportedId?: string;
 	readonly error?: string;
+	readonly expectedIntegrity?: string;
 	readonly observation?: PublishProofObservation;
 }): SideEffectReceipt<PublishReceipt> {
 	if (input.error) return { state: "failed", error: input.error };
@@ -205,13 +214,30 @@ export function provePublishReceipt(input: {
 	if (input.observation.publicationId !== input.reportedId) {
 		return { state: "failed", error: "publish_id_mismatch" };
 	}
-	return { state: "proven", detail: { publicationId: input.observation.publicationId } };
+	if (
+		(input.expectedIntegrity && input.observation.integrity !== input.expectedIntegrity) ||
+		(input.expectedIntegrity && !input.observation.integrity)
+	) {
+		return { state: "failed", error: "publish_integrity_mismatch" };
+	}
+	return {
+		state: "proven",
+		detail: {
+			publicationId: input.observation.publicationId,
+			...(input.observation.packageName ? { packageName: input.observation.packageName } : {}),
+			...(input.observation.version ? { version: input.observation.version } : {}),
+			...(input.observation.registry ? { registry: input.observation.registry } : {}),
+			...(input.observation.integrity ? { integrity: input.observation.integrity } : {}),
+		},
+	};
 }
 
 export function proveDeployReceipt(input: {
 	readonly target: string;
 	readonly reportedId?: string;
 	readonly error?: string;
+	readonly expectedRevision?: string;
+	readonly expectedArtifactDigest?: string;
 	readonly observation?: DeployProofObservation;
 }): SideEffectReceipt<{ target: string; deploymentId?: string }> {
 	if (input.error) return { state: "failed", error: input.error, detail: { target: input.target } };
@@ -220,6 +246,20 @@ export function proveDeployReceipt(input: {
 		return { state: "failed", error: "deploy_proof_unavailable", detail: { target: input.target } };
 	if (input.observation.target !== input.target || input.observation.deploymentId !== input.reportedId) {
 		return { state: "failed", error: "deploy_id_mismatch", detail: { target: input.target } };
+	}
+	if (
+		input.observation.deployedRevision !== undefined &&
+		input.expectedRevision !== undefined &&
+		input.observation.deployedRevision !== input.expectedRevision
+	) {
+		return { state: "failed", error: "deploy_revision_mismatch", detail: { target: input.target } };
+	}
+	if (
+		input.observation.artifactDigest !== undefined &&
+		input.expectedArtifactDigest !== undefined &&
+		input.observation.artifactDigest !== input.expectedArtifactDigest
+	) {
+		return { state: "failed", error: "deploy_artifact_mismatch", detail: { target: input.target } };
 	}
 	return {
 		state: "proven",
@@ -245,7 +285,7 @@ function gitOutput(repoRoot: string, args: readonly string[], options?: GitRunOp
 				timeout: options?.network ? NETWORK_GIT_TIMEOUT_MS : LOCAL_GIT_TIMEOUT_MS,
 				signal: options?.signal,
 				env: {
-					...process.env,
+					...withoutInheritedGitLocation(),
 					GIT_TERMINAL_PROMPT: "0",
 					GCM_INTERACTIVE: "never",
 					...options?.env,
@@ -365,8 +405,18 @@ function execFileText(repoRoot: string, args: readonly string[]): string {
 		encoding: "utf8",
 		timeout: LOCAL_GIT_TIMEOUT_MS,
 		maxBuffer: GIT_OUTPUT_MAX_BYTES,
-		env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" },
+		env: { ...withoutInheritedGitLocation(), GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" },
 	}).replace(/\n$/, "");
+}
+
+function peeledTagSha(listed: string, name: string): string {
+	const lines = listed
+		.split(/\r?\n/u)
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0);
+	const peeled = lines.find((line) => line.endsWith(`refs/tags/${name}^{}`));
+	const exact = lines.find((line) => line.endsWith(`refs/tags/${name}`));
+	return ((peeled ?? exact)?.split(/\s+/u)[0] ?? "").trim();
 }
 
 /** Local git commit, push, and proof. Network stays inside this executor, not in completion control flow. */
@@ -374,7 +424,11 @@ export function createRepoGitDelivery(repoRoot: string): {
 	certifyOwnedCandidate(paths: readonly string[], signal?: AbortSignal): Promise<ApprovedCandidateTree>;
 	commit(request: OwnedCommitRequest): Promise<{ sha: string; tree: string; parent: string }>;
 	push(target: { remote: string; ref: string }, signal?: AbortSignal): Promise<{ ref: string; remote: string }>;
-	tag(name: string, signal?: AbortSignal): Promise<{ tag: string }>;
+	tag(name: string, signal?: AbortSignal, targetSha?: string): Promise<{ tag: string; targetSha: string }>;
+	pushTag(
+		request: { readonly remote: string; readonly name: string; readonly expectedSha: string },
+		signal?: AbortSignal,
+	): Promise<{ remote: string; tag: string; observedSha: string }>;
 	proveDelivery(query: DeliveryProofQuery, signal?: AbortSignal): Promise<DeliveryProofObservation>;
 	proveTag(tag: string, signal?: AbortSignal): Promise<TagProofObservation>;
 } {
@@ -429,11 +483,31 @@ export function createRepoGitDelivery(repoRoot: string): {
 			await gitText(repoRoot, ["push", target.remote, `HEAD:${target.ref}`], { signal, network: true });
 			return { remote: target.remote, ref: target.ref };
 		},
-		async tag(name, signal) {
+		async tag(name, signal, targetSha) {
 			if (!name?.trim()) throw new Error("tag_name_required");
+			if (targetSha) {
+				const head = await gitText(repoRoot, ["rev-parse", "HEAD"], { signal });
+				const porcelain = await gitOutput(repoRoot, ["status", "--porcelain"], { signal });
+				if (porcelain.trim()) throw new Error("commit_required_for_dirty_candidate");
+				if (head !== targetSha) throw new Error("stale_candidate");
+			}
 			// -m supplies the message git asks for when this repo signs or annotates tags.
-			await gitText(repoRoot, ["tag", "-m", name, name], { signal });
-			return { tag: name };
+			const args = targetSha ? ["tag", "-m", name, name, targetSha] : ["tag", "-m", name, name];
+			await gitText(repoRoot, args, { signal });
+			const commitSha = await gitText(repoRoot, ["rev-parse", `${name}^{}`], { signal });
+			if (targetSha && commitSha !== targetSha) throw new Error("tag_commit_mismatch");
+			return { tag: name, targetSha: commitSha };
+		},
+		async pushTag(request, signal) {
+			const name = request.name.trim();
+			if (!name) throw new Error("tag_name_required");
+			if (!request.remote) throw new Error("tag_push_upstream_unavailable");
+			const ref = `refs/tags/${name}`;
+			await gitText(repoRoot, ["push", request.remote, `${ref}:${ref}`], { signal, network: true });
+			const listed = await gitText(repoRoot, ["ls-remote", request.remote, ref], { signal, network: true });
+			const observedSha = peeledTagSha(listed, name);
+			if (!observedSha || observedSha !== request.expectedSha) throw new Error("tag_push_sha_mismatch");
+			return { remote: request.remote, tag: name, observedSha };
 		},
 		async proveDelivery(query, signal) {
 			const head = await gitText(repoRoot, ["rev-parse", "HEAD"], { signal });

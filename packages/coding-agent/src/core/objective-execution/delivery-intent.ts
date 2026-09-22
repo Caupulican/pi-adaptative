@@ -6,6 +6,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { withoutInheritedGitLocation } from "../exec.ts";
 
 export interface GitCommitIntent {
 	readonly exact: true;
@@ -22,6 +23,8 @@ export interface GitTagIntent {
 	readonly exact: true;
 	readonly name: string;
 	readonly push: boolean;
+	/** Frozen at admission when this tag is pushed. Branch push is a separate intent. */
+	readonly remote?: string;
 }
 
 export interface PackagePublishIntent {
@@ -66,6 +69,8 @@ export interface DeliveryAdmission {
 	readonly packageVersion?: string;
 	readonly packagePrivate?: boolean;
 	readonly registry?: string;
+	/** Present when this admission was read from a real checkout. Registry is read from here once. */
+	readonly repoRoot?: string;
 }
 
 export interface DeliveryInitialGitGrant {
@@ -129,6 +134,7 @@ export function observeDeliveryAdmission(repoRoot: string): DeliveryAdmission {
 			packageName: manifest?.name,
 			packageVersion: manifest?.version,
 			packagePrivate: manifest?.privatePackage,
+			repoRoot,
 		};
 	} catch {
 		return failed;
@@ -170,8 +176,13 @@ export function compileDeliveryIntent(input: {
 	let tag: false | GitTagIntent = false;
 	if (input.grantTag) {
 		if (!tagName) unresolved.push({ action: "tag", error: "tag_name_required" });
-		else tag = { exact: true, name: tagName, push: tagPush };
-		if (tagPush) unresolved.push({ action: "tag_push", error: "tag_push_unsupported" });
+		else if (tagPush) {
+			const remote = input.git?.push_remote ?? admission?.upstream?.remote;
+			if (!remote || admission?.detached) {
+				unresolved.push({ action: "tag_push", error: "tag_push_upstream_unavailable" });
+				tag = { exact: true, name: tagName, push: true };
+			} else tag = { exact: true, name: tagName, push: true, remote };
+		} else tag = { exact: true, name: tagName, push: false };
 	}
 
 	let packagePublish: false | PackagePublishIntent = false;
@@ -180,10 +191,17 @@ export function compileDeliveryIntent(input: {
 			input.release?.package_name ?? (admission?.packagePrivate ? undefined : admission?.packageName);
 		const version =
 			input.release?.package_version ?? (admission?.packagePrivate ? undefined : admission?.packageVersion);
-		const registry = input.release?.package_registry ?? admission?.registry;
-		if (!packageName || !version)
+		if (!packageName || !version) {
 			unresolved.push({ action: "package_publish", error: "package_identity_unavailable" });
-		else packagePublish = { packageName, version, ...(registry ? { registry } : {}) };
+		} else {
+			const registry =
+				input.release?.package_registry ??
+				admission?.registry ??
+				(admission?.repoRoot ? readDefaultNpmRegistry(admission.repoRoot) : undefined);
+			if (admission?.repoRoot && !registry) {
+				unresolved.push({ action: "package_publish", error: "package_registry_unavailable" });
+			} else packagePublish = { packageName, version, ...(registry ? { registry } : {}) };
+		}
 	}
 
 	const adapters = input.release?.deploy_adapters ?? [];
@@ -215,13 +233,34 @@ export function unresolvedError(intent: DeliveryIntent, action: DeliveryUnresolv
 	return intent.unresolved.find((entry) => entry.action === action)?.error;
 }
 
+/** One registry read at admission, from the checkout npm would publish. Publish does not read this again. */
+function readDefaultNpmRegistry(repoRoot: string): string | undefined {
+	try {
+		const value = execFileSync(
+			process.platform === "win32" ? "npm.cmd" : "npm",
+			["config", "get", "registry", "--workspaces=false"],
+			{
+				cwd: repoRoot,
+				encoding: "utf8",
+				timeout: 15_000,
+				maxBuffer: 1_048_576,
+				env: { ...process.env, NPM_CONFIG_YES: "false", GIT_TERMINAL_PROMPT: "0" },
+			},
+		).trim();
+		if (!value || value === "undefined" || value === "null") return undefined;
+		return value;
+	} catch {
+		return undefined;
+	}
+}
+
 function gitText(repoRoot: string, args: readonly string[]): string {
 	return execFileSync("git", args, {
 		cwd: repoRoot,
 		encoding: "utf8",
 		timeout: 15_000,
 		maxBuffer: 1_048_576,
-		env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" },
+		env: { ...withoutInheritedGitLocation(), GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" },
 	}).trim();
 }
 

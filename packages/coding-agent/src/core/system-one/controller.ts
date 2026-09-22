@@ -671,11 +671,14 @@ export class SystemOneController {
 						run_id: this.store.runId,
 						session_id: this.store.runId,
 						hook: "completion_candidate",
-						impact: "repo_mutation",
+						impact: "read_only",
 					},
 					{ signal: options?.signal },
 				);
-				if (hookResult.decision !== "allow") {
+				const mutationRequested = hookResult.reasonCodes.some(
+					(code) => code === "mutation_requested" || code === "repo_mutation",
+				);
+				if (hookResult.decision !== "allow" || mutationRequested) {
 					finalVerdict.verdict = hookResult.decision === "replan" ? "rework" : "blocked_external";
 					finalVerdict.failed_gates.push({
 						id: "external_hook_gate",

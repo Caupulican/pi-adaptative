@@ -1,4 +1,9 @@
 import { execFileSync } from "node:child_process";
+
+for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"]) {
+	delete process.env[key];
+}
+
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -842,7 +847,10 @@ describe("completion catalog thresholds and release binding", () => {
 		writeFileSync(join(root, "package.json"), JSON.stringify({ name: "pkg", version: "1.0.0", private: true }));
 		expect(createRepoReleaseDelivery(root)).toBeUndefined();
 		writeFileSync(join(root, "package.json"), JSON.stringify({ name: "pkg", version: "1.0.0" }));
-		const publishOnly = createRepoReleaseDelivery(root);
+		expect(createRepoReleaseDelivery(root)?.publish).toBeUndefined();
+		const publishOnly = createRepoReleaseDelivery(root, {
+			packageIntent: { packageName: "pkg", version: "1.0.0", registry: "https://registry.example.test" },
+		});
 		expect(typeof publishOnly?.publish).toBe("function");
 		expect(typeof publishOnly?.provePublish).toBe("function");
 		expect(publishOnly?.deploy).toBeUndefined();

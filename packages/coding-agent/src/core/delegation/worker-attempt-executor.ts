@@ -17,6 +17,7 @@ import type { WorkerRequest } from "../autonomy/contracts.ts";
 import type { LaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { type ModelCapabilityProfile, resolveWorkerOutputTokenCeiling } from "../model-capability.ts";
+import { classifyDangerousGitBash } from "../objective-execution/dangerous-git-bash.ts";
 import { attemptUsageFromGatewayUsage, EMPTY_ATTEMPT_USAGE } from "../orchestration/attempt-usage.ts";
 import { CapabilityGatewayDeniedError, type ProviderBudgetReservation } from "../orchestration/capability-gateway.ts";
 import type { ArtifactContract, AttemptUsageSnapshot, ExecutionGrant } from "../orchestration/contracts.ts";
@@ -170,6 +171,12 @@ export interface WorkerAttemptExecutorOptions {
 	 * is swallowed by its own owner rather than failing the worker.
 	 */
 	observeWorkerProgress?(observation: WorkerProgressObservation): Promise<unknown> | unknown;
+	/** Parent objective ledger. Shell edits stay unattributed. Successful writes record a content digest. */
+	recordObjectiveMutation?(event: {
+		readonly kind: "owned_write" | "shell";
+		readonly path?: string;
+		readonly cwd: string;
+	}): void;
 }
 
 function workerCompletionCallbackFailure(error: unknown): Error {
@@ -694,9 +701,21 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												throw error;
 											}
 										},
-										afterToolCall: async ({ toolCall, args }) => {
+										afterToolCall: async ({ toolCall, args, isError }) => {
 											try {
+												if (toolCall.name === "bash") {
+													const command =
+														args && typeof args === "object" && !Array.isArray(args)
+															? (args as { command?: unknown }).command
+															: undefined;
+													const readOnly =
+														typeof command === "string" && classifyDangerousGitBash(command).readOnly;
+													if (!readOnly) {
+														options.recordObjectiveMutation?.({ kind: "shell", cwd: options.cwd });
+													}
+												}
 												if (
+													!isError &&
 													(toolCall.name === "write" || toolCall.name === "edit") &&
 													args &&
 													typeof args === "object" &&
@@ -713,9 +732,16 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 														} catch {
 															// The operation entered execution; retain its lexical target if canonicalization failed.
 														}
-														recordChangedFile(
-															path.relative(options.cwd, canonicalPath).split(path.sep).join("/"),
-														);
+														const relativePath = path
+															.relative(options.cwd, canonicalPath)
+															.split(path.sep)
+															.join("/");
+														recordChangedFile(relativePath);
+														options.recordObjectiveMutation?.({
+															kind: "owned_write",
+															path: relativePath,
+															cwd: options.cwd,
+														});
 													}
 												}
 												signal.throwIfAborted();

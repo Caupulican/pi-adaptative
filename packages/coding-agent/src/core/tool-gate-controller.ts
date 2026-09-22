@@ -14,6 +14,7 @@ import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
 import { classifyAllEdgeOperations, type EdgeClass } from "./autonomy/edge-policy.ts";
 import { evaluateToolGateAsync } from "./autonomy/gates.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
+import { classifyDangerousGitBash } from "./objective-execution/dangerous-git-bash.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import type { SystemOneForegroundControl } from "./system-one/foreground-control.ts";
 import type { SystemOneController } from "./system-one/index.ts";
@@ -88,6 +89,10 @@ export interface ToolGateControllerDeps {
 		toolName: string;
 		changedFiles: readonly string[];
 	}): Promise<{ blocked: boolean; explanation?: string; repairId?: string } | undefined>;
+	/** Successful typed edit/write paths, hashed by the session ledger. */
+	noteOwnedWrites?(paths: readonly string[], cwd: string): void;
+	/** A bash command that was not read-only git already ran. Shared-worktree commit stays unattributed. */
+	noteShellMutation?(): void;
 }
 
 /** File paths a mutation tool call names in its own arguments. */
@@ -109,6 +114,21 @@ export function collectMutatedPaths(toolName: string, args: unknown): string[] {
 	return [...new Set(paths)];
 }
 
+function bashCommand(args: unknown): string | undefined {
+	if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+	const command = (args as { command?: unknown }).command;
+	return typeof command === "string" ? command : undefined;
+}
+
+function refuseDangerousGit(toolName: string, args: unknown): { block: true; reason: string } | undefined {
+	if (toolName !== "bash") return undefined;
+	const command = bashCommand(args);
+	if (!command) return undefined;
+	const verdict = classifyDangerousGitBash(command);
+	if (!verdict.refused) return undefined;
+	return { block: true, reason: verdict.reason ?? "dangerous git is refused" };
+}
+
 export class ToolGateController {
 	private readonly deps: ToolGateControllerDeps;
 
@@ -121,6 +141,8 @@ export class ToolGateController {
 		signal,
 	) => {
 		signal?.throwIfAborted();
+		const dangerousGit = refuseDangerousGit(toolCall.name, args);
+		if (dangerousGit) return dangerousGit;
 		// Session model selection may change during a provider response or any awaited hook.
 		const modelRef = `${assistantMessage.provider}/${assistantMessage.model}`;
 		const escalation = this.deps.maybeEscalateToolCall(toolCall.name, args);
@@ -196,6 +218,8 @@ export class ToolGateController {
 			// 3. Post-hook arguments: direct-script gate, then the envelope on what will really run
 			// Hooks rewrite event.input in place. The executor retains this same args object;
 			// extension return values carry control decisions, never replacement arguments.
+			const rewrittenGit = refuseDangerousGit(toolCall.name, args);
+			if (rewrittenGit) return rewrittenGit;
 			const effectiveCwd = executionContext?.cwd ?? scopeCwd;
 			if (this.deps.checkDirectScriptExecution) {
 				const directCheck = this.deps.checkDirectScriptExecution(toolCall.name, args, effectiveCwd);
@@ -332,6 +356,10 @@ export class ToolGateController {
 		// Retired first and synchronously, before any hook here can throw -- a write rejected by its own
 		// preflight would otherwise park a later bash in the same batch for the rest of the turn.
 		retireToolCall(toolCall.id, this.deps.getMutationScope?.());
+		if (toolCall.name === "bash") {
+			const command = bashCommand(args);
+			if (!command || !classifyDangerousGitBash(command).readOnly) this.deps.noteShellMutation?.();
+		}
 		const selection = this.deps.getToolSelectionController?.();
 		try {
 			const runner = this.deps.getExtensionRunner();
@@ -429,6 +457,9 @@ export class ToolGateController {
 							terminate,
 						};
 					}
+				}
+				if (changedFiles.length > 0) {
+					this.deps.noteOwnedWrites?.(changedFiles, executionContext?.cwd ?? this.deps.getCwd());
 				}
 			}
 

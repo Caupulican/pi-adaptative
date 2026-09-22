@@ -15,6 +15,7 @@
 
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
+import { classifyDangerousGitBash } from "../objective-execution/dangerous-git-bash.ts";
 import type { WorktreeSyncPolicy } from "./codes.ts";
 import { deriveLaneFacts, type RepoContext, resolveRepoContext, type WorktreeSyncEngineDeps } from "./git-engine.ts";
 import { readLane } from "./store.ts";
@@ -31,7 +32,6 @@ const SYNC_SAFE_GIT_SUBCOMMANDS = new Set([
 	"show",
 	"add",
 	"commit",
-	"stash",
 	"rev-parse",
 	"ls-files",
 	"blame",
@@ -68,6 +68,13 @@ export function classifyLaneBashCommand(command: string, mainBranch: string): La
 		return {
 			verdict: "main_mutation_refused",
 			reason: "quoted command names are refused in a lane; use the typed Git actions",
+		};
+	}
+	const dangerous = classifyDangerousGitBash(command);
+	if (dangerous.refused) {
+		return {
+			verdict: "main_mutation_refused",
+			reason: dangerous.reason ?? "dangerous git is refused",
 		};
 	}
 	const segments = [command];

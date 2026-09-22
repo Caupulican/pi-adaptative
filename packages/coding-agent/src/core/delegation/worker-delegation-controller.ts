@@ -253,6 +253,12 @@ export interface WorkerDelegationControllerDeps {
 	getEdgeGrants?(): readonly EdgeGrantView[];
 	/** Host-owned path alias table getter for expanding alias tokens in worker tool arguments. */
 	getPathAliasTable?: () => PathAliasTable;
+	/** Parent objective mutation ledger. Workers do not keep a second ownership record. */
+	recordObjectiveMutation?(event: {
+		readonly kind: "owned_write" | "shell";
+		readonly path?: string;
+		readonly cwd: string;
+	}): void;
 }
 
 type WorkerAdmission =
@@ -3252,6 +3258,7 @@ export class WorkerDelegationController {
 				: undefined,
 			warn: (message) => this.safeWarn(message),
 			...(this.deps.observeWorkerProgress ? { observeWorkerProgress: this.deps.observeWorkerProgress } : {}),
+			...(this.deps.recordObjectiveMutation ? { recordObjectiveMutation: this.deps.recordObjectiveMutation } : {}),
 		});
 		// Held for this specialist across the whole execution and released only after the finally has
 		// awaited tool-surface disposal: a terminal record is not evidence that its resources are gone.

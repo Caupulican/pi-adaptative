@@ -64,6 +64,7 @@ import {
 	deliveryReceiptFailed,
 	executeDelivery,
 } from "./delivery-coordinator.ts";
+import { type ApprovedCandidateTree, candidateTreeDigest } from "./delivery-proof.ts";
 import { finalizeDelivery } from "./finalization-coordinator.ts";
 import { completionFailuresToRepairWork, type RepairWork } from "./objective-repair-work.ts";
 import {
@@ -189,6 +190,9 @@ export interface ObjectiveExecutionControllerDeps {
 	authorityBlockLedger?: DurableAuthorityBlockLedger;
 	/** Paths the objective itself wrote. Unlisted worktree changes block automatic git delivery. */
 	attributedMutationPaths?(): readonly string[];
+	/** Precise reason the owned-path set is empty: shell mutation or digest drift. */
+	deliveryBlockReason?(): string | undefined;
+	ownedPathDigests?(): readonly { readonly path: string; readonly digest: string }[];
 	gitExecutor?: DeliveryGitExecutor;
 	releaseExecutor?: DeliveryReleaseExecutor;
 	steeringPlane?: SystemOneSteeringPlane;
@@ -418,6 +422,9 @@ export class ObjectiveExecutionController {
 				| "repoRoot"
 				| "gitExecutor"
 				| "releaseExecutor"
+				| "attributedMutationPaths"
+				| "deliveryBlockReason"
+				| "ownedPathDigests"
 			>
 		>,
 	): void {
@@ -790,6 +797,32 @@ export class ObjectiveExecutionController {
 			decisionRefs: extra?.decisionRefs,
 			failedGates: extra?.reasonCodes,
 		});
+	}
+
+	private async refuseDelivery(
+		objectiveId: string,
+		runtime: TaskRuntimeProjection,
+		error: string,
+		effect: "commit" | "publish" = "commit",
+	): Promise<ObjectiveTerminalResult> {
+		const base = await this.buildBundle(objectiveId, "unrecoverable", runtime, { reasonCodes: [error] });
+		const failed = { state: "failed" as const, error };
+		return {
+			status: "unrecoverable",
+			reasonCodes: [error],
+			cycleCount: this.cycleCounter,
+			deliveryBundle: buildDeliveryBundle({
+				objectiveId,
+				terminalStatus: "unrecoverable",
+				sourceRevision: base.source_revision,
+				acceptance: base.acceptance,
+				verification: base.verification,
+				artifacts: base.artifacts,
+				limitations: base.limitations,
+				failedGates: [error],
+				sideEffects: effect === "publish" ? { publish: failed } : { commit: failed },
+			}),
+		};
 	}
 
 	private async rejectedCompletion(
@@ -1183,6 +1216,36 @@ export class ObjectiveExecutionController {
 					const candidateSnapshot = captureOptionalSnapshot(this.deps.repoRoot);
 					const diffDigest = candidateSnapshot?.digest ?? "unknown";
 					const snapshotIdentity = candidateSnapshot ? candidateSnapshotIdentity(candidateSnapshot) : undefined;
+					const charterForFreeze = this.deps.executionCharter;
+					let frozenGit: ApprovedCandidateTree | undefined;
+					const frozenPaths = this.deps.attributedMutationPaths?.() ?? [];
+					const frozenDigests = this.deps.ownedPathDigests?.() ?? [];
+					if (charterForFreeze?.git.commit) {
+						const ownershipBlock = this.deps.deliveryBlockReason?.();
+						if (ownershipBlock) return this.refuseDelivery(objectiveId, runtime, ownershipBlock);
+						const git = this.deps.gitExecutor;
+						if (git?.certifyOwnedCandidate) {
+							try {
+								frozenGit = await git.certifyOwnedCandidate(frozenPaths, signal);
+							} catch (error) {
+								const message = error instanceof Error ? error.message : String(error);
+								return this.refuseDelivery(objectiveId, runtime, message);
+							}
+							if (candidateSnapshot && frozenGit.parent !== candidateSnapshot.candidateRevision) {
+								return this.refuseDelivery(objectiveId, runtime, "stale_candidate");
+							}
+						} else if (git?.inspectCandidate) {
+							try {
+								frozenGit = await git.inspectCandidate();
+							} catch (error) {
+								const message = error instanceof Error ? error.message : String(error);
+								return this.refuseDelivery(objectiveId, runtime, message);
+							}
+						}
+					}
+					const worktreeClean = candidateSnapshot
+						? candidateSnapshot.trackedDiffBytes.length === 0 && candidateSnapshot.untracked.length === 0
+						: undefined;
 
 					const canonicalProofState = {
 						objectiveId,
@@ -1197,6 +1260,15 @@ export class ObjectiveExecutionController {
 						candidateSnapshot: snapshotIdentity,
 						artifacts,
 						limitations,
+						deliveryCandidate: frozenGit
+							? {
+									approvedParent: frozenGit.parent,
+									approvedTreeOid: frozenGit.tree,
+									treeDigest: candidateTreeDigest(frozenGit.tree),
+									ownedPaths: frozenPaths,
+									ownedDigests: frozenDigests,
+								}
+							: undefined,
 					};
 
 					// 1. PH-150, FC-062: JEV-024 completion plausibility on canonical proof state BEFORE finalization gates
@@ -1394,6 +1466,23 @@ export class ObjectiveExecutionController {
 
 						// 8. PH-156, PH-157, FC-066: JEV-028 gates publish AND/OR deploy
 						const activeCharter = this.deps.executionCharter;
+						let packageArtifact:
+							| { packageName: string; version: string; registry?: string; integrity: string }
+							| undefined;
+						if (activeCharter?.release.package_publish && this.deps.releaseExecutor?.preparePublish) {
+							try {
+								const prepared = await this.deps.releaseExecutor.preparePublish();
+								packageArtifact = {
+									packageName: prepared.packageName,
+									version: prepared.version,
+									registry: prepared.registry,
+									integrity: prepared.integrity,
+								};
+							} catch (error) {
+								const message = error instanceof Error ? error.message : String(error);
+								return this.refuseDelivery(objectiveId, runtime, message, "publish");
+							}
+						}
 						if (activeCharter) {
 							const needsPublishOrDeploy =
 								activeCharter.release.package_publish || activeCharter.release.deploy_targets.length > 0;
@@ -1405,6 +1494,7 @@ export class ObjectiveExecutionController {
 										publishRequested: Boolean(activeCharter.release.package_publish),
 										deployTargets: activeCharter.release.deploy_targets,
 										releaseRules: activeCharter.release,
+										packageArtifact,
 									},
 									{ objectiveId, evidenceRevision, signal },
 								);
@@ -1433,7 +1523,12 @@ export class ObjectiveExecutionController {
 							release: this.deps.releaseExecutor,
 							signal,
 							candidateUntrackedPaths: candidateSnapshot?.untracked.map((file) => file.path) ?? [],
-							attributedPaths: this.deps.attributedMutationPaths?.() ?? [],
+							attributedPaths: frozenPaths,
+							candidateRevision: candidateSnapshot?.candidateRevision,
+							approvedTreeOid: frozenGit?.tree,
+							approvedParent: frozenGit?.parent,
+							worktreeClean,
+							expectedArtifactDigest: packageArtifact?.integrity,
 						});
 						const requiredReceiptFailed = deliveryReceiptFailed(sideEffects);
 

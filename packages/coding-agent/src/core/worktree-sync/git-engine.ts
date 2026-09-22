@@ -16,7 +16,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { join } from "node:path";
-import { type ExecResult, execCommand } from "../exec.ts";
+import { type ExecResult, execCommand, withoutInheritedGitLocation } from "../exec.ts";
 import { withFileLock } from "../util/atomic-file.ts";
 import {
 	type AbortSyncResult,
@@ -118,7 +118,13 @@ export function createDefaultWorktreeSyncExec(): WorktreeSyncExec {
 }
 
 function runGit(deps: WorktreeSyncEngineDeps, cwd: string, args: string[]): Promise<ExecResult> {
-	return deps.exec("git", args, { cwd, timeout: GIT_TIMEOUT_MS, signal: deps.signal, maxBuffer: GIT_MAX_BUFFER });
+	return deps.exec("git", args, {
+		cwd,
+		timeout: GIT_TIMEOUT_MS,
+		signal: deps.signal,
+		maxBuffer: GIT_MAX_BUFFER,
+		env: withoutInheritedGitLocation(),
+	});
 }
 
 function nowIso(deps: WorktreeSyncEngineDeps): string {

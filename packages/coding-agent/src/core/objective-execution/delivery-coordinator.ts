@@ -22,15 +22,35 @@ export interface DeliveryGitExecutor {
 		target?: { readonly remote: string; readonly ref: string },
 		signal?: AbortSignal,
 	): Promise<{ ref: string; remote?: string } | undefined>;
-	tag?(name?: string, signal?: AbortSignal): Promise<{ tag: string } | undefined>;
+	tag?(
+		name?: string,
+		signal?: AbortSignal,
+		targetSha?: string,
+	): Promise<{ tag: string; targetSha?: string } | undefined>;
+	pushTag?(
+		request: { readonly remote: string; readonly name: string; readonly expectedSha: string },
+		signal?: AbortSignal,
+	): Promise<{ remote: string; tag: string; observedSha: string } | undefined>;
 	proveDelivery?(query: DeliveryProofQuery, signal?: AbortSignal): Promise<DeliveryProofObservation>;
 	proveTag?(tag: string, signal?: AbortSignal): Promise<TagProofObservation>;
 	inspectCandidate?(): Promise<ApprovedCandidateTree>;
 	certifyOwnedCandidate?(paths: readonly string[], signal?: AbortSignal): Promise<ApprovedCandidateTree>;
 }
 
+export interface PreparedPackageArtifact {
+	readonly id: string;
+	readonly packageName: string;
+	readonly version: string;
+	readonly registry?: string;
+	readonly integrity: string;
+	readonly shasum: string;
+}
+
 export interface DeliveryReleaseExecutor {
-	publish?(): Promise<{ id: string } | undefined>;
+	preparePublish?(): Promise<PreparedPackageArtifact>;
+	publish?(): Promise<
+		{ id: string; integrity?: string; packageName?: string; version?: string; registry?: string } | undefined
+	>;
 	deploy?(target: string): Promise<{ id: string } | undefined>;
 	provePublish?(publicationId: string): Promise<PublishProofObservation>;
 	proveDeploy?(target: string): Promise<DeployProofObservation>;
@@ -43,6 +63,14 @@ export interface DeliveryExecutionInput {
 	readonly signal?: AbortSignal;
 	readonly candidateUntrackedPaths: readonly string[];
 	readonly attributedPaths: readonly string[];
+	/** Semantic candidate HEAD. Push-only compares the live HEAD to this revision. */
+	readonly candidateRevision?: string;
+	readonly approvedTreeOid?: string;
+	readonly approvedParent?: string;
+	/** False when the frozen candidate still has worktree edits and no commit will absorb them. */
+	readonly worktreeClean?: boolean;
+	readonly expectedDeployRevision?: string;
+	readonly expectedArtifactDigest?: string;
 }
 
 function messageOf(error: unknown): string {
@@ -76,15 +104,23 @@ export async function executeDelivery(input: DeliveryExecutionInput): Promise<De
 	let reportedTag: string | undefined;
 	let tagError: string | undefined;
 	let reportedPublicationId: string | undefined;
+	let reportedIntegrity: string | undefined;
 	let publishError: string | undefined;
 	const reportedDeploys: { target: string; id?: string; error?: string }[] = [];
+	let tagTargetSha: string | undefined;
 
 	if (charter.git.commit) {
 		if (gitBlocked) commitError = "delivery_unsafe_unowned_changes";
 		else if (!input.git?.commit) commitError = "Git commit unavailable";
 		else {
 			try {
-				if (input.git.inspectCandidate) approved = await input.git.inspectCandidate();
+				if (input.approvedParent && input.approvedTreeOid) {
+					approved = {
+						parent: input.approvedParent,
+						tree: input.approvedTreeOid,
+						digest: candidateTreeDigest(input.approvedTreeOid),
+					};
+				} else if (input.git.inspectCandidate) approved = await input.git.inspectCandidate();
 				else if (input.git.certifyOwnedCandidate) {
 					approved = await input.git.certifyOwnedCandidate(input.attributedPaths, input.signal);
 				} else commitError = "candidate_tree_unavailable";
@@ -114,13 +150,37 @@ export async function executeDelivery(input: DeliveryExecutionInput): Promise<De
 		if (blocked) tagError = blocked;
 		else if (!intent.git.tag) tagError = "tag_name_required";
 		else if (!input.git?.tag) tagError = "Git tag unavailable";
-		else {
-			try {
-				const tagRes = await input.git.tag(intent.git.tag.name, input.signal);
-				if (tagRes && typeof tagRes === "object" && "tag" in tagRes && tagRes.tag) reportedTag = String(tagRes.tag);
-				else tagError = "Missing tag";
-			} catch (error) {
-				tagError = messageOf(error);
+		else if (charter.git.commit && (commitError !== undefined || !reportedCommitSha)) {
+			tagError = commitError ?? "commit_required_for_dirty_candidate";
+		} else if (!charter.git.commit && input.worktreeClean === false) {
+			tagError = "commit_required_for_dirty_candidate";
+		} else if (!charter.git.commit && !input.candidateRevision) {
+			tagError = "tag_target_unspecified";
+		} else {
+			tagTargetSha = charter.git.commit ? reportedCommitSha : input.candidateRevision;
+			if (!tagTargetSha) tagError = "tag_target_unspecified";
+			else {
+				try {
+					const tagRes = await input.git.tag(intent.git.tag.name, input.signal, tagTargetSha);
+					if (tagRes && typeof tagRes === "object" && "tag" in tagRes && tagRes.tag)
+						reportedTag = String(tagRes.tag);
+					else tagError = "Missing tag";
+					if (tagError === undefined && intent.git.tag.push) {
+						if (!intent.git.tag.remote) tagError = "tag_push_upstream_unavailable";
+						else if (!input.git.pushTag) tagError = "tag_push_unavailable";
+						else {
+							const pushed = await input.git.pushTag(
+								{ remote: intent.git.tag.remote, name: intent.git.tag.name, expectedSha: tagTargetSha },
+								input.signal,
+							);
+							if (!pushed || pushed.observedSha !== tagTargetSha || pushed.remote !== intent.git.tag.remote) {
+								tagError = "tag_push_sha_mismatch";
+							}
+						}
+					}
+				} catch (error) {
+					tagError = messageOf(error);
+				}
 			}
 		}
 	}
@@ -155,6 +215,7 @@ export async function executeDelivery(input: DeliveryExecutionInput): Promise<De
 				const pubRes = await input.release.publish();
 				if (pubRes && typeof pubRes === "object" && "id" in pubRes && pubRes.id) {
 					reportedPublicationId = String(pubRes.id);
+					if ("integrity" in pubRes && typeof pubRes.integrity === "string") reportedIntegrity = pubRes.integrity;
 				} else publishError = "Missing id";
 			} catch (error) {
 				publishError = messageOf(error);
@@ -165,7 +226,7 @@ export async function executeDelivery(input: DeliveryExecutionInput): Promise<De
 	if (charter.release.deploy_targets.length > 0) {
 		if (!input.release?.deploy) {
 			for (const target of charter.release.deploy_targets)
-				reportedDeploys.push({ target, error: "Deploy unavailable" });
+				reportedDeploys.push({ target, error: "deploy_adapter_unavailable" });
 		} else {
 			for (const target of charter.release.deploy_targets) {
 				try {
@@ -223,7 +284,7 @@ export async function executeDelivery(input: DeliveryExecutionInput): Promise<De
 		reportedPushRemote,
 		pushError,
 		candidateDigest: approved ? candidateTreeDigest(approved.tree) : undefined,
-		candidateRevision: approved?.parent,
+		candidateRevision: commitRequired ? approved?.parent : input.candidateRevision,
 		approvedTreeOid: approved?.tree,
 		approvedParent: approved?.parent,
 		observation,
@@ -241,10 +302,11 @@ export async function executeDelivery(input: DeliveryExecutionInput): Promise<De
 			}
 		}
 		const provenCommitSha = sideEffects.commit?.state === "proven" ? sideEffects.commit.detail.sha : undefined;
+		const expectedTargetSha = charter.git.commit ? provenCommitSha : input.candidateRevision;
 		sideEffects.tag = proveTagReceipt({
 			reportedTag,
 			tagError,
-			commitSha: provenCommitSha,
+			expectedTargetSha,
 			observation: tagObservation,
 		});
 	}
@@ -261,6 +323,7 @@ export async function executeDelivery(input: DeliveryExecutionInput): Promise<De
 		sideEffects.publish = provePublishReceipt({
 			reportedId: reportedPublicationId,
 			error: publishError,
+			expectedIntegrity: reportedIntegrity,
 			observation: publishObservation,
 		});
 	}
@@ -282,6 +345,8 @@ export async function executeDelivery(input: DeliveryExecutionInput): Promise<De
 					target: deployment.target,
 					reportedId: deployment.id,
 					error,
+					expectedRevision: input.expectedDeployRevision ?? input.candidateRevision,
+					expectedArtifactDigest: input.expectedArtifactDigest,
 					observation: deployObservation,
 				}),
 			);

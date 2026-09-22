@@ -3,6 +3,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { execCommand } from "../src/core/exec.ts";
+
+for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"]) {
+	delete process.env[key];
+}
+
 import {
 	createDefaultWorktreeSyncExec,
 	createLane,
@@ -64,7 +69,8 @@ describe("classifyLaneBashCommand (G10)", () => {
 			"main_mutation_refused",
 		);
 
-		expect(classifyLaneBashCommand("git add -A", "main").verdict).toBe("allowed_even_when_sync_required");
+		expect(classifyLaneBashCommand("git add -A", "main").verdict).toBe("main_mutation_refused");
+		expect(classifyLaneBashCommand("git add README.md", "main").verdict).toBe("allowed_even_when_sync_required");
 		expect(classifyLaneBashCommand('git commit -m "wip"', "main").verdict).toBe("allowed_even_when_sync_required");
 		expect(classifyLaneBashCommand("git status --porcelain", "main").verdict).toBe("allowed_even_when_sync_required");
 		expect(classifyLaneBashCommand("git log main..HEAD --oneline", "main").verdict).toBe(
@@ -121,7 +127,8 @@ describe("WorktreeLaneGate (G8, real git)", () => {
 			expect(blocked.message).toContain("worktree_sync");
 		}
 		// Saving WIP stays possible while blocked (the prescribed step BEFORE syncing).
-		expect(await gate.checkMutation("bash", "git add -A")).toEqual({ allowed: true });
+		expect((await gate.checkMutation("bash", "git add -A")).allowed).toBe(false);
+		expect(await gate.checkMutation("bash", "git add README.md")).toEqual({ allowed: true });
 		expect(await gate.checkMutation("bash", 'git commit -m "wip"')).toEqual({ allowed: true });
 		// G10 refusals hold regardless of staleness.
 		const push = await gate.checkMutation("bash", "git push");

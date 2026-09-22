@@ -51,6 +51,10 @@ export interface PushReceipt {
 
 export interface PublishReceipt {
 	readonly publicationId: string;
+	readonly packageName?: string;
+	readonly version?: string;
+	readonly registry?: string;
+	readonly integrity?: string;
 }
 
 export interface DeployReceipt {
@@ -67,7 +71,7 @@ export interface DeliverySideEffects {
 	readonly commit?: SideEffectReceipt<CommitReceipt>;
 	readonly push?: SideEffectReceipt<PushReceipt>;
 	readonly deploy?: readonly SideEffectReceipt<DeployReceipt>[];
-	readonly tag?: SideEffectReceipt<{ tag: string }>;
+	readonly tag?: SideEffectReceipt<{ tag: string; targetSha?: string }>;
 	readonly publish?: SideEffectReceipt<PublishReceipt>;
 	readonly github_release?: SideEffectReceipt<GithubReleaseReceipt>;
 }

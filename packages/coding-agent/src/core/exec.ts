@@ -11,6 +11,24 @@ const DEFAULT_EXEC_MAX_BUFFER = 16 * 1024 * 1024;
 const DEFAULT_EXEC_TIMEOUT_MS = 10 * 60_000;
 const EXEC_KILL_GRACE_MS = 5_000;
 
+const INHERITED_GIT_LOCATION_KEYS = [
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_COMMON_DIR",
+] as const;
+
+/**
+ * A git hook exports GIT_DIR and GIT_INDEX_FILE. A child that passes its own cwd must not
+ * keep those, or `git add` rewrites the hook's index.
+ */
+export function withoutInheritedGitLocation(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+	const env = { ...base };
+	for (const key of INHERITED_GIT_LOCATION_KEYS) delete env[key];
+	return env;
+}
+
 /**
  * Options for executing shell commands.
  */
