@@ -2,6 +2,10 @@
 
 ## [0.99.41] - 2026-09-22
 
+### Fixed
+
+- The built-in xAI catalog test lists Grok 4.7 and Grok 4.7 Fast with Grok 4.5 and Grok 4.6.
+
 ### Added
 
 - Native xAI catalog includes Grok 4.7 and Grok 4.7 Fast on the Responses path. Grok 4.7 uses the published 500k window, default effort high, and xhigh. Fast is the CLI catalog's twice-the-price variant. The OpenRouter catalog is refreshed from the live model list, including `x-ai/grok-4.7`.

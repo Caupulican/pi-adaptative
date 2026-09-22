@@ -5,9 +5,10 @@ import { streamOpenAIResponses } from "../src/providers/openai-responses.ts";
 import type { AssistantMessage, Context, Model, ToolResultMessage, Usage } from "../src/types.ts";
 import { xaiOAuthProvider } from "../src/utils/oauth/xai.ts";
 
-// Regression coverage for the xAI subscription polish layer: the built-in catalog is grok-4.5
-// and grok-4.6 on the Responses API. Both must echo reasoning.encrypted_content once reasoning
-// is active, even when the caller requested no explicit reasoning effort (WP-7).
+// Regression coverage for the xAI subscription polish layer: the built-in catalog is grok-4.5,
+// grok-4.6, grok-4.7, and grok-4.7-build-fast on the Responses API. Each must echo
+// reasoning.encrypted_content once reasoning is active, even when the caller requested no
+// explicit reasoning effort (WP-7).
 
 const context: Context = {
 	messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
@@ -47,7 +48,7 @@ function completedResponsesSse(): Response {
 
 /** Drive a real Responses-lane request through a stubbed global fetch and capture the raw HTTP call. */
 async function captureResponsesRequest(
-	modelId: "grok-4.5" | "grok-4.6",
+	modelId: "grok-4.5" | "grok-4.6" | "grok-4.7" | "grok-4.7-build-fast",
 	options: Parameters<typeof streamOpenAIResponses>[2],
 	requestContext: Context = context,
 	modelOverride?: Model<"openai-responses">,
@@ -76,108 +77,114 @@ async function captureResponsesRequest(
 	};
 }
 
-describe.each(["grok-4.5", "grok-4.6"] as const)("xAI Responses lane (%s)", (modelId) => {
-	it("materializes assistant text from a completed-only Responses body", async () => {
-		const originalFetch = globalThis.fetch;
-		globalThis.fetch = (async () => completedResponsesSse()) as typeof fetch;
-		try {
-			const result = await streamOpenAIResponses(getModel("xai", modelId), context, {
-				apiKey: "test-key-123",
-			}).result();
-			expect(result.stopReason).toBe("stop");
-			expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "hello from xai" })]);
-		} finally {
-			globalThis.fetch = originalFetch;
-		}
-	});
-
-	it("authenticates with a Bearer token derived from the API key", async () => {
-		const { url, headers } = await captureResponsesRequest(modelId, { apiKey: "test-key-123" });
-		expect(url).toBe("https://api.x.ai/v1/responses");
-		expect(headers.get("authorization")).toBe("Bearer test-key-123");
-	});
-
-	it("recovers from 401 using onAuthRejection and retries once with the replacement key", async () => {
-		const originalFetch = globalThis.fetch;
-		const capturedAuthHeaders: string[] = [];
-		let callCount = 0;
-		globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
-			callCount++;
-			const headers = new Headers(init?.headers);
-			const auth = headers.get("authorization");
-			if (auth) capturedAuthHeaders.push(auth);
-			if (callCount === 1) {
-				return new Response(JSON.stringify({ error: { message: "Invalid token" } }), {
-					status: 401,
-					headers: { "content-type": "application/json" },
-				});
+describe.each(["grok-4.5", "grok-4.6", "grok-4.7", "grok-4.7-build-fast"] as const)(
+	"xAI Responses lane (%s)",
+	(modelId) => {
+		it("materializes assistant text from a completed-only Responses body", async () => {
+			const originalFetch = globalThis.fetch;
+			globalThis.fetch = (async () => completedResponsesSse()) as typeof fetch;
+			try {
+				const result = await streamOpenAIResponses(getModel("xai", modelId), context, {
+					apiKey: "test-key-123",
+				}).result();
+				expect(result.stopReason).toBe("stop");
+				expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "hello from xai" })]);
+			} finally {
+				globalThis.fetch = originalFetch;
 			}
-			return completedResponsesSse();
-		}) as typeof fetch;
+		});
 
-		try {
-			let rejectionEvent: { providerId: string; status: 401; attempt: number } | undefined;
-			const result = await streamOpenAIResponses(getModel("xai", modelId), context, {
-				apiKey: "initial-rejected-key",
-				onAuthRejection: async (event) => {
-					rejectionEvent = event;
-					return "replacement-clean-key";
-				},
-			}).result();
+		it("authenticates with a Bearer token derived from the API key", async () => {
+			const { url, headers } = await captureResponsesRequest(modelId, { apiKey: "test-key-123" });
+			expect(url).toBe("https://api.x.ai/v1/responses");
+			expect(headers.get("authorization")).toBe("Bearer test-key-123");
+		});
 
-			expect(rejectionEvent).toEqual({
-				providerId: "xai",
-				status: 401,
-				attempt: 1,
-			});
-			expect(capturedAuthHeaders).toEqual(["Bearer initial-rejected-key", "Bearer replacement-clean-key"]);
-			expect(result.stopReason).toBe("stop");
-		} finally {
-			globalThis.fetch = originalFetch;
-		}
-	});
+		it("recovers from 401 using onAuthRejection and retries once with the replacement key", async () => {
+			const originalFetch = globalThis.fetch;
+			const capturedAuthHeaders: string[] = [];
+			let callCount = 0;
+			globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+				callCount++;
+				const headers = new Headers(init?.headers);
+				const auth = headers.get("authorization");
+				if (auth) capturedAuthHeaders.push(auth);
+				if (callCount === 1) {
+					return new Response(JSON.stringify({ error: { message: "Invalid token" } }), {
+						status: 401,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				return completedResponsesSse();
+			}) as typeof fetch;
 
-	it("does not send Grok CLI proxy headers to the public API", async () => {
-		const { headers } = await captureResponsesRequest(modelId, { apiKey: "test-key-123" });
-		expect(headers.get("x-xai-token-auth")).toBeNull();
-		expect(headers.get("x-authenticateresponse")).toBeNull();
-		expect(headers.get("x-grok-client-version")).toBeNull();
-		expect(headers.get("x-grok-client-identifier")).toBeNull();
-		expect(headers.get("x-grok-client-mode")).toBeNull();
-		expect(headers.get("x-grok-model-override")).toBeNull();
-	});
+			try {
+				let rejectionEvent: { providerId: string; status: 401; attempt: number } | undefined;
+				const result = await streamOpenAIResponses(getModel("xai", modelId), context, {
+					apiKey: "initial-rejected-key",
+					onAuthRejection: async (event) => {
+						rejectionEvent = event;
+						return "replacement-clean-key";
+					},
+				}).result();
 
-	it("sends store:false and omits prompt_cache_retention/prompt_cache_key by default", async () => {
-		const { body } = await captureResponsesRequest(modelId, { apiKey: "test-key-123" });
-		expect(body.store).toBe(false);
-		expect(body.prompt_cache_retention).toBeUndefined();
-		expect(body.prompt_cache_key).toBeUndefined();
-	});
+				expect(rejectionEvent).toEqual({
+					providerId: "xai",
+					status: 401,
+					attempt: 1,
+				});
+				expect(capturedAuthHeaders).toEqual(["Bearer initial-rejected-key", "Bearer replacement-clean-key"]);
+				expect(result.stopReason).toBe("stop");
+			} finally {
+				globalThis.fetch = originalFetch;
+			}
+		});
 
-	it("sets reasoning.effort when a reasoning effort is requested", async () => {
-		const { body } = await captureResponsesRequest(modelId, { apiKey: "test-key-123", reasoningEffort: "high" });
-		expect(body.reasoning).toMatchObject({ effort: "high" });
-	});
+		it("does not send Grok CLI proxy headers to the public API", async () => {
+			const { headers } = await captureResponsesRequest(modelId, { apiKey: "test-key-123" });
+			expect(headers.get("x-xai-token-auth")).toBeNull();
+			expect(headers.get("x-authenticateresponse")).toBeNull();
+			expect(headers.get("x-grok-client-version")).toBeNull();
+			expect(headers.get("x-grok-client-identifier")).toBeNull();
+			expect(headers.get("x-grok-client-mode")).toBeNull();
+			expect(headers.get("x-grok-model-override")).toBeNull();
+		});
 
-	// WP-7 regression: thinkingLevelMap.off is null, so the "no explicit effort" branch that
-	// would otherwise set params.reasoning is skipped entirely for xAI. Before the fix, that
-	// also meant include:["reasoning.encrypted_content"] was never sent, silently dropping
-	// encrypted reasoning across turns. It must be present regardless of the reasoning field.
-	it("sets include:[reasoning.encrypted_content] even with no explicit reasoning effort", async () => {
-		const { body } = await captureResponsesRequest(modelId, { apiKey: "test-key-123" });
-		expect(body.reasoning).toBeUndefined();
-		expect(body.include).toEqual(["reasoning.encrypted_content"]);
-	});
+		it("sends store:false and omits prompt_cache_retention/prompt_cache_key by default", async () => {
+			const { body } = await captureResponsesRequest(modelId, { apiKey: "test-key-123" });
+			expect(body.store).toBe(false);
+			expect(body.prompt_cache_retention).toBeUndefined();
+			expect(body.prompt_cache_key).toBeUndefined();
+		});
 
-	it("still sets include:[reasoning.encrypted_content] when a reasoning effort is requested", async () => {
-		const { body } = await captureResponsesRequest(modelId, { apiKey: "test-key-123", reasoningEffort: "high" });
-		expect(body.include).toEqual(["reasoning.encrypted_content"]);
-	});
-});
+		it("sets reasoning.effort when a reasoning effort is requested", async () => {
+			const { body } = await captureResponsesRequest(modelId, { apiKey: "test-key-123", reasoningEffort: "high" });
+			expect(body.reasoning).toMatchObject({ effort: "high" });
+		});
 
-describe("xAI Responses lane (grok-4.6 xhigh)", () => {
+		// WP-7 regression: thinkingLevelMap.off is null, so the "no explicit effort" branch that
+		// would otherwise set params.reasoning is skipped entirely for xAI. Before the fix, that
+		// also meant include:["reasoning.encrypted_content"] was never sent, silently dropping
+		// encrypted reasoning across turns. It must be present regardless of the reasoning field.
+		it("sets include:[reasoning.encrypted_content] even with no explicit reasoning effort", async () => {
+			const { body } = await captureResponsesRequest(modelId, { apiKey: "test-key-123" });
+			expect(body.reasoning).toBeUndefined();
+			expect(body.include).toEqual(["reasoning.encrypted_content"]);
+		});
+
+		it("still sets include:[reasoning.encrypted_content] when a reasoning effort is requested", async () => {
+			const { body } = await captureResponsesRequest(modelId, { apiKey: "test-key-123", reasoningEffort: "high" });
+			expect(body.include).toEqual(["reasoning.encrypted_content"]);
+		});
+	},
+);
+
+describe.each(["grok-4.6", "grok-4.7", "grok-4.7-build-fast"] as const)("xAI Responses lane (%s xhigh)", (modelId) => {
 	it("sends reasoning.effort xhigh", async () => {
-		const { body } = await captureResponsesRequest("grok-4.6", { apiKey: "test-key-123", reasoningEffort: "xhigh" });
+		const { body } = await captureResponsesRequest(modelId, {
+			apiKey: "test-key-123",
+			reasoningEffort: "xhigh",
+		});
 		expect(body.reasoning).toMatchObject({ effort: "xhigh" });
 		expect(body.include).toEqual(["reasoning.encrypted_content"]);
 	});
@@ -368,12 +375,12 @@ describe("xAI Grok CLI subscription schema", () => {
 });
 
 describe("xAI built-in catalog", () => {
-	it("keeps only grok-4.5 and grok-4.6", () => {
+	it("keeps the current Grok Responses models", () => {
 		expect(
 			getModels("xai")
 				.map((model) => model.id)
 				.sort(),
-		).toEqual(["grok-4.5", "grok-4.6"]);
+		).toEqual(["grok-4.5", "grok-4.6", "grok-4.7", "grok-4.7-build-fast"]);
 	});
 
 	it("excludes retired and redundant models", () => {
