@@ -307,7 +307,7 @@ const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
 	"gpt-5.6-luna",
 	"gpt-6-astra",
 ]);
-const XAI_RESPONSES_MODEL_IDS = new Set(["grok-4.5", "grok-4.6"]);
+const XAI_RESPONSES_MODEL_IDS = new Set(["grok-4.5", "grok-4.6", "grok-4.7", "grok-4.7-build-fast"]);
 const XAI_BUILTIN_EXCLUDED_MODEL_IDS = new Set([
 	"grok-3",
 	"grok-3-fast",
@@ -498,7 +498,7 @@ function applyThinkingLevelMetadata(model: Model<any>, modelId = model.id): void
 	}
 	if (model.provider === "xai" && model.api === "openai-responses") {
 		// Reasoning cannot be disabled. Unspecified effort is high (xAI + Grok CLI).
-		// xhigh is grok-4.6+ only; grok-4.5 treats an unsupported xhigh request as high.
+		// xhigh is grok-4.6 and grok-4.7; grok-4.5 treats an unsupported xhigh request as high.
 		mergeThinkingLevelMap(model, { off: null, minimal: null });
 		if (modelId !== "grok-4.5") {
 			mergeThinkingLevelMap(model, { xhigh: "xhigh" });
@@ -1611,6 +1611,34 @@ async function generateModels() {
 			cost: { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
 			contextWindow: 262144,
 			maxTokens: 256000,
+		});
+	}
+	// Grok CLI's live catalog names this variant and says it costs twice Grok 4.7.
+	// models.dev and OpenRouter do not publish it, so the price is that multiple of the 4.7 entry.
+	const grok47 = allModels.find((model) => model.provider === "xai" && model.id === "grok-4.7");
+	if (grok47 && !allModels.some((model) => model.provider === "xai" && model.id === "grok-4.7-build-fast")) {
+		const double = (value: number) => roundCost(value * 2);
+		allModels.push({
+			...grok47,
+			id: "grok-4.7-build-fast",
+			name: "Grok 4.7 Fast",
+			cost: {
+				input: double(grok47.cost.input),
+				output: double(grok47.cost.output),
+				cacheRead: double(grok47.cost.cacheRead),
+				cacheWrite: double(grok47.cost.cacheWrite),
+				...(grok47.cost.tiers
+					? {
+							tiers: grok47.cost.tiers.map((tier) => ({
+								...tier,
+								input: double(tier.input),
+								output: double(tier.output),
+								cacheRead: double(tier.cacheRead),
+								cacheWrite: double(tier.cacheWrite),
+							})),
+						}
+					: {}),
+			},
 		});
 	}
 	if (!allModels.some((m) => m.provider === "openrouter" && m.id === "stealth/ox-alpha")) {

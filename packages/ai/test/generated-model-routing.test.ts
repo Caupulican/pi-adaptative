@@ -43,9 +43,29 @@ describe("generated model routing", () => {
 		expect(model.defaultThinkingLevel).toBe("high");
 	});
 
+	it("routes xAI Grok 4.7 through Responses with xhigh effort", () => {
+		const model = getModel("xai", "grok-4.7");
+		expect(model.api).toBe("openai-responses");
+		expect(model.compat?.supportsLongCacheRetention).toBe(false);
+		expect(model.thinkingLevelMap).toMatchObject({ off: null, minimal: null, xhigh: "xhigh" });
+		expect(model.defaultThinkingLevel).toBe("high");
+		expect(model.contextWindow).toBe(500000);
+		expect(model.maxTokens).toBe(500000);
+	});
+
+	it("prices Grok 4.7 Fast at twice Grok 4.7", () => {
+		const base = getModel("xai", "grok-4.7");
+		const fast = getModel("xai", "grok-4.7-build-fast");
+		expect(fast.api).toBe("openai-responses");
+		expect(fast.cost.input).toBeCloseTo(base.cost.input * 2);
+		expect(fast.cost.output).toBeCloseTo(base.cost.output * 2);
+		expect(fast.cost.cacheRead).toBeCloseTo(base.cost.cacheRead * 2);
+		expect(fast.thinkingLevelMap).toMatchObject({ xhigh: "xhigh" });
+	});
+
 	it("excludes retired native xAI models from the built-in catalog", () => {
 		const ids = getModels("xai").map((model) => model.id);
-		expect(ids.sort()).toEqual(["grok-4.5", "grok-4.6"]);
+		expect(ids.sort()).toEqual(["grok-4.5", "grok-4.6", "grok-4.7", "grok-4.7-build-fast"]);
 		for (const modelId of [
 			"grok-3",
 			"grok-3-fast",
