@@ -12,7 +12,7 @@ const bashParameters = Type.Object({ command: Type.String() });
  * synthesized (with one milestone at first sight and one at activation).
  */
 describe("operator projection phases reach the projection from their real boundaries", () => {
-	it("projects DELIVER while a granted git.publish call runs, and clears a blocker when the owner grants", async () => {
+	it("projects DELIVER while a granted package.publish call runs, and clears a blocker when the owner grants", async () => {
 		const phasesDuringTools: string[] = [];
 		let session: Awaited<ReturnType<typeof createHarness>>["session"] | undefined;
 		const commands: string[] = [];
@@ -33,16 +33,16 @@ describe("operator projection phases reach the projection from their real bounda
 		try {
 			harness.session.setOperatorBlocker("git.publish needs you: git push");
 			expect(harness.session.operatorProjection.getProjection().phase).toBe("blocked");
-			harness.session.grantEdge("git.publish", "operator", { note: "release day" });
+			harness.session.grantEdge("package.publish", "operator", { note: "release day" });
 			expect(harness.session.operatorProjection.getProjection().phase).not.toBe("blocked");
 
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("bash", { command: "git status" })], { stopReason: "toolUse" }),
-				fauxAssistantMessage([fauxToolCall("bash", { command: "git push" })], { stopReason: "toolUse" }),
+				fauxAssistantMessage([fauxToolCall("bash", { command: "echo status" })], { stopReason: "toolUse" }),
+				fauxAssistantMessage([fauxToolCall("bash", { command: "npm publish" })], { stopReason: "toolUse" }),
 				fauxAssistantMessage("Done"),
 			]);
-			await harness.session.prompt("Push");
-			expect(commands).toEqual(["git status", "git push"]);
+			await harness.session.prompt("Publish");
+			expect(commands).toEqual(["echo status", "npm publish"]);
 			expect(phasesDuringTools[0]).not.toBe("deliver");
 			expect(phasesDuringTools[1]).toBe("deliver");
 			expect(harness.session.operatorProjection.getProjection().phase).not.toBe("deliver");

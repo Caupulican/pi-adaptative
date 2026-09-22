@@ -324,6 +324,20 @@ export class ForegroundRecoveryController {
 			}
 			await this.deps.agent.waitForIdle();
 			if (!this.isBusy) return;
+			// Evaluation, reflection, or an armed continuation is still occupancy.
+			// It clears on the event loop. A microtask retry never reaches that work.
+			await new Promise<void>((resolve) => {
+				let settled = false;
+				const finish = (): void => {
+					if (settled) return;
+					settled = true;
+					this.idleWaiters.delete(waiter);
+					resolve();
+				};
+				const waiter = (): void => finish();
+				this.idleWaiters.add(waiter);
+				setImmediate(finish);
+			});
 		}
 	}
 

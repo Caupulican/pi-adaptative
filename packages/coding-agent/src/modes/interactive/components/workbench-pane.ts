@@ -212,15 +212,25 @@ export class WorkbenchPane {
 				? `${this.offset + 1}-${Math.min(lines.length, this.offset + this.height)}/${lines.length} ↕`
 				: "";
 		const combinedMeta = [meta, range, this.newerProgress ? "new" : ""].filter(Boolean).join(" · ");
-		const actionWidths = actions.map((action) => visibleWidth(action.label) + 2);
-		const actionTotal =
-			actionWidths.reduce((sum, actionWidth) => sum + actionWidth, 0) + Math.max(0, actions.length - 1) * 2;
+		const actionRowWidth = (row: readonly WorkbenchPaneTitleButton[]): number => {
+			const widths = row.map((action) => visibleWidth(action.label) + 2);
+			return widths.reduce((sum, actionWidth) => sum + actionWidth, 0) + Math.max(0, row.length - 1) * 2;
+		};
+		let fittedActions = actions;
+		if (
+			fittedActions.some((action) => action.action === "followCurrent") &&
+			visibleWidth(title) + 1 + actionRowWidth(fittedActions) > this.width
+		) {
+			fittedActions = fittedActions.filter((action) => action.action !== "followCurrent");
+		}
+		const actionWidths = fittedActions.map((action) => visibleWidth(action.label) + 2);
+		const actionTotal = actionRowWidth(fittedActions);
 		let heading: string;
-		if (actions.length && visibleWidth(title) + 1 + actionTotal <= this.width) {
+		if (fittedActions.length && visibleWidth(title) + 1 + actionTotal <= this.width) {
 			const titleWidth = this.width - actionTotal;
 			const parts: string[] = [];
 			let column = x + 1 + titleWidth;
-			actions.forEach((action, index) => {
+			fittedActions.forEach((action, index) => {
 				this.titleActions.push({ action: action.action, start: column, end: column + actionWidths[index]! });
 				parts.push(titleChip(action.label, action.selected ?? false));
 				column += actionWidths[index]! + 2;

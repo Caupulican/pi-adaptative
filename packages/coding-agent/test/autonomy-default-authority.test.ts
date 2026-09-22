@@ -177,7 +177,7 @@ describe("autonomous default authority", () => {
 			const confirmation = vi.fn(async () => "deny" as const);
 			harness.session.setEdgeConfirmation(confirmation);
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("bash", { command: "git push origin main && npm publish" })], {
+				fauxAssistantMessage([fauxToolCall("bash", { command: "npm publish" })], {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage("Finished"),

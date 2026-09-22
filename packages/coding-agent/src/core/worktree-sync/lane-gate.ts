@@ -16,6 +16,7 @@
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { classifyDangerousGitBash } from "../objective-execution/dangerous-git-bash.ts";
+import { isGitExecutableToken, lexShellCommand } from "../objective-execution/git-shell-lexer.ts";
 import type { WorktreeSyncPolicy } from "./codes.ts";
 import { deriveLaneFacts, type RepoContext, resolveRepoContext, type WorktreeSyncEngineDeps } from "./git-engine.ts";
 import { readLane } from "./store.ts";
@@ -39,6 +40,22 @@ const SYNC_SAFE_GIT_SUBCOMMANDS = new Set([
 ]);
 
 const MAIN_MUTATING_GIT_SUBCOMMANDS = new Set(["merge", "rebase", "reset", "commit", "branch", "update-ref", "push"]);
+
+/** Commands that do not execute their arguments. A git token after one of these is text. */
+const NON_EXECUTING_COMMANDS = new Set(["echo", "printf", "true", "false", "test", "[", ":", "pwd"]);
+
+function commandWordExecutesGit(command: string): boolean {
+	const lex = lexShellCommand(command);
+	if (!lex.ok) return true;
+	for (const segment of lex.segments) {
+		let index = 0;
+		while (index < segment.length && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(segment[index] ?? "")) index += 1;
+		const word = (segment[index] ?? "").replace(/^.*[\\/]/u, "").toLowerCase();
+		if (NON_EXECUTING_COMMANDS.has(word)) continue;
+		if (segment.some((token) => isGitExecutableToken(token))) return true;
+	}
+	return false;
+}
 
 /**
  * Classify one bash command line for a lane-bound session (G10 + the sync_required allowlist).
@@ -71,7 +88,9 @@ export function classifyLaneBashCommand(command: string, mainBranch: string): La
 		};
 	}
 	const dangerous = classifyDangerousGitBash(command);
-	if (dangerous.refused) {
+	// `git push` as an argument of echo is not an invocation. A real git command, including one
+	// reached through env or command, still takes the dangerous-git refusal.
+	if (dangerous.refused && commandWordExecutesGit(command)) {
 		return {
 			verdict: "main_mutation_refused",
 			reason: dangerous.reason ?? "dangerous git is refused",

@@ -7,20 +7,24 @@ import { createHarness, type Harness } from "./suite/harness.ts";
 
 function supervisionEvaluation(): DecisionEvaluation {
 	const results = Object.fromEntries(
-		WORKER_SUPERVISION_DECISION_IDS.map((id) => [
-			id,
-			{
-				kind: "boolean" as const,
-				value: false,
-				probabilityTrue: 0.1,
-				confidence: {
-					value: 0.9,
-					provenance: "native_calibrated" as const,
-					isCalibrated: true,
-					noulProbabilityTrue: 0.1,
+		WORKER_SUPERVISION_DECISION_IDS.map((id) => {
+			const progressing = id === "meaningful_progress";
+			const probabilityTrue = progressing ? 0.9 : 0.1;
+			return [
+				id,
+				{
+					kind: "boolean" as const,
+					value: progressing,
+					probabilityTrue,
+					confidence: {
+						value: 0.9,
+						provenance: "native_calibrated" as const,
+						isCalibrated: true,
+						noulProbabilityTrue: probabilityTrue,
+					},
 				},
-			},
-		]),
+			];
+		}),
 	);
 	return createDecisionEvaluation({
 		programId: "pi:steering:program:JEV-WORKER-SUPERVISION:1.0",

@@ -701,10 +701,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												throw error;
 											}
 										},
-										afterToolCall: async ({ toolCall, args, isError }) => {
+										afterToolCall: async ({ toolCall, args }) => {
 											try {
 												if (
-													!isError &&
 													(toolCall.name === "write" || toolCall.name === "edit") &&
 													args &&
 													typeof args === "object" &&

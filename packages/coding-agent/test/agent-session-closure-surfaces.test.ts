@@ -159,7 +159,10 @@ describe("Session closure surfaces", () => {
 	it("observes worker progress through the supervision coordinator", async () => {
 		// A normally-progressing worker: no gap, no stall, no repetition.
 		const harness = await createRcSdkHarness({
-			decisions: { fallback: { kind: "boolean", probabilityTrue: 0.05 } },
+			decisions: {
+				answers: { meaningful_progress: { kind: "boolean", probabilityTrue: 0.95 } },
+				fallback: { kind: "boolean", probabilityTrue: 0.05 },
+			},
 		});
 		const observed = await harness.session.workerSupervision.observe({
 			agentId: "agent-1",

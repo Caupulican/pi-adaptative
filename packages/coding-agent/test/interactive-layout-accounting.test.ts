@@ -64,6 +64,12 @@ it("counts one invocation once while foreground and background handoff observati
 				switched: false,
 			}),
 			getSemanticPlaneHealth: () => ({ state: "unbound" }),
+			getSessionWorkState: () => ({
+				phase: "idle" as const,
+				busy: false,
+				label: "Ready",
+				sessionId: "fixture",
+			}),
 			getCostSummary: () => ({ currentCost: 0, subagentCost: 0, subagentReports: 0 }),
 		},
 		headerContainer: new Container(),

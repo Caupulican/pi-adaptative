@@ -911,7 +911,18 @@ export class AgentSession {
 			// to this controller's own `continueGoalLoopExclusive` guard, so routing through it here would
 			// recurse into the guard from inside itself instead of driving the actual continuation pass.
 			continueGoalLoop: (options) => this._goals.continueLoop(options),
-			isForegroundBusy: () => this.getSessionWorkState().busy,
+			// A running worker or background tool is the fact the goal loop reports as waiting.
+			// Waiting for that occupancy here never observes it: the caller is what would release it.
+			isForegroundBusy: () => {
+				const phase = this.getSessionWorkState().phase;
+				return (
+					phase === "foreground_preparing" ||
+					phase === "llm_streaming" ||
+					phase === "retrying" ||
+					phase === "compacting" ||
+					phase === "system_one_evaluating"
+				);
+			},
 			waitForForegroundIdle: () => this._foregroundRecovery.waitForIdle(),
 			collectWorkspaceSources: (args) => this._collectWorkspaceSources(args),
 			getPathAliasTable: () => this._pipeline.peekPathAliasTable(),
@@ -1143,10 +1154,6 @@ export class AgentSession {
 					(this._systemOneController?.isEvaluating ?? false) ||
 					this._semanticPlaneHealth.getHealth(true).state === "evaluating" ||
 					this._reflectionTurnLifecycle.inFlight ||
-					this._backgroundLanes
-						.getLaneRecords()
-						.some((lane) => lane.status === "queued" || lane.status === "running") ||
-					hasRunningBackgroundedToolCall(this._backgroundToolTasks.list()) ||
 					(!isOwnIdleContinuationAdmission() && this._backgroundLanes.hasPendingIdleContinuation())
 				);
 			},
@@ -4010,7 +4017,11 @@ export class AgentSession {
 		} satisfies CustomMessage<T>;
 		if (options?.deliverAs === "nextTurn") {
 			this._pendingNextTurnMessages.push(appMessage);
-		} else if (this.getSessionWorkState().busy && !this._foregroundRecovery.ownsSubmission(submissionLease)) {
+		} else if (
+			this.getSessionWorkState().phase !== "continuation_armed" &&
+			this.getSessionWorkState().busy &&
+			!this._foregroundRecovery.ownsSubmission(submissionLease)
+		) {
 			if (options?.deliverAs === "followUp") {
 				this.agent.followUp(appMessage);
 			} else {

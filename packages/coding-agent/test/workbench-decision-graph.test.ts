@@ -698,7 +698,8 @@ describe("Workbench controller with the Decision graph", () => {
 		controller.handleInput(mouse(0, 4, stageRow!));
 		expect(view.getSelectedGraphStage()).toBe("dispatch");
 		expect(view.geometry().graphView).toBe("list");
-		controller.handleInput(mouse(0, title.indexOf("Hide"), titleRow));
+		const hideTitle = stripAnsi(view.render(120)[titleRow] ?? "");
+		controller.handleInput(mouse(0, hideTitle.indexOf("Hide"), titleRow));
 		expect(view.geometry().graph).toBe("hidden");
 	});
 

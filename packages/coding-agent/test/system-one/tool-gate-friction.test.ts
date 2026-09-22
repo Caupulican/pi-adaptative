@@ -43,10 +43,10 @@ describe("Tool Gate Friction Remediations", () => {
 			recordGateOutcome: () => {},
 		});
 
-		// Command is git push - an edge operation
+		// npm publish is an edge operation. Root bash admits no git, so the grant is not a bash git push.
 		const gateResult = await controller.beforeToolCall({
 			toolCall: { id: "call-1", name: "bash" } as any,
-			args: { command: "git push origin main" },
+			args: { command: "npm publish" },
 			assistantMessage: { provider: "test", model: "test" } as any,
 			context: { messages: [] } as any,
 		});
