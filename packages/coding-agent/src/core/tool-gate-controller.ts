@@ -14,6 +14,7 @@ import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
 import { classifyAllEdgeOperations, type EdgeClass } from "./autonomy/edge-policy.ts";
 import { evaluateToolGateAsync } from "./autonomy/gates.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
+import { refuseLocalPush } from "./objective-execution/local-commit-delivery.ts";
 import { type HostRepositoryEffect, repositoryEffectForCall } from "./objective-execution/repository-effect.ts";
 import type {
 	RepositoryMutationObserver,
@@ -63,6 +64,8 @@ export interface ToolGateControllerDeps {
 		executionCwd: string | undefined,
 		signal: AbortSignal | undefined,
 	): Promise<BeforeToolCallResult | undefined>;
+	/** Branch this task must commit onto. Set only after Jev classifies the request as local commits. */
+	localCommitBranch?(): string | undefined;
 	/** The edge classes an admitted call carries (empty for ordinary work), for the delivery projection. */
 	noteEdgeOperations?(toolCallId: string, classes: readonly EdgeClass[]): void;
 	/**
@@ -181,6 +184,12 @@ export class ToolGateController {
 		if (escalation) {
 			return escalation;
 		}
+		const refusedPush = refuseLocalPush(
+			this.deps.localCommitBranch ? { branch: () => this.deps.localCommitBranch?.() } : undefined,
+			toolCall.name,
+			args,
+		);
+		if (refusedPush) return refusedPush;
 
 		// The capability envelope is evaluated twice per call - once on the raw arguments before any
 		// extension hook can see them, once on the arguments the hooks actually hand to the tool (a

@@ -98,6 +98,7 @@ export class SessionSupervisionRuntime implements AgentSessionRuntimeResource {
 					agentDir: this.options.agentDir,
 					settingsManager: session.settingsManager,
 					sessionId,
+					integrationBranch: () => session.localCommitBranch() || undefined,
 					notify: (text) => {
 						void this.notify(session, "worktree-sync-notice", text).catch(() => {});
 					},

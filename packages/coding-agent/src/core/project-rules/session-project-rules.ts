@@ -111,21 +111,23 @@ export class SessionProjectRules {
 	}
 
 	/** RCG-041: mutation acceptance. */
-	async validateMutation(input: {
-		objectiveId?: string;
-		taskId?: string;
-		changedFiles: readonly string[];
-		diffContent?: string;
-		signal?: AbortSignal;
-	}): Promise<RuleValidationResult> {
+	async validateMutation(
+		input: {
+			objectiveId?: string;
+			taskId?: string;
+			changedFiles: readonly string[];
+			diffContent?: string;
+			signal?: AbortSignal;
+		},
+		options?: { record?: boolean },
+	): Promise<RuleValidationResult> {
 		const fileContents = this.readChangedFiles(input.changedFiles);
-		return this.consume(
-			await this.getController().validateMutation({
-				...input,
-				fileContents,
-				boundedDiffEvidence: input.diffContent ?? summarizeFileEvidence(fileContents),
-			}),
-		);
+		const result = await this.getController().validateMutation({
+			...input,
+			fileContents,
+			boundedDiffEvidence: input.diffContent ?? summarizeFileEvidence(fileContents),
+		});
+		return options?.record === false ? result : this.consume(result);
 	}
 
 	/** RCG-042: task postflight. */
@@ -140,13 +142,17 @@ export class SessionProjectRules {
 	}
 
 	/** RCG-043: completion. */
-	async validateCompletion(input: {
-		objectiveId: string;
-		changedFiles: readonly string[];
-		evidence?: readonly unknown[];
-		signal?: AbortSignal;
-	}): Promise<RuleValidationResult> {
-		return this.consume(await this.getController().validateCompletion(input));
+	async validateCompletion(
+		input: {
+			objectiveId: string;
+			changedFiles: readonly string[];
+			evidence?: readonly unknown[];
+			signal?: AbortSignal;
+		},
+		options?: { record?: boolean },
+	): Promise<RuleValidationResult> {
+		const result = await this.getController().validateCompletion(input);
+		return options?.record === false ? result : this.consume(result);
 	}
 
 	/** Bounded contents of the changed files, for deterministic pattern rules. */

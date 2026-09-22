@@ -36,6 +36,7 @@ import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { isLoopbackModelEndpoint } from "../models/model-endpoint.ts";
+import { refuseLocalPush } from "../objective-execution/local-commit-delivery.ts";
 import { sharesRepository } from "../objective-execution/repo-delivery-fingerprint.ts";
 import type { RepositoryMutationObserver } from "../objective-execution/repository-mutation-observer.ts";
 import { providerUsageFromAttemptUsage } from "../orchestration/attempt-usage.ts";
@@ -253,6 +254,8 @@ export interface WorkerDelegationControllerDeps {
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** Parent admitted edge grants for worker edge authorization without interactive prompts. */
 	getEdgeGrants?(): readonly EdgeGrantView[];
+	/** Set when the parent task is bound to local commits. Workers refuse git push on this branch. */
+	localCommitBranch?(): string | undefined;
 	/** Host-owned path alias table getter for expanding alias tokens in worker tool arguments. */
 	getPathAliasTable?: () => PathAliasTable;
 	/** Parent objective mutation ledger. Workers do not keep a second ownership record. */
@@ -3122,6 +3125,12 @@ export class WorkerDelegationController {
 			toolManifests: executionPlan.toolManifests,
 			...(workerToolAdapters ? { workerToolAdapters } : {}),
 			checkEdge: (toolName, args, executionCwd) => {
+				const refusedPush = refuseLocalPush(
+					this.deps.localCommitBranch ? { branch: () => this.deps.localCommitBranch?.() } : undefined,
+					toolName,
+					args,
+				);
+				if (refusedPush) return refusedPush;
 				const parentGrants = this.deps.getEdgeGrants?.() ?? [];
 				const operations = classifyAllEdgeOperations({
 					toolName,

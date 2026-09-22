@@ -181,6 +181,14 @@ import type { OllamaRuntime, TransformersRuntime } from "./models/local-runtime.
 import { createRepoGitDelivery } from "./objective-execution/delivery-proof.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import { LedgerRouteCheckpoints } from "./objective-execution/ledger-route-checkpoints.ts";
+import {
+	RULE_CONFLICT_NOTE,
+	RULE_SETTLED_USER_NOTE,
+	RULE_SETTLED_WRITTEN_NOTE,
+	readHeadBranch,
+	resolveDeliveryBinding,
+	resolveRuleAuthority,
+} from "./objective-execution/local-commit-delivery.ts";
 import { ObjectiveMutationLedger } from "./objective-execution/objective-mutation-ledger.ts";
 import {
 	createRepoReleaseDelivery,
@@ -481,6 +489,10 @@ export class AgentSession {
 	/** External-acquisition gate; its authority is the session's own ExecutionCharter. */
 	private _acquisitionGate?: ExternalCapabilityAcquisitionGate;
 	private _executionCharter?: ExecutionCharter;
+	/** Set when System One classifies the task as local commits. Empty string means push is refused and the branch was detached. */
+	private _localCommitBranch?: string;
+	/** unset: written rules apply. ask: the request differs and the user has not chosen. user: the request is above the files. */
+	private _ruleAuthority: "unset" | "ask" | "user" | "written" = "unset";
 	private _adaptationProjection?: AdaptationProjection;
 	private _deliveryState: DeliveryState = "none";
 	private _foregroundControl?: SystemOneForegroundControl;
@@ -621,10 +633,13 @@ export class AgentSession {
 			cwd: config.cwd,
 			// Only instruction files the active profile already admitted are rule sources; arbitrary
 			// repository text never gets to author a rule that blocks a transition.
-			getTrustedRuleSources: () =>
-				this._resourceLoader
+			getTrustedRuleSources: () => {
+				const admitted = this._resourceLoader.getAdmittedAgentsRuleSources?.();
+				if (admitted !== undefined) return admitted;
+				return this._resourceLoader
 					.getAgentsFiles()
-					.agentsFiles.flatMap((file) => (file.content ? [{ path: file.path, content: file.content }] : [])),
+					.agentsFiles.flatMap((file) => (file.content ? [{ path: file.path, content: file.content }] : []));
+			},
 			getOwnerRulePolicies: () => this._ownerRules.list(),
 			getDecisionEngine: () => this._recordingSemanticEngine(),
 			recordRepairWork: (repair) => {
@@ -888,6 +903,7 @@ export class AgentSession {
 			observeWorkerProgress: (observation) => this._workerSupervision.observe(observation),
 			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
 			getEdgeGrants: () => this.getEdgeGrants(),
+			localCommitBranch: () => this._localCommitBranch,
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			emit: (event) => this._emit(event),
@@ -1318,6 +1334,7 @@ export class AgentSession {
 			getAgentDir: () => this._agentDir,
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
+			integrationBranch: () => this._localCommitBranch || undefined,
 			getModelRegistry: () => this._modelRegistry,
 			isModelExhausted: (model) => this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`),
 			getResourceLoader: () => this._resourceLoader,
@@ -1602,6 +1619,7 @@ export class AgentSession {
 			getExtensionRunner: () => this._extensionRunner,
 			getToolSelectionController: () => this._toolSelection,
 			checkEdge: (tool, args, cwd, signal) => enforceSessionEdge(this._edgeDeps(), tool, args, cwd, signal),
+			localCommitBranch: () => this._localCommitBranch,
 			// An admitted outward-facing operation (publish to a remote or a registry) is the delivery
 			// step the projection reports as DELIVER until that call ends.
 			noteEdgeOperations: (toolCallId, classes) => {
@@ -1632,8 +1650,15 @@ export class AgentSession {
 			getSystemOneController: () => this._systemOneController,
 			getForegroundControl: () => this.systemOneForegroundControl,
 			validateMutationAcceptance: async ({ changedFiles }) => {
-				const result = await this._projectRules.validateMutation({ changedFiles });
+				if (this._ruleAuthority === "user") return { blocked: false };
+				const result = await this._projectRules.validateMutation(
+					{ changedFiles },
+					{ record: this._ruleAuthority !== "ask" },
+				);
 				if (!SessionProjectRules.blocks(result)) return { blocked: false };
+				if (this._ruleAuthority === "ask") {
+					return { blocked: true, explanation: RULE_CONFLICT_NOTE };
+				}
 				return {
 					blocked: true,
 					explanation: result.violations[0]?.explanation,
@@ -2018,7 +2043,24 @@ export class AgentSession {
 
 	/** The owner rules block every worker, specialist and capability-builder mission carries. */
 	renderOwnerRulesForMission(): string {
-		return renderOwnerRulesForMission(this._ownerRules.list());
+		const base = renderOwnerRulesForMission(this._ownerRules.list());
+		const lines = [base];
+		if (this._localCommitBranch !== undefined) {
+			const branch = this._localCommitBranch || "the current branch";
+			lines.push(
+				`LOCAL COMMIT DELIVERY: this task commits only on ${branch}. Do not push. Other branches and worktrees rebase locally onto ${branch}.`,
+			);
+		}
+		if (this._ruleAuthority === "ask") lines.push(RULE_CONFLICT_NOTE);
+		if (this._ruleAuthority === "user") {
+			lines.push("RULE AUTHORITY: the user's request is above AGENTS.md and standing user rules for this task.");
+		}
+		return lines.filter((line) => line.length > 0).join("\n");
+	}
+
+	/** Branch bound by a local-commit classification, or undefined when that rule is off. */
+	localCommitBranch(): string | undefined {
+		return this._localCommitBranch;
 	}
 
 	/** Skill vault controller managing active and cached skills. */
@@ -2119,6 +2161,8 @@ export class AgentSession {
 				waitForRepositoryQuiescence: (objectiveId, signal) =>
 					this._repositoryObserver.waitForQuiescence(objectiveId, signal),
 				ownedPathDigests: () => this._mutationLedger.ownedDigests(this.objectiveMutationId()),
+				localCommitBranch: () => this._localCommitBranch,
+				ruleAuthority: () => this._ruleAuthority,
 				...(() => {
 					const packageIntent = this._executionCharter?.delivery.packagePublish ?? false;
 					const releaseExecutor = createRepoReleaseDelivery(this._cwd, {
@@ -2331,20 +2375,54 @@ export class AgentSession {
 		return sessionEdgeGrants(this._edgeDeps());
 	}
 
-	/**
-	 * A hard yes from Jev on the user request enables every edge capability that is still off.
-	 * Grants already present are left alone, so the authority slot does not grow on every turn.
-	 */
-	private async _enableCapabilitiesAuthorizedByUser(request: string): Promise<void> {
-		const controller = this._systemOneController;
-		if (!controller) return;
-		const authorized = await controller.classifyCapabilitiesAuthorized(request);
-		if (authorized !== true) return;
-		const granted = new Set(this.getEdgeGrants().map((grant) => grant.class));
-		for (const edgeClass of EDGE_CLASSES) {
-			if (granted.has(edgeClass)) continue;
-			this.grantEdge(edgeClass, "operator", { note: "explicit user request" });
+	/** Bounded AGENTS.md and standing user-rule lines for one System One classification. */
+	private writtenRuleText(): string {
+		const lines: string[] = [];
+		const seen = new Set<string>();
+		for (const rule of this._projectRules.getRules()) {
+			const source = rule.source.path.includes("AGENTS.md")
+				? "AGENTS.md"
+				: rule.source.path.startsWith("owner:")
+					? "user rule"
+					: rule.source.path;
+			const line = `${source}: ${rule.text}`;
+			if (seen.has(line)) continue;
+			seen.add(line);
+			lines.push(line);
+			if (lines.join("\n").length >= 2_000) break;
 		}
+		return lines.join("\n").slice(0, 2_000);
+	}
+
+	/**
+	 * System One classifies the request. A hard yes enables edge capabilities that are still off.
+	 * The user is above AGENTS.md: an explicit override follows the request, a contradiction asks.
+	 * Returns the one line the model should see when it must ask, and nothing otherwise.
+	 */
+	private async _enableCapabilitiesAuthorizedByUser(request: string): Promise<string | undefined> {
+		const controller = this._systemOneController;
+		if (!controller) return undefined;
+		const classified = await controller.classifyUserRequest(request, this.writtenRuleText());
+		if (!classified) return undefined;
+		this._localCommitBranch = resolveDeliveryBinding(
+			this._localCommitBranch,
+			{ blocksPush: classified.localCommitsOnly, liftsPushBlock: classified.liftsDeliveryBlock },
+			readHeadBranch(this._cwd),
+		);
+		this._ruleAuthority = resolveRuleAuthority(classified);
+		if (classified.capabilitiesAuthorized === true) {
+			const granted = new Set(this.getEdgeGrants().map((grant) => grant.class));
+			for (const edgeClass of EDGE_CLASSES) {
+				if (edgeClass === "git.publish" && this._localCommitBranch !== undefined) continue;
+				if (granted.has(edgeClass)) continue;
+				this.grantEdge(edgeClass, "operator", { note: "explicit user request" });
+			}
+		}
+		if (this._ruleAuthority === "ask") return RULE_CONFLICT_NOTE;
+		if (classified.fullHandoff && classified.rulesDiffer) {
+			return this._ruleAuthority === "user" ? RULE_SETTLED_USER_NOTE : RULE_SETTLED_WRITTEN_NOTE;
+		}
+		return undefined;
 	}
 
 	grantEdge(edgeClass: EdgeClass, source: "operator" | "instructions", details: EdgeGrantDetails = {}): void {
@@ -3910,7 +3988,12 @@ export class AgentSession {
 		this._goals.setStartAuthority(goalToolStartAuthority);
 		try {
 			this._toolProtocol.resetTurnState();
-			await this._enableCapabilitiesAuthorizedByUser(userRequest);
+			const ruleConflict = await this._enableCapabilitiesAuthorizedByUser(userRequest);
+			if (ruleConflict) {
+				messages.push(
+					createCustomMessage("rule_conflict", ruleConflict, false, undefined, new Date().toISOString()),
+				);
+			}
 			const preflight = await executeSystemOnePreflight(this._systemOneController, this.agent.state.messages.length);
 			if (preflight.proceed) {
 				await this._modelRouter.runRoutedTurn(

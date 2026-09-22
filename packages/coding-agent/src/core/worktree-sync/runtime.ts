@@ -35,18 +35,22 @@ export interface WorktreeSyncEngineConfig {
 	settingsManager: SettingsManager;
 	sessionId?: string;
 	signal?: AbortSignal;
+	/** When System One bound this task to local commits, land and rebase onto this branch. */
+	integrationBranch?: () => string | undefined;
 }
 
 /** Build production engine deps from session facts + resolved settings. */
 export function buildWorktreeSyncEngineDeps(config: WorktreeSyncEngineConfig): WorktreeSyncEngineDeps {
 	const settings = config.settingsManager.getWorktreeSyncSettings();
+	const boundBranch = config.integrationBranch?.();
+	const mainBranchOverride = boundBranch || settings.mainBranch;
 	return {
 		exec: createDefaultWorktreeSyncExec(),
 		cwd: config.cwd,
 		worktreesBaseDir: settings.worktreesRoot ?? worktreesDir(config.agentDir),
 		options: {
 			maxLanes: settings.maxLanes,
-			...(settings.mainBranch !== undefined ? { mainBranchOverride: settings.mainBranch } : {}),
+			...(mainBranchOverride !== undefined ? { mainBranchOverride } : {}),
 		},
 		...(config.sessionId !== undefined ? { sessionId: config.sessionId } : {}),
 		...(config.signal !== undefined ? { signal: config.signal } : {}),

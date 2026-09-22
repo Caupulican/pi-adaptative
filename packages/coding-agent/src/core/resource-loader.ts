@@ -77,6 +77,8 @@ export interface ResourceLoader {
 	/** Themes allowed by the currently active resource profile. */
 	getActiveThemes(): Theme[];
 	getAgentsFiles(): { agentsFiles: Array<{ path: string; content?: string }> };
+	/** Rule text for instruction files already admitted by settings and scoped UAC. */
+	getAdmittedAgentsRuleSources?(): Array<{ path: string; content: string }>;
 	/** Warnings about context files withheld by the active profile (empty when none). */
 	getAgentsDiagnostics(): ResourceDiagnostic[];
 	/** Profile-INDEPENDENT discovery (editor universe; metadata only, never loads content). */
@@ -591,6 +593,29 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 	getAgentsFiles(): { agentsFiles: Array<{ path: string; content?: string }> } {
 		return { agentsFiles: this.agentsFiles };
+	}
+
+	/**
+	 * Rule text from instruction files already admitted by settings and scoped UAC.
+	 * `agentsFiles` is that list: project files are absent unless project context is enabled
+	 * and the path was admitted. This does not discover or read any other path.
+	 */
+	getAdmittedAgentsRuleSources(): Array<{ path: string; content: string }> {
+		const sources: Array<{ path: string; content: string }> = [];
+		for (const file of this.agentsFiles) {
+			const content = file.content ?? this.readAdmittedAgentsContent(file.path);
+			if (!content || content.startsWith("[BLOCKED:")) continue;
+			sources.push({ path: file.path, content });
+		}
+		return sources;
+	}
+
+	private readAdmittedAgentsContent(filePath: string): string | undefined {
+		try {
+			return sanitizeContextFileContent(filePath, readFileSync(filePath, "utf-8"));
+		} catch {
+			return undefined;
+		}
 	}
 
 	/** Warnings about context files withheld by the active profile (empty when none). */

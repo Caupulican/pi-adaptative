@@ -259,8 +259,16 @@ describe("System One recovery WO-09 production paths", () => {
 				}),
 			},
 		});
-		expect(await controller.classifyCapabilitiesAuthorized("commit and push this")).toBe(true);
-		expect(await controller.classifyCapabilitiesAuthorized("   ")).toBeUndefined();
+		expect(await controller.classifyUserRequest("commit and push this")).toEqual({
+			capabilitiesAuthorized: true,
+			localCommitsOnly: false,
+			liftsDeliveryBlock: false,
+			rulesDiffer: false,
+			overridesWrittenRules: false,
+			fullHandoff: false,
+			requestHolds: false,
+		});
+		expect(await controller.classifyUserRequest("   ")).toBeUndefined();
 		const denied = new SystemOneController({
 			store: emptyStore("authorize-no"),
 			adapter: {
@@ -271,7 +279,15 @@ describe("System One recovery WO-09 production paths", () => {
 				}),
 			},
 		});
-		expect(await denied.classifyCapabilitiesAuthorized("what does this function do")).toBe(false);
+		expect(await denied.classifyUserRequest("what does this function do")).toEqual({
+			capabilitiesAuthorized: false,
+			localCommitsOnly: false,
+			liftsDeliveryBlock: false,
+			rulesDiffer: false,
+			overridesWrittenRules: false,
+			fullHandoff: false,
+			requestHolds: false,
+		});
 		const down = new SystemOneController({
 			store: emptyStore("authorize-down"),
 			adapter: {
@@ -280,7 +296,7 @@ describe("System One recovery WO-09 production paths", () => {
 				},
 			},
 		});
-		expect(await down.classifyCapabilitiesAuthorized("commit and push this")).toBeUndefined();
+		expect(await down.classifyUserRequest("commit and push this")).toBeUndefined();
 	});
 
 	it("evaluateRouteOnce keeps a retrieve directive through wait_for_worker and owner_required, then reroutes", async () => {

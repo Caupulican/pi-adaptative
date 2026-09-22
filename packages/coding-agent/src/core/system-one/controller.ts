@@ -240,24 +240,51 @@ export class SystemOneController {
 	}
 
 	/**
-	 * Classify whether this user request authorizes the harness to act.
-	 * Undefined when Jev does not answer. Ambiguous and no do not enable anything.
+	 * One classification of the user request: whether it authorizes work, and whether delivery
+	 * is local commits with push forbidden. Undefined when System One does not answer.
 	 * Stage-pack intake below is kept for tests and hooks; production admission is SteeringPlane JEV-001..003.
 	 */
-	async classifyCapabilitiesAuthorized(request: string): Promise<boolean | undefined> {
+	async classifyUserRequest(
+		request: string,
+		writtenRules = "",
+	): Promise<
+		| {
+				capabilitiesAuthorized: boolean;
+				localCommitsOnly: boolean;
+				liftsDeliveryBlock: boolean;
+				rulesDiffer: boolean;
+				overridesWrittenRules: boolean;
+				fullHandoff: boolean;
+				requestHolds: boolean;
+		  }
+		| undefined
+	> {
 		const userRequest = request.trim();
 		if (!userRequest) return undefined;
 		try {
 			const response = await this.adapter.evaluate(
 				{
 					model: this.config.model.production || SYSTEM_ONE_PINNED_MODEL,
-					state: { user_request: userRequest.slice(0, 4_000) },
+					state: {
+						user_request: userRequest.slice(0, 4_000),
+						written_rules: writtenRules.trim().slice(0, 2_000) || "(none)",
+					},
 					questions: toTypeSafeEvaluationQuestions(USER_AUTHORIZATION_QUESTIONS),
 				},
 				{ impact: "read_only" },
 			);
-			const answer = noulFromAnswer(response.answers.capabilities_authorized, false);
-			return evaluateNoul(answer, "required_true", this.config.thresholds) === "hard_pass";
+			const hardYes = (id: string): boolean =>
+				evaluateNoul(noulFromAnswer(response.answers[id], false), "required_true", this.config.thresholds) ===
+				"hard_pass";
+			return {
+				capabilitiesAuthorized: hardYes("capabilities_authorized"),
+				localCommitsOnly: hardYes("local_commits_only"),
+				liftsDeliveryBlock: hardYes("lifts_delivery_block"),
+				rulesDiffer: hardYes("rules_differ"),
+				overridesWrittenRules: hardYes("overrides_written_rules"),
+				fullHandoff: hardYes("full_handoff"),
+				requestHolds: hardYes("request_holds"),
+			};
 		} catch {
 			return undefined;
 		}

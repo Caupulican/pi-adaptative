@@ -264,6 +264,8 @@ export interface RuntimeBuilderDeps {
 	getSessionManager(): SessionManager;
 	/** Tool/shell/toolkit/resource settings + reload target (settingsManager.reload()). */
 	getSettingsManager(): SettingsManager;
+	/** Branch System One bound this task to. Worktree sync rebases and lands onto it. */
+	integrationBranch?(): string | undefined;
 	/** Model registry, passed to the extension runner and profile model re-resolution. */
 	getModelRegistry(): ModelRegistry;
 	/** Session-scoped provider/model quota exhaustion guard. */
@@ -1217,6 +1219,7 @@ export class RuntimeBuilder {
 					agentDir: this.deps.getAgentDir(),
 					settingsManager: this.deps.getSettingsManager(),
 					sessionId: this.deps.getSessionManager().getSessionId(),
+					integrationBranch: () => this.deps.integrationBranch?.() || undefined,
 				});
 			const shouldBuildGoalExecutor =
 				toolAccess.allows(LEGACY_GOAL_TOOL_NAME) || GOAL_LIFECYCLE_TOOL_NAMES.some(toolAccess.allows);

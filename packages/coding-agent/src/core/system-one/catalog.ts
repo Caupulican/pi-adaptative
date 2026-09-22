@@ -29,6 +29,57 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 			false: "The user is greeting, asking for an explanation, or withholding permission to act.",
 		}),
 	}),
+	local_commits_only: Object.freeze({
+		type: "boolean",
+		instructions:
+			"Does `user_request` require this task's git delivery to be local commits on the current branch and forbid every push?",
+		criteria: Object.freeze({
+			true: "The user limits this task to commits and rules out pushing. 'only commits', 'don't want pushes', 'no push', and 'commit but do not push' are this limit. Branches and worktrees still count when the user wants them brought back locally.",
+			false: "The user asks to push, lifts a no-push limit, or does not set a git delivery limit. 'commit and push', 'you can push now', 'push when done', 'fix the bug', and 'hello' are not this limit.",
+		}),
+	}),
+	lifts_delivery_block: Object.freeze({
+		type: "boolean",
+		instructions:
+			"Does `user_request` explicitly lift a delivery restriction the user owns, including allowing a push that was forbidden, even when a file says otherwise?",
+		criteria: Object.freeze({
+			true: "The user releases the restriction. 'you can push now', 'lift the no-push rule', 'push is allowed', and 'ignore the spec that forbids push' are a lift.",
+			false: "The user is imposing a limit, or is not changing one. 'only commits', 'don't want pushes', 'fix the bug', and 'hello' are not a lift.",
+		}),
+	}),
+	rules_differ: Object.freeze({
+		type: "boolean",
+		instructions:
+			"Does `user_request` contradict `written_rules` so the request and a written rule cannot both be followed?",
+		criteria: Object.freeze({
+			true: "A written rule requires what the request forbids, or forbids what the request requires. AGENTS.md and a standing user rule both count.",
+			false: "The request fits the written rules, or the written rules do not speak to it. 'fix the bug' and 'hello' are false when the rules are about something else.",
+		}),
+	}),
+	overrides_written_rules: Object.freeze({
+		type: "boolean",
+		instructions: "Does `user_request` explicitly put the user's own request above `written_rules`?",
+		criteria: Object.freeze({
+			true: "The user says to follow their request instead of AGENTS.md or a standing user rule. 'do what I asked', 'ignore AGENTS.md', 'override the spec', and 'lift that file rule' are overrides.",
+			false: "The user does not explicitly override a written rule. A contradiction alone, 'fix the bug', and 'hello' are not overrides.",
+		}),
+	}),
+	full_handoff: Object.freeze({
+		type: "boolean",
+		instructions: "Does `user_request` hand rule conflicts to the harness to settle without asking the user?",
+		criteria: Object.freeze({
+			true: "The user hands the decision off. 'you decide', 'full handoff', 'settle it', and 'don't ask me' are a handoff.",
+			false: "The user wants to choose, or is not handing the decision off. 'ask me', 'fix the bug', and 'hello' are not a handoff.",
+		}),
+	}),
+	request_holds: Object.freeze({
+		type: "boolean",
+		instructions: "Does `user_request` say to do what the user asked where it differs from `written_rules`?",
+		criteria: Object.freeze({
+			true: "The request says the user's own instruction wins. 'settle it on my request', 'do what I asked', and 'my request holds' are this.",
+			false: "The request does not say the user's instruction wins. 'follow AGENTS.md', 'push this branch', and 'fix the bug' are this.",
+		}),
+	}),
 });
 
 /**

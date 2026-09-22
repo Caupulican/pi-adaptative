@@ -67,6 +67,7 @@ import {
 } from "./delivery-coordinator.ts";
 import { type ApprovedCandidateTree, candidateTreeDigest } from "./delivery-proof.ts";
 import { finalizeDelivery } from "./finalization-coordinator.ts";
+import { applyLocalCommitCharter } from "./local-commit-delivery.ts";
 import { completionFailuresToRepairWork, type RepairWork } from "./objective-repair-work.ts";
 import {
 	type ObjectiveRoute,
@@ -188,6 +189,10 @@ export interface ObjectiveExecutionControllerDeps {
 	consumePendingSupervisionRequest?(signalId: string): void;
 	mode?: ExecutionLoopMode;
 	executionCharter?: ExecutionCharter;
+	/** Set when System One classified this task as local commits. Empty string means detached HEAD. */
+	localCommitBranch?(): string | undefined;
+	/** unset: written rules apply. ask: the user has not chosen. user: the request is above the files. */
+	ruleAuthority?(): "unset" | "ask" | "user" | "written";
 	authorityBlockLedger?: DurableAuthorityBlockLedger;
 	/** Paths the objective itself wrote. Unlisted worktree changes block automatic git delivery. */
 	attributedMutationPaths?(): readonly string[];
@@ -219,11 +224,14 @@ export interface ObjectiveExecutionControllerDeps {
 			changedFiles: readonly string[];
 			signal?: AbortSignal;
 		}): Promise<{ passed: boolean; violations: readonly { consequence: string; explanation: string }[] }>;
-		validateCompletion(input: {
-			objectiveId: string;
-			changedFiles: readonly string[];
-			signal?: AbortSignal;
-		}): Promise<{ passed: boolean; violations: readonly { consequence: string; explanation: string }[] }>;
+		validateCompletion(
+			input: {
+				objectiveId: string;
+				changedFiles: readonly string[];
+				signal?: AbortSignal;
+			},
+			options?: { record?: boolean },
+		): Promise<{ passed: boolean; violations: readonly { consequence: string; explanation: string }[] }>;
 	};
 }
 
@@ -429,6 +437,8 @@ export class ObjectiveExecutionController {
 				| "deliveryBlockReason"
 				| "waitForRepositoryQuiescence"
 				| "ownedPathDigests"
+				| "localCommitBranch"
+				| "ruleAuthority"
 			>
 		>,
 	): void {
@@ -1317,14 +1327,18 @@ export class ObjectiveExecutionController {
 
 					// RCG-043: completion project rules. A blocking violation queues repair work and
 					// refuses the completion candidate; it never finalizes on a violated rule.
-					if (this.deps.projectRules) {
-						const completionRules = await this.deps.projectRules.validateCompletion({
-							objectiveId,
-							changedFiles: artifacts.map((artifact) => artifact.path),
-							signal,
-						});
+					const ruleAuthority = this.deps.ruleAuthority?.() ?? "unset";
+					if (this.deps.projectRules && ruleAuthority !== "user") {
+						const completionRules = await this.deps.projectRules.validateCompletion(
+							{
+								objectiveId,
+								changedFiles: artifacts.map((artifact) => artifact.path),
+								signal,
+							},
+							{ record: ruleAuthority !== "ask" },
+						);
 						if (ruleViolationBlocks(completionRules)) {
-							if (this.deps.runtime.ensureRepairTasks) {
+							if (ruleAuthority !== "ask" && this.deps.runtime.ensureRepairTasks) {
 								await this.deps.runtime.ensureRepairTasks(
 									objectiveId,
 									completionFailuresToRepairWork(
@@ -1523,8 +1537,12 @@ export class ObjectiveExecutionController {
 							}
 						}
 
+						const deliveryCharter =
+							activeCharter && this.deps.localCommitBranch?.() !== undefined
+								? applyLocalCommitCharter(activeCharter)
+								: activeCharter;
 						const sideEffects = await executeDelivery({
-							charter: activeCharter,
+							charter: deliveryCharter,
 							git: this.deps.gitExecutor,
 							release: this.deps.releaseExecutor,
 							signal,
