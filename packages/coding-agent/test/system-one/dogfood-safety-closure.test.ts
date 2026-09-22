@@ -10,10 +10,7 @@ import { AgentSession } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import { compileExecutionCharter } from "../../src/core/autonomy/execution-charter.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
-import {
-	classifyDangerousGitBash,
-	classifyRootGitBash,
-} from "../../src/core/objective-execution/dangerous-git-bash.ts";
+import { classifyDangerousGitBash } from "../../src/core/objective-execution/dangerous-git-bash.ts";
 import { ObjectiveExecutionController } from "../../src/core/objective-execution/objective-execution-controller.ts";
 import { ObjectiveMutationLedger } from "../../src/core/objective-execution/objective-mutation-ledger.ts";
 import { captureRepoDeliveryFingerprint } from "../../src/core/objective-execution/repo-delivery-fingerprint.ts";
@@ -153,52 +150,11 @@ async function settle(
 }
 
 describe("dogfood safety closure", () => {
-	it("keeps lane WIP git and refuses mutating git at the root bash boundary", () => {
+	it("keeps lane WIP git quote-aware and does not ban ordinary git", () => {
 		expect(classifyDangerousGitBash('git commit -m "wip"').refused).toBe(false);
 		expect(classifyDangerousGitBash("git add README.md").refused).toBe(false);
-		for (const command of [
-			"git commit -m x -- file",
-			"git tag v1",
-			"git branch new",
-			"git rebase main",
-			"git update-ref refs/heads/main HEAD",
-			"git add README.md",
-			"git push origin main",
-			"git checkout main",
-			"git switch main",
-			"git merge main",
-			"git pull",
-			"git reset --hard",
-			"git clean -fd",
-			"git stash",
-			"git config user.name bad",
-			"npm test && git commit -m x",
-			"command git commit -m x",
-			"/usr/bin/git tag v1",
-			"git -c user.name=x status",
-		]) {
-			expect(classifyRootGitBash(command).refused, command).toBe(true);
-		}
-		for (const command of [
-			"git status",
-			"git diff",
-			"git log",
-			"git show HEAD",
-			"git rev-parse HEAD",
-			"git ls-files",
-			"git ls-tree HEAD",
-			"git cat-file -p HEAD",
-			"git blame README.md",
-			"git grep foo",
-			"git ls-remote origin",
-			"git branch",
-			"git tag -l",
-			"git status && git diff",
-			"git status > note.txt",
-		]) {
-			expect(classifyRootGitBash(command).refused, command).toBe(true);
-		}
-		expect(classifyRootGitBash("npm test && npm run lint").refused).toBe(false);
+		expect(classifyDangerousGitBash("git log").refused).toBe(false);
+		expect(classifyDangerousGitBash("git push origin main").refused).toBe(true);
 		expect(classifyDangerousGitBash('git commit "-a"').refused).toBe(true);
 		expect(classifyDangerousGitBash("git commit '--no-verify'").refused).toBe(true);
 		expect(classifyDangerousGitBash('git add "--all"').refused).toBe(true);
@@ -264,29 +220,13 @@ describe("dogfood safety closure", () => {
 		await settle(blind.gate, "bad", "bash", { command: "npm test" }, () => undefined);
 		expect(blind.observer.deliveryBlockReason("obj")).toBe("repository_fingerprint_unavailable");
 		const read = gateFor(root);
-		await settle(read.gate, "status", "bash", { command: "git status" }, () => {
-			writeFileSync(join(root, "during-status.txt"), "x\n");
-		});
+		await settle(read.gate, "status", "bash", { command: "git status" }, () => undefined);
 		expect(read.observer.deliveryBlockReason("obj")).toBeUndefined();
-		const blocked = await read.gate.beforeToolCall(
-			{
-				toolCall: {
-					type: "toolCall",
-					id: "deny",
-					name: "bash",
-					arguments: { command: "git commit -m x -- README.md" },
-				},
-				args: { command: "git commit -m x -- README.md" },
-				assistantMessage: { provider: "test", model: "test" } as never,
-				context: {} as never,
-			} as Parameters<ToolGateController["beforeToolCall"]>[0],
-			undefined,
-		);
-		expect(blocked?.block).toBe(true);
+		await settle(read.gate, "commit", "bash", { command: "git commit -m x -- README.md" }, () => undefined);
 		expect(read.observer.deliveryBlockReason("obj")).toBeUndefined();
 	});
 
-	it("commits the owned file after a harmless test and refuses a bash write", async () => {
+	it("commits the owned file after a harmless test and rejects a bash write at delivery", async () => {
 		const fixOnly = compileExecutionCharter({
 			objectiveId: "fix-only",
 			prompt: "fix the file, run the targeted test",
@@ -370,21 +310,30 @@ describe("dogfood safety closure", () => {
 		const beforeToolCall = session.agent.beforeToolCall;
 		const afterToolCall = session.agent.afterToolCall;
 		if (!beforeToolCall || !afterToolCall) throw new Error("session tool gate is not installed");
-		const refused = await beforeToolCall(
+		const gitCommit = "git commit -m x -- README.md";
+		const admittedGit = await beforeToolCall(
 			{
 				toolCall: {
 					type: "toolCall",
 					id: "git1",
 					name: "bash",
-					arguments: { command: "git commit -m x -- README.md" },
+					arguments: { command: gitCommit },
 				},
-				args: { command: "git commit -m x -- README.md" },
+				args: { command: gitCommit },
 				assistantMessage: { provider: "test", model: "test" } as never,
 				context: {} as never,
 			} as Parameters<typeof beforeToolCall>[0],
 			undefined,
 		);
-		expect(refused?.block).toBe(true);
+		expect(admittedGit?.block).toBeUndefined();
+		await afterToolCall({
+			toolCall: { type: "toolCall", id: "git1", name: "bash", arguments: { command: gitCommit } },
+			args: { command: gitCommit },
+			result: { content: [{ type: "text", text: "ok" }], details: {} },
+			isError: false,
+			assistantMessage: {} as never,
+			context: {} as never,
+		});
 		expect(git(root, ["rev-parse", "HEAD"])).toBe(admitted);
 
 		writeFileSync(join(root, "README.md"), "fixed\n");

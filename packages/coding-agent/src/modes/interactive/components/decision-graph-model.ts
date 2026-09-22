@@ -50,6 +50,8 @@ export interface DecisionGraphInput {
 export interface DecisionStageRow {
 	readonly stage: DecisionStage;
 	readonly totalMs: number;
+	/** This visit only. Zero when the stage is not the open one. The ticking clock uses this, not `totalMs`. */
+	readonly passMs: number;
 	readonly passes: number;
 	readonly current: boolean;
 	readonly loop: number;
@@ -188,6 +190,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 			events: eventsDuring(entry.stage),
 			stage: entry.stage,
 			totalMs: totals.elapsedMs,
+			passMs: isCurrent && open ? Math.max(0, nowMs - open.enteredAt) : 0,
 			passes: totals.passes,
 			current: isCurrent,
 			loop: isCurrent && open ? open.loop : entry.loop,

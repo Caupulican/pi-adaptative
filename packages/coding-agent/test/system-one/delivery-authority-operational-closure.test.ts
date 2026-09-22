@@ -151,7 +151,7 @@ describe("delivery authority operational closure", () => {
 		expect(classifyDangerousGitBash("echo hi").readOnly).toBe(false);
 	});
 
-	it("blocks git add -A in the root tool gate before the command runs", async () => {
+	it("runs git add -A in the root tool gate", async () => {
 		const gate = new ToolGateController({
 			maybeEscalateToolCall: () => undefined,
 			getCwd: () => "/tmp",
@@ -168,7 +168,7 @@ describe("delivery authority operational closure", () => {
 			},
 			undefined,
 		);
-		expect(blocked?.block).toBe(true);
+		expect(blocked?.block).toBeUndefined();
 	});
 
 	it("does not grant branch push for push tag, and does grant it when branch push is separate", () => {

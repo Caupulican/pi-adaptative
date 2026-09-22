@@ -316,6 +316,8 @@ describe("Decision graph model", () => {
 		expect(model.loop).toBe(3);
 		expect(model.stages.find((row) => row.stage === "verify")?.passes).toBe(1);
 		expect(model.stages.find((row) => row.stage === "repair")?.passes).toBe(2);
+		expect(model.current?.passMs).toBe(2_000);
+		expect(model.stages.find((row) => row.stage === "repair")?.totalMs).toBe(7_000);
 		expect(model.goal.branch).toBe("repair");
 		expect(model.you).toMatchObject({ present: true, waiting: false, asked: 1, answered: 1 });
 		expect(model.hasRunningClock).toBe(true);
@@ -401,9 +403,10 @@ describe("Decision graph rendering", () => {
 		expect(many.join("\n")).toMatch(/tool vend/);
 		const waiting = renderDecisionDiagram(buildDecisionGraphModel(SCENARIOS.waitingForYou!()), 64);
 		const text = waiting.rows.map(stripAnsi);
-		expect(text[0]).toMatch(/YOU .*· loop 2/);
+		expect(text[0]).toMatch(/YOU/);
 		expect(text.join("\n")).toContain("waiting for your answer");
-		expect(waiting.currentRow).toBe(0);
+		expect(text.join("\n")).toMatch(/loop 2/);
+		expect(stripAnsi(waiting.rows[waiting.currentRow]!)).toMatch(/clarify/);
 		const delivered = renderDecisionDiagram(buildDecisionGraphModel(SCENARIOS.delivered!()), 64)
 			.rows.map(stripAnsi)
 			.join("\n");
@@ -457,6 +460,32 @@ describe("Decision graph rendering", () => {
 		expect(text.some((row) => row.includes("· criterion 3 failed"))).toBe(true);
 		expect(text.some((row) => row.includes("· worker dispatched"))).toBe(false);
 		expect(text.some((row) => row.includes("CHECKS") && row.includes("1/2"))).toBe(true);
+	});
+
+	it("draws the work loop and does not call an open goal yes", () => {
+		const log = new DecisionStageLog();
+		log.observe(projection({ phase: "understand" }), T0);
+		log.observe(projection(), T0 + 4_000);
+		log.observe(
+			projection({
+				phase: "understand",
+				control: { owner: "root", state: "deciding", reasonCode: "no_objective" },
+				active_actors: [],
+			}),
+			T0 + 8_000,
+		);
+		const model = buildDecisionGraphModel({
+			...SCENARIOS.idle!(),
+			stageLog: log.view(T0 + 8_000),
+			receipts: { actions: 6, fileEffects: 0, failures: 0 },
+		});
+		expect(model.current).toBeUndefined();
+		const rows = renderDecisionDiagram(model, 64).rows.map((row) => stripAnsi(row).trim());
+		expect(rows.some((row) => row.includes("loop 1"))).toBe(true);
+		expect(rows.some((row) => row.includes("build"))).toBe(true);
+		expect(rows.some((row) => row.includes("not closed"))).toBe(true);
+		expect(rows.some((row) => row === "yes")).toBe(false);
+		expect(rows.some((row) => row === "pending")).toBe(false);
 	});
 });
 

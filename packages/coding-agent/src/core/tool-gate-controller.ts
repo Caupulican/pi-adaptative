@@ -14,7 +14,6 @@ import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
 import { classifyAllEdgeOperations, type EdgeClass } from "./autonomy/edge-policy.ts";
 import { evaluateToolGateAsync } from "./autonomy/gates.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
-import { classifyRootGitBash } from "./objective-execution/dangerous-git-bash.ts";
 import { type HostRepositoryEffect, repositoryEffectForCall } from "./objective-execution/repository-effect.ts";
 import type {
 	RepositoryMutationObserver,
@@ -124,21 +123,6 @@ export function collectMutatedPaths(toolName: string, args: unknown): string[] {
 	return [...new Set(paths)];
 }
 
-function bashCommand(args: unknown): string | undefined {
-	if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
-	const command = (args as { command?: unknown }).command;
-	return typeof command === "string" ? command : undefined;
-}
-
-function refuseDangerousGit(toolName: string, args: unknown): { block: true; reason: string } | undefined {
-	if (toolName !== "bash") return undefined;
-	const command = bashCommand(args);
-	if (!command) return undefined;
-	const verdict = classifyRootGitBash(command);
-	if (!verdict.refused) return undefined;
-	return { block: true, reason: verdict.reason ?? "dangerous git is refused" };
-}
-
 export class ToolGateController {
 	private readonly deps: ToolGateControllerDeps;
 	private readonly pendingObservations = new Map<string, RepositoryObservationToken>();
@@ -191,8 +175,6 @@ export class ToolGateController {
 		signal,
 	) => {
 		signal?.throwIfAborted();
-		const dangerousGit = refuseDangerousGit(toolCall.name, args);
-		if (dangerousGit) return dangerousGit;
 		// Session model selection may change during a provider response or any awaited hook.
 		const modelRef = `${assistantMessage.provider}/${assistantMessage.model}`;
 		const escalation = this.deps.maybeEscalateToolCall(toolCall.name, args);
@@ -271,8 +253,6 @@ export class ToolGateController {
 			// 3. Post-hook arguments: direct-script gate, then the envelope on what will really run
 			// Hooks rewrite event.input in place. The executor retains this same args object;
 			// extension return values carry control decisions, never replacement arguments.
-			const rewrittenGit = refuseDangerousGit(toolCall.name, args);
-			if (rewrittenGit) return rewrittenGit;
 			const effectiveCwd = executionContext?.cwd ?? scopeCwd;
 			if (this.deps.checkDirectScriptExecution) {
 				const directCheck = this.deps.checkDirectScriptExecution(toolCall.name, args, effectiveCwd);
@@ -352,30 +332,23 @@ export class ToolGateController {
 					}
 				}
 
-				const systemOneResult = await systemOne.validateToolGate({
-					tool: toolCall.name,
-					intent: `Invoke tool ${toolCall.name}`,
-					impact,
-					args,
-					call_id: toolCall.id,
-				});
-				if (systemOneResult.outcome === "block") {
-					return {
-						block: true,
-						reason: systemOneResult.reason ?? "Tool execution blocked by System One semantic gate",
-					};
+				let systemOneResult: Awaited<ReturnType<typeof systemOne.validateToolGate>> | undefined;
+				try {
+					systemOneResult = await systemOne.validateToolGate({
+						tool: toolCall.name,
+						intent: `Invoke tool ${toolCall.name}`,
+						impact,
+						args,
+						call_id: toolCall.id,
+					});
+				} catch {
+					// A missing classification does not refuse the call.
+					systemOneResult = undefined;
 				}
 				const foreground = this.deps.getForegroundControl?.();
-				if (systemOneResult.outcome === "replan") {
-					// The call is not relevant to the current step. Refusal is scoped to this one call:
-					// the rest of the batch and the turn go on, and the verdict is ledger evidence the
-					// objective loop routes on at its next cycle. Cancelling the turn here killed every
-					// sibling call and the operator's own request (field-observed on a plain session).
-					const reason = systemOneResult.reason ?? `tool ${toolCall.name} is not relevant to the current step`;
-					return { block: true, reason: `System One asks to re-plan: ${reason}` };
-				}
-				if (systemOneResult.outcome === "confirm" && foreground) {
-					// Broad scope on a non-destructive call: allowed, with a steer the next model turn reads.
+				// Jev classifies. Allow and replan stay on the ledger. Only a broad-scope
+				// confirm is ranked high enough to reach the model, as one queued line.
+				if (systemOneResult?.outcome === "confirm" && foreground) {
 					await foreground.steer(
 						`System One: the ${toolCall.name} call's scope looks broad relative to the current step; keep to what the step needs and say why if more is required.`,
 						"queue",

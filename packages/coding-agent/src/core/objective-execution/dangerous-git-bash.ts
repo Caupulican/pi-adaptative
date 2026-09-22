@@ -1,7 +1,7 @@
 /**
  * Lane WIP git stays on `classifyDangerousGitBash`, with a quote-aware lexer.
- * Root bash uses `classifyRootGitBash` and refuses every git invocation.
- * Typed delivery and `repo_read` do not go through bash.
+ * Root bash runs git. The operator is asked only for extreme destruction, and that
+ * check lives on the edge, not here.
  */
 import { isGitExecutableToken, lexShellCommand } from "./git-shell-lexer.ts";
 
@@ -125,24 +125,4 @@ export function classifyDangerousGitBash(command: string): DangerousGitBashVerdi
 	}
 	const readOnly = lex.segments.length > 0 && lex.segments.every((segment) => segmentIsReadOnly(segment));
 	return { refused: false, readOnly };
-}
-
-const ROOT_GIT_REFUSAL =
-	"root bash cannot run git; use repo_read for reads and typed delivery for commit, push, and tag";
-
-/** Root bash admits no git invocation. Reads go through repo_read. */
-export function classifyRootGitBash(command: string): DangerousGitBashVerdict {
-	const lex = lexShellCommand(command);
-	if (!lex.ok) {
-		if (/(?:^|[\s"'/\\])git(?:\.exe)?(?=$|[\s"'/\\])/iu.test(command)) {
-			return { refused: true, reason: ROOT_GIT_REFUSAL, readOnly: false };
-		}
-		return { refused: false, readOnly: false };
-	}
-	for (const segment of lex.segments) {
-		if (segment.some((token) => isGitExecutableToken(token))) {
-			return { refused: true, reason: ROOT_GIT_REFUSAL, readOnly: false };
-		}
-	}
-	return { refused: false, readOnly: false };
 }

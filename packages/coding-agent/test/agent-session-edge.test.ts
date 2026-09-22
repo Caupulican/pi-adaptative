@@ -38,17 +38,17 @@ describe("the edge in a session", () => {
 		const harness = await createHarness({ baseToolsOverride: [bash.tool], settings: { edge: { allow: [] } } });
 		try {
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("bash", { command: "npm publish" })], {
+				fauxAssistantMessage([fauxToolCall("bash", { command: "rm -rf ." })], {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage("Done"),
 			]);
-			await harness.session.prompt("Push the branch");
+			await harness.session.prompt("Delete the repository");
 			expect(bash.commands).toEqual([]);
 			const text = lastToolResultText(harness);
 			expect(text).toContain(EDGE_CONFIRMATION_REQUIRED);
 			expect(text).toContain("goal grant_edge");
-			expect(text).toContain("/edge allow package.publish");
+			expect(text).toContain("/edge allow destructive.fs");
 		} finally {
 			await harness.cleanup();
 		}
@@ -73,21 +73,21 @@ describe("the edge in a session", () => {
 			expect(bash.commands).toEqual(["npm test"]);
 			expect(asked).toBe(0);
 
-			harness.session.grantEdge("package.publish", "operator", { note: "release day" });
+			harness.session.grantEdge("destructive.fs", "operator", { note: "release day" });
 			expect(harness.session.getEdgeGrants()).toEqual([
-				expect.objectContaining({ class: "package.publish", source: "operator", note: "release day" }),
+				expect.objectContaining({ class: "destructive.fs", source: "operator", note: "release day" }),
 			]);
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("bash", { command: "npm publish" })], { stopReason: "toolUse" }),
+				fauxAssistantMessage([fauxToolCall("bash", { command: "rm -rf ." })], { stopReason: "toolUse" }),
 				fauxAssistantMessage("Done"),
 			]);
-			await harness.session.prompt("Publish");
-			expect(bash.commands).toEqual(["npm test", "npm publish"]);
+			await harness.session.prompt("Delete the repository");
+			expect(bash.commands).toEqual(["npm test", "rm -rf ."]);
 			expect(asked).toBe(0);
 
-			expect(harness.session.revokeEdge("package.publish")).toBe(true);
+			expect(harness.session.revokeEdge("destructive.fs")).toBe(true);
 			expect(harness.session.getEdgeGrants()).toEqual([]);
-			expect(harness.session.revokeEdge("package.publish")).toBe(false);
+			expect(harness.session.revokeEdge("destructive.fs")).toBe(false);
 		} finally {
 			await harness.cleanup();
 		}
@@ -103,7 +103,7 @@ describe("the edge in a session", () => {
 			return answers.shift() ?? "deny";
 		});
 		try {
-			for (const command of ["npm publish", "npm publish", "npm publish", "npm publish"]) {
+			for (const command of ["rm -rf .", "rm -rf .", "rm -rf .", "rm -rf ."]) {
 				harness.setResponses([
 					fauxAssistantMessage([fauxToolCall("bash", { command })], { stopReason: "toolUse" }),
 					fauxAssistantMessage("Done"),
@@ -111,15 +111,15 @@ describe("the edge in a session", () => {
 				await harness.session.prompt("Publish");
 			}
 			expect(requests.map((request) => request.class)).toEqual([
-				"package.publish",
-				"package.publish",
-				"package.publish",
+				"destructive.fs",
+				"destructive.fs",
+				"destructive.fs",
 			]);
-			expect(requests[0]).toMatchObject({ toolName: "bash", operation: "npm publish" });
+			expect(requests[0]).toMatchObject({ toolName: "bash", operation: "rm -rf ." });
 			// deny → blocked; allow-once → ran; allow-session → ran and granted; fourth → granted, no question.
-			expect(bash.commands).toEqual(["npm publish", "npm publish", "npm publish"]);
+			expect(bash.commands).toEqual(["rm -rf .", "rm -rf .", "rm -rf ."]);
 			expect(harness.session.getEdgeGrants()).toEqual([
-				expect.objectContaining({ class: "package.publish", source: "operator" }),
+				expect.objectContaining({ class: "destructive.fs", source: "operator" }),
 			]);
 		} finally {
 			await harness.cleanup();
@@ -130,17 +130,17 @@ describe("the edge in a session", () => {
 		const bash = bashSpy();
 		const harness = await createHarness({
 			baseToolsOverride: [bash.tool],
-			settings: { edge: { allow: ["package.publish", "bogus"] } },
+			settings: { edge: { allow: ["destructive.fs", "bogus"] } },
 		});
 		try {
-			expect(harness.session.getEdgeGrants()).toEqual([{ class: "package.publish", source: "settings" }]);
-			expect(harness.session.revokeEdge("package.publish")).toBe(false);
+			expect(harness.session.getEdgeGrants()).toEqual([{ class: "destructive.fs", source: "settings" }]);
+			expect(harness.session.revokeEdge("destructive.fs")).toBe(false);
 			harness.setResponses([
-				fauxAssistantMessage([fauxToolCall("bash", { command: "npm publish" })], { stopReason: "toolUse" }),
+				fauxAssistantMessage([fauxToolCall("bash", { command: "rm -rf ." })], { stopReason: "toolUse" }),
 				fauxAssistantMessage("Done"),
 			]);
-			await harness.session.prompt("Publish");
-			expect(bash.commands).toEqual(["npm publish"]);
+			await harness.session.prompt("Delete the repository");
+			expect(bash.commands).toEqual(["rm -rf ."]);
 		} finally {
 			await harness.cleanup();
 		}

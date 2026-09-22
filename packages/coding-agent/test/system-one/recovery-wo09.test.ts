@@ -225,7 +225,7 @@ describe("System One recovery WO-09 production paths", () => {
 		expect(called).toBe(0);
 	});
 
-	it("preflight retrieve on a live objective skips the turn and records a retrieve directive", async () => {
+	it("preflight retrieve on a live objective records the directive and still runs the turn", async () => {
 		const store = emptyStore("preflight-retrieve");
 		const controller = new SystemOneController({
 			store,
@@ -244,8 +244,43 @@ describe("System One recovery WO-09 production paths", () => {
 			truthSource: () => projectCanonicalTruth({ goal: goalWithRequirement(), currentRevision: "rev-1" }),
 		});
 		const result = await executeSystemOnePreflight(controller, 0);
-		expect(result.proceed).toBe(false);
+		expect(result.proceed).toBe(true);
 		expect(controller.peekControlDirective()?.objectiveRoute).toBe("retrieve");
+	});
+
+	it("enables capabilities only on a hard yes and leaves a failed classification unset", async () => {
+		const controller = new SystemOneController({
+			store: emptyStore("authorize"),
+			adapter: {
+				evaluate: async () => ({
+					model: "jev-1.13.0",
+					answers: { capabilities_authorized: { noul: 0.99 } },
+					latency_ms: 1,
+				}),
+			},
+		});
+		expect(await controller.classifyCapabilitiesAuthorized("commit and push this")).toBe(true);
+		expect(await controller.classifyCapabilitiesAuthorized("   ")).toBeUndefined();
+		const denied = new SystemOneController({
+			store: emptyStore("authorize-no"),
+			adapter: {
+				evaluate: async () => ({
+					model: "jev-1.13.0",
+					answers: { capabilities_authorized: { noul: 0.5 } },
+					latency_ms: 1,
+				}),
+			},
+		});
+		expect(await denied.classifyCapabilitiesAuthorized("what does this function do")).toBe(false);
+		const down = new SystemOneController({
+			store: emptyStore("authorize-down"),
+			adapter: {
+				evaluate: async () => {
+					throw new Error("unavailable");
+				},
+			},
+		});
+		expect(await down.classifyCapabilitiesAuthorized("commit and push this")).toBeUndefined();
 	});
 
 	it("evaluateRouteOnce keeps a retrieve directive through wait_for_worker and owner_required, then reroutes", async () => {

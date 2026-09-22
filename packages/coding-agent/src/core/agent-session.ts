@@ -56,7 +56,12 @@ import type {
 	WorkerClaim,
 	WorkerRequest,
 } from "./autonomy/contracts.ts";
-import type { EdgeClass, EdgeConfirmationHandler, EdgeGrantView } from "./autonomy/edge-policy.ts";
+import {
+	EDGE_CLASSES,
+	type EdgeClass,
+	type EdgeConfirmationHandler,
+	type EdgeGrantView,
+} from "./autonomy/edge-policy.ts";
 import type { ExecutionCharter } from "./autonomy/execution-charter.ts";
 import { buildForegroundEnvelope, formatForegroundEnvelopeObservation } from "./autonomy/foreground-envelope.ts";
 import { evaluateToolGate } from "./autonomy/gates.ts";
@@ -2326,6 +2331,22 @@ export class AgentSession {
 		return sessionEdgeGrants(this._edgeDeps());
 	}
 
+	/**
+	 * A hard yes from Jev on the user request enables every edge capability that is still off.
+	 * Grants already present are left alone, so the authority slot does not grow on every turn.
+	 */
+	private async _enableCapabilitiesAuthorizedByUser(request: string): Promise<void> {
+		const controller = this._systemOneController;
+		if (!controller) return;
+		const authorized = await controller.classifyCapabilitiesAuthorized(request);
+		if (authorized !== true) return;
+		const granted = new Set(this.getEdgeGrants().map((grant) => grant.class));
+		for (const edgeClass of EDGE_CLASSES) {
+			if (granted.has(edgeClass)) continue;
+			this.grantEdge(edgeClass, "operator", { note: "explicit user request" });
+		}
+	}
+
 	grantEdge(edgeClass: EdgeClass, source: "operator" | "instructions", details: EdgeGrantDetails = {}): void {
 		recordEdgeGrant(this._edgeDeps(), edgeClass, source, details);
 		// The owner acted at the edge: whatever was waiting on them is no longer a blocker.
@@ -3557,6 +3578,7 @@ export class AgentSession {
 		let recallQuery = "";
 		let admittedGoalId = options?.goalExecutionId;
 		let goalToolStartAuthority: ExplicitGoalStartAuthority | undefined;
+		let userRequest = text;
 
 		try {
 			// Handle extension commands first. Programmatic extension messages may opt
@@ -3608,6 +3630,7 @@ export class AgentSession {
 			}
 
 			if (!options?.internalContextType) goalToolStartAuthority = parseExplicitGoalStartAuthority(expandedText);
+			userRequest = expandedText;
 
 			// If streaming — or waiting out a retry backoff, which is still an active
 			// operation — queue via steer() or followUp() instead of starting a
@@ -3887,6 +3910,7 @@ export class AgentSession {
 		this._goals.setStartAuthority(goalToolStartAuthority);
 		try {
 			this._toolProtocol.resetTurnState();
+			await this._enableCapabilitiesAuthorizedByUser(userRequest);
 			const preflight = await executeSystemOnePreflight(this._systemOneController, this.agent.state.messages.length);
 			if (preflight.proceed) {
 				await this._modelRouter.runRoutedTurn(

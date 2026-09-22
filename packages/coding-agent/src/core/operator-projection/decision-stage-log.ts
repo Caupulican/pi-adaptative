@@ -85,6 +85,8 @@ export interface DecisionStageSink {
 	open(entry: DecisionStageSinkEntry): number;
 	close(rowId: number, endedAt: number): void;
 	load(): readonly DecisionStageStoredEntry[];
+	/** Moves an open row's start to `enteredAt`. The gap before a resume is not work. */
+	reanchor?(rowId: number, enteredAt: number): void;
 }
 
 /**
@@ -181,6 +183,8 @@ export class DecisionStageLog {
 	private objectiveId?: string;
 	private readonly sink?: DecisionStageSink;
 	private sinkFailure?: string;
+	/** An open row was loaded from the sink. Its clock restarts at the next read, so downtime is not counted. */
+	private resumeClock = false;
 
 	constructor(options: DecisionStageLogOptions = {}) {
 		this.sink = options.sink;
@@ -199,6 +203,7 @@ export class DecisionStageLog {
 	 * loop is not running, so no stage is and no clock runs.
 	 */
 	observe(projection: OperatorProjection, now: number): boolean {
+		this.anchorResumedClock(now);
 		if (this.objectiveId !== undefined && this.objectiveId !== projection.objective_id)
 			this.reset(projection.objective_id, now);
 		this.objectiveId = projection.objective_id;
@@ -234,6 +239,7 @@ export class DecisionStageLog {
 	}
 
 	view(now: number): DecisionStageLogView {
+		this.anchorResumedClock(now);
 		const open = this.entries.at(-1);
 		const openEntry = open !== undefined && open.endedAt === undefined ? open : undefined;
 		const totals = {} as Record<DecisionStage, DecisionStageTotals>;
@@ -284,10 +290,30 @@ export class DecisionStageLog {
 		}
 	}
 
+	/** Restarts a rehydrated open pass at `now` and persists that start. Closed passes stay. */
+	private anchorResumedClock(now: number): void {
+		if (!this.resumeClock) return;
+		this.resumeClock = false;
+		const index = this.entries.length - 1;
+		const open = this.entries[index];
+		if (open === undefined || open.endedAt !== undefined || open.enteredAt === now) return;
+		this.entries[index] = { ...open, enteredAt: now };
+		if (open.rowId !== undefined) this.persistReanchor(open.rowId, now);
+	}
+
+	private persistReanchor(rowId: number, enteredAt: number): void {
+		if (!this.sink?.reanchor) return;
+		try {
+			this.sink.reanchor(rowId, enteredAt);
+		} catch (error) {
+			this.sinkFailure = error instanceof Error ? error.message : String(error);
+		}
+	}
+
 	/**
-	 * Replays the session's durable entries so a resumed session continues its timers instead of
-	 * restarting them. Only the newest objective's entries are live; earlier objectives stay in the
-	 * sink for analysis.
+	 * Replays the session's durable entries. Closed passes keep their durations. An open pass does
+	 * not keep counting across the time the process was down: the next read restarts that clock.
+	 * Only the newest objective's entries are live; earlier objectives stay in the sink.
 	 */
 	private rehydrate(sink: DecisionStageSink): void {
 		let stored: readonly DecisionStageStoredEntry[];
@@ -319,5 +345,7 @@ export class DecisionStageLog {
 				total.passes += 1;
 			}
 		}
+		const open = this.entries.at(-1);
+		this.resumeClock = open !== undefined && open.endedAt === undefined;
 	}
 }

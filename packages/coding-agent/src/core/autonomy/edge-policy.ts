@@ -2,23 +2,18 @@ import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import nodePath from "node:path";
 import type { SessionEntry } from "@caupulican/pi-agent-core/node";
-import { getAgentDir } from "../../config.ts";
 import { matchToolkitScript, type ToolkitScript } from "../toolkit/script-registry.ts";
 import { expandPath } from "../tools/path-utils.ts";
 import { parseShellCommandSequence, stripShellInvocationPrefixes } from "../tools/shell-command-parser.ts";
-import { isPathWithinScope } from "./path-scope.ts";
 
 /**
  * The edge: the operations that can need the operator, and whether they still do.
  *
- * Autonomy is provided by the harness and the agent; the human is enforced at the edge. The edge
- * is a short list of operation classes — publishing a repository, publishing or adding packages,
- * deleting outside the task, changing the harness's own authority, or running dangerous toolkit scripts —
- * and whether one actually stops depends on what the operator said. A class granted by the task
- * instructions (recorded by the model with the operator's exact words), by the operator in this
- * session (`/edge allow`) or by the machine's settings (`edge.allow`) never asks. An ungranted class
- * asks once, structurally: the tool call waits for a one-key answer in the workbench, or is blocked with the
- * reason when no one is at the keyboard. Nothing else in the tool layer ever asks.
+ * Git runs. Publishing, installing, committing, and editing settings run. The operator is asked
+ * only before extreme destruction: deleting the repository, a directory that contains it, or its
+ * `.git` directory, deleting the home directory or a filesystem root, or formatting a disk. A
+ * granted class never asks. An ungranted extreme operation asks once, or is blocked when no one
+ * is at the keyboard.
  *
  * Classification is deliberately narrow and literal: a real risk names itself; anything unknown
  * is ordinary work and runs.
@@ -34,13 +29,19 @@ export const EDGE_CLASSES = [
 export type EdgeClass = (typeof EDGE_CLASSES)[number];
 
 export const EDGE_CLASS_DESCRIPTIONS: Readonly<Record<EdgeClass, string>> = {
-	"git.publish": "git push, tag, release (outward-facing repository changes)",
-	"package.publish": "publishing a package or image to a registry",
-	"package.install": "adding a dependency or installing a package globally",
-	"destructive.fs": "irreversible deletion outside the task directory, or discarding uncommitted work",
-	"settings.authority": "changing the harness's own settings, credentials or authority files",
+	"git.publish": "git push, tag, and release run without asking",
+	"package.publish": "publishing a package or image runs without asking",
+	"package.install": "installing a package runs without asking",
+	"destructive.fs":
+		"deleting the repository, a directory that contains it, the home directory, a filesystem root, or a disk",
+	"settings.authority": "editing settings and credentials runs without asking",
 	"toolkit.script": "running registered dangerous toolkit scripts",
 };
+
+/** Classes a tool call can still make the operator confirm. The other names stay for grants. */
+export function edgeClassRequiresConfirmation(edgeClass: EdgeClass): boolean {
+	return edgeClass === "destructive.fs" || edgeClass === "toolkit.script";
+}
 
 export function isEdgeClass(value: unknown): value is EdgeClass {
 	return typeof value === "string" && (EDGE_CLASSES as readonly string[]).includes(value);
@@ -67,25 +68,17 @@ export interface ClassifyEdgeInput {
 	agentDir?: string;
 }
 
-const GIT_GLOBAL_VALUE_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
-const PUBLISH_PACKAGE_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
-const INSTALL_ADD_SUBCOMMANDS = new Set(["add"]);
-const NPM_INSTALL_SUBCOMMANDS = new Set(["install", "i", "add", "isntall"]);
-const RECURSIVE_RM_FLAGS = /^-[a-zA-Z]*[rR][a-zA-Z]*$/;
 const POWERSHELL_REMOVE = new Set(["remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"]);
-const AUTHORITY_FILES = new Set(["settings.json", "auth.json", "keybindings.json", "models.json"]);
-const MUTATING_FILE_TOOLS = new Set([
-	"sed",
-	"tee",
-	"cp",
-	"mv",
-	"rm",
-	"truncate",
-	"install",
-	"ln",
-	"dd",
-	"python",
-	"node",
+/** A find expression with one of these deletes matches, not the search root. */
+const FIND_NARROWING = new Set([
+	"-name",
+	"-iname",
+	"-path",
+	"-ipath",
+	"-regex",
+	"-iregex",
+	"-wholename",
+	"-iwholename",
 ]);
 
 function lower(token: string | undefined): string {
@@ -104,18 +97,6 @@ function isOption(token: string): boolean {
 
 function positional(argv: readonly string[]): string[] {
 	return argv.filter((token) => !isOption(token));
-}
-
-/** `git -C dir -c k=v <subcommand> …` → the subcommand and the arguments after it. */
-function gitInvocation(argv: readonly string[]): { subcommand: string; rest: string[] } | undefined {
-	let index = 1;
-	while (index < argv.length) {
-		const token = argv[index] as string;
-		if (!isOption(token)) return { subcommand: token.toLowerCase(), rest: argv.slice(index + 1) };
-		if (GIT_GLOBAL_VALUE_OPTIONS.has(token)) index += 2;
-		else index += 1;
-	}
-	return undefined;
 }
 
 function splitLoose(command: string): string[][] {
@@ -175,176 +156,32 @@ function resolveTarget(target: string, cwd: string): { resolved: string; api: no
 	return { resolved: nodePath.resolve(cwd, expanded), api: nodePath };
 }
 
-/** A path the task may not delete: a root, the home directory, or anything outside the task directory. */
-function isOutsideTask(target: string, cwd: string, scopeCwd: string): boolean {
+/** True when `child` is `parent` or a path inside it. */
+function pathContains(parent: string, child: string, api: nodePath.PlatformPath): boolean {
+	const relative = api.relative(parent, child);
+	return relative === "" || (!relative.startsWith(`..${api.sep}`) && relative !== ".." && !api.isAbsolute(relative));
+}
+
+/**
+ * Extreme destruction: the repository, a directory that contains it, its `.git` directory,
+ * the home directory, or a filesystem root.
+ */
+function destroysRepository(target: string, cwd: string, scopeCwd: string): boolean {
 	const { resolved, api } = resolveTarget(target, cwd);
 	const parsed = api.parse(resolved);
-	if (parsed.root === resolved || resolved === nodePath.resolve(homedir())) return true;
-	return !isPathWithinScope(resolved, scopeCwd);
+	if (parsed.root === resolved) return true;
+	const home = nodePath.resolve(homedir());
+	if (resolved === home || (api === nodePath && pathContains(resolved, home, api))) return true;
+	const scope = api.resolve(scopeCwd);
+	if (pathContains(resolved, scope, api)) return true;
+	return api.basename(resolved) === ".git";
 }
 
-function isAuthorityFile(target: string, cwd: string, agentDir: string): boolean {
-	const { resolved } = resolveTarget(target, cwd);
-	const base = nodePath.basename(resolved).toLowerCase();
-	if (!AUTHORITY_FILES.has(base)) return false;
-	const parent = nodePath.basename(nodePath.dirname(resolved)).toLowerCase();
-	return isPathWithinScope(resolved, agentDir) || parent === ".pi" || parent === "agent" || parent === ".agent";
-}
-
-function classifyGit(argv: readonly string[], joined: string): EdgeOperation | undefined {
-	const invocation = gitInvocation(argv);
-	if (!invocation) return undefined;
-	const { subcommand, rest } = invocation;
-	const options = rest.filter(isOption).map((token) => token.toLowerCase());
-	const targets = positional(rest);
-	switch (subcommand) {
-		case "push":
-			return { class: "git.publish", operation: joined, reason: "pushes commits to a remote" };
-		case "tag": {
-			const listing = options.some((option) =>
-				["-l", "--list", "-d", "--delete", "-v", "--verify", "-n", "--contains", "--points-at", "--merged"].some(
-					(flag) => option === flag || option.startsWith(`${flag}=`),
-				),
-			);
-			if (!listing && targets.length > 0) {
-				return { class: "git.publish", operation: joined, reason: "creates a release tag" };
-			}
-			return undefined;
-		}
-		case "reset":
-			if (options.includes("--hard") || options.includes("--merge")) {
-				return { class: "destructive.fs", operation: joined, reason: "discards uncommitted work" };
-			}
-			return undefined;
-		case "clean":
-			if (options.some((option) => /^-[a-z]*f|^--force$/.test(option))) {
-				return { class: "destructive.fs", operation: joined, reason: "deletes untracked files" };
-			}
-			return undefined;
-		case "checkout":
-			if (rest.includes("--") || (targets.length > 0 && targets.every((target) => target === "."))) {
-				return { class: "destructive.fs", operation: joined, reason: "discards working-tree changes" };
-			}
-			return undefined;
-		case "restore":
-			if (
-				targets.length > 0 &&
-				!options.some((option) => option === "--staged" || option === "-s" || option === "--worktree=false")
-			) {
-				return { class: "destructive.fs", operation: joined, reason: "discards working-tree changes" };
-			}
-			return undefined;
-		case "stash":
-			if (targets[0] === "drop" || targets[0] === "clear") {
-				return { class: "destructive.fs", operation: joined, reason: "deletes stashed work" };
-			}
-			return undefined;
-		case "filter-branch":
-		case "filter-repo":
-			return { class: "destructive.fs", operation: joined, reason: "rewrites repository history" };
-		case "reflog":
-			if (targets[0] === "expire" || targets[0] === "delete") {
-				return { class: "destructive.fs", operation: joined, reason: "expires recovery history" };
-			}
-			return undefined;
-		case "gc":
-			if (options.some((option) => option.startsWith("--prune"))) {
-				return { class: "destructive.fs", operation: joined, reason: "prunes unreachable objects" };
-			}
-			return undefined;
-		default:
-			return undefined;
-	}
-}
-
-function classifyPackageManager(argv: readonly string[], joined: string): EdgeOperation | undefined {
-	const tool = commandTool(argv[0]);
-	const subcommand = lower(argv[1]);
-	const rest = argv.slice(2);
-	const options = rest.filter(isOption).map((token) => token.toLowerCase());
-	const targets = positional(rest);
-	if (PUBLISH_PACKAGE_MANAGERS.has(tool)) {
-		if (subcommand === "publish" || subcommand === "unpublish" || subcommand === "deprecate") {
-			return { class: "package.publish", operation: joined, reason: `${tool} ${subcommand} reaches the registry` };
-		}
-		const global = options.some((option) => option === "-g" || option === "--global");
-		if (tool === "npm" && NPM_INSTALL_SUBCOMMANDS.has(subcommand) && (targets.length > 0 || global)) {
-			return {
-				class: "package.install",
-				operation: joined,
-				reason: global ? "installs globally" : "adds a dependency",
-			};
-		}
-		if (tool !== "npm" && (INSTALL_ADD_SUBCOMMANDS.has(subcommand) || (subcommand === "install" && global))) {
-			if (targets.length > 0 || global) {
-				return {
-					class: "package.install",
-					operation: joined,
-					reason: global ? "installs globally" : "adds a dependency",
-				};
-			}
-		}
-		if (tool === "pnpm" && subcommand === "install" && targets.length > 0) {
-			return { class: "package.install", operation: joined, reason: "adds a dependency" };
-		}
-		return undefined;
-	}
-	if (tool === "pip" || tool === "pip3" || tool === "pipx") {
-		if (subcommand === "install") {
-			const requirementsOnly = options.some((option) => option === "-r" || option === "--requirement");
-			const editableOnly = targets.length === 0 || (options.includes("-e") && targets.every((t) => t === "."));
-			if (!requirementsOnly && !editableOnly) {
-				return { class: "package.install", operation: joined, reason: "adds a dependency" };
-			}
-		}
-		return undefined;
-	}
-	if (tool === "uv") {
-		if (
-			subcommand === "add" ||
-			(subcommand === "pip" && lower(argv[2]) === "install" && positional(argv.slice(3)).length > 0)
-		) {
-			return { class: "package.install", operation: joined, reason: "adds a dependency" };
-		}
-		if (subcommand === "publish")
-			return { class: "package.publish", operation: joined, reason: "reaches the registry" };
-		return undefined;
-	}
-	if (tool === "poetry" && subcommand === "add") {
-		return { class: "package.install", operation: joined, reason: "adds a dependency" };
-	}
-	if (tool === "poetry" && subcommand === "publish") {
-		return { class: "package.publish", operation: joined, reason: "reaches the registry" };
-	}
-	if (tool === "cargo") {
-		if (subcommand === "add" || subcommand === "install") {
-			return { class: "package.install", operation: joined, reason: "adds a dependency" };
-		}
-		if (subcommand === "publish")
-			return { class: "package.publish", operation: joined, reason: "reaches the registry" };
-		return undefined;
-	}
-	if (tool === "gem") {
-		if (subcommand === "install") return { class: "package.install", operation: joined, reason: "installs a gem" };
-		if (subcommand === "push") return { class: "package.publish", operation: joined, reason: "reaches the registry" };
-		return undefined;
-	}
-	if (tool === "go" && (subcommand === "get" || subcommand === "install") && targets.length > 0) {
-		return { class: "package.install", operation: joined, reason: "adds a dependency" };
-	}
-	if (tool === "twine" && subcommand === "upload") {
-		return { class: "package.publish", operation: joined, reason: "reaches the registry" };
-	}
-	if ((tool === "docker" || tool === "podman" || tool === "helm") && subcommand === "push") {
-		return { class: "package.publish", operation: joined, reason: "pushes an image or chart" };
-	}
-	if (
-		["brew", "apt", "apt-get", "dnf", "yum", "pacman", "choco", "winget", "scoop"].includes(tool) &&
-		(subcommand === "install" || (tool === "pacman" && subcommand.startsWith("-s")))
-	) {
-		return { class: "package.install", operation: joined, reason: "installs a system package" };
-	}
-	return undefined;
+/** `find <root> -delete` removes the tree. A name or path predicate removes matches only. */
+function findDeletesTree(rest: readonly string[]): boolean {
+	const deletes =
+		rest.includes("-delete") || rest.some((token, index) => token === "-exec" && lower(rest[index + 1]) === "rm");
+	return deletes && !rest.some((token) => FIND_NARROWING.has(token));
 }
 
 function classifyDeletion(
@@ -357,40 +194,29 @@ function classifyDeletion(
 	const rest = argv.slice(1);
 	const targets = positional(rest);
 	if (tool === "rm" || tool === "unlink" || tool === "shred") {
-		const outside = targets.filter((target) => isOutsideTask(target, cwd, scopeCwd));
-		if (outside.length > 0) {
+		const destroyed = targets.filter((target) => destroysRepository(target, cwd, scopeCwd));
+		if (destroyed.length > 0) {
 			return {
 				class: "destructive.fs",
 				operation: joined,
-				reason: `deletes outside the task directory (${outside.join(", ")})`,
+				reason: `deletes the repository (${destroyed.join(", ")})`,
 			};
 		}
 		return undefined;
 	}
 	if (POWERSHELL_REMOVE.has(tool)) {
-		const recursive = rest.some((token) => /^-recurse$/i.test(token) || /^\/s$/i.test(token));
-		const outside = targets.filter((target) => isOutsideTask(target, cwd, scopeCwd));
-		if (outside.length > 0 || (recursive && targets.length === 0)) {
-			return { class: "destructive.fs", operation: joined, reason: "deletes outside the task directory" };
+		const destroyed = targets.filter((target) => destroysRepository(target, cwd, scopeCwd));
+		if (destroyed.length > 0) {
+			return { class: "destructive.fs", operation: joined, reason: "deletes the repository" };
 		}
 		return undefined;
 	}
 	if (tool === "find") {
-		const deletes =
-			rest.includes("-delete") || rest.some((token, index) => token === "-exec" && lower(rest[index + 1]) === "rm");
-		if (deletes) {
-			const roots = targets.filter((target) => !target.startsWith("-"));
-			const outside = roots.filter((root) => isOutsideTask(root, cwd, scopeCwd));
-			if (outside.length > 0) {
-				return { class: "destructive.fs", operation: joined, reason: "deletes outside the task directory" };
-			}
-		}
-		return undefined;
-	}
-	if ((tool === "chmod" || tool === "chown") && rest.some((token) => RECURSIVE_RM_FLAGS.test(token))) {
-		const outside = targets.slice(1).filter((target) => isOutsideTask(target, cwd, scopeCwd));
-		if (outside.length > 0) {
-			return { class: "destructive.fs", operation: joined, reason: "changes ownership or mode outside the task" };
+		if (!findDeletesTree(rest)) return undefined;
+		const roots = targets.filter((target) => !target.startsWith("-"));
+		const destroyed = roots.filter((root) => destroysRepository(root, cwd, scopeCwd));
+		if (destroyed.length > 0) {
+			return { class: "destructive.fs", operation: joined, reason: "deletes the repository" };
 		}
 		return undefined;
 	}
@@ -403,80 +229,39 @@ function classifyDeletion(
 	return undefined;
 }
 
-function classifyAuthorityWrite(
-	argv: readonly string[],
-	raw: string,
-	joined: string,
-	cwd: string,
-	agentDir: string,
-): EdgeOperation | undefined {
-	const tool = commandTool(argv[0]);
-	const mutating = MUTATING_FILE_TOOLS.has(tool) || />|\btee\b/.test(raw);
-	if (!mutating) return undefined;
-	const target = [...argv.slice(1), ...raw.split(/\s+/)].find((token) => isAuthorityFile(token, cwd, agentDir));
-	if (!target) return undefined;
-	return { class: "settings.authority", operation: joined, reason: `writes ${nodePath.basename(target)}` };
-}
-
-function classifyInvokedArgv(
-	argv: readonly string[],
-	raw: string,
-	cwd: string,
-	scopeCwd: string,
-	agentDir: string,
-): EdgeOperation[] {
+function classifyInvokedArgv(argv: readonly string[], cwd: string, scopeCwd: string): EdgeOperation[] {
 	if (argv.length === 0) return [];
 	const joined = argv.join(" ");
 	const tool = commandTool(argv[0]);
 	const operations: EdgeOperation[] = [];
-	const candidates: (EdgeOperation | undefined)[] = [
-		tool === "git" ? classifyGit(argv, joined) : undefined,
-		tool === "gh" && ["release", "pr", "repo"].includes(lower(argv[1])) && lower(argv[2]) !== "list"
-			? classifyGh(argv, joined)
-			: undefined,
-		classifyPackageManager(argv, joined),
-		classifyDeletion(argv, joined, cwd, scopeCwd),
-		classifyAuthorityWrite(argv, raw, joined, cwd, agentDir),
-	];
-	for (const candidate of candidates) {
-		if (candidate) operations.push(candidate);
+	if (tool === "gh") {
+		const remote = classifyGh(argv, joined);
+		if (remote) operations.push(remote);
 	}
+	const deletion = classifyDeletion(argv, joined, cwd, scopeCwd);
+	if (deletion) operations.push(deletion);
 	return operations;
 }
 
 /** Classify all edge operations in a tool call; empty array means ordinary work. */
 export function classifyAllEdgeOperations(input: ClassifyEdgeInput): EdgeOperation[] {
 	const args = input.args && typeof input.args === "object" ? (input.args as Record<string, unknown>) : {};
-	const agentDir = input.agentDir ?? getAgentDir();
 	const name = input.toolName.toLowerCase();
-	if (name === "write" || name === "edit" || name === "edit-diff") {
-		const path = typeof args.path === "string" ? args.path : typeof args.file_path === "string" ? args.file_path : "";
-		if (path && isAuthorityFile(path, input.cwd, agentDir)) {
-			return [
-				{
-					class: "settings.authority",
-					operation: `${name} ${path}`,
-					reason: `writes ${nodePath.basename(path)}`,
-				},
-			];
-		}
-		return [];
-	}
+	if (name === "write" || name === "edit" || name === "edit-diff") return [];
 	if (name === "run_process" || name === "run-process") {
 		const executable = typeof args.executable === "string" ? args.executable.trim() : "";
 		if (!executable) return [];
 		const processArgs = Array.isArray(args.args)
 			? args.args.filter((item): item is string => typeof item === "string")
 			: [];
-		const argv = [executable, ...processArgs];
-		return classifyInvokedArgv(argv, "", input.cwd, input.scopeCwd, agentDir);
+		return classifyInvokedArgv([executable, ...processArgs], input.cwd, input.scopeCwd);
 	}
 	if (name !== "bash" && name !== "powershell" && name !== "shell") return [];
 	const command = typeof args.command === "string" ? args.command : "";
 	if (!command.trim()) return [];
 	const operations: EdgeOperation[] = [];
 	for (const argv of shellInvocations(command)) {
-		operations.push(...classifyInvokedArgv(argv, command, input.cwd, input.scopeCwd, agentDir));
+		operations.push(...classifyInvokedArgv(argv, input.cwd, input.scopeCwd));
 	}
 	return operations;
 }
@@ -489,13 +274,8 @@ export function classifyEdgeOperation(input: ClassifyEdgeInput): EdgeOperation |
 function classifyGh(argv: readonly string[], joined: string): EdgeOperation | undefined {
 	const group = lower(argv[1]);
 	const verb = lower(argv[2]);
-	if (group === "release" && ["create", "upload", "delete", "edit"].includes(verb)) {
-		return { class: "git.publish", operation: joined, reason: "changes a published release" };
-	}
-	if (group === "pr" && verb === "merge")
-		return { class: "git.publish", operation: joined, reason: "merges on the remote" };
-	if (group === "repo" && ["delete", "rename", "archive"].includes(verb)) {
-		return { class: "git.publish", operation: joined, reason: "changes the remote repository" };
+	if (group === "repo" && verb === "delete") {
+		return { class: "destructive.fs", operation: joined, reason: "deletes the remote repository" };
 	}
 	return undefined;
 }

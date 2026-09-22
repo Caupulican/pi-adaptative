@@ -1,9 +1,8 @@
 /**
  * `/edge` — the operator's view of, and authority over, the edge.
  *
- * The edge is the short list of operation classes that can need the operator (publishing a
- * repository or a package, adding a dependency, deleting outside the task, changing the harness's
- * own authority). A granted class never asks; an ungranted one asks once. Grants come from the task
+ * The edge is the short list of operation classes. Git, publishing, installing, and settings edits
+ * run. An ungranted `destructive.fs` or `toolkit.script` asks once. Grants come from the task
  * instructions (recorded by the model with the operator's exact words), from here, or from the
  * machine's settings (`edge.allow`).
  */
@@ -12,6 +11,7 @@ import {
 	EDGE_CLASSES,
 	type EdgeClass,
 	type EdgeGrantView,
+	edgeClassRequiresConfirmation,
 	isEdgeClass,
 } from "../../core/autonomy/edge-policy.ts";
 
@@ -67,10 +67,11 @@ export async function handleEdgeCommand(host: EdgeHost, text: string): Promise<v
 		const grants = new Map(host.getEdgeGrants().map((grant) => [grant.class, grant]));
 		host.showText(
 			[
-				`Edge — ${grants.size} of ${EDGE_CLASSES.length} classes granted; an ungranted class asks once`,
+				`Edge — ${grants.size} of ${EDGE_CLASSES.length} classes granted; an ungranted destructive.fs or toolkit.script asks once`,
 				...EDGE_CLASSES.map((cls) => {
 					const grant = grants.get(cls);
-					return `${grant ? "✓" : "·"} ${cls} — ${EDGE_CLASS_DESCRIPTIONS[cls]}\n   ${grant ? describeGrant(grant) : "asks"}`;
+					const pending = edgeClassRequiresConfirmation(cls) ? "asks" : "runs";
+					return `${grant ? "✓" : "·"} ${cls} — ${EDGE_CLASS_DESCRIPTIONS[cls]}\n   ${grant ? describeGrant(grant) : pending}`;
 				}),
 				EDGE_USAGE,
 			].join("\n"),
@@ -100,7 +101,11 @@ export async function handleEdgeCommand(host: EdgeHost, text: string): Promise<v
 		host.showStatus(
 			[
 				revoked.length > 0
-					? `Edge: ${revoked.join(", ")} revoked; ${revoked.length === 1 ? "it asks" : "they ask"} again.`
+					? `Edge: ${revoked.join(", ")} revoked${
+							revoked.some((cls) => edgeClassRequiresConfirmation(cls))
+								? `; ${revoked.length === 1 ? "it asks" : "they ask"} again.`
+								: "."
+						}`
 					: "",
 				untouched.length > 0
 					? `Edge: ${untouched.join(", ")} ${untouched.length === 1 ? "was" : "were"} not granted in this session (a settings grant is changed in edge.allow).`

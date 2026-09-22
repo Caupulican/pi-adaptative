@@ -1367,55 +1367,45 @@ describe("edge authority, scoped grants, and canonical operation lifecycle", () 
 		expect(afterMalformedRevoke).toHaveLength(1);
 	});
 
-	it("classifies multi-edge command crossing both destructive.fs and settings.authority and requires both grants", async () => {
+	it("does not ask before deleting a settings file, and blocks an ungranted repository delete", async () => {
 		const cwd = "/workspace/project";
 		const taskCwd = "/workspace/project/subtask";
 		const agentDir = "/workspace/project/.agent";
 		const settingsFile = "/workspace/project/.agent/settings.json";
 
-		const operations = classifyAllEdgeOperations({
+		const settingsOps = classifyAllEdgeOperations({
 			toolName: "bash",
 			args: { command: `rm ${settingsFile}` },
 			cwd,
 			scopeCwd: taskCwd,
 			agentDir,
 		});
+		expect(settingsOps).toEqual([]);
 
-		// Both edges detected
-		const classes = operations.map((op) => op.class);
-		expect(classes).toContain("destructive.fs");
-		expect(classes).toContain("settings.authority");
-
-		// Partial grant: granting only destructive.fs blocks on settings.authority
-		const depsPartial: SessionEdgeDeps = {
+		const child: SessionEdgeDeps = {
 			getBranch: () => [],
-			getSettingsAllow: () => ["destructive.fs"],
-			appendCustomEntry: () => {},
-			getCwd: () => taskCwd,
-			isChildSession: () => true, // Non-interactive fails closed
-			getConfirmation: () => undefined,
-		};
-		const resultPartial = await enforceSessionEdge(
-			depsPartial,
-			"bash",
-			{ command: `rm ${settingsFile}` },
-			cwd,
-			undefined,
-		);
-		expect(resultPartial?.block).toBe(true);
-		expect(resultPartial?.reason).toContain("settings.authority");
-
-		// Both granted: passes
-		const depsBoth: SessionEdgeDeps = {
-			getBranch: () => [],
-			getSettingsAllow: () => ["destructive.fs", "settings.authority"],
+			getSettingsAllow: () => [],
 			appendCustomEntry: () => {},
 			getCwd: () => taskCwd,
 			isChildSession: () => true,
 			getConfirmation: () => undefined,
 		};
-		const resultBoth = await enforceSessionEdge(depsBoth, "bash", { command: `rm ${settingsFile}` }, cwd, undefined);
-		expect(resultBoth).toBeUndefined();
+		expect(
+			await enforceSessionEdge(child, "bash", { command: `rm ${settingsFile}` }, cwd, undefined),
+		).toBeUndefined();
+
+		const blocked = await enforceSessionEdge(child, "bash", { command: "rm -rf ." }, taskCwd, undefined);
+		expect(blocked?.block).toBe(true);
+		expect(blocked?.reason).toContain("destructive.fs");
+
+		const granted = await enforceSessionEdge(
+			{ ...child, getSettingsAllow: () => ["destructive.fs"] },
+			"bash",
+			{ command: "rm -rf ." },
+			taskCwd,
+			undefined,
+		);
+		expect(granted).toBeUndefined();
 	});
 
 	it("resolveToolkitScriptScope resolves exact script, aliases, and rejects ambiguous or unknown requests", () => {
@@ -1599,28 +1589,22 @@ describe("edge authority, scoped grants, and canonical operation lifecycle", () 
 	it("classifies direct argv run_process commands literally without reparsing arguments as shell", async () => {
 		const cwd = "/workspace/project";
 
-		// 1. Literal git push in run_process is classified as git.publish
 		const gitOps = classifyAllEdgeOperations({
 			toolName: "run_process",
 			args: { executable: "git", args: ["push", "origin", "main"] },
 			cwd,
 			scopeCwd: cwd,
 		});
-		expect(gitOps).toHaveLength(1);
-		expect(gitOps[0]?.class).toBe("git.publish");
-		expect(gitOps[0]?.operation).toBe("git push origin main");
+		expect(gitOps).toHaveLength(0);
 
-		// 2. Executable with directory path /usr/bin/git is recognized
 		const pathGitOps = classifyAllEdgeOperations({
 			toolName: "run_process",
 			args: { executable: "/usr/bin/git", args: ["push", "origin", "main"] },
 			cwd,
 			scopeCwd: cwd,
 		});
-		expect(pathGitOps).toHaveLength(1);
-		expect(pathGitOps[0]?.class).toBe("git.publish");
+		expect(pathGitOps).toHaveLength(0);
 
-		// 3. printf argument containing dangerous shell text is NEVER reparsed as shell
 		const printfOps = classifyAllEdgeOperations({
 			toolName: "run_process",
 			args: { executable: "printf", args: ["git push origin main && npm publish"] },
@@ -1629,7 +1613,15 @@ describe("edge authority, scoped grants, and canonical operation lifecycle", () 
 		});
 		expect(printfOps).toHaveLength(0);
 
-		// 4. Session edge enforcement on run_process
+		const deleteOps = classifyAllEdgeOperations({
+			toolName: "run_process",
+			args: { executable: "rm", args: ["-rf", "."] },
+			cwd,
+			scopeCwd: cwd,
+		});
+		expect(deleteOps).toHaveLength(1);
+		expect(deleteOps[0]?.class).toBe("destructive.fs");
+
 		const depsDenied: SessionEdgeDeps = {
 			getBranch: () => [],
 			getSettingsAllow: () => [],
@@ -1638,38 +1630,43 @@ describe("edge authority, scoped grants, and canonical operation lifecycle", () 
 			isChildSession: () => true,
 			getConfirmation: () => undefined,
 		};
+		expect(
+			await enforceSessionEdge(
+				depsDenied,
+				"run_process",
+				{ executable: "git", args: ["push", "origin", "main"] },
+				cwd,
+				undefined,
+			),
+		).toBeUndefined();
+
 		const blocked = await enforceSessionEdge(
 			depsDenied,
 			"run_process",
-			{ executable: "git", args: ["push", "origin", "main"] },
+			{ executable: "rm", args: ["-rf", "."] },
 			cwd,
 			undefined,
 		);
 		expect(blocked?.block).toBe(true);
-		expect(blocked?.reason).toContain("git.publish");
+		expect(blocked?.reason).toContain("destructive.fs");
 
-		// 5. Granted git.publish allows run_process
-		const depsGranted: SessionEdgeDeps = {
-			...depsDenied,
-			getSettingsAllow: () => ["git.publish"],
-		};
 		const allowed = await enforceSessionEdge(
-			depsGranted,
+			{ ...depsDenied, getSettingsAllow: () => ["destructive.fs"] },
 			"run_process",
-			{ executable: "git", args: ["push", "origin", "main"] },
+			{ executable: "rm", args: ["-rf", "."] },
 			cwd,
 			undefined,
 		);
 		expect(allowed).toBeUndefined();
 
-		// 6. Safe printf with embedded shell syntax is allowed without grants
-		const printfAllowed = await enforceSessionEdge(
-			depsDenied,
-			"run_process",
-			{ executable: "printf", args: ["git push origin main && npm publish"] },
-			cwd,
-			undefined,
-		);
-		expect(printfAllowed).toBeUndefined();
+		expect(
+			await enforceSessionEdge(
+				depsDenied,
+				"run_process",
+				{ executable: "printf", args: ["git push origin main && npm publish"] },
+				cwd,
+				undefined,
+			),
+		).toBeUndefined();
 	});
 });

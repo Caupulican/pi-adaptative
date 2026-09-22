@@ -154,6 +154,7 @@ export class DecisionLedgerStore {
 			open: (entry) => this.openStage(sessionId, cwd, entry),
 			close: (rowId, endedAt) => this.closeStage(rowId, endedAt),
 			load: () => this.loadStages(sessionId),
+			reanchor: (rowId, enteredAt) => this.reanchorStage(rowId, enteredAt),
 		};
 	}
 
@@ -184,6 +185,13 @@ export class DecisionLedgerStore {
 		this.database
 			.prepare("UPDATE stage_entries SET ended_at = ? WHERE id = ? AND ended_at IS NULL")
 			.run(endedAt, rowId);
+	}
+
+	/** Restarts an open stage at `enteredAt`. A closed row is left alone. */
+	reanchorStage(rowId: number, enteredAt: number): void {
+		this.database
+			.prepare("UPDATE stage_entries SET entered_at = ? WHERE id = ? AND ended_at IS NULL")
+			.run(enteredAt, rowId);
 	}
 
 	/** Every stage entry of a session, oldest first. */

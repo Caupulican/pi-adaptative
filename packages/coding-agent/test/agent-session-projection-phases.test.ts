@@ -12,7 +12,7 @@ const bashParameters = Type.Object({ command: Type.String() });
  * synthesized (with one milestone at first sight and one at activation).
  */
 describe("operator projection phases reach the projection from their real boundaries", () => {
-	it("projects DELIVER while a granted package.publish call runs, and clears a blocker when the owner grants", async () => {
+	it("runs npm publish without a grant and clears a blocker when the owner grants", async () => {
 		const phasesDuringTools: string[] = [];
 		let session: Awaited<ReturnType<typeof createHarness>>["session"] | undefined;
 		const commands: string[] = [];
@@ -44,7 +44,7 @@ describe("operator projection phases reach the projection from their real bounda
 			await harness.session.prompt("Publish");
 			expect(commands).toEqual(["echo status", "npm publish"]);
 			expect(phasesDuringTools[0]).not.toBe("deliver");
-			expect(phasesDuringTools[1]).toBe("deliver");
+			expect(phasesDuringTools[1]).not.toBe("deliver");
 			expect(harness.session.operatorProjection.getProjection().phase).not.toBe("deliver");
 		} finally {
 			await harness.cleanup();

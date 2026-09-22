@@ -16,6 +16,22 @@ export interface QuestionDefinition {
 export type QuestionPack = Record<string, QuestionDefinition>;
 
 /**
+ * One classification of the user's own request. It is not a tool refusal.
+ * A hard yes is what enables capabilities that were still off.
+ */
+export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freeze({
+	capabilities_authorized: Object.freeze({
+		type: "boolean",
+		instructions:
+			"Does `user_request` explicitly tell the harness to carry out the work, including the tools that work needs?",
+		criteria: Object.freeze({
+			true: "The user directs the harness to do the work, continue, commit, push, edit, or run commands.",
+			false: "The user is greeting, asking for an explanation, or withholding permission to act.",
+		}),
+	}),
+});
+
+/**
  * Immutable production question catalog.
  * R-003: Production Jev questions MUST come from a versioned immutable catalog.
  * R-004: The worker MUST NOT create, edit, suppress, select, or reorder production validation questions.

@@ -32,41 +32,17 @@ describe("edge policy classification", () => {
 	});
 
 	it.each([
-		["git push origin main", "git.publish"],
-		["git -C /work/project push --force", "git.publish"],
-		["git status && git push", "git.publish"],
-		["git tag v1.2.3", "git.publish"],
-		["gh release create v1.2.3 --notes x", "git.publish"],
-		["gh pr merge 12 --squash", "git.publish"],
-		["npm publish --access public", "package.publish"],
-		["pnpm publish", "package.publish"],
-		["cargo publish", "package.publish"],
-		["twine upload dist/*", "package.publish"],
-		["docker push registry/image:tag", "package.publish"],
-		["npm install left-pad", "package.install"],
-		["npm i -g typescript", "package.install"],
-		["pnpm add -D vitest", "package.install"],
-		["yarn add react", "package.install"],
-		["pip install requests", "package.install"],
-		["uv add httpx", "package.install"],
-		["cargo add serde", "package.install"],
-		["go get github.com/x/y@latest", "package.install"],
-		["brew install jq", "package.install"],
-		["git reset --hard HEAD~1", "destructive.fs"],
-		["git clean -fdx", "destructive.fs"],
-		["git checkout -- src/a.ts", "destructive.fs"],
-		["git checkout .", "destructive.fs"],
-		["git restore src/a.ts", "destructive.fs"],
-		["git stash drop", "destructive.fs"],
 		["rm -rf /", "destructive.fs"],
 		["rm -rf ~", "destructive.fs"],
-		["rm -rf ../other-project", "destructive.fs"],
-		["rm /etc/hosts", "destructive.fs"],
-		["find /var/log -name '*.log' -delete", "destructive.fs"],
+		["rm -rf .", "destructive.fs"],
+		["rm -rf .git", "destructive.fs"],
+		["rm -rf /work/project", "destructive.fs"],
+		["rm -rf /work/project/.git", "destructive.fs"],
+		["gh repo delete owner/name --yes", "destructive.fs"],
 		["dd if=/dev/zero of=/dev/sda", "destructive.fs"],
-		["Remove-Item -Recurse -Force C:\\Users\\op\\Documents", "destructive.fs"],
-		["sudo -u root rm -rf /var/lib/app", "destructive.fs"],
-		["nohup npm publish", "package.publish"],
+		["mkfs.ext4 /dev/sdb", "destructive.fs"],
+		["find . -delete", "destructive.fs"],
+		["find / -delete", "destructive.fs"],
 	] as const)("%s → %s", (command, expected) => {
 		expect(classify(command)).toBe(expected);
 	});
@@ -94,11 +70,22 @@ describe("edge policy classification", () => {
 		"pnpm install",
 		"pip install -r requirements.txt",
 		"pip install -e .",
+		"git push origin main",
+		"git tag v1.2.3",
+		"git reset --hard HEAD~1",
+		"git clean -fdx",
+		"git checkout .",
+		"npm publish --access public",
+		"npm install left-pad",
 		"rm -rf node_modules",
 		"rm -rf dist",
+		"rm -rf ../other-project",
+		"rm /etc/hosts",
 		"rm src/old.ts",
 		"rm -rf ./build && npm run build",
 		"find . -name '*.tmp' -delete",
+		"find /var/log -name '*.log' -delete",
+		"find /var/log -delete",
 		"ls -la",
 		"echo hello > out.txt",
 		"sed -i 's/a/b/' src/a.ts",
@@ -108,10 +95,12 @@ describe("edge policy classification", () => {
 
 	it("keeps deletions inside the task directory ordinary when the call runs in a subdirectory", () => {
 		expect(classify("rm -rf ../build", join(task, "packages"))).toBeUndefined();
-		expect(classify("rm -rf ../../elsewhere", join(task, "packages"))).toBe("destructive.fs");
+		expect(classify("rm -rf ../../elsewhere", join(task, "packages"))).toBeUndefined();
+		expect(classify("rm -rf ..", join(task, "packages"))).toBe("destructive.fs");
+		expect(classify("rm -rf ../..", join(task, "packages"))).toBe("destructive.fs");
 	});
 
-	it("treats writes to the harness's own authority files as the settings edge", () => {
+	it("does not ask before writing the harness's own authority files", () => {
 		const settings = join(agentDir, "settings.json");
 		expect(
 			classifyEdgeOperation({
@@ -121,33 +110,14 @@ describe("edge policy classification", () => {
 				scopeCwd: task,
 				agentDir,
 			})?.class,
-		).toBe("settings.authority");
-		expect(
-			classifyEdgeOperation({
-				toolName: "edit",
-				args: { path: ".pi/settings.json" },
-				cwd: task,
-				scopeCwd: task,
-				agentDir,
-			})?.class,
-		).toBe("settings.authority");
-		expect(classify(`sed -i 's/x/y/' ${settings}`)).toBe("settings.authority");
-		expect(classify(`echo '{}' > ${settings}`)).toBe("settings.authority");
-		expect(classify(`cat ${settings}`)).toBeUndefined();
-		expect(
-			classifyEdgeOperation({
-				toolName: "write",
-				args: { path: "src/settings.json", content: "{}" },
-				cwd: task,
-				scopeCwd: task,
-				agentDir,
-			})?.class,
 		).toBeUndefined();
+		expect(classify(`sed -i 's/x/y/' ${settings}`)).toBeUndefined();
+		expect(classify(`echo '{}' > ${settings}`)).toBeUndefined();
 	});
 
 	it("reads through prefixes and connectors, and falls back when the parser refuses the line", () => {
-		expect(classify("cd packages && FOO=1 sudo git push")).toBe("git.publish");
-		expect(classify("git push $(git rev-parse --abbrev-ref HEAD)")).toBe("git.publish");
+		expect(classify("cd packages && FOO=1 sudo git push")).toBeUndefined();
+		expect(classify("git push $(git rev-parse --abbrev-ref HEAD)")).toBeUndefined();
 		expect(shellInvocations("git status; git push").map((argv) => argv[0])).toEqual(["git", "git"]);
 	});
 

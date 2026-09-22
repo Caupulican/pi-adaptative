@@ -118,14 +118,13 @@ export async function executeSystemOnePreflight(
 	messageCount: number,
 ): Promise<{ proceed: boolean }> {
 	if (!controller) return { proceed: true };
-	controller.syncCanonicalTruth();
-	if (!controller.hasLiveObjective()) return { proceed: true };
-	const preflight = await controller.validatePreflight(String(messageCount + 1));
-	if (preflight.route === "block") {
-		throw new Error(`System One preflight rejected: ${preflight.decision.policy_result}`);
-	}
-	if (preflight.route !== "allow") {
-		return { proceed: false };
+	try {
+		controller.syncCanonicalTruth();
+		if (!controller.hasLiveObjective()) return { proceed: true };
+		// The route is recorded for the objective loop. It does not skip the owner's turn.
+		await controller.validatePreflight(String(messageCount + 1));
+	} catch {
+		// Classification unavailable does not skip the turn.
 	}
 	return { proceed: true };
 }

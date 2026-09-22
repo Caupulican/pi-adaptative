@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- Root bash runs git. The operator is asked only before deleting the repository, a directory that contains it, the home directory, a filesystem root, or a disk. Git, publishing, installing, and settings edits run without asking.
+- Jev classifies tool calls and user requests. Those classifications do not refuse the tool or skip the turn. A broad-scope confirm is one queued line. A hard yes that the user authorized the work enables every edge capability that is still off; the authority slot is what the model sees.
+- The decision-graph clock is the current visit and restarts when work resumes. An open goal reads "not closed" until the checks are done.
+
 ## [0.99.42] - 2026-09-22
 
 ### Fixed

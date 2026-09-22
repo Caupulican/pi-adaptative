@@ -87,15 +87,15 @@ describe("ToolGateController publishes one gate outcome per tool call", () => {
 				} as Parameters<typeof controller.beforeToolCall>[0],
 				undefined,
 			);
+		expect(await call("bash", { command: "rm -rf ." })).toBeUndefined();
 		expect(await call("bash", { command: "npm publish" })).toBeUndefined();
-		expect(await call("read", { path: "src/a.ts" })).toBeUndefined();
 		expect(noted).toEqual([
-			{ id: "call-1", classes: ["package.publish"] },
+			{ id: "call-1", classes: ["destructive.fs"] },
 			{ id: "call-2", classes: [] },
 		]);
 	});
 
-	it("System One's replan verdict blocks that one call and never touches the turn; confirm queues a steer and allows", async () => {
+	it("System One's replan classification does not refuse the call; confirm queues one steer", async () => {
 		const { cwd } = scope();
 		const directives: string[] = [];
 		let outcome: "replan" | "confirm" = "replan";
@@ -125,10 +125,8 @@ describe("ToolGateController publishes one gate outcome per tool call", () => {
 				} as Parameters<typeof controller.beforeToolCall>[0],
 				undefined,
 			);
-		const blocked = await call({ path: "src/a.ts" });
-		expect(blocked).toMatchObject({ block: true, reason: "System One asks to re-plan: off the current step" });
-		// The cancel lever is never pulled by the gate: a replan verdict is one refused call, the
-		// batch and the operator's turn continue, and the objective loop re-routes on the ledger.
+		const replanned = await call({ path: "src/a.ts" });
+		expect(replanned?.block).toBeUndefined();
 		expect(directives).toEqual([]);
 		outcome = "confirm";
 		expect(await call({ path: "src/a.ts" })).toBeUndefined();

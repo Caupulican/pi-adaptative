@@ -303,12 +303,12 @@ is still a different tool and can re-admit the read. Pinned by
 ## Guards
 
 **The edge asks once; instructions, the session or the machine grant it, and nothing else in the
-tool layer ever asks.** The operations that can need the operator are six named classes —
-`git.publish` (push, tag, release), `package.publish`, `package.install` (adding a dependency or a
-global install), `destructive.fs` (deleting outside the task directory or discarding uncommitted
-work), `settings.authority` (the harness's own settings and credential files), and `toolkit.script`
-(executing registered dangerous toolkit scripts) — classified literally from the tool call;
-anything unknown is ordinary work and runs. Toolkit script authority is a host-owned edge: dangerous
+tool layer ever asks.** Six class names remain for grants. Classification asks only for
+`destructive.fs` (deleting the repository, a directory that contains it, its `.git`, the home
+directory, a filesystem root, or a disk, including `gh repo delete`) and `toolkit.script`
+(executing a registered dangerous toolkit script). Git, including push, tag, reset, and commit,
+package publish and install, settings edits, and every other delete run without asking. Anything
+unknown is ordinary work and runs. Toolkit script authority is a host-owned edge: dangerous
 toolkit script operations are classified into `toolkit.script` with a narrow scope key derived
 cryptographically from `(cwd, scriptPath, runner, scriptName, argv)` (`toolkit:<scriptName>:<digest>`).
 A narrow grant persists across session compaction and reload, but changing script registration
@@ -327,9 +327,9 @@ tool/self-modification prose cannot introduce another confirmation. The edge con
 fixtures now explicitly select `edge.allow: []`; they still prove that missing authority blocks and
 that worker grants remain bounded. A session or
 instruction grant is a durable record on the session branch and lasts until revoked, so a full grant
-covers the whole work, and a commit is ordinary work that never asks. An ungranted class asks the
-interactive operator once with one key and the tool call waits for the answer; a headless or child
-session blocks it with a reason that names every way to grant. The former keyword `risk_assessment`
+covers the whole work, and a commit is ordinary work that never asks. An ungranted `destructive.fs`
+or `toolkit.script` asks the interactive operator once with one key and the tool call waits for the
+answer; a headless or child session blocks it with a reason that names every way to grant. The former keyword `risk_assessment`
 gate (regular expressions over command text that turned "token", "clean", "delete" or a Python
 `subprocess`/`shutil` mention into a block under a capability envelope) is gone on purpose: it
 asked questions the owner had already answered with the handoff. What remains is structural — the
@@ -614,14 +614,15 @@ Pinned by `packages/coding-agent/test/goal-session-primary-loop.test.ts` and
 path, a named abort). A steer is either queued for the next model turn or delivered now by
 interrupting the running turn and sending it once the foreground is idle; for a worker, "now"
 interrupts the attempt, queues the directive on its mailbox and resumes it. Both work from inside the
-running turn and every directive is an operator event. The tool gate never pulls the cancel lever:
-its replan verdict refuses that one call (the batch and the operator's turn continue, and the
-objective loop re-routes on the ledger at its next cycle), its confirm verdict queues a scope steer,
-and relevance is judged only against a real step or goal, never against an empty objective. A
+running turn and every directive is an operator event. The tool gate never pulls the cancel lever.
+Jev classifies a tool call and a user request; allow and replan stay on the ledger and the call
+runs. A confirm queues one scope steer. A preflight route is recorded and does not skip the turn.
+A hard yes that the user authorized the work enables every edge capability that is still off, and
+the authority slot is the only text the model receives for that change. Relevance is judged only
+against a real step or goal, never against an empty objective. A
 System One cancel of the root's own turn inside the objective loop is a re-route, not a stop; only
 the operator's interruption stops the loop. A worker judged off the mission is redirected now, a
 stalled one at its next turn, a repeated stall rerouted. The off-step cancel proof uses `echo status`.
-A git read never reaches the tool body on root bash, so that proof is not a git command.
 Pinned by `packages/coding-agent/test/system-one-foreground-control.test.ts` and
 `packages/coding-agent/test/system-one-worker-control.test.ts`.
 
@@ -633,9 +634,9 @@ the ledger through `decision_ledger_read`, a bounded query tool never exposed to
 projected schema costs at most 100 tokens, budgeted separately from the 4,500-token base ceiling
 and the other separately-measured additions (aggregate 5,813 = 4,500 + 350 task_directory +
 720 task_automation + 100 decision_ledger_read + 143 repo_read; the Jev tool's 512 stays inside the base subtotal
-accounting), so the ledger surface cannot hide growth in the pre-existing tools. `repo_read` is the
-root git read, measured at 143 tokens, and is budgeted the same way: root bash admits no git
-invocation, so that schema is a separate addition and is subtracted from the base subtotal.
+accounting), so the ledger surface cannot hide growth in the pre-existing tools. `repo_read` is a bounded git read, measured at 143 tokens, and is budgeted the same way.
+Root bash also runs git. The operator is asked only before deleting the repository, a directory
+that contains it, the home directory, a filesystem root, or a disk.
 Pinned by `packages/coding-agent/test/ledger-route-checkpoints.test.ts` and
 `packages/coding-agent/test/context-composition.test.ts`.
 

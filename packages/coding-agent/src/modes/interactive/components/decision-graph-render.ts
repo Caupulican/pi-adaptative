@@ -134,15 +134,16 @@ export function renderDecisionList(
 			),
 		);
 	for (const stage of model.stages) {
+		const shown = formatGraphDuration(stage.current ? stage.passMs : stage.totalMs);
 		const right = [
-			stage.current ? formatGraphDuration(stage.totalMs) : theme.fg("muted", formatGraphDuration(stage.totalMs)),
+			stage.current ? shown : theme.fg("muted", shown),
 			stage.passes > 1 ? theme.fg("dim", ` ×${stage.passes}`) : "",
-			stage.current ? theme.fg("accent", `  ← now · loop ${stage.loop}`) : "",
+			stage.current ? theme.fg("accent", "  ← now") : "",
 		].join("");
 		item(
 			stage.current ? "●" : "✓",
 			"success",
-			STAGE_LABEL[stage.stage],
+			stage.current ? `${STAGE_LABEL[stage.stage]} · loop ${stage.loop}` : STAGE_LABEL[stage.stage],
 			stage.current ? undefined : "muted",
 			right,
 			stage.stage,
@@ -226,14 +227,14 @@ export function renderDecisionList(
 			: model.goal.branch === "deliver" && openChecks === 0
 				? ["yes → deliver", "success"]
 				: openChecks > 0
-					? [`pending · ${openChecks} open`, "dim"]
+					? [`not closed · ${openChecks} open`, "dim"]
 					: model.blocked
 						? [`blocked → replan`, "warning"]
 						: model.goal.branch === "repair"
 							? [`no → repair (loop ${model.loop})`, "warning"]
 							: model.goal.branch === "clarify"
 								? ["not yet → ask you", "warning"]
-								: ["pending", "dim"];
+								: ["not closed", "dim"];
 	head("goal satisfied?", theme.fg(verdict[1], verdict[0]));
 	return { rows, stageAt, currentRow, focusKey: graphFocusKey(model) };
 }
@@ -268,6 +269,9 @@ type DiagramLevel =
 				readonly glyph: string;
 				readonly glyphTone: ThemeColor;
 				readonly tone: ThemeColor | undefined;
+				readonly stage?: DecisionStage;
+				readonly current?: boolean;
+				readonly clock?: string;
 			}[];
 	  }
 	| { readonly kind: "level"; readonly nodes: readonly DiagramNode[] }
@@ -295,7 +299,6 @@ function graphFocusKey(model: DecisionGraphModel): string {
 function goalYesNode(
 	model: DecisionGraphModel,
 	currentStage: DecisionStage | undefined,
-	clock: (isCur: boolean) => string,
 ): DiagramNode & { readonly lit: boolean } {
 	const pending = model.checks.filter((check) => check.status !== "satisfied").length;
 	const delivered = model.goal.branch === "delivered" && pending === 0;
@@ -303,18 +306,15 @@ function goalYesNode(
 	if (delivered || delivering) {
 		return {
 			text: delivered ? "delivered" : "DELIVER",
-			clock: clock(currentStage === "deliver"),
 			tone: delivered ? "success" : "accent",
 			bold: delivering,
-			current: currentStage === "deliver",
 			stage: "deliver",
 			lit: true,
 		};
 	}
 	return {
-		text: pending > 0 ? `pending · ${pending} open` : "pending",
+		text: pending > 0 ? `not closed · ${pending} open` : "not closed",
 		tone: "dim",
-		current: currentStage === "deliver",
 		stage: "deliver",
 		lit: false,
 	};
@@ -326,8 +326,6 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 	const cur = model.current;
 	const currentStage = cur?.stage;
 	const evaluating = model.decider.evaluating;
-	const clock = (isCur: boolean): string =>
-		isCur && cur ? `  ${formatGraphDuration(cur.totalMs)} · loop ${cur.loop}` : "";
 	const levels: DiagramLevel[] = [];
 	if (model.stageLogEmpty) return [{ kind: "level", nodes: [{ text: "no task yet", tone: "dim" }] }];
 
@@ -337,10 +335,8 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 			kind: "you",
 			node: {
 				text: "YOU",
-				clock: clock(isCur),
 				tone: isCur ? "warning" : undefined,
 				bold: isCur,
-				current: isCur,
 				stage: "clarify",
 			},
 			note: isCur ? "waiting for your answer" : `asked ${model.you.asked} · answered ${model.you.answered}`,
@@ -353,10 +349,8 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 		kind: "box",
 		node: {
 			text: "SYSTEM ONE · JEV",
-			clock: clock(s1cur),
 			tone: s1cur ? "accent" : undefined,
 			bold: s1cur,
-			current: s1cur,
 			stage: currentStage && s1Stages.includes(currentStage) ? currentStage : undefined,
 		},
 		sub: evaluating
@@ -365,6 +359,21 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 		subTone: evaluating ? JEV_TONE : "muted",
 		boxTone: s1cur || evaluating ? JEV_TONE : "muted",
 	});
+	if (model.stages.length) {
+		levels.push({
+			kind: "tree",
+			title: `${model.loop > 1 ? "↺ " : ""}loop ${model.loop}`,
+			items: model.stages.map((stage) => ({
+				text: STAGE_LABEL[stage.stage],
+				glyph: stage.current ? "●" : "✓",
+				glyphTone: stage.current ? "accent" : "success",
+				tone: stage.current ? undefined : "muted",
+				stage: stage.stage,
+				current: stage.current,
+				...(stage.current && stage.stage !== "done" ? { clock: `  ${formatGraphDuration(stage.passMs)}` } : {}),
+			})),
+		});
+	}
 	if (model.plan.length) {
 		const done = model.plan.filter((step) => step.status === "done").length;
 		const total = model.plan.filter((step) => step.status !== "cancelled").length;
@@ -382,23 +391,9 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 			}),
 		});
 	}
-	// One clock per level: when several executors run in the same step, the first carries the
-	// step's clock and the others are lit without it, so the drawing never shows the same time twice.
-	let clockOwned = false;
 	const executors: DiagramNode[] = model.participants.map((participant) => {
-		const isCur =
-			participant.running &&
-			(participant.kind === "root"
-				? // During repair the goal branch's repair node is the current step and owns the clock.
-					currentStage === "build"
-				: participant.kind === "capability"
-					? true
-					: currentStage === "dispatch");
-		const ownsClock = isCur && participant.kind !== "capability" && !clockOwned;
-		if (ownsClock) clockOwned = true;
 		return {
 			text: participantText(participant),
-			clock: clock(ownsClock),
 			tone: participant.running
 				? participant.kind === "capability"
 					? JEV_TONE
@@ -407,7 +402,6 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 					? undefined
 					: "dim",
 			bold: participant.running,
-			current: isCur,
 			stage: participant.kind === "root" ? "build" : participant.kind === "capability" ? undefined : "dispatch",
 			...(participant.routeText
 				? { sub: participant.routeText, subTone: JEV_TONE as ThemeColor }
@@ -434,10 +428,8 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 		const isCur = currentStage === "verify" && !evaluating;
 		evidenceNodes.push({
 			text: `CHECKS ${ok}/${model.checks.length}${failing ? " ✗" : ""}`,
-			clock: clock(isCur),
 			tone: isCur ? "accent" : failing ? "error" : ok === model.checks.length ? "success" : undefined,
 			bold: isCur,
-			current: isCur,
 			stage: "verify",
 		});
 	}
@@ -463,17 +455,14 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 			text: `goal satisfied?${evaluating && /^(verify|completion)/.test(evaluating.label) ? `  ◆ ${formatGraphDuration(now - evaluating.startedAt)}` : ""}`,
 			tone: evaluating ? JEV_TONE : model.decider.last ? undefined : "dim",
 			bold: Boolean(evaluating),
-			current: Boolean(evaluating) && currentStage === "verify",
 		},
-		yes: goalYesNode(model, currentStage, clock),
+		yes: goalYesNode(model, currentStage),
 		...(repairTaken || model.blocked
 			? {
 					no: {
 						text: "repair",
-						clock: clock(currentStage === "repair"),
 						tone: currentStage === "repair" ? "warning" : "muted",
 						bold: currentStage === "repair",
-						current: currentStage === "repair",
 						stage: "repair",
 						...(model.loop > 1 ? { loop: `↺ loop ${model.loop} → SYSTEM ONE` } : {}),
 					},
@@ -632,15 +621,22 @@ export function renderDecisionDiagram(model: DecisionGraphModel, width: number):
 				]);
 				level.items.forEach((item, index) => {
 					const last = index === level.items.length - 1;
-					push([
-						{ col: C, text: last ? "└─ " : "├─ ", tone: "muted" },
-						{ col: C + 3, text: item.glyph, tone: item.glyphTone },
-						{
-							col: C + 5,
-							text: truncateToWidth(item.text, Math.max(1, pad + inner - (C + 5)), "…"),
-							...(item.tone ? { tone: item.tone } : {}),
-						},
-					]);
+					const clockText = item.clock ?? "";
+					const room = Math.max(1, pad + inner - (C + 5));
+					const label = `${truncateToWidth(item.text, Math.max(1, room - visibleWidth(clockText)), "…")}${clockText}`;
+					push(
+						[
+							{ col: C, text: last ? "└─ " : "├─ ", tone: "muted" },
+							{ col: C + 3, text: item.glyph, tone: item.glyphTone },
+							{
+								col: C + 5,
+								text: label,
+								...(item.tone ? { tone: item.tone } : {}),
+							},
+						],
+						item.stage,
+						Boolean(item.current),
+					);
 				});
 				previousCount = 1;
 				break;
@@ -710,7 +706,17 @@ export function renderDecisionDiagram(model: DecisionGraphModel, width: number):
 					"verify",
 					level.question.current,
 				);
-				const hasNo = level.no !== undefined;
+				if (level.no === undefined) {
+					push([{ col: C, text: "↓", tone: level.yes.lit ? "muted" : "dim" }]);
+					push(
+						[centered(nodeText(level.yes, inner), C, inner, level.yes.tone, level.yes.bold)],
+						level.yes.stage,
+						false,
+					);
+					previousCount = 1;
+					break;
+				}
+				const hasNo = true;
 				const leftEnd = (text: string, tone?: ThemeColor, bold?: boolean): Part => ({
 					col: Math.max(pad, C - 4 - visibleWidth(text)),
 					text,

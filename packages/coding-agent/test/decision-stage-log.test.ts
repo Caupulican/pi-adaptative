@@ -57,6 +57,10 @@ function memorySink(): DecisionStageSink & { rows: DecisionStageStoredEntry[] } 
 			const index = rows.findIndex((row) => row.rowId === rowId);
 			if (index >= 0) rows[index] = { ...rows[index]!, endedAt };
 		},
+		reanchor(rowId, enteredAt) {
+			const index = rows.findIndex((row) => row.rowId === rowId);
+			if (index >= 0 && rows[index]?.endedAt === undefined) rows[index] = { ...rows[index]!, enteredAt };
+		},
 		load: () => rows,
 	};
 }
@@ -217,18 +221,22 @@ describe("DecisionStageLog", () => {
 		const view = resumed.view(8000);
 		expect(view.loop).toBe(2);
 		expect(view.open?.stage).toBe("repair");
-		expect(view.open?.enteredAt).toBe(6000);
+		// The gap since 6000 is downtime, not work. The open clock starts at the resume.
+		expect(view.open?.enteredAt).toBe(8000);
 		expect(view.totals.understand).toEqual({ elapsedMs: 2000, passes: 1 });
 		expect(view.totals.build).toEqual({ elapsedMs: 3000, passes: 1 });
-		expect(view.totals.repair).toEqual({ elapsedMs: 2000, passes: 1 });
+		expect(view.totals.repair).toEqual({ elapsedMs: 0, passes: 1 });
+		expect(sink.rows[2]?.enteredAt).toBe(8000);
 		expect(view.entries[0]?.note).toBe("Framing the request");
 		expect(resumed.observe(projection({ control: { reasonCode: "verification_repair_required" } }), 9000)).toBe(
 			false,
 		);
-		expect(resumed.view(9000).open?.enteredAt).toBe(6000);
+		expect(resumed.view(9000).open?.enteredAt).toBe(8000);
+		expect(resumed.view(9000).totals.repair).toEqual({ elapsedMs: 1000, passes: 1 });
 		// The resumed log settles the row it inherited, not a new one.
 		resumed.observe(projection({ phase: "verify" }), 9500);
 		expect(sink.rows[2]?.endedAt).toBe(9500);
+		expect(sink.rows[2]?.enteredAt).toBe(8000);
 		expect(sink.rows).toHaveLength(4);
 	});
 
@@ -273,7 +281,8 @@ describe("DecisionStageLog", () => {
 			["understand", "goal_active"],
 		]);
 		const resumed = new DecisionStageLog({ sink: store.stageSink("session-old", "/repo") });
-		expect(resumed.view(40_000).totals.understand).toEqual({ elapsedMs: 9_000, passes: 1 });
+		expect(resumed.view(40_000).open?.enteredAt).toBe(40_000);
+		expect(resumed.view(40_000).totals.understand).toEqual({ elapsedMs: 0, passes: 1 });
 		store.close();
 	});
 

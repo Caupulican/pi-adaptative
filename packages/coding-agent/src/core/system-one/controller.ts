@@ -8,6 +8,7 @@ import {
 	SYSTEM_ONE_PINNED_MODEL,
 	selectQuestions,
 	toTypeSafeEvaluationQuestions,
+	USER_AUTHORIZATION_QUESTIONS,
 } from "./catalog.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import {
@@ -27,6 +28,7 @@ import {
 	evaluateDeterministicCompletionGates,
 	evaluateNoul,
 	type FinalCompletionVerdict,
+	noulFromAnswer,
 } from "./policy.ts";
 import { StateProjector } from "./projector.ts";
 import type { SemanticEvaluationObserver } from "./semantic-evaluation-ledger.ts";
@@ -238,12 +240,29 @@ export class SystemOneController {
 	}
 
 	/**
-	 * Validate task intake.
+	 * Classify whether this user request authorizes the harness to act.
+	 * Undefined when Jev does not answer. Ambiguous and no do not enable anything.
+	 * Stage-pack intake below is kept for tests and hooks; production admission is SteeringPlane JEV-001..003.
 	 */
-	/**
-	 * Stage-pack intake. Production admission is SteeringPlane JEV-001..003.
-	 * Kept for tests and hooks; not the production objective-admission owner.
-	 */
+	async classifyCapabilitiesAuthorized(request: string): Promise<boolean | undefined> {
+		const userRequest = request.trim();
+		if (!userRequest) return undefined;
+		try {
+			const response = await this.adapter.evaluate(
+				{
+					model: this.config.model.production || SYSTEM_ONE_PINNED_MODEL,
+					state: { user_request: userRequest.slice(0, 4_000) },
+					questions: toTypeSafeEvaluationQuestions(USER_AUTHORIZATION_QUESTIONS),
+				},
+				{ impact: "read_only" },
+			);
+			const answer = noulFromAnswer(response.answers.capabilities_authorized, false);
+			return evaluateNoul(answer, "required_true", this.config.thresholds) === "hard_pass";
+		} catch {
+			return undefined;
+		}
+	}
+
 	async validateIntake(): Promise<{
 		objectiveClear: boolean;
 		taskKind: string;
