@@ -263,6 +263,14 @@ import { AnswerClaimChecker, assistantAnswerText } from "./system-one/claim-deli
 import { CodeDuplicateReviewer } from "./system-one/code-duplicates.ts";
 import { type SystemOneController, USER_REQUEST_RULE_BUDGET } from "./system-one/controller.ts";
 import { createSessionForegroundControl, type SystemOneForegroundControl } from "./system-one/foreground-control.ts";
+import {
+	appendOwnerFollowUp,
+	consultMessage,
+	OWNER_QUESTION_CONSULT_PROMPT,
+	type OwnerQuestionConsult,
+	ownerFollowUpPath,
+	parseConsultReply,
+} from "./system-one/owner-question-routing.ts";
 import { type SemanticEvaluationRecord, verdictFromEvaluation } from "./system-one/semantic-evaluation-ledger.ts";
 import {
 	type SemanticEvaluationDurableSink,
@@ -500,6 +508,10 @@ export class AgentSession {
 	private _ruleAuthority: "unset" | "ask" | "user" | "written" = "unset";
 	/** The last classification could not run. Kept so the model is told once per outage, not per turn. */
 	private _deliveryClassificationUnavailable = false;
+	/** The latest user request handed decisions to the agents; owner questions then route through System One. */
+	private _handoff = false;
+	/** The owner's latest request text, for owner questions asked outside an objective. */
+	private _lastUserRequest = "";
 	private readonly _codeDuplicates = new CodeDuplicateReviewer({
 		getController: () => this._systemOneController,
 		warn: (message) => this._emit({ type: "warning", message }),
@@ -1445,6 +1457,19 @@ export class AgentSession {
 			getSystemOneController: () => this._systemOneController,
 			getSteeringPlane: () => this._steeringPlane,
 			getSemanticDecisionEngine: () => this._semanticDecisionEngine(),
+			askQuestionRouting: () => ({
+				isHandoff: () => this._handoff,
+				getRequestText: () => this._lastUserRequest,
+				consultStrongerModel: (input) => this._consultStrongerModel(input),
+				recordOwnerFollowUp: (entry) => {
+					const path = appendOwnerFollowUp(ownerFollowUpPath(this._agentDir, this.sessionManager.getSessionId()), {
+						...entry,
+						at: new Date().toISOString(),
+					});
+					this._emit({ type: "warning", message: `Owner follow-up recorded (${path}): ${entry.question}` });
+					return path;
+				},
+			}),
 			getAdaptiveReadiness: () => this._adaptiveReadiness,
 			grantEdgeFromInstructions: (grant) => this.grantEdge(grant.class, "instructions", grant),
 			enforceEdgeOperation: (op, signal) => enforceSessionEdgeOperation(this._edgeDeps(), op, undefined, signal),
@@ -2456,6 +2481,8 @@ export class AgentSession {
 		const outcome = await controller.classifyUserRequest(request, this.writtenRuleText(), { capabilitiesPending });
 		if (outcome.status === "skipped") return undefined;
 		if (outcome.status === "unavailable") {
+			// Unknown is not a handoff: an owner question goes to the owner.
+			this._handoff = false;
 			// The binding is left exactly as it was -- but a silent "nothing changed" would read as a
 			// classified "the user imposed nothing", which is how a stated no-push limit gets lost.
 			// The model is told the limit was not registered so it honours the request itself. Once
@@ -2469,6 +2496,7 @@ export class AgentSession {
 		}
 		this._deliveryClassificationUnavailable = false;
 		const classified = outcome.classification;
+		this._handoff = classified.fullHandoff;
 		this._localCommitBranch = resolveDeliveryBinding(
 			this._localCommitBranch,
 			{ blocksPush: classified.localCommitsOnly, liftsPushBlock: classified.liftsDeliveryBlock },
@@ -4052,6 +4080,7 @@ export class AgentSession {
 		this._goals.setStartAuthority(goalToolStartAuthority);
 		try {
 			this._toolProtocol.resetTurnState();
+			this._lastUserRequest = userRequest;
 			const requestNote = await this._enableCapabilitiesAuthorizedByUser(userRequest);
 			if (requestNote) {
 				messages.push(
@@ -4985,6 +5014,26 @@ export class AgentSession {
 	/** Run one explicit isolated completion for bounded host-owned consumers. */
 	async runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult> {
 		return this._reflection.runIsolatedCompletion(opts);
+	}
+
+	/** Ask the router's expensive-tier model to settle a handed-off owner question, or say it cannot. */
+	private async _consultStrongerModel(input: {
+		question: string;
+		request: string;
+		signal?: AbortSignal;
+	}): Promise<OwnerQuestionConsult | undefined> {
+		const expensive = this._modelRouter.resolveExpensiveModel();
+		if ("skip" in expensive) return undefined;
+		const result = await this.runIsolatedCompletion({
+			systemPrompt: OWNER_QUESTION_CONSULT_PROMPT,
+			messages: [{ role: "user", content: consultMessage(input), timestamp: Date.now() }],
+			model: expensive.model,
+			maxTokens: 600,
+			cacheRetention: "none",
+			laneKind: "owner-question-consult",
+			...(input.signal ? { signal: input.signal } : {}),
+		});
+		return parseConsultReply(result.text, expensive.ref);
 	}
 
 	/** Machine-wide provider load: in-flight requests, recorded limits, provider windows, the stop. */

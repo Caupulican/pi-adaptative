@@ -152,7 +152,7 @@ import type { TaskStepsState } from "./tasks/task-state.ts";
 import { getToolCapabilityPolicy } from "./tool-capability-policy.ts";
 import { resolveCurrentToolRepairSettings } from "./tool-repair-settings.ts";
 import { runReflexInterpreterCompletion } from "./toolkit/reflex-interpreter.ts";
-import { createAskQuestionToolDefinition } from "./tools/ask-question.ts";
+import { type AskQuestionToolOptions, createAskQuestionToolDefinition } from "./tools/ask-question.ts";
 import { buildShellSessionContext } from "./tools/bash.ts";
 import { dispatchCollaborationWorker } from "./tools/collaboration-dispatch.ts";
 import { createContextScoutToolDefinition } from "./tools/context-scout.ts";
@@ -375,6 +375,11 @@ export interface RuntimeBuilderDeps {
 	 * the semantic-plane health the operator POV reads. Undefined when no steering plane is bound.
 	 */
 	getSemanticDecisionEngine?(): ClarificationDecisionEngine | undefined;
+	/** Owner-question routing under a handoff; see AskQuestionToolOptions. */
+	askQuestionRouting?(): Pick<
+		AskQuestionToolOptions,
+		"isHandoff" | "getRequestText" | "consultStrongerModel" | "recordOwnerFollowUp"
+	>;
 	/** Diagnostic readiness gate for adaptive runtime components. */
 	getAdaptiveReadiness?(): AdaptiveRuntimeReadiness | undefined;
 	/** Record an edge grant the model cited from the operator's own words (goal grant_edge). */
@@ -1403,6 +1408,7 @@ export class RuntimeBuilder {
 						};
 					},
 					getSemanticDecisionEngine: () => this.deps.getSemanticDecisionEngine?.(),
+					...this.deps.askQuestionRouting?.(),
 					recordObjectiveClarification: (objectiveId, event) => {
 						recordObjectiveClarification(
 							{

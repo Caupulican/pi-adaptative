@@ -319,10 +319,16 @@ describe("System One recovery WO-09 production paths", () => {
 			},
 		});
 		// No written rules and every edge class already granted: only the delivery axis is live.
+		// The handoff question is always live: it decides where owner questions go, rules or not.
 		await controller.classifyUserRequest("hi", "", { capabilitiesPending: false });
-		expect(asked.at(-1)).toEqual(["local_commits_only", "lifts_delivery_block"]);
+		expect(asked.at(-1)).toEqual(["local_commits_only", "lifts_delivery_block", "full_handoff"]);
 		await controller.classifyUserRequest("hi", "", { capabilitiesPending: true });
-		expect(asked.at(-1)).toEqual(["capabilities_authorized", "local_commits_only", "lifts_delivery_block"]);
+		expect(asked.at(-1)).toEqual([
+			"capabilities_authorized",
+			"local_commits_only",
+			"lifts_delivery_block",
+			"full_handoff",
+		]);
 		await controller.classifyUserRequest("hi", "AGENTS.md: never push", { capabilitiesPending: false });
 		expect(asked.at(-1)).toEqual([
 			"local_commits_only",

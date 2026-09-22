@@ -112,12 +112,11 @@ describe("objective-correlated ask_question", () => {
 		expect(charterAfter.acquisition.package_installs).toBe(false);
 	});
 
-	it("withholds a question the owner already answered, without presenting a dialog", async () => {
-		const sessionManager = SessionManager.inMemory();
-		startActiveGoal(sessionManager);
+	function routedTool(
+		sessionManager: SessionManager,
+		routing: Partial<Parameters<typeof createAskQuestionToolDefinition>[0]> = {},
+	) {
 		const port = goalPort(sessionManager);
-		let presented = 0;
-
 		const tool = createAskQuestionToolDefinition({
 			sessionManager,
 			getObjectiveId: () => port.getGoalState()?.goalId,
@@ -128,10 +127,12 @@ describe("objective-correlated ask_question", () => {
 			recordObjectiveClarification: (objectiveId, event) => {
 				recordObjectiveClarification(port, objectiveId, event);
 			},
+			...routing,
 		});
+		const counter = { presented: 0 };
 		const ui = {
 			askQuestions: async (request: { questions: readonly AskQuestion[] }) => {
-				presented += 1;
+				counter.presented += 1;
 				return {
 					answers: request.questions.map((question) => ({
 						id: question.id,
@@ -146,15 +147,78 @@ describe("objective-correlated ask_question", () => {
 			},
 		} as unknown as ExtensionUIContext;
 		const ctx = { hasUI: true, ui } as unknown as ExtensionContext;
+		return { tool, ctx, counter, port };
+	}
 
+	it("outside a handoff, always presents the question to the owner, even one already answered", async () => {
+		const sessionManager = SessionManager.inMemory();
+		startActiveGoal(sessionManager);
+		const { tool, ctx, counter } = routedTool(sessionManager, { isHandoff: () => false });
 		await tool.execute("call-1", { questions }, undefined, undefined, ctx);
-		const repeat = await tool.execute("call-2", { questions }, undefined, undefined, ctx);
+		await tool.execute("call-2", { questions }, undefined, undefined, ctx);
+		expect(counter.presented).toBe(2);
+	});
 
-		expect(presented).toBe(1);
+	it("under a handoff, withholds a question the owner already answered, without presenting a dialog", async () => {
+		const sessionManager = SessionManager.inMemory();
+		startActiveGoal(sessionManager);
+		let handoff = false;
+		const { tool, ctx, counter, port } = routedTool(sessionManager, { isHandoff: () => handoff });
+		await tool.execute("call-1", { questions }, undefined, undefined, ctx);
+		handoff = true;
+		const repeat = await tool.execute("call-2", { questions }, undefined, undefined, ctx);
+		expect(counter.presented).toBe(1);
 		expect(repeat.details.answers).toEqual([]);
-		expect(repeat.content[0]).toMatchObject({ type: "text" });
 		expect((repeat.content[0] as { text: string }).text).toContain("already_answered");
 		expect(port.getGoalState()?.clarifications).toHaveLength(1);
+	});
+
+	it("under a handoff, a stronger model's answer settles the question", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const { tool, ctx, counter } = routedTool(sessionManager, {
+			isHandoff: () => true,
+			getRequestText: () => "tidy the settings screen",
+			consultStrongerModel: async () => ({
+				kind: "answered",
+				answer: "Keep the archived importer.",
+				model: "big/model",
+			}),
+		});
+		const result = await tool.execute("call-1", { questions }, undefined, undefined, ctx);
+		expect(counter.presented).toBe(0);
+		expect((result.content[0] as { text: string }).text).toContain("Keep the archived importer.");
+	});
+
+	it("under a handoff, a decision only the owner can make becomes a follow-up and the run goes on", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const followUps: string[] = [];
+		const { tool, ctx, counter } = routedTool(sessionManager, {
+			isHandoff: () => true,
+			consultStrongerModel: async () => ({
+				kind: "needs_owner",
+				reason: "It changes the product scope.",
+				model: "big/model",
+			}),
+			recordOwnerFollowUp: (entry) => {
+				followUps.push(`${entry.question} | ${entry.reason}`);
+				return "/tmp/follow-ups/s.md";
+			},
+		});
+		const result = await tool.execute("call-1", { questions }, undefined, undefined, ctx);
+		expect(counter.presented).toBe(0);
+		expect(followUps).toHaveLength(1);
+		expect(followUps[0]).toContain("It changes the product scope.");
+		expect((result.content[0] as { text: string }).text).toContain("do not wait");
+	});
+
+	it("under a handoff with nowhere to record a follow-up, the owner is asked rather than skipped", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const { tool, ctx, counter } = routedTool(sessionManager, {
+			isHandoff: () => true,
+			consultStrongerModel: async () => ({ kind: "needs_owner", reason: "scope", model: "big/model" }),
+		});
+		await tool.execute("call-1", { questions }, undefined, undefined, ctx);
+		expect(counter.presented).toBe(1);
 	});
 
 	it("never exposes ask_question to a worker lane", () => {

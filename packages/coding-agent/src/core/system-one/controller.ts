@@ -37,10 +37,10 @@ import type { SemanticEvaluationObserver } from "./semantic-evaluation-ledger.ts
 import type { ExecutionState, ToolImpact, ValidationDecision, ValidationStage } from "./types.ts";
 
 /** The four questions that only mean something when written rules were supplied. */
+/** Asked only when written rules exist. `full_handoff` is not among them: it governs owner questions too. */
 const RULE_AUTHORITY_QUESTION_IDS: ReadonlySet<string> = new Set([
 	"rules_differ",
 	"overrides_written_rules",
-	"full_handoff",
 	"request_holds",
 ]);
 

@@ -45,6 +45,7 @@ import {
 	evaluateClarificationNeed,
 	formatClarificationQuestion,
 } from "../system-one/clarification.ts";
+import type { OwnerQuestionConsult } from "../system-one/owner-question-routing.ts";
 import {
 	emptyOrchestrationCall,
 	OrchestrationPanelComponent,
@@ -148,6 +149,21 @@ export interface AskQuestionToolOptions {
 	getSemanticDecisionEngine?: () => ClarificationDecisionEngine | undefined;
 	/** Durable objective-side clarification writer: one event before presenting, one after settling. */
 	recordObjectiveClarification?: (objectiveId: string, event: GoalClarificationEvent) => void;
+	/**
+	 * Whether the owner handed the work off. Outside a handoff an owner question is always shown; under
+	 * one, System One and a stronger model settle what they can and the rest becomes an owner follow-up.
+	 */
+	isHandoff?: () => boolean;
+	/** The owner's latest request, for a question asked outside an objective. */
+	getRequestText?: () => string;
+	/** A stronger model's verdict on the question, or undefined when none is available. */
+	consultStrongerModel?: (input: {
+		question: string;
+		request: string;
+		signal?: AbortSignal;
+	}) => Promise<OwnerQuestionConsult | undefined>;
+	/** Append a decision only the owner can make to the follow-up document; returns its path. */
+	recordOwnerFollowUp?: (entry: { question: string; reason: string; request: string }) => string | undefined;
 }
 
 export interface AskQuestionClipboardOptions {
@@ -867,6 +883,24 @@ function withheldResult(
 	};
 }
 
+/** A handed-off question a stronger model settled: the agent proceeds with that answer. */
+function consultedResult(
+	questions: readonly AskQuestion[],
+	consult: Extract<OwnerQuestionConsult, { kind: "answered" }>,
+): { content: Array<{ type: "text"; text: string }>; details: AskQuestionToolDetails } {
+	const text = `ask_question settled under the owner's handoff by ${consult.model}: ${consult.answer} Proceed with this answer and say you used it.`;
+	return { content: [{ type: "text", text }], details: { questions, answers: [], cancelled: true, error: text } };
+}
+
+/** A handed-off question only the owner can decide: recorded for them, the run goes on. */
+function followUpResult(
+	questions: readonly AskQuestion[],
+	path: string,
+): { content: Array<{ type: "text"; text: string }>; details: AskQuestionToolDetails } {
+	const text = `ask_question recorded as an owner follow-up (${path}). The owner handed this work off: do not wait. Continue with everything that does not depend on this decision, and list the follow-up in your final answer.`;
+	return { content: [{ type: "text", text }], details: { questions, answers: [], cancelled: true, error: text } };
+}
+
 export function createAskQuestionToolDefinition(options: AskQuestionToolOptions = {}) {
 	const name = options.name ?? "ask_question";
 	return defineTool<typeof askQuestionSchema, AskQuestionToolDetails>({
@@ -916,20 +950,38 @@ export function createAskQuestionToolDefinition(options: AskQuestionToolOptions 
 					content: [],
 					details: { questions: input.questions, answers: [], cancelled: false, phase: value },
 				});
-			if (objectiveId) {
+			// Outside a handoff the owner is asked, always. Under a handoff the agents settle what they can:
+			// System One, then a stronger model; only a decision reserved for the owner becomes a follow-up.
+			if (options.isHandoff?.()) {
 				phase("checking");
-				const objective = options.getObjectiveClarificationState?.();
+				const objective = objectiveId ? options.getObjectiveClarificationState?.() : undefined;
+				const request = objective?.userGoal ?? options.getRequestText?.() ?? "";
 				verdict = await evaluateClarificationNeed({
-					objectiveId,
+					objectiveId: objectiveId ?? "session",
 					questions: input.questions,
 					category,
 					clarifications: objective?.clarifications ?? [],
-					userGoal: objective?.userGoal ?? "",
+					userGoal: request,
 					...(objective?.acceptanceCriteria ? { acceptanceCriteria: objective.acceptanceCriteria } : {}),
 					semantic: options.getSemanticDecisionEngine?.(),
 					signal,
 				});
 				if (verdict.decision !== "ask") return withheldResult(input.questions, verdict);
+				const question = formatClarificationQuestion(input.questions);
+				const consult = await options
+					.consultStrongerModel?.({ question, request, ...(signal ? { signal } : {}) })
+					.catch(() => undefined);
+				if (consult?.kind === "answered") return consultedResult(input.questions, consult);
+				const followUp = options.recordOwnerFollowUp?.({
+					question,
+					reason:
+						consult?.kind === "needs_owner"
+							? consult.reason
+							: (verdict.detail ?? "a decision the owner reserved"),
+					request,
+				});
+				// No follow-up document to hold it: the owner is asked, never silently skipped.
+				if (followUp) return followUpResult(input.questions, followUp);
 			}
 
 			phase("waiting");

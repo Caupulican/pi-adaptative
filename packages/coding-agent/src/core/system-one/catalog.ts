@@ -66,10 +66,10 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	}),
 	full_handoff: Object.freeze({
 		type: "boolean",
-		instructions: "Does `user_request` hand rule conflicts to the harness to settle without asking the user?",
+		instructions: "Does `user_request` hand the work's decisions to the agents to settle without asking the user?",
 		criteria: Object.freeze({
-			true: "The user hands the decision off. 'you decide', 'full handoff', 'settle it', and 'don't ask me' are a handoff.",
-			false: "The user wants to choose, or is not handing the decision off. 'ask me', 'fix the bug', and 'hello' are not a handoff.",
+			true: "The user hands decisions off. 'you decide', 'full handoff', 'settle it', 'work autonomously', and 'don't ask me' are a handoff.",
+			false: "The user wants to choose, or is not handing decisions off. 'ask me', 'fix the bug', and 'hello' are not a handoff.",
 		}),
 	}),
 	request_holds: Object.freeze({

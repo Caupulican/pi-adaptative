@@ -504,53 +504,64 @@ export class ModelRouterController {
 		return statuses;
 	}
 
+	/**
+	 * The expensive tier's model as the router would pick it now (auto-selected, or the configured
+	 * pattern when available, authed, not exhausted and fit), or why there is none.
+	 */
+	resolveExpensiveModel():
+		| { model: Model<Api>; ref: string; selection: "auto" | "manual"; autoReason?: string }
+		| { skip: string } {
+		if (this.isTierAutoSelected("expensive")) {
+			const auto = this.selectAutoTierModel("expensive");
+			if (!auto.chosen) return { skip: `expensive tier auto-selection: ${auto.reason}` };
+			return { model: auto.chosen.model, ref: auto.chosen.ref, selection: "auto", autoReason: auto.reason };
+		}
+		const settings = this.deps.getSettingsManager().getModelRouterSettings();
+		const expensivePattern = settings.expensiveModel;
+		if (!expensivePattern || !this._isModelAvailableAndAuthed(expensivePattern))
+			return { skip: "expensive model not configured or not available" };
+		const resolvedExpensive = resolveCliModel({
+			cliModel: expensivePattern,
+			modelRegistry: this.deps.getModelRegistry(),
+		});
+		if (!resolvedExpensive.model) return { skip: "expensive model not configured or not available" };
+		if (this.deps.isModelExhausted(resolvedExpensive.model)) return { skip: "expensive model exhausted: quota" };
+		if (settings.fitnessGate) {
+			const verdict = this._evaluateModelFitness("router_expensive", resolvedExpensive.model);
+			if (!verdict.fit)
+				return { skip: `expensive model unfit: ${this._formatFitnessFailure(verdict)} (fitness gate)` };
+		}
+		return {
+			model: resolvedExpensive.model,
+			ref: formatModelRouterModel(resolvedExpensive.model),
+			selection: "manual",
+		};
+	}
+
 	private _resolveExpensiveFallbackRoute(
 		decision: RouteDecision,
 		reasonCode: string,
 		reason: string,
 	): { decision: RouteDecision; model: Model<Api> } | undefined {
-		if (this.isTierAutoSelected("expensive")) {
-			const auto = this.selectAutoTierModel("expensive");
-			if (!auto.chosen) {
-				this._lastModelRouterSkipReason = `expensive tier auto-selection: ${auto.reason}`;
-				return undefined;
-			}
-			decision.fallbackFrom = "medium";
-			decision.tier = "expensive";
-			decision.reasonCode = reasonCode;
-			decision.reasons = [...decision.reasons, reason, `Auto-selected ${auto.chosen.ref}: ${auto.reason}`];
-			decision.model = auto.chosen.ref;
-			decision.selection = "auto";
-			this._lastModelRouterSkipReason = undefined;
-			return { decision, model: auto.chosen.model };
-		}
-		const settings = this.deps.getSettingsManager().getModelRouterSettings();
-		const expensivePattern = settings.expensiveModel;
-		if (!expensivePattern || !this._isModelAvailableAndAuthed(expensivePattern)) return undefined;
-		const resolvedExpensive = resolveCliModel({
-			cliModel: expensivePattern,
-			modelRegistry: this.deps.getModelRegistry(),
-		});
-		if (!resolvedExpensive.model) return undefined;
-		if (this.deps.isModelExhausted(resolvedExpensive.model)) {
-			this._lastModelRouterSkipReason = "expensive model exhausted: quota";
+		const expensive = this.resolveExpensiveModel();
+		if ("skip" in expensive) {
+			// A missing configuration is not a skip worth reporting; every other refusal is.
+			this._lastModelRouterSkipReason =
+				expensive.skip === "expensive model not configured or not available"
+					? this._lastModelRouterSkipReason
+					: expensive.skip;
 			return undefined;
-		}
-		if (settings.fitnessGate) {
-			const verdict = this._evaluateModelFitness("router_expensive", resolvedExpensive.model);
-			if (!verdict.fit) {
-				this._lastModelRouterSkipReason = `expensive model unfit: ${this._formatFitnessFailure(verdict)} (fitness gate)`;
-				return undefined;
-			}
 		}
 		decision.fallbackFrom = "medium";
 		decision.tier = "expensive";
 		decision.reasonCode = reasonCode;
-		decision.reasons = [...decision.reasons, reason];
-		decision.model = formatModelRouterModel(resolvedExpensive.model);
-		decision.selection = "manual";
+		decision.reasons = expensive.autoReason
+			? [...decision.reasons, reason, `Auto-selected ${expensive.ref}: ${expensive.autoReason}`]
+			: [...decision.reasons, reason];
+		decision.model = expensive.ref;
+		decision.selection = expensive.selection;
 		this._lastModelRouterSkipReason = undefined;
-		return { decision, model: resolvedExpensive.model };
+		return { decision, model: expensive.model };
 	}
 
 	private _resolveExecutorRoute(
