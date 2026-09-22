@@ -47,13 +47,11 @@ event:
   is idle; a worker's attempt is interrupted, the directive queued on its mailbox, and the attempt
   resumed.
 
-The tool gate does not pull the cancel lever: a `replan` verdict refuses that one call (the rest of
-the batch and the operator's turn continue; the verdict is ledger evidence the objective loop routes
-on at its next cycle), records the event as `refused` (never `allowed`), and a `confirm` verdict
-queues a scope steer and allows the call. After the call runs, the same `call_id` is updated to
-`succeeded` or `failed` so postflight sees the terminal, not admission. Relevance is judged only
-against a real plan step or goal; a plain session with no objective is never asked whether a call is
-relevant to nothing, and preflight/postflight Jev packs are skipped when there is no live objective.
+The tool gate does not ask Jev about a single call. Each admitted call is recorded with an intent
+built from its own arguments (`bash command=…`, `edit path=…`) and its terminal (`succeeded` or
+`failed`) is written on the same `call_id`, so postflight judges the step's relevance and scope over
+real events. Preflight and postflight Jev packs run only with a live objective; the claim check and
+the duplicate review run in every session.
 Inside the objective loop a System One cancel of the root's own turn is a re-route (the next cycle
 routes again); only the operator's interruption stops the loop. The worker supervisor redirects a
 worker judged off the mission now, steers a stalled one at its next turn, and reroutes a repeated
@@ -94,3 +92,29 @@ runtime tests](../test/session-objective-runtime.test.ts), the [foreground contr
 the [worker control tests](../test/system-one-worker-control.test.ts) and the
 [ledger route tests](../test/ledger-route-checkpoints.test.ts); see `docs/doctrine.md`, section
 "System One".
+
+## Where a judgment may stop work
+
+`system-one/authority-line.ts` is the one table. Reversible work proceeds past a doubt or an outage
+with the doubt visible; an ambiguous judgment asks for evidence at most `GATHER_MORE_LIMIT` (2) times
+per evidence revision. An objective transition (JEV-024..028) never closes on a doubt and holds on
+an outage. An irreversible or outward operation goes to the operator, or is refused for a worker.
+Only Choice and Score answers are gated on confidence; a Noul's probability is its certainty.
+
+## Claims against deliveries
+
+After every turn the final answer's claims (tests pass, committed, pushed, published, files changed)
+are asked of Jev one atomic question each, and each settled "the answer states X" is combined in code
+with the turn's receipts: test verification records, git commit/push and publish exit status, and
+successful edits. A contradicted claim buys one correction turn; an unbacked one is a warning.
+
+## Semantic duplicates
+
+A successful edit or write that adds a function is checked against a semantic unit index of the
+repository (files from the resident FFF index or the managed ripgrep listing, refreshed by mtime).
+Candidates rank by IDF-weighted shared calls and normalized-token fingerprints; Jev judges every
+(new unit, candidate) pair in one request. A decisive duplicate is appended to the edit's result,
+naming the function to reuse; a provisional one is a warning. `npm run scan:semantic-duplicates`
+judges every production unit against its closest candidates, batched and concurrent (scaled to the
+machine's cores and free memory), and prints a report.
+

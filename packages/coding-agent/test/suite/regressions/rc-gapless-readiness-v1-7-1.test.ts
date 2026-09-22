@@ -866,7 +866,7 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 				),
 			).rejects.toThrow();
 			expect(failing.session.getSemanticPlaneHealth().state).toBe("degraded");
-			expect(semanticPlaneHealthLabel(failing.session.getSemanticPlaneHealth())).toBe("JEV degraded");
+			expect(semanticPlaneHealthLabel(failing.session.getSemanticPlaneHealth())).toMatch(/^JEV degraded( · .+)?$/);
 		});
 
 		it("RCG-055: the fast-iteration indicator appears only while the owner rule is in force", async () => {

@@ -625,8 +625,9 @@ path, a named abort). A steer is either queued for the next model turn or delive
 interrupting the running turn and sending it once the foreground is idle; for a worker, "now"
 interrupts the attempt, queues the directive on its mailbox and resumes it. Both work from inside the
 running turn and every directive is an operator event. The tool gate never pulls the cancel lever.
-Jev classifies a tool call and a user request; allow and replan stay on the ledger and the call
-runs. A confirm queues one scope steer. A preflight route is recorded and does not skip the turn.
+Jev never judges a single tool call: the call is recorded with an intent built from its own
+arguments, and relevance and scope are judged once per step in postflight. A preflight route is
+recorded and does not skip the turn.
 A hard yes that the user authorized the work enables every edge capability that is still off, and
 the authority slot is the only text the model receives for that change. Relevance is judged only
 against a real step or goal, never against an empty objective. A
@@ -635,6 +636,30 @@ the operator's interruption stops the loop. A worker judged off the mission is r
 stalled one at its next turn, a repeated stall rerouted. The off-step cancel proof uses `echo status`.
 Pinned by `packages/coding-agent/test/system-one-foreground-control.test.ts` and
 `packages/coding-agent/test/system-one-worker-control.test.ts`.
+
+**The authority line says where a judgment may stop work** (`system-one/authority-line.ts`). Reversible
+work proceeds past a doubt or an outage with the doubt visible; an ambiguous judgment asks for
+evidence at most twice per evidence revision, then reversible work proceeds. An objective transition
+(JEV-024..028) never closes on a doubt and holds on an outage. An irreversible or outward operation
+goes to the operator (root) or is refused (worker). A Noul has no confidence of its own (its
+probability is the certainty), so only Choice and Score answers are gated on confidence, and a
+low-confidence answer is a doubt routed to `gather_more`, never an exception that ends the run.
+Pinned by `packages/coding-agent/test/system-one/authority-line.test.ts`.
+
+**Every answer's claims are checked against the turn's receipts** (`system-one/claim-delivery.ts`), with or
+without a live objective. Jev answers one atomic question per claim kind (the answer states tests
+passed, a commit, a push, a publish, changed files); code combines each settled answer with the
+turn's mechanical receipts. A claim the receipts contradict buys one correction turn; one no receipt
+backs is an unverified-claim warning. Pinned by `packages/coding-agent/test/system-one/claim-delivery.test.ts`.
+
+**Jev catches logic that is duplicated but written differently** (`system-one/code-duplicates.ts`). Token
+clone detection finds copies; it cannot see two functions that do the same job with different names
+and structure. A semantic unit index ranks candidates by IDF-weighted shared calls and normalized-token
+fingerprints, with rarity measured from the index, never listed by hand; identical structure ranks a
+candidate but is not the same job. Jev judges every (new unit, candidate) pair of an edit in one
+request and a decisive duplicate is reported in the edit's result, naming the function to reuse.
+`npm run scan:semantic-duplicates` runs the same judgment over every production unit.
+Pinned by `packages/coding-agent/test/system-one/code-duplicates.test.ts`.
 
 **A noul answer is a probability with a direction, never a boolean.** Noul is P(the proposition is
 true). The decision is the pair (direction, band): `required_true` needs the high end,

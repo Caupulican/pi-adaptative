@@ -178,6 +178,14 @@ describe("Operator POV bar", () => {
 		expect(semanticPlaneHealthLabel({ state: "evaluating", inFlight: 1 })).toBe("JEV eval");
 		expect(semanticPlaneHealthLabel({ state: "ok" })).toBe("JEV ok");
 		expect(semanticPlaneHealthLabel({ state: "degraded", lastFailure: "boom" })).toBe("JEV degraded");
+		expect(
+			semanticPlaneHealthLabel({
+				state: "degraded",
+				lastFailure: "boom",
+				lastFailedLabel: "worker supervision",
+				lastFailureKind: "invalid_request",
+			}),
+		).toBe("JEV degraded · worker supervision invalid_request");
 		for (const state of ["unbound", "unknown", "evaluating", "ok", "degraded"] as const) {
 			expect(renderPlain(source({ health: { state } }), 200)).not.toContain("?");
 		}

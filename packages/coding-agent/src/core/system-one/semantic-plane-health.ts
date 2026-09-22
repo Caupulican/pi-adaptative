@@ -27,6 +27,9 @@ export interface SemanticPlaneHealth {
 	readonly state: SemanticPlaneHealthState;
 	readonly lastOutcomeAt?: string;
 	readonly lastFailure?: string;
+	/** Which evaluation failed last (its operator label) and how (the adapter's failure kind, when known). */
+	readonly lastFailedLabel?: string;
+	readonly lastFailureKind?: string;
 	/** Evaluations currently in flight; only meaningful while `state` is `evaluating`. */
 	readonly inFlight?: number;
 	/** What those evaluations are and since when; present only while `state` is `evaluating`. */
@@ -46,6 +49,8 @@ const MAX_RECENT_EVALUATIONS = 32;
 export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver {
 	private lastOutcomeAt?: string;
 	private lastFailure?: string;
+	private lastFailedLabel?: string;
+	private lastFailureKind?: string;
 	private observed = false;
 	private readonly open = new Map<string, SemanticEvaluationStart>();
 	private readonly recent: SemanticEvaluationRecord[] = [];
@@ -86,6 +91,8 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver {
 		this.observed = true;
 		this.lastOutcomeAt = new Date(this.now()).toISOString();
 		this.lastFailure = undefined;
+		this.lastFailedLabel = undefined;
+		this.lastFailureKind = undefined;
 		this.push(start, "ok", verdict, reasons);
 	}
 
@@ -95,6 +102,9 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver {
 		this.observed = true;
 		this.lastOutcomeAt = new Date(this.now()).toISOString();
 		this.lastFailure = error instanceof Error ? error.message : String(error);
+		this.lastFailedLabel = start.label;
+		const kind = (error as { kind?: unknown } | undefined)?.kind;
+		this.lastFailureKind = typeof kind === "string" ? kind : undefined;
 		this.push(start, "failed", undefined, [this.lastFailure]);
 	}
 
@@ -157,6 +167,8 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver {
 			state: this.lastFailure ? "degraded" : "ok",
 			...(this.lastOutcomeAt ? { lastOutcomeAt: this.lastOutcomeAt } : {}),
 			...(this.lastFailure ? { lastFailure: this.lastFailure } : {}),
+			...(this.lastFailure && this.lastFailedLabel ? { lastFailedLabel: this.lastFailedLabel } : {}),
+			...(this.lastFailure && this.lastFailureKind ? { lastFailureKind: this.lastFailureKind } : {}),
 		};
 	}
 
@@ -217,8 +229,11 @@ export function semanticPlaneHealthLabel(health: SemanticPlaneHealth): string {
 	switch (health.state) {
 		case "ok":
 			return "JEV ok";
-		case "degraded":
-			return "JEV degraded";
+		case "degraded": {
+			// Which evaluation is failing and how, so the operator can tell an outage from one bad input.
+			const detail = [health.lastFailedLabel, health.lastFailureKind].filter(Boolean).join(" ");
+			return detail ? `JEV degraded · ${detail}` : "JEV degraded";
+		}
 		case "evaluating":
 			return "JEV eval";
 		case "unknown":

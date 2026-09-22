@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Added
+
+- Every answer's claims are checked against the turn's own tool results, with or without a goal. A claim the results contradict (a push that failed, tests that failed) buys one correction turn; a claim nothing backs is a warning.
+- Semantic duplicate review: an edit that adds a function doing the same job as existing code, however it is written, gets a note in its result naming the function to reuse. `npm run scan:semantic-duplicates` reports every such pair across the repository.
+
 ### Fixed
 
 - A noul answer is a probability with a direction, not a boolean. `BooleanDecisionResult` carries `probabilityTrue`, `direction` and `band` and no longer has a `value` field derived from `noul >= 0.5`; `settledBoolean` is the only way to collapse one and returns nothing for an ambiguous band. Every gate that read the old 0.5 cutoff now reads the band: the steering plane's checkpoint predicates, worker supervision, project-rule violations, the external-acquisition gate, semantic dedup, clarification, capability resolution and the adaptive route. A soft pass continues the step; an ambiguous answer decides nothing and never authorizes work. Per-question calibrations (JEV-004's 0.75, JEV-013's 0.7) are unchanged.
@@ -9,6 +14,13 @@
 - Worktree-discarding git commands (`reset --hard`, `clean -f`, `checkout -- …`, `restore`, `stash`) reach the edge only while the tree holds uncommitted changes this session never wrote, which is when they would destroy a concurrent session's work. Discarding the session's own work never asks, and an unreadable `git status` never asks.
 - Typed delivery works from a tree that was already dirty when the session opened. Ownership is checked per path: a path dirty at admission is excluded from the commit, and a path that appeared during the objective without being owned still refuses. A baseline that could not be read refuses.
 - The user-request classification asks only the questions whose answer can still change something, so an ordinary turn costs two questions instead of seven. A System One failure is reported as unavailable, with a line telling the model to honour any delivery limit the request states, instead of silently leaving the binding unset. The rule text it compares against shares its budget across every rule, so the last rules of a long AGENTS.md are no longer dropped before Jev sees them.
+- Jev's route judgments reach the objective route. In production the steering-plane branch read each answer's nonexistent `boolean` field, so work remaining, worker continuation, independent verification, capability escalation, stale context and strategy repetition were always undefined and a repeating strategy never forced a replan.
+- A Jev doubt or outage never ends reversible work. Objective admission and routing proceed on deterministic facts when Jev is unavailable; a low-confidence Choice or Score answer is a doubt routed to `gather_more` instead of an exception that ended the run; an ambiguous checkpoint asks for evidence at most twice per evidence revision. A Noul's probability is no longer turned into a derived confidence.
+- Jev no longer judges each tool call. The per-call evaluation received only the tool name, could not block anything, and cost about 100 s of waiting in one field session; the call is now recorded with an intent built from its arguments and judged once per step.
+- JEV-001, JEV-002 and JEV-003 each ask only what their outcome reads, over the objective's request, constraints and acceptance criteria, and run concurrently.
+- Evidence the harness built wrong names its JSON path and is classified `invalid_request` without retries; `timeoutMs` bounds a whole Jev evaluation.
+- A worker whose semantic supervision keeps failing keeps running; supervision pauses for that attempt instead of cancelling it.
+- Secret patterns start at a token boundary: `task-automation-controller.ts` no longer reads as an API key and blocks the Jev request that names it.
 
 ## [0.99.43] - 2026-09-22
 
