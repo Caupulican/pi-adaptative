@@ -2,7 +2,7 @@
  * Local test harness for the new coding-agent test suite.
  */
 
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -30,6 +30,7 @@ import { OrchestrationProfileStore } from "../../src/core/orchestration/profile-
 import type { collectWorkspaceSources } from "../../src/core/research/workspace-collector.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
+import { removeTreeSync } from "../../src/core/util/remove-tree.ts";
 import {
 	type CreateTestExtensionsResultInput,
 	createTestExtensionsResult,
@@ -127,9 +128,10 @@ export interface Harness {
 }
 
 function createTempDir(): string {
-	const tempDir = join(tmpdir(), `pi-suite-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	const root = realpathSync.native(tmpdir());
+	const tempDir = join(root, `pi-suite-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(tempDir, { recursive: true });
-	return tempDir;
+	return realpathSync.native(tempDir);
 }
 
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -305,9 +307,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 				await session.disposeAndWait();
 			} finally {
 				if (!options.sharedFauxProvider) fauxProvider.unregister();
-				if (existsSync(tempDir)) {
-					rmSync(tempDir, { recursive: true, maxRetries: 5, retryDelay: 100 });
-				}
+				if (existsSync(tempDir)) removeTreeSync(tempDir);
 			}
 		})();
 		return cleanupPromise;

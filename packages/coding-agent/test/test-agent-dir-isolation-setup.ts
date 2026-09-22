@@ -1,10 +1,11 @@
 import "../../../scripts/vitest-worker-parent-exit.ts";
 import "./test-launch-env-setup.ts";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
+import { removeTreeSync } from "../src/core/util/remove-tree.ts";
 import { launchEnvBackup } from "./test-launch-env-setup.ts";
 
 interface AgentDirIsolationState {
@@ -19,7 +20,7 @@ if (!isolationState) {
 	Reflect.set(process, isolationStateKey, isolationState);
 	process.once("exit", () => {
 		for (const path of isolationState?.pendingCleanup ?? []) {
-			rmSync(path, { recursive: true, force: true });
+			removeTreeSync(path);
 		}
 	});
 }
@@ -38,6 +39,6 @@ afterAll(() => {
 	} else {
 		process.env[ENV_AGENT_DIR] = isolationState.originalAgentDir;
 	}
-	rmSync(isolatedAgentDir, { recursive: true, force: true });
+	removeTreeSync(isolatedAgentDir);
 	isolationState.pendingCleanup.delete(isolatedAgentDir);
 });
