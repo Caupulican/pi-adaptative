@@ -197,14 +197,19 @@ export class SystemOneController {
 	 * Seals a stage decision: the durable record (the store mints the one id both stores key), the
 	 * audit trail under that same id, and the operator-visible verdict on the evaluation ledger.
 	 */
-	private sealDecision(decision: ValidationDecision, policyResult: string, evaluationId: string | undefined): void {
+	private sealDecision(
+		decision: ValidationDecision,
+		policyResult: string,
+		evaluationId: string | undefined,
+		reasons?: readonly string[],
+	): void {
 		decision.policy_result = policyResult;
 		const { id: _provisional, timestamp: _drafted, ...draft } = decision;
 		const sealed = this.store.recordDecision(draft);
 		decision.id = sealed.id;
 		decision.timestamp = sealed.timestamp;
 		this.audit.recordDecision(this.store.runId, sealed);
-		if (evaluationId !== undefined) this.evaluationObserver?.noteVerdict(evaluationId, policyResult);
+		if (evaluationId !== undefined) this.evaluationObserver?.noteVerdict(evaluationId, policyResult, reasons);
 	}
 
 	private activeEvaluations = 0;
@@ -486,7 +491,9 @@ export class SystemOneController {
 		const { decision, answers, evaluationId } = await this.runStageValidation("claim_delivery", {
 			final_answer: this.projector.redactText(finalAnswer),
 		});
-		this.sealDecision(decision, "evaluated", evaluationId);
+		// What the ledger keeps: each claim kind with the probability the answer states it.
+		const reasons = Object.entries(answers).map(([id, answer]) => `${id} P=${probabilityText(answer)}`);
+		this.sealDecision(decision, "evaluated", evaluationId, reasons);
 		return answers;
 	}
 
@@ -529,7 +536,15 @@ export class SystemOneController {
 			questions,
 			signal,
 		);
-		this.sealDecision(decision, "evaluated", evaluationId);
+		// What the ledger keeps: every judged pair and the probability it is the same job, so a scan or a
+		// later review can track duplicates the way a clone report does.
+		const reasons = pairs.flatMap(({ unit, candidates }, unitIndex) =>
+			candidates.map(
+				(candidate, candidateIndex) =>
+					`${unit.name} (${unit.path}:${unit.line}) vs ${candidate.name} (${candidate.path}:${candidate.line}) P(same job)=${probabilityText(answers[duplicateQuestionId(unitIndex, candidateIndex)])}`,
+			),
+		);
+		this.sealDecision(decision, "evaluated", evaluationId, reasons);
 		return answers;
 	}
 
@@ -901,4 +916,9 @@ function describeToolCall(tool: string, args: unknown): string {
 	}
 	const text = parts.length > 0 ? `${tool} ${parts.join(" ")}` : tool;
 	return text.length <= 240 ? text : `${text.slice(0, 239)}…`;
+}
+
+function probabilityText(answer: unknown): string {
+	const noul = (answer as { noul?: unknown } | undefined)?.noul;
+	return typeof noul === "number" ? noul.toFixed(2) : "none";
 }

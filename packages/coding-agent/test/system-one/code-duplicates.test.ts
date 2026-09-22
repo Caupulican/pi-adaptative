@@ -7,6 +7,7 @@ import {
 	type CodeUnit,
 	extractCodeUnits,
 	harnessFileLister,
+	isTestPath,
 	newCodeUnits,
 	SemanticUnitIndex,
 	scanSemanticDuplicates,
@@ -62,6 +63,13 @@ describe("semantic code deduplication", () => {
 		expect(added.map((u) => u.name)).toEqual(["toRepoPath"]);
 	});
 
+	it("recognizes test files so production code is never pointed at a test helper", () => {
+		expect(isTestPath("packages/tui/test/markdown.test.ts")).toBe(true);
+		expect(isTestPath("src/a.spec.ts")).toBe(true);
+		expect(isTestPath("tests/test_io.py")).toBe(true);
+		expect(isTestPath("packages/tui/src/autocomplete.ts")).toBe(false);
+	});
+
 	it("lists source files through the harness find tool", async () => {
 		const root = repo();
 		expect(await harnessFileLister(root, "**/*.{ts,js}")).toEqual(["src/paths.ts"]);
@@ -104,7 +112,9 @@ describe("semantic code deduplication", () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.[0]?.candidates.map((c) => c.name)).toEqual(["normalizeRepositoryPath"]);
 		expect(note).toContain("toRepoPath (src/new.ts:1) does the same job as normalizeRepositoryPath (src/paths.ts:1)");
-		expect(warnings).toEqual([]);
+		expect(warnings).toEqual([
+			"Duplicate logic: toRepoPath (src/new.ts) does the same job as normalizeRepositoryPath (src/paths.ts:1)",
+		]);
 	});
 
 	it("an outage adds no note and is reported once", async () => {

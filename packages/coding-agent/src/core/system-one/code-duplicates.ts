@@ -432,6 +432,11 @@ export class SemanticUnitIndex {
 	}
 }
 
+/** A test file by the conventions every language here shares: a test directory or a `.test.`/`.spec.` name. */
+export function isTestPath(path: string): boolean {
+	return /(^|\/)(test|tests|__tests__|spec)\/|\.(test|spec)\.[^/]+$|(^|\/)test_[^/]+\.py$/.test(path);
+}
+
 export interface DuplicateFinding {
 	readonly unit: CodeUnit;
 	readonly candidate: CodeUnit;
@@ -497,9 +502,11 @@ export class CodeDuplicateReviewer {
 			if (!glob) continue;
 			// Identical structure with names and literals erased ranks a candidate high, but it is not the
 			// same job (two predicates of one shape test different values): every candidate is judged.
+			// Production code is never told to reuse a test helper; test code may reuse anything.
 			const judged = this.index(cwd, glob)
 				.candidates(unit)
-				.map((candidate) => candidate.unit);
+				.map((candidate) => candidate.unit)
+				.filter((candidate) => isTestPath(unit.path) || !isTestPath(candidate.path));
 			if (judged.length > 0) pairs.push({ unit, candidates: judged });
 		}
 		if (pairs.length > 0) {
@@ -522,9 +529,13 @@ export class CodeDuplicateReviewer {
 				this.outageReported = true;
 			}
 		}
-		for (const finding of findings.filter((f) => !f.decisive))
+		// The operator sees every finding: the note in the tool result steers the model, but a model that
+		// ignores it must not hide the duplicate.
+		for (const finding of findings)
 			this.deps.warn(
-				`Possible duplicate: ${finding.unit.name} (${finding.unit.path}) may repeat ${finding.candidate.name} (${finding.candidate.path}:${finding.candidate.line})`,
+				finding.decisive
+					? `Duplicate logic: ${finding.unit.name} (${finding.unit.path}) does the same job as ${finding.candidate.name} (${finding.candidate.path}:${finding.candidate.line})`
+					: `Possible duplicate: ${finding.unit.name} (${finding.unit.path}) may repeat ${finding.candidate.name} (${finding.candidate.path}:${finding.candidate.line})`,
 			);
 		const decisive = findings.filter((finding) => finding.decisive);
 		if (decisive.length === 0) return undefined;

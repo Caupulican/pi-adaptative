@@ -20,7 +20,7 @@ const { SystemOneJevAdapter } = await src("system-one/adapter.ts");
 const { createSystemOneConfig } = await src("system-one/config.ts");
 const { SystemOneController } = await src("system-one/controller.ts");
 const { ExecutionStore } = await src("system-one/execution-state.ts");
-const { harnessFileLister, SemanticUnitIndex, scanSemanticDuplicates, JEV_SCAN_CONCURRENCY } = await src(
+const { harnessFileLister, isTestPath, SemanticUnitIndex, scanSemanticDuplicates, JEV_SCAN_CONCURRENCY } = await src(
 	"system-one/code-duplicates.ts",
 );
 
@@ -50,7 +50,7 @@ const store = new ExecutionStore({
 const controller = new SystemOneController({ store, adapter, config });
 
 const production = (path) =>
-	/^(packages\/[^/]+\/src\/|scripts\/)/.test(path) && !/\.test\.|\/test\/|\.d\.ts$|\.generated\./.test(path);
+	/^(packages\/[^/]+\/src\/|scripts\/)/.test(path) && !isTestPath(path) && !/\.d\.ts$|\.generated\./.test(path);
 const started = Date.now();
 const index = new SemanticUnitIndex(repositoryRoot, "**/*.{ts,mts,js,mjs}", async (root, glob, signal) =>
 	(await harnessFileLister(root, glob, signal)).filter(production),
