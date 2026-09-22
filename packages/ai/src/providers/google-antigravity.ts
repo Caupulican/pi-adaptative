@@ -4,7 +4,8 @@ import {
 	ANTIGRAVITY_ENDPOINT,
 	antigravityHeaders,
 	antigravityObject,
-	resolveAntigravityProject,
+	antigravityThinkingBudget,
+	resolveAntigravityProjectOnce,
 } from "../utils/antigravity.ts";
 import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
 import {
@@ -63,8 +64,10 @@ async function* readAntigravityEvents(
 			if (entry.finishReason) sawTerminal = true;
 			if (entry.content) {
 				const content = antigravityObject(entry.content);
-				if (!Array.isArray(content.parts)) throw new Error("Invalid Antigravity content");
-				for (const value of content.parts) {
+				// A stream may open with a role-only content ({"role":"model"}); absent parts are none.
+				if (content.parts !== undefined && !Array.isArray(content.parts))
+					throw new Error("Invalid Antigravity content");
+				for (const value of (content.parts ?? []) as unknown[]) {
 					const part = antigravityObject(value);
 					if (part.text !== undefined && typeof part.text !== "string")
 						throw new Error("Invalid Antigravity text");
@@ -143,11 +146,19 @@ async function generateAntigravityContent(
 	if (!token?.trim()) throw new Error("Missing Antigravity credentials. Sign in with /login.");
 	if (model.baseUrl !== ANTIGRAVITY_ENDPOINT) throw new Error("Antigravity requires its trusted service endpoint");
 	const config = params.config;
-	const projectId = await resolveAntigravityProject(token, config?.abortSignal);
+	const projectId = await resolveAntigravityProjectOnce(token, config?.abortSignal);
 	config?.abortSignal?.throwIfAborted();
 	const headers = new Headers({ ...model.headers, ...options.headers });
 	for (const [key, value] of Object.entries(antigravityHeaders(token))) headers.set(key, value);
 	headers.set("Accept", "text/event-stream");
+	const budget = model.reasoning ? antigravityThinkingBudget(model) : undefined;
+	// Thinking counts inside the output cap on every upstream (Anthropic rejects a cap at or below the
+	// budget): a fixed budget runs on top of the caller's cap for the answer, within the model's maximum.
+	const requestedOutput = config?.maxOutputTokens;
+	const maxOutputTokens =
+		budget !== undefined && budget > 0 && requestedOutput !== undefined
+			? Math.min(model.maxTokens, requestedOutput + budget)
+			: requestedOutput;
 	const systemInstruction =
 		typeof config?.systemInstruction === "string"
 			? { role: "user", parts: [{ text: config.systemInstruction }] }
@@ -171,8 +182,9 @@ async function generateAntigravityContent(
 				sessionId: options.sessionId,
 				generationConfig: {
 					temperature: config?.temperature,
-					maxOutputTokens: config?.maxOutputTokens,
-					thinkingConfig: config?.thinkingConfig,
+					maxOutputTokens,
+					// The model's own catalog budget, never pi's level mapping; no budget recorded, no config.
+					...(budget !== undefined ? { thinkingConfig: { thinkingBudget: budget, includeThoughts: true } } : {}),
 				},
 			},
 		}),

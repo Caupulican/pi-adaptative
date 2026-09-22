@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Fixed
+
+- Google Antigravity models run at their own catalog thinking budget. Pi mapped its thinking level onto them, and the service rejects the `MINIMAL` level every Gemini model received with thinking off (HTTP 400) and any level on GPT-OSS. Each model now declares the one thinking level its budget stands for, and the answer's output cap runs on top of the budget, as Anthropic requires.
+- Antigravity tools reach Claude and GPT models: their upstreams read only the OpenAPI `parameters` field, so Claude received no input schema (HTTP 400) and GPT called tools with no arguments. `Model.upstream`, from the catalog's backend, selects the field.
+- An Antigravity stream that opens with a role-only event no longer fails as invalid content.
+- The Antigravity project is resolved once per access token, as the native client does at startup, instead of before every request.
+
 ## [0.99.43] - 2026-09-22
 
 ## [0.99.42] - 2026-09-22

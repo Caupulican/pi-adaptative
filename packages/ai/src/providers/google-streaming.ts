@@ -233,7 +233,16 @@ export function buildGoogleGenerateContentParameters<TApi extends GoogleApiType>
 	const config: GenerateContentConfig = {
 		...(Object.keys(generationConfig).length > 0 && generationConfig),
 		...(context.systemPrompt && { systemInstruction: sanitizeSurrogates(context.systemPrompt) }),
-		...(context.tools && context.tools.length > 0 && { tools: convertTools(context.tools, false, toolNameMap) }),
+		...(context.tools &&
+			context.tools.length > 0 && {
+				tools: convertTools(
+					context.tools,
+					// A non-Google upstream reads only the OpenAPI `parameters` field: without it Claude receives
+					// no input_schema and GPT calls tools with no arguments.
+					model.upstream !== undefined && model.upstream !== "google",
+					toolNameMap,
+				),
+			}),
 	};
 
 	if (context.tools && context.tools.length > 0 && options.toolChoice) {

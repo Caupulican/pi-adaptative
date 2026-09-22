@@ -730,6 +730,12 @@ export interface Model<TApi extends Api> {
 			: TApi extends "anthropic-messages"
 				? AnthropicMessagesCompat
 				: never;
+	/**
+	 * The model family a gateway provider forwards this model to, when the gateway serves several
+	 * (Antigravity serves Google, Anthropic and OpenAI models through one Gemini-shaped API). Request
+	 * details that the upstream reads differently follow it.
+	 */
+	upstream?: "google" | "anthropic" | "openai";
 }
 
 export interface ImagesModel<TApi extends ImagesApi>

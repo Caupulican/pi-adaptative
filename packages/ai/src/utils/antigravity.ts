@@ -1,4 +1,4 @@
-import type { Model } from "../types.ts";
+import type { Model, ThinkingBudgets, ThinkingLevelMap } from "../types.ts";
 
 export const ANTIGRAVITY_PROVIDER = "google-antigravity";
 export const ANTIGRAVITY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
@@ -48,6 +48,45 @@ export async function antigravityRequest(
 	return antigravityObject(await response.json());
 }
 
+/**
+ * An Antigravity model is a fixed thinking preset: its catalog `thinkingBudget` (-1 is dynamic) is
+ * what separates the -low and -high variants of one model, and it is the only thinking configuration
+ * every advertised model accepts (measured: Gemini rejects the MINIMAL level, GPT-OSS rejects any
+ * level). The model therefore declares one thinking level, named from its budget, and the transport
+ * sends the budget itself; pi's level scale is never mapped onto it.
+ */
+function antigravityThinkingPreset(budget: number): {
+	level: "low" | "medium" | "high";
+	thinkingLevelMap: ThinkingLevelMap;
+	thinkingBudgets: ThinkingBudgets;
+} {
+	const level = budget < 0 || budget >= 8192 ? "high" : budget >= 2048 ? "medium" : "low";
+	return {
+		level,
+		thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: null, [level]: level },
+		thinkingBudgets: { [level]: budget },
+	};
+}
+
+/** The model family the catalog's backend name stands for. */
+function antigravityUpstream(backend: string): "google" | "anthropic" | "openai" {
+	return backend.includes("ANTHROPIC") ? "anthropic" : backend.includes("OPENAI") ? "openai" : "google";
+}
+
+/** The backend field worth persisting from a catalog entry: which provider serves the model. */
+function antigravityBackend(entry: unknown): { apiProvider?: string } {
+	const provider = isAntigravityObject(entry) ? entry.apiProvider : undefined;
+	return typeof provider === "string" && /^API_PROVIDER_[A-Z_]{1,60}$/.test(provider) ? { apiProvider: provider } : {};
+}
+
+/** The catalog thinking budget an Antigravity model runs at, or undefined when its catalog predates budgets. */
+export function antigravityThinkingBudget(model: Model<"google-antigravity">): number | undefined {
+	const budgets = model.thinkingBudgets;
+	if (!budgets) return undefined;
+	const values = Object.values(budgets).filter((value): value is number => typeof value === "number");
+	return values.length === 1 ? values[0] : undefined;
+}
+
 export function parseAntigravityModels(raw: unknown): Model<"google-antigravity">[] {
 	const entries = Object.entries(antigravityObject(raw));
 	if (entries.length > 200) throw new Error("Antigravity model catalog exceeds its size limit");
@@ -61,20 +100,57 @@ export function parseAntigravityModels(raw: unknown): Model<"google-antigravity"
 		const contextWindow = info.maxTokens as number;
 		const maxTokens = info.maxOutputTokens as number;
 		if (contextWindow <= 0 || maxTokens <= 0 || maxTokens > contextWindow) continue;
+		const reasoning = info.supportsThinking === true;
+		const budget =
+			reasoning && Number.isSafeInteger(info.thinkingBudget) && (info.thinkingBudget as number) >= -1
+				? (info.thinkingBudget as number)
+				: undefined;
+		const preset = budget !== undefined ? antigravityThinkingPreset(budget) : undefined;
+		// The catalog names the backend; only Gemini reads the JSON-schema tool field.
+		const backend = typeof info.apiProvider === "string" ? info.apiProvider : undefined;
 		models.push({
 			id,
 			name: typeof info.displayName === "string" ? info.displayName.slice(0, 200) : id,
 			provider: ANTIGRAVITY_PROVIDER,
 			api: "google-antigravity",
 			baseUrl: ANTIGRAVITY_ENDPOINT,
-			reasoning: info.supportsThinking === true,
+			reasoning,
+			...(preset
+				? {
+						defaultThinkingLevel: preset.level,
+						thinkingLevelMap: preset.thinkingLevelMap,
+						thinkingBudgets: preset.thinkingBudgets,
+					}
+				: {}),
 			input: info.supportsImages === true ? ["text", "image"] : ["text"],
 			contextWindow,
 			maxTokens,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			...(backend ? { upstream: antigravityUpstream(backend) } : {}),
 		});
 	}
 	return models;
+}
+
+/**
+ * The project each access token resolved to. The native client resolves the project once at
+ * startup, not per request; a refreshed token is a new key and resolves again. Concurrent first
+ * calls share one lookup, and a failed lookup is not kept.
+ */
+const resolvedProjects = new Map<string, Promise<string>>();
+const MAX_RESOLVED_PROJECTS = 16;
+
+export function resolveAntigravityProjectOnce(token: string, signal?: AbortSignal): Promise<string> {
+	const known = resolvedProjects.get(token);
+	if (known) return known;
+	const lookup = resolveAntigravityProject(token, signal);
+	resolvedProjects.set(token, lookup);
+	if (resolvedProjects.size > MAX_RESOLVED_PROJECTS)
+		resolvedProjects.delete(resolvedProjects.keys().next().value as string);
+	lookup.catch(() => {
+		if (resolvedProjects.get(token) === lookup) resolvedProjects.delete(token);
+	});
+	return lookup;
 }
 
 export async function resolveAntigravityProject(token: string, signal?: AbortSignal): Promise<string> {
@@ -129,6 +205,12 @@ export async function discoverAntigravityAccount(
 				maxOutputTokens: model.maxTokens,
 				supportsThinking: model.reasoning,
 				supportsImages: model.input.includes("image"),
+				...(antigravityThinkingBudget(model) !== undefined
+					? { thinkingBudget: antigravityThinkingBudget(model) }
+					: {}),
+				...(response.models && typeof antigravityObject(response.models)[model.id] === "object"
+					? antigravityBackend(antigravityObject(response.models)[model.id])
+					: {}),
 			},
 		]),
 	);

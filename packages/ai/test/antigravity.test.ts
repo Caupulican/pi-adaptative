@@ -141,7 +141,7 @@ describe("Antigravity OAuth and transport", () => {
 	it("does not generate when the startup account check fails", async () => {
 		const fetchMock = vi.fn().mockResolvedValue(Response.json({}, { status: 401 }));
 		vi.stubGlobal("fetch", fetchMock);
-		const result = await streamAntigravity(model, { messages: [] }, { apiKey: "fixture" }).result();
+		const result = await streamAntigravity(model, { messages: [] }, { apiKey: "fixture-144" }).result();
 		expect(result.stopReason).toBe("error");
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
@@ -156,7 +156,7 @@ describe("Antigravity OAuth and transport", () => {
 		const result = await streamAntigravity(
 			model,
 			{ messages: [] },
-			{ apiKey: "fixture", signal: controller.signal },
+			{ apiKey: "fixture-159", signal: controller.signal },
 		).result();
 		expect(result.stopReason).toBe("aborted");
 		expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -180,7 +180,7 @@ describe("Antigravity OAuth and transport", () => {
 				.mockResolvedValueOnce(Response.json({ cloudaicompanionProject: "fixture-project" }))
 				.mockResolvedValue(new Response(body)),
 		);
-		const result = await streamAntigravity(model, { messages: [] }, { apiKey: "fixture" }).result();
+		const result = await streamAntigravity(model, { messages: [] }, { apiKey: "fixture-183" }).result();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).not.toContain("secret-fixture");
 	});
@@ -205,7 +205,7 @@ describe("Antigravity OAuth and transport", () => {
 					),
 				),
 		);
-		const result = await streamAntigravity(model, { messages: [] }, { apiKey: "fixture" }).result();
+		const result = await streamAntigravity(model, { messages: [] }, { apiKey: "fixture-208" }).result();
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toEqual([{ type: "text", text: "café中" }]);
 		expect(result.responseId).toBe("fixture-trace");
@@ -218,7 +218,7 @@ describe("Antigravity OAuth and transport", () => {
 		const result = await streamAntigravity(
 			{ ...model, baseUrl: "https://untrusted.invalid" },
 			{ messages: [] },
-			{ apiKey: "fixture" },
+			{ apiKey: "fixture-221" },
 		).result();
 		expect(result.stopReason).toBe("error");
 		expect(fetchMock).not.toHaveBeenCalled();
@@ -230,7 +230,7 @@ describe("Antigravity OAuth and transport", () => {
 		const result = await streamAntigravity(
 			model,
 			{ messages: [] },
-			{ apiKey: "fixture", signal: AbortSignal.abort() },
+			{ apiKey: "fixture-233", signal: AbortSignal.abort() },
 		).result();
 		expect(result.stopReason).toBe("aborted");
 		expect(fetchMock).not.toHaveBeenCalled();
@@ -273,5 +273,63 @@ describe("Antigravity OAuth and transport", () => {
 		expect(new Headers(secondCallOptions.headers).get("Authorization")).toBe("Bearer expired-token");
 		const [, fourthCallOptions] = fetchMock.mock.calls[3] as [string, RequestInit];
 		expect(new Headers(fourthCallOptions.headers).get("Authorization")).toBe("Bearer refreshed-token");
+	});
+
+	it("runs each model at its catalog budget, answer cap on top, and speaks each upstream's tool field", async () => {
+		const [claude] = parseAntigravityModels({
+			"claude-sonnet-4-6": {
+				displayName: "Claude Sonnet 4.6",
+				maxTokens: 200000,
+				maxOutputTokens: 64000,
+				supportsThinking: true,
+				thinkingBudget: 1024,
+				apiProvider: "API_PROVIDER_ANTHROPIC_VERTEX",
+			},
+		});
+		expect(claude).toMatchObject({
+			upstream: "anthropic",
+			defaultThinkingLevel: "low",
+			thinkingBudgets: { low: 1024 },
+		});
+		const bodies: Record<string, unknown>[] = [];
+		vi.stubGlobal(
+			"fetch",
+			vi
+				.fn()
+				.mockResolvedValueOnce(Response.json({ cloudaicompanionProject: "fixture-project" }))
+				.mockImplementation(async (_url: string, init: { body: string }) => {
+					bodies.push(JSON.parse(init.body));
+					// A role-only opening event, then text and the terminal event.
+					return new Response(
+						[
+							`data: ${JSON.stringify({ response: { candidates: [{ content: { role: "model" } }] } })}`,
+							"",
+							`data: ${JSON.stringify({ response: { candidates: [{ content: { role: "model", parts: [{ text: "OK" }] }, finishReason: "STOP" }] } })}`,
+							"",
+							"",
+						].join("\n"),
+						{ headers: { "content-type": "text/event-stream" } },
+					);
+				}),
+		);
+		const result = await streamAntigravity(
+			claude!,
+			{
+				messages: [{ role: "user", content: "hi", timestamp: 1 }],
+				tools: [
+					{ name: "get_weather", description: "weather", parameters: { type: "object", properties: {} } as never },
+				],
+			},
+			{ apiKey: "fixture-budget", maxTokens: 4096 },
+		).result();
+		expect(result.stopReason).toBe("stop");
+		const request = bodies[0]?.request as {
+			generationConfig: { maxOutputTokens: number; thinkingConfig: unknown };
+			tools: { functionDeclarations: Record<string, unknown>[] }[];
+		};
+		expect(request.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 1024, includeThoughts: true });
+		expect(request.generationConfig.maxOutputTokens).toBe(4096 + 1024);
+		expect(request.tools[0]?.functionDeclarations[0]).toHaveProperty("parameters");
+		expect(request.tools[0]?.functionDeclarations[0]).not.toHaveProperty("parametersJsonSchema");
 	});
 });
