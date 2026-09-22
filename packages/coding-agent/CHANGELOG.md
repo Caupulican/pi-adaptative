@@ -2,6 +2,10 @@
 
 ## [0.99.41] - 2026-09-22
 
+### Fixed
+
+- OpenRouter model-override tests target `anthropic/claude-opus-4.1`. The live catalog no longer lists `anthropic/claude-opus-4`.
+
 ### Changed
 
 - The xAI default model is Grok 4.7.
