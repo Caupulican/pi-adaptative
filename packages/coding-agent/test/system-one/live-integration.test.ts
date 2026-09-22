@@ -62,7 +62,7 @@ describe("System One Live Integration", () => {
 		return controller;
 	}
 
-	it("classifies a prohibited tool execution and does not refuse the call", async () => {
+	it("does not ask Jev about a single tool call, even one the old gate would have classified prohibited", async () => {
 		const systemOne = createMockSystemOne({
 			toolGateOutcome: "block",
 			toolGateReason: "Prohibited repository mutation during discovery phase",
@@ -87,10 +87,10 @@ describe("System One Live Integration", () => {
 		);
 
 		expect(result?.block).toBeUndefined();
-		expect(systemOne.validateToolGate).toHaveBeenCalled();
+		expect(systemOne.validateToolGate).not.toHaveBeenCalled();
 	});
 
-	it("allows tool execution when System One approves", async () => {
+	it("records an allowed tool call without a Jev evaluation", async () => {
 		const systemOne = createMockSystemOne({
 			toolGateOutcome: "allow",
 		});
@@ -114,7 +114,8 @@ describe("System One Live Integration", () => {
 		);
 
 		expect(result).toBeUndefined();
-		expect(systemOne.validateToolGate).toHaveBeenCalled();
+		expect(systemOne.validateToolGate).not.toHaveBeenCalled();
+		expect(systemOne.store.snapshot().tool_events.at(-1)).toMatchObject({ tool: "read", call_id: "call-2" });
 	});
 
 	it("gates goal complete transition on System One completion validation", async () => {

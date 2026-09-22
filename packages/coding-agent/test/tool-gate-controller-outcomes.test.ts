@@ -95,10 +95,10 @@ describe("ToolGateController publishes one gate outcome per tool call", () => {
 		]);
 	});
 
-	it("System One's replan classification does not refuse the call; confirm queues one steer", async () => {
+	it("a tool call makes no Jev evaluation; System One records it with an intent built from its arguments", async () => {
 		const { cwd } = scope();
-		const directives: string[] = [];
-		let outcome: "replan" | "confirm" = "replan";
+		const recorded: { tool: string; args?: unknown; impact: string; call_id: string }[] = [];
+		let evaluations = 0;
 		const controller = new ToolGateController({
 			maybeEscalateToolCall: () => undefined,
 			getCwd: () => cwd,
@@ -106,31 +106,31 @@ describe("ToolGateController publishes one gate outcome per tool call", () => {
 			recordGateOutcome: () => {},
 			getExtensionRunner: () => fakeRunner([]),
 			getSystemOneController: () =>
-				({ validateToolGate: async () => ({ outcome, reason: "off the current step" }) }) as never,
-			getForegroundControl: () => ({
-				cancelTurn: (reason) => {
-					directives.push(`cancel:${reason}`);
-				},
-				steer: async (text, delivery) => {
-					directives.push(`steer:${delivery}:${text.slice(0, 30)}`);
-				},
-			}),
+				({
+					validateToolGate: async () => {
+						evaluations += 1;
+						return { outcome: "replan" };
+					},
+					recordToolCall: (request: { tool: string; args?: unknown; impact: string; call_id: string }) =>
+						recorded.push(request),
+				}) as never,
 		});
-		const call = (args: Record<string, unknown>) =>
+		const call = (id: string, name: string, args: Record<string, unknown>) =>
 			controller.beforeToolCall(
 				{
 					assistantMessage: fauxAssistantMessage(""),
-					toolCall: { id: "call-1", name: "read", arguments: args },
+					toolCall: { id, name, arguments: args },
 					args,
 				} as Parameters<typeof controller.beforeToolCall>[0],
 				undefined,
 			);
-		const replanned = await call({ path: "src/a.ts" });
-		expect(replanned?.block).toBeUndefined();
-		expect(directives).toEqual([]);
-		outcome = "confirm";
-		expect(await call({ path: "src/a.ts" })).toBeUndefined();
-		expect(directives.at(-1)).toMatch(/^steer:queue:System One: the read call/);
+		expect(await call("call-1", "read", { path: "src/a.ts" })).toBeUndefined();
+		expect(await call("call-2", "bash", { command: "git push origin main" })).toBeUndefined();
+		expect(evaluations).toBe(0);
+		expect(recorded.map((entry) => [entry.call_id, entry.tool, entry.impact])).toEqual([
+			["call-1", "read", "read_only"],
+			["call-2", "bash", "local_reversible"],
+		]);
 	});
 
 	it("an allowed call with no hooks records exactly one allow outcome", async () => {

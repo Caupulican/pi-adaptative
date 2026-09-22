@@ -21,7 +21,6 @@ import type {
 	RepositoryObservationToken,
 } from "./objective-execution/repository-mutation-observer.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
-import type { SystemOneForegroundControl } from "./system-one/foreground-control.ts";
 import type { SystemOneController } from "./system-one/index.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import { retireToolCall } from "./tools/file-mutation-queue.ts";
@@ -86,8 +85,6 @@ export interface ToolGateControllerDeps {
 	): Promise<BeforeToolCallResult | undefined>;
 	/** System One semantic control plane controller, if active for this session/run. */
 	getSystemOneController?(): SystemOneController | undefined;
-	/** System One's cancel and steer levers over the running turn; absent, its verdicts only block or allow. */
-	getForegroundControl?(): SystemOneForegroundControl | undefined;
 	/**
 	 * Mutation-acceptance rule hook. A blocking violation converts the mutation's own result into an
 	 * error carrying the violation, so the transition does not proceed on an accepted mutation.
@@ -294,14 +291,13 @@ export class ToolGateController {
 			// Operator edge authorization outranks advisory semantic tool gates;
 			// control-plane tools are internal harness operations, not untrusted repo inputs.
 			const systemOne = this.deps.getSystemOneController?.();
+			const impact =
+				toolCall.name === "bash"
+					? "local_reversible"
+					: toolCall.name.includes("edit") || toolCall.name.includes("write")
+						? "repo_mutation"
+						: "read_only";
 			if (systemOne && !isControlPlaneTool && !isOperatorAuthorizedEdge) {
-				const impact =
-					toolCall.name === "bash"
-						? "local_reversible"
-						: toolCall.name.includes("edit") || toolCall.name.includes("write")
-							? "repo_mutation"
-							: "read_only";
-
 				if (systemOne.hookCoordinator?.hasExtensions()) {
 					const beforeToolResult = await systemOne.hookCoordinator.runHook("before_tool", {
 						schema_version: "1.0",
@@ -340,29 +336,11 @@ export class ToolGateController {
 						}
 					}
 				}
-
-				let systemOneResult: Awaited<ReturnType<typeof systemOne.validateToolGate>> | undefined;
-				try {
-					systemOneResult = await systemOne.validateToolGate({
-						tool: toolCall.name,
-						intent: `Invoke tool ${toolCall.name}`,
-						impact,
-						args,
-						call_id: toolCall.id,
-					});
-				} catch {
-					// A missing classification does not refuse the call.
-					systemOneResult = undefined;
-				}
-				const foreground = this.deps.getForegroundControl?.();
-				// Jev classifies. Allow and replan stay on the ledger. Only a broad-scope
-				// confirm is ranked high enough to reach the model, as one queued line.
-				if (systemOneResult?.outcome === "confirm" && foreground) {
-					await foreground.steer(
-						`System One: the ${toolCall.name} call's scope looks broad relative to the current step; keep to what the step needs and say why if more is required.`,
-						"queue",
-					);
-				}
+			}
+			// Recorded, not judged: the call's relevance and scope are judged once per step in postflight,
+			// where the step and its evidence are known. Edge operations are recorded too.
+			if (systemOne && !isControlPlaneTool) {
+				systemOne.recordToolCall({ tool: toolCall.name, args, impact, call_id: toolCall.id });
 			}
 
 			let releaseObservation: (() => void) | undefined;

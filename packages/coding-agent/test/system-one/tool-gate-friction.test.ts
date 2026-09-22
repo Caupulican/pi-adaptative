@@ -142,7 +142,7 @@ describe("Tool Gate Friction Remediations", () => {
 		expect(gateResult?.block).toBeFalsy();
 	});
 
-	it("Ordinary untrusted tool call without edge grant is still subject to semantic validation", async () => {
+	it("An ordinary tool call makes no Jev call and is recorded for the step's postflight judgment", async () => {
 		const store = new ExecutionStore({
 			run_id: "untrusted-run",
 			objective: { request: "Normal", normalized_goal: "Normal", acceptance_criteria: [], constraints: [] },
@@ -182,7 +182,10 @@ describe("Tool Gate Friction Remediations", () => {
 			context: { messages: [] } as any,
 		});
 
-		// Semantic gate was called
-		expect(semanticGateCalled).toBe(true);
+		// No per-call Jev evaluation; the call is recorded with an intent built from its arguments.
+		expect(semanticGateCalled).toBe(false);
+		const event = store.snapshot().tool_events.at(-1);
+		expect(event).toMatchObject({ tool: "edit", status: "allowed", call_id: "call-3" });
+		expect(event?.intent).toBe("edit path=src/index.ts");
 	});
 });

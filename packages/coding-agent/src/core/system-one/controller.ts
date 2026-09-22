@@ -457,6 +457,21 @@ export class SystemOneController {
 		return { outcome, decision, toolEventId: event.id };
 	}
 
+	/**
+	 * Record a tool call the deterministic gates admitted. No Jev call: relevance and scope are judged
+	 * once per step in postflight, over these events, where the step and its evidence are known.
+	 */
+	recordToolCall(toolRequest: { tool: string; args?: unknown; impact: ToolImpact; call_id: string }): void {
+		this.store.recordToolEvent({
+			tool: toolRequest.tool,
+			intent: describeToolCall(toolRequest.tool, toolRequest.args),
+			impact: toolRequest.impact,
+			status: "allowed",
+			input_payload: toolRequest.args,
+			call_id: toolRequest.call_id,
+		});
+	}
+
 	/** Record the real terminal after the call ran. No-op when the gate never admitted this call_id. */
 	recordToolTerminal(input: { call_id: string; succeeded: boolean; output?: unknown; aborted?: boolean }): void {
 		this.store.updateToolEvent(
@@ -807,4 +822,22 @@ export class SystemOneController {
 
 		return finalVerdict;
 	}
+}
+
+const TOOL_INTENT_ARG_KEYS = ["command", "path", "file_path", "pattern", "query", "url", "action", "agentId"] as const;
+
+/**
+ * What the call does, from its own arguments: the tool plus its identifying fields, bounded. This is
+ * the `intent` postflight judges against the step, so it must describe the call, not just name it.
+ */
+function describeToolCall(tool: string, args: unknown): string {
+	if (!args || typeof args !== "object") return tool;
+	const record = args as Record<string, unknown>;
+	const parts: string[] = [];
+	for (const key of TOOL_INTENT_ARG_KEYS) {
+		const value = record[key];
+		if (typeof value === "string" && value.trim()) parts.push(`${key}=${value.trim()}`);
+	}
+	const text = parts.length > 0 ? `${tool} ${parts.join(" ")}` : tool;
+	return text.length <= 240 ? text : `${text.slice(0, 239)}…`;
 }

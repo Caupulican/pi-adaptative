@@ -1653,7 +1653,6 @@ export class AgentSession {
 					signal,
 				),
 			getSystemOneController: () => this._systemOneController,
-			getForegroundControl: () => this.systemOneForegroundControl,
 			validateMutationAcceptance: async ({ changedFiles }) => {
 				if (this._ruleAuthority === "user") return { blocked: false };
 				const result = await this._projectRules.validateMutation(
