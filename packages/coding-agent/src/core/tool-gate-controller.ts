@@ -14,7 +14,12 @@ import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
 import { classifyAllEdgeOperations, type EdgeClass } from "./autonomy/edge-policy.ts";
 import { evaluateToolGateAsync } from "./autonomy/gates.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
-import { classifyDangerousGitBash } from "./objective-execution/dangerous-git-bash.ts";
+import { classifyRootGitBash } from "./objective-execution/dangerous-git-bash.ts";
+import { type HostRepositoryEffect, repositoryEffectForCall } from "./objective-execution/repository-effect.ts";
+import type {
+	RepositoryMutationObserver,
+	RepositoryObservationToken,
+} from "./objective-execution/repository-mutation-observer.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import type { SystemOneForegroundControl } from "./system-one/foreground-control.ts";
 import type { SystemOneController } from "./system-one/index.ts";
@@ -91,8 +96,13 @@ export interface ToolGateControllerDeps {
 	}): Promise<{ blocked: boolean; explanation?: string; repairId?: string } | undefined>;
 	/** Successful typed edit/write paths, hashed by the session ledger. */
 	noteOwnedWrites?(paths: readonly string[], cwd: string): void;
-	/** A bash command that was not read-only git already ran. Shared-worktree commit stays unattributed. */
+	/** Bash or run_process changed the checkout, or that fingerprint could not be read. */
 	noteShellMutation?(): void;
+	/** Session mutation boundary. Absent sessions keep the ledger callbacks above. */
+	repositoryObserver?: RepositoryMutationObserver;
+	getObjectiveId?(): string;
+	deliveryActive?(): boolean;
+	hostRepositoryEffect?(toolName: string): HostRepositoryEffect | undefined;
 }
 
 /** File paths a mutation tool call names in its own arguments. */
@@ -124,16 +134,56 @@ function refuseDangerousGit(toolName: string, args: unknown): { block: true; rea
 	if (toolName !== "bash") return undefined;
 	const command = bashCommand(args);
 	if (!command) return undefined;
-	const verdict = classifyDangerousGitBash(command);
+	const verdict = classifyRootGitBash(command);
 	if (!verdict.refused) return undefined;
 	return { block: true, reason: verdict.reason ?? "dangerous git is refused" };
 }
 
 export class ToolGateController {
 	private readonly deps: ToolGateControllerDeps;
+	private readonly pendingObservations = new Map<string, RepositoryObservationToken>();
 
 	constructor(deps: ToolGateControllerDeps) {
 		this.deps = deps;
+	}
+
+	private async beginObservation(
+		toolCallId: string,
+		toolName: string,
+		args: unknown,
+	): Promise<RepositoryObservationToken | undefined> {
+		const observer = this.deps.repositoryObserver;
+		if (!observer) return undefined;
+		const effect = repositoryEffectForCall({
+			toolName,
+			args,
+			deliveryActive: this.deps.deliveryActive?.() ?? false,
+			hostEffect: this.deps.hostRepositoryEffect?.(toolName),
+		});
+		if (effect === "none") return undefined;
+		return observer.begin({
+			callId: toolCallId,
+			objectiveId: this.deps.getObjectiveId?.() ?? "",
+			cwd: this.deps.getCwd(),
+			effect,
+		});
+	}
+
+	private async finishObservation(
+		toolCallId: string,
+		toolName: string,
+		args: unknown,
+		operationSucceeded: boolean,
+	): Promise<void> {
+		const token = this.pendingObservations.get(toolCallId);
+		if (!token) return;
+		this.pendingObservations.delete(toolCallId);
+		const declared = token.effect === "typed_owned_write" ? collectMutatedPaths(toolName, args) : [];
+		await this.deps.repositoryObserver?.finish({
+			token,
+			declaredOwnedPaths: declared,
+			operationSucceeded,
+		});
 	}
 
 	readonly beforeToolCall: BeforeToolCall = async (
@@ -181,6 +231,8 @@ export class ToolGateController {
 
 		// 1. Pre-hook capability envelope & path bounds check on raw args
 		let terminalOutcome = await evaluateEnvelope(args);
+		let observationToken: RepositoryObservationToken | undefined;
+		let observationHandedOff = false;
 		try {
 			const denied = blockedBy(terminalOutcome);
 			if (denied) return denied;
@@ -192,6 +244,7 @@ export class ToolGateController {
 				if (acquisitionBlock) return acquisitionBlock;
 			}
 
+			observationToken = await this.beginObservation(toolCall.id, toolCall.name, args);
 			// 2. Extension tool_call hooks
 			const runner = this.deps.getExtensionRunner();
 			let extensionResult: BeforeToolCallResult | undefined;
@@ -342,8 +395,18 @@ export class ToolGateController {
 				// Advisory ranking/storage reads cannot deny an otherwise authorized operation.
 			}
 			if (releaseObservation) registerCleanup?.(releaseObservation);
+			if (observationToken) {
+				observationHandedOff = true;
+				this.pendingObservations.set(toolCall.id, observationToken);
+			}
 			return extensionResult;
 		} finally {
+			if (observationToken && !observationHandedOff) {
+				await this.deps.repositoryObserver?.finish({
+					token: observationToken,
+					operationSucceeded: false,
+				});
+			}
 			// A later abort does not invalidate a decision the envelope already made; the pre-hook
 			// evaluation above either completed (and is published) or threw before this block exists.
 			if (envelope) this.deps.recordGateOutcome(terminalOutcome);
@@ -356,11 +419,8 @@ export class ToolGateController {
 		// Retired first and synchronously, before any hook here can throw -- a write rejected by its own
 		// preflight would otherwise park a later bash in the same batch for the rest of the turn.
 		retireToolCall(toolCall.id, this.deps.getMutationScope?.());
-		if (toolCall.name === "bash") {
-			const command = bashCommand(args);
-			if (!command || !classifyDangerousGitBash(command).readOnly) this.deps.noteShellMutation?.();
-		}
 		const selection = this.deps.getToolSelectionController?.();
+		let finishSucceeded = !isError;
 		try {
 			const runner = this.deps.getExtensionRunner();
 			let content = result.content;
@@ -462,6 +522,7 @@ export class ToolGateController {
 					this.deps.noteOwnedWrites?.(changedFiles, executionContext?.cwd ?? this.deps.getCwd());
 				}
 			}
+			finishSucceeded = !resolvedIsError;
 
 			if (
 				content === result.content &&
@@ -477,6 +538,7 @@ export class ToolGateController {
 			// Result hooks can fail before complete(). A terminal call must retain no pending
 			// observation; a projection failure is not evidence that the tool itself failed.
 			selection?.discard(toolCall.id);
+			await this.finishObservation(toolCall.id, toolCall.name, args, finishSucceeded);
 		}
 	};
 }

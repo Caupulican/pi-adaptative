@@ -44,6 +44,7 @@ describe("model capability auto-detection", () => {
 				"skillify",
 				"skill_audit",
 				"bash",
+				"repo_read",
 				"python",
 				"edit",
 				"write",

@@ -25,6 +25,7 @@ import { truncateToVisualLines } from "../../modes/interactive/components/visual
 import { theme } from "../../modes/interactive/theme/theme.ts";
 import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { createPowerShellHostEnvironment, POWERSHELL_7_GUARD } from "../../utils/powershell-session-protocol.ts";
+import { awaitOwnedProcessGroup } from "../../utils/process-group-wait.ts";
 import {
 	getPlatformShellToolName,
 	getShellConfig,
@@ -259,6 +260,7 @@ function createLocalShellOperations(
 				timeoutMs: timeout !== undefined && timeout > 0 ? timeout * 1000 : undefined,
 				killGraceMs: 2_000,
 			});
+			await awaitOwnedProcessGroup(child.pid, cwd, signal);
 			if (signal?.aborted) throw new Error("aborted");
 			if (terminal.reason === "timeout") throw new Error(`timeout:${timeout}`);
 			if (silenceKilled) throw new Error(`silence:${silenceMs / 1000}`);
@@ -1374,14 +1376,10 @@ function createShellToolDefinition(
 					}
 					if (err instanceof Error && err.message.startsWith("silence:")) {
 						const secs = err.message.split(":")[1];
-						const recovery =
-							backendShell === "bash"
-								? "re-run it with an explicit timeout, or run it in the background with '&'."
-								: "re-run it with an explicit timeout.";
 						throw new Error(
 							appendStatus(
 								text,
-								`Command killed after ${secs}s of silence (no output). If the command is legitimately quiet for long stretches, ${recovery}`,
+								`Command killed after ${secs}s of silence (no output). If the command is legitimately quiet for long stretches, re-run it with an explicit timeout.`,
 							),
 						);
 					}

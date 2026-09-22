@@ -17,7 +17,7 @@ import type { WorkerRequest } from "../autonomy/contracts.ts";
 import type { LaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { type ModelCapabilityProfile, resolveWorkerOutputTokenCeiling } from "../model-capability.ts";
-import { classifyDangerousGitBash } from "../objective-execution/dangerous-git-bash.ts";
+
 import { attemptUsageFromGatewayUsage, EMPTY_ATTEMPT_USAGE } from "../orchestration/attempt-usage.ts";
 import { CapabilityGatewayDeniedError, type ProviderBudgetReservation } from "../orchestration/capability-gateway.ts";
 import type { ArtifactContract, AttemptUsageSnapshot, ExecutionGrant } from "../orchestration/contracts.ts";
@@ -703,17 +703,6 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										},
 										afterToolCall: async ({ toolCall, args, isError }) => {
 											try {
-												if (toolCall.name === "bash") {
-													const command =
-														args && typeof args === "object" && !Array.isArray(args)
-															? (args as { command?: unknown }).command
-															: undefined;
-													const readOnly =
-														typeof command === "string" && classifyDangerousGitBash(command).readOnly;
-													if (!readOnly) {
-														options.recordObjectiveMutation?.({ kind: "shell", cwd: options.cwd });
-													}
-												}
 												if (
 													!isError &&
 													(toolCall.name === "write" || toolCall.name === "edit") &&

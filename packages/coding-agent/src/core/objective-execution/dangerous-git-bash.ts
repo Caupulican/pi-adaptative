@@ -1,10 +1,9 @@
 /**
- * Deterministic refusal of model-issued git that can sweep or rewrite the worktree.
- * This is not a shell parser. Lane sessions still refuse compound syntax outright.
- * Root bash scans each segment so `npm test && npm run lint` still runs, while
- * `npm test && git add -A` does not.
- * The typed delivery executor does not go through bash, so it is not classified here.
+ * Lane WIP git stays on `classifyDangerousGitBash`, with a quote-aware lexer.
+ * Root bash uses `classifyRootGitBash` and refuses every git invocation.
+ * Typed delivery and `repo_read` do not go through bash.
  */
+import { isGitExecutableToken, lexShellCommand } from "./git-shell-lexer.ts";
 
 const READ_ONLY_GIT_SUBCOMMANDS = new Set(["status", "diff", "log", "show", "rev-parse", "ls-files", "blame", "grep"]);
 
@@ -19,33 +18,37 @@ interface GitInvocation {
 	readonly rest: readonly string[];
 }
 
-function shellSegments(command: string): string[] {
-	return command
-		.split(/&&|\|\||[;&|\n\r]/u)
-		.map((segment) => segment.trim())
-		.filter((segment) => segment.length > 0);
-}
+const GLOBAL_VALUE = new Set(["-C", "--git-dir", "--work-tree", "--namespace", "--super-prefix"]);
 
-function tokensOf(segment: string): string[] {
-	return segment.split(/\s+/u).filter((token) => token.length > 0);
-}
-
-function gitInvocation(segment: string): GitInvocation | undefined {
-	const tokens = tokensOf(segment);
-	let start = 0;
-	while (start < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokens[start] ?? "")) start += 1;
-	if (tokens[start] !== "git") return undefined;
-	let index = start + 1;
+function invocationFromTokens(tokens: readonly string[]): GitInvocation | "config" | undefined {
+	const gitIndex = tokens.findIndex((token) => isGitExecutableToken(token));
+	if (gitIndex < 0) return undefined;
+	let index = gitIndex + 1;
 	while (index < tokens.length) {
 		const token = tokens[index] ?? "";
-		if (token === "-C" || token === "--git-dir" || token === "--work-tree") {
+		if (token === "--") {
+			index += 1;
+			break;
+		}
+		if (
+			token === "-c" ||
+			(token.startsWith("-c") && !token.startsWith("--")) ||
+			token === "--config-env" ||
+			token.startsWith("--config-env=") ||
+			token === "--exec-path" ||
+			token.startsWith("--exec-path=")
+		) {
+			return "config";
+		}
+		if (GLOBAL_VALUE.has(token)) {
 			index += 2;
 			continue;
 		}
 		if (
-			(token.startsWith("-C") && token !== "-C") ||
 			token.startsWith("--git-dir=") ||
-			token.startsWith("--work-tree=")
+			token.startsWith("--work-tree=") ||
+			token.startsWith("--namespace=") ||
+			token.startsWith("--super-prefix=")
 		) {
 			index += 1;
 			continue;
@@ -100,23 +103,46 @@ function refusalFor(invocation: GitInvocation): string | undefined {
 	return undefined;
 }
 
-function segmentReadOnly(segment: string): boolean {
-	if (/[<>]/u.test(segment)) return false;
-	if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokensOf(segment)[0] ?? "")) return false;
-	const invocation = gitInvocation(segment);
-	if (!invocation || refusalFor(invocation)) return false;
+function segmentIsReadOnly(tokens: readonly string[]): boolean {
+	const invocation = invocationFromTokens(tokens);
+	if (!invocation || invocation === "config") return false;
+	if (refusalFor(invocation)) return false;
 	return READ_ONLY_GIT_SUBCOMMANDS.has(invocation.subcommand);
 }
 
 /** Refuse dangerous git anywhere in the command. Read-only means every segment is read-only git. */
 export function classifyDangerousGitBash(command: string): DangerousGitBashVerdict {
-	const segments = shellSegments(command);
-	for (const segment of segments) {
-		const invocation = gitInvocation(segment);
+	const lex = lexShellCommand(command);
+	if (!lex.ok) return { refused: true, reason: "shell quoting is ambiguous; git is refused", readOnly: false };
+	for (const segment of lex.segments) {
+		const invocation = invocationFromTokens(segment);
+		if (invocation === "config") {
+			return { refused: true, reason: "git config overrides are refused", readOnly: false };
+		}
 		if (!invocation) continue;
 		const reason = refusalFor(invocation);
 		if (reason) return { refused: true, reason, readOnly: false };
 	}
-	const readOnly = segments.length > 0 && segments.every((segment) => segmentReadOnly(segment));
+	const readOnly = lex.segments.length > 0 && lex.segments.every((segment) => segmentIsReadOnly(segment));
 	return { refused: false, readOnly };
+}
+
+const ROOT_GIT_REFUSAL =
+	"root bash cannot run git; use repo_read for reads and typed delivery for commit, push, and tag";
+
+/** Root bash admits no git invocation. Reads go through repo_read. */
+export function classifyRootGitBash(command: string): DangerousGitBashVerdict {
+	const lex = lexShellCommand(command);
+	if (!lex.ok) {
+		if (/(?:^|[\s"'/\\])git(?:\.exe)?(?=$|[\s"'/\\])/iu.test(command)) {
+			return { refused: true, reason: ROOT_GIT_REFUSAL, readOnly: false };
+		}
+		return { refused: false, readOnly: false };
+	}
+	for (const segment of lex.segments) {
+		if (segment.some((token) => isGitExecutableToken(token))) {
+			return { refused: true, reason: ROOT_GIT_REFUSAL, readOnly: false };
+		}
+	}
+	return { refused: false, readOnly: false };
 }

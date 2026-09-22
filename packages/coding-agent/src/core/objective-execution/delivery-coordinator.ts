@@ -367,3 +367,36 @@ export function deliveryReceiptFailed(sideEffects: DeliverySideEffects): boolean
 		(sideEffects.deploy ?? []).some((receipt) => receipt.state === "failed")
 	);
 }
+
+const CANDIDATE_IDENTITY_LOSS = new Set([
+	"candidate_tree_mismatch",
+	"stale_candidate",
+	"candidate_revision_mismatch",
+	"candidate_digest_mismatch",
+	"commit_parent_mismatch",
+	"commit_required_for_dirty_candidate",
+	"candidate_residue_remains",
+	"commit_sha_not_head",
+]);
+
+function failedReceiptError(
+	receipt: { readonly state: string; readonly error?: string } | undefined,
+): string | undefined {
+	if (receipt?.state !== "failed") return undefined;
+	return receipt.error;
+}
+
+/** True when every failed receipt says the frozen candidate is not the live tree. */
+export function deliveryCandidateIdentityLost(sideEffects: DeliverySideEffects): boolean {
+	const errors: string[] = [];
+	const collect = (error: string | undefined): void => {
+		if (error !== undefined) errors.push(error);
+	};
+	collect(failedReceiptError(sideEffects.commit));
+	collect(failedReceiptError(sideEffects.tag));
+	collect(failedReceiptError(sideEffects.push));
+	collect(failedReceiptError(sideEffects.publish));
+	collect(failedReceiptError(sideEffects.github_release));
+	for (const receipt of sideEffects.deploy ?? []) collect(failedReceiptError(receipt));
+	return errors.length > 0 && errors.every((error) => CANDIDATE_IDENTITY_LOSS.has(error));
+}

@@ -323,7 +323,7 @@ describe("delivery authority operational closure", () => {
 		expect(verdict.verdict).not.toBe("complete");
 	});
 
-	it("commits the frozen tree through the session binding and does not approve a later edit", async () => {
+	it("commits the frozen tree through the session binding and refreezes a later edit", async () => {
 		const root = gitRepo();
 		const bare = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-oc-remote-"));
 		execFileSync("git", ["init", "--bare"], { cwd: bare });
@@ -420,6 +420,10 @@ describe("delivery authority operational closure", () => {
 		await session.disposeAndWait();
 
 		const driftRoot = gitRepo();
+		const driftBare = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-oc-drift-remote-"));
+		execFileSync("git", ["init", "--bare"], { cwd: driftBare });
+		track(driftRoot, driftBare);
+		execFileSync("git", ["push", "origin", "HEAD"], { cwd: driftRoot });
 		const driftAdmitted = head(driftRoot);
 		const driftController = new ObjectiveExecutionController({
 			mode: "start_only",
@@ -442,7 +446,8 @@ describe("delivery authority operational closure", () => {
 		});
 		writeFileSync(join(driftRoot, "README.md"), "before-freeze\n");
 		const drifted = await driftController.run("obj-drift");
-		expect(drifted.status).not.toBe("complete");
-		expect(head(driftRoot)).toBe(driftAdmitted);
+		expect(drifted.status).toBe("complete");
+		expect(head(driftRoot)).not.toBe(driftAdmitted);
+		expect(readFileSync(join(driftRoot, "README.md"), "utf8")).toBe("after-freeze\n");
 	});
 });

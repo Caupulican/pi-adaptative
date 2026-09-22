@@ -137,6 +137,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"pipeline",
 					"python",
 					"read",
+					"repo_read",
 					"run_toolkit_script",
 					"runtime_update",
 					"secret_store",
@@ -179,10 +180,11 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// The decision ledger's read tool (System One's bounded ledger query, root only) gets its
 			// own 100-token ceiling on the same terms: added to the aggregate, removed from the base
 			// subtotal by its actual cost, never a slack for the pre-existing surface.
+			// repo_read is the root git read now that bash refuses raw git. Measured 143 tokens.
 			expect(
 				report.toolSchemaTokens,
 				JSON.stringify(report.tools.map(({ name, schemaTokens }) => ({ name, schemaTokens }))),
-			).toBeLessThanOrEqual(4_500 + 350 + 720 + 100);
+			).toBeLessThanOrEqual(4_500 + 350 + 720 + 100 + 143);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
 			expect(toolTokens.get("task_directory")).toBeLessThanOrEqual(350);
 			expect(toolTokens.get("task_automation")).toBeLessThanOrEqual(720);
@@ -190,12 +192,15 @@ describe("AgentSession.getContextCompositionReport", () => {
 			expect(toolTokens.get("typesafe_review")).toBeLessThanOrEqual(512);
 			expect(toolTokens.get("decision_ledger_read")).toBeGreaterThan(0);
 			expect(toolTokens.get("decision_ledger_read")).toBeLessThanOrEqual(100);
+			expect(toolTokens.get("repo_read")).toBeGreaterThan(0);
+			expect(toolTokens.get("repo_read")).toBeLessThanOrEqual(143);
 			expect(
 				report.toolSchemaTokens -
 					toolTokens.get("task_directory")! -
 					toolTokens.get("task_automation")! -
 					toolTokens.get("typesafe_review")! -
-					toolTokens.get("decision_ledger_read")!,
+					toolTokens.get("decision_ledger_read")! -
+					toolTokens.get("repo_read")!,
 			).toBeLessThanOrEqual(4_500);
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(160);
 			// Explicit independent work adds one bounded object to delegate's wire contract. Keep

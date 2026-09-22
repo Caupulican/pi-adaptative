@@ -64,6 +64,7 @@ describe("regression #5109: exclude tools", () => {
 				"memory",
 				"pipeline",
 				"python",
+				"repo_read",
 				"run_toolkit_script",
 				"runtime_update",
 				"secret_store",

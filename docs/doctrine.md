@@ -628,9 +628,11 @@ The objective's recent routes are a history block in the state the judge reads, 
 new evidence" is a fact from those rows: one route on one evidence marker, twice. The root reads
 the ledger through `decision_ledger_read`, a bounded query tool never exposed to workers; its
 projected schema costs at most 100 tokens, budgeted separately from the 4,500-token base ceiling
-and the other separately-measured additions (aggregate 5,670 = 4,500 + 350 task_directory +
-720 task_automation + 100 decision_ledger_read; the Jev tool's 512 stays inside the base subtotal
-accounting), so the ledger surface cannot hide growth in the pre-existing tools.
+and the other separately-measured additions (aggregate 5,813 = 4,500 + 350 task_directory +
+720 task_automation + 100 decision_ledger_read + 143 repo_read; the Jev tool's 512 stays inside the base subtotal
+accounting), so the ledger surface cannot hide growth in the pre-existing tools. `repo_read` is the
+root git read, measured at 143 tokens, and is budgeted the same way: root bash admits no git
+invocation, so that schema is a separate addition and is subtracted from the base subtotal.
 Pinned by `packages/coding-agent/test/ledger-route-checkpoints.test.ts` and
 `packages/coding-agent/test/context-composition.test.ts`.
 

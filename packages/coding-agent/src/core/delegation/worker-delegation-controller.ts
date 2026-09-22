@@ -36,6 +36,8 @@ import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { isLoopbackModelEndpoint } from "../models/model-endpoint.ts";
+import { sharesRepository } from "../objective-execution/repo-delivery-fingerprint.ts";
+import type { RepositoryMutationObserver } from "../objective-execution/repository-mutation-observer.ts";
 import { providerUsageFromAttemptUsage } from "../orchestration/attempt-usage.ts";
 import {
 	type AgentBindingContract,
@@ -259,6 +261,10 @@ export interface WorkerDelegationControllerDeps {
 		readonly path?: string;
 		readonly cwd: string;
 	}): void;
+	/** Shared-worktree attempts are one root observation. Isolated git dirs stay private. */
+	repositoryObserver?: RepositoryMutationObserver;
+	getSessionCwd?(): string;
+	getObjectiveId?(): string;
 }
 
 type WorkerAdmission =
@@ -3275,7 +3281,31 @@ export class WorkerDelegationController {
 					cwd: executionPlan.cwd,
 				});
 				leaseHeartbeat.start();
-				const executionResult = await executor.run();
+				const observer = this.deps.repositoryObserver;
+				const objectiveId = this.deps.getObjectiveId?.();
+				const sessionCwd = this.deps.getSessionCwd?.() ?? executionPlan.cwd;
+				const shared = observer && objectiveId ? await sharesRepository(executionPlan.cwd, sessionCwd) : false;
+				const workerToken =
+					observer && objectiveId && shared
+						? await observer.begin({
+								callId: `worker:${startedRecord.laneId}:${heartbeatAttemptId}`,
+								objectiveId,
+								cwd: executionPlan.cwd,
+								effect: "observe",
+							})
+						: undefined;
+				let executionResult: Awaited<ReturnType<typeof executor.run>>;
+				try {
+					executionResult = await executor.run();
+				} finally {
+					if (workerToken && observer) {
+						await observer.finish({
+							token: workerToken,
+							declaredOwnedPaths: [...executor.ledger.changedFiles],
+							operationSucceeded: true,
+						});
+					}
+				}
 				// Stop the instant the run returns, before any post-run finalization (finalizeWorkerClaim,
 				// verifier dispatch, handoff persistence —~190 lines) can run: a tick landing in that
 				// window renews an attempt that has already reached a terminal status, throws, and would

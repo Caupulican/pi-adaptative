@@ -47,6 +47,7 @@ import {
 	POWERSHELL_SESSION_STDERR_READY_MARKER,
 	POWERSHELL_STDERR_BARRIER_LABEL,
 } from "../../utils/powershell-session-protocol.ts";
+import { awaitOwnedProcessDescendants, reapOwnedProcessGroup } from "../../utils/process-group-wait.ts";
 import {
 	getPowerShellCandidateConfigs,
 	getShellConfig,
@@ -229,6 +230,8 @@ export function buildBashWire(command: string, nonce: string, cdTo: string | nul
 		`PI_EOF_${nonce}`,
 		`)"; } < /dev/null 2>&1`,
 		"__pi_status=$?",
+		// Job-table children stay inside this command. The saved status is the command's, not wait's.
+		"wait",
 		"__pi_exports=$(unset -v _ PWD OLDPWD SHLVL; export -p)",
 		'if [ "$__pi_exports" != "$__PI_EXPORT_SNAPSHOT" ]; then __PI_EXPORT_SNAPSHOT=$__pi_exports; __pi_exports_out=$__pi_exports; else __pi_exports_out=; fi',
 		// Version and byte lengths make the frame unambiguous even when a legal POSIX path or an
@@ -576,6 +579,7 @@ export class PersistentShellSession {
 				let commandExportsBefore: string | undefined;
 				let stderrBarrierSeen = this.kind !== "powershell";
 				let timeoutTimer: NodeJS.Timeout | undefined;
+				const trackAbort = new AbortController();
 
 				const silenceWatchdog =
 					timeoutSeconds === undefined && silenceMs !== undefined && silenceMs > 0
@@ -591,6 +595,7 @@ export class PersistentShellSession {
 				const settle = (finish: () => void) => {
 					if (settled) return;
 					settled = true;
+					trackAbort.abort();
 					if (timeoutTimer) clearTimeout(timeoutTimer);
 					silenceWatchdog?.disarm();
 					if (signal) signal.removeEventListener("abort", onAbort);
@@ -613,9 +618,23 @@ export class PersistentShellSession {
 					onData(stderrPending.subarray(0, upTo));
 					stderrPending = stderrPending.subarray(upTo);
 				};
+				let tracking = false;
 				const resolveWhenComplete = () => {
 					const exitCode = commandExitCode;
-					if (exitCode === undefined || !stderrBarrierSeen) return;
+					if (exitCode === undefined || !stderrBarrierSeen || tracking || settled) return;
+					tracking = true;
+					void finishTracked(exitCode);
+				};
+				const finishTracked = async (exitCode: number | null) => {
+					try {
+						if (this.kind !== "powershell") {
+							await awaitOwnedProcessDescendants(child.pid, cwd, trackAbort.signal);
+						}
+					} catch (error) {
+						if (!settled) settle(() => reject(error instanceof Error ? error : new Error(String(error))));
+						return;
+					}
+					if (settled) return;
 					this.lastReportedCwd = commandCwd;
 					// A lane's first frame carries the listing it started with: its own baseline, and the
 					// session's when no lane has reported yet.
@@ -699,10 +718,21 @@ export class PersistentShellSession {
 					},
 					onChildClose: (code) => {
 						// The command terminated the shell itself (e.g. `exit 3`) or the shell
-						// crashed: report its exit code like the per-command backend would.
+						// crashed. Settlement follows the shell's exit, not stdio close: a grandchild
+						// holding inherited pipes must not block it. The group still ends with the shell.
 						emitStdoutPending(stdoutPending.length);
 						emitStderrPending(stderrPending.length);
-						settle(() => resolve({ exitCode: code, initialCwd }));
+						if (settled) return;
+						void (async () => {
+							try {
+								if (this.kind !== "powershell") await reapOwnedProcessGroup(child.pid, cwd);
+							} catch (error) {
+								if (!settled) settle(() => reject(error instanceof Error ? error : new Error(String(error))));
+								return;
+							}
+							if (settled) return;
+							settle(() => resolve({ exitCode: code, initialCwd }));
+						})();
 					},
 					fail: (error) => {
 						this.killChild();

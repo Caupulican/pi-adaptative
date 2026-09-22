@@ -61,6 +61,7 @@ import {
 import {
 	type DeliveryGitExecutor,
 	type DeliveryReleaseExecutor,
+	deliveryCandidateIdentityLost,
 	deliveryReceiptFailed,
 	executeDelivery,
 } from "./delivery-coordinator.ts";
@@ -192,6 +193,8 @@ export interface ObjectiveExecutionControllerDeps {
 	attributedMutationPaths?(): readonly string[];
 	/** Precise reason the owned-path set is empty: shell mutation or digest drift. */
 	deliveryBlockReason?(): string | undefined;
+	/** Resolves when no mutation-capable call for this objective is still running. */
+	waitForRepositoryQuiescence?(objectiveId: string, signal?: AbortSignal): Promise<void>;
 	ownedPathDigests?(): readonly { readonly path: string; readonly digest: string }[];
 	gitExecutor?: DeliveryGitExecutor;
 	releaseExecutor?: DeliveryReleaseExecutor;
@@ -424,6 +427,7 @@ export class ObjectiveExecutionController {
 				| "releaseExecutor"
 				| "attributedMutationPaths"
 				| "deliveryBlockReason"
+				| "waitForRepositoryQuiescence"
 				| "ownedPathDigests"
 			>
 		>,
@@ -1194,6 +1198,7 @@ export class ObjectiveExecutionController {
 				}
 
 				case "completion_candidate": {
+					await this.deps.waitForRepositoryQuiescence?.(objectiveId, signal);
 					// FIN-060: Single completion owner via CompletionCoordinator
 					const profile = resolveEffectiveCompletionProfile({
 						requestedProfile: this.deps.completionProfile,
@@ -1232,7 +1237,8 @@ export class ObjectiveExecutionController {
 								return this.refuseDelivery(objectiveId, runtime, message);
 							}
 							if (candidateSnapshot && frozenGit.parent !== candidateSnapshot.candidateRevision) {
-								return this.refuseDelivery(objectiveId, runtime, "stale_candidate");
+								// The snapshot and the certified parent are not one candidate yet.
+								continue;
 							}
 						} else if (git?.inspectCandidate) {
 							try {
@@ -1569,6 +1575,7 @@ export class ObjectiveExecutionController {
 						});
 
 						if (requiredReceiptFailed) {
+							if (deliveryCandidateIdentityLost(sideEffects)) continue;
 							return {
 								status: "unrecoverable",
 								reasonCodes: ["delivery_side_effect_failed"],

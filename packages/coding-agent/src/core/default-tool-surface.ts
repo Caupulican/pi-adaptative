@@ -7,6 +7,7 @@
  *
  * `bash` is the stable agent shell contract on every platform; its finite grammar routes to
  * PowerShell on Windows. `python` is a separate bounded, uv-managed execution contract.
+ * Root git reads are `repo_read`. Root bash does not admit a git invocation.
  */
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "./goals/goal-tool-names.ts";
 
@@ -22,6 +23,7 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 		"skillify",
 		"skill_audit",
 		STABLE_SHELL_TOOL_NAME,
+		"repo_read",
 		"python",
 		"edit",
 		"write",

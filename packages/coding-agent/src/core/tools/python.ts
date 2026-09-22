@@ -5,6 +5,7 @@ import { Text } from "@caupulican/pi-tui";
 import { type Static, Type } from "typebox";
 import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { type PathInputOptions, resolvePath } from "../../utils/paths.ts";
+import { awaitOwnedProcessGroup } from "../../utils/process-group-wait.ts";
 import { composeExecutionEnvironment, type ExecutionEnvironment } from "../execution-environment.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { withoutHarnessLaunchEnv } from "../harness-environment.ts";
@@ -229,6 +230,7 @@ function createLocalPythonOperations(): PythonOperations {
 				signal: request.signal,
 				timeoutMs: request.timeoutMs,
 			});
+			await awaitOwnedProcessGroup(child.pid, request.cwd, request.signal);
 			return { exitCode: terminal.code, reason: terminal.reason, signal: child.signalCode };
 		},
 	};

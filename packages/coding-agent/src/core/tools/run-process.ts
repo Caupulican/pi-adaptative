@@ -2,6 +2,7 @@ import type { ChildProcess } from "node:child_process";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
 import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
+import { awaitOwnedProcessGroup } from "../../utils/process-group-wait.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import {
 	MAX_ORCHESTRATION_PROCESS_OUTPUT_BYTES,
@@ -190,6 +191,7 @@ export function createRunProcessToolDefinition(cwd: string, options: RunProcessT
 			let outputLimitReached = false;
 			const child = (options.spawn ?? spawnProcess)(input.executable, [...args], {
 				cwd,
+				detached: process.platform !== "win32",
 				env: scopedEnvironment(options.policy.allowedEnvironmentVariables, options.environment?.(cwd) ?? {}),
 				stdio: ["ignore", "pipe", "pipe"],
 				windowsHide: true,
@@ -211,6 +213,7 @@ export function createRunProcessToolDefinition(cwd: string, options: RunProcessT
 					timeoutMs: processPolicy.timeoutMs,
 					killGraceMs: 2_000,
 				});
+				await awaitOwnedProcessGroup(child.pid, cwd, combinedAbort.signal);
 				const captured = output.read();
 				const outcome: RunProcessDetails["outcome"] = outputLimitReached
 					? "output_limit"

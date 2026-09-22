@@ -610,9 +610,8 @@ describe.skipIf(!HAS_BASH)("PersistentShellSession (shell dies under a live gran
 	it("resolves promptly when the shell exits while a backgrounded grandchild still holds the inherited stdio pipes", async () => {
 		const session = makeSession("bash");
 		const start = Date.now();
-		// `sleep 30 &` backgrounds a grandchild that inherits this bash process's stdout/stderr pipe
-		// before `exit 3` kills the shell itself. If settlement waited on "close" instead of "exit",
-		// this would hang for the full 30s sleep instead of resolving as soon as the shell dies.
+		// `exit 3` inside the command kills the shell before the sentinel. Settlement follows that
+		// exit and ends the shell's process group, so the grandchild's pipes do not hold the result.
 		const result = await run(session, "sleep 30 & exit 3", cwd);
 		const elapsedMs = Date.now() - start;
 		expect(result.exitCode).toBe(3);

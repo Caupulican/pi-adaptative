@@ -181,6 +181,7 @@ import {
 	type TrustedDeployAdapter,
 	TrustedDeployAdapterRegistry,
 } from "./objective-execution/release-delivery.ts";
+import { RepositoryMutationObserver } from "./objective-execution/repository-mutation-observer.ts";
 import { DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import type { DecisionStageSink } from "./operator-projection/decision-stage-log.ts";
 import { type DeliveryState, SessionOperatorProjection } from "./operator-projection/session-operator-projection.ts";
@@ -336,6 +337,7 @@ export class AgentSession {
 	private readonly _profileFilter: ProfileFilterController;
 	private readonly _toolGate: ToolGateController;
 	private readonly _mutationLedger = new ObjectiveMutationLedger();
+	private readonly _repositoryObserver = new RepositoryMutationObserver(this._mutationLedger);
 	private readonly _deployAdapters = new TrustedDeployAdapterRegistry();
 	private readonly _toolSelection: ToolSelectionController;
 	private readonly _toolPerformanceStore: ToolPerformanceStore;
@@ -917,6 +919,9 @@ export class AgentSession {
 				if (event.kind === "shell") this._mutationLedger.markShellUnsafe(objectiveId);
 				else if (event.path) this._mutationLedger.recordOwnedWrite(objectiveId, event.cwd, event.path);
 			},
+			repositoryObserver: this._repositoryObserver,
+			getSessionCwd: () => this._cwd,
+			getObjectiveId: () => this.objectiveMutationId(),
 		});
 		this._memory = new MemoryController({
 			acquireSystemSwitchLease: () => {
@@ -1620,6 +1625,15 @@ export class AgentSession {
 			noteShellMutation: () => {
 				this._mutationLedger.markShellUnsafe(this.objectiveMutationId());
 			},
+			repositoryObserver: this._repositoryObserver,
+			getObjectiveId: () => this.objectiveMutationId(),
+			deliveryActive: () =>
+				Boolean(
+					this._executionCharter?.git.commit ||
+						this._executionCharter?.git.push ||
+						this._executionCharter?.git.create_tag,
+				),
+			hostRepositoryEffect: (toolName) => this._runtimeBuilder.getToolDefinition(toolName)?.repositoryEffect,
 		});
 
 		// Always subscribe to agent events for internal handling
@@ -2078,8 +2092,10 @@ export class AgentSession {
 				deliveryBlockReason: () => {
 					const objectiveId = this.objectiveMutationId();
 					this._mutationLedger.reconcile(objectiveId, this._cwd);
-					return this._mutationLedger.deliveryBlockReason(objectiveId);
+					return this._repositoryObserver.deliveryBlockReason(objectiveId);
 				},
+				waitForRepositoryQuiescence: (objectiveId, signal) =>
+					this._repositoryObserver.waitForQuiescence(objectiveId, signal),
 				ownedPathDigests: () => this._mutationLedger.ownedDigests(this.objectiveMutationId()),
 				...(() => {
 					const packageIntent = this._executionCharter?.delivery.packagePublish ?? false;

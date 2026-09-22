@@ -505,6 +505,12 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	backgroundRequested?(args: Static<TParams>): boolean;
 
 	/**
+	 * Host-owned repository effect. Absent means the capability catalogue decides, and an
+	 * unknown tool is observed while automatic delivery is active. Model arguments cannot set this.
+	 */
+	repositoryEffect?: "none" | "observe" | "typed_paths";
+
+	/**
 	 * The file this call will mutate, as the model spelled it, or undefined when it mutates nothing.
 	 *
 	 * Declaring it lets the agent loop keep emission order inside one assistant message: a later
