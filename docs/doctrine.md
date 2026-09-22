@@ -308,7 +308,17 @@ tool layer ever asks.** Six class names remain for grants. Classification asks o
 directory, a filesystem root, or a disk, including `gh repo delete`) and `toolkit.script`
 (executing a registered dangerous toolkit script). Git, including push, tag, reset, and commit,
 package publish and install, settings edits, and every other delete run without asking. Anything
-unknown is ordinary work and runs. Toolkit script authority is a host-owned edge: dangerous
+unknown is ordinary work and runs.
+
+**One classification is conditional on live state, not on the command alone.** Several pi sessions
+share one worktree, so `git reset --hard`, `git clean -f`, `git checkout -- …`, `git restore` and
+`git stash` (push, save, drop, clear) can delete another session's uncommitted work with no reflog
+to recover it. They stay ordinary work whenever every dirty path in the tree is one this session
+wrote; they classify into `destructive.fs` only while the tree also holds changes it did not. The
+classifier never touches the filesystem: it emits the operation with a `condition`, and the session
+layer resolves it once per call against `git status` and the objective's own mutation ledger. A
+status that cannot be read resolves to *no condition* — the edge must not start asking about a state
+nobody established, and a discard of the session's own work never reaches the operator. Toolkit script authority is a host-owned edge: dangerous
 toolkit script operations are classified into `toolkit.script` with a narrow scope key derived
 cryptographically from `(cwd, scriptPath, runner, scriptName, argv)` (`toolkit:<scriptName>:<digest>`).
 A narrow grant persists across session compaction and reload, but changing script registration
@@ -626,6 +636,27 @@ stalled one at its next turn, a repeated stall rerouted. The off-step cancel pro
 Pinned by `packages/coding-agent/test/system-one-foreground-control.test.ts` and
 `packages/coding-agent/test/system-one-worker-control.test.ts`.
 
+**A noul answer is a probability with a direction, never a boolean.** Noul is P(the proposition is
+true). The decision is the pair (direction, band): `required_true` needs the high end,
+`required_false` the low one, and the band says whether it was reached. `hard_pass` and `hard_fail`
+are decisive. `soft_pass` is provisional — the step may continue, but it may not close a goal or
+authorize a destructive or outward-facing action. `ambiguous` decided nothing: it is not a pass and
+not a failure, and acting on it is acting on ignorance. `BooleanDecisionResult` therefore carries
+`probabilityTrue`, `direction` and `band` and has no `value` field; `settledBoolean` is the only way
+to collapse one, and it returns undefined rather than pick a side. A checkpoint whose only problem is
+doubt routes to `gather_more` — look again — instead of passing or rejecting, and the certificate
+carries those predicates as `unsure_semantic_predicates`. A per-question numeric threshold
+(JEV-004's 0.75, JEV-013's 0.7) is a deliberate calibration and reads the probability directly; a
+0.5 cutoff is not a calibration and appears nowhere. The pane prints `P(yes)=0.55 · unsure`, never
+`true (p=0.55)`. Pinned by `packages/coding-agent/test/noul-bands.test.ts`.
+
+**The Decision graph draws doubt, not just pass and fail.** An unsettled judgment is an open doubt:
+it is named in the list and in the diagram, it holds `goal satisfied?` at `not closed · N doubts`
+exactly as an unmet check does, and it blocks the `DELIVER` node. Doubts travel as prefixed reason
+lines on the evaluation record, so they reach the pane and the durable ledger by the route every
+other reason already takes. The running clock is the current visit only and restarts on resume.
+Pinned by `packages/coding-agent/test/workbench-decision-graph.test.ts`.
+
 **The decision ledger is an input, never erased.** Every stage transition, Jev evaluation and route
 is appended to one SQLite database per agent directory, keyed by session id and working directory.
 The objective's recent routes are a history block in the state the judge reads, and "repeated without
@@ -804,3 +835,4 @@ measurement gains no new surface.
 | 2026-09-08 | Windows shell parity: with the engine on, every bash call runs on the shell engine (the PowerShell floor serves only `windowsShell.pythonEngine: false` and a runtime outage); coreutils names dispatch to Git for Windows' real GNU binaries before any engine reimplementation, with the GNU directory first on those tools' own PATH; the engine grammar covers functions, `case`, `[[ ]]`, brace expansion, the bash parameter operators, `set -e/-u/-x/-o pipefail` and `command -v`, and names arrays, indirection, `select` and process substitution as refusals. The regression wall `test/windows-shell-corpus.test.ts` replays every sanitized command shape of the measured Windows sessions (`test/fixtures/windows-shell-corpus/commands.json`) through the router, the grammar and the executor with real GNU tools on Linux and Windows; its refusal budget for supported families is zero, a live Windows shell failure is added there as its failing shape before its fix lands, and the replay leg carries a timeout matching its own single-process spawn bound (vitest's 30 s default cut a defect-free 25 s replay off under a parallel suite run). The corpus is produced and replayed by one harness-owned tool (`pi-shell-engine/corpus.py`, driven by `scripts/windows-shell-corpus.mjs`): harvest sanitizes every `bash` call of any session transcript with a hard leak guard and records the real command's grammar verdict, replay classifies defects, and the wall test consumes the same replay, so the fixture is reproducible from transcripts on any machine and never carries a private command. |
 | 2026-09-12 | Toolkit script authority is a host-owned edge class (`toolkit.script`) with cryptographic scope keys derived from `(cwd, scriptPath, runner, scriptName, argv)`; grants persist across compaction and reload, mutating script registration invalidates the grant, and owner authorization is reused without model confirmation prompts. Goal continuation bounded recovery rearms transient provider failures once per streak or waits on in-flight work, resetting failure streaks only on verified host completion with matching pre-state turn ordinals. Runaway signatures live in one bounded durable collection (once per signature, A,B,A stays blocked, full collection refuses, owner prompt resets) — this restates the 2026-09-08 row, it does not weaken it. The keyword `risk_assessment` gate is removed in favour of the structural envelope and the literal edge classes; `run_toolkit_script` drops its model `confirm` flag for the host authorizer; the core prompt renders standing owner authorization exactly once per capability class and keeps deterministic long-checkout headroom under the unchanged 3,300-byte and 4,096-character budgets. The runaway/stagnant guard identity stored by the consumed-signature collection names the guard and the signature only; the repeat count stays in the `runaway_stop` record and the warning, so a loop that trips at a different threshold is still the same loop. |
 | 2026-09-12 | Tool surfaces aggregate ceiling recalibrates from 4,850 to 5,570 tokens (4,500 base + 350 task_directory + 720 task_automation) for deterministic task automation (681 measured, 720 ceiling), with feature deltas for versioned skill inspection/repair/exclusion (150 measured, 160 ceiling) and narrow toolkit grant selectors (295 measured, 305 ceiling). Core tools measure 4,218 tokens under the unchanged 4,500 base. |
+| 2026-09-22 | Noul answers carry `(probabilityTrue, direction, band)` and no derived boolean; `settledBoolean` refuses to answer an ambiguous band, a checkpoint whose only problem is doubt routes to `gather_more`, and the 0.5 cutoff is removed from every gate (tool gate, worker supervision, project rules, acquisition, dedup, clarification, capability resolution). The Decision graph names open doubts and holds the goal open on them. The empty-turn placeholder appears only when the turn produced nothing readable. Worktree-discarding git (`reset --hard`, `clean -f`, `checkout --`, `restore`, `stash`) is a conditional `destructive.fs` operation, resolved per call against the live tree and the session's mutation ledger, and stays ordinary work when the session owns everything dirty. Typed delivery certifies per path instead of vetoing a tree that was already dirty at admission. The user-request classification asks only the questions that can still change something, reports an unavailable System One as `unavailable` rather than as silence, and shares its rule-text budget across every rule instead of truncating the tail. |

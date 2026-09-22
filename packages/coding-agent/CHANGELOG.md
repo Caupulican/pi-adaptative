@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Fixed
+
+- A noul answer is a probability with a direction, not a boolean. `BooleanDecisionResult` carries `probabilityTrue`, `direction` and `band` and no longer has a `value` field derived from `noul >= 0.5`; `settledBoolean` is the only way to collapse one and returns nothing for an ambiguous band. Every gate that read the old 0.5 cutoff now reads the band: the steering plane's checkpoint predicates, worker supervision, project-rule violations, the external-acquisition gate, semantic dedup, clarification, capability resolution and the adaptive route. A soft pass continues the step; an ambiguous answer decides nothing and never authorizes work. Per-question calibrations (JEV-004's 0.75, JEV-013's 0.7) are unchanged.
+- A checkpoint whose only problem is an unsettled judgment routes to `gather_more` instead of passing or rejecting, and its certificate carries `unsure_semantic_predicates`.
+- The Decision graph draws doubt. Open doubts are named in the list and the diagram, hold `goal satisfied?` at `not closed · N doubts`, and block the deliver node. Jev rows print `P(yes)=0.91 · pass (needs yes)` in place of `true (p=0.91)`.
+- `(No response received from model)` appears only when the turn produced nothing readable. A reply with text, or a turn whose only content is a hidden thinking block, no longer carries it.
+- Worktree-discarding git commands (`reset --hard`, `clean -f`, `checkout -- …`, `restore`, `stash`) reach the edge only while the tree holds uncommitted changes this session never wrote, which is when they would destroy a concurrent session's work. Discarding the session's own work never asks, and an unreadable `git status` never asks.
+- Typed delivery works from a tree that was already dirty when the session opened. Ownership is checked per path: a path dirty at admission is excluded from the commit, and a path that appeared during the objective without being owned still refuses. A baseline that could not be read refuses.
+- The user-request classification asks only the questions whose answer can still change something, so an ordinary turn costs two questions instead of seven. A System One failure is reported as unavailable, with a line telling the model to honour any delivery limit the request states, instead of silently leaving the binding unset. The rule text it compares against shares its budget across every rule, so the last rules of a long AGENTS.md are no longer dropped before Jev sees them.
+
 ## [0.99.43] - 2026-09-22
 
 ### Fixed

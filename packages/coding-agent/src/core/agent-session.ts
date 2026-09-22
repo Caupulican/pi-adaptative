@@ -182,6 +182,7 @@ import { createRepoGitDelivery } from "./objective-execution/delivery-proof.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import { LedgerRouteCheckpoints } from "./objective-execution/ledger-route-checkpoints.ts";
 import {
+	deliveryClassificationUnavailableNote,
 	RULE_CONFLICT_NOTE,
 	RULE_SETTLED_USER_NOTE,
 	RULE_SETTLED_WRITTEN_NOTE,
@@ -196,6 +197,7 @@ import {
 	TrustedDeployAdapterRegistry,
 } from "./objective-execution/release-delivery.ts";
 import { RepositoryMutationObserver } from "./objective-execution/repository-mutation-observer.ts";
+import { hasUnownedWorktreeChanges } from "./objective-execution/worktree-ownership.ts";
 import { DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import type { DecisionStageSink } from "./operator-projection/decision-stage-log.ts";
 import { type DeliveryState, SessionOperatorProjection } from "./operator-projection/session-operator-projection.ts";
@@ -257,7 +259,7 @@ import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-v
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import { WorkerSemanticSupervisor } from "./supervision/worker-semantic-supervisor.ts";
 import { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
-import type { SystemOneController } from "./system-one/controller.ts";
+import { type SystemOneController, USER_REQUEST_RULE_BUDGET } from "./system-one/controller.ts";
 import { createSessionForegroundControl, type SystemOneForegroundControl } from "./system-one/foreground-control.ts";
 import { type SemanticEvaluationRecord, verdictFromEvaluation } from "./system-one/semantic-evaluation-ledger.ts";
 import {
@@ -279,6 +281,7 @@ import { formatToolSelectionReport, ToolSelectionController } from "./tool-selec
 import type { BashOperations } from "./tools/bash.ts";
 import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
+import { shareTextBudget } from "./util/text-budget.ts";
 
 // ============================================================================
 // Stream-idle watchdog wiring
@@ -2363,6 +2366,8 @@ export class AgentSession {
 			getCwd: () => this._cwd,
 			isChildSession: () => this._isChildSession,
 			getConfirmation: () => this._edgeConfirmation,
+			hasUnownedWorktreeChanges: (signal) =>
+				hasUnownedWorktreeChanges(this._cwd, this._mutationLedger.writtenPaths(this.objectiveMutationId()), signal),
 		};
 	}
 
@@ -2375,7 +2380,15 @@ export class AgentSession {
 		return sessionEdgeGrants(this._edgeDeps());
 	}
 
-	/** Bounded AGENTS.md and standing user-rule lines for one System One classification. */
+	/**
+	 * AGENTS.md and standing user-rule lines for one System One classification.
+	 *
+	 * The budget is shared out, never spent first-come: taking rules in document order until a byte
+	 * cap hits drops whatever sits at the end of a long instruction file, and those rules then read
+	 * as absent to `rules_differ`. Every rule gets an equal share, short rules hand their unused
+	 * share back, and only a rule that is still over its share is shortened -- so a long file loses
+	 * detail inside its rules instead of losing its last rules entirely.
+	 */
 	private writtenRuleText(): string {
 		const lines: string[] = [];
 		const seen = new Set<string>();
@@ -2385,33 +2398,40 @@ export class AgentSession {
 				: rule.source.path.startsWith("owner:")
 					? "user rule"
 					: rule.source.path;
-			const line = `${source}: ${rule.text}`;
+			const line = `${source}: ${rule.text.replace(/\s+/g, " ").trim()}`;
 			if (seen.has(line)) continue;
 			seen.add(line);
 			lines.push(line);
-			if (lines.join("\n").length >= 2_000) break;
 		}
-		return lines.join("\n").slice(0, 2_000);
+		return shareTextBudget(lines, USER_REQUEST_RULE_BUDGET).join("\n");
 	}
 
 	/**
 	 * System One classifies the request. A hard yes enables edge capabilities that are still off.
 	 * The user is above AGENTS.md: an explicit override follows the request, a contradiction asks.
-	 * Returns the one line the model should see when it must ask, and nothing otherwise.
+	 * Returns the one line the model should see, and nothing when there is nothing to say.
 	 */
 	private async _enableCapabilitiesAuthorizedByUser(request: string): Promise<string | undefined> {
 		const controller = this._systemOneController;
 		if (!controller) return undefined;
-		const classified = await controller.classifyUserRequest(request, this.writtenRuleText());
-		if (!classified) return undefined;
+		const granted = new Set(this.getEdgeGrants().map((grant) => grant.class));
+		const capabilitiesPending = EDGE_CLASSES.some((edgeClass) => !granted.has(edgeClass));
+		const outcome = await controller.classifyUserRequest(request, this.writtenRuleText(), { capabilitiesPending });
+		if (outcome.status === "skipped") return undefined;
+		if (outcome.status === "unavailable") {
+			// The binding is left exactly as it was -- but a silent "nothing changed" would read as a
+			// classified "the user imposed nothing", which is how a stated no-push limit gets lost.
+			// The model is told the limit was not registered so it honours the request itself.
+			return deliveryClassificationUnavailableNote(outcome.reason, this._localCommitBranch);
+		}
+		const classified = outcome.classification;
 		this._localCommitBranch = resolveDeliveryBinding(
 			this._localCommitBranch,
 			{ blocksPush: classified.localCommitsOnly, liftsPushBlock: classified.liftsDeliveryBlock },
 			readHeadBranch(this._cwd),
 		);
 		this._ruleAuthority = resolveRuleAuthority(classified);
-		if (classified.capabilitiesAuthorized === true) {
-			const granted = new Set(this.getEdgeGrants().map((grant) => grant.class));
+		if (classified.capabilitiesAuthorized) {
 			for (const edgeClass of EDGE_CLASSES) {
 				if (edgeClass === "git.publish" && this._localCommitBranch !== undefined) continue;
 				if (granted.has(edgeClass)) continue;

@@ -9,7 +9,7 @@
 import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
-import type { DecisionGraphModel, DecisionParticipant } from "./decision-graph-model.ts";
+import { type DecisionGraphModel, type DecisionParticipant, MAX_DOUBTS } from "./decision-graph-model.ts";
 
 export interface DecisionGraphRows {
 	readonly rows: readonly string[];
@@ -219,15 +219,32 @@ export function renderDecisionList(
 			item(glyph, tone, check.text, check.status === "pending" ? "dim" : "muted");
 		}
 	}
+	if (model.doubts.length) {
+		// The open doubts, named. A judgment that settled nothing is why the loop is going round
+		// again, and it used to be invisible: drawn either as a quiet pass or as nothing at all.
+		head("DOUBTS", theme.fg(JEV_TONE, `${model.doubts.length} open`));
+		for (const doubt of model.doubts.slice(0, MAX_DOUBTS)) {
+			item("?", JEV_TONE, doubt.text, "muted", theme.fg("dim", `  ${doubt.label}`));
+		}
+	}
 	arrow("back to System One");
 	const openChecks = model.checks.filter((check) => check.status !== "satisfied").length;
+	const doubts = model.doubts.length;
+	const openNote = [
+		openChecks > 0 ? `${openChecks} open` : "",
+		doubts > 0 ? `${doubts} ${doubts === 1 ? "doubt" : "doubts"}` : "",
+	]
+		.filter(Boolean)
+		.join(" · ");
+	// A doubt keeps the goal open exactly like an unmet check: neither is a failure, and neither is
+	// a yes. Only a clean run with nothing open and nothing unsettled reaches "yes".
 	const verdict: [string, ThemeColor] =
-		model.goal.branch === "delivered" && openChecks === 0
+		model.goal.branch === "delivered" && !openNote
 			? ["yes → delivered", "success"]
-			: model.goal.branch === "deliver" && openChecks === 0
+			: model.goal.branch === "deliver" && !openNote
 				? ["yes → deliver", "success"]
-				: openChecks > 0
-					? [`not closed · ${openChecks} open`, "dim"]
+				: openNote
+					? [`not closed · ${openNote}`, doubts > 0 ? JEV_TONE : "dim"]
 					: model.blocked
 						? [`blocked → replan`, "warning"]
 						: model.goal.branch === "repair"
@@ -301,8 +318,12 @@ function goalYesNode(
 	currentStage: DecisionStage | undefined,
 ): DiagramNode & { readonly lit: boolean } {
 	const pending = model.checks.filter((check) => check.status !== "satisfied").length;
-	const delivered = model.goal.branch === "delivered" && pending === 0;
-	const delivering = (model.goal.branch === "deliver" || currentStage === "deliver") && pending === 0;
+	const doubts = model.doubts.length;
+	// An unsettled judgment holds the goal open the same way an unmet check does. Delivering over
+	// one would be the drawing claiming a yes that System One never gave.
+	const open = pending + doubts;
+	const delivered = model.goal.branch === "delivered" && open === 0;
+	const delivering = (model.goal.branch === "deliver" || currentStage === "deliver") && open === 0;
 	if (delivered || delivering) {
 		return {
 			text: delivered ? "delivered" : "DELIVER",
@@ -312,9 +333,12 @@ function goalYesNode(
 			lit: true,
 		};
 	}
+	const note = [pending > 0 ? `${pending} open` : "", doubts > 0 ? `${doubts} unsure` : ""]
+		.filter(Boolean)
+		.join(" · ");
 	return {
-		text: pending > 0 ? `not closed · ${pending} open` : "not closed",
-		tone: "dim",
+		text: note ? `not closed · ${note}` : "not closed",
+		tone: doubts > 0 ? JEV_TONE : "dim",
 		stage: "deliver",
 		lit: false,
 	};
@@ -444,6 +468,20 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 					tone: JEV_TONE,
 				},
 			],
+		});
+	}
+	if (model.doubts.length) {
+		// Named on the drawing, under the judgment that raised them: the chain of thought the pane
+		// can actually keep true is the judgments and what each one left unresolved.
+		levels.push({
+			kind: "tree",
+			title: `unsure · ${model.doubts.length}`,
+			items: model.doubts.slice(0, MAX_DOUBTS).map((doubt) => ({
+				text: doubt.text,
+				glyph: "?",
+				glyphTone: JEV_TONE,
+				tone: "muted" as ThemeColor,
+			})),
 		});
 	}
 	if (model.blocked)

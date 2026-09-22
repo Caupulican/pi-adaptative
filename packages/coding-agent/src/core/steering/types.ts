@@ -163,6 +163,8 @@ export interface SteeringCertificate {
 	readonly policy_result?: string | null;
 	readonly semantic_outcome?: SteeringSemanticOutcome;
 	readonly failed_semantic_predicates?: readonly string[];
+	/** Predicates the model could not settle either way. Open doubts, not rejections. */
+	readonly unsure_semantic_predicates?: readonly string[];
 	readonly parent_certificate_ids?: readonly string[];
 	readonly usage?: Record<string, unknown>;
 	readonly created_at: string;

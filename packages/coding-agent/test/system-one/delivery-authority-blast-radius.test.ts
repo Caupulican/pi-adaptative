@@ -33,15 +33,30 @@ function head(root: string): string {
 }
 
 describe("delivery authority blast radius", () => {
-	it("does not commit pre-existing or unrelated paths", async () => {
+	it("delivers from a tree that was already dirty, and leaves that pre-existing work alone", async () => {
 		const root = gitRepo();
 		const admitted = head(root);
 		writeFileSync(join(root, "owner.txt"), "owner\n");
 		const dirty = createRepoGitDelivery(root);
 		writeFileSync(join(root, "README.md"), "objective\n");
+		const certified = await dirty.certifyOwnedCandidate(["README.md"]);
+		const committed = await dirty.commit({
+			message: "objective",
+			paths: ["README.md"],
+			approvedParent: certified.parent,
+			approvedTreeOid: certified.tree,
+		});
+		expect(committed.parent).toBe(admitted);
+		// The pre-existing path was another session's work: never committed, never touched.
+		const status = execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" });
+		expect(status).toContain("owner.txt");
+		expect(status).not.toContain("README.md");
+		const files = execFileSync("git", ["show", "--name-only", "--format=", "HEAD"], { cwd: root, encoding: "utf8" });
+		expect(files.trim()).toBe("README.md");
+
+		// A path this objective did not produce, and that was not there at admission, still refuses.
+		writeFileSync(join(root, "stranger.txt"), "foreign\n");
 		await expect(dirty.certifyOwnedCandidate(["README.md"])).rejects.toThrow("delivery_unsafe_unowned_changes");
-		expect(head(root)).toBe(admitted);
-		expect(execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" })).toContain("owner.txt");
 
 		const cleanRoot = gitRepo();
 		const clean = createRepoGitDelivery(cleanRoot);

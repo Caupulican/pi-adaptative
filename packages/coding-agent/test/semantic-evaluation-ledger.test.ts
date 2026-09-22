@@ -43,12 +43,18 @@ describe("verdict extraction", () => {
 		const booleans = verdictFromEvaluation(
 			evaluation({
 				results: {
-					objective_clear: { kind: "boolean", value: true, probabilityTrue: 0.91, confidence },
+					objective_clear: {
+						kind: "boolean",
+						probabilityTrue: 0.91,
+						direction: "required_true",
+						band: "soft_pass",
+						confidence,
+					},
 				},
 			}),
 		);
 		expect(booleans.verdict).toBeUndefined();
-		expect(booleans.reasons).toEqual(["objective_clear: true (p=0.91)"]);
+		expect(booleans.reasons).toEqual(["objective_clear: P(yes)=0.91 · soft pass (needs yes)"]);
 
 		const chosen = verdictFromEvaluation(
 			evaluation({

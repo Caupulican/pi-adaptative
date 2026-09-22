@@ -309,7 +309,7 @@ function gitText(repoRoot: string, args: readonly string[], options?: GitRunOpti
 	return gitOutput(repoRoot, args, options).then((text) => text.trim());
 }
 
-function parsePorcelainZ(text: string): string[] {
+export function parsePorcelainZ(text: string): string[] {
 	const parts = text.split("\0");
 	const paths: string[] = [];
 	for (let index = 0; index < parts.length; index++) {
@@ -383,7 +383,8 @@ async function treeForPaths(repoRoot: string, paths: readonly string[], signal?:
 }
 
 interface AdmissionBaseline {
-	readonly dirty: boolean;
+	/** False when the baseline could not be read. Nothing can be attributed without it. */
+	readonly readable: boolean;
 	readonly paths: readonly string[];
 	readonly head: string;
 }
@@ -392,10 +393,9 @@ function captureBaseline(repoRoot: string): AdmissionBaseline {
 	try {
 		const head = execFileText(repoRoot, ["rev-parse", "HEAD"]);
 		const porcelain = execFileText(repoRoot, ["status", "--porcelain=v1", "-z"]);
-		const paths = parsePorcelainZ(porcelain);
-		return { dirty: paths.length > 0, paths, head };
+		return { readable: true, paths: parsePorcelainZ(porcelain), head };
 	} catch {
-		return { dirty: true, paths: [], head: "" };
+		return { readable: false, paths: [], head: "" };
 	}
 }
 
@@ -439,11 +439,17 @@ export function createRepoGitDelivery(repoRoot: string): {
 		paths: readonly string[],
 		signal?: AbortSignal,
 	): Promise<ApprovedCandidateTree> {
-		if (baseline.dirty || paths.length === 0) throw new Error("delivery_unsafe_unowned_changes");
+		if (paths.length === 0 || !baseline.readable) throw new Error("delivery_unsafe_unowned_changes");
 		const current = await porcelainPaths(repoRoot, signal);
 		const owned = new Set(paths);
+		// The property is per path, not per tree: nothing this objective did not produce may enter the
+		// commit. A path that was already dirty when delivery opened was produced by someone else --
+		// another session, or the operator -- so it is excluded from the candidate tree and from the
+		// pathspec commit, and it is not a reason to refuse. A path that appeared *during* the
+		// objective and is not owned is unattributable, and that still stops delivery.
 		for (const path of current) {
-			if (!owned.has(path)) throw new Error("delivery_unsafe_unowned_changes");
+			if (owned.has(path) || baselinePaths.has(path)) continue;
+			throw new Error("delivery_unsafe_unowned_changes");
 		}
 		for (const path of paths) {
 			if (baselinePaths.has(path) || !current.includes(path)) throw new Error("delivery_unsafe_unowned_changes");

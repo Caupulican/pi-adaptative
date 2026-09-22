@@ -1,10 +1,54 @@
 import type { ConfidenceProvenance, DecisionConfidence } from "./confidence.ts";
+import { type NoulBand, type NoulDirection, noulBand, settledFromBand } from "./noul.ts";
 
+/**
+ * A noul answer, carrying what it actually decided.
+ *
+ * There is deliberately no `value: boolean` field. One existed, derived as `probabilityTrue >= 0.5`,
+ * and every caller that read it silently turned an undecided answer into a yes. The band and the
+ * direction are the decision; `settledBoolean` is the one way to collapse them, and it refuses to
+ * answer when the claim is ambiguous.
+ */
 export interface BooleanDecisionResult {
 	readonly kind: "boolean";
-	readonly value: boolean;
 	readonly probabilityTrue: number;
+	/** Which end this question needed. */
+	readonly direction: NoulDirection;
+	/** Where `probabilityTrue` fell relative to that end. */
+	readonly band: NoulBand;
 	readonly confidence: DecisionConfidence;
+}
+
+/** The answer this result settles on, or undefined when the band is ambiguous. */
+export function settledBoolean(result: BooleanDecisionResult): boolean | undefined {
+	return settledFromBand(result.band, result.direction);
+}
+
+/**
+ * A boolean an engine computed rather than estimated: a mechanical read of state, or a model that
+ * returned a literal true/false. It lands at P=1 or P=0, so its band is decisive either way, and
+ * the direction still decides which of those is a pass.
+ */
+export function certainBooleanResult(
+	value: boolean,
+	direction: NoulDirection,
+	confidence: DecisionConfidence,
+): BooleanDecisionResult {
+	const probabilityTrue = value ? 1 : 0;
+	return { kind: "boolean", probabilityTrue, direction, band: noulBand(probabilityTrue, direction), confidence };
+}
+
+/**
+ * The settled answer for a result that may be absent or of another kind. Undefined means the same
+ * thing in every case: nothing was decided here, which callers already handle.
+ */
+export function booleanAnswer(result: DecisionResult | undefined): boolean | undefined {
+	return result?.kind === "boolean" ? settledBoolean(result) : undefined;
+}
+
+/** True only for a decisive answer in the required direction. A soft pass is not decisive. */
+export function decisivelyHolds(result: BooleanDecisionResult): boolean {
+	return result.band === "hard_pass";
 }
 
 export interface ChoiceDecisionResult {

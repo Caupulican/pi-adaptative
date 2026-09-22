@@ -29,6 +29,12 @@ export interface SessionEdgeDeps {
 	getCwd(): string;
 	isChildSession(): boolean;
 	getConfirmation(): EdgeConfirmationHandler | undefined;
+	/**
+	 * Whether the worktree currently holds changes at paths this session never wrote. Resolves the
+	 * `unowned_worktree_changes` condition. Absent means the state cannot be read, and a conditional
+	 * operation then stays ordinary work rather than asking on a state nobody established.
+	 */
+	hasUnownedWorktreeChanges?(signal?: AbortSignal): Promise<boolean>;
 }
 
 export interface EdgeGrantDetails {
@@ -122,6 +128,36 @@ export async function enforceSessionEdgeOperation(
 }
 
 /**
+ * Drop every conditional operation whose condition does not hold right now. A condition is only
+ * ever asked once per call, and a condition that cannot be evaluated drops the operation: an edge
+ * that fires on an unknown state is friction on ordinary work, which is what this layer exists to
+ * avoid.
+ */
+async function resolveEdgeConditions(
+	deps: SessionEdgeDeps,
+	operations: readonly EdgeOperation[],
+	signal: AbortSignal | undefined,
+): Promise<EdgeOperation[]> {
+	if (operations.every((operation) => operation.condition === undefined)) return [...operations];
+	let unownedChanges: boolean | undefined;
+	const resolved: EdgeOperation[] = [];
+	for (const operation of operations) {
+		if (operation.condition === undefined) {
+			resolved.push(operation);
+			continue;
+		}
+		if (unownedChanges === undefined) {
+			unownedChanges = deps.hasUnownedWorktreeChanges
+				? await deps.hasUnownedWorktreeChanges(signal).catch(() => false)
+				: false;
+			signal?.throwIfAborted();
+		}
+		if (unownedChanges) resolved.push(operation);
+	}
+	return resolved;
+}
+
+/**
  * Enforce the edge for one tool call. Ordinary work and granted classes pass; an ungranted class
  * asks the interactive host once (allow once, allow for the session, deny) and is blocked with the
  * reason when nobody can answer — a child session never asks.
@@ -134,7 +170,12 @@ export async function enforceSessionEdge(
 	signal: AbortSignal | undefined,
 ): Promise<BeforeToolCallResult | undefined> {
 	const scopeCwd = deps.getCwd();
-	const operations = classifyAllEdgeOperations({ toolName, args, cwd: executionCwd ?? scopeCwd, scopeCwd });
+	const classified = classifyAllEdgeOperations(
+		{ toolName, args, cwd: executionCwd ?? scopeCwd, scopeCwd },
+		{ includeConditional: true },
+	);
+	if (classified.length === 0) return undefined;
+	const operations = await resolveEdgeConditions(deps, classified, signal);
 	if (operations.length === 0) return undefined;
 	const grants = sessionEdgeGrants(deps);
 	const ungranted = operations.filter((op) => !isEdgeOperationGranted(op, grants));

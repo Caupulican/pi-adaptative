@@ -7,6 +7,7 @@
 import { randomUUID } from "node:crypto";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
 import { SteeringProtocolError } from "../steering/types.ts";
+import { noulHolds } from "../system-one/policy.ts";
 import type { CandidateDiscoveryService } from "./candidate-discovery.ts";
 import type { ResponsibilityRegistry } from "./responsibility-registry.ts";
 import type {
@@ -176,8 +177,12 @@ export class SemanticResponsibilityController {
 
 			// PH-141: JEV-045 must include a positive waiver_valid judgment
 			const waiverValidAns = waiverCert.answers.waiver_valid as { boolean?: boolean; noul?: number } | undefined;
+			// A waiver lets duplicated responsibility through, so it takes a decisive yes: an undecided
+			// probability is not a waiver.
 			const isWaiverValid =
-				typeof waiverValidAns?.boolean === "boolean" ? waiverValidAns.boolean : (waiverValidAns?.noul ?? 0) >= 0.5;
+				typeof waiverValidAns?.boolean === "boolean"
+					? waiverValidAns.boolean
+					: noulHolds(waiverValidAns?.noul, "required_true");
 
 			if (!isWaiverValid) {
 				throw new SteeringProtocolError("JEV-045 evaluated waiver as invalid (PH-141)", "JEV-045");
@@ -284,7 +289,10 @@ export class SemanticResponsibilityController {
 
 		const waiver = this.waivers.findValidWaiver(input.objectiveId, input.responsibility, input.mutatedFile);
 
-		const isUnintentionalDuplicate = duplicateIntroduced >= 0.6 && (!waiver || intentionalWaiverApplies < 0.5);
+		// The waiver has to earn its exemption: it applies when the answer settles on a yes, and an
+		// undecided probability leaves the duplicate unwaived rather than excusing it at a coin flip.
+		const waiverApplies = waiver !== undefined && noulHolds(intentionalWaiverApplies, "required_true");
+		const isUnintentionalDuplicate = duplicateIntroduced >= 0.6 && !waiverApplies;
 
 		const verdict: PostMutationDedupVerdict = {
 			unintentionalDuplicate: isUnintentionalDuplicate,
@@ -348,8 +356,10 @@ export class SemanticResponsibilityController {
 		const duplicateRemaining =
 			typeof dupRemAns.boolean === "boolean" ? (dupRemAns.boolean ? 1.0 : 0.0) : (dupRemAns.noul ?? 0.0);
 
-		// S1A-220, S1A-221: Completion cannot pass semantic duplicate even if tests pass
-		if (duplicateRemaining >= 0.5) {
+		// S1A-220, S1A-221: Completion cannot pass semantic duplicate even if tests pass.
+		// The claim being made here is "a duplicate is still present", and blocking completion on it
+		// takes a decisive yes -- the same bar every other adverse judgment answers to.
+		if (noulHolds(duplicateRemaining, "required_true")) {
 			throw new SemanticDuplicateResponsibilityError({
 				reason:
 					"Cold semantic dedup sweep detected remaining unintentional duplicate responsibilities in repository.",

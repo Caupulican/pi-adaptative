@@ -94,6 +94,18 @@ export class ObjectiveMutationLedger {
 		return [...(this.owned.get(objectiveId)?.keys() ?? [])];
 	}
 
+	/**
+	 * Every path a typed edit or write touched, with no delivery gate.
+	 *
+	 * Distinct from `provenOwnedPaths`, which returns nothing once shell mutation or drift makes the
+	 * set unfit to commit from. A caller asking "did this session write here at all" needs the raw
+	 * record: for that question an empty set means "this session wrote nothing", and answering it
+	 * with the delivery gate's empty set would claim the session authored none of its own work.
+	 */
+	writtenPaths(objectiveId: string): readonly string[] {
+		return [...(this.owned.get(objectiveId)?.keys() ?? [])];
+	}
+
 	ownedDigests(objectiveId: string): readonly OwnedPathDigest[] {
 		if (this.deliveryBlockReason(objectiveId)) return [];
 		return [...(this.owned.get(objectiveId)?.entries() ?? [])].map(([path, digest]) => ({ path, digest }));

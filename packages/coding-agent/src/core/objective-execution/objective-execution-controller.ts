@@ -22,6 +22,7 @@ import { DurableHumanEdgeLedger, type HumanEdgeRequest, requiresHumanEdge } from
 import { DecisionActionPolicy } from "../decision/action-policy.ts";
 import { resolveEffectiveCompletionProfile } from "../decision/completion-profile.ts";
 import type { DecisionEngineRouter } from "../decision/engine-router.ts";
+import { booleanAnswer } from "../decision/evaluation.ts";
 import type { CompletionAssuranceProfile } from "../decision/policy.ts";
 import { createDecisionProgram } from "../decision/program.ts";
 import type { ResponsibilityStatement, SemanticResponsibilityController } from "../dedup/index.ts";
@@ -643,16 +644,18 @@ export class ObjectiveExecutionController {
 				const cs = evaluation.results.context_stale;
 				const sr = evaluation.results.strategy_repetition;
 
+				// An ambiguous band reads as undefined here, exactly like a missing answer: the route
+				// must not treat "I cannot tell whether work remains" as "work remains".
 				semantic = {
-					workRemaining: wr?.kind === "boolean" ? wr.value : undefined,
+					workRemaining: booleanAnswer(wr),
 					missingWorkClass,
-					currentWorkerCanContinue: cwcc?.kind === "boolean" ? cwcc.value : undefined,
-					independentWorkerRequired: iwr?.kind === "boolean" ? iwr.value : undefined,
-					capabilityEscalationRequired: cer?.kind === "boolean" ? cer.value : undefined,
-					externalBlockerPresent: ebp?.kind === "boolean" ? ebp.value : undefined,
+					currentWorkerCanContinue: booleanAnswer(cwcc),
+					independentWorkerRequired: booleanAnswer(iwr),
+					capabilityEscalationRequired: booleanAnswer(cer),
+					externalBlockerPresent: booleanAnswer(ebp),
 					semanticProgress: sp?.kind === "score" ? sp.value : undefined,
-					contextStale: cs?.kind === "boolean" ? cs.value : undefined,
-					strategyRepetition: sr?.kind === "boolean" ? sr.value : undefined,
+					contextStale: booleanAnswer(cs),
+					strategyRepetition: booleanAnswer(sr),
 				};
 			} catch (err) {
 				this.throwIfRequiredSemantic(err);

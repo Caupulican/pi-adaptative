@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { noulHolds } from "../system-one/policy.ts";
 import type {
 	CompletionRuleInput,
 	MutationRuleInput,
@@ -353,7 +354,8 @@ export class SemanticProjectRuleController {
 												? answer.confidence.value
 												: 0;
 
-						if (violateProb > 0.5) {
+						// A violation blocks work: it takes a decisive yes, not a probability over a coin flip.
+						if (noulHolds(violateProb, "required_true")) {
 							violations.push({
 								ruleId: rule.rule_id,
 								phase,
@@ -391,7 +393,13 @@ export class SemanticProjectRuleController {
 					for (const rule of semantic) {
 						const key = `violate::${rule.rule_id}`;
 						const ans = cert.answers?.[key] as any;
-						if (ans?.probabilityTrue > 0.5 || ans?.noul > 0.5 || ans === true || ans?.value === true) {
+						// "Did this change violate the rule?" A violation blocks work, so it takes a
+						// decisive yes. An undecided probability is not evidence of a violation.
+						const violated =
+							ans === true ||
+							ans?.value === true ||
+							noulHolds(ans?.probabilityTrue ?? ans?.noul, "required_true");
+						if (violated) {
 							violations.push({
 								ruleId: rule.rule_id,
 								phase,

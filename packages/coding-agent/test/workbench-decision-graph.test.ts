@@ -300,6 +300,8 @@ const SCENARIOS: Record<string, () => DecisionGraphInput> = {
 };
 
 describe("Decision graph model", () => {
+	beforeAll(() => initTheme("dark"));
+
 	it("derives stages in order of first entry with accumulated totals, loop, and the goal branch", () => {
 		const model = buildDecisionGraphModel(SCENARIOS.repairLoop!());
 		expect(model.stages.map((row) => row.stage)).toEqual([
@@ -321,6 +323,41 @@ describe("Decision graph model", () => {
 		expect(model.goal.branch).toBe("repair");
 		expect(model.you).toMatchObject({ present: true, waiting: false, asked: 1, answered: 1 });
 		expect(model.hasRunningClock).toBe(true);
+	});
+
+	it("carries an unsettled judgment as an open doubt and keeps the goal open on it", () => {
+		const base = SCENARIOS.rootOnlyBuild!();
+		const unsure: SemanticEvaluationRecord = {
+			...evaluation("verify criterion 3", "gather_more", T0 + 5_000),
+			reasons: ["unsure: evidence_sufficient: P(yes)=0.55 · unsure (needs yes)", "criterion 3: exit 1"],
+		};
+		const model = buildDecisionGraphModel({ ...base, evaluations: [unsure] });
+		expect(model.doubts).toEqual([
+			{
+				text: "evidence_sufficient: P(yes)=0.55 · unsure (needs yes)",
+				label: "verify criterion 3",
+				at: T0 + 6_500,
+			},
+		]);
+		const list = stripAnsi(renderDecisionList(model, 96).rows.join("\n"));
+		expect(list).toContain("DOUBTS");
+		expect(list).toContain("evidence_sufficient: P(yes)=0.55");
+		expect(list).toContain("not closed · 1 open · 1 doubt");
+		expect(list).not.toContain("yes → deliver");
+		const diagram = stripAnsi(renderDecisionDiagram(model, 96).rows.join("\n"));
+		expect(diagram).toContain("unsure · 1");
+		expect(diagram).toContain("not closed · 1 open · 1 unsure");
+	});
+
+	it("keeps a settled judgment out of the doubts, so a clean run still reads as one", () => {
+		const base = SCENARIOS.rootOnlyBuild!();
+		const settled: SemanticEvaluationRecord = {
+			...evaluation("verify criterion 3", "pass", T0 + 5_000),
+			reasons: ["evidence_sufficient: P(yes)=0.97 · pass (needs yes)"],
+		};
+		const model = buildDecisionGraphModel({ ...base, evaluations: [settled] });
+		expect(model.doubts).toEqual([]);
+		expect(stripAnsi(renderDecisionList(model, 96).rows.join("\n"))).not.toContain("DOUBTS");
 	});
 
 	it("lights YOU with a waiting clock while the operator owns control, and names the routed root model", () => {

@@ -14,7 +14,10 @@ import {
 	isIdleProjection,
 } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { OperatorProjection } from "../../../core/operator-projection/types.ts";
-import type { SemanticEvaluationRecord } from "../../../core/system-one/semantic-evaluation-ledger.ts";
+import {
+	doubtsFromReasons,
+	type SemanticEvaluationRecord,
+} from "../../../core/system-one/semantic-evaluation-ledger.ts";
 import type { SemanticPlaneHealth } from "../../../core/system-one/semantic-plane-health.ts";
 import { formatRouteValue, shortModelName } from "./operator-pov-bar.ts";
 
@@ -80,6 +83,19 @@ export interface DecisionParticipant {
 
 export type DecisionGoalBranch = "pending" | "deliver" | "delivered" | "repair" | "clarify";
 
+export interface DecisionDoubt {
+	/** The judgment that came back unsure, as the ledger recorded it. */
+	readonly text: string;
+	/** The evaluation that raised it, for the stage it belongs to. */
+	readonly label: string;
+	readonly at: number;
+}
+
+/** Doubts are read from the last few evaluations; older ones are history, not open questions. */
+export const DOUBT_EVALUATION_WINDOW = 3;
+/** The pane names at most this many; the count still reports all of them. */
+export const MAX_DOUBTS = 4;
+
 export interface DecisionGraphModel {
 	readonly objectiveId: string;
 	readonly you: {
@@ -109,6 +125,14 @@ export interface DecisionGraphModel {
 	readonly evidence: DecisionGraphInput["receipts"];
 	readonly blocked?: string;
 	readonly goal: { readonly branch: DecisionGoalBranch };
+	/**
+	 * Judgments that settled nothing and are still open, newest evaluation first.
+	 *
+	 * A doubt is the third state between a pass and a failure, and it is the one the pane never had:
+	 * without it an unsure judgment is drawn as a quiet yes. It is why the loop is going round again,
+	 * so it belongs on the drawing next to the stage that asked it.
+	 */
+	readonly doubts: readonly DecisionDoubt[];
 	readonly hasRunningClock: boolean;
 	readonly stageLogEmpty: boolean;
 	readonly nowMs: number;
@@ -335,6 +359,16 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 						? "repair"
 						: "pending";
 
+	// Only the most recent evaluations are asked: a doubt from five judgments ago was either
+	// resolved by the work since, or it is being raised again by the evaluation that still holds it.
+	const doubts: DecisionDoubt[] = [];
+	for (const record of evaluations.slice(-DOUBT_EVALUATION_WINDOW).reverse()) {
+		for (const text of doubtsFromReasons(record.reasons)) {
+			if (doubts.some((doubt) => doubt.text === text)) continue;
+			doubts.push({ text, label: record.label, at: record.endedAt });
+		}
+	}
+
 	const hasRunningClock = Boolean(
 		(open && projection.phase !== "done") ||
 			inFlight ||
@@ -356,6 +390,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		evidence: input.receipts,
 		...(blocked ? { blocked } : {}),
 		goal: { branch },
+		doubts,
 		hasRunningClock,
 		stageLogEmpty: stageLog.entries.length === 0,
 		nowMs,

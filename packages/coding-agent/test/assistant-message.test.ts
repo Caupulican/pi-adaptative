@@ -135,3 +135,41 @@ describe("AssistantMessageComponent unresolved verification", () => {
 		expect(plainText).toContain("(No response received from model)");
 	});
 });
+
+describe("AssistantMessageComponent empty-turn placeholder", () => {
+	test("a finished reply with text never carries the empty-turn placeholder", () => {
+		initTheme("dark");
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "text", text: "Hi. What do you need?" }]),
+			true,
+			undefined,
+			{ showCommentary: true },
+		);
+		const text = stripAnsi(component.render(100).join("\n"));
+		expect(text).toContain("Hi. What do you need?");
+		expect(text).not.toContain("(No response received from model)");
+	});
+
+	test("a thinking-only turn is not an empty turn even while the thinking block is hidden", () => {
+		initTheme("dark");
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "thinking", thinking: "Weighing two routes." }]),
+			true,
+			undefined,
+			{ showCommentary: true },
+		);
+		const text = stripAnsi(component.render(100).join("\n"));
+		expect(text).not.toContain("(No response received from model)");
+		expect(component.hasVisibleOutput()).toBe(false);
+	});
+
+	test("a turn that produced nothing still says so", () => {
+		initTheme("dark");
+		const component = new AssistantMessageComponent(createAssistantMessage([]), true, undefined, {
+			showCommentary: true,
+		});
+		const text = stripAnsi(component.render(100).join("\n"));
+		expect(text).toContain("(No response received from model)");
+		expect(component.hasVisibleOutput()).toBe(true);
+	});
+});

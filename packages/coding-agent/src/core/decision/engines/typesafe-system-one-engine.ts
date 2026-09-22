@@ -3,6 +3,13 @@ import { SYSTEM_ONE_PINNED_MODEL } from "../../system-one/catalog.ts";
 import type { DecisionEngineCapabilities } from "../capabilities.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../engine.ts";
 import { createDecisionEvaluation, type DecisionEvaluation, type DecisionResult } from "../evaluation.ts";
+import {
+	DEFAULT_NOUL_BAND_THRESHOLDS,
+	isNoulProbability,
+	type NoulBandThresholds,
+	noulBand,
+	noulCertainty,
+} from "../noul.ts";
 import type { DecisionProgram } from "../program.ts";
 import { DecisionEngineProtocolError } from "../protocol-error.ts";
 
@@ -10,10 +17,16 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 	readonly id = "typesafe-system-one";
 	readonly model: string;
 	private readonly adapter: JevAdapter;
+	private readonly thresholds: NoulBandThresholds;
 
-	constructor(adapter: JevAdapter, model: string = SYSTEM_ONE_PINNED_MODEL) {
+	constructor(
+		adapter: JevAdapter,
+		model: string = SYSTEM_ONE_PINNED_MODEL,
+		thresholds: NoulBandThresholds = DEFAULT_NOUL_BAND_THRESHOLDS,
+	) {
 		this.adapter = adapter;
 		this.model = model;
+		this.thresholds = thresholds;
 	}
 
 	capabilities(): DecisionEngineCapabilities {
@@ -105,29 +118,22 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 					});
 				}
 				const ans = raw as { type?: string; noul?: number };
-				if (
-					ans.type !== "noul" ||
-					typeof ans.noul !== "number" ||
-					!Number.isFinite(ans.noul) ||
-					ans.noul < 0 ||
-					ans.noul > 1
-				) {
+				if (ans.type !== "noul" || !isNoulProbability(ans.noul)) {
 					throw new DecisionEngineProtocolError(
 						`Invalid noul answer for boolean decision '${d.id}': expected finite number in [0, 1]`,
 						{ decisionId: d.id, raw },
 					);
 				}
-				const noul = ans.noul;
-				const prob = noul;
-				const val = noul >= 0.5;
-				const conf = Math.max(noul, 1 - noul);
+				const prob = ans.noul;
+				const direction = d.direction ?? "required_true";
 
 				results[d.id] = {
 					kind: "boolean",
-					value: val,
 					probabilityTrue: prob,
+					direction,
+					band: noulBand(prob, direction, this.thresholds),
 					confidence: {
-						value: conf,
+						value: noulCertainty(prob),
 						provenance: "derived_calibrated_probability",
 						isCalibrated: true,
 						noulProbabilityTrue: prob,
@@ -277,13 +283,7 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 						throw new DecisionEngineProtocolError(`Missing answer for set item '${qId}'`, { decisionId: qId });
 					}
 					const ans = memberRaw as { type?: string; noul?: number };
-					if (
-						ans.type !== "noul" ||
-						typeof ans.noul !== "number" ||
-						!Number.isFinite(ans.noul) ||
-						ans.noul < 0 ||
-						ans.noul > 1
-					) {
+					if (ans.type !== "noul" || !isNoulProbability(ans.noul)) {
 						throw new DecisionEngineProtocolError(
 							`Invalid noul answer for set item '${qId}': expected finite number in [0, 1]`,
 							{ decisionId: qId, raw: memberRaw },
@@ -294,7 +294,7 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 					if (prob >= (d.threshold ?? 0.5)) {
 						selected.push(memberKey);
 					}
-					const conf = Math.max(prob, 1 - prob);
+					const conf = noulCertainty(prob);
 					if (conf < minConf) {
 						minConf = conf;
 					}

@@ -34,6 +34,39 @@ import { StateProjector } from "./projector.ts";
 import type { SemanticEvaluationObserver } from "./semantic-evaluation-ledger.ts";
 import type { ExecutionState, ToolImpact, ValidationDecision, ValidationStage } from "./types.ts";
 
+/** The four questions that only mean something when written rules were supplied. */
+const RULE_AUTHORITY_QUESTION_IDS: ReadonlySet<string> = new Set([
+	"rules_differ",
+	"overrides_written_rules",
+	"full_handoff",
+	"request_holds",
+]);
+
+/**
+ * Hard ceiling on the rule text one classification carries. The caller decides which rules fit;
+ * this only stops a pathological instruction file from crowding out the request itself.
+ */
+export const USER_REQUEST_RULE_BUDGET = 8_000;
+
+export interface UserRequestClassification {
+	readonly capabilitiesAuthorized: boolean;
+	readonly localCommitsOnly: boolean;
+	readonly liftsDeliveryBlock: boolean;
+	readonly rulesDiffer: boolean;
+	readonly overridesWrittenRules: boolean;
+	readonly fullHandoff: boolean;
+	readonly requestHolds: boolean;
+}
+
+/**
+ * `skipped` means nothing could have changed, so nothing was asked. `unavailable` means the
+ * question was asked and System One did not answer -- which is not the same as a clean "no".
+ */
+export type UserRequestClassificationOutcome =
+	| { readonly status: "classified"; readonly classification: UserRequestClassification }
+	| { readonly status: "skipped" }
+	| { readonly status: "unavailable"; readonly reason: string };
+
 export interface TerminalCompletionProof {
 	readonly objectiveId: string;
 	readonly candidateDigest: string;
@@ -240,43 +273,58 @@ export class SystemOneController {
 	}
 
 	/**
-	 * One classification of the user request: whether it authorizes work, and whether delivery
-	 * is local commits with push forbidden. Undefined when System One does not answer.
+	 * One classification of the user request: whether it authorizes work, whether delivery is local
+	 * commits with push forbidden, and how it stands against the written rules.
+	 *
+	 * Only questions whose answer can still change something are asked. Every edge class already
+	 * granted makes `capabilities_authorized` inert; no written rules makes the four rule questions
+	 * inert. An unasked question keeps its neutral answer, so dropping one never changes a verdict.
+	 *
+	 * A failure is reported as `unavailable`, never as "nothing was asked for". The caller must be
+	 * able to tell a classified "no restriction" from a classification that did not run.
 	 * Stage-pack intake below is kept for tests and hooks; production admission is SteeringPlane JEV-001..003.
 	 */
 	async classifyUserRequest(
 		request: string,
 		writtenRules = "",
-	): Promise<
-		| {
-				capabilitiesAuthorized: boolean;
-				localCommitsOnly: boolean;
-				liftsDeliveryBlock: boolean;
-				rulesDiffer: boolean;
-				overridesWrittenRules: boolean;
-				fullHandoff: boolean;
-				requestHolds: boolean;
-		  }
-		| undefined
-	> {
+		options: { capabilitiesPending?: boolean } = {},
+	): Promise<UserRequestClassificationOutcome> {
 		const userRequest = request.trim();
-		if (!userRequest) return undefined;
+		if (!userRequest) return { status: "skipped" };
+		const rules = writtenRules.trim().slice(0, USER_REQUEST_RULE_BUDGET);
+		const askCapabilities = options.capabilitiesPending !== false;
+		const asked: Record<string, unknown> = {};
+		for (const [id, question] of Object.entries(USER_AUTHORIZATION_QUESTIONS)) {
+			if (id === "capabilities_authorized" && !askCapabilities) continue;
+			if (RULE_AUTHORITY_QUESTION_IDS.has(id) && !rules) continue;
+			asked[id] = question;
+		}
+		if (Object.keys(asked).length === 0) return { status: "skipped" };
+		let response: Awaited<ReturnType<JevAdapter["evaluate"]>>;
 		try {
-			const response = await this.adapter.evaluate(
+			response = await this.adapter.evaluate(
 				{
 					model: this.config.model.production || SYSTEM_ONE_PINNED_MODEL,
 					state: {
 						user_request: userRequest.slice(0, 4_000),
-						written_rules: writtenRules.trim().slice(0, 2_000) || "(none)",
+						written_rules: rules || "(none)",
 					},
-					questions: toTypeSafeEvaluationQuestions(USER_AUTHORIZATION_QUESTIONS),
+					questions: toTypeSafeEvaluationQuestions(asked as typeof USER_AUTHORIZATION_QUESTIONS),
 				},
 				{ impact: "read_only" },
 			);
-			const hardYes = (id: string): boolean =>
-				evaluateNoul(noulFromAnswer(response.answers[id], false), "required_true", this.config.thresholds) ===
+		} catch (error) {
+			return { status: "unavailable", reason: error instanceof Error ? error.message : String(error) };
+		}
+		// An unasked question is neutral, not false-by-accident: every id here reads "the user is
+		// imposing or lifting something", so absent means the request did nothing to that axis.
+		const hardYes = (id: string): boolean =>
+			id in asked &&
+			evaluateNoul(noulFromAnswer(response.answers[id], false), "required_true", this.config.thresholds) ===
 				"hard_pass";
-			return {
+		return {
+			status: "classified",
+			classification: {
 				capabilitiesAuthorized: hardYes("capabilities_authorized"),
 				localCommitsOnly: hardYes("local_commits_only"),
 				liftsDeliveryBlock: hardYes("lifts_delivery_block"),
@@ -284,10 +332,8 @@ export class SystemOneController {
 				overridesWrittenRules: hardYes("overrides_written_rules"),
 				fullHandoff: hardYes("full_handoff"),
 				requestHolds: hardYes("request_holds"),
-			};
-		} catch {
-			return undefined;
-		}
+			},
+		};
 	}
 
 	async validateIntake(): Promise<{

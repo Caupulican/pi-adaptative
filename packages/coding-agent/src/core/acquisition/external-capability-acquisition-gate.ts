@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ExecutionCharter } from "../autonomy/execution-charter.ts";
+import { noulHolds, settledNoul } from "../system-one/policy.ts";
 import type {
 	AcquisitionDecision,
 	AcquisitionDisposition,
@@ -324,17 +325,22 @@ export class ExternalCapabilityAcquisitionGate {
 				);
 				const answers = evalRes.answers ?? {};
 				semanticDecisionObserved = Object.keys(answers).length > 0;
+				// This gate reaches outside the machine, so an undecided answer must not authorize it.
+				// Each judgment keeps the conservative stance it started with unless a band settles it:
+				// the three that must hold need a decisive yes, and the blocker needs a decisive no.
 				if (answers.acquisition_required_for_objective) {
-					acquisitionRequired = (answers.acquisition_required_for_objective.noul ?? 1) >= 0.5;
+					acquisitionRequired = noulHolds(answers.acquisition_required_for_objective.noul, "required_true");
 				}
 				if (answers.side_effects_proportionate) {
-					sideEffectsProportionate = (answers.side_effects_proportionate.noul ?? 1) >= 0.5;
+					sideEffectsProportionate = noulHolds(answers.side_effects_proportionate.noul, "required_true");
 				}
 				if (answers.safer_existing_route_preferred) {
-					saferExistingPreferred = (answers.safer_existing_route_preferred.noul ?? 0) >= 0.5;
+					// Undecided leaves the safer route in play rather than clearing the way.
+					saferExistingPreferred =
+						settledNoul(answers.safer_existing_route_preferred.noul, "required_false", true) !== false;
 				}
 				if (answers.source_matches_requested_capability) {
-					sourceMatchesCapability = (answers.source_matches_requested_capability.noul ?? 1) >= 0.5;
+					sourceMatchesCapability = noulHolds(answers.source_matches_requested_capability.noul, "required_true");
 				}
 			} catch (error) {
 				// The engine failed: the conservative stance stands, and the failure is reported, not hidden.

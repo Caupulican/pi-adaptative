@@ -15,6 +15,12 @@ import { parseShellCommandSequence, stripShellInvocationPrefixes } from "../tool
  * granted class never asks. An ungranted extreme operation asks once, or is blocked when no one
  * is at the keyboard.
  *
+ * One class is conditional rather than literal. Several sessions share one worktree, so a command
+ * that discards the whole tree can delete uncommitted work belonging to another session with no
+ * reflog to recover it. Those commands are ordinary work when everything dirty is this session's
+ * own; they reach the edge only while the tree also holds changes this session never wrote. The
+ * session layer resolves that, because the classifier itself never touches the filesystem.
+ *
  * Classification is deliberately narrow and literal: a real risk names itself; anything unknown
  * is ordinary work and runs.
  */
@@ -33,7 +39,7 @@ export const EDGE_CLASS_DESCRIPTIONS: Readonly<Record<EdgeClass, string>> = {
 	"package.publish": "publishing a package or image runs without asking",
 	"package.install": "installing a package runs without asking",
 	"destructive.fs":
-		"deleting the repository, a directory that contains it, the home directory, a filesystem root, or a disk",
+		"deleting the repository, a directory that contains it, the home directory, a filesystem root, or a disk, or discarding a shared worktree that holds another session's uncommitted work",
 	"settings.authority": "editing settings and credentials runs without asking",
 	"toolkit.script": "running registered dangerous toolkit scripts",
 };
@@ -47,6 +53,13 @@ export function isEdgeClass(value: unknown): value is EdgeClass {
 	return typeof value === "string" && (EDGE_CLASSES as readonly string[]).includes(value);
 }
 
+/**
+ * A risk that only exists in some live states, resolved by the session layer before the operation
+ * counts. `unowned_worktree_changes`: the worktree holds changes at paths this session never wrote,
+ * so a discard would destroy work belonging to a concurrent session or to the operator.
+ */
+export type EdgeCondition = "unowned_worktree_changes";
+
 export interface EdgeOperation {
 	class: EdgeClass;
 	/** The operation as the operator would read it (`git push origin main`). */
@@ -55,6 +68,16 @@ export interface EdgeOperation {
 	reason: string;
 	/** Optional exact operation scope key (e.g. deterministic digest for narrow toolkit approvals). */
 	scopeKey?: string;
+	/** Present when this is only an edge operation while the condition holds. */
+	condition?: EdgeCondition;
+}
+
+export interface ClassifyEdgeOptions {
+	/**
+	 * Include operations whose risk depends on live state. Only a caller that can resolve the
+	 * condition passes this; every other caller sees the unconditional classification it always saw.
+	 */
+	includeConditional?: boolean;
 }
 
 export interface ClassifyEdgeInput {
@@ -68,6 +91,7 @@ export interface ClassifyEdgeInput {
 	agentDir?: string;
 }
 
+const GIT_GLOBAL_VALUE_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
 const POWERSHELL_REMOVE = new Set(["remove-item", "ri", "rm", "del", "erase", "rd", "rmdir"]);
 /** A find expression with one of these deletes matches, not the search root. */
 const FIND_NARROWING = new Set([
@@ -229,6 +253,68 @@ function classifyDeletion(
 	return undefined;
 }
 
+/** `git -C dir -c k=v <subcommand> …` → the subcommand and the arguments after it. */
+function gitInvocation(argv: readonly string[]): { subcommand: string; rest: string[] } | undefined {
+	let index = 1;
+	while (index < argv.length) {
+		const token = argv[index] as string;
+		if (!isOption(token)) return { subcommand: token.toLowerCase(), rest: argv.slice(index + 1) };
+		index += GIT_GLOBAL_VALUE_OPTIONS.has(token) ? 2 : 1;
+	}
+	return undefined;
+}
+
+/**
+ * A git command that throws away working-tree state.
+ *
+ * Git is ordinary work and stays ungated. These commands are the exception, and only while the
+ * condition holds: they discard the whole worktree, not a path the caller named, so when another
+ * session's uncommitted work is sitting in the same checkout they delete it with no reflog and no
+ * undo. Discarding only your own work never reaches the operator.
+ */
+function classifyWorktreeDiscard(argv: readonly string[], joined: string): EdgeOperation | undefined {
+	const invocation = gitInvocation(argv);
+	if (!invocation) return undefined;
+	const { subcommand, rest } = invocation;
+	const options = rest.filter(isOption).map((token) => token.toLowerCase());
+	const targets = positional(rest);
+	const discard = (reason: string): EdgeOperation => ({
+		class: "destructive.fs",
+		operation: joined,
+		reason,
+		condition: "unowned_worktree_changes",
+	});
+	switch (subcommand) {
+		case "reset":
+			return options.includes("--hard") || options.includes("--merge")
+				? discard("discards every uncommitted change in the worktree")
+				: undefined;
+		case "clean":
+			return options.some((option) => option === "--force" || /^-[a-z]*f/.test(option))
+				? discard("deletes untracked files across the worktree")
+				: undefined;
+		case "checkout":
+			return rest.includes("--") || (targets.length > 0 && targets.every((target) => target === "."))
+				? discard("overwrites working-tree changes")
+				: undefined;
+		case "restore":
+			return targets.length > 0 &&
+				!options.some((option) => option === "--staged" || option === "-s" || option === "--worktree=false")
+				? discard("overwrites working-tree changes")
+				: undefined;
+		case "stash": {
+			const verb = targets[0]?.toLowerCase() ?? "push";
+			if (verb === "drop" || verb === "clear") return discard("deletes stashed work");
+			// push/save take the whole worktree away from whoever else is editing in it.
+			return verb === "push" || verb === "save"
+				? discard("removes every uncommitted change from the worktree")
+				: undefined;
+		}
+		default:
+			return undefined;
+	}
+}
+
 function classifyInvokedArgv(argv: readonly string[], cwd: string, scopeCwd: string): EdgeOperation[] {
 	if (argv.length === 0) return [];
 	const joined = argv.join(" ");
@@ -238,13 +324,25 @@ function classifyInvokedArgv(argv: readonly string[], cwd: string, scopeCwd: str
 		const remote = classifyGh(argv, joined);
 		if (remote) operations.push(remote);
 	}
+	if (tool === "git") {
+		const discard = classifyWorktreeDiscard(argv, joined);
+		if (discard) operations.push(discard);
+	}
 	const deletion = classifyDeletion(argv, joined, cwd, scopeCwd);
 	if (deletion) operations.push(deletion);
 	return operations;
 }
 
 /** Classify all edge operations in a tool call; empty array means ordinary work. */
-export function classifyAllEdgeOperations(input: ClassifyEdgeInput): EdgeOperation[] {
+export function classifyAllEdgeOperations(
+	input: ClassifyEdgeInput,
+	options: ClassifyEdgeOptions = {},
+): EdgeOperation[] {
+	const operations = classifyEveryEdgeOperation(input);
+	return options.includeConditional ? operations : operations.filter((operation) => operation.condition === undefined);
+}
+
+function classifyEveryEdgeOperation(input: ClassifyEdgeInput): EdgeOperation[] {
 	const args = input.args && typeof input.args === "object" ? (input.args as Record<string, unknown>) : {};
 	const name = input.toolName.toLowerCase();
 	if (name === "write" || name === "edit" || name === "edit-diff") return [];

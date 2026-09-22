@@ -14,6 +14,7 @@ import {
 	MechanicalDecisionEngine,
 	resolveFunctionCall,
 	StructuredLlmDecisionEngine,
+	settledBoolean,
 	TypeSafeSystemOneDecisionEngine,
 } from "../../src/core/decision/index.ts";
 import {
@@ -148,7 +149,9 @@ describe("Finalization v2.1 Verification Suite (FIN-001 to FIN-095)", () => {
 			const boolResult = evalResult.results.q_bool;
 			expect(boolResult.kind).toBe("boolean");
 			if (boolResult.kind === "boolean") {
-				expect(boolResult.value).toBe(true);
+				expect(boolResult.direction).toBe("required_true");
+				expect(boolResult.band).toBe("hard_pass");
+				expect(settledBoolean(boolResult)).toBe(true);
 				expect(boolResult.probabilityTrue).toBe(0.93);
 				expect(boolResult.confidence.value).toBe(0.93);
 				expect(boolResult.confidence.provenance).toBe("derived_calibrated_probability");
@@ -472,8 +475,9 @@ describe("Finalization v2.1 Verification Suite (FIN-001 to FIN-095)", () => {
 					},
 					dispatch_worker__context__stated: {
 						kind: "boolean" as const,
-						value: false, // NOT stated
-						probabilityTrue: 0.0,
+						probabilityTrue: 0.0, // NOT stated
+						direction: "required_true" as const,
+						band: "hard_fail" as const,
 						confidence: { value: 0.99, provenance: "heuristic" as const, isCalibrated: false },
 					},
 				},

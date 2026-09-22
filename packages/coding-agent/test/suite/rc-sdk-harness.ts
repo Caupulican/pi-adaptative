@@ -29,6 +29,7 @@ import {
 	type DecisionEvaluation,
 	type DecisionResult,
 } from "../../src/core/decision/evaluation.ts";
+import { type NoulDirection, noulBand } from "../../src/core/decision/noul.ts";
 import type { DecisionDefinition } from "../../src/core/decision/primitives.ts";
 import type { DecisionProgram } from "../../src/core/decision/program.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
@@ -46,7 +47,12 @@ const LOW_CONFIDENCE: DecisionConfidence = { value: 0.41, provenance: "native_ca
 
 /** A replayed answer, expressed in the engine's own normalized result shapes. */
 export type ReplayAnswer =
-	| { kind: "boolean"; probabilityTrue: number; confidence?: DecisionConfidence }
+	| {
+			kind: "boolean";
+			probabilityTrue: number;
+			direction?: NoulDirection;
+			confidence?: DecisionConfidence;
+	  }
 	| { kind: "choice"; selected: string; distribution?: Record<string, number>; confidence?: DecisionConfidence }
 	| { kind: "score"; value: number; confidence?: DecisionConfidence };
 
@@ -66,10 +72,12 @@ export interface ReplayDecisionEngineOptions {
 export function normalizedResult(answer: ReplayAnswer, lowConfidence: boolean): DecisionResult {
 	const confidence = answer.confidence ?? (lowConfidence ? LOW_CONFIDENCE : CALIBRATED);
 	if (answer.kind === "boolean") {
+		const direction = answer.direction ?? "required_true";
 		return {
 			kind: "boolean",
-			value: answer.probabilityTrue >= 0.5,
 			probabilityTrue: answer.probabilityTrue,
+			direction,
+			band: noulBand(answer.probabilityTrue, direction),
 			confidence: { ...confidence, noulProbabilityTrue: answer.probabilityTrue },
 		};
 	}

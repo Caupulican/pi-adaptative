@@ -79,6 +79,12 @@ export class SystemOneSteeringPlane {
 	readonly decisionEngine?: SemanticDecisionEngine;
 	readonly router?: DecisionEngineRouter;
 	private readonly adapter?: JevAdapter;
+	/**
+	 * Predicates whose band came back ambiguous during the current `evaluateSemanticOutcome` call.
+	 * Scoped to that one synchronous call, which resets it on entry and drains it before returning;
+	 * it is never read across calls.
+	 */
+	private openDoubts: string[] = [];
 
 	constructor(deps: SystemOneSteeringPlaneDeps = {}) {
 		this.certificates = deps.certificates ?? new SteeringCertificateStore(deps.persistentPath);
@@ -256,49 +262,43 @@ export class SystemOneSteeringPlane {
 		}
 
 		if (checkpointId === "JEV-WORKER-SUPERVISION") {
-			const specGap = answers.specialist_gap_present as { noul?: number } | undefined;
-			const capGap = answers.capability_gap_present as { noul?: number } | undefined;
-			const indepVerif = answers.needs_independent_verification as { noul?: number } | undefined;
-			const stuck = answers.worker_stuck as { noul?: number } | undefined;
-			const rep = answers.strategy_repetition as { noul?: number } | undefined;
-			const offTrack = answers.work_off_track as { noul?: number } | undefined;
-			const progress = answers.meaningful_progress as { noul?: number } | undefined;
+			// Each of these asks whether a problem is present, so the required end is "no". A decisive
+			// yes -- the hard_fail band -- is what moves a worker. A coin flip used to be enough, which
+			// rerouted healthy workers on ignorance; an undecided signal now leaves the work alone and
+			// is carried as a doubt instead.
+			const risk = (answer: unknown): boolean =>
+				evaluateNoul(noulFromAnswer(answer, false), "required_false") === "hard_fail";
 
-			if ((specGap?.noul ?? 0) > 0.5) {
+			if (risk(answers.specialist_gap_present)) {
 				return {
 					action: "reroute_expert",
 					reasonCodes: ["specialist_gap_detected"],
 					metadata: { dimension: "specialist" },
 				};
 			}
-			if ((capGap?.noul ?? 0) > 0.5) {
+			if (risk(answers.capability_gap_present)) {
 				return {
 					action: "resolve_capability",
 					reasonCodes: ["capability_gap_detected"],
 					metadata: { dimension: "capability" },
 				};
 			}
-			if ((indepVerif?.noul ?? 0) > 0.5) {
+			if (risk(answers.needs_independent_verification)) {
 				return {
 					action: "independent_review",
 					reasonCodes: ["independent_verification_needed"],
 				};
 			}
-			if (
-				(stuck?.noul ?? 0) > 0.5 ||
-				(rep?.noul ?? 0) > 0.5 ||
-				(offTrack?.noul ?? 0) > 0.5 ||
-				(progress?.noul !== undefined && progress.noul < 0.3)
-			) {
-				const reasons: string[] = [];
-				if ((offTrack?.noul ?? 0) > 0.5) reasons.push("worker_off_track");
-				if ((stuck?.noul ?? 0) > 0.5) reasons.push("worker_stuck");
-				if ((rep?.noul ?? 0) > 0.5) reasons.push("strategy_repetition");
-				if (progress?.noul !== undefined && progress.noul < 0.3) reasons.push("meaningful_progress_insufficient");
-				return {
-					action: "replan",
-					reasonCodes: reasons.length > 0 ? reasons : ["worker_supervision_steer"],
-				};
+			// meaningful_progress asks the opposite way round: a decisive NO is the adverse answer.
+			const noProgress =
+				evaluateNoul(noulFromAnswer(answers.meaningful_progress, true), "required_true") === "hard_fail";
+			const reasons: string[] = [];
+			if (risk(answers.work_off_track)) reasons.push("worker_off_track");
+			if (risk(answers.worker_stuck)) reasons.push("worker_stuck");
+			if (risk(answers.strategy_repetition)) reasons.push("strategy_repetition");
+			if (noProgress) reasons.push("meaningful_progress_insufficient");
+			if (reasons.length > 0) {
+				return { action: "replan", reasonCodes: reasons };
 			}
 			return {
 				action: "continue_current_work",
@@ -335,13 +335,32 @@ export class SystemOneSteeringPlane {
 		return verdict.accepted && verdict.choice === "complete";
 	}
 
-	private isTruthy(ans: unknown, threshold = 0.5): boolean {
+	/**
+	 * Does this answer carry a yes?
+	 *
+	 * With no `threshold` the calibrated band decides: `hard_pass` and `soft_pass` are a yes,
+	 * `hard_fail` is a no, and an `ambiguous` answer is neither -- it is recorded as a doubt and
+	 * reported as a no here, so the checkpoint does not proceed on it. A doubt is not a failure:
+	 * `evaluateSemanticOutcome` turns a checkpoint whose only problem is doubt into `gather_more`,
+	 * which looks again rather than rejecting the work.
+	 *
+	 * A `threshold` is a deliberate per-checkpoint calibration (JEV-004's 0.75, JEV-013's 0.7) and
+	 * reads the probability directly, as the doctrine requires. There is no 0.5 default: a coin flip
+	 * is ignorance, and it used to pass here.
+	 */
+	private isTruthy(ans: unknown, threshold?: number, predicate?: string): boolean {
 		if (ans == null) return false;
+		if (typeof threshold === "number") {
+			const probability = noulFromAnswer(ans, false);
+			return typeof probability === "number" ? probability >= threshold : probability === true;
+		}
 		if (typeof ans === "object") {
-			const obj = ans as Record<string, unknown>;
-			if (typeof obj.value === "boolean") return obj.value;
-			if (typeof obj.boolean === "boolean") return obj.boolean;
-			if (typeof obj.noul === "number") return obj.noul >= threshold;
+			const band = evaluateNoul(noulFromAnswer(ans, false), "required_true");
+			if (band === "ambiguous") {
+				if (predicate) this.openDoubts.push(predicate);
+				return false;
+			}
+			return band !== "hard_fail";
 		}
 		return Boolean(ans);
 	}
@@ -378,29 +397,34 @@ export class SystemOneSteeringPlane {
 	): {
 		semantic_outcome: SteeringSemanticOutcome;
 		failed_semantic_predicates: readonly string[];
+		/** Predicates the model could not settle. Not failures: reasons to look again. */
+		unsure_semantic_predicates: readonly string[];
 	} {
 		const failed: string[] = [];
+		this.openDoubts = [];
 		let outcome: SteeringSemanticOutcome = "pass";
 
 		switch (checkpointId) {
 			case "JEV-001": {
-				if (!this.isTruthy(answers.objective_coherent)) {
+				if (!this.isTruthy(answers.objective_coherent, undefined, "objective_coherent")) {
 					failed.push("objective_coherent");
 				}
 				if (this.getScoreValue(answers.ambiguity_severity) > 1) {
 					failed.push("ambiguity_severity_acceptable");
 				}
-				if (this.isTruthy(answers.missing_information)) {
+				if (this.isTruthy(answers.missing_information, undefined, "missing_information")) {
 					failed.push("no_missing_information");
 				}
 				if (failed.length > 0) {
-					outcome = this.isTruthy(answers.missing_information) ? "gather_more" : "fail";
+					outcome = this.isTruthy(answers.missing_information, undefined, "missing_information")
+						? "gather_more"
+						: "fail";
 				}
 				break;
 			}
 
 			case "JEV-002": {
-				if (!this.isTruthy(answers.acceptance_complete)) {
+				if (!this.isTruthy(answers.acceptance_complete, undefined, "acceptance_complete")) {
 					failed.push("acceptance_complete");
 					outcome = "gather_more";
 				}
@@ -408,7 +432,10 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-003": {
-				if (answers.grounding_sufficient !== undefined && !this.isTruthy(answers.grounding_sufficient)) {
+				if (
+					answers.grounding_sufficient !== undefined &&
+					!this.isTruthy(answers.grounding_sufficient, undefined, "grounding_sufficient")
+				) {
 					failed.push("grounding_sufficient");
 					outcome = "gather_more";
 				}
@@ -417,7 +444,7 @@ export class SystemOneSteeringPlane {
 
 			case "JEV-004": {
 				if (directive.action === "completion_candidate") {
-					if (!this.isTruthy(answers.completion_plausible, 0.75)) {
+					if (!this.isTruthy(answers.completion_plausible, 0.75, "completion_plausible")) {
 						failed.push("completion_plausible");
 						outcome = "fail";
 					}
@@ -434,7 +461,7 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-006": {
-				if (this.isTruthy(answers.strategy_repetition)) {
+				if (this.isTruthy(answers.strategy_repetition, undefined, "strategy_repetition")) {
 					failed.push("no_strategy_repetition");
 					outcome = "replan";
 				}
@@ -442,10 +469,10 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-009": {
-				if (!this.isTruthy(answers.gap_confirmed)) {
+				if (!this.isTruthy(answers.gap_confirmed, undefined, "gap_confirmed")) {
 					failed.push("gap_confirmed");
 				}
-				if (!this.isTruthy(answers.adaptation_needed)) {
+				if (!this.isTruthy(answers.adaptation_needed, undefined, "adaptation_needed")) {
 					failed.push("adaptation_needed");
 				}
 				if (failed.length > 0) outcome = "fail";
@@ -453,7 +480,7 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-010": {
-				if (!this.isTruthy(answers.risk_acceptable)) {
+				if (!this.isTruthy(answers.risk_acceptable, undefined, "risk_acceptable")) {
 					failed.push("risk_acceptable");
 					outcome = "block";
 				}
@@ -461,86 +488,105 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-011": {
-				if (!this.isTruthy(answers.spec_complete)) failed.push("spec_complete");
-				if (!this.isTruthy(answers.interface_sound)) failed.push("interface_sound");
-				if (!this.isTruthy(answers.side_effects_bounded)) failed.push("side_effects_bounded");
-				if (!this.isTruthy(answers.test_strategy_viable)) failed.push("test_strategy_viable");
+				if (!this.isTruthy(answers.spec_complete, undefined, "spec_complete")) failed.push("spec_complete");
+				if (!this.isTruthy(answers.interface_sound, undefined, "interface_sound")) failed.push("interface_sound");
+				if (!this.isTruthy(answers.side_effects_bounded, undefined, "side_effects_bounded"))
+					failed.push("side_effects_bounded");
+				if (!this.isTruthy(answers.test_strategy_viable, undefined, "test_strategy_viable"))
+					failed.push("test_strategy_viable");
 				if (failed.length > 0) outcome = "repair";
 				break;
 			}
 
 			case "JEV-012": {
-				if (!this.isTruthy(answers.plan_viable)) failed.push("plan_viable");
-				if (!this.isTruthy(answers.architecture_fit)) failed.push("architecture_fit");
-				if (!this.isTruthy(answers.builder_profile_sound)) failed.push("builder_profile_sound");
+				if (!this.isTruthy(answers.plan_viable, undefined, "plan_viable")) failed.push("plan_viable");
+				if (!this.isTruthy(answers.architecture_fit, undefined, "architecture_fit"))
+					failed.push("architecture_fit");
+				if (!this.isTruthy(answers.builder_profile_sound, undefined, "builder_profile_sound"))
+					failed.push("builder_profile_sound");
 				if (failed.length > 0) outcome = "repair";
 				break;
 			}
 
 			case "JEV-013": {
-				if (!this.isTruthy(answers.spec_fulfilled, 0.7)) failed.push("spec_fulfilled");
-				if (!this.isTruthy(answers.tests_valid)) failed.push("tests_valid");
-				if (!this.isTruthy(answers.safety_satisfied)) failed.push("safety_satisfied");
+				if (!this.isTruthy(answers.spec_fulfilled, 0.7, "spec_fulfilled")) failed.push("spec_fulfilled");
+				if (!this.isTruthy(answers.tests_valid, undefined, "tests_valid")) failed.push("tests_valid");
+				if (!this.isTruthy(answers.safety_satisfied, undefined, "safety_satisfied"))
+					failed.push("safety_satisfied");
 				if (failed.length > 0) outcome = "repair";
 				break;
 			}
 
 			case "JEV-014": {
-				if (!this.isTruthy(answers.scope_bounded)) failed.push("scope_bounded");
-				if (!this.isTruthy(answers.rollback_safe)) failed.push("rollback_safe");
-				if (!this.isTruthy(answers.invariants_preserved)) failed.push("invariants_preserved");
+				if (!this.isTruthy(answers.scope_bounded, undefined, "scope_bounded")) failed.push("scope_bounded");
+				if (!this.isTruthy(answers.rollback_safe, undefined, "rollback_safe")) failed.push("rollback_safe");
+				if (!this.isTruthy(answers.invariants_preserved, undefined, "invariants_preserved"))
+					failed.push("invariants_preserved");
 				if (failed.length > 0) outcome = "block";
 				break;
 			}
 
 			case "JEV-015": {
-				if (!this.isTruthy(answers.activation_succeeded)) failed.push("activation_succeeded");
-				if (!this.isTruthy(answers.runtime_healthy)) failed.push("runtime_healthy");
-				if (!this.isTruthy(answers.capability_available)) failed.push("capability_available");
+				if (!this.isTruthy(answers.activation_succeeded, undefined, "activation_succeeded"))
+					failed.push("activation_succeeded");
+				if (!this.isTruthy(answers.runtime_healthy, undefined, "runtime_healthy")) failed.push("runtime_healthy");
+				if (!this.isTruthy(answers.capability_available, undefined, "capability_available"))
+					failed.push("capability_available");
 				if (failed.length > 0) outcome = "fail";
 				break;
 			}
 
 			case "JEV-016": {
-				if (!this.isTruthy(answers.task_proof_passed)) failed.push("task_proof_passed");
-				if (!this.isTruthy(answers.regression_absent)) failed.push("regression_absent");
-				if (!this.isTruthy(answers.commit_approved)) failed.push("commit_approved");
+				if (!this.isTruthy(answers.task_proof_passed, undefined, "task_proof_passed"))
+					failed.push("task_proof_passed");
+				if (!this.isTruthy(answers.regression_absent, undefined, "regression_absent"))
+					failed.push("regression_absent");
+				if (!this.isTruthy(answers.commit_approved, undefined, "commit_approved")) failed.push("commit_approved");
 				if (failed.length > 0) outcome = "fail";
 				break;
 			}
 
 			case "JEV-017": {
-				if (!this.isTruthy(answers.claim_supported)) failed.push("claim_supported");
-				if (!this.isTruthy(answers.evidence_sufficient)) failed.push("evidence_sufficient");
+				if (!this.isTruthy(answers.claim_supported, undefined, "claim_supported")) failed.push("claim_supported");
+				if (!this.isTruthy(answers.evidence_sufficient, undefined, "evidence_sufficient"))
+					failed.push("evidence_sufficient");
 				if (failed.length > 0) outcome = "fail";
 				break;
 			}
 
 			case "JEV-018": {
-				if (!this.isTruthy(answers.patch_matches_requirements)) failed.push("patch_matches_requirements");
-				if (!this.isTruthy(answers.side_effects_acceptable)) failed.push("side_effects_acceptable");
+				if (!this.isTruthy(answers.patch_matches_requirements, undefined, "patch_matches_requirements"))
+					failed.push("patch_matches_requirements");
+				if (!this.isTruthy(answers.side_effects_acceptable, undefined, "side_effects_acceptable"))
+					failed.push("side_effects_acceptable");
 				if (failed.length > 0) outcome = "repair";
 				break;
 			}
 
 			case "JEV-019": {
-				if (!this.isTruthy(answers.bug_reproduced)) failed.push("bug_reproduced");
-				if (!this.isTruthy(answers.fix_verified)) failed.push("fix_verified");
-				if (!this.isTruthy(answers.causal_link_proven)) failed.push("causal_link_proven");
+				if (!this.isTruthy(answers.bug_reproduced, undefined, "bug_reproduced")) failed.push("bug_reproduced");
+				if (!this.isTruthy(answers.fix_verified, undefined, "fix_verified")) failed.push("fix_verified");
+				if (!this.isTruthy(answers.causal_link_proven, undefined, "causal_link_proven"))
+					failed.push("causal_link_proven");
 				if (failed.length > 0) outcome = "repair";
 				break;
 			}
 
 			case "JEV-020": {
-				if (!this.isTruthy(answers.boundaries_respected)) failed.push("boundaries_respected");
-				if (!this.isTruthy(answers.invariants_held)) failed.push("invariants_held");
+				if (!this.isTruthy(answers.boundaries_respected, undefined, "boundaries_respected"))
+					failed.push("boundaries_respected");
+				if (!this.isTruthy(answers.invariants_held, undefined, "invariants_held")) failed.push("invariants_held");
 				if (failed.length > 0) outcome = "block";
 				break;
 			}
 
 			case "JEV-021": {
-				if (!this.isTruthy(answers.test_coverage_sufficient)) failed.push("test_coverage_sufficient");
-				if (answers.negative_tests_present !== undefined && !this.isTruthy(answers.negative_tests_present)) {
+				if (!this.isTruthy(answers.test_coverage_sufficient, undefined, "test_coverage_sufficient"))
+					failed.push("test_coverage_sufficient");
+				if (
+					answers.negative_tests_present !== undefined &&
+					!this.isTruthy(answers.negative_tests_present, undefined, "negative_tests_present")
+				) {
 					failed.push("negative_tests_present");
 				}
 				if (failed.length > 0) outcome = "repair";
@@ -548,21 +594,24 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-022": {
-				if (!this.isTruthy(answers.checks_relevant)) failed.push("checks_relevant");
-				if (!this.isTruthy(answers.criteria_covered)) failed.push("criteria_covered");
+				if (!this.isTruthy(answers.checks_relevant, undefined, "checks_relevant")) failed.push("checks_relevant");
+				if (!this.isTruthy(answers.criteria_covered, undefined, "criteria_covered"))
+					failed.push("criteria_covered");
 				if (failed.length > 0) outcome = "repair";
 				break;
 			}
 
 			case "JEV-023": {
-				if (!this.isTruthy(answers.repairs_sufficient)) failed.push("repairs_sufficient");
-				if (!this.isTruthy(answers.root_cause_addressed)) failed.push("root_cause_addressed");
+				if (!this.isTruthy(answers.repairs_sufficient, undefined, "repairs_sufficient"))
+					failed.push("repairs_sufficient");
+				if (!this.isTruthy(answers.root_cause_addressed, undefined, "root_cause_addressed"))
+					failed.push("root_cause_addressed");
 				if (failed.length > 0) outcome = "repair";
 				break;
 			}
 
 			case "JEV-024": {
-				if (!this.isTruthy(answers.completion_plausible, 0.75)) {
+				if (!this.isTruthy(answers.completion_plausible, 0.75, "completion_plausible")) {
 					failed.push("completion_plausible");
 					outcome = "fail";
 				}
@@ -641,61 +690,72 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-027": {
-				if (!this.isTruthy(answers.delivery_bundle_truthful)) failed.push("delivery_bundle_truthful");
-				if (!this.isTruthy(answers.artifacts_verified)) failed.push("artifacts_verified");
-				if (!this.isTruthy(answers.limitations_disclosed)) failed.push("limitations_disclosed");
+				if (!this.isTruthy(answers.delivery_bundle_truthful, undefined, "delivery_bundle_truthful"))
+					failed.push("delivery_bundle_truthful");
+				if (!this.isTruthy(answers.artifacts_verified, undefined, "artifacts_verified"))
+					failed.push("artifacts_verified");
+				if (!this.isTruthy(answers.limitations_disclosed, undefined, "limitations_disclosed"))
+					failed.push("limitations_disclosed");
 				if (failed.length > 0) outcome = "fail";
 				break;
 			}
 
 			case "JEV-028": {
-				if (!this.isTruthy(answers.release_ready)) failed.push("release_ready");
-				if (!this.isTruthy(answers.package_healthy)) failed.push("package_healthy");
-				if (!this.isTruthy(answers.deploy_safe)) failed.push("deploy_safe");
+				if (!this.isTruthy(answers.release_ready, undefined, "release_ready")) failed.push("release_ready");
+				if (!this.isTruthy(answers.package_healthy, undefined, "package_healthy")) failed.push("package_healthy");
+				if (!this.isTruthy(answers.deploy_safe, undefined, "deploy_safe")) failed.push("deploy_safe");
 				if (failed.length > 0) outcome = "block";
 				break;
 			}
 
 			case "JEV-031": {
-				if (!this.isTruthy(answers.specialist_needed)) failed.push("specialist_needed");
+				if (!this.isTruthy(answers.specialist_needed, undefined, "specialist_needed"))
+					failed.push("specialist_needed");
 				if (failed.length > 0) outcome = "fail";
 				break;
 			}
 
 			case "JEV-033": {
-				if (!this.isTruthy(answers.spec_complete)) failed.push("spec_complete");
-				if (!this.isTruthy(answers.role_bounded)) failed.push("role_bounded");
-				if (!this.isTruthy(answers.tools_skills_sufficient)) failed.push("tools_skills_sufficient");
+				if (!this.isTruthy(answers.spec_complete, undefined, "spec_complete")) failed.push("spec_complete");
+				if (!this.isTruthy(answers.role_bounded, undefined, "role_bounded")) failed.push("role_bounded");
+				if (!this.isTruthy(answers.tools_skills_sufficient, undefined, "tools_skills_sufficient"))
+					failed.push("tools_skills_sufficient");
 				if (failed.length > 0) outcome = "repair";
 				break;
 			}
 
 			case "JEV-034": {
-				if (!this.isTruthy(answers.dependencies_resolved)) failed.push("dependencies_resolved");
-				if (!this.isTruthy(answers.capabilities_ready)) failed.push("capabilities_ready");
-				if (!this.isTruthy(answers.tools_available)) failed.push("tools_available");
+				if (!this.isTruthy(answers.dependencies_resolved, undefined, "dependencies_resolved"))
+					failed.push("dependencies_resolved");
+				if (!this.isTruthy(answers.capabilities_ready, undefined, "capabilities_ready"))
+					failed.push("capabilities_ready");
+				if (!this.isTruthy(answers.tools_available, undefined, "tools_available")) failed.push("tools_available");
 				if (failed.length > 0) outcome = "repair";
 				break;
 			}
 
 			case "JEV-035": {
-				if (!this.isTruthy(answers.contract_sound)) failed.push("contract_sound");
-				if (!this.isTruthy(answers.authority_bounded)) failed.push("authority_bounded");
-				if (!this.isTruthy(answers.within_charter)) failed.push("within_charter");
+				if (!this.isTruthy(answers.contract_sound, undefined, "contract_sound")) failed.push("contract_sound");
+				if (!this.isTruthy(answers.authority_bounded, undefined, "authority_bounded"))
+					failed.push("authority_bounded");
+				if (!this.isTruthy(answers.within_charter, undefined, "within_charter")) failed.push("within_charter");
 				if (failed.length > 0) outcome = "block";
 				break;
 			}
 
 			case "JEV-036": {
-				if (!this.isTruthy(answers.mission_fulfilled)) failed.push("mission_fulfilled");
-				if (!this.isTruthy(answers.proof_satisfied)) failed.push("proof_satisfied");
+				if (!this.isTruthy(answers.mission_fulfilled, undefined, "mission_fulfilled"))
+					failed.push("mission_fulfilled");
+				if (!this.isTruthy(answers.proof_satisfied, undefined, "proof_satisfied")) failed.push("proof_satisfied");
 				if (failed.length > 0) outcome = "fail";
 				break;
 			}
 
 			case "JEV-041": {
-				if (!this.isTruthy(answers.unique_responsibility)) failed.push("unique_responsibility");
-				if (this.isTruthy(answers.competing_existing_detected)) failed.push("no_competing_existing_detected");
+				if (!this.isTruthy(answers.unique_responsibility, undefined, "unique_responsibility"))
+					failed.push("unique_responsibility");
+				if (this.isTruthy(answers.competing_existing_detected, undefined, "competing_existing_detected"))
+					failed.push("no_competing_existing_detected");
 				if (failed.length > 0) outcome = "fail";
 				break;
 			}
@@ -712,17 +772,23 @@ export class SystemOneSteeringPlane {
 			case "JEV-043": {
 				if (
 					answers.mutations_conform_to_disposition !== undefined &&
-					!this.isTruthy(answers.mutations_conform_to_disposition)
+					!this.isTruthy(answers.mutations_conform_to_disposition, undefined, "mutations_conform_to_disposition")
 				) {
 					failed.push("mutations_conform_to_disposition");
 				}
 				if (
 					answers.no_unauthorized_duplication !== undefined &&
-					!this.isTruthy(answers.no_unauthorized_duplication)
+					!this.isTruthy(answers.no_unauthorized_duplication, undefined, "no_unauthorized_duplication")
 				) {
 					failed.push("no_unauthorized_duplication");
 				}
-				if (this.isTruthy(answers.duplicate_responsibility_introduced)) {
+				if (
+					this.isTruthy(
+						answers.duplicate_responsibility_introduced,
+						undefined,
+						"duplicate_responsibility_introduced",
+					)
+				) {
 					failed.push("no_duplicate_responsibility_introduced");
 				}
 				if (failed.length > 0) outcome = "repair";
@@ -730,15 +796,18 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-044": {
-				if (!this.isTruthy(answers.no_hidden_duplicates)) failed.push("no_hidden_duplicates");
-				if (!this.isTruthy(answers.single_semantic_owner)) failed.push("single_semantic_owner");
+				if (!this.isTruthy(answers.no_hidden_duplicates, undefined, "no_hidden_duplicates"))
+					failed.push("no_hidden_duplicates");
+				if (!this.isTruthy(answers.single_semantic_owner, undefined, "single_semantic_owner"))
+					failed.push("single_semantic_owner");
 				if (failed.length > 0) outcome = "fail";
 				break;
 			}
 
 			case "JEV-045": {
-				if (!this.isTruthy(answers.waiver_valid)) failed.push("waiver_valid");
-				if (!this.isTruthy(answers.architectural_rationale_sound)) failed.push("architectural_rationale_sound");
+				if (!this.isTruthy(answers.waiver_valid, undefined, "waiver_valid")) failed.push("waiver_valid");
+				if (!this.isTruthy(answers.architectural_rationale_sound, undefined, "architectural_rationale_sound"))
+					failed.push("architectural_rationale_sound");
 				if (failed.length > 0) outcome = "block";
 				break;
 			}
@@ -749,7 +818,7 @@ export class SystemOneSteeringPlane {
 			}
 
 			default: {
-				if (answers.approved !== undefined && !this.isTruthy(answers.approved)) {
+				if (answers.approved !== undefined && !this.isTruthy(answers.approved, undefined, "approved")) {
 					failed.push("approved");
 					outcome = "fail";
 				}
@@ -761,9 +830,22 @@ export class SystemOneSteeringPlane {
 			outcome = "fail";
 		}
 
+		// A predicate that only came back unsure is a doubt, not a rejection. Every failed predicate
+		// here is also a doubt (isTruthy reports ambiguous as a no), so a doubt on its own -- nothing
+		// decisively wrong, something undecided -- routes to gather_more: look again, do not reject.
+		const unsure = [...new Set(this.openDoubts)];
+		this.openDoubts = [];
+		const onlyDoubt = unsure.filter((predicate) => !failed.includes(predicate));
+		if (outcome === "fail" && failed.every((predicate) => unsure.includes(predicate))) {
+			outcome = "gather_more";
+		} else if (outcome === "pass" && onlyDoubt.length > 0) {
+			outcome = "gather_more";
+		}
+
 		return {
 			semantic_outcome: outcome,
 			failed_semantic_predicates: failed,
+			unsure_semantic_predicates: unsure,
 		};
 	}
 
@@ -949,7 +1031,8 @@ export class SystemOneSteeringPlane {
 				answers[d.id] = {
 					type: "noul",
 					noul: result.probabilityTrue,
-					value: result.value,
+					direction: result.direction,
+					band: result.band,
 					confidence: result.confidence.value,
 				};
 				confidences.push(result.confidence.value);
@@ -991,7 +1074,7 @@ export class SystemOneSteeringPlane {
 		}
 
 		const directive = this.composeDirective(request.checkpointId, answers, program);
-		const { semantic_outcome, failed_semantic_predicates } = this.evaluateSemanticOutcome(
+		const { semantic_outcome, failed_semantic_predicates, unsure_semantic_predicates } = this.evaluateSemanticOutcome(
 			request.checkpointId,
 			answers,
 			directive,
@@ -1027,6 +1110,7 @@ export class SystemOneSteeringPlane {
 			policy_result: semantic_outcome === "pass" ? "accepted" : "rejected",
 			semantic_outcome,
 			failed_semantic_predicates,
+			unsure_semantic_predicates,
 			parent_certificate_ids: request.parentCertificateIds ? [...request.parentCertificateIds] : undefined,
 			usage: evaluation.audit as Record<string, unknown> | undefined,
 			created_at: new Date().toISOString(),

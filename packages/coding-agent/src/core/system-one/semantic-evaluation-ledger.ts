@@ -6,6 +6,7 @@
  */
 
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
+import type { NoulBand } from "../decision/noul.ts";
 import type { Consequence } from "../decision/primitives.ts";
 import { findPackForCheckpoint } from "../steering/programs.ts";
 import type { SteeringCertificate } from "../steering/types.ts";
@@ -115,6 +116,34 @@ export function semanticEvaluationLabel(programId: string): string {
 	return bounded(programId, LABEL_LIMIT);
 }
 
+/**
+ * A reason line for a judgment that settled nothing.
+ *
+ * Doubts travel as reason lines rather than as a parallel array: reasons are already bounded,
+ * already durable and already drawn, so a doubt reaches the pane and the ledger by the same route
+ * as every other reason. The prefix is the contract that makes one countable.
+ */
+export const DOUBT_REASON_PREFIX = "unsure: ";
+
+export function doubtReason(text: string): string {
+	return bounded(`${DOUBT_REASON_PREFIX}${text}`, REASON_LIMIT);
+}
+
+/** The open doubts in a set of reason lines, with the prefix stripped. */
+export function doubtsFromReasons(reasons: readonly string[] | undefined): string[] {
+	return (reasons ?? [])
+		.filter((line) => line.startsWith(DOUBT_REASON_PREFIX))
+		.map((line) => line.slice(DOUBT_REASON_PREFIX.length));
+}
+
+/** How each band reads to an operator. `soft pass` and `unsure` are deliberately not "true". */
+export const NOUL_BAND_LABEL: Readonly<Record<NoulBand, string>> = Object.freeze({
+	hard_pass: "pass",
+	soft_pass: "soft pass",
+	ambiguous: "unsure",
+	hard_fail: "fail",
+});
+
 /** What a raw evaluation decided, without inventing a judgment it did not make. */
 export function verdictFromEvaluation(evaluation: DecisionEvaluation): {
 	verdict?: string;
@@ -125,9 +154,15 @@ export function verdictFromEvaluation(evaluation: DecisionEvaluation): {
 	for (const [id, result] of Object.entries(evaluation.results)) {
 		if (reasons.length >= MAX_EVALUATION_REASONS) break;
 		switch (result.kind) {
-			case "boolean":
-				reasons.push(bounded(`${id}: ${result.value} (p=${result.probabilityTrue.toFixed(2)})`, REASON_LIMIT));
+			case "boolean": {
+				// The probability and the band are the answer. Printing the old derived boolean taught
+				// the 0.5 cutoff to anyone reading the pane: `x: true (p=0.51)` is not a yes.
+				const line = `${id}: P(yes)=${result.probabilityTrue.toFixed(2)} · ${NOUL_BAND_LABEL[result.band]} (${
+					result.direction === "required_false" ? "needs no" : "needs yes"
+				})`;
+				reasons.push(result.band === "ambiguous" ? doubtReason(line) : bounded(line, REASON_LIMIT));
 				break;
+			}
 			case "choice":
 				if (verdict === undefined) verdict = result.selected;
 				reasons.push(bounded(`${id}: ${result.selected}`, REASON_LIMIT));
@@ -157,9 +192,17 @@ export function verdictFromCertificate(certificate: SteeringCertificate): {
 	const reasons: string[] = [];
 	if (certificate.semantic_outcome !== "pass")
 		reasons.push(bounded(`directive: ${certificate.directive}`, REASON_LIMIT));
-	for (const predicate of certificate.failed_semantic_predicates ?? []) {
+	const failed = certificate.failed_semantic_predicates ?? [];
+	for (const predicate of failed) {
 		if (reasons.length >= MAX_EVALUATION_REASONS) break;
 		reasons.push(bounded(predicate, REASON_LIMIT));
+	}
+	// A predicate that was only unsure is an open doubt, not a rejection: it is why the checkpoint
+	// wants another look, and the pane has to be able to say so.
+	for (const predicate of certificate.unsure_semantic_predicates ?? []) {
+		if (reasons.length >= MAX_EVALUATION_REASONS) break;
+		if (failed.includes(predicate)) continue;
+		reasons.push(doubtReason(predicate));
 	}
 	return { verdict, reasons };
 }

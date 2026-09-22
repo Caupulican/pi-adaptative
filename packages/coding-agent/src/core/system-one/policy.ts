@@ -1,7 +1,15 @@
+import {
+	type NoulBand,
+	type NoulBandThresholds,
+	type NoulDirection,
+	noulBand,
+	settledFromBand,
+} from "../decision/noul.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig, type SystemOneThresholds } from "./config.ts";
 import type { CompletionGate, ExecutionState, ToolImpact } from "./types.ts";
 
-export type NoulEvaluation = "hard_pass" | "soft_pass" | "ambiguous" | "hard_fail";
+/** Re-exported so the System One layer keeps one name for the band, defined in `decision/noul.ts`. */
+export type NoulEvaluation = NoulBand;
 
 export interface ChoiceEvaluation {
 	choice: string;
@@ -38,31 +46,70 @@ export function noulFromAnswer(answer: unknown, fallback: boolean): number | boo
 	return fallback;
 }
 
+/** The operator's configured numbers, in the shape the band arithmetic takes. */
+export function noulBandThresholds(
+	thresholds: SystemOneThresholds = DEFAULT_SYSTEM_ONE_CONFIG.thresholds,
+): NoulBandThresholds {
+	return {
+		requiredTrue: {
+			hardPass: thresholds.noul_required_true.hard_pass,
+			softPass: thresholds.noul_required_true.soft_pass,
+			hardFail: thresholds.noul_required_true.hard_fail,
+		},
+		requiredFalse: {
+			hardPassMax: thresholds.noul_required_false.hard_pass_max,
+			softPassMax: thresholds.noul_required_false.soft_pass_max,
+			hardFailMin: thresholds.noul_required_false.hard_fail_min,
+		},
+	};
+}
+
 export function evaluateNoul(
 	p: number | boolean,
-	direction: "required_true" | "required_false",
+	direction: NoulDirection,
 	thresholds: SystemOneThresholds = DEFAULT_SYSTEM_ONE_CONFIG.thresholds,
 ): NoulEvaluation {
-	if (typeof p === "boolean") {
-		if (direction === "required_true") return p ? "hard_pass" : "hard_fail";
-		return !p ? "hard_pass" : "hard_fail";
-	}
-	if (typeof p !== "number" || Number.isNaN(p) || p < 0 || p > 1) {
-		return "hard_fail";
-	}
+	// A literal boolean is P=1 or P=0 and lands in a decisive band either way.
+	const probability = typeof p === "boolean" ? (p ? 1 : 0) : p;
+	return noulBand(probability as number, direction, noulBandThresholds(thresholds));
+}
 
-	if (direction === "required_true") {
-		if (p >= thresholds.noul_required_true.hard_pass) return "hard_pass";
-		if (p >= thresholds.noul_required_true.soft_pass) return "soft_pass";
-		if (p <= thresholds.noul_required_true.hard_fail) return "hard_fail";
-		return "ambiguous";
-	}
+/**
+ * The yes/no a noul answer settles on, or undefined when it settles nothing.
+ * The one sanctioned way to get a boolean out of a probability: there is no 0.5 cutoff anywhere.
+ */
+export function settledNoul(
+	answer: unknown,
+	direction: NoulDirection,
+	fallback: boolean,
+	thresholds: SystemOneThresholds = DEFAULT_SYSTEM_ONE_CONFIG.thresholds,
+): boolean | undefined {
+	return settledFromBand(evaluateNoul(noulFromAnswer(answer, fallback), direction, thresholds), direction);
+}
 
-	// required_false: p is P(yes). A low probability (<= hard_pass_max, e.g. 0.07) is a confident NO!
-	if (p <= thresholds.noul_required_false.hard_pass_max) return "hard_pass";
-	if (p <= thresholds.noul_required_false.soft_pass_max) return "soft_pass";
-	if (p >= thresholds.noul_required_false.hard_fail_min) return "hard_fail";
-	return "ambiguous";
+/**
+ * The answer settles on a yes in the required direction.
+ *
+ * A soft pass counts: it is provisional, and the doctrine lets the current step continue on it. An
+ * ambiguous answer does not, because it decided nothing. This is the ordinary gate; use
+ * `noulHoldsDecisively` for the two things a provisional answer may not do -- close a goal, or
+ * authorize a destructive or outward-facing action.
+ */
+export function noulHolds(
+	answer: unknown,
+	direction: NoulDirection,
+	thresholds: SystemOneThresholds = DEFAULT_SYSTEM_ONE_CONFIG.thresholds,
+): boolean {
+	return settledNoul(answer, direction, false, thresholds) === true;
+}
+
+/** Only a `hard_pass`. A soft pass is provisional and an ambiguous answer decided nothing. */
+export function noulHoldsDecisively(
+	answer: unknown,
+	direction: NoulDirection,
+	thresholds: SystemOneThresholds = DEFAULT_SYSTEM_ONE_CONFIG.thresholds,
+): boolean {
+	return evaluateNoul(noulFromAnswer(answer, false), direction, thresholds) === "hard_pass";
 }
 
 /**

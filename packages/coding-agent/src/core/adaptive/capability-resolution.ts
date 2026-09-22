@@ -4,6 +4,7 @@
  */
 
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
+import { noulHolds, settledNoul } from "../system-one/policy.ts";
 import type { CapabilityCatalog, CapabilityCatalogEntry } from "./capability-catalog.ts";
 import type { CapabilityKind, EstablishedCapability } from "./types.ts";
 
@@ -93,7 +94,9 @@ export class CapabilityResolver {
 		return {
 			need,
 			rankedCandidates,
-			needsCapability: needsCap >= 0.5,
+			// A decisive yes, not a coin flip: synthesising a capability on ignorance is expensive work
+			// nobody asked for.
+			needsCapability: noulHolds(needsCap, "required_true"),
 			certificateId: cert.certificate_id,
 		};
 	}
@@ -153,12 +156,16 @@ export class CapabilityResolver {
 		const bestFitId = whichAns?.choice;
 		const bestFitScore = bestFitId ? (absoluteFits[bestFitId] ?? 0) : 0;
 		const gapAns = answers.gap_remains as { noul?: number; boolean?: boolean } | undefined;
-		const gapRemains =
+		// gap_remains asks whether a gap is still present; the required end is "no gap". A decisive
+		// yes is the adverse answer. An undecided one falls back to the measured fit score rather
+		// than inventing a verdict from a probability that settled nothing.
+		const gapSettled =
 			typeof gapAns?.boolean === "boolean"
 				? gapAns.boolean
 				: gapAns?.noul !== undefined
-					? gapAns.noul >= 0.5
-					: bestFitScore < 0.7;
+					? settledNoul(gapAns.noul, "required_false", false) === false
+					: undefined;
+		const gapRemains = gapSettled ?? bestFitScore < 0.7;
 
 		// S1A-065: Shortlist can reject all if below absolute fit threshold
 		if (!gapRemains && bestFitId && bestFitScore >= 0.7) {

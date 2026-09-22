@@ -1,3 +1,5 @@
+import type { NoulDirection } from "./noul.ts";
+
 export type Consequence = "low" | "medium" | "high" | "critical";
 
 export interface BooleanDecision {
@@ -8,6 +10,12 @@ export interface BooleanDecision {
 		readonly true?: string;
 		readonly false?: string;
 	};
+	/**
+	 * Which end of the probability the asker needs. `required_true` (the default) passes on a high
+	 * P(true); `required_false` passes on a low one. The band is read against this, so a question
+	 * that is really "no risk is present" must say so here or its confident no reads as a fail.
+	 */
+	readonly direction?: NoulDirection;
 	readonly consequence?: Consequence;
 }
 

@@ -15,6 +15,7 @@
 import type { GoalClarification, GoalClarificationCategory } from "../goals/goal-state.ts";
 import type { HumanInputQuestion } from "../human-input.ts";
 import { compileDecisionProgramForCheckpoint } from "../steering/programs.ts";
+import { settledNoul } from "./policy.ts";
 
 /**
  * The batched decision-program shape the session's recorded semantic engine consumes. Declared here
@@ -78,7 +79,6 @@ export interface ClarificationNeedInput {
 export const MAX_CLARIFICATION_QUESTION_LENGTH = 300;
 
 /** A boolean answer is trusted only above this probability; below it the answer is not an answer. */
-const SEMANTIC_TRUE_THRESHOLD = 0.6;
 
 /** Display text for a batch of questions: what the ledger records and what the owner was asked. */
 export function formatClarificationQuestion(questions: readonly HumanInputQuestion[]): string {
@@ -97,13 +97,18 @@ export function clarificationQuestionIdentity(text: string): string {
 	return text.replace(/\s+/gu, " ").trim().toLowerCase();
 }
 
+/**
+ * The answer, or undefined when the band settled nothing. Undefined already means "not answered"
+ * to every caller here, which is the honest reading of an ambiguous probability -- a cutoff would
+ * turn it into a confident yes or no that the model never gave.
+ */
 function readBoolean(results: Record<string, any> | undefined, id: string): boolean | undefined {
 	const res = results?.[id];
 	if (!res || typeof res !== "object") return undefined;
-	if (typeof res.probabilityTrue === "number") return res.probabilityTrue >= SEMANTIC_TRUE_THRESHOLD;
-	if (typeof res.noul === "number") return res.noul >= SEMANTIC_TRUE_THRESHOLD;
 	if (typeof res.value === "boolean") return res.value;
-	return undefined;
+	const probability = typeof res.probabilityTrue === "number" ? res.probabilityTrue : res.noul;
+	if (typeof probability !== "number") return undefined;
+	return settledNoul(probability, res.direction === "required_false" ? "required_false" : "required_true", false);
 }
 
 /**

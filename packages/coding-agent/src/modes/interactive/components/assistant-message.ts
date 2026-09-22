@@ -120,6 +120,17 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	/**
+	 * Does this block carry something the operator can read? Text the current commentary setting
+	 * shows, or any thinking block — a hidden one is still content, just collapsed. Deliberately
+	 * blind to `hideThinkingBlock`, which is a view toggle, not a fact about the turn.
+	 */
+	private isReadable(content: AssistantMessage["content"][number]): boolean {
+		if (content.type === "text")
+			return isAssistantDisplayText(content, this.showCommentary) && Boolean(content.text.trim());
+		return content.type === "thinking" && Boolean(content.thinking.trim());
+	}
+
 	updateContent(message: AssistantMessage): void {
 		this.contentRevision++;
 		this.lastMessage = message;
@@ -130,14 +141,18 @@ export class AssistantMessageComponent extends Container {
 		this.thinkingContainer = undefined;
 
 		const hasVisibleContent = message.content.some(
-			(c) =>
-				(c.type === "text" && isAssistantDisplayText(c, this.showCommentary) && c.text.trim()) ||
-				(!this.hideThinkingBlock && c.type === "thinking" && c.thinking.trim()),
+			(c) => this.isReadable(c) && (c.type !== "thinking" || !this.hideThinkingBlock),
 		);
+		// What the turn produced, independent of the thinking toggle: a hidden thinking block is still
+		// content the operator can reveal, so it must not read as an empty turn.
+		const hasReadableContent = message.content.some((c) => this.isReadable(c));
 		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
 		this.visibleOutput =
 			hasVisibleContent ||
-			(!hasToolCalls && (message.stopReason === "aborted" || message.stopReason === "error" || !this.isStreaming));
+			(!hasToolCalls &&
+				(message.stopReason === "aborted" ||
+					message.stopReason === "error" ||
+					(!this.isStreaming && !hasReadableContent)));
 
 		if (hasVisibleContent) {
 			this.contentContainer.addChild(new Spacer(1));
@@ -169,13 +184,7 @@ export class AssistantMessageComponent extends Container {
 				// in place without rebuilding this component (see setHideThinkingBlock doc above).
 				// Add spacing only when another visible assistant content block follows.
 				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
-				const hasVisibleContentAfter = message.content
-					.slice(i + 1)
-					.some(
-						(c) =>
-							(c.type === "text" && isAssistantDisplayText(c, this.showCommentary) && c.text.trim()) ||
-							(c.type === "thinking" && c.thinking.trim()),
-					);
+				const hasVisibleContentAfter = message.content.slice(i + 1).some((c) => this.isReadable(c));
 				const thinkingRaw = thinkingBlocks.join("\n\n");
 				// Adjacent thinking blocks form one section instead of repeated visual chrome.
 				const thinkingMarkdown = new Markdown(thinkingRaw, 1, 0, this.markdownTheme, {
@@ -228,7 +237,9 @@ export class AssistantMessageComponent extends Container {
 				const errorMsg = message.errorMessage || "Unknown error";
 				this.contentContainer.addChild(new Spacer(1));
 				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), 1, 0));
-			} else if (!this.isStreaming) {
+			} else if (!this.isStreaming && !hasReadableContent) {
+				// The placeholder reports an empty turn. A turn that produced text or a thinking block
+				// has something to read, so it never gets one.
 				this.contentContainer.addChild(new Spacer(1));
 				this.contentContainer.addChild(new Text(theme.fg("muted", "(No response received from model)"), 1, 0));
 			}

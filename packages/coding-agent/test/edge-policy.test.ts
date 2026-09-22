@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+	classifyAllEdgeOperations,
 	classifyEdgeOperation,
 	collectEdgeGrants,
 	EDGE_CLASSES,
@@ -119,6 +120,56 @@ describe("edge policy classification", () => {
 		expect(classify("cd packages && FOO=1 sudo git push")).toBeUndefined();
 		expect(classify("git push $(git rev-parse --abbrev-ref HEAD)")).toBeUndefined();
 		expect(shellInvocations("git status; git push").map((argv) => argv[0])).toEqual(["git", "git"]);
+	});
+
+	it("leaves a worktree discard ordinary until the caller says other work is in the tree", () => {
+		const conditional = (command: string) =>
+			classifyAllEdgeOperations(
+				{ toolName: "bash", args: { command }, cwd: task, scopeCwd: task, agentDir },
+				{ includeConditional: true },
+			);
+		for (const command of [
+			"git reset --hard HEAD~1",
+			"git reset --merge",
+			"git clean -fdx",
+			"git checkout .",
+			"git checkout -- src",
+			"git restore src/a.ts",
+			"git stash",
+			"git stash save wip",
+			"git stash drop",
+			"git stash clear",
+			"git -C /work/project reset --hard",
+		]) {
+			// Nothing by default: a caller that cannot tell whose work is in the tree must not ask.
+			expect(classify(command), command).toBeUndefined();
+			const [operation] = conditional(command);
+			expect(operation?.class, command).toBe("destructive.fs");
+			expect(operation?.condition, command).toBe("unowned_worktree_changes");
+		}
+	});
+
+	it("keeps git that does not discard the worktree ordinary even for a caller that resolves conditions", () => {
+		for (const command of [
+			"git status",
+			"git commit -m wip",
+			"git push origin main",
+			"git reset --soft HEAD~1",
+			"git reset src/a.ts",
+			"git checkout feature-branch",
+			"git restore --staged src/a.ts",
+			"git stash pop",
+			"git stash list",
+			"git clean -n",
+		]) {
+			expect(
+				classifyAllEdgeOperations(
+					{ toolName: "bash", args: { command }, cwd: task, scopeCwd: task, agentDir },
+					{ includeConditional: true },
+				),
+				command,
+			).toEqual([]);
+		}
 	});
 
 	it("does not classify a home directory delete as ordinary because the task lives under it", () => {

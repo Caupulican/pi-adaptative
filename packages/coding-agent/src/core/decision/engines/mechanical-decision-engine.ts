@@ -1,6 +1,11 @@
 import type { DecisionEngineCapabilities } from "../capabilities.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../engine.ts";
-import { createDecisionEvaluation, type DecisionEvaluation, type DecisionResult } from "../evaluation.ts";
+import {
+	certainBooleanResult,
+	createDecisionEvaluation,
+	type DecisionEvaluation,
+	type DecisionResult,
+} from "../evaluation.ts";
 import type { DecisionProgram } from "../program.ts";
 
 export interface MechanicalObjectiveState {
@@ -184,16 +189,11 @@ export class MechanicalDecisionEngine implements SemanticDecisionEngine {
 				}
 
 				if (val !== undefined) {
-					results[decision.id] = {
-						kind: "boolean",
-						value: val,
-						probabilityTrue: val ? 1.0 : 0.0,
-						confidence: {
-							value: 1.0,
-							provenance: "heuristic",
-							isCalibrated: false,
-						},
-					};
+					results[decision.id] = certainBooleanResult(val, decision.direction ?? "required_true", {
+						value: 1.0,
+						provenance: "heuristic",
+						isCalibrated: false,
+					});
 				} else {
 					results[decision.id] = {
 						kind: "unsupported",

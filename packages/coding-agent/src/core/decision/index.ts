@@ -9,6 +9,7 @@ export * from "./engines/structured-llm-engine.ts";
 export * from "./engines/typesafe-system-one-engine.ts";
 export * from "./evaluation.ts";
 export * from "./functions.ts";
+export * from "./noul.ts";
 export * from "./policy.ts";
 export * from "./primitives.ts";
 export * from "./program.ts";

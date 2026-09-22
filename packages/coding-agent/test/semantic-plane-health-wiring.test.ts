@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { SemanticDecisionEngine } from "../src/core/decision/engine.ts";
 import { createDecisionEvaluation, type DecisionEvaluation } from "../src/core/decision/evaluation.ts";
+import { noulBand } from "../src/core/decision/noul.ts";
 import { SystemOneSteeringPlane } from "../src/core/steering/system-one-steering-plane.ts";
 import { WORKER_SUPERVISION_DECISION_IDS } from "../src/core/supervision/worker-semantic-supervisor.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
@@ -14,8 +15,9 @@ function supervisionEvaluation(): DecisionEvaluation {
 				id,
 				{
 					kind: "boolean" as const,
-					value: progressing,
 					probabilityTrue,
+					direction: "required_true" as const,
+					band: noulBand(probabilityTrue, "required_true"),
 					confidence: {
 						value: 0.9,
 						provenance: "native_calibrated" as const,

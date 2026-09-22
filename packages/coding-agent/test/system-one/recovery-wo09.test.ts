@@ -248,7 +248,7 @@ describe("System One recovery WO-09 production paths", () => {
 		expect(controller.peekControlDirective()?.objectiveRoute).toBe("retrieve");
 	});
 
-	it("enables capabilities only on a hard yes and leaves a failed classification unset", async () => {
+	it("enables capabilities only on a hard yes and reports a failed classification as unavailable", async () => {
 		const controller = new SystemOneController({
 			store: emptyStore("authorize"),
 			adapter: {
@@ -260,15 +260,18 @@ describe("System One recovery WO-09 production paths", () => {
 			},
 		});
 		expect(await controller.classifyUserRequest("commit and push this")).toEqual({
-			capabilitiesAuthorized: true,
-			localCommitsOnly: false,
-			liftsDeliveryBlock: false,
-			rulesDiffer: false,
-			overridesWrittenRules: false,
-			fullHandoff: false,
-			requestHolds: false,
+			status: "classified",
+			classification: {
+				capabilitiesAuthorized: true,
+				localCommitsOnly: false,
+				liftsDeliveryBlock: false,
+				rulesDiffer: false,
+				overridesWrittenRules: false,
+				fullHandoff: false,
+				requestHolds: false,
+			},
 		});
-		expect(await controller.classifyUserRequest("   ")).toBeUndefined();
+		expect(await controller.classifyUserRequest("   ")).toEqual({ status: "skipped" });
 		const denied = new SystemOneController({
 			store: emptyStore("authorize-no"),
 			adapter: {
@@ -280,13 +283,16 @@ describe("System One recovery WO-09 production paths", () => {
 			},
 		});
 		expect(await denied.classifyUserRequest("what does this function do")).toEqual({
-			capabilitiesAuthorized: false,
-			localCommitsOnly: false,
-			liftsDeliveryBlock: false,
-			rulesDiffer: false,
-			overridesWrittenRules: false,
-			fullHandoff: false,
-			requestHolds: false,
+			status: "classified",
+			classification: {
+				capabilitiesAuthorized: false,
+				localCommitsOnly: false,
+				liftsDeliveryBlock: false,
+				rulesDiffer: false,
+				overridesWrittenRules: false,
+				fullHandoff: false,
+				requestHolds: false,
+			},
 		});
 		const down = new SystemOneController({
 			store: emptyStore("authorize-down"),
@@ -296,7 +302,36 @@ describe("System One recovery WO-09 production paths", () => {
 				},
 			},
 		});
-		expect(await down.classifyUserRequest("commit and push this")).toBeUndefined();
+		const outcome = await down.classifyUserRequest("commit and push this");
+		expect(outcome.status).toBe("unavailable");
+		expect(outcome.status === "unavailable" && outcome.reason).toBe("unavailable");
+	});
+
+	it("asks only the questions that can still change something", async () => {
+		const asked: string[][] = [];
+		const controller = new SystemOneController({
+			store: emptyStore("authorize-scope"),
+			adapter: {
+				evaluate: async (input) => {
+					asked.push(Object.keys(input.questions));
+					return { model: "jev-1.13.0", answers: {}, latency_ms: 1 };
+				},
+			},
+		});
+		// No written rules and every edge class already granted: only the delivery axis is live.
+		await controller.classifyUserRequest("hi", "", { capabilitiesPending: false });
+		expect(asked.at(-1)).toEqual(["local_commits_only", "lifts_delivery_block"]);
+		await controller.classifyUserRequest("hi", "", { capabilitiesPending: true });
+		expect(asked.at(-1)).toEqual(["capabilities_authorized", "local_commits_only", "lifts_delivery_block"]);
+		await controller.classifyUserRequest("hi", "AGENTS.md: never push", { capabilitiesPending: false });
+		expect(asked.at(-1)).toEqual([
+			"local_commits_only",
+			"lifts_delivery_block",
+			"rules_differ",
+			"overrides_written_rules",
+			"full_handoff",
+			"request_holds",
+		]);
 	});
 
 	it("evaluateRouteOnce keeps a retrieve directive through wait_for_worker and owner_required, then reroutes", async () => {

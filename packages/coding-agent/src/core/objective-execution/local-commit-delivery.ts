@@ -176,6 +176,19 @@ export function applyLocalCommitCharter(charter: ExecutionCharter): ExecutionCha
 	};
 }
 
+/**
+ * System One did not answer, so the request was never classified. The binding is unchanged, which
+ * is correct; saying nothing is not, because an unclassified "commit, do not push" is
+ * indistinguishable from a classified "no limit asked for" once the turn moves on.
+ */
+export function deliveryClassificationUnavailableNote(reason: string, boundBranch: string | undefined): string {
+	const standing =
+		boundBranch === undefined
+			? "No delivery limit is bound."
+			: `The existing local-commit binding on ${boundBranch || "the current branch"} still holds.`;
+	return `DELIVERY CLASSIFICATION UNAVAILABLE: System One did not classify this request (${reason}). ${standing} If this request states a delivery limit, such as commit without pushing, honour it yourself for this task; the harness did not register it.`;
+}
+
 export function localCommitPushRefusal(branch: string | undefined): string {
 	const where = branch ? `branch '${branch}'` : "the current branch";
 	return `Local commit delivery is bound to ${where}. Git push is refused for the root and for every worker. Commit locally. Other branches and worktrees rebase onto ${where}.`;

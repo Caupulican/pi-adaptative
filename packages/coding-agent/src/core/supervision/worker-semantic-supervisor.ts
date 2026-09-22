@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { evaluateNoul, noulFromAnswer } from "../system-one/policy.ts";
 import type {
 	LiveWorkerAttempt,
 	SupervisionObservationState,
@@ -302,34 +303,42 @@ export class WorkerSemanticSupervisor {
 			let summaryEvent: string | undefined;
 			const reasonCodes: string[] = [];
 
-			if (answers.specialist_gap_present > 0.5) {
+			// Every one of these asks whether a problem is present: the required end is "no", and only a
+			// decisive yes moves a worker. Intervening on a coin flip reroutes healthy work.
+			const risk = (probability: number | undefined): boolean =>
+				evaluateNoul(noulFromAnswer(probability, false), "required_false") === "hard_fail";
+			// meaningful_progress asks the opposite way round: a decisive NO is the adverse answer.
+			const noProgress = (probability: number | undefined): boolean =>
+				evaluateNoul(noulFromAnswer(probability, true), "required_true") === "hard_fail";
+
+			if (risk(answers.specialist_gap_present)) {
 				action = "request_specialist";
 				summaryEvent = "Specialist requested · worker mission requires specialist domain";
 				reasonCodes.push("specialist_gap_detected");
-			} else if (answers.external_block_present > 0.5) {
+			} else if (risk(answers.external_block_present)) {
 				action = "mark_external_block";
 				summaryEvent = "External block detected · worker is waiting on external dependencies";
 				reasonCodes.push("external_block_detected");
-			} else if (answers.capability_gap_present > 0.5) {
+			} else if (risk(answers.capability_gap_present)) {
 				action = "request_capability";
 				summaryEvent = "Capability requested · worker mission requires synthesized capability";
 				reasonCodes.push("capability_gap_detected");
-			} else if (answers.needs_independent_verification > 0.5) {
+			} else if (risk(answers.needs_independent_verification)) {
 				action = "request_verifier";
 				summaryEvent = "Verification requested · implementation complete, independent proof missing";
 				reasonCodes.push("independent_verification_needed");
 			} else if (
-				answers.worker_stuck > 0.5 ||
-				answers.strategy_repetition > 0.5 ||
-				answers.work_off_track > 0.5 ||
-				answers.meaningful_progress < 0.3
+				risk(answers.worker_stuck) ||
+				risk(answers.strategy_repetition) ||
+				risk(answers.work_off_track) ||
+				noProgress(answers.meaningful_progress)
 			) {
-				if (answers.meaningful_progress < 0.3) {
+				if (noProgress(answers.meaningful_progress)) {
 					reasonCodes.push("meaningful_progress_insufficient");
 				}
 				// FR-065: Anti-oscillation (one steer + grace period, then stop and reroute). Off-track
 				// work is redirected now, not at the worker's next turn; a stall waits for that turn.
-				if (priorSteeringCount === 0 && answers.work_off_track > 0.5) {
+				if (priorSteeringCount === 0 && risk(answers.work_off_track)) {
 					action = "steer_now";
 					this.noteSteering(attempt.attemptId);
 					summaryEvent = "Worker redirected now · work off the mission";

@@ -1,5 +1,5 @@
 import { type ConfidenceProvenance, type DecisionConfidence, weakestCallConfidence } from "./confidence.ts";
-import type { DecisionEvaluation, FunctionCallDecisionResult } from "./evaluation.ts";
+import { type DecisionEvaluation, type FunctionCallDecisionResult, settledBoolean } from "./evaluation.ts";
 import type { SemanticFunctionRegistry } from "./functions.ts";
 import type { ChoiceDecision, DecisionDefinition } from "./primitives.ts";
 import { createDecisionProgram, type DecisionProgram, type SemanticFunctionDeclaration } from "./program.ts";
@@ -131,8 +131,11 @@ export function resolveFunctionCall(
 		let shouldApplyArg = false;
 		if (paramDef.optional) {
 			const statedResult = evaluation.results[`${selectedFunc}__${paramName}__stated`];
+			// An undecided "was this stated?" is not a yes: fall back to the parameter's default.
 			const isStated =
-				statedResult?.kind === "boolean" ? statedResult.value : argResult !== undefined && !statedResult;
+				statedResult?.kind === "boolean"
+					? settledBoolean(statedResult) === true
+					: argResult !== undefined && !statedResult;
 
 			if (isStated) {
 				if (statedResult && statedResult.kind === "boolean") {
@@ -156,9 +159,14 @@ export function resolveFunctionCall(
 				argConfidences[paramName] = argResult.confidence;
 				requiredConfidences.push(argResult.confidence);
 			} else if (argResult.kind === "boolean") {
-				resolvedArgs[paramName] = argResult.value;
-				argConfidences[paramName] = argResult.confidence;
-				requiredConfidences.push(argResult.confidence);
+				// An ambiguous band decided nothing, so there is no argument to pass. Leaving it out
+				// keeps the omission visible instead of inventing a false from a coin-flip probability.
+				const settled = settledBoolean(argResult);
+				if (settled !== undefined) {
+					resolvedArgs[paramName] = settled;
+					argConfidences[paramName] = argResult.confidence;
+					requiredConfidences.push(argResult.confidence);
+				}
 			}
 		}
 	}

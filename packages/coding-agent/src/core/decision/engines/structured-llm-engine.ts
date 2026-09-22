@@ -1,6 +1,11 @@
 import type { DecisionEngineCapabilities } from "../capabilities.ts";
 import type { DecisionOptions, SemanticDecisionEngine } from "../engine.ts";
-import { createDecisionEvaluation, type DecisionEvaluation, type DecisionResult } from "../evaluation.ts";
+import {
+	certainBooleanResult,
+	createDecisionEvaluation,
+	type DecisionEvaluation,
+	type DecisionResult,
+} from "../evaluation.ts";
 import type { DecisionProgram } from "../program.ts";
 
 export interface LlmCompletionRunner {
@@ -85,16 +90,11 @@ export class StructuredLlmDecisionEngine implements SemanticDecisionEngine {
 					continue;
 				}
 
-				results[d.id] = {
-					kind: "boolean",
-					value: val,
-					probabilityTrue: val ? 1.0 : 0.0,
-					confidence: {
-						value: confidenceVal,
-						provenance,
-						isCalibrated: false,
-					},
-				};
+				results[d.id] = certainBooleanResult(val, d.direction ?? "required_true", {
+					value: confidenceVal,
+					provenance,
+					isCalibrated: false,
+				});
 			} else if (d.kind === "choice") {
 				let selected: string | undefined;
 				let distribution: Record<string, number> | undefined;

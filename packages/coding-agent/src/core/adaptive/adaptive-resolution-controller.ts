@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
+import { settledNoul } from "../system-one/policy.ts";
 import { AdaptationGraph } from "./adaptation-graph.ts";
 import type { CapabilityNeed } from "./capability-resolution.ts";
 import type { SpecialistNeed } from "./specialist-synthesis-controller.ts";
@@ -158,7 +159,9 @@ export class AdaptiveResolutionController {
 				domain.toLowerCase().includes("visual") ||
 				Boolean(
 					typeof (answers.vision_required as { noul?: number })?.noul === "number"
-						? ((answers.vision_required as { noul?: number }).noul ?? 0) > 0.5
+						? // Routing to a visual specialist on an undecided answer is a wrong route, not a
+							// cautious one: it takes a settled yes.
+							settledNoul((answers.vision_required as { noul?: number }).noul, "required_true", false) === true
 						: answers.vision_required === true,
 				);
 

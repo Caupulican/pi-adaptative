@@ -9,6 +9,7 @@ import type { ExecutionCharter } from "../autonomy/execution-charter.ts";
 import type { ExpertSelectionService } from "../expert-routing/service.ts";
 import type { TaskProfileWriterPort } from "../orchestration/task-profile-writer.ts";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
+import { settledNoul } from "../system-one/policy.ts";
 import type { SpecialistCatalog, SpecialistCatalogEntry } from "./specialist-catalog.ts";
 import type {
 	MaterializedSpecialist,
@@ -165,7 +166,10 @@ export class SpecialistSynthesisController {
 			const fitChoice = (fitCert.answers.best_candidate as { choice?: string })?.choice;
 			const newSpecialistRequired = (fitCert.answers.new_specialist_required as { noul?: number })?.noul ?? 0;
 
-			if (fitChoice && fitChoice !== "none" && newSpecialistRequired < 0.5) {
+			// Reusing the existing specialist needs a settled "no new one is required". Undecided keeps
+			// the synthesis path rather than reusing a candidate the judgment did not endorse.
+			const noNewSpecialist = settledNoul(newSpecialistRequired, "required_false", true) === false;
+			if (fitChoice && fitChoice !== "none" && noNewSpecialist) {
 				existingEntry = this.catalog.get(fitChoice);
 			}
 		}
