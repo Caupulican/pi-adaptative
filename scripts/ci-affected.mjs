@@ -3,7 +3,7 @@
  * Decide which CI tests a commit actually bought.
  *
  * Push/PR runs only the workspaces (and OS-specific controls) whose files changed.
- * The complete Linux/Windows matrix is the release tag (workflow_call) and manual dispatch.
+ * The complete Linux/Windows matrix is the release tag (build-binaries passes full_suite) and manual dispatch.
  */
 import { appendFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";

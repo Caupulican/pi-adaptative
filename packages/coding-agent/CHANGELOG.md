@@ -29,6 +29,7 @@
 - A bug-fix match is the word `bug`, `bugs`, or `bugfix`. `debug` is not a bug fix. `npm publish` does not run package lifecycle scripts. Deploy proof is an independent adapter observation. Deploy stdout is not proof.
 - `fix`, `implement`, `repair`, `refactor`, and `build` do not grant a commit. Automatic git delivery stages objective-owned paths only, refuses a dirty admission baseline and any later unowned path, and proves the commit parent and tree. A push without a commit fails while the candidate is dirty. A tag requires an exact name. A requested GitHub release without a trusted adapter fails `github_release_unsupported`. The terminal hook is read-only and runs before complete is stored.
 - Goal auto-continue no longer counts its own armed continuation as foreground occupancy. That bit made the idle wait poll a resolved promise, so the event loop never read shell output and the destructive chaos run hit the job timeout.
+- The version-tag quality gate passes `full_suite: true` into CI. A reusable workflow keeps the tag push's event name, so testing `github.event_name == 'workflow_call'` skipped the matrix and provenance rejected the tag.
 
 ## [0.99.38] - 2026-09-21
 

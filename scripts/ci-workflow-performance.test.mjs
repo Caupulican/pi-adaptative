@@ -205,7 +205,9 @@ test("normal CI reserves twenty minutes for runner setup plus bounded suite exec
 
 test("ordinary commits plan affected tests; the tag quality-gate runs the full matrix", () => {
 	assert.match(workflow, /^  plan:\n/mu);
-	assert.match(workflow, /CI_FULL_SUITE:.*workflow_call.*workflow_dispatch/u);
+	assert.match(workflow, /full_suite:/u);
+	assert.match(workflow, /CI_FULL_SUITE: \$\{\{ inputs\.full_suite \|\| github\.event_name == 'workflow_dispatch' \}\}/u);
+	assert.match(releaseWorkflow, /full_suite: true/u);
 	assert.match(workflow, /needs\.plan\.outputs\.coding_agent == 'true'/u);
 	assert.match(workflow, /needs\.plan\.outputs\.check == 'true'/u);
 	assert.doesNotMatch(workflow, /skip_tests/u);

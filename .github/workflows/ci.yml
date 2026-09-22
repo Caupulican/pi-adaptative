@@ -15,6 +15,11 @@ on:
         description: Exact commit or tag to validate
         required: false
         type: string
+      full_suite:
+        description: Run the complete Linux/Windows matrix
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
@@ -45,7 +50,9 @@ jobs:
       - name: Plan
         id: plan
         env:
-          CI_FULL_SUITE: ${{ github.event_name == 'workflow_call' || github.event_name == 'workflow_dispatch' }}
+          # A reusable workflow keeps the caller's event name. A tag push is `push`,
+          # so the caller passes full_suite instead of hoping event_name is workflow_call.
+          CI_FULL_SUITE: ${{ inputs.full_suite || github.event_name == 'workflow_dispatch' }}
           CI_EVENT_NAME: ${{ github.event_name }}
           CI_BEFORE: ${{ github.event.before }}
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
