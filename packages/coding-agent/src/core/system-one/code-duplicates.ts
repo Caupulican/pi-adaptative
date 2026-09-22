@@ -90,14 +90,44 @@ function indentBody(text: string, start: number, indent: string): string {
 	return body.join("\n").trimEnd();
 }
 
+/**
+ * Spans of `text` that are string literals or comments, from the same tokenizer the fingerprints use.
+ * A declaration starting inside one is code quoted as data (a test fixture, a prompt), not a unit.
+ */
+function quotedSpans(text: string): [number, number][] {
+	const spans: [number, number][] = [];
+	for (const match of text.matchAll(TOKEN_PATTERN)) {
+		const token = match[0];
+		if (/^["'`]|^\/\/|^\/\*|^[ \t]*#/.test(token)) spans.push([match.index ?? 0, (match.index ?? 0) + token.length]);
+	}
+	return spans;
+}
+
+function insideSpan(spans: readonly [number, number][], index: number): boolean {
+	let low = 0;
+	let high = spans.length - 1;
+	while (low <= high) {
+		const middle = (low + high) >> 1;
+		const [start, end] = spans[middle]!;
+		if (index < start) high = middle - 1;
+		else if (index >= end) low = middle + 1;
+		else return true;
+	}
+	return false;
+}
+
 /** Every function-like unit declared in `text`, with a body long enough to carry a responsibility. */
 export function extractCodeUnits(path: string, text: string): CodeUnit[] {
 	const units: CodeUnit[] = [];
 	const seen = new Set<number>();
+	const quoted = quotedSpans(text);
 	for (const { pattern, body } of DECLARATIONS) {
 		for (const match of text.matchAll(pattern)) {
 			const index = match.index ?? 0;
 			if (seen.has(index)) continue;
+			// The declaration keyword itself, past any indentation the pattern consumed.
+			const keywordAt = index + (match[0].length - match[0].trimStart().length);
+			if (insideSpan(quoted, keywordAt)) continue;
 			const name = body === "indent" ? match[2] : match[1];
 			if (!name || NOT_A_NAME.has(name)) continue;
 			const code = body === "indent" ? indentBody(text, index, match[1] ?? "") : braceBody(text, index);
@@ -268,9 +298,6 @@ export function scaledToMachine(base: number): number {
 	return Math.max(1, Math.round(base * factor));
 }
 
-/** Postings a candidate pool is built from: the probe's rarest calls, where identity lives. */
-const POOL_CALLS = scaledToMachine(16);
-
 /** Concurrent Jev requests a scan keeps in flight; Jev evaluates each request's questions in parallel too. */
 export const JEV_SCAN_CONCURRENCY = scaledToMachine(16);
 
@@ -338,6 +365,7 @@ export class SemanticUnitIndex {
 		this.callPostings = callPostings;
 		this.windowPostings = windowPostings;
 		this.squaredIdf.clear();
+		this.norms.clear();
 		this.indexed = new Set([...this.files.values()].flatMap(({ units }) => units));
 	}
 
@@ -366,30 +394,56 @@ export class SemanticUnitIndex {
 		return value;
 	}
 
-	private callSimilarity(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
-		let dot = 0;
-		let normA = 0;
-		let normB = 0;
-		for (const call of a) {
-			const weight = this.weight(call);
-			normA += weight;
-			if (b.has(call)) dot += weight;
+	/** Sum of a unit's squared call weights: the norm in the IDF cosine, cached per indexed unit. */
+	private readonly norms = new Map<CodeUnit, number>();
+
+	private norm(unit: IndexedUnit): number {
+		let value = this.norms.get(unit);
+		if (value === undefined) {
+			value = 0;
+			for (const call of unit.calls) value += this.weight(call);
+			this.norms.set(unit, value);
 		}
-		for (const call of b) normB += this.weight(call);
-		return normA === 0 || normB === 0 ? 0 : dot / Math.sqrt(normA * normB);
+		return value;
+	}
+
+	/** IDF-weighted cosine of the two units' calls, from the accumulated dot and the cached norms. */
+	private cosine(
+		probe: IndexedUnit,
+		probeNorm: number,
+		existing: IndexedUnit,
+		informativeDot: ReadonlyMap<IndexedUnit, number>,
+		commonCalls: readonly string[],
+	): number {
+		let dot = informativeDot.get(existing) ?? 0;
+		for (const call of commonCalls) if (existing.calls.has(call)) dot += this.weight(call);
+		const existingNorm = this.norm(existing);
+		return probeNorm === 0 || existingNorm === 0 || probe.calls.size === 0
+			? 0
+			: dot / Math.sqrt(probeNorm * existingNorm);
 	}
 
 	/** The indexed units most similar to `unit`, by calls or by structure, excluding the unit itself. */
 	candidates(unit: CodeUnit, limit = MAX_CANDIDATES): DuplicateCandidate[] {
 		const probe = this.indexed.has(unit) ? (unit as IndexedUnit) : indexUnit(unit);
 		const pool = new Set<IndexedUnit>();
-		const rarest = [...probe.calls]
-			.map((call) => ({ call, posting: this.callPostings.get(call) }))
-			.filter((entry): entry is { call: string; posting: IndexedUnit[] } => entry.posting !== undefined)
-			.filter((entry) => this.informative(entry.posting))
-			.sort((a, b) => a.posting.length - b.posting.length)
-			.slice(0, POOL_CALLS);
-		for (const { posting } of rarest) for (const existing of posting) pool.add(existing);
+		const informativeCalls: { call: string; posting: IndexedUnit[] }[] = [];
+		// Calls too common to post from: their exact share of the dot product is checked per unit below.
+		const commonCalls: string[] = [];
+		for (const call of probe.calls) {
+			const posting = this.callPostings.get(call);
+			if (!posting) continue;
+			if (this.informative(posting)) informativeCalls.push({ call, posting });
+			else commonCalls.push(call);
+		}
+		// The dot product of the IDF cosine, accumulated from the postings instead of per comparison.
+		const informativeDot = new Map<IndexedUnit, number>();
+		for (const { call, posting } of informativeCalls) {
+			const weight = this.weight(call);
+			for (const existing of posting) informativeDot.set(existing, (informativeDot.get(existing) ?? 0) + weight);
+		}
+		// Every unit sharing an informative call is a call candidate: its cosine is exact from the dot.
+		for (const existing of informativeDot.keys()) pool.add(existing);
 		// Shared informative windows are counted while the pool is built; the exact intersection runs only
 		// for units whose count can still reach a clone.
 		const informativeShared = new Map<IndexedUnit, number>();
@@ -401,11 +455,15 @@ export class SemanticUnitIndex {
 				commonWindows += 1;
 				continue;
 			}
-			for (const existing of posting) {
-				pool.add(existing);
-				informativeShared.set(existing, (informativeShared.get(existing) ?? 0) + 1);
-			}
+			for (const existing of posting) informativeShared.set(existing, (informativeShared.get(existing) ?? 0) + 1);
 		}
+		// A structural candidate is one whose shared windows (the counted informative ones plus every common
+		// one) can still reach the threshold against the larger unit: nothing else can pass on structure.
+		for (const [existing, shared] of informativeShared)
+			if (shared + commonWindows >= MIN_SIMILARITY * Math.max(probe.fingerprints.size, existing.fingerprints.size))
+				pool.add(existing);
+		let probeNorm = 0;
+		for (const call of probe.calls) probeNorm += this.weight(call);
 		const scored: DuplicateCandidate[] = [];
 		for (const existing of pool) {
 			if (existing.path === unit.path && (existing.name === unit.name || existing.code === unit.code)) continue;
@@ -421,7 +479,7 @@ export class SemanticUnitIndex {
 				for (const window of probe.fingerprints) if (existing.fingerprints.has(window)) sharedWindows += 1;
 			const candidate: DuplicateCandidate = {
 				unit: existing,
-				callSimilarity: this.callSimilarity(probe.calls, existing.calls),
+				callSimilarity: this.cosine(probe, probeNorm, existing, informativeDot, commonCalls),
 				structuralSimilarity: comparable && largest > 0 ? sharedWindows / largest : 0,
 			};
 			if (Math.max(candidate.callSimilarity, candidate.structuralSimilarity) >= MIN_SIMILARITY)

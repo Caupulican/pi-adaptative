@@ -48,6 +48,14 @@ describe("semantic code deduplication", () => {
 		expect(extractCodeUnits("c.py", py).map((u) => [u.name, u.code.split("\n").length])).toEqual([["load_rows", 3]]);
 	});
 
+	it("does not extract code quoted in a string literal or a comment", () => {
+		const fixture = `const SAMPLE = \`${EXISTING}\`;\n/*\n${EXISTING}*/\n`;
+		expect(extractCodeUnits("fixture.ts", fixture)).toEqual([]);
+		expect(extractCodeUnits("real.ts", `${fixture}${EXISTING}`).map((u) => u.name)).toEqual([
+			"normalizeRepositoryPath",
+		]);
+	});
+
 	it("reports only units an edit adds, not ones it keeps", () => {
 		const kept = newCodeUnits(
 			"edit",
