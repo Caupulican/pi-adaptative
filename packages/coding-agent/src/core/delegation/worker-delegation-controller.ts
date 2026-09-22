@@ -258,6 +258,11 @@ export interface WorkerDelegationControllerDeps {
 	localCommitBranch?(): string | undefined;
 	/** Host-owned path alias table getter for expanding alias tokens in worker tool arguments. */
 	getPathAliasTable?: () => PathAliasTable;
+	/**
+	 * The parent's semantic duplicate review of code a worker's edit or write added. Its note is appended
+	 * to that tool result so the worker reuses existing logic, exactly as the root's own edits are steered.
+	 */
+	reviewNewCode?(input: { toolName: string; args: unknown; cwd: string }): Promise<string | undefined>;
 	/** Parent objective mutation ledger. Workers do not keep a second ownership record. */
 	recordObjectiveMutation?(event: {
 		readonly kind: "owned_write" | "shell";
@@ -3274,6 +3279,7 @@ export class WorkerDelegationController {
 			warn: (message) => this.safeWarn(message),
 			...(this.deps.observeWorkerProgress ? { observeWorkerProgress: this.deps.observeWorkerProgress } : {}),
 			...(this.deps.recordObjectiveMutation ? { recordObjectiveMutation: this.deps.recordObjectiveMutation } : {}),
+			...(this.deps.reviewNewCode ? { reviewNewCode: this.deps.reviewNewCode } : {}),
 		});
 		// Held for this specialist across the whole execution and released only after the finally has
 		// awaited tool-surface disposal: a terminal record is not evidence that its resources are gone.

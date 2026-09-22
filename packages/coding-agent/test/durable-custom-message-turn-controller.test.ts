@@ -148,3 +148,34 @@ describe("DurableCustomMessageTurnController", () => {
 		expect(endExecution).not.toHaveBeenCalled();
 	});
 });
+
+describe("durable custom-message turns: after-turn check", () => {
+	it("check the turn's answer after the model run, under the same lease, before completion settles", async () => {
+		const events: string[] = [];
+		const lease = { id: "lease-1" } as unknown as ForegroundSubmissionLease;
+		let messages = 3;
+		let controller: DurableCustomMessageTurnController;
+		const foreground = {
+			runAgentPrompt: async (message: unknown, used: ForegroundSubmissionLease) => {
+				events.push(`run:${used === lease}`);
+				controller.notePersisted(message as never);
+				messages = 7;
+			},
+		} as unknown as ForegroundRecoveryController;
+		controller = new DurableCustomMessageTurnController({
+			foreground,
+			goals: { beginExecution: () => undefined as never, endExecution: () => {} },
+			enqueueSteeringMessage: () => {},
+			messageCount: () => messages,
+			afterTurn: async (turnStart, used) => {
+				events.push(`after:${turnStart}:${used === lease}`);
+			},
+		});
+		const { completion } = await controller.start(
+			{ customType: "wake", content: "worker done", display: false, details: undefined },
+			lease,
+		);
+		await completion;
+		expect(events).toEqual(["run:true", "after:3:true"]);
+	});
+});

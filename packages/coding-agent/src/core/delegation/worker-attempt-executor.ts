@@ -171,6 +171,8 @@ export interface WorkerAttemptExecutorOptions {
 	 * is swallowed by its own owner rather than failing the worker.
 	 */
 	observeWorkerProgress?(observation: WorkerProgressObservation): Promise<unknown> | unknown;
+	/** Parent semantic duplicate review of code this worker's edit or write added; see the controller dep. */
+	reviewNewCode?(input: { toolName: string; args: unknown; cwd: string }): Promise<string | undefined>;
 	/** Parent objective ledger. Shell edits stay unattributed. Successful writes record a content digest. */
 	recordObjectiveMutation?(event: {
 		readonly kind: "owned_write" | "shell";
@@ -701,8 +703,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												throw error;
 											}
 										},
-										afterToolCall: async ({ toolCall, args }) => {
+										afterToolCall: async ({ toolCall, args, result, isError }) => {
 											try {
+												let duplicateNote: string | undefined;
 												if (
 													(toolCall.name === "write" || toolCall.name === "edit") &&
 													args &&
@@ -730,11 +733,24 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 															path: relativePath,
 															cwd: options.cwd,
 														});
+														if (!isError)
+															duplicateNote = await options.reviewNewCode?.({
+																toolName: toolCall.name,
+																args,
+																cwd: options.cwd,
+															});
 													}
 												}
 												signal.throwIfAborted();
 												await observeToolCall(toolCall.name);
-												return undefined;
+												return duplicateNote
+													? {
+															content: [
+																...result.content,
+																{ type: "text" as const, text: duplicateNote },
+															],
+														}
+													: undefined;
 											} catch (error) {
 												retainCallbackFailure(error);
 												throw error;

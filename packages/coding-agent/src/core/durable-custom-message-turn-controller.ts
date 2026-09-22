@@ -6,6 +6,13 @@ interface DurableCustomMessageTurnControllerDeps {
 	foreground: ForegroundRecoveryController;
 	goals: Pick<GoalSessionController, "beginExecution" | "endExecution">;
 	enqueueSteeringMessage(message: CustomMessage<unknown>): void;
+	/** Messages in the canonical transcript, read before a turn so its own messages can be sliced after. */
+	messageCount?(): number;
+	/**
+	 * Runs after the turn's model run and before its lease is released, with that lease: the claim check
+	 * that every answer gets, and the one correction turn a contradicted claim buys.
+	 */
+	afterTurn?(turnStart: number, submissionLease: ForegroundSubmissionLease): Promise<void>;
 }
 
 /**
@@ -64,8 +71,10 @@ export class DurableCustomMessageTurnController {
 		}
 		let completion: Promise<void>;
 		try {
+			const turnStart = this.deps.messageCount?.() ?? 0;
 			completion = this.deps.foreground
 				.runAgentPrompt(appMessage, submissionLease)
+				.then(() => this.deps.afterTurn?.(turnStart, submissionLease))
 				.finally(() => this.deps.goals.endExecution(goalExecutionLease));
 		} catch (error) {
 			// runAgentPrompt is expected to report failure through its returned promise, but if it

@@ -974,6 +974,7 @@ export class AgentSession {
 			waitForForegroundIdle: () => this._foregroundRecovery.waitForIdle(),
 			collectWorkspaceSources: (args) => this._collectWorkspaceSources(args),
 			getPathAliasTable: () => this._pipeline.peekPathAliasTable(),
+			reviewNewCode: ({ toolName, args, cwd }) => this._codeDuplicates.review(toolName, args, cwd),
 			recordObjectiveMutation: (event) => {
 				const objectiveId = this.objectiveMutationId();
 				if (event.kind === "shell") this._mutationLedger.markShellUnsafe(objectiveId);
@@ -1227,6 +1228,19 @@ export class AgentSession {
 			foreground: this._foregroundRecovery,
 			goals: this._goals,
 			enqueueSteeringMessage: (message) => this.agent.steer(message),
+			messageCount: () => this.agent.state.messages.length,
+			// Wake turns relay worker results: their answer's claims are checked like any other answer's.
+			afterTurn: async (turnStart, lease) => {
+				const correction = await this._answerClaims.check(
+					assistantAnswerText(this._findLastAssistantMessage()),
+					this.agent.state.messages.slice(turnStart),
+				);
+				if (correction)
+					await this._foregroundRecovery.runAgentPrompt(
+						createCustomMessage("claim_delivery", correction, true, undefined, new Date().toISOString()),
+						lease,
+					);
+			},
 		});
 		this._terminalHandoffs = new ForegroundTerminalHandoffController({
 			foreground: this._foregroundRecovery,
