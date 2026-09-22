@@ -83,7 +83,7 @@ export class StateProjector {
 		this.userKeys = userKeys;
 	}
 
-	private _redact(text: string): string {
+	redactText(text: string): string {
 		return redactSecrets(text, this.userKeys);
 	}
 
@@ -93,19 +93,19 @@ export class StateProjector {
 	intake(state: ExecutionState): Record<string, unknown> {
 		return {
 			objective: {
-				request: this._redact(state.objective.request),
-				normalized_goal: this._redact(state.objective.normalized_goal),
+				request: this.redactText(state.objective.request),
+				normalized_goal: this.redactText(state.objective.normalized_goal),
 				acceptance_criteria: state.objective.acceptance_criteria.map((ac) => ({
 					id: ac.id,
-					text: this._redact(ac.text),
+					text: this.redactText(ac.text),
 					required: ac.required,
 				})),
 				constraints: state.objective.constraints.map((c) => ({
 					id: c.id,
-					text: this._redact(c.text),
+					text: this.redactText(c.text),
 					severity: c.severity,
 				})),
-				non_goals: state.objective.non_goals.map((ng) => this._redact(ng)),
+				non_goals: state.objective.non_goals.map((ng) => this.redactText(ng)),
 			},
 			repo: {
 				root: state.repo.root,
@@ -132,7 +132,7 @@ export class StateProjector {
 			.slice(-10)
 			.map((o) => ({
 				id: o.id,
-				text: this._redact(o.text),
+				text: this.redactText(o.text),
 				source_locator: o.source.locator,
 				trust: o.source.trust,
 			}));
@@ -141,19 +141,19 @@ export class StateProjector {
 			.filter((h) => h.status === "candidate" || h.status === "investigating")
 			.map((h) => ({
 				id: h.id,
-				text: this._redact(h.text),
+				text: this.redactText(h.text),
 				status: h.status,
 				next_discriminator: h.next_discriminator,
 			}));
 
 		return {
 			objective: {
-				normalized_goal: this._redact(state.objective.normalized_goal),
-				non_goals: state.objective.non_goals.map((ng) => this._redact(ng)),
+				normalized_goal: this.redactText(state.objective.normalized_goal),
+				non_goals: state.objective.non_goals.map((ng) => this.redactText(ng)),
 			},
 			current_step: {
 				id: step.id,
-				goal: this._redact(step.goal),
+				goal: this.redactText(step.goal),
 				action_class: step.action_class,
 				proof_obligations: step.proof_obligations,
 			},
@@ -174,15 +174,15 @@ export class StateProjector {
 		// only against a real step or a real goal, and the projection says so by omitting the step.
 		const activeStep = state.plan.steps.find((s) => s.status === "active");
 		const stepGoal = activeStep?.goal ?? state.objective.normalized_goal;
-		const currentStep = stepGoal.trim().length > 0 ? { goal: this._redact(stepGoal) } : undefined;
+		const currentStep = stepGoal.trim().length > 0 ? { goal: this.redactText(stepGoal) } : undefined;
 
-		const untrustedText = toolRequest.args ? this._redact(JSON.stringify(toolRequest.args)) : "";
+		const untrustedText = toolRequest.args ? this.redactText(JSON.stringify(toolRequest.args)) : "";
 
 		return {
 			...(currentStep ? { current_step: currentStep } : {}),
 			tool_request: {
 				tool: toolRequest.tool,
-				intent: this._redact(toolRequest.intent),
+				intent: this.redactText(toolRequest.intent),
 				impact: toolRequest.impact,
 			},
 			untrusted_text: untrustedText,
@@ -207,12 +207,12 @@ export class StateProjector {
 		return {
 			claim: {
 				id: claim.id,
-				text: this._redact(claim.text),
+				text: this.redactText(claim.text),
 				materiality: claim.materiality,
 			},
 			evidence: {
 				id: obs.id,
-				text: this._redact(obs.text),
+				text: this.redactText(obs.text),
 				locator: obs.source.locator,
 				content_hash: obs.source.content_hash,
 				trust: obs.source.trust,
@@ -232,11 +232,11 @@ export class StateProjector {
 		const recentObservations = state.observations
 			.filter((o) => o.freshness === "fresh")
 			.slice(-5)
-			.map((o) => ({ id: o.id, text: this._redact(o.text) }));
+			.map((o) => ({ id: o.id, text: this.redactText(o.text) }));
 
 		const workerClaims = state.claims.slice(-5).map((c) => ({
 			id: c.id,
-			text: this._redact(c.text),
+			text: this.redactText(c.text),
 			materiality: c.materiality,
 			evidence_ids: c.evidence_ids,
 		}));
@@ -250,12 +250,12 @@ export class StateProjector {
 		return {
 			current_step: {
 				id: step.id,
-				goal: this._redact(step.goal),
+				goal: this.redactText(step.goal),
 			},
 			last_action: lastToolEvent
 				? {
 						tool: lastToolEvent.tool,
-						intent: this._redact(lastToolEvent.intent),
+						intent: this.redactText(lastToolEvent.intent),
 						status: lastToolEvent.status,
 					}
 				: "none",
@@ -271,13 +271,13 @@ export class StateProjector {
 	driftCheck(state: ExecutionState): Record<string, unknown> {
 		const recentActions = state.tool_events.slice(-8).map((te) => ({
 			tool: te.tool,
-			intent: this._redact(te.intent),
+			intent: this.redactText(te.intent),
 			status: te.status,
 		}));
 
 		return {
 			objective: {
-				normalized_goal: this._redact(state.objective.normalized_goal),
+				normalized_goal: this.redactText(state.objective.normalized_goal),
 				acceptance_criteria: state.objective.acceptance_criteria.map((ac) => ({
 					id: ac.id,
 					status: ac.status,
@@ -294,7 +294,7 @@ export class StateProjector {
 	duplicateLogic(candidateExisting: string, proposedLogic: string): Record<string, unknown> {
 		return {
 			candidate_existing_logic: wrapUntrustedText(candidateExisting, "repository", this.userKeys),
-			proposed_logic: this._redact(proposedLogic),
+			proposed_logic: this.redactText(proposedLogic),
 		};
 	}
 
@@ -309,7 +309,7 @@ export class StateProjector {
 
 		return {
 			current_step: {
-				goal: this._redact(activeStep.goal),
+				goal: this.redactText(activeStep.goal),
 			},
 			diff_view: changes.map((c) => ({
 				path: c.path,
@@ -331,7 +331,7 @@ export class StateProjector {
 	completion(state: ExecutionState): Record<string, unknown> {
 		const acceptanceMatrix = state.objective.acceptance_criteria.map((ac) => ({
 			id: ac.id,
-			text: this._redact(ac.text),
+			text: this.redactText(ac.text),
 			required: ac.required,
 			status: ac.status,
 			evidence_ids: ac.evidence_ids,
@@ -342,7 +342,7 @@ export class StateProjector {
 			.filter((c) => c.materiality !== "informational")
 			.map((c) => ({
 				id: c.id,
-				text: this._redact(c.text),
+				text: this.redactText(c.text),
 				materiality: c.materiality,
 				status: c.status,
 				evidence_ids: c.evidence_ids,
@@ -366,7 +366,7 @@ export class StateProjector {
 
 		const hypotheses = state.hypotheses.map((h) => ({
 			id: h.id,
-			text: this._redact(h.text),
+			text: this.redactText(h.text),
 			status: h.status,
 			supporting_evidence: h.supporting_evidence,
 			contradicting_evidence: h.contradicting_evidence,
@@ -376,14 +376,14 @@ export class StateProjector {
 			.filter((r) => r.status === "open")
 			.map((r) => ({
 				id: r.id,
-				text: this._redact(r.text),
+				text: this.redactText(r.text),
 				severity: r.severity,
 			}));
 
 		return {
 			objective: {
-				normalized_goal: this._redact(state.objective.normalized_goal),
-				non_goals: state.objective.non_goals.map((ng) => this._redact(ng)),
+				normalized_goal: this.redactText(state.objective.normalized_goal),
+				non_goals: state.objective.non_goals.map((ng) => this.redactText(ng)),
 			},
 			acceptance_matrix: acceptanceMatrix,
 			claim_matrix: claimMatrix,

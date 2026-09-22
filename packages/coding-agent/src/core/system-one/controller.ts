@@ -472,6 +472,19 @@ export class SystemOneController {
 		});
 	}
 
+	/**
+	 * Ask what the final answer claims, one atomic question per claim kind. Runs with or without a live
+	 * objective: a plain session's answer is the user's delivery too. The receipts are combined with
+	 * these answers in code; Jev never judges whether something happened from the answer's own words.
+	 */
+	async evaluateAnswerClaims(finalAnswer: string): Promise<Record<string, unknown>> {
+		const { decision, answers, evaluationId } = await this.runStageValidation("claim_delivery", {
+			final_answer: this.projector.redactText(finalAnswer),
+		});
+		this.sealDecision(decision, "evaluated", evaluationId);
+		return answers;
+	}
+
 	/** Record the real terminal after the call ran. No-op when the gate never admitted this call_id. */
 	recordToolTerminal(input: { call_id: string; succeeded: boolean; output?: unknown; aborted?: boolean }): void {
 		this.store.updateToolEvent(

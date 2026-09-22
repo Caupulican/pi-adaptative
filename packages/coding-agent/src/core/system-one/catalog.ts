@@ -212,6 +212,31 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 		}),
 	}),
 
+	// One atomic question per claim kind. Each asks only what the answer SAYS; whether it happened is
+	// read from the turn's receipts in code (claim-delivery.ts), never judged from the answer's own words.
+	claim_delivery: Object.freeze({
+		states_tests_pass: Object.freeze({
+			type: "boolean",
+			instructions: "Does `final_answer` state that tests or checks passed?",
+		}),
+		states_committed: Object.freeze({
+			type: "boolean",
+			instructions: "Does `final_answer` state that changes were committed?",
+		}),
+		states_pushed: Object.freeze({
+			type: "boolean",
+			instructions: "Does `final_answer` state that changes were pushed to a remote?",
+		}),
+		states_published: Object.freeze({
+			type: "boolean",
+			instructions: "Does `final_answer` state that a package or release was published?",
+		}),
+		states_files_changed: Object.freeze({
+			type: "boolean",
+			instructions: "Does `final_answer` state that files were created, edited or written during this work?",
+		}),
+	}),
+
 	evidence_check: Object.freeze({
 		relationship: Object.freeze({
 			type: "choice",

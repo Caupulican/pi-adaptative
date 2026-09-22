@@ -259,6 +259,7 @@ import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-v
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import { WorkerSemanticSupervisor } from "./supervision/worker-semantic-supervisor.ts";
 import { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
+import { AnswerClaimChecker, assistantAnswerText } from "./system-one/claim-delivery.ts";
 import { type SystemOneController, USER_REQUEST_RULE_BUDGET } from "./system-one/controller.ts";
 import { createSessionForegroundControl, type SystemOneForegroundControl } from "./system-one/foreground-control.ts";
 import { type SemanticEvaluationRecord, verdictFromEvaluation } from "./system-one/semantic-evaluation-ledger.ts";
@@ -498,6 +499,10 @@ export class AgentSession {
 	private _ruleAuthority: "unset" | "ask" | "user" | "written" = "unset";
 	/** The last classification could not run. Kept so the model is told once per outage, not per turn. */
 	private _deliveryClassificationUnavailable = false;
+	private readonly _answerClaims = new AnswerClaimChecker({
+		getController: () => this._systemOneController,
+		warn: (message) => this._emit({ type: "warning", message }),
+	});
 	private _adaptationProjection?: AdaptationProjection;
 	private _deliveryState: DeliveryState = "none";
 	private _foregroundControl?: SystemOneForegroundControl;
@@ -4024,6 +4029,7 @@ export class AgentSession {
 			}
 			const preflight = await executeSystemOnePreflight(this._systemOneController, this.agent.state.messages.length);
 			if (preflight.proceed) {
+				const turnStart = this.agent.state.messages.length;
 				await this._modelRouter.runRoutedTurn(
 					messages,
 					routedTurnModel,
@@ -4037,6 +4043,23 @@ export class AgentSession {
 					this.agent.state.messages.length,
 					submissionSignal?.aborted,
 				);
+				// Claims against deliveries: a contradicted claim buys one correction turn, never a loop.
+				if (!submissionSignal?.aborted) {
+					const correction = await this._answerClaims.check(
+						assistantAnswerText(this._findLastAssistantMessage()),
+						this.agent.state.messages.slice(turnStart),
+					);
+					if (correction && !submissionSignal?.aborted) {
+						await this._modelRouter.runRoutedTurn(
+							[createCustomMessage("claim_delivery", correction, true, undefined, new Date().toISOString())],
+							routedTurnModel,
+							routedTurnRouteDecision,
+							false,
+							false,
+							submissionSignal,
+						);
+					}
+				}
 			}
 			// A cancelled submission records no outcome. Cancelled before the run, the last assistant
 			// message is the PREVIOUS turn's and scoring it here would count that turn twice; cancelled
@@ -4055,13 +4078,7 @@ export class AgentSession {
 		// Score whether the agent actually used the recalled context, so the recall gate can adapt.
 		// Not for a cancelled submission: it has no response of its own to score (see above).
 		if (injectedRecall && !submissionSignal?.aborted) {
-			const response = this._findLastAssistantMessage();
-			const responseText = response
-				? response.content
-						.filter((c): c is TextContent => c.type === "text")
-						.map((c) => c.text)
-						.join(" ")
-				: "";
+			const responseText = assistantAnswerText(this._findLastAssistantMessage());
 			if (responseText) {
 				this._memory.recordRecallOutcome(injectedRecall, recallQuery, responseText);
 			}

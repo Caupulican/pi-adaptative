@@ -229,7 +229,8 @@ export type ValidationStage =
 	| "duplicate_logic"
 	| "patch_review"
 	| "completion"
-	| "completion_challenge";
+	| "completion_challenge"
+	| "claim_delivery";
 
 export interface ValidationDecision {
 	id: string;

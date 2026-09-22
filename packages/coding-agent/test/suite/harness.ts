@@ -107,6 +107,8 @@ export interface HarnessOptions {
 	/** Owner-authored profile used by delegate calls; independent from the foreground profile. */
 	workerOrchestrationProfile?: OrchestrationProfile;
 	additionalOrchestrationProfiles?: readonly OrchestrationProfile[];
+	/** System One controller bound to the session, as the SDK binds one when Jev is configured. */
+	systemOneController?: AgentSessionConfig["systemOneController"];
 }
 
 export interface Harness {
@@ -293,6 +295,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		collectWorkspaceSources: options.collectWorkspaceSources ?? (async () => []),
 		localRuntimeDeps: options.localRuntimeDeps,
 		orchestrationProfile: options.orchestrationProfile,
+		systemOneController: options.systemOneController,
 	});
 
 	const events: AgentSessionEvent[] = [];
