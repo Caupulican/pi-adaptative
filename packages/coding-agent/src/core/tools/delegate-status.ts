@@ -1,6 +1,7 @@
 import type { Finding, WorkerClaim } from "../autonomy/contracts.ts";
 import { normalizeEvidenceFinding } from "../autonomy/evidence-finding-projection.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import { workerClaimSettlementLines } from "../delegation/worker-claim.ts";
 import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "../delegation/worker-terminal-handoff-coordinator.ts";
 import { workerTerminalOutputArtifact } from "../delegation/worker-terminal-output-artifact.ts";
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
@@ -272,9 +273,10 @@ function formatRecord(
 	if (claim.usageReportId) {
 		headerLines.push(`usageReportId: ${claim.usageReportId.slice(0, 256)}`);
 	}
+	for (const line of workerClaimSettlementLines(claim)) headerLines.push(utf8PrefixByBytes(line, 1_024));
 	if (isUnreviewed(claim)) {
 		headerLines.push(
-			`UNREVIEWED MUTATION - this worker's claim requires explicit parent review. Acknowledge with delegate { action: "review", laneId: "${boundedLaneId}" }.`,
+			`UNREVIEWED CLAIM - this worker's claim requires explicit parent review. Acknowledge with delegate { action: "review", laneId: "${boundedLaneId}" }.`,
 		);
 	} else if (claim.parentReviewRequired && claim.parentReviewedAt) {
 		headerLines.push(`reviewed at ${claim.parentReviewedAt.slice(0, 256)}`);
@@ -476,7 +478,7 @@ export function delegateStatusPanelModel(details: DelegateStatusToolDetails): Or
 				? [
 						{
 							status: "warning",
-							text: `${unreviewed} worker mutation${unreviewed === 1 ? "" : "s"} awaiting parent review.`,
+							text: `${unreviewed} worker claim${unreviewed === 1 ? "" : "s"} awaiting parent review.`,
 						},
 					]
 				: undefined,
@@ -676,7 +678,7 @@ export function executeDelegateStatusAction(
 				? `${visibleUnreviewedIds.join(", ")}${omitted > 0 ? `, and ${omitted} more` : ""}`
 				: `(${unreviewedRecords.length} omitted)`;
 		overviewLines.push(
-			`${unreviewedRecords.length} unreviewed worker mutation${unreviewedRecords.length === 1 ? "" : "s"} pending review: ${listText}. Acknowledge each with delegate { action: "review", laneId }.`,
+			`${unreviewedRecords.length} unreviewed worker claim${unreviewedRecords.length === 1 ? "" : "s"} pending review: ${listText}. Acknowledge each with delegate { action: "review", laneId }.`,
 		);
 	}
 	const overview = overviewLines.join("\n");

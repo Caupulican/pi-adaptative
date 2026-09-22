@@ -21,13 +21,16 @@ describe("worker TypeSafe review", () => {
 		{ name: "billed transport retry", capabilities: undefined, permitted: true, retry: true },
 		{ name: "transcript append failure", capabilities: undefined, permitted: true, appendFailure: true },
 		{
-			name: "explicit complete",
-			capabilities: ["network.http", "credentials.use"] as HarnessCapability[],
+			name: "explicit judgment",
+			capabilities: ["semantic.judge"] as HarnessCapability[],
 			permitted: true,
 		},
 		{ name: "no authority", capabilities: [] as HarnessCapability[], permitted: false },
-		{ name: "network only", capabilities: ["network.http"] as HarnessCapability[], permitted: false },
-		{ name: "credential only", capabilities: ["credentials.use"] as HarnessCapability[], permitted: false },
+		{
+			name: "network and credential only",
+			capabilities: ["network.http", "credentials.use"] as HarnessCapability[],
+			permitted: false,
+		},
 	])(
 		"uses the packaged reviewer under $name authority",
 		async ({

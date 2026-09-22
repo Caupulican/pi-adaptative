@@ -652,6 +652,16 @@ passed, a commit, a push, a publish, changed files); code combines each settled 
 turn's mechanical receipts. A claim the receipts contradict buys one correction turn; one no receipt
 backs is an unverified-claim warning. Pinned by `packages/coding-agent/test/system-one/claim-delivery.test.ts`.
 
+**What no agent could settle climbs a ladder, then reaches the owner** (`system-one/unsettled-ladder.ts`).
+A worker reports findings it could not confirm as `inconclusive`, never rounded up. System One judges
+each against the worker's own tool results; then a stronger model names the settling fact and System
+One judges it; each pass carries new evidence, at most two. The model finds, Jev decides. What stays
+open goes to the owner: asked through the parent with the owner in the loop, written to the follow-up
+document under a handoff while the run continues around it. `typesafe_review` is authorized by
+`semantic.judge`, which read-only grants keep. Pinned by
+`packages/coding-agent/test/system-one/unsettled-ladder.test.ts` and
+`packages/coding-agent/test/worker-inconclusive-ladder.test.ts`.
+
 **Jev catches logic that is duplicated but written differently** (`system-one/code-duplicates.ts`). Token
 clone detection finds copies; it cannot see two functions that do the same job with different names
 and structure. A semantic unit index ranks candidates by IDF-weighted shared calls and normalized-token

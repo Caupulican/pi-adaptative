@@ -49,6 +49,7 @@ import {
 	workerAgentBroadcastTargetIdempotencyKey,
 	workerAgentMessageId,
 } from "./worker-agent-control.ts";
+import { workerClaimSettlementLines } from "./worker-claim.ts";
 import {
 	MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES,
 	type WorkerConversation,
@@ -131,6 +132,9 @@ export function buildWorkerTerminalHandoffContent(args: {
 		status?: string;
 		changedFiles?: readonly string[];
 		blockers?: readonly string[];
+		inconclusive?: readonly string[];
+		systemOneSettled?: readonly string[];
+		ownerFollowUp?: string;
 	};
 }): string {
 	const sanitize = (value: string): string => value.replace(/[\r\n]+/g, " ").slice(0, 120);
@@ -153,6 +157,7 @@ export function buildWorkerTerminalHandoffContent(args: {
 		...(args.claim?.blockers && args.claim.blockers.length > 0
 			? [`blockers=${args.claim.blockers.map((b) => sanitize(b)).join("; ")}`]
 			: []),
+		...(args.claim ? workerClaimSettlementLines(args.claim, sanitize) : []),
 		"CAVEMAN MODE - MANDATORY: terminal handoff means worker state was retained. Read the full transcript, verify the claim, then continue or replan within the admitted grant. Do not call this lost state or harness failure.",
 		"MANDATORY: read every transcript page before judging this result.",
 		`Start with delegate action="transcript" agentId="${args.childAgentId}" cursor=0.`,
@@ -1685,6 +1690,9 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 							status: snapshot.claim.status,
 							changedFiles: snapshot.claim.changedFiles,
 							blockers: snapshot.claim.blockers,
+							...(snapshot.claim.inconclusive ? { inconclusive: snapshot.claim.inconclusive } : {}),
+							...(snapshot.claim.systemOneSettled ? { systemOneSettled: snapshot.claim.systemOneSettled } : {}),
+							...(snapshot.claim.ownerFollowUp ? { ownerFollowUp: snapshot.claim.ownerFollowUp } : {}),
 						},
 					}
 				: {}),

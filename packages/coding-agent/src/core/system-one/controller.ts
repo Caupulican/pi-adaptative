@@ -35,6 +35,7 @@ import {
 import { StateProjector } from "./projector.ts";
 import type { SemanticEvaluationObserver } from "./semantic-evaluation-ledger.ts";
 import type { ExecutionState, ToolImpact, ValidationDecision, ValidationStage } from "./types.ts";
+import { unsettledQuestionId } from "./unsettled-ladder.ts";
 
 /** The four questions that only mean something when written rules were supplied. */
 /** Asked only when written rules exist. `full_handoff` is not among them: it governs owner questions too. */
@@ -543,6 +544,53 @@ export class SystemOneController {
 				(candidate, candidateIndex) =>
 					`${unit.name} (${unit.path}:${unit.line}) vs ${candidate.name} (${candidate.path}:${candidate.line}) P(same job)=${probabilityText(answers[duplicateQuestionId(unitIndex, candidateIndex)])}`,
 			),
+		);
+		this.sealDecision(decision, "evaluated", evaluationId, reasons);
+		return answers;
+	}
+
+	/**
+	 * Whether each piece of evidence shows its statement true, and separately whether it shows it
+	 * false: two one-condition Nouls per item, every item in ONE request. Evidence that shows neither
+	 * leaves the item unsettled; that is an answer, not a failure.
+	 */
+	async evaluateUnsettledItems(
+		checks: readonly { readonly statement: string; readonly evidence: string }[],
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>> {
+		const state: Record<string, unknown> = {};
+		const questions: QuestionPack = {};
+		checks.forEach((check, index) => {
+			state[`s${index}`] = this.projector.redactText(check.statement);
+			state[`e${index}`] = this.projector.redactText(check.evidence);
+			questions[unsettledQuestionId("shows_true", index)] = {
+				type: "boolean",
+				instructions: `Does \`e${index}\` show that \`s${index}\` is true?`,
+				criteria: {
+					true: "The evidence states it or directly shows it",
+					false: "The evidence does not show it, or shows the opposite",
+				},
+			};
+			questions[unsettledQuestionId("shows_false", index)] = {
+				type: "boolean",
+				instructions: `Does \`e${index}\` show that \`s${index}\` is false?`,
+				criteria: {
+					true: "The evidence states or directly shows the opposite",
+					false: "The evidence does not contradict it",
+				},
+			};
+		});
+		const { decision, answers, evaluationId } = await this.runStageValidation(
+			"unsettled_item",
+			state,
+			"read_only",
+			[],
+			questions,
+			signal,
+		);
+		const reasons = checks.map(
+			(check, index) =>
+				`${check.statement.slice(0, 120)} P(shown true)=${probabilityText(answers[unsettledQuestionId("shows_true", index)])} P(shown false)=${probabilityText(answers[unsettledQuestionId("shows_false", index)])}`,
 		);
 		this.sealDecision(decision, "evaluated", evaluationId, reasons);
 		return answers;

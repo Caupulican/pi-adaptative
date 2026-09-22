@@ -75,6 +75,7 @@ const DEFAULT_CAPABILITIES: readonly HarnessCapability[] = [
 	"credentials.use",
 	"service.mcp",
 	"skill.read",
+	"semantic.judge",
 ];
 export interface WorkerAuthorityResolutionInput {
 	authority?: WorkerDelegationAuthorityRequest;

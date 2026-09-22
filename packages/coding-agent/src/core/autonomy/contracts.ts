@@ -153,6 +153,13 @@ export interface WorkerClaim {
 	evidence?: EvidenceBundle;
 	changedFiles: readonly string[];
 	blockers?: readonly string[];
+	/** Findings the worker could not settle (Jev left them below the gate, or the evidence ran out).
+	 * Reported honestly instead of rounded up; the parent reviews them and they reach the owner. */
+	inconclusive?: readonly string[];
+	/** Inconclusive findings System One settled on the ladder, with the verdict and who reached it. */
+	systemOneSettled?: readonly string[];
+	/** The owner's follow-up document the still-open findings were written to under a handoff. */
+	ownerFollowUp?: string;
 	usageReportId?: string;
 	createdAt?: string;
 	/** Stamped at persistence time when validateWorkerClaim's gate flagged this claim

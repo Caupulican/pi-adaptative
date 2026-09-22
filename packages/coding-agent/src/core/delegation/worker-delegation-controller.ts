@@ -99,6 +99,7 @@ import {
 	type WorkerAuthorityResolution,
 	type WorkerAuthorityResolutionInput,
 } from "./worker-authority-resolver.ts";
+import { normalizeWorkerClaimForHost, validateWorkerClaim } from "./worker-claim.ts";
 import { WorkerContextForkStore, WorkerContextForkStoreError } from "./worker-context-fork-store.ts";
 import { resolveWorkerContextInheritanceMode } from "./worker-context-inheritance-policy.ts";
 import {
@@ -265,14 +266,24 @@ export interface WorkerDelegationControllerDeps {
 	reviewNewCode?(input: { toolName: string; args: unknown; cwd: string }): Promise<string | undefined>;
 	/**
 	 * Blockers for a worker's report from its own transcript: claims the transcript's tool results
-	 * contradict, and a verifier's acceptance with no passing test run. Any blocker makes the claim
-	 * need parent review instead of being accepted.
+	 * contradict, and a verifier's acceptance its own transcript does not back. Any blocker makes the
+	 * claim need parent review instead of being accepted.
 	 */
 	reviewWorkerReport?(input: {
 		summary: string;
 		messages: readonly Message[];
 		verifierVerdict?: "accepted" | "rejected";
 	}): Promise<readonly string[]>;
+	/**
+	 * The unsettled-item ladder for a worker's `inconclusive` findings: System One, then a stronger
+	 * model with System One, over the worker's own transcript. What stays open is returned for the
+	 * owner, and under a handoff is already written to the owner's follow-up document.
+	 */
+	settleInconclusive?(input: {
+		items: readonly string[];
+		messages: readonly Message[];
+		signal?: AbortSignal;
+	}): Promise<{ settled: readonly string[]; unsettled: readonly string[]; ownerFollowUp?: string }>;
 	/** Parent objective mutation ledger. Workers do not keep a second ownership record. */
 	recordObjectiveMutation?(event: {
 		readonly kind: "owned_write" | "shell";
@@ -3362,22 +3373,59 @@ export class WorkerDelegationController {
 					orchestrationProfile.requireIndependentVerification &&
 					orchestrationProfile.role !== "verifier" &&
 					rawOutcome.claim.status === "completed";
-				const reportBlockers = rawOutcome.accepted
-					? ((await this.deps
-							.reviewWorkerReport?.({
-								summary: rawOutcome.claim.summary,
-								messages: conversation.getRawTranscript().slice(transcriptStart),
-								...(rawOutcome.claim.verification
-									? { verifierVerdict: rawOutcome.claim.verification.verdict }
-									: {}),
-							})
-							.catch(() => [])) ?? [])
-					: [];
+				// An honest "could not settle this" climbs the ladder before anyone relies on it; what stays
+				// open reaches the owner as it happens, not only the parent.
+				const inconclusive = rawOutcome.claim.inconclusive ?? [];
+				const ladder =
+					inconclusive.length > 0 && this.deps.settleInconclusive
+						? await this.deps
+								.settleInconclusive({
+									items: inconclusive,
+									messages: conversation.getRawTranscript().slice(transcriptStart),
+									signal: workerSignal,
+								})
+								.catch(
+									(
+										error: unknown,
+									): { settled: readonly string[]; unsettled: readonly string[]; ownerFollowUp?: string } => ({
+										settled: [],
+										unsettled: inconclusive.map(
+											(item) =>
+												`${item} (ladder failed: ${error instanceof Error ? error.message : String(error)})`,
+										),
+									}),
+								)
+						: undefined;
+				for (const entry of ladder?.settled ?? []) this.safeWarn(`Worker ${agentId}: System One settled ${entry}`);
+				for (const entry of ladder?.unsettled ?? inconclusive)
+					this.safeWarn(`Worker ${agentId} could not settle: ${entry}`);
+				const settledOutcome = ladder
+					? rejudgedOutcome(rawOutcome, workerRequest, executionPlan.cwd, {
+							...rawOutcome.claim,
+							inconclusive: ladder.unsettled.length > 0 ? ladder.unsettled : undefined,
+							...(ladder.settled.length > 0 ? { systemOneSettled: ladder.settled } : {}),
+							...(ladder.ownerFollowUp ? { ownerFollowUp: ladder.ownerFollowUp } : {}),
+						})
+					: rawOutcome;
+				// Every completed report is checked against its own receipts, including the ones that already
+				// need parent review because they changed files: those are the reports that matter most.
+				const reportBlockers =
+					settledOutcome.claim.status === "completed"
+						? ((await this.deps
+								.reviewWorkerReport?.({
+									summary: settledOutcome.claim.summary,
+									messages: conversation.getRawTranscript().slice(transcriptStart),
+									...(settledOutcome.claim.verification
+										? { verifierVerdict: settledOutcome.claim.verification.verdict }
+										: {}),
+								})
+								.catch(() => [])) ?? [])
+						: [];
 				const reviewedOutcome: WorkerRunOutcome =
 					reportBlockers.length === 0
-						? rawOutcome
+						? settledOutcome
 						: {
-								...rawOutcome,
+								...settledOutcome,
 								accepted: false,
 								reasonCode: "worker_report_unbacked",
 								acceptance: {
@@ -3387,9 +3435,9 @@ export class WorkerDelegationController {
 									message: reportBlockers.join("; "),
 								},
 								claim: {
-									...rawOutcome.claim,
+									...settledOutcome.claim,
 									parentReviewRequired: true,
-									blockers: [...(rawOutcome.claim.blockers ?? []), ...reportBlockers],
+									blockers: [...(settledOutcome.claim.blockers ?? []), ...reportBlockers],
 								},
 							};
 				const outcome: WorkerRunOutcome = {
@@ -3597,4 +3645,19 @@ export class WorkerDelegationController {
 		this.scheduler.drain();
 		this.terminalHandoffs.signal();
 	}
+}
+
+/**
+ * The same outcome with a host-revised claim, re-judged by the same gate that judged the original:
+ * items System One settled no longer hold the claim in parent review, and an item still open does.
+ */
+function rejudgedOutcome(
+	outcome: WorkerRunOutcome,
+	request: WorkerRequest,
+	cwd: string,
+	claim: WorkerClaim,
+): WorkerRunOutcome {
+	const normalized = normalizeWorkerClaimForHost(claim);
+	const acceptance = validateWorkerClaim({ request, claim: normalized, cwd });
+	return { ...outcome, claim: normalized, acceptance, accepted: acceptance.outcome === "allow" };
 }

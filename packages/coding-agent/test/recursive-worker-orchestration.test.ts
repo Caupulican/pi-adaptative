@@ -16,6 +16,12 @@ import { setConcurrentResponses } from "./suite/concurrent-responses.ts";
 import { createHarness } from "./suite/harness.ts";
 import { createTestResourceLoader } from "./suite/test-resources.ts";
 
+/** A verifier's acceptance rests on its own inspection: one successful read of the subject first. */
+function verifierInspection(cwd: string): AssistantMessage {
+	writeFileSync(join(cwd, "subject.txt"), "verified subject\n");
+	return fauxAssistantMessage([fauxToolCall("read", { path: "subject.txt" })], { stopReason: "toolUse" });
+}
+
 const UNAVAILABLE_SHELL_TOOL_NAME = "nonexistent_shell";
 
 interface AgentTranscriptPage {
@@ -430,8 +436,9 @@ describe("leaf worker orchestration", () => {
 					fauxAssistantMessage('{"summary":"implementation complete","status":"completed","findings":[]}'),
 					() => {
 						verifierStarted = true;
-						return verifierCompletion;
+						return verifierInspection(harness.tempDir);
 					},
+					() => verifierCompletion,
 				]);
 
 				const admitted = await harness.session.runWorkerDelegationOnce({
@@ -500,6 +507,7 @@ describe("leaf worker orchestration", () => {
 			try {
 				harness.setResponses([
 					fauxAssistantMessage('{"summary":"initial implementation","status":"completed","findings":[]}'),
+					verifierInspection(harness.tempDir),
 					fauxAssistantMessage(
 						'{"summary":"initial verification","status":"completed","verdict":"accepted","reasonCodes":["verified"],"findings":[]}',
 					),
@@ -531,6 +539,7 @@ describe("leaf worker orchestration", () => {
 				const beforeConversations = conversationEntries(harness.tempDir, harness.session.sessionId);
 				harness.setResponses([
 					fauxAssistantMessage('{"summary":"reused implementation","status":"completed","findings":[]}'),
+					verifierInspection(harness.tempDir),
 					fauxAssistantMessage(
 						'{"summary":"reuse verification","status":"completed","verdict":"accepted","reasonCodes":["verified"],"findings":[]}',
 					),
@@ -551,7 +560,7 @@ describe("leaf worker orchestration", () => {
 					});
 					expect(durableEntityCounts(lifecycle)).toEqual(before);
 					expect(conversationEntries(harness.tempDir, harness.session.sessionId)).toEqual(beforeConversations);
-					expect(harness.getPendingResponseCount()).toBe(2);
+					expect(harness.getPendingResponseCount()).toBe(3);
 					return;
 				}
 

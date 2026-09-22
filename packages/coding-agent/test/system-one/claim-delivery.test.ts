@@ -50,7 +50,7 @@ describe("claims against deliveries", () => {
 		expect(judgeClaims({ states_pushed: { type: "noul", noul: 0.5 } }, receipts)).toEqual([]);
 	});
 
-	it("blocks a worker report its own results contradict, and a verifier's acceptance with no passing test", async () => {
+	it("blocks a worker report its own results contradict, and a verifier's acceptance nothing inspected", async () => {
 		const warnings: string[] = [];
 		const checker = new AnswerClaimChecker({
 			getController: () => ({
@@ -64,12 +64,27 @@ describe("claims against deliveries", () => {
 		});
 		expect(pushed).toHaveLength(1);
 		expect(pushed[0]).toContain("pushed");
-		const verified = await checker.workerReportBlockers({
+		// An inspection backs an acceptance; a subject without tests is verified by reading it.
+		const inspected = await checker.workerReportBlockers({
 			summary: "Reviewed the change.",
 			messages: turn("git status", false),
 			verifierVerdict: "accepted",
 		});
-		expect(verified).toEqual(["verification accepted with no passing test run in the verifier's own transcript"]);
+		expect(inspected).toEqual([]);
+		const uninspected = await checker.workerReportBlockers({
+			summary: "Reviewed the change.",
+			messages: turn("git status", true),
+			verifierVerdict: "accepted",
+		});
+		expect(uninspected).toEqual([
+			"verification accepted with no successful inspection in the verifier's own transcript",
+		]);
+		const nothing = await checker.workerReportBlockers({
+			summary: "Reviewed the change.",
+			messages: [],
+			verifierVerdict: "accepted",
+		});
+		expect(nothing).toEqual(uninspected);
 	});
 
 	describe("in a session", () => {

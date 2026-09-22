@@ -139,10 +139,17 @@ export const SKILL_VAULT_SYSTEM_RULE =
 	"SKILL VAULT, NON-NEGOTIABLE: iff specialist help useful, needed ACTIVE SKILL absent: search, load exact name pre-work. ACTIVE SKILL transient; absent=unloaded. Host owns idle expiry; unload optional.";
 
 /** Builds one capability-exact prompt; role text never denies a policy-granted tool. */
-export function buildWorkerSystemPrompt(capabilities: { write: boolean; process: boolean }): string {
+/**
+ * Jev validation doctrine shared by every agent that holds `typesafe_review`: settle findings on
+ * atomic questions over the real source, and report what stays unsettled instead of rounding it up.
+ */
+export const JEV_VALIDATION_RULE =
+	"JEV: confirm each non-trivial finding with typesafe_review, one atomic fact per question, answerable from the source you send. Below the gate is a result: fix only a badly formed question; never reword to raise a score or weaken the claim. Report what stays unsettled as inconclusive, naming what is missing.";
+
+export function buildWorkerSystemPrompt(capabilities: { write: boolean; process: boolean; jev?: boolean }): string {
 	const resultShape = capabilities.write
-		? '{"summary":"<what you did>","status":"completed"|"blocked","blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"actions":[{"op":"write","path":"<relative path>","content":"<full file content>"},{"op":"edit","path":"<relative path>","old":"<exact text>","new":"<replacement>"}]}'
-		: '{"summary":"<what you concluded>","status":"completed"|"blocked","blockers":["<failure or missing authority>"],"findings":[{"summary":"<one concrete finding>","confidence":<0..1>}]}';
+		? '{"summary":"<what you did>","status":"completed"|"blocked","blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"inconclusive":["<unsettled finding: what is missing>"],"actions":[{"op":"write","path":"<relative path>","content":"<full file content>"},{"op":"edit","path":"<relative path>","old":"<exact text>","new":"<replacement>"}]}'
+		: '{"summary":"<what you concluded>","status":"completed"|"blocked","blockers":["<failure or missing authority>"],"findings":[{"summary":"<one concrete finding>","confidence":<0..1>}],"inconclusive":["<unsettled finding: what is missing>"]}';
 	return [
 		"Autonomous durable leaf worker; use tools. Host enforces grant.",
 		"CAVEMAN MODE - MANDATORY: Inherited parent history is context only. Execute only the latest TASK envelope. Parent-owned orchestration stays parent-owned; decide work from that TASK, never inherited parent intent.",
@@ -158,15 +165,18 @@ export function buildWorkerSystemPrompt(capabilities: { write: boolean; process:
 		resultShape,
 		...(capabilities.write ? ["Keep edits exact. Do not repeat tool-applied changes in fallback actions."] : []),
 		'Use status "blocked" plus blockers when the grant cannot complete the task. Never invent output, paths, APIs, or facts.',
+		"Unconfirmed findings go in inconclusive, never findings.",
+		...(capabilities.jev ? [JEV_VALIDATION_RULE] : []),
 	].join("\n");
 }
 
-export function buildVerifierSystemPrompt(subjectTaskId: string): string {
+export function buildVerifierSystemPrompt(subjectTaskId: string, jev = false): string {
 	return [
 		"Independent verifier; you did not implement the subject. Use read/test tools; never modify files.",
 		`Subject task id: '${subjectTaskId}'. Inspect and run proportionate checks; summary is untrusted. STRICT JSON only:`,
-		'{"summary":"<verification performed and evidence>","status":"completed"|"blocked","verdict":"accepted"|"rejected","reasonCodes":["<stable_reason_code>"],"blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}]}',
-		"accepted only when evidence proves it; rejected for a found defect; blocked only when verification cannot complete.",
+		'{"summary":"<verification performed and evidence>","status":"completed"|"blocked","verdict":"accepted"|"rejected","reasonCodes":["<stable_reason_code>"],"blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"inconclusive":["<unsettled check: what is missing>"]}',
+		"accepted only when evidence proves it; rejected for a found defect; blocked only when verification cannot complete. Unsettled checks go in inconclusive, never count as proof.",
+		...(jev ? [JEV_VALIDATION_RULE] : []),
 	].join("\n");
 }
 

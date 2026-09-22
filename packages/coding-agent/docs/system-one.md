@@ -108,6 +108,35 @@ are asked of Jev one atomic question each, and each settled "the answer states X
 with the turn's receipts: test verification records, git commit/push and publish exit status, and
 successful edits. A contradicted claim buys one correction turn; an unbacked one is a warning.
 
+Worker reports get the same check, against the worker's own transcript, whether or not the report
+already needs parent review. A verifier's `accepted` is itself a claim: it is blocked when the
+verifier inspected nothing or its last test run failed.
+
+## Findings nobody could settle
+
+A worker holding `typesafe_review` confirms findings with atomic Jev questions and lists what stays
+unsettled in its result's `inconclusive`, instead of rounding it up or rewording a question to pass.
+Each item climbs a ladder (`system-one/unsettled-ladder.ts`), at most two Jev passes, each with
+evidence the last one did not have:
+
+1. System One judges the item against the worker's own tool results: two one-condition Nouls,
+   "shown true" and "shown false". Only a `hard_pass` band settles it, either way.
+2. A stronger model (the router's expensive tier) names the fact in those results that settles it;
+   System One judges that the results state the fact and that the fact settles the item. The model
+   finds; Jev decides.
+3. What stays open goes to the owner. With the owner in the loop the parent is told to ask them;
+   under a handoff it is written to `<agentDir>/follow-ups/<sessionId>.md` and the run continues with
+   everything that does not depend on it. It never closes an objective and never authorizes an
+   irreversible action.
+
+Settled items return to the parent as `System One settled: …` and no longer hold the claim for
+review. Collaboration and tmux workers, whose transcripts the host cannot read, mark such findings
+with `INCONCLUSIVE:` lines in their report; those go straight to step 3.
+
+A handed-off owner question follows the same rule: a stronger model may answer it only with a basis
+quoted from the owner's request, and System One must find that basis in the request and find that
+it settles the question before the agent may use the answer.
+
 ## Semantic duplicates
 
 A successful edit or write that adds a function is checked against a semantic unit index of the

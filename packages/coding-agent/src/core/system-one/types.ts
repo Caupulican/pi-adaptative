@@ -231,7 +231,8 @@ export type ValidationStage =
 	| "completion"
 	| "completion_challenge"
 	| "claim_delivery"
-	| "code_duplicate";
+	| "code_duplicate"
+	| "unsettled_item";
 
 export interface ValidationDecision {
 	id: string;

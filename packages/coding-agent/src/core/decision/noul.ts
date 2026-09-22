@@ -100,3 +100,17 @@ export function settledAnswer(
 	if (isNoulProbability(record.noul)) return settledFromBand(noulBand(record.noul, direction, thresholds), direction);
 	return undefined;
 }
+
+/**
+ * True only when a required-true Noul answer reached `hard_pass`. A provisional `soft_pass` is not
+ * decisive: what settles an item, closes a goal or names a duplicate outright needs the hard band.
+ */
+export function isDecisivelyTrue(
+	answer: unknown,
+	thresholds: NoulBandThresholds = DEFAULT_NOUL_BAND_THRESHOLDS,
+): boolean {
+	if (!answer || typeof answer !== "object") return false;
+	const record = answer as { band?: unknown; noul?: unknown };
+	if (typeof record.band === "string") return record.band === "hard_pass";
+	return isNoulProbability(record.noul) && noulBand(record.noul, "required_true", thresholds) === "hard_pass";
+}

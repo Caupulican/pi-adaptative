@@ -2,6 +2,7 @@ import path from "node:path";
 import { DEFAULT_MAX_BYTES } from "@caupulican/pi-agent-core/truncate";
 import type { CapabilityEnvelope, GateOutcome, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
 import { checkPathScope } from "../autonomy/path-scope.ts";
+import { INCONCLUSIVE_LINE_PREFIX } from "../extensions/types.ts";
 import { normalizeEvidenceBundleForStorage } from "../research/evidence-bundle.ts";
 import { utf8PrefixByBytes } from "../util/bounded-value.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -143,6 +144,40 @@ export function boundedWorkerClaimStrings(
 	return bounded;
 }
 
+/** The findings a report marks inconclusive, one per `INCONCLUSIVE:` line, bounded like blockers. */
+export function inconclusiveLinesIn(text: string | undefined): string[] {
+	if (!text) return [];
+	return collectBoundedWorkerClaimBlockers(
+		text
+			.split(/\r?\n/)
+			.map((line) => line.trim())
+			.filter((line) => line.toUpperCase().startsWith(INCONCLUSIVE_LINE_PREFIX))
+			.map((line) => line.slice(INCONCLUSIVE_LINE_PREFIX.length)),
+	).values;
+}
+
+/**
+ * What the parent is told about a worker's unsettled findings: what System One settled, and what is
+ * still open with the owner route that applies. One wording for every surface that shows a claim.
+ */
+export function workerClaimSettlementLines(
+	claim: Pick<WorkerClaim, "inconclusive" | "systemOneSettled" | "ownerFollowUp">,
+	sanitize: (value: string) => string = (value) => value,
+): string[] {
+	const lines: string[] = [];
+	if (claim.systemOneSettled && claim.systemOneSettled.length > 0)
+		lines.push(`System One settled: ${claim.systemOneSettled.map(sanitize).join("; ")}`);
+	if (claim.inconclusive && claim.inconclusive.length > 0) {
+		const items = claim.inconclusive.map(sanitize).join("; ");
+		lines.push(
+			claim.ownerFollowUp
+				? `Inconclusive, recorded for the owner in ${sanitize(claim.ownerFollowUp)}: ${items}. Continue with what does not depend on it and list it in your final answer.`
+				: `Inconclusive, never treat as confirmed: ${items}. Ask the owner (ask_question) before relying on it.`,
+		);
+	}
+	return lines;
+}
+
 export function boundedWorkerClaimBlockers(values: readonly string[]): string[] {
 	return collectBoundedWorkerClaimBlockers(values).values;
 }
@@ -229,6 +264,35 @@ export function normalizeWorkerClaimForHost(value: unknown): WorkerClaim {
 					),
 				}
 			: {}),
+		...(claim.inconclusive !== undefined
+			? {
+					inconclusive: workerClaimStringArray(
+						claim.inconclusive,
+						"claim.inconclusive",
+						MAX_WORKER_CLAIM_BLOCKERS,
+						MAX_WORKER_CLAIM_BLOCKER_CHARS,
+					),
+				}
+			: {}),
+		...(claim.systemOneSettled !== undefined
+			? {
+					systemOneSettled: workerClaimStringArray(
+						claim.systemOneSettled,
+						"claim.systemOneSettled",
+						MAX_WORKER_CLAIM_BLOCKERS,
+						MAX_WORKER_CLAIM_BLOCKER_CHARS,
+					),
+				}
+			: {}),
+		...(claim.ownerFollowUp !== undefined
+			? {
+					ownerFollowUp: requiredWorkerClaimString(
+						claim.ownerFollowUp,
+						"claim.ownerFollowUp",
+						MAX_WORKER_CLAIM_BLOCKER_CHARS,
+					),
+				}
+			: {}),
 		...(claim.usageReportId !== undefined
 			? {
 					usageReportId: requiredWorkerClaimString(
@@ -286,6 +350,9 @@ export function requiresParentReview(claim: WorkerClaim): boolean {
 		return true;
 	}
 	if (claim.blockers && claim.blockers.length > 0) {
+		return true;
+	}
+	if (claim.inconclusive && claim.inconclusive.length > 0) {
 		return true;
 	}
 	if (claim.changedFiles.length > 0) {
@@ -437,6 +504,7 @@ export function validateWorkerClaim(args: {
 			}
 		}
 
+		if (claim.inconclusive && claim.inconclusive.length > 0) return inconclusiveReview(claim.inconclusive);
 		// Files are inside scope, but worker output is untrusted
 		return {
 			outcome: "ask-user",
@@ -446,11 +514,23 @@ export function validateWorkerClaim(args: {
 		};
 	}
 
+	if (claim.inconclusive && claim.inconclusive.length > 0) return inconclusiveReview(claim.inconclusive);
 	return {
 		outcome: "allow",
 		gate: "worker_claim",
 		reasonCode: "allowed",
 		message: "Worker claim is read-only and allowed.",
+	};
+}
+
+/** An honest "could not settle this" is not a failure: the parent reviews it and it reaches the owner. */
+function inconclusiveReview(inconclusive: readonly string[]): GateOutcome {
+	return {
+		outcome: "ask-user",
+		gate: "worker_claim",
+		reasonCode: "parent_review_required",
+		message: "Completed worker claim reports inconclusive findings and requires parent review.",
+		details: { inconclusive: [...inconclusive] },
 	};
 }
 

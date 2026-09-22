@@ -80,6 +80,8 @@ export interface WorkerRunnerOptions {
 	applyActions?: (actions: readonly WorkerAction[]) => AppliedActionsReport;
 	/** Enables the constrained direct-argv operator role prompt. */
 	processCapable?: boolean;
+	/** The lane holds `typesafe_review`: the prompt asks the worker to validate findings with Jev. */
+	jevCapable?: boolean;
 	/** Session cwd — the baseline for relative changed-file and envelope paths in parent
 	 * validation. Defaults to process.cwd(). */
 	cwd?: string;
@@ -118,6 +120,8 @@ export interface ParsedWorkerOutput {
 	summary: string;
 	status: "completed" | "blocked";
 	blockers: string[];
+	/** Findings the worker could not settle; never folded into blockers or findings. */
+	inconclusive: string[];
 	findings: EvidenceFindingDraft[];
 	actions: WorkerAction[];
 	/** Present when the model emitted an action list that cannot safely reach execution. */
@@ -220,6 +224,15 @@ function extractWorkerFindingDrafts(rawFindings: unknown): EvidenceFindingDraft[
 	return findings;
 }
 
+function boundedReportStrings(raw: unknown): string[] {
+	return Array.isArray(raw)
+		? raw
+				.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+				.slice(0, MAX_WORKER_CLAIM_BLOCKERS)
+				.map((entry) => entry.trim().slice(0, MAX_WORKER_CLAIM_BLOCKER_CHARS))
+		: [];
+}
+
 export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined {
 	for (const record of workerOutputRecords(text)) {
 		const summary = record.summary;
@@ -235,12 +248,8 @@ export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined 
 		}
 
 		const status = record.status;
-		const blockers = Array.isArray(record.blockers)
-			? record.blockers
-					.filter((blocker): blocker is string => typeof blocker === "string" && blocker.trim().length > 0)
-					.slice(0, MAX_WORKER_CLAIM_BLOCKERS)
-					.map((blocker) => blocker.trim().slice(0, MAX_WORKER_CLAIM_BLOCKER_CHARS))
-			: [];
+		const blockers = boundedReportStrings(record.blockers);
+		const inconclusive = boundedReportStrings(record.inconclusive);
 		const findings = extractWorkerFindingDrafts(record.findings);
 		const verdict = record.verdict === "accepted" || record.verdict === "rejected" ? record.verdict : undefined;
 		const reasonCodes = Array.isArray(record.reasonCodes)
@@ -256,6 +265,7 @@ export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined 
 			summary: clipWorkerClaimSummary(summary.trim()),
 			status,
 			blockers,
+			inconclusive,
 			findings,
 			actions: actionOutcome.kind === "accepted" ? actionOutcome.actions : [],
 			...(actionOutcome.kind === "rejected" ? { actionRejection: actionOutcome } : {}),
@@ -384,10 +394,11 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		execute: (signal) =>
 			options.complete({
 				systemPrompt: options.verificationSubjectTaskId
-					? buildVerifierSystemPrompt(options.verificationSubjectTaskId)
+					? buildVerifierSystemPrompt(options.verificationSubjectTaskId, options.jevCapable === true)
 					: buildWorkerSystemPrompt({
 							write: writeCapable,
 							process: options.processCapable === true,
+							jev: options.jevCapable === true,
 						}),
 				userPrompt: buildWorkerUserPrompt(options.request),
 				signal,
@@ -679,6 +690,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		status: parsed.status === "blocked" || allBlockers.length > 0 ? "blocked" : "completed",
 		summary: parsed.summary,
 		...(allBlockers.length > 0 ? { blockers: allBlockers } : {}),
+		...(parsed.inconclusive.length > 0 ? { inconclusive: parsed.inconclusive } : {}),
 		...(evidence ? { evidence } : {}),
 		...(options.verificationSubjectTaskId && parsed.verdict
 			? {

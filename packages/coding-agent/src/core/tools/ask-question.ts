@@ -883,12 +883,12 @@ function withheldResult(
 	};
 }
 
-/** A handed-off question a stronger model settled: the agent proceeds with that answer. */
+/** A handed-off question a stronger model settled and System One grounded: the agent proceeds with it. */
 function consultedResult(
 	questions: readonly AskQuestion[],
 	consult: Extract<OwnerQuestionConsult, { kind: "answered" }>,
 ): { content: Array<{ type: "text"; text: string }>; details: AskQuestionToolDetails } {
-	const text = `ask_question settled under the owner's handoff by ${consult.model}: ${consult.answer} Proceed with this answer and say you used it.`;
+	const text = `ask_question settled under the owner's handoff by ${consult.model}, checked by System One against the request ("${consult.basis}"): ${consult.answer} Proceed with this answer and say you used it.`;
 	return { content: [{ type: "text", text }], details: { questions, answers: [], cancelled: true, error: text } };
 }
 

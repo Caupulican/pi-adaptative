@@ -266,6 +266,7 @@ import { createSessionForegroundControl, type SystemOneForegroundControl } from 
 import {
 	appendOwnerFollowUp,
 	consultMessage,
+	groundConsultAnswer,
 	OWNER_QUESTION_CONSULT_PROMPT,
 	type OwnerQuestionConsult,
 	ownerFollowUpPath,
@@ -277,6 +278,14 @@ import {
 	type SemanticPlaneHealth,
 	SemanticPlaneHealthRecorder,
 } from "./system-one/semantic-plane-health.ts";
+import {
+	itemConsultMessage,
+	type LadderOutcome,
+	parseItemConsult,
+	settleUnsettledItems,
+	toolResultEvidence,
+	UNSETTLED_ITEM_CONSULT_PROMPT,
+} from "./system-one/unsettled-ladder.ts";
 import { createSessionWorkerControl, type SystemOneWorkerControl } from "./system-one/worker-control.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
@@ -954,6 +963,7 @@ export class AgentSession {
 			getEvidenceBundleSnapshot: () => this.getEvidenceBundleSnapshot(),
 			saveEvidenceBundleSnapshot: (bundle) => this.saveEvidenceBundleSnapshot(bundle),
 			saveWorkerClaimSnapshot: (claim, request) => this.saveWorkerClaimSnapshot(claim, request),
+			recordUnsettledForOwner: (items) => this._recordUnsettledForOwner(items),
 			readMemoryForLane: (query) => this._memory.readMemoryForLane(query),
 			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
 			getArtifactStore: () => this._getToolArtifactStore(),
@@ -988,6 +998,7 @@ export class AgentSession {
 			getPathAliasTable: () => this._pipeline.peekPathAliasTable(),
 			reviewNewCode: ({ toolName, args, cwd }) => this._codeDuplicates.review(toolName, args, cwd),
 			reviewWorkerReport: (input) => this._answerClaims.workerReportBlockers(input),
+			settleInconclusive: (input) => this._settleWorkerInconclusive(input),
 			recordObjectiveMutation: (event) => {
 				const objectiveId = this.objectiveMutationId();
 				if (event.kind === "shell") this._mutationLedger.markShellUnsafe(objectiveId);
@@ -5017,24 +5028,113 @@ export class AgentSession {
 		return this._reflection.runIsolatedCompletion(opts);
 	}
 
-	/** Ask the router's expensive-tier model to settle a handed-off owner question, or say it cannot. */
+	/** One bounded completion on the router's expensive-tier model, or undefined when none is configured. */
+	private async _consultExpensiveModel(input: {
+		systemPrompt: string;
+		message: string;
+		laneKind: string;
+		signal?: AbortSignal;
+	}): Promise<{ text: string; ref: string } | undefined> {
+		const expensive = this._modelRouter.resolveExpensiveModel();
+		if ("skip" in expensive) return undefined;
+		const result = await this.runIsolatedCompletion({
+			systemPrompt: input.systemPrompt,
+			messages: [{ role: "user", content: input.message, timestamp: Date.now() }],
+			model: expensive.model,
+			maxTokens: 600,
+			cacheRetention: "none",
+			laneKind: input.laneKind,
+			...(input.signal ? { signal: input.signal } : {}),
+		});
+		return { text: result.text, ref: expensive.ref };
+	}
+
+	/**
+	 * A stronger model settles a handed-off owner question only on a basis the owner's request states,
+	 * and System One checks that basis before the agent may use the answer.
+	 */
 	private async _consultStrongerModel(input: {
 		question: string;
 		request: string;
 		signal?: AbortSignal;
 	}): Promise<OwnerQuestionConsult | undefined> {
-		const expensive = this._modelRouter.resolveExpensiveModel();
-		if ("skip" in expensive) return undefined;
-		const result = await this.runIsolatedCompletion({
+		const reply = await this._consultExpensiveModel({
 			systemPrompt: OWNER_QUESTION_CONSULT_PROMPT,
-			messages: [{ role: "user", content: consultMessage(input), timestamp: Date.now() }],
-			model: expensive.model,
-			maxTokens: 600,
-			cacheRetention: "none",
+			message: consultMessage(input),
 			laneKind: "owner-question-consult",
 			...(input.signal ? { signal: input.signal } : {}),
 		});
-		return parseConsultReply(result.text, expensive.ref);
+		const consult = reply ? parseConsultReply(reply.text, reply.ref) : undefined;
+		if (consult?.kind !== "answered") return consult;
+		return groundConsultAnswer(this._systemOneController, { consult, ...input });
+	}
+
+	/**
+	 * A worker's inconclusive findings on the ladder. What stays open goes to the owner: under a handoff
+	 * it is written to the follow-up document so the run moves on around it; with the owner in the
+	 * loop the parent is told to ask them.
+	 */
+	private async _settleWorkerInconclusive(input: {
+		items: readonly string[];
+		messages: Parameters<typeof toolResultEvidence>[0];
+		signal?: AbortSignal;
+	}): Promise<{ settled: readonly string[]; unsettled: readonly string[]; ownerFollowUp?: string }> {
+		const outcome = await this._settleInconclusive(input);
+		const settled = outcome.settled.map(
+			(entry) => `${entry.verdict}: ${entry.item} (${entry.by}${entry.basis ? `; basis: ${entry.basis}` : ""})`,
+		);
+		const unsettled = outcome.unsettled.map((entry) => `${entry.item} (missing: ${entry.missing})`);
+		const ownerFollowUp = this._recordUnsettledForOwner(unsettled);
+		return { settled, unsettled, ...(ownerFollowUp ? { ownerFollowUp } : {}) };
+	}
+
+	/**
+	 * Unsettled findings for the owner. Under a handoff they go to the follow-up document and the run
+	 * moves on around them; with the owner in the loop nothing is written and the parent asks them.
+	 */
+	private _recordUnsettledForOwner(items: readonly string[]): string | undefined {
+		if (!this._handoff || items.length === 0) return undefined;
+		const path = ownerFollowUpPath(this._agentDir, this.sessionManager.getSessionId());
+		const at = new Date().toISOString();
+		for (const item of items)
+			appendOwnerFollowUp(path, {
+				question: `A worker could not settle: ${item}`,
+				reason: "Neither System One nor a stronger model could settle it from the work's evidence.",
+				request: this._lastUserRequest,
+				at,
+			});
+		this._emit({
+			type: "warning",
+			message: `Owner follow-up recorded (${path}): ${items.length} unsettled finding(s)`,
+		});
+		return path;
+	}
+
+	/** Climb the unsettled-item ladder for a worker's inconclusive findings over its own tool results. */
+	private _settleInconclusive(input: {
+		items: readonly string[];
+		messages: Parameters<typeof toolResultEvidence>[0];
+		signal?: AbortSignal;
+	}): Promise<LadderOutcome> {
+		return settleUnsettledItems(
+			{
+				getJudge: () => this._systemOneController,
+				consult: async ({ item, evidence, signal }) => {
+					const reply = await this._consultExpensiveModel({
+						systemPrompt: UNSETTLED_ITEM_CONSULT_PROMPT,
+						message: itemConsultMessage({ item, evidence }),
+						laneKind: "unsettled-item-consult",
+						...(signal ? { signal } : {}),
+					});
+					return reply ? parseItemConsult(reply.text, reply.ref) : undefined;
+				},
+			},
+			{
+				items: input.items,
+				evidence: toolResultEvidence(input.messages),
+				...(input.signal ? { signal: input.signal } : {}),
+			},
+		);
 	}
 
 	/** Machine-wide provider load: in-flight requests, recorded limits, provider windows, the stop. */

@@ -4,12 +4,14 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { CapabilityEnvelope, WorkerClaim, WorkerRequest } from "../src/core/autonomy/contracts.ts";
 import {
+	inconclusiveLinesIn,
 	isWorkerClaim,
 	MAX_WORKER_CLAIM_SUMMARY_CHARS,
 	MAX_WORKER_CLAIM_TERMINAL_ATTEMPT_ID_CHARS,
 	normalizeWorkerClaimForHost,
 	requiresParentReview,
 	validateWorkerClaim,
+	workerClaimSettlementLines,
 } from "../src/core/delegation/worker-claim.ts";
 
 describe("Worker Result Validator (Phase 6)", () => {
@@ -34,6 +36,55 @@ describe("Worker Result Validator (Phase 6)", () => {
 		changedFiles: [],
 		usageReportId: "usage-1",
 	};
+
+	describe("inconclusive findings", () => {
+		const inconclusive = ["the retry path is idempotent (missing: a run with a dropped connection)"];
+
+		it("an honest inconclusive keeps the claim completed and hands it to the parent, not a failure", () => {
+			const claim = normalizeWorkerClaimForHost({ ...baseClaim, inconclusive });
+			expect(claim.status).toBe("completed");
+			expect(claim.inconclusive).toEqual(inconclusive);
+			expect(requiresParentReview(claim)).toBe(true);
+			const outcome = validateWorkerClaim({ request: mockRequest, claim });
+			expect(outcome).toMatchObject({
+				outcome: "ask-user",
+				reasonCode: "parent_review_required",
+				details: { inconclusive },
+			});
+		});
+
+		it("still refuses an out-of-scope change before the inconclusive review", () => {
+			const outcome = validateWorkerClaim({
+				request: mockRequest,
+				claim: { ...baseClaim, inconclusive, changedFiles: ["/tmp/outside/x.ts"] },
+			});
+			expect(outcome).toMatchObject({ outcome: "block", reasonCode: "changed_file_outside_scope" });
+		});
+
+		it("tells the parent what System One settled and routes what is open to the owner", () => {
+			expect(
+				workerClaimSettlementLines({
+					systemOneSettled: ["confirmed: the suite passes (system_one)"],
+					inconclusive,
+				}),
+			).toEqual([
+				"System One settled: confirmed: the suite passes (system_one)",
+				`Inconclusive, never treat as confirmed: ${inconclusive[0]}. Ask the owner (ask_question) before relying on it.`,
+			]);
+			expect(workerClaimSettlementLines({ inconclusive, ownerFollowUp: "/f/s.md" })[0]).toContain(
+				"recorded for the owner in /f/s.md",
+			);
+			expect(workerClaimSettlementLines({})).toEqual([]);
+		});
+
+		it("reads an out-of-process report's INCONCLUSIVE lines, and nothing else", () => {
+			expect(
+				inconclusiveLinesIn("Done.\nINCONCLUSIVE: cache is safe\n  inconclusive:   lock order\nnot this"),
+			).toEqual(["cache is safe", "lock order"]);
+			expect(inconclusiveLinesIn("INCONCLUSIVE:   ")).toEqual([]);
+			expect(inconclusiveLinesIn(undefined)).toEqual([]);
+		});
+	});
 
 	describe("validateWorkerClaim", () => {
 		it("request id mismatch blocks", () => {

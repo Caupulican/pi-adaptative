@@ -181,12 +181,15 @@ describe("objective-correlated ask_question", () => {
 			consultStrongerModel: async () => ({
 				kind: "answered",
 				answer: "Keep the archived importer.",
+				basis: "tidy the settings screen",
 				model: "big/model",
 			}),
 		});
 		const result = await tool.execute("call-1", { questions }, undefined, undefined, ctx);
 		expect(counter.presented).toBe(0);
-		expect((result.content[0] as { text: string }).text).toContain("Keep the archived importer.");
+		const text = (result.content[0] as { text: string }).text;
+		expect(text).toContain("Keep the archived importer.");
+		expect(text).toContain('checked by System One against the request ("tidy the settings screen")');
 	});
 
 	it("under a handoff, a decision only the owner can make becomes a follow-up and the run goes on", async () => {

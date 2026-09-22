@@ -6,6 +6,7 @@ import {
 	projectBackgroundToolTerminalDelivery,
 } from "./background-tool-task-controller.ts";
 import type { WorkerClaimSnapshotPayload } from "./delegation/session-worker-claim.ts";
+import { workerClaimSettlementLines } from "./delegation/worker-claim.ts";
 import type { WorkerTerminalHandoffRecord } from "./delegation/worker-notification-coordinator.ts";
 import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "./delegation/worker-terminal-handoff-coordinator.ts";
 import { workerTerminalOutputArtifact } from "./delegation/worker-terminal-output-artifact.ts";
@@ -144,6 +145,9 @@ export function buildForegroundWorkerTerminalHandoffContent(
 			status?: string;
 			changedFiles?: readonly string[];
 			blockers?: readonly string[];
+			inconclusive?: readonly string[];
+			systemOneSettled?: readonly string[];
+			ownerFollowUp?: string;
 			parentReviewRequired?: boolean;
 		};
 	}[],
@@ -177,6 +181,7 @@ export function buildForegroundWorkerTerminalHandoffContent(
 				if (record.claim.blockers && record.claim.blockers.length > 0) {
 					lines.push(`  Blockers: ${record.claim.blockers.map((b) => sanitize(b)).join("; ")}`);
 				}
+				for (const line of workerClaimSettlementLines(record.claim, sanitize)) lines.push(`  ${line}`);
 			}
 			return lines;
 		}),
@@ -413,6 +418,9 @@ export class ForegroundTerminalHandoffController {
 								),
 								changedFiles: claim.changedFiles,
 								...(claim.blockers ? { blockers: claim.blockers } : {}),
+								...(claim.inconclusive ? { inconclusive: claim.inconclusive } : {}),
+								...(claim.systemOneSettled ? { systemOneSettled: claim.systemOneSettled } : {}),
+								...(claim.ownerFollowUp ? { ownerFollowUp: claim.ownerFollowUp } : {}),
 								...(claim.parentReviewRequired ? { parentReviewRequired: true } : {}),
 							},
 						}

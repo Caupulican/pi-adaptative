@@ -11,6 +11,7 @@ import {
 	type WorkerAgentView,
 	type WorkerGrantSummary,
 } from "../delegation/worker-agent-control.ts";
+import { workerClaimSettlementLines } from "../delegation/worker-claim.ts";
 import { MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES } from "../delegation/worker-conversation-store.ts";
 import {
 	MAX_PARALLEL_WORK_JUSTIFICATION_LENGTH,
@@ -627,6 +628,7 @@ export interface DelegateDispatchToolDetails {
 	costUsd?: number;
 	summary?: string;
 	blockers?: readonly string[];
+	inconclusive?: readonly string[];
 	queued?: boolean;
 	messageId?: string;
 	broadcastResults?: readonly WorkerAgentBroadcastTargetResult[];
@@ -2432,6 +2434,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 								.join("; ")}`,
 						);
 					}
+					lines.push(...workerClaimSettlementLines(outcome.claim, (entry) => entry.slice(0, 512)));
 					for (const finding of outcome.claim.evidence?.findings.slice(0, 16) ?? []) {
 						lines.push(`- Finding: ${finding.summary.slice(0, 512)}`);
 					}
@@ -2452,6 +2455,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 						costUsd: outcome?.costUsd,
 						summary: outcome?.claim.summary.slice(0, 8_000),
 						blockers: outcome?.claim.blockers?.slice(0, 16),
+						...(outcome?.claim.inconclusive ? { inconclusive: outcome.claim.inconclusive.slice(0, 16) } : {}),
 						...(modelPinBypassFrom(run) ? { modelPinBypass: modelPinBypassFrom(run) } : {}),
 					},
 				};

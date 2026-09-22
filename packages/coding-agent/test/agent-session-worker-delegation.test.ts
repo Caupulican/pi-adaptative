@@ -93,6 +93,12 @@ function lastMessageText(context: { messages?: readonly unknown[] }): string {
 		.join("\n");
 }
 
+/** A verifier's acceptance rests on its own inspection: one successful read of the subject first. */
+function verifierInspection(cwd: string): AssistantMessage {
+	writeFileSync(join(cwd, "subject.txt"), "verified subject\n");
+	return fauxAssistantMessage([fauxToolCall("read", { path: "subject.txt" })], { stopReason: "toolUse" });
+}
+
 describe("AgentSession worker delegation", () => {
 	it("constructs only the model and tool surface owned by the active orchestration profile", async () => {
 		const now = new Date().toISOString();
@@ -1838,6 +1844,7 @@ describe("AgentSession worker delegation", () => {
 		try {
 			harness.setResponses([
 				fauxAssistantMessage('{"summary":"implementation complete","status":"completed","findings":[]}'),
+				verifierInspection(harness.tempDir),
 				() => verifierCompletion,
 			]);
 
@@ -1974,6 +1981,7 @@ describe("AgentSession worker delegation", () => {
 
 			harness.setResponses([
 				fauxAssistantMessage("Recovery boundary reached."),
+				verifierInspection(harness.tempDir),
 				fauxAssistantMessage(
 					'{"summary":"recovered verification passed","status":"completed","verdict":"accepted","reasonCodes":["recovery_check_passed"],"findings":[]}',
 				),

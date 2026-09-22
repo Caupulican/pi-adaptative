@@ -31,6 +31,8 @@ export interface ClaimReceipts {
 	/** Paths written by successful edit/write calls. */
 	readonly filesChanged: readonly string[];
 	readonly toolCalls: number;
+	/** Tool calls that returned without error: what an inspection-backed verdict rests on. */
+	readonly succeededToolCalls: number;
 }
 
 export type ClaimKind = "tests_pass" | "committed" | "pushed" | "published" | "files_changed";
@@ -64,10 +66,12 @@ export function collectClaimReceipts(turnMessages: readonly AgentMessage[]): Cla
 	const publishes = { succeeded: 0, failed: 0 };
 	const filesChanged: string[] = [];
 	let toolCalls = 0;
+	let succeededToolCalls = 0;
 	for (const message of turnMessages) {
 		if (message.role !== "toolResult") continue;
 		const result = message as ToolResultMessage;
 		toolCalls += 1;
+		if (!result.isError) succeededToolCalls += 1;
 		const record = retainedVerificationDetails(result.details)?.piVerification;
 		if (record?.evidence === "tests" && record.outcome === "executed") {
 			const passed = isPassingTestVerification(record);
@@ -88,7 +92,7 @@ export function collectClaimReceipts(turnMessages: readonly AgentMessage[]): Cla
 			if (typeof path === "string" && !filesChanged.includes(path)) filesChanged.push(path);
 		}
 	}
-	return { tests, commits, pushes, publishes, filesChanged, toolCalls };
+	return { tests, commits, pushes, publishes, filesChanged, toolCalls, succeededToolCalls };
 }
 
 /** Cheap gate before spending a Jev call: an answer that names none of the claim kinds claims none. */
@@ -236,8 +240,15 @@ export class AnswerClaimChecker {
 				blockers.push(`claim contradicted by the worker's own tool results: ${finding.reason}`);
 			else this.deps.warn(`Unverified worker claim: ${finding.reason}`);
 		}
-		if (input.verifierVerdict === "accepted" && collectClaimReceipts(input.messages).tests.passed === 0)
-			blockers.push("verification accepted with no passing test run in the verifier's own transcript");
+		// "accepted" is itself a claim: it must rest on the verifier's own inspection, and a failing last
+		// test run contradicts it. A subject with no tests (docs, config) is verified by reading it.
+		if (input.verifierVerdict === "accepted") {
+			const receipts = collectClaimReceipts(input.messages);
+			if (receipts.tests.lastPassed === false)
+				blockers.push("verification accepted although the verifier's last test run failed");
+			else if (receipts.succeededToolCalls === 0)
+				blockers.push("verification accepted with no successful inspection in the verifier's own transcript");
+		}
 		return blockers;
 	}
 }

@@ -1301,6 +1301,8 @@ interface ManagedLaneEventBase {
 }
 
 export const MAX_MANAGED_LANE_SUMMARY_BYTES = 8 * 1024;
+/** A managed lane's report marks each finding it could not settle on its own summary line. */
+export const INCONCLUSIVE_LINE_PREFIX = "INCONCLUSIVE:";
 
 export type ManagedLaneEvent =
 	| (ManagedLaneEventBase & {

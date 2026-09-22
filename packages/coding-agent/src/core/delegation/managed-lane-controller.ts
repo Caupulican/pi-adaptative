@@ -17,6 +17,7 @@ import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import { getLatestWorkerClaimSnapshot } from "./session-worker-claim.ts";
 import {
+	inconclusiveLinesIn,
 	normalizeWorkerClaimForHost,
 	normalizeWorkerClaimReasonCode,
 	reviewManagedLaneChangedFiles,
@@ -74,6 +75,11 @@ export interface ManagedLaneControllerDeps {
 	getCurrentSubmissionEpoch?(): number | undefined;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string;
+	/**
+	 * Findings a worker could not settle, for the owner. Under a handoff they are written to the
+	 * owner's follow-up document and its path is returned; with the owner in the loop, undefined.
+	 */
+	recordUnsettledForOwner?(items: readonly string[]): string | undefined;
 	/** Optional only for minimal host embeddings; normal AgentSession integration always supplies this. */
 	addSpawnedUsage?(
 		usage: Usage,
@@ -253,12 +259,19 @@ export class ManagedLaneController {
 			envelope: this.deps.getCapabilityEnvelope() ?? {},
 			cwd: this.deps.getCwd(),
 		});
+		// An out-of-process lane leaves no transcript the host can judge its findings from, and its own
+		// narrative is not a receipt: what it marks inconclusive goes to the owner as reported.
+		const inconclusive = inconclusiveLinesIn(typeof event.summary === "string" ? event.summary : undefined);
+		for (const item of inconclusive) this.warn(`Managed worker ${event.laneId} could not settle: ${item}`);
+		const ownerFollowUp = inconclusive.length > 0 ? this.deps.recordUnsettledForOwner?.(inconclusive) : undefined;
 		claim = normalizeWorkerClaimForHost({
 			...claim,
 			summary: `${claim.summary}${
 				review.reviewRequired ? ` Changed files require parent review (${review.reasonCode}).` : ""
 			}`,
-			parentReviewRequired: review.reviewRequired,
+			parentReviewRequired: review.reviewRequired || inconclusive.length > 0,
+			...(inconclusive.length > 0 ? { inconclusive } : {}),
+			...(ownerFollowUp ? { ownerFollowUp } : {}),
 		});
 		let record: LaneRecord | undefined;
 		let finalized = false;
@@ -272,7 +285,7 @@ export class ManagedLaneController {
 			const terminal = finalizeWorkerClaim(this.lifecycle, {
 				handle,
 				claim,
-				accepted: resolvedStatus === "succeeded" && !review.reviewRequired,
+				accepted: resolvedStatus === "succeeded" && claim.parentReviewRequired !== true,
 				costUsd: usage?.cost.total,
 				cwd: this.deps.getCwd(),
 				...(usage

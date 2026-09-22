@@ -12,7 +12,7 @@ import { validateOrchestrationProfile } from "../src/core/orchestration/profile-
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { TypeSafeEvidenceStore } from "../src/core/review/typesafe-evidence-store.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
-import { envelopeHasToolCapability } from "../src/core/tool-capability-policy.ts";
+import { capabilitySurvivesReadOnly, envelopeHasToolCapability } from "../src/core/tool-capability-policy.ts";
 import { AuthDialogsController } from "../src/modes/interactive/auth-dialogs-controller.ts";
 import { LoginDialogComponent } from "../src/modes/interactive/components/login-dialog.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -100,90 +100,92 @@ describe("packaged TypeSafe reviewer", () => {
 		}
 	});
 	it.each([
-		{ capabilities: [] as HarnessCapability[] },
-		{ capabilities: ["network.http"] as HarnessCapability[] },
-		{ capabilities: ["credentials.use"] as HarnessCapability[] },
-		{ capabilities: ["network.http", "credentials.use"] as HarnessCapability[] },
-	])("requires both capabilities before admitting review execution: $capabilities", async ({ capabilities }) => {
-		const faux = registerFauxProvider();
-		const model = faux.getModel();
-		const now = new Date().toISOString();
-		const profile: OrchestrationProfile = {
-			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
-			profileId: "review-authority",
-			description: "Review authority fixture",
-			role: "operator",
-			modelPolicy: {
-				mode: "fixed",
-				candidates: [{ provider: model.provider, modelId: model.id, thinkingLevel: "off" }],
-			},
-			capabilityCeiling: capabilities,
-			toolNames: ["typesafe_review"],
-			resourceProfileNames: [],
-			dispatchProfileIds: [],
-			budget: { maxWallClockMs: 5_000, maxToolCalls: 4, maxTokens: 8_192, maxCostUsd: 1 },
-			maxConcurrent: 1,
-			leaseTtlMs: 10_000,
-			requireIndependentVerification: false,
-			createdAt: now,
-			updatedAt: now,
-		};
-		const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-			Response.json({
-				model: "jev-1.13.0",
-				answers: {
-					q: {
-						type: "choice",
-						choice: "supports",
-						confidence: 1,
-						probabilities: { supports: 1, insufficient: 0 },
-					},
+		{ capabilities: [] as HarnessCapability[], admitted: false },
+		{ capabilities: ["network.http", "credentials.use"] as HarnessCapability[], admitted: false },
+		{ capabilities: ["semantic.judge"] as HarnessCapability[], admitted: true },
+	])(
+		"requires semantic judgment authority before admitting review execution: $capabilities",
+		async ({ capabilities, admitted }) => {
+			const faux = registerFauxProvider();
+			const model = faux.getModel();
+			const now = new Date().toISOString();
+			const profile: OrchestrationProfile = {
+				schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+				profileId: "review-authority",
+				description: "Review authority fixture",
+				role: "operator",
+				modelPolicy: {
+					mode: "fixed",
+					candidates: [{ provider: model.provider, modelId: model.id, thinkingLevel: "off" }],
 				},
-				usage: { input_tokens: 100, output_tokens: 10 },
-			}),
-		);
-		let cleanup: (() => Promise<void>) | undefined;
-		try {
-			if (capabilities.length !== 2) {
-				expect(() => validateOrchestrationProfile(profile)).toThrow("lacks network authority");
-				expect(fetcher).not.toHaveBeenCalled();
-				return;
-			}
-			expect(() => validateOrchestrationProfile(profile)).not.toThrow();
-			const harness = await createHarness({ sharedFauxProvider: faux, orchestrationProfile: profile });
-			cleanup = harness.cleanup;
-			harness.authStorage.set("typesafe", { type: "api_key", key: "fixture-key" });
-			harness.setResponses([
-				fauxAssistantMessage(
-					fauxToolCall("typesafe_review", {
-						action: "review",
-						review: {
-							state: "fixture",
-							questions: {
-								q: {
-									instructions: "Verify fixture",
-									criteria: { supports: "Supported", insufficient: "Missing" },
-									expected: "supports",
+				capabilityCeiling: capabilities,
+				toolNames: ["typesafe_review"],
+				resourceProfileNames: [],
+				dispatchProfileIds: [],
+				budget: { maxWallClockMs: 5_000, maxToolCalls: 4, maxTokens: 8_192, maxCostUsd: 1 },
+				maxConcurrent: 1,
+				leaseTtlMs: 10_000,
+				requireIndependentVerification: false,
+				createdAt: now,
+				updatedAt: now,
+			};
+			const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+				Response.json({
+					model: "jev-1.13.0",
+					answers: {
+						q: {
+							type: "choice",
+							choice: "supports",
+							confidence: 1,
+							probabilities: { supports: 1, insufficient: 0 },
+						},
+					},
+					usage: { input_tokens: 100, output_tokens: 10 },
+				}),
+			);
+			let cleanup: (() => Promise<void>) | undefined;
+			try {
+				if (!admitted) {
+					expect(() => validateOrchestrationProfile(profile)).toThrow("lacks judgment authority");
+					expect(fetcher).not.toHaveBeenCalled();
+					return;
+				}
+				expect(() => validateOrchestrationProfile(profile)).not.toThrow();
+				const harness = await createHarness({ sharedFauxProvider: faux, orchestrationProfile: profile });
+				cleanup = harness.cleanup;
+				harness.authStorage.set("typesafe", { type: "api_key", key: "fixture-key" });
+				harness.setResponses([
+					fauxAssistantMessage(
+						fauxToolCall("typesafe_review", {
+							action: "review",
+							review: {
+								state: "fixture",
+								questions: {
+									q: {
+										instructions: "Verify fixture",
+										criteria: { supports: "Supported", insufficient: "Missing" },
+										expected: "supports",
+									},
 								},
 							},
-						},
-					}),
-					{ stopReason: "toolUse" },
-				),
-				fauxAssistantMessage("Done"),
-			]);
-			await harness.session.prompt("Review the fixture.");
-			expect(fetcher).toHaveBeenCalledOnce();
-			expect(
-				harness.session.messages.find(
-					(message) => message.role === "toolResult" && message.toolName === "typesafe_review",
-				),
-			).toMatchObject({ isError: false, details: { accepted: true } });
-		} finally {
-			await cleanup?.();
-			faux.unregister();
-		}
-	});
+						}),
+						{ stopReason: "toolUse" },
+					),
+					fauxAssistantMessage("Done"),
+				]);
+				await harness.session.prompt("Review the fixture.");
+				expect(fetcher).toHaveBeenCalledOnce();
+				expect(
+					harness.session.messages.find(
+						(message) => message.role === "toolResult" && message.toolName === "typesafe_review",
+					),
+				).toMatchObject({ isError: false, details: { accepted: true } });
+			} finally {
+				await cleanup?.();
+				faux.unregister();
+			}
+		},
+	);
 	it.each([200_000, 16_384, 8_192, 4_096])(
 		"keeps the default reviewer available at context window %s",
 		async (contextWindow) => {
@@ -402,10 +404,12 @@ describe("packaged TypeSafe reviewer", () => {
 		expect(auth.hasAuth("typesafe")).toBe(true);
 		expect(await auth.getApiKey("typesafe")).toBe("fixture-env-key");
 	});
-	it("requires both network and credential authority", () => {
-		expect(envelopeHasToolCapability(["network.http"], "typesafe_review")).toBe(false);
-		expect(envelopeHasToolCapability(["credentials.use"], "typesafe_review")).toBe(false);
-		expect(envelopeHasToolCapability(["network.http", "credentials.use"], "typesafe_review")).toBe(true);
+	it("is authorized by semantic judgment, which a read-only grant keeps", () => {
+		// The host brokers the call and holds the credential: network or credential authority is neither
+		// needed nor sufficient, and a read-only reviewer still gets Jev.
+		expect(envelopeHasToolCapability(["network.http", "credentials.use"], "typesafe_review")).toBe(false);
+		expect(envelopeHasToolCapability(["semantic.judge"], "typesafe_review")).toBe(true);
+		expect(capabilitySurvivesReadOnly("semantic.judge")).toBe(true);
 	});
 	it.each([false, true])(
 		"reports /login typesafe honestly when persistence fails=%s without changing the foreground model",

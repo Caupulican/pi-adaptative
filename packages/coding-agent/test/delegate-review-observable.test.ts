@@ -238,17 +238,17 @@ describe("delegate status/review surfaces unreviewed mutations", () => {
 			.join("\n");
 	}
 
-	it("a mutating worker with parent_review_required shows as unreviewed in the overview and per-lane detail", async () => {
+	it("a worker claim with parent_review_required shows as unreviewed in the overview and per-lane detail", async () => {
 		const { sessionManager, tool } = buildSessionBackedTool();
 		appendWorkerClaimSnapshot(sessionManager, { ...baseClaim, blockers: ["verify this"] }, mockRequest);
 
 		const overview = await tool.execute("call", { action: "status" }, undefined, undefined, context);
-		expect(textOf(overview)).toContain("1 unreviewed worker mutation");
+		expect(textOf(overview)).toContain("1 unreviewed worker claim");
 		expect(textOf(overview)).toContain("req-1");
 		expect((overview.details as { unreviewedCount: number }).unreviewedCount).toBe(1);
 
 		const single = await tool.execute("call", { action: "status", laneId: "req-1" }, undefined, undefined, context);
-		expect(textOf(single)).toContain("UNREVIEWED MUTATION");
+		expect(textOf(single)).toContain("UNREVIEWED CLAIM");
 		expect((single.details as { unreviewed: boolean }).unreviewed).toBe(true);
 	});
 

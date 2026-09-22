@@ -95,6 +95,7 @@ const CAPABILITY_ENFORCEMENT = new Map<HarnessCapability, ToolCapabilityManifest
 	["credentials.use", "service-proxy"],
 	["memory.query", "memory-broker"],
 	["memory.mutate", "memory-broker"],
+	["semantic.judge", "service-proxy"],
 	["settings.read", "control-plane"],
 	["settings.write", "control-plane"],
 	["skill.read", "path-scope"],

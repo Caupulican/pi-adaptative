@@ -1,5 +1,5 @@
 import type { Usage } from "@caupulican/pi-ai";
-import { MAX_MANAGED_LANE_SUMMARY_BYTES } from "../extensions/types.ts";
+import { INCONCLUSIVE_LINE_PREFIX, MAX_MANAGED_LANE_SUMMARY_BYTES } from "../extensions/types.ts";
 import type { CollaborationBackend, CollaborationQuestionAnswer } from "./backend.ts";
 import { boundCollaborationEvidence, type CollaborationTerminal } from "./job-store.ts";
 import type { CollaborationPendingQuestion, CollaborationResultClaim } from "./result-claim.ts";
@@ -22,6 +22,7 @@ export function collaborationPrompt(input: CollaborationTurnInput): string {
 		`Your current dispatch identity is ${input.turnId}. After completing and verifying your task, or when blocked, submit your bounded final evidence through the authenticated report command as your last tool action. Printed terminal markers are not completion evidence.`,
 		`Immediately before EVERY report, including after an answer or keyboard selection resumes you, run this command and read its returned turnId (answers create a fresh identity; never reuse an older one):\n${input.reportCommand} current`,
 		`Then run: ${input.reportCommand} report <returned-turnId> <done|blocked> <quoted-evidence> [optional-usage-json]`,
+		`Put each finding you could not confirm on its own evidence line as ${JSON.stringify(`${INCONCLUSIVE_LINE_PREFIX} <finding: what is missing>`)}; never report it as verified.`,
 		`Use done only for verified completed work. Use blocked for a precise question or missing condition. Evidence must be nonempty and at most ${MAX_MANAGED_LANE_SUMMARY_BYTES} UTF-8 bytes. Optional advisory token usage must be directly measured; never estimate it. Never display the peer token environment variable.`,
 		"After a successful report, end your response and stop working. The orchestrator waits for the native stopped event before accepting your report. Do not issue another tool call or task until the orchestrator resumes you. If a report receipt is lost, retry the exact same turn ID, status, evidence and usage; never replace an accepted claim.",
 	].join("\n\n");

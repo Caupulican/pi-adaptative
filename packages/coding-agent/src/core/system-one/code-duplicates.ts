@@ -14,7 +14,7 @@ import { availableParallelism, freemem } from "node:os";
 import { extname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
-import { type NoulBand, noulBand, settledAnswer } from "../decision/noul.ts";
+import { isDecisivelyTrue, type NoulBand, noulBand, settledAnswer } from "../decision/noul.ts";
 import { defaultFffSearchBackend } from "../tools/fff-search-backend.ts";
 import { resolveManagedSearchTool } from "../tools/managed-search-tool.ts";
 import {
@@ -579,7 +579,8 @@ export class CodeDuplicateReviewer {
 						const answer = answers[duplicateQuestionId(unitIndex, candidateIndex)] as
 							| { band?: unknown; noul?: unknown }
 							| undefined;
-						if (settledAnswer(answer) === true) findings.push({ unit, candidate, decisive: isDecisive(answer) });
+						if (settledAnswer(answer) === true)
+							findings.push({ unit, candidate, decisive: isDecisivelyTrue(answer) });
 					});
 				});
 			} catch (error) {
@@ -609,11 +610,6 @@ export class CodeDuplicateReviewer {
 			"Reuse or extend the existing function instead of keeping two implementations of one responsibility.",
 		].join("\n");
 	}
-}
-
-function isDecisive(answer: { band?: unknown; noul?: unknown } | undefined): boolean {
-	if (typeof answer?.band === "string") return answer.band === "hard_pass";
-	return typeof answer?.noul === "number" && noulBand(answer.noul, "required_true") === "hard_pass";
 }
 
 export interface SemanticDuplicateVerdict {

@@ -23,6 +23,7 @@ function buildDeps(
 	overrides?: Partial<{
 		envelope: CapabilityEnvelope | undefined;
 		cwd: string;
+		recordUnsettledForOwner: (items: readonly string[]) => string | undefined;
 	}>,
 ): { deps: BackgroundLaneControllerDeps; savedClaims: Array<{ claim: WorkerClaim; request?: unknown }> } {
 	const savedClaims: Array<{ claim: WorkerClaim; request?: unknown }> = [];
@@ -42,6 +43,7 @@ function buildDeps(
 			savedClaims.push({ claim, request });
 			return `worker-claim-entry-${savedClaims.length}`;
 		},
+		...(overrides?.recordUnsettledForOwner ? { recordUnsettledForOwner: overrides.recordUnsettledForOwner } : {}),
 	} as unknown as BackgroundLaneControllerDeps;
 	return { deps, savedClaims };
 }
@@ -212,7 +214,57 @@ describe("host re-review of a managed (collaboration) lane's changed files", () 
 			.map((entry) => entry.text)
 			.join("\n");
 
-		expect(text).toContain("UNREVIEWED MUTATION");
+		expect(text).toContain("UNREVIEWED CLAIM");
 		expect((result.details as { unreviewed?: boolean }).unreviewed).toBe(true);
+	});
+
+	describe("findings a managed lane could not settle", () => {
+		const summary =
+			"Reviewed the parser.\nINCONCLUSIVE: the fallback branch is unreachable (missing: a coverage run)";
+
+		function terminal(laneId: string, recordUnsettledForOwner?: (items: readonly string[]) => string | undefined) {
+			const { deps, savedClaims } = buildDeps(`/tmp/pi-test-collaboration-inconclusive-${laneId}`, {
+				...(recordUnsettledForOwner ? { recordUnsettledForOwner } : {}),
+			});
+			const controller = new BackgroundLaneController(deps);
+			controller.recordManagedLane({ laneId, phase: "dispatch", dispatch: createTestManagedLaneDispatch() });
+			controller.recordManagedLane({ laneId, phase: "terminal", status: "succeeded", summary });
+			return savedClaims[0]?.claim;
+		}
+
+		it("carries them to the parent for review with the owner in the loop", () => {
+			const claim = terminal("collaboration-job-inc-1", () => undefined);
+			expect(claim?.inconclusive).toEqual(["the fallback branch is unreachable (missing: a coverage run)"]);
+			expect(claim?.parentReviewRequired).toBe(true);
+			expect(claim?.ownerFollowUp).toBeUndefined();
+		});
+
+		it("records them in the owner's follow-up document under a handoff", () => {
+			const recorded: string[][] = [];
+			const claim = terminal("collaboration-job-inc-2", (items) => {
+				recorded.push([...items]);
+				return "/agent/follow-ups/s.md";
+			});
+			expect(recorded).toEqual([["the fallback branch is unreachable (missing: a coverage run)"]]);
+			expect(claim?.ownerFollowUp).toBe("/agent/follow-ups/s.md");
+		});
+
+		it("leaves a report without INCONCLUSIVE lines untouched", () => {
+			const { deps, savedClaims } = buildDeps("/tmp/pi-test-collaboration-inconclusive-none");
+			const controller = new BackgroundLaneController(deps);
+			controller.recordManagedLane({
+				laneId: "collaboration-job-inc-3",
+				phase: "dispatch",
+				dispatch: createTestManagedLaneDispatch(),
+			});
+			controller.recordManagedLane({
+				laneId: "collaboration-job-inc-3",
+				phase: "terminal",
+				status: "succeeded",
+				summary: "All verified.",
+			});
+			expect(savedClaims[0]?.claim.inconclusive).toBeUndefined();
+			expect(savedClaims[0]?.claim.parentReviewRequired).toBe(false);
+		});
 	});
 });

@@ -215,6 +215,9 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 	// Built per evaluation: one Noul per candidate (system-one/code-duplicates.ts).
 	code_duplicate: Object.freeze({}),
 
+	// Built per evaluation: two Nouls per unsettled item (system-one/unsettled-ladder.ts).
+	unsettled_item: Object.freeze({}),
+
 	// One atomic question per claim kind. Each asks only what the answer SAYS; whether it happened is
 	// read from the turn's receipts in code (claim-delivery.ts), never judged from the answer's own words.
 	claim_delivery: Object.freeze({

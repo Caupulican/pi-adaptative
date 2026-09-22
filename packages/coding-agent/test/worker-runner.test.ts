@@ -1,6 +1,7 @@
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { describe, expect, it, vi } from "vitest";
 import type { WorkerRequest } from "../src/core/autonomy/contracts.ts";
+import { SUBAGENT_CORE_SYSTEM_PROMPT } from "../src/core/autonomy/subagent-prompt.ts";
 import {
 	appendWorkerClaimSnapshot,
 	getWorkerClaimSnapshots,
@@ -17,6 +18,7 @@ import {
 	type WorkerRunnerOptions,
 } from "../src/core/delegation/worker-runner.ts";
 import { WorkerTreeBudgetExceededError } from "../src/core/delegation/worker-tree-budget-coordinator.ts";
+import { MODEL_CAPABILITY_SYSTEM_PROMPT_MAX_CHARS } from "../src/core/model-capability.ts";
 import { CapabilityGatewayDeniedError } from "../src/core/orchestration/capability-gateway.ts";
 
 function workerRequest(overrides: Partial<WorkerRequest> = {}): WorkerRequest {
@@ -65,6 +67,7 @@ describe("parseWorkerOutput", () => {
 			summary: "All good",
 			status: "completed",
 			blockers: [],
+			inconclusive: [],
 			findings: [],
 			actions: [],
 			reasonCodes: [],
@@ -169,7 +172,12 @@ describe("buildWorkerSystemPrompt", () => {
 		expect(prompt).toContain("run_process");
 		expect(prompt).not.toContain("Delegate useful independent");
 		expect(prompt).not.toContain("workspace tools are read-only");
-		expect(prompt.length).toBeLessThan(1_000);
+		// The fullest role prompt, Jev included, must fit the smallest class that may hold typesafe_review.
+		const fullest = buildWorkerSystemPrompt({ write: true, process: true, jev: true });
+		expect(fullest).toContain("typesafe_review");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT.length + 2 + fullest.length).toBeLessThanOrEqual(
+			MODEL_CAPABILITY_SYSTEM_PROMPT_MAX_CHARS.chat ?? 0,
+		);
 	});
 });
 

@@ -25,7 +25,7 @@ import type {
 import { isLaneTerminalStatus, type LaneRecord, LaneTracker } from "./autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
-import { ManagedLaneController } from "./delegation/managed-lane-controller.ts";
+import { ManagedLaneController, type ManagedLaneControllerDeps } from "./delegation/managed-lane-controller.ts";
 import type {
 	SessionRootReply,
 	SessionRootReplyQuery,
@@ -85,7 +85,8 @@ export interface BackgroundLaneControllerDeps
 	extends WorkerDelegationControllerDeps,
 		ResearchLaneControllerDeps,
 		ModelFitnessControllerDeps,
-		LaneModelResolverDeps {
+		LaneModelResolverDeps,
+		Pick<ManagedLaneControllerDeps, "recordUnsettledForOwner"> {
 	/** True iff the active surface can terminalize a goal through `goal` or `update_goal`.
 	 * Explicit tool/profile exclusion and the worker-role ceiling still disable continuation. */
 	isGoalToolActive(): boolean;

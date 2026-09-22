@@ -556,6 +556,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 					signal: options.signal,
 					cwd: options.cwd,
 					processCapable: options.processCapable,
+					jevCapable: options.toolSurface.allowedTools.includes("typesafe_review"),
 					...(options.verificationSubjectTaskId
 						? { verificationSubjectTaskId: options.verificationSubjectTaskId }
 						: {}),

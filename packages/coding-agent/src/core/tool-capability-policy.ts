@@ -51,7 +51,7 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	),
 	...["fetch", "web_search"].map((toolName) => [toolName, NETWORK_POLICY] as const),
 	["webfetch", policy([["network.http"]], "service-proxy")],
-	["typesafe_review", policy([["network.http"], ["credentials.use"]], "service-proxy")],
+	["typesafe_review", policy([["semantic.judge"]], "service-proxy")],
 	[
 		"image_generate",
 		policy([["network.http"], ["credentials.use"], ["filesystem.read"]], ["service-proxy", "path-scope"]),
@@ -108,6 +108,7 @@ export function capabilitySurvivesReadOnly(capability: HarnessCapability): boole
 	return (
 		resolveCapabilityPathAccess([capability]) === "read" ||
 		capability === "memory.query" ||
+		capability === "semantic.judge" ||
 		capability === "settings.read"
 	);
 }
@@ -272,6 +273,8 @@ export function describeToolCapabilityAuthority(toolName: string): string {
 		case "memory.query":
 		case "memory.mutate":
 			return "memory";
+		case "semantic.judge":
+			return "judgment";
 		case "workflow.delegate":
 			return "delegation";
 		case "skill.read":

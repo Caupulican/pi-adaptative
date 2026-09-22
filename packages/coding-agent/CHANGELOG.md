@@ -4,6 +4,8 @@
 
 - Every answer's claims are checked against the turn's own tool results, with or without a goal. A claim the results contradict (a push that failed, tests that failed) buys one correction turn; a claim nothing backs is a warning.
 - Semantic duplicate review: an edit that adds a function doing the same job as existing code, however it is written, gets a note in its result naming the function to reuse. `npm run scan:semantic-duplicates` reports every such pair across the repository.
+- Workers report what they could not settle. A worker's result has an `inconclusive` list, and every worker holding `typesafe_review` is told to confirm findings with atomic Jev questions and to report an unsettled one honestly instead of rewording it to pass. Each item climbs a ladder before anyone relies on it: System One judges it against the worker's own tool results, then a stronger model names the fact that settles it and System One checks that fact. What stays open goes to the owner: the parent is told to ask them, or, under a handoff, it is written to the owner's follow-up document and the work continues around it. Collaboration and tmux workers mark such findings with `INCONCLUSIVE:` lines in their report.
+- Read-only workers get Jev. `typesafe_review` needs the new `semantic.judge` capability, which a read-only grant keeps, instead of network and credential authority, which it strips; reviewers and auditors had silently lost the tool.
 
 ### Fixed
 
@@ -21,6 +23,11 @@
 - Evidence the harness built wrong names its JSON path and is classified `invalid_request` without retries; `timeoutMs` bounds a whole Jev evaluation.
 - A worker whose semantic supervision keeps failing keeps running; supervision pauses for that attempt instead of cancelling it.
 - Secret patterns start at a token boundary: `task-automation-controller.ts` no longer reads as an API key and blocks the Jev request that names it.
+- A worker report that changed files is checked against its own tool results. The check ran only for reports already accepted, and a report with changed files always waits for parent review, so the reports that mattered most were never checked.
+- A verifier's acceptance must rest on its own inspection: it is blocked when the verifier inspected nothing or its last test run failed, instead of requiring a passing test run that a docs or config change cannot have.
+- A stronger model settles a handed-off owner question only on a basis the owner's request states, and System One checks that basis before the agent may use the answer; before, its answer was used unchecked.
+- Independent `typesafe_review` calls in one turn run concurrently instead of one at a time.
+- `delegate status` says "unreviewed worker claim": a claim can need review for blockers or unsettled findings without changing any file.
 
 ## [0.99.43] - 2026-09-22
 
