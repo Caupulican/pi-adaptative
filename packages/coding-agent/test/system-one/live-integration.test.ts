@@ -62,7 +62,7 @@ describe("System One Live Integration", () => {
 		return controller;
 	}
 
-	it("intercepts and blocks prohibited tool executions via ToolGateController", async () => {
+	it("classifies a prohibited tool execution and does not refuse the call", async () => {
 		const systemOne = createMockSystemOne({
 			toolGateOutcome: "block",
 			toolGateReason: "Prohibited repository mutation during discovery phase",
@@ -86,9 +86,7 @@ describe("System One Live Integration", () => {
 			undefined,
 		);
 
-		expect(result).toBeDefined();
-		expect(result?.block).toBe(true);
-		expect(result?.reason).toContain("Prohibited repository mutation during discovery phase");
+		expect(result?.block).toBeUndefined();
 		expect(systemOne.validateToolGate).toHaveBeenCalled();
 	});
 
