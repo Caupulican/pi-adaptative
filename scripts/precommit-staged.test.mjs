@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { biomeCoveredFiles, globToRegExp, partitionBiomeFiles, planStagedGates, stagedCopyPath } from "./precommit-staged.mjs";
+import {
+	biomeCoveredFiles,
+	globToRegExp,
+	partitionBiomeFiles,
+	planStagedGates,
+	stagedCopyPath,
+	withoutHookGitLocation,
+} from "./precommit-staged.mjs";
 
 const biomeIncludes = JSON.parse(readFileSync(new URL("../biome.json", import.meta.url), "utf8")).files.includes;
 
@@ -73,6 +80,26 @@ test("a partially staged file is checked on its staged content, never rewritten 
 	);
 	assert.deepEqual(whole, ["packages/coding-agent/src/a.ts", "scripts/c.mjs"]);
 	assert.deepEqual(partiallyStaged, ["packages/coding-agent/src/b.ts"]);
+});
+
+test("staged tests drop the hook git location and keep the rest of the environment", () => {
+	const env = withoutHookGitLocation({
+		PATH: "/usr/bin",
+		KEEP: "yes",
+		GIT_DIR: "/repo/.git",
+		GIT_WORK_TREE: "/repo",
+		GIT_INDEX_FILE: "/repo/.git/index",
+		GIT_OBJECT_DIRECTORY: "/repo/.git/objects",
+		GIT_COMMON_DIR: "/repo/.git",
+	});
+	assert.equal(env.PATH, "/usr/bin");
+	assert.equal(env.KEEP, "yes");
+	assert.equal(env.GIT_DIR, undefined);
+	assert.equal(env.GIT_WORK_TREE, undefined);
+	assert.equal(env.GIT_INDEX_FILE, undefined);
+	assert.equal(env.GIT_OBJECT_DIRECTORY, undefined);
+	assert.equal(env.GIT_COMMON_DIR, undefined);
+	assert.equal("GIT_INDEX_FILE" in env, false);
 });
 
 test("a staged blob is checked as a sibling copy with the same extension", () => {

@@ -83,6 +83,18 @@ export function partitionBiomeFiles(biomeFiles, unstagedChangedFiles) {
 	};
 }
 
+const HOOK_GIT_LOCATION_KEYS = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"];
+
+/**
+ * The commit hook exports its own git location. A staged test that runs git must not inherit it,
+ * or `git add` rewrites the index the hook is committing.
+ */
+export function withoutHookGitLocation(base = process.env) {
+	const env = { ...base };
+	for (const key of HOOK_GIT_LOCATION_KEYS) delete env[key];
+	return env;
+}
+
 /** Where a partially staged file's staged blob is checked: a sibling with the same extension, never committed. */
 export function stagedCopyPath(path) {
 	const slash = path.lastIndexOf("/");
@@ -129,13 +141,13 @@ function readBiomeIncludes() {
 	return config.files?.includes ?? [];
 }
 
-function run(label, command, args, cwd = repoRoot) {
+function run(label, command, args, cwd = repoRoot, env = process.env) {
 	const started = Date.now();
 	process.stdout.write(`precommit: ${label}\n`);
 	const result = spawnSync(command, args, {
 		cwd: resolve(repoRoot, cwd),
 		stdio: "inherit",
-		env: process.env,
+		env,
 		shell: process.platform === "win32" && !command.endsWith(".mjs") && command !== process.execPath,
 	});
 	const seconds = ((Date.now() - started) / 1000).toFixed(1);
@@ -213,7 +225,7 @@ export function main(argv = process.argv.slice(2)) {
 	if (plan.browserSmoke) run("browser smoke check", "npm", ["run", "check:browser-smoke"]);
 	for (const entry of plan.tests) {
 		const [command, args] = testCommand(entry);
-		run(`${entry.runner} ${entry.cwd}/${entry.file}`, command, args, entry.cwd);
+		run(`${entry.runner} ${entry.cwd}/${entry.file}`, command, args, entry.cwd, withoutHookGitLocation());
 	}
 	if (plan.typecheck) run("project type check (staged TypeScript source)", process.execPath, [join(scriptsDir, "run-tsc.mjs"), "--noEmit"]);
 	process.stdout.write(`✅ precommit: staged gates passed in ${((Date.now() - started) / 1000).toFixed(1)}s\n`);
