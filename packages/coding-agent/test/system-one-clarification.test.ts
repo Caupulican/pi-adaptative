@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { GoalClarification } from "../src/core/goals/goal-state.ts";
 import type { HumanInputQuestion } from "../src/core/human-input.ts";
 import {
+	CLARIFICATION_JUDGMENT_BUDGET_MS,
 	type ClarificationDecisionEngine,
 	type ClarificationDecisionProgram,
 	clarificationQuestionIdentity,
@@ -73,16 +74,37 @@ describe("clarification sufficiency arbitration", () => {
 		});
 	});
 
-	it("refuses a question that is still waiting on the owner", async () => {
+	it("does not withhold a question whose earlier identical ask never completed", async () => {
+		// A dialog can be left pending when the goal stops while it is open; the owner never saw an
+		// answerable question, so the new ask is judged like any other instead of being withheld.
+		const { engine } = engineAnswering({ missing_information: { noul: 0.9 } });
 		const verdict = await evaluateClarificationNeed(
 			input({
 				clarifications: [
 					priorClarification({ status: "pending", answerSummary: undefined, answeredAt: undefined }),
 				],
+				semantic: engine,
 			}),
 		);
-		expect(verdict.decision).toBe("duplicate");
-		expect(verdict.reasonCode).toBe("asked_recently");
+		expect(verdict.decision).toBe("ask");
+	});
+
+	it("asks the owner when System One cannot judge in time", async () => {
+		vi.useFakeTimers();
+		try {
+			const engine = {
+				evaluate: (_program: unknown, _state: unknown, options?: { signal?: AbortSignal }) =>
+					new Promise<never>((_resolve, reject) => {
+						options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
+					}),
+			};
+			const pending = evaluateClarificationNeed(input({ semantic: engine }));
+			await vi.advanceTimersByTimeAsync(CLARIFICATION_JUDGMENT_BUDGET_MS + 1);
+			const verdict = await pending;
+			expect(verdict.decision).toBe("ask");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("matches a prior ask on normalized text, not exact formatting", async () => {

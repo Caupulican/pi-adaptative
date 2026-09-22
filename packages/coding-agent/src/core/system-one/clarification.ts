@@ -54,7 +54,6 @@ export type ClarificationDecision = "ask" | "duplicate" | "resolve_autonomously"
 export type ClarificationReasonCode =
 	| "no_prior"
 	| "already_answered"
-	| "asked_recently"
 	| "semantic_missing_information"
 	| "semantic_sufficient"
 	| "semantic_unavailable";
@@ -71,9 +70,18 @@ export interface ClarificationNeedInput {
 	readonly category: GoalClarificationCategory;
 	readonly clarifications: readonly GoalClarification[];
 	readonly userGoal: string;
+	/** The objective's acceptance criteria, which JEV-001's questions read alongside the request. */
+	readonly acceptanceCriteria?: readonly string[];
 	readonly semantic?: ClarificationDecisionEngine;
 	readonly signal?: AbortSignal;
 }
+
+/**
+ * How long the question waits on System One before it goes to the owner anyway. Jev's measured p90 is
+ * under half a second (decision ledger, 2026-09-22); ten times that leaves room for a slow request
+ * without leaving the owner staring at a question that has not been shown.
+ */
+export const CLARIFICATION_JUDGMENT_BUDGET_MS = 5_000;
 
 /** Bound on the proposed-question text recorded on the ledger and handed to the semantic program. */
 export const MAX_CLARIFICATION_QUESTION_LENGTH = 300;
@@ -134,12 +142,12 @@ function buildClarificationProgram(state: Record<string, unknown>): Clarificatio
  * | condition                                              | decision             | reasonCode                   |
  * | ------------------------------------------------------ | -------------------- | ---------------------------- |
  * | identical ask already answered on this objective        | duplicate            | already_answered             |
- * | identical ask still pending on this objective           | duplicate            | asked_recently               |
+ * | identical ask still pending (never completed)          | not a duplicate: judged as a new ask                |
  * | no semantic engine bound                                | ask                  | semantic_unavailable         |
  * | JEV-001: critical information missing                   | ask                  | semantic_missing_information |
  * | JEV-001: objective incoherent                           | ask                  | semantic_missing_information |
  * | JEV-001: nothing missing and objective coherent         | resolve_autonomously | semantic_sufficient          |
- * | JEV-001 produced no usable answer (or threw)            | ask                  | no_prior                     |
+ * | JEV-001 produced no usable answer, threw or timed out   | ask                  | no_prior                     |
  *
  * A prior ask the owner explicitly declined is deliberately NOT a duplicate: a decline is owner
  * intent about that moment, and the semantic stage decides whether the objective can now proceed
@@ -160,13 +168,9 @@ export async function evaluateClarificationNeed(input: ClarificationNeedInput): 
 					: "Owner already answered this question for the active objective.",
 			};
 		}
-		if (clarification.status === "pending") {
-			return {
-				decision: "duplicate",
-				reasonCode: "asked_recently",
-				detail: `This question is already waiting on the owner (request ${clarification.requestId}).`,
-			};
-		}
+		// A pending entry is NOT a duplicate: it can be left pending by a dialog that never completed (the
+		// goal stopped while it was open), and withholding on it would tell the model not to ask a question
+		// the owner never saw. Only an answered question is settled.
 	}
 
 	if (!input.semantic) {
@@ -180,6 +184,9 @@ export async function evaluateClarificationNeed(input: ClarificationNeedInput): 
 	const state: Record<string, unknown> = {
 		objectiveId: input.objectiveId,
 		request: input.userGoal,
+		// JEV-001 reads these beside the request; a goal carries no separate constraint list.
+		constraints: [],
+		acceptanceCriteria: input.acceptanceCriteria ?? [],
 		clarifications: input.clarifications.map((clarification) => ({
 			question: clarification.question,
 			status: clarification.status,
@@ -191,11 +198,18 @@ export async function evaluateClarificationNeed(input: ClarificationNeedInput): 
 
 	let answers: Awaited<ReturnType<ClarificationDecisionEngine["evaluate"]>>["answers"];
 	try {
+		// Bounded: the owner is waiting on this ask. A timeout reads like any other failure below: ask.
+		const deadline = AbortSignal.timeout(CLARIFICATION_JUDGMENT_BUDGET_MS);
 		const evaluation = await input.semantic.evaluate(buildClarificationProgram(state), state, {
 			consequence: "high",
-			signal: input.signal,
+			signal: input.signal ? AbortSignal.any([input.signal, deadline]) : deadline,
 		});
-		answers = (evaluation.results ?? evaluation.answers) as any;
+		// Per decision: the normalized result when present, else the raw answer. An empty `results` object
+		// must not hide populated answers.
+		const merged: Record<string, unknown> = {};
+		for (const id of new Set([...Object.keys(evaluation.answers ?? {}), ...Object.keys(evaluation.results ?? {})]))
+			merged[id] = evaluation.results?.[id] ?? evaluation.answers?.[id];
+		answers = merged as any;
 	} catch (error) {
 		return {
 			decision: "ask",

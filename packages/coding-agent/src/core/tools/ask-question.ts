@@ -123,6 +123,8 @@ export interface AskQuestionToolDetails {
 	cancelled: boolean;
 	reason?: AskQuestionStopReason;
 	error?: string;
+	/** While the call runs: System One is judging whether the owner is needed, or the dialog is shown. */
+	phase?: "checking" | "waiting";
 }
 
 export interface AskQuestionToolOptions {
@@ -140,7 +142,7 @@ export interface AskQuestionToolOptions {
 	getObjectiveId?: () => string | undefined;
 	/** Objective text and clarification ledger the arbitration reads. */
 	getObjectiveClarificationState?: () =>
-		| { userGoal: string; clarifications: readonly GoalClarification[] }
+		| { userGoal: string; clarifications: readonly GoalClarification[]; acceptanceCriteria?: readonly string[] }
 		| undefined;
 	/** The session's recorded semantic decision engine; undefined when no steering plane is bound. */
 	getSemanticDecisionEngine?: () => ClarificationDecisionEngine | undefined;
@@ -890,13 +892,15 @@ export function createAskQuestionToolDefinition(options: AskQuestionToolOptions 
 			if (isPartial) {
 				return new OrchestrationPanelComponent(theme, {
 					label: "question",
-					action: "waiting for you",
+					// Never "waiting for you" before a dialog exists: that is the state the owner can act on.
+					action:
+						result.details?.phase === "checking" ? "System One checking whether it needs you" : "waiting for you",
 					status: "running",
 				});
 			}
 			return new OrchestrationPanelComponent(theme, questionPanelModel(result.details), expanded);
 		},
-		async execute(_toolCallId, input, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, input, signal, onUpdate, ctx) {
 			const validationError = validateQuestions(input.questions);
 			if (validationError) return stoppedResult(input.questions, "invalid_questions", validationError);
 			if (!ctx.hasUI) {
@@ -907,7 +911,13 @@ export function createAskQuestionToolDefinition(options: AskQuestionToolOptions 
 			const objectiveId = options.getObjectiveId?.();
 			const category: GoalClarificationCategory = input.category ?? "information";
 			let verdict: ClarificationVerdict | undefined;
+			const phase = (value: "checking" | "waiting") =>
+				onUpdate?.({
+					content: [],
+					details: { questions: input.questions, answers: [], cancelled: false, phase: value },
+				});
 			if (objectiveId) {
+				phase("checking");
 				const objective = options.getObjectiveClarificationState?.();
 				verdict = await evaluateClarificationNeed({
 					objectiveId,
@@ -915,12 +925,14 @@ export function createAskQuestionToolDefinition(options: AskQuestionToolOptions 
 					category,
 					clarifications: objective?.clarifications ?? [],
 					userGoal: objective?.userGoal ?? "",
+					...(objective?.acceptanceCriteria ? { acceptanceCriteria: objective.acceptanceCriteria } : {}),
 					semantic: options.getSemanticDecisionEngine?.(),
 					signal,
 				});
 				if (verdict.decision !== "ask") return withheldResult(input.questions, verdict);
 			}
 
+			phase("waiting");
 			const request = createHumanInputRequest({
 				source: "tool",
 				toolCallId: _toolCallId,

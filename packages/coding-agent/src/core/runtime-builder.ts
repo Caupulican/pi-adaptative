@@ -1396,7 +1396,11 @@ export class RuntimeBuilder {
 					getObjectiveClarificationState: () => {
 						const goal = activeObjective();
 						if (!goal) return undefined;
-						return { userGoal: goal.userGoal, clarifications: goal.clarifications ?? [] };
+						return {
+							userGoal: goal.userGoal,
+							clarifications: goal.clarifications ?? [],
+							acceptanceCriteria: goal.requirements.map((requirement) => requirement.text),
+						};
 					},
 					getSemanticDecisionEngine: () => this.deps.getSemanticDecisionEngine?.(),
 					recordObjectiveClarification: (objectiveId, event) => {
