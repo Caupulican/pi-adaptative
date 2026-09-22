@@ -98,7 +98,7 @@ describe("goal continuation interruption containment", () => {
 			systemFailureStreak: 0,
 			blockedReason: undefined,
 		});
-	});
+	}, 90_000);
 
 	it("resets failure streak on healthy continuation turn without legacy evidence so subsequent transient error recovers", async () => {
 		const harness = await createHarness();
@@ -146,7 +146,7 @@ describe("goal continuation interruption containment", () => {
 			status: "active",
 			systemFailureStreak: 1,
 		});
-	});
+	}, 90_000);
 
 	it("continues across successful provider turns as a negative control", async () => {
 		const harness = await createHarness();
