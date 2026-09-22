@@ -49,6 +49,27 @@ test("proof binds successful runs to the requested SHA and examines the complete
 	}
 });
 
+test("release proof accepts the tag workflow quality-gate jobs when ci.yml has no run", () => {
+	const sha = "c".repeat(40);
+	const jobs = completeCiJobs().map((job) => ({ ...job, name: `quality-gate / ${job.name}` }));
+	const calls = [];
+	const read = (_command, args) => {
+		calls.push(args[1]);
+		if (args[1] === "view") return JSON.stringify({ headSha: sha, jobs });
+		return JSON.stringify([]);
+	};
+	assert.equal(requireCiProof(sha, "owner/repo", read, "99"), 99);
+	assert.deepEqual(calls, ["view"]);
+});
+
+test("a caller run for another SHA is not proof and an empty ci.yml list still fails", () => {
+	const sha = "c".repeat(40);
+	const read = (_command, args) => JSON.stringify(args[1] === "view"
+		? { headSha: "d".repeat(40), jobs: completeCiJobs() }
+		: []);
+	assert.throws(() => requireCiProof(sha, "owner/repo", read, "99"), /complete/);
+});
+
 test("release proof examines the exact tagged SHA", () => {
 	const sha = "a".repeat(40);
 	const complete = completeCiJobs();

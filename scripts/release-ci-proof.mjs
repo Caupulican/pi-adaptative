@@ -9,6 +9,19 @@ const REQUIRED_JOBS = new Map([
 	])),
 ]);
 
+const CALLER_JOB_PREFIX = "quality-gate / ";
+
+/** Tag publication nests ci.yml under build-binaries, which prefixes every called job. */
+export function normalizeCiJobs(jobs) {
+	if (!Array.isArray(jobs)) return [];
+	return jobs.map((job) => ({
+		...job,
+		name: typeof job.name === "string" && job.name.startsWith(CALLER_JOB_PREFIX)
+			? job.name.slice(CALLER_JOB_PREFIX.length)
+			: job.name,
+	}));
+}
+
 /** A green workflow can skip tests. Require every distinct platform/shard and its actual test steps. */
 export function hasCompleteCiMatrix(jobs) {
 	if (!Array.isArray(jobs)) return false;
@@ -23,14 +36,27 @@ function readCommand(command, args) {
 	return execFileSync(command, args, { encoding: "utf8", stdio: ["ignore", "pipe", "inherit"], maxBuffer: 8 * 1024 * 1024 });
 }
 
-/** The full matrix must belong to one successful, complete run on exactly this source tree. */
-export function requireCiProof(sha, repo, read = readCommand) {
+function matrixRunId(detail, sha) {
+	if (detail?.headSha !== sha) return undefined;
+	return hasCompleteCiMatrix(normalizeCiJobs(detail.jobs)) ? true : undefined;
+}
+
+/**
+ * The full matrix must belong to this source tree. A tag workflow is still in progress when
+ * provenance reads it, so the caller's quality-gate jobs count before that run's own conclusion.
+ * A finished standalone ci.yml run remains proof when there is no caller matrix.
+ */
+export function requireCiProof(sha, repo, read = readCommand, callerRunId) {
+	if (callerRunId) {
+		const detail = JSON.parse(read("gh", ["run", "view", String(callerRunId), "-R", repo, "--json", "jobs,headSha"]));
+		if (matrixRunId(detail, sha)) return Number(callerRunId);
+	}
 	const runs = JSON.parse(read("gh", ["run", "list", "-R", repo, "--workflow=ci.yml", "--commit", sha,
 		"--limit", "100", "--json", "databaseId,headSha,status,conclusion"]));
 	for (const run of runs) {
 		if (run.headSha !== sha || run.status !== "completed" || run.conclusion !== "success") continue;
-		const detail = JSON.parse(read("gh", ["run", "view", String(run.databaseId), "-R", repo, "--json", "jobs"]));
-		if (hasCompleteCiMatrix(detail.jobs)) return run.databaseId;
+		const detail = JSON.parse(read("gh", ["run", "view", String(run.databaseId), "-R", repo, "--json", "jobs,headSha"]));
+		if (matrixRunId({ ...detail, headSha: detail.headSha ?? run.headSha }, sha)) return run.databaseId;
 	}
 	throw new Error(`ci.yml has no successful complete Linux/Windows matrix for tested commit ${sha}`);
 }
@@ -44,7 +70,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 	try {
 		const [sha, repo] = process.argv.slice(2);
 		if (!/^[a-f0-9]{40}$/iu.test(sha ?? "") || !repo) throw new Error("Usage: release-ci-proof.mjs <sha> <repo>");
-		const run = requireCiProof(sha, repo);
+		const run = requireCiProof(sha, repo, readCommand, process.env.GITHUB_RUN_ID);
 		console.log(`Complete CI matrix proven by run ${run}`);
 	} catch (error) {
 		console.error(`::error::${error.message}`);
