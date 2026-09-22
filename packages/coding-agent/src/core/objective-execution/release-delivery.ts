@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { PreparedPackageArtifact } from "./delivery-coordinator.ts";
 import type { PackagePublishIntent } from "./delivery-intent.ts";
 import type { DeployProofObservation, PublishProofObservation } from "./delivery-proof.ts";
+import { npmExec } from "./npm-exec.ts";
 
 interface PackageManifest {
 	readonly name?: unknown;
@@ -71,14 +72,6 @@ function publishableIdentity(manifest: PackageManifest | undefined): { name: str
 	return { name: manifest.name, version: manifest.version };
 }
 
-function npmInvocation(configured: readonly string[] | undefined): { command: string; args: string[] } {
-	if (configured && configured.length > 0 && configured[0]) {
-		const [command, ...args] = configured;
-		return { command, args };
-	}
-	return { command: process.platform === "win32" ? "npm.cmd" : "npm", args: [] };
-}
-
 function run(command: string, args: readonly string[], cwd: string, signal?: AbortSignal): Promise<string> {
 	return new Promise((resolve, reject) => {
 		execFile(
@@ -142,7 +135,7 @@ export function createRepoReleaseDelivery(
 	const liveRegistry = adapters && !Array.isArray(adapters) ? adapters : undefined;
 	const staticAdapters = Array.isArray(adapters) ? adapters : [];
 	if (!publishIdentity && !liveRegistry && staticAdapters.length === 0) return undefined;
-	const npm = npmInvocation(options?.npmCommand);
+	const npm = npmExec(options?.npmCommand);
 	let prepared: PreparedPackageArtifact | undefined;
 	let preparedDir: string | undefined;
 

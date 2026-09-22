@@ -128,6 +128,10 @@ describe("AssistantMessageComponent unresolved verification", () => {
 		const plain = new AssistantMessageComponent(createAssistantMessage([]), true, undefined, {
 			showCommentary: true,
 		});
-		expect(stripAnsi(plain.render(100).join("\n")).trim()).toBe("");
+		const plainText = stripAnsi(plain.render(100).join("\n"));
+		expect(plainText).not.toContain("Verification remains unresolved");
+		expect(plainText).not.toContain("Answer withheld");
+		expect(plainText).not.toContain("VERIFICATION_UNRESOLVED");
+		expect(plainText).toContain("(No response received from model)");
 	});
 });

@@ -19,7 +19,17 @@ describe("parent indicator visibility", () => {
 			isInitialized: true,
 			footer: { invalidate() {} },
 			ui: { requestRender() {}, terminal: { setProgress() {} } },
-			session: { getForegroundActivity: () => activity, sessionManager: { getCwd: () => "/fixture" } },
+			session: {
+				getForegroundActivity: () => activity,
+				getSessionWorkState: () => ({
+					phase: "llm_streaming" as const,
+					busy: activity.busy,
+					label: "Streaming response",
+					epoch: activity.epoch,
+					sessionId: activity.sessionId,
+				}),
+				sessionManager: { getCwd: () => "/fixture" },
+			},
 			activityLane: lane,
 			settingsManager: { getShowTerminalProgress: () => false },
 			defaultEditor: {},

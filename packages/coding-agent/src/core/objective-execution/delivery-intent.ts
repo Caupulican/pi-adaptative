@@ -7,6 +7,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { withoutInheritedGitLocation } from "../exec.ts";
+import { npmExec } from "./npm-exec.ts";
 
 export interface GitCommitIntent {
 	readonly exact: true;
@@ -236,17 +237,14 @@ export function unresolvedError(intent: DeliveryIntent, action: DeliveryUnresolv
 /** One registry read at admission, from the checkout npm would publish. Publish does not read this again. */
 function readDefaultNpmRegistry(repoRoot: string): string | undefined {
 	try {
-		const value = execFileSync(
-			process.platform === "win32" ? "npm.cmd" : "npm",
-			["config", "get", "registry", "--workspaces=false"],
-			{
-				cwd: repoRoot,
-				encoding: "utf8",
-				timeout: 15_000,
-				maxBuffer: 1_048_576,
-				env: { ...process.env, NPM_CONFIG_YES: "false", GIT_TERMINAL_PROMPT: "0" },
-			},
-		).trim();
+		const npm = npmExec();
+		const value = execFileSync(npm.command, [...npm.args, "config", "get", "registry", "--workspaces=false"], {
+			cwd: repoRoot,
+			encoding: "utf8",
+			timeout: 15_000,
+			maxBuffer: 1_048_576,
+			env: { ...process.env, NPM_CONFIG_YES: "false", GIT_TERMINAL_PROMPT: "0" },
+		}).trim();
 		if (!value || value === "undefined" || value === "null") return undefined;
 		return value;
 	} catch {

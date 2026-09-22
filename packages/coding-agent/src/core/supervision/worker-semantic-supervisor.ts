@@ -134,7 +134,8 @@ export class WorkerSemanticSupervisor {
 		}
 
 		const tail = attempt.outputTail ? attempt.outputTail.slice(-2000) : "";
-		const hashStr = `${attempt.evidenceRevision ?? 1}:${tail}:${Boolean(attempt.isStalled)}:${Boolean(attempt.isRepeating)}`;
+		const priorSteeringCount = this.getPriorSteeringCount(attempt.attemptId);
+		const hashStr = `${attempt.evidenceRevision ?? 1}:${tail}:${Boolean(attempt.isStalled)}:${Boolean(attempt.isRepeating)}:${priorSteeringCount}`;
 		const lastHash = this.lastAssessmentHash.get(attempt.attemptId);
 		if (lastHash === hashStr) {
 			return false; // No material state change
@@ -186,7 +187,7 @@ export class WorkerSemanticSupervisor {
 		this.lastAssessmentAt.set(attempt.attemptId, Date.now());
 		this.lastAssessmentHash.set(
 			attempt.attemptId,
-			`${state.evidenceRevision}:${tail}:${state.isStalled}:${state.isRepeating}`,
+			`${state.evidenceRevision}:${tail}:${state.isStalled}:${state.isRepeating}:${state.priorSteeringCount}`,
 		);
 
 		try {

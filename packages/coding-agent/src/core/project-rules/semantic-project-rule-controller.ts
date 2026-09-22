@@ -329,19 +329,29 @@ export class SemanticProjectRuleController {
 
 					for (const rule of semantic) {
 						const key = `violate::${rule.rule_id}`;
-						const res = evaluation.results?.[key] ?? (evaluation.answers?.[key] as any);
+						const res = evaluation.results?.[key] ?? evaluation.answers?.[key];
+						const answer = res as
+							| {
+									probabilityTrue?: number;
+									noul?: number;
+									value?: boolean | number;
+									confidence?: { value?: number };
+							  }
+							| undefined;
 						const violateProb =
-							typeof res?.probabilityTrue === "number"
-								? res.probabilityTrue
-								: typeof res?.value === "boolean"
-									? res.value
-										? 1
-										: 0
-									: typeof res?.value === "number"
-										? res.value
-										: typeof res?.confidence?.value === "number"
-											? res.confidence.value
-											: 0;
+							typeof answer?.probabilityTrue === "number"
+								? answer.probabilityTrue
+								: typeof answer?.noul === "number"
+									? answer.noul
+									: typeof answer?.value === "boolean"
+										? answer.value
+											? 1
+											: 0
+										: typeof answer?.value === "number"
+											? answer.value
+											: typeof answer?.confidence?.value === "number"
+												? answer.confidence.value
+												: 0;
 
 						if (violateProb > 0.5) {
 							violations.push({

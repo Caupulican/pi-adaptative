@@ -182,7 +182,6 @@ async function waitForProcessGroupExit(pid: number, signal?: AbortSignal): Promi
 	} finally {
 		signal?.removeEventListener("abort", killGroup);
 	}
-	if (signal?.aborted) throw new Error("aborted");
 }
 
 function ownedPid(pid: number | undefined): pid is number {
