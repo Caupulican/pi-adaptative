@@ -53,9 +53,8 @@ import {
 /** Sync counterpart of the rename-retry policy; see {@link isTransientWin32FsError}. */
 function renameSyncWithRetry(tmpPath: string, filePath: string, fs: FaultableFs, beforeCommit?: () => void): void {
 	retryTransientWin32Sync(() => {
-		beforeCommit?.();
 		fs.renameSync(tmpPath, filePath);
-	});
+	}, beforeCommit);
 }
 
 /** Async counterpart of the rename-retry policy; see {@link isTransientRenameErrorOnWin32}. */

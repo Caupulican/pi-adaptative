@@ -18,8 +18,9 @@ function sleepMs(ms: number): void {
 	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-export function retryTransientWin32Sync(operation: () => void): void {
+export function retryTransientWin32Sync(operation: () => void, beforeAttempt?: () => void): void {
 	for (let attempt = 0; attempt <= WIN32_TRANSIENT_RETRY_ATTEMPTS; attempt++) {
+		beforeAttempt?.();
 		try {
 			operation();
 			return;
