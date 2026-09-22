@@ -13,6 +13,7 @@ import {
 } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
+import { DEFAULT_CACHE_TTL_MS } from "../src/core/cache-miss-notice.ts";
 import {
 	type AutoCompactionReason,
 	CompactionController,
@@ -1091,6 +1092,102 @@ describe("CompactionController base-envelope warnings", () => {
 		});
 		modelless.controller.checkContextWindowUsageWarning();
 		expect(modelless.events).toEqual([]);
+	});
+
+	it("proceeds with early compaction when the cache epoch is cold and then records the savings", async () => {
+		const model: Model<"openai-completions"> = {
+			...createModel(),
+			id: "priced",
+			contextWindow: 200_000,
+			cost: { input: 0, output: 15, cacheRead: 0.5, cacheWrite: 1 },
+		};
+		let compacted = false;
+		const { agent, controller, compactWithRetry } = createFixture({
+			model,
+			settings: {
+				enabled: true,
+				reserveTokens: 50_000,
+				keepRecentTokens: 20_000,
+				triggerPercent: 0.2,
+			},
+			measureLiveContextTokens: () => (compacted ? 10_000 : 80_000),
+			createResult: async (attempt, entryIds) => {
+				compacted = true;
+				return checkpoint(attempt, entryIds);
+			},
+		});
+		const usage = (
+			total: number,
+			cacheRead: number,
+			cacheWrite: number,
+			input = total,
+		): AssistantMessage["usage"] => ({
+			input,
+			output: 1,
+			cacheRead,
+			cacheWrite,
+			totalTokens: total,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		});
+		const turn = (timestamp: number, overrides: Partial<AssistantMessage> = {}): AssistantMessage => ({
+			role: "assistant",
+			content: [{ type: "text", text: "turn" }],
+			api: "openai-completions",
+			provider: "test",
+			model: "priced",
+			usage: usage(80_000, 100, 10),
+			stopReason: "stop",
+			timestamp,
+			...overrides,
+		});
+		const walk = async (messages: AgentMessage[]) => {
+			agent.state.messages = messages;
+			const latest = messages.findLast((message) => message.role === "assistant");
+			await controller.check((latest ?? turn(1)) as AssistantMessage);
+		};
+
+		await walk([{ role: "user", content: "cut", timestamp: 1, type: "compaction" } as AgentMessage]);
+		await walk([turn(2_000, { usage: undefined }), turn(1_000)]);
+		await walk([turn(4_000, { model: "other" }), turn(3_000)]);
+		await walk([turn(DEFAULT_CACHE_TTL_MS + 10_000), turn(1_000)]);
+		await walk([
+			turn(6_000, { usage: usage(80_000, 0, 0, 5_000) }),
+			turn(5_000, { usage: usage(80_000, 1_000, 10) }),
+		]);
+		await walk(Array.from({ length: 11 }, (_, index) => turn(20_000 + index, { usage: usage(80_000, 20, 5) })));
+
+		model.cost.input = 5;
+		const early = turn(30_000);
+		agent.state.messages = [early];
+		await controller.check(early);
+		expect(compactWithRetry).toHaveBeenCalledTimes(1);
+		const feedback = controller.getEarlyCompactionFeedback();
+		expect(feedback?.predictedSavingsUsd).toBeGreaterThan(0);
+		expect(feedback?.observedTurns).toBe(0);
+
+		const after = Date.now();
+		const later = turn(after + 1_000, { usage: usage(1_000, 0, 0) });
+		agent.state.messages = [later];
+		await controller.check(later);
+		expect(controller.getEarlyCompactionFeedback()?.observedTurns).toBe(1);
+		expect(controller.getEarlyCompactionFeedback()?.actualSavedUsd).toBeTypeOf("number");
+
+		Reflect.deleteProperty(model.cost, "input");
+		const unpriced = turn(after + 2_000, { usage: usage(1_000, 0, 0) });
+		agent.state.messages = [unpriced];
+		await controller.check(unpriced);
+		expect(controller.getEarlyCompactionFeedback()?.observedTurns).toBe(2);
+
+		for (let index = 0; index < 6; index++) {
+			const follow = turn(after + 4_000 + index, { usage: usage(1_000, 0, 0) });
+			agent.state.messages = [follow];
+			await controller.check(follow);
+		}
+		expect(controller.getEarlyCompactionFeedback()?.observedTurns).toBe(8);
+		const pastHorizon = turn(after + 20_000, { usage: usage(1_000, 0, 0) });
+		agent.state.messages = [pastHorizon];
+		await controller.check(pastHorizon);
+		expect(controller.getEarlyCompactionFeedback()?.observedTurns).toBe(8);
 	});
 });
 
