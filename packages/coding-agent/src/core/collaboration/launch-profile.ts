@@ -6,6 +6,7 @@ import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool
 import { ORCHESTRATION_THINKING_LEVEL_SCHEMA } from "../orchestration/thinking-level-schema.ts";
 import { WORKER_FORBIDDEN_TOOLS } from "../session-role.ts";
 import { POLICY_OWNED_RUNTIME_TOOL_NAMES } from "../tool-capability-policy.ts";
+import { isRecordObject as isPlainRecord } from "../util/value-guards.ts";
 
 export type Provider = "pi" | "codex" | "agy" | "claude" | "opencode" | "custom";
 
@@ -161,10 +162,6 @@ export function buildScopedSystemPrompt(profile: WorkerLaunchProfile): string {
 		);
 	}
 	return sentences.join(" ");
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 const usageNumber = Type.Number();

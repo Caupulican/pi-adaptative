@@ -1,3 +1,5 @@
+import { positiveLimit } from "./undo-stack.ts";
+
 /**
  * Ring buffer for Emacs-style kill/yank operations.
  *
@@ -7,10 +9,6 @@
  */
 const DEFAULT_MAX_KILL_RING_ENTRIES = 60;
 const DEFAULT_MAX_KILL_RING_BYTES = 1024 * 1024;
-
-function positiveLimit(value: number, fallback: number): number {
-	return Number.isFinite(value) && value > 0 ? Math.max(1, Math.floor(value)) : fallback;
-}
 
 function clampUtf8(value: string, maxBytes: number, keepEnd: boolean): string {
 	if (Buffer.byteLength(value, "utf-8") <= maxBytes) return value;

@@ -62,7 +62,7 @@ function isRecognizedPayload(kind: ContextStoreKind, name: string): boolean {
 	return /^[0-9a-f]{1,64}(?:\.payload|\.meta\.json|\.refs)$/.test(name);
 }
 
-function isRealDirectory(path: string): boolean {
+export function isRealDirectory(path: string): boolean {
 	try {
 		const stats = lstatSync(path);
 		return stats.isDirectory() && !stats.isSymbolicLink();

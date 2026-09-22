@@ -18,6 +18,7 @@ import {
 	FileMutationPreflightError,
 	resolveMutationPathTarget,
 } from "./file-mutation-intent.ts";
+import { trimTrailingEmptyLines } from "./read.ts";
 import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { assertNoNulInWriteContent } from "./text-nul-guard.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -116,14 +117,6 @@ function countWriteDisplayLines(fileContent: string): number {
 		if (fileContent.charCodeAt(i) === 10) lines++;
 	}
 	return lines;
-}
-
-function trimTrailingEmptyLines(lines: string[]): string[] {
-	let end = lines.length;
-	while (end > 0 && lines[end - 1] === "") {
-		end--;
-	}
-	return lines.slice(0, end);
 }
 
 function buildCollapsedWriteSource(fileContent: string): {

@@ -1,3 +1,4 @@
+import { isRecord } from "../utils/value-guards.ts";
 import { buildOpenAICodexHeaders, DEFAULT_OPENAI_CODEX_BASE_URL } from "./openai-codex-auth.ts";
 
 const MAX_ACCOUNT_RESPONSE_BYTES = 256 * 1024;
@@ -40,10 +41,6 @@ export class OpenAICodexAccountError extends Error {
 		this.name = "OpenAICodexAccountError";
 		this.status = status;
 	}
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function requiredString(record: Record<string, unknown>, key: string): string {

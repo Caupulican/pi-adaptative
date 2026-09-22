@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
+import { escapeRegExp } from "@caupulican/pi-ai";
 import { stripBom } from "../../utils/text.ts";
 
 /**
@@ -70,10 +71,6 @@ function codecForCharset(charset: string): string | undefined {
 	if (charset === "latin1") return "windows-1252";
 	if (charset === "utf-8" || charset === "utf-8-bom") return undefined;
 	return charset;
-}
-
-function escapeRegExp(text: string): string {
-	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function toPosix(path: string): string {

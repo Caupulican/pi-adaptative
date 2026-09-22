@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { workerActionJournalFile } from "../agent-paths.ts";
+import { usesWindowsPath } from "../autonomy/path-scope.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { requireBoundedTrimmedText } from "../util/bounded-value.ts";
@@ -122,10 +123,6 @@ function scopeDigest(scope: WorkerActionJournalIdentity): string {
 		.update(scope.taskId)
 		.update("\0")
 		.digest("hex");
-}
-
-function usesWindowsPath(value: string): boolean {
-	return /^[a-zA-Z]:([\\/]|$)/.test(value) || value.startsWith("\\\\") || value.startsWith("//");
 }
 
 /** Canonical lexical identity for an already-authorized real target, including native Windows paths. */

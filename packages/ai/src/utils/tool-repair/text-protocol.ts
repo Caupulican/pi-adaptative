@@ -1,4 +1,5 @@
 import type { Tool, ToolCall } from "../../types.ts";
+import { isRecord } from "../value-guards.ts";
 
 export type TextToolProtocolParseFailure = "overlap" | "unrecognized" | "unknown-tool" | "validation-failed";
 
@@ -68,11 +69,7 @@ interface EnvelopeMatch {
 
 const DEFAULT_TEXT_TOOL_PROTOCOL_VARIANT: TextToolProtocolVariant = "tool-tag";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function escapeAttribute(value: string): string {
+export function escapeAttribute(value: string): string {
 	return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 

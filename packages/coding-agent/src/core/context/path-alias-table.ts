@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { posix, win32 } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
+import { escapeRegExp } from "@caupulican/pi-ai";
 import { formatPathRelativeToCwdOrAbsolute, resolvePath } from "../../utils/paths.ts";
 
 const MIN_ALIAS_CHARS = 20;
@@ -537,10 +538,6 @@ export function formatPathAliasLegend(table: PathAliasTable, activeTexts?: strin
 		return ["PATH ALIASES", ...table.entries.map((entry) => `${entry.id}=${entry.path}`)].join("\n");
 	}
 	return formatPathAliasLegendForIds(table, collectActiveAliasIds(activeTexts));
-}
-
-function escapeRegExp(string: string) {
-	return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 interface CompiledRewriter {

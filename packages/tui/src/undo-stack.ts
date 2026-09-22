@@ -14,7 +14,7 @@ interface UndoEntry<S> {
 	bytes: number;
 }
 
-function positiveLimit(value: number, fallback: number): number {
+export function positiveLimit(value: number, fallback: number): number {
 	return Number.isFinite(value) && value > 0 ? Math.max(1, Math.floor(value)) : fallback;
 }
 

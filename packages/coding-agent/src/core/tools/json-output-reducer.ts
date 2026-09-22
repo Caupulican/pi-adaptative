@@ -12,6 +12,8 @@
  * Indentation follows the original (pretty stays pretty, compact stays compact). The raw document is
  * persisted by the caller, so an omitted item is one read away.
  */
+
+import { isRecordObject as isObjectRecord } from "../util/value-guards.ts";
 import type { CommandFamilyClassification } from "./command-family.ts";
 import type { OutputReducer, OutputReductionLevel, OutputReductionRequest } from "./output-reduction.ts";
 
@@ -156,10 +158,6 @@ const MAX_PROJECTED_KEYS = 4;
 
 function jqKey(key: string): string {
 	return JQ_IDENTIFIER_RE.test(key) ? key : JSON.stringify(key);
-}
-
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** Keys of the first record worth projecting: scalars first, at most a few, in document order. */

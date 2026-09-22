@@ -14,12 +14,14 @@ import {
 } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import {
+	ownDataValue,
 	retainedVerificationDetails,
 	type VerificationRecord,
 } from "@caupulican/pi-agent-core/verification-obligations";
 import type { Usage } from "@caupulican/pi-ai";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import { formatArtifactNotice, packToolOutput } from "./context/tool-output-packer.ts";
+import { oneLine } from "./provider-tool-text.ts";
 import { releaseExclusiveHold } from "./tools/file-mutation-queue.ts";
 import { hasOnlyKeys, isPlainRecord, isRecordObject } from "./util/value-guards.ts";
 
@@ -441,13 +443,6 @@ function renderCompletionOutput(completion: BackgroundToolCallCompletion): strin
 	return blocks.join("\n") || "Tool completed without text output.";
 }
 
-function oneLine(value: string): string {
-	return value
-		.replace(/[\r\n]+/g, " ")
-		.replace(/\s+/g, " ")
-		.trim();
-}
-
 /**
  * The model-facing half of a `[harness]` failure record, in cause-first order.
  *
@@ -516,11 +511,6 @@ function cloneUsage(value: unknown): Usage | undefined {
 			total: cost.total as number,
 		},
 	};
-}
-
-function ownDataValue(record: object, key: string): unknown {
-	const descriptor = Object.getOwnPropertyDescriptor(record, key);
-	return descriptor && "value" in descriptor ? descriptor.value : undefined;
 }
 
 /** Bounded projection for receipt consumers; never infer execution from rendered notification prose. */

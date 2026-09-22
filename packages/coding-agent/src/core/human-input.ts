@@ -6,7 +6,7 @@ import type { ContextArtifactRef } from "./context/context-item.ts";
 import { publishHumanInputActivity } from "./human-input-activity.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 import { getActiveSessionBranchEntries, type SessionBranchEntrySource } from "./session-snapshot.ts";
-import { isPlainRecord } from "./util/value-guards.ts";
+import { isPlainRecord, isStringArray } from "./util/value-guards.ts";
 
 export const HUMAN_INPUT_CUSTOM_TYPE = "human_input_request";
 export const HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE = "worker-owner-response";
@@ -158,10 +158,6 @@ function cloneSnapshot(snapshot: HumanInputSnapshot): HumanInputSnapshot {
 		request: cloneRequest(snapshot.request),
 		answers: snapshot.answers.map(cloneAnswer),
 	};
-}
-
-function isStringArray(value: unknown): value is string[] {
-	return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
 function isQuestion(value: unknown): value is HumanInputQuestion {

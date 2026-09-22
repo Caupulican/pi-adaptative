@@ -12,6 +12,7 @@ import { parseShellSearchInvocationScope, type ShellContentSearchTool } from "..
 import { type ShellToken, tokenizeShellCommand } from "../tools/shell-command-parser.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
+import { isRecordObject as isRecord } from "../util/value-guards.ts";
 import {
 	isCredentialSecretKey,
 	mockCredentialContent,
@@ -82,10 +83,6 @@ export interface CredentialExposureAssessment {
 	/** `search`: only lines attributed to protected files are mocked; `content`: the whole output is. */
 	kind: "none" | "search" | "content";
 	reason?: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function isProtectedCredentialPath(

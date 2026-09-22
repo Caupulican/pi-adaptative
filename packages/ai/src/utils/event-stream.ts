@@ -170,3 +170,10 @@ export function isFirstTokenEvent(event: AssistantMessageEvent): boolean {
 		event.delta.length > 0
 	);
 }
+
+/** The assistant message an event carries: final on `done`, the error message on `error`, else the partial. */
+export function assistantMessageFromEvent(event: AssistantMessageEvent): AssistantMessage {
+	if (event.type === "done") return event.message;
+	if (event.type === "error") return event.error;
+	return event.partial;
+}

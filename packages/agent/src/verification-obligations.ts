@@ -93,7 +93,7 @@ function boundedDisplayText(value: unknown, limit: number): string | undefined {
 	return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
 }
 
-function ownDataValue(record: object, key: string): unknown {
+export function ownDataValue(record: object, key: string): unknown {
 	const descriptor = Object.getOwnPropertyDescriptor(record, key);
 	return descriptor && "value" in descriptor ? descriptor.value : undefined;
 }

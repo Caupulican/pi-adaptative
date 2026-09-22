@@ -390,7 +390,7 @@ function formatReadCall(args: ReadRenderArgs | undefined, theme: Theme, cwd: str
 	return `${theme.fg("toolTitle", theme.bold("read"))} ${pathDisplay}${formatReadLineRange(args, theme)}`;
 }
 
-function trimTrailingEmptyLines(lines: string[]): string[] {
+export function trimTrailingEmptyLines(lines: string[]): string[] {
 	let end = lines.length;
 	while (end > 0 && lines[end - 1] === "") {
 		end--;

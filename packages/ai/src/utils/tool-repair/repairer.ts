@@ -1,5 +1,7 @@
 import type { Tool } from "../../types.ts";
+import { escapeRegExp } from "../regexp.ts";
 import { getValidator } from "../validation.ts";
+import { isRecord } from "../value-guards.ts";
 import {
 	analyzeToolArgumentErrors,
 	formatRepairPath,
@@ -7,8 +9,8 @@ import {
 	getSchemaTypes,
 	getValueAtPath,
 	isJsonSchemaObject,
-	isRecord,
 	type JsonSchemaObject,
+	normalizeEnumValue,
 	type ToolRepairIssue,
 	type ValidationErrorLike,
 } from "./analyzer.ts";
@@ -95,10 +97,6 @@ function deleteValueAtPath(target: Record<string, unknown>, path: readonly strin
 	return true;
 }
 
-function normalizeEnumValue(value: string): string {
-	return value.trim().replace(/\s+/g, " ").toLowerCase();
-}
-
 function findNormalizedEnumValue(schema: JsonSchemaObject, value: string): string | undefined {
 	const normalized = normalizeEnumValue(value);
 	const matches = getEnumValues(schema).filter((candidate) => normalizeEnumValue(candidate) === normalized);
@@ -116,10 +114,6 @@ function normalizeJsonQuoteDrift(value: string): string | undefined {
 	if (!/[“”]/.test(value)) return undefined;
 	const normalizedQuotes = value.replaceAll("“", '"').replaceAll("”", '"');
 	return normalizedQuotes.replace(/"([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*"/g, '"$1":"');
-}
-
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function parseJsonLiteralToken(token: string): unknown | undefined {

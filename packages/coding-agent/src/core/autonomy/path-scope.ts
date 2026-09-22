@@ -59,7 +59,7 @@ function resolveSafely(absolutePath: string, hops: number): string {
 	return path.join(resolvedParent, path.basename(absolutePath));
 }
 
-function usesWindowsPath(value: string): boolean {
+export function usesWindowsPath(value: string): boolean {
 	return /^[a-zA-Z]:([\\/]|$)/.test(value) || value.startsWith("\\\\") || value.startsWith("//");
 }
 

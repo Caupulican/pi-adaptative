@@ -1,7 +1,7 @@
-/** Accepts non-null object records while excluding arrays; custom prototypes remain valid. */
-export function isRecordObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord as isRecordObject } from "@caupulican/pi-ai";
+
+/** Accepts non-null object records while excluding arrays; custom prototypes remain valid (owned by pi-ai). */
+export { isRecordObject };
 
 /** Accepts only ordinary JSON-style records, including null-prototype dictionaries. */
 export function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -14,4 +14,9 @@ export function isPlainRecord(value: unknown): value is Record<string, unknown> 
 export function hasOnlyKeys(record: Record<string, unknown>, allowed: readonly string[]): boolean {
 	const allowedSet = new Set(allowed);
 	return Object.keys(record).every((key) => allowedSet.has(key));
+}
+
+/** An array whose every entry is a string. */
+export function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }

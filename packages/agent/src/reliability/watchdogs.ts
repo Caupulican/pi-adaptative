@@ -53,6 +53,7 @@ export function createSilenceWatchdog(opts: SilenceWatchdogOptions): SilenceWatc
 
 // --- Stream-idle watchdog (wraps a StreamFn) -------------------------------
 
+import { assistantMessageFromEvent as partialFromEvent } from "@caupulican/pi-ai";
 import { createAssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
 import type { Api, AssistantMessage, AssistantMessageEvent, Model, ProviderResponse } from "@caupulican/pi-ai/types";
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
@@ -181,13 +182,6 @@ function outputRepetition(message: AssistantMessage, opts: StreamIdleOptions): n
 		if (count >= repeatsNeeded) return count;
 	}
 	return undefined;
-}
-
-/** Extracts the current AssistantMessage snapshot carried by any stream event variant. */
-function partialFromEvent(event: AssistantMessageEvent): AssistantMessage {
-	if (event.type === "done") return event.message;
-	if (event.type === "error") return event.error;
-	return event.partial;
 }
 
 /**

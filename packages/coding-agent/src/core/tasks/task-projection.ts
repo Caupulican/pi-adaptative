@@ -1,3 +1,4 @@
+import { escapeRegExp } from "@caupulican/pi-ai";
 import type { TaskStepStatus, TaskStepsState } from "./task-state.ts";
 
 export interface OpenTaskStepProjection {
@@ -15,10 +16,6 @@ export interface OpenTaskStepProjection {
 export interface TaskRequirementReference {
 	id: string;
 	text: string;
-}
-
-function escapeRegExp(text: string): string {
-	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /** Conservative fallback used only for task steps persisted before explicit requirement links existed. */

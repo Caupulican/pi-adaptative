@@ -1,6 +1,7 @@
 import { lstatSync } from "node:fs";
 import { basename, join } from "node:path";
 import { canonicalPathScopeIdentity, isPathWithinScope, safeRealpathSync } from "../autonomy/path-scope.ts";
+import { isRealDirectory as isDir } from "../context/context-store-retention.ts";
 import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/bounded-file.ts";
 import { parseStageContract, parseWorkspaceFrontmatter } from "./parse-contract.ts";
 import {
@@ -68,15 +69,6 @@ function readText(path: string, rootDir: string): string | undefined {
 		return readBoundedTextFileSync(path, MAX_PIPELINE_DEFINITION_FILE_BYTES, "Pipeline definition file");
 	} catch {
 		return undefined;
-	}
-}
-
-function isDir(path: string): boolean {
-	try {
-		const stats = lstatSync(path);
-		return stats.isDirectory() && !stats.isSymbolicLink();
-	} catch {
-		return false;
 	}
 }
 

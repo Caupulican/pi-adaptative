@@ -1,4 +1,5 @@
 import type { Tool } from "@caupulican/pi-ai";
+import { isRecord } from "@caupulican/pi-ai";
 import type { TSchema } from "typebox";
 
 /**
@@ -33,10 +34,6 @@ const SCHEMA_SINGLE_KEYS = new Set([
 	"unevaluatedItems",
 	"unevaluatedProperties",
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function createProviderRecord(): Record<string, unknown> {
 	// Null prototype preserves a legitimate schema property named "__proto__". Object.keys below

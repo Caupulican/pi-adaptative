@@ -8,6 +8,7 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { escapeAttribute as escapeAttr } from "@caupulican/pi-ai";
 import { UNTRUSTED_BOUNDARY_SYSTEM_RULE, UNTRUSTED_BOUNDARY_TAG } from "../provider-prompt-contracts.ts";
 
 export { UNTRUSTED_BOUNDARY_SYSTEM_RULE };
@@ -59,8 +60,4 @@ export function wrapUntrustedText(
 		.replaceAll(nonce, "[NONCE_NEUTRALIZED]");
 	const freshnessAttr = options?.freshness ? ` freshness="${escapeAttr(options.freshness)}"` : "";
 	return `<${UNTRUSTED_BOUNDARY_TAG} id="${nonce}" source="${escapeAttr(source)}"${freshnessAttr}>\n${neutralized}\n</${UNTRUSTED_BOUNDARY_TAG}>`;
-}
-
-function escapeAttr(value: string): string {
-	return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

@@ -48,6 +48,7 @@ export type {
 } from "./utils/oauth/types.ts";
 export * from "./utils/overflow.ts";
 export * from "./utils/provider-retry.ts";
+export * from "./utils/regexp.ts";
 export * from "./utils/streaming-lines.ts";
 export * from "./utils/tool-repair/registry.ts";
 export * from "./utils/tool-repair/replay.ts";
@@ -55,3 +56,4 @@ export * from "./utils/tool-repair/text-protocol.ts";
 export * from "./utils/typebox-helpers.ts";
 export * from "./utils/uuid.ts";
 export * from "./utils/validation.ts";
+export * from "./utils/value-guards.ts";

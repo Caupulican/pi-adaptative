@@ -1,3 +1,4 @@
+import { isRecord } from "@caupulican/pi-ai";
 import {
 	getToolExecutionAttemptMemory,
 	getToolExecutionErrorPolicy,
@@ -972,10 +973,6 @@ export function assessToolFailure(
 		...(policy ? { policyGuidance: truncate(policy.guidance, MAX_CORRECTION_CHARS) } : {}),
 		...(policy?.attemptMemory === "discard" ? { attemptMemory: "discard" as const } : {}),
 	};
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isOutputSignature(value: unknown): value is string {

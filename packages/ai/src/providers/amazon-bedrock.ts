@@ -48,6 +48,7 @@ import { parseStreamingJson } from "../utils/json-parse.ts";
 import { createHttpProxyAgentsForTarget } from "../utils/node-http-proxy.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
+import { isRecord as isSchemaRecord } from "../utils/value-guards.ts";
 import { getRecoverableBedrockSsoError } from "./bedrock-sso.ts";
 import {
 	applyProviderPayloadHook,
@@ -730,10 +731,6 @@ interface BedrockObjectSchemaProjection {
 interface NormalizedBedrockToolInputSchema {
 	schema: unknown;
 	constraintDescription?: string;
-}
-
-function isSchemaRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function cloneBedrockSchemaValue(value: unknown, seen = new WeakMap<object, unknown>()): unknown {

@@ -1,4 +1,5 @@
 import type { Tool } from "../../types.ts";
+import { isRecord } from "../value-guards.ts";
 import type { ToolRepairModeName } from "./registry.ts";
 
 export interface JsonSchemaObject {
@@ -31,10 +32,6 @@ export interface ToolRepairIssue {
 	propertyKey?: string;
 	required: boolean;
 	modes: ToolRepairModeName[];
-}
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function isJsonSchemaObject(value: unknown): value is JsonSchemaObject {
@@ -184,7 +181,7 @@ function isObjectSchema(schema: JsonSchemaObject): boolean {
 	return getSchemaTypes(schema).includes("object");
 }
 
-function normalizeEnumValue(value: string): string {
+export function normalizeEnumValue(value: string): string {
 	return value.trim().replace(/\s+/g, " ").toLowerCase();
 }
 

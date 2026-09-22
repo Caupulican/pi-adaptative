@@ -1,4 +1,5 @@
 import { ensureToolWithDiagnostics, type ManagedToolResolver } from "../../utils/tools-manager.ts";
+import { isRecordObject as isObject } from "../util/value-guards.ts";
 import { type CredentialCliCommandResult, runCredentialCliCommand } from "./credential-cli-command.ts";
 import {
 	type CredentialProfileRecord,
@@ -67,10 +68,6 @@ export async function runBitwardenCommand(request: BitwardenCommandRequest): Pro
 		omitEnvironmentVariables: ["BWS_ACCESS_TOKEN"],
 		...(request.signal ? { signal: request.signal } : {}),
 	});
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function parseJson(value: string): unknown {

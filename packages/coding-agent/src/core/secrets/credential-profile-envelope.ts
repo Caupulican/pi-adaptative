@@ -1,3 +1,4 @@
+import { isRecordObject as isObject } from "../util/value-guards.ts";
 import {
 	type CredentialProfileRecord,
 	type StoredCredentialProfileSummary,
@@ -23,10 +24,6 @@ export class CredentialProfileEnvelopeError extends Error {
 		super(message);
 		this.name = "CredentialProfileEnvelopeError";
 	}
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function serializeCredentialProfileEnvelope(record: CredentialProfileRecord): string {

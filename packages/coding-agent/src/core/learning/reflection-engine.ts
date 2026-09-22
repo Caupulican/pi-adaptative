@@ -8,6 +8,7 @@ import {
 import { REFLECTION_SYSTEM_PROMPT } from "../provider-prompt-contracts.ts";
 import { MAX_ACTIVE_SKILL_BODY_BYTES } from "../skill-vault.ts";
 import { MAX_SKILL_DESCRIPTION_LENGTH, MAX_SKILL_NAME_LENGTH } from "../skills.ts";
+import { isRecordObject as isRecord, isStringArray } from "../util/value-guards.ts";
 
 export { REFLECTION_SYSTEM_PROMPT };
 
@@ -117,14 +118,6 @@ export const MAX_REFLECTION_WRITES = 32;
 export const MAX_REFLECTION_SCAN_ENTRIES = MAX_REFLECTION_WRITES * 4;
 
 type StructuredReflectionWrite = Extract<ReflectionWrite, { kind: "okf_add" | "okf_organize" }>;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isStringArray(value: unknown): value is string[] {
-	return Array.isArray(value) && value.every((entry) => typeof entry === "string");
-}
 
 /** A rendered hot-memory section header: the general file or a project file, never USER.md or OKF. */
 const HOT_MEMORY_SECTION_RE = /^## MEMORY\.md(?: \([^)\n]*\))?:\n/gm;

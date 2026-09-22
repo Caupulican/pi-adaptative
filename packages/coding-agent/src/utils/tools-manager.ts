@@ -50,7 +50,7 @@ type ModuleRequire = ((id: string) => unknown) & { resolve?: (id: string) => str
 const moduleRequire = createRequire(import.meta.url);
 const executableDirRequire = createRequire(pathToFileURL(join(dirname(process.execPath), "package.json")).href);
 
-function isOfflineModeEnabled(): boolean {
+export function isOfflineModeEnabled(): boolean {
 	const value = process.env.PI_OFFLINE;
 	if (!value) return false;
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";

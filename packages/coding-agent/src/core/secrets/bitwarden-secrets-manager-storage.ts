@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { ensureToolWithDiagnostics, type ManagedToolResolver } from "../../utils/tools-manager.ts";
 import { type AtomicFileLockOptions, withFileLock } from "../util/atomic-file.ts";
+import { isRecordObject as isObject } from "../util/value-guards.ts";
 import { type CredentialCliCommandResult, runCredentialCliCommand } from "./credential-cli-command.ts";
 import {
 	type CredentialProfileRecord,
@@ -75,10 +76,6 @@ interface SecretsManagerSecret {
 interface CachedSecretsManagerProfile {
 	id: string;
 	record: CredentialProfileRecord;
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function parseJson(value: string): unknown {

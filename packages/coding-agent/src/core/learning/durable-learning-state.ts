@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { stateFile } from "../agent-paths.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { isRecordObject as isRecord } from "../util/value-guards.ts";
 
 export const DURABLE_LEARNING_MEMORY_POLICY_VERSION = "1";
 export const DURABLE_LEARNING_STATE_MAX_HISTORY = 32;
@@ -150,10 +151,6 @@ const RESOLVED_KEYS = [
 	"status",
 ] as const;
 const CLAIM_KEYS = ["claimId", "ownerId", "acquiredAt", "expiresAt"] as const;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function hasUnknownKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
 	const allowedKeys = new Set(allowed);

@@ -1,5 +1,6 @@
 import type { TSchema } from "typebox";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
+import { isRecordObject as isRecord } from "../util/value-guards.ts";
 import type { ToolDefinition } from "./types.ts";
 
 const MAX_IDENTITY_CHARS = 256;
@@ -133,8 +134,4 @@ function isIdentityValue(value: unknown): value is string {
 		!value.includes("\0") &&
 		!value.includes("\n")
 	);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }

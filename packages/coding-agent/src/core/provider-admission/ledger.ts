@@ -70,7 +70,7 @@ export function entryKey(entry: Pick<ProviderAdmissionEntry, "provider" | "accou
 	return entry.account ? `${entry.provider}#${entry.account}` : entry.provider;
 }
 
-function safeSegment(value: string): string {
+export function safeSegment(value: string): string {
 	return value.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64) || "provider";
 }
 

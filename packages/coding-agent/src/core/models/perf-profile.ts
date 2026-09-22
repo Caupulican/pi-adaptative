@@ -1,6 +1,7 @@
 import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
 import { isStreamStallError, type StreamIdleOptions } from "@caupulican/pi-agent-core/reliability";
 import type { StreamFn } from "@caupulican/pi-agent-core/types";
+import { assistantMessageFromEvent } from "@caupulican/pi-ai";
 import { createAssistantMessageEventStream, isFirstTokenEvent } from "@caupulican/pi-ai/event-stream";
 import type {
 	Api,
@@ -286,12 +287,6 @@ export function withModelPerfProfile(streamFn: StreamFn, recorder: ModelPerfProf
 
 		return outer;
 	};
-}
-
-function assistantMessageFromEvent(event: AssistantMessageEvent): AssistantMessage {
-	if (event.type === "done") return event.message;
-	if (event.type === "error") return event.error;
-	return event.partial;
 }
 
 function emptyAssistantMessage(model: Model<Api>): AssistantMessage {

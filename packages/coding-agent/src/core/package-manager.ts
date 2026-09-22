@@ -29,6 +29,7 @@ import { CONFIG_DIR_NAME } from "../config.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcessWithTermination } from "../utils/child-process.ts";
 import { type GitSource, parseGitUrl } from "../utils/git.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
+import { isOfflineModeEnabled } from "../utils/tools-manager.ts";
 import { getProcessWorkRun } from "../utils/work-directory.ts";
 import { gitDir, npmDir } from "./agent-paths.ts";
 import { createRollingOutputBuffer } from "./exec.ts";
@@ -54,12 +55,6 @@ const PACKAGE_COMMAND_KILL_GRACE_MS = 2_000;
 const UPDATE_CHECK_CONCURRENCY = 4;
 const GIT_UPDATE_CONCURRENCY = 4;
 const MAX_RESOURCE_PROFILE_SCAN_BYTES = 2 * 1024 * 1024;
-
-function isOfflineModeEnabled(): boolean {
-	const value = process.env.PI_OFFLINE;
-	if (!value) return false;
-	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
-}
 
 export interface PathMetadata {
 	source: string;

@@ -3,7 +3,7 @@ export const MAX_PROVIDER_TOOL_SNIPPET_CHARS = 120;
 export const MAX_PROVIDER_TOOL_GUIDELINE_CHARS = 140;
 export const MAX_PROVIDER_TOOL_GUIDELINES_CHARS = 1_200;
 
-function oneLine(text: string): string {
+export function oneLine(text: string): string {
 	return text
 		.replace(/[\r\n]+/g, " ")
 		.replace(/\s+/g, " ")

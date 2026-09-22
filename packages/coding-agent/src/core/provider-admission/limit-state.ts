@@ -5,7 +5,7 @@ import { type AssistantMessage, getProviderRetryDirective } from "@caupulican/pi
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { describeProviderAccountKey, splitProviderAccountKey } from "./account-key.ts";
-import { providerAdmissionDir } from "./ledger.ts";
+import { providerAdmissionDir, safeSegment } from "./ledger.ts";
 import { readProviderAdmissionRecord } from "./record-storage.ts";
 
 /**
@@ -52,10 +52,6 @@ export interface ProviderLimitStoreOptions {
 /** A subscription window counts as exhausted only when fully used. */
 export const USAGE_WINDOW_EXHAUSTED_PERCENT = 100;
 const MAX_DETAIL_LENGTH = 500;
-
-function safeSegment(value: string): string {
-	return value.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64) || "provider";
-}
 
 function isLimitRecord(value: unknown): value is ProviderLimitRecord {
 	return (
