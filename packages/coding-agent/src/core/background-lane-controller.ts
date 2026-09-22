@@ -112,6 +112,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private readonly _fitness: ModelFitnessController;
 	/** Lazily materialized only when managed-lane state is queried or reported. */
 	private _managedLanes: ManagedLaneController | undefined;
+	/** Leaf already scanned with no persisted active managed lane. A new leaf rescans. */
+	private _managedLaneAbsenceLeafId: string | null | undefined;
 	/** Lazily materialized so a UAC surface without `delegate` allocates no worker runtime state. */
 	private _workers: WorkerDelegationController | undefined;
 	/** One durable lifecycle shared by every worker execution adapter. */
@@ -309,10 +311,17 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._managedLanes.ensureHydrated();
 			return;
 		}
-		const hasPersistedActiveManagedLane = getLatestLaneRecordSnapshots(
-			getActiveSessionBranchEntries(this.deps.getSessionManager()),
-		).some((record) => record.type === "tmux-worker" && (record.status === "queued" || record.status === "running"));
-		if (hasPersistedActiveManagedLane) this._getManagedLaneController().ensureHydrated();
+		const session = this.deps.getSessionManager();
+		const leafId = typeof session.getLeafId === "function" ? session.getLeafId() : undefined;
+		if (leafId !== undefined && this._managedLaneAbsenceLeafId === leafId) return;
+		const hasPersistedActiveManagedLane = getLatestLaneRecordSnapshots(getActiveSessionBranchEntries(session)).some(
+			(record) => record.type === "tmux-worker" && (record.status === "queued" || record.status === "running"),
+		);
+		if (hasPersistedActiveManagedLane) {
+			this._getManagedLaneController().ensureHydrated();
+			return;
+		}
+		if (leafId !== undefined) this._managedLaneAbsenceLeafId = leafId;
 	}
 
 	/** Live lane records tracked by this process (running and terminal). */

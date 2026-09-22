@@ -165,9 +165,15 @@ export class SystemOneController {
 	}
 
 	private activeEvaluations = 0;
+	private evaluationIdleListener?: () => void;
 
 	get isEvaluating(): boolean {
 		return this.activeEvaluations > 0;
+	}
+
+	/** Fires when the last in-flight stage validation settles. Idle wait uses this instead of polling. */
+	setEvaluationIdleListener(listener: (() => void) | undefined): void {
+		this.evaluationIdleListener = listener;
 	}
 
 	private async runStageValidation(
@@ -221,6 +227,7 @@ export class SystemOneController {
 			return { decision, answers: response.answers, evaluationId };
 		} finally {
 			this.activeEvaluations--;
+			if (this.activeEvaluations === 0) this.evaluationIdleListener?.();
 		}
 	}
 

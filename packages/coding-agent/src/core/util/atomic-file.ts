@@ -28,6 +28,7 @@ import {
 	WIN32_TRANSIENT_RETRY_ATTEMPTS as RENAME_RETRY_ATTEMPTS,
 	WIN32_TRANSIENT_RETRY_MAX_MS as RENAME_RETRY_MAX_TIMEOUT_MS,
 	WIN32_TRANSIENT_RETRY_MIN_MS as RENAME_RETRY_MIN_TIMEOUT_MS,
+	retryTransientWin32,
 	retryTransientWin32Sync,
 } from "./win32-transient-fs.ts";
 
@@ -290,7 +291,10 @@ export function withFileLockSync<T>(filePath: string, fn: () => T, options?: Ato
 		// A lock-cleanup failure must never mask fn()'s result (or replace fn()'s own thrown error) —
 		// by this point fn() has already durably committed or failed on its own terms.
 		try {
-			release();
+			// A swallowed unlock leaves the lock directory open. On Windows that outlives the
+			// rename retry and the suite cannot remove the tree. Retry the unlock, then still
+			// do not mask fn()'s result.
+			retryTransientWin32Sync(() => release());
 		} catch {
 			// best-effort cleanup; a stale lock self-expires via proper-lockfile's `stale` window
 		}
@@ -320,7 +324,7 @@ export async function withFileLock<T>(
 			return await fn();
 		} finally {
 			// See {@link withFileLockSync} — cleanup failures must not mask fn()'s outcome.
-			await release().catch(() => {});
+			await retryTransientWin32(release).catch(() => {});
 		}
 	});
 }

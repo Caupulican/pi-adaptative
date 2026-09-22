@@ -94,6 +94,7 @@ describe("foreground lease activity adapter", () => {
 		lane.start({ id: "tool:q", kind: "tool", label: "Question" });
 		const host = {
 			session,
+			ui: { requestRender: vi.fn() },
 			activityLane: lane,
 			subscriptionGeneration: 0,
 			handleEvent: vi.fn(),

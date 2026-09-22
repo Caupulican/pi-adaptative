@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Idle wait wakes when a system-one stage, a semantic evaluation, or an armed continuation settles. A session work-state read does not walk the session branch again while that leaf has no active managed lane. A file-lock unlock uses the same Windows transient retry as a rename, so a failed unlock does not leave the directory locked.
+
 ## [0.99.39] - 2026-09-22
 
 ### Changed

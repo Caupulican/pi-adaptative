@@ -18,6 +18,19 @@ function sleepMs(ms: number): void {
 	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+export async function retryTransientWin32(operation: () => void | Promise<void>): Promise<void> {
+	for (let attempt = 0; attempt <= WIN32_TRANSIENT_RETRY_ATTEMPTS; attempt++) {
+		try {
+			await operation();
+			return;
+		} catch (err) {
+			if (!isTransientWin32FsError(err) || attempt === WIN32_TRANSIENT_RETRY_ATTEMPTS) throw err;
+			const backoffMs = Math.min(WIN32_TRANSIENT_RETRY_MIN_MS * 2 ** attempt, WIN32_TRANSIENT_RETRY_MAX_MS);
+			await new Promise((resolve) => setTimeout(resolve, backoffMs));
+		}
+	}
+}
+
 export function retryTransientWin32Sync(operation: () => void, beforeAttempt?: () => void): void {
 	for (let attempt = 0; attempt <= WIN32_TRANSIENT_RETRY_ATTEMPTS; attempt++) {
 		beforeAttempt?.();

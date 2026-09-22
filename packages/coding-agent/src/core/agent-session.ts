@@ -488,6 +488,7 @@ export class AgentSession {
 	/** The plane engine the recording wrapper below was built for, and the wrapper itself. */
 	private _recordedSemanticEngineSource?: SemanticDecisionEngine;
 	private _recordedSemanticEngine?: SemanticDecisionEngine;
+	private _unsubscribeIdleOccupancy?: () => void;
 
 	/** The decision ledger (stage transitions, Jev evaluations); opened on first use, never truncated. */
 	private _decisionLedger?: DecisionLedgerStore;
@@ -1166,6 +1167,15 @@ export class AgentSession {
 				await this._drainQueuedExtensionCommands();
 			},
 		});
+		const wakeIdleOccupancy = (): void => this._foregroundRecovery.wakeIdleWaiters();
+		const unsubscribeSemantic = this._semanticPlaneHealth.subscribe(() => wakeIdleOccupancy());
+		const unsubscribeContinuation = this._backgroundLanes.subscribeIdleContinuationActivity(wakeIdleOccupancy);
+		this._systemOneController?.setEvaluationIdleListener(wakeIdleOccupancy);
+		this._unsubscribeIdleOccupancy = () => {
+			unsubscribeSemantic();
+			unsubscribeContinuation();
+			this._systemOneController?.setEvaluationIdleListener(undefined);
+		};
 		this._durableCustomMessageTurns = new DurableCustomMessageTurnController({
 			foreground: this._foregroundRecovery,
 			goals: this._goals,
@@ -2996,6 +3006,8 @@ export class AgentSession {
 
 		safely(() => this._backgroundLanes.clearGoalAutoContinueTimer());
 		safely(() => this._backgroundLanes.clearResearchLaneTimer());
+		safely(() => this._unsubscribeIdleOccupancy?.());
+		this._unsubscribeIdleOccupancy = undefined;
 		safely(() => this._foregroundRecovery.shutdown());
 		safely(() => this._durableCustomMessageTurns.shutdown());
 		safely(() => this.abortRetry());
