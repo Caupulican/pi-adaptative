@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { collectClaimReceipts, judgeClaims } from "../../src/core/system-one/claim-delivery.ts";
+import { AnswerClaimChecker, collectClaimReceipts, judgeClaims } from "../../src/core/system-one/claim-delivery.ts";
 import { SystemOneController } from "../../src/core/system-one/controller.ts";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
 import { createHarness, type Harness } from "../suite/harness.ts";
@@ -48,6 +48,28 @@ describe("claims against deliveries", () => {
 	it("claims nothing when Jev could not settle whether the answer states it", () => {
 		const receipts = collectClaimReceipts(turn("git push origin main", true));
 		expect(judgeClaims({ states_pushed: { type: "noul", noul: 0.5 } }, receipts)).toEqual([]);
+	});
+
+	it("blocks a worker report its own results contradict, and a verifier's acceptance with no passing test", async () => {
+		const warnings: string[] = [];
+		const checker = new AnswerClaimChecker({
+			getController: () => ({
+				evaluateAnswerClaims: async () => ({ states_pushed: yes, states_tests_pass: no }),
+			}),
+			warn: (message) => warnings.push(message),
+		});
+		const pushed = await checker.workerReportBlockers({
+			summary: "Pushed the fix.",
+			messages: turn("git push origin main", true),
+		});
+		expect(pushed).toHaveLength(1);
+		expect(pushed[0]).toContain("pushed");
+		const verified = await checker.workerReportBlockers({
+			summary: "Reviewed the change.",
+			messages: turn("git status", false),
+			verifierVerdict: "accepted",
+		});
+		expect(verified).toEqual(["verification accepted with no passing test run in the verifier's own transcript"]);
 	});
 
 	describe("in a session", () => {

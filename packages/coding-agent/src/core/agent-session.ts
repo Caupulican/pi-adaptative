@@ -987,6 +987,7 @@ export class AgentSession {
 			collectWorkspaceSources: (args) => this._collectWorkspaceSources(args),
 			getPathAliasTable: () => this._pipeline.peekPathAliasTable(),
 			reviewNewCode: ({ toolName, args, cwd }) => this._codeDuplicates.review(toolName, args, cwd),
+			reviewWorkerReport: (input) => this._answerClaims.workerReportBlockers(input),
 			recordObjectiveMutation: (event) => {
 				const objectiveId = this.objectiveMutationId();
 				if (event.kind === "shell") this._mutationLedger.markShellUnsafe(objectiveId);

@@ -188,7 +188,11 @@ export class AnswerClaimChecker {
 	}
 
 	/** Returns the correction prompt when a claim is contradicted; undefined otherwise. */
-	async check(finalAnswer: string, turnMessages: readonly AgentMessage[]): Promise<string | undefined> {
+	/**
+	 * Every claim finding for an answer against the messages its work produced, or undefined when
+	 * nothing was checked (no controller, no claim vocabulary, or Jev unavailable, reported once).
+	 */
+	async findings(finalAnswer: string, messages: readonly AgentMessage[]): Promise<ClaimFinding[] | undefined> {
 		const controller = this.deps.getController();
 		if (!controller || !finalAnswer.trim() || !mayContainDeliveryClaims(finalAnswer)) return undefined;
 		let answers: Record<string, unknown>;
@@ -203,12 +207,38 @@ export class AnswerClaimChecker {
 			return undefined;
 		}
 		this.outageReported = false;
-		const findings = judgeClaims(answers, collectClaimReceipts(turnMessages));
+		return judgeClaims(answers, collectClaimReceipts(messages));
+	}
+
+	/** Returns the correction prompt when a claim is contradicted; undefined otherwise. */
+	async check(finalAnswer: string, turnMessages: readonly AgentMessage[]): Promise<string | undefined> {
+		const findings = await this.findings(finalAnswer, turnMessages);
+		if (!findings) return undefined;
 		for (const finding of findings)
 			if (finding.verdict === "unsupported") this.deps.warn(`Unverified claim: ${finding.reason}`);
 		return findings.some((finding) => finding.verdict === "contradicted")
 			? claimCorrectionPrompt(findings)
 			: undefined;
+	}
+
+	/**
+	 * Blockers for a worker's report: claims its own transcript contradicts, and a verifier's "accepted"
+	 * with no passing test run behind it. A worker proposes; this is what the parent accepts on.
+	 */
+	async workerReportBlockers(input: {
+		readonly summary: string;
+		readonly messages: readonly AgentMessage[];
+		readonly verifierVerdict?: "accepted" | "rejected";
+	}): Promise<string[]> {
+		const blockers: string[] = [];
+		for (const finding of (await this.findings(input.summary, input.messages)) ?? []) {
+			if (finding.verdict === "contradicted")
+				blockers.push(`claim contradicted by the worker's own tool results: ${finding.reason}`);
+			else this.deps.warn(`Unverified worker claim: ${finding.reason}`);
+		}
+		if (input.verifierVerdict === "accepted" && collectClaimReceipts(input.messages).tests.passed === 0)
+			blockers.push("verification accepted with no passing test run in the verifier's own transcript");
+		return blockers;
 	}
 }
 

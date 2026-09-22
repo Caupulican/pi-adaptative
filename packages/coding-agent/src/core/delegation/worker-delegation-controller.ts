@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { type AgentMessage, decodeExecutionContext } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import type { Api, Model, Usage } from "@caupulican/pi-ai";
+import type { Api, Message, Model, Usage } from "@caupulican/pi-ai";
 import { getProcessWorkRun } from "../agent-paths.ts";
 import type {
 	AgentSessionEvent,
@@ -263,6 +263,16 @@ export interface WorkerDelegationControllerDeps {
 	 * to that tool result so the worker reuses existing logic, exactly as the root's own edits are steered.
 	 */
 	reviewNewCode?(input: { toolName: string; args: unknown; cwd: string }): Promise<string | undefined>;
+	/**
+	 * Blockers for a worker's report from its own transcript: claims the transcript's tool results
+	 * contradict, and a verifier's acceptance with no passing test run. Any blocker makes the claim
+	 * need parent review instead of being accepted.
+	 */
+	reviewWorkerReport?(input: {
+		summary: string;
+		messages: readonly Message[];
+		verifierVerdict?: "accepted" | "rejected";
+	}): Promise<readonly string[]>;
 	/** Parent objective mutation ledger. Workers do not keep a second ownership record. */
 	recordObjectiveMutation?(event: {
 		readonly kind: "owned_write" | "shell";
@@ -3310,6 +3320,8 @@ export class WorkerDelegationController {
 							})
 						: undefined;
 				let executionResult: Awaited<ReturnType<typeof executor.run>>;
+				// This attempt's own transcript begins here: its report is checked against these results only.
+				const transcriptStart = conversation.getRawTranscript().length;
 				try {
 					executionResult = await executor.run();
 				} finally {
@@ -3350,10 +3362,40 @@ export class WorkerDelegationController {
 					orchestrationProfile.requireIndependentVerification &&
 					orchestrationProfile.role !== "verifier" &&
 					rawOutcome.claim.status === "completed";
+				const reportBlockers = rawOutcome.accepted
+					? ((await this.deps
+							.reviewWorkerReport?.({
+								summary: rawOutcome.claim.summary,
+								messages: conversation.getRawTranscript().slice(transcriptStart),
+								...(rawOutcome.claim.verification
+									? { verifierVerdict: rawOutcome.claim.verification.verdict }
+									: {}),
+							})
+							.catch(() => [])) ?? [])
+					: [];
+				const reviewedOutcome: WorkerRunOutcome =
+					reportBlockers.length === 0
+						? rawOutcome
+						: {
+								...rawOutcome,
+								accepted: false,
+								reasonCode: "worker_report_unbacked",
+								acceptance: {
+									outcome: "ask-user" as const,
+									gate: "worker_report_receipts",
+									reasonCode: "worker_report_unbacked",
+									message: reportBlockers.join("; "),
+								},
+								claim: {
+									...rawOutcome.claim,
+									parentReviewRequired: true,
+									blockers: [...(rawOutcome.claim.blockers ?? []), ...reportBlockers],
+								},
+							};
 				const outcome: WorkerRunOutcome = {
 					...(verificationRequired
 						? {
-								...rawOutcome,
+								...reviewedOutcome,
 								accepted: false,
 								reasonCode: "independent_verification_required",
 								acceptance: {
@@ -3363,15 +3405,15 @@ export class WorkerDelegationController {
 									message: "The owner-authored profile requires an independent verifier before acceptance.",
 								},
 								claim: {
-									...rawOutcome.claim,
+									...reviewedOutcome.claim,
 									parentReviewRequired: true,
 									blockers: [
-										...(rawOutcome.claim.blockers ?? []),
+										...(reviewedOutcome.claim.blockers ?? []),
 										"independent verification is required before acceptance",
 									],
 								},
 							}
-						: rawOutcome),
+						: reviewedOutcome),
 					...(admission.modelPinBypass ? { modelPinBypass: admission.modelPinBypass } : {}),
 				};
 
