@@ -230,7 +230,8 @@ export type ValidationStage =
 	| "patch_review"
 	| "completion"
 	| "completion_challenge"
-	| "claim_delivery";
+	| "claim_delivery"
+	| "code_duplicate";
 
 export interface ValidationDecision {
 	id: string;

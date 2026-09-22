@@ -260,6 +260,7 @@ import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plan
 import { WorkerSemanticSupervisor } from "./supervision/worker-semantic-supervisor.ts";
 import { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
 import { AnswerClaimChecker, assistantAnswerText } from "./system-one/claim-delivery.ts";
+import { CodeDuplicateReviewer } from "./system-one/code-duplicates.ts";
 import { type SystemOneController, USER_REQUEST_RULE_BUDGET } from "./system-one/controller.ts";
 import { createSessionForegroundControl, type SystemOneForegroundControl } from "./system-one/foreground-control.ts";
 import { type SemanticEvaluationRecord, verdictFromEvaluation } from "./system-one/semantic-evaluation-ledger.ts";
@@ -499,6 +500,10 @@ export class AgentSession {
 	private _ruleAuthority: "unset" | "ask" | "user" | "written" = "unset";
 	/** The last classification could not run. Kept so the model is told once per outage, not per turn. */
 	private _deliveryClassificationUnavailable = false;
+	private readonly _codeDuplicates = new CodeDuplicateReviewer({
+		getController: () => this._systemOneController,
+		warn: (message) => this._emit({ type: "warning", message }),
+	});
 	private readonly _answerClaims = new AnswerClaimChecker({
 		getController: () => this._systemOneController,
 		warn: (message) => this._emit({ type: "warning", message }),
@@ -1658,6 +1663,7 @@ export class AgentSession {
 					signal,
 				),
 			getSystemOneController: () => this._systemOneController,
+			reviewNewCode: ({ toolName, args, cwd }) => this._codeDuplicates.review(toolName, args, cwd),
 			validateMutationAcceptance: async ({ changedFiles }) => {
 				if (this._ruleAuthority === "user") return { blocked: false };
 				const result = await this._projectRules.validateMutation(

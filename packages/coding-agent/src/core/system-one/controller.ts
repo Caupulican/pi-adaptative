@@ -4,12 +4,14 @@ import type { JevAdapter } from "./adapter.ts";
 import { AuditStore } from "./audit.ts";
 import {
 	hashQuestions,
+	type QuestionPack,
 	SYSTEM_ONE_CATALOG_VERSION,
 	SYSTEM_ONE_PINNED_MODEL,
 	selectQuestions,
 	toTypeSafeEvaluationQuestions,
 	USER_AUTHORIZATION_QUESTIONS,
 } from "./catalog.ts";
+import { type CodeUnit, duplicateQuestionId } from "./code-duplicates.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import {
 	directiveFromPostflight,
@@ -222,10 +224,13 @@ export class SystemOneController {
 		stateView: Record<string, unknown>,
 		impact: ToolImpact = "read_only",
 		omitQuestions: readonly string[] = [],
+		/** Questions built for this one evaluation (per-item fan-out); the stage's catalog pack otherwise. */
+		builtQuestions?: Readonly<QuestionPack>,
+		signal?: AbortSignal,
 	): Promise<{ decision: ValidationDecision; answers: Record<string, unknown>; evaluationId: string | undefined }> {
 		this.activeEvaluations++;
 		try {
-			const questions = selectQuestions(stage, omitQuestions);
+			const questions = builtQuestions ?? selectQuestions(stage, omitQuestions);
 			const questionsHash = hashQuestions(questions);
 			const stateHash = this.store.computeStateHash();
 			const pinnedModel = this.config.model.production || SYSTEM_ONE_PINNED_MODEL;
@@ -243,7 +248,7 @@ export class SystemOneController {
 						state: stateView,
 						questions: toTypeSafeEvaluationQuestions(questions),
 					},
-					{ impact },
+					{ impact, ...(signal ? { signal } : {}) },
 				);
 			} catch (error) {
 				if (evaluationId !== undefined) this.evaluationObserver?.settleFailed(evaluationId, error);
@@ -481,6 +486,49 @@ export class SystemOneController {
 		const { decision, answers, evaluationId } = await this.runStageValidation("claim_delivery", {
 			final_answer: this.projector.redactText(finalAnswer),
 		});
+		this.sealDecision(decision, "evaluated", evaluationId);
+		return answers;
+	}
+
+	/**
+	 * Every (new unit, candidate) pair in ONE request: Jev evaluates the questions in parallel, so a
+	 * change adding three functions with five candidates each costs one call, not three. Each unit and
+	 * candidate rides in the state under the key its question names.
+	 */
+	async evaluateCodeDuplicates(
+		pairs: readonly { readonly unit: CodeUnit; readonly candidates: readonly CodeUnit[] }[],
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>> {
+		const state: Record<string, unknown> = {};
+		const questions: QuestionPack = {};
+		const view = (unit: CodeUnit) => ({
+			path: unit.path,
+			name: unit.name,
+			code: this.projector.redactText(unit.code),
+		});
+		pairs.forEach(({ unit, candidates }, unitIndex) => {
+			state[`u${unitIndex}`] = view(unit);
+			candidates.forEach((candidate, candidateIndex) => {
+				const key = `u${unitIndex}c${candidateIndex}`;
+				state[key] = view(candidate);
+				questions[duplicateQuestionId(unitIndex, candidateIndex)] = {
+					type: "boolean",
+					instructions: `Does \`u${unitIndex}\` do the same job as \`${key}\` (the same inputs lead to the same results or effects), even if written differently?`,
+					criteria: {
+						true: "Same responsibility: either one could replace the other without changing behavior",
+						false: "Different responsibility, or only shares names, types or a few helper calls",
+					},
+				};
+			});
+		});
+		const { decision, answers, evaluationId } = await this.runStageValidation(
+			"code_duplicate",
+			state,
+			"read_only",
+			[],
+			questions,
+			signal,
+		);
 		this.sealDecision(decision, "evaluated", evaluationId);
 		return answers;
 	}

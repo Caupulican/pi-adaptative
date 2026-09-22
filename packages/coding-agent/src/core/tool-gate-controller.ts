@@ -86,6 +86,11 @@ export interface ToolGateControllerDeps {
 	/** System One semantic control plane controller, if active for this session/run. */
 	getSystemOneController?(): SystemOneController | undefined;
 	/**
+	 * Semantic duplicate review of the code a successful edit/write added. Returns a note appended to the
+	 * tool result (the edit stands; the model is steered to reuse the existing logic), or undefined.
+	 */
+	reviewNewCode?(input: { toolName: string; args: unknown; cwd: string }): Promise<string | undefined>;
+	/**
 	 * Mutation-acceptance rule hook. A blocking violation converts the mutation's own result into an
 	 * error carrying the violation, so the transition does not proceed on an accepted mutation.
 	 */
@@ -480,6 +485,12 @@ export class ToolGateController {
 				}
 				if (changedFiles.length > 0) {
 					this.deps.noteOwnedWrites?.(changedFiles, executionContext?.cwd ?? this.deps.getCwd());
+					const duplicateNote = await this.deps.reviewNewCode?.({
+						toolName: toolCall.name,
+						args,
+						cwd: executionContext?.cwd ?? this.deps.getCwd(),
+					});
+					if (duplicateNote) content = [...content, { type: "text", text: duplicateNote }];
 				}
 			}
 			finishSucceeded = !resolvedIsError;
