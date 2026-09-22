@@ -553,6 +553,7 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 	describe("Subsystem 6: Operator projection & interactive TUI (FR-110..FR-136)", () => {
 		it("FR-110..FR-118: OperatorProjectionController maintains pure projection of Goal, Phase, Now, Why, Next, Health", () => {
 			const controller = new OperatorProjectionController({
+				hasGoal: true,
 				objectiveId: "obj-proj-1",
 				title: "GrimDex UI refresh",
 				phase: "build",
@@ -588,6 +589,7 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 
 		it("FR-119, FR-129..FR-134: OperatorEventController filters routine events and retains semantic milestones", () => {
 			const projController = new OperatorProjectionController({
+				hasGoal: true,
 				objectiveId: "obj-proj-2",
 				title: "Release test",
 			});
@@ -619,6 +621,7 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 
 		it("FR-120, FR-121, FR-122, FR-135, FR-136: the POV bar renders build, blocked, and done states in one row", () => {
 			const projController = new OperatorProjectionController({
+				hasGoal: true,
 				objectiveId: "obj-tui-1",
 				title: "TUI Golden View",
 				phase: "build",

@@ -14,7 +14,8 @@ describe("Workbench terminal rendering", () => {
 		chat.addChild(new Text("conversation remains visible", 0, 0));
 		let input = "prompt";
 		const editor: Component = {
-			render: () => [`> ${input}${CURSOR_MARKER}`],
+			// Like the real Editor, it draws its own two rules around the input row.
+			render: (width) => ["─".repeat(width), `> ${input}${CURSOR_MARKER}`, "─".repeat(width)],
 			handleInput: (data) => {
 				input += data;
 				ui.requestRender();
@@ -58,7 +59,7 @@ describe("Workbench terminal rendering", () => {
 			expect(terminal.getViewport()[view.conversationTop + view.conversationHeight + 1]).toContain(
 				"status at bottom",
 			);
-			expect(terminal.getViewport()[view.conversationTop + view.conversationHeight + 2]).toMatch(/^─+$/);
+			expect(terminal.getViewport()[view.conversationTop + view.conversationHeight + 2]).toMatch(/^ ─+$/);
 			for (const line of terminal.getViewport()) expect(line).not.toMatch(/[┌┐└┘]/);
 			view.setInspector([{ title: "Work plan", body: ["Work complete"] }]);
 			view.setExecution(undefined);

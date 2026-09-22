@@ -1,6 +1,9 @@
 import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core/shell-output";
 import { type Component, Text, visibleWidth } from "@caupulican/pi-tui";
-import type { SemanticEvaluationRecord } from "../../../core/system-one/semantic-evaluation-ledger.ts";
+import {
+	evaluationResultText,
+	type SemanticEvaluationRecord,
+} from "../../../core/system-one/semantic-evaluation-ledger.ts";
 import { isRecordObject } from "../../../core/util/value-guards.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { theme } from "../theme/theme.ts";
@@ -54,6 +57,41 @@ export function createSystemOneEvaluationPreview(record: SemanticEvaluationRecor
 		render(width) {
 			body ??= new Text(reasons.map((reason) => theme.fg(failed ? "error" : "toolOutput", reason)).join("\n"), 0, 0);
 			return [metaRow(title, right, width, visibleWidth(titleText)), ...(reasons.length ? body.render(width) : [])];
+		},
+		invalidate() {
+			body = undefined;
+		},
+	};
+}
+
+/**
+ * Every System One evaluation of the cycle as one row, updated in place: how many, their average time,
+ * the last judgment, and how many of each kind. One row per evaluation buried the work under
+ * judgments that had nothing to show; the ledger keeps each one, and a failure keeps its own row.
+ */
+export function createSystemOneSummaryPreview(records: readonly SemanticEvaluationRecord[]): Component {
+	const count = records.length;
+	const averageMs = count ? records.reduce((sum, record) => sum + record.durationMs, 0) / count : 0;
+	const failed = records.filter((record) => record.outcome === "failed").length;
+	const last = records.at(-1);
+	const lastResult = last && evaluationResultText(last);
+	const clean = (text: string) => sanitizeBinaryOutput(stripAnsi(text)).slice(0, 80);
+	const titleText = `◆ System One · ${count} evaluation${count === 1 ? "" : "s"} · avg ${formatGraphDuration(averageMs)}${
+		failed ? ` · ${failed} failed` : ""
+	}`;
+	const title = theme.fg(failed ? "error" : SYSTEM_ONE_TONE, titleText);
+	const right = last ? theme.fg("muted", `last: ${clean(last.label)}${lastResult ? ` · ${lastResult}` : ""}`) : "";
+	const kinds = new Map<string, number>();
+	for (const record of records) kinds.set(clean(record.label), (kinds.get(clean(record.label)) ?? 0) + 1);
+	const breakdown = theme.fg(
+		"dim",
+		[...kinds].map(([label, times]) => (times > 1 ? `${label} ×${times}` : label)).join(" · "),
+	);
+	let body: Text | undefined;
+	return {
+		render(width) {
+			body ??= new Text(breakdown, 0, 0);
+			return [metaRow(title, right, width, visibleWidth(titleText)), ...body.render(width)];
 		},
 		invalidate() {
 			body = undefined;

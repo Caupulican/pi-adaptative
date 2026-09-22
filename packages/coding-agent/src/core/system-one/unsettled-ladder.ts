@@ -238,11 +238,26 @@ export async function settleUnsettledItems(
 	return { settled, unsettled };
 }
 
-/** The text of the tool results in a transcript, newest last, bounded from the end. */
+/**
+ * The tool results in a transcript, each with the call that produced it, newest last, bounded from the
+ * end. A result alone ("exitCode=0") says nothing about what ran; the call's arguments (the command,
+ * the path) are what make it evidence for a claim.
+ */
 export function toolResultEvidence(
-	messages: readonly { readonly role: string; readonly content?: unknown; readonly toolName?: unknown }[],
+	messages: readonly {
+		readonly role: string;
+		readonly content?: unknown;
+		readonly toolName?: unknown;
+		readonly toolCallId?: unknown;
+	}[],
 	maxChars = 12_000,
 ): string {
+	const calls = new Map<string, unknown>();
+	for (const message of messages) {
+		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+		for (const block of message.content as { type?: unknown; id?: unknown; arguments?: unknown }[])
+			if (block?.type === "toolCall" && typeof block.id === "string") calls.set(block.id, block.arguments);
+	}
 	const parts: string[] = [];
 	for (const message of messages) {
 		if (message.role !== "toolResult" || !Array.isArray(message.content)) continue;
@@ -251,8 +266,10 @@ export function toolResultEvidence(
 				block?.type === "text" && typeof block.text === "string" ? block.text : "",
 			)
 			.join("");
-		if (text.trim())
-			parts.push(`[${typeof message.toolName === "string" ? message.toolName : "tool"}] ${text.trim()}`);
+		const name = typeof message.toolName === "string" ? message.toolName : "tool";
+		const args = typeof message.toolCallId === "string" ? calls.get(message.toolCallId) : undefined;
+		const call = args === undefined ? "" : ` ${JSON.stringify(args).slice(0, 600)}`;
+		if (text.trim() || call) parts.push(`[${name}${call}] ${text.trim()}`);
 	}
 	const joined = parts.join("\n");
 	return joined.length > maxChars ? joined.slice(joined.length - maxChars) : joined;

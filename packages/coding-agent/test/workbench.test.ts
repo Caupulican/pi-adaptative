@@ -5,6 +5,7 @@ import { ConversationWindow } from "../src/modes/interactive/components/conversa
 import { WorkbenchComponent, workAreaRows } from "../src/modes/interactive/components/workbench.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
+import { RuledEditor } from "./helpers/ruled-editor.ts";
 
 class Rows implements Component {
 	reads = 0;
@@ -173,7 +174,7 @@ describe("Workbench layout", () => {
 		const conversation = new Container();
 		conversation.addChild(new Text("conversation body", 0, 0));
 		const editor = new Container();
-		editor.addChild(new Text("input across the entire screen", 0, 0));
+		editor.addChild(new RuledEditor(["input across the entire screen"]));
 		const status = new Text("status across the entire screen", 0, 0);
 		const view = new WorkbenchComponent({
 			conversation,
@@ -232,9 +233,9 @@ describe("Workbench layout", () => {
 			// own two rules, then the hint row. Geometry never jumps between turns.
 			expect(frame.at(-6)).toBe("");
 			expect(frame.at(-5)!.trimEnd()).toBe(" status across the entire screen");
-			expect(frame.at(-4)).toMatch(/^─+$/);
+			expect(frame.at(-4)).toMatch(/^ ─+$/);
 			expect(frame.at(-3)!.trimEnd()).toBe(" input across the entire screen");
-			expect(frame.at(-2)).toMatch(/^─+$/);
+			expect(frame.at(-2)).toMatch(/^ ─+$/);
 			expect(frame.at(-1)).toMatch(/^ \/ commands/);
 			expect(frame.join("\n")).not.toMatch(/[┌┐└┘]/);
 		}
@@ -255,7 +256,7 @@ describe("Workbench layout", () => {
 		}
 		const short = new WorkbenchComponent({
 			conversation: new Container(),
-			editor: new Container(),
+			editor: new RuledEditor(),
 			dock: [],
 			brand: "pi",
 			viewportRows: () => 9,
@@ -330,9 +331,9 @@ describe("Workbench layout", () => {
 		expect(lines).toHaveLength(30);
 		expect(lines[12]).toContain("Conversation");
 		expect(lines.at(-5)!.trimEnd()).toBe(" status across the entire screen");
-		expect(lines.at(-4)).toMatch(/^─+$/);
+		expect(lines.at(-4)).toMatch(/^ ─+$/);
 		expect(lines.at(-3)!.trimEnd()).toBe(" input across the entire screen");
-		expect(lines.at(-2)).toMatch(/^─+$/);
+		expect(lines.at(-2)).toMatch(/^ ─+$/);
 		expect(lines.at(-1)).toMatch(/^ \/ commands/);
 		expect(view.children).toContain(editor);
 	});
@@ -455,7 +456,7 @@ describe("Workbench layout", () => {
 		const activity = new Text("● Editing reload ownership", 0, 0);
 		const withActivity = new WorkbenchComponent({
 			conversation: new Container(),
-			editor: new Container(),
+			editor: new RuledEditor(),
 			dock: [],
 			activity,
 			brand: "pi",

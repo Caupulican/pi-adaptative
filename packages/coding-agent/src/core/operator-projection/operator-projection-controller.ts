@@ -13,6 +13,7 @@ import type {
 
 export interface OperatorProjectionInit {
 	objectiveId: string;
+	hasGoal: boolean;
 	title: string;
 	phase?: OperatorPhase;
 	phaseIndex?: number;
@@ -47,6 +48,7 @@ export class OperatorProjectionController {
 		this.projection = {
 			schema_version: "1.0",
 			objective_id: init.objectiveId,
+			has_goal: init.hasGoal,
 			title: init.title,
 			phase: init.phase ?? "understand",
 			phase_index: init.phaseIndex ?? 1,

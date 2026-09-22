@@ -85,6 +85,7 @@ function pendingGraphProjection(fixture: HardeningFixture): OperatorProjection {
 	return {
 		schema_version: "1.0",
 		objective_id: "g",
+		has_goal: true,
 		title: "t",
 		phase: "build",
 		phase_index: 3,
@@ -508,6 +509,7 @@ describe("next-release hardening", () => {
 			{
 				schema_version: "1.0",
 				objective_id: "g",
+				has_goal: true,
 				title: "t",
 				phase: "build",
 				phase_index: 3,
@@ -528,6 +530,7 @@ describe("next-release hardening", () => {
 			projection: {
 				schema_version: "1.0",
 				objective_id: "g",
+				has_goal: true,
 				title: "t",
 				phase: "build",
 				phase_index: 3,
@@ -581,6 +584,7 @@ describe("next-release hardening", () => {
 		const projection: OperatorProjection = {
 			schema_version: "1.0",
 			objective_id: "g",
+			has_goal: true,
 			title: "t",
 			phase: "deliver",
 			phase_index: 5,
@@ -701,6 +705,7 @@ describe("next-release hardening", () => {
 		const projection: OperatorProjection = {
 			schema_version: "1.0",
 			objective_id: "g",
+			has_goal: true,
 			title: "t",
 			phase: "build",
 			phase_index: 3,

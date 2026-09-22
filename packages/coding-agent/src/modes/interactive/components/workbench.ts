@@ -958,23 +958,21 @@ export class WorkbenchComponent extends Container {
 				: [];
 			return [...Array.from({ length: remaining - dock.length }, () => ""), ...dock, ...nativeEditor];
 		}
-		// Title strip, divider, conversation header, three conversation rows, the live row, the POV
-		// row and the editor's two rules stay.
-		const dockBudget = Math.max(0, total - editor.length - 10);
+		// Title strip, divider, conversation header, three conversation rows, the live row and the POV
+		// row stay; the editor's rendering already carries its own two rules.
+		const dockBudget = Math.max(0, total - editor.length - 8);
 		const above = this.options.dock.flatMap((component) => component.render(inner)).slice(-dockBudget);
 		const below = (this.options.dockBelow ?? [])
 			.flatMap((component) => component.render(inner))
 			.slice(0, Math.max(0, dockBudget - above.length));
-		// The POV lane leads the status band; the editor sits inside its own two rules, so the bottom of
-		// the screen reads as separate lanes and never jumps with the band's contents.
+		// The POV lane leads the status band; the editor draws its own two rules (they carry its scroll
+		// indicators and mode colour), so the bottom of the screen reads as separate lanes without a
+		// second rule stacked on each of them.
 		const povRows = this.operatorStatus?.render(columns - 1) ?? [];
-		const rule = theme.fg("borderMuted", "─".repeat(columns));
 		const dockRows = [
 			...povRows.map((line) => surfaceRow(line, columns)),
 			...above.map((line) => surfaceRow(gutter(line, inner), columns)),
-			rule,
 			...editor.map((line) => gutter(line, inner)),
-			rule,
 			...below.map((line) => gutter(line, inner)),
 			this.hintRow(columns),
 		];

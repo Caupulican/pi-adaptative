@@ -173,7 +173,11 @@ export class SessionOperatorProjection {
 	get projectionController(): OperatorProjectionController {
 		const objectiveId = this.deps.getObjectiveId();
 		if (this.controller && this.controllerObjectiveId === objectiveId) return this.controller;
-		const controller = new OperatorProjectionController({ objectiveId, title: this.deps.getTitle() });
+		const controller = new OperatorProjectionController({
+			objectiveId,
+			hasGoal: this.deps.getGoalState() !== undefined,
+			title: this.deps.getTitle(),
+		});
 		for (const event of this.events) controller.emitEvent(event);
 		controller.subscribe((projection) => {
 			for (const listener of this.listeners) {
@@ -242,6 +246,7 @@ export class SessionOperatorProjection {
 		const observing = control.owner === "system_one" && control.state === "observing" && reviewableLane !== undefined;
 
 		const patch = {
+			has_goal: goal !== undefined,
 			title: this.deps.getTitle(),
 			phase,
 			phase_index: phaseIndex(phase),

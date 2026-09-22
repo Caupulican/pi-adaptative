@@ -13,7 +13,10 @@ import { backgroundToolInvocationObservations } from "../../core/background-tool
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import type { ForegroundRouteSnapshot } from "../../core/model-router-controller.ts";
 import type { OperatorProjection } from "../../core/operator-projection/types.ts";
-import type { SemanticEvaluationRecord } from "../../core/system-one/semantic-evaluation-ledger.ts";
+import {
+	evaluationResultText,
+	type SemanticEvaluationRecord,
+} from "../../core/system-one/semantic-evaluation-ledger.ts";
 import type { SemanticPlaneHealth } from "../../core/system-one/semantic-plane-health.ts";
 import { type OrchestrationPanelModel, renderOrchestrationPanelRows } from "../../core/tools/orchestration-panel.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
@@ -39,7 +42,11 @@ import {
 	type WorkbenchSection,
 } from "./components/workbench.ts";
 import { metaRow } from "./components/workbench-pane.ts";
-import { createSystemOneEvaluationPreview, type PreviewAttribution } from "./components/workbench-tool-preview.ts";
+import {
+	createSystemOneEvaluationPreview,
+	createSystemOneSummaryPreview,
+	type PreviewAttribution,
+} from "./components/workbench-tool-preview.ts";
 import { theme } from "./theme/theme.ts";
 import { WorkspaceObservation } from "./workbench-workspace.ts";
 
@@ -94,7 +101,11 @@ export class WorkbenchController {
 	private readonly invocations = new ToolInvocationReport();
 	private fileEffects = 0;
 	/** System One previews by evaluation id: a later verdict note replaces the preview in place. */
-	private readonly jevPreviews = new Map<string, Component>();
+	/** This cycle's System One evaluations by id (a later verdict replaces its record, never recounts it). */
+	private readonly systemOneRecords = new Map<string, SemanticEvaluationRecord>();
+	private systemOneSummary: Component | undefined;
+	/** A failed evaluation keeps its own row: it needs attention, unlike a routine judgment. */
+	private readonly systemOneFailures = new Map<string, Component>();
 	/** Evidence of the previous cycle stays on screen until the new cycle produces its own. */
 	private staleEvidence = false;
 	private selecting = false;
@@ -140,7 +151,7 @@ export class WorkbenchController {
 		this.observationTurn++;
 		this.submissionEpoch = undefined;
 		this.previews = [];
-		this.jevPreviews.clear();
+		this.resetSystemOneEvidence();
 		this.invocations.reset();
 		this.fileEffects = 0;
 		this.staleEvidence = false;
@@ -190,7 +201,7 @@ export class WorkbenchController {
 		if (!this.staleEvidence) return;
 		this.staleEvidence = false;
 		this.previews = [];
-		this.jevPreviews.clear();
+		this.resetSystemOneEvidence();
 		this.fileEffects = 0;
 	}
 
@@ -199,27 +210,41 @@ export class WorkbenchController {
 		return this.ports.attribution?.();
 	}
 
+	private resetSystemOneEvidence(): void {
+		this.systemOneRecords.clear();
+		this.systemOneFailures.clear();
+		this.systemOneSummary = undefined;
+	}
+
+	/** Replace `previous` with `next` where it stands, or append `next` when it is not shown. */
+	private placePreview(previous: Component | undefined, next: Component): void {
+		const index = previous ? this.previews.indexOf(previous) : -1;
+		if (index >= 0) this.previews[index] = next;
+		else this.previews.push(next);
+	}
+
 	/**
-	 * A settled System One evaluation is Execution evidence like a file effect or a command: one preview per
-	 * evaluation in the cycle's order, replaced in place when its verdict is noted later, bounded by
-	 * the same preview limit. The invocation report is never touched: System One is not a tool call.
+	 * A settled System One evaluation is Execution evidence, collapsed: the cycle's evaluations are one
+	 * summary row (count, average time, last judgment, kinds), updated in place; a failed evaluation
+	 * also keeps its own row. The invocation report is never touched: System One is not a tool call.
 	 */
 	recordSystemOneEvaluation(record: SemanticEvaluationRecord): void {
 		if (this.disposed) return;
 		this.beginEvidence();
-		const preview = createSystemOneEvaluationPreview(record);
-		const existing = this.jevPreviews.get(record.evaluationId);
-		if (existing) {
-			const index = this.previews.indexOf(existing);
-			if (index >= 0) this.previews[index] = preview;
-			else this.previews.push(preview);
-		} else {
-			this.previews.push(preview);
+		this.systemOneRecords.set(record.evaluationId, record);
+		const summary = createSystemOneSummaryPreview([...this.systemOneRecords.values()]);
+		this.placePreview(this.systemOneSummary, summary);
+		this.systemOneSummary = summary;
+		if (record.outcome === "failed") {
+			const failure = createSystemOneEvaluationPreview(record);
+			this.placePreview(this.systemOneFailures.get(record.evaluationId), failure);
+			this.systemOneFailures.set(record.evaluationId, failure);
 		}
-		this.jevPreviews.set(record.evaluationId, preview);
 		while (this.previews.length > this.previewLimit()) {
 			const dropped = this.previews.shift();
-			for (const [id, candidate] of this.jevPreviews) if (candidate === dropped) this.jevPreviews.delete(id);
+			if (dropped === this.systemOneSummary) this.systemOneSummary = undefined;
+			for (const [id, candidate] of this.systemOneFailures)
+				if (candidate === dropped) this.systemOneFailures.delete(id);
 		}
 		this.refreshExecution();
 	}
@@ -590,21 +615,23 @@ export function workTitle(items: readonly ActivityLaneItem[]): string | undefine
 const SYSTEM_ONE_TONE = "customMessageLabel";
 
 /**
- * The Decider group: System One with System One, first in the Team. What it is doing comes from the
- * semantic plane's in-flight evaluation, its last verdict, and who holds control — never a literal.
+ * The Decider group: System One, first in the Team. What it is doing comes from the semantic plane's
+ * in-flight evaluation, its last judgment, and who holds control — never a literal. Each fact has its
+ * own row, so a narrow Team column truncates nothing that matters.
  */
 export function renderDeciderRows(facts: WorkbenchTeamFacts, nowMs: number): string[] {
 	const evaluating = facts.health.inFlightEvaluations?.at(-1);
 	const owner = facts.projection.control.owner;
-	const name = theme.fg(SYSTEM_ONE_TONE, "System One · Jev");
+	const name = theme.fg(SYSTEM_ONE_TONE, "System One");
+	const lastResult = facts.last && evaluationResultText(facts.last);
 	const state = evaluating
 		? theme.fg(SYSTEM_ONE_TONE, `judging ${evaluating.label} ${formatGraphDuration(nowMs - evaluating.startedAt)}`)
 		: facts.last
 			? theme.fg(
 					facts.last.outcome === "failed" ? "error" : "muted",
 					facts.last.outcome === "ok"
-						? `${facts.last.verdict ?? "ok"} · ${facts.last.label}`
-						: `${facts.last.outcome} · ${facts.last.label}`,
+						? `last: ${facts.last.label}${lastResult ? ` · ${lastResult}` : ""}`
+						: `${facts.last.outcome}: ${facts.last.label}`,
 				)
 			: theme.fg("dim", facts.health.state === "unbound" ? "off" : "ready");
 	const glyph = evaluating ? theme.fg(SYSTEM_ONE_TONE, "◆") : theme.fg("muted", "◇");
@@ -614,7 +641,7 @@ export function renderDeciderRows(facts: WorkbenchTeamFacts, nowMs: number): str
 			: owner === "user"
 				? theme.fg("warning", "waiting for you")
 				: theme.fg("dim", "root executes");
-	return [`  ${glyph} ${name}  ${state}`, `    ${control}`];
+	return [`  ${glyph} ${name}`, `    ${state}`, `    ${control}`];
 }
 
 /** The root executor: the model actually answering, its route when routed, and its current action. */
@@ -648,7 +675,7 @@ export function renderRoutingRows(facts: WorkbenchTeamFacts): string[] {
 /**
  * Work plan and Team blocks for the inspector. Long plans show a bounded, prioritized slice; a
  * finished plan or an idle team folds to one summary row without deleting anything. With `team`
- * facts the Team is a hierarchy: Decider (System One · System One) first, Executors (root, then the lanes)
+ * facts the Team is a hierarchy: Decider (System One) first, Executors (root, then the lanes)
  * second, Routing last and only while a routed choice is live.
  */
 export function buildWorkbenchSections(

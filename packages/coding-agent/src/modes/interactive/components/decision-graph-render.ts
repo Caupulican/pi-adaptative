@@ -8,6 +8,7 @@
 
 import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
+import { evaluationResultText } from "../../../core/system-one/semantic-evaluation-ledger.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
 import { type DecisionGraphModel, type DecisionParticipant, MAX_DOUBTS } from "./decision-graph-model.ts";
 
@@ -464,7 +465,11 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 			kind: "level",
 			nodes: [
 				{
-					text: `◆ System One · ${model.decider.evaluations} evaluation${model.decider.evaluations > 1 ? "s" : ""}${last ? ` · last ${last.label} → ${last.verdict ?? last.outcome}` : ""}`,
+					text: `◆ System One · ${model.decider.evaluations} evaluation${model.decider.evaluations > 1 ? "s" : ""}${
+						last
+							? ` · last ${last.label}${evaluationResultText(last) ? ` → ${evaluationResultText(last)}` : ""}`
+							: ""
+					}`,
 					tone: SYSTEM_ONE_TONE,
 				},
 			],
@@ -486,6 +491,23 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 	}
 	if (model.blocked)
 		levels.push({ kind: "level", nodes: [{ text: `BLOCKED · ${model.blocked}`, tone: "warning", bold: true }] });
+	// A request without an objective has no goal to satisfy: it ends when its turn does.
+	if (!model.goal.present) {
+		const unsure = model.doubts.length ? ` · ${model.doubts.length} unsure` : "";
+		levels.push({
+			kind: "level",
+			nodes: [
+				// A plain turn may end without a done phase; the open stage row is what says it is still running.
+				model.current && model.current.stage !== "done"
+					? { text: `turn running${unsure}`, tone: "accent" }
+					: {
+							text: `turn finished${unsure}`,
+							tone: model.doubts.length ? SYSTEM_ONE_TONE : "success",
+						},
+			],
+		});
+		return levels;
+	}
 	const repairTaken = model.stages.some((row) => row.stage === "repair");
 	const branch: DiagramLevel = {
 		kind: "branch",
@@ -577,6 +599,8 @@ export function renderDecisionDiagram(model: DecisionGraphModel, width: number):
 	const MIN_SLOT = 10;
 	const connector = (fromCount: number, toCount: number): void => {
 		const tone: ThemeColor = "muted";
+		// Nothing above: the first level has no edge to draw.
+		if (fromCount === 0 && toCount <= 1) return;
 		if (fromCount <= 1 && toCount <= 1) {
 			push([{ col: C, text: "↓", tone }]);
 			return;

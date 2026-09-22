@@ -22,6 +22,7 @@ function projection(overrides: Partial<OperatorProjection> = {}): OperatorProjec
 	return {
 		schema_version: "1.0",
 		objective_id: "obj",
+		has_goal: true,
 		title: "fixture",
 		phase: "build",
 		phase_index: 3,

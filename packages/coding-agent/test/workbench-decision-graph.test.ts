@@ -26,6 +26,7 @@ function projection(overrides: Partial<OperatorProjection> = {}): OperatorProjec
 	return {
 		schema_version: "1.0",
 		objective_id: "goal-1",
+		has_goal: true,
 		title: "orbit",
 		phase: "build",
 		phase_index: 3,
@@ -526,6 +527,44 @@ describe("Decision graph rendering", () => {
 	});
 });
 
+describe("Decision graph for a plain request", () => {
+	beforeAll(() => initTheme("dark"));
+
+	it("ends a goal-less turn as finished, draws no edge above the first level, and names the last judgment briefly", () => {
+		const log = new DecisionStageLog();
+		const plain = (overrides: Partial<OperatorProjection> = {}) =>
+			projection({
+				has_goal: false,
+				control: { owner: "root", state: "executing", reasonCode: "no_objective" },
+				...overrides,
+			});
+		log.observe(plain({ phase: "understand" }), T0);
+		log.observe(plain(), T0 + 2_000);
+		log.observe(
+			plain({ phase: "done", control: { owner: "root", state: "deciding", reasonCode: "no_objective" } }),
+			T0 + 6_000,
+		);
+		const model = buildDecisionGraphModel({
+			...SCENARIOS.idle!(),
+			projection: plain({
+				phase: "done",
+				control: { owner: "root", state: "deciding", reasonCode: "no_objective" },
+			}),
+			stageLog: log.view(T0 + 6_000),
+			evaluations: [evaluation("answer claims", "evaluated", T0 + 5_000)],
+		});
+		const rows = renderDecisionDiagram(model, 64).rows.map((row) => stripAnsi(row).trim());
+		const text = rows.join("\n");
+		expect(text).toContain("turn finished");
+		expect(text).not.toContain("goal satisfied?");
+		expect(text).not.toContain("not closed");
+		expect(text).toMatch(/System One · 1 evaluation · last answer claims$/m);
+		expect(text).not.toContain("→ evaluated");
+		const firstDrawn = rows.findIndex((row) => row.length > 0);
+		expect(rows[firstDrawn]).not.toBe("↓");
+	});
+});
+
 describe("Workbench conversation zone with the Decision graph", () => {
 	beforeAll(() => initTheme("dark"));
 
@@ -632,7 +671,11 @@ describe("Workbench conversation zone with the Decision graph", () => {
 		const ui = new TUI(terminal, true);
 		const chat = new Container();
 		chat.addChild(new Text("conversation remains visible", 0, 0));
-		const editor: Component = { render: () => [`> prompt${CURSOR_MARKER}`], invalidate() {} };
+		// Like the real Editor, it draws its own two rules around the input row.
+		const editor: Component = {
+			render: (width) => ["─".repeat(width), `> prompt${CURSOR_MARKER}`, "─".repeat(width)],
+			invalidate() {},
+		};
 		const editorContainer = new Container();
 		editorContainer.addChild(editor);
 		const view = new WorkbenchComponent({

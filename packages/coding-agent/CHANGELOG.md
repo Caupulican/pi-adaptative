@@ -40,6 +40,12 @@
 - The ladder's System One questions were worded from live measurement: refutation is asked as "contradict" with criteria, which settles a failing test run or a rejected push that the earlier wording left open, and the reserved-decision questions no longer read implementation choices as scope or taste. Whether a request contains a quoted basis is checked in code, where System One had scored it between 0.57 and 0.88.
 - The owner follow-up document groups entries under one heading per request and does not repeat a question it already holds.
 - `scan:semantic-duplicates` resolves workspace packages from source; it had loaded a stale `dist` build.
+- System One evaluations take one Execution row per cycle instead of one row each: `◆ System One · N evaluations · avg 0.9s`, the last judgment on the right and a count per kind below. A failed evaluation still gets its own row with its reasons.
+- The Team decider reads `System One` with its state and control on their own rows, and the routine `evaluated` verdict is no longer printed anywhere a judgment is named.
+- The Decision graph draws no arrow above its first level. A plain request with no goal ends as `turn finished` (or `turn running`) instead of `goal satisfied? → not closed`, which read as an unfinished goal after every ordinary turn; the operator projection carries `has_goal` for it.
+- The bottom of the Workbench draws one rule above and one below the input. The Workbench added its own pair around the editor's rules.
+- Every System One stage has an operator label (`answer claims`, `duplicate code`, `model routing`, …) from one exhaustive table; new stages had shown their raw id.
+- The root's unbacked claims are judged over tool results paired with the calls that produced them, so a check run as a Python one-liner backs "the tests pass" instead of reaching the owner as unsettled.
 
 ## [0.99.43] - 2026-09-22
 

@@ -27,6 +27,7 @@ function projection(overrides: {
 	return {
 		schema_version: "1.0",
 		objective_id: overrides.objectiveId ?? "goal-1",
+		has_goal: true,
 		title: "orbit",
 		phase: overrides.phase ?? "build",
 		phase_index: 3,

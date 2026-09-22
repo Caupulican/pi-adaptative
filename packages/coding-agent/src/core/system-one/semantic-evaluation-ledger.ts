@@ -63,19 +63,24 @@ const CHECKPOINT_LABEL_OVERRIDES: Readonly<Record<string, string>> = {
 	"JEV-WORKER-SUPERVISION": "worker supervision",
 };
 
-const SYSTEM_ONE_STAGES: ReadonlySet<string> = new Set<ValidationStage>([
-	"intake",
-	"preflight",
-	"tool_gate",
-	"postflight",
-	"evidence_check",
-	"drift_check",
-	"drift_loop",
-	"duplicate_logic",
-	"patch_review",
-	"completion",
-	"completion_challenge",
-]);
+/** Every System One stage in the operator's words. Exhaustive: a new stage cannot ship without its label. */
+const SYSTEM_ONE_STAGE_LABELS: Readonly<Record<ValidationStage, string>> = {
+	intake: "request",
+	preflight: "preflight",
+	tool_gate: "tool gate",
+	postflight: "postflight",
+	evidence_check: "evidence check",
+	drift_check: "drift check",
+	drift_loop: "drift loop",
+	duplicate_logic: "duplicate logic",
+	patch_review: "patch review",
+	completion: "completion",
+	completion_challenge: "completion challenge",
+	claim_delivery: "answer claims",
+	code_duplicate: "duplicate code",
+	unsettled_item: "unsettled findings",
+	route_choice: "model routing",
+};
 
 const STEERING_PROGRAM_PREFIX = "pi:steering:program:";
 const STEERING_PACK_PREFIX = "pi:steering:pack:";
@@ -105,7 +110,7 @@ function labelForCheckpoint(checkpointId: string): string {
 export function semanticEvaluationLabel(programId: string): string {
 	if (programId.startsWith("system-one:")) {
 		const stage = programId.slice("system-one:".length);
-		if (SYSTEM_ONE_STAGES.has(stage)) return stage.replaceAll("_", " ");
+		if (stage in SYSTEM_ONE_STAGE_LABELS) return SYSTEM_ONE_STAGE_LABELS[stage as ValidationStage];
 	}
 	if (programId.startsWith(STEERING_PROGRAM_PREFIX)) {
 		const checkpoint = programId.slice(STEERING_PROGRAM_PREFIX.length).split(":")[0] ?? "";
@@ -114,6 +119,17 @@ export function semanticEvaluationLabel(programId: string): string {
 	if (/^JEV-[A-Z0-9-]+$/.test(programId)) return bounded(labelForCheckpoint(programId), LABEL_LIMIT);
 	for (const [pattern, label] of HOST_PROGRAM_LABELS) if (pattern.test(programId)) return label;
 	return bounded(programId, LABEL_LIMIT);
+}
+
+/**
+ * What an evaluation's result says to an operator: its outcome when it did not finish ok, else its
+ * verdict. The routine `evaluated` verdict names nothing the label does not already say, so it has none.
+ */
+export function evaluationResultText(
+	record: Pick<SemanticEvaluationRecord, "outcome" | "verdict">,
+): string | undefined {
+	if (record.outcome !== "ok") return record.outcome;
+	return record.verdict && record.verdict !== "evaluated" ? record.verdict : undefined;
 }
 
 /**

@@ -52,6 +52,8 @@ export interface OperatorControlProjection {
 export interface OperatorProjection {
 	readonly schema_version: "1.0";
 	readonly objective_id: string;
+	/** Whether the session holds a goal; a plain request has none, and nothing to close but its turn. */
+	readonly has_goal: boolean;
 	readonly title: string;
 	readonly phase: OperatorPhase;
 	readonly phase_index: number;

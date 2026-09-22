@@ -63,15 +63,14 @@ describe("Workbench review regressions", () => {
 		controller.record(new Text("execution result", 0, 0), workbenchToolObservation("execution"));
 		const seen: string[] = [];
 		for (let i = 0; i < 10; i++) {
-			seen.push(
-				stripAnsi(
-					view
-						.render(60)
-						.slice(view.upperTop, view.upperTop + view.upperHeight)
-						.join("\n"),
-				),
-			);
-			view.scrollUpper(1, view.upperTop + 1, 1);
+			const upper = view
+				.render(60)
+				.slice(view.upperTop, view.upperTop + view.upperHeight)
+				.map((line) => stripAnsi(line));
+			seen.push(upper.join("\n"));
+			// Wheel over the Work plan's body, wherever the combined pane places it at this height.
+			const plan = upper.findIndex((line) => line.trimStart().startsWith("Work plan"));
+			view.scrollUpper(1, view.upperTop + plan + 1, 1);
 		}
 		expect(seen.join("\n")).toContain("failed verifier");
 		expect(seen.join("\n")).toContain("active step");

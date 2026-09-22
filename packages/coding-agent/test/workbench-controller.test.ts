@@ -5,7 +5,6 @@ import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import { createBackgroundToolTerminalMessage } from "../src/core/background-tool-task-controller.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { WorkbenchComponent, type WorkbenchSection } from "../src/modes/interactive/components/workbench.ts";
-import { createWorkbenchToolPreview } from "../src/modes/interactive/components/workbench-tool-preview.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import {
 	buildWorkbenchSections,
@@ -15,6 +14,7 @@ import {
 import { WorkspaceObservation } from "../src/modes/interactive/workbench-workspace.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 import { workbenchCounterFixture, workbenchToolObservation } from "./fixtures/session-failures.ts";
+import { RuledEditor } from "./helpers/ruled-editor.ts";
 
 function idleWorker(laneId: string, agentStatus: NonNullable<LaneRecord["agentStatus"]>): LaneRecord {
 	return {
@@ -96,7 +96,7 @@ describe("Workbench input boundary", () => {
 	it("persists every operator geometry change through the geometry port", () => {
 		const view = new WorkbenchComponent({
 			conversation: new Container(),
-			editor: new Container(),
+			editor: new RuledEditor(),
 			dock: [],
 			brand: "pi",
 			viewportRows: () => 40,
@@ -208,6 +208,7 @@ describe("Workbench input boundary", () => {
 			projection: {
 				schema_version: "1.0" as const,
 				objective_id: "obj",
+				has_goal: true,
 				title: "fixture",
 				phase: "build" as const,
 				phase_index: 3,
@@ -257,10 +258,12 @@ describe("Workbench input boundary", () => {
 		const text = body.map(stripAnsi);
 		const at = (needle: string) => text.findIndex((line) => line.includes(needle));
 		expect(at("Decider")).toBe(0);
-		expect(text[1]).toMatch(/◆ System One · Jev\s+judging verify \d+(\.\d)?s/);
-		expect(text[2]).toContain("decides next");
-		expect(at("Executors")).toBe(3);
-		expect(text[4]).toMatch(/● root · gpt-5.6-mini\s+Editing parser.ts/);
+		expect(text[1]).toMatch(/◆ System One$/);
+		expect(text.join("\n")).not.toContain("Jev");
+		expect(text[2]).toMatch(/judging verify \d+(\.\d)?s/);
+		expect(text[3]).toContain("decides next");
+		expect(at("Executors")).toBe(4);
+		expect(text[5]).toMatch(/● root · gpt-5.6-mini\s+Editing parser.ts/);
 		expect(at("tester")).toBeGreaterThan(4);
 		expect(at("Routing")).toBeGreaterThan(at("tester"));
 		expect(text.at(-2)).toContain("cheap/read-only via model-router → gpt-5.6-mini for root");
@@ -384,7 +387,7 @@ describe("Workbench input boundary", () => {
 		}
 		controller.dispose();
 	});
-	it("records System One evaluations as Execution evidence with attribution, replacing a preview when its verdict is noted", () => {
+	it("collapses System One evaluations into one counted Execution row with the average time, and keeps failures", () => {
 		const view = new WorkbenchComponent({
 			conversation: new Container(),
 			editor: new Container(),
@@ -399,49 +402,39 @@ describe("Workbench input boundary", () => {
 			messages: () => [],
 			copy: async () => {},
 			notice() {},
-			previewLimit: () => 2,
+			previewLimit: () => 4,
 			attribution: () => ({ kind: "root", label: "root", modelRef: "xai/grok-4.6" }),
 		});
-		view.applyGeometry({ rows: 12, collapsed: false, inspector: "hidden", executionMaximized: false });
+		view.applyGeometry({ rows: 16, collapsed: false, inspector: "hidden", executionMaximized: false });
 		controller.beginCycle();
-		const base = {
-			evaluationId: "e1",
-			programId: "system-one:verify",
-			label: "verify",
-			startedAt: 1000,
-			endedAt: 3500,
-			durationMs: 2500,
-		};
-		controller.recordSystemOneEvaluation({ ...base, outcome: "ok" });
-		controller.recordSystemOneEvaluation({ ...base, outcome: "ok", verdict: "pass", reasons: ["all criteria hold"] });
-		const rendered = stripAnsi(view.render(110).join("\n"));
-		expect(rendered.match(/◆ System One verify/g)?.length).toBe(1);
-		expect(rendered).toMatch(/◆ System One verify\s+system one · pass · 2\.5s/);
-		expect(rendered).toContain("all criteria hold");
-		expect(rendered).toContain("Completed: 0");
-		controller.record(
-			createWorkbenchToolPreview(
-				"edit",
-				{ path: "src/a.ts" },
-				{ isError: false, content: [], details: { diff: "+1 x\n-1 y" } },
-				controller.attribution(),
-			),
-			{ toolCallId: "t1", isError: false, details: {} },
-		);
-		const withTool = stripAnsi(view.render(110).join("\n"));
-		expect(withTool).toMatch(/edit · src\/a\.ts\s+\+1 −1\s+root · grok-4\.6/);
+		const base = { programId: "system-one:verify", label: "verify", startedAt: 1000, outcome: "ok" as const };
+		controller.recordSystemOneEvaluation({ ...base, evaluationId: "e1", endedAt: 2000, durationMs: 1000 });
+		controller.recordSystemOneEvaluation({ ...base, evaluationId: "e2", endedAt: 4000, durationMs: 3000 });
+		// A verdict noted later updates the same evaluation, never adds a row.
 		controller.recordSystemOneEvaluation({
 			...base,
 			evaluationId: "e2",
+			endedAt: 4000,
+			durationMs: 3000,
+			verdict: "pass",
+		});
+		const rendered = stripAnsi(view.render(110).join("\n"));
+		expect(rendered.match(/◆ System One/g)?.length).toBe(1);
+		expect(rendered).toMatch(/◆ System One · 2 evaluations · avg 2(\.0)?s/);
+		expect(rendered).toContain("last: verify · pass");
+		controller.recordSystemOneEvaluation({
+			...base,
+			evaluationId: "e3",
 			label: "objective route",
+			endedAt: 3500,
+			durationMs: 2500,
 			outcome: "failed",
 			reasons: ["engine timeout"],
 		});
-		const bounded = stripAnsi(view.render(110).join("\n"));
-		expect(bounded).not.toContain("◆ System One verify");
-		expect(bounded).toContain("◆ System One objective route");
-		expect(bounded).toContain("failed · 2.5s");
-		expect(bounded).toContain("engine timeout");
+		const withFailure = stripAnsi(view.render(110).join("\n"));
+		expect(withFailure).toMatch(/◆ System One · 3 evaluations · avg 2\.2s · 1 failed/);
+		expect(withFailure).toContain("objective route");
+		expect(withFailure).toContain("engine timeout");
 		controller.dispose();
 	});
 	it("retains a visible file-effect receipt when observation finishes after the agent stops", async () => {
@@ -683,7 +676,7 @@ describe("Workbench input boundary", () => {
 		chat.addChild(new Text("hello world", 0, 0));
 		const view = new WorkbenchComponent({
 			conversation: chat,
-			editor: new Container(),
+			editor: new RuledEditor(),
 			dock: [],
 			brand: "pi",
 			viewportRows: () => 20,

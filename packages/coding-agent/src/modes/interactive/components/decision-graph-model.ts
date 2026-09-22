@@ -124,7 +124,8 @@ export interface DecisionGraphModel {
 	readonly routing: readonly { readonly text: string; readonly live: boolean }[];
 	readonly evidence: DecisionGraphInput["receipts"];
 	readonly blocked?: string;
-	readonly goal: { readonly branch: DecisionGoalBranch };
+	/** `present` is false for a plain request: it has no goal to satisfy, only a turn to finish. */
+	readonly goal: { readonly present: boolean; readonly branch: DecisionGoalBranch };
 	/**
 	 * Judgments that settled nothing and are still open, newest evaluation first.
 	 *
@@ -389,7 +390,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		routing,
 		evidence: input.receipts,
 		...(blocked ? { blocked } : {}),
-		goal: { branch },
+		goal: { present: projection.has_goal, branch },
 		doubts,
 		hasRunningClock,
 		stageLogEmpty: stageLog.entries.length === 0,
