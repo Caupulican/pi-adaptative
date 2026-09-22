@@ -15,6 +15,7 @@ import {
 } from "@caupulican/pi-agent-core/verification-obligations";
 import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@caupulican/pi-ai";
 import { settledAnswer } from "../decision/noul.ts";
+import type { LadderOutcome } from "./unsettled-ladder.ts";
 
 /** A counted delivery: how many attempts succeeded and how many failed in this turn. */
 export interface DeliveryReceipt {
@@ -173,10 +174,26 @@ export function claimCorrectionPrompt(findings: readonly ClaimFinding[]): string
 	].join("\n");
 }
 
+/** What each claim kind asserts, as a statement System One can judge against the turn's own results. */
+const CLAIM_STATEMENTS: Readonly<Record<ClaimKind, string>> = {
+	tests_pass: "The tests that were run passed",
+	committed: "The changes were committed with git",
+	pushed: "The changes were pushed to a git remote",
+	published: "The package or release was published",
+	files_changed: "Files in the workspace were changed",
+};
+
 export interface AnswerClaimCheckerDeps {
 	/** The session's System One controller; absent, no claim is checked. */
 	getController(): { evaluateAnswerClaims(finalAnswer: string): Promise<Record<string, unknown>> } | undefined;
 	warn(message: string): void;
+	/**
+	 * The unsettled-item ladder over the turn's own tool results, for a claim no receipt backs: the
+	 * harness reads receipts only from the tools it knows, so the results may still settle it.
+	 */
+	settle?(items: readonly string[], messages: readonly AgentMessage[]): Promise<LadderOutcome>;
+	/** Claims nothing settled, delivered to the owner by the host. */
+	deliverToOwner?(items: readonly string[]): void;
 }
 
 /**
@@ -214,15 +231,40 @@ export class AnswerClaimChecker {
 		return judgeClaims(answers, collectClaimReceipts(messages));
 	}
 
-	/** Returns the correction prompt when a claim is contradicted; undefined otherwise. */
+	/**
+	 * Returns the correction prompt when a claim is contradicted; undefined otherwise. A claim no
+	 * receipt backs climbs the ladder over the turn's results: confirmed, it stands; refuted, it is a
+	 * contradiction; still open, it goes to the owner.
+	 */
 	async check(finalAnswer: string, turnMessages: readonly AgentMessage[]): Promise<string | undefined> {
 		const findings = await this.findings(finalAnswer, turnMessages);
 		if (!findings) return undefined;
-		for (const finding of findings)
-			if (finding.verdict === "unsupported") this.deps.warn(`Unverified claim: ${finding.reason}`);
-		return findings.some((finding) => finding.verdict === "contradicted")
-			? claimCorrectionPrompt(findings)
-			: undefined;
+		const contradicted = findings.filter((finding) => finding.verdict === "contradicted");
+		const unsupported = findings.filter((finding) => finding.verdict === "unsupported");
+		if (unsupported.length > 0 && this.deps.settle) {
+			const outcome = await this.deps.settle(
+				unsupported.map((finding) => CLAIM_STATEMENTS[finding.kind]),
+				turnMessages,
+			);
+			const byStatement = new Map(unsupported.map((finding) => [CLAIM_STATEMENTS[finding.kind], finding]));
+			for (const settled of outcome.settled) {
+				const finding = byStatement.get(settled.item);
+				if (finding && settled.verdict === "refuted")
+					contradicted.push({
+						kind: finding.kind,
+						verdict: "contradicted",
+						reason: `${finding.reason}, and System One found this turn's results show it did not happen`,
+					});
+			}
+			const open = outcome.unsettled.map(
+				(entry) => `${byStatement.get(entry.item)?.reason ?? entry.item} (missing: ${entry.missing})`,
+			);
+			for (const item of open) this.deps.warn(`Unverified claim: ${item}`);
+			if (open.length > 0) this.deps.deliverToOwner?.(open);
+		} else {
+			for (const finding of unsupported) this.deps.warn(`Unverified claim: ${finding.reason}`);
+		}
+		return contradicted.length > 0 ? claimCorrectionPrompt(contradicted) : undefined;
 	}
 
 	/**

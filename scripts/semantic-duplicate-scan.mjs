@@ -5,49 +5,22 @@
  * which token-level clone detection cannot see. Needs a TypeSafe key (TYPESAFE_API_KEY or
  * ~/.config/typesafe/.env) and network, so it is a report, not part of `npm run check`.
  *
- * usage: node scripts/semantic-duplicate-scan.mjs [--out <report.md>]
+ * usage: node --conditions=pi-source scripts/semantic-duplicate-scan.mjs [--out <report.md>]
  */
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
-import { createJiti } from "jiti";
-
-const repositoryRoot = resolve(import.meta.dirname, "..");
-const jiti = createJiti(import.meta.url);
-const src = (path) => jiti.import(join(repositoryRoot, "packages/coding-agent/src/core", path));
-const { TypeSafeReviewer } = await src("review/typesafe-reviewer.ts");
-const { SystemOneJevAdapter } = await src("system-one/adapter.ts");
-const { createSystemOneConfig } = await src("system-one/config.ts");
-const { SystemOneController } = await src("system-one/controller.ts");
-const { ExecutionStore } = await src("system-one/execution-state.ts");
-const { harnessFileLister, isTestPath, SemanticUnitIndex, scanSemanticDuplicates, JEV_SCAN_CONCURRENCY } = await src(
-	"system-one/code-duplicates.ts",
-);
-
-function readKey() {
-	if (process.env.TYPESAFE_API_KEY?.trim()) return process.env.TYPESAFE_API_KEY.trim();
-	const envFile = join(homedir(), ".config", "typesafe", ".env");
-	if (!existsSync(envFile)) return undefined;
-	return /^TYPESAFE_API_KEY=(.*)$/m.exec(readFileSync(envFile, "utf8"))?.[1]?.trim().replace(/^["']|["']$/g, "");
-}
+import { writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import {
+	harnessFileLister,
+	isTestPath,
+	JEV_SCAN_CONCURRENCY,
+	SemanticUnitIndex,
+	scanSemanticDuplicates,
+} from "../packages/coding-agent/src/core/system-one/code-duplicates.ts";
+import { JEV_LIVE_MODEL, liveSystemOneController, repositoryRoot } from "./jev-live.mjs";
 
 const outIndex = process.argv.indexOf("--out");
 const out = outIndex > 0 ? resolve(process.argv[outIndex + 1]) : undefined;
-const key = readKey();
-if (!key) {
-	console.error("semantic-duplicate-scan: no TypeSafe key (TYPESAFE_API_KEY or ~/.config/typesafe/.env)");
-	process.exit(2);
-}
-const model = "jev-1.13.0";
-const config = createSystemOneConfig({ enabled: true, provider: "typesafe", productionModel: model });
-const reviewer = new TypeSafeReviewer({ provider: "typesafe", model, getApiKey: async () => key });
-const adapter = new SystemOneJevAdapter(reviewer, config, { getApiKey: async () => key, getUserKeys: async () => [key] });
-const store = new ExecutionStore({
-	run_id: "semantic-duplicate-scan",
-	objective: { request: "", normalized_goal: "", acceptance_criteria: [], constraints: [] },
-	repo: { root: repositoryRoot, baseline_revision: "HEAD" },
-});
-const controller = new SystemOneController({ store, adapter, config });
+const controller = liveSystemOneController("semantic-duplicate-scan");
 
 const production = (path) =>
 	/^(packages\/[^/]+\/src\/|scripts\/)/.test(path) && !isTestPath(path) && !/\.d\.ts$|\.generated\./.test(path);
@@ -68,7 +41,7 @@ const counts = (band) => scan.verdicts.filter((v) => v.band === band).length;
 const report = [
 	"# Semantic duplicate scan",
 	"",
-	`${scan.units} units, ${scan.pairs} candidate pairs judged by ${model} in ${scan.requests} requests (${JEV_SCAN_CONCURRENCY} concurrent), ${seconds} s; failed requests: ${scan.failedRequests}.`,
+	`${scan.units} units, ${scan.pairs} candidate pairs judged by ${JEV_LIVE_MODEL} in ${scan.requests} requests (${JEV_SCAN_CONCURRENCY} concurrent), ${seconds} s; failed requests: ${scan.failedRequests}.`,
 	`Same job (hard_pass): ${counts("hard_pass")}. Provisional (soft_pass): ${counts("soft_pass")}. Unsettled: ${counts("ambiguous")}.`,
 	...section("hard_pass", "Same job, written differently"),
 	...section("soft_pass", "Provisional"),

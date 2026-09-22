@@ -144,7 +144,7 @@ export const SKILL_VAULT_SYSTEM_RULE =
  * atomic questions over the real source, and report what stays unsettled instead of rounding it up.
  */
 export const JEV_VALIDATION_RULE =
-	"JEV: confirm each non-trivial finding with typesafe_review, one atomic fact per question, answerable from the source you send. Below the gate is a result: fix only a badly formed question; never reword to raise a score or weaken the claim. Report what stays unsettled as inconclusive, naming what is missing.";
+	"JEV: confirm non-trivial findings with typesafe_review, one atomic fact per question over sent source. Unsettled is a result: never reword to pass; report it as inconclusive with what is missing.";
 
 export function buildWorkerSystemPrompt(capabilities: { write: boolean; process: boolean; jev?: boolean }): string {
 	const resultShape = capabilities.write

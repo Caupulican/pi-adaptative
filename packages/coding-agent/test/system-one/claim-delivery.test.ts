@@ -87,6 +87,59 @@ describe("claims against deliveries", () => {
 		expect(nothing).toEqual(uninspected);
 	});
 
+	describe("a claim no receipt backs climbs the ladder", () => {
+		const statesTests = async () => ({ states_tests_pass: yes });
+		// A test runner the harness does not recognize leaves no receipt; its output is still evidence.
+		const unrecognizedRun = turn("pytest -q", false);
+
+		function checker(outcome: { settled: unknown[]; unsettled: unknown[] }) {
+			const warnings: string[] = [];
+			const delivered: string[][] = [];
+			const settleCalls: string[][] = [];
+			const instance = new AnswerClaimChecker({
+				getController: () => ({ evaluateAnswerClaims: statesTests }),
+				warn: (message) => warnings.push(message),
+				settle: async (items) => {
+					settleCalls.push([...items]);
+					return outcome as never;
+				},
+				deliverToOwner: (items) => delivered.push([...items]),
+			});
+			return { instance, warnings, delivered, settleCalls };
+		}
+
+		it("stands when System One confirms it from the turn's results", async () => {
+			const c = checker({
+				settled: [{ item: "The tests that were run passed", verdict: "confirmed", by: "system_one" }],
+				unsettled: [],
+			});
+			expect(await c.instance.check("All tests pass.", unrecognizedRun)).toBeUndefined();
+			expect(c.settleCalls).toEqual([["The tests that were run passed"]]);
+			expect(c.warnings).toEqual([]);
+			expect(c.delivered).toEqual([]);
+		});
+
+		it("becomes a contradiction, with one correction, when System One refutes it", async () => {
+			const c = checker({
+				settled: [{ item: "The tests that were run passed", verdict: "refuted", by: "system_one" }],
+				unsettled: [],
+			});
+			const correction = await c.instance.check("All tests pass.", unrecognizedRun);
+			expect(correction).toContain("show it did not happen");
+		});
+
+		it("goes to the owner when nothing settles it", async () => {
+			const c = checker({
+				settled: [],
+				unsettled: [{ item: "The tests that were run passed", missing: "a test run in this turn" }],
+			});
+			expect(await c.instance.check("All tests pass.", unrecognizedRun)).toBeUndefined();
+			expect(c.delivered).toHaveLength(1);
+			expect(c.delivered[0]?.[0]).toContain("no test run in this turn recorded a pass");
+			expect(c.delivered[0]?.[0]).toContain("(missing: a test run in this turn)");
+		});
+	});
+
 	describe("in a session", () => {
 		let harness: Harness | undefined;
 		afterEach(async () => {
@@ -130,6 +183,48 @@ describe("claims against deliveries", () => {
 				message.role === "custom" ? `custom:${message.customType}` : message.role,
 			);
 			expect(texts.filter((entry) => entry === "custom:claim_delivery")).toHaveLength(1);
+		});
+
+		it("an unbacked claim nothing settles reaches the owner from the host, not the model", async () => {
+			const store = new ExecutionStore({
+				run_id: "claims-owner",
+				objective: { request: "", normalized_goal: "", acceptance_criteria: [], constraints: [] },
+				repo: { root: "/repo", baseline_revision: "rev-0" },
+			});
+			const unsure = { type: "noul", noul: 0.6 };
+			const systemOneController = new SystemOneController({
+				store,
+				adapter: {
+					evaluate: async (request) => ({
+						model: "jev-1.13.0",
+						latency_ms: 1,
+						answers: Object.fromEntries(
+							Object.keys(request.questions).map((id) => [
+								id,
+								id.startsWith("shows_") ? unsure : id === "states_tests_pass" ? yes : no,
+							]),
+						),
+					}),
+				},
+			});
+			harness = await createHarness({ systemOneController });
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("bash", { command: "echo checked" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage("Done. All tests pass."),
+				fauxAssistantMessage("MISSING: a test run in this turn"),
+			]);
+			await harness.session.prompt("check it");
+			const ownerItems = harness.session.agent.state.messages.filter(
+				(message) => message.role === "custom" && message.customType === "owner_items",
+			);
+			expect(ownerItems).toHaveLength(1);
+			expect(JSON.stringify(ownerItems[0])).toContain("no test run in this turn recorded a pass");
+			// No contradiction, so no correction turn.
+			expect(
+				harness.session.agent.state.messages.filter(
+					(message) => message.role === "custom" && message.customType === "claim_delivery",
+				),
+			).toHaveLength(0);
 		});
 	});
 });

@@ -133,9 +133,23 @@ Settled items return to the parent as `System One settled: …` and no longer ho
 review. Collaboration and tmux workers, whose transcripts the host cannot read, mark such findings
 with `INCONCLUSIVE:` lines in their report; those go straight to step 3.
 
-A handed-off owner question follows the same rule: a stronger model may answer it only with a basis
-quoted from the owner's request, and System One must find that basis in the request and find that
-it settles the question before the agent may use the answer.
+The root agent's own answer climbs the same ladder: a claim no receipt backs (the harness reads
+receipts only from the tools it knows) is judged against the turn's tool results. Confirmed, it
+stands; refuted, it is a contradiction and buys the one correction turn; still open, it goes to the
+owner. What goes to the owner is delivered by the host, never relayed by a model: at the end of the
+turn a displayed `owner_items` message lists every open item, with the follow-up document named
+under a handoff.
+
+A handed-off owner question follows the same rule. A stronger model may answer it on a basis copied
+from the owner's request, which code checks is in the request (case, punctuation and spacing folded)
+and Jev judges backs the answer; or on its own judgment, which stands only when Jev decisively finds
+the question is none of the kinds the owner reserves: scope, spending, accepting a risk, an
+irreversible or outward action, or a matter of taste the request does not settle.
+
+The ladder's questions are worded from live measurement, and `npm run probe:jev-ladder` re-measures
+them against live Jev with cases of known answer. It fails only when a case settles the wrong way;
+a case left open reaches the owner and is reported as conservative. Re-run it when the Jev model or
+a question changes.
 
 ## Semantic duplicates
 

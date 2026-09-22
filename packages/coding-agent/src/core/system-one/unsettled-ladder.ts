@@ -59,6 +59,53 @@ export interface UnsettledLadderDeps {
 	consult?(input: { item: string; evidence: string; signal?: AbortSignal }): Promise<ItemConsult | undefined>;
 }
 
+/**
+ * The decisions an owner keeps even after handing work off, one condition each. A question that is
+ * decisively none of these is the agents' to settle; any other answer keeps it for the owner.
+ */
+export const RESERVED_DECISION_KINDS: Readonly<
+	Record<string, { readonly instructions: string; readonly criteria?: { true: string; false: string } }>
+> = {
+	reserved_scope: {
+		instructions:
+			"Does `question` ask whether to add or drop a feature, requirement or deliverable that `request` does not already settle?",
+		criteria: {
+			true: "Adding, removing or changing what gets delivered",
+			false: "How to build something already requested: data structures, file layout, naming, libraries, algorithms",
+		},
+	},
+	reserved_spending: { instructions: "Does `question` ask to decide whether to spend money or buy something?" },
+	reserved_risk: { instructions: "Does `question` ask to accept a security, privacy or data-loss risk?" },
+	reserved_irreversible: {
+		instructions:
+			"Does `question` ask to decide on an action that cannot be undone or that leaves the machine (publishing, sending, deleting, releasing)?",
+	},
+	reserved_taste: {
+		instructions:
+			"Does `question` ask for the owner's personal preference on how something looks or reads, which `request` does not settle?",
+		criteria: {
+			true: "Visual design, colours, wording, tone, branding",
+			false: "Technical implementation choices, even when several would work",
+		},
+	},
+};
+
+/**
+ * A consult answer grounded in the request: whether the quoted basis backs the answer. Whether the
+ * request contains the quote is a fact code checks (`quotedIn`), not a question for Jev.
+ */
+export const CONSULT_GROUNDING_QUESTIONS: Readonly<
+	Record<
+		string,
+		{ readonly type: "boolean"; readonly instructions: string; readonly criteria?: { true: string; false: string } }
+	>
+> = {
+	basis_backs_answer: {
+		type: "boolean",
+		instructions: "Does `basis` tell the agent to do what `answer` says, for `question`?",
+	},
+};
+
 export function unsettledQuestionId(kind: "shows_true" | "shows_false", index: number): string {
 	return `${kind}_${index}`;
 }
@@ -209,4 +256,18 @@ export function toolResultEvidence(
 	}
 	const joined = parts.join("\n");
 	return joined.length > maxChars ? joined.slice(joined.length - maxChars) : joined;
+}
+
+/** Case, punctuation and spacing folded away, so a quote matches the text it was copied from. */
+function foldForQuote(text: string): string {
+	return text
+		.toLowerCase()
+		.replace(/[^\p{L}\p{N}]+/gu, " ")
+		.trim();
+}
+
+/** Whether `quote` appears in `text`, ignoring case, punctuation and spacing. An empty quote never does. */
+export function quotedIn(quote: string, text: string): boolean {
+	const needle = foldForQuote(quote.replace(/^["'\u201c\u2018]+|["'\u201d\u2019]+$/g, ""));
+	return needle.length > 0 && ` ${foldForQuote(text)} `.includes(` ${needle} `);
 }

@@ -7,26 +7,51 @@
  * the run continues with the rest of its work instead of waiting on a human who handed it off.
  */
 
-import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { type UnsettledItemJudge, verdictAt } from "./unsettled-ladder.ts";
+import { isDecisivelyFalse, isDecisivelyTrue } from "../decision/noul.ts";
+import { quotedIn, RESERVED_DECISION_KINDS, type UnsettledItemJudge } from "./unsettled-ladder.ts";
 
-/** What the stronger model concluded about one owner question. */
+/**
+ * What the stronger model concluded about one owner question. An answer rests either on words the
+ * owner's request states (`request`) or on the agents' own judgment (`judgment`), which a handoff
+ * allows only for a decision the owner did not reserve.
+ */
 export type OwnerQuestionConsult =
-	| { readonly kind: "answered"; readonly answer: string; readonly basis: string; readonly model: string }
+	| {
+			readonly kind: "answered";
+			readonly answer: string;
+			readonly grounds: "request" | "judgment";
+			readonly basis: string;
+			readonly model: string;
+	  }
 	| { readonly kind: "needs_owner"; readonly reason: string; readonly model: string };
+
+/** What System One judges a consult answer with: the item ladder's Nouls and the reserved kinds. */
+export interface OwnerQuestionJudge extends UnsettledItemJudge {
+	evaluateConsultGrounding(
+		input: { readonly basis: string; readonly question: string; readonly answer: string },
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>>;
+	evaluateReservedDecision(
+		input: { readonly question: string; readonly request: string },
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>>;
+}
 
 /** The system prompt the stronger model answers under: settle it, or name why only the owner can. */
 export const OWNER_QUESTION_CONSULT_PROMPT = [
-	"You settle a question an agent wanted to ask its human owner, who handed the work off and asked not to be asked.",
-	"Answer it yourself when the request, the stated context and ordinary engineering judgment are enough.",
-	"Only when the question is a real decision the owner reserved (scope, money, risk, irreversible or outward-facing action, taste the request does not settle) say it needs the owner.",
-	"Reply with either two lines:",
+	"You settle a question an agent wanted to ask its human owner, who handed the work off to the agents.",
+	"The agents may decide anything the owner did not reserve. The owner reserves: what the work should include beyond the request, spending money, accepting security, privacy or data-loss risk, actions that cannot be undone or leave the machine, and personal preferences the request does not settle.",
+	"Reply with one of:",
 	"ANSWER: <the answer the agent should proceed with>",
-	"BASIS: <the words of the owner's request that settle it, quoted>",
-	"or one line:",
+	"BASIS: <the words of the owner's request that settle it, copied exactly>",
+	"or",
+	"ANSWER: <the answer the agent should proceed with>",
+	"JUDGMENT: <the engineering reason, when the request does not settle it and the decision is not reserved>",
+	"or",
 	"NEEDS_OWNER: <why only the owner can decide, in one sentence>",
-	"An answer the request does not settle is not yours to give: say NEEDS_OWNER.",
 ].join("\n");
 
 export function consultMessage(input: { request: string; question: string }): string {
@@ -48,21 +73,24 @@ export function parseConsultReply(reply: string, model: string): OwnerQuestionCo
 	const needsOwner = field("NEEDS_OWNER");
 	if (answer) {
 		const basis = field("BASIS");
-		// An answer with nothing in the request behind it is the model deciding for the owner.
-		return basis
-			? { kind: "answered", answer, basis, model }
-			: { kind: "needs_owner", reason: `${model} answered without a basis in the request: ${answer}`, model };
+		if (basis) return { kind: "answered", answer, grounds: "request", basis, model };
+		const judgment = field("JUDGMENT");
+		if (judgment) return { kind: "answered", answer, grounds: "judgment", basis: judgment, model };
+		// An answer with no grounds at all is the model deciding for the owner.
+		return { kind: "needs_owner", reason: `${model} answered without grounds: ${answer}`, model };
 	}
 	return needsOwner ? { kind: "needs_owner", reason: needsOwner, model } : undefined;
 }
 
 /**
- * The model finds, Jev decides: an answer stands only when System One judges, decisively, that the
- * owner's request states its basis and that the basis settles the question with that answer.
- * Anything short of that, an outage included, leaves the question for the owner.
+ * The model finds, Jev decides. An answer grounded in the request stands only when the request
+ * contains the quoted basis (a fact code checks) and System One judges, decisively, that the basis
+ * settles the question. An answer grounded in judgment stands only when System One judges,
+ * decisively, that the question is none of the kinds the owner reserves. Anything short of that, an
+ * outage included, leaves it for the owner.
  */
 export async function groundConsultAnswer(
-	judge: UnsettledItemJudge | undefined,
+	judge: OwnerQuestionJudge | undefined,
 	input: {
 		readonly consult: Extract<OwnerQuestionConsult, { kind: "answered" }>;
 		readonly request: string;
@@ -78,18 +106,23 @@ export async function groundConsultAnswer(
 	});
 	if (!judge) return unsettled("System One is not bound to check it");
 	try {
-		const answers = await judge.evaluateUnsettledItems(
-			[
-				{ statement: consult.basis, evidence: input.request },
-				{
-					statement: `The answer to this question is: ${consult.answer}\nQuestion: ${input.question}`,
-					evidence: consult.basis,
-				},
-			],
+		if (consult.grounds === "judgment") {
+			const answers = await judge.evaluateReservedDecision(
+				{ question: input.question, request: input.request },
+				input.signal,
+			);
+			const reserved = Object.keys(RESERVED_DECISION_KINDS).filter((id) => !isDecisivelyFalse(answers[id]));
+			return reserved.length === 0
+				? consult
+				: unsettled(`the decision may be one the owner reserves (${reserved.join(", ")})`);
+		}
+		// Whether the request holds the quote is a fact; whether the quote backs the answer is Jev's.
+		if (!quotedIn(consult.basis, input.request)) return unsettled("the owner's request does not contain its basis");
+		const answers = await judge.evaluateConsultGrounding(
+			{ basis: consult.basis, question: input.question, answer: consult.answer },
 			input.signal,
 		);
-		if (verdictAt(answers, 0) !== "confirmed") return unsettled("the owner's request does not show its basis");
-		if (verdictAt(answers, 1) !== "confirmed") return unsettled("its basis does not settle the question");
+		if (!isDecisivelyTrue(answers.basis_backs_answer)) return unsettled("its basis does not settle the question");
 		return consult;
 	} catch (error) {
 		return unsettled(`System One could not check it (${error instanceof Error ? error.message : String(error)})`);
@@ -101,18 +134,35 @@ export function ownerFollowUpPath(agentDir: string, sessionId: string): string {
 	return join(agentDir, "follow-ups", `${sessionId}.md`);
 }
 
-/** Append one decision the owner must make to the follow-up document and return its path. */
+function requestMarker(request: string): string {
+	return `<!-- request:${createHash("sha256").update(request).digest("hex").slice(0, 16)} -->`;
+}
+
+/**
+ * Append one decision the owner must make to the follow-up document and return its path. Entries
+ * are grouped under one heading per request, and a question the document already holds is not
+ * written again, so a long unassisted run grows it by decisions, not by repeats.
+ */
 export function appendOwnerFollowUp(
 	path: string,
 	entry: { readonly question: string; readonly reason: string; readonly request: string; readonly at: string },
 ): string {
 	mkdirSync(dirname(path), { recursive: true });
-	const header = existsSync(path)
+	const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
+	const questionLine = `**Question:** ${entry.question}\n`;
+	if (existing.includes(questionLine)) return path;
+	const marker = requestMarker(entry.request);
+	const lastMarker = existing.match(/<!-- request:[0-9a-f]{16} -->/g)?.at(-1);
+	const header = existing
 		? ""
 		: "# Owner follow-ups\n\nDecisions the agents were not given a green light to make during a handed-off run. Answer them to start the next round of work.\n";
-	appendFileSync(
-		path,
-		`${header}\n## ${entry.at}\n\n**Question:** ${entry.question}\n\n**Why it needs you:** ${entry.reason}\n\n**Request it came from:** ${entry.request || "(not recorded)"}\n`,
-	);
+	const section =
+		lastMarker === marker
+			? ""
+			: `\n## Request (${entry.at})\n${marker}\n\n${(entry.request || "(not recorded)")
+					.split("\n")
+					.map((line) => `> ${line}`)
+					.join("\n")}\n`;
+	appendFileSync(path, `${header}${section}\n${questionLine}\n**Why it needs you:** ${entry.reason}\n`);
 	return path;
 }

@@ -528,7 +528,15 @@ export class AgentSession {
 	private readonly _answerClaims = new AnswerClaimChecker({
 		getController: () => this._systemOneController,
 		warn: (message) => this._emit({ type: "warning", message }),
+		settle: (items, messages) => this._settleInconclusive({ items, messages }),
+		deliverToOwner: (items) => {
+			this._deliverToOwner(items);
+		},
 	});
+	/** Findings nothing could settle this turn, delivered to the owner by the host when the turn ends. */
+	private _pendingOwnerItems: string[] = [];
+	/** The follow-up document this turn's items were written to under a handoff, if any. */
+	private _pendingOwnerFollowUp: string | undefined;
 	private _adaptationProjection?: AdaptationProjection;
 	private _deliveryState: DeliveryState = "none";
 	private _foregroundControl?: SystemOneForegroundControl;
@@ -963,7 +971,7 @@ export class AgentSession {
 			getEvidenceBundleSnapshot: () => this.getEvidenceBundleSnapshot(),
 			saveEvidenceBundleSnapshot: (bundle) => this.saveEvidenceBundleSnapshot(bundle),
 			saveWorkerClaimSnapshot: (claim, request) => this.saveWorkerClaimSnapshot(claim, request),
-			recordUnsettledForOwner: (items) => this._recordUnsettledForOwner(items),
+			recordUnsettledForOwner: (items) => this._deliverToOwner(items),
 			readMemoryForLane: (query) => this._memory.readMemoryForLane(query),
 			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
 			getArtifactStore: () => this._getToolArtifactStore(),
@@ -1264,6 +1272,7 @@ export class AgentSession {
 						createCustomMessage("claim_delivery", correction, true, undefined, new Date().toISOString()),
 						lease,
 					);
+				await this._flushOwnerItems(lease);
 			},
 		});
 		this._terminalHandoffs = new ForegroundTerminalHandoffController({
@@ -4131,6 +4140,7 @@ export class AgentSession {
 							submissionSignal,
 						);
 					}
+					if (!submissionSignal?.aborted) await this._flushOwnerItems(submission.lease);
 				}
 			}
 			// A cancelled submission records no outcome. Cancelled before the run, the last assistant
@@ -5084,8 +5094,40 @@ export class AgentSession {
 			(entry) => `${entry.verdict}: ${entry.item} (${entry.by}${entry.basis ? `; basis: ${entry.basis}` : ""})`,
 		);
 		const unsettled = outcome.unsettled.map((entry) => `${entry.item} (missing: ${entry.missing})`);
-		const ownerFollowUp = this._recordUnsettledForOwner(unsettled);
+		const ownerFollowUp = this._deliverToOwner(unsettled);
 		return { settled, unsettled, ...(ownerFollowUp ? { ownerFollowUp } : {}) };
+	}
+
+	/**
+	 * Items nothing could settle go to the owner by the host, never by trusting a model to relay them:
+	 * written to the follow-up document under a handoff, and posted to the owner when the turn ends.
+	 */
+	private _deliverToOwner(items: readonly string[]): string | undefined {
+		if (items.length === 0) return undefined;
+		this._pendingOwnerItems.push(...items.filter((item) => !this._pendingOwnerItems.includes(item)));
+		const path = this._recordUnsettledForOwner(items);
+		if (path) this._pendingOwnerFollowUp = path;
+		return path;
+	}
+
+	/** Post this turn's unsettled items to the owner as one displayed message, then clear them. */
+	private async _flushOwnerItems(lease: ForegroundSubmissionLease | undefined): Promise<void> {
+		if (this._pendingOwnerItems.length === 0) return;
+		const items = this._pendingOwnerItems;
+		const followUp = this._pendingOwnerFollowUp;
+		this._pendingOwnerItems = [];
+		this._pendingOwnerFollowUp = undefined;
+		const content = [
+			followUp
+				? `Needs you (recorded in ${followUp}; the run continued without it):`
+				: "Needs you: nothing the agents could check settled these. Answer before relying on them:",
+			...items.map((item) => `- ${item}`),
+		].join("\n");
+		await this._sendCustomMessage(
+			{ customType: "owner_items", content, display: true, details: { items, ...(followUp ? { followUp } : {}) } },
+			undefined,
+			lease,
+		);
 	}
 
 	/**

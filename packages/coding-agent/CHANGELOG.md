@@ -5,6 +5,10 @@
 - Every answer's claims are checked against the turn's own tool results, with or without a goal. A claim the results contradict (a push that failed, tests that failed) buys one correction turn; a claim nothing backs is a warning.
 - Semantic duplicate review: an edit that adds a function doing the same job as existing code, however it is written, gets a note in its result naming the function to reuse. `npm run scan:semantic-duplicates` reports every such pair across the repository.
 - Workers report what they could not settle. A worker's result has an `inconclusive` list, and every worker holding `typesafe_review` is told to confirm findings with atomic Jev questions and to report an unsettled one honestly instead of rewording it to pass. Each item climbs a ladder before anyone relies on it: System One judges it against the worker's own tool results, then a stronger model names the fact that settles it and System One checks that fact. What stays open goes to the owner: the parent is told to ask them, or, under a handoff, it is written to the owner's follow-up document and the work continues around it. Collaboration and tmux workers mark such findings with `INCONCLUSIVE:` lines in their report.
+- The root agent's unbacked claims climb the same ladder over the turn's tool results: a test run the harness does not recognize can still back "tests pass", a refuted claim buys the correction turn, and an open one goes to the owner.
+- Unsettled items reach the owner from the host: at the end of the turn a displayed message lists every open item, instead of relying on the parent model to relay them.
+- Under a handoff, a stronger model may settle an owner question on its own judgment when Jev decisively finds the question touches none of the decisions the owner reserves (scope, spending, risk, irreversible or outward actions, taste).
+- `npm run probe:jev-ladder` measures the ladder's Jev questions against live Jev with cases of known answer and fails when any case settles the wrong way.
 - Read-only workers get Jev. `typesafe_review` needs the new `semantic.judge` capability, which a read-only grant keeps, instead of network and credential authority, which it strips; reviewers and auditors had silently lost the tool.
 
 ### Fixed
@@ -28,6 +32,9 @@
 - A stronger model settles a handed-off owner question only on a basis the owner's request states, and System One checks that basis before the agent may use the answer; before, its answer was used unchecked.
 - Independent `typesafe_review` calls in one turn run concurrently instead of one at a time.
 - `delegate status` says "unreviewed worker claim": a claim can need review for blockers or unsettled findings without changing any file.
+- The ladder's Jev questions were worded from live measurement: refutation is asked as "contradict" with criteria, which settles a failing test run or a rejected push that the earlier wording left open, and the reserved-decision questions no longer read implementation choices as scope or taste. Whether a request contains a quoted basis is checked in code, where Jev had scored it between 0.57 and 0.88.
+- The owner follow-up document groups entries under one heading per request and does not repeat a question it already holds.
+- `scan:semantic-duplicates` resolves workspace packages from source; it had loaded a stale `dist` build.
 
 ## [0.99.43] - 2026-09-22
 

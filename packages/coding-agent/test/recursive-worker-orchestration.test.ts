@@ -15,12 +15,7 @@ import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fi
 import { setConcurrentResponses } from "./suite/concurrent-responses.ts";
 import { createHarness } from "./suite/harness.ts";
 import { createTestResourceLoader } from "./suite/test-resources.ts";
-
-/** A verifier's acceptance rests on its own inspection: one successful read of the subject first. */
-function verifierInspection(cwd: string): AssistantMessage {
-	writeFileSync(join(cwd, "subject.txt"), "verified subject\n");
-	return fauxAssistantMessage([fauxToolCall("read", { path: "subject.txt" })], { stopReason: "toolUse" });
-}
+import { verifierInspection } from "./worker-output-fixture.ts";
 
 const UNAVAILABLE_SHELL_TOOL_NAME = "nonexistent_shell";
 

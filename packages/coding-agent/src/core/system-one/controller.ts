@@ -35,7 +35,7 @@ import {
 import { StateProjector } from "./projector.ts";
 import type { SemanticEvaluationObserver } from "./semantic-evaluation-ledger.ts";
 import type { ExecutionState, ToolImpact, ValidationDecision, ValidationStage } from "./types.ts";
-import { unsettledQuestionId } from "./unsettled-ladder.ts";
+import { CONSULT_GROUNDING_QUESTIONS, RESERVED_DECISION_KINDS, unsettledQuestionId } from "./unsettled-ladder.ts";
 
 /** The four questions that only mean something when written rules were supplied. */
 /** Asked only when written rules exist. `full_handoff` is not among them: it governs owner questions too. */
@@ -563,20 +563,22 @@ export class SystemOneController {
 		checks.forEach((check, index) => {
 			state[`s${index}`] = this.projector.redactText(check.statement);
 			state[`e${index}`] = this.projector.redactText(check.evidence);
+			// Wording measured against live Jev (docs/system-one.md): refutation is asked as "contradict",
+			// with criteria naming what a contradicting result looks like.
 			questions[unsettledQuestionId("shows_true", index)] = {
 				type: "boolean",
 				instructions: `Does \`e${index}\` show that \`s${index}\` is true?`,
 				criteria: {
-					true: "The evidence states it or directly shows it",
-					false: "The evidence does not show it, or shows the opposite",
+					true: "The evidence reports the statement's outcome directly",
+					false: "The evidence reports a different outcome, or says nothing about it",
 				},
 			};
 			questions[unsettledQuestionId("shows_false", index)] = {
 				type: "boolean",
-				instructions: `Does \`e${index}\` show that \`s${index}\` is false?`,
+				instructions: `Does \`e${index}\` contradict \`s${index}\`?`,
 				criteria: {
-					true: "The evidence states or directly shows the opposite",
-					false: "The evidence does not contradict it",
+					true: "The evidence reports a result that makes the statement untrue (a failure, a rejection, a different value)",
+					false: "The evidence agrees with the statement or says nothing about it",
 				},
 			};
 		});
@@ -592,6 +594,49 @@ export class SystemOneController {
 			(check, index) =>
 				`${check.statement.slice(0, 120)} P(shown true)=${probabilityText(answers[unsettledQuestionId("shows_true", index)])} P(shown false)=${probabilityText(answers[unsettledQuestionId("shows_false", index)])}`,
 		);
+		this.sealDecision(decision, "evaluated", evaluationId, reasons);
+		return answers;
+	}
+
+	/**
+	 * Whether a question asks for a decision the owner reserves: one Noul per reserved kind, in one
+	 * request. Under a handoff the agents may decide everything else.
+	 */
+	async evaluateReservedDecision(
+		input: { readonly question: string; readonly request: string },
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>> {
+		const questions: QuestionPack = Object.fromEntries(
+			Object.entries(RESERVED_DECISION_KINDS).map(([id, question]) => [id, { type: "boolean", ...question }]),
+		);
+		const { decision, answers, evaluationId } = await this.runStageValidation(
+			"unsettled_item",
+			{ question: this.projector.redactText(input.question), request: this.projector.redactText(input.request) },
+			"read_only",
+			[],
+			questions,
+			signal,
+		);
+		const reasons = Object.keys(RESERVED_DECISION_KINDS).map((id) => `${id} P=${probabilityText(answers[id])}`);
+		this.sealDecision(decision, "evaluated", evaluationId, reasons);
+		return answers;
+	}
+
+	/** Whether a consult answer's quoted basis tells the agent to do what the answer says. */
+	async evaluateConsultGrounding(
+		input: { readonly basis: string; readonly question: string; readonly answer: string },
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>> {
+		const redact = (text: string) => this.projector.redactText(text);
+		const { decision, answers, evaluationId } = await this.runStageValidation(
+			"unsettled_item",
+			{ basis: redact(input.basis), question: redact(input.question), answer: redact(input.answer) },
+			"read_only",
+			[],
+			CONSULT_GROUNDING_QUESTIONS,
+			signal,
+		);
+		const reasons = Object.keys(CONSULT_GROUNDING_QUESTIONS).map((id) => `${id} P=${probabilityText(answers[id])}`);
 		this.sealDecision(decision, "evaluated", evaluationId, reasons);
 		return answers;
 	}

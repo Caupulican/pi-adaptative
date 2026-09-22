@@ -888,7 +888,11 @@ function consultedResult(
 	questions: readonly AskQuestion[],
 	consult: Extract<OwnerQuestionConsult, { kind: "answered" }>,
 ): { content: Array<{ type: "text"; text: string }>; details: AskQuestionToolDetails } {
-	const text = `ask_question settled under the owner's handoff by ${consult.model}, checked by System One against the request ("${consult.basis}"): ${consult.answer} Proceed with this answer and say you used it.`;
+	const checked =
+		consult.grounds === "request"
+			? `checked by System One against the request ("${consult.basis}")`
+			: `on judgment System One found the owner did not reserve (${consult.basis})`;
+	const text = `ask_question settled under the owner's handoff by ${consult.model}, ${checked}: ${consult.answer} Proceed with this answer and say you used it.`;
 	return { content: [{ type: "text", text }], details: { questions, answers: [], cancelled: true, error: text } };
 }
 

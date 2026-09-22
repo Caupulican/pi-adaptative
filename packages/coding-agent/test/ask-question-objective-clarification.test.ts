@@ -181,6 +181,7 @@ describe("objective-correlated ask_question", () => {
 			consultStrongerModel: async () => ({
 				kind: "answered",
 				answer: "Keep the archived importer.",
+				grounds: "request",
 				basis: "tidy the settings screen",
 				model: "big/model",
 			}),

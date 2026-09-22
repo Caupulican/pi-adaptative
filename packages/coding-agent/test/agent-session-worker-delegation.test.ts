@@ -30,6 +30,7 @@ import { createTestExecutionGrant, createTestWorkerExecutionAuthority } from "./
 import { setConcurrentResponses } from "./suite/concurrent-responses.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 import { createTestResourceLoader } from "./suite/test-resources.ts";
+import { verifierInspection } from "./worker-output-fixture.ts";
 
 const WORKER_JSON =
 	'{"summary":"The validator blocks out-of-scope changes.","status":"completed","findings":[{"summary":"Deny lists override allow lists","confidence":0.8}]}';
@@ -91,12 +92,6 @@ function lastMessageText(context: { messages?: readonly unknown[] }): string {
 				: "",
 		)
 		.join("\n");
-}
-
-/** A verifier's acceptance rests on its own inspection: one successful read of the subject first. */
-function verifierInspection(cwd: string): AssistantMessage {
-	writeFileSync(join(cwd, "subject.txt"), "verified subject\n");
-	return fauxAssistantMessage([fauxToolCall("read", { path: "subject.txt" })], { stopReason: "toolUse" });
 }
 
 describe("AgentSession worker delegation", () => {
