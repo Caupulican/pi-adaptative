@@ -23,6 +23,7 @@ import { DecisionActionPolicy } from "../decision/action-policy.ts";
 import { resolveEffectiveCompletionProfile } from "../decision/completion-profile.ts";
 import type { DecisionEngineRouter } from "../decision/engine-router.ts";
 import { booleanAnswer } from "../decision/evaluation.ts";
+import { settledAnswer } from "../decision/noul.ts";
 import type { CompletionAssuranceProfile } from "../decision/policy.ts";
 import { createDecisionProgram } from "../decision/program.ts";
 import type { ResponsibilityStatement, SemanticResponsibilityController } from "../dedup/index.ts";
@@ -676,24 +677,20 @@ export class ObjectiveExecutionController {
 					signal: options?.signal,
 				});
 
-				const wrAns = cert.answers.work_remaining as { boolean?: boolean } | undefined;
-				const cwccAns = cert.answers.current_worker_can_continue as { boolean?: boolean } | undefined;
-				const iwrAns = cert.answers.independent_worker_required as { boolean?: boolean } | undefined;
-				const cerAns = cert.answers.capability_escalation_required as { boolean?: boolean } | undefined;
 				const spAns = cert.answers.semantic_progress as { level?: number; score?: number } | undefined;
-				const csAns = cert.answers.context_stale as { boolean?: boolean } | undefined;
-				const srAns = cert.answers.strategy_repetition as { boolean?: boolean } | undefined;
 				const mwcAns = cert.answers.missing_work_class as { choice?: string } | undefined;
 
+				// Certificate answers carry the band; an ambiguous one settles nothing and reads as undefined.
 				semantic = {
-					workRemaining: typeof wrAns?.boolean === "boolean" ? wrAns.boolean : undefined,
+					workRemaining: settledAnswer(cert.answers.work_remaining),
 					missingWorkClass: mwcAns?.choice as SemanticRouteJudgments["missingWorkClass"],
-					currentWorkerCanContinue: typeof cwccAns?.boolean === "boolean" ? cwccAns.boolean : undefined,
-					independentWorkerRequired: typeof iwrAns?.boolean === "boolean" ? iwrAns.boolean : undefined,
-					capabilityEscalationRequired: typeof cerAns?.boolean === "boolean" ? cerAns.boolean : undefined,
+					currentWorkerCanContinue: settledAnswer(cert.answers.current_worker_can_continue),
+					independentWorkerRequired: settledAnswer(cert.answers.independent_worker_required),
+					capabilityEscalationRequired: settledAnswer(cert.answers.capability_escalation_required),
+					externalBlockerPresent: settledAnswer(cert.answers.external_blocker_present),
 					semanticProgress: spAns?.level ?? spAns?.score,
-					contextStale: typeof csAns?.boolean === "boolean" ? csAns.boolean : undefined,
-					strategyRepetition: typeof srAns?.boolean === "boolean" ? srAns.boolean : undefined,
+					contextStale: settledAnswer(cert.answers.context_stale),
+					strategyRepetition: settledAnswer(cert.answers.strategy_repetition),
 				};
 			} catch (err) {
 				if (this.deps.steeringPlane.policy.mode === "system_one_required") {

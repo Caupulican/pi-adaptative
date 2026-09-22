@@ -83,3 +83,20 @@ export function settledFromBand(band: NoulBand, direction: NoulDirection): boole
 export function noulCertainty(probabilityTrue: number): number {
 	return Math.max(probabilityTrue, 1 - probabilityTrue);
 }
+
+/**
+ * The truth of a recorded noul answer (`{ band, direction }`, or `{ noul, direction }` when no band
+ * was stored), or undefined when it settled nothing. The one reader for answers that crossed a
+ * certificate or ledger boundary: nothing downstream re-derives a boolean from the probability.
+ */
+export function settledAnswer(
+	answer: unknown,
+	thresholds: NoulBandThresholds = DEFAULT_NOUL_BAND_THRESHOLDS,
+): boolean | undefined {
+	if (!answer || typeof answer !== "object") return undefined;
+	const record = answer as { band?: unknown; direction?: unknown; noul?: unknown };
+	const direction: NoulDirection = record.direction === "required_false" ? "required_false" : "required_true";
+	if (typeof record.band === "string") return settledFromBand(record.band as NoulBand, direction);
+	if (isNoulProbability(record.noul)) return settledFromBand(noulBand(record.noul, direction, thresholds), direction);
+	return undefined;
+}

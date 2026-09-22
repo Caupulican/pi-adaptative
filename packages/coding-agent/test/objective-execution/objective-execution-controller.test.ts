@@ -515,6 +515,44 @@ describe("Objective Execution Controller & Jev Substrate (OEL-001 to OEL-045)", 
 		).toThrow(RepairWorkValidationError);
 	});
 
+	it("reads JEV-004 route judgments from steering-plane certificates by band, not a missing boolean field", async () => {
+		const { runtime } = createTestRuntime();
+		const noul = (probability: number, band: string) => ({
+			type: "noul",
+			noul: probability,
+			direction: "required_true",
+			band,
+			confidence: Math.max(probability, 1 - probability),
+		});
+		let strategyRepetition = noul(0.02, "hard_fail");
+		const controller = new ObjectiveExecutionController({
+			mode: "objective_primary",
+			runtime: { reconcileObjective: async () => runtime.getSnapshot() },
+			steeringPlane: {
+				policy: { mode: "system_one_required" },
+				requireCertificate: async () => ({
+					certificate_id: "c-route",
+					answers: {
+						work_remaining: noul(0.97, "hard_pass"),
+						missing_work_class: { type: "choice", choice: "implement", confidence: 0.95 },
+						current_worker_can_continue: noul(0.03, "hard_fail"),
+						independent_worker_required: noul(0.02, "hard_fail"),
+						capability_escalation_required: noul(0.02, "hard_fail"),
+						context_stale: noul(0.03, "hard_fail"),
+						strategy_repetition: strategyRepetition,
+						semantic_progress: { type: "score", score: 2, confidence: 0.9 },
+					},
+				}),
+			} as never,
+		});
+		expect((await controller.evaluateRouteOnce("goal:route")).route).toBe("implement");
+		// Jev says the strategy is repeating: the route must replan, not keep implementing.
+		strategyRepetition = noul(0.96, "hard_pass");
+		const repeating = await controller.evaluateRouteOnce("goal:route");
+		expect(repeating.route).toBe("replan");
+		expect(repeating.reason_codes).toContain("strategy_repetition_detected");
+	});
+
 	it("routes owner_required while the owner's authority is what the objective waits on", async () => {
 		const { runtime } = createTestRuntime();
 		let ownerRequired = true;
