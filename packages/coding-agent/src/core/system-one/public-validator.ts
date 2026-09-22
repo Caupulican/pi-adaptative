@@ -85,8 +85,8 @@ export class DefaultSemanticValidator implements SemanticValidator {
 				}
 				questionsMap[qId] = {
 					type: q.type,
-					instruction: q.instruction,
-					criteria: q.criteria,
+					instructions: q.instruction,
+					...(q.criteria !== undefined ? { criteria: q.criteria } : {}),
 				};
 			}
 		} else {
@@ -96,7 +96,12 @@ export class DefaultSemanticValidator implements SemanticValidator {
 			if (rawQuestions) {
 				for (const qId of request.questionIds) {
 					if (rawQuestions[qId]) {
-						questionsMap[qId] = rawQuestions[qId];
+						const question = rawQuestions[qId];
+						questionsMap[qId] = {
+							type: question.type,
+							instructions: question.instruction,
+							...(question.criteria !== undefined ? { criteria: question.criteria } : {}),
+						};
 					}
 				}
 			}

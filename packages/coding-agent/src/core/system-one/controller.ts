@@ -2,7 +2,13 @@ import type { Consequence } from "../decision/primitives.ts";
 import type { IntegrityGateResult } from "../hooks/index.ts";
 import type { JevAdapter } from "./adapter.ts";
 import { AuditStore } from "./audit.ts";
-import { hashQuestions, SYSTEM_ONE_CATALOG_VERSION, SYSTEM_ONE_PINNED_MODEL, selectQuestions } from "./catalog.ts";
+import {
+	hashQuestions,
+	SYSTEM_ONE_CATALOG_VERSION,
+	SYSTEM_ONE_PINNED_MODEL,
+	selectQuestions,
+	toTypeSafeEvaluationQuestions,
+} from "./catalog.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import {
 	directiveFromPostflight,
@@ -200,7 +206,7 @@ export class SystemOneController {
 					{
 						model: pinnedModel,
 						state: stateView,
-						questions,
+						questions: toTypeSafeEvaluationQuestions(questions),
 					},
 					{ impact },
 				);

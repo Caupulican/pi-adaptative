@@ -358,3 +358,35 @@ export function selectQuestions(stage: ValidationStage, omit: readonly string[])
 	if (omit.length === 0) return pack;
 	return Object.fromEntries(Object.entries(pack).filter(([name]) => !omit.includes(name)));
 }
+
+function isNamedCriteria(criteria: QuestionDefinition["criteria"]): criteria is Readonly<Record<string, string>> {
+	return criteria !== undefined && !Array.isArray(criteria);
+}
+
+/**
+ * The catalog names a yes/no question `boolean`. The TypeSafe evaluation API names that same
+ * question `noul`. Sending the catalog type fails the request before Jev runs.
+ */
+export function toTypeSafeEvaluationQuestions(
+	questions: Readonly<QuestionPack>,
+): Record<string, { type: "noul" | "choice" | "score"; instructions: string; criteria?: unknown }> {
+	const wire: Record<string, { type: "noul" | "choice" | "score"; instructions: string; criteria?: unknown }> = {};
+	for (const [id, question] of Object.entries(questions)) {
+		if (question.type === "boolean") {
+			const named = question.criteria;
+			const criteria = isNamedCriteria(named) ? { true: named.true, false: named.false } : undefined;
+			wire[id] = {
+				type: "noul",
+				instructions: question.instructions,
+				...(criteria ? { criteria } : {}),
+			};
+			continue;
+		}
+		wire[id] = {
+			type: question.type,
+			instructions: question.instructions,
+			...(question.criteria !== undefined ? { criteria: question.criteria } : {}),
+		};
+	}
+	return wire;
+}

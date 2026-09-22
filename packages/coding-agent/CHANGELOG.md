@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Tool preflight sends catalog yes/no questions to Jev as `noul`. The evaluator rejects `type: "boolean"`, which blocked every tool before it ran.
+
 ## [0.99.41] - 2026-09-22
 
 ### Fixed
