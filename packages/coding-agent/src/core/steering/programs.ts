@@ -101,54 +101,54 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 	const s = (state ?? {}) as Record<string, unknown>;
 
 	switch (checkpointId) {
-		case "JEV-001":
-		case "JEV-002":
-		case "JEV-003": {
+		// Admission. Each checkpoint asks only what its own outcome reads; every question is answerable
+		// from the admission state (`request`, `constraints`, `acceptanceCriteria`).
+		case "JEV-001": {
 			decisions.push(
-				{ kind: "boolean", id: "objective_coherent", instruction: "Is the objective clear and coherent?" },
 				{
 					kind: "boolean",
-					id: "acceptance_complete",
-					instruction: "Are all requested behaviors covered in acceptance criteria?",
+					id: "objective_coherent",
+					instruction:
+						"Does `request` state one coherent objective (its parts do not contradict each other or `constraints`)?",
 				},
 				{
 					kind: "score",
 					id: "ambiguity_severity",
-					instruction: "How severe is remaining ambiguity (0=none, 3=fatal)?",
+					instruction:
+						"How severe is the ambiguity left in `request` together with `acceptanceCriteria` (0=none, 3=cannot start)?",
 					levels: [
-						{ value: 0, description: "No ambiguity" },
-						{ value: 1, description: "Minor ambiguity" },
-						{ value: 2, description: "Significant ambiguity" },
-						{ value: 3, description: "Fatal ambiguity" },
+						{ value: 0, description: "No ambiguity: the intended outcome is clear" },
+						{ value: 1, description: "Minor ambiguity: reasonable defaults resolve it" },
+						{ value: 2, description: "Significant ambiguity: different readings lead to different work" },
+						{ value: 3, description: "Fatal ambiguity: the work cannot start without an answer" },
 					],
 				},
-				{ kind: "boolean", id: "missing_information", instruction: "Is critical information missing?" },
-				{
-					kind: "choice",
-					id: "requested_delivery_class",
-					instruction: "Target deliverable class",
-					options: {
-						code_fix: { description: "Bug fix or correction" },
-						new_feature: { description: "New functional capability" },
-						refactor: { description: "Structural refactoring" },
-						investigation: { description: "Investigation or audit" },
-						release: { description: "Release or packaging" },
-						full_system: { description: "Full system synthesis" },
-					},
-				},
 				{
 					kind: "boolean",
-					id: "capability_sensitive",
-					instruction: "Does this require special tools or capabilities?",
+					id: "missing_information",
+					instruction:
+						"Is information that only the user can supply missing from `request` and `constraints` (not something the repository or tools can reveal)?",
 				},
 			);
-			if (checkpointId === "JEV-003") {
-				decisions.push({
-					kind: "boolean",
-					id: "grounding_sufficient",
-					instruction: "Is repository and domain grounding sufficient?",
-				});
-			}
+			break;
+		}
+
+		case "JEV-002": {
+			decisions.push({
+				kind: "boolean",
+				id: "acceptance_complete",
+				instruction: "Is every behavior `request` asks for covered by at least one entry in `acceptanceCriteria`?",
+			});
+			break;
+		}
+
+		case "JEV-003": {
+			decisions.push({
+				kind: "boolean",
+				id: "grounding_sufficient",
+				instruction:
+					"Does `request` name concrete enough targets (files, components, commands or observable behaviors) to begin investigating the repository?",
+			});
 			break;
 		}
 
@@ -913,29 +913,15 @@ export const STEERING_QUESTION_PACKS: Record<string, SteeringQuestionPack> = {
 		version: "1.0",
 		checkpointIds: ["JEV-001", "JEV-002", "JEV-003"],
 		questions: [
-			{ id: "objective_coherent", kind: "boolean", description: "Is the objective clear and coherent?" },
+			{ id: "objective_coherent", kind: "boolean", description: "Does the request state one coherent objective?" },
+			{ id: "ambiguity_severity", kind: "score", description: "How severe is the remaining ambiguity (0-3)?" },
+			{ id: "missing_information", kind: "boolean", description: "Is user-only information missing?" },
 			{
 				id: "acceptance_complete",
 				kind: "boolean",
-				description: "Are all requested behaviors covered in acceptance criteria?",
+				description: "Do the acceptance criteria cover every requested behavior?",
 			},
-			{
-				id: "ambiguity_severity",
-				kind: "score",
-				description: "How severe is remaining ambiguity (0=none, 3=fatal)?",
-			},
-			{ id: "missing_information", kind: "boolean", description: "Is critical information missing?" },
-			{
-				id: "requested_delivery_class",
-				kind: "choice",
-				description: "Target deliverable class",
-				options: ["code_fix", "new_feature", "refactor", "investigation", "release", "full_system"],
-			},
-			{
-				id: "capability_sensitive",
-				kind: "boolean",
-				description: "Does this require special tools or capabilities?",
-			},
+			{ id: "grounding_sufficient", kind: "boolean", description: "Does the request name concrete targets?" },
 		],
 	},
 	worker_supervision: {

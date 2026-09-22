@@ -799,3 +799,50 @@ describe("next-release hardening", () => {
 		expect(checks.every((check) => check.status !== "failed")).toBe(true);
 	});
 });
+
+describe("Jev request integrity and bounds", () => {
+	it("names the JSON path of non-JSON evidence and never retries a request the harness built wrong", async () => {
+		expect(() => serializeEvaluation({ state: { changedFiles: ["a", undefined] } })).toThrow(
+			/got undefined\) at \$\.state\.changedFiles\[1\]/,
+		);
+		let calls = 0;
+		const adapter = new SystemOneJevAdapter(
+			{
+				evaluate: async (input) => {
+					calls += 1;
+					serializeEvaluation(input);
+					throw new Error("unreachable");
+				},
+			},
+			DEFAULT_SYSTEM_ONE_CONFIG,
+			{ getApiKey: () => "test-key", sleep: async () => {} },
+		);
+		const failure = await adapter
+			.evaluate({ state: { elapsedMs: Number.NaN }, questions: { q: { type: "noul" } } })
+			.catch((error: unknown) => error);
+		expect(failure).toBeInstanceOf(JevAdapterFailure);
+		expect((failure as JevAdapterFailure).kind).toBe("invalid_request");
+		expect((failure as JevAdapterFailure).originalMessage).toContain("$.state.elapsedMs");
+		expect(calls).toBe(1);
+	});
+
+	it("bounds the whole evaluation, retries included, by timeoutMs", async () => {
+		const adapter = new SystemOneJevAdapter(
+			{
+				evaluate: (_input, signal) =>
+					new Promise((_resolve, reject) => {
+						signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+					}),
+			},
+			DEFAULT_SYSTEM_ONE_CONFIG,
+			{ getApiKey: () => "test-key", sleep: async () => {} },
+		);
+		const started = Date.now();
+		const failure = await adapter
+			.evaluate({ state: {}, questions: { q: { type: "noul" } } }, { timeoutMs: 50 })
+			.catch((error: unknown) => error);
+		expect(failure).toBeInstanceOf(JevAdapterFailure);
+		expect((failure as JevAdapterFailure).kind).toBe("timeout");
+		expect(Date.now() - started).toBeLessThan(2_000);
+	});
+});

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { compileDecisionProgramForCheckpoint } from "../steering/programs.ts";
 import { evaluateNoul, noulFromAnswer } from "../system-one/policy.ts";
 import type {
 	LiveWorkerAttempt,
@@ -72,6 +73,22 @@ function requireSupervisionAnswers(raw: Record<string, unknown>): Record<string,
 		answers[id] = noul;
 	}
 	return answers;
+}
+
+/** Semantic supervision stopped for one attempt after repeated evaluation failures; the worker continues. */
+export class WorkerSupervisionPausedError extends Error {
+	readonly attemptId: string;
+	readonly failures: number;
+
+	constructor(attemptId: string, failures: number, cause: unknown) {
+		super(
+			`Worker supervision paused for attempt ${attemptId} after ${failures} failed evaluations; the worker continues unsupervised: ${cause instanceof Error ? cause.message : String(cause)}`,
+			{ cause },
+		);
+		this.name = "WorkerSupervisionPausedError";
+		this.attemptId = attemptId;
+		this.failures = failures;
+	}
 }
 
 /**
@@ -206,62 +223,19 @@ export class WorkerSemanticSupervisor {
 					certId = cert.certificate_id;
 					answers = requireSupervisionAnswers((cert.answers ?? {}) as Record<string, unknown>);
 				} else if (this.decisionEngine) {
-					const program = {
-						schema_version: "2.0",
-						id: `supervision_eval_${Date.now()}`,
-						version: "1.0.0",
-						description: "Live worker supervision assessment",
-						decisions: [
-							{
-								id: "meaningful_progress",
-								kind: "boolean",
-								instruction: "Is the worker making meaningful progress?",
-							},
-							{
-								id: "worker_stuck",
-								kind: "boolean",
-								instruction: "Is the worker stuck or making no progress?",
-							},
-							{
-								id: "work_off_track",
-								kind: "boolean",
-								instruction: "Has the worker drifted off-track from the mission?",
-							},
-							{
-								id: "strategy_repetition",
-								kind: "boolean",
-								instruction: "Is the worker repeating failing strategies without modification?",
-							},
-							{
-								id: "needs_independent_verification",
-								kind: "boolean",
-								instruction: "Is the implementation finished and ready for independent verification?",
-							},
-							{
-								id: "specialist_gap_present",
-								kind: "boolean",
-								instruction: "Does this require a different domain specialist?",
-							},
-							{
-								id: "capability_gap_present",
-								kind: "boolean",
-								instruction: "Is the worker missing an essential capability?",
-							},
-							{
-								id: "external_block_present",
-								kind: "boolean",
-								instruction: "Is the worker blocked by an external dependency or system?",
-							},
-						],
-					};
-
-					const evalRes = await this.decisionEngine.evaluate(program as any, state as any, {
-						consequence: "medium",
-						signal,
-					});
-					answers = requireSupervisionAnswers(
-						(evalRes.results ?? evalRes.answers ?? {}) as Record<string, unknown>,
+					// The same canonical program the steering plane compiles; never an inline copy.
+					const evalRes = await this.decisionEngine.evaluate(
+						compileDecisionProgramForCheckpoint("JEV-WORKER-SUPERVISION", state),
+						state as unknown as Record<string, unknown>,
+						{ consequence: "medium", signal },
 					);
+					// Per decision: the normalized result when present, else the raw answer. An empty
+					// `results` object must not hide populated answers.
+					const merged: Record<string, unknown> = {};
+					for (const id of WORKER_SUPERVISION_DECISION_IDS) {
+						merged[id] = evalRes.results?.[id] ?? evalRes.answers?.[id];
+					}
+					answers = requireSupervisionAnswers(merged);
 				} else {
 					// Unbound supervisor (tests / no plane): local stall/repeat heuristics, never empty answers.
 					answers = {
@@ -280,20 +254,10 @@ export class WorkerSemanticSupervisor {
 				const fails = (this.consecutiveFailures.get(attempt.attemptId) ?? 0) + 1;
 				this.consecutiveFailures.set(attempt.attemptId, fails);
 				if (fails >= this.maxFailures) {
+					// The observer failed, not the worker: stop spending Jev calls on this attempt and let
+					// the worker keep running. The failure still reaches the caller once, below.
 					this.openBreakers.add(attempt.attemptId);
-					return {
-						schema_version: "1.0",
-						signal_id: `sig-${randomUUID().slice(0, 8)}`,
-						objective_id: attempt.objectiveId,
-						task_id: attempt.taskId,
-						attempt_id: attempt.attemptId,
-						action: "stop_and_reroute",
-						certificate_id: "circuit-breaker-tripped",
-						reason_codes: ["supervision_fault", "circuit_breaker_tripped"],
-						created_at: new Date().toISOString(),
-						explanation: "Supervision circuit breaker tripped due to consecutive evaluation failures",
-						summaryEvent: "Worker rerouted · supervisor offline or continuously failing",
-					};
+					throw new WorkerSupervisionPausedError(attempt.attemptId, fails, err);
 				}
 				throw err;
 			}

@@ -120,31 +120,54 @@ export function getEvaluationUsage(value: unknown): EvaluationResponse["usage"] 
 	return value.usage;
 }
 
+/** Evidence the harness built is not JSON. A defect in the request we built, never a provider outage. */
+export class TypeSafeEvidenceError extends Error {
+	readonly path: string;
+
+	constructor(message: string, path: string) {
+		super(`${message} at ${path}`);
+		this.name = "TypeSafeEvidenceError";
+		this.path = path;
+	}
+}
+
+function describeValue(item: unknown): string {
+	if (item === undefined) return "undefined";
+	if (typeof item === "number") return Object.is(item, -0) ? "-0" : String(item);
+	if (typeof item !== "object" || item === null) return typeof item;
+	return Array.isArray(item) ? "array" : (Object.getPrototypeOf(item)?.constructor?.name ?? "object");
+}
+
 /** Reject non-JSON evidence instead of silently deleting or rewriting it during transport. */
 export function serializeEvaluation(value: unknown): string {
 	const ancestors = new Set<object>();
-	const visit = (item: unknown, depth: number): void => {
-		if (depth > 64) throw new Error("TypeSafe JSON evidence exceeds 64 nested levels");
+	const visit = (item: unknown, depth: number, path: string): void => {
+		if (depth > 64) throw new TypeSafeEvidenceError("TypeSafe JSON evidence exceeds 64 nested levels", path);
 		if (item === null || typeof item === "string" || typeof item === "boolean") return;
 		if (typeof item === "number" && Number.isFinite(item) && !Object.is(item, -0)) return;
-		if (typeof item !== "object" || (!Array.isArray(item) && !isPlainRecord(item)) || ancestors.has(item))
-			throw new Error("TypeSafe evidence must be finite, acyclic JSON");
+		if (typeof item !== "object" || (!Array.isArray(item) && !isPlainRecord(item)))
+			throw new TypeSafeEvidenceError(
+				`TypeSafe evidence must be finite, acyclic JSON (got ${describeValue(item)})`,
+				path,
+			);
+		if (ancestors.has(item))
+			throw new TypeSafeEvidenceError("TypeSafe evidence must be finite, acyclic JSON (cycle)", path);
 		ancestors.add(item);
 		for (const key of Reflect.ownKeys(item)) {
 			if (Array.isArray(item) && key === "length") continue;
 			const descriptor = Object.getOwnPropertyDescriptor(item, key);
 			if (typeof key !== "string" || !descriptor?.enumerable || !("value" in descriptor))
-				throw new Error("TypeSafe evidence must be ordinary JSON data");
-			visit(descriptor.value, depth + 1);
+				throw new TypeSafeEvidenceError("TypeSafe evidence must be ordinary JSON data", `${path}.${String(key)}`);
+			visit(descriptor.value, depth + 1, Array.isArray(item) ? `${path}[${key}]` : `${path}.${key}`);
 		}
 		if (
 			Array.isArray(item) &&
 			(Object.keys(item).length !== item.length || Object.keys(item).some((key, index) => key !== String(index)))
 		)
-			throw new Error("TypeSafe JSON arrays must not have holes or extra properties");
+			throw new TypeSafeEvidenceError("TypeSafe JSON arrays must not have holes or extra properties", path);
 		ancestors.delete(item);
 	};
-	visit(value, 0);
+	visit(value, 0, "$");
 	return JSON.stringify(value);
 }
 

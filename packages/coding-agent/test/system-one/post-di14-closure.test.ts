@@ -9,7 +9,10 @@ import { ObjectiveExecutionController } from "../../src/core/objective-execution
 import { projectBoundedCombinedState } from "../../src/core/objective-execution/objective-route-projector.ts";
 import type { TaskRuntimeProjection } from "../../src/core/orchestration/task-runtime.ts";
 import type { LiveWorkerAttempt } from "../../src/core/supervision/types.ts";
-import { WorkerSemanticSupervisor } from "../../src/core/supervision/worker-semantic-supervisor.ts";
+import {
+	WorkerSemanticSupervisor,
+	WorkerSupervisionPausedError,
+} from "../../src/core/supervision/worker-semantic-supervisor.ts";
 import { WorkerSupervisionCoordinator } from "../../src/core/supervision/worker-supervision-coordinator.ts";
 import { captureCandidateSnapshot } from "../../src/core/system-one/candidate-snapshot.ts";
 import { SystemOneController } from "../../src/core/system-one/controller.ts";
@@ -421,7 +424,7 @@ describe("post-DI14 closure gates", () => {
 		expect(result.assuranceProfileUsed).toBeUndefined();
 	});
 
-	it("Gate 8: open breaker issues one stop_and_reroute and then makes no further Jev calls", async () => {
+	it("Gate 8: open breaker pauses supervision for the attempt, makes no further Jev calls, and never cancels the worker", async () => {
 		let calls = 0;
 		const supervisor = new WorkerSemanticSupervisor({
 			debounceMs: 0,
@@ -435,14 +438,27 @@ describe("post-DI14 closure gates", () => {
 				},
 			},
 		});
-		await expect(supervisor.observe({ ...attempt("brk"), outputTail: "1" })).rejects.toThrow(/jev down/);
-		await expect(supervisor.observe({ ...attempt("brk"), outputTail: "2" })).rejects.toThrow(/jev down/);
-		const trip = await supervisor.observe({ ...attempt("brk"), outputTail: "3" });
-		expect(trip?.action).toBe("stop_and_reroute");
+		const cancelled: string[] = [];
+		const errors: unknown[] = [];
+		const coordinator = new WorkerSupervisionCoordinator({
+			supervisor,
+			control: {
+				steerWorker: () => {},
+				cancelWorker: (agentId) => {
+					cancelled.push(agentId);
+				},
+			},
+			onSupervisionError: (error) => errors.push(error),
+		});
+		const observe = (tail: string) => coordinator.observe({ ...attempt("brk"), agentId: "w-brk", outputTail: tail });
+		expect(await observe("1")).toBeUndefined();
+		expect(await observe("2")).toBeUndefined();
+		expect(await observe("3")).toBeUndefined();
 		expect(calls).toBe(3);
-		const after = await supervisor.observe({ ...attempt("brk"), outputTail: "4" });
-		expect(after).toBeUndefined();
+		expect(errors.at(-1)).toBeInstanceOf(WorkerSupervisionPausedError);
+		expect(await observe("4")).toBeUndefined();
 		expect(calls).toBe(3);
+		expect(cancelled).toEqual([]);
 	});
 
 	it("pending root requests include mark_external_block", async () => {

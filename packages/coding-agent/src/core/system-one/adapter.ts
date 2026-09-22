@@ -1,3 +1,4 @@
+import { TypeSafeEvidenceError } from "../review/typesafe-contract.ts";
 import { SYSTEM_ONE_PINNED_MODEL } from "./catalog.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import { containsCredential } from "./projector.ts";
@@ -51,6 +52,7 @@ export interface SystemOneReviewerLike {
 export type TypeSafeReviewerLike = SystemOneReviewerLike;
 
 export type JevFailureKind =
+	| "invalid_request"
 	| "invalid_response"
 	| "unavailable"
 	| "rate_limit"
@@ -72,6 +74,7 @@ export class JevAdapterFailure extends Error {
 
 export function classifyJevFailure(error: unknown, aborted: boolean): JevFailureKind {
 	if (aborted) return "cancelled";
+	if (error instanceof TypeSafeEvidenceError) return "invalid_request";
 	const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
 	if (/Model drift detected/i.test(text)) return "model_drift";
 	if (/AbortError|aborted/i.test(text)) return "cancelled";
@@ -165,8 +168,16 @@ export class SystemOneJevAdapter implements JevAdapter {
 		let attempts = 0;
 		const maxAttempts = 3;
 		let lastError: unknown;
+		// One deadline bounds the whole evaluation, retries and backoff included.
+		const timeoutMs = options?.timeoutMs;
+		const deadline = timeoutMs !== undefined ? AbortSignal.timeout(timeoutMs) : undefined;
+		const signal =
+			deadline && options?.signal ? AbortSignal.any([options.signal, deadline]) : (deadline ?? options?.signal);
+		const timedOut = () =>
+			new JevAdapterFailure("timeout", `Jev evaluation exceeded its ${timeoutMs} ms budget`, impact);
 
 		while (attempts < maxAttempts) {
+			if (deadline?.aborted && !options?.signal?.aborted) throw timedOut();
 			options?.signal?.throwIfAborted();
 			attempts++;
 
@@ -177,7 +188,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 						state: input.state,
 						questions: input.questions,
 					},
-					options?.signal,
+					signal,
 				);
 
 				const returnedModel = result.response.model;
@@ -215,6 +226,11 @@ export class SystemOneJevAdapter implements JevAdapter {
 				if (error instanceof JevAdapterFailure) {
 					throw error;
 				}
+				// The request we built is not JSON: retrying sends the same defect again.
+				if (error instanceof TypeSafeEvidenceError) {
+					throw new JevAdapterFailure("invalid_request", error.message, impact);
+				}
+				if (deadline?.aborted && !options?.signal?.aborted) throw timedOut();
 				// If model drift was detected, do not retry
 				if (error instanceof Error && error.message.includes("Model drift detected")) {
 					throw error;

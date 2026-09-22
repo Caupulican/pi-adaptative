@@ -889,30 +889,27 @@ export class ObjectiveExecutionController {
 			// PH-110..PH-112: Objective admission certificates
 			if (this.deps.steeringPlane && !this.admittedObjectives.has(objectiveId)) {
 				this.admittedObjectives.add(objectiveId);
-				const c1 = await this.deps.steeringPlane.requireCertificate(
-					"JEV-001",
-					{
-						objectiveId,
-						request: runtime.objectives[objectiveId]?.objective?.description ?? objectiveId,
-					},
-					{ objectiveId, signal },
-				);
-				const c2 = await this.deps.steeringPlane.requireCertificate(
-					"JEV-002",
-					{
-						objectiveId,
-						acceptanceCriteria: runtime.objectives[objectiveId]?.objective?.acceptanceCriteria ?? [],
-					},
-					{ objectiveId, signal },
-				);
-				const c3 = await this.deps.steeringPlane.requireCertificate(
-					"JEV-003",
-					{
-						objectiveId,
-						groundingState: "intake_verified",
-					},
-					{ objectiveId, signal },
-				);
+				// One admission state for all three checkpoints: the objective as the runtime holds it.
+				const objective = runtime.objectives[objectiveId]?.objective;
+				const admissionState = {
+					objectiveId,
+					title: objective?.title ?? objectiveId,
+					request: objective?.description ?? objectiveId,
+					constraints: objective?.constraints ?? [],
+					acceptanceCriteria: objective?.acceptanceCriteria ?? [],
+				};
+				const c1 = await this.deps.steeringPlane.requireCertificate("JEV-001", admissionState, {
+					objectiveId,
+					signal,
+				});
+				const c2 = await this.deps.steeringPlane.requireCertificate("JEV-002", admissionState, {
+					objectiveId,
+					signal,
+				});
+				const c3 = await this.deps.steeringPlane.requireCertificate("JEV-003", admissionState, {
+					objectiveId,
+					signal,
+				});
 				this.admissionCerts.set(objectiveId, [c1.certificate_id, c2.certificate_id, c3.certificate_id]);
 			}
 
