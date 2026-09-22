@@ -7,7 +7,12 @@ import { retryTransientWin32Sync } from "./win32-transient-fs.ts";
  * transient backoff. POSIX removes once.
  */
 export function removeTreeSync(targetPath: string): void {
-	retryTransientWin32Sync(() => {
-		rmSync(targetPath, { recursive: true, force: true });
-	});
+	// A loaded Windows runner can keep the tree locked for seconds, not milliseconds.
+	retryTransientWin32Sync(
+		() => {
+			rmSync(targetPath, { recursive: true, force: true });
+		},
+		undefined,
+		{ attempts: 20, maxMs: 500 },
+	);
 }

@@ -137,6 +137,9 @@ async function twoCompatibleIdleSpecialists(context: ReuseHarness): Promise<[str
 		},
 	};
 	const second = await context.harness.session.runWorkerDelegationOnce(independent);
+	if (!second.record) {
+		throw new Error(`second reviewer produced no lane record: ${second.started ? "started" : second.skipReason}`);
+	}
 	const secondAgentId = agentIdOf(assertCompleted(second.record, "second reviewer")) ?? "";
 	expect(secondAgentId).not.toBe(firstAgentId);
 	expect(Object.keys(context.agents())).toHaveLength(2);

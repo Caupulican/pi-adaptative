@@ -10,6 +10,7 @@
 - The live user request is above AGENTS.md and standing user rules. Startup rule text comes only from instruction files settings and scoped access already admitted. When the request contradicts those rules and does not explicitly override them, the model is told to ask the user which holds. An explicit override follows the request. A full handoff lets System One settle the conflict on the request or on the written rule.
 - A dispatched lane's bash follows the orchestrator's decision. Git push is refused there only when the orchestrator bound the dispatch to local commits. The lane still cannot move the integration branch or escape its worktree.
 - The decision-graph clock is the current visit and restarts when work resumes. An open goal reads "not closed" until the checks are done.
+- Recovery-log durability waits until the worker acknowledges the write. Windows directory cleanup keeps retrying a lock for several seconds. The RPC listener wait matches a slow session start.
 
 ## [0.99.42] - 2026-09-22
 

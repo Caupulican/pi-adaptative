@@ -31,15 +31,21 @@ export async function retryTransientWin32(operation: () => void | Promise<void>)
 	}
 }
 
-export function retryTransientWin32Sync(operation: () => void, beforeAttempt?: () => void): void {
-	for (let attempt = 0; attempt <= WIN32_TRANSIENT_RETRY_ATTEMPTS; attempt++) {
+export function retryTransientWin32Sync(
+	operation: () => void,
+	beforeAttempt?: () => void,
+	bounds?: { attempts?: number; maxMs?: number },
+): void {
+	const attempts = bounds?.attempts ?? WIN32_TRANSIENT_RETRY_ATTEMPTS;
+	const maxMs = bounds?.maxMs ?? WIN32_TRANSIENT_RETRY_MAX_MS;
+	for (let attempt = 0; attempt <= attempts; attempt++) {
 		beforeAttempt?.();
 		try {
 			operation();
 			return;
 		} catch (err) {
-			if (!isTransientWin32FsError(err) || attempt === WIN32_TRANSIENT_RETRY_ATTEMPTS) throw err;
-			const backoffMs = Math.min(WIN32_TRANSIENT_RETRY_MIN_MS * 2 ** attempt, WIN32_TRANSIENT_RETRY_MAX_MS);
+			if (!isTransientWin32FsError(err) || attempt === attempts) throw err;
+			const backoffMs = Math.min(WIN32_TRANSIENT_RETRY_MIN_MS * 2 ** attempt, maxMs);
 			sleepMs(backoffMs);
 		}
 	}

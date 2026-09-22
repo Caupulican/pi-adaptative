@@ -96,7 +96,7 @@ describe("ToolRecoveryLogger", () => {
 
 		const record = logger.recordToolArgumentValidation(createEvent("repaired"));
 		expect(record?.recordId).toBe("session-1:0");
-		await logger.flush(1_000);
+		await logger.drain();
 
 		const lines = readFileSync(join(dir, "state", "tool-recovery-events.jsonl"), "utf-8")
 			.trim()
@@ -115,7 +115,7 @@ describe("ToolRecoveryLogger", () => {
 		const logger = createLogger(dir);
 
 		logger.recordToolArgumentValidation(createEvent("bounced"));
-		await logger.flush(1_000);
+		await logger.drain();
 
 		const corpus = JSON.parse(readFileSync(join(dir, "state", "failure-corpus.jsonl"), "utf-8").trim()) as unknown;
 		expect(corpus).toMatchObject({
@@ -149,7 +149,7 @@ describe("ToolRecoveryLogger", () => {
 			details: createToolFailureResult(failure).details,
 		});
 		expect(record).toMatchObject({ kind: "tool_execution_failure", phase: "provisioning" });
-		await logger.flush(1_000);
+		await logger.drain();
 
 		const corpus = JSON.parse(readFileSync(join(dir, "state", "failure-corpus.jsonl"), "utf-8").trim()) as unknown;
 		expect(corpus).toMatchObject({
