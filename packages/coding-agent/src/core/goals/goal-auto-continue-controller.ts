@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import type {
 	AgentSessionEvent,
@@ -20,6 +21,17 @@ export interface GoalAutoContinueControllerDeps {
 	markGoalToolUnavailable(): void;
 	emit(event: AgentSessionEvent): void;
 	onContinuationActivity?(): void;
+}
+
+/**
+ * The continuation waits for the foreground and is itself foreground work.
+ * Its own wait and prompt run inside this store so they do not observe that bit.
+ * Callers outside the store still see the armed continuation.
+ */
+const ownIdleContinuationAdmission = new AsyncLocalStorage<true>();
+
+export function isOwnIdleContinuationAdmission(): boolean {
+	return ownIdleContinuationAdmission.getStore() === true;
 }
 
 /** Owns the single-flight goal continuation loop and its foreground-idle timer. */
@@ -78,6 +90,10 @@ export class GoalAutoContinueController {
 		if (this._isContinuing) return this.skippedResult(options, "already_continuing");
 		const initialGuard = this.unavailableResult(options);
 		if (initialGuard) return initialGuard;
+		return ownIdleContinuationAdmission.run(true, () => this.continueAdmitted(options));
+	}
+
+	private async continueAdmitted(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
 		this._isContinuing = true;
 		this.deps.onContinuationActivity?.();
 		try {

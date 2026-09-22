@@ -126,6 +126,7 @@ import { ForegroundRecoveryController, type ForegroundSubmissionLease } from "./
 import { ForegroundTerminalHandoffController } from "./foreground-terminal-handoff-controller.ts";
 import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from "./gateways/channel-provider.ts";
 import { reportGithubOriginPinForSession } from "./github-origin-pin.ts";
+import { isOwnIdleContinuationAdmission } from "./goals/goal-auto-continue-controller.ts";
 import { recordObjectiveClarification } from "./goals/goal-clarification-log.ts";
 import { DEFAULT_GOAL_WORKER_WAIT_MS } from "./goals/goal-continuation-defaults.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
@@ -1146,7 +1147,7 @@ export class AgentSession {
 						.getLaneRecords()
 						.some((lane) => lane.status === "queued" || lane.status === "running") ||
 					hasRunningBackgroundedToolCall(this._backgroundToolTasks.list()) ||
-					this._backgroundLanes.hasPendingIdleContinuation()
+					(!isOwnIdleContinuationAdmission() && this._backgroundLanes.hasPendingIdleContinuation())
 				);
 			},
 			prepareRun: async () => {

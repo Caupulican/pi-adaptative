@@ -28,6 +28,7 @@
 - The inner completion transaction receives the objective's bug-fix flag. Commit and tag use the repo's own signer, with a tag message so an annotated tag does not open an editor. A push goes to the upstream frozen when that push was authorized. A detached HEAD or a branch with no upstream is not pushed. The session binds npm publish only for a public package. A repository deploy script is not a deployment adapter.
 - A bug-fix match is the word `bug`, `bugs`, or `bugfix`. `debug` is not a bug fix. `npm publish` does not run package lifecycle scripts. Deploy proof is an independent adapter observation. Deploy stdout is not proof.
 - `fix`, `implement`, `repair`, `refactor`, and `build` do not grant a commit. Automatic git delivery stages objective-owned paths only, refuses a dirty admission baseline and any later unowned path, and proves the commit parent and tree. A push without a commit fails while the candidate is dirty. A tag requires an exact name. A requested GitHub release without a trusted adapter fails `github_release_unsupported`. The terminal hook is read-only and runs before complete is stored.
+- Goal auto-continue no longer counts its own armed continuation as foreground occupancy. That bit made the idle wait poll a resolved promise, so the event loop never read shell output and the destructive chaos run hit the job timeout.
 
 ## [0.99.38] - 2026-09-21
 
