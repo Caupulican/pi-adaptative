@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
@@ -351,7 +351,7 @@ describe("model capability auto-detection", () => {
 					models: [{ id: "mid-model", contextWindow: 16_384 }],
 					settings: { researchLane: { enabled: true }, autonomy: { mode: "balanced" } },
 				});
-				expect(harness.tempDir.startsWith(longTempRoot)).toBe(true);
+				expect(harness.tempDir.startsWith(realpathSync.native(longTempRoot))).toBe(true);
 				expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(10_240);
 				expect(harness.session.systemPrompt).toContain("Pi-Adaptative bounded coding agent");
 				expect(harness.session.systemPrompt).not.toContain("Current working directory:");
