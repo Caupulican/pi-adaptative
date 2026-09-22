@@ -11,10 +11,21 @@
 import { execFile } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { availableParallelism, freemem } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { extname, isAbsolute, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
+import { Worker } from "node:worker_threads";
 import { type NoulBand, noulBand, settledAnswer } from "../decision/noul.ts";
 import { defaultFffSearchBackend } from "../tools/fff-search-backend.ts";
 import { resolveManagedSearchTool } from "../tools/managed-search-tool.ts";
+import {
+	type ArenaBuffers,
+	arenaUnitFeatures,
+	buildArena,
+	type ScoringParameters,
+	ScoringScratch,
+	scoreProbe,
+	type UnitFeatures,
+} from "./code-unit-arena.ts";
 
 export interface CodeUnit {
 	readonly path: string;
@@ -90,17 +101,44 @@ function indentBody(text: string, start: number, indent: string): string {
 	return body.join("\n").trimEnd();
 }
 
+/** Token kinds of the jscpd-style stream: identifiers and literals are normalized, punctuation is kept. */
+const IDENTIFIER = 0;
+const LITERAL = 1;
+const PUNCT = 2;
+
+/** One pass of the tokenizer over a whole file: its code tokens, and the spans that are quoted data. */
+interface FileTokens {
+	readonly starts: number[];
+	readonly kinds: number[];
+	readonly texts: string[];
+	/** String literals and comments: a declaration starting inside one is data, not a unit. */
+	readonly quoted: [number, number][];
+}
+
+const TOKEN_PATTERN =
+	/\/\/[^\n]*|\/\*[\s\S]*?\*\/|(?<=^|\n)[ \t]*#[^\n]*|\s+|`(?:\\[\s\S]|[^`\\])*`|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|\d[\w.]*|[A-Za-z_$][\w$]*|[^\s]/g;
+
 /**
- * Spans of `text` that are string literals or comments, from the same tokenizer the fingerprints use.
- * A declaration starting inside one is code quoted as data (a test fixture, a prompt), not a unit.
+ * jscpd-style tokens, once per source: comments and whitespace dropped, identifiers and literals kept
+ * with their kind so fingerprints can erase names and values. No vocabulary is involved.
  */
-function quotedSpans(text: string): [number, number][] {
-	const spans: [number, number][] = [];
+function tokenizeFile(text: string): FileTokens {
+	const tokens: FileTokens = { starts: [], kinds: [], texts: [], quoted: [] };
 	for (const match of text.matchAll(TOKEN_PATTERN)) {
 		const token = match[0];
-		if (/^["'`]|^\/\/|^\/\*|^[ \t]*#/.test(token)) spans.push([match.index ?? 0, (match.index ?? 0) + token.length]);
+		const at = match.index ?? 0;
+		if (token.startsWith("//") || token.startsWith("/*") || /^[ \t]*#/.test(token)) {
+			tokens.quoted.push([at, at + token.length]);
+			continue;
+		}
+		if (/^\s/.test(token)) continue;
+		const kind = /^[A-Za-z_$]/.test(token) ? IDENTIFIER : /^["'`\d]/.test(token) ? LITERAL : PUNCT;
+		if (kind === LITERAL && /^["'`]/.test(token)) tokens.quoted.push([at, at + token.length]);
+		tokens.starts.push(at);
+		tokens.kinds.push(kind);
+		tokens.texts.push(token);
 	}
-	return spans;
+	return tokens;
 }
 
 function insideSpan(spans: readonly [number, number][], index: number): boolean {
@@ -116,27 +154,43 @@ function insideSpan(spans: readonly [number, number][], index: number): boolean 
 	return false;
 }
 
-/** Every function-like unit declared in `text`, with a body long enough to carry a responsibility. */
-export function extractCodeUnits(path: string, text: string): CodeUnit[] {
-	const units: CodeUnit[] = [];
+/** A unit together with the character span it occupies in its file's text. */
+interface LocatedUnit extends CodeUnit {
+	readonly start: number;
+	readonly end: number;
+}
+
+function locateCodeUnits(path: string, text: string, tokens: FileTokens): LocatedUnit[] {
+	const units: LocatedUnit[] = [];
 	const seen = new Set<number>();
-	const quoted = quotedSpans(text);
 	for (const { pattern, body } of DECLARATIONS) {
 		for (const match of text.matchAll(pattern)) {
 			const index = match.index ?? 0;
 			if (seen.has(index)) continue;
 			// The declaration keyword itself, past any indentation the pattern consumed.
 			const keywordAt = index + (match[0].length - match[0].trimStart().length);
-			if (insideSpan(quoted, keywordAt)) continue;
+			if (insideSpan(tokens.quoted, keywordAt)) continue;
 			const name = body === "indent" ? match[2] : match[1];
 			if (!name || NOT_A_NAME.has(name)) continue;
 			const code = body === "indent" ? indentBody(text, index, match[1] ?? "") : braceBody(text, index);
 			if (!code || code.split("\n").length < MIN_UNIT_LINES) continue;
 			seen.add(index);
-			units.push({ path, name, line: text.slice(0, index).split("\n").length, code });
+			units.push({
+				path,
+				name,
+				line: text.slice(0, index).split("\n").length,
+				code,
+				start: index,
+				end: index + code.length,
+			});
 		}
 	}
 	return units;
+}
+
+/** Every function-like unit declared in `text`, with a body long enough to carry a responsibility. */
+export function extractCodeUnits(path: string, text: string): CodeUnit[] {
+	return locateCodeUnits(path, text, tokenizeFile(text)).map(({ start: _start, end: _end, ...unit }) => unit);
 }
 
 /** Functions an edit or write introduces: present in the new text, absent verbatim from the old. */
@@ -160,57 +214,6 @@ export function newCodeUnits(toolName: string, args: unknown, cwd: string): Code
 	for (const { oldText, newText } of pieces)
 		for (const unit of extractCodeUnits(path, newText)) if (!oldText.includes(unit.code)) units.push(unit);
 	return units.slice(0, MAX_NEW_UNITS);
-}
-
-/**
- * jscpd-style tokens: comments and whitespace dropped, every identifier normalized to `I` and every
- * literal to `L`, so two units with the same structure compare equal however their names are spelled.
- * No vocabulary is involved; the only grammar is what separates identifiers, literals and punctuation.
- */
-interface Token {
-	readonly kind: "identifier" | "literal" | "punct";
-	readonly text: string;
-}
-
-const TOKEN_PATTERN =
-	/\/\/[^\n]*|\/\*[\s\S]*?\*\/|(?<=^|\n)[ \t]*#[^\n]*|\s+|`(?:\\[\s\S]|[^`\\])*`|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|\d[\w.]*|[A-Za-z_$][\w$]*|[^\s]/g;
-
-function tokenize(code: string): Token[] {
-	const tokens: Token[] = [];
-	for (const match of code.matchAll(TOKEN_PATTERN)) {
-		const text = match[0];
-		if (/^\s/.test(text) || text.startsWith("//") || text.startsWith("/*") || /^[ \t]*#/.test(text)) continue;
-		if (/^[A-Za-z_$]/.test(text)) tokens.push({ kind: "identifier", text });
-		else if (/^["'`\d]/.test(text)) tokens.push({ kind: "literal", text });
-		else tokens.push({ kind: "punct", text });
-	}
-	return tokens;
-}
-
-/** Window length of the normalized-token fingerprints, as a clone scanner's minimum match. */
-const FINGERPRINT_WINDOW = 8;
-
-/** Hashed windows of the normalized token stream: the unit's structure with names and values erased. */
-function structuralFingerprints(code: string): Set<string> {
-	const normalized = tokenize(code).map((token) =>
-		token.kind === "identifier" ? "I" : token.kind === "literal" ? "L" : token.text,
-	);
-	const windows = new Set<string>();
-	for (let index = 0; index + FINGERPRINT_WINDOW <= normalized.length; index += 1)
-		windows.add(normalized.slice(index, index + FINGERPRINT_WINDOW).join(" "));
-	return windows;
-}
-
-/** The operations a unit performs: identifiers immediately followed by `(` in its token stream. */
-function calledNames(code: string, ownName?: string): Set<string> {
-	const tokens = tokenize(code);
-	const found = new Set<string>();
-	for (let index = 0; index + 1 < tokens.length; index += 1) {
-		const token = tokens[index];
-		if (token?.kind === "identifier" && tokens[index + 1]?.text === "(" && token.text !== ownName)
-			found.add(token.text);
-	}
-	return found;
 }
 
 /** Source files of the same language family as `path`, so the index never mixes docs or lockfiles in. */
@@ -257,21 +260,6 @@ export const harnessFileLister: FileLister = async (root, glob, signal) => {
 	}
 };
 
-interface IndexedUnit extends CodeUnit {
-	readonly calls: ReadonlySet<string>;
-	readonly fingerprints: ReadonlySet<string>;
-	readonly tokenCount: number;
-}
-
-function indexUnit(unit: CodeUnit): IndexedUnit {
-	return {
-		...unit,
-		calls: calledNames(unit.code, unit.name),
-		fingerprints: structuralFingerprints(unit.code),
-		tokenCount: tokenize(unit.code).length,
-	};
-}
-
 export interface DuplicateCandidate {
 	readonly unit: CodeUnit;
 	/** IDF-weighted cosine of the two units' calls. */
@@ -287,6 +275,9 @@ const MIN_SIMILARITY = 0.35;
  * minimum jscpd and the repository clone gate use.
  */
 const STRUCTURAL_MIN_TOKENS = 50;
+/** Window length of the normalized-token fingerprints, as a clone scanner's minimum match. */
+const FINGERPRINT_WINDOW = 8;
+
 /**
  * Scale a base amount of work to this machine: a reference host of 8 cores with 4 GiB free runs the
  * base; more cores and memory run more (up to double), a constrained host runs less (down to half).
@@ -301,23 +292,135 @@ export function scaledToMachine(base: number): number {
 /** Concurrent Jev requests a scan keeps in flight; Jev evaluates each request's questions in parallel too. */
 export const JEV_SCAN_CONCURRENCY = scaledToMachine(16);
 
+/** String interning: every distinct string gets a stable small integer for the arena. */
+class Interner {
+	private readonly ids = new Map<string, number>();
+
+	id(value: string): number {
+		let id = this.ids.get(value);
+		if (id === undefined) {
+			id = this.ids.size;
+			this.ids.set(value, id);
+		}
+		return id;
+	}
+
+	/** The id if already interned, otherwise -1: a lookup that never grows the vocabulary. */
+	peek(value: string): number {
+		return this.ids.get(value) ?? -1;
+	}
+
+	get size(): number {
+		return this.ids.size;
+	}
+}
+
+/** 32-bit FNV-1a over a window of symbol ids. */
+function hashWindow(symbols: readonly number[], from: number): number {
+	let hash = 0x811c9dc5;
+	for (let index = from; index < from + FINGERPRINT_WINDOW; index += 1) {
+		hash ^= symbols[index]!;
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return hash | 0;
+}
+
+function sortedUnique(values: number[]): Int32Array {
+	const sorted = Int32Array.from(values).sort();
+	let length = 0;
+	for (let index = 0; index < sorted.length; index += 1)
+		if (index === 0 || sorted[index] !== sorted[length - 1]) sorted[length++] = sorted[index]!;
+	return sorted.slice(0, length);
+}
+
+/** The shared vocabularies features are expressed in. */
+interface Vocabularies {
+	readonly calls: Interner;
+	readonly symbols: Interner;
+	readonly paths: Interner;
+	readonly names: Interner;
+	readonly codes: Interner;
+}
+
+function createVocabularies(): Vocabularies {
+	const symbols = new Interner();
+	symbols.id("\u0000identifier");
+	symbols.id("\u0000literal");
+	return { calls: new Interner(), symbols, paths: new Interner(), names: new Interner(), codes: new Interner() };
+}
+
 /**
- * Every function-like unit of one language family in the repository, with its calls and structural
- * fingerprints, refreshed incrementally by file mtime. Call rarity is the exact document frequency
- * across the indexed units, so what makes a call distinctive is measured, never listed by hand.
+ * A unit's features from its file's token stream (no second read or tokenization of the source): the
+ * calls it makes (identifiers followed by `(`), its normalized-token window hashes, and its size.
+ * `grow` false looks calls up without adding them, for a probe that is not part of the index.
+ */
+function unitFeatures(unit: LocatedUnit, tokens: FileTokens, vocabularies: Vocabularies, grow: boolean): UnitFeatures {
+	let from = 0;
+	let to = tokens.starts.length;
+	// First token at or after the unit's start, first at or after its end.
+	for (let low = 0, high = tokens.starts.length; low < high; ) {
+		const middle = (low + high) >> 1;
+		if (tokens.starts[middle]! < unit.start) low = middle + 1;
+		else high = middle;
+		from = low;
+	}
+	for (let low = from, high = tokens.starts.length; low < high; ) {
+		const middle = (low + high) >> 1;
+		if (tokens.starts[middle]! < unit.end) low = middle + 1;
+		else high = middle;
+		to = low;
+	}
+	if (from >= tokens.starts.length) to = from;
+	const calls: number[] = [];
+	const symbols: number[] = [];
+	for (let index = from; index < to; index += 1) {
+		const kind = tokens.kinds[index]!;
+		const text = tokens.texts[index]!;
+		symbols.push(kind === IDENTIFIER ? 0 : kind === LITERAL ? 1 : vocabularies.symbols.id(text));
+		if (kind === IDENTIFIER && index + 1 < to && tokens.texts[index + 1] === "(" && text !== unit.name) {
+			const call = grow ? vocabularies.calls.id(text) : vocabularies.calls.peek(text);
+			// An unseen call keeps an id past the vocabulary, which the arena weighs as the rarest possible.
+			calls.push(call >= 0 ? call : vocabularies.calls.size + calls.length);
+		}
+	}
+	const windows: number[] = [];
+	for (let index = 0; index + FINGERPRINT_WINDOW <= symbols.length; index += 1)
+		windows.push(hashWindow(symbols, index));
+	return {
+		calls: sortedUnique(calls),
+		windows: sortedUnique(windows),
+		tokenCount: to - from,
+		pathId: vocabularies.paths.id(unit.path),
+		nameId: vocabularies.names.id(unit.name),
+		codeId: vocabularies.codes.id(unit.code),
+	};
+}
+
+const SCORING: ScoringParameters = {
+	minSimilarity: MIN_SIMILARITY,
+	structuralMinTokens: STRUCTURAL_MIN_TOKENS,
+	limit: MAX_CANDIDATES,
+};
+
+/**
+ * Every function-like unit of one language family in the repository, held as a feature arena. Each
+ * source is read and tokenized once, and again only when its mtime changes. Call rarity is the exact
+ * document frequency across the indexed units, so what makes a call distinctive is measured, never
+ * listed by hand. Scoring touches postings, never all pairs.
  */
 export class SemanticUnitIndex {
 	private readonly root: string;
 	private readonly glob: string;
 	private readonly lister: FileLister;
-	private readonly files = new Map<string, { mtimeMs: number; units: readonly IndexedUnit[] }>();
-	private documentFrequency = new Map<string, number>();
-	private unitCount = 0;
-	/** Inverted postings: which units make each call, and which contain each structural window. */
-	private callPostings = new Map<string, IndexedUnit[]>();
-	private windowPostings = new Map<string, IndexedUnit[]>();
-	/** Identity set of indexed units, so a scan reuses their tokens instead of re-reading them. */
-	private indexed = new Set<CodeUnit>();
+	private readonly vocabularies = createVocabularies();
+	private readonly files = new Map<
+		string,
+		{ mtimeMs: number; units: readonly LocatedUnit[]; features: readonly UnitFeatures[] }
+	>();
+	private units: LocatedUnit[] = [];
+	private positions = new Map<CodeUnit, number>();
+	private arena: ArenaBuffers = buildArena([], 0);
+	private scratch = new ScoringScratch(0);
 
 	constructor(root: string, glob: string, lister: FileLister) {
 		this.root = root;
@@ -327,7 +430,12 @@ export class SemanticUnitIndex {
 
 	async refresh(signal?: AbortSignal): Promise<void> {
 		const listed = new Set(await this.lister(this.root, this.glob, signal));
-		for (const path of this.files.keys()) if (!listed.has(path)) this.files.delete(path);
+		let changed = false;
+		for (const path of this.files.keys())
+			if (!listed.has(path)) {
+				this.files.delete(path);
+				changed = true;
+			}
 		await Promise.all(
 			[...listed].map(async (path) => {
 				const absolute = isAbsolute(path) ? path : join(this.root, path);
@@ -335,158 +443,53 @@ export class SemanticUnitIndex {
 					const { mtimeMs } = await stat(absolute);
 					if (this.files.get(path)?.mtimeMs === mtimeMs) return;
 					const text = await readFile(absolute, "utf8");
-					this.files.set(path, { mtimeMs, units: extractCodeUnits(path, text).map(indexUnit) });
+					const tokens = tokenizeFile(text);
+					const units = locateCodeUnits(path, text, tokens);
+					const features = units.map((unit) => unitFeatures(unit, tokens, this.vocabularies, true));
+					this.files.set(path, { mtimeMs, units, features });
+					changed = true;
 				} catch {
-					this.files.delete(path);
+					if (this.files.delete(path)) changed = true;
 				}
 			}),
 		);
-		const frequency = new Map<string, number>();
-		const callPostings = new Map<string, IndexedUnit[]>();
-		const windowPostings = new Map<string, IndexedUnit[]>();
-		let count = 0;
-		for (const { units } of this.files.values())
-			for (const unit of units) {
-				count += 1;
-				for (const call of unit.calls) {
-					frequency.set(call, (frequency.get(call) ?? 0) + 1);
-					const posting = callPostings.get(call);
-					if (posting) posting.push(unit);
-					else callPostings.set(call, [unit]);
-				}
-				for (const window of unit.fingerprints) {
-					const posting = windowPostings.get(window);
-					if (posting) posting.push(unit);
-					else windowPostings.set(window, [unit]);
-				}
-			}
-		this.documentFrequency = frequency;
-		this.unitCount = count;
-		this.callPostings = callPostings;
-		this.windowPostings = windowPostings;
-		this.squaredIdf.clear();
-		this.norms.clear();
-		this.indexed = new Set([...this.files.values()].flatMap(({ units }) => units));
+		if (!changed && this.units.length > 0) return;
+		const units: LocatedUnit[] = [];
+		const features: UnitFeatures[] = [];
+		for (const file of this.files.values()) {
+			units.push(...file.units);
+			features.push(...file.features);
+		}
+		this.units = units;
+		this.positions = new Map(units.map((unit, index) => [unit, index]));
+		this.arena = buildArena(features, this.vocabularies.calls.size);
+		this.scratch = new ScoringScratch(units.length);
 	}
 
 	/** All indexed units, for a whole-repository scan. */
-	allUnits(): CodeUnit[] {
-		return [...this.files.values()].flatMap(({ units }) => units);
+	allUnits(): readonly CodeUnit[] {
+		return this.units;
 	}
 
-	/**
-	 * A posting shared by more than this share of all units carries no identity: its call or window is
-	 * everywhere. Measured from the index itself, so what counts as common is never a list.
-	 */
-	private informative(posting: readonly IndexedUnit[]): boolean {
-		return posting.length <= Math.max(8, Math.sqrt(this.unitCount) * 2);
-	}
-
-	private readonly squaredIdf = new Map<string, number>();
-
-	/** Squared inverse document frequency of a call, cached until the next refresh. */
-	private weight(call: string): number {
-		let value = this.squaredIdf.get(call);
-		if (value === undefined) {
-			value = Math.log((this.unitCount + 1) / ((this.documentFrequency.get(call) ?? 0) + 1)) ** 2;
-			this.squaredIdf.set(call, value);
-		}
-		return value;
-	}
-
-	/** Sum of a unit's squared call weights: the norm in the IDF cosine, cached per indexed unit. */
-	private readonly norms = new Map<CodeUnit, number>();
-
-	private norm(unit: IndexedUnit): number {
-		let value = this.norms.get(unit);
-		if (value === undefined) {
-			value = 0;
-			for (const call of unit.calls) value += this.weight(call);
-			this.norms.set(unit, value);
-		}
-		return value;
-	}
-
-	/** IDF-weighted cosine of the two units' calls, from the accumulated dot and the cached norms. */
-	private cosine(
-		probe: IndexedUnit,
-		probeNorm: number,
-		existing: IndexedUnit,
-		informativeDot: ReadonlyMap<IndexedUnit, number>,
-		commonCalls: readonly string[],
-	): number {
-		let dot = informativeDot.get(existing) ?? 0;
-		for (const call of commonCalls) if (existing.calls.has(call)) dot += this.weight(call);
-		const existingNorm = this.norm(existing);
-		return probeNorm === 0 || existingNorm === 0 || probe.calls.size === 0
-			? 0
-			: dot / Math.sqrt(probeNorm * existingNorm);
+	/** The arena and its units, for scan workers. */
+	snapshot(): { readonly arena: ArenaBuffers; readonly units: readonly CodeUnit[] } {
+		return { arena: this.arena, units: this.units };
 	}
 
 	/** The indexed units most similar to `unit`, by calls or by structure, excluding the unit itself. */
 	candidates(unit: CodeUnit, limit = MAX_CANDIDATES): DuplicateCandidate[] {
-		const probe = this.indexed.has(unit) ? (unit as IndexedUnit) : indexUnit(unit);
-		const pool = new Set<IndexedUnit>();
-		const informativeCalls: { call: string; posting: IndexedUnit[] }[] = [];
-		// Calls too common to post from: their exact share of the dot product is checked per unit below.
-		const commonCalls: string[] = [];
-		for (const call of probe.calls) {
-			const posting = this.callPostings.get(call);
-			if (!posting) continue;
-			if (this.informative(posting)) informativeCalls.push({ call, posting });
-			else commonCalls.push(call);
+		const self = this.positions.get(unit) ?? -1;
+		let probe: UnitFeatures;
+		if (self >= 0) probe = arenaUnitFeatures(this.arena, self);
+		else {
+			const located: LocatedUnit = { ...unit, start: 0, end: unit.code.length };
+			probe = unitFeatures(located, tokenizeFile(unit.code), this.vocabularies, false);
 		}
-		// The dot product of the IDF cosine, accumulated from the postings instead of per comparison.
-		const informativeDot = new Map<IndexedUnit, number>();
-		for (const { call, posting } of informativeCalls) {
-			const weight = this.weight(call);
-			for (const existing of posting) informativeDot.set(existing, (informativeDot.get(existing) ?? 0) + weight);
-		}
-		// Every unit sharing an informative call is a call candidate: its cosine is exact from the dot.
-		for (const existing of informativeDot.keys()) pool.add(existing);
-		// Shared informative windows are counted while the pool is built; the exact intersection runs only
-		// for units whose count can still reach a clone.
-		const informativeShared = new Map<IndexedUnit, number>();
-		let commonWindows = 0;
-		for (const window of probe.fingerprints) {
-			const posting = this.windowPostings.get(window);
-			if (!posting) continue;
-			if (!this.informative(posting)) {
-				commonWindows += 1;
-				continue;
-			}
-			for (const existing of posting) informativeShared.set(existing, (informativeShared.get(existing) ?? 0) + 1);
-		}
-		// A structural candidate is one whose shared windows (the counted informative ones plus every common
-		// one) can still reach the threshold against the larger unit: nothing else can pass on structure.
-		for (const [existing, shared] of informativeShared)
-			if (shared + commonWindows >= MIN_SIMILARITY * Math.max(probe.fingerprints.size, existing.fingerprints.size))
-				pool.add(existing);
-		let probeNorm = 0;
-		for (const call of probe.calls) probeNorm += this.weight(call);
-		const scored: DuplicateCandidate[] = [];
-		for (const existing of pool) {
-			if (existing.path === unit.path && (existing.name === unit.name || existing.code === unit.code)) continue;
-			const comparable = Math.min(probe.tokenCount, existing.tokenCount) >= STRUCTURAL_MIN_TOKENS;
-			const largest = Math.max(probe.fingerprints.size, existing.fingerprints.size);
-			// Shared windows can only be the counted informative ones plus the common ones: an upper bound.
-			let sharedWindows = 0;
-			if (
-				comparable &&
-				largest > 0 &&
-				(informativeShared.get(existing) ?? 0) + commonWindows >= MIN_SIMILARITY * largest
-			)
-				for (const window of probe.fingerprints) if (existing.fingerprints.has(window)) sharedWindows += 1;
-			const candidate: DuplicateCandidate = {
-				unit: existing,
-				callSimilarity: this.cosine(probe, probeNorm, existing, informativeDot, commonCalls),
-				structuralSimilarity: comparable && largest > 0 ? sharedWindows / largest : 0,
-			};
-			if (Math.max(candidate.callSimilarity, candidate.structuralSimilarity) >= MIN_SIMILARITY)
-				scored.push(candidate);
-		}
-		const rank = (c: DuplicateCandidate) => Math.max(c.callSimilarity, c.structuralSimilarity);
-		return scored.sort((a, b) => rank(b) - rank(a)).slice(0, limit);
+		return scoreProbe(this.arena, probe, self, { ...SCORING, limit }, this.scratch).map((scored) => ({
+			unit: this.units[scored.unit]!,
+			callSimilarity: scored.callSimilarity,
+			structuralSimilarity: scored.structuralSimilarity,
+		}));
 	}
 }
 
@@ -634,29 +637,74 @@ const SCAN_MIN_SIMILARITY = 0.5;
 /** Questions per Jev request in a scan: Jev evaluates them in parallel, so a request carries many. */
 const SCAN_QUESTIONS_PER_REQUEST = 25;
 
+/** Score every indexed unit as a probe across worker threads that share the arena without copies. */
+async function scoreAllUnits(
+	arena: ArenaBuffers,
+	candidatesPerUnit: number,
+	threads: number,
+): Promise<{ probe: number; candidate: number; similarity: number }[]> {
+	const parameters: ScoringParameters = { ...SCORING, limit: candidatesPerUnit };
+	const count = arena.unitCount;
+	const workers = Math.max(1, Math.min(threads, Math.ceil(count / 256)));
+	const chunk = Math.ceil(count / workers);
+	const parts = await Promise.all(
+		Array.from({ length: workers }, (_, index) => {
+			const from = index * chunk;
+			const to = Math.min(count, from + chunk);
+			return new Promise<Float64Array>((resolve, reject) => {
+				const worker = new Worker(
+					new URL(`./code-duplicate-scan-worker${extname(fileURLToPath(import.meta.url))}`, import.meta.url),
+					{
+						workerData: { arena, parameters, from, to },
+					},
+				);
+				worker.once("message", (packed: Float64Array) => resolve(packed));
+				worker.once("error", reject);
+				worker.once("exit", (code) => {
+					if (code !== 0) reject(new Error(`duplicate scan worker exited with code ${code}`));
+				});
+			});
+		}),
+	);
+	const scored: { probe: number; candidate: number; similarity: number }[] = [];
+	for (const packed of parts)
+		for (let at = 0; at + 3 < packed.length; at += 4)
+			scored.push({
+				probe: packed[at]!,
+				candidate: packed[at + 1]!,
+				similarity: Math.max(packed[at + 2]!, packed[at + 3]!),
+			});
+	return scored;
+}
+
 /**
  * Judge every indexed unit against its closest candidates, each unordered pair once: the Jev
- * counterpart of a clone report. Requests are batched and kept in flight concurrently.
+ * counterpart of a clone report. Candidates are scored across worker threads over the shared arena;
+ * Jev requests are batched and kept in flight concurrently.
  */
 export async function scanSemanticDuplicates(options: {
 	readonly index: SemanticUnitIndex;
 	readonly controller: DuplicateJudge;
 	readonly concurrency?: number;
+	readonly threads?: number;
 	readonly candidatesPerUnit?: number;
 	readonly signal?: AbortSignal;
 }): Promise<SemanticDuplicateScan> {
-	const units = options.index.allUnits();
-	const identity = (unit: CodeUnit) => `${unit.path}:${unit.line}:${unit.name}`;
-	const seen = new Set<string>();
+	const { arena, units } = options.index.snapshot();
+	const scored = await scoreAllUnits(
+		arena,
+		options.candidatesPerUnit ?? 3,
+		options.threads ?? Math.max(1, availableParallelism() - 1),
+	);
+	const seen = new Set<number>();
 	const pairs: { unit: CodeUnit; candidate: CodeUnit }[] = [];
-	for (const unit of units)
-		for (const candidate of options.index.candidates(unit, options.candidatesPerUnit ?? 3)) {
-			if (Math.max(candidate.callSimilarity, candidate.structuralSimilarity) < SCAN_MIN_SIMILARITY) continue;
-			const key = [identity(unit), identity(candidate.unit)].sort().join("\u0000");
-			if (seen.has(key)) continue;
-			seen.add(key);
-			pairs.push({ unit, candidate: candidate.unit });
-		}
+	for (const { probe, candidate, similarity } of scored) {
+		if (similarity < SCAN_MIN_SIMILARITY) continue;
+		const key = Math.min(probe, candidate) * units.length + Math.max(probe, candidate);
+		if (seen.has(key)) continue;
+		seen.add(key);
+		pairs.push({ unit: units[probe]!, candidate: units[candidate]! });
+	}
 	const batches: (typeof pairs)[] = [];
 	for (let index = 0; index < pairs.length; index += SCAN_QUESTIONS_PER_REQUEST)
 		batches.push(pairs.slice(index, index + SCAN_QUESTIONS_PER_REQUEST));
