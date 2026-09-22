@@ -60,7 +60,9 @@ describe("stream-idle watchdog wiring", () => {
 		expect(harness.eventsOfType("auto_retry_end").map((event) => event.success)).toContain(true);
 		expect(harness.faux.state.callCount).toBe(2);
 		expect(getAssistantTexts(harness)).toContain("recovered after stall");
-	}, 5000);
+		// The stall itself is a few hundred milliseconds. The bound is wall-clock room for harness
+		// startup on a loaded Windows runner. A missing abort still hangs until this fires.
+	}, 20_000);
 
 	it("constrains the watchdog below a shorter nonzero HTTP idle timeout", async () => {
 		setStreamIdleOptionsForTests({
@@ -85,5 +87,5 @@ describe("stream-idle watchdog wiring", () => {
 		expect(retries).toHaveLength(1);
 		expect(retries[0].errorMessage).toContain("no events for 45ms (first-progress phase)");
 		expect(getAssistantTexts(harness)).toContain("recovered before HTTP timeout");
-	}, 5000);
+	}, 20_000);
 });

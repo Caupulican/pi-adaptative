@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- OpenRouter model-override tests target `anthropic/claude-opus-4.1`. The live catalog no longer lists `anthropic/claude-opus-4`.
+- OpenRouter model-override tests target `anthropic/claude-opus-4.1`. The live catalog no longer lists `anthropic/claude-opus-4`. The stream-stall wiring test keeps a 20s wall-clock bound so a loaded Windows runner can finish the real stall timer.
 
 ### Changed
 
