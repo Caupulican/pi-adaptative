@@ -1586,6 +1586,7 @@ export class RuntimeBuilder {
 						laneKey: boundLaneKey,
 						engineDeps: worktreeSyncEngineDeps,
 						policy: () => this.deps.getSettingsManager().getWorktreeSyncSettings().syncPolicy,
+						pushesForbidden: () => Boolean(this.deps.integrationBranch?.()),
 					});
 					for (const gatedToolName of ["edit", "write", "bash"]) {
 						const original = this._baseToolDefinitions.get(gatedToolName);

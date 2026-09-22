@@ -5,7 +5,6 @@ import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../context/path-alias-tool-wrap.ts";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
-import { classifyDangerousGitBash } from "../objective-execution/dangerous-git-bash.ts";
 import {
 	CapabilityGateway,
 	CapabilityGatewayDeniedError,
@@ -363,13 +362,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		toolUsage,
 		beforeToolCall: async ({ toolCall, args }) => {
 			toolUsage.assertOpen();
-			if (toolCall.name === "bash" && args && typeof args === "object" && !Array.isArray(args)) {
-				const command = (args as { command?: unknown }).command;
-				if (typeof command === "string") {
-					const dangerous = classifyDangerousGitBash(command);
-					if (dangerous.refused) return { block: true, reason: dangerous.reason ?? "dangerous git is refused" };
-				}
-			}
+			// Git freedom is the orchestrator's decision, applied through checkEdge at dispatch.
 			if (!allowedToolSet.has(toolCall.name)) {
 				return { block: true, reason: `Lane tool '${toolCall.name}' is outside the materialized UAC surface.` };
 			}

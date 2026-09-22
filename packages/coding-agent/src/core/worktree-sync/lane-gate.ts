@@ -15,8 +15,8 @@
 
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
-import { classifyDangerousGitBash } from "../objective-execution/dangerous-git-bash.ts";
 import { isGitExecutableToken, lexShellCommand } from "../objective-execution/git-shell-lexer.ts";
+import { commandPushesGit } from "../objective-execution/local-commit-delivery.ts";
 import type { WorktreeSyncPolicy } from "./codes.ts";
 import { deriveLaneFacts, type RepoContext, resolveRepoContext, type WorktreeSyncEngineDeps } from "./git-engine.ts";
 import { readLane } from "./store.ts";
@@ -64,36 +64,22 @@ function commandWordExecutesGit(command: string): boolean {
  * evaded). Command POSITION still matters: `git` only begins an invocation at the start of the
  * command or immediately after a shell separator (`&&`, `||`, `;`, `|`) -- a bare `git` token
  * elsewhere (e.g. as a plain argument to `echo`) is not an invocation. Rules:
- * - `git push` anywhere: refused (main moves only through the land gate; pushing is owner-only).
+ * - `git push`: refused only when the orchestrator bound this dispatch to local commits.
  * - `git -C <path>` / `--git-dir` combined with a mutating subcommand: refused (escaping the
  *   lane worktree to operate on another checkout, e.g. the hub).
  * - `git branch -f/-M/-D <main>` / `git update-ref refs/heads/<main>`: refused.
- * - Everything else: allowed; a read/commit-shaped git subcommand additionally stays allowed
- *   while the lane is sync_required (committing WIP is the prescribed step BEFORE syncing).
+ * - Everything else, including add, commit, and push when the orchestrator allows it: allowed.
+ *   A read/commit-shaped git subcommand additionally stays allowed while the lane is sync_required.
  */
-export function classifyLaneBashCommand(command: string, mainBranch: string): LaneBashVerdict {
-	// This classifier is defense-in-depth, not a shell parser. Refuse compound
-	// syntax before any segment can return an allow verdict; otherwise `git
-	// status; git push` is approved by the first safe segment.
-	if (/[|;&<>$`(){}\n\r]/u.test(command)) {
+export function classifyLaneBashCommand(
+	command: string,
+	mainBranch: string,
+	policy?: { pushesForbidden?: boolean },
+): LaneBashVerdict {
+	if (policy?.pushesForbidden && commandPushesGit(command) && commandWordExecutesGit(command)) {
 		return {
 			verdict: "main_mutation_refused",
-			reason: "compound shell syntax is refused in a lane; use typed worktree_sync actions",
-		};
-	}
-	if (/^\s*["']git["']\s/u.test(command)) {
-		return {
-			verdict: "main_mutation_refused",
-			reason: "quoted command names are refused in a lane; use the typed Git actions",
-		};
-	}
-	const dangerous = classifyDangerousGitBash(command);
-	// `git push` as an argument of echo is not an invocation. A real git command, including one
-	// reached through env or command, still takes the dangerous-git refusal.
-	if (dangerous.refused && commandWordExecutesGit(command)) {
-		return {
-			verdict: "main_mutation_refused",
-			reason: dangerous.reason ?? "dangerous git is refused",
+			reason: "git push is refused; the orchestrator bound this dispatch to local commits",
 		};
 	}
 	const segments = [command];
@@ -129,13 +115,6 @@ export function classifyLaneBashCommand(command: string, mainBranch: string): La
 		}
 		const subcommand = tokens[j] ?? "";
 		const rest = tokens.slice(j + 1);
-		if (subcommand === "push") {
-			return {
-				verdict: "main_mutation_refused",
-				reason:
-					"git push is refused in a lane session; landing is the only integration path and pushing stays an owner action",
-			};
-		}
 		if (escapesWorktree && MAIN_MUTATING_GIT_SUBCOMMANDS.has(subcommand)) {
 			return {
 				verdict: "main_mutation_refused",
@@ -213,6 +192,8 @@ export interface WorktreeLaneGateConfig {
 	laneKey: string;
 	engineDeps: () => WorktreeSyncEngineDeps;
 	policy: () => WorktreeSyncPolicy;
+	/** The orchestrator's decision for this dispatch. Omitted means push is allowed, as on the root. */
+	pushesForbidden?: () => boolean;
 }
 
 export type LaneMutationCheck = { allowed: true } | { allowed: false; code: string; message: string };
@@ -279,7 +260,9 @@ export class WorktreeLaneGate {
 		const mainBranch = ctx?.mainBranch ?? "main";
 
 		if (toolName === "bash" && bashCommand !== undefined) {
-			const verdict = classifyLaneBashCommand(bashCommand, mainBranch);
+			const verdict = classifyLaneBashCommand(bashCommand, mainBranch, {
+				pushesForbidden: this.config.pushesForbidden?.() ?? false,
+			});
 			if (verdict.verdict === "main_mutation_refused") {
 				return { allowed: false, code: "main_mutation_refused", message: `worktree-sync: ${verdict.reason}` };
 			}

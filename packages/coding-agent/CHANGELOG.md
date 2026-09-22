@@ -6,6 +6,7 @@
 - Jev classifies tool calls and user requests. Those classifications do not refuse the tool or skip the turn. A broad-scope confirm is one queued line. A hard yes that the user authorized the work enables every edge capability that is still off; the authority slot is what the model sees.
 - System One classifies a request that limits the task to local commits and forbids push, and a request that lifts that limit. The user owns the binding: a block sets it, a lift clears it, and either one overrides a specification written in a file. While it is set, the root and every worker refuse `git push`, `git.publish` is not granted, delivery commits locally and does not push, and worktree sync rebases and lands onto the current branch.
 - The live user request is above AGENTS.md and standing user rules. Startup rule text comes only from instruction files settings and scoped access already admitted. When the request contradicts those rules and does not explicitly override them, the model is told to ask the user which holds. An explicit override follows the request. A full handoff lets System One settle the conflict on the request or on the written rule.
+- A dispatched lane's bash follows the orchestrator's decision. Git push is refused there only when the orchestrator bound the dispatch to local commits. The lane still cannot move the integration branch or escape its worktree.
 - The decision-graph clock is the current visit and restarts when work resumes. An open goal reads "not closed" until the checks are done.
 
 ## [0.99.42] - 2026-09-22
