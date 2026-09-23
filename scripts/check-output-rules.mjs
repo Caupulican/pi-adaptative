@@ -7,16 +7,10 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createJiti } from "jiti";
-
-const here = fileURLToPath(new URL(".", import.meta.url));
-const jiti = createJiti(import.meta.url, { interopDefault: true });
-const { BUNDLED_OUTPUT_RULES } = await jiti.import(
-	resolve(here, "../packages/coding-agent/src/core/tools/output-rules.bundled.ts"),
-);
-const { readOutputRulesFile, runOutputRuleTests } = await jiti.import(
-	resolve(here, "../packages/coding-agent/src/core/tools/output-rules.ts"),
-);
+// Static source imports, run with `node --conditions=pi-source`: workspace packages resolve to their
+// sources, never to a gitignored `dist` that can lag behind them (jiti resolves to `dist`).
+import { BUNDLED_OUTPUT_RULES } from "../packages/coding-agent/src/core/tools/output-rules.bundled.ts";
+import { readOutputRulesFile, runOutputRuleTests } from "../packages/coding-agent/src/core/tools/output-rules.ts";
 
 export function collectRuleSets(argv, cwd) {
 	const sets = [{ source: "bundled", rules: BUNDLED_OUTPUT_RULES }];

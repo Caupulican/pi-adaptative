@@ -5,7 +5,7 @@
  * and classifies commands with the SAME classifier the runtime uses, so a family that shows up here
  * as passthrough is one the pipeline really left alone.
  *
- * Usage: node scripts/output-reduction-census.mjs <dir|file>... [--top N] [--replay] [--gate <json>]
+ * Usage: node --conditions=pi-source scripts/output-reduction-census.mjs <dir|file>... [--top N] [--replay] [--gate <json>]
  *
  *   --top N      families per table (default 20)
  *   --replay     run the bundled reducers over the recorded raw text of every bash/python result and
@@ -21,20 +21,18 @@
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { createJiti } from "jiti";
+// Static source imports, run with `node --conditions=pi-source`: workspace packages resolve to their
+// sources, never to a gitignored `dist` that can lag behind them (jiti resolves to `dist`).
+import { classifyCommandFamily, commandFamilyLabel } from "../packages/coding-agent/src/core/tools/command-family.ts";
+import { reduceToolOutput } from "../packages/coding-agent/src/core/tools/output-reduction.ts";
+import { BUNDLED_OUTPUT_RULES } from "../packages/coding-agent/src/core/tools/output-rules.bundled.ts";
+import { createRuleOutputReducer } from "../packages/coding-agent/src/core/tools/output-rules.ts";
+// Registers the bundled reducers so the replay measures exactly what the tools run.
+import "../packages/coding-agent/src/core/tools/output-reducers.ts";
 import { listSessionFiles, messageText, parseSessionEntries } from "./session-stats-common.mjs";
 
-const jiti = createJiti(import.meta.url);
-const { classifyCommandFamily, commandFamilyLabel } = await jiti.import(
-	"../packages/coding-agent/src/core/tools/command-family.ts",
-);
-const { reduceToolOutput } = await jiti.import("../packages/coding-agent/src/core/tools/output-reduction.ts");
-const { BUNDLED_OUTPUT_RULES } = await jiti.import("../packages/coding-agent/src/core/tools/output-rules.bundled.ts");
-const { createRuleOutputReducer } = await jiti.import("../packages/coding-agent/src/core/tools/output-rules.ts");
 /** Replay uses the bundled rules exactly as a fresh tool instance would (no user or project file). */
 const replayOptions = { extraReducers: [createRuleOutputReducer(BUNDLED_OUTPUT_RULES)] };
-// Registers the bundled reducers so the replay measures exactly what the tools run.
-await jiti.import("../packages/coding-agent/src/core/tools/output-reducers.ts");
 
 function parseArgs(argv) {
 	const options = { targets: [], top: 20, replay: false, gate: undefined, corpus: undefined };
@@ -53,7 +51,7 @@ function parseArgs(argv) {
 	}
 	if (options.targets.length === 0 && !options.corpus) {
 		console.error(
-			"usage: node scripts/output-reduction-census.mjs <dir|file>... [--top N] [--replay] [--gate json] | --corpus manifest.json [--gate json]",
+			"usage: node --conditions=pi-source scripts/output-reduction-census.mjs <dir|file>... [--top N] [--replay] [--gate json] | --corpus manifest.json [--gate json]",
 		);
 		process.exit(2);
 	}
