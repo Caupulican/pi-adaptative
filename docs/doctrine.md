@@ -42,17 +42,23 @@ superseding note, never packed); the goal context is byte-identical while the go
 reclaims the tail with a one-line pointer, and the full record returns only when its content
 changes. The sent-prefix mark is carried across runs, so a user, reflection or continuation turn
 appends to the cached prefix instead of letting context GC repack the whole previous run (the
-measured prompt halving and head miss); context GC still rewrites below the mark, but only at a
-grid crossing of its quantized recent boundary, as one batch of everything that aged out, and a
-message it packed once stays packed while frozen. Deep supersessions (an older read of a re-read
-file) join a crossing batch once they save `deepPackMinTokens`. Rewrites therefore happen once per
-stride, never per turn and never because a run started; the long-session gate counts them against
-the number of crossings instead of a flat append share. Compaction summarizes the packed
-projection, and a deterministic checkpoint is recorded as `fallback` with its cause, never
-`success`. Pinned by `packages/coding-agent/test/path-alias-session.test.ts` (delta and budget),
+measured prompt halving and head miss). A sent message is part of the provider's cache, so context
+GC rewrites below the mark only as a priced cache break: at a grid crossing of its quantized recent
+boundary, every packable message below the mark (what aged out, plus deep supersessions such as an
+older read of a re-read file) is offered as one batch, and it packs only when the tokens it saves at
+the cache-read price over the remaining requests (the fewer of the requests left before the compaction
+trigger and the median further requests recorded lineages of this length went on to make, learned from
+the decision ledger; the lineage's own elapsed requests when none that long has ended) exceed
+re-prefilling the suffix behind it at the cold price, on the executing model's catalog prices. Every
+verdict is recorded as a `gc_pack` cache decision. Without prices the sent prefix stays as sent. A
+declined batch stays as sent and is offered again, larger, at the next crossing; a message packed once
+stays packed while frozen. Rewrites therefore happen at most once per stride, never per turn and never
+because a run started; the long-session gate counts them against the number of crossings instead of a
+flat append share. Compaction summarizes the packed projection, and a deterministic checkpoint is
+recorded as `fallback` with its cause, never `success`. Pinned by `packages/coding-agent/test/path-alias-session.test.ts` (delta and budget),
 `packages/agent/test/transient-records-index.test.ts` (pointer and cumulative kinds),
-`packages/coding-agent/test/context-gc-frozen-prefix.test.ts` (crossing batches, frozen stubs, deep
-floor), `packages/coding-agent/test/compact-goal-context.test.ts`, and
+`packages/coding-agent/test/context-gc-frozen-prefix.test.ts` (priced crossing batches, frozen stubs,
+declined batches staying as sent), `packages/coding-agent/test/compact-goal-context.test.ts`, and
 `packages/agent/test/session/lifecycle-ledger.test.ts` (fallback outcome).
 
 **Per-request host work is bounded.** Every request-time scan resumes from the history prefix it
@@ -909,3 +915,4 @@ measurement gains no new surface.
 | 2026-09-12 | Tool surfaces aggregate ceiling recalibrates from 4,850 to 5,570 tokens (4,500 base + 350 task_directory + 720 task_automation) for deterministic task automation (681 measured, 720 ceiling), with feature deltas for versioned skill inspection/repair/exclusion (150 measured, 160 ceiling) and narrow toolkit grant selectors (295 measured, 305 ceiling). Core tools measure 4,218 tokens under the unchanged 4,500 base. |
 | 2026-09-22 | Noul answers carry `(probabilityTrue, direction, band)` and no derived boolean; `settledBoolean` refuses to answer an ambiguous band, a checkpoint whose only problem is doubt routes to `gather_more`, and the 0.5 cutoff is removed from every gate (tool gate, worker supervision, project rules, acquisition, dedup, clarification, capability resolution). The Decision graph names open doubts and holds the goal open on them. The empty-turn placeholder appears only when the turn produced nothing readable. Worktree-discarding git (`reset --hard`, `clean -f`, `checkout --`, `restore`, `stash`) is a conditional `destructive.fs` operation, resolved per call against the live tree and the session's mutation ledger, and stays ordinary work when the session owns everything dirty. Typed delivery certifies per path instead of vetoing a tree that was already dirty at admission. The user-request classification asks only the questions that can still change something, reports an unavailable System One as `unavailable` rather than as silence, and shares its rule-text budget across every rule instead of truncating the tail. |
 | 2026-09-23 | The legend delta is read from the legend records in the history a request plans from, not from a process-local memory of commits: a restarted process no longer re-sends the whole legend, and a history whose record was compacted away gets its lines again. |
+| 2026-09-23 | Context GC rewrites the already-sent prefix only as a priced cache break: a crossing's below-mark batch (deep supersessions included) packs when its saving over the learned remaining requests pays for the re-prefill, and stays as sent otherwise. `contextGc.deepPackMinTokens` is removed; the price replaces its fixed floor. |

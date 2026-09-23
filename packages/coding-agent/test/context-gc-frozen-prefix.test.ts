@@ -2,16 +2,21 @@
  * A3 — the context-GC freeze: below the request's `sentPrefixCount` (already gone out on an accepted
  * provider request) nothing changes spelling between two grid crossings of the quantized recent
  * boundary, while packing above the mark keeps working exactly as before. With a grid, a crossing
- * rewrites the batch that aged out as one unit, below the mark included, a message packed once
- * stays packed while frozen, and deep supersessions wait for a batch that clears
- * `deepPackMinTokens`. Without a grid (`preserveRecentMessages: 0`, stride 1) the mark is absolute.
+ * offers every packable message below the mark (what aged out plus deep supersessions) as ONE batch to
+ * the host's price (`admitSentPrefixRewrite`); an admitted batch rewrites as one unit, a declined or
+ * unpriced one stays exactly as sent and is offered again at the next crossing, and a message packed
+ * once stays packed while frozen. Without a grid (`preserveRecentMessages: 0`, stride 1) the mark is
+ * absolute.
  * See `context/prefix-stability.ts`'s `frozenPrefixLength` for how the mark, an index into the
  * pre-transform message list, gets re-anchored onto the array `applyContextGc` actually sees.
  */
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
-import { applyContextGc, type ContextGcSettings } from "../src/core/context-gc.ts";
+import { applyContextGc, type ContextGcSettings, type SentPrefixRewriteBatch } from "../src/core/context-gc.ts";
+
+const ADMIT = () => ({ admit: true, reason: "priced to pay" });
+const DECLINE = () => ({ admit: false, reason: "priced not to pay" });
 
 function toolResult(index: number): ToolResultMessage {
 	return {
@@ -106,15 +111,14 @@ describe("context-gc: sentPrefixCount freeze", () => {
 	// trails it by a constant `preserveRecentMessages`, so the mark overtakes the boundary early in
 	// every run and stays ahead of it. An absolute freeze would then pack nothing for the rest of the
 	// run, and a mark that reset per prompt repacked the whole previous run at the next prompt (the
-	// measured prompt halving). The grid resolves both: rewrites below the mark land only at a
-	// crossing of the quantized boundary, as one batch, whatever the run boundaries.
+	// measured prompt halving). The grid resolves both: rewrites below the mark are offered only at a
+	// crossing of the quantized boundary, as one priced batch, whatever the run boundaries. These grid
+	// assertions admit every batch; the price itself is pinned on its own below.
 	const griddedBase = {
 		cwd: "/repo",
 		preserveRecentMessages: 8,
 		packStrideMessages: 4,
-		// Synthetic pools start mid-history with nothing memoized; a zero floor lets a crossing pick
-		// up that backlog so the assertions are about the grid, not the floor (tested on its own below).
-		deepPackMinTokens: 0,
+		admitSentPrefixRewrite: ADMIT,
 		minToolResultChars: 10,
 		tools: ["bash"],
 		writePayloads: false,
@@ -163,7 +167,7 @@ describe("context-gc: sentPrefixCount freeze", () => {
 		}
 	});
 
-	it("at a crossing the batch that aged past the previous boundary packs even though it sits below the mark", () => {
+	it("at an admitted crossing the batch that aged past the previous boundary packs even though it sits below the mark", () => {
 		const pool = messages(40);
 		// Mark 36 -> previous boundary quantize(28, 4) = 28; 40 messages -> boundary 32: the batch [28, 32)
 		// crossed and packs below the mark; [32, 40) is recent and stays.
@@ -193,10 +197,72 @@ describe("context-gc: sentPrefixCount freeze", () => {
 		expect(result.report.packedCount).toBe(8);
 	});
 
-	it("deep supersessions wait for a crossing batch that clears the deep-pack floor", () => {
+	it("offers a crossing's sent batch to the price once, and a declined batch stays exactly as sent", () => {
+		const pool = messages(40);
+		const offered: SentPrefixRewriteBatch[] = [];
+		const declined = applyContextGc(pool, {
+			...griddedBase,
+			frozenBelow: 36,
+			admitSentPrefixRewrite: (batch) => {
+				offered.push(batch);
+				return DECLINE();
+			},
+		});
+		expect(offered).toHaveLength(1);
+		// Every packable message below the mark: the backlog of this synthetic pool, earliest first.
+		expect(offered[0]).toMatchObject({ earliestIndex: 0, packCount: 32 });
+		expect(offered[0].savedTokens).toBeGreaterThan(0);
+		// The provider re-prefills from the first rewritten message to the mark: at least what it saves.
+		expect(offered[0].rewrittenTokens).toBeGreaterThanOrEqual(offered[0].savedTokens);
+		for (let index = 0; index < 36; index++) expect(declined.messages[index]).toBe(pool[index]);
+		expect(declined.report.sentPrefixRewrite).toMatchObject({
+			admit: false,
+			reason: "priced not to pay",
+			packCount: 32,
+		});
+		// Unsent messages are not the provider's: they pack whatever the price said. [32, 36) is
+		// recent; nothing at or above the mark is old enough here, so nothing packs at all.
+		expect(declined.report.records.every((record) => record.messageIndex >= 36)).toBe(true);
+	});
+
+	it("without a price nothing below the mark rewrites, even at a crossing", () => {
+		const pool = messages(40);
+		const { admitSentPrefixRewrite: _unused, ...unpriced } = griddedBase;
+		const result = applyContextGc(pool, { ...unpriced, frozenBelow: 36 });
+		for (let index = 0; index < 36; index++) expect(result.messages[index]).toBe(pool[index]);
+		expect(result.report.sentPrefixRewrite).toMatchObject({ admit: false, packCount: 32 });
+	});
+
+	it("a declined batch is offered again, larger, at the next crossing", () => {
+		const pool = messages(44);
+		const sizes: number[] = [];
+		const record = (batch: SentPrefixRewriteBatch) => {
+			sizes.push(batch.packCount);
+			return DECLINE();
+		};
+		applyContextGc(pool.slice(0, 40), { ...griddedBase, frozenBelow: 36, admitSentPrefixRewrite: record });
+		applyContextGc(pool, { ...griddedBase, frozenBelow: 40, admitSentPrefixRewrite: record });
+		expect(sizes).toEqual([32, 36]);
+	});
+
+	it("between crossings nothing is offered to the price at all", () => {
+		const pool = messages(34);
+		let offers = 0;
+		applyContextGc(pool, {
+			...griddedBase,
+			frozenBelow: 33,
+			admitSentPrefixRewrite: () => {
+				offers++;
+				return ADMIT();
+			},
+		});
+		expect(offers).toBe(0);
+	});
+
+	it("deep supersessions join a crossing's priced batch and pack only when it is admitted", () => {
 		// Two reads of the same path: the older one becomes packable only because of the newer one,
-		// deep inside the sent prefix. It must not rewrite at an ordinary turn, nor at a crossing
-		// while it saves less than the floor; it joins the batch once the floor is met (or is zero).
+		// deep inside the sent prefix. It never rewrites at an ordinary turn; at a crossing it is part
+		// of the one priced batch, packing when the batch is admitted and staying as sent when declined.
 		const read = (index: number, path: string): AgentMessage[] => [
 			{
 				role: "assistant",
@@ -225,22 +291,23 @@ describe("context-gc: sentPrefixCount freeze", () => {
 			built.push(...read(40, "/repo/a.txt"));
 			return built;
 		};
-		const pool = buildPool();
 		const deepBase = { ...griddedBase, tools: ["read"] };
-		// A crossing (mark 40 -> previous boundary 32; 42 messages -> boundary 32... choose a mark whose
-		// boundary lags): mark 38 -> previous boundary quantize(30, 4) = 28; 42 messages -> boundary 32.
-		const heldBack = applyContextGc(pool, { ...deepBase, frozenBelow: 38, deepPackMinTokens: 100_000 });
-		expect(heldBack.report.records.some((record) => record.messageIndex === 1)).toBe(false);
-		expect(heldBack.messages[1]).toBe(pool[1]);
-		const released = applyContextGc(pool, { ...deepBase, frozenBelow: 38, deepPackMinTokens: 0 });
+		// A crossing: mark 38 -> previous boundary quantize(30, 4) = 28; 42 messages -> boundary 32.
+		const declinedPool = buildPool();
+		const declined = applyContextGc(declinedPool, { ...deepBase, frozenBelow: 38, admitSentPrefixRewrite: DECLINE });
+		expect(declined.report.records.some((record) => record.messageIndex === 1)).toBe(false);
+		expect(declined.messages[1]).toBe(declinedPool[1]);
+		expect(declined.report.sentPrefixRewrite).toMatchObject({ earliestIndex: 1, packCount: 1, admit: false });
+		const admitted = applyContextGc(buildPool(), { ...deepBase, frozenBelow: 38 });
 		expect(
-			released.report.records.some((record) => record.messageIndex === 1 && record.reason === "superseded-read"),
+			admitted.report.records.some((record) => record.messageIndex === 1 && record.reason === "superseded-read"),
 		).toBe(true);
-		// Outside a crossing a never-packed deep candidate does not rewrite, floor or not (a fresh
-		// pool: the released pass above memoized the packed form on the first pool's objects, and a
+		// Outside a crossing a never-packed deep candidate does not rewrite, admitted or not (a fresh
+		// pool: the admitted pass above memoized the packed form on its own pool's objects, and a
 		// packed message staying packed is the frozen-stub contract, not a rewrite).
 		const fresh = buildPool();
-		const quiet = applyContextGc(fresh, { ...deepBase, frozenBelow: 42, deepPackMinTokens: 0 });
+		const quiet = applyContextGc(fresh, { ...deepBase, frozenBelow: 42 });
 		expect(quiet.messages[1]).toBe(fresh[1]);
+		expect(quiet.report.sentPrefixRewrite).toBeUndefined();
 	});
 });

@@ -109,9 +109,10 @@ export type AgentRequestId = string & { readonly [AGENT_REQUEST_ID]: true };
  *   rest of that run; while the mark reset per prompt, every run start then repacked the whole
  *   previous run at once - measured live as the prompt halving and the head cache miss on every
  *   user, reflection and continuation turn. The stride is therefore the host's: the coding-agent
- *   packer batches every below-mark rewrite onto the grid crossings of its quantized recent boundary
- *   (`context/prefix-stability.ts`), whatever the run boundaries, and keeps a message it already
- *   packed in its packed form while frozen. A host that treats this mark as an absolute freeze
+ *   packer offers below-mark rewrites only at the grid crossings of its quantized recent boundary
+ *   (`context/prefix-stability.ts`), whatever the run boundaries, as one batch it packs only when
+ *   the saving pays for the cache break, and keeps a message it already packed in its packed form
+ *   while frozen. A host that treats this mark as an absolute freeze
  *   would grow context without bound; a host that ignores it rewrites history every turn.
  *
  * Whoever reads this next will be tempted to "simplify" it into one field. Resist that: it is
@@ -122,8 +123,8 @@ export interface ProviderRequestPrefixState {
 	 * SESSION-scoped pack-freeze horizon (carried across top-level prompts like the sanitizer mark).
 	 * Feeds `AgentContextPlanRequest.sentPrefixCount` and the disturbance detector in
 	 * `provider-request-planner.ts`; the host's packer decides where below it a batched rewrite may
-	 * land (grid crossings only). See the interface doc comment above before changing this field's
-	 * lifetime.
+	 * land (priced batches at grid crossings only). See the interface doc comment above before
+	 * changing this field's lifetime.
 	 */
 	sentPrefixCount: number;
 	/**

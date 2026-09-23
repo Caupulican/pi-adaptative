@@ -41,6 +41,11 @@ import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { addUsage, createEmptyUsage } from "@caupulican/pi-agent-core/usage";
 import type { Api, AssistantMessage, Model, Usage } from "@caupulican/pi-ai";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session-contracts.ts";
+import {
+	priceSentPrefixRewrite,
+	resolveEffectiveModelPricing,
+	type SentPrefixRewriteVerdict,
+} from "./compaction/early-compaction-economics.ts";
 import { BrainCurator, type CurationTelemetrySnapshot, preDigestConversationText } from "./context/brain-curator.ts";
 import { type ArtifactStore, createFileArtifactStore } from "./context/context-artifacts.ts";
 import {
@@ -66,7 +71,12 @@ import { latestUserPromptText, textContentPrefix } from "./context/message-text.
 import { PathAliasRuntime } from "./context/path-alias-session.ts";
 import type { PathAliasTable } from "./context/path-alias-table.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "./context/tool-output-packer.ts";
-import { applyContextGc, type ContextGcReport, type ContextGcResult } from "./context-gc.ts";
+import {
+	applyContextGc,
+	type ContextGcReport,
+	type ContextGcResult,
+	type SentPrefixRewriteBatch,
+} from "./context-gc.ts";
 import { runIsolatedTextCompletion } from "./isolated-text-completion.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -74,6 +84,7 @@ import { resolveCliModel } from "./model-resolver.ts";
 import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
+import type { CacheDecisionRow } from "./operator-projection/decision-ledger-store.ts";
 import { LatestCompactionEntryScan, resolveSessionEntryIndex } from "./session-entry-index.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { reportSpawnedUsage } from "./spawned-usage.ts";
@@ -170,6 +181,20 @@ export interface ContextPipelineDeps {
 	getModelRegistry(): ModelRegistry;
 	/** Foreground model currently executing the transformed request. */
 	getModel(): Model<Api> | undefined;
+	/**
+	 * The context size at which compaction always runs for the current model, or undefined when
+	 * compaction is off. Bounds how many requests a context-GC saving on the sent prefix can last.
+	 */
+	getCompactionTriggerTokens?(): number | undefined;
+	/**
+	 * The live history lineage's requests so far and the median further requests learned from recorded
+	 * lineages (`lineageRemainingRequests`); undefined without a decision ledger.
+	 */
+	estimateLineageRemainingRequests?():
+		| { elapsed: number; remaining: number | undefined; lineages: number }
+		| undefined;
+	/** Records a priced cache decision in the decision ledger. */
+	recordCacheDecision?(decision: Omit<CacheDecisionRow, "sessionId" | "cwd">): void;
 	/** Root dir the host-keyed {@link FitnessStore} and per-session gc/artifact storage live under. */
 	getAgentDir(): string;
 	/** Workspace root, passed to the context-gc pass. */
@@ -813,6 +838,7 @@ export class ContextPipeline {
 				// `writePayloads`), so ONE pass serves preview, currency check and commit.
 				writePayloads: false,
 				frozenBelow,
+				admitSentPrefixRewrite: (batch) => this._priceSentPrefixRewrite(messages, batch),
 				curation: curationSettings.enabled
 					? {
 							resolveDigest: (digestKey) => this._brainCurator.getDigest(digestKey),
@@ -835,6 +861,23 @@ export class ContextPipeline {
 					}
 				}
 				this._latestContextGcReport = result.report;
+				const rewrite = result.report.sentPrefixRewrite;
+				if (rewrite) {
+					this.deps.recordCacheDecision?.({
+						kind: "gc_pack",
+						decidedAt: Date.now(),
+						admit: rewrite.admit,
+						reason: rewrite.reason,
+						...(rewrite.savingUsd !== undefined ? { savingUsd: rewrite.savingUsd } : {}),
+						...(rewrite.costUsd !== undefined ? { costUsd: rewrite.costUsd } : {}),
+						detail: {
+							earliestIndex: rewrite.earliestIndex,
+							packCount: rewrite.packCount,
+							savedTokens: rewrite.savedTokens,
+							rewrittenTokens: rewrite.rewrittenTokens,
+						},
+					});
+				}
 				// Only release/reclaim on the real per-turn pass, never on a read-only report path.
 				if (result.report.packedCount > 0) this._releaseGcPackedArtifactReferences(messages, result.report);
 			};
@@ -858,6 +901,49 @@ export class ContextPipeline {
 			if (writePayloads) commit();
 			return { messages, report, isCurrent: () => true, commit };
 		}
+	}
+
+	/**
+	 * Prices a crossing's already-sent packing batch on the model executing this request. The saving
+	 * lasts until the prefix is rewritten anyway, so the remaining requests are the fewer of the requests
+	 * left before the compaction trigger (at this history's own measured growth per request) and the
+	 * further requests lineages that lived this long went on to make (learned from the decision ledger).
+	 * Without that evidence the lineage's own elapsed count stands in: with nothing known about its
+	 * length, a lineage's median remaining life is the life it has already had.
+	 */
+	private _priceSentPrefixRewrite(messages: AgentMessage[], batch: SentPrefixRewriteBatch): SentPrefixRewriteVerdict {
+		const model = this.deps.getModel();
+		if (!model) return { admit: false, reason: "no model; the sent prefix stays as sent" };
+		let currentTokens = 0;
+		let requests = 0;
+		for (const message of messages) {
+			currentTokens += estimateTokens(message);
+			if (message.role === "assistant") requests++;
+		}
+		const trigger = this.deps.getCompactionTriggerTokens?.();
+		const growthPerRequest = requests > 0 ? currentTokens / requests : 0;
+		const untilCompaction =
+			trigger !== undefined && growthPerRequest > 0
+				? Math.max(0, Math.floor((trigger - currentTokens) / growthPerRequest))
+				: Number.POSITIVE_INFINITY;
+		const lineage = this.deps.estimateLineageRemainingRequests?.();
+		const learned = lineage?.remaining;
+		const expected = learned ?? lineage?.elapsed ?? requests;
+		const remainingRequests = Math.min(expected, untilCompaction);
+		const pricing = resolveEffectiveModelPricing(model, currentTokens);
+		return priceSentPrefixRewrite({
+			savedTokens: batch.savedTokens,
+			rewrittenTokens: batch.rewrittenTokens,
+			remainingRequests,
+			remainingBasis:
+				remainingRequests === untilCompaction
+					? "until the compaction trigger"
+					: learned !== undefined
+						? `learned from ${lineage?.lineages ?? 0} lineages`
+						: "the lineage's elapsed requests",
+			cacheReadUsdPerMillion: pricing?.cacheRead,
+			coldUsdPerMillion: pricing ? (pricing.cacheWrite > 0 ? pricing.cacheWrite : pricing.input) : undefined,
+		});
 	}
 
 	/**

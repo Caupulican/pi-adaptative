@@ -434,6 +434,20 @@ export const MIN_COMPACTION_SAVINGS = 0.12;
  */
 export type CompactionNeed = "none" | "early" | "hard";
 
+/**
+ * The context size at which compaction always runs: the window minus the reserve, or a lower
+ * caller-supplied trigger. The one formula behind {@link assessCompactionNeed}'s hard boundary, shared
+ * so a caller that needs to know how far away compaction is never re-derives it.
+ */
+export function hardCompactionTriggerTokens(
+	contextWindow: number,
+	settings: CompactionSettings,
+	triggerTokens?: number,
+): number {
+	const reserveTrigger = contextWindow - settings.reserveTokens;
+	return triggerTokens === undefined ? reserveTrigger : Math.min(reserveTrigger, triggerTokens);
+}
+
 /** Classify why compaction is needed so callers never confuse a cost optimization with capacity. */
 export function assessCompactionNeed(
 	contextTokens: number,
@@ -444,9 +458,7 @@ export function assessCompactionNeed(
 	if (!settings.enabled) return "none";
 
 	// Hard trigger: near-full, or a caller-supplied lower override. Always compacts (avoid overflow).
-	const reserveTrigger = contextWindow - settings.reserveTokens;
-	const hardTrigger = triggerTokens === undefined ? reserveTrigger : Math.min(reserveTrigger, triggerTokens);
-	if (contextTokens > hardTrigger) return "hard";
+	if (contextTokens > hardCompactionTriggerTokens(contextWindow, settings, triggerTokens)) return "hard";
 
 	// Early fractional trigger: bounds per-turn input cost on large-window models, gated by anti-thrashing.
 	const pct = settings.triggerPercent ?? 0;

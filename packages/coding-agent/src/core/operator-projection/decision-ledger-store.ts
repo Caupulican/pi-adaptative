@@ -72,6 +72,22 @@ export interface CacheObservationRow {
 	readonly lineage?: string;
 }
 
+/**
+ * One priced decision to break (or keep) a provider cache: what was proposed (`kind`, e.g. `gc_pack`),
+ * whether it was admitted, why, and the priced saving and cost. `detail` carries the kind's own facts.
+ */
+export interface CacheDecisionRow {
+	readonly sessionId: string;
+	readonly cwd: string;
+	readonly kind: string;
+	readonly decidedAt: number;
+	readonly admit: boolean;
+	readonly reason: string;
+	readonly savingUsd?: number;
+	readonly costUsd?: number;
+	readonly detail?: Readonly<Record<string, number | string>>;
+}
+
 /** One session's history lineage: how many requests were made on it, and when the last one was. */
 export interface LineageEpisodeRow {
 	readonly sessionId: string;
@@ -191,6 +207,19 @@ export class DecisionLedgerStore {
 			);
 			CREATE INDEX IF NOT EXISTS cache_observations_lane ON cache_observations (lane, observed_at);
 			CREATE INDEX IF NOT EXISTS cache_observations_session_lane ON cache_observations (session_id, lane, observed_at);
+			CREATE TABLE IF NOT EXISTS cache_decisions (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				session_id TEXT NOT NULL,
+				cwd TEXT NOT NULL,
+				kind TEXT NOT NULL,
+				decided_at INTEGER NOT NULL,
+				admit INTEGER NOT NULL,
+				reason TEXT NOT NULL,
+				saving_usd REAL,
+				cost_usd REAL,
+				detail TEXT
+			);
+			CREATE INDEX IF NOT EXISTS cache_decisions_session ON cache_decisions (session_id, decided_at);
 		`);
 		// Ledgers created before observations carried their lineage gain the column; their rows stay unassigned.
 		const columns = this.database.prepare("PRAGMA table_info(cache_observations)").all();
@@ -395,6 +424,54 @@ export class DecisionLedgerStore {
 				row.divergenceKind ?? null,
 				row.lineage ?? null,
 			);
+	}
+
+	/** Records one priced cache decision (see {@link CacheDecisionRow}). */
+	recordCacheDecision(row: CacheDecisionRow): void {
+		this.database
+			.prepare(
+				`INSERT INTO cache_decisions (session_id, cwd, kind, decided_at, admit, reason, saving_usd, cost_usd, detail)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				row.sessionId,
+				row.cwd,
+				row.kind,
+				row.decidedAt,
+				row.admit ? 1 : 0,
+				row.reason,
+				row.savingUsd ?? null,
+				row.costUsd ?? null,
+				row.detail ? JSON.stringify(row.detail) : null,
+			);
+	}
+
+	/** A session's cache decisions, oldest first. */
+	cacheDecisions(sessionId: string): CacheDecisionRow[] {
+		const rows = this.database
+			.prepare("SELECT * FROM cache_decisions WHERE session_id = ? ORDER BY decided_at, id")
+			.all(sessionId);
+		const out: CacheDecisionRow[] = [];
+		for (const row of rows) {
+			const cwd = asText(row.cwd);
+			const kind = asText(row.kind);
+			const decidedAt = asInteger(row.decided_at);
+			const reason = asText(row.reason);
+			if (cwd === undefined || kind === undefined || decidedAt === undefined || reason === undefined) continue;
+			const detailText = asText(row.detail);
+			out.push({
+				sessionId,
+				cwd,
+				kind,
+				decidedAt,
+				admit: row.admit === 1,
+				reason,
+				...(typeof row.saving_usd === "number" ? { savingUsd: row.saving_usd } : {}),
+				...(typeof row.cost_usd === "number" ? { costUsd: row.cost_usd } : {}),
+				...(detailText !== undefined ? { detail: JSON.parse(detailText) as Record<string, number | string> } : {}),
+			});
+		}
+		return out;
 	}
 
 	/** A session lane's most recent observation: where a resumed session's next gap is measured from. */

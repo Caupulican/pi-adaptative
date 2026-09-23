@@ -6,6 +6,7 @@ import { PrefixFold } from "@caupulican/pi-agent-core";
 import { estimateTokens } from "@caupulican/pi-agent-core/compaction/compaction";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { normalizePath } from "../utils/paths.ts";
+import type { SentPrefixRewriteVerdict } from "./compaction/early-compaction-economics.ts";
 import { quantizeRecentBoundary, resolveRecentBoundaryStride } from "./context/prefix-stability.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "./context/tool-output-packer.ts";
 import { boundedTextPreview } from "./text-preview.ts";
@@ -33,14 +34,6 @@ export interface ContextGcSettings {
 	 * 1 restores continuous, pack-as-soon-as-it-ages behavior.
 	 */
 	packStrideMessages?: number;
-	/**
-	 * A message that became packable only because a later message superseded it (an older read of a
-	 * re-read file, an older record of a re-issued kind) sits deep inside the already-sent prefix, and
-	 * rewriting it re-prefills everything after it. Such deep packs wait for a grid crossing and then
-	 * land only when, together, they save at least this many estimated tokens on every later request;
-	 * below the floor they wait for a later crossing. 0 packs them at the first crossing.
-	 */
-	deepPackMinTokens?: number;
 	/** Minimum provider-visible text chars before a stale tool result is packed. */
 	minToolResultChars?: number;
 	/** Tool names eligible for stale result packing. */
@@ -51,6 +44,19 @@ export interface ContextGcSettings {
 
 export interface NormalizedContextGcSettings extends Omit<Required<ContextGcSettings>, "semanticMemory"> {
 	semanticMemory: Required<SemanticMemoryGcSettings>;
+}
+
+/**
+ * The already-sent part of a crossing's packing batch, offered to the host before anything below the
+ * sent mark changes spelling. `rewrittenTokens` is the sent history from `earliestIndex` to the mark
+ * as it is sent today (the suffix the provider would re-prefill); `savedTokens` is what the batch
+ * removes from every later request.
+ */
+export interface SentPrefixRewriteBatch {
+	earliestIndex: number;
+	packCount: number;
+	savedTokens: number;
+	rewrittenTokens: number;
 }
 
 /**
@@ -74,17 +80,23 @@ export interface ContextGcOptions extends NormalizedContextGcSettings {
 	writePayloads?: boolean;
 	curation?: ContextGcCurationHooks;
 	/**
+	 * Prices a crossing's already-sent batch (see {@link SentPrefixRewriteBatch}). Absent, the sent
+	 * prefix is never rewritten: packing an already-cached message is a cache break, and a break with
+	 * no one to price it does not happen.
+	 */
+	admitSentPrefixRewrite?: (batch: SentPrefixRewriteBatch) => SentPrefixRewriteVerdict;
+	/**
 	 * Every index strictly below this mark has already gone out on an accepted provider request (see
 	 * `context/prefix-stability.ts`'s `frozenPrefixLength`, which derives it from the request's
 	 * `sentPrefixCount`). Between two grid crossings of the preserve-recent boundary nothing below the
 	 * mark changes spelling: a message packed on an earlier request keeps its memoized packed form,
-	 * everything else stays as sent. At a crossing the messages that aged past the boundary the
-	 * previous request packed against rewrite as one batch even though they sit below the mark, and
-	 * deep supersessions join that batch once they clear `deepPackMinTokens`. Rewrites therefore
-	 * land only where the grid already re-prefills the tail, never one message per turn and never
-	 * at a new prompt because a run started. With no grid (`packStrideMessages` 1) the mark is an
-	 * absolute freeze. Always populated by `applyContextGc` below (clamped from its own optional
-	 * `frozenBelow` input, defaulting to 0 for callers outside the live provider-request path).
+	 * everything else stays as sent. At a crossing every packable message below the mark (the batch that
+	 * aged out, plus deep supersessions such as an older read of a re-read file) is offered as ONE batch
+	 * to `admitSentPrefixRewrite`, which admits it only when the tokens it saves on the remaining
+	 * requests pay for re-prefilling the suffix behind it. A declined batch stays as sent and is offered
+	 * again, larger, at the next crossing. With no grid (`packStrideMessages` 1) there are no crossings
+	 * and the mark is an absolute freeze. Always populated by `applyContextGc` below (clamped from its
+	 * own optional `frozenBelow` input, defaulting to 0 for callers outside the live provider-request path).
 	 */
 	frozenBelow: number;
 }
@@ -114,6 +126,8 @@ export interface ContextGcReport {
 	packedTokens: number;
 	savedTokens: number;
 	records: ContextGcPackedRecord[];
+	/** The crossing's already-sent batch and the host's verdict on it, when one was offered. */
+	sentPrefixRewrite?: SentPrefixRewriteBatch & SentPrefixRewriteVerdict;
 }
 
 export interface ContextGcResult {
@@ -201,7 +215,6 @@ export const DEFAULT_CONTEXT_GC_SETTINGS: NormalizedContextGcSettings = {
 	enabled: true,
 	preserveRecentMessages: 24,
 	packStrideMessages: resolveRecentBoundaryStride(24),
-	deepPackMinTokens: 8_000,
 	minToolResultChars: 1200,
 	tools: [
 		"read",
@@ -265,10 +278,6 @@ function normalizeContextGcSettings(settings?: ContextGcSettings): NormalizedCon
 		enabled: settings?.enabled ?? DEFAULT_CONTEXT_GC_SETTINGS.enabled,
 		preserveRecentMessages,
 		packStrideMessages: resolveRecentBoundaryStride(preserveRecentMessages, settings?.packStrideMessages),
-		deepPackMinTokens: Math.max(
-			0,
-			Math.floor(settings?.deepPackMinTokens ?? DEFAULT_CONTEXT_GC_SETTINGS.deepPackMinTokens),
-		),
 		minToolResultChars: Math.max(
 			0,
 			Math.floor(settings?.minToolResultChars ?? DEFAULT_CONTEXT_GC_SETTINGS.minToolResultChars),
@@ -685,6 +694,7 @@ export function applyContextGc(
 		writePayloads?: boolean;
 		curation?: ContextGcCurationHooks;
 		frozenBelow?: number;
+		admitSentPrefixRewrite?: (batch: SentPrefixRewriteBatch) => SentPrefixRewriteVerdict;
 	},
 ): ContextGcResult {
 	const settings = normalizeContextGcSettings(rawSettings);
@@ -705,6 +715,7 @@ export function applyContextGc(
 		acquireStorageDir: rawSettings.acquireStorageDir,
 		writePayloads: rawSettings.writePayloads ?? true,
 		curation: rawSettings.curation,
+		admitSentPrefixRewrite: rawSettings.admitSentPrefixRewrite,
 		// Clamped defensively: a caller-supplied mark must never be trusted past the array it indexes.
 		frozenBelow: Math.min(Math.max(0, Math.floor(rawSettings.frozenBelow ?? 0)), messages.length),
 	};
@@ -718,8 +729,8 @@ export function applyContextGc(
 		options.packStrideMessages,
 	);
 	// The boundary the previous accepted request packed against: its message count is the sent mark.
-	// A pass whose boundary moved past it is a grid crossing and may rewrite the batch that aged out,
-	// below the mark included; any other pass leaves everything below the mark exactly as sent (see
+	// A pass whose boundary moved past it is a grid crossing and may offer the packable messages below
+	// the mark as one priced batch; any other pass leaves everything below the mark exactly as sent (see
 	// `ContextGcOptions.frozenBelow`). Without a grid there are no crossings and the mark is absolute.
 	const gridded = options.packStrideMessages > 1;
 	const previousRecentStart = gridded
@@ -729,7 +740,6 @@ export function applyContextGc(
 			)
 		: options.frozenBelow;
 	const crossing = gridded && recentStart > previousRecentStart;
-	const rewriteFloor = crossing ? previousRecentStart : options.frozenBelow;
 	const semanticIndexSet = new Set(plan.semanticIndexes);
 	const preservedSemanticIndexes = new Set(
 		options.semanticMemory.preserveRecentPages > 0
@@ -743,10 +753,11 @@ export function applyContextGc(
 
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index];
-		// Below the rewrite floor nothing changes spelling: a message packed on an earlier request is
-		// re-emitted in its memoized packed form, anything else stays as sent. Checked first, uniformly,
-		// so neither packing category below can rewrite it regardless of how eligible it would be.
-		if (index < rewriteFloor) {
+		// Below the sent mark nothing changes spelling on its own: a message packed on an earlier request
+		// is re-emitted in its memoized packed form (never reverted, whatever this pass decides), anything
+		// else stays as sent. Checked first, uniformly, so neither packing category below can rewrite it
+		// outside the priced crossing batch.
+		if (index < options.frozenBelow) {
 			const memo = packedMemos.get(message);
 			if (memo && (memo.keyIndex === undefined || memo.keyIndex === index)) {
 				emitMemoizedPack(pass, index, memo);
@@ -754,8 +765,7 @@ export function applyContextGc(
 				continue;
 			}
 			// Between crossings nothing else below the mark may change. At a crossing a never-packed
-			// message this far back can only be a deep supersession; it falls through to the eligibility
-			// checks and joins the batch only if the deep floor is met (see below).
+			// message below the mark falls through to the eligibility checks and joins the priced batch.
 			if (!crossing) continue;
 		}
 		// A transient record with a later record of its kind is superseded by construction: the
@@ -891,17 +901,39 @@ export function applyContextGc(
 		});
 	}
 
-	// Deep supersessions (below the boundary the previous request already packed against) rewrite
-	// far back into the sent prefix; they land in this crossing's batch only when together they clear
-	// the floor, otherwise they wait for a later crossing. Everything else in `decisions` is either
-	// unsent or part of the batch that just aged out.
-	const deepSavings = decisions.reduce(
-		(sum, decision) => (decision.index < previousRecentStart ? sum + decision.record.originalTokens : sum),
-		0,
-	);
-	const packDeep = deepSavings >= options.deepPackMinTokens;
+	// Everything at or above the mark is unsent and packs freely. Everything below it is already in the
+	// provider's cache: packing it is a cache break, so it goes out as ONE batch only when the host's
+	// price admits it (see `ContextGcOptions.admitSentPrefixRewrite`); otherwise it stays as sent.
+	const sentDecisions = decisions.filter((decision) => decision.index < options.frozenBelow);
+	let admitSent = false;
+	if (sentDecisions.length > 0) {
+		const earliestIndex = sentDecisions[0].index;
+		let rewrittenTokens = 0;
+		for (let index = earliestIndex; index < options.frozenBelow; index++) {
+			rewrittenTokens += estimateTokens(nextMessages[index]);
+		}
+		let savedTokens = 0;
+		for (const decision of sentDecisions) {
+			const packedTokens =
+				decision.memo?.packedTokens ??
+				estimateTokens(decision.makePacked(decision.message, { ...decision.record }));
+			savedTokens += Math.max(0, decision.record.originalTokens - packedTokens);
+		}
+		const batch: SentPrefixRewriteBatch = {
+			earliestIndex,
+			packCount: sentDecisions.length,
+			savedTokens,
+			rewrittenTokens,
+		};
+		const verdict = options.admitSentPrefixRewrite?.(batch) ?? {
+			admit: false,
+			reason: "no price for a sent-prefix rewrite; the sent prefix stays as sent",
+		};
+		admitSent = verdict.admit;
+		baseReport.sentPrefixRewrite = { ...batch, ...verdict };
+	}
 	for (const decision of decisions) {
-		if (decision.index < previousRecentStart && !packDeep) continue;
+		if (decision.index < options.frozenBelow && !admitSent) continue;
 		commitPackedMessage(
 			pass,
 			decision.index,

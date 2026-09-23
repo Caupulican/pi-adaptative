@@ -199,3 +199,66 @@ export function projectEarlyCompactionEconomics(input: EarlyCompactionEconomicsI
 		hitRatio,
 	};
 }
+
+/**
+ * A proposed rewrite of already-sent history: context GC packing messages the provider has already
+ * cached. The provider re-prefills everything from the first rewritten message on, so the rewrite is
+ * paid once on that suffix; the packed tokens are then saved on every later request that reads the
+ * shorter prefix instead of the original.
+ */
+export interface SentPrefixRewriteEconomicsInput {
+	/** Tokens the batch removes from every later request (original minus packed form). */
+	readonly savedTokens: number;
+	/** Tokens of already-sent history from the first rewritten message to the sent mark, as sent. */
+	readonly rewrittenTokens: number;
+	/** Later requests expected to read this prefix before it is rewritten anyway (compaction). */
+	readonly remainingRequests: number;
+	/** Where `remainingRequests` came from, named in the verdict's reason. */
+	readonly remainingBasis?: string;
+	readonly cacheReadUsdPerMillion?: number;
+	/** What a prefix the provider has not cached costs: its cache-write price, else its input price. */
+	readonly coldUsdPerMillion?: number;
+}
+
+export interface SentPrefixRewriteVerdict {
+	readonly admit: boolean;
+	readonly reason: string;
+	readonly savingUsd?: number;
+	readonly costUsd?: number;
+}
+
+/**
+ * Admit a rewrite of already-sent history only when it pays: the suffix that must be re-prefilled
+ * costs its cold price instead of its cache-read price once, and the batch saves its tokens at the
+ * cache-read price on every remaining request. Without prices there is no evidence, and the sent
+ * prefix stays as sent. A rewrite that costs nothing (a price-free model) is admitted when it saves
+ * anything, since a shorter prompt is then free.
+ */
+export function priceSentPrefixRewrite(input: SentPrefixRewriteEconomicsInput): SentPrefixRewriteVerdict {
+	const read = input.cacheReadUsdPerMillion;
+	const cold = input.coldUsdPerMillion;
+	if (read === undefined || cold === undefined) {
+		return { admit: false, reason: "prices unknown; the sent prefix stays as sent" };
+	}
+	if (input.savedTokens <= 0) return { admit: false, reason: "the batch saves nothing" };
+	const reprefilled = Math.max(0, input.rewrittenTokens - input.savedTokens);
+	const costUsd = usd(reprefilled, Math.max(0, cold - read));
+	const savingUsd = usd(input.savedTokens, read) * Math.max(0, input.remainingRequests);
+	const requestsText = `${input.remainingRequests} requests${input.remainingBasis ? ` (${input.remainingBasis})` : ""}`;
+	if (costUsd === 0) {
+		return { admit: true, reason: "the rewrite costs nothing on this model", savingUsd, costUsd };
+	}
+	return savingUsd > costUsd
+		? {
+				admit: true,
+				reason: `saves ${savingUsd.toFixed(6)} USD over ${requestsText} against a ${costUsd.toFixed(6)} USD re-prefill`,
+				savingUsd,
+				costUsd,
+			}
+		: {
+				admit: false,
+				reason: `re-prefill ${costUsd.toFixed(6)} USD exceeds ${savingUsd.toFixed(6)} USD saved over ${requestsText}`,
+				savingUsd,
+				costUsd,
+			};
+}

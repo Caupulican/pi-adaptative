@@ -1,7 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { basename, join } from "node:path";
 import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
-import type { CompactionResult, CompactionSettings } from "@caupulican/pi-agent-core/compaction/compaction";
+import {
+	type CompactionResult,
+	type CompactionSettings,
+	hardCompactionTriggerTokens,
+} from "@caupulican/pi-agent-core/compaction/compaction";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
 import { type CustomMessage, createCustomMessage } from "@caupulican/pi-agent-core/messages";
 import type { BranchSummaryEntry, SessionManager } from "@caupulican/pi-agent-core/session";
@@ -90,6 +94,8 @@ import { type AutoCompactionReason, CompactionController } from "./compaction-co
 import { CompactionSupport } from "./compaction-support.ts";
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
 import { CacheObservationRecorder, cacheLaneKey, historyLineage } from "./context/cache-observation-recorder.ts";
+import { lineageRemainingRequests } from "./context/cache-survival.ts";
+import { CACHE_SURVIVAL_CALIBRATION } from "./context/cache-survival-calibration.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { ContextAuditReport } from "./context/context-audit.ts";
 import {
@@ -1152,6 +1158,33 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			getModelRegistry: () => this._modelRegistry,
 			getModel: () => this.model,
+			getCompactionTriggerTokens: () => {
+				const model = this.model;
+				const settings = this._getAdaptedCompactionSettings();
+				if (!model?.contextWindow || !settings.enabled) return undefined;
+				return hardCompactionTriggerTokens(model.contextWindow, settings, model.autoCompactionTriggerTokens);
+			},
+			estimateLineageRemainingRequests: () => {
+				const ledger = this.getDecisionLedger();
+				if (!ledger) return undefined;
+				return lineageRemainingRequests(
+					ledger.lineageEpisodes(),
+					{ sessionId: this.sessionId, lineage: historyLineage(this.agent.state.messages) },
+					Date.now(),
+					CACHE_SURVIVAL_CALIBRATION.halfLifeMs,
+				);
+			},
+			recordCacheDecision: (decision) => {
+				try {
+					this.getDecisionLedger()?.recordCacheDecision({
+						...decision,
+						sessionId: this.sessionId,
+						cwd: this._cwd,
+					});
+				} catch {
+					// Telemetry only.
+				}
+			},
 			getAgentDir: () => this._agentDir,
 			getCwd: () => this._cwd,
 			getActiveToolNames: () => this.getActiveToolNames(),

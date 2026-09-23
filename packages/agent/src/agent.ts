@@ -288,9 +288,9 @@ export class Agent {
 	private loopContinuationState: AgentLoopContinuationState | undefined;
 	/**
 	 * SESSION-scoped "already sent" mark for `sanitizeToolFailureContext` (see
-	 * `ProviderRequestPrefixState` in types.ts - do not merge this back with the RUN-scoped
-	 * `sentPrefixCount` that `loopContinuationState` resets every prompt; that recreates the exact
-	 * defect this field exists to prevent). Persists across every `prompt()`/`continue()` call for
+	 * `ProviderRequestPrefixState` in types.ts - do not merge this back with the pack-freeze
+	 * `sentPrefixCount` below; each has its own consumer and reset rule, and merging them recreates
+	 * the exact defect this field exists to prevent). Persists across every `prompt()`/`continue()` call for
 	 * the life of this `Agent` instance, seeding each new `AgentLoopContinuationState` instead of
 	 * letting it reset to zero, and is written back from the loop's own copy after each run. Reset
 	 * only by `reset()` and `resetSanitizerPrefixHorizon()` - see the latter's doc comment for when

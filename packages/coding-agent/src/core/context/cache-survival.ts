@@ -329,3 +329,31 @@ export function lineageEpisodes(lineageKeys: readonly string[], open: boolean, w
 	if (count > 0) episodes.push({ requests: count, ended: !open, ...(weight !== undefined ? { weight } : {}) });
 	return episodes;
 }
+
+/** One recorded lineage, as the decision ledger aggregates it. */
+export interface RecordedLineage {
+	readonly sessionId: string;
+	readonly lineage: string;
+	readonly requests: number;
+	readonly lastObservedAt: number;
+}
+
+/**
+ * The live lineage's requests so far and the median further requests learned from every recorded
+ * lineage (recency-weighted by `halfLifeMs`). The live lineage is open; every other one ended when
+ * its session compacted or stopped. `remaining` is undefined when no lineage that long has ended.
+ */
+export function lineageRemainingRequests(
+	recorded: readonly RecordedLineage[],
+	current: { readonly sessionId: string; readonly lineage: string },
+	now: number,
+	halfLifeMs: number,
+): { elapsed: number; remaining: number | undefined; lineages: number } {
+	let elapsed = 0;
+	const episodes = recorded.map((row) => {
+		const open = row.sessionId === current.sessionId && row.lineage === current.lineage;
+		if (open) elapsed = row.requests;
+		return { requests: row.requests, ended: !open, weight: decayWeight(now - row.lastObservedAt, halfLifeMs) };
+	});
+	return { elapsed, remaining: medianRemainingRequests(episodes, elapsed), lineages: episodes.length };
+}
