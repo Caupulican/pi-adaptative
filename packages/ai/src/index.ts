@@ -48,6 +48,7 @@ export type {
 } from "./utils/oauth/types.ts";
 export * from "./utils/overflow.ts";
 export * from "./utils/provider-retry.ts";
+export * from "./utils/quota-exhaustion.ts";
 export * from "./utils/regexp.ts";
 export * from "./utils/streaming-lines.ts";
 export * from "./utils/tool-repair/registry.ts";

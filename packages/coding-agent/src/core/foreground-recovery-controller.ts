@@ -34,7 +34,9 @@ export interface ForegroundSubmissionLease {
 export interface ForegroundRecoveryControllerDeps {
 	agent: Agent;
 	/** See `BillingFailoverControllerDeps.applyFailoverModel`. */
-	applyFailoverModel(failed: Model<Api>, hop: Model<Api>): void;
+	applyFailoverModel(failed: Model<Api>, hop: Model<Api>): Model<Api> | undefined;
+	/** See `BillingFailoverControllerDeps.resolveFallbackModel`. */
+	resolveFallbackModel?(failed: Model<Api>): Model<Api> | undefined;
 	settingsManager: SettingsManager;
 	modelRegistry: ModelRegistry;
 	failureCorpus: FailureCorpusRecorder;
@@ -87,6 +89,7 @@ export class ForegroundRecoveryController {
 		this.billingFailover = new BillingFailoverController({
 			agent: deps.agent,
 			applyFailoverModel: (failed, hop) => deps.applyFailoverModel(failed, hop),
+			resolveFallbackModel: (failed) => deps.resolveFallbackModel?.(failed),
 			modelRegistry: deps.modelRegistry,
 			exhausted: new ExhaustedProviderRegistry(deps.exhaustedStoreDir),
 			subscriptionHop: deps.settingsManager.getFailoverSettings().subscriptionHop,
@@ -444,7 +447,11 @@ export class ForegroundRecoveryController {
 			if (replacement && this.retry.prepareModelSwitchRetry(message, `Continuing on ${replacement}.`)) return true;
 		}
 		if (classified?.reason === "billing_or_quota") this.deps.onUsageLimitReached?.(message);
-		if (await this.billingFailover.handleAssistantError(message, classified)) return false;
+		const billing = await this.billingFailover.handleAssistantError(message, classified);
+		// A quota the work moved off continues at once on the model it moved to, like an unsupported model.
+		if (billing.continuedOn && this.retry.prepareModelSwitchRetry(message, `Continuing on ${billing.continuedOn}.`))
+			return true;
+		if (billing.handled) return false;
 
 		if (message.stopReason === "error") this.finishRetry(false, message.errorMessage);
 		if (await this.deps.checkCompaction(message)) return true;

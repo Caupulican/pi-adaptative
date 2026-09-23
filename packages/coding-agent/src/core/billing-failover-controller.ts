@@ -126,8 +126,11 @@ export interface BillingFailoverControllerDeps {
 	/**
 	 * Moves work off the exhausted model: a routed turn's model inside that turn, otherwise the session
 	 * model, recorded like any other session model change. A routed turn's model is never the session's.
+	 * Returns the model the work actually continues on, or undefined when nothing could take it.
 	 */
-	applyFailoverModel(failed: Model<Api>, hop: Model<Api>): void;
+	applyFailoverModel(failed: Model<Api>, hop: Model<Api>): Model<Api> | undefined;
+	/** The router's usable model for the work when there is no same-provider hop (see `BillingFailoverInput.fallback`). */
+	resolveFallbackModel?(failed: Model<Api>): Model<Api> | undefined;
 	modelRegistry: ModelRegistry;
 	emit(event: { type: "warning"; message: string }): void;
 	exhausted: ExhaustedProviderRegistry;
@@ -138,6 +141,12 @@ export interface BillingFailoverControllerDeps {
 		message: string;
 		classified: ReturnType<typeof classifyFailure>;
 	}): void;
+}
+
+/** Whether a billing/quota failure was handled, and where the work continues when it moved to another model. */
+export interface BillingFailoverOutcome {
+	handled: boolean;
+	continuedOn?: string;
 }
 
 export class BillingFailoverController {
@@ -168,16 +177,21 @@ export class BillingFailoverController {
 		return { exhausted: this.snapshotExhausted(), lastNotice: this.lastNotice };
 	}
 
-	async handleAssistantError(message: AssistantMessage, classified?: ClassifiedError): Promise<boolean> {
-		if (message.stopReason !== "error") return false;
+	async handleAssistantError(
+		message: AssistantMessage,
+		classified?: ClassifiedError,
+	): Promise<BillingFailoverOutcome> {
+		if (message.stopReason !== "error") return { handled: false };
 		classified ??= classifyFailure({ message: message.errorMessage ?? "", provider: message.provider });
-		if (classified.reason !== "billing_or_quota") return false;
+		if (classified.reason !== "billing_or_quota") return { handled: false };
 		const failedModel = this.deps.modelRegistry.find(message.provider, message.model) ?? this.deps.agent.state.model;
 		const failedRef = `${failedModel.provider}/${failedModel.id}`;
 		this.deps.exhausted.markExhausted(failedRef, expiryFromRetryAfter(classified.retryAfterMs));
 
 		const defaultModelId = DEFAULT_MODEL_PER_PROVIDER[failedModel.provider];
 		const hop = defaultModelId ? this.deps.modelRegistry.find(failedModel.provider, defaultModelId) : undefined;
+		// Resolved after the failed model is marked exhausted, so the router never hands it back.
+		const fallback = this.deps.resolveFallbackModel?.(failedModel);
 		const action = decideBillingFailover({
 			failedModel: { provider: failedModel.provider, id: failedModel.id },
 			billingClass: this.deps.modelRegistry.isUsingSubscription(failedModel) ? "subscription" : "metered",
@@ -185,13 +199,23 @@ export class BillingFailoverController {
 			hopResolvesWithAuth: Boolean(hop && this.deps.modelRegistry.hasConfiguredAuth(hop)),
 			hopExhausted: hop ? this.deps.exhausted.isExhausted(`${hop.provider}/${hop.id}`) : false,
 			subscriptionHop: this.deps.subscriptionHop,
+			...(fallback ? { fallback: { provider: fallback.provider, modelId: fallback.id } } : {}),
 		});
-		if (action.action === "failover" && hop) {
-			this.deps.applyFailoverModel(failedModel, hop);
+		let continuedOn: Model<Api> | undefined;
+		if (action.action === "failover") {
+			const target = hop && action.to.provider === hop.provider && action.to.modelId === hop.id ? hop : fallback;
+			continuedOn = target ? this.deps.applyFailoverModel(failedModel, target) : undefined;
 		}
-		this.lastNotice = action.notice;
-		this.deps.emit({ type: "warning", message: action.notice });
-		return true;
+		// The notice names where the work actually continues: inside a routed turn that is the turn's own
+		// replacement, not necessarily the model the decision proposed.
+		const notice = continuedOn
+			? `${failedModel.id} quota reached — continuing on ${continuedOn.provider}/${continuedOn.id}`
+			: action.notice;
+		this.lastNotice = notice;
+		this.deps.emit({ type: "warning", message: notice });
+		return continuedOn
+			? { handled: true, continuedOn: `${continuedOn.provider}/${continuedOn.id}` }
+			: { handled: true };
 	}
 }
 

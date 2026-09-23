@@ -58,6 +58,7 @@ describe("BillingFailoverController", () => {
 			agent,
 			applyFailoverModel: (_failed, hop) => {
 				agent.state.model = hop;
+				return hop;
 			},
 			modelRegistry: registry(true),
 			exhausted: new ExhaustedProviderRegistry(),
@@ -66,9 +67,9 @@ describe("BillingFailoverController", () => {
 
 		await expect(
 			controller.handleAssistantError(message("You have hit your ChatGPT usage limit. Try again later.")),
-		).resolves.toBe(true);
+		).resolves.toMatchObject({ handled: true });
 		expect(agent.state.model.id).toBe("gpt-5.6-sol");
-		expect(warnings).toEqual(["codex-spark quota reached — switched to openai-codex/gpt-5.6-sol"]);
+		expect(warnings).toEqual(["codex-spark quota reached — continuing on openai-codex/gpt-5.6-sol"]);
 	});
 
 	it("halts metered quota failures without changing models", async () => {
@@ -78,13 +79,16 @@ describe("BillingFailoverController", () => {
 			agent,
 			applyFailoverModel: (_failed, hop) => {
 				agent.state.model = hop;
+				return hop;
 			},
 			modelRegistry: registry(false),
 			exhausted: new ExhaustedProviderRegistry(),
 			emit: (event) => warnings.push(event.message),
 		});
 
-		await expect(controller.handleAssistantError(message("quota exceeded"))).resolves.toBe(true);
+		await expect(controller.handleAssistantError(message("quota exceeded"))).resolves.toMatchObject({
+			handled: true,
+		});
 		expect(agent.state.model.id).toBe("codex-spark");
 		expect(warnings[0]).toContain("switch models (/model), wait for the limit window, or re-send to retry");
 	});
@@ -111,6 +115,7 @@ describe("BillingFailoverController", () => {
 			agent,
 			applyFailoverModel: (_failed, hop) => {
 				agent.state.model = hop;
+				return hop;
 			},
 			modelRegistry,
 			exhausted: new ExhaustedProviderRegistry(),
@@ -119,7 +124,7 @@ describe("BillingFailoverController", () => {
 
 		await expect(
 			controller.handleAssistantError(message("You have hit your ChatGPT usage limit. Try again later.")),
-		).resolves.toBe(true);
+		).resolves.toMatchObject({ handled: true });
 		// Classified as metered, not subscription: halts and asks instead of silently hopping models.
 		expect(agent.state.model.id).toBe("codex-spark");
 		expect(warnings[0]).toContain("switch models (/model), wait for the limit window, or re-send to retry");
@@ -158,16 +163,58 @@ describe("BillingFailoverController", () => {
 			agent,
 			applyFailoverModel: (_failed, hop) => {
 				agent.state.model = hop;
+				return hop;
 			},
 			modelRegistry: registry(true),
 			exhausted,
 			emit: (event) => warnings.push(event.message),
 		});
 
-		await expect(controller.handleAssistantError(message("You have hit your ChatGPT usage limit."))).resolves.toBe(
-			true,
-		);
+		await expect(
+			controller.handleAssistantError(message("You have hit your ChatGPT usage limit.")),
+		).resolves.toMatchObject({ handled: true });
 		expect(agent.state.model.id).toBe("codex-spark");
 		expect(warnings[0]).toContain("wait for the limit window");
+	});
+	it("moves an exhausted subscription with no hop to the router's fallback and reports where the work continues", async () => {
+		const warnings: string[] = [];
+		const grok = { ...model("grok-4.7"), provider: "xai" };
+		const gemini = { ...model("gemini-3.1-pro-low"), provider: "google-antigravity" };
+		const agent = { state: { model: grok } } as unknown as Agent;
+		const exhausted = new ExhaustedProviderRegistry();
+		let fallbackSawFailedExhausted = false;
+		const controller = new BillingFailoverController({
+			agent,
+			applyFailoverModel: (_failed, target) => {
+				agent.state.model = target;
+				return target;
+			},
+			resolveFallbackModel: (failedModel) => {
+				fallbackSawFailedExhausted = exhausted.isExhausted(`${failedModel.provider}/${failedModel.id}`);
+				return gemini;
+			},
+			modelRegistry: {
+				find: (provider: string, id: string) => (provider === "xai" && id === "grok-4.7" ? grok : undefined),
+				hasConfiguredAuth: () => true,
+				getAvailable: () => [],
+				isUsingSubscription: () => true,
+			} as unknown as ModelRegistry,
+			exhausted,
+			emit: (event) => warnings.push(event.message),
+		});
+		const error = {
+			...message('OpenAI API error (402): 402 "Grok Build usage balance exhausted"'),
+			provider: "xai",
+			model: "grok-4.7",
+		} as AssistantMessage;
+
+		await expect(controller.handleAssistantError(error)).resolves.toEqual({
+			handled: true,
+			continuedOn: "google-antigravity/gemini-3.1-pro-low",
+		});
+		// The failed model is marked exhausted before the router is asked, so it is never handed back.
+		expect(fallbackSawFailedExhausted).toBe(true);
+		expect(agent.state.model.id).toBe("gemini-3.1-pro-low");
+		expect(warnings).toEqual(["grok-4.7 quota reached — continuing on google-antigravity/gemini-3.1-pro-low"]);
 	});
 });

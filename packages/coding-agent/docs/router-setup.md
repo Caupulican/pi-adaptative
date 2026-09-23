@@ -107,6 +107,15 @@ A routed turn's model is the turn's, never the session's. The session model is t
 `model_change`; a reply written by a routed model never becomes it, so a resumed session reopens on the
 same ROOT. Billing failover inside a routed turn replaces that turn's model and leaves the session model alone.
 
+When a subscription runs out of quota (a usage limit, an exhausted balance, HTTP 402), the work moves
+on and the failed request continues at once on the new model (`Continuing on <model>`). A provider's own
+backup comes first when it has a usable one (Codex's default model); otherwise the router picks, trying
+the tiers from strongest to cheapest with the same checks a routed turn uses: your pin for the tier in
+any selection mode, then the tier's automatic pick from the pool, never an exhausted model, one outside
+your model policy, one without auth or a working tool path, or one too small for the context. A metered
+balance still stops and asks, because moving it to another paid model is a spending decision.
+`failover.subscriptionHop: false` turns the automatic move off.
+
 ## Model pools by request
 
 Models fall in three pools: subscription (a flat plan, not billed per request), metered (pay-per-use API

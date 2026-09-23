@@ -12,6 +12,7 @@
  * `contextOverflow` in.
  */
 
+import { QUOTA_EXHAUSTED_PATTERN } from "@caupulican/pi-ai";
 import { PROVIDER_FAILURE_SIGNATURES } from "./provider-signatures.ts";
 
 export type FailureReason =
@@ -50,8 +51,7 @@ export interface ClassifyFailureInput {
 	provider?: string;
 }
 
-const BILLING_OR_QUOTA =
-	/GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing|usage.?limit(?:s)?\s*(?:(?:has|have)\s+been\s+)?(?:reached|exceeded|hit)|usage_limit_reached|hit your usage limit|hit your ChatGPT usage limit/i;
+const BILLING_OR_QUOTA = QUOTA_EXHAUSTED_PATTERN;
 /**
  * The account cannot use the requested model at all, as opposed to having run out of it. Retrying the
  * same request is futile; the host moves the turn to a model the account has.

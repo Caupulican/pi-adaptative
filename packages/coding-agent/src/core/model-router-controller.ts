@@ -829,6 +829,34 @@ export class ModelRouterController {
 		return this.deps.isModelExhausted(resolved.model) ? undefined : resolved.model;
 	}
 
+	/**
+	 * Where work goes when `failed` ran out of quota and its provider has no usable hop: the configured
+	 * tiers, strongest first so the work keeps its capability, each through the same checks a routed turn
+	 * applies (the owner's pin in any selection mode when usable, then the tier's automatic pick from the
+	 * pool; auth, the owner's model policy, quota, a working tool path, the turn's context). Never the model
+	 * that just failed.
+	 */
+	resolveQuotaFallbackModel(
+		failed: Model<Api>,
+		facts: { hasImages: boolean; contextTokens: number },
+	): Model<Api> | undefined {
+		const usable = (candidate: Model<Api> | undefined): candidate is Model<Api> =>
+			candidate !== undefined &&
+			!modelsAreEqual(candidate, failed) &&
+			this.deps.isModelAllowed?.(candidate) !== false;
+		for (const tier of ["expensive", "medium", "cheap"] as const) {
+			// Same order as a routed turn: the owner's pin in any selection mode, then the tier's automatic pick.
+			const pinned = this._usablePin(tier, facts).model;
+			if (usable(pinned)) return pinned;
+			if (!this.isTierAutoSelected(tier)) continue;
+			const auto = this.selectAutoTierModel(tier).candidates.find(
+				(entry) => entry.admitted && fitsTurnFacts(entry.model, facts) && usable(entry.model),
+			)?.model;
+			if (auto) return auto;
+		}
+		return undefined;
+	}
+
 	resolveConfiguredTierModel(tier: "cheap" | "medium" | "expensive"): Model<Api> | undefined {
 		if (this.isTierAutoSelected(tier)) return this.selectAutoTierModel(tier).chosen?.model;
 		const settings = this.deps.getSettingsManager().getModelRouterSettings();

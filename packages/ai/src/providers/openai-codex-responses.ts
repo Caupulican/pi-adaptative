@@ -41,6 +41,7 @@ import {
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
+import { isQuotaExhaustedMessage } from "../utils/quota-exhaustion.ts";
 import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
 import { uuidv7 } from "../utils/uuid.ts";
 import {
@@ -143,9 +144,7 @@ interface RequestBody {
 // ============================================================================
 
 function isTerminalRateLimitError(errorText: string): boolean {
-	return /GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing|usage.?limit(?:s)?\s*(?:(?:has|have)\s+been\s+)?(?:reached|exceeded|hit)|hit your (?:\S+ )?usage limit/i.test(
-		errorText,
-	);
+	return isQuotaExhaustedMessage(errorText);
 }
 
 function isRetryableError(status: number, errorText: string): boolean {

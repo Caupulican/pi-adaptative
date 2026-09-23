@@ -1,5 +1,5 @@
 import type { Agent } from "@caupulican/pi-agent-core/agent";
-import type { AssistantMessage } from "@caupulican/pi-ai";
+import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { FailureCorpusRecorder } from "../src/core/failure-corpus.ts";
@@ -257,5 +257,50 @@ describe("ForegroundRecoveryController submission cancellation", () => {
 		expect(agent.prompt).toHaveBeenCalledOnce();
 		expect(agent.continue).toHaveBeenCalledOnce();
 		expect(controller.isBusy).toBe(false);
+	});
+	it("continues the failed request on the router's fallback when a subscription runs out of quota", async () => {
+		const f = createFixture();
+		f.checkCompaction.mockResolvedValue(false);
+		const grok = { provider: "xai", id: "grok-4.7" } as Model<Api>;
+		const gemini = { provider: "google-antigravity", id: "gemini-3.1-pro-low" } as Model<Api>;
+		const applied: string[] = [];
+		const base = fixtureDeps(f);
+		const controller = new ForegroundRecoveryController({
+			...base,
+			// Automatic subscription failover allowed (the owner's `failover.subscriptionHop`).
+			settingsManager: {
+				...base.settingsManager,
+				getRetrySettings: () => ({ enabled: true, maxRetries: 3, baseDelayMs: 0 }),
+				getProviderRetrySettings: () => ({ maxRetryDelayMs: 60_000 }),
+				getFailoverSettings: () => ({ subscriptionHop: true }),
+				getAutonomySettings: () => ({ maxStallTurns: 0 }),
+			} as unknown as SettingsManager,
+			modelRegistry: {
+				find: (provider: string, id: string) => (provider === "xai" && id === "grok-4.7" ? grok : undefined),
+				hasConfiguredAuth: () => true,
+				isUsingSubscription: () => true,
+			} as unknown as ModelRegistry,
+			applyFailoverModel: (_failed, target) => {
+				applied.push(`${target.provider}/${target.id}`);
+				return target;
+			},
+			resolveFallbackModel: () => gemini,
+		});
+		const error = {
+			role: "assistant",
+			content: [],
+			stopReason: "error",
+			errorMessage: 'OpenAI API error (402): 402 "Grok Build usage balance exhausted"',
+			provider: "xai",
+			model: "grok-4.7",
+			timestamp: 1,
+		} as unknown as AssistantMessage;
+		f.agent.state.messages = [error];
+		controller.observeAssistant(error);
+
+		await expect(controller.handlePostAgentRun()).resolves.toBe(true);
+		expect(applied).toEqual(["google-antigravity/gemini-3.1-pro-low"]);
+		// The failed reply is dropped so the continuation re-sends the request on the fallback.
+		expect(f.agent.state.messages).toEqual([]);
 	});
 });

@@ -1287,13 +1287,18 @@ export class AgentSession {
 			agent: this.agent,
 			applyFailoverModel: (failed, hop) => {
 				// Same rule as an unsupported model: a routed turn's model stays inside that turn.
-				if (this._modelRouter.isRoutedTurnOn(failed)) {
-					this._modelRouter.replaceRefusedRoutedModel(failed, hop);
-					return;
-				}
+				if (this._modelRouter.isRoutedTurnOn(failed))
+					return this._modelRouter.replaceRefusedRoutedModel(failed, hop);
 				this.agent.state.model = hop;
 				this.sessionManager.appendModelChange(hop.provider, hop.id);
+				return hop;
 			},
+			resolveFallbackModel: (failed) =>
+				this._modelRouter.resolveQuotaFallbackModel(failed, {
+					hasImages: false,
+					contextTokens: this.getContextUsage()?.tokens ?? 0,
+				}),
+
 			modelRegistry: this._modelRegistry,
 			settingsManager: this.settingsManager,
 			failureCorpus: this._failureCorpus,

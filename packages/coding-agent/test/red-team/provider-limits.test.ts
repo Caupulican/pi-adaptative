@@ -157,6 +157,7 @@ function controller(startModel: Model<Api>, subscription: boolean, exhausted = n
 		agent,
 		applyFailoverModel: (_failed, hop) => {
 			agent.state.model = hop;
+			return hop;
 		},
 		modelRegistry: registry(subscription),
 		exhausted,
@@ -170,10 +171,12 @@ describe("provider limit red-team matrix", () => {
 		const chaos = createChaosProvider([{ type: "error", message: codexLiteral }, { type: "success" }]);
 		const harness = controller(codexSpark, true);
 		chaos.call("openai-codex/codex-spark");
-		await expect(harness.failover.handleAssistantError(assistantError(codexSpark, codexLiteral))).resolves.toBe(true);
+		await expect(
+			harness.failover.handleAssistantError(assistantError(codexSpark, codexLiteral)),
+		).resolves.toMatchObject({ handled: true });
 		chaos.call(`${harness.agent.state.model.provider}/${harness.agent.state.model.id}`);
 		expect(harness.agent.state.model.id).toBe("gpt-5.6-sol");
-		expect(harness.warnings[0]).toContain("switched to openai-codex/gpt-5.6-sol");
+		expect(harness.warnings[0]).toContain("continuing on openai-codex/gpt-5.6-sol");
 		expectBoundedOutbound(chaos, 2);
 		expectNoSilentTerminal({ ended: true, visibleMessages: harness.warnings });
 	});
@@ -184,7 +187,7 @@ describe("provider limit red-team matrix", () => {
 		chaos.call("metered/selected");
 		await expect(
 			harness.failover.handleAssistantError(assistantError(meteredSelected, "quota exceeded")),
-		).resolves.toBe(true);
+		).resolves.toMatchObject({ handled: true });
 		expect(harness.agent.state.model.id).toBe("selected");
 		expect(harness.warnings[0]).toContain("switch models (/model), wait for the limit window, or re-send to retry");
 		expectBoundedOutbound(chaos, 1);
@@ -225,7 +228,9 @@ describe("provider limit red-team matrix", () => {
 
 	it("A0 stored literal replayed verbatim", async () => {
 		const harness = controller(codexSpark, true);
-		await expect(harness.failover.handleAssistantError(assistantError(codexSpark, codexLiteral))).resolves.toBe(true);
+		await expect(
+			harness.failover.handleAssistantError(assistantError(codexSpark, codexLiteral)),
+		).resolves.toMatchObject({ handled: true });
 		expect(classifyFailure({ message: codexLiteral, provider: "openai-codex" }).reason).toBe("billing_or_quota");
 		expect(classifyFailure({ message: codexLiteral, provider: "openai-codex" }).retryable).toBe(false);
 	});

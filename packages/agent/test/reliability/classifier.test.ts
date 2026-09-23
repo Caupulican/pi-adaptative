@@ -131,12 +131,19 @@ describe("classifyFailure", () => {
 			// Codex's in-stream error event, which carries no code: only the text says it is a quota.
 			"Codex error: The usage limit has been reached",
 			"Monthly usage limits have been exceeded",
+			// xAI's exhausted subscription: HTTP 402 Payment Required.
+			'OpenAI API error (402): 402 "Grok Build usage balance exhausted"',
+			"402 Payment Required",
 		]) {
 			const c = classifyFailure({ message: msg });
 			expect(c.retryable, msg).toBe(false);
 			expect(c.shouldFallback, msg).toBe(true);
 			expect(c.reason, msg).toBe("billing_or_quota");
 		}
+	});
+
+	it("does not read a bare 402 count as a quota", () => {
+		expect(classifyFailure({ message: "prompt is 402 tokens too long" }).reason).not.toBe("billing_or_quota");
 	});
 
 	it("classifies auth failures as rotate + fallback, non-retryable", () => {

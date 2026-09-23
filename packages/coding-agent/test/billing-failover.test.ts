@@ -36,6 +36,47 @@ describe("decideBillingFailover", () => {
 		});
 	});
 
+	it("moves a subscription with no usable hop to the router's fallback, and keeps halting a metered balance", () => {
+		const xai = { provider: "xai", id: "grok-4.7" };
+		const fallback = { provider: "google-antigravity", modelId: "gemini-3.1-pro-low" };
+		expect(
+			decideBillingFailover({
+				failedModel: xai,
+				billingClass: "subscription",
+				providerDefaultModelId: undefined,
+				hopResolvesWithAuth: false,
+				hopExhausted: false,
+				fallback,
+			}),
+		).toEqual({
+			action: "failover",
+			to: fallback,
+			notice: "grok-4.7 quota reached — switched to google-antigravity/gemini-3.1-pro-low",
+		});
+		// A same-provider hop that is usable still comes first.
+		expect(
+			decideBillingFailover({
+				failedModel,
+				billingClass: "subscription",
+				providerDefaultModelId: "gpt-5.5",
+				hopResolvesWithAuth: true,
+				hopExhausted: false,
+				fallback,
+			}),
+		).toMatchObject({ action: "failover", to: { provider: "openai-codex", modelId: "gpt-5.5" } });
+		// Moving a metered balance to another paid model is a spending decision: it still halts.
+		expect(
+			decideBillingFailover({
+				failedModel: xai,
+				billingClass: "metered",
+				providerDefaultModelId: undefined,
+				hopResolvesWithAuth: false,
+				hopExhausted: false,
+				fallback,
+			}).action,
+		).toBe("halt_ask");
+	});
+
 	it("halts subscription providers when the hop is unavailable, exhausted, disabled, or already default", () => {
 		for (const input of [
 			{ providerDefaultModelId: "codex-spark", hopResolvesWithAuth: true, hopExhausted: false },
