@@ -331,5 +331,53 @@ describe("Antigravity OAuth and transport", () => {
 		expect(request.generationConfig.maxOutputTokens).toBe(4096 + 1024);
 		expect(request.tools[0]?.functionDeclarations[0]).toHaveProperty("parameters");
 		expect(request.tools[0]?.functionDeclarations[0]).not.toHaveProperty("parametersJsonSchema");
+		expect(request).not.toHaveProperty("max_tokens");
+		expect(request).not.toHaveProperty("messages");
+		expect(bodies[0]).toMatchObject({ model: "claude-sonnet-4-6", requestType: "agent", userAgent: "antigravity" });
+	});
+
+	it("reads a Claude stream that opens with an empty part before the thought and the answer", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi
+				.fn()
+				.mockResolvedValueOnce(Response.json({ cloudaicompanionProject: "fixture-project" }))
+				.mockResolvedValueOnce(
+					new Response(
+						[
+							`data: ${JSON.stringify({ response: { candidates: [{ content: { role: "model", parts: [{ text: "" }] } }] } })}`,
+							"",
+							`data: ${JSON.stringify({ response: { candidates: [{ content: { role: "model", parts: [{ thought: true, text: "ok" }] } }] } })}`,
+							"",
+							`data: ${JSON.stringify({ response: { candidates: [{ content: { role: "model", parts: [{ thought: true, text: "", thoughtSignature: "c2ln" }] } }] } })}`,
+							"",
+							`data: ${JSON.stringify({ response: { candidates: [{ content: { role: "model", parts: [{ text: "ok" }] }, finishReason: "STOP" }] } })}`,
+							"",
+							"",
+						].join("\n"),
+						{ headers: { "content-type": "text/event-stream" } },
+					),
+				),
+		);
+		const [claude] = parseAntigravityModels({
+			"claude-sonnet-4-6": {
+				displayName: "Claude Sonnet 4.6",
+				maxTokens: 200000,
+				maxOutputTokens: 64000,
+				supportsThinking: true,
+				thinkingBudget: 1024,
+				apiProvider: "API_PROVIDER_ANTHROPIC_VERTEX",
+			},
+		});
+		const result = await streamAntigravity(
+			claude!,
+			{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+			{ apiKey: "fixture-claude-stream", maxTokens: 64 },
+		).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([
+			{ type: "thinking", thinking: "ok", thinkingSignature: "c2ln" },
+			{ type: "text", text: "ok", textSignature: undefined },
+		]);
 	});
 });

@@ -95,6 +95,9 @@ export function streamGoogleGenAi<TApi extends GoogleApiType>(
 					for (const part of candidate.content.parts) {
 						if (part.text !== undefined) {
 							const isThinking = isThinkingPart(part);
+							// This endpoint opens a Claude turn with an empty text part, then the
+							// thought, then the answer. An empty part with no signature is not a block.
+							if (part.text.length === 0 && !part.thoughtSignature) continue;
 							if (
 								!currentBlock ||
 								(isThinking && currentBlock.type !== "thinking") ||
