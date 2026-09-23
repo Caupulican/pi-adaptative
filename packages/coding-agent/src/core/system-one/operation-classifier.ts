@@ -1,118 +1,46 @@
 /**
- * Operations the deterministic gates cannot decide, judged by System One.
+ * System One judges every operation that can have an effect beyond the task.
  *
- * The envelope and the edge decide most calls from their own arguments: a read is safe, `rm -rf` of
- * the repository is the edge, a package install is the edge's install class. A few
- * shapes carry an effect none of them can read off the command: code piped into an interpreter, a
- * destructive command whose target is an unexpanded variable, a request that sends data off the
- * machine, a typed write outside the task directory. Those, and only those, are undecidable: System
- * One answers what the operation does (leaves the machine, cannot be undone, touches files outside
- * the task) and whether the owner's request asks for it, and the authority line turns the answers
- * into an action. Everything else never reaches System One.
+ * A pattern list cannot decide what a shell command, a script or a program does: there are more
+ * languages and more ways to say the same thing than any list covers, and a model blocked on one
+ * spelling reaches for another (measured live: a blocked `curl` POST came back as Python `urllib`).
+ * So the only deterministic decisions here are by tool contract and exact path: a tool that cannot
+ * have effects (reading, searching, planning) and a typed write inside the task directory are
+ * ordinary work, and the edge keeps its literal extreme-destruction rules. Every shell or code call,
+ * and every write outside the task, goes to System One, which answers what the operation does (leaves
+ * the machine, cannot be undone, touches files outside the task, acquires external code) and whether the
+ * owner's request asks for it; the authority line turns the answers into an action.
  */
 
 import nodePath from "node:path";
 import { commandFromToolArgs } from "../acquisition/acquisition-boundary.ts";
 import { classifyAllEdgeOperations } from "../autonomy/edge-policy.ts";
-import { isDecisivelyFalse, isDecisivelyTrue } from "../decision/noul.ts";
-import { parseShellCommandSequence } from "../tools/shell-command-parser.ts";
 import { decideByAuthority, type JudgmentReading } from "./authority-line.ts";
 
-/** What makes an operation undecidable, named for the record and the operator. */
-export type UndecidableReason =
-	| "pipe_to_interpreter"
-	| "destructive_unexpanded_target"
-	| "network_send"
-	| "write_outside_task";
+/** Why System One is asked: the operation runs code, or writes outside the task. */
+export type JudgedOperationKind = "shell" | "code" | "write_outside_task";
 
 export type OperationTriage =
 	| { readonly kind: "decided" }
 	| {
-			readonly kind: "undecidable";
-			readonly reasons: readonly UndecidableReason[];
-			/** The operation as the operator reads it: the command, or the written path. */
+			readonly kind: "judged";
+			readonly operationKind: JudgedOperationKind;
+			/** The operation as the operator reads it: the command, the code, or the written path. */
 			readonly operation: string;
 	  };
 
-const SHELL_TOOLS = new Set(["bash", "run_process", "powershell"]);
+/** Tools that run arbitrary commands or code: what they do is only known by reading them. */
+const OPERATION_TOOLS: Readonly<Record<string, JudgedOperationKind>> = {
+	bash: "shell",
+	run_process: "shell",
+	powershell: "shell",
+	python: "code",
+};
 const WRITE_TOOLS = new Set(["write", "edit"]);
-const INTERPRETERS = new Set([
-	"bash",
-	"sh",
-	"zsh",
-	"dash",
-	"python",
-	"node",
-	"perl",
-	"ruby",
-	"pwsh",
-	"powershell",
-	"iex",
-]);
-const DESTRUCTIVE = new Set(["rm", "rmdir", "shred", "truncate", "unlink", "del", "rd", "remove-item"]);
-const REMOTE_COPY = new Set(["scp", "sftp", "ftp", "nc", "ncat", "netcat"]);
-const CURL_SEND = /^(?:-d|--data(?:-[a-z]+)?|-F|--form(?:-string)?|-T|--upload-file|--json)$/;
-const SEND_METHOD = /^(?:POST|PUT|PATCH|DELETE)$/i;
-
-function tool(token: string | undefined): string {
-	return nodePath
-		.basename((token ?? "").toLowerCase())
-		.replace(/\.exe$/, "")
-		.replace(/[0-9.]+$/, "");
-}
-
-function hasExpansion(token: string): boolean {
-	return /\$|`|%[A-Za-z_][A-Za-z0-9_]*%/.test(token);
-}
-
-function commandReasons(command: string): UndecidableReason[] {
-	const sequence = parseShellCommandSequence(command, { redirects: "drop" });
-	const reasons = new Set<UndecidableReason>();
-	if (!sequence) {
-		// An opaque command still says a pipe into an interpreter in its own text.
-		if (
-			/\|\s*(?:sudo\s+)?(?:bash|sh|zsh|dash|python[0-9.]*|node|perl|ruby|pwsh|powershell|iex)\s*(?:$|[;&|)])/m.test(
-				command,
-			)
-		)
-			reasons.add("pipe_to_interpreter");
-		return [...reasons];
-	}
-	sequence.invocations.forEach((rawArgs, index) => {
-		const args = rawArgs[0] === "sudo" ? rawArgs.slice(1) : rawArgs;
-		const name = tool(args[0]);
-		const piped = index > 0 && sequence.connectors[index - 1] === "|";
-		// `… | python` runs what arrives on stdin; `… | python -m json.tool` or `-c code` runs its own code.
-		const readsCodeFromStdin = args.slice(1).every((arg) => arg === "-" || arg === "-s" || arg === "--");
-		if (piped && INTERPRETERS.has(name) && readsCodeFromStdin) reasons.add("pipe_to_interpreter");
-		const gitClean = name === "git" && args.includes("clean");
-		const findDelete = name === "find" && args.includes("-delete");
-		if ((DESTRUCTIVE.has(name) || gitClean || findDelete) && args.slice(1).some(hasExpansion)) {
-			reasons.add("destructive_unexpanded_target");
-		}
-		if (REMOTE_COPY.has(name)) reasons.add("network_send");
-		if (name === "rsync" && args.slice(1).some((arg) => /^[^/\s]+:/.test(arg))) reasons.add("network_send");
-		if (name === "curl") {
-			const sends = args.some(
-				(arg, i) =>
-					CURL_SEND.test(arg) || ((arg === "-X" || arg === "--request") && SEND_METHOD.test(args[i + 1] ?? "")),
-			);
-			if (sends) reasons.add("network_send");
-		}
-		if (
-			name === "wget" &&
-			args.some((arg) =>
-				/^--(?:post-data|post-file|body-data|body-file)|^--method=(?:POST|PUT|PATCH|DELETE)$/i.test(arg),
-			)
-		)
-			reasons.add("network_send");
-	});
-	return [...reasons];
-}
 
 /**
- * Which calls System One must judge. `decided` covers what the edge already owns and ordinary work,
- * so it never reaches System One.
+ * Which calls System One must judge. `decided` covers what the edge already owns, tools that cannot
+ * have effects, and writes inside the task (or the temp directory); everything else is judged.
  */
 export function triageOperation(input: {
 	toolName: string;
@@ -127,15 +55,11 @@ export function triageOperation(input: {
 		cwd: input.cwd,
 		scopeCwd: input.scopeCwd,
 	});
-	// The edge owns its operations. An acquisition is not skipped: the acquisition screen exists only
-	// under an objective charter, and a named shape (a send, a pipe into an interpreter) is an effect
-	// the acquisition questions do not ask about.
 	if (edge.length > 0) return { kind: "decided" };
-	if (SHELL_TOOLS.has(input.toolName)) {
-		const command = commandFromToolArgs(input.args);
-		if (!command) return { kind: "decided" };
-		const reasons = commandReasons(command);
-		return reasons.length > 0 ? { kind: "undecidable", reasons, operation: command } : { kind: "decided" };
+	const operationKind = OPERATION_TOOLS[input.toolName];
+	if (operationKind) {
+		const operation = commandFromToolArgs(input.args);
+		return operation ? { kind: "judged", operationKind, operation } : { kind: "decided" };
 	}
 	if (WRITE_TOOLS.has(input.toolName)) {
 		const path = (input.args as { path?: unknown } | undefined)?.path;
@@ -146,7 +70,7 @@ export function triageOperation(input: {
 			return relative === "" || (!relative.startsWith("..") && !nodePath.isAbsolute(relative));
 		};
 		if (inside(input.scopeCwd) || inside(input.tempDir)) return { kind: "decided" };
-		return { kind: "undecidable", reasons: ["write_outside_task"], operation: `${input.toolName} ${resolved}` };
+		return { kind: "judged", operationKind: "write_outside_task", operation: `${input.toolName} ${resolved}` };
 	}
 	return { kind: "decided" };
 }
@@ -171,6 +95,11 @@ export const OPERATION_EFFECT_PROGRAM = {
 		{
 			id: "touches_outside_task",
 			instruction: "Does `operation.command` create, change or delete files outside `operation.task_directory`?",
+		},
+		{
+			id: "acquires_external_code",
+			instruction:
+				"Does `operation.command` download or install code, packages or programs from outside this machine?",
 		},
 		{
 			id: "request_authorizes",
@@ -210,6 +139,7 @@ const EFFECT_WORDS: Readonly<Record<string, string>> = {
 	leaves_machine: "leaves the machine",
 	cannot_be_undone: "cannot be undone",
 	touches_outside_task: "touches files outside the task",
+	acquires_external_code: "acquires external code",
 };
 
 /** The authority line's irreversible row, as an operation verdict. */
@@ -220,16 +150,34 @@ function irreversibleAction(reading: JudgmentReading, actor: "root" | "worker"):
 }
 
 /**
- * One batched System One request over the four questions, read through the authority line: an
- * operation shown local and reversible proceeds; one System One finds irreversible or outward runs
- * when the owner's request asks for it, is refused when the request clearly does not, and goes to
- * the operator when that is unsettled; an unsettled effect or an unanswered request goes to the
- * operator too.
+ * How the answers read. Every shell call reaches this gate, so the reading scales with what an
+ * interruption costs (TypeSafe: thresholds follow the cost of the action): an effect is established
+ * at the noul hard-fail band, unsettled above an even chance, absent below it. Probed live: `npm test`,
+ * `git status`, a build script and a `sed` edit stay at or below 0.22 on every effect; `pip install`
+ * reads 0.99 acquires external code; a Python POST reads 0.93 leaves the machine.
+ */
+const EFFECT_ESTABLISHED = 0.8;
+const EFFECT_UNSETTLED_ABOVE = 0.5;
+/** The owner's request: asks for it at 0.8 or above, clearly does not at 0.2 or below. */
+const REQUEST_ASKS = 0.8;
+const REQUEST_DOES_NOT_ASK = 0.2;
+
+function probability(answer: unknown): number | undefined {
+	const noul = (answer as { noul?: unknown } | undefined)?.noul;
+	return typeof noul === "number" && Number.isFinite(noul) && noul >= 0 && noul <= 1 ? noul : undefined;
+}
+
+/**
+ * One batched System One request, read through the authority line: an operation with no likely effect
+ * runs silently; one with an established effect runs when the owner's request asks for it, is refused
+ * when the request clearly does not, and goes to the operator otherwise; an unsettled effect goes to
+ * the operator unless the request asks for it; an unanswered request goes to the operator (a worker
+ * is refused).
  */
 export async function judgeOperation(
 	engine: OperationEffectEngine,
 	input: {
-		readonly triage: Extract<OperationTriage, { kind: "undecidable" }>;
+		readonly triage: Extract<OperationTriage, { kind: "judged" }>;
 		readonly toolName: string;
 		readonly scopeCwd: string;
 		readonly request: string;
@@ -239,55 +187,58 @@ export async function judgeOperation(
 		readonly timeoutMs?: number;
 	},
 ): Promise<OperationVerdict> {
-	let answers: Record<string, unknown> | undefined;
-	let failure: string | undefined;
-	{
-		const bounded = [input.signal, input.timeoutMs ? AbortSignal.timeout(input.timeoutMs) : undefined].filter(
-			(signal): signal is AbortSignal => signal !== undefined,
-		);
-		try {
-			answers =
-				(
-					await engine.evaluate(
-						OPERATION_EFFECT_PROGRAM,
-						{
-							operation: {
-								tool: input.toolName,
-								command: input.triage.operation,
-								task_directory: input.scopeCwd,
-								why_asked: input.triage.reasons,
-							},
-							request: input.request || "(no request recorded)",
+	const bounded = [input.signal, input.timeoutMs ? AbortSignal.timeout(input.timeoutMs) : undefined].filter(
+		(signal): signal is AbortSignal => signal !== undefined,
+	);
+	let answers: Record<string, unknown>;
+	try {
+		answers =
+			(
+				await engine.evaluate(
+					OPERATION_EFFECT_PROGRAM,
+					{
+						operation: {
+							tool: input.toolName,
+							command: input.triage.operation,
+							task_directory: input.scopeCwd,
+							kind: input.triage.operationKind,
 						},
-						{ consequence: "high", signal: bounded.length > 0 ? AbortSignal.any(bounded) : undefined },
-					)
-				).answers ?? {};
-		} catch (error) {
-			input.signal?.throwIfAborted();
-			failure = error instanceof Error ? error.message : String(error);
-		}
-	}
-	if (!answers) {
+						request: input.request || "(no request recorded)",
+					},
+					{ consequence: "high", signal: bounded.length > 0 ? AbortSignal.any(bounded) : undefined },
+				)
+			).answers ?? {};
+	} catch (error) {
+		input.signal?.throwIfAborted();
 		return {
 			action: irreversibleAction("unavailable", input.actor),
-			finding: `System One could not judge it (${failure}); flagged for ${input.triage.reasons.join(", ")}`,
+			finding: `System One could not judge it (${error instanceof Error ? error.message : String(error)})`,
 			notable: true,
 		};
 	}
-	const found = answers;
-	const effects = Object.keys(EFFECT_WORDS).filter((id) => isDecisivelyTrue(found[id]));
-	if (Object.keys(EFFECT_WORDS).every((id) => isDecisivelyFalse(found[id]))) {
-		return { action: "proceed", finding: "System One found it local and reversible", notable: false };
+	const effectIds = Object.keys(EFFECT_WORDS);
+	const read = (id: string) => probability(answers[id]);
+	const established = effectIds.filter((id) => (read(id) ?? 0) >= EFFECT_ESTABLISHED);
+	const unsettled = effectIds.filter((id) => {
+		const value = read(id);
+		return value === undefined || (value > EFFECT_UNSETTLED_ABOVE && value < EFFECT_ESTABLISHED);
+	});
+	if (established.length === 0 && unsettled.length === 0) {
+		return { action: "proceed", finding: "System One found no effect beyond the task", notable: false };
 	}
 	const described =
-		effects.length > 0 ? effects.map((id) => EFFECT_WORDS[id]).join(", ") : "its effect could not be settled";
-	if (isDecisivelyTrue(found.request_authorizes)) {
+		established.length > 0
+			? established.map((id) => EFFECT_WORDS[id]).join(", ")
+			: `possibly ${unsettled.map((id) => EFFECT_WORDS[id]).join(", possibly ")}`;
+	const asked = read("request_authorizes");
+	if (asked !== undefined && asked >= REQUEST_ASKS) {
 		return { action: "proceed", finding: `${described}; the owner's request asks for it`, notable: true };
 	}
-	const refused = effects.length > 0 && isDecisivelyFalse(found.request_authorizes);
+	const clearlyNot = asked !== undefined && asked <= REQUEST_DOES_NOT_ASK;
+	const reading: JudgmentReading = established.length > 0 && clearlyNot ? "fail" : "ambiguous";
 	return {
-		action: irreversibleAction(refused ? "fail" : "ambiguous", input.actor),
-		finding: `${described}; ${refused ? "the owner's request does not ask for it" : "the owner's request does not settle it"}`,
+		action: irreversibleAction(reading, input.actor),
+		finding: `${described}; ${clearlyNot ? "the owner's request does not ask for it" : "the owner's request does not settle it"}`,
 		notable: true,
 	};
 }

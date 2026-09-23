@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- An Antigravity rejection carries the service's status and message (bounded) instead of only the HTTP code, so the operator and the failure classifier can tell a bad request from a model the account cannot use.
 - A Codex `slow_down` rejection is retried as a rate limit, as the Codex CLI does since 0.156.
 - An incomplete Responses answer is a length stop only when the output cap ended it; a content filter is reported as an error with its reason.
 - A Codex token exchange or refresh error never contains a token: echoed submitted values and token fields are redacted, and a response missing fields names the fields instead of printing the body.

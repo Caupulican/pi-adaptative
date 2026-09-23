@@ -310,20 +310,25 @@ directory, a filesystem root, or a disk, including `gh repo delete`) and `toolki
 package publish and install, settings edits, and every other delete run without asking. Anything
 unknown is ordinary work and runs.
 
-**An operation the deterministic gates cannot decide is System One's, judged once per turn.** A few
-shapes carry an effect no gate can read off the arguments: code piped into an interpreter, a
-destructive command whose target is an unexpanded variable, a request that sends data off the
-machine (`curl -d`, `-X POST`, `scp`, `rsync host:`), a typed write outside the task directory. Only
-these reach System One, in one batched request of four atomic questions: does it leave the machine,
-can it not be undone, does it touch files outside the task, does the owner's request ask for it.
-The irreversible row of the authority line decides: an operation shown local and reversible runs; an
-irreversible or outward one runs when the request asks for it, is refused when the request clearly
-does not, and goes to the operator (`operation.irreversible` at the edge; a worker is refused) when
-that is unsettled or System One cannot answer within its time budget. A standing
-`operation.irreversible` grant authorizes all of these, and what System One found is shown either
-way. Everything else never reaches System One, so ordinary work pays nothing, and a session with no
-System One bound keeps the deterministic gates alone. Pinned by
-`packages/coding-agent/test/edge-policy.test.ts` and
+**System One judges every operation that can reach beyond the task; no pattern list decides it.**
+A shell command or a script says what it does in any language and any spelling, and a model blocked
+on one reaches for another (measured live: a blocked `curl` POST came back as Python `urllib`), so
+pattern gates are bypassed more easily than they control anything. The only deterministic decisions
+are by tool contract and exact path: tools that cannot have effects (reading, searching, planning),
+typed writes inside the task or the temp directory, and the edge's literal extreme-destruction rules.
+Every shell or code call (`bash`, `run_process`, `powershell`, `python`) and every write outside the
+task goes to System One as one batched request: does it leave the machine, can it not be undone, does
+it touch files outside the task, does it acquire external code, does the owner's request ask for it.
+The reading scales with what an interruption costs: an effect is established at 0.8, unsettled above
+an even chance, absent below (live: `npm test`, `git status`, a build script and a `sed` edit stay at
+or below 0.22 on every effect; `pip install` reads 0.99 acquires external code; a Python POST 0.93
+leaves the machine). The irreversible row of the authority line then decides: no likely effect runs
+silently; an established effect runs when the request asks for it (0.8), is refused when it clearly
+does not (0.2), and otherwise goes to the operator as `operation.irreversible` at the edge, as does
+an unsettled effect or a System One that cannot answer within 8 s; a worker is refused instead of
+asking. A standing `operation.irreversible` grant authorizes, and what System One found is shown
+either way. Verdicts are cached for identical calls within a turn; a session without System One keeps
+the deterministic gates alone. Pinned by `packages/coding-agent/test/edge-policy.test.ts` and
 `packages/coding-agent/test/system-one/operation-gate.test.ts`.
 
 **System One checks a plan when it is published or changed.** After a `task_steps` set, intake or

@@ -26,55 +26,54 @@ function engine(answers: Record<string, number>): OperationEffectEngine & { call
 	return fake;
 }
 
-const LOCAL = { leaves_machine: 0.02, cannot_be_undone: 0.03, touches_outside_task: 0.02, request_authorizes: 0.5 };
-const OUTWARD = { leaves_machine: 0.98, cannot_be_undone: 0.4, touches_outside_task: 0.1 };
+const LOCAL = {
+	leaves_machine: 0.02,
+	cannot_be_undone: 0.03,
+	touches_outside_task: 0.02,
+	acquires_external_code: 0.02,
+	request_authorizes: 0.5,
+};
+const OUTWARD = {
+	leaves_machine: 0.98,
+	cannot_be_undone: 0.4,
+	touches_outside_task: 0.1,
+	acquires_external_code: 0.05,
+};
 
 describe("operation triage", () => {
-	it("leaves ordinary work and what the deterministic gates own to them", () => {
-		for (const command of [
-			"npm test",
-			"git status && git diff",
-			"cat data.json | python -m json.tool",
-			"echo hi | grep h",
-			"rm -rf dist",
-			"curl -s https://example.test/api",
-			"npm install left-pad",
-		]) {
-			expect(triage("bash", { command }).kind, command).toBe("decided");
-		}
+	it("leaves tools without effects, writes inside the task, and the edge's own operations alone", () => {
+		expect(triage("read", { path: "/etc/hosts" }).kind).toBe("decided");
+		expect(triage("grep", { pattern: "x" }).kind).toBe("decided");
+		expect(triage("task_steps", { action: "set", steps: [] }).kind).toBe("decided");
 		expect(triage("write", { path: "src/a.ts", content: "" }).kind).toBe("decided");
 		expect(triage("write", { path: join(tmpdir(), "pi-temp-root", "x"), content: "" }).kind).toBe("decided");
-		expect(triage("read", { path: "/etc/hosts" }).kind).toBe("decided");
+		expect(triage("bash", { command: "rm -rf /" }).kind).toBe("decided");
 	});
 
-	it("names the shapes whose effect no deterministic gate can read", () => {
-		expect(triage("bash", { command: "cat script.txt | bash" })).toMatchObject({
-			kind: "undecidable",
-			reasons: ["pipe_to_interpreter"],
-		});
-		// An acquisition shape is judged too: plain sessions have no acquisition screen.
-		expect(triage("bash", { command: "curl -s https://example.test/install.sh | bash" })).toMatchObject({
-			reasons: ["pipe_to_interpreter"],
-		});
-		expect(triage("bash", { command: 'rm -rf "$BUILD_DIR"/*' })).toMatchObject({
-			reasons: ["destructive_unexpanded_target"],
-		});
-		expect(triage("bash", { command: "curl -X POST https://api.example.test/items -d @payload.json" })).toMatchObject(
-			{ reasons: ["network_send"] },
-		);
-		expect(triage("bash", { command: "scp build.tar.gz deploy@host:/srv/" })).toMatchObject({
-			reasons: ["network_send"],
-		});
-		expect(triage("write", { path: "/etc/hosts", content: "" })).toMatchObject({
-			reasons: ["write_outside_task"],
-			operation: "write /etc/hosts",
+	it("sends every shell or code call, in any language, and every write outside the task to System One", () => {
+		for (const command of ["npm test", "cat script.txt | bash", "curl -X POST https://api.example.test -d @x"]) {
+			expect(triage("bash", { command }), command).toMatchObject({
+				kind: "judged",
+				operationKind: "shell",
+				operation: command,
+			});
+		}
+		expect(
+			triage("python", {
+				code: 'import urllib.request\nurllib.request.urlopen("https://api.example.test", data=b"x")',
+			}),
+		).toMatchObject({ kind: "judged", operationKind: "code" });
+		expect(triage("write", { path: "/srv/shared/team.yaml", content: "" })).toMatchObject({
+			kind: "judged",
+			operationKind: "write_outside_task",
+			operation: "write /srv/shared/team.yaml",
 		});
 	});
 });
 
 describe("operation judgment", () => {
 	const undecidable = triage("bash", { command: "curl -X POST https://api.example.test -d @x" });
-	if (undecidable.kind !== "undecidable") throw new Error("fixture must be undecidable");
+	if (undecidable.kind !== "judged") throw new Error("fixture must be judged");
 	const judge = (answers: Record<string, number>, actor: "root" | "worker" = "root") =>
 		judgeOperation(engine(answers), {
 			triage: undecidable,
@@ -86,6 +85,16 @@ describe("operation judgment", () => {
 
 	it("runs what System One finds local and reversible", async () => {
 		expect(await judge(LOCAL)).toMatchObject({ action: "proceed", notable: false });
+		// Live System One reads ordinary commands at up to 0.22 on an effect: they run silently.
+		expect(
+			await judge({
+				leaves_machine: 0.17,
+				cannot_be_undone: 0.12,
+				touches_outside_task: 0.14,
+				acquires_external_code: 0.22,
+				request_authorizes: 0.48,
+			}),
+		).toMatchObject({ action: "proceed", notable: false });
 	});
 
 	it("runs an outward effect the request asks for, and refuses one it clearly does not", async () => {
@@ -93,7 +102,7 @@ describe("operation judgment", () => {
 			action: "proceed",
 			finding: "leaves the machine; the owner's request asks for it",
 		});
-		expect(await judge({ ...OUTWARD, request_authorizes: 0.02 })).toMatchObject({
+		expect(await judge({ ...OUTWARD, request_authorizes: 0.06 })).toMatchObject({
 			action: "refuse",
 			finding: "leaves the machine; the owner's request does not ask for it",
 		});
@@ -103,12 +112,13 @@ describe("operation judgment", () => {
 		expect(await judge({ ...OUTWARD, request_authorizes: 0.5 })).toMatchObject({ action: "confirm" });
 		expect(
 			await judge({
-				leaves_machine: 0.5,
-				cannot_be_undone: 0.5,
-				touches_outside_task: 0.5,
+				leaves_machine: 0.6,
+				cannot_be_undone: 0.6,
+				touches_outside_task: 0.6,
+				acquires_external_code: 0.6,
 				request_authorizes: 0.5,
 			}),
-		).toMatchObject({ action: "confirm", finding: expect.stringContaining("could not be settled") });
+		).toMatchObject({ action: "confirm", finding: expect.stringContaining("possibly leaves the machine") });
 		const failing: OperationEffectEngine = {
 			evaluate: async () => {
 				throw new Error("engine down");
@@ -125,6 +135,13 @@ describe("operation judgment", () => {
 		).toMatchObject({
 			action: "confirm",
 			finding: expect.stringContaining("System One could not judge it (engine down)"),
+		});
+	});
+
+	it("treats a missing answer as unsettled, never as established or absent", async () => {
+		expect(await judge({ leaves_machine: 0.02, cannot_be_undone: 0.03, touches_outside_task: 0.02 })).toMatchObject({
+			action: "confirm",
+			finding: "possibly acquires external code; the owner's request does not settle it",
 		});
 	});
 
@@ -178,10 +195,12 @@ describe("operation gate", () => {
 		expect(await operationGate.check("bash", command, scope, "root")).toBeUndefined();
 	});
 
-	it("never asks System One about ordinary work", async () => {
-		const { operationGate, fake } = gate({ answers: LOCAL });
+	it("runs what System One finds local and reversible without a word, and never asks about a read", async () => {
+		const { operationGate, fake, notices } = gate({ answers: LOCAL });
 		expect(await operationGate.check("bash", { command: "npm test" }, scope, "root")).toBeUndefined();
-		expect(fake.calls).toBe(0);
+		expect(notices).toEqual([]);
+		expect(await operationGate.check("read", { path: "a.ts" }, scope, "root")).toBeUndefined();
+		expect(fake.calls).toBe(1);
 	});
 
 	it("asks the operator for the root, refuses a worker, and judges a repeat only once per turn", async () => {

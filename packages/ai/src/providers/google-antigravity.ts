@@ -190,13 +190,37 @@ async function generateAntigravityContent(
 		}),
 	});
 	if (!response.ok) {
-		const error = new Error(`Antigravity inference failed (HTTP ${response.status})`);
+		const detail = await antigravityErrorDetail(response);
+		const error = new Error(`Antigravity inference failed (HTTP ${response.status})${detail ? `: ${detail}` : ""}`);
 		(error as Error & { status?: number }).status = response.status;
 		throw error;
 	}
 	if (!response.body) throw new Error("Antigravity returned no stream");
 	const reader = response.body.getReader();
 	return readAntigravityEvents(reader, config?.abortSignal);
+}
+
+const MAX_ERROR_DETAIL_CHARS = 500;
+
+/**
+ * What the service said about a rejected request: Google's `{ error: { status, message } }`, or the
+ * body as text. Without it every rejection reads the same, and neither the operator nor the failure
+ * classifier can tell a bad request from a model the account cannot use.
+ */
+async function antigravityErrorDetail(response: Response): Promise<string> {
+	const raw = (await response.text().catch(() => "")).trim();
+	if (!raw) return "";
+	let detail = raw;
+	try {
+		const parsed = JSON.parse(raw) as { error?: { status?: unknown; message?: unknown } };
+		const status = typeof parsed.error?.status === "string" ? parsed.error.status : undefined;
+		const message = typeof parsed.error?.message === "string" ? parsed.error.message : undefined;
+		if (status || message) detail = [status, message].filter(Boolean).join(": ");
+	} catch {
+		// Not JSON: the text itself is the detail.
+	}
+	const flat = detail.replace(/\s+/g, " ");
+	return flat.length <= MAX_ERROR_DETAIL_CHARS ? flat : `${flat.slice(0, MAX_ERROR_DETAIL_CHARS - 1)}…`;
 }
 
 export function createAntigravityClient(

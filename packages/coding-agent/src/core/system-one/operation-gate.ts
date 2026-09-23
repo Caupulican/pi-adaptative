@@ -1,6 +1,6 @@
 /**
  * The operation gate: one check per tool call, after the envelope and the edge. With System One bound it asks
- * only about an operation {@link triageOperation} finds undecidable, caches the verdict for the rest
+ * about every operation {@link triageOperation} sends to it, caches the verdict for the rest
  * of the turn (a repeated call is not judged twice), and applies it: the operator's standing grant of
  * `operation.irreversible` authorizes; otherwise the root asks the operator at the edge and a worker
  * is refused. Whatever System One found that matters is shown to the operator.
@@ -16,7 +16,7 @@ import {
 	triageOperation,
 } from "./operation-classifier.ts";
 
-/** A few seconds: an undecidable call waits this long for System One at most. */
+/** A few seconds: a judged call waits this long for System One at most. */
 export const OPERATION_JUDGMENT_TIMEOUT_MS = 8_000;
 
 export interface OperationGateDeps {
@@ -75,7 +75,8 @@ export class OperationGate {
 			});
 			this.verdicts.set(key, verdict);
 		}
-		const subject = `${actor === "worker" ? "a worker's " : ""}${triage.operation}`;
+		const shown = triage.operation.replace(/\s+/g, " ").trim();
+		const subject = `${actor === "worker" ? "a worker's " : ""}${shown.length <= 160 ? shown : `${shown.slice(0, 159)}…`}`;
 		if (verdict.action === "proceed") {
 			if (verdict.notable) this.deps.notify(`System One: ${subject}: ${verdict.finding}; it runs.`);
 			return undefined;

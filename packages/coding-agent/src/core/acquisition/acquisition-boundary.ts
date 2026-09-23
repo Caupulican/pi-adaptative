@@ -14,8 +14,13 @@ import type { AcquisitionDecision } from "./types.ts";
 /** Tools whose arguments can start an external acquisition. */
 const ACQUISITION_CAPABLE_TOOLS: readonly string[] = ["bash", "run_process", "python", "powershell"];
 
+/**
+ * A download of code or an installable artifact: a URL naming a script, an archive or a package file.
+ * Calling an API or sending data with curl is not an acquisition (it acquires no code); a send is an
+ * outward operation, judged by System One's operation gate instead.
+ */
 const NETWORK_FETCH_PATTERN =
-	/\b(?:curl|wget|Invoke-WebRequest|iwr|Invoke-RestMethod|irm)\b|https?:\/\/[^\s'"|;]+\.(?:sh|ps1|tar\.gz|tgz|zip|exe|bin|deb|rpm|pkg|msi)\b/i;
+	/https?:\/\/[^\s'"|;]+\.(?:sh|ps1|py|tar\.gz|tgz|zip|exe|bin|deb|rpm|pkg|msi|dmg|appimage|whl|jar)\b/i;
 const FETCH_TO_SHELL_PATTERN = /(?:curl|wget|iwr|irm)[^|\n]*\|\s*(?:bash|sh|zsh|pwsh|powershell|iex)/i;
 
 /** The command text a tool call is asking to execute, if any. */
