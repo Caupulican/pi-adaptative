@@ -1,0 +1,4 @@
+# A test fixture wrote its throwaway identity into this repository's own git config on 2026-09-21
+# (worktree-sync tests running under the commit hook's GIT_DIR); the commits it authored are the
+# owner's. History is not rewritten, since those commits are released; this maps them for git tooling.
+Caupulican <72838758+Caupulican@users.noreply.github.com> worktree-sync-it <it@example.invalid>
