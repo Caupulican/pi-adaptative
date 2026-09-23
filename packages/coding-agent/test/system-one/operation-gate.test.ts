@@ -1,5 +1,5 @@
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
 	judgeOperation,
@@ -66,7 +66,7 @@ describe("operation triage", () => {
 		expect(triage("write", { path: "/srv/shared/team.yaml", content: "" })).toMatchObject({
 			kind: "judged",
 			operationKind: "write_outside_task",
-			operation: "write /srv/shared/team.yaml",
+			operation: `write ${resolve("/srv/shared/team.yaml")}`,
 		});
 	});
 });
