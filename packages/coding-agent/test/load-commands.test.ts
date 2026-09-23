@@ -42,6 +42,7 @@ function view(overrides: Partial<ProviderLoadView> = {}): ProviderLoadView {
 				at: at - 2_000,
 				pid: 11,
 				rateLimits: [{ limitId: "codex", limitName: "codex", primary: { usedPercent: 42, windowMinutes: 300 } }],
+				credits: { hasCredits: true, unlimited: false, balance: "12.50" },
 			},
 		],
 		emergencyStop: { engaged: false, path: "/agent/ESTOP" },
@@ -85,6 +86,7 @@ describe("/load", () => {
 		expect(text).toContain("xai: rate limit until");
 		expect(text).toContain("30s left, recorded by pid 12: 429");
 		expect(text).toContain("openai-codex codex: 300m 42% used (seen 2s ago)");
+		expect(text).toContain("openai-codex credits: balance 12.50 (seen 2s ago)");
 		expect(text).toContain("Emergency stop: off");
 		expect(formatProviderLoadView(view({ inflight: [], limits: [], usage: [] }))).toContain("Limited: none recorded");
 	});

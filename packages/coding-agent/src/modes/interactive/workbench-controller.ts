@@ -511,6 +511,8 @@ export class WorkbenchController {
 				const titleAction = this.view.paneTitleAction(column, row);
 				if (titleAction === "graphList") this.changeGeometry(() => this.view.setGraphView("list"));
 				else if (titleAction === "graphDiagram") this.changeGeometry(() => this.view.setGraphView("diagram"));
+				else if (titleAction === "graphLanes") this.changeGeometry(() => this.view.setGraphView("lanes"));
+				else if (titleAction === "graphCycle") this.changeGeometry(() => this.view.cycleGraphView());
 				else if (titleAction === "followCurrent") this.changeGeometry(() => this.view.followCurrentGraph());
 				else if (titleAction === "hideGraph") this.changeGeometry(() => this.view.toggleGraph());
 			} else if (action === "down" && button === "left" && hit === "graph") {

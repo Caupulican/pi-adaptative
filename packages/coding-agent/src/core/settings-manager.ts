@@ -371,7 +371,7 @@ export function normalizeHmoeWeights(value: unknown): HmoeWeights | undefined {
 }
 
 export interface ModelRouterSettings {
-	enabled?: boolean; // default: false — routing is opt-in until escalation safeguards are complete
+	enabled?: boolean; // default: on when the session has System One, off otherwise (setModelRouterDefaultEnabled)
 	selectionMode?: ModelRouterSelectionMode; // default: manual — existing installs keep exact-pin behavior
 	poolPreference?: ModelRouterPoolPreference; // default: subscription-first — applies only to auto-selected tiers
 	cheapModel?: string; // model pattern for read-only/research turns
@@ -794,7 +794,7 @@ export interface WorkbenchSettings {
 	/** The graph's share of the conversation zone (0.25..0.5). */
 	graphFraction?: number;
 	/** How the graph draws the loop: the stage list with timers, or the diagram composed per task. */
-	graphView?: "list" | "diagram";
+	graphView?: "list" | "diagram" | "lanes";
 }
 
 export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> = Object.freeze({
@@ -1653,6 +1653,8 @@ export class SettingsManager {
 	private modifiedProjectFields = new Set<keyof Settings>(); // Track project fields modified during session
 	private modifiedProjectNestedFields = new Map<keyof Settings, Set<string>>(); // Track project nested field modifications
 	private globalSettingsLoadError: Error | null = null; // Track if global settings file had parse errors
+	/** An unset `modelRouter.enabled`: off until the session reports that it has System One. */
+	private modelRouterDefaultEnabled = false;
 	private projectSettingsLoadError: Error | null = null; // Track if project settings file had parse errors
 	private directoryProfileSettingsLoadError: Error | null = null;
 	private directoryProfileInfo: DirectoryResourceProfileInfo | null = null;
@@ -3346,6 +3348,14 @@ export class SettingsManager {
 		return Object.keys(merged).length > 0 ? merged : undefined;
 	}
 
+	/**
+	 * What an unset `modelRouter.enabled` means for this session: routing is on when the session has
+	 * System One to judge it, off otherwise. The session sets it once it knows; an explicit setting wins.
+	 */
+	setModelRouterDefaultEnabled(enabled: boolean): void {
+		this.modelRouterDefaultEnabled = enabled;
+	}
+
 	getModelRouterSettings(): {
 		enabled: boolean;
 		selectionMode: ModelRouterSelectionMode;
@@ -3368,7 +3378,7 @@ export class SettingsManager {
 	} {
 		const profileSettings = this.getProfileModelRouterSettings();
 		const settings = {
-			enabled: this.settings.modelRouter?.enabled ?? false,
+			enabled: this.settings.modelRouter?.enabled ?? this.modelRouterDefaultEnabled,
 			selectionMode: isModelRouterSelectionMode(this.settings.modelRouter?.selectionMode)
 				? this.settings.modelRouter.selectionMode
 				: DEFAULT_MODEL_ROUTER_SELECTION_MODE,
@@ -4268,7 +4278,10 @@ export class SettingsManager {
 				0.25,
 				0.5,
 			),
-			graphView: stored.graphView === "list" ? "list" : DEFAULT_WORKBENCH_SETTINGS.graphView,
+			graphView:
+				stored.graphView === "list" || stored.graphView === "lanes"
+					? stored.graphView
+					: DEFAULT_WORKBENCH_SETTINGS.graphView,
 		};
 	}
 

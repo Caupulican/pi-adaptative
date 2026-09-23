@@ -32,6 +32,7 @@ import type {
 import type { GoalContinuationPrompt } from "./goals/goal-continuation-prompt.ts";
 import type { GoalRuntimeSnapshot } from "./goals/goal-runtime-snapshot.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import type { AccountModelCatalog } from "./model-router/account-models.ts";
 import type { LocalRuntimeDeps } from "./models/local-runtime.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "./objective-execution/index.ts";
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
@@ -148,6 +149,8 @@ export interface AgentSessionConfig {
 	localRuntimeDeps?: LocalRuntimeDeps;
 	/** System One semantic control plane controller for Jev semantic validation. */
 	systemOneController?: SystemOneController;
+	/** What the owner's provider accounts offer, checked with the providers; absent skips the check. */
+	accountModels?: AccountModelCatalog;
 	/** Execution loop mode for objective execution ('legacy_goal', 'objective_shadow', 'objective_primary'). */
 	executionLoopMode?: ExecutionLoopMode;
 	/** Objective execution controller for deterministic loop authority and route evaluation. */

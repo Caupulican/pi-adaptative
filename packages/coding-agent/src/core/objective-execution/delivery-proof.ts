@@ -405,6 +405,8 @@ function execFileText(repoRoot: string, args: readonly string[]): string {
 		encoding: "utf8",
 		timeout: LOCAL_GIT_TIMEOUT_MS,
 		maxBuffer: GIT_OUTPUT_MAX_BYTES,
+		// A failure carries git's stderr in the thrown error instead of printing it to the host terminal.
+		stdio: ["ignore", "pipe", "pipe"],
 		env: { ...withoutInheritedGitLocation(), GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" },
 	}).replace(/\n$/, "");
 }

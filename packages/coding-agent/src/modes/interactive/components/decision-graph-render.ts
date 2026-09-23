@@ -23,7 +23,7 @@ export interface DecisionGraphRows {
 }
 
 /** The decider's tone: the label tone marks System One everywhere in the Workbench. */
-const SYSTEM_ONE_TONE: ThemeColor = "customMessageLabel";
+export const SYSTEM_ONE_TONE: ThemeColor = "customMessageLabel";
 const TITLE_TONE: ThemeColor = "customMessageLabel";
 
 import { formatCompactDuration } from "../../../core/util/format-duration.ts";
@@ -497,13 +497,17 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 		levels.push({
 			kind: "level",
 			nodes: [
-				// A plain turn may end without a done phase; the open stage row is what says it is still running.
-				model.current && model.current.stage !== "done"
+				// The trace says whether a turn is executing; a plain turn has no done phase to wait for.
+				model.turnRunning
 					? { text: `turn running${unsure}`, tone: "accent" }
-					: {
-							text: `turn finished${unsure}`,
-							tone: model.doubts.length ? SYSTEM_ONE_TONE : "success",
-						},
+					: model.lastTurnOutcome === "failed"
+						? { text: `turn failed${unsure}`, tone: "error" }
+						: model.lastTurnOutcome === "cancelled"
+							? { text: `turn cancelled${unsure}`, tone: "dim" }
+							: {
+									text: `turn finished${unsure}`,
+									tone: model.doubts.length ? SYSTEM_ONE_TONE : "success",
+								},
 			],
 		});
 		return levels;

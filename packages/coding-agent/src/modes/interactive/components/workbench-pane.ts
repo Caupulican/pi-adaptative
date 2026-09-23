@@ -49,6 +49,8 @@ export type WorkbenchPaneTitleAction =
 	| "layout"
 	| "graphList"
 	| "graphDiagram"
+	| "graphLanes"
+	| "graphCycle"
 	| "hideGraph"
 	| "followCurrent";
 

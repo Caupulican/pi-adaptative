@@ -41,6 +41,24 @@ export interface ProviderUsageRecord {
 	at: number;
 	pid: number;
 	rateLimits: unknown[];
+	/** The account's credits as the provider reported them beside the windows, when it does. */
+	credits?: ProviderCredits;
+}
+
+export interface ProviderCredits {
+	hasCredits: boolean;
+	unlimited: boolean;
+	balance?: string;
+}
+
+function readCredits(value: unknown): ProviderCredits | undefined {
+	if (!isPlainRecord(value) || typeof value.hasCredits !== "boolean" || typeof value.unlimited !== "boolean")
+		return undefined;
+	return {
+		hasCredits: value.hasCredits,
+		unlimited: value.unlimited,
+		...(typeof value.balance === "string" && value.balance ? { balance: value.balance } : {}),
+	};
 }
 
 export interface ProviderLimitStoreOptions {
@@ -198,8 +216,14 @@ export class ProviderLimitStore {
 		return records.sort((a, b) => a.provider.localeCompare(b.provider));
 	}
 
-	recordUsage(provider: string, rateLimits: unknown[]): ProviderUsageRecord {
-		const record: ProviderUsageRecord = { provider, at: this.now(), pid: this.pid, rateLimits };
+	recordUsage(provider: string, rateLimits: unknown[], credits?: ProviderCredits): ProviderUsageRecord {
+		const record: ProviderUsageRecord = {
+			provider,
+			at: this.now(),
+			pid: this.pid,
+			rateLimits,
+			...(credits ? { credits } : {}),
+		};
 		mkdirSync(this.usageDir, { recursive: true });
 		writeFileAtomicSync(this.usagePath(provider), `${JSON.stringify(record)}\n`, { mode: 0o600 });
 		return record;
@@ -398,7 +422,7 @@ export function observeProviderResult(
 		if (diagnostic.type === "openai_codex_subscription_rate_limits") {
 			const rateLimits = diagnostic.details?.rateLimits;
 			if (!Array.isArray(rateLimits)) continue;
-			store.recordUsage(provider, rateLimits);
+			store.recordUsage(provider, rateLimits, readCredits(diagnostic.details?.credits));
 			const exhausted = usageWindowLimit(rateLimits, nowMs);
 			if (exhausted) store.record(provider, { ...exhausted, reason: "usage_window" });
 		} else if (diagnostic.type === "anthropic_subscription_rate_limits") {

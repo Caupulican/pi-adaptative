@@ -95,6 +95,17 @@ export function formatProviderLoadView(view: ProviderLoadView): string {
 					`  ${describeProviderAccountKey(usage.provider)} ${name}: ${parts.join("; ")} (seen ${seconds(view.at - usage.at)} ago)`,
 				);
 			}
+			const credits = usage.credits;
+			if (credits) {
+				const state = credits.unlimited
+					? "unlimited"
+					: credits.hasCredits
+						? `balance ${credits.balance ?? "unknown"}`
+						: "none";
+				lines.push(
+					`  ${describeProviderAccountKey(usage.provider)} credits: ${state} (seen ${seconds(view.at - usage.at)} ago)`,
+				);
+			}
 		}
 	}
 	lines.push(

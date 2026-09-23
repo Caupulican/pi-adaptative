@@ -916,15 +916,6 @@ export async function main(args: string[], options?: MainOptions) {
 			})),
 		];
 
-		diagnostics.push(
-			...collectModelRouterConfigDiagnostics(settingsManager.getModelRouterSettings(), modelRegistry, agentDir).map(
-				(message) => ({
-					type: "warning" as const,
-					message,
-				}),
-			),
-		);
-
 		const modelPatterns = parsed.models ?? settingsManager.getEnabledModels();
 		const scopedModels =
 			modelPatterns && modelPatterns.length > 0 ? await resolveModelScope(modelPatterns, modelRegistry) : [];
@@ -994,6 +985,15 @@ export async function main(args: string[], options?: MainOptions) {
 						toolProfileFilter: settingsManager.getResourceProfileFilter("tools"),
 					}),
 		});
+		// After the session exists: an unset `modelRouter.enabled` follows whether it has System One.
+		diagnostics.push(
+			...collectModelRouterConfigDiagnostics(settingsManager.getModelRouterSettings(), modelRegistry, agentDir).map(
+				(message) => ({
+					type: "warning" as const,
+					message,
+				}),
+			),
+		);
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
 		if (created.session.model && cliThinkingOverride) {
 			created.session.setThinkingLevel(created.session.thinkingLevel);

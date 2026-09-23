@@ -5,7 +5,7 @@ import { ActionTranscriptComponent } from "./action-transcript.ts";
 import { BashExecutionComponent } from "./bash-execution.ts";
 import { ConversationWindow } from "./conversation-window.ts";
 import type { DecisionGraphModel } from "./decision-graph-model.ts";
-import { DecisionGraphPane } from "./decision-graph-pane.ts";
+import { DecisionGraphPane, GRAPH_PANE_TITLE } from "./decision-graph-pane.ts";
 import { keyText } from "./keybinding-hints.ts";
 import {
 	fitRow,
@@ -81,7 +81,7 @@ export const MIN_GRAPH_FRACTION = 0.25;
 export const MAX_GRAPH_FRACTION = 0.5;
 
 /** How the Decision graph draws the loop. */
-export type WorkbenchGraphView = "list" | "diagram";
+export type WorkbenchGraphView = "list" | "diagram" | "lanes";
 
 /** Explicit rows the operator chose, or "half": an even split that follows the terminal's height. */
 export type WorkAreaRows = number | "half";
@@ -428,7 +428,8 @@ export class WorkbenchComponent extends Container {
 		this.graphView = view;
 	}
 	cycleGraphView(): void {
-		this.graphView = this.graphView === "list" ? "diagram" : "list";
+		// List → Diagram → Lanes → List.
+		this.graphView = this.graphView === "list" ? "diagram" : this.graphView === "diagram" ? "lanes" : "list";
 	}
 	followCurrentGraph(): void {
 		this.graphPane.unpin();
@@ -513,16 +514,34 @@ export class WorkbenchComponent extends Container {
 		}
 		return buttons;
 	}
-	private graphTitleButtons(): WorkbenchPaneTitleButton[] {
-		const buttons: WorkbenchPaneTitleButton[] = [
+	/**
+	 * The graph pane's title chips at `paneWidth`. Every view has a chip when they all fit; when they
+	 * do not, the views condense into one chip that names the current view and cycles on click (as
+	 * alt+l does), so switching views and hiding the pane never disappear at a narrow width.
+	 */
+	private graphTitleButtons(paneWidth: number): WorkbenchPaneTitleButton[] {
+		const views: WorkbenchPaneTitleButton[] = [
 			{ action: "graphList", label: "List", selected: this.graphView === "list" },
 			{ action: "graphDiagram", label: "Diagram", selected: this.graphView === "diagram" },
+			{ action: "graphLanes", label: "Lanes", selected: this.graphView === "lanes" },
 		];
+		const hide: WorkbenchPaneTitleButton = { action: "hideGraph", label: "Hide" };
+		// Title, one space, each chip padded by one cell a side, two cells between chips (WorkbenchPane).
+		const width = (buttons: readonly WorkbenchPaneTitleButton[]) =>
+			visibleWidth(GRAPH_PANE_TITLE) +
+			1 +
+			buttons.reduce((sum, button) => sum + visibleWidth(button.label) + 2, 0) +
+			Math.max(0, buttons.length - 1) * 2;
+		const inner = Math.max(1, paneWidth - 2);
+		const selected = views.find((view) => view.selected) ?? views[1]!;
+		const buttons =
+			width([...views, hide]) <= inner
+				? views
+				: [{ action: "graphCycle" as const, label: selected.label, selected: true }];
 		if (this.graphPane.isPinned() || this.graphPane.hasNewerProgress()) {
 			buttons.push({ action: "followCurrent", label: "Follow current" });
 		}
-		buttons.push({ action: "hideGraph", label: "Hide" });
-		return buttons;
+		return [...buttons, hide];
 	}
 	headerAction(column: number): "latest" | "copyAll" | "layout" | undefined {
 		return this.headerButtons.find((button) => column >= button.start && column < button.end)?.action;
@@ -891,7 +910,7 @@ export class WorkbenchComponent extends Container {
 			top,
 			graphWidth,
 			height + 1,
-			this.graphTitleButtons(),
+			this.graphTitleButtons(graphWidth),
 		);
 		const body = this.conversation.render(inner, height).map((line) => gutter(line, inner));
 		while (body.length < height) body.push("");

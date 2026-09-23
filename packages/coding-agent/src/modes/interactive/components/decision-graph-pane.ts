@@ -1,13 +1,14 @@
 /**
  * The Decision graph pane: the System One decider's live dashboard beside the chat. It owns only
  * what a viewport owns — scroll position and the stage the operator expanded — and composes its
- * rows per frame from the model the workbench hands it. The view (List | Diagram) is workbench
+ * rows per frame from the model the workbench hands it. The view (List | Diagram | Lanes) is workbench
  * geometry, persisted with the other operator choices.
  */
 
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { DecisionGraphModel } from "./decision-graph-model.ts";
 import { renderDecisionDiagram, renderDecisionList } from "./decision-graph-render.ts";
+import { renderFlowLanes } from "./flow-lanes-render.ts";
 import type { WorkbenchGraphView } from "./workbench.ts";
 import { WorkbenchPane, type WorkbenchPaneTitleButton } from "./workbench-pane.ts";
 
@@ -45,7 +46,11 @@ export class DecisionGraphPane extends WorkbenchPane {
 	): string[] {
 		const inner = Math.max(1, width - 2);
 		const composed =
-			view === "list" ? renderDecisionList(model, inner, this.selectedStage) : renderDecisionDiagram(model, inner);
+			view === "list"
+				? renderDecisionList(model, inner, this.selectedStage)
+				: view === "lanes"
+					? renderFlowLanes(model.flow, inner, model.nowMs)
+					: renderDecisionDiagram(model, inner);
 		this.stageAt = composed.stageAt;
 		const meta = model.current
 			? `${model.current.stage}${model.loop > 1 ? ` · loop ${model.loop}` : ""}`

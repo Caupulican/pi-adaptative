@@ -161,6 +161,7 @@ import {
 	type ModelCapabilityProfile,
 } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import { AccountModelCatalog } from "./model-router/account-models.ts";
 import {
 	type RouterCandidatePool,
 	type RouterPoolState,
@@ -503,6 +504,7 @@ export class AgentSession {
 	private _baseSystemPrompt = "";
 	private readonly _pathAliasWrappedTools = new WeakSet<AgentTool>();
 	private _systemOneController?: SystemOneController;
+	private readonly _accountModels: AccountModelCatalog;
 	private _executionLoopMode?: ExecutionLoopMode;
 	private _objectiveExecutionController?: ObjectiveExecutionController;
 	private _steeringPlane?: SystemOneSteeringPlane;
@@ -590,6 +592,14 @@ export class AgentSession {
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this._systemOneController = config.systemOneController;
+		// Without a checked catalog nothing is known up front, but a provider's refusal is still recorded.
+		this._accountModels =
+			config.accountModels ??
+			new AccountModelCatalog({
+				getModels: () => config.modelRegistry.getAll(),
+				hasConfiguredAuth: (model) => config.modelRegistry.hasConfiguredAuth(model),
+				getApiKey: async () => undefined,
+			});
 		this._executionLoopMode = config.executionLoopMode;
 		this._objectiveExecutionController = config.objectiveExecutionController;
 		this._steeringPlane = config.steeringPlane;
@@ -978,7 +988,8 @@ export class AgentSession {
 			getResourceLoader: () => this._resourceLoader,
 			getActiveOrchestrationProfile: () => config.orchestrationProfile,
 			getModelRegistry: () => this._modelRegistry,
-			isModelExhausted: (model) => this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`),
+			// Workers pick only models that can take work: quota left and offered to the owner's account.
+			isModelExhausted: (model) => this._isModelUnusable(model),
 			getModel: () => this.model ?? undefined,
 			getForegroundThinkingLevel: () => this.thinkingLevel,
 			getForegroundToolNames: () => this.getActiveToolNames(),
@@ -1088,7 +1099,11 @@ export class AgentSession {
 			getModelRegistry: () => this._modelRegistry,
 			isRawStream: () => isRawStreamSimpleFn(this.agent.streamFn),
 			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
-			isModelExhausted: (ref) => this._foregroundRecovery.isModelExhausted(ref),
+			isModelExhausted: (ref) => {
+				const [provider, ...id] = ref.split("/");
+				const model = provider ? this._modelRegistry.find(provider, id.join("/")) : undefined;
+				return model ? this._isModelUnusable(model) : this._foregroundRecovery.isModelExhausted(ref);
+			},
 			getStoredFitnessReport: (ref) => this.getStoredFitnessReports().find((entry) => entry.model === ref)?.report,
 			// Live context is an over-estimate of the span to summarize (includes the kept tail) —
 			// conservative in the safe direction for the summarizer capacity check.
@@ -1263,6 +1278,7 @@ export class AgentSession {
 				this._emit(event);
 			},
 			checkCompaction: (message) => this._checkCompaction(message),
+			replaceUnsupportedModel: (message) => this._replaceUnsupportedModel(message),
 			onSuccessfulAssistant: () => this._compaction.resetOverflowRecovery(),
 			settleRuntimeUpdate: (signal) => this.runtimeUpdates.settle(signal),
 			isCompacting: () => this._compaction.isCompacting,
@@ -1356,6 +1372,7 @@ export class AgentSession {
 				return { ...pool, models: this._modelPolicy.allowed(pool.models) };
 			},
 			isModelAllowed: (model) => this._modelPolicy.allows(model),
+			getAccountModels: () => this._accountModels,
 			getRouteJudge: () => this._systemOneController,
 			isUsingSubscription: (model) => this._modelRegistry.isUsingSubscription(model),
 		});
@@ -1447,7 +1464,7 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			integrationBranch: () => this._localCommitBranch || undefined,
 			getModelRegistry: () => this._modelRegistry,
-			isModelExhausted: (model) => this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`),
+			isModelExhausted: (model) => this._isModelUnusable(model),
 			getResourceLoader: () => this._resourceLoader,
 			getSkillVault: () => this._skillVault,
 			getExtensionRunner: () => this._extensionRunner,
@@ -2325,6 +2342,62 @@ export class AgentSession {
 		if (stack.adaptiveCapabilities) {
 			stack.adaptiveCapabilities.setAdaptationSink((adaptation) => this.setAdaptationProjection(adaptation));
 		}
+	}
+
+	/** A model that cannot take work now: its quota is exhausted, or the owner's account does not offer it. */
+	private _isModelUnusable(model: Model<Api>): boolean {
+		return (
+			this._foregroundRecovery.isModelExhausted(`${model.provider}/${model.id}`) ||
+			this._accountModels.availability(model) === "unavailable"
+		);
+	}
+
+	/**
+	 * A provider refused the model for the owner's account: it is never routed to again this session,
+	 * and the turn moves to the model that replaces it. Returns the replacement's ref, or undefined.
+	 */
+	private async _replaceUnsupportedModel(message: AssistantMessage): Promise<string | undefined> {
+		const refused = this._modelRegistry.find(message.provider, message.model) ?? this.model;
+		if (!refused) return undefined;
+		this._accountModels.markRefused(refused, message.errorMessage ?? "model not supported");
+		const routed = this._modelRouter.replaceRefusedRoutedModel(refused);
+		if (routed) {
+			const to = `${routed.provider}/${routed.id}`;
+			this._emit({
+				type: "warning",
+				message: `${refused.provider}/${refused.id} is not available on this account; this turn continues on ${to}.`,
+			});
+			return to;
+		}
+		return this._leaveUnavailableSessionModel();
+	}
+
+	/**
+	 * The session's model is not offered to the owner's account: this session moves to the
+	 * provider's own default for the account (the owner's saved default is left alone), with a
+	 * warning naming both. Returns the replacement's ref, or undefined when there is nothing to leave
+	 * or nothing to move to.
+	 */
+	private async _leaveUnavailableSessionModel(): Promise<string | undefined> {
+		const current = this.model;
+		if (!current || this._accountModels.availability(current) !== "unavailable") return undefined;
+		const from = `${current.provider}/${current.id}`;
+		const why = this._accountModels.unavailableReason(current) ?? "unavailable";
+		const replacement = this._accountModels.accountDefault(current.provider);
+		if (!replacement) {
+			this._emit({
+				type: "warning",
+				message: `${from} is not available on this account (${why}), and the account offers no other ${current.provider} model pi knows.`,
+			});
+			return undefined;
+		}
+		await this.setModel(replacement, { persistSettings: false });
+		const to = `${replacement.provider}/${replacement.id}`;
+		this._emit({
+			type: "warning",
+			message: `${from} is not available on this account (${why}); this session continues on ${to}.`,
+		});
+		return to;
 	}
 
 	private async _getRequiredRequestAuth(model: Model<Api>): Promise<RequestAuth> {
@@ -3977,6 +4050,9 @@ export class AgentSession {
 			routingStarted = true;
 			this._emit({ type: "routing_start" });
 
+			// Before anything is routed or sent: what the owner's accounts actually offer.
+			await this._accountModels.ready();
+			await this._leaveUnavailableSessionModel();
 			const resolvedRouteInfo = await this._modelRouter.resolveTurnRouteJudged(expandedText, {
 				// Internally generated turns (goal continuation, lane follow-ups) keep the deterministic
 				// route: the classifier already placed them, and a 20-turn loop must not buy 20 evaluations.

@@ -59,6 +59,7 @@ import {
 import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
+import type { AccountModelCatalog } from "./model-router/account-models.ts";
 import {
 	type AutoSelectionDeps,
 	type AutoSelectionResult,
@@ -169,6 +170,8 @@ export interface ModelRouterControllerDeps {
 	getModelRegistry(): ModelRegistry;
 	/** Session-scoped provider/model quota exhaustion guard. */
 	isModelExhausted(model: Model<Api>): boolean;
+	/** What the owner's provider accounts can use, checked with the providers; absent means unchecked. */
+	getAccountModels?(): AccountModelCatalog | undefined;
 	/** Status snapshot for exhausted models and the last failover notice. */
 	getFailoverStatus(): ModelRouterFailoverStatus;
 	/** Root dir the host-keyed {@link FitnessStore} lives under (executor tool-call fitness gate). */
@@ -326,10 +329,9 @@ export class ModelRouterController {
 
 	private _autoSelectionDeps(): AutoSelectionDeps {
 		const settings = this.deps.getSettingsManager().getModelRouterSettings();
-		const registry = this.deps.getModelRegistry();
 		return {
 			isSubscription: (model) => this.deps.isUsingSubscription(model),
-			hasConfiguredAuth: (model) => registry.hasConfiguredAuth(model),
+			hasConfiguredAuth: (model) => this._hasAccess(model),
 			isExhausted: (model) => this.deps.isModelExhausted(model),
 			toolProbeVerdict: (model) => this.deps.getToolProbeVerdict(model),
 			fitness: (surface, model) => this._evaluateModelFitness(surface, model),
@@ -482,7 +484,24 @@ export class ModelRouterController {
 	private _isModelAvailableAndAuthed(pattern: string): boolean {
 		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this.deps.getModelRegistry() });
 		if (!resolved.model) return false;
-		return this.deps.getModelRegistry().hasConfiguredAuth(resolved.model);
+		return this._hasAccess(resolved.model);
+	}
+
+	/**
+	 * Why the owner cannot reach this model at all, or undefined when they can: no credential, or a
+	 * provider account that does not offer it (checked with the provider, or refused by it).
+	 */
+	private _accessProblem(model: Model<Api>): string | undefined {
+		if (!this.deps.getModelRegistry().hasConfiguredAuth(model)) return "has no auth";
+		const accounts = this.deps.getAccountModels?.();
+		if (accounts?.availability(model) === "unavailable") {
+			return `is not available on this account (${accounts.unavailableReason(model) ?? "unavailable"})`;
+		}
+		return undefined;
+	}
+
+	private _hasAccess(model: Model<Api>): boolean {
+		return this._accessProblem(model) === undefined;
 	}
 
 	private _evaluateModelFitness(surface: FitnessGatedSurface, model: Model<Api>): FitnessGateVerdict {
@@ -508,7 +527,7 @@ export class ModelRouterController {
 				tier === "cheap" ? settings.cheapModel : tier === "medium" ? settings.mediumModel : settings.expensiveModel;
 			if (!pattern) continue;
 			const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this.deps.getModelRegistry() });
-			if (!resolved.model || !this.deps.getModelRegistry().hasConfiguredAuth(resolved.model)) continue;
+			if (!resolved.model || !this._hasAccess(resolved.model)) continue;
 			const verdict = this._evaluateModelFitness(this._routerSurfaceForTier(tier), resolved.model);
 			statuses[tier] = verdict.fit
 				? { status: verdict.probed ? "fit" : "unprobed" }
@@ -588,7 +607,7 @@ export class ModelRouterController {
 			const verdict = classifyExecutorTurn(prompt, this.deps.getSettingsManager().getToolkitScripts());
 			if (!verdict.execute) return undefined;
 			const resolved = resolveCliModel({ cliModel: executorPattern, modelRegistry: this.deps.getModelRegistry() });
-			if (!resolved.model || !this.deps.getModelRegistry().hasConfiguredAuth(resolved.model)) return undefined;
+			if (!resolved.model || !this._hasAccess(resolved.model)) return undefined;
 			// Fitness gate: the executor must have PROVEN tool-calling on this host (same
 			// canonical-ref discipline as the curation gate).
 			if (!this._evaluateModelFitness("executor", resolved.model).fit) return undefined;
@@ -733,8 +752,12 @@ export class ModelRouterController {
 		}
 
 		const resolvedName = formatModelRouterModel(resolved.model);
-		if (!this.deps.getModelRegistry().hasConfiguredAuth(resolved.model)) {
-			this._lastModelRouterSkipReason = `${label} missing auth: ${resolvedName}`;
+		const accessProblem = this._accessProblem(resolved.model);
+		if (accessProblem) {
+			this._lastModelRouterSkipReason =
+				accessProblem === "has no auth"
+					? `${label} missing auth: ${resolvedName}`
+					: `${label} ${resolvedName} ${accessProblem}`;
 			return undefined;
 		}
 
@@ -802,7 +825,7 @@ export class ModelRouterController {
 		if (!modelPattern) return undefined;
 		const resolved = resolveCliModel({ cliModel: modelPattern, modelRegistry: this.deps.getModelRegistry() });
 		if (!resolved.model) return undefined;
-		if (!this.deps.getModelRegistry().hasConfiguredAuth(resolved.model)) return undefined;
+		if (!this._hasAccess(resolved.model)) return undefined;
 		return this.deps.isModelExhausted(resolved.model) ? undefined : resolved.model;
 	}
 
@@ -814,7 +837,7 @@ export class ModelRouterController {
 		if (!pattern) return undefined;
 		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this.deps.getModelRegistry() });
 		if (!resolved.model) return undefined;
-		if (!this.deps.getModelRegistry().hasConfiguredAuth(resolved.model)) return undefined;
+		if (!this._hasAccess(resolved.model)) return undefined;
 		if (this.deps.isModelExhausted(resolved.model)) return undefined;
 		// (Same doctrine as _resolveModelRouterTurnRoute above): never resolve a local/managed
 		// model the probe has already graded as having no working tool-call path.
@@ -878,7 +901,7 @@ export class ModelRouterController {
 				if (
 					model &&
 					isModelInRouterPool(pool, model) &&
-					this.deps.getModelRegistry().hasConfiguredAuth(model) &&
+					this._hasAccess(model) &&
 					!this.deps.isModelExhausted(model)
 				) {
 					return {
@@ -1033,7 +1056,8 @@ export class ModelRouterController {
 		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this.deps.getModelRegistry() }).model;
 		if (!resolved) return { reason: `${pattern} does not resolve` };
 		const ref = formatModelRouterModel(resolved);
-		if (!this.deps.getModelRegistry().hasConfiguredAuth(resolved)) return { reason: `${ref} has no auth` };
+		const accessProblem = this._accessProblem(resolved);
+		if (accessProblem) return { reason: `${ref} ${accessProblem}` };
 		if (this.deps.isModelAllowed?.(resolved) === false)
 			return { reason: `${ref} is outside the owner's model policy` };
 		if (this.deps.isModelExhausted(resolved)) return { reason: `${ref} quota exhausted` };
@@ -1070,7 +1094,7 @@ export class ModelRouterController {
 			manualPinModel && pool.customized && !isModelInRouterPool(pool, manualPinModel),
 		);
 		const subscriptionCandidates = pool.models.filter(
-			(model) => registry.hasConfiguredAuth(model) && this.deps.isUsingSubscription(model),
+			(model) => this._hasAccess(model) && this.deps.isUsingSubscription(model),
 		).length;
 
 		const previousSkip = this._lastModelRouterSkipReason;
@@ -1193,6 +1217,11 @@ export class ModelRouterController {
 				`${formatLabel ? formatLabel("H-MoE:") : "H-MoE:"} unavailable (${this._lastExpertSelectionFailure})`,
 			);
 		}
+		const accountLines = this.deps.getAccountModels?.()?.describe() ?? [];
+		if (accountLines.length > 0) {
+			lines.push(formatLabel ? formatLabel("Accounts:") : "Accounts:");
+			for (const line of accountLines) lines.push(`- ${line}`);
+		}
 		const pinsOutsidePool = this._pinsOutsideCandidatePool();
 		if (pinsOutsidePool.length > 0) {
 			lines.push(formatLabel ? formatLabel("Pool exceptions:") : "Pool exceptions:");
@@ -1212,6 +1241,41 @@ export class ModelRouterController {
 			}
 		}
 		return lines.join("\n");
+	}
+
+	/**
+	 * The routed turn's model was refused for the owner's account (mark it refused first): the rest
+	 * of the turn runs on the tier's next usable model, or on the turn's root model when the tier has
+	 * none. The turn's end restores from whichever model is installed. Undefined when no routed turn
+	 * is running on `refused`, or nothing can replace it.
+	 */
+	replaceRefusedRoutedModel(refused: Model<Api>): Model<Api> | undefined {
+		const active = this._activeRoutedTurn;
+		if (!active || !modelsAreEqual(active.routedModel, refused)) return undefined;
+		const tier = active.decision.tier;
+		const next =
+			tier === "cheap" || tier === "medium" || tier === "expensive"
+				? this.resolveConfiguredTierModel(tier)
+				: undefined;
+		const root = active.rootModel;
+		const replacement =
+			next && !modelsAreEqual(next, refused)
+				? next
+				: root && !modelsAreEqual(root, refused) && this._hasAccess(root)
+					? root
+					: undefined;
+		if (!replacement) return undefined;
+		const agent = this.deps.getAgent();
+		agent.state.model = replacement;
+		agent.state.thinkingLevel = clampThinkingLevel(replacement, agent.state.thinkingLevel) as ThinkingLevel;
+		this._activeRoutedTurn = { ...active, routedModel: replacement };
+		if (this._lastModelRouterDecision) {
+			this._lastModelRouterDecision = {
+				...this._lastModelRouterDecision,
+				routedModel: formatModelRouterModel(replacement),
+			};
+		}
+		return replacement;
 	}
 
 	async runRoutedTurn(
@@ -1445,7 +1509,10 @@ export class ModelRouterController {
 			// Restore the pre-route model ONLY if the routed model is still in place: a command
 			// handler may have legitimately changed the session model mid-turn (setModel or a
 			// provider re-registration), and clobbering that would silently undo the change.
-			if (modelsAreEqual(agent.state.model, routedModel)) {
+			// A refusal mid-turn may have moved this turn to another model (replaceRefusedRoutedModel).
+			const installedModel =
+				routeDecision && this._activeRoutedTurn ? this._activeRoutedTurn.routedModel : routedModel;
+			if (modelsAreEqual(agent.state.model, installedModel)) {
 				agent.state.model = previousModel;
 				agent.state.thinkingLevel = previousThinkingLevel;
 				// Symmetric restore: undo tools/systemPrompt only if each is STILL the exact

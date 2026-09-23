@@ -46,6 +46,7 @@ import { ObjectivePrimaryBindingError } from "./goals/goal-session-controller.ts
 import type { IntegrityExtension } from "./hooks/index.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
+import { AccountModelCatalog } from "./model-router/account-models.ts";
 import { ModelAdaptationStore } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import { observeDeliveryAdmission } from "./objective-execution/delivery-intent.ts";
@@ -672,6 +673,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 
+	// Routing is judged by System One, so an unset `modelRouter.enabled` follows whether this session has it.
+	settingsManager.setModelRouterDefaultEnabled(systemOneController !== undefined);
+
 	// Restore messages if session has existing data
 	if (hasExistingSession) {
 		agent.state.messages = existingSession.messages;
@@ -733,6 +737,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		(systemOneController ? "objective_primary" : "legacy_goal");
 
 	// Phase A — Core session construction (AgentSession, runtimeUpdates, skillVault, extensionRunner, backgroundLanes)
+	// Which models the owner's accounts offer, asked of the providers while the session starts; the
+	// first turn waits for the answer before anything is routed.
+	const accountModels = new AccountModelCatalog({
+		getModels: () => modelRegistry.getAll(),
+		hasConfiguredAuth: (model) => modelRegistry.hasConfiguredAuth(model),
+		getApiKey: async (model) => {
+			const auth = await modelRegistry.getApiKeyAndHeaders(model);
+			return auth.ok ? auth.apiKey : undefined;
+		},
+	});
+	void accountModels.refresh();
+
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -759,6 +775,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		orchestrationProfile,
 		sessionStartEvent: options.sessionStartEvent,
 		systemOneController,
+		accountModels,
 		executionLoopMode,
 		objectiveExecutionController,
 		steeringPlane,

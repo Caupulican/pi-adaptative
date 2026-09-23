@@ -536,7 +536,9 @@ machine-wide cap.** Every pi process on the machine registers each in-flight pro
 `state/provider-admission/` (one file per request, released when its stream settles, pruned by any
 reader once its owner's pid is gone or its heartbeat is stale). The first process to see a 429, an
 overload, or a fully used subscription window records the reset time under
-`state/provider-admission/limits/`; before sending, every lane waits out a recorded limit that fits
+`state/provider-admission/limits/`; the latest windows are kept per provider under
+`state/provider-admission/usage/`, with the account's credits when the provider reports them
+(Codex's `x-codex-credits-*`), so `/load` shows what remains beside what is used; before sending, every lane waits out a recorded limit that fits
 its budget and otherwise refuses the request unsent with a message the reliability classifier
 reads as a rate limit carrying the remaining delay, so no retry ladder rediscovers a limit at the
 account's expense; a worker's own retry ladder publishes its wait the same way. Counts and limits

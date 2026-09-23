@@ -8,11 +8,8 @@
 
 import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
 import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
-import {
-	type DecisionStage,
-	type DecisionStageLogView,
-	isIdleProjection,
-} from "../../../core/operator-projection/decision-stage-log.ts";
+import type { DecisionStage, DecisionStageLogView } from "../../../core/operator-projection/decision-stage-log.ts";
+import type { FlowEvent, FlowOutcome } from "../../../core/operator-projection/flow-trace.ts";
 import type { OperatorProjection } from "../../../core/operator-projection/types.ts";
 import {
 	doubtsFromReasons,
@@ -47,6 +44,8 @@ export interface DecisionGraphInput {
 	readonly backgroundTools: readonly { readonly name: string; readonly startedAt?: number }[];
 	/** The operator event stream (visible events only); a stage's detail lists what happened while it was open. */
 	readonly events?: readonly { readonly timestamp: string; readonly title: string; readonly severity: string }[];
+	/** What actually happened, recorded where it happened: the source for what is running now. */
+	readonly flow?: readonly FlowEvent[];
 	readonly nowMs: number;
 }
 
@@ -135,6 +134,12 @@ export interface DecisionGraphModel {
 	 */
 	readonly doubts: readonly DecisionDoubt[];
 	readonly hasRunningClock: boolean;
+	/** The request is in flight: something in the trace is still open (routing, the turn, a tool, a question). */
+	readonly turnRunning: boolean;
+	/** How the last finished turn ended, from the trace. */
+	readonly lastTurnOutcome?: FlowOutcome;
+	/** The flow trace, for the views drawn from it. */
+	readonly flow: readonly FlowEvent[];
 	readonly stageLogEmpty: boolean;
 	readonly nowMs: number;
 }
@@ -263,14 +268,17 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 	};
 
 	const routed = route.switched && route.activeModel !== route.rootModel;
-	const rootRunning =
-		projection.active_actors.some((actor) => actor.kind === "root") &&
-		projection.phase !== "done" &&
-		!waiting &&
-		!isIdleProjection(projection);
+	// What the root is doing is read from the trace, not guessed from phases: running while a turn is
+	// open, and doing the latest action still open inside it.
+	const flow = input.flow ?? [];
+	const openRoot = flow.filter((event) => event.actor === "root" && event.endedAt === undefined);
+	const turnRunning = flow.some((event) => event.endedAt === undefined && event.actor !== "worker");
+	const rootAction = openRoot.findLast((event) => event.kind !== "turn");
+	const rootRunning = openRoot.some((event) => event.kind === "turn");
+	const lastTurnOutcome = flow.findLast((event) => event.kind === "turn" && event.endedAt !== undefined)?.outcome;
+	const rootTask = waiting ? "waiting for your answer" : (rootAction?.label ?? "thinking");
 	const rootActed =
-		input.receipts.actions > 0 ||
-		stageLog.entries.some((entry) => entry.stage === "build" || entry.stage === "repair");
+		input.receipts.actions > 0 || flow.some((event) => event.actor === "root" && event.kind !== "notice");
 	const participants: DecisionParticipant[] = [
 		{
 			id: "root",
@@ -278,7 +286,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 			label: "root",
 			model: shortModelName(route.activeModel ?? route.rootModel),
 			...(routed ? { routeText: formatRouteValue(route) } : {}),
-			...(rootRunning ? { task: projection.current_action } : {}),
+			...(rootRunning ? { task: rootTask } : {}),
 			running: rootRunning,
 			acted: rootActed,
 		},
@@ -373,6 +381,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 	const hasRunningClock = Boolean(
 		(open && projection.phase !== "done") ||
 			inFlight ||
+			flow.some((event) => event.endedAt === undefined) ||
 			participants.some((p) => p.running && p.startedAt !== undefined),
 	);
 
@@ -393,6 +402,9 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		goal: { present: projection.has_goal, branch },
 		doubts,
 		hasRunningClock,
+		turnRunning,
+		...(lastTurnOutcome ? { lastTurnOutcome } : {}),
+		flow,
 		stageLogEmpty: stageLog.entries.length === 0,
 		nowMs,
 	};

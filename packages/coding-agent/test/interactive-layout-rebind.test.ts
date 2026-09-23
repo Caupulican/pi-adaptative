@@ -47,6 +47,8 @@ function fakeSession(name: string) {
 			getVisibleEvents: () => [],
 		},
 		onSemanticEvaluation: subscribe,
+		// The flow trace records the session's own event stream.
+		subscribe,
 		getTaskStepsStateSnapshot: () => undefined,
 		getGoalStateSnapshot: () => undefined,
 		getVerificationObligations: () => [],
@@ -71,7 +73,7 @@ function fakeSession(name: string) {
 describe("interactive layout session listeners", () => {
 	beforeAll(() => initTheme("dark"));
 
-	it("rebinds the four listeners to the new session and disposes the old ones; stop disposes everything", () => {
+	it("rebinds the five listeners to the new session and disposes the old ones; stop disposes everything", () => {
 		const first = fakeSession("first");
 		const second = fakeSession("second");
 		const settings = {
@@ -119,16 +121,16 @@ describe("interactive layout session listeners", () => {
 			workbench: undefined as WorkbenchController | undefined,
 		};
 		mountInteractiveLayout(host as unknown as InteractiveLayoutHost);
-		expect(first.counts).toEqual({ subscribed: 3, unsubscribed: 0 });
+		expect(first.counts).toEqual({ subscribed: 4, unsubscribed: 0 });
 		expect(host.workbench).toBeDefined();
 		// The session is swapped (resume / new session): the mode rebinds the layout to it.
 		host.session = second.session;
 		subscribeInteractiveLayout(host as unknown as InteractiveLayoutHost);
-		expect(first.counts).toEqual({ subscribed: 3, unsubscribed: 3 });
-		expect(second.counts).toEqual({ subscribed: 3, unsubscribed: 0 });
+		expect(first.counts).toEqual({ subscribed: 4, unsubscribed: 4 });
+		expect(second.counts).toEqual({ subscribed: 4, unsubscribed: 0 });
 		const typed = host as unknown as InteractiveLayoutHost;
 		typed.disposeOperatorProjection?.();
-		expect(second.counts).toEqual({ subscribed: 3, unsubscribed: 3 });
+		expect(second.counts).toEqual({ subscribed: 4, unsubscribed: 4 });
 		expect(typed.disposeOperatorProjection).toBeUndefined();
 	});
 });

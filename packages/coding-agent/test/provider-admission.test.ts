@@ -367,12 +367,23 @@ describe("ProviderLimitStore", () => {
 			{
 				...fauxAssistantMessage("ok"),
 				provider: "openai-codex",
-				diagnostics: [{ type: "openai_codex_subscription_rate_limits", timestamp: now, details: { rateLimits } }],
+				diagnostics: [
+					{
+						type: "openai_codex_subscription_rate_limits",
+						timestamp: now,
+						details: { rateLimits, credits: { hasCredits: true, unlimited: false, balance: "12.50" } },
+					},
+				],
 			},
 			now,
 		);
 		expect(store.read("openai-codex")).toMatchObject({ reason: "usage_window", limitedUntil: now + 3_600_000 });
 		expect(store.readUsage("openai-codex")?.rateLimits).toEqual(rateLimits);
+		expect(store.readUsage("openai-codex")?.credits).toEqual({
+			hasCredits: true,
+			unlimited: false,
+			balance: "12.50",
+		});
 	});
 
 	it("records a limit from a rate-limited result that states its reset and clears it on the next success", () => {

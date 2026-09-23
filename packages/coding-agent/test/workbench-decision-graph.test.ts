@@ -530,6 +530,26 @@ describe("Decision graph rendering", () => {
 describe("Decision graph for a plain request", () => {
 	beforeAll(() => initTheme("dark"));
 
+	it("takes what the root is doing from the flow trace: its open action while the turn runs, idle once it ends", () => {
+		const base = { actor: "root" as const, startedAt: T0 };
+		const running = buildDecisionGraphModel({
+			...SCENARIOS.rootOnlyBuild!(),
+			flow: [
+				{ ...base, id: "1", kind: "turn", label: "turn" },
+				{ ...base, id: "2", kind: "tool", label: "bash", endedAt: T0 + 1, outcome: "ok" },
+				{ ...base, id: "3", kind: "tool", label: "edit" },
+			],
+		});
+		expect(running.turnRunning).toBe(true);
+		expect(running.participants[0]).toMatchObject({ id: "root", running: true, task: "edit" });
+		const finished = buildDecisionGraphModel({
+			...SCENARIOS.rootOnlyBuild!(),
+			flow: [{ ...base, id: "1", kind: "turn", label: "turn", endedAt: T0 + 5, outcome: "ok" }],
+		});
+		expect(finished.turnRunning).toBe(false);
+		expect(finished.participants[0]).toMatchObject({ running: false });
+	});
+
 	it("ends a goal-less turn as finished, draws no edge above the first level, and names the last judgment briefly", () => {
 		const log = new DecisionStageLog();
 		const plain = (overrides: Partial<OperatorProjection> = {}) =>
@@ -594,7 +614,13 @@ describe("Workbench conversation zone with the Decision graph", () => {
 		for (const row of frame) expect(visibleWidth(row)).toBeLessThanOrEqual(120);
 		expect(frame.length).toBe(40);
 		const header = text[view.conversationTop - 1]!;
-		expect(header).toMatch(/^ Decision graph .*List .*Diagram .*Hide .*│\s+Conversation/);
+		// A 48-column pane cannot hold every view chip: they condense into one naming the current view.
+		expect(header).toMatch(/^ Decision graph .*Diagram .*Hide .*│\s+Conversation/);
+		expect(header).not.toContain("Lanes");
+		// A pane wide enough for every view (64 columns at 200) shows them all.
+		const wideView = setup();
+		const wide = stripAnsi(wideView.render(200)[wideView.conversationTop - 1] ?? "");
+		expect(wide).toMatch(/^ Decision graph .*List .*Diagram .*Lanes .*Hide .*│/);
 		const ruleColumn = header.indexOf("│");
 		expect(ruleColumn).toBe(Math.max(48, Math.floor(120 * 0.32)));
 		for (let row = view.conversationTop - 1; row < view.conversationTop + view.conversationHeight; row++) {
@@ -612,7 +638,7 @@ describe("Workbench conversation zone with the Decision graph", () => {
 		expect(view.hitTest(ruleColumn, view.conversationTop + 1)).toBe("graphSplit");
 		expect(view.hitTest(ruleColumn + 4, view.conversationTop - 1)).toBe("conversationHeader");
 		expect(view.hitTest(ruleColumn + 4, view.conversationTop + 1)).toBe("conversation");
-		expect(view.paneTitleAction(header.indexOf("List"), view.conversationTop - 1)).toBe("graphList");
+		expect(view.paneTitleAction(header.indexOf("Diagram"), view.conversationTop - 1)).toBe("graphCycle");
 		expect(view.paneTitleAction(header.indexOf("Hide"), view.conversationTop - 1)).toBe("hideGraph");
 		expect(view.headerAction(header.indexOf("Copy conversation") + 1)).toBe("copyAll");
 	});
@@ -773,12 +799,15 @@ describe("Workbench controller with the Decision graph", () => {
 		controller.handleInput("\x1bg");
 		expect(view.geometry().graph).toBe("shown");
 		controller.handleInput("\x1bl");
+		expect(view.geometry().graphView).toBe("lanes");
+		controller.handleInput("\x1bl");
 		expect(view.geometry().graphView).toBe("list");
 		controller.handleInput("\x1bl");
 		expect(view.geometry().graphView).toBe("diagram");
 		expect(saved.map((geometry) => (geometry as { graphView: string }).graphView)).toEqual([
 			"diagram",
 			"diagram",
+			"lanes",
 			"list",
 			"diagram",
 		]);
@@ -787,12 +816,19 @@ describe("Workbench controller with the Decision graph", () => {
 	it("switches views and hides from the title chips, scrolls on the wheel, and expands a stage on click", () => {
 		const { view, controller, saved } = setup();
 		const titleRow = view.conversationTop - 1;
-		const title = stripAnsi(view.render(120)[titleRow] ?? "");
-		controller.handleInput(mouse(0, title.indexOf("List"), titleRow));
+		// The condensed view chip names the current view and cycles on click: Diagram → Lanes → List → Diagram.
+		const clickView = (label: string) => {
+			const title = stripAnsi(view.render(120)[titleRow] ?? "");
+			expect(title).toContain(label);
+			controller.handleInput(mouse(0, title.indexOf(label), titleRow));
+		};
+		clickView("Diagram");
+		expect(view.geometry().graphView).toBe("lanes");
+		clickView("Lanes");
 		expect(view.geometry().graphView).toBe("list");
-		controller.handleInput(mouse(0, title.indexOf("Diagram"), titleRow));
+		clickView("List");
 		expect(view.geometry().graphView).toBe("diagram");
-		expect(saved.length).toBe(2);
+		expect(saved.length).toBe(3);
 		// The diagram is taller than the pane: the wheel scrolls it without touching the conversation.
 		const before = stripAnsi(view.render(120)[view.conversationTop + 1] ?? "");
 		controller.handleInput(mouse(65, 4, view.conversationTop + 1));

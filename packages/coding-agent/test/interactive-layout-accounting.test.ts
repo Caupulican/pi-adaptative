@@ -53,6 +53,7 @@ it("counts one invocation once while foreground and background handoff observati
 			getVerificationObligations: () => [],
 			getSemanticEvaluations: () => [],
 			onSemanticEvaluation: () => () => {},
+			subscribe: () => () => {},
 			getLaneRecords: () => [],
 			getForegroundRouteSnapshot: () => ({
 				rootModel: "fixture/model",

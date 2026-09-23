@@ -41,6 +41,8 @@ export interface ForegroundRecoveryControllerDeps {
 	exhaustedStoreDir?: string;
 	emit(event: ForegroundRecoveryEvent): void;
 	checkCompaction(message: AssistantMessage): Promise<boolean>;
+	/** The provider refused the model for this account: move the turn to a replacement, returning its ref. */
+	replaceUnsupportedModel?(message: AssistantMessage): Promise<string | undefined>;
 	onSuccessfulAssistant(): void;
 	prepareRun(): Promise<void>;
 	afterRun(): Promise<void>;
@@ -426,6 +428,10 @@ export class ForegroundRecoveryController {
 		if (classified?.retryable && (await this.retry.prepareRetry(message))) {
 			this.pendingCompactionRetryKey = compactionRetryKey;
 			return true;
+		}
+		if (classified?.reason === "model_unsupported") {
+			const replacement = await this.deps.replaceUnsupportedModel?.(message);
+			if (replacement && this.retry.prepareModelSwitchRetry(message, `Continuing on ${replacement}.`)) return true;
 		}
 		if (await this.billingFailover.handleAssistantError(message, classified)) return false;
 

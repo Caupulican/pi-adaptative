@@ -191,7 +191,7 @@ export const KEYBINDINGS = {
 	},
 	"app.graph.view": {
 		defaultKeys: "alt+l",
-		description: "Switch the Decision graph between List and Diagram",
+		description: "Cycle the Decision graph view: List, Diagram, Lanes",
 	},
 	"app.graph.follow": {
 		defaultKeys: "alt+f",

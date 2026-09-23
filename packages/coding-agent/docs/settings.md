@@ -144,7 +144,7 @@ These grants control operation approval. Explicit tool/path restrictions, worker
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `modelRouter.enabled` | boolean | `false` | Enable deterministic cheap/medium/expensive model routing |
+| `modelRouter.enabled` | boolean | on with System One, off otherwise | Enable cheap/medium/expensive model routing. Unset, it is on when the session has System One (a TypeSafe or OpenRouter key) and off otherwise; an explicit value wins |
 | `modelRouter.fitnessGate` | boolean | `false` | Opt-in subtractive gate: when a tier model has a host-local failed probe for its router lanes, skip or fall back instead of routing to it; unprobed tier models still route |
 | `modelRouter.cheapModel` | string | - | Model pattern for read-only, research, explanation, and question turns |
 | `modelRouter.mediumModel` | string | - | Model pattern for scoped implementation/planning turns |

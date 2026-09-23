@@ -24,6 +24,7 @@ import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
 import type { ExtensionFactory } from "../../src/core/extensions/types.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
+import { AccountModelCatalog } from "../../src/core/model-router/account-models.ts";
 import type { LocalRuntimeDeps } from "../../src/core/models/local-runtime.ts";
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../src/core/orchestration/profile-store.ts";
@@ -109,6 +110,8 @@ export interface HarnessOptions {
 	additionalOrchestrationProfiles?: readonly OrchestrationProfile[];
 	/** System One controller bound to the session, as the SDK binds one when System One is configured. */
 	systemOneController?: AgentSessionConfig["systemOneController"];
+	/** Fake provider endpoint (and credential) for the account model check the SDK runs at session start. */
+	accountModels?: { fetch: typeof fetch; apiKey: string };
 }
 
 export interface Harness {
@@ -278,6 +281,19 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		if (!scoped) throw new Error(`Harness scopedModelIds: no registered model ${id}`);
 		return { model: scoped };
 	});
+	// As the SDK does: an unset `modelRouter.enabled` follows whether the session has System One.
+	settingsManager.setModelRouterDefaultEnabled(options.systemOneController !== undefined);
+	let accountModels: AccountModelCatalog | undefined;
+	const accountCheck = options.accountModels;
+	if (accountCheck) {
+		accountModels = new AccountModelCatalog({
+			getModels: () => modelRegistry.getAll(),
+			hasConfiguredAuth: (candidate) => modelRegistry.hasConfiguredAuth(candidate),
+			getApiKey: async () => accountCheck.apiKey,
+			fetch: accountCheck.fetch,
+		});
+		await accountModels.refresh();
+	}
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -296,6 +312,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		localRuntimeDeps: options.localRuntimeDeps,
 		orchestrationProfile: options.orchestrationProfile,
 		systemOneController: options.systemOneController,
+		accountModels,
 	});
 
 	const events: AgentSessionEvent[] = [];

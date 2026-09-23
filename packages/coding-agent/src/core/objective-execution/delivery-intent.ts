@@ -258,6 +258,8 @@ function gitText(repoRoot: string, args: readonly string[]): string {
 		encoding: "utf8",
 		timeout: 15_000,
 		maxBuffer: 1_048_576,
+		// A failure carries git's stderr in the thrown error instead of printing it to the host terminal.
+		stdio: ["ignore", "pipe", "pipe"],
 		env: { ...withoutInheritedGitLocation(), GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" },
 	}).trim();
 }

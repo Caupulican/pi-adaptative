@@ -9,6 +9,7 @@ import { expandMessageTextForDisplay } from "../../core/context/path-alias-displ
 import type { ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
+import { type FlowEvent, FlowTrace } from "../../core/operator-projection/flow-trace.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
 import type { TaskStepStatus } from "../../core/tasks/task-state.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
@@ -53,6 +54,8 @@ export interface InteractiveLayoutHost {
 	disposeOperatorProjection?: () => void;
 	/** Questions asked in the current objective; survives a session rebind so the graph's YOU node keeps its counts. */
 	humanInputTally?: HumanInputTally;
+	/** What actually happened in the session, recorded where it happens; the graph views draw from it. */
+	flowTrace?: FlowTrace;
 }
 
 /** Active obligations are unresolved open work, not a failed requirement branch. */
@@ -137,6 +140,7 @@ function composeDecisionGraph(host: InteractiveLayoutHost, humanInput: HumanInpu
 			answered: humanInput.answered,
 		},
 		events: session.operatorProjection.getVisibleEvents(),
+		flow: host.flowTrace ? observedFlow(host.flowTrace, session) : [],
 		backgroundTools: (host.activityLane?.getItems() ?? []).flatMap((item) =>
 			isBackgroundToolActivityItem(item) && item.status !== "success" && item.status !== "failure"
 				? [{ name: item.label, ...(item.startedAt !== undefined ? { startedAt: item.startedAt } : {}) }]
@@ -144,6 +148,12 @@ function composeDecisionGraph(host: InteractiveLayoutHost, humanInput: HumanInpu
 		),
 		nowMs: now,
 	});
+}
+
+/** Worker lanes enter the trace from their records as they stand at each composition. */
+function observedFlow(flow: FlowTrace, session: AgentSession): readonly FlowEvent[] {
+	flow.observeLanes(session.getLaneRecords());
+	return flow.snapshot();
 }
 
 /**
@@ -158,14 +168,21 @@ export function subscribeInteractiveLayout(host: InteractiveLayoutHost): HumanIn
 	const unsubscribeOperatorProjection = session.operatorProjection.subscribe(() => host.ui.requestRender());
 	// The stage log fires on every transition; the graph pane's timers and lit stage follow it.
 	const unsubscribeStageChange = session.operatorProjection.onStageChange(() => host.ui.requestRender());
+	// The flow trace belongs to the session it records: a swapped session starts its own.
+	host.flowTrace ??= new FlowTrace();
+	const flow = host.flowTrace;
+	flow.reset();
+	const unsubscribeFlow = session.subscribe((event) => flow.observe(event));
 	// Every settled System One evaluation is Execution evidence and changes the Decider row and the graph.
 	const unsubscribeSemantic = session.onSemanticEvaluation((record) => {
 		host.workbench?.recordSystemOneEvaluation(record);
+		flow.observeEvaluation(record);
 		host.ui.requestRender();
 	});
 	const humanInput: HumanInputTally = host.humanInputTally ?? { asked: 0, answered: 0 };
 	host.humanInputTally = humanInput;
 	const unsubscribeHumanInput = subscribeHumanInputActivity(session.sessionManager, (activity) => {
+		flow.observeQuestion(activity);
 		if (activity.phase === "waiting") {
 			humanInput.asked++;
 			humanInput.question = activity.request.questions[0]?.question;
@@ -182,6 +199,7 @@ export function subscribeInteractiveLayout(host: InteractiveLayoutHost): HumanIn
 		unsubscribeStageChange();
 		unsubscribeSemantic();
 		unsubscribeHumanInput();
+		unsubscribeFlow();
 		host.activityLane?.setExternalClock("decision-graph", false);
 		host.disposeOperatorProjection = undefined;
 	};
