@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { codingAgentShards, FULL_PLAN } from "./ci-affected.mjs";
 
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const releaseWorkflow = readFileSync(new URL("../.github/workflows/build-binaries.yml", import.meta.url), "utf8");
@@ -109,7 +110,9 @@ function withInstallerHarness(options, fn) {
 test("normal CI keeps small workspaces on the quality job and shards coding-agent four ways", () => {
 	assert.match(workflow, /join\(fromJSON\(needs\.plan\.outputs\.non_coding_agent_workspaces\), ' '\)/u);
 	assert.match(workflow, /^  coding-agent-test:\n/mu);
-	assert.match(workflow, /shard: \[1, 2, 3, 4\]/u);
+	// The shard list comes from the plan: four for a full or unnarrowed run, one when narrowed.
+	assert.match(workflow, /shard: \$\{\{ fromJSON\(needs\.plan\.outputs\.coding_agent_shards\) \}\}/u);
+	assert.deepEqual(codingAgentShards(FULL_PLAN), [1, 2, 3, 4]);
 	assert.match(workflow, /--shard=\$\{\{ matrix\.shard \}\}\/4/u);
 	assert.doesNotMatch(workflow, /^\s+run: npm test\s*$/mu);
 });
