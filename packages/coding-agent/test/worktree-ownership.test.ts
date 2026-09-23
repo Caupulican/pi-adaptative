@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { enforceSessionEdge, type SessionEdgeDeps } from "../src/core/agent-session-edge.ts";
-import { hasUnownedWorktreeChanges } from "../src/core/objective-execution/worktree-ownership.ts";
+import { mayHoldUnownedWorktreeChanges } from "../src/core/objective-execution/worktree-ownership.ts";
 
 function gitRepo(): string {
 	const root = realpathSync.native(mkdtempSync(join(realpathSync.native(tmpdir()), "pi-own-")));
@@ -26,29 +26,35 @@ function edgeDeps(root: string, unowned: () => Promise<boolean>): SessionEdgeDep
 		getCwd: () => root,
 		isChildSession: () => true,
 		getConfirmation: () => undefined,
-		hasUnownedWorktreeChanges: unowned,
+		mayHoldUnownedWorktreeChanges: unowned,
 	};
 }
 
 describe("worktree ownership", () => {
 	it("is false for a clean tree and for a tree holding only this session's writes", async () => {
 		const root = gitRepo();
-		expect(await hasUnownedWorktreeChanges(root, [])).toBe(false);
+		expect(await mayHoldUnownedWorktreeChanges(root, [])).toBe(false);
 		writeFileSync(join(root, "README.md"), "two\n");
 		writeFileSync(join(root, "new.ts"), "export const a = 1;\n");
-		expect(await hasUnownedWorktreeChanges(root, ["README.md", "new.ts"])).toBe(false);
+		expect(await mayHoldUnownedWorktreeChanges(root, ["README.md", "new.ts"])).toBe(false);
 	});
 
 	it("is true as soon as one dirty path was never written by this session", async () => {
 		const root = gitRepo();
 		writeFileSync(join(root, "README.md"), "mine\n");
 		writeFileSync(join(root, "theirs.ts"), "other session\n");
-		expect(await hasUnownedWorktreeChanges(root, ["README.md"])).toBe(true);
+		expect(await mayHoldUnownedWorktreeChanges(root, ["README.md"])).toBe(true);
 	});
 
-	it("answers false when the status cannot be read, so the edge never asks on an unknown state", async () => {
+	it("is false outside a repository, where there is no worktree to discard", async () => {
 		const outside = realpathSync.native(mkdtempSync(join(realpathSync.native(tmpdir()), "pi-nogit-")));
-		expect(await hasUnownedWorktreeChanges(outside, [])).toBe(false);
+		expect(await mayHoldUnownedWorktreeChanges(outside, [])).toBe(false);
+	});
+
+	it("is true when the status of a repository cannot be read, so an irreversible discard asks", async () => {
+		const root = gitRepo();
+		writeFileSync(join(root, ".git", "index"), "not an index");
+		expect(await mayHoldUnownedWorktreeChanges(root, [])).toBe(true);
 	});
 });
 
@@ -78,6 +84,20 @@ describe("the worktree-discard edge in a session", () => {
 		);
 		expect(result?.block).toBe(true);
 		expect(result?.reason).toContain("destructive.fs");
+	});
+
+	it("stops a discard when the ownership check itself fails", async () => {
+		const root = gitRepo();
+		const result = await enforceSessionEdge(
+			edgeDeps(root, async () => {
+				throw new Error("status probe crashed");
+			}),
+			"bash",
+			discard,
+			root,
+			undefined,
+		);
+		expect(result?.block).toBe(true);
 	});
 
 	it("leaves ordinary git alone without ever reading the worktree", async () => {

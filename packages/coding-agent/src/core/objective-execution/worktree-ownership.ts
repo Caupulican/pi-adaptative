@@ -12,8 +12,14 @@ import { parsePorcelainZ } from "./delivery-proof.ts";
 const STATUS_TIMEOUT_MS = 5_000;
 const STATUS_MAX_BYTES = 4 * 1024 * 1024;
 
-/** Repo-relative paths with uncommitted changes, or undefined when the status could not be read. */
-export async function dirtyWorktreePaths(cwd: string, signal?: AbortSignal): Promise<string[] | undefined> {
+/** What `git status` said about a checkout: its dirty paths, that it is not a repository, or nothing. */
+export type WorktreeStatus =
+	| { readonly kind: "paths"; readonly paths: string[] }
+	| { readonly kind: "no_repository" }
+	| { readonly kind: "unreadable"; readonly reason: string };
+
+/** The checkout's repo-relative dirty paths, as `git status` reports them. */
+export async function readWorktreeStatus(cwd: string, signal?: AbortSignal): Promise<WorktreeStatus> {
 	return new Promise((resolve) => {
 		execFile(
 			"git",
@@ -26,30 +32,36 @@ export async function dirtyWorktreePaths(cwd: string, signal?: AbortSignal): Pro
 				...(signal ? { signal } : {}),
 				env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" },
 			},
-			(error, stdout) => {
-				if (error) {
-					resolve(undefined);
+			(error, stdout, stderr) => {
+				if (!error) {
+					resolve({ kind: "paths", paths: parsePorcelainZ(stdout) });
 					return;
 				}
-				resolve(parsePorcelainZ(stdout));
+				if (/not a git repository/i.test(String(stderr))) {
+					resolve({ kind: "no_repository" });
+					return;
+				}
+				resolve({ kind: "unreadable", reason: error.message });
 			},
 		);
 	});
 }
 
 /**
- * True when at least one dirty path is outside `writtenPaths`.
- *
- * An unreadable status answers false: the edge must not start asking about a state nobody could
- * establish. A clean tree, and a tree whose every change this session wrote, are both false.
+ * True when the checkout may hold work this session did not write: at least one dirty path is
+ * outside `writtenPaths`, or the status could not be read. A discard is irreversible, so a state
+ * nobody could establish counts as holding such work and the edge asks (the authority line's rule for
+ * an irreversible operation on an unknown state). A clean tree, a tree whose every change this
+ * session wrote, and a directory that is not a repository are false.
  */
-export async function hasUnownedWorktreeChanges(
+export async function mayHoldUnownedWorktreeChanges(
 	cwd: string,
 	writtenPaths: readonly string[],
 	signal?: AbortSignal,
 ): Promise<boolean> {
-	const dirty = await dirtyWorktreePaths(cwd, signal);
-	if (dirty === undefined || dirty.length === 0) return false;
+	const status = await readWorktreeStatus(cwd, signal);
+	if (status.kind === "no_repository") return false;
+	if (status.kind === "unreadable") return true;
 	const owned = new Set(writtenPaths);
-	return dirty.some((path) => !owned.has(path));
+	return status.paths.some((path) => !owned.has(path));
 }

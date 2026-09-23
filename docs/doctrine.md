@@ -317,8 +317,11 @@ to recover it. They stay ordinary work whenever every dirty path in the tree is 
 wrote; they classify into `destructive.fs` only while the tree also holds changes it did not. The
 classifier never touches the filesystem: it emits the operation with a `condition`, and the session
 layer resolves it once per call against `git status` and the objective's own mutation ledger. A
-status that cannot be read resolves to *no condition* — the edge must not start asking about a state
-nobody established, and a discard of the session's own work never reaches the operator. Toolkit script authority is a host-owned edge: dangerous
+directory that is not a repository has no worktree to discard and resolves to no condition, and a
+discard of the session's own work never reaches the operator. A status that cannot be read (a timeout,
+an oversized status, a lock) resolves to *the condition holding*: the discard is irreversible, so on a
+state nobody could establish the operator decides, the authority line's rule for an irreversible
+operation. Toolkit script authority is a host-owned edge: dangerous
 toolkit script operations are classified into `toolkit.script` with a narrow scope key derived
 cryptographically from `(cwd, scriptPath, runner, scriptName, argv)` (`toolkit:<scriptName>:<digest>`).
 A narrow grant persists across session compaction and reload, but changing script registration

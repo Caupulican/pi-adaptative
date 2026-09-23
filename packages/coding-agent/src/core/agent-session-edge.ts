@@ -34,7 +34,7 @@ export interface SessionEdgeDeps {
 	 * `unowned_worktree_changes` condition. Absent means the state cannot be read, and a conditional
 	 * operation then stays ordinary work rather than asking on a state nobody established.
 	 */
-	hasUnownedWorktreeChanges?(signal?: AbortSignal): Promise<boolean>;
+	mayHoldUnownedWorktreeChanges?(signal?: AbortSignal): Promise<boolean>;
 }
 
 export interface EdgeGrantDetails {
@@ -129,9 +129,9 @@ export async function enforceSessionEdgeOperation(
 
 /**
  * Drop every conditional operation whose condition does not hold right now. A condition is only
- * ever asked once per call, and a condition that cannot be evaluated drops the operation: an edge
- * that fires on an unknown state is friction on ordinary work, which is what this layer exists to
- * avoid.
+ * ever asked once per call. Its one condition guards an irreversible discard, so a condition that
+ * cannot be evaluated keeps the operation: on an unknown state the operator decides (the authority
+ * line's rule for an irreversible operation).
  */
 async function resolveEdgeConditions(
 	deps: SessionEdgeDeps,
@@ -147,8 +147,8 @@ async function resolveEdgeConditions(
 			continue;
 		}
 		if (unownedChanges === undefined) {
-			unownedChanges = deps.hasUnownedWorktreeChanges
-				? await deps.hasUnownedWorktreeChanges(signal).catch(() => false)
+			unownedChanges = deps.mayHoldUnownedWorktreeChanges
+				? await deps.mayHoldUnownedWorktreeChanges(signal).catch(() => true)
 				: false;
 			signal?.throwIfAborted();
 		}

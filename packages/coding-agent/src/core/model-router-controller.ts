@@ -1243,27 +1243,30 @@ export class ModelRouterController {
 		return lines.join("\n");
 	}
 
+	/** Whether a routed turn is running on `model` right now (its swap is still installed). */
+	isRoutedTurnOn(model: Model<Api>): boolean {
+		const active = this._activeRoutedTurn;
+		return active !== undefined && modelsAreEqual(active.routedModel, model);
+	}
+
 	/**
 	 * The routed turn's model was refused for the owner's account (mark it refused first): the rest
-	 * of the turn runs on the tier's next usable model, or on the turn's root model when the tier has
-	 * none. The turn's end restores from whichever model is installed. Undefined when no routed turn
-	 * is running on `refused`, or nothing can replace it.
+	 * of the turn runs on the tier's next usable model, else the turn's root model, else `fallback`
+	 * (the refused provider's own default for the account). The swap stays the routed turn's, so the
+	 * turn's end restores the root model exactly as for any routed turn. Undefined when no routed turn
+	 * is running on `refused`, or nothing usable can replace it.
 	 */
-	replaceRefusedRoutedModel(refused: Model<Api>): Model<Api> | undefined {
+	replaceRefusedRoutedModel(refused: Model<Api>, fallback?: Model<Api>): Model<Api> | undefined {
 		const active = this._activeRoutedTurn;
 		if (!active || !modelsAreEqual(active.routedModel, refused)) return undefined;
 		const tier = active.decision.tier;
+		const usable = (candidate: Model<Api> | undefined): candidate is Model<Api> =>
+			candidate !== undefined && !modelsAreEqual(candidate, refused) && this._hasAccess(candidate);
 		const next =
 			tier === "cheap" || tier === "medium" || tier === "expensive"
 				? this.resolveConfiguredTierModel(tier)
 				: undefined;
-		const root = active.rootModel;
-		const replacement =
-			next && !modelsAreEqual(next, refused)
-				? next
-				: root && !modelsAreEqual(root, refused) && this._hasAccess(root)
-					? root
-					: undefined;
+		const replacement = [next, active.rootModel, fallback].find(usable);
 		if (!replacement) return undefined;
 		const agent = this.deps.getAgent();
 		agent.state.model = replacement;

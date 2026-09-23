@@ -14,7 +14,11 @@ import { createRepoGitDelivery } from "../../src/core/objective-execution/delive
 import { ObjectiveExecutionController } from "../../src/core/objective-execution/objective-execution-controller.ts";
 import { createRepoReleaseDelivery } from "../../src/core/objective-execution/release-delivery.ts";
 import type { TaskRuntimeProjection } from "../../src/core/orchestration/task-runtime.ts";
-import { SystemOneSteeringPlane } from "../../src/core/steering/system-one-steering-plane.ts";
+import {
+	SteeringJudgmentUnavailableError,
+	SystemOneSteeringPlane,
+} from "../../src/core/steering/system-one-steering-plane.ts";
+import { SteeringSemanticFailedError, type SteeringSemanticOutcome } from "../../src/core/steering/types.ts";
 import { requestsBugFix } from "../../src/core/system-one/bug-fix.ts";
 import { SystemOneController, TerminalCompletionConflictError } from "../../src/core/system-one/controller.ts";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
@@ -117,10 +121,11 @@ function passingAdapter() {
 	};
 }
 
-function certificate(checkpoint: string, failed?: string) {
+function certificate(checkpoint: string, failed?: string, outcome: "fail" | "gather_more" = "fail") {
+	const semanticOutcome: SteeringSemanticOutcome = checkpoint === failed ? outcome : "pass";
 	return {
 		certificate_id: `c-${checkpoint}`,
-		semantic_outcome: checkpoint === failed ? "fail" : "pass",
+		semantic_outcome: semanticOutcome,
 		answers: {
 			work_remaining: { boolean: false },
 			missing_work_class: { choice: "none" },
@@ -132,6 +137,8 @@ function certificate(checkpoint: string, failed?: string) {
 
 async function deliver(options?: {
 	readonly fail?: "JEV-025" | "JEV-026" | "JEV-027";
+	/** How the failing checkpoint fails: a judged fail (default), an ambiguity, or System One down. */
+	readonly failAs?: "fail" | "gather_more" | "unavailable";
 	readonly commitSha?: string;
 	readonly head?: string;
 	readonly observedSha?: string;
@@ -256,7 +263,33 @@ async function deliver(options?: {
 			? {
 					steeringPlane: {
 						policy: { mode: options.steeringMode },
-						requireCertificate: async (checkpoint: string) => certificate(checkpoint, options.fail),
+						// The real plane's contract: an outage throws; a non-pass throws unless requirePass is false.
+						requireCertificate: async (
+							checkpoint: string,
+							_state: unknown,
+							callOptions?: { requirePass?: boolean },
+						) => {
+							if (checkpoint === options.fail && options.failAs === "unavailable") {
+								throw new SteeringJudgmentUnavailableError(
+									checkpoint,
+									"objective_transition",
+									new Error("engine down"),
+								);
+							}
+							const cert = certificate(
+								checkpoint,
+								options.fail,
+								options.failAs === "gather_more" ? "gather_more" : "fail",
+							);
+							if ((callOptions?.requirePass ?? true) && cert.semantic_outcome !== "pass") {
+								throw new SteeringSemanticFailedError(
+									checkpoint,
+									cert.semantic_outcome,
+									cert.failed_semantic_predicates ?? [],
+								);
+							}
+							return cert;
+						},
 					} as never,
 				}
 			: {}),
@@ -335,6 +368,25 @@ describe("FC-01 terminal complete", () => {
 		expect(result?.reasonCodes).toContain("adversarial_completion_failed");
 		expect(store.phase).not.toBe("complete");
 	});
+
+	it.each([
+		["JEV-025", "unavailable", "jev_025_unavailable"],
+		["JEV-026", "gather_more", "jev_026_ambiguous"],
+		["JEV-027", "unavailable", "jev_027_unavailable"],
+	] as const)(
+		"a %s that cannot settle (%s) holds the objective open and says why",
+		async (checkpoint, failAs, reason) => {
+			const { result, store } = await deliver({
+				fail: checkpoint,
+				failAs,
+				profile: "system_one_required",
+				steeringMode: "system_one_required",
+			});
+			expect(result?.status).toBe("semantic_gate_unavailable");
+			expect(result?.reasonCodes).toContain(reason);
+			expect(store.phase).not.toBe("complete");
+		},
+	);
 
 	it("required receipt fail leaves the store not complete", async () => {
 		const { result, store } = await deliver({

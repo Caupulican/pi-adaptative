@@ -182,6 +182,97 @@ describe("account model availability", () => {
 		expect(harness.session.getModelRouterStatus()).not.toContain("Exhausted models:");
 	});
 
+	it("keeps a refused routed turn's replacement inside the turn and never moves the session model", async () => {
+		// The session runs gpt-5.4 and the cheap tier is pinned to it too: when Codex refuses it, neither
+		// the pin nor the root can take over, so the turn continues on the account's own default and the
+		// turn's end restores the owner's model.
+		const harness = await createHarness({
+			models: MODELS,
+			fauxProvider: { provider: "openai-codex" },
+			settings: { modelRouter: { enabled: true, cheapModel: "openai-codex/gpt-5.4" } },
+			accountModels: {
+				fetch: codexModels([
+					{ slug: "gpt-5.4", priority: 1 },
+					{ slug: "gpt-5.6-sol", priority: 4 },
+				]),
+				apiKey: accessToken(),
+			},
+		});
+		const seen: string[] = [];
+		harness.setResponses([
+			(_context, _options, _state, model): AssistantMessage => {
+				seen.push(model.id);
+				return fauxAssistantMessage("", { stopReason: "error", errorMessage: REFUSAL });
+			},
+			(_context, _options, _state, model) => {
+				seen.push(model.id);
+				return fauxAssistantMessage("answered on sol");
+			},
+		]);
+		await harness.session.prompt("Explain this read-only value");
+		expect(seen).toEqual(["gpt-5.4", "gpt-5.6-sol"]);
+		expect(harness.session.model?.id).toBe("gpt-5.4");
+		expect(harness.eventsOfType("warning").map((event) => event.message)).toContain(
+			"openai-codex/gpt-5.4 is not available on this account; this turn continues on openai-codex/gpt-5.6-sol.",
+		);
+	});
+
+	it("ends a refused routed turn without touching the session model when nothing usable can take it", async () => {
+		const harness = await createHarness({
+			models: MODELS,
+			fauxProvider: { provider: "openai-codex" },
+			settings: { modelRouter: { enabled: true, cheapModel: "openai-codex/gpt-5.4" } },
+		});
+		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: REFUSAL })]);
+		await harness.session.prompt("Explain this read-only value");
+		expect(harness.session.model?.id).toBe("gpt-5.4");
+		expect(harness.eventsOfType("auto_retry_start")).toHaveLength(0);
+		expect(harness.eventsOfType("warning").map((event) => event.message)).toContain(
+			"openai-codex/gpt-5.4 is not available on this account, and no usable model can take this routed turn over.",
+		);
+	});
+
+	it("checks for Codex resets again after a check that found none", async () => {
+		const harness = await createHarness({ models: MODELS, fauxProvider: { provider: "openai-codex" } });
+		harness.authStorage.setRuntimeApiKey("openai-codex", accessToken());
+		let available = 0;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(
+						JSON.stringify({
+							credits: Array.from({ length: available }, (_, index) => ({
+								id: `credit-${index}`,
+								reset_type: "codex_rate_limits",
+								status: "available",
+								granted_at: "2026-09-01T00:00:00Z",
+							})),
+							available_count: available,
+						}),
+						{ status: 200 },
+					),
+			),
+		);
+		const limit = fauxAssistantMessage("", {
+			stopReason: "error",
+			errorMessage: "You have hit your ChatGPT usage limit (pro plan). Try again in ~1933 min.",
+		});
+		const offers = () =>
+			harness
+				.eventsOfType("warning")
+				.filter((event) => event.message.startsWith("OpenAI Codex usage limit reached. "));
+		harness.setResponses([limit]);
+		await harness.session.prompt("hello");
+		await vi.waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1));
+		expect(offers()).toHaveLength(0);
+
+		available = 1;
+		harness.setResponses([limit]);
+		await harness.session.prompt("hello again");
+		await vi.waitFor(() => expect(offers()).toHaveLength(1));
+	});
+
 	it("reports what each account offers, a rejected key, and an unanswered check", async () => {
 		const models = [
 			{ provider: "openai-codex", id: "gpt-5.4", baseUrl: "https://chatgpt.com/backend-api" },

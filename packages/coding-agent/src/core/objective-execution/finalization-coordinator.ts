@@ -6,6 +6,7 @@ import {
 	type DeliverySideEffects,
 	type DeliveryTerminalStatus,
 } from "./delivery-bundle.ts";
+import { judgeTransition, type TransitionCertifier } from "./transition-judgment.ts";
 
 export interface FinalizationCertificate {
 	readonly certificate_id: string;
@@ -26,29 +27,40 @@ export async function finalizeDelivery(input: {
 	readonly snapshotIdentity: DeliveryBundle["candidate_snapshot"];
 	readonly steeringCertRefs: string[];
 	readonly signal?: AbortSignal;
-	readonly steeringPlane?: {
-		requireCertificate(
-			checkpoint: string,
-			state: unknown,
-			options: { objectiveId: string; evidenceRevision: number; signal?: AbortSignal },
-		): Promise<FinalizationCertificate>;
-	};
+	readonly steeringPlane?: TransitionCertifier<FinalizationCertificate>;
 	readonly systemOne?: {
 		commitTerminalCompletion(proof: TerminalCompletionProof, options?: { signal?: AbortSignal }): Promise<void>;
 	};
 }): Promise<
 	| { readonly status: "complete"; readonly bundle: DeliveryBundle; readonly reasonCodes: readonly string[] }
 	| { readonly status: "unrecoverable"; readonly bundle: DeliveryBundle; readonly reasonCodes: readonly string[] }
+	| {
+			readonly status: "semantic_gate_unavailable";
+			readonly bundle: DeliveryBundle;
+			readonly reasonCodes: readonly string[];
+	  }
 > {
 	let bundle = input.bundle;
 	const steeringCertRefs = input.steeringCertRefs;
 	if (input.steeringPlane) {
-		const certificate = await input.steeringPlane.requireCertificate(
+		const judgment = await judgeTransition(
+			input.steeringPlane,
 			"JEV-027",
 			{ ...bundle, candidateSnapshot: input.snapshotIdentity },
 			{ objectiveId: input.objectiveId, evidenceRevision: input.evidenceRevision, signal: input.signal },
 		);
-		steeringCertRefs.push(certificate.certificate_id);
+		if (judgment.certificate) steeringCertRefs.push(judgment.certificate.certificate_id);
+		if (judgment.kind === "held") {
+			// The side effects already ran; completion is not stored until System One judges the delivery.
+			return {
+				status: "semantic_gate_unavailable",
+				reasonCodes: judgment.reasonCodes,
+				bundle: certifiedBundle(input, bundle, steeringCertRefs, "semantic_gate_unavailable", [
+					...judgment.reasonCodes,
+				]),
+			};
+		}
+		const certificate = judgment.certificate;
 		if (certificate.semantic_outcome !== "pass") {
 			return {
 				status: "unrecoverable",

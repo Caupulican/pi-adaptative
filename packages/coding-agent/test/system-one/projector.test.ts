@@ -36,6 +36,21 @@ describe("System One StateProjector", () => {
 		expect(containsCredential(redacted, ["my-secret-custom-key-12345"])).toBe(false);
 	});
 
+	it("redacts a key glued to other text or written straight after another key, and never a plain word", () => {
+		const openai = "sk-proj-ZYXWVUTSRQPONMLKJIHGFEDCBA0987654321";
+		const github = `ghp_${"A".repeat(36)}`;
+		const aws = "AKIAQRSTUVWXYZ123456";
+		for (const text of [`result${openai}`, `${github}ghp_${"B".repeat(36)}`, `AKIAABCDEFGHIJKLMNOP${aws}`]) {
+			const redacted = redactSecrets(text);
+			expect(redacted, text).not.toMatch(/ZYXWV|BBBB|QRSTUV/);
+			expect(containsCredential(text), text).toBe(true);
+		}
+		// A lowercase path word that happens to hold a prefix is not a key.
+		const path = "edit packages/coding-agent/src/core/automation/task-automation-controller.ts";
+		expect(redactSecrets(path)).toBe(path);
+		expect(containsCredential(path)).toBe(false);
+	});
+
 	it("redacts dynamic userKeys configured in StateProjector instance", () => {
 		const userKey = "user-configured-secret-token-99999";
 		const projector = new StateProjector([userKey]);

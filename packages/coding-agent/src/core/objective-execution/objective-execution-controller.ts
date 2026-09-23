@@ -89,6 +89,7 @@ import {
 	type SemanticRouteJudgments,
 } from "./objective-route-projector.ts";
 import { ObjectiveStallDetector, type StallEvaluation } from "./objective-stall-fingerprint.ts";
+import { judgeTransition } from "./transition-judgment.ts";
 
 export type ExecutionLoopMode = "legacy_goal" | "objective_shadow" | "objective_primary" | "start_only" | "interactive";
 
@@ -863,6 +864,22 @@ export class ObjectiveExecutionController {
 		};
 	}
 
+	/** A transition System One could not settle: the objective is not closed, and says why. */
+	private async heldCompletion(
+		objectiveId: string,
+		runtime: TaskRuntimeProjection,
+		reasonCodes: readonly string[],
+	): Promise<ObjectiveTerminalResult> {
+		return {
+			status: "semantic_gate_unavailable",
+			reasonCodes: [...reasonCodes],
+			cycleCount: this.cycleCounter,
+			deliveryBundle: await this.buildBundle(objectiveId, "semantic_gate_unavailable", runtime, {
+				reasonCodes: [...reasonCodes],
+			}),
+		};
+	}
+
 	async run(objectiveId: string, signal?: AbortSignal): Promise<ObjectiveTerminalResult> {
 		const terminal = await this.runLoop(objectiveId, signal);
 		if (!terminal) throw new Error("Objective run loop ended without a terminal result.");
@@ -1300,37 +1317,23 @@ export class ObjectiveExecutionController {
 
 					// 1. PH-150, FC-062: JEV-024 completion plausibility on canonical proof state BEFORE finalization gates
 					if (this.deps.steeringPlane) {
-						try {
-							const c24 = await this.deps.steeringPlane.requireCertificate("JEV-024", canonicalProofState, {
-								objectiveId,
-								evidenceRevision,
-								signal,
-							});
-							steeringCertRefs.push(c24.certificate_id);
-
-							if (c24.semantic_outcome !== "pass" || c24.directive !== "completion_candidate") {
-								if (this.deps.runtime.ensureRepairTasks) {
-									const repairs = completionFailuresToRepairWork(
-										(c24.failed_semantic_predicates ?? ["completion_not_plausible"]).map((p) => ({
-											gate_id: p,
-										})),
-										objectiveId,
-									);
-									await this.deps.runtime.ensureRepairTasks(objectiveId, repairs);
-								}
-								break;
-							}
-						} catch (_err) {
-							if (this.deps.steeringPlane.policy.mode === "system_one_required") {
-								const bundle = await this.buildBundle(objectiveId, "semantic_gate_unavailable", runtime, {
-									reasonCodes: ["system_one_required_but_unavailable"],
-								});
-								return {
-									status: "semantic_gate_unavailable",
-									reasonCodes: ["system_one_required_but_unavailable"],
-									cycleCount: this.cycleCounter,
-									deliveryBundle: bundle,
-								};
+						const j24 = await judgeTransition(this.deps.steeringPlane, "JEV-024", canonicalProofState, {
+							objectiveId,
+							evidenceRevision,
+							signal,
+						});
+						if (j24.certificate) steeringCertRefs.push(j24.certificate.certificate_id);
+						if (j24.kind === "held") return this.heldCompletion(objectiveId, runtime, j24.reasonCodes);
+						const c24 = j24.certificate;
+						if (c24.semantic_outcome !== "pass" || c24.directive !== "completion_candidate") {
+							if (this.deps.runtime.ensureRepairTasks) {
+								const repairs = completionFailuresToRepairWork(
+									(c24.failed_semantic_predicates ?? ["completion_not_plausible"]).map((p) => ({
+										gate_id: p,
+									})),
+									objectiveId,
+								);
+								await this.deps.runtime.ensureRepairTasks(objectiveId, repairs);
 							}
 							break;
 						}
@@ -1401,7 +1404,8 @@ export class ObjectiveExecutionController {
 					if (evalResult.verdict === "complete") {
 						// 3. PH-152, FC-063: JEV-025 primary semantic completion (proof-bearing)
 						if (this.deps.steeringPlane) {
-							const c25 = await this.deps.steeringPlane.requireCertificate(
+							const j25 = await judgeTransition(
+								this.deps.steeringPlane,
 								"JEV-025",
 								{
 									...canonicalProofState,
@@ -1411,7 +1415,9 @@ export class ObjectiveExecutionController {
 								},
 								{ objectiveId, evidenceRevision, signal },
 							);
-							steeringCertRefs.push(c25.certificate_id);
+							if (j25.certificate) steeringCertRefs.push(j25.certificate.certificate_id);
+							if (j25.kind === "held") return this.heldCompletion(objectiveId, runtime, j25.reasonCodes);
+							const c25 = j25.certificate;
 
 							if (c25.semantic_outcome !== "pass") {
 								if (this.deps.runtime.ensureRepairTasks) {
@@ -1440,12 +1446,14 @@ export class ObjectiveExecutionController {
 								verificationMatrix,
 								diffDigest,
 							};
-							const c26 = await this.deps.steeringPlane.requireCertificate("JEV-026", coldProofState, {
+							const j26 = await judgeTransition(this.deps.steeringPlane, "JEV-026", coldProofState, {
 								objectiveId,
 								evidenceRevision,
 								signal,
 							});
-							steeringCertRefs.push(c26.certificate_id);
+							if (j26.certificate) steeringCertRefs.push(j26.certificate.certificate_id);
+							if (j26.kind === "held") return this.heldCompletion(objectiveId, runtime, j26.reasonCodes);
+							const c26 = j26.certificate;
 
 							const adverseChallengeIds = [
 								"hidden_regressions",
@@ -1518,7 +1526,8 @@ export class ObjectiveExecutionController {
 							const needsPublishOrDeploy =
 								activeCharter.release.package_publish || activeCharter.release.deploy_targets.length > 0;
 							if (needsPublishOrDeploy && this.deps.steeringPlane) {
-								const c28 = await this.deps.steeringPlane.requireCertificate(
+								const j28 = await judgeTransition(
+									this.deps.steeringPlane,
 									"JEV-028",
 									{
 										objectiveId,
@@ -1529,7 +1538,9 @@ export class ObjectiveExecutionController {
 									},
 									{ objectiveId, evidenceRevision, signal },
 								);
-								steeringCertRefs.push(c28.certificate_id);
+								if (j28.certificate) steeringCertRefs.push(j28.certificate.certificate_id);
+								if (j28.kind === "held") return this.heldCompletion(objectiveId, runtime, j28.reasonCodes);
+								const c28 = j28.certificate;
 
 								const deploySafe =
 									c28.semantic_outcome === "pass" &&

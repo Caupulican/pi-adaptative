@@ -214,7 +214,7 @@ import {
 	TrustedDeployAdapterRegistry,
 } from "./objective-execution/release-delivery.ts";
 import { RepositoryMutationObserver } from "./objective-execution/repository-mutation-observer.ts";
-import { hasUnownedWorktreeChanges } from "./objective-execution/worktree-ownership.ts";
+import { mayHoldUnownedWorktreeChanges } from "./objective-execution/worktree-ownership.ts";
 import { DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import type { DecisionStageSink } from "./operator-projection/decision-stage-log.ts";
 import { type DeliveryState, SessionOperatorProjection } from "./operator-projection/session-operator-projection.ts";
@@ -517,6 +517,8 @@ export class AgentSession {
 	private readonly _accountModels: AccountModelCatalog;
 	/** Providers whose usage-limit episode already told the owner about redeemable resets. */
 	private readonly _subscriptionResetOffered = new Set<string>();
+	/** Providers whose reset check is in flight, so two limit answers do not ask twice at once. */
+	private readonly _subscriptionResetChecking = new Set<string>();
 	private _executionLoopMode?: ExecutionLoopMode;
 	private _objectiveExecutionController?: ObjectiveExecutionController;
 	private _steeringPlane?: SystemOneSteeringPlane;
@@ -2373,11 +2375,19 @@ export class AgentSession {
 
 	/**
 	 * Codex answered that the subscription's usage limit is reached: say whether the account holds a
-	 * usage reset it can redeem (`/usage`), once per session until a reset is redeemed.
+	 * usage reset it can redeem (`/usage`); once told, not again this session until a reset is redeemed.
 	 */
 	private async _offerSubscriptionReset(message: AssistantMessage): Promise<void> {
-		if (message.provider !== "openai-codex" || this._subscriptionResetOffered.has(message.provider)) return;
-		this._subscriptionResetOffered.add(message.provider);
+		const provider = message.provider;
+		if (
+			provider !== "openai-codex" ||
+			this._subscriptionResetOffered.has(provider) ||
+			this._subscriptionResetChecking.has(provider)
+		)
+			return;
+		// Only a notice the owner actually received uses up the episode; a check that found no reset or
+		// could not complete is made again on the next limit answer.
+		this._subscriptionResetChecking.add(provider);
 		const codex = this._modelRegistry.find(message.provider, message.model);
 		try {
 			const accessToken = await this._modelRegistry.getApiKeyForProvider(message.provider);
@@ -2388,6 +2398,7 @@ export class AgentSession {
 				signal: AbortSignal.timeout(15_000),
 			});
 			if (summary.availableCount === 0) return;
+			this._subscriptionResetOffered.add(provider);
 			this._emit({
 				type: "warning",
 				message: `OpenAI Codex usage limit reached. ${summary.availableCount} usage ${summary.availableCount === 1 ? "reset is" : "resets are"} available: /usage, then Redeem usage limit reset.`,
@@ -2397,6 +2408,8 @@ export class AgentSession {
 				type: "warning",
 				message: `OpenAI Codex usage limit reached; checking for usage resets failed: ${error instanceof Error ? error.message : String(error)}`,
 			});
+		} finally {
+			this._subscriptionResetChecking.delete(provider);
 		}
 	}
 
@@ -2416,12 +2429,25 @@ export class AgentSession {
 		const refused = this._modelRegistry.find(message.provider, message.model) ?? this.model;
 		if (!refused) return undefined;
 		this._accountModels.markRefused(refused, message.errorMessage ?? "model not supported");
-		const routed = this._modelRouter.replaceRefusedRoutedModel(refused);
-		if (routed) {
+		const from = `${refused.provider}/${refused.id}`;
+		// A routed turn's model is the turn's, never the session's: its replacement stays inside the
+		// routed turn, whose end restores the owner's model; the session model is never changed from here.
+		if (this._modelRouter.isRoutedTurnOn(refused)) {
+			const routed = this._modelRouter.replaceRefusedRoutedModel(
+				refused,
+				this._accountModels.accountDefault(refused.provider),
+			);
+			if (!routed) {
+				this._emit({
+					type: "warning",
+					message: `${from} is not available on this account, and no usable model can take this routed turn over.`,
+				});
+				return undefined;
+			}
 			const to = `${routed.provider}/${routed.id}`;
 			this._emit({
 				type: "warning",
-				message: `${refused.provider}/${refused.id} is not available on this account; this turn continues on ${to}.`,
+				message: `${from} is not available on this account; this turn continues on ${to}.`,
 			});
 			return to;
 		}
@@ -2616,8 +2642,12 @@ export class AgentSession {
 			getCwd: () => this._cwd,
 			isChildSession: () => this._isChildSession,
 			getConfirmation: () => this._edgeConfirmation,
-			hasUnownedWorktreeChanges: (signal) =>
-				hasUnownedWorktreeChanges(this._cwd, this._mutationLedger.writtenPaths(this.objectiveMutationId()), signal),
+			mayHoldUnownedWorktreeChanges: (signal) =>
+				mayHoldUnownedWorktreeChanges(
+					this._cwd,
+					this._mutationLedger.writtenPaths(this.objectiveMutationId()),
+					signal,
+				),
 		};
 	}
 

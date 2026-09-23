@@ -4,18 +4,21 @@ import type { ExecutionState, ToolImpact } from "./types.ts";
  * Secret redaction patterns.
  * R-032: Secrets, tokens, credentials, private keys, and configured sensitive patterns MUST be redacted before remote Jev calls.
  */
-// Every prefix-anchored token pattern starts at a token boundary: without it, `sk-` inside
-// `task-automation-controller.ts` reads as an OpenAI key and blocks the whole System One request.
+// A token pattern recognises a key by its body, not by what comes before it: a key glued to other
+// text, or a second key written straight after a first, is still a key. The permissive bodies
+// (`sk-`, `apikey_`, `glpat-`, …) must hold an uppercase letter or a digit, which every issued key
+// does and lowercase words do not, so `task-automation-controller.ts` never reads as an OpenAI key.
+const KEY_BODY = "(?=[A-Za-z0-9_-]*[A-Z0-9])";
 export const SECRET_PATTERNS: readonly RegExp[] = Object.freeze([
-	/(?<![A-Za-z0-9])apikey_[A-Za-z0-9_-]+/g,
-	/(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_-]{20,}/g,
-	/(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}/g,
-	/(?<![A-Za-z0-9])AIza[0-9A-Za-z-_]{35}/g,
-	/(?<![A-Za-z0-9])(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}/g,
-	/(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{22,}/g,
-	/(?<![A-Za-z0-9])glpat-[A-Za-z0-9_-]{20,}/g,
-	/(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9_-]+/g,
-	/(?<![A-Za-z0-9])(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}/g,
+	new RegExp(`apikey_${KEY_BODY}[A-Za-z0-9_-]+`, "g"),
+	new RegExp(`sk-ant-${KEY_BODY}[A-Za-z0-9_-]{20,}`, "g"),
+	new RegExp(`sk-${KEY_BODY}[A-Za-z0-9_-]{20,}`, "g"),
+	/AIza[0-9A-Za-z-_]{35}/g,
+	/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}/g,
+	new RegExp(`github_pat_${KEY_BODY}[A-Za-z0-9_]{22,}`, "g"),
+	new RegExp(`glpat-${KEY_BODY}[A-Za-z0-9_-]{20,}`, "g"),
+	new RegExp(`xox[baprs]-${KEY_BODY}[A-Za-z0-9_-]+`, "g"),
+	/(?:AKIA|ABIA|ACCA|ASIA)[0-9A-Z]{16}/g,
 	/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi,
 	/-----BEGIN\s+(?:[A-Z0-9_-]+\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END\s+(?:[A-Z0-9_-]+\s+)?PRIVATE\s+KEY-----/g,
 	/(?:api[_-]?key|secret[_-]?key|access[_-]?token|auth[_-]?token|password)\s*[:=]\s*["'][^"']+["']/gi,
