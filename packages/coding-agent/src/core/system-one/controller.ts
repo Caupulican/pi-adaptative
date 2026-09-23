@@ -47,6 +47,7 @@ import { StateProjector } from "./projector.ts";
 import { doubtReason, type SemanticEvaluationObserver } from "./semantic-evaluation-ledger.ts";
 import type { ExecutionState, ToolImpact, ValidationDecision, ValidationStage } from "./types.ts";
 import { CONSULT_GROUNDING_QUESTIONS, RESERVED_DECISION_KINDS, unsettledQuestionId } from "./unsettled-ladder.ts";
+import type { WorkDiff } from "./work-diff.ts";
 
 /** The four questions that only mean something when written rules were supplied. */
 /** Asked only when written rules exist. `full_handoff` is not among them: it governs owner questions too. */
@@ -132,6 +133,8 @@ export interface SystemOneControllerDeps {
 	evaluationObserver?: SemanticEvaluationObserver;
 	/** Live goal/runtime/verification projection; called before every stage. */
 	truthSource?: () => CanonicalHydration | undefined;
+	/** The work under completion as the repository shows it; read once per completion check. */
+	workDiffSource?: () => WorkDiff | undefined;
 }
 
 /** The consequence class a stage's tool impact maps to, for the evaluation record. */
@@ -161,6 +164,7 @@ export class SystemOneController {
 	readonly hookCoordinator?: IntegrityHookCoordinator;
 	private evaluationObserver?: SemanticEvaluationObserver;
 	private truthSource?: () => CanonicalHydration | undefined;
+	private workDiffSource?: () => WorkDiff | undefined;
 	private pendingDirective?: SystemOneControlDirective;
 
 	constructor(deps: SystemOneControllerDeps) {
@@ -172,11 +176,17 @@ export class SystemOneController {
 		this.hookCoordinator = deps.hookCoordinator;
 		this.evaluationObserver = deps.evaluationObserver;
 		this.truthSource = deps.truthSource;
+		this.workDiffSource = deps.workDiffSource;
 	}
 
 	/** Binds the session's evaluation sink; late-bound because the controller is built before the session. */
 	setEvaluationObserver(observer: SemanticEvaluationObserver | undefined): void {
 		this.evaluationObserver = observer;
+	}
+
+	/** Late-bound like the truth source. */
+	setWorkDiffSource(source: (() => WorkDiff | undefined) | undefined): void {
+		this.workDiffSource = source;
 	}
 
 	/** Late-bound: the session exists after the controller is constructed. */
@@ -1073,11 +1083,12 @@ export class SystemOneController {
 		}
 
 		// 2. Cold primary completion pack (R-048, R-049)
-		const primaryProjection = this.projector.completion(this.store.snapshot());
+		const work = this.workDiffSource?.();
+		const primaryProjection = this.projector.completion(this.store.snapshot(), work);
 		const primaryStage = await this.runStageValidation("completion", primaryProjection);
 
 		// 3. Cold challenge pack (R-058)
-		const challengeProjection = this.projector.completionChallenge(this.store.snapshot());
+		const challengeProjection = this.projector.completionChallenge(this.store.snapshot(), work);
 		const challengeStage = await this.runStageValidation("completion_challenge", challengeProjection);
 
 		// 4. Policy engine final verdict

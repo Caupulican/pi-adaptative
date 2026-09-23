@@ -82,6 +82,7 @@ import { createSystemOneConfig } from "./system-one/config.ts";
 import { SystemOneController } from "./system-one/controller.ts";
 import { ExecutionStore } from "./system-one/execution-state.ts";
 import { IntegrityHookCoordinator } from "./system-one/integrity-hooks.ts";
+import { readWorkDiff } from "./system-one/work-diff.ts";
 import { time } from "./timings.ts";
 import {
 	createBashTool,
@@ -1082,6 +1083,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			});
 		});
 		systemOneController.syncCanonicalTruth();
+		systemOneController.setWorkDiffSource(() => {
+			const goal = session.getGoalStateSnapshot();
+			return goal ? readWorkDiff(cwd, goal.createdAt) : undefined;
+		});
 	}
 	if (executionLoopMode === "objective_primary" && !session.objectiveExecutionController) {
 		await session.disposeAndWait();

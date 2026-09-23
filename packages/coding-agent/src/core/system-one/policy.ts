@@ -496,6 +496,22 @@ export function evaluateDeterministicCompletionGates(state: ExecutionState): {
 }
 
 /**
+ * A completion check holds when its answer clears the ambiguous band's edge in the direction it
+ * needs: at least `ambiguous_high` for a yes the goal needs, at most `ambiguous_low` for a defect.
+ * That is where live System One separates finished work from unfinished (measured on one goal's real
+ * diff against a broken and an unrelated one: the goal match 0.87-0.88 vs 0.30-0.33 and 0.06, every
+ * defect at most 0.28 vs up to 0.74). The hard-pass edges (0.93, 0.07) lie beyond what System One
+ * gives finished work, so requiring all ten at once rejected correct work. A missing answer never holds.
+ */
+function completionCheckHolds(answer: unknown, direction: NoulDirection, thresholds: SystemOneThresholds): boolean {
+	const read = noulFromAnswer(answer, direction === "required_false");
+	const probability = typeof read === "boolean" ? (read ? 1 : 0) : read;
+	return direction === "required_true"
+		? probability >= thresholds.noul_required_true.ambiguous_high
+		: probability <= thresholds.noul_required_false.ambiguous_low;
+}
+
+/**
  * Two-stage completion decision engine.
  * R-057: Bug-fix completion MUST pass root_cause_addressed and MUST NOT pass if masks_symptom_only is strongly true.
  * R-058: A second completion_challenge pack MUST run after the primary completion pack.
@@ -529,8 +545,7 @@ export function decideFinalCompletion(input: {
 	const { primaryAnswers } = input;
 
 	// implementation_matches_goal (required_true, hard pass)
-	const goalMatchAns = noulFromAnswer(primaryAnswers.implementation_matches_goal, false);
-	if (evaluateNoul(goalMatchAns, "required_true", config.thresholds) !== "hard_pass") {
+	if (!completionCheckHolds(primaryAnswers.implementation_matches_goal, "required_true", config.thresholds)) {
 		failedGates.push({
 			id: "JEV-implementation_matches_goal",
 			reason: "Implementation does not sufficiently match the normalized goal and acceptance criteria.",
@@ -540,8 +555,7 @@ export function decideFinalCompletion(input: {
 
 	// root_cause_addressed for bug fixes (R-015, R-057)
 	if (input.isBugFix) {
-		const rootCauseAns = noulFromAnswer(primaryAnswers.root_cause_addressed, false);
-		if (evaluateNoul(rootCauseAns, "required_true", config.thresholds) !== "hard_pass") {
+		if (!completionCheckHolds(primaryAnswers.root_cause_addressed, "required_true", config.thresholds)) {
 			failedGates.push({
 				id: "JEV-root_cause_addressed",
 				reason: "For bug fix, the evidenced causal mechanism was not addressed.",
@@ -551,8 +565,7 @@ export function decideFinalCompletion(input: {
 	}
 
 	// required_behavior_unverified (required_false)
-	const unverifiedAns = noulFromAnswer(primaryAnswers.required_behavior_unverified, true);
-	if (evaluateNoul(unverifiedAns, "required_false", config.thresholds) !== "hard_pass") {
+	if (!completionCheckHolds(primaryAnswers.required_behavior_unverified, "required_false", config.thresholds)) {
 		failedGates.push({
 			id: "JEV-required_behavior_unverified",
 			reason: "Some required behavior remains unverified by fresh evidence.",
@@ -561,8 +574,7 @@ export function decideFinalCompletion(input: {
 	}
 
 	// material_claim_unsupported (required_false)
-	const unsuppClaimAns = noulFromAnswer(primaryAnswers.material_claim_unsupported, true);
-	if (evaluateNoul(unsuppClaimAns, "required_false", config.thresholds) !== "hard_pass") {
+	if (!completionCheckHolds(primaryAnswers.material_claim_unsupported, "required_false", config.thresholds)) {
 		failedGates.push({
 			id: "JEV-material_claim_unsupported",
 			reason: "Material claims remain unsupported or based on stale evidence.",
@@ -571,8 +583,7 @@ export function decideFinalCompletion(input: {
 	}
 
 	// out_of_scope_change_present (required_false)
-	const outOfScopeAns = noulFromAnswer(primaryAnswers.out_of_scope_change_present, true);
-	if (evaluateNoul(outOfScopeAns, "required_false", config.thresholds) !== "hard_pass") {
+	if (!completionCheckHolds(primaryAnswers.out_of_scope_change_present, "required_false", config.thresholds)) {
 		failedGates.push({
 			id: "JEV-out_of_scope_change_present",
 			reason: "Diff contains changes outside the task's allowed semantic scope.",
@@ -581,8 +592,7 @@ export function decideFinalCompletion(input: {
 	}
 
 	// duplicate_responsibility_introduced (required_false)
-	const dupRespAns = noulFromAnswer(primaryAnswers.duplicate_responsibility_introduced, true);
-	if (evaluateNoul(dupRespAns, "required_false", config.thresholds) !== "hard_pass") {
+	if (!completionCheckHolds(primaryAnswers.duplicate_responsibility_introduced, "required_false", config.thresholds)) {
 		failedGates.push({
 			id: "JEV-duplicate_responsibility_introduced",
 			reason: "Diff introduces duplicate logic for a responsibility with an existing owner.",
@@ -619,8 +629,7 @@ export function decideFinalCompletion(input: {
 	const { challengeAnswers } = input;
 
 	// missing_requirement (required_false)
-	const missingReqAns = noulFromAnswer(challengeAnswers.missing_requirement, true);
-	if (evaluateNoul(missingReqAns, "required_false", config.thresholds) !== "hard_pass") {
+	if (!completionCheckHolds(challengeAnswers.missing_requirement, "required_false", config.thresholds)) {
 		failedGates.push({
 			id: "JEV-CHALLENGE-missing_requirement",
 			reason: "Challenge evaluation found a missing acceptance requirement or constraint.",
@@ -629,8 +638,7 @@ export function decideFinalCompletion(input: {
 	}
 
 	// hidden_assumption (required_false)
-	const hiddenAssumpAns = noulFromAnswer(challengeAnswers.hidden_assumption, true);
-	if (evaluateNoul(hiddenAssumpAns, "required_false", config.thresholds) !== "hard_pass") {
+	if (!completionCheckHolds(challengeAnswers.hidden_assumption, "required_false", config.thresholds)) {
 		failedGates.push({
 			id: "JEV-CHALLENGE-hidden_assumption",
 			reason: "Challenge evaluation found completion depends on an unverified hidden assumption.",
@@ -639,8 +647,7 @@ export function decideFinalCompletion(input: {
 	}
 
 	// plausible_regression_not_tested (required_false)
-	const regressionAns = noulFromAnswer(challengeAnswers.plausible_regression_not_tested, true);
-	if (evaluateNoul(regressionAns, "required_false", config.thresholds) !== "hard_pass") {
+	if (!completionCheckHolds(challengeAnswers.plausible_regression_not_tested, "required_false", config.thresholds)) {
 		failedGates.push({
 			id: "JEV-CHALLENGE-plausible_regression_not_tested",
 			reason: "Challenge evaluation found untested plausible regression paths in the diff.",
@@ -649,8 +656,7 @@ export function decideFinalCompletion(input: {
 	}
 
 	// conclusion_overstates_evidence (required_false)
-	const overstatesAns = noulFromAnswer(challengeAnswers.conclusion_overstates_evidence, true);
-	if (evaluateNoul(overstatesAns, "required_false", config.thresholds) !== "hard_pass") {
+	if (!completionCheckHolds(challengeAnswers.conclusion_overstates_evidence, "required_false", config.thresholds)) {
 		failedGates.push({
 			id: "JEV-CHALLENGE-conclusion_overstates_evidence",
 			reason: "Conclusion claims more than the evidence package proves.",

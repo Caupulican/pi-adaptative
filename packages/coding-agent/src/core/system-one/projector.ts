@@ -1,4 +1,5 @@
 import type { ExecutionState, ToolImpact } from "./types.ts";
+import type { WorkDiff } from "./work-diff.ts";
 
 /**
  * Secret redaction patterns.
@@ -333,7 +334,7 @@ export class StateProjector {
 	 * R-048: Built cold from source evidence, diff, acceptance matrix, and verification results.
 	 * R-049: The worker final summary MUST NOT be the primary state.
 	 */
-	completion(state: ExecutionState): Record<string, unknown> {
+	completion(state: ExecutionState, work?: WorkDiff): Record<string, unknown> {
 		const acceptanceMatrix = state.objective.acceptance_criteria.map((ac) => ({
 			id: ac.id,
 			text: this.redactText(ac.text),
@@ -393,7 +394,24 @@ export class StateProjector {
 			acceptance_matrix: acceptanceMatrix,
 			claim_matrix: claimMatrix,
 			verification_matrix: verificationMatrix,
-			final_diff: changesManifest,
+			// The work itself when the repository can show it; the change manifest alone is paths and
+			// hashes, which leaves "does the diff satisfy the goal" unanswerable.
+			final_diff: work
+				? {
+						base_commit: work.base,
+						patch: this.redactText(work.patch),
+						...(work.omittedChars > 0 ? { patch_truncated_chars: work.omittedChars } : {}),
+						new_untracked_files: work.untracked,
+						recorded_changes: changesManifest,
+					}
+				: changesManifest,
+			// What the acceptance matrix's evidence ids refer to.
+			evidence: state.observations.map((observation) => ({
+				id: observation.id,
+				text: this.redactText(observation.text),
+				trust: observation.source.trust,
+				freshness: observation.freshness,
+			})),
 			hypotheses,
 			open_risks: openRisks,
 		};
@@ -403,7 +421,7 @@ export class StateProjector {
 	 * Independent completion challenge projection.
 	 * R-058: Second completion_challenge pack runs after primary completion pack.
 	 */
-	completionChallenge(state: ExecutionState): Record<string, unknown> {
-		return this.completion(state);
+	completionChallenge(state: ExecutionState, work?: WorkDiff): Record<string, unknown> {
+		return this.completion(state, work);
 	}
 }
