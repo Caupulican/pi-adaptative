@@ -14,7 +14,7 @@ import {
 } from "./job-store.ts";
 import { assertCollaborationReportCapability } from "./launch-profile.ts";
 import { bootstrapCollaborationPeers } from "./peer-bootstrap.ts";
-import { assertCollaborationNativeIdentity } from "./session-recovery.ts";
+import { assertCollaborationNativeIdentity, classifyPaneOwnership } from "./session-recovery.ts";
 import { type CollaborationStartIntent, collaborationSpecializationKey } from "./specialist-selection.ts";
 import { waitForSteeringSettlement } from "./turn-settlement.ts";
 
@@ -22,6 +22,14 @@ export interface CollaborationAnswer {
 	text?: string;
 	keys?: string[];
 }
+/**
+ * A member that fails to start is recycled on its own; healthy members keep running. This bounds the
+ * recycle to one retry (two total attempts) — the codebase has no existing retry bound for
+ * collaboration LAUNCHES to reuse (the closest relative, `CollaborationDeadlines`'s cleanup ladder in
+ * deadlines.ts, bounds retrying a STOP after a turn deadline, a different operation, with a timed
+ * backoff of its own); inventing a cooldown here is against doctrine, so a retry is immediate.
+ */
+const MEMBER_LAUNCH_RETRY_LIMIT = 1;
 export interface CollaborationCoordinatorDeps {
 	store: CollaborationJobStore;
 	/** Creation is allowed only for an already-admitted new job, never recovery or cleanup. */
@@ -76,13 +84,20 @@ interface CollaborationPlacementStrategy {
 		agent: CollaborationAgent,
 		environment: Record<string, string>,
 	): Promise<CollaborationPane>;
+	/**
+	 * Confirms a member's pane as the strategy's new placement anchor. Called only once that member's
+	 * FULL launch (pane, startAgent, readiness) has succeeded — never speculatively inside
+	 * `createNextPane` — so a member whose launch fails and is recycled never becomes the sibling the
+	 * next member split from, and a retry of the same member re-splits from the correct predecessor.
+	 */
+	markPlaced(paneId: string): void;
 }
 
 class CurrentPanePlacementStrategy implements CollaborationPlacementStrategy {
 	private readonly backend: CollaborationBackend;
 	private readonly job: CollaborationJob;
 	private readonly store: CollaborationJobStore;
-	private previousSiblingPaneId?: string;
+	private lastPlacedPaneId?: string;
 
 	constructor(backend: CollaborationBackend, job: CollaborationJob, store: CollaborationJobStore) {
 		this.backend = backend;
@@ -106,7 +121,7 @@ class CurrentPanePlacementStrategy implements CollaborationPlacementStrategy {
 			current.workspaceId = caller.workspaceId;
 			current.callerTerminalId = caller.terminalId;
 		});
-		this.previousSiblingPaneId = caller.paneId;
+		this.lastPlacedPaneId = caller.paneId;
 		return { workspaceId: caller.workspaceId };
 	}
 
@@ -117,15 +132,17 @@ class CurrentPanePlacementStrategy implements CollaborationPlacementStrategy {
 	): Promise<CollaborationPane> {
 		const defaultDirection = index === 0 ? "right" : index === 1 ? "down" : index === 2 ? "right" : "down";
 		const direction = agent.direction ?? defaultDirection;
-		const splitTarget = index === 0 ? this.job.callerPaneId! : this.previousSiblingPaneId!;
-		const pane = await this.backend.splitPane({
+		const splitTarget = index === 0 ? this.job.callerPaneId! : this.lastPlacedPaneId!;
+		return this.backend.splitPane({
 			paneId: splitTarget,
 			direction,
 			cwd: agent.cwd,
 			env: environment,
 		});
-		this.previousSiblingPaneId = pane.paneId;
-		return pane;
+	}
+
+	markPlaced(paneId: string): void {
+		this.lastPlacedPaneId = paneId;
 	}
 }
 
@@ -174,6 +191,9 @@ class ManagedWorkspacePlacementStrategy implements CollaborationPlacementStrateg
 			env: environment,
 		});
 	}
+
+	/** No-op: every sibling split always targets the fixed root pane, never a prior member's pane. */
+	markPlaced(): void {}
 }
 
 /** Single owner of persistent-agent lifecycle; backend adapters never publish parent messages. */
@@ -259,6 +279,184 @@ export class CollaborationCoordinator {
 		if (!dryRun) pending.controller.abort(new Error("Collaboration launch stopped during admission."));
 		return true;
 	}
+	/**
+	 * A managed workspace's first member's pane IS the workspace's root pane, created once by
+	 * `strategy.init()` — there is no way to acquire a fresh pane for it short of recreating the whole
+	 * workspace, which every other member's pane was split from (directly, or via the sibling chain).
+	 * Its failure is team-scoped. Every other member's pane — an ordinary current-pane split, or a
+	 * managed-workspace sibling split off the still-live root — is safe to close and recreate alone.
+	 */
+	private memberLaunchIsRecyclable(job: CollaborationJob, index: number): boolean {
+		return !(job.placement === "managed-workspace" && index === 0);
+	}
+	/** Best-effort pane close between recycle attempts; no durable claim is made here. */
+	private async courtesyClosePane(backend: CollaborationBackend, paneId: string): Promise<void> {
+		try {
+			await backend.closePane(paneId);
+		} catch {
+			// The stale pane may already be gone or unreachable; the retry below acquires a fresh one
+			// regardless, so a failed courtesy close never blocks recycling.
+		}
+	}
+	/** Drops a member's pane identity between recycle attempts so the next placement starts clean. */
+	private clearMemberPane(store: CollaborationJobStore, jobId: string, agentId: string): void {
+		store.update(jobId, (current) => {
+			const member = current.agents.find((candidate) => candidate.id === agentId);
+			if (member) {
+				delete member.paneId;
+				delete member.terminalId;
+				delete member.backendName;
+			}
+		});
+	}
+	/** Frees a member's stale pane between recycle attempts so its next placement starts clean. */
+	private async recycleReset(
+		store: CollaborationJobStore,
+		backend: CollaborationBackend,
+		jobId: string,
+		agentId: string,
+		paneId: string | undefined,
+	): Promise<void> {
+		if (paneId) await this.courtesyClosePane(backend, paneId);
+		this.clearMemberPane(store, jobId, agentId);
+	}
+	/**
+	 * Acquires one member's pane, starts its agent and verifies readiness — the same sequence the
+	 * launch loop always ran inline, extracted so a recycle attempt can rerun it from scratch. Throws
+	 * on any failure; the caller decides whether that failure is team-scoped or recyclable.
+	 */
+	private async placeMember(
+		store: CollaborationJobStore,
+		backend: CollaborationBackend,
+		strategy: CollaborationPlacementStrategy,
+		job: CollaborationJob,
+		index: number,
+		signal: AbortSignal,
+		environment: Record<string, string>,
+	): Promise<CollaborationJob> {
+		this.assertActive(signal);
+		const agent = store.load(job.id).agents[index];
+		if (agent.stopping || agent.closed) throw new Error("Collaboration launch was stopped.");
+		// Durable before the request is issued: a lost reply must not read as "no resource".
+		store.beginAcquisition(job.id, agent.id);
+		const pane = await strategy.createNextPane(index, agent, environment);
+		const name = `a-${agent.id.slice(0, 12)}-${randomUUID().slice(0, 12)}`;
+		store.finishAcquisition(job.id, agent.id, {
+			paneId: pane.paneId,
+			terminalId: pane.terminalId,
+			backendName: name,
+		});
+		// Pane creation is a real round trip, so a cancellation or an explicit stop can land while it is
+		// in flight. Re-check only AFTER the pane is recorded above: cleanup finds owned panes through
+		// the store, so checking any earlier would abandon the one just acquired.
+		this.assertActive(signal);
+		const acquired = store.load(job.id).agents[index];
+		if (acquired.stopping || acquired.closed) throw new Error("Collaboration launch was stopped.");
+		const started = await backend.startAgent({
+			name,
+			kind: agent.provider,
+			paneId: pane.paneId,
+			args: agent.args,
+			executable: agent.executable,
+		});
+		if (
+			!started.interactiveReady ||
+			started.launchPending ||
+			started.paneId !== pane.paneId ||
+			started.terminalId !== pane.terminalId
+		)
+			throw new Error(`Agent ${agent.name} is not interactively ready on the expected pane.`);
+		const updated = store.update(job.id, (current) => {
+			const member = current.agents[index];
+			if (member.stopping || member.closed) throw new Error("Collaboration launch was stopped.");
+			member.paneId = started.paneId;
+			member.terminalId = started.terminalId;
+			member.backendName = name;
+		});
+		strategy.markPlaced(started.paneId);
+		return updated;
+	}
+	/**
+	 * Verified pane close: only closes when the backend proves the pane still holds this exact agent
+	 * identity, mirroring session reconciliation's own verification (`classifyPaneOwnership`, shared
+	 * so the two can never drift apart — never closes on the record's word alone). Returns whether the
+	 * close is now provably clean: a confirmed different occupant needs no close but is just as
+	 * conclusive as one, so it counts as clean too.
+	 */
+	private async verifiedClosePane(
+		backend: CollaborationBackend,
+		agent: { paneId?: string; terminalId?: string; backendName?: string },
+	): Promise<boolean> {
+		if (!agent.paneId) return true;
+		const paneId = agent.paneId;
+		let registered: { paneId: string; terminalId: string } | undefined;
+		if (agent.backendName) {
+			try {
+				const current = await backend.getAgent(agent.backendName);
+				registered = { paneId: current.paneId, terminalId: current.terminalId };
+			} catch {
+				// Agent name not registered in backend (e.g. failed during startAgent)
+			}
+		}
+		try {
+			const status = await classifyPaneOwnership(backend, { paneId, terminalId: agent.terminalId }, registered);
+			if (status === "unverifiable") return false;
+			if (status === "ours") await backend.closePane(paneId);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+	/**
+	 * Durable resolution once a member's stop intent (`beginStop`) is settled: a verified-clean close
+	 * resolves the acquisition and finishes the stop as failed; an unresolved one is left uncertain,
+	 * durably marked without ever claiming closure. Shared by the team-wide launch rollback and the
+	 * per-member recycle-exhaustion path — the two places a launch failure is durably resolved.
+	 */
+	private resolveStoppedAgent(
+		store: CollaborationJobStore,
+		jobId: string,
+		agent: CollaborationAgent,
+		cleaned: boolean,
+		detail: string,
+	): void {
+		if (cleaned) {
+			store.finishAcquisition(jobId, agent.id);
+			store.finishStop(jobId, agent.id, agent.turnId, "failed", detail);
+		} else {
+			store.update(jobId, (current) => {
+				const member = current.agents.find((candidate) => candidate.id === agent.id);
+				if (member) {
+					member.status = "failed";
+					member.evidence = `Launch cleanup uncertain: ${detail}; live work may remain active.`;
+				}
+			});
+		}
+	}
+	/**
+	 * Durable per-member launch failure resolution once its recycle budget is exhausted: the same
+	 * verified-close-or-uncertain distinction the team-wide launch rollback uses (a `not-submitted`
+	 * backend error proves no resource exists; anything else leaves the acquisition unresolved),
+	 * scoped to one member. Never closes a workspace — recycling a member never tears down the team.
+	 */
+	private async resolveMemberLaunchFailure(
+		store: CollaborationJobStore,
+		backend: CollaborationBackend,
+		job: CollaborationJob,
+		agentId: string,
+		error: unknown,
+	): Promise<void> {
+		const detail = error instanceof Error ? error.message : String(error);
+		const acquisitionOutcomeUnknown =
+			!(error instanceof CollaborationBackendError) || error.delivery !== "not-submitted";
+		const before = store.load(job.id).agents.find((candidate) => candidate.id === agentId);
+		const agent = store.beginStop(job.id, agentId, before?.turnId);
+		if (!agent) return;
+		const cleaned = agent.paneId
+			? await this.verifiedClosePane(backend, agent)
+			: !(agent.acquiring && acquisitionOutcomeUnknown);
+		this.resolveStoppedAgent(store, job.id, agent, cleaned, detail);
+	}
 	private async launchAdmitted(
 		input: NewCollaborationJob,
 		task: string | undefined,
@@ -319,55 +517,89 @@ export class CollaborationCoordinator {
 			const init = await strategy.init();
 			workspaceId = init.workspaceId;
 
+			// A member-scoped failure (its own pane acquisition, startAgent, readiness check, or its
+			// launchTurn) never rolls back the whole team: it is recycled — cleaned up and retried up to
+			// MEMBER_LAUNCH_RETRY_LIMIT extra times — and, if still failing, that member alone ends
+			// failed while the rest of the team keeps running. A team-scoped failure (an external
+			// cancel/dispose, an explicit stop racing the launch, or the unrecyclable managed-workspace
+			// root member) is never recycled and falls straight through to the catch below.
+			const recycledFailures = new Set<string>();
 			for (let index = 0; index < job.agents.length; index++) {
 				this.assertActive(signal);
 				const agent = store.load(job.id).agents[index];
 				if (agent.stopping || agent.closed) throw new Error("Collaboration launch was stopped.");
-				// Durable before the request is issued: a lost reply must not read as "no resource".
-				store.beginAcquisition(job.id, agent.id);
-				const pane = await strategy.createNextPane(index, agent, peers.environments[index]);
-				const name = `a-${agent.id.slice(0, 12)}-${randomUUID().slice(0, 12)}`;
-				store.finishAcquisition(job.id, agent.id, {
-					paneId: pane.paneId,
-					terminalId: pane.terminalId,
-					backendName: name,
-				});
-				// Pane creation is a real round trip, so a cancellation or an explicit stop can land while
-				// it is in flight. Re-check only AFTER the pane is recorded above: the catch block's
-				// cleanup finds owned panes through the store, so checking any earlier would abandon the
-				// one just acquired.
-				this.assertActive(signal);
-				const acquired = store.load(job.id).agents[index];
-				if (acquired.stopping || acquired.closed) throw new Error("Collaboration launch was stopped.");
-				const started = await backend.startAgent({
-					name,
-					kind: agent.provider,
-					paneId: pane.paneId,
-					args: agent.args,
-					executable: agent.executable,
-				});
-				if (
-					!started.interactiveReady ||
-					started.launchPending ||
-					started.paneId !== pane.paneId ||
-					started.terminalId !== pane.terminalId
-				)
-					throw new Error(`Agent ${agent.name} is not interactively ready on the expected pane.`);
-				job = store.update(job.id, (current) => {
-					const member = current.agents[index];
-					if (member.stopping || member.closed) throw new Error("Collaboration launch was stopped.");
-					member.paneId = started.paneId;
-					member.terminalId = started.terminalId;
-					member.backendName = name;
-				});
+				const recyclable = this.memberLaunchIsRecyclable(job, index);
+				for (let attempt = 1; ; attempt++) {
+					try {
+						job = await this.placeMember(store, backend, strategy, job, index, signal, peers.environments[index]);
+						break;
+					} catch (error) {
+						if (signal.aborted || this.disposed) throw error;
+						const current = store.load(job.id).agents[index];
+						if (current.stopping || current.closed) throw error;
+						if (!recyclable) throw error;
+						if (attempt <= MEMBER_LAUNCH_RETRY_LIMIT) {
+							await this.recycleReset(store, backend, job.id, current.id, current.paneId);
+							continue;
+						}
+						await this.resolveMemberLaunchFailure(store, backend, job, current.id, error);
+						recycledFailures.add(current.id);
+						job = store.load(job.id);
+						break;
+					}
+				}
 			}
 			this.assertActive(signal);
 			if (task)
-				for (const member of job.agents) {
-					this.assertActive(signal);
-					const agent = store.load(job.id).agents.find((candidate) => candidate.id === member.id)!;
-					if (agent.stopping || agent.closed) throw new Error("Collaboration launch was stopped.");
-					await this.deps.launchTurn(job, agent);
+				for (let index = 0; index < job.agents.length; index++) {
+					const memberId = job.agents[index].id;
+					if (recycledFailures.has(memberId)) continue;
+					const recyclable = this.memberLaunchIsRecyclable(job, index);
+					for (let attempt = 1; ; attempt++) {
+						this.assertActive(signal);
+						const agent = store.load(job.id).agents.find((candidate) => candidate.id === memberId)!;
+						if (agent.stopping || agent.closed) throw new Error("Collaboration launch was stopped.");
+						try {
+							await this.deps.launchTurn(job, agent);
+							break;
+						} catch (error) {
+							if (signal.aborted || this.disposed) throw error;
+							const current = store.load(job.id).agents.find((candidate) => candidate.id === memberId)!;
+							if (current.stopping || current.closed) throw error;
+							if (!recyclable) throw error;
+							if (attempt <= MEMBER_LAUNCH_RETRY_LIMIT) {
+								await this.recycleReset(store, backend, job.id, memberId, current.paneId);
+								try {
+									// A turn failure cannot trust the process behind it: recycling here redoes the
+									// whole member launch, not just the turn delivery.
+									job = await this.placeMember(
+										store,
+										backend,
+										strategy,
+										job,
+										index,
+										signal,
+										peers.environments[index],
+									);
+								} catch (relaunchError) {
+									if (signal.aborted || this.disposed) throw relaunchError;
+									const afterRelaunch = store
+										.load(job.id)
+										.agents.find((candidate) => candidate.id === memberId)!;
+									if (afterRelaunch.stopping || afterRelaunch.closed) throw relaunchError;
+									await this.resolveMemberLaunchFailure(store, backend, job, memberId, relaunchError);
+									recycledFailures.add(memberId);
+									job = store.load(job.id);
+									break;
+								}
+								continue;
+							}
+							await this.resolveMemberLaunchFailure(store, backend, job, memberId, error);
+							recycledFailures.add(memberId);
+							job = store.load(job.id);
+							break;
+						}
+					}
 				}
 			return store.load(job.id);
 		} catch (error) {
@@ -384,34 +616,7 @@ export class CollaborationCoordinator {
 				if (backend) {
 					for (const agent of loaded.agents) {
 						if (agent.paneId && agent.paneId !== job.callerPaneId) {
-							try {
-								let verified = false;
-								if (agent.backendName) {
-									try {
-										const current = await backend.getAgent(agent.backendName);
-										if (
-											current.paneId === agent.paneId &&
-											(!agent.terminalId || current.terminalId === agent.terminalId)
-										) {
-											verified = true;
-										}
-									} catch {
-										// Agent name not registered in backend (e.g. failed during startAgent)
-									}
-								}
-								if (!verified && agent.terminalId) {
-									const currentPane = await backend.getPane(agent.paneId);
-									if (currentPane.terminalId === agent.terminalId) {
-										verified = true;
-									}
-								}
-								if (verified) {
-									await backend.closePane(agent.paneId);
-									cleanedAgentIds.add(agent.id);
-								}
-							} catch {
-								// Cleanup failed; pane remains live or uncertain
-							}
+							if (await this.verifiedClosePane(backend, agent)) cleanedAgentIds.add(agent.id);
 						} else if (!agent.paneId && !(agent.acquiring && acquisitionOutcomeUnknown)) {
 							cleanedAgentIds.add(agent.id);
 						}
@@ -433,24 +638,11 @@ export class CollaborationCoordinator {
 					if (!agent.paneId && !(agent.acquiring && acquisitionOutcomeUnknown)) cleanedAgentIds.add(agent.id);
 				}
 			}
+			// Membership in `cleanedAgentIds` IS the evidence about the member's resource: a verified
+			// pane close, a positively closed owned workspace, or a failure proven `not-submitted`.
 			for (const agent of stopping) {
 				if (!agent) continue;
-				if (cleanedAgentIds.has(agent.id)) {
-					// Membership in this set IS the evidence about the member's resource: a verified pane
-					// close, a positively closed owned workspace, or a failure proven `not-submitted`.
-					// Resolving the acquisition here is what lets the store record durable closure; the
-					// store itself never resolves one on the caller's word.
-					store.finishAcquisition(job.id, agent.id);
-					store.finishStop(job.id, agent.id, agent.turnId, "failed", detail);
-				} else {
-					store.update(job.id, (current) => {
-						const member = current.agents.find((m) => m.id === agent.id);
-						if (member) {
-							member.status = "failed";
-							member.evidence = `Launch cleanup uncertain: ${detail}; live work may remain active.`;
-						}
-					});
-				}
+				this.resolveStoppedAgent(store, job.id, agent, cleanedAgentIds.has(agent.id), detail);
 			}
 			this.refresh();
 			throw error;

@@ -329,19 +329,95 @@ describe("collaboration launch cancellation lifetime", () => {
 
 	it("negative control: a cleanup failure leaves the agent marked uncertain, never cleanly closed", async () => {
 		const h = await harness({ placement: "current-pane", agentCount: 1 });
-		h.startAgent.mockImplementationOnce(async () => {
+		// A single member with no other member to keep running: its own recycle budget must still
+		// exhaust before it is resolved, exactly like a member inside a larger team (D8).
+		h.startAgent.mockImplementation(async () => {
 			throw new Error("startAgent refused");
 		});
 		h.closePane.mockImplementation(async () => {
 			throw new Error("closePane failed");
 		});
 
-		await expect(h.coordinator.launch(h.input)).rejects.toThrow("startAgent refused");
+		// A member-scoped failure never fails the whole launch: it resolves with that member marked
+		// failed, exactly as a healthy sibling would keep the launch resolving in a larger team.
+		const job = await h.coordinator.launch(h.input);
+		// One retry (two attempts): recycle before giving up.
+		expect(h.startAgent).toHaveBeenCalledTimes(2);
 
-		const agent = h.store.load("job").agents[0];
+		const agent = job.agents[0];
 		expect(agent.status).toBe("failed");
 		// `closed` is the clean-stop proof; an uncertain cleanup must never set it.
 		expect(agent.closed).not.toBe(true);
 		expect(agent.evidence).toContain("Launch cleanup uncertain");
+	});
+
+	it("D8: a member that fails to start is recycled while a healthy sibling keeps running and gets its turn", async () => {
+		// managed-workspace: agent0 is the unrecyclable root member (must stay healthy here so the
+		// test isolates recycling agent1, the ordinary sibling split off the still-live root).
+		const h = await harness({ placement: "managed-workspace", agentCount: 2 });
+		let agent1Attempts = 0;
+		h.startAgent.mockImplementation(async (input: CollaborationStart) => {
+			const pane = [ROOT_PANE, SECOND_PANE].find((candidate) => candidate.paneId === input.paneId);
+			if (!pane) throw new Error(`Unexpected startAgent pane ${input.paneId}`);
+			if (input.name.startsWith("a-agent1")) {
+				agent1Attempts++;
+				if (agent1Attempts === 1) throw new Error("agent1 startAgent refused");
+			}
+			return readyAgent(pane, input.name);
+		});
+
+		const multiTaskInput = {
+			...h.input,
+			agents: h.input.agents.map((agent, index) => ({ ...agent, task: `task-${index}` })),
+		};
+		const job = await h.coordinator.launch(multiTaskInput, "build the thing");
+
+		expect(agent1Attempts).toBe(2);
+		expect(job.agents.every((agent) => agent.status !== "failed")).toBe(true);
+		expect(job.agents.map((agent) => agent.paneId)).toEqual([ROOT_PANE.paneId, SECOND_PANE.paneId]);
+		expect(h.launchTurn).toHaveBeenCalledTimes(2);
+	});
+
+	it("D8: recycle exhausted marks only that member failed while a healthy sibling keeps running", async () => {
+		const h = await harness({ placement: "managed-workspace", agentCount: 2 });
+		h.startAgent.mockImplementation(async (input: CollaborationStart) => {
+			if (input.name.startsWith("a-agent1")) throw new Error("agent1 startAgent refused");
+			const pane = [ROOT_PANE, SECOND_PANE].find((candidate) => candidate.paneId === input.paneId);
+			if (!pane) throw new Error(`Unexpected startAgent pane ${input.paneId}`);
+			return readyAgent(pane, input.name);
+		});
+
+		const multiTaskInput = {
+			...h.input,
+			agents: h.input.agents.map((agent, index) => ({ ...agent, task: `task-${index}` })),
+		};
+		const job = await h.coordinator.launch(multiTaskInput, "build the thing");
+
+		expect(job.agents[0].status).not.toBe("failed");
+		expect(job.agents[1].status).toBe("failed");
+		expect(job.agents[1].evidence).toContain("agent1 startAgent refused");
+		// The healthy sibling still gets its turn; the recycled-out member never does.
+		expect(h.launchTurn).toHaveBeenCalledTimes(1);
+		expect(h.launchTurn).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: "agent0" }));
+	});
+
+	it("D8: a team-scoped failure (the managed-workspace root member) still rolls back the whole team", async () => {
+		const h = await harness({ placement: "managed-workspace", agentCount: 2 });
+		h.startAgent.mockImplementation(async (input: CollaborationStart) => {
+			if (input.name.startsWith("a-agent0")) throw new Error("root member startAgent refused");
+			return readyAgent(SECOND_PANE, input.name);
+		});
+
+		const multiTaskInput = {
+			...h.input,
+			agents: h.input.agents.map((agent, index) => ({ ...agent, task: `task-${index}` })),
+		};
+		await expect(h.coordinator.launch(multiTaskInput, "build the thing")).rejects.toThrow(
+			"root member startAgent refused",
+		);
+
+		expect(h.closeWorkspace).toHaveBeenCalledWith(ROOT_PANE.workspaceId);
+		expect(h.store.load("job").agents.every((agent) => agent.closed)).toBe(true);
+		expect(h.launchTurn).not.toHaveBeenCalled();
 	});
 });

@@ -494,12 +494,11 @@ describe("Herdr panel orchestration", () => {
 		};
 		const { backend, panes } = createMockBackend([callerPane]);
 
-		// Make startAgent fail on the 2nd agent
-		let agentCount = 0;
+		// Make startAgent fail on every attempt for the 2nd agent (its recycle budget must fully
+		// exhaust here, never succeed on a retry) while the 1st agent always starts cleanly.
 		const originalStart = backend.startAgent;
 		backend.startAgent = vi.fn(async (input: CollaborationStart) => {
-			agentCount++;
-			if (agentCount === 2) {
+			if (input.name.startsWith("a-agent-2-")) {
 				throw new Error("Second agent failed interactive readiness");
 			}
 			return originalStart(input);
@@ -512,71 +511,75 @@ describe("Herdr panel orchestration", () => {
 			launchTurn: async () => {},
 		});
 
-		await expect(
-			coordinator.launch(
-				{
-					id: "job-partial-fail",
-					parentSessionId: "parent",
-					sessionName: "shared",
-					cwd: root,
-					title: "Partial Fail Job",
-					createdAt: Date.now(),
-					deadlineSeconds: 1200,
-					placement: "current-pane",
-					socketPath: "/tmp/pi-herdr-fixture/herdr.sock",
-					callerPaneId: "w9:pA",
-					callerWorkspaceId: "w9",
-					callerTabId: "w9:tA",
-					agents: [
-						{
-							id: "agent-1",
-							name: "builder",
-							task: "Build partial work",
-							provider: "agy",
-							cwd: root,
-							args: ["--effort", "high"],
-							env: {},
-							profile: {
-								identity: "profile-1",
-								allowedTools: ["bash"],
-								writePaths: [],
-								parentPid: process.pid,
-								parentSession: "parent",
-							},
+		// A member-scoped failure (D8): the whole launch resolves once its own recycle budget is
+		// exhausted, with only that one member left failed — the healthy sibling keeps running.
+		const job = await coordinator.launch(
+			{
+				id: "job-partial-fail",
+				parentSessionId: "parent",
+				sessionName: "shared",
+				cwd: root,
+				title: "Partial Fail Job",
+				createdAt: Date.now(),
+				deadlineSeconds: 1200,
+				placement: "current-pane",
+				socketPath: "/tmp/pi-herdr-fixture/herdr.sock",
+				callerPaneId: "w9:pA",
+				callerWorkspaceId: "w9",
+				callerTabId: "w9:tA",
+				agents: [
+					{
+						id: "agent-1",
+						name: "builder",
+						task: "Build partial work",
+						provider: "agy",
+						cwd: root,
+						args: ["--effort", "high"],
+						env: {},
+						profile: {
+							identity: "profile-1",
+							allowedTools: ["bash"],
+							writePaths: [],
+							parentPid: process.pid,
+							parentSession: "parent",
 						},
-						{
-							id: "agent-2",
-							name: "validator",
-							task: "Validate partial work",
-							provider: "agy",
-							cwd: root,
-							args: ["--effort", "high"],
-							env: {},
-							profile: {
-								identity: "profile-2",
-								allowedTools: ["bash"],
-								writePaths: [],
-								parentPid: process.pid,
-								parentSession: "parent",
-							},
+					},
+					{
+						id: "agent-2",
+						name: "validator",
+						task: "Validate partial work",
+						provider: "agy",
+						cwd: root,
+						args: ["--effort", "high"],
+						env: {},
+						profile: {
+							identity: "profile-2",
+							allowedTools: ["bash"],
+							writePaths: [],
+							parentPid: process.pid,
+							parentSession: "parent",
 						},
-					],
-				},
-				"Partial fail task",
-			),
-		).rejects.toThrow("Second agent failed interactive readiness");
+					},
+				],
+			},
+			"Partial fail task",
+		);
 
 		// Caller pane was NEVER closed
 		expect(panes.has("w9:pA")).toBe(true);
 		// Workspace was NEVER closed
 		expect(backend.closeWorkspace).not.toHaveBeenCalled();
-		// Only the created pane for agent 1 was closed
+		// The failing agent's pane(s) were closed on every recycle attempt and the final exhaustion.
 		expect(backend.closePane).toHaveBeenCalled();
 
-		// Check durable state recorded failed terminal
+		// Check durable state: the healthy sibling kept running, only the recycled member failed.
 		const loaded = store.load("job-partial-fail");
-		expect(loaded.agents[0].status).toBe("failed");
-		expect(loaded.agents[1].status).toBe("failed");
+		expect(job.agents.find((agent) => agent.id === "agent-1")?.status).not.toBe("failed");
+		expect(loaded.agents.find((agent) => agent.id === "agent-1")?.status).not.toBe("failed");
+		expect(loaded.agents.find((agent) => agent.id === "agent-2")?.status).toBe("failed");
+		expect(loaded.agents.find((agent) => agent.id === "agent-2")?.evidence).toContain(
+			"Second agent failed interactive readiness",
+		);
 
 		await rm(root, { recursive: true, force: true });
 	});
@@ -1645,41 +1648,43 @@ describe("Herdr panel orchestration", () => {
 			launchTurn: async () => {},
 		});
 
-		await expect(
-			coordinator.launch({
-				id: "job-prename",
-				parentSessionId: "parent",
-				sessionName: "shared",
-				cwd: root,
-				title: "Prename Job",
-				createdAt: Date.now(),
-				deadlineSeconds: 1200,
-				placement: "current-pane",
-				callerPaneId: "w9:pA",
-				callerWorkspaceId: "w9",
-				callerTabId: "w9:tA",
-				agents: [
-					{
-						id: "a1",
-						name: "w1",
-						provider: "agy",
-						cwd: root,
-						args: [],
-						env: {},
-						profile: {
-							identity: "p1",
-							allowedTools: ["bash"],
-							writePaths: [],
-							parentPid: process.pid,
-							parentSession: "parent",
-						},
+		// A single-member team is still a member-scoped failure (D8): the launch resolves once its
+		// own recycle budget is exhausted, with that member left failed.
+		const job = await coordinator.launch({
+			id: "job-prename",
+			parentSessionId: "parent",
+			sessionName: "shared",
+			cwd: root,
+			title: "Prename Job",
+			createdAt: Date.now(),
+			deadlineSeconds: 1200,
+			placement: "current-pane",
+			callerPaneId: "w9:pA",
+			callerWorkspaceId: "w9",
+			callerTabId: "w9:tA",
+			agents: [
+				{
+					id: "a1",
+					name: "w1",
+					provider: "agy",
+					cwd: root,
+					args: [],
+					env: {},
+					profile: {
+						identity: "p1",
+						allowedTools: ["bash"],
+						writePaths: [],
+						parentPid: process.pid,
+						parentSession: "parent",
 					},
-				],
-			}),
-		).rejects.toThrow("startAgent failed before registering name");
+				},
+			],
+		});
 
 		expect(backend.getPane).toHaveBeenCalled();
 		expect(backend.closePane).toHaveBeenCalled();
+		expect(job.agents[0].status).toBe("failed");
+		expect(job.agents[0].evidence).toContain("startAgent failed before registering name");
 
 		await rm(root, { recursive: true, force: true });
 	});
