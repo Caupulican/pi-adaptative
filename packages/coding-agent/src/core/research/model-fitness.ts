@@ -2,7 +2,6 @@ import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { runWorker } from "../delegation/worker-runner.ts";
 import { parseModelOutputJsonObject } from "../model-output-json.ts";
-import { runRouteJudge } from "../model-router/route-judge.ts";
 import {
 	CAPACITY_PROBE_SYSTEM_PROMPT,
 	CURATION_DIGEST_SYSTEM_PROMPT,
@@ -20,10 +19,10 @@ export {
 
 /**
  * Model fitness probe: measures whether a candidate model can actually drive the harness's
- * subagent contracts — the research lane, the delegated-worker lane, and the routing judge — by
- * running each real runner against the model and scoring parse/success rates plus judge
- * discrimination. Provider-free: the completion executor is injected, so this works against any
- * registered model (local Ollama models included) and against faux providers in tests.
+ * subagent contracts — the research lane and the delegated-worker lane — by running each real
+ * runner against the model and scoring parse/success rates. Provider-free: the completion
+ * executor is injected, so this works against any registered model (local Ollama models included)
+ * and against faux providers in tests.
  */
 
 export interface FitnessCompletion {
@@ -42,22 +41,6 @@ export type FitnessComplete = (args: {
 	signal?: AbortSignal;
 }) => Promise<FitnessCompletion>;
 
-export interface JudgeFitnessPrompt {
-	prompt: string;
-	/** True when the prompt is planning-shaped and must never route cheap. */
-	planning: boolean;
-}
-
-/** Default judge probe set: three planning-shaped prompts, three trivial lookups. */
-export const DEFAULT_JUDGE_FITNESS_PROMPTS: readonly JudgeFitnessPrompt[] = [
-	{ prompt: "how should we plan the migration of the session storage layer?", planning: true },
-	{ prompt: "design an approach for splitting the settings manager", planning: true },
-	{ prompt: "draft a roadmap for the autonomy rework", planning: true },
-	{ prompt: "what does the resolvePath function return?", planning: false },
-	{ prompt: "list the files in the delegation module", planning: false },
-	{ prompt: "why is this test flaky?", planning: false },
-];
-
 export interface CapacityProbeOptions {
 	registeredContextWindow: number;
 	/** Smallest candidate window to try before declaring the capacity unknown. Default 1024. */
@@ -70,7 +53,6 @@ export interface ModelFitnessOptions {
 	trials?: number;
 	/** Wall-clock budget per call in ms. Default 120000. */
 	maxWallClockMs?: number;
-	judgePrompts?: readonly JudgeFitnessPrompt[];
 	/** Optional local-model capacity lane: measures the actually served context window. */
 	capacityProbe?: CapacityProbeOptions;
 	signal?: AbortSignal;
@@ -87,19 +69,6 @@ export interface LaneFitnessScore {
 	tokensPerSecond?: number;
 }
 
-export interface JudgeFitnessScore {
-	parsed: number;
-	planningElevated: number;
-	planningTotal: number;
-	trivialCheap: number;
-	trivialTotal: number;
-	total: number;
-	outcomes: string[];
-	meanMs: number;
-	/** Mean output tokens/second across the judge calls; undefined when not reported. */
-	tokensPerSecond?: number;
-}
-
 export interface CapacityFitnessScore {
 	registeredContextWindow: number;
 	servedContextWindow: number;
@@ -113,7 +82,6 @@ export interface ModelFitnessReport {
 	tokensPerSecond?: number;
 	research: LaneFitnessScore;
 	worker: LaneFitnessScore;
-	judge: JudgeFitnessScore;
 	/** Heavy-lifter surface: can the model formulate a structured search plan? */
 	search: LaneFitnessScore;
 	/** Heavy-lifter surface: can the model emit a well-formed tool call against a schema? */
@@ -284,7 +252,6 @@ async function measureServedContextWindow(args: {
 export async function runModelFitnessProbe(options: ModelFitnessOptions): Promise<ModelFitnessReport> {
 	const trials = Math.max(1, Math.min(options.trials ?? 3, 20));
 	const maxWallClockMs = options.maxWallClockMs ?? 120_000;
-	const judgePrompts = options.judgePrompts ?? DEFAULT_JUDGE_FITNESS_PROMPTS;
 	const now = options.now ?? Date.now;
 	let totalCostUsd = 0;
 
@@ -364,42 +331,6 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 	worker.meanMs = Math.round(worker.meanMs / trials);
 	worker.tokensPerSecond = takeSurfaceSpeed();
 
-	const judge: JudgeFitnessScore = {
-		parsed: 0,
-		planningElevated: 0,
-		planningTotal: judgePrompts.filter((entry) => entry.planning).length,
-		trivialCheap: 0,
-		trivialTotal: judgePrompts.filter((entry) => !entry.planning).length,
-		total: judgePrompts.length,
-		outcomes: [],
-		meanMs: 0,
-	};
-	for (const entry of judgePrompts) {
-		const started = now();
-		const result = await runRouteJudge({
-			prompt: entry.prompt,
-			baseline: { tier: "cheap", risk: "read-only", confidence: 0.5, reasonCode: "fitness_probe", reasons: [] },
-			maxWallClockMs,
-			signal: options.signal,
-			complete,
-		});
-		judge.meanMs += now() - started;
-		totalCostUsd += result.costUsd;
-		const tier = result.decision.tier;
-		if (result.verdict) {
-			judge.parsed++;
-			// A useful judge must both keep planning off the cheap tier AND actually send trivial
-			// prompts there — all-medium verdicts are safe but save nothing.
-			if (entry.planning && tier !== "cheap") judge.planningElevated++;
-			if (!entry.planning && tier === "cheap") judge.trivialCheap++;
-		}
-		judge.outcomes.push(
-			`"${entry.prompt.slice(0, 40)}" -> ${tier}${result.fallbackReason ? ` (${result.fallbackReason})` : ""}`,
-		);
-	}
-	judge.meanMs = judgePrompts.length > 0 ? Math.round(judge.meanMs / judgePrompts.length) : 0;
-	judge.tokensPerSecond = takeSurfaceSpeed();
-
 	const probeSurface = async (
 		systemPrompt: string,
 		tasks: readonly string[],
@@ -455,28 +386,23 @@ export async function runModelFitnessProbe(options: ModelFitnessOptions): Promis
 	const tokensPerSecond =
 		overallSpeed.evalMs > 0 ? Math.round((overallSpeed.tokens / overallSpeed.evalMs) * 1000) : undefined;
 
-	return { trials, tokensPerSecond, research, worker, judge, search, toolCall, digest, capacity, totalCostUsd };
+	return { trials, tokensPerSecond, research, worker, search, toolCall, digest, capacity, totalCostUsd };
 }
 
 /**
- * Pure verdict: true when the probe found ZERO successes on every LANE surface it actually graded
- * AND the judge (if it ran) also failed. A lane/judge with total 0 (i.e. never run) carries no
- * evidence and is excluded from the lane check — but at least one lane must actually have been
- * graded for an all-failed verdict at all: `gradedLanes.every(...)` is vacuously true over an
- * empty array, so a report where only the judge ran (every research/worker/search/toolCall/digest
- * lane is ungraded) is excluded explicitly rather than misread as "all lanes failed" on zero lane
- * evidence. An empty/degenerate report (nothing graded at all, lanes AND judge) is likewise never
- * mistaken for a failed one. This is the gate adoption flows must consult before assigning a role —
- * see `isProbeAllFailed` callers in interactive-mode.ts and agent-session.ts.
+ * Pure verdict: true when the probe found ZERO successes on every LANE surface it actually graded.
+ * A lane with total 0 (i.e. never run) carries no evidence and is excluded from the check — but at
+ * least one lane must actually have been graded for an all-failed verdict at all:
+ * `gradedLanes.every(...)` is vacuously true over an empty array, so a report where nothing was
+ * graded is excluded explicitly rather than misread as "all lanes failed" on zero evidence. This is
+ * the gate adoption flows must consult before assigning a role — see `isProbeAllFailed` callers in
+ * interactive-mode.ts and agent-session.ts.
  */
 export function isProbeAllFailed(report: ModelFitnessReport): boolean {
 	const lanes = [report.research, report.worker, report.search, report.toolCall, report.digest];
 	const gradedLanes = lanes.filter((lane) => lane.total > 0);
-	const judgeGraded = report.judge.total > 0;
-	if (gradedLanes.length === 0 && !judgeGraded) return false;
-	const lanesAllFailed = gradedLanes.length > 0 && gradedLanes.every((lane) => lane.succeeded === 0);
-	const judgeFailed = !judgeGraded || report.judge.parsed === 0;
-	return lanesAllFailed && judgeFailed;
+	if (gradedLanes.length === 0) return false;
+	return gradedLanes.every((lane) => lane.succeeded === 0);
 }
 
 /** Compact human-readable report for tool output / interactive display. Bounded, no raw dumps. */
@@ -495,8 +421,6 @@ export function formatModelFitnessReport(model: string, report: ModelFitnessRepo
 					`- capacity:      served window ${report.capacity.servedContextWindow}/${report.capacity.registeredContextWindow} tokens, mean ${report.capacity.meanMs}ms`,
 				]
 			: []),
-		`- route judge:   parsed ${report.judge.parsed}/${report.judge.total}, planning-elevated ${report.judge.planningElevated}/${report.judge.planningTotal}, trivial-cheap ${report.judge.trivialCheap}/${report.judge.trivialTotal}, mean ${report.judge.meanMs}ms${speed(report.judge.tokensPerSecond)}`,
-		...report.judge.outcomes.map((outcome) => `    ${outcome}`),
 	];
 	if (report.totalCostUsd > 0) {
 		lines.push(`- probe cost: $${report.totalCostUsd.toFixed(4)}`);

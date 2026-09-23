@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { OAuthRefreshCompletedError, registerOAuthProvider, unregisterOAuthProvider } from "@caupulican/pi-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, expect, it, vi } from "vitest";
+import { ANTIGRAVITY_CATALOG_VERSION } from "../../ai/src/utils/antigravity.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 
 const directories: string[] = [];
@@ -32,6 +33,8 @@ it.each([
 		expires: trigger === "expiry" ? 0 : Date.now() + 60_000,
 		projectId: "previous-project",
 		modelCatalog,
+		// A current-format catalog: this test is about rotation, not the stale-catalog upgrade.
+		catalogVersion: ANTIGRAVITY_CATALOG_VERSION,
 	});
 	const requests: string[] = [];
 	vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {

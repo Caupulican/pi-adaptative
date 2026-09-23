@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { combineAbortSignals } from "@caupulican/pi-ai/abort-signals";
 import { retryProviderRequest } from "@caupulican/pi-ai/provider-retry";
 import { Value } from "typebox/value";
+import type { SystemOneAccessResolver } from "../system-one/access.ts";
 import { getSystemOneProviderDriver, type SystemOneProviderDriver } from "../system-one/provider-driver.ts";
 import {
 	type EvaluationInput,
@@ -104,13 +105,27 @@ export class TypeSafeReviewError extends Error {
 }
 
 export interface SystemOneReviewerDeps {
-	getApiKey(): Promise<string | undefined>;
+	/**
+	 * The session's System One access: provider, pinned model and key, resolved at every call so a
+	 * provider switch applies to the next evaluation. Production reviewers take this; the fixed fields
+	 * below describe one pinned connection (tests, a single-provider tool).
+	 */
+	access?: SystemOneAccessResolver;
+	getApiKey?(): Promise<string | undefined>;
 	fetch?: typeof fetch;
 	provider?: string;
 	driver?: SystemOneProviderDriver;
 	model?: string;
 	endpoint?: string;
 	modelsEndpoint?: string;
+}
+
+/** One evaluation's connection: which provider, which model, which key (absent when not configured). */
+interface ReviewerConnection {
+	readonly driver: SystemOneProviderDriver;
+	readonly model: string;
+	readonly key: string | undefined;
+	readonly setup: string;
 }
 
 export type TypeSafeReviewerDeps = SystemOneReviewerDeps;
@@ -124,46 +139,33 @@ export class SystemOneReviewer {
 	constructor(deps: SystemOneReviewerDeps) {
 		this.deps = deps;
 		this.driver = deps.driver ?? getSystemOneProviderDriver(deps.provider);
+		if (!deps.access && !deps.getApiKey) throw new Error("A System One reviewer needs an access resolver or a key");
 	}
 
-	private getProviderName(): string {
-		return this.driver.displayName;
-	}
-
-	private getDefaultModel(): string {
-		return this.deps.model ?? this.driver.defaultModel;
-	}
-
-	private getEndpoint(): string {
-		return this.deps.endpoint ?? this.driver.decisionsEndpoint;
-	}
-
-	private getModelsEndpoint(): string {
-		return this.deps.modelsEndpoint ?? this.driver.modelsEndpoint;
-	}
-
-	private getSetupHint(): string {
-		return this.driver.formatSetupHelp();
-	}
-
-	private async resolveKey(): Promise<string | undefined> {
-		const name = this.getProviderName();
-		const setup = this.getSetupHint();
+	private async connection(): Promise<ReviewerConnection> {
+		let driver = this.driver;
+		let model = this.deps.model ?? this.driver.model;
 		let key: string | undefined;
+		let setup = this.driver.formatSetupHelp();
 		try {
-			key = (await this.deps.getApiKey())?.trim();
+			if (this.deps.access) {
+				const outcome = await this.deps.access.resolve();
+				if (outcome.kind === "ready") {
+					({ driver, model } = outcome.access);
+					key = outcome.access.apiKey;
+					setup = driver.formatSetupHelp();
+				} else setup = outcome.setup;
+			} else key = (await this.deps.getApiKey?.())?.trim();
 		} catch {
-			throw new Error(`${name} credential lookup failed; check ${setup}`);
+			throw new Error(`${driver.displayName} credential lookup failed; check ${setup}`);
 		}
-		if (key && !/^[\x21-\x7e]+$/.test(key)) throw new Error(`Invalid ${name} credential`);
-		return key || undefined;
+		if (key && !/^[\x21-\x7e]+$/.test(key)) throw new Error(`Invalid ${driver.displayName} credential`);
+		return { driver, model, key: key || undefined, setup };
 	}
 
 	async status(signal?: AbortSignal) {
-		const providerName = this.getProviderName();
-		const model = this.getDefaultModel();
-		const setup = this.getSetupHint();
-		const key = await this.resolveKey();
+		const { driver, model, key, setup } = await this.connection();
+		const providerName = driver.displayName;
 		const enabled = Boolean(key?.trim());
 		if (!enabled || !key) {
 			return {
@@ -180,7 +182,7 @@ export class SystemOneReviewer {
 			const timer = setTimeout(() => timeout.abort(), 10_000);
 			const combined = combineAbortSignals([signal, timeout.signal]);
 			try {
-				const response = await (this.deps.fetch ?? fetch)(this.getModelsEndpoint(), {
+				const response = await (this.deps.fetch ?? fetch)(this.deps.modelsEndpoint ?? driver.modelsEndpoint, {
 					method: "GET",
 					headers: { Authorization: `Bearer ${key}` },
 					redirect: "error",
@@ -269,23 +271,23 @@ export class SystemOneReviewer {
 		signal?: AbortSignal,
 		onResponse?: (attempts: readonly TypeSafeTransportAttempt[]) => void,
 	): Promise<EvaluationRecord> {
-		const providerName = this.getProviderName();
-		const defaultModel = this.getDefaultModel();
-		const endpoint = this.getEndpoint();
-		const setup = this.getSetupHint();
-
 		signal?.throwIfAborted();
 		// Snapshot before any await. No omitted fields or context truncation are permitted.
 		const snapshot: EvaluationInput = JSON.parse(serializeEvaluation(input));
+		const { driver, model, key, setup } = await this.connection();
+		signal?.throwIfAborted();
+		const providerName = driver.displayName;
+		const endpoint = this.deps.endpoint ?? driver.decisionsEndpoint;
 		if (!Value.Check(evaluationInputSchema, snapshot)) throw new Error(`Invalid ${providerName} evaluation input`);
-		const request = { model: snapshot.model ?? defaultModel, ...snapshot };
+		// One engine version for every path: a caller naming another version is refused, not rerouted.
+		if (this.deps.access && snapshot.model !== undefined && !driver.matchesModel(model, snapshot.model))
+			throw new Error(`System One runs ${model}; ${snapshot.model} was requested`);
+		const request = this.deps.access ? { ...snapshot, model } : { model: snapshot.model ?? model, ...snapshot };
 		const body = JSON.stringify(request);
 		if (Buffer.byteLength(body) > MAX_REQUEST_BYTES)
 			throw new Error(
 				`${providerName} request exceeds 2 MiB; partition with explicit coverage, never truncate evidence`,
 			);
-		const key = await this.resolveKey();
-		signal?.throwIfAborted();
 		if (!key) throw new Error(`${providerName} is not configured. Use ${setup}`);
 		if (body.includes(JSON.stringify(key).slice(1, -1)) || API_CREDENTIAL.test(body))
 			throw new Error(`${providerName} evidence contains an API credential`);

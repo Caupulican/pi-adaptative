@@ -700,19 +700,20 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Get all models (built-in + custom).
+	 * Get all conversational models (built-in + custom). System One engines (`kind: "judge"`) are not
+	 * listed: nothing may allocate a conversation to one, and `find` still resolves them by id.
 	 * If models.json had errors, returns only built-in models.
 	 */
 	getAll(): Model<Api>[] {
-		return this.models;
+		return this.models.filter((m) => m.kind !== "judge");
 	}
 
 	/**
-	 * Get only models that have auth configured.
+	 * Get only conversational models that have auth configured.
 	 * This is a fast check that doesn't refresh OAuth tokens.
 	 */
 	getAvailable(): Model<Api>[] {
-		return this.models.filter((m) => this.hasConfiguredAuth(m));
+		return this.getAll().filter((m) => this.hasConfiguredAuth(m));
 	}
 
 	/** Restrict one provider to an exact, externally verified set of model IDs. */

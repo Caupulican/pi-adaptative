@@ -70,6 +70,13 @@ export interface OAuthProviderInterface {
 	/** Refresh expired credentials, return updated credentials to persist */
 	refreshToken(credentials: OAuthCredentials): Promise<OAuthCredentials>;
 
+	/**
+	 * Optional: whether unexpired credentials were stored by an older version of this provider and
+	 * lack data it now reads. They are refreshed like expired ones; a failed refresh leaves the
+	 * still-valid credentials in use.
+	 */
+	needsRefresh?(credentials: OAuthCredentials): boolean;
+
 	/** Convert credentials to API key string for the provider */
 	getApiKey(credentials: OAuthCredentials): string;
 

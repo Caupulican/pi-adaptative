@@ -163,6 +163,11 @@ export class WorkerDispatchScheduler {
 		}
 	}
 
+	/** Is this lane's run executing (tracked and not yet settled)? */
+	isRunning(laneId: string): boolean {
+		return this.running.has(laneId);
+	}
+
 	/** Does this scheduler currently own this lane's queue entry or its run? */
 	ownsLane(laneId: string): boolean {
 		return this.queued.has(laneId) || this.running.has(laneId) || this.preflights.has(laneId);

@@ -49,6 +49,46 @@ describe("WorkerDelegationController integration invariants", () => {
 		}
 	});
 
+	it("keeps a running lane's write reservation through cancellation until its run releases it", () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-cancel-reservation-"));
+		try {
+			const controller = new WorkerDelegationController(
+				{
+					getAgentDir: () => agentDir,
+					getSessionId: () => "session-cancel-reservation",
+					isDelegateToolActive: () => true,
+					isDisposed: () => false,
+					emit: vi.fn(),
+				} as unknown as ConstructorParameters<typeof WorkerDelegationController>[0],
+				{ statusChanged: vi.fn() } as unknown as ConstructorParameters<typeof WorkerDelegationController>[1],
+				{
+					getTaskRuntimeSnapshot: () => ({ agents: {} }),
+					cancel: () => undefined,
+				} as unknown as ConstructorParameters<typeof WorkerDelegationController>[2],
+			);
+			const running = new Set(["running-lane"]);
+			const release = vi.fn();
+			Reflect.set(controller, "scheduler", {
+				dropQueued: vi.fn(),
+				drain: vi.fn(),
+				isRunning: (laneId: string) => running.has(laneId),
+			});
+			Reflect.set(controller, "writeReservations", { release });
+			const options = Reflect.get(Reflect.get(controller, "agentControl") as object, "options") as {
+				cancelLane(laneId: string, reasonCode: string): unknown;
+			};
+
+			// The abort is asynchronous: an in-flight edit can still write, so the run's own end releases.
+			options.cancelLane("running-lane", "owner_cancelled");
+			expect(release).not.toHaveBeenCalled();
+			// A queued lane has no run to release it.
+			options.cancelLane("queued-lane", "owner_cancelled");
+			expect(release).toHaveBeenCalledWith("queued-lane");
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
+
 	it("retains a caller capacity yield until every independent wait lease releases it", () => {
 		const controller = controllerWithRunningCaller();
 		const yieldCapacity = Reflect.get(controller, "yieldWorkerForWait") as (callerAgentId: string) => () => boolean;

@@ -298,29 +298,6 @@ describe("H-MoE Expert Routing Substrate (HMOE-001..HMOE-125)", () => {
 			expect(unprobed.adequacyClass).toBe("unprobed");
 		});
 
-		it("FIELD-004: a judge request scores its own judge lane, not the worker lane", async () => {
-			const builder = new ExpertFeatureBuilder({
-				fitnessStore: {
-					getReport: (ref: string) =>
-						ref === "anthropic/claude-3-5-sonnet"
-							? { lanes: { worker: { successes: 10, total: 10 }, judge: { parsed: 1, total: 10 } } }
-							: undefined,
-				} as never,
-			});
-			const cand = createMockCandidate();
-			const judged = await builder.build(
-				{ ...buildWorkerCapabilityRequest({ route: "implement" }), worker_role: "judge" },
-				cand,
-			);
-			expect(judged.roleProbeFitness).toBeCloseTo(0.1, 5);
-			expect(judged.adequacyClass).toBe("known_unfit");
-
-			// The same report through a non-judge request still reads the worker lane.
-			const worker = await builder.build(buildWorkerCapabilityRequest({ route: "implement" }), cand);
-			expect(worker.roleProbeFitness).toBeCloseTo(1.0, 5);
-			expect(worker.adequacyClass).toBe("known_fit");
-		});
-
 		it("HMOE-044: Critical consequence emphasizes ability and reliability over cost", async () => {
 			const candExpensive = createMockCandidate({
 				capability_tier: "expensive",
@@ -728,7 +705,6 @@ describe("H-MoE Expert Routing Substrate (HMOE-001..HMOE-125)", () => {
 							cheapModel: "test-provider/m-fast-model",
 							mediumModel: "test-provider/m-fast-model",
 							expensiveModel: "test-provider/m-fast-model",
-							judgeEnabled: false,
 						}),
 					}) as any,
 				getSessionManager: () =>

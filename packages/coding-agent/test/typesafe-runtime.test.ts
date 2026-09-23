@@ -303,7 +303,7 @@ describe("packaged TypeSafe reviewer", () => {
 				expect(fetcher).toHaveBeenCalledOnce();
 				const submitted = JSON.parse(String(fetcher.mock.calls[0][1]?.body));
 				expect(Object.keys(submitted).sort()).toEqual(["model", "questions", "state"]);
-				expect(submitted.model).toBe("jev-latest");
+				expect(submitted.model).toBe("jev-1.13.0");
 				expect(submitted.state).toEqual(
 					withHook ? { fixture: "red square", hook: "applied-input" } : { fixture: "red square" },
 				);
@@ -362,11 +362,13 @@ describe("packaged TypeSafe reviewer", () => {
 			expect(showError).not.toHaveBeenCalled();
 			expect(await AuthStorage.create(authPath).getApiKey("typesafe")).toBe("fixture-key");
 			expect(session.model?.provider).toBe("anthropic");
+			// Jev is a System One engine: resolvable by id, never listed for a conversation.
+			expect(session.modelRegistry.find("typesafe", "jev-1.13.0")?.kind).toBe("judge");
 			expect(
 				session.modelRegistry
 					.getAll()
 					.some((model) => model.provider === "typesafe" || model.id.startsWith("jev-")),
-			).toBe(true);
+			).toBe(false);
 			expect(await tool.execute("status-2", { action: "status" }, undefined, undefined, {} as never)).toMatchObject({
 				details: { enabled: true },
 			});

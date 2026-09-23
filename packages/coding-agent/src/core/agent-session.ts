@@ -166,7 +166,13 @@ import {
 	type RouterPoolState,
 	resolveRouterCandidatePool,
 } from "./model-router/candidate-pool.ts";
-import { describePolicy, type ModelPoolPolicy, OwnerModelPolicy } from "./model-router/owner-model-policy.ts";
+import {
+	describePolicy,
+	latestPoolPolicy,
+	MODEL_POOL_POLICY_CUSTOM_TYPE,
+	type ModelPoolPolicy,
+	OwnerModelPolicy,
+} from "./model-router/owner-model-policy.ts";
 import type { LiveRoutePreview, RoutePreview } from "./model-router/route-preview.ts";
 import { isLocalOrManagedRouterModel } from "./model-router/tool-escalation.ts";
 import {
@@ -534,14 +540,29 @@ export class AgentSession {
 			this._deliverToOwner(items);
 		},
 	});
+	/** The pool policy the current branch states, keyed by the branch it was read from. */
+	private _poolPolicyRead?: { branchKey: string; policy: ModelPoolPolicy | undefined };
 	/**
 	 * Which model pools the owner allows this session. System One reads changes from the owner's own
-	 * words; every allocation reads it when it picks, so a change applies to the next pick.
+	 * words; every allocation reads it when it picks, so a change applies to the next pick. It is kept
+	 * on the session branch, so resume, fork and branch switches restore what the owner said there.
 	 */
-	private readonly _modelPolicy = new OwnerModelPolicy({
-		isSubscription: (model) => this._modelRegistry.isUsingSubscription(model),
-		isLocal: (model) => isLocalOrManagedRouterModel(model),
-	});
+	private readonly _modelPolicy = new OwnerModelPolicy(
+		{
+			isSubscription: (model) => this._modelRegistry.isUsingSubscription(model),
+			isLocal: (model) => isLocalOrManagedRouterModel(model),
+		},
+		{
+			// Allocation asks per candidate model: read the branch once per branch position.
+			read: () => {
+				const branchKey = `${this.sessionManager.getSessionId()}:${this.sessionManager.getLeafId() ?? ""}`;
+				if (this._poolPolicyRead?.branchKey !== branchKey)
+					this._poolPolicyRead = { branchKey, policy: latestPoolPolicy(this.sessionManager.getBranch()) };
+				return this._poolPolicyRead.policy;
+			},
+			record: (record) => this.sessionManager.appendCustomEntry(MODEL_POOL_POLICY_CUSTOM_TYPE, record),
+		},
+	);
 	/** Findings nothing could settle this turn, delivered to the owner by the host when the turn ends. */
 	private _pendingOwnerItems: string[] = [];
 	/** The follow-up document this turn's items were written to under a handoff, if any. */

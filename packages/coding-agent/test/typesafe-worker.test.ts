@@ -139,7 +139,7 @@ describe("worker TypeSafe review", () => {
 					});
 					expect(fetcher).toHaveBeenCalledTimes(retry ? 2 : 1);
 					expect(JSON.parse(String(fetcher.mock.calls[0][1]?.body))).toMatchObject({
-						model: "jev-latest",
+						model: "jev-1.13.0",
 						state: { fixture: evidence },
 					});
 					if (!result.started || !result.record) throw new Error("Missing worker record");

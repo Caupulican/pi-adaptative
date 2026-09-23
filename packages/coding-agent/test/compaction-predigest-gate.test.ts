@@ -41,16 +41,6 @@ const digestFitReport = (): ModelFitnessReport => {
 		search: { ...lane },
 		toolCall: { ...lane },
 		digest: { succeeded: 2, total: 3, outcomes: [], meanMs: 10 },
-		judge: {
-			parsed: 0,
-			planningElevated: 0,
-			planningTotal: 0,
-			trivialCheap: 0,
-			trivialTotal: 0,
-			total: 0,
-			outcomes: [],
-			meanMs: 0,
-		},
 		totalCostUsd: 0,
 	};
 };

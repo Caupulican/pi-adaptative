@@ -144,6 +144,7 @@ import {
 import type { SkillVaultController } from "./skill-vault.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
+import { systemOneAccessFromSession } from "./system-one/access.ts";
 import type { ClarificationDecisionEngine } from "./system-one/clarification.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import { TaskDirectoryRuntime } from "./tasks/task-directory-runtime.ts";
@@ -1130,22 +1131,13 @@ export class RuntimeBuilder {
 		}
 		if (!baseToolsOverride) {
 			if (toolAccess.allows("typesafe_review")) {
-				const systemOneSettings = this.deps.getSettingsManager().getSystemOneSettings();
+				// The same access every System One path uses: one provider's key only ever goes to that
+				// provider, and a provider switch in settings applies to the next review.
 				const reviewer = new TypeSafeReviewer({
-					provider: systemOneSettings.provider,
-					model: systemOneSettings.model,
-					getApiKey: async () => {
-						const currentSettings = this.deps.getSettingsManager().getSystemOneSettings();
-						const currentProvider = currentSettings.provider ?? "typesafe";
-						const key = await this.deps
-							.getModelRegistry()
-							.authStorage.getApiKey(currentProvider, { includeFallback: false });
-						if (key) return key;
-						const fallbackProvider = currentProvider === "openrouter" ? "typesafe" : "openrouter";
-						return this.deps
-							.getModelRegistry()
-							.authStorage.getApiKey(fallbackProvider, { includeFallback: false });
-					},
+					access: systemOneAccessFromSession(
+						this.deps.getSettingsManager(),
+						this.deps.getModelRegistry().authStorage,
+					),
 				});
 				this._baseToolDefinitions.set(
 					"typesafe_review",

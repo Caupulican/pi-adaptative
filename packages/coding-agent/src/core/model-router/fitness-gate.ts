@@ -12,7 +12,6 @@ export type FitnessGatedSurface =
 	| "router_cheap"
 	| "router_medium"
 	| "router_expensive"
-	| "router_judge"
 	| "executor"
 	| "curation"
 	| "scout_auto";
@@ -22,7 +21,7 @@ export type FitnessGateVerdict =
 	| { fit: false; reason: "unprobed" }
 	| { fit: false; reason: "lane_failed"; lane: string; succeeded: number; total: number };
 
-type FitnessLane = "research" | "worker" | "judge" | "toolCall" | "digest";
+type FitnessLane = "research" | "worker" | "toolCall" | "digest";
 
 const CLASS_A_SURFACES = new Set<FitnessGatedSurface>(["executor", "curation", "scout_auto"]);
 
@@ -31,7 +30,6 @@ const SURFACE_LANES: Record<FitnessGatedSurface, readonly FitnessLane[]> = {
 	router_cheap: ["research", "toolCall"],
 	router_medium: ["worker", "toolCall"],
 	router_expensive: ["worker", "toolCall"],
-	router_judge: ["judge"],
 	executor: ["toolCall"],
 	curation: ["digest"],
 	scout_auto: ["research", "toolCall"],
@@ -52,18 +50,6 @@ export function evaluateSurfaceFitness(
 	if (!report) return unprobedVerdict(surface);
 
 	for (const lane of SURFACE_LANES[surface]) {
-		if (lane === "judge") {
-			const score = report.judge;
-			// A report that carries no score for a lane this surface needs is evidence about other
-			// surfaces, not about this one: a report written before the lane existed, or one whose
-			// lane was skipped. "Missing evidence" is the same verdict as "no report" — never a
-			// crash, and never a pass on evidence that was never measured.
-			if (!score) return unprobedVerdict(surface);
-			if (!laneMeetsFitnessBar(score.parsed, score.total)) {
-				return { fit: false, reason: "lane_failed", lane, succeeded: score.parsed, total: score.total };
-			}
-			continue;
-		}
 		const score = report[lane];
 		if (!score) return unprobedVerdict(surface);
 		if (!laneMeetsFitnessBar(score.succeeded, score.total)) {

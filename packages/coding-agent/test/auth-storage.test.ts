@@ -459,6 +459,54 @@ describe("AuthStorage", () => {
 		);
 	}
 
+	describe("stale oauth credentials", () => {
+		function registerStaleAwareProvider(refreshToken: (credentials: OAuthCredentials) => Promise<OAuthCredentials>) {
+			const providerId = `test-stale-provider-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+			registerOAuthProvider({
+				id: providerId,
+				name: "Stale-aware test provider",
+				async login() {
+					throw new Error("Not used in this test");
+				},
+				refreshToken,
+				getApiKey: (credentials) => `Bearer ${credentials.access}`,
+				needsRefresh: (credentials) => credentials.format !== 2,
+			});
+			return providerId;
+		}
+
+		test("refreshes an unexpired credential stored in an older format once, then uses the upgraded one", async () => {
+			const refresh = vi.fn(async (credentials: OAuthCredentials) => ({
+				...credentials,
+				access: "upgraded-access",
+				format: 2,
+			}));
+			const providerId = registerStaleAwareProvider(refresh);
+			writeAuthJson({
+				[providerId]: { type: "oauth", refresh: "r", access: "old-access", expires: Date.now() + 60_000 },
+			});
+			authStorage = AuthStorage.create(authJsonPath);
+			expect(await authStorage.getApiKey(providerId)).toBe("Bearer upgraded-access");
+			expect(await authStorage.getApiKey(providerId)).toBe("Bearer upgraded-access");
+			expect(refresh).toHaveBeenCalledTimes(1);
+		});
+
+		test("keeps using a still-valid stale credential when its upgrade fails, and does not retry it on every request", async () => {
+			const refresh = vi.fn(async (): Promise<OAuthCredentials> => {
+				throw new Error("discovery unavailable");
+			});
+			const providerId = registerStaleAwareProvider(refresh);
+			writeAuthJson({
+				[providerId]: { type: "oauth", refresh: "r", access: "still-valid", expires: Date.now() + 60_000 },
+			});
+			authStorage = AuthStorage.create(authJsonPath);
+			expect(await authStorage.getApiKey(providerId)).toBe("Bearer still-valid");
+			expect(await authStorage.getApiKey(providerId)).toBe("Bearer still-valid");
+			expect(refresh).toHaveBeenCalledTimes(1);
+			expect(authStorage.drainErrors().length).toBeGreaterThan(0);
+		});
+	});
+
 	describe("oauth lock compromise handling", () => {
 		test("reports the compromised lock as an unusable credential and allows a later retry", async () => {
 			const providerId = registerTestOAuthProvider(async (credentials) => ({

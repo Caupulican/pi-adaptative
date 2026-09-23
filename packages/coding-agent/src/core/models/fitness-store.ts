@@ -35,6 +35,11 @@ function isLaneScore(value: unknown): boolean {
 	);
 }
 
+/**
+ * Validates the lanes the current `ModelFitnessReport` shape actually carries. A report written
+ * before the retired route-judge lane was removed still carries an extra `judge` field on disk —
+ * this validator neither requires nor rejects it, so old reports keep loading.
+ */
 function isFitnessReport(value: unknown): value is ModelFitnessReport {
 	return (
 		isPlainRecord(value) &&
@@ -45,17 +50,6 @@ function isFitnessReport(value: unknown): value is ModelFitnessReport {
 		isLaneScore(value.search) &&
 		isLaneScore(value.toolCall) &&
 		isLaneScore(value.digest) &&
-		isPlainRecord(value.judge) &&
-		isFiniteNumber(value.judge.parsed) &&
-		isFiniteNumber(value.judge.planningElevated) &&
-		isFiniteNumber(value.judge.planningTotal) &&
-		isFiniteNumber(value.judge.trivialCheap) &&
-		isFiniteNumber(value.judge.trivialTotal) &&
-		isFiniteNumber(value.judge.total) &&
-		Array.isArray(value.judge.outcomes) &&
-		value.judge.outcomes.every((outcome) => typeof outcome === "string") &&
-		isFiniteNumber(value.judge.meanMs) &&
-		(value.judge.tokensPerSecond === undefined || isFiniteNumber(value.judge.tokensPerSecond)) &&
 		(value.capacity === undefined ||
 			(isPlainRecord(value.capacity) &&
 				isFiniteNumber(value.capacity.registeredContextWindow) &&

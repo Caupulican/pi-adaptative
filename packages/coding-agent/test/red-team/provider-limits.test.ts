@@ -10,7 +10,6 @@ import { BillingFailoverController, ExhaustedProviderRegistry } from "../../src/
 import { runCompactionWithRetry } from "../../src/core/compaction-controller.ts";
 import { CompactionSupport } from "../../src/core/compaction-support.ts";
 import type { ModelRegistry } from "../../src/core/model-registry.ts";
-import type { AutoSelectionTier } from "../../src/core/model-router/auto-selection.ts";
 import { ModelRouterController } from "../../src/core/model-router-controller.ts";
 import { FitnessStore } from "../../src/core/models/fitness-store.ts";
 import type { LaneFitnessScore, ModelFitnessReport } from "../../src/core/research/model-fitness.ts";
@@ -77,16 +76,6 @@ function report(overrides: Partial<ModelFitnessReport> = {}): ModelFitnessReport
 		trials: 3,
 		research: lane(),
 		worker: lane(),
-		judge: {
-			parsed: 3,
-			planningElevated: 3,
-			planningTotal: 3,
-			trivialCheap: 3,
-			trivialTotal: 3,
-			total: 3,
-			outcomes: [],
-			meanMs: 1,
-		},
 		search: lane(),
 		toolCall: lane(),
 		digest: lane(),
@@ -128,14 +117,6 @@ function compactionHarness(options: { agentDir: string; exhausted?: ExhaustedPro
 type RouterHarness = {
 	_lastModelRouterSkipReason?: string;
 	_resolveExecutorRoute: () => undefined;
-	_routerSurfaceForTier?: (
-		tier: "cheap" | "medium" | "expensive",
-	) => "router_cheap" | "router_medium" | "router_expensive";
-	_evaluateModelFitness?: (
-		surface: "router_cheap" | "router_medium" | "router_expensive",
-		model: Model<Api>,
-	) => { fit: true; probed: boolean } | { fit: false; reason: "unprobed" | "lane_failed" };
-	isTierAutoSelected: (tier: AutoSelectionTier) => boolean;
 	deps: {
 		getSettingsManager: () => {
 			getModelRouterSettings: () => {
@@ -155,17 +136,19 @@ type RouterHarness = {
 };
 
 const routerPrototype = ModelRouterController.prototype as unknown as {
-	_routerSurfaceForTier(tier: "cheap" | "medium" | "expensive"): "router_cheap" | "router_medium" | "router_expensive";
-	_evaluateModelFitness(
-		surface: "router_cheap" | "router_medium" | "router_expensive",
-		model: Model<Api>,
-	): { fit: true; probed: boolean } | { fit: false; reason: "unprobed" | "lane_failed" };
 	_resolveModelRouterTurnRoute(
 		this: RouterHarness,
 		prompt: string,
 	): { decision: RouteDecision; model: Model<Api> } | undefined;
-	isTierAutoSelected(this: RouterHarness, tier: AutoSelectionTier): boolean;
 };
+
+/**
+ * A router whose methods are the real controller's, over the state the test supplies: every private
+ * helper resolves through the prototype, so a refactor of the controller never strands the harness.
+ */
+function routerOver(state: RouterHarness): RouterHarness {
+	return Object.assign(Object.create(ModelRouterController.prototype) as object, state);
+}
 
 function controller(startModel: Model<Api>, subscription: boolean, exhausted = new ExhaustedProviderRegistry()) {
 	const warnings: string[] = [];
@@ -276,9 +259,8 @@ describe("provider limit red-team matrix", () => {
 	it("Quota on a routed cheap turn", () => {
 		const exhausted = new ExhaustedProviderRegistry();
 		exhausted.markExhausted("openai-codex/codex-spark");
-		const harness: RouterHarness = {
+		const harness = routerOver({
 			_resolveExecutorRoute: () => undefined,
-			isTierAutoSelected: (tier) => routerPrototype.isTierAutoSelected.call(harness, tier),
 			deps: {
 				getSettingsManager: () => ({
 					getModelRouterSettings: () => ({
@@ -293,7 +275,7 @@ describe("provider limit red-team matrix", () => {
 				isModelExhausted: (candidate) => exhausted.isExhausted(`${candidate.provider}/${candidate.id}`),
 				getFailoverStatus: () => ({ exhausted: exhausted.snapshot() }),
 			},
-		};
+		});
 		expect(routerPrototype._resolveModelRouterTurnRoute.call(harness, "Explain this code block")).toBeUndefined();
 		const skipReason = harness._lastModelRouterSkipReason;
 		expect(skipReason).toBe("cheap model exhausted: quota");
@@ -325,12 +307,8 @@ describe("provider limit red-team matrix", () => {
 		expect(compaction.support.resolveModel(codexDefault)).toBe(codexDefault);
 		expect(compaction.warnings).toContain("Compaction summarizer fallback:digest_unfit(1/3)");
 
-		const routerHarness: RouterHarness = {
+		const routerHarness = routerOver({
 			_resolveExecutorRoute: () => undefined,
-			isTierAutoSelected: (tier) => routerPrototype.isTierAutoSelected.call(routerHarness, tier),
-			_routerSurfaceForTier: (tier) => routerPrototype._routerSurfaceForTier.call(routerHarness, tier),
-			_evaluateModelFitness: (surface, candidate) =>
-				routerPrototype._evaluateModelFitness.call(routerHarness, surface, candidate),
 			deps: {
 				getSettingsManager: () => ({
 					getModelRouterSettings: () => ({
@@ -346,7 +324,7 @@ describe("provider limit red-team matrix", () => {
 				isModelExhausted: () => false,
 				getFailoverStatus: () => ({ exhausted: [] }),
 			},
-		};
+		});
 		const routed = routerPrototype._resolveModelRouterTurnRoute.call(routerHarness, "Find references to this symbol");
 		expect(routed?.model).toBe(codexSpark);
 	});

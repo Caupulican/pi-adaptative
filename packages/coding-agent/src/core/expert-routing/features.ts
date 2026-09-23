@@ -85,14 +85,10 @@ export class ExpertFeatureBuilder {
 			}
 
 			if (matchingReport) {
-				// Every branch selects the request's lane and nothing else; scoring happens once,
-				// below. A branch that scored inline would be overwritten here by the lane it left
-				// unselected — which is exactly how the judge lane used to be discarded.
+				// Every branch selects the request's lane and nothing else; scoring happens once, below.
 				let lane = matchingReport.worker ?? matchingReport.lanes?.worker;
 				if (request.work_class === "investigate" || request.work_class === "retrieve") {
 					lane = matchingReport.research ?? matchingReport.lanes?.research;
-				} else if ((request.work_class as string) === "judge" || request.worker_role === "judge") {
-					lane = matchingReport.judge ?? matchingReport.lanes?.judge;
 				} else if ((request.work_class as string) === "digest" || request.worker_role === "digest") {
 					lane = matchingReport.digest ?? matchingReport.lanes?.digest;
 				} else if (request.required_tools && request.required_tools.length > 0) {
@@ -100,8 +96,7 @@ export class ExpertFeatureBuilder {
 				}
 
 				if (lane && lane.total > 0) {
-					// The judge lane counts parsed verdicts; every other lane counts successes.
-					const successes = lane.parsed ?? lane.succeeded ?? lane.successes ?? 0;
+					const successes = lane.succeeded ?? lane.successes ?? 0;
 					roleProbeFitness = Math.max(0.0, Math.min(1.0, successes / lane.total));
 					adequacyClass = laneMeetsFitnessBar(successes, lane.total) ? "known_fit" : "known_unfit";
 				}

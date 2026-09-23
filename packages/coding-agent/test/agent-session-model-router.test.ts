@@ -52,7 +52,6 @@ type RouterTierThinkingSettings = {
 	mediumThinking?: ThinkingLevel;
 	expensiveThinking?: ThinkingLevel;
 	executorThinking?: ThinkingLevel;
-	judgeThinking?: ThinkingLevel;
 };
 
 type RoutedRunContext = {
@@ -136,16 +135,6 @@ function fitnessReport(overrides: Partial<ModelFitnessReport> = {}): ModelFitnes
 		search: { ...lane },
 		toolCall: { ...lane },
 		digest: { ...lane },
-		judge: {
-			parsed: 3,
-			planningElevated: 3,
-			planningTotal: 3,
-			trivialCheap: 3,
-			trivialTotal: 3,
-			total: 3,
-			outcomes: [],
-			meanMs: 0,
-		},
 		totalCostUsd: 0,
 		...overrides,
 	};
@@ -1314,16 +1303,6 @@ describe("executor lane fitness gate (session-level)", () => {
 			search: { ...lane },
 			toolCall: { ...lane, ...toolCall },
 			digest: { ...lane },
-			judge: {
-				parsed: 0,
-				planningElevated: 0,
-				planningTotal: 0,
-				trivialCheap: 0,
-				trivialTotal: 0,
-				total: 0,
-				outcomes: [],
-				meanMs: 0,
-			},
 			totalCostUsd: 0,
 		};
 	};

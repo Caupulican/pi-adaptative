@@ -157,7 +157,7 @@ Use `/settings` → **Model Router** to configure these fields globally or for t
 Fitness applicability is intentionally split by autonomy level:
 
 - Class A autonomous adoption requires proof on this host: executor direct uses `toolCall`, curation uses `digest`, and scout `"auto"` uses `research` + `toolCall`.
-- Class B routed turns are subtractive and opt-in via `modelRouter.fitnessGate`: cheap uses `research` + `toolCall`; medium/expensive use `worker` + `toolCall`; the routing judge uses parsed `judge` output. Unprobed tier models pass.
+- Class B routed turns are subtractive and opt-in via `modelRouter.fitnessGate`: cheap uses `research` + `toolCall`; medium/expensive use `worker` + `toolCall`. Unprobed tier models pass. Routing itself is judged by System One, not a fitness-gated lane.
 - Compaction summarizer auto-selection is always-on subtractive composition: when `compaction.model` is `auto`, a router cheap model with a probed failed `digest` lane falls back to the session model; unprobed cheap models still pass, and exhausted explicit/cheap summarizers fall back visibly.
 - Class C explicit user choices are sovereign: explicit `/model` and explicit `scout.model` patterns are not router-gated, except for the existing all-lanes-failed adoption backstop and runtime output checks.
 

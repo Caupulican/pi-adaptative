@@ -9,7 +9,6 @@ import {
 	REFLECTION_SYSTEM_PROMPT,
 	REFLEX_INTERPRETER_SYSTEM_PROMPT,
 	RESEARCH_LANE_SYSTEM_PROMPT,
-	ROUTE_JUDGE_SYSTEM_PROMPT,
 	SCOUT_SYSTEM_PROMPT,
 	SEARCH_PROBE_SYSTEM_PROMPT,
 	SKILL_VAULT_SYSTEM_RULE,
@@ -35,7 +34,6 @@ const PROMPT_LIMITS = [
 	["curation compaction digest", CURATION_COMPACTION_DIGEST_SYSTEM_PROMPT, 450],
 	["research", RESEARCH_LANE_SYSTEM_PROMPT, 500],
 	["reflex interpreter", REFLEX_INTERPRETER_SYSTEM_PROMPT, 350],
-	["route judge", ROUTE_JUDGE_SYSTEM_PROMPT, 650],
 	["search probe", SEARCH_PROBE_SYSTEM_PROMPT, 300],
 	["tool-call probe", TOOL_CALL_PROBE_SYSTEM_PROMPT, 300],
 	["capacity probe", CAPACITY_PROBE_SYSTEM_PROMPT, 220],
@@ -70,7 +68,6 @@ describe("recurring provider prompt budgets", () => {
 		expect(SCOUT_SYSTEM_PROMPT).toContain("<final_answer>");
 		expect(SCOUT_SYSTEM_PROMPT).toContain("do NOT");
 		expect(RESEARCH_LANE_SYSTEM_PROMPT).toContain('"findings"');
-		expect(ROUTE_JUDGE_SYSTEM_PROMPT).toContain('"approval-required"');
 		expect(REFLECTION_SYSTEM_PROMPT).toContain('"memory_replace"');
 		expect(REFLECTION_SYSTEM_PROMPT).toContain('"promote_skill"');
 		expect(UNTRUSTED_BOUNDARY_SYSTEM_RULE).toContain("<untrusted_content");

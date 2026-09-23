@@ -172,10 +172,17 @@ export async function resolveAntigravityProject(token: string, signal?: AbortSig
 	return projectId;
 }
 
+/**
+ * The shape of the model catalog this adapter stores. Raise it whenever discovery starts persisting a
+ * field the adapter reads (thinking budgets and backends are version 2): a stored catalog of an older
+ * version is refreshed instead of silently running models without what it lacks.
+ */
+export const ANTIGRAVITY_CATALOG_VERSION = 2;
+
 export async function discoverAntigravityAccount(
 	token: string,
 	signal?: AbortSignal,
-): Promise<{ projectId: string; modelCatalog: unknown }> {
+): Promise<{ projectId: string; modelCatalog: unknown; catalogVersion: number }> {
 	const projectId = await resolveAntigravityProject(token, signal);
 	const response = await antigravityRequest(token, "fetchAvailableModels", { project: projectId }, signal);
 	if (!Array.isArray(response.agentModelSorts) || response.agentModelSorts.length > 20)
@@ -214,5 +221,5 @@ export async function discoverAntigravityAccount(
 			},
 		]),
 	);
-	return { projectId, modelCatalog };
+	return { projectId, modelCatalog, catalogVersion: ANTIGRAVITY_CATALOG_VERSION };
 }

@@ -76,11 +76,11 @@ import { emergencyStopPath, isEmergencyStopEngaged } from "../provider-admission
 import { ProviderLimitStore } from "../provider-admission/limit-state.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
-import { TYPESAFE_PROVIDER } from "../review/typesafe-contract.ts";
 import { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../settings-manager.ts";
 import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
+import { systemOneAccessFromSession } from "../system-one/access.ts";
 import { executeToolkitScript } from "../toolkit/script-runner.ts";
 import { disposeShellSessionLanes } from "../tools/shell-lane-pool.ts";
 import { disposePersistentShellSession } from "../tools/shell-session.ts";
@@ -494,7 +494,11 @@ export class WorkerDelegationController {
 			abortLane: (laneId, reasonCode) => this.laneAbortControllers.get(laneId)?.abort(reasonCode),
 			cancelLane: (laneId, reasonCode) => {
 				this.scheduler.dropQueued(laneId);
-				this.writeReservations.release(laneId);
+				// A running lane keeps its write reservation until its run has actually stopped: the
+				// abort is asynchronous, and an in-flight edit or shell command can still write. The
+				// run's own `finally` releases it (fenced to that attempt), and a queued worker waiting on
+				// the same paths is woken by that release.
+				if (!this.scheduler.isRunning(laneId)) this.writeReservations.release(laneId);
 				const terminal = this.getWorkerLifecycle().cancel(laneId, reasonCode);
 				if (terminal) this.publishTerminalRecord(terminal);
 				if (terminal && !this.deps.isDisposed()) this.scheduler.drain();
@@ -3092,8 +3096,12 @@ export class WorkerDelegationController {
 					this.deps.getSessionId(),
 					this.deps.getSessionManager().getSessionLineageIds(),
 				),
-				getApiKey: () =>
-					this.deps.getModelRegistry().authStorage.getApiKey(TYPESAFE_PROVIDER, { includeFallback: false }),
+				// Workers review through the session's System One access: the same provider, key and
+				// pinned version as the root, switched with it.
+				access: systemOneAccessFromSession(
+					this.deps.getSettingsManager(),
+					this.deps.getModelRegistry().authStorage,
+				),
 			};
 		}
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === "artifact_retrieve")) {

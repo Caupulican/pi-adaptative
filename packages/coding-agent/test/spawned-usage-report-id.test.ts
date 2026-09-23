@@ -19,12 +19,13 @@ type RunIsolatedCompletionFn = (opts: IsolatedCompletionOptions) => Promise<Isol
 
 /**
  * `addSpawnedUsage` reportId is required at the type level on every one of these controllers'
- * local `Deps` interfaces, and the 5 previously-omitting call sites (model-router's executor-brain
- * warmup + route judge, background-lane's fitness probe, runtime-builder's toolkit-brain reflex,
- * context-pipeline's curation drain) now derive a STABLE id from the work unit's own identity —
- * never `Date.now`/random — so a retry of the same logical work unit reports the same id (the
- * session-level dedupe in `addSpawnedUsage`, covered by test/cost-aggregation.test.ts, then counts
- * it once) while genuinely different work gets a distinct id.
+ * local `Deps` interfaces, and the previously-omitting call sites (model-router's executor-brain
+ * warmup, background-lane's fitness probe, runtime-builder's toolkit-brain reflex, context-pipeline's
+ * curation drain) now derive a STABLE id from the work unit's own identity — never `Date.now`/random
+ * — so a retry of the same logical work unit reports the same id (the session-level dedupe in
+ * `addSpawnedUsage`, covered by test/cost-aggregation.test.ts, then counts it once) while genuinely
+ * different work gets a distinct id. (The retired LLM route-judge lane's own reportId/laneKind
+ * wiring, once exercised here, was removed with the lane — routing is now judged by System One.)
  *
  * (runtime-builder's toolkit-brain reflex is a closure defined inline inside `buildRuntime`, not a
  * separately callable method — exercising it would require constructing a full tool registry via
@@ -144,99 +145,6 @@ describe("model-router-controller: addSpawnedUsage reportId + laneKind", () => {
 		const ctx = executorContext();
 		await buildExecutorRefinedPrompt.call(ctx, [userMessage("restore the database")]);
 		expect(ctx.deps.runIsolatedCompletion.mock.calls[0][0]).toMatchObject({ laneKind: "executor" });
-	});
-
-	type JudgeContext = {
-		_resolveModelRouterTurnRoute: (prompt: string) => {
-			decision: { tier: string; risk: string; confidence: number; reasonCode: string; reasons: string[] };
-			model: Model<Api>;
-		};
-		deps: {
-			getSettingsManager: () => {
-				getModelRouterSettings: () => {
-					judgeEnabled: boolean;
-					judgeModel: string;
-					mediumModel?: string;
-					fitnessGate: boolean;
-				};
-			};
-			resolveLaneModel: () => Model<Api> | undefined;
-			getReflectionSignal: () => AbortSignal;
-			runIsolatedCompletion: ReturnType<typeof vi.fn<RunIsolatedCompletionFn>>;
-			addSpawnedUsage: ReturnType<typeof vi.fn<AddSpawnedUsageFn>>;
-			getSessionManager: () => { getSessionId: () => string };
-		};
-	};
-
-	function judgeContext(sessionId = "session-a"): JudgeContext {
-		return {
-			_resolveModelRouterTurnRoute: (prompt: string) => ({
-				decision: {
-					tier: "medium",
-					risk: "scoped-write",
-					confidence: 0.8,
-					reasonCode: "test_baseline",
-					reasons: [`baseline for ${prompt}`],
-				},
-				model,
-			}),
-			deps: {
-				getSettingsManager: () => ({
-					getModelRouterSettings: () => ({
-						judgeEnabled: true,
-						judgeModel: "anthropic/judge",
-						fitnessGate: false,
-					}),
-				}),
-				resolveLaneModel: () => testModel("anthropic", "judge"),
-				getReflectionSignal: () => new AbortController().signal,
-				runIsolatedCompletion: vi.fn<RunIsolatedCompletionFn>(async () => ({
-					text: "not parseable judge output",
-					usage: usageWithCost(0.01),
-					stopReason: "stop",
-				})),
-				addSpawnedUsage: vi.fn<AddSpawnedUsageFn>(() => "entry-id"),
-				getSessionManager: () => ({ getSessionId: () => sessionId }),
-			},
-		};
-	}
-
-	const resolveTurnRouteJudged = (
-		ModelRouterController.prototype as unknown as {
-			resolveTurnRouteJudged(
-				this: JudgeContext,
-				prompt: string,
-				options?: { skipJudge?: boolean },
-			): Promise<unknown>;
-		}
-	).resolveTurnRouteJudged;
-
-	it("route judge: same prompt yields the same reportId across a simulated retry", async () => {
-		const ctx = judgeContext();
-		await resolveTurnRouteJudged.call(ctx, "implement the retry queue");
-		await resolveTurnRouteJudged.call(ctx, "implement the retry queue");
-
-		expect(ctx.deps.addSpawnedUsage).toHaveBeenCalledTimes(2);
-		const firstOpts = ctx.deps.addSpawnedUsage.mock.calls[0][1];
-		const secondOpts = ctx.deps.addSpawnedUsage.mock.calls[1][1];
-		expect(firstOpts.reportId).toBeTruthy();
-		expect(firstOpts.reportId).toBe(secondOpts.reportId);
-	});
-
-	it("route judge: a genuinely different prompt yields a distinct reportId", async () => {
-		const ctx = judgeContext();
-		await resolveTurnRouteJudged.call(ctx, "implement the retry queue");
-		await resolveTurnRouteJudged.call(ctx, "delete the staging database");
-
-		const firstOpts = ctx.deps.addSpawnedUsage.mock.calls[0][1];
-		const secondOpts = ctx.deps.addSpawnedUsage.mock.calls[1][1];
-		expect(firstOpts.reportId).not.toBe(secondOpts.reportId);
-	});
-
-	it('route judge: runIsolatedCompletion carries laneKind "route-judge"', async () => {
-		const ctx = judgeContext();
-		await resolveTurnRouteJudged.call(ctx, "implement the retry queue");
-		expect(ctx.deps.runIsolatedCompletion.mock.calls[0][0]).toMatchObject({ laneKind: "route-judge" });
 	});
 });
 

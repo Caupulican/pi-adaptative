@@ -21,6 +21,7 @@ import type {
 	SettingsManager,
 	SettingsScope,
 } from "../../core/settings-manager.ts";
+import { describeSystemOneAccess } from "../../core/system-one/access.ts";
 import { ActionTranscriptComponent } from "./components/action-transcript.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
 import type { FooterComponent } from "./components/footer.ts";
@@ -157,6 +158,9 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 				modelCapability: host.settingsManager.getModelCapabilitySettings(),
 				modelCapabilityScope: projectSettings.modelCapability ? "project" : "global",
 				modelRouter: host.settingsManager.getModelRouterSettings(),
+				systemOneProvider: host.settingsManager.getSystemOneSettings().provider,
+				describeSystemOneAccess: (choice) =>
+					describeSystemOneAccess(choice, (provider) => host.session.modelRegistry.authStorage.hasAuth(provider)),
 				modelRouterScope: projectSettings.modelRouter ? "project" : "global",
 				modelRouterPool: buildModelRouterPoolView(host),
 				autoLearn: host.settingsManager.getAutoLearnSettings(),
@@ -341,6 +345,10 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 				onLearningPolicyChange: (settings, scope) => {
 					host.settingsManager.setLearningPolicySettings(settings, scope);
 					host.showStatus(`Learning policy saved to ${scope}.`);
+				},
+				onSystemOneProviderChange: (choice) => {
+					host.settingsManager.setSystemOneProvider(choice);
+					host.showStatus(`System One provider set to ${choice}; the next evaluation uses it.`);
 				},
 				onModelCapabilityChange: (settings, scope) => {
 					host.settingsManager.setModelCapabilitySettings(settings, scope);

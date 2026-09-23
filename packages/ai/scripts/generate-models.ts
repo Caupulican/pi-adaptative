@@ -224,6 +224,7 @@ const TYPESAFE_MODELS: Model<"openai-completions">[] = [
 		name: "Jev 1.13",
 		api: "openai-completions",
 		provider: "typesafe",
+		kind: "judge",
 		baseUrl: TYPESAFE_BASE_URL,
 		reasoning: false,
 		input: ["text"],
@@ -241,6 +242,7 @@ const TYPESAFE_MODELS: Model<"openai-completions">[] = [
 		name: "Jev Latest",
 		api: "openai-completions",
 		provider: "typesafe",
+		kind: "judge",
 		baseUrl: TYPESAFE_BASE_URL,
 		reasoning: false,
 		input: ["text"],
@@ -258,6 +260,7 @@ const TYPESAFE_MODELS: Model<"openai-completions">[] = [
 		name: "Jev Preview",
 		api: "openai-completions",
 		provider: "typesafe",
+		kind: "judge",
 		baseUrl: TYPESAFE_BASE_URL,
 		reasoning: false,
 		input: ["text"],
@@ -2344,6 +2347,7 @@ async function generateModels() {
 		allModels.push({
 			id: "typesafe/jev-1.13",
 			name: "TypeSafe: Jev 1.13",
+			kind: "judge",
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
@@ -2364,6 +2368,7 @@ async function generateModels() {
 		allModels.push({
 			id: "typesafe/jev-latest",
 			name: "TypeSafe: Jev Latest",
+			kind: "judge",
 			api: "openai-completions",
 			provider: "openrouter",
 			baseUrl: "https://openrouter.ai/api/v1",
@@ -2389,6 +2394,12 @@ async function generateModels() {
 				name: "Mistral Large 2512",
 			});
 		}
+	}
+
+	// Gateways list TypeSafe's System One engines beside chat models (OpenRouter also as a `~` alias);
+	// they answer typed questions and are never allocated to a conversation.
+	for (const model of allModels) {
+		if (/^~?typesafe\//.test(model.id)) model.kind = "judge";
 	}
 
 	const VERTEX_BASE_URL = "https://{location}-aiplatform.googleapis.com";
@@ -2632,6 +2643,9 @@ export const MODELS = {
 			if (model.compat) {
 				output += `			compat: ${JSON.stringify(model.compat)},
 `;
+			}
+			if (model.kind) {
+				output += `\t\t\tkind: "${model.kind}",\n`;
 			}
 			output += `\t\t\treasoning: ${model.reasoning},\n`;
 			if (model.defaultThinkingLevel) {

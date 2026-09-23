@@ -11,7 +11,7 @@ import { initTheme } from "../src/modes/interactive/theme/theme.ts";
  * Reproduces the reported bug at the boundary where /models suggest (and the manual /fitness
  * picker) consume a probe result and decide whether to offer role adoption: a model that scored
  * 0/3 on every surface must be refused, not walked into the role selector where a reflexive
- * Enter-press lands it as judge model / router settings. `runFitnessAndAssign` is the single site
+ * Enter-press lands it as a router role. `runFitnessAndAssign` is the single site
  * both flows funnel through (see interactive-mode.ts), so it is exercised directly here the same
  * way fitness-role-assignment.test.ts drives `assignFitnessRole` — via the class prototype, with a
  * minimal stand-in `this` instead of a full InteractiveMode (which needs a live TUI/session).
@@ -37,12 +37,10 @@ type RouterProbeSettings = {
 	expensiveModel?: string;
 	learningModel?: string;
 	executorModel?: string;
-	judgeModel?: string;
 	cheapThinking?: ThinkingLevel;
 	mediumThinking?: ThinkingLevel;
 	expensiveThinking?: ThinkingLevel;
 	executorThinking?: ThinkingLevel;
-	judgeThinking?: ThinkingLevel;
 };
 
 const runFitnessAndAssign = Reflect.get(InteractiveMode.prototype, "runFitnessAndAssign") as (

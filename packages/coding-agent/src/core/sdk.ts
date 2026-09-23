@@ -74,6 +74,7 @@ import { SettingsManager } from "./settings-manager.ts";
 import { SteeringCertificateStore } from "./steering/certificate-store.ts";
 import { DEFAULT_STEERING_POLICY } from "./steering/policy.ts";
 import { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
+import { type SystemOneProviderChoice, systemOneAccessFromSession } from "./system-one/access.ts";
 import { SystemOneJevAdapter } from "./system-one/adapter.ts";
 import { projectCanonicalTruth } from "./system-one/canonical-truth.ts";
 import { createSystemOneConfig } from "./system-one/config.ts";
@@ -188,10 +189,8 @@ export interface CreateAgentSessionOptions {
 	disableSystemOne?: boolean;
 	/** Optional flag to explicitly enable or disable System One semantic control plane. Takes precedence over settings. */
 	systemOneEnabled?: boolean;
-	/** Optional provider for System One ("typesafe" or "openrouter"). Takes precedence over settings. */
-	systemOneProvider?: "typesafe" | "openrouter";
-	/** Optional model for System One. Takes precedence over settings. */
-	systemOneModel?: string;
+	/** Optional provider for System One. Takes precedence over settings. The engine version is pinned (Jev 1.13). */
+	systemOneProvider?: SystemOneProviderChoice;
 	/** Optional integrity extensions to register with the integrity hook coordinator. */
 	integrityExtensions?: IntegrityExtension[];
 	/** Optional pre-configured integrity hook coordinator. */
@@ -629,48 +628,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		(options.integrityExtensions ? new IntegrityHookCoordinator(options.integrityExtensions) : undefined);
 
 	if (!systemOneController && systemOneEnabled) {
-		const typesafeKey = (await authStorage.getApiKey("typesafe")) ?? process.env.TYPESAFE_API_KEY;
-		const openrouterKey = (await authStorage.getApiKey("openrouter")) ?? process.env.OPENROUTER_API_KEY;
-
-		// Resolve provider: explicit option > settings > autodetect based on available keys
-		const provider: "typesafe" | "openrouter" =
-			options.systemOneProvider ??
-			(systemOneSettings.provider === "openrouter" || (!typesafeKey && Boolean(openrouterKey))
-				? "openrouter"
-				: "typesafe");
-
-		const chosenKey = provider === "openrouter" ? openrouterKey : typesafeKey;
-
-		if (chosenKey) {
-			const model =
-				options.systemOneModel ??
-				systemOneSettings.model ??
-				(provider === "openrouter" ? "typesafe/jev-1.13" : "jev-1.13.0");
-
-			const reviewer = new TypeSafeReviewer({
-				provider,
-				model,
-				getApiKey: async () =>
-					(await authStorage.getApiKey(provider)) ??
-					(provider === "openrouter" ? process.env.OPENROUTER_API_KEY : process.env.TYPESAFE_API_KEY),
-			});
-
-			const config = createSystemOneConfig({
-				enabled: true,
-				provider,
-				productionModel: model,
-			});
-
-			const adapter = new SystemOneJevAdapter(reviewer, config, {
-				getApiKey: async () =>
-					(await authStorage.getApiKey(provider)) ??
-					(provider === "openrouter" ? process.env.OPENROUTER_API_KEY : process.env.TYPESAFE_API_KEY),
-				getUserKeys: async () => {
-					const k =
-						(await authStorage.getApiKey(provider)) ??
-						(provider === "openrouter" ? process.env.OPENROUTER_API_KEY : process.env.TYPESAFE_API_KEY);
-					return k ? [k] : [];
-				},
+		const access = systemOneAccessFromSession(settingsManager, authStorage, options.systemOneProvider);
+		// A session without any System One key starts without System One, as before; with one, every
+		// evaluation resolves provider, model and key anew, so a provider switch needs no restart.
+		if ((await access.resolve()).kind === "ready") {
+			const reviewer = new TypeSafeReviewer({ access });
+			const adapter = new SystemOneJevAdapter(reviewer, createSystemOneConfig({ enabled: true }), {
+				access,
+				getUserKeys: () => access.keys(),
 			});
 
 			let baselineRevision = "unknown";
@@ -701,7 +666,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			systemOneController = new SystemOneController({
 				store,
 				adapter,
-				userKeys: [chosenKey],
+				userKeys: await access.keys(),
 				hookCoordinator,
 			});
 		}

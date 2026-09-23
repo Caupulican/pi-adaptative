@@ -95,14 +95,6 @@ export const REFLEX_INTERPRETER_SYSTEM_PROMPT = [
 	'No fit: {"script":"none","args":[],"danger":false,"confidence":0}',
 ].join("\n");
 
-export const ROUTE_JUDGE_SYSTEM_PROMPT = [
-	"Coding-agent route judge; only route, never answer task.",
-	"cheap: trivial mechanical read-only lookup only. medium: normal implementation, scoped edits/tests, non-trivial planning/design. expensive: architecture, ambiguity, security/authentication, destructive/release/high-impact work.",
-	"Planning/design/strategy is NEVER cheap unless genuinely trivial.",
-	"STRICT JSON only:",
-	'{"tier":"cheap"|"medium"|"expensive","risk":"read-only"|"scoped-write"|"high-impact"|"approval-required","trivial":true|false,"reason":"<short reason>"}',
-].join("\n");
-
 export const SEARCH_PROBE_SYSTEM_PROMPT = [
 	"Plan code search; never answer question. STRICT JSON only:",
 	'{"queries":[{"pattern":"<regex or literal to grep>","glob":"<file glob like **/*.ts>"}]}',

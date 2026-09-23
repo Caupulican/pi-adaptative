@@ -200,12 +200,12 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 					provider: "anthropic",
 					contextWindow: 200000,
 					maxTokens: 8192,
-					inputPrice: 3,
-					outputPrice: 15,
+					input: ["text"],
+					cost: { input: 3, output: 15, cacheRead: 0, cacheWrite: 0 },
 					// The base profile pins `medium`; a model that cannot reason supports only `off`,
 					// and the task-profile writer rightly refuses such a profile.
 					reasoning: true,
-				} as any,
+				},
 			],
 		} as any);
 

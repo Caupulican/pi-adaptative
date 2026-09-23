@@ -127,7 +127,6 @@ describe.skipIf(!runnable)("local model size-class bench", () => {
 				if (candidate.sizeClass === "medium-local") {
 					expect(report.research.succeeded).toBeGreaterThanOrEqual(2);
 					expect(report.worker.succeeded).toBeGreaterThanOrEqual(2);
-					expect(report.judge.parsed).toBeGreaterThanOrEqual(4);
 				}
 			},
 			30 * 60_000,

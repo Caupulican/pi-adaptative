@@ -1,4 +1,9 @@
-import { ANTIGRAVITY_PROVIDER, discoverAntigravityAccount, parseAntigravityModels } from "../antigravity.ts";
+import {
+	ANTIGRAVITY_CATALOG_VERSION,
+	ANTIGRAVITY_PROVIDER,
+	discoverAntigravityAccount,
+	parseAntigravityModels,
+} from "../antigravity.ts";
 import { awaitAuthorizationInput, parseAuthorizationInput } from "./authorization-input.ts";
 import { generatePKCE } from "./pkce.ts";
 import { OAuthRefreshCompletedError } from "./refresh-completed-error.ts";
@@ -88,6 +93,9 @@ export const antigravityOAuthProvider: OAuthProviderInterface = {
 	},
 	getApiKey(credentials) {
 		return credentials.access;
+	},
+	needsRefresh(credentials) {
+		return credentials.catalogVersion !== ANTIGRAVITY_CATALOG_VERSION;
 	},
 	modifyModels(models, credentials) {
 		const discovered = parseAntigravityModels(credentials.modelCatalog ?? {});

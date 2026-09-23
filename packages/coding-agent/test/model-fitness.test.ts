@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { WORKER_LANE_SYSTEM_PROMPT } from "../src/core/delegation/worker-runner.ts";
-import { ROUTE_JUDGE_SYSTEM_PROMPT } from "../src/core/model-router/route-judge.ts";
 import {
-	DEFAULT_JUDGE_FITNESS_PROMPTS,
 	DIGEST_PROBE_SYSTEM_PROMPT,
 	formatModelFitnessReport,
 	isProbeAllFailed,
@@ -18,7 +16,6 @@ import { completedWorkerOutput } from "./worker-output-fixture.ts";
 function scriptedComplete(behavior: {
 	research?: string;
 	worker?: string;
-	judge?: (userPrompt: string) => string;
 	search?: string;
 	toolCall?: string;
 	digest?: (userPrompt: string) => string;
@@ -27,7 +24,6 @@ function scriptedComplete(behavior: {
 		let text = "not json";
 		if (systemPrompt === RESEARCH_LANE_SYSTEM_PROMPT) text = behavior.research ?? "not json";
 		else if (systemPrompt === WORKER_LANE_SYSTEM_PROMPT) text = behavior.worker ?? "";
-		else if (systemPrompt === ROUTE_JUDGE_SYSTEM_PROMPT) text = behavior.judge?.(userPrompt) ?? "not json";
 		else if (systemPrompt === SEARCH_PROBE_SYSTEM_PROMPT) text = behavior.search ?? "not json";
 		else if (systemPrompt === TOOL_CALL_PROBE_SYSTEM_PROMPT) text = behavior.toolCall ?? "not json";
 		else if (systemPrompt === DIGEST_PROBE_SYSTEM_PROMPT) text = behavior.digest?.(userPrompt) ?? "not json";
@@ -44,17 +40,13 @@ function faithfulDigest(chunk: string): string {
 }
 
 describe("runModelFitnessProbe", () => {
-	it("scores a fully-capable model across all six surfaces", async () => {
+	it("scores a fully-capable model across all five surfaces", async () => {
 		const report = await runModelFitnessProbe({
 			trials: 2,
 			now: () => 0,
 			complete: scriptedComplete({
 				research: '{"findings":[{"summary":"finding","confidence":0.8}]}',
 				worker: completedWorkerOutput("done"),
-				judge: (prompt) =>
-					/plan|design|roadmap/i.test(prompt)
-						? '{"tier":"medium","risk":"read-only","trivial":false,"reason":"planning"}'
-						: '{"tier":"cheap","risk":"read-only","trivial":true,"reason":"trivial"}',
 				search: '{"queries":[{"pattern":"retry","glob":"**/*.ts"}]}',
 				toolCall: '{"tool":"grep","arguments":{"pattern":"resolveCliModel","path":"src/"}}',
 				digest: faithfulDigest,
@@ -67,22 +59,7 @@ describe("runModelFitnessProbe", () => {
 		expect(report.toolCall.succeeded).toBe(3);
 		expect(report.digest.succeeded).toBe(report.digest.total);
 		expect(report.digest.total).toBeGreaterThan(0);
-		expect(report.judge.parsed).toBe(DEFAULT_JUDGE_FITNESS_PROMPTS.length);
-		expect(report.judge.planningElevated).toBe(3);
-		expect(report.judge.trivialCheap).toBe(3);
 		expect(report.totalCostUsd).toBeGreaterThan(0);
-	});
-
-	it("scores an all-medium judge as safe but non-discriminating", async () => {
-		const report = await runModelFitnessProbe({
-			trials: 1,
-			now: () => 0,
-			complete: scriptedComplete({
-				judge: () => '{"tier":"medium","risk":"read-only","trivial":false,"reason":"always medium"}',
-			}),
-		});
-		expect(report.judge.planningElevated).toBe(3);
-		expect(report.judge.trivialCheap).toBe(0);
 	});
 
 	it("records unparseable output honestly on every surface", async () => {
@@ -91,7 +68,6 @@ describe("runModelFitnessProbe", () => {
 		expect(report.worker.succeeded).toBe(0);
 		expect(report.search.succeeded).toBe(0);
 		expect(report.toolCall.succeeded).toBe(0);
-		expect(report.judge.parsed).toBe(0);
 		expect(report.search.outcomes).toEqual(["unparseable_output", "unparseable_output", "unparseable_output"]);
 	});
 
@@ -117,7 +93,6 @@ describe("runModelFitnessProbe", () => {
 		let digestCall = 0;
 		const report = await runModelFitnessProbe({
 			trials: 1,
-			judgePrompts: [],
 			complete: async ({ systemPrompt }) => {
 				const text = systemPrompt === DIGEST_PROBE_SYSTEM_PROMPT ? (replies[digestCall++] ?? "{}") : "{}";
 				return { text, costUsd: 0, stopReason: "stop" };
@@ -126,17 +101,6 @@ describe("runModelFitnessProbe", () => {
 		expect(report.digest.total).toBe(3);
 		expect(report.digest.succeeded).toBe(1);
 		expect(report.digest.outcomes).toEqual(["ok", "unparseable_output", "unparseable_output"]);
-	});
-
-	it("handles an empty judge prompt set without NaN", async () => {
-		const report = await runModelFitnessProbe({
-			trials: 1,
-			now: () => 0,
-			judgePrompts: [],
-			complete: scriptedComplete({}),
-		});
-		expect(report.judge.meanMs).toBe(0);
-		expect(Number.isNaN(report.judge.meanMs)).toBe(false);
 	});
 
 	it("bounds the search/toolCall surfaces with the wall clock (hung model cannot hang the probe)", async () => {
@@ -161,14 +125,12 @@ describe("runModelFitnessProbe", () => {
 		const text = formatModelFitnessReport("test/model", report);
 		expect(text).toContain("Model fitness: test/model");
 		expect(text).toContain("search plans:  3/3");
-		expect(text).toContain("route judge:");
 	});
 
 	it("measures served context capacity by halving until both start and end needles fit", async () => {
 		const servedWindow = 4_096;
 		const report = await runModelFitnessProbe({
 			trials: 1,
-			judgePrompts: [],
 			capacityProbe: { registeredContextWindow: 16_384 },
 			complete: async ({ systemPrompt, userPrompt }) => {
 				if (!systemPrompt.includes("context-window capacity probe")) {
@@ -196,7 +158,6 @@ describe("runModelFitnessProbe", () => {
 		const servedWindow = 4_096;
 		const report = await runModelFitnessProbe({
 			trials: 1,
-			judgePrompts: [],
 			capacityProbe: { registeredContextWindow: 16_384 },
 			complete: async ({ userPrompt }) => {
 				const servedTail = userPrompt.slice(-servedWindow * 4);
@@ -227,10 +188,6 @@ describe("isProbeAllFailed", () => {
 			complete: scriptedComplete({
 				research: '{"findings":[{"summary":"finding","confidence":0.8}]}',
 				worker: completedWorkerOutput("done"),
-				judge: (prompt) =>
-					/plan|design|roadmap/i.test(prompt)
-						? '{"tier":"medium","risk":"read-only","trivial":false,"reason":"planning"}'
-						: '{"tier":"cheap","risk":"read-only","trivial":true,"reason":"trivial"}',
 				search: '{"queries":[{"pattern":"retry","glob":"**/*.ts"}]}',
 				toolCall: '{"tool":"grep","arguments":{"pattern":"resolveCliModel","path":"src/"}}',
 				digest: faithfulDigest,
@@ -242,7 +199,6 @@ describe("isProbeAllFailed", () => {
 	it("does not flag a partial pass (e.g. only the digest surface succeeds)", async () => {
 		const report = await runModelFitnessProbe({
 			trials: 1,
-			judgePrompts: [],
 			complete: async ({ systemPrompt }) => {
 				// Echoes the FIRST digest task's nonce verbatim; that task's reply parses and is
 				// faithful, the other two digest tasks (different nonces) do not match -> partial pass.
@@ -263,44 +219,6 @@ describe("isProbeAllFailed", () => {
 			trials: 0,
 			research: { ...emptyLane },
 			worker: { ...emptyLane },
-			judge: {
-				parsed: 0,
-				planningElevated: 0,
-				planningTotal: 0,
-				trivialCheap: 0,
-				trivialTotal: 0,
-				total: 0,
-				outcomes: [],
-				meanMs: 0,
-			},
-			search: { ...emptyLane },
-			toolCall: { ...emptyLane },
-			digest: { ...emptyLane },
-			totalCostUsd: 0,
-		};
-		expect(isProbeAllFailed(report)).toBe(false);
-	});
-
-	it("does not flag all-failed when only the judge ran and failed (no lane surface graded at all)", () => {
-		// The vacuous-truth trap: every lane is ungraded (total: 0), so `gradedLanes.every(...)` is
-		// trivially true over an empty array. Without an explicit `gradedLanes.length > 0` guard this
-		// would wrongly read as "all lanes failed" on the judge's failure alone, with zero lane
-		// evidence behind it.
-		const emptyLane = { succeeded: 0, total: 0, outcomes: [], meanMs: 0 };
-		const report: ModelFitnessReport = {
-			trials: 0,
-			research: { ...emptyLane },
-			worker: { ...emptyLane },
-			judge: {
-				parsed: 0,
-				planningElevated: 0,
-				planningTotal: 3,
-				trivialCheap: 0,
-				trivialTotal: 3,
-				total: 6,
-				outcomes: [],
-				meanMs: 0,
-			},
 			search: { ...emptyLane },
 			toolCall: { ...emptyLane },
 			digest: { ...emptyLane },

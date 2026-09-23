@@ -736,6 +736,11 @@ export interface Model<TApi extends Api> {
 	 * details that the upstream reads differently follow it.
 	 */
 	upstream?: "google" | "anthropic" | "openai";
+	/**
+	 * What the model is for. Absent is a conversational model; `judge` is a System One engine that
+	 * answers typed questions (TypeSafe's Jev) and is never allocated to a conversation.
+	 */
+	kind?: "judge";
 }
 
 export interface ImagesModel<TApi extends ImagesApi>

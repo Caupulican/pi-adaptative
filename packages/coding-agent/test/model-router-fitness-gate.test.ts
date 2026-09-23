@@ -15,16 +15,6 @@ function report(overrides: Partial<ModelFitnessReport> = {}): ModelFitnessReport
 		trials: 3,
 		research: lane(),
 		worker: lane(),
-		judge: {
-			parsed: 3,
-			planningElevated: 3,
-			planningTotal: 3,
-			trivialCheap: 3,
-			trivialTotal: 3,
-			total: 3,
-			outcomes: [],
-			meanMs: 1,
-		},
 		search: lane(),
 		toolCall: lane(),
 		digest: lane(),
@@ -43,13 +33,7 @@ describe("model router fitness gate doctrine", () => {
 	});
 
 	it("splits unprobed models by Class A proof-required vs Class B subtractive surfaces", () => {
-		const classB: FitnessGatedSurface[] = [
-			"compaction",
-			"router_cheap",
-			"router_medium",
-			"router_expensive",
-			"router_judge",
-		];
+		const classB: FitnessGatedSurface[] = ["compaction", "router_cheap", "router_medium", "router_expensive"];
 		for (const surface of classB) {
 			expect(evaluateSurfaceFitness(surface, undefined)).toEqual({ fit: true, probed: false });
 		}
@@ -90,9 +74,6 @@ describe("model router fitness gate doctrine", () => {
 			fit: false,
 			lane: "worker",
 		});
-		expect(
-			evaluateSurfaceFitness("router_judge", report({ judge: { ...report().judge, parsed: 1, total: 3 } })),
-		).toMatchObject({ fit: false, lane: "judge", succeeded: 1, total: 3 });
 		expect(evaluateSurfaceFitness("executor", report({ toolCall: lane(1, 3) }))).toMatchObject({
 			fit: false,
 			lane: "toolCall",

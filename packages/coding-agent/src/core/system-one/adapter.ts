@@ -1,4 +1,5 @@
 import { TypeSafeEvidenceError } from "../review/typesafe-contract.ts";
+import type { SystemOneAccessResolver } from "./access.ts";
 import { SYSTEM_ONE_PINNED_MODEL } from "./catalog.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import { containsCredential } from "./projector.ts";
@@ -87,6 +88,9 @@ export function classifyJevFailure(error: unknown, aborted: boolean): JevFailure
 
 export interface SystemOneJevAdapterDeps {
 	sleep?: (ms: number) => Promise<void>;
+	/** The session's System One access, resolved per evaluation: provider, pinned model and key. */
+	access?: SystemOneAccessResolver;
+	/** A fixed connection's key, when no access resolver is given. */
 	getApiKey?: () => Promise<string | undefined> | string | undefined;
 	getUserKeys?: () => Promise<readonly string[]> | readonly string[];
 	driver?: SystemOneProviderDriver;
@@ -123,17 +127,28 @@ export class SystemOneJevAdapter implements JevAdapter {
 	}
 
 	async evaluate(input: JevEvaluationRequest, options?: JevAdapterEvaluateOptions): Promise<JevEvaluationResponse> {
-		const targetModel = input.model ?? this.pinnedModel;
 		const started = Date.now();
 		const impact = options?.impact ?? "read_only";
 
 		// 1. Mandatory user credential requirement: always require non-empty user API key (no bypass, no fallback)
-		const getApiKey = this.deps.getApiKey ?? (() => this.driver.getApiKey());
-		const userKey = (await getApiKey())?.trim();
+		let driver = this.driver;
+		let targetModel = input.model ?? this.pinnedModel;
+		let userKey: string | undefined;
+		let credentialHint = driver.formatSetupHelp();
+		if (this.deps.access) {
+			const outcome = await this.deps.access.resolve();
+			if (outcome.kind === "ready") {
+				({ driver } = outcome.access);
+				userKey = outcome.access.apiKey;
+				// The access decides the version; the caller's id is only accepted when it names the same one.
+				if (input.model !== undefined && !driver.matchesModel(outcome.access.model, input.model))
+					throw new Error(`System One runs ${outcome.access.model}; ${input.model} was requested`);
+				targetModel = outcome.access.model;
+			} else credentialHint = outcome.setup;
+		} else userKey = (await this.deps.getApiKey?.())?.trim();
 		if (!userKey) {
-			const credentialHint = this.driver.formatSetupHelp();
 			throw new Error(
-				`${this.driver.displayName} System One requires an API key configured by the user (${credentialHint}). No fallback or default credential is permitted.`,
+				`${driver.displayName} System One requires an API key configured by the user (${credentialHint}). No fallback or default credential is permitted.`,
 			);
 		}
 
@@ -195,7 +210,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 				const latency_ms = result.elapsedMs ?? Date.now() - started;
 
 				// R-007: Log the concrete model version returned and reject unexpected model drift
-				const modelsMatch = this.driver.matchesModel(targetModel, returnedModel);
+				const modelsMatch = driver.matchesModel(targetModel, returnedModel);
 				if (this.config.model.pin_required && !modelsMatch) {
 					throw new Error(
 						`Model drift detected: requested pinned model '${targetModel}', but Jev endpoint returned '${returnedModel}' (R-007)`,

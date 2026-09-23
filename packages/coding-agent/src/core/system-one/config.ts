@@ -3,6 +3,8 @@
  * Normative reference: jev_harness_reference_config.yaml
  */
 
+import { OpenRouterSystemOneDriver, TypeSafeSystemOneDriver } from "./provider-driver.ts";
+
 export interface SystemOneStateBudget {
 	readonly target_tokens: number;
 	readonly soft_limit_tokens: number;
@@ -87,7 +89,6 @@ export interface SystemOneConfig {
 	readonly provider: "typesafe" | "openrouter";
 	readonly model: {
 		readonly production: string;
-		readonly preview: string;
 		readonly pin_required: boolean;
 	};
 	readonly language: string;
@@ -103,8 +104,7 @@ export const DEFAULT_SYSTEM_ONE_CONFIG: SystemOneConfig = Object.freeze({
 	enabled: true,
 	provider: "typesafe",
 	model: Object.freeze({
-		production: "jev-1.13.0",
-		preview: "jev-preview",
+		production: new TypeSafeSystemOneDriver().model,
 		pin_required: true,
 	}),
 	language: "en",
@@ -185,8 +185,7 @@ export const OPENROUTER_SYSTEM_ONE_CONFIG: SystemOneConfig = Object.freeze({
 	...DEFAULT_SYSTEM_ONE_CONFIG,
 	provider: "openrouter",
 	model: Object.freeze({
-		production: "typesafe/jev-1.13",
-		preview: "typesafe/jev-latest",
+		production: new OpenRouterSystemOneDriver().model,
 		pin_required: true,
 	}),
 });
@@ -195,7 +194,6 @@ export function createSystemOneConfig(options?: {
 	enabled?: boolean;
 	provider?: "typesafe" | "openrouter";
 	productionModel?: string;
-	previewModel?: string;
 	pinRequired?: boolean;
 }): SystemOneConfig {
 	const provider = options?.provider ?? "typesafe";
@@ -206,7 +204,6 @@ export function createSystemOneConfig(options?: {
 		provider,
 		model: Object.freeze({
 			production: options?.productionModel ?? base.model.production,
-			preview: options?.previewModel ?? base.model.preview,
 			pin_required: options?.pinRequired ?? base.model.pin_required,
 		}),
 	});

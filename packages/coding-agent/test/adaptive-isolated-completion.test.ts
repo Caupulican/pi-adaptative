@@ -247,8 +247,8 @@ describe("runIsolatedCompletion isolation invariants", () => {
 /**
  * `AgentSession.runIsolatedCompletion` forwards to `ReflectionController.runIsolatedCompletion`
  * (the SINGLE choke point every isolated completion in the codebase runs through — reflection,
- * research/worker/fitness lanes, context-pipeline curation, model-router judge calls), which must
- * register itself in the reload-gate quiesce registry (reload-blockers.ts) for the run's full
+ * research/worker/fitness lanes, context-pipeline curation, model-router executor-brain warmup),
+ * which must register itself in the reload-gate quiesce registry (reload-blockers.ts) for the run's full
  * duration so `/reload`/profile-switch/live extension load-unload-reconcile wait it out.
  */
 describe("runIsolatedCompletion — reload-gate quiesce registration", () => {

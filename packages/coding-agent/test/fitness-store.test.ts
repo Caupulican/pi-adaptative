@@ -15,16 +15,6 @@ function report(overrides: Partial<ModelFitnessReport> = {}): ModelFitnessReport
 		search: { ...lane },
 		toolCall: { ...lane },
 		digest: { ...lane },
-		judge: {
-			parsed: 6,
-			planningElevated: 3,
-			planningTotal: 3,
-			trivialCheap: 2,
-			trivialTotal: 3,
-			total: 6,
-			outcomes: [],
-			meanMs: 100,
-		},
 		totalCostUsd: 0,
 		...overrides,
 	};

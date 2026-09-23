@@ -167,7 +167,7 @@ describe("TypeSafe review boundary", () => {
 		);
 		expect((await reviewer.evaluate(data)).response.answers).toEqual({ entry: answer });
 		const options = fetcher.mock.calls[0] as unknown as [string, RequestInit];
-		expect(JSON.parse(String(options[1].body))).toEqual({ model: "jev-latest", ...data });
+		expect(JSON.parse(String(options[1].body))).toEqual({ model: "jev-1.13.0", ...data });
 	});
 	it("does not widen state to null when supporting nullable question entries", async () => {
 		const fetcher = vi.fn();
@@ -467,7 +467,7 @@ describe("TypeSafe review boundary", () => {
 		expect(url).toBe("https://api.typesafe.ai/v1/systemone");
 		expect(options.redirect).toBe("error");
 		expect(JSON.parse(String(options.body))).toEqual({
-			model: "jev-latest",
+			model: "jev-1.13.0",
 			state: input.state,
 			questions: {
 				claim: {
@@ -553,7 +553,7 @@ describe("TypeSafe review boundary", () => {
 		const [url, options] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
 		expect(url).toBe("https://openrouter.ai/api/alpha/decisions");
 		expect(JSON.parse(String(options.body))).toMatchObject({
-			model: "typesafe/jev-latest",
+			model: "typesafe/jev-1.13",
 			state: input.state,
 		});
 	});

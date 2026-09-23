@@ -1,6 +1,6 @@
 /**
  * Model-router turn routing: the session's per-turn model-selection subsystem — the regex/executor
- * route resolver, the optional bounded routing judge, the executor lane (Level-0 toolkit direct hit
+ * route resolver, the optional System One routing judge, the executor lane (Level-0 toolkit direct hit
  * + speculative brain-refined retry), the per-tier thinking/tool-surface swap around a routed turn,
  * the cheap-research-turn session buffer with mutating-tool escalation to an expensive retry, and
  * the router status/diagnostics report.
@@ -10,7 +10,7 @@
  * retry-in-flight flags — and the sticky last-decision/last-skip-reason/last-intent used by the
  * status report. Everything else it needs — the live agent + its state, the current model, the
  * session/settings managers, the model registry, the agent dir, the session-disposal abort signal for
- * isolated judge completions, the base system prompt, the isolated-completion primitive, spawned-usage
+ * the routing judge and isolated completions, the base system prompt, the isolated-completion primitive, spawned-usage
  * accounting, the event/telemetry
  * emitters, and the recently-extracted BackgroundLaneController (resolveLaneModel) / ContextPipeline
  * (resolveCurationModelIfFit) collaborators — is reached through narrow deps accessors rather than the
@@ -53,6 +53,7 @@ import {
 	CATEGORY_TIER,
 	type CategoryOutcome,
 	chooseRouteCategory,
+	classifySupersededModels,
 	type RouteChoiceJudge,
 } from "./expert-routing/system-one-choice.ts";
 import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "./model-capability.ts";
@@ -252,6 +253,8 @@ export class ModelRouterController {
 	private _isModelRouterRetry = false;
 	private _lastModelRouterDecision?: ModelRouterDecisionStatus;
 	private _lastModelRouterSkipReason?: string;
+	/** Pins already checked this session for a later version among the owner's models (asked once each). */
+	private readonly _pinVersionChecked = new Set<string>();
 	/** Why the last expert selection failed, if it did. Not a skip: the baseline route still ran. */
 	private _lastExpertSelectionFailure?: string;
 	/** Per-invocation sequence so two judge calls on identical text are two ledger entries. */
@@ -946,7 +949,10 @@ export class ModelRouterController {
 		// The owner's pin for that tier runs it, in any selection mode, when it can: authenticated,
 		// allowed by the owner's model policy, not exhausted, and able to take this turn's facts.
 		const pinned = this._usablePin(tier, facts);
-		if (pinned.model) return route(pinned.model, category ? "system_one" : "manual", `owner pin for ${tier}`);
+		if (pinned.model) {
+			this._noticeSupersededPin(tier, pinned.model, signal);
+			return route(pinned.model, category ? "system_one" : "manual", `owner pin for ${tier}`);
+		}
 		const pinNote = pinned.reason ? [`${tier} pin not used: ${pinned.reason}`] : [];
 
 		if (this.deps.expertSelector && this.isTierAutoSelected(tier)) {
@@ -980,6 +986,37 @@ export class ModelRouterController {
 		}
 		baseline.decision.reasons = [...baseline.decision.reasons, ...judgedReasons, ...pinNote];
 		return baseline;
+	}
+
+	/**
+	 * Once per session and pin, off the turn's path: when System One judges that a later version of the
+	 * pinned model is among the owner's authenticated models, the owner is told. The pin keeps ruling;
+	 * only the owner repins. Asked once per session and pin: an outage and "nothing superseded" look the
+	 * same from here, and re-asking on every routed turn would spend System One on a settled question.
+	 */
+	private _noticeSupersededPin(tier: AutoSelectionTier, pin: Model<Api>, signal: AbortSignal): void {
+		const ref = formatModelRouterModel(pin);
+		const judge = this.deps.getRouteJudge?.();
+		if (!judge || this._pinVersionChecked.has(ref)) return;
+		this._pinVersionChecked.add(ref);
+		const models = [
+			pin,
+			...this.deps
+				.getModelRegistry()
+				.getAvailable()
+				.filter((model) => model !== pin),
+		].map((model) => ({
+			id: formatModelRouterModel(model),
+			description: model.name,
+		}));
+		void classifySupersededModels(judge, models, signal).then((superseded) => {
+			if (superseded.has(ref)) {
+				this.deps.emit({
+					type: "warning",
+					message: `Your ${tier} pin ${ref} has a later version among your authenticated models, as System One judges it. The pin still rules; repin the tier in /settings > Model Router to use the newer one.`,
+				});
+			}
+		});
 	}
 
 	/**

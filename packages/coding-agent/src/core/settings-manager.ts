@@ -49,6 +49,7 @@ import {
 } from "./resource-profile-blocks.ts";
 import { isWorkerSession } from "./session-role.ts";
 import { validateSkillName } from "./skills.ts";
+import type { SystemOneProviderChoice } from "./system-one/access.ts";
 import type { ToolkitScript } from "./toolkit/script-registry.ts";
 import type { FileEncodingRule } from "./tools/file-encoding-metadata.ts";
 import { acquireFileLockSync, LOW_LATENCY_FILE_LOCK_OPTIONS, writeFileAtomicSync } from "./util/atomic-file.ts";
@@ -70,8 +71,8 @@ export interface ScoutSettings {
 
 export interface SystemOneSettings {
 	enabled?: boolean; // default: true
-	provider?: "typesafe" | "openrouter"; // default: "typesafe"
-	model?: string; // default: "jev-1.13.0" (typesafe) or "typesafe/jev-1.13" (openrouter)
+	/** Which key System One authenticates with; `auto` (default) prefers TypeSafe, then OpenRouter. The engine version is pinned (Jev 1.13). */
+	provider?: SystemOneProviderChoice;
 	/** Who drives an active goal: System One's objective routes (default when System One is bound) or the legacy continuation. */
 	loopMode?: "legacy_goal" | "objective_shadow" | "objective_primary";
 	/** Completion assurance the objective must pass; default semantic_enhanced under a semantic plane, mechanical without. */
@@ -3527,8 +3528,7 @@ export class SettingsManager {
 
 	getSystemOneSettings(): {
 		enabled: boolean;
-		provider: "typesafe" | "openrouter";
-		model?: string;
+		provider: SystemOneProviderChoice;
 		loopMode?: SystemOneSettings["loopMode"];
 		completionProfile?: SystemOneSettings["completionProfile"];
 	} {
@@ -3548,11 +3548,17 @@ export class SettingsManager {
 				: undefined;
 		return {
 			enabled: raw?.enabled ?? true,
-			provider: raw?.provider === "openrouter" ? "openrouter" : "typesafe",
-			model: raw?.model,
+			provider: raw?.provider === "typesafe" || raw?.provider === "openrouter" ? raw.provider : "auto",
 			...(loopMode ? { loopMode } : {}),
 			...(completionProfile ? { completionProfile } : {}),
 		};
+	}
+
+	/** Switches System One's provider; every evaluation resolves it anew, so the next one uses it. */
+	setSystemOneProvider(provider: SystemOneProviderChoice): void {
+		this.globalSettings.systemOne = { ...this.globalSettings.systemOne, provider };
+		this.markModified("systemOne");
+		this.save();
 	}
 
 	setSystemOneSettings(settings: SystemOneSettings, scope: SettingsScope = "global"): void {

@@ -33,16 +33,6 @@ function fitnessReport(overrides: Partial<ModelFitnessReport> = {}): ModelFitnes
 		search: { ...lane },
 		toolCall: { ...lane },
 		digest: { ...lane },
-		judge: {
-			parsed: 3,
-			planningElevated: 3,
-			planningTotal: 3,
-			trivialCheap: 3,
-			trivialTotal: 3,
-			total: 3,
-			outcomes: [],
-			meanMs: 0,
-		},
 		totalCostUsd: 0.01,
 		...overrides,
 	};
@@ -86,19 +76,18 @@ describe("Router calibration evidence (F001-070..075)", () => {
 				router_cheap: "FIT",
 				router_medium: "FIT",
 				router_expensive: "FIT",
-				router_judge: "FIT",
 				executor: "FIT",
 			},
 		});
 		// Old evidence: STALE on every probed surface, never FIT/UNFIT as if fresh.
 		expect(rows[1].staleReason).toContain("older than 30 days");
 		expect(rows[1].needsCalibration).toBe(true);
-		expect(Object.values(rows[1].surfaces)).toEqual(["STALE", "STALE", "STALE", "STALE", "STALE"]);
+		expect(Object.values(rows[1].surfaces)).toEqual(["STALE", "STALE", "STALE", "STALE"]);
 		expect(rows[2]).toMatchObject({ ref: "api/api-new", needsCalibration: true });
-		expect(Object.values(rows[2].surfaces)).toEqual(["UNPROBED", "UNPROBED", "UNPROBED", "UNPROBED", "UNPROBED"]);
+		expect(Object.values(rows[2].surfaces)).toEqual(["UNPROBED", "UNPROBED", "UNPROBED", "UNPROBED"]);
 		const line = formatRouterCalibrationRow(rows[0]);
 		expect(line).toBe(
-			"sub/sub-max · subscription · cheap FIT · medium FIT · expensive FIT · judge FIT · executor FIT · tool native · probed 2026-09-19",
+			"sub/sub-max · subscription · cheap FIT · medium FIT · expensive FIT · executor FIT · tool native · probed 2026-09-19",
 		);
 		// F001-075: no universal score anywhere in the row.
 		expect(line.toLowerCase()).not.toContain("score");
@@ -122,7 +111,8 @@ describe("Router calibration evidence (F001-070..075)", () => {
 	});
 
 	it("a report that covers only part of the router surfaces still needs calibration", () => {
-		// Evidence about the judge lane, none about the tool-call lane the other surfaces need.
+		// Evidence about the research/worker/digest lanes, none about the tool-call lane every
+		// router surface here needs.
 		const { toolCall: _toolCall, ...withoutToolCall } = fitnessReport();
 		const report: StoredFitnessReport = {
 			model: "api/api-mini",
@@ -141,7 +131,6 @@ describe("Router calibration evidence (F001-070..075)", () => {
 			router_cheap: "UNPROBED",
 			router_medium: "UNPROBED",
 			router_expensive: "UNPROBED",
-			router_judge: "FIT",
 			executor: "UNPROBED",
 		});
 		expect(row.needsCalibration).toBe(true);
@@ -154,7 +143,7 @@ describe("Router calibration evidence (F001-070..075)", () => {
 			isSubscription: () => false,
 			now,
 		});
-		expect(Object.values(row.surfaces)).toEqual(["FIT", "FIT", "FIT", "FIT", "FIT"]);
+		expect(Object.values(row.surfaces)).toEqual(["FIT", "FIT", "FIT", "FIT"]);
 		expect(row.needsCalibration).toBe(false);
 	});
 
@@ -175,7 +164,7 @@ describe("Router calibration evidence (F001-070..075)", () => {
 		});
 		expect(row.staleReason).toBe("context window changed (4096 at probe time, 8192 now)");
 		expect(row.needsCalibration).toBe(true);
-		expect(Object.values(row.surfaces)).toEqual(["STALE", "STALE", "STALE", "STALE", "STALE"]);
+		expect(Object.values(row.surfaces)).toEqual(["STALE", "STALE", "STALE", "STALE"]);
 	});
 
 	it("the same context window keeps the evidence fresh", () => {
@@ -194,16 +183,14 @@ describe("Router calibration evidence (F001-070..075)", () => {
 
 	it("calibration copy is derived from the canonical surface list, never a literal count", () => {
 		const scope = describeRouterCalibrationScope();
-		expect(scope).toBe(
-			"5 router fitness surfaces (cheap, medium, expensive, judge, executor) + real tool execution probe",
-		);
-		expect(scope).not.toContain("6");
+		expect(scope).toBe("4 router fitness surfaces (cheap, medium, expensive, executor) + real tool execution probe");
+		expect(scope).not.toContain("5");
 	});
 
 	it("an UNFIT surface is reported per surface, not as a model-wide verdict", () => {
 		const report: StoredFitnessReport = {
 			model: "api/api-mini",
-			report: fitnessReport({ judge: { ...fitnessReport().judge, parsed: 0 } }),
+			report: fitnessReport({ worker: { succeeded: 0, total: 3, outcomes: [], meanMs: 1 } }),
 			at: now.toISOString(),
 			host,
 		};
@@ -213,7 +200,7 @@ describe("Router calibration evidence (F001-070..075)", () => {
 			isSubscription: () => false,
 			now,
 		});
-		expect(row.surfaces.router_judge).toBe("UNFIT");
+		expect(row.surfaces.router_medium).toBe("UNFIT");
 		expect(row.surfaces.router_cheap).toBe("FIT");
 	});
 });
@@ -342,6 +329,24 @@ describe("Router Setup settings screen (F001-060..065)", () => {
 		selector.getSettingsList().handleInput("\r");
 	}
 
+	/**
+	 * Presses DOWN until the cursor row (the settings list marks it with "→ ", see
+	 * `getSettingsListTheme` in theme.ts) contains `label`, bounded so a menu-shape change fails
+	 * loudly instead of silently landing on the wrong row (a hardcoded press count used to do that
+	 * whenever a row was added/removed above the target).
+	 */
+	function pressDownUntilCursorRowContains(selector: SettingsSelectorComponent, label: string, maxPresses = 30): void {
+		for (let attempt = 0; attempt <= maxPresses; attempt++) {
+			const output = stripAnsi(selector.render(200).join("\n"));
+			const cursorLine = output.split("\n").find((line) => line.includes("→ "));
+			if (cursorLine?.includes(label)) return;
+			if (attempt === maxPresses) {
+				throw new Error(`cursor never reached a row containing "${label}" within ${maxPresses} DOWN presses`);
+			}
+			selector.getSettingsList().handleInput(DOWN);
+		}
+	}
+
 	it("F001-063/064/065: shows selection mode, candidate pool summary and pool preference", () => {
 		const selector = new SettingsSelectorComponent(makeConfig(), makeCallbacks());
 		openRouter(selector);
@@ -434,7 +439,7 @@ describe("Router Setup settings screen (F001-060..065)", () => {
 		const onModelRouterAction = vi.fn();
 		const selector = new SettingsSelectorComponent(makeConfig(), makeCallbacks({ onModelRouterAction }));
 		openRouter(selector);
-		for (let index = 0; index < 17; index++) selector.getSettingsList().handleInput(DOWN);
+		pressDownUntilCursorRowContains(selector, "Calibrate");
 		selector.getSettingsList().handleInput("\r");
 		const output = stripAnsi(selector.render(200).join("\n"));
 		expect(output).toContain("Router Calibration");
@@ -581,8 +586,8 @@ describe("Router Setup actions (F001-070..072, F001-080..082)", () => {
 		const h = makeHost();
 		await handleModelRouterAction(h, "calibrate-all");
 		const rendered = stripAnsi(h.selectors[0].component.render(200).join("\n"));
-		expect(rendered).toContain("5 router fitness surfaces");
-		expect(rendered).not.toContain("6 fitness surfaces");
+		expect(rendered).toContain("4 router fitness surfaces");
+		expect(rendered).not.toContain("5 fitness surfaces");
 	});
 });
 

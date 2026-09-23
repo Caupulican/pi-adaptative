@@ -1472,4 +1472,23 @@ describe("settings selector", () => {
 			expect(selector.render(140).join("\n")).toContain("Resources");
 		}
 	});
+
+	it("switches System One's provider in place and says what the new choice resolves to", () => {
+		const onSystemOneProviderChange = vi.fn();
+		const selector = new SettingsSelectorComponent(
+			makeConfig({
+				systemOneProvider: "auto",
+				describeSystemOneAccess: (choice) =>
+					choice === "openrouter" ? "No key for this choice" : "In force: TypeSafe",
+			}),
+			makeCallbacks({ onSystemOneProviderChange }),
+		);
+		selector.getSettingsList().handleInput("system one provider");
+		expect(selector.render(140).join("\n")).toContain("In force: TypeSafe");
+		selector.getSettingsList().handleInput("\r");
+		expect(onSystemOneProviderChange).toHaveBeenLastCalledWith("typesafe");
+		selector.getSettingsList().handleInput("\r");
+		expect(onSystemOneProviderChange).toHaveBeenLastCalledWith("openrouter");
+		expect(selector.render(140).join("\n")).toContain("No key for this choice");
+	});
 });

@@ -66,6 +66,7 @@ import {
 	HMOE_TEAM_STRATEGIES,
 	MAX_WORKER_DELEGATION_MAX_USD,
 } from "../../../core/settings-manager.ts";
+import { SYSTEM_ONE_PROVIDER_CHOICES, type SystemOneProviderChoice } from "../../../core/system-one/access.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
 import { THINKING_LEVEL_DESCRIPTIONS } from "../thinking-level-descriptions.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -459,6 +460,10 @@ export interface SettingsConfig {
 	modelRouter: ModelRouterSettings;
 	modelRouterScope?: SettingsScope;
 	modelRouterPool?: ModelRouterPoolView;
+	/** Which key System One authenticates with. */
+	systemOneProvider?: SystemOneProviderChoice;
+	/** What a provider choice resolves to right now (provider in force, or the key it lacks). */
+	describeSystemOneAccess?: (choice: SystemOneProviderChoice) => string;
 	autoLearn: AutoLearnSettings;
 	autoLearnScope?: SettingsScope;
 	contextPolicyEnforcement: ContextPromptEnforcementSettings;
@@ -514,6 +519,7 @@ export interface SettingsCallbacks {
 	onContextCurationChange: (settings: ContextCurationSettings, scope: SettingsScope) => void;
 	onLearningPolicyChange: (settings: LearningPolicySettings, scope: SettingsScope) => void;
 	onModelCapabilityChange: (settings: ModelCapabilitySettings, scope: SettingsScope) => void;
+	onSystemOneProviderChange?: (choice: SystemOneProviderChoice) => void;
 	onModelRouterChange: (settings: ModelRouterSettings, scope: SettingsScope) => void;
 	onAutoLearnChange: (settings: AutoLearnSettings, scope: SettingsScope) => void;
 	onContextPolicyEnforcementChange: (settings: ContextPromptEnforcementSettings, scope: SettingsScope) => void;
@@ -2758,6 +2764,17 @@ export class SettingsSelectorComponent extends Container {
 						config.contextCurationScope ?? "global",
 					),
 			},
+			...(config.systemOneProvider
+				? [
+						{
+							id: "system-one-provider",
+							label: "System One provider",
+							description: config.describeSystemOneAccess?.(config.systemOneProvider) ?? "",
+							currentValue: config.systemOneProvider,
+							values: [...SYSTEM_ONE_PROVIDER_CHOICES],
+						},
+					]
+				: []),
 			{
 				id: "model-router",
 				label: "Model Router",
@@ -3069,6 +3086,14 @@ export class SettingsSelectorComponent extends Container {
 			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {
+					case "system-one-provider": {
+						const choice = newValue as SystemOneProviderChoice;
+						callbacks.onSystemOneProviderChange?.(choice);
+						// The row says what the new choice resolves to, not what the old one did.
+						const row = items.find((item) => item.id === id);
+						if (row && config.describeSystemOneAccess) row.description = config.describeSystemOneAccess(choice);
+						break;
+					}
 					case "autocompact":
 						callbacks.onAutoCompactChange(newValue === "true");
 						break;

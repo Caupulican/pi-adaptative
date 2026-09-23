@@ -14,6 +14,7 @@ import {
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
 	type OAuthProviderId,
+	type OAuthProviderInterface,
 	OAuthRefreshCompletedError,
 	refreshOAuthToken,
 } from "@caupulican/pi-ai/oauth";
@@ -269,6 +270,8 @@ export class AuthStorage {
 	private reloadRevision = 0;
 	private providerRevisions = new Map<string, number>();
 	private runtimeOverrides: Map<string, string> = new Map();
+	/** Providers whose stale (unexpired, older-format) credential this process already tried to refresh. */
+	private readonly staleRefreshAttempted = new Set<string>();
 	private fallbackResolver?: (provider: string) => string | undefined;
 	private loadError: Error | null = null;
 	private errors: Error[] = [];
@@ -582,6 +585,17 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Whether a stored OAuth credential must be refreshed before use: when it expired, or when the
+	 * provider finds it stale (still valid, stored by an older version that lacks data it now reads).
+	 * A stale credential stays usable, so its upgrade is tried once per process: a provider whose
+	 * refresh keeps failing is not re-asked on every request.
+	 */
+	private needsOAuthRefresh(providerId: string, provider: OAuthProviderInterface, cred: OAuthCredentials): boolean {
+		if (Date.now() >= cred.expires) return true;
+		return provider.needsRefresh?.(cred) === true && !this.staleRefreshAttempted.has(providerId);
+	}
+
+	/**
 	 * Refresh OAuth token with backend locking to prevent race conditions.
 	 * Multiple pi instances may try to refresh simultaneously when tokens expire.
 	 */
@@ -594,9 +608,10 @@ export class AuthStorage {
 		}
 
 		const newCredentials = await this.withOAuthRefreshLock(providerId, async (cred) => {
-			if (Date.now() < cred.expires) {
+			if (!this.needsOAuthRefresh(providerId, provider, cred)) {
 				return cred;
 			}
+			if (Date.now() < cred.expires) this.staleRefreshAttempted.add(providerId);
 			return (await getOAuthApiKey(provider, { [providerId]: cred }))?.newCredentials;
 		});
 		return newCredentials ? { apiKey: provider.getApiKey(newCredentials), newCredentials } : null;
@@ -644,7 +659,7 @@ export class AuthStorage {
 		const cred = this.data[providerId];
 		const provider = getOAuthProvider(providerId);
 		if (cred?.type !== "oauth" || !provider || this.loadError) return undefined;
-		if (Date.now() < cred.expires) return provider.getApiKey(cred);
+		if (!this.needsOAuthRefresh(providerId, provider, cred)) return provider.getApiKey(cred);
 		const revision = this.captureOAuthStorageRevision(providerId);
 		try {
 			const refreshed = (await this.refreshOAuthTokenWithLock(providerId))?.apiKey;

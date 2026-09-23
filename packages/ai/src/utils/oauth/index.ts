@@ -184,8 +184,8 @@ export async function getOAuthApiKey(
 		return null;
 	}
 
-	// Refresh if expired
-	if (Date.now() >= creds.expires) {
+	// Refresh if expired, or stored by an older provider version that lacks data it now reads
+	if (Date.now() >= creds.expires || provider.needsRefresh?.(creds)) {
 		try {
 			creds = await refreshOAuthToken(provider, creds);
 		} catch (error) {

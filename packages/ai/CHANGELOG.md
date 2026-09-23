@@ -1,11 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- `Model.kind`: `"judge"` marks a System One engine (TypeSafe's Jev, directly or through OpenRouter) that answers typed questions and is never allocated to a conversation; the catalog generator sets it.
+- `OAuthProviderInterface.needsRefresh(credentials)`: an optional provider hook that declares unexpired stored credentials stale (stored by an older provider version); `getOAuthApiKey` refreshes them like expired ones.
+
 ### Fixed
 
 - Google Antigravity models run at their own catalog thinking budget. Pi mapped its thinking level onto them, and the service rejects the `MINIMAL` level every Gemini model received with thinking off (HTTP 400) and any level on GPT-OSS. Each model now declares the one thinking level its budget stands for, and the answer's output cap runs on top of the budget, as Anthropic requires.
 - Antigravity tools reach Claude and GPT models: their upstreams read only the OpenAPI `parameters` field, so Claude received no input schema (HTTP 400) and GPT called tools with no arguments. `Model.upstream`, from the catalog's backend, selects the field.
 - An Antigravity stream that opens with a role-only event no longer fails as invalid content.
 - The Antigravity project is resolved once per access token, as the native client does at startup, instead of before every request.
+- Antigravity stores a catalog version with its discovered model catalog and treats an older one as stale, so a catalog written before thinking budgets and backends were persisted is re-discovered on first use.
 
 ## [0.99.43] - 2026-09-22
 

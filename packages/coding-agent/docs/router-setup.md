@@ -9,7 +9,7 @@ choice. Nothing on this screen runs a provider call by being opened.
 | Mode | Tier model |
 | --- | --- |
 | `manual` (default for existing installs) | the operator's pin for each tier; an unset tier stays unset, exactly as before |
-| `auto` | the router decides the tier (regex floor, optional judge), then selects the exact model from the candidate pool |
+| `auto` | the router decides the tier (regex floor, optional System One judge), then selects the exact model from the candidate pool |
 | `hybrid` | a pinned tier wins; an unpinned tier selects automatically |
 
 Tier pickers show `(AUTO)` for a tier the router selects and `(unset)` in manual mode. Existing
@@ -62,8 +62,8 @@ handed to it.
 
 Operator-triggered only. Calibration reuses the existing evidence and nothing else: the host-keyed
 fitness reports written by `/fitness` (`runModelFitness`) and the persisted `/toolprobe` verdicts.
-Each pool model shows one state per router surface — the five router fitness surfaces `router_cheap`,
-`router_medium`, `router_expensive`, `router_judge`, `executor` — as `FIT`, `UNFIT`, `UNPROBED` or
+Each pool model shows one state per router surface — the four router fitness surfaces `router_cheap`,
+`router_medium`, `router_expensive`, `executor` — as `FIT`, `UNFIT`, `UNPROBED` or
 `STALE`; the real tool execution probe is reported separately. A surface whose lane is missing from an
 otherwise present report is `UNPROBED`, not fit. Evidence is `STALE` when it is older than 30 days, when
 a tool probe was recorded after it, or when the model's registered context window changed since the
@@ -86,8 +86,8 @@ Enter an example task. The deterministic preview classifies it exactly as a turn
 the model through the same code path — intent, baseline tier, risk, reason, mode, pin, pool,
 subscription candidates, eligible candidates, the model it would choose, its source and fitness —
 without any provider call and without touching the session model or the router's status. Prefix the
-task with `live:` to run the judged path (routing judge and H-MoE may spend); that is still
-inspection, not execution.
+task with `live:` to run the judged path (the System One routing judge and H-MoE may spend); that is
+still inspection, not execution.
 
 ## Diagnostics
 

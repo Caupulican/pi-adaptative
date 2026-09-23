@@ -4,14 +4,11 @@ import { Value } from "typebox/value";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 export const TYPESAFE_PROVIDER = "typesafe";
-export const TYPESAFE_MODEL = "jev-latest";
 export const TYPESAFE_ENDPOINT = "https://api.typesafe.ai/v1/systemone";
 export const TYPESAFE_MODELS_ENDPOINT = "https://api.typesafe.ai/v1/models";
 export const OPENROUTER_PROVIDER = "openrouter";
 export const OPENROUTER_DECISIONS_ENDPOINT = "https://openrouter.ai/api/alpha/decisions";
 export const OPENROUTER_MODELS_ENDPOINT = "https://openrouter.ai/api/v1/models?output_modalities=decisions";
-export const OPENROUTER_TYPESAFE_MODEL = "typesafe/jev-latest";
-export const OPENROUTER_TYPESAFE_PINNED_MODEL = "typesafe/jev-1.13";
 export const REVIEW_CONFIDENCE = { high: 0.95, max: 0.99 } as const;
 
 const contextSchema = Type.Union([

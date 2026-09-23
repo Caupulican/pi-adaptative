@@ -233,6 +233,18 @@ function globToFffPattern(glob: string): string {
 }
 
 /**
+ * Repo-relative path identity is POSIX-style everywhere in this module (unit paths, candidate keys,
+ * the notes/warnings formatted from them) — the same convention `tools/find.ts` and `tools/grep.ts`
+ * already apply to the identical `finder.glob`/`item.relativePath` source. Both listing branches
+ * below (the FFF index and the ripgrep fallback) hand back OS-native separators on Windows, so
+ * without this every path built here would carry backslashes and never match the forward-slash
+ * paths the caller's own edit/write args and test fixtures use.
+ */
+function toPosixPath(value: string): string {
+	return value.replaceAll("\\", "/");
+}
+
+/**
  * The harness's resident FFF index when it is already warm (never waiting on an index build, the same
  * non-blocking acquisition the search tools use), the managed ripgrep file listing otherwise. Both
  * honor .gitignore. This is internal enumeration, read whole; a failure lists nothing.
@@ -242,7 +254,7 @@ export const harnessFileLister: FileLister = async (root, glob, signal) => {
 		const finder = defaultFffSearchBackend.peekFinder?.(root);
 		if (finder && !finder.isDestroyed) {
 			const result = finder.glob(globToFffPattern(glob), { pageSize: 100_000 });
-			if (result.ok) return result.value.items.map((item) => item.relativePath);
+			if (result.ok) return result.value.items.map((item) => toPosixPath(item.relativePath));
 		}
 	} catch {
 		// A broken index is unavailable for this listing, never a failure of the edit.
@@ -252,7 +264,12 @@ export const harnessFileLister: FileLister = async (root, glob, signal) => {
 		return await new Promise<string[]>((resolve) => {
 			execFile(rg, ["--files", "-g", glob], { cwd: root, maxBuffer: 64_000_000, signal }, (error, stdout) => {
 				if (error) return resolve([]);
-				resolve(String(stdout).split("\n").filter(Boolean));
+				resolve(
+					String(stdout)
+						.split("\n")
+						.filter(Boolean)
+						.map((line) => toPosixPath(line)),
+				);
 			});
 		});
 	} catch {

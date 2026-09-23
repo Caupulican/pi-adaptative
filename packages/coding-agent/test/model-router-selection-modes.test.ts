@@ -22,7 +22,11 @@ import {
 	resolveRouterCandidatePool,
 	routerPoolModelRefs,
 } from "../src/core/model-router/candidate-pool.ts";
-import { OwnerModelPolicy } from "../src/core/model-router/owner-model-policy.ts";
+import {
+	latestPoolPolicy,
+	MODEL_POOL_POLICY_CUSTOM_TYPE,
+	OwnerModelPolicy,
+} from "../src/core/model-router/owner-model-policy.ts";
 import { formatRoutePreview } from "../src/core/model-router/route-preview.ts";
 import { formatModelRouterStatus } from "../src/core/model-router/status.ts";
 import { ModelRouterController, type ModelRouterControllerDeps } from "../src/core/model-router-controller.ts";
@@ -64,16 +68,6 @@ function fitnessReport(overrides: Partial<ModelFitnessReport> = {}): ModelFitnes
 		search: { ...lane },
 		toolCall: { ...lane },
 		digest: { ...lane },
-		judge: {
-			parsed: 3,
-			planningElevated: 3,
-			planningTotal: 3,
-			trivialCheap: 3,
-			trivialTotal: 3,
-			total: 3,
-			outcomes: [],
-			meanMs: 0,
-		},
 		totalCostUsd: 0,
 		...overrides,
 	};
@@ -103,6 +97,9 @@ interface ControllerFixture {
 	expertRelease: ReturnType<typeof vi.fn>;
 	isolatedCompletion: ReturnType<typeof vi.fn>;
 	spawnedUsageReportIds: string[];
+	warnings: string[];
+	/** How many times System One was asked which models are superseded. */
+	supersededAsks(): number;
 	setSettings(next: Partial<RouterSettings>): void;
 	setPool(models: TestModel[] | undefined): void;
 }
@@ -116,14 +113,14 @@ function createController(options: {
 	withExpertSelector?: boolean;
 	/** Makes the expert selector reject, as an exhausted capacity pool does. */
 	expertError?: string;
-	/** Judge model returned by resolveLaneModel, plus the usage its completion reports. */
-	judgeModel?: TestModel;
 	/** Makes the routed-turn system-prompt build throw, as a setup failure does. */
 	buildSystemPromptError?: string;
 	/** The owner's live model policy, as the session binds it. */
 	policy?: OwnerModelPolicy;
 	/** System One's route category answer, as the session binds it. */
 	routeCategory?: string;
+	/** Model refs System One judges superseded by a later version among the offered models. */
+	supersededRefs?: string[];
 }): ControllerFixture {
 	const agentDir = mkdtempSync(join(tmpdir(), "pi-router-modes-"));
 	let current = settings(options.settings);
@@ -148,6 +145,8 @@ function createController(options: {
 	});
 	const expertRelease = vi.fn(() => undefined);
 	const spawnedUsageReportIds: string[] = [];
+	const warnings: string[] = [];
+	let supersededAsks = 0;
 	const judgeUsage = {
 		input: 10,
 		output: 5,
@@ -190,9 +189,11 @@ function createController(options: {
 			spawnedUsageReportIds.push(opts.reportId);
 			return opts.reportId;
 		},
-		emit: () => {},
+		emit: (event) => {
+			if (event.type === "warning") warnings.push(event.message);
+		},
 		emitAutonomyTelemetry: () => {},
-		resolveLaneModel: () => options.judgeModel,
+		resolveLaneModel: () => undefined,
 		resolveCurationModelIfFit: () => undefined,
 		getToolProbeVerdict: () => undefined,
 		getCandidatePool: () => {
@@ -209,6 +210,15 @@ function createController(options: {
 						evaluateRouteChoice: async () => ({
 							route_choice: { choice: options.routeCategory, confidence: 0.97 },
 						}),
+						evaluateSupersededModels: async ({ models }: { models: readonly { id: string }[] }) => {
+							supersededAsks++;
+							return Object.fromEntries(
+								models.map((m, index) => [
+									`superseded_${index}`,
+									{ noul: options.supersededRefs?.includes(m.id) ? 0.97 : 0.03 },
+								]),
+							);
+						},
 					}),
 				}
 			: {}),
@@ -230,6 +240,8 @@ function createController(options: {
 		expertRelease,
 		isolatedCompletion,
 		spawnedUsageReportIds,
+		warnings,
+		supersededAsks: () => supersededAsks,
 		setSettings: (next) => {
 			current = { ...current, ...next };
 		},
@@ -266,6 +278,30 @@ describe("System One picks the tier; the owner's pin runs it", () => {
 		expect(routed?.decision.reasons.join(" ")).toContain("owner pin for expensive");
 	});
 
+	it("tells the owner once when System One judges the pin superseded, and the pin keeps running", async () => {
+		const fixture = createController({
+			settings: { enabled: true, selectionMode: "auto", expensiveModel: "api-provider/api-max" },
+			routeCategory: "strong_deep",
+			supersededRefs: ["api-provider/api-max"],
+		});
+		const first = await fixture.controller.resolveTurnRouteJudged(RESEARCH_PROMPT);
+		const second = await fixture.controller.resolveTurnRouteJudged(RESEARCH_PROMPT);
+		await vi.waitFor(() => expect(fixture.warnings).toHaveLength(1));
+		expect(fixture.warnings[0]).toContain("expensive pin api-provider/api-max has a later version");
+		expect([first?.model, second?.model]).toEqual([apiBig, apiBig]);
+		expect(fixture.supersededAsks()).toBe(1);
+	});
+
+	it("says nothing about a pin System One does not judge superseded", async () => {
+		const fixture = createController({
+			settings: { enabled: true, selectionMode: "auto", expensiveModel: "api-provider/api-max" },
+			routeCategory: "strong_deep",
+		});
+		await fixture.controller.resolveTurnRouteJudged(RESEARCH_PROMPT);
+		await vi.waitFor(() => expect(fixture.supersededAsks()).toBe(1));
+		expect(fixture.warnings).toEqual([]);
+	});
+
 	it("a pin yields only to facts: a text-only pin does not take an image", async () => {
 		const { controller } = createController({
 			settings: { enabled: true, selectionMode: "auto", expensiveModel: "api-provider/api-max" },
@@ -277,8 +313,33 @@ describe("System One picks the tier; the owner's pin runs it", () => {
 	});
 });
 
+/** A session branch as the policy's store sees it: custom records appended, the latest one wins. */
+function branchStore(branch: { type: string; customType?: string; data?: unknown }[] = []) {
+	return {
+		branch,
+		read: () => latestPoolPolicy(branch),
+		record: (record: unknown) => {
+			branch.push({ type: "custom", customType: MODEL_POOL_POLICY_CUSTOM_TYPE, data: record });
+		},
+	};
+}
+
 describe("The owner's model policy reallocates, never refuses", () => {
-	const policy = () => new OwnerModelPolicy({ isSubscription, isLocal: () => false });
+	const policy = () => new OwnerModelPolicy({ isSubscription, isLocal: () => false }, branchStore());
+
+	it("lives on the session branch: a resumed session keeps it, a branch without the change does not", () => {
+		const store = branchStore();
+		const said = new OwnerModelPolicy({ isSubscription, isLocal: () => false }, store);
+		expect(said.apply({ metered: false }, ALL)).toMatchObject({ kind: "applied" });
+		const resumed = new OwnerModelPolicy({ isSubscription, isLocal: () => false }, branchStore([...store.branch]));
+		expect(resumed.policy).toEqual({ subscription: true, metered: false, local: true });
+		const earlierBranch = new OwnerModelPolicy({ isSubscription, isLocal: () => false }, branchStore([]));
+		expect(earlierBranch.policy).toEqual({ subscription: true, metered: true, local: true });
+		// Turning it back on is a later record on the same branch.
+		expect(said.apply({ metered: true }, ALL)).toMatchObject({ kind: "applied" });
+		expect(store.branch).toHaveLength(2);
+		expect(said.policy.metered).toBe(true);
+	});
 
 	it("routes away from a metered session model the owner ruled out, even with the router off", () => {
 		const subscriptionOnly = policy();

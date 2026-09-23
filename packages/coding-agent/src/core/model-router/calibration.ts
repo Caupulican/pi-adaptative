@@ -15,7 +15,6 @@ export const ROUTER_CALIBRATION_SURFACES: readonly FitnessGatedSurface[] = [
 	"router_cheap",
 	"router_medium",
 	"router_expensive",
-	"router_judge",
 	"executor",
 ];
 
@@ -109,7 +108,6 @@ const SURFACE_SHORT: Record<FitnessGatedSurface, string> = {
 	router_cheap: "cheap",
 	router_medium: "medium",
 	router_expensive: "expensive",
-	router_judge: "judge",
 	executor: "executor",
 	compaction: "compaction",
 	curation: "curation",

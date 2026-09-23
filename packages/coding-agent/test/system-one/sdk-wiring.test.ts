@@ -121,7 +121,6 @@ describe("System One SDK Session Auto-Wiring and Resume Hook (R-062, R-071)", ()
 			model: model!,
 			authStorage,
 			systemOneProvider: "openrouter",
-			systemOneModel: "typesafe/jev-1.13",
 			sessionManager: SessionManager.inMemory(cwd),
 		});
 
@@ -132,7 +131,7 @@ describe("System One SDK Session Auto-Wiring and Resume Hook (R-062, R-071)", ()
 		await session.disposeAndWait();
 	});
 
-	it("respects settingsManager systemOne configuration for provider, model, and enabled status", async () => {
+	it("respects settingsManager systemOne configuration for provider and enabled status", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5");
 		expect(model).toBeTruthy();
 
@@ -151,7 +150,7 @@ describe("System One SDK Session Auto-Wiring and Resume Hook (R-062, R-071)", ()
 		expect(disabledSession.systemOneController).toBeUndefined();
 		await disabledSession.disposeAndWait();
 
-		// Test enabled with openrouter provider and custom model via options
+		// Test enabled with the openrouter provider via options (the engine version is pinned)
 		const { session: openrouterSession } = await createAgentSession({
 			cwd,
 			agentDir,
@@ -159,7 +158,6 @@ describe("System One SDK Session Auto-Wiring and Resume Hook (R-062, R-071)", ()
 			authStorage,
 			sessionManager: SessionManager.inMemory(cwd),
 			systemOneProvider: "openrouter",
-			systemOneModel: "typesafe/jev-latest",
 		});
 		expect(openrouterSession.systemOneController).toBeDefined();
 		await openrouterSession.disposeAndWait();
