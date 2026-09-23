@@ -69,6 +69,8 @@ export interface GoalSessionControllerDeps {
 	scheduleGoalAutoContinueFromIdle(): void;
 	prompt(text: string, options?: PromptOptions): Promise<void>;
 	emitWarning(message: string): void;
+	/** Hand the owner a decision nobody else may make, through the host's own owner channel. */
+	deliverToOwner?(items: readonly string[]): void;
 	getExecutionLoopMode?(): ExecutionLoopMode | undefined;
 	getObjectiveExecutionController?(): ObjectiveExecutionController | undefined;
 }
@@ -148,6 +150,27 @@ const PROVIDER_FAILURE_REASONS: ReadonlySet<string> = new Set([
 	"auth",
 	"billing_or_quota",
 ]);
+
+const TRANSITION_CHECKS: Readonly<Record<string, string>> = {
+	jev_024: "completion plausibility",
+	jev_025: "primary completion",
+	jev_026: "cold adversarial challenge",
+	jev_027: "delivery truth",
+	jev_028: "release readiness",
+};
+
+/**
+ * The owner question for a completion System One could not settle: the authority line sends an
+ * objective transition whose ambiguity outlived its gather-more budget to the owner, never to a close.
+ */
+function ambiguousCompletionQuestion(reasonCodes: readonly string[]): string {
+	const held = reasonCodes.find((code) => /^jev_02[4-8]_ambiguous$/.test(code));
+	const check = held ? (TRANSITION_CHECKS[held.slice(0, 7)] ?? held) : "completion";
+	const doubts = reasonCodes.filter(
+		(code) => code !== "system_one_ambiguous" && !/^jev_02[4-8]_ambiguous$/.test(code),
+	);
+	return `System One could not settle the objective's ${check} check${doubts.length > 0 ? ` (${doubts.join(", ")})` : ""}, so the goal is held open: say whether to accept it as complete, or what is still missing.`;
+}
 
 export class GoalSessionController {
 	private readonly deps: GoalSessionControllerDeps;
@@ -805,6 +828,12 @@ export class GoalSessionController {
 				return;
 			default:
 				this.stopActiveGoal("blocked", `${terminal.status}: ${reasons}`);
+				if (
+					terminal.status === "semantic_gate_unavailable" &&
+					terminal.reasonCodes.includes("system_one_ambiguous")
+				) {
+					this.deps.deliverToOwner?.([ambiguousCompletionQuestion(terminal.reasonCodes)]);
+				}
 		}
 	}
 

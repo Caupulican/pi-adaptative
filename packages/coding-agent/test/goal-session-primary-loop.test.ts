@@ -71,7 +71,11 @@ function assistantTurn(stopReason: "stop" | "aborted", errorMessage?: string): A
 function session(
 	controller: ObjectiveExecutionController,
 	prompts: string[],
-	options: { afterPrompt?: (sessionManager: SessionManager, text: string) => void; warnings?: string[] } = {},
+	options: {
+		afterPrompt?: (sessionManager: SessionManager, text: string) => void;
+		warnings?: string[];
+		ownerItems?: string[];
+	} = {},
 ) {
 	const sessionManager = SessionManager.inMemory();
 	let ordinal = 0;
@@ -90,6 +94,9 @@ function session(
 		},
 		emitWarning: (message) => {
 			options.warnings?.push(message);
+		},
+		deliverToOwner: (items) => {
+			options.ownerItems?.push(...items);
 		},
 		getExecutionLoopMode: () => "objective_primary",
 		getObjectiveExecutionController: () => controller,
@@ -178,6 +185,40 @@ describe("System One primary loop", () => {
 		expect(rest).toMatchObject({ turnsSubmitted: 1, stopReason: "continuation_not_allowed" });
 		expect(goals.getState()?.status).toBe("blocked");
 		expect(goals.getState()?.blockedReason).toContain("unrecoverable: missing_required_executor:x");
+	});
+
+	it("asks the owner when System One cannot settle a completion check, and not when it is only down", async () => {
+		const ownerItems: string[] = [];
+		const ambiguous = scriptedController([
+			{
+				kind: "terminal",
+				terminal: {
+					status: "semantic_gate_unavailable",
+					reasonCodes: ["system_one_ambiguous", "jev_026_ambiguous", "hidden_regressions"],
+				},
+			},
+		]);
+		const goals = session(ambiguous.controller, [], { ownerItems });
+		await goals.continueLoop({ maxTurns: 1, maxStallTurns: 3 });
+		expect(goals.getState()?.status).toBe("blocked");
+		expect(ownerItems).toEqual([
+			"System One could not settle the objective's cold adversarial challenge check (hidden_regressions), so the goal is held open: say whether to accept it as complete, or what is still missing.",
+		]);
+
+		const outageItems: string[] = [];
+		const outage = scriptedController([
+			{
+				kind: "terminal",
+				terminal: {
+					status: "semantic_gate_unavailable",
+					reasonCodes: ["system_one_required_but_unavailable", "jev_025_unavailable"],
+				},
+			},
+		]);
+		const held = session(outage.controller, [], { ownerItems: outageItems });
+		await held.continueLoop({ maxTurns: 1, maxStallTurns: 3 });
+		expect(held.getState()?.blockedReason).toContain("jev_025_unavailable");
+		expect(outageItems).toEqual([]);
 	});
 
 	it("completes the goal from a complete terminal only when its requirements are satisfied, else blocks and says why", async () => {

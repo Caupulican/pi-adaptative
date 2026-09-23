@@ -980,6 +980,11 @@ export class AgentSession {
 			scheduleGoalAutoContinueFromIdle: () => this._backgroundLanes.scheduleGoalAutoContinueFromIdle(),
 			prompt: (text, options) => this.prompt(text, options),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
+			// A running turn posts it when it ends; an idle session posts it now.
+			deliverToOwner: (items) => {
+				this._deliverToOwner(items);
+				if (!this._foregroundRecovery.isBusy) void this._flushOwnerItems(undefined);
+			},
 			getExecutionLoopMode: () => this._executionLoopMode,
 			getObjectiveExecutionController: () => this._objectiveExecutionController,
 		});

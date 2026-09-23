@@ -37,7 +37,11 @@ export async function judgeTransition<C extends TransitionCertificate>(
 	try {
 		const certificate = await plane.requireCertificate(checkpointId, state, { ...options, requirePass: false });
 		if (certificate.semantic_outcome === "gather_more") {
-			return { kind: "held", certificate, reasonCodes: ["system_one_ambiguous", `${id}_ambiguous`] };
+			return {
+				kind: "held",
+				certificate,
+				reasonCodes: ["system_one_ambiguous", `${id}_ambiguous`, ...(certificate.failed_semantic_predicates ?? [])],
+			};
 		}
 		return { kind: "judged", certificate };
 	} catch (error) {

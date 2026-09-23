@@ -621,7 +621,10 @@ for review, independent verification and escalation; a wait on the running worke
 coordinator for a completion candidate. The legacy continuation is the input layer of that route and
 never a competing decider; `legacy_goal` stays available by setting and is the fallback without a
 plane. Completion is only the coordinator's verdict: the goal follows the objective's terminal and
-blocks, naming the unsatisfied requirements, when the two disagree.
+blocks, naming the unsatisfied requirements, when the two disagree. A completion check System One
+could not settle holds the goal: an outage only holds, while an ambiguity also becomes a question to
+the owner through the host's owner channel, naming the check and its doubts, since an objective
+transition never closes on a doubt.
 Pinned by `packages/coding-agent/test/goal-session-primary-loop.test.ts` and
 `packages/coding-agent/test/session-objective-runtime.test.ts`.
 
