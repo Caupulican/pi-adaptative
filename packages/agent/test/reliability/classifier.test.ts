@@ -128,6 +128,9 @@ describe("classifyFailure", () => {
 			"out of budget",
 			"You have hit your ChatGPT usage limit (plus plan). Try again in ~90 min.",
 			"usage_limit_reached",
+			// Codex's in-stream error event, which carries no code: only the text says it is a quota.
+			"Codex error: The usage limit has been reached",
+			"Monthly usage limits have been exceeded",
 		]) {
 			const c = classifyFailure({ message: msg });
 			expect(c.retryable, msg).toBe(false);

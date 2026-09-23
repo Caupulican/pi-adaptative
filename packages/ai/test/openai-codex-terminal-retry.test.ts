@@ -41,4 +41,20 @@ describe("openai-codex terminal retry handling", () => {
 			vi.unstubAllGlobals();
 		}
 	});
+
+	it("does not retry Codex's in-stream usage-limit wording", async () => {
+		const fetchMock = vi.fn(async () => {
+			throw new Error("Codex error: The usage limit has been reached");
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		try {
+			const stream = streamOpenAICodexResponses(model, context, { apiKey, maxRetries: 3 });
+			const result = await stream.result();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("The usage limit has been reached");
+			expect(fetchMock).toHaveBeenCalledOnce();
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
 });

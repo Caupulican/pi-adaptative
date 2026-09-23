@@ -51,7 +51,7 @@ export interface ClassifyFailureInput {
 }
 
 const BILLING_OR_QUOTA =
-	/GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing|usage.?limit(?:s)?\s*(?:reached|exceeded|hit)|usage_limit_reached|hit your usage limit|hit your ChatGPT usage limit/i;
+	/GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing|usage.?limit(?:s)?\s*(?:(?:has|have)\s+been\s+)?(?:reached|exceeded|hit)|usage_limit_reached|hit your usage limit|hit your ChatGPT usage limit/i;
 /**
  * The account cannot use the requested model at all, as opposed to having run out of it. Retrying the
  * same request is futile; the host moves the turn to a model the account has.
