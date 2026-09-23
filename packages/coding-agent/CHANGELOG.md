@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Skip native Windows installer tests on Linux platforms to prevent WSL interop failures.
+
 ## [0.99.44] - 2026-09-23
 
 ### Added

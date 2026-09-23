@@ -1,7 +1,12 @@
 ## [Unreleased]
 
+### Added
+
+- `CLAUDE_CODE_OAUTH_TOKEN` is natively recognized for Anthropic OAuth, matching the standard Claude Code utility export.
+
 ### Fixed
 
+- Anthropic inference requests correctly use the `claude-code/` prefix for the User-Agent to prevent intermittent 500 errors.
 - A Claude model on Antigravity stays on the generate-content request the service translates. The stream's opening empty part is not an answer; the thought and the following text are.
 
 ### Changed
