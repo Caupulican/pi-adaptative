@@ -574,6 +574,9 @@ describe("openai-codex streaming", () => {
 							"x-codex-bengalfox-primary-window-minutes": "300",
 							"x-codex-bengalfox-primary-reset-at": "1783615246",
 							"x-codex-bengalfox-limit-name": "gpt-5.5",
+							"x-codex-credits-has-credits": "true",
+							"x-codex-credits-unlimited": "false",
+							"x-codex-credits-balance": "12.50",
 						},
 					}),
 			),
@@ -603,6 +606,7 @@ describe("openai-codex streaming", () => {
 							primary: { usedPercent: 40.5, windowMinutes: 300, resetsAt: 1783615246 },
 						}),
 					]),
+					credits: { hasCredits: true, unlimited: false, balance: "12.50" },
 				}),
 			}),
 		);

@@ -16,6 +16,7 @@ import type {
 	Api,
 	KnownProvider,
 	Model,
+	ModelThinkingLevel,
 	OpenAICompletionsCompat,
 	OpenAIResponsesCompat,
 } from "../src/types.ts";
@@ -363,6 +364,44 @@ function getModelsDevCost(cost: ModelsDevCost | undefined): ModelCost {
 // models.dev publishes the same tier; this helper only backs the fallback entries used while
 // the catalogue lags a launch.
 const OPENAI_LONG_CONTEXT_INPUT_THRESHOLD = 272_000;
+/** One model of Codex's catalogue, as scripts/sync-codex-models.ts keeps it. */
+interface CodexCatalogueModel {
+	slug: string;
+	display_name: string;
+	visibility: string;
+	priority: number;
+	minimal_client_version?: string;
+	context_window: number;
+	input_modalities: string[];
+	default_reasoning_level?: ModelThinkingLevel;
+	supported_reasoning_levels: string[];
+	multi_agent_reasoning_effort?: string;
+	use_responses_lite?: boolean;
+	supported_in_api: boolean;
+}
+
+/**
+ * A Codex model's reasoning levels as Codex drives them: a level Codex does not offer is unsupported,
+ * and Ultra is local orchestration intent sent as the model's multi-agent effort, else max, else its
+ * highest other level (codex-rs ModelInfo::resolve_reasoning_effort).
+ */
+function codexThinkingLevelMap(entry: CodexCatalogueModel): NonNullable<Model<Api>["thinkingLevelMap"]> {
+	const levels = new Set(entry.supported_reasoning_levels);
+	const map: NonNullable<Model<Api>["thinkingLevelMap"]> = { off: levels.has("none") ? "none" : null };
+	for (const level of ["minimal", "low", "medium", "high"] as const) {
+		if (!levels.has(level)) map[level] = null;
+		else if (level === "minimal") map.minimal = "minimal";
+	}
+	for (const level of ["xhigh", "max"] as const) {
+		if (levels.has(level)) map[level] = level;
+	}
+	if (levels.has("ultra")) {
+		const others = entry.supported_reasoning_levels.filter((level) => level !== "ultra");
+		map.ultra = entry.multi_agent_reasoning_effort ?? (levels.has("max") ? "max" : others.at(-1) ?? "medium");
+	}
+	return map;
+}
+
 function withOpenAiLongContextTier(cost: ModelCost): ModelCost {
 	return {
 		...cost,
@@ -427,7 +466,7 @@ function isOpenAiResponsesLiteFamily(modelId: string): boolean {
 
 function supportsUltraThinkingAlias(model: Model<Api>): boolean {
 	return (
-		(model.provider === "openai" || model.provider === "openai-codex") &&
+		model.provider === "openai" &&
 		(model.id === "gpt-5.6" || model.id.includes("gpt-5.6-sol") || model.id.includes("gpt-5.6-terra"))
 	);
 }
@@ -517,12 +556,6 @@ function applyThinkingLevelMetadata(model: Model<any>, modelId = model.id): void
 	if (supportsUltraThinkingAlias(model)) {
 		// Ultra is a UI reasoning label; supported GPT-5.6 variants receive max on the wire.
 		mergeThinkingLevelMap(model, { ultra: "max" });
-	}
-	if (model.provider === "openai-codex" && modelId === "gpt-6-astra") {
-		// Codex f1aac1e88: Ultra is local orchestration intent, not a wire effort.
-		// core/src/client.rs resolves it through the catalog's multi_agent_reasoning_effort:
-		// Astra selects xhigh; GPT-5.6 Sol/Terra have no override and fall back to max above.
-		mergeThinkingLevelMap(model, { ultra: "xhigh" });
 	}
 	if (model.provider === "openai" && modelId === "gpt-5.5") {
 		mergeThinkingLevelMap(model, { minimal: null });
@@ -2098,27 +2131,13 @@ async function generateModels() {
 		}
 	}
 
-	// OpenAI Codex (ChatGPT OAuth) models
-	// NOTE: These are not fetched from models.dev; we keep a small, explicit list to avoid aliases.
-	// Context windows follow the ChatGPT Codex catalogue, not public API limits.
+	// OpenAI Codex (ChatGPT OAuth) models. ChatGPT subscriptions are not billed per token; the
+	// catalogue mirrors OpenAI's list prices for usage display. The models below predate the pinned
+	// Codex catalogue (it no longer offers them) and keep their explicit entries; the rest follow it.
 	const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 	const CODEX_CONTEXT = 272000;
-	const CODEX_GPT_5_6_CONTEXT = 272000;
-	// Codex's catalogue: context_window 272000, max_context_window 872000 (the long tier).
-	const CODEX_GPT_6_CONTEXT = 272000;
 	const CODEX_SPARK_CONTEXT = 128000;
 	const CODEX_MAX_TOKENS = 128000;
-	// ChatGPT subscriptions are not billed per token; the catalogue mirrors OpenAI's list prices
-	// for usage display, so a Codex GPT-5.6 entry follows the listed openai entry (tiers included)
-	// and falls back to the same numbers only while the catalogue lags.
-	const openAiListCost = (id: string, fallback: ModelCost): ModelCost => {
-		const listed = allModels.find((model) => model.provider === "openai" && model.id === id);
-		if (!listed) return withOpenAiLongContextTier(fallback);
-		return {
-			...listed.cost,
-			...(listed.cost.tiers ? { tiers: listed.cost.tiers.map((tier) => ({ ...tier })) } : {}),
-		};
-	};
 	const codexModels: Model<"openai-codex-responses">[] = [
 		{
 			id: "gpt-5.2",
@@ -2180,79 +2199,47 @@ async function generateModels() {
 			contextWindow: CODEX_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
-		{
-			id: "gpt-5.5",
-			name: "GPT-5.5",
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: CODEX_BASE_URL,
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
-			contextWindow: CODEX_CONTEXT,
-			maxTokens: CODEX_MAX_TOKENS,
-		},
-		{
-			id: "gpt-5.6-sol",
-			name: "GPT-5.6 Sol",
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: CODEX_BASE_URL,
-			reasoning: true,
-			defaultThinkingLevel: "low",
-			openaiResponsesLite: true,
-			input: ["text", "image"],
-			cost: openAiListCost("gpt-5.6-sol", { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 }),
-			contextWindow: CODEX_GPT_5_6_CONTEXT,
-			maxTokens: CODEX_MAX_TOKENS,
-		},
-		{
-			id: "gpt-5.6-terra",
-			name: "GPT-5.6 Terra",
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: CODEX_BASE_URL,
-			reasoning: true,
-			defaultThinkingLevel: "medium",
-			openaiResponsesLite: true,
-			input: ["text", "image"],
-			cost: openAiListCost("gpt-5.6-terra", { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 }),
-			contextWindow: CODEX_GPT_5_6_CONTEXT,
-			maxTokens: CODEX_MAX_TOKENS,
-		},
-		{
-			id: "gpt-5.6-luna",
-			name: "GPT-5.6 Luna",
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: CODEX_BASE_URL,
-			reasoning: true,
-			defaultThinkingLevel: "medium",
-			openaiResponsesLite: true,
-			input: ["text", "image"],
-			cost: openAiListCost("gpt-5.6-luna", { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 }),
-			contextWindow: CODEX_GPT_5_6_CONTEXT,
-			maxTokens: CODEX_MAX_TOKENS,
-		},
-		{
-			// From Codex's bundled catalogue (openai/codex ed391d4dd, 2026-09-03): Responses Lite,
-			// websockets preferred, image input, reasoning low..ultra with low as the default, hidden
-			// from Codex's own picker while it rolls out. The cost mirrors the OpenAI list price
-			// (ChatGPT plans are not billed per token); models.dev takes over once it lists the model.
-			id: "gpt-6-astra",
-			name: "GPT-6 Astra",
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: CODEX_BASE_URL,
-			reasoning: true,
-			defaultThinkingLevel: "low",
-			openaiResponsesLite: true,
-			input: ["text", "image"],
-			cost: openAiListCost("gpt-6-astra", { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }),
-			contextWindow: CODEX_GPT_6_CONTEXT,
-			maxTokens: CODEX_MAX_TOKENS,
-		},
 	];
+	// Every model Codex's own catalogue offers for picking (scripts/data/codex-models.json, pinned by
+	// scripts/sync-codex-models.ts) is derived from it: which models exist, their context window,
+	// image input, Responses Lite, and reasoning levels. Pricing and the output cap are not in Codex's
+	// catalogue and come from the public listing of the same OpenAI model: models.dev's, then
+	// OpenRouter's. A model neither lists is left out with a warning instead of given invented numbers.
+	const codexCatalogue = JSON.parse(readFileSync(join(__dirname, "data", "codex-models.json"), "utf8")) as {
+		models: CodexCatalogueModel[];
+	};
+	for (const entry of codexCatalogue.models) {
+		if (entry.visibility !== "list") continue;
+		const listing =
+			allModels.find((model) => model.provider === "openai" && model.id === entry.slug) ??
+			allModels.find((model) => model.provider === "openrouter" && model.id === `openai/${entry.slug}`);
+		if (!listing) {
+			// Published without a price would read as free; it is left out until a listing names one.
+			console.warn(`Codex model ${entry.slug} left out: no OpenAI or OpenRouter listing names its price and output cap`);
+			continue;
+		}
+		const levels = new Set(entry.supported_reasoning_levels);
+		codexModels.push({
+			id: entry.slug,
+			name: entry.display_name,
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: levels.size > 0,
+			...(entry.default_reasoning_level ? { defaultThinkingLevel: entry.default_reasoning_level } : {}),
+			thinkingLevelMap: codexThinkingLevelMap(entry),
+			...(entry.use_responses_lite ? { openaiResponsesLite: true } : {}),
+			input: entry.input_modalities.filter((modality): modality is "text" | "image" =>
+				modality === "text" || modality === "image",
+			),
+			cost: {
+				...listing.cost,
+				...(listing.cost.tiers ? { tiers: listing.cost.tiers.map((tier) => ({ ...tier })) } : {}),
+			},
+			contextWindow: entry.context_window,
+			maxTokens: listing.maxTokens,
+		});
+	}
 	allModels.push(...codexModels);
 
 	// Add missing Mistral Medium 3.5 model until models.dev includes it

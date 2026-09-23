@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
 	consumeOpenAICodexRateLimitResetCredit,
+	listOpenAICodexAccountModels,
 	listOpenAICodexRateLimitResetCredits,
+	OPENAI_CODEX_CLIENT_VERSION,
 	resolveOpenAICodexAccountEndpoint,
 } from "../src/providers/openai-codex-account.ts";
 
@@ -27,6 +29,48 @@ describe("OpenAI Codex account client", () => {
 		expect(resolveOpenAICodexAccountEndpoint("https://example.test/api/codex/responses", "usage")).toBe(
 			"https://example.test/api/codex/usage",
 		);
+	});
+
+	it("lists the account's models for the Codex client version pi speaks", async () => {
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = new URL(String(input));
+			expect(`${url.origin}${url.pathname}`).toBe("https://chatgpt.com/backend-api/codex/models");
+			expect(url.searchParams.get("client_version")).toBe(OPENAI_CODEX_CLIENT_VERSION);
+			expect(new Headers(init?.headers).get("chatgpt-account-id")).toBe("account-123");
+			return new Response(
+				JSON.stringify({
+					models: [
+						{
+							slug: "gpt-5.6-sol",
+							display_name: "GPT-5.6 Sol",
+							visibility: "list",
+							supported_in_api: true,
+							priority: 4,
+						},
+						{ slug: "codex-auto-review", visibility: "hide", supported_in_api: true, priority: 43 },
+					],
+				}),
+				{ status: 200 },
+			);
+		});
+		await expect(
+			listOpenAICodexAccountModels({ accessToken: createAccessToken(), fetch: fetchMock }),
+		).resolves.toEqual([
+			{ slug: "gpt-5.6-sol", displayName: "GPT-5.6 Sol", visibility: "list", supportedInApi: true, priority: 4 },
+			{
+				slug: "codex-auto-review",
+				displayName: "codex-auto-review",
+				visibility: "hide",
+				supportedInApi: true,
+				priority: 43,
+			},
+		]);
+		await expect(
+			listOpenAICodexAccountModels({
+				accessToken: createAccessToken(),
+				fetch: async () => new Response(JSON.stringify({ detail: "no" }), { status: 200 }),
+			}),
+		).rejects.toThrow("no models list");
 	});
 
 	it("lists detailed reset credits with subscription headers", async () => {

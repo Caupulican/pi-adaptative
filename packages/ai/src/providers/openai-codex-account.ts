@@ -86,10 +86,11 @@ function normalizeAccountBaseUrl(baseUrl?: string): string {
 
 export function resolveOpenAICodexAccountEndpoint(
 	baseUrl: string | undefined,
-	endpoint: "usage" | "reset-credits" | "consume-reset-credit",
+	endpoint: "usage" | "reset-credits" | "consume-reset-credit" | "models",
 ): string {
 	const normalized = normalizeAccountBaseUrl(baseUrl);
 	const usesChatGptPaths = new URL(normalized).pathname.split("/").includes("backend-api");
+	if (endpoint === "models") return `${normalized}${usesChatGptPaths ? "/codex/models" : "/api/codex/models"}`;
 	const suffix = usesChatGptPaths
 		? endpoint === "usage"
 			? "/wham/usage"
@@ -126,8 +127,9 @@ async function readBoundedResponseText(response: Response): Promise<string> {
 
 async function requestAccountJson(
 	options: OpenAICodexAccountRequestOptions,
-	endpoint: "reset-credits" | "consume-reset-credit",
+	endpoint: "reset-credits" | "consume-reset-credit" | "models",
 	init: RequestInit,
+	query?: Record<string, string>,
 ): Promise<unknown> {
 	const fetchImpl = options.fetch ?? globalThis.fetch;
 	if (typeof fetchImpl !== "function") throw new OpenAICodexAccountError("Fetch is unavailable in this runtime");
@@ -135,7 +137,9 @@ async function requestAccountJson(
 	new Headers(init.headers).forEach((value, key) => {
 		headers.set(key, value);
 	});
-	const response = await fetchImpl(resolveOpenAICodexAccountEndpoint(options.baseUrl, endpoint), {
+	const url = new URL(resolveOpenAICodexAccountEndpoint(options.baseUrl, endpoint));
+	for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
+	const response = await fetchImpl(url.toString(), {
 		...init,
 		headers,
 		signal: options.signal,
@@ -205,4 +209,55 @@ export async function consumeOpenAICodexRateLimitResetCredit(
 		throw new OpenAICodexAccountError(`OpenAI Codex account response has unknown reset outcome: ${outcome}`);
 	}
 	return { outcome, windowsReset: requiredInteger(json, "windows_reset") };
+}
+
+/**
+ * The Codex client release whose model protocol pi's Codex transport speaks. The models endpoint
+ * lists only the models a client of this version may use, so it is part of what the account can use.
+ * It is the release scripts/data/codex-models.json was pinned from (scripts/sync-codex-models.ts),
+ * so the model catalogue and what the account is asked for always name the same release.
+ */
+export const OPENAI_CODEX_CLIENT_VERSION = "0.156.1";
+
+export interface OpenAICodexAccountModel {
+	slug: string;
+	displayName: string;
+	/** `list` models are offered for picking; `hide` models exist but are not meant to be chosen. */
+	visibility: string;
+	supportedInApi: boolean;
+	/** Lower comes first: the Codex CLI's own default is the first listed model. */
+	priority: number;
+}
+
+function parseAccountModel(value: unknown): OpenAICodexAccountModel {
+	if (!isRecord(value)) throw new OpenAICodexAccountError("OpenAI Codex models response has an invalid model");
+	const supportedInApi = value.supported_in_api;
+	if (typeof supportedInApi !== "boolean") {
+		throw new OpenAICodexAccountError("OpenAI Codex models response has invalid supported_in_api");
+	}
+	return {
+		slug: requiredString(value, "slug"),
+		displayName: optionalString(value, "display_name") ?? requiredString(value, "slug"),
+		visibility: requiredString(value, "visibility"),
+		supportedInApi,
+		priority: requiredInteger(value, "priority"),
+	};
+}
+
+/** The models this ChatGPT account may use with Codex, as the Codex CLI asks for them. */
+export async function listOpenAICodexAccountModels(
+	options: OpenAICodexAccountRequestOptions & { clientVersion?: string },
+): Promise<OpenAICodexAccountModel[]> {
+	const json = await requestAccountJson(
+		options,
+		"models",
+		{ method: "GET" },
+		{
+			client_version: options.clientVersion ?? OPENAI_CODEX_CLIENT_VERSION,
+		},
+	);
+	if (!isRecord(json) || !Array.isArray(json.models)) {
+		throw new OpenAICodexAccountError("OpenAI Codex models response has no models list");
+	}
+	return json.models.map(parseAccountModel);
 }

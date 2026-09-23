@@ -155,7 +155,10 @@ function isRetryableError(status: number, errorText: string): boolean {
 	if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) {
 		return true;
 	}
-	return /rate.?limit|overloaded|service.?unavailable|upstream.?connect|connection.?refused/i.test(errorText);
+	// `slow_down` is the Codex backend's rate-limit code (the Codex CLI retries it as one since 0.156).
+	return /rate.?limit|slow_down|overloaded|service.?unavailable|upstream.?connect|connection.?refused/i.test(
+		errorText,
+	);
 }
 
 function getRetryAfterDelayMs(headers: Headers): number | undefined {
@@ -255,9 +258,25 @@ function parseCodexSubscriptionRateLimits(headers: Headers): CodexRateLimitSnaps
 		.filter((snapshot) => snapshot.primary || snapshot.secondary || snapshot.limitName);
 }
 
+/** Codex's credits beside the windows: usage past a window draws on them. Both flags or nothing. */
+function parseCodexCreditsSnapshot(
+	headers: Headers,
+): { hasCredits: boolean; unlimited: boolean; balance?: string } | undefined {
+	const flag = (name: string): boolean | undefined => {
+		const raw = headers.get(name)?.trim().toLowerCase();
+		return raw === "true" || raw === "1" ? true : raw === "false" || raw === "0" ? false : undefined;
+	};
+	const hasCredits = flag("x-codex-credits-has-credits");
+	const unlimited = flag("x-codex-credits-unlimited");
+	if (hasCredits === undefined || unlimited === undefined) return undefined;
+	const balance = headers.get("x-codex-credits-balance")?.trim() || undefined;
+	return { hasCredits, unlimited, ...(balance ? { balance } : {}) };
+}
+
 function appendCodexSubscriptionRateLimitDiagnostics(output: AssistantMessage, headers: Headers): void {
 	const snapshots = parseCodexSubscriptionRateLimits(headers);
-	if (snapshots.length === 0) return;
+	const credits = parseCodexCreditsSnapshot(headers);
+	if (snapshots.length === 0 && !credits) return;
 	output.diagnostics = [
 		...(output.diagnostics ?? []),
 		{
@@ -267,6 +286,7 @@ function appendCodexSubscriptionRateLimitDiagnostics(output: AssistantMessage, h
 				rollover: "server_reset_at_epoch_seconds",
 				unit: "subscription_metered_limit_window",
 				rateLimits: snapshots,
+				...(credits ? { credits } : {}),
 			},
 		},
 	];

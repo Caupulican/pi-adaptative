@@ -169,9 +169,12 @@ describe("classifyFailure", () => {
 	it("classifies every provider signature row before the generic ladder", () => {
 		for (const [provider, signatures] of Object.entries(PROVIDER_FAILURE_SIGNATURES)) {
 			for (const signature of signatures) {
-				const message = signature.source.includes("openai-codex")
-					? "You have hit your ChatGPT usage limit (plus plan). Try again in ~90 min."
-					: signature.pattern.source;
+				const message =
+					signature.reason === "billing_or_quota" && provider === "openai-codex"
+						? "You have hit your ChatGPT usage limit (plus plan). Try again in ~90 min."
+						: signature.reason === "model_unsupported" && provider === "openai-codex"
+							? "Codex error (status 400): The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account."
+							: signature.pattern.source;
 				const c = classifyFailure({ provider, message });
 				expect(c.reason, `${provider} ${signature.source}`).toBe(signature.reason);
 				if (signature.reason === "billing_or_quota") {
@@ -180,6 +183,27 @@ describe("classifyFailure", () => {
 				}
 			}
 		}
+	});
+
+	it("classifies a model the account cannot use as unsupported, never retried as-is", () => {
+		for (const message of [
+			"Codex error (status 400): The 'gpt-5.3-codex-spark' model is not supported when using Codex with a ChatGPT account.",
+			'400 {"error":{"code":"model_not_supported","message":"The requested model is not supported."}}',
+		]) {
+			expect(classifyFailure({ message, provider: "openai-codex" }), message).toMatchObject({
+				reason: "model_unsupported",
+				retryable: false,
+				shouldFallback: true,
+			});
+		}
+		expect(classifyFailure({ message: "This feature is not supported for streaming." }).reason).toBe("unknown");
+	});
+
+	it("classifies the Codex backend's slow_down code as a retryable rate limit", () => {
+		expect(classifyFailure({ message: "Codex error (code slow_down): Please slow down." })).toMatchObject({
+			reason: "rate_limit",
+			retryable: true,
+		});
 	});
 
 	it("precedence: overflow beats retryable patterns; billing beats rate-limit words", () => {

@@ -1,12 +1,22 @@
 ## [Unreleased]
 
+### Changed
+
+- `OPENAI_CODEX_CLIENT_VERSION` is 0.156.1, the release the Codex catalogue is pinned from, so the account is asked for the models that release serves (GPT-6 Sol and Luna need 0.155.0).
+
 ### Added
 
+- ChatGPT Codex models come from the Codex CLI's own catalogue, pinned at release rust-v0.156.1 (`scripts/sync-codex-models.ts` writes `scripts/data/codex-models.json`): which models exist, their context window, image input, Responses Lite and reasoning levels, with Ultra sent as each model's own effort. Prices and the output cap come from models.dev's OpenAI listing, then OpenRouter's; a model neither lists is left out with a warning. This adds GPT-6 Sol and GPT-6 Luna.
+- Codex responses report the account's credits (`x-codex-credits-*`) beside the usage windows in the `openai_codex_subscription_rate_limits` diagnostic.
+- `listOpenAICodexAccountModels()`: the models a ChatGPT account may use with Codex, asked of the Codex models endpoint with the client version pi's Codex transport speaks (`OPENAI_CODEX_CLIENT_VERSION`).
 - `Model.kind`: `"judge"` marks a System One engine (TypeSafe's Jev, directly or through OpenRouter) that answers typed questions and is never allocated to a conversation; the catalog generator sets it.
 - `OAuthProviderInterface.needsRefresh(credentials)`: an optional provider hook that declares unexpired stored credentials stale (stored by an older provider version); `getOAuthApiKey` refreshes them like expired ones.
 
 ### Fixed
 
+- A Codex `slow_down` rejection is retried as a rate limit, as the Codex CLI does since 0.156.
+- An incomplete Responses answer is a length stop only when the output cap ended it; a content filter is reported as an error with its reason.
+- A Codex token exchange or refresh error never contains a token: echoed submitted values and token fields are redacted, and a response missing fields names the fields instead of printing the body.
 - Google Antigravity models run at their own catalog thinking budget. Pi mapped its thinking level onto them, and the service rejects the `MINIMAL` level every Gemini model received with thinking off (HTTP 400) and any level on GPT-OSS. Each model now declares the one thinking level its budget stands for, and the answer's output cap runs on top of the budget, as Anthropic requires.
 - Antigravity tools reach Claude and GPT models: their upstreams read only the OpenAPI `parameters` field, so Claude received no input schema (HTTP 400) and GPT called tools with no arguments. `Model.upstream`, from the catalog's backend, selects the field.
 - An Antigravity stream that opens with a role-only event no longer fails as invalid content.

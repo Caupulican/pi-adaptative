@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Fixed
+
+- A `slow_down` failure code classifies as a retryable rate limit.
+
+### Added
+
+- Failure class `model_unsupported`: the provider refuses the model for the credential in use (for example a Codex model not on a ChatGPT plan). It is never retried as-is; `RetryController.prepareModelSwitchRetry()` re-sends the request at once after the host has switched the model, counted against the same retry ceiling.
+
 ## [0.99.43] - 2026-09-22
 
 ## [0.99.42] - 2026-09-22

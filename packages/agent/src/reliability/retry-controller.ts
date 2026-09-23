@@ -112,6 +112,34 @@ export class RetryController {
 	}
 
 	/**
+	 * Re-send the failed request on another model at once: the host has already switched the model
+	 * (the failure was about the model itself, so waiting would not help). Drops the trailing assistant
+	 * error and counts one attempt against the same ceiling as a retry.
+	 * @returns true if the caller should continue the agent, false when retries are off or used up.
+	 */
+	prepareModelSwitchRetry(message: AssistantMessage, detail: string): boolean {
+		const policy = this.getPolicy();
+		if (!policy.enabled) return false;
+		const nextAttempt = this._attempt + 1;
+		if (nextAttempt > policy.maxAttempts) return false;
+		this._attempt = nextAttempt;
+		this.startAttempt(policy.maxAttempts, 0, `${message.errorMessage || "Unknown error"} ${detail}`.trim());
+		return true;
+	}
+
+	/**
+	 * Announce the attempt just counted and drop the trailing assistant error from live agent state
+	 * (the host session keeps it in history), so the continuation re-sends the request.
+	 */
+	private startAttempt(maxAttempts: number, delayMs: number, errorMessage: string): void {
+		this.events.onRetryStart({ attempt: this._attempt, maxAttempts, delayMs, errorMessage });
+		const messages = this.agent.state.messages;
+		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+			this.agent.state.messages = messages.slice(0, -1);
+		}
+	}
+
+	/**
 	 * Classify `message`; if it is retryable and attempts remain, drop the trailing assistant
 	 * error from agent state, emit the start event, and wait out the backoff (abortable).
 	 * @returns true if the caller should continue the agent, false otherwise.
@@ -151,18 +179,7 @@ export class RetryController {
 		// queue as steering instead of racing the retry continuation.
 		this._abortController = new AbortController();
 
-		this.events.onRetryStart({
-			attempt: this._attempt,
-			maxAttempts,
-			delayMs,
-			errorMessage: message.errorMessage || "Unknown error",
-		});
-
-		// Remove the trailing assistant error from live agent state (the host session keeps it in history).
-		const messages = this.agent.state.messages;
-		if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-			this.agent.state.messages = messages.slice(0, -1);
-		}
+		this.startAttempt(maxAttempts, delayMs, message.errorMessage || "Unknown error");
 
 		try {
 			await sleepAbortable(delayMs, this._abortController.signal);

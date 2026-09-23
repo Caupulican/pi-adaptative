@@ -24,6 +24,8 @@ export type FailureReason =
 	| "context_overflow"
 	| "auth"
 	| "billing_or_quota"
+	/** The provider refuses this model for the credential in use (not on the account's plan). */
+	| "model_unsupported"
 	| "aborted"
 	| "unknown";
 
@@ -50,8 +52,14 @@ export interface ClassifyFailureInput {
 
 const BILLING_OR_QUOTA =
 	/GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing|usage.?limit(?:s)?\s*(?:reached|exceeded|hit)|usage_limit_reached|hit your usage limit|hit your ChatGPT usage limit/i;
+/**
+ * The account cannot use the requested model at all, as opposed to having run out of it. Retrying the
+ * same request is futile; the host moves the turn to a model the account has.
+ */
+const MODEL_UNSUPPORTED =
+	/\bmodel\b[^.\n]{0,80}\bis not supported (?:when using|for|with|on)\b|\bmodel_not_supported\b/i;
 const AUTH = /\b401\b|unauthorized|invalid.?api.?key|authentication.?error|forbidden|permission.?denied/i;
-const RATE_LIMIT = /rate.?limit|too many requests|(?<![A-Za-z0-9])429(?![A-Za-z0-9])/i;
+const RATE_LIMIT = /rate.?limit|\bslow_down\b|too many requests|(?<![A-Za-z0-9])429(?![A-Za-z0-9])/i;
 const OVERLOADED = /overloaded/i;
 const STREAM_STALL =
 	/stream stalled|ended without|stream ended before message_stop|stream ended before a terminal response event|reset before headers/i;
@@ -143,7 +151,10 @@ export function classifyFailure(input: ClassifyFailureInput): ClassifiedError {
 				...base,
 				reason: signature.reason,
 				shouldCompact: signature.shouldCompact ?? false,
-				shouldFallback: signature.reason === "billing_or_quota" || signature.reason === "auth",
+				shouldFallback:
+					signature.reason === "billing_or_quota" ||
+					signature.reason === "auth" ||
+					signature.reason === "model_unsupported",
 				shouldRotateCredential: signature.reason === "auth",
 				retryable:
 					signature.reason === "rate_limit" ||
@@ -157,6 +168,8 @@ export function classifyFailure(input: ClassifyFailureInput): ClassifiedError {
 	// An output runaway (the stream guard ended a degenerate loop) is never retried as-is: the same
 	// prompt reproduces the loop. The host records it and lets the goal loop change approach.
 	if (/^output runaway:/i.test(message)) return { ...base, reason: "runaway_output", retryable: false };
+	if (MODEL_UNSUPPORTED.test(message))
+		return withRetry({ ...base, reason: "model_unsupported", shouldFallback: true });
 	if (BILLING_OR_QUOTA.test(message)) return withRetry({ ...base, reason: "billing_or_quota", shouldFallback: true });
 	if (AUTH.test(message))
 		return withRetry({ ...base, reason: "auth", shouldRotateCredential: true, shouldFallback: true });

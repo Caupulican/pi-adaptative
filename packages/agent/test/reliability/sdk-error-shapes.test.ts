@@ -139,7 +139,10 @@ const providerRowFixtureCoverage: Record<string, readonly string[]> = {
 	mistral: ["Insufficient credits"],
 	openrouter: ["Insufficient credits"],
 	xai: [XAI_CAPACITY_MESSAGE, XAI_INTERNAL_GENERATION_MESSAGE],
-	"openai-codex": ["You have hit your ChatGPT usage limit"],
+	"openai-codex": [
+		"You have hit your ChatGPT usage limit",
+		"Codex error (status 400): The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account.",
+	],
 };
 
 describe("SDK-rendered provider error messages", () => {

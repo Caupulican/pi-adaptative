@@ -115,12 +115,13 @@ async function* createHighContextFuguUltraEvents(): AsyncIterable<ResponseStream
 	} as unknown as ResponseStreamEvent;
 }
 
-async function* createIncompleteEvents(): AsyncIterable<ResponseStreamEvent> {
+async function* createIncompleteEvents(reason?: string): AsyncIterable<ResponseStreamEvent> {
 	yield {
 		type: "response.incomplete",
 		response: {
 			id: "resp_incomplete",
 			status: "incomplete",
+			...(reason ? { incomplete_details: { reason } } : {}),
 			usage: {
 				input_tokens: 30,
 				output_tokens: 12,
@@ -626,6 +627,28 @@ describe("OpenAI Responses terminal events", () => {
 		expect(output.usage.input).toBe(25);
 		expect(output.usage.cacheRead).toBe(5);
 		expect(output.usage.output).toBe(12);
+	});
+
+	it("reports an incomplete answer by its reason: the output cap is a length stop, a filter is an error", async () => {
+		const model = createModel();
+		const capped = createOutput(model);
+		await processResponsesStream(
+			createIncompleteEvents("max_output_tokens"),
+			capped,
+			new AssistantMessageEventStream(),
+			model,
+		);
+		expect(capped.stopReason).toBe("length");
+
+		const filtered = createOutput(model);
+		await processResponsesStream(
+			createIncompleteEvents("content_filter"),
+			filtered,
+			new AssistantMessageEventStream(),
+			model,
+		);
+		expect(filtered.stopReason).toBe("error");
+		expect(filtered.errorMessage).toBe("Response incomplete: content_filter");
 	});
 
 	it("emits output text deltas even when content_part.added is absent", async () => {

@@ -81,10 +81,31 @@ async function fetchWithLoginCancellation(input: string, init: RequestInit): Pro
 	}
 }
 
-async function readTokenResponse(response: Response, operation: TokenOperation): Promise<OAuthToken> {
+/**
+ * A token endpoint error body can echo what was submitted (a refresh token, an authorization code),
+ * and a token response carries credentials: neither reaches an error message unredacted.
+ */
+function redactTokenText(text: string, submitted: readonly string[]): string {
+	let redacted = text.replace(
+		/("(?:access_token|refresh_token|id_token|code|code_verifier)"\s*:\s*")[^"]*"/g,
+		'$1[REDACTED]"',
+	);
+	for (const secret of submitted) {
+		if (secret) redacted = redacted.split(secret).join("[REDACTED]");
+	}
+	return redacted;
+}
+
+async function readTokenResponse(
+	response: Response,
+	operation: TokenOperation,
+	submitted: readonly string[],
+): Promise<OAuthToken> {
 	if (!response.ok) {
 		const text = await response.text().catch(() => "");
-		throw new Error(`OpenAI Codex token ${operation} failed (${response.status}): ${text || response.statusText}`);
+		throw new Error(
+			`OpenAI Codex token ${operation} failed (${response.status}): ${redactTokenText(text, submitted) || response.statusText}`,
+		);
 	}
 
 	const rawJson = await response.json();
@@ -94,7 +115,12 @@ async function readTokenResponse(response: Response, operation: TokenOperation):
 		expires_in?: number;
 	} | null;
 	if (!json?.access_token || !json.refresh_token || typeof json.expires_in !== "number") {
-		throw new Error(`OpenAI Codex token ${operation} response missing fields: ${JSON.stringify(json)}`);
+		const missing = [
+			...(json?.access_token ? [] : ["access_token"]),
+			...(json?.refresh_token ? [] : ["refresh_token"]),
+			...(typeof json?.expires_in === "number" ? [] : ["expires_in"]),
+		];
+		throw new Error(`OpenAI Codex token ${operation} response missing fields: ${missing.join(", ")}`);
 	}
 
 	return {
@@ -123,7 +149,7 @@ async function exchangeAuthorizationCode(
 		signal,
 	});
 
-	return readTokenResponse(response, "exchange");
+	return readTokenResponse(response, "exchange", [code, verifier]);
 }
 
 async function refreshAccessToken(refreshToken: string): Promise<OAuthToken> {
@@ -142,7 +168,7 @@ async function refreshAccessToken(refreshToken: string): Promise<OAuthToken> {
 		throw new Error(`OpenAI Codex token refresh error: ${error instanceof Error ? error.message : String(error)}`);
 	}
 
-	return readTokenResponse(response, "refresh");
+	return readTokenResponse(response, "refresh", [refreshToken]);
 }
 
 async function startOpenAICodexDeviceAuth(signal?: AbortSignal): Promise<DeviceAuthInfo> {

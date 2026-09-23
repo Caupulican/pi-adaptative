@@ -55,5 +55,10 @@ export const PROVIDER_FAILURE_SIGNATURES: Record<string, readonly ProviderSignat
 			pattern: /You have hit your ChatGPT usage limit/i,
 			source: "packages/ai/src/providers/openai-codex-responses.ts:1402",
 		},
+		{
+			reason: "model_unsupported",
+			pattern: /model is not supported when using Codex with a ChatGPT account/i,
+			source: "corpus:openai-codex status 400 for gpt-5.3-codex-spark and gpt-5.4 on a ChatGPT account",
+		},
 	],
 };

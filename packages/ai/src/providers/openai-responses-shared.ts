@@ -703,8 +703,14 @@ export async function processResponsesStream<TApi extends Api>(
 			options.applyServiceTierPricing(output.usage, serviceTier);
 		}
 		applyResponseOutput(response.output ?? []);
-		// Map status to stop reason
+		// Map status to stop reason. An incomplete response is a length stop only when the output cap
+		// ended it; any other reason (a content filter) ended the answer early and is reported as such.
 		output.stopReason = mapStopReason(response?.status);
+		const incompleteReason = response?.status === "incomplete" ? response.incomplete_details?.reason : undefined;
+		if (incompleteReason && incompleteReason !== "max_output_tokens") {
+			output.stopReason = "error";
+			output.errorMessage = `Response incomplete: ${incompleteReason}`;
+		}
 		if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
 			output.stopReason = "toolUse";
 		}

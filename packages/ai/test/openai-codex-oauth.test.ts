@@ -470,4 +470,27 @@ describe("OpenAI Codex OAuth", () => {
 		);
 		expect(consoleError).not.toHaveBeenCalled();
 	});
+
+	it("never puts a submitted or returned token in a refresh error", async () => {
+		const accessToken = createAccessToken("account-leak");
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async (): Promise<Response> =>
+					new Response(`{"error":"invalid_grant","refresh_token":"echoed-refresh-token"} echoed-refresh-token`, {
+						status: 400,
+					}),
+			),
+		);
+		const echoed = await refreshOpenAICodexToken("echoed-refresh-token").catch((error: Error) => error.message);
+		expect(echoed).toContain("invalid_grant");
+		expect(echoed).not.toContain("echoed-refresh-token");
+
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => jsonResponse({ access_token: accessToken, refresh_token: "returned-refresh-token" })),
+		);
+		const missing = await refreshOpenAICodexToken("old-refresh-token").catch((error: Error) => error.message);
+		expect(missing).toBe("OpenAI Codex token refresh response missing fields: expires_in");
+	});
 });
