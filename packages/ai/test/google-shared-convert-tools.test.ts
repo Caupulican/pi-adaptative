@@ -11,7 +11,7 @@ function makeTool(parameters: Record<string, unknown>): Tool {
 }
 
 describe("google-shared convertTools", () => {
-	it("strips JSON Schema meta keys from parameters when useParameters=true", () => {
+	it("leaves JSON Schema meta keys out of parameters when useParameters=true", () => {
 		const tools = [
 			makeTool({
 				$schema: "http://json-schema.org/draft-07/schema#",
@@ -78,31 +78,69 @@ describe("google-shared convertTools", () => {
 		});
 	});
 
-	it("preserves $ref while stripping meta keys", () => {
+	it("inlines a local $ref and leaves out one that resolves nowhere", () => {
 		const tools = [
 			makeTool({
 				$schema: "http://json-schema.org/draft-07/schema#",
+				$defs: { mode: { type: "string", enum: ["fast", "slow"] } },
 				type: "object",
 				properties: {
-					refProp: {
-						$ref: "#/$defs/someDef",
-						type: "string",
-					},
+					mode: { $ref: "#/$defs/mode", description: "How to run" },
+					dangling: { $ref: "#/$defs/missing", type: "string" },
 				},
 			}),
 		];
 
-		const result = convertTools(tools, true);
-		const decl = result?.[0]?.functionDeclarations?.[0];
+		const decl = convertTools(tools, true)?.[0]?.functionDeclarations?.[0];
 
-		expect(decl).toBeDefined();
 		expect(decl?.parameters).toEqual({
 			type: "object",
 			properties: {
-				refProp: {
-					$ref: "#/$defs/someDef",
-					type: "string",
+				mode: { type: "string", enum: ["fast", "slow"], description: "How to run" },
+				dangling: { type: "string" },
+			},
+		});
+	});
+
+	it("writes JSON Schema keywords the OpenAPI subset lacks in the forms it has", () => {
+		const tools = [
+			makeTool({
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					action: { const: "start", type: "string" },
+					budget: { type: "number", exclusiveMinimum: 0 },
+					note: { type: ["string", "null"] },
+					choice: {
+						anyOf: [
+							{ const: "a", type: "string" },
+							{ const: "b", type: "string" },
+						],
+					},
+					either: {
+						oneOf: [
+							{ type: "object", properties: { x: { type: "string" } }, required: ["x"] },
+							{ type: "object", properties: { y: { type: "number" } }, required: ["y"] },
+						],
+					},
+					maybe: { anyOf: [{ type: "string" }, { type: "null" }] },
+					mixed: { anyOf: [{ type: "string" }, { type: "number" }] },
 				},
+			}),
+		];
+
+		const decl = convertTools(tools, true)?.[0]?.functionDeclarations?.[0];
+
+		expect(decl?.parameters).toEqual({
+			type: "object",
+			properties: {
+				action: { type: "string", enum: ["start"] },
+				budget: { type: "number", minimum: 0 },
+				note: { type: "string", nullable: true },
+				choice: { type: "string", enum: ["a", "b"] },
+				either: { type: "object", properties: { x: { type: "string" }, y: { type: "number" } } },
+				maybe: { type: "string", nullable: true },
+				mixed: { type: "string", description: "Also accepts: number." },
 			},
 		});
 	});

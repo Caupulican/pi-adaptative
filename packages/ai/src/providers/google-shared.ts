@@ -387,31 +387,144 @@ export function convertMessages<T extends GoogleApiType>(
 	return contents;
 }
 
-const JSON_SCHEMA_META_DECLARATIONS = new Set([
-	"$schema",
-	"$id",
-	"$anchor",
-	"$dynamicAnchor",
-	"$vocabulary",
-	"$comment",
-	"$defs",
-	"definitions", // pre-draft-2019-09 equivalent of $defs
+/** The fields of the API's OpenAPI-subset `Schema`; any other field is rejected as an unknown name. */
+const OPENAPI_SCHEMA_FIELDS = new Set([
+	"anyOf",
+	"default",
+	"description",
+	"enum",
+	"example",
+	"format",
+	"items",
+	"maxItems",
+	"maxLength",
+	"maxProperties",
+	"maximum",
+	"minItems",
+	"minLength",
+	"minProperties",
+	"minimum",
+	"nullable",
+	"pattern",
+	"properties",
+	"propertyOrdering",
+	"required",
+	"title",
+	"type",
 ]);
 
-/**
- * Strip meta-declarations from a schema obj
- */
-function sanitizeForOpenApi(schema: unknown): unknown {
-	if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
-		return schema;
-	}
+type JsonObject = Record<string, unknown>;
 
-	const result: Record<string, unknown> = {};
-	for (const [key, value] of Object.entries(schema)) {
-		if (JSON_SCHEMA_META_DECLARATIONS.has(key)) continue;
-		result[key] = sanitizeForOpenApi(value);
+function isJsonObject(value: unknown): value is JsonObject {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The local definitions a `$ref` may point at: `#/$defs/<name>` or `#/definitions/<name>`. */
+function localDefinitions(schema: JsonObject): Map<string, unknown> {
+	const definitions = new Map<string, unknown>();
+	for (const key of ["$defs", "definitions"]) {
+		const table = schema[key];
+		if (!isJsonObject(table)) continue;
+		for (const [name, value] of Object.entries(table)) definitions.set(`#/${key}/${name}`, value);
 	}
+	return definitions;
+}
+
+/**
+ * Translate a JSON Schema into the OpenAPI subset the `parameters` field accepts. Keywords the subset
+ * lacks are expressed in the nearest form it has (`const` as a one-value `enum`, `oneOf` as `anyOf`,
+ * an exclusive bound as the inclusive one, a `null` member of a type list as `nullable`, a local
+ * `$ref` inlined); anything with no counterpart is left out. The declaration only guides the model:
+ * arguments are still validated against the tool's full schema.
+ */
+function toOpenApiSchema(schema: unknown, definitions: Map<string, unknown>, resolving: ReadonlySet<string>): unknown {
+	if (!isJsonObject(schema)) return schema;
+	let source = schema;
+	const ref = schema.$ref;
+	if (typeof ref === "string" && definitions.has(ref) && !resolving.has(ref)) {
+		const { $ref: _ref, ...siblings } = schema;
+		const target = definitions.get(ref);
+		source = isJsonObject(target) ? { ...target, ...siblings } : siblings;
+		resolving = new Set([...resolving, ref]);
+	}
+	const result: JsonObject = {};
+	for (const [key, value] of Object.entries(source)) {
+		if (key === "properties" && isJsonObject(value)) {
+			result.properties = Object.fromEntries(
+				Object.entries(value).map(([name, property]) => [name, toOpenApiSchema(property, definitions, resolving)]),
+			);
+		} else if (key === "items") {
+			result.items = toOpenApiSchema(value, definitions, resolving);
+		} else if ((key === "anyOf" || key === "oneOf") && Array.isArray(value)) {
+			Object.assign(result, flattenUnion(value.map((member) => toOpenApiSchema(member, definitions, resolving))));
+		} else if (key === "enum" && Array.isArray(value)) {
+			// The subset's enum lists strings.
+			if (value.every((member) => typeof member === "string")) result.enum = value;
+		} else if (key === "type" && Array.isArray(value)) {
+			const types = value.filter((type) => type !== "null");
+			if (types.length !== value.length) result.nullable = true;
+			if (types.length > 0) Object.assign(result, flattenUnion(types.map((type) => ({ type }))));
+		} else if (OPENAPI_SCHEMA_FIELDS.has(key)) {
+			result[key] = value;
+		}
+	}
+	if ("const" in source && result.enum === undefined && typeof source.const === "string") result.enum = [source.const];
+	if (typeof source.exclusiveMinimum === "number" && result.minimum === undefined)
+		result.minimum = source.exclusiveMinimum;
+	if (typeof source.exclusiveMaximum === "number" && result.maximum === undefined)
+		result.maximum = source.exclusiveMaximum;
 	return result;
+}
+
+/**
+ * One schema for a union. The Claude and GPT upstreams reject every `anyOf` that reaches them through
+ * `parameters` (measured: a string-or-null, a literal union and an object union each fail as an
+ * invalid input_schema), so a union is written in the single-schema forms it has: a `null` member as
+ * `nullable`, string literals as one `enum`, object variants as one object with every variant's
+ * properties and only the required keys all variants share. Mixed primitive types keep the first and
+ * name the rest in the description.
+ */
+function flattenUnion(members: readonly unknown[]): JsonObject {
+	const variants = members.filter(isJsonObject);
+	const nullable = variants.some((member) => member.type === "null" || member.nullable === true);
+	const kept = variants.filter((member) => member.type !== "null");
+	const flat: JsonObject = nullable ? { nullable: true } : {};
+	if (kept.length === 0) return flat;
+	if (kept.length === 1) return { ...kept[0], ...flat };
+	const literals = kept.flatMap((member) =>
+		member.type === "string" && Array.isArray(member.enum) ? (member.enum as unknown[]) : [undefined],
+	);
+	if (literals.every((literal) => typeof literal === "string")) {
+		return { type: "string", enum: [...new Set(literals as string[])], ...flat };
+	}
+	if (kept.every((member) => member.type === "object")) {
+		const properties: JsonObject = {};
+		for (const member of kept) {
+			for (const [name, property] of Object.entries(isJsonObject(member.properties) ? member.properties : {})) {
+				if (!(name in properties)) properties[name] = property;
+			}
+		}
+		const requiredBy = kept.map((member) => new Set(Array.isArray(member.required) ? member.required : []));
+		const required = [...requiredBy[0]].filter((name) => requiredBy.every((set) => set.has(name)));
+		const descriptions = kept.map((member) => member.description).filter((text) => typeof text === "string");
+		return {
+			type: "object",
+			properties,
+			...(required.length > 0 ? { required } : {}),
+			...(descriptions.length > 0 ? { description: descriptions.join(" Or: ") } : {}),
+			...flat,
+		};
+	}
+	const [first, ...rest] = kept;
+	const alternatives = [...new Set(rest.map((member) => String(member.type ?? "another shape")))];
+	const description = [first.description, `Also accepts: ${alternatives.join(", ")}.`]
+		.filter((text) => typeof text === "string")
+		.join(" ");
+	return { ...first, description, ...flat };
+}
+
+function sanitizeForOpenApi(schema: unknown): unknown {
+	return toOpenApiSchema(schema, isJsonObject(schema) ? localDefinitions(schema) : new Map(), new Set());
 }
 
 /**
