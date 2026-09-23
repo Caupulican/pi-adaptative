@@ -134,6 +134,8 @@ describe("classifyFailure", () => {
 			// xAI's exhausted subscription: HTTP 402 Payment Required.
 			'OpenAI API error (402): 402 "Grok Build usage balance exhausted"',
 			"402 Payment Required",
+			// OpenRouter's API key at its spending cap.
+			'403: {"message":"Key limit exceeded (total limit). Manage it using https://openrouter.ai/keys","code":403}',
 		]) {
 			const c = classifyFailure({ message: msg });
 			expect(c.retryable, msg).toBe(false);
