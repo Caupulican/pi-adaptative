@@ -2,6 +2,7 @@ import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { Container, Text } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import { ActionTranscriptComponent } from "../src/modes/interactive/components/action-transcript.ts";
+import { ReplyBylineTracker } from "../src/modes/interactive/components/reply-byline.ts";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { messagesForTuiHistoryReload } from "../src/modes/interactive/history-reload-math.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -221,8 +222,15 @@ describe("InteractiveMode TUI reload history cap", () => {
 		ctx.updateEditorBorderColor = vi.fn();
 		ctx.activeToolCalls = { activeEntries: () => [], hasActive: () => false };
 		Object.defineProperty(ctx, "session", {
-			value: { retryAttempt: 0, peekPathAliasTable: () => ({ cwd: process.cwd(), entries: [] }) },
+			value: {
+				retryAttempt: 0,
+				peekPathAliasTable: () => ({ cwd: process.cwd(), entries: [] }),
+				sessionManager: { getEntries: () => [] },
+			},
 		});
+		// Instance fields the constructor initializes, which `Object.create` skips.
+		ctx.replyBylines = new ReplyBylineTracker();
+		ctx.replyRoutes = new Map();
 		ctx.defaultEditor = { addToHistory: vi.fn() };
 		ctx.clearActiveToolCallState = vi.fn();
 		ctx.getMarkdownThemeWithSettings = vi.fn(() => undefined);

@@ -6,6 +6,7 @@ import { createEventBus } from "../src/core/event-bus.ts";
 import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/factory-runtime.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
+import { ReplyBylineTracker } from "../src/modes/interactive/components/reply-byline.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -173,6 +174,9 @@ describe("P2g: path-alias display integrity", () => {
 		ctx.toolOutputExpanded = false;
 		ctx.getMarkdownThemeWithSettings = () => getMarkdownTheme();
 		ctx.trimLiveTuiHistory = () => {};
+		// Instance fields the constructor initializes, which `Object.create` skips.
+		ctx.replyBylines = new ReplyBylineTracker();
+		ctx.replyRoutes = new Map();
 
 		const seenTexts: string[] = [];
 		ctx.transformMarkdownForDisplay = (markdown: string) => {

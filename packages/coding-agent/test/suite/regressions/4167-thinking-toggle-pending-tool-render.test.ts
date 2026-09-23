@@ -6,6 +6,7 @@ import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import { ActionTranscriptComponent } from "../../../src/modes/interactive/components/action-transcript.ts";
 import { ActiveToolCallRegistry } from "../../../src/modes/interactive/components/active-tool-call-registry.ts";
+import { ReplyBylineTracker } from "../../../src/modes/interactive/components/reply-byline.ts";
 import type { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
@@ -39,7 +40,13 @@ type RenderSessionContextThis = {
 		getImageWidthCells(): number;
 	};
 	sessionManager: { getCwd(): string };
-	session: { retryAttempt: number; peekPathAliasTable(): { cwd: string; entries: never[] } };
+	session: {
+		retryAttempt: number;
+		peekPathAliasTable(): { cwd: string; entries: never[] };
+		sessionManager: { getEntries(): never[] };
+	};
+	replyBylines: ReplyBylineTracker;
+	replyRoutes: Map<number, unknown>;
 	toolOutputExpanded: boolean;
 	transcriptActionsExpanded: boolean;
 	isInitialized: boolean;
@@ -73,7 +80,13 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 			getImageWidthCells: () => 60,
 		},
 		sessionManager: { getCwd: () => process.cwd() },
-		session: { retryAttempt: 0, peekPathAliasTable: () => ({ cwd: process.cwd(), entries: [] }) },
+		session: {
+			retryAttempt: 0,
+			peekPathAliasTable: () => ({ cwd: process.cwd(), entries: [] }),
+			sessionManager: { getEntries: () => [] },
+		},
+		replyBylines: new ReplyBylineTracker(),
+		replyRoutes: new Map(),
 		toolOutputExpanded: false,
 		transcriptActionsExpanded: false,
 		isInitialized: true,
