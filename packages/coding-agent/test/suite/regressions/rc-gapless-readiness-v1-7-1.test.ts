@@ -657,9 +657,9 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 					evaluate: async () => ({
 						answers: {
 							acquisition_required_for_objective: { type: "noul", noul: 0.99 },
-							side_effects_proportionate: { type: "noul", noul: 0.99 },
-							safer_existing_route_preferred: { type: "noul", noul: 0.0 },
-							source_matches_requested_capability: { type: "noul", noul: 0.99 },
+							exceeds_request: { type: "noul", noul: 0.0 },
+							runs_unverified_download: { type: "noul", noul: 0.0 },
+							source_mismatch: { type: "noul", noul: 0.0 },
 						},
 					}),
 				},

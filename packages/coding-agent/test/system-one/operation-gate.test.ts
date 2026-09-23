@@ -66,7 +66,7 @@ describe("operation triage", () => {
 		expect(triage("write", { path: "/srv/shared/team.yaml", content: "" })).toMatchObject({
 			kind: "judged",
 			operationKind: "write_outside_task",
-			operation: `write ${resolve("/srv/shared/team.yaml")}`,
+			operation: `write ${resolve(scope, "/srv/shared/team.yaml")}`,
 		});
 	});
 });

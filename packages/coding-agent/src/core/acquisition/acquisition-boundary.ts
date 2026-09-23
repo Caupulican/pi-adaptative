@@ -61,6 +61,8 @@ export function classifyAcquisition(toolName: string, args: unknown): Acquisitio
 export interface AcquisitionBoundaryDeps {
 	getGate(): ExternalCapabilityAcquisitionGate | undefined;
 	getObjectiveId(): string;
+	/** The owner's request this turn serves. */
+	getRequest(): string;
 	/** Bounded operator-visible notice for a blocked or hardened acquisition. */
 	onDecision?(decision: AcquisitionDecision, classification: AcquisitionClassification): void;
 }
@@ -87,6 +89,7 @@ export async function screenAcquisition(
 
 	const decision = await gate.evaluateAcquisition({
 		objectiveId: deps.getObjectiveId(),
+		request: deps.getRequest(),
 		source: classification.command,
 		command: classification.command,
 		signal,

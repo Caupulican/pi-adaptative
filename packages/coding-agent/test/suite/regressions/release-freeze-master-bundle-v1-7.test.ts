@@ -60,12 +60,8 @@ class TestReleaseFreezeJevAdapter {
 				answers[q] = { type: "noul", noul: 0.1 }; // by default, drop old results unless overridden
 			} else if (q === "acquisition_required_for_objective") {
 				answers[q] = { type: "noul", noul: 0.9 };
-			} else if (q === "side_effects_proportionate") {
-				answers[q] = { type: "noul", noul: 0.9 };
-			} else if (q === "safer_existing_route_preferred") {
-				answers[q] = { type: "noul", noul: 0.0 };
-			} else if (q === "source_matches_requested_capability") {
-				answers[q] = { type: "noul", noul: 0.9 };
+			} else if (q === "exceeds_request" || q === "runs_unverified_download" || q === "source_mismatch") {
+				answers[q] = { type: "noul", noul: 0.1 };
 			} else if (q === "worker_stuck" || q === "strategy_repetition") {
 				answers[q] = { type: "noul", noul: 0.9 };
 			} else if (

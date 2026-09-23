@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ExecutionCharter } from "../autonomy/execution-charter.ts";
-import { noulHolds, settledNoul } from "../system-one/policy.ts";
 import type {
 	AcquisitionDecision,
 	AcquisitionDisposition,
@@ -30,32 +29,44 @@ export interface DecisionEngine {
 }
 
 /**
- * The semantic questions of the acquisition gate as a batched boolean program, the shape the
- * session's decision engine actually evaluates. A bare list of question ids is not a program.
+ * The semantic questions of the acquisition gate as a batched boolean program, over the owner's
+ * request and the exact command. One asks whether the request needs the acquisition; three name a
+ * defect, which live System One separates far better than the positive forms (probed: legitimate
+ * installs read at most 0.29 on every defect, a download piped into a shell 0.98, an install the
+ * request never needed 0.96; the positive "proportionate" and "safer route exists" forms read 0.52-0.87
+ * for the same legitimate installs).
  */
 export const ACQUISITION_DECISION_PROGRAM = {
 	program_id: "external_capability_acquisition",
 	decisions: [
 		{
 			id: "acquisition_required_for_objective",
-			instruction: "Is acquiring this external capability required to complete the objective?",
+			instruction: "Does `request` need what `command` downloads or installs in order to be done?",
 		},
 		{
-			id: "side_effects_proportionate",
+			id: "exceeds_request",
+			instruction: "Does `command` install, download or execute more than `request` needs?",
+		},
+		{
+			id: "runs_unverified_download",
 			instruction:
-				"Are the acquisition's side effects (installs, downloads, shell execution) proportionate to the objective?",
+				"Does `command` execute code it downloads before that code is saved and checked, for example by piping a download into a shell?",
 		},
 		{
-			id: "safer_existing_route_preferred",
-			instruction:
-				"Would a safer existing route (a pinned, verified or already-installed alternative) serve the objective instead?",
-		},
-		{
-			id: "source_matches_requested_capability",
-			instruction: "Does the requested source actually provide the requested capability?",
+			id: "source_mismatch",
+			instruction: "Does `source` provide something other than what `request` asks to acquire?",
 		},
 	],
 } as const;
+
+/** A defect this likely is established; a request this unlikely to need the acquisition does not need it. */
+const DEFECT_ESTABLISHED = 0.8;
+const REQUEST_DOES_NOT_NEED = 0.2;
+
+function noulProbability(answer: unknown): number | undefined {
+	const noul = (answer as { noul?: unknown } | undefined)?.noul;
+	return typeof noul === "number" && Number.isFinite(noul) && noul >= 0 && noul <= 1 ? noul : undefined;
+}
 
 export interface ExternalCapabilityAcquisitionGateDeps {
 	steering?: SteeringPlane;
@@ -317,31 +328,24 @@ export class ExternalCapabilityAcquisitionGate {
 				const evalRes = await this.decisionEngine.evaluate(
 					ACQUISITION_DECISION_PROGRAM,
 					{
-						objective_id: request.objectiveId,
-						capability_id: request.capabilityId,
+						request: request.request?.trim() || "(no request recorded)",
+						command: request.command ?? request.source,
 						source: request.source,
+						...(request.capabilityId ? { capability_id: request.capabilityId } : {}),
 					},
-					{ consequence: "low", signal: request.signal },
+					{ consequence: "high", signal: request.signal },
 				);
 				const answers = evalRes.answers ?? {};
 				semanticDecisionObserved = Object.keys(answers).length > 0;
-				// This gate reaches outside the machine, so an undecided answer must not authorize it.
-				// Each judgment keeps the conservative stance it started with unless a band settles it:
-				// the three that must hold need a decisive yes, and the blocker needs a decisive no.
-				if (answers.acquisition_required_for_objective) {
-					acquisitionRequired = noulHolds(answers.acquisition_required_for_objective.noul, "required_true");
-				}
-				if (answers.side_effects_proportionate) {
-					sideEffectsProportionate = noulHolds(answers.side_effects_proportionate.noul, "required_true");
-				}
-				if (answers.safer_existing_route_preferred) {
-					// Undecided leaves the safer route in play rather than clearing the way.
-					saferExistingPreferred =
-						settledNoul(answers.safer_existing_route_preferred.noul, "required_false", true) !== false;
-				}
-				if (answers.source_matches_requested_capability) {
-					sourceMatchesCapability = noulHolds(answers.source_matches_requested_capability.noul, "required_true");
-				}
+				// Each judgment keeps its starting stance unless its answer settles it: the request clearly
+				// not needing the acquisition, or an established defect, changes the disposition; an
+				// unsettled or missing answer changes nothing.
+				const read = (id: string) => noulProbability(answers[id]);
+				const required = read("acquisition_required_for_objective");
+				if (required !== undefined && required <= REQUEST_DOES_NOT_NEED) acquisitionRequired = false;
+				if ((read("exceeds_request") ?? 0) >= DEFECT_ESTABLISHED) sideEffectsProportionate = false;
+				if ((read("runs_unverified_download") ?? 0) >= DEFECT_ESTABLISHED) saferExistingPreferred = true;
+				if ((read("source_mismatch") ?? 0) >= DEFECT_ESTABLISHED) sourceMatchesCapability = false;
 			} catch (error) {
 				// The engine failed: the conservative stance stands, and the failure is reported, not hidden.
 				this.onSemanticFailure?.(error);

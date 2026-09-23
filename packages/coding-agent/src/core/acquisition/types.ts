@@ -24,6 +24,8 @@ export interface ExternalAcquisitionRecord {
 
 export interface AcquisitionRequest {
 	readonly objectiveId: string;
+	/** The owner's request the acquisition serves, for System One's judgment. */
+	readonly request?: string;
 	readonly source: string;
 	readonly command?: string;
 	readonly capabilityId?: string;

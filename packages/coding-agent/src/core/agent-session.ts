@@ -1802,6 +1802,7 @@ export class AgentSession {
 					{
 						getGate: () => this._acquisitionGate,
 						getObjectiveId: () => this._executionCharter?.objective_id ?? this.sessionManager.getSessionId(),
+						getRequest: () => this._lastUserRequest,
 						onDecision: (decision) => {
 							if (!decision.summaryEvent) return;
 							this._emit({ type: "warning", message: decision.summaryEvent });
