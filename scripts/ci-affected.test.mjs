@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
-import { EMPTY_PLAN, FULL_PLAN, isReleaseMetadataSubject, listChangedFiles, planAffected, workspaceOf } from "./ci-affected.mjs";
+import { fileURLToPath } from "node:url";
+import {
+	codingAgentRelatedFiles,
+	codingAgentShards,
+	EMPTY_PLAN,
+	enrichWithScanIncludes,
+	FULL_PLAN,
+	isReleaseMetadataSubject,
+	listChangedFiles,
+	parseCarriedFiles,
+	planAffected,
+	workspaceOf,
+} from "./ci-affected.mjs";
 import { WORKSPACES } from "./workspace-test-plan.mjs";
 
 test("workspaceOf reads the first packages/ segment on POSIX and Windows paths", () => {
@@ -118,6 +131,169 @@ test("a scripts-only change runs the Linux quality job with check and without wo
 	assert.deepEqual(plan.workspaces, []);
 	assert.equal(plan.codingAgent, false);
 	assert.deepEqual(plan.os, ["ubuntu-latest"]);
+});
+
+test("a single coding-agent TypeScript source change narrows to that file for vitest related", () => {
+	const plan = planAffected({ paths: ["packages/coding-agent/src/core/agent-session.ts"] });
+	assert.deepEqual(plan.codingAgentRelatedFiles, ["src/core/agent-session.ts"]);
+	assert.deepEqual(codingAgentShards(plan), [1]);
+});
+
+test("a coding-agent test-file-only change also narrows (vitest related runs that exact file)", () => {
+	const plan = planAffected({ paths: ["packages/coding-agent/test/agent-session-closure-surfaces.test.ts"] });
+	assert.deepEqual(plan.codingAgentRelatedFiles, ["test/agent-session-closure-surfaces.test.ts"]);
+});
+
+test("multiple coding-agent TypeScript changes all narrow together", () => {
+	const plan = planAffected({
+		paths: ["packages/coding-agent/src/a.ts", "packages/coding-agent/src/b.mts"],
+	});
+	assert.deepEqual(plan.codingAgentRelatedFiles, ["src/a.ts", "src/b.mts"]);
+});
+
+test("a non-TypeScript coding-agent change (fixture/asset/python) disables narrowing", () => {
+	for (const path of [
+		"packages/coding-agent/test/fixtures/sample.json",
+		"packages/coding-agent/src/bundled-resources/runtimes/pi-shell-engine/commands/foo.py",
+		"packages/coding-agent/src/modes/interactive/assets/logo.png",
+	]) {
+		const plan = planAffected({ paths: [path, "packages/coding-agent/src/core/agent-session.ts"] });
+		assert.equal(plan.codingAgentRelatedFiles, null, path);
+		assert.deepEqual(codingAgentShards(plan), [1, 2, 3, 4], path);
+	}
+});
+
+test("a change to coding-agent's own vitest config or setupFile disables narrowing", () => {
+	for (const path of ["packages/coding-agent/vitest.config.ts", "packages/coding-agent/test/test-agent-dir-isolation-setup.ts"]) {
+		const plan = planAffected({ paths: [path] });
+		assert.equal(plan.codingAgentRelatedFiles, null, path);
+	}
+});
+
+test("a producer (tui/ai/agent) source change disables coding-agent narrowing even alongside a local change", () => {
+	const plan = planAffected({
+		paths: ["packages/ai/src/index.ts", "packages/coding-agent/src/core/agent-session.ts"],
+	});
+	assert.equal(plan.codingAgentRelatedFiles, null);
+	assert.deepEqual(plan.workspaces, ["packages/ai", "packages/agent", "packages/coding-agent"]);
+});
+
+test("a producer test-only or docs change does not disable coding-agent narrowing", () => {
+	const plan = planAffected({
+		paths: ["packages/tui/test/viewport-mode.test.ts", "packages/coding-agent/src/core/agent-session.ts"],
+	});
+	assert.deepEqual(plan.codingAgentRelatedFiles, ["src/core/agent-session.ts"]);
+});
+
+test("coding-agent pulled in only as a consumer (no direct coding-agent change) is not narrowed", () => {
+	const plan = planAffected({ paths: ["packages/agent/src/agent-loop.ts"] });
+	assert.equal(plan.codingAgentRelatedFiles, null);
+});
+
+test("full suite and empty/doc-only plans never narrow", () => {
+	assert.equal(FULL_PLAN.codingAgentRelatedFiles, null);
+	assert.equal(EMPTY_PLAN.codingAgentRelatedFiles, null);
+	assert.equal(planAffected({ fullSuite: true }).codingAgentRelatedFiles, null);
+	assert.equal(planAffected({ paths: [] }).codingAgentRelatedFiles, null);
+});
+
+test("codingAgentRelatedFiles is a pure helper independent of workspace selection", () => {
+	assert.deepEqual(codingAgentRelatedFiles(["packages/coding-agent/src/x.ts"]), ["src/x.ts"]);
+	assert.equal(codingAgentRelatedFiles(["packages/coding-agent/src/x.js"]), null);
+	assert.equal(codingAgentRelatedFiles(["packages/tui/src/y.ts"]), null);
+});
+
+test("enrichWithScanIncludes adds a scan hit to an already-narrowed plan, deduped", () => {
+	const plan = { codingAgentRelatedFiles: ["src/x.ts"] };
+	const scan = (changed) => {
+		assert.deepEqual(changed, ["packages/coding-agent/src/x.ts"]);
+		return ["test/reads-x-as-text.test.ts", "src/x.ts" /* would-be duplicate, must be deduped */];
+	};
+	assert.deepEqual(enrichWithScanIncludes(plan, scan), { codingAgentRelatedFiles: ["src/x.ts", "test/reads-x-as-text.test.ts"] });
+});
+
+test("enrichWithScanIncludes never calls scan and returns the plan unchanged when narrowing does not apply", () => {
+	const plan = { codingAgentRelatedFiles: null, full: true };
+	const scan = () => {
+		throw new Error("scan must not run on a full-suite plan");
+	};
+	assert.deepEqual(enrichWithScanIncludes(plan, scan), plan);
+});
+
+test("enrichWithScanIncludes leaves the plan unchanged (same shape) when the scan finds nothing new", () => {
+	const plan = { codingAgentRelatedFiles: ["src/x.ts"] };
+	assert.deepEqual(enrichWithScanIncludes(plan, () => []), plan);
+});
+
+test("parseCarriedFiles accepts the { full: false, files } shape and filters non-string entries", () => {
+	assert.deepEqual(parseCarriedFiles('{"full":false,"files":["packages/coding-agent/test/a.test.ts"]}'), {
+		full: false,
+		files: ["packages/coding-agent/test/a.test.ts"],
+	});
+	assert.deepEqual(parseCarriedFiles('{"full":false,"files":[]}'), { full: false, files: [] });
+	assert.deepEqual(parseCarriedFiles('{"full":false,"files":[1,"packages/coding-agent/test/a.test.ts",null]}'), {
+		full: false,
+		files: ["packages/coding-agent/test/a.test.ts"],
+	});
+});
+
+test("parseCarriedFiles treats absent/empty input as nothing to carry, not a failure", () => {
+	// The carry-forward step only runs on push-to-main; every other event leaves this env var
+	// empty, which must read as "ordinary diff-based plan", not "fail closed to full".
+	assert.deepEqual(parseCarriedFiles(undefined), { full: false, files: [] });
+	assert.deepEqual(parseCarriedFiles(""), { full: false, files: [] });
+});
+
+test("parseCarriedFiles honors an explicit { full: true, reason } marker", () => {
+	assert.deepEqual(parseCarriedFiles('{"full":true,"reason":"job X failed"}'), { full: true, reason: "job X failed" });
+	assert.deepEqual(parseCarriedFiles('{"full":true}'), { full: true, reason: "carry-forward requested the full suite" });
+});
+
+test("parseCarriedFiles fails closed to full on any unrecognized or malformed shape", () => {
+	for (const raw of ["not json", '{"not":"a recognized shape"}', "[]", '["packages/coding-agent/test/a.test.ts"]', "null", "42", '"full"']) {
+		const result = parseCarriedFiles(raw);
+		assert.equal(result.full, true, raw);
+		assert.equal(typeof result.reason, "string", raw);
+	}
+});
+
+test("a carried-forward failed coding-agent test file joins narrowing alongside the diff", () => {
+	const plan = planAffected({
+		paths: ["packages/coding-agent/src/core/agent-session.ts", "packages/coding-agent/test/some-other.test.ts"],
+	});
+	assert.deepEqual(plan.codingAgentRelatedFiles, ["src/core/agent-session.ts", "test/some-other.test.ts"]);
+});
+
+test("the CLI forces the full suite when carry-forward reports { full: true }", () => {
+	const output = execFileSync(process.execPath, [fileURLToPath(new URL("./ci-affected.mjs", import.meta.url))], {
+		encoding: "utf8",
+		env: {
+			...process.env,
+			CI_FULL_SUITE: "",
+			CI_EVENT_NAME: "push",
+			CI_BEFORE: "HEAD",
+			CI_CARRIED_FILES: '{"full":true,"reason":"a non-coding-agent job failed"}',
+		},
+	});
+	const plan = JSON.parse(output);
+	assert.equal(plan.full, true);
+	assert.equal(plan.codingAgentRelatedFiles, null);
+	assert.deepEqual(plan.os, ["ubuntu-latest", "windows-latest"]);
+});
+
+test("the CLI runs an ordinary diff-based plan when carry-forward reports nothing to carry", () => {
+	const output = execFileSync(process.execPath, [fileURLToPath(new URL("./ci-affected.mjs", import.meta.url))], {
+		encoding: "utf8",
+		env: {
+			...process.env,
+			CI_FULL_SUITE: "",
+			CI_EVENT_NAME: "push",
+			CI_BEFORE: "HEAD",
+			CI_CARRIED_FILES: '{"full":false,"files":[]}',
+		},
+	});
+	const plan = JSON.parse(output);
+	assert.equal(plan.full, false);
 });
 
 test("listChangedFiles uses the PR merge-base range, then the push before..HEAD, then HEAD~1", () => {

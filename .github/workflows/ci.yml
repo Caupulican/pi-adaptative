@@ -29,6 +29,9 @@ jobs:
   plan:
     name: Plan affected tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
       quality_job: ${{ steps.plan.outputs.quality_job }}
       check: ${{ steps.plan.outputs.check }}
@@ -39,6 +42,10 @@ jobs:
       long_session: ${{ steps.plan.outputs.long_session }}
       native_process: ${{ steps.plan.outputs.native_process }}
       windows_incident: ${{ steps.plan.outputs.windows_incident }}
+      coding_agent_narrow: ${{ steps.plan.outputs.coding_agent_narrow }}
+      coding_agent_related_files: ${{ steps.plan.outputs.coding_agent_related_files }}
+      coding_agent_shards: ${{ steps.plan.outputs.coding_agent_shards }}
+      coding_agent_shard_count: ${{ steps.plan.outputs.coding_agent_shard_count }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -46,6 +53,26 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0
           persist-credentials: false
+
+      # Reads the previous push-to-main run's OWN uploaded test-report artifacts (never a guess)
+      # to find which coding-agent tests it left failing. Scoped to push-to-main, since that is
+      # the exact "fix one bug, don't rerun everything" sequence ci-affected.mjs is asked to
+      # shrink. `gh run list --status completed` only ever considers the latest COMPLETED run on
+      # main: a run still in progress is not "previous" yet, so an in-flight run is invisible here
+      # and the completed run before it (if any) is used instead — deliberate, not a race.
+      # ci-carry-forward.mjs fails CLOSED: any lookup failure, or any evidence that a failure isn't
+      # fully explained by named coding-agent test files, comes back as `{"full":true,"reason":
+      # "..."}`, and ci-affected.mjs must then run the complete suite, not just skip narrowing.
+      - name: Failure carry-forward
+        id: carry_forward
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          result=$(node scripts/ci-carry-forward.mjs)
+          echo "result=${result}" >> "$GITHUB_OUTPUT"
 
       - name: Plan
         id: plan
@@ -57,6 +84,9 @@ jobs:
           CI_BEFORE: ${{ github.event.before }}
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           CI_COMMIT_SUBJECT: ${{ github.event.head_commit.message || github.event.pull_request.title }}
+          # Empty when the step above didn't run (not a push to main) — parseCarriedFiles in
+          # ci-affected.mjs treats that as "nothing to carry", not as a carry-forward failure.
+          CI_CARRIED_FILES: ${{ steps.carry_forward.outputs.result }}
         run: node scripts/ci-affected.mjs
 
   build-check-test:
@@ -206,14 +236,18 @@ jobs:
           node ../../node_modules/vitest/dist/cli.js --run test/windows-incident-collector.test.ts
 
   coding-agent-test:
-    name: Coding-agent test (${{ matrix.os }}, shard ${{ matrix.shard }}/4)
+    # coding_agent_shard_count is 4 (today's full sharded suite) unless ci-affected.mjs proved
+    # every changed file in this workspace is plain TypeScript source/tests with no global test
+    # infra touched (see codingAgentRelatedFiles) — then it is 1: vitest related resolves the
+    # affected set itself instead of it being pre-partitioned, so one job per OS is the whole run.
+    name: Coding-agent test (${{ matrix.os }}, shard ${{ matrix.shard }}/${{ needs.plan.outputs.coding_agent_shard_count }})
     needs: plan
     if: needs.plan.outputs.coding_agent == 'true'
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        shard: [1, 2, 3, 4]
+        shard: ${{ fromJSON(needs.plan.outputs.coding_agent_shards) }}
     runs-on: ${{ matrix.os }}
     # Includes hosted-runner package-manager variance plus bounded execution.
     timeout-minutes: 20
@@ -275,9 +309,12 @@ jobs:
 
       # The Windows shell corpus wall runs for over a minute on Windows and shares a shard with
       # tests holding second-scale budgets; three of those failed on time alone while it ran
-      # beside them (2026-09-12). It is excluded from every shard and run by itself, after shard
-      # 1's own tests have finished, so no budgeted test ever competes with it for the runner.
+      # beside them (2026-09-12). It is excluded from every shard/related run and run by itself,
+      # after shard 1's own tests have finished, so no budgeted test ever competes with it for the
+      # runner. That "shard == 1" gate fires exactly once regardless of shard count (1 or 4), so
+      # narrowed runs keep this coverage unchanged.
       - name: Test coding-agent shard
+        if: needs.plan.outputs.coding_agent_narrow != 'true'
         working-directory: packages/coding-agent
         env:
           NODE_OPTIONS: --conditions=pi-source
@@ -286,7 +323,31 @@ jobs:
         # each red shard showed exactly one failure and the next push found the next one
         # (2026-09-12: two candidates, nine red jobs each, seven distinct causes). The local
         # inner loop keeps its own defaults (package.json `test` still bails).
-        run: node ../../node_modules/vitest/dist/cli.js --run --bail=0 --shard=${{ matrix.shard }}/4
+        # The json reporter feeds failure carry-forward (scripts/ci-carry-forward.mjs) on the next
+        # push; it is uploaded only when this step fails, so a green run buys no extra artifact.
+        run: node ../../node_modules/vitest/dist/cli.js --run --bail=0 --shard=${{ matrix.shard }}/4 --reporter=default --reporter=json --outputFile.json=test-report.json
+
+      # Narrowed mode: every changed file in this push is plain TypeScript source/tests, so
+      # `vitest related` resolves the exact affected test files itself instead of the workspace
+      # being pre-sharded (see codingAgentRelatedFiles in ci-affected.mjs). One job per OS is the
+      # whole run.
+      - name: Test coding-agent related files
+        if: needs.plan.outputs.coding_agent_narrow == 'true'
+        working-directory: packages/coding-agent
+        env:
+          NODE_OPTIONS: --conditions=pi-source
+          PI_VITEST_ISOLATE_CORPUS: "1"
+          PI_CI_RELATED_FILES: ${{ needs.plan.outputs.coding_agent_related_files }}
+        run: node ../../scripts/run-coding-agent-related.mjs --bail=0 --reporter=default --reporter=json --outputFile.json=test-report.json
+
+      - name: Upload coding-agent test report for failure carry-forward
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-report-coding-agent-${{ matrix.os }}-${{ matrix.shard }}
+          path: packages/coding-agent/test-report.json
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: Test the Windows shell corpus wall alone
         if: matrix.shard == 1
