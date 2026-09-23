@@ -4,6 +4,10 @@
 
 - A Claude model on Antigravity stays on the generate-content request the service translates. The stream's opening empty part is not an answer; the thought and the following text are.
 
+### Changed
+
+- Claude subscription requests identify as Claude Code 2.1.280. The login URL, client id, and scopes already match that client.
+
 ## [0.99.44] - 2026-09-23
 
 ### Changed
