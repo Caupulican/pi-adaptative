@@ -28,8 +28,12 @@ jobs:
   # Tag publication is what runs the complete Linux/Windows matrix. Ordinary
   # main/PR commits do not.
   quality-gate:
+    # A called workflow's jobs cannot ask for more than the caller grants: ci.yml's plan job reads
+    # the previous run's test-report artifacts (actions: read), and without the grant here GitHub
+    # refuses to start the tag run at all (startup_failure).
     permissions:
       contents: read
+      actions: read
     uses: ./.github/workflows/ci.yml
     with:
       ref: ${{ github.event.inputs.tag || github.ref_name }}
