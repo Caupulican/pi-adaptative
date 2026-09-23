@@ -19,7 +19,14 @@ const baseScopes = [
 	"user:file_upload",
 	"user:plugins",
 ];
-const originalScopes = ["user:inference", "user:projects:read", "user:projects:write", "retired:scope"];
+const originalScopes = [
+	"user:inference",
+	"user:projects:read",
+	"user:projects:write",
+	"user:design:read",
+	"user:design:write",
+	"retired:scope",
+];
 const credentials = { access: "old-access", refresh: "original-refresh", expires: 0, scopes: originalScopes };
 const response = {
 	access_token: "new-access",
@@ -50,7 +57,13 @@ describe("Claude binary-derived OAuth scope workflow", () => {
 		vi.stubGlobal("fetch", fetchMock);
 		const result = await anthropicOAuthProvider.refreshToken(credentials);
 		const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-		expect(body.scope.split(" ")).toEqual([...baseScopes, "user:projects:read", "user:projects:write"]);
+		expect(body.scope.split(" ")).toEqual([
+			...baseScopes,
+			"user:projects:read",
+			"user:projects:write",
+			"user:design:read",
+			"user:design:write",
+		]);
 		expect(body.refresh_token).toBe("original-refresh");
 		expect(result.scopes).toEqual(["user:inference", "user:plugins"]);
 		expect(result.refresh).toBe("rotated-refresh");
@@ -79,7 +92,11 @@ describe("Claude binary-derived OAuth scope workflow", () => {
 			expect(fetchMock).toHaveBeenCalledTimes(2);
 			const first = JSON.parse(fetchMock.mock.calls[0][1].body);
 			const second = JSON.parse(fetchMock.mock.calls[1][1].body);
-			expect(first.scope).toBe([...baseScopes, "user:projects:read", "user:projects:write"].join(" "));
+			expect(first.scope).toBe(
+				[...baseScopes, "user:projects:read", "user:projects:write", "user:design:read", "user:design:write"].join(
+					" ",
+				),
+			);
 			expect(second).toEqual({ ...first, scope: originalScopes.join(" ") });
 			expect(result.access).toBe("new-access");
 		},

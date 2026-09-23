@@ -395,7 +395,13 @@ export async function refreshAnthropicToken(
 	const scopes = migrate
 		? [
 				...INFERENCE_SCOPES,
-				...originalScopes.filter((scope) => scope === "user:projects:read" || scope === "user:projects:write"),
+				...originalScopes.filter(
+					(scope) =>
+						scope === "user:projects:read" ||
+						scope === "user:projects:write" ||
+						scope === "user:design:read" ||
+						scope === "user:design:write",
+				),
 			]
 		: originalScopes.length
 			? originalScopes

@@ -7,6 +7,7 @@
 ### Changed
 
 - Claude subscription requests identify as Claude Code 2.1.280. The login URL, client id, and scopes already match that client.
+- Claude OAuth token refresh preserves the Design MCP connector scopes (`user:design:read` and `user:design:write`) introduced in Claude Code 2.1.280.
 
 ## [0.99.44] - 2026-09-23
 
