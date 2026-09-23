@@ -47,6 +47,26 @@ export interface DecisionLedgerSessionRow {
 }
 
 /** One System One route as the ledger keeps it: what was decided, from what evidence, who executed it. */
+/**
+ * One provider response's cache outcome on a lane (api, provider, model): the idle gap since the lane's
+ * previous response, the prompt size, the cached share of the previous prompt, and whether the prefix was
+ * intact. The substrate the cache-survival estimator learns each provider's cache lifetime from.
+ */
+export interface CacheObservationRow {
+	readonly sessionId: string;
+	readonly cwd: string;
+	readonly lane: string;
+	readonly observedAt: number;
+	/** Milliseconds from the lane's previous response to this request; absent on a lane's first request. */
+	readonly gapMs?: number;
+	readonly promptTokens: number;
+	readonly cacheReadTokens: number;
+	/** cacheRead over the previous request's prompt, clamped to [0, 1]; absent without a previous prompt. */
+	readonly retained?: number;
+	readonly prefixIntact: "true" | "false" | "unknown";
+	readonly divergenceKind?: string;
+}
+
 export interface RouteDecisionRow {
 	readonly sessionId: string;
 	readonly cwd: string;
@@ -142,6 +162,20 @@ export class DecisionLedgerStore {
 				executor TEXT
 			);
 			CREATE INDEX IF NOT EXISTS route_decisions_objective ON route_decisions (session_id, objective_id, id);
+			CREATE TABLE IF NOT EXISTS cache_observations (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				session_id TEXT NOT NULL,
+				cwd TEXT NOT NULL,
+				lane TEXT NOT NULL,
+				observed_at INTEGER NOT NULL,
+				gap_ms INTEGER,
+				prompt_tokens INTEGER NOT NULL,
+				cache_read_tokens INTEGER NOT NULL,
+				retained REAL,
+				prefix_intact TEXT NOT NULL,
+				divergence_kind TEXT
+			);
+			CREATE INDEX IF NOT EXISTS cache_observations_lane ON cache_observations (lane, observed_at);
 		`);
 		this.database
 			.prepare("INSERT OR IGNORE INTO ledger_meta (key, value) VALUES ('schema_version', ?)")
@@ -312,6 +346,69 @@ export class DecisionLedgerStore {
 				lastAt,
 				stageEntries: asInteger(row.stage_entries) ?? 0,
 				evaluations: asInteger(row.evaluations) ?? 0,
+			});
+		}
+		return out;
+	}
+
+	/** Records one provider response's cache outcome (see {@link CacheObservationRow}). */
+	recordCacheObservation(row: CacheObservationRow): void {
+		this.database
+			.prepare(
+				`INSERT INTO cache_observations
+				 (session_id, cwd, lane, observed_at, gap_ms, prompt_tokens, cache_read_tokens, retained, prefix_intact, divergence_kind)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				row.sessionId,
+				row.cwd,
+				row.lane,
+				row.observedAt,
+				row.gapMs ?? null,
+				row.promptTokens,
+				row.cacheReadTokens,
+				row.retained ?? null,
+				row.prefixIntact,
+				row.divergenceKind ?? null,
+			);
+	}
+
+	/** A lane's most recent observations across sessions, newest first, bounded. */
+	recentCacheObservations(lane: string, limit: number): CacheObservationRow[] {
+		const rows = this.database
+			.prepare("SELECT * FROM cache_observations WHERE lane = ? ORDER BY observed_at DESC LIMIT ?")
+			.all(lane, Math.max(1, Math.floor(limit)));
+		const out: CacheObservationRow[] = [];
+		for (const row of rows) {
+			const sessionId = asText(row.session_id);
+			const cwd = asText(row.cwd);
+			const observedAt = asInteger(row.observed_at);
+			const promptTokens = asInteger(row.prompt_tokens);
+			const cacheReadTokens = asInteger(row.cache_read_tokens);
+			const prefixIntact = asText(row.prefix_intact);
+			if (
+				sessionId === undefined ||
+				cwd === undefined ||
+				observedAt === undefined ||
+				promptTokens === undefined ||
+				cacheReadTokens === undefined ||
+				(prefixIntact !== "true" && prefixIntact !== "false" && prefixIntact !== "unknown")
+			)
+				continue;
+			const gapMs = asInteger(row.gap_ms);
+			const retained = typeof row.retained === "number" ? row.retained : undefined;
+			const divergenceKind = asText(row.divergence_kind);
+			out.push({
+				sessionId,
+				cwd,
+				lane,
+				observedAt,
+				promptTokens,
+				cacheReadTokens,
+				prefixIntact,
+				...(gapMs !== undefined ? { gapMs } : {}),
+				...(retained !== undefined ? { retained } : {}),
+				...(divergenceKind !== undefined ? { divergenceKind } : {}),
 			});
 		}
 		return out;

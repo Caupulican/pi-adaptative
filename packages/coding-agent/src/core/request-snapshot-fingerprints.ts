@@ -6,6 +6,7 @@ import type {
 } from "@caupulican/pi-agent-core/session";
 import type { ProviderRequestSnapshotContext } from "@caupulican/pi-agent-core/types";
 import type { Api, Model } from "@caupulican/pi-ai";
+import { cacheLaneKey } from "./context/cache-observation-recorder.ts";
 
 /**
  * Bounded fingerprints for `request_snapshot` entries, shared by the owner session's foreground
@@ -174,7 +175,8 @@ function providerMessageDescriptor(message: object): unknown {
 
 const messageFingerprints = new WeakMap<object, string>();
 
-function messageFingerprint(message: unknown): string {
+/** A message's provider-visible content identity (role, content, ids), memoized by object. */
+export function messageFingerprint(message: unknown): string {
 	if (!message || typeof message !== "object") return fingerprint({ type: typeof message });
 	const cached = messageFingerprints.get(message);
 	if (cached) return cached;
@@ -205,6 +207,71 @@ export function historyFingerprint(messages: readonly unknown[]): string {
 	const digest = createHash("sha256").update(`${messages.length}\0${Math.max(0, messages.length - indexes.length)}\0`);
 	for (const index of indexes) digest.update(messageFingerprint(messages[index])).update("\0");
 	return digest.digest("hex");
+}
+
+/** What one lane's previous request sent, kept in memory to compare the next request against. */
+interface LaneRequestPrefix {
+	readonly system: string;
+	readonly tools: string;
+	readonly messages: readonly string[];
+}
+
+/** Per session log and lane (api, provider, model): the last request's prefix. Process-local by design. */
+const lanePrefixes = new WeakMap<SessionManager, Map<string, LaneRequestPrefix>>();
+
+export interface RequestPrefixDivergence {
+	readonly prefixIntact: boolean | "unknown";
+	readonly firstDivergentIndex?: number;
+	readonly firstDivergentKind?: string;
+}
+
+function messageKind(message: unknown): string {
+	if (!message || typeof message !== "object") return "unknown";
+	const candidate = message as { role?: unknown; customType?: unknown };
+	if (candidate.role === "custom" && typeof candidate.customType === "string") return `custom:${candidate.customType}`;
+	return typeof candidate.role === "string" ? candidate.role : "unknown";
+}
+
+/**
+ * Compare a request's provider-visible prefix with the previous request's on the same lane: intact when
+ * the system prompt, the tools and every message the previous request sent are unchanged and in place.
+ * The first difference names what broke the cache: the system prompt, the tools, a removed message, or
+ * the role (or record kind) of the first rewritten message.
+ */
+export function compareRequestPrefix(
+	previous: LaneRequestPrefix | undefined,
+	current: LaneRequestPrefix,
+	messages: readonly unknown[],
+): RequestPrefixDivergence {
+	if (!previous) return { prefixIntact: "unknown" };
+	if (previous.system !== current.system)
+		return { prefixIntact: false, firstDivergentIndex: -1, firstDivergentKind: "system" };
+	if (previous.tools !== current.tools)
+		return { prefixIntact: false, firstDivergentIndex: -1, firstDivergentKind: "tools" };
+	for (let index = 0; index < previous.messages.length; index++) {
+		if (index >= current.messages.length)
+			return { prefixIntact: false, firstDivergentIndex: index, firstDivergentKind: "removed" };
+		if (previous.messages[index] !== current.messages[index]) {
+			return { prefixIntact: false, firstDivergentIndex: index, firstDivergentKind: messageKind(messages[index]) };
+		}
+	}
+	return { prefixIntact: true };
+}
+
+function requestPrefixDivergence(
+	sessionManager: SessionManager,
+	lane: string,
+	current: LaneRequestPrefix,
+	messages: readonly unknown[],
+): RequestPrefixDivergence {
+	let lanes = lanePrefixes.get(sessionManager);
+	if (!lanes) {
+		lanes = new Map();
+		lanePrefixes.set(sessionManager, lanes);
+	}
+	const divergence = compareRequestPrefix(lanes.get(lane), current, messages);
+	lanes.set(lane, current);
+	return divergence;
 }
 
 export function messageEntryIds(sessionManager: SessionManager): string[] {
@@ -261,6 +328,8 @@ export function buildRequestSnapshotInput(
 ): SessionRequestSnapshotInput {
 	const model = context.model as Model<Api>;
 	const ref = modelRef(model);
+	const systemFingerprint = systemPromptFingerprint(context.context.systemPrompt);
+	const tools = toolsFingerprint(context.context.tools ?? []);
 	return {
 		requestId: context.requestId,
 		reason: requestSnapshotReason(sessionManager, model),
@@ -273,10 +342,17 @@ export function buildRequestSnapshotInput(
 			maxTokens: context.maxTokens,
 			attempt: context.attempt,
 		}),
-		systemFingerprint: systemPromptFingerprint(context.context.systemPrompt),
-		toolsFingerprint: toolsFingerprint(context.context.tools ?? []),
+		systemFingerprint,
+		toolsFingerprint: tools,
 		historyFingerprint: historyFingerprint(context.context.messages),
 		messageEntryIds: messageEntryIds(sessionManager),
 		...(typeof context.reasoning === "string" ? { reasoning: context.reasoning } : {}),
+		...requestPrefixDivergence(
+			sessionManager,
+			cacheLaneKey(ref.api, ref.provider, ref.modelId),
+			{ system: systemFingerprint, tools, messages: context.context.messages.map(messageFingerprint) },
+			context.context.messages,
+		),
+		messageCount: context.context.messages.length,
 	};
 }

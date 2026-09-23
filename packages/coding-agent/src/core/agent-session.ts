@@ -89,6 +89,7 @@ import { createRetentionDecisionEngine } from "./compaction/retention-decision-e
 import { type AutoCompactionReason, CompactionController } from "./compaction-controller.ts";
 import { CompactionSupport } from "./compaction-support.ts";
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
+import { CacheObservationRecorder, cacheLaneKey } from "./context/cache-observation-recorder.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { ContextAuditReport } from "./context/context-audit.ts";
 import {
@@ -248,6 +249,7 @@ import { ReflectionController } from "./reflection-controller.ts";
 import { ReflectionTurnLifecycle } from "./reflection-turn-lifecycle.ts";
 import { REPLY_ROUTE_CUSTOM_TYPE, type ReplyRouteRecord } from "./reply-route.ts";
 import type { RequestAuth } from "./request-auth.ts";
+import { latestRequestSnapshot } from "./request-snapshot-fingerprints.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import {
 	appendEvidenceBundleSnapshot,
@@ -553,6 +555,7 @@ export class AgentSession {
 		getController: () => this._systemOneController,
 		warn: (message) => this._emit({ type: "warning", message }),
 	});
+	private readonly _cacheObservations = new CacheObservationRecorder();
 	private readonly _answerClaims = new AnswerClaimChecker({
 		getController: () => this._systemOneController,
 		warn: (message) => this._emit({ type: "warning", message }),
@@ -1298,7 +1301,6 @@ export class AgentSession {
 					hasImages: false,
 					contextTokens: this.getContextUsage()?.tokens ?? 0,
 				}),
-
 			modelRegistry: this._modelRegistry,
 			settingsManager: this.settingsManager,
 			failureCorpus: this._failureCorpus,
@@ -2958,6 +2960,32 @@ export class AgentSession {
 	}
 
 	/** Drop provider-owned request/continuation caches whose prefix was invalidated by compaction. */
+	/**
+	 * One cache observation per provider response (see CacheObservationRecorder), joined to the request
+	 * snapshot that opened it, so the cache-survival estimator can learn each lane's cache lifetime.
+	 * Best effort: a ledger that cannot be written never affects the turn.
+	 */
+	private _recordCacheObservation(message: AssistantMessage): void {
+		try {
+			const snapshot = latestRequestSnapshot(this.sessionManager);
+			const lane = cacheLaneKey(message.api, message.provider, message.model);
+			const snapshotLane = snapshot ? cacheLaneKey(snapshot.api, snapshot.provider, snapshot.modelId) : undefined;
+			const matched = snapshotLane === lane ? snapshot : undefined;
+			const row = this._cacheObservations.observe({
+				lane,
+				respondedAt: Date.now(),
+				usage: message.usage,
+				...(matched ? { requestOpenedAt: Date.parse(matched.timestamp) } : {}),
+				...(matched?.prefixIntact !== undefined ? { prefixIntact: matched.prefixIntact } : {}),
+				...(matched?.firstDivergentKind ? { divergenceKind: matched.firstDivergentKind } : {}),
+			});
+			if (row)
+				this.getDecisionLedger()?.recordCacheObservation({ ...row, sessionId: this.sessionId, cwd: this._cwd });
+		} catch {
+			// Telemetry only.
+		}
+	}
+
 	private _refreshAfterCompaction(): void {
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
 		// The compacted history replaces the one the sent-prefix marks were counting: none of it has been
@@ -3287,6 +3315,7 @@ export class AgentSession {
 			// Track the response for ordered retry/failover/compaction handling after agent_end.
 			if (event.message.role === "assistant") {
 				const assistantMsg = event.message as AssistantMessage;
+				this._recordCacheObservation(assistantMsg);
 				// A reply a routed model wrote keeps its route, so a reloaded conversation names the same author.
 				const route = this._modelRouter.getForegroundRouteSnapshot();
 				if (route.switched) {

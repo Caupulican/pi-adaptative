@@ -25,6 +25,19 @@ export interface RequestSnapshotEntry extends SessionEntryBase {
 	 * request-local policy lowered, such as host-started turns.
 	 */
 	reasoning?: string;
+	/**
+	 * Whether this request's provider-visible prefix is exactly the previous request's on the same lane
+	 * (model): true when the system prompt, the tools and every message the previous request sent are
+	 * unchanged and in place; false when something already sent changed; "unknown" for the first request
+	 * a process sees on a lane. A cold cache on an intact prefix is the provider's; on a broken one, ours.
+	 */
+	prefixIntact?: boolean | "unknown";
+	/** Where the prefix first differs: -1 for the system prompt or tools, else the message index. */
+	firstDivergentIndex?: number;
+	/** What first differs: `system`, `tools`, `removed`, or the message's role (`custom:<type>` for records). */
+	firstDivergentKind?: string;
+	/** How many provider messages the request carried. */
+	messageCount?: number;
 }
 
 export type SessionRequestSnapshotInput = Omit<RequestSnapshotEntry, "type" | "id" | "parentId" | "timestamp">;
@@ -139,6 +152,10 @@ function fieldsForType(type: string): readonly string[] {
 				"historyFingerprint",
 				"messageEntryIds",
 				"reasoning",
+				"prefixIntact",
+				"firstDivergentIndex",
+				"firstDivergentKind",
+				"messageCount",
 			];
 		case "foreground_tool_start":
 			return ["requestId", "assistantMessageEntryId", "callId", "toolName"];
@@ -202,6 +219,21 @@ export function validateSessionLifecycleEntry(value: unknown): asserts value is 
 			assertBoundedString(record.historyFingerprint, "historyFingerprint");
 			assertStringArray(record.messageEntryIds, "messageEntryIds");
 			if (record.reasoning !== undefined) assertBoundedString(record.reasoning, "reasoning", 64);
+			if (
+				record.prefixIntact !== undefined &&
+				typeof record.prefixIntact !== "boolean" &&
+				record.prefixIntact !== "unknown"
+			) {
+				throw lifecycleValidationError("prefixIntact", "expected true, false, or unknown");
+			}
+			for (const key of ["firstDivergentIndex", "messageCount"] as const) {
+				const value = record[key];
+				if (value !== undefined && (typeof value !== "number" || !Number.isSafeInteger(value) || value < -1)) {
+					throw lifecycleValidationError(key, "expected an integer of at least -1");
+				}
+			}
+			if (record.firstDivergentKind !== undefined)
+				assertBoundedString(record.firstDivergentKind, "firstDivergentKind", 256);
 			break;
 		case "foreground_tool_start":
 			assertExternalId(record.requestId, "requestId");
