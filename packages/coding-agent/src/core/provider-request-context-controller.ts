@@ -61,8 +61,6 @@ export interface ProviderRequestContextControllerDeps {
 		legend?: string;
 		legendIds?: readonly string[];
 	};
-	/** An accepted plan committed the legend delta it carried; later requests send only newer lines. */
-	commitPathAliasLegend?(ids: readonly string[]): void;
 }
 
 export { PATH_ALIAS_LEGEND_CUSTOM_TYPE };
@@ -382,9 +380,6 @@ export class ProviderRequestContextController {
 					throw new Error("Committed active skill context diverged from its accepted plan");
 				}
 				reflectionCuePlan?.commit();
-				if (pathAliasPlan.legendIds && pathAliasPlan.legendIds.length > 0) {
-					this.deps.commitPathAliasLegend?.(pathAliasPlan.legendIds);
-				}
 			},
 		};
 	}

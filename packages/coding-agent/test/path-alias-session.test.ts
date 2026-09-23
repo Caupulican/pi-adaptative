@@ -520,6 +520,19 @@ describe("PathAliasRuntime legend delta records", () => {
 		for (const dir of tempDirs.splice(0))
 			rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 	});
+	/** The durable record an accepted plan commits for a legend delta (what the next request's history holds). */
+	function legendRecord(legend: string | undefined, timestamp = 10): AgentMessage {
+		if (!legend) throw new Error("Expected a legend delta.");
+		return {
+			role: "custom",
+			customType: PATH_ALIAS_LEGEND_CUSTOM_TYPE,
+			content: legend,
+			display: false,
+			details: { cumulative: true },
+			// Committed right after the request that carried it, before any later result.
+			timestamp,
+		} as AgentMessage;
+	}
 	function runtime(): PathAliasRuntime {
 		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-delta-"));
 		tempDirs.push(dir);
@@ -540,18 +553,30 @@ describe("PathAliasRuntime legend delta records", () => {
 		// The plan was not committed: the same request must carry the same delta again.
 		const again = runtime1.sync([toolResult("packages/coding-agent/src/foo.ts", 10)]);
 		expect(again.legend).toBe(first.legend);
-		runtime1.markLegendCommitted(first.legendIds);
-		// Committed: nothing new to send for the same history.
-		expect(runtime1.sync([toolResult("packages/coding-agent/src/foo.ts", 10)]).legend).toBeUndefined();
+		// Committed: the record is in the history, so there is nothing new to send.
+		const committed = legendRecord(first.legend);
+		expect(runtime1.sync([toolResult("packages/coding-agent/src/foo.ts", 10), committed]).legend).toBeUndefined();
 		// A new alias rides alone, without the earlier line.
 		const second = runtime1.sync([
 			toolResult("packages/coding-agent/src/foo.ts", 10),
+			committed,
 			toolResult("packages/coding-agent/test/bar.ts", 11),
 		]);
 		expect(second.legend).toContain("p/bar.ts=packages/coding-agent/test/bar.ts");
 		expect(second.legend).not.toContain("p/foo.ts=");
 		expect(second.legendIds).toEqual(["p/bar.ts"]);
 		runtime1.close();
+	});
+
+	it("reads committed lines from the history, so a restart does not re-send them and a lost record is re-sent", () => {
+		const history = [toolResult("packages/coding-agent/src/foo.ts", 10)];
+		const first = runtime().sync(history);
+		const committed = legendRecord(first.legend);
+		// A new process over the same session: the record is in its history, so nothing is re-sent.
+		const restarted = runtime();
+		expect(restarted.sync([...history, committed]).legend).toBeUndefined();
+		// A history whose record was summarized away still uses the alias, so its line rides again.
+		expect(runtime().sync(history).legend).toContain("p/foo.ts=packages/coding-agent/src/foo.ts");
 	});
 
 	it("pauses minting once the legend outgrows what its aliases saved", () => {
@@ -562,7 +587,7 @@ describe("PathAliasRuntime legend delta records", () => {
 		const history = paths.map((path, index) => toolResult(path, 10 + index));
 		const first = runtime1.sync(history);
 		expect(first.legendIds.length).toBe(paths.length);
-		runtime1.markLegendCommitted(first.legendIds);
+		history.push(legendRecord(first.legend, 10 + paths.length) as ReturnType<typeof toolResult>);
 		const economics = runtime1.getAliasEconomics();
 		expect(economics.legendChars).toBeGreaterThan(4096);
 		expect(economics.legendChars).toBeGreaterThan(economics.savedChars);

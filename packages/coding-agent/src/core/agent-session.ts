@@ -1251,7 +1251,6 @@ export class AgentSession {
 			skillVault: this._skillVault,
 			getEdgeGrants: () => this.getEdgeGrants(),
 			applyPathAliases: (messages) => this._pipeline.applyPathAliases(messages),
-			commitPathAliasLegend: (ids) => this._pipeline.commitPathAliasLegend(ids),
 		});
 		this._providerRequestRuntime = new ProviderRequestRuntimeController({
 			agent: this.agent,

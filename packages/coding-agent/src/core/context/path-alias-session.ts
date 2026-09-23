@@ -11,6 +11,7 @@ import {
 	extendPathAliasTable,
 	formatPathAliasLegendDeltaForIds,
 	MAX_RESERVED_TOKENS,
+	PATH_ALIAS_LEGEND_CUSTOM_TYPE,
 	type PathAliasTable,
 	rewriteAgentMessagesWith,
 	rewriteText,
@@ -60,7 +61,7 @@ export interface PathAliasSyncResult {
 	messages: AgentMessage[];
 	/** Cumulative delta legend record for this request, or undefined when nothing new was minted. */
 	legend?: string;
-	/** The ids whose lines `legend` carries; `markLegendCommitted` takes them once the plan commits. */
+	/** The ids whose lines `legend` carries. */
 	legendIds: readonly string[];
 }
 
@@ -87,12 +88,8 @@ export class PathAliasRuntime {
 	 * lines appended in table (mint) order.
 	 */
 	private readonly legendIds = new Set<string>();
-	/**
-	 * Ids whose legend line was committed into durable history by an accepted request plan. The
-	 * legend a request carries is the delta `legendIds \ committedLegendIds`, so the table reaches
-	 * the model once, line by line, instead of once per change in full.
-	 */
-	private readonly committedLegendIds = new Set<string>();
+	/** The alias ids each durable legend record lists, parsed once per record object. */
+	private readonly legendRecordIds = new WeakMap<object, readonly string[]>();
 	/** Mentions per alias id in rendered text, the savings side of the legend budget. */
 	private readonly mentionsById = new Map<string, number>();
 	private mintingPaused = false;
@@ -142,7 +139,6 @@ export class PathAliasRuntime {
 		| {
 				readonly cwd: string;
 				readonly messages: readonly AgentMessage[];
-				readonly committedCount: number;
 				readonly result: PathAliasSyncResult;
 		  }
 		| undefined;
@@ -202,12 +198,7 @@ export class PathAliasRuntime {
 	sync(messages: readonly AgentMessage[]): PathAliasSyncResult {
 		this.ensureLoaded();
 		const cached = this.lastSync;
-		if (
-			cached &&
-			cached.cwd === this.table.cwd &&
-			cached.committedCount === this.committedLegendIds.size &&
-			sameMessageSequence(cached.messages, messages)
-		)
+		if (cached && cached.cwd === this.table.cwd && sameMessageSequence(cached.messages, messages))
 			return cached.result;
 		// A candidate id that names a real file or directory under cwd (a literal `p/`
 		// tree) must never be assigned, or expansion would redirect real-file references.
@@ -286,10 +277,15 @@ export class PathAliasRuntime {
 			this.persistLastScannedTs();
 		}
 		const rewritten = this.renderFrozen(messages);
-		const pendingIds = [...this.legendIds].filter((id) => !this.committedLegendIds.has(id));
+		// The legend a request carries is the delta against the lines the model can actually see: the
+		// legend records in this history. Read from the history, not remembered by the process, so a
+		// restarted process does not re-send lines already there, and a compaction that summarized a
+		// record away re-sends the lines its aliases still need.
+		const committed = this.durableLegendIds(messages);
+		const pendingIds = [...this.legendIds].filter((id) => !committed.has(id));
 		const result: PathAliasSyncResult = {
 			messages: rewritten,
-			legend: formatPathAliasLegendDeltaForIds(this.table, this.legendIds, this.committedLegendIds, {
+			legend: formatPathAliasLegendDeltaForIds(this.table, this.legendIds, committed, {
 				paused: this.mintingPaused,
 			}),
 			legendIds: pendingIds,
@@ -297,15 +293,28 @@ export class PathAliasRuntime {
 		this.lastSync = {
 			cwd: this.table.cwd,
 			messages: messages.slice(),
-			committedCount: this.committedLegendIds.size,
 			result,
 		};
 		return result;
 	}
 
-	/** An accepted plan committed these legend lines durably; later requests carry only newer ones. */
-	markLegendCommitted(ids: Iterable<string>): void {
-		for (const id of ids) this.committedLegendIds.add(id);
+	/** The alias ids listed by the durable legend records (`<id>=<path>` lines) in `messages`. */
+	private durableLegendIds(messages: readonly AgentMessage[]): Set<string> {
+		const ids = new Set<string>();
+		for (const message of messages) {
+			if (message.role !== "custom" || message.customType !== PATH_ALIAS_LEGEND_CUSTOM_TYPE) continue;
+			let listed = this.legendRecordIds.get(message);
+			if (!listed) {
+				const content = typeof message.content === "string" ? message.content : "";
+				listed = content
+					.split("\n")
+					.map((line) => line.slice(0, line.indexOf("=")))
+					.filter((id) => id.length > 0);
+				this.legendRecordIds.set(message, listed);
+			}
+			for (const id of listed) ids.add(id);
+		}
+		return ids;
 	}
 
 	/** The legend budget as the census reads it: legend bytes owed against bytes the aliases saved. */

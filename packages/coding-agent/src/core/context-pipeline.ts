@@ -262,10 +262,6 @@ export class ContextPipeline {
 		return getContextStoreDir(this.deps.getAgentDir(), "index", this.deps.getSessionManager().getSessionId());
 	}
 
-	commitPathAliasLegend(ids: readonly string[]): void {
-		this._pathAliasRuntime?.markLegendCommitted(ids);
-	}
-
 	applyPathAliases(messages: AgentMessage[]): {
 		messages: AgentMessage[];
 		legend?: string;
