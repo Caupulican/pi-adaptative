@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { setImmediate as realSetImmediate } from "node:timers/promises";
 import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
 import type { AssistantMessage } from "@caupulican/pi-ai/types";
 import { describe, expect, it, vi } from "vitest";
@@ -792,9 +793,24 @@ describe("AgentSession worker delegation", () => {
 			expect(harness.session.getWorkerClaimSnapshots()).toEqual([]);
 			expect(workerLaneRecords(harness)).toEqual([]);
 
+			// Wait for the lane's own terminal event, not a wall-clock budget: the resumed worker writes
+			// its durable state through real I/O, which a slow runner can stretch past any fixed poll.
+			let resumedTerminal = false;
+			const unsubscribe = harness.session.subscribe((event) => {
+				if (
+					event.type === "delegate_workers" &&
+					event.terminalSinceFlush.some((entry) => entry.laneId === laneId)
+				) {
+					resumedTerminal = true;
+				}
+			});
 			await vi.runOnlyPendingTimersAsync();
-			await vi.advanceTimersByTimeAsync(0);
-			await vi.waitFor(() => expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(1));
+			while (!resumedTerminal) {
+				await vi.advanceTimersByTimeAsync(50);
+				await realSetImmediate();
+			}
+			unsubscribe();
+			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(1);
 			expect(providerExecutions).toBe(4);
 			const completedSnapshot = new WorkerLifecycle({
 				agentDir: harness.tempDir,
