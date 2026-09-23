@@ -35,7 +35,7 @@ describe("release workflow quality gate", () => {
 		expect(ci).toContain("workflow_call:");
 		expect(ci).toContain(`ref: \${{ inputs.ref || github.sha }}`);
 		expect(release).toContain(
-			"quality-gate:\n    permissions:\n      contents: read\n    uses: ./.github/workflows/ci.yml",
+			"    permissions:\n      contents: read\n      actions: read\n    uses: ./.github/workflows/ci.yml",
 		);
 		expect(release).toContain(`ref: \${{ github.event.inputs.tag || github.ref_name }}`);
 		expect(release).not.toContain("skip_tests: true");
@@ -54,5 +54,24 @@ describe("release workflow quality gate", () => {
 		expect(release).toContain("SHA256SUMS");
 		expect(release).not.toContain("publish-npm:");
 		expect(release).not.toContain("NODE_AUTH_TOKEN");
+	});
+
+	it("grants the quality gate every permission a ci.yml job requests", () => {
+		const ci = readFileSync(join(REPOSITORY_ROOT, ".github/workflows/ci.yml"), "utf8");
+		const release = readFileSync(join(REPOSITORY_ROOT, ".github/workflows/build-binaries.yml"), "utf8");
+		// A called workflow's jobs cannot ask for more than the caller grants; GitHub refuses to start
+		// the whole tag run (startup_failure) when one does.
+		const scopes = (block: string) =>
+			[...block.matchAll(/^ {6}([a-z-]+): (read|write)$/gmu)].map((match) => `${match[1]}: ${match[2]}`);
+		const jobPermissions = [...ci.matchAll(/^ {4}permissions:\n((?: {6}[a-z-]+: (?:read|write)\n)+)/gmu)].flatMap(
+			(match) => scopes(match[1]),
+		);
+		const gate = release.slice(
+			release.indexOf("  quality-gate:"),
+			release.indexOf("uses: ./.github/workflows/ci.yml"),
+		);
+		const granted = new Set(scopes(gate));
+		expect(jobPermissions.length).toBeGreaterThan(0);
+		for (const permission of jobPermissions) expect(granted, permission).toContain(permission);
 	});
 });
