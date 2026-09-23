@@ -60,10 +60,11 @@ describe("cache observations", () => {
 	it("measures the gap and the retained share of the previous prompt per lane", () => {
 		const recorder = new CacheObservationRecorder();
 		const lane = cacheLaneKey("anthropic-messages", "anthropic", "claude-opus-5-5");
-		const first = recorder.observe({ lane, respondedAt: 1_000, usage: { input: 10_000 } });
+		const first = recorder.observe({ sessionId: "s", lane, respondedAt: 1_000, usage: { input: 10_000 } });
 		expect(first).toMatchObject({ lane, promptTokens: 10_000, prefixIntact: "unknown" });
 		expect(first?.gapMs).toBeUndefined();
 		const second = recorder.observe({
+			sessionId: "s",
 			lane,
 			requestOpenedAt: 61_000,
 			respondedAt: 65_000,
@@ -72,7 +73,7 @@ describe("cache observations", () => {
 		});
 		expect(second).toMatchObject({ gapMs: 60_000, promptTokens: 10_000, retained: 0.9, prefixIntact: "true" });
 		// An empty response (no prompt counted) is not an observation.
-		expect(recorder.observe({ lane, respondedAt: 70_000, usage: {} })).toBeUndefined();
+		expect(recorder.observe({ sessionId: "s", lane, respondedAt: 70_000, usage: {} })).toBeUndefined();
 	});
 
 	it("round-trips through the decision ledger, newest first", () => {

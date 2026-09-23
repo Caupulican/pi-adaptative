@@ -65,6 +65,19 @@ export interface CacheObservationRow {
 	readonly retained?: number;
 	readonly prefixIntact: "true" | "false" | "unknown";
 	readonly divergenceKind?: string;
+	/**
+	 * The history lineage the request was made on: the compaction it follows, or `root` before the first
+	 * one. A session's requests on one lineage are that lineage's lifetime, which ends at the next compaction.
+	 */
+	readonly lineage?: string;
+}
+
+/** One session's history lineage: how many requests were made on it, and when the last one was. */
+export interface LineageEpisodeRow {
+	readonly sessionId: string;
+	readonly lineage: string;
+	readonly requests: number;
+	readonly lastObservedAt: number;
 }
 
 export interface RouteDecisionRow {
@@ -173,10 +186,20 @@ export class DecisionLedgerStore {
 				cache_read_tokens INTEGER NOT NULL,
 				retained REAL,
 				prefix_intact TEXT NOT NULL,
-				divergence_kind TEXT
+				divergence_kind TEXT,
+				lineage TEXT
 			);
 			CREATE INDEX IF NOT EXISTS cache_observations_lane ON cache_observations (lane, observed_at);
+			CREATE INDEX IF NOT EXISTS cache_observations_session_lane ON cache_observations (session_id, lane, observed_at);
 		`);
+		// Ledgers created before observations carried their lineage gain the column; their rows stay unassigned.
+		const columns = this.database.prepare("PRAGMA table_info(cache_observations)").all();
+		if (!columns.some((column) => column.name === "lineage")) {
+			this.database.exec("ALTER TABLE cache_observations ADD COLUMN lineage TEXT");
+		}
+		this.database.exec(
+			"CREATE INDEX IF NOT EXISTS cache_observations_lineage ON cache_observations (session_id, lineage, observed_at)",
+		);
 		this.database
 			.prepare("INSERT OR IGNORE INTO ledger_meta (key, value) VALUES ('schema_version', ?)")
 			.run(String(DECISION_LEDGER_SCHEMA_VERSION));
@@ -356,8 +379,8 @@ export class DecisionLedgerStore {
 		this.database
 			.prepare(
 				`INSERT INTO cache_observations
-				 (session_id, cwd, lane, observed_at, gap_ms, prompt_tokens, cache_read_tokens, retained, prefix_intact, divergence_kind)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				 (session_id, cwd, lane, observed_at, gap_ms, prompt_tokens, cache_read_tokens, retained, prefix_intact, divergence_kind, lineage)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				row.sessionId,
@@ -370,7 +393,45 @@ export class DecisionLedgerStore {
 				row.retained ?? null,
 				row.prefixIntact,
 				row.divergenceKind ?? null,
+				row.lineage ?? null,
 			);
+	}
+
+	/** A session lane's most recent observation: where a resumed session's next gap is measured from. */
+	latestCacheObservation(sessionId: string, lane: string): { observedAt: number; promptTokens: number } | undefined {
+		const row = this.database
+			.prepare(
+				"SELECT observed_at, prompt_tokens FROM cache_observations WHERE session_id = ? AND lane = ? ORDER BY observed_at DESC LIMIT 1",
+			)
+			.get(sessionId, lane);
+		const observedAt = asInteger(row?.observed_at);
+		const promptTokens = asInteger(row?.prompt_tokens);
+		return observedAt !== undefined && promptTokens !== undefined ? { observedAt, promptTokens } : undefined;
+	}
+
+	/**
+	 * Every recorded history lineage across sessions: its request count and last request time, newest
+	 * first. Rows recorded without a lineage are not counted.
+	 */
+	lineageEpisodes(): LineageEpisodeRow[] {
+		const rows = this.database
+			.prepare(
+				`SELECT session_id, lineage, COUNT(*) AS requests, MAX(observed_at) AS last_at
+				 FROM cache_observations WHERE lineage IS NOT NULL
+				 GROUP BY session_id, lineage ORDER BY last_at DESC`,
+			)
+			.all();
+		const out: LineageEpisodeRow[] = [];
+		for (const row of rows) {
+			const sessionId = asText(row.session_id);
+			const lineage = asText(row.lineage);
+			const requests = asInteger(row.requests);
+			const lastObservedAt = asInteger(row.last_at);
+			if (sessionId === undefined || lineage === undefined || requests === undefined || lastObservedAt === undefined)
+				continue;
+			out.push({ sessionId, lineage, requests, lastObservedAt });
+		}
+		return out;
 	}
 
 	/** A lane's most recent observations across sessions, newest first, bounded. */
@@ -398,6 +459,7 @@ export class DecisionLedgerStore {
 			const gapMs = asInteger(row.gap_ms);
 			const retained = typeof row.retained === "number" ? row.retained : undefined;
 			const divergenceKind = asText(row.divergence_kind);
+			const lineage = asText(row.lineage);
 			out.push({
 				sessionId,
 				cwd,
@@ -409,6 +471,7 @@ export class DecisionLedgerStore {
 				...(gapMs !== undefined ? { gapMs } : {}),
 				...(retained !== undefined ? { retained } : {}),
 				...(divergenceKind !== undefined ? { divergenceKind } : {}),
+				...(lineage !== undefined ? { lineage } : {}),
 			});
 		}
 		return out;

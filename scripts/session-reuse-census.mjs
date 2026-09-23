@@ -13,11 +13,26 @@
  * is a request whose cacheRead is below 30% of the previous prompt (same model, previous prompt
  * over 10,000 tokens). Wall-clock spans (idle between requests, time to first token) exclude any
  * `clock_jump` the process-matrix heartbeat recorded: a suspended host is not time anything spent.
- * Reads session files only; never writes.
+ *
+ * `--survival` instead learns provider-cache survival (`src/core/context/cache-survival.ts`) from
+ * the same logs: per-lane curves of retained cache over the idle gap (wall time, clock jumps
+ * included, since the provider's cache ages while the host sleeps), the settings that best predict
+ * held-out requests, lineage lifetimes between compactions, return gaps by who held the lane, and
+ * what a compact-before-a-cold-resume policy would have saved. `--write-calibration <file>` writes
+ * the chosen settings as a TypeScript module. Otherwise reads session files only; never writes.
  */
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { cacheLaneKey } from "../packages/coding-agent/src/core/context/cache-observation-recorder.ts";
+import {
+	laneParts,
+	lineageEpisodes,
+	medianRemainingRequests,
+	predictRetained,
+	survivalCurve,
+} from "../packages/coding-agent/src/core/context/cache-survival.ts";
 import { listSessionFiles, messageText, parseSessionEntries } from "./session-stats-common.mjs";
 
 export const HOST_RECORD_KINDS = [
@@ -276,20 +291,316 @@ function printSummaryRow(label, summary) {
 	);
 }
 
+// --- Cache survival (`--survival`) -------------------------------------------------------------
+
+/**
+ * Replay one session's entries into cache observations (the rows the decision ledger records live)
+ * plus the facts the survival census learns from: each request's lineage (the compaction it follows),
+ * the wall-clock gap and who held the lane during it, and the measured per-token prices. Gaps are wall
+ * time, clock jumps included: the provider's cache ages while the host sleeps. A request's prefix is
+ * intact or not per the request snapshot recorded just before it on the same lane; sessions recorded
+ * before snapshots carried it replay as `unknown` (lower confidence).
+ */
+export function survivalEntries(entries) {
+	const observations = [];
+	const requests = [];
+	const lanes = new Map();
+	let snapshot;
+	let lineage = "root";
+	let between = [];
+	let lastPrompt;
+	let pendingCompaction = false;
+	const compactionRatios = [];
+	for (const entry of entries) {
+		if (entry.type === "request_snapshot") {
+			snapshot = entry;
+			continue;
+		}
+		if (entry.type === "compaction") {
+			lineage = entry.id ?? `compaction@${entry.timestamp}`;
+			pendingCompaction = lastPrompt !== undefined;
+			between.push("compaction");
+			continue;
+		}
+		if (entry.type !== "message") {
+			between.push(recordKind(entry));
+			continue;
+		}
+		const message = entry.message ?? {};
+		if (message.role !== "assistant") {
+			between.push(message.role === "user" ? "user" : message.role === "toolResult" ? "toolResult" : recordKind(entry));
+			continue;
+		}
+		const usage = message.usage ?? {};
+		const cacheRead = usage.cacheRead ?? 0;
+		const prompt = (usage.input ?? 0) + cacheRead + (usage.cacheWrite ?? 0);
+		if (prompt <= 0 || typeof message.timestamp !== "number") {
+			between = [];
+			continue;
+		}
+		const lane = cacheLaneKey(message.api ?? "?", message.provider ?? "?", message.model ?? "?");
+		const previous = lanes.get(lane);
+		const matched =
+			snapshot && cacheLaneKey(snapshot.api, snapshot.provider, snapshot.modelId) === lane ? snapshot : undefined;
+		const prefixIntact =
+			matched?.prefixIntact === true ? "true" : matched?.prefixIntact === false ? "false" : "unknown";
+		const gapMs = previous ? Math.max(0, message.timestamp - previous.endedAt) : undefined;
+		const retained = previous && previous.prompt > 0 ? Math.min(1, Math.max(0, cacheRead / previous.prompt)) : undefined;
+		const observation = {
+			lane,
+			observedAt: message.timestamp,
+			promptTokens: prompt,
+			cacheReadTokens: cacheRead,
+			prefixIntact,
+			...(gapMs !== undefined ? { gapMs } : {}),
+			...(retained !== undefined ? { retained } : {}),
+		};
+		observations.push(observation);
+		if (pendingCompaction && lastPrompt > 0) compactionRatios.push({ lane, ratio: prompt / lastPrompt });
+		pendingCompaction = false;
+		requests.push({
+			observation,
+			lineage,
+			holder: between.includes("user") ? "owner" : between.includes("toolResult") ? "tool" : "host",
+			previousPrompt: previous?.prompt,
+			cost: usage.cost ?? {},
+			usage,
+		});
+		lanes.set(lane, { prompt, endedAt: message.streamEndAt ?? message.timestamp });
+		lastPrompt = prompt;
+		snapshot = undefined;
+		between = [];
+	}
+	return { observations, requests, compactionRatios };
+}
+
+/** Per-token USD a lane was actually billed, from the usage records' own cost split. */
+function measuredPrices(requests) {
+	const totals = new Map();
+	for (const { observation, usage, cost } of requests) {
+		const t = totals.get(observation.lane) ?? { input: [0, 0], cacheRead: [0, 0], cacheWrite: [0, 0], output: [0, 0] };
+		for (const key of ["input", "cacheRead", "cacheWrite", "output"]) {
+			if ((usage[key] ?? 0) > 0 && typeof cost[key] === "number") {
+				t[key][0] += cost[key];
+				t[key][1] += usage[key];
+			}
+		}
+		totals.set(observation.lane, t);
+	}
+	const prices = new Map();
+	for (const [lane, t] of totals) {
+		const per = (key) => (t[key][1] > 0 ? t[key][0] / t[key][1] : undefined);
+		prices.set(lane, { input: per("input"), cacheRead: per("cacheRead"), cacheWrite: per("cacheWrite"), output: per("output") });
+	}
+	return prices;
+}
+
+export const SURVIVAL_GRID = {
+	halfLifeMs: [Number.POSITIVE_INFINITY, 30 * 86_400_000, 7 * 86_400_000, 86_400_000],
+	poolingWeight: [1, 4, 16],
+	binsPerDecade: [2, 4, 8],
+};
+
+/**
+ * Choose the survival settings that best predict held-out requests: fit on every observation before
+ * the time cutoff (the 80th percentile of measuring observations), score the squared error of the
+ * predicted retained share on the ones after it. A gap the curve has no evidence for is predicted at
+ * the training mean, so a setting cannot win by declining to predict.
+ */
+export function calibrateSurvival(observations, grid = SURVIVAL_GRID) {
+	const measuring = observations
+		.filter((o) => o.prefixIntact !== "false" && typeof o.gapMs === "number" && typeof o.retained === "number")
+		.sort((a, b) => a.observedAt - b.observedAt);
+	if (measuring.length < 2) return undefined;
+	const cutoff = measuring[Math.floor(measuring.length * 0.8)].observedAt;
+	const train = observations.filter((o) => o.observedAt < cutoff);
+	const test = measuring.filter((o) => o.observedAt >= cutoff);
+	const trainMeasuring = measuring.filter((o) => o.observedAt < cutoff);
+	if (trainMeasuring.length === 0 || test.length === 0) return undefined;
+	const trainMean = trainMeasuring.reduce((sum, o) => sum + o.retained, 0) / trainMeasuring.length;
+	const testLanes = [...new Set(test.map((o) => o.lane))];
+	const results = [];
+	for (const halfLifeMs of grid.halfLifeMs) {
+		for (const poolingWeight of grid.poolingWeight) {
+			for (const binsPerDecade of grid.binsPerDecade) {
+				const settings = { halfLifeMs, poolingWeight, binsPerDecade };
+				const curves = new Map(testLanes.map((lane) => [lane, survivalCurve(train, lane, settings, cutoff)]));
+				let squared = 0;
+				let covered = 0;
+				for (const o of test) {
+					const predicted = predictRetained(curves.get(o.lane), o.gapMs, binsPerDecade);
+					if (predicted !== undefined) covered++;
+					squared += ((predicted ?? trainMean) - o.retained) ** 2;
+				}
+				results.push({ settings, mse: squared / test.length, coverage: covered / test.length });
+			}
+		}
+	}
+	results.sort((a, b) => a.mse - b.mse);
+	return { best: results[0], results, train: train.length, test: test.length, baselineMse: test.reduce((s, o) => s + (trainMean - o.retained) ** 2, 0) / test.length };
+}
+
+export function survivalCensus(files) {
+	const observations = [];
+	const requests = [];
+	const compactionRatios = [];
+	const episodes = [];
+	for (const file of files) {
+		const replay = survivalEntries(parseSessionEntries(file));
+		observations.push(...replay.observations);
+		// Lineage ids are only unique within their session.
+		requests.push(...replay.requests.map((request) => ({ ...request, lineage: `${file}\u0000${request.lineage}` })));
+		compactionRatios.push(...replay.compactionRatios);
+		// A replayed session's history is finished: its last lineage ended with the session.
+		episodes.push(...lineageEpisodes(replay.requests.map((request) => request.lineage), false));
+	}
+	return { observations, requests, compactionRatios, episodes };
+}
+
+/**
+ * What a compact-before-a-cold-resume policy would have saved on the recorded history, in the lanes'
+ * own billed prices: at every request that came back cold after a gap the curve predicts below one half
+ * retained, compacting first re-prefills the summary instead of the whole prompt and every later request
+ * of the lineage reads the shorter prefix; the summarizer reads the prompt cold and writes the summary.
+ * The policy compacts only where the Kaplan-Meier remaining-requests estimate says that pays.
+ */
+export function coldResumeCounterfactual(census, curves, settings, summaryRatio) {
+	const prices = measuredPrices(census.requests);
+	let paidUsd = 0;
+	let policyNetUsd = 0;
+	let resumes = 0;
+	let compacted = 0;
+	const byLineage = new Map();
+	census.requests.forEach((request, index) => {
+		const list = byLineage.get(request.lineage) ?? [];
+		list.push(index);
+		byLineage.set(request.lineage, list);
+	});
+	census.requests.forEach((request, index) => {
+		const o = request.observation;
+		if (o.gapMs === undefined || request.previousPrompt === undefined || request.holder !== "owner") return;
+		const predicted = predictRetained(curves.get(o.lane), o.gapMs, settings.binsPerDecade);
+		if (predicted === undefined || predicted >= 0.5) return;
+		const price = prices.get(o.lane);
+		const cold = price?.cacheWrite ?? price?.input;
+		if (!price || cold === undefined || price.cacheRead === undefined || price.output === undefined) return;
+		resumes++;
+		paidUsd += (o.promptTokens - o.cacheReadTokens) * cold;
+		const lineage = byLineage.get(request.lineage) ?? [];
+		const position = lineage.indexOf(index);
+		const expectedLater = medianRemainingRequests(census.episodes, position + 1) ?? 0;
+		const summary = request.previousPrompt * summaryRatio;
+		const saved = request.previousPrompt - summary;
+		const expectedNet = saved * cold + expectedLater * saved * price.cacheRead - request.previousPrompt * cold - summary * price.output;
+		if (expectedNet <= 0) return;
+		compacted++;
+		const actualLater = lineage.length - position - 1;
+		policyNetUsd += saved * cold + actualLater * saved * price.cacheRead - request.previousPrompt * cold - summary * price.output;
+	});
+	return { resumes, compacted, paidUsd, policyNetUsd };
+}
+
+function runSurvival(targets, writeCalibration) {
+	const files = targets.flatMap(listSessionFiles);
+	const census = survivalCensus(files);
+	const calibration = calibrateSurvival(census.observations);
+	if (!calibration) {
+		console.log("survival: not enough measuring observations to calibrate");
+		return;
+	}
+	const { settings } = calibration.best;
+	const now = Math.max(...census.observations.map((o) => o.observedAt));
+	const lanes = [...new Set(census.observations.map((o) => o.lane))];
+	const curves = new Map(lanes.map((lane) => [lane, survivalCurve(census.observations, lane, settings, now)]));
+	const unknownShare =
+		census.observations.filter((o) => o.prefixIntact === "unknown").length / Math.max(1, census.observations.length);
+	console.log(
+		`survival: ${files.length} sessions, ${census.observations.length} observations (${fmt(unknownShare)} without prefix tracking: lower confidence), ${lanes.length} lanes`,
+	);
+	console.log(
+		`calibration: halfLife=${Number.isFinite(settings.halfLifeMs) ? `${settings.halfLifeMs / 86_400_000}d` : "inf"} pooling=${settings.poolingWeight} binsPerDecade=${settings.binsPerDecade} held-out mse=${calibration.best.mse.toFixed(4)} (training-mean baseline ${calibration.baselineMse.toFixed(4)}) coverage=${fmt(calibration.best.coverage)} train=${calibration.train} test=${calibration.test}`,
+	);
+	for (const [lane, curve] of [...curves].sort((a, b) => b[1].laneObservations - a[1].laneObservations)) {
+		const { api, provider, modelId } = laneParts(lane);
+		const points = curve.bins
+			.filter((bin) => bin.retained !== undefined && bin.source !== "none")
+			.map((bin) => `${formatGap(bin.toMs)}:${fmt(bin.retained)}${bin.source === "lane" ? "" : `(${bin.source[0]})`}`)
+			.join(" ");
+		console.log(`  ${`${provider}/${modelId} [${api}]`.padEnd(58)} n=${String(curve.laneObservations).padStart(5)} minCache=${curve.minCacheableTokens ?? "-"}  ${points}`);
+	}
+	const ratios = census.compactionRatios.map((r) => r.ratio);
+	const summaryRatio = median(ratios);
+	const ended = census.episodes.filter((e) => e.ended).map((e) => e.requests);
+	console.log(
+		`lineages: ${census.episodes.length} (median ${fmt(median(ended), 0)} requests, p90 ${fmt(quantile(ended, 0.9), 0)}); prompt after compaction over before: median ${fmt(summaryRatio)} over ${ratios.length}`,
+	);
+	console.log(
+		`  median remaining requests given elapsed: ${[1, 5, 20, 50, 100, 200].map((e) => `${e}:${medianRemainingRequests(census.episodes, e) ?? "-"}`).join(" ")}`,
+	);
+	for (const holder of ["owner", "tool", "host"]) {
+		const gaps = census.requests.filter((r) => r.holder === holder && r.observation.gapMs !== undefined).map((r) => r.observation.gapMs);
+		console.log(`  return gap held by ${holder.padEnd(5)} n=${String(gaps.length).padStart(5)} p50=${formatGap(quantile(gaps, 0.5))} p90=${formatGap(quantile(gaps, 0.9))}`);
+	}
+	if (Number.isFinite(summaryRatio)) {
+		const counterfactual = coldResumeCounterfactual(census, curves, settings, summaryRatio);
+		console.log(
+			`cold resumes held by the owner: ${counterfactual.resumes}, cold prefill paid ${fmt(counterfactual.paidUsd)} USD; compact-first policy would compact ${counterfactual.compacted} and net ${fmt(counterfactual.policyNetUsd)} USD (in-sample curve)`,
+		);
+	}
+	if (writeCalibration) {
+		const evidence = `${files.length} sessions, ${census.observations.length} observations, held-out mse ${calibration.best.mse.toFixed(4)} vs ${calibration.baselineMse.toFixed(4)} baseline, coverage ${fmt(calibration.best.coverage)}`;
+		writeFileSync(writeCalibration, renderCalibrationModule(settings, evidence));
+		console.log(`wrote ${writeCalibration}`);
+	}
+}
+
+function renderCalibrationModule(settings, evidence) {
+	const halfLife = Number.isFinite(settings.halfLifeMs) ? String(settings.halfLifeMs) : "Number.POSITIVE_INFINITY";
+	return `import type { SurvivalSettings } from "./cache-survival.ts";
+
+/**
+ * Survival estimator settings chosen by \`node scripts/session-reuse-census.mjs --survival
+ * --write-calibration <this file> <sessions>\`: the grid point that best predicted held-out requests.
+ * Generated; rerun the census to recalibrate.
+ *
+ * Evidence: ${evidence}.
+ */
+export const CACHE_SURVIVAL_CALIBRATION: SurvivalSettings = {
+	halfLifeMs: ${halfLife},
+	poolingWeight: ${settings.poolingWeight},
+	binsPerDecade: ${settings.binsPerDecade},
+};
+`;
+}
+
+function formatGap(ms) {
+	if (!Number.isFinite(ms)) return "-";
+	if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+	if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m`;
+	if (ms < 86_400_000) return `${(ms / 3_600_000).toFixed(1)}h`;
+	return `${(ms / 86_400_000).toFixed(1)}d`;
+}
+
 function main(argv) {
-	const options = { byModel: false, wipes: false, records: false, gate: undefined, targets: [] };
+	const options = { byModel: false, wipes: false, records: false, survival: false, writeCalibration: undefined, gate: undefined, targets: [] };
 	for (let index = 0; index < argv.length; index++) {
 		const arg = argv[index];
 		if (arg === "--by-model") options.byModel = true;
 		else if (arg === "--wipes") options.wipes = true;
 		else if (arg === "--records") options.records = true;
+		else if (arg === "--survival") options.survival = true;
+		else if (arg === "--write-calibration") options.writeCalibration = argv[++index];
 		else if (arg === "--gate") options.gate = { ...DEFAULT_GATE, ...JSON.parse(argv[++index] ?? "{}") };
 		else if (arg.startsWith("--")) throw new Error(`Unknown argument: ${arg}`);
 		else options.targets.push(arg);
 	}
 	if (options.targets.length === 0) {
-		console.error("usage: node scripts/session-reuse-census.mjs <dir|file>... [--by-model] [--wipes] [--records] [--gate json]");
+		console.error("usage: node scripts/session-reuse-census.mjs <dir|file>... [--by-model] [--wipes] [--records] [--gate json] [--survival [--write-calibration file]]");
 		process.exit(2);
+	}
+	if (options.survival) {
+		runSurvival(options.targets, options.writeCalibration);
+		return;
 	}
 	const header = `${"session".padEnd(44)} ${"n".padStart(5)} ${"p50".padStart(6)} ${">=.9".padStart(6)} ${"wipes".padStart(5)} ${"misses".padStart(6)} ${"ttft50".padStart(7)} ${"ttft90".padStart(7)} ${"cost$".padStart(8)} ${"maxPrompt".padStart(9)}`;
 	console.log(header);

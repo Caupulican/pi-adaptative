@@ -89,7 +89,7 @@ import { createRetentionDecisionEngine } from "./compaction/retention-decision-e
 import { type AutoCompactionReason, CompactionController } from "./compaction-controller.ts";
 import { CompactionSupport } from "./compaction-support.ts";
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
-import { CacheObservationRecorder, cacheLaneKey } from "./context/cache-observation-recorder.ts";
+import { CacheObservationRecorder, cacheLaneKey, historyLineage } from "./context/cache-observation-recorder.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { ContextAuditReport } from "./context/context-audit.ts";
 import {
@@ -555,7 +555,10 @@ export class AgentSession {
 		getController: () => this._systemOneController,
 		warn: (message) => this._emit({ type: "warning", message }),
 	});
-	private readonly _cacheObservations = new CacheObservationRecorder();
+	private readonly _cacheObservations = new CacheObservationRecorder((sessionId, lane) => {
+		const last = this.getDecisionLedger()?.latestCacheObservation(sessionId, lane);
+		return last ? { respondedAt: last.observedAt, promptTokens: last.promptTokens } : undefined;
+	});
 	private readonly _answerClaims = new AnswerClaimChecker({
 		getController: () => this._systemOneController,
 		warn: (message) => this._emit({ type: "warning", message }),
@@ -2971,12 +2974,14 @@ export class AgentSession {
 			const snapshotLane = snapshot ? cacheLaneKey(snapshot.api, snapshot.provider, snapshot.modelId) : undefined;
 			const matched = snapshotLane === lane ? snapshot : undefined;
 			const row = this._cacheObservations.observe({
+				sessionId: this.sessionId,
 				lane,
 				respondedAt: Date.now(),
 				usage: message.usage,
 				...(matched ? { requestOpenedAt: Date.parse(matched.timestamp) } : {}),
 				...(matched?.prefixIntact !== undefined ? { prefixIntact: matched.prefixIntact } : {}),
 				...(matched?.firstDivergentKind ? { divergenceKind: matched.firstDivergentKind } : {}),
+				lineage: historyLineage(this.agent.state.messages),
 			});
 			if (row)
 				this.getDecisionLedger()?.recordCacheObservation({ ...row, sessionId: this.sessionId, cwd: this._cwd });

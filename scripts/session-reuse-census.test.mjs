@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DEFAULT_GATE, censusEntries, evaluateGate, groupSummaries, summarize } from "./session-reuse-census.mjs";
+import {
+	DEFAULT_GATE,
+	calibrateSurvival,
+	censusEntries,
+	evaluateGate,
+	groupSummaries,
+	summarize,
+	survivalEntries,
+} from "./session-reuse-census.mjs";
 
 function assistant(index, { input, cacheRead, ttftMs = 1_000, provider = "xai", model = "grok" }) {
 	const timestamp = 1_000_000 + index * 60_000;
@@ -115,4 +123,47 @@ test("excludes a recorded clock jump from the idle gap and from time to first to
 	const withoutJumps = censusEntries(suspended.filter((entry) => entry.customType !== "clock_jump")).requests;
 	assert.equal(withoutJumps[1].idleSeconds, idleSeconds);
 	assert.equal(withoutJumps[1].ttft, 20);
+});
+
+test("replays cache observations per lane with wall-clock gaps, snapshot prefix state and lineages", () => {
+	const snapshot = (prefixIntact) => ({ type: "request_snapshot", api: "openai-responses", provider: "xai", modelId: "grok", prefixIntact });
+	const withApi = (entry) => ({ ...entry, message: { ...entry.message, api: "openai-responses" } });
+	const replay = survivalEntries([
+		user("hi"),
+		withApi(assistant(0, { input: 10_000, cacheRead: 0 })),
+		toolResult("x"),
+		// The host slept through this gap; the provider's cache aged anyway, so it stays in the gap.
+		{ type: "custom", customType: "clock_jump", data: { previousTickAt: new Date(1_000_000).toISOString(), tickAt: new Date(1_050_000).toISOString() } },
+		snapshot(true),
+		withApi(assistant(1, { input: 1_000, cacheRead: 9_000 })),
+		{ type: "compaction", id: "c1", summary: "s" },
+		user("more"),
+		snapshot(false),
+		withApi(assistant(2, { input: 6_000, cacheRead: 0 })),
+	]);
+	assert.deepEqual(
+		replay.observations.map((o) => [o.gapMs, o.retained, o.prefixIntact]),
+		[
+			[undefined, undefined, "unknown"],
+			[60_000 - 1_500, 0.9, "true"],
+			[60_000 - 1_500, 0, "false"],
+		],
+	);
+	assert.deepEqual(replay.requests.map((r) => [r.lineage, r.holder]), [["root", "owner"], ["root", "tool"], ["c1", "owner"]]);
+	assert.deepEqual(replay.compactionRatios.map((r) => r.ratio), [0.6]);
+});
+
+test("calibrates survival settings on held-out requests and beats the training mean", () => {
+	const lane = "api\u0000xai\u0000grok";
+	const observations = [];
+	for (let index = 0; index < 200; index++) {
+		const gapMs = index % 2 === 0 ? 5_000 : 30 * 60_000;
+		observations.push({ lane, observedAt: index, gapMs, retained: gapMs < 300_000 ? 1 : 0, promptTokens: 1, cacheReadTokens: 1, prefixIntact: "true" });
+	}
+	const calibration = calibrateSurvival(observations);
+	assert.ok(calibration);
+	assert.equal(calibration.test, 40);
+	assert.ok(calibration.best.mse < 1e-9);
+	assert.ok(calibration.baselineMse > 0.2);
+	assert.equal(calibration.best.coverage, 1);
 });
