@@ -618,6 +618,13 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatProviderError(normalizeProviderError(error));
+			if (error instanceof CodexApiError && error.misalignment) {
+				// The host offers to continue with the steer, and only once the user has read the explanation.
+				output.diagnostics = [
+					...(output.diagnostics ?? []),
+					{ type: "openai_codex_misalignment", timestamp: Date.now(), details: { ...error.misalignment } },
+				];
+			}
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}
@@ -802,17 +809,53 @@ async function processStream(
 	});
 }
 
+/**
+ * What the Responses API attaches to a misalignment block: an explanation the user must see before
+ * a client may offer to continue, and the model-visible instruction to submit if they do.
+ */
+export interface CodexMisalignmentDetails {
+	errorType?: string;
+	detailedExplanation?: string;
+	steer?: string;
+}
+
 class CodexApiError extends Error {
 	readonly code?: string;
 	readonly payload?: Record<string, unknown>;
+	readonly misalignment?: CodexMisalignmentDetails;
 
-	constructor(message: string, options?: { code?: string; payload?: Record<string, unknown>; cause?: unknown }) {
+	constructor(
+		message: string,
+		options?: {
+			code?: string;
+			payload?: Record<string, unknown>;
+			cause?: unknown;
+			misalignment?: CodexMisalignmentDetails;
+		},
+	) {
 		super(message);
 		this.name = "CodexApiError";
 		this.code = options?.code;
 		this.payload = options?.payload;
 		this.cause = options?.cause;
+		this.misalignment = options?.misalignment;
 	}
+}
+
+function parseCodexMisalignment(value: unknown): CodexMisalignmentDetails | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const record = value as Record<string, unknown>;
+	const text = (field: unknown) => (typeof field === "string" && field.trim() ? field.trim() : undefined);
+	const steer =
+		record.steer && typeof record.steer === "object"
+			? text((record.steer as { message?: unknown }).message)
+			: undefined;
+	const details = {
+		...(text(record.error_type) ? { errorType: text(record.error_type) } : {}),
+		...(text(record.detailed_explanation) ? { detailedExplanation: text(record.detailed_explanation) } : {}),
+		...(steer ? { steer } : {}),
+	};
+	return Object.keys(details).length > 0 ? details : undefined;
 }
 
 class CodexProtocolError extends Error {
@@ -881,12 +924,30 @@ async function* mapCodexEvents(events: AsyncIterable<Record<string, unknown>>): 
 		}
 
 		if (type === "response.failed") {
-			const response = (event as { response?: { error?: { code?: string; message?: string } } }).response;
+			const response = (
+				event as { response?: { error?: { code?: string; message?: string; misalignment?: unknown } } }
+			).response;
 			const code = response?.error?.code ?? "";
-			const message = response?.error?.message ?? "";
-			throw new CodexApiError(formatCodexEventError("Codex response failed", event, code, message), {
+			const misalignment =
+				code === "misalignment_policy_violation"
+					? parseCodexMisalignment(response?.error?.misalignment)
+					: undefined;
+			// As the Codex CLI does: a block with no message still says what it is, and its explanation
+			// is part of what the user reads.
+			const message =
+				response?.error?.message?.trim() ||
+				(code === "misalignment_policy_violation"
+					? "This request was blocked due to a misalignment policy violation."
+					: code === "bio_policy"
+						? "This content was flagged for possible biological risk."
+						: "");
+			const explained = misalignment?.detailedExplanation
+				? `${message} ${misalignment.detailedExplanation}`
+				: message;
+			throw new CodexApiError(formatCodexEventError("Codex response failed", event, code, explained), {
 				code: code || undefined,
 				payload: event,
+				...(misalignment ? { misalignment } : {}),
 			});
 		}
 

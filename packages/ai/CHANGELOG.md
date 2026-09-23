@@ -2,10 +2,13 @@
 
 ### Changed
 
+- The ChatGPT Codex provider lists exactly the models the Codex catalogue offers (GPT-5.5, GPT-5.6 Sol/Terra/Luna, GPT-6 Astra/Sol/Luna); GPT-5.2, GPT-5.3 Codex, GPT-5.3 Codex Spark, GPT-5.4 and GPT-5.4 mini are gone. Off clamps to each model's lowest catalogue level, since no Codex model offers `none`.
+- A Codex token refresh is sent as a JSON grant, as the Codex CLI sends it; the access token's own `exp` claim is its expiry (`expires_in` only when the token has none), and a refresh that returns no refresh token keeps the current one.
 - `OPENAI_CODEX_CLIENT_VERSION` is 0.156.1, the release the Codex catalogue is pinned from, so the account is asked for the models that release serves (GPT-6 Sol and Luna need 0.155.0).
 
 ### Added
 
+- A Codex misalignment block carries its explanation and steer: the error message includes the explanation, and an `openai_codex_misalignment` diagnostic holds `{ errorType, detailedExplanation, steer }` for a host to offer continuation.
 - ChatGPT Codex models come from the Codex CLI's own catalogue, pinned at release rust-v0.156.1 (`scripts/sync-codex-models.ts` writes `scripts/data/codex-models.json`): which models exist, their context window, image input, Responses Lite and reasoning levels, with Ultra sent as each model's own effort. Prices and the output cap come from models.dev's OpenAI listing, then OpenRouter's; a model neither lists is left out with a warning. This adds GPT-6 Sol and GPT-6 Luna.
 - Codex responses report the account's credits (`x-codex-credits-*`) beside the usage windows in the `openai_codex_subscription_rate_limits` diagnostic.
 - `listOpenAICodexAccountModels()`: the models a ChatGPT account may use with Codex, asked of the Codex models endpoint with the client version pi's Codex transport speaks (`OPENAI_CODEX_CLIENT_VERSION`).

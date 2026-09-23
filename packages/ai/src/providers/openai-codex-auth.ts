@@ -26,6 +26,12 @@ function decodeJwtPayload(token: string): OpenAICodexJwtPayload | undefined {
 	}
 }
 
+/** The access token's own expiry (its `exp` claim, epoch milliseconds), as the Codex CLI reads it. */
+export function getOpenAICodexTokenExpiry(token: string): number | undefined {
+	const exp = decodeJwtPayload(token)?.exp;
+	return typeof exp === "number" && Number.isFinite(exp) && exp > 0 ? exp * 1000 : undefined;
+}
+
 export function getOpenAICodexAccountId(token: string): string | undefined {
 	const accountId = decodeJwtPayload(token)?.[OPENAI_CODEX_JWT_CLAIM_PATH]?.chatgpt_account_id;
 	return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;

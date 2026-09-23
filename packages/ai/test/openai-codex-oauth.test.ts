@@ -19,13 +19,14 @@ function getUrl(input: unknown): string {
 	throw new Error(`Unsupported fetch input: ${String(input)}`);
 }
 
-function createAccessToken(accountId: string): string {
+function createAccessToken(accountId: string, exp?: number): string {
 	const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64");
 	const payload = Buffer.from(
 		JSON.stringify({
 			"https://api.openai.com/auth": {
 				chatgpt_account_id: accountId,
 			},
+			...(exp === undefined ? {} : { exp }),
 		}),
 	).toString("base64");
 	return `${header}.${payload}.signature`;
@@ -491,6 +492,30 @@ describe("OpenAI Codex OAuth", () => {
 			vi.fn(async () => jsonResponse({ access_token: accessToken, refresh_token: "returned-refresh-token" })),
 		);
 		const missing = await refreshOpenAICodexToken("old-refresh-token").catch((error: Error) => error.message);
-		expect(missing).toBe("OpenAI Codex token refresh response missing fields: expires_in");
+		expect(missing).toBe(
+			"OpenAI Codex token refresh response missing fields: expires_in (the token has no exp claim)",
+		);
+	});
+
+	it("refreshes as the Codex CLI does: a JSON grant, the token's own expiry, and the current refresh token kept", async () => {
+		const exp = Math.floor(Date.parse("2026-10-01T00:00:00Z") / 1000);
+		const accessToken = createAccessToken("account-json", exp);
+		const fetchMock = vi.fn(async (_input: unknown, init?: RequestInit) => {
+			expect(new Headers(init?.headers).get("content-type")).toBe("application/json");
+			expect(JSON.parse(String(init?.body))).toEqual({
+				client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
+				grant_type: "refresh_token",
+				refresh_token: "current-refresh-token",
+			});
+			// No refresh_token and no expires_in: the reference client needs neither.
+			return jsonResponse({ access_token: accessToken });
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		await expect(refreshOpenAICodexToken("current-refresh-token")).resolves.toMatchObject({
+			access: accessToken,
+			refresh: "current-refresh-token",
+			expires: exp * 1000 - 5 * 60 * 1000,
+		});
 	});
 });

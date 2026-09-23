@@ -404,7 +404,7 @@ describe("GPT-5.6 and GPT-6 integration", () => {
 		expect(JSON.stringify(requestBody?.input)).not.toContain("additional_tools");
 	});
 
-	it("preserves supported Codex off and clamps unsupported GPT-5.6 off explicitly", async () => {
+	it("clamps off to each Codex model's lowest catalogue level: no Codex model offers none", async () => {
 		const capturedPayloads: unknown[] = [];
 		vi.stubGlobal(
 			"fetch",
@@ -430,7 +430,8 @@ describe("GPT-5.6 and GPT-6 integration", () => {
 			onPayload: capturePayload,
 		}).result();
 
-		expect(capturedPayloads[0]).toMatchObject({ reasoning: { effort: "none" } });
+		// Codex's catalogue (rust-v0.156.1) gives GPT-5.5 low..xhigh, so off is sent as low, as the Codex CLI would.
+		expect(capturedPayloads[0]).toMatchObject({ reasoning: { effort: "low" } });
 		expect(capturedPayloads[1]).toMatchObject({
 			reasoning: { effort: "low", summary: "auto", context: "all_turns" },
 		});

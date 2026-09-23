@@ -17,7 +17,7 @@ if (typeof process !== "undefined" && (process.versions?.node || process.version
 	});
 }
 
-import { getOpenAICodexAccountId } from "../../providers/openai-codex-auth.ts";
+import { getOpenAICodexAccountId, getOpenAICodexTokenExpiry } from "../../providers/openai-codex-auth.ts";
 import { parseAuthorizationInput, raceAuthorizationInput } from "./authorization-input.ts";
 import { pollOAuthDeviceCodeFlow } from "./device-code.ts";
 import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.ts";
@@ -100,6 +100,7 @@ async function readTokenResponse(
 	response: Response,
 	operation: TokenOperation,
 	submitted: readonly string[],
+	currentRefreshToken?: string,
 ): Promise<OAuthToken> {
 	if (!response.ok) {
 		const text = await response.text().catch(() => "");
@@ -114,19 +115,25 @@ async function readTokenResponse(
 		refresh_token?: string;
 		expires_in?: number;
 	} | null;
-	if (!json?.access_token || !json.refresh_token || typeof json.expires_in !== "number") {
+	// As the Codex CLI does: a refresh that leaves the refresh token out keeps the current one, and the
+	// access token's own `exp` claim is its expiry (`expires_in` only when the token carries none).
+	const refresh = json?.refresh_token || currentRefreshToken;
+	const expiresAt =
+		(json?.access_token ? getOpenAICodexTokenExpiry(json.access_token) : undefined) ??
+		(typeof json?.expires_in === "number" ? Date.now() + json.expires_in * 1000 : undefined);
+	if (!json?.access_token || !refresh || expiresAt === undefined) {
 		const missing = [
 			...(json?.access_token ? [] : ["access_token"]),
-			...(json?.refresh_token ? [] : ["refresh_token"]),
-			...(typeof json?.expires_in === "number" ? [] : ["expires_in"]),
+			...(refresh ? [] : ["refresh_token"]),
+			...(!json?.access_token || expiresAt !== undefined ? [] : ["expires_in (the token has no exp claim)"]),
 		];
 		throw new Error(`OpenAI Codex token ${operation} response missing fields: ${missing.join(", ")}`);
 	}
 
 	return {
 		access: json.access_token,
-		refresh: json.refresh_token,
-		expires: Date.now() + json.expires_in * 1000 - TOKEN_EXPIRY_EARLY_REFRESH_MS,
+		refresh,
+		expires: expiresAt - TOKEN_EXPIRY_EARLY_REFRESH_MS,
 	};
 }
 
@@ -155,20 +162,17 @@ async function exchangeAuthorizationCode(
 async function refreshAccessToken(refreshToken: string): Promise<OAuthToken> {
 	let response: Response;
 	try {
+		// The Codex CLI sends the ChatGPT refresh grant as JSON; the authorization-code exchange stays a form.
 		response = await fetch(TOKEN_URL, {
 			method: "POST",
-			headers: { "Content-Type": "application/x-www-form-urlencoded" },
-			body: new URLSearchParams({
-				grant_type: "refresh_token",
-				refresh_token: refreshToken,
-				client_id: CLIENT_ID,
-			}),
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ client_id: CLIENT_ID, grant_type: "refresh_token", refresh_token: refreshToken }),
 		});
 	} catch (error) {
 		throw new Error(`OpenAI Codex token refresh error: ${error instanceof Error ? error.message : String(error)}`);
 	}
 
-	return readTokenResponse(response, "refresh", [refreshToken]);
+	return readTokenResponse(response, "refresh", [refreshToken], refreshToken);
 }
 
 async function startOpenAICodexDeviceAuth(signal?: AbortSignal): Promise<DeviceAuthInfo> {

@@ -548,6 +548,56 @@ describe("openai-codex streaming", () => {
 		expect(result.errorMessage).toContain("Codex SSE frame exceeded");
 	});
 
+	it("carries a misalignment block's explanation and steer for the host to offer continuation", async () => {
+		const token = mockToken();
+		const failed = {
+			type: "response.failed",
+			response: {
+				id: "resp_blocked",
+				status: "failed",
+				error: {
+					code: "misalignment_policy_violation",
+					message: "",
+					misalignment: {
+						error_type: "scope",
+						detailed_explanation: "The request asked for work outside the stated task.",
+						steer: { message: "Continue only with the stated task." },
+					},
+				},
+			},
+		};
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(`data: ${JSON.stringify(failed)}\n\n`, {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+			),
+		);
+
+		const result = await streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: token,
+			transport: "sse",
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain(
+			"This request was blocked due to a misalignment policy violation. The request asked for work outside the stated task.",
+		);
+		expect(result.diagnostics).toContainEqual(
+			expect.objectContaining({
+				type: "openai_codex_misalignment",
+				details: {
+					errorType: "scope",
+					detailedExplanation: "The request asked for work outside the stated task.",
+					steer: "Continue only with the stated task.",
+				},
+			}),
+		);
+	});
+
 	it("attaches Codex subscription rate-limit reset diagnostics from response headers", async () => {
 		const token = mockToken();
 		const encoder = new TextEncoder();
