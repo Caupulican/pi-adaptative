@@ -371,14 +371,27 @@ export class SystemOneSteeringPlane {
 		return Boolean(ans);
 	}
 
-	private getScoreValue(ans: unknown): number {
-		if (ans == null) return 0;
-		if (typeof ans === "object") {
-			const obj = ans as Record<string, unknown>;
-			if (typeof obj.value === "number") return obj.value;
-			if (typeof obj.score === "number") return obj.score;
+	/**
+	 * How much of a Score answer's probability falls on the levels `inLevels` accepts. A Score is a
+	 * distribution over discrete levels, so a question about levels reads the mass on them: its mean
+	 * is not a level, and a mean compared against a level boundary flips on tail mass alone (measured:
+	 * 0.72 on "minor, defaults resolve it" and 0.15 on "significant" averages to 1.08, past a `> 1`
+	 * cutoff). A score without a distribution is certain at its value; a missing one is undefined.
+	 */
+	private scoreMass(ans: unknown, inLevels: (level: number) => boolean): number | undefined {
+		if (ans == null) return undefined;
+		const obj = typeof ans === "object" ? (ans as Record<string, unknown>) : { value: ans };
+		const distribution = obj.distribution ?? obj.probabilities;
+		if (distribution && typeof distribution === "object") {
+			let mass = 0;
+			for (const [level, probability] of Object.entries(distribution as Record<string, unknown>)) {
+				if (typeof probability === "number" && Number.isFinite(probability) && inLevels(Number(level)))
+					mass += probability;
+			}
+			return mass;
 		}
-		return typeof ans === "number" ? ans : 0;
+		const value = typeof obj.value === "number" ? obj.value : typeof obj.score === "number" ? obj.score : undefined;
+		return value === undefined ? undefined : inLevels(value) ? 1 : 0;
 	}
 
 	private getChoiceValue(ans: unknown): string | undefined {
@@ -415,17 +428,19 @@ export class SystemOneSteeringPlane {
 				if (!this.isTruthy(answers.objective_coherent, undefined, "objective_coherent")) {
 					failed.push("objective_coherent");
 				}
-				if (this.getScoreValue(answers.ambiguity_severity) > 1) {
+				// Most of the belief on "different readings lead to different work" or worse.
+				if ((this.scoreMass(answers.ambiguity_severity, (level) => level >= 2) ?? 0) >= 0.5) {
 					failed.push("ambiguity_severity_acceptable");
 				}
 				if (this.isTruthy(answers.missing_information, undefined, "missing_information")) {
 					failed.push("no_missing_information");
 				}
-				if (failed.length > 0) {
-					outcome = this.isTruthy(answers.missing_information, undefined, "missing_information")
-						? "gather_more"
-						: "fail";
-				}
+				// Only a decisively incoherent objective ends admission. Ambiguity and missing information
+				// are answered by gathering evidence or asking the owner, never by refusing the objective.
+				const incoherent =
+					answers.objective_coherent != null &&
+					evaluateNoul(noulFromAnswer(answers.objective_coherent, false), "required_true") === "hard_fail";
+				if (failed.length > 0) outcome = incoherent ? "fail" : "gather_more";
 				break;
 			}
 
@@ -459,7 +474,7 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-005": {
-				if (this.getScoreValue(answers.semantic_progress) <= 0) {
+				if ((this.scoreMass(answers.semantic_progress, (level) => level <= 0) ?? 0) >= 0.5) {
 					failed.push("semantic_progress_positive");
 					outcome = "replan";
 				}
