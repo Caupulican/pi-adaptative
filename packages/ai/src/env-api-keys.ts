@@ -27,6 +27,7 @@ import type { KnownProvider } from "./types.ts";
 
 export const ANTHROPIC_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN";
 export const ANTHROPIC_OAUTH_TOKEN_ENV = "ANTHROPIC_OAUTH_TOKEN";
+export const CLAUDE_CODE_OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
 export const ANTHROPIC_API_KEY_ENV = "ANTHROPIC_API_KEY";
 
 let _procEnvCache: Map<string, string> | null = null;
@@ -110,7 +111,7 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 	// ANTHROPIC_AUTH_TOKEN participates in discovery/status, but getEnvApiKey skips it because it
 	// must be sent as an Authorization header rather than as Anthropic API-key/OAuth auth.
 	if (provider === "anthropic") {
-		return [ANTHROPIC_AUTH_TOKEN_ENV, ANTHROPIC_OAUTH_TOKEN_ENV, ANTHROPIC_API_KEY_ENV];
+		return [ANTHROPIC_AUTH_TOKEN_ENV, ANTHROPIC_OAUTH_TOKEN_ENV, CLAUDE_CODE_OAUTH_TOKEN_ENV, ANTHROPIC_API_KEY_ENV];
 	}
 
 	// Sakana's Codex/Fugu integration documents SAKANA_API_KEY. The models page
