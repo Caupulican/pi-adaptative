@@ -291,6 +291,7 @@ import {
 	ownerFollowUpPath,
 	parseConsultReply,
 } from "./system-one/owner-question-routing.ts";
+import { changesPlan, reviewPlan } from "./system-one/plan-review.ts";
 import { type SemanticEvaluationRecord, verdictFromEvaluation } from "./system-one/semantic-evaluation-ledger.ts";
 import {
 	type SemanticEvaluationDurableSink,
@@ -1816,6 +1817,7 @@ export class AgentSession {
 				),
 			getSystemOneController: () => this._systemOneController,
 			reviewNewCode: ({ toolName, args, cwd }) => this._codeDuplicates.review(toolName, args, cwd),
+			reviewPlan: ({ toolName, args }) => this._reviewPublishedPlan(toolName, args),
 			validateMutationAcceptance: async ({ changedFiles }) => {
 				if (this._ruleAuthority === "user") return { blocked: false };
 				const result = await this._projectRules.validateMutation(
@@ -2437,6 +2439,20 @@ export class AgentSession {
 		} finally {
 			this._subscriptionResetChecking.delete(provider);
 		}
+	}
+
+	/**
+	 * System One checks a plan the model just published or changed, against the owner's request: a
+	 * decisive gap steers the model in the same result; an unsettled one is shown to the operator.
+	 */
+	private async _reviewPublishedPlan(toolName: string, args: unknown): Promise<string | undefined> {
+		if (!changesPlan(toolName, args)) return undefined;
+		const steps = (this.getTaskStepsStateSnapshot()?.steps ?? [])
+			.filter((step) => step.status !== "cancelled")
+			.map((step) => step.content);
+		const review = await reviewPlan(this._semanticDecisionEngine(), { request: this._lastUserRequest, steps });
+		if (review.doubt) this._emit({ type: "warning", message: `${review.doubt}.` });
+		return review.steer;
 	}
 
 	/** A model that cannot take work now: its quota is exhausted, or the owner's account does not offer it. */

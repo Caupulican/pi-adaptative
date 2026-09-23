@@ -14,19 +14,22 @@ import type { DecisionEngine, DecisionEngineProgram } from "./evidence-retention
 interface RetentionQuestion {
 	readonly id?: string;
 	readonly instruction?: string;
+	/** What a true and a false answer mean, when the boundary is subtle; sent to the engine as is. */
+	readonly criteria?: { readonly true?: string; readonly false?: string };
 }
 
 export function createRetentionDecisionEngine(engine: SemanticDecisionEngine): DecisionEngine {
 	return {
 		async evaluate(program: DecisionEngineProgram, state, options) {
 			const decisions = (program.decisions as readonly RetentionQuestion[])
-				.filter((decision): decision is Required<RetentionQuestion> =>
+				.filter((decision): decision is RetentionQuestion & { id: string; instruction: string } =>
 					Boolean(decision?.id && decision?.instruction),
 				)
 				.map((decision) => ({
 					kind: "boolean" as const,
 					id: decision.id,
 					instruction: decision.instruction,
+					...(decision.criteria ? { criteria: decision.criteria } : {}),
 				}));
 			if (decisions.length === 0) return {};
 

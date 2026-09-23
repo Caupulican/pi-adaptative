@@ -227,7 +227,7 @@ function irreversibleAction(reading: JudgmentReading, actor: "root" | "worker"):
  * operator too.
  */
 export async function judgeOperation(
-	engine: OperationEffectEngine | undefined,
+	engine: OperationEffectEngine,
 	input: {
 		readonly triage: Extract<OperationTriage, { kind: "undecidable" }>;
 		readonly toolName: string;
@@ -241,8 +241,7 @@ export async function judgeOperation(
 ): Promise<OperationVerdict> {
 	let answers: Record<string, unknown> | undefined;
 	let failure: string | undefined;
-	if (!engine) failure = "System One is not bound";
-	else {
+	{
 		const bounded = [input.signal, input.timeoutMs ? AbortSignal.timeout(input.timeoutMs) : undefined].filter(
 			(signal): signal is AbortSignal => signal !== undefined,
 		);

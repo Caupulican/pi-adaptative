@@ -75,8 +75,8 @@ describe("operation triage", () => {
 describe("operation judgment", () => {
 	const undecidable = triage("bash", { command: "curl -X POST https://api.example.test -d @x" });
 	if (undecidable.kind !== "undecidable") throw new Error("fixture must be undecidable");
-	const judge = (answers: Record<string, number> | undefined, actor: "root" | "worker" = "root") =>
-		judgeOperation(answers ? engine(answers) : undefined, {
+	const judge = (answers: Record<string, number>, actor: "root" | "worker" = "root") =>
+		judgeOperation(engine(answers), {
 			triage: undecidable,
 			toolName: "bash",
 			scopeCwd: scope,
@@ -109,9 +109,22 @@ describe("operation judgment", () => {
 				request_authorizes: 0.5,
 			}),
 		).toMatchObject({ action: "confirm", finding: expect.stringContaining("could not be settled") });
-		expect(await judge(undefined)).toMatchObject({
+		const failing: OperationEffectEngine = {
+			evaluate: async () => {
+				throw new Error("engine down");
+			},
+		};
+		expect(
+			await judgeOperation(failing, {
+				triage: undecidable,
+				toolName: "bash",
+				scopeCwd: scope,
+				request: "",
+				actor: "root",
+			}),
+		).toMatchObject({
 			action: "confirm",
-			finding: expect.stringContaining("System One could not judge it"),
+			finding: expect.stringContaining("System One could not judge it (engine down)"),
 		});
 	});
 
@@ -152,6 +165,18 @@ describe("operation gate", () => {
 		});
 		return { operationGate, fake, notices, askOperator };
 	}
+
+	it("leaves a session without System One to the deterministic gates", async () => {
+		const operationGate = new OperationGate({
+			getEngine: () => undefined,
+			getRequest: () => "",
+			getScopeCwd: () => scope,
+			getTurnKey: () => "t",
+			isGranted: () => false,
+			notify: () => {},
+		});
+		expect(await operationGate.check("bash", command, scope, "root")).toBeUndefined();
+	});
 
 	it("never asks System One about ordinary work", async () => {
 		const { operationGate, fake } = gate({ answers: LOCAL });

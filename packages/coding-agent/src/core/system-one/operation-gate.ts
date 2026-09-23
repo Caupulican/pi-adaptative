@@ -1,5 +1,5 @@
 /**
- * The operation gate: one check per tool call, after the envelope and the edge. It asks System One
+ * The operation gate: one check per tool call, after the envelope and the edge. With System One bound it asks
  * only about an operation {@link triageOperation} finds undecidable, caches the verdict for the rest
  * of the turn (a repeated call is not judged twice), and applies it: the operator's standing grant of
  * `operation.irreversible` authorizes; otherwise the root asks the operator at the edge and a worker
@@ -52,6 +52,10 @@ export class OperationGate {
 		const scopeCwd = this.deps.getScopeCwd();
 		const triage = triageOperation({ toolName, args, cwd, scopeCwd, tempDir: tmpdir() });
 		if (triage.kind === "decided") return undefined;
+		// A session without System One keeps the deterministic gates alone, as it always did; an outage
+		// of a bound System One is different and goes to the operator (the authority line).
+		const engine = this.deps.getEngine();
+		if (!engine) return undefined;
 		const turnKey = this.deps.getTurnKey();
 		if (turnKey !== this.turnKey) {
 			this.verdicts.clear();
@@ -60,7 +64,7 @@ export class OperationGate {
 		const key = `${actor}\u0000${getToolExecutionKey(toolName, args)}`;
 		let verdict = this.verdicts.get(key);
 		if (!verdict) {
-			verdict = await judgeOperation(this.deps.getEngine(), {
+			verdict = await judgeOperation(engine, {
 				triage,
 				toolName,
 				scopeCwd,

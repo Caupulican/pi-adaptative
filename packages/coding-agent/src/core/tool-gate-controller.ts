@@ -101,6 +101,11 @@ export interface ToolGateControllerDeps {
 	 */
 	reviewNewCode?(input: { toolName: string; args: unknown; cwd: string }): Promise<string | undefined>;
 	/**
+	 * System One's review of a plan the model just published or changed (task_steps set/intake/add).
+	 * Returns a steer appended to the tool result, or undefined when the plan passes.
+	 */
+	reviewPlan?(input: { toolName: string; args: unknown }): Promise<string | undefined>;
+	/**
 	 * Mutation-acceptance rule hook. A blocking violation converts the mutation's own result into an
 	 * error carrying the violation, so the transition does not proceed on an accepted mutation.
 	 */
@@ -495,6 +500,8 @@ export class ToolGateController {
 						};
 					}
 				}
+				const planSteer = await this.deps.reviewPlan?.({ toolName: toolCall.name, args });
+				if (planSteer) content = [...content, { type: "text", text: planSteer }];
 				if (changedFiles.length > 0) {
 					this.deps.noteOwnedWrites?.(changedFiles, executionContext?.cwd ?? this.deps.getCwd());
 					const duplicateNote = await this.deps.reviewNewCode?.({

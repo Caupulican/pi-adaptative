@@ -321,9 +321,18 @@ irreversible or outward one runs when the request asks for it, is refused when t
 does not, and goes to the operator (`operation.irreversible` at the edge; a worker is refused) when
 that is unsettled or System One cannot answer within its time budget. A standing
 `operation.irreversible` grant authorizes all of these, and what System One found is shown either
-way. Everything else never reaches System One, so ordinary work pays nothing. Pinned by
+way. Everything else never reaches System One, so ordinary work pays nothing, and a session with no
+System One bound keeps the deterministic gates alone. Pinned by
 `packages/coding-agent/test/edge-policy.test.ts` and
 `packages/coding-agent/test/system-one/operation-gate.test.ts`.
+
+**System One checks a plan when it is published or changed.** After a `task_steps` set, intake or
+add, the whole current plan and the owner's request go to System One as three questions, each naming
+one defect: a requested part no step does, a step that needs a later step's result, no step that
+checks the result. A defect at the noul hard-fail band (0.8) is appended to the tool result as a
+steer, so the model revises the plan before working from it; a defect above an even chance is a
+doubt shown to the operator; a failing System One is a doubt, never a block. Status updates are not
+reviewed. Pinned by `packages/coding-agent/test/system-one/plan-review.test.ts`.
 
 **One classification is conditional on live state, not on the command alone.** Several pi sessions
 share one worktree, so `git reset --hard`, `git clean -f`, `git checkout -- …`, `git restore` and
