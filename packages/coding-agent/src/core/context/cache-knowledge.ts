@@ -61,6 +61,16 @@ export class CacheKnowledge {
 		return curve ? predictRetainedWithError(curve, gapMs, this.settings.binsPerDecade) : undefined;
 	}
 
+	/** Learned idle gaps that ended with `holder` waking a lane (every lane: the wait is the holder's). */
+	returnGaps(holder: "owner" | "tool" | "host", now: number): number[] {
+		return this.getLedger()?.returnGaps(holder, now - negligibleAgeMs(this.settings.halfLifeMs)) ?? [];
+	}
+
+	/** The curve's measurement resolution for `lane`: the moments a decision over idle time can act at. */
+	gapResolution(lane: string, now: number): number[] {
+		return this.curve(lane, now)?.bins.map((bin) => bin.fromMs) ?? [];
+	}
+
 	/** When `lane` last answered in this session, per the ledger. */
 	lastResponseAt(sessionId: string, lane: string): number | undefined {
 		return this.getLedger()?.latestCacheObservation(sessionId, lane)?.observedAt;

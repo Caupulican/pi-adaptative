@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	type CompactionEconomicsInput,
+	planIdlePreparation,
 	priceCompaction,
 	switchCostUsd,
 } from "../src/core/compaction/early-compaction-economics.ts";
@@ -94,5 +95,58 @@ describe("switch cost", () => {
 		// Without a cache-write price a miss costs the input price.
 		expect(switchCostUsd({ cost: { input: 0.3 } }, 1_000_000)).toBeCloseTo(0.3, 12);
 		expect(switchCostUsd({}, 1_000)).toBeUndefined();
+	});
+});
+
+describe("idle preparation plan", () => {
+	// Anthropic-like prices: a cold prefix costs twelve times a cached one.
+	const PLAN = {
+		prefixTokens: 100_000,
+		compactedTokens: 20_000,
+		summaryOutputTokens: 1_000,
+		remainingRequests: 5,
+		summarizerSharesLane: true,
+		cacheReadUsdPerMillion: 0.5,
+		coldUsdPerMillion: 6.25,
+		outputUsdPerMillion: 25,
+		candidateTimesMs: [1_000, 60_000, 240_000, 600_000],
+	};
+	// Warm until five minutes, gone after.
+	const ttlCurve = (gapMs: number) => ({ retained: gapMs < 300_000 ? 1 : 0, standardError: 0 });
+
+	it("prepares at the last warm moment before the owner usually returns cold", () => {
+		const plan = planIdlePreparation({
+			...PLAN,
+			retainedAt: ttlCurve,
+			returnGapsMs: [900_000, 1_200_000, 1_800_000],
+		});
+		expect(plan?.prepareAtMs).toBe(240_000);
+		expect(plan?.valueUsd).toBeGreaterThan(0);
+	});
+
+	it("plans nothing when the owner comes back while the cache is still warm", () => {
+		expect(planIdlePreparation({ ...PLAN, retainedAt: ttlCurve, returnGapsMs: [30_000, 60_000] })).toBeUndefined();
+	});
+
+	it("plans nothing when the lane never loses its cache, or nothing is known about returns", () => {
+		const alwaysWarm = () => ({ retained: 1, standardError: 0 });
+		expect(planIdlePreparation({ ...PLAN, retainedAt: alwaysWarm, returnGapsMs: [1_800_000] })).toBeUndefined();
+		expect(planIdlePreparation({ ...PLAN, retainedAt: ttlCurve, returnGapsMs: [] })).toBeUndefined();
+	});
+
+	it("plans nothing when a preparation could only read the prefix cold", () => {
+		const coldFromStart = () => ({ retained: 0, standardError: 0 });
+		expect(planIdlePreparation({ ...PLAN, retainedAt: coldFromStart, returnGapsMs: [1_800_000] })).toBeUndefined();
+	});
+
+	it("continuing from a prepared summary costs only the compacted prefix", () => {
+		const verdict = priceCompaction({
+			...PLAN,
+			retained: { retained: 0, standardError: 0 },
+			summaryPrepared: true,
+		});
+		expect(verdict.proceed).toBe(true);
+		if (!verdict.proceed) return;
+		expect(verdict.compactUsd).toBeCloseTo(usd(20_000, 6.25) + 4 * usd(20_000, 0.5), 12);
 	});
 });

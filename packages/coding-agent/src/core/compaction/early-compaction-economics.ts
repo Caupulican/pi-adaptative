@@ -32,6 +32,11 @@ export interface CompactionEconomicsInput {
 	readonly summarizerSharesLane: boolean;
 	/** The summarizer's cold price, when it runs on another lane and reads P uncached. */
 	readonly summarizerColdUsdPerMillion?: number;
+	/**
+	 * The summary was prepared while the lane idled: its read of P and its output are already paid, so
+	 * compacting now costs only writing and reading the compacted prefix.
+	 */
+	readonly summaryPrepared?: boolean;
 	readonly cacheReadUsdPerMillion?: number;
 	/** What a prefix the provider has not cached costs: its cache-write price, else its input price. */
 	readonly coldUsdPerMillion?: number;
@@ -64,24 +69,11 @@ export type CompactionEconomicsVerdict =
  * without evidence), so an uncertain curve never forces a context-losing compaction.
  */
 export function priceCompaction(input: CompactionEconomicsInput): CompactionEconomicsVerdict {
-	const read = input.cacheReadUsdPerMillion;
-	const cold = input.coldUsdPerMillion;
-	const output = input.outputUsdPerMillion;
-	if (read === undefined || cold === undefined || output === undefined) {
+	const costs = compactionCosts(input);
+	if (!costs) {
 		return { proceed: false, reason: "insufficient_evidence", detail: "prices unknown; no fabricated savings" };
 	}
-	const compactedRead = input.compactedCacheReadUsdPerMillion ?? read;
-	const compactedCold = input.compactedColdUsdPerMillion ?? cold;
-	const prefix = Math.max(0, input.prefixTokens);
-	const compacted = Math.max(0, input.compactedTokens);
-	const further = Math.max(0, input.remainingRequests - 1);
-	const firstRead = (share: number) => usd(prefix, share * read + (1 - share) * cold);
-	const resume = (share: number) => firstRead(share) + further * usd(prefix, read);
-	const compact = (share: number) =>
-		(input.summarizerSharesLane ? firstRead(share) : usd(prefix, input.summarizerColdUsdPerMillion ?? cold)) +
-		usd(input.summaryOutputTokens, output) +
-		usd(compacted, compactedCold) +
-		further * usd(compacted, compactedRead);
+	const compact = (share: number) => (input.summaryPrepared ? 0 : costs.summarize(share)) + costs.continueCompacted;
 	const shares = input.retained
 		? [
 				Math.max(0, input.retained.retained - input.retained.standardError),
@@ -89,9 +81,9 @@ export function priceCompaction(input: CompactionEconomicsInput): CompactionEcon
 			]
 		: [0, 1];
 	const worst = shares
-		.map((share) => ({ share, saving: resume(share) - compact(share) }))
+		.map((share) => ({ share, saving: costs.resume(share) - compact(share) }))
 		.reduce((a, b) => (b.saving < a.saving ? b : a));
-	const resumeUsd = resume(worst.share);
+	const resumeUsd = costs.resume(worst.share);
 	const compactUsd = compact(worst.share);
 	const basis = `${input.remainingRequests} requests, cache share ${worst.share.toFixed(2)}`;
 	if (worst.saving <= 0) {
@@ -109,6 +101,87 @@ export function priceCompaction(input: CompactionEconomicsInput): CompactionEcon
 		resumeUsd,
 		compactUsd,
 	};
+}
+
+/**
+ * The three costs every compaction price is made of, or undefined without prices:
+ * - `resume(share)`: the next request reads the prefix with `share` of it cached, and each further
+ *   request reads it from cache;
+ * - `summarize(share)`: the summarizer reads the prefix (on the session lane at `share`, elsewhere cold)
+ *   and generates the summary at the output price;
+ * - `continueCompacted`: the next request writes the compacted prefix cold, and each further request
+ *   reads it from cache.
+ */
+function compactionCosts(
+	input: Omit<CompactionEconomicsInput, "retained">,
+): { resume(share: number): number; summarize(share: number): number; continueCompacted: number } | undefined {
+	const read = input.cacheReadUsdPerMillion;
+	const cold = input.coldUsdPerMillion;
+	const output = input.outputUsdPerMillion;
+	if (read === undefined || cold === undefined || output === undefined) return undefined;
+	const prefix = Math.max(0, input.prefixTokens);
+	const compacted = Math.max(0, input.compactedTokens);
+	const further = Math.max(0, input.remainingRequests - 1);
+	const firstRead = (share: number) => usd(prefix, share * read + (1 - share) * cold);
+	return {
+		resume: (share) => firstRead(share) + further * usd(prefix, read),
+		summarize: (share) =>
+			(input.summarizerSharesLane ? firstRead(share) : usd(prefix, input.summarizerColdUsdPerMillion ?? cold)) +
+			usd(input.summaryOutputTokens, output),
+		continueCompacted:
+			usd(compacted, input.compactedColdUsdPerMillion ?? cold) +
+			further * usd(compacted, input.compactedCacheReadUsdPerMillion ?? read),
+	};
+}
+
+/** Everything {@link planIdlePreparation} prices a preparation with. */
+export interface IdlePreparationInput extends Omit<CompactionEconomicsInput, "retained" | "summaryPrepared"> {
+	/** The lane's survival curve: the share still cached after an idle gap, with its standard error. */
+	retainedAt(gapMs: number): { readonly retained: number; readonly standardError: number } | undefined;
+	/** Learned idle gaps before the next request, for whatever holds the lane now. */
+	readonly returnGapsMs: readonly number[];
+	/** Moments the preparation may run at (the curve's measurement resolution). */
+	readonly candidateTimesMs: readonly number[];
+}
+
+/**
+ * When to prepare a compaction while the lane idles, if ever. Preparing at t pays the summarizer at the
+ * cache share left at t, and helps only when the next request comes after t: then the best of resuming
+ * and compacting without a summary, `min(resume, summarize + continue)`, becomes the best with one,
+ * `min(resume, continue)`. The expected value over the learned return gaps is maximized over the
+ * candidate moments; nothing is planned when no moment has a positive value. Shares are taken at their
+ * least favorable end: the preparation's read at the colder bound, a return's at the warmer (a warm
+ * return needs no summary). A gap the curve has no evidence for counts as fully warm.
+ */
+export function planIdlePreparation(
+	input: IdlePreparationInput,
+): { prepareAtMs: number; valueUsd: number } | undefined {
+	const costs = compactionCosts(input);
+	const gaps = input.returnGapsMs.filter((gap) => Number.isFinite(gap) && gap >= 0);
+	if (!costs || gaps.length === 0) return undefined;
+	const share = (gapMs: number, bound: -1 | 1) => {
+		const estimate = input.retainedAt(gapMs);
+		if (!estimate) return bound > 0 ? 1 : 0;
+		return Math.min(1, Math.max(0, estimate.retained + bound * estimate.standardError));
+	};
+	const benefit = (gap: number) => {
+		const warm = share(gap, 1);
+		const resume = costs.resume(warm);
+		return (
+			Math.min(resume, costs.summarize(warm) + costs.continueCompacted) - Math.min(resume, costs.continueCompacted)
+		);
+	};
+	let best: { prepareAtMs: number; valueUsd: number } | undefined;
+	for (const t of [...new Set(input.candidateTimesMs)].filter((time) => time > 0).sort((a, b) => a - b)) {
+		const later = gaps.filter((gap) => gap > t);
+		if (later.length === 0) break;
+		const preparation = costs.summarize(share(t, -1));
+		const value = later.reduce((sum, gap) => sum + benefit(gap) - preparation, 0) / gaps.length;
+		// Among equally valuable moments the latest wins: a later preparation wastes less on a return the
+		// learned gaps did not show.
+		if (value > 0 && (!best || value >= best.valueUsd)) best = { prepareAtMs: t, valueUsd: value };
+	}
+	return best;
 }
 
 /**

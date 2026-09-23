@@ -7,6 +7,7 @@ import {
 	CacheObservationRecorder,
 	cacheLaneKey,
 	historyLineage,
+	idleHolder,
 } from "../src/core/context/cache-observation-recorder.ts";
 import {
 	lineageEpisodes,
@@ -278,5 +279,41 @@ describe("cache knowledge", () => {
 		knowledge.noteObservation(record(2, 0));
 		expect(knowledge.retainedAfter(key, 2_000, 10)?.retained).toBeCloseTo(0.5, 12);
 		expect(knowledge.lastResponseAt("s", key)).toBe(2);
+	});
+});
+
+describe("idle holder", () => {
+	const dirs: string[] = [];
+	afterEach(() => {
+		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	});
+
+	it("names who woke the lane and learns the return gaps per holder", () => {
+		// Host records riding with a person's message or tool results do not change who woke the lane.
+		expect(idleHolder([{ role: "user" }, { role: "custom" }])).toBe("owner");
+		expect(idleHolder([{ role: "toolResult" }, { role: "custom" }])).toBe("tool");
+		expect(idleHolder([{ role: "custom" }])).toBe("host");
+		expect(idleHolder([])).toBe("host");
+		const dir = mkdtempSync(join(tmpdir(), "idle-holder-"));
+		dirs.push(dir);
+		const ledger = new DecisionLedgerStore({ databasePath: join(dir, "decision-ledger.sqlite") });
+		const row = (observedAt: number, gapMs: number | undefined, holder: "owner" | "tool") => ({
+			sessionId: "s",
+			cwd: "/repo",
+			lane: lane("xai", "grok"),
+			observedAt,
+			...(gapMs !== undefined ? { gapMs } : {}),
+			promptTokens: 1,
+			cacheReadTokens: 0,
+			prefixIntact: "true" as const,
+			holder,
+		});
+		ledger.recordCacheObservation(row(1, 60_000, "owner"));
+		ledger.recordCacheObservation(row(2, 900, "tool"));
+		ledger.recordCacheObservation(row(3, undefined, "owner"));
+		ledger.recordCacheObservation(row(4, 120_000, "owner"));
+		expect(ledger.returnGaps("owner", 0).sort((a, b) => a - b)).toEqual([60_000, 120_000]);
+		expect(ledger.returnGaps("owner", 2)).toEqual([120_000]);
+		expect(ledger.recentCacheObservations(lane("xai", "grok"), 1)[0]).toMatchObject({ holder: "owner" });
 	});
 });

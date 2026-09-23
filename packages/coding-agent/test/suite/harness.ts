@@ -79,7 +79,7 @@ export interface HarnessOptions {
 	/** Persist the session inside the harness-owned temporary directory. */
 	persistSession?: boolean;
 	models?: FauxModelDefinition[];
-	fauxProvider?: Pick<RegisterFauxProviderOptions, "api" | "provider" | "onRequest">;
+	fauxProvider?: Pick<RegisterFauxProviderOptions, "api" | "provider" | "onRequest" | "cacheTtlMs">;
 	settings?: Partial<Settings>;
 	systemPrompt?: string;
 	/**
@@ -244,6 +244,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	}
 
 	const agent = new Agent({
+		// The SDK routes every foreground request on the session's own id (sdk.ts), which is also the cache
+		// session a summarizer on the same lane reuses.
+		sessionId: sessionManager.getSessionId(),
 		getApiKey: () => (withConfiguredAuth ? "faux-key" : undefined),
 		initialState: {
 			model,

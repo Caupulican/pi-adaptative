@@ -94,7 +94,12 @@ import { type AutoCompactionReason, CompactionController } from "./compaction-co
 import { CompactionSupport, type LastSentRequest } from "./compaction-support.ts";
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
 import { CacheKnowledge } from "./context/cache-knowledge.ts";
-import { CacheObservationRecorder, cacheLaneKey, historyLineage } from "./context/cache-observation-recorder.ts";
+import {
+	CacheObservationRecorder,
+	cacheLaneKey,
+	historyLineage,
+	idleHolder,
+} from "./context/cache-observation-recorder.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { ContextAuditReport } from "./context/context-audit.ts";
 import {
@@ -362,6 +367,15 @@ export type { ToolProbeReport, ToolProbeResult, ToolProbeVerdict } from "./tool-
 // ============================================================================
 // AgentSession Class
 // ============================================================================
+
+/** The messages a reply's request carried since the previous reply (see `idleHolder`). */
+function sincePreviousReply(messages: readonly AgentMessage[], reply: AgentMessage): readonly AgentMessage[] {
+	const end = messages.lastIndexOf(reply);
+	const before = end >= 0 ? messages.slice(0, end) : messages;
+	let start = before.length;
+	while (start > 0 && before[start - 1]?.role !== "assistant") start--;
+	return before.slice(start);
+}
 
 export class AgentSession {
 	readonly agent: Agent;
@@ -1267,6 +1281,9 @@ export class AgentSession {
 				);
 				const outcome = this._cacheKnowledge.compactionOutcome(lane, now);
 				return {
+					retainedAt: (gapMs) => this._cacheKnowledge.retainedAfter(lane, gapMs, now),
+					returnGapsMs: (holder) => this._cacheKnowledge.returnGaps(holder, now),
+					gapResolutionMs: this._cacheKnowledge.gapResolution(lane, now),
 					...(retained ? { retained } : {}),
 					// Without a lineage that long on record, the lineage's own elapsed requests stand in.
 					...(lineage ? { remainingRequests: lineage.remaining ?? lineage.elapsed } : {}),
@@ -3038,6 +3055,7 @@ export class AgentSession {
 				...(matched?.prefixIntact !== undefined ? { prefixIntact: matched.prefixIntact } : {}),
 				...(matched?.firstDivergentKind ? { divergenceKind: matched.firstDivergentKind } : {}),
 				lineage: historyLineage(this.agent.state.messages),
+				holder: idleHolder(sincePreviousReply(this.agent.state.messages, message)),
 			});
 			if (row) {
 				const recorded = { ...row, sessionId: this.sessionId, cwd: this._cwd };
@@ -3387,6 +3405,17 @@ export class AgentSession {
 			if (event.message.role === "assistant") {
 				const assistantMsg = event.message as AssistantMessage;
 				this._recordCacheObservation(assistantMsg);
+				// The session lane's stream closed: it idles until its next request (a tool run or the owner).
+				const sessionModel = this.model;
+				if (
+					sessionModel &&
+					assistantMsg.stopReason !== "error" &&
+					assistantMsg.stopReason !== "aborted" &&
+					assistantMsg.provider === sessionModel.provider &&
+					assistantMsg.model === sessionModel.id
+				) {
+					this._compaction.onLaneIdle(assistantMsg);
+				}
 				// A reply a routed model wrote keeps its route, so a reloaded conversation names the same author.
 				const route = this._modelRouter.getForegroundRouteSnapshot();
 				if (route.switched) {
@@ -3613,6 +3642,7 @@ export class AgentSession {
 	dispose(): void {
 		if (this._disposed) return;
 		this._disposed = true;
+		this._compaction.cancelIdlePreparation();
 		// Every in-flight admission entry this session still owns is released; a sibling process
 		// would otherwise count it until the heartbeat went stale.
 		this._providerAdmissionLedger.releaseAll();
@@ -4089,6 +4119,8 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		// The owner spoke: a summary being prepared while the lane idled never makes them wait.
+		this._compaction.cancelIdlePreparation();
 		// An owner development directive is policy, not prompt text: it is captured durably here,
 		// before the turn that carried it can be compacted away.
 		this._ownerRules.record(text);
@@ -4815,6 +4847,7 @@ export class AgentSession {
 	// =========================================================================
 
 	async setModel(model: Model<Api>, options: { persistSettings?: boolean } = {}): Promise<void> {
+		this._compaction.cancelIdlePreparation();
 		await this._modelSelection.setModel(model, options);
 		this._localPrefixWarm.schedule(this.agent.state.model);
 	}
@@ -5052,6 +5085,7 @@ export class AgentSession {
 		// Extension/settings reload: guarded (see extension-binding-controller.ts) to never overlap
 		// compaction, so this is always a genuine resync, never compaction's own within-lineage pack.
 		this.agent.resetSanitizerPrefixHorizon();
+		this._compaction.cancelIdlePreparation();
 		return this._runtimeBuilder.reload();
 	}
 

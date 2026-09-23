@@ -128,6 +128,11 @@ export interface RegisterFauxProviderOptions {
 	provider?: string;
 	/** Observe every request's prompt-cache reuse; see {@link FauxRequestEvent}. */
 	onRequest?: (event: FauxRequestEvent) => void;
+	/**
+	 * How long a session's cached prefix survives without a request, as a real provider's cache expires.
+	 * A request after a longer idle gap is served cold. Unset, the cache never expires.
+	 */
+	cacheTtlMs?: number;
 	models?: FauxModelDefinition[];
 	tokensPerSecond?: number;
 	tokenSize?: {
@@ -245,8 +250,9 @@ function withUsageEstimate(
 	message: AssistantMessage,
 	context: Context,
 	options: StreamOptions | undefined,
-	promptCache: Map<string, SerializedContext>,
+	promptCache: Map<string, SerializedContext & { storedAt: number }>,
 	onRequest?: (event: FauxRequestEvent) => void,
+	cacheTtlMs?: number,
 ): AssistantMessage {
 	const serialized = serializeContext(context);
 	const promptText = serialized.text;
@@ -263,7 +269,9 @@ function withUsageEstimate(
 	// id only routes, so a host that names no session is still measured, per registration.
 	const accounted = sessionId !== undefined && options?.cacheRetention !== "none";
 	const cacheKey = accounted ? sessionId : "";
-	const previous = promptCache.get(cacheKey);
+	const stored = promptCache.get(cacheKey);
+	const now = Date.now();
+	const previous = stored && (cacheTtlMs === undefined || now - stored.storedAt <= cacheTtlMs) ? stored : undefined;
 	if (previous) {
 		firstRequest = false;
 		cachedChars = commonPrefixLength(previous.text, promptText);
@@ -277,7 +285,7 @@ function withUsageEstimate(
 			cacheWrite = promptTokens;
 		}
 	}
-	promptCache.set(cacheKey, serialized);
+	promptCache.set(cacheKey, { ...serialized, storedAt: now });
 	if (onRequest) {
 		const divergedAt = serialized.messageSpans.findIndex(([, end]) => end > cachedChars);
 		const diverged = divergedAt >= 0 ? context.messages[divergedAt] : undefined;
@@ -505,7 +513,7 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 	let pendingResponses: FauxResponseStep[] = [];
 	const tokensPerSecond = options.tokensPerSecond;
 	const state = { callCount: 0 };
-	const promptCache = new Map<string, SerializedContext>();
+	const promptCache = new Map<string, SerializedContext & { storedAt: number }>();
 
 	const modelDefinitions = options.models?.length
 		? options.models
@@ -554,7 +562,14 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 						provider,
 						requestModel.id,
 					);
-					message = withUsageEstimate(message, context, streamOptions, promptCache, options.onRequest);
+					message = withUsageEstimate(
+						message,
+						context,
+						streamOptions,
+						promptCache,
+						options.onRequest,
+						options.cacheTtlMs,
+					);
 					outer.push({ type: "error", reason: "error", error: message });
 					outer.end(message);
 					return;
@@ -563,7 +578,14 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 				const resolved =
 					typeof step === "function" ? await step(context, streamOptions, state, requestModel) : step;
 				let message = cloneMessage(resolved, api, provider, requestModel.id);
-				message = withUsageEstimate(message, context, streamOptions, promptCache, options.onRequest);
+				message = withUsageEstimate(
+					message,
+					context,
+					streamOptions,
+					promptCache,
+					options.onRequest,
+					options.cacheTtlMs,
+				);
 				await streamWithDeltas(outer, message, minTokenSize, maxTokenSize, tokensPerSecond, streamOptions?.signal);
 			} catch (error) {
 				const message = createErrorMessage(error, api, provider, requestModel.id);

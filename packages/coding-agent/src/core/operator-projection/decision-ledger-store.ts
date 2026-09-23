@@ -70,6 +70,11 @@ export interface CacheObservationRow {
 	 * one. A session's requests on one lineage are that lineage's lifetime, which ends at the next compaction.
 	 */
 	readonly lineage?: string;
+	/**
+	 * What held the lane while it idled before this request: `owner` (a person's message ended the wait),
+	 * `tool` (tool results did), or `host` (a host turn). The return-gap distribution is learned per holder.
+	 */
+	readonly holder?: "owner" | "tool" | "host";
 }
 
 /**
@@ -216,7 +221,8 @@ export class DecisionLedgerStore {
 				retained REAL,
 				prefix_intact TEXT NOT NULL,
 				divergence_kind TEXT,
-				lineage TEXT
+				lineage TEXT,
+				holder TEXT
 			);
 			CREATE INDEX IF NOT EXISTS cache_observations_lane ON cache_observations (lane, observed_at);
 			CREATE INDEX IF NOT EXISTS cache_observations_session_lane ON cache_observations (session_id, lane, observed_at);
@@ -244,10 +250,15 @@ export class DecisionLedgerStore {
 			);
 			CREATE INDEX IF NOT EXISTS compaction_outcomes_lane ON compaction_outcomes (lane, observed_at);
 		`);
-		// Ledgers created before observations carried their lineage gain the column; their rows stay unassigned.
-		const columns = this.database.prepare("PRAGMA table_info(cache_observations)").all();
-		if (!columns.some((column) => column.name === "lineage")) {
-			this.database.exec("ALTER TABLE cache_observations ADD COLUMN lineage TEXT");
+		// Ledgers created before observations carried these columns gain them; their rows stay unassigned.
+		const columns = new Set(
+			this.database
+				.prepare("PRAGMA table_info(cache_observations)")
+				.all()
+				.map((column) => column.name),
+		);
+		for (const column of ["lineage", "holder"]) {
+			if (!columns.has(column)) this.database.exec(`ALTER TABLE cache_observations ADD COLUMN ${column} TEXT`);
 		}
 		this.database.exec(
 			"CREATE INDEX IF NOT EXISTS cache_observations_lineage ON cache_observations (session_id, lineage, observed_at)",
@@ -431,8 +442,8 @@ export class DecisionLedgerStore {
 		this.database
 			.prepare(
 				`INSERT INTO cache_observations
-				 (session_id, cwd, lane, observed_at, gap_ms, prompt_tokens, cache_read_tokens, retained, prefix_intact, divergence_kind, lineage)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				 (session_id, cwd, lane, observed_at, gap_ms, prompt_tokens, cache_read_tokens, retained, prefix_intact, divergence_kind, lineage, holder)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				row.sessionId,
@@ -446,7 +457,17 @@ export class DecisionLedgerStore {
 				row.prefixIntact,
 				row.divergenceKind ?? null,
 				row.lineage ?? null,
+				row.holder ?? null,
 			);
+	}
+
+	/** Every recorded idle gap that ended with `holder` waking the lane, since `sinceMs`. */
+	returnGaps(holder: "owner" | "tool" | "host", sinceMs: number): number[] {
+		return this.database
+			.prepare("SELECT gap_ms FROM cache_observations WHERE holder = ? AND gap_ms IS NOT NULL AND observed_at >= ?")
+			.all(holder, Number.isFinite(sinceMs) ? sinceMs : Number.MIN_SAFE_INTEGER)
+			.map((row) => asInteger(row.gap_ms))
+			.filter((gap): gap is number => gap !== undefined);
 	}
 
 	/** Records one priced cache decision (see {@link CacheDecisionRow}). */
@@ -615,6 +636,7 @@ export class DecisionLedgerStore {
 			const retained = typeof row.retained === "number" ? row.retained : undefined;
 			const divergenceKind = asText(row.divergence_kind);
 			const lineage = asText(row.lineage);
+			const holder = asText(row.holder);
 			out.push({
 				sessionId,
 				cwd,
@@ -627,6 +649,7 @@ export class DecisionLedgerStore {
 				...(retained !== undefined ? { retained } : {}),
 				...(divergenceKind !== undefined ? { divergenceKind } : {}),
 				...(lineage !== undefined ? { lineage } : {}),
+				...(holder === "owner" || holder === "tool" || holder === "host" ? { holder } : {}),
 			});
 		}
 		return out;

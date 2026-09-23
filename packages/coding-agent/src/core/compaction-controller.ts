@@ -37,8 +37,10 @@ import { isContextOverflow } from "@caupulican/pi-ai/overflow";
 import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
 import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import {
+	type CompactionEconomicsInput,
 	type CompactionEconomicsVerdict,
 	type EffectiveModelPricing,
+	planIdlePreparation,
 	priceCompaction,
 	resolveEffectiveModelPricing,
 	usd,
@@ -56,6 +58,7 @@ import {
 	resolvePreserveRecentPairs,
 } from "./compaction/evidence-retention-projection.ts";
 import { type LastSentRequest, sameCacheLane, sessionLaneSummarizerRequest } from "./compaction-support.ts";
+import { IdlePreparationTimer } from "./context/idle-preparation-timer.ts";
 import { packSupersededHostRecords } from "./context-gc.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
@@ -246,6 +249,22 @@ export interface CompactionCacheFacts {
 	readonly remainingRequests?: number;
 	/** What a compaction on this lane leaves and generates, as shares of the context before it. */
 	readonly outcome?: { readonly afterRatio: number; readonly outputRatio: number };
+	/** The lane's survival curve at any idle gap, for deciding over idle time. */
+	retainedAt?(gapMs: number): { readonly retained: number; readonly standardError: number } | undefined;
+	/** Learned idle gaps that ended with `holder` waking a lane. */
+	returnGapsMs?(holder: "owner" | "tool" | "host"): readonly number[];
+	/** The curve's measurement resolution: the moments a decision over idle time can act at. */
+	readonly gapResolutionMs?: readonly number[];
+}
+
+/** Session custom entry holding a compaction summarized while the lane idled, not yet applied. */
+export const COMPACTION_PREPARED_CUSTOM_TYPE = "compaction_prepared";
+
+/** What a `compaction_prepared` entry records: the result to apply, and the lane it was read on. */
+export interface PreparedCompactionRecord {
+	readonly result: CompactionResult;
+	readonly lane: { readonly provider: string; readonly id: string; readonly api: string };
+	readonly preparedAt: number;
 }
 
 /** What the applied retention plan did to the branch this compaction actually compacted. */
@@ -301,6 +320,10 @@ export class CompactionController {
 	private ineffectiveThresholdFrontier: IneffectiveThresholdFrontier | undefined;
 	/** The last early-compaction verdict (`proceed` or its deferral reason), so a deferral is reported once. */
 	private lastEarlyVerdictKey: string | undefined;
+	/** Fires the planned preparation while the session lane idles (see `onLaneIdle`). */
+	private readonly idleTimer = new IdlePreparationTimer();
+	/** A compaction being summarized while the lane idles, not yet recorded. */
+	private idlePreparation: { abort: AbortController; done: Promise<PreparedCompactionRecord | undefined> } | undefined;
 	private pendingEarlyCompactionPrediction?: {
 		predictedSavingsUsd: number;
 		tokensBefore: number;
@@ -533,9 +556,15 @@ export class CompactionController {
 	}
 
 	async admitProviderRequest(input: ProviderRequestCompactionInput): Promise<ProviderRequestCompactionDecision> {
+		this.onLaneBusy();
 		const model = this.deps.getModel();
 		const contextWindow = model?.contextWindow ?? 0;
 		if (!model || contextWindow <= 0) return { action: "send" };
+		// Held tool results and owner messages alike reach the lane through here: a summary prepared
+		// while it idled is used or let go now, before any other compaction decision.
+		if (input.attempt === 0 && (await this.admitPreparedCompaction(model, input.requestTokens))) {
+			return { action: "replan" };
+		}
 
 		if (input.nonCompactableTokens >= contextWindow) {
 			throw new ProviderRequestEnvelopeOverflowError(
@@ -635,6 +664,7 @@ export class CompactionController {
 		if (this.isRunning()) {
 			throw new Error("Compaction already in progress");
 		}
+		this.cancelIdlePreparation();
 		const abortController = new AbortController();
 		this.manualAbortController = abortController;
 		this.ineffectiveThresholdFrontier = undefined;
@@ -1003,6 +1033,7 @@ export class CompactionController {
 
 	runAuto(reason: AutoCompactionReason, willRetry: boolean, options: AutoCompactionRunOptions = {}): Promise<boolean> {
 		if (this.autoRunPromise) return this.autoRunPromise;
+		this.cancelIdlePreparation();
 		if (this.manualAbortController) return Promise.resolve(this.deps.agent.hasQueuedMessages());
 
 		const abortController = new AbortController();
@@ -1320,6 +1351,256 @@ export class CompactionController {
 	}
 
 	/**
+	 * The catalog-priced, learned inputs every compaction price on `model` shares: the prefix, what a
+	 * compaction is expected to leave and generate (learned shares of the prefix), and the lane's prices,
+	 * with the summarizer's own when it runs on another lane.
+	 */
+	private compactionPricing(
+		model: Model<Api>,
+		summarizer: Model<Api>,
+		prefixTokens: number,
+		outcome: { readonly afterRatio: number; readonly outputRatio: number },
+		remainingRequests: number,
+	): Omit<CompactionEconomicsInput, "retained"> {
+		const compactedTokens = Math.round(prefixTokens * outcome.afterRatio);
+		const pre = resolveEffectiveModelPricing(model, prefixTokens);
+		const post = resolveEffectiveModelPricing(model, compactedTokens);
+		const summarizerPricing = resolveEffectiveModelPricing(summarizer, prefixTokens);
+		const coldOf = (pricing: EffectiveModelPricing | undefined) =>
+			pricing ? (pricing.cacheWrite > 0 ? pricing.cacheWrite : pricing.input) : undefined;
+		return {
+			prefixTokens,
+			compactedTokens,
+			summaryOutputTokens: Math.round(prefixTokens * outcome.outputRatio),
+			remainingRequests,
+			summarizerSharesLane: sameCacheLane(summarizer, model),
+			cacheReadUsdPerMillion: pre?.cacheRead,
+			coldUsdPerMillion: coldOf(pre),
+			summarizerColdUsdPerMillion: coldOf(summarizerPricing),
+			outputUsdPerMillion: summarizerPricing?.output,
+			compactedCacheReadUsdPerMillion: post?.cacheRead,
+			compactedColdUsdPerMillion: coldOf(post),
+		};
+	}
+
+	/**
+	 * The session lane just went idle (its response stream closed): plan a compaction to prepare at the
+	 * moment the expected value of having one ready is highest (`planIdlePreparation`), and arm the timer
+	 * for it. No plan without a recorded compaction, learned return gaps, or a positive value; an
+	 * extension that owns compaction also owns when to prepare one.
+	 */
+	onLaneIdle(reply: AssistantMessage): void {
+		this.idleTimer.disarm();
+		const model = this.deps.getModel();
+		if (!model || this.isRunning() || this.deps.getExtensionRunner().hasHandlers("session_before_compact")) return;
+		const settings = this.deps.getAdaptedSettings();
+		if (!settings.enabled) return;
+		const now = Date.now();
+		const facts = this.deps.getCacheEconomics?.(model, now);
+		if (!facts?.outcome || !facts.retainedAt || !facts.returnGapsMs) return;
+		const usage = reply.usage;
+		const prefixTokens =
+			(usage?.input ?? 0) + (usage?.cacheRead ?? 0) + (usage?.cacheWrite ?? 0) + (usage?.output ?? 0);
+		if (prefixTokens <= 0) return;
+		const holder = reply.stopReason === "toolUse" ? "tool" : "owner";
+		const plan = planIdlePreparation({
+			...this.compactionPricing(
+				model,
+				this.deps.resolveModel(model),
+				prefixTokens,
+				facts.outcome,
+				Math.max(1, facts.remainingRequests ?? 1),
+			),
+			retainedAt: facts.retainedAt,
+			returnGapsMs: facts.returnGapsMs(holder),
+			candidateTimesMs: facts.gapResolutionMs ?? [],
+		});
+		if (!plan) return;
+		this.deps.recordCacheDecision?.({
+			kind: "idle_preparation",
+			decidedAt: now,
+			admit: true,
+			reason: `prepare after ${Math.round(plan.prepareAtMs / 1000)} s idle: expected ${plan.valueUsd.toFixed(6)} USD`,
+			savingUsd: plan.valueUsd,
+			detail: { prefixTokens, prepareAtMs: plan.prepareAtMs, holder },
+		});
+		this.idleTimer.arm(plan.prepareAtMs, () => this.startIdlePreparation());
+	}
+
+	/** The lane is busy again (a request is being admitted): nothing idle remains to prepare for. */
+	onLaneBusy(): void {
+		this.idleTimer.disarm();
+	}
+
+	/** Drop the idle timer and abort a preparation in flight (an owner message, a model change, shutdown). */
+	cancelIdlePreparation(): void {
+		this.idleTimer.disarm();
+		this.idlePreparation?.abort.abort();
+	}
+
+	private startIdlePreparation(): void {
+		if (this.idlePreparation || this.isRunning()) return;
+		const abort = new AbortController();
+		const preparation: { abort: AbortController; done: Promise<PreparedCompactionRecord | undefined> } = {
+			abort,
+			done: this.runIdlePreparation(abort.signal)
+				.catch((error: unknown) => {
+					if (!abort.signal.aborted) {
+						this.deps.emit({
+							type: "warning",
+							message: `idle compaction preparation failed: ${error instanceof Error ? error.message : String(error)}`,
+						});
+					}
+					return undefined;
+				})
+				.finally(() => {
+					if (this.idlePreparation === preparation) this.idlePreparation = undefined;
+				}),
+		};
+		this.idlePreparation = preparation;
+	}
+
+	/**
+	 * Summarize the history on the warm session lane without applying it, and record the result as a
+	 * `compaction_prepared` entry. Evidence-retention planning is skipped: it records an audit and spends a
+	 * System One evaluation, both wasted on a summary that may be discarded; the summary covers the raw
+	 * branch, as a compaction does when that planner is unavailable.
+	 */
+	private async runIdlePreparation(signal: AbortSignal): Promise<PreparedCompactionRecord | undefined> {
+		const model = this.deps.getModel();
+		if (!model) return undefined;
+		const settings = this.deps.getAdaptedSettings();
+		const sessionId = this.deps.sessionManager.getSessionId();
+		const readLeafId = this.deps.sessionManager.getLeafEntry()?.id;
+		const preparation = this.prepareCompactionWithPackedHostRecords(this.getRawCompactionBranch(), settings);
+		if (!preparation || readLeafId === undefined) return undefined;
+		const summarizer = this.deps.resolveModel(model);
+		const auth = await this.deps.resolveModelAndAuth(summarizer, model);
+		if (auth.failure) throw new Error(auth.failure);
+		const result = await this.deps.compactWithRetry(
+			() =>
+				compact(
+					preparation,
+					auth.model,
+					auth.apiKey,
+					auth.headers,
+					undefined,
+					signal,
+					this.deps.resolveThinkingLevel(auth.model, model),
+					this.deps.agent.streamFn,
+					this.deps.buildPreDigest(),
+					this.buildExecutionOptions(preparation, auth.model, model, false),
+				),
+			signal,
+			auth.model.provider,
+		);
+		// Record it only on the history it read: the same session, whose branch still leads from the entry
+		// the preparation read up to, with no request or compaction since.
+		if (signal.aborted || this.deps.sessionManager.getSessionId() !== sessionId || !this.leadsFrom(readLeafId)) {
+			return undefined;
+		}
+		const record: PreparedCompactionRecord = {
+			result,
+			lane: { provider: model.provider, id: model.id, api: model.api },
+			preparedAt: Date.now(),
+		};
+		this.deps.sessionManager.appendCustomEntry(COMPACTION_PREPARED_CUSTOM_TYPE, record);
+		return record;
+	}
+
+	/** Whether the live branch still leads from `entryId` with no request or compaction after it. */
+	private leadsFrom(entryId: string): boolean {
+		const manager = this.deps.sessionManager;
+		for (
+			let entry = manager.getLeafEntry();
+			entry;
+			entry = entry.parentId ? manager.getEntry(entry.parentId) : undefined
+		) {
+			if (entry.id === entryId) return true;
+			if (entry.type === "request_snapshot" || entry.type === "compaction") return false;
+		}
+		return false;
+	}
+
+	/**
+	 * The prepared compaction the next request may still use: the latest `compaction_prepared` entry with
+	 * no request or compaction after it on the branch. Once a request has gone out on the full history the
+	 * summary no longer describes what the lane caches, and a compaction replaced the history it read.
+	 */
+	private findPreparedCompaction(model: Model<Api>): PreparedCompactionRecord | undefined {
+		const manager = this.deps.sessionManager;
+		for (
+			let entry = manager.getLeafEntry();
+			entry;
+			entry = entry.parentId ? manager.getEntry(entry.parentId) : undefined
+		) {
+			if (entry.type === "request_snapshot" || entry.type === "compaction") return undefined;
+			if (entry.type === "custom" && entry.customType === COMPACTION_PREPARED_CUSTOM_TYPE) {
+				const record = entry.data as PreparedCompactionRecord | undefined;
+				const lane = record?.lane;
+				return lane && lane.provider === model.provider && lane.id === model.id && lane.api === model.api
+					? record
+					: undefined;
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * At the admission gate, with a compaction prepared (or being prepared) while the lane idled: continue
+	 * from it when that is cheaper than resuming on the full history at the real idle gap (its summary is
+	 * already paid for), otherwise resume and let it go. A preparation still in flight is awaited only when
+	 * continuing from it wins; when resuming wins it is aborted.
+	 */
+	private async admitPreparedCompaction(model: Model<Api>, requestTokens: number): Promise<boolean> {
+		if (this.isRunning() || this.activeCompactionLifecycle) return false;
+		const inFlight = this.idlePreparation;
+		const recorded = this.findPreparedCompaction(model);
+		if (!recorded && !inFlight) return false;
+		const now = Date.now();
+		const facts = this.deps.getCacheEconomics?.(model, now);
+		if (!facts?.outcome) {
+			inFlight?.abort.abort();
+			return false;
+		}
+		const pricing = this.compactionPricing(
+			model,
+			this.deps.resolveModel(model),
+			requestTokens,
+			facts.outcome,
+			Math.max(1, facts.remainingRequests ?? 1),
+		);
+		const verdict = priceCompaction({
+			...pricing,
+			...(facts.retained ? { retained: facts.retained } : {}),
+			summaryPrepared: true,
+		});
+		this.deps.recordCacheDecision?.({
+			kind: "prepared_resume",
+			decidedAt: now,
+			admit: verdict.proceed,
+			reason: verdict.proceed ? verdict.reason : `${verdict.reason}: ${verdict.detail}`,
+			...(verdict.savingUsd !== undefined ? { savingUsd: verdict.savingUsd } : {}),
+			detail: { prefixTokens: requestTokens, inFlight: recorded ? 0 : 1 },
+		});
+		if (!verdict.proceed) {
+			inFlight?.abort.abort();
+			return false;
+		}
+		const prepared = recorded ?? (await inFlight?.done);
+		if (!prepared) return false;
+		this.deps.emit({ type: "compaction_start", reason: "threshold" });
+		const { result } = prepared;
+		const compactionId = randomUUID();
+		this.deps.sessionManager.appendCompactionStart(compactionId, result.firstKeptEntryId, result.tokensBefore);
+		this.activeCompactionLifecycle = { compactionId, endAttempted: false };
+		this.recordAppliedCompaction(await this.applyResult(result, false));
+		this.finishCompactionLifecycle(result.deterministic ? "fallback" : "success", result.deterministic?.cause);
+		this.deps.emit({ type: "compaction_end", reason: "threshold", result, aborted: false, willRetry: false });
+		return true;
+	}
+
+	/**
 	 * Price an early compaction (see `priceCompaction`) with what this lane has learned: the cache share
 	 * after its real idle gap, the lineage's expected remaining requests, and what past compactions left
 	 * and generated. Without a recorded compaction there is nothing to price it with, and early compaction
@@ -1340,33 +1621,13 @@ export class CompactionController {
 				detail: "no compaction on record to learn a compaction's size and cost from",
 			};
 		} else {
-			const compactedTokens = Math.round(contextTokens * facts.outcome.afterRatio);
-			const summaryOutputTokens = Math.round(contextTokens * facts.outcome.outputRatio);
-			const pre = resolveEffectiveModelPricing(model, contextTokens);
-			const post = resolveEffectiveModelPricing(model, compactedTokens);
-			const summarizerPricing = resolveEffectiveModelPricing(summarizer, contextTokens);
-			const coldOf = (pricing: EffectiveModelPricing | undefined) =>
-				pricing ? (pricing.cacheWrite > 0 ? pricing.cacheWrite : pricing.input) : undefined;
-			const summarizerSharesLane = sameCacheLane(summarizer, model);
-			verdict = priceCompaction({
-				prefixTokens: contextTokens,
-				compactedTokens,
-				summaryOutputTokens,
-				remainingRequests,
-				...(facts.retained ? { retained: facts.retained } : {}),
-				summarizerSharesLane,
-				cacheReadUsdPerMillion: pre?.cacheRead,
-				coldUsdPerMillion: coldOf(pre),
-				summarizerColdUsdPerMillion: coldOf(summarizerPricing),
-				outputUsdPerMillion: summarizerPricing?.output,
-				compactedCacheReadUsdPerMillion: post?.cacheRead,
-				compactedColdUsdPerMillion: coldOf(post),
-			});
+			const pricing = this.compactionPricing(model, summarizer, contextTokens, facts.outcome, remainingRequests);
+			verdict = priceCompaction({ ...pricing, ...(facts.retained ? { retained: facts.retained } : {}) });
 			detail = {
 				...detail,
-				compactedTokens,
-				summaryOutputTokens,
-				summarizerSharesLane: summarizerSharesLane ? 1 : 0,
+				compactedTokens: pricing.compactedTokens,
+				summaryOutputTokens: pricing.summaryOutputTokens,
+				summarizerSharesLane: pricing.summarizerSharesLane ? 1 : 0,
 				...(facts.retained
 					? { retained: facts.retained.retained, retainedStandardError: facts.retained.standardError }
 					: {}),

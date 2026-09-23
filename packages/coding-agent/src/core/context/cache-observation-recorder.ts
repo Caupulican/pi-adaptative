@@ -18,6 +18,20 @@ export interface CacheObservationInput {
 	readonly divergenceKind?: string;
 	/** The history lineage the request was made on (see {@link historyLineage}). */
 	readonly lineage?: string;
+	/** What held the lane while it idled before this request (see {@link idleHolder}). */
+	readonly holder?: "owner" | "tool" | "host";
+}
+
+/**
+ * What held a lane while it idled before a reply's request: whatever the request carried since the
+ * previous reply says who woke it. A person's message means `owner`; otherwise tool results mean `tool`;
+ * otherwise (host records alone, such as a continuation trigger) `host`. Host records that ride along
+ * with a person's message or tool results do not change who woke it.
+ */
+export function idleHolder(sincePreviousReply: readonly { role: string }[]): "owner" | "tool" | "host" {
+	if (sincePreviousReply.some((message) => message.role === "user")) return "owner";
+	if (sincePreviousReply.some((message) => message.role === "toolResult")) return "tool";
+	return "host";
 }
 
 /**
@@ -84,6 +98,7 @@ export class CacheObservationRecorder {
 			...(retained !== undefined ? { retained } : {}),
 			...(input.divergenceKind ? { divergenceKind: input.divergenceKind } : {}),
 			...(input.lineage ? { lineage: input.lineage } : {}),
+			...(input.holder ? { holder: input.holder } : {}),
 		};
 	}
 }
