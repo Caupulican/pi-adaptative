@@ -53,22 +53,25 @@ function selectValue(selector: UsageActionSelectorComponent, value: string): voi
 	list.onSelect?.(item);
 }
 
-function createHost(options: { oauth?: boolean; model?: Model<Api> } = {}): {
+function createHost(options: { oauth?: boolean; models?: Model<Api>[] } = {}): {
 	host: UsageCommandHost;
 	selectors: UsageActionSelectorComponent[];
 	statuses: string[];
 	errors: string[];
 	showUsageReport: ReturnType<typeof vi.fn>;
+	resets: string[];
 } {
+	const resets: string[] = [];
 	const selectors: UsageActionSelectorComponent[] = [];
 	const statuses: string[] = [];
 	const errors: string[] = [];
 	const showUsageReport = vi.fn();
 	const host: UsageCommandHost = {
 		session: {
-			model: options.model ?? createModel(),
+			noteSubscriptionUsageReset: (provider) => resets.push(provider),
 			modelRegistry: {
-				isUsingOAuth: () => options.oauth ?? true,
+				getAll: () => options.models ?? [createModel()],
+				isUsingOAuth: (model) => model.provider === "openai-codex" && (options.oauth ?? true),
 				getApiKeyForProvider: async () =>
 					"header.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjb3VudC0xMjMifX0.signature",
 			},
@@ -82,7 +85,7 @@ function createHost(options: { oauth?: boolean; model?: Model<Api> } = {}): {
 		showError: (message) => errors.push(message),
 		showUsageReport,
 	};
-	return { host, selectors, statuses, errors, showUsageReport };
+	return { host, selectors, statuses, errors, showUsageReport, resets };
 }
 
 describe("OpenAI subscription usage reset flow", () => {
@@ -99,6 +102,18 @@ describe("OpenAI subscription usage reset flow", () => {
 
 		expect(showUsageReport).toHaveBeenCalledOnce();
 		expect(selectors).toHaveLength(0);
+	});
+
+	test("offers the Codex reset whenever the owner is logged in to Codex, whatever the session model", () => {
+		const grok = { ...createModel(), id: "grok-4.7", provider: "xai" } as Model<Api>;
+		const { host, selectors, showUsageReport } = createHost({ models: [grok, createModel()] });
+		handleUsageMenuCommand(host, { list: vi.fn(), consume: vi.fn() });
+		expect(showUsageReport).not.toHaveBeenCalled();
+		expect(selectors[0]?.render(100).join("\n")).toContain("Redeem usage limit reset");
+
+		const loggedOut = createHost({ models: [grok] });
+		handleUsageMenuCommand(loggedOut.host, { list: vi.fn(), consume: vi.fn() });
+		expect(loggedOut.showUsageReport).toHaveBeenCalledOnce();
 	});
 
 	test("sanitizes backend-provided reset copy before rendering it", () => {
@@ -118,7 +133,7 @@ describe("OpenAI subscription usage reset flow", () => {
 	});
 
 	test("requires a safe confirmation and refreshes availability after redemption", async () => {
-		const { host, selectors, statuses, errors } = createHost();
+		const { host, selectors, statuses, errors, resets } = createHost();
 		let listCalls = 0;
 		const consume = vi.fn(
 			async (
@@ -148,6 +163,8 @@ describe("OpenAI subscription usage reset flow", () => {
 		selectValue(selectors[2]!, "confirm");
 		await vi.waitFor(() => expect(consume).toHaveBeenCalledOnce());
 		await vi.waitFor(() => expect(statuses.at(-1)).toBe("Usage reset. You have 0 resets left."));
+		// The redeemed reset clears pi's own record of the exhausted Codex limits.
+		expect(resets).toEqual(["openai-codex"]);
 
 		const call = consume.mock.calls[0];
 		expect(call?.[1]).toMatch(/^[0-9a-f-]{36}$/);

@@ -15,14 +15,16 @@ import { UsageActionSelectorComponent } from "./components/usage-action-selector
 const ACCOUNT_REQUEST_TIMEOUT_MS = 15_000;
 
 type UsageSessionModelRegistry = {
+	getAll(): Model<Api>[];
 	isUsingOAuth(model: Model<Api>): boolean;
 	getApiKeyForProvider(provider: string): Promise<string | undefined>;
 };
 
 export interface UsageCommandHost {
 	readonly session: {
-		readonly model: Model<Api> | undefined;
 		readonly modelRegistry: UsageSessionModelRegistry;
+		/** A redeemed reset: the provider's recorded limits no longer hold, so it is routed to again. */
+		noteSubscriptionUsageReset(provider: string): void;
 	};
 	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void;
 	showStatus(message: string): void;
@@ -120,6 +122,15 @@ export function resetCreditOptions(summary: OpenAICodexRateLimitResetCredits): R
 	}));
 }
 
+/**
+ * The owner's OpenAI Codex subscription lane, whatever model the session runs: resets belong to the
+ * ChatGPT account, which routing, workers or the session may be using.
+ */
+function codexSubscriptionModel(host: UsageCommandHost): Model<Api> | undefined {
+	const registry = host.session.modelRegistry;
+	return registry.getAll().find((model) => model.provider === "openai-codex" && registry.isUsingOAuth(model));
+}
+
 function showUsageMenu(host: UsageCommandHost, client: OpenAICodexUsageResetClient): void {
 	host.showSelector((done) => {
 		const selector = new UsageActionSelectorComponent({
@@ -148,9 +159,9 @@ function showUsageMenu(host: UsageCommandHost, client: OpenAICodexUsageResetClie
 }
 
 async function loadResetCredits(host: UsageCommandHost, client: OpenAICodexUsageResetClient): Promise<void> {
-	const model = host.session.model;
-	if (model?.provider !== "openai-codex" || !host.session.modelRegistry.isUsingOAuth(model)) {
-		host.showError("Usage limit resets require an active OpenAI Codex subscription lane.");
+	const model = codexSubscriptionModel(host);
+	if (!model) {
+		host.showError("Usage limit resets need an OpenAI Codex subscription login (/login).");
 		return;
 	}
 
@@ -247,6 +258,7 @@ async function consumeResetCredit(
 		switch (result.outcome) {
 			case "reset":
 			case "already_redeemed":
+				host.session.noteSubscriptionUsageReset("openai-codex");
 				await refreshAfterReset(host, client, auth);
 				return;
 			case "nothing_to_reset":
@@ -307,8 +319,7 @@ export function handleUsageMenuCommand(
 	host: UsageCommandHost,
 	client: OpenAICodexUsageResetClient = DEFAULT_RESET_CLIENT,
 ): void {
-	const model = host.session.model;
-	if (model?.provider !== "openai-codex" || !host.session.modelRegistry.isUsingOAuth(model)) {
+	if (!codexSubscriptionModel(host)) {
 		host.showUsageReport();
 		return;
 	}

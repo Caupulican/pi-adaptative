@@ -31,6 +31,7 @@ import type { FooterComponent } from "./components/footer.ts";
 import { keyText } from "./components/keybinding-hints.ts";
 import type { MarkdownTransformFn } from "./components/markdown-transform.ts";
 import type { ToolExecutionComponent } from "./components/tool-execution.ts";
+import { type MisalignmentBlock, misalignmentBlock } from "./misalignment-continuation.ts";
 import { theme } from "./theme/theme.ts";
 import type { WorkbenchController } from "./workbench-controller.ts";
 
@@ -90,6 +91,8 @@ export interface InteractiveEventHost {
 	maybeRunNativeReflection(messages: AgentMessage[]): void;
 	maybeStartAutoLearn(): boolean;
 	maybeStartAutonomyReview(messages: AgentMessage[]): boolean;
+	/** A Codex misalignment block with an explanation and a steer: the owner may continue past it. */
+	offerMisalignmentContinuation(block: MisalignmentBlock): void;
 	checkShutdownRequested(): Promise<void>;
 	rebuildChatFromMessages(): Promise<void>;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
@@ -370,6 +373,8 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 				);
 				const failed = finalAssistant?.stopReason === "error" || finalAssistant?.stopReason === "aborted";
 				host.activityLane?.setForegroundOutcome(failed ? "failure" : "success", failed ? "Turn failed" : "Done");
+				const block = misalignmentBlock(finalAssistant);
+				if (block) host.offerMisalignmentContinuation(block);
 			}
 			if (host.loadingAnimation && !host.session.getSessionWorkState().busy) {
 				host.loadingAnimation.stop();

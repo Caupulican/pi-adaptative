@@ -84,6 +84,26 @@ export class ExhaustedProviderRegistry {
 		}
 	}
 
+	/**
+	 * Forget every exhaustion recorded for a provider (its models and its provider-wide entry), in
+	 * this process and the shared store: the account's limits were reset, so none of them holds.
+	 */
+	clearProvider(provider: string): void {
+		const matches = (key: string) => key.split("/")[0] === provider;
+		for (const key of [...this.exhausted.keys()]) if (matches(key)) this.exhausted.delete(key);
+		if (!this.storeDir || !existsSync(this.storeDir)) return;
+		for (const name of readdirSync(this.storeDir)) {
+			if (!name.endsWith(".json")) continue;
+			try {
+				const parsed = JSON.parse(readFileSync(join(this.storeDir, name), "utf-8")) as { ref?: unknown };
+				if (typeof parsed.ref === "string" && matches(parsed.ref))
+					rmSync(join(this.storeDir, name), { force: true });
+			} catch {
+				// A half-written entry names nothing yet.
+			}
+		}
+	}
+
 	snapshot(): string[] {
 		const keys = new Set(this.exhausted.keys());
 		if (this.storeDir && existsSync(this.storeDir)) {
@@ -125,6 +145,10 @@ export class BillingFailoverController {
 
 	isExhausted(ref: string): boolean {
 		return this.deps.exhausted.isExhausted(ref);
+	}
+
+	clearProviderExhaustion(provider: string): void {
+		this.deps.exhausted.clearProvider(provider);
 	}
 
 	snapshotExhausted(): string[] {

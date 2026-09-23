@@ -5,7 +5,7 @@
  */
 
 import { type AssistantMessage, fauxAssistantMessage } from "@caupulican/pi-ai";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AccountModelCatalog } from "../../src/core/model-router/account-models.ts";
 import { createHarness } from "./harness.ts";
 
@@ -44,6 +44,10 @@ const REFUSAL =
 	"Codex error (status 400): The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account.";
 
 describe("account model availability", () => {
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
 	it("leaves a session model the account does not offer before the first request", async () => {
 		const harness = await createHarness({
 			models: MODELS,
@@ -136,6 +140,46 @@ describe("account model availability", () => {
 		expect(harness.session.getModelRouterStatus()).toContain(
 			"cheap model openai-codex/gpt-5.4 is not available on this account (refused by openai-codex:",
 		);
+	});
+
+	it("names a redeemable reset when Codex's usage limit is reached, and a redeemed reset clears the limit", async () => {
+		const harness = await createHarness({ models: MODELS, fauxProvider: { provider: "openai-codex" } });
+		harness.authStorage.setRuntimeApiKey("openai-codex", accessToken());
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			// Asked at the refused model's own Codex base URL (the faux server here).
+			expect(String(input)).toMatch(/\/rate-limit-reset-credits$/);
+			return new Response(
+				JSON.stringify({
+					credits: [
+						{
+							id: "credit-1",
+							reset_type: "codex_rate_limits",
+							status: "available",
+							granted_at: "2026-09-01T00:00:00Z",
+						},
+					],
+					available_count: 1,
+				}),
+				{ status: 200 },
+			);
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		harness.setResponses([
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				errorMessage: "You have hit your ChatGPT usage limit (pro plan). Try again in ~1933 min.",
+			}),
+		]);
+		await harness.session.prompt("hello");
+		await vi.waitFor(() =>
+			expect(harness.eventsOfType("warning").map((event) => event.message)).toContain(
+				"OpenAI Codex usage limit reached. 1 usage reset is available: /usage, then Redeem usage limit reset.",
+			),
+		);
+		expect(harness.session.getModelRouterStatus()).toContain("openai-codex/gpt-5.4");
+
+		harness.session.noteSubscriptionUsageReset("openai-codex");
+		expect(harness.session.getModelRouterStatus()).not.toContain("Exhausted models:");
 	});
 
 	it("reports what each account offers, a rejected key, and an unanswered check", async () => {

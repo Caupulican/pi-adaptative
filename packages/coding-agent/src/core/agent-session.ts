@@ -20,7 +20,16 @@ import {
 	VerificationObligationTracker,
 	type VerificationObligationView,
 } from "@caupulican/pi-agent-core/verification-obligations";
-import type { Api, AssistantMessage, ImageContent, Message, Model, TextContent, Usage } from "@caupulican/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	type ImageContent,
+	listOpenAICodexRateLimitResetCredits,
+	type Message,
+	type Model,
+	type TextContent,
+	type Usage,
+} from "@caupulican/pi-ai";
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
 import { getAgentDir, VERSION, VERSION_SOURCE_AVAILABLE } from "../config.ts";
@@ -228,6 +237,7 @@ import {
 import { PROJECT_RULE_REPAIR_CUSTOM_TYPE, SessionProjectRules } from "./project-rules/session-project-rules.ts";
 import type { RuleRepairWork } from "./project-rules/types.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
+import { resolveProviderAccountKey } from "./provider-admission/account-key.ts";
 import { engageEmergencyStop, liftEmergencyStop } from "./provider-admission/emergency-stop.ts";
 import { ProviderAdmissionLedger, providerAdmissionDir } from "./provider-admission/ledger.ts";
 import { ProviderLimitStore } from "./provider-admission/limit-state.ts";
@@ -505,6 +515,8 @@ export class AgentSession {
 	private readonly _pathAliasWrappedTools = new WeakSet<AgentTool>();
 	private _systemOneController?: SystemOneController;
 	private readonly _accountModels: AccountModelCatalog;
+	/** Providers whose usage-limit episode already told the owner about redeemable resets. */
+	private readonly _subscriptionResetOffered = new Set<string>();
 	private _executionLoopMode?: ExecutionLoopMode;
 	private _objectiveExecutionController?: ObjectiveExecutionController;
 	private _steeringPlane?: SystemOneSteeringPlane;
@@ -1279,6 +1291,7 @@ export class AgentSession {
 			},
 			checkCompaction: (message) => this._checkCompaction(message),
 			replaceUnsupportedModel: (message) => this._replaceUnsupportedModel(message),
+			onUsageLimitReached: (message) => void this._offerSubscriptionReset(message),
 			onSuccessfulAssistant: () => this._compaction.resetOverflowRecovery(),
 			settleRuntimeUpdate: (signal) => this.runtimeUpdates.settle(signal),
 			isCompacting: () => this._compaction.isCompacting,
@@ -2341,6 +2354,49 @@ export class AgentSession {
 		}
 		if (stack.adaptiveCapabilities) {
 			stack.adaptiveCapabilities.setAdaptationSink((adaptation) => this.setAdaptationProjection(adaptation));
+		}
+	}
+
+	/**
+	 * The owner redeemed a subscription usage reset for `provider`: its recorded exhaustions and usage
+	 * window limits no longer hold, so routing, workers and admission use it again at once instead of
+	 * waiting out the reset time recorded before the redemption.
+	 */
+	noteSubscriptionUsageReset(provider: string): void {
+		this._foregroundRecovery.clearProviderExhaustion(provider);
+		this._providerLimitStore.clear(resolveProviderAccountKey(this._modelRegistry.authStorage, provider), [
+			"usage_window",
+			"rate_limit",
+		]);
+		this._subscriptionResetOffered.delete(provider);
+	}
+
+	/**
+	 * Codex answered that the subscription's usage limit is reached: say whether the account holds a
+	 * usage reset it can redeem (`/usage`), once per session until a reset is redeemed.
+	 */
+	private async _offerSubscriptionReset(message: AssistantMessage): Promise<void> {
+		if (message.provider !== "openai-codex" || this._subscriptionResetOffered.has(message.provider)) return;
+		this._subscriptionResetOffered.add(message.provider);
+		const codex = this._modelRegistry.find(message.provider, message.model);
+		try {
+			const accessToken = await this._modelRegistry.getApiKeyForProvider(message.provider);
+			if (!accessToken) return;
+			const summary = await listOpenAICodexRateLimitResetCredits({
+				accessToken,
+				baseUrl: codex?.baseUrl,
+				signal: AbortSignal.timeout(15_000),
+			});
+			if (summary.availableCount === 0) return;
+			this._emit({
+				type: "warning",
+				message: `OpenAI Codex usage limit reached. ${summary.availableCount} usage ${summary.availableCount === 1 ? "reset is" : "resets are"} available: /usage, then Redeem usage limit reset.`,
+			});
+		} catch (error) {
+			this._emit({
+				type: "warning",
+				message: `OpenAI Codex usage limit reached; checking for usage resets failed: ${error instanceof Error ? error.message : String(error)}`,
+			});
 		}
 	}
 

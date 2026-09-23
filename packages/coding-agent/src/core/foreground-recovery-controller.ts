@@ -43,6 +43,8 @@ export interface ForegroundRecoveryControllerDeps {
 	checkCompaction(message: AssistantMessage): Promise<boolean>;
 	/** The provider refused the model for this account: move the turn to a replacement, returning its ref. */
 	replaceUnsupportedModel?(message: AssistantMessage): Promise<string | undefined>;
+	/** The provider answered that the account's usage limit is reached (billing or quota). */
+	onUsageLimitReached?(message: AssistantMessage): void;
 	onSuccessfulAssistant(): void;
 	prepareRun(): Promise<void>;
 	afterRun(): Promise<void>;
@@ -365,6 +367,11 @@ export class ForegroundRecoveryController {
 		return this.billingFailover.isExhausted(ref);
 	}
 
+	/** The provider's limits were reset (a redeemed subscription reset): none of its exhaustions holds. */
+	clearProviderExhaustion(provider: string): void {
+		this.billingFailover.clearProviderExhaustion(provider);
+	}
+
 	getFailoverStatus(): ModelRouterFailoverStatus {
 		return { ...this.billingFailover.getStatus(), failureStats: this.deps.failureCorpus.stats() };
 	}
@@ -433,6 +440,7 @@ export class ForegroundRecoveryController {
 			const replacement = await this.deps.replaceUnsupportedModel?.(message);
 			if (replacement && this.retry.prepareModelSwitchRetry(message, `Continuing on ${replacement}.`)) return true;
 		}
+		if (classified?.reason === "billing_or_quota") this.deps.onUsageLimitReached?.(message);
 		if (await this.billingFailover.handleAssistantError(message, classified)) return false;
 
 		if (message.stopReason === "error") this.finishRetry(false, message.errorMessage);

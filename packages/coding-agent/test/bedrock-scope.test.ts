@@ -154,7 +154,7 @@ describe("Bedrock model scope", () => {
 
 		expect(selectBedrockTierModelIds(bedrockModels, discovered, "us-east-2")).toEqual([
 			"us.anthropic.claude-sonnet-5",
-			"us.anthropic.claude-opus-5",
+			"us.anthropic.claude-opus-5-5",
 			"us.anthropic.claude-haiku-4-5-20251001-v1:0",
 			"us.anthropic.claude-fable-5-1",
 		]);
@@ -234,7 +234,7 @@ describe("Bedrock model scope", () => {
 				bearerToken: "test-bearer",
 				modelIds: [
 					"us.anthropic.claude-sonnet-5",
-					"us.anthropic.claude-opus-5",
+					"us.anthropic.claude-opus-5-5",
 					"us.anthropic.claude-haiku-4-5-20251001-v1:0",
 					"us.anthropic.claude-fable-5-1",
 				],

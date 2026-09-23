@@ -114,6 +114,7 @@ import { handleEstopCommand, handleLoadCommand } from "./load-commands.ts";
 import { type LoadedResourcesViewOptions, renderLoadedResources } from "./loaded-resources-view.ts";
 import * as localModelCommands from "./local-model-commands.ts";
 import { handleMemoryCommand } from "./memory-commands.ts";
+import { type MisalignmentBlock, offerMisalignmentContinuation } from "./misalignment-continuation.ts";
 import * as modelRouterSetupCommands from "./model-router-setup-commands.ts";
 import { ProfileMenuController } from "./profile-menu-controller.ts";
 import * as reportCommands from "./report-commands.ts";
@@ -3059,6 +3060,14 @@ export class InteractiveMode {
 
 	private maybeStartAutonomyReview(messages: AgentMessage[]): boolean {
 		return this.autoLearnController.maybeStartAutonomyReview(messages);
+	}
+
+	/** Event-host hook: the owner may continue past a Codex misalignment block (interactive-event-controller). */
+	offerMisalignmentContinuation(block: MisalignmentBlock): void {
+		offerMisalignmentContinuation(
+			{ showSelector: (create) => this.showSelector(create), submit: (text) => this.session.prompt(text) },
+			block,
+		);
 	}
 
 	private updateAutoLearnFooter(): void {

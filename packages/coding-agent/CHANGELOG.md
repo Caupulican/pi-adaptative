@@ -2,6 +2,8 @@
 
 ### Added
 
+- A Codex answer blocked for misalignment shows the backend's explanation and offers Continue, which sends the backend's steer as the next message; Stop is the default.
+- `/usage` offers the Codex usage-limit reset whenever the owner is logged in to Codex, whatever model the session runs. When Codex answers that the usage limit is reached, pi says how many resets the account can redeem, and a redeemed reset clears pi's recorded Codex exhaustion and usage-window limit so routing, workers and admission use Codex again at once.
 - `/load` shows each account's credits (unlimited, a balance, or none) beside its usage windows when the provider reports them.
 - The Decision graph pane has a third view, Lanes (List | Diagram | Lanes, `alt+l` cycles): one column each for you, System One, root and workers, time flowing down, one row per action, an arrow across the lanes for each hand-over, and a run of finished same-kind actions folded into one counted row with its average time. It is drawn from a flow trace the session records where things happen (prompts, routing, System One judgments, turns, tools, workers, questions and answers, retries, waits, compaction); every session event type is mapped or ignored in one exhaustive table and every kind of action has one look, so new behavior appears without editing the view. When the pane cannot hold every view chip, they condense into one chip that names the current view and cycles on click.
 
