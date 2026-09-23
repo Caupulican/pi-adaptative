@@ -15,9 +15,9 @@ import type {
 import { buildLaneToolManifests } from "../orchestration/lane-tool-manifests.ts";
 import { ExecutionPolicyCompiler } from "../orchestration/policy-compiler.ts";
 import { intersectRiskBudgets } from "../orchestration/risk-budget.ts";
-import { WORKER_FORBIDDEN_TOOLS } from "../session-role.ts";
 import type { ResolvedWorkerDelegationSettings } from "../settings-manager.ts";
 import { getToolCapabilityPolicy, requiredEnvelopeCapabilities } from "../tool-capability-policy.ts";
+import { WORKER_FORBIDDEN_TOOLS } from "../worker-tool-ceiling.ts";
 import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-machine-scope.ts";
 
 const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;

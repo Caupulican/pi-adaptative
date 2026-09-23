@@ -433,7 +433,6 @@ export {
 	resolveCredentialMigrationSources,
 } from "./core/secrets/credential-migration-source.ts";
 export { createPortableGitProjectKey, resolveCredentialProject } from "./core/secrets/credential-project.ts";
-export { WORKER_FORBIDDEN_TOOLS } from "./core/session-role.ts";
 export {
 	type CompactionSettings,
 	type DirectoryResourceProfileInfo,
@@ -588,6 +587,7 @@ export {
 	tokenize,
 } from "./core/tools/skill-audit.ts";
 export { hasProjectTrustInputs, type ProjectTrustDecision, ProjectTrustStore } from "./core/trust-manager.ts";
+export { WORKER_FORBIDDEN_TOOLS } from "./core/worker-tool-ceiling.ts";
 // Main entry point
 export { type MainOptions, main } from "./main.ts";
 // Run modes for programmatic SDK usage

@@ -1,3 +1,9 @@
+/**
+ * Registers the host program's own module instances for extensions (see `registerHostExtensionModules`).
+ * Imported for its effect by the session builder in every runtime, and first thing by the Bun entry,
+ * whose bundler needs these imports static. The extension loader never imports this module, so a
+ * focused test of the loader does not load the program.
+ */
 import * as bundledPiAgentCore from "@caupulican/pi-agent-core";
 import * as bundledPiAgentCoreAgent from "@caupulican/pi-agent-core/agent";
 import * as bundledPiAgentCoreAgentLoop from "@caupulican/pi-agent-core/agent-loop";
@@ -56,7 +62,7 @@ import * as bundledPiCodingAgent from "../../index.ts";
 import {
 	type PiAgentCoreExtensionSubpath,
 	type PiAiExtensionSubpath,
-	registerBundledExtensionVirtualModules,
+	registerHostExtensionModules,
 } from "./virtual-modules.ts";
 
 const piAgentCoreVirtualSubpaths: Record<PiAgentCoreExtensionSubpath, unknown> = {
@@ -127,7 +133,7 @@ function piAgentCoreVirtualModules(packageName: string): Record<string, unknown>
 	]);
 }
 
-registerBundledExtensionVirtualModules({
+registerHostExtensionModules({
 	typebox: bundledTypebox,
 	"typebox/compile": bundledTypeboxCompile,
 	"typebox/value": bundledTypeboxValue,

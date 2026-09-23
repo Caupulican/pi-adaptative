@@ -11,7 +11,7 @@ if ((firstArg === "--version" || firstArg === "-v") && cliArgs.length === 1) {
 	process.exit(0);
 }
 
-await import("../core/extensions/bundled-virtual-modules.ts");
+await import("../core/extensions/host-extension-modules.ts");
 const { restoreSandboxEnv } = await import("./restore-sandbox-env.ts");
 restoreSandboxEnv();
 await import("./register-bedrock.ts");

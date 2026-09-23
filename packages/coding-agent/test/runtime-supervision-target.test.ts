@@ -19,12 +19,15 @@ vi.mock("../src/core/process-matrix/self-launch-target.ts", async (original) => 
 }));
 vi.mock("../src/utils/work-directory.ts", () => ({
 	acquireWorkRun: () => ({ path: join(ports.root, "lease"), release: ports.release }),
+	getWorkTenantDir: (_agentDir: string, category: string, tenant: string) => join(ports.root, category, tenant),
+	pruneWorkTenant: () => [],
 }));
 vi.mock("../src/cli/runtime-child-process.ts", () => ({ launchRuntimeChild: ports.launch }));
 vi.mock("../src/cli/runtime-artifact-store.ts", () => ({
 	RuntimeArtifactStore: class {
 		capture = ports.capture;
 		retire = async () => {};
+		settle = async () => {};
 		target() {
 			return {
 				executable: join(ports.root, "snapshot", "node"),

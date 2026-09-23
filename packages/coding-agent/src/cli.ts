@@ -5,6 +5,7 @@
  *
  * Test with: npx tsx src/cli-new.ts [args...]
  */
+import type { Args } from "./cli/args.ts";
 import { APP_NAME, VERSION } from "./config.ts";
 
 process.title = APP_NAME;
@@ -22,6 +23,25 @@ const packageCommands = new Set(["install", "remove", "uninstall", "update", "li
 if ((firstArg === "--version" || firstArg === "-v") && cliArgs.length === 1) {
 	console.log(VERSION);
 	process.exit(0);
+}
+
+// An interactive launch owns the terminal from here: keys typed while the program loads stay raw
+// instead of being echoed and having Enter turned into a newline. A supervised launch is decided here
+// too, before the session program loads: the parent only supervises, the child runs the session.
+let launchArgs: Args | undefined;
+if (!packageCommands.has(firstArg ?? "")) {
+	const [{ parseArgs, resolveAppMode }, { holdStartupTypeahead }] = await Promise.all([
+		import("./cli/args.ts"),
+		import("./cli/startup-typeahead.ts"),
+	]);
+	launchArgs = parseArgs(cliArgs);
+	if (
+		resolveAppMode(launchArgs, process.stdin.isTTY) === "interactive" &&
+		!launchArgs.help &&
+		launchArgs.listModels === undefined &&
+		!launchArgs.export
+	)
+		holdStartupTypeahead();
 }
 
 const { configureHttpDispatcher } = await import("./core/http-dispatcher.ts");
@@ -47,5 +67,21 @@ if ((cliArgs.includes("--help") || cliArgs.includes("-h")) && !packageCommands.h
 	process.exit(0);
 }
 
-const { main } = await import("./main.ts");
-await main(cliArgs);
+const supervised = launchArgs !== undefined && (await superviseBeforeLoading(launchArgs));
+if (!supervised) {
+	const { main } = await import("./main.ts");
+	await main(cliArgs);
+}
+
+/** Runs a supervised interactive launch without loading the session program into this process. */
+async function superviseBeforeLoading(parsed: Args): Promise<boolean> {
+	const [{ isSupervisedInteractiveLaunch }, { initializeRuntimeChildChannel }] = await Promise.all([
+		import("./cli/launch.ts"),
+		import("./cli/runtime-channel.ts"),
+	]);
+	// A supervised child carries its supervisor's envelope; binding it first makes this launch the child.
+	if (initializeRuntimeChildChannel()) return false;
+	if (!isSupervisedInteractiveLaunch(cliArgs, parsed, process.env, process.stdin.isTTY)) return false;
+	const { superviseInteractiveRuntime } = await import("./cli/runtime-supervision.ts");
+	return superviseInteractiveRuntime(cliArgs);
+}

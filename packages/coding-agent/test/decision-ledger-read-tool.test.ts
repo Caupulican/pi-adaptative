@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { getDefaultActiveToolNames } from "../src/core/default-tool-surface.ts";
 import { DecisionLedgerStore } from "../src/core/operator-projection/decision-ledger-store.ts";
-import { WORKER_FORBIDDEN_TOOLS } from "../src/core/session-role.ts";
 import {
 	createDecisionLedgerReadTool,
 	DECISION_LEDGER_READ_TOOL_NAME,
 } from "../src/core/tools/decision-ledger-read.ts";
+import { WORKER_FORBIDDEN_TOOLS } from "../src/core/worker-tool-ceiling.ts";
 
 function text(result: unknown): string {
 	const part = (result as { content: { type: string; text?: string }[] }).content.find((c) => c.type === "text");

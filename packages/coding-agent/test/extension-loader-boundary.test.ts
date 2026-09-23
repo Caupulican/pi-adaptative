@@ -8,10 +8,11 @@ const runtimeBuilder = readFileSync(new URL("../src/core/runtime-builder.ts", im
 const extensionifyRuntime = readFileSync(new URL("../src/core/tools/extensionify-runtime.ts", import.meta.url), "utf8");
 const publicIndex = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 const bunEntrypoint = readFileSync(new URL("../src/bun/cli.ts", import.meta.url), "utf8");
-const bundledVirtualModules = readFileSync(
-	new URL("../src/core/extensions/bundled-virtual-modules.ts", import.meta.url),
+const hostExtensionModules = readFileSync(
+	new URL("../src/core/extensions/host-extension-modules.ts", import.meta.url),
 	"utf8",
 );
+const sessionBuilder = readFileSync(new URL("../src/core/sdk.ts", import.meta.url), "utf8");
 const bundledCollaborationRuntimeSources = ["../src/bundled-resources/extensions/pi-collaboration/index.ts"].map(
 	(path) => ({ path, source: readFileSync(new URL(path, import.meta.url), "utf8") }),
 );
@@ -114,9 +115,11 @@ describe("extension loader dependency boundary", () => {
 		expect(publicIndex).toMatch(/from "\.\/core\/extensions\/loader\.ts"/);
 	});
 
-	it("loads the bundled SDK catalog only from the Bun binary entrypoint", () => {
-		expect(extensionLoader).not.toMatch(/_bundledPi|_bundledTypebox|\.\.\/\.\.\/index\.ts/);
-		expect(bunEntrypoint).toMatch(/bundled-virtual-modules\.ts/);
+	it("registers the host's live modules from the session builder and the Bun entry, never from the loader", () => {
+		// The loader stays light for focused tests; every session registers the program's modules first.
+		expect(extensionLoader).not.toMatch(/host-extension-modules|\.\.\/\.\.\/index\.ts/);
+		expect(sessionBuilder).toMatch(/^import "\.\/extensions\/host-extension-modules\.ts";$/m);
+		expect(bunEntrypoint).toMatch(/host-extension-modules\.ts/);
 	});
 
 	it("keeps copied bundled extensions on the embedded package runtime boundary", () => {
@@ -127,7 +130,7 @@ describe("extension loader dependency boundary", () => {
 			})),
 		);
 		expect(violations).toEqual([]);
-		expect(bundledVirtualModules).toMatch(/"@caupulican\/pi-adaptative": bundledPiCodingAgent/);
+		expect(hostExtensionModules).toMatch(/"@caupulican\/pi-adaptative": bundledPiCodingAgent/);
 	});
 
 	it("covers every supported agent-core subpath in both Node and Bun extension adapters", () => {
@@ -137,6 +140,6 @@ describe("extension loader dependency boundary", () => {
 			.sort();
 		expect(Object.keys(PI_AGENT_CORE_EXTENSION_SUBPATHS).sort()).toEqual(exportedSubpaths);
 		expect(extensionLoader).toMatch(/PI_AGENT_CORE_EXTENSION_SUBPATHS/);
-		expect(bundledVirtualModules).toMatch(/piAgentCoreVirtualModules/);
+		expect(hostExtensionModules).toMatch(/piAgentCoreVirtualModules/);
 	});
 });

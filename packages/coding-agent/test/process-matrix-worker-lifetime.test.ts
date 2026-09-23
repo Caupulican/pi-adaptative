@@ -40,7 +40,7 @@ import {
 } from "../src/core/process-matrix/runtime.ts";
 import { buildEntryId, entryPath, readEntry, writeEntry } from "../src/core/process-matrix/store.ts";
 import { applyAdoption, beginWindDown } from "../src/core/process-matrix/supervisor.ts";
-import { PI_WORKTREE_LANE_ENV } from "../src/core/worktree-sync/runtime.ts";
+import { PI_WORKTREE_LANE_ENV } from "../src/core/worktree-sync/lane-binding.ts";
 
 const POLL_MS = 1_000;
 const HEARTBEAT_MS = 5_000;

@@ -11,18 +11,20 @@ import { assertValidSessionId, SessionManager } from "@caupulican/pi-agent-core/
 import { type ImageContent, modelsAreEqual } from "@caupulican/pi-ai";
 import { applyTerminalSettings, ProcessTerminal, setKeybindings, TUI } from "@caupulican/pi-tui";
 import chalk from "chalk";
-import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
+import { type AppMode, type Args, type Mode, parseArgs, printHelp, resolveAppMode } from "./cli/args.ts";
 import { handleAuthCommand } from "./cli/auth-check.ts";
 import { runCollaborationPeer } from "./cli/collaboration-peer.ts";
 import { runCollaborationWorker } from "./cli/collaboration-worker.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
+import { applyLaunchEnvironment, isSupervisedInteractiveLaunch, isTruthyEnvFlag } from "./cli/launch.ts";
 import { listModels } from "./cli/list-models.ts";
 import { readPipedInput } from "./cli/piped-stdin.ts";
 import { initializeRuntimeChildChannel } from "./cli/runtime-channel.ts";
 import { applyRuntimeRestartArgs, bindInteractiveRuntimeRestart } from "./cli/runtime-restart.ts";
 import { superviseInteractiveRuntime } from "./cli/runtime-supervision.ts";
 import { selectSession } from "./cli/session-picker.ts";
+import { resumeStartupTypeahead } from "./cli/startup-typeahead.ts";
 import { ENV_SESSION_DIR, expandTildePath, getAgentDir, VERSION } from "./config.ts";
 import {
 	type AgentSessionRuntime,
@@ -58,12 +60,7 @@ import { OrchestrationProfileStore } from "./core/orchestration/profile-store.ts
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import type { ResumablePayload } from "./core/process-matrix/codes.ts";
 import { launchResumablePiAgent } from "./core/process-matrix/resume-launcher.ts";
-import {
-	PI_PARENT_PID_ENV,
-	PI_PARENT_SESSION_ENV,
-	PI_TASK_REF_ENV,
-	type ResumeWorkerLaunchOutcome,
-} from "./core/process-matrix/runtime.ts";
+import type { ResumeWorkerLaunchOutcome } from "./core/process-matrix/runtime.ts";
 import { getSelfLaunchTarget } from "./core/process-matrix/self-launch-target.ts";
 import { parseResourceProfileInput } from "./core/resource-profile-blocks.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
@@ -81,13 +78,13 @@ import {
 	listSessions,
 	openSession,
 } from "./core/session-manager-factory.ts";
-import { getSessionRole, setTerminalSessionMode } from "./core/session-role.ts";
+import { getSessionRole } from "./core/session-role.ts";
 import { SessionSupervisionRuntime } from "./core/session-supervision-runtime.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { startCliPowerShellWarmStart } from "./core/tools/early-powershell-session.ts";
 import { hasProjectTrustInputs, ProjectTrustStore } from "./core/trust-manager.ts";
-import { getBoundWorktreeLaneKey, PI_WORKTREE_LANE_ENV } from "./core/worktree-sync/runtime.ts";
+import { getBoundWorktreeLaneKey } from "./core/worktree-sync/lane-binding.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { terminalCapabilityOverridesFromSettings } from "./modes/interactive/terminal-capability-settings.ts";
 
@@ -149,26 +146,6 @@ export async function disposeRuntimeAndExit(
 	} finally {
 		exit(exitCode);
 	}
-}
-
-function isTruthyEnvFlag(value: string | undefined): boolean {
-	if (!value) return false;
-	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
-}
-
-type AppMode = "interactive" | "print" | "json" | "rpc";
-
-function resolveAppMode(parsed: Args, stdinIsTTY: boolean): AppMode {
-	if (parsed.mode === "rpc") {
-		return "rpc";
-	}
-	if (parsed.mode === "json") {
-		return "json";
-	}
-	if (parsed.print || !stdinIsTTY) {
-		return "print";
-	}
-	return "interactive";
 }
 
 function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc"> {
@@ -259,6 +236,8 @@ export async function promptConfirm(message: string): Promise<boolean> {
 			settled = true;
 			rl.removeListener("close", onClose);
 			rl.close();
+			// readline leaves the terminal cooked on close; startup still holds typed keys raw.
+			resumeStartupTypeahead();
 			resolve(confirmed);
 		};
 		const onClose = () => finish(false);
@@ -735,36 +714,13 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	}
 	time("parseArgs");
-	// --worktree-lane is sugar over the cross-process env contract: setting the env here (before
-	// any session/tool construction) makes the flag and a launcher-provided env byte-identical
-	// downstream (RuntimeBuilder's lane gate, the epoch watcher, child processes).
-	if (parsed.worktreeLane) {
-		process.env[PI_WORKTREE_LANE_ENV] = parsed.worktreeLane;
-	}
-	// --parent-pid/--parent-session are the same CLI-sugar-over-env pattern as --worktree-lane:
-	// setting the env here (before any session/tool construction) makes the flag and a
-	// launcher-provided env byte-identical downstream (the process-matrix runtime's worker branch).
-	if (parsed.parentPid !== undefined) {
-		process.env[PI_PARENT_PID_ENV] = String(parsed.parentPid);
-	}
-	if (parsed.parentSession) {
-		process.env[PI_PARENT_SESSION_ENV] = parsed.parentSession;
-	}
-	if (parsed.taskRef) {
-		process.env[PI_TASK_REF_ENV] = parsed.taskRef;
-	}
-	if (parsed.sessionMode) {
-		setTerminalSessionMode(parsed.sessionMode);
-	}
+	applyLaunchEnvironment(parsed);
 	let appMode = resolveAppMode(parsed, process.stdin.isTTY);
 	let hasHumanUI = appMode === "interactive" && getSessionRole() === "main";
+	// The CLI entry decides this before loading the program; SDK callers reach it here.
 	if (
-		hasHumanUI &&
-		!parsed.help &&
-		parsed.listModels === undefined &&
-		!parsed.export &&
 		!options?.extensionFactories?.length &&
-		!isTruthyEnvFlag(process.env.PI_STARTUP_BENCHMARK)
+		isSupervisedInteractiveLaunch(args, parsed, process.env, process.stdin.isTTY)
 	) {
 		if (await superviseInteractiveRuntime(args)) return;
 	}

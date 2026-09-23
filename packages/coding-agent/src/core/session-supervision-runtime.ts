@@ -13,8 +13,9 @@ import {
 	type ResumeWorkerLaunchOutcome,
 	startProcessMatrixRuntime,
 } from "./process-matrix/runtime.ts";
+import { getBoundWorktreeLaneKey } from "./worktree-sync/lane-binding.ts";
 import type { WorktreeSyncRuntimeHandle } from "./worktree-sync/runtime.ts";
-import { getBoundWorktreeLaneKey, startWorktreeSyncRuntime } from "./worktree-sync/runtime.ts";
+import { startWorktreeSyncRuntime } from "./worktree-sync/runtime.ts";
 
 function rejectionReasons(results: readonly PromiseSettledResult<unknown>[]): unknown[] {
 	return results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));

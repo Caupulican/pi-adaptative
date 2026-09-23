@@ -135,7 +135,7 @@ import { CredentialManager } from "./secrets/credential-manager.ts";
 import { resolveCredentialProject } from "./secrets/credential-project.ts";
 import { discoverCredentialMigrationSources } from "./secrets/credential-source-discovery.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
-import { getSessionRole, isWorkerSession, WORKER_FORBIDDEN_TOOLS } from "./session-role.ts";
+import { getSessionRole, isWorkerSession } from "./session-role.ts";
 import {
 	matchesResourceProfilePattern,
 	type ResourceProfileFilterSettings,
@@ -187,9 +187,11 @@ import { createToolTaskToolDefinition, type ToolTaskDependencies } from "./tools
 import { createTypeSafeReviewToolDefinition } from "./tools/typesafe-review.ts";
 import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
 import { countFileLinesSync } from "./util/bounded-file.ts";
+import { WORKER_FORBIDDEN_TOOLS } from "./worker-tool-ceiling.ts";
 import { createLane } from "./worktree-sync/git-engine.ts";
+import { getBoundWorktreeLaneKey } from "./worktree-sync/lane-binding.ts";
 import { WorktreeLaneGate } from "./worktree-sync/lane-gate.ts";
-import { buildWorktreeSyncEngineDeps, getBoundWorktreeLaneKey } from "./worktree-sync/runtime.ts";
+import { buildWorktreeSyncEngineDeps } from "./worktree-sync/runtime.ts";
 
 interface ToolDefinitionEntry {
 	definition: ToolDefinition;

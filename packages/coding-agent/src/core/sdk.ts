@@ -39,6 +39,8 @@ import { recoverBedrockSsoAuthentication } from "./bedrock-sso-login.ts";
 import { resolveEffectiveCompletionProfile } from "./decision/completion-profile.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+// Extensions a session loads bind to this program's live modules; see host-extension-modules.ts.
+import "./extensions/host-extension-modules.ts";
 import { resolveFastModeServiceTier } from "./fast-mode.ts";
 import { ObjectivePrimaryBindingError } from "./goals/goal-session-controller.ts";
 import type { IntegrityExtension } from "./hooks/index.ts";

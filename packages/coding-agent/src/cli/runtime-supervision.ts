@@ -9,7 +9,7 @@ import {
 } from "../core/process-matrix/self-launch-target.ts";
 import { type RuntimeChild, RuntimeSupervisor } from "../core/runtime-supervisor.ts";
 import { writeFileAtomicSync } from "../core/util/atomic-file.ts";
-import { acquireWorkRun } from "../utils/work-directory.ts";
+import { acquireWorkRun, getWorkTenantDir, pruneWorkTenant } from "../utils/work-directory.ts";
 import { RuntimeArtifactStore, type RuntimeOrigin } from "./runtime-artifact-store.ts";
 import { getRuntimeChildChannel, RUNTIME_SUPERVISOR_ENV } from "./runtime-channel.ts";
 import { launchRuntimeChild } from "./runtime-child-process.ts";
@@ -58,8 +58,17 @@ export async function superviseInteractiveRuntime(args: readonly string[]): Prom
 				},
 			}
 		: null;
-	const lease = acquireWorkRun({ agentDir: getAgentDir(), category: "runtime", tenant: "generations" });
-	const store = new RuntimeArtifactStore(installed?.capture ?? origin, lease.path);
+	const agentDir = getAgentDir();
+	// A generation belongs to the supervisor that captured it; one whose supervisor is gone (crashed or
+	// killed) is garbage. Its pooled content stays in the pool for the next capture to link.
+	// Every inactive run goes, so their sizes are never measured (a live generation holds ~40k entries).
+	pruneWorkTenant(agentDir, "runtime", "generations", { maxRuns: 0, maxScannedEntries: 0 });
+	const lease = acquireWorkRun({ agentDir, category: "runtime", tenant: "generations" });
+	const store = new RuntimeArtifactStore(
+		installed?.capture ?? origin,
+		lease.path,
+		getWorkTenantDir(agentDir, "runtime", "pool"),
+	);
 	let supervisor: RuntimeSupervisor | undefined;
 	const stopping = () => supervisor?.stop();
 	try {
@@ -103,5 +112,6 @@ export async function superviseInteractiveRuntime(args: readonly string[]): Prom
 	} finally {
 		process.off("SIGTERM", stopping);
 		lease.release();
+		await store.settle();
 	}
 }

@@ -26,7 +26,7 @@ import {
 import { disposeExtensionEventSubscriptions, isExtensionGenerationInactive } from "./lifecycle.ts";
 import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResult, ToolDefinition } from "./types.ts";
 import {
-	getBundledExtensionVirtualModules,
+	getHostExtensionModules,
 	PI_AGENT_CORE_EXTENSION_SUBPATHS,
 	PI_AI_EXTENSION_SUBPATHS,
 } from "./virtual-modules.ts";
@@ -148,6 +148,23 @@ function getAliases(): Record<string, string> {
 	return _aliases;
 }
 
+/**
+ * How host packages resolve for an extension. Inside a session they are the running program's own
+ * modules: the extension shares its singletons, and loading it evaluates only the extension's files.
+ * A process that never built a session (a focused test of the loader) has no program to share, so the
+ * packages resolve to their workspace source; the Bun binary always registers its modules.
+ */
+function hostModuleOptions():
+	| { virtualModules: Readonly<Record<string, unknown>>; tryNative?: boolean }
+	| { alias: Record<string, string> } {
+	const virtualModules = getHostExtensionModules();
+	if (isBunBinary) {
+		if (!virtualModules) throw new Error("The Bun binary entrypoint did not register its host modules");
+		return { virtualModules, tryNative: false };
+	}
+	return virtualModules ? { virtualModules } : { alias: getAliases() };
+}
+
 function yieldToEventLoop(): Promise<void> {
 	return new Promise((resolve) => setImmediate(resolve));
 }
@@ -174,11 +191,9 @@ async function loadExtensionModule(
 		// pass an explicit agent dir; low-level callers that omit it remain zero-write and skip fsCache.
 		moduleCache: false,
 		fsCache: transformCacheAgentDir ? cacheFile(transformCacheAgentDir, "jiti-transforms") : false,
-		// In Bun binary: use virtualModules for bundled packages (no filesystem resolution)
-		// In Node.js/dev: use aliases to resolve to node_modules paths
-		...(isBunBinary
-			? { virtualModules: getBundledExtensionVirtualModules(), tryNative: false }
-			: { alias: getAliases() }),
+		// Host packages resolve to the running program's own modules, never to a second copy of their
+		// source: the extension shares the host's singletons and loading it evaluates only its own files.
+		...hostModuleOptions(),
 	});
 
 	// Every call gets a fresh jiti instance with moduleCache disabled. Do not append a query string:

@@ -19,7 +19,7 @@ import {
 	type ProcessMatrixRuntimeHandle,
 	startProcessMatrixRuntime,
 } from "../src/core/process-matrix/runtime.ts";
-import { PI_WORKTREE_LANE_ENV } from "../src/core/worktree-sync/runtime.ts";
+import { PI_WORKTREE_LANE_ENV } from "../src/core/worktree-sync/lane-binding.ts";
 
 const HEARTBEAT_MS = 5_000;
 const T0 = Date.parse("2026-09-11T09:00:00.000Z");

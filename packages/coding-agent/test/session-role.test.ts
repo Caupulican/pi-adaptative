@@ -1,13 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { PI_PARENT_PID_ENV } from "../src/core/process-identity.ts";
-import {
-	getSessionRole,
-	isWorkerSession,
-	setTerminalSessionMode,
-	WORKER_FORBIDDEN_TOOLS,
-} from "../src/core/session-role.ts";
+import { getSessionRole, isWorkerSession, setTerminalSessionMode } from "../src/core/session-role.ts";
 import { envelopeHasToolCapability } from "../src/core/tool-capability-policy.ts";
-import { PI_WORKTREE_LANE_ENV } from "../src/core/worktree-sync/runtime.ts";
+import { WORKER_FORBIDDEN_TOOLS } from "../src/core/worker-tool-ceiling.ts";
+import { PI_WORKTREE_LANE_ENV } from "../src/core/worktree-sync/lane-binding.ts";
 
 /**
  * Session-role derivation table (D1). Every case passes a hand-built env object -- never mutates

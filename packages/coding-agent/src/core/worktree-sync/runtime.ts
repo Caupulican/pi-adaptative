@@ -16,18 +16,8 @@ import {
 	resolveRepoContext,
 	type WorktreeSyncEngineDeps,
 } from "./git-engine.ts";
+import { getBoundWorktreeLaneKey } from "./lane-binding.ts";
 import { type EpochWatcherHandle, startEpochWatcher } from "./watcher.ts";
-
-export const PI_WORKTREE_LANE_ENV = "PI_WORKTREE_LANE";
-
-const LANE_KEY_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
-
-/** The lane this process is bound to, from the cross-process env contract. Invalid values are
- * ignored (never a crash on a malformed env). */
-export function getBoundWorktreeLaneKey(env: NodeJS.ProcessEnv = process.env): string | undefined {
-	const value = env[PI_WORKTREE_LANE_ENV]?.trim();
-	return value && LANE_KEY_RE.test(value) ? value : undefined;
-}
 
 export interface WorktreeSyncEngineConfig {
 	cwd: string;

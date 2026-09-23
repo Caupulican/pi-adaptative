@@ -46,6 +46,10 @@
 - The bottom of the Workbench draws one rule above and one below the input. The Workbench added its own pair around the editor's rules.
 - Every System One stage has an operator label (`answer claims`, `duplicate code`, `model routing`, …) from one exhaustive table; new stages had shown their raw id.
 - The root's unbacked claims are judged over tool results paired with the calls that produced them, so a check run as a Python one-liner backs "the tests pass" instead of reaching the owner as unsettled.
+- Extensions bind to the running program's own modules in every runtime. In Node the host packages were aliased to their source and every extension load evaluated a private copy of the whole program through jiti, with its own module-level singletons; a source launch spent about 26 s there. A process that never builds a session (a focused loader test) still resolves them to workspace source.
+- A prompt typed while an interactive launch is still loading submits once the editor is ready. The terminal stayed in cooked mode until the TUI started, so typing was echoed over the screen and Enter arrived as a newline; the launch now holds raw mode from its first moment and restores the terminal on exit.
+- A runtime snapshot no longer aborts the launch when a file changes while it is copied; the file is copied again, and the launch fails, naming it, only when it never holds still. Each version of a runtime file is copied once into a shared pool and hard-linked into every generation that needs it, pool versions no live generation links are pruned in the background, and generations left by a supervisor that died are removed at the next launch.
+- A supervised interactive launch decides supervision in the entry point, so the parent that only supervises no longer loads the session program. Session identity (`session-role.ts`) no longer imports tool modules: the worker tool ceiling moved to `worker-tool-ceiling.ts` and the worktree-lane contract to `worktree-sync/lane-binding.ts`.
 
 ## [0.99.43] - 2026-09-22
 

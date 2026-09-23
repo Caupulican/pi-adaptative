@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { RuntimeArtifactStore } from "../src/cli/runtime-artifact-store.ts";
 
@@ -111,5 +111,69 @@ describe("immutable runtime artifacts", () => {
 		expect(compact.target(compactArtifact).argsPrefix[0]).toBe(
 			`--require=${join(compactArtifact, "src", "cli.mjs")}`,
 		);
+	});
+
+	it("copies each version once into the pool and links it into every generation that needs it", async () => {
+		const f = await fixture();
+		const pool = join(f.root, "pool");
+		const pooled = new RuntimeArtifactStore(
+			{
+				root: f.origin,
+				entries: ["src"],
+				target: { executable: process.execPath, argsPrefix: [join(f.origin, "src", "cli.mjs")] },
+			},
+			f.artifacts,
+			pool,
+		);
+		const first = await pooled.capture();
+		const second = await pooled.capture();
+		const [a, b] = await Promise.all([lstat(join(first, "src", "cli.mjs")), lstat(join(second, "src", "cli.mjs"))]);
+		// One pooled copy shared by both generations, never the source inode itself.
+		expect(a.ino).toBe(b.ino);
+		expect(a.ino).not.toBe((await lstat(join(f.origin, "src", "cli.mjs"))).ino);
+		expect(a.nlink).toBe(3);
+		expect(a.mode & 0o222).toBe(0);
+		// An in-place edit of the source is a new version: the generations keep what they captured.
+		await writeFile(join(f.origin, "src", "cli.mjs"), "edited in place");
+		const third = await pooled.capture();
+		expect(await readFile(join(first, "src", "cli.mjs"), "utf8")).toBe("known good");
+		expect(await readFile(join(third, "src", "cli.mjs"), "utf8")).toBe("edited in place");
+		await pooled.settle();
+	});
+
+	it("prunes pool versions no live generation links once they are past the grace window", async () => {
+		const f = await fixture();
+		const pool = join(f.root, "pool");
+		const pooled = new RuntimeArtifactStore(
+			{
+				root: f.origin,
+				entries: ["src"],
+				target: { executable: process.execPath, argsPrefix: [join(f.origin, "src", "cli.mjs")] },
+			},
+			f.artifacts,
+			pool,
+		);
+		const old = await pooled.capture();
+		await pooled.settle();
+		const entries = async () =>
+			(await Promise.all((await readdir(pool)).map((shard) => readdir(join(pool, shard))))).flat();
+		const captured = (await lstat(join(old, "src", "cli.mjs"))).ino;
+		let oldPath: string | undefined;
+		for (const shard of await readdir(pool))
+			for (const name of await readdir(join(pool, shard)))
+				if ((await lstat(join(pool, shard, name))).ino === captured) oldPath = join(pool, shard, name);
+		if (!oldPath) throw new Error("The captured version is not pooled.");
+		const oldEntry = basename(oldPath);
+		await pooled.retire(old);
+		const past = new Date(Date.now() - 60 * 60_000);
+		await utimes(oldPath, past, past);
+		await writeFile(join(f.origin, "src", "cli.mjs"), "next version");
+		const next = await pooled.capture();
+		await pooled.settle();
+		const remaining = await entries();
+		expect(remaining).not.toContain(oldEntry);
+		// The new cli.mjs version and the host executable (outside the origin, captured under .host).
+		expect(remaining).toHaveLength(2);
+		expect(await readFile(join(next, "src", "cli.mjs"), "utf8")).toBe("next version");
 	});
 });

@@ -4,8 +4,8 @@ import { extractToolPathArguments } from "../src/core/autonomy/envelope-enforcem
 import { getDefaultActiveToolNames } from "../src/core/default-tool-surface.ts";
 import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "../src/core/model-capability.ts";
 import { credentialToolBlockReason } from "../src/core/secrets/credential-exposure-guard.ts";
-import { WORKER_FORBIDDEN_TOOLS } from "../src/core/session-role.ts";
 import { envelopeHasToolCapability } from "../src/core/tool-capability-policy.ts";
+import { WORKER_FORBIDDEN_TOOLS } from "../src/core/worker-tool-ceiling.ts";
 
 it("makes subscription image generation available only on the selected ChatGPT provider", () => {
 	const full = deriveModelCapabilityProfile({ mode: "full" });

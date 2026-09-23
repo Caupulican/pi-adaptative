@@ -30,7 +30,7 @@ import { isAgentIdentity } from "../orchestration/agent-resume.ts";
 import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import { getParentPid, getParentSessionId, getProcessTaskRef } from "../process-identity.ts";
 import type { ResolvedProcessMatrixSettings } from "../settings-manager.ts";
-import { getBoundWorktreeLaneKey } from "../worktree-sync/runtime.ts";
+import { getBoundWorktreeLaneKey } from "../worktree-sync/lane-binding.ts";
 import type { ProcessMatrixEntry, ResumablePayload } from "./codes.ts";
 import {
 	buildEntryId,

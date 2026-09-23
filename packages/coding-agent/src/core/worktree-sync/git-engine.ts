@@ -39,6 +39,7 @@ import {
 	type WorktreeSyncPolicy,
 	type WorktreeSyncRefusal,
 } from "./codes.ts";
+import { WORKTREE_LANE_KEY_PATTERN } from "./lane-binding.ts";
 import {
 	acquireIntegrationLock,
 	appendAuditEvent,
@@ -104,7 +105,6 @@ export interface RepoContext {
 
 const GIT_TIMEOUT_MS = 60_000;
 const GIT_MAX_BUFFER = 1024 * 1024;
-const LANE_KEY_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
 /** Production exec: `exec.ts`'s bounded `execCommand` (rolling-tail output, timeout, abort). */
 export function createDefaultWorktreeSyncExec(): WorktreeSyncExec {
@@ -370,7 +370,7 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 	if ("code" in ctx) return ctx;
 
 	return withFileLock(ctx.paths.lifecycleLockFile, async () => {
-		if (args.laneKey !== undefined && !LANE_KEY_RE.test(args.laneKey)) {
+		if (args.laneKey !== undefined && !WORKTREE_LANE_KEY_PATTERN.test(args.laneKey)) {
 			return {
 				code: "invalid_lane_key",
 				message: `laneKey '${args.laneKey}' is invalid: lowercase alphanumerics and inner dashes, max 63 chars`,
@@ -567,7 +567,7 @@ function findUnregisteredLaneWorktrees(
 		const ref = entry.branchRef;
 		if (!ref?.startsWith(`refs/heads/${LANE_BRANCH_PREFIX}`)) continue;
 		const laneKey = ref.slice(`refs/heads/${LANE_BRANCH_PREFIX}`.length);
-		if (registered.has(laneKey) || !LANE_KEY_RE.test(laneKey)) continue;
+		if (registered.has(laneKey) || !WORKTREE_LANE_KEY_PATTERN.test(laneKey)) continue;
 		if (!fileExists(deps, entry.path)) continue;
 		found.push({ laneKey, path: entry.path });
 	}

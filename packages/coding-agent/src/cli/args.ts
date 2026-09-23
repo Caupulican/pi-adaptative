@@ -11,6 +11,15 @@ import { isTerminalSessionMode, type TerminalSessionMode } from "../core/session
 
 export type Mode = "text" | "json" | "rpc";
 
+export type AppMode = "interactive" | "print" | "json" | "rpc";
+
+export function resolveAppMode(parsed: Args, stdinIsTTY: boolean | undefined): AppMode {
+	if (parsed.mode === "rpc") return "rpc";
+	if (parsed.mode === "json") return "json";
+	if (parsed.print || !stdinIsTTY) return "print";
+	return "interactive";
+}
+
 export interface Args {
 	provider?: string;
 	model?: string;

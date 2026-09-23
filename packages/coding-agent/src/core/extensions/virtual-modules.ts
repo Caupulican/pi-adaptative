@@ -56,16 +56,24 @@ export const PI_AI_EXTENSION_SUBPATHS = {
 
 export type PiAiExtensionSubpath = keyof typeof PI_AI_EXTENSION_SUBPATHS;
 
-let bundledVirtualModules: Readonly<Record<string, unknown>> | undefined;
+/**
+ * The host program's own module instances, by the specifiers extensions import them under. Extensions
+ * bind to these live modules instead of loading a private copy of the program: one instance of every
+ * module-level singleton, and no re-evaluation of the host on each extension load. Registered once, by
+ * `host-extension-modules.ts`, which the session builder imports.
+ */
+let hostExtensionModules: Readonly<Record<string, unknown>> | undefined;
 
-export function registerBundledExtensionVirtualModules(modules: Record<string, unknown>): void {
-	if (bundledVirtualModules) throw new Error("Bundled extension virtual modules are already registered");
-	bundledVirtualModules = Object.freeze({ ...modules });
+export function registerHostExtensionModules(modules: Record<string, unknown>): void {
+	if (hostExtensionModules) throw new Error("Host extension modules are already registered");
+	hostExtensionModules = Object.freeze({ ...modules });
 }
 
-export function getBundledExtensionVirtualModules(): Readonly<Record<string, unknown>> {
-	if (!bundledVirtualModules) {
-		throw new Error("Bun extension virtual modules were not registered by the binary entrypoint");
-	}
-	return bundledVirtualModules;
+/**
+ * The registered host modules, or undefined in a process that never built a session (a focused test
+ * of the loader): there is no running program to share, and extensions resolve packages from disk.
+ * Every session registers them first, through the session builder's static import.
+ */
+export function getHostExtensionModules(): Readonly<Record<string, unknown>> | undefined {
+	return hostExtensionModules;
 }

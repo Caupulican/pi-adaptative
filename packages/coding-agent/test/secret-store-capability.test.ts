@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { evaluateToolGate, extractCandidatePaths } from "../src/core/autonomy/gates.ts";
 import { getDefaultActiveToolNames } from "../src/core/default-tool-surface.ts";
 import { assessOperationRisk } from "../src/core/risk-classifier.ts";
-import { WORKER_FORBIDDEN_TOOLS } from "../src/core/session-role.ts";
 import { getToolCapabilityPolicy } from "../src/core/tool-capability-policy.ts";
+import { WORKER_FORBIDDEN_TOOLS } from "../src/core/worker-tool-ceiling.ts";
 
 describe("secret_store capability boundary", () => {
 	it("is default-active only for the user plane and requires credentials.use", () => {

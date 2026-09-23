@@ -4,9 +4,9 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { ORCHESTRATION_THINKING_LEVEL_SCHEMA } from "../orchestration/thinking-level-schema.ts";
-import { WORKER_FORBIDDEN_TOOLS } from "../session-role.ts";
 import { POLICY_OWNED_RUNTIME_TOOL_NAMES } from "../tool-capability-policy.ts";
 import { isRecordObject as isPlainRecord } from "../util/value-guards.ts";
+import { WORKER_FORBIDDEN_TOOLS } from "../worker-tool-ceiling.ts";
 
 export type Provider = "pi" | "codex" | "agy" | "claude" | "opencode" | "custom";
 
