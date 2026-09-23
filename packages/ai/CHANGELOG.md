@@ -5,6 +5,7 @@
 - The ChatGPT Codex provider lists exactly the models the Codex catalogue offers (GPT-5.5, GPT-5.6 Sol/Terra/Luna, GPT-6 Astra/Sol/Luna); GPT-5.2, GPT-5.3 Codex, GPT-5.3 Codex Spark, GPT-5.4 and GPT-5.4 mini are gone. Off clamps to each model's lowest catalogue level, since no Codex model offers `none`.
 - A Codex token refresh is sent as a JSON grant, as the Codex CLI sends it; the access token's own `exp` claim is its expiry (`expires_in` only when the token has none), and a refresh that returns no refresh token keeps the current one.
 - `OPENAI_CODEX_CLIENT_VERSION` is 0.156.1, the release the Codex catalogue is pinned from, so the account is asked for the models that release serves (GPT-6 Sol and Luna need 0.155.0).
+- Tests that call live providers run only with `PI_LIVE_TESTS=1`; a key in the shell or in `~/.pi/agent/auth.json` no longer turns them on, including in the pre-commit hook.
 
 ### Added
 
@@ -26,6 +27,7 @@
 - An Antigravity stream that opens with a role-only event no longer fails as invalid content.
 - The Antigravity project is resolved once per access token, as the native client does at startup, instead of before every request.
 - Antigravity stores a catalog version with its discovered model catalog and treats an older one as stale, so a catalog written before thinking budgets and backends were persisted is re-discovered on first use.
+- Claude and GPT via Antigravity accept goal-mode tools. The OpenAPI-subset `parameters` field rejected `const`, `exclusiveMinimum` and `$ref` (HTTP 400 on every request), and every `anyOf` came back from the upstream as an invalid input_schema; the schema is now translated into the subset (`const` as a one-value enum, exclusive bounds as inclusive ones, local `$ref` inlined, a `null` type member as `nullable`, a union as one schema).
 
 ## [0.99.43] - 2026-09-22
 
