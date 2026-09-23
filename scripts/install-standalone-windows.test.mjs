@@ -47,6 +47,7 @@ let sharedFixtureRoot;
 let sharedFixtureExecutable;
 
 function getNativeFixtureCompiler() {
+	if (process.platform !== "win32") return undefined;
 	if (!nativeFixtureCompilerChecked) {
 		nativeFixtureCompilerChecked = true;
 		const result = spawnSync("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"], { encoding: "utf8" });
@@ -247,11 +248,8 @@ test("release version resolution has one latest lookup and pinned asset URLs", (
 });
 
 test("checksum verification works in native Windows PowerShell without Get-FileHash", (context) => {
-	const shell = "powershell.exe";
-	const probe = spawnSync(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"], {
-		encoding: "utf8",
-	});
-	if (probe.status !== 0) {
+	const shell = getNativeFixtureCompiler();
+	if (!shell) {
 		context.skip("native Windows PowerShell is not available on this host");
 		return;
 	}
