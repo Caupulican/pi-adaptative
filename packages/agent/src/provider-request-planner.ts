@@ -3,6 +3,7 @@ import type { Context, Message } from "@caupulican/pi-ai/types";
 import { applyProviderRequestImageBudget } from "./provider-request-image-budget.ts";
 import { projectToolsForProvider } from "./provider-tool-projection.ts";
 import {
+	createToolFailureContextMemory,
 	sanitizeToolFailureContext,
 	TOOL_FAILURE_LEDGER_CLEARED_TEXT,
 	TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
@@ -81,6 +82,29 @@ function writeSanitizerSentPrefixCount(config: AgentLoopConfig, count: number): 
 		return;
 	}
 	sentPrefixFallback.set(config, { ...readFallbackEntry(config), sanitizerSentPrefixCount: count });
+}
+
+/**
+ * A replan (compaction) hands back a DIFFERENT history: only the leading messages it shares with the
+ * previous history by reference are still bytes the provider has seen. Lower both marks to that shared
+ * prefix, and drop the sanitizer's erasure memory when the cut reaches below its mark (its fold state
+ * indexes messages that no longer exist). Without this the monotone mark write after acceptance kept the
+ * pre-compaction count, so the whole compacted history read as already sent: context GC could not pack
+ * it and the sanitizer could not dedup it until the history regrew past the old length.
+ */
+function lowerPrefixMarksToSharedPrefix(
+	config: AgentLoopConfig,
+	previous: readonly AgentMessage[],
+	next: readonly AgentMessage[],
+): void {
+	let shared = 0;
+	while (shared < previous.length && shared < next.length && previous[shared] === next[shared]) shared++;
+	if (readSentPrefixCount(config) > shared) writeSentPrefixCount(config, shared);
+	if (readSanitizerSentPrefixCount(config) > shared) {
+		writeSanitizerSentPrefixCount(config, shared);
+		const state = config.providerRequestPrefixState;
+		if (state) state.sanitizerMemory = createToolFailureContextMemory();
+	}
 }
 
 const MAX_STALE_PROVIDER_REQUEST_PLANS = 3;
@@ -299,9 +323,10 @@ export async function startPlannedAgentProviderRequestWithId(
 		// these back into one value; that recreates either the cache defect or the unbounded-context
 		// defect the split exists to keep apart):
 		// - sanitizerSentPrefixCount (SESSION-scoped) confines the sanitizer's dedup-erasure below.
-		// - sentPrefixCount (RUN-scoped) feeds `planContext`'s AgentContextPlanRequest.sentPrefixCount
-		//   and the disturbance detector below - both validate a host's packing against exactly this
-		//   value, so it must keep its own, separate, per-prompt-resetting lifetime.
+		// - sentPrefixCount (SESSION-scoped too since 2026-09-03, carried across prompts by `Agent`) feeds
+		//   `planContext`'s AgentContextPlanRequest.sentPrefixCount and the disturbance detector below -
+		//   both validate a host's packing against exactly this value. The two marks differ in what
+		//   they confine (packing vs dedup-erasure), and both drop when history is replaced.
 		// Both computed once per loop iteration and clamped: compaction can shorten the transcript,
 		// and each mark indexes into `sourceContext.messages`, whose entries are otherwise only ever
 		// appended - recomputed fresh on every iteration, so a replan that hands back a shorter
@@ -425,6 +450,7 @@ export async function startPlannedAgentProviderRequestWithId(
 				if (admissionAttempt >= MAX_PROVIDER_REQUEST_REPLANS) {
 					throw new Error(`Provider request admission exceeded ${MAX_PROVIDER_REQUEST_REPLANS} replans`);
 				}
+				lowerPrefixMarksToSharedPrefix(config, sourceContext.messages, admission.context.messages);
 				sourceContext = admission.context;
 				admissionAttempt++;
 				stalePlanCount = 0;
@@ -485,8 +511,9 @@ export async function startPlannedAgentProviderRequestWithId(
 				config.onTransientRecordsCommitted,
 			);
 			// Everything in this accepted request is now bytes the provider has seen; later turns may
-			// no longer rewrite them. Monotone, so a shorter replanned history never lowers either
-			// mark. Both marks are updated identically here - they diverge only in WHEN they get reset
+			// no longer rewrite them. Monotone within one history; a replan that replaced history has
+			// already lowered both marks to the shared prefix (`lowerPrefixMarksToSharedPrefix`). Both marks
+			// are updated identically here - they diverge only in WHEN they get reset
 			// (see ProviderRequestPrefixState in types.ts), not in how they grow within a run/session.
 			writeSentPrefixCount(config, Math.max(readSentPrefixCount(config), sourceContext.messages.length));
 			writeSanitizerSentPrefixCount(

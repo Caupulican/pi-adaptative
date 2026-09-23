@@ -2945,6 +2945,11 @@ export class AgentSession {
 	/** Drop provider-owned request/continuation caches whose prefix was invalidated by compaction. */
 	private _refreshAfterCompaction(): void {
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+		// The compacted history replaces the one the sent-prefix marks were counting: none of it has been
+		// sent in this form. Without the reset the monotone mark kept the pre-compaction count, so the whole
+		// new history read as already sent (no context-GC packing, no sanitizer dedup) until it regrew past
+		// that count. A compaction applied inside a run lowers the run's marks itself on `replan`.
+		this.agent.resetSanitizerPrefixHorizon();
 		try {
 			cleanupSessionResources(this.sessionId);
 		} catch {

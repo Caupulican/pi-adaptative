@@ -490,15 +490,11 @@ export class Agent {
 	 * automatically, since it already clears `state.messages` to `[]` - after that, index 0 is
 	 * correctly "nothing sent yet" for the new, empty transcript.
 	 *
-	 * A host MUST also call this whenever it replaces `state.messages` with a DIFFERENT lineage
-	 * than the one the mark was tracking - a session reload, a fork, or a branch switch - since the
-	 * mark otherwise indexes into a message array that no longer exists. This package does not
-	 * expose a signal for those specific transitions beyond a full `reset()`; a host performing one
-	 * of them without calling this (or `reset()`) leaves the mark pointing at stale history, which
-	 * would incorrectly protect - or incorrectly permit erasing - positions in the new array that
-	 * have no relationship to what was actually sent for it. See the repo-root AGENTS.md entry under
-	 * "Compaction and Long Sessions" for the exact coding-agent call sites this needs wiring into
-	 * (session-tree-navigator.ts, agent-session.ts, sdk.ts) - none of them call this yet.
+	 * A host MUST also call this whenever it replaces `state.messages` outside a run - a session
+	 * reload, a fork, a branch switch, or a compaction applied between runs - since the marks
+	 * otherwise index into a message array that no longer exists and the monotone mark write would
+	 * keep a stale, larger count (the whole new history would read as already sent). A compaction
+	 * applied INSIDE a run through admission `replan` lowers the marks itself in the planner.
 	 */
 	resetSanitizerPrefixHorizon(): void {
 		this.sanitizerSentPrefixCount = 0;
@@ -626,6 +622,10 @@ export class Agent {
 		if (updated !== undefined) this.sanitizerSentPrefixCount = updated;
 		const sent = continuationState.providerRequestPrefixState?.sentPrefixCount;
 		if (sent !== undefined) this.sentPrefixCount = sent;
+		// A replan that replaced history mid-run swaps in a fresh erasure memory (see
+		// `lowerPrefixMarksToSharedPrefix` in provider-request-planner.ts); carry it back like the marks.
+		const memory = continuationState.providerRequestPrefixState?.sanitizerMemory;
+		if (memory !== undefined) this.sanitizerMemory = memory;
 	}
 
 	private createContextSnapshot(): AgentContext {

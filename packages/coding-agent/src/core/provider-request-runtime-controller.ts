@@ -198,9 +198,9 @@ export class ProviderRequestRuntimeController {
 		//    `.transformContext(` call in both packages.
 		// 2. Even if a future caller invoked `agent.transformContext(...)` directly, this class has
 		//    no way to answer "how much of `messages` has already gone out on a provider request":
-		//    that count lives in `Agent`'s private `loopContinuationState.providerRequestPrefixState`
-		//    (`agent.ts`), reset to a fresh zero at the start of every `runPromptMessages()` call and
-		//    never exposed outside the class. There is no cross-package accessor for it.
+		//    that count lives in `Agent`'s private session-scoped prefix state (`agent.ts`, carried
+		//    across prompts and dropped only when the history is replaced) and is never exposed
+		//    outside the class. There is no cross-package accessor for it.
 		//
 		// `0` is also the SAFE direction to be wrong in if this ever does become reachable: per
 		// `AgentContextPlanRequest`'s own contract, a too-low count only makes the sanitizer more
