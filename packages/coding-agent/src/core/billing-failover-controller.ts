@@ -123,6 +123,11 @@ export class ExhaustedProviderRegistry {
 
 export interface BillingFailoverControllerDeps {
 	agent: Agent;
+	/**
+	 * Moves work off the exhausted model: a routed turn's model inside that turn, otherwise the session
+	 * model, recorded like any other session model change. A routed turn's model is never the session's.
+	 */
+	applyFailoverModel(failed: Model<Api>, hop: Model<Api>): void;
 	modelRegistry: ModelRegistry;
 	emit(event: { type: "warning"; message: string }): void;
 	exhausted: ExhaustedProviderRegistry;
@@ -181,8 +186,8 @@ export class BillingFailoverController {
 			hopExhausted: hop ? this.deps.exhausted.isExhausted(`${hop.provider}/${hop.id}`) : false,
 			subscriptionHop: this.deps.subscriptionHop,
 		});
-		if (action.action === "failover") {
-			this.deps.agent.state.model = hop as Model<Api>;
+		if (action.action === "failover" && hop) {
+			this.deps.applyFailoverModel(failedModel, hop);
 		}
 		this.lastNotice = action.notice;
 		this.deps.emit({ type: "warning", message: action.notice });

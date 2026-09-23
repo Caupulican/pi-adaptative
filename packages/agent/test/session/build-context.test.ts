@@ -111,21 +111,21 @@ describe("buildSessionContext", () => {
 			expect(ctx.messages).toHaveLength(2);
 		});
 
-		it("tracks model from assistant message", () => {
+		it("does not take the session model from the model that answered", () => {
 			const entries: SessionEntry[] = [msg("1", null, "user", "hello"), msg("2", "1", "assistant", "hi")];
 			const ctx = buildSessionContext(entries);
-			expect(ctx.model).toEqual({ provider: "anthropic", modelId: "claude-test" });
+			expect(ctx.model).toBeNull();
 		});
 
-		it("tracks model from model change entry", () => {
+		it("tracks model from model change entry, even when a later reply came from another model", () => {
 			const entries: SessionEntry[] = [
 				msg("1", null, "user", "hello"),
 				modelChange("2", "1", "openai", "gpt-4"),
 				msg("3", "2", "assistant", "hi"),
 			];
 			const ctx = buildSessionContext(entries);
-			// Assistant message overwrites model change
-			expect(ctx.model).toEqual({ provider: "anthropic", modelId: "claude-test" });
+			// A routed reply is written by the routed model; the session model is the selected one.
+			expect(ctx.model).toEqual({ provider: "openai", modelId: "gpt-4" });
 		});
 	});
 

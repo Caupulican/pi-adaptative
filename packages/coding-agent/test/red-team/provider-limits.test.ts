@@ -155,6 +155,9 @@ function controller(startModel: Model<Api>, subscription: boolean, exhausted = n
 	const agent = { state: { model: startModel } } as unknown as Agent;
 	const failover = new BillingFailoverController({
 		agent,
+		applyFailoverModel: (_failed, hop) => {
+			agent.state.model = hop;
+		},
 		modelRegistry: registry(subscription),
 		exhausted,
 		emit: (event) => warnings.push(event.message),

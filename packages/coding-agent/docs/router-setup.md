@@ -102,6 +102,11 @@ While a routed turn runs, the POV bar shows `ROOT` (the session model the turn r
 `escalated→<model> via model-router`. Jev is never named as the selector; its own slot reports only
 its observed state (`S1 off | ready | eval | ok | degraded`). See `workbench.md`.
 
+A routed turn's model is the turn's, never the session's. The session model is the one last selected
+(session start, `/model`, a forced switch such as billing failover or an unavailable model), recorded as a
+`model_change`; a reply written by a routed model never becomes it, so a resumed session reopens on the
+same ROOT. Billing failover inside a routed turn replaces that turn's model and leaves the session model alone.
+
 ## Model pools by request
 
 Models fall in three pools: subscription (a flat plan, not billed per request), metered (pay-per-use API

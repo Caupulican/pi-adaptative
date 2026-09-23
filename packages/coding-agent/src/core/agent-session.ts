@@ -1285,6 +1285,15 @@ export class AgentSession {
 		});
 		this._foregroundRecovery = new ForegroundRecoveryController({
 			agent: this.agent,
+			applyFailoverModel: (failed, hop) => {
+				// Same rule as an unsupported model: a routed turn's model stays inside that turn.
+				if (this._modelRouter.isRoutedTurnOn(failed)) {
+					this._modelRouter.replaceRefusedRoutedModel(failed, hop);
+					return;
+				}
+				this.agent.state.model = hop;
+				this.sessionManager.appendModelChange(hop.provider, hop.id);
+			},
 			modelRegistry: this._modelRegistry,
 			settingsManager: this.settingsManager,
 			failureCorpus: this._failureCorpus,

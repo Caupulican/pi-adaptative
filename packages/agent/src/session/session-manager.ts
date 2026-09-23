@@ -211,6 +211,11 @@ export interface SessionTreeNode {
 export interface SessionContext {
 	messages: AgentMessage[];
 	thinkingLevel: string;
+	/**
+	 * The session's selected model: the latest `model_change` entry (session start, `/model`, a forced
+	 * switch). Never the model that happened to answer last - a routed reply is written by the routed
+	 * model, and a routed turn's model is the turn's, never the session's.
+	 */
 	model: { provider: string; modelId: string } | null;
 }
 
@@ -517,8 +522,6 @@ export function buildSessionContext(
 			thinkingLevel = entry.thinkingLevel;
 		} else if (entry.type === "model_change") {
 			model = { provider: entry.provider, modelId: entry.modelId };
-		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			model = { provider: entry.message.provider, modelId: entry.message.model };
 		} else if (entry.type === "compaction") {
 			compaction = entry;
 		}
@@ -1876,9 +1879,6 @@ export class SessionManager {
 		switch (entry.type) {
 			case "message":
 				cached.context.messages.push(entry.message);
-				if (entry.message.role === "assistant") {
-					cached.context.model = { provider: entry.message.provider, modelId: entry.message.model };
-				}
 				break;
 			case "custom_message":
 				cached.context.messages.push(

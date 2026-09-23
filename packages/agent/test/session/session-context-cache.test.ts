@@ -33,17 +33,25 @@ function assistantMessage(text: string, provider = "anthropic", model = "test-mo
 	};
 }
 
-function countedUserMessage(text: string, onRoleRead: () => void): UserMessage {
+/**
+ * Appends a user message and records every later projection that visits its stored entry (by reading the
+ * entry's `type`, which any full rebuild must), so a test can tell a full rebuild from an incremental one.
+ */
+function appendVisitedUserMessage(session: SessionManager, text: string, visited: Set<string>): string {
 	const message: UserMessage = { role: "user", content: text, timestamp: 1 };
-	Object.defineProperty(message, "role", {
+	const id = session.appendMessage(message);
+	const entry = session.getEntry(id);
+	if (!entry) throw new Error("Expected the appended entry.");
+	const type = entry.type;
+	Object.defineProperty(entry, "type", {
 		configurable: true,
 		enumerable: true,
 		get: () => {
-			onRoleRead();
-			return "user";
+			visited.add(id);
+			return type;
 		},
 	});
-	return message;
+	return id;
 }
 
 function userText(message: ReturnType<SessionManager["buildSessionContext"]>["messages"][number]): string {
@@ -74,23 +82,18 @@ describe("SessionManager context cache", () => {
 
 	it("advances linear messages and settings without revisiting the settled prefix", () => {
 		const session = SessionManager.inMemory("/repo");
-		let prefixRoleReads = 0;
-		for (let index = 0; index < 256; index++) {
-			session.appendMessage(
-				countedUserMessage(`prefix-${index}`, () => {
-					prefixRoleReads += 1;
-				}),
-			);
-		}
+		const visited = new Set<string>();
+		session.appendModelChange("anthropic", "test-model");
+		for (let index = 0; index < 256; index++) appendVisitedUserMessage(session, `prefix-${index}`, visited);
 		session.appendMessage(assistantMessage("prefix assistant"));
 
 		const initial = session.buildSessionContext();
 		expect(initial.messages).toHaveLength(257);
-		expect(prefixRoleReads).toBe(256);
-		prefixRoleReads = 0;
+		expect(visited.size).toBe(256);
+		visited.clear();
 
 		initial.messages.length = 0;
-		if (!initial.model) throw new Error("Expected an assistant-derived model projection.");
+		if (!initial.model) throw new Error("Expected the model_change projection.");
 		initial.model.provider = "mutated-by-caller";
 		const defensive = session.buildSessionContext();
 		expect(defensive.messages).toHaveLength(257);
@@ -104,56 +107,48 @@ describe("SessionManager context cache", () => {
 		expect(advanced.thinkingLevel).toBe("high");
 		expect(advanced.model).toEqual({ provider: "openai", modelId: "gpt-cache" });
 
+		// A reply written by another model (a routed turn) never becomes the session's model.
 		session.appendMessage(assistantMessage("next assistant", "google", "gemini-cache"));
 		advanced = session.buildSessionContext();
 		expect(advanced.messages).toHaveLength(259);
-		expect(advanced.model).toEqual({ provider: "google", modelId: "gemini-cache" });
-		expect(prefixRoleReads).toBe(0);
+		expect(advanced.model).toEqual({ provider: "openai", modelId: "gpt-cache" });
+		expect(visited.size).toBe(0);
 	});
 
 	it("rebuilds once after compaction and never revisits compacted-away entries on later appends", () => {
 		const session = SessionManager.inMemory("/repo");
-		let compactedRoleReads = 0;
-		for (let index = 0; index < 2_044; index++) {
-			session.appendMessage(
-				countedUserMessage(`compacted-${index}`, () => {
-					compactedRoleReads += 1;
-				}),
-			);
-		}
+		const visited = new Set<string>();
+		for (let index = 0; index < 2_044; index++) appendVisitedUserMessage(session, `compacted-${index}`, visited);
 		const keptIds: string[] = [];
 		for (let index = 0; index < 4; index++) {
 			keptIds.push(session.appendMessage({ role: "user", content: `kept-${index}`, timestamp: index + 2 }));
 		}
 		session.appendCompaction("bounded summary", keptIds[0]!, 100_000);
 
-		compactedRoleReads = 0;
+		visited.clear();
 		const rebuilt = session.buildSessionContext();
 		expect(rebuilt.messages).toHaveLength(5);
-		expect(compactedRoleReads).toBe(2_044);
-		compactedRoleReads = 0;
+		expect(visited.size).toBe(2_044);
+		visited.clear();
 
 		for (let index = 0; index < 32; index++) {
 			session.appendMessage({ role: "user", content: `later-${index}`, timestamp: index + 10 });
 			expect(session.buildSessionContext().messages).toHaveLength(6 + index);
 		}
-		expect(compactedRoleReads).toBe(0);
+		expect(visited.size).toBe(0);
 	});
 
 	it("invalidates a cached projection on branch, reset, and new session transitions", () => {
 		const session = SessionManager.inMemory("/repo");
-		let roleReads = 0;
-		const countRoleRead = () => {
-			roleReads += 1;
-		};
-		const rootId = session.appendMessage(countedUserMessage("root", countRoleRead));
-		const mainId = session.appendMessage(countedUserMessage("main", countRoleRead));
+		const visited = new Set<string>();
+		const rootId = appendVisitedUserMessage(session, "root", visited);
+		const mainId = appendVisitedUserMessage(session, "main", visited);
 		expect(session.buildSessionContext().messages).toHaveLength(2);
 
-		roleReads = 0;
+		visited.clear();
 		session.branch(mainId);
 		expect(session.buildSessionContext().messages).toHaveLength(2);
-		expect(roleReads).toBe(2);
+		expect(visited.size).toBe(2);
 
 		session.branch(rootId);
 		session.appendMessage({ role: "user", content: "branch", timestamp: 3 });

@@ -386,7 +386,8 @@ describe("buildSessionContext", () => {
 		const loaded = buildSessionContext(entries);
 		expect(loaded.messages.length).toBe(4);
 		expect(loaded.thinkingLevel).toBe("off");
-		expect(loaded.model).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
+		// No model was ever selected (no model_change); the replies' own models never stand in for one.
+		expect(loaded.model).toBeNull();
 	});
 
 	it("should handle single compaction", () => {
@@ -454,8 +455,8 @@ describe("buildSessionContext", () => {
 		];
 
 		const loaded = buildSessionContext(entries);
-		// model_change is later overwritten by assistant message's model info
-		expect(loaded.model).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
+		// The selected model stands; the later reply's model never overwrites it.
+		expect(loaded.model).toEqual({ provider: "openai", modelId: "gpt-4" });
 		expect(loaded.thinkingLevel).toBe("high");
 	});
 });

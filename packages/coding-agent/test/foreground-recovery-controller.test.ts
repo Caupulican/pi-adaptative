@@ -29,6 +29,7 @@ function createFixture() {
 	const afterRun = vi.fn(async () => {});
 	const deps: ConstructorParameters<typeof ForegroundRecoveryController>[0] = {
 		agent,
+		applyFailoverModel: vi.fn(),
 		settingsManager: {
 			getRetrySettings: () => ({ enabled: true, maxRetries: 3, baseDelayMs: 0 }),
 			getProviderRetrySettings: () => ({ maxRetryDelayMs: 60_000 }),

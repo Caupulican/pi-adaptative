@@ -56,6 +56,9 @@ describe("BillingFailoverController", () => {
 		const agent = { state: { model: failed } } as unknown as Agent;
 		const controller = new BillingFailoverController({
 			agent,
+			applyFailoverModel: (_failed, hop) => {
+				agent.state.model = hop;
+			},
 			modelRegistry: registry(true),
 			exhausted: new ExhaustedProviderRegistry(),
 			emit: (event) => warnings.push(event.message),
@@ -73,6 +76,9 @@ describe("BillingFailoverController", () => {
 		const agent = { state: { model: failed } } as unknown as Agent;
 		const controller = new BillingFailoverController({
 			agent,
+			applyFailoverModel: (_failed, hop) => {
+				agent.state.model = hop;
+			},
 			modelRegistry: registry(false),
 			exhausted: new ExhaustedProviderRegistry(),
 			emit: (event) => warnings.push(event.message),
@@ -103,6 +109,9 @@ describe("BillingFailoverController", () => {
 		} as unknown as ModelRegistry;
 		const controller = new BillingFailoverController({
 			agent,
+			applyFailoverModel: (_failed, hop) => {
+				agent.state.model = hop;
+			},
 			modelRegistry,
 			exhausted: new ExhaustedProviderRegistry(),
 			emit: (event) => warnings.push(event.message),
@@ -147,6 +156,9 @@ describe("BillingFailoverController", () => {
 		const agent = { state: { model: failed } } as unknown as Agent;
 		const controller = new BillingFailoverController({
 			agent,
+			applyFailoverModel: (_failed, hop) => {
+				agent.state.model = hop;
+			},
 			modelRegistry: registry(true),
 			exhausted,
 			emit: (event) => warnings.push(event.message),

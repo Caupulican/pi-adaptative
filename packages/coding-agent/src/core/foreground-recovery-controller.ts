@@ -8,7 +8,7 @@ import {
 	RetryDelayExceededError,
 } from "@caupulican/pi-agent-core/reliability";
 import type { AgentEvent, AgentMessage } from "@caupulican/pi-agent-core/types";
-import type { AssistantMessage } from "@caupulican/pi-ai";
+import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { isContextOverflow } from "@caupulican/pi-ai/overflow";
 import { BillingFailoverController, ExhaustedProviderRegistry } from "./billing-failover-controller.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
@@ -33,6 +33,8 @@ export interface ForegroundSubmissionLease {
 
 export interface ForegroundRecoveryControllerDeps {
 	agent: Agent;
+	/** See `BillingFailoverControllerDeps.applyFailoverModel`. */
+	applyFailoverModel(failed: Model<Api>, hop: Model<Api>): void;
 	settingsManager: SettingsManager;
 	modelRegistry: ModelRegistry;
 	failureCorpus: FailureCorpusRecorder;
@@ -84,6 +86,7 @@ export class ForegroundRecoveryController {
 		);
 		this.billingFailover = new BillingFailoverController({
 			agent: deps.agent,
+			applyFailoverModel: (failed, hop) => deps.applyFailoverModel(failed, hop),
 			modelRegistry: deps.modelRegistry,
 			exhausted: new ExhaustedProviderRegistry(deps.exhaustedStoreDir),
 			subscriptionHop: deps.settingsManager.getFailoverSettings().subscriptionHop,
