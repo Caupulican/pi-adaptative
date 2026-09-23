@@ -1,6 +1,11 @@
-import type { Model } from "@caupulican/pi-ai";
+import type { AgentMessage } from "@caupulican/pi-agent-core/types";
+import type { Api, Context, Model } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
-import { CompactionSupport, type CompactionSupportDeps } from "../src/core/compaction-support.ts";
+import {
+	CompactionSupport,
+	type CompactionSupportDeps,
+	sessionLaneSummarizerRequest,
+} from "../src/core/compaction-support.ts";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
 import type { SettingsManager } from "../src/core/settings-manager.ts";
 
@@ -128,5 +133,71 @@ describe("compaction summarizer capacity selection", () => {
 
 		expect(resolved).toBe(session);
 		expect(warnings.some((message) => message.includes("window_too_small") && message.includes("8192"))).toBe(true);
+	});
+});
+
+describe("session-lane summarizer request", () => {
+	const lane = (provider: string, api: Api, id: string): Model<Api> => ({
+		...makeModel(provider, id, 200_000),
+		api,
+		baseUrl: `https://${provider}.example`,
+	});
+	const opus = lane("anthropic", "anthropic-messages", "claude-opus-5-5");
+	const codex = lane("openai-codex", "openai-codex-responses", "gpt-5.6-sol");
+	const user = (text: string, timestamp: number): AgentMessage => ({ role: "user", content: text, timestamp });
+	const first = user("first", 1);
+	const second = user("second", 2);
+	const sentContext: Context = {
+		systemPrompt: "system",
+		messages: [{ role: "user", content: "first (as sent)", timestamp: 1 }],
+		tools: [],
+	};
+	const request = (model: Model<Api>, live: readonly AgentMessage[], sentModel = model) =>
+		sessionLaneSummarizerRequest({
+			compactionModel: model,
+			sessionModel: model,
+			systemPrompt: "system",
+			tools: [],
+			messagesToSummarize: [first],
+			liveMessages: live,
+			lastSent: { model: sentModel, context: sentContext, sourceMessages: [first] },
+			textToolCallProtocol: undefined,
+			sessionId: "session-1",
+		});
+
+	it("reuses the session lane for Anthropic and Codex, not only the xAI subscription", () => {
+		for (const model of [opus, codex]) {
+			expect(request(model, [first])).toMatchObject({ sessionId: "session-1", cacheRetention: "short" });
+		}
+	});
+
+	it("sends the lane's context exactly as sent, extended by the messages persisted since", () => {
+		expect(request(opus, [first])?.sentContext).toBe(sentContext);
+		const extended = request(opus, [first, second])?.sentContext;
+		expect(extended?.messages).toEqual([
+			...sentContext.messages,
+			expect.objectContaining({ role: "user", content: "second" }),
+		]);
+	});
+
+	it("drops the sent context once the history it was planned from was replaced, or it was another lane", () => {
+		expect(request(opus, [user("compacted", 3)])?.sentContext).toBeUndefined();
+		expect(request(opus, [first], codex)?.sentContext).toBeUndefined();
+	});
+
+	it("builds no lane request for a summarizer on another model", () => {
+		expect(
+			sessionLaneSummarizerRequest({
+				compactionModel: codex,
+				sessionModel: opus,
+				systemPrompt: "system",
+				tools: [],
+				messagesToSummarize: [first],
+				liveMessages: [first],
+				lastSent: undefined,
+				textToolCallProtocol: undefined,
+				sessionId: "session-1",
+			}),
+		).toBeUndefined();
 	});
 });

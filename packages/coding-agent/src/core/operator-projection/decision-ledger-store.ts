@@ -88,6 +88,19 @@ export interface CacheDecisionRow {
 	readonly detail?: Readonly<Record<string, number | string>>;
 }
 
+/**
+ * One applied compaction's measured effect on a lane: the context before and after, and the tokens the
+ * summarizer generated. What a compaction on that lane is expected to leave and to cost is learned here.
+ */
+export interface CompactionOutcomeRow {
+	readonly sessionId: string;
+	readonly lane: string;
+	readonly observedAt: number;
+	readonly tokensBefore: number;
+	readonly tokensAfter: number;
+	readonly outputTokens: number;
+}
+
 /** One session's history lineage: how many requests were made on it, and when the last one was. */
 export interface LineageEpisodeRow {
 	readonly sessionId: string;
@@ -220,6 +233,16 @@ export class DecisionLedgerStore {
 				detail TEXT
 			);
 			CREATE INDEX IF NOT EXISTS cache_decisions_session ON cache_decisions (session_id, decided_at);
+			CREATE TABLE IF NOT EXISTS compaction_outcomes (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				session_id TEXT NOT NULL,
+				lane TEXT NOT NULL,
+				observed_at INTEGER NOT NULL,
+				tokens_before INTEGER NOT NULL,
+				tokens_after INTEGER NOT NULL,
+				output_tokens INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS compaction_outcomes_lane ON compaction_outcomes (lane, observed_at);
 		`);
 		// Ledgers created before observations carried their lineage gain the column; their rows stay unassigned.
 		const columns = this.database.prepare("PRAGMA table_info(cache_observations)").all();
@@ -474,6 +497,55 @@ export class DecisionLedgerStore {
 		return out;
 	}
 
+	/** Records one applied compaction's measured effect (see {@link CompactionOutcomeRow}). */
+	recordCompactionOutcome(row: CompactionOutcomeRow): void {
+		this.database
+			.prepare(
+				`INSERT INTO compaction_outcomes (session_id, lane, observed_at, tokens_before, tokens_after, output_tokens)
+				 VALUES (?, ?, ?, ?, ?, ?)`,
+			)
+			.run(row.sessionId, row.lane, row.observedAt, row.tokensBefore, row.tokensAfter, row.outputTokens);
+	}
+
+	/** Every recorded compaction outcome since `sinceMs`, oldest first. */
+	compactionOutcomesSince(sinceMs: number): CompactionOutcomeRow[] {
+		const rows = this.database
+			.prepare("SELECT * FROM compaction_outcomes WHERE observed_at >= ? ORDER BY observed_at, id")
+			.all(Number.isFinite(sinceMs) ? sinceMs : Number.MIN_SAFE_INTEGER);
+		const out: CompactionOutcomeRow[] = [];
+		for (const row of rows) {
+			const sessionId = asText(row.session_id);
+			const lane = asText(row.lane);
+			const observedAt = asInteger(row.observed_at);
+			const tokensBefore = asInteger(row.tokens_before);
+			const tokensAfter = asInteger(row.tokens_after);
+			const outputTokens = asInteger(row.output_tokens);
+			if (
+				sessionId === undefined ||
+				lane === undefined ||
+				observedAt === undefined ||
+				tokensBefore === undefined ||
+				tokensAfter === undefined ||
+				outputTokens === undefined
+			)
+				continue;
+			out.push({ sessionId, lane, observedAt, tokensBefore, tokensAfter, outputTokens });
+		}
+		return out;
+	}
+
+	/**
+	 * Every cache observation on a provider's lanes since `sinceMs`, oldest first: a lane's survival
+	 * curve pools from its model and provider peers, so it reads the whole provider.
+	 */
+	cacheObservationsForProvider(provider: string, sinceMs: number): CacheObservationRow[] {
+		const rows = this.database
+			.prepare("SELECT * FROM cache_observations WHERE observed_at >= ? ORDER BY observed_at, id")
+			.all(Number.isFinite(sinceMs) ? sinceMs : Number.MIN_SAFE_INTEGER);
+		// Lane keys join api, provider and model with NUL, which SQL string matching does not handle reliably.
+		return this.cacheObservationRows(rows).filter((row) => row.lane.split("\u0000")[1] === provider);
+	}
+
 	/** A session lane's most recent observation: where a resumed session's next gap is measured from. */
 	latestCacheObservation(sessionId: string, lane: string): { observedAt: number; promptTokens: number } | undefined {
 		const row = this.database
@@ -516,6 +588,10 @@ export class DecisionLedgerStore {
 		const rows = this.database
 			.prepare("SELECT * FROM cache_observations WHERE lane = ? ORDER BY observed_at DESC LIMIT ?")
 			.all(lane, Math.max(1, Math.floor(limit)));
+		return this.cacheObservationRows(rows);
+	}
+
+	private cacheObservationRows(rows: readonly Record<string, unknown>[]): CacheObservationRow[] {
 		const out: CacheObservationRow[] = [];
 		for (const row of rows) {
 			const sessionId = asText(row.session_id);
@@ -523,8 +599,10 @@ export class DecisionLedgerStore {
 			const observedAt = asInteger(row.observed_at);
 			const promptTokens = asInteger(row.prompt_tokens);
 			const cacheReadTokens = asInteger(row.cache_read_tokens);
+			const lane = asText(row.lane);
 			const prefixIntact = asText(row.prefix_intact);
 			if (
+				lane === undefined ||
 				sessionId === undefined ||
 				cwd === undefined ||
 				observedAt === undefined ||

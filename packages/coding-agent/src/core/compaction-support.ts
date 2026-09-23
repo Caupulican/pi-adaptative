@@ -6,9 +6,15 @@
  * persistence, notification, and cancellation; AgentSession keeps compatibility delegations at
  * established regression seams.
  */
-import { type CompactionSettings, summarizerCanIngest } from "@caupulican/pi-agent-core/compaction/compaction";
-import type { ThinkingLevel } from "@caupulican/pi-agent-core/types";
-import type { Api, Model } from "@caupulican/pi-ai";
+import {
+	type CompactionSettings,
+	type StructuredCompactionRequest,
+	summarizerCanIngest,
+} from "@caupulican/pi-agent-core/compaction/compaction";
+import { convertToLlm } from "@caupulican/pi-agent-core/messages";
+import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
+import type { Api, Context, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
+import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
@@ -43,6 +49,76 @@ function tierAwareCompactionTriggerPercent(
 function usesXaiSubscriptionSessionReplacement(model: Model<Api>): boolean {
 	if (model.provider !== "xai" || model.api !== "openai-responses") return false;
 	return model.compat !== undefined && "requestFormat" in model.compat && model.compat.requestFormat === "xai-cli";
+}
+
+/** Two models share a provider cache lane: the same deployment behind the same API and endpoint. */
+export function sameCacheLane(a: Model<Api>, b: Model<Api>): boolean {
+	return a.provider === b.provider && a.id === b.id && a.api === b.api && a.baseUrl === b.baseUrl;
+}
+
+/** The session lane's last sent provider request: its model, the context as sent, and the history it was planned from. */
+export interface LastSentRequest {
+	readonly model: Model<Api>;
+	readonly context: Context;
+	readonly sourceMessages: readonly AgentMessage[];
+}
+
+/**
+ * The summarizer request for a compaction on the session's own model, which reads the session's cached
+ * prefix whatever the provider or the retention strategy: the lane's system prompt, tools and cache
+ * session id, and (when it is still the head of the live history) the context exactly as the lane last
+ * sent it, extended by the messages persisted since and materialized the same way. Undefined for a
+ * summarizer on another model, which shares no cache with the session.
+ */
+export function sessionLaneSummarizerRequest(input: {
+	compactionModel: Model<Api>;
+	sessionModel: Model<Api>;
+	systemPrompt: string;
+	tools: Context["tools"];
+	messagesToSummarize: readonly AgentMessage[];
+	liveMessages: readonly AgentMessage[];
+	lastSent: LastSentRequest | undefined;
+	textToolCallProtocol: SimpleStreamOptions["textToolCallProtocol"];
+	sessionId: string;
+}): StructuredCompactionRequest | undefined {
+	if (!sameCacheLane(input.compactionModel, input.sessionModel)) return undefined;
+	const materialize = (context: Context) =>
+		materializeProviderRequest(context, { textToolCallProtocol: input.textToolCallProtocol }).context;
+	const context = materialize({
+		systemPrompt: input.systemPrompt,
+		messages: convertToLlm([...input.messagesToSummarize]),
+		tools: input.tools,
+	});
+	const sentContext = extendSentContext(
+		input.lastSent,
+		input.compactionModel,
+		input.liveMessages,
+		(newer) => materialize({ ...(input.lastSent?.context ?? {}), messages: convertToLlm([...newer]) }).messages,
+	);
+	return {
+		context,
+		...(sentContext ? { sentContext } : {}),
+		sessionId: input.sessionId,
+		cacheRetention: "short",
+	};
+}
+
+function extendSentContext(
+	sent: LastSentRequest | undefined,
+	model: Model<Api>,
+	live: readonly AgentMessage[],
+	materializeNewer: (newer: readonly AgentMessage[]) => Context["messages"],
+): Context | undefined {
+	if (!sent || !sameCacheLane(sent.model, model)) return undefined;
+	const planned = sent.sourceMessages.length;
+	// The sent request no longer describes this history when its last message is not where it was.
+	if (planned > live.length || (planned > 0 && live[planned - 1] !== sent.sourceMessages[planned - 1])) {
+		return undefined;
+	}
+	const newer = live.slice(planned);
+	return newer.length === 0
+		? sent.context
+		: { ...sent.context, messages: [...sent.context.messages, ...materializeNewer(newer)] };
 }
 
 export interface CompactionSupportDeps {

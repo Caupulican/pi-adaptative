@@ -2,7 +2,10 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import { projectEarlyCompactionEconomics } from "../../src/core/compaction/early-compaction-economics.ts";
+import {
+	type CompactionEconomicsInput,
+	priceCompaction,
+} from "../../src/core/compaction/early-compaction-economics.ts";
 import { TypeSafeSystemOneDecisionEngine } from "../../src/core/decision/engines/typesafe-system-one-engine.ts";
 import { ObjectiveExecutionController } from "../../src/core/objective-execution/objective-execution-controller.ts";
 import { composeObjectiveRoute } from "../../src/core/objective-execution/objective-route-policy.ts";
@@ -57,19 +60,7 @@ type HardeningFixture = {
 		checks: Array<{ text: string; status: DecisionCheckStatus }>;
 	};
 	compaction: {
-		hotCache: {
-			currentTokens: number;
-			compactableTokens: number;
-			recentCacheReadTokens: number;
-			recentCacheWriteTokens: number;
-			cacheReadUsdPerMillion: number;
-			cacheWriteUsdPerMillion: number;
-			inputUsdPerMillion: number;
-			estimatedSummaryTokens: number;
-			horizonTurns: number;
-			hysteresisTokens: number;
-			minSavingsUsd: number;
-		};
+		hotCache: CompactionEconomicsInput;
 	};
 };
 
@@ -161,9 +152,9 @@ describe("next-release hardening", () => {
 		expect(renderDecisionDiagram(model, 80).rows.map(stripAnsi).join("\n")).not.toContain("DELIVER");
 		expect(renderDecisionList(model, 80).rows.map(stripAnsi).join("\n")).toMatch(/not closed · 3 open/);
 
-		const hot = projectEarlyCompactionEconomics(fixture.compaction.hotCache);
+		const hot = priceCompaction(fixture.compaction.hotCache);
 		expect(hot.proceed).toBe(false);
-		if (!hot.proceed) expect(hot.reason).toBe("hot_cache");
+		if (!hot.proceed) expect(hot.reason).toBe("insufficient_savings");
 	});
 
 	it("unpinned {row,key} follow recenters when the key changes", () => {
@@ -637,67 +628,32 @@ describe("next-release hardening", () => {
 		expect(diagram.currentRow).toBeGreaterThan(0);
 	});
 
-	it("defers early compaction when the cache is hot or prices are missing", () => {
-		const hot = projectEarlyCompactionEconomics({
-			currentTokens: 80_000,
-			compactableTokens: 40_000,
-			recentCacheReadTokens: 90_000,
-			recentCacheWriteTokens: 1_000,
+	it("defers early compaction on a warm cache or missing prices, and compacts when the horizon pays", () => {
+		const base: CompactionEconomicsInput = {
+			prefixTokens: 80_000,
+			compactedTokens: 40_000,
+			summaryOutputTokens: 2_000,
+			remainingRequests: 3,
+			retained: { retained: 0.95, standardError: 0.02 },
+			summarizerSharesLane: false,
 			cacheReadUsdPerMillion: 0.3,
-			cacheWriteUsdPerMillion: 3.75,
-			inputUsdPerMillion: 3,
-			estimatedSummaryTokens: 2000,
-			horizonTurns: 8,
-			hysteresisTokens: 2000,
-			minSavingsUsd: 0.001,
-		});
+			coldUsdPerMillion: 3.75,
+			outputUsdPerMillion: 15,
+		};
+		const hot = priceCompaction(base);
 		expect(hot.proceed).toBe(false);
-		if (!hot.proceed) expect(hot.reason).toBe("hot_cache");
-		const noPrice = projectEarlyCompactionEconomics({
-			currentTokens: 80_000,
-			compactableTokens: 40_000,
-			recentCacheReadTokens: 0,
-			recentCacheWriteTokens: 0,
-			estimatedSummaryTokens: 2000,
-			horizonTurns: 8,
-			hysteresisTokens: 2000,
-			minSavingsUsd: 0.001,
-		});
+		if (!hot.proceed) expect(hot.reason).toBe("insufficient_savings");
+		const noPrice = priceCompaction({ ...base, cacheReadUsdPerMillion: undefined });
 		expect(noPrice.proceed).toBe(false);
 		if (!noPrice.proceed) expect(noPrice.reason).toBe("insufficient_evidence");
-		const hysteresis = projectEarlyCompactionEconomics({
-			currentTokens: 81_000,
-			compactableTokens: 40_000,
-			recentCacheReadTokens: 100,
-			recentCacheWriteTokens: 50_000,
-			cacheReadUsdPerMillion: 0.3,
-			cacheWriteUsdPerMillion: 0.01,
-			inputUsdPerMillion: 0.01,
-			estimatedSummaryTokens: 100,
-			horizonTurns: 20,
-			lastEarlyDecisionAtTokens: 80_000,
-			hysteresisTokens: 2000,
-			minSavingsUsd: 0.0000001,
+		// On the session lane the summarizer reads the prefix as a resume would, so a long lineage pays.
+		const longLineage = priceCompaction({
+			...base,
+			prefixTokens: 200_000,
+			remainingRequests: 50,
+			summarizerSharesLane: true,
 		});
-		expect(hysteresis.proceed).toBe(false);
-		if (!hysteresis.proceed) expect(hysteresis.reason).toBe("hysteresis");
-		const afterSwitch = projectEarlyCompactionEconomics({
-			currentTokens: 81_000,
-			compactableTokens: 40_000,
-			recentCacheReadTokens: 100,
-			recentCacheWriteTokens: 50_000,
-			cacheReadUsdPerMillion: 0.3,
-			cacheWriteUsdPerMillion: 0.01,
-			inputUsdPerMillion: 0.01,
-			estimatedSummaryTokens: 100,
-			horizonTurns: 20,
-			lastEarlyDecisionAtTokens: 80_000,
-			hysteresisTokens: 2000,
-			minSavingsUsd: 0.0000001,
-			modelSwitched: true,
-			cacheInvalidated: true,
-		});
-		expect(afterSwitch.proceed).toBe(true);
+		expect(longLineage.proceed).toBe(true);
 	});
 
 	it("keeps diagram rows within width across the adversarial width matrix while proof is pending", () => {
@@ -756,19 +712,17 @@ describe("next-release hardening", () => {
 		}
 	});
 
-	it("chooses early compaction when hit ratio is poor and projected savings clear the margin", () => {
-		const chosen = projectEarlyCompactionEconomics({
-			currentTokens: 100_000,
-			compactableTokens: 80_000,
-			recentCacheReadTokens: 100,
-			recentCacheWriteTokens: 50_000,
+	it("chooses early compaction when the cache has expired and the lineage continues", () => {
+		const chosen = priceCompaction({
+			prefixTokens: 100_000,
+			compactedTokens: 20_000,
+			summaryOutputTokens: 100,
+			remainingRequests: 20,
+			retained: { retained: 0, standardError: 0 },
+			summarizerSharesLane: false,
 			cacheReadUsdPerMillion: 0.3,
-			cacheWriteUsdPerMillion: 0.01,
-			inputUsdPerMillion: 0.01,
-			estimatedSummaryTokens: 100,
-			horizonTurns: 20,
-			hysteresisTokens: 2000,
-			minSavingsUsd: 0.0000001,
+			coldUsdPerMillion: 3.75,
+			outputUsdPerMillion: 15,
 		});
 		expect(chosen.proceed).toBe(true);
 	});

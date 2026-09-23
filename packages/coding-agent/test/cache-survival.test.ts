@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { CacheKnowledge } from "../src/core/context/cache-knowledge.ts";
 import {
 	CacheObservationRecorder,
 	cacheLaneKey,
@@ -206,5 +207,76 @@ describe("cache observations across processes", () => {
 			{ sessionId: "s", lineage: "compaction@1", requests: 1, lastObservedAt: 71_000 },
 			{ sessionId: "s", lineage: "root", requests: 2, lastObservedAt: 62_000 },
 		]);
+	});
+});
+
+describe("cache knowledge", () => {
+	const dirs: string[] = [];
+	afterEach(() => {
+		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	});
+	const ledgerIn = () => {
+		const dir = mkdtempSync(join(tmpdir(), "cache-knowledge-"));
+		dirs.push(dir);
+		return new DecisionLedgerStore({ databasePath: join(dir, "decision-ledger.sqlite") });
+	};
+
+	it("learns what a compaction leaves and generates, pooling a sparse lane toward every lane", () => {
+		const ledger = ledgerIn();
+		const knowledge = new CacheKnowledge(() => ledger, SETTINGS);
+		const own = lane("openrouter", "deepseek");
+		expect(knowledge.compactionOutcome(own, 0)).toBeUndefined();
+		for (let index = 0; index < 4; index++) {
+			ledger.recordCompactionOutcome({
+				sessionId: "s",
+				lane: lane("xai", "grok"),
+				observedAt: index,
+				tokensBefore: 100_000,
+				tokensAfter: 20_000,
+				outputTokens: 2_000,
+			});
+		}
+		// No outcome on this lane yet: every lane's outcome stands in.
+		expect(knowledge.compactionOutcome(own, 10)).toEqual({ afterRatio: 0.2, outputRatio: 0.02, laneEffectiveN: 0 });
+		ledger.recordCompactionOutcome({
+			sessionId: "s",
+			lane: own,
+			observedAt: 5,
+			tokensBefore: 30_000,
+			tokensAfter: 3_000,
+			outputTokens: 1_500,
+		});
+		// One own outcome against a pooling weight of 4: a fifth of the way from every lane's 0.2 (which
+		// now includes it) toward its own 0.1.
+		const all = (4 * 0.2 + 0.1) / 5;
+		const pooled = knowledge.compactionOutcome(own, 10);
+		expect(pooled?.laneEffectiveN).toBe(1);
+		expect(pooled?.afterRatio).toBeCloseTo((1 * 0.1 + 4 * all) / 5, 12);
+	});
+
+	it("reads a lane's curve from the ledger once and follows the observations the session records", () => {
+		const ledger = ledgerIn();
+		const knowledge = new CacheKnowledge(() => ledger, SETTINGS);
+		const key = lane("xai", "grok");
+		const record = (observedAt: number, retained: number) => {
+			const row = {
+				sessionId: "s",
+				cwd: "/repo",
+				lane: key,
+				observedAt,
+				gapMs: 2_000,
+				promptTokens: 20_000,
+				cacheReadTokens: Math.round(20_000 * retained),
+				retained,
+				prefixIntact: "true" as const,
+			};
+			ledger.recordCacheObservation(row);
+			return row;
+		};
+		record(1, 1);
+		expect(knowledge.retainedAfter(key, 2_000, 10)?.retained).toBe(1);
+		knowledge.noteObservation(record(2, 0));
+		expect(knowledge.retainedAfter(key, 2_000, 10)?.retained).toBeCloseTo(0.5, 12);
+		expect(knowledge.lastResponseAt("s", key)).toBe(2);
 	});
 });

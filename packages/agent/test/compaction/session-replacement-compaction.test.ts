@@ -205,6 +205,57 @@ describe("session-replacement compaction", () => {
 		expect(sourceContext.messages).toHaveLength(3);
 	});
 
+	it("extends the lane's sent context when it fits the summarizer window, and summarizes the messages otherwise", async () => {
+		const summarized: Message[] = [{ role: "user", content: "Summarize me.", timestamp: 1 }];
+		const sentWith = (tail: string): Message[] => [
+			{ role: "user", content: "Summarize me.", timestamp: 1 },
+			{ role: "user", content: tail, timestamp: 2 },
+		];
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "user-1",
+			messagesToSummarize: summarized,
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 1_000,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: DEFAULT_COMPACTION_SETTINGS,
+		};
+		const run = async (sent: Message[]) => {
+			let captured: Context | undefined;
+			const completion = vi.fn(async (_model: Model<Api>, context: Context) => {
+				captured = context;
+				return acceptedSummary();
+			});
+			await compact(
+				preparation,
+				model(),
+				"oauth-token",
+				undefined,
+				undefined,
+				undefined,
+				"low",
+				undefined,
+				undefined,
+				{
+					chunked: false,
+					completion,
+					structuredRequest: {
+						context: { systemPrompt: "system", messages: summarized },
+						sentContext: { systemPrompt: "system", messages: sent },
+						sessionId: "lane",
+						cacheRetention: "short",
+					},
+				},
+			);
+			return captured?.messages.slice(0, -1);
+		};
+		// Room for the sent context: the request is that context plus one control message.
+		const fits = sentWith("recent tail");
+		expect(await run(fits)).toEqual(fits);
+		// A sent context past the summarizer window gives way to the messages being summarized.
+		expect(await run(sentWith("x".repeat(4 * 600_000)))).toEqual(summarized);
+	});
+
 	it("prepares the complete live context and records sparse original-user retention", () => {
 		const firstUser = entry("u1", null, {
 			role: "user",

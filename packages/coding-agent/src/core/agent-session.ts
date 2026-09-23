@@ -91,11 +91,10 @@ import type { NativePiActivityPort } from "./collaboration/native-pi-activity.ts
 import { RETENTION_AUDIT_CUSTOM_TYPE } from "./compaction/evidence-retention-projection.ts";
 import { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
 import { type AutoCompactionReason, CompactionController } from "./compaction-controller.ts";
-import { CompactionSupport } from "./compaction-support.ts";
+import { CompactionSupport, type LastSentRequest } from "./compaction-support.ts";
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
+import { CacheKnowledge } from "./context/cache-knowledge.ts";
 import { CacheObservationRecorder, cacheLaneKey, historyLineage } from "./context/cache-observation-recorder.ts";
-import { lineageRemainingRequests } from "./context/cache-survival.ts";
-import { CACHE_SURVIVAL_CALIBRATION } from "./context/cache-survival-calibration.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { ContextAuditReport } from "./context/context-audit.ts";
 import {
@@ -222,7 +221,7 @@ import {
 } from "./objective-execution/release-delivery.ts";
 import { RepositoryMutationObserver } from "./objective-execution/repository-mutation-observer.ts";
 import { mayHoldUnownedWorktreeChanges } from "./objective-execution/worktree-ownership.ts";
-import { DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
+import { type CacheDecisionRow, DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import type { DecisionStageSink } from "./operator-projection/decision-stage-log.ts";
 import { type DeliveryState, SessionOperatorProjection } from "./operator-projection/session-operator-projection.ts";
 import type { AdaptationProjection } from "./operator-projection/types.ts";
@@ -561,6 +560,10 @@ export class AgentSession {
 		getController: () => this._systemOneController,
 		warn: (message) => this._emit({ type: "warning", message }),
 	});
+	/** The learned cache view (survival curves, lineage lifetime, compaction outcomes) from the ledger. */
+	private readonly _cacheKnowledge = new CacheKnowledge(() => this.getDecisionLedger());
+	/** The foreground lane's last sent request, for a summarizer on the same lane to extend. */
+	private _lastSentRequest: LastSentRequest | undefined;
 	private readonly _cacheObservations = new CacheObservationRecorder((sessionId, lane) => {
 		const last = this.getDecisionLedger()?.latestCacheObservation(sessionId, lane);
 		return last ? { respondedAt: last.observedAt, promptTokens: last.promptTokens } : undefined;
@@ -1164,27 +1167,9 @@ export class AgentSession {
 				if (!model?.contextWindow || !settings.enabled) return undefined;
 				return hardCompactionTriggerTokens(model.contextWindow, settings, model.autoCompactionTriggerTokens);
 			},
-			estimateLineageRemainingRequests: () => {
-				const ledger = this.getDecisionLedger();
-				if (!ledger) return undefined;
-				return lineageRemainingRequests(
-					ledger.lineageEpisodes(),
-					{ sessionId: this.sessionId, lineage: historyLineage(this.agent.state.messages) },
-					Date.now(),
-					CACHE_SURVIVAL_CALIBRATION.halfLifeMs,
-				);
-			},
-			recordCacheDecision: (decision) => {
-				try {
-					this.getDecisionLedger()?.recordCacheDecision({
-						...decision,
-						sessionId: this.sessionId,
-						cwd: this._cwd,
-					});
-				} catch {
-					// Telemetry only.
-				}
-			},
+			estimateLineageRemainingRequests: () =>
+				this._cacheKnowledge.lineage(this.sessionId, historyLineage(this.agent.state.messages), Date.now()),
+			recordCacheDecision: (decision) => this._recordCacheDecision(decision),
 			getAgentDir: () => this._agentDir,
 			getCwd: () => this._cwd,
 			getActiveToolNames: () => this.getActiveToolNames(),
@@ -1266,6 +1251,42 @@ export class AgentSession {
 			persistRetentionAudit: (audit) => {
 				this.sessionManager.appendCustomEntry(RETENTION_AUDIT_CUSTOM_TYPE, audit);
 				this._operatorProjection.eventBridge.recordCompactionResult(audit.summaryEvent);
+			},
+			getLastSentRequest: () => this._lastSentRequest,
+			getCacheEconomics: (model, now) => {
+				const lane = cacheLaneKey(model.api, model.provider, model.id);
+				const lastResponseAt = this._cacheKnowledge.lastResponseAt(this.sessionId, lane);
+				const retained =
+					lastResponseAt === undefined
+						? undefined
+						: this._cacheKnowledge.retainedAfter(lane, Math.max(0, now - lastResponseAt), now);
+				const lineage = this._cacheKnowledge.lineage(
+					this.sessionId,
+					historyLineage(this.agent.state.messages),
+					now,
+				);
+				const outcome = this._cacheKnowledge.compactionOutcome(lane, now);
+				return {
+					...(retained ? { retained } : {}),
+					// Without a lineage that long on record, the lineage's own elapsed requests stand in.
+					...(lineage ? { remainingRequests: lineage.remaining ?? lineage.elapsed } : {}),
+					...(outcome ? { outcome } : {}),
+				};
+			},
+			recordCacheDecision: (decision) => this._recordCacheDecision(decision),
+			recordCompactionOutcome: ({ model, tokensBefore, tokensAfter, outputTokens }) => {
+				try {
+					this.getDecisionLedger()?.recordCompactionOutcome({
+						sessionId: this.sessionId,
+						lane: cacheLaneKey(model.api, model.provider, model.id),
+						observedAt: Date.now(),
+						tokensBefore,
+						tokensAfter,
+						outputTokens,
+					});
+				} catch {
+					// Telemetry only.
+				}
 			},
 		});
 		const providerRequestContext = new ProviderRequestContextController({
@@ -1463,12 +1484,14 @@ export class AgentSession {
 			(message, entryId) => this._reflection.noteOwnerInputPersisted(message, entryId),
 			() =>
 				this._eventListeners.length > 0 ? (message: string) => this._emit({ type: "warning", message }) : undefined,
-			({ requestId, model, context }) =>
+			({ requestId, model, context, sourceContext }) => {
+				this._lastSentRequest = { model, context, sourceMessages: sourceContext.messages };
 				this._toolSelection.observeProviderRequest(
 					requestId,
 					formatModelRouterModel(model),
 					context.systemPrompt ?? "",
-				),
+				);
+			},
 		);
 		this._foregroundLifecycle.start();
 		this._reflection = new ReflectionController({
@@ -3016,8 +3039,19 @@ export class AgentSession {
 				...(matched?.firstDivergentKind ? { divergenceKind: matched.firstDivergentKind } : {}),
 				lineage: historyLineage(this.agent.state.messages),
 			});
-			if (row)
-				this.getDecisionLedger()?.recordCacheObservation({ ...row, sessionId: this.sessionId, cwd: this._cwd });
+			if (row) {
+				const recorded = { ...row, sessionId: this.sessionId, cwd: this._cwd };
+				this.getDecisionLedger()?.recordCacheObservation(recorded);
+				this._cacheKnowledge.noteObservation(recorded);
+			}
+		} catch {
+			// Telemetry only.
+		}
+	}
+
+	private _recordCacheDecision(decision: Omit<CacheDecisionRow, "sessionId" | "cwd">): void {
+		try {
+			this.getDecisionLedger()?.recordCacheDecision({ ...decision, sessionId: this.sessionId, cwd: this._cwd });
 		} catch {
 			// Telemetry only.
 		}

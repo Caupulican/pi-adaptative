@@ -47,6 +47,11 @@ export interface SurvivalBin {
 	readonly retained: number | undefined;
 	/** The lane's own effective sample count in this bin. */
 	readonly laneEffectiveN: number;
+	/**
+	 * Standard error of `retained`: the spread of a share estimated from the lane's own effective count
+	 * plus the pooling weight its parents count for. Zero where `retained` is certain (0 or 1).
+	 */
+	readonly standardError: number | undefined;
 	/** The deepest level that had evidence: the lane itself, or what it borrowed from. */
 	readonly source: "lane" | "model" | "provider" | "prior" | "none";
 	/** Share of the lane's own weight in this bin from observations without prefix tracking. */
@@ -249,10 +254,13 @@ export function survivalCurve(
 		lane,
 		bins: monotone.map((retained, index) => {
 			const own = laneBins.get(index);
+			const weight = weights[index] ?? 0;
 			return {
 				...binBounds(index, settings.binsPerDecade),
 				retained,
 				laneEffectiveN: effectiveN(own),
+				standardError:
+					retained === undefined || weight <= 0 ? undefined : Math.sqrt((retained * (1 - retained)) / weight),
 				source: sources[index] ?? "none",
 				lowConfidenceShare: own && own.weight > 0 ? own.lowConfidenceWeight / own.weight : 0,
 			};
@@ -268,9 +276,28 @@ export function survivalCurve(
  * gone after it); otherwise, past the evidence, there is no estimate.
  */
 export function predictRetained(curve: SurvivalCurve, gapMs: number, binsPerDecade: number): number | undefined {
+	return predictRetainedWithError(curve, gapMs, binsPerDecade)?.retained;
+}
+
+/** {@link predictRetained} with the estimate's standard error. */
+export function predictRetainedWithError(
+	curve: SurvivalCurve,
+	gapMs: number,
+	binsPerDecade: number,
+): { retained: number; standardError: number } | undefined {
 	const bin = curve.bins[gapBinIndex(gapMs, binsPerDecade)];
-	if (bin) return bin.retained;
-	return curve.priorTtlMs !== undefined && gapMs >= curve.priorTtlMs ? 0 : undefined;
+	if (bin) {
+		return bin.retained === undefined ? undefined : { retained: bin.retained, standardError: bin.standardError ?? 0 };
+	}
+	return curve.priorTtlMs !== undefined && gapMs >= curve.priorTtlMs ? { retained: 0, standardError: 0 } : undefined;
+}
+
+/**
+ * Oldest observation age that can still move an estimate: past it a row's decay weight is below the
+ * double-precision resolution of a fresh row's weight (2^-52), so it adds nothing representable.
+ */
+export function negligibleAgeMs(halfLifeMs: number): number {
+	return Number.isFinite(halfLifeMs) ? 52 * halfLifeMs : Number.POSITIVE_INFINITY;
 }
 
 /**

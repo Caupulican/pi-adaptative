@@ -13,9 +13,9 @@ import {
 } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
-import { DEFAULT_CACHE_TTL_MS } from "../src/core/cache-miss-notice.ts";
 import {
 	type AutoCompactionReason,
+	type CompactionCacheFacts,
 	CompactionController,
 	type CompactionControllerDeps,
 } from "../src/core/compaction-controller.ts";
@@ -107,6 +107,7 @@ function createFixture(options: {
 	memoryPreCompressInsight?: string;
 	isRawStream?: boolean;
 	systemPrompt?: string;
+	cacheEconomics?: CompactionCacheFacts;
 }) {
 	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
 	const messages: AgentMessage[] = [];
@@ -130,6 +131,7 @@ function createFixture(options: {
 
 	const model = options.model ?? createModel();
 	const events: Array<Record<string, unknown>> = [];
+	const cacheDecisions: Array<{ kind: string; admit: boolean; reason: string }> = [];
 	let compactionAttempt = 0;
 	const compactWithRetry = vi.fn(async (run: () => Promise<CompactionResult>): Promise<CompactionResult> => {
 		options.onCompactionRun?.(run);
@@ -190,11 +192,14 @@ function createFixture(options: {
 		runAutoCompaction,
 		compactWithRetry,
 		onCompactionSettled: options.onCompactionSettled,
+		...(options.cacheEconomics ? { getCacheEconomics: () => options.cacheEconomics ?? {} } : {}),
+		recordCacheDecision: (decision) => cacheDecisions.push(decision),
 	};
 	controller = new CompactionController(deps);
 
 	return {
 		agent,
+		cacheDecisions,
 		controller,
 		compactWithRetry,
 		entryIds,
@@ -1094,100 +1099,105 @@ describe("CompactionController base-envelope warnings", () => {
 		expect(modelless.events).toEqual([]);
 	});
 
-	it("proceeds with early compaction when the cache epoch is cold and then records the savings", async () => {
-		const model: Model<"openai-completions"> = {
+	it("prices early compaction with learned facts, proceeds when it pays, and follows the learned horizon", async () => {
+		const model = {
 			...createModel(),
 			id: "priced",
 			contextWindow: 200_000,
-			cost: { input: 0, output: 15, cacheRead: 0.5, cacheWrite: 1 },
+			cost: { input: 5, output: 15, cacheRead: 0.5, cacheWrite: 1 },
 		};
-		let compacted = false;
-		const { agent, controller, compactWithRetry } = createFixture({
+		const { agent, controller, compactWithRetry, cacheDecisions } = createFixture({
 			model,
-			settings: {
-				enabled: true,
-				reserveTokens: 50_000,
-				keepRecentTokens: 20_000,
-				triggerPercent: 0.2,
-			},
-			measureLiveContextTokens: () => (compacted ? 10_000 : 80_000),
-			createResult: async (attempt, entryIds) => {
-				compacted = true;
-				return checkpoint(attempt, entryIds);
+			settings: { enabled: true, reserveTokens: 50_000, keepRecentTokens: 20_000, triggerPercent: 0.2 },
+			measureLiveContextTokens: () => 80_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			// The cache expired over the idle gap, the lineage is expected to last 8 more requests, and
+			// past compactions left an eighth of the context and generated 1% of it.
+			cacheEconomics: {
+				retained: { retained: 0, standardError: 0 },
+				remainingRequests: 8,
+				outcome: { afterRatio: 0.125, outputRatio: 0.01 },
 			},
 		});
-		const usage = (
-			total: number,
-			cacheRead: number,
-			cacheWrite: number,
-			input = total,
-		): AssistantMessage["usage"] => ({
-			input,
-			output: 1,
-			cacheRead,
-			cacheWrite,
-			totalTokens: total,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		});
-		const turn = (timestamp: number, overrides: Partial<AssistantMessage> = {}): AssistantMessage => ({
+		const turn = (timestamp: number, input: number): AssistantMessage => ({
 			role: "assistant",
 			content: [{ type: "text", text: "turn" }],
 			api: "openai-completions",
 			provider: "test",
 			model: "priced",
-			usage: usage(80_000, 100, 10),
+			usage: {
+				input,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: input,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
 			stopReason: "stop",
 			timestamp,
-			...overrides,
 		});
-		const walk = async (messages: AgentMessage[]) => {
-			agent.state.messages = messages;
-			const latest = messages.findLast((message) => message.role === "assistant");
-			await controller.check((latest ?? turn(1)) as AssistantMessage);
-		};
-
-		await walk([{ role: "user", content: "cut", timestamp: 1, type: "compaction" } as AgentMessage]);
-		await walk([turn(2_000, { usage: undefined }), turn(1_000)]);
-		await walk([turn(4_000, { model: "other" }), turn(3_000)]);
-		await walk([turn(DEFAULT_CACHE_TTL_MS + 10_000), turn(1_000)]);
-		await walk([
-			turn(6_000, { usage: usage(80_000, 0, 0, 5_000) }),
-			turn(5_000, { usage: usage(80_000, 1_000, 10) }),
-		]);
-		await walk(Array.from({ length: 11 }, (_, index) => turn(20_000 + index, { usage: usage(80_000, 20, 5) })));
-
-		model.cost.input = 5;
-		const early = turn(30_000);
+		const early = turn(Date.now(), 80_000);
 		agent.state.messages = [early];
 		await controller.check(early);
 		expect(compactWithRetry).toHaveBeenCalledTimes(1);
+		expect(cacheDecisions).toEqual([expect.objectContaining({ kind: "early_compaction", admit: true })]);
 		const feedback = controller.getEarlyCompactionFeedback();
 		expect(feedback?.predictedSavingsUsd).toBeGreaterThan(0);
-		expect(feedback?.observedTurns).toBe(0);
+		expect(feedback?.horizonTurns).toBe(8);
 
-		const after = Date.now();
-		const later = turn(after + 1_000, { usage: usage(1_000, 0, 0) });
-		agent.state.messages = [later];
-		await controller.check(later);
-		expect(controller.getEarlyCompactionFeedback()?.observedTurns).toBe(1);
-		expect(controller.getEarlyCompactionFeedback()?.actualSavedUsd).toBeTypeOf("number");
-
-		Reflect.deleteProperty(model.cost, "input");
-		const unpriced = turn(after + 2_000, { usage: usage(1_000, 0, 0) });
-		agent.state.messages = [unpriced];
-		await controller.check(unpriced);
-		expect(controller.getEarlyCompactionFeedback()?.observedTurns).toBe(2);
-
-		for (let index = 0; index < 6; index++) {
-			const follow = turn(after + 4_000 + index, { usage: usage(1_000, 0, 0) });
+		for (let index = 0; index < 9; index++) {
+			const follow = turn(Date.now() + 1_000 + index, 1_000);
 			agent.state.messages = [follow];
 			await controller.check(follow);
 		}
+		// The feedback stops at the learned horizon.
 		expect(controller.getEarlyCompactionFeedback()?.observedTurns).toBe(8);
-		const pastHorizon = turn(after + 20_000, { usage: usage(1_000, 0, 0) });
-		agent.state.messages = [pastHorizon];
-		await controller.check(pastHorizon);
-		expect(controller.getEarlyCompactionFeedback()?.observedTurns).toBe(8);
+	});
+
+	it("stays passive without a recorded compaction to price one with, and reports the deferral once", async () => {
+		const model = {
+			...createModel(),
+			id: "priced",
+			contextWindow: 200_000,
+			cost: { input: 5, output: 15, cacheRead: 0.5, cacheWrite: 1 },
+		};
+		const { agent, controller, compactWithRetry, cacheDecisions, events } = createFixture({
+			model,
+			settings: { enabled: true, reserveTokens: 50_000, keepRecentTokens: 20_000, triggerPercent: 0.2 },
+			measureLiveContextTokens: () => 80_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			cacheEconomics: { retained: { retained: 0, standardError: 0 }, remainingRequests: 8 },
+		});
+		for (const timestamp of [1, 2]) {
+			const message: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "turn" }],
+				api: "openai-completions",
+				provider: "test",
+				model: "priced",
+				usage: {
+					input: 80_000,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 80_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now() + timestamp,
+			};
+			agent.state.messages = [message];
+			await controller.check(message);
+		}
+		expect(compactWithRetry).not.toHaveBeenCalled();
+		expect(cacheDecisions).toEqual([
+			expect.objectContaining({
+				kind: "early_compaction",
+				admit: false,
+				reason: expect.stringMatching(/^insufficient_evidence/),
+			}),
+		]);
+		expect(events.filter((event) => event.type === "compaction_end")).toHaveLength(1);
 	});
 });
 

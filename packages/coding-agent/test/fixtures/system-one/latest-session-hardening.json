@@ -32,17 +32,15 @@
 	"compaction": {
 		"earlyThresholdWithoutCacheProof": true,
 		"hotCache": {
-			"currentTokens": 80000,
-			"compactableTokens": 40000,
-			"recentCacheReadTokens": 90000,
-			"recentCacheWriteTokens": 1000,
+			"prefixTokens": 80000,
+			"compactedTokens": 40000,
+			"summaryOutputTokens": 2000,
+			"remainingRequests": 3,
+			"retained": { "retained": 0.95, "standardError": 0.02 },
+			"summarizerSharesLane": false,
 			"cacheReadUsdPerMillion": 0.3,
-			"cacheWriteUsdPerMillion": 3.75,
-			"inputUsdPerMillion": 3,
-			"estimatedSummaryTokens": 2000,
-			"horizonTurns": 8,
-			"hysteresisTokens": 2000,
-			"minSavingsUsd": 0.001
+			"coldUsdPerMillion": 3.75,
+			"outputUsdPerMillion": 15
 		}
 	}
 }

@@ -185,6 +185,12 @@ export type CompactionCompletion = (
 /** Existing provider-visible prefix reused by a session-replacement summary request. */
 export interface StructuredCompactionRequest {
 	context: Context;
+	/**
+	 * The session lane's context exactly as it was last sent, extended by the messages persisted since.
+	 * The summarization request appends one control message to it, so a provider that cached that request
+	 * serves the whole prefix from cache. Used whenever it fits the summarizer window; `context` otherwise.
+	 */
+	sentContext?: Context;
 	sessionId: string;
 	cacheRetention: Exclude<CacheRetention, "none">;
 }
@@ -741,11 +747,11 @@ The preceding messages are source history; this final temporary message is contr
 Do not continue the task and do not call tools. Return only the checkpoint.
 Preserve the owner's exact active request and prohibitions, durable decisions, paths, commands, errors, completed work, pending work, and immediate next step. Never include secrets, credentials, or tokens; write [REDACTED].`;
 
-function buildStructuredSummarizationContext(promptText: string, request: StructuredCompactionRequest): Context {
+function buildStructuredSummarizationContext(promptText: string, context: Context): Context {
 	return {
-		...request.context,
+		...context,
 		messages: [
-			...request.context.messages,
+			...context.messages,
 			{
 				role: "user",
 				content: [{ type: "text", text: `${STRUCTURED_SUMMARIZATION_CONTROL}\n\n${promptText}` }],
@@ -967,8 +973,15 @@ export async function generateSummaryWithUsage(
 
 	const inputBound = getSummarizerInputBound(model, maxTokens);
 	if (structuredRequest) {
-		const structuredContext = buildStructuredSummarizationContext(promptSuffix, structuredRequest);
-		if (estimateProviderRequestTokens(structuredContext, model) <= inputBound) {
+		// The lane's sent context first (a pure append on the cached prefix); the summarized messages when
+		// the sent context no longer fits the summarizer window.
+		const candidates = [structuredRequest.sentContext, structuredRequest.context].filter(
+			(candidate): candidate is Context => candidate !== undefined,
+		);
+		const structuredContext = candidates
+			.map((candidate) => buildStructuredSummarizationContext(promptSuffix, candidate))
+			.find((candidate) => estimateProviderRequestTokens(candidate, model) <= inputBound);
+		if (structuredContext) {
 			const response = await completeStructuredSummarizationPrompt(
 				structuredContext,
 				structuredRequest,

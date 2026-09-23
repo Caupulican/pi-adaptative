@@ -26,11 +26,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { cacheLaneKey } from "../packages/coding-agent/src/core/context/cache-observation-recorder.ts";
+import { priceCompaction } from "../packages/coding-agent/src/core/compaction/early-compaction-economics.ts";
 import {
 	laneParts,
 	lineageEpisodes,
 	medianRemainingRequests,
 	predictRetained,
+	predictRetainedWithError,
 	survivalCurve,
 } from "../packages/coding-agent/src/core/context/cache-survival.ts";
 import { listSessionFiles, messageText, parseSessionEntries } from "./session-stats-common.mjs";
@@ -309,7 +311,7 @@ export function survivalEntries(entries) {
 	let lineage = "root";
 	let between = [];
 	let lastPrompt;
-	let pendingCompaction = false;
+	let pendingCompaction;
 	const compactionRatios = [];
 	for (const entry of entries) {
 		if (entry.type === "request_snapshot") {
@@ -318,7 +320,7 @@ export function survivalEntries(entries) {
 		}
 		if (entry.type === "compaction") {
 			lineage = entry.id ?? `compaction@${entry.timestamp}`;
-			pendingCompaction = lastPrompt !== undefined;
+			pendingCompaction = lastPrompt !== undefined ? { output: entry.usage?.output } : undefined;
 			between.push("compaction");
 			continue;
 		}
@@ -356,8 +358,14 @@ export function survivalEntries(entries) {
 			...(retained !== undefined ? { retained } : {}),
 		};
 		observations.push(observation);
-		if (pendingCompaction && lastPrompt > 0) compactionRatios.push({ lane, ratio: prompt / lastPrompt });
-		pendingCompaction = false;
+		if (pendingCompaction && lastPrompt > 0) {
+			compactionRatios.push({
+				lane,
+				ratio: prompt / lastPrompt,
+				...(typeof pendingCompaction.output === "number" ? { outputRatio: pendingCompaction.output / lastPrompt } : {}),
+			});
+		}
+		pendingCompaction = undefined;
 		requests.push({
 			observation,
 			lineage,
@@ -458,18 +466,20 @@ export function survivalCensus(files) {
 }
 
 /**
- * What a compact-before-a-cold-resume policy would have saved on the recorded history, in the lanes'
- * own billed prices: at every request that came back cold after a gap the curve predicts below one half
- * retained, compacting first re-prefills the summary instead of the whole prompt and every later request
- * of the lineage reads the shorter prefix; the summarizer reads the prompt cold and writes the summary.
- * The policy compacts only where the Kaplan-Meier remaining-requests estimate says that pays.
+ * What pricing each owner-held resume with `priceCompaction` (the early-compaction policy, on the
+ * session lane) would have saved on the recorded history, in the lanes' own billed prices: where the
+ * price, taken with the learned lineage lifetime and the curve's share at the real gap, says compacting
+ * pays, the realized saving is the same price with the lineage's actual length and the share the
+ * provider actually served. Only a lineage's first compaction is priced: after it, the recorded history
+ * is no longer the one the policy would have continued on.
  */
-export function coldResumeCounterfactual(census, curves, settings, summaryRatio) {
+export function coldResumeCounterfactual(census, curves, settings, outcome) {
 	const prices = measuredPrices(census.requests);
-	let paidUsd = 0;
-	let policyNetUsd = 0;
+	let coldPaidUsd = 0;
 	let resumes = 0;
 	let compacted = 0;
+	let policyNetUsd = 0;
+	const compactedLineages = new Set();
 	const byLineage = new Map();
 	census.requests.forEach((request, index) => {
 		const list = byLineage.get(request.lineage) ?? [];
@@ -479,25 +489,40 @@ export function coldResumeCounterfactual(census, curves, settings, summaryRatio)
 	census.requests.forEach((request, index) => {
 		const o = request.observation;
 		if (o.gapMs === undefined || request.previousPrompt === undefined || request.holder !== "owner") return;
-		const predicted = predictRetained(curves.get(o.lane), o.gapMs, settings.binsPerDecade);
-		if (predicted === undefined || predicted >= 0.5) return;
 		const price = prices.get(o.lane);
 		const cold = price?.cacheWrite ?? price?.input;
 		if (!price || cold === undefined || price.cacheRead === undefined || price.output === undefined) return;
 		resumes++;
-		paidUsd += (o.promptTokens - o.cacheReadTokens) * cold;
+		if ((o.retained ?? 0) < 0.5) coldPaidUsd += (o.promptTokens - o.cacheReadTokens) * cold;
+		if (compactedLineages.has(request.lineage)) return;
 		const lineage = byLineage.get(request.lineage) ?? [];
 		const position = lineage.indexOf(index);
-		const expectedLater = medianRemainingRequests(census.episodes, position + 1) ?? 0;
-		const summary = request.previousPrompt * summaryRatio;
-		const saved = request.previousPrompt - summary;
-		const expectedNet = saved * cold + expectedLater * saved * price.cacheRead - request.previousPrompt * cold - summary * price.output;
-		if (expectedNet <= 0) return;
+		const base = {
+			prefixTokens: request.previousPrompt,
+			compactedTokens: request.previousPrompt * outcome.afterRatio,
+			summaryOutputTokens: request.previousPrompt * outcome.outputRatio,
+			summarizerSharesLane: true,
+			cacheReadUsdPerMillion: price.cacheRead * 1e6,
+			coldUsdPerMillion: cold * 1e6,
+			outputUsdPerMillion: price.output * 1e6,
+		};
+		const retained = predictRetainedWithError(curves.get(o.lane), o.gapMs, settings.binsPerDecade);
+		const expected = priceCompaction({
+			...base,
+			remainingRequests: Math.max(1, medianRemainingRequests(census.episodes, position) ?? position),
+			...(retained ? { retained } : {}),
+		});
+		if (!expected.proceed) return;
 		compacted++;
-		const actualLater = lineage.length - position - 1;
-		policyNetUsd += saved * cold + actualLater * saved * price.cacheRead - request.previousPrompt * cold - summary * price.output;
+		compactedLineages.add(request.lineage);
+		const actual = priceCompaction({
+			...base,
+			remainingRequests: lineage.length - position,
+			retained: { retained: o.retained ?? 0, standardError: 0 },
+		});
+		policyNetUsd += actual.savingUsd ?? 0;
 	});
-	return { resumes, compacted, paidUsd, policyNetUsd };
+	return { resumes, compacted, coldPaidUsd, policyNetUsd };
 }
 
 function runSurvival(targets, writeCalibration) {
@@ -530,6 +555,7 @@ function runSurvival(targets, writeCalibration) {
 	}
 	const ratios = census.compactionRatios.map((r) => r.ratio);
 	const summaryRatio = median(ratios);
+	const outputRatio = median(census.compactionRatios.map((r) => r.outputRatio).filter((v) => typeof v === "number"));
 	const ended = census.episodes.filter((e) => e.ended).map((e) => e.requests);
 	console.log(
 		`lineages: ${census.episodes.length} (median ${fmt(median(ended), 0)} requests, p90 ${fmt(quantile(ended, 0.9), 0)}); prompt after compaction over before: median ${fmt(summaryRatio)} over ${ratios.length}`,
@@ -541,10 +567,10 @@ function runSurvival(targets, writeCalibration) {
 		const gaps = census.requests.filter((r) => r.holder === holder && r.observation.gapMs !== undefined).map((r) => r.observation.gapMs);
 		console.log(`  return gap held by ${holder.padEnd(5)} n=${String(gaps.length).padStart(5)} p50=${formatGap(quantile(gaps, 0.5))} p90=${formatGap(quantile(gaps, 0.9))}`);
 	}
-	if (Number.isFinite(summaryRatio)) {
-		const counterfactual = coldResumeCounterfactual(census, curves, settings, summaryRatio);
+	if (Number.isFinite(summaryRatio) && Number.isFinite(outputRatio)) {
+		const counterfactual = coldResumeCounterfactual(census, curves, settings, { afterRatio: summaryRatio, outputRatio });
 		console.log(
-			`cold resumes held by the owner: ${counterfactual.resumes}, cold prefill paid ${fmt(counterfactual.paidUsd)} USD; compact-first policy would compact ${counterfactual.compacted} and net ${fmt(counterfactual.policyNetUsd)} USD (in-sample curve)`,
+			`owner resumes: ${counterfactual.resumes}, cold prefill paid on them ${fmt(counterfactual.coldPaidUsd)} USD; the priced policy compacts ${counterfactual.compacted} and nets ${fmt(counterfactual.policyNetUsd)} USD (in-sample curve; summary output ${fmt(outputRatio, 3)} of the prompt)`,
 		);
 	}
 	if (writeCalibration) {

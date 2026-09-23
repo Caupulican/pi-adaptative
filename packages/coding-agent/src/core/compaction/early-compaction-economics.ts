@@ -1,56 +1,136 @@
 /**
- * Early (pre-hard-boundary) compaction must prove expected savings beat rewrite + summary cost.
- * Safety/recovery compaction is not this planner's job.
+ * Cache economics: what continuing on a cached prefix costs against rewriting it. One module prices
+ * every such choice: an early (pre-hard-boundary) compaction, a context-GC rewrite of already-sent
+ * history, and the cold write a model switch pays. Safety and recovery compaction is not priced here.
  */
 
-export type EarlyCompactionDeferReason =
-	| "insufficient_evidence"
-	| "hot_cache"
-	| "insufficient_savings"
-	| "hysteresis"
-	| "summary_wipes_savings";
+/**
+ * The comparison behind an early compaction: keep the prefix and resume, or compact now and continue on
+ * the shorter one. Every quantity is learned or catalog-priced; nothing here is a tuned constant.
+ *
+ * Resume: the next request reads the prefix P, a share `retained` of it from cache (R), the rest at the
+ * cold price; each further request reads P from cache.
+ * Compact: the summarizer reads P (on the session lane at the same R; elsewhere cold), generates the
+ * summary at the output price, the next request writes the compacted prefix P' cold, and each further
+ * request reads P' from cache.
+ */
+export interface CompactionEconomicsInput {
+	/** Context the next request would carry (P). */
+	readonly prefixTokens: number;
+	/** Expected context after compacting (P'), from learned compaction outcomes. */
+	readonly compactedTokens: number;
+	/** Expected tokens the summarizer generates, from learned compaction outcomes. */
+	readonly summaryOutputTokens: number;
+	/** Requests expected on this history, the next one included (learned lineage lifetime). */
+	readonly remainingRequests: number;
+	/**
+	 * The share of P the next request finds cached, from the lane's survival curve at the real idle gap,
+	 * with its standard error. Undefined without evidence: then every share is possible.
+	 */
+	readonly retained?: { readonly retained: number; readonly standardError: number };
+	/** The summarizer runs on the session lane (same model, the sent prefix): it reads P as resume would. */
+	readonly summarizerSharesLane: boolean;
+	/** The summarizer's cold price, when it runs on another lane and reads P uncached. */
+	readonly summarizerColdUsdPerMillion?: number;
+	readonly cacheReadUsdPerMillion?: number;
+	/** What a prefix the provider has not cached costs: its cache-write price, else its input price. */
+	readonly coldUsdPerMillion?: number;
+	/** The summarizer's output price. */
+	readonly outputUsdPerMillion?: number;
+	/** Prices at the compacted size, where a tiered model changes price below a threshold. */
+	readonly compactedCacheReadUsdPerMillion?: number;
+	readonly compactedColdUsdPerMillion?: number;
+}
 
-export type EarlyCompactionEconomicsVerdict =
+export type CompactionEconomicsVerdict =
 	| {
 			readonly proceed: true;
 			readonly reason: string;
-			readonly projectedSavingsUsd: number;
-			readonly preserveTurnCostUsd?: number;
-			readonly compactTurnCostUsd?: number;
-			readonly compactionOneTimeCostUsd?: number;
-			readonly hitRatio?: number;
+			/** Saving at the least favorable share the evidence allows. */
+			readonly savingUsd: number;
+			readonly resumeUsd: number;
+			readonly compactUsd: number;
 	  }
 	| {
 			readonly proceed: false;
-			readonly reason: EarlyCompactionDeferReason;
+			readonly reason: "insufficient_evidence" | "insufficient_savings";
 			readonly detail: string;
-			readonly projectedSavingsUsd?: number;
+			readonly savingUsd?: number;
 	  };
 
-export interface EarlyCompactionEconomicsInput {
-	readonly currentTokens: number;
-	readonly compactableTokens: number;
-	readonly recentCacheReadTokens: number;
-	readonly recentCacheWriteTokens: number;
-	readonly cacheReadUsdPerMillion?: number;
-	readonly cacheWriteUsdPerMillion?: number;
-	readonly inputUsdPerMillion?: number;
-	readonly postCompactionInputUsdPerMillion?: number;
-	readonly postCompactionCacheReadUsdPerMillion?: number;
-	readonly postCompactionCacheWriteUsdPerMillion?: number;
-	readonly estimatedSummaryTokens: number;
-	readonly horizonTurns: number;
-	readonly lastEarlyDecisionAtTokens?: number;
-	readonly hysteresisTokens: number;
-	readonly minSavingsUsd: number;
-	/** Prefix was dropped (model switch, TTL, or an explicit cache reset). Hysteresis must not block a reassess. */
-	readonly cacheInvalidated?: boolean;
-	readonly modelSwitched?: boolean;
-	readonly tierChanged?: boolean;
+/**
+ * Compact only when compacting is cheaper at every cache share the evidence cannot rule out: the saving
+ * is taken at the least favorable end of `retained` +/- one standard error (the whole [0, 1] range
+ * without evidence), so an uncertain curve never forces a context-losing compaction.
+ */
+export function priceCompaction(input: CompactionEconomicsInput): CompactionEconomicsVerdict {
+	const read = input.cacheReadUsdPerMillion;
+	const cold = input.coldUsdPerMillion;
+	const output = input.outputUsdPerMillion;
+	if (read === undefined || cold === undefined || output === undefined) {
+		return { proceed: false, reason: "insufficient_evidence", detail: "prices unknown; no fabricated savings" };
+	}
+	const compactedRead = input.compactedCacheReadUsdPerMillion ?? read;
+	const compactedCold = input.compactedColdUsdPerMillion ?? cold;
+	const prefix = Math.max(0, input.prefixTokens);
+	const compacted = Math.max(0, input.compactedTokens);
+	const further = Math.max(0, input.remainingRequests - 1);
+	const firstRead = (share: number) => usd(prefix, share * read + (1 - share) * cold);
+	const resume = (share: number) => firstRead(share) + further * usd(prefix, read);
+	const compact = (share: number) =>
+		(input.summarizerSharesLane ? firstRead(share) : usd(prefix, input.summarizerColdUsdPerMillion ?? cold)) +
+		usd(input.summaryOutputTokens, output) +
+		usd(compacted, compactedCold) +
+		further * usd(compacted, compactedRead);
+	const shares = input.retained
+		? [
+				Math.max(0, input.retained.retained - input.retained.standardError),
+				Math.min(1, input.retained.retained + input.retained.standardError),
+			]
+		: [0, 1];
+	const worst = shares
+		.map((share) => ({ share, saving: resume(share) - compact(share) }))
+		.reduce((a, b) => (b.saving < a.saving ? b : a));
+	const resumeUsd = resume(worst.share);
+	const compactUsd = compact(worst.share);
+	const basis = `${input.remainingRequests} requests, cache share ${worst.share.toFixed(2)}`;
+	if (worst.saving <= 0) {
+		return {
+			proceed: false,
+			reason: "insufficient_savings",
+			detail: `compacting ${compactUsd.toFixed(6)} USD is not below resuming ${resumeUsd.toFixed(6)} USD (${basis})`,
+			savingUsd: worst.saving,
+		};
+	}
+	return {
+		proceed: true,
+		reason: `compacting saves ${worst.saving.toFixed(6)} USD: ${compactUsd.toFixed(6)} against resuming ${resumeUsd.toFixed(6)} (${basis})`,
+		savingUsd: worst.saving,
+		resumeUsd,
+		compactUsd,
+	};
+}
+
+/**
+ * What moving work onto a model costs in cache: the destination has none of it cached, so every token
+ * it must read (the prefix, or the smaller brief it is given instead) is paid at its cold price. Zero for
+ * a price-free model; undefined when its prices are unknown.
+ */
+export function switchCostUsd(
+	destination: { cost?: { input?: number; cacheWrite?: number } },
+	prefixTokens: number,
+	briefTokens?: number,
+): number | undefined {
+	const input = destination.cost?.input;
+	if (input === undefined) return undefined;
+	const write = destination.cost?.cacheWrite ?? 0;
+	return usd(Math.max(0, briefTokens ?? prefixTokens), write > 0 ? write : input);
 }
 
 export interface EffectiveModelPricing {
 	readonly input: number;
+	/** Undefined when the catalog prices no output. */
+	readonly output: number | undefined;
 	readonly cacheRead: number;
 	readonly cacheWrite: number;
 	readonly tierActive: boolean;
@@ -71,6 +151,7 @@ export function resolveEffectiveModelPricing(
 ): EffectiveModelPricing | undefined {
 	const baseInput = model.cost?.input;
 	if (baseInput === undefined) return undefined;
+	const baseOutput = model.cost?.output;
 	const baseRead = model.cost?.cacheRead ?? 0;
 	const baseWrite = model.cost?.cacheWrite ?? 0;
 
@@ -80,6 +161,7 @@ export function resolveEffectiveModelPricing(
 		if (matchingTier) {
 			return {
 				input: matchingTier.input ?? baseInput,
+				output: baseOutput,
 				cacheRead: matchingTier.cacheRead ?? baseRead,
 				cacheWrite: matchingTier.cacheWrite ?? baseWrite,
 				tierActive: true,
@@ -91,6 +173,7 @@ export function resolveEffectiveModelPricing(
 		const mult = model.longContextPricing.inputMultiplier;
 		return {
 			input: baseInput * mult,
+			output: baseOutput === undefined ? undefined : baseOutput * model.longContextPricing.outputMultiplier,
 			cacheRead: baseRead * mult,
 			cacheWrite: baseWrite * mult,
 			tierActive: true,
@@ -99,6 +182,7 @@ export function resolveEffectiveModelPricing(
 
 	return {
 		input: baseInput,
+		output: baseOutput,
 		cacheRead: baseRead,
 		cacheWrite: baseWrite,
 		tierActive: false,
@@ -107,97 +191,6 @@ export function resolveEffectiveModelPricing(
 
 export function usd(tokens: number, perMillion: number): number {
 	return (tokens / 1_000_000) * perMillion;
-}
-
-export function projectEarlyCompactionEconomics(input: EarlyCompactionEconomicsInput): EarlyCompactionEconomicsVerdict {
-	const readPrice = input.cacheReadUsdPerMillion;
-	const writePrice = input.cacheWriteUsdPerMillion;
-	const inputPrice = input.inputUsdPerMillion;
-	if (readPrice === undefined || writePrice === undefined || inputPrice === undefined) {
-		return {
-			proceed: false,
-			reason: "insufficient_evidence",
-			detail: "cache/input prices missing; no fabricated savings",
-		};
-	}
-	const postInputPrice = input.postCompactionInputUsdPerMillion ?? inputPrice;
-	const postReadPrice = input.postCompactionCacheReadUsdPerMillion ?? readPrice;
-	const postWritePrice = input.postCompactionCacheWriteUsdPerMillion ?? writePrice;
-
-	const cacheInvalidated = Boolean(input.cacheInvalidated || input.modelSwitched || input.tierChanged);
-	if (
-		!cacheInvalidated &&
-		input.lastEarlyDecisionAtTokens !== undefined &&
-		Math.abs(input.currentTokens - input.lastEarlyDecisionAtTokens) < input.hysteresisTokens
-	) {
-		return {
-			proceed: false,
-			reason: "hysteresis",
-			detail: `tokens moved less than ${input.hysteresisTokens} since last early decision`,
-		};
-	}
-
-	const cacheTotal = input.recentCacheReadTokens + input.recentCacheWriteTokens;
-	const hitRatio = cacheTotal > 0 ? input.recentCacheReadTokens / cacheTotal : 0;
-
-	const compactable = Math.max(0, input.compactableTokens);
-	const postTokens = Math.max(0, input.currentTokens - compactable + input.estimatedSummaryTokens);
-
-	// One-time costs: summary generation + rewriting compacted prefix
-	const summaryCost = usd(input.estimatedSummaryTokens, inputPrice);
-	const rewriteCost = usd(postTokens, postWritePrice);
-	const compactionOneTimeCost = summaryCost + rewriteCost;
-
-	// Per-turn expected costs over horizon:
-	// Preserve per turn: uncached input + cached read
-	const preserveTurnCost = usd(input.currentTokens, hitRatio * readPrice + (1 - hitRatio) * inputPrice);
-	// Compact per turn: shorter post-compaction input / cached read, reflecting tier movement if prices changed
-	const compactTurnCost = usd(postTokens, hitRatio * postReadPrice + (1 - hitRatio) * postInputPrice);
-
-	const savedPerTurn = Math.max(0, preserveTurnCost - compactTurnCost);
-	const horizonTurns = Math.max(1, input.horizonTurns);
-	const totalHorizonSavings = savedPerTurn * horizonTurns;
-
-	const projected = totalHorizonSavings - compactionOneTimeCost;
-
-	// Hot cache: Strong bias, not an absolute veto.
-	// When cache is hot (hitRatio >= 0.7), add a bias margin penalty proportional to hit ratio.
-	const hotCacheBiasUsd = hitRatio >= 0.7 ? (hitRatio - 0.5) * 0.005 : 0;
-	const requiredSavings = input.minSavingsUsd + hotCacheBiasUsd;
-
-	if (hitRatio >= 0.7 && projected < requiredSavings) {
-		return {
-			proceed: false,
-			reason: "hot_cache",
-			detail: `hit ratio ${hitRatio.toFixed(2)}; hot cache bias requires net savings >= ${requiredSavings.toFixed(6)}, projected was ${projected.toFixed(6)}`,
-			projectedSavingsUsd: projected,
-		};
-	}
-	if (compactionOneTimeCost >= totalHorizonSavings && totalHorizonSavings > 0) {
-		return {
-			proceed: false,
-			reason: "summary_wipes_savings",
-			detail: `summary+rewrite ${compactionOneTimeCost.toFixed(6)} >= horizon savings ${totalHorizonSavings.toFixed(6)}`,
-			projectedSavingsUsd: projected,
-		};
-	}
-	if (projected < requiredSavings) {
-		return {
-			proceed: false,
-			reason: "insufficient_savings",
-			detail: `projected ${projected.toFixed(6)} below margin ${requiredSavings.toFixed(6)}`,
-			projectedSavingsUsd: projected,
-		};
-	}
-	return {
-		proceed: true,
-		reason: `projected savings ${projected.toFixed(6)} USD over ${horizonTurns} turns (hitRatio: ${hitRatio.toFixed(2)}, postPriceShift: ${postInputPrice !== inputPrice})`,
-		projectedSavingsUsd: projected,
-		preserveTurnCostUsd: preserveTurnCost,
-		compactTurnCostUsd: compactTurnCost,
-		compactionOneTimeCostUsd: compactionOneTimeCost,
-		hitRatio,
-	};
 }
 
 /**
