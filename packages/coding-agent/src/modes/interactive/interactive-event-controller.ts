@@ -30,6 +30,7 @@ import type { CustomEditor } from "./components/custom-editor.ts";
 import type { FooterComponent } from "./components/footer.ts";
 import { keyText } from "./components/keybinding-hints.ts";
 import type { MarkdownTransformFn } from "./components/markdown-transform.ts";
+import { type ReplyBylineTracker, replyByline, replyModelRef } from "./components/reply-byline.ts";
 import type { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { type MisalignmentBlock, misalignmentBlock } from "./misalignment-continuation.ts";
 import { theme } from "./theme/theme.ts";
@@ -58,6 +59,7 @@ export interface InteractiveEventHost {
 	streamingComponent: AssistantMessageComponent | undefined;
 	streamingMessage: AssistantMessage | undefined;
 	hideThinkingBlock: boolean;
+	replyBylines: ReplyBylineTracker;
 	lastStreamingUiUpdateAt: number;
 	activeToolCalls: ActiveToolCallRegistry;
 	init(): Promise<void>;
@@ -225,6 +227,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			} else if (event.message.role === "assistant") {
 				host.clearPendingStreamingUiUpdate();
 				host.lastStreamingUiUpdateAt = 0;
+				const modelRef = replyModelRef(event.message);
 				host.streamingComponent = new AssistantMessageComponent(
 					undefined,
 					host.hideThinkingBlock,
@@ -233,6 +236,9 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 						isStreaming: true,
 						showCommentary: host.hasHumanAudience,
 						transformMarkdown: host.transformMarkdownForDisplay,
+						...(host.replyBylines.shouldShow(modelRef)
+							? { byline: replyByline(modelRef, host.session.getForegroundRouteSnapshot()) }
+							: {}),
 					},
 				);
 				host.streamingMessage = event.message;

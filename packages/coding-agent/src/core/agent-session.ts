@@ -246,6 +246,7 @@ import { ProviderRequestContextController } from "./provider-request-context-con
 import { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
 import { ReflectionController } from "./reflection-controller.ts";
 import { ReflectionTurnLifecycle } from "./reflection-turn-lifecycle.ts";
+import { REPLY_ROUTE_CUSTOM_TYPE, type ReplyRouteRecord } from "./reply-route.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import {
@@ -3272,6 +3273,12 @@ export class AgentSession {
 			// Track the response for ordered retry/failover/compaction handling after agent_end.
 			if (event.message.role === "assistant") {
 				const assistantMsg = event.message as AssistantMessage;
+				// A reply a routed model wrote keeps its route, so a reloaded conversation names the same author.
+				const route = this._modelRouter.getForegroundRouteSnapshot();
+				if (route.switched) {
+					const record: ReplyRouteRecord = { timestamp: assistantMsg.timestamp, route };
+					this.sessionManager.appendCustomEntry(REPLY_ROUTE_CUSTOM_TYPE, record);
+				}
 				this._foregroundLifecycle.recordTransportTelemetry(assistantMsg);
 				this._goals.recordExecutionUsage(assistantMsg);
 				if (messagePersisted) {

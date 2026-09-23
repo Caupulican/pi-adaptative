@@ -50,8 +50,10 @@ import { configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import type { ManagedMemoryTarget } from "../../core/memory/providers/file-store.ts";
+import type { ForegroundRouteSnapshot } from "../../core/model-router-controller.ts";
 import type { PrismLlamaCppRuntime } from "../../core/models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
+import { REPLY_ROUTE_CUSTOM_TYPE, type ReplyRouteRecord } from "../../core/reply-route.ts";
 import { formatMissingSessionCwdPrompt, type MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { SessionImageStore } from "../../core/session-image-store.ts";
 import type {
@@ -89,6 +91,7 @@ import type { FitnessRole } from "./components/fitness-role-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import type { MarkdownTransformFn } from "./components/markdown-transform.ts";
+import { ReplyBylineTracker, replyByline, replyModelRef } from "./components/reply-byline.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { openTranscriptOverlay } from "./components/transcript-overlay.ts";
@@ -271,6 +274,10 @@ export class InteractiveMode {
 
 	// Thinking block visibility state
 	private hideThinkingBlock = true;
+	/** Which replies carry a byline; shared by the live event path and history reload. */
+	replyBylines = new ReplyBylineTracker();
+	/** Routes of routed replies, by reply timestamp, read from the session while history reloads. */
+	private replyRoutes: Map<number, ForegroundRouteSnapshot> | undefined;
 
 	// Skill commands: command name -> skill file path
 	private skillCommands = new Map<string, string>();
@@ -2176,6 +2183,7 @@ export class InteractiveMode {
 				break;
 			}
 			case "user": {
+				this.replyBylines.ownerMessage();
 				const textContent = this.getUserMessageText(message);
 				if (textContent) {
 					if (this.chatContainer.children.length > 0) {
@@ -2214,6 +2222,7 @@ export class InteractiveMode {
 				break;
 			}
 			case "assistant": {
+				const modelRef = replyModelRef(message);
 				const assistantComponent = new AssistantMessageComponent(
 					message,
 					this.hideThinkingBlock,
@@ -2222,6 +2231,9 @@ export class InteractiveMode {
 						isStreaming: false,
 						showCommentary: this.hasHumanAudience,
 						transformMarkdown: this.transformMarkdownForDisplay,
+						...(this.replyBylines.shouldShow(modelRef)
+							? { byline: replyByline(modelRef, this.replyRoutes?.get(message.timestamp)) }
+							: {}),
 					},
 				);
 				this.chatContainer.addChild(assistantComponent);
@@ -2290,6 +2302,13 @@ export class InteractiveMode {
 					this.updateEditorBorderColor();
 				}
 
+				this.replyBylines.reset();
+				this.replyRoutes = new Map();
+				for (const entry of this.session.sessionManager.getEntries()) {
+					if (entry.type !== "custom" || entry.customType !== REPLY_ROUTE_CUSTOM_TYPE) continue;
+					const record = entry.data as ReplyRouteRecord | undefined;
+					if (record && typeof record.timestamp === "number") this.replyRoutes.set(record.timestamp, record.route);
+				}
 				const tuiHistory = this.messagesForTuiHistoryReload(sessionContext.messages);
 				if (tuiHistory.omittedMessages > 0) {
 					this.appendStatusToChat(

@@ -1,9 +1,18 @@
 import { VERIFICATION_HANDOFF_REQUIRED_ERROR } from "@caupulican/pi-agent-core";
 import type { AssistantMessage } from "@caupulican/pi-ai";
-import { Container, Markdown, type MarkdownTheme, Spacer, Text, VisibilityContainer } from "@caupulican/pi-tui";
+import {
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	Spacer,
+	Text,
+	TruncatedText,
+	VisibilityContainer,
+} from "@caupulican/pi-tui";
 import { isAssistantDisplayText } from "../../../core/message-phase.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { applyMarkdownTransform, type MarkdownTransformFn, type MarkdownTransformSlot } from "./markdown-transform.ts";
+import type { ReplyByline } from "./reply-byline.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -13,6 +22,8 @@ export interface AssistantMessageComponentOptions {
 	isStreaming?: boolean;
 	showCommentary?: boolean;
 	transformMarkdown?: MarkdownTransformFn;
+	/** Who wrote this reply, shown as one row above it (see reply-byline.ts). */
+	byline?: ReplyByline;
 }
 
 /**
@@ -32,6 +43,7 @@ export class AssistantMessageComponent extends Container {
 	private visibleOutput = false;
 	private isStreaming: boolean;
 	private transformMarkdown?: MarkdownTransformFn;
+	private readonly byline?: ReplyByline;
 	private markdownSlots: MarkdownTransformSlot[] = [];
 	/** Wraps the thinking block (+ its own trailing spacer) so toggling never rebuilds content. */
 	private thinkingContainer?: VisibilityContainer;
@@ -49,6 +61,7 @@ export class AssistantMessageComponent extends Container {
 		this.isStreaming = options?.isStreaming ?? false;
 		this.showCommentary = options?.showCommentary ?? false;
 		this.transformMarkdown = options?.transformMarkdown;
+		this.byline = options?.byline;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -154,8 +167,14 @@ export class AssistantMessageComponent extends Container {
 					message.stopReason === "error" ||
 					(!this.isStreaming && !hasReadableContent)));
 
-		if (hasVisibleContent) {
+		if (hasVisibleContent || this.byline) {
 			this.contentContainer.addChild(new Spacer(1));
+		}
+		if (this.byline) {
+			this.contentContainer.addChild(
+				// One row: at narrow widths the route and model shorten from the end, the actor always stays.
+				new TruncatedText(theme.fg(this.byline.routed ? "warning" : "muted", this.byline.text), 1, 0),
+			);
 		}
 
 		// Render content in order
