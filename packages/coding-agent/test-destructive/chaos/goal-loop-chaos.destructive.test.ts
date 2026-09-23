@@ -38,6 +38,24 @@ const SEEDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
  * wide. */
 const DEADLINE_MS = 2 * 60 * 60 * 1000;
 const TOKEN_BUDGET = 40_000;
+/** Virtual time per step of the settle loops. */
+const STEP_MS = 5_000;
+/**
+ * Real time each virtual step also yields. The scenario runs a real `bash` tool call: the child is
+ * an OS process, and its exit arrives in real time, whatever the fake clock says. A loop that only
+ * advances virtual time spends its whole 2-hour deadline in well under 1.5 s of real time (measured:
+ * a child that needs 1.5 s never exits inside it), so a slow spawn on a loaded Windows runner read as
+ * a hang. With this, the deadline gives real I/O up to DEADLINE_MS / STEP_MS * REAL_STEP_MS (14.4 s).
+ */
+const REAL_STEP_MS = 10;
+/** Captured before `vi.useFakeTimers()` replaces the global, so it stays a real timer. */
+const realSetTimeout = globalThis.setTimeout;
+
+/** One step of a settle loop: advance the fake clock, then let real I/O run for a moment. */
+async function advanceStep(): Promise<void> {
+	await vi.advanceTimersByTimeAsync(STEP_MS);
+	await new Promise<void>((resolve) => realSetTimeout(resolve, REAL_STEP_MS));
+}
 
 function healthyGoalSequence(): FauxResponseStep[] {
 	return [
@@ -97,10 +115,9 @@ describe("destructive/chaos: budgeted goal loop against ChaosProvider (INV-L1)",
 					settled = true;
 				});
 
-			const STEP_MS = 5_000;
 			let elapsedMs = 0;
 			while (!settled && elapsedMs < DEADLINE_MS) {
-				await vi.advanceTimersByTimeAsync(STEP_MS);
+				await advanceStep();
 				elapsedMs += STEP_MS;
 			}
 			if (!settled) {
@@ -133,7 +150,7 @@ describe("destructive/chaos: budgeted goal loop against ChaosProvider (INV-L1)",
 				});
 			let probeElapsedMs = 0;
 			while (!probeSettled && probeElapsedMs < DEADLINE_MS) {
-				await vi.advanceTimersByTimeAsync(STEP_MS);
+				await advanceStep();
 				probeElapsedMs += STEP_MS;
 			}
 			if (!probeSettled) {
@@ -154,6 +171,6 @@ describe("destructive/chaos: budgeted goal loop against ChaosProvider (INV-L1)",
 			await harness.cleanup();
 
 			assertInvL1({ loopRun: world }, repro);
-		}, 30_000);
+		}, 60_000);
 	}
 });
