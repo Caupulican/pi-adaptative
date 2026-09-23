@@ -255,6 +255,8 @@ export interface WorkerDelegationControllerDeps {
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** Parent admitted edge grants for worker edge authorization without interactive prompts. */
 	getEdgeGrants?(): readonly EdgeGrantView[];
+	/** System One's operation gate for a worker's call the deterministic gates cannot decide (refused unless granted). */
+	checkOperation?(toolName: string, args: unknown, cwd: string): Promise<{ block: true; reason: string } | undefined>;
 	/** Set when the parent task is bound to local commits. Workers refuse git push on this branch. */
 	localCommitBranch?(): string | undefined;
 	/** Host-owned path alias table getter for expanding alias tokens in worker tool arguments. */
@@ -3193,7 +3195,7 @@ export class WorkerDelegationController {
 						return { block: true, reason: edgeBlockReason(operation, false) };
 					}
 				}
-				return undefined;
+				return this.deps.checkOperation?.(toolName, args, executionCwd);
 			},
 			initialUsage,
 			sharedBudget,

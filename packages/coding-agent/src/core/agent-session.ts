@@ -281,6 +281,7 @@ import { AnswerClaimChecker, assistantAnswerText } from "./system-one/claim-deli
 import { CodeDuplicateReviewer } from "./system-one/code-duplicates.ts";
 import { type SystemOneController, USER_REQUEST_RULE_BUDGET } from "./system-one/controller.ts";
 import { createSessionForegroundControl, type SystemOneForegroundControl } from "./system-one/foreground-control.ts";
+import { OperationGate } from "./system-one/operation-gate.ts";
 import {
 	appendOwnerFollowUp,
 	consultMessage,
@@ -517,6 +518,8 @@ export class AgentSession {
 	private readonly _accountModels: AccountModelCatalog;
 	/** Providers whose usage-limit episode already told the owner about redeemable resets. */
 	private readonly _subscriptionResetOffered = new Set<string>();
+	/** System One's gate for operations the deterministic gates cannot decide (created on first use). */
+	private _operationGateInstance?: OperationGate;
 	/** Providers whose reset check is in flight, so two limit answers do not ask twice at once. */
 	private readonly _subscriptionResetChecking = new Set<string>();
 	private _executionLoopMode?: ExecutionLoopMode;
@@ -1018,6 +1021,7 @@ export class AgentSession {
 			observeWorkerProgress: (observation) => this._workerSupervision.observe(observation),
 			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
 			getEdgeGrants: () => this.getEdgeGrants(),
+			checkOperation: (tool, args, cwd) => this._operationGate.check(tool, args, cwd, "worker"),
 			localCommitBranch: () => this._localCommitBranch,
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
@@ -1780,6 +1784,8 @@ export class AgentSession {
 			getExtensionRunner: () => this._extensionRunner,
 			getToolSelectionController: () => this._toolSelection,
 			checkEdge: (tool, args, cwd, signal) => enforceSessionEdge(this._edgeDeps(), tool, args, cwd, signal),
+			checkOperation: (tool, args, cwd, signal) =>
+				this._operationGate.check(tool, args, cwd ?? this._cwd, "root", signal),
 			localCommitBranch: () => this._localCommitBranch,
 			// An admitted outward-facing operation (publish to a remote or a registry) is the delivery
 			// step the projection reports as DELIVER until that call ends.
@@ -2362,6 +2368,21 @@ export class AgentSession {
 		if (stack.adaptiveCapabilities) {
 			stack.adaptiveCapabilities.setAdaptationSink((adaptation) => this.setAdaptationProjection(adaptation));
 		}
+	}
+
+	private get _operationGate(): OperationGate {
+		this._operationGateInstance ??= new OperationGate({
+			getEngine: () => this._semanticDecisionEngine(),
+			getRequest: () => this._lastUserRequest,
+			getScopeCwd: () => this._cwd,
+			getTurnKey: () =>
+				`${this._foregroundRecovery.getCurrentSubmissionEpoch() ?? "idle"}\u0000${this._lastUserRequest}`,
+			isGranted: () => this.getEdgeGrants().some((grant) => grant.class === "operation.irreversible"),
+			askOperator: async (operation, signal) =>
+				enforceSessionEdgeOperation(this._edgeDeps(), operation, "operation", signal),
+			notify: (message) => this._emit({ type: "warning", message }),
+		});
+		return this._operationGateInstance;
 	}
 
 	/**

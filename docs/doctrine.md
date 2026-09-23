@@ -310,6 +310,21 @@ directory, a filesystem root, or a disk, including `gh repo delete`) and `toolki
 package publish and install, settings edits, and every other delete run without asking. Anything
 unknown is ordinary work and runs.
 
+**An operation the deterministic gates cannot decide is System One's, judged once per turn.** A few
+shapes carry an effect no gate can read off the arguments: code piped into an interpreter, a
+destructive command whose target is an unexpanded variable, a request that sends data off the
+machine (`curl -d`, `-X POST`, `scp`, `rsync host:`), a typed write outside the task directory. Only
+these reach System One, in one batched request of four atomic questions: does it leave the machine,
+can it not be undone, does it touch files outside the task, does the owner's request ask for it.
+The irreversible row of the authority line decides: an operation shown local and reversible runs; an
+irreversible or outward one runs when the request asks for it, is refused when the request clearly
+does not, and goes to the operator (`operation.irreversible` at the edge; a worker is refused) when
+that is unsettled or System One cannot answer within its time budget. A standing
+`operation.irreversible` grant authorizes all of these, and what System One found is shown either
+way. Everything else never reaches System One, so ordinary work pays nothing. Pinned by
+`packages/coding-agent/test/edge-policy.test.ts` and
+`packages/coding-agent/test/system-one/operation-gate.test.ts`.
+
 **One classification is conditional on live state, not on the command alone.** Several pi sessions
 share one worktree, so `git reset --hard`, `git clean -f`, `git checkout -- …`, `git restore` and
 `git stash` (push, save, drop, clear) can delete another session's uncommitted work with no reflog

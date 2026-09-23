@@ -29,6 +29,7 @@ describe("edge policy classification", () => {
 			"destructive.fs",
 			"settings.authority",
 			"toolkit.script",
+			"operation.irreversible",
 		]);
 	});
 

@@ -31,6 +31,7 @@ export const EDGE_CLASSES = [
 	"destructive.fs",
 	"settings.authority",
 	"toolkit.script",
+	"operation.irreversible",
 ] as const;
 export type EdgeClass = (typeof EDGE_CLASSES)[number];
 
@@ -42,11 +43,13 @@ export const EDGE_CLASS_DESCRIPTIONS: Readonly<Record<EdgeClass, string>> = {
 		"deleting the repository, a directory that contains it, the home directory, a filesystem root, or a disk, or discarding a shared worktree that holds another session's uncommitted work",
 	"settings.authority": "editing settings and credentials runs without asking",
 	"toolkit.script": "running registered dangerous toolkit scripts",
+	"operation.irreversible":
+		"an operation System One finds irreversible, outward or unsettled (code piped into an interpreter, a destructive command on an unexpanded variable, sending data off the machine, a write outside the task) that the owner's request does not ask for",
 };
 
 /** Classes a tool call can still make the operator confirm. The other names stay for grants. */
 export function edgeClassRequiresConfirmation(edgeClass: EdgeClass): boolean {
-	return edgeClass === "destructive.fs" || edgeClass === "toolkit.script";
+	return edgeClass === "destructive.fs" || edgeClass === "toolkit.script" || edgeClass === "operation.irreversible";
 }
 
 export function isEdgeClass(value: unknown): value is EdgeClass {

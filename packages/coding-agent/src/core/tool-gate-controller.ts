@@ -63,6 +63,16 @@ export interface ToolGateControllerDeps {
 		executionCwd: string | undefined,
 		signal: AbortSignal | undefined,
 	): Promise<BeforeToolCallResult | undefined>;
+	/**
+	 * System One's operation gate: an operation the deterministic gates cannot decide is judged, then
+	 * runs, asks the operator, or is refused (see system-one/operation-gate.ts).
+	 */
+	checkOperation?(
+		toolName: string,
+		args: unknown,
+		executionCwd: string | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<BeforeToolCallResult | undefined>;
 	/** Branch this task must commit onto. Set only after Jev classifies the request as local commits. */
 	localCommitBranch?(): string | undefined;
 	/** The edge classes an admitted call carries (empty for ordinary work), for the delivery projection. */
@@ -278,6 +288,8 @@ export class ToolGateController {
 			// 4. Single edge authorization on the actual final operation
 			const edge = await this.deps.checkEdge?.(toolCall.name, args, executionContext?.cwd, signal);
 			if (edge) return edge;
+			const operation = await this.deps.checkOperation?.(toolCall.name, args, executionContext?.cwd, signal);
+			if (operation) return operation;
 
 			// 5. System One semantic tool gate
 			const isControlPlaneTool = CONTROL_PLANE_TOOL_NAMES.has(toolCall.name);

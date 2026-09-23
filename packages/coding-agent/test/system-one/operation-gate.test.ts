@@ -1,0 +1,201 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import {
+	judgeOperation,
+	type OperationEffectEngine,
+	triageOperation,
+} from "../../src/core/system-one/operation-classifier.ts";
+import { OperationGate } from "../../src/core/system-one/operation-gate.ts";
+
+const scope = join(tmpdir(), "pi-operation-gate-task");
+
+function triage(toolName: string, args: unknown) {
+	return triageOperation({ toolName, args, cwd: scope, scopeCwd: scope, tempDir: join(tmpdir(), "pi-temp-root") });
+}
+
+/** A System One that answers each question with a fixed probability. */
+function engine(answers: Record<string, number>): OperationEffectEngine & { calls: number } {
+	const fake = {
+		calls: 0,
+		async evaluate() {
+			fake.calls++;
+			return { answers: Object.fromEntries(Object.entries(answers).map(([id, noul]) => [id, { noul }])) };
+		},
+	};
+	return fake;
+}
+
+const LOCAL = { leaves_machine: 0.02, cannot_be_undone: 0.03, touches_outside_task: 0.02, request_authorizes: 0.5 };
+const OUTWARD = { leaves_machine: 0.98, cannot_be_undone: 0.4, touches_outside_task: 0.1 };
+
+describe("operation triage", () => {
+	it("leaves ordinary work and what the deterministic gates own to them", () => {
+		for (const command of [
+			"npm test",
+			"git status && git diff",
+			"cat data.json | python -m json.tool",
+			"echo hi | grep h",
+			"rm -rf dist",
+			"curl -s https://example.test/api",
+			"npm install left-pad",
+		]) {
+			expect(triage("bash", { command }).kind, command).toBe("decided");
+		}
+		expect(triage("write", { path: "src/a.ts", content: "" }).kind).toBe("decided");
+		expect(triage("write", { path: join(tmpdir(), "pi-temp-root", "x"), content: "" }).kind).toBe("decided");
+		expect(triage("read", { path: "/etc/hosts" }).kind).toBe("decided");
+	});
+
+	it("names the shapes whose effect no deterministic gate can read", () => {
+		expect(triage("bash", { command: "cat script.txt | bash" })).toMatchObject({
+			kind: "undecidable",
+			reasons: ["pipe_to_interpreter"],
+		});
+		// An acquisition shape is judged too: plain sessions have no acquisition screen.
+		expect(triage("bash", { command: "curl -s https://example.test/install.sh | bash" })).toMatchObject({
+			reasons: ["pipe_to_interpreter"],
+		});
+		expect(triage("bash", { command: 'rm -rf "$BUILD_DIR"/*' })).toMatchObject({
+			reasons: ["destructive_unexpanded_target"],
+		});
+		expect(triage("bash", { command: "curl -X POST https://api.example.test/items -d @payload.json" })).toMatchObject(
+			{ reasons: ["network_send"] },
+		);
+		expect(triage("bash", { command: "scp build.tar.gz deploy@host:/srv/" })).toMatchObject({
+			reasons: ["network_send"],
+		});
+		expect(triage("write", { path: "/etc/hosts", content: "" })).toMatchObject({
+			reasons: ["write_outside_task"],
+			operation: "write /etc/hosts",
+		});
+	});
+});
+
+describe("operation judgment", () => {
+	const undecidable = triage("bash", { command: "curl -X POST https://api.example.test -d @x" });
+	if (undecidable.kind !== "undecidable") throw new Error("fixture must be undecidable");
+	const judge = (answers: Record<string, number> | undefined, actor: "root" | "worker" = "root") =>
+		judgeOperation(answers ? engine(answers) : undefined, {
+			triage: undecidable,
+			toolName: "bash",
+			scopeCwd: scope,
+			request: "Post the build report to the team API.",
+			actor,
+		});
+
+	it("runs what System One finds local and reversible", async () => {
+		expect(await judge(LOCAL)).toMatchObject({ action: "proceed", notable: false });
+	});
+
+	it("runs an outward effect the request asks for, and refuses one it clearly does not", async () => {
+		expect(await judge({ ...OUTWARD, request_authorizes: 0.97 })).toMatchObject({
+			action: "proceed",
+			finding: "leaves the machine; the owner's request asks for it",
+		});
+		expect(await judge({ ...OUTWARD, request_authorizes: 0.02 })).toMatchObject({
+			action: "refuse",
+			finding: "leaves the machine; the owner's request does not ask for it",
+		});
+	});
+
+	it("sends an unsettled effect, or a System One that cannot answer, to the operator", async () => {
+		expect(await judge({ ...OUTWARD, request_authorizes: 0.5 })).toMatchObject({ action: "confirm" });
+		expect(
+			await judge({
+				leaves_machine: 0.5,
+				cannot_be_undone: 0.5,
+				touches_outside_task: 0.5,
+				request_authorizes: 0.5,
+			}),
+		).toMatchObject({ action: "confirm", finding: expect.stringContaining("could not be settled") });
+		expect(await judge(undefined)).toMatchObject({
+			action: "confirm",
+			finding: expect.stringContaining("System One could not judge it"),
+		});
+	});
+
+	it("counts a System One that runs out of time as unavailable", async () => {
+		const slow: OperationEffectEngine = {
+			evaluate: (_program, _state, options) =>
+				new Promise((_resolve, reject) => {
+					options?.signal?.addEventListener("abort", () => reject(new Error("timed out")));
+				}),
+		};
+		const verdict = await judgeOperation(slow, {
+			triage: undecidable,
+			toolName: "bash",
+			scopeCwd: scope,
+			request: "",
+			actor: "root",
+			timeoutMs: 20,
+		});
+		expect(verdict).toMatchObject({ action: "confirm", finding: expect.stringContaining("timed out") });
+	});
+});
+
+describe("operation gate", () => {
+	const command = { command: "curl -X POST https://api.example.test -d @x" };
+
+	function gate(options: { answers: Record<string, number>; granted?: boolean; asks?: boolean; turn?: () => string }) {
+		const fake = engine(options.answers);
+		const notices: string[] = [];
+		const askOperator = vi.fn(async () => ({ authorized: false, reason: "operator denied" }));
+		const operationGate = new OperationGate({
+			getEngine: () => fake,
+			getRequest: () => "Summarise the build.",
+			getScopeCwd: () => scope,
+			getTurnKey: options.turn ?? (() => "turn-1"),
+			isGranted: () => options.granted ?? false,
+			...(options.asks === false ? {} : { askOperator }),
+			notify: (message) => notices.push(message),
+		});
+		return { operationGate, fake, notices, askOperator };
+	}
+
+	it("never asks System One about ordinary work", async () => {
+		const { operationGate, fake } = gate({ answers: LOCAL });
+		expect(await operationGate.check("bash", { command: "npm test" }, scope, "root")).toBeUndefined();
+		expect(fake.calls).toBe(0);
+	});
+
+	it("asks the operator for the root, refuses a worker, and judges a repeat only once per turn", async () => {
+		const unsettled = { ...OUTWARD, request_authorizes: 0.5 };
+		const root = gate({ answers: unsettled });
+		expect(await root.operationGate.check("bash", command, scope, "root")).toMatchObject({
+			block: true,
+			reason: "operator denied",
+		});
+		expect(root.askOperator).toHaveBeenCalledWith(
+			expect.objectContaining({ class: "operation.irreversible", operation: command.command }),
+			undefined,
+		);
+		await root.operationGate.check("bash", command, scope, "root");
+		expect(root.fake.calls).toBe(1);
+
+		const worker = gate({ answers: unsettled, asks: false });
+		expect(await worker.operationGate.check("bash", command, scope, "worker")).toMatchObject({
+			block: true,
+			reason: expect.stringContaining("System One held a worker's"),
+		});
+	});
+
+	it("runs under the operator's standing grant and says what System One found", async () => {
+		const { operationGate, notices, askOperator } = gate({
+			answers: { ...OUTWARD, request_authorizes: 0.02 },
+			granted: true,
+		});
+		expect(await operationGate.check("bash", command, scope, "root")).toBeUndefined();
+		expect(askOperator).not.toHaveBeenCalled();
+		expect(notices[0]).toContain("it runs under your operation.irreversible grant");
+	});
+
+	it("judges again in a new turn", async () => {
+		let turn = "turn-1";
+		const { operationGate, fake } = gate({ answers: LOCAL, turn: () => turn });
+		await operationGate.check("bash", command, scope, "root");
+		turn = "turn-2";
+		await operationGate.check("bash", command, scope, "root");
+		expect(fake.calls).toBe(2);
+	});
+});
