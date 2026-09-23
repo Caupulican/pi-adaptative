@@ -134,7 +134,7 @@ describe("InteractiveMode thinking visibility toggle (F4)", () => {
 				getRouterCandidatePool: () => ({ customized: false, models: [] }),
 				getStoredFitnessReports: () => [],
 				getToolProbeRecord: () => undefined,
-				modelRegistry: { isUsingSubscription: () => false },
+				modelRegistry: { isUsingSubscription: () => false, authStorage: { hasAuth: () => false } },
 			} as any,
 			settingsManager: {
 				getProjectSettings: () => ({}),
@@ -170,6 +170,7 @@ describe("InteractiveMode thinking visibility toggle (F4)", () => {
 				getLearningPolicySettings: () => ({}),
 				getModelCapabilitySettings: () => ({}),
 				getModelRouterSettings: () => ({}),
+				getSystemOneSettings: () => ({ enabled: true, provider: "auto" }),
 				getAutoLearnSettings: () => ({}),
 				getContextPromptEnforcementSettings: () => ({}),
 				getMemoryRetrievalSettings: () => ({}),
