@@ -101,7 +101,7 @@ describe("Anthropic bearer-token authentication", () => {
 		expect(mockState.constructorOptions?.apiKey).toBeNull();
 		expect(mockState.constructorOptions?.authToken).toBe("sk-ant-oat-test");
 		const headers = mockState.constructorOptions?.defaultHeaders as Record<string, string>;
-		expect(headers["user-agent"]).toBe("claude-cli/2.1.280 (external, cli)");
+		expect(headers["user-agent"]).toBe("claude-code/2.1.280 (external, cli)");
 		expect(headers["x-app"]).toBe("cli");
 		expect(headers["anthropic-beta"]).toContain("oauth-2025-04-20");
 		expect(headers["anthropic-beta"]).toContain("claude-code-20250219");

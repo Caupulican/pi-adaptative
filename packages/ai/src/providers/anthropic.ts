@@ -933,7 +933,7 @@ function createClient(
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
 					"anthropic-beta": ["claude-code-20250219", "oauth-2025-04-20", ...betaFeatures].join(","),
-					"user-agent": `claude-cli/${claudeCodeVersion} (external, cli)`,
+					"user-agent": `claude-code/${claudeCodeVersion} (external, cli)`,
 					"x-app": "cli",
 				},
 				model.headers,
