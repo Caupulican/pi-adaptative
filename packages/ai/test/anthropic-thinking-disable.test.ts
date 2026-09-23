@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import { streamSimple } from "../src/stream.ts";
 import type { Context, Model, SimpleStreamOptions } from "../src/types.ts";
+import { liveEnvApiKey } from "./oauth.ts";
 
 interface AnthropicThinkingPayload {
 	thinking?: { type: string; budget_tokens?: number; display?: string };
@@ -154,7 +155,7 @@ describe("Anthropic thinking disable payload", () => {
 	});
 });
 
-describe.skipIf(!process.env.ANTHROPIC_API_KEY)("Anthropic thinking disable E2E", () => {
+describe.skipIf(!liveEnvApiKey("anthropic"))("Anthropic thinking disable E2E", () => {
 	it("disables thinking for Claude reasoning models", { retry: 2, timeout: 30000 }, async () => {
 		const result = await runWithoutReasoning(getModel("anthropic", "claude-sonnet-4-5"));
 

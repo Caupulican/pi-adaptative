@@ -3,7 +3,7 @@ import { getModel } from "../src/models.ts";
 import { complete } from "../src/stream.ts";
 import type { Api, Context, Model, StreamOptions } from "../src/types.ts";
 import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.ts";
-import { resolveApiKey } from "./oauth.ts";
+import { liveEnvApiKey, liveEnvVar, resolveApiKey } from "./oauth.ts";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
@@ -24,7 +24,7 @@ async function expectResponseId<TApi extends Api>(model: Model<TApi>, options: S
 }
 
 describe("responseId E2E Tests", () => {
-	describe.skipIf(!process.env.GEMINI_API_KEY)("Google Provider", () => {
+	describe.skipIf(!liveEnvApiKey("google"))("Google Provider", () => {
 		const llm = getModel("google", "gemini-2.5-flash");
 
 		it("should expose responseId", { retry: 3, timeout: 30000 }, async () => {
@@ -33,9 +33,9 @@ describe("responseId E2E Tests", () => {
 	});
 
 	describe("Google Vertex Provider", () => {
-		const vertexProject = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT;
-		const vertexLocation = process.env.GOOGLE_CLOUD_LOCATION;
-		const vertexApiKey = process.env.GOOGLE_CLOUD_API_KEY;
+		const vertexProject = liveEnvVar("GOOGLE_CLOUD_PROJECT") || liveEnvVar("GCLOUD_PROJECT");
+		const vertexLocation = liveEnvVar("GOOGLE_CLOUD_LOCATION");
+		const vertexApiKey = liveEnvVar("GOOGLE_CLOUD_API_KEY");
 		const isVertexConfigured = Boolean(vertexProject && vertexLocation);
 		const vertexOptions = { project: vertexProject, location: vertexLocation } as const;
 		const llm = getModel("google-vertex", "gemini-3-flash-preview");
@@ -49,7 +49,7 @@ describe("responseId E2E Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Completions Provider", () => {
+	describe.skipIf(!liveEnvApiKey("openai"))("OpenAI Completions Provider", () => {
 		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini");
 		void _compat;
 		const llm: Model<"openai-completions"> = {
@@ -62,7 +62,7 @@ describe("responseId E2E Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Responses Provider", () => {
+	describe.skipIf(!liveEnvApiKey("openai"))("OpenAI Responses Provider", () => {
 		const llm = getModel("openai", "gpt-5-mini");
 
 		it("should expose responseId", { retry: 3, timeout: 30000 }, async () => {
@@ -70,7 +70,7 @@ describe("responseId E2E Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.ANTHROPIC_API_KEY)("Anthropic Provider", () => {
+	describe.skipIf(!liveEnvApiKey("anthropic"))("Anthropic Provider", () => {
 		const llm = getModel("anthropic", "claude-sonnet-4-5");
 
 		it("should expose responseId", { retry: 3, timeout: 30000 }, async () => {
@@ -88,7 +88,7 @@ describe("responseId E2E Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.MISTRAL_API_KEY)("Mistral Provider", () => {
+	describe.skipIf(!liveEnvApiKey("mistral"))("Mistral Provider", () => {
 		const llm = getModel("mistral", "devstral-medium-latest");
 
 		it("should expose responseId", { retry: 3, timeout: 30000 }, async () => {

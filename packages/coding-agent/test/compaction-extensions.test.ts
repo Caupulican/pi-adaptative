@@ -22,9 +22,7 @@ import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { createCodingTools } from "../src/index.ts";
-import { createTestResourceLoader } from "./utilities.ts";
-
-const API_KEY = process.env.ANTHROPIC_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
+import { API_KEY, createTestResourceLoader } from "./utilities.ts";
 
 describe.skipIf(!API_KEY)("Compaction extensions", () => {
 	let session: AgentSession;

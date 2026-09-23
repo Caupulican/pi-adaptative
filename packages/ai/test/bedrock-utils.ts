@@ -2,6 +2,8 @@
  * Utility functions for Amazon Bedrock tests
  */
 
+import { liveTestsEnabled } from "./oauth.ts";
+
 /**
  * Check if any valid AWS credentials are configured for Bedrock.
  * Returns true if any of the following are set:
@@ -10,6 +12,7 @@
  * - AWS_BEARER_TOKEN_BEDROCK (Bedrock API key)
  */
 export function hasBedrockCredentials(): boolean {
+	if (!liveTestsEnabled()) return false;
 	return !!(
 		process.env.AWS_PROFILE ||
 		(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY) ||

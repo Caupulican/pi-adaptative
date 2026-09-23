@@ -1,10 +1,9 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { getEnvApiKey } from "../src/env-api-keys.ts";
 import { getModels, getProviders } from "../src/models.ts";
 import { complete } from "../src/stream.ts";
 import type { Api, KnownProvider, Model, ProviderStreamOptions, Tool } from "../src/types.ts";
-import { resolveApiKey } from "./oauth.ts";
+import { liveEnvApiKey, resolveApiKey } from "./oauth.ts";
 
 const githubCopilotToken = await resolveApiKey("github-copilot");
 
@@ -29,7 +28,7 @@ function getE2EApiKey(provider: KnownProvider): string | undefined {
 	if (provider === "github-copilot") {
 		return githubCopilotToken;
 	}
-	return getEnvApiKey(provider);
+	return liveEnvApiKey(provider);
 }
 
 function getAnthropicMessagesModels(provider: KnownProvider): Model<"anthropic-messages">[] {

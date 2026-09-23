@@ -9,7 +9,7 @@ type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.ts";
 import { hasBedrockCredentials } from "./bedrock-utils.ts";
 import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.ts";
-import { resolveApiKey } from "./oauth.ts";
+import { liveEnvApiKey, resolveApiKey } from "./oauth.ts";
 
 // Empty schema for test tools - must be proper OBJECT type for Cloud Code Assist
 const emptySchema = Type.Object({});
@@ -284,7 +284,7 @@ async function testUnpairedHighSurrogate<TApi extends Api>(llm: Model<TApi>, opt
 }
 
 describe("AI Providers Unicode Surrogate Pair Tests", () => {
-	describe.skipIf(!process.env.GEMINI_API_KEY)("Google Provider Unicode Handling", () => {
+	describe.skipIf(!liveEnvApiKey("google"))("Google Provider Unicode Handling", () => {
 		const llm = getModel("google", "gemini-2.5-flash");
 
 		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
@@ -300,7 +300,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Completions Provider Unicode Handling", () => {
+	describe.skipIf(!liveEnvApiKey("openai"))("OpenAI Completions Provider Unicode Handling", () => {
 		const llm = getModel("openai", "gpt-4o-mini");
 
 		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
@@ -316,7 +316,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Responses Provider Unicode Handling", () => {
+	describe.skipIf(!liveEnvApiKey("openai"))("OpenAI Responses Provider Unicode Handling", () => {
 		const llm = getModel("openai", "gpt-5-mini");
 
 		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
@@ -350,7 +350,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.ANTHROPIC_API_KEY)("Anthropic Provider Unicode Handling", () => {
+	describe.skipIf(!liveEnvApiKey("anthropic"))("Anthropic Provider Unicode Handling", () => {
 		const llm = getModel("anthropic", "claude-haiku-4-5");
 
 		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
@@ -450,7 +450,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		);
 	});
 
-	describe.skipIf(!process.env.XAI_API_KEY)("xAI Provider Unicode Handling", () => {
+	describe.skipIf(!liveEnvApiKey("xai"))("xAI Provider Unicode Handling", () => {
 		const llm = getModel("xai", "grok-4.6");
 
 		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
@@ -466,7 +466,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.GROQ_API_KEY)("Groq Provider Unicode Handling", () => {
+	describe.skipIf(!liveEnvApiKey("groq"))("Groq Provider Unicode Handling", () => {
 		const llm = getModel("groq", "openai/gpt-oss-20b");
 
 		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
@@ -482,7 +482,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.CEREBRAS_API_KEY)("Cerebras Provider Unicode Handling", () => {
+	describe.skipIf(!liveEnvApiKey("cerebras"))("Cerebras Provider Unicode Handling", () => {
 		const llm = getModel("cerebras", "gpt-oss-120b");
 
 		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
@@ -530,7 +530,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.HF_TOKEN)("Hugging Face Provider Unicode Handling", () => {
+	describe.skipIf(!liveEnvApiKey("huggingface"))("Hugging Face Provider Unicode Handling", () => {
 		const llm = getModel("huggingface", "moonshotai/Kimi-K2.5");
 
 		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
@@ -546,7 +546,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.TOGETHER_API_KEY)("Together AI Provider Unicode Handling", () => {
+	describe.skipIf(!liveEnvApiKey("together"))("Together AI Provider Unicode Handling", () => {
 		const llm = getModel("together", "moonshotai/Kimi-K2.6");
 		const options = { reasoningEffort: "high" } satisfies StreamOptionsWithExtras;
 
@@ -563,7 +563,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.ZAI_API_KEY)("zAI Provider Unicode Handling", () => {
+	describe.skipIf(!liveEnvApiKey("zai"))("zAI Provider Unicode Handling", () => {
 		const llm = getModel("zai", "glm-5.2");
 
 		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
@@ -579,7 +579,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.MISTRAL_API_KEY)("Mistral Provider Unicode Handling", () => {
+	describe.skipIf(!liveEnvApiKey("mistral"))("Mistral Provider Unicode Handling", () => {
 		const llm = getModel("mistral", "devstral-medium-latest");
 
 		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
@@ -595,7 +595,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.MINIMAX_API_KEY)("MiniMax Provider Unicode Handling", () => {
+	describe.skipIf(!liveEnvApiKey("minimax"))("MiniMax Provider Unicode Handling", () => {
 		const llm = getModel("minimax", "MiniMax-M2.7");
 
 		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
@@ -611,7 +611,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.XIAOMI_API_KEY)("Xiaomi MiMo (API billing) Provider Unicode Handling", () => {
+	describe.skipIf(!liveEnvApiKey("xiaomi"))("Xiaomi MiMo (API billing) Provider Unicode Handling", () => {
 		const llm = getModel("xiaomi", "mimo-v2.5-pro");
 
 		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
@@ -627,7 +627,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_CN_API_KEY)(
+	describe.skipIf(!liveEnvApiKey("xiaomi-token-plan-cn"))(
 		"Xiaomi MiMo Token Plan (CN) Provider Unicode Handling",
 		() => {
 			const llm = getModel("xiaomi-token-plan-cn", "mimo-v2.5-pro");
@@ -649,7 +649,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		},
 	);
 
-	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_AMS_API_KEY)(
+	describe.skipIf(!liveEnvApiKey("xiaomi-token-plan-ams"))(
 		"Xiaomi MiMo Token Plan (AMS) Provider Unicode Handling",
 		() => {
 			const llm = getModel("xiaomi-token-plan-ams", "mimo-v2.5-pro");
@@ -671,7 +671,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		},
 	);
 
-	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_SGP_API_KEY)(
+	describe.skipIf(!liveEnvApiKey("xiaomi-token-plan-sgp"))(
 		"Xiaomi MiMo Token Plan (SGP) Provider Unicode Handling",
 		() => {
 			const llm = getModel("xiaomi-token-plan-sgp", "mimo-v2.5-pro");
@@ -693,7 +693,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		},
 	);
 
-	describe.skipIf(!process.env.KIMI_API_KEY)("Kimi For Coding Provider Unicode Handling", () => {
+	describe.skipIf(!liveEnvApiKey("kimi-coding"))("Kimi For Coding Provider Unicode Handling", () => {
 		const llm = getModel("kimi-coding", "kimi-for-coding");
 
 		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {
@@ -709,7 +709,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.AI_GATEWAY_API_KEY)("Vercel AI Gateway Provider Unicode Handling", () => {
+	describe.skipIf(!liveEnvApiKey("vercel-ai-gateway"))("Vercel AI Gateway Provider Unicode Handling", () => {
 		const llm = getModel("vercel-ai-gateway", "google/gemini-2.5-flash");
 
 		it("should handle emoji in tool results", { retry: 3, timeout: 30000 }, async () => {

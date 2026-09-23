@@ -2,6 +2,8 @@
  * Utility functions for Azure OpenAI tests
  */
 
+import { liveTestsEnabled } from "./oauth.ts";
+
 function parseDeploymentNameMap(value: string | undefined): Map<string, string> {
 	const map = new Map<string, string>();
 	if (!value) return map;
@@ -16,6 +18,7 @@ function parseDeploymentNameMap(value: string | undefined): Map<string, string> 
 }
 
 export function hasAzureOpenAICredentials(): boolean {
+	if (!liveTestsEnabled()) return false;
 	const hasKey = !!process.env.AZURE_OPENAI_API_KEY;
 	const hasBaseUrl = !!(process.env.AZURE_OPENAI_BASE_URL || process.env.AZURE_OPENAI_RESOURCE_NAME);
 	return hasKey && hasBaseUrl;

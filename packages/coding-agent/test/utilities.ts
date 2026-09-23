@@ -24,10 +24,23 @@ export {
 } from "./suite/test-resources.ts";
 
 /**
+ * Live tests make real, paid provider calls. They are opt-in only: without
+ * PI_LIVE_TESTS=1, credential-reading exports below (API_KEY, resolveApiKey,
+ * hasAuthForProvider) return undefined/false so every gated test skips
+ * instead of silently calling out (including from the pre-commit hook,
+ * which runs any staged test file).
+ */
+export function liveTestsEnabled(): boolean {
+	return process.env.PI_LIVE_TESTS === "1";
+}
+
+/**
  * API key for authenticated tests. Tests using this should be wrapped in
  * describe.skipIf(!API_KEY)
  */
-export const API_KEY = process.env.ANTHROPIC_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
+export const API_KEY = liveTestsEnabled()
+	? process.env.ANTHROPIC_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY
+	: undefined;
 
 // ============================================================================
 // OAuth API key resolution from ~/.pi/agent/auth.json
@@ -77,6 +90,8 @@ function saveAuthStorage(storage: AuthStorageData): void {
  *
  */
 export async function resolveApiKey(provider: string): Promise<string | undefined> {
+	if (!liveTestsEnabled()) return undefined;
+
 	const storage = loadAuthStorage();
 	const entry = storage[provider];
 

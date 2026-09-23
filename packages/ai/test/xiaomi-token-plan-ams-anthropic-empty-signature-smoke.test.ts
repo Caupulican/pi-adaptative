@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { completeSimple, getEnvApiKey, streamSimple } from "../src/stream.ts";
+import { completeSimple, streamSimple } from "../src/stream.ts";
 import type { AssistantMessage, Context, Model } from "../src/types.ts";
+import { liveEnvApiKey } from "./oauth.ts";
 
 const provider = "xiaomi-token-plan-ams";
-const apiKey = getEnvApiKey(provider);
+const apiKey = liveEnvApiKey(provider);
 
 const model: Model<"anthropic-messages"> = {
 	id: "mimo-v2.5-pro",

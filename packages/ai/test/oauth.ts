@@ -8,10 +8,22 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
+import { getEnvApiKey } from "../src/env-api-keys.ts";
+import type { KnownProvider } from "../src/types.ts";
 import { getOAuthApiKey } from "../src/utils/oauth/index.ts";
 import type { OAuthCredentials, OAuthProvider } from "../src/utils/oauth/types.ts";
 
 const AUTH_PATH = join(homedir(), ".pi", "agent", "auth.json");
+
+/**
+ * Live tests make real, paid provider calls. They are opt-in only: without
+ * PI_LIVE_TESTS=1, credential-reading helpers below return undefined so every
+ * gated test skips instead of silently calling out (including from the
+ * pre-commit hook, which runs any staged test file).
+ */
+export function liveTestsEnabled(): boolean {
+	return process.env.PI_LIVE_TESTS === "1";
+}
 
 type ApiKeyCredential = {
 	type: "api_key";
@@ -55,6 +67,8 @@ function saveAuthStorage(storage: AuthStorage): void {
  *
  */
 export async function resolveApiKey(provider: string): Promise<string | undefined> {
+	if (!liveTestsEnabled()) return undefined;
+
 	const storage = loadAuthStorage();
 	const entry = storage[provider];
 
@@ -90,4 +104,28 @@ export async function resolveApiKey(provider: string): Promise<string | undefine
 	}
 
 	return undefined;
+}
+
+/**
+ * Resolve a provider API key from known environment variables (e.g. OPENAI_API_KEY),
+ * for e2e tests that decide whether to run based on a configured provider key.
+ * Gated by PI_LIVE_TESTS=1 like resolveApiKey above, so a real key sitting in the
+ * shell environment never triggers a live call by itself.
+ */
+export function liveEnvApiKey(provider: KnownProvider): string | undefined;
+export function liveEnvApiKey(provider: string): string | undefined;
+export function liveEnvApiKey(provider: string): string | undefined {
+	if (!liveTestsEnabled()) return undefined;
+	return getEnvApiKey(provider);
+}
+
+/**
+ * Read a raw environment variable, gated by PI_LIVE_TESTS=1 like the helpers above.
+ * For credential shapes `liveEnvApiKey` can't express as a single provider lookup:
+ * a specific env var among several a provider accepts (e.g. distinguishing an
+ * Anthropic OAuth-token test from an Anthropic API-key test), or a non-key
+ * credential such as an endpoint URL, region, account id, or deployment name.
+ */
+export function liveEnvVar(name: string): string | undefined {
+	return liveTestsEnabled() ? process.env[name] : undefined;
 }

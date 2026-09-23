@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { getImageModel } from "../src/image-models.ts";
 import { generateImages } from "../src/images.ts";
 import type { ImageContent, ImagesContext, ImagesModel, ProviderImagesOptions } from "../src/types.ts";
+import { liveEnvApiKey } from "./oauth.ts";
 
 type ImagesOptionsWithExtras = ProviderImagesOptions & Record<string, unknown>;
 
@@ -65,22 +66,19 @@ async function handleImageInput<TApi extends string>(model: ImagesModel<TApi>, o
 }
 
 describe("Images E2E Tests", () => {
-	describe.skipIf(!process.env.OPENROUTER_API_KEY)(
-		"OpenRouter Images Provider (google/gemini-2.5-flash-image)",
-		() => {
-			const model = getImageModel("openrouter", "google/gemini-2.5-flash-image");
+	describe.skipIf(!liveEnvApiKey("openrouter"))("OpenRouter Images Provider (google/gemini-2.5-flash-image)", () => {
+		const model = getImageModel("openrouter", "google/gemini-2.5-flash-image");
 
-			it("should generate a basic image", { retry: 3 }, async () => {
-				await basicImageGeneration(model);
-			});
+		it("should generate a basic image", { retry: 3 }, async () => {
+			await basicImageGeneration(model);
+		});
 
-			it("should handle text plus image output", { retry: 3 }, async () => {
-				await handleTextAndImageOutput(model);
-			});
+		it("should handle text plus image output", { retry: 3 }, async () => {
+			await handleTextAndImageOutput(model);
+		});
 
-			it("should handle image input", { retry: 3 }, async () => {
-				await handleImageInput(model);
-			});
-		},
-	);
+		it("should handle image input", { retry: 3 }, async () => {
+			await handleImageInput(model);
+		});
+	});
 });

@@ -1,11 +1,11 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { getEnvApiKey } from "../src/env-api-keys.ts";
 import { getModel } from "../src/models.ts";
 import { completeSimple } from "../src/stream.ts";
 import type { Api, Context, Model, StopReason, Tool, ToolCall, ToolResultMessage } from "../src/types.ts";
 import { StringEnum } from "../src/utils/typebox-helpers.ts";
 import { hasBedrockCredentials } from "./bedrock-utils.ts";
+import { liveEnvApiKey } from "./oauth.ts";
 
 const calculatorSchema = Type.Object({
 	a: Type.Number({ description: "First number" }),
@@ -118,7 +118,7 @@ async function assertSecondToolCallWithInterleavedThinking<TApi extends Api>(
 	expect(secondResponse.content.some((block) => block.type === "text")).toBe(true);
 }
 
-const hasAnthropicCredentials = !!getEnvApiKey("anthropic");
+const hasAnthropicCredentials = !!liveEnvApiKey("anthropic");
 
 describe.skipIf(!hasBedrockCredentials())("Amazon Bedrock interleaved thinking", () => {
 	it("should do interleaved thinking on Claude Opus 4.5", { retry: 3 }, async () => {

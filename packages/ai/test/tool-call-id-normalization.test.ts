@@ -13,13 +13,13 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
-import { completeSimple, getEnvApiKey } from "../src/stream.ts";
+import { completeSimple } from "../src/stream.ts";
 import type { AssistantMessage, Message, Tool, ToolResultMessage } from "../src/types.ts";
-import { resolveApiKey } from "./oauth.ts";
+import { liveEnvApiKey, resolveApiKey } from "./oauth.ts";
 
 // Resolve API keys
 const copilotToken = await resolveApiKey("github-copilot");
-const openrouterKey = getEnvApiKey("openrouter");
+const openrouterKey = liveEnvApiKey("openrouter");
 const codexToken = await resolveApiKey("openai-codex");
 
 // Simple echo tool for testing

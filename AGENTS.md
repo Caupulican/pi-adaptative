@@ -33,7 +33,7 @@
 - After code changes (not docs): `npm run check` (full output, no tail). Fix all errors, warnings, and infos before committing. Does not run tests.
 - Never run `npm run build` or `npm test` unless requested by the user. Release verification delegates the full suite to GitHub Actions; local release checks use the focused standalone-installer and binary regressions.
 - While developing, run only the targeted tests specific to the code you touched: `./test.sh <specific-test-path>` or from the package root: `node ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`. Do not run the full suite to iterate on a change.
-- Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. The full non-e2e suite is owned by GitHub Actions; local `./test.sh` with no arguments is forbidden unless the user explicitly requests it.
+- Never run the full vitest suite directly: it includes e2e tests that activate only with `PI_LIVE_TESTS=1` set. The full non-e2e suite is owned by GitHub Actions; local `./test.sh` with no arguments is forbidden unless the user explicitly requests it.
 - If you create or modify a test file, run it and iterate on test or implementation until it passes.
 - For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` + the faux provider. No real provider APIs, keys, or paid tokens.
 - Put issue-specific regressions under `packages/coding-agent/test/suite/regressions/` named `<issue-number>-<short-slug>.test.ts`.

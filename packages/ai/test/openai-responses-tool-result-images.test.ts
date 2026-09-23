@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { Api, Context, Model, StreamOptions, Tool, ToolResultMessage } from "../src/index.ts";
 import { complete, getModel } from "../src/index.ts";
 import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.ts";
-import { resolveApiKey } from "./oauth.ts";
+import { liveEnvApiKey, resolveApiKey } from "./oauth.ts";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 
@@ -146,7 +146,7 @@ async function verifyToolResultImagesStayInFunctionCallOutput<TApi extends Api>(
 }
 
 describe("Responses API tool result images", () => {
-	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Responses Provider (gpt-5-mini)", () => {
+	describe.skipIf(!liveEnvApiKey("openai"))("OpenAI Responses Provider (gpt-5-mini)", () => {
 		const model = getModel("openai", "gpt-5-mini");
 
 		it("should send tool result images in function_call_output", { retry: 3, timeout: 30000 }, async () => {

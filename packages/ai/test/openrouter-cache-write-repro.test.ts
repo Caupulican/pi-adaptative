@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import { completeSimple } from "../src/stream.ts";
+import { liveEnvApiKey } from "./oauth.ts";
 
 function createLongSystemPrompt(): string {
 	const nonce = `${Date.now()}-${Math.random()}`;
@@ -11,7 +12,7 @@ function createLongSystemPrompt(): string {
 		.join("\n\n")}`;
 }
 
-describe.skipIf(!process.env.OPENROUTER_API_KEY)("OpenRouter cache_write repro E2E", () => {
+describe.skipIf(!liveEnvApiKey("openrouter"))("OpenRouter cache_write repro E2E", () => {
 	it("regression: preserves cache_write_tokens on openai-completions stream path", {
 		retry: 2,
 		timeout: 90000,
@@ -29,7 +30,7 @@ describe.skipIf(!process.env.OPENROUTER_API_KEY)("OpenRouter cache_write repro E
 		};
 
 		const options = {
-			apiKey: process.env.OPENROUTER_API_KEY!,
+			apiKey: liveEnvApiKey("openrouter")!,
 			maxTokens: 32,
 			temperature: 0,
 			onPayload: (payload: unknown) => {

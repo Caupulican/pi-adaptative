@@ -1,8 +1,9 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
-import { complete, getEnvApiKey } from "../src/stream.ts";
+import { complete } from "../src/stream.ts";
 import type { AssistantMessage, Context, Message, Tool, ToolCall } from "../src/types.ts";
+import { liveEnvApiKey } from "./oauth.ts";
 
 const testToolSchema = Type.Object({
 	value: Type.Number({ description: "A number to double" }),
@@ -14,13 +15,13 @@ const testTool: Tool<typeof testToolSchema> = {
 	parameters: testToolSchema,
 };
 
-describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
+describe.skipIf(!liveEnvApiKey("openai") || !liveEnvApiKey("anthropic"))(
 	"OpenAI Responses reasoning replay e2e",
 	() => {
 		it("skips reasoning-only history after an aborted turn", { retry: 2 }, async () => {
 			const model = getModel("openai", "gpt-5-mini");
 
-			const apiKey = getEnvApiKey("openai");
+			const apiKey = liveEnvApiKey("openai");
 			if (!apiKey) {
 				throw new Error("Missing OPENAI_API_KEY");
 			}
@@ -93,7 +94,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 			const modelA = getModel("openai", "gpt-5-mini");
 			const modelB = getModel("openai", "gpt-5.3-codex");
 
-			const apiKey = getEnvApiKey("openai");
+			const apiKey = liveEnvApiKey("openai");
 			if (!apiKey) {
 				throw new Error("Missing OPENAI_API_KEY");
 			}
@@ -192,8 +193,8 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 			const anthropicModel = getModel("anthropic", "claude-sonnet-4-5");
 			const codexModel = getModel("openai", "gpt-5.3-codex");
 
-			const anthropicApiKey = getEnvApiKey("anthropic");
-			const openaiApiKey = getEnvApiKey("openai");
+			const anthropicApiKey = liveEnvApiKey("anthropic");
+			const openaiApiKey = liveEnvApiKey("openai");
 			if (!anthropicApiKey || !openaiApiKey) {
 				throw new Error("Missing API keys");
 			}

@@ -910,7 +910,13 @@ describe("Large session fixture", () => {
 // LLM integration tests (skipped without API key)
 // ============================================================================
 
-describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("LLM summarization", () => {
+// Live tests make a real, paid provider call and are opt-in only: without
+// PI_LIVE_TESTS=1 this stays undefined so the suite below skips, even when
+// ANTHROPIC_OAUTH_TOKEN happens to be set in the shell (e.g. from normal
+// pi agent use, not a deliberate test opt-in).
+const liveAnthropicOAuthToken = process.env.PI_LIVE_TESTS === "1" ? process.env.ANTHROPIC_OAUTH_TOKEN : undefined;
+
+describe.skipIf(!liveAnthropicOAuthToken)("LLM summarization", () => {
 	it("should generate a compaction result for the large session", async () => {
 		const entries = loadLargeSessionEntries();
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
@@ -918,7 +924,7 @@ describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("LLM summarization", () => {
 		const preparation = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS);
 		expect(preparation).toBeDefined();
 
-		const compactionResult = await compact(preparation!, model, process.env.ANTHROPIC_OAUTH_TOKEN!);
+		const compactionResult = await compact(preparation!, model, liveAnthropicOAuthToken!);
 
 		expect(compactionResult.summary.length).toBeGreaterThan(100);
 		expect(compactionResult.firstKeptEntryId).toBeTruthy();
@@ -939,7 +945,7 @@ describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("LLM summarization", () => {
 		const preparation = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS);
 		expect(preparation).toBeDefined();
 
-		const compactionResult = await compact(preparation!, model, process.env.ANTHROPIC_OAUTH_TOKEN!);
+		const compactionResult = await compact(preparation!, model, liveAnthropicOAuthToken!);
 
 		// Simulate appending compaction to entries by creating a proper entry
 		const lastEntry = entries[entries.length - 1];

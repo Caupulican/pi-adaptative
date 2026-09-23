@@ -8,7 +8,7 @@ type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.ts";
 import { hasBedrockCredentials } from "./bedrock-utils.ts";
 import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.ts";
-import { resolveApiKey } from "./oauth.ts";
+import { liveEnvApiKey, resolveApiKey } from "./oauth.ts";
 
 // Resolve OAuth tokens at module level (async, runs before tests)
 const oauthTokens = await Promise.all([
@@ -145,7 +145,7 @@ async function testEmptyAssistantMessage<TApi extends Api>(llm: Model<TApi>, opt
 }
 
 describe("AI Providers Empty Message Tests", () => {
-	describe.skipIf(!process.env.GEMINI_API_KEY)("Google Provider Empty Messages", () => {
+	describe.skipIf(!liveEnvApiKey("google"))("Google Provider Empty Messages", () => {
 		const llm = getModel("google", "gemini-2.5-flash");
 
 		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
@@ -165,7 +165,7 @@ describe("AI Providers Empty Message Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Completions Provider Empty Messages", () => {
+	describe.skipIf(!liveEnvApiKey("openai"))("OpenAI Completions Provider Empty Messages", () => {
 		const llm = getModel("openai", "gpt-4o-mini");
 
 		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
@@ -185,7 +185,7 @@ describe("AI Providers Empty Message Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Responses Provider Empty Messages", () => {
+	describe.skipIf(!liveEnvApiKey("openai"))("OpenAI Responses Provider Empty Messages", () => {
 		const llm = getModel("openai", "gpt-5-mini");
 
 		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
@@ -227,7 +227,7 @@ describe("AI Providers Empty Message Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.ANTHROPIC_API_KEY)("Anthropic Provider Empty Messages", () => {
+	describe.skipIf(!liveEnvApiKey("anthropic"))("Anthropic Provider Empty Messages", () => {
 		const llm = getModel("anthropic", "claude-haiku-4-5");
 
 		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
@@ -247,7 +247,7 @@ describe("AI Providers Empty Message Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.XAI_API_KEY)("xAI Provider Empty Messages", () => {
+	describe.skipIf(!liveEnvApiKey("xai"))("xAI Provider Empty Messages", () => {
 		const llm = getModel("xai", "grok-4.6");
 
 		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
@@ -267,7 +267,7 @@ describe("AI Providers Empty Message Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.GROQ_API_KEY)("Groq Provider Empty Messages", () => {
+	describe.skipIf(!liveEnvApiKey("groq"))("Groq Provider Empty Messages", () => {
 		const llm = getModel("groq", "openai/gpt-oss-20b");
 
 		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
@@ -287,7 +287,7 @@ describe("AI Providers Empty Message Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.CEREBRAS_API_KEY)("Cerebras Provider Empty Messages", () => {
+	describe.skipIf(!liveEnvApiKey("cerebras"))("Cerebras Provider Empty Messages", () => {
 		const llm = getModel("cerebras", "gpt-oss-120b");
 
 		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
@@ -347,7 +347,7 @@ describe("AI Providers Empty Message Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.HF_TOKEN)("Hugging Face Provider Empty Messages", () => {
+	describe.skipIf(!liveEnvApiKey("huggingface"))("Hugging Face Provider Empty Messages", () => {
 		const llm = getModel("huggingface", "moonshotai/Kimi-K2.5");
 
 		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
@@ -367,7 +367,7 @@ describe("AI Providers Empty Message Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.TOGETHER_API_KEY)("Together AI Provider Empty Messages", () => {
+	describe.skipIf(!liveEnvApiKey("together"))("Together AI Provider Empty Messages", () => {
 		const llm = getModel("together", "moonshotai/Kimi-K2.6");
 
 		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
@@ -387,7 +387,7 @@ describe("AI Providers Empty Message Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.ZAI_API_KEY)("zAI Provider Empty Messages", () => {
+	describe.skipIf(!liveEnvApiKey("zai"))("zAI Provider Empty Messages", () => {
 		const llm = getModel("zai", "glm-5.2");
 
 		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
@@ -407,7 +407,7 @@ describe("AI Providers Empty Message Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.MISTRAL_API_KEY)("Mistral Provider Empty Messages", () => {
+	describe.skipIf(!liveEnvApiKey("mistral"))("Mistral Provider Empty Messages", () => {
 		const llm = getModel("mistral", "devstral-medium-latest");
 
 		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
@@ -427,7 +427,7 @@ describe("AI Providers Empty Message Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.MINIMAX_API_KEY)("MiniMax Provider Empty Messages", () => {
+	describe.skipIf(!liveEnvApiKey("minimax"))("MiniMax Provider Empty Messages", () => {
 		const llm = getModel("minimax", "MiniMax-M2.7");
 
 		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
@@ -447,7 +447,7 @@ describe("AI Providers Empty Message Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.XIAOMI_API_KEY)("Xiaomi MiMo (API billing) Provider Empty Messages", () => {
+	describe.skipIf(!liveEnvApiKey("xiaomi"))("Xiaomi MiMo (API billing) Provider Empty Messages", () => {
 		const llm = getModel("xiaomi", "mimo-v2.5-pro");
 
 		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
@@ -467,7 +467,7 @@ describe("AI Providers Empty Message Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_CN_API_KEY)(
+	describe.skipIf(!liveEnvApiKey("xiaomi-token-plan-cn"))(
 		"Xiaomi MiMo Token Plan (CN) Provider Empty Messages",
 		() => {
 			const llm = getModel("xiaomi-token-plan-cn", "mimo-v2.5-pro");
@@ -490,7 +490,7 @@ describe("AI Providers Empty Message Tests", () => {
 		},
 	);
 
-	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_AMS_API_KEY)(
+	describe.skipIf(!liveEnvApiKey("xiaomi-token-plan-ams"))(
 		"Xiaomi MiMo Token Plan (AMS) Provider Empty Messages",
 		() => {
 			const llm = getModel("xiaomi-token-plan-ams", "mimo-v2.5-pro");
@@ -513,7 +513,7 @@ describe("AI Providers Empty Message Tests", () => {
 		},
 	);
 
-	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_SGP_API_KEY)(
+	describe.skipIf(!liveEnvApiKey("xiaomi-token-plan-sgp"))(
 		"Xiaomi MiMo Token Plan (SGP) Provider Empty Messages",
 		() => {
 			const llm = getModel("xiaomi-token-plan-sgp", "mimo-v2.5-pro");
@@ -536,7 +536,7 @@ describe("AI Providers Empty Message Tests", () => {
 		},
 	);
 
-	describe.skipIf(!process.env.KIMI_API_KEY)("Kimi For Coding Provider Empty Messages", () => {
+	describe.skipIf(!liveEnvApiKey("kimi-coding"))("Kimi For Coding Provider Empty Messages", () => {
 		const llm = getModel("kimi-coding", "kimi-for-coding");
 
 		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {
@@ -556,7 +556,7 @@ describe("AI Providers Empty Message Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.AI_GATEWAY_API_KEY)("Vercel AI Gateway Provider Empty Messages", () => {
+	describe.skipIf(!liveEnvApiKey("vercel-ai-gateway"))("Vercel AI Gateway Provider Empty Messages", () => {
 		const llm = getModel("vercel-ai-gateway", "google/gemini-2.5-flash");
 
 		it("should handle empty content array", { retry: 3, timeout: 30000 }, async () => {

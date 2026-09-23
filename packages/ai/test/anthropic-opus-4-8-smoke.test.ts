@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import { streamSimple } from "../src/stream.ts";
 import type { Context } from "../src/types.ts";
+import { liveEnvApiKey } from "./oauth.ts";
 
 interface AnthropicThinkingPayload {
 	thinking?: { type: string };
@@ -22,7 +23,7 @@ function makeContext(): Context {
 	};
 }
 
-describe.skipIf(!process.env.ANTHROPIC_API_KEY)("Anthropic Opus 4.8 smoke", () => {
+describe.skipIf(!liveEnvApiKey("anthropic"))("Anthropic Opus 4.8 smoke", () => {
 	it("streams Claude Opus 4.8 with reasoning enabled", { retry: 2, timeout: 30000 }, async () => {
 		const model = getModel("anthropic", "claude-opus-4-8");
 		let capturedPayload: AnthropicThinkingPayload | undefined;

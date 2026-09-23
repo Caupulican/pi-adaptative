@@ -26,11 +26,11 @@ import { writeFileSync } from "fs";
 import { Type } from "typebox";
 import { beforeAll, describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
-import { completeSimple, getEnvApiKey } from "../src/stream.ts";
+import { completeSimple } from "../src/stream.ts";
 import type { Api, AssistantMessage, Message, Model, Tool, ToolResultMessage } from "../src/types.ts";
 import { hasAzureOpenAICredentials } from "./azure-utils.ts";
 import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.ts";
-import { resolveApiKey } from "./oauth.ts";
+import { liveEnvApiKey, liveEnvVar, resolveApiKey } from "./oauth.ts";
 
 // Simple tool for testing
 const testToolSchema = Type.Object({
@@ -151,7 +151,7 @@ interface CachedContext {
 async function getApiKey(provider: string): Promise<string | undefined> {
 	const oauthKey = await resolveApiKey(provider);
 	if (oauthKey) return oauthKey;
-	return getEnvApiKey(provider);
+	return liveEnvApiKey(provider);
 }
 
 /**
@@ -166,14 +166,14 @@ function hasApiKey(pair: ProviderModelPair): boolean {
 	}
 	if (pair.provider === "cloudflare-ai-gateway") {
 		if (!hasCloudflareAiGatewayCredentials()) return false;
-		return pair.upstreamApiKeyEnv ? !!process.env[pair.upstreamApiKeyEnv] : true;
+		return pair.upstreamApiKeyEnv ? !!liveEnvVar(pair.upstreamApiKeyEnv) : true;
 	}
-	return !!getEnvApiKey(pair.provider);
+	return !!liveEnvApiKey(pair.provider);
 }
 
 function getHeaders(pair: ProviderModelPair): Record<string, string> | undefined {
 	if (!pair.upstreamApiKeyEnv) return undefined;
-	const upstreamApiKey = process.env[pair.upstreamApiKeyEnv];
+	const upstreamApiKey = liveEnvVar(pair.upstreamApiKeyEnv);
 	return upstreamApiKey ? { Authorization: `Bearer ${upstreamApiKey}` } : undefined;
 }
 

@@ -5,6 +5,7 @@ import { streamOpenAICompletions } from "../src/providers/openai-completions.ts"
 import { streamOpenAIResponses } from "../src/providers/openai-responses.ts";
 import { stream } from "../src/stream.ts";
 import type { Context, Model } from "../src/types.ts";
+import { liveEnvApiKey } from "./oauth.ts";
 
 class PayloadCaptured extends Error {
 	constructor() {
@@ -41,7 +42,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 	};
 
 	describe("Anthropic Provider", () => {
-		it.skipIf(!process.env.ANTHROPIC_API_KEY)(
+		it.skipIf(!liveEnvApiKey("anthropic"))(
 			"should use default cache TTL (no ttl field) when PI_CACHE_RETENTION is not set",
 			async () => {
 				const model = getModel("anthropic", "claude-haiku-4-5");
@@ -65,7 +66,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 			},
 		);
 
-		it.skipIf(!process.env.ANTHROPIC_API_KEY)("should use 1h cache TTL when PI_CACHE_RETENTION=long", async () => {
+		it.skipIf(!liveEnvApiKey("anthropic"))("should use 1h cache TTL when PI_CACHE_RETENTION=long", async () => {
 			process.env.PI_CACHE_RETENTION = "long";
 			const model = getModel("anthropic", "claude-haiku-4-5");
 			let capturedPayload: any = null;
@@ -231,7 +232,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 	});
 
 	describe("OpenAI Responses Provider", () => {
-		it.skipIf(!process.env.OPENAI_API_KEY)(
+		it.skipIf(!liveEnvApiKey("openai"))(
 			"should not set prompt_cache_retention when PI_CACHE_RETENTION is not set",
 			async () => {
 				const model = getModel("openai", "gpt-4o-mini");
@@ -253,7 +254,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 			},
 		);
 
-		it.skipIf(!process.env.OPENAI_API_KEY)(
+		it.skipIf(!liveEnvApiKey("openai"))(
 			"should set prompt_cache_retention to 24h when PI_CACHE_RETENTION=long",
 			async () => {
 				process.env.PI_CACHE_RETENTION = "long";

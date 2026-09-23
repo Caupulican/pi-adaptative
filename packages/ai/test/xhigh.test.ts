@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import { stream } from "../src/stream.ts";
 import type { Context, Model } from "../src/types.ts";
+import { liveEnvApiKey } from "./oauth.ts";
 
 function makeContext(): Context {
 	return {
@@ -15,7 +16,7 @@ function makeContext(): Context {
 	};
 }
 
-describe.skipIf(!process.env.OPENAI_API_KEY)("xhigh reasoning", () => {
+describe.skipIf(!liveEnvApiKey("openai"))("xhigh reasoning", () => {
 	describe("codex-max (supports xhigh)", () => {
 		// Note: codex models only support the responses API, not chat completions
 		it("should work with openai-responses", async () => {
