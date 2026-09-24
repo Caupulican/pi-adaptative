@@ -589,3 +589,30 @@ describe("text tool-call protocol", () => {
 		}
 	});
 });
+
+describe("arg_key/arg_value tool_call dialect", () => {
+	const tools = [
+		{
+			name: "read",
+			description: "read a file",
+			parameters: { type: "object", properties: { path: { type: "string" }, limit: { type: "number" } } },
+		},
+	] as unknown as Parameters<typeof parseTextToolCalls>[1];
+
+	it("parses a named tool_call body of key/value pairs, JSON values typed and text values kept", () => {
+		const text =
+			"<tool_call>read\n<arg_key>path</arg_key>\n<arg_value>/repo/package.json</arg_value>\n<arg_key>limit</arg_key><arg_value>20</arg_value>\n</tool_call>";
+		const parsed = parseTextToolCalls(text, tools);
+		expect(parsed.calls).toHaveLength(1);
+		expect(parsed.calls[0]).toMatchObject({ name: "read", arguments: { path: "/repo/package.json", limit: 20 } });
+		expect(parsed.calls[0]?.errorMessage).toBeUndefined();
+	});
+
+	it("names an unknown tool rather than inventing one", () => {
+		const parsed = parseTextToolCalls(
+			"<tool_call>delete\n<arg_key>path</arg_key><arg_value>x</arg_value></tool_call>",
+			tools,
+		);
+		expect(parsed.calls[0]?.errorMessage).toContain('Unknown tool "delete"');
+	});
+});

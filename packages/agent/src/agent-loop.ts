@@ -860,6 +860,7 @@ async function streamToollessClosingTurn(
 		streamFn,
 		{
 			rejectToolCalls: true,
+			withheldTools: currentContext.tools ?? [],
 			verificationObligations,
 		},
 		previousAssistant,
@@ -895,6 +896,8 @@ type StartedAssistantResponse = {
 
 type AssistantResponsePolicy = {
 	rejectToolCalls?: boolean;
+	/** The run's tools a tool-free request withheld: a text-written call of one is still a tool call. */
+	withheldTools?: readonly AgentTool[];
 	verificationObligations?: VerificationObligationTracker;
 };
 
@@ -982,7 +985,7 @@ async function streamAssistantResponse(
 	signal?.removeEventListener("abort", onOuterAbort);
 	const providerMessage = await response.stream.result();
 	let finalMessage = policy?.rejectToolCalls
-		? rejectToolCallsFromToolFreeResponse(providerMessage)
+		? rejectToolCallsFromToolFreeResponse(providerMessage, policy.withheldTools)
 		: rejectNativeToolProtocolResidue(providerMessage, context.tools ?? [], Boolean(config.textToolCallProtocol));
 	if (abortedForDegeneration && !signal?.aborted && finalMessage.stopReason === "aborted") {
 		finalMessage = { ...finalMessage, stopReason: "stop" };

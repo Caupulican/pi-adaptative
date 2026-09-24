@@ -2,6 +2,7 @@ import { type AssistantMessage, type AssistantMessageEvent, EventStream, type Me
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { agentLoop } from "../src/agent-loop.ts";
+import { rejectToolCallsFromToolFreeResponse } from "../src/tool-protocol-residue.ts";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "../src/types.ts";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -132,5 +133,20 @@ describe("native tool protocol residue", () => {
 			errorMessage: "native_tool_protocol_residue: functions.bash was rendered as text",
 		});
 		expect(events.some((event) => event.type === "tool_execution_start")).toBe(false);
+	});
+});
+
+describe("tool-free response with a text-written call of a withheld tool", () => {
+	it("rejects any envelope the text tool protocol parses, in its dialects, against the withheld tools", () => {
+		const glm = response("<tool_call>bash\n<arg_key>cmd</arg_key>\n<arg_value>ls</arg_value>\n</tool_call>");
+		const rejected = rejectToolCallsFromToolFreeResponse(glm, [shellTool]);
+		expect(rejected.stopReason).toBe("error");
+		expect(rejected.errorMessage).toContain("provider returned bash while tools were disabled");
+		// Without the withheld tools only the native marker dialect is recognized, as before.
+		expect(rejectToolCallsFromToolFreeResponse(glm).stopReason).toBe("stop");
+		// Plain prose that mentions a tool is not a call.
+		expect(rejectToolCallsFromToolFreeResponse(response("I would run bash next."), [shellTool]).stopReason).toBe(
+			"stop",
+		);
 	});
 });

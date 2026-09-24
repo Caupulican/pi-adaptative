@@ -1,3 +1,4 @@
+import { parseTextToolCalls } from "@caupulican/pi-ai/text-tool-protocol";
 import type { AssistantMessage } from "@caupulican/pi-ai/types";
 import type { AgentTool } from "./types.ts";
 
@@ -113,7 +114,11 @@ export function rejectNativeToolProtocolResidue(
  * provider response is retained as an explicit protocol error with no synthetic prose and no
  * executable call block.
  */
-export function rejectToolCallsFromToolFreeResponse(message: AssistantMessage): AssistantMessage {
+export function rejectToolCallsFromToolFreeResponse(
+	message: AssistantMessage,
+	/** The tools the run had before this request withheld them: a model may still write their calls as text. */
+	knownTools: readonly AgentTool[] = [],
+): AssistantMessage {
 	if (message.stopReason === "error" || message.stopReason === "aborted") return message;
 	const nativeToolCall = message.content.find((block) => block.type === "toolCall");
 	const text = message.content
@@ -121,7 +126,10 @@ export function rejectToolCallsFromToolFreeResponse(message: AssistantMessage): 
 		.map((block) => block.text)
 		.join("\n");
 	const renderedToolName = text ? findRenderedToolMarker(text) : undefined;
-	const toolName = nativeToolCall?.name ?? renderedToolName;
+	// Every text envelope the text tool protocol recognizes, in any dialect it parses.
+	const envelopeToolName =
+		text && knownTools.length > 0 ? parseTextToolCalls(text, knownTools).calls[0]?.name : undefined;
+	const toolName = nativeToolCall?.name ?? renderedToolName ?? envelopeToolName;
 	if (!toolName) return message;
 	return {
 		...message,

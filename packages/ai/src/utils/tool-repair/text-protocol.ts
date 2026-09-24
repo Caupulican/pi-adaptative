@@ -341,6 +341,30 @@ function textToolErrorMessage(name: string, names: readonly string[]): string | 
 	return `Unknown tool "${name}". Valid tools: ${names.join(", ")}.`;
 }
 
+/**
+ * The `<tool_call>` body some models emit instead of JSON: the tool name, then one
+ * `<arg_key>key</arg_key><arg_value>value</arg_value>` pair per argument. A value reads as JSON when it
+ * parses as JSON, as the plain text otherwise. Undefined when the body is not exactly that shape.
+ */
+function parseArgKeyValueBody(body: string): { name: string; arguments: Record<string, unknown> } | undefined {
+	const shape =
+		/^([A-Za-z][A-Za-z0-9_.-]{0,63})\s*((?:<arg_key>[\s\S]*?<\/arg_key>\s*<arg_value>[\s\S]*?<\/arg_value>\s*)*)$/.exec(
+			body.trim(),
+		);
+	if (!shape) return undefined;
+	const args: Record<string, unknown> = {};
+	for (const pair of (shape[2] ?? "").matchAll(
+		/<arg_key>([\s\S]*?)<\/arg_key>\s*<arg_value>([\s\S]*?)<\/arg_value>/g,
+	)) {
+		const key = (pair[1] ?? "").trim();
+		if (!key) return undefined;
+		const raw = pair[2] ?? "";
+		const value = parseJsonValue(raw);
+		args[key] = value.ok ? value.value : raw;
+	}
+	return { name: shape[1] ?? "", arguments: args };
+}
+
 function extractNameFromMalformedJson(raw: string): string | undefined {
 	const match = /"(?:name|tool)"\s*:\s*"([^"]+)"/.exec(raw);
 	return match?.[1];
@@ -413,6 +437,17 @@ function parseEnvelope(
 
 	const parsedValue = parseJsonValue(match.body);
 	if (!parsedValue.ok || !isRecord(parsedValue.value)) {
+		const keyed = match.kind === "tool_call" ? parseArgKeyValueBody(match.body) : undefined;
+		if (keyed) {
+			return {
+				type: "toolCall",
+				id: textToolCallId(idPrefix, index),
+				name: keyed.name,
+				arguments: keyed.arguments,
+				source: "text-protocol",
+				errorMessage: textToolErrorMessage(keyed.name, names),
+			};
+		}
 		const name = extractNameFromMalformedJson(match.body);
 		if (!name) return undefined;
 		return {
