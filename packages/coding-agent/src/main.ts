@@ -620,6 +620,8 @@ async function resolveProjectTrusted(options: {
 	trustOverride?: boolean;
 	appMode: AppMode;
 	settingsManagerForPrompt: SettingsManager;
+	/** Whether this invocation runs a session (not --help or --list-models), so an untrusted run is worth announcing. */
+	runsSession: boolean;
 }): Promise<boolean> {
 	if (options.trustOverride !== undefined) {
 		return options.trustOverride;
@@ -635,11 +637,12 @@ async function resolveProjectTrusted(options: {
 	if (options.appMode !== "interactive") {
 		// Nobody can be asked here, so the project runs untrusted; say so, since its own settings
 		// (toolkit scripts, models, extensions) silently not applying reads as them being broken.
-		console.error(
-			chalk.yellow(
-				`Project ${options.cwd} is not trusted, so its .pi settings, extensions and instructions are not loaded. Pass --approve (-a) to trust it for this run, or trust it once in the interactive app.`,
-			),
-		);
+		if (options.runsSession)
+			console.error(
+				chalk.yellow(
+					`Project ${options.cwd} is not trusted, so its .pi settings, extensions and instructions are not loaded. Pass --approve (-a) to trust it for this run, or trust it once in the interactive app.`,
+				),
+			);
 		return false;
 	}
 
@@ -819,6 +822,7 @@ export async function main(args: string[], options?: MainOptions) {
 		trustOverride: parsed.projectTrustOverride,
 		appMode: trustPromptMode,
 		settingsManagerForPrompt: startupSettingsManager,
+		runsSession: !parsed.help && parsed.listModels === undefined,
 	});
 
 	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);

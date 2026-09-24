@@ -120,6 +120,7 @@ describe("delegate profile actions", () => {
 
 			expect(run.started).toBe(true);
 			expect(selectedModel).toBe("fast-worker");
+			// A named profile runs exactly as authored: no companion is added to its tool list.
 			expect(selectedTools.sort()).toEqual(["grep", "read"]);
 			expect(run.record?.profileId).toBe(details.profileId);
 		} finally {

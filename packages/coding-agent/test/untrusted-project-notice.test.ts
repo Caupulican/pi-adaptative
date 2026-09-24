@@ -35,11 +35,12 @@ function run(args: string[]) {
 			PI_SKIP_VERSION_CHECK: "1",
 		},
 		encoding: "utf8",
-		timeout: 60_000,
+		timeout: 120_000,
 	});
 }
 
-describe("untrusted project notice", () => {
+// Each case starts the CLI from source; a cold start on the Windows runners outlasts the default 30 s.
+describe("untrusted project notice", { timeout: 150_000 }, () => {
 	it("tells a non-interactive run that an undecided project runs untrusted, and how to trust it", () => {
 		const result = run(["-p", "hello"]);
 		expect(result.stderr).toContain(
@@ -50,5 +51,9 @@ describe("untrusted project notice", () => {
 
 	it("says nothing when the run trusts the project", () => {
 		expect(run(["-a", "-p", "hello"]).stderr).not.toContain("is not trusted");
+	});
+
+	it("says nothing for an invocation that runs no session", () => {
+		expect(run(["--help"]).stderr).not.toContain("is not trusted");
 	});
 });

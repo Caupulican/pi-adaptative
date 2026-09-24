@@ -3,7 +3,7 @@
 ### Changed
 
 - A side trip searches the conversation its brief omits with `conversation_history` instead of handing the message back (`hand_to_talker` is removed: the free side-trip model never called it).
-- A worker granted a tool whose output is packed (grep, find) also gets `artifact_retrieve`, as the root does, so its large outputs are packed and stay retrievable.
+- A worker whose grant is derived (inherited or narrowed) and holds a tool whose output is packed (grep, find) also gets `artifact_retrieve`, as the root does, so its large outputs are packed and stay retrievable; a named profile runs exactly as authored.
 - The claim check reads an answer that relays what a script printed as no test claim, and settles test and check claims against the checks that ran.
 
 ### Added
@@ -15,7 +15,7 @@
 - The activity row of a finished turn ends with its submission instead of staying on as "Working" or "Preparing, no token yet" while background work runs.
 - Per-request host work no longer grows with the session: edge grants are read from an incremental branch index instead of the whole branch, and path aliasing scans only messages after its scan mark even before a first alias exists (the host profile's per-request time stays flat over 600 turns, where it grew from about 4 to 11 ms).
 - The status bar reads BACKGROUND with what is running (a tool or a worker) once only background work is left, instead of WORKING with the finished turn's last action.
-- A print, json or rpc run in a project with no trust decision says the project runs untrusted and names `--approve`.
+- A print, json or rpc run in a project with no trust decision says the project runs untrusted and names `--approve` (not for `--help` or `--list-models`).
 - A quota failover or a move off a model the account no longer offers carries the conversation's talker to the model the work continued on.
 - A backgrounded bash or python run without an explicit timeout gets the tool's ceiling (3600 s bash, 300 s python) instead of the foreground default, so long background builds and suites are no longer killed at 120 s (30 s for python).
 

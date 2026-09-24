@@ -485,7 +485,9 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	}
 	// The root's rule for its own surface: a tool whose output is packed brings artifact_retrieve, so the
 	// worker's large outputs are packed too and every packed handle stays resolvable by the agent that sees it.
+	// A named profile stays exactly as authored: its tool list is its identity.
 	if (
+		!input.base &&
 		input.artifactRetrieveAvailable === true &&
 		toolNames.some((toolName) => PACKED_TOOL_OUTPUT_TOOLS.has(toolName)) &&
 		!toolNames.includes("artifact_retrieve") &&
