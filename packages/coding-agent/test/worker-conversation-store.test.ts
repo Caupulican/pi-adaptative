@@ -853,6 +853,26 @@ describe("WorkerConversationStore", () => {
 		expect(reopened.getRawTranscript()[0]).toEqual(userMessage(`turn-0: ${"evidence ".repeat(80)}`));
 	});
 
+	it("carries its sent-prefix marks across runs, re-anchored to the history the next run still shares", () => {
+		const conversation = new WorkerConversationStore().create(createOptions());
+		const sent = [userMessage("task one"), userMessage("follow-up"), userMessage("more")];
+		const first = conversation.requestPrefix(sent);
+		first.state.sentPrefixCount = 3;
+		first.state.sanitizerSentPrefixCount = 3;
+		first.source = sent;
+		// The next run's history is the same conversation reloaded (new objects) and extended: marks hold.
+		const extended = [...sent.map((message) => structuredClone(message)), userMessage("next task")];
+		expect(conversation.requestPrefix(extended).state).toMatchObject({
+			sentPrefixCount: 3,
+			sanitizerSentPrefixCount: 3,
+		});
+		// A history whose second message changed (a compaction replaced it) keeps only what it still shares.
+		const memory = first.state.sanitizerMemory;
+		const replaced = conversation.requestPrefix([structuredClone(sent[0]!), userMessage("summary")]);
+		expect(replaced.state).toMatchObject({ sentPrefixCount: 1, sanitizerSentPrefixCount: 1 });
+		expect(replaced.state.sanitizerMemory).not.toBe(memory);
+	});
+
 	it("remembers which parent session each attempt ran under, for a reused specialist's next task", () => {
 		const conversation = new WorkerConversationStore().create(createOptions());
 		expect(conversation.previousAttemptParentSession("attempt-1")).toBeUndefined();

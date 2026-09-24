@@ -25,7 +25,12 @@ import {
 	SessionManager,
 	type SessionRequestSnapshotInput,
 } from "@caupulican/pi-agent-core/session";
-import type { AgentMessage, ProviderRequestSnapshotContext } from "@caupulican/pi-agent-core/types";
+import { createToolFailureContextMemory } from "@caupulican/pi-agent-core/tool-failure-memory";
+import type {
+	AgentMessage,
+	ProviderRequestPrefixState,
+	ProviderRequestSnapshotContext,
+} from "@caupulican/pi-agent-core/types";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "@caupulican/pi-agent-core/usage";
 import type { AssistantMessageDiagnostic, Message, Usage } from "@caupulican/pi-ai";
 import { orchestrationSessionsDir, workerConversationSessionsDir } from "../agent-paths.ts";
@@ -216,6 +221,27 @@ interface WorkerConversationCore {
 	invalid: boolean;
 	generation: number;
 	activeTranscriptCursors: number;
+	/** Sent-prefix marks carried across this conversation's runs in this process (see `requestPrefix`). */
+	requestPrefix?: WorkerRequestPrefix;
+}
+
+/** A conversation's sent-prefix marks and the history they index: the messages its last request carried. */
+export interface WorkerRequestPrefix {
+	readonly state: ProviderRequestPrefixState;
+	source: readonly AgentMessage[];
+}
+
+/** What the provider sees of a message: two messages that render the same compare equal. */
+function providerView(message: AgentMessage | undefined): string | undefined {
+	if (!message) return undefined;
+	const view = message as {
+		role: string;
+		content?: unknown;
+		toolCallId?: unknown;
+		toolName?: unknown;
+		customType?: unknown;
+	};
+	return JSON.stringify([view.role, view.content, view.toolCallId, view.toolName, view.customType]);
 }
 
 export interface WorkerTranscriptCommitCursor {
@@ -1001,6 +1027,28 @@ export class WorkerConversation {
 	}
 
 	/** A view carries its original claim; refreshing a shared parsed core never grants new authority. */
+	/**
+	 * The conversation's sent-prefix marks for its next run, re-anchored to the leading messages that run
+	 * still shares with the history the last request carried: what the provider already has is never
+	 * rewritten, and a history compaction replaced moves the marks back to where they still hold.
+	 */
+	requestPrefix(nextHistory: readonly AgentMessage[]): WorkerRequestPrefix {
+		this.core.requestPrefix ??= {
+			state: { sentPrefixCount: 0, sanitizerSentPrefixCount: 0, sanitizerMemory: createToolFailureContextMemory() },
+			source: [],
+		};
+		const prefix = this.core.requestPrefix;
+		const mark = Math.max(prefix.state.sentPrefixCount, prefix.state.sanitizerSentPrefixCount);
+		let shared = 0;
+		while (shared < mark && providerView(prefix.source[shared]) === providerView(nextHistory[shared])) shared++;
+		if (prefix.state.sentPrefixCount > shared) prefix.state.sentPrefixCount = shared;
+		if (prefix.state.sanitizerSentPrefixCount > shared) {
+			prefix.state.sanitizerSentPrefixCount = shared;
+			prefix.state.sanitizerMemory = createToolFailureContextMemory();
+		}
+		return prefix;
+	}
+
 	getProjectClaim(): SpecialistContextClaim | undefined {
 		return this.projectClaim ? structuredClone(this.projectClaim) : undefined;
 	}

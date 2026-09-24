@@ -1137,6 +1137,10 @@ export class AgentSession {
 			admitWorkerEarlyCompaction: ({ agentId, model, contextTokens, messages }) =>
 				this._admitWorkerEarlyCompaction(agentId, model, contextTokens, messages),
 			recordWorkerCompactionOutcome: ({ agentId, model, tokensBefore, tokensAfter, outputTokens }) => {
+				// A compaction replaced the worker's history: its next request's break is sanctioned, as root's is.
+				this._custody.sanction("compaction", "a worker compaction replaced its history", {
+					conversation: `${this.sessionId}/worker:${agentId}`,
+				});
 				try {
 					this.getDecisionLedger()?.recordCompactionOutcome({
 						sessionId: `${this.sessionId}/worker:${agentId}`,

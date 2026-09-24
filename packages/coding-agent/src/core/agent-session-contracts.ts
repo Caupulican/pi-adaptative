@@ -7,6 +7,7 @@ import type {
 	AgentMessageOrigin,
 	AgentRunawayStopInfo,
 	AgentTool,
+	ProviderRequestPrefixState,
 	StreamIdleOptions,
 	ThinkingLevel,
 } from "@caupulican/pi-agent-core";
@@ -329,6 +330,12 @@ export interface IsolatedCompletionOptions {
 	 * lane's budget preflight still runs. `messages` and `tools` are ignored when it is set.
 	 */
 	requestContext?: Context;
+	/**
+	 * The caller's conversation-owned sent-prefix marks, carried across its runs the way root's agent
+	 * carries its own: a run that starts at zero lets the sanitizer and context GC rewrite what the
+	 * provider already has. The child loop writes through it in place.
+	 */
+	prefixState?: ProviderRequestPrefixState;
 	/**
 	 * The caller's conversation identity for per-conversation host policy (the reasoning pin, the lane's
 	 * observed cache lifetime). A worker passes the id its cache observations are recorded under.

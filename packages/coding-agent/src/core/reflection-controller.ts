@@ -11,7 +11,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Agent } from "@caupulican/pi-agent-core/agent";
-import { runAgentLoop, startAgentProviderRequest } from "@caupulican/pi-agent-core/agent-loop";
+import {
+	createAgentLoopContinuationState,
+	runAgentLoop,
+	startAgentProviderRequest,
+} from "@caupulican/pi-agent-core/agent-loop";
 import { resolveRequestPreflightMaxTokens } from "@caupulican/pi-agent-core/provider-request-planner";
 import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/session";
 import type { AgentContext, AgentLoopConfig, AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
@@ -1562,6 +1566,10 @@ export class ReflectionController {
 					},
 					opts.signal,
 					agent.streamFn,
+					// The caller's conversation carries its sent-prefix marks across runs; the loop writes through them.
+					opts.prefixState
+						? { ...createAgentLoopContinuationState(), providerRequestPrefixState: opts.prefixState }
+						: undefined,
 				);
 				const assistantMessages = messages.filter(
 					(message): message is AssistantMessage => message.role === "assistant",
