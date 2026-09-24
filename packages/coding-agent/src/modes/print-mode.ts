@@ -123,7 +123,10 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 			await session.prompt(initialMessage, { images: initialImages });
 		}
 
-		for (const message of messages) {
+		for (const [index, message] of messages.entries()) {
+			// A prompt resolves when its run ends, but work the run left behind (System One checking the
+			// answer, an armed continuation) still holds the session; the next message waits for it.
+			if (initialMessage || index > 0) await session.waitForForegroundIdle();
 			await session.prompt(message);
 		}
 

@@ -19,6 +19,7 @@ type FakeSession = {
 	bindExtensions: ReturnType<typeof vi.fn>;
 	subscribe: ReturnType<typeof vi.fn>;
 	prompt: ReturnType<typeof vi.fn>;
+	waitForForegroundIdle: ReturnType<typeof vi.fn>;
 	reload: ReturnType<typeof vi.fn>;
 	getCumulativeUsage: () => AssistantMessage["usage"];
 };
@@ -74,6 +75,7 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 		bindExtensions: vi.fn(async () => {}),
 		subscribe: vi.fn(() => () => {}),
 		prompt: vi.fn(async () => {}),
+		waitForForegroundIdle: vi.fn(async () => {}),
 		reload: vi.fn(async () => {}),
 		getCumulativeUsage: () => ({
 			input: 0,
@@ -117,6 +119,31 @@ describe("runPrintMode", () => {
 		expect(session.prompt).toHaveBeenCalledWith("Say done", { images });
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
+	});
+
+	it("submits each further message only after the work the previous one left behind settles", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
+		const { session } = runtimeHost;
+		// A prompt resolves while System One still checks its answer: the session stays busy until then.
+		let busy = false;
+		const calls: string[] = [];
+		session.prompt.mockImplementation(async (text: string) => {
+			if (busy) throw new Error("Agent is already processing.");
+			calls.push(text);
+			busy = true;
+		});
+		session.waitForForegroundIdle.mockImplementation(async () => {
+			busy = false;
+		});
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+			initialMessage: "first",
+			messages: ["second", "third"],
+		});
+
+		expect(exitCode).toBe(0);
+		expect(calls).toEqual(["first", "second", "third"]);
 	});
 
 	it("emits session_shutdown in json mode", async () => {
