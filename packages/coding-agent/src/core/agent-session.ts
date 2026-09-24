@@ -4,6 +4,7 @@ import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import {
 	type CompactionResult,
 	type CompactionSettings,
+	estimateTokens,
 	hardCompactionTriggerTokens,
 } from "@caupulican/pi-agent-core/compaction/compaction";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
@@ -88,6 +89,7 @@ import { BashExecutionController } from "./bash-execution-controller.ts";
 import type { BashResult } from "./bash-executor.ts";
 import { type CapabilityTierPolicy, capabilityTierPolicy, resolveCapabilityTier } from "./capability-tier.ts";
 import type { NativePiActivityPort } from "./collaboration/native-pi-activity.ts";
+import { resolveEffectiveModelPricing, switchCostUsd, usd } from "./compaction/early-compaction-economics.ts";
 import { RETENTION_AUDIT_CUSTOM_TYPE } from "./compaction/evidence-retention-projection.ts";
 import { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
 import { type AutoCompactionReason, CompactionController } from "./compaction-controller.ts";
@@ -195,6 +197,7 @@ import {
 	OwnerModelPolicy,
 } from "./model-router/owner-model-policy.ts";
 import type { LiveRoutePreview, RoutePreview } from "./model-router/route-preview.ts";
+import { sideTripBrief } from "./model-router/side-trip-brief.ts";
 import { isLocalOrManagedRouterModel } from "./model-router/tool-escalation.ts";
 import {
 	type ForegroundRouteSnapshot,
@@ -257,7 +260,12 @@ import { ProviderRequestContextController } from "./provider-request-context-con
 import { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
 import { ReflectionController } from "./reflection-controller.ts";
 import { ReflectionTurnLifecycle } from "./reflection-turn-lifecycle.ts";
-import { REPLY_ROUTE_CUSTOM_TYPE, type ReplyRouteRecord } from "./reply-route.ts";
+import {
+	CONVERSATION_TALKER_CUSTOM_TYPE,
+	type ConversationTalkerRecord,
+	REPLY_ROUTE_CUSTOM_TYPE,
+	type ReplyRouteRecord,
+} from "./reply-route.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import { latestRequestSnapshot } from "./request-snapshot-fingerprints.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
@@ -1307,6 +1315,8 @@ export class AgentSession {
 			},
 		});
 		const providerRequestContext = new ProviderRequestContextController({
+			// A side trip reads its small brief, never the transcript (see ModelRouterController.projectTurnContext).
+			transformBase: async (messages) => this._modelRouter.projectTurnContext(messages),
 			transformExtensions: this._memory.createContextProjection(() => this._extensionRunner),
 			runContextAudit: (messages) => this._runContextAudit(messages),
 			runPromptPolicyPlanning: (report) => this._runPromptPolicyPlanning(report),
@@ -4079,6 +4089,49 @@ export class AgentSession {
 	 * ollama isn't up. Delegates to {@link LocalRuntimeController}; see there for the full
 	 * consent-then-escalate contract (which includes the local-model readiness check itself).
 	 */
+	/**
+	 * The opening's route becomes the conversation's talker: the session model (a recorded model change,
+	 * so later turns and a resume run on it with no swap) at the judged thinking level, with the reason
+	 * recorded as the conversation route.
+	 */
+	private async _adoptTalker(model: Model<Api>, decision: RouteDecision): Promise<void> {
+		const current = this.model;
+		if (!current || current.provider !== model.provider || current.id !== model.id) {
+			await this._modelSelection.setModel(model, { persistSettings: false });
+		}
+		if (decision.thinkingLevel) {
+			this._modelSelection.setThinkingLevel(decision.thinkingLevel as ThinkingLevel, { persistSettings: false });
+		}
+		const record: ConversationTalkerRecord = {
+			model: formatModelRouterModel(model),
+			thinkingLevel: this.agent.state.thinkingLevel,
+			reasons: decision.reasons,
+			decidedAt: Date.now(),
+		};
+		this.sessionManager.appendCustomEntry(CONVERSATION_TALKER_CUSTOM_TYPE, record);
+		this._modelRouter.recordOpeningRoute(decision, model);
+	}
+
+	/**
+	 * A small message's side trip pays for itself when writing its brief on the side-trip model costs less
+	 * than the talker reading its warm prefix to answer (`switchCostUsd`); a price-free side-trip model
+	 * always does. Without prices on either side there is no evidence, and the talker answers.
+	 */
+	private _sideTripApproves(model: Model<Api>, text: string): boolean {
+		const prefixTokens = this.getContextUsage()?.tokens ?? 0;
+		const briefTokens =
+			sideTripBrief(this.agent.state.messages, this.agent.state.messages.length).reduce(
+				(sum, message) => sum + estimateTokens(message),
+				0,
+			) + estimateTokens({ role: "user", content: text, timestamp: 0 });
+		const cost = switchCostUsd(model, prefixTokens, briefTokens);
+		if (cost === undefined) return false;
+		if (cost === 0) return true;
+		const talker = this.model;
+		const pricing = talker ? resolveEffectiveModelPricing(talker, prefixTokens) : undefined;
+		return pricing !== undefined && cost < usd(prefixTokens, pricing.cacheRead);
+	}
+
 	private async _ensureRouteModelReady(
 		resolved: { decision: RouteDecision; model: Model<Api> } | undefined,
 	): Promise<{ decision: RouteDecision; model: Model<Api> } | undefined> {
@@ -4340,15 +4393,36 @@ export class AgentSession {
 			// Before anything is routed or sent: what the owner's accounts actually offer.
 			await this._accountModels.ready();
 			await this._leaveUnavailableSessionModel();
-			const resolvedRouteInfo = await this._modelRouter.resolveTurnRouteJudged(expandedText, {
-				// Internally generated turns (goal continuation, lane follow-ups) keep the deterministic
-				// route: the classifier already placed them, and a 20-turn loop must not buy 20 evaluations.
-				skipJudge: options?.autoContinueGoal === false,
-				// Facts the route cannot be chosen without: an image needs a model that reads images, and the
-				// context this turn sends must fit the window.
+			// Facts a route cannot be chosen without: an image needs a model that reads images, and the
+			// context this turn sends must fit the window.
+			const routeFacts = {
 				hasImages: (currentImages?.length ?? 0) > 0,
 				contextTokens: this.getContextUsage()?.tokens ?? 0,
-			});
+			};
+			let resolvedRouteInfo: { decision: RouteDecision; model: Model<Api> } | undefined;
+			if (options?.autoContinueGoal === false) {
+				// Internally generated turns (goal continuation, lane follow-ups) keep the deterministic
+				// route: the classifier already placed them, and a 20-turn loop must not buy 20 evaluations.
+				resolvedRouteInfo = await this._modelRouter.resolveTurnRouteJudged(expandedText, {
+					skipJudge: true,
+					...routeFacts,
+				});
+			} else {
+				// An owner message: the talker answers, a small message takes a side trip, and the first
+				// substantive message chooses the talker once (conversation-continuity stages 0-1).
+				const route = await this._modelRouter.routeOwnerMessage(expandedText, {
+					talkerChosen:
+						this.sessionManager.getLatestCustomEntryOnBranch(CONVERSATION_TALKER_CUSTOM_TYPE) !== undefined,
+					...routeFacts,
+					sideTripApproves: (model) => this._sideTripApproves(model, expandedText),
+				});
+				if (route.kind === "opening") {
+					const ready = await this._ensureRouteModelReady(route);
+					if (ready) await this._adoptTalker(ready.model, ready.decision);
+				} else if (route.kind === "side_trip" || route.kind === "executor") {
+					resolvedRouteInfo = route;
+				}
+			}
 			// #27: a route landing on a local (ollama) model must not hard-fail the turn just because
 			// the server isn't up yet — boot/reuse it here, or escalate to a non-local tier.
 			const readyRouteInfo = await this._ensureRouteModelReady(resolvedRouteInfo);

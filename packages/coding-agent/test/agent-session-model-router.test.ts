@@ -4,6 +4,7 @@ import { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { SessionMessageBatchEntry } from "@caupulican/pi-agent-core/session";
 import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
 import { clampThinkingLevel, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
+import type { FauxRequestEvent } from "@caupulican/pi-ai/faux";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -12,6 +13,7 @@ import { ModelRegistry } from "../src/core/model-registry.ts";
 import { MODEL_ROUTER_DECISION_CUSTOM_TYPE, type ModelRouterDecisionStatus } from "../src/core/model-router/status.ts";
 import { ModelRouterController } from "../src/core/model-router-controller.ts";
 import { FitnessStore } from "../src/core/models/fitness-store.ts";
+import { CONVERSATION_TALKER_CUSTOM_TYPE } from "../src/core/reply-route.ts";
 import type { ModelFitnessReport } from "../src/core/research/model-fitness.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -203,9 +205,10 @@ function createContext(
 }
 
 describe("AgentSession model router turn selection", () => {
-	it("does not duplicate user message_start events and preserves escalated status after cheap-to-expensive retry", async () => {
+	it("reruns a side trip that reaches for a mutating tool on the talker, without duplicating the user message", async () => {
 		const harness = await createHarness({
-			models: [{ id: "cheap" }, { id: "expensive" }],
+			// The session model is the talker; the small message takes its side trip on the cheap tier.
+			models: [{ id: "expensive" }, { id: "cheap" }],
 			baseToolsOverride: [bashTool],
 			settings: {
 				modelRouter: {
@@ -218,7 +221,7 @@ describe("AgentSession model router turn selection", () => {
 		try {
 			harness.setResponses([
 				fauxAssistantMessage([fauxToolCall("bash", { command: "cp source target" })], { stopReason: "toolUse" }),
-				fauxAssistantMessage("retried on expensive"),
+				fauxAssistantMessage("retried on the talker"),
 			]);
 
 			await harness.session.prompt("Explain whether this command is safe: cp source target");
@@ -233,13 +236,15 @@ describe("AgentSession model router turn selection", () => {
 						entry.type === "message" &&
 						entry.message.role === "assistant" &&
 						entry.message.model === "expensive" &&
-						entry.message.content.some((block) => block.type === "text" && block.text === "retried on expensive"),
+						entry.message.content.some(
+							(block) => block.type === "text" && block.text === "retried on the talker",
+						),
 				),
 			).toHaveLength(1);
 			expect(branch.filter((entry) => entry.type === "foreground_tool_start")).toHaveLength(0);
 			expect(branch.filter((entry) => entry.type === "foreground_tool_terminal")).toHaveLength(0);
 			expect(harness.session.getModelRouterStatus()).toContain(
-				"cheap/read-only -> faux/cheap (read_only_question, escalated -> faux/expensive, selected by manual)",
+				"cheap/read-only -> faux/cheap (side_trip, escalated -> faux/expensive, selected by manual)",
 			);
 		} finally {
 			harness.cleanup();
@@ -1484,6 +1489,65 @@ describe("Router candidate pool provenance (CONFIRMED-001, FC-016)", () => {
 			expect(status).toContain("1 selected model (Models selector)");
 		} finally {
 			await harness.cleanup();
+		}
+	});
+});
+
+describe("conversation stage routing", () => {
+	const routedHarness = (requests: FauxRequestEvent[]) =>
+		createHarness({
+			models: [{ id: "root" }, { id: "cheap" }, { id: "medium" }],
+			fauxProvider: { onRequest: (event) => requests.push(event) },
+			settings: {
+				modelRouter: {
+					enabled: true,
+					cheapModel: "faux/cheap",
+					mediumModel: "faux/medium",
+					expensiveModel: "faux/medium",
+				},
+			},
+		});
+	const talkerEntries = (harness: Awaited<ReturnType<typeof createHarness>>) =>
+		harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "custom" && entry.customType === CONVERSATION_TALKER_CUSTOM_TYPE);
+
+	it("chooses the talker once at the opening and keeps it for later substantive messages", async () => {
+		const requests: FauxRequestEvent[] = [];
+		const harness = await routedHarness(requests);
+		try {
+			harness.setResponses([fauxAssistantMessage("plan one"), fauxAssistantMessage("plan two")]);
+			await harness.session.prompt("Plan the migration of the ledger to a new schema; list the steps.");
+			expect(harness.session.model?.id).toBe("medium");
+			expect(talkerEntries(harness)).toHaveLength(1);
+			await harness.session.prompt("Plan the rollback for that migration; list the steps.");
+			// No second route: the talker answered, and it is still the session model.
+			expect(talkerEntries(harness)).toHaveLength(1);
+			expect(harness.session.model?.id).toBe("medium");
+			const replies = harness.session.messages.filter((message) => message.role === "assistant");
+			expect(replies.map((message) => (message as AssistantMessage).model)).toEqual(["medium", "medium"]);
+			// The talker's second request appends to its first.
+			expect(requests[1]?.cachedChars).toBeGreaterThan(0);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("sends a small message on a side trip that reads only its brief, leaving the talker in place", async () => {
+		const requests: FauxRequestEvent[] = [];
+		const harness = await routedHarness(requests);
+		try {
+			harness.setResponses([fauxAssistantMessage("the plan"), fauxAssistantMessage("you're welcome")]);
+			await harness.session.prompt("Plan the migration of the ledger to a new schema; list the steps.");
+			await harness.session.prompt("thanks!");
+			const sideTrip = harness.session.messages.at(-1) as AssistantMessage;
+			expect(sideTrip.model).toBe("cheap");
+			expect(harness.session.model?.id).toBe("medium");
+			// The brief is the talker's last reply and the new message, never the transcript.
+			expect(requests[1]?.messageCount).toBe(2);
+			expect(requests[1]?.messageCount).toBeLessThan(harness.session.messages.length);
+		} finally {
+			harness.cleanup();
 		}
 	});
 });

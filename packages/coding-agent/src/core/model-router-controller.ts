@@ -90,6 +90,7 @@ import {
 	flushModelRouterSessionBufferPrefix,
 	type ModelRouterSessionBuffer,
 } from "./model-router/session-buffer.ts";
+import { sideTripBrief } from "./model-router/side-trip-brief.ts";
 import {
 	formatModelRouterStatus,
 	getRecentModelRouterDecisions,
@@ -247,6 +248,17 @@ function formatFitnessVerdict(verdict: FitnessGateVerdict): string {
  * Owns the model-router turn routing extracted from {@link AgentSession}. See the module header for the
  * drive-path boundary that keeps the agent.prompt()/continue() loop in its foreground lifecycle owner.
  */
+/** Route reason of a small owner message's cheap-tier side trip (see `routeOwnerMessage`). */
+export const SIDE_TRIP_REASON_CODE = "side_trip";
+
+/** How an owner message is routed (see `ModelRouterController.routeOwnerMessage`). */
+export type OwnerMessageRoute =
+	| { kind: "direct" }
+	| { kind: "talker" }
+	| { kind: "opening"; decision: RouteDecision; model: Model<Api> }
+	| { kind: "side_trip"; decision: RouteDecision; model: Model<Api> }
+	| { kind: "executor"; decision: RouteDecision; model: Model<Api> };
+
 export class ModelRouterController {
 	/** Active model-router intent for the current transient routed turn, if any. */
 	private _activeModelRouterIntent?: ModelRouterIntent;
@@ -263,7 +275,13 @@ export class ModelRouterController {
 	/** Per-invocation sequence so two judge calls on identical text are two ledger entries. */
 	private _lastModelRouterIntent?: ModelRouterIntent;
 	/** The routed turn currently executing, with the root model it swapped away from. */
-	private _activeRoutedTurn?: { rootModel: Model<Api> | undefined; routedModel: Model<Api>; decision: RouteDecision };
+	private _activeRoutedTurn?: {
+		rootModel: Model<Api> | undefined;
+		routedModel: Model<Api>;
+		decision: RouteDecision;
+		/** Where this turn's exchange starts in the agent's history (the side trip's brief keeps from here). */
+		exchangeStart: number;
+	};
 
 	private readonly deps: ModelRouterControllerDeps;
 
@@ -954,6 +972,94 @@ export class ModelRouterController {
 		return undefined;
 	}
 
+	/**
+	 * Stage routing for an owner message (conversation-continuity design, stages 0-1). A small message (the
+	 * deterministic classifier says the cheap tier; no System One call) takes one side trip on the cheap
+	 * tier with a small brief, when `sideTripApproves` prices it below the talker answering on its warm
+	 * cache. Otherwise the talker answers: with a talker chosen, no route is judged; before one, the
+	 * judged route runs once and its model becomes the talker (`opening`). Executor-lane hits keep their
+	 * own route. With the router off the session model answers (`direct`).
+	 */
+	async routeOwnerMessage(
+		prompt: string,
+		input: {
+			talkerChosen: boolean;
+			hasImages?: boolean;
+			contextTokens?: number;
+			sideTripApproves(model: Model<Api>): boolean;
+		},
+	): Promise<OwnerMessageRoute> {
+		const baseline = this._resolveModelRouterTurnRoute(prompt);
+		if (!baseline) return { kind: "direct" };
+		if (baseline.decision.reasonCode === "executor_direct") return { kind: "executor", ...baseline };
+		if (baseline.decision.tier === "cheap") {
+			const session = this.deps.getModel();
+			// The owner's cheap-tier pin runs the side trip in any selection mode, as it runs a judged cheap route.
+			const pinned = this._usablePin("cheap", {
+				hasImages: input.hasImages === true,
+				contextTokens: input.contextTokens ?? 0,
+			}).model;
+			const model = pinned ?? baseline.model;
+			if (!(session && modelsAreEqual(session, model)) && input.sideTripApproves(model)) {
+				return {
+					kind: "side_trip",
+					model,
+					decision: {
+						...baseline.decision,
+						model: formatModelRouterModel(model),
+						...(pinned ? { selection: "manual" as const } : {}),
+						reasonCode: SIDE_TRIP_REASON_CODE,
+						reasons: [...baseline.decision.reasons, "small message: one side trip on a brief; the talker stays"],
+					},
+				};
+			}
+			return { kind: input.talkerChosen ? "talker" : "direct" };
+		}
+		if (input.talkerChosen) return { kind: "talker" };
+		const opening = await this.resolveTurnRouteJudged(prompt, {
+			...(input.hasImages !== undefined ? { hasImages: input.hasImages } : {}),
+			...(input.contextTokens !== undefined ? { contextTokens: input.contextTokens } : {}),
+		});
+		return opening ? { kind: "opening", ...opening } : { kind: "direct" };
+	}
+
+	/**
+	 * Record the opening's judged route as the session's route decision: the conversation's talker was
+	 * chosen by it (it runs as the session model, not as a routed turn), so the decision record and its
+	 * telemetry are written here once, as a routed turn writes them.
+	 */
+	recordOpeningRoute(decision: RouteDecision, model: Model<Api>): void {
+		const completed: ModelRouterDecisionStatus = {
+			route: decision,
+			routedModel: formatModelRouterModel(model),
+			outcome: "routed",
+			intent: decision.tier === "cheap" ? "research" : "modify",
+		};
+		this._lastModelRouterDecision = completed;
+		persistModelRouterDecision(this.deps.getSessionManager(), completed);
+		this.deps.emitAutonomyTelemetry({
+			type: AUTONOMY_TELEMETRY_EVENT_TYPES.routeDecision,
+			timestamp: new Date().toISOString(),
+			payload: {
+				tier: decision.tier,
+				risk: decision.risk,
+				reasonCode: decision.reasonCode,
+				confidence: decision.confidence,
+				outcome: completed.outcome,
+			},
+		});
+	}
+
+	/**
+	 * The messages a request of the active turn sends: a side trip reads its small brief
+	 * (`sideTripBrief`); every other turn reads the history unchanged.
+	 */
+	projectTurnContext(messages: AgentMessage[]): AgentMessage[] {
+		const active = this._activeRoutedTurn;
+		if (active?.decision.reasonCode !== SIDE_TRIP_REASON_CODE) return messages;
+		return sideTripBrief(messages, active.exchangeStart);
+	}
+
 	async resolveTurnRouteJudged(
 		prompt: string,
 		options?: { skipJudge?: boolean; hasImages?: boolean; contextTokens?: number },
@@ -1357,7 +1463,12 @@ export class ModelRouterController {
 		try {
 			// The POV snapshot reads this: the root is what the finally below restores, never a guess.
 			if (routeDecision) {
-				this._activeRoutedTurn = { rootModel: previousModel, routedModel, decision: routeDecision };
+				this._activeRoutedTurn = {
+					rootModel: previousModel,
+					routedModel,
+					decision: routeDecision,
+					exchangeStart: originalHistoryLength,
+				};
 				this._lastModelRouterDecision = completedDecision;
 			}
 			this._activeModelRouterIntent = routeDecision
@@ -1504,7 +1615,12 @@ export class ModelRouterController {
 				} else if (!bufferCommitted) {
 					agent.state.messages.splice(originalHistoryLength);
 				}
-				retryModel = this._resolveModelRouterModelForIntent("modify") ?? previousModel;
+				// A side trip that reaches for a mutating tool reruns on the talker it stepped away from, whose
+				// cache holds the conversation; any other cheap turn escalates to the modify tier.
+				retryModel =
+					routeDecision?.reasonCode === SIDE_TRIP_REASON_CODE
+						? previousModel
+						: (this._resolveModelRouterModelForIntent("modify") ?? previousModel);
 				completedDecision = {
 					route: routeDecision!,
 					routedModel: formatModelRouterModel(routedModel),

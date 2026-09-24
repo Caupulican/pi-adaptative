@@ -4,6 +4,15 @@
 who picks the exact model, how subscription-backed models are preferred, and the evidence behind each
 choice. Nothing on this screen runs a provider call by being opened.
 
+## Conversation stages
+
+The router decides once per conversation, not once per message:
+
+- **Opening.** The first owner message the classifier does not mark small is routed once (System One judges it when configured). Its model becomes the conversation's talker: it is set as the session model, so later turns and a resumed session run on it with no swap, and the choice is recorded as a `conversation_talker` entry.
+- **Talker.** Every later substantive owner message goes to the talker with no route judged. `/model` changes the talker like any session model change. A conversation that outgrows the talker's window is compacted, never moved.
+- **Side trip.** A message the classifier marks small (no System One call) takes one turn on the cheap tier (its pin first) when that costs less than the talker answering on its warm cache: writing the side trip's brief at the cheap model's cold price, against the talker's cache-read price for its prefix. A free model always qualifies. The side trip reads a small brief, the talker's last reply and the new message, never the transcript, and its reply stays in the conversation. If it reaches for a mutating tool, the message reruns on the talker.
+- **Internal turns** (goal continuations, lane follow-ups) keep the deterministic route.
+
 ## Selection mode
 
 | Mode | Tier model |

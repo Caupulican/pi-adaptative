@@ -34,7 +34,7 @@ function seedActiveGoal(harness: Harness): void {
 }
 
 describe("autonomy telemetry emission (G3)", () => {
-	it("a routed turn emits a route_decision event with the completed route's codes", async () => {
+	it("the opening's judged route emits a route_decision event with the route's codes", async () => {
 		const harness = await createHarness({
 			models: [{ id: "cheap" }, { id: "medium" }],
 			settings: { modelRouter: { enabled: true, cheapModel: "faux/cheap", mediumModel: "faux/medium" } },
@@ -42,7 +42,8 @@ describe("autonomy telemetry emission (G3)", () => {
 		try {
 			harness.setResponses([fauxAssistantMessage(JUDGE_MEDIUM), fauxAssistantMessage("answered on medium")]);
 
-			await harness.session.prompt("what's the cleanest structure for the cache invalidation subsystem?");
+			// The conversation's first substantive message is judged once and chooses the talker.
+			await harness.session.prompt("Plan the structure of the cache invalidation subsystem; list the parts.");
 
 			const routes = telemetryEvents(harness).filter(
 				(event) => event.type === AUTONOMY_TELEMETRY_EVENT_TYPES.routeDecision,
@@ -58,6 +59,7 @@ describe("autonomy telemetry emission (G3)", () => {
 			expect(typeof route.payload.confidence).toBe("number");
 			// The sink stores codes/numbers only — never the prompt text.
 			expect(JSON.stringify(route.payload)).not.toContain("cache invalidation");
+			expect(harness.session.model?.id).toBe("medium");
 		} finally {
 			harness.cleanup();
 		}

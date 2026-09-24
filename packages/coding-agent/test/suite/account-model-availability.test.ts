@@ -209,7 +209,9 @@ describe("account model availability", () => {
 				return fauxAssistantMessage("answered on sol");
 			},
 		]);
-		await harness.session.prompt("Explain this read-only value");
+		// An internal turn keeps the deterministic route, so it runs as a routed turn on the cheap pin
+		// (an owner's small message on the session's own model is a plain session turn instead).
+		await harness.session.prompt("Explain this read-only value", { autoContinueGoal: false });
 		expect(seen).toEqual(["gpt-5.4", "gpt-5.6-sol"]);
 		expect(harness.session.model?.id).toBe("gpt-5.4");
 		expect(harness.eventsOfType("warning").map((event) => event.message)).toContain(
@@ -224,7 +226,7 @@ describe("account model availability", () => {
 			settings: { modelRouter: { enabled: true, cheapModel: "openai-codex/gpt-5.4" } },
 		});
 		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: REFUSAL })]);
-		await harness.session.prompt("Explain this read-only value");
+		await harness.session.prompt("Explain this read-only value", { autoContinueGoal: false });
 		expect(harness.session.model?.id).toBe("gpt-5.4");
 		expect(harness.eventsOfType("auto_retry_start")).toHaveLength(0);
 		expect(harness.eventsOfType("warning").map((event) => event.message)).toContain(
