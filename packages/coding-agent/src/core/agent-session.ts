@@ -96,6 +96,7 @@ import type { NativePiActivityPort } from "./collaboration/native-pi-activity.ts
 import {
 	type CompactionEconomicsVerdict,
 	compactionPricingFor,
+	compactionVerdictDecision,
 	priceCompaction,
 	priceExecutor,
 	resolveEffectiveModelPricing,
@@ -1615,12 +1616,7 @@ export class AgentSession {
 			messageCount: () => this.agent.state.messages.length,
 			// Wake turns relay worker results: their answer's claims are checked like any other answer's.
 			afterTurn: async (turnStart, lease) => {
-				const window = this._claimWindow(this.agent.state.messages.slice(turnStart));
-				const correction = await this._answerClaims.check(
-					assistantAnswerText(this._findLastAssistantMessage()),
-					window.messages,
-					window.workerReceipts,
-				);
+				const correction = await this._claimCorrection(turnStart);
 				if (correction)
 					await this._foregroundRecovery.runAgentPrompt(
 						createCustomMessage("claim_delivery", correction, true, undefined, new Date().toISOString()),
@@ -3398,14 +3394,13 @@ export class AgentSession {
 		const key = `${conversation}:${verdict.proceed ? "proceed" : verdict.reason}`;
 		if (verdict.proceed || this._workerEarlyVerdicts.get(conversation) !== key) {
 			this._workerEarlyVerdicts.set(conversation, key);
-			this._recordCacheDecision({
-				kind: "early_compaction",
-				decidedAt: now,
-				admit: verdict.proceed,
-				reason: verdict.proceed ? verdict.reason : `${verdict.reason}: ${verdict.detail}`,
-				...(verdict.savingUsd !== undefined ? { savingUsd: verdict.savingUsd } : {}),
-				detail: { conversation, prefixTokens: contextTokens, remainingRequests },
-			});
+			this._recordCacheDecision(
+				compactionVerdictDecision("early_compaction", verdict, now, {
+					conversation,
+					prefixTokens: contextTokens,
+					remainingRequests,
+				}),
+			);
 		}
 		return verdict.proceed;
 	}
@@ -4537,6 +4532,16 @@ export class AgentSession {
 		return verdict.executor;
 	}
 
+	/** The correction the last answer's delivery claims call for, checked over the turn's claim window. */
+	private _claimCorrection(turnStart: number): Promise<string | undefined> {
+		const window = this._claimWindow(this.agent.state.messages.slice(turnStart));
+		return this._answerClaims.check(
+			assistantAnswerText(this._findLastAssistantMessage()),
+			window.messages,
+			window.workerReceipts,
+		);
+	}
+
 	/**
 	 * What an answer's claims are checked against: the current or most recent work unit, boundary to now,
 	 * with the receipts of workers accepted during it; the turn alone when no work unit was ever opened.
@@ -5175,12 +5180,7 @@ export class AgentSession {
 				);
 				// Claims against deliveries: a contradicted claim buys one correction turn, never a loop.
 				if (!submissionSignal?.aborted) {
-					const window = this._claimWindow(this.agent.state.messages.slice(turnStart));
-					const correction = await this._answerClaims.check(
-						assistantAnswerText(this._findLastAssistantMessage()),
-						window.messages,
-						window.workerReceipts,
-					);
+					const correction = await this._claimCorrection(turnStart);
 					if (correction && !submissionSignal?.aborted) {
 						await this._modelRouter.runRoutedTurn(
 							[createCustomMessage("claim_delivery", correction, true, undefined, new Date().toISOString())],

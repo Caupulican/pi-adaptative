@@ -68,6 +68,30 @@ export type CompactionEconomicsVerdict =
  * is taken at the least favorable end of `retained` +/- one standard error (the whole [0, 1] range
  * without evidence), so an uncertain curve never forces a context-losing compaction.
  */
+/** A priced compaction verdict as the decision ledger records it. */
+export function compactionVerdictDecision(
+	kind: string,
+	verdict: CompactionEconomicsVerdict,
+	decidedAt: number,
+	detail: Readonly<Record<string, number | string>>,
+): {
+	kind: string;
+	decidedAt: number;
+	admit: boolean;
+	reason: string;
+	savingUsd?: number;
+	detail: Readonly<Record<string, number | string>>;
+} {
+	return {
+		kind,
+		decidedAt,
+		admit: verdict.proceed,
+		reason: verdict.proceed ? verdict.reason : `${verdict.reason}: ${verdict.detail}`,
+		...(verdict.savingUsd !== undefined ? { savingUsd: verdict.savingUsd } : {}),
+		detail,
+	};
+}
+
 export function priceCompaction(input: CompactionEconomicsInput): CompactionEconomicsVerdict {
 	const costs = compactionCosts(input);
 	if (!costs) {

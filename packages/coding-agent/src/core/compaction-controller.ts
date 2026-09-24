@@ -40,6 +40,7 @@ import {
 	type CompactionEconomicsInput,
 	type CompactionEconomicsVerdict,
 	compactionPricingFor,
+	compactionVerdictDecision,
 	planIdlePreparation,
 	priceCompaction,
 	resolveEffectiveModelPricing,
@@ -1593,14 +1594,12 @@ export class CompactionController {
 			...(facts.retained ? { retained: facts.retained } : {}),
 			summaryPrepared: true,
 		});
-		this.deps.recordCacheDecision?.({
-			kind: "prepared_resume",
-			decidedAt: now,
-			admit: verdict.proceed,
-			reason: verdict.proceed ? verdict.reason : `${verdict.reason}: ${verdict.detail}`,
-			...(verdict.savingUsd !== undefined ? { savingUsd: verdict.savingUsd } : {}),
-			detail: { prefixTokens: requestTokens, inFlight: recorded ? 0 : 1 },
-		});
+		this.deps.recordCacheDecision?.(
+			compactionVerdictDecision("prepared_resume", verdict, now, {
+				prefixTokens: requestTokens,
+				inFlight: recorded ? 0 : 1,
+			}),
+		);
 		if (!verdict.proceed) {
 			inFlight?.abort.abort();
 			this.idleView = { state: "resumed", fresh: false, at: now };
@@ -1662,14 +1661,7 @@ export class CompactionController {
 		const changed = key !== this.lastEarlyVerdictKey;
 		this.lastEarlyVerdictKey = key;
 		if (changed || verdict.proceed) {
-			this.deps.recordCacheDecision?.({
-				kind: "early_compaction",
-				decidedAt: now,
-				admit: verdict.proceed,
-				reason: verdict.proceed ? verdict.reason : `${verdict.reason}: ${verdict.detail}`,
-				...(verdict.savingUsd !== undefined ? { savingUsd: verdict.savingUsd } : {}),
-				detail,
-			});
+			this.deps.recordCacheDecision?.(compactionVerdictDecision("early_compaction", verdict, now, detail));
 		}
 		if (verdict.proceed) {
 			this.pendingEarlyCompactionPrediction = {

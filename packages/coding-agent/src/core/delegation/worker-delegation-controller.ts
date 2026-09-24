@@ -903,10 +903,10 @@ export class WorkerDelegationController {
 	previewWorkerModel(role: WorkerRole = "implementer"): Model<Api> | undefined {
 		const foregroundModel = this.deps.getModel();
 		if (!foregroundModel) return undefined;
-		const pins = this.deps.getSettingsManager().getWorkerModelPinPolicy();
+		const modelPinPolicy = this.deps.getSettingsManager().getWorkerModelPinPolicy();
 		return previewWorkerModel({
 			foregroundModel,
-			pin: pins.status === "active" ? resolveWorkerModelPin(pins, role)?.binding : undefined,
+			pin: modelPinPolicy.status === "active" ? resolveWorkerModelPin(modelPinPolicy, role)?.binding : undefined,
 			routing: this.deps.getSettingsManager().getWorkerAccountRouting(),
 			role,
 			modelRegistry: this.deps.getModelRegistry(),
