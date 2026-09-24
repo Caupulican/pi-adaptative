@@ -730,7 +730,6 @@ describe("H-MoE Expert Routing Substrate (HMOE-001..HMOE-125)", () => {
 				emit: () => {},
 				emitAutonomyTelemetry: () => {},
 				resolveLaneModel: () => undefined,
-				resolveCurationModelIfFit: () => undefined,
 				getToolProbeVerdict: () => undefined,
 				expertSelector,
 			});

@@ -24,7 +24,11 @@ export interface ToolkitScript {
 }
 
 export type ToolkitMatch =
-	| { kind: "exact"; script: ToolkitScript }
+	/**
+	 * `literal`: the request IS the script's name or one of its taught aliases. Otherwise the script won
+	 * the scored match by the margin rule, a clear reading of the request but still a reading.
+	 */
+	| { kind: "exact"; script: ToolkitScript; literal: boolean }
 	| { kind: "ambiguous"; shortlist: ToolkitScript[] }
 	| { kind: "none"; closest: ToolkitScript[] };
 
@@ -68,9 +72,9 @@ export function matchToolkitScript(request: string, scripts: readonly ToolkitScr
 
 	// 1. Exact name or alias (normalized) matches directly.
 	for (const script of scripts) {
-		if (normalize(script.name) === normalizedRequest) return { kind: "exact", script };
+		if (normalize(script.name) === normalizedRequest) return { kind: "exact", script, literal: true };
 		for (const alias of script.aliases ?? []) {
-			if (normalize(alias) === normalizedRequest) return { kind: "exact", script };
+			if (normalize(alias) === normalizedRequest) return { kind: "exact", script, literal: true };
 		}
 	}
 
@@ -89,7 +93,7 @@ export function matchToolkitScript(request: string, scripts: readonly ToolkitScr
 		best.score >= MIN_SCORE &&
 		(runnerUp === undefined || (best.score >= runnerUp.score * MARGIN_FACTOR && best.score - runnerUp.score >= 2))
 	) {
-		return { kind: "exact", script: best.script };
+		return { kind: "exact", script: best.script, literal: false };
 	}
 
 	// No clear winner: shortlist for disambiguation — never guess.

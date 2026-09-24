@@ -1,9 +1,9 @@
 /**
- * Model-router turn routing: the session's per-turn model-selection subsystem — the regex/executor
- * route resolver, the optional System One routing judge, the executor lane (Level-0 toolkit direct hit
- * + speculative brain-refined retry), the per-tier thinking/tool-surface swap around a routed turn,
- * the cheap-research-turn session buffer with mutating-tool escalation to an expensive retry, and
- * the router status/diagnostics report.
+ * Model-router turn routing: the session's model-selection subsystem — the conversation stages (the
+ * opening judged once into the talker, small messages on a brief side trip, exact toolkit hits run
+ * with no model), the regex route resolver, the optional System One routing judge, the per-tier
+ * thinking/tool-surface swap around a routed turn, the cheap-turn session buffer with mutating-tool
+ * escalation back to the talker, and the router status/diagnostics report.
  *
  * Extracted verbatim from agent-session.ts (god-file decomposition). Owns the transient per-turn
  * route state — the active intent/route, the cheap-turn session buffer, the escalation-requested and
@@ -12,9 +12,8 @@
  * session/settings managers, the model registry, the agent dir, the session-disposal abort signal for
  * the routing judge and isolated completions, the base system prompt, the isolated-completion primitive, spawned-usage
  * accounting, the event/telemetry
- * emitters, and the recently-extracted BackgroundLaneController (resolveLaneModel) / ContextPipeline
- * (resolveCurationModelIfFit) collaborators — is reached through narrow deps accessors rather than the
- * whole AgentSession.
+ * emitters, and the recently-extracted BackgroundLaneController (resolveLaneModel) collaborator — is
+ * reached through narrow deps accessors rather than the whole AgentSession.
  *
  * Drive-path boundary (deliberate): the actual agent.prompt()/continue() loop belongs to the
  * session-owned ForegroundRecoveryController; this controller's parallel routed drive path
@@ -43,7 +42,6 @@ import type {
 } from "./agent-session-contracts.ts";
 import type { RouteDecision } from "./autonomy/contracts.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "./autonomy/telemetry-events.ts";
-import { latestUserPromptText } from "./context/message-text.ts";
 import type { ExpertSelectionPlan } from "./expert-routing/contracts.ts";
 import { buildWorkerCapabilityRequest } from "./expert-routing/request-builder.ts";
 import type { ExpertSelectionService } from "./expert-routing/service.ts";
@@ -103,7 +101,6 @@ import { isLocalOrManagedRouterModel, shouldEscalateModelRouterTool } from "./mo
 import type { ModelToolProbeVerdict } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import type { SettingsManager } from "./settings-manager.ts";
-import { runReflexInterpreterCompletion } from "./toolkit/reflex-interpreter.ts";
 
 /** Canonical `provider/id` label for a routed/resolved model, as it appears in decisions and status. */
 export function formatModelRouterModel(model: Model<Api>): string {
@@ -204,8 +201,6 @@ export interface ModelRouterControllerDeps {
 	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
 	/** Resolves the judge model pattern via {@link BackgroundLaneController}. */
 	resolveLaneModel(pattern: string): Model<Api> | undefined;
-	/** Fitness-gated reflex-brain model via {@link ContextPipeline} (executor speculative refinement). */
-	resolveCurationModelIfFit(): Model<Api> | undefined;
 	/** Persisted `/toolprobe` verdict for this model (native / text-protocol / none), or undefined
 	 * when never probed. Tier-resolution's consultation reads this ONLY for local/managed models
 	 * ({@link isLocalOrManagedRouterModel}); cloud models never call it. */
@@ -257,7 +252,7 @@ export type OwnerMessageRoute =
 	| { kind: "talker" }
 	| { kind: "opening"; decision: RouteDecision; model: Model<Api> }
 	| { kind: "side_trip"; decision: RouteDecision; model: Model<Api> }
-	| { kind: "executor"; decision: RouteDecision; model: Model<Api> };
+	| { kind: "toolkit"; scriptName: string };
 
 export class ModelRouterController {
 	/** Active model-router intent for the current transient routed turn, if any. */
@@ -417,7 +412,6 @@ export class ModelRouterController {
 				tier: this._activeModelRouterRoute.tier,
 				toolName,
 				args,
-				reasonCode: this._activeModelRouterRoute.reasonCode,
 			})
 		) {
 			this._modelRouterEscalationRequested = true;
@@ -616,76 +610,6 @@ export class ModelRouterController {
 		return { decision, model: expensive.model };
 	}
 
-	private _resolveExecutorRoute(
-		prompt: string,
-		executorPattern: string | undefined,
-	): { decision: RouteDecision; model: Model<Api> } | undefined {
-		if (!executorPattern) return undefined;
-		try {
-			const verdict = classifyExecutorTurn(prompt, this.deps.getSettingsManager().getToolkitScripts());
-			if (!verdict.execute) return undefined;
-			const resolved = resolveCliModel({ cliModel: executorPattern, modelRegistry: this.deps.getModelRegistry() });
-			if (!resolved.model || !this._hasAccess(resolved.model)) return undefined;
-			// Fitness gate: the executor must have PROVEN tool-calling on this host (same
-			// canonical-ref discipline as the curation gate).
-			if (!this._evaluateModelFitness("executor", resolved.model).fit) return undefined;
-			this._lastModelRouterIntent = "research";
-			return {
-				decision: {
-					tier: "cheap",
-					risk: "scoped-write",
-					confidence: 1,
-					reasonCode: "executor_direct",
-					reasons: [`Executor lane: Level-0 direct hit on toolkit script "${verdict.scriptName}"`],
-					selection: "manual",
-				},
-				model: resolved.model,
-			};
-		} catch {
-			return undefined;
-		}
-	}
-
-	/** True if a run_toolkit_script tool result since `fromIndex` actually EXECUTED (not error/ambiguous). */
-	private _executorTurnExecutedScript(fromIndex: number): boolean {
-		for (const message of this.deps.getAgent().state.messages.slice(fromIndex)) {
-			if ((message as { role?: string }).role !== "toolResult") continue;
-			if ((message as { toolName?: string }).toolName !== "run_toolkit_script") continue;
-			if ((message as { isError?: boolean }).isError === true) continue;
-			const outcome = (message as { details?: { outcome?: unknown } }).details?.outcome;
-			if (outcome === "executed") return true;
-		}
-		return false;
-	}
-
-	/** Ask the reflex brain to refine the last user request into an explicit toolkit instruction. */
-	private async _buildExecutorRefinedPrompt(messages: AgentMessage | AgentMessage[]): Promise<string | undefined> {
-		try {
-			const model = this.deps.resolveCurationModelIfFit();
-			if (!model) return undefined;
-			const list = Array.isArray(messages) ? messages : [messages];
-			const request = latestUserPromptText(list);
-			if (!request) return undefined;
-			const scripts = this.deps.getSettingsManager().getToolkitScripts();
-			const plan = await runReflexInterpreterCompletion({
-				request,
-				scripts,
-				model,
-				laneKind: "executor",
-				usageKind: "executor-brain",
-				usageLabel: "executor-brain-warmup",
-				sessionId: this.deps.getSessionManager().getSessionId(),
-				completionRunner: this.deps,
-				usageReporter: this.deps,
-			});
-			if (!plan || plan.script === "none") return undefined;
-			const argHint = plan.args.length > 0 ? ` with args ${JSON.stringify(plan.args)}` : "";
-			return `Run the toolkit script "${plan.script}"${argHint} using run_toolkit_script, then report its result exactly.`;
-		} catch {
-			return undefined;
-		}
-	}
-
 	private _resolveModelRouterTurnRoute(prompt: string): { decision: RouteDecision; model: Model<Api> } | undefined {
 		const settings = this.deps.getSettingsManager().getModelRouterSettings();
 		// Off means "keep the session model"; a session model the owner's policy now disallows is
@@ -697,13 +621,6 @@ export class ModelRouterController {
 			this._lastModelRouterSkipReason = "disabled";
 			return undefined;
 		}
-
-		// Executor lane: a Level-0 DIRECT toolkit hit on a command-shaped prompt routes the
-		// whole turn to the configured local executor (tool-call-fitness-gated) instead of
-		// spending the frontier model on a one-tool reflex. Ambiguity never routes here — it
-		// stays with the big model and the reflex brain. Deterministic, so the judge is skipped.
-		const executorRoute = this._resolveExecutorRoute(prompt, settings.executorModel);
-		if (executorRoute) return executorRoute;
 
 		const decision = classifyModelRouterRoute(prompt);
 		this._lastModelRouterIntent = decision.tier === "cheap" ? "research" : "modify";
@@ -977,8 +894,8 @@ export class ModelRouterController {
 	 * deterministic classifier says the cheap tier; no System One call) takes one side trip on the cheap
 	 * tier with a small brief, when `sideTripApproves` prices it below the talker answering on its warm
 	 * cache. Otherwise the talker answers: with a talker chosen, no route is judged; before one, the
-	 * judged route runs once and its model becomes the talker (`opening`). Executor-lane hits keep their
-	 * own route. With the router off the session model answers (`direct`).
+	 * judged route runs once and its model becomes the talker (`opening`). An exact toolkit hit runs
+	 * with no model (`toolkit`). With the router off the session model answers (`direct`).
 	 */
 	async routeOwnerMessage(
 		prompt: string,
@@ -989,9 +906,11 @@ export class ModelRouterController {
 			sideTripApproves(model: Model<Api>): boolean;
 		},
 	): Promise<OwnerMessageRoute> {
+		// An exact toolkit hit is the harness's own work: the script runs with no model at all.
+		const toolkit = classifyExecutorTurn(prompt, this.deps.getSettingsManager().getToolkitScripts());
+		if (toolkit.execute && toolkit.scriptName) return { kind: "toolkit", scriptName: toolkit.scriptName };
 		const baseline = this._resolveModelRouterTurnRoute(prompt);
 		if (!baseline) return { kind: "direct" };
-		if (baseline.decision.reasonCode === "executor_direct") return { kind: "executor", ...baseline };
 		if (baseline.decision.tier === "cheap") {
 			const session = this.deps.getModel();
 			// The owner's cheap-tier pin runs the side trip in any selection mode, as it runs a judged cheap route.
@@ -1069,7 +988,7 @@ export class ModelRouterController {
 		const baselineTier = baseline.decision.tier;
 		// Internally generated turns (goal continuation, lane follow-ups) keep the deterministic route: a
 		// 20-turn loop must not buy 20 allocation judgments. Deterministic executor routes are decided.
-		if (options?.skipJudge || baseline.decision.reasonCode === "executor_direct") return baseline;
+		if (options?.skipJudge) return baseline;
 		if (baselineTier !== "cheap" && baselineTier !== "medium" && baselineTier !== "expensive") return baseline;
 		const signal = this.deps.getReflectionSignal();
 		const facts = { hasImages: options?.hasImages === true, contextTokens: options?.contextTokens ?? 0 };
@@ -1486,15 +1405,13 @@ export class ModelRouterController {
 				? undefined
 				: routeDecision.thinkingLevel
 					? (routeDecision.thinkingLevel as ThinkingLevel)
-					: routeDecision.reasonCode === "executor_direct"
-						? routerThinkingSettings.executorThinking
-						: routeDecision.tier === "cheap"
-							? routerThinkingSettings.cheapThinking
-							: routeDecision.tier === "medium"
-								? routerThinkingSettings.mediumThinking
-								: routeDecision.tier === "expensive"
-									? routerThinkingSettings.expensiveThinking
-									: undefined;
+					: routeDecision.tier === "cheap"
+						? routerThinkingSettings.cheapThinking
+						: routeDecision.tier === "medium"
+							? routerThinkingSettings.mediumThinking
+							: routeDecision.tier === "expensive"
+								? routerThinkingSettings.expensiveThinking
+								: undefined;
 			const routedThinkingLevel = clampThinkingLevel(
 				routedModel,
 				configuredThinking ?? previousThinkingLevel,
@@ -1542,69 +1459,6 @@ export class ModelRouterController {
 			}
 			if (continueFromCanonicalHistory) await this.deps.runAgentContinuation(signal);
 			else await this.deps.runAgentPrompt(messages, signal);
-			// Speculative muscle-retry: an executor-routed turn is a bet that the
-			// small model can run the toolkit command directly. If it ends WITHOUT a successful
-			// run_toolkit_script execution, retry ONCE on the same executor with the brain's
-			// refined instruction injected — the brain warms while the muscle tries, so the retry
-			// pays only when the muscle actually missed.
-			// Not on a cancelled submission: the miss is then the cancellation's doing, and the refine
-			// step is itself a provider call the submission's owner has already declined to pay for.
-			if (
-				routeDecision?.reasonCode === "executor_direct" &&
-				!this._isModelRouterRetry &&
-				!signal?.aborted &&
-				!this._executorTurnExecutedScript(originalHistoryLength)
-			) {
-				const refined = await this._buildExecutorRefinedPrompt(messages);
-				if (refined) {
-					// A prepared executor tool may already have crossed the lifecycle commit boundary.
-					// In that case the canonical tool/result history must remain visible to the retry;
-					// only an uncommitted speculative route may discard its live suffix and replace its
-					// buffer.
-					if (this._modelRouterSessionBuffer?.committed !== true) {
-						const prefixCommitted = this._modelRouterSessionBuffer?.prefixCommitted === true;
-						const prefixMessageCount = this._modelRouterSessionBuffer?.prefixMessageCount ?? 0;
-						agent.state.messages.splice(
-							prefixCommitted ? originalHistoryLength + prefixMessageCount : originalHistoryLength,
-						);
-						if (bufferRoutedTurn) {
-							this._modelRouterSessionBuffer = createModelRouterSessionBuffer();
-							if (prefixCommitted) {
-								this._modelRouterSessionBuffer.prefixCommitted = true;
-								this._modelRouterSessionBuffer.prefixMessageCount = prefixMessageCount;
-							}
-						}
-					}
-					await this.deps.runAgentPrompt(
-						[{ role: "user", content: [{ type: "text", text: refined }], timestamp: Date.now() }],
-						signal,
-					);
-					completedDecision = {
-						route: {
-							...routeDecision,
-							reasonCode: "executor_speculative_retry",
-							reasons: [
-								...routeDecision.reasons,
-								"Executor missed on first try; retried with brain-refined instruction",
-							],
-						},
-						routedModel: formatModelRouterModel(routedModel),
-						outcome: "routed",
-						intent: "research",
-					};
-					this._lastModelRouterDecision = completedDecision;
-				} else {
-					// The muscle missed AND the reflex brain could not refine the request into a toolkit
-					// instruction (no fit brain model, or no confident plan). There is deliberately NO
-					// frontier fallback here, so surface the miss instead of letting it stand silently —
-					// otherwise the routed turn just ends with an unrun command and no explanation.
-					this.deps.emit({
-						type: "warning",
-						message:
-							"Executor lane: the toolkit command did not run and the reflex brain could not refine it into an explicit instruction; leaving the turn as-is (no automatic escalation).",
-					});
-				}
-			}
 			if (bufferRoutedTurn && this._modelRouterEscalationRequested) {
 				const bufferCommitted = this._modelRouterSessionBuffer?.committed === true;
 				const prefixCommitted = this._modelRouterSessionBuffer?.prefixCommitted === true;

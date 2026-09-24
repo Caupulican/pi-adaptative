@@ -194,7 +194,6 @@ function createController(options: {
 		},
 		emitAutonomyTelemetry: () => {},
 		resolveLaneModel: () => undefined,
-		resolveCurationModelIfFit: () => undefined,
 		getToolProbeVerdict: () => undefined,
 		getCandidatePool: () => {
 			const pool = resolveRouterCandidatePool(

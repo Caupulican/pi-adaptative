@@ -145,7 +145,6 @@ function makeProbe(throwAfterCommit: boolean): RouterProbe {
 		emit: () => {},
 		emitAutonomyTelemetry: () => {},
 		resolveLaneModel: () => undefined,
-		resolveCurationModelIfFit: () => undefined,
 		getToolProbeVerdict: () => undefined,
 	};
 	controller = new ModelRouterController(deps);

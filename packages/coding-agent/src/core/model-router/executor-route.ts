@@ -1,18 +1,15 @@
 import { matchToolkitScript, type ToolkitScript } from "../toolkit/script-registry.ts";
 
 /**
- * Executor-lane classifier (G16): decides when a USER turn is a direct toolkit command that a
- * small local executor model can own end-to-end ("restore db staging", "run the status report"),
- * instead of spending the frontier model on a one-tool reflex.
+ * Executor-lane classifier (G16): decides when a USER turn is a direct toolkit command the harness
+ * runs itself, with no model ("restore-db", a taught alias such as "run the status report"), instead of
+ * spending a model on a one-tool reflex.
  *
  * Deliberately conservative — ALL of:
- *   - the deterministic Level-0 matcher scores an EXACT/direct hit (the same margin rule that
- *     gates tool-side matching; ambiguity never routes to the executor, it stays with the big
- *     model + reflex brain), and
+ *   - the deterministic Level-0 matcher finds the script by its exact name or a taught alias (a
+ *     scored or ambiguous match never runs here; it stays with the talker and its reflex brain), and
  *   - the prompt LOOKS like a command: single line, short, no code fences/paths of substance.
- * Everything else falls through to normal routing. The executor model itself is gated by the
- * caller (configured + resolved + tool-call fitness), and failures escalate via the existing
- * cheap-tier escalation path.
+ * Everything else falls through to normal routing.
  */
 
 const EXECUTOR_MAX_PROMPT_CHARS = 120;
@@ -36,5 +33,9 @@ export function classifyExecutorTurn(prompt: string, scripts: readonly ToolkitSc
 	if (match.kind !== "exact") {
 		return { execute: false, reason: match.kind === "ambiguous" ? "ambiguous_match" : "no_match" };
 	}
+	// The harness runs the script with no model to read the request, so only the script's own name or a
+	// taught alias is a command; a scored match ("is the status report green?") is a reading, and a
+	// reading is the talker's to make.
+	if (!match.literal) return { execute: false, reason: "scored_match" };
 	return { execute: true, scriptName: match.script.name, reason: "level0_direct_hit" };
 }

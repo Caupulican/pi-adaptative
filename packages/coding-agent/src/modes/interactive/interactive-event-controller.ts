@@ -224,6 +224,10 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 				host.addMessageToChat(event.message);
 				host.updatePendingMessagesDisplay();
 				host.ui.requestRender();
+			} else if (event.message.role === "bashExecution") {
+				// A run the harness made for the owner (an exact toolkit hit) shows like a `!` command.
+				host.addMessageToChat(event.message);
+				host.ui.requestRender();
 			} else if (event.message.role === "assistant") {
 				host.clearPendingStreamingUiUpdate();
 				host.lastStreamingUiUpdateAt = 0;

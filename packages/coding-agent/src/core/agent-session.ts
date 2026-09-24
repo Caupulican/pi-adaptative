@@ -1511,7 +1511,6 @@ export class AgentSession {
 			emit: (event) => this._emit(event),
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			resolveLaneModel: (pattern) => this._backgroundLanes.resolveLaneModel(pattern),
-			resolveCurationModelIfFit: () => this._resolveCurationModelIfFit(),
 			getToolProbeVerdict: (model) => this._toolProtocol.getToolProbeVerdict(model),
 			// The pool is the operator's Models configuration (startup enabledModels / --models, an
 			// SDK scope, or a live Models-selector edit), or every authed model when uncustomized.
@@ -4214,6 +4213,45 @@ export class AgentSession {
 		return { messages: window.messages, workerReceipts: window.customs as ClaimReceipts[] };
 	}
 
+	/**
+	 * An exact toolkit hit (conversation-continuity N1): the harness runs the registered script itself
+	 * through the `run_toolkit_script` tool (its authorization, danger confirmation and output bounds
+	 * unchanged) with no model request, and records the run as an owner-issued execution, as a `!` command
+	 * is recorded, so the talker reads it on its next turn. The owner's message is kept in the history.
+	 */
+	private async _runToolkitHit(
+		scriptName: string,
+		turnMessages: readonly AgentMessage[],
+		signal?: AbortSignal,
+	): Promise<void> {
+		const tool = this.agent.state.tools.find((candidate) => candidate.name === "run_toolkit_script");
+		if (!tool) return;
+		for (const message of turnMessages) {
+			if (message.role !== "user") continue;
+			this.agent.state.messages.push(message);
+			this.sessionManager.appendMessage(message);
+			this._emit({ type: "message_end", message });
+		}
+		const command = `run_toolkit_script ${scriptName}`;
+		let output: string;
+		let exitCode: number | undefined;
+		try {
+			const result = await tool.execute(`toolkit-${randomUUID()}`, { script: scriptName }, signal);
+			output = result.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+			const details = result.details as { exitCode?: number | null } | undefined;
+			exitCode = typeof details?.exitCode === "number" ? details.exitCode : result.isError ? 1 : 0;
+		} catch (error) {
+			output = error instanceof Error ? error.message : String(error);
+			exitCode = undefined;
+		}
+		this._bash.recordBashResult(command, { output, exitCode, cancelled: signal?.aborted === true, truncated: false });
+		const recorded = this.agent.state.messages.at(-1);
+		if (recorded?.role === "bashExecution") {
+			this._emit({ type: "message_start", message: recorded });
+			this._emit({ type: "message_end", message: recorded });
+		}
+	}
+
 	private async _ensureRouteModelReady(
 		resolved: { decision: RouteDecision; model: Model<Api> } | undefined,
 	): Promise<{ decision: RouteDecision; model: Model<Api> } | undefined> {
@@ -4325,6 +4363,8 @@ export class AgentSession {
 		let messages: AgentMessage[] | undefined;
 		let routedTurnModel: Model<Api> | undefined;
 		let routedTurnRouteDecision: RouteDecision | undefined;
+		// An exact toolkit hit the harness runs itself, with no model (see `_runToolkitHit`).
+		let toolkitHit: string | undefined;
 		// Built and painted early (see below) so a later throw in this try block — e.g. no model
 		// selected/authenticated — can un-register it from _earlyDisplayedUserMessages instead of
 		// leaking the reference forever.
@@ -4497,8 +4537,13 @@ export class AgentSession {
 				if (route.kind === "opening") {
 					const ready = await this._ensureRouteModelReady(route);
 					if (ready) await this._adoptTalker(ready.model, ready.decision);
-				} else if (route.kind === "side_trip" || route.kind === "executor") {
+				} else if (route.kind === "side_trip") {
 					resolvedRouteInfo = route;
+				} else if (
+					route.kind === "toolkit" &&
+					this.agent.state.tools.some((tool) => tool.name === "run_toolkit_script")
+				) {
+					toolkitHit = route.scriptName;
 				}
 			}
 			// #27: a route landing on a local (ollama) model must not hard-fail the turn just because
@@ -4700,6 +4745,10 @@ export class AgentSession {
 				messages.push(
 					createCustomMessage("request_authority", requestNote, false, undefined, new Date().toISOString()),
 				);
+			}
+			if (toolkitHit !== undefined) {
+				await this._runToolkitHit(toolkitHit, messages, submissionSignal);
+				return;
 			}
 			const preflight = await executeSystemOnePreflight(this._systemOneController, this.agent.state.messages.length);
 			if (preflight.proceed) {

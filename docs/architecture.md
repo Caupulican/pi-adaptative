@@ -31,7 +31,7 @@ session module under `packages/coding-agent/src/core`. Regenerate after adding o
 | `local-prefix-warm-controller.ts` | no | (no header comment) |
 | `local-runtime-controller.ts` | no | Local-runtime (Ollama) lifecycle controller. |
 | `memory-controller.ts` | no | Memory controller: the session's plug-and-play memory subsystem — the read-only OKF retrieval provider, the bounded prompt-evidence surfacing pilot, cross-session recall effectiveness, and the live {@link MemoryManager} (bundled file-store + transcript-recall providers plus any extension contributions). |
-| `model-router-controller.ts` | no | Model-router turn routing: the session's per-turn model-selection subsystem — the regex/executor route resolver, the optional System One routing judge, the executor lane (Level-0 toolkit direct hit + speculative brain-refined retry), the per-tier thinking/tool-surface swap around a routed turn, the cheap-research-turn  |
+| `model-router-controller.ts` | no | Model-router turn routing: the session's model-selection subsystem — the conversation stages (the opening judged once into the talker, small messages on a brief side trip, exact toolkit hits run with no model), the regex route resolver, the optional System One routing judge, the per-tier thinking/tool-surface swap arou |
 | `model-selection-controller.ts` | no | User-facing model + thinking-level selection. |
 | `pending-input-queue-controller.ts` | yes | (no header comment) |
 | `profile-filter-controller.ts` | no | Resource-profile tool/extension gating + reload-time profile model re-application. |

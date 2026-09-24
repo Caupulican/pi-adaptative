@@ -1,10 +1,8 @@
-import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../src/core/agent-session.ts";
 import { BackgroundLaneController } from "../src/core/background-lane-controller.ts";
 import { ContextPipeline, type ContextPipelineDeps } from "../src/core/context-pipeline.ts";
-import { ModelRouterController } from "../src/core/model-router-controller.ts";
 
 /**
  * Shared mock signatures for `addSpawnedUsage`/`runIsolatedCompletion` across every describe block
@@ -65,88 +63,6 @@ function usageWithCost(total: number): Usage {
 		cost: { input: total / 2, output: total / 2, cacheRead: 0, cacheWrite: 0, total },
 	};
 }
-
-describe("model-router-controller: addSpawnedUsage reportId + laneKind", () => {
-	const model = testModel("anthropic", "brain-model");
-
-	type ExecutorContext = {
-		deps: {
-			resolveCurationModelIfFit: () => Model<Api> | undefined;
-			getSettingsManager: () => { getToolkitScripts: () => [] };
-			runIsolatedCompletion: ReturnType<typeof vi.fn<RunIsolatedCompletionFn>>;
-			addSpawnedUsage: ReturnType<typeof vi.fn<AddSpawnedUsageFn>>;
-			getSessionManager: () => { getSessionId: () => string };
-		};
-	};
-
-	function executorContext(sessionId = "session-a"): ExecutorContext {
-		return {
-			deps: {
-				resolveCurationModelIfFit: () => model,
-				getSettingsManager: () => ({ getToolkitScripts: () => [] }),
-				runIsolatedCompletion: vi.fn<RunIsolatedCompletionFn>(async () => ({
-					text: "none",
-					usage: usageWithCost(0.05),
-					stopReason: "stop",
-				})),
-				addSpawnedUsage: vi.fn<AddSpawnedUsageFn>(() => "entry-id"),
-				getSessionManager: () => ({ getSessionId: () => sessionId }),
-			},
-		};
-	}
-
-	const buildExecutorRefinedPrompt = (
-		ModelRouterController.prototype as unknown as {
-			_buildExecutorRefinedPrompt(
-				this: ExecutorContext,
-				messages: AgentMessage | AgentMessage[],
-			): Promise<string | undefined>;
-		}
-	)._buildExecutorRefinedPrompt;
-
-	function userMessage(text: string): AgentMessage {
-		return { role: "user", content: text, timestamp: 1 } as AgentMessage;
-	}
-
-	it("executor-brain warmup: same request text yields the same reportId across a simulated retry", async () => {
-		const ctx = executorContext();
-		await buildExecutorRefinedPrompt.call(ctx, [userMessage("restore the database")]);
-		await buildExecutorRefinedPrompt.call(ctx, [userMessage("restore the database")]);
-
-		expect(ctx.deps.addSpawnedUsage).toHaveBeenCalledTimes(2);
-		const firstOpts = ctx.deps.addSpawnedUsage.mock.calls[0][1];
-		const secondOpts = ctx.deps.addSpawnedUsage.mock.calls[1][1];
-		expect(firstOpts.reportId).toBeTruthy();
-		expect(firstOpts.reportId).toBe(secondOpts.reportId);
-	});
-
-	it("executor-brain warmup: a genuinely different request yields a distinct reportId", async () => {
-		const ctx = executorContext();
-		await buildExecutorRefinedPrompt.call(ctx, [userMessage("restore the database")]);
-		await buildExecutorRefinedPrompt.call(ctx, [userMessage("rotate the api keys")]);
-
-		const firstOpts = ctx.deps.addSpawnedUsage.mock.calls[0][1];
-		const secondOpts = ctx.deps.addSpawnedUsage.mock.calls[1][1];
-		expect(firstOpts.reportId).not.toBe(secondOpts.reportId);
-	});
-
-	it("executor-brain warmup: two different sessions never collide on the same reportId", async () => {
-		const ctxA = executorContext("session-a");
-		const ctxB = executorContext("session-b");
-		await buildExecutorRefinedPrompt.call(ctxA, [userMessage("restore the database")]);
-		await buildExecutorRefinedPrompt.call(ctxB, [userMessage("restore the database")]);
-
-		const optsA = ctxA.deps.addSpawnedUsage.mock.calls[0][1];
-		const optsB = ctxB.deps.addSpawnedUsage.mock.calls[0][1];
-		expect(optsA.reportId).not.toBe(optsB.reportId);
-	});
-
-	it('executor-brain warmup: runIsolatedCompletion carries laneKind "executor"', async () => {
-		const ctx = executorContext();
-		await buildExecutorRefinedPrompt.call(ctx, [userMessage("restore the database")]);
-		expect(ctx.deps.runIsolatedCompletion.mock.calls[0][0]).toMatchObject({ laneKind: "executor" });
-	});
-});
 
 describe("background-lane-controller: model-fitness reportId + laneKind", () => {
 	function fitnessDeps(
