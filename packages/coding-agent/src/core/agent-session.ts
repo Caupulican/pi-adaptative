@@ -133,7 +133,7 @@ import type { PathAliasTable } from "./context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "./context/path-alias-tool-wrap.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "./context/tool-output-packer.ts";
 import type { ContextGcReport, ContextGcResult } from "./context-gc.ts";
-import { ContextPipeline } from "./context-pipeline.ts";
+import { ContextPipeline, type ContextPolicyLane } from "./context-pipeline.ts";
 import type { SessionCostSummary } from "./cost/cost-summary.ts";
 import type { DailyUsageTotals } from "./cost/daily-usage.ts";
 import type { CostGuardDecision, CostGuardSettings } from "./cost-guard.ts";
@@ -597,6 +597,8 @@ export class AgentSession {
 	private _executionLoopMode?: ExecutionLoopMode;
 	private _objectiveExecutionController?: ObjectiveExecutionController;
 	private _steeringPlane?: SystemOneSteeringPlane;
+	/** Each worker conversation's own context-policy state (audit memo, tool facts), by agent id. */
+	private readonly _workerContextPolicyLanes = new Map<string, ContextPolicyLane>();
 	private _adaptiveReadiness?: AdaptiveRuntimeReadiness;
 	/** Durable owner development rules, restored from disk so they outlive compaction and restart. */
 	private readonly _ownerRules: DurableOwnerRuleStore;
@@ -1179,7 +1181,15 @@ export class AgentSession {
 				this._foregroundRecovery.markModelExhausted(`${model.provider}/${model.id}`, retryAfterMs),
 			// Worker conversations plan with root's own request-context controller, on their own lane: the
 			// mechanics every agent needs, none of the head-only steps.
-			planWorkerRequest: ({ agentId, model, compactionTriggerTokens, messages, sentPrefixCount, signal }) => {
+			planWorkerRequest: ({
+				agentId,
+				model,
+				compactionTriggerTokens,
+				messages,
+				sentPrefixCount,
+				toolNames,
+				signal,
+			}) => {
 				const lane = {
 					model,
 					compactionTriggerTokens,
@@ -1189,7 +1199,18 @@ export class AgentSession {
 					},
 					conversation: `worker:${agentId}`,
 				};
+				let policyLane = this._workerContextPolicyLanes.get(agentId);
+				if (!policyLane) {
+					policyLane = { memo: new Map(), memoMessages: [], toolNames };
+					this._workerContextPolicyLanes.set(agentId, policyLane);
+				}
+				policyLane.toolNames = toolNames;
+				const contextPolicy = policyLane;
 				return new ProviderRequestContextController({
+					runContextAudit: (history) => this._pipeline.runContextAudit(history, contextPolicy),
+					runPromptPolicyPlanning: (report) => this._pipeline.runPromptPolicyPlanning(report, contextPolicy),
+					runPromptEnforcement: (history, report) =>
+						this._pipeline.runPromptEnforcement(history, report, contextPolicy),
 					applyContextGc: (history, writePayloads, frozenBelow) =>
 						this._pipeline.applyContextGc(history, writePayloads, frozenBelow, lane),
 					applyPathAliases: (history) => this._pipeline.applyPathAliases(history),
@@ -4043,6 +4064,7 @@ export class AgentSession {
 		// resolvable if the same session is resumed later. It does not sweep OTHER
 		// sessions' artifact directories.
 		safely(() => this._pipeline.cleanupToolArtifactStoreOnDispose());
+		this._workerContextPolicyLanes.clear();
 		this._disposeCompletion = finish();
 	}
 

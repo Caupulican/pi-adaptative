@@ -265,6 +265,8 @@ export interface WorkerDelegationControllerDeps {
 		compactionTriggerTokens: number | undefined;
 		messages: AgentMessage[];
 		sentPrefixCount: number;
+		/** The worker's own tool surface: what its lane's context policy can rely on (a retrieval tool). */
+		toolNames: readonly string[];
 		signal?: AbortSignal;
 	}): Promise<AgentContextPlan>;
 	/** The cache guard for worker lanes: each accepted worker provider request, as its recorded snapshot. */
@@ -3485,6 +3487,7 @@ export class WorkerDelegationController {
 								compactionTriggerTokens: retentionPolicy?.maxContextTokens,
 								messages,
 								sentPrefixCount,
+								toolNames: toolSurface.tools.map((tool) => tool.name),
 								...(signal ? { signal } : {}),
 							}),
 					}

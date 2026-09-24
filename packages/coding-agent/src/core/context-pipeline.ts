@@ -99,6 +99,17 @@ function extractArtifactId(message: AgentMessage | undefined): string | undefine
 	return typeof artifactId === "string" ? artifactId : undefined;
 }
 
+/**
+ * A worker conversation's own context-policy state (agent parity): the audit memo and the messages it
+ * was last filled for, and the lane's own tool surface. The head-only relevance curator never reaches a
+ * lane, and a lane's reports are its own, never the root's inspection state.
+ */
+export interface ContextPolicyLane {
+	readonly memo: ContextAuditMemo;
+	memoMessages: readonly AgentMessage[];
+	toolNames: readonly string[];
+}
+
 /** Per-message memo of `estimateTokens(message)`, keyed by message object identity --
  * same contract as {@link ContextAuditMemo}. See `estimateContextTokensMemoized`. */
 type TokenMemo = Map<AgentMessage, number>;
@@ -474,15 +485,24 @@ export class ContextPipeline {
 	 * `_runContextAuditFullScan`), so a read-only debug/test peek at a hypothetical `messages`
 	 * array can never evict a live entry out of the hot-path memo.
 	 */
-	runContextAudit(messages: AgentMessage[]): ContextAuditReport {
+	runContextAudit(messages: AgentMessage[], lane?: ContextPolicyLane): ContextAuditReport {
 		try {
+			if (lane) {
+				lane.memoMessages = continueMemoLineage(lane.memo, lane.memoMessages, messages);
+				// A lane's tool results live in its own conversation, never on the root session's branch.
+				return runContextAudit(
+					messages,
+					{ turnIndex: this.deps.getTurnIndex(), artifactStore: this._toolArtifactStore },
+					lane.memo,
+				);
+			}
 			this._auditMemoMessages = continueMemoLineage(this._auditMemo, this._auditMemoMessages, messages);
 			const report = runContextAudit(messages, this._buildContextAuditOptions(messages), this._auditMemo);
 			this._latestContextAuditReport = report;
 			return report;
 		} catch {
 			const report: ContextAuditReport = { turnIndex: this.deps.getTurnIndex(), items: [] };
-			this._latestContextAuditReport = report;
+			if (!lane) this._latestContextAuditReport = report;
 			return report;
 		}
 	}
@@ -517,16 +537,15 @@ export class ContextPipeline {
 	 * "keep_raw" -- this never enforces anything, it only records what the policy engine
 	 * would say. Never throws into a live turn: any failure degrades to an empty report.
 	 */
-	runPromptPolicyPlanning(auditReport: ContextAuditReport): PromptPolicyShadowReport {
+	runPromptPolicyPlanning(auditReport: ContextAuditReport, lane?: ContextPolicyLane): PromptPolicyShadowReport {
+		let report: PromptPolicyShadowReport;
 		try {
-			const report = planPromptPolicy(auditReport);
-			this._latestPromptPolicyReport = report;
-			return report;
+			report = planPromptPolicy(auditReport);
 		} catch {
-			const report: PromptPolicyShadowReport = { turnIndex: this.deps.getTurnIndex(), items: [] };
-			this._latestPromptPolicyReport = report;
-			return report;
+			report = { turnIndex: this.deps.getTurnIndex(), items: [] };
 		}
+		if (!lane) this._latestPromptPolicyReport = report;
+		return report;
 	}
 
 	/**
@@ -570,25 +589,28 @@ export class ContextPipeline {
 	runPromptEnforcement(
 		messages: AgentMessage[],
 		shadowReport: PromptPolicyShadowReport,
+		lane?: ContextPolicyLane,
 	): { messages: AgentMessage[]; report: PromptEnforcementReport } {
 		try {
 			const persistedSettings = this.deps.getSettingsManager().getContextPromptEnforcementSettings();
-			const curationEnabled = this.deps.getSettingsManager().getContextCurationSettings().enabled;
+			// Relevance curation is the head's: a lane's enforcement reads only its own facts.
+			const curationEnabled = !lane && this.deps.getSettingsManager().getContextCurationSettings().enabled;
+			const toolNames = lane ? lane.toolNames : this.deps.getActiveToolNames();
 			const settings = {
 				...persistedSettings,
 				// Runtime fact, never assumed: artifact_retrieve is a companion affordance
 				// (auto-activated alongside grep/find), not a default/global tool, so active
 				// tools can differ turn to turn -- see context-prompt-enforcement.ts's doc
 				// comment on why this is checked separately from hasAvailableRetrievalPath.
-				retrievalToolAvailable: this.deps.getActiveToolNames().includes("artifact_retrieve"),
+				retrievalToolAvailable: toolNames.includes("artifact_retrieve"),
 				brainRelevance: curationEnabled ? (itemId: string) => this._brainCurator.getRelevance(itemId) : undefined,
 			};
 			const result = enforcePromptPolicy(messages, shadowReport, settings);
-			this._latestPromptEnforcementReport = result.report;
+			if (!lane) this._latestPromptEnforcementReport = result.report;
 			return result;
 		} catch {
 			const report: PromptEnforcementReport = { turnIndex: this.deps.getTurnIndex(), items: [] };
-			this._latestPromptEnforcementReport = report;
+			if (!lane) this._latestPromptEnforcementReport = report;
 			return { messages, report };
 		}
 	}
