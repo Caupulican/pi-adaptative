@@ -251,6 +251,40 @@ export function switchCostUsd(
 	return usd(Math.max(0, briefTokens ?? prefixTokens), write > 0 ? write : input);
 }
 
+/**
+ * A compaction's priced inputs on a lane, from its learned outcome (what a compaction leaves and
+ * generates, as ratios of the prefix) and the catalog prices: the one pricing root's session lane and
+ * a worker conversation's lane both decide with.
+ */
+export function compactionPricingFor(input: {
+	readonly model: Parameters<typeof resolveEffectiveModelPricing>[0];
+	readonly summarizer: Parameters<typeof resolveEffectiveModelPricing>[0];
+	readonly summarizerSharesLane: boolean;
+	readonly prefixTokens: number;
+	readonly outcome: { readonly afterRatio: number; readonly outputRatio: number };
+	readonly remainingRequests: number;
+}): Omit<CompactionEconomicsInput, "retained"> {
+	const compactedTokens = Math.round(input.prefixTokens * input.outcome.afterRatio);
+	const pre = resolveEffectiveModelPricing(input.model, input.prefixTokens);
+	const post = resolveEffectiveModelPricing(input.model, compactedTokens);
+	const summarizerPricing = resolveEffectiveModelPricing(input.summarizer, input.prefixTokens);
+	const coldOf = (pricing: EffectiveModelPricing | undefined) =>
+		pricing ? (pricing.cacheWrite > 0 ? pricing.cacheWrite : pricing.input) : undefined;
+	return {
+		prefixTokens: input.prefixTokens,
+		compactedTokens,
+		summaryOutputTokens: Math.round(input.prefixTokens * input.outcome.outputRatio),
+		remainingRequests: input.remainingRequests,
+		summarizerSharesLane: input.summarizerSharesLane,
+		cacheReadUsdPerMillion: pre?.cacheRead,
+		coldUsdPerMillion: coldOf(pre),
+		summarizerColdUsdPerMillion: coldOf(summarizerPricing),
+		outputUsdPerMillion: summarizerPricing?.output,
+		compactedCacheReadUsdPerMillion: post?.cacheRead,
+		compactedColdUsdPerMillion: coldOf(post),
+	};
+}
+
 export interface EffectiveModelPricing {
 	readonly input: number;
 	/** Undefined when the catalog prices no output. */

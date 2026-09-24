@@ -39,7 +39,7 @@ import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import {
 	type CompactionEconomicsInput,
 	type CompactionEconomicsVerdict,
-	type EffectiveModelPricing,
+	compactionPricingFor,
 	planIdlePreparation,
 	priceCompaction,
 	resolveEffectiveModelPricing,
@@ -1362,25 +1362,14 @@ export class CompactionController {
 		outcome: { readonly afterRatio: number; readonly outputRatio: number },
 		remainingRequests: number,
 	): Omit<CompactionEconomicsInput, "retained"> {
-		const compactedTokens = Math.round(prefixTokens * outcome.afterRatio);
-		const pre = resolveEffectiveModelPricing(model, prefixTokens);
-		const post = resolveEffectiveModelPricing(model, compactedTokens);
-		const summarizerPricing = resolveEffectiveModelPricing(summarizer, prefixTokens);
-		const coldOf = (pricing: EffectiveModelPricing | undefined) =>
-			pricing ? (pricing.cacheWrite > 0 ? pricing.cacheWrite : pricing.input) : undefined;
-		return {
-			prefixTokens,
-			compactedTokens,
-			summaryOutputTokens: Math.round(prefixTokens * outcome.outputRatio),
-			remainingRequests,
+		return compactionPricingFor({
+			model,
+			summarizer,
 			summarizerSharesLane: sameCacheLane(summarizer, model),
-			cacheReadUsdPerMillion: pre?.cacheRead,
-			coldUsdPerMillion: coldOf(pre),
-			summarizerColdUsdPerMillion: coldOf(summarizerPricing),
-			outputUsdPerMillion: summarizerPricing?.output,
-			compactedCacheReadUsdPerMillion: post?.cacheRead,
-			compactedColdUsdPerMillion: coldOf(post),
-		};
+			prefixTokens,
+			outcome,
+			remainingRequests,
+		});
 	}
 
 	/**

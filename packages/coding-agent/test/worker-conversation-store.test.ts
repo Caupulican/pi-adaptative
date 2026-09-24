@@ -853,6 +853,33 @@ describe("WorkerConversationStore", () => {
 		expect(reopened.getRawTranscript()[0]).toEqual(userMessage(`turn-0: ${"evidence ".repeat(80)}`));
 	});
 
+	it("compacts below the limit only when the early band's price admits it, and reports what it compacted", async () => {
+		const options = createOptions();
+		const conversation = new WorkerConversationStore().create(options);
+		for (let index = 0; index < 24; index++) {
+			conversation.appendMessage(userMessage(`turn-${index}: ${"evidence ".repeat(80)}`));
+		}
+		const asked: number[] = [];
+		const declined = await conversation.compactProviderContext({
+			maxContextTokens: 100_000,
+			keepRecentTokens: 300,
+			admitEarlyCompaction: (tokens) => {
+				asked.push(tokens);
+				return false;
+			},
+		});
+		expect(declined.status).toBe("within_limit");
+		expect(asked).toHaveLength(1);
+		const admitted = await conversation.compactProviderContext({
+			maxContextTokens: 100_000,
+			keepRecentTokens: 300,
+			admitEarlyCompaction: () => true,
+		});
+		expect(admitted.status).toBe("compacted_deterministic");
+		expect(admitted.compacted?.tokensBefore).toBe(asked[0]);
+		expect(admitted.contextUsage.tokens).toBeLessThan(asked[0]!);
+	});
+
 	it("appends one deterministic compaction checkpoint and is idempotent at an unchanged context boundary", async () => {
 		const options = createOptions();
 		const conversation = new WorkerConversationStore().create(options);

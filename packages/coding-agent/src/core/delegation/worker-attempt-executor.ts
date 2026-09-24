@@ -212,6 +212,8 @@ export interface WorkerAttemptExecutorOptions {
 	 * tokens of its fixed prefix (system prompt and tool schemas) on the attempt's first request.
 	 */
 	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput, prefixTokens?: number): void;
+	/** A worker compaction's measured effect, recorded where root records its own. */
+	recordCompactionOutcome?(outcome: { tokensBefore: number; tokensAfter: number; outputTokens: number }): void;
 	/** Tool selection on the worker's model (see {@link WorkerToolSelection}). */
 	toolSelection?: WorkerToolSelection;
 	/** Each worker provider response, recorded as a cache observation on the worker's own history. */
@@ -993,6 +995,13 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 																	retained.status !== "compacted_deterministic"
 																) {
 																	return messages;
+																}
+																if (retained.compacted) {
+																	options.recordCompactionOutcome?.({
+																		tokensBefore: retained.compacted.tokensBefore,
+																		tokensAfter: retained.contextUsage.tokens,
+																		outputTokens: retained.compacted.usage?.output ?? 0,
+																	});
 																}
 																return sanitizeToolFailureContext(retained.context.messages, "")
 																	.messages;

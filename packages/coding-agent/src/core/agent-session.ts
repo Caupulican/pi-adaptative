@@ -94,6 +94,9 @@ import type { BashResult } from "./bash-executor.ts";
 import { type CapabilityTierPolicy, capabilityTierPolicy, resolveCapabilityTier } from "./capability-tier.ts";
 import type { NativePiActivityPort } from "./collaboration/native-pi-activity.ts";
 import {
+	type CompactionEconomicsVerdict,
+	compactionPricingFor,
+	priceCompaction,
 	priceExecutor,
 	resolveEffectiveModelPricing,
 	switchCostUsd,
@@ -614,6 +617,8 @@ export class AgentSession {
 	});
 	/** The learned cache view (survival curves, lineage lifetime, compaction outcomes) from the ledger. */
 	private readonly _cacheKnowledge = new CacheKnowledge(() => this.getDecisionLedger());
+	/** Each worker conversation's last early-compaction verdict, so only a change is recorded. */
+	private readonly _workerEarlyVerdicts = new Map<string, string>();
 	/** Cache custody: the gate every surface change goes through and the guard every request passes. */
 	private readonly _custody = new CacheCustody();
 	/** The foreground lane's last sent request, for a summarizer on the same lane to extend. */
@@ -1118,6 +1123,22 @@ export class AgentSession {
 			},
 			observeWorkerResponse: (message, observation) => this._recordCacheObservation(message, observation),
 			getSharedLaneToolOptions: () => this._runtimeBuilder.getSharedLaneToolOptions(),
+			admitWorkerEarlyCompaction: ({ agentId, model, contextTokens, messages }) =>
+				this._admitWorkerEarlyCompaction(agentId, model, contextTokens, messages),
+			recordWorkerCompactionOutcome: ({ agentId, model, tokensBefore, tokensAfter, outputTokens }) => {
+				try {
+					this.getDecisionLedger()?.recordCompactionOutcome({
+						sessionId: `${this.sessionId}/worker:${agentId}`,
+						lane: cacheLaneKey(model.api, model.provider, model.id),
+						observedAt: Date.now(),
+						tokensBefore,
+						tokensAfter,
+						outputTokens,
+					});
+				} catch {
+					// Telemetry only.
+				}
+			},
 			// A worker learns tool choice on its own model into the same evidence store root learns in.
 			createWorkerToolSelection: (model, tools) => {
 				const modelRef = formatModelRouterModel(model);
@@ -3283,6 +3304,62 @@ export class AgentSession {
 				undefined ||
 			this._laneCacheGone(model);
 		return laneCold(turnModel ?? this.model) && laneCold(this.model);
+	}
+
+	/**
+	 * A worker conversation's early compaction, priced as root's session lane prices its own: the
+	 * worker lane's learned compaction outcome, its cache retained after its own idle gap, and its own
+	 * lineage's remaining requests. The summarizer extends the worker's warm lane.
+	 */
+	private _admitWorkerEarlyCompaction(
+		agentId: string,
+		model: Model<Api>,
+		contextTokens: number,
+		messages: readonly AgentMessage[],
+	): boolean {
+		const now = Date.now();
+		const conversation = `${this.sessionId}/worker:${agentId}`;
+		const lane = cacheLaneKey(model.api, model.provider, model.id);
+		const outcome = this._cacheKnowledge.compactionOutcome(lane, now);
+		let verdict: CompactionEconomicsVerdict;
+		let remainingRequests = 1;
+		if (!outcome) {
+			verdict = {
+				proceed: false,
+				reason: "insufficient_evidence",
+				detail: "no compaction on record to learn a compaction's size and cost from",
+			};
+		} else {
+			const last = this._cacheKnowledge.lastResponseAt(conversation, lane);
+			const retained =
+				last === undefined ? undefined : this._cacheKnowledge.retainedAfter(lane, Math.max(0, now - last), now);
+			const lineage = this._cacheKnowledge.lineage(conversation, historyLineage(messages), now);
+			remainingRequests = Math.max(1, lineage ? (lineage.remaining ?? lineage.elapsed) : 1);
+			verdict = priceCompaction({
+				...compactionPricingFor({
+					model,
+					summarizer: model,
+					summarizerSharesLane: true,
+					prefixTokens: contextTokens,
+					outcome,
+					remainingRequests,
+				}),
+				...(retained ? { retained } : {}),
+			});
+		}
+		const key = `${conversation}:${verdict.proceed ? "proceed" : verdict.reason}`;
+		if (verdict.proceed || this._workerEarlyVerdicts.get(conversation) !== key) {
+			this._workerEarlyVerdicts.set(conversation, key);
+			this._recordCacheDecision({
+				kind: "early_compaction",
+				decidedAt: now,
+				admit: verdict.proceed,
+				reason: verdict.proceed ? verdict.reason : `${verdict.reason}: ${verdict.detail}`,
+				...(verdict.savingUsd !== undefined ? { savingUsd: verdict.savingUsd } : {}),
+				detail: { conversation, prefixTokens: contextTokens, remainingRequests },
+			});
+		}
+		return verdict.proceed;
 	}
 
 	/** Whether the lane's cache is expected gone at the real idle gap: a surface change there costs nothing. */

@@ -6,6 +6,7 @@ import {
 	type AgentTool,
 	decodeExecutionContext,
 } from "@caupulican/pi-agent-core";
+import { assessCompactionNeed, hardCompactionTriggerTokens } from "@caupulican/pi-agent-core/compaction/compaction";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import type { SessionRequestSnapshotInput } from "@caupulican/pi-agent-core/session";
@@ -198,28 +199,41 @@ export function isLocalExecutionModel(model: Pick<Model<Api>, "provider" | "base
 function workerConversationRetentionPolicy(
 	model: Model<Api>,
 	settingsManager: SettingsManager,
+	admitEarly?: (contextTokens: number, messages: readonly AgentMessage[]) => boolean,
 ): WorkerConversationRetentionPolicy | undefined {
 	const settings = settingsManager.getCompactionSettings();
 	const contextWindow = Math.floor(model.contextWindow ?? 0);
 	if (!settings.enabled || contextWindow < 4) return undefined;
-	const reserveTokens = Math.min(settings.reserveTokens, Math.floor(contextWindow * 0.25));
-	const reserveTrigger = contextWindow - reserveTokens;
-	const fractionalTrigger =
-		settings.triggerPercent > 0 && settings.triggerPercent < 1
-			? Math.floor(contextWindow * settings.triggerPercent)
-			: reserveTrigger;
+	// Root's boundaries on the worker's own window: the hard limit always compacts; the fractional
+	// trigger is the early band, where a compaction runs only when its price admits it.
+	const laneSettings = {
+		...settings,
+		reserveTokens: Math.min(settings.reserveTokens, Math.floor(contextWindow * 0.25)),
+	};
 	const modelTrigger =
 		model.autoCompactionTriggerTokens && model.autoCompactionTriggerTokens > 0
 			? Math.floor(model.autoCompactionTriggerTokens)
-			: reserveTrigger;
-	const maxContextTokens = Math.min(reserveTrigger, fractionalTrigger, modelTrigger);
+			: undefined;
+	const maxContextTokens = hardCompactionTriggerTokens(contextWindow, laneSettings, modelTrigger);
 	if (maxContextTokens < 2) return undefined;
+	const keepRecentTokens = Math.max(
+		1,
+		Math.min(settings.keepRecentTokens, Math.floor(contextWindow * 0.5), maxContextTokens - 1),
+	);
 	return {
 		maxContextTokens,
-		keepRecentTokens: Math.max(
-			1,
-			Math.min(settings.keepRecentTokens, Math.floor(contextWindow * 0.5), maxContextTokens - 1),
-		),
+		keepRecentTokens,
+		...(admitEarly
+			? {
+					admitEarlyCompaction: (contextTokens: number, messages: readonly AgentMessage[]) =>
+						assessCompactionNeed(
+							contextTokens,
+							contextWindow,
+							{ ...laneSettings, keepRecentTokens },
+							modelTrigger,
+						) === "early" && admitEarly(contextTokens, messages),
+				}
+			: {}),
 	};
 }
 
@@ -257,6 +271,24 @@ export interface WorkerDelegationControllerDeps {
 	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput, prefixTokens?: number): void;
 	/** Tool selection for a worker's model and tools, sharing root's evidence store. */
 	createWorkerToolSelection?(model: Model<Api>, tools: readonly AgentTool[]): WorkerToolSelection;
+	/**
+	 * Whether an early compaction of a worker conversation pays for itself now: the same priced verdict
+	 * root's session lane decides with, on the worker conversation's own cache facts.
+	 */
+	admitWorkerEarlyCompaction?(input: {
+		agentId: string;
+		model: Model<Api>;
+		contextTokens: number;
+		messages: readonly AgentMessage[];
+	}): boolean;
+	/** A worker compaction's measured effect on its lane, recorded where root records its own. */
+	recordWorkerCompactionOutcome?(input: {
+		agentId: string;
+		model: Model<Api>;
+		tokensBefore: number;
+		tokensAfter: number;
+		outputTokens: number;
+	}): void;
 	/** Record a model a worker ran out of quota, where root's billing failover records its own. */
 	markModelExhausted?(model: Model<Api>, retryAfterMs?: number): void;
 	/** Root's tool mechanics (output reduction, encodings, shell engine, packing), shared with every lane. */
@@ -3015,7 +3047,15 @@ export class WorkerDelegationController {
 			return { started: false, skipReason: "worker_delegation_already_running" };
 		}
 		const laneCapability = this.laneCapabilityProfile(model);
-		const retentionPolicy = workerConversationRetentionPolicy(model, this.deps.getSettingsManager());
+		const retentionPolicy = workerConversationRetentionPolicy(
+			model,
+			this.deps.getSettingsManager(),
+			this.deps.admitWorkerEarlyCompaction
+				? (contextTokens, messages) =>
+						// Called at compaction time, once the attempt's agent is bound below.
+						this.deps.admitWorkerEarlyCompaction!({ agentId, model, contextTokens, messages })
+				: undefined,
+		);
 		const prepared = this.prepareWorkerAttempt(request, admission, existingRecord);
 		onPrepared(prepared.record);
 		const { executionPlan, lifecycle } = prepared;
@@ -3426,6 +3466,15 @@ export class WorkerDelegationController {
 			...(this.deps.observeWorkerResponse ? { observeWorkerResponse: this.deps.observeWorkerResponse } : {}),
 			...(this.deps.createWorkerToolSelection
 				? { toolSelection: this.deps.createWorkerToolSelection(model, toolSurface.tools) }
+				: {}),
+			...(this.deps.recordWorkerCompactionOutcome
+				? {
+						recordCompactionOutcome: (outcome: {
+							tokensBefore: number;
+							tokensAfter: number;
+							outputTokens: number;
+						}) => this.deps.recordWorkerCompactionOutcome?.({ agentId, model, ...outcome }),
+					}
 				: {}),
 			...(this.deps.planWorkerRequest
 				? {

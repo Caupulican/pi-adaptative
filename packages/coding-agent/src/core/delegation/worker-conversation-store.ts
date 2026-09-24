@@ -25,7 +25,7 @@ import {
 	SessionManager,
 	type SessionRequestSnapshotInput,
 } from "@caupulican/pi-agent-core/session";
-import type { ProviderRequestSnapshotContext } from "@caupulican/pi-agent-core/types";
+import type { AgentMessage, ProviderRequestSnapshotContext } from "@caupulican/pi-agent-core/types";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "@caupulican/pi-agent-core/usage";
 import type { AssistantMessageDiagnostic, Message, Usage } from "@caupulican/pi-ai";
 import { orchestrationSessionsDir, workerConversationSessionsDir } from "../agent-paths.ts";
@@ -159,6 +159,11 @@ export interface WorkerConversationRetentionPolicy {
 	/** Shared compaction's retained recent-context target. Must be lower than the maximum. */
 	keepRecentTokens: number;
 	/**
+	 * Below the maximum, whether an early compaction pays for itself now (the same priced early band
+	 * root's session lane has); the history the next request would carry is passed.
+	 */
+	admitEarlyCompaction?: (contextTokens: number, messages: readonly AgentMessage[]) => boolean;
+	/**
 	 * Generate a verified shared compaction result. Failures, malformed results, and omitted
 	 * generators fall back to `createDeterministicCompaction`; raw transcript entries are never
 	 * replaced or removed.
@@ -176,6 +181,8 @@ interface WorkerConversationRetentionOutcome {
 	status: "within_limit" | "compacted_verified" | "compacted_deterministic" | "cannot_compact";
 	context: SessionContext;
 	contextUsage: ReturnType<typeof estimateContextTokens>;
+	/** For a compaction: the context it started from, and what its summarizer spent. */
+	compacted?: { tokensBefore: number; usage?: Usage };
 }
 
 interface WorkerConversationMetadata {
@@ -1426,7 +1433,10 @@ export class WorkerConversation {
 		const preparationEntryCount = this.withCanonicalSessionLock((sessionManager) => sessionManager.getEntryCount());
 		const before = this.getProviderContext();
 		const beforeUsage = estimateContextTokens(before.messages);
-		if (beforeUsage.tokens <= policy.maxContextTokens) {
+		if (
+			beforeUsage.tokens <= policy.maxContextTokens &&
+			policy.admitEarlyCompaction?.(beforeUsage.tokens, before.messages) !== true
+		) {
 			return { status: "within_limit", context: before, contextUsage: beforeUsage };
 		}
 
@@ -1483,7 +1493,12 @@ export class WorkerConversation {
 			);
 		});
 		const context = this.getProviderContext();
-		return { status, context, contextUsage: estimateContextTokens(context.messages) };
+		return {
+			status,
+			context,
+			contextUsage: estimateContextTokens(context.messages),
+			compacted: { tokensBefore: beforeUsage.tokens, ...(result.usage ? { usage: result.usage } : {}) },
+		};
 	}
 
 	/** Append one already-authorized worker message to the canonical transcript. */
