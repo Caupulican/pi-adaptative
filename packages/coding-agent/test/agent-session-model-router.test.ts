@@ -2,7 +2,7 @@ import { tmpdir } from "node:os";
 import type { AgentMessage, AgentTool, ThinkingLevel } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { SessionMessageBatchEntry } from "@caupulican/pi-agent-core/session";
-import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
+import type { Api, AssistantMessage, Context, Message, Model, Usage } from "@caupulican/pi-ai";
 import { clampThinkingLevel, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import type { FauxRequestEvent } from "@caupulican/pi-ai/faux";
 import { Type } from "typebox";
@@ -1276,6 +1276,38 @@ describe("conversation stage routing", () => {
 			expect(reply.model).toBe("root");
 			expect(harness.session.model?.id).toBe("root");
 			expect(harness.session.getModelRouterStatus()).toContain("Last decision: none");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("reruns a side trip that hands its message back on the talker, which reads the conversation", async () => {
+		const requests: FauxRequestEvent[] = [];
+		const harness = await routedHarness(requests);
+		try {
+			let sideTrip: { tools: string[]; brief: string } | undefined;
+			harness.setResponses([
+				fauxAssistantMessage("the plan"),
+				(context: Context) => {
+					const note = context.messages.at(-2);
+					sideTrip = {
+						tools: (context.tools ?? []).map((tool) => tool.name),
+						brief: note?.role === "user" && typeof note.content !== "string" ? JSON.stringify(note.content) : "",
+					};
+					return fauxAssistantMessage([fauxToolCall("hand_to_talker", {})], { stopReason: "toolUse" });
+				},
+				fauxAssistantMessage("the first step exports the ledger"),
+			]);
+			await harness.session.prompt("Plan the migration of the ledger to a new schema; list the steps.");
+			await harness.session.prompt("What did the first step say?");
+			// The side trip was offered the way back and told the conversation before its brief is not shown.
+			expect(sideTrip?.tools).toContain("hand_to_talker");
+			expect(sideTrip?.brief).toContain("the conversation before it is not shown here");
+			// The message reran on the talker; the side trip's turn left nothing behind.
+			const replies = harness.session.messages.filter((message) => message.role === "assistant");
+			expect(replies.map((message) => (message as AssistantMessage).model)).toEqual(["medium", "medium"]);
+			expect(harness.session.model?.id).toBe("medium");
+			expect(harness.session.getModelRouterStatus()).toContain("escalated -> faux/medium");
 		} finally {
 			harness.cleanup();
 		}

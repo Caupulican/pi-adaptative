@@ -88,7 +88,11 @@ import {
 	flushModelRouterSessionBufferPrefix,
 	type ModelRouterSessionBuffer,
 } from "./model-router/session-buffer.ts";
-import { sideTripBrief } from "./model-router/side-trip-brief.ts";
+import {
+	SIDE_TRIP_HAND_BACK_TOOL,
+	SIDE_TRIP_HAND_BACK_TOOL_NAME,
+	sideTripBrief,
+} from "./model-router/side-trip-brief.ts";
 import {
 	formatModelRouterStatus,
 	getRecentModelRouterDecisions,
@@ -406,20 +410,18 @@ export class ModelRouterController {
 	 * or undefined when no escalation is required.
 	 */
 	maybeEscalateToolCall(toolName: string, args: unknown): { block: true; reason: string } | undefined {
+		const route = this._activeModelRouterRoute;
 		if (
-			this._activeModelRouterRoute &&
-			shouldEscalateModelRouterTool({
-				tier: this._activeModelRouterRoute.tier,
-				toolName,
-				args,
-			})
+			route &&
+			((route.reasonCode === SIDE_TRIP_REASON_CODE && toolName === SIDE_TRIP_HAND_BACK_TOOL_NAME) ||
+				shouldEscalateModelRouterTool({ tier: route.tier, toolName, args }))
 		) {
 			this._modelRouterEscalationRequested = true;
 			this.deps.getAgent().abort("model router escalation");
 			return {
 				block: true,
 				reason:
-					"Model router escalation required: a cheap research turn attempted a mutating tool. Retry the turn on the configured expensive model.",
+					"Model router escalation required: a cheap research turn attempted a mutating tool or handed its message back. Retry the turn on the next model.",
 			};
 		}
 		return undefined;
@@ -1446,6 +1448,11 @@ export class ModelRouterController {
 						// not our input array, so restoration works without overwriting live tool changes.
 						swappedTools = agent.state.tools;
 					}
+				}
+				// A side trip can hand its message to the talker when its brief cannot answer it.
+				if (routeDecision?.reasonCode === SIDE_TRIP_REASON_CODE) {
+					agent.state.tools = [...agent.state.tools, SIDE_TRIP_HAND_BACK_TOOL];
+					swappedTools = agent.state.tools;
 				}
 				// The routed prompt follows the routed tool surface and keeps provider-neutral delegation
 				// guidance whenever delegate remains active, including same-model thinking overrides.
