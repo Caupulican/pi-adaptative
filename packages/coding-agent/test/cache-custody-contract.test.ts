@@ -2,6 +2,8 @@ import type { AgentTool } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall, type ModelThinkingLevel } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { cacheLaneKey } from "../src/core/context/cache-observation-recorder.ts";
+import { setConcurrentResponses } from "./suite/concurrent-responses.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 
 /**
@@ -94,5 +96,32 @@ describe("cache custody contract", () => {
 		expect(breaks.filter((decision) => !decision.admit)).toEqual([]);
 		// One reasoning level for the whole lane: the bookkeeping continuation kept it.
 		expect(new Set(reasoning)).toEqual(new Set(["high"]));
+	});
+
+	it("keeps a worker conversation's requests appends too, guarded and observed on its own lane", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const workerTurn = (value: string) =>
+			fauxAssistantMessage([fauxToolCall("read", { path: `missing-${value}.txt` })], { stopReason: "toolUse" });
+		setConcurrentResponses(harness, [
+			workerTurn("one"),
+			workerTurn("two"),
+			workerTurn("three"),
+			fauxAssistantMessage('{"summary":"read three files","status":"completed"}'),
+		]);
+		const run = await harness.session.runWorkerDelegationOnce({ instructions: "Read three files and report." });
+		expect(run.started).toBe(true);
+		const ledger = harness.session.getDecisionLedger();
+		const breaks = (ledger?.cacheDecisions(harness.session.sessionId) ?? []).filter(
+			(decision) => decision.kind === "cache_break" && !decision.admit,
+		);
+		expect(breaks).toEqual([]);
+		// The worker's responses are observed on its own conversation, on the provider lane its model is.
+		const model = harness.session.model!;
+		const workerObservation = ledger?.latestCacheObservation(
+			`${harness.session.sessionId}/worker:${run.record?.agentId ?? "worker-1"}`,
+			cacheLaneKey(model.api, model.provider, model.id),
+		);
+		expect(workerObservation).toBeDefined();
 	});
 });

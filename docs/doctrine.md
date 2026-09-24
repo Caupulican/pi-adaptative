@@ -76,7 +76,20 @@ while its cache is warm; the owner's own level, a return to it, and the owner's 
 pass. Why: measured on the owner's sessions a reasoning-only change made a cold cache five times as
 likely (47% against a 9% baseline). Pinned by `packages/coding-agent/test/cache-custody-contract.test.ts`
 (a tool loop, a 12-call parallel batch, a bookkeeping turn and an extension prompt change leave every
-request an append, one reasoning level, and no unsanctioned break in the ledger).
+request an append, one reasoning level, and no unsanctioned break in the ledger; a worker's tool loop
+leaves no unsanctioned break and is observed on its own conversation).
+
+**Every agent runs the conversation mechanics; only the head orchestrates.** A worker plans each
+request with root's own request-context controller (context GC on its own lane, path aliases, the
+authority context), pays its early compaction and GC rewrites by root's prices on its own cache facts,
+summarizes on its own warm lane, records its cache observations, tool choices and compaction outcomes
+into the same stores root learns from, and shares root's tool mechanics (output reduction, shell,
+encodings, artifact packing; never credential injection). What stays with the head is command:
+model routing, System One intake and report acceptance, spawning, goals, reflection and
+self-adaptation, memory writes, extensions and the owner surface. A worker prices on its own lane's
+inputs, never on root's. A routed worker whose account runs out of quota moves to its next routing
+candidate on retry (its contract's ordered-fallback policy), and the attempt records the model it ran on.
+Pinned by `packages/coding-agent/test/cache-custody-contract.test.ts` (the worker leg).
 
 **Per-request host work is bounded.** Every request-time scan resumes from the history prefix it
 already covered; the profiler's last decile of pre-request time may not exceed twice its first.
@@ -934,3 +947,4 @@ measurement gains no new surface.
 | 2026-09-23 | The legend delta is read from the legend records in the history a request plans from, not from a process-local memory of commits: a restarted process no longer re-sends the whole legend, and a history whose record was compacted away gets its lines again. |
 | 2026-09-23 | Context GC rewrites the already-sent prefix only as a priced cache break: a crossing's below-mark batch (deep supersessions included) packs when its saving over the learned remaining requests pays for the re-prefill, and stays as sent otherwise. `contextGc.deepPackMinTokens` is removed; the price replaces its fixed floor. |
 | 2026-09-23 | A cache break passes the custody gate or is recorded as a defect: every foreground and worker request is classified (append, first, sanctioned, unsanctioned) into the decision ledger; an extension system prompt and the prompt's date wait for a cold moment; a lane keeps its sent reasoning level against host adjustments while warm. |
+| 2026-09-24 | Every agent runs the conversation mechanics within its boundaries; only the head orchestrates. Workers plan requests with root's request-context controller, price early compaction and GC on their own lane's facts, summarize on their own warm lane, and share root's tool mechanics and learning stores; a quota-exhausted routed worker moves to its next account. |
