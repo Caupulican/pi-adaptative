@@ -243,6 +243,8 @@ Pi runs `aws sso login --profile <profile>` without a shell. The AWS SDK refresh
 credentials; if the underlying SSO session later expires, Pi performs one foreground login and
 replays the Bedrock request once, only before a response has started. Background and worker requests
 never open a browser and instead return an authentication-required error to the owning session.
+Concurrent foreground logins for the same profile share one CLI process; cancelling one waiter leaves
+it running for the others. A named profile also takes precedence over an ambient Bedrock bearer token.
 
 Also supports ECS task roles (`AWS_CONTAINER_CREDENTIALS_*`) and IRSA (`AWS_WEB_IDENTITY_TOKEN_FILE`).
 

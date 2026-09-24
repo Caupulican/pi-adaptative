@@ -5,6 +5,10 @@
 - `AgentTool.readOnly` declares that every call of a tool only reads.
 - `SessionManager.getCustomEntriesOnBranch(types)` returns the branch's custom entries of those types in order, walking only entries appended since the last read.
 
+### Fixed
+
+- Bedrock throttling exceptions classify as rate limits so the shared retry and admission policy can handle them.
+
 ## [0.99.46] - 2026-09-24
 
 ### Added

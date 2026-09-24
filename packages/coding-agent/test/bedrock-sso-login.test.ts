@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { loginBedrockSsoProfile } from "../src/core/bedrock-sso-login.ts";
-import type { ExecResult } from "../src/core/exec.ts";
+import type { ExecOptions, ExecResult } from "../src/core/exec.ts";
 
 function result(overrides: Partial<ExecResult> = {}): ExecResult {
 	return {
@@ -68,6 +68,60 @@ describe("Bedrock SSO login", () => {
 		await first;
 		await expect(joining).rejects.toThrow("cancelled");
 		expect(execute).toHaveBeenCalledOnce();
+	});
+
+	it("keeps a shared login running when its first caller cancels", async () => {
+		let release: (() => void) | undefined;
+		const execute = vi.fn(
+			(_command: string, _args: string[], _cwd: string, commandOptions?: ExecOptions) =>
+				new Promise<ExecResult>((resolve) => {
+					commandOptions?.signal?.addEventListener("abort", () => resolve(result({ code: 1, killed: true })), {
+						once: true,
+					});
+					release = () => resolve(result());
+				}),
+		);
+		const controller = new AbortController();
+		const options = { execute, isWorker: () => false, cwd: "/workspace", env: {} };
+		const first = loginBedrockSsoProfile("work-sso", { ...options, signal: controller.signal });
+		const second = loginBedrockSsoProfile("work-sso", options);
+
+		controller.abort();
+		await expect(first).rejects.toThrow("cancelled");
+		release?.();
+		await expect(second).resolves.toBeUndefined();
+		expect(execute).toHaveBeenCalledOnce();
+	});
+
+	it("stops login after every caller cancels and admits a fresh attempt", async () => {
+		let attempts = 0;
+		const execute = vi.fn(
+			(_command: string, _args: string[], _cwd: string, commandOptions?: ExecOptions) =>
+				new Promise<ExecResult>((resolve) => {
+					attempts++;
+					if (attempts > 1) {
+						resolve(result());
+						return;
+					}
+					commandOptions?.signal?.addEventListener("abort", () => resolve(result({ code: 1, killed: true })), {
+						once: true,
+					});
+				}),
+		);
+		const options = { execute, isWorker: () => false, cwd: "/workspace", env: {} };
+		const firstController = new AbortController();
+		const secondController = new AbortController();
+		const first = loginBedrockSsoProfile("work-sso", { ...options, signal: firstController.signal });
+		const second = loginBedrockSsoProfile("work-sso", { ...options, signal: secondController.signal });
+
+		firstController.abort();
+		await expect(first).rejects.toThrow("cancelled");
+		expect(execute.mock.calls[0]?.[3]?.signal?.aborted).toBe(false);
+		secondController.abort();
+		await expect(second).rejects.toThrow("cancelled");
+		expect(execute.mock.calls[0]?.[3]?.signal?.aborted).toBe(true);
+		await expect(loginBedrockSsoProfile("work-sso", options)).resolves.toBeUndefined();
+		expect(execute).toHaveBeenCalledTimes(2);
 	});
 
 	it("never starts browser-capable authentication in a worker session", async () => {

@@ -178,7 +178,6 @@ describe("Anthropic OAuth", { concurrent: false }, () => {
 			expect(body.grant_type).toBe("refresh_token");
 			expect(body.client_id).toBeTruthy();
 			expect(body.refresh_token).toBe("refresh-token");
-			// Claude 2.1.280 refresh sends these inference scopes when stored scope metadata is absent.
 			expect(body.scope).toBe(
 				"user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins",
 			);

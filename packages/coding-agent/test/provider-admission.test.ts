@@ -340,6 +340,13 @@ describe("ProviderLimitStore", () => {
 			reason: "rate_limit",
 			limitedUntil: now + 12_000,
 		});
+		expect(
+			providerLimitFromFailure("amazon-bedrock", "Throttling error: Request throttled. Retry after 12 seconds", now),
+		).toMatchObject({
+			reason: "rate_limit",
+			limitedUntil: now + 12_000,
+		});
+		expect(providerLimitFromFailure("amazon-bedrock", "Throttling error: Request throttled", now)).toBeUndefined();
 		// A bare overload publishes nothing on its own; the retry policy's chosen delay does.
 		expect(providerLimitFromFailure("xai", "Provider overloaded", now)).toBeUndefined();
 		expect(providerLimitFromFailure("xai", "Provider overloaded", now, 2_000)).toMatchObject({

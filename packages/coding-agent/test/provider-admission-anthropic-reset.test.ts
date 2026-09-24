@@ -80,6 +80,39 @@ describe("Claude SDK rejection to shared admission state", () => {
 		},
 	);
 
+	it.each(["foreground", "worker", "background"] as const)(
+		"publishes a long server reset for %s without an early retry",
+		async (lane) => {
+			const fetch = vi
+				.fn<typeof globalThis.fetch>()
+				.mockResolvedValueOnce(
+					Response.json(
+						{ type: "error", error: { type: "rate_limit_error", message: "Rate limited" } },
+						{ status: 429, headers: { "retry-after": "120" } },
+					),
+				);
+			vi.stubGlobal("fetch", fetch);
+			const wrapped = withProviderAdmission(
+				(requestModel, context, options) =>
+					streamSimpleAnthropic(requestModel as Model<"anthropic-messages">, context, options),
+				{
+					ledger,
+					limits,
+					getLane: () => lane,
+					getAccountKey: () => account,
+					getPolicy: () => ({ enabled: true, limits: {}, maxWaitMs: 10_000, foregroundLimitWaitMs: 10_000 }),
+				},
+			);
+			const stream = await wrapped(model, { messages: [] }, { apiKey: "sk-ant-oat-fixture", maxRetries: 1 });
+			const message = await stream.result();
+			expect(message.stopReason).toBe("error");
+			expect(message.errorMessage).toContain("do not retry");
+			expect(fetch).toHaveBeenCalledTimes(1);
+			expect(limits.read(account)).toMatchObject({ limitedUntil: now + 120_000, reason: "rate_limit" });
+			expect(limits.read("anthropic#other")).toBeUndefined();
+		},
+	);
+
 	it("publishes rate limit immediately when streamFn throws transport 429", async () => {
 		const err = Object.assign(new Error("429 Rate limited; retry after 7 seconds"), { status: 429 });
 		const wrapped = withProviderAdmission(

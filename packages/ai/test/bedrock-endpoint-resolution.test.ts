@@ -56,6 +56,7 @@ const context: Context = {
 const originalAwsRegion = process.env.AWS_REGION;
 const originalAwsDefaultRegion = process.env.AWS_DEFAULT_REGION;
 const originalAwsProfile = process.env.AWS_PROFILE;
+const originalAwsBearerToken = process.env.AWS_BEARER_TOKEN_BEDROCK;
 
 beforeEach(() => {
 	bedrockMock.constructorCalls.length = 0;
@@ -64,6 +65,7 @@ beforeEach(() => {
 	delete process.env.AWS_REGION;
 	delete process.env.AWS_DEFAULT_REGION;
 	delete process.env.AWS_PROFILE;
+	delete process.env.AWS_BEARER_TOKEN_BEDROCK;
 });
 
 afterEach(() => {
@@ -83,6 +85,11 @@ afterEach(() => {
 		delete process.env.AWS_PROFILE;
 	} else {
 		process.env.AWS_PROFILE = originalAwsProfile;
+	}
+	if (originalAwsBearerToken === undefined) {
+		delete process.env.AWS_BEARER_TOKEN_BEDROCK;
+	} else {
+		process.env.AWS_BEARER_TOKEN_BEDROCK = originalAwsBearerToken;
 	}
 });
 
@@ -144,6 +151,21 @@ describe("bedrock endpoint resolution", () => {
 		expect(config.profile).toBe("work-sso");
 		expect(config.region).toBeUndefined();
 		expect(config.endpoint).toBeUndefined();
+	});
+
+	it("uses a verified SSO profile even when an ambient bearer token exists", async () => {
+		process.env.AWS_BEARER_TOKEN_BEDROCK = "unrelated-bearer";
+		const model = getModel("amazon-bedrock", "us.anthropic.claude-opus-4-8");
+
+		const profileConfig = await captureClientConfig(model, { profile: "work-sso" });
+		expect(profileConfig.profile).toBe("work-sso");
+		expect(profileConfig.token).toBeUndefined();
+		expect(profileConfig.authSchemePreference).toBeUndefined();
+
+		bedrockMock.constructorCalls.length = 0;
+		const bearerConfig = await captureClientConfig(model);
+		expect(bearerConfig.token).toEqual({ token: "unrelated-bearer" });
+		expect(bearerConfig.authSchemePreference).toEqual(["httpBearerAuth"]);
 	});
 });
 

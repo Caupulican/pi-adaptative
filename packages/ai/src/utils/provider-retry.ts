@@ -180,7 +180,9 @@ export function appendProviderRetryDirective(message: string, error: unknown): s
 	const directive = getProviderRetryDirective(error);
 	let suffix: string | undefined;
 	if (directive?.shouldRetry === false) {
-		suffix = "Provider retry directive: do not retry.";
+		suffix = `Provider retry directive: do not retry.${
+			directive.retryAfterMs !== undefined ? ` Retry after ${formatRetrySeconds(directive.retryAfterMs)}s.` : ""
+		}`;
 	} else if (directive?.retryAfterMs !== undefined) {
 		suffix = `Provider retry directive: retry after ${formatRetrySeconds(directive.retryAfterMs)}s.`;
 	} else if (directive?.shouldRetry === true) {

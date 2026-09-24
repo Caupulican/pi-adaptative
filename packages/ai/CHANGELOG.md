@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- Anthropic OAuth Messages requests use the Claude Code 2.1.281 CLI User-Agent observed in the latest local binary.
+- A provider's long `Retry-After` remains available to shared admission after the immediate retry wait is refused.
+- Bedrock requests with a named AWS profile use that profile even when an unrelated ambient bearer token is present.
+
 ## [0.99.46] - 2026-09-24
 
 ### Added

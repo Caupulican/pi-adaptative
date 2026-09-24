@@ -12,6 +12,8 @@
 
 ### Fixed
 
+- A cancelled SSO login waiter no longer cancels a shared AWS profile login while another session still needs it.
+- Root and delegated workers honor an Anthropic reset longer than the immediate retry cap without sending another request early.
 - The activity row of a finished turn ends with its submission instead of staying on as "Working" or "Preparing, no token yet" while background work runs.
 - Per-request host work no longer grows with the session: edge grants are read from an incremental branch index instead of the whole branch, and path aliasing scans only messages after its scan mark even before a first alias exists (the host profile's per-request time stays flat over 600 turns, where it grew from about 4 to 11 ms).
 - The status bar reads BACKGROUND with what is running (a tool or a worker) once only background work is left, instead of WORKING with the finished turn's last action.

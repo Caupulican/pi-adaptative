@@ -13,6 +13,13 @@ export interface ProviderSignature {
 
 /** Provider-thrown-message signatures checked before the generic ladder. */
 export const PROVIDER_FAILURE_SIGNATURES: Record<string, readonly ProviderSignature[]> = {
+	"amazon-bedrock": [
+		{
+			reason: "rate_limit",
+			pattern: /^Throttling error:/i,
+			source: "packages/ai/src/providers/amazon-bedrock.ts:319",
+		},
+	],
 	anthropic: [
 		{
 			reason: "billing_or_quota",

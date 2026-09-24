@@ -96,16 +96,19 @@ afterEach(() => {
 });
 
 describe("Anthropic bearer-token authentication", () => {
-	it("uses subscription client metadata only for OAuth tokens", async () => {
-		await streamSimple(model, context, { apiKey: "sk-ant-oat-test" }).result();
-		expect(mockState.constructorOptions?.apiKey).toBeNull();
-		expect(mockState.constructorOptions?.authToken).toBe("sk-ant-oat-test");
-		const headers = mockState.constructorOptions?.defaultHeaders as Record<string, string>;
-		expect(headers["user-agent"]).toBe("claude-code/2.1.280 (external, cli)");
-		expect(headers["x-app"]).toBe("cli");
-		expect(headers["anthropic-beta"]).toContain("oauth-2025-04-20");
-		expect(headers["anthropic-beta"]).toContain("claude-code-20250219");
-	});
+	it.each(["user", "background"] as const)(
+		"uses the native CLI identity for %s OAuth requests",
+		async (interactionMode) => {
+			await streamSimple(model, context, { apiKey: "sk-ant-oat-test", interactionMode }).result();
+			expect(mockState.constructorOptions?.apiKey).toBeNull();
+			expect(mockState.constructorOptions?.authToken).toBe("sk-ant-oat-test");
+			const headers = mockState.constructorOptions?.defaultHeaders as Record<string, string>;
+			expect(headers["user-agent"]).toBe("claude-cli/2.1.281 (external, cli)");
+			expect(headers["x-app"]).toBe("cli");
+			expect(headers["anthropic-beta"]).toContain("oauth-2025-04-20");
+			expect(headers["anthropic-beta"]).toContain("claude-code-20250219");
+		},
+	);
 
 	it("does not add subscription metadata to API-key requests", async () => {
 		await streamSimple(model, context, { apiKey: "sk-ant-api-test" }).result();

@@ -625,7 +625,10 @@ overload, or a fully used subscription window records the reset time under
 (Codex's `x-codex-credits-*`), so `/load` shows what remains beside what is used; before sending, every lane waits out a recorded limit that fits
 its budget and otherwise refuses the request unsent with a message the reliability classifier
 reads as a rate limit carrying the remaining delay, so no retry ladder rediscovers a limit at the
-account's expense; a worker's own retry ladder publishes its wait the same way. Counts and limits
+account's expense; a worker's own retry ladder publishes its wait the same way. Bedrock's
+`ThrottlingException` enters this rate-limit policy through the adapter's `Throttling error:`
+message; admission records a shared limit only when that failure provides a reset or retry delay.
+Counts and limits
 are keyed by provider plus credential identity (`<provider>#<identity>`, never a secret), so two
 accounts on one provider are two budgets. Admission captures that identity once and retains it
 through result observation, even if the session's credentials change. A success clears a rate-limit
@@ -922,6 +925,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-24 | The provider-limit contract now pins Bedrock throttling classification and requires a known reset before sharing its limit, so sibling requests do not invent a cooldown. |
 | 2026-09-21 | The tool gate's replan verdict refuses one call and never cancels the turn; relevance is judged only against a real step or goal; a System One cancel of the root turn inside the objective loop is a re-route, the operator's interruption a stop. |
 | 2026-09-21 | `decision_ledger_read` joins the default root tool surface with its own 100-token schema allowance; aggregate ceiling 5,670, base subtotal unchanged at 4,500. |
 | 2026-09-21 | System One integration: `objective_primary` drives the goal loop (root and workers as routed executors, completion only through the coordinator, goal follows the objective's terminal), cancel/steer levers for the root and for workers, and the decision ledger as a route input. New section "System One". |

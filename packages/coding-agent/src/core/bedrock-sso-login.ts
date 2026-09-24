@@ -6,7 +6,14 @@ import { isWorkerSession } from "./session-role.ts";
 const LOGIN_TIMEOUT_MS = 15 * 60_000;
 const LOGIN_OUTPUT_LIMIT = 32 * 1024;
 const ERROR_DETAIL_LIMIT = 512;
-const activeLogins = new Map<string, Promise<void>>();
+interface SharedLogin {
+	promise: Promise<void>;
+	controller: AbortController;
+	waiters: number;
+	completed: boolean;
+}
+
+const activeLogins = new Map<string, SharedLogin>();
 
 type ExecuteCommand = typeof execCommand;
 
@@ -61,23 +68,25 @@ async function executeLogin(profile: string, options: BedrockSsoLoginOptions): P
 	}
 }
 
-function waitForSharedLogin(login: Promise<void>, signal: AbortSignal | undefined): Promise<void> {
-	if (!signal) return login;
+function waitForSharedLogin(login: SharedLogin, signal: AbortSignal | undefined): Promise<void> {
+	login.waiters++;
 	return new Promise<void>((resolve, reject) => {
 		let settled = false;
 		const finish = (settle: () => void) => {
 			if (settled) return;
 			settled = true;
-			signal.removeEventListener("abort", onAbort);
+			signal?.removeEventListener("abort", onAbort);
+			login.waiters--;
+			if (login.waiters === 0 && !login.completed) login.controller.abort();
 			settle();
 		};
 		const onAbort = () => finish(() => reject(new Error("AWS SSO login was cancelled")));
-		signal.addEventListener("abort", onAbort, { once: true });
-		void login.then(
+		signal?.addEventListener("abort", onAbort, { once: true });
+		void login.promise.then(
 			() => finish(resolve),
 			(error: unknown) => finish(() => reject(error)),
 		);
-		if (signal.aborted) onAbort();
+		if (signal?.aborted) onAbort();
 	});
 }
 
@@ -92,14 +101,21 @@ export async function loginBedrockSsoProfile(profile: string, options: BedrockSs
 	if (options.signal?.aborted) throw new Error("AWS SSO login was cancelled");
 
 	const existing = activeLogins.get(normalized);
-	if (existing) return waitForSharedLogin(existing, options.signal);
-	const login = executeLogin(normalized, options);
+	if (existing && !existing.controller.signal.aborted) return waitForSharedLogin(existing, options.signal);
+	const controller = new AbortController();
+	const login: SharedLogin = {
+		promise: executeLogin(normalized, { ...options, signal: controller.signal }),
+		controller,
+		waiters: 0,
+		completed: false,
+	};
 	activeLogins.set(normalized, login);
-	try {
-		await login;
-	} finally {
+	const finish = () => {
+		login.completed = true;
 		if (activeLogins.get(normalized) === login) activeLogins.delete(normalized);
-	}
+	};
+	void login.promise.then(finish, finish);
+	return waitForSharedLogin(login, options.signal);
 }
 
 /** Restore one request-owned Bedrock SSO session after the provider identifies explicit expiry. */

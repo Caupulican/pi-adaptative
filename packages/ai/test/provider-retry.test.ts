@@ -150,6 +150,7 @@ describe("provider request retries", () => {
 		expect(appendProviderRetryDirective((failure as Error).message, failure)).toContain(
 			"Provider retry directive: do not retry.",
 		);
+		expect(appendProviderRetryDirective((failure as Error).message, failure)).toContain("Retry after 79.542s.");
 	});
 
 	it("aborts a retry wait without issuing another request", async () => {

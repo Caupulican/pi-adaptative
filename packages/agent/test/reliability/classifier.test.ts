@@ -182,11 +182,13 @@ describe("classifyFailure", () => {
 		for (const [provider, signatures] of Object.entries(PROVIDER_FAILURE_SIGNATURES)) {
 			for (const signature of signatures) {
 				const message =
-					signature.reason === "billing_or_quota" && provider === "openai-codex"
-						? "You have hit your ChatGPT usage limit (plus plan). Try again in ~90 min."
-						: signature.reason === "model_unsupported" && provider === "openai-codex"
-							? "Codex error (status 400): The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account."
-							: signature.pattern.source;
+					provider === "amazon-bedrock"
+						? "Throttling error: Request throttled"
+						: signature.reason === "billing_or_quota" && provider === "openai-codex"
+							? "You have hit your ChatGPT usage limit (plus plan). Try again in ~90 min."
+							: signature.reason === "model_unsupported" && provider === "openai-codex"
+								? "Codex error (status 400): The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account."
+								: signature.pattern.source;
 				const c = classifyFailure({ provider, message });
 				expect(c.reason, `${provider} ${signature.source}`).toBe(signature.reason);
 				if (signature.reason === "billing_or_quota") {
@@ -215,6 +217,16 @@ describe("classifyFailure", () => {
 		expect(classifyFailure({ message: "Codex error (code slow_down): Please slow down." })).toMatchObject({
 			reason: "rate_limit",
 			retryable: true,
+		});
+	});
+
+	it("classifies the Bedrock adapter's throttling error as a rate limit", () => {
+		expect(
+			classifyFailure({ provider: "amazon-bedrock", message: "Throttling error: Request throttled" }),
+		).toMatchObject({ reason: "rate_limit", retryable: true });
+		expect(classifyFailure({ provider: "anthropic", message: "Throttling error: Request throttled" })).toMatchObject({
+			reason: "unknown",
+			retryable: false,
 		});
 	});
 

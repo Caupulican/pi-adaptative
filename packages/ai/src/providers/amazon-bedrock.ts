@@ -136,7 +136,8 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 		}
 
 		// Resolve bearer token for Bedrock API key auth.
-		const bearerToken = options.bearerToken || process.env.AWS_BEARER_TOKEN_BEDROCK || undefined;
+		const bearerToken =
+			options.bearerToken || (hasConfiguredProfile ? undefined : process.env.AWS_BEARER_TOKEN_BEDROCK) || undefined;
 		const useBearerToken = bearerToken !== undefined && process.env.AWS_BEDROCK_SKIP_AUTH !== "1";
 
 		// in Node.js/Bun environment only
