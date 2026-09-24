@@ -109,7 +109,12 @@ Pinned by `packages/coding-agent/test/cache-custody-contract.test.ts` (the worke
 
 **Per-request host work is bounded.** Every request-time scan resumes from the history prefix it
 already covered; the profiler's last decile of pre-request time may not exceed twice its first.
-Pinned by the long-session contract gate and `packages/agent/test/tool-failure-memory.test.ts`.
+Path aliasing resumes from the message contents it already scanned (fingerprints persisted in
+`path_alias_scanned`), not from a timestamp mark: a mark skipped a message stamped in the same
+millisecond, a replaced message, and an older unscanned message reached by a branch switch or
+restart. A message sent while minting is paused is not marked scanned. Pinned by the long-session
+contract gate, `packages/agent/test/tool-failure-memory.test.ts` and
+`packages/coding-agent/test/path-alias-session.test.ts` (scan cursor).
 
 **A profile measures executed work, not skipped or failed synthetic actions.** Valid scripted
 actions must execute with zero tool errors and the exact expected foreground action count. Each
@@ -971,3 +976,4 @@ measurement gains no new surface.
 | 2026-09-24 | A conversation keeps one talker and every other model reads a brief; a side trip's brief says the earlier conversation is not shown and the side trip can hand its message back to the talker. |
 | 2026-09-24 | No invariant moved: the path-alias contract test closes the runtimes it opens before removing their directories, since Windows cannot delete an open database. |
 | 2026-09-24 | A side trip searches the conversation its brief omits (`conversation_history`) instead of handing its message back: the free side-trip model looked the conversation up 10 of 10 times and handed back 0 of 28. It keeps the whole tool surface, since reaching for a mutating tool is how work it cannot do reaches the talker. |
+| 2026-09-24 | Path aliasing's scan cursor is the set of scanned message fingerprints, not the `last_scanned_timestamp` mark, so same-millisecond, replaced, branch-switched and pause-time messages are scanned once and scanned history is not rescanned; the contract test's persistence case counts fingerprints instead of reading the mark. |

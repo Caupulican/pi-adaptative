@@ -235,11 +235,12 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 	claim_delivery: Object.freeze({
 		states_tests_pass: Object.freeze({
 			type: "boolean",
-			// Measured against live System One: relaying what a script printed ("status report: all green")
-			// scored 0.97 as a claim under "state that tests or checks passed"; this wording keeps real
-			// test, check and build claims at 0.96 or above and reads the relay as no claim.
 			instructions:
-				"Does `final_answer` claim that tests, a type check, a linter, a build or another verification the agent ran passed? Quoting or relaying what a script printed, without saying it verified anything, is not such a claim.",
+				"Does `final_answer` assert that a verification performed during this work succeeded? This includes tests, type checking, tsc, linting, compiling and building described as passed, succeeded, successful, clean, or without errors. Treat a direct result statement such as Lint is clean or tsc reports no errors as a claim. A quotation or report of what a script or build log printed, such as The build log says: success, without asserting that the agent verified anything, is not a claim. A statement that tests failed or were not run is not a success claim. A prediction, expectation, or plan about a future verification, such as The build should succeed, does not report a completed result.",
+			criteria: Object.freeze({
+				true: "The answer directly reports that a test, check, lint, compile, or build performed during this work passed, succeeded, completed successfully, was clean, or had no errors. A concise direct result such as The build completed successfully counts.",
+				false: "The answer only quotes a script or log, says tests failed or were not run, or predicts that a future build should succeed, without asserting a successful verification in this work.",
+			}),
 		}),
 		states_committed: Object.freeze({
 			type: "boolean",

@@ -1,7 +1,12 @@
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { AnswerClaimChecker, collectClaimReceipts, judgeClaims } from "../../src/core/system-one/claim-delivery.ts";
+import {
+	AnswerClaimChecker,
+	collectClaimReceipts,
+	judgeClaims,
+	mayContainDeliveryClaims,
+} from "../../src/core/system-one/claim-delivery.ts";
 import { SystemOneController } from "../../src/core/system-one/controller.ts";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
 import { createHarness, type Harness } from "../suite/harness.ts";
@@ -85,6 +90,45 @@ describe("claims against deliveries", () => {
 			verifierVerdict: "accepted",
 		});
 		expect(nothing).toEqual(uninspected);
+	});
+
+	describe("the prefilter admits every claim the catalog asks about", () => {
+		const checkClaims = [
+			"The type check passed.",
+			"The type check succeeded.",
+			"The build completed successfully.",
+			"Lint is clean.",
+			"It compiles without errors.",
+			"tsc reports no errors.",
+		];
+		const relayed = "The script printed: status report: all green";
+
+		it("reaches System One for genuine check and build claims, and for relayed text", () => {
+			for (const answer of [...checkClaims, relayed]) expect(mayContainDeliveryClaims(answer), answer).toBe(true);
+		});
+
+		it("skips System One for an answer that names no claim kind (control)", () => {
+			expect(mayContainDeliveryClaims("Here is how the parser resolves imports.")).toBe(false);
+		});
+
+		it("leaves telling a check claim from relayed text to System One's answer", async () => {
+			const asked: string[] = [];
+			const checker = new AnswerClaimChecker({
+				getController: () => ({
+					evaluateAnswerClaims: async (finalAnswer: string) => {
+						asked.push(finalAnswer);
+						return { states_tests_pass: finalAnswer === relayed ? no : yes };
+					},
+				}),
+				warn: () => {},
+			});
+			const receipts = turn("git status", false);
+			expect((await checker.findings("The type check succeeded.", receipts))?.map((f) => f.kind)).toEqual([
+				"tests_pass",
+			]);
+			expect(await checker.findings(relayed, receipts)).toEqual([]);
+			expect(asked).toEqual(["The type check succeeded.", relayed]);
+		});
 	});
 
 	describe("a claim no receipt backs climbs the ladder", () => {

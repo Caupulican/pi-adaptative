@@ -16,6 +16,7 @@ const stages: ValidationStage[] = [
 	"patch_review",
 	"completion",
 	"completion_challenge",
+	"claim_delivery",
 ];
 
 describe("system-one catalog wire format", () => {
@@ -30,6 +31,23 @@ describe("system-one catalog wire format", () => {
 				questions: wire,
 			}),
 		).toBe(true);
+	});
+
+	it("sends the test-claim question with its true and false criteria", () => {
+		const question = getQuestionPack("claim_delivery").states_tests_pass!;
+		const wire = toTypeSafeEvaluationQuestions(getQuestionPack("claim_delivery"));
+		expect(wire.states_tests_pass).toEqual({
+			type: "noul",
+			instructions: question.instructions,
+			criteria: question.criteria,
+		});
+		expect(wire.states_tests_pass!.criteria).toMatchObject({
+			true: expect.stringContaining("The build completed successfully counts"),
+			false: expect.stringContaining("predicts that a future build should succeed"),
+		});
+		expect(Value.Check(evaluationInputSchema, { state: { final_answer: "Lint is clean." }, questions: wire })).toBe(
+			true,
+		);
 	});
 
 	it("accepts every stage pack as a TypeSafe evaluation", () => {

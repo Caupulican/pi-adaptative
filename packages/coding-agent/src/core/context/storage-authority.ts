@@ -75,6 +75,11 @@ export const CONTEXT_STORAGE_TABLE_AUTHORITY: readonly StorageTableAuthority[] =
 	{
 		table: "path_alias_meta",
 		authorityClass: "runtime_cache_disposable",
-		notes: "Scan watermark (last_scanned_timestamp) for incremental path extraction; safe to drop and rescan.",
+		notes: "Table cwd and reserved p/ tokens for incremental path extraction; safe to drop and rescan.",
+	},
+	{
+		table: "path_alias_scanned",
+		authorityClass: "runtime_cache_disposable",
+		notes: "Fingerprints of messages already scanned for path extraction; safe to drop and rescan.",
 	},
 ];

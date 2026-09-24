@@ -18,6 +18,7 @@ export const SQLITE_CONTEXT_INDEX_TABLES = [
 	"memory_index",
 	"path_aliases",
 	"path_alias_meta",
+	"path_alias_scanned",
 ] as const;
 
 export interface SqliteRuntimeIndexOptions {
@@ -162,6 +163,10 @@ export function migrateSqliteRuntimeIndex(database: SqliteDatabase): void {
 				key TEXT PRIMARY KEY NOT NULL,
 				value TEXT NOT NULL
 			) STRICT;
+
+			CREATE TABLE IF NOT EXISTS path_alias_scanned (
+				fingerprint TEXT PRIMARY KEY NOT NULL
+			) STRICT, WITHOUT ROWID;
 
 			PRAGMA user_version = ${SQLITE_RUNTIME_INDEX_SCHEMA_VERSION};
 			COMMIT;
@@ -478,6 +483,8 @@ export interface SqlitePathAliasStore {
 	upsertMany(rows: readonly SqlitePathAliasRow[]): void;
 	getMeta(key: string): string | undefined;
 	setMeta(key: string, value: string): void;
+	listScanned(): string[];
+	insertScanned(fingerprints: readonly string[]): void;
 	close(): void;
 }
 
@@ -530,6 +537,25 @@ export function createSqlitePathAliasStore(options: SqliteRuntimeIndexOptions): 
 	const setMeta = database.prepare(
 		"INSERT INTO path_alias_meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
 	);
+	const listScanned = database.prepare("SELECT fingerprint FROM path_alias_scanned");
+	const insertScanned = database.prepare(
+		"INSERT INTO path_alias_scanned(fingerprint) VALUES(?) ON CONFLICT DO NOTHING",
+	);
+	const inTransaction = (write: () => void): void => {
+		database.exec("BEGIN");
+		try {
+			write();
+			database.exec("COMMIT");
+		} catch (error) {
+			try {
+				database.exec("ROLLBACK");
+			} catch {
+				// The primary failure is rethrown below; a rollback error on an already-
+				// aborted transaction must not mask it.
+			}
+			throw error;
+		}
+	};
 	return {
 		list,
 		upsert(row: SqlitePathAliasRow): void {
@@ -537,23 +563,22 @@ export function createSqlitePathAliasStore(options: SqliteRuntimeIndexOptions): 
 		},
 		upsertMany(rows: readonly SqlitePathAliasRow[]): void {
 			if (rows.length === 0) return;
-			database.exec("BEGIN");
-			try {
+			inTransaction(() => {
 				for (const row of rows) upsert.run(row.fullPath, row.aliasId, row.createdAtTurn);
-				database.exec("COMMIT");
-			} catch (error) {
-				try {
-					database.exec("ROLLBACK");
-				} catch {
-					// The primary failure is rethrown below; a rollback error on an already-
-					// aborted transaction must not mask it.
-				}
-				throw error;
-			}
+			});
 		},
 		getMeta,
 		setMeta(key: string, value: string): void {
 			setMeta.run(key, value);
+		},
+		listScanned(): string[] {
+			return listScanned.all().map((row) => String((row as Record<string, unknown>).fingerprint));
+		},
+		insertScanned(fingerprints: readonly string[]): void {
+			if (fingerprints.length === 0) return;
+			inTransaction(() => {
+				for (const fingerprint of fingerprints) insertScanned.run(fingerprint);
+			});
 		},
 		close(): void {
 			try {

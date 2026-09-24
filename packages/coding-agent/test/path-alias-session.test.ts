@@ -125,7 +125,7 @@ describe("PathAliasRuntime", () => {
 		runtime.close();
 	});
 
-	it("persists the last-scanned mark with alias inserts and at close, not on every sync", () => {
+	it("persists scanned fingerprints with alias inserts and at close, not on every sync", () => {
 		// The mark is a resume optimization, and writing it per request was one journaled SQLite
 		// commit per provider request. A lagging mark only means the next process rescans a few more
 		// messages, which the table extension makes idempotent.
@@ -141,7 +141,7 @@ describe("PathAliasRuntime", () => {
 		const meta = () => {
 			const store = createSqlitePathAliasStore({ databasePath });
 			try {
-				return store.getMeta("last_scanned_timestamp");
+				return store.listScanned().length;
 			} finally {
 				store.close();
 			}
@@ -149,14 +149,14 @@ describe("PathAliasRuntime", () => {
 		// Path-free messages: nothing to insert, so the mark stays in memory.
 		runtime.sync([toolResult("no paths here", 10)]);
 		runtime.sync([toolResult("no paths here", 10), toolResult("still none", 20)]);
-		expect(meta()).toBeUndefined();
+		expect(meta()).toBe(0);
 		// An insert is already a write; the mark rides along with it.
 		runtime.sync([
 			toolResult("no paths here", 10),
 			toolResult("still none", 20),
 			toolResult("packages/app/src/loader.ts", 30),
 		]);
-		expect(meta()).toBe("30");
+		expect(meta()).toBe(3);
 		// Later path-free syncs stay in memory again until close persists them.
 		runtime.sync([
 			toolResult("no paths here", 10),
@@ -164,9 +164,74 @@ describe("PathAliasRuntime", () => {
 			toolResult("packages/app/src/loader.ts", 30),
 			toolResult("tail", 40),
 		]);
-		expect(meta()).toBe("30");
+		expect(meta()).toBe(3);
 		runtime.close();
-		expect(meta()).toBe("40");
+		expect(meta()).toBe(4);
+	});
+
+	describe("scan mark shared by messages stamped in the same millisecond", () => {
+		function runtimeAt(databasePath: string): PathAliasRuntime {
+			return new PathAliasRuntime(
+				() => "/repo",
+				() => databasePath,
+				() => 1,
+				{ requireExistingTargets: false },
+			);
+		}
+		function databaseIn(): string {
+			const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-runtime-"));
+			tempDirs.push(dir);
+			return join(dir, "runtime.sqlite");
+		}
+		const aliased = (runtime: PathAliasRuntime) => runtime.peekTable().entries.map((entry) => entry.path);
+
+		it("scans a path appended at the last-scanned timestamp while the table is still empty", () => {
+			const runtime = runtimeAt(databaseIn());
+			const first = toolResult("no paths here", 10);
+			runtime.sync([first]);
+			expect(aliased(runtime)).toEqual([]);
+			runtime.sync([first, toolResult("packages/app/src/loader.ts", 10)]);
+			expect(aliased(runtime)).toEqual(["packages/app/src/loader.ts"]);
+			runtime.close();
+		});
+
+		it("scans a path appended at a later timestamp (control)", () => {
+			const runtime = runtimeAt(databaseIn());
+			const first = toolResult("no paths here", 10);
+			runtime.sync([first]);
+			runtime.sync([first, toolResult("packages/app/src/loader.ts", 11)]);
+			expect(aliased(runtime)).toEqual(["packages/app/src/loader.ts"]);
+			runtime.close();
+		});
+
+		it("scans a message that replaced a scanned one at the mark timestamp", () => {
+			const runtime = runtimeAt(databaseIn());
+			const a = toolResult("no paths here", 10);
+			runtime.sync([a, toolResult("still none", 10)]);
+			runtime.sync([a, toolResult("packages/app/src/loader.ts", 10)]);
+			expect(aliased(runtime)).toEqual(["packages/app/src/loader.ts"]);
+			runtime.close();
+		});
+
+		it("scans a third message appended at the mark timestamp (control)", () => {
+			const runtime = runtimeAt(databaseIn());
+			const scanned = [toolResult("no paths here", 10), toolResult("still none", 10)];
+			runtime.sync(scanned);
+			runtime.sync([...scanned, toolResult("packages/app/src/loader.ts", 10)]);
+			expect(aliased(runtime)).toEqual(["packages/app/src/loader.ts"]);
+			runtime.close();
+		});
+
+		it("scans a replaced message at the mark after a restart", () => {
+			const databasePath = databaseIn();
+			const first = runtimeAt(databasePath);
+			first.sync([toolResult("no paths here", 10), toolResult("still none", 10)]);
+			first.close();
+			const second = runtimeAt(databasePath);
+			second.sync([toolResult("no paths here", 10), toolResult("packages/app/src/loader.ts", 10)]);
+			expect(aliased(second)).toEqual(["packages/app/src/loader.ts"]);
+			second.close();
+		});
 	});
 
 	it("avoids alias ids that collide with an on-disk p/ directory", () => {
@@ -601,6 +666,150 @@ describe("PathAliasRuntime legend delta records", () => {
 		expect(runtime1.getAliasEconomics().paused).toBe(true);
 		expect(runtime1.peekTable().entries.length).toBe(paths.length);
 		expect(next.legend).toBeUndefined();
+	});
+
+	function pausedHistory(runtime1: PathAliasRuntime) {
+		const paths = Array.from({ length: 160 }, (_, index) => `longdirname/abcde${String(index).padStart(3, "0")}.ts`);
+		const history: AgentMessage[] = paths.map((path, index) => toolResult(path, 10 + index));
+		history.push(legendRecord(runtime1.sync(history).legend, 10 + paths.length));
+		const recovery = Array.from({ length: 4 }, (_, index) => toolResult(paths.join("\n"), 1000 + index));
+		return { paths, history, recovery };
+	}
+	const entryPaths = (runtime1: PathAliasRuntime) => runtime1.peekTable().entries.map((entry) => entry.path);
+
+	it("scans a message sent while minting was paused once minting resumes", () => {
+		const runtime1 = runtime();
+		const { history, recovery } = pausedHistory(runtime1);
+		const duringPause = toolResult("longdirname/zzzzz-new.ts", 999);
+		runtime1.sync([...history, duringPause]);
+		expect(runtime1.getAliasEconomics().paused).toBe(true);
+		runtime1.sync([...history, duringPause, ...recovery]);
+		runtime1.sync([...history, duringPause, ...recovery, toolResult("no paths here", 1004)]);
+		expect(runtime1.getAliasEconomics().paused).toBe(false);
+		expect(entryPaths(runtime1)).toContain("longdirname/zzzzz-new.ts");
+	});
+
+	it("mints a path first sent after minting resumed (control)", () => {
+		const runtime1 = runtime();
+		const { paths, history, recovery } = pausedHistory(runtime1);
+		const ids = runtime1.peekTable().entries.map((entry) => entry.id);
+		runtime1.sync([...history, toolResult("no paths here", 999)]);
+		expect(runtime1.getAliasEconomics().paused).toBe(true);
+		const resumed = [...history, toolResult("no paths here", 999), ...recovery];
+		runtime1.sync(resumed);
+		runtime1.sync([...resumed, toolResult("longdirname/yyyyy-after.ts", 1004)]);
+		expect(runtime1.getAliasEconomics().paused).toBe(false);
+		expect(entryPaths(runtime1)).toEqual([...paths, "longdirname/yyyyy-after.ts"]);
+		expect(
+			runtime1
+				.peekTable()
+				.entries.slice(0, paths.length)
+				.map((entry) => entry.id),
+		).toEqual(ids);
+	});
+});
+
+describe("PathAliasRuntime branch switch to older messages", () => {
+	const tempDirs: string[] = [];
+	afterEach(() => {
+		for (const dir of tempDirs.splice(0))
+			rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+	});
+
+	function databaseIn(): string {
+		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-branch-"));
+		tempDirs.push(dir);
+		return join(dir, "runtime.sqlite");
+	}
+	function synthetic(databasePath: string): PathAliasRuntime {
+		return new PathAliasRuntime(
+			() => "/repo",
+			() => databasePath,
+			() => 1,
+			{ requireExistingTargets: false },
+		);
+	}
+	const aliased = (runtime: PathAliasRuntime) => runtime.peekTable().entries.map((entry) => entry.path);
+	const text = (message: AgentMessage) =>
+		message.role === "toolResult"
+			? message.content.map((part) => (part.type === "text" ? part.text : "")).join("")
+			: "";
+
+	it("scans a path-bearing message older than the last scanned one after a branch switch", () => {
+		const runtime = synthetic(databaseIn());
+		const root = toolResult("no paths here", 10);
+		runtime.sync([root, toolResult("still none", 20)]);
+		runtime.sync([root, toolResult("packages/app/src/branch.ts", 15)]);
+		expect(aliased(runtime)).toEqual(["packages/app/src/branch.ts"]);
+		runtime.close();
+	});
+
+	it("scans a resumed branch's older unscanned message after a restart", () => {
+		const databasePath = databaseIn();
+		const first = synthetic(databasePath);
+		first.sync([toolResult("no paths here", 10), toolResult("still none", 20)]);
+		first.close();
+		const second = synthetic(databasePath);
+		second.sync([toolResult("no paths here", 10), toolResult("packages/app/src/branch.ts", 15)]);
+		expect(aliased(second)).toEqual(["packages/app/src/branch.ts"]);
+		second.close();
+	});
+
+	it("mints from an appended message on the same branch (control)", () => {
+		const runtime = synthetic(databaseIn());
+		const scanned = [toolResult("no paths here", 10), toolResult("still none", 20)];
+		runtime.sync(scanned);
+		runtime.sync([...scanned, toolResult("packages/app/src/branch.ts", 30)]);
+		expect(aliased(runtime)).toEqual(["packages/app/src/branch.ts"]);
+		runtime.close();
+	});
+
+	it("does not rescan history already scanned on the same branch, in process or after a restart (control)", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "pi-path-alias-branch-"));
+		tempDirs.push(cwd);
+		const databasePath = join(cwd, "runtime.sqlite");
+		const live = () =>
+			new PathAliasRuntime(
+				() => cwd,
+				() => databasePath,
+				() => 1,
+			);
+		const early = toolResult("packages/app/src/late.ts", 10);
+		const first = live();
+		first.sync([early]);
+		mkdirSync(join(cwd, "packages", "app", "src"), { recursive: true });
+		writeFileSync(join(cwd, "packages", "app", "src", "late.ts"), "export {};\n");
+		first.sync([early, toolResult("no paths here", 20)]);
+		expect(aliased(first)).toEqual([]);
+		first.close();
+		const second = live();
+		second.sync([toolResult("packages/app/src/late.ts", 10), toolResult("no paths here", 20)]);
+		expect(aliased(second)).toEqual([]);
+		second.close();
+	});
+
+	it("keeps the shared prefix's spelling and existing alias ids when a branch switch mints", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "pi-path-alias-branch-"));
+		tempDirs.push(cwd);
+		mkdirSync(join(cwd, "packages", "app", "src"), { recursive: true });
+		writeFileSync(join(cwd, "packages", "app", "src", "kept.ts"), "export {};\n");
+		const runtime = new PathAliasRuntime(
+			() => cwd,
+			() => join(cwd, "runtime.sqlite"),
+			() => 1,
+		);
+		const kept = toolResult("packages/app/src/kept.ts", 5);
+		const early = toolResult("packages/app/src/late.ts", 10);
+		const before = runtime.sync([kept, early, toolResult("no paths here", 20)]);
+		const keptId = runtime.peekTable().entries.find((entry) => entry.path.endsWith("kept.ts"))?.id;
+		writeFileSync(join(cwd, "packages", "app", "src", "late.ts"), "export {};\n");
+		const after = runtime.sync([kept, early, toolResult("read packages/app/src/late.ts again", 15)]);
+		expect(aliased(runtime)).toEqual(["packages/app/src/kept.ts", "packages/app/src/late.ts"]);
+		expect(runtime.peekTable().entries.find((entry) => entry.path.endsWith("kept.ts"))?.id).toBe(keptId);
+		expect(text(after.messages[0]!)).toBe(text(before.messages[0]!));
+		expect(text(after.messages[1]!)).toBe("packages/app/src/late.ts");
+		expect(text(after.messages[2]!)).not.toContain("packages/app/src/late.ts");
+		runtime.close();
 	});
 });
 

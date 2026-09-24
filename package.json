@@ -26,6 +26,7 @@
 		"check:clone-config": "node --test scripts/check-production-clones.test.mjs",
 		"check:clones": "node scripts/check-production-clones.mjs",
 		"scan:semantic-duplicates": "node --conditions=pi-source scripts/semantic-duplicate-scan.mjs",
+		"probe:system-one-claim": "node --conditions=pi-source scripts/system-one-claim-probe.mjs",
 		"probe:system-one-ladder": "node --conditions=pi-source scripts/system-one-ladder-probe.mjs",
 		"probe:system-one-route": "node --conditions=pi-source scripts/system-one-route-probe.mjs",
 		"check:coordinator-boundaries": "node --test scripts/check-coordinator-boundaries.test.mjs && node scripts/check-coordinator-boundaries.mjs",

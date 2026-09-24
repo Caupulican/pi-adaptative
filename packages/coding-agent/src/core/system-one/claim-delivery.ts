@@ -121,7 +121,7 @@ export function mergeClaimReceipts(receipts: readonly ClaimReceipts[]): ClaimRec
 
 /** Cheap gate before spending a System One call: an answer that names none of the claim kinds claims none. */
 const CLAIM_VOCABULARY =
-	/\b(?:test|tests|tested|pass|passes|passed|passing|green|commit|committed|push|pushed|publish|published|released|created|updated|modified|changed|edited|wrote|written|fixed)\b/i;
+	/\b(?:test|tests|tested|testing|check|checks|checked|typecheck|typechecks|typechecked|tsc|lint|lints|linted|linter|linting|build|builds|built|compile|compiles|compiled|verify|verified|verification|pass|passes|passed|passing|green|succeed|succeeds|succeeded|success|successful|successfully|clean|commit|committed|push|pushed|publish|published|released|created|updated|modified|changed|edited|wrote|written|fixed)\b/i;
 
 export function mayContainDeliveryClaims(finalAnswer: string): boolean {
 	return CLAIM_VOCABULARY.test(finalAnswer);

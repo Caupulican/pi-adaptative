@@ -23,9 +23,8 @@ import {
 	type SqlitePathAliasStore,
 } from "./sqlite-runtime-index.ts";
 
-const LAST_SCANNED_TS_KEY = "last_scanned_timestamp";
 const RESERVED_TOKENS_KEY = "reserved_alias_tokens";
-const LAST_SCANNED_TS_PERSIST_INTERVAL_MS = 5_000;
+const SCANNED_PERSIST_INTERVAL_MS = 5_000;
 const TABLE_CWD_KEY = "table_cwd";
 
 interface PathAliasRecord {
@@ -70,18 +69,18 @@ export class PathAliasRuntime {
 	private records: PathAliasRecord[] = [];
 	private store: SqlitePathAliasStore | undefined;
 	private loaded = false;
-	private lastScannedTs = 0;
+	private scanned = new Set<string>();
+	private readonly scanFingerprints = new WeakMap<AgentMessage, string>();
 	/**
-	 * Whether `lastScannedTs` has moved past what the store holds, and when it was last persisted.
-	 * The mark is a resume optimization (which messages an earlier process already scanned), so it
-	 * does not need to reach disk on every request: persisting it per request was one synchronous
+	 * Scanned fingerprints the store does not hold yet, and when they were last persisted.
+	 * They are a resume optimization (which messages an earlier process already scanned), so they
+	 * do not need to reach disk on every request: persisting per request was one synchronous
 	 * journaled SQLite write per provider request -- 37% of host time on Windows in the CI profile.
-	 * It lands with any alias insert (already a write), at close, and otherwise at most every few
-	 * seconds; a mark that lags only means the next process rescans a few more messages, which is
-	 * idempotent.
+	 * They land with any alias insert (already a write), at close, and otherwise at most every few
+	 * seconds; a lag only means the next process rescans a few more messages, which is idempotent.
 	 */
-	private lastScannedTsDirty = false;
-	private lastScannedTsPersistedAt = 0;
+	private pendingScanned: string[] = [];
+	private scannedPersistedAt = 0;
 	/**
 	 * Ids ever rendered into the legend. Monotone: an id whose last mention scrolls out of the
 	 * window keeps its line instead of retracting it, so the rendered legend only ever grows by
@@ -214,7 +213,8 @@ export class PathAliasRuntime {
 		// for the rest of the session. Once the lines cost more than every mention saves, minting
 		// stops (existing aliases keep working) until the balance recovers.
 		this.mintingPaused = this.legendCostExceedsSavings();
-		const textsToScan = this.mintingPaused ? [] : this.textsToScan(messages);
+		const unscanned = messages.filter((message) => !this.scanned.has(this.scanFingerprint(message)));
+		const textsToScan = this.mintingPaused ? [] : collectMessageTexts(unscanned);
 		let scanWholeHistoryForReservations = !this.reservationHistoryScanned;
 		const reservationTexts = scanWholeHistoryForReservations ? collectMessageTexts(messages) : textsToScan;
 		this.reservationHistoryScanned = true;
@@ -264,17 +264,20 @@ export class PathAliasRuntime {
 		if (scanWholeHistoryForReservations) {
 			this.store?.setMeta(RESERVED_TOKENS_KEY, JSON.stringify(this.table.reservedIds ?? []));
 		}
-		const maxTs = maxMessageTimestamp(messages);
-		if (maxTs > this.lastScannedTs) {
-			this.lastScannedTs = maxTs;
-			this.lastScannedTsDirty = true;
+		if (!this.mintingPaused) {
+			for (const message of unscanned) {
+				const fingerprint = this.scanFingerprint(message);
+				if (this.scanned.has(fingerprint)) continue;
+				this.scanned.add(fingerprint);
+				this.pendingScanned.push(fingerprint);
+			}
 		}
 		const wroteAliases = extended.inserted.length > 0;
 		if (
-			this.lastScannedTsDirty &&
-			(wroteAliases || Date.now() - this.lastScannedTsPersistedAt >= LAST_SCANNED_TS_PERSIST_INTERVAL_MS)
+			this.pendingScanned.length > 0 &&
+			(wroteAliases || Date.now() - this.scannedPersistedAt >= SCANNED_PERSIST_INTERVAL_MS)
 		) {
-			this.persistLastScannedTs();
+			this.persistScanned();
 		}
 		const rewritten = this.renderFrozen(messages);
 		// The legend a request carries is the delta against the lines the model can actually see: the
@@ -407,15 +410,15 @@ export class PathAliasRuntime {
 		return rendered;
 	}
 
-	private persistLastScannedTs(): void {
-		if (!this.lastScannedTsDirty || !this.store) return;
-		this.store.setMeta(LAST_SCANNED_TS_KEY, String(this.lastScannedTs));
-		this.lastScannedTsDirty = false;
-		this.lastScannedTsPersistedAt = Date.now();
+	private persistScanned(): void {
+		if (this.pendingScanned.length === 0 || !this.store) return;
+		this.store.insertScanned(this.pendingScanned);
+		this.pendingScanned = [];
+		this.scannedPersistedAt = Date.now();
 	}
 
 	close(): void {
-		this.persistLastScannedTs();
+		this.persistScanned();
 		this.store?.close();
 		this.store = undefined;
 		this.records = [];
@@ -423,6 +426,8 @@ export class PathAliasRuntime {
 		this.rendered = new WeakMap();
 		this.renderRun = undefined;
 		this.reservationHistoryScanned = false;
+		this.scanned = new Set();
+		this.pendingScanned = [];
 	}
 
 	private ensureLoaded(): void {
@@ -455,11 +460,9 @@ export class PathAliasRuntime {
 		};
 		this.table = this.buildTableForCwd(cwd);
 		if (!storedCwd) this.store.setMeta(TABLE_CWD_KEY, cwd);
-		const meta = this.store.getMeta(LAST_SCANNED_TS_KEY);
-		this.lastScannedTs = meta ? Number(meta) || 0 : 0;
+		this.scanned = new Set(this.store.listScanned());
 		// The persist interval counts from the load, so the first requests do not each write the mark.
-		this.lastScannedTsPersistedAt = Date.now();
-		this.lastScannedTsDirty = false;
+		this.scannedPersistedAt = Date.now();
 		this.loaded = true;
 	}
 
@@ -471,13 +474,15 @@ export class PathAliasRuntime {
 		};
 	}
 
-	/**
-	 * Only messages after the scan mark: minting needs no mention counts, so a message scanned once
-	 * yields nothing new. A table that is still empty is no exception; rescanning the whole history on
-	 * every request until a first alias was minted made per-request work grow with the session.
-	 */
-	private textsToScan(messages: readonly AgentMessage[]): string[] {
-		return collectMessageTexts(messages.filter((message) => (message.timestamp ?? 0) > this.lastScannedTs));
+	private scanFingerprint(message: AgentMessage): string {
+		let fingerprint = this.scanFingerprints.get(message);
+		if (fingerprint === undefined) {
+			fingerprint = createHash("sha256")
+				.update(JSON.stringify(collectMessageTexts([message])))
+				.digest("hex");
+			this.scanFingerprints.set(message, fingerprint);
+		}
+		return fingerprint;
 	}
 }
 
@@ -525,15 +530,6 @@ function readReservedTokens(raw: string | undefined): string[] {
 	} catch {
 		return [];
 	}
-}
-
-function maxMessageTimestamp(messages: readonly AgentMessage[]): number {
-	let max = 0;
-	for (const message of messages) {
-		const timestamp = message.timestamp ?? 0;
-		if (timestamp > max) max = timestamp;
-	}
-	return max;
 }
 
 /**

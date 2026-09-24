@@ -15,11 +15,14 @@
 - A cancelled SSO login waiter no longer cancels a shared AWS profile login while another session still needs it.
 - Root and delegated workers honor an Anthropic reset longer than the immediate retry cap without sending another request early.
 - The activity row of a finished turn ends with its submission instead of staying on as "Working" or "Preparing, no token yet" while background work runs.
-- Per-request host work no longer grows with the session: edge grants are read from an incremental branch index instead of the whole branch, and path aliasing scans only messages after its scan mark even before a first alias exists (the host profile's per-request time stays flat over 600 turns, where it grew from about 4 to 11 ms).
+- Per-request host work no longer grows with the session: edge grants are read from an incremental branch index instead of the whole branch, and path aliasing scans only messages it has not scanned yet, even before a first alias exists (the host profile's per-request time stays flat over 600 turns, where it grew from about 4 to 11 ms).
 - The status bar reads BACKGROUND with what is running (a tool or a worker) once only background work is left, instead of WORKING with the finished turn's last action.
 - A print, json or rpc run in a project with no trust decision says the project runs untrusted and names `--approve` (not for `--help` or `--list-models`).
 - A quota failover or a move off a model the account no longer offers carries the conversation's talker to the model the work continued on.
 - A backgrounded bash or python run without an explicit timeout gets the tool's ceiling (3600 s bash, 300 s python) instead of the foreground default, so long background builds and suites are no longer killed at 120 s (30 s for python).
+- Path aliasing tracks which messages it scanned by content instead of by timestamp, so a message stamped in the same millisecond as the last scanned one, one that replaced a scanned message, and an older unscanned message reached by a branch switch, compaction or restart are scanned instead of skipped, while already-scanned history is not rescanned. A message sent while alias minting was paused is scanned once minting resumes.
+- `conversation_history` shows an excerpt around the match of an earlier message too large for the output bound instead of reporting it matched and showing nothing, and its whole output stays within the bound.
+- The claim check's prefilter admits type check, lint, build and compile claims worded as succeeded, successful or clean, not only as passed, and System One settles direct result statements such as "Lint is clean", "tsc reports no errors" or "The build completed successfully" as check claims instead of leaving them unsettled, while a prediction such as "The build should succeed" is not read as one.
 
 ## [0.99.46] - 2026-09-24
 
