@@ -44,6 +44,14 @@ const GAPS = [2_000, 20_000, 90_000, 4 * MINUTE, 8 * MINUTE, 20 * MINUTE, 90 * M
 	Array.from({ length: 12 }, () => gap),
 );
 
+/** Every ledger a test opens, closed before its directory is removed (Windows cannot delete an open database). */
+const ledgers: DecisionLedgerStore[] = [];
+function openLedger(databasePath: string): DecisionLedgerStore {
+	const ledger = new DecisionLedgerStore({ databasePath });
+	ledgers.push(ledger);
+	return ledger;
+}
+
 describe("cache survival curve", () => {
 	it("recovers a lane's cache lifetime from its observations", () => {
 		const key = lane("xai", "grok");
@@ -190,13 +198,14 @@ describe("lineage lifetime", () => {
 describe("cache observations across processes", () => {
 	const dirs: string[] = [];
 	afterEach(() => {
+		for (const ledger of ledgers.splice(0)) ledger.close();
 		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 
 	it("measures a resumed session's gap from the ledger and counts its lineages", () => {
 		const dir = mkdtempSync(join(tmpdir(), "cache-survival-"));
 		dirs.push(dir);
-		const ledger = new DecisionLedgerStore({ databasePath: join(dir, "decision-ledger.sqlite") });
+		const ledger = openLedger(join(dir, "decision-ledger.sqlite"));
 		const key = lane("openrouter", "ling");
 		const seed = (sessionId: string, laneKey: string) => {
 			const last = ledger.latestCacheObservation(sessionId, laneKey);
@@ -234,12 +243,13 @@ describe("cache observations across processes", () => {
 describe("cache knowledge", () => {
 	const dirs: string[] = [];
 	afterEach(() => {
+		for (const ledger of ledgers.splice(0)) ledger.close();
 		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 	const ledgerIn = () => {
 		const dir = mkdtempSync(join(tmpdir(), "cache-knowledge-"));
 		dirs.push(dir);
-		return new DecisionLedgerStore({ databasePath: join(dir, "decision-ledger.sqlite") });
+		return openLedger(join(dir, "decision-ledger.sqlite"));
 	};
 
 	it("learns what a compaction leaves and generates, pooling a sparse lane toward every lane", () => {
@@ -305,6 +315,7 @@ describe("cache knowledge", () => {
 describe("idle holder", () => {
 	const dirs: string[] = [];
 	afterEach(() => {
+		for (const ledger of ledgers.splice(0)) ledger.close();
 		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -316,7 +327,7 @@ describe("idle holder", () => {
 		expect(idleHolder([])).toBe("host");
 		const dir = mkdtempSync(join(tmpdir(), "idle-holder-"));
 		dirs.push(dir);
-		const ledger = new DecisionLedgerStore({ databasePath: join(dir, "decision-ledger.sqlite") });
+		const ledger = openLedger(join(dir, "decision-ledger.sqlite"));
 		const row = (observedAt: number, gapMs: number | undefined, holder: "owner" | "tool") => ({
 			sessionId: "s",
 			cwd: "/repo",

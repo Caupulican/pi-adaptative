@@ -9,6 +9,14 @@ import { DecisionLedgerStore } from "../src/core/operator-projection/decision-le
 // deepseek-v4-flash catalog prices (USD per million): cold 0.088606, cache read 0.0177212.
 const PRICES = { cacheReadUsdPerMillion: 0.0177212, coldUsdPerMillion: 0.088606 };
 
+/** Every ledger a test opens, closed before its directory is removed (Windows cannot delete an open database). */
+const ledgers: DecisionLedgerStore[] = [];
+function openLedger(databasePath: string): DecisionLedgerStore {
+	const ledger = new DecisionLedgerStore({ databasePath });
+	ledgers.push(ledger);
+	return ledger;
+}
+
 describe("sent-prefix rewrite price", () => {
 	it("admits a batch whose saving over the remaining requests pays for the re-prefill, and names the basis", () => {
 		const verdict = priceSentPrefixRewrite({
@@ -66,13 +74,14 @@ describe("lineage remaining requests", () => {
 describe("cache decisions in the ledger", () => {
 	const dirs: string[] = [];
 	afterEach(() => {
+		for (const ledger of ledgers.splice(0)) ledger.close();
 		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 
 	it("round-trips a priced gc_pack verdict", () => {
 		const dir = mkdtempSync(join(tmpdir(), "cache-decisions-"));
 		dirs.push(dir);
-		const ledger = new DecisionLedgerStore({ databasePath: join(dir, "decision-ledger.sqlite") });
+		const ledger = openLedger(join(dir, "decision-ledger.sqlite"));
 		ledger.recordCacheDecision({
 			sessionId: "s",
 			cwd: "/repo",

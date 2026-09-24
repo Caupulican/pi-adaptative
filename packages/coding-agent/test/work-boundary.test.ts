@@ -11,6 +11,14 @@ import { currentWorkUnit, openWorkUnit } from "../src/core/work-units.ts";
 const owner = (manager: SessionManager, text: string) =>
 	manager.appendMessage({ role: "user", content: text, timestamp: Date.now() });
 
+/** Every ledger a test opens, closed before its directory is removed (Windows cannot delete an open database). */
+const ledgers: DecisionLedgerStore[] = [];
+function openLedger(databasePath: string): DecisionLedgerStore {
+	const ledger = new DecisionLedgerStore({ databasePath });
+	ledgers.push(ledger);
+	return ledger;
+}
+
 describe("work units", () => {
 	it("keeps an enforced unit open until the owner speaks again", () => {
 		const manager = SessionManager.inMemory();
@@ -97,13 +105,14 @@ describe("executor price", () => {
 describe("learned root route requests", () => {
 	const dirs: string[] = [];
 	afterEach(() => {
+		for (const ledger of ledgers.splice(0)) ledger.close();
 		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 
 	it("counts the requests between a root route's decision and the next decision", () => {
 		const dir = mkdtempSync(join(tmpdir(), "route-requests-"));
 		dirs.push(dir);
-		const ledger = new DecisionLedgerStore({ databasePath: join(dir, "decision-ledger.sqlite") });
+		const ledger = openLedger(join(dir, "decision-ledger.sqlite"));
 		const decide = (cycleId: string, route: string, at: number, executor?: string) => {
 			ledger.recordRoute({
 				sessionId: "s",

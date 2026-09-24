@@ -14,6 +14,14 @@ function prefix(system: string, tools: string, messages: readonly object[]) {
 	return { system, tools, messages: messages.map(messageFingerprint) };
 }
 
+/** Every ledger a test opens, closed before its directory is removed (Windows cannot delete an open database). */
+const ledgers: DecisionLedgerStore[] = [];
+function openLedger(databasePath: string): DecisionLedgerStore {
+	const ledger = new DecisionLedgerStore({ databasePath });
+	ledgers.push(ledger);
+	return ledger;
+}
+
 describe("request prefix divergence", () => {
 	const a = user("a");
 	const b = user("b");
@@ -54,6 +62,7 @@ describe("request prefix divergence", () => {
 describe("cache observations", () => {
 	const dirs: string[] = [];
 	afterEach(() => {
+		for (const ledger of ledgers.splice(0)) ledger.close();
 		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 
@@ -79,7 +88,7 @@ describe("cache observations", () => {
 	it("round-trips through the decision ledger, newest first", () => {
 		const dir = mkdtempSync(join(tmpdir(), "cache-observations-"));
 		dirs.push(dir);
-		const ledger = new DecisionLedgerStore({ databasePath: join(dir, "decision-ledger.sqlite") });
+		const ledger = openLedger(join(dir, "decision-ledger.sqlite"));
 		const lane = cacheLaneKey("openai-codex-responses", "openai-codex", "gpt-5.6-sol");
 		ledger.recordCacheObservation({
 			sessionId: "s",

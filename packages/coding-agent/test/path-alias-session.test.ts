@@ -516,7 +516,10 @@ describe("PathAliasRuntime incremental render", () => {
 
 describe("PathAliasRuntime legend delta records", () => {
 	const tempDirs: string[] = [];
+	// Closed before their directories are removed: Windows cannot delete an open database.
+	const runtimes: PathAliasRuntime[] = [];
 	afterEach(() => {
+		for (const opened of runtimes.splice(0)) opened.close();
 		for (const dir of tempDirs.splice(0))
 			rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 	});
@@ -536,12 +539,14 @@ describe("PathAliasRuntime legend delta records", () => {
 	function runtime(): PathAliasRuntime {
 		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-delta-"));
 		tempDirs.push(dir);
-		return new PathAliasRuntime(
+		const opened = new PathAliasRuntime(
 			() => "/repo",
 			() => join(dir, "runtime.sqlite"),
 			() => 1,
 			{ requireExistingTargets: false },
 		);
+		runtimes.push(opened);
+		return opened;
 	}
 
 	it("carries each legend line once: a committed line never rides a later request", () => {
@@ -596,7 +601,6 @@ describe("PathAliasRuntime legend delta records", () => {
 		expect(runtime1.getAliasEconomics().paused).toBe(true);
 		expect(runtime1.peekTable().entries.length).toBe(paths.length);
 		expect(next.legend).toBeUndefined();
-		runtime1.close();
 	});
 });
 
