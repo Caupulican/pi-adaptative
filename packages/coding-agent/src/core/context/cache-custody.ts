@@ -3,9 +3,9 @@
  * messages already sent) changes only through a gate, and every request is classified against it.
  *
  * - The guard classifies each request: a pure append; a `sanctioned` break (the gate issued a token for
- *   this lane's next request: a priced GC pack, a compaction, an owner action); or an `unsanctioned`
- *   break at a kind and index. Unsanctioned breaks are recorded, never repaired silently: each one is
- *   a harness defect that cost a cache write nobody priced.
+ *   this conversation's next request: a priced GC pack, a compaction, an owner action); or an
+ *   `unsanctioned` break at a kind and index. Unsanctioned breaks are recorded, never repaired silently:
+ *   each one is a harness defect that cost a cache write nobody priced.
  * - The gate is the only way to change the surface. Mandatory kinds (owner actions, authority or safety
  *   removals) pass at once; a priced kind passes when its price admits it; anything else waits in the
  *   queue for a cold moment (the lane's cache is gone anyway, or a compaction rewrote it), when all
@@ -13,6 +13,10 @@
  * - Reasoning is surface too: a lane's reasoning level is pinned to what it last sent. The owner's own
  *   change passes, and so does the owner's cost ceiling; a host adjustment passes only when it is free,
  *   otherwise the pinned level is kept.
+ *
+ * Every lane belongs to a conversation: the session's own (`conversation` omitted) or a worker's. A
+ * token is good for its conversation's next request only, so that request consumes every token of the
+ * conversation, and a token for a request that never happened cannot sanction a later one.
  */
 
 export type CacheBreakClassification =
@@ -21,8 +25,15 @@ export type CacheBreakClassification =
 	| { readonly classification: "sanctioned"; readonly kind: string; readonly reason: string }
 	| { readonly classification: "unsanctioned"; readonly kind: string; readonly index?: number };
 
+/** Where a token applies: a conversation (the session's own when omitted) and, optionally, one lane of it. */
+export interface CustodyTarget {
+	readonly conversation?: string;
+	readonly lane?: string;
+}
+
 /** What the guard reads of one request (the request snapshot's own fields). */
 export interface CustodyRequestFacts {
+	readonly conversation?: string;
 	readonly lane: string;
 	readonly prefixIntact?: boolean | "unknown";
 	readonly firstDivergentKind?: string;
@@ -37,21 +48,36 @@ export interface DeferredBreak {
 	readonly apply: () => void;
 }
 
-/** Any lane: a token not bound to one lane (a compaction rewrites every lane's history). */
-const ANY_LANE = "*";
+interface Token {
+	readonly kind: string;
+	readonly reason: string;
+	/** Undefined: any lane of the conversation (a compaction rewrites every lane's history). */
+	readonly lane?: string;
+}
+
+const SESSION_CONVERSATION = "";
+
+function laneKey(conversation: string | undefined, lane: string): string {
+	return `${conversation ?? SESSION_CONVERSATION}\u0001${lane}`;
+}
+
+function targetOf(conversation: string | undefined, lane: string): CustodyTarget {
+	return conversation ? { conversation, lane } : { lane };
+}
 
 export class CacheCustody {
-	private readonly tokens = new Map<string, { kind: string; reason: string }[]>();
+	private readonly tokens = new Map<string, Token[]>();
 	private readonly queue: DeferredBreak[] = [];
 	private readonly reasoning = new Map<string, { sent: string | undefined; base: string | undefined }>();
 	/** The reasoning each lane's last request sent: a change breaks the cache as surely as a rewrite. */
 	private readonly lastSentReasoning = new Map<string, string | undefined>();
 
-	/** Issue a token: the next request on `lane` (or any lane) may break the prefix for `kind`. */
-	sanction(kind: string, reason: string, lane: string = ANY_LANE): void {
-		const list = this.tokens.get(lane) ?? [];
-		list.push({ kind, reason });
-		this.tokens.set(lane, list);
+	/** Issue a token: the conversation's next request (on `lane`, or any lane) may break the prefix for `kind`. */
+	sanction(kind: string, reason: string, target: CustodyTarget = {}): void {
+		const conversation = target.conversation ?? SESSION_CONVERSATION;
+		const list = this.tokens.get(conversation) ?? [];
+		list.push({ kind, reason, ...(target.lane !== undefined ? { lane: target.lane } : {}) });
+		this.tokens.set(conversation, list);
 	}
 
 	/**
@@ -59,10 +85,14 @@ export class CacheCustody {
 	 * now and are sanctioned; the rest wait for `flushColdMoment`, the latest of each kind.
 	 */
 	request(
-		input: DeferredBreak & { readonly mandatory?: boolean; readonly admitted?: boolean; readonly lane?: string },
+		input: DeferredBreak & {
+			readonly mandatory?: boolean;
+			readonly admitted?: boolean;
+			readonly target?: CustodyTarget;
+		},
 	): "applied" | "deferred" {
 		if (input.mandatory || input.admitted) {
-			this.sanction(input.kind, input.reason, input.lane);
+			this.sanction(input.kind, input.reason, input.target);
 			input.apply();
 			return "applied";
 		}
@@ -73,7 +103,7 @@ export class CacheCustody {
 		return "deferred";
 	}
 
-	/** A cold moment: every waiting break applies together, sanctioned for the next request. */
+	/** A cold moment of the session: every waiting break applies together, sanctioned for its next request. */
 	flushColdMoment(reason: string): string[] {
 		const flushed = this.queue.splice(0);
 		for (const pending of flushed) {
@@ -94,22 +124,24 @@ export class CacheCustody {
 	}
 
 	/**
-	 * The reasoning a request on `lane` sends. `base` is the session's own level (the owner's choice),
-	 * `adjusted` what the host's per-request policies made of it. A lane keeps sending the level it last
-	 * sent unless the owner changed the base, the request returns to the base, or `isFree()` says the change
-	 * costs no cache.
+	 * The reasoning a request on `lane` of `conversation` sends. `base` is the conversation's own level
+	 * (the owner's choice), `adjusted` what the host's per-request policies made of it. A lane keeps
+	 * sending the level it last sent unless the owner changed the base, the request returns to the base,
+	 * or `isFree()` says the change costs no cache.
 	 */
 	admitReasoning(
+		conversation: string | undefined,
 		lane: string,
 		base: string | undefined,
 		adjusted: string | undefined,
 		isFree: () => boolean,
 	): string | undefined {
-		const state = this.reasoning.get(lane);
+		const key = laneKey(conversation, lane);
+		const state = this.reasoning.get(key);
 		const send = (value: string | undefined, sanctionReason?: string) => {
 			if (sanctionReason !== undefined && state && value !== state.sent)
-				this.sanction("reasoning", sanctionReason, lane);
-			this.reasoning.set(lane, { sent: value, base });
+				this.sanction("reasoning", sanctionReason, targetOf(conversation, lane));
+			this.reasoning.set(key, { sent: value, base });
 			return value;
 		};
 		if (!state || adjusted === state.sent) return send(adjusted);
@@ -124,23 +156,26 @@ export class CacheCustody {
 	 * A mandatory reasoning change after the gate (the owner's cost ceiling downgrading the level): it
 	 * passes, sanctioned, and becomes what the lane last sent.
 	 */
-	overrideReasoning(lane: string, value: string | undefined, reason: string): void {
-		const state = this.reasoning.get(lane);
+	overrideReasoning(conversation: string | undefined, lane: string, value: string | undefined, reason: string): void {
+		const key = laneKey(conversation, lane);
+		const state = this.reasoning.get(key);
 		if (!state || state.sent === value) return;
-		this.sanction("reasoning", reason, lane);
-		this.reasoning.set(lane, { sent: value, base: state.base });
+		this.sanction("reasoning", reason, targetOf(conversation, lane));
+		this.reasoning.set(key, { sent: value, base: state.base });
 	}
 
-	/** The guard: classify one request against the lane's surface, consuming the lane's tokens. */
+	/** The guard: classify one request against its lane's surface, consuming its conversation's tokens. */
 	classify(facts: CustodyRequestFacts): CacheBreakClassification {
-		const firstOnLane = !this.lastSentReasoning.has(facts.lane);
-		const reasoningChanged = !firstOnLane && this.lastSentReasoning.get(facts.lane) !== facts.reasoning;
-		this.lastSentReasoning.set(facts.lane, facts.reasoning);
-		const laneTokens = this.tokens.get(facts.lane) ?? [];
-		const anyTokens = this.tokens.get(ANY_LANE) ?? [];
-		this.tokens.delete(facts.lane);
-		this.tokens.delete(ANY_LANE);
-		const token = laneTokens[0] ?? anyTokens[0];
+		const key = laneKey(facts.conversation, facts.lane);
+		const firstOnLane = !this.lastSentReasoning.has(key);
+		const reasoningChanged = !firstOnLane && this.lastSentReasoning.get(key) !== facts.reasoning;
+		this.lastSentReasoning.set(key, facts.reasoning);
+		const conversation = facts.conversation ?? SESSION_CONVERSATION;
+		const pending = this.tokens.get(conversation) ?? [];
+		this.tokens.delete(conversation);
+		const token =
+			pending.find((candidate) => candidate.lane === facts.lane) ??
+			pending.find((candidate) => candidate.lane === undefined);
 		const unknownPrefix = facts.prefixIntact === "unknown" || facts.prefixIntact === undefined;
 		// Nothing to compare against: the lane's first request in this process.
 		if (firstOnLane && unknownPrefix) return { classification: "first" };

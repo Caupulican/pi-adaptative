@@ -40,14 +40,16 @@ describe("cache custody", () => {
 			const custody = new CacheCustody();
 			custody.classify({ lane: "a", prefixIntact: "unknown" });
 			custody.classify({ lane: "b", prefixIntact: "unknown" });
-			custody.sanction("gc_pack", "priced", "a");
-			expect(custody.classify({ lane: "b", prefixIntact: false, firstDivergentKind: "user" })).toMatchObject({
-				classification: "unsanctioned",
-			});
+			custody.sanction("gc_pack", "priced", { lane: "a" });
 			expect(custody.classify({ lane: "a", prefixIntact: false })).toEqual({
 				classification: "sanctioned",
 				kind: "gc_pack",
 				reason: "priced",
+			});
+			// A token is for its conversation's next request: a request on another lane consumes it.
+			custody.sanction("side_trip_brief", "brief", { lane: "a" });
+			expect(custody.classify({ lane: "b", prefixIntact: false, firstDivergentKind: "user" })).toMatchObject({
+				classification: "unsanctioned",
 			});
 			expect(custody.classify({ lane: "a", prefixIntact: false })).toMatchObject({ classification: "unsanctioned" });
 			custody.sanction("compaction", "history replaced");
@@ -55,6 +57,34 @@ describe("cache custody", () => {
 				classification: "sanctioned",
 				kind: "compaction",
 			});
+		});
+	});
+
+	describe("conversations", () => {
+		it("keeps each conversation's tokens and reasoning pins its own", () => {
+			const custody = new CacheCustody();
+			custody.classify({ lane: "m", prefixIntact: "unknown" });
+			custody.classify({ conversation: "s/worker:w", lane: "m", prefixIntact: "unknown" });
+			custody.sanction("gc_pack", "worker pack", { conversation: "s/worker:w", lane: "m" });
+			// The session's own request does not consume the worker's token.
+			expect(custody.classify({ lane: "m", prefixIntact: true })).toEqual({ classification: "append" });
+			expect(custody.classify({ conversation: "s/worker:w", lane: "m", prefixIntact: false })).toMatchObject({
+				classification: "sanctioned",
+				kind: "gc_pack",
+			});
+			expect(custody.admitReasoning(undefined, "m", "high", "high", () => false)).toBe("high");
+			expect(custody.admitReasoning("s/worker:w", "m", "low", "low", () => false)).toBe("low");
+			expect(custody.admitReasoning(undefined, "m", "high", "low", () => false)).toBe("high");
+		});
+
+		it("sanctions a worker's free reasoning change on the worker's own guard", () => {
+			const custody = new CacheCustody();
+			custody.admitReasoning("s/worker:w", "m", "high", "high", () => false);
+			custody.classify({ conversation: "s/worker:w", lane: "m", prefixIntact: "unknown", reasoning: "high" });
+			expect(custody.admitReasoning("s/worker:w", "m", "high", "low", () => true)).toBe("low");
+			expect(
+				custody.classify({ conversation: "s/worker:w", lane: "m", prefixIntact: true, reasoning: "low" }),
+			).toMatchObject({ classification: "sanctioned", kind: "reasoning" });
 		});
 	});
 
@@ -102,15 +132,15 @@ describe("cache custody", () => {
 	describe("reasoning", () => {
 		it("keeps the lane's sent level against a host adjustment while the cache is warm", () => {
 			const custody = new CacheCustody();
-			expect(custody.admitReasoning("a", "high", "high", () => false)).toBe("high");
-			expect(custody.admitReasoning("a", "high", "low", () => false)).toBe("high");
+			expect(custody.admitReasoning(undefined, "a", "high", "high", () => false)).toBe("high");
+			expect(custody.admitReasoning(undefined, "a", "high", "low", () => false)).toBe("high");
 		});
 
 		it("passes a host adjustment when the lane's cache is already gone, sanctioned", () => {
 			const custody = new CacheCustody();
-			custody.admitReasoning("a", "high", "high", () => false);
+			custody.admitReasoning(undefined, "a", "high", "high", () => false);
 			custody.classify({ lane: "a", prefixIntact: "unknown", reasoning: "high" });
-			expect(custody.admitReasoning("a", "high", "low", () => true)).toBe("low");
+			expect(custody.admitReasoning(undefined, "a", "high", "low", () => true)).toBe("low");
 			expect(custody.classify({ lane: "a", prefixIntact: true, reasoning: "low" })).toMatchObject({
 				classification: "sanctioned",
 				kind: "reasoning",
@@ -120,16 +150,16 @@ describe("cache custody", () => {
 		it("passes the owner's own change and a return to the owner's level", () => {
 			const custody = new CacheCustody();
 			// The lane's first request was a host turn below the owner's level.
-			expect(custody.admitReasoning("a", "high", "medium", () => false)).toBe("medium");
-			expect(custody.admitReasoning("a", "high", "high", () => false)).toBe("high");
-			expect(custody.admitReasoning("a", "low", "low", () => false)).toBe("low");
+			expect(custody.admitReasoning(undefined, "a", "high", "medium", () => false)).toBe("medium");
+			expect(custody.admitReasoning(undefined, "a", "high", "high", () => false)).toBe("high");
+			expect(custody.admitReasoning(undefined, "a", "low", "low", () => false)).toBe("low");
 		});
 
 		it("records a mandatory override as what the lane last sent", () => {
 			const custody = new CacheCustody();
-			custody.admitReasoning("a", "high", "high", () => false);
-			custody.overrideReasoning("a", "medium", "cost ceiling");
-			expect(custody.admitReasoning("a", "high", "low", () => false)).toBe("medium");
+			custody.admitReasoning(undefined, "a", "high", "high", () => false);
+			custody.overrideReasoning(undefined, "a", "medium", "cost ceiling");
+			expect(custody.admitReasoning(undefined, "a", "high", "low", () => false)).toBe("medium");
 		});
 	});
 });

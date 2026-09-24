@@ -47,6 +47,7 @@ import {
 	type SentPrefixRewriteVerdict,
 } from "./compaction/early-compaction-economics.ts";
 import { BrainCurator, type CurationTelemetrySnapshot, preDigestConversationText } from "./context/brain-curator.ts";
+import type { CustodyTarget } from "./context/cache-custody.ts";
 import { type ArtifactStore, createFileArtifactStore } from "./context/context-artifacts.ts";
 import {
 	type ContextAuditMemo,
@@ -173,8 +174,8 @@ export interface ContextGcLane {
 	readonly model: Model<Api>;
 	/** Where the lane's own retention compaction starts, in context tokens. */
 	readonly compactionTriggerTokens: number | undefined;
-	/** The cache custody lane key its requests are guarded on. */
-	readonly custodyLane: string;
+	/** The cache custody conversation and lane its requests are guarded on. */
+	readonly custody: CustodyTarget;
 	/** The conversation, for the recorded decision. */
 	readonly conversation: string;
 }
@@ -210,7 +211,7 @@ export interface ContextPipelineDeps {
 	 * Issue the cache custody token for an admitted sent-prefix rewrite: the next request's break is
 	 * priced. `lane` is the custody lane key; omitted, the foreground lane.
 	 */
-	sanctionCacheBreak?(kind: string, reason: string, lane?: string): void;
+	sanctionCacheBreak?(kind: string, reason: string, target?: CustodyTarget): void;
 	/** Root dir the host-keyed {@link FitnessStore} and per-session gc/artifact storage live under. */
 	getAgentDir(): string;
 	/** Workspace root, passed to the context-gc pass. */
@@ -890,7 +891,7 @@ export class ContextPipeline {
 				if (!lane) this._latestContextGcReport = result.report;
 				const rewrite = result.report.sentPrefixRewrite;
 				if (rewrite) {
-					if (rewrite.admit) this.deps.sanctionCacheBreak?.("gc_pack", rewrite.reason, lane?.custodyLane);
+					if (rewrite.admit) this.deps.sanctionCacheBreak?.("gc_pack", rewrite.reason, lane?.custody);
 					this.deps.recordCacheDecision?.({
 						kind: "gc_pack",
 						decidedAt: Date.now(),

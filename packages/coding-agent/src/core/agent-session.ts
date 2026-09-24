@@ -873,9 +873,9 @@ export class AgentSession {
 			// this resolver on its own conversation, so its pin is its own, never the foreground's.
 			const conversation =
 				request.sessionId !== undefined && request.sessionId !== this.sessionId ? request.sessionId : undefined;
-			const modelLane = cacheLaneKey(request.model.api, request.model.provider, request.model.id);
-			const lane = conversation ? `${conversation}\0${modelLane}` : modelLane;
+			const lane = cacheLaneKey(request.model.api, request.model.provider, request.model.id);
 			const held = this._custody.admitReasoning(
+				conversation,
 				lane,
 				resolvedReasoning,
 				this.hostTurnReasoning.resolveRequestReasoning(request.model, request.sourceMessages, resolvedReasoning),
@@ -883,7 +883,8 @@ export class AgentSession {
 			) as typeof resolvedReasoning;
 			this.hostTurnReasoning.noteSent(held);
 			const final = this._costGuard.resolveRequestReasoning(request.model, request.context, held, request.maxTokens);
-			if (final !== held) this._custody.overrideReasoning(lane, final, "the cost ceiling downgraded the level");
+			if (final !== held)
+				this._custody.overrideReasoning(conversation, lane, final, "the cost ceiling downgraded the level");
 			return final;
 		};
 		// `this.settingsManager` is assigned below; the chain closes over the config reference because
@@ -1118,7 +1119,7 @@ export class AgentSession {
 			observeWorkerProgress: (observation) => this._workerSupervision.observe(observation),
 			// Worker lanes pass the same cache guard; each worker conversation is its own lane.
 			observeWorkerRequest: (agentId, snapshot, prefixTokens) => {
-				this._guardCacheSurface(snapshot, `worker:${agentId}`);
+				this._guardCacheSurface(snapshot, `${this.sessionId}/worker:${agentId}`);
 				if (prefixTokens === undefined) return;
 				try {
 					this.getDecisionLedger()?.recordWorkerPrefix({
@@ -1178,7 +1179,10 @@ export class AgentSession {
 				const lane = {
 					model,
 					compactionTriggerTokens,
-					custodyLane: `worker:${agentId}\0${cacheLaneKey(model.api, model.provider, model.id)}`,
+					custody: {
+						conversation: `${this.sessionId}/worker:${agentId}`,
+						lane: cacheLaneKey(model.api, model.provider, model.id),
+					},
 					conversation: `worker:${agentId}`,
 				};
 				return new ProviderRequestContextController({
@@ -1330,12 +1334,12 @@ export class AgentSession {
 			estimateLineageRemainingRequests: () =>
 				this._cacheKnowledge.lineage(this.sessionId, historyLineage(this.agent.state.messages), Date.now()),
 			recordCacheDecision: (decision) => this._recordCacheDecision(decision),
-			sanctionCacheBreak: (kind, reason, lane) => {
+			sanctionCacheBreak: (kind, reason, target) => {
 				const model = this.model;
 				this._custody.sanction(
 					kind,
 					reason,
-					lane ?? (model ? cacheLaneKey(model.api, model.provider, model.id) : undefined),
+					target ?? (model ? { lane: cacheLaneKey(model.api, model.provider, model.id) } : {}),
 				);
 			},
 			getAgentDir: () => this._agentDir,
@@ -1662,11 +1666,9 @@ export class AgentSession {
 				this._lastSentRequest = { model, context, sourceMessages: sourceContext.messages };
 				// A surface the loop changed on purpose (a safety removal) is mandatory: sanctioned for this request.
 				if (sourceContext.surfaceChange) {
-					this._custody.sanction(
-						"safety_removal",
-						sourceContext.surfaceChange,
-						cacheLaneKey(model.api, model.provider, model.id),
-					);
+					this._custody.sanction("safety_removal", sourceContext.surfaceChange, {
+						lane: cacheLaneKey(model.api, model.provider, model.id),
+					});
 				}
 				this._guardCacheSurface();
 				this._toolSelection.observeProviderRequest(
@@ -3273,8 +3275,9 @@ export class AgentSession {
 		if (!snapshot) return;
 		const lane = cacheLaneKey(snapshot.api, snapshot.provider, snapshot.modelId);
 		const verdict = this._custody.classify({
-			// A worker conversation shares a model's lane key but not its prefix: guard it on its own.
-			lane: conversation ? `${conversation}\0${lane}` : lane,
+			// A worker conversation shares a model's lane but not its prefix: it is guarded as its own.
+			...(conversation ? { conversation } : {}),
+			lane,
 			...(snapshot.prefixIntact !== undefined ? { prefixIntact: snapshot.prefixIntact } : {}),
 			...(snapshot.firstDivergentKind !== undefined ? { firstDivergentKind: snapshot.firstDivergentKind } : {}),
 			...(snapshot.firstDivergentIndex !== undefined ? { firstDivergentIndex: snapshot.firstDivergentIndex } : {}),
@@ -4893,11 +4896,9 @@ export class AgentSession {
 					resolvedRouteInfo = route;
 					// A side trip sends its own small brief, never the lane's earlier one: its first request is a
 					// deliberate new prefix on that lane.
-					this._custody.sanction(
-						"side_trip_brief",
-						"a side trip sends its own small brief",
-						cacheLaneKey(route.model.api, route.model.provider, route.model.id),
-					);
+					this._custody.sanction("side_trip_brief", "a side trip sends its own small brief", {
+						lane: cacheLaneKey(route.model.api, route.model.provider, route.model.id),
+					});
 				} else if (
 					route.kind === "toolkit" &&
 					this.agent.state.tools.some((tool) => tool.name === "run_toolkit_script")
