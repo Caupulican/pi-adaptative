@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { type AgentMessage, decodeExecutionContext } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { SessionRequestSnapshotInput } from "@caupulican/pi-agent-core/session";
-import type { Api, Message, Model, Usage } from "@caupulican/pi-ai";
+import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
 import { getProcessWorkRun } from "../agent-paths.ts";
 import type {
 	AgentSessionEvent,
@@ -92,7 +92,7 @@ import { getLatestWorkerClaimSnapshot } from "./session-worker-claim.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
 import { type WorkerAgentControlPort, type WorkerGrantSummary, workerAgentMessageId } from "./worker-agent-control.ts";
 import { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
-import { createWorkerAttemptExecutor } from "./worker-attempt-executor.ts";
+import { createWorkerAttemptExecutor, type WorkerResponseObservation } from "./worker-attempt-executor.ts";
 import {
 	bindCompiledToolSurface,
 	bindCompiledVerifierIdentity,
@@ -243,6 +243,8 @@ export interface WorkerDelegationControllerDeps {
 	}): AgentMessage[];
 	/** The cache guard for worker lanes: each accepted worker provider request, as its recorded snapshot. */
 	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput): void;
+	/** Each worker provider response, as a cache observation on the worker conversation's own history. */
+	observeWorkerResponse?(message: AssistantMessage, observation: WorkerResponseObservation): void;
 	emit(event: AgentSessionEvent): void;
 	notifyWorkerTerminalHandoff(records: readonly WorkerTerminalHandoffRecord[]): Promise<void>;
 	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
@@ -3344,6 +3346,7 @@ export class WorkerDelegationController {
 			warn: (message) => this.safeWarn(message),
 			...(this.deps.observeWorkerProgress ? { observeWorkerProgress: this.deps.observeWorkerProgress } : {}),
 			...(this.deps.observeWorkerRequest ? { observeWorkerRequest: this.deps.observeWorkerRequest } : {}),
+			...(this.deps.observeWorkerResponse ? { observeWorkerResponse: this.deps.observeWorkerResponse } : {}),
 			...(this.deps.packWorkerContext
 				? {
 						packContext: (messages: AgentMessage[], frozenBelow: number) =>

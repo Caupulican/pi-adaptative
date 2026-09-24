@@ -121,6 +121,7 @@ function createExecutorHarness(
 	const checkpoints: string[] = [];
 	const checkpointUsages: AttemptUsageSnapshot[] = [];
 	const observedRequests: Array<{ agentId: string; requestId: string; prefixIntact: unknown }> = [];
+	const observedResponses: Array<{ agentId: string; stopReason: string; historyLength: number }> = [];
 	const productionShapedCompletion = async (options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult> => {
 		let preflightInvoked = false;
 		const requestPreflight = options.requestPreflight;
@@ -227,10 +228,25 @@ function createExecutorHarness(
 		},
 		warn: (message) => events.push(`warn:${message}`),
 		...(packContext ? { packContext } : {}),
+		observeWorkerResponse: (message, observation) =>
+			observedResponses.push({
+				agentId: observation.agentId,
+				stopReason: message.stopReason,
+				historyLength: observation.messages.length,
+			}),
 		observeWorkerRequest: (agentId, snapshot) =>
 			observedRequests.push({ agentId, requestId: snapshot.requestId, prefixIntact: snapshot.prefixIntact }),
 	});
-	return { checkpoints, checkpointUsages, conversation, events, executor, gateway, observedRequests };
+	return {
+		checkpoints,
+		checkpointUsages,
+		conversation,
+		events,
+		executor,
+		gateway,
+		observedRequests,
+		observedResponses,
+	};
 }
 
 const VERIFIED_COMPACTION_SUMMARY = `## Active Task
@@ -287,6 +303,24 @@ describe("worker attempt executor", () => {
 		await expect(isolated!.onMessage!(late)).rejects.toThrow("owner stopped");
 		expect(harness.gateway.getUsage()).toMatchObject({ inputTokens: 11, totalTokens: 11 });
 		expect(harness.conversation.getRawTranscript().map((message) => message.role)).toEqual(["user"]);
+	});
+
+	it("records a cache observation for a tool-use response, against the history its request carried", async () => {
+		const abort = new AbortController();
+		const harness = createExecutorHarness(
+			async (options) => {
+				await options.onMessage?.(assistantToolRequest(17));
+				abort.abort(new Error("stop after the response"));
+				return new Promise<IsolatedCompletionResult>(() => undefined);
+			},
+			100,
+			undefined,
+			undefined,
+			abort.signal,
+		);
+		await harness.executor.run();
+		// Tool-use responses persist later, from beforeToolCall; the observation must not wait for that.
+		expect(harness.observedResponses).toEqual([{ agentId: "worker-agent", stopReason: "toolUse", historyLength: 1 }]);
 	});
 
 	it("charges an observed assistant tool request before cancellation can skip its tool preflight", async () => {

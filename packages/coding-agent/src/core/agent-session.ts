@@ -139,6 +139,7 @@ import {
 	getLatestWorkerClaimSnapshot,
 	getWorkerClaimSnapshots,
 } from "./delegation/session-worker-claim.ts";
+import type { WorkerResponseObservation } from "./delegation/worker-attempt-executor.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { DurableCustomMessageTurnController } from "./durable-custom-message-turn-controller.ts";
 import type { ExpertSelectionService } from "./expert-routing/service.ts";
@@ -1095,6 +1096,7 @@ export class AgentSession {
 			observeWorkerProgress: (observation) => this._workerSupervision.observe(observation),
 			// Worker lanes pass the same cache guard; each worker conversation is its own lane.
 			observeWorkerRequest: (agentId, snapshot) => this._guardCacheSurface(snapshot, `worker:${agentId}`),
+			observeWorkerResponse: (message, observation) => this._recordCacheObservation(message, observation),
 			// Worker conversations pack with root's own context-GC pass, on their own lane.
 			packWorkerContext: ({ agentId, model, compactionTriggerTokens, messages, frozenBelow }) =>
 				this._pipeline.applyContextGc(messages, true, frozenBelow, {
@@ -3132,25 +3134,37 @@ export class AgentSession {
 	 * snapshot that opened it, so the cache-survival estimator can learn each lane's cache lifetime.
 	 * Best effort: a ledger that cannot be written never affects the turn.
 	 */
-	private _recordCacheObservation(message: AssistantMessage): void {
+	private _recordCacheObservation(
+		message: AssistantMessage,
+		/**
+		 * A worker conversation's own history and request snapshot; omitted, the foreground's. Each worker
+		 * conversation is its own history (the gap is measured on it), on the same provider lane.
+		 */
+		conversation?: WorkerResponseObservation,
+	): void {
 		try {
-			const snapshot = latestRequestSnapshot(this.sessionManager);
+			const foreground = conversation ? undefined : latestRequestSnapshot(this.sessionManager);
+			const snapshot = conversation ? conversation.snapshot : foreground;
+			const history = conversation ? conversation.messages : this.agent.state.messages;
+			const sessionId = conversation ? `${this.sessionId}/worker:${conversation.agentId}` : this.sessionId;
 			const lane = cacheLaneKey(message.api, message.provider, message.model);
 			const snapshotLane = snapshot ? cacheLaneKey(snapshot.api, snapshot.provider, snapshot.modelId) : undefined;
 			const matched = snapshotLane === lane ? snapshot : undefined;
+			const openedAt = conversation ? conversation.requestOpenedAt : foreground && Date.parse(foreground.timestamp);
+			const requestOpenedAt = matched ? openedAt : undefined;
 			const row = this._cacheObservations.observe({
-				sessionId: this.sessionId,
+				sessionId,
 				lane,
 				respondedAt: Date.now(),
 				usage: message.usage,
-				...(matched ? { requestOpenedAt: Date.parse(matched.timestamp) } : {}),
+				...(requestOpenedAt !== undefined ? { requestOpenedAt } : {}),
 				...(matched?.prefixIntact !== undefined ? { prefixIntact: matched.prefixIntact } : {}),
 				...(matched?.firstDivergentKind ? { divergenceKind: matched.firstDivergentKind } : {}),
-				lineage: historyLineage(this.agent.state.messages),
-				holder: idleHolder(sincePreviousReply(this.agent.state.messages, message)),
+				lineage: historyLineage(history),
+				holder: idleHolder(sincePreviousReply(history, message)),
 			});
 			if (row) {
-				const recorded = { ...row, sessionId: this.sessionId, cwd: this._cwd };
+				const recorded = { ...row, sessionId, cwd: this._cwd };
 				this.getDecisionLedger()?.recordCacheObservation(recorded);
 				this._cacheKnowledge.noteObservation(recorded);
 			}

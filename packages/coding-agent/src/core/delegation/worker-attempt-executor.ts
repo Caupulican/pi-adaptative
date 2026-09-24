@@ -132,6 +132,17 @@ export async function runProviderCompletionWithBackoff(args: {
  * persist assistant tool requests before execution, append messages before mailbox acknowledgements,
  * checkpoint cumulative usage before later boundaries, and compact only the provider projection.
  */
+/** One worker provider response, with what the cache survival estimator measures it against. */
+export interface WorkerResponseObservation {
+	readonly agentId: string;
+	/** The request snapshot the response answers. */
+	readonly snapshot: SessionRequestSnapshotInput | undefined;
+	/** When that request opened. */
+	readonly requestOpenedAt: number | undefined;
+	/** The worker conversation's history the request carried. */
+	readonly messages: readonly AgentMessage[];
+}
+
 export interface WorkerAttemptExecutorOptions {
 	request: WorkerRequest;
 	grant: ExecutionGrant;
@@ -180,6 +191,8 @@ export interface WorkerAttemptExecutorOptions {
 	packContext?(messages: AgentMessage[], frozenBelow: number): AgentMessage[];
 	/** The cache guard: each accepted provider request of this worker, as its recorded snapshot. */
 	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput): void;
+	/** Each worker provider response, recorded as a cache observation on the worker's own history. */
+	observeWorkerResponse?(message: AssistantMessage, observation: WorkerResponseObservation): void;
 	/** Parent semantic duplicate review of code this worker's edit or write added; see the controller dep. */
 	reviewNewCode?(input: { toolName: string; args: unknown; cwd: string }): Promise<string | undefined>;
 	/** Parent objective ledger. Shell edits stay unattributed. Successful writes record a content digest. */
@@ -361,6 +374,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			})
 		: undefined;
 	let retentionWarningEmitted = false;
+	/** The latest accepted provider request of this attempt, for the response that answers it. */
+	let lastRequest: { snapshot: SessionRequestSnapshotInput; openedAt: number } | undefined;
 	let firstMailboxPoll = true;
 	let ran = false;
 	let terminalOutput: string | undefined;
@@ -695,6 +710,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										onProviderRequestSnapshot: (context) => {
 											signal.throwIfAborted();
 											const { snapshot } = options.conversation.appendRequestSnapshot(context);
+											lastRequest = { snapshot, openedAt: Date.now() };
 											options.observeWorkerRequest?.(options.agentId, snapshot);
 										},
 										beforeToolCall: async (context, toolSignal) => {
@@ -781,6 +797,14 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												if (message.role === "assistant" && origin !== "local") {
 													providerTurn.accountAssistantUsage(message.usage);
 													options.toolSurface.gateway?.flushUsage();
+													// Every provider response, tool use included, against the history its request carried
+													// (this response is not persisted yet).
+													options.observeWorkerResponse?.(message, {
+														agentId: options.agentId,
+														snapshot: lastRequest?.snapshot,
+														requestOpenedAt: lastRequest?.openedAt,
+														messages: options.conversation.getProviderContext().messages,
+													});
 												}
 												// Failed/aborted streams can retain partial tool calls, but the loop never
 												// executes them. Their terminal callback must account and persist the response now.
