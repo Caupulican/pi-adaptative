@@ -4,6 +4,8 @@ import { DEFAULT_STEERING_POLICY } from "../src/core/steering/policy.ts";
 import { SystemOneSteeringPlane } from "../src/core/steering/system-one-steering-plane.ts";
 import type { SteeringCertificate } from "../src/core/steering/types.ts";
 import {
+	MAX_EVALUATION_REASONS,
+	PROGRAM_SETTLED_REASON,
 	semanticEvaluationLabel,
 	verdictFromCertificate,
 	verdictFromEvaluation,
@@ -98,10 +100,78 @@ describe("verdict extraction", () => {
 			semantic_outcome: "pass",
 			created_at: "2026-09-20T10:00:00.000Z",
 		};
-		expect(verdictFromCertificate(base)).toEqual({ verdict: "pass", reasons: [] });
+		expect(verdictFromCertificate(base)).toEqual({ verdict: "pass", reasons: [PROGRAM_SETTLED_REASON] });
+		expect(
+			verdictFromCertificate({ ...base, semantic_outcome: undefined, policy_result: "pass" }).reasons,
+		).not.toContain(PROGRAM_SETTLED_REASON);
+		expect(
+			verdictFromCertificate({
+				...base,
+				semantic_outcome: "gather_more",
+				unsure_semantic_predicates: ["evidence_sufficient"],
+			}).reasons,
+		).not.toContain(PROGRAM_SETTLED_REASON);
 		expect(
 			verdictFromCertificate({ ...base, semantic_outcome: "repair", failed_semantic_predicates: ["tests_pass"] }),
 		).toEqual({ verdict: "repair", reasons: ["directive: proceed", "tests_pass"] });
+	});
+});
+
+describe("the whole-program settled marker on malformed certificates", () => {
+	const clean: SteeringCertificate = {
+		schema_version: "1.0",
+		certificate_id: "SCERT-2",
+		objective_id: "obj",
+		checkpoint_id: "JEV-024",
+		state_digest: "d",
+		evidence_revision: 1,
+		policy: { id: "p", version: "1", digest: "x" },
+		question_pack: { id: "pi:steering:pack:objective_route:1.0", version: "1.0", digest: "y" },
+		engine: { provider: "typesafe", model: "jev" },
+		answers: {},
+		directive: "proceed",
+		semantic_outcome: "pass",
+		created_at: "2026-09-20T10:00:00.000Z",
+	};
+	const many = Array.from({ length: 10 }, (_, index) => `predicate_${index}`);
+
+	it("marks only a clean pass as settled (control)", () => {
+		expect(verdictFromCertificate(clean)).toEqual({ verdict: "pass", reasons: [PROGRAM_SETTLED_REASON] });
+	});
+
+	it("does not mark a pass that also carries failed or unsure predicates", () => {
+		const failed = verdictFromCertificate({ ...clean, failed_semantic_predicates: ["tests_pass"] }).reasons;
+		expect(failed).not.toContain(PROGRAM_SETTLED_REASON);
+		expect(failed).toContain("tests_pass");
+		const unsure = verdictFromCertificate({ ...clean, unsure_semantic_predicates: ["evidence_sufficient"] }).reasons;
+		expect(unsure).not.toContain(PROGRAM_SETTLED_REASON);
+		expect(unsure).toContain("unsure: evidence_sufficient");
+	});
+
+	it("keeps a pass whose failed predicate reads like the marker distinguishable from a clean pass", () => {
+		expect(
+			verdictFromCertificate({ ...clean, failed_semantic_predicates: [PROGRAM_SETTLED_REASON] }).reasons,
+		).not.toEqual([PROGRAM_SETTLED_REASON]);
+	});
+
+	it("keeps the reason bound for a pass carrying more predicates than the bound", () => {
+		for (const certificate of [
+			{ ...clean, failed_semantic_predicates: many },
+			{ ...clean, unsure_semantic_predicates: many },
+		]) {
+			const { reasons } = verdictFromCertificate(certificate);
+			expect(reasons.length).toBeLessThanOrEqual(MAX_EVALUATION_REASONS);
+			expect(reasons).not.toContain(PROGRAM_SETTLED_REASON);
+		}
+	});
+
+	it("keeps the reason bound for a failing certificate carrying more predicates than the bound (control)", () => {
+		const { reasons } = verdictFromCertificate({
+			...clean,
+			semantic_outcome: "repair",
+			failed_semantic_predicates: many,
+		});
+		expect(reasons.length).toBe(MAX_EVALUATION_REASONS);
 	});
 });
 

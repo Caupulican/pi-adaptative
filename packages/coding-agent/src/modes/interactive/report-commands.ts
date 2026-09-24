@@ -24,6 +24,7 @@ import { DaxnutsComponent } from "./components/daxnuts.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { EarendilAnnouncementComponent } from "./components/earendil-announcement.ts";
 import { formatKeyText } from "./components/keybinding-hints.ts";
+import { selfCompactionGauge } from "./components/self-compaction-gauge.ts";
 import { theme } from "./theme/theme.ts";
 
 export interface ReportRenderHost {
@@ -66,6 +67,63 @@ export function formatCostReport(costs: SessionCostSummary, usingSubscription = 
 		`${theme.fg("dim", "Today rollover:")} local midnight`,
 	);
 	return lines.join("\n");
+}
+
+export interface SelfCompactionReportHost extends ReportRenderHost {
+	readonly session: AgentSession;
+}
+
+export function formatSelfCompactionInfo(session: Pick<AgentSession, "getSelfCompactionInfo">): string {
+	const { view, settings, promptSources, note, running } = session.getSelfCompactionInfo();
+	const label = (text: string) => theme.fg("dim", text);
+	const count = (tokens: number | null) => (tokens === null ? "unknown" : tokens.toLocaleString("en-US"));
+	const lines = [theme.bold("Self-compaction")];
+	if (view.settingsError) {
+		lines.push(`${label("State:")} disabled because its settings were rejected (${view.settingsError})`);
+	} else if (!view.thresholds) {
+		lines.push(
+			`${label("State:")} ${view.enabled ? "unavailable (no compaction trigger or context window)" : "disabled"}`,
+		);
+	} else {
+		const t = view.thresholds;
+		const gauge = selfCompactionGauge(view);
+		lines.push(
+			`${label("Gauge:")} ${gauge ? [gauge.bar, gauge.percent, gauge.tag].filter(Boolean).join(" ") : "unknown"}`,
+		);
+		lines.push(
+			`${label("Phase:")} ${view.phase} (level ${view.level}); tools ${view.toolsLocked ? "locked to self_compact" : "open"}`,
+		);
+		lines.push(
+			`${label("Usage:")} ${count(view.usedTokens)} of ${t.contextWindow.toLocaleString("en-US")} tokens${view.usedPercent === null ? "" : ` (${view.usedPercent}%)`}, cached ${count(view.cachedTokens)}`,
+		);
+		lines.push(
+			`${label("Lines:")} notice ${count(t.noticeTokens)} (${settings.notice} of the first trigger), warning ${count(t.warningTokens)} (${settings.warning}), forced ${count(t.forcedTokens)} (${settings.forced} of hard)`,
+		);
+		lines.push(
+			`${label("Host compaction:")} early ${t.earlyTokens === null ? "off" : count(t.earlyTokens)}, hard ${count(t.hardTokens)}`,
+		);
+		lines.push(
+			`${label("Until:")} warning ${count(view.tokensUntilWarning)}, forced ${count(view.tokensUntilForced)} tokens`,
+		);
+	}
+	lines.push(`${label("Cycles completed:")} ${view.cycles}`);
+	lines.push(
+		`${label("Handoff:")} ${view.handoff.status}${view.handoff.attempts > 0 ? `, ${view.handoff.attempts} failed attempt(s)` : ""}${view.handoff.lastError ? `, last error: ${view.handoff.lastError}` : ""}${view.handoff.ownerRequested ? ", owner asked to compact now" : ""}${running ? ", runner active" : ""}`,
+	);
+	lines.push(
+		`${label("Prompts:")} notice ${promptSources.notice}; warning ${promptSources.warning}; summary ${promptSources.summary}`,
+	);
+	if (note !== null) {
+		lines.push(`${label(`Saved note (${note.length.toLocaleString("en-US")} chars):`)}`, note);
+	}
+	lines.push("", `${label("/self-compact-now")}: compact now, reusing a saved note or asking the agent for one`);
+	return lines.join("\n");
+}
+
+export function handleSelfCompactInfoCommand(host: SelfCompactionReportHost): void {
+	host.chatContainer.addChild(new Spacer(1));
+	host.chatContainer.addChild(new Text(formatSelfCompactionInfo(host.session), 1, 0));
+	host.ui.requestRender();
 }
 
 export function handleUsageCommand(host: UsageReportHost): void {

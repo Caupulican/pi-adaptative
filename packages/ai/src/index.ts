@@ -10,6 +10,7 @@ export * from "./images-api-registry.ts";
 export * from "./models.ts";
 export type { BedrockOptions, BedrockThinkingDisplay } from "./providers/amazon-bedrock.ts";
 export type { AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay } from "./providers/anthropic.ts";
+export * from "./providers/anthropic-account.ts";
 export type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses.ts";
 export * from "./providers/faux.ts";
 export type { GoogleOptions } from "./providers/google.ts";
@@ -25,6 +26,7 @@ export type {
 } from "./providers/openai-codex-responses.ts";
 export type { OpenAICompletionsOptions } from "./providers/openai-completions.ts";
 export type { OpenAIResponsesOptions } from "./providers/openai-responses.ts";
+export * from "./providers/openrouter-account.ts";
 export * from "./providers/register-builtins.ts";
 export * from "./session-resources.ts";
 export * from "./stream.ts";

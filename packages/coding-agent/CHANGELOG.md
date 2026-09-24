@@ -2,17 +2,22 @@
 
 ### Changed
 
+- A worker session never draws a terminal UI. With a TTY it keeps its interactive runtime, input, prompt submission, extension binding, shutdown handling and handoff recovery. It builds no header, history, footer, status or decision graph, runs no startup checks, and writes nothing to the terminal. A collaboration host no longer turns a worker into a watched session.
 - A side trip searches the conversation its brief omits with `conversation_history` instead of handing the message back (`hand_to_talker` is removed: the free side-trip model never called it).
 - A worker whose grant is derived (inherited or narrowed) and holds a tool whose output is packed (grep, find) also gets `artifact_retrieve`, as the root does, so its large outputs are packed and stay retrievable; a named profile runs exactly as authored, and `profile_create` writes `artifact_retrieve` into a new profile beside grep or find when its base holds it, saying so in the result.
 - The claim check reads an answer that relays what a script printed as no test claim, and settles test and check claims against the checks that ran.
 
 ### Added
 
+- Self-monitoring compaction: the root agent sees its context gauge (notice, warning and forced lines placed before the host's own compaction triggers), writes a `note_to_self` with `self_compact` at a clean checkpoint, and the host compacts through its own compaction owner, returns the exact note and continues without a user message. Recovery across failures, restarts, rebinds and branch switches never replays an answered note. `/self-compact-info` prints the gauge, phase, cycles, prompt sources and saved note without a model turn; `/self-compact-now` reuses a saved note or asks the agent for one. The footer and the Workbench status row show a 20-cell gauge with the phase and cycle count. Print mode finishes a saved or delivered handoff before its first prompt and waits for one started during a prompt; RPC resumes one at startup and adds `get_self_compaction` and `self_compact_now`. An owner request lapses when the agent finishes its next reply without saving a note. Lines and the notice, warning and summary prompts are configurable under `compaction.selfMonitor` (see [compaction.md](docs/compaction.md#self-monitoring-compaction)).
+- `/usage` opens one overview at once. It covers session and today cost, tokens and context, machine-wide provider admission, and each signed-in account's usage windows, reset times, limits and credits. OpenAI Codex, Anthropic and OpenRouter accounts are read on open or refresh, bounded and paced per account, with every value labelled by when it was observed. `/usage reset` and the overview's reset action keep the confirmation step (see [usage.md](docs/usage.md)).
 - Tools declare `readOnly`; a cheap turn's escalation, the work boundary and a side trip's surface trust the declaration, so read-only tools such as `repo_read`, `artifact_retrieve`, `decision_ledger_read`, `webfetch` and `memory_read` run on a side trip instead of escalating. An undeclared unknown tool is still treated as mutating.
 
 ### Fixed
 
 - A cancelled SSO login waiter no longer cancels a shared AWS profile login while another session still needs it.
+- An OAuth refresh token the provider refused for good is not sent again; the credential reports as unusable until a login or another process stores a new refresh token.
+- OpenAI Codex FedRAMP accounts send `X-OpenAI-Fedramp: true` on model, image, account model listing, `/usage`, reset and limit-notice requests, taken from the stored credential whose key the request uses; configured model or provider headers, a `before_provider_headers` extension and caller stream options cannot set or clear it.
 - Root and delegated workers honor an Anthropic reset longer than the immediate retry cap without sending another request early.
 - The activity row of a finished turn ends with its submission instead of staying on as "Working" or "Preparing, no token yet" while background work runs.
 - Per-request host work no longer grows with the session: edge grants are read from an incremental branch index instead of the whole branch, and path aliasing scans only messages it has not scanned yet, even before a first alias exists (the host profile's per-request time stays flat over 600 turns, where it grew from about 4 to 11 ms).

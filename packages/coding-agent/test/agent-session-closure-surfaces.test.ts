@@ -93,7 +93,7 @@ describe("Session closure surfaces", () => {
 				};
 			}
 		)._toolGate;
-		const assistantMessage = { provider: "faux", model: "faux-model" };
+		const assistantMessage = { provider: "faux", model: "faux-model", content: [] };
 
 		const ordinary = await gate.beforeToolCall({
 			toolCall: { id: "call-1", name: "bash", arguments: {} },

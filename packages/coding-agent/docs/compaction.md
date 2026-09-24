@@ -424,3 +424,47 @@ Configure compaction in `~/.pi/agent/settings.json` or `<project-dir>/.pi/settin
 | `keepRecentTokens` | `20000` | Recent tokens to keep (not summarized) |
 
 Disable auto-compaction with `"enabled": false`. You can still compact manually with `/compact`.
+
+## Self-Monitoring Compaction
+
+The root agent sees its own context gauge and can hand itself off at a clean checkpoint instead of waiting for the host to compact at a line it cannot see.
+
+| Line | Default | What the agent gets |
+|------|---------|---------------------|
+| notice | `0.7` of the first compaction trigger | one transient notice with the lines; nothing is refused |
+| warning | `0.85` of the first compaction trigger | a transient warning asking it to finish the current step and call `self_compact` |
+| forced | `0.95` of the hard trigger | every tool except `self_compact` is refused while there is history to compact |
+
+The first compaction trigger is the host's cost-priced early trigger (`triggerPercent`) when it is below the hard trigger, otherwise the hard trigger, so notice and warning arrive before the host compacts on its own. Host early, idle and hard compaction keep working unchanged.
+
+`self_compact` without a note returns the live numbers as JSON. With `note_to_self` (up to 24,000 characters: goal, done work with exact paths, in-progress state, decisions, verified results, exact next action last) it saves the note and ends the turn. Other calls in the same batch are refused before any of them runs. When the foreground is idle, the host compacts through its own compaction owner (same summary model, retry and fallback), the exact note comes back as the next message, and the agent continues without a user message. A compaction failure keeps the note and retries up to three attempts; `/compact` or `/self-compact-now` finishes it sooner. Restart, `/resume`, rebind and `/tree` rebuild the handoff from the session; an answered or owner-aborted handoff never replays. A note saved when there is nothing to compact is refused, so the agent keeps working.
+
+Guidance never enters the conversation as a user message. It is a transient host record appended once per level, so it does not break the prompt cache.
+
+**Commands.** `/self-compact-info` prints the gauge, phase, lines, usage, completed cycles, prompt sources and any saved note without a model turn. `/self-compact-now` resumes a saved note, or asks the agent to write one and call `self_compact` (also below the notice line); it spends no model turn when there is nothing to compact. The request lapses when the agent finishes its next reply without saving a note, so a later note below the notice line is refused again. RPC has the same two as typed commands, `get_self_compaction` and `self_compact_now`.
+
+**Print and RPC modes.** A root session opened in print mode (`pi -p`, `--mode json`) finishes a saved or delivered handoff before its first prompt, and waits for a handoff the agent starts during a prompt before printing, so the printed reply is the continued one. RPC mode resumes a saved or delivered handoff when it starts and on every session replacement. An answered or owner-aborted handoff is not resumed in either mode.
+
+**Footer.** The context segment of the footer and of the Workbench status row carries a 20-cell gauge (`#` cached, `=` not cached, `.` free; `+` notice, `!` warning, `|` forced), the phase (`NOTICE`, `WARNING`, `FORCED`, `COMPACTING`, `COMPACTED`, `RESUMING`) and `cycle N` once a handoff has completed. A narrow row drops the bar before the phase.
+
+**Prompts.** `compaction.selfMonitor.prompts` replaces the built-in `notice` and `warning` guidance and the `summary` instructions given to the summarizer:
+
+```json
+{
+  "compaction": {
+    "selfMonitor": {
+      "notice": 0.7,
+      "warning": 0.85,
+      "forced": 0.95,
+      "prompts": {
+        "warning": "Context is {{used_tokens}} ({{used_percent}}); forced at {{forced_tokens}}. Write note_to_self and call self_compact.",
+        "summary": "Keep pending work pending. This is cycle {{cycle}}."
+      }
+    }
+  }
+}
+```
+
+Placeholders: `used_tokens`, `used_percent`, `context_window`, `notice_tokens`, `warning_tokens`, `forced_tokens`, `hard_tokens`, `early_tokens`, `tokens_until_warning`, `tokens_until_forced`, `cycle`, `note_max_chars`. A notice or warning prompt is rendered when its line is first crossed and kept until the level changes, so live numbers do not churn the cache. An unknown placeholder rejects the settings.
+
+Workers do not get `self_compact`: their compaction runs inline in their own request planning with no idle checkpoint.

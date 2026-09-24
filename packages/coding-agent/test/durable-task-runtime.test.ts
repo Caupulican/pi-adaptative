@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { JsonObject } from "../src/core/autonomy/contracts.ts";
+import { projectWorkerLaneRecord } from "../src/core/delegation/worker-lane-projection.ts";
 import { buildPiResumeLaunchSpec } from "../src/core/orchestration/agent-resume.ts";
 import {
 	type ApprovalRequestContract,
@@ -410,6 +411,44 @@ describe("DurableTaskRuntime", () => {
 				riskBudget: { maxAttempts: 1.5 },
 			}),
 		).toThrow("task.riskBudget.maxAttempts must be a non-negative safe integer");
+	});
+
+	it("projects a running worker lane's execution start from its lease, apart from its queue time", () => {
+		const { runtime, clock, store } = createHarness();
+		const objective = runtime.createObjective({
+			objectiveId: "objective-timing",
+			title: "Timing",
+			description: "Queue then run",
+			acceptanceCriteria: [{ id: "criterion-1", description: "Runs", required: true }],
+			riskBudget: { maxAttempts: 2 },
+		});
+		const task = runtime.createTask({
+			taskId: "task-timing",
+			objectiveId: objective.objectiveId,
+			title: "Timed work",
+			description: "Wait in the queue",
+			role: "implementer",
+		});
+		const attempt = runtime.queueAttempt(task.taskId, dispatch(task.taskId), "grant-timing");
+		const queuedAt = new Date(T0).toISOString();
+		expect(projectWorkerLaneRecord(runtime.getSnapshot(), task.taskId)).toMatchObject({ status: "queued", queuedAt });
+		expect(projectWorkerLaneRecord(runtime.getSnapshot(), task.taskId)?.startedAt).toBeUndefined();
+		clock.ms += 30_000;
+		const lease = runtime.leaseAttempt(attempt.attemptId, "worker-timing", 60_000);
+		clock.ms += 1_000;
+		runtime.startAttempt(attempt.attemptId, lease.leaseId, lease.fencingToken);
+		const startedAt = new Date(T0 + 30_000).toISOString();
+		expect(projectWorkerLaneRecord(runtime.getSnapshot(), task.taskId)).toMatchObject({
+			status: "running",
+			queuedAt,
+			startedAt,
+		});
+		const replayed = new DurableTaskRuntime({ store, now: () => clock.ms });
+		expect(projectWorkerLaneRecord(replayed.getSnapshot(), task.taskId)?.startedAt).toBe(startedAt);
+		const state = runtime.getSnapshot();
+		expect(
+			projectionFromSnapshot(toJsonObject(state), state.lastOrdinal).attempts[attempt.attemptId]?.executionStartedAt,
+		).toBe(startedAt);
 	});
 
 	it("runs a dependency DAG through leased attempts and unlocks dependents", () => {

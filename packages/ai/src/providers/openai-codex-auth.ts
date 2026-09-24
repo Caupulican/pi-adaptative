@@ -5,6 +5,7 @@ export const DEFAULT_OPENAI_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 type OpenAICodexJwtPayload = {
 	[OPENAI_CODEX_JWT_CLAIM_PATH]?: {
 		chatgpt_account_id?: unknown;
+		chatgpt_account_is_fedramp?: unknown;
 	};
 	[key: string]: unknown;
 };
@@ -37,6 +38,20 @@ export function getOpenAICodexAccountId(token: string): string | undefined {
 	return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;
 }
 
+export const OPENAI_CODEX_FEDRAMP_HEADER = "X-OpenAI-Fedramp";
+
+export function getOpenAICodexFedrampClaim(idToken: string): boolean | undefined {
+	if (idToken.split(".").some((part) => !part)) return undefined;
+	const payload = decodeJwtPayload(idToken);
+	if (!payload) return undefined;
+	const auth: unknown = payload[OPENAI_CODEX_JWT_CLAIM_PATH];
+	if (auth === undefined || auth === null) return false;
+	if (typeof auth !== "object" || Array.isArray(auth)) return undefined;
+	const fedramp = (auth as { chatgpt_account_is_fedramp?: unknown }).chatgpt_account_is_fedramp;
+	if (fedramp === undefined) return false;
+	return typeof fedramp === "boolean" ? fedramp : undefined;
+}
+
 export function requireOpenAICodexAccountId(token: string): string {
 	const accountId = getOpenAICodexAccountId(token);
 	if (!accountId) throw new Error("Failed to extract accountId from token");
@@ -49,6 +64,7 @@ export function buildOpenAICodexHeaders(options: {
 	initial?: Record<string, string>;
 	additional?: Record<string, string>;
 	userAgent?: string;
+	credentialHeaders?: Record<string, string>;
 }): Headers {
 	// Headers constructors include invalid values in thrown errors. Validate credential fields
 	// first so callers can safely report failures without accidentally logging bearer material.
@@ -61,9 +77,13 @@ export function buildOpenAICodexHeaders(options: {
 	}
 	const headers = new Headers(options.initial);
 	for (const [key, value] of Object.entries(options.additional ?? {})) headers.set(key, value);
+	headers.delete(OPENAI_CODEX_FEDRAMP_HEADER);
 	headers.set("Authorization", `Bearer ${options.token}`);
 	headers.set("chatgpt-account-id", accountId);
 	headers.set("originator", "pi");
+	if (new Headers(options.credentialHeaders).get(OPENAI_CODEX_FEDRAMP_HEADER) === "true") {
+		headers.set(OPENAI_CODEX_FEDRAMP_HEADER, "true");
+	}
 	if (options.userAgent) headers.set("User-Agent", options.userAgent);
 	return headers;
 }

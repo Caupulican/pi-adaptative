@@ -13,6 +13,26 @@ const response = () =>
 afterEach(() => vi.useRealTimers());
 
 describe("ChatGPT subscription images", () => {
+	it("routes image requests as FedRAMP only from the credential's own headers", async () => {
+		const sent: Array<string | null> = [];
+		const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
+			sent.push(new Headers(init?.headers).get("X-OpenAI-Fedramp"));
+			return response();
+		});
+		await generateImagesOpenAICodex(OPENAI_CODEX_IMAGE_MODEL, input, {
+			accessToken: token,
+			fetch,
+			credentialHeaders: { "X-OpenAI-Fedramp": "true" },
+		});
+		await generateImagesOpenAICodex(OPENAI_CODEX_IMAGE_MODEL, input, {
+			accessToken: token,
+			fetch,
+			headers: { "X-OpenAI-Fedramp": "true" },
+		});
+		await generateImagesOpenAICodex(OPENAI_CODEX_IMAGE_MODEL, input, { accessToken: token, fetch });
+		expect(sent).toEqual(["true", null, null]);
+	});
+
 	it("uses the native Codex JSON contract and records subscription token usage", async () => {
 		const fetch = vi.fn<typeof globalThis.fetch>(async () => response());
 		const result = await generateImagesOpenAICodex(OPENAI_CODEX_IMAGE_MODEL, input, {

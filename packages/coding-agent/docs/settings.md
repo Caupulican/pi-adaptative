@@ -353,6 +353,13 @@ The checkpoint owns user intent mechanically: `## Active Task` copies the latest
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
 | `compaction.triggerPercent` | number | `0.6` | Context-efficiency and latency trigger as a fraction of the model window; separate from the USD cost guard |
+| `compaction.selfMonitor.enabled` | boolean | `true` | Let the agent watch its context gauge and hand itself off with `self_compact` (see [Compaction](compaction.md#self-monitoring-compaction)) |
+| `compaction.selfMonitor.notice` | number | `0.7` | Notice line as a fraction of the first compaction trigger (the early trigger when it is below hard, else hard) |
+| `compaction.selfMonitor.warning` | number | `0.85` | Warning line as a fraction of the first compaction trigger; must not be below `notice` |
+| `compaction.selfMonitor.forced` | number | `0.95` | Forced line as a fraction of the hard trigger (never below the warning line) |
+| `compaction.selfMonitor.prompts` | object | built-in | Optional `notice`, `warning` and `summary` texts with `{{placeholders}}` |
+
+A rejected `compaction.selfMonitor` value (a non-boolean `enabled`, a fraction outside (0, 1], `notice` above `warning`, or a malformed prompt) disables self-monitoring and names the reason in `/self-compact-info` and `context_audit`.
 
 ```json
 {

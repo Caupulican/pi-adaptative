@@ -141,6 +141,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"run_toolkit_script",
 					"runtime_update",
 					"secret_store",
+					"self_compact",
 					"skill",
 					"skill_audit",
 					"skillify",
@@ -184,7 +185,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 			expect(
 				report.toolSchemaTokens,
 				JSON.stringify(report.tools.map(({ name, schemaTokens }) => ({ name, schemaTokens }))),
-			).toBeLessThanOrEqual(4_500 + 350 + 720 + 100 + 143);
+			).toBeLessThanOrEqual(4_500 + 350 + 720 + 100 + 143 + 140);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
 			expect(toolTokens.get("task_directory")).toBeLessThanOrEqual(350);
 			expect(toolTokens.get("task_automation")).toBeLessThanOrEqual(720);
@@ -194,13 +195,16 @@ describe("AgentSession.getContextCompositionReport", () => {
 			expect(toolTokens.get("decision_ledger_read")).toBeLessThanOrEqual(100);
 			expect(toolTokens.get("repo_read")).toBeGreaterThan(0);
 			expect(toolTokens.get("repo_read")).toBeLessThanOrEqual(143);
+			expect(toolTokens.get("self_compact")).toBeGreaterThan(0);
+			expect(toolTokens.get("self_compact")).toBeLessThanOrEqual(140);
 			expect(
 				report.toolSchemaTokens -
 					toolTokens.get("task_directory")! -
 					toolTokens.get("task_automation")! -
 					toolTokens.get("typesafe_review")! -
 					toolTokens.get("decision_ledger_read")! -
-					toolTokens.get("repo_read")!,
+					toolTokens.get("repo_read")! -
+					toolTokens.get("self_compact")!,
 			).toBeLessThanOrEqual(4_500);
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(160);
 			// Explicit independent work adds one bounded object to delegate's wire contract. Keep

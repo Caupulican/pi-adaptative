@@ -710,6 +710,13 @@ export class TUI extends Container {
 		const restarting = this.hasStarted;
 		this.hasStarted = true;
 		this.stopped = false;
+		if (this.terminal.inputOnly) {
+			this.terminal.start(
+				(data) => this.handleInput(data),
+				() => {},
+			);
+			return;
+		}
 		this.terminal.start(
 			(data) => this.handleInput(data),
 			() => this.requestRender(),
@@ -822,6 +829,10 @@ export class TUI extends Container {
 
 	stop(): void {
 		this.stopped = true;
+		if (this.terminal.inputOnly) {
+			this.terminal.stop();
+			return;
+		}
 		this.clearCellSizeQuery();
 		this.clearAmbiguousWidthProbe();
 		this.renderRequested = false;
@@ -862,12 +873,13 @@ export class TUI extends Container {
 			this.requestFullRender("saved-lines");
 			return;
 		}
-		if (this.renderRequested) return;
+		if (this.renderRequested || this.terminal.inputOnly) return;
 		this.renderRequested = true;
 		process.nextTick(() => this.scheduleRender());
 	}
 
 	private requestFullRender(clearMode: FullRedrawClearMode): void {
+		if (this.terminal.inputOnly) return;
 		// A public force redraw remains the strongest request if width detection races it.
 		if (this.pendingFullRedrawClearMode !== "saved-lines") {
 			this.pendingFullRedrawClearMode = clearMode;
@@ -1360,7 +1372,7 @@ export class TUI extends Container {
 	}
 
 	private doRender(): void {
-		if (this.stopped) return;
+		if (this.stopped || this.terminal.inputOnly) return;
 		const fullRedrawClearMode = this.pendingFullRedrawClearMode;
 		this.pendingFullRedrawClearMode = undefined;
 		const width = this.terminal.columns;

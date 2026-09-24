@@ -80,6 +80,8 @@ export interface OAuthProviderInterface {
 	/** Convert credentials to API key string for the provider */
 	getApiKey(credentials: OAuthCredentials): string;
 
+	getRequestHeaders?(credentials: OAuthCredentials): Record<string, string> | undefined;
+
 	/** Optional: modify models for this provider (e.g., update baseUrl) */
 	modifyModels?(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[];
 }

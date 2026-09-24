@@ -125,9 +125,11 @@ export class FooterDataProvider {
 	private refreshInFlight = false;
 	private refreshPending = false;
 	private disposed = false;
+	private readonly watchGit: boolean;
 
-	constructor(cwd: string) {
+	constructor(cwd: string, options: { watchGit?: boolean } = {}) {
 		this.cwd = cwd;
+		this.watchGit = options.watchGit ?? true;
 		this.gitPaths = findGitPaths(cwd);
 		this.setupGitWatcher();
 	}
@@ -328,7 +330,7 @@ export class FooterDataProvider {
 
 	private setupGitWatcher(): void {
 		this.clearGitWatchers();
-		if (!this.gitPaths) return;
+		if (!this.gitPaths || !this.watchGit) return;
 
 		const pollGitHead = shouldPollGitHead(this.gitPaths.repoDir);
 

@@ -62,7 +62,10 @@ export interface SessionStreamChainInput {
 	/** The agent directory whose ESTOP sentinel pauses new worker and background requests. */
 	agentDir: string;
 	/** Credentials, so limits and in-flight counts key on provider plus account (see account-key.ts). */
-	authStorage: { get(provider: string): AuthCredential | undefined };
+	authStorage: {
+		get(provider: string): AuthCredential | undefined;
+		getOAuthRequestHeaders(provider: string, apiKey: string): Record<string, string> | undefined;
+	};
 	/** Live wait notifications for the operator's activity lane. */
 	onWait?: (event: ProviderAdmissionWaitEvent) => void;
 	/** The output repetition guard's threshold follows the model's capability tier. */
@@ -73,7 +76,19 @@ export interface SessionStreamChainInput {
 
 export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 	const { baseStreamFn, settingsManager, sessionManager, modelAdaptationStore, providerAdmissionLedger } = input;
-	const profiled = withModelPerfProfile(baseStreamFn, {
+	const credentialed: StreamFn =
+		baseStreamFn === streamSimple
+			? (model, context, options) =>
+					baseStreamFn(model, context, {
+						...options,
+						credentialHeaders: options?.apiKey
+							? input.authStorage.getOAuthRequestHeaders(model.provider, options.apiKey)
+							: undefined,
+						credentialHeadersFor: (apiKey: string) =>
+							input.authStorage.getOAuthRequestHeaders(model.provider, apiKey),
+					})
+			: baseStreamFn;
+	const profiled = withModelPerfProfile(credentialed, {
 		modelKey: (model) => formatModelRouterModel(model),
 		recordSample: (modelKey, sample) => {
 			modelAdaptationStore.recordPerfSample(modelKey, sample);

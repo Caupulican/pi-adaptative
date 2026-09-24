@@ -316,6 +316,7 @@ export type ResolvedRequestAuth =
 			ok: true;
 			apiKey?: string;
 			headers?: Record<string, string>;
+			credentialHeaders?: Record<string, string>;
 	  }
 	| {
 			ok: false;
@@ -749,12 +750,24 @@ export class ModelRegistry {
 		if (model.provider === "llama-cpp") {
 			return true;
 		}
+		return this.hasCredential(model);
+	}
+
+	private hasCredential(model: Model<Api>): boolean {
 		const providerApiKey = this.providerRequestConfigs.get(model.provider)?.apiKey;
 		return (
 			this.authStorage.hasAuth(model.provider) ||
 			(providerApiKey !== undefined && isConfigValueConfigured(providerApiKey)) ||
 			hasAuthenticationHeaders(model.headers)
 		);
+	}
+
+	getAuthenticatedProviders(): string[] {
+		const providers = new Set<string>();
+		for (const model of this.models) {
+			if (!providers.has(model.provider) && this.hasCredential(model)) providers.add(model.provider);
+		}
+		return [...providers].sort((left, right) => left.localeCompare(right));
 	}
 
 	canUseResolvedRequestAuth(
@@ -828,10 +841,14 @@ export class ModelRegistry {
 				headers = { ...headers, Authorization: `Bearer ${apiKey}` };
 			}
 
+			const credentialHeaders = apiKeyFromAuthStorage
+				? this.authStorage.getOAuthRequestHeaders(model.provider, apiKeyFromAuthStorage)
+				: undefined;
 			return {
 				ok: true,
 				apiKey,
 				headers: headers && Object.keys(headers).length > 0 ? headers : undefined,
+				...(credentialHeaders ? { credentialHeaders } : {}),
 			};
 		} catch (error) {
 			return {

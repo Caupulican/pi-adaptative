@@ -14,6 +14,7 @@ import {
 	applyTerminalSettings,
 	type Component,
 	Container,
+	InputOnlyTerminal,
 	type Loader,
 	type LoaderIndicatorOptions,
 	ProcessTerminal,
@@ -53,9 +54,11 @@ import type { ManagedMemoryTarget } from "../../core/memory/providers/file-store
 import type { ForegroundRouteSnapshot } from "../../core/model-router-controller.ts";
 import type { PrismLlamaCppRuntime } from "../../core/models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
+import { AccountUsageMonitor } from "../../core/provider-admission/account-usage-monitor.ts";
 import { REPLY_ROUTE_CUSTOM_TYPE, type ReplyRouteRecord } from "../../core/reply-route.ts";
 import { formatMissingSessionCwdPrompt, type MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { SessionImageStore } from "../../core/session-image-store.ts";
+import { getSessionRole } from "../../core/session-role.ts";
 import type {
 	AutoLearnSettings,
 	AutonomyMode,
@@ -322,6 +325,7 @@ export class InteractiveMode {
 	private workbench?: WorkbenchController;
 	private workbenchInputCleanup?: () => void;
 	private readonly hasHumanAudience: boolean;
+	private usageMonitor: AccountUsageMonitor | undefined;
 
 	// Header container that holds the built-in or custom header
 	private headerContainer: Container;
@@ -372,7 +376,7 @@ export class InteractiveMode {
 	constructor(runtimeHost: AgentSessionRuntime, options: InteractiveModeOptions = {}) {
 		this.runtimeHost = runtimeHost;
 		this.options = options;
-		this.hasHumanAudience = options.hasHumanAudience ?? true;
+		this.hasHumanAudience = (options.hasHumanAudience ?? true) && getSessionRole() === "main";
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.extensionUiHost.resetExtensionUI();
 		});
@@ -384,10 +388,12 @@ export class InteractiveMode {
 		// getCapabilities() and cache a settings-less result (P1g).
 		applyTerminalSettings(terminalCapabilityOverridesFromSettings(this.settingsManager));
 		this.ui = new TUI(
-			new ProcessTerminal({
-				workbench: this.hasHumanAudience,
-				mouse: this.settingsManager.getWorkbenchSettings().mouse === "on",
-			}),
+			this.hasHumanAudience
+				? new ProcessTerminal({
+						workbench: true,
+						mouse: this.settingsManager.getWorkbenchSettings().mouse === "on",
+					})
+				: new InputOnlyTerminal(),
 			this.settingsManager.getShowHardwareCursor(),
 		);
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
@@ -420,7 +426,9 @@ export class InteractiveMode {
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor as Component);
 		this.overlayHost = new EditorOverlayHost(this.editorContainer, this.ui);
-		this.footerDataProvider = new FooterDataProvider(this.sessionManager.getCwd());
+		this.footerDataProvider = new FooterDataProvider(this.sessionManager.getCwd(), {
+			watchGit: this.hasHumanAudience,
+		});
 		this.footer = new FooterComponent(this.session, this.footerDataProvider);
 		this.autoLearnController = new AutoLearnController({
 			getSession: () => this.runtimeHost.session,
@@ -602,6 +610,17 @@ export class InteractiveMode {
 		if (this.isInitialized) return;
 
 		this.registerSignalHandlers();
+		if (!this.hasHumanAudience) {
+			this.builtInHeader = new Text("", 0, 0);
+			mountInteractiveLayout(this as unknown as InteractiveLayoutHost);
+			this.ui.setFocus(this.editor);
+			this.setupKeyHandlers();
+			this.setupEditorSubmitHandler();
+			this.ui.start();
+			this.isInitialized = true;
+			await this.rebindCurrentSession();
+			return;
+		}
 
 		// Load changelog (only show new entries, skip for resumed sessions)
 		this.changelogMarkdown = this.getChangelogForDisplay();
@@ -761,7 +780,48 @@ export class InteractiveMode {
 	 */
 	async run(): Promise<void> {
 		await this.init();
+		if (this.hasHumanAudience) this.startAudienceChecks();
 
+		const { initialMessage, initialImages, initialMessages } = this.options;
+		if (initialMessage) {
+			try {
+				await this.session.prompt(initialMessage, { images: initialImages });
+			} catch (error: unknown) {
+				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+				this.showError(errorMessage);
+			} finally {
+				this.refreshAutonomyFooterStatus();
+			}
+		}
+
+		if (initialMessages) {
+			for (const message of initialMessages) {
+				try {
+					await this.session.prompt(message);
+				} catch (error: unknown) {
+					const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+					this.showError(errorMessage);
+				} finally {
+					this.refreshAutonomyFooterStatus();
+				}
+			}
+		}
+
+		while (true) {
+			const userInput = await this.getUserInput();
+			try {
+				await this.session.prompt(userInput.text, { images: userInput.images });
+			} catch (error: unknown) {
+				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+				this.showError(errorMessage);
+			} finally {
+				this.reportCacheMissNoticeIfEvidenced();
+				this.refreshAutonomyFooterStatus();
+			}
+		}
+	}
+
+	private startAudienceChecks(): void {
 		// Start version check asynchronously
 		checkForNewPiVersion(this.version).then((newRelease) => {
 			if (newRelease) {
@@ -805,8 +865,7 @@ export class InteractiveMode {
 				// curation is best-effort; never disrupt startup
 			});
 
-		// Show startup warnings
-		const { migratedProviders, modelFallbackMessage, initialMessage, initialImages, initialMessages } = this.options;
+		const { migratedProviders, modelFallbackMessage } = this.options;
 
 		if (migratedProviders && migratedProviders.length > 0) {
 			this.showWarning(`Migrated credentials to auth.json: ${migratedProviders.join(", ")}`);
@@ -822,48 +881,10 @@ export class InteractiveMode {
 		}
 
 		void this.maybeWarnAboutAnthropicSubscriptionAuth();
-
-		// Process initial messages
-		if (initialMessage) {
-			try {
-				await this.session.prompt(initialMessage, { images: initialImages });
-			} catch (error: unknown) {
-				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-				this.showError(errorMessage);
-			} finally {
-				this.refreshAutonomyFooterStatus();
-			}
-		}
-
-		if (initialMessages) {
-			for (const message of initialMessages) {
-				try {
-					await this.session.prompt(message);
-				} catch (error: unknown) {
-					const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-					this.showError(errorMessage);
-				} finally {
-					this.refreshAutonomyFooterStatus();
-				}
-			}
-		}
-
-		// Main interactive loop
-		while (true) {
-			const userInput = await this.getUserInput();
-			try {
-				await this.session.prompt(userInput.text, { images: userInput.images });
-			} catch (error: unknown) {
-				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-				this.showError(errorMessage);
-			} finally {
-				this.reportCacheMissNoticeIfEvidenced();
-				this.refreshAutonomyFooterStatus();
-			}
-		}
 	}
 
 	private refreshAutonomyFooterStatus(): void {
+		if (!this.hasHumanAudience) return;
 		this.footerDataProvider.setAutonomyStatusSnapshot(this.session.getAutonomyStatusSnapshot());
 		this.footer.invalidate();
 	}
@@ -874,6 +895,7 @@ export class InteractiveMode {
 	 * already recorded on assistant messages -- no new metering.
 	 */
 	private reportCacheMissNoticeIfEvidenced(): void {
+		if (!this.hasHumanAudience) return;
 		const current = observeCacheStateFromMessages(this.session.messages);
 		if (!current) return;
 		if (this.session.settingsManager.getShowCacheMissNotices()) {
@@ -1064,11 +1086,11 @@ export class InteractiveMode {
 			},
 		});
 
-		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
-		this.setupAutocompleteProvider();
-
 		const extensionRunner = this.session.extensionRunner;
 		this.extensionUiHost.setupExtensionShortcuts(extensionRunner);
+		if (!this.hasHumanAudience) return;
+		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
+		this.setupAutocompleteProvider();
 		this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 		this.showStartupNoticesIfNeeded();
 	}
@@ -1133,13 +1155,15 @@ export class InteractiveMode {
 		this.applyRuntimeSettings();
 		await this.bindCurrentSessionExtensions();
 		this.subscribeToAgent();
-		// The Workbench's own listeners (projection, stage log, System One ledger, questions) follow the session too.
-		if (this.workbench) subscribeInteractiveLayout(this as unknown as InteractiveLayoutHost);
-		this.subscribeToExtensionsChanged();
-		await this.updateAvailableProviderCount();
-		this.updateEditorBorderColor();
-		this.updateTerminalTitle();
-		this.refreshActivityLane({ replace: true });
+		if (this.hasHumanAudience) {
+			// The Workbench's own listeners (projection, stage log, System One ledger, questions) follow the session too.
+			if (this.workbench) subscribeInteractiveLayout(this as unknown as InteractiveLayoutHost);
+			this.subscribeToExtensionsChanged();
+			await this.updateAvailableProviderCount();
+			this.updateEditorBorderColor();
+			this.updateTerminalTitle();
+			this.refreshActivityLane({ replace: true });
+		}
 		try {
 			await this.session.resumePendingHumanInput();
 		} catch (error: unknown) {
@@ -1147,6 +1171,7 @@ export class InteractiveMode {
 				`Failed to resume pending user input: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
+		this.session.resumeSelfCompaction();
 	}
 
 	private subscribeToExtensionsChanged(): void {
@@ -1641,8 +1666,8 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/usage") {
-				this.handleUsageMenuCommand();
+			if (text === "/usage" || text.startsWith("/usage ")) {
+				this.handleUsageMenuCommand(text);
 				this.editor.setText("");
 				return;
 			}
@@ -1704,6 +1729,20 @@ export class InteractiveMode {
 			if (text === "/new" || text.startsWith("/new ")) {
 				this.editor.setText("");
 				await this.handleClearCommand(text.slice("/new".length).trim() || undefined);
+				return;
+			}
+			if (text === "/self-compact-info") {
+				this.editor.setText("");
+				reportCommands.handleSelfCompactInfoCommand({
+					session: this.session,
+					chatContainer: this.chatContainer,
+					ui: this.ui,
+				});
+				return;
+			}
+			if (text === "/self-compact-now") {
+				this.editor.setText("");
+				await this.handleSelfCompactNowCommand();
 				return;
 			}
 			if (text === "/compact" || text.startsWith("/compact ")) {
@@ -1796,6 +1835,13 @@ export class InteractiveMode {
 	private subscribeToAgent(): void {
 		const session = this.session;
 		const generation = ++this.subscriptionGeneration;
+		if (!this.hasHumanAudience) {
+			this.unsubscribe = session.subscribe(async (event) => {
+				if (generation !== this.subscriptionGeneration || session !== this.session) return;
+				await this.handleUnattendedEvent(event);
+			});
+			return;
+		}
 		this.unsubscribe = session.subscribe(async (event) => {
 			if (generation !== this.subscriptionGeneration || session !== this.session) return;
 			await this.handleEvent(event);
@@ -1840,6 +1886,15 @@ export class InteractiveMode {
 
 	private handleEvent(event: AgentSessionEvent): Promise<void> {
 		return handleInteractiveEvent(this as unknown as InteractiveEventHost, event);
+	}
+
+	private async handleUnattendedEvent(event: AgentSessionEvent): Promise<void> {
+		if (event.type === "agent_end") {
+			this.maybeRunNativeReflection(event.messages);
+			await this.checkShutdownRequested();
+		} else if (event.type === "compaction_end") {
+			await this.flushCompactionQueue({ willRetry: event.willRetry });
+		}
 	}
 	/** Extract text content from a user message */
 	// Thin `this.`-delegate to the pure formatter in ./history-reload-math.ts; kept so
@@ -3798,6 +3853,20 @@ export class InteractiveMode {
 		});
 	}
 
+	private async handleSelfCompactNowCommand(): Promise<void> {
+		try {
+			const outcome = await this.session.selfCompactNow();
+			if (outcome.kind === "refused") this.showError(`Self-compaction: ${outcome.reason}.`);
+			else if (outcome.kind === "resumed")
+				this.showStatus(
+					`Self-compaction: compacting with the saved note (${outcome.noteChars.toLocaleString("en-US")} chars).`,
+				);
+			else this.showStatus("Self-compaction: asked the agent to write its note and compact.");
+		} catch (error) {
+			this.showError(`Self-compaction failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
 	private handleUsageCommand(): void {
 		reportCommands.handleUsageCommand({
 			session: this.session,
@@ -3807,14 +3876,20 @@ export class InteractiveMode {
 		});
 	}
 
-	private handleUsageMenuCommand(): void {
-		usageCommands.handleUsageMenuCommand({
-			session: this.session,
-			showSelector: (create) => this.showSelector(create),
-			showStatus: (message) => this.showStatus(message),
-			showError: (message) => this.showError(message),
-			showUsageReport: () => this.handleUsageCommand(),
-		});
+	private handleUsageMenuCommand(text: string): void {
+		this.usageMonitor ??= new AccountUsageMonitor();
+		usageCommands.handleUsageMenuCommand(
+			{
+				session: this.session,
+				usageMonitor: this.usageMonitor,
+				showSelector: (create) => this.showSelector(create),
+				showStatus: (message) => this.showStatus(message),
+				showError: (message) => this.showError(message),
+				requestRender: () => this.ui.requestRender(),
+				terminalRows: () => this.ui.terminal.rows,
+			},
+			text,
+		);
 	}
 
 	private handleChangelogCommand(): void {

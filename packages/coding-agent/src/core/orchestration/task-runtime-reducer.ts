@@ -1354,6 +1354,7 @@ export function reduceOrchestrationEvent(
 				status: "leased",
 				lease,
 				...(agentId ? { agentId } : {}),
+				executionStartedAt: attempt.executionStartedAt ?? event.occurredAt,
 				updatedAt: event.occurredAt,
 			};
 			const task = tasks[attempt.taskId];

@@ -17,6 +17,7 @@ import {
 	OPENAI_CODEX_CLIENT_VERSION,
 	type OpenAICodexAccountModel,
 } from "@caupulican/pi-ai";
+import type { RequestAuth } from "../request-auth.ts";
 
 export type AccountModelAvailability = "available" | "unavailable" | "unknown";
 
@@ -32,7 +33,7 @@ export interface AccountModelCatalogDeps {
 	getModels(): readonly Model<Api>[];
 	hasConfiguredAuth(model: Model<Api>): boolean;
 	/** The request credential for a model (an OAuth access token or API key). */
-	getApiKey(model: Model<Api>): Promise<string | undefined>;
+	getRequestAuth(model: Model<Api>): Promise<RequestAuth | undefined>;
 	fetch?: typeof fetch;
 }
 
@@ -50,11 +51,20 @@ function errorText(error: unknown): string {
 
 /** The providers that answer "which models may this account use", and how each is asked. */
 const ACCOUNT_CHECKS: Readonly<
-	Record<string, (model: Model<Api>, apiKey: string, fetchImpl: typeof fetch) => Promise<ProviderAccountState>>
+	Record<
+		string,
+		(
+			model: Model<Api>,
+			apiKey: string,
+			fetchImpl: typeof fetch,
+			credentialHeaders: Record<string, string> | undefined,
+		) => Promise<ProviderAccountState>
+	>
 > = {
-	"openai-codex": async (model, apiKey, fetchImpl) => {
+	"openai-codex": async (model, apiKey, fetchImpl, credentialHeaders) => {
 		const listed = await listOpenAICodexAccountModels({
 			accessToken: apiKey,
+			credentialHeaders,
 			baseUrl: model.baseUrl,
 			clientVersion: OPENAI_CODEX_CLIENT_VERSION,
 			fetch: fetchImpl,
@@ -132,9 +142,9 @@ export class AccountModelCatalog {
 
 	private async checkProvider(model: Model<Api>, fetchImpl: typeof fetch): Promise<ProviderAccountState> {
 		try {
-			const apiKey = await this.deps.getApiKey(model);
-			if (!apiKey) return { kind: "unchecked", reason: "no credential resolved" };
-			return await ACCOUNT_CHECKS[model.provider]!(model, apiKey, fetchImpl);
+			const auth = await this.deps.getRequestAuth(model);
+			if (!auth?.apiKey) return { kind: "unchecked", reason: "no credential resolved" };
+			return await ACCOUNT_CHECKS[model.provider]!(model, auth.apiKey, fetchImpl, auth.credentialHeaders);
 		} catch (error) {
 			return { kind: "unchecked", reason: errorText(error) };
 		}

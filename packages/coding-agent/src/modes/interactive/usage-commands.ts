@@ -9,28 +9,50 @@ import type {
 } from "@caupulican/pi-ai";
 import { consumeOpenAICodexRateLimitResetCredit, listOpenAICodexRateLimitResetCredits } from "@caupulican/pi-ai";
 import type { Component } from "@caupulican/pi-tui";
+import type { SessionCostSummary } from "../../core/cost/cost-summary.ts";
+import { resolveProviderAccountKey } from "../../core/provider-admission/account-key.ts";
+import type { AccountUsageMonitor } from "../../core/provider-admission/account-usage-monitor.ts";
+import type { ProviderLoadView } from "../../core/provider-admission/load-view.ts";
+import {
+	type AuthenticatedAccount,
+	buildUsageOverview,
+	listAuthenticatedAccounts,
+	OPENAI_CODEX_PROVIDER,
+	openAICodexCredentialHeaders,
+	type UsageOverview,
+	type UsageOverviewRegistry,
+} from "../../core/provider-admission/usage-overview.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
 import { UsageActionSelectorComponent } from "./components/usage-action-selector.ts";
+import { UsageDashboardComponent } from "./components/usage-dashboard.ts";
 
 const ACCOUNT_REQUEST_TIMEOUT_MS = 15_000;
 
-type UsageSessionModelRegistry = {
-	getAll(): Model<Api>[];
+type UsageSessionModelRegistry = UsageOverviewRegistry & {
 	isUsingOAuth(model: Model<Api>): boolean;
-	getApiKeyForProvider(provider: string): Promise<string | undefined>;
+	isUsingSubscription(model: Model<Api>): boolean;
 };
 
 export interface UsageCommandHost {
 	readonly session: {
 		readonly modelRegistry: UsageSessionModelRegistry;
+		readonly model: Model<Api> | undefined;
 		/** A redeemed reset: the provider's recorded limits no longer hold, so it is routed to again. */
 		noteSubscriptionUsageReset(provider: string): void;
+		getCostSummary(): Pick<SessionCostSummary, "currentCost" | "subagentCost" | "todayCost" | "todaySubagentCost">;
+		getSessionStats(): { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number } };
+		getContextUsage(): { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
+		getProviderLoadView(): ProviderLoadView;
 	};
+	readonly usageMonitor: AccountUsageMonitor;
 	showSelector(create: (done: () => void) => { component: Component; focus: Component }): void;
 	showStatus(message: string): void;
 	showError(message: string): void;
-	showUsageReport(): void;
+	requestRender(): void;
+	terminalRows(): number;
 }
+
+export const USAGE_COMMAND_USAGE = "/usage · /usage reset";
 
 export interface OpenAICodexUsageResetClient {
 	list(options: OpenAICodexAccountRequestOptions): Promise<OpenAICodexRateLimitResetCredits>;
@@ -44,6 +66,7 @@ export interface OpenAICodexUsageResetClient {
 type UsageResetAuth = {
 	accessToken: string;
 	baseUrl?: string;
+	credentialHeaders: Record<string, string> | undefined;
 };
 
 type ResetCreditOption = {
@@ -67,6 +90,7 @@ function accountRequestOptions(auth: UsageResetAuth): OpenAICodexAccountRequestO
 	return {
 		accessToken: auth.accessToken,
 		baseUrl: auth.baseUrl,
+		credentialHeaders: auth.credentialHeaders,
 		signal: AbortSignal.timeout(ACCOUNT_REQUEST_TIMEOUT_MS),
 	};
 }
@@ -131,30 +155,64 @@ function codexSubscriptionModel(host: UsageCommandHost): Model<Api> | undefined 
 	return registry.getAll().find((model) => model.provider === "openai-codex" && registry.isUsingOAuth(model));
 }
 
-function showUsageMenu(host: UsageCommandHost, client: OpenAICodexUsageResetClient): void {
+function canRedeemReset(account: AuthenticatedAccount): boolean {
+	return account.provider === OPENAI_CODEX_PROVIDER && (account.auth === "subscription" || account.auth === "oauth");
+}
+
+function buildOverview(host: UsageCommandHost, accounts: readonly AuthenticatedAccount[]): UsageOverview {
+	const session = host.session;
+	const registry = session.modelRegistry;
+	const model = session.model;
+	const context = session.getContextUsage();
+	return buildUsageOverview({
+		now: Date.now(),
+		cost: session.getCostSummary(),
+		tokens: session.getSessionStats().tokens,
+		...(context ? { context } : {}),
+		subscription: model ? registry.isUsingSubscription(model) : false,
+		load: session.getProviderLoadView(),
+		accounts: [...accounts],
+		fetchState: (account) => host.usageMonitor.state(account, registry),
+		canRedeemReset,
+	});
+}
+
+function openUsageDashboard(host: UsageCommandHost, client: OpenAICodexUsageResetClient): void {
+	const registry = host.session.modelRegistry;
+	const currentAccountKey = (provider: string) => resolveProviderAccountKey(registry.authStorage, provider);
 	host.showSelector((done) => {
-		const selector = new UsageActionSelectorComponent({
-			title: "Usage",
-			subtitle: "Inspect this session or redeem an earned OpenAI subscription reset.",
-			items: [
-				{ value: "report", label: "Show usage", description: "Tokens, cost, context, and optimization" },
-				{
-					value: "reset",
-					label: "Redeem usage limit reset",
-					description: "Check earned reset-pass availability",
-				},
-			],
-			onSelect: (value) => {
-				done();
-				if (value === "report") {
-					host.showUsageReport();
+		let open = true;
+		let accounts = listAuthenticatedAccounts(registry);
+		const close = () => {
+			open = false;
+			done();
+		};
+		const refresh = (force: boolean) => {
+			accounts = listAuthenticatedAccounts(registry);
+			const running = host.usageMonitor.refresh(accounts, registry, { force, currentAccountKey });
+			dashboard.update(buildOverview(host, accounts));
+			host.requestRender();
+			void running.then(() => {
+				if (!open) return;
+				dashboard.update(buildOverview(host, accounts));
+				host.requestRender();
+			});
+		};
+		const dashboard = new UsageDashboardComponent({
+			overview: buildOverview(host, accounts),
+			canRedeemReset: accounts.some(canRedeemReset),
+			maxRows: () => host.terminalRows(),
+			onAction: (action) => {
+				if (action === "refresh") {
+					refresh(true);
 					return;
 				}
-				void loadResetCredits(host, client);
+				close();
+				if (action === "reset") void loadResetCredits(host, client);
 			},
-			onCancel: done,
 		});
-		return { component: selector, focus: selector };
+		refresh(false);
+		return { component: dashboard, focus: dashboard };
 	});
 }
 
@@ -169,7 +227,11 @@ async function loadResetCredits(host: UsageCommandHost, client: OpenAICodexUsage
 	try {
 		const accessToken = await host.session.modelRegistry.getApiKeyForProvider(model.provider);
 		if (!accessToken) throw new Error("OpenAI Codex subscription credentials are unavailable. Run /login.");
-		const auth = { accessToken, baseUrl: model.baseUrl };
+		const auth = {
+			accessToken,
+			baseUrl: model.baseUrl,
+			credentialHeaders: openAICodexCredentialHeaders(host.session.modelRegistry, accessToken),
+		};
 		const summary = await client.list(accountRequestOptions(auth));
 		const options = resetCreditOptions(summary);
 		if (summary.availableCount === 0 || options.length === 0) {
@@ -317,11 +379,17 @@ function showResetRetry(
 
 export function handleUsageMenuCommand(
 	host: UsageCommandHost,
+	text = "/usage",
 	client: OpenAICodexUsageResetClient = DEFAULT_RESET_CLIENT,
 ): void {
-	if (!codexSubscriptionModel(host)) {
-		host.showUsageReport();
+	const args = text.replace(/^\/usage\b/, "").trim();
+	if (args === "reset") {
+		void loadResetCredits(host, client);
 		return;
 	}
-	showUsageMenu(host, client);
+	if (args.length > 0) {
+		host.showError(USAGE_COMMAND_USAGE);
+		return;
+	}
+	openUsageDashboard(host, client);
 }

@@ -78,6 +78,8 @@ export interface HarnessOptions {
 	cwd?: string;
 	/** Persist the session inside the harness-owned temporary directory. */
 	persistSession?: boolean;
+	/** Reconstruct the session from an existing persisted session file instead of creating one. */
+	sessionFile?: string;
 	models?: FauxModelDefinition[];
 	fauxProvider?: Pick<RegisterFauxProviderOptions, "api" | "provider" | "onRequest" | "cacheTtlMs">;
 	settings?: Partial<Settings>;
@@ -156,9 +158,11 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	const sessionManager = options.persistSession
-		? SessionManager.create(options.cwd ?? tempDir, agentDir, join(tempDir, "sessions"))
-		: SessionManager.inMemory();
+	const sessionManager = options.sessionFile
+		? SessionManager.open(options.sessionFile, agentDir, undefined, options.cwd)
+		: options.persistSession
+			? SessionManager.create(options.cwd ?? tempDir, agentDir, join(tempDir, "sessions"))
+			: SessionManager.inMemory();
 	const workerModel = model;
 	const defaultOrchestrationProfileId = options.workerOrchestrationProfile?.profileId ?? "test-worker";
 	const effectiveSettings: Partial<Settings> = {
@@ -292,7 +296,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		accountModels = new AccountModelCatalog({
 			getModels: () => modelRegistry.getAll(),
 			hasConfiguredAuth: (candidate) => modelRegistry.hasConfiguredAuth(candidate),
-			getApiKey: async () => accountCheck.apiKey,
+			getRequestAuth: async () => ({ apiKey: accountCheck.apiKey }),
 			fetch: accountCheck.fetch,
 		});
 		await accountModels.refresh();

@@ -1,8 +1,25 @@
 ## [Unreleased]
 
+### Added
+
+- Read-only account clients for OpenAI Codex usage (`getOpenAICodexUsage`: windows, additional limits, reached reason, inline reset count, spend-control monthly limit, credits), Anthropic OAuth usage (`getAnthropicOAuthUsage`) and OpenRouter credits and key limits (`getOpenRouterAccountUsage`). All three share one bounded transport that refuses redirects, caps responses at 256 KiB, reports failures by HTTP status only, and carries a bounded `Retry-After`.
+
+### Changed
+
+- OpenAI Codex login requests the Codex CLI's full scope set, adding `api.connectors.read` and `api.connectors.invoke`. Existing tokens keep refreshing unchanged.
+- OpenAI Codex browser login state is 32 random bytes in unpadded base64url, as the Codex CLI generates it.
+- OpenAI Codex credentials record the ID token's FedRAMP claim as `chatgptAccountIsFedramp`, and model, account and image requests for such an account send `X-OpenAI-Fedramp: true`. A refresh without an ID token keeps the flag for the same account; a refresh with one replaces it. Credentials stored before the claim was read send no header and need no new login. OAuth providers return credential-derived headers through `getRequestHeaders`; callers pass them as `credentialHeaders` (stream, image and account options) and `credentialHeadersFor` (stream options, for the key a rejected request is replayed with). The Codex header builder takes `X-OpenAI-Fedramp` only from `credentialHeaders`: request and model headers can no longer set or clear it, and a replay after auth recovery uses the recovered credential's headers instead of the rejected one's.
+- An OpenAI Codex refresh refused for good (HTTP 401, `invalid_grant`, or an expired, reused or invalidated refresh token) throws `OAuthRefreshRejectedError` with the reason.
+
 ### Fixed
 
-- Anthropic OAuth Messages requests use the Claude Code 2.1.281 CLI User-Agent observed in the latest local binary.
+- OpenAI Codex account and device-login errors no longer include response bodies, device codes or authorization codes.
+- An OpenAI Codex request rejected with HTTP 401 is replayed once with the recovered key even when `maxRetries` is 0, instead of ending as "Failed after retries"; the replay no longer uses up a transient retry.
+- A final OpenAI Codex HTTP error (such as a 400, or a 401 after the one auth replay) ends the request instead of being retried as a network failure; transient HTTP and network failures keep their retries.
+- OpenAI Codex token exchange and refresh errors report the HTTP status and error code only, never the response body; token and device responses are read up to 64 KiB, and a network failure no longer repeats the underlying error text. A token response with a malformed ID token is refused, and so is a login exchange without one, as in the Codex CLI; a refresh may still omit it.
+- OpenAI Codex browser login accepts ChatGPT's life-sciences onboarding state suffix, and a provider error on the callback ends the login instead of waiting for a manual code.
+
+- Anthropic OAuth Messages and usage requests load their identities from a generated config updated with `sync:claude-identity`.
 - A provider's long `Retry-After` remains available to shared admission after the immediate retry wait is refused.
 - Bedrock requests with a named AWS profile use that profile even when an unrelated ambient bearer token is present.
 

@@ -14,6 +14,8 @@ export function buildBaseOptions(_model: Model<Api>, options?: SimpleStreamOptio
 		promptCacheOptions: options?.promptCacheOptions,
 		sessionId: options?.sessionId,
 		headers: options?.headers,
+		credentialHeaders: options?.credentialHeaders,
+		credentialHeadersFor: options?.credentialHeadersFor,
 		onPayload: options?.onPayload,
 		onResponse: options?.onResponse,
 		timeoutMs: options?.timeoutMs,

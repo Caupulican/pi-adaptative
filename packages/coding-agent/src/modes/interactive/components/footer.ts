@@ -6,6 +6,7 @@ import { getFastModeStatus } from "../../../core/fast-mode.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
 import { stripAnsi, stripAnsiExceptSgr } from "../../../utils/ansi.ts";
 import { theme } from "../theme/theme.ts";
+import { type SelfCompactionGauge, selfCompactionGauge } from "./self-compaction-gauge.ts";
 
 const FAST_MODE_BADGE = "[fast]";
 
@@ -113,6 +114,7 @@ type FooterUsageSnapshot = {
 	totalCacheRead: number;
 	totalCacheWrite: number;
 	contextUsage: ReturnType<AgentSession["getContextUsage"]>;
+	gauge: SelfCompactionGauge | null;
 };
 
 export class FooterComponent implements Component {
@@ -124,7 +126,7 @@ export class FooterComponent implements Component {
 	private session: AgentSession;
 	private footerData: ReadonlyFooterDataProvider;
 	private usageSnapshot?: FooterUsageSnapshot;
-	private cumulativeUsage?: Omit<FooterUsageSnapshot, "messageCount" | "contextUsage">;
+	private cumulativeUsage?: Omit<FooterUsageSnapshot, "messageCount" | "contextUsage" | "gauge">;
 
 	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
 		this.session = session;
@@ -222,6 +224,7 @@ export class FooterComponent implements Component {
 			// Calculate context usage from session (handles compaction correctly).
 			// After compaction, tokens are unknown until the next LLM response.
 			contextUsage: this.session.getContextUsage(),
+			gauge: selfCompactionGauge(this.session.getSelfCompactionView()),
 		};
 		this.usageSnapshot = snapshot;
 		return snapshot;
@@ -230,7 +233,7 @@ export class FooterComponent implements Component {
 	render(width: number): string[] {
 		const state = this.session.state;
 		const usageSnapshot = this.getUsageSnapshot(state.messages?.length ?? 0);
-		const { totalInput, totalOutput, totalCacheRead, totalCacheWrite, contextUsage } = usageSnapshot;
+		const { totalInput, totalOutput, totalCacheRead, totalCacheWrite, contextUsage, gauge } = usageSnapshot;
 		const costSummary = this.session.getCostSummary();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
@@ -258,7 +261,7 @@ export class FooterComponent implements Component {
 		}
 
 		// Build stats line
-		const statsParts = [];
+		const statsParts: string[] = [];
 		if (totalInput) statsParts.push(`↑${formatTokens(totalInput)}`);
 		if (totalOutput) statsParts.push(`↓${formatTokens(totalOutput)}`);
 		if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
@@ -303,36 +306,34 @@ export class FooterComponent implements Component {
 			statsParts.push(theme.fg("warning", `GUARD:$${costGuard.estUsd.toFixed(2)}/turn`));
 		}
 
-		// Colorize context percentage based on usage
-		let contextPercentStr: string;
 		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
 		const contextPercentDisplay =
 			contextPercent === "?"
 				? `?/${formatTokens(contextWindow)}${autoIndicator}`
 				: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
-		if (contextPercentValue > 90) {
-			contextPercentStr = theme.fg("error", contextPercentDisplay);
-		} else if (contextPercentValue > 70) {
-			contextPercentStr = theme.fg("warning", contextPercentDisplay);
-		} else {
-			contextPercentStr = contextPercentDisplay;
-		}
-		statsParts.push(contextPercentStr);
-
-		let statsLeft = statsParts.join(" ");
+		const contextTone = gauge
+			? gauge.tone
+			: contextPercentValue > 90
+				? "error"
+				: contextPercentValue > 70
+					? "warning"
+					: null;
+		const contextText = (detail: 0 | 1 | 2): string => {
+			const text = [
+				detail === 0 && gauge ? gauge.bar : undefined,
+				contextPercentDisplay,
+				gauge?.tag ?? undefined,
+				detail < 2 ? (gauge?.cycle ?? undefined) : undefined,
+			]
+				.filter(Boolean)
+				.join(" ");
+			return contextTone ? theme.fg(contextTone, text) : text;
+		};
 
 		// Add model display name on the right side, plus thinking level if model supports it
 		const modelName = state.model?.name || state.model?.id || "no-model";
 		const fastModeEnabled = getFastModeStatus(this.session).enabled;
 		const modelDisplayName = fastModeEnabled ? `${modelName} ${FAST_MODE_BADGE}` : modelName;
-
-		let statsLeftWidth = visibleWidth(statsLeft);
-
-		// If statsLeft is too wide, truncate it
-		if (statsLeftWidth > width) {
-			statsLeft = truncateToWidth(statsLeft, width, "...");
-			statsLeftWidth = visibleWidth(statsLeft);
-		}
 
 		// Calculate available space for padding (minimum 2 spaces between stats and model)
 		const minPadding = 2;
@@ -343,6 +344,19 @@ export class FooterComponent implements Component {
 			const thinkingLevel = state.thinkingLevel || "off";
 			rightSideWithoutProvider =
 				thinkingLevel === "off" ? `${modelDisplayName} • thinking off` : `${modelDisplayName} • ${thinkingLevel}`;
+		}
+
+		const rightSideRoom = minPadding + visibleWidth(rightSideWithoutProvider);
+		const statsVariants = ([0, 1, 2] as const).map((detail) => [...statsParts, contextText(detail)].join(" "));
+		let statsLeft =
+			statsVariants.find((variant) => visibleWidth(variant) + rightSideRoom <= width) ??
+			statsVariants[gauge ? 2 : 0];
+
+		let statsLeftWidth = visibleWidth(statsLeft);
+
+		if (statsLeftWidth > width) {
+			statsLeft = truncateToWidth(statsLeft, width, "...");
+			statsLeftWidth = visibleWidth(statsLeft);
 		}
 
 		// Prepend the provider in parentheses if there are multiple providers and there's enough room

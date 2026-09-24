@@ -107,6 +107,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 				console.warn(`Warning: ${event.message}`);
 			}
 		});
+		session.resumeSelfCompaction();
 	};
 
 	try {
@@ -118,9 +119,11 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		}
 
 		await rebindSession();
+		await session.waitForSelfCompactionHandoff();
 
 		if (initialMessage) {
 			await session.prompt(initialMessage, { images: initialImages });
+			await session.waitForSelfCompactionHandoff();
 		}
 
 		for (const [index, message] of messages.entries()) {
@@ -128,6 +131,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 			// answer, an armed continuation) still holds the session; the next message waits for it.
 			if (initialMessage || index > 0) await session.waitForForegroundIdle();
 			await session.prompt(message);
+			await session.waitForSelfCompactionHandoff();
 		}
 
 		if (mode === "text") {

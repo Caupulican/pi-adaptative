@@ -10,6 +10,14 @@ import {
 import { streamSimple } from "../src/stream.ts";
 import type { Context, Model } from "../src/types.ts";
 
+const mockIdentity = vi.hoisted(() => ({
+	version: "7.8.9",
+	messagesUserAgent: "claude-cli/7.8.9 (external, cli)",
+	usageUserAgent: "claude-code/7.8.9",
+}));
+
+vi.mock("../src/providers/anthropic-client-config.generated.ts", () => ({ ANTHROPIC_CLIENT_CONFIG: mockIdentity }));
+
 const mockState = vi.hoisted(() => ({
 	constructorOptions: undefined as Record<string, unknown> | undefined,
 	createParams: undefined as Record<string, unknown> | undefined,
@@ -103,7 +111,7 @@ describe("Anthropic bearer-token authentication", () => {
 			expect(mockState.constructorOptions?.apiKey).toBeNull();
 			expect(mockState.constructorOptions?.authToken).toBe("sk-ant-oat-test");
 			const headers = mockState.constructorOptions?.defaultHeaders as Record<string, string>;
-			expect(headers["user-agent"]).toBe("claude-cli/2.1.281 (external, cli)");
+			expect(headers["user-agent"]).toBe(mockIdentity.messagesUserAgent);
 			expect(headers["x-app"]).toBe("cli");
 			expect(headers["anthropic-beta"]).toContain("oauth-2025-04-20");
 			expect(headers["anthropic-beta"]).toContain("claude-code-20250219");

@@ -106,7 +106,8 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 				}
 			: {}),
 		...(reasonCode ? { reasonCode } : {}),
-		...(attempt.status !== "queued" ? { startedAt: attempt.createdAt } : {}),
+		queuedAt: attempt.createdAt,
+		...(attempt.status !== "queued" && attempt.executionStartedAt ? { startedAt: attempt.executionStartedAt } : {}),
 		...(status === "queued" || status === "running"
 			? {}
 			: { completedAt: task.verification?.completedAt ?? attempt.updatedAt }),

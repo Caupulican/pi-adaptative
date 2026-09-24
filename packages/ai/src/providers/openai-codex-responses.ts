@@ -189,6 +189,8 @@ function getRetryAfterDelayMs(headers: Headers): number | undefined {
 
 class RetryDelayExceededError extends Error {}
 
+class CodexFinalHttpError extends Error {}
+
 function validateRetryDelayMs(delayMs: number, options?: StreamOptions): number {
 	const maxRetryDelayMs = options?.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
 	if (maxRetryDelayMs > 0 && delayMs > maxRetryDelayMs) {
@@ -365,6 +367,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			let sseHeaders = buildSSEHeaders(
 				model.headers,
 				options?.headers,
+				options?.credentialHeaders,
 				accountId,
 				apiKey,
 				cacheSessionId,
@@ -373,6 +376,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			const websocketHeaders = buildWebSocketHeaders(
 				model.headers,
 				options?.headers,
+				options?.credentialHeaders,
 				accountId,
 				apiKey,
 				websocketRequestId,
@@ -505,7 +509,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
 			let authRecoveryAttempt = 0;
 
-			for (let attempt = 0; attempt <= maxRetries; attempt++) {
+			for (let attempt = 0; attempt <= maxRetries; ) {
 				if (options?.signal?.aborted) {
 					throw new Error("Request was aborted");
 				}
@@ -537,6 +541,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 							sseHeaders = buildSSEHeaders(
 								model.headers,
 								options?.headers,
+								options?.credentialHeadersFor?.(replacementKey),
 								requireOpenAICodexAccountId(replacementKey),
 								replacementKey,
 								cacheSessionId,
@@ -555,6 +560,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 								: validateRetryDelayMs(retryAfterDelayMs, options);
 
 						await abortableSleep(delayMs, options?.signal);
+						attempt++;
 						continue;
 					}
 
@@ -564,8 +570,9 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						statusText: response.statusText,
 					});
 					const info = await parseErrorResponse(fakeResponse);
-					throw new Error(info.friendlyMessage || info.message);
+					throw new CodexFinalHttpError(info.friendlyMessage || info.message);
 				} catch (error) {
+					if (error instanceof CodexFinalHttpError) throw error;
 					if (error instanceof Error) {
 						if (error.name === "AbortError" || error.message === "Request was aborted") {
 							throw new Error("Request was aborted");
@@ -580,6 +587,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					) {
 						const delayMs = BASE_DELAY_MS * 2 ** attempt;
 						await abortableSleep(delayMs, options?.signal);
+						attempt++;
 						continue;
 					}
 					throw lastError;
@@ -1960,6 +1968,7 @@ async function parseErrorResponse(response: Response): Promise<{ message: string
 function buildBaseCodexHeaders(
 	initHeaders: Record<string, string> | undefined,
 	additionalHeaders: Record<string, string> | undefined,
+	credentialHeaders: Record<string, string> | undefined,
 	accountId: string,
 	token: string,
 ): Headers {
@@ -1969,6 +1978,7 @@ function buildBaseCodexHeaders(
 		accountId,
 		initial: initHeaders,
 		additional: additionalHeaders,
+		credentialHeaders,
 		userAgent,
 	});
 }
@@ -1976,12 +1986,13 @@ function buildBaseCodexHeaders(
 function buildSSEHeaders(
 	initHeaders: Record<string, string> | undefined,
 	additionalHeaders: Record<string, string> | undefined,
+	credentialHeaders: Record<string, string> | undefined,
 	accountId: string,
 	token: string,
 	sessionId?: string,
 	useResponsesLite = false,
 ): Headers {
-	const headers = buildBaseCodexHeaders(initHeaders, additionalHeaders, accountId, token);
+	const headers = buildBaseCodexHeaders(initHeaders, additionalHeaders, credentialHeaders, accountId, token);
 	headers.set("OpenAI-Beta", "responses=experimental");
 	headers.set("accept", "text/event-stream");
 	headers.set("content-type", "application/json");
@@ -2000,11 +2011,12 @@ function buildSSEHeaders(
 function buildWebSocketHeaders(
 	initHeaders: Record<string, string> | undefined,
 	additionalHeaders: Record<string, string> | undefined,
+	credentialHeaders: Record<string, string> | undefined,
 	accountId: string,
 	token: string,
 	requestId: string,
 ): Headers {
-	const headers = buildBaseCodexHeaders(initHeaders, additionalHeaders, accountId, token);
+	const headers = buildBaseCodexHeaders(initHeaders, additionalHeaders, credentialHeaders, accountId, token);
 	headers.delete("accept");
 	headers.delete("content-type");
 	headers.delete("OpenAI-Beta");

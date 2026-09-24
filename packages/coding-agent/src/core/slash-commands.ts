@@ -77,7 +77,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "copy", description: "Copy last agent message to clipboard" },
 	{ name: "name", description: "Set session display name" },
 	{ name: "session", description: "Show session info and stats" },
-	{ name: "usage", description: "Show usage controls and available subscription resets" },
+	{
+		name: "usage",
+		description:
+			"Usage and limits: session, today, machine and each signed-in account (/usage reset redeems an earned reset)",
+	},
 	{ name: "changelog", description: "Show changelog entries" },
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },
 	{ name: "fork", description: "Create a new fork from a previous user message (optional name: /fork <name>)" },
@@ -91,6 +95,14 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "logout", description: "Remove provider authentication" },
 	{ name: "new", description: "Start a new session (optional name: /new <name>)" },
 	{ name: "compact", description: "Manually compact the session context" },
+	{
+		name: "self-compact-info",
+		description: "Show self-compaction usage, lines, phase, cycles, prompts and any saved note (no model turn)",
+	},
+	{
+		name: "self-compact-now",
+		description: "Compact now: reuse a saved self-compaction note, or ask the agent to write one",
+	},
 	{ name: "curate", description: "Review/archive stale or overlapping reflection-promoted skills" },
 	{ name: "resume", description: "Resume a different session" },
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes" },

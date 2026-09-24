@@ -281,6 +281,27 @@ describe("account model availability", () => {
 		await vi.waitFor(() => expect(offers()).toHaveLength(1));
 	});
 
+	it("lists Codex account models with the credential's FedRAMP routing header only when it carries the claim", async () => {
+		const models = [
+			{ provider: "openai-codex", id: "gpt-5.6-sol", baseUrl: "https://chatgpt.com/backend-api" },
+		] as unknown as ReturnType<ConstructorParameters<typeof AccountModelCatalog>[0]["getModels"]>;
+		const sent: Array<string | null> = [];
+		const listing = codexModels([{ slug: "gpt-5.6-sol", priority: 1 }]);
+		const catalogFor = (credentialHeaders?: Record<string, string>) =>
+			new AccountModelCatalog({
+				getModels: () => models,
+				hasConfiguredAuth: () => true,
+				getRequestAuth: async () => ({ apiKey: accessToken(), credentialHeaders }),
+				fetch: async (input, init) => {
+					sent.push(new Headers(init?.headers).get("X-OpenAI-Fedramp"));
+					return listing(input, init);
+				},
+			});
+		await catalogFor({ "X-OpenAI-Fedramp": "true" }).refresh();
+		await catalogFor().refresh();
+		expect(sent).toEqual(["true", null]);
+	});
+
 	it("reports what each account offers, a rejected key, and an unanswered check", async () => {
 		const models = [
 			{ provider: "openai-codex", id: "gpt-5.4", baseUrl: "https://chatgpt.com/backend-api" },
@@ -290,7 +311,9 @@ describe("account model availability", () => {
 		const catalog = new AccountModelCatalog({
 			getModels: () => models,
 			hasConfiguredAuth: () => true,
-			getApiKey: async (model) => (model.provider === "openai-codex" ? accessToken() : "sk-or-test"),
+			getRequestAuth: async (model) => ({
+				apiKey: model.provider === "openai-codex" ? accessToken() : "sk-or-test",
+			}),
 			fetch: async (input) =>
 				String(input).startsWith("https://openrouter.ai")
 					? new Response("{}", { status: 401 })
@@ -307,7 +330,7 @@ describe("account model availability", () => {
 		const offline = new AccountModelCatalog({
 			getModels: () => models,
 			hasConfiguredAuth: () => true,
-			getApiKey: async () => accessToken(),
+			getRequestAuth: async () => ({ apiKey: accessToken() }),
 			fetch: async () => {
 				throw new Error("getaddrinfo ENOTFOUND chatgpt.com");
 			},

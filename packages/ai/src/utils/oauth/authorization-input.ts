@@ -13,6 +13,7 @@ export interface AuthorizationRaceOptions {
 	cancelWait: () => void;
 	expectedState: string;
 	stateMismatchMessage: string;
+	normalizeState?: (state: string) => string;
 }
 
 /** Stop waiting for host input on cancellation without allowing a late result to resume login. */
@@ -85,7 +86,7 @@ export async function raceAuthorizationInput(
 	const callback = await options.waitForCallback();
 	if (manualError) throw manualError;
 	if (callback?.code) {
-		assertExpectedState(callback, options.expectedState, options.stateMismatchMessage);
+		assertExpectedState(callback, options);
 		return { source: "callback", ...callback };
 	}
 
@@ -93,10 +94,12 @@ export async function raceAuthorizationInput(
 	if (manualError) throw manualError;
 	if (!manualInput) return undefined;
 	const parsed = parseAuthorizationInput(manualInput);
-	assertExpectedState(parsed, options.expectedState, options.stateMismatchMessage);
+	assertExpectedState(parsed, options);
 	return parsed.code ? { source: "manual", ...parsed } : undefined;
 }
 
-function assertExpectedState(input: AuthorizationInput, expectedState: string, message: string): void {
-	if (input.state && input.state !== expectedState) throw new Error(message);
+function assertExpectedState(input: AuthorizationInput, options: AuthorizationRaceOptions): void {
+	if (!input.state) return;
+	const state = options.normalizeState ? options.normalizeState(input.state) : input.state;
+	if (state !== options.expectedState) throw new Error(options.stateMismatchMessage);
 }

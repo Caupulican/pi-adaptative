@@ -204,7 +204,11 @@ export const generateImagesOpenAICodex: ImagesFunction<"openai-codex-images", Op
 		if (references.length + text.length !== context.input.length || references.length > MAX_CODEX_EDIT_IMAGES)
 			throw new Error("Invalid image-generation input.");
 		for (const image of references) validateCodexImageContent(image, MAX_CODEX_REFERENCE_IMAGE_BYTES);
-		const headers = buildOpenAICodexHeaders({ token: options.accessToken, userAgent: "pi" });
+		const headers = buildOpenAICodexHeaders({
+			token: options.accessToken,
+			userAgent: "pi",
+			credentialHeaders: options.credentialHeaders,
+		});
 		headers.set("content-type", "application/json");
 		headers.set("accept", "application/json");
 		if (options.turnId) {

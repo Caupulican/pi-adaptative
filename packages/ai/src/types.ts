@@ -188,6 +188,8 @@ export interface StreamOptions {
 	 * `authorization`, `host`) are silently ignored to preserve SigV4 / bearer auth.
 	 */
 	headers?: Record<string, string>;
+	credentialHeaders?: Record<string, string>;
+	credentialHeadersFor?: (apiKey: string) => Record<string, string> | undefined;
 	/**
 	 * HTTP request timeout in milliseconds for providers/SDKs that support it.
 	 * For example, OpenAI and Anthropic SDK clients default to 10 minutes.
@@ -247,6 +249,7 @@ export interface ImagesOptions {
 	 * Merged with provider defaults; can override default headers.
 	 */
 	headers?: Record<string, string>;
+	credentialHeaders?: Record<string, string>;
 	/**
 	 * HTTP request timeout in milliseconds for providers/SDKs that support it.
 	 */

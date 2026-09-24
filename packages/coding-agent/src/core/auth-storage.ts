@@ -16,6 +16,7 @@ import {
 	type OAuthProviderId,
 	type OAuthProviderInterface,
 	OAuthRefreshCompletedError,
+	OAuthRefreshRejectedError,
 	refreshOAuthToken,
 } from "@caupulican/pi-ai/oauth";
 import { chmodSync, existsSync, mkdirSync, readFileSync } from "fs";
@@ -272,6 +273,7 @@ export class AuthStorage {
 	private runtimeOverrides: Map<string, string> = new Map();
 	/** Providers whose stale (unexpired, older-format) credential this process already tried to refresh. */
 	private readonly staleRefreshAttempted = new Set<string>();
+	private readonly refusedRefreshTokens = new Map<string, string>();
 	private fallbackResolver?: (provider: string) => string | undefined;
 	private loadError: Error | null = null;
 	private errors: Error[] = [];
@@ -590,6 +592,11 @@ export class AuthStorage {
 	 * A stale credential stays usable, so its upgrade is tried once per process: a provider whose
 	 * refresh keeps failing is not re-asked on every request.
 	 */
+	private noteRefreshRefusal(providerId: string, credential: OAuthCredentials, error: unknown): void {
+		const rejection = error instanceof Error && !(error instanceof OAuthRefreshRejectedError) ? error.cause : error;
+		if (rejection instanceof OAuthRefreshRejectedError) this.refusedRefreshTokens.set(providerId, credential.refresh);
+	}
+
 	private needsOAuthRefresh(providerId: string, provider: OAuthProviderInterface, cred: OAuthCredentials): boolean {
 		if (Date.now() >= cred.expires) return true;
 		return provider.needsRefresh?.(cred) === true && !this.staleRefreshAttempted.has(providerId);
@@ -611,8 +618,16 @@ export class AuthStorage {
 			if (!this.needsOAuthRefresh(providerId, provider, cred)) {
 				return cred;
 			}
+			if (this.refusedRefreshTokens.get(providerId) === cred.refresh) {
+				return Date.now() < cred.expires ? cred : undefined;
+			}
 			if (Date.now() < cred.expires) this.staleRefreshAttempted.add(providerId);
-			return (await getOAuthApiKey(provider, { [providerId]: cred }))?.newCredentials;
+			try {
+				return (await getOAuthApiKey(provider, { [providerId]: cred }))?.newCredentials;
+			} catch (error) {
+				this.noteRefreshRefusal(providerId, cred, error);
+				throw error;
+			}
 		});
 		return newCredentials ? { apiKey: provider.getApiKey(newCredentials), newCredentials } : null;
 	}
@@ -632,11 +647,13 @@ export class AuthStorage {
 			if (currentKey !== rejectedApiKey && Date.now() < credential.expires) {
 				return credential;
 			}
+			if (this.refusedRefreshTokens.get(providerId) === credential.refresh) return undefined;
 
 			try {
 				return await refreshOAuthToken(provider, credential);
 			} catch (error) {
 				if (error instanceof OAuthRefreshCompletedError) throw error;
+				this.noteRefreshRefusal(providerId, credential, error);
 				this.recordError(error);
 				return undefined;
 			}
@@ -655,6 +672,13 @@ export class AuthStorage {
 	 * returning undefined — an expired credential is a different failure from a missing one, and
 	 * reporting it as "no API key" hid a four-day-stale token behind the wrong instruction.
 	 */
+	getOAuthRequestHeaders(providerId: string, apiKey: string): Record<string, string> | undefined {
+		const credential = this.data[providerId];
+		const provider = getOAuthProvider(providerId);
+		if (this.runtimeOverrides.has(providerId) || credential?.type !== "oauth" || !provider) return undefined;
+		return provider.getApiKey(credential) === apiKey ? provider.getRequestHeaders?.(credential) : undefined;
+	}
+
 	async getOAuthApiKey(providerId: string): Promise<string | undefined> {
 		const cred = this.data[providerId];
 		const provider = getOAuthProvider(providerId);

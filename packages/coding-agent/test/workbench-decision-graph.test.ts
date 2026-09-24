@@ -6,7 +6,12 @@ import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { DecisionStageLogView } from "../src/core/operator-projection/decision-stage-log.ts";
 import { DecisionStageLog } from "../src/core/operator-projection/decision-stage-log.ts";
 import type { OperatorProjection } from "../src/core/operator-projection/types.ts";
-import type { SemanticEvaluationRecord } from "../src/core/system-one/semantic-evaluation-ledger.ts";
+import type { SteeringCertificate } from "../src/core/steering/types.ts";
+import {
+	PROGRAM_SETTLED_REASON,
+	type SemanticEvaluationRecord,
+	verdictFromCertificate,
+} from "../src/core/system-one/semantic-evaluation-ledger.ts";
 import {
 	buildDecisionGraphModel,
 	type DecisionGraphInput,
@@ -593,6 +598,305 @@ describe("Decision graph for a plain request", () => {
 		expect(text).not.toContain("→ evaluated");
 		const firstDrawn = rows.findIndex((row) => row.length > 0);
 		expect(rows[firstDrawn]).not.toBe("↓");
+	});
+});
+
+describe("Decision graph review findings", () => {
+	beforeAll(() => initTheme("dark"));
+
+	const judged = (label: string, startedAt: number, reasons: string[], programId = "system-one:completion") => ({
+		...evaluation(label, "evaluated", startedAt),
+		programId,
+		reasons,
+	});
+	const listText = (input: DecisionGraphInput) =>
+		stripAnsi(renderDecisionList(buildDecisionGraphModel(input), 96).rows.join("\n"));
+	const diagramText = (input: DecisionGraphInput) =>
+		stripAnsi(renderDecisionDiagram(buildDecisionGraphModel(input), 96).rows.join("\n"));
+
+	it("clears an earlier doubt once a later judgment settles the same question", () => {
+		const model = buildDecisionGraphModel({
+			...SCENARIOS.rootOnlyBuild!(),
+			evaluations: [
+				judged("completion", T0 + 5_000, ["unsure: evidence_sufficient: P(yes)=0.55 · unsure (needs yes)"]),
+				judged("completion", T0 + 8_000, ["evidence_sufficient: P(yes)=0.97 · pass (needs yes)"]),
+			],
+		});
+		expect(model.doubts).toEqual([]);
+	});
+
+	it("keeps an earlier doubt when the later judgment answered a different question (control)", () => {
+		const model = buildDecisionGraphModel({
+			...SCENARIOS.rootOnlyBuild!(),
+			evaluations: [
+				judged("completion", T0 + 5_000, ["unsure: evidence_sufficient: P(yes)=0.55 · unsure (needs yes)"]),
+				judged("completion", T0 + 8_000, ["work_remaining: P(yes)=0.03 · pass (needs no)"]),
+			],
+		});
+		expect(model.doubts.map((doubt) => doubt.text)).toEqual([
+			"evidence_sufficient: P(yes)=0.55 · unsure (needs yes)",
+		]);
+	});
+
+	it("keeps an earlier question open after a later pass of the same program that proves nothing about it", () => {
+		const model = buildDecisionGraphModel({
+			...SCENARIOS.rootOnlyBuild!(),
+			evaluations: [
+				judged(
+					"patch review",
+					T0 + 5_000,
+					["unsure: addresses_evidenced_need: P(yes)=0.6 · unsure (needs yes)"],
+					"system-one:patch_review",
+				),
+				{
+					...judged(
+						"patch review",
+						T0 + 8_000,
+						["masks_symptom_only: P(yes)=0.02 · pass (needs no)"],
+						"system-one:patch_review",
+					),
+					verdict: "pass",
+				},
+			],
+		});
+		expect(model.doubts.map((doubt) => doubt.text)).toEqual([
+			"addresses_evidenced_need: P(yes)=0.6 · unsure (needs yes)",
+		]);
+	});
+
+	it("clears every earlier question of a program once a later record proves the whole program settled (control)", () => {
+		const program = "pi:steering:program:JEV-024:1.0";
+		const model = buildDecisionGraphModel({
+			...SCENARIOS.rootOnlyBuild!(),
+			evaluations: [
+				judged("objective route", T0 + 5_000, ["directive: gather_more", "unsure: evidence_sufficient"], program),
+				{ ...judged("objective route", T0 + 8_000, [PROGRAM_SETTLED_REASON], program), verdict: "pass" },
+			],
+		});
+		expect(model.doubts).toEqual([]);
+	});
+
+	function settledBy(record: Pick<SemanticEvaluationRecord, "verdict" | "reasons">) {
+		const program = "pi:steering:program:JEV-024:1.0";
+		return buildDecisionGraphModel({
+			...SCENARIOS.rootOnlyBuild!(),
+			evaluations: [
+				judged("objective route", T0 + 5_000, ["directive: gather_more", "unsure: evidence_sufficient"], program),
+				{ ...judged("objective route", T0 + 8_000, [], program), ...record },
+			],
+		}).doubts.map((doubt) => doubt.text);
+	}
+	const certificate: SteeringCertificate = {
+		schema_version: "1.0",
+		certificate_id: "SCERT-3",
+		objective_id: "obj",
+		checkpoint_id: "JEV-024",
+		state_digest: "d",
+		evidence_revision: 1,
+		policy: { id: "p", version: "1", digest: "x" },
+		question_pack: { id: "pi:steering:pack:objective_route:1.0", version: "1.0", digest: "y" },
+		engine: { provider: "typesafe", model: "jev" },
+		answers: {},
+		directive: "proceed",
+		semantic_outcome: "pass",
+		created_at: "2026-09-20T10:00:00.000Z",
+	};
+
+	it("does not clear a program's doubts on a failed predicate whose text reads like the marker", () => {
+		expect(
+			settledBy(
+				verdictFromCertificate({
+					...certificate,
+					semantic_outcome: "repair",
+					failed_semantic_predicates: [PROGRAM_SETTLED_REASON],
+				}),
+			),
+		).toEqual(["evidence_sufficient"]);
+		expect(
+			settledBy(verdictFromCertificate({ ...certificate, failed_semantic_predicates: [PROGRAM_SETTLED_REASON] })),
+		).toEqual(["evidence_sufficient"]);
+	});
+
+	it("clears a program's doubts on a clean pass certificate's ledger reasons (control)", () => {
+		expect(settledBy(verdictFromCertificate(certificate))).toEqual([]);
+	});
+
+	it("shows a delivered goal as delivered, not held open by a doubt raised before delivery", () => {
+		const input = {
+			...SCENARIOS.delivered!(),
+			evaluations: [
+				judged(
+					"drift check",
+					T0 + 30_000,
+					["unsure: on_track: P(yes)=0.6 · unsure (needs yes)"],
+					"system-one:drift_check",
+				),
+				evaluation("completion", "pass", T0 + 48_000),
+			],
+		};
+		expect(buildDecisionGraphModel(input).doubts).toEqual([]);
+		expect(listText(input)).toContain("yes → delivered");
+		expect(diagramText(input)).toMatch(/delivered/);
+		expect(diagramText(input)).not.toContain("unsure");
+	});
+
+	it("still names a doubt raised after delivery (control)", () => {
+		const input = {
+			...SCENARIOS.delivered!(),
+			evaluations: [
+				evaluation("completion", "pass", T0 + 48_000),
+				judged(
+					"answer claims",
+					T0 + 54_000,
+					["unsure: states_tests_pass: P(yes)=0.6 · unsure (needs yes)"],
+					"system-one:claim_delivery",
+				),
+			],
+		};
+		expect(buildDecisionGraphModel(input).doubts.map((doubt) => doubt.label)).toEqual(["answer claims"]);
+	});
+
+	function plainTurn(done: boolean, running = false): DecisionGraphInput {
+		const log = new DecisionStageLog();
+		const plain = (overrides: Partial<OperatorProjection> = {}) =>
+			projection({
+				has_goal: false,
+				control: { owner: "root", state: "executing", reasonCode: "no_objective" },
+				...overrides,
+			});
+		log.observe(plain({ phase: "understand" }), T0);
+		log.observe(plain(), T0 + 2_000);
+		const end = plain({ phase: "done", control: { owner: "root", state: "deciding", reasonCode: "no_objective" } });
+		if (done) log.observe(end, T0 + 6_000);
+		return {
+			...SCENARIOS.idle!(),
+			projection: done ? end : plain(),
+			stageLog: log.view(T0 + 6_000),
+			flow: [
+				{
+					id: "1",
+					actor: "root",
+					kind: "turn",
+					label: "turn",
+					startedAt: T0,
+					...(running ? {} : { endedAt: T0 + 5_000, outcome: "ok" as const }),
+				},
+			],
+		};
+	}
+
+	it("ends a plain finished turn in the List view the way the Diagram does, never as a satisfied goal", () => {
+		const list = listText(plainTurn(true));
+		expect(list).toContain("turn finished");
+		expect(list).not.toContain("goal satisfied?");
+		expect(list).not.toContain("yes → delivered");
+		expect(listText(plainTurn(false, true))).toContain("turn running");
+		expect(diagramText(plainTurn(true))).toContain("turn finished");
+	});
+
+	it("keeps the goal verdict for a delivered goal in the List view (control)", () => {
+		const list = listText(SCENARIOS.delivered!());
+		expect(list).toContain("goal satisfied?");
+		expect(list).toContain("yes → delivered");
+	});
+
+	it("draws a queued worker as queued, with no execution clock, and a running one as running", () => {
+		const queued = buildDecisionGraphModel(
+			inputAt(18, { lanes: [lane({ status: "queued", startedAt: undefined, waitReason: "capacity" })] }),
+		);
+		const worker = queued.participants.find((participant) => participant.kind === "worker");
+		expect(worker).toMatchObject({ running: false, queued: true });
+		expect(stripAnsi(renderDecisionList(queued, 96).rows.join("\n"))).toMatch(/queued · capacity/);
+		expect(stripAnsi(renderDecisionDiagram(queued, 96).rows.join("\n"))).toMatch(/queued/);
+		const running = buildDecisionGraphModel(inputAt(18, { lanes: [lane()] }));
+		expect(running.participants.find((participant) => participant.kind === "worker")).toMatchObject({
+			running: true,
+			queued: false,
+			startedAt: Date.parse("2026-09-20T10:00:16.000Z"),
+		});
+	});
+
+	it("shows a plan made before any run, with no run yet, instead of no task yet", () => {
+		const input = {
+			...SCENARIOS.idle!(),
+			plan: [
+				{ title: "Write the parser", status: "active" as const },
+				{ title: "Add tests", status: "pending" as const },
+			],
+		};
+		for (const text of [listText(input), diagramText(input)]) {
+			expect(text).not.toMatch(/no task yet/i);
+			expect(text).toContain("Write the parser");
+			expect(text).toContain("no run yet");
+		}
+	});
+
+	it("says no task yet when there is neither a plan nor a run (control)", () => {
+		expect(listText(SCENARIOS.idle!())).toMatch(/No task yet/);
+		expect(diagramText(SCENARIOS.idle!())).toContain("no task yet");
+	});
+
+	function planning(health: DecisionGraphInput["health"], owner: OperatorProjection["control"]["owner"]) {
+		const control = { owner, state: "deciding" as const, reasonCode: "goal_active" };
+		const log = new DecisionStageLog();
+		log.observe(projection({ phase: "plan", control }), T0);
+		return inputAt(4, { projection: projection({ phase: "plan", control }), stageLog: log.view(T0 + 4_000), health });
+	}
+
+	it("credits the root, not an unbound System One, with the stage work while the root owns control", () => {
+		const input = planning({ state: "unbound" }, "root");
+		const model = buildDecisionGraphModel(input);
+		expect(model.decider.doing).toBe("off");
+		const list = listText(input).split("\n");
+		expect(list.find((row) => row.startsWith("SYSTEM ONE"))).not.toMatch(/planning/);
+		expect(list.find((row) => row.startsWith("ROOT"))).toMatch(/planning/);
+		const diagram = diagramText(input);
+		expect(diagram).not.toMatch(/│\s*planning\s*│/);
+		expect(diagram).toMatch(/│\s*off · root decides\s*│/);
+	});
+
+	it("credits the root, not a bound System One, with the stage work while the root owns control", () => {
+		const input = planning({ state: "ok" }, "root");
+		expect(buildDecisionGraphModel(input).decider.doing).not.toBe("planning");
+		const list = listText(input).split("\n");
+		expect(list.find((row) => row.startsWith("SYSTEM ONE"))).not.toMatch(/planning/);
+		expect(list.find((row) => row.startsWith("ROOT"))).toMatch(/planning/);
+		const diagram = diagramText(input);
+		expect(diagram).not.toMatch(/│\s*planning\s*│/);
+		expect(diagram).toMatch(/root decides/);
+	});
+
+	it("keeps a real in-flight judgment credited to System One while the root owns control (control)", () => {
+		const input = planning(
+			{
+				state: "evaluating",
+				inFlight: 1,
+				inFlightEvaluations: [
+					{
+						evaluationId: "e1",
+						programId: "system-one:claim_delivery",
+						label: "answer claims",
+						startedAt: T0 + 3_000,
+					},
+				],
+			},
+			"root",
+		);
+		expect(buildDecisionGraphModel(input).decider.doing).toBe("judging answer claims");
+		const list = listText(input).split("\n");
+		expect(list.find((row) => row.startsWith("SYSTEM ONE"))).toMatch(/◆ evaluating/);
+		expect(list).toContain("  ◆ answer claims");
+		expect(list.find((row) => row.startsWith("ROOT"))).toMatch(/planning/);
+		expect(diagramText(input)).toMatch(/│\s*◆ answer claims\s+1\.0s\s*│/);
+	});
+
+	it("credits a bound System One that owns control with the stage work (control)", () => {
+		const input = planning({ state: "ok" }, "system_one");
+		expect(buildDecisionGraphModel(input).decider.doing).toBe("planning");
+		const list = listText(input).split("\n");
+		expect(list.find((row) => row.startsWith("SYSTEM ONE"))).toMatch(/planning/);
+		expect(list.some((row) => row.startsWith("ROOT"))).toBe(false);
+		expect(diagramText(input)).toMatch(/│\s*planning\s*│/);
 	});
 });
 

@@ -3,6 +3,7 @@
  * every launch path reads and which must not load tool modules to answer who this process is.
  */
 
+import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
 import { ROOT_MEMORY_TOOL_NAME } from "./memory/worker-memory-tools.ts";
 import { DECISION_LEDGER_READ_TOOL_NAME } from "./tools/decision-ledger-read.ts";
 
@@ -28,4 +29,5 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	"task_automation",
 	// The decision ledger is the root's and System One's review surface; workers never read it.
 	DECISION_LEDGER_READ_TOOL_NAME,
+	SELF_COMPACT_TOOL_NAME,
 ]);

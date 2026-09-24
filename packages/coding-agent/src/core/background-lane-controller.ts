@@ -106,7 +106,10 @@ export interface BackgroundLaneControllerDeps
 
 export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Live lane registry — the real source for AutonomyStatusSnapshot.activeLaneCount. */
-	private readonly _laneTracker = new LaneTracker();
+	private readonly _laneTracker = new LaneTracker({ onChange: () => this._laneRecordsChanged() });
+	private readonly _laneRecordListeners = new Set<(records: readonly LaneRecord[]) => void>();
+	private _laneRecordsNotifyQueued = false;
+	private _unsubscribeLaneRecordStore: (() => void) | undefined;
 	private readonly _laneModels: LaneModelResolver;
 	private readonly _goalAutoContinue: GoalAutoContinueController;
 	private readonly _research: ResearchLaneController;
@@ -190,6 +193,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			store,
 		});
 		this._workerLifecycle = lifecycle;
+		this._unsubscribeLaneRecordStore = store.subscribe(() => this._laneRecordsChanged());
 		this._workerUsage = new WorkerUsageReceiptDelivery({
 			parentSessionId,
 			runtime: lifecycle.ledger.runtime,
@@ -330,6 +334,36 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		if (leafId !== undefined) this._managedLaneAbsenceLeafId = leafId;
 	}
 
+	subscribeLaneRecords(listener: (records: readonly LaneRecord[]) => void): () => void {
+		this._laneRecordListeners.add(listener);
+		return () => {
+			this._laneRecordListeners.delete(listener);
+		};
+	}
+
+	private _laneRecordsChanged(): void {
+		if (this._laneRecordListeners.size === 0 || this._laneRecordsNotifyQueued) return;
+		this._laneRecordsNotifyQueued = true;
+		queueMicrotask(() => {
+			this._laneRecordsNotifyQueued = false;
+			if (this._laneRecordListeners.size === 0) return;
+			let records: LaneRecord[];
+			try {
+				records = this.getLaneRecords();
+			} catch (error) {
+				this._safeWarn(`Lane records could not be read: ${error instanceof Error ? error.message : String(error)}`);
+				return;
+			}
+			for (const listener of [...this._laneRecordListeners]) {
+				try {
+					listener(records);
+				} catch {
+					this._safeWarn("Lane record observer failed.");
+				}
+			}
+		});
+	}
+
 	/** Live lane records tracked by this process (running and terminal). */
 	getLaneRecords(): LaneRecord[] {
 		this._hydrateManagedLanes();
@@ -423,6 +457,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._workers?.abort();
 		this._workerUsage?.dispose();
 		this._workerNotifications?.dispose();
+		this._unsubscribeLaneRecordStore?.();
+		this._unsubscribeLaneRecordStore = undefined;
 	}
 
 	clearGoalAutoContinueTimer(): void {

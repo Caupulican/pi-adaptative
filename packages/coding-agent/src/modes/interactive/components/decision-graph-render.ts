@@ -67,6 +67,40 @@ function participantText(participant: DecisionParticipant): string {
 	return participant.model ? `${head} · ${participant.model}` : head;
 }
 
+function queuedText(participant: DecisionParticipant): string {
+	return `queued${participant.waitReason ? ` · ${participant.waitReason}` : ""}`;
+}
+
+function plainTurnStatus(model: DecisionGraphModel): [string, ThemeColor] {
+	const unsure = model.doubts.length ? ` · ${model.doubts.length} unsure` : "";
+	if (model.turnRunning) return [`turn running${unsure}`, "accent"];
+	if (model.lastTurnOutcome === "failed") return [`turn failed${unsure}`, "error"];
+	if (model.lastTurnOutcome === "cancelled") return [`turn cancelled${unsure}`, "dim"];
+	return [`turn finished${unsure}`, model.doubts.length ? SYSTEM_ONE_TONE : "success"];
+}
+
+function planProgress(model: DecisionGraphModel): string {
+	const done = model.plan.filter((step) => step.status === "done").length;
+	const total = model.plan.filter((step) => step.status !== "cancelled").length;
+	return `${done}/${total}`;
+}
+
+function planItems(model: DecisionGraphModel) {
+	return model.plan.map((step) => {
+		const [glyph, glyphTone] = PLAN_GLYPH[step.status] ?? PLAN_GLYPH.pending!;
+		return {
+			text: step.title,
+			glyph,
+			glyphTone,
+			tone: (step.status === "active" ? undefined : step.status === "done" ? "muted" : "dim") as
+				| ThemeColor
+				| undefined,
+		};
+	});
+}
+
+const NO_RUN_YET = "no run yet · the graph composes when work starts";
+
 /* ============================================================ List view */
 export function renderDecisionList(
 	model: DecisionGraphModel,
@@ -101,7 +135,13 @@ export function renderDecisionList(
 	const now = model.nowMs;
 
 	if (model.stageLogEmpty) {
-		push(theme.fg("dim", "No task yet · the graph composes when work starts"));
+		if (!model.plan.length) {
+			push(theme.fg("dim", "No task yet · the graph composes when work starts"));
+			return { rows, stageAt, currentRow, focusKey: graphFocusKey(model) };
+		}
+		head("PLAN", theme.fg("muted", planProgress(model)));
+		for (const step of planItems(model)) item(step.glyph, step.glyphTone, step.text, step.tone);
+		push(theme.fg("dim", NO_RUN_YET));
 		return { rows, stageAt, currentRow, focusKey: graphFocusKey(model) };
 	}
 
@@ -134,6 +174,7 @@ export function renderDecisionList(
 				`  last verdict: ${model.decider.last.label} → ${model.decider.last.verdict ?? model.decider.last.outcome}`,
 			),
 		);
+	if (model.decider.rootOwned) head("ROOT", theme.fg("dim", model.decider.rootDoing ?? ""));
 	for (const stage of model.stages) {
 		const shown = formatGraphDuration(stage.current ? stage.passMs : stage.totalMs);
 		const right = [
@@ -182,19 +223,21 @@ export function renderDecisionList(
 	for (const participant of model.participants.filter((p) => p.kind !== "capability")) {
 		const right = participant.running
 			? `${theme.fg("muted", participant.task ?? "")}${participant.startedAt !== undefined ? theme.fg("muted", ` ${formatGraphDuration(now - participant.startedAt)}`) : ""}`
-			: theme.fg(
-					"dim",
-					participant.kind === "root"
-						? model.you.waiting
-							? "waiting for you"
-							: evaluating
-								? "waiting for System One"
-								: (model.idleText ?? "")
-						: (participant.task ?? ""),
-				);
+			: participant.queued
+				? theme.fg("warning", queuedText(participant))
+				: theme.fg(
+						"dim",
+						participant.kind === "root"
+							? model.you.waiting
+								? "waiting for you"
+								: evaluating
+									? "waiting for System One"
+									: (model.idleText ?? "")
+							: (participant.task ?? ""),
+					);
 		item(
-			participant.running ? "●" : "○",
-			participant.running ? "success" : "dim",
+			participant.running ? "●" : participant.queued ? "◌" : "○",
+			participant.running ? "success" : participant.queued ? "warning" : "dim",
 			participantText(participant),
 			participant.running ? (participant.kind === "root" ? undefined : SYSTEM_ONE_TONE) : "muted",
 			right,
@@ -227,6 +270,12 @@ export function renderDecisionList(
 		for (const doubt of model.doubts.slice(0, MAX_DOUBTS)) {
 			item("?", SYSTEM_ONE_TONE, doubt.text, "muted", theme.fg("dim", `  ${doubt.label}`));
 		}
+	}
+	if (!model.goal.present) {
+		arrow();
+		const [status, tone] = plainTurnStatus(model);
+		head(status, "", tone);
+		return { rows, stageAt, currentRow, focusKey: graphFocusKey(model) };
 	}
 	arrow("back to System One");
 	const openChecks = model.checks.filter((check) => check.status !== "satisfied").length;
@@ -352,7 +401,13 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 	const currentStage = cur?.stage;
 	const evaluating = model.decider.evaluating;
 	const levels: DiagramLevel[] = [];
-	if (model.stageLogEmpty) return [{ kind: "level", nodes: [{ text: "no task yet", tone: "dim" }] }];
+	if (model.stageLogEmpty)
+		return model.plan.length
+			? [
+					{ kind: "tree", title: `plan ${planProgress(model)}`, items: planItems(model) },
+					{ kind: "level", nodes: [{ text: NO_RUN_YET, tone: "dim" }] },
+				]
+			: [{ kind: "level", nodes: [{ text: "no task yet", tone: "dim" }] }];
 
 	if (model.you.present) {
 		const isCur = currentStage === "clarify";
@@ -369,19 +424,22 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 		});
 	}
 	const s1Stages: readonly (DecisionStage | undefined)[] = ["understand", "plan", "observe"];
-	const s1cur = s1Stages.includes(currentStage) && !evaluating;
+	const rootOwned = model.decider.rootOwned;
+	const s1cur = !rootOwned && s1Stages.includes(currentStage) && !evaluating;
 	levels.push({
 		kind: "box",
 		node: {
 			text: "SYSTEM ONE",
-			tone: s1cur ? "accent" : undefined,
+			tone: s1cur ? "accent" : rootOwned ? "dim" : undefined,
 			bold: s1cur,
-			stage: currentStage && s1Stages.includes(currentStage) ? currentStage : undefined,
+			stage: !rootOwned && currentStage && s1Stages.includes(currentStage) ? currentStage : undefined,
 		},
 		sub: evaluating
 			? `◆ ${evaluating.label}  ${formatGraphDuration(now - evaluating.startedAt)}`
-			: model.decider.doing,
-		subTone: evaluating ? SYSTEM_ONE_TONE : "muted",
+			: rootOwned
+				? `${model.decider.doing} · root decides`
+				: model.decider.doing,
+		subTone: evaluating ? SYSTEM_ONE_TONE : rootOwned ? "dim" : "muted",
 		boxTone: s1cur || evaluating ? SYSTEM_ONE_TONE : "muted",
 	});
 	if (model.stages.length) {
@@ -399,23 +457,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 			})),
 		});
 	}
-	if (model.plan.length) {
-		const done = model.plan.filter((step) => step.status === "done").length;
-		const total = model.plan.filter((step) => step.status !== "cancelled").length;
-		levels.push({
-			kind: "tree",
-			title: `plan ${done}/${total}`,
-			items: model.plan.map((step) => {
-				const [glyph, glyphTone] = PLAN_GLYPH[step.status] ?? PLAN_GLYPH.pending!;
-				return {
-					text: step.title,
-					glyph,
-					glyphTone,
-					tone: step.status === "active" ? undefined : step.status === "done" ? "muted" : "dim",
-				};
-			}),
-		});
-	}
+	if (model.plan.length) levels.push({ kind: "tree", title: `plan ${planProgress(model)}`, items: planItems(model) });
 	const executors: DiagramNode[] = model.participants.map((participant) => {
 		return {
 			text: participantText(participant),
@@ -428,16 +470,18 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 					: "dim",
 			bold: participant.running,
 			stage: participant.kind === "root" ? "build" : participant.kind === "capability" ? undefined : "dispatch",
-			...(participant.routeText
-				? { sub: participant.routeText, subTone: SYSTEM_ONE_TONE as ThemeColor }
-				: participant.running && participant.task
-					? {
-							sub: `${participant.task}${participant.startedAt !== undefined ? ` ${formatGraphDuration(now - participant.startedAt)}` : ""}`,
-							subTone: "muted" as ThemeColor,
-						}
-					: participant.kind === "root" && !participant.running && model.idleText
-						? { sub: model.idleText, subTone: "dim" as ThemeColor }
-						: {}),
+			...(participant.queued
+				? { sub: queuedText(participant), subTone: "warning" as ThemeColor }
+				: participant.routeText
+					? { sub: participant.routeText, subTone: SYSTEM_ONE_TONE as ThemeColor }
+					: participant.running && participant.task
+						? {
+								sub: `${participant.task}${participant.startedAt !== undefined ? ` ${formatGraphDuration(now - participant.startedAt)}` : ""}`,
+								subTone: "muted" as ThemeColor,
+							}
+						: participant.kind === "root" && !participant.running && model.idleText
+							? { sub: model.idleText, subTone: "dim" as ThemeColor }
+							: {}),
 		};
 	});
 	levels.push({ kind: "level", nodes: executors });
@@ -495,23 +539,8 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 		levels.push({ kind: "level", nodes: [{ text: `BLOCKED · ${model.blocked}`, tone: "warning", bold: true }] });
 	// A request without an objective has no goal to satisfy: it ends when its turn does.
 	if (!model.goal.present) {
-		const unsure = model.doubts.length ? ` · ${model.doubts.length} unsure` : "";
-		levels.push({
-			kind: "level",
-			nodes: [
-				// The trace says whether a turn is executing; a plain turn has no done phase to wait for.
-				model.turnRunning
-					? { text: `turn running${unsure}`, tone: "accent" }
-					: model.lastTurnOutcome === "failed"
-						? { text: `turn failed${unsure}`, tone: "error" }
-						: model.lastTurnOutcome === "cancelled"
-							? { text: `turn cancelled${unsure}`, tone: "dim" }
-							: {
-									text: `turn finished${unsure}`,
-									tone: model.doubts.length ? SYSTEM_ONE_TONE : "success",
-								},
-			],
-		});
+		const [text, tone] = plainTurnStatus(model);
+		levels.push({ kind: "level", nodes: [{ text, tone }] });
 		return levels;
 	}
 	const repairTaken = model.stages.some((row) => row.stage === "repair");

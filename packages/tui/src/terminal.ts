@@ -109,6 +109,57 @@ export interface Terminal {
 
 	// Progress indicator (OSC 9;4)
 	setProgress(active: boolean): void;
+
+	readonly inputOnly?: boolean;
+}
+
+export class InputOnlyTerminal implements Terminal {
+	readonly inputOnly = true;
+	readonly columns = 80;
+	readonly rows = 24;
+	readonly kittyProtocolActive = false;
+	private readonly input: NodeJS.ReadStream;
+	private wasRaw = false;
+	private stdinBuffer?: StdinBuffer;
+	private dataHandler?: (data: string) => void;
+
+	constructor(input: NodeJS.ReadStream = process.stdin) {
+		this.input = input;
+	}
+
+	start(onInput: (data: string) => void, _onResize: () => void): void {
+		this.wasRaw = this.input.isRaw || false;
+		if (this.input.isTTY && this.input.setRawMode) this.input.setRawMode(true);
+		this.input.setEncoding("utf8");
+		this.input.resume();
+		this.stdinBuffer = new StdinBuffer({ timeout: 10, detectUnframedPaste: process.platform === "win32" });
+		this.stdinBuffer.on("data", (sequence) => onInput(sequence));
+		this.stdinBuffer.on("paste", (content) => onInput(wrapBracketedPaste(content)));
+		this.dataHandler = (data: string) => this.stdinBuffer?.process(data);
+		this.input.on("data", this.dataHandler);
+	}
+
+	stop(): void {
+		this.stdinBuffer?.destroy();
+		this.stdinBuffer = undefined;
+		if (this.dataHandler) {
+			this.input.removeListener("data", this.dataHandler);
+			this.dataHandler = undefined;
+		}
+		this.input.pause();
+		if (this.input.isTTY && this.input.setRawMode) this.input.setRawMode(this.wasRaw);
+	}
+
+	async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
+	write(_data: string): void {}
+	moveBy(_lines: number): void {}
+	hideCursor(): void {}
+	showCursor(): void {}
+	clearLine(): void {}
+	clearFromCursor(): void {}
+	clearScreen(): void {}
+	setTitle(_title: string): void {}
+	setProgress(_active: boolean): void {}
 }
 
 /**

@@ -10,6 +10,7 @@
  */
 
 import type { Agent, BeforeToolCallResult } from "@caupulican/pi-agent-core";
+import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
 import { classifyAllEdgeOperations, type EdgeClass } from "./autonomy/edge-policy.ts";
 import { evaluateToolGateAsync } from "./autonomy/gates.ts";
@@ -44,6 +45,7 @@ type BeforeToolCall = NonNullable<Agent["beforeToolCall"]>;
 type AfterToolCall = NonNullable<Agent["afterToolCall"]>;
 
 export interface ToolGateControllerDeps {
+	gateSelfCompaction?(toolName: string, assistantMessage: AssistantMessage): BeforeToolCallResult | undefined;
 	/** Router escalation: block a tool the active cheap route is not allowed to run. */
 	maybeEscalateToolCall(toolName: string, args: unknown): { block: true; reason: string } | undefined;
 	getCwd(): string;
@@ -200,6 +202,8 @@ export class ToolGateController {
 		signal,
 	) => {
 		signal?.throwIfAborted();
+		const selfCompactionBlock = this.deps.gateSelfCompaction?.(toolCall.name, assistantMessage);
+		if (selfCompactionBlock) return selfCompactionBlock;
 		// Session model selection may change during a provider response or any awaited hook.
 		const modelRef = `${assistantMessage.provider}/${assistantMessage.model}`;
 		const escalation = this.deps.maybeEscalateToolCall(toolCall.name, args);

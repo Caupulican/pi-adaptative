@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- `InputOnlyTerminal`: reads keystrokes and pastes into the focused component but draws nothing. A TUI on it never renders or writes.
+
 ## [0.99.46] - 2026-09-24
 
 ## [0.99.45] - 2026-09-23

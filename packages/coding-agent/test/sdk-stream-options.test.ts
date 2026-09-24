@@ -296,6 +296,50 @@ describe("createAgentSession stream options", () => {
 		expect(options?.onAuthRejection).toBeTypeOf("function");
 	});
 
+	it("derives Codex credential headers from the stored credential, never from the caller", async () => {
+		const model = createModel("openai-codex-responses", "openai-codex");
+		const credential = {
+			type: "oauth" as const,
+			access: "stored-access",
+			refresh: "refresh",
+			expires: Date.now() + 3_600_000,
+			accountId: "acct",
+		};
+		const authStorage = AuthStorage.inMemory({ "openai-codex": { ...credential, chatgptAccountIsFedramp: true } });
+		const modelRegistry = ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+		const captured: SimpleStreamOptions[] = [];
+		modelRegistry.registerProvider(model.provider, {
+			api: model.api,
+			streamSimple: (_model, _context, providerOptions) => {
+				if (providerOptions) captured.push(providerOptions);
+				return createDoneStream(model.api);
+			},
+		});
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			model,
+			authStorage,
+			modelRegistry,
+			settingsManager: SettingsManager.inMemory({}),
+			sessionManager: SessionManager.inMemory(cwd),
+		});
+		const forged = { credentialHeaders: { "X-OpenAI-Fedramp": "true" }, headers: { "X-OpenAI-Fedramp": "true" } };
+		try {
+			await session.agent.streamFn(model, { messages: [] }, forged);
+			authStorage.set("openai-codex", credential);
+			await session.agent.streamFn(model, { messages: [] }, forged);
+		} finally {
+			await session.disposeAndWait();
+			modelRegistry.unregisterProvider(model.provider);
+		}
+		expect(captured[0]?.credentialHeaders).toEqual({ "X-OpenAI-Fedramp": "true" });
+		expect(captured[1]?.credentialHeaders).toBeUndefined();
+		authStorage.set("openai-codex", { ...credential, chatgptAccountIsFedramp: true });
+		expect(captured[0]?.credentialHeadersFor?.("stored-access")).toEqual({ "X-OpenAI-Fedramp": "true" });
+		expect(captured[0]?.credentialHeadersFor?.("some-other-access")).toBeUndefined();
+	});
+
 	it("wires OAuth rejection recovery for xai provider", async () => {
 		const options = await captureStreamOptions("openai-responses", {}, {}, "xai");
 

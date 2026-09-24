@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { HOST_TRANSIENT_CLEARED_DETAILS } from "@caupulican/pi-agent-core";
 import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
 import type { AgentContextPlan, AgentMessage } from "@caupulican/pi-agent-core/types";
 import {
@@ -8,6 +9,7 @@ import {
 	type TaskAutomationContextPlan,
 } from "./automation/task-automation-runtime-adapter.ts";
 import type { EdgeGrantView } from "./autonomy/edge-policy.ts";
+import { SELF_COMPACTION_GUIDANCE_CUSTOM_TYPE } from "./compaction/self-compaction.ts";
 import type { ContextAuditReport } from "./context/context-audit.ts";
 import type { PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
 import type { PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
@@ -58,6 +60,7 @@ export interface ProviderRequestContextControllerDeps {
 	previewReflectionCue?(): CurrentTurnReflectionCuePlan | undefined;
 	previewTaskDirectoryContext?(): TaskDirectoryContextPlan;
 	previewTaskAutomationContext?(): TaskAutomationContextPlan;
+	previewSelfCompactionGuidance?(): { readonly content: string | undefined; readonly cleared: string };
 	getGoalState?(): GoalState | undefined;
 	skillVault?: Pick<
 		SkillVaultController,
@@ -271,9 +274,28 @@ export class ProviderRequestContextController {
 		const automationContent =
 			rawAutomationContent ??
 			(hasPriorAutomationContext && automationPlan?.isCurrent() ? TASK_AUTOMATION_CONTEXT_CLEARED : undefined);
+		const selfCompaction = this.deps.previewSelfCompactionGuidance?.();
+		const isGuidanceRecord = (message: AgentMessage) =>
+			message.role === "custom" && message.customType === SELF_COMPACTION_GUIDANCE_CUSTOM_TYPE;
+		const selfCompactionText =
+			selfCompaction?.content ??
+			(selfCompaction && (messages.some(isGuidanceRecord) || extensionPlan.messages.some(isGuidanceRecord))
+				? selfCompaction.cleared
+				: undefined);
 		const providerTransients = [
 			...extensionPlan.transientMessages,
 			...(reflectionCuePlan ? [reflectionCuePlan.message] : []),
+			...(selfCompaction && selfCompactionText
+				? [
+						createCustomMessage(
+							SELF_COMPACTION_GUIDANCE_CUSTOM_TYPE,
+							selfCompactionText,
+							false,
+							selfCompaction.content === undefined ? HOST_TRANSIENT_CLEARED_DETAILS : undefined,
+							deterministicTransientTimestamp(selfCompactionText),
+						),
+					]
+				: []),
 			...(directoryContent
 				? [
 						createCustomMessage(

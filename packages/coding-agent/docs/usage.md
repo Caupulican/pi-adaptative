@@ -13,6 +13,33 @@ The interface has four main areas:
 - **Editor** - where you type; border color indicates the current thinking level
 - **Footer** - working directory, session name, token/cache usage, cost, context usage, and current model
 
+## `/usage`: usage and limits
+
+`/usage` opens one overview at once:
+
+- **Session**: cost, tokens and context.
+- **Today**: cost for the host's local day.
+- **Machine**: provider requests in flight across every pi process, work on other accounts, and the emergency stop.
+- **Accounts**: every provider this session holds credentials for (`/login`, environment keys, `models.json` keys or auth headers), with its in-flight requests, any recorded limit, its usage windows with reset times, and its credit balance when the provider reports one.
+
+Local runtimes that need no credential are not listed, and neither are other accounts' records.
+
+Account usage is read only when you open `/usage` or choose **Refresh**, never in the background:
+- Requests to different providers run in parallel.
+- Each account waits at least 30 seconds between requests, and longer when the provider asks for that with `Retry-After`.
+- A refresh sooner than that shows the cached data and when the next request is allowed.
+
+Every value says when it was fetched or seen in responses. Data older than 15 minutes is labelled stale. A failed request shows only its kind (HTTP status, timeout, network error, unreadable response, missing credentials), never the provider's response.
+
+| Provider | Account data |
+|---|---|
+| OpenAI Codex (ChatGPT login) | Usage windows, monthly credit limit, credit balance, earned resets (`/wham/usage`) |
+| Anthropic (Claude login) | Usage windows, extra-usage amounts when enabled (`/api/oauth/usage`) |
+| OpenRouter (API key) | Remaining credit, key limit and key spend (`/credits`, `/key`) |
+| Others | Admission state and windows seen in responses only |
+
+`/usage reset` redeems an earned OpenAI Codex reset. It always asks for confirmation first, and the overview offers the same action. `/cost` keeps the detailed cost and optimization report, and `/load` keeps the machine diagnostic.
+
 Footer cost labels match the `/usage`, `/session`, and autonomy status cost line:
 
 - **CURRENT** is the current session file's total recorded cost, including assistant usage and any **SUBAGENTS** cost.

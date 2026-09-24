@@ -10,6 +10,7 @@ import type { CompactionResult } from "@caupulican/pi-agent-core/node";
 import type { ImageContent, Model } from "@caupulican/pi-ai";
 import type { SessionStats, ToolProbeReport } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
+import type { SelfCompactionInfo, SelfCompactionNowOutcome } from "../../core/compaction/self-compaction-controller.ts";
 import type { HumanInputAnswer, HumanInputPresentationRequest } from "../../core/human-input.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 
@@ -46,6 +47,8 @@ export type RpcCommand =
 	// Compaction
 	| { id?: string; type: "compact"; customInstructions?: string }
 	| { id?: string; type: "set_auto_compaction"; enabled: boolean }
+	| { id?: string; type: "get_self_compaction" }
+	| { id?: string; type: "self_compact_now" }
 
 	// Retry
 	| { id?: string; type: "set_auto_retry"; enabled: boolean }
@@ -185,6 +188,8 @@ export function decodeRpcCommand(value: unknown): RpcCommand | undefined {
 		case "get_last_assistant_text":
 		case "get_messages":
 		case "get_commands":
+		case "get_self_compaction":
+		case "self_compact_now":
 			break;
 		default:
 			return undefined;
@@ -297,6 +302,8 @@ export type RpcResponse =
 	// Compaction
 	| { id?: string; type: "response"; command: "compact"; success: true; data: CompactionResult }
 	| { id?: string; type: "response"; command: "set_auto_compaction"; success: true }
+	| { id?: string; type: "response"; command: "get_self_compaction"; success: true; data: SelfCompactionInfo }
+	| { id?: string; type: "response"; command: "self_compact_now"; success: true; data: SelfCompactionNowOutcome }
 
 	// Retry
 	| { id?: string; type: "response"; command: "set_auto_retry"; success: true }

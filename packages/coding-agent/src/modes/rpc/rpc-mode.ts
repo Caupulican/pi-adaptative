@@ -350,6 +350,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	runtimeHost.setRebindSession(async () => {
 		await rebindSession();
 		await session.resumePendingHumanInput();
+		session.resumeSelfCompaction();
 	});
 
 	const rebindSession = async (): Promise<void> => {
@@ -569,6 +570,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "set_auto_compaction": {
 				session.setAutoCompactionEnabled(command.enabled);
 				return success(id, "set_auto_compaction");
+			}
+
+			case "get_self_compaction": {
+				return success(id, "get_self_compaction", session.getSelfCompactionInfo());
+			}
+
+			case "self_compact_now": {
+				return success(id, "self_compact_now", await session.selfCompactNow());
 			}
 
 			// =================================================================
@@ -866,6 +875,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			process.stdin.off("end", onInputEnd);
 		};
 	})();
+	session.resumeSelfCompaction();
 	void session.resumePendingHumanInput().catch((resumeError: unknown) => {
 		output({
 			type: "human_input_resume_error",

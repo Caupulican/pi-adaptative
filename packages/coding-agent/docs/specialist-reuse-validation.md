@@ -91,10 +91,9 @@ alignment, not a new production correction or a relaxation of the ownership regr
 The candidate that implicit resource selection alone breaks an unchanged named-task replay was not
 reproduced. Its negative control passes; no speculative correction was made for it.
 
-The Claude Code binary-analysis evidence supports stable conversation identity, single execution per
-specialist, event-driven idle state, and cleanup before releasing concurrency. It does not establish
-automatic cross-parent ownership transfer. The implementation keeps Pi's own authority and lifecycle
-owners; extracted binary code was not executed or copied into the runtime.
+Observed Claude Code behavior supports stable conversation identity, single execution per specialist,
+event-driven idle state, and cleanup before releasing concurrency. It does not establish automatic
+cross-parent ownership transfer. The implementation keeps Pi's own authority and lifecycle owners.
 
 ## Remaining boundaries
 

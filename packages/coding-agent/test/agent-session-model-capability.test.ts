@@ -64,6 +64,7 @@ describe("model capability auto-detection", () => {
 				"run_toolkit_script",
 				"improvement_loop",
 				"runtime_update",
+				"self_compact",
 				"artifact_retrieve",
 			]);
 		} finally {

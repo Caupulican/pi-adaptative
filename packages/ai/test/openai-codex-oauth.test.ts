@@ -19,6 +19,10 @@ function getUrl(input: unknown): string {
 	throw new Error(`Unsupported fetch input: ${String(input)}`);
 }
 
+function createIdToken(): string {
+	return `header.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": {} })).toString("base64url")}.signature`;
+}
+
 function createAccessToken(accountId: string, exp?: number): string {
 	const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64");
 	const payload = Buffer.from(
@@ -117,6 +121,7 @@ describe("OpenAI Codex OAuth", () => {
 				return jsonResponse({
 					access_token: accessToken,
 					refresh_token: "refresh-token",
+					id_token: createIdToken(),
 					expires_in: 3600,
 				});
 			}
@@ -192,6 +197,7 @@ describe("OpenAI Codex OAuth", () => {
 					return jsonResponse({
 						access_token: accessToken,
 						refresh_token: "refresh-token",
+						id_token: createIdToken(),
 						expires_in: 3600,
 					});
 				}
@@ -374,6 +380,7 @@ describe("OpenAI Codex OAuth", () => {
 					return jsonResponse({
 						access_token: accessToken,
 						refresh_token: "refresh-token",
+						id_token: createIdToken(),
 						expires_in: 3600,
 					});
 				}
@@ -399,32 +406,45 @@ describe("OpenAI Codex OAuth", () => {
 		expect(pollTimes).toHaveLength(3);
 	});
 
-	it("includes the response body in OpenAI Codex device auth poll failures", async () => {
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async (input: unknown): Promise<Response> => {
-				const url = getUrl(input);
-				if (url === "https://auth.openai.com/api/accounts/deviceauth/usercode") {
-					return jsonResponse({
-						device_auth_id: "device-auth-id",
-						user_code: "ABCD-1234",
-						interval: "5",
-					});
-				}
-				if (url === "https://auth.openai.com/api/accounts/deviceauth/token") {
-					return jsonResponse({ error: "server_error", error_description: "try again later" }, 500);
-				}
-				throw new Error(`Unexpected fetch URL: ${url}`);
-			}),
-		);
-
-		await expect(
-			loginOpenAICodexDeviceCode({
-				onDeviceCode: () => {},
-			}),
-		).rejects.toThrow(
-			'OpenAI Codex device auth failed with status 500: {"error":"server_error","error_description":"try again later"}',
-		);
+	it("keeps OpenAI Codex device auth failures structural, without response bodies or secrets", async () => {
+		const secret = "zq9-device-secret-7f3a";
+		const run = async (usercode: () => Response, token: () => Response) => {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: unknown): Promise<Response> => {
+					const url = getUrl(input);
+					if (url === "https://auth.openai.com/api/accounts/deviceauth/usercode") return usercode();
+					if (url === "https://auth.openai.com/api/accounts/deviceauth/token") return token();
+					throw new Error(`Unexpected fetch URL: ${url}`);
+				}),
+			);
+			return loginOpenAICodexDeviceCode({ onDeviceCode: () => {} }).then(
+				() => {
+					throw new Error("expected the login to fail");
+				},
+				(error: unknown) => (error as Error).message,
+			);
+		};
+		const validCode = () => jsonResponse({ device_auth_id: secret, user_code: `${secret}-code`, interval: "0" });
+		const messages = [
+			await run(validCode, () => jsonResponse({ error: "server_error", error_description: secret }, 500)),
+			await run(validCode, () => jsonResponse({ error: `bad ${secret}` }, 500)),
+			await run(validCode, () => jsonResponse({ authorization_code: secret })),
+			await run(validCode, () => new Response(`not json ${secret}`, { status: 200 })),
+			await run(() => new Response(`upstream said ${secret}`, { status: 500 }), validCode),
+			await run(() => jsonResponse({ device_auth_id: secret, interval: 5 }), validCode),
+			await run(() => new Response(`{"device_auth_id":"${secret}"`, { status: 200 }), validCode),
+		];
+		expect(messages).toEqual([
+			"OpenAI Codex device auth failed with status 500 (server_error)",
+			"OpenAI Codex device auth failed with status 500",
+			"Invalid OpenAI Codex device auth token response: missing code_verifier",
+			"OpenAI Codex device auth token response was not valid JSON",
+			"OpenAI Codex device code request failed with status 500",
+			"Invalid OpenAI Codex device code response: missing or invalid user_code",
+			"OpenAI Codex device code response was not valid JSON",
+		]);
+		for (const message of messages) expect(message).not.toContain(secret);
 	});
 
 	it("applies the early-refresh buffer to refreshed OpenAI Codex tokens", async () => {
@@ -467,7 +487,7 @@ describe("OpenAI Codex OAuth", () => {
 		);
 
 		await expect(refreshOpenAICodexToken("invalid-refresh-token")).rejects.toThrow(
-			/OpenAI Codex token refresh failed \(401\).*Could not validate your token/,
+			"OpenAI Codex token refresh failed (HTTP 401)",
 		);
 		expect(consoleError).not.toHaveBeenCalled();
 	});
@@ -484,8 +504,7 @@ describe("OpenAI Codex OAuth", () => {
 			),
 		);
 		const echoed = await refreshOpenAICodexToken("echoed-refresh-token").catch((error: Error) => error.message);
-		expect(echoed).toContain("invalid_grant");
-		expect(echoed).not.toContain("echoed-refresh-token");
+		expect(echoed).toBe("OpenAI Codex token refresh failed (HTTP 400)");
 
 		vi.stubGlobal(
 			"fetch",

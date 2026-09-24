@@ -70,6 +70,7 @@ export interface AttemptRuntimeState {
 	 * as last observed by its owner. Absent means retained, which is every attempt's initial state.
 	 */
 	managedLifetime?: ManagedLaneLifetime;
+	executionStartedAt?: string;
 	createdAt: string;
 	updatedAt: string;
 }

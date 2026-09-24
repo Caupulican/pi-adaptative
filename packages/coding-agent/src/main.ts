@@ -1185,7 +1185,7 @@ export async function main(args: string[], options?: MainOptions) {
 			initialImages,
 			initialMessages: parsed.messages,
 			verbose: parsed.verbose,
-			hasHumanAudience: hasHumanUI || nativePiRuntime.active,
+			hasHumanAudience: hasHumanUI,
 		});
 		if (nativePiRuntime.active) {
 			await interactiveMode.init();

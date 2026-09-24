@@ -54,6 +54,7 @@ function fakeSession(name: string) {
 		getVerificationObligations: () => [],
 		getSemanticEvaluations: () => [],
 		getLaneRecords: () => [],
+		onLaneRecordsChanged: subscribe,
 		getForegroundRouteSnapshot: () => ({
 			rootModel: "fixture/model",
 			activeModel: "fixture/model",
@@ -121,16 +122,16 @@ describe("interactive layout session listeners", () => {
 			workbench: undefined as WorkbenchController | undefined,
 		};
 		mountInteractiveLayout(host as unknown as InteractiveLayoutHost);
-		expect(first.counts).toEqual({ subscribed: 4, unsubscribed: 0 });
+		expect(first.counts).toEqual({ subscribed: 5, unsubscribed: 0 });
 		expect(host.workbench).toBeDefined();
 		// The session is swapped (resume / new session): the mode rebinds the layout to it.
 		host.session = second.session;
 		subscribeInteractiveLayout(host as unknown as InteractiveLayoutHost);
-		expect(first.counts).toEqual({ subscribed: 4, unsubscribed: 4 });
-		expect(second.counts).toEqual({ subscribed: 4, unsubscribed: 0 });
+		expect(first.counts).toEqual({ subscribed: 5, unsubscribed: 5 });
+		expect(second.counts).toEqual({ subscribed: 5, unsubscribed: 0 });
 		const typed = host as unknown as InteractiveLayoutHost;
 		typed.disposeOperatorProjection?.();
-		expect(second.counts).toEqual({ subscribed: 4, unsubscribed: 4 });
+		expect(second.counts).toEqual({ subscribed: 5, unsubscribed: 5 });
 		expect(typed.disposeOperatorProjection).toBeUndefined();
 	});
 });

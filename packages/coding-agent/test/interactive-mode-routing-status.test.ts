@@ -66,6 +66,7 @@ describe("foreground lease activity adapter", () => {
 			},
 		};
 		const host = {
+			hasHumanAudience: true,
 			session,
 			subscriptionGeneration: 0,
 			handleEvent: vi.fn(),
@@ -93,6 +94,7 @@ describe("foreground lease activity adapter", () => {
 		lane.syncForegroundActivity({ sessionId: "s", epoch: 1, busy: true });
 		lane.start({ id: "tool:q", kind: "tool", label: "Question" });
 		const host = {
+			hasHumanAudience: true,
 			session,
 			ui: { requestRender: vi.fn() },
 			activityLane: lane,

@@ -41,6 +41,7 @@ export interface LaneRecord {
 	/** Effective thinking level admitted with modelRef. */
 	thinkingLevel?: OrchestrationThinkingLevel;
 	reasonCode?: string;
+	queuedAt?: string;
 	startedAt?: string;
 	completedAt?: string;
 	costUsd?: number;
@@ -115,6 +116,7 @@ export function isLaneRecord(value: unknown): value is LaneRecord {
 		return false;
 	}
 	if (!isOptionalString(record.reasonCode)) return false;
+	if (!isOptionalString(record.queuedAt)) return false;
 	if (!isOptionalString(record.startedAt)) return false;
 	if (!isOptionalString(record.completedAt)) return false;
 	if (record.costUsd !== undefined && (typeof record.costUsd !== "number" || !Number.isFinite(record.costUsd))) {
@@ -145,9 +147,11 @@ export class LaneTracker {
 	private readonly _lanes = new Map<string, LaneRecord>();
 	private _nextLaneNumber = 1;
 	private readonly _now: () => string;
+	private readonly _onChange: (() => void) | undefined;
 
-	constructor(options?: { now?: () => string }) {
+	constructor(options?: { now?: () => string; onChange?: () => void }) {
 		this._now = options?.now ?? (() => new Date().toISOString());
+		this._onChange = options?.onChange;
 	}
 
 	/** Seed the id counter (e.g. from persisted lane records) so resumed sessions don't reuse ids. */
@@ -187,12 +191,14 @@ export class LaneTracker {
 		worktreeLaneKey?: string;
 	}): LaneRecord {
 		const record: LaneRecord = { laneId: args.laneId, type: args.type, status: args.status };
+		if (args.status === "queued") record.queuedAt = this._now();
 		if (args.startedAt !== undefined) record.startedAt = args.startedAt;
 		const label = args.label === undefined ? undefined : deriveWorkerTaskLabel(args.label, "");
 		if (label) record.label = label;
 		if (args.goalId !== undefined) record.goalId = args.goalId;
 		if (args.worktreeLaneKey !== undefined) record.worktreeLaneKey = args.worktreeLaneKey;
 		this._lanes.set(record.laneId, record);
+		this._onChange?.();
 		return { ...record };
 	}
 
@@ -207,6 +213,7 @@ export class LaneTracker {
 		const suffix = /-(\d+)$/.exec(restored.laneId)?.[1];
 		if (suffix) this.ensureCounterAtLeast(Number(suffix) + 1);
 		this._evictOldTerminal();
+		this._onChange?.();
 		return { ...restored };
 	}
 
@@ -230,12 +237,17 @@ export class LaneTracker {
 		if (record?.status !== "queued") return undefined;
 		const next = { ...record, status: "running" as const, startedAt: this._now() };
 		this._lanes.set(laneId, next);
+		this._onChange?.();
 		return { ...next };
 	}
 
 	start(args: { type: LaneType; label?: string; goalId?: string; worktreeLaneKey?: string }): LaneRecord {
-		const record = this.enqueue(args);
-		return this.markRunning(record.laneId) as LaneRecord;
+		return this._mint({
+			...args,
+			laneId: `${args.type}-${this._nextLaneNumber++}`,
+			status: "running",
+			startedAt: this._now(),
+		});
 	}
 
 	complete(
@@ -254,6 +266,7 @@ export class LaneTracker {
 		if (args.evidenceEntryId !== undefined) next.evidenceEntryId = args.evidenceEntryId;
 		this._lanes.set(laneId, next);
 		this._evictOldTerminal();
+		this._onChange?.();
 		return { ...next };
 	}
 

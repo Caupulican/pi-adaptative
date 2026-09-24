@@ -38,6 +38,7 @@ export interface ImageGenerationDetails {
 export interface ImageGenerationOptions {
 	getModel(): Pick<Model<Api>, "provider"> | undefined;
 	getOAuthToken(): Promise<string | undefined>;
+	getCredentialHeaders(token: string): Record<string, string> | undefined;
 	getImageStore(): Pick<SessionImageStore, "retainContent"> | undefined;
 	getMessages?(): readonly AgentMessage[];
 	generateImages?: typeof generateImages;
@@ -83,7 +84,7 @@ export class ImageGenerationController {
 			{
 				input: [{ type: "text", text: input.prompt }, ...images],
 			},
-			{ accessToken: token, turnId: callId, signal },
+			{ accessToken: token, credentialHeaders: this.options.getCredentialHeaders(token), turnId: callId, signal },
 		);
 		signal?.throwIfAborted();
 		if (result.stopReason !== "stop")

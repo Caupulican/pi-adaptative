@@ -9,7 +9,7 @@ import { expandMessageTextForDisplay } from "../../core/context/path-alias-displ
 import type { ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
-import { type FlowEvent, FlowTrace } from "../../core/operator-projection/flow-trace.ts";
+import { FlowTrace } from "../../core/operator-projection/flow-trace.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
 import type { TaskStepStatus } from "../../core/tasks/task-state.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
@@ -141,7 +141,7 @@ function composeDecisionGraph(host: InteractiveLayoutHost, humanInput: HumanInpu
 			answered: humanInput.answered,
 		},
 		events: session.operatorProjection.getVisibleEvents(),
-		flow: host.flowTrace ? observedFlow(host.flowTrace, session) : [],
+		flow: host.flowTrace?.snapshot() ?? [],
 		...(idlePreparation ? { idlePreparation } : {}),
 		backgroundTools: (host.activityLane?.getItems() ?? []).flatMap((item) =>
 			isBackgroundToolActivityItem(item) && item.status !== "success" && item.status !== "failure"
@@ -150,12 +150,6 @@ function composeDecisionGraph(host: InteractiveLayoutHost, humanInput: HumanInpu
 		),
 		nowMs: now,
 	});
-}
-
-/** Worker lanes enter the trace from their records as they stand at each composition. */
-function observedFlow(flow: FlowTrace, session: AgentSession): readonly FlowEvent[] {
-	flow.observeLanes(session.getLaneRecords());
-	return flow.snapshot();
 }
 
 /**
@@ -175,6 +169,11 @@ export function subscribeInteractiveLayout(host: InteractiveLayoutHost): HumanIn
 	const flow = host.flowTrace;
 	flow.reset();
 	const unsubscribeFlow = session.subscribe((event) => flow.observe(event));
+	flow.observeLanes(session.getLaneRecords());
+	const unsubscribeLanes = session.onLaneRecordsChanged((records) => {
+		flow.observeLanes(records);
+		host.ui.requestRender();
+	});
 	// Every settled System One evaluation is Execution evidence and changes the Decider row and the graph.
 	const unsubscribeSemantic = session.onSemanticEvaluation((record) => {
 		host.workbench?.recordSystemOneEvaluation(record);
@@ -202,6 +201,7 @@ export function subscribeInteractiveLayout(host: InteractiveLayoutHost): HumanIn
 		unsubscribeSemantic();
 		unsubscribeHumanInput();
 		unsubscribeFlow();
+		unsubscribeLanes();
 		host.activityLane?.setExternalClock("decision-graph", false);
 		host.disposeOperatorProjection = undefined;
 	};
@@ -226,6 +226,7 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		getSemanticPlaneHealth: () => host.session.getSemanticPlaneHealth(),
 		getCostSummary: () => host.session.getCostSummary(),
 		getSessionWorkState: () => host.session.getSessionWorkState(),
+		getSelfCompactionView: () => host.session.getSelfCompactionView(),
 	});
 	const humanInput = subscribeInteractiveLayout(host);
 	const view = new WorkbenchComponent({

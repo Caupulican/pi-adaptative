@@ -1,6 +1,7 @@
 export interface RequestAuth {
 	apiKey?: string;
 	headers?: Record<string, string>;
+	credentialHeaders?: Record<string, string>;
 }
 
 const AUTHENTICATION_HEADER_NAMES = new Set(["authorization", "api-key", "x-api-key"]);

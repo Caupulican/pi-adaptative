@@ -111,10 +111,12 @@ export class FlowTrace {
 	private readonly laneStatus = new Map<string, LaneStatus>();
 	private readonly backgroundOpen = new Set<string>();
 	private readonly now: () => number;
+	private since: number;
 	private sequence = 0;
 
 	constructor(options: { now?: () => number } = {}) {
 		this.now = options.now ?? Date.now;
+		this.since = this.now();
 	}
 
 	/** Every recorded action, oldest first. */
@@ -133,6 +135,7 @@ export class FlowTrace {
 		this.open.clear();
 		this.laneStatus.clear();
 		this.backgroundOpen.clear();
+		this.since = this.now();
 		this.changed();
 	}
 
@@ -246,22 +249,19 @@ export class FlowTrace {
 			this.laneStatus.set(record.laneId, record.status);
 			const lane = record.label ?? record.laneId;
 			const key = `worker:${record.laneId}`;
+			const queueKey = `queue:${record.laneId}`;
 			const outcome = LANE_OUTCOME[record.status];
-			if (previous === undefined && outcome === "open") {
-				const startedAt = Date.parse(record.startedAt ?? "") || this.now();
+			const timeOf = (value: string | undefined) => Date.parse(value ?? "") || this.now();
+			const delegate = (delegatedAt: number) =>
 				this.push({
 					actor: "root",
 					kind: "delegate",
 					label: short(lane),
 					to: "worker",
-					startedAt,
-					endedAt: startedAt,
+					startedAt: delegatedAt,
+					endedAt: delegatedAt,
 				});
-				this.begin(key, { actor: "worker", kind: "worker", label: short(lane), lane }, startedAt);
-			}
-			if (outcome !== "open" && previous !== undefined && LANE_OUTCOME[previous] === "open") {
-				const endedAt = Date.parse(record.completedAt ?? "") || this.now();
-				this.finish(key, outcome, endedAt);
+			const report = (reported: FlowOutcome, endedAt: number) =>
 				this.push({
 					actor: "worker",
 					kind: "report",
@@ -270,8 +270,30 @@ export class FlowTrace {
 					lane,
 					startedAt: endedAt,
 					endedAt,
-					outcome,
+					outcome: reported,
 				});
+			if (previous === undefined && outcome === "open") {
+				const delegatedAt = timeOf(record.status === "queued" ? record.queuedAt : record.startedAt);
+				delegate(delegatedAt);
+				if (record.status === "queued")
+					this.begin(queueKey, { actor: "worker", kind: "wait", label: "queued", lane }, delegatedAt);
+			}
+			if (record.status === "running") {
+				const startedAt = timeOf(record.startedAt);
+				this.finish(queueKey, "ok", startedAt);
+				this.begin(key, { actor: "worker", kind: "worker", label: short(lane), lane }, startedAt);
+			}
+			if (outcome !== "open" && previous !== undefined && LANE_OUTCOME[previous] === "open") {
+				const endedAt = timeOf(record.completedAt);
+				this.finish(queueKey, outcome, endedAt);
+				this.finish(key, outcome, endedAt);
+				report(outcome, endedAt);
+			}
+			if (outcome !== "open" && previous === undefined) {
+				const endedAt = Date.parse(record.completedAt ?? "");
+				if (!Number.isFinite(endedAt) || endedAt < this.since) continue;
+				delegate(Date.parse(record.queuedAt ?? record.startedAt ?? "") || endedAt);
+				report(outcome, endedAt);
 			}
 		}
 	}

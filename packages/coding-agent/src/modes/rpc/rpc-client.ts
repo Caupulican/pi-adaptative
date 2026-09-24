@@ -10,6 +10,7 @@ import type { CompactionResult } from "@caupulican/pi-agent-core/node";
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
+import type { SelfCompactionInfo, SelfCompactionNowOutcome } from "../../core/compaction/self-compaction-controller.ts";
 import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type { RpcCommand, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
@@ -313,6 +314,16 @@ export class RpcClient {
 	 */
 	async compact(customInstructions?: string): Promise<CompactionResult> {
 		const response = await this.send({ type: "compact", customInstructions });
+		return this.getData(response);
+	}
+
+	async getSelfCompaction(): Promise<SelfCompactionInfo> {
+		const response = await this.send({ type: "get_self_compaction" });
+		return this.getData(response);
+	}
+
+	async selfCompactNow(): Promise<SelfCompactionNowOutcome> {
+		const response = await this.send({ type: "self_compact_now" });
 		return this.getData(response);
 	}
 

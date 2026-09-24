@@ -588,6 +588,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					attributionHeaders || auth.headers || options?.headers
 						? { ...attributionHeaders, ...auth.headers, ...options?.headers }
 						: undefined,
+				credentialHeaders: auth.credentialHeaders,
+				credentialHeadersFor: (apiKey: string) =>
+					modelRegistry.authStorage.getOAuthRequestHeaders(model.provider, apiKey),
 			};
 			return streamSimple(model, context, providerOptions);
 		},
@@ -743,9 +746,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const accountModels = new AccountModelCatalog({
 		getModels: () => modelRegistry.getAll(),
 		hasConfiguredAuth: (model) => modelRegistry.hasConfiguredAuth(model),
-		getApiKey: async (model) => {
+		getRequestAuth: async (model) => {
 			const auth = await modelRegistry.getApiKeyAndHeaders(model);
-			return auth.ok ? auth.apiKey : undefined;
+			return auth.ok ? { apiKey: auth.apiKey, credentialHeaders: auth.credentialHeaders } : undefined;
 		},
 	});
 	void accountModels.refresh();

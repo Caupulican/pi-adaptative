@@ -414,6 +414,43 @@ Response:
 {"type": "response", "command": "set_auto_compaction", "success": true}
 ```
 
+#### get_self_compaction
+
+Read the self-monitoring compaction state without a model turn: the same view the `self_compact` tool returns (usage, lines, phase, tools lock, handoff status, completed cycles), the resolved settings, where each prompt comes from, the saved note while a handoff is active, and whether the handoff runner is active. This is the RPC form of the interactive `/self-compact-info`.
+
+```json
+{"type": "get_self_compaction"}
+```
+
+Response:
+```json
+{
+  "type": "response",
+  "command": "get_self_compaction",
+  "success": true,
+  "data": {
+    "view": {"phase": "warning", "level": "warning", "cycles": 1, "usedTokens": 110000, "toolsLocked": false, "handoff": {"status": "none", "attempts": 0, "noteChars": null, "lastError": null, "ownerRequested": false}},
+    "settings": {"enabled": true, "notice": 0.7, "warning": 0.85, "forced": 0.95, "prompts": {}},
+    "promptSources": {"notice": "built-in", "warning": "built-in", "summary": "built-in"},
+    "note": null,
+    "running": false
+  }
+}
+```
+
+#### self_compact_now
+
+Compact now, the RPC form of the interactive `/self-compact-now`. A saved note is reused and the handoff resumes (`"resumed"`). Otherwise the agent is asked to write its note and call `self_compact` (`"asked"`), even below the notice line; that request lapses when the agent finishes its next reply without saving a note. The response arrives when the asked turn ends, like `compact`. Nothing to compact, self-compaction off, or a pending owner question answers `"refused"` without a model turn.
+
+```json
+{"type": "self_compact_now"}
+```
+
+Response:
+```json
+{"type": "response", "command": "self_compact_now", "success": true, "data": {"kind": "resumed", "noteChars": 812}}
+```
+
 ### Retry
 
 #### set_auto_retry
@@ -833,7 +870,7 @@ Each command has:
   - `"path"`: Explicit path via CLI or settings
 - `path`: Absolute file path to the command source (optional)
 
-**Note**: Built-in TUI commands (`/settings`, `/hotkeys`, etc.) are not included. They are handled only in interactive mode and would not execute if sent via `prompt`.
+**Note**: Built-in TUI commands (`/settings`, `/hotkeys`, etc.) are not included. They are handled only in interactive mode and would not execute if sent via `prompt`. Built-in commands that RPC supports are typed commands instead: `/compact` is `compact`, `/self-compact-info` is `get_self_compaction`, and `/self-compact-now` is `self_compact_now`.
 
 ## Events
 

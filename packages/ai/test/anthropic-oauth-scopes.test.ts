@@ -37,7 +37,7 @@ const response = {
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe("Claude binary-derived OAuth scope workflow", () => {
+describe("Claude OAuth scope workflow", () => {
 	it("requests plugin access at login and retains the granted scopes", async () => {
 		vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(response)));
 		let authorization = new URL("https://unused.invalid");

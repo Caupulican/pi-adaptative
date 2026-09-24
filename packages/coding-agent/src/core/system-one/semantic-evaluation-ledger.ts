@@ -152,6 +152,8 @@ export function doubtsFromReasons(reasons: readonly string[] | undefined): strin
 		.map((line) => line.slice(DOUBT_REASON_PREFIX.length));
 }
 
+export const PROGRAM_SETTLED_REASON = "settled: every predicate passed";
+
 /** How each band reads to an operator. `soft pass` and `unsure` are deliberately not "true". */
 export const NOUL_BAND_LABEL: Readonly<Record<NoulBand, string>> = Object.freeze({
 	hard_pass: "pass",
@@ -206,19 +208,21 @@ export function verdictFromCertificate(certificate: SteeringCertificate): {
 } {
 	const verdict = certificate.semantic_outcome ?? certificate.policy_result ?? certificate.directive;
 	const reasons: string[] = [];
-	if (certificate.semantic_outcome !== "pass")
-		reasons.push(bounded(`directive: ${certificate.directive}`, REASON_LIMIT));
 	const failed = certificate.failed_semantic_predicates ?? [];
+	const unsure = certificate.unsure_semantic_predicates ?? [];
+	const settled = certificate.semantic_outcome === "pass" && failed.length === 0 && unsure.length === 0;
+	if (!settled) reasons.push(bounded(`directive: ${certificate.directive}`, REASON_LIMIT));
 	for (const predicate of failed) {
 		if (reasons.length >= MAX_EVALUATION_REASONS) break;
 		reasons.push(bounded(predicate, REASON_LIMIT));
 	}
 	// A predicate that was only unsure is an open doubt, not a rejection: it is why the checkpoint
 	// wants another look, and the pane has to be able to say so.
-	for (const predicate of certificate.unsure_semantic_predicates ?? []) {
+	for (const predicate of unsure) {
 		if (reasons.length >= MAX_EVALUATION_REASONS) break;
 		if (failed.includes(predicate)) continue;
 		reasons.push(doubtReason(predicate));
 	}
+	if (settled) reasons.push(PROGRAM_SETTLED_REASON);
 	return { verdict, reasons };
 }

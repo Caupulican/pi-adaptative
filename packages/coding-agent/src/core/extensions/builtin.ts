@@ -7,6 +7,7 @@ import {
 import type { CompactionEntry, SessionEntry } from "@caupulican/pi-agent-core/session";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { Type } from "typebox";
+import type { SelfCompactionView } from "../compaction/self-compaction-controller.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "../context/memory-diagnostics.ts";
 import type { ContextGcReport } from "../context-gc.ts";
 import { boundedTextPreview } from "../text-preview.ts";
@@ -195,6 +196,16 @@ function formatMemoryPromptInclusionLine(promptInclusion: MemoryPromptInclusionR
 	return `Prompt inclusion: ${promptInclusion.status} (${promptInclusion.includedCount} included, ${promptInclusion.omittedCount} omitted, ${promptInclusion.blockChars} chars)`;
 }
 
+function formatSelfCompactionLine(view: SelfCompactionView): string {
+	if (view.settingsError)
+		return `self-compaction: disabled because its settings were rejected (${view.settingsError})`;
+	if (!view.thresholds) return `self-compaction: ${view.enabled ? "unavailable (no compaction trigger)" : "disabled"}`;
+	const t = view.thresholds;
+	const handoff =
+		view.handoff.status === "none" ? "" : `, handoff ${view.handoff.status} (attempts ${view.handoff.attempts})`;
+	return `self-compaction: level ${view.level}; notice ${t.noticeTokens}, warning ${t.warningTokens}, forced ${t.forcedTokens}, host early ${t.earlyTokens ?? "off"}, hard ${t.hardTokens}; tools ${view.toolsLocked ? "locked to self_compact" : "open"}${handoff}`;
+}
+
 export function createCoreDiagnosticsToolDefinitions(
 	getActiveTools: () => string[],
 	getAllTools: () => ToolInfo[],
@@ -203,6 +214,7 @@ export function createCoreDiagnosticsToolDefinitions(
 		retrieval: MemoryRetrievalDiagnostics;
 		promptInclusion: MemoryPromptInclusionReport;
 	},
+	getSelfCompactionView?: () => SelfCompactionView | undefined,
 ): ToolDefinition[] {
 	return [
 		{
@@ -245,6 +257,7 @@ export function createCoreDiagnosticsToolDefinitions(
 				const { rows, messages: activeMessages } = collectActiveContextAudit(branch);
 				const contextGcReport = getContextGcReport?.(activeMessages);
 				const memoryDiagnostics = getMemoryDiagnostics?.();
+				const selfCompaction = getSelfCompactionView?.();
 				const contextUsage = ctx.getContextUsage();
 				const systemPrompt = ctx.getSystemPrompt?.() || "";
 				const activeTools = new Set(getActiveTools());
@@ -300,6 +313,7 @@ export function createCoreDiagnosticsToolDefinitions(
 					unattributed === null
 						? undefined
 						: `provider-reported remainder not mapped by chars/4 rows: ${unattributed} tokens`,
+					selfCompaction ? formatSelfCompactionLine(selfCompaction) : undefined,
 					...(memoryDiagnostics
 						? [
 								formatMemoryRetrievalLine(memoryDiagnostics.retrieval),
@@ -331,6 +345,7 @@ export function createCoreDiagnosticsToolDefinitions(
 						contextGc: contextGcReport,
 						rows,
 						memory: memoryDiagnostics,
+						selfCompaction,
 					},
 				};
 			},

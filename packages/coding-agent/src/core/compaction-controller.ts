@@ -337,6 +337,7 @@ export class CompactionController {
 	/** A compaction being summarized while the lane idles, not yet recorded. */
 	private idlePreparation: { abort: AbortController; done: Promise<PreparedCompactionRecord | undefined> } | undefined;
 	private idleView: IdlePreparationView | undefined;
+	private compactableHistory: { key: string; value: boolean } | undefined;
 	private pendingEarlyCompactionPrediction?: {
 		predictedSavingsUsd: number;
 		tokensBefore: number;
@@ -430,6 +431,15 @@ export class CompactionController {
 			wrapUntrustedText(memoryInsight, "memory:pre-compress"),
 		].join("\n");
 		return [customInstructions?.trim(), memoryHandoff].filter(Boolean).join("\n\n");
+	}
+
+	hasCompactableHistory(): boolean {
+		const settings = this.deps.getAdaptedSettings();
+		const key = `${this.deps.sessionManager.getLeafId() ?? ""}\u0000${JSON.stringify(settings)}\u0000${this.deps.getActiveTask?.() ?? ""}`;
+		if (this.compactableHistory?.key === key) return this.compactableHistory.value;
+		const value = this.prepareCompactionWithPackedHostRecords(this.getRawCompactionBranch(), settings) !== undefined;
+		this.compactableHistory = { key, value };
+		return value;
 	}
 
 	isRunning(): boolean {

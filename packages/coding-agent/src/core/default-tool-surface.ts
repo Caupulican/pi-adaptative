@@ -42,6 +42,7 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 		"run_toolkit_script",
 		"improvement_loop",
 		"runtime_update",
+		"self_compact",
 	];
 }
 

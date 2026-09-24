@@ -324,6 +324,7 @@ describe("AgentSession prompt characterization", () => {
 			"run_toolkit_script",
 			"improvement_loop",
 			"runtime_update",
+			"self_compact",
 			"artifact_retrieve",
 		]);
 

@@ -366,4 +366,21 @@ describe.skipIf(process.platform === "win32")("FooterDataProvider autonomy statu
 
 		provider.dispose();
 	});
+
+	it("watches git only for a watched terminal, and still resolves the branch on demand", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "footer-unwatched-"));
+		try {
+			const repoDir = createPlainRepo(tempDir);
+			const unwatched = new FooterDataProvider(repoDir, { watchGit: false });
+			const watched = new FooterDataProvider(repoDir);
+			const internals = (provider: FooterDataProvider) => provider as unknown as { headWatcher: FSWatcher | null };
+			expect(internals(unwatched).headWatcher).toBeNull();
+			expect(internals(watched).headWatcher).not.toBeNull();
+			expect(unwatched.getGitBranch()).toBe("main");
+			unwatched.dispose();
+			watched.dispose();
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
 });

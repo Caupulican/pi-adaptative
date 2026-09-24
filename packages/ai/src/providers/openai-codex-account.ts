@@ -1,8 +1,8 @@
 import { isRecord } from "../utils/value-guards.ts";
+import { requestBoundedAccountJson } from "./account-request.ts";
 import { buildOpenAICodexHeaders, DEFAULT_OPENAI_CODEX_BASE_URL } from "./openai-codex-auth.ts";
 
-const MAX_ACCOUNT_RESPONSE_BYTES = 256 * 1024;
-const MAX_ERROR_DETAIL_CHARS = 2_000;
+export { OPENAI_CODEX_FEDRAMP_HEADER } from "./openai-codex-auth.ts";
 
 export type OpenAICodexRateLimitResetCredit = {
 	id: string;
@@ -31,15 +31,18 @@ export interface OpenAICodexAccountRequestOptions {
 	baseUrl?: string;
 	signal?: AbortSignal;
 	fetch?: typeof fetch;
+	credentialHeaders?: Record<string, string>;
 }
 
 export class OpenAICodexAccountError extends Error {
 	readonly status?: number;
+	readonly retryAfterMs?: number;
 
-	constructor(message: string, status?: number) {
+	constructor(message: string, status?: number, retryAfterMs?: number) {
 		super(message);
 		this.name = "OpenAICodexAccountError";
 		this.status = status;
+		this.retryAfterMs = retryAfterMs;
 	}
 }
 
@@ -105,58 +108,31 @@ export function resolveOpenAICodexAccountEndpoint(
 	return `${normalized}${suffix}`;
 }
 
-async function readBoundedResponseText(response: Response): Promise<string> {
-	if (!response.body) return "";
-	const reader = response.body.getReader();
-	const decoder = new TextDecoder();
-	let bytes = 0;
-	const textParts: string[] = [];
-	while (true) {
-		const next = await reader.read();
-		if (next.done) break;
-		bytes += next.value.byteLength;
-		if (bytes > MAX_ACCOUNT_RESPONSE_BYTES) {
-			await reader.cancel().catch(() => {});
-			throw new OpenAICodexAccountError("OpenAI Codex account response exceeded the 256 KiB limit", response.status);
-		}
-		textParts.push(decoder.decode(next.value, { stream: true }));
-	}
-	textParts.push(decoder.decode());
-	return textParts.join("");
-}
-
 async function requestAccountJson(
 	options: OpenAICodexAccountRequestOptions,
-	endpoint: "reset-credits" | "consume-reset-credit" | "models",
+	endpoint: "usage" | "reset-credits" | "consume-reset-credit" | "models",
 	init: RequestInit,
 	query?: Record<string, string>,
 ): Promise<unknown> {
-	const fetchImpl = options.fetch ?? globalThis.fetch;
-	if (typeof fetchImpl !== "function") throw new OpenAICodexAccountError("Fetch is unavailable in this runtime");
-	const headers = buildOpenAICodexHeaders({ token: options.accessToken, userAgent: "pi" });
+	const headers = buildOpenAICodexHeaders({
+		token: options.accessToken,
+		userAgent: "pi",
+		credentialHeaders: options.credentialHeaders,
+	});
 	new Headers(init.headers).forEach((value, key) => {
 		headers.set(key, value);
 	});
 	const url = new URL(resolveOpenAICodexAccountEndpoint(options.baseUrl, endpoint));
 	for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
-	const response = await fetchImpl(url.toString(), {
-		...init,
+	return requestBoundedAccountJson({
+		url: url.toString(),
 		headers,
+		init,
 		signal: options.signal,
+		fetch: options.fetch,
+		label: "OpenAI Codex account",
+		createError: (message, status, retryAfterMs) => new OpenAICodexAccountError(message, status, retryAfterMs),
 	});
-	const text = await readBoundedResponseText(response);
-	if (!response.ok) {
-		const detail = text.trim().slice(0, MAX_ERROR_DETAIL_CHARS);
-		throw new OpenAICodexAccountError(
-			`OpenAI Codex account request failed (${response.status})${detail ? `: ${detail}` : ""}`,
-			response.status,
-		);
-	}
-	try {
-		return JSON.parse(text) as unknown;
-	} catch {
-		throw new OpenAICodexAccountError("OpenAI Codex account response was not valid JSON", response.status);
-	}
 }
 
 function parseResetCredit(value: unknown): OpenAICodexRateLimitResetCredit {
@@ -260,4 +236,160 @@ export async function listOpenAICodexAccountModels(
 		throw new OpenAICodexAccountError("OpenAI Codex models response has no models list");
 	}
 	return json.models.map(parseAccountModel);
+}
+
+export type OpenAICodexUsageWindow = {
+	usedPercent: number;
+	windowSeconds?: number;
+	resetsAt?: number;
+};
+
+export const OPENAI_CODEX_LIMIT_REACHED_TYPES = [
+	"rate_limit_reached",
+	"workspace_owner_credits_depleted",
+	"workspace_member_credits_depleted",
+	"workspace_owner_usage_limit_reached",
+	"workspace_member_usage_limit_reached",
+	"unknown",
+] as const;
+export type OpenAICodexLimitReachedType = (typeof OPENAI_CODEX_LIMIT_REACHED_TYPES)[number];
+
+export type OpenAICodexUsageLimit = {
+	name: string;
+	allowed?: boolean;
+	limitReached?: boolean;
+	primary?: OpenAICodexUsageWindow;
+	secondary?: OpenAICodexUsageWindow;
+};
+
+export type OpenAICodexSpendControl = {
+	reached: boolean;
+	individualLimit?: { usedPercent: number; used: string; limit: string; resetsAt?: number };
+};
+
+export type OpenAICodexUsage = {
+	planType?: string;
+	limits: OpenAICodexUsageLimit[];
+	credits?: { hasCredits: boolean; unlimited: boolean; balance?: string };
+	limitReachedType?: OpenAICodexLimitReachedType;
+	resetCreditsAvailable?: number;
+	spendControl?: OpenAICodexSpendControl;
+};
+
+function finiteNumber(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function usageWindow(value: unknown): OpenAICodexUsageWindow | undefined {
+	if (!isRecord(value)) return undefined;
+	const usedPercent = finiteNumber(value.used_percent);
+	if (usedPercent === undefined) return undefined;
+	const windowSeconds = finiteNumber(value.limit_window_seconds);
+	const resetsAt = finiteNumber(value.reset_at);
+	return {
+		usedPercent,
+		...(windowSeconds !== undefined && windowSeconds > 0 ? { windowSeconds } : {}),
+		...(resetsAt !== undefined && resetsAt > 0 ? { resetsAt } : {}),
+	};
+}
+
+function usageLimit(name: string, value: unknown): OpenAICodexUsageLimit | undefined {
+	if (!isRecord(value)) return undefined;
+	const primary = usageWindow(value.primary_window);
+	const secondary = usageWindow(value.secondary_window);
+	const allowed = typeof value.allowed === "boolean" ? value.allowed : undefined;
+	const limitReached = typeof value.limit_reached === "boolean" ? value.limit_reached : undefined;
+	if (!primary && !secondary && allowed === undefined && limitReached === undefined) return undefined;
+	return {
+		name,
+		...(allowed !== undefined ? { allowed } : {}),
+		...(limitReached !== undefined ? { limitReached } : {}),
+		...(primary ? { primary } : {}),
+		...(secondary ? { secondary } : {}),
+	};
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+const CREDIT_AMOUNT = /^\d{1,15}(?:\.\d{1,6})?$/;
+
+function spendControl(value: unknown): OpenAICodexSpendControl | undefined {
+	if (value === undefined || value === null) return undefined;
+	const invalid = () => new OpenAICodexAccountError("OpenAI Codex usage response has invalid spend_control");
+	if (!isRecord(value) || typeof value.reached !== "boolean") throw invalid();
+	const limit = value.individual_limit;
+	if (limit === undefined || limit === null) return { reached: value.reached };
+	if (!isRecord(limit)) throw invalid();
+	const remainingPercent = finiteNumber(limit.remaining_percent);
+	const used = typeof limit.used === "string" ? limit.used.trim() : "";
+	const total = typeof limit.limit === "string" ? limit.limit.trim() : "";
+	const resetsAt = limit.reset_at === undefined || limit.reset_at === null ? undefined : finiteNumber(limit.reset_at);
+	if (
+		remainingPercent === undefined ||
+		remainingPercent < 0 ||
+		remainingPercent > 100 ||
+		!CREDIT_AMOUNT.test(used) ||
+		!CREDIT_AMOUNT.test(total) ||
+		(limit.reset_at !== undefined && limit.reset_at !== null && (resetsAt === undefined || resetsAt <= 0))
+	) {
+		throw invalid();
+	}
+	return {
+		reached: value.reached,
+		individualLimit: {
+			usedPercent: 100 - remainingPercent,
+			used,
+			limit: total,
+			...(resetsAt !== undefined ? { resetsAt } : {}),
+		},
+	};
+}
+
+export async function getOpenAICodexUsage(options: OpenAICodexAccountRequestOptions): Promise<OpenAICodexUsage> {
+	const json = await requestAccountJson(options, "usage", { method: "GET", headers: { Accept: "application/json" } });
+	if (!isRecord(json)) throw new OpenAICodexAccountError("OpenAI Codex usage response is not an object");
+	const limits: OpenAICodexUsageLimit[] = [];
+	const main = usageLimit("codex", json.rate_limit);
+	if (main) limits.push(main);
+	if (Array.isArray(json.additional_rate_limits)) {
+		for (const additional of json.additional_rate_limits) {
+			if (!isRecord(additional)) continue;
+			const name = nonEmptyString(additional.limit_name) ?? nonEmptyString(additional.metered_feature);
+			const limit = name ? usageLimit(name, additional.rate_limit) : undefined;
+			if (limit) limits.push(limit);
+		}
+	}
+	const credits = json.credits;
+	const reachedType = isRecord(json.rate_limit_reached_type) ? json.rate_limit_reached_type.type : undefined;
+	const reached: OpenAICodexLimitReachedType | undefined =
+		typeof reachedType !== "string"
+			? undefined
+			: (((OPENAI_CODEX_LIMIT_REACHED_TYPES as readonly string[]).includes(reachedType)
+					? reachedType
+					: "unknown") as OpenAICodexLimitReachedType);
+	const resetCredits = isRecord(json.rate_limit_reset_credits)
+		? finiteNumber(json.rate_limit_reset_credits.available_count)
+		: undefined;
+	const spend = spendControl(json.spend_control);
+	const balance = isRecord(credits)
+		? (nonEmptyString(credits.balance) ?? finiteNumber(credits.balance)?.toString())
+		: undefined;
+	return {
+		...(nonEmptyString(json.plan_type) ? { planType: nonEmptyString(json.plan_type) } : {}),
+		limits,
+		...(isRecord(credits) && typeof credits.has_credits === "boolean" && typeof credits.unlimited === "boolean"
+			? {
+					credits: {
+						hasCredits: credits.has_credits,
+						unlimited: credits.unlimited,
+						...(credits.has_credits && balance ? { balance } : {}),
+					},
+				}
+			: {}),
+		...(reached ? { limitReachedType: reached } : {}),
+		...(resetCredits !== undefined && resetCredits >= 0 ? { resetCreditsAvailable: Math.floor(resetCredits) } : {}),
+		...(spend ? { spendControl: spend } : {}),
+	};
 }

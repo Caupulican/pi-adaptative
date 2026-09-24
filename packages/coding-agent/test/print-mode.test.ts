@@ -27,6 +27,8 @@ type FakeSession = {
 	subscribe: ReturnType<typeof vi.fn>;
 	prompt: ReturnType<typeof vi.fn>;
 	waitForForegroundIdle: ReturnType<typeof vi.fn>;
+	resumeSelfCompaction: ReturnType<typeof vi.fn>;
+	waitForSelfCompactionHandoff: ReturnType<typeof vi.fn>;
 	reload: ReturnType<typeof vi.fn>;
 	getCumulativeUsage: () => AssistantMessage["usage"];
 };
@@ -83,6 +85,8 @@ function createRuntimeHost(...messages: AgentMessage[]): FakeRuntimeHost {
 		subscribe: vi.fn(() => () => {}),
 		prompt: vi.fn(async () => {}),
 		waitForForegroundIdle: vi.fn(async () => {}),
+		resumeSelfCompaction: vi.fn(() => false),
+		waitForSelfCompactionHandoff: vi.fn(async () => {}),
 		reload: vi.fn(async () => {}),
 		getCumulativeUsage: () => ({
 			input: 0,

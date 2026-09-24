@@ -1,5 +1,5 @@
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions, Spacer, Text } from "@caupulican/pi-tui";
-import { theme } from "../theme/theme.ts";
+import { getSelectListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { SelectorNavigationFooter } from "./selector-list.ts";
 
@@ -31,13 +31,7 @@ export class UsageActionSelectorComponent extends Container {
 		this.selectList = new SelectList(
 			options.items,
 			Math.min(8, Math.max(2, options.items.length)),
-			{
-				selectedPrefix: (text) => theme.fg("accent", text),
-				selectedText: (text) => theme.fg("accent", text),
-				description: (text) => theme.fg("muted", text),
-				scrollInfo: (text) => theme.fg("dim", text),
-				noMatch: (text) => theme.fg("muted", text),
-			},
+			getSelectListTheme(),
 			USAGE_ACTION_LAYOUT,
 		);
 		this.selectList.setSelectedIndex(options.initialSelectedIndex ?? 0);

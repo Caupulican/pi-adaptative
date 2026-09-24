@@ -155,6 +155,35 @@ quote a finished result. Pinned by `packages/coding-agent/test/host-turn-reasoni
 `packages/coding-agent/test/activity-lane.test.ts` and
 `packages/coding-agent/test/interactive-event-controller.test.ts`.
 
+**The agent sees its context gauge and hands itself off at a clean checkpoint.** The root reads
+its usage and three lines through `self_compact` without a note and `context_audit`: notice and
+warning are fractions of the first host compaction trigger (the cost-priced early trigger when it is
+configured below hard, else hard), so they are reached before the host compacts on its own; forced
+is a fraction of the hard trigger. Guidance is a transient host record whose text is stable per
+level (a configured prompt renders once per crossing), so it is appended once per level and never
+churns the cached prefix; the cleared marker is sent only when a guidance record exists. A note is
+admitted only at or above notice, or after the owner asked (`/self-compact-now`) and before the
+agent finishes its next reply, and only when
+there is history to compact; it is kept byte for byte. Siblings of an admissible note in the same
+batch are refused before any runs, in either order; an ordinary parallel batch is untouched. At
+forced every other tool is refused only while there is history to compact, so nothing strands the
+agent. The handoff runs through the host's own compaction (`AgentSession.compact`: summary model,
+retry ladder, deterministic fallback, cache and pricing unchanged) after every foreground run the
+owner did not interrupt; a compaction tagged with the note's id carries it, the exact note comes
+back as the next message and the agent continues without a user turn. State is derived only from
+branch entries, so restart, rebind and branch switch rebuild it, in interactive, print and RPC
+modes alike (print mode finishes a handoff before its first prompt and before it prints); an answered or owner-aborted
+handoff never replays, a transport failure after delivery continues without re-sending the note,
+failed or cancelled compactions retry within three attempts, and a compaction that does not carry
+the note ends the handoff instead of looping. Host early, idle and hard compaction are never
+cancelled. `self_compact` is root-only: worker compaction is inline in the worker's request planning
+with no idle checkpoint, so the tool is in the worker forbidden set rather than silently inert.
+Its projected schema has a separate 140-token allowance (aggregate 5,953 = 5,813 + 140 self_compact).
+Pinned by `packages/coding-agent/test/context-composition.test.ts`,
+`packages/coding-agent/test/self-compaction.test.ts`,
+`packages/coding-agent/test/self-compaction-controller.test.ts` and
+`packages/coding-agent/test/suite/self-compaction.test.ts`.
+
 ## Tool surfaces
 
 **A slip the harness can absorb normalizes; only real ambiguity refuses, and the refusal names the
@@ -930,6 +959,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-24 | Self-monitoring compaction: the agent sees its gauge and lines, hands itself off with `self_compact` at a clean checkpoint through the host compaction owner, and continues from its exact note; `self_compact` gets its own 140-token schema allowance, aggregate ceiling 5,953, base subtotal unchanged at 4,500. |
 | 2026-09-24 | The provider-limit contract now pins Bedrock throttling classification and requires a known reset before sharing its limit, so sibling requests do not invent a cooldown. |
 | 2026-09-21 | The tool gate's replan verdict refuses one call and never cancels the turn; relevance is judged only against a real step or goal; a System One cancel of the root turn inside the objective loop is a re-route, the operator's interruption a stop. |
 | 2026-09-21 | `decision_ledger_read` joins the default root tool surface with its own 100-token schema allowance; aggregate ceiling 5,670, base subtotal unchanged at 4,500. |

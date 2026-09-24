@@ -31,6 +31,7 @@ export {
 } from "./openai-codex.ts";
 export { loginOpenRouter, openRouterOAuthProvider } from "./openrouter.ts";
 export { OAuthRefreshCompletedError } from "./refresh-completed-error.ts";
+export { OAuthRefreshRejectedError, type OAuthRefreshRejection } from "./refresh-rejected-error.ts";
 export * from "./types.ts";
 export { loginXai, refreshXaiToken, xaiOAuthProvider } from "./xai.ts";
 

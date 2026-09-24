@@ -12,7 +12,7 @@ describe("account model catalog readiness", () => {
 		const catalog = new AccountModelCatalog({
 			getModels: () => [model],
 			hasConfiguredAuth: () => true,
-			getApiKey: () => new Promise<string | undefined>(() => undefined),
+			getRequestAuth: () => new Promise<undefined>(() => undefined),
 		});
 		void catalog.refresh();
 		const controller = new AbortController();

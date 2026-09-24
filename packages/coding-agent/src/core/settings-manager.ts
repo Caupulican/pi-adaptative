@@ -11,6 +11,7 @@ import { stripBom } from "../utils/text.ts";
 import { configFile, directoryProfilesDir } from "./agent-paths.ts";
 import { EDGE_CLASSES, type EdgeClass, isEdgeClass } from "./autonomy/edge-policy.ts";
 import { DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS } from "./background-tool-task-controller.ts";
+import { resolveSelfCompactionSettings, type SelfCompactionSettings } from "./compaction/self-compaction.ts";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "./context-gc.ts";
 import { type CostGuardSettings, DEFAULT_COST_GUARD_SETTINGS } from "./cost-guard.ts";
 import type {
@@ -62,6 +63,13 @@ export interface CompactionSettings {
 	keepRecentTokens?: number; // default: 20000
 	triggerPercent?: number; // default: 0.6 — early context-efficiency threshold, separate from the USD cost guard
 	model?: string; // default: "auto" — cheap auxiliary model for the summary; "auto" picks cheapest authed, else the session model
+	selfMonitor?: {
+		enabled?: boolean;
+		notice?: number;
+		warning?: number;
+		forced?: number;
+		prompts?: { notice?: string; warning?: string; summary?: string };
+	};
 }
 
 export interface ScoutSettings {
@@ -1655,6 +1663,7 @@ export class SettingsManager {
 	/** An unset `modelRouter.enabled`: off until the session reports that it has System One. */
 	private modelRouterDefaultEnabled = false;
 	private projectSettingsLoadError: Error | null = null; // Track if project settings file had parse errors
+	private resolvedSelfCompaction: { key: string; value: SelfCompactionSettings } | undefined;
 	private directoryProfileSettingsLoadError: Error | null = null;
 	private directoryProfileInfo: DirectoryResourceProfileInfo | null = null;
 	private profileRegistry!: ProfileRegistry;
@@ -3499,6 +3508,15 @@ export class SettingsManager {
 	/** Configured auxiliary summarizer model id, or "auto" (default) to pick the cheapest authed model. */
 	getCompactionModel(): string {
 		return this.settings.compaction?.model ?? "auto";
+	}
+
+	getSelfCompactionSettings(): SelfCompactionSettings {
+		const raw = this.settings.compaction?.selfMonitor ?? {};
+		const key = JSON.stringify(raw);
+		if (this.resolvedSelfCompaction?.key !== key) {
+			this.resolvedSelfCompaction = { key, value: resolveSelfCompactionSettings(raw) };
+		}
+		return this.resolvedSelfCompaction.value;
 	}
 
 	getCompactionSettings(): {

@@ -2,11 +2,31 @@ import { sep } from "node:path";
 import { visibleWidth } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
+import type { SelfCompactionView } from "../src/core/compaction/self-compaction-controller.ts";
 import type { SessionCostSummary } from "../src/core/cost/cost-summary.ts";
 import type { CostGuardDecision } from "../src/core/cost-guard.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
 import { FooterComponent, formatCwdForFooter } from "../src/modes/interactive/components/footer.ts";
+import { selfCompactionGauge } from "../src/modes/interactive/components/self-compaction-gauge.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
+import { gaugeView } from "./self-compaction-view-fixture.ts";
+
+const SELF_COMPACTION_OFF: SelfCompactionView = {
+	enabled: false,
+	settingsError: null,
+	level: "unknown",
+	phase: "off",
+	cycles: 0,
+	usedTokens: null,
+	cachedTokens: null,
+	usedPercent: null,
+	contextWindow: null,
+	thresholds: null,
+	tokensUntilWarning: null,
+	tokensUntilForced: null,
+	toolsLocked: false,
+	handoff: { status: "none", attempts: 0, noteChars: null, lastError: null, ownerRequested: false },
+};
 
 type FooterUsageSnapshotForTest = {
 	totalInput: number;
@@ -37,6 +57,7 @@ function createSession(options: {
 	costGuardDecision?: CostGuardDecision;
 	costGuardEnabled?: boolean;
 	subscription?: boolean;
+	selfCompaction?: SelfCompactionView;
 }): AgentSession {
 	const usage = options.usage;
 	const entries =
@@ -86,6 +107,7 @@ function createSession(options: {
 			getCwd: () => "/tmp/project",
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
+		getSelfCompactionView: () => options.selfCompaction ?? SELF_COMPACTION_OFF,
 		getSpawnedUsage: () => ({ cost: subagentCost, reports: subagentReports }),
 		getDailyUsageTotals: () => ({ totalCost: options.dailyCost ?? 0 }),
 		getCostSummary: () => costSummary,
@@ -165,6 +187,7 @@ describe("FooterComponent width handling", () => {
 				getEntriesSince,
 			},
 			getContextUsage: () => ({ tokens: 10, contextWindow: 100, percent: 10 }),
+			getSelfCompactionView: () => SELF_COMPACTION_OFF,
 		} as unknown as AgentSession;
 		const footer = new FooterComponent(session, createFooterData(1));
 		const getUsageSnapshot = (
@@ -542,5 +565,65 @@ describe("footer compact row (Workbench)", () => {
 		expect(line).not.toContain("\x1b]0;");
 		expect(line).not.toContain("\x1b[2J");
 		expect(visibleWidth(line)).toBeLessThanOrEqual(220);
+	});
+});
+
+describe("footer self-compaction gauge", () => {
+	beforeAll(() => initTheme("dark"));
+	const warning = gaugeView({ phase: "warning", cycles: 1 });
+
+	it("carries the gauge, phase and cycle on the existing stats row without adding a row", () => {
+		const plain = new FooterComponent(createSession({ sessionName: "" }), createFooterData(1)).render(200);
+		const lines = new FooterComponent(
+			createSession({ sessionName: "", selfCompaction: warning }),
+			createFooterData(1),
+		).render(200);
+		expect(lines).toHaveLength(plain.length);
+		const stats = stripAnsi(lines[1] ?? "");
+		expect(stats).toContain(`${selfCompactionGauge(warning)!.bar} 12.3%/200k (auto) WARNING cycle 1`);
+		expect(stripAnsi(plain[1] ?? "")).not.toContain("[");
+	});
+
+	it("drops the bar before the phase when the row is narrow", () => {
+		const session = createSession({ sessionName: "", selfCompaction: warning });
+		const full = stripAnsi(new FooterComponent(session, createFooterData(1)).render(400)[1] ?? "").trimEnd();
+		const statsWidth = full.indexOf("cycle 1") + "cycle 1".length;
+		const width = statsWidth - 10;
+		const stats = stripAnsi(new FooterComponent(session, createFooterData(1)).render(width)[1] ?? "");
+		expect(stats).not.toContain("[");
+		expect(stats).toContain("WARNING cycle 1");
+		expect(visibleWidth(stats)).toBeLessThanOrEqual(width);
+	});
+
+	it("collapses the bar before cutting the model label at 80 columns", () => {
+		const width = 80;
+		const options = {
+			sessionName: "",
+			modelId: "test-model",
+			usage: { input: 1_200, output: 400, cacheRead: 200, cacheWrite: 100, cost: { total: 0.0123 } },
+		};
+		const plain = stripAnsi(new FooterComponent(createSession(options), createFooterData(1)).render(width)[1] ?? "");
+		expect(plain).toMatch(/ test-model$/);
+		const footer = new FooterComponent(createSession({ ...options, selfCompaction: warning }), createFooterData(1));
+		expect(stripAnsi(footer.render(200)[1] ?? "")).toContain(selfCompactionGauge(warning)!.bar);
+		const stats = stripAnsi(footer.render(width)[1] ?? "");
+		expect(stats).toMatch(/ test-model$/);
+		expect(stats).toContain("12.3%/200k (auto) WARNING");
+		expect(stats).not.toContain("[");
+		expect(visibleWidth(stats)).toBeLessThanOrEqual(width);
+		const roomy = stripAnsi(footer.render(width + 20)[1] ?? "");
+		expect(roomy).toContain("WARNING cycle 1");
+		expect(roomy).toMatch(/ test-model$/);
+	});
+
+	it("keeps one row in the compact Workbench footer while showing the phase", () => {
+		const footer = new FooterComponent(
+			createSession({ sessionName: "", selfCompaction: warning }),
+			createFooterData(1),
+		);
+		footer.setCompact(true);
+		const lines = footer.render(240).map(stripAnsi);
+		expect(lines).toHaveLength(1);
+		expect(lines[0]).toContain("WARNING");
 	});
 });

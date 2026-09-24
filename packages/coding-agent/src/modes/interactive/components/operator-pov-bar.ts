@@ -1,4 +1,5 @@
 import { type Component, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
+import type { SelfCompactionView } from "../../../core/compaction/self-compaction-controller.ts";
 import type { SessionCostSummary } from "../../../core/cost/cost-summary.ts";
 import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
 import { isIdleProjection } from "../../../core/operator-projection/decision-stage-log.ts";
@@ -10,6 +11,7 @@ import {
 	semanticPlaneHealthValue,
 } from "../../../core/system-one/semantic-plane-health.ts";
 import { theme } from "../theme/theme.ts";
+import { selfCompactionGauge } from "./self-compaction-gauge.ts";
 
 /**
  * Everything the POV bar reads. Each getter is a live read of canonical runtime state — the
@@ -22,6 +24,7 @@ export interface OperatorPovSource {
 	getSemanticPlaneHealth(): SemanticPlaneHealth;
 	getCostSummary(): Pick<SessionCostSummary, "currentCost" | "subagentCost" | "subagentReports">;
 	getSessionWorkState?(): SessionWorkState;
+	getSelfCompactionView?(): SelfCompactionView;
 }
 
 export type OperatorPovSegmentId =
@@ -232,7 +235,20 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		});
 	}
 
-	if (projection.context) {
+	const view = source.getSelfCompactionView?.();
+	const gauge = view ? selfCompactionGauge(view) : null;
+	if (gauge) {
+		const reading = [gauge.percent, gauge.tag].filter(Boolean).join(" ");
+		segments.push({
+			id: "ctx",
+			label: "CTX",
+			value: `${gauge.bar} ${reading}`,
+			compact: reading,
+			...(gauge.cycle ? { extension: gauge.cycle } : {}),
+			...(gauge.tone ? { tone: gauge.tone } : {}),
+			dropOrder: gauge.tag ? 45 : 10,
+		});
+	} else if (projection.context) {
 		const percent = projection.context.percent;
 		segments.push({
 			id: "ctx",

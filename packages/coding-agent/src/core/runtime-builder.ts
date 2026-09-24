@@ -68,6 +68,8 @@ import type { SharedLaneToolOptions } from "./autonomy/lane-tool-surface.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import { buildWorkerSessionPrivatePathEnvelope } from "./autonomy/worker-session-private-scope.ts";
 import type { CapabilityTierPolicy } from "./capability-tier.ts";
+import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
+import type { SelfCompactionView } from "./compaction/self-compaction-controller.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "./context/memory-diagnostics.ts";
 import type { ContextGcReport } from "./context-gc.ts";
@@ -353,6 +355,7 @@ export interface RuntimeBuilderDeps {
 	/** Session-owned slow-tool registry. Optional only for narrow RuntimeBuilder test/embedding seams. */
 	getToolTaskDependencies?(): ToolTaskDependencies;
 	getRuntimeUpdateTool?(): ToolDefinition | undefined;
+	getSelfCompactTool?(): ToolDefinition | undefined;
 	/** Lazily resolve durable image storage only for a persisted/configured session. */
 	getSessionImageStore(): Pick<SessionImageStore, "retainContent"> | undefined;
 
@@ -360,6 +363,7 @@ export interface RuntimeBuilderDeps {
 	getMemoryManager(): MemoryManager;
 	/** Memory retrieval + prompt-inclusion diagnostics for the core diagnostics tool. */
 	getMemoryAuditDiagnostics(): { retrieval: MemoryRetrievalDiagnostics; promptInclusion: MemoryPromptInclusionReport };
+	getSelfCompactionView?(): SelfCompactionView;
 	/** Drop extension-contributed pending memory providers before a reload re-registers them. */
 	clearPendingMemoryProviders(): void;
 	createMemoryReloadSnapshot(): MemoryControllerReloadSnapshot;
@@ -1189,6 +1193,8 @@ export class RuntimeBuilder {
 					createImageGenerateToolDefinition(cwd, {
 						getModel: () => this.deps.getAgent().state.model,
 						getOAuthToken: () => this.deps.getModelRegistry().authStorage.getOAuthApiKey("openai-codex"),
+						getCredentialHeaders: (token) =>
+							this.deps.getModelRegistry().authStorage.getOAuthRequestHeaders("openai-codex", token),
 						getImageStore: () => this.deps.getSessionImageStore(),
 						getMessages: () => this.deps.getAgent().state.messages,
 					}),
@@ -1197,6 +1203,10 @@ export class RuntimeBuilder {
 			}
 			if (toolAccess.allows("runtime_update")) {
 				const definition = this.deps.getRuntimeUpdateTool?.();
+				if (definition) this._baseToolDefinitions.set(definition.name, definition);
+			}
+			if (toolAccess.allows(SELF_COMPACT_TOOL_NAME)) {
+				const definition = this.deps.getSelfCompactTool?.();
 				if (definition) this._baseToolDefinitions.set(definition.name, definition);
 			}
 			if (toolAccess.allows("skill")) {
@@ -1227,6 +1237,7 @@ export class RuntimeBuilder {
 					() => this.getAllTools(),
 					(messages) => this.deps.getContextGcReport(messages),
 					() => this.deps.getMemoryAuditDiagnostics(),
+					() => this.deps.getSelfCompactionView?.(),
 				)) {
 					this._baseToolDefinitions.set(definition.name, definition);
 				}

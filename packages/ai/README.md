@@ -1156,6 +1156,8 @@ Several providers require OAuth authentication instead of static API keys:
 - **OpenAI Codex** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models)
 - **GitHub Copilot** (Copilot subscription)
 
+After updating Claude Code, run `npm run sync:claude-identity --workspace=packages/ai`, then rebuild and restart Pi to apply the generated Anthropic OAuth identities to Messages and usage requests.
+
 For paid Cloud Code Assist subscriptions, set `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_PROJECT_ID` to your project ID.
 
 ### Vertex AI

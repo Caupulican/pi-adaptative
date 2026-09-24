@@ -13,7 +13,9 @@ import type { DecisionStage, DecisionStageLogView } from "../../../core/operator
 import type { FlowEvent, FlowOutcome } from "../../../core/operator-projection/flow-trace.ts";
 import type { OperatorProjection } from "../../../core/operator-projection/types.ts";
 import {
+	DOUBT_REASON_PREFIX,
 	doubtsFromReasons,
+	PROGRAM_SETTLED_REASON,
 	type SemanticEvaluationRecord,
 } from "../../../core/system-one/semantic-evaluation-ledger.ts";
 import type { SemanticPlaneHealth } from "../../../core/system-one/semantic-plane-health.ts";
@@ -80,6 +82,8 @@ export interface DecisionParticipant {
 	readonly task?: string;
 	readonly startedAt?: number;
 	readonly running: boolean;
+	readonly queued?: boolean;
+	readonly waitReason?: string;
 	/** The participant executed something in this objective (even if idle now). */
 	readonly acted: boolean;
 }
@@ -116,6 +120,8 @@ export interface DecisionGraphModel {
 		readonly evaluations: number;
 		/** What System One is doing with control right now, in one phrase. */
 		readonly doing: string;
+		readonly rootOwned: boolean;
+		readonly rootDoing?: string;
 	};
 	readonly stages: readonly DecisionStageRow[];
 	readonly current?: DecisionStageRow;
@@ -201,10 +207,6 @@ const STAGE_DOING: Readonly<Record<DecisionStage, string>> = {
 	done: "delivered",
 };
 
-function laneRunning(lane: LaneRecord): boolean {
-	return lane.status === "queued" || lane.status === "running";
-}
-
 function participantKind(lane: LaneRecord): DecisionParticipant["kind"] {
 	return lane.type === "research" ? "specialist" : "worker";
 }
@@ -271,6 +273,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 
 	const inFlight = health.inFlightEvaluations?.at(-1);
 	const last = evaluations.at(-1);
+	const rootOwned = projection.control.owner === "root";
 	const decider = {
 		owner: projection.control.owner,
 		...(inFlight ? { evaluating: { label: inFlight.label, startedAt: inFlight.startedAt } } : {}),
@@ -278,15 +281,21 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		evaluations: evaluations.length,
 		doing: inFlight
 			? `judging ${inFlight.label}`
-			: current
-				? STAGE_DOING[current.stage]
-				: projection.phase === "done"
-					? "delivered"
-					: projection.control.owner === "system_one"
-						? "decides next"
-						: projection.control.owner === "user"
-							? "waiting for you"
-							: "standing by",
+			: rootOwned
+				? health.state === "unbound"
+					? "off"
+					: "standing by"
+				: current
+					? STAGE_DOING[current.stage]
+					: projection.phase === "done"
+						? "delivered"
+						: projection.control.owner === "system_one"
+							? "decides next"
+							: projection.control.owner === "user"
+								? "waiting for you"
+								: "standing by",
+		rootOwned,
+		...(rootOwned && current ? { rootDoing: STAGE_DOING[current.stage] } : {}),
 	};
 
 	const routed = route.switched && route.activeModel !== route.rootModel;
@@ -331,8 +340,12 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 				...(lane.modelRef ? { model: shortModelName(lane.modelRef) } : {}),
 				...(workerRouteText(lane) ? { routeText: workerRouteText(lane) } : {}),
 				...(lane.label ? { task: lane.label } : {}),
-				...(parseTime(lane.startedAt) !== undefined ? { startedAt: parseTime(lane.startedAt) } : {}),
-				running: laneRunning(lane),
+				...(lane.status === "running" && parseTime(lane.startedAt) !== undefined
+					? { startedAt: parseTime(lane.startedAt) }
+					: {}),
+				running: lane.status === "running",
+				queued: lane.status === "queued",
+				...(lane.status === "queued" && lane.waitReason ? { waitReason: lane.waitReason } : {}),
 				acted: true,
 			}),
 		)
@@ -364,7 +377,10 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		routing.push({ text: `${formatRouteValue(route)} → ${shortModelName(route.activeModel)} for root`, live: true });
 	for (const lane of laneParticipants) {
 		if (lane.routeText && lane.model)
-			routing.push({ text: `${lane.routeText} → ${lane.model} for ${lane.label}`, live: lane.running });
+			routing.push({
+				text: `${lane.routeText} → ${lane.model} for ${lane.label}`,
+				live: lane.running || lane.queued === true,
+			});
 	}
 
 	const lastVerify = [...evaluations]
@@ -392,12 +408,32 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 
 	// Only the most recent evaluations are asked: a doubt from five judgments ago was either
 	// resolved by the work since, or it is being raised again by the evaluation that still holds it.
+	const deliveredAt =
+		projection.phase === "done" ? stageLog.entries.findLast((entry) => entry.stage === "done")?.enteredAt : undefined;
+	const questionKey = (record: SemanticEvaluationRecord, line: string) => {
+		const at = line.indexOf(": ");
+		return `${record.programId}\u0000${at > 0 ? line.slice(0, at) : line}`;
+	};
+	const settledQuestions = new Set<string>();
+	const settledPrograms = new Set<string>();
 	const doubts: DecisionDoubt[] = [];
 	for (const record of evaluations.slice(-DOUBT_EVALUATION_WINDOW).reverse()) {
-		for (const text of doubtsFromReasons(record.reasons)) {
+		const open = doubtsFromReasons(record.reasons);
+		const superseded = deliveredAt !== undefined && record.endedAt <= deliveredAt;
+		for (const text of superseded ? [] : open) {
+			if (settledPrograms.has(record.programId) || settledQuestions.has(questionKey(record, text))) continue;
 			if (doubts.some((doubt) => doubt.text === text)) continue;
 			doubts.push({ text, label: record.label, at: record.endedAt });
 		}
+		for (const line of record.reasons ?? [])
+			if (!line.startsWith(DOUBT_REASON_PREFIX)) settledQuestions.add(questionKey(record, line));
+		if (
+			record.outcome === "ok" &&
+			record.verdict === "pass" &&
+			record.reasons?.length === 1 &&
+			record.reasons[0] === PROGRAM_SETTLED_REASON
+		)
+			settledPrograms.add(record.programId);
 	}
 
 	const idle = input.idlePreparation;

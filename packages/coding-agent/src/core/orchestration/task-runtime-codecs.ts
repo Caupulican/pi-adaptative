@@ -814,6 +814,7 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		"usageReceipts",
 		"result",
 		"managedLifetime",
+		"executionStartedAt",
 		"createdAt",
 		"updatedAt",
 	]);
@@ -863,6 +864,9 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		),
 		...(attempt.result === undefined ? {} : { result: resultFromValue(attempt.result, `${label}.result`) }),
 		...(managedLifetime ? { managedLifetime } : {}),
+		...(attempt.executionStartedAt === undefined
+			? {}
+			: { executionStartedAt: isoDate(attempt.executionStartedAt, `${label}.executionStartedAt`) }),
 		createdAt,
 		updatedAt,
 	};

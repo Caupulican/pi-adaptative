@@ -13,8 +13,10 @@ import {
 	OperatorPovBarComponent,
 	type OperatorPovSource,
 } from "../src/modes/interactive/components/operator-pov-bar.ts";
+import { selfCompactionGauge } from "../src/modes/interactive/components/self-compaction-gauge.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
+import { gaugeView } from "./self-compaction-view-fixture.ts";
 
 beforeAll(() => initTheme("dark"));
 
@@ -409,5 +411,27 @@ describe("Operator POV bar", () => {
 		);
 		const narrow = layoutOperatorPovSegments(segments, 143, { plain: true });
 		expect(narrow).toContain("ACTOR worker Implement settings");
+	});
+
+	it("shows the self-compaction gauge and phase in CTX, keeping an active phase over lower facts", () => {
+		const forced = { ...source({}), getSelfCompactionView: () => gaugeView({ phase: "forced", cycles: 1 }) };
+		const ctx = buildOperatorPovSegments(forced).find((segment) => segment.id === "ctx")!;
+		expect(ctx).toMatchObject({
+			value: `${selfCompactionGauge(gaugeView())!.bar} 55.0% FORCED`,
+			compact: "55.0% FORCED",
+			extension: "cycle 1",
+			tone: "error",
+			dropOrder: 45,
+		});
+		const clear = { ...source({}), getSelfCompactionView: () => gaugeView({ phase: "clear" }) };
+		expect(buildOperatorPovSegments(clear).find((segment) => segment.id === "ctx")).toMatchObject({
+			compact: "55.0%",
+			dropOrder: 10,
+		});
+		for (let width = 60; width <= 260; width += 5) {
+			const row = renderPlain(forced, width);
+			if (row.includes("NEXT")) expect(row, String(width)).toContain("FORCED");
+		}
+		expect(renderPlain(forced, 260)).toContain("FORCED");
 	});
 });

@@ -107,6 +107,13 @@ import {
 } from "./compaction/early-compaction-economics.ts";
 import { RETENTION_AUDIT_CUSTOM_TYPE } from "./compaction/evidence-retention-projection.ts";
 import { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
+import {
+	createSelfCompactToolDefinition,
+	SelfCompactionController,
+	type SelfCompactionInfo,
+	type SelfCompactionNowOutcome,
+	type SelfCompactionView,
+} from "./compaction/self-compaction-controller.ts";
 import { type AutoCompactionReason, CompactionController, type IdlePreparationView } from "./compaction-controller.ts";
 import { CompactionSupport, type LastSentRequest } from "./compaction-support.ts";
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
@@ -184,6 +191,7 @@ import { hasGoalContinuationControl } from "./goals/goal-tool-names.ts";
 import { type ExplicitGoalStartAuthority, parseExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
 import { HostTurnReasoningController } from "./host-turn-reasoning.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
+import { subscribeHumanInputActivity } from "./human-input-activity.ts";
 import { HumanInputController } from "./human-input-controller.ts";
 import { DURABLE_LEARNING_MEMORY_POLICY_VERSION, DurableLearningState } from "./learning/durable-learning-state.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
@@ -516,6 +524,7 @@ export class AgentSession {
 	private readonly _memory: MemoryController;
 	private readonly _compactionSupport: CompactionSupport;
 	private readonly _compaction: CompactionController;
+	private readonly _selfCompaction: SelfCompactionController;
 	/** Provider request hook generation, replay-safe planning, admission, and lifecycle commit. */
 	private readonly _providerRequestRuntime: ProviderRequestRuntimeController;
 	/** Per-turn context-shaping subsystem (see context-pipeline.ts); owns the latest
@@ -706,7 +715,7 @@ export class AgentSession {
 			new AccountModelCatalog({
 				getModels: () => config.modelRegistry.getAll(),
 				hasConfiguredAuth: (model) => config.modelRegistry.hasConfiguredAuth(model),
-				getApiKey: async () => undefined,
+				getRequestAuth: async () => undefined,
 			});
 		this._executionLoopMode = config.executionLoopMode;
 		this._objectiveExecutionController = config.objectiveExecutionController;
@@ -1257,16 +1266,7 @@ export class AgentSession {
 			continueGoalLoop: (options) => this._goals.continueLoop(options),
 			// A running worker or background tool is the fact the goal loop reports as waiting.
 			// Waiting for that occupancy here never observes it: the caller is what would release it.
-			isForegroundBusy: () => {
-				const phase = this.getSessionWorkState().phase;
-				return (
-					phase === "foreground_preparing" ||
-					phase === "llm_streaming" ||
-					phase === "retrying" ||
-					phase === "compacting" ||
-					phase === "system_one_evaluating"
-				);
-			},
+			isForegroundBusy: () => this._isForegroundPhaseBusy(),
 			waitForForegroundIdle: () => this._foregroundRecovery.waitForIdle(),
 			collectWorkspaceSources: (args) => this._collectWorkspaceSources(args),
 			getPathAliasTable: () => this._pipeline.peekPathAliasTable(),
@@ -1302,7 +1302,7 @@ export class AgentSession {
 					this._isChildSession ||
 					this.isRetrying ||
 					this._reflectionTurnLifecycle.inFlight ||
-					!isSessionSettled(this, this._backgroundLanes.hasPendingIdleContinuation()) ||
+					!isSessionSettled(this, this._hasPendingIdleContinuation()) ||
 					this._pendingNextTurnMessages.length > 0 ||
 					this._backgroundLanes
 						.getLaneRecords()
@@ -1353,12 +1353,7 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			getModelRegistry: () => this._modelRegistry,
 			getModel: () => this.model,
-			getCompactionTriggerTokens: () => {
-				const model = this.model;
-				const settings = this._getAdaptedCompactionSettings();
-				if (!model?.contextWindow || !settings.enabled) return undefined;
-				return hardCompactionTriggerTokens(model.contextWindow, settings, model.autoCompactionTriggerTokens);
-			},
+			getCompactionTriggerTokens: () => this._hardCompactionTriggerTokens(),
 			estimateLineageRemainingRequests: () =>
 				this._cacheKnowledge.lineage(this.sessionId, historyLineage(this.agent.state.messages), Date.now()),
 			recordCacheDecision: (decision) => this._recordCacheDecision(decision),
@@ -1426,7 +1421,10 @@ export class AgentSession {
 			measureLiveContextTokens: () => this._measureLiveContextTokensForCompaction(),
 			runAutoCompaction: (reason, willRetry) => this._runAutoCompaction(reason, willRetry),
 			compactWithRetry: (run, signal, provider) => this._compactWithRetry(run, signal, provider),
-			onCompactionSettled: () => this._foregroundRecovery?.wakeIdleWaiters(),
+			onCompactionSettled: () => {
+				this._foregroundRecovery?.wakeIdleWaiters();
+				if (this._selfCompaction?.state().status === "compacted") this._selfCompaction.schedule();
+			},
 			// Evidence-preserving compaction runs on the session's own semantic engine. Without one
 			// the planner is never consulted and compaction behaves exactly as it did before.
 			getRetentionDecisionEngine: () => this._semanticDecisionEngine(),
@@ -1492,6 +1490,49 @@ export class AgentSession {
 				}
 			},
 		});
+		this._selfCompaction = new SelfCompactionController({
+			getSessionManager: () => this.sessionManager,
+			getSettings: () => this.settingsManager.getSelfCompactionSettings(),
+			getContextUsage: () => this.getContextUsage(),
+			getCachedTokens: () => {
+				const messages = this.agent.state.messages;
+				for (let index = messages.length - 1; index >= 0; index--) {
+					const message = messages[index]!;
+					if (
+						message.role === "assistant" &&
+						message.usage &&
+						message.stopReason !== "error" &&
+						message.stopReason !== "aborted"
+					) {
+						return message.usage.cacheRead;
+					}
+				}
+				return null;
+			},
+			getHardTriggerTokens: () => this._hardCompactionTriggerTokens(),
+			getEarlyTriggerTokens: () => this._earlyCompactionTriggerTokens(),
+			hasCompactableHistory: () => this._compaction.hasCompactableHistory(),
+			compact: (customInstructions) => this.compact(customInstructions),
+			deliverNote: (message) => this.sendCustomMessage(message, { triggerTurn: true }),
+			askForHandoff: (message) => this.sendCustomMessage(message, { triggerTurn: true }),
+			continueFromHandoff: () =>
+				this._durableCustomMessageTurns.continue(async () => {
+					let messages = this.agent.state.messages;
+					while (
+						messages.at(-1)?.role === "assistant" &&
+						(messages.at(-1) as AssistantMessage).stopReason === "error"
+					) {
+						messages = messages.slice(0, -1);
+					}
+					if (messages !== this.agent.state.messages) this.agent.state.messages = messages;
+				}, this._goals.getOwnershipGoalId()),
+			isForegroundBusy: () => this._isForegroundPhaseBusy(),
+			waitForForegroundIdle: () => this._foregroundRecovery.waitForIdle(),
+			isDisposed: () => this._disposed,
+			isAwaitingOwner: () => getResumableHumanInputSnapshot(this.sessionManager)?.status === "pending",
+			onHandoffSettled: () => this._scheduleIdleWork(undefined, false),
+			warn: (message) => this._emit({ type: "warning", message }),
+		});
 		const providerRequestContext = new ProviderRequestContextController({
 			// A side trip reads its small brief, never the transcript (see ModelRouterController.projectTurnContext).
 			transformBase: async (messages) => this._modelRouter.projectTurnContext(messages),
@@ -1509,6 +1550,10 @@ export class AgentSession {
 			previewReflectionCue: () => this._reflection.previewCurrentTurnCue(),
 			previewTaskDirectoryContext: () => captureSessionTaskDirectoryContext(this.sessionManager),
 			previewTaskAutomationContext: () => this._runtimeBuilder.previewTaskAutomationContext(),
+			previewSelfCompactionGuidance: () => ({
+				content: this._selfCompaction.guidance(),
+				cleared: this._selfCompaction.guidanceClearedText(),
+			}),
 			getGoalState: () => this.getGoalStateSnapshot(),
 			skillVault: this._skillVault,
 			getEdgeGrants: () => this.getEdgeGrants(),
@@ -1598,6 +1643,9 @@ export class AgentSession {
 				await this._toolProtocol.ensureActiveModelProtocol();
 			},
 			afterRun: async () => {
+				if (!isInterruptedAssistantStopReason(this._findLastAssistantMessage()?.stopReason)) {
+					this._selfCompaction.schedule();
+				}
 				this._toolProtocol.restoreWithheldTools();
 				this._flushPendingBashMessages();
 				await this._drainQueuedExtensionCommands();
@@ -1605,11 +1653,15 @@ export class AgentSession {
 		});
 		const wakeIdleOccupancy = (): void => this._foregroundRecovery.wakeIdleWaiters();
 		const unsubscribeSemantic = this._semanticPlaneHealth.subscribe(() => wakeIdleOccupancy());
-		const unsubscribeContinuation = this._backgroundLanes.subscribeIdleContinuationActivity(wakeIdleOccupancy);
+		const unsubscribeContinuation = this._subscribeIdleContinuationActivity(wakeIdleOccupancy);
+		const unsubscribeOwnerAnswers = subscribeHumanInputActivity(this.sessionManager, (activity) => {
+			if (activity.phase === "settled") this._selfCompaction.schedule();
+		});
 		this._systemOneController?.setEvaluationIdleListener(wakeIdleOccupancy);
 		this._unsubscribeIdleOccupancy = () => {
 			unsubscribeSemantic();
 			unsubscribeContinuation();
+			unsubscribeOwnerAnswers();
 			this._systemOneController?.setEvaluationIdleListener(undefined);
 		};
 		this._durableCustomMessageTurns = new DurableCustomMessageTurnController({
@@ -1789,6 +1841,8 @@ export class AgentSession {
 			},
 			getCustomTools: () => this._customTools,
 			getRuntimeUpdateTool: () => (this._isChildSession ? undefined : this.runtimeUpdates.createTool()),
+			getSelfCompactTool: () =>
+				this._isChildSession ? undefined : createSelfCompactToolDefinition(() => this._selfCompaction),
 			getBaseToolsOverride: () => this._baseToolsOverride,
 			getRequestedActiveToolNames: () => this._requestedActiveToolNames,
 			setRequestedActiveToolNames: (names) => {
@@ -1833,6 +1887,7 @@ export class AgentSession {
 			getSessionImageStore: () => this._getSessionImageStore(),
 			getMemoryManager: () => this._memory.getMemoryManager(),
 			getMemoryAuditDiagnostics: () => this._memory.getMemoryAuditDiagnostics(),
+			getSelfCompactionView: () => this._selfCompaction.view(),
 			clearPendingMemoryProviders: () => this._memory.clearPendingProviders(),
 			createMemoryReloadSnapshot: () => this._memory.createReloadSnapshot(),
 			restoreMemoryReloadSnapshot: (snapshot) => this._memory.restoreReloadSnapshot(snapshot),
@@ -1991,7 +2046,11 @@ export class AgentSession {
 			getRequiredRequestAuth: (model) => this._getRequiredRequestAuth(model),
 			getSettingsManager: () => this.settingsManager,
 			getAgent: () => this.agent,
-			onBranchChanged: () => this._reflection.invalidateCurrentTurnCueStateCache({ releaseActiveClaim: true }),
+			onBranchChanged: () => {
+				this._reflection.invalidateCurrentTurnCueStateCache({ releaseActiveClaim: true });
+				this._selfCompaction.resetBranchState();
+				this._selfCompaction.schedule();
+			},
 		});
 		this._modelSelection = new ModelSelectionController({
 			getAgent: () => this.agent,
@@ -2062,6 +2121,8 @@ export class AgentSession {
 			},
 		});
 		this._toolGate = new ToolGateController({
+			gateSelfCompaction: (toolName, assistantMessage) =>
+				this._selfCompaction.gateToolCall(toolName, assistantMessage),
 			getMutationScope: () => this.mutationScope,
 			noteMutatingCall: (toolName) => {
 				// The enforced work boundary: the first call that may change the world with no work declared
@@ -2719,6 +2780,7 @@ export class AgentSession {
 			if (!accessToken) return;
 			const summary = await listOpenAICodexRateLimitResetCredits({
 				accessToken,
+				credentialHeaders: this._modelRegistry.authStorage.getOAuthRequestHeaders(message.provider, accessToken),
 				baseUrl: codex?.baseUrl,
 				signal: AbortSignal.timeout(15_000),
 			});
@@ -3136,9 +3198,61 @@ export class AgentSession {
 	/** Preserve active verification identities and setup-repair proof inside the compaction checkpoint. */
 	private _decorateCompactionDetails(details: unknown): unknown {
 		const snapshot = new VerificationObligationTracker(this.agent.state.messages).createSnapshotDetails();
-		if (!snapshot) return details;
-		if (!details || typeof details !== "object" || Array.isArray(details)) return snapshot;
-		return { ...details, ...snapshot };
+		const selfCompaction = this._selfCompaction.state();
+		const handoff =
+			selfCompaction.status === "pending" && selfCompaction.request
+				? { selfCompaction: { handoffId: selfCompaction.request.id } }
+				: undefined;
+		if (!snapshot && !handoff) return details;
+		const base = !details || typeof details !== "object" || Array.isArray(details) ? {} : details;
+		return { ...base, ...snapshot, ...handoff };
+	}
+
+	private _scheduleIdleWork(options: PromptOptions | undefined, allowHandoff: boolean): void {
+		this._backgroundLanes.drainQueuedWorkerDelegations();
+		const interrupted = isInterruptedAssistantStopReason(this._findLastAssistantMessage()?.stopReason);
+		const handoff = allowHandoff && !interrupted && this._selfCompaction.schedule();
+		if (!interrupted && !handoff) this._backgroundLanes.scheduleGoalAutoContinueFromIdle(options);
+		this._backgroundLanes.scheduleResearchLaneFromIdle();
+	}
+
+	private _subscribeIdleContinuationActivity(listener: () => void): () => void {
+		const offLanes = this._backgroundLanes.subscribeIdleContinuationActivity(listener);
+		const offHandoff = this._selfCompaction.subscribeActivity(listener);
+		return () => {
+			offLanes();
+			offHandoff();
+		};
+	}
+
+	private _hasPendingIdleContinuation(): boolean {
+		return this._backgroundLanes.hasPendingIdleContinuation() || this._selfCompaction.hasPendingContinuation();
+	}
+
+	private _hardCompactionTriggerTokens(): number | undefined {
+		const model = this.model;
+		const settings = this._getAdaptedCompactionSettings();
+		if (!model?.contextWindow || !settings.enabled) return undefined;
+		return hardCompactionTriggerTokens(model.contextWindow, settings, model.autoCompactionTriggerTokens);
+	}
+
+	private _earlyCompactionTriggerTokens(): number | undefined {
+		const model = this.model;
+		const settings = this._getAdaptedCompactionSettings();
+		const percent = settings.triggerPercent ?? 0;
+		if (!model?.contextWindow || !settings.enabled || !(percent > 0 && percent < 1)) return undefined;
+		return Math.floor(model.contextWindow * percent);
+	}
+
+	private _isForegroundPhaseBusy(): boolean {
+		const phase = this.getSessionWorkState().phase;
+		return (
+			phase === "foreground_preparing" ||
+			phase === "llm_streaming" ||
+			phase === "retrying" ||
+			phase === "compacting" ||
+			phase === "system_one_evaluating"
+		);
 	}
 
 	/** Compatibility seam retained for focused auto-probe regressions. */
@@ -4163,8 +4277,8 @@ export class AgentSession {
 	get nativeActivity(): NativePiActivityPort {
 		return {
 			foreground: this._foregroundRecovery,
-			isSettled: () => isSessionSettled(this, this._backgroundLanes.hasPendingIdleContinuation()),
-			subscribePendingContinuation: (listener) => this._backgroundLanes.subscribeIdleContinuationActivity(listener),
+			isSettled: () => isSessionSettled(this, this._hasPendingIdleContinuation()),
+			subscribePendingContinuation: (listener) => this._subscribeIdleContinuationActivity(listener),
 		};
 	}
 
@@ -4268,7 +4382,7 @@ export class AgentSession {
 			.getLaneRecords()
 			.some((lane) => lane.status === "queued" || lane.status === "running");
 		const hasRunningTool = hasRunningBackgroundedToolCall(this._backgroundToolTasks.list());
-		const hasPendingContinuation = this._backgroundLanes.hasPendingIdleContinuation();
+		const hasPendingContinuation = this._hasPendingIdleContinuation();
 		const goalSnapshot = this.getGoalStateSnapshot();
 		const isBlocked = goalSnapshot?.status === "blocked";
 		const isDone = goalSnapshot?.status === "completed";
@@ -5229,14 +5343,10 @@ export class AgentSession {
 			}
 		}
 
-		this._backgroundLanes.drainQueuedWorkerDelegations();
-		if (!isInterruptedAssistantStopReason(this._findLastAssistantMessage()?.stopReason)) {
-			this._backgroundLanes.scheduleGoalAutoContinueFromIdle(options);
-		}
-		this._backgroundLanes.scheduleResearchLaneFromIdle();
+		this._scheduleIdleWork(options, true);
 
 		// Extension-only, and read after the lanes are scheduled so an armed continuation is visible.
-		if (isSessionSettled(this, this._backgroundLanes.hasPendingIdleContinuation())) {
+		if (isSessionSettled(this, this._hasPendingIdleContinuation())) {
 			this.checkOrphanedObjectiveWatchdog();
 			await this._extensionRunner.emit({ type: "agent_settled" });
 		}
@@ -5976,6 +6086,10 @@ export class AgentSession {
 		return this._backgroundLanes.getLaneRecords();
 	}
 
+	onLaneRecordsChanged(listener: (records: readonly LaneRecord[]) => void): () => void {
+		return this._backgroundLanes.subscribeLaneRecords(listener);
+	}
+
 	// Autonomy telemetry + gate-outcome history live in AutonomyTelemetry (see
 	// autonomy-telemetry.ts). These stubs keep the god file's internal call surface stable while the
 	// sink logic and the owned gate-outcome fields live there.
@@ -6305,6 +6419,26 @@ export class AgentSession {
 	/** Roll back one applied durable learning change. Delegates to {@link ReflectionController}. */
 	async rollbackLearningWrite(auditId: string): Promise<{ ok: boolean; reason: string }> {
 		return this._reflection.rollbackLearningWrite(auditId);
+	}
+
+	getSelfCompactionView(): SelfCompactionView {
+		return this._selfCompaction.view();
+	}
+
+	resumeSelfCompaction(): boolean {
+		return this._selfCompaction.schedule();
+	}
+
+	waitForSelfCompactionHandoff(): Promise<void> {
+		return this._selfCompaction.whenSettled();
+	}
+
+	getSelfCompactionInfo(): SelfCompactionInfo {
+		return this._selfCompaction.info();
+	}
+
+	selfCompactNow(): Promise<SelfCompactionNowOutcome> {
+		return this._selfCompaction.compactNow();
 	}
 
 	getContextUsage(): ContextUsage | undefined {

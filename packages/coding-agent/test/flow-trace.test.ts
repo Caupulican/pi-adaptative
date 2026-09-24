@@ -101,6 +101,69 @@ describe("flow trace", () => {
 	});
 });
 
+describe("flow trace for queued worker lanes", () => {
+	const at = (ms: number) => new Date(ms).toISOString();
+	const open = (trace: FlowTrace) =>
+		trace
+			.snapshot()
+			.filter((e) => e.endedAt === undefined)
+			.map((e) => `${e.actor}:${e.kind}`);
+
+	it("shows a queued lane as waiting and starts its worker clock when it starts running", () => {
+		const clock = { t: 1_000 };
+		const trace = new FlowTrace({ now: () => clock.t });
+		trace.observeLanes([lane("queued")]);
+		expect(open(trace)).toEqual(["worker:wait"]);
+		expect(trace.snapshot().find((e) => e.kind === "wait")).toMatchObject({ lane: "tester", startedAt: 1_000 });
+		clock.t = 9_000;
+		trace.observeLanes([lane("running", { startedAt: at(8_000) })]);
+		expect(open(trace)).toEqual(["worker:worker"]);
+		expect(trace.snapshot().find((e) => e.kind === "wait")).toMatchObject({ endedAt: 8_000, outcome: "ok" });
+		expect(trace.snapshot().find((e) => e.kind === "worker")).toMatchObject({ startedAt: 8_000 });
+		trace.observeLanes([lane("succeeded", { startedAt: at(8_000), completedAt: at(12_000) })]);
+		expect(open(trace)).toEqual([]);
+		expect(trace.snapshot().at(-1)).toMatchObject({ kind: "report", outcome: "ok" });
+	});
+
+	it("reports a queued lane that ends without running, and never draws it as a worker run", () => {
+		const trace = new FlowTrace({ now: () => 1_000 });
+		trace.observeLanes([lane("queued")]);
+		trace.observeLanes([lane("canceled", { completedAt: at(3_000) })]);
+		expect(open(trace)).toEqual([]);
+		expect(trace.snapshot().some((e) => e.kind === "worker")).toBe(false);
+		expect(trace.snapshot().find((e) => e.kind === "wait")).toMatchObject({ endedAt: 3_000, outcome: "cancelled" });
+		expect(trace.snapshot().at(-1)).toMatchObject({ kind: "report", outcome: "cancelled", to: "root" });
+	});
+
+	it("reports a lane that finished after the trace started even when none of its earlier states were seen", () => {
+		const trace = new FlowTrace({ now: () => 1_000 });
+		trace.observeLanes([lane("canceled", { queuedAt: at(2_000), completedAt: at(3_000) })]);
+		expect(open(trace)).toEqual([]);
+		expect(trace.snapshot().some((e) => e.kind === "worker")).toBe(false);
+		expect(trace.snapshot().at(-1)).toMatchObject({ kind: "report", outcome: "cancelled", startedAt: 3_000 });
+	});
+
+	it("does not report a lane that had already finished before the trace started (control)", () => {
+		const trace = new FlowTrace({ now: () => 1_000 });
+		trace.observeLanes([lane("succeeded", { startedAt: at(200), completedAt: at(500) })]);
+		expect(trace.snapshot()).toEqual([]);
+	});
+
+	it("starts a queued lane's wait at the time it was queued", () => {
+		const trace = new FlowTrace({ now: () => 9_000 });
+		trace.observeLanes([lane("queued", { queuedAt: at(4_000) })]);
+		expect(trace.snapshot().find((e) => e.kind === "wait")).toMatchObject({ startedAt: 4_000 });
+	});
+
+	it("starts a lane first seen running at its own start time (control)", () => {
+		const trace = new FlowTrace({ now: () => 9_000 });
+		trace.observeLanes([lane("running", { startedAt: at(4_000) })]);
+		expect(open(trace)).toEqual(["worker:worker"]);
+		expect(trace.snapshot().find((e) => e.kind === "worker")).toMatchObject({ startedAt: 4_000 });
+		expect(trace.snapshot().some((e) => e.kind === "wait")).toBe(false);
+	});
+});
+
 describe("Lanes view", () => {
 	beforeAll(() => initTheme("dark"));
 

@@ -36,6 +36,7 @@ function setup(overrides: Partial<ImageGenerationOptions> = {}) {
 	const controller = new ImageGenerationController(directory, {
 		getModel: () => ({ provider: "openai-codex" }),
 		getOAuthToken,
+		getCredentialHeaders: () => undefined,
 		getImageStore: () => store,
 		generateImages,
 		...overrides,
@@ -44,6 +45,22 @@ function setup(overrides: Partial<ImageGenerationOptions> = {}) {
 }
 
 describe("image generation host boundary", () => {
+	it("routes the image request with the credential headers of the exact token it resolved", async () => {
+		const getCredentialHeaders = vi.fn((token: string) =>
+			token === "oauth-token" ? { "X-OpenAI-Fedramp": "true" } : undefined,
+		);
+		const { controller, generateImages } = setup({ getCredentialHeaders });
+		await controller.generate("call-fedramp", { prompt: "A lighthouse" });
+		expect(getCredentialHeaders).toHaveBeenCalledWith("oauth-token");
+		expect(generateImages.mock.calls[0]?.[2]).toMatchObject({
+			accessToken: "oauth-token",
+			credentialHeaders: { "X-OpenAI-Fedramp": "true" },
+		});
+		const rotated = setup({ getOAuthToken: async () => "rotated-token", getCredentialHeaders });
+		await rotated.controller.generate("call-rotated", { prompt: "A lighthouse" });
+		expect(rotated.generateImages.mock.calls[0]?.[2]?.credentialHeaders).toBeUndefined();
+	});
+
 	it("persists the original image in existing bounded attachment storage", async () => {
 		const { controller, store, generateImages } = setup();
 		const result = await controller.generate("call-1", { prompt: "A fox" });
