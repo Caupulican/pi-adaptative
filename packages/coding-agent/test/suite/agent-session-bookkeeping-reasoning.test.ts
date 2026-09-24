@@ -55,18 +55,19 @@ describe("AgentSession bookkeeping-continuation reasoning", () => {
 		return { harness, reasoning, toolNames };
 	}
 
-	it("requests the continuation after a bookkeeping result at low and the one after real work at the session level", async () => {
+	it("proposes low after a bookkeeping result, and cache custody keeps the warm lane at its sent level", async () => {
 		const { harness, reasoning, toolNames } = await run();
 		expect(toolNames).toEqual(["task_steps", "read"]);
-		// prompt -> high; after task_steps -> low; after read -> high again.
-		expect(reasoning).toEqual(["high", "low", "high"]);
+		// The lane's cache is warm, so the lowering would cost a cache write: every request keeps "high".
+		expect(reasoning).toEqual(["high", "high", "high"]);
 		expect(harness.session.hostTurnReasoning.getLastDecision()).toMatchObject({
 			kind: "bookkeeping",
 			tools: ["task_steps"],
 			resolvedLevel: "low",
 			lowered: true,
+			held: true,
 		});
-		expect(harness.session.hostTurnReasoning.getLoweredRequestCount()).toBe(1);
+		expect(harness.session.hostTurnReasoning.getLoweredRequestCount()).toBe(0);
 		expect(harness.session.thinkingLevel).toBe("high");
 	});
 

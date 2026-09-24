@@ -100,6 +100,7 @@ import { createRetentionDecisionEngine } from "./compaction/retention-decision-e
 import { type AutoCompactionReason, CompactionController } from "./compaction-controller.ts";
 import { CompactionSupport, type LastSentRequest } from "./compaction-support.ts";
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
+import { CacheCustody } from "./context/cache-custody.ts";
 import { CacheKnowledge } from "./context/cache-knowledge.ts";
 import {
 	CacheObservationRecorder,
@@ -605,6 +606,8 @@ export class AgentSession {
 	});
 	/** The learned cache view (survival curves, lineage lifetime, compaction outcomes) from the ledger. */
 	private readonly _cacheKnowledge = new CacheKnowledge(() => this.getDecisionLedger());
+	/** Cache custody: the gate every surface change goes through and the guard every request passes. */
+	private readonly _custody = new CacheCustody();
 	/** The foreground lane's last sent request, for a summarizer on the same lane to extend. */
 	private _lastSentRequest: LastSentRequest | undefined;
 	private readonly _cacheObservations = new CacheObservationRecorder((sessionId, lane) => {
@@ -842,12 +845,19 @@ export class AgentSession {
 			const resolvedReasoning = previousResolveRequestReasoning
 				? previousResolveRequestReasoning(reasoning, request)
 				: reasoning;
-			return this._costGuard.resolveRequestReasoning(
-				request.model,
-				request.context,
+			// The lane keeps the reasoning it last sent unless the owner changed it or the change is free; the
+			// owner's cost ceiling applies after the gate and always passes.
+			const lane = cacheLaneKey(request.model.api, request.model.provider, request.model.id);
+			const held = this._custody.admitReasoning(
+				lane,
+				resolvedReasoning,
 				this.hostTurnReasoning.resolveRequestReasoning(request.model, request.sourceMessages, resolvedReasoning),
-				request.maxTokens,
-			);
+				() => this._laneCacheGone(request.model),
+			) as typeof resolvedReasoning;
+			this.hostTurnReasoning.noteSent(held);
+			const final = this._costGuard.resolveRequestReasoning(request.model, request.context, held, request.maxTokens);
+			if (final !== held) this._custody.overrideReasoning(lane, final, "the cost ceiling downgraded the level");
+			return final;
 		};
 		// `this.settingsManager` is assigned below; the chain closes over the config reference because
 		// it must be installed before that assignment runs. See session-stream-chain.ts for the order
@@ -1220,6 +1230,10 @@ export class AgentSession {
 			estimateLineageRemainingRequests: () =>
 				this._cacheKnowledge.lineage(this.sessionId, historyLineage(this.agent.state.messages), Date.now()),
 			recordCacheDecision: (decision) => this._recordCacheDecision(decision),
+			sanctionCacheBreak: (kind, reason) => {
+				const model = this.model;
+				this._custody.sanction(kind, reason, model ? cacheLaneKey(model.api, model.provider, model.id) : undefined);
+			},
 			getAgentDir: () => this._agentDir,
 			getCwd: () => this._cwd,
 			getActiveToolNames: () => this.getActiveToolNames(),
@@ -1542,6 +1556,7 @@ export class AgentSession {
 				this._eventListeners.length > 0 ? (message: string) => this._emit({ type: "warning", message }) : undefined,
 			({ requestId, model, context, sourceContext }) => {
 				this._lastSentRequest = { model, context, sourceMessages: sourceContext.messages };
+				this._guardCacheSurface();
 				this._toolSelection.observeProviderRequest(
 					requestId,
 					formatModelRouterModel(model),
@@ -3116,6 +3131,43 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * The guard, once per foreground request: classify it against the lane's surface. A break the gate
+	 * sanctioned is recorded as priced; one it did not is recorded as unsanctioned, with its kind and index.
+	 */
+	private _guardCacheSurface(): void {
+		const snapshot = latestRequestSnapshot(this.sessionManager);
+		if (!snapshot) return;
+		const verdict = this._custody.classify({
+			lane: cacheLaneKey(snapshot.api, snapshot.provider, snapshot.modelId),
+			...(snapshot.prefixIntact !== undefined ? { prefixIntact: snapshot.prefixIntact } : {}),
+			...(snapshot.firstDivergentKind !== undefined ? { firstDivergentKind: snapshot.firstDivergentKind } : {}),
+			...(snapshot.firstDivergentIndex !== undefined ? { firstDivergentIndex: snapshot.firstDivergentIndex } : {}),
+			...(snapshot.reasoning !== undefined ? { reasoning: snapshot.reasoning } : {}),
+		});
+		if (verdict.classification === "append" || verdict.classification === "first") return;
+		this._recordCacheDecision({
+			kind: "cache_break",
+			decidedAt: Date.now(),
+			admit: verdict.classification === "sanctioned",
+			reason:
+				verdict.classification === "sanctioned"
+					? `sanctioned:${verdict.kind} (${verdict.reason})`
+					: `unsanctioned:${verdict.kind}@${verdict.index ?? "?"}`,
+			detail: { requestId: snapshot.requestId, model: `${snapshot.provider}/${snapshot.modelId}` },
+		});
+	}
+
+	/** Whether the lane's cache is expected gone at the real idle gap: a surface change there costs nothing. */
+	private _laneCacheGone(model: Model<Api>): boolean {
+		const lane = cacheLaneKey(model.api, model.provider, model.id);
+		const now = Date.now();
+		const last = this._cacheKnowledge.lastResponseAt(this.sessionId, lane);
+		if (last === undefined) return false;
+		const estimate = this._cacheKnowledge.retainedAfter(lane, Math.max(0, now - last), now);
+		return estimate !== undefined && estimate.retained + estimate.standardError <= 0;
+	}
+
 	private _recordCacheDecision(decision: Omit<CacheDecisionRow, "sessionId" | "cwd">): void {
 		try {
 			this.getDecisionLedger()?.recordCacheDecision({ ...decision, sessionId: this.sessionId, cwd: this._cwd });
@@ -3126,6 +3178,10 @@ export class AgentSession {
 
 	private _refreshAfterCompaction(): void {
 		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+		// A compaction rewrites the history every lane sends: the next request's break is sanctioned, and it
+		// is a cold moment for every surface change that waited.
+		this._custody.sanction("compaction", "a compaction replaced the history");
+		this._custody.flushColdMoment("compaction");
 		// The compacted history replaces the one the sent-prefix marks were counting: none of it has been
 		// sent in this form. Without the reset the monotone mark kept the pre-compaction count, so the whole
 		// new history read as already sent (no context-GC packing, no sanitizer dedup) until it regrew past

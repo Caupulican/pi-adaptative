@@ -195,6 +195,8 @@ export interface ContextPipelineDeps {
 		| undefined;
 	/** Records a priced cache decision in the decision ledger. */
 	recordCacheDecision?(decision: Omit<CacheDecisionRow, "sessionId" | "cwd">): void;
+	/** Issue the cache custody token for an admitted sent-prefix rewrite: the next request's break is priced. */
+	sanctionCacheBreak?(kind: string, reason: string): void;
 	/** Root dir the host-keyed {@link FitnessStore} and per-session gc/artifact storage live under. */
 	getAgentDir(): string;
 	/** Workspace root, passed to the context-gc pass. */
@@ -863,6 +865,7 @@ export class ContextPipeline {
 				this._latestContextGcReport = result.report;
 				const rewrite = result.report.sentPrefixRewrite;
 				if (rewrite) {
+					if (rewrite.admit) this.deps.sanctionCacheBreak?.("gc_pack", rewrite.reason);
 					this.deps.recordCacheDecision?.({
 						kind: "gc_pack",
 						decidedAt: Date.now(),

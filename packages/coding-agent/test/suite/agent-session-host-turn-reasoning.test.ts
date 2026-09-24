@@ -86,17 +86,16 @@ describe("AgentSession host-turn reasoning", () => {
 		return { harness, reasoning };
 	}
 
-	it("requests the host's own completion turn one level below the session, leaving ordinary turns alone", async () => {
+	it("proposes the host's own completion turn one level below the session, held at the warm lane's sent level", async () => {
 		const { harness, reasoning } = await runBackgroundToolCompletionTurn();
 
 		const completionDelivered = harness.session.messages.some(
 			(message) => message.role === "custom" && message.customType === "background-tool-completion",
 		);
 		expect(completionDelivered).toBe(true);
-		// The operator's own prompt and the model's continuation keep the session level; only the
-		// request that answers the host-delivered completion is lowered.
-		expect(reasoning.slice(0, 2)).toEqual(["high", "high"]);
-		expect(reasoning.at(-1)).toBe("medium");
+		// The policy proposes "medium" for the request answering the host-delivered completion, but the
+		// lane's cache is warm: cache custody keeps the level the lane last sent.
+		expect(reasoning).toEqual(["high", "high", "high"]);
 
 		const decision = harness.session.hostTurnReasoning.getLastDecision();
 		expect(decision).toMatchObject({
@@ -104,8 +103,9 @@ describe("AgentSession host-turn reasoning", () => {
 			sessionLevel: "high",
 			resolvedLevel: "medium",
 			lowered: true,
+			held: true,
 		});
-		expect(harness.session.hostTurnReasoning.getLoweredRequestCount()).toBe(1);
+		expect(harness.session.hostTurnReasoning.getLoweredRequestCount()).toBe(0);
 		// The policy is request-local: the session's own level never moves.
 		expect(harness.session.thinkingLevel).toBe("high");
 	});
@@ -125,8 +125,11 @@ describe("AgentSession host-turn reasoning", () => {
 			settings: { autoLearn: { reflectionReview: false }, reasoning: { hostTurnThinking: "minimal" } },
 		});
 
-		expect(reasoning.slice(0, 2)).toEqual(["high", "high"]);
-		expect(reasoning.at(-1)).toBe("minimal");
-		expect(harness.session.hostTurnReasoning.getLoweredRequestCount()).toBe(1);
+		expect(reasoning).toEqual(["high", "high", "high"]);
+		expect(harness.session.hostTurnReasoning.getLastDecision()).toMatchObject({
+			resolvedLevel: "minimal",
+			held: true,
+		});
+		expect(harness.session.hostTurnReasoning.getLoweredRequestCount()).toBe(0);
 	});
 });

@@ -54,6 +54,8 @@ export interface HostTurnReasoningDecision {
 	resolvedLevel: ModelThinkingLevel;
 	/** False when the policy resolved to the session level itself (`"inherit"`, or a floor/clamp no-op). */
 	lowered: boolean;
+	/** The level actually sent differed: cache custody kept the lane's last sent level (set by `noteSent`). */
+	held?: boolean;
 }
 
 /** Both rules' settings; the controller reads them live so an edit applies to the next request. */
@@ -244,6 +246,8 @@ export function resolveBookkeepingRequestReasoning(input: {
 export class HostTurnReasoningController {
 	private readonly getSettings: () => CheapTurnSettings;
 	private lastDecision: HostTurnReasoningDecision | undefined;
+	/** The decision `resolveRequestReasoning` proposed, until `noteSent` says what the request sent. */
+	private proposed: HostTurnReasoningDecision | undefined;
 	private loweredRequests = 0;
 
 	constructor(getSettings: () => CheapTurnSettings) {
@@ -253,6 +257,19 @@ export class HostTurnReasoningController {
 	/** Latest host-turn decision for the host UI/report. Undefined until one host turn has run. */
 	getLastDecision(): HostTurnReasoningDecision | undefined {
 		return this.lastDecision;
+	}
+
+	/**
+	 * What the request sent after the cache custody gate: the proposal becomes the last decision, and a
+	 * lowering counts only when the lowered level was the one sent.
+	 */
+	noteSent(level: ModelThinkingLevel | undefined): void {
+		const decision = this.proposed;
+		this.proposed = undefined;
+		if (!decision) return;
+		const held = level !== decision.resolvedLevel;
+		this.lastDecision = held ? { ...decision, held } : decision;
+		if (decision.lowered && !held) this.loweredRequests++;
 	}
 
 	/** How many provider requests this session has lowered. The census counter. */
@@ -276,10 +293,8 @@ export class HostTurnReasoningController {
 			const decision =
 				resolveHostTurnRequestReasoning({ ...shared, setting: settings.hostTurn }) ??
 				resolveBookkeepingRequestReasoning({ ...shared, setting: settings.bookkeeping });
-			if (!decision) return reasoning;
-			this.lastDecision = decision;
-			if (decision.lowered) this.loweredRequests++;
-			return decision.resolvedLevel;
+			this.proposed = decision;
+			return decision ? decision.resolvedLevel : reasoning;
 		} catch {
 			// Reasoning policy is request-local and advisory; it must never disrupt the provider call.
 			return reasoning;

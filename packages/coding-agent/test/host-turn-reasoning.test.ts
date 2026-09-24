@@ -247,23 +247,30 @@ describe("host-turn reasoning", () => {
 			expect(controller.resolveRequestReasoning(reasoningModel, [userMessage("ordinary")], "high")).toBe("high");
 			expect(controller.getLastDecision()).toBeUndefined();
 
+			// A proposal counts only once `noteSent` confirms the lowered level was the one sent.
 			const host = [completion("background-tool-completion")];
 			expect(controller.resolveRequestReasoning(reasoningModel, host, "high")).toBe("medium");
+			expect(controller.getLoweredRequestCount()).toBe(0);
+			controller.noteSent("medium");
 			expect(controller.resolveRequestReasoning(reasoningModel, host, "high")).toBe("medium");
+			controller.noteSent("medium");
 			expect(controller.getLoweredRequestCount()).toBe(2);
 			expect(controller.getLastDecision()?.customType).toBe("background-tool-completion");
 
 			// An ordinary request afterwards changes neither the count nor the retained decision.
 			expect(controller.resolveRequestReasoning(reasoningModel, [userMessage("next")], "high")).toBe("high");
+			controller.noteSent("high");
 			expect(controller.getLoweredRequestCount()).toBe(2);
 			expect(controller.getLastDecision()?.resolvedLevel).toBe("medium");
 
-			// A bookkeeping continuation is the second rule: low by default, counted the same way.
+			// A bookkeeping continuation is the second rule: low by default. Held at the lane's sent level by
+			// cache custody, it is retained as held and not counted.
 			expect(controller.resolveRequestReasoning(reasoningModel, bookkeepingRequest("task_steps"), "high")).toBe(
 				"low",
 			);
-			expect(controller.getLoweredRequestCount()).toBe(3);
-			expect(controller.getLastDecision()).toMatchObject({ kind: "bookkeeping", tools: ["task_steps"] });
+			controller.noteSent("high");
+			expect(controller.getLoweredRequestCount()).toBe(2);
+			expect(controller.getLastDecision()).toMatchObject({ kind: "bookkeeping", tools: ["task_steps"], held: true });
 		});
 
 		it("passes the request through unchanged when the policy itself fails", () => {

@@ -153,7 +153,11 @@ export function handleUsageCommand(host: UsageReportHost): void {
 	const hostTurn = host.session.hostTurnReasoning.getLastDecision();
 	const loweredHostTurns = host.session.hostTurnReasoning.getLoweredRequestCount();
 	if (hostTurn) {
-		const effect = hostTurn.lowered ? `${hostTurn.sessionLevel} to ${hostTurn.resolvedLevel}` : "inherited";
+		const effect = hostTurn.held
+			? `${hostTurn.sessionLevel} to ${hostTurn.resolvedLevel} proposed, held at the lane's sent level`
+			: hostTurn.lowered
+				? `${hostTurn.sessionLevel} to ${hostTurn.resolvedLevel}`
+				: "inherited";
 		info += `${theme.fg("dim", "Host-turn thinking:")} ${effect} (${loweredHostTurns} lowered; last ${hostTurn.customType})\n`;
 	} else {
 		info += `${theme.fg("dim", "Host-turn thinking:")} no host-initiated turn yet\n`;
