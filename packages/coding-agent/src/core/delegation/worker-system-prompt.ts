@@ -53,6 +53,8 @@ export interface BuildWorkerSystemPromptOptions {
 	 * never raw memory: only applicable USER.md preference lines, trailers stripped.
 	 */
 	personaGuidance?: string;
+	/** Evidence-gated tool-selection hints learned for this model, as root's system prompt renders them. */
+	toolSelectionHints?: string;
 }
 
 /** Formats provider and model ID into standard modelRef key. */
@@ -155,6 +157,7 @@ export function buildWorkerSystemPrompt(options: BuildWorkerSystemPromptOptions)
 		options.rolePrompt,
 		options.workerResourceSystemPrompt,
 		modelGuidancePrompt,
+		options.toolSelectionHints,
 		contextPrompt,
 		options.personaGuidance,
 	].filter((part): part is string => Boolean(part && part.trim().length > 0));

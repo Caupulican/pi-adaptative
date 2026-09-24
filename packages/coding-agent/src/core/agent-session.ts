@@ -363,6 +363,7 @@ import { ToolGateController } from "./tool-gate-controller.ts";
 import { type ToolProbeReport, type ToolProbeResult, ToolProtocolController } from "./tool-protocol-controller.ts";
 import { TOOL_RECOVERY_EVENT_LOG_FILE } from "./tool-recovery-log-records.ts";
 import { ToolRecoveryLogger } from "./tool-recovery-logger.ts";
+import { formatToolSelectionHints } from "./tool-selection/promotion.ts";
 import { ToolPerformanceStore } from "./tool-selection/tool-performance-store.ts";
 import { formatToolSelectionReport, ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import type { BashOperations } from "./tools/bash.ts";
@@ -1117,6 +1118,27 @@ export class AgentSession {
 			},
 			observeWorkerResponse: (message, observation) => this._recordCacheObservation(message, observation),
 			getSharedLaneToolOptions: () => this._runtimeBuilder.getSharedLaneToolOptions(),
+			// A worker learns tool choice on its own model into the same evidence store root learns in.
+			createWorkerToolSelection: (model, tools) => {
+				const modelRef = formatModelRouterModel(model);
+				const selection = new ToolSelectionController({
+					store: this._toolPerformanceStore,
+					getModelRef: () => modelRef,
+					getActiveTools: () =>
+						tools.map((tool) => ({
+							name: tool.name,
+							description: tool.description,
+							parameters: tool.parameters,
+						})),
+				});
+				return {
+					hints: () => formatToolSelectionHints(selection.getActiveHints()),
+					begin: (toolCallId, toolName, args) => {
+						selection.begin(toolCallId, toolName, args, { modelRef });
+					},
+					complete: (toolCallId, succeeded, content) => selection.complete(toolCallId, succeeded, content),
+				};
+			},
 			markModelExhausted: (model, retryAfterMs) =>
 				this._foregroundRecovery.markModelExhausted(`${model.provider}/${model.id}`, retryAfterMs),
 			// Worker conversations plan with root's own request-context controller, on their own lane: the

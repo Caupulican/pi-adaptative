@@ -139,6 +139,16 @@ export async function runProviderCompletionWithBackoff(args: {
  * persist assistant tool requests before execution, append messages before mailbox acknowledgements,
  * checkpoint cumulative usage before later boundaries, and compact only the provider projection.
  */
+/**
+ * Tool selection for one worker conversation, the same learning root runs: the evidence-gated hints
+ * learned for the worker's model, and each tool call recorded into the shared evidence store.
+ */
+export interface WorkerToolSelection {
+	hints(): string | undefined;
+	begin(toolCallId: string, toolName: string, args: unknown): void;
+	complete(toolCallId: string, succeeded: boolean, content: readonly unknown[]): void;
+}
+
 /** One worker provider response, with what the cache survival estimator measures it against. */
 export interface WorkerResponseObservation {
 	readonly agentId: string;
@@ -202,6 +212,8 @@ export interface WorkerAttemptExecutorOptions {
 	 * tokens of its fixed prefix (system prompt and tool schemas) on the attempt's first request.
 	 */
 	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput, prefixTokens?: number): void;
+	/** Tool selection on the worker's model (see {@link WorkerToolSelection}). */
+	toolSelection?: WorkerToolSelection;
 	/** Each worker provider response, recorded as a cache observation on the worker's own history. */
 	observeWorkerResponse?(message: AssistantMessage, observation: WorkerResponseObservation): void;
 	/** Parent semantic duplicate review of code this worker's edit or write added; see the controller dep. */
@@ -389,6 +401,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	let lastRequest: { snapshot: SessionRequestSnapshotInput; openedAt: number } | undefined;
 	/** The worker lane's last request exactly as sent, for its summarizer to extend on the warm cache. */
 	let lastSent: LastSentRequest | undefined;
+	/** Fixed per attempt, so the worker's system prompt stays byte-stable across its requests. */
+	const toolSelectionHints = options.toolSelection?.hints();
 	/** The durable history the request being planned carries (what the last sent request is checked against). */
 	let planningMessages: readonly AgentMessage[] = [];
 	let firstMailboxPoll = true;
@@ -737,6 +751,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 											model: options.model,
 											projectContextFiles: options.projectContextFiles,
 											...(options.personaGuidance ? { personaGuidance: options.personaGuidance } : {}),
+											...(toolSelectionHints ? { toolSelectionHints } : {}),
 										}),
 										history,
 										messages: [],
@@ -782,6 +797,11 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 													checkpointUsage(
 														`Authorized worker tool '${context.toolCall.name}' under its durable grant.`,
 													);
+													options.toolSelection?.begin(
+														context.toolCall.id,
+														context.toolCall.name,
+														context.args,
+													);
 												}
 												return decision;
 											} catch (error) {
@@ -791,6 +811,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										},
 										afterToolCall: async ({ toolCall, args, result, isError }) => {
 											try {
+												options.toolSelection?.complete(toolCall.id, !isError, result.content);
 												let duplicateNote: string | undefined;
 												if (
 													(toolCall.name === "write" || toolCall.name === "edit") &&

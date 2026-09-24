@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { type AgentContextPlan, type AgentMessage, decodeExecutionContext } from "@caupulican/pi-agent-core";
+import {
+	type AgentContextPlan,
+	type AgentMessage,
+	type AgentTool,
+	decodeExecutionContext,
+} from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import type { SessionRequestSnapshotInput } from "@caupulican/pi-agent-core/session";
@@ -93,7 +98,11 @@ import { getLatestWorkerClaimSnapshot } from "./session-worker-claim.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
 import { type WorkerAgentControlPort, type WorkerGrantSummary, workerAgentMessageId } from "./worker-agent-control.ts";
 import { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
-import { createWorkerAttemptExecutor, type WorkerResponseObservation } from "./worker-attempt-executor.ts";
+import {
+	createWorkerAttemptExecutor,
+	type WorkerResponseObservation,
+	type WorkerToolSelection,
+} from "./worker-attempt-executor.ts";
 import {
 	bindCompiledToolSurface,
 	bindCompiledVerifierIdentity,
@@ -246,6 +255,8 @@ export interface WorkerDelegationControllerDeps {
 	}): Promise<AgentContextPlan>;
 	/** The cache guard for worker lanes: each accepted worker provider request, as its recorded snapshot. */
 	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput, prefixTokens?: number): void;
+	/** Tool selection for a worker's model and tools, sharing root's evidence store. */
+	createWorkerToolSelection?(model: Model<Api>, tools: readonly AgentTool[]): WorkerToolSelection;
 	/** Record a model a worker ran out of quota, where root's billing failover records its own. */
 	markModelExhausted?(model: Model<Api>, retryAfterMs?: number): void;
 	/** Root's tool mechanics (output reduction, encodings, shell engine, packing), shared with every lane. */
@@ -3413,6 +3424,9 @@ export class WorkerDelegationController {
 			...(this.deps.observeWorkerProgress ? { observeWorkerProgress: this.deps.observeWorkerProgress } : {}),
 			...(this.deps.observeWorkerRequest ? { observeWorkerRequest: this.deps.observeWorkerRequest } : {}),
 			...(this.deps.observeWorkerResponse ? { observeWorkerResponse: this.deps.observeWorkerResponse } : {}),
+			...(this.deps.createWorkerToolSelection
+				? { toolSelection: this.deps.createWorkerToolSelection(model, toolSurface.tools) }
+				: {}),
 			...(this.deps.planWorkerRequest
 				? {
 						planRequest: (messages: AgentMessage[], sentPrefixCount: number, signal?: AbortSignal) =>

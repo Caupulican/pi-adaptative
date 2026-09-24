@@ -84,6 +84,7 @@ function createExecutorHarness(
 	sharedBudget?: SharedCapabilityBudget,
 	workerContextFiles: ReadonlyArray<{ path: string; content?: string }> = [],
 	planRequest?: WorkerAttemptExecutorOptions["planRequest"],
+	extra: Partial<WorkerAttemptExecutorOptions> = {},
 ) {
 	const events: string[] = [];
 	const conversation = workerConversation();
@@ -228,6 +229,7 @@ function createExecutorHarness(
 		},
 		warn: (message) => events.push(`warn:${message}`),
 		...(planRequest ? { planRequest } : {}),
+		...extra,
 		observeWorkerResponse: (message, observation) =>
 			observedResponses.push({
 				agentId: observation.agentId,
@@ -533,6 +535,66 @@ describe("worker attempt executor", () => {
 		expect(result.rawOutcome.accepted).toBe(true);
 		expect(packCalls).toEqual([{ count: 2, frozenBelow: 1 }]);
 		expect(planned).toEqual([history[1]]);
+	});
+
+	it("gives the worker the tool-selection hints learned for its model and records its tool calls", async () => {
+		let capturedSystemPrompt = "";
+		const calls: string[] = [];
+		const harness = createExecutorHarness(
+			async (options) => {
+				capturedSystemPrompt = options.systemPrompt;
+				const assistant = assistantToolRequest(17);
+				const toolCall = assistant.content.find((content) => content.type === "toolCall");
+				if (toolCall?.type !== "toolCall" || !options.beforeToolCall || !options.afterToolCall) {
+					throw new Error("Missing tool hooks");
+				}
+				await options.onMessage?.(assistant);
+				const context = { systemPrompt: "", messages: [], tools: [] };
+				await options.beforeToolCall({
+					assistantMessage: assistant,
+					toolCall,
+					args: { path: "focused.ts" },
+					context,
+				});
+				await options.afterToolCall({
+					assistantMessage: assistant,
+					toolCall,
+					args: { path: "focused.ts" },
+					result: { content: [{ type: "text", text: "file" }], details: {} },
+					isError: false,
+					context,
+				});
+				const finalAssistant = fauxAssistantMessage('{"summary":"read","status":"completed"}');
+				await options.onMessage?.(finalAssistant);
+				return {
+					text: '{"summary":"read","status":"completed"}',
+					usage: ZERO_USAGE,
+					stopReason: "stop",
+					messages: [...(options.history ?? []), finalAssistant],
+				};
+			},
+			100,
+			undefined,
+			undefined,
+			undefined,
+			30_000,
+			true,
+			undefined,
+			[],
+			undefined,
+			{
+				toolSelection: {
+					hints: () => "TOOL SELECTION HINTS\n- read: `read` established for this model",
+					begin: (id, name) => calls.push(`begin:${name}:${id}`),
+					complete: (id, succeeded) => calls.push(`complete:${succeeded}:${id}`),
+				},
+			},
+		);
+		await harness.executor.run();
+		expect(capturedSystemPrompt).toContain("`read` established for this model");
+		expect(calls).toHaveLength(2);
+		expect(calls[0]).toMatch(/^begin:read:/);
+		expect(calls[1]).toMatch(/^complete:true:/);
 	});
 
 	it("threads final worker context into the isolated system prompt", async () => {
