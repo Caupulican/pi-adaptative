@@ -94,8 +94,26 @@ export class AccountModelCatalog {
 	}
 
 	/** Resolves once the latest check has settled (immediately when none was started). */
-	async ready(): Promise<void> {
-		await this.pending;
+	/**
+	 * Settles when every account check has, or when `signal` aborts first: a submission the owner
+	 * interrupted does not keep waiting on an account check (a credential refresh can stall).
+	 */
+	async ready(signal?: AbortSignal): Promise<void> {
+		if (!signal) {
+			await this.pending;
+			return;
+		}
+		if (signal.aborted) return;
+		let onAbort: (() => void) | undefined;
+		const aborted = new Promise<void>((resolve) => {
+			onAbort = () => resolve();
+			signal.addEventListener("abort", onAbort, { once: true });
+		});
+		try {
+			await Promise.race([this.pending, aborted]);
+		} finally {
+			if (onAbort) signal.removeEventListener("abort", onAbort);
+		}
 	}
 
 	private async checkAll(): Promise<void> {

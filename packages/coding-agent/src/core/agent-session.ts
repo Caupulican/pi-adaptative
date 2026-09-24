@@ -418,6 +418,14 @@ function sincePreviousReply(messages: readonly AgentMessage[], reply: AgentMessa
 	return before.slice(start);
 }
 
+/** An owner interrupt arrived while a submission was still preparing its turn (see `prompt`). */
+class SubmissionPreflightAborted extends Error {
+	constructor() {
+		super("The submission was interrupted before its turn started.");
+		this.name = "SubmissionPreflightAborted";
+	}
+}
+
 export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -617,6 +625,8 @@ export class AgentSession {
 	});
 	/** The learned cache view (survival curves, lineage lifetime, compaction outcomes) from the ledger. */
 	private readonly _cacheKnowledge = new CacheKnowledge(() => this.getDecisionLedger());
+	/** The running submission's own abort, while one runs (see `prompt`). */
+	private _submissionAbort: AbortController | undefined;
 	/** Each worker conversation's last early-compaction verdict, so only a change is recorded. */
 	private readonly _workerEarlyVerdicts = new Map<string, string>();
 	/** Cache custody: the gate every surface change goes through and the guard every request passes. */
@@ -2993,12 +3003,18 @@ export class AgentSession {
 	 * The user is above AGENTS.md: an explicit override follows the request, a contradiction asks.
 	 * Returns the one line the model should see, and nothing when there is nothing to say.
 	 */
-	private async _enableCapabilitiesAuthorizedByUser(request: string): Promise<string | undefined> {
+	private async _enableCapabilitiesAuthorizedByUser(
+		request: string,
+		signal?: AbortSignal,
+	): Promise<string | undefined> {
 		const controller = this._systemOneController;
 		if (!controller) return undefined;
 		const granted = new Set(this.getEdgeGrants().map((grant) => grant.class));
 		const capabilitiesPending = EDGE_CLASSES.some((edgeClass) => !granted.has(edgeClass));
-		const outcome = await controller.classifyUserRequest(request, this.writtenRuleText(), { capabilitiesPending });
+		const outcome = await controller.classifyUserRequest(request, this.writtenRuleText(), {
+			capabilitiesPending,
+			...(signal ? { signal } : {}),
+		});
 		if (outcome.status === "skipped") return undefined;
 		if (outcome.status === "unavailable") {
 			// Unknown is not a handoff: an owner question goes to the owner.
@@ -4048,6 +4064,11 @@ export class AgentSession {
 		return this.agent.state.thinkingLevel;
 	}
 
+	/** A submission is preparing its turn (routing, System One classification): no response streams yet. */
+	get isPreparingSubmission(): boolean {
+		return this._submissionAbort !== undefined && !this.agent.state.isStreaming;
+	}
+
 	/** Whether agent is currently streaming a response */
 	get isStreaming(): boolean {
 		return this.agent.state.isStreaming;
@@ -4645,9 +4666,17 @@ export class AgentSession {
 	): Promise<void> {
 		const submission = { lease: initialSubmissionLease };
 		if (submission.lease) this._foregroundPromptLease = submission.lease;
+		// The submission's own abort: before its run exists (routing, System One classification) an owner
+		// interrupt reaches it through `abort()`; the caller's signal still aborts it too.
+		const submissionAbort = new AbortController();
+		this._submissionAbort = submissionAbort;
+		const signal = options?.signal
+			? AbortSignal.any([options.signal, submissionAbort.signal])
+			: submissionAbort.signal;
 		try {
-			await this._promptUnserialized(text, options, submission);
+			await this._promptUnserialized(text, { ...options, signal }, submission);
 		} finally {
+			if (this._submissionAbort === submissionAbort) this._submissionAbort = undefined;
 			if (submission.lease) {
 				if (this._foregroundPromptLease === submission.lease) this._foregroundPromptLease = undefined;
 				this._foregroundRecovery.releaseSubmission(submission.lease);
@@ -4835,7 +4864,8 @@ export class AgentSession {
 			this._emit({ type: "routing_start" });
 
 			// Before anything is routed or sent: what the owner's accounts actually offer.
-			await this._accountModels.ready();
+			await this._accountModels.ready(submissionSignal);
+			if (submissionSignal?.aborted) throw new SubmissionPreflightAborted();
 			await this._leaveUnavailableSessionModel();
 			// Facts a route cannot be chosen without: an image needs a model that reads images, and the
 			// context this turn sends must fit the window.
@@ -5029,6 +5059,8 @@ export class AgentSession {
 			// it here, or the UI's "working" indicator for it spins forever with nothing behind it.
 			if (routingStarted) this._emit({ type: "routing_end" });
 			preflightResult?.(false);
+			// An owner interrupt while the turn was being prepared: the same unwind, and a quiet end.
+			if (error instanceof SubmissionPreflightAborted) return;
 			throw error;
 		}
 
@@ -5079,7 +5111,7 @@ export class AgentSession {
 		try {
 			this._toolProtocol.resetTurnState();
 			this._lastUserRequest = userRequest;
-			const requestNote = await this._enableCapabilitiesAuthorizedByUser(userRequest);
+			const requestNote = await this._enableCapabilitiesAuthorizedByUser(userRequest, submissionSignal);
 			if (requestNote) {
 				messages.push(
 					createCustomMessage("request_authority", requestNote, false, undefined, new Date().toISOString()),
@@ -5369,6 +5401,8 @@ export class AgentSession {
 	 * abort in the persisted aborted message; use a short, stable, lower-case label.
 	 */
 	async abort(reason: string): Promise<void> {
+		// A submission still preparing has no run to abort: cancel the submission itself.
+		if (!this.agent.state.isStreaming) this._submissionAbort?.abort(reason);
 		this.runtimeUpdates.cancel();
 		this.abortRetry();
 		this.agent.abort(reason);

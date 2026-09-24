@@ -321,7 +321,8 @@ export class SystemOneController {
 	async classifyUserRequest(
 		request: string,
 		writtenRules = "",
-		options: { capabilitiesPending?: boolean } = {},
+		/** `signal`: the owner's submission; an abort before the run starts cancels the classification too. */
+		options: { capabilitiesPending?: boolean; signal?: AbortSignal } = {},
 	): Promise<UserRequestClassificationOutcome> {
 		const userRequest = request.trim();
 		if (!userRequest) return { status: "skipped" };
@@ -345,7 +346,7 @@ export class SystemOneController {
 					},
 					questions: toTypeSafeEvaluationQuestions(asked as typeof USER_AUTHORIZATION_QUESTIONS),
 				},
-				{ impact: "read_only" },
+				{ impact: "read_only", ...(options.signal ? { signal: options.signal } : {}) },
 			);
 		} catch (error) {
 			return { status: "unavailable", reason: error instanceof Error ? error.message : String(error) };

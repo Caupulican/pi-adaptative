@@ -17,7 +17,10 @@ export interface KeyHandlersHost {
 	readonly defaultEditor: CustomEditor;
 	readonly editor: EditorComponent;
 	readonly ui: TUI;
-	readonly session: Pick<AgentSession, "isStreaming" | "isBashRunning" | "abortBash" | "backgroundRunningToolCalls">;
+	readonly session: Pick<
+		AgentSession,
+		"isStreaming" | "isPreparingSubmission" | "abort" | "isBashRunning" | "abortBash" | "backgroundRunningToolCalls"
+	>;
 	readonly settingsManager: Pick<SettingsManager, "getDoubleEscapeAction">;
 	isBashMode: boolean;
 	lastEscapeTime: number;
@@ -52,6 +55,9 @@ export function setupKeyHandlers(host: KeyHandlersHost): void {
 	host.defaultEditor.onEscape = () => {
 		if (host.session.isStreaming) {
 			host.restoreQueuedMessagesToEditor({ abort: true });
+		} else if (host.session.isPreparingSubmission) {
+			// Routing or System One is still preparing the turn: the interrupt cancels the submission.
+			void host.session.abort("user interrupt");
 		} else if (host.session.isBashRunning) {
 			host.session.abortBash();
 		} else if (host.isBashMode) {
