@@ -194,6 +194,11 @@ export function planIdlePreparation(
 export function priceExecutor(input: {
 	readonly talkerPrefixTokens: number;
 	readonly briefTokens: number;
+	/**
+	 * What a worker sends before its brief (system prompt and tool schemas), learned from the requests
+	 * workers sent; the talker keeps the work while it is unknown.
+	 */
+	readonly workerPrefixTokens: number | undefined;
 	readonly reportTokens: number;
 	/** The requests this kind of work has learned to take on the talker. */
 	readonly requests: number | undefined;
@@ -201,14 +206,19 @@ export function priceExecutor(input: {
 	readonly worker: EffectiveModelPricing | undefined;
 }): { executor: "root" | "worker"; reason: string; talkerUsd?: number; workerUsd?: number } {
 	const { talker, worker, requests } = input;
-	if (!talker || !worker || requests === undefined || requests <= 0) {
-		return { executor: "root", reason: "no learned request count or prices; the talker keeps the work" };
+	if (!talker || !worker || requests === undefined || requests <= 0 || input.workerPrefixTokens === undefined) {
+		return {
+			executor: "root",
+			reason: "no learned request count, worker prefix or prices; the talker keeps the work",
+		};
 	}
 	const coldOf = (pricing: EffectiveModelPricing) => (pricing.cacheWrite > 0 ? pricing.cacheWrite : pricing.input);
 	const talkerUsd = requests * usd(input.talkerPrefixTokens, talker.cacheRead);
+	// The worker pays its own prefix and the brief cold once, then reads them from cache.
+	const workerStart = input.workerPrefixTokens + input.briefTokens;
 	const workerUsd =
-		usd(input.briefTokens, coldOf(worker)) +
-		Math.max(0, requests - 1) * usd(input.briefTokens, worker.cacheRead) +
+		usd(workerStart, coldOf(worker)) +
+		Math.max(0, requests - 1) * usd(workerStart, worker.cacheRead) +
 		usd(input.reportTokens, coldOf(talker));
 	return workerUsd < talkerUsd
 		? {

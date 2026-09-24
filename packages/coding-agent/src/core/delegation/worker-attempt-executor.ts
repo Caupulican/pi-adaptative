@@ -1,6 +1,7 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { compact } from "@caupulican/pi-agent-core/compaction/compaction";
+import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
 import {
 	classifyFailure,
 	computeRetryDelayMs,
@@ -190,8 +191,11 @@ export interface WorkerAttemptExecutorOptions {
 	 * never rewriting below `frozenBelow` unless the pass's price admits it.
 	 */
 	packContext?(messages: AgentMessage[], frozenBelow: number): AgentMessage[];
-	/** The cache guard: each accepted provider request of this worker, as its recorded snapshot. */
-	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput): void;
+	/**
+	 * The cache guard: each accepted provider request of this worker, as its recorded snapshot, with the
+	 * tokens of its fixed prefix (system prompt and tool schemas) on the attempt's first request.
+	 */
+	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput, prefixTokens?: number): void;
 	/** Each worker provider response, recorded as a cache observation on the worker's own history. */
 	observeWorkerResponse?(message: AssistantMessage, observation: WorkerResponseObservation): void;
 	/** Parent semantic duplicate review of code this worker's edit or write added; see the controller dep. */
@@ -743,13 +747,24 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										onProviderRequestSnapshot: (context) => {
 											signal.throwIfAborted();
 											const { snapshot } = options.conversation.appendRequestSnapshot(context);
+											const firstRequest = lastRequest === undefined;
 											lastRequest = { snapshot, openedAt: Date.now() };
 											lastSent = {
 												model: context.model as Model<Api>,
 												context: context.context,
 												sourceMessages: context.sourceContext.messages,
 											};
-											options.observeWorkerRequest?.(options.agentId, snapshot);
+											options.observeWorkerRequest?.(
+												options.agentId,
+												snapshot,
+												firstRequest
+													? estimateProviderRequestTokens({
+															systemPrompt: context.context.systemPrompt,
+															tools: context.context.tools,
+															messages: [],
+														})
+													: undefined,
+											);
 										},
 										beforeToolCall: async (context, toolSignal) => {
 											try {

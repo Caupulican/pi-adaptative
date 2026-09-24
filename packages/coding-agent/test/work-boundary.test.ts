@@ -47,6 +47,7 @@ describe("executor price", () => {
 		const verdict = priceExecutor({
 			talkerPrefixTokens: 150_000,
 			briefTokens: 2_000,
+			workerPrefixTokens: 8_000,
 			reportTokens: 4_000,
 			requests: 12,
 			talker,
@@ -56,10 +57,23 @@ describe("executor price", () => {
 	});
 
 	it("keeps work on the talker when its prefix is small, or nothing is learned", () => {
+		// The worker's own prefix is paid cold: unknown, the talker keeps the work.
+		expect(
+			priceExecutor({
+				talkerPrefixTokens: 150_000,
+				briefTokens: 2_000,
+				workerPrefixTokens: undefined,
+				reportTokens: 4_000,
+				requests: 12,
+				talker,
+				worker: talker,
+			}).executor,
+		).toBe("root");
 		expect(
 			priceExecutor({
 				talkerPrefixTokens: 3_000,
 				briefTokens: 2_000,
+				workerPrefixTokens: 8_000,
 				reportTokens: 4_000,
 				requests: 3,
 				talker,
@@ -70,6 +84,7 @@ describe("executor price", () => {
 			priceExecutor({
 				talkerPrefixTokens: 150_000,
 				briefTokens: 2_000,
+				workerPrefixTokens: 8_000,
 				reportTokens: 4_000,
 				requests: undefined,
 				talker,
@@ -121,5 +136,29 @@ describe("learned root route requests", () => {
 		expect(ledger.learnedRootRouteRequests("implement")).toBe(4);
 		// A route the root has not run to a next decision has nothing learned.
 		expect(ledger.learnedRootRouteRequests("verify")).toBeUndefined();
+	});
+});
+
+describe("learned worker prefix", () => {
+	it("prices a worker on the median fixed prefix its requests actually sent", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-worker-prefix-"));
+		try {
+			const ledger = new DecisionLedgerStore({ databasePath: join(dir, "ledger.sqlite") });
+			expect(ledger.medianWorkerPrefixTokens(0)).toBeUndefined();
+			for (const [index, prefixTokens] of [2_400, 9_000, 2_600].entries()) {
+				ledger.recordWorkerPrefix({
+					sessionId: `s/worker:${index}`,
+					lane: "lane",
+					observedAt: 1_000 + index,
+					prefixTokens,
+				});
+			}
+			expect(ledger.medianWorkerPrefixTokens(0)).toBe(2_600);
+			expect(ledger.medianWorkerPrefixTokens(1_002)).toBe(2_600);
+			expect(ledger.medianWorkerPrefixTokens(1_001)).toBe(5_800);
+			ledger.close?.();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

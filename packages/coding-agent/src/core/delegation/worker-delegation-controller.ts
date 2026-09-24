@@ -244,7 +244,7 @@ export interface WorkerDelegationControllerDeps {
 		frozenBelow: number;
 	}): AgentMessage[];
 	/** The cache guard for worker lanes: each accepted worker provider request, as its recorded snapshot. */
-	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput): void;
+	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput, prefixTokens?: number): void;
 	/** Record a model a worker ran out of quota, where root's billing failover records its own. */
 	markModelExhausted?(model: Model<Api>, retryAfterMs?: number): void;
 	/** Root's tool mechanics (output reduction, encodings, shell engine, packing), shared with every lane. */

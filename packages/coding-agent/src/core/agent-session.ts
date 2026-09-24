@@ -112,6 +112,8 @@ import {
 	historyLineage,
 	idleHolder,
 } from "./context/cache-observation-recorder.ts";
+import { negligibleAgeMs } from "./context/cache-survival.ts";
+import { CACHE_SURVIVAL_CALIBRATION } from "./context/cache-survival-calibration.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { ContextAuditReport } from "./context/context-audit.ts";
 import {
@@ -1099,7 +1101,20 @@ export class AgentSession {
 			// the root's existing worker-agent control surface.
 			observeWorkerProgress: (observation) => this._workerSupervision.observe(observation),
 			// Worker lanes pass the same cache guard; each worker conversation is its own lane.
-			observeWorkerRequest: (agentId, snapshot) => this._guardCacheSurface(snapshot, `worker:${agentId}`),
+			observeWorkerRequest: (agentId, snapshot, prefixTokens) => {
+				this._guardCacheSurface(snapshot, `worker:${agentId}`);
+				if (prefixTokens === undefined) return;
+				try {
+					this.getDecisionLedger()?.recordWorkerPrefix({
+						sessionId: `${this.sessionId}/worker:${agentId}`,
+						lane: cacheLaneKey(snapshot.api, snapshot.provider, snapshot.modelId),
+						observedAt: Date.now(),
+						prefixTokens,
+					});
+				} catch {
+					// Telemetry only.
+				}
+			},
 			observeWorkerResponse: (message, observation) => this._recordCacheObservation(message, observation),
 			getSharedLaneToolOptions: () => this._runtimeBuilder.getSharedLaneToolOptions(),
 			markModelExhausted: (model, retryAfterMs) =>
@@ -4335,6 +4350,9 @@ export class AgentSession {
 				timestamp: 0,
 			}),
 			requests: this.getDecisionLedger()?.learnedRootRouteRequests(route.route),
+			workerPrefixTokens: this.getDecisionLedger()?.medianWorkerPrefixTokens(
+				Date.now() - negligibleAgeMs(CACHE_SURVIVAL_CALIBRATION.halfLifeMs),
+			),
 			talker: pricing,
 			worker: workerModel ? resolveEffectiveModelPricing(workerModel, briefTokens) : undefined,
 		});

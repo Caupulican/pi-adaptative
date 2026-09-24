@@ -249,6 +249,14 @@ export class DecisionLedgerStore {
 				output_tokens INTEGER NOT NULL
 			);
 			CREATE INDEX IF NOT EXISTS compaction_outcomes_lane ON compaction_outcomes (lane, observed_at);
+			CREATE TABLE IF NOT EXISTS worker_prefixes (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				session_id TEXT NOT NULL,
+				lane TEXT NOT NULL,
+				observed_at INTEGER NOT NULL,
+				prefix_tokens INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS worker_prefixes_observed ON worker_prefixes (observed_at);
 		`);
 		// Ledgers created before observations carried these columns gain them; their rows stay unassigned.
 		const columns = new Set(
@@ -526,6 +534,29 @@ export class DecisionLedgerStore {
 				 VALUES (?, ?, ?, ?, ?, ?)`,
 			)
 			.run(row.sessionId, row.lane, row.observedAt, row.tokensBefore, row.tokensAfter, row.outputTokens);
+	}
+
+	/**
+	 * The fixed prefix one worker request sent (its system prompt and tool schemas, in tokens): what a
+	 * worker pays before its brief, learned from what workers actually sent.
+	 */
+	recordWorkerPrefix(row: { sessionId: string; lane: string; observedAt: number; prefixTokens: number }): void {
+		this.database
+			.prepare("INSERT INTO worker_prefixes (session_id, lane, observed_at, prefix_tokens) VALUES (?, ?, ?, ?)")
+			.run(row.sessionId, row.lane, row.observedAt, row.prefixTokens);
+	}
+
+	/** The median fixed worker prefix recorded since `sinceMs`; undefined before any. */
+	medianWorkerPrefixTokens(sinceMs: number): number | undefined {
+		const rows = this.database
+			.prepare("SELECT prefix_tokens FROM worker_prefixes WHERE observed_at >= ? ORDER BY prefix_tokens")
+			.all(Number.isFinite(sinceMs) ? sinceMs : Number.MIN_SAFE_INTEGER);
+		const values = rows
+			.map((row) => asInteger(row.prefix_tokens))
+			.filter((value): value is number => value !== undefined);
+		if (values.length === 0) return undefined;
+		const middle = Math.floor(values.length / 2);
+		return values.length % 2 === 1 ? values[middle] : Math.round((values[middle - 1]! + values[middle]!) / 2);
 	}
 
 	/** Every recorded compaction outcome since `sinceMs`, oldest first. */
