@@ -231,7 +231,7 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 	route_choice: Object.freeze({}),
 
 	// One atomic question per claim kind. Each asks only what the answer SAYS; whether it happened is
-	// read from the turn's receipts in code (claim-delivery.ts), never judged from the answer's own words.
+	// read from the work's receipts in code (claim-delivery.ts), never judged from the answer's own words.
 	claim_delivery: Object.freeze({
 		states_tests_pass: Object.freeze({
 			type: "boolean",

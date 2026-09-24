@@ -1,6 +1,7 @@
 /**
- * Claims against deliveries: does the final answer say something happened that the turn's own
- * receipts do not show?
+ * Claims against deliveries: does the final answer say something happened that the work's own
+ * receipts do not show? The work is the current or most recent work unit (see work-units.ts), with the
+ * receipts of the workers whose reports were accepted during it; with no work unit, the turn.
  *
  * Receipts are mechanical facts read from the turn's tool calls and results — never model text.
  * System One answers one atomic question per claim kind ("does the answer state that X?"); code combines
@@ -17,7 +18,7 @@ import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from 
 import { settledAnswer } from "../decision/noul.ts";
 import type { LadderOutcome } from "./unsettled-ladder.ts";
 
-/** A counted delivery: how many attempts succeeded and how many failed in this turn. */
+/** A counted delivery: how many attempts succeeded and how many failed during the work. */
 export interface DeliveryReceipt {
 	readonly succeeded: number;
 	readonly failed: number;
@@ -96,6 +97,28 @@ export function collectClaimReceipts(turnMessages: readonly AgentMessage[]): Cla
 	return { tests, commits, pushes, publishes, filesChanged, toolCalls, succeededToolCalls };
 }
 
+/** Receipts of several sources (the root's window and accepted workers) as one. */
+export function mergeClaimReceipts(receipts: readonly ClaimReceipts[]): ClaimReceipts {
+	const sum = (pick: (r: ClaimReceipts) => DeliveryReceipt) => ({
+		succeeded: receipts.reduce((total, r) => total + pick(r).succeeded, 0),
+		failed: receipts.reduce((total, r) => total + pick(r).failed, 0),
+	});
+	const lastTests = [...receipts].reverse().find((r) => r.tests.lastPassed !== undefined)?.tests.lastPassed;
+	return {
+		tests: {
+			passed: receipts.reduce((total, r) => total + r.tests.passed, 0),
+			failed: receipts.reduce((total, r) => total + r.tests.failed, 0),
+			lastPassed: lastTests,
+		},
+		commits: sum((r) => r.commits),
+		pushes: sum((r) => r.pushes),
+		publishes: sum((r) => r.publishes),
+		filesChanged: [...new Set(receipts.flatMap((r) => r.filesChanged))],
+		toolCalls: receipts.reduce((total, r) => total + r.toolCalls, 0),
+		succeededToolCalls: receipts.reduce((total, r) => total + r.succeededToolCalls, 0),
+	};
+}
+
 /** Cheap gate before spending a System One call: an answer that names none of the claim kinds claims none. */
 const CLAIM_VOCABULARY =
 	/\b(?:test|tests|tested|pass|passes|passed|passing|green|commit|committed|push|pushed|publish|published|released|created|updated|modified|changed|edited|wrote|written|fixed)\b/i;
@@ -121,7 +144,11 @@ function judgeDelivery(kind: ClaimKind, receipt: DeliveryReceipt, label: string)
 			verdict: "contradicted",
 			reason: `the answer says it ${label}, but every ${label} command failed`,
 		};
-	return { kind, verdict: "unsupported", reason: `the answer says it ${label}; no ${label} command ran in this turn` };
+	return {
+		kind,
+		verdict: "unsupported",
+		reason: `the answer says it ${label}; no ${label} command ran during this work`,
+	};
 }
 
 /**
@@ -136,13 +163,13 @@ export function judgeClaims(answers: Record<string, unknown>, receipts: ClaimRec
 			findings.push({
 				kind: "tests_pass",
 				verdict: "contradicted",
-				reason: `the answer says tests pass, but the last test run in this turn failed (${receipts.tests.failed} failed)`,
+				reason: `the answer says tests pass, but the last test run during this work failed (${receipts.tests.failed} failed)`,
 			});
 		else if (receipts.tests.passed === 0)
 			findings.push({
 				kind: "tests_pass",
 				verdict: "unsupported",
-				reason: "the answer says tests pass; no test run in this turn recorded a pass",
+				reason: "the answer says tests pass; no test run during this work recorded a pass",
 			});
 	}
 	const deliveries: [ClaimKind, DeliveryReceipt, string][] = [
@@ -159,7 +186,7 @@ export function judgeClaims(answers: Record<string, unknown>, receipts: ClaimRec
 		findings.push({
 			kind: "files_changed",
 			verdict: "unsupported",
-			reason: "the answer says files were changed; no edit or write succeeded in this turn",
+			reason: "the answer says files were changed; no edit or write succeeded during this work",
 		});
 	return findings;
 }
@@ -213,7 +240,11 @@ export class AnswerClaimChecker {
 	 * Every claim finding for an answer against the messages its work produced, or undefined when
 	 * nothing was checked (no controller, no claim vocabulary, or System One unavailable, reported once).
 	 */
-	async findings(finalAnswer: string, messages: readonly AgentMessage[]): Promise<ClaimFinding[] | undefined> {
+	async findings(
+		finalAnswer: string,
+		messages: readonly AgentMessage[],
+		acceptedWorkerReceipts: readonly ClaimReceipts[] = [],
+	): Promise<ClaimFinding[] | undefined> {
 		const controller = this.deps.getController();
 		if (!controller || !finalAnswer.trim() || !mayContainDeliveryClaims(finalAnswer)) return undefined;
 		let answers: Record<string, unknown>;
@@ -228,7 +259,7 @@ export class AnswerClaimChecker {
 			return undefined;
 		}
 		this.outageReported = false;
-		return judgeClaims(answers, collectClaimReceipts(messages));
+		return judgeClaims(answers, mergeClaimReceipts([collectClaimReceipts(messages), ...acceptedWorkerReceipts]));
 	}
 
 	/**
@@ -236,8 +267,12 @@ export class AnswerClaimChecker {
 	 * receipt backs climbs the ladder over the turn's results: confirmed, it stands; refuted, it is a
 	 * contradiction; still open, it goes to the owner.
 	 */
-	async check(finalAnswer: string, turnMessages: readonly AgentMessage[]): Promise<string | undefined> {
-		const findings = await this.findings(finalAnswer, turnMessages);
+	async check(
+		finalAnswer: string,
+		turnMessages: readonly AgentMessage[],
+		acceptedWorkerReceipts: readonly ClaimReceipts[] = [],
+	): Promise<string | undefined> {
+		const findings = await this.findings(finalAnswer, turnMessages, acceptedWorkerReceipts);
 		if (!findings) return undefined;
 		const contradicted = findings.filter((finding) => finding.verdict === "contradicted");
 		const unsupported = findings.filter((finding) => finding.verdict === "unsupported");

@@ -7,7 +7,7 @@ import { completedWorkerOutput } from "../worker-output-fixture.ts";
 import { createHostResponseScript } from "./host-response-script.ts";
 
 describe("host profiling response ownership", () => {
-	it("keeps an undefined foreground affinity distinct from the first worker affinity", async () => {
+	it("keeps the foreground's session affinity distinct from the first worker affinity", async () => {
 		const affinities: Array<string | undefined> = [];
 		const harness = await createHarness({
 			fauxProvider: { onRequest: (event) => affinities.push(event.sessionId) },
@@ -16,7 +16,9 @@ describe("host profiling response ownership", () => {
 		const script = createHostResponseScript(harness.faux);
 		script.setResponses([fauxAssistantMessage("Foreground ready.")]);
 		await harness.session.prompt("Profile one worker.", { autoContinueGoal: false });
-		expect(affinities).toEqual([undefined]);
+		// The foreground routes on the session's own id, as the SDK does.
+		const foreground = harness.sessionManager.getSessionId();
+		expect(affinities).toEqual([foreground]);
 		const target = join(harness.tempDir, "worker-target.txt");
 		writeFileSync(target, "worker-only evidence");
 		let workerReads = 0;
@@ -37,7 +39,7 @@ describe("host profiling response ownership", () => {
 		expect(run.started).toBe(true);
 		expect(run.outcome?.claim.status, JSON.stringify(run.outcome)).toBe("completed");
 		expect(workerReads).toBe(1);
-		expect(affinities.slice(1).some((affinity) => affinity !== undefined)).toBe(true);
+		expect(affinities.slice(1).some((affinity) => affinity !== undefined && affinity !== foreground)).toBe(true);
 	});
 
 	for (const compact of [false, true]) {

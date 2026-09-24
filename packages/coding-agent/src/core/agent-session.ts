@@ -305,7 +305,12 @@ import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-v
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import { WorkerSemanticSupervisor } from "./supervision/worker-semantic-supervisor.ts";
 import { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
-import { AnswerClaimChecker, assistantAnswerText } from "./system-one/claim-delivery.ts";
+import {
+	AnswerClaimChecker,
+	assistantAnswerText,
+	type ClaimReceipts,
+	collectClaimReceipts,
+} from "./system-one/claim-delivery.ts";
 import { CodeDuplicateReviewer } from "./system-one/code-duplicates.ts";
 import { type SystemOneController, USER_REQUEST_RULE_BUDGET } from "./system-one/controller.ts";
 import { createSessionForegroundControl, type SystemOneForegroundControl } from "./system-one/foreground-control.ts";
@@ -350,7 +355,7 @@ import { MAX_DELEGATE_STATUS_OUTPUT_BYTES } from "./tools/delegate-status.ts";
 import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
 import { shareTextBudget } from "./util/text-budget.ts";
-import { currentWorkUnit, openWorkUnit } from "./work-units.ts";
+import { currentWorkUnit, openWorkUnit, WORKER_RECEIPTS_CUSTOM_TYPE, workUnitWindow } from "./work-units.ts";
 
 // ============================================================================
 // Stream-idle watchdog wiring
@@ -1117,7 +1122,14 @@ export class AgentSession {
 			collectWorkspaceSources: (args) => this._collectWorkspaceSources(args),
 			getPathAliasTable: () => this._pipeline.peekPathAliasTable(),
 			reviewNewCode: ({ toolName, args, cwd }) => this._codeDuplicates.review(toolName, args, cwd),
-			reviewWorkerReport: (input) => this._answerClaims.workerReportBlockers(input),
+			reviewWorkerReport: async (input) => {
+				const blockers = await this._answerClaims.workerReportBlockers(input);
+				// An accepted report's receipts back the root's claims for the rest of the work unit.
+				if (blockers.length === 0) {
+					this.sessionManager.appendCustomEntry(WORKER_RECEIPTS_CUSTOM_TYPE, collectClaimReceipts(input.messages));
+				}
+				return blockers;
+			},
 			settleInconclusive: (input) => this._settleWorkerInconclusive(input),
 			isModelAllowed: (model) => this._modelPolicy.allows(model),
 			// Allocated from the policy-filtered pool, the same way a routed turn picks.
@@ -1449,9 +1461,11 @@ export class AgentSession {
 			messageCount: () => this.agent.state.messages.length,
 			// Wake turns relay worker results: their answer's claims are checked like any other answer's.
 			afterTurn: async (turnStart, lease) => {
+				const window = this._claimWindow(this.agent.state.messages.slice(turnStart));
 				const correction = await this._answerClaims.check(
 					assistantAnswerText(this._findLastAssistantMessage()),
-					this.agent.state.messages.slice(turnStart),
+					window.messages,
+					window.workerReceipts,
 				);
 				if (correction)
 					await this._foregroundRecovery.runAgentPrompt(
@@ -4187,6 +4201,19 @@ export class AgentSession {
 		return verdict.executor;
 	}
 
+	/**
+	 * What an answer's claims are checked against: the current or most recent work unit, boundary to now,
+	 * with the receipts of workers accepted during it; the turn alone when no work unit was ever opened.
+	 */
+	private _claimWindow(turnMessages: readonly AgentMessage[]): {
+		messages: readonly AgentMessage[];
+		workerReceipts: readonly ClaimReceipts[];
+	} {
+		const window = workUnitWindow(this.sessionManager, WORKER_RECEIPTS_CUSTOM_TYPE);
+		if (!window) return { messages: turnMessages, workerReceipts: [] };
+		return { messages: window.messages, workerReceipts: window.customs as ClaimReceipts[] };
+	}
+
 	private async _ensureRouteModelReady(
 		resolved: { decision: RouteDecision; model: Model<Api> } | undefined,
 	): Promise<{ decision: RouteDecision; model: Model<Api> } | undefined> {
@@ -4692,9 +4719,11 @@ export class AgentSession {
 				);
 				// Claims against deliveries: a contradicted claim buys one correction turn, never a loop.
 				if (!submissionSignal?.aborted) {
+					const window = this._claimWindow(this.agent.state.messages.slice(turnStart));
 					const correction = await this._answerClaims.check(
 						assistantAnswerText(this._findLastAssistantMessage()),
-						this.agent.state.messages.slice(turnStart),
+						window.messages,
+						window.workerReceipts,
 					);
 					if (correction && !submissionSignal?.aborted) {
 						await this._modelRouter.runRoutedTurn(

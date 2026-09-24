@@ -135,7 +135,7 @@ describe("claims against deliveries", () => {
 			});
 			expect(await c.instance.check("All tests pass.", unrecognizedRun)).toBeUndefined();
 			expect(c.delivered).toHaveLength(1);
-			expect(c.delivered[0]?.[0]).toContain("no test run in this turn recorded a pass");
+			expect(c.delivered[0]?.[0]).toContain("no test run during this work recorded a pass");
 			expect(c.delivered[0]?.[0]).toContain("(missing: a test run in this turn)");
 		});
 	});
@@ -218,7 +218,7 @@ describe("claims against deliveries", () => {
 				(message) => message.role === "custom" && message.customType === "owner_items",
 			);
 			expect(ownerItems).toHaveLength(1);
-			expect(JSON.stringify(ownerItems[0])).toContain("no test run in this turn recorded a pass");
+			expect(JSON.stringify(ownerItems[0])).toContain("no test run during this work recorded a pass");
 			// No contradiction, so no correction turn.
 			expect(
 				harness.session.agent.state.messages.filter(
