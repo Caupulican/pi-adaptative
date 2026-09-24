@@ -1,5 +1,37 @@
 ## [Unreleased]
 
+### Added
+
+- Conversation continuity: a conversation is routed once at its opening and keeps that talker; small messages take one side trip on the cheap tier with a small brief, and the side trip can hand a message back to the talker (`hand_to_talker`).
+- Reply bylines: each reply shows the model that wrote it, persisted per reply and shown again after reload.
+- Exact toolkit hits run their script in the harness with no model request; print mode prints the script's output and exits by its status.
+- Cache custody: every provider request is classified as an append or a break; breaks the harness makes deliberately (context-GC packing, compaction, side-trip briefs, safety removals, the prompt date, reasoning changes, extension prompt changes) are sanctioned, any other break is recorded in the decision ledger. Each lane keeps one reasoning level, and system-prompt changes wait for a cold moment. Extensions can set `systemPromptUrgency: "now"` on `before_agent_start` to apply a prompt change at once.
+- Learned cache economics: provider cache survival and lineage lifetime are learned from observations (pooled by upstream vendor for routing providers), and context-GC rewrites of the sent prefix and early compaction are priced from them.
+- Idle compaction preparation on the warm session lane, used only when it pays.
+- `artifact_retrieve context:<key>` retrieves a context-GC packed original, with an `offset` mode.
+- Retrieve routes of the objective loop can be gathered by read-only minions when the talker's reads cost more.
+- Worker parity: worker conversations run context GC, cache custody, cache observations, path aliases, tool-output reduction and artifact packing, tool-selection learning, warm-lane summarization, priced early compaction, carried sent-prefix marks and the context policy on their own lane; only orchestration stays with the root.
+- A routed worker whose account runs out of quota moves to the next routing candidate without spending its retry ceiling, and status reports the model it ran on.
+- A reused specialist resumed under a new parent session is told its earlier context may have aged.
+
+### Changed
+
+- Delivery claims are checked against the work unit's receipts instead of the current turn only.
+- The executor choice prices a worker on the model it would run on and on the prefix workers actually send.
+- Escape cancels a submission that is still preparing its turn (account readiness, request classification).
+- Slash and bang commands typed while only background work runs are executed as commands; they still steer while a foreground turn is live.
+
+### Fixed
+
+- Sent-prefix marks are reset when a compaction replaces history, so context-GC packing resumes on the new history.
+- The selected model stays the session model on resume.
+- A path-alias legend committed earlier in the history is read back after a restart.
+- An `-e` extension, skill or prompt path refused by the project-instruction boundary is reported as a startup error instead of being dropped silently.
+- Print mode waits for the session to settle between `-p` messages instead of failing with "Agent is already processing", and prints the reply even when a host record follows it.
+- A session whose only reply is an owner execution (a toolkit hit or a `!` command) is written to disk.
+- Worker supervision reads only the current attempt's output.
+- A route's executor is recorded when it is decided.
+
 ## [0.99.45] - 2026-09-23
 
 ### Fixed

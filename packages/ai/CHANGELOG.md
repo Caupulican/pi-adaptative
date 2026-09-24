@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Added
+
+- Text tool-call parsing accepts the `<tool_call>name <arg_key>..</arg_key><arg_value>..</arg_value>` dialect.
+- The faux provider reports per-request prefix reuse and the first divergence from the previous request.
+
+### Fixed
+
+- Codex in-stream usage-limit errors and OpenRouter key spending caps are classified as quota exhaustion.
+
 ## [0.99.45] - 2026-09-23
 
 ### Added

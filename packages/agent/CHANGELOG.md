@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- `AgentContext.surfaceChange` names a deliberate request-surface change (the runaway-stop closing turn), and the request-reasoning resolver receives the request's `sessionId`.
+- Request snapshots record where each request's prompt first differs from the previous one.
+
+### Fixed
+
+- Sent-prefix marks are lowered to the prefix shared with a replanned history after an in-run compaction.
+- A tool-free response that writes tool calls as text in any known dialect is rejected against the withheld tools.
+- A session is written to disk once it holds any reply, including an owner execution with no assistant message.
+- Codex in-stream usage-limit errors are classified as quota failures.
+
 ## [0.99.45] - 2026-09-23
 
 ## [0.99.44] - 2026-09-23
