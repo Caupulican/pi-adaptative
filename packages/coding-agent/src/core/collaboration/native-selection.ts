@@ -43,6 +43,7 @@ export function normalizeNativeProviderSelection(
 		);
 	const selection = { ...requested };
 	const args: string[] = [];
+	let agyEffort: string | undefined;
 	for (let index = 0; index < rawArgs.length; index++) {
 		const argument = rawArgs[index]!;
 		if (NONINTERACTIVE_OPTIONS[kind]?.test(argument))
@@ -51,6 +52,16 @@ export function normalizeNativeProviderSelection(
 			throw new Error(
 				"Native launch overrides an authentication context that its status probe cannot verify; configure the same environment or wrapper for both instead.",
 			);
+		const effortOption = kind === "agy" ? /^--effort(?:=(.*))?$/.exec(argument) : null;
+		if (effortOption) {
+			const effort = effortOption[1] ?? rawArgs[++index];
+			if (effort !== "low" && effort !== "medium" && effort !== "high")
+				throw new Error("Native AGY effort must be low, medium, or high.");
+			if (agyEffort !== undefined && agyEffort !== effort) throw new Error("Native AGY effort options conflict.");
+			agyEffort = effort;
+			args.push("--effort", effort);
+			continue;
+		}
 		const normalized =
 			kind === "codex" && argument.startsWith("-m")
 				? argument.length === 2
@@ -71,6 +82,11 @@ export function normalizeNativeProviderSelection(
 		if (selection[key] !== undefined && selection[key] !== value)
 			throw new Error("Native provider/model selection conflicts with its authenticated launch identity.");
 		selection[key] = value;
+	}
+	if (kind === "agy" && agyEffort) {
+		const modelEffort = /-(low|medium|high)$/.exec(selection.model ?? "")?.[1];
+		if (modelEffort && modelEffort !== agyEffort)
+			throw new Error("Native AGY model conflicts with its selected effort.");
 	}
 	if (kind === "codex") {
 		for (let index = 0; index < args.length; index++) {

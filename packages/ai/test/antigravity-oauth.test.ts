@@ -49,8 +49,8 @@ describe("Antigravity subscription login", () => {
 		["linux", "arm64", "linux", "arm64"],
 		["darwin", "x64", "darwin", "amd64"],
 	])("uses runtime-specific CLI headers on %s/%s", (platform, arch, osType, architecture) => {
-		const headers = antigravityHeaders("fixture", { platform, arch });
-		expect(headers["User-Agent"]).toContain("antigravity/cli/1.2.4");
+		const headers = antigravityHeaders("fixture", { platform, arch }, "antigravity/cli/7.8.9");
+		expect(headers["User-Agent"]).toContain("antigravity/cli/7.8.9");
 		expect(headers["User-Agent"]).toContain(`os_type=${osType}; arch=${architecture}`);
 		expect(headers["User-Agent"]).toContain("auth_method=consumer");
 	});
@@ -71,6 +71,7 @@ describe("Antigravity subscription login", () => {
 		expect(params?.get("redirect_uri")).toBe("https://antigravity.google/oauth-callback");
 		expect(params?.get("scope")?.split(" ")).toContain("openid");
 		expect(params?.get("code_challenge_method")).toBe("S256");
+		expect(params?.get("state")).toMatch(/^[A-Za-z0-9_-]{22}$/);
 		const fields = fetchMock.mock.calls[0][1].body as URLSearchParams;
 		expect(fields.get("redirect_uri")).toBe(params?.get("redirect_uri"));
 		expect(fields.get("code_verifier")).not.toBe(params?.get("state"));

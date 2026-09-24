@@ -1,8 +1,8 @@
+import { ANTIGRAVITY_CLIENT_CONFIG } from "../providers/antigravity-client-config.generated.ts";
 import type { Model, ThinkingBudgets, ThinkingLevelMap } from "../types.ts";
 
 export const ANTIGRAVITY_PROVIDER = "google-antigravity";
 export const ANTIGRAVITY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
-export const ANTIGRAVITY_VERSION = "1.2.4";
 
 function isAntigravityObject(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -16,6 +16,7 @@ export function antigravityObject(value: unknown): Record<string, unknown> {
 export function antigravityHeaders(
 	token: string,
 	runtime: { platform: string; arch: string } | undefined = typeof process === "undefined" ? undefined : process,
+	userAgentPrefix: string = ANTIGRAVITY_CLIENT_CONFIG.userAgentPrefix,
 ): Record<string, string> {
 	const platform = runtime?.platform === "win32" ? "windows" : runtime?.platform;
 	const arch = runtime?.arch === "x64" ? "amd64" : runtime?.arch === "ia32" ? "386" : runtime?.arch;
@@ -23,7 +24,7 @@ export function antigravityHeaders(
 	return {
 		Authorization: `Bearer ${token}`,
 		"Content-Type": "application/json",
-		"User-Agent": `antigravity/cli/${ANTIGRAVITY_VERSION} (aidev_client${system}; auth_method=consumer)`,
+		"User-Agent": `${userAgentPrefix} (aidev_client${system}; auth_method=consumer)`,
 	};
 }
 

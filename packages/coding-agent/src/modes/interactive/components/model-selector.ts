@@ -26,6 +26,8 @@ interface ModelItem {
 	provider: string;
 	id: string;
 	model: Model<any>;
+	displayName?: string;
+	variants?: Model<any>[];
 }
 
 interface ScopedModelItem {
@@ -34,6 +36,53 @@ interface ScopedModelItem {
 }
 
 type ModelScope = "all" | "favorites" | "scoped";
+
+const EFFORT_ORDER = ["low", "medium", "high"] as const;
+
+function groupAntigravityModels(items: ModelItem[], currentModel?: Model<any>): ModelItem[] {
+	const grouped = new Map<string, ModelItem[]>();
+	const result: ModelItem[] = [];
+	for (const item of items) {
+		const label = /^(Gemini .+) \((Low|Medium|High)\)$/.exec(item.model.name);
+		if (
+			item.provider !== "google-antigravity" ||
+			!item.id.startsWith("gemini-") ||
+			!label ||
+			item.model.defaultThinkingLevel !== label[2]?.toLowerCase()
+		) {
+			result.push(item);
+			continue;
+		}
+		const key = `${item.provider}\u0000${label[1]}`;
+		const variants = grouped.get(key) ?? [];
+		variants.push(item);
+		grouped.set(key, variants);
+	}
+	for (const [key, members] of grouped) {
+		if (
+			members.length < 2 ||
+			new Set(members.map((item) => item.model.defaultThinkingLevel)).size !== members.length
+		) {
+			result.push(...members);
+			continue;
+		}
+		const variants = members
+			.map((item) => item.model)
+			.sort(
+				(a, b) =>
+					EFFORT_ORDER.indexOf(a.defaultThinkingLevel as (typeof EFFORT_ORDER)[number]) -
+					EFFORT_ORDER.indexOf(b.defaultThinkingLevel as (typeof EFFORT_ORDER)[number]),
+			);
+		const selected =
+			variants.find((model) => modelsAreEqual(currentModel, model)) ??
+			variants.find((model) => model.defaultThinkingLevel === "medium") ??
+			variants.find((model) => model.defaultThinkingLevel === "high") ??
+			variants[0]!;
+		const [, displayName] = key.split("\u0000");
+		result.push({ provider: members[0]!.provider, id: displayName!, model: selected, displayName, variants });
+	}
+	return result;
+}
 
 /**
  * Component that renders a model selector with search
@@ -160,6 +209,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				provider: model.provider,
 				id: model.id,
 				model,
+				...(model.provider === "google-antigravity" ? { displayName: model.name } : {}),
 			}));
 		} catch (error) {
 			this.allModels = [];
@@ -170,19 +220,23 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			return;
 		}
 
-		this.allModels = this.sortModels(models);
+		this.allModels = this.sortModels(groupAntigravityModels(models, this.currentModel));
 		this.scopedModels = this.scopedModels.map((scoped) => {
 			const refreshed = this.modelRegistry.find(scoped.model.provider, scoped.model.id);
 			return refreshed ? { ...scoped, model: refreshed } : scoped;
 		});
-		this.scopedModelItems = this.scopedModels.map((scoped) => ({
-			provider: scoped.model.provider,
-			id: scoped.model.id,
-			model: scoped.model,
-		}));
+		this.scopedModelItems = groupAntigravityModels(
+			this.scopedModels.map((scoped) => ({
+				provider: scoped.model.provider,
+				id: scoped.model.id,
+				model: scoped.model,
+				...(scoped.model.provider === "google-antigravity" ? { displayName: scoped.model.name } : {}),
+			})),
+			this.currentModel,
+		);
 		this.activeModels = this.getActiveModels();
 		this.filteredModels = this.activeModels;
-		const currentIndex = this.filteredModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
+		const currentIndex = this.filteredModels.findIndex((item) => this.isCurrent(item));
 		this.selectedIndex =
 			currentIndex >= 0 ? currentIndex : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
 	}
@@ -213,13 +267,28 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		return `${item.provider}\u0000${item.id}`;
 	}
 
+	private isCurrent(item: ModelItem): boolean {
+		return (item.variants ?? [item.model]).some((model) => modelsAreEqual(this.currentModel, model));
+	}
+
 	private isFavorite(item: ModelItem): boolean {
-		return this.favoriteKeys.has(this.modelKey(item));
+		return (item.variants ?? [item.model]).some((model) =>
+			this.favoriteKeys.has(`${item.provider}\u0000${model.id}`),
+		);
 	}
 
 	private getActiveModels(): ModelItem[] {
 		if (this.scope === "scoped") return this.scopedModelItems;
-		if (this.scope === "favorites") return this.allModels.filter((item) => this.isFavorite(item));
+		if (this.scope === "favorites")
+			return this.allModels.flatMap((item) => {
+				const pinned = (item.variants ?? [item.model]).filter((model) =>
+					this.favoriteKeys.has(`${item.provider}\u0000${model.id}`),
+				);
+				if (pinned.length === 0) return [];
+				if (!item.variants) return [item];
+				const selected = pinned.find((model) => model.id === item.model.id) ?? pinned[0]!;
+				return [{ ...item, model: selected, variants: pinned }];
+			});
 		return this.allModels;
 	}
 
@@ -247,7 +316,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		const previousIndex = previousKey
 			? this.activeModels.findIndex((item) => this.modelKey(item) === previousKey)
 			: -1;
-		const currentIndex = this.activeModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
+		const currentIndex = this.activeModels.findIndex((item) => this.isCurrent(item));
 		this.selectedIndex = previousIndex >= 0 ? previousIndex : currentIndex >= 0 ? currentIndex : 0;
 		this.filterModels(this.searchInput.getValue(), previousKey);
 		if (this.scopeText) {
@@ -259,7 +328,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		const matches = filterSelectorItems(
 			this.activeModels,
 			query,
-			({ id, provider }) => `${id} ${provider} ${provider}/${id} ${provider} ${id}`,
+			({ id, provider, displayName, variants }) =>
+				`${id} ${provider} ${provider}/${id} ${displayName ?? ""} ${variants?.map((model) => model.id).join(" ") ?? ""}`,
 		);
 		this.filteredModels = [
 			...matches.filter((item) => this.isFavorite(item)),
@@ -288,10 +358,10 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			if (!item) continue;
 
 			const isSelected = i === this.selectedIndex;
-			const isCurrent = modelsAreEqual(this.currentModel, item.model);
+			const isCurrent = this.isCurrent(item);
 			const favoriteMark = this.isFavorite(item) ? theme.fg("accent", "★ ") : " ".repeat(visibleWidth("★ "));
 			const prefix = isSelected ? theme.fg("accent", "→ ") : " ".repeat(visibleWidth("→ "));
-			const modelText = isSelected ? theme.fg("accent", item.id) : item.id;
+			const modelText = isSelected ? theme.fg("accent", item.displayName ?? item.id) : (item.displayName ?? item.id);
 			const providerBadge = theme.fg("muted", `[${item.provider}]`);
 			const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
 			const line = `${prefix}${favoriteMark}${modelText} ${providerBadge}${checkmark}`;
@@ -319,7 +389,18 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		} else {
 			const selected = this.filteredModels[this.selectedIndex];
 			this.listContainer.addChild(new Spacer(1));
-			this.listContainer.addChild(new Text(theme.fg("muted", `  Model Name: ${selected.model.name}`), 0, 0));
+			this.listContainer.addChild(
+				new Text(
+					theme.fg(
+						"muted",
+						selected.variants
+							? `  Effort: ${selected.model.defaultThinkingLevel}  ${keyHint("app.models.effortLower", "lower")} / ${keyHint("app.models.effortHigher", "higher")}`
+							: `  Model Name: ${selected.model.name}`,
+					),
+					0,
+					0,
+				),
+			);
 		}
 	}
 
@@ -341,7 +422,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		if (kb.matches(keyData, "app.models.toggleFavorite")) {
 			const selected = this.filteredModels[this.selectedIndex];
 			if (selected) {
-				this.settingsManager.toggleModelFavorite(selected.provider, selected.id);
+				this.settingsManager.toggleModelFavorite(selected.provider, selected.model.id);
 				this.refreshFavoriteKeys();
 				const selectedKey = this.modelKey(selected);
 				this.allModels = this.sortModels(this.allModels);
@@ -349,6 +430,23 @@ export class ModelSelectorComponent extends Container implements Focusable {
 				this.filterModels(this.searchInput.getValue(), selectedKey);
 			}
 			return;
+		}
+		if (kb.matches(keyData, "app.models.effortLower") || kb.matches(keyData, "app.models.effortHigher")) {
+			const selected = this.filteredModels[this.selectedIndex];
+			if (selected?.variants) {
+				const index = selected.variants.findIndex((model) => model.id === selected.model.id);
+				const delta = kb.matches(keyData, "app.models.effortLower") ? -1 : 1;
+				selected.model = selected.variants[Math.max(0, Math.min(selected.variants.length - 1, index + delta))]!;
+				for (const item of [...this.allModels, ...this.scopedModelItems]) {
+					if (
+						this.modelKey(item) === this.modelKey(selected) &&
+						item.variants?.some((model) => model.id === selected.model.id)
+					)
+						item.model = selected.model;
+				}
+				this.updateList();
+				return;
+			}
 		}
 		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {

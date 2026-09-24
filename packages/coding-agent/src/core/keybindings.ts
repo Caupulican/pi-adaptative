@@ -79,6 +79,8 @@ export interface AppKeybindings {
 	"app.models.clearAll": true;
 	"app.models.toggleFavorite": true;
 	"app.models.toggleFavoritesTab": true;
+	"app.models.effortLower": true;
+	"app.models.effortHigher": true;
 	"app.models.toggleProvider": true;
 	"app.models.reorderUp": true;
 	"app.models.reorderDown": true;
@@ -288,6 +290,8 @@ export const KEYBINDINGS = {
 		defaultKeys: "tab",
 		description: "Switch between all models and favorites",
 	},
+	"app.models.effortLower": { defaultKeys: "left", description: "Choose lower model effort" },
+	"app.models.effortHigher": { defaultKeys: "right", description: "Choose higher model effort" },
 	"app.models.toggleProvider": {
 		defaultKeys: "ctrl+p",
 		description: "Toggle all models for provider",

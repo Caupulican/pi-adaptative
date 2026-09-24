@@ -10,6 +10,8 @@
 - OpenAI Codex browser login state is 32 random bytes in unpadded base64url, as the Codex CLI generates it.
 - OpenAI Codex credentials record the ID token's FedRAMP claim as `chatgptAccountIsFedramp`, and model, account and image requests for such an account send `X-OpenAI-Fedramp: true`. A refresh without an ID token keeps the flag for the same account; a refresh with one replaces it. Credentials stored before the claim was read send no header and need no new login. OAuth providers return credential-derived headers through `getRequestHeaders`; callers pass them as `credentialHeaders` (stream, image and account options) and `credentialHeadersFor` (stream options, for the key a rejected request is replayed with). The Codex header builder takes `X-OpenAI-Fedramp` only from `credentialHeaders`: request and model headers can no longer set or clear it, and a replay after auth recovery uses the recovered credential's headers instead of the rejected one's.
 - An OpenAI Codex refresh refused for good (HTTP 401, `invalid_grant`, or an expired, reused or invalidated refresh token) throws `OAuthRefreshRejectedError` with the reason.
+- Google Antigravity request identity is generated from the locally installed AGY version with `sync:agy-identity`.
+- Google Antigravity login uses a 16-byte URL-safe random state in its authorization request.
 
 ### Fixed
 

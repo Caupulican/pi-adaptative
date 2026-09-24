@@ -49,6 +49,18 @@ describe("native launch and authentication selection identity", () => {
 			args: ["--model", "opus"],
 		});
 	});
+	it("rejects AGY model and effort conflicts before launching a worker", () => {
+		expect(() =>
+			normalizeNativeProviderSelection("agy", ["--model", "gemini-3.8-flash-high", "--effort", "low"]),
+		).toThrow("conflicts");
+		expect(() =>
+			normalizeNativeProviderSelection("agy", ["--effort=medium"], { model: "gemini-3.8-flash-high" }),
+		).toThrow("conflicts");
+		expect(
+			normalizeNativeProviderSelection("agy", ["--model", "gemini-3.8-flash-high", "--effort", "high"]).args,
+		).toEqual(["--effort", "high", "--model", "gemini-3.8-flash-high"]);
+		expect(() => normalizeNativeProviderSelection("agy", ["--effort", "ultra"])).toThrow("effort");
+	});
 	it.each(["claude", "codex", "agy"])(
 		"honors structured models for %s and rejects conflicting raw models and non-Pi providers",
 		(kind) => {

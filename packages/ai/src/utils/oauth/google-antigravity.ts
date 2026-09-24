@@ -5,7 +5,7 @@ import {
 	parseAntigravityModels,
 } from "../antigravity.ts";
 import { awaitAuthorizationInput, parseAuthorizationInput } from "./authorization-input.ts";
-import { generatePKCE } from "./pkce.ts";
+import { base64urlEncode, generatePKCE } from "./pkce.ts";
 import { OAuthRefreshCompletedError } from "./refresh-completed-error.ts";
 import { parseOAuthTokenCredentials } from "./token-credentials.ts";
 import type { OAuthCredentials, OAuthProviderInterface } from "./types.ts";
@@ -45,7 +45,7 @@ export const antigravityOAuthProvider: OAuthProviderInterface = {
 	async login(callbacks) {
 		callbacks.signal?.throwIfAborted();
 		const { verifier, challenge } = await generatePKCE();
-		const state = crypto.randomUUID();
+		const state = base64urlEncode(crypto.getRandomValues(new Uint8Array(16)));
 		const params = new URLSearchParams({
 			client_id: CLIENT_ID,
 			redirect_uri: REDIRECT_URI,
