@@ -1332,9 +1332,13 @@ describe("conversation stage routing", () => {
 		const harness = await routedHarness(requests);
 		try {
 			let sideTrip: { tools: string[]; brief: string } | undefined;
+			let talkerTools: string[] = [];
 			let found = "";
 			harness.setResponses([
-				fauxAssistantMessage("Step one exports the ledger; step two migrates it."),
+				(context: Context) => {
+					talkerTools = (context.tools ?? []).map((tool) => tool.name);
+					return fauxAssistantMessage("Step one exports the ledger; step two migrates it.");
+				},
 				fauxAssistantMessage("ok"),
 				(context: Context) => {
 					const note = context.messages.at(-2);
@@ -1357,8 +1361,9 @@ describe("conversation stage routing", () => {
 			await harness.session.prompt("What did the first step say?");
 			// The side trip keeps the whole surface (reaching for a mutating tool hands the work to the
 			// talker) and gains the search.
-			expect(sideTrip?.tools).toContain("conversation_history");
-			expect(sideTrip?.tools).toEqual(expect.arrayContaining(harness.session.getActiveToolNames()));
+			// Exactly the tools the talker's own request carried, plus the search.
+			expect(talkerTools.length).toBeGreaterThan(0);
+			expect(sideTrip?.tools).toEqual([...talkerTools, "conversation_history"]);
 			expect(sideTrip?.brief).toContain("search it with conversation_history");
 			// The search reads the conversation before the brief, which the brief itself never sent.
 			expect(found).toContain("Step one exports the ledger");
