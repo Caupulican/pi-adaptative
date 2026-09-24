@@ -235,7 +235,11 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 	claim_delivery: Object.freeze({
 		states_tests_pass: Object.freeze({
 			type: "boolean",
-			instructions: "Does `final_answer` state that tests or checks passed?",
+			// Measured against live System One: relaying what a script printed ("status report: all green")
+			// scored 0.97 as a claim under "state that tests or checks passed"; this wording keeps real
+			// test, check and build claims at 0.96 or above and reads the relay as no claim.
+			instructions:
+				"Does `final_answer` claim that tests, a type check, a linter, a build or another verification the agent ran passed? Quoting or relaying what a script printed, without saying it verified anything, is not such a claim.",
 		}),
 		states_committed: Object.freeze({
 			type: "boolean",

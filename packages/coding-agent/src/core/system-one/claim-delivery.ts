@@ -203,7 +203,8 @@ export function claimCorrectionPrompt(findings: readonly ClaimFinding[]): string
 
 /** What each claim kind asserts, as a statement System One can judge against the turn's own results. */
 const CLAIM_STATEMENTS: Readonly<Record<ClaimKind, string>> = {
-	tests_pass: "The tests that were run passed",
+	// The claim the question detects (tests, checks, builds the agent ran), so a passing check in the results settles it.
+	tests_pass: "The tests or checks that were run passed",
 	committed: "The changes were committed with git",
 	pushed: "The changes were pushed to a git remote",
 	published: "The package or release was published",

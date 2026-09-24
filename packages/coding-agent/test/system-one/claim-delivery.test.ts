@@ -110,18 +110,18 @@ describe("claims against deliveries", () => {
 
 		it("stands when System One confirms it from the turn's results", async () => {
 			const c = checker({
-				settled: [{ item: "The tests that were run passed", verdict: "confirmed", by: "system_one" }],
+				settled: [{ item: "The tests or checks that were run passed", verdict: "confirmed", by: "system_one" }],
 				unsettled: [],
 			});
 			expect(await c.instance.check("All tests pass.", unrecognizedRun)).toBeUndefined();
-			expect(c.settleCalls).toEqual([["The tests that were run passed"]]);
+			expect(c.settleCalls).toEqual([["The tests or checks that were run passed"]]);
 			expect(c.warnings).toEqual([]);
 			expect(c.delivered).toEqual([]);
 		});
 
 		it("becomes a contradiction, with one correction, when System One refutes it", async () => {
 			const c = checker({
-				settled: [{ item: "The tests that were run passed", verdict: "refuted", by: "system_one" }],
+				settled: [{ item: "The tests or checks that were run passed", verdict: "refuted", by: "system_one" }],
 				unsettled: [],
 			});
 			const correction = await c.instance.check("All tests pass.", unrecognizedRun);
@@ -131,7 +131,7 @@ describe("claims against deliveries", () => {
 		it("goes to the owner when nothing settles it", async () => {
 			const c = checker({
 				settled: [],
-				unsettled: [{ item: "The tests that were run passed", missing: "a test run in this turn" }],
+				unsettled: [{ item: "The tests or checks that were run passed", missing: "a test run in this turn" }],
 			});
 			expect(await c.instance.check("All tests pass.", unrecognizedRun)).toBeUndefined();
 			expect(c.delivered).toHaveLength(1);
