@@ -1553,6 +1553,7 @@ export class AgentSession {
 					return this._modelRouter.replaceRefusedRoutedModel(failed, hop);
 				this.agent.state.model = hop;
 				this.sessionManager.appendModelChange(hop.provider, hop.id);
+				this._moveTalker(hop, `${failed.provider}/${failed.id} out of quota`);
 				return hop;
 			},
 			resolveFallbackModel: (failed) =>
@@ -2809,10 +2810,7 @@ export class AgentSession {
 			return undefined;
 		}
 		await this._switchSessionModel(replacement, { persistSettings: false });
-		// A forced move carries a chosen talker with it; before the opening there is none to carry.
-		if (this.sessionManager.getLatestCustomEntryOnBranch(CONVERSATION_TALKER_CUSTOM_TYPE) !== undefined) {
-			this._recordTalker(replacement, [`${from} unavailable on this account`]);
-		}
+		this._moveTalker(replacement, `${from} unavailable on this account`);
 		const to = `${replacement.provider}/${replacement.id}`;
 		this._emit({
 			type: "warning",
@@ -4452,6 +4450,15 @@ export class AgentSession {
 		}
 		this._recordTalker(model, decision.reasons);
 		this._modelRouter.recordOpeningRoute(decision, model);
+	}
+
+	/**
+	 * A hard failure (quota, an account that no longer offers the model) carries a chosen talker to the
+	 * model the session moved to; before the opening there is no talker to carry.
+	 */
+	private _moveTalker(model: Model<Api>, reason: string): void {
+		if (this.sessionManager.getLatestCustomEntryOnBranch(CONVERSATION_TALKER_CUSTOM_TYPE) === undefined) return;
+		this._recordTalker(model, [reason]);
 	}
 
 	/** The conversation's talker from now on: later owner messages run on it with no route judged. */

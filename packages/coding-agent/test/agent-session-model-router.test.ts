@@ -6,7 +6,7 @@ import type { Api, AssistantMessage, Context, Message, Model, Usage } from "@cau
 import { clampThinkingLevel, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import type { FauxRequestEvent } from "@caupulican/pi-ai/faux";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { RouteDecision } from "../src/core/autonomy/contracts.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
@@ -1281,6 +1281,30 @@ describe("conversation stage routing", () => {
 			expect(talkers).toHaveLength(1);
 			expect(talkers[0]?.type === "custom" ? talkers[0].data : undefined).toMatchObject({
 				reasons: ["model selected"],
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("moves the talker to where a quota failover continued the work", async () => {
+		const requests: FauxRequestEvent[] = [];
+		const harness = await routedHarness(requests);
+		try {
+			await harness.session.setModel(harness.getModel("root")!);
+			vi.spyOn(harness.session.modelRegistry, "isUsingSubscription").mockReturnValue(true);
+			harness.setResponses([
+				fauxAssistantMessage("", { stopReason: "error", errorMessage: "The usage limit has been reached" }),
+				fauxAssistantMessage("continued"),
+			]);
+			await harness.session.prompt("Plan the migration of the ledger to a new schema; list the steps.");
+			const continuedOn = harness.session.model?.id;
+			expect(continuedOn).not.toBe("root");
+			const talkers = talkerEntries(harness);
+			const latest = talkers.at(-1);
+			expect(latest?.type === "custom" ? latest.data : undefined).toMatchObject({
+				model: `faux/${continuedOn}`,
+				reasons: ["faux/root out of quota"],
 			});
 		} finally {
 			harness.cleanup();
