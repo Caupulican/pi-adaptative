@@ -567,6 +567,34 @@ export class DecisionLedgerStore {
 		return this.cacheObservationRows(rows).filter((row) => row.lane.split("\u0000")[1] === provider);
 	}
 
+	/**
+	 * How many foreground requests the root has taken on each route of `route`'s kind, learned from the
+	 * ledger: the provider responses recorded in the session between that route's decision and the next
+	 * decision there. The median, or undefined before the root has run such a route to its next decision.
+	 */
+	learnedRootRouteRequests(route: string): number | undefined {
+		const rows = this.database
+			.prepare(
+				`WITH decisions AS (
+					SELECT session_id, route, executor, decided_at,
+						LEAD(decided_at) OVER (PARTITION BY session_id ORDER BY decided_at, id) AS next_at
+					FROM route_decisions
+				)
+				SELECT (SELECT COUNT(*) FROM cache_observations o
+					WHERE o.session_id = d.session_id AND o.observed_at >= d.decided_at AND o.observed_at < d.next_at) AS requests
+				FROM decisions d
+				WHERE d.route = ? AND d.executor = 'root' AND d.next_at IS NOT NULL`,
+			)
+			.all(route);
+		const counts = rows
+			.map((row) => asInteger(row.requests))
+			.filter((count): count is number => count !== undefined && count > 0)
+			.sort((a, b) => a - b);
+		if (counts.length === 0) return undefined;
+		const mid = Math.floor(counts.length / 2);
+		return counts.length % 2 === 1 ? counts[mid] : ((counts[mid - 1] ?? 0) + (counts[mid] ?? 0)) / 2;
+	}
+
 	/** A session lane's most recent observation: where a resumed session's next gap is measured from. */
 	latestCacheObservation(sessionId: string, lane: string): { observedAt: number; promptTokens: number } | undefined {
 		const row = this.database

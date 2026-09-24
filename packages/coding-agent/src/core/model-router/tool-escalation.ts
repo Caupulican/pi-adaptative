@@ -145,11 +145,21 @@ export function shouldEscalateModelRouterTool(options: {
 	// abort every executor turn at the moment it does its job. Any OTHER mutating tool still
 	// escalates to the expensive model as usual.
 	if (options.reasonCode === "executor_direct" && toolName === "run_toolkit_script") return false;
-	if (!toolName) return true;
-	if (READ_ONLY_TOOL_NAMES.has(toolName)) return false;
-	if (SHELL_TOOL_NAMES.has(toolName)) {
-		const command = getShellCommand(options.args);
+	return isMutatingToolCall(toolName, options.args);
+}
+
+/**
+ * Whether a tool call may change the world (files, processes, remote state): anything but the known
+ * read-only tools and read-only shell commands. The one read/write line the router escalation and the
+ * work boundary both draw.
+ */
+export function isMutatingToolCall(toolName: string, args?: unknown): boolean {
+	const name = toolName.trim().toLowerCase();
+	if (!name) return true;
+	if (READ_ONLY_TOOL_NAMES.has(name)) return false;
+	if (SHELL_TOOL_NAMES.has(name)) {
+		const command = getShellCommand(args);
 		return command ? !isReadOnlyShellCommand(command) : true;
 	}
-	return MUTATING_TOOL_NAME_RE.test(toolName) || !toolName.startsWith("read_");
+	return MUTATING_TOOL_NAME_RE.test(name) || !name.startsWith("read_");
 }

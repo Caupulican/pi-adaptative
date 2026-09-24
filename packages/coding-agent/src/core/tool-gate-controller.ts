@@ -14,6 +14,7 @@ import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
 import { classifyAllEdgeOperations, type EdgeClass } from "./autonomy/edge-policy.ts";
 import { evaluateToolGateAsync } from "./autonomy/gates.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
+import { isMutatingToolCall } from "./model-router/tool-escalation.ts";
 import { refuseLocalPush } from "./objective-execution/local-commit-delivery.ts";
 import { type HostRepositoryEffect, repositoryEffectForCall } from "./objective-execution/repository-effect.ts";
 import type {
@@ -73,6 +74,8 @@ export interface ToolGateControllerDeps {
 		executionCwd: string | undefined,
 		signal: AbortSignal | undefined,
 	): Promise<BeforeToolCallResult | undefined>;
+	/** An admitted tool call that may change the world (see `isMutatingToolCall`): the work boundary. */
+	noteMutatingCall?(toolName: string): void;
 	/** Branch this task must commit onto. Set only after Jev classifies the request as local commits. */
 	localCommitBranch?(): string | undefined;
 	/** The edge classes an admitted call carries (empty for ordinary work), for the delivery projection. */
@@ -364,6 +367,9 @@ export class ToolGateController {
 			if (systemOne && !isControlPlaneTool) {
 				systemOne.recordToolCall({ tool: toolCall.name, args, impact, call_id: toolCall.id });
 			}
+			// Admitted: a call that may change the world opens the work boundary when no work is declared.
+			if (!isControlPlaneTool && isMutatingToolCall(toolCall.name, args))
+				this.deps.noteMutatingCall?.(toolCall.name);
 
 			let releaseObservation: (() => void) | undefined;
 			try {

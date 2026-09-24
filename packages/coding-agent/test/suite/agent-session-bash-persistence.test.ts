@@ -10,6 +10,7 @@ import {
 	OWNER_EVIDENCE_CUSTOM_TYPE,
 } from "../../src/core/reflection-controller.ts";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
+import { WORK_UNIT_CUSTOM_TYPE } from "../../src/core/work-units.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function getEntryTypes(harness: Harness): string[] {
@@ -172,6 +173,8 @@ describe("AgentSession bash and persistence characterization", () => {
 			"custom",
 			"request_snapshot",
 			"message",
+			// The first call that may change the world opens the turn's work unit (see work-units.ts).
+			"custom",
 			"foreground_tool_start",
 			"message",
 			"foreground_tool_terminal",
@@ -179,6 +182,11 @@ describe("AgentSession bash and persistence characterization", () => {
 			"message",
 			"custom",
 		]);
+		expect(entries[6]).toMatchObject({
+			type: "custom",
+			customType: WORK_UNIT_CUSTOM_TYPE,
+			data: { kind: "enforced" },
+		});
 		// The owner's prompt is persisted (entry 2) and immediately followed by its owner-evidence
 		// record (entry 3): the session marks the message as operator input and the reflection
 		// controller records the original words at persistence, bound to that message's entry id.

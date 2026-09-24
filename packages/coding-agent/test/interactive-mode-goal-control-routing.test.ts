@@ -181,7 +181,8 @@ describe.each(["streaming", "retrying", "compacting"] as const)("owner goal comm
 			await submit("/goal resume");
 
 			expect(context.showError).toHaveBeenCalledWith(expect.stringContaining("Goal state changed concurrently"));
-			expect(manager.getEntryCount()).toBe(initialEntries + 1);
+			// Only the racing write lands: its goal state, plus the declared work unit a new goal opens.
+			expect(manager.getEntryCount()).toBe(initialEntries + (race === "replacement" ? 2 : 1));
 			expect(controller.getState()?.goalId).toBe(race === "revision" ? "goal-routing" : "replacement");
 			expect(schedule).not.toHaveBeenCalled();
 			expect(context.showStatus).not.toHaveBeenCalled();

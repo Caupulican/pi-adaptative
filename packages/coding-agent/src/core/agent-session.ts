@@ -89,7 +89,12 @@ import { BashExecutionController } from "./bash-execution-controller.ts";
 import type { BashResult } from "./bash-executor.ts";
 import { type CapabilityTierPolicy, capabilityTierPolicy, resolveCapabilityTier } from "./capability-tier.ts";
 import type { NativePiActivityPort } from "./collaboration/native-pi-activity.ts";
-import { resolveEffectiveModelPricing, switchCostUsd, usd } from "./compaction/early-compaction-economics.ts";
+import {
+	priceExecutor,
+	resolveEffectiveModelPricing,
+	switchCostUsd,
+	usd,
+} from "./compaction/early-compaction-economics.ts";
 import { RETENTION_AUDIT_CUSTOM_TYPE } from "./compaction/evidence-retention-projection.ts";
 import { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
 import { type AutoCompactionReason, CompactionController } from "./compaction-controller.ts";
@@ -156,6 +161,7 @@ import { reportGithubOriginPinForSession } from "./github-origin-pin.ts";
 import { isOwnIdleContinuationAdmission } from "./goals/goal-auto-continue-controller.ts";
 import { recordObjectiveClarification } from "./goals/goal-clarification-log.ts";
 import { DEFAULT_GOAL_WORKER_WAIT_MS } from "./goals/goal-continuation-defaults.ts";
+import { buildObjectiveRoutePrompt } from "./goals/goal-continuation-prompt.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import { GoalSessionController } from "./goals/goal-session-controller.ts";
@@ -222,6 +228,7 @@ import {
 	resolveRuleAuthority,
 } from "./objective-execution/local-commit-delivery.ts";
 import { ObjectiveMutationLedger } from "./objective-execution/objective-mutation-ledger.ts";
+import type { ObjectiveRoute } from "./objective-execution/objective-route.ts";
 import {
 	createRepoReleaseDelivery,
 	type TrustedDeployAdapter,
@@ -339,9 +346,11 @@ import { ToolRecoveryLogger } from "./tool-recovery-logger.ts";
 import { ToolPerformanceStore } from "./tool-selection/tool-performance-store.ts";
 import { formatToolSelectionReport, ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import type { BashOperations } from "./tools/bash.ts";
+import { MAX_DELEGATE_STATUS_OUTPUT_BYTES } from "./tools/delegate-status.ts";
 import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
 import { shareTextBudget } from "./util/text-budget.ts";
+import { currentWorkUnit, openWorkUnit } from "./work-units.ts";
 
 // ============================================================================
 // Stream-idle watchdog wiring
@@ -1880,6 +1889,14 @@ export class AgentSession {
 		});
 		this._toolGate = new ToolGateController({
 			getMutationScope: () => this.mutationScope,
+			noteMutatingCall: (toolName) => {
+				// The enforced work boundary: the first call that may change the world with no work declared
+				// (a goal being worked declares its own unit) opens one unit until the owner speaks again.
+				const goal = this._goals.getState();
+				const activeGoalId = goal && isGoalExecutionActive(goal.status) ? goal.goalId : undefined;
+				if (currentWorkUnit(this.sessionManager, activeGoalId)) return;
+				openWorkUnit(this.sessionManager, { kind: "enforced", reason: `first mutating call: ${toolName}` });
+			},
 			maybeEscalateToolCall: (toolName, args) => this._modelRouter.maybeEscalateToolCall(toolName, args),
 			getCwd: () => this._cwd,
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
@@ -2409,6 +2426,7 @@ export class AgentSession {
 			});
 			stack.objectiveController.bindSessionExecutors({
 				rootExecutor: this._goals.objectiveRootExecutor(),
+				chooseExecutor: (route) => this._chooseObjectiveExecutor(route),
 				waiter: { wait: (context) => this._waitForObjectiveWorkers(context) },
 				checkpoints: ledgerRoutes,
 				stalls: ledgerRoutes,
@@ -4132,6 +4150,43 @@ export class AgentSession {
 		return pricing !== undefined && cost < usd(prefixTokens, pricing.cacheRead);
 	}
 
+	/**
+	 * The root (the talker) or a worker for a route the root may take (`priceExecutor`). The talker's
+	 * cost is its learned requests for this route kind reading its prefix; the worker writes the route's
+	 * brief and reports back within the delegate result bound. The worker is priced on the session model,
+	 * the model a worker runs on when no expert binding places it elsewhere.
+	 */
+	private _chooseObjectiveExecutor(route: ObjectiveRoute): "root" | "worker" {
+		const model = this.model;
+		const prefixTokens = this.getContextUsage()?.tokens ?? 0;
+		const pricing = model ? resolveEffectiveModelPricing(model, prefixTokens) : undefined;
+		const briefTokens = estimateTokens({
+			role: "user",
+			content: buildObjectiveRoutePrompt(route).text,
+			timestamp: 0,
+		});
+		const verdict = priceExecutor({
+			talkerPrefixTokens: prefixTokens,
+			briefTokens,
+			reportTokens: estimateTokens({
+				role: "user",
+				content: " ".repeat(MAX_DELEGATE_STATUS_OUTPUT_BYTES),
+				timestamp: 0,
+			}),
+			requests: this.getDecisionLedger()?.learnedRootRouteRequests(route.route),
+			talker: pricing,
+			worker: model ? resolveEffectiveModelPricing(model, briefTokens) : undefined,
+		});
+		this._recordCacheDecision({
+			kind: "executor",
+			decidedAt: Date.now(),
+			admit: verdict.executor === "worker",
+			reason: verdict.reason,
+			detail: { route: route.route, prefixTokens, briefTokens },
+		});
+		return verdict.executor;
+	}
+
 	private async _ensureRouteModelReady(
 		resolved: { decision: RouteDecision; model: Model<Api> } | undefined,
 	): Promise<{ decision: RouteDecision; model: Model<Api> } | undefined> {
@@ -4400,14 +4455,10 @@ export class AgentSession {
 				contextTokens: this.getContextUsage()?.tokens ?? 0,
 			};
 			let resolvedRouteInfo: { decision: RouteDecision; model: Model<Api> } | undefined;
-			if (options?.autoContinueGoal === false) {
-				// Internally generated turns (goal continuation, lane follow-ups) keep the deterministic
-				// route: the classifier already placed them, and a 20-turn loop must not buy 20 evaluations.
-				resolvedRouteInfo = await this._modelRouter.resolveTurnRouteJudged(expandedText, {
-					skipJudge: true,
-					...routeFacts,
-				});
-			} else {
+			// Internally generated turns (goal continuation, a route brief, lane follow-ups, reflection) run on
+			// the root lane: the talker, on its warm cache, with no tier swap. Work meant for another model
+			// goes to a worker through the objective route, never to a swapped root turn.
+			if (options?.autoContinueGoal !== false) {
 				// An owner message: the talker answers, a small message takes a side trip, and the first
 				// substantive message chooses the talker once (conversation-continuity stages 0-1).
 				const route = await this._modelRouter.routeOwnerMessage(expandedText, {

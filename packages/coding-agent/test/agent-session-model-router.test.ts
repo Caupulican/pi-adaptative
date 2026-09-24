@@ -1533,6 +1533,22 @@ describe("conversation stage routing", () => {
 		}
 	});
 
+	it("runs internal turns on the talker with no route and no swap", async () => {
+		const requests: FauxRequestEvent[] = [];
+		const harness = await routedHarness(requests);
+		try {
+			harness.setResponses([fauxAssistantMessage("continued")]);
+			// A goal continuation or route brief the classifier would call small still runs on the root lane.
+			await harness.session.prompt("Explain this read-only value", { autoContinueGoal: false });
+			const reply = harness.session.messages.at(-1) as AssistantMessage;
+			expect(reply.model).toBe("root");
+			expect(harness.session.model?.id).toBe("root");
+			expect(harness.session.getModelRouterStatus()).toContain("Last decision: none");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("sends a small message on a side trip that reads only its brief, leaving the talker in place", async () => {
 		const requests: FauxRequestEvent[] = [];
 		const harness = await routedHarness(requests);

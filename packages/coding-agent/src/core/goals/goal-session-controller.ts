@@ -21,6 +21,7 @@ import { budgetedTokens } from "../orchestration/capability-gateway.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import { systemOneAbortReason } from "../system-one/foreground-control.ts";
+import { openWorkUnit } from "../work-units.ts";
 import { buildObjectiveRoutePrompt, GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
 import {
 	GoalBudgetExhaustedError,
@@ -244,6 +245,14 @@ export class GoalSessionController {
 			throw new Error(
 				`Goal state changed concurrently; expected ${expected.goalId}@${expected.revision}, found ${current ? `${current.goalId}@${current.revision ?? 0}` : "none"}. Retry against the latest state.`,
 			);
+		}
+		// A goal starting is the declared work boundary: the unit it opens runs until the goal ends.
+		if (current?.goalId !== state.goalId && isGoalExecutionActive(state.status)) {
+			openWorkUnit(this.deps.getSessionManager(), {
+				kind: "declared",
+				goalId: state.goalId,
+				reason: state.userGoal,
+			});
 		}
 		const entryId = appendGoalStateSnapshot(this.deps.getSessionManager(), state, current);
 		const lease = this.executionLease;

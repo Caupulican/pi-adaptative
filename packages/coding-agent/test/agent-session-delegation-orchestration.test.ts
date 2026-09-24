@@ -142,7 +142,7 @@ describe("AgentSession provider-neutral delegation orchestration", () => {
 		}
 	});
 
-	it("keeps delegation policy for a routed provider/model turn", async () => {
+	it("keeps delegation policy for a side trip on another provider/model", async () => {
 		const harness = await createHarness({
 			models: [
 				{ id: "sol", reasoning: true, contextWindow: 372_000 },
@@ -170,7 +170,8 @@ describe("AgentSession provider-neutral delegation orchestration", () => {
 				},
 			]);
 
-			await harness.session.prompt("Explain this code block", { autoContinueGoal: false });
+			// A small owner message takes its side trip on the cheap pin with the tier's thinking.
+			await harness.session.prompt("Explain this code block");
 
 			expect(routedReasoning).toBe("max");
 			expect(routedPrompt).toContain(DELEGATION_POLICY_HEADING);
@@ -182,7 +183,7 @@ describe("AgentSession provider-neutral delegation orchestration", () => {
 		}
 	});
 
-	it("keeps delegation policy across a same-model thinking override", async () => {
+	it("keeps the talker's own thinking and delegation policy when the cheap pin is the talker", async () => {
 		const harness = await createHarness({
 			models: [{ id: "sol", reasoning: true, contextWindow: 372_000 }],
 			settings: {
@@ -207,9 +208,12 @@ describe("AgentSession provider-neutral delegation orchestration", () => {
 				},
 			]);
 
-			await harness.session.prompt("Explain this code block", { autoContinueGoal: false });
+			// No side trip runs on the talker's own model, so no tier thinking replaces the session's: a
+			// per-request reasoning change would rewrite the cached request for nothing.
+			await harness.session.prompt("Explain this code block");
 
-			expect(routedReasoning).toBe("max");
+			expect(routedReasoning).toBe("ultra");
+			expect(harness.session.getModelRouterStatus()).toContain("Last decision: none");
 			expect(routedPrompt).toContain(DELEGATION_POLICY_HEADING);
 			expect(harness.session.thinkingLevel).toBe("ultra");
 			expect(harness.session.systemPrompt).toContain(DELEGATION_POLICY_HEADING);

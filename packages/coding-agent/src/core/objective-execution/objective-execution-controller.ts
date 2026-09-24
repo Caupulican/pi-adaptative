@@ -185,6 +185,11 @@ export interface ObjectiveExecutionControllerDeps {
 	 * retrieval and non-independent verification); review and escalations stay with workers.
 	 */
 	rootExecutor?: { execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void> };
+	/**
+	 * Who executes a route the root may take: the root (the talker, on its warm cache) or a worker given
+	 * the route's brief, by what each costs (`priceExecutor`). Absent, the root takes it.
+	 */
+	chooseExecutor?(route: ObjectiveRoute): "root" | "worker";
 	/** The owner's authority is what the objective waits on right now: an open question or an operator blocker. */
 	ownerRequired?(objectiveId: string): boolean;
 	/** Unconsumed specialist/capability/verifier requests from live worker supervision. */
@@ -426,6 +431,7 @@ export class ObjectiveExecutionController {
 			Pick<
 				ObjectiveExecutionControllerDeps,
 				| "rootExecutor"
+				| "chooseExecutor"
 				| "waiter"
 				| "retrieval"
 				| "verifier"
@@ -1792,7 +1798,8 @@ export class ObjectiveExecutionController {
 			this.deps.rootExecutor &&
 			!escalated &&
 			route.route !== "review" &&
-			!route.reason_codes.includes("independent_verification_required")
+			!route.reason_codes.includes("independent_verification_required") &&
+			(!this.deps.workerDispatcher?.dispatch || (this.deps.chooseExecutor?.(route) ?? "root") === "root")
 		) {
 			this._lastExecutor = "root";
 			await this.deps.rootExecutor.execute(route, signal);

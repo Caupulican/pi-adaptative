@@ -185,6 +185,47 @@ export function planIdlePreparation(
 }
 
 /**
+ * Who executes a unit of work (conversation-continuity Q8 as refined by the KV-cache rule): the talker
+ * on its own warm cache, or a worker given a brief. The talker pays each of its learned requests for the
+ * work reading its whole prefix from cache. The worker writes the brief cold, reads its small prefix on
+ * each request, and its report is appended to the talker's prefix once, cold. The worker wins only when
+ * that is cheaper; without prices or a learned request count the talker keeps the work.
+ */
+export function priceExecutor(input: {
+	readonly talkerPrefixTokens: number;
+	readonly briefTokens: number;
+	readonly reportTokens: number;
+	/** The requests this kind of work has learned to take on the talker. */
+	readonly requests: number | undefined;
+	readonly talker: EffectiveModelPricing | undefined;
+	readonly worker: EffectiveModelPricing | undefined;
+}): { executor: "root" | "worker"; reason: string; talkerUsd?: number; workerUsd?: number } {
+	const { talker, worker, requests } = input;
+	if (!talker || !worker || requests === undefined || requests <= 0) {
+		return { executor: "root", reason: "no learned request count or prices; the talker keeps the work" };
+	}
+	const coldOf = (pricing: EffectiveModelPricing) => (pricing.cacheWrite > 0 ? pricing.cacheWrite : pricing.input);
+	const talkerUsd = requests * usd(input.talkerPrefixTokens, talker.cacheRead);
+	const workerUsd =
+		usd(input.briefTokens, coldOf(worker)) +
+		Math.max(0, requests - 1) * usd(input.briefTokens, worker.cacheRead) +
+		usd(input.reportTokens, coldOf(talker));
+	return workerUsd < talkerUsd
+		? {
+				executor: "worker",
+				reason: `a worker on a brief costs ${workerUsd.toFixed(6)} USD against ${talkerUsd.toFixed(6)} USD on the talker over ${requests} requests`,
+				talkerUsd,
+				workerUsd,
+			}
+		: {
+				executor: "root",
+				reason: `the talker's warm prefix costs ${talkerUsd.toFixed(6)} USD against ${workerUsd.toFixed(6)} USD for a worker over ${requests} requests`,
+				talkerUsd,
+				workerUsd,
+			};
+}
+
+/**
  * What moving work onto a model costs in cache: the destination has none of it cached, so every token
  * it must read (the prefix, or the smaller brief it is given instead) is paid at its cold price. Zero for
  * a price-free model; undefined when its prices are unknown.
