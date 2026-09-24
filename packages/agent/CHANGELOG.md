@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- `AgentTool.readOnly` declares that every call of a tool only reads.
+
 ## [0.99.46] - 2026-09-24
 
 ### Added

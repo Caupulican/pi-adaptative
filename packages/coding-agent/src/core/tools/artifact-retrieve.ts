@@ -125,6 +125,7 @@ export function createArtifactRetrieveToolDefinition(
 	return {
 		name: "artifact_retrieve",
 		label: "artifact_retrieve",
+		readOnly: true,
 		description:
 			"Retrieve a bounded slice of a stored original by id: a packed tool-output artifact ('Full output: artifact tool-output:<id>') or a context-GC packed result ('artifact_retrieve context:<key>'). Returns metadata, or a bounded head/tail/offset slice -- never the full raw payload in one call.",
 		promptSnippet: "Retrieve a bounded slice of a packed tool-output artifact",

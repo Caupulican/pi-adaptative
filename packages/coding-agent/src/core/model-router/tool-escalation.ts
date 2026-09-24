@@ -28,8 +28,6 @@ export function isLocalOrManagedRouterModel(model: Model<Api>): boolean {
 
 const READ_ONLY_TOOL_NAMES = new Set([
 	"read",
-	// A side trip's search of the conversation its brief omits (model-router/side-trip-brief.ts).
-	"conversation_history",
 	"grep",
 	"find",
 	"ls",
@@ -138,22 +136,30 @@ function isReadOnlyShellCommand(command: string): boolean {
  * shell tools, whose read-only commands run while the escalation gate reruns a mutating one elsewhere.
  * Every call of any other tool escalates, so a side trip that carries it only pays for its schema.
  */
-export function mayRunWithoutEscalation(toolName: string): boolean {
-	const name = toolName.trim().toLowerCase();
-	return SHELL_TOOL_NAMES.has(name) || !isMutatingToolCall(name);
+export function mayRunWithoutEscalation(tool: { readonly name: string; readonly readOnly?: boolean }): boolean {
+	const name = tool.name.trim().toLowerCase();
+	return SHELL_TOOL_NAMES.has(name) || !isMutatingToolCall(name, undefined, tool.readOnly);
 }
 
-export function shouldEscalateModelRouterTool(options: { tier: ModelTier; toolName: string; args?: unknown }): boolean {
+export function shouldEscalateModelRouterTool(options: {
+	tier: ModelTier;
+	toolName: string;
+	args?: unknown;
+	/** The tool's own `readOnly` declaration, when it made one. */
+	readOnly?: boolean;
+}): boolean {
 	if (options.tier !== "cheap") return false;
-	return isMutatingToolCall(options.toolName, options.args);
+	return isMutatingToolCall(options.toolName, options.args, options.readOnly);
 }
 
 /**
- * Whether a tool call may change the world (files, processes, remote state): anything but the known
- * read-only tools and read-only shell commands. The one read/write line the router escalation and the
+ * Whether a tool call may change the world (files, processes, remote state): anything but a tool that
+ * declares itself read-only, the known read-only tools and read-only shell commands. The one read/write line the router escalation and the
  * work boundary both draw.
  */
-export function isMutatingToolCall(toolName: string, args?: unknown): boolean {
+export function isMutatingToolCall(toolName: string, args?: unknown, declaredReadOnly?: boolean): boolean {
+	// A tool's own declaration outranks its name; the name rules below judge tools that declared nothing.
+	if (declaredReadOnly === true) return false;
 	const name = toolName.trim().toLowerCase();
 	if (!name) return true;
 	if (READ_ONLY_TOOL_NAMES.has(name)) return false;

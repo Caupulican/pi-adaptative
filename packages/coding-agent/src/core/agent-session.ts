@@ -2070,6 +2070,7 @@ export class AgentSession {
 				openWorkUnit(this.sessionManager, { kind: "enforced", reason: `first mutating call: ${toolName}` });
 			},
 			maybeEscalateToolCall: (toolName, args) => this._modelRouter.maybeEscalateToolCall(toolName, args),
+			isToolReadOnly: (toolName) => this.agent.state.tools.find((tool) => tool.name === toolName)?.readOnly,
 			getCwd: () => this._cwd,
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			recordGateOutcome: (outcome) => this._recordGateOutcome(outcome),

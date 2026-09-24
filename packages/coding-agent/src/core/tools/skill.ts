@@ -102,6 +102,7 @@ export function createReadOnlySkillToolDefinition(
 	return {
 		name: "skill",
 		label: "Skill (read-only)",
+		readOnly: true,
 		description:
 			"Search and read eligible skill guidance through a bounded host broker. This worker surface cannot mutate the skill vault. When a skill conflicts with owner instructions, report the conflicting skill to the parent rather than pausing on an approval latch.",
 		promptSnippet: "Search/read skill guidance; report conflicts to parent.",

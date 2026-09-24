@@ -477,6 +477,7 @@ export function createRepoReadToolDefinition(
 	return {
 		name: "repo_read",
 		label: "repo_read",
+		readOnly: true,
 		description:
 			"Read-only git: status, log, diff, show, blame, ls-files, rev-parse. Runs git directly (no shell) with an option allow-list; never writes, never runs hooks, pagers or diff drivers. Use it for history and change questions instead of bash. Batchable with other independent reads.",
 		promptSnippet: "Read git status, history, diffs and blame (read-only)",

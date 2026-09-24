@@ -251,6 +251,7 @@ export function createSkillAuditToolDefinition(
 	return {
 		name: "skill_audit",
 		label: "Skill Audit",
+		readOnly: true,
 		description:
 			"Check a draft/new skill for overlap with existing skills before creating it; flags near-duplicate triggers/descriptions via local Jaccard similarity. Read-only: does not write files.",
 		promptSnippet: "Audit skill for overlaps",

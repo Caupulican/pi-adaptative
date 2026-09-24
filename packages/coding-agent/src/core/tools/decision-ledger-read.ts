@@ -104,6 +104,7 @@ export function createDecisionLedgerReadToolDefinition(
 	return {
 		name: DECISION_LEDGER_READ_TOOL_NAME,
 		label: DECISION_LEDGER_READ_TOOL_NAME,
+		readOnly: true,
 		description:
 			"Read the decision ledger: the stage transitions (understand, plan, build, dispatch, observe, verify, clarify, repair, deliver, done) with their times and loops, and the Jev evaluations with their verdicts and reasons, for this session or a recorded one. Use it to find where a run went wrong, what looped, and which judgments were made; 'replay' returns a past session's graph as recorded.",
 		promptSnippet: "Read the decision ledger: stage transitions and Jev verdicts of this or a recorded session",

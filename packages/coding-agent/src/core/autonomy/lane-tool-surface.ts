@@ -208,6 +208,7 @@ function createLaneTools(
 		factories.set(WORKER_MEMORY_READ_TOOL_NAME, () => ({
 			name: WORKER_MEMORY_READ_TOOL_NAME,
 			label: "Read Memory",
+			readOnly: true,
 			description:
 				"Retrieve bounded, source-labeled standing memory relevant to this delegated task. Read-only: no memory writes or lifecycle actions are available.",
 			parameters: laneMemorySchema,

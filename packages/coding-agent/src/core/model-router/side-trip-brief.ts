@@ -29,6 +29,7 @@ export function sideTripHistoryTool(earlier: () => readonly AgentMessage[]): Age
 	return {
 		name: SIDE_TRIP_HISTORY_TOOL_NAME,
 		label: "Conversation history",
+		readOnly: true,
 		description:
 			"Search the earlier conversation, which your brief does not show. Call it when the message refers to something said or done earlier.",
 		parameters: Type.Object({ query: Type.String({ description: "What to look for" }) }),

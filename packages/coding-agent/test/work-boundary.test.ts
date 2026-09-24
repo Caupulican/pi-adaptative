@@ -4,7 +4,11 @@ import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/session";
 import { afterEach, describe, expect, it } from "vitest";
 import { priceExecutor } from "../src/core/compaction/early-compaction-economics.ts";
-import { isMutatingToolCall } from "../src/core/model-router/tool-escalation.ts";
+import {
+	isMutatingToolCall,
+	mayRunWithoutEscalation,
+	shouldEscalateModelRouterTool,
+} from "../src/core/model-router/tool-escalation.ts";
 import { DecisionLedgerStore } from "../src/core/operator-projection/decision-ledger-store.ts";
 import { currentWorkUnit, openWorkUnit } from "../src/core/work-units.ts";
 
@@ -46,6 +50,18 @@ describe("the read/write line", () => {
 		expect(isMutatingToolCall("bash", { command: "ls -la" })).toBe(false);
 		expect(isMutatingToolCall("bash", { command: "echo hi > a.txt" })).toBe(true);
 		expect(isMutatingToolCall("edit", { path: "a" })).toBe(true);
+	});
+
+	it("trusts a tool's own read-only declaration over its name, and treats an undeclared unknown tool as mutating", () => {
+		expect(isMutatingToolCall("repo_read", { action: "status" })).toBe(true);
+		expect(isMutatingToolCall("repo_read", { action: "status" }, true)).toBe(false);
+		expect(isMutatingToolCall("some_extension_tool", {})).toBe(true);
+		// A cheap turn escalates only what may change the world; the side trip keeps what it can run.
+		expect(shouldEscalateModelRouterTool({ tier: "cheap", toolName: "repo_read", readOnly: true })).toBe(false);
+		expect(shouldEscalateModelRouterTool({ tier: "cheap", toolName: "repo_read" })).toBe(true);
+		expect(mayRunWithoutEscalation({ name: "artifact_retrieve", readOnly: true })).toBe(true);
+		expect(mayRunWithoutEscalation({ name: "bash" })).toBe(true);
+		expect(mayRunWithoutEscalation({ name: "edit" })).toBe(false);
 	});
 });
 

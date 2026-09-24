@@ -486,6 +486,12 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	 *
 	 * If omitted, the default execution mode applies.
 	 */
+	/**
+	 * Every call only reads: it changes no file, process or remote state. Harness policy that must tell
+	 * reads from writes (a cheap turn's escalation, the work boundary, a side trip's surface) trusts this
+	 * declaration; a tool that declares nothing is judged by its name and treated as mutating when unknown.
+	 */
+	readOnly?: boolean;
 	executionMode?: ToolExecutionMode;
 
 	/**

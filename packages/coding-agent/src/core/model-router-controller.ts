@@ -411,7 +411,8 @@ export class ModelRouterController {
 	 */
 	maybeEscalateToolCall(toolName: string, args: unknown): { block: true; reason: string } | undefined {
 		const route = this._activeModelRouterRoute;
-		if (route && shouldEscalateModelRouterTool({ tier: route.tier, toolName, args })) {
+		const readOnly = this.deps.getAgent().state.tools.find((tool) => tool.name === toolName)?.readOnly;
+		if (route && shouldEscalateModelRouterTool({ tier: route.tier, toolName, args, readOnly })) {
 			this._modelRouterEscalationRequested = true;
 			this.deps.getAgent().abort("model router escalation");
 			return {
@@ -1450,7 +1451,7 @@ export class ModelRouterController {
 				// omits: a small brief reads a small surface, and the search is not buried under schemas.
 				if (routeDecision?.reasonCode === SIDE_TRIP_REASON_CODE) {
 					agent.state.tools = [
-						...agent.state.tools.filter((tool) => mayRunWithoutEscalation(tool.name)),
+						...agent.state.tools.filter((tool) => mayRunWithoutEscalation(tool)),
 						sideTripHistoryTool(() => agent.state.messages.slice(0, originalHistoryLength)),
 					];
 					swappedTools = agent.state.tools;
