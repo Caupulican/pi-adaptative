@@ -1,9 +1,9 @@
 /**
- * Coverage for the turn-economics reset-wiring task: `Agent.resetSanitizerPrefixHorizon()` must be
- * called at genuine lineage changes (session load, branch switch) and must NOT be called by
- * compaction's own within-lineage trim/summary-append -- see the "Compaction and Long Sessions"
- * entry in the repo-root AGENTS.md and `Agent.resetSanitizerPrefixHorizon`'s doc comment
- * (packages/agent/src/agent.ts) for the full rationale. This spies on the real method rather than
+ * Coverage for the turn-economics reset-wiring task: `Agent.resetSanitizerPrefixHorizon()` is called
+ * whenever the history the prefix marks count is replaced: at lineage changes (session load, branch
+ * switch) and when a compaction applies, since the compacted history is not what was sent -- see the
+ * "Compaction and Long Sessions" entry in the repo-root AGENTS.md and
+ * `Agent.resetSanitizerPrefixHorizon`'s doc comment (packages/agent/src/agent.ts). This spies on the real method rather than
  * reaching into `Agent`'s private `sanitizerSentPrefixCount` field, so it tests the WIRING
  * (coding-agent's call sites) rather than re-testing packages/agent's own mark semantics.
  */
@@ -163,7 +163,7 @@ describe("sanitizer prefix horizon reset wiring", () => {
 		}
 	});
 
-	it("does NOT reset for a compaction pass (within-lineage trim + summary append)", async () => {
+	it("resets once when a compaction replaces the history the marks count", async () => {
 		tempDir = createTempDir("compaction");
 		const agent = new Agent({ initialState: { model, systemPrompt: "Test", tools: [] } });
 
@@ -211,10 +211,9 @@ describe("sanitizer prefix horizon reset wiring", () => {
 		try {
 			const resetSpy = vi.spyOn(agent, "resetSanitizerPrefixHorizon");
 			await session.compact();
-			// Confirm compaction actually ran (not silently skipped) before trusting the negative
-			// assertion below.
 			expect(sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
-			expect(resetSpy).not.toHaveBeenCalled();
+			// A stale mark would freeze the whole compacted history until it regrew past the old count.
+			expect(resetSpy).toHaveBeenCalledTimes(1);
 		} finally {
 			session.dispose();
 		}

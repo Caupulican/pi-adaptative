@@ -91,7 +91,8 @@ function fixtureExpectations(): FixtureExpectation[] {
 				type: "payment_required",
 			}),
 			reason: "billing_or_quota",
-			genericReason: "unknown",
+			// HTTP 402 is recognized as a quota failure by the shared pi-ai pattern, with or without a provider.
+			genericReason: "billing_or_quota",
 			provisional: true,
 		},
 		{

@@ -173,7 +173,8 @@ describe("Context GC", () => {
 		expect(existsSync(storagePath!)).toBe(true);
 		expect(readFileSync(storagePath!, "utf8")).toBe(original);
 		expect(textOf(messages[1])).toBe(original);
-		expect(textOf(result.messages[1])).toContain(storagePath!);
+		// The stub names the retrieval by context key; the store path stays out of the prompt.
+		expect(textOf(result.messages[1])).toContain(`artifact_retrieve context:${result.report.records[0]?.key}`);
 		expect(result.report.originalTokens).toBe(beforeTokens);
 		expect(result.report.savedTokens).toBeGreaterThan(0);
 	});

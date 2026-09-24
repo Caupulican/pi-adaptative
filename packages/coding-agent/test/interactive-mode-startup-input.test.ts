@@ -31,6 +31,7 @@ type SubmitContext = {
 			sessionId: string;
 			epoch: number;
 		};
+		getForegroundActivity: () => { epoch: number | undefined };
 		getSteeringMessages: () => readonly string[];
 		getFollowUpMessages: () => readonly string[];
 		takeQueuedMessages: () => { steering: QueuedInput[]; followUp: QueuedInput[] };
@@ -120,6 +121,8 @@ function createSubmitContext(): SubmitContext {
 					epoch: 1,
 				};
 			},
+			// No foreground submission holds the lease: startup input is not part of a live turn.
+			getForegroundActivity: () => ({ epoch: undefined }),
 			getSteeringMessages: () => queued.steering.map((entry) => entry.text),
 			getFollowUpMessages: () => queued.followUp.map((entry) => entry.text),
 			takeQueuedMessages: vi.fn(() => {

@@ -142,6 +142,11 @@ const codingAgentVerificationCoverageTests = [
 	"test/runtime-builder-delegate-diagnostics.test.ts",
 	"test/runtime-builder-reload-reconcile.test.ts",
 	"test/suite/runtime-update.test.ts",
+	"test/suite/idle-preparation.test.ts",
+	"test/suite/compaction-prefix-horizon.test.ts",
+	"test/compaction-support-selection.test.ts",
+	"test/provider-request-compaction-integration.test.ts",
+	"test/auto-compaction-apply.test.ts",
 ];
 const clearedVariables = [
 	"ANTHROPIC_API_KEY",

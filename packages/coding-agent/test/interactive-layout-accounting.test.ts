@@ -72,6 +72,7 @@ it("counts one invocation once while foreground and background handoff observati
 				sessionId: "fixture",
 			}),
 			getCostSummary: () => ({ currentCost: 0, subagentCost: 0, subagentReports: 0 }),
+			getIdlePreparationView: () => undefined,
 		},
 		headerContainer: new Container(),
 		chatContainer: new Container(),

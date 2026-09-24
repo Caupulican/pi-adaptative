@@ -90,6 +90,8 @@ describe("the retrieve route's executor", () => {
 			});
 		}
 		decide("h2", 2_000);
+		// What a worker's fixed prefix costs, learned from what workers sent: the price needs it before a worker can win.
+		ledger.recordWorkerPrefix({ sessionId: "history", lane: "lane", observedAt: Date.now(), prefixTokens: 1_000 });
 	};
 
 	const retrieve = (harness: Awaited<ReturnType<typeof createHarness>>, targets: string[]) =>
