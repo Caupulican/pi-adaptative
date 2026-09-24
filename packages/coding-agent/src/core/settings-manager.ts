@@ -93,7 +93,7 @@ export interface ContextGcSettings {
 	// every turn and busting the provider prefix cache -- see context/prefix-stability.ts.
 	packStrideMessages?: number; // default: half preserveRecentMessages; 1 restores continuous packing
 	minToolResultChars?: number; // default: 1200
-	tools?: string[]; // default: read,bash,rg,grep,context_headroom_retrieve,headroom_retrieve
+	tools?: string[]; // default: the packed-output tools, ls, skill/automata/delegation records, artifact_retrieve
 	semanticMemory?: SemanticMemoryGcSettings;
 }
 

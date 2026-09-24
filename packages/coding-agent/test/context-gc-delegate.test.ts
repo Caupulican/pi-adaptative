@@ -70,7 +70,9 @@ describe("delegate context GC", () => {
 			expect(existsSync(storagePath!)).toBe(true);
 			expect(readFileSync(storagePath!, "utf8")).toBe(staleText);
 			expect(messageText(result.messages[0]!)).toContain("Context GC packed stale tool result");
-			expect(messageText(result.messages[0]!)).toContain(`exact old text: read ${storagePath}`);
+			expect(messageText(result.messages[0]!)).toContain(
+				`exact old text: artifact_retrieve context:${result.report.records[0]?.key}`,
+			);
 			expect(messageText(result.messages[1]!)).toBe(recentText);
 			expect(messageText(messages[0]!)).toBe(staleText);
 

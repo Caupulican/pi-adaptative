@@ -1511,6 +1511,7 @@ export class ReflectionController {
 				getSteeringMessages: opts.getSteeringMessages,
 				getFollowUpMessages: opts.getFollowUpMessages,
 				transformContext: opts.transformContext,
+				planContext: opts.planContext,
 				requestPreflight: opts.requestPreflight,
 				onProviderRequestSnapshot: opts.onProviderRequestSnapshot,
 				...(maxTurns === undefined

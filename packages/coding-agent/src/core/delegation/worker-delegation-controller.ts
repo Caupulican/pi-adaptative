@@ -230,6 +230,17 @@ export interface WorkerDelegationControllerDeps {
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	/** Live worker supervision hook; one observation per executed worker tool call. */
 	observeWorkerProgress?(observation: WorkerProgressObservation): Promise<unknown> | unknown;
+	/**
+	 * Context GC for a worker conversation: the same pass root runs, priced on the worker's model and
+	 * its retention trigger, sanctioned on the worker's custody lane.
+	 */
+	packWorkerContext?(input: {
+		agentId: string;
+		model: Model<Api>;
+		compactionTriggerTokens: number | undefined;
+		messages: AgentMessage[];
+		frozenBelow: number;
+	}): AgentMessage[];
 	/** The cache guard for worker lanes: each accepted worker provider request, as its recorded snapshot. */
 	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput): void;
 	emit(event: AgentSessionEvent): void;
@@ -246,6 +257,8 @@ export interface WorkerDelegationControllerDeps {
 	getHandoffPersonaGuidance?(): string | undefined;
 	/** Session-owned artifact store broker; worker adapters receive fresh retrieval tools only. */
 	getArtifactStore?(): ArtifactStore;
+	/** The session's context-GC store, where `artifact_retrieve context:<key>` originals live. */
+	getContextGcStoreDir?(): string | undefined;
 	/** Host-owned read-only skill broker; no SkillVaultController crosses this boundary. */
 	getSkillReadBroker?(): ReadOnlySkillBroker;
 	/** Host-owned skill metadata source for read-only audit; paths are redacted before projection. */
@@ -3112,6 +3125,8 @@ export class WorkerDelegationController {
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === "artifact_retrieve")) {
 			const artifactStore = this.deps.getArtifactStore?.();
 			if (artifactStore) adapterSources.artifactStore = artifactStore;
+			if (this.deps.getContextGcStoreDir)
+				adapterSources.getContextGcStoreDir = () => this.deps.getContextGcStoreDir?.();
 		}
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === "skill")) {
 			const broker = this.deps.getSkillReadBroker?.();
@@ -3329,6 +3344,18 @@ export class WorkerDelegationController {
 			warn: (message) => this.safeWarn(message),
 			...(this.deps.observeWorkerProgress ? { observeWorkerProgress: this.deps.observeWorkerProgress } : {}),
 			...(this.deps.observeWorkerRequest ? { observeWorkerRequest: this.deps.observeWorkerRequest } : {}),
+			...(this.deps.packWorkerContext
+				? {
+						packContext: (messages: AgentMessage[], frozenBelow: number) =>
+							this.deps.packWorkerContext?.({
+								agentId,
+								model,
+								compactionTriggerTokens: retentionPolicy?.maxContextTokens,
+								messages,
+								frozenBelow,
+							}) ?? messages,
+					}
+				: {}),
 			...(this.deps.recordObjectiveMutation ? { recordObjectiveMutation: this.deps.recordObjectiveMutation } : {}),
 			...(this.deps.reviewNewCode ? { reviewNewCode: this.deps.reviewNewCode } : {}),
 		});

@@ -304,6 +304,11 @@ export interface IsolatedCompletionOptions {
 	getFollowUpMessages?: AgentLoopConfig["getFollowUpMessages"];
 	/** Child-owned provider projection, invoked before every request without mutating raw history. */
 	transformContext?: AgentLoopConfig["transformContext"];
+	/**
+	 * Child-owned replay-safe request plan (retention, then context GC), invoked before every request
+	 * with the child's own sent-prefix mark. Takes precedence over `transformContext`, as in the loop.
+	 */
+	planContext?: AgentLoopConfig["planContext"];
 	/** Request-local budget/authority check, invoked immediately before every child provider transport. */
 	requestPreflight?: AgentLoopConfig["requestPreflight"];
 	/**

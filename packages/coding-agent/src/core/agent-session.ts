@@ -1095,6 +1095,14 @@ export class AgentSession {
 			observeWorkerProgress: (observation) => this._workerSupervision.observe(observation),
 			// Worker lanes pass the same cache guard; each worker conversation is its own lane.
 			observeWorkerRequest: (agentId, snapshot) => this._guardCacheSurface(snapshot, `worker:${agentId}`),
+			// Worker conversations pack with root's own context-GC pass, on their own lane.
+			packWorkerContext: ({ agentId, model, compactionTriggerTokens, messages, frozenBelow }) =>
+				this._pipeline.applyContextGc(messages, true, frozenBelow, {
+					model,
+					compactionTriggerTokens,
+					custodyLane: `worker:${agentId}\0${cacheLaneKey(model.api, model.provider, model.id)}`,
+					conversation: `worker:${agentId}`,
+				}).messages,
 			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
 			getEdgeGrants: () => this.getEdgeGrants(),
 			checkOperation: (tool, args, cwd) => this._operationGate.check(tool, args, cwd, "worker"),
@@ -1114,6 +1122,7 @@ export class AgentSession {
 			recordUnsettledForOwner: (items) => this._deliverToOwner(items),
 			readMemoryForLane: (query) => this._memory.readMemoryForLane(query),
 			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
+			getContextGcStoreDir: () => this._pipeline.contextGcStorageDir(),
 			getArtifactStore: () => this._getToolArtifactStore(),
 			getSkillReadBroker: () => ({
 				search: (query) => this._skillVault.search(query),
@@ -1236,9 +1245,13 @@ export class AgentSession {
 			estimateLineageRemainingRequests: () =>
 				this._cacheKnowledge.lineage(this.sessionId, historyLineage(this.agent.state.messages), Date.now()),
 			recordCacheDecision: (decision) => this._recordCacheDecision(decision),
-			sanctionCacheBreak: (kind, reason) => {
+			sanctionCacheBreak: (kind, reason, lane) => {
 				const model = this.model;
-				this._custody.sanction(kind, reason, model ? cacheLaneKey(model.api, model.provider, model.id) : undefined);
+				this._custody.sanction(
+					kind,
+					reason,
+					lane ?? (model ? cacheLaneKey(model.api, model.provider, model.id) : undefined),
+				);
 			},
 			getAgentDir: () => this._agentDir,
 			getCwd: () => this._cwd,
@@ -1703,6 +1716,7 @@ export class AgentSession {
 			reapplyActiveProfileModelSettings: () => this._profileFilter.reapplyActiveProfileModelSettings(),
 			notifyExtensionsChanged: () => this._notifyExtensionsChanged(),
 			getToolArtifactStore: () => this._getToolArtifactStore(),
+			getContextGcStoreDir: () => this._pipeline.contextGcStorageDir(),
 			getDecisionLedger: () => this.getDecisionLedger(),
 			getToolTaskDependencies: () => this._backgroundToolTasks,
 			getSessionImageStore: () => this._getSessionImageStore(),

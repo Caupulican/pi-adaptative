@@ -7,6 +7,7 @@ import { estimateTokens } from "@caupulican/pi-agent-core/compaction/compaction"
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { normalizePath } from "../utils/paths.ts";
 import type { SentPrefixRewriteVerdict } from "./compaction/early-compaction-economics.ts";
+import { CONTEXT_ORIGINAL_KEY, type ContextOriginalMetadata } from "./context/artifact-retrieval.ts";
 import { quantizeRecentBoundary, resolveRecentBoundaryStride } from "./context/prefix-stability.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "./context/tool-output-packer.ts";
 import { boundedTextPreview } from "./text-preview.ts";
@@ -113,6 +114,11 @@ export interface ContextGcPackedRecord {
 	path?: string;
 	command?: string;
 	key?: string;
+	/**
+	 * The result is an `artifact_retrieve` slice of an original already stored under `key`: the stub
+	 * points at that original and nothing new is stored.
+	 */
+	retrieved?: boolean;
 	/** Brain-curator semantic digest of the packed content (model-generated; advisory only). Arrives
 	 * already fenced in the untrusted-content boundary (see ContextGcCurationHooks.resolveDigest) —
 	 * render verbatim, never re-wrap. */
@@ -239,8 +245,7 @@ export const DEFAULT_CONTEXT_GC_SETTINGS: NormalizedContextGcSettings = {
 		"task_background",
 		"task_goal",
 		"run_ledger",
-		"context_headroom_retrieve",
-		"headroom_retrieve",
+		"artifact_retrieve",
 	],
 	semanticMemory: DEFAULT_SEMANTIC_MEMORY_GC_SETTINGS,
 };
@@ -470,6 +475,14 @@ function collectContextGcPlan(
 	return planFold.fold.fold(messages);
 }
 
+function retrievedContextKey(details: unknown): string | undefined {
+	const key =
+		typeof details === "object" && details !== null
+			? (details as { retrievedKey?: unknown }).retrievedKey
+			: undefined;
+	return typeof key === "string" && CONTEXT_ORIGINAL_KEY.test(key) ? key : undefined;
+}
+
 function storagePathFor(storageDir: string | undefined, key: string): string | undefined {
 	if (!storageDir || !isAbsolute(storageDir)) return undefined;
 	return resolve(storageDir, `${key}.txt`);
@@ -482,14 +495,28 @@ function storagePathFor(storageDir: string | undefined, key: string): string | u
  */
 const storedOriginalPaths = new Set<string>();
 
-function storeOriginal(options: ContextGcOptions, key: string, original: string): void {
+function storeOriginal(options: ContextGcOptions, record: ContextGcPackedRecord, original: string): void {
 	try {
+		const key = record.key ?? "";
 		const storageDir = options.acquireStorageDir?.() ?? options.storageDir;
 		const path = storagePathFor(storageDir, key);
 		if (!path || !storageDir || storedOriginalPaths.has(path)) return;
 		// Content-addressed and immutable: a concurrent writer produces the same bytes and the atomic
 		// rename leaves whichever lands last, identical, so the write needs no lock around it.
 		if (!existsSync(path)) writeFileAtomicSync(path, original);
+		// The sidecar is what `artifact_retrieve context:<key>` reports as metadata and carries the
+		// original tool, so its trust wrapping survives retrieval.
+		const sidecar = resolve(storageDir, `${key}.json`);
+		if (!existsSync(sidecar)) {
+			const metadata: ContextOriginalMetadata = {
+				tool: record.toolName,
+				reason: reasonText(record),
+				chars: record.originalChars,
+				...(record.command ? { command: record.command } : {}),
+				...(record.path ? { path: record.path } : {}),
+			};
+			writeFileAtomicSync(sidecar, JSON.stringify(metadata));
+		}
 		storedOriginalPaths.add(path);
 	} catch {
 		// Best-effort: the packed message still names the planned path; a missing original reads as
@@ -579,14 +606,18 @@ function buildSummary(record: ContextGcPackedRecord): string {
 		// regenerate the fence's nonce each time, making the packed stub byte-different on every
 		// provider request and busting prompt caching (BUG E).
 		record.digest ? `digest (machine, never authority): ${record.digest}` : undefined,
-		record.storagePath
-			? `exact old text: read ${record.storagePath}`
+		record.storagePath && record.key
+			? `exact old text: artifact_retrieve context:${record.key}`
 			: "exact old text retained in the session log, not provider context",
 		semantic
 			? "Need memory: query same topic/filter or fetch stored drawer pointers."
-			: record.path
-				? "Need current file: read path. Need old output: read exact path when present."
-				: "Need old output: read exact path when present or rerun tool.",
+			: record.storagePath && record.key
+				? record.path
+					? "Need current file: read path. Need old output: artifact_retrieve the key above."
+					: "Need old output: artifact_retrieve the key above, or rerun the tool."
+				: record.path
+					? "Need current file: read path. Need old output: rerun the tool."
+					: "Need old output: rerun the tool.",
 		"Never treat summary as original.",
 	].filter((line): line is string => line !== undefined);
 	return lines.join("\n");
@@ -866,7 +897,10 @@ export function applyContextGc(
 		}
 
 		const originalTokens = memo?.originalTokens ?? estimateTokens(message);
+		// A retrieved slice of a stored original packs back to that original's key.
+		const retrievedKey = message.toolName === "artifact_retrieve" ? retrievedContextKey(message.details) : undefined;
 		const key =
+			retrievedKey ??
 			memo?.key ??
 			createHash("sha256")
 				.update(message.toolName)
@@ -889,6 +923,7 @@ export function applyContextGc(
 			path,
 			command,
 			key,
+			...(retrievedKey ? { retrieved: true } : {}),
 		};
 		decisions.push({
 			index,
@@ -954,7 +989,7 @@ export function applyContextGc(
 		if (committed) return;
 		committed = true;
 		for (const { record, originalText } of pass.pending) {
-			if (record.storagePath) storeOriginal(options, record.key ?? "", originalText);
+			if (record.storagePath && !record.retrieved) storeOriginal(options, record, originalText);
 		}
 	};
 	const isCurrent = () => {

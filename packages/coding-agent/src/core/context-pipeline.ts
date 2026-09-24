@@ -168,6 +168,17 @@ function estimateContextTokensMemoized(
 	return result;
 }
 
+/** A non-foreground lane a history is packed for (see `ContextPipeline.applyContextGc`). */
+export interface ContextGcLane {
+	readonly model: Model<Api>;
+	/** Where the lane's own retention compaction starts, in context tokens. */
+	readonly compactionTriggerTokens: number | undefined;
+	/** The cache custody lane key its requests are guarded on. */
+	readonly custodyLane: string;
+	/** The conversation, for the recorded decision. */
+	readonly conversation: string;
+}
+
 export interface ContextPipelineDeps {
 	/** Capability-tier switch for path aliasing; absent means enabled. */
 	isPathAliasingEnabled?(): boolean;
@@ -195,8 +206,11 @@ export interface ContextPipelineDeps {
 		| undefined;
 	/** Records a priced cache decision in the decision ledger. */
 	recordCacheDecision?(decision: Omit<CacheDecisionRow, "sessionId" | "cwd">): void;
-	/** Issue the cache custody token for an admitted sent-prefix rewrite: the next request's break is priced. */
-	sanctionCacheBreak?(kind: string, reason: string): void;
+	/**
+	 * Issue the cache custody token for an admitted sent-prefix rewrite: the next request's break is
+	 * priced. `lane` is the custody lane key; omitted, the foreground lane.
+	 */
+	sanctionCacheBreak?(kind: string, reason: string, lane?: string): void;
 	/** Root dir the host-keyed {@link FitnessStore} and per-session gc/artifact storage live under. */
 	getAgentDir(): string;
 	/** Workspace root, passed to the context-gc pass. */
@@ -274,6 +288,11 @@ export class ContextPipeline {
 			);
 		}
 		return this._contextStoreRetentionLease;
+	}
+
+	/** The session's context-GC store, where packed originals live (`artifact_retrieve context:<key>`). */
+	contextGcStorageDir(): string {
+		return this._contextGcStorageDir();
 	}
 
 	private _contextGcStorageDir(): string {
@@ -814,6 +833,12 @@ export class ContextPipeline {
 		 * live mark to honor (a read-only report/dashboard view) must pass 0 explicitly.
 		 */
 		frozenBelow: number,
+		/**
+		 * The lane this history is sent on when it is not the foreground's: a worker conversation packs
+		 * with the same pass, priced on its own model and compaction trigger, sanctioned on its own
+		 * custody lane, and never replaces the foreground's report.
+		 */
+		lane?: ContextGcLane,
 	): ContextGcResult {
 		try {
 			const settings = this.deps.getSettingsManager().getContextGcSettings();
@@ -840,7 +865,7 @@ export class ContextPipeline {
 				// `writePayloads`), so ONE pass serves preview, currency check and commit.
 				writePayloads: false,
 				frozenBelow,
-				admitSentPrefixRewrite: (batch) => this._priceSentPrefixRewrite(messages, batch),
+				admitSentPrefixRewrite: (batch) => this._priceSentPrefixRewrite(messages, batch, lane),
 				curation: curationSettings.enabled
 					? {
 							resolveDigest: (digestKey) => this._brainCurator.getDigest(digestKey),
@@ -862,10 +887,10 @@ export class ContextPipeline {
 						if (record.digest !== undefined) this._brainCurator.noteDigestServed();
 					}
 				}
-				this._latestContextGcReport = result.report;
+				if (!lane) this._latestContextGcReport = result.report;
 				const rewrite = result.report.sentPrefixRewrite;
 				if (rewrite) {
-					if (rewrite.admit) this.deps.sanctionCacheBreak?.("gc_pack", rewrite.reason);
+					if (rewrite.admit) this.deps.sanctionCacheBreak?.("gc_pack", rewrite.reason, lane?.custodyLane);
 					this.deps.recordCacheDecision?.({
 						kind: "gc_pack",
 						decidedAt: Date.now(),
@@ -878,6 +903,7 @@ export class ContextPipeline {
 							packCount: rewrite.packCount,
 							savedTokens: rewrite.savedTokens,
 							rewrittenTokens: rewrite.rewrittenTokens,
+							...(lane ? { conversation: lane.conversation } : {}),
 						},
 					});
 				}
@@ -914,8 +940,12 @@ export class ContextPipeline {
 	 * Without that evidence the lineage's own elapsed count stands in: with nothing known about its
 	 * length, a lineage's median remaining life is the life it has already had.
 	 */
-	private _priceSentPrefixRewrite(messages: AgentMessage[], batch: SentPrefixRewriteBatch): SentPrefixRewriteVerdict {
-		const model = this.deps.getModel();
+	private _priceSentPrefixRewrite(
+		messages: AgentMessage[],
+		batch: SentPrefixRewriteBatch,
+		lane?: ContextGcLane,
+	): SentPrefixRewriteVerdict {
+		const model = lane ? lane.model : this.deps.getModel();
 		if (!model) return { admit: false, reason: "no model; the sent prefix stays as sent" };
 		let currentTokens = 0;
 		let requests = 0;
@@ -923,13 +953,14 @@ export class ContextPipeline {
 			currentTokens += estimateTokens(message);
 			if (message.role === "assistant") requests++;
 		}
-		const trigger = this.deps.getCompactionTriggerTokens?.();
+		const trigger = lane ? lane.compactionTriggerTokens : this.deps.getCompactionTriggerTokens?.();
 		const growthPerRequest = requests > 0 ? currentTokens / requests : 0;
 		const untilCompaction =
 			trigger !== undefined && growthPerRequest > 0
 				? Math.max(0, Math.floor((trigger - currentTokens) / growthPerRequest))
 				: Number.POSITIVE_INFINITY;
-		const lineage = this.deps.estimateLineageRemainingRequests?.();
+		// A worker conversation's lineage lengths are not recorded: it prices on its own elapsed requests.
+		const lineage = lane ? undefined : this.deps.estimateLineageRemainingRequests?.();
 		const learned = lineage?.remaining;
 		const expected = learned ?? lineage?.elapsed ?? requests;
 		const remainingRequests = Math.min(expected, untilCompaction);

@@ -345,6 +345,8 @@ export interface RuntimeBuilderDeps {
 
 	/** Session-scoped tool-output artifact store for artifact-producing tools and artifact_retrieve (gated on the profile). */
 	getToolArtifactStore(): ArtifactStore;
+	/** The session's context-GC store, where `artifact_retrieve context:<key>` originals live. */
+	getContextGcStoreDir?(): string | undefined;
 	/** The session's decision ledger (stage transitions, Jev evaluations), read by the root's ledger tool. */
 	getDecisionLedger?(): DecisionLedgerStore | undefined;
 	/** Session-owned slow-tool registry. Optional only for narrow RuntimeBuilder test/embedding seams. */
@@ -1087,7 +1089,10 @@ export class RuntimeBuilder {
 			edit: { intentController: this._fileMutationIntents, fileEncodings },
 			grep: { artifactStore: toolArtifactStore },
 			find: { artifactStore: toolArtifactStore },
-			artifact_retrieve: { artifactStore: toolArtifactStore },
+			artifact_retrieve: {
+				artifactStore: toolArtifactStore,
+				getContextStoreDir: () => this.deps.getContextGcStoreDir?.(),
+			},
 			decision_ledger_read: {
 				getLedger: () => this.deps.getDecisionLedger?.(),
 				getSessionId: () => this.deps.getSessionManager().getSessionId(),

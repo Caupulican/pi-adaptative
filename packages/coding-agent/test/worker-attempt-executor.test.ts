@@ -1,11 +1,15 @@
 import { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../src/core/agent-session-contracts.ts";
 import type { LaneToolSurface } from "../src/core/autonomy/lane-tool-surface.ts";
 import { LaneToolUsage } from "../src/core/autonomy/lane-tool-usage.ts";
-import { createWorkerAttemptExecutor } from "../src/core/delegation/worker-attempt-executor.ts";
+import {
+	createWorkerAttemptExecutor,
+	type WorkerAttemptExecutorOptions,
+} from "../src/core/delegation/worker-attempt-executor.ts";
 import { WorkerConversation, type WorkerTranscriptMessage } from "../src/core/delegation/worker-conversation-store.ts";
 import type { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { WorkerTreeBudgetCoordinator } from "../src/core/delegation/worker-tree-budget-coordinator.ts";
@@ -79,6 +83,7 @@ function createExecutorHarness(
 	autoPreflight = true,
 	sharedBudget?: SharedCapabilityBudget,
 	workerContextFiles: ReadonlyArray<{ path: string; content?: string }> = [],
+	packContext?: WorkerAttemptExecutorOptions["packContext"],
 ) {
 	const events: string[] = [];
 	const conversation = workerConversation();
@@ -221,6 +226,7 @@ function createExecutorHarness(
 			mailboxMessagesForConversation: () => [],
 		},
 		warn: (message) => events.push(`warn:${message}`),
+		...(packContext ? { packContext } : {}),
 		observeWorkerRequest: (agentId, snapshot) =>
 			observedRequests.push({ agentId, requestId: snapshot.requestId, prefixIntact: snapshot.prefixIntact }),
 	});
@@ -452,6 +458,46 @@ describe("worker attempt executor", () => {
 			{ agentId: "worker-agent", requestId: "worker-req-1", prefixIntact: "unknown" },
 		]);
 		expect(harness.conversation.getProviderContext().messages.filter((m) => m.role === "assistant")).toHaveLength(1);
+	});
+
+	it("plans every worker request through context GC, with the worker's own sent mark", async () => {
+		const packCalls: Array<{ count: number; frozenBelow: number }> = [];
+		let planned: AgentMessage[] | undefined;
+		const history: AgentMessage[] = [
+			{ role: "user", content: "earlier", timestamp: 1 },
+			{ role: "user", content: "later", timestamp: 2 },
+		];
+		const harness = createExecutorHarness(
+			async (options) => {
+				planned = (await options.planContext?.({ messages: history, attempt: 0, sentPrefixCount: 1 }))?.messages;
+				const finalAssistant = fauxAssistantMessage('{"summary":"packed","status":"completed"}');
+				await options.onMessage?.(finalAssistant);
+				return {
+					text: '{"summary":"packed","status":"completed"}',
+					usage: ZERO_USAGE,
+					stopReason: "stop",
+					messages: [...(options.history ?? []), finalAssistant],
+				};
+			},
+			100,
+			undefined,
+			undefined,
+			undefined,
+			30_000,
+			true,
+			undefined,
+			[],
+			(messages, frozenBelow) => {
+				packCalls.push({ count: messages.length, frozenBelow });
+				return [messages[1]!];
+			},
+		);
+
+		const result = await harness.executor.run();
+
+		expect(result.rawOutcome.accepted).toBe(true);
+		expect(packCalls).toEqual([{ count: 2, frozenBelow: 1 }]);
+		expect(planned).toEqual([history[1]]);
 	});
 
 	it("threads final worker context into the isolated system prompt", async () => {
@@ -1731,7 +1777,7 @@ describe("worker attempt executor", () => {
 							resolveCompaction = resolve;
 						});
 					}
-					await options.transformContext?.(options.history ?? []);
+					await options.planContext?.({ messages: options.history ?? [], attempt: 0, sentPrefixCount: 0 });
 					throw new Error("main completion must remain blocked behind compaction");
 				},
 				100,
@@ -1803,7 +1849,7 @@ describe("worker attempt executor", () => {
 						stopReason: "stop",
 					};
 				}
-				await options.transformContext?.(options.history ?? []);
+				await options.planContext?.({ messages: options.history ?? [], attempt: 0, sentPrefixCount: 0 });
 				const finalAssistant = fauxAssistantMessage(
 					'{"summary":"worker complete","status":"completed"}',
 				) as AssistantMessage;
@@ -1856,7 +1902,7 @@ describe("worker attempt executor", () => {
 						stopReason: "stop",
 					};
 				}
-				await options.transformContext?.(options.history ?? []);
+				await options.planContext?.({ messages: options.history ?? [], attempt: 0, sentPrefixCount: 0 });
 				const finalAssistant = fauxAssistantMessage(
 					'{"summary":"worker complete","status":"completed"}',
 				) as AssistantMessage;
@@ -1919,7 +1965,7 @@ describe("worker attempt executor", () => {
 						stopReason: "stop",
 					};
 				}
-				await options.transformContext?.(options.history ?? []);
+				await options.planContext?.({ messages: options.history ?? [], attempt: 0, sentPrefixCount: 0 });
 				await invokeRequestPreflight(options);
 				const finalAssistant = fauxAssistantMessage(
 					'{"summary":"worker complete","status":"completed"}',
@@ -1981,7 +2027,7 @@ describe("worker attempt executor", () => {
 						stopReason: "stop",
 					};
 				}
-				await options.transformContext?.(options.history ?? []);
+				await options.planContext?.({ messages: options.history ?? [], attempt: 0, sentPrefixCount: 0 });
 				const finalAssistant = fauxAssistantMessage(
 					'{"summary":"worker complete","status":"completed"}',
 				) as AssistantMessage;
@@ -2030,7 +2076,7 @@ describe("worker attempt executor", () => {
 						stopReason: "stop",
 					};
 				}
-				await options.transformContext?.(options.history ?? []);
+				await options.planContext?.({ messages: options.history ?? [], attempt: 0, sentPrefixCount: 0 });
 				const finalAssistant = fauxAssistantMessage(
 					'{"summary":"worker complete","status":"completed"}',
 				) as AssistantMessage;

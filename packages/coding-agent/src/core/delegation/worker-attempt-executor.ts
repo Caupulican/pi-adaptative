@@ -9,7 +9,7 @@ import {
 } from "@caupulican/pi-agent-core/reliability";
 import type { SessionRequestSnapshotInput } from "@caupulican/pi-agent-core/session";
 import { sanitizeToolFailureContext } from "@caupulican/pi-agent-core/tool-failure-memory";
-import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
+import type { AgentContextPlanRequest, AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
 import { addUsage, createEmptyUsage } from "@caupulican/pi-agent-core/usage";
 import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
@@ -17,6 +17,7 @@ import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts
 import type { WorkerRequest } from "../autonomy/contracts.ts";
 import type { LaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
+import { frozenPrefixLength } from "../context/prefix-stability.ts";
 import { type ModelCapabilityProfile, resolveWorkerOutputTokenCeiling } from "../model-capability.ts";
 
 import { attemptUsageFromGatewayUsage, EMPTY_ATTEMPT_USAGE } from "../orchestration/attempt-usage.ts";
@@ -172,6 +173,11 @@ export interface WorkerAttemptExecutorOptions {
 	 * is swallowed by its own owner rather than failing the worker.
 	 */
 	observeWorkerProgress?(observation: WorkerProgressObservation): Promise<unknown> | unknown;
+	/**
+	 * Context GC for this conversation, the same pass root runs: pack what went stale in `messages`,
+	 * never rewriting below `frozenBelow` unless the pass's price admits it.
+	 */
+	packContext?(messages: AgentMessage[], frozenBelow: number): AgentMessage[];
 	/** The cache guard: each accepted provider request of this worker, as its recorded snapshot. */
 	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput): void;
 	/** Parent semantic duplicate review of code this worker's edit or write added; see the controller dep. */
@@ -853,49 +859,65 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												throw error;
 											}
 										},
-										...(retentionPolicy
+										// The same per-request projection root gets: the conversation's own retention
+										// compaction, then context GC packing what went stale, priced on this lane.
+										...(retentionPolicy || options.packContext
 											? {
-													transformContext: async (messages: AgentMessage[]) => {
-														try {
-															signal.throwIfAborted();
-															const retained = await options.conversation.compactProviderContext(
-																retentionPolicy,
-																signal,
-															);
-															signal.throwIfAborted();
-															if (
-																retained.contextUsage.tokens > retentionPolicy.maxContextTokens &&
-																!retentionWarningEmitted
-															) {
-																retentionWarningEmitted = true;
-																options.warn(
-																	`Worker ${options.laneId} has one retained turn larger than its context policy; provider overflow recovery may be required.`,
+													planContext: async ({ messages, sentPrefixCount }: AgentContextPlanRequest) => {
+														const retain = async (
+															policy: WorkerConversationRetentionPolicy,
+														): Promise<AgentMessage[]> => {
+															try {
+																signal.throwIfAborted();
+																const retained = await options.conversation.compactProviderContext(
+																	policy,
+																	signal,
 																);
-															}
-															if (
-																retained.status !== "compacted_verified" &&
-																retained.status !== "compacted_deterministic"
-															) {
+																signal.throwIfAborted();
+																if (
+																	retained.contextUsage.tokens > policy.maxContextTokens &&
+																	!retentionWarningEmitted
+																) {
+																	retentionWarningEmitted = true;
+																	options.warn(
+																		`Worker ${options.laneId} has one retained turn larger than its context policy; provider overflow recovery may be required.`,
+																	);
+																}
+																if (
+																	retained.status !== "compacted_verified" &&
+																	retained.status !== "compacted_deterministic"
+																) {
+																	return messages;
+																}
+																return sanitizeToolFailureContext(retained.context.messages, "")
+																	.messages;
+															} catch (error) {
+																if (signal.aborted) {
+																	retainCallbackFailure(error);
+																	signal.throwIfAborted();
+																}
+																if (error instanceof WorkerConversationOwnershipError) {
+																	retainCallbackFailure(error);
+																	throw error;
+																}
+																if (!retentionWarningEmitted) {
+																	retentionWarningEmitted = true;
+																	options.warn(
+																		`Worker context retention failed: ${error instanceof Error ? error.message : String(error)}`,
+																	);
+																}
 																return messages;
 															}
-															return sanitizeToolFailureContext(retained.context.messages, "").messages;
-														} catch (error) {
-															if (signal.aborted) {
-																retainCallbackFailure(error);
-																signal.throwIfAborted();
-															}
-															if (error instanceof WorkerConversationOwnershipError) {
-																retainCallbackFailure(error);
-																throw error;
-															}
-															if (!retentionWarningEmitted) {
-																retentionWarningEmitted = true;
-																options.warn(
-																	`Worker context retention failed: ${error instanceof Error ? error.message : String(error)}`,
-																);
-															}
-															return messages;
-														}
+														};
+														const retained = retentionPolicy ? await retain(retentionPolicy) : messages;
+														signal.throwIfAborted();
+														// The sent mark indexes `messages`; re-anchor it by reference on what retention left.
+														const frozenBelow = frozenPrefixLength(messages, sentPrefixCount, retained);
+														return {
+															messages: options.packContext
+																? options.packContext(retained, frozenBelow)
+																: retained,
+														};
 													},
 												}
 											: {}),

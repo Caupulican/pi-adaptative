@@ -87,6 +87,8 @@ export interface WorkerToolAdapterSources {
 	typeSafe?: ConstructorParameters<typeof TypeSafeReviewer>[0] & { evidenceStore: TypeSafeEvidenceStore };
 	/** Session-owned packed output store; retrieval is bounded and identifier-only. */
 	artifactStore?: ArtifactStore;
+	/** The parent session's context-GC store: a forked worker can retrieve the stubs it inherited. */
+	getContextGcStoreDir?: () => string | undefined;
 	/** Host-owned script registry and bounded executor. */
 	runToolkitScript?: RunToolkitScriptDependencies;
 	/** Optional brokered read-only skill surface. */
@@ -176,7 +178,11 @@ export function createWorkerToolAdapterRegistry(sources: WorkerToolAdapterSource
 		registry.register({
 			name: "artifact_retrieve",
 			description: "Retrieve a bounded slice from a host-owned packed tool-output artifact.",
-			create: (context) => createArtifactRetrieveTool(context.cwd, { artifactStore: sources.artifactStore }),
+			create: (context) =>
+				createArtifactRetrieveTool(context.cwd, {
+					artifactStore: sources.artifactStore,
+					...(sources.getContextGcStoreDir ? { getContextStoreDir: sources.getContextGcStoreDir } : {}),
+				}),
 		});
 	}
 	if (sources.runToolkitScript) {
