@@ -166,6 +166,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		});
 	}
 
+	/** The model a fresh worker would run on now (see WorkerDelegationController.previewWorkerModel). */
+	previewWorkerModel(): Model<Api> | undefined {
+		return this._getWorkerController().previewWorkerModel();
+	}
+
 	private _getWorkerController(): WorkerDelegationController {
 		this._workers ??= new WorkerDelegationController(
 			this.deps,

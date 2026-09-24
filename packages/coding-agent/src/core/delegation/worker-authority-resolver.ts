@@ -161,6 +161,23 @@ export function stepDownThinkingLevel(level: OrchestrationThinkingLevel): Orches
 }
 
 /**
+ * The model a fresh worker for `role` would run on now, by the same choice admission makes: the
+ * owner's pin for the role, else account routing, else the foreground model.
+ */
+export function previewWorkerModel(input: {
+	foregroundModel: Model<Api>;
+	pin: OrchestrationModelBinding | undefined;
+	routing: WorkerAccountRouting;
+	role: string;
+	modelRegistry: ModelRegistry;
+	isModelExhausted: (model: Model<Api>) => boolean;
+	isModelLimited?: (model: Model<Api>) => boolean;
+}): Model<Api> {
+	if (input.pin) return input.modelRegistry.find(input.pin.provider, input.pin.modelId) ?? input.foregroundModel;
+	return selectRoutedWorkerModel(input) ?? input.foregroundModel;
+}
+
+/**
  * Every model a fresh, unpinned worker may run on under `account: "other"`, in routing order: the
  * first is where it runs, the rest are where it moves when that account runs out of quota.
  */

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveWorkerAuthority } from "../src/core/delegation/worker-authority-resolver.ts";
+import { previewWorkerModel, resolveWorkerAuthority } from "../src/core/delegation/worker-authority-resolver.ts";
 import { WorkerProfileResolver } from "../src/core/delegation/worker-profile-resolver.ts";
 import { evaluateWorkerRetry } from "../src/core/delegation/worker-retry-policy.ts";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
@@ -150,5 +150,20 @@ describe("worker quota failover", () => {
 			store: new OrchestrationEventStore({ agentDir, sessionId: "session-1" }),
 		});
 		expect(reopened.getSnapshot().attempts[queued.attemptId]?.runningModel).toEqual(moved);
+	});
+
+	it("previews the model a fresh worker would run on: the role's pin, else routing, else the foreground", () => {
+		const base = {
+			foregroundModel: foreground,
+			routing: { account: "other" as const, routeProviders: ["openai-codex", "openrouter"] },
+			role: "implementer",
+			modelRegistry: registry,
+			isModelExhausted: () => false,
+		};
+		expect(previewWorkerModel({ ...base, pin: undefined })).toBe(codex);
+		expect(
+			previewWorkerModel({ ...base, pin: { provider: "openrouter", modelId: ling.id, thinkingLevel: "off" } }),
+		).toBe(ling);
+		expect(previewWorkerModel({ ...base, pin: undefined, isModelExhausted: () => true })).toBe(foreground);
 	});
 });

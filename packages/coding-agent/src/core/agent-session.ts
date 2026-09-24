@@ -4312,13 +4312,15 @@ export class AgentSession {
 	/**
 	 * The root (the talker) or a worker for a route the root may take (`priceExecutor`). The talker's
 	 * cost is its learned requests for this route kind reading its prefix; the worker writes the route's
-	 * brief and reports back within the delegate result bound. The worker is priced on the session model,
-	 * the model a worker runs on when no expert binding places it elsewhere.
+	 * brief and reports back within the delegate result bound. The worker is priced on the model it would
+	 * run on now (the owner's pin for its role, account routing, or the session model), the same choice
+	 * admission makes.
 	 */
 	private _chooseObjectiveExecutor(route: ObjectiveRoute): "root" | "worker" {
 		const model = this.model;
 		const prefixTokens = this.getContextUsage()?.tokens ?? 0;
 		const pricing = model ? resolveEffectiveModelPricing(model, prefixTokens) : undefined;
+		const workerModel = this._backgroundLanes.previewWorkerModel() ?? model;
 		const briefTokens = estimateTokens({
 			role: "user",
 			content: buildObjectiveRoutePrompt(route).text,
@@ -4334,14 +4336,19 @@ export class AgentSession {
 			}),
 			requests: this.getDecisionLedger()?.learnedRootRouteRequests(route.route),
 			talker: pricing,
-			worker: model ? resolveEffectiveModelPricing(model, briefTokens) : undefined,
+			worker: workerModel ? resolveEffectiveModelPricing(workerModel, briefTokens) : undefined,
 		});
 		this._recordCacheDecision({
 			kind: "executor",
 			decidedAt: Date.now(),
 			admit: verdict.executor === "worker",
 			reason: verdict.reason,
-			detail: { route: route.route, prefixTokens, briefTokens },
+			detail: {
+				route: route.route,
+				prefixTokens,
+				briefTokens,
+				...(workerModel ? { workerModel: `${workerModel.provider}/${workerModel.id}` } : {}),
+			},
 		});
 		return verdict.executor;
 	}

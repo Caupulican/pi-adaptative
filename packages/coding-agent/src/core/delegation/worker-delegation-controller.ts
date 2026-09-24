@@ -97,6 +97,7 @@ import { createWorkerAttemptExecutor, type WorkerResponseObservation } from "./w
 import {
 	bindCompiledToolSurface,
 	bindCompiledVerifierIdentity,
+	previewWorkerModel,
 	resolveWorkerAuthority,
 	type WorkerAuthorityResolution,
 	type WorkerAuthorityResolutionInput,
@@ -834,14 +835,37 @@ export class WorkerDelegationController {
 			foregroundThinkingLevel: this.deps.getForegroundThinkingLevel?.(),
 			foregroundThinkingPolicy: this.deps.getSettingsManager().getWorkerThinkingPolicy(),
 			accountRouting: this.deps.getSettingsManager().getWorkerAccountRouting(),
-			isModelLimited: (model) => {
-				this.providerLimitStore ??= new ProviderLimitStore(this.deps.getAgentDir());
-				const key = resolveProviderAccountKey(this.deps.getModelRegistry().authStorage, model.provider);
-				return this.providerLimitStore.read(key) !== undefined;
-			},
+			isModelLimited: (model) => this.isAccountLimited(model),
 			...(this.deps.getForegroundToolNames ? { foregroundToolNames: this.deps.getForegroundToolNames() } : {}),
 			...(this.deps.getCapabilityEnvelope() ? { foregroundEnvelope: this.deps.getCapabilityEnvelope() } : {}),
 			...this.authorityBase(),
+		});
+	}
+
+	/** A live machine-wide limit on the model's account (a 429 a sibling saw, an exhausted window). */
+	private isAccountLimited(model: Model<Api>): boolean {
+		this.providerLimitStore ??= new ProviderLimitStore(this.deps.getAgentDir());
+		const key = resolveProviderAccountKey(this.deps.getModelRegistry().authStorage, model.provider);
+		return this.providerLimitStore.read(key) !== undefined;
+	}
+
+	/**
+	 * The model a fresh worker for `role` would run on now, by the same choice admission makes: the
+	 * owner's pin for the role, else account routing, else the foreground model. A route's executor
+	 * choice prices the worker on it.
+	 */
+	previewWorkerModel(role: WorkerRole = "implementer"): Model<Api> | undefined {
+		const foregroundModel = this.deps.getModel();
+		if (!foregroundModel) return undefined;
+		const pins = this.deps.getSettingsManager().getWorkerModelPinPolicy();
+		return previewWorkerModel({
+			foregroundModel,
+			pin: pins.status === "active" ? resolveWorkerModelPin(pins, role)?.binding : undefined,
+			routing: this.deps.getSettingsManager().getWorkerAccountRouting(),
+			role,
+			modelRegistry: this.deps.getModelRegistry(),
+			isModelExhausted: (model) => this.deps.isModelExhausted(model),
+			isModelLimited: (model) => this.isAccountLimited(model),
 		});
 	}
 
