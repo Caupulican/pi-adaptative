@@ -113,7 +113,10 @@ describe("idle preparation", () => {
 		]);
 
 		await harness.session.prompt("hello");
+		// The operator sees when the lane will prepare and what that is expected to save.
+		expect(harness.session.getIdlePreparationView()).toMatchObject({ state: "armed" });
 		await sleep(RETURN_GAP_MS);
+		expect(harness.session.getIdlePreparationView()).toMatchObject({ state: "prepared" });
 		// The preparation ran on the warm lane, before the cache expired, and was recorded unapplied.
 		expect(requests).toHaveLength(2);
 		expect(requests[1]?.cachedChars).toBeGreaterThan(0);
@@ -124,6 +127,7 @@ describe("idle preparation", () => {
 		expect(harness.sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(false);
 
 		await harness.session.prompt("again");
+		expect(harness.session.getIdlePreparationView()).toMatchObject({ state: "resumed", fresh: true });
 		const compaction = harness.sessionManager.getEntries().find((entry) => entry.type === "compaction");
 		expect(compaction).toMatchObject({ summary: SUMMARY });
 		const decisions = harness.session.getDecisionLedger()?.cacheDecisions(harness.session.sessionId) ?? [];

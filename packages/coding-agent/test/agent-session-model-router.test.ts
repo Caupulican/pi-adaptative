@@ -1265,6 +1265,28 @@ describe("conversation stage routing", () => {
 		}
 	});
 
+	it("keeps a model the owner selected before the opening as the talker, with no route judged", async () => {
+		const requests: FauxRequestEvent[] = [];
+		const harness = await routedHarness(requests);
+		try {
+			const selected = harness.getModel("root");
+			expect(selected).toBeDefined();
+			await harness.session.setModel(selected!);
+			harness.setResponses([fauxAssistantMessage("the plan")]);
+			await harness.session.prompt("Plan the migration of the ledger to a new schema; list the steps.");
+			const reply = harness.session.messages.at(-1) as AssistantMessage;
+			expect(reply.model).toBe("root");
+			expect(harness.session.model?.id).toBe("root");
+			const talkers = talkerEntries(harness);
+			expect(talkers).toHaveLength(1);
+			expect(talkers[0]?.type === "custom" ? talkers[0].data : undefined).toMatchObject({
+				reasons: ["model selected"],
+			});
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("runs internal turns on the talker with no route and no swap", async () => {
 		const requests: FauxRequestEvent[] = [];
 		const harness = await routedHarness(requests);

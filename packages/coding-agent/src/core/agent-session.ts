@@ -104,7 +104,7 @@ import {
 } from "./compaction/early-compaction-economics.ts";
 import { RETENTION_AUDIT_CUSTOM_TYPE } from "./compaction/evidence-retention-projection.ts";
 import { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
-import { type AutoCompactionReason, CompactionController } from "./compaction-controller.ts";
+import { type AutoCompactionReason, CompactionController, type IdlePreparationView } from "./compaction-controller.ts";
 import { CompactionSupport, type LastSentRequest } from "./compaction-support.ts";
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
 import { CacheCustody } from "./context/cache-custody.ts";
@@ -2812,7 +2812,11 @@ export class AgentSession {
 			});
 			return undefined;
 		}
-		await this.setModel(replacement, { persistSettings: false });
+		await this._switchSessionModel(replacement, { persistSettings: false });
+		// A forced move carries a chosen talker with it; before the opening there is none to carry.
+		if (this.sessionManager.getLatestCustomEntryOnBranch(CONVERSATION_TALKER_CUSTOM_TYPE) !== undefined) {
+			this._recordTalker(replacement, [`${from} unavailable on this account`]);
+		}
 		const to = `${replacement.provider}/${replacement.id}`;
 		this._emit({
 			type: "warning",
@@ -4451,14 +4455,19 @@ export class AgentSession {
 		if (decision.thinkingLevel) {
 			this._modelSelection.setThinkingLevel(decision.thinkingLevel as ThinkingLevel, { persistSettings: false });
 		}
+		this._recordTalker(model, decision.reasons);
+		this._modelRouter.recordOpeningRoute(decision, model);
+	}
+
+	/** The conversation's talker from now on: later owner messages run on it with no route judged. */
+	private _recordTalker(model: Model<Api>, reasons: readonly string[]): void {
 		const record: ConversationTalkerRecord = {
 			model: formatModelRouterModel(model),
 			thinkingLevel: this.agent.state.thinkingLevel,
-			reasons: decision.reasons,
+			reasons: [...reasons],
 			decidedAt: Date.now(),
 		};
 		this.sessionManager.appendCustomEntry(CONVERSATION_TALKER_CUSTOM_TYPE, record);
-		this._modelRouter.recordOpeningRoute(decision, model);
 	}
 
 	/**
@@ -5441,6 +5450,11 @@ export class AgentSession {
 	 * that owned it has finished its tail. `abort()` alone returns at the first of those; a caller
 	 * that wants to submit a new root prompt right after an abort waits for the second.
 	 */
+	/** What the session lane's idle compaction preparation is doing, for the Decision graph. */
+	getIdlePreparationView(): IdlePreparationView | undefined {
+		return this._compaction.getIdlePreparationView();
+	}
+
 	waitForForegroundIdle(): Promise<void> {
 		return this._foregroundRecovery.waitForIdle();
 	}
@@ -5449,7 +5463,16 @@ export class AgentSession {
 	// Model Management
 	// =========================================================================
 
+	/**
+	 * An explicit model selection (`/model`, a model cycle, RPC, an extension): the selected model becomes
+	 * the conversation's talker, so the opening route never replaces it.
+	 */
 	async setModel(model: Model<Api>, options: { persistSettings?: boolean } = {}): Promise<void> {
+		await this._switchSessionModel(model, options);
+		this._recordTalker(model, ["model selected"]);
+	}
+
+	private async _switchSessionModel(model: Model<Api>, options: { persistSettings?: boolean }): Promise<void> {
 		this._compaction.cancelIdlePreparation();
 		await this._modelSelection.setModel(model, options);
 		this._localPrefixWarm.schedule(this.agent.state.model);
@@ -5468,6 +5491,7 @@ export class AgentSession {
 
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
 		const result = await this._modelSelection.cycleModel(direction);
+		if (result?.model) this._recordTalker(result.model, ["model selected"]);
 		this._localPrefixWarm.schedule(result?.model);
 		return result;
 	}

@@ -7,6 +7,7 @@
  */
 
 import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
+import type { IdlePreparationView } from "../../../core/compaction-controller.ts";
 import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
 import type { DecisionStage, DecisionStageLogView } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { FlowEvent, FlowOutcome } from "../../../core/operator-projection/flow-trace.ts";
@@ -16,6 +17,7 @@ import {
 	type SemanticEvaluationRecord,
 } from "../../../core/system-one/semantic-evaluation-ledger.ts";
 import type { SemanticPlaneHealth } from "../../../core/system-one/semantic-plane-health.ts";
+import { formatCompactDuration } from "../../../core/util/format-duration.ts";
 import { formatRouteValue, shortModelName } from "./operator-pov-bar.ts";
 
 export type DecisionPlanStepStatus = "done" | "active" | "pending" | "blocked" | "failed" | "cancelled";
@@ -46,6 +48,8 @@ export interface DecisionGraphInput {
 	readonly events?: readonly { readonly timestamp: string; readonly title: string; readonly severity: string }[];
 	/** What actually happened, recorded where it happened: the source for what is running now. */
 	readonly flow?: readonly FlowEvent[];
+	/** The root lane's idle compaction preparation, when one is planned or just decided a resume. */
+	readonly idlePreparation?: IdlePreparationView;
 	readonly nowMs: number;
 }
 
@@ -141,7 +145,25 @@ export interface DecisionGraphModel {
 	/** The flow trace, for the views drawn from it. */
 	readonly flow: readonly FlowEvent[];
 	readonly stageLogEmpty: boolean;
+	/** What the idle root lane's compaction preparation is doing, in one line; absent when none is planned. */
+	readonly idleText?: string;
 	readonly nowMs: number;
+}
+
+/** The idle preparation in the operator's words: when it prepares and what it expects, or how the lane resumed. */
+export function idlePreparationText(view: IdlePreparationView, nowMs: number): string {
+	switch (view.state) {
+		case "armed":
+			return `idle · prepare in ${formatCompactDuration(view.prepareAt - nowMs)} · ~$${view.valueUsd.toFixed(3)} expected`;
+		case "preparing":
+			return `idle · preparing a summary ${formatCompactDuration(nowMs - view.since)}`;
+		case "prepared":
+			return "idle · summary prepared";
+		case "resumed":
+			return view.fresh
+				? `resumed · fresh${view.savedUsd !== undefined ? ` · saved ~$${view.savedUsd.toFixed(3)}` : ""}`
+				: "resumed · warm";
+	}
 }
 
 /**
@@ -378,9 +400,12 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		}
 	}
 
+	const idle = input.idlePreparation;
 	const hasRunningClock = Boolean(
 		(open && projection.phase !== "done") ||
 			inFlight ||
+			idle?.state === "armed" ||
+			idle?.state === "preparing" ||
 			flow.some((event) => event.endedAt === undefined) ||
 			participants.some((p) => p.running && p.startedAt !== undefined),
 	);
@@ -406,6 +431,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		...(lastTurnOutcome ? { lastTurnOutcome } : {}),
 		flow,
 		stageLogEmpty: stageLog.entries.length === 0,
+		...(idle ? { idleText: idlePreparationText(idle, nowMs) } : {}),
 		nowMs,
 	};
 }

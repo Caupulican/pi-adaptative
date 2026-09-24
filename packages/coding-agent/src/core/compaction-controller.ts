@@ -260,6 +260,17 @@ export interface CompactionCacheFacts {
 /** Session custom entry holding a compaction summarized while the lane idled, not yet applied. */
 export const COMPACTION_PREPARED_CUSTOM_TYPE = "compaction_prepared";
 
+/**
+ * What the session lane's idle preparation is doing, for the operator: armed with the moment it will
+ * prepare and the value it expects, preparing, prepared, or how the next request resumed (fresh from the
+ * prepared summary with its saving, or warm on the full history).
+ */
+export type IdlePreparationView =
+	| { readonly state: "armed"; readonly prepareAt: number; readonly valueUsd: number }
+	| { readonly state: "preparing"; readonly since: number }
+	| { readonly state: "prepared"; readonly at: number }
+	| { readonly state: "resumed"; readonly fresh: boolean; readonly savedUsd?: number; readonly at: number };
+
 /** What a `compaction_prepared` entry records: the result to apply, and the lane it was read on. */
 export interface PreparedCompactionRecord {
 	readonly result: CompactionResult;
@@ -324,6 +335,7 @@ export class CompactionController {
 	private readonly idleTimer = new IdlePreparationTimer();
 	/** A compaction being summarized while the lane idles, not yet recorded. */
 	private idlePreparation: { abort: AbortController; done: Promise<PreparedCompactionRecord | undefined> } | undefined;
+	private idleView: IdlePreparationView | undefined;
 	private pendingEarlyCompactionPrediction?: {
 		predictedSavingsUsd: number;
 		tokensBefore: number;
@@ -1378,8 +1390,15 @@ export class CompactionController {
 	 * for it. No plan without a recorded compaction, learned return gaps, or a positive value; an
 	 * extension that owns compaction also owns when to prepare one.
 	 */
+	/** The idle preparation's state for the Decision graph, undefined when the lane plans none. */
+	getIdlePreparationView(): IdlePreparationView | undefined {
+		return this.idleView;
+	}
+
 	onLaneIdle(reply: AssistantMessage): void {
 		this.idleTimer.disarm();
+		// A resume outcome stays visible until a new preparation is planned.
+		if (this.idleView?.state !== "resumed") this.idleView = undefined;
 		const model = this.deps.getModel();
 		if (!model || this.isRunning() || this.deps.getExtensionRunner().hasHandlers("session_before_compact")) return;
 		const settings = this.deps.getAdaptedSettings();
@@ -1414,21 +1433,25 @@ export class CompactionController {
 			detail: { prefixTokens, prepareAtMs: plan.prepareAtMs, holder },
 		});
 		this.idleTimer.arm(plan.prepareAtMs, () => this.startIdlePreparation());
+		this.idleView = { state: "armed", prepareAt: now + plan.prepareAtMs, valueUsd: plan.valueUsd };
 	}
 
 	/** The lane is busy again (a request is being admitted): nothing idle remains to prepare for. */
 	onLaneBusy(): void {
 		this.idleTimer.disarm();
+		if (this.idleView?.state === "armed") this.idleView = undefined;
 	}
 
 	/** Drop the idle timer and abort a preparation in flight (an owner message, a model change, shutdown). */
 	cancelIdlePreparation(): void {
 		this.idleTimer.disarm();
 		this.idlePreparation?.abort.abort();
+		if (this.idleView?.state === "armed" || this.idleView?.state === "preparing") this.idleView = undefined;
 	}
 
 	private startIdlePreparation(): void {
 		if (this.idlePreparation || this.isRunning()) return;
+		this.idleView = { state: "preparing", since: Date.now() };
 		const abort = new AbortController();
 		const preparation: { abort: AbortController; done: Promise<PreparedCompactionRecord | undefined> } = {
 			abort,
@@ -1441,6 +1464,11 @@ export class CompactionController {
 						});
 					}
 					return undefined;
+				})
+				.then((prepared) => {
+					if (this.idleView?.state === "preparing")
+						this.idleView = prepared ? { state: "prepared", at: Date.now() } : undefined;
+					return prepared;
 				})
 				.finally(() => {
 					if (this.idlePreparation === preparation) this.idlePreparation = undefined;
@@ -1550,6 +1578,7 @@ export class CompactionController {
 		const facts = this.deps.getCacheEconomics?.(model, now);
 		if (!facts?.outcome) {
 			inFlight?.abort.abort();
+			this.idleView = undefined;
 			return false;
 		}
 		const pricing = this.compactionPricing(
@@ -1574,10 +1603,17 @@ export class CompactionController {
 		});
 		if (!verdict.proceed) {
 			inFlight?.abort.abort();
+			this.idleView = { state: "resumed", fresh: false, at: now };
 			return false;
 		}
 		const prepared = recorded ?? (await inFlight?.done);
 		if (!prepared) return false;
+		this.idleView = {
+			state: "resumed",
+			fresh: true,
+			...(verdict.savingUsd !== undefined ? { savedUsd: verdict.savingUsd } : {}),
+			at: now,
+		};
 		this.deps.emit({ type: "compaction_start", reason: "threshold" });
 		const { result } = prepared;
 		const compactionId = randomUUID();

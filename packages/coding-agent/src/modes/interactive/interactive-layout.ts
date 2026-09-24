@@ -123,6 +123,7 @@ function composeDecisionGraph(host: InteractiveLayoutHost, humanInput: HumanInpu
 			: []),
 		...graphChecksFromVerificationObligations(session.getVerificationObligations()),
 	];
+	const idlePreparation = session.getIdlePreparationView();
 	return buildDecisionGraphModel({
 		projection,
 		stageLog: session.operatorProjection.getStageLog(now),
@@ -141,6 +142,7 @@ function composeDecisionGraph(host: InteractiveLayoutHost, humanInput: HumanInpu
 		},
 		events: session.operatorProjection.getVisibleEvents(),
 		flow: host.flowTrace ? observedFlow(host.flowTrace, session) : [],
+		...(idlePreparation ? { idlePreparation } : {}),
 		backgroundTools: (host.activityLane?.getItems() ?? []).flatMap((item) =>
 			isBackgroundToolActivityItem(item) && item.status !== "success" && item.status !== "failure"
 				? [{ name: item.label, ...(item.startedAt !== undefined ? { startedAt: item.startedAt } : {}) }]

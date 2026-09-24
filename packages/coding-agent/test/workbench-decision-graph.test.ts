@@ -396,6 +396,17 @@ describe("Decision graph model", () => {
 		expect(idle.stageLogEmpty).toBe(true);
 		expect(idle.hasRunningClock).toBe(false);
 	});
+
+	it("names the idle root lane's planned compaction preparation on the root, and ticks its countdown", () => {
+		const input = SCENARIOS.delivered!();
+		const model = buildDecisionGraphModel({
+			...input,
+			idlePreparation: { state: "armed", prepareAt: input.nowMs + 90_000, valueUsd: 0.02 },
+		});
+		expect(model.idleText).toBe("idle · prepare in 1m30s · ~$0.020 expected");
+		expect(model.hasRunningClock).toBe(true);
+		expect(stripAnsi(renderDecisionList(model, 96).rows.join("\n"))).toContain("idle · prepare in 1m30s");
+	});
 });
 
 describe("Decision graph rendering", () => {

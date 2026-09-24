@@ -189,7 +189,7 @@ export function renderDecisionList(
 							? "waiting for you"
 							: evaluating
 								? "waiting for System One"
-								: ""
+								: (model.idleText ?? "")
 						: (participant.task ?? ""),
 				);
 		item(
@@ -435,7 +435,9 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 							sub: `${participant.task}${participant.startedAt !== undefined ? ` ${formatGraphDuration(now - participant.startedAt)}` : ""}`,
 							subTone: "muted" as ThemeColor,
 						}
-					: {}),
+					: participant.kind === "root" && !participant.running && model.idleText
+						? { sub: model.idleText, subTone: "dim" as ThemeColor }
+						: {}),
 		};
 	});
 	levels.push({ kind: "level", nodes: executors });
