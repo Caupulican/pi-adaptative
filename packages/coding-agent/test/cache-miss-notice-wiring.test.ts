@@ -24,8 +24,9 @@ function assistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantM
 	};
 }
 
-function makeCtx(messages: AssistantMessage[], showCacheMissNotices: boolean) {
+function makeCtx(messages: AssistantMessage[], showCacheMissNotices: boolean, hasHumanAudience = true) {
 	const ctx = Object.create((InteractiveMode as any).prototype);
+	Object.defineProperty(ctx, "hasHumanAudience", { value: hasHumanAudience });
 	// `session` is a getter-only accessor on the prototype (backed by runtimeHost), so it must be
 	// shadowed with an own property rather than assigned.
 	Object.defineProperty(ctx, "session", {
@@ -110,6 +111,14 @@ describe("InteractiveMode.reportCacheMissNoticeIfEvidenced (P1m wiring)", () => 
 		(InteractiveMode as any).prototype.reportCacheMissNoticeIfEvidenced.call(ctx);
 
 		expect(ctx.showWarning).not.toHaveBeenCalled();
+	});
+
+	it("neither warns nor records a baseline without a human audience", () => {
+		const ctx = makeCtx([assistantMessage({ timestamp: 1_000 })], true, false);
+		(InteractiveMode as any).prototype.reportCacheMissNoticeIfEvidenced.call(ctx);
+
+		expect(ctx.showWarning).not.toHaveBeenCalled();
+		expect(ctx.lastCacheObservation).toBeUndefined();
 	});
 
 	it("warns for an idle-gap-explained miss past the default TTL", () => {

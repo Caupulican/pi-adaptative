@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 type RebindHarness = {
+	hasHumanAudience: boolean;
 	unsubscribe?: () => void;
 	unsubscribeExtensionsChanged?: () => void;
 	clipboardQueue: {
@@ -12,6 +13,7 @@ type RebindHarness = {
 		session: {
 			onExtensionsChanged(callback: () => void): () => void;
 			resumePendingHumanInput(): Promise<void>;
+			resumeSelfCompaction(): boolean;
 			settingsManager: { getClipboardImageDirectory(): undefined };
 			sessionManager: { isPersisted(): false };
 		};
@@ -30,6 +32,7 @@ type RebindHarness = {
 function createModeHarness(): { mode: RebindHarness; fireExtensionsChanged: () => void } {
 	let listener: (() => void) | undefined;
 	const mode = Object.create(InteractiveMode.prototype) as RebindHarness;
+	Object.defineProperty(mode, "hasHumanAudience", { value: true });
 	mode.unsubscribe = vi.fn();
 	mode.unsubscribeExtensionsChanged = vi.fn();
 	mode.clipboardQueue = { pendingClipboardImages: [], clipboardImageCounter: 0 };
@@ -40,6 +43,7 @@ function createModeHarness(): { mode: RebindHarness; fireExtensionsChanged: () =
 				return vi.fn();
 			},
 			resumePendingHumanInput: vi.fn(async () => {}),
+			resumeSelfCompaction: vi.fn(() => false),
 			settingsManager: { getClipboardImageDirectory: () => undefined },
 			sessionManager: { isPersisted: () => false },
 		},
@@ -68,5 +72,6 @@ describe("InteractiveMode extension-change rebinding", () => {
 
 		expect(oldUnsubscribe).toHaveBeenCalledOnce();
 		expect(mode.refreshUIAfterExtensionsChanged).toHaveBeenCalledOnce();
+		expect(mode.runtimeHost.session.resumeSelfCompaction).toHaveBeenCalledOnce();
 	});
 });

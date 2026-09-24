@@ -320,7 +320,7 @@ describe("dogfood safety closure", () => {
 					arguments: { command: gitCommit },
 				},
 				args: { command: gitCommit },
-				assistantMessage: { provider: "test", model: "test" } as never,
+				assistantMessage: { provider: "test", model: "test", content: [] } as never,
 				context: {} as never,
 			} as Parameters<typeof beforeToolCall>[0],
 			undefined,
@@ -351,7 +351,7 @@ describe("dogfood safety closure", () => {
 			{
 				toolCall: { type: "toolCall", id: "t1", name: "bash", arguments: { command: testCommand } },
 				args: { command: testCommand },
-				assistantMessage: { provider: "test", model: "test" } as never,
+				assistantMessage: { provider: "test", model: "test", content: [] } as never,
 				context: {} as never,
 			} as Parameters<typeof beforeToolCall>[0],
 			undefined,
@@ -439,7 +439,7 @@ describe("dogfood safety closure", () => {
 			{
 				toolCall: { type: "toolCall", id: "b2", name: "bash", arguments: { command: mutate } },
 				args: { command: mutate },
-				assistantMessage: { provider: "test", model: "test" } as never,
+				assistantMessage: { provider: "test", model: "test", content: [] } as never,
 				context: {} as never,
 			} as Parameters<typeof dirtyBefore>[0],
 			undefined,

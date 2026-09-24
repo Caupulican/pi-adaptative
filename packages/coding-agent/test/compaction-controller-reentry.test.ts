@@ -1051,6 +1051,44 @@ describe("CompactionController memory handoff", () => {
 	});
 });
 
+describe("CompactionController compactable history", () => {
+	it("answers from the live branch and recomputes when the branch or settings change", () => {
+		const settings = { enabled: true, reserveTokens: 3_000, keepRecentTokens: 1_200, triggerPercent: 0 };
+		const fixture = createFixture({
+			measureLiveContextTokens: () => 3_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			settings,
+		});
+
+		expect(fixture.controller.hasCompactableHistory()).toBe(true);
+		expect(fixture.controller.hasCompactableHistory()).toBe(true);
+
+		fixture.sessionManager.appendCompaction("checkpoint", fixture.entryIds[4]!, 3_000);
+		expect(fixture.controller.hasCompactableHistory()).toBe(false);
+
+		settings.keepRecentTokens = 600;
+		expect(fixture.controller.hasCompactableHistory()).toBe(false);
+
+		fixture.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "next" }],
+			timestamp: Date.now(),
+		});
+		expect(fixture.controller.hasCompactableHistory()).toBe(true);
+	});
+
+	it("has nothing to compact on an empty session", () => {
+		const fixture = createFixture({
+			measureLiveContextTokens: () => 0,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			sessionManager: SessionManager.inMemory(),
+		});
+		fixture.sessionManager.resetLeaf();
+
+		expect(fixture.controller.hasCompactableHistory()).toBe(false);
+	});
+});
+
 describe("CompactionController base-envelope warnings", () => {
 	it("warns that no prompt can be processed when the base envelope alone fills the context window", () => {
 		const fixture = createFixture({

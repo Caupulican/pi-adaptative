@@ -22,6 +22,7 @@ const OPENROUTER_CREDITS_MESSAGE = "402 Insufficient credits. Add more credits t
 const XAI_CAPACITY_MESSAGE =
 	"Error Code null: The model is currently at capacity due to high demand. Please try again in a few minutes, or use a higher service tier for priority processing: https://docs.x.ai/developers/advanced-api-usage/priority-processing";
 const XAI_INTERNAL_GENERATION_MESSAGE = "Error Code null: Internal error during token generation";
+const BEDROCK_THROTTLING_MESSAGE = "Throttling error: Too many requests, please wait before trying again.";
 
 function mistralSdkError(status: number, body: object): string {
 	return new SDKError("Mistral API error", {
@@ -115,6 +116,12 @@ function fixtureExpectations(): FixtureExpectation[] {
 			genericReason: "server_error",
 		},
 		{
+			provider: "amazon-bedrock",
+			message: BEDROCK_THROTTLING_MESSAGE,
+			reason: "rate_limit",
+			genericReason: "rate_limit",
+		},
+		{
 			provider: "google",
 			message: new ApiError({
 				status: 429,
@@ -136,6 +143,7 @@ function fixtureExpectations(): FixtureExpectation[] {
 }
 
 const providerRowFixtureCoverage: Record<string, readonly string[]> = {
+	"amazon-bedrock": [BEDROCK_THROTTLING_MESSAGE],
 	anthropic: ["Your credit balance is too low"],
 	mistral: ["Insufficient credits"],
 	openrouter: ["Insufficient credits"],
