@@ -28,6 +28,8 @@ export function isLocalOrManagedRouterModel(model: Model<Api>): boolean {
 
 const READ_ONLY_TOOL_NAMES = new Set([
 	"read",
+	// A side trip's search of the conversation its brief omits (model-router/side-trip-brief.ts).
+	"conversation_history",
 	"grep",
 	"find",
 	"ls",
@@ -129,6 +131,16 @@ function isReadOnlyShellCommand(command: string): boolean {
 		return false;
 	const segments = command.split(/\s*(?:&&|\|\||[;|\r\n])\s*/).map((segment) => segment.trim());
 	return segments.length > 0 && segments.every((segment) => segment.length > 0 && isReadOnlyShellSegment(segment));
+}
+
+/**
+ * Whether some call of this tool can run on a cheap turn without escalating: the read-only tools, and the
+ * shell tools, whose read-only commands run while the escalation gate reruns a mutating one elsewhere.
+ * Every call of any other tool escalates, so a side trip that carries it only pays for its schema.
+ */
+export function mayRunWithoutEscalation(toolName: string): boolean {
+	const name = toolName.trim().toLowerCase();
+	return SHELL_TOOL_NAMES.has(name) || !isMutatingToolCall(name);
 }
 
 export function shouldEscalateModelRouterTool(options: { tier: ModelTier; toolName: string; args?: unknown }): boolean {

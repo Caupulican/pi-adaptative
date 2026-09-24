@@ -85,13 +85,15 @@ run on it with no swap, and only `/model` or a hard failure (quota, account, bil
 model switch is a full cache write, so work reaches another model only when the arithmetic says it
 is cheaper, and then on a brief orders of magnitude smaller than the talker's context: a small
 message's side trip reads a note that the earlier conversation is not shown, the talker's last reply
-and the message, and hands the message back to the talker (`hand_to_talker`, or reaching for a
-mutating tool) when the brief cannot answer it; a worker or a minion gets the route's brief. Why:
-measured on the owner's sessions, 8 replying-model switches in 217 owner turns each re-sent the
-whole context. Pinned by the conversation stage routing tests in
+and the message, on a surface of the tools it can use without escalating, and searches what the brief
+omits with `conversation_history`; reaching for a mutating tool reruns the message on the talker, so
+the side trip loses no capability. A worker or a minion gets the route's brief. Why: measured on the
+owner's sessions, 8 replying-model switches in 217 owner turns each re-sent the whole context; and
+the free side-trip model searched the conversation when it could (10 of 10) where it would not hand
+a message back (0 of 28). Pinned by the conversation stage routing tests in
 `packages/coding-agent/test/agent-session-model-router.test.ts` (one route judgment at the opening,
-the talker kept, a side trip reading only its brief, a side trip handing back or reaching for a
-mutating tool rerunning on the talker).
+the talker kept, a side trip reading only its brief and searching the rest on its own model, a side
+trip reaching for a mutating tool rerunning on the talker).
 
 **Every agent runs the conversation mechanics; only the head orchestrates.** A worker plans each
 request with root's own request-context controller (context GC on its own lane, path aliases, the
@@ -964,3 +966,4 @@ measurement gains no new surface.
 | 2026-09-24 | Every agent runs the conversation mechanics within its boundaries; only the head orchestrates. Workers plan requests with root's request-context controller, price early compaction and GC on their own lane's facts, summarize on their own warm lane, and share root's tool mechanics and learning stores; a quota-exhausted routed worker moves to its next account. |
 | 2026-09-24 | A conversation keeps one talker and every other model reads a brief; a side trip's brief says the earlier conversation is not shown and the side trip can hand its message back to the talker. |
 | 2026-09-24 | No invariant moved: the path-alias contract test closes the runtimes it opens before removing their directories, since Windows cannot delete an open database. |
+| 2026-09-24 | A side trip searches the conversation its brief omits (`conversation_history`) on a surface of the tools it can use without escalating, instead of handing its message back: the free side-trip model looked the conversation up 10 of 10 times and handed back 0 of 28. |

@@ -88,11 +88,7 @@ import {
 	flushModelRouterSessionBufferPrefix,
 	type ModelRouterSessionBuffer,
 } from "./model-router/session-buffer.ts";
-import {
-	SIDE_TRIP_HAND_BACK_TOOL,
-	SIDE_TRIP_HAND_BACK_TOOL_NAME,
-	sideTripBrief,
-} from "./model-router/side-trip-brief.ts";
+import { sideTripBrief, sideTripHistoryTool } from "./model-router/side-trip-brief.ts";
 import {
 	formatModelRouterStatus,
 	getRecentModelRouterDecisions,
@@ -101,7 +97,11 @@ import {
 	type ModelRouterFailoverStatus,
 	type ModelRouterFitnessStatuses,
 } from "./model-router/status.ts";
-import { isLocalOrManagedRouterModel, shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
+import {
+	isLocalOrManagedRouterModel,
+	mayRunWithoutEscalation,
+	shouldEscalateModelRouterTool,
+} from "./model-router/tool-escalation.ts";
 import type { ModelToolProbeVerdict } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -411,17 +411,13 @@ export class ModelRouterController {
 	 */
 	maybeEscalateToolCall(toolName: string, args: unknown): { block: true; reason: string } | undefined {
 		const route = this._activeModelRouterRoute;
-		if (
-			route &&
-			((route.reasonCode === SIDE_TRIP_REASON_CODE && toolName === SIDE_TRIP_HAND_BACK_TOOL_NAME) ||
-				shouldEscalateModelRouterTool({ tier: route.tier, toolName, args }))
-		) {
+		if (route && shouldEscalateModelRouterTool({ tier: route.tier, toolName, args })) {
 			this._modelRouterEscalationRequested = true;
 			this.deps.getAgent().abort("model router escalation");
 			return {
 				block: true,
 				reason:
-					"Model router escalation required: a cheap research turn attempted a mutating tool or handed its message back. Retry the turn on the next model.",
+					"Model router escalation required: a cheap research turn attempted a mutating tool. Retry the turn on the next model.",
 			};
 		}
 		return undefined;
@@ -1449,9 +1445,14 @@ export class ModelRouterController {
 						swappedTools = agent.state.tools;
 					}
 				}
-				// A side trip can hand its message to the talker when its brief cannot answer it.
+				// A side trip carries the tools it can use without escalating (reaching for any other one
+				// reruns the message on the talker anyway) and a search of the conversation its brief
+				// omits: a small brief reads a small surface, and the search is not buried under schemas.
 				if (routeDecision?.reasonCode === SIDE_TRIP_REASON_CODE) {
-					agent.state.tools = [...agent.state.tools, SIDE_TRIP_HAND_BACK_TOOL];
+					agent.state.tools = [
+						...agent.state.tools.filter((tool) => mayRunWithoutEscalation(tool.name)),
+						sideTripHistoryTool(() => agent.state.messages.slice(0, originalHistoryLength)),
+					];
 					swappedTools = agent.state.tools;
 				}
 				// The routed prompt follows the routed tool surface and keeps provider-neutral delegation

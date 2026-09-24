@@ -1303,33 +1303,44 @@ describe("conversation stage routing", () => {
 		}
 	});
 
-	it("reruns a side trip that hands its message back on the talker, which reads the conversation", async () => {
+	it("lets a side trip search the conversation its brief omits, on its own model, with the talker left in place", async () => {
 		const requests: FauxRequestEvent[] = [];
 		const harness = await routedHarness(requests);
 		try {
 			let sideTrip: { tools: string[]; brief: string } | undefined;
+			let found = "";
 			harness.setResponses([
-				fauxAssistantMessage("the plan"),
+				fauxAssistantMessage("Step one exports the ledger; step two migrates it."),
+				fauxAssistantMessage("ok"),
 				(context: Context) => {
 					const note = context.messages.at(-2);
 					sideTrip = {
 						tools: (context.tools ?? []).map((tool) => tool.name),
 						brief: note?.role === "user" && typeof note.content !== "string" ? JSON.stringify(note.content) : "",
 					};
-					return fauxAssistantMessage([fauxToolCall("hand_to_talker", {})], { stopReason: "toolUse" });
+					return fauxAssistantMessage([fauxToolCall("conversation_history", { query: "step one" })], {
+						stopReason: "toolUse",
+					});
 				},
-				fauxAssistantMessage("the first step exports the ledger"),
+				(context: Context) => {
+					const result = context.messages.at(-1);
+					found = result?.role === "toolResult" ? JSON.stringify(result.content) : "";
+					return fauxAssistantMessage("Step one exports the ledger.");
+				},
 			]);
 			await harness.session.prompt("Plan the migration of the ledger to a new schema; list the steps.");
+			await harness.session.prompt("thanks!");
 			await harness.session.prompt("What did the first step say?");
-			// The side trip was offered the way back and told the conversation before its brief is not shown.
-			expect(sideTrip?.tools).toContain("hand_to_talker");
-			expect(sideTrip?.brief).toContain("the conversation before it is not shown here");
-			// The message reran on the talker; the side trip's turn left nothing behind.
-			const replies = harness.session.messages.filter((message) => message.role === "assistant");
-			expect(replies.map((message) => (message as AssistantMessage).model)).toEqual(["medium", "medium"]);
+			// The side trip carries only what it can use without escalating, plus the search.
+			expect(sideTrip?.tools).toContain("conversation_history");
+			expect(sideTrip?.tools).not.toContain("edit");
+			expect(sideTrip?.brief).toContain("search it with conversation_history");
+			// The search reads the conversation before the brief, which the brief itself never sent.
+			expect(found).toContain("Step one exports the ledger");
+			const reply = harness.session.messages.at(-1) as AssistantMessage;
+			expect(reply.model).toBe("cheap");
 			expect(harness.session.model?.id).toBe("medium");
-			expect(harness.session.getModelRouterStatus()).toContain("escalated -> faux/medium");
+			expect(harness.session.getModelRouterStatus()).not.toContain("escalated");
 		} finally {
 			harness.cleanup();
 		}

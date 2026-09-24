@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Changed
+
+- A side trip searches the conversation its brief omits with `conversation_history` instead of handing the message back (`hand_to_talker` is removed: the free side-trip model never called it), and carries only the tools it can use without escalating, which cuts its request from about 55k to about 9k characters.
+- The claim check reads an answer that relays what a script printed as no test claim, and settles test and check claims against the checks that ran.
+
+### Fixed
+
+- The activity row of a finished turn ends with its submission instead of staying on as "Working" or "Preparing, no token yet" while background work runs.
+- A print, json or rpc run in a project with no trust decision says the project runs untrusted and names `--approve`.
+
 ## [0.99.46] - 2026-09-24
 
 ### Added
