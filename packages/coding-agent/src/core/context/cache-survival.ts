@@ -76,6 +76,19 @@ export function laneParts(lane: string): { api: string; provider: string; modelI
 	return { api, provider, modelId };
 }
 
+/**
+ * Who serves a lane's cache. A routing or hosting provider names its models `vendor/model`: each vendor
+ * behind it keeps its own cache, so lanes pool with their vendor's lanes, never with every model the
+ * provider fronts. `vendor` is whose documented cache lifetime applies.
+ */
+export function cacheHost(lane: string): { key: string; vendor: string } {
+	const { provider, modelId } = laneParts(lane);
+	const slash = modelId.indexOf("/");
+	if (slash <= 0) return { key: provider, vendor: provider };
+	const vendor = modelId.slice(0, slash);
+	return { key: `${provider}/${vendor}`, vendor };
+}
+
 /** The documented cache lifetime of a provider, where the provider publishes one. */
 export function providerCacheTtlMs(provider: string, retention?: "short" | "long"): number | undefined {
 	if (provider !== "anthropic") return undefined;
@@ -210,11 +223,12 @@ export function survivalCurve(
 		const parts = laneParts(o.lane);
 		return parts.provider === provider && parts.modelId === modelId;
 	});
-	const providerObservations = observations.filter((o) => laneParts(o.lane).provider === provider);
+	const host = cacheHost(lane);
+	const providerObservations = observations.filter((o) => cacheHost(o.lane).key === host.key);
 	const laneBins = accumulate(laneObservations, settings, now).bins;
 	const modelBins = accumulate(modelObservations, settings, now).bins;
 	const providerBins = accumulate(providerObservations, settings, now).bins;
-	const ttlMs = providerCacheTtlMs(provider, retention);
+	const ttlMs = providerCacheTtlMs(host.vendor, retention);
 
 	let lastIndex = Math.max(-1, ...laneBins.keys(), ...modelBins.keys(), ...providerBins.keys());
 	if (ttlMs !== undefined) lastIndex = Math.max(lastIndex, gapBinIndex(ttlMs, settings.binsPerDecade) + 1);

@@ -107,6 +107,26 @@ describe("cache survival curve", () => {
 		);
 	});
 
+	it("pools a routing provider's lane with its own vendor's lanes, and takes that vendor's documented TTL", () => {
+		// Two OpenRouter vendors with opposite caches: one keeps it for an hour, one loses it in seconds.
+		const deepseekA = lane("openrouter", "deepseek/deepseek-a");
+		const deepseekB = lane("openrouter", "deepseek/deepseek-b");
+		const other = lane("openrouter", "inclusionai/ling");
+		const observations = [...ttlLane(deepseekA, 60 * MINUTE, GAPS), ...ttlLane(other, 1_000, GAPS)];
+		const curve = survivalCurve(
+			[...observations, ...ttlLane(deepseekB, 60 * MINUTE, [2_000])],
+			deepseekB,
+			SETTINGS,
+			100,
+		);
+		// The sparse DeepSeek lane borrows DeepSeek's hour-long cache, not the other vendor's.
+		expect(predictRetained(curve, 20 * MINUTE, SETTINGS.binsPerDecade)).toBeCloseTo(1, 5);
+		// Anthropic behind OpenRouter falls to Anthropic's documented five-minute cache.
+		const routedOpus = survivalCurve([], lane("openrouter", "anthropic/claude-opus-5-5"), SETTINGS, 0);
+		expect(predictRetained(routedOpus, MINUTE, SETTINGS.binsPerDecade)).toBe(1);
+		expect(predictRetained(routedOpus, 30 * MINUTE, SETTINGS.binsPerDecade)).toBe(0);
+	});
+
 	it("excludes requests whose own prefix changed: their cold read is ours, not the provider's", () => {
 		const key = lane("xai", "grok");
 		const broken: SurvivalObservation[] = ttlLane(key, 5 * MINUTE, [2_000, 2_000, 2_000]).map((o) => ({
