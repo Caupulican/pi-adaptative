@@ -39,7 +39,7 @@ import { normalizeProviderPromptGuidelines, normalizeProviderPromptSnippet } fro
 import type { ResourceLoader } from "./resource-loader.ts";
 import { UNTRUSTED_BOUNDARY_SYSTEM_RULE } from "./security/untrusted-boundary.ts";
 import type { SettingsManager } from "./settings-manager.ts";
-import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
+import { type BuildSystemPromptOptions, buildSystemPrompt, promptDate } from "./system-prompt.ts";
 import { formatToolSelectionHints, type ToolSelectionHint } from "./tool-selection/promotion.ts";
 
 export interface SystemPromptBuilderDeps {
@@ -130,9 +130,20 @@ function collectPromptGuidelines(
 export class SystemPromptBuilder {
 	private readonly deps: SystemPromptBuilderDeps;
 	private _baseSystemPromptOptions!: BuildSystemPromptOptions;
+	/** The date every prompt this session builds states, pinned until `advancePromptDate` at a cold moment. */
+	private _promptDate: string | undefined;
 
 	constructor(deps: SystemPromptBuilderDeps) {
 		this.deps = deps;
+	}
+
+	/** Move the pinned date to today; true when it changed (the caller rebuilds the base prompt). */
+	advancePromptDate(now: Date = new Date()): boolean {
+		const today = promptDate(now);
+		if (this._promptDate === today) return false;
+		const changed = this._promptDate !== undefined;
+		this._promptDate = today;
+		return changed;
 	}
 
 	/** The options used to render the last base prompt — read by a before_agent_start extension hook. */
@@ -412,6 +423,7 @@ export class SystemPromptBuilder {
 		].filter((part): part is string => Boolean(part));
 		const loadedContextFiles = this.deps.getResourceLoader().getAgentsFiles().agentsFiles;
 
+		this._promptDate ??= promptDate(new Date());
 		const options: BuildSystemPromptOptions = {
 			modelCapability,
 			cwd: this.deps.getCwd(),
@@ -425,6 +437,7 @@ export class SystemPromptBuilder {
 			toolSnippets,
 			promptGuidelines,
 			extensions: [...activeExtensions],
+			date: this._promptDate,
 		};
 		// A memory allowance is part of the final prompt, not extra capacity on top of it.
 		// Measure the mandatory prefix first, including caller guidance and paths; retain its

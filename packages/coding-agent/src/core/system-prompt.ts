@@ -38,6 +38,11 @@ export interface BuildSystemPromptOptions {
 	skills?: Skill[];
 	/** Discovered extensions currently active. */
 	extensions?: Extension[];
+	/**
+	 * The Y-M-D date the prompt states; today when omitted. A session pins it (SystemPromptBuilder) and
+	 * advances it only at a cold moment, so a day rollover never breaks a warm cache on its own.
+	 */
+	date?: string;
 }
 
 const MODEL_BLIND_CREDENTIAL_AUTHORITY =
@@ -231,6 +236,13 @@ function appendPromptResources(
  * of once per calendar day, defeating provider prompt caching (cost + latency regression on every
  * request). Pinned by test/system-prompt-stability.test.ts.
  */
+/** The local Y-M-D date a system prompt states. */
+export function promptDate(now: Date): string {
+	const month = String(now.getMonth() + 1).padStart(2, "0");
+	const day = String(now.getDate()).padStart(2, "0");
+	return `${now.getFullYear()}-${month}-${day}`;
+}
+
 export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	const {
 		customPrompt,
@@ -246,11 +258,7 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 
 	// Day-granularity only (see cache-stability invariant on buildSystemPrompt above): this must
 	// stay stable across every call within a calendar day, not just within a single turn.
-	const now = new Date();
-	const year = now.getFullYear();
-	const month = String(now.getMonth() + 1).padStart(2, "0");
-	const day = String(now.getDate()).padStart(2, "0");
-	const date = `${year}-${month}-${day}`;
+	const date = options.date ?? promptDate(new Date());
 
 	const appendSection = appendSystemPrompt ? `\n\n${appendSystemPrompt}` : "";
 

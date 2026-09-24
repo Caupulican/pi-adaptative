@@ -1246,6 +1246,13 @@ export interface AgentContext {
 	 * request.
 	 */
 	trailingInstruction?: string;
+	/**
+	 * Why this request's system prompt or tools deliberately differ from the run's (a safety removal,
+	 * such as the runaway-stop closing request withholding every tool). Never sent to the provider; a
+	 * host's cache guard reads it from `ProviderRequestSnapshotContext.sourceContext` to tell a break the
+	 * loop made on purpose from one nobody sanctioned.
+	 */
+	surfaceChange?: string;
 }
 
 /**

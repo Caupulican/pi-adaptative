@@ -82,6 +82,23 @@ describe("cache custody", () => {
 		});
 	});
 
+	describe("queue", () => {
+		it("keeps one waiting change per kind, the latest, and withdraws one no longer wanted", () => {
+			const custody = new CacheCustody();
+			const applied: string[] = [];
+			custody.request({ kind: "extension_system_prompt", reason: "r", apply: () => applied.push("p1") });
+			custody.request({ kind: "extension_system_prompt", reason: "r", apply: () => applied.push("p2") });
+			expect(custody.deferredCount).toBe(1);
+			custody.flushColdMoment("idle");
+			expect(applied).toEqual(["p2"]);
+
+			custody.request({ kind: "extension_system_prompt", reason: "r", apply: () => applied.push("p3") });
+			custody.withdraw("extension_system_prompt");
+			expect(custody.flushColdMoment("idle")).toEqual([]);
+			expect(applied).toEqual(["p2"]);
+		});
+	});
+
 	describe("reasoning", () => {
 		it("keeps the lane's sent level against a host adjustment while the cache is warm", () => {
 			const custody = new CacheCustody();

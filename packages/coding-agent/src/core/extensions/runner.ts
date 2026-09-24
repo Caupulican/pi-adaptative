@@ -114,6 +114,8 @@ const buildBuiltinKeybindings = (resolvedKeybindings: KeybindingsConfig): BuiltI
 interface BeforeAgentStartCombinedResult {
 	messages?: NonNullable<BeforeAgentStartEventResult["message"]>[];
 	systemPrompt?: string;
+	/** `"now"` when any extension that changed the system prompt asked for it at once. */
+	systemPromptUrgency?: "now";
 }
 
 interface SessionBeforeTreeCombinedResult {
@@ -1161,6 +1163,7 @@ export class ExtensionRunner {
 		};
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
 		let systemPromptModified = false;
+		let systemPromptNow = false;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_agent_start");
@@ -1185,6 +1188,7 @@ export class ExtensionRunner {
 						if (result.systemPrompt !== undefined) {
 							currentSystemPrompt = result.systemPrompt;
 							systemPromptModified = true;
+							if (result.systemPromptUrgency === "now") systemPromptNow = true;
 						}
 					}
 				} catch (err) {
@@ -1197,6 +1201,7 @@ export class ExtensionRunner {
 			return {
 				messages: messages.length > 0 ? messages : undefined,
 				systemPrompt: systemPromptModified ? currentSystemPrompt : undefined,
+				...(systemPromptNow ? { systemPromptUrgency: "now" as const } : {}),
 			};
 		}
 

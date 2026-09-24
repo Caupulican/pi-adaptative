@@ -112,6 +112,9 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 		hints = [searchHint, readHint].map((hint) => ({ ...hint, sampleCount: 5_000, margin: 0.95, entropy: 0.01 }));
 		expect(builder.rebuildSystemPrompt(surface)).toBe(morning);
 		vi.setSystemTime(new Date(2026, 8, 18, 8));
+		// The pinned date moves only at a cold moment.
+		expect(builder.rebuildSystemPrompt(surface)).toBe(morning);
+		builder.advancePromptDate();
 		const nextDay = builder.rebuildSystemPrompt(surface);
 		expect(nextDay).not.toBe(morning);
 		expect(nextDay.replace("Current date: 2026-09-18", "Current date: 2026-09-17")).toBe(morning);
@@ -584,5 +587,22 @@ describe("SystemPromptBuilder — ICM catalog freeze", () => {
 		const prompt = builder.rebuildSystemPrompt(["read"]);
 		expect(prompt).toContain("ICM memory:");
 		expect(prompt).toContain("on demand with native tools");
+	});
+});
+
+describe("SystemPromptBuilder — pinned prompt date", () => {
+	it("keeps the date it first stated across a day rollover until the date is advanced at a cold moment", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date(2026, 8, 23, 23, 59));
+		const builder = new SystemPromptBuilder(makeDeps());
+		expect(builder.rebuildSystemPrompt(["read"])).toContain("Current date: 2026-09-23");
+
+		vi.setSystemTime(new Date(2026, 8, 24, 0, 1));
+		// A rebuild for any other reason (a settings change, a tool change) keeps the pinned date.
+		expect(builder.rebuildSystemPrompt(["read"])).toContain("Current date: 2026-09-23");
+
+		expect(builder.advancePromptDate()).toBe(true);
+		expect(builder.rebuildSystemPrompt(["read"])).toContain("Current date: 2026-09-24");
+		expect(builder.advancePromptDate()).toBe(false);
 	});
 });

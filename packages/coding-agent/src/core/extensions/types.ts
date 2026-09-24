@@ -1157,8 +1157,15 @@ export interface MessageEndEventResult {
 
 export interface BeforeAgentStartEventResult {
 	message?: Pick<CustomMessage, "customType" | "content" | "display" | "details">;
-	/** Replace the system prompt for this turn. If multiple extensions return this, they are chained. */
+	/**
+	 * Replace the system prompt. If multiple extensions return this, they are chained. The system prompt
+	 * is the start of every cached request, so a change waits for a cold moment (the lane's cache is gone,
+	 * or a compaction rewrote the history) unless `systemPromptUrgency` is `"now"`. Per-turn content
+	 * belongs in `message`, which appends instead.
+	 */
 	systemPrompt?: string;
+	/** `"now"` applies a `systemPrompt` change at once, paying the cache write; the default is `"deferred"`. */
+	systemPromptUrgency?: "deferred" | "now";
 }
 
 export interface SessionBeforeSwitchResult {

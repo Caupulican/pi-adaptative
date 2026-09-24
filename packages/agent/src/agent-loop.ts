@@ -850,6 +850,7 @@ async function streamToollessClosingTurn(
 			: RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT,
 		trailingInstruction: verificationObligations?.requestInstruction(),
 		tools: [],
+		surfaceChange: "the runaway-stop closing request withholds every tool",
 	};
 	const response = await streamAssistantResponse(
 		closingContext,

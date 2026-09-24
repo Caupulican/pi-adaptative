@@ -542,11 +542,15 @@ pi.on("before_agent_start", async (event, ctx) => {
       content: "Additional context for the LLM",
       display: true,
     },
-    // Replace the system prompt for this turn (chained across extensions)
-    systemPrompt: event.systemPrompt + "\n\nExtra instructions for this turn...",
+    // Replace the system prompt (chained across extensions). Waits for a cold moment unless urgent.
+    systemPrompt: event.systemPrompt + "\n\nStanding instructions...",
+    // "now" applies the change at once; the default "deferred" waits for a cold moment
+    systemPromptUrgency: "deferred",
   };
 });
 ```
+
+The system prompt is the start of every cached provider request, so changing it rewrites the whole cached prefix. A `systemPrompt` change therefore waits for a cold moment: the lane serving the turn and the talker's lane have no warm cache (no answer yet, or the cache is expected gone after the idle gap), or a compaction rewrote the history. Return `systemPromptUrgency: "now"` when the change must apply at once, such as a mode the user just toggled; it pays the cache write. Content that changes turn to turn belongs in `message`, which appends to the conversation and leaves the cached prefix intact.
 
 The `systemPromptOptions` field gives extensions access to the same structured data Pi uses to build the system prompt. This lets you inspect what Pi has discovered — custom prompts, guidelines, tool snippets, context file contents, skills — without re-discovering resources or re-parsing flags. Use it when your extension needs to make deep, informed changes to the system prompt while respecting user-provided configuration.
 

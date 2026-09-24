@@ -56,7 +56,7 @@ export class CacheCustody {
 
 	/**
 	 * The gate for a change that would break the surface. Mandatory changes and admitted prices apply
-	 * now and are sanctioned; the rest wait for `flushColdMoment`.
+	 * now and are sanctioned; the rest wait for `flushColdMoment`, the latest of each kind.
 	 */
 	request(
 		input: DeferredBreak & { readonly mandatory?: boolean; readonly admitted?: boolean; readonly lane?: string },
@@ -66,6 +66,9 @@ export class CacheCustody {
 			input.apply();
 			return "applied";
 		}
+		// One waiting change per kind: a newer request of the same kind supersedes the one waiting.
+		const waiting = this.queue.findIndex((pending) => pending.kind === input.kind);
+		if (waiting >= 0) this.queue.splice(waiting, 1);
 		this.queue.push({ kind: input.kind, reason: input.reason, apply: input.apply });
 		return "deferred";
 	}
@@ -78,6 +81,12 @@ export class CacheCustody {
 			pending.apply();
 		}
 		return flushed.map((pending) => pending.kind);
+	}
+
+	/** The surface already is what a waiting change of `kind` wanted to reach, or it is no longer wanted. */
+	withdraw(kind: string): void {
+		const waiting = this.queue.findIndex((pending) => pending.kind === kind);
+		if (waiting >= 0) this.queue.splice(waiting, 1);
 	}
 
 	get deferredCount(): number {

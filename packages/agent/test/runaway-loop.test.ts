@@ -967,6 +967,7 @@ describe("runaway-loop backstop", () => {
 		const stalls: Array<{ reason?: string }> = [];
 		const toolCounts: number[] = [];
 		const systemPrompts: string[] = [];
+		const surfaceChanges: Array<string | undefined> = [];
 		const repeatedThinking = "The operation is still blocked. I will report the unresolved blocker.";
 		let turns = 0;
 		const events = await drain(
@@ -978,6 +979,9 @@ describe("runaway-loop backstop", () => {
 					convertToLlm: identityConverter,
 					maxStallTurns: 3,
 					onRunawayStop: (info) => stalls.push(info),
+					onProviderRequestSnapshot: (context) => {
+						surfaceChanges.push(context.sourceContext.surfaceChange);
+					},
 				},
 				undefined,
 				(_model, providerContext: { systemPrompt?: string; tools?: readonly unknown[] }) => {
@@ -1028,6 +1032,13 @@ describe("runaway-loop backstop", () => {
 		expect(toolCounts).toEqual([1, 1, 1, 0]);
 		expect(systemPrompts[3]).toContain("RUNAWAY STOP CLOSING TURN");
 		expect(systemPrompts[3]).toContain("Do not emit a tool call or tool-call markup");
+		// Only the closing request declares its deliberate surface change, for a host's cache guard.
+		expect(surfaceChanges).toEqual([
+			undefined,
+			undefined,
+			undefined,
+			expect.stringContaining("withholds every tool"),
+		]);
 		// The tool ran for the three admitted calls and never for the closing turn.
 		expect(executions).toBe(3);
 		expect(

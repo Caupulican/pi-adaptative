@@ -14,18 +14,23 @@ import type { ExtensionAPI } from "@caupulican/pi-adaptative";
 
 export default function pirateExtension(pi: ExtensionAPI) {
 	let pirateMode = false;
+	// Set by /pirate: the next turn applies the change at once, in either direction.
+	let toggled = false;
 
 	// Register /pirate command to toggle pirate mode
 	pi.registerCommand("pirate", {
 		description: "Toggle pirate mode (agent speaks like a pirate)",
 		handler: async (_args, ctx) => {
 			pirateMode = !pirateMode;
+			toggled = true;
 			ctx.ui.notify(pirateMode ? "Arrr! Pirate mode enabled!" : "Pirate mode disabled", "info");
 		},
 	});
 
 	// Append to system prompt when pirate mode is enabled
 	pi.on("before_agent_start", async (event) => {
+		const now = toggled;
+		toggled = false;
 		if (pirateMode) {
 			return {
 				systemPrompt:
@@ -40,8 +45,11 @@ IMPORTANT: You are now in PIRATE MODE. You must:
 - End sentences with nautical expressions
 - Still complete the actual task correctly, just in pirate speak
 `,
+				// The user toggled pirate mode: apply it now rather than at the next cold moment.
+				...(now ? { systemPromptUrgency: "now" as const } : {}),
 			};
 		}
-		return undefined;
+		// Turning it off restores the unmodified prompt at once too.
+		return now ? { systemPrompt: event.systemPrompt, systemPromptUrgency: "now" as const } : undefined;
 	});
 }

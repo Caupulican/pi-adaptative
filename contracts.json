@@ -36,6 +36,7 @@
     "packages/coding-agent/test/session-objective-runtime.test.ts",
     "packages/coding-agent/test/system-one-foreground-control.test.ts",
     "packages/coding-agent/test/system-one-worker-control.test.ts",
-    "packages/coding-agent/test/ledger-route-checkpoints.test.ts"
+    "packages/coding-agent/test/ledger-route-checkpoints.test.ts",
+    "packages/coding-agent/test/cache-custody-contract.test.ts"
   ]
 }

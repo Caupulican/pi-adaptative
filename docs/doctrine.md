@@ -61,6 +61,23 @@ recorded as `fallback` with its cause, never `success`. Pinned by `packages/codi
 declined batches staying as sent), `packages/coding-agent/test/compact-goal-context.test.ts`, and
 `packages/agent/test/session/lifecycle-ledger.test.ts` (fallback outcome).
 
+**A cache break passes the custody gate, or it is a defect.** Every foreground and worker request is
+classified against its lane's previous one: an append, the lane's first request, a break the gate
+sanctioned for that request, or an unsanctioned break at a kind and index. Sanctioned breaks are the
+ones the harness makes on purpose: a priced context-GC batch, a compaction, a side trip's own small
+brief, a safety removal the loop declares (the runaway-stop closing request withholding every tool),
+and a surface change applied at a cold moment. Both kinds are recorded as `cache_break` decisions in
+the decision ledger; an unsanctioned one names the defect. A surface change that is not mandatory
+waits for a cold moment (the turn's lane and the talker's lane have no warm cache, or a compaction
+rewrote the history): an extension's system prompt (unless it returns `systemPromptUrgency: "now"`)
+and the prompt's date, which is pinned per session and advances only then. Reasoning is surface too:
+a lane keeps the level it last sent against a host adjustment (host-turn and bookkeeping lowering)
+while its cache is warm; the owner's own level, a return to it, and the owner's cost ceiling always
+pass. Why: measured on the owner's sessions a reasoning-only change made a cold cache five times as
+likely (47% against a 9% baseline). Pinned by `packages/coding-agent/test/cache-custody-contract.test.ts`
+(a tool loop, a 12-call parallel batch, a bookkeeping turn and an extension prompt change leave every
+request an append, one reasoning level, and no unsanctioned break in the ledger).
+
 **Per-request host work is bounded.** Every request-time scan resumes from the history prefix it
 already covered; the profiler's last decile of pre-request time may not exceed twice its first.
 Pinned by the long-session contract gate and `packages/agent/test/tool-failure-memory.test.ts`.
@@ -916,3 +933,4 @@ measurement gains no new surface.
 | 2026-09-22 | Noul answers carry `(probabilityTrue, direction, band)` and no derived boolean; `settledBoolean` refuses to answer an ambiguous band, a checkpoint whose only problem is doubt routes to `gather_more`, and the 0.5 cutoff is removed from every gate (tool gate, worker supervision, project rules, acquisition, dedup, clarification, capability resolution). The Decision graph names open doubts and holds the goal open on them. The empty-turn placeholder appears only when the turn produced nothing readable. Worktree-discarding git (`reset --hard`, `clean -f`, `checkout --`, `restore`, `stash`) is a conditional `destructive.fs` operation, resolved per call against the live tree and the session's mutation ledger, and stays ordinary work when the session owns everything dirty. Typed delivery certifies per path instead of vetoing a tree that was already dirty at admission. The user-request classification asks only the questions that can still change something, reports an unavailable System One as `unavailable` rather than as silence, and shares its rule-text budget across every rule instead of truncating the tail. |
 | 2026-09-23 | The legend delta is read from the legend records in the history a request plans from, not from a process-local memory of commits: a restarted process no longer re-sends the whole legend, and a history whose record was compacted away gets its lines again. |
 | 2026-09-23 | Context GC rewrites the already-sent prefix only as a priced cache break: a crossing's below-mark batch (deep supersessions included) packs when its saving over the learned remaining requests pays for the re-prefill, and stays as sent otherwise. `contextGc.deepPackMinTokens` is removed; the price replaces its fixed floor. |
+| 2026-09-23 | A cache break passes the custody gate or is recorded as a defect: every foreground and worker request is classified (append, first, sanctioned, unsanctioned) into the decision ledger; an extension system prompt and the prompt's date wait for a cold moment; a lane keeps its sent reasoning level against host adjustments while warm. |

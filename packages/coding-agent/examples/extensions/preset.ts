@@ -381,6 +381,8 @@ export default function presetExtension(pi: ExtensionAPI) {
 		if (activePreset?.instructions) {
 			return {
 				systemPrompt: `${event.systemPrompt}\n\n${activePreset.instructions}`,
+				// The user picked the preset: apply it now rather than at the next cold moment.
+				systemPromptUrgency: "now",
 			};
 		}
 	});

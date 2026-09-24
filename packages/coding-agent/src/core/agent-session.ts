@@ -1562,6 +1562,14 @@ export class AgentSession {
 				this._eventListeners.length > 0 ? (message: string) => this._emit({ type: "warning", message }) : undefined,
 			({ requestId, model, context, sourceContext }) => {
 				this._lastSentRequest = { model, context, sourceMessages: sourceContext.messages };
+				// A surface the loop changed on purpose (a safety removal) is mandatory: sanctioned for this request.
+				if (sourceContext.surfaceChange) {
+					this._custody.sanction(
+						"safety_removal",
+						sourceContext.surfaceChange,
+						cacheLaneKey(model.api, model.provider, model.id),
+					);
+				}
 				this._guardCacheSurface();
 				this._toolSelection.observeProviderRequest(
 					requestId,
@@ -3172,6 +3180,31 @@ export class AgentSession {
 		});
 	}
 
+	/**
+	 * A cold moment: every surface change that waited applies, and the prompt's pinned date advances to
+	 * today. Each is sanctioned for the next request.
+	 */
+	private _atColdMoment(reason: string): void {
+		this._custody.flushColdMoment(reason);
+		if (this._systemPromptBuilder.advancePromptDate()) {
+			this._custody.sanction("date", `the prompt's date advanced (${reason})`);
+			this._refreshBaseSystemPrompt();
+		}
+	}
+
+	/**
+	 * No warm cache the system prompt could break: the turn's lane and the talker's lane (the system prompt
+	 * is shared) each have no answer yet in this session or their cache expected gone.
+	 */
+	private _systemPromptCold(turnModel: Model<Api> | undefined): boolean {
+		const laneCold = (model: Model<Api> | undefined) =>
+			!model ||
+			this._cacheKnowledge.lastResponseAt(this.sessionId, cacheLaneKey(model.api, model.provider, model.id)) ===
+				undefined ||
+			this._laneCacheGone(model);
+		return laneCold(turnModel ?? this.model) && laneCold(this.model);
+	}
+
 	/** Whether the lane's cache is expected gone at the real idle gap: a surface change there costs nothing. */
 	private _laneCacheGone(model: Model<Api>): boolean {
 		const lane = cacheLaneKey(model.api, model.provider, model.id);
@@ -3195,7 +3228,7 @@ export class AgentSession {
 		// A compaction rewrites the history every lane sends: the next request's break is sanctioned, and it
 		// is a cold moment for every surface change that waited.
 		this._custody.sanction("compaction", "a compaction replaced the history");
-		this._custody.flushColdMoment("compaction");
+		this._atColdMoment("compaction");
 		// The compacted history replaces the one the sent-prefix marks were counting: none of it has been
 		// sent in this form. Without the reset the monotone mark kept the pre-compaction count, so the whole
 		// new history read as already sent (no context-GC packing, no sanitizer dedup) until it regrew past
@@ -4658,6 +4691,13 @@ export class AgentSession {
 					if (ready) await this._adoptTalker(ready.model, ready.decision);
 				} else if (route.kind === "side_trip") {
 					resolvedRouteInfo = route;
+					// A side trip sends its own small brief, never the lane's earlier one: its first request is a
+					// deliberate new prefix on that lane.
+					this._custody.sanction(
+						"side_trip_brief",
+						"a side trip sends its own small brief",
+						cacheLaneKey(route.model.api, route.model.provider, route.model.id),
+					);
 				} else if (
 					route.kind === "toolkit" &&
 					this.agent.state.tools.some((tool) => tool.name === "run_toolkit_script")
@@ -4791,12 +4831,22 @@ export class AgentSession {
 					});
 				}
 			}
-			// Apply extension-modified system prompt, or reset to base
-			if (result?.systemPrompt) {
-				this.agent.state.systemPrompt = result.systemPrompt;
-			} else {
-				// Ensure we're using the base prompt (in case previous turn had modifications)
-				this.agent.state.systemPrompt = this._baseSystemPrompt;
+			// The extension-modified system prompt, or the base (in case an earlier turn had modifications),
+			// through the cache custody gate: a change waits for a cold moment unless the extension asked for
+			// it now. A cold turn start is itself that moment.
+			const systemPromptCold = this._systemPromptCold(routedTurnModel);
+			if (systemPromptCold) this._atColdMoment("no warm cache at turn start");
+			const nextSystemPrompt = result?.systemPrompt || this._baseSystemPrompt;
+			if (this.agent.state.systemPrompt === nextSystemPrompt) this._custody.withdraw("extension_system_prompt");
+			else {
+				this._custody.request({
+					kind: "extension_system_prompt",
+					reason: result?.systemPrompt ? "an extension changed the system prompt" : "the extension prompt ended",
+					mandatory: result?.systemPromptUrgency === "now" || systemPromptCold,
+					apply: () => {
+						this.agent.state.systemPrompt = nextSystemPrompt;
+					},
+				});
 			}
 		} catch (error) {
 			// The turn never reached the foreground run, so the authoritative message_start that would
