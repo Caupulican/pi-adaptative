@@ -4537,7 +4537,10 @@ export class AgentSession {
 	 * record on its next turn.
 	 */
 	private async _retrieveForObjective(route: ObjectiveRoute, signal?: AbortSignal): Promise<"root" | "worker"> {
-		if (this._chooseObjectiveExecutor(route) === "root") {
+		const executor = this._chooseObjectiveExecutor(route);
+		// Recorded before the route runs, so an interrupted route still teaches its request count.
+		this.getDecisionLedger()?.noteRouteExecutor(this.sessionId, route.cycle_id, executor);
+		if (executor === "root") {
 			await this._goals.objectiveRootExecutor().execute(route, signal);
 			return "root";
 		}

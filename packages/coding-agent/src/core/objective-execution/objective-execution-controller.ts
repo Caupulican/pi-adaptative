@@ -416,6 +416,16 @@ export class ObjectiveExecutionController {
 	private _lastBinding?: ExpertBinding;
 	private _lastRoute?: ObjectiveRoute;
 	private _lastExecutor?: string;
+
+	/**
+	 * Record who executes a route the moment it is decided, before the route runs: how many requests a
+	 * route of this kind takes on the root is learned from the decision to the next one, whatever the
+	 * route's outcome, so a route that fails or is interrupted still counts.
+	 */
+	private async _noteExecutor(route: ObjectiveRoute, executor: string): Promise<void> {
+		this._lastExecutor = executor;
+		await this.deps.checkpoints?.recordRouteOutcome?.(route, executor);
+	}
 	private ownerBlockerSink?: (blocker: string | undefined) => void;
 
 	/** The route the last run cycle evaluated; the session's loop reads it to name a wait or a stop. */
@@ -1105,6 +1115,7 @@ export class ObjectiveExecutionController {
 				case "retrieve":
 					if (!this.deps.retrieval?.execute && this.deps.rootExecutor) {
 						// No dedicated retrieval executor: the root reads, with the route's brief.
+						await this._noteExecutor(route, "root");
 						await this.deps.rootExecutor.execute(route, signal);
 						break;
 					}
@@ -1802,11 +1813,11 @@ export class ObjectiveExecutionController {
 			!route.reason_codes.includes("independent_verification_required") &&
 			(!this.deps.workerDispatcher?.dispatch || (this.deps.chooseExecutor?.(route) ?? "root") === "root")
 		) {
-			this._lastExecutor = "root";
+			await this._noteExecutor(route, "root");
 			await this.deps.rootExecutor.execute(route, signal);
 			return undefined;
 		}
-		this._lastExecutor = escalated ? "worker:escalated" : "worker";
+		await this._noteExecutor(route, escalated ? "worker:escalated" : "worker");
 		const dispatcher = escalated
 			? this.deps.workerDispatcher?.dispatchEscalated
 			: this.deps.workerDispatcher?.dispatch;

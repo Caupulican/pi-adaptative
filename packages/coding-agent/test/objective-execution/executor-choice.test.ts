@@ -5,8 +5,9 @@ import { ObjectiveExecutionController } from "../../src/core/objective-execution
  * The root (the talker, on its warm cache) executes a route it may take unless the host's executor price
  * says a worker given the route's brief costs less; then the worker dispatcher takes it.
  */
-function controllerWith(options: { choose?: "root" | "worker" }) {
+function controllerWith(options: { choose?: "root" | "worker"; rootThrows?: boolean }) {
 	const executed: string[] = [];
+	const noted: string[] = [];
 	let stop = false;
 	const now = new Date().toISOString();
 	const controller = new ObjectiveExecutionController({
@@ -45,6 +46,13 @@ function controllerWith(options: { choose?: "root" | "worker" }) {
 			execute: async () => {
 				executed.push("root");
 				stop = true;
+				if (options.rootThrows) throw new Error("interrupted");
+			},
+		},
+		checkpoints: {
+			recordRoute: async () => {},
+			recordRouteOutcome: async (_route, executor) => {
+				noted.push(executor);
 			},
 		},
 		...(options.choose ? { chooseExecutor: () => options.choose ?? "root" } : {}),
@@ -58,7 +66,7 @@ function controllerWith(options: { choose?: "root" | "worker" }) {
 		},
 		getRouteProposedAction: () => ({ kind: "implement" }),
 	});
-	return { controller, executed };
+	return { controller, executed, noted };
 }
 
 describe("objective executor choice", () => {
@@ -74,5 +82,11 @@ describe("objective executor choice", () => {
 		const { controller, executed } = controllerWith({ choose: "worker" });
 		await controller.run("obj-test");
 		expect(executed).toEqual(["worker"]);
+	});
+
+	it("records who executes a route before it runs, so an interrupted route still counts", async () => {
+		const { controller, noted } = controllerWith({ rootThrows: true });
+		await controller.run("obj-test").catch(() => undefined);
+		expect(noted[0]).toBe("root");
 	});
 });
