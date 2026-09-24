@@ -79,6 +79,20 @@ likely (47% against a 9% baseline). Pinned by `packages/coding-agent/test/cache-
 request an append, one reasoning level, and no unsanctioned break in the ledger; a worker's tool loop
 leaves no unsanctioned break and is observed on its own conversation).
 
+**A conversation keeps one talker; every other model reads a brief.** The first substantive owner
+message is routed once and its model becomes the talker; later owner messages and internal turns
+run on it with no swap, and only `/model` or a hard failure (quota, account, billing) moves it. A
+model switch is a full cache write, so work reaches another model only when the arithmetic says it
+is cheaper, and then on a brief orders of magnitude smaller than the talker's context: a small
+message's side trip reads a note that the earlier conversation is not shown, the talker's last reply
+and the message, and hands the message back to the talker (`hand_to_talker`, or reaching for a
+mutating tool) when the brief cannot answer it; a worker or a minion gets the route's brief. Why:
+measured on the owner's sessions, 8 replying-model switches in 217 owner turns each re-sent the
+whole context. Pinned by the conversation stage routing tests in
+`packages/coding-agent/test/agent-session-model-router.test.ts` (one route judgment at the opening,
+the talker kept, a side trip reading only its brief, a side trip handing back or reaching for a
+mutating tool rerunning on the talker).
+
 **Every agent runs the conversation mechanics; only the head orchestrates.** A worker plans each
 request with root's own request-context controller (context GC on its own lane, path aliases, the
 authority context), pays its early compaction and GC rewrites by root's prices on its own cache facts,
@@ -948,3 +962,4 @@ measurement gains no new surface.
 | 2026-09-23 | Context GC rewrites the already-sent prefix only as a priced cache break: a crossing's below-mark batch (deep supersessions included) packs when its saving over the learned remaining requests pays for the re-prefill, and stays as sent otherwise. `contextGc.deepPackMinTokens` is removed; the price replaces its fixed floor. |
 | 2026-09-23 | A cache break passes the custody gate or is recorded as a defect: every foreground and worker request is classified (append, first, sanctioned, unsanctioned) into the decision ledger; an extension system prompt and the prompt's date wait for a cold moment; a lane keeps its sent reasoning level against host adjustments while warm. |
 | 2026-09-24 | Every agent runs the conversation mechanics within its boundaries; only the head orchestrates. Workers plan requests with root's request-context controller, price early compaction and GC on their own lane's facts, summarize on their own warm lane, and share root's tool mechanics and learning stores; a quota-exhausted routed worker moves to its next account. |
+| 2026-09-24 | A conversation keeps one talker and every other model reads a brief; a side trip's brief says the earlier conversation is not shown and the side trip can hand its message back to the talker. |
