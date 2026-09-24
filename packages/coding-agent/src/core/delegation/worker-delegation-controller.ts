@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { type AgentMessage, decodeExecutionContext } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { SessionRequestSnapshotInput } from "@caupulican/pi-agent-core/session";
 import type { Api, Message, Model, Usage } from "@caupulican/pi-ai";
 import { getProcessWorkRun } from "../agent-paths.ts";
 import type {
@@ -229,6 +230,8 @@ export interface WorkerDelegationControllerDeps {
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	/** Live worker supervision hook; one observation per executed worker tool call. */
 	observeWorkerProgress?(observation: WorkerProgressObservation): Promise<unknown> | unknown;
+	/** The cache guard for worker lanes: each accepted worker provider request, as its recorded snapshot. */
+	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput): void;
 	emit(event: AgentSessionEvent): void;
 	notifyWorkerTerminalHandoff(records: readonly WorkerTerminalHandoffRecord[]): Promise<void>;
 	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
@@ -3325,6 +3328,7 @@ export class WorkerDelegationController {
 				: undefined,
 			warn: (message) => this.safeWarn(message),
 			...(this.deps.observeWorkerProgress ? { observeWorkerProgress: this.deps.observeWorkerProgress } : {}),
+			...(this.deps.observeWorkerRequest ? { observeWorkerRequest: this.deps.observeWorkerRequest } : {}),
 			...(this.deps.recordObjectiveMutation ? { recordObjectiveMutation: this.deps.recordObjectiveMutation } : {}),
 			...(this.deps.reviewNewCode ? { reviewNewCode: this.deps.reviewNewCode } : {}),
 		});

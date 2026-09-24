@@ -23,6 +23,7 @@ import {
 	MAX_SESSION_ENTRY_VISIT_COUNT,
 	type SessionContext,
 	SessionManager,
+	type SessionRequestSnapshotInput,
 } from "@caupulican/pi-agent-core/session";
 import type { ProviderRequestSnapshotContext } from "@caupulican/pi-agent-core/types";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "@caupulican/pi-agent-core/usage";
@@ -1499,10 +1500,17 @@ export class WorkerConversation {
 	 * provider projection skip them, so a snapshot may sit anywhere between two messages. Without
 	 * it a worker's request start time and reasoning level were unrecoverable from its conversation.
 	 */
-	appendRequestSnapshot(context: ProviderRequestSnapshotContext): string {
-		return this.appendSessionEntry((sessionManager) =>
-			sessionManager.appendRequestSnapshot(buildRequestSnapshotInput(context, sessionManager)),
-		);
+	appendRequestSnapshot(context: ProviderRequestSnapshotContext): {
+		entryId: string;
+		snapshot: SessionRequestSnapshotInput;
+	} {
+		let snapshot: SessionRequestSnapshotInput | undefined;
+		const entryId = this.appendSessionEntry((sessionManager) => {
+			snapshot = buildRequestSnapshotInput(context, sessionManager);
+			return sessionManager.appendRequestSnapshot(snapshot);
+		});
+		if (!snapshot) throw new Error("Worker request snapshot was appended without being built.");
+		return { entryId, snapshot };
 	}
 
 	private appendSessionEntry(operation: (sessionManager: SessionManager) => string): string {

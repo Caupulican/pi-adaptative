@@ -7,6 +7,7 @@ import {
 	type RetryPolicy,
 	sleepAbortable,
 } from "@caupulican/pi-agent-core/reliability";
+import type { SessionRequestSnapshotInput } from "@caupulican/pi-agent-core/session";
 import { sanitizeToolFailureContext } from "@caupulican/pi-agent-core/tool-failure-memory";
 import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
 import { addUsage, createEmptyUsage } from "@caupulican/pi-agent-core/usage";
@@ -171,6 +172,8 @@ export interface WorkerAttemptExecutorOptions {
 	 * is swallowed by its own owner rather than failing the worker.
 	 */
 	observeWorkerProgress?(observation: WorkerProgressObservation): Promise<unknown> | unknown;
+	/** The cache guard: each accepted provider request of this worker, as its recorded snapshot. */
+	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput): void;
 	/** Parent semantic duplicate review of code this worker's edit or write added; see the controller dep. */
 	reviewNewCode?(input: { toolName: string; args: unknown; cwd: string }): Promise<string | undefined>;
 	/** Parent objective ledger. Shell edits stay unattributed. Successful writes record a content digest. */
@@ -685,7 +688,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										// request start and reasoning level survive in its own conversation.
 										onProviderRequestSnapshot: (context) => {
 											signal.throwIfAborted();
-											options.conversation.appendRequestSnapshot(context);
+											const { snapshot } = options.conversation.appendRequestSnapshot(context);
+											options.observeWorkerRequest?.(options.agentId, snapshot);
 										},
 										beforeToolCall: async (context, toolSignal) => {
 											try {

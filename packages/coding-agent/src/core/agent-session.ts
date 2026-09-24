@@ -9,7 +9,11 @@ import {
 } from "@caupulican/pi-agent-core/compaction/compaction";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
 import { type CustomMessage, createCustomMessage } from "@caupulican/pi-agent-core/messages";
-import type { BranchSummaryEntry, SessionManager } from "@caupulican/pi-agent-core/session";
+import type {
+	BranchSummaryEntry,
+	SessionManager,
+	SessionRequestSnapshotInput,
+} from "@caupulican/pi-agent-core/session";
 import { NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR } from "@caupulican/pi-agent-core/tool-protocol-residue";
 import type {
 	AgentContext,
@@ -1089,6 +1093,8 @@ export class AgentSession {
 			// Live worker supervision: one observation per executed worker tool call, applied through
 			// the root's existing worker-agent control surface.
 			observeWorkerProgress: (observation) => this._workerSupervision.observe(observation),
+			// Worker lanes pass the same cache guard; each worker conversation is its own lane.
+			observeWorkerRequest: (agentId, snapshot) => this._guardCacheSurface(snapshot, `worker:${agentId}`),
 			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
 			getEdgeGrants: () => this.getEdgeGrants(),
 			checkOperation: (tool, args, cwd) => this._operationGate.check(tool, args, cwd, "worker"),
@@ -3135,11 +3141,15 @@ export class AgentSession {
 	 * The guard, once per foreground request: classify it against the lane's surface. A break the gate
 	 * sanctioned is recorded as priced; one it did not is recorded as unsanctioned, with its kind and index.
 	 */
-	private _guardCacheSurface(): void {
-		const snapshot = latestRequestSnapshot(this.sessionManager);
+	private _guardCacheSurface(
+		snapshot: SessionRequestSnapshotInput | undefined = latestRequestSnapshot(this.sessionManager),
+		conversation?: string,
+	): void {
 		if (!snapshot) return;
+		const lane = cacheLaneKey(snapshot.api, snapshot.provider, snapshot.modelId);
 		const verdict = this._custody.classify({
-			lane: cacheLaneKey(snapshot.api, snapshot.provider, snapshot.modelId),
+			// A worker conversation shares a model's lane key but not its prefix: guard it on its own.
+			lane: conversation ? `${conversation}\0${lane}` : lane,
 			...(snapshot.prefixIntact !== undefined ? { prefixIntact: snapshot.prefixIntact } : {}),
 			...(snapshot.firstDivergentKind !== undefined ? { firstDivergentKind: snapshot.firstDivergentKind } : {}),
 			...(snapshot.firstDivergentIndex !== undefined ? { firstDivergentIndex: snapshot.firstDivergentIndex } : {}),
@@ -3154,7 +3164,11 @@ export class AgentSession {
 				verdict.classification === "sanctioned"
 					? `sanctioned:${verdict.kind} (${verdict.reason})`
 					: `unsanctioned:${verdict.kind}@${verdict.index ?? "?"}`,
-			detail: { requestId: snapshot.requestId, model: `${snapshot.provider}/${snapshot.modelId}` },
+			detail: {
+				requestId: snapshot.requestId,
+				model: `${snapshot.provider}/${snapshot.modelId}`,
+				...(conversation ? { conversation } : {}),
+			},
 		});
 	}
 

@@ -115,6 +115,7 @@ function createExecutorHarness(
 	};
 	const checkpoints: string[] = [];
 	const checkpointUsages: AttemptUsageSnapshot[] = [];
+	const observedRequests: Array<{ agentId: string; requestId: string; prefixIntact: unknown }> = [];
 	const productionShapedCompletion = async (options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult> => {
 		let preflightInvoked = false;
 		const requestPreflight = options.requestPreflight;
@@ -220,8 +221,10 @@ function createExecutorHarness(
 			mailboxMessagesForConversation: () => [],
 		},
 		warn: (message) => events.push(`warn:${message}`),
+		observeWorkerRequest: (agentId, snapshot) =>
+			observedRequests.push({ agentId, requestId: snapshot.requestId, prefixIntact: snapshot.prefixIntact }),
 	});
-	return { checkpoints, checkpointUsages, conversation, events, executor, gateway };
+	return { checkpoints, checkpointUsages, conversation, events, executor, gateway, observedRequests };
 }
 
 const VERIFIED_COMPACTION_SUMMARY = `## Active Task
@@ -444,6 +447,10 @@ describe("worker attempt executor", () => {
 
 		expect(result.rawOutcome.accepted).toBe(true);
 		expect(snapshots).toEqual(["worker-req-1"]);
+		// The cache guard sees the same snapshot the conversation recorded.
+		expect(harness.observedRequests).toEqual([
+			{ agentId: "worker-agent", requestId: "worker-req-1", prefixIntact: "unknown" },
+		]);
 		expect(harness.conversation.getProviderContext().messages.filter((m) => m.role === "assistant")).toHaveLength(1);
 	});
 
