@@ -858,7 +858,10 @@ export class ActivityLaneComponent implements Component {
 			this.foregroundEpoch = activity.epoch;
 			this.foregroundOutcome = undefined;
 			this.start({ id: RUNTIME_TURN_ACTIVITY_ID, kind: "runtime", label });
-		} else if (!activity.busy && this.foregroundEpoch !== undefined) {
+		} else if ((!activity.busy || activity.epoch === undefined) && this.foregroundEpoch !== undefined) {
+			// The submission ended when its lease did. Background work (a backgrounded tool, an armed
+			// continuation, System One checking the answer) keeps the session busy, but it has its own
+			// rows; holding the turn row open for it reported a finished turn as still preparing.
 			const outcome = this.foregroundOutcome ?? { status: "neutral" as const, label: "Stopped" };
 			this.finish(RUNTIME_TURN_ACTIVITY_ID, outcome.status, {
 				id: RUNTIME_TURN_ACTIVITY_ID,

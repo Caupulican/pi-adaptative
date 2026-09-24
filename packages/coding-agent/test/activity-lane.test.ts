@@ -384,6 +384,28 @@ describe("activity lane slots", () => {
 		lane.dispose();
 	});
 
+	it("ends the turn row when the submission's lease ends, while background work keeps the session busy", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		lane.start({ id: "background-tool:a", kind: "tool", label: "sleep 60" });
+		lane.syncForegroundActivity({ sessionId: "s", epoch: 1, busy: true });
+		now += 12_000;
+		expect(stripAnsi(lane.render(100).join(""))).toContain("Preparing");
+		// The command finished and released its lease; the backgrounded tool still keeps the session busy.
+		lane.syncForegroundActivity({ sessionId: "s", busy: true });
+		expect(lane.getItems().some((item) => item.id === "runtime:turn" && item.status === "active")).toBe(false);
+		const rendered = stripAnsi(lane.render(100).join(""));
+		// The turn shows how it ended, never a submission still preparing.
+		expect(rendered).not.toContain("Preparing");
+		expect(rendered).toContain("Stopped (12s)");
+		lane.dispose();
+	});
+
 	it("visibility changes keep the parent clock and independent background work", () => {
 		let now = 1_000_000;
 		const lane = new ActivityLaneComponent(
