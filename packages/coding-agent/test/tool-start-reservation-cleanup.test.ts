@@ -1,5 +1,6 @@
 import { type AgentTool, createEmptyUsage, runAgentLoop } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { AgentRequestId } from "@caupulican/pi-agent-core/types";
 import { createAssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
 import type { AssistantMessage, Message } from "@caupulican/pi-ai/types";
 import { Type } from "typebox";
@@ -203,5 +204,75 @@ describe("tool start reservation cleanup", () => {
 		releaseCurrent();
 		releaseCurrent();
 		expect(scope.idle).toBe(true);
+	});
+
+	it.each(["bash", "python", "read"])("announces %s before a later mutation reaches its queue", async (toolName) => {
+		const scopeKey = `reservation-order-${toolName}`;
+		const scope = getMutationLockScope(scopeKey);
+		const sessionManager = SessionManager.inMemory();
+		const agent: ForegroundLifecycleAgentDependency = {
+			state: { messages: [] },
+			resetSanitizerPrefixHorizon() {},
+		};
+		const lifecycle = new ForegroundLifecycleController({
+			agent,
+			sessionManager,
+			modelRouter: {
+				commitSessionBuffer: () => new Map(),
+				commitSessionBufferPrefix: () => new Map(),
+			} as ModelRouterController,
+			emitWarning() {},
+			getMutationScope: () => scopeKey,
+			getAnnouncer: () => "fixture",
+		});
+		lifecycle.install();
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: "first", name: toolName, arguments: {} },
+				{ type: "toolCall", id: "second", name: "write", arguments: {} },
+			],
+			api: "openai-responses",
+			provider: "openai",
+			model: "fixture",
+			stopReason: "toolUse",
+			timestamp: 1,
+			usage: createEmptyUsage(),
+		};
+		lifecycle.notePersistedMessage(assistantMessage, sessionManager.appendMessage(assistantMessage));
+		const calls = assistantMessage.content.filter((block) => block.type === "toolCall");
+		const reservation = await agent.onToolCallStart?.(
+			calls.map((call, index) => ({
+				requestId: "request" as AgentRequestId,
+				callId: call.id,
+				toolName: call.name,
+				index,
+				mutation: index === 1,
+				assistantMessage,
+				toolCall: call,
+				args: {},
+				context: { systemPrompt: "", messages: [], tools: [] },
+			})),
+		);
+		try {
+			const wait = scope.waitForEarlierAnnouncedCalls("second", "shell", undefined);
+			if (toolName === "read") {
+				await wait;
+			} else {
+				let cleared = false;
+				void wait.then(() => {
+					cleared = true;
+				});
+				await Promise.resolve();
+				expect(cleared).toBe(false);
+				reservation?.release("first");
+				await wait;
+			}
+		} finally {
+			reservation?.release("first");
+			reservation?.release("second");
+			lifecycle.resetForSessionReload();
+			disposeMutationLockScope(scopeKey);
+		}
 	});
 });

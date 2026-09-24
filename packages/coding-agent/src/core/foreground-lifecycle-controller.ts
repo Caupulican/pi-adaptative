@@ -278,9 +278,14 @@ export class ForegroundLifecycleController {
 		};
 		try {
 			for (const call of calls) {
+				const kind = call.mutation
+					? "mutation"
+					: call.toolName === "bash" || call.toolName === "python"
+						? "shell"
+						: "other";
 				releases.set(
 					call.callId,
-					announceToolCall(call.callId, call.index, call.mutation, batchId, mutationScope, announcer),
+					announceToolCall(call.callId, call.index, kind, batchId, mutationScope, announcer),
 				);
 			}
 			for (const identity of identities) this.startedTools.set(this.toolKey(identity), identity);
