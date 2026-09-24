@@ -633,6 +633,13 @@ async function resolveProjectTrusted(options: {
 		return decision;
 	}
 	if (options.appMode !== "interactive") {
+		// Nobody can be asked here, so the project runs untrusted; say so, since its own settings
+		// (toolkit scripts, models, extensions) silently not applying reads as them being broken.
+		console.error(
+			chalk.yellow(
+				`Project ${options.cwd} is not trusted, so its .pi settings, extensions and instructions are not loaded. Pass --approve (-a) to trust it for this run, or trust it once in the interactive app.`,
+			),
+		);
 		return false;
 	}
 
