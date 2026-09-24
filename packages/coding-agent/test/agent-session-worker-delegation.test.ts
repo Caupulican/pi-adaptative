@@ -1152,7 +1152,15 @@ describe("AgentSession worker delegation", () => {
 			// Parent agent decides; do not queue an owner Review now / Keep blocked interrupt.
 			expect(getWorkerHumanInputsRequiringDelivery(harness.sessionManager)).toEqual([]);
 			const request = getWorkerRequestSnapshots(harness.sessionManager.getEntries())[0];
-			expect(request?.envelope.allowedTools).toEqual(["read", "grep", "find", "ls", "write", "edit"]);
+			expect(request?.envelope.allowedTools).toEqual([
+				"read",
+				"grep",
+				"find",
+				"ls",
+				"write",
+				"edit",
+				"artifact_retrieve",
+			]);
 			expect(request?.envelope.allowedTools).not.toContain("delegate");
 		} finally {
 			harness.cleanup();

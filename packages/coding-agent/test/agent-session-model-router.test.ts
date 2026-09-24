@@ -1355,9 +1355,10 @@ describe("conversation stage routing", () => {
 			await harness.session.prompt("Plan the migration of the ledger to a new schema; list the steps.");
 			await harness.session.prompt("thanks!");
 			await harness.session.prompt("What did the first step say?");
-			// The side trip carries only what it can use without escalating, plus the search.
+			// The side trip keeps the whole surface (reaching for a mutating tool hands the work to the
+			// talker) and gains the search.
 			expect(sideTrip?.tools).toContain("conversation_history");
-			expect(sideTrip?.tools).not.toContain("edit");
+			expect(sideTrip?.tools).toEqual(expect.arrayContaining(harness.session.getActiveToolNames()));
 			expect(sideTrip?.brief).toContain("search it with conversation_history");
 			// The search reads the conversation before the brief, which the brief itself never sent.
 			expect(found).toContain("Step one exports the ledger");

@@ -131,16 +131,6 @@ function isReadOnlyShellCommand(command: string): boolean {
 	return segments.length > 0 && segments.every((segment) => segment.length > 0 && isReadOnlyShellSegment(segment));
 }
 
-/**
- * Whether some call of this tool can run on a cheap turn without escalating: the read-only tools, and the
- * shell tools, whose read-only commands run while the escalation gate reruns a mutating one elsewhere.
- * Every call of any other tool escalates, so a side trip that carries it only pays for its schema.
- */
-export function mayRunWithoutEscalation(tool: { readonly name: string; readonly readOnly?: boolean }): boolean {
-	const name = tool.name.trim().toLowerCase();
-	return SHELL_TOOL_NAMES.has(name) || !isMutatingToolCall(name, undefined, tool.readOnly);
-}
-
 export function shouldEscalateModelRouterTool(options: {
 	tier: ModelTier;
 	toolName: string;

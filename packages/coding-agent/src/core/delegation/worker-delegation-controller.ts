@@ -944,10 +944,16 @@ export class WorkerDelegationController {
 	/** What every worker authority resolution reads from the host: cwd, models, and the owner's model policy. */
 	private authorityBase(): Pick<
 		WorkerAuthorityResolutionInput,
-		"cwd" | "modelRegistry" | "isModelExhausted" | "isModelAllowed" | "allocateAllowedModel"
+		| "cwd"
+		| "modelRegistry"
+		| "isModelExhausted"
+		| "isModelAllowed"
+		| "allocateAllowedModel"
+		| "artifactRetrieveAvailable"
 	> {
 		return {
 			cwd: this.deps.getCwd(),
+			artifactRetrieveAvailable: this.workerToolAdapterNames().includes("artifact_retrieve"),
 			modelRegistry: this.deps.getModelRegistry(),
 			isModelExhausted: (model) => this.deps.isModelExhausted(model),
 			...(this.deps.isModelAllowed

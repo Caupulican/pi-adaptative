@@ -2,7 +2,8 @@
 
 ### Changed
 
-- A side trip searches the conversation its brief omits with `conversation_history` instead of handing the message back (`hand_to_talker` is removed: the free side-trip model never called it), and carries only the tools it can use without escalating, which cuts its request from about 55k to about 9k characters.
+- A side trip searches the conversation its brief omits with `conversation_history` instead of handing the message back (`hand_to_talker` is removed: the free side-trip model never called it).
+- A worker granted a tool whose output is packed (grep, find) also gets `artifact_retrieve`, as the root does, so its large outputs are packed and stay retrievable.
 - The claim check reads an answer that relays what a script printed as no test claim, and settles test and check claims against the checks that ran.
 
 ### Added

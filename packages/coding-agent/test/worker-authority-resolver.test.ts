@@ -135,6 +135,23 @@ describe("resolveWorkerAuthority", () => {
 		});
 	});
 
+	it("grants artifact_retrieve alongside a tool whose output is packed, as the root's surface does, when the host brokers it", () => {
+		const admit = (artifactRetrieveAvailable: boolean) =>
+			resolveWorkerAuthority({
+				authority: { toolNames: ["grep", "read"] },
+				base: undefined,
+				foregroundModel: model,
+				modelRegistry,
+				isModelExhausted: () => false,
+				artifactRetrieveAvailable,
+			});
+		const brokered = admit(true);
+		expect(brokered.ok && brokered.shipment.profile.toolNames).toEqual(["grep", "read", "artifact_retrieve"]);
+		// Without the host adapter the companion is not granted: a tool the worker cannot get never is.
+		const unbrokered = admit(false);
+		expect(unbrokered.ok && unbrokered.shipment.profile.toolNames).toEqual(["grep", "read"]);
+	});
+
 	it("keeps an explicit capability restriction authoritative for leaf workers", () => {
 		const resolution = resolveWorkerAuthority({
 			authority: {

@@ -97,11 +97,7 @@ import {
 	type ModelRouterFailoverStatus,
 	type ModelRouterFitnessStatuses,
 } from "./model-router/status.ts";
-import {
-	isLocalOrManagedRouterModel,
-	mayRunWithoutEscalation,
-	shouldEscalateModelRouterTool,
-} from "./model-router/tool-escalation.ts";
+import { isLocalOrManagedRouterModel, shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
 import type { ModelToolProbeVerdict } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -1446,12 +1442,11 @@ export class ModelRouterController {
 						swappedTools = agent.state.tools;
 					}
 				}
-				// A side trip carries the tools it can use without escalating (reaching for any other one
-				// reruns the message on the talker anyway) and a search of the conversation its brief
-				// omits: a small brief reads a small surface, and the search is not buried under schemas.
+				// A side trip keeps the whole surface, since reaching for a mutating tool is how it hands work it
+				// cannot do to the talker, and gains a search of the conversation its brief omits.
 				if (routeDecision?.reasonCode === SIDE_TRIP_REASON_CODE) {
 					agent.state.tools = [
-						...agent.state.tools.filter((tool) => mayRunWithoutEscalation(tool)),
+						...agent.state.tools,
 						sideTripHistoryTool(() => agent.state.messages.slice(0, originalHistoryLength)),
 					];
 					swappedTools = agent.state.tools;

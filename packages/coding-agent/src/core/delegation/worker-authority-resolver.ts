@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Api, KnownProvider, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
+import { PACKED_TOOL_OUTPUT_TOOLS } from "../context/tool-output-packer.ts";
 import { lendableToolSurface, mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import {
 	ROOT_MEMORY_TOOL_NAME,
@@ -88,6 +89,8 @@ export interface WorkerAuthorityResolutionInput {
 	/** Which account a fresh, unpinned worker runs on; default routes away from the foreground's. */
 	accountRouting?: WorkerAccountRouting;
 	foregroundToolNames?: readonly string[];
+	/** Whether the host brokers artifact_retrieve to workers: the companion a packed-output tool brings. */
+	artifactRetrieveAvailable?: boolean;
 	foregroundEnvelope?: CapabilityEnvelope;
 	cwd?: string;
 	/** Caller task cwd for explicit relative path intent; preset paths remain anchored to cwd. */
@@ -479,6 +482,16 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		if (input.authority?.toolNames !== undefined) {
 			return { ok: false, reason: `orchestration_tool_capability_missing:${toolName}` };
 		}
+	}
+	// The root's rule for its own surface: a tool whose output is packed brings artifact_retrieve, so the
+	// worker's large outputs are packed too and every packed handle stays resolvable by the agent that sees it.
+	if (
+		input.artifactRetrieveAvailable === true &&
+		toolNames.some((toolName) => PACKED_TOOL_OUTPUT_TOOLS.has(toolName)) &&
+		!toolNames.includes("artifact_retrieve") &&
+		envelopeHasToolCapability(capabilityList, "artifact_retrieve")
+	) {
+		toolNames.push("artifact_retrieve");
 	}
 	const budget = structuredClone(input.authority?.budget ?? input.base?.profile.budget ?? {});
 	const floorFailure = tokenBudgetFloorFailure(budget.maxTokens);
