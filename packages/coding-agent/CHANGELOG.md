@@ -7,7 +7,7 @@
 - Exact toolkit hits run their script in the harness with no model request; print mode prints the script's output and exits by its status.
 - Cache custody: every provider request is classified as an append or a break; breaks the harness makes deliberately (context-GC packing, compaction, side-trip briefs, safety removals, the prompt date, reasoning changes, extension prompt changes) are sanctioned, any other break is recorded in the decision ledger. Each lane keeps one reasoning level, and system-prompt changes wait for a cold moment. Extensions can set `systemPromptUrgency: "now"` on `before_agent_start` to apply a prompt change at once.
 - Learned cache economics: provider cache survival and lineage lifetime are learned from observations (pooled by upstream vendor for routing providers), and context-GC rewrites of the sent prefix and early compaction are priced from them.
-- Idle compaction preparation on the warm session lane, used only when it pays.
+- Idle compaction preparation on the warm session lane, used only when it pays; the Decision graph's root node shows when it will prepare, its expected value, and whether the next request resumed fresh or warm.
 - `artifact_retrieve context:<key>` retrieves a context-GC packed original, with an `offset` mode.
 - Retrieve routes of the objective loop can be gathered by read-only minions when the talker's reads cost more.
 - Worker parity: worker conversations run context GC, cache custody, cache observations, path aliases, tool-output reduction and artifact packing, tool-selection learning, warm-lane summarization, priced early compaction, carried sent-prefix marks and the context policy on their own lane; only orchestration stays with the root.
@@ -25,6 +25,7 @@
 
 - Sent-prefix marks are reset when a compaction replaces history, so context-GC packing resumes on the new history.
 - The selected model stays the session model on resume.
+- A model selected with `/model`, a model cycle, RPC or an extension before the first substantive message stays the conversation's talker instead of being replaced by the opening route.
 - A path-alias legend committed earlier in the history is read back after a restart.
 - An `-e` extension, skill or prompt path refused by the project-instruction boundary is reported as a startup error instead of being dropped silently.
 - Print mode waits for the session to settle between `-p` messages instead of failing with "Agent is already processing", and prints the reply even when a host record follows it.
