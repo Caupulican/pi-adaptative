@@ -166,6 +166,10 @@ function collectProjectInstructionRoots(cwd: string): string[] {
 	return Array.from(roots);
 }
 
+function refusedProjectInstructionMessage(path: string): string {
+	return `Project context files are disabled; refused project instruction path: ${path}`;
+}
+
 function isProjectInstructionLocation(candidatePath: string, cwd: string, projectRoots: string[]): boolean {
 	if (projectRoots.some((root) => isPathWithin(candidatePath, root))) return true;
 	if (
@@ -690,10 +694,14 @@ export class DefaultResourceLoader implements ResourceLoader {
 	}
 
 	private blockedExtensionLoadResult(extensionPath: string): { extension: Extension | null; error: string | null } {
-		return {
-			extension: null,
-			error: `Project context files are disabled; refused project instruction path: ${extensionPath}`,
-		};
+		return { extension: null, error: refusedProjectInstructionMessage(extensionPath) };
+	}
+
+	/** Explicitly supplied paths the project-instruction boundary refuses, so each refusal is reported, never silent. */
+	private refusedInstructionPaths(paths: string[]): string[] {
+		return paths
+			.filter((path) => !this.isInstructionPathAdmitted(path))
+			.map((path) => this.resolveResourcePath(path));
 	}
 
 	/**
@@ -1098,6 +1106,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 				extensionsResult.errors.push({ path: conflict.path, error: conflict.message });
 			}
 
+			for (const path of this.refusedInstructionPaths(this.additionalExtensionPaths)) {
+				extensionsResult.errors.push({ path, error: refusedProjectInstructionMessage(path) });
+			}
 			for (const p of additionalExtensionPaths) {
 				if (isLocalPath(p)) {
 					const resolved = this.resolveResourcePath(p);
@@ -1171,6 +1182,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 				metadataByPath,
 			);
 			this.updateSkillsFromPaths(skillPaths, metadataByPath);
+			for (const path of this.refusedInstructionPaths(this.additionalSkillPaths)) {
+				this.skillDiagnostics.push({ type: "error", message: refusedProjectInstructionMessage(path), path });
+			}
 			for (const p of additionalSkillPaths) {
 				if (isLocalPath(p)) {
 					const resolved = this.resolveResourcePath(p);
@@ -1235,6 +1249,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 				metadataByPath,
 			);
 			this.updatePromptsFromPaths(promptPaths, metadataByPath);
+			for (const path of this.refusedInstructionPaths(this.additionalPromptTemplatePaths)) {
+				this.promptDiagnostics.push({ type: "error", message: refusedProjectInstructionMessage(path), path });
+			}
 			for (const p of additionalPromptTemplatePaths) {
 				if (isLocalPath(p)) {
 					const resolved = this.resolveResourcePath(p);

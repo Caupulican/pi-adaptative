@@ -1464,9 +1464,17 @@ export class InteractiveMode {
 			}
 
 			// Other input submitted during work is steering. Slash/bang text must not execute
-			// commands that would interrupt the current stream or compaction.
+			// commands that would interrupt the current stream or compaction, so it steers only while a
+			// foreground turn is live; background work (a worker, a backgrounded tool, System One
+			// checking an answer, an armed continuation) is nothing a command interrupts.
 			const workState = this.session.getSessionWorkState();
-			if (workState.busy) {
+			const isCommandText = text.startsWith("/") || text.startsWith("!");
+			const foregroundTurnLive =
+				this.session.isStreaming ||
+				this.session.isCompacting ||
+				this.session.isRetrying ||
+				this.session.getForegroundActivity().epoch !== undefined;
+			if (workState.busy && (!isCommandText || foregroundTurnLive)) {
 				const images = this.takeClipboardImagesForText(text);
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");

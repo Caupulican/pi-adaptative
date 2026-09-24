@@ -307,6 +307,14 @@ describe("SDK project-context file admission", () => {
 		expect(skillNames).toContain("external-sdk-skill");
 		expect(promptNames).not.toContain("project-sdk-prompt");
 		expect(promptNames).toContain("external-sdk-prompt");
+		// Every refused explicit path is reported, so the owner sees why it did not load.
+		expect(loader.getExtensions().errors).toContainEqual({
+			path: projectExtension,
+			error: expect.stringMatching(/project context files are disabled/i),
+		});
+		expect(loader.getSkills().diagnostics.map((diagnostic) => diagnostic.path)).toContain(projectSkillDirectory);
+		expect(loader.getPrompts().diagnostics.map((diagnostic) => diagnostic.path)).toContain(projectPromptDirectory);
+		expect(loader.getExtensions().errors.map((error) => error.path)).not.toContain(externalExtension);
 	});
 
 	it("does not let a trusted external-resource root reclassify project instruction files", async () => {
