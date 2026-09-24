@@ -1177,6 +1177,14 @@ async function listSessionsFromDir(
  * Use buildSessionContext() to get the resolved message list for the LLM, which
  * handles compaction summaries and follows the path from root to current leaf.
  */
+/**
+ * An answer to the owner: the model's reply, or an owner execution (a `!` command, or a toolkit script
+ * the harness ran with no model). A session is written to disk once it holds one.
+ */
+function isReplyEntry(entry: FileEntry): boolean {
+	return entry.type === "message" && (entry.message.role === "assistant" || entry.message.role === "bashExecution");
+}
+
 export class SessionManager {
 	private sessionId: string = "";
 	private sessionFile: string | undefined;
@@ -1691,11 +1699,9 @@ export class SessionManager {
 			);
 		}
 
-		const hasAssistant =
-			this.fileEntries.some((candidate) => candidate.type === "message" && candidate.message.role === "assistant") ||
-			entries.some((entry) => entry.type === "message" && entry.message.role === "assistant");
+		const hasReply = this.fileEntries.some(isReplyEntry) || entries.some(isReplyEntry);
 		const forceFlush = entries.some((entry) => isSessionLifecycleEntry(entry));
-		const shouldFlush = hasAssistant || forceFlush;
+		const shouldFlush = hasReply || forceFlush;
 		// Encoding can invoke extension-owned getters. Prepare the entire initial prefix
 		// before opening the file, then check cancellation at the last pre-write boundary.
 		// Preparation failure is not an uncertain physical write and must remain recoverable.
@@ -2913,12 +2919,9 @@ export class SessionManager {
 		}
 		branched._buildIndex();
 
-		// Only write the file now if it contains an assistant message. Otherwise defer to _persist(),
-		// matching newSession() and avoiding a duplicate-header write on the first assistant response.
-		const hasAssistant = branched.fileEntries.some(
-			(entry) => entry.type === "message" && entry.message.role === "assistant",
-		);
-		if (this.persist && hasAssistant) {
+		// Only write the file now if it contains a reply. Otherwise defer to _persist(), matching
+		// newSession() and avoiding a duplicate-header write on the first reply.
+		if (this.persist && branched.fileEntries.some(isReplyEntry)) {
 			// Keep the source manager active while cold compacted getters serialize into the copy.
 			branched._rewriteFile();
 			// Reload through the branch owner so every disk-backed getter closes over the new

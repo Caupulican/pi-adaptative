@@ -131,10 +131,15 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		}
 
 		if (mode === "text") {
-			const state = session.state;
-			const lastMessage = state.messages[state.messages.length - 1];
+			// The reply is the last message that is not a host record (an owner-items or evidence record
+			// can land after it): the model's answer, or the owner execution a toolkit hit ran with no model.
+			const lastMessage = session.state.messages.findLast((message) => message.role !== "custom");
 
-			if (lastMessage?.role === "assistant") {
+			if (lastMessage?.role === "bashExecution") {
+				writeRawStdout(`${lastMessage.output}\n`);
+				if (lastMessage.cancelled || (lastMessage.exitCode !== undefined && lastMessage.exitCode !== 0))
+					exitCode = 1;
+			} else if (lastMessage?.role === "assistant") {
 				const assistantMsg = lastMessage as AssistantMessage;
 				if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
 					console.error(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);

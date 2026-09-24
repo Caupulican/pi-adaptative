@@ -529,6 +529,39 @@ describe("createBranchedSession", () => {
 		}
 	});
 
+	it("writes the file once the session holds an owner execution, the reply a toolkit hit gives with no model", () => {
+		const tempDir = join(tmpdir(), `session-owner-execution-${Date.now()}`);
+		mkdirSync(tempDir, { recursive: true });
+
+		try {
+			const session = SessionManager.create(tempDir, tempDir, tempDir);
+			session.appendMessage(userMsg("run the status report"));
+			const file = session.getSessionFile();
+			expect(file).toBeDefined();
+			expect(existsSync(file!)).toBe(false);
+			session.appendMessage({
+				role: "bashExecution",
+				command: "run_toolkit_script status-report",
+				output: "status report: all green",
+				exitCode: 0,
+				cancelled: false,
+				truncated: false,
+				timestamp: 2,
+			});
+			expect(existsSync(file!)).toBe(true);
+			const records = readFileSync(file!, "utf-8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			expect(records.filter((record) => record.type === "message").map((record) => record.message.role)).toEqual([
+				"user",
+				"bashExecution",
+			]);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("writes file immediately when forking from a point with assistant messages", () => {
 		const tempDir = join(tmpdir(), `session-fork-with-assistant-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });

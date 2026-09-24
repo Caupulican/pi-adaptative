@@ -1,7 +1,14 @@
+import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionShutdownEvent } from "../src/index.ts";
 import { runPrintMode } from "../src/modes/print-mode.ts";
+
+const stdout = vi.hoisted(() => ({ written: [] as string[] }));
+vi.mock("../src/core/output-guard.ts", () => ({
+	writeRawStdout: (text: string) => stdout.written.push(text),
+	flushRawStdout: async () => {},
+}));
 
 type EmitEvent = SessionShutdownEvent;
 
@@ -14,7 +21,7 @@ type FakeSession = {
 	peekPathAliasTable(): { cwd: string; entries: never[] };
 	sessionManager: { getHeader: () => object | undefined };
 	agent: { waitForIdle: () => Promise<void> };
-	state: { messages: AssistantMessage[] };
+	state: { messages: AgentMessage[] };
 	extensionRunner: FakeExtensionRunner;
 	bindExtensions: ReturnType<typeof vi.fn>;
 	subscribe: ReturnType<typeof vi.fn>;
@@ -58,13 +65,13 @@ function createAssistantMessage(options?: {
 	};
 }
 
-function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost {
+function createRuntimeHost(...messages: AgentMessage[]): FakeRuntimeHost {
 	const extensionRunner: FakeExtensionRunner = {
 		hasHandlers: (eventType: string) => eventType === "session_shutdown",
 		emit: vi.fn(async () => {}),
 	};
 
-	const state = { messages: [assistantMessage] };
+	const state = { messages };
 
 	const session: FakeSession = {
 		peekPathAliasTable: () => ({ cwd: process.cwd(), entries: [] }),
@@ -144,6 +151,45 @@ describe("runPrintMode", () => {
 
 		expect(exitCode).toBe(0);
 		expect(calls).toEqual(["first", "second", "third"]);
+	});
+
+	it("prints the reply even when a host record lands after it", async () => {
+		stdout.written.length = 0;
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "the answer" }), {
+			role: "custom",
+			customType: "owner_items",
+			content: "Needs you: nothing",
+			display: true,
+			timestamp: 3,
+		});
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+			initialMessage: "question",
+		});
+		expect(exitCode).toBe(0);
+		expect(stdout.written).toEqual(["the answer\n"]);
+	});
+
+	it("prints a toolkit hit's owner execution, the reply given with no model, and exits by its status", async () => {
+		stdout.written.length = 0;
+		const execution = (exitCode: number) =>
+			createRuntimeHost({
+				role: "bashExecution",
+				command: "run_toolkit_script status-report",
+				output: "status report: all green",
+				exitCode,
+				cancelled: false,
+				truncated: false,
+				timestamp: 2,
+			});
+		const run = (runtimeHost: FakeRuntimeHost) =>
+			runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+				mode: "text",
+				initialMessage: "run the status report",
+			});
+		expect(await run(execution(0))).toBe(0);
+		expect(stdout.written).toEqual(["status report: all green\n"]);
+		expect(await run(execution(2))).toBe(1);
 	});
 
 	it("emits session_shutdown in json mode", async () => {
