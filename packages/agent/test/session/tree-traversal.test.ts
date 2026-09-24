@@ -529,6 +529,26 @@ describe("createBranchedSession", () => {
 		}
 	});
 
+	it("reads custom entries of given types on the branch incrementally, and anew after a branch switch", () => {
+		const session = SessionManager.inMemory();
+		session.appendMessage(userMsg("one"));
+		const first = session.appendCustomEntry("grant", { n: 1 });
+		session.appendCustomEntry("other", { n: 2 });
+		expect(session.getCustomEntriesOnBranch(["grant", "revoke"]).map((entry) => entry.id)).toEqual([first]);
+		// Appended after the last read: only the new entries are walked, and the order is the branch's.
+		const revoke = session.appendCustomEntry("revoke", { n: 3 });
+		session.appendMessage(userMsg("two"));
+		const second = session.appendCustomEntry("grant", { n: 4 });
+		expect(session.getCustomEntriesOnBranch(["grant", "revoke"]).map((entry) => entry.id)).toEqual([
+			first,
+			revoke,
+			second,
+		]);
+		// A branch switch to before the revoke reads that branch, not the cached one.
+		session.branch(first);
+		expect(session.getCustomEntriesOnBranch(["grant", "revoke"]).map((entry) => entry.id)).toEqual([first]);
+	});
+
 	it("writes the file once the session holds an owner execution, the reply a toolkit hit gives with no model", () => {
 		const tempDir = join(tmpdir(), `session-owner-execution-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });

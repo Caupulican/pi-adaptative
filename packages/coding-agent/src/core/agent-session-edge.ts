@@ -24,6 +24,8 @@ import {
 
 export interface SessionEdgeDeps {
 	getBranch(): readonly SessionEntry[];
+	/** The branch's edge grant and revoke records in order, read incrementally (see `getCustomEntriesOnBranch`). */
+	getEdgeRecords(): readonly SessionEntry[];
 	getSettingsAllow(): readonly string[];
 	appendCustomEntry(customType: string, data: unknown): void;
 	getCwd(): string;
@@ -56,7 +58,7 @@ function requireValidEdgeScope(scopeKey: unknown, kind: "grant" | "revoke"): str
 
 /** Granted edge classes: settings first, then the branch's grant and revoke records in order. */
 export function sessionEdgeGrants(deps: SessionEdgeDeps): EdgeGrantView[] {
-	return collectEdgeGrants(deps.getBranch(), deps.getSettingsAllow());
+	return collectEdgeGrants(deps.getEdgeRecords(), deps.getSettingsAllow());
 }
 
 /** Record a grant on the branch: the operator's decision here, or the model's citation of their words. */

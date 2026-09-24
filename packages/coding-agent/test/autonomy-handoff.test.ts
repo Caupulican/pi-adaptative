@@ -656,6 +656,7 @@ describe("compaction, fork host context projection, and edge grants authority", 
 			const sm = SessionManager.inMemory(root);
 			const sessionEdgeDeps: SessionEdgeDeps = {
 				getBranch: () => sm.getBranch(),
+				getEdgeRecords: () => sm.getBranch(),
 				getSettingsAllow: () => [],
 				appendCustomEntry: (customType, data) => sm.appendCustomEntry(customType, data),
 				getCwd: () => root,
@@ -1384,6 +1385,7 @@ describe("edge authority, scoped grants, and canonical operation lifecycle", () 
 
 		const child: SessionEdgeDeps = {
 			getBranch: () => [],
+			getEdgeRecords: () => [],
 			getSettingsAllow: () => [],
 			appendCustomEntry: () => {},
 			getCwd: () => taskCwd,
@@ -1466,6 +1468,7 @@ describe("edge authority, scoped grants, and canonical operation lifecycle", () 
 			const sm = SessionManager.inMemory(root);
 			const deps: SessionEdgeDeps = {
 				getBranch: () => sm.getBranch(),
+				getEdgeRecords: () => sm.getBranch(),
 				getSettingsAllow: () => [],
 				appendCustomEntry: (customType, data) => sm.appendCustomEntry(customType, data),
 				getCwd: () => root,
@@ -1542,6 +1545,7 @@ describe("edge authority, scoped grants, and canonical operation lifecycle", () 
 		let confirmationCalled = false;
 		const workerDeps: SessionEdgeDeps = {
 			getBranch: () => [],
+			getEdgeRecords: () => [],
 			getSettingsAllow: () => [],
 			appendCustomEntry: () => {},
 			getCwd: () => cwd,
@@ -1572,6 +1576,7 @@ describe("edge authority, scoped grants, and canonical operation lifecycle", () 
 			{
 				...workerDeps,
 				getBranch: () => [grantEntry],
+				getEdgeRecords: () => [grantEntry],
 			},
 			{ class: "toolkit.script", operation: "restore-db", reason: "deploy", scopeKey: parentScopeKey },
 			"run_toolkit_script",
@@ -1624,6 +1629,7 @@ describe("edge authority, scoped grants, and canonical operation lifecycle", () 
 
 		const depsDenied: SessionEdgeDeps = {
 			getBranch: () => [],
+			getEdgeRecords: () => [],
 			getSettingsAllow: () => [],
 			appendCustomEntry: () => {},
 			getCwd: () => cwd,

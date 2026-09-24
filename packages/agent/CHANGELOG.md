@@ -3,6 +3,7 @@
 ### Added
 
 - `AgentTool.readOnly` declares that every call of a tool only reads.
+- `SessionManager.getCustomEntriesOnBranch(types)` returns the branch's custom entries of those types in order, walking only entries appended since the last read.
 
 ## [0.99.46] - 2026-09-24
 

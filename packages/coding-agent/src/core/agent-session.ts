@@ -76,6 +76,8 @@ import type {
 } from "./autonomy/contracts.ts";
 import {
 	EDGE_CLASSES,
+	EDGE_GRANT_CUSTOM_TYPE,
+	EDGE_REVOKE_CUSTOM_TYPE,
 	type EdgeClass,
 	type EdgeConfirmationHandler,
 	type EdgeGrantView,
@@ -2975,6 +2977,8 @@ export class AgentSession {
 	private _edgeDeps(): SessionEdgeDeps {
 		return {
 			getBranch: () => this.sessionManager.getBranch(),
+			getEdgeRecords: () =>
+				this.sessionManager.getCustomEntriesOnBranch([EDGE_GRANT_CUSTOM_TYPE, EDGE_REVOKE_CUSTOM_TYPE]),
 			getSettingsAllow: () => this.settingsManager.getEdgeSettings().allow,
 			appendCustomEntry: (customType, data) => this.sessionManager.appendCustomEntry(customType, data),
 			getCwd: () => this._cwd,

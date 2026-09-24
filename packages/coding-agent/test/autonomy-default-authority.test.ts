@@ -111,6 +111,7 @@ describe("autonomous default authority", () => {
 		const confirmation = vi.fn(async () => "allow-once" as const);
 		const deps: SessionEdgeDeps = {
 			getBranch: () => [],
+			getEdgeRecords: () => [],
 			getSettingsAllow: () => settings.getEdgeSettings().allow,
 			appendCustomEntry: vi.fn(),
 			getCwd: () => "/workspace",
@@ -136,6 +137,7 @@ describe("autonomous default authority", () => {
 		const confirmation = vi.fn(async () => "deny" as const);
 		const deps: SessionEdgeDeps = {
 			getBranch: () => [],
+			getEdgeRecords: () => [],
 			getSettingsAllow: () => settings.getEdgeSettings().allow,
 			appendCustomEntry: vi.fn(),
 			getCwd: () => "/workspace",

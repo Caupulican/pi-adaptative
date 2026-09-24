@@ -21,6 +21,7 @@ function gitRepo(): string {
 function edgeDeps(root: string, unowned: () => Promise<boolean>): SessionEdgeDeps {
 	return {
 		getBranch: () => [],
+		getEdgeRecords: () => [],
 		getSettingsAllow: () => [],
 		appendCustomEntry: () => {},
 		getCwd: () => root,

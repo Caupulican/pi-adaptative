@@ -471,8 +471,12 @@ export class PathAliasRuntime {
 		};
 	}
 
+	/**
+	 * Only messages after the scan mark: minting needs no mention counts, so a message scanned once
+	 * yields nothing new. A table that is still empty is no exception; rescanning the whole history on
+	 * every request until a first alias was minted made per-request work grow with the session.
+	 */
 	private textsToScan(messages: readonly AgentMessage[]): string[] {
-		if (this.table.entries.length === 0) return collectMessageTexts(messages);
 		return collectMessageTexts(messages.filter((message) => (message.timestamp ?? 0) > this.lastScannedTs));
 	}
 }

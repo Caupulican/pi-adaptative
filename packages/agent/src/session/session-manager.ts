@@ -243,6 +243,11 @@ interface LatestCustomEntryCache {
 
 const MAX_LATEST_CUSTOM_ENTRY_CACHE_TYPES = 32;
 
+interface BranchCustomEntriesCache {
+	readonly byId: Map<string, SessionEntry>;
+	readonly perKey: Map<string, { leafId: string | null; entries: readonly CustomEntry[] }>;
+}
+
 interface LifecycleActiveCache {
 	leafId: string | null;
 	currentRequestId?: string;
@@ -1219,6 +1224,7 @@ export class SessionManager {
 	private sessionContextCache: SessionContextCache | undefined;
 	private lifecycleActiveCache: LifecycleActiveCache | undefined;
 	private latestCustomEntryCache: LatestCustomEntryCache | undefined;
+	private branchCustomEntriesCache: BranchCustomEntriesCache | undefined;
 	private persistenceStateUncertain = false;
 	private inheritedSessionIds = new Set<string>();
 
@@ -1378,6 +1384,7 @@ export class SessionManager {
 		this.leafId = null;
 		this.lifecycleActiveCache = undefined;
 		this.latestCustomEntryCache = undefined;
+		this.branchCustomEntriesCache = undefined;
 		this.flushed = false;
 		this.persistenceStateUncertain = false;
 		this._invalidateSessionContextCache();
@@ -1451,6 +1458,7 @@ export class SessionManager {
 		this.leafId = leafId;
 		this.lifecycleActiveCache = undefined;
 		this.latestCustomEntryCache = undefined;
+		this.branchCustomEntriesCache = undefined;
 		for (const id of this.coldPayloadEntryIds) {
 			if (!byId.has(id)) this.coldPayloadEntryIds.delete(id);
 		}
@@ -2539,6 +2547,39 @@ export class SessionManager {
 		return match;
 	}
 
+	/**
+	 * Every custom entry of the given types on the active branch, in branch order. A caller that reads
+	 * them on every request (edge grants and revokes) pays for the entries appended since its last read,
+	 * not for the whole branch: when the leaf descends from the leaf of the last read, only the entries
+	 * after it are walked; a branch switch or a rebuilt index walks the branch once. Payload-agnostic.
+	 */
+	getCustomEntriesOnBranch(customTypes: readonly string[]): readonly CustomEntry[] {
+		if (this.branchCustomEntriesCache?.byId !== this.byId) {
+			this.branchCustomEntriesCache = { byId: this.byId, perKey: new Map() };
+		}
+		const key = customTypes.join("\u0000");
+		const types = new Set(customTypes);
+		const cached = this.branchCustomEntriesCache.perKey.get(key);
+		if (cached && cached.leafId === this.leafId) return cached.entries;
+		const appended: CustomEntry[] = [];
+		let resumed = false;
+		for (
+			let entry = this.leafId ? this.byId.get(this.leafId) : undefined;
+			entry;
+			entry = entry.parentId ? this.byId.get(entry.parentId) : undefined
+		) {
+			if (cached && cached.leafId !== null && entry.id === cached.leafId) {
+				resumed = true;
+				break;
+			}
+			if (entry.type === "custom" && types.has(entry.customType)) appended.push(entry);
+		}
+		appended.reverse();
+		const entries = resumed && cached ? [...cached.entries, ...appended] : appended;
+		this.branchCustomEntriesCache.perKey.set(key, { leafId: this.leafId, entries });
+		return entries;
+	}
+
 	private _latestCustomEntryCacheForIndex(): LatestCustomEntryCache {
 		if (this.latestCustomEntryCache?.byId !== this.byId) {
 			this.latestCustomEntryCache = { byId: this.byId, perType: new Map() };
@@ -2953,6 +2994,7 @@ export class SessionManager {
 		this.leafId = branched.leafId;
 		this.lifecycleActiveCache = undefined;
 		this.latestCustomEntryCache = undefined;
+		this.branchCustomEntriesCache = undefined;
 		this.persistenceStateUncertain = branched.persistenceStateUncertain;
 		this.inheritedSessionIds = new Set(branched.inheritedSessionIds);
 		this.coldPayloadEntryIds.clear();
