@@ -257,11 +257,12 @@ describe("ProviderRequestContextController", () => {
 			});
 		return new ProviderRequestContextController({
 			transformExtensions: async (msgs) => ({ messages: msgs, transientMessages: [] }),
-			runContextAudit: () => ({}) as ReturnType<ProviderRequestContextControllerDeps["runContextAudit"]>,
+			runContextAudit: () =>
+				({}) as ReturnType<NonNullable<ProviderRequestContextControllerDeps["runContextAudit"]>>,
 			runPromptPolicyPlanning: () =>
-				({}) as ReturnType<ProviderRequestContextControllerDeps["runPromptPolicyPlanning"]>,
+				({}) as ReturnType<NonNullable<ProviderRequestContextControllerDeps["runPromptPolicyPlanning"]>>,
 			runMemoryRetrieval: async () =>
-				({}) as Awaited<ReturnType<ProviderRequestContextControllerDeps["runMemoryRetrieval"]>>,
+				({}) as Awaited<ReturnType<NonNullable<ProviderRequestContextControllerDeps["runMemoryRetrieval"]>>>,
 			applyContextGc: (msgs) => ({
 				messages: msgs,
 				report: {} as ReturnType<ProviderRequestContextControllerDeps["applyContextGc"]>["report"],
@@ -271,7 +272,9 @@ describe("ProviderRequestContextController", () => {
 			correlatePromptPolicyWithContextGc: () => {},
 			runPromptEnforcement: (msgs) => ({
 				messages: msgs,
-				report: {} as ReturnType<ProviderRequestContextControllerDeps["runPromptEnforcement"]>["report"],
+				report: {} as ReturnType<
+					NonNullable<ProviderRequestContextControllerDeps["runPromptEnforcement"]>
+				>["report"],
 			}),
 			enqueueRelevanceCuration: () => {},
 			maybeDrainBrainCuration: () => {},
@@ -404,11 +407,12 @@ describe("directory request-plan projection", () => {
 	function controller(preview: () => TaskDirectoryContextPlan) {
 		return new ProviderRequestContextController({
 			transformExtensions: async (messages) => ({ messages, transientMessages: [] }),
-			runContextAudit: () => ({}) as ReturnType<ProviderRequestContextControllerDeps["runContextAudit"]>,
+			runContextAudit: () =>
+				({}) as ReturnType<NonNullable<ProviderRequestContextControllerDeps["runContextAudit"]>>,
 			runPromptPolicyPlanning: () =>
-				({}) as ReturnType<ProviderRequestContextControllerDeps["runPromptPolicyPlanning"]>,
+				({}) as ReturnType<NonNullable<ProviderRequestContextControllerDeps["runPromptPolicyPlanning"]>>,
 			runMemoryRetrieval: async () =>
-				({}) as Awaited<ReturnType<ProviderRequestContextControllerDeps["runMemoryRetrieval"]>>,
+				({}) as Awaited<ReturnType<NonNullable<ProviderRequestContextControllerDeps["runMemoryRetrieval"]>>>,
 			applyContextGc: (messages) => ({
 				messages,
 				report: {} as ReturnType<ProviderRequestContextControllerDeps["applyContextGc"]>["report"],
@@ -418,7 +422,9 @@ describe("directory request-plan projection", () => {
 			correlatePromptPolicyWithContextGc: () => {},
 			runPromptEnforcement: (messages) => ({
 				messages,
-				report: {} as ReturnType<ProviderRequestContextControllerDeps["runPromptEnforcement"]>["report"],
+				report: {} as ReturnType<
+					NonNullable<ProviderRequestContextControllerDeps["runPromptEnforcement"]>
+				>["report"],
 			}),
 			enqueueRelevanceCuration: () => {},
 			maybeDrainBrainCuration: () => {},
@@ -510,11 +516,12 @@ describe("task automation request-plan projection", () => {
 	function controller(preview: () => TaskAutomationContextPlan) {
 		return new ProviderRequestContextController({
 			transformExtensions: async (messages) => ({ messages, transientMessages: [] }),
-			runContextAudit: () => ({}) as ReturnType<ProviderRequestContextControllerDeps["runContextAudit"]>,
+			runContextAudit: () =>
+				({}) as ReturnType<NonNullable<ProviderRequestContextControllerDeps["runContextAudit"]>>,
 			runPromptPolicyPlanning: () =>
-				({}) as ReturnType<ProviderRequestContextControllerDeps["runPromptPolicyPlanning"]>,
+				({}) as ReturnType<NonNullable<ProviderRequestContextControllerDeps["runPromptPolicyPlanning"]>>,
 			runMemoryRetrieval: async () =>
-				({}) as Awaited<ReturnType<ProviderRequestContextControllerDeps["runMemoryRetrieval"]>>,
+				({}) as Awaited<ReturnType<NonNullable<ProviderRequestContextControllerDeps["runMemoryRetrieval"]>>>,
 			applyContextGc: (messages) => ({
 				messages,
 				report: {} as ReturnType<ProviderRequestContextControllerDeps["applyContextGc"]>["report"],
@@ -524,7 +531,9 @@ describe("task automation request-plan projection", () => {
 			correlatePromptPolicyWithContextGc: () => {},
 			runPromptEnforcement: (messages) => ({
 				messages,
-				report: {} as ReturnType<ProviderRequestContextControllerDeps["runPromptEnforcement"]>["report"],
+				report: {} as ReturnType<
+					NonNullable<ProviderRequestContextControllerDeps["runPromptEnforcement"]>
+				>["report"],
 			}),
 			enqueueRelevanceCuration: () => {},
 			maybeDrainBrainCuration: () => {},
@@ -585,4 +594,45 @@ describe("task automation request-plan projection", () => {
 			);
 		},
 	);
+});
+
+describe("worker conversation request plan", () => {
+	it("plans with only the mechanics every agent needs: GC, path aliases and the authority context", async () => {
+		const history: AgentMessage[] = [
+			createCompactionSummaryMessage("checkpoint", 100, new Date(1).toISOString()),
+			{ role: "user", content: [{ type: "text", text: "Read p/src/a.ts" }], timestamp: 2 },
+		];
+		const gcCalls: number[] = [];
+		const controller = new ProviderRequestContextController({
+			applyContextGc: (messages, _writePayloads, frozenBelow) => {
+				gcCalls.push(frozenBelow);
+				return {
+					messages,
+					report: {
+						enabled: true,
+						packedCount: 0,
+						originalTokens: 0,
+						packedTokens: 0,
+						savedTokens: 0,
+						records: [],
+					},
+					isCurrent: () => true,
+					commit: () => {},
+				};
+			},
+			applyPathAliases: (messages) => ({ messages, legend: "p/src = /repo/src" }),
+			getEdgeGrants: () => [{ class: "git.publish", source: "instructions" }],
+		});
+		const plan = await controller.plan(history, 1);
+		expect(gcCalls).toEqual([1]);
+		expect(plan.messages).toEqual(history);
+		const kinds = (plan.transientMessages ?? []).map((message) =>
+			message.role === "custom" ? message.customType : message.role,
+		);
+		expect(kinds).toEqual([AUTHORITY_CONTEXT_CUSTOM_TYPE, PATH_ALIAS_LEGEND_CUSTOM_TYPE]);
+		// No head-only record: a compacted worker history gets no "skill cleared" note from a skill vault it lacks.
+		expect(kinds).not.toContain(ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE);
+		expect(plan.prepareCommit?.()).toBe(true);
+		plan.commit?.();
+	});
 });

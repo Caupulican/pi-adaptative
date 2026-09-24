@@ -10,7 +10,12 @@ import {
 } from "@caupulican/pi-agent-core/reliability";
 import type { SessionRequestSnapshotInput } from "@caupulican/pi-agent-core/session";
 import { sanitizeToolFailureContext } from "@caupulican/pi-agent-core/tool-failure-memory";
-import type { AgentContextPlanRequest, AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
+import type {
+	AgentContextPlan,
+	AgentContextPlanRequest,
+	AgentMessage,
+	ThinkingLevel,
+} from "@caupulican/pi-agent-core/types";
 import { addUsage, createEmptyUsage } from "@caupulican/pi-agent-core/usage";
 import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
@@ -187,10 +192,11 @@ export interface WorkerAttemptExecutorOptions {
 	 */
 	observeWorkerProgress?(observation: WorkerProgressObservation): Promise<unknown> | unknown;
 	/**
-	 * Context GC for this conversation, the same pass root runs: pack what went stale in `messages`,
-	 * never rewriting below `frozenBelow` unless the pass's price admits it.
+	 * Plan one request's context with root's own request-context controller, on this conversation's
+	 * lane (context GC, path aliases, the authority context; the head-only steps absent).
+	 * `sentPrefixCount` indexes `messages`.
 	 */
-	packContext?(messages: AgentMessage[], frozenBelow: number): AgentMessage[];
+	planRequest?(messages: AgentMessage[], sentPrefixCount: number, signal?: AbortSignal): Promise<AgentContextPlan>;
 	/**
 	 * The cache guard: each accepted provider request of this worker, as its recorded snapshot, with the
 	 * tokens of its fixed prefix (system prompt and tool schemas) on the attempt's first request.
@@ -938,7 +944,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										},
 										// The same per-request projection root gets: the conversation's own retention
 										// compaction, then context GC packing what went stale, priced on this lane.
-										...(retentionPolicy || options.packContext
+										...(retentionPolicy || options.planRequest
 											? {
 													planContext: async ({ messages, sentPrefixCount }: AgentContextPlanRequest) => {
 														planningMessages = messages;
@@ -991,11 +997,9 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 														signal.throwIfAborted();
 														// The sent mark indexes `messages`; re-anchor it by reference on what retention left.
 														const frozenBelow = frozenPrefixLength(messages, sentPrefixCount, retained);
-														return {
-															messages: options.packContext
-																? options.packContext(retained, frozenBelow)
-																: retained,
-														};
+														return options.planRequest
+															? options.planRequest(retained, frozenBelow, signal)
+															: { messages: retained };
 													},
 												}
 											: {}),

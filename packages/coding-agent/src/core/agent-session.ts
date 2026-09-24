@@ -1119,14 +1119,22 @@ export class AgentSession {
 			getSharedLaneToolOptions: () => this._runtimeBuilder.getSharedLaneToolOptions(),
 			markModelExhausted: (model, retryAfterMs) =>
 				this._foregroundRecovery.markModelExhausted(`${model.provider}/${model.id}`, retryAfterMs),
-			// Worker conversations pack with root's own context-GC pass, on their own lane.
-			packWorkerContext: ({ agentId, model, compactionTriggerTokens, messages, frozenBelow }) =>
-				this._pipeline.applyContextGc(messages, true, frozenBelow, {
+			// Worker conversations plan with root's own request-context controller, on their own lane: the
+			// mechanics every agent needs, none of the head-only steps.
+			planWorkerRequest: ({ agentId, model, compactionTriggerTokens, messages, sentPrefixCount, signal }) => {
+				const lane = {
 					model,
 					compactionTriggerTokens,
 					custodyLane: `worker:${agentId}\0${cacheLaneKey(model.api, model.provider, model.id)}`,
 					conversation: `worker:${agentId}`,
-				}).messages,
+				};
+				return new ProviderRequestContextController({
+					applyContextGc: (history, writePayloads, frozenBelow) =>
+						this._pipeline.applyContextGc(history, writePayloads, frozenBelow, lane),
+					applyPathAliases: (history) => this._pipeline.applyPathAliases(history),
+					getEdgeGrants: () => this.getEdgeGrants(),
+				}).plan(messages, sentPrefixCount, signal);
+			},
 			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
 			getEdgeGrants: () => this.getEdgeGrants(),
 			checkOperation: (tool, args, cwd) => this._operationGate.check(tool, args, cwd, "worker"),

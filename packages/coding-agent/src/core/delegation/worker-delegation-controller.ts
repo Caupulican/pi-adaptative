@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { type AgentMessage, decodeExecutionContext } from "@caupulican/pi-agent-core";
+import { type AgentContextPlan, type AgentMessage, decodeExecutionContext } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import type { SessionRequestSnapshotInput } from "@caupulican/pi-agent-core/session";
@@ -233,16 +233,17 @@ export interface WorkerDelegationControllerDeps {
 	/** Live worker supervision hook; one observation per executed worker tool call. */
 	observeWorkerProgress?(observation: WorkerProgressObservation): Promise<unknown> | unknown;
 	/**
-	 * Context GC for a worker conversation: the same pass root runs, priced on the worker's model and
-	 * its retention trigger, sanctioned on the worker's custody lane.
+	 * Plan a worker request's context with root's request-context controller on the worker's lane:
+	 * context GC priced on the worker's model and retention trigger, path aliases, the authority context.
 	 */
-	packWorkerContext?(input: {
+	planWorkerRequest?(input: {
 		agentId: string;
 		model: Model<Api>;
 		compactionTriggerTokens: number | undefined;
 		messages: AgentMessage[];
-		frozenBelow: number;
-	}): AgentMessage[];
+		sentPrefixCount: number;
+		signal?: AbortSignal;
+	}): Promise<AgentContextPlan>;
 	/** The cache guard for worker lanes: each accepted worker provider request, as its recorded snapshot. */
 	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput, prefixTokens?: number): void;
 	/** Record a model a worker ran out of quota, where root's billing failover records its own. */
@@ -3412,16 +3413,17 @@ export class WorkerDelegationController {
 			...(this.deps.observeWorkerProgress ? { observeWorkerProgress: this.deps.observeWorkerProgress } : {}),
 			...(this.deps.observeWorkerRequest ? { observeWorkerRequest: this.deps.observeWorkerRequest } : {}),
 			...(this.deps.observeWorkerResponse ? { observeWorkerResponse: this.deps.observeWorkerResponse } : {}),
-			...(this.deps.packWorkerContext
+			...(this.deps.planWorkerRequest
 				? {
-						packContext: (messages: AgentMessage[], frozenBelow: number) =>
-							this.deps.packWorkerContext?.({
+						planRequest: (messages: AgentMessage[], sentPrefixCount: number, signal?: AbortSignal) =>
+							this.deps.planWorkerRequest!({
 								agentId,
 								model,
 								compactionTriggerTokens: retentionPolicy?.maxContextTokens,
 								messages,
-								frozenBelow,
-							}) ?? messages,
+								sentPrefixCount,
+								...(signal ? { signal } : {}),
+							}),
 					}
 				: {}),
 			...(this.deps.recordObjectiveMutation ? { recordObjectiveMutation: this.deps.recordObjectiveMutation } : {}),

@@ -25,35 +25,44 @@ import {
 	type TaskDirectoryContextPlan,
 } from "./tasks/task-directory-context.ts";
 
+/**
+ * The steps one request's context is planned with. The mechanics every conversation needs (context GC,
+ * path aliases, the authority context) are required; the steps that belong to the session's head (its
+ * extensions, memory recall, observers, curation, goal, skills, reflection and task context) are
+ * optional, so a worker conversation plans with the same controller and simply lacks them.
+ */
 export interface ProviderRequestContextControllerDeps {
 	transformBase?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
-	transformExtensions(messages: AgentMessage[]): Promise<{
+	transformExtensions?(messages: AgentMessage[]): Promise<{
 		messages: AgentMessage[];
 		transientMessages: AgentMessage[];
 		isCurrent?(): boolean;
 	}>;
-	runContextAudit(messages: AgentMessage[]): ContextAuditReport;
-	runPromptPolicyPlanning(report: ContextAuditReport): PromptPolicyShadowReport;
-	runMemoryRetrieval(messages: AgentMessage[]): Promise<MemoryRetrievalReport>;
+	runContextAudit?(messages: AgentMessage[]): ContextAuditReport;
+	runPromptPolicyPlanning?(report: ContextAuditReport): PromptPolicyShadowReport;
+	runMemoryRetrieval?(messages: AgentMessage[]): Promise<MemoryRetrievalReport>;
 	applyContextGc(
 		messages: AgentMessage[],
 		writePayloads: boolean,
 		/** Already-sent boundary packing must not rewrite below (see `frozenPrefixLength`). */
 		frozenBelow: number,
 	): ContextGcResult;
-	correlatePromptPolicyWithContextGc(report: ContextGcReport): void;
-	runPromptEnforcement(
+	correlatePromptPolicyWithContextGc?(report: ContextGcReport): void;
+	runPromptEnforcement?(
 		messages: AgentMessage[],
 		report: PromptPolicyShadowReport,
 	): { messages: AgentMessage[]; report: PromptEnforcementReport };
-	enqueueRelevanceCuration(messages: AgentMessage[], report: PromptPolicyShadowReport): void;
-	maybeDrainBrainCuration(): void;
-	appendMemoryEvidence(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[];
+	enqueueRelevanceCuration?(messages: AgentMessage[], report: PromptPolicyShadowReport): void;
+	maybeDrainBrainCuration?(): void;
+	appendMemoryEvidence?(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[];
 	previewReflectionCue?(): CurrentTurnReflectionCuePlan | undefined;
 	previewTaskDirectoryContext?(): TaskDirectoryContextPlan;
 	previewTaskAutomationContext?(): TaskAutomationContextPlan;
-	getGoalState(): GoalState | undefined;
-	skillVault: SkillVaultController;
+	getGoalState?(): GoalState | undefined;
+	skillVault?: Pick<
+		SkillVaultController,
+		"previewSystemPromptSection" | "getContextRevision" | "previewExclusionReminder" | "commitSystemPromptSection"
+	>;
 	/** Edge authority grants active on the session; projected after compaction or whenever active. */
 	getEdgeGrants?(): readonly EdgeGrantView[];
 	applyPathAliases(messages: AgentMessage[]): {
@@ -236,7 +245,9 @@ export class ProviderRequestContextController {
 
 	async plan(messages: AgentMessage[], sentPrefixCount: number, signal?: AbortSignal): Promise<AgentContextPlan> {
 		const transformed = this.deps.transformBase ? await this.deps.transformBase(messages, signal) : messages;
-		const extensionPlan = await this.deps.transformExtensions(transformed);
+		const extensionPlan = this.deps.transformExtensions
+			? await this.deps.transformExtensions(transformed)
+			: { messages: transformed, transientMessages: [] as AgentMessage[] };
 		const goalContextProjection = captureGoalContextProjection(extensionPlan.messages);
 		const reflectionCuePlan = this.deps.previewReflectionCue?.();
 		const directoryPlan = this.deps.previewTaskDirectoryContext?.();
@@ -294,31 +305,37 @@ export class ProviderRequestContextController {
 		// passes below so they can never disagree about what is frozen.
 		const frozenBelow = frozenPrefixLength(messages, sentPrefixCount, durableMessages);
 		const extensionMessages = [...durableMessages, ...providerTransients];
-		const auditReport = this.deps.runContextAudit(extensionMessages);
-		const shadowReport = this.deps.runPromptPolicyPlanning(auditReport);
-		const memoryReport = await this.deps.runMemoryRetrieval(extensionMessages);
+		const auditReport = this.deps.runContextAudit?.(extensionMessages);
+		const shadowReport = auditReport ? this.deps.runPromptPolicyPlanning?.(auditReport) : undefined;
+		const memoryReport = this.deps.runMemoryRetrieval
+			? await this.deps.runMemoryRetrieval(extensionMessages)
+			: undefined;
 		const previewGc = this.deps.applyContextGc(durableMessages, false, frozenBelow);
 		const pathAliasPlan = this.deps.applyPathAliases(previewGc.messages);
 		const previewProviderMessages = [...pathAliasPlan.messages, ...providerTransients];
-		const previewEnforcement = this.deps.runPromptEnforcement(previewProviderMessages, shadowReport);
+		const previewEnforcement =
+			shadowReport && this.deps.runPromptEnforcement
+				? this.deps.runPromptEnforcement(previewProviderMessages, shadowReport)
+				: { messages: previewProviderMessages };
 		if (previewEnforcement.messages.length !== previewProviderMessages.length) {
 			throw new Error("Provider request enforcement changed message cardinality");
 		}
 		const compactableMessages = previewEnforcement.messages.slice(0, previewGc.messages.length);
-		const goalState = this.deps.getGoalState();
+		const goalState = this.deps.getGoalState?.();
 		const withExtensionTransients = previewEnforcement.messages.slice(previewGc.messages.length);
-		const withMemory = this.deps.appendMemoryEvidence(
-			[...compactableMessages, ...withExtensionTransients],
-			memoryReport,
-		);
+		const withMemory =
+			memoryReport && this.deps.appendMemoryEvidence
+				? this.deps.appendMemoryEvidence([...compactableMessages, ...withExtensionTransients], memoryReport)
+				: [...compactableMessages, ...withExtensionTransients];
 		const beforeSkill = injectCompactGoalContext(withMemory, goalState, goalContextProjection);
 		if (!sameMessages(beforeSkill.slice(0, compactableMessages.length), compactableMessages)) {
 			throw new Error("Provider request transient contributors changed compactable history");
 		}
 		const legend = pathAliasPlan.legend;
-		const skillSection = this.deps.skillVault.previewSystemPromptSection();
-		const skillRevision = this.deps.skillVault.getContextRevision();
-		const exclusionReminder = this.deps.skillVault.previewExclusionReminder?.();
+		const skillVault = this.deps.skillVault;
+		const skillSection = skillVault?.previewSystemPromptSection();
+		const skillRevision = skillVault?.getContextRevision() ?? 0;
+		const exclusionReminder = skillVault?.previewExclusionReminder?.();
 		const hasActiveSkillRecordInHistory =
 			messages.some(
 				(message) => message.role === "custom" && message.customType === ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
@@ -334,7 +351,7 @@ export class ProviderRequestContextController {
 			skillContext = skillSection;
 		} else if (exclusionReminder) {
 			skillContext = `${ACTIVE_SKILL_CONTEXT_CLEARED_TEXT}\n\n${exclusionReminder}`;
-		} else if (skillRevision > 0 || hasActiveSkillRecordInHistory || hasSummaryMarkerInHistory) {
+		} else if (skillVault && (skillRevision > 0 || hasActiveSkillRecordInHistory || hasSummaryMarkerInHistory)) {
 			skillContext = ACTIVE_SKILL_CONTEXT_CLEARED_TEXT;
 		}
 
@@ -348,9 +365,9 @@ export class ProviderRequestContextController {
 			reflectionCuePlan?.isCurrent() !== false &&
 			directoryPlan?.isCurrent() !== false &&
 			automationPlan?.isCurrent() !== false &&
-			this.deps.skillVault.getContextRevision() === skillRevision &&
+			(skillVault?.getContextRevision() ?? 0) === skillRevision &&
 			// The goal snapshot is one shared frozen value per journal position (session-goal-state.ts).
-			this.deps.getGoalState() === goalState &&
+			this.deps.getGoalState?.() === goalState &&
 			resolveAuthorityContext(this.deps.getEdgeGrants, messages, extensionPlan.messages) === authorityContext;
 		// One projection serves preview, currency check and commit. The plan is a pure function of the
 		// durable messages (same array, same objects), the dependencies `dependenciesCurrent` tracks,
@@ -360,8 +377,8 @@ export class ProviderRequestContextController {
 		const planCurrent = () =>
 			dependenciesCurrent() &&
 			previewGc.isCurrent() &&
-			this.deps.skillVault.previewSystemPromptSection() === skillSection &&
-			this.deps.skillVault.previewExclusionReminder?.() === exclusionReminder;
+			skillVault?.previewSystemPromptSection() === skillSection &&
+			skillVault?.previewExclusionReminder?.() === exclusionReminder;
 
 		return {
 			messages: compactableMessages,
@@ -373,10 +390,10 @@ export class ProviderRequestContextController {
 					throw new Error("Committed provider request context diverged from its accepted plan");
 				}
 				previewGc.commit();
-				this.deps.correlatePromptPolicyWithContextGc(previewGc.report);
-				this.deps.enqueueRelevanceCuration(previewProviderMessages, shadowReport);
-				this.deps.maybeDrainBrainCuration();
-				if (this.deps.skillVault.commitSystemPromptSection() !== skillSection) {
+				this.deps.correlatePromptPolicyWithContextGc?.(previewGc.report);
+				if (shadowReport) this.deps.enqueueRelevanceCuration?.(previewProviderMessages, shadowReport);
+				this.deps.maybeDrainBrainCuration?.();
+				if (skillVault && skillVault.commitSystemPromptSection() !== skillSection) {
 					throw new Error("Committed active skill context diverged from its accepted plan");
 				}
 				reflectionCuePlan?.commit();

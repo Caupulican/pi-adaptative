@@ -83,7 +83,7 @@ function createExecutorHarness(
 	autoPreflight = true,
 	sharedBudget?: SharedCapabilityBudget,
 	workerContextFiles: ReadonlyArray<{ path: string; content?: string }> = [],
-	packContext?: WorkerAttemptExecutorOptions["packContext"],
+	planRequest?: WorkerAttemptExecutorOptions["planRequest"],
 ) {
 	const events: string[] = [];
 	const conversation = workerConversation();
@@ -227,7 +227,7 @@ function createExecutorHarness(
 			mailboxMessagesForConversation: () => [],
 		},
 		warn: (message) => events.push(`warn:${message}`),
-		...(packContext ? { packContext } : {}),
+		...(planRequest ? { planRequest } : {}),
 		observeWorkerResponse: (message, observation) =>
 			observedResponses.push({
 				agentId: observation.agentId,
@@ -495,7 +495,7 @@ describe("worker attempt executor", () => {
 		expect(harness.conversation.getProviderContext().messages.filter((m) => m.role === "assistant")).toHaveLength(1);
 	});
 
-	it("plans every worker request through context GC, with the worker's own sent mark", async () => {
+	it("plans every worker request through the shared request planner, with the worker's own sent mark", async () => {
 		const packCalls: Array<{ count: number; frozenBelow: number }> = [];
 		let planned: AgentMessage[] | undefined;
 		const history: AgentMessage[] = [
@@ -522,9 +522,9 @@ describe("worker attempt executor", () => {
 			true,
 			undefined,
 			[],
-			(messages, frozenBelow) => {
-				packCalls.push({ count: messages.length, frozenBelow });
-				return [messages[1]!];
+			async (messages, sentPrefixCount) => {
+				packCalls.push({ count: messages.length, frozenBelow: sentPrefixCount });
+				return { messages: [messages[1]!] };
 			},
 		);
 
