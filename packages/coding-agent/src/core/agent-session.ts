@@ -851,13 +851,17 @@ export class AgentSession {
 				? previousResolveRequestReasoning(reasoning, request)
 				: reasoning;
 			// The lane keeps the reasoning it last sent unless the owner changed it or the change is free; the
-			// owner's cost ceiling applies after the gate and always passes.
-			const lane = cacheLaneKey(request.model.api, request.model.provider, request.model.id);
+			// owner's cost ceiling applies after the gate and always passes. An isolated lane (a worker) reuses
+			// this resolver on its own conversation, so its pin is its own, never the foreground's.
+			const conversation =
+				request.sessionId !== undefined && request.sessionId !== this.sessionId ? request.sessionId : undefined;
+			const modelLane = cacheLaneKey(request.model.api, request.model.provider, request.model.id);
+			const lane = conversation ? `${conversation}\0${modelLane}` : modelLane;
 			const held = this._custody.admitReasoning(
 				lane,
 				resolvedReasoning,
 				this.hostTurnReasoning.resolveRequestReasoning(request.model, request.sourceMessages, resolvedReasoning),
-				() => this._laneCacheGone(request.model),
+				() => this._laneCacheGone(request.model, conversation),
 			) as typeof resolvedReasoning;
 			this.hostTurnReasoning.noteSent(held);
 			const final = this._costGuard.resolveRequestReasoning(request.model, request.context, held, request.maxTokens);
@@ -3237,10 +3241,10 @@ export class AgentSession {
 	}
 
 	/** Whether the lane's cache is expected gone at the real idle gap: a surface change there costs nothing. */
-	private _laneCacheGone(model: Model<Api>): boolean {
+	private _laneCacheGone(model: Model<Api>, conversation?: string): boolean {
 		const lane = cacheLaneKey(model.api, model.provider, model.id);
 		const now = Date.now();
-		const last = this._cacheKnowledge.lastResponseAt(this.sessionId, lane);
+		const last = this._cacheKnowledge.lastResponseAt(conversation ?? this.sessionId, lane);
 		if (last === undefined) return false;
 		const estimate = this._cacheKnowledge.retainedAfter(lane, Math.max(0, now - last), now);
 		return estimate !== undefined && estimate.retained + estimate.standardError <= 0;

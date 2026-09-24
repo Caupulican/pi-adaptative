@@ -653,6 +653,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 			context: Context;
 			maxTokens?: number;
 			sourceMessages: readonly AgentMessage[];
+			/**
+			 * The conversation the request belongs to (`AgentLoopConfig.sessionId`). One resolver can serve
+			 * several conversations (a host's isolated lanes reuse its policy), so per-conversation state is
+			 * keyed by it.
+			 */
+			sessionId?: string;
 		},
 	) => SimpleStreamOptions["reasoning"];
 

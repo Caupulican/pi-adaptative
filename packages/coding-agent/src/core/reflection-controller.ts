@@ -12,9 +12,11 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Agent } from "@caupulican/pi-agent-core/agent";
 import { runAgentLoop, startAgentProviderRequest } from "@caupulican/pi-agent-core/agent-loop";
+import { resolveRequestPreflightMaxTokens } from "@caupulican/pi-agent-core/provider-request-planner";
 import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/session";
 import type { AgentContext, AgentLoopConfig, AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
+import { streamSimple } from "@caupulican/pi-ai/stream";
 import type {
 	Api,
 	AssistantMessage,
@@ -1490,7 +1492,12 @@ export class ReflectionController {
 				...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
 				...(options.headers !== undefined ? { headers: options.headers } : {}),
 				getApiKey: agent.getApiKey,
-				resolveRequestReasoning: agent.resolveRequestReasoning,
+				// The host's reasoning policy, applied to this conversation's own state.
+				resolveRequestReasoning:
+					opts.conversationId !== undefined && agent.resolveRequestReasoning
+						? (reasoning, request) =>
+								agent.resolveRequestReasoning!(reasoning, { ...request, sessionId: opts.conversationId })
+						: agent.resolveRequestReasoning,
 				temperature: textToolCallProtocol ? 0 : undefined,
 				textToolCallProtocol,
 				onTextToolProtocolParse: usesForegroundModel ? agent.onTextToolProtocolParse : undefined,
@@ -1643,6 +1650,37 @@ export class ReflectionController {
 				};
 			}
 
+			if (opts.requestContext) {
+				// Sent exactly as given: the lane's own budget preflight, then one request with the lane's
+				// affinity, retention and auth, never through request planning.
+				const requestContext = opts.requestContext;
+				const maxTokens = await resolveRequestPreflightMaxTokens({
+					requestPreflight: opts.requestPreflight,
+					model,
+					context: requestContext,
+					maxTokens: opts.maxTokens,
+					signal: opts.signal,
+				});
+				const apiKey = (agent.getApiKey ? await agent.getApiKey(model.provider) : undefined) || options.apiKey;
+				const streamFunction = agent.streamFn ?? streamSimple;
+				const rawStream = await streamFunction(model, requestContext, {
+					...options,
+					...(maxTokens !== undefined ? { maxTokens } : {}),
+					...(apiKey !== undefined ? { apiKey } : {}),
+				});
+				const response = await rawStream.result();
+				await opts.onMessage?.(response);
+				return {
+					text: response.content
+						.filter((c): c is TextContent => c.type === "text")
+						.map((c) => c.text)
+						.join(""),
+					usage: response.usage,
+					stopReason: response.stopReason,
+					...(response.errorMessage ? { errorMessage: response.errorMessage } : {}),
+					messages: [...history, response],
+				};
+			}
 			for (const message of opts.messages) await opts.onMessage?.(message);
 			const stream = await startAgentProviderRequest(context, loopConfig, opts.signal, agent.streamFn);
 			const result = await stream.result();

@@ -11,7 +11,7 @@ import type {
 	ThinkingLevel,
 } from "@caupulican/pi-agent-core";
 import type { CompactionResult, SessionManager } from "@caupulican/pi-agent-core/node";
-import type { Api, CacheRetention, ImageContent, Message, Model, StopReason, Usage } from "@caupulican/pi-ai";
+import type { Api, CacheRetention, Context, ImageContent, Message, Model, StopReason, Usage } from "@caupulican/pi-ai";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import type { LaneRecord, LaneTerminalStatus } from "./autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskLiveView } from "./background-tool-task-controller.ts";
@@ -322,6 +322,18 @@ export interface IsolatedCompletionOptions {
 	cacheRetention: CacheRetention;
 	/** Stable namespace used to derive provider cache affinity. */
 	laneKind?: string;
+	/**
+	 * An exact provider request to send once, as is: a summarizer extending the lane's sent context (its
+	 * system prompt, tools and messages exactly as last sent, plus one instruction) so the provider serves
+	 * the prefix from cache. It bypasses request planning, which could rewrite the sent messages; the
+	 * lane's budget preflight still runs. `messages` and `tools` are ignored when it is set.
+	 */
+	requestContext?: Context;
+	/**
+	 * The caller's conversation identity for per-conversation host policy (the reasoning pin, the lane's
+	 * observed cache lifetime). A worker passes the id its cache observations are recorded under.
+	 */
+	conversationId?: string;
 }
 
 export const DEFAULT_ISOLATED_LANE_KIND = "isolated";

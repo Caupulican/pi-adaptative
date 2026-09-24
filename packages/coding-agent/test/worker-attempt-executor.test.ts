@@ -464,6 +464,7 @@ describe("worker attempt executor", () => {
 					maxTokens: 64,
 					attempt: 0,
 					context: { systemPrompt: options.systemPrompt, tools: [], messages: options.history ?? [] },
+					sourceContext: { systemPrompt: options.systemPrompt, tools: [], messages: options.history ?? [] },
 				} as never,
 				undefined,
 			);

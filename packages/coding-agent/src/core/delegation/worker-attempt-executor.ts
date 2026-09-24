@@ -17,6 +17,7 @@ import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts
 import type { WorkerRequest } from "../autonomy/contracts.ts";
 import type { LaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
+import { type LastSentRequest, sessionLaneSummarizerRequest } from "../compaction-support.ts";
 import { frozenPrefixLength } from "../context/prefix-stability.ts";
 import { type ModelCapabilityProfile, resolveWorkerOutputTokenCeiling } from "../model-capability.ts";
 
@@ -376,6 +377,10 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	let retentionWarningEmitted = false;
 	/** The latest accepted provider request of this attempt, for the response that answers it. */
 	let lastRequest: { snapshot: SessionRequestSnapshotInput; openedAt: number } | undefined;
+	/** The worker lane's last request exactly as sent, for its summarizer to extend on the warm cache. */
+	let lastSent: LastSentRequest | undefined;
+	/** The durable history the request being planned carries (what the last sent request is checked against). */
+	let planningMessages: readonly AgentMessage[] = [];
 	let firstMailboxPoll = true;
 	let ran = false;
 	let terminalOutput: string | undefined;
@@ -439,6 +444,24 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 					undefined,
 					undefined,
 					{
+						// The summarizer extends the worker lane's own last request (its system prompt, tools and
+						// messages exactly as sent) on the same cache, like root's summarizer on the session lane.
+						...(() => {
+							const structuredRequest = lastSent
+								? sessionLaneSummarizerRequest({
+										compactionModel: options.model,
+										sessionModel: options.model,
+										systemPrompt: lastSent.context.systemPrompt ?? "",
+										tools: lastSent.context.tools,
+										messagesToSummarize: preparation.messagesToSummarize,
+										liveMessages: planningMessages,
+										lastSent,
+										textToolCallProtocol: undefined,
+										sessionId: `${options.parentSessionId}/worker:${options.agentId}`,
+									})
+								: undefined;
+							return structuredRequest ? { structuredRequest } : {};
+						})(),
 						completion: async (model, context, requestOptions): Promise<AssistantMessage> => {
 							const requestSignal = requestOptions.signal ?? completeSignal;
 							requestSignal.throwIfAborted();
@@ -479,7 +502,12 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							try {
 								let completion: IsolatedCompletionResult;
 								try {
+									// A structured request (cache retained) is the lane's own sent prefix plus one
+									// instruction: sent as is, on the worker lane's affinity. Otherwise a standalone prompt.
+									const structured =
+										requestOptions.cacheRetention !== undefined && requestOptions.cacheRetention !== "none";
 									completion = await options.runIsolatedCompletion({
+										...(structured ? { requestContext: context } : {}),
 										systemPrompt: context.systemPrompt ?? "",
 										messages: context.messages,
 										model: options.model,
@@ -487,8 +515,13 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										maxTokens,
 										requestPreflight: () => providerTurn.requestPreflight(),
 										signal: requestSignal,
-										cacheRetention: "none",
-										laneKind: "worker-compaction",
+										...(structured
+											? {
+													cacheRetention: requestOptions.cacheRetention ?? "short",
+													laneKind: "worker",
+													conversationId: `${options.parentSessionId}/worker:${options.agentId}`,
+												}
+											: { cacheRetention: "none", laneKind: "worker-compaction" }),
 									});
 								} catch (error) {
 									providerTurn.close();
@@ -711,6 +744,11 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 											signal.throwIfAborted();
 											const { snapshot } = options.conversation.appendRequestSnapshot(context);
 											lastRequest = { snapshot, openedAt: Date.now() };
+											lastSent = {
+												model: context.model as Model<Api>,
+												context: context.context,
+												sourceMessages: context.sourceContext.messages,
+											};
 											options.observeWorkerRequest?.(options.agentId, snapshot);
 										},
 										beforeToolCall: async (context, toolSignal) => {
@@ -888,6 +926,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										...(retentionPolicy || options.packContext
 											? {
 													planContext: async ({ messages, sentPrefixCount }: AgentContextPlanRequest) => {
+														planningMessages = messages;
 														const retain = async (
 															policy: WorkerConversationRetentionPolicy,
 														): Promise<AgentMessage[]> => {
@@ -948,6 +987,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										signal,
 										cacheRetention: "short",
 										laneKind: "worker",
+										conversationId: `${options.parentSessionId}/worker:${options.agentId}`,
 									});
 								} catch (error) {
 									providerTurn.close();

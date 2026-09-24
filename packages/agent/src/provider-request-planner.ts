@@ -480,6 +480,7 @@ export async function startPlannedAgentProviderRequestWithId(
 						context: materialized.context,
 						maxTokens: requestMaxTokens,
 						sourceMessages: plan.messages,
+						...(config.sessionId !== undefined ? { sessionId: config.sessionId } : {}),
 					})
 				: config.reasoning;
 			const streamFunction = streamFn ?? streamSimple;
