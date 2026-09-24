@@ -138,6 +138,11 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		phaseLabel = "RETRYING";
 		phaseTone = "warning";
 		phaseValue = projection.why || projection.current_action || "Retrying transient failure";
+	} else if (workState?.phase === "waiting_tool" || workState?.phase === "waiting_worker") {
+		// Only background work runs: the foreground turn is over, so its last action is not what is happening.
+		phaseLabel = "BACKGROUND";
+		phaseTone = undefined;
+		phaseValue = workState.label;
 	} else {
 		phaseLabel = "WORKING";
 		phaseTone = undefined;

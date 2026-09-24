@@ -99,6 +99,25 @@ describe("Operator POV bar", () => {
 		expect(turn.startsWith(" WORKING build: Working the operator's turn")).toBe(true);
 	});
 
+	it("reads BACKGROUND with what runs once only background work is left, never the finished turn's action", () => {
+		const src = source({
+			projection: {
+				phase: "build",
+				current_action: "Working the operator's turn",
+				control: { owner: "root", state: "executing", reasonCode: "no_objective" },
+			},
+		});
+		const row = renderPlain(
+			{
+				...src,
+				getSessionWorkState: () => ({ phase: "waiting_tool", busy: true, label: "Tool executing", sessionId: "s" }),
+			},
+			240,
+		);
+		expect(row.startsWith(" BACKGROUND Tool executing")).toBe(true);
+		expect(row).not.toContain("WORKING");
+	});
+
 	it("F001-001/003/004..011: one `|`-separated row carrying every operator fact", () => {
 		const lines = new OperatorPovBarComponent(
 			source({
