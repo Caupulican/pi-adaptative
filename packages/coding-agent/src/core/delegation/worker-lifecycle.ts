@@ -10,6 +10,7 @@ import type {
 	AttemptRetryState,
 	AttemptUsageSnapshot,
 	ExecutionGrant,
+	OrchestrationModelBinding,
 	WorkerExecutionContract,
 	WorkerResultContract,
 	WorkerRole,
@@ -278,6 +279,18 @@ export class WorkerLifecycle {
 	startAgent(laneId: string, agentId: string, leaseTtlMs: number, ownerId = agentId): StartedDelegationAttempt {
 		const attempt = this.requireActiveAttempt(laneId);
 		return this.ledger.start(attempt.attemptId, leaseTtlMs, ownerId, agentId);
+	}
+
+	/** The attempt runs on a model other than its contract's first binding (a quota failover). */
+	recordRunningModel(laneId: string, model: OrchestrationModelBinding): void {
+		const attempt = this.requireActiveAttempt(laneId);
+		if (!attempt.lease) throw new Error(`Durable worker '${laneId}' has no live lease.`);
+		this.ledger.runtime.recordAttemptRunningModel(
+			attempt.attemptId,
+			attempt.lease.leaseId,
+			attempt.lease.fencingToken,
+			model,
+		);
 	}
 
 	renewLease(laneId: string, leaseTtlMs: number) {

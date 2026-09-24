@@ -154,11 +154,14 @@ export class WorkerProfileResolver {
 	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
 		// Admission already fixed this contract. Live host controls may revoke execution, but mutable
 		// profile files cannot retroactively redefine the model, resources, or authority snapshot.
-		const resolvedModel = resolvePinnedOrchestrationModel(
-			contract.modelBinding,
-			this.options.getModelRegistry(),
-			(model) => this.options.isModelExhausted(model),
-		);
+		// A routed worker's contract carries its routing order as an ordered-fallback policy: the first
+		// candidate not exhausted is where it runs, so a quota failure moves it on retry. A fixed policy
+		// runs on the admitted binding or not at all.
+		const isUnavailable = (model: Model<Api>) => this.options.isModelExhausted(model);
+		const resolvedModel =
+			contract.profile.modelPolicy.mode === "ordered-fallback"
+				? resolveConfiguredOrchestrationModel(contract.profile, this.options.getModelRegistry(), isUnavailable)
+				: resolvePinnedOrchestrationModel(contract.modelBinding, this.options.getModelRegistry(), isUnavailable);
 		if (!resolvedModel) return { ok: false, reason: "orchestration_profile_model_unavailable" };
 		return {
 			ok: true,

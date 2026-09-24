@@ -1097,6 +1097,9 @@ export class AgentSession {
 			// Worker lanes pass the same cache guard; each worker conversation is its own lane.
 			observeWorkerRequest: (agentId, snapshot) => this._guardCacheSurface(snapshot, `worker:${agentId}`),
 			observeWorkerResponse: (message, observation) => this._recordCacheObservation(message, observation),
+			getSharedLaneToolOptions: () => this._runtimeBuilder.getSharedLaneToolOptions(),
+			markModelExhausted: (model, retryAfterMs) =>
+				this._foregroundRecovery.markModelExhausted(`${model.provider}/${model.id}`, retryAfterMs),
 			// Worker conversations pack with root's own context-GC pass, on their own lane.
 			packWorkerContext: ({ agentId, model, compactionTriggerTokens, messages, frozenBelow }) =>
 				this._pipeline.applyContextGc(messages, true, frozenBelow, {

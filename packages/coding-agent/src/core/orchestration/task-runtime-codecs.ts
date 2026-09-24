@@ -48,6 +48,7 @@ import {
 	type ObjectiveStatus,
 	ORCHESTRATION_SCHEMA_VERSION,
 	type OrchestrationDispatchRequest,
+	type OrchestrationModelBinding,
 	type OrchestrationTaskStatus,
 	type ResourcePointer,
 	type RiskBudget,
@@ -61,6 +62,7 @@ import {
 	type WorkerModelRouteSource,
 	type WorkerResultContract,
 } from "./contracts.ts";
+import { orchestrationModelBindingFromValue } from "./profile-registry.ts";
 import { validateRiskBudget } from "./risk-budget.ts";
 import {
 	assertRecordWithinLimit,
@@ -806,6 +808,7 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		"agentId",
 		"lease",
 		"retry",
+		"runningModel",
 		"checkpointIds",
 		"usageAccounting",
 		"usageReceipts",
@@ -844,6 +847,9 @@ function attemptRuntimeStateFromValue(value: unknown, label: string): AttemptRun
 		...(attempt.agentId === undefined ? {} : { agentId: dispatchIdentifier(attempt.agentId, `${label}.agentId`) }),
 		...(attempt.lease === undefined ? {} : { lease: leaseFromPayload(toJsonObject({ lease: attempt.lease })) }),
 		...(attempt.retry === undefined ? {} : { retry: retryStateFromValue(attempt.retry, `${label}.retry`) }),
+		...(attempt.runningModel === undefined
+			? {}
+			: { runningModel: runningModelFromValue(attempt.runningModel, `${label}.runningModel`) }),
 		...(attempt.usageAccounting === undefined
 			? {}
 			: { usageAccounting: usageAccountingFromValue(attempt.usageAccounting, `${label}.usageAccounting`) }),
@@ -892,6 +898,15 @@ function leaseFromValue(value: unknown, label: string): AttemptLease {
 		issuedAt,
 		expiresAt,
 	};
+}
+
+/** The model an attempt moved to (see `AttemptRuntimeState.runningModel`). */
+export function runningModelFromValue(value: unknown, label: string): OrchestrationModelBinding {
+	try {
+		return orchestrationModelBindingFromValue(value);
+	} catch {
+		throw new DurableTaskRuntimeError(`${label} is invalid.`);
+	}
 }
 
 export function retryStateFromValue(value: unknown, label: string): AttemptRetryState {

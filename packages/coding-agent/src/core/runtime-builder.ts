@@ -64,6 +64,7 @@ import {
 	resolveToolkitScriptScope,
 } from "./autonomy/edge-policy.ts";
 import { isPathWithinEnvelope, wrapToolWithEnvelopeScope } from "./autonomy/envelope-enforcement.ts";
+import type { SharedLaneToolOptions } from "./autonomy/lane-tool-surface.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import { buildWorkerSessionPrivatePathEnvelope } from "./autonomy/worker-session-private-scope.ts";
 import type { CapabilityTierPolicy } from "./capability-tier.ts";
@@ -491,12 +492,19 @@ interface RuntimeToolAccessPolicy {
  * {@link AgentSession}. See the module header for the snapshot-ownership and host-binding boundaries.
  */
 export class RuntimeBuilder {
+	/** The tool mechanics a worker lane shares with root (see `SharedLaneToolOptions`). */
+	getSharedLaneToolOptions(): SharedLaneToolOptions {
+		return this._sharedLaneToolOptions;
+	}
+
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
+	/** Root's tool mechanics as the last build resolved them, shared with every worker lane. */
+	private _sharedLaneToolOptions: SharedLaneToolOptions = {};
 	/** Exact extensions the owner approved through the live-load API. Discovery never populates this set. */
 	private readonly _explicitLiveExtensionPaths = new Set<string>();
 	private _reloadPromise: Promise<void> | undefined;
@@ -1110,6 +1118,20 @@ export class RuntimeBuilder {
 					return resourceLoader.loadIsolatedExtension(extensionPath, cwd);
 				},
 			},
+		};
+		this._sharedLaneToolOptions = {
+			bash: {
+				outputReduction,
+				...(shellCommandPrefix !== undefined ? { commandPrefix: shellCommandPrefix } : {}),
+				...(shellPath !== undefined ? { shellPath } : {}),
+				platform: process.platform,
+				windowsShellPythonEngine: windowsShell.pythonEngine,
+				windowsShellEngineOptions: { gnuToolsDir: windowsShell.gnuToolsDir },
+			},
+			python: { outputReduction, omitEnvironmentVariables: ["BW_SESSION"] },
+			read: { autoResizeImages, fileEncodings },
+			edit: { fileEncodings },
+			...(toolArtifactStore ? { artifactStore: toolArtifactStore } : {}),
 		};
 		this._baseToolDefinitions = baseToolsOverride
 			? new Map(

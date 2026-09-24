@@ -210,6 +210,8 @@ export class WorkerRecoveryCoordinator {
 		outcome: { laneStatus: string; reasonCode: string; reasonDetail?: string };
 		provider: string;
 		maxAttempts?: number;
+		/** The attempt's contract has another usable candidate for a quota failure (see evaluateWorkerRetry). */
+		failover?: boolean;
 	}): WorkerRetryScheduleResult {
 		const attempt = this.options.lifecycle.getActiveAttempt(args.laneId);
 		const record = this.options.lifecycle.getRecord(args.laneId);
@@ -222,6 +224,7 @@ export class WorkerRecoveryCoordinator {
 			provider: args.provider,
 			retriesUsed,
 			...(args.maxAttempts !== undefined ? { maxAttempts: args.maxAttempts } : {}),
+			...(args.failover ? { failover: true } : {}),
 		});
 		if (!decision.retry) return { scheduled: false, reason: decision.reason };
 		if (decision.reason === "rate_limit" || decision.reason === "overloaded") {

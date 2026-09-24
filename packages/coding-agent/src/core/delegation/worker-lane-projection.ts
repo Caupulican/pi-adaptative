@@ -99,8 +99,10 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 		profileId: attempt.dispatch.profileId,
 		...(attempt.dispatch.executionContract
 			? {
-					modelRef: `${attempt.dispatch.executionContract.worker.modelBinding.provider}/${attempt.dispatch.executionContract.worker.modelBinding.modelId}`,
-					thinkingLevel: attempt.dispatch.executionContract.worker.modelBinding.thinkingLevel,
+					// The model the attempt actually ran on: a quota failover moved it off the contract's first binding.
+					modelRef: `${(attempt.runningModel ?? attempt.dispatch.executionContract.worker.modelBinding).provider}/${(attempt.runningModel ?? attempt.dispatch.executionContract.worker.modelBinding).modelId}`,
+					thinkingLevel: (attempt.runningModel ?? attempt.dispatch.executionContract.worker.modelBinding)
+						.thinkingLevel,
 				}
 			: {}),
 		...(reasonCode ? { reasonCode } : {}),

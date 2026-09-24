@@ -48,6 +48,7 @@ import {
 	objectiveFromPayload,
 	resultFromPayload,
 	retryStateFromValue,
+	runningModelFromValue,
 	string,
 	taskFromPayload,
 	usageFromPayload,
@@ -1395,6 +1396,23 @@ export function reduceOrchestrationEvent(
 			attempts[attemptId] = {
 				...attempt,
 				lease: { ...attempt.lease!, expiresAt },
+				updatedAt: event.occurredAt,
+			};
+			break;
+		}
+		case "attempt.model_moved": {
+			const attemptId = string(event.payload.attemptId, "attempt.model_moved.attemptId");
+			assertEventAggregateId(event, attemptId, "Moved attempt");
+			const attempt = attempts[attemptId];
+			if (!attempt) throw new DurableTaskRuntimeError(`Unknown attempt '${attemptId}'.`);
+			const leaseId = string(event.payload.leaseId, "attempt.model_moved.leaseId");
+			const fencingToken = number(event.payload.fencingToken, "attempt.model_moved.fencingToken");
+			if (!attempt.lease || attempt.lease.leaseId !== leaseId || attempt.lease.fencingToken !== fencingToken) {
+				throw new DurableTaskRuntimeError(`Attempt '${attemptId}' lease or fencing token is stale.`);
+			}
+			attempts[attemptId] = {
+				...attempt,
+				runningModel: runningModelFromValue(event.payload.model, "attempt.model_moved.model"),
 				updatedAt: event.occurredAt,
 			};
 			break;

@@ -379,30 +379,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 	) {
 		throw new OrchestrationProfileError("Orchestration profile delegationLimits are invalid.");
 	}
-	const candidates = modelPolicy.candidates.map((candidate) => {
-		if (!isPlainRecord(candidate) || !hasOnlyKeys(candidate, ["provider", "modelId", "thinkingLevel"])) {
-			throw new OrchestrationProfileError("Orchestration profile model candidate is invalid.");
-		}
-		if (
-			typeof candidate.provider !== "string" ||
-			candidate.provider.length === 0 ||
-			candidate.provider.length > MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH ||
-			typeof candidate.modelId !== "string" ||
-			candidate.modelId.length === 0 ||
-			candidate.modelId.length > MAX_ORCHESTRATION_MODEL_ID_LENGTH ||
-			typeof candidate.thinkingLevel !== "string" ||
-			!ORCHESTRATION_THINKING_LEVELS.includes(
-				candidate.thinkingLevel as (typeof ORCHESTRATION_THINKING_LEVELS)[number],
-			)
-		) {
-			throw new OrchestrationProfileError("Orchestration profile model candidate is invalid.");
-		}
-		return {
-			provider: candidate.provider,
-			modelId: candidate.modelId,
-			thinkingLevel: candidate.thinkingLevel as (typeof ORCHESTRATION_THINKING_LEVELS)[number],
-		};
-	});
+	const candidates = modelPolicy.candidates.map((candidate) => orchestrationModelBindingFromValue(candidate));
 	if (
 		value.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION ||
 		typeof value.profileId !== "string" ||
@@ -633,4 +610,28 @@ export function planProfileDispatch(args: {
 	const compiled = args.policyCompiler.compile(policyInput);
 	if (compiled.outcome !== "allow") return compiled;
 	return { outcome: "allow", plan: { profile, model, grant: compiled.grant, toolManifests: compiled.toolManifests } };
+}
+
+/** One model binding (`provider`, `modelId`, `thinkingLevel`) exactly as a profile or a durable record holds it. */
+export function orchestrationModelBindingFromValue(candidate: unknown): OrchestrationModelBinding {
+	if (!isPlainRecord(candidate) || !hasOnlyKeys(candidate, ["provider", "modelId", "thinkingLevel"])) {
+		throw new OrchestrationProfileError("Orchestration profile model candidate is invalid.");
+	}
+	if (
+		typeof candidate.provider !== "string" ||
+		candidate.provider.length === 0 ||
+		candidate.provider.length > MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH ||
+		typeof candidate.modelId !== "string" ||
+		candidate.modelId.length === 0 ||
+		candidate.modelId.length > MAX_ORCHESTRATION_MODEL_ID_LENGTH ||
+		typeof candidate.thinkingLevel !== "string" ||
+		!ORCHESTRATION_THINKING_LEVELS.includes(candidate.thinkingLevel as (typeof ORCHESTRATION_THINKING_LEVELS)[number])
+	) {
+		throw new OrchestrationProfileError("Orchestration profile model candidate is invalid.");
+	}
+	return {
+		provider: candidate.provider,
+		modelId: candidate.modelId,
+		thinkingLevel: candidate.thinkingLevel as (typeof ORCHESTRATION_THINKING_LEVELS)[number],
+	};
 }

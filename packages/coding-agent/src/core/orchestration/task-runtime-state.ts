@@ -17,6 +17,7 @@ import type {
 	ObjectiveContract,
 	ObjectiveStatus,
 	OrchestrationDispatchRequest,
+	OrchestrationModelBinding,
 	RiskBudget,
 	TaskContract,
 	WorkerResultContract,
@@ -53,6 +54,11 @@ export interface AttemptRuntimeState {
 	lease?: AttemptLease;
 	/** Omitted for legacy attempts and attempts that have never entered the host retry ladder. */
 	retry?: AttemptRetryState;
+	/**
+	 * The model the attempt runs on when it is not its contract's first binding: a routed worker's
+	 * ordered-fallback contract moved it after a quota failure. Omitted means the contract's binding.
+	 */
+	runningModel?: OrchestrationModelBinding;
 	checkpointIds: readonly string[];
 	/** Received charges retain their execution-generation identity after suspension or completion. */
 	usageAccounting?: AttemptUsageAccounting;

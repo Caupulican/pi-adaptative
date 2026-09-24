@@ -161,6 +161,14 @@ export function stepDownThinkingLevel(level: OrchestrationThinkingLevel): Orches
 }
 
 /**
+ * Every model a fresh, unpinned worker may run on under `account: "other"`, in routing order: the
+ * first is where it runs, the rest are where it moves when that account runs out of quota.
+ */
+export function routedWorkerModels(input: Parameters<typeof selectRoutedWorkerModel>[0]): Model<Api>[] {
+	return collectRoutedWorkerModels(input, Number.POSITIVE_INFINITY);
+}
+
+/**
  * The model a fresh, unpinned worker runs on under `account: "other"`: the first routing candidate
  * (`provider` or `provider/modelId`, in the configured order, then every other authenticated
  * provider in catalog order) that is not the foreground's provider, has configured auth, and is not
@@ -175,7 +183,27 @@ export function selectRoutedWorkerModel(input: {
 	isModelExhausted: (model: Model<Api>) => boolean;
 	isModelLimited?: (model: Model<Api>) => boolean;
 }): Model<Api> | undefined {
-	if (input.routing.account !== "other" || input.foregroundModel.provider === "faux") return undefined;
+	return collectRoutedWorkerModels(input, 1)[0];
+}
+
+function collectRoutedWorkerModels(
+	input: {
+		foregroundModel: Model<Api>;
+		routing: WorkerAccountRouting;
+		role?: string;
+		modelRegistry: ModelRegistry;
+		isModelExhausted: (model: Model<Api>) => boolean;
+		isModelLimited?: (model: Model<Api>) => boolean;
+	},
+	limit: number,
+): Model<Api>[] {
+	const found: Model<Api>[] = [];
+	const add = (model: Model<Api> | undefined): boolean => {
+		if (model && !found.some((entry) => entry.provider === model.provider && entry.id === model.id))
+			found.push(model);
+		return found.length >= limit;
+	};
+	if (input.routing.account !== "other" || input.foregroundModel.provider === "faux") return found;
 	const { foregroundModel, modelRegistry } = input;
 	const ordered =
 		(input.role !== undefined ? input.routing.routeProvidersByRole?.[input.role] : undefined) ??
@@ -202,18 +230,16 @@ export function selectRoutedWorkerModel(input: {
 	};
 	for (const entry of ordered) {
 		const slash = entry.indexOf("/");
-		const found = slash > 0 ? candidate(entry.slice(0, slash), entry.slice(slash + 1)) : candidate(entry);
-		if (found) return found;
+		if (add(slash > 0 ? candidate(entry.slice(0, slash), entry.slice(slash + 1)) : candidate(entry))) return found;
 	}
 	const seen = new Set<string>();
 	for (const model of available) {
 		if (seen.has(model.provider)) continue;
 		seen.add(model.provider);
 		if (!isAccount(model.provider)) continue;
-		const found = candidate(model.provider);
-		if (found) return found;
+		if (add(candidate(model.provider))) return found;
 	}
-	return undefined;
+	return found;
 }
 
 function selectModelBinding(
@@ -227,12 +253,18 @@ function selectModelBinding(
 	accountRouting: WorkerAccountRouting,
 	isModelExhausted: (model: Model<Api>) => boolean,
 	isModelLimited: ((model: Model<Api>) => boolean) | undefined,
-): OrchestrationModelBinding | undefined {
-	if (modelPin) return { ...modelPin };
+):
+	| {
+			binding: OrchestrationModelBinding;
+			/** Where a routed worker moves, in order, when its account runs out of quota. Authored choices have none. */
+			fallbacks: OrchestrationModelBinding[];
+	  }
+	| undefined {
+	if (modelPin) return { binding: { ...modelPin }, fallbacks: [] };
 	// Routing applies only to a fresh worker nothing has bound: no pin, no authority model, no
 	// profile binding. An authored choice is never moved to another account.
 	if (!authority?.model && !base && foregroundModel) {
-		const routed = selectRoutedWorkerModel({
+		const routed = routedWorkerModels({
 			foregroundModel,
 			routing: accountRouting,
 			role: authority?.role ?? "implementer",
@@ -240,18 +272,24 @@ function selectModelBinding(
 			isModelExhausted,
 			isModelLimited,
 		});
-		if (routed) {
+		if (routed.length > 0) {
 			const inherited = foregroundThinkingLevel ?? resolveModelThinkingLevel(foregroundModel, undefined);
-			const level =
-				foregroundThinkingPolicy === "inherit"
-					? resolveModelThinkingLevel(routed, inherited)
-					: resolveModelThinkingLevel(routed, stepDownThinkingLevel(inherited));
-			return { provider: routed.provider, modelId: routed.id, thinkingLevel: level };
+			const bind = (model: Model<Api>): OrchestrationModelBinding => ({
+				provider: model.provider,
+				modelId: model.id,
+				thinkingLevel:
+					foregroundThinkingPolicy === "inherit"
+						? resolveModelThinkingLevel(model, inherited)
+						: resolveModelThinkingLevel(model, stepDownThinkingLevel(inherited)),
+			});
+			const [first, ...rest] = routed.map(bind);
+			return { binding: first!, fallbacks: rest };
 		}
 	}
 	const provider = authority?.model?.provider ?? base?.modelBinding.provider ?? foregroundModel?.provider;
 	const modelId = authority?.model?.modelId ?? base?.modelBinding.modelId ?? foregroundModel?.id;
 	if (!provider || !modelId) return undefined;
+	const authored = (binding: OrchestrationModelBinding) => ({ binding, fallbacks: [] });
 	const sameAsBase = provider === base?.modelBinding.provider && modelId === base.modelBinding.modelId;
 	const selectedModel = modelRegistry.find(provider, modelId);
 	// Only the branch that copies the FOREGROUND level is subject to the thinking policy: an
@@ -270,7 +308,7 @@ function selectModelBinding(
 				: selectedModel
 					? resolveModelThinkingLevel(selectedModel, undefined)
 					: "off");
-	return { provider, modelId, thinkingLevel };
+	return authored({ provider, modelId, thinkingLevel });
 }
 
 function adaptiveProfileId(value: object): string {
@@ -285,7 +323,7 @@ function tokenBudgetFloorFailure(maxTokens: number | undefined): string | undefi
 
 /** Materialize free-form model choices as one immutable profile-shaped execution snapshot. */
 export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): WorkerAuthorityResolution {
-	const binding = selectModelBinding(
+	const selected = selectModelBinding(
 		input.modelPin,
 		input.authority,
 		input.base,
@@ -297,13 +335,22 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		input.isModelExhausted,
 		input.isModelLimited,
 	);
-	if (!binding) return { ok: false, reason: "orchestration_model_required" };
+	if (!selected) return { ok: false, reason: "orchestration_model_required" };
+	const { binding } = selected;
 	const boundModel = resolvePinnedOrchestrationModel(binding, input.modelRegistry, input.isModelExhausted);
 	if (!boundModel) return { ok: false, reason: "orchestration_model_unavailable" };
 	// The owner's model policy outranks any binding, pins included: the work is reallocated to an
 	// allowed model instead of running on one the owner ruled out.
 	let resolvedModel = boundModel;
+	// A routed worker keeps its routing order as an ordered-fallback policy: a quota failure moves it to
+	// the next candidate on retry. An owner-policy reallocation below is a single allowed model.
+	// The owner's model policy bounds the fallbacks as it bounds the first choice.
+	let fallbacks = selected.fallbacks.filter((fallback) => {
+		const model = input.modelRegistry.find(fallback.provider, fallback.modelId);
+		return model !== undefined && (!input.isModelAllowed || input.isModelAllowed(model));
+	});
 	if (input.isModelAllowed && !input.isModelAllowed(boundModel.model)) {
+		fallbacks = [];
 		const allowed = input.allocateAllowedModel?.();
 		if (!allowed) return { ok: false, reason: "orchestration_model_policy_no_allowed_model" };
 		resolvedModel = {
@@ -433,6 +480,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		baseProfileId: input.base?.profile.profileId ?? null,
 		role,
 		binding: resolvedModel.binding,
+		fallbacks,
 		capabilities: [...capabilities],
 		toolNames,
 		budget,
@@ -452,7 +500,10 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		profileId: input.base?.profile.profileId ?? "",
 		description: input.base?.profile.description ?? "Admission-time adaptive agent authority",
 		role,
-		modelPolicy: { mode: "fixed", candidates: [resolvedModel.binding] },
+		modelPolicy:
+			fallbacks.length > 0
+				? { mode: "ordered-fallback", candidates: [resolvedModel.binding, ...fallbacks] }
+				: { mode: "fixed", candidates: [resolvedModel.binding] },
 		capabilityCeiling: [...capabilities],
 		toolNames,
 		...(workspacePath ? { workspacePath } : {}),

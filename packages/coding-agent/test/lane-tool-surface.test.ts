@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AgentContext, AgentTool, ExecutionContext } from "@caupulican/pi-agent-core";
@@ -6,6 +6,8 @@ import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLaneToolSurface, type LaneToolSurface } from "../src/core/autonomy/lane-tool-surface.ts";
+import { createWorkerToolAdapterRegistry } from "../src/core/autonomy/worker-tool-adapter-registry.ts";
+import { createInMemoryArtifactStore } from "../src/core/context/context-artifacts.ts";
 import { emptyPathAliasTable, extendPathAliasTable } from "../src/core/context/path-alias-table.ts";
 import { CapabilityGatewayDeniedError } from "../src/core/orchestration/capability-gateway.ts";
 import {
@@ -42,6 +44,35 @@ describe("classified lane tool surface", () => {
 	afterEach(() => {
 		rmSync(cwd, { recursive: true, force: true });
 		rmSync(outside, { recursive: true, force: true });
+	});
+
+	it("packs a worker's large grep output into root's shared store, only when the lane can retrieve it", async () => {
+		writeFileSync(
+			path.join(cwd, "src", "big.ts"),
+			Array.from({ length: 4000 }, (_, index) => `import { value${index} } from "./module-${index}.ts";`).join("\n"),
+		);
+		const artifactStore = createInMemoryArtifactStore();
+		const grepText = async (surface: LaneToolSurface) => {
+			const grep = surface.tools.find((tool) => tool.name === "grep")!;
+			const result = await grep.execute("grep-1", { pattern: "import", path: "src/big.ts", limit: 4000 });
+			return {
+				text: result.content.map((part) => (part.type === "text" ? part.text : "")).join(""),
+				artifactId: (result.details as { artifactId?: string } | undefined)?.artifactId,
+			};
+		};
+		const retrieving = createLaneToolSurface({
+			cwd,
+			sharedToolOptions: { artifactStore },
+			workerToolAdapters: createWorkerToolAdapterRegistry({ artifactStore }),
+		});
+		const packed = await grepText(retrieving);
+		expect(packed.artifactId).toBeDefined();
+		expect(packed.text).toContain(`artifact tool-output:${packed.artifactId}`);
+		expect(artifactStore.has(packed.artifactId!)).toBe(true);
+		// Without artifact_retrieve on the lane, no handle the agent could not resolve.
+		const plain = await grepText(createLaneToolSurface({ cwd, sharedToolOptions: { artifactStore } }));
+		expect(plain.artifactId).toBeUndefined();
+		expect(plain.text).not.toContain("artifact tool-output:");
 	});
 
 	it("provides fresh classified read tools without a lane profile", () => {

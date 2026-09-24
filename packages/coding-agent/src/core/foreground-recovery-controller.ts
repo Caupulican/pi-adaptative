@@ -373,6 +373,11 @@ export class ForegroundRecoveryController {
 		return this.billingFailover.isExhausted(ref);
 	}
 
+	/** Record a quota exhaustion another lane met (see BillingFailoverController.markModelExhausted). */
+	markModelExhausted(ref: string, retryAfterMs?: number): void {
+		this.billingFailover.markModelExhausted(ref, retryAfterMs);
+	}
+
 	/** The provider's limits were reset (a redeemed subscription reset): none of its exhaustions holds. */
 	clearProviderExhaustion(provider: string): void {
 		this.billingFailover.clearProviderExhaustion(provider);

@@ -39,22 +39,32 @@ export function evaluateWorkerRetry(args: {
 	retriesUsed: number;
 	/** Grant budget ceiling for total attempts; defaults to {@link DEFAULT_WORKER_TASK_ATTEMPTS}. */
 	maxAttempts?: number;
+	/**
+	 * The attempt's contract has another usable candidate: a quota failure moves it there at once
+	 * instead of terminalizing (the failed model is already marked exhausted).
+	 */
+	failover?: boolean;
 }): WorkerRetryDecision {
 	if (args.laneStatus !== "failed") return { retry: false, reason: `lane_status_${args.laneStatus}` };
 	if (args.reasonCode !== "completion_error") return { retry: false, reason: `reason_code_${args.reasonCode}` };
 	if (!args.reasonDetail) return { retry: false, reason: "no_failure_detail" };
-	const attemptsAllowed = args.maxAttempts ?? DEFAULT_WORKER_TASK_ATTEMPTS;
-	if (args.retriesUsed + 1 >= attemptsAllowed) return { retry: false, reason: "attempts_exhausted" };
 	const classified = classifyFailure({ message: args.reasonDetail, provider: args.provider });
-	if (!classified.retryable) return { retry: false, reason: `not_retryable_${classified.reason}` };
+	// A quota failure with another candidate moves on the ladder's own backoff; the exhausted model's
+	// retry-after bounds the account it leaves, not the one it moves to. It is not a repeat of the same
+	// failure, so it does not spend the attempt ceiling: the chain is bounded by the contract's finite
+	// candidates, each marked exhausted as it is left.
+	const failover = classified.reason === "billing_or_quota" && args.failover === true;
+	const attemptsAllowed = args.maxAttempts ?? DEFAULT_WORKER_TASK_ATTEMPTS;
+	if (!failover && args.retriesUsed + 1 >= attemptsAllowed) return { retry: false, reason: "attempts_exhausted" };
+	if (!classified.retryable && !failover) return { retry: false, reason: `not_retryable_${classified.reason}` };
 	let delayMs: number;
 	try {
 		delayMs = computeRetryDelayMs(WORKER_TASK_RETRY_POLICY, args.retriesUsed + 1, {
-			...(classified.retryAfterMs !== undefined ? { retryAfterMs: classified.retryAfterMs } : {}),
+			...(classified.retryAfterMs !== undefined && !failover ? { retryAfterMs: classified.retryAfterMs } : {}),
 		});
 	} catch (error) {
 		if (error instanceof RetryDelayExceededError) return { retry: false, reason: "retry_delay_exceeds_max" };
 		throw error;
 	}
-	return { retry: true, reason: classified.reason, delayMs };
+	return { retry: true, reason: failover ? "billing_or_quota_failover" : classified.reason, delayMs };
 }

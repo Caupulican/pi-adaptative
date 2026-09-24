@@ -165,6 +165,11 @@ export class BillingFailoverController {
 		this.deps.exhausted.clearProvider(provider);
 	}
 
+	/** A lane other than the foreground (a worker) ran the model out of quota: nothing routes to it again. */
+	markModelExhausted(ref: string, retryAfterMs?: number): void {
+		this.deps.exhausted.markExhausted(ref, expiryFromRetryAfter(retryAfterMs));
+	}
+
 	snapshotExhausted(): string[] {
 		return this.deps.exhausted.snapshot();
 	}

@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { AgentLoopConfig, AgentTool, BeforeToolCallResult } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
+import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../context/path-alias-tool-wrap.ts";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
@@ -23,15 +24,15 @@ import {
 } from "../secrets/credential-exposure-guard.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import { matchesResourceProfilePattern } from "../settings-manager.ts";
-import { createBashTool } from "../tools/bash.ts";
-import { createEditTool } from "../tools/edit.ts";
+import { type BashToolOptions, createBashTool } from "../tools/bash.ts";
+import { createEditTool, type EditToolOptions } from "../tools/edit.ts";
 import { FileMutationIntentController } from "../tools/file-mutation-intent.ts";
 import { mutationScopeForWorktree } from "../tools/file-mutation-queue.ts";
 import { createFindTool } from "../tools/find.ts";
 import { createGrepTool } from "../tools/grep.ts";
 import { createLsTool } from "../tools/ls.ts";
-import { createPythonTool } from "../tools/python.ts";
-import { createReadTool } from "../tools/read.ts";
+import { createPythonTool, type PythonToolOptions } from "../tools/python.ts";
+import { createReadTool, type ReadToolOptions } from "../tools/read.ts";
 import { createRepoReadTool } from "../tools/repo-read.ts";
 import { createRunProcessTool } from "../tools/run-process.ts";
 import { disposeShellExecutionSession } from "../tools/shell-execution-session.ts";
@@ -41,6 +42,33 @@ import type { CapabilityEnvelope } from "./contracts.ts";
 import { evaluateToolGate } from "./gates.ts";
 import { LaneToolUsage } from "./lane-tool-usage.ts";
 import type { WorkerToolAdapterRegistry } from "./worker-tool-adapter-registry.ts";
+
+/**
+ * The tool mechanics every agent shares with root: output reduction, the command prefix and shell,
+ * the Windows shell engine, file encodings, and artifact packing. Lane identity (shell session,
+ * mutation scope, mutation intents, output directory) stays the lane's own. Credential injection into
+ * a shell or python environment is authority, never shared: a worker's commands never see the
+ * owner's credentials.
+ */
+export interface SharedLaneToolOptions {
+	readonly bash?: Pick<
+		BashToolOptions,
+		| "outputReduction"
+		| "commandPrefix"
+		| "shellPath"
+		| "platform"
+		| "windowsShellPythonEngine"
+		| "windowsShellEngineOptions"
+	>;
+	readonly python?: Pick<PythonToolOptions, "outputReduction" | "omitEnvironmentVariables">;
+	readonly read?: ReadToolOptions;
+	readonly edit?: Pick<EditToolOptions, "fileEncodings">;
+	/**
+	 * The session's packed tool-output store. grep and find pack into it only on a lane that holds
+	 * `artifact_retrieve`, so a packed handle is always resolvable by the agent that sees it.
+	 */
+	readonly artifactStore?: ArtifactStore;
+}
 
 const READ_ONLY_LANE_TOOL_NAMES = ["read", "grep", "find", "ls", "repo_read"] as const;
 const WRITE_LANE_TOOL_NAMES = ["write", "edit"] as const;
@@ -110,6 +138,8 @@ export interface LaneToolSurfaceOptions {
 	) => Promise<BeforeToolCallResult | undefined> | BeforeToolCallResult | undefined;
 	/** Host-owned path alias table getter for expanding alias tokens in tool arguments. */
 	getPathAliasTable?: () => PathAliasTable;
+	/** Root's tool mechanics, shared (see {@link SharedLaneToolOptions}). */
+	sharedToolOptions?: SharedLaneToolOptions;
 }
 
 function strictLaneProfilePatterns(profile: NormalizedProfile | undefined): {
@@ -143,16 +173,19 @@ function createLaneTools(
 	shellOutputDirectory?: string,
 	workerToolAdapters?: WorkerToolAdapterRegistry,
 	bindTool?: (tool: AgentTool) => AgentTool,
+	shared: SharedLaneToolOptions = {},
 ): AgentTool[] {
+	const packing =
+		shared.artifactStore && names.includes("artifact_retrieve") ? { artifactStore: shared.artifactStore } : {};
 	const factories = new Map<string, () => AgentTool>([
-		["read", () => createReadTool(cwd)],
-		["grep", () => createGrepTool(cwd)],
-		["find", () => createFindTool(cwd)],
+		["read", () => createReadTool(cwd, shared.read)],
+		["grep", () => createGrepTool(cwd, packing)],
+		["find", () => createFindTool(cwd, packing)],
 		["ls", () => createLsTool(cwd)],
 		["repo_read", () => createRepoReadTool(cwd)],
 		["write", () => createWriteTool(cwd, { intentController: fileMutationIntents })],
-		["edit", () => createEditTool(cwd, { intentController: fileMutationIntents })],
-		[PYTHON_LANE_TOOL_NAME, () => createPythonTool(cwd, { mutationScope })],
+		["edit", () => createEditTool(cwd, { ...shared.edit, intentController: fileMutationIntents })],
+		[PYTHON_LANE_TOOL_NAME, () => createPythonTool(cwd, { ...shared.python, mutationScope })],
 	]);
 	if (executionPolicy) {
 		factories.set(PROCESS_LANE_TOOL_NAME, () =>
@@ -162,6 +195,7 @@ function createLaneTools(
 	if (shellSessionKey) {
 		factories.set(STABLE_SHELL_TOOL_NAME, () =>
 			createBashTool(cwd, {
+				...shared.bash,
 				sessionKey: shellSessionKey,
 				mutationScope,
 				forceCwd: true,
@@ -335,6 +369,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		options.shellOutputDirectory,
 		options.workerToolAdapters,
 		options.bindTool,
+		options.sharedToolOptions,
 	);
 	const getPathAliasTable = options.getPathAliasTable;
 	const wrappedTools = new WeakSet<AgentTool>();

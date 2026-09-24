@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { type AgentMessage, decodeExecutionContext } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import type { SessionRequestSnapshotInput } from "@caupulican/pi-agent-core/session";
 import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
 import { getProcessWorkRun } from "../agent-paths.ts";
@@ -20,7 +21,7 @@ import {
 	isEdgeOperationGranted,
 } from "../autonomy/edge-policy.ts";
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
-import { createLaneToolSurface } from "../autonomy/lane-tool-surface.ts";
+import { createLaneToolSurface, type SharedLaneToolOptions } from "../autonomy/lane-tool-surface.ts";
 import { isLaneTerminalStatus, type LaneRecord } from "../autonomy/lane-tracker.ts";
 import { appendLaneRecordSnapshot } from "../autonomy/session-lane-record.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "../autonomy/telemetry-events.ts";
@@ -243,6 +244,10 @@ export interface WorkerDelegationControllerDeps {
 	}): AgentMessage[];
 	/** The cache guard for worker lanes: each accepted worker provider request, as its recorded snapshot. */
 	observeWorkerRequest?(agentId: string, snapshot: SessionRequestSnapshotInput): void;
+	/** Record a model a worker ran out of quota, where root's billing failover records its own. */
+	markModelExhausted?(model: Model<Api>, retryAfterMs?: number): void;
+	/** Root's tool mechanics (output reduction, encodings, shell engine, packing), shared with every lane. */
+	getSharedLaneToolOptions?(): SharedLaneToolOptions;
 	/** Each worker provider response, as a cache observation on the worker conversation's own history. */
 	observeWorkerResponse?(message: AssistantMessage, observation: WorkerResponseObservation): void;
 	emit(event: AgentSessionEvent): void;
@@ -838,6 +843,32 @@ export class WorkerDelegationController {
 			...(this.deps.getCapabilityEnvelope() ? { foregroundEnvelope: this.deps.getCapabilityEnvelope() } : {}),
 			...this.authorityBase(),
 		});
+	}
+
+	/**
+	 * A worker that ran its model's account out of quota: the model is marked exhausted where every
+	 * routing decision reads it (the same registry root's billing failover writes), and when the
+	 * attempt's contract routed it with fallbacks, whether its retry now resolves to another model.
+	 */
+	private failOverQuotaExhaustion(
+		laneId: string,
+		outcome: { reasonCode: string; reasonDetail?: string },
+		model: Model<Api>,
+	): boolean {
+		if (outcome.reasonCode !== "completion_error" || !outcome.reasonDetail) return false;
+		const classified = classifyFailure({ message: outcome.reasonDetail, provider: model.provider });
+		if (classified.reason !== "billing_or_quota") return false;
+		this.deps.markModelExhausted?.(model, classified.retryAfterMs);
+		const contract = this.getWorkerLifecycle().getActiveAttempt(laneId)?.dispatch.executionContract;
+		if (contract?.worker.profile.modelPolicy.mode !== "ordered-fallback") return false;
+		const next = this.getWorkerProfileResolver().resolveContract(contract.worker);
+		const moved = next.ok && (next.resolved.model.provider !== model.provider || next.resolved.model.id !== model.id);
+		if (moved) {
+			this.safeWarn(
+				`Worker ${laneId} ran ${model.provider}/${model.id} out of quota; retrying on ${next.resolved.model.provider}/${next.resolved.model.id}.`,
+			);
+		}
+		return moved;
 	}
 
 	/** What every worker authority resolution reads from the host: cwd, models, and the owner's model policy. */
@@ -3063,6 +3094,14 @@ export class WorkerDelegationController {
 			this.safeWarn(`Worker start failed: ${error instanceof Error ? error.message : String(error)}`);
 			return { started: false, skipReason: "worker_start_unavailable" };
 		}
+		// A routed contract whose first binding is exhausted runs on its next candidate: record where.
+		const contractBinding = prepared.attempt.dispatch.executionContract?.worker.modelBinding;
+		if (
+			contractBinding &&
+			(contractBinding.provider !== modelBinding.provider || contractBinding.modelId !== modelBinding.modelId)
+		) {
+			lifecycle.recordRunningModel(prepared.record.laneId, modelBinding);
+		}
 		const startedRecord = lifecycle.getRecord(prepared.record.laneId);
 		if (!startedRecord) {
 			this.writeReservations.release(prepared.record.laneId);
@@ -3181,8 +3220,10 @@ export class WorkerDelegationController {
 					taskId: startedRecord.laneId,
 				}
 			: undefined;
+		const sharedToolOptions = this.deps.getSharedLaneToolOptions?.();
 		const toolSurface = createLaneToolSurface({
 			cwd: executionPlan.cwd,
+			...(sharedToolOptions ? { sharedToolOptions } : {}),
 			...(this.deps.getPathAliasTable ? { getPathAliasTable: this.deps.getPathAliasTable } : {}),
 			...(executionContext ? { bindTool: (tool) => this.directories.bindTool(tool, executionContext) } : {}),
 			deniedPaths: executionPlan.deniedPaths,
@@ -3415,7 +3456,9 @@ export class WorkerDelegationController {
 				// Attempt ladder: a retryable bounded failure suspends and re-enqueues instead of
 				// terminalizing, resuming from the persisted transcript under a fresh fence.
 				if (rawOutcome.laneStatus === "failed" && !this.deps.isDisposed() && !workerSignal.aborted) {
+					const failover = this.failOverQuotaExhaustion(startedRecord.laneId, rawOutcome, model);
 					const retry = this.recovery.scheduleAttemptRetry({
+						...(failover ? { failover } : {}),
 						laneId: startedRecord.laneId,
 						agentId,
 						ownerId: this.agentControl.getProcessOwnerId(),

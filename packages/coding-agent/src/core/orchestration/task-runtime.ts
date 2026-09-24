@@ -31,6 +31,7 @@ import {
 	ORCHESTRATION_SCHEMA_VERSION,
 	type OrchestrationDispatchRequest,
 	type OrchestrationEvent,
+	type OrchestrationModelBinding,
 	type TaskContract,
 	toJsonObject,
 	type WorkerResultContract,
@@ -681,6 +682,27 @@ export class DurableTaskRuntime {
 			payload: toJsonObject({ attemptId, leaseId, fencingToken, expiresAt }),
 		});
 		return structuredClone(this.state.attempts[attemptId]!.lease!);
+	}
+
+	/**
+	 * Record, under the attempt's live lease, that it runs on a model other than its contract's first
+	 * binding (an ordered-fallback contract moved it after a quota failure).
+	 */
+	recordAttemptRunningModel(
+		attemptId: string,
+		leaseId: string,
+		fencingToken: number,
+		model: OrchestrationModelBinding,
+	): void {
+		this.refresh();
+		this.requireLiveLease(attemptId, leaseId, fencingToken);
+		this.commit({
+			type: "attempt.model_moved",
+			aggregateId: attemptId,
+			actor: "runtime",
+			idempotencyKey: `attempt-model-moved:${leaseId}:${model.provider}/${model.modelId}`,
+			payload: toJsonObject({ attemptId, leaseId, fencingToken, model }),
+		});
 	}
 
 	checkpointAttempt(args: {
