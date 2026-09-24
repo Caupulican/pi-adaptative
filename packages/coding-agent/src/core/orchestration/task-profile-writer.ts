@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getSupportedThinkingLevels, resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
+import { PACKED_TOOL_OUTPUT_TOOLS } from "../context/tool-output-packer.ts";
 import { LEAF_WORKER_DELEGATION_LIMITS } from "../delegation/worker-fleet-limits.ts";
 import { resolveWorkerWorkspacePath } from "../delegation/worker-machine-scope.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -48,6 +49,8 @@ export interface TaskProfileCreateResult {
 	profileId?: string;
 	baseProfileId?: string;
 	changedFields?: string[];
+	/** Companions added to the requested tools (artifact_retrieve alongside a packed-output tool). */
+	addedTools?: string[];
 }
 
 export interface TaskProfileWriterPort {
@@ -156,6 +159,18 @@ export class TaskProfileWriter implements TaskProfileWriterPort {
 			if (!isExactSubset(toolNames, compatibleBaseToolNames)) {
 				return { created: false, reason: "task_profile_tool_authority_expansion" };
 			}
+			// A tool whose output is packed brings artifact_retrieve, as on the root's surface, so the
+			// profile's large outputs are packed and stay retrievable. Only a companion the base already
+			// holds is added: the profile never gains authority its base lacks.
+			const addedTools: string[] = [];
+			if (
+				toolNames.some((toolName) => PACKED_TOOL_OUTPUT_TOOLS.has(toolName)) &&
+				!toolNames.includes("artifact_retrieve") &&
+				compatibleBaseToolNames.includes("artifact_retrieve")
+			) {
+				toolNames.push("artifact_retrieve");
+				addedTools.push("artifact_retrieve");
+			}
 			const budget = structuredClone(base.budget);
 
 			let modelPolicy = structuredClone(base.modelPolicy);
@@ -224,7 +239,13 @@ export class TaskProfileWriter implements TaskProfileWriterPort {
 			}
 			if (workspacePath !== base.workspacePath) changedFields.push("path");
 			if (!sameStrings(toolNames, base.toolNames)) changedFields.push("tools");
-			return { created: true, profileId: profile.profileId, baseProfileId, changedFields };
+			return {
+				created: true,
+				profileId: profile.profileId,
+				baseProfileId,
+				changedFields,
+				...(addedTools.length > 0 ? { addedTools } : {}),
+			};
 		} catch (error) {
 			return { created: false, reason: error instanceof Error ? error.message : String(error) };
 		}

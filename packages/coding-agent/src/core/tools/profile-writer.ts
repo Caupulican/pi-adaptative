@@ -122,7 +122,7 @@ export function executeDelegateProfileAction(
 			{
 				type: "text",
 				text: result.created
-					? `Created immutable session task profile ${result.profileId} from ${result.baseProfileId ?? "foreground inheritance"}.`
+					? `Created immutable session task profile ${result.profileId} from ${result.baseProfileId ?? "foreground inheritance"}.${result.addedTools?.length ? ` Added ${result.addedTools.join(", ")} so packed tool output stays retrievable.` : ""}`
 					: `delegate profile_create rejected the request: ${result.reason}.`,
 			},
 		],

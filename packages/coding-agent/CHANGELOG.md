@@ -3,7 +3,7 @@
 ### Changed
 
 - A side trip searches the conversation its brief omits with `conversation_history` instead of handing the message back (`hand_to_talker` is removed: the free side-trip model never called it).
-- A worker whose grant is derived (inherited or narrowed) and holds a tool whose output is packed (grep, find) also gets `artifact_retrieve`, as the root does, so its large outputs are packed and stay retrievable; a named profile runs exactly as authored.
+- A worker whose grant is derived (inherited or narrowed) and holds a tool whose output is packed (grep, find) also gets `artifact_retrieve`, as the root does, so its large outputs are packed and stay retrievable; a named profile runs exactly as authored, and `profile_create` writes `artifact_retrieve` into a new profile beside grep or find when its base holds it, saying so in the result.
 - The claim check reads an answer that relays what a script printed as no test claim, and settles test and check claims against the checks that ran.
 
 ### Added
