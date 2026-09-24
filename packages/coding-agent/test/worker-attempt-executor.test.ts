@@ -597,6 +597,59 @@ describe("worker attempt executor", () => {
 		expect(calls[1]).toMatch(/^complete:true:/);
 	});
 
+	it("shows supervision only this attempt's own output, never a reused specialist's earlier report", async () => {
+		const tails: string[] = [];
+		const harness = createExecutorHarness(
+			async (options) => {
+				const assistant = assistantToolRequest(17);
+				const toolCall = assistant.content.find((content) => content.type === "toolCall");
+				if (toolCall?.type !== "toolCall" || !options.beforeToolCall || !options.afterToolCall) {
+					throw new Error("Missing tool hooks");
+				}
+				await options.onMessage?.(assistant);
+				const context = { systemPrompt: "", messages: [], tools: [] };
+				await options.beforeToolCall({
+					assistantMessage: assistant,
+					toolCall,
+					args: { path: "focused.ts" },
+					context,
+				});
+				await options.afterToolCall({
+					assistantMessage: assistant,
+					toolCall,
+					args: { path: "focused.ts" },
+					result: { content: [{ type: "text", text: "file" }], details: {} },
+					isError: false,
+					context,
+				});
+				const finalAssistant = fauxAssistantMessage('{"summary":"read","status":"completed"}');
+				await options.onMessage?.(finalAssistant);
+				return {
+					text: '{"summary":"read","status":"completed"}',
+					usage: ZERO_USAGE,
+					stopReason: "stop",
+					messages: [...(options.history ?? []), finalAssistant],
+				};
+			},
+			100,
+			undefined,
+			undefined,
+			undefined,
+			30_000,
+			true,
+			undefined,
+			[],
+			undefined,
+			{ observeWorkerProgress: (observation) => void tails.push(observation.outputTail ?? "") },
+		);
+		// An earlier task on this specialist left its final report in the conversation.
+		harness.conversation.appendMessage({ role: "user", content: "earlier task", timestamp: 1 });
+		harness.conversation.appendMessage(fauxAssistantMessage("EARLIER REPORT: package version 0.0.3"));
+		await harness.executor.run();
+		expect(tails.length).toBeGreaterThan(0);
+		expect(tails.every((tail) => !tail.includes("EARLIER REPORT"))).toBe(true);
+	});
+
 	it("threads final worker context into the isolated system prompt", async () => {
 		let capturedSystemPrompt = "";
 		const harness = createExecutorHarness(

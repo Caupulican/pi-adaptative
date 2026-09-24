@@ -321,6 +321,11 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	const changedFiles = new Set(options.conversation.getChangedFiles(options.durableHandle.attemptId));
 	const toolIssues = new Set<string>();
 	const attemptStartedAt = Date.now();
+	/**
+	 * Where this attempt's own messages begin, set when it runs: a reused specialist's earlier tasks are
+	 * not this attempt's output.
+	 */
+	let attemptTranscriptStart = 0;
 	const recentToolNames: string[] = [];
 	let executedToolCalls = 0;
 	let changedFileCountAtChurnWindowStart = changedFiles.size;
@@ -338,7 +343,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		const isStalled = changedFiles.size === 0 && executedToolCalls >= 4 && (isRepeating || toolIssues.size > 0);
 		let outputTail = "";
 		try {
-			const messages = options.conversation.getProviderContext().messages;
+			// Only this attempt's own output: supervision judges the current task, never an earlier one's report.
+			const messages = options.conversation.getRawTranscript().slice(attemptTranscriptStart);
 			for (let index = messages.length - 1; index >= 0; index--) {
 				const message = messages[index];
 				if (message.role !== "assistant" || !("content" in message) || !Array.isArray(message.content)) continue;
@@ -611,6 +617,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		ledger,
 		checkpointUsage,
 		async run(): Promise<WorkerAttemptExecutionResult> {
+			attemptTranscriptStart = options.conversation.getRawTranscript().length;
 			if (ran) throw new Error("A worker attempt executor may run only once.");
 			ran = true;
 			try {
