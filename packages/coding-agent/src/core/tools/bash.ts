@@ -107,8 +107,14 @@ export function setCommandTimeoutMsForTests(ms: number | undefined): void {
 	commandTimeoutMsOverride = ms;
 }
 
-export function resolveCommandTimeoutSeconds(timeout: number | undefined): number {
+/**
+ * The command's wall-clock bound. The default bounds a call the agent waits on; a background run blocks
+ * nothing, so without an explicit timeout it gets the ceiling instead: long builds and suites finish,
+ * and nothing runs unbounded.
+ */
+export function resolveCommandTimeoutSeconds(timeout: number | undefined, background = false): number {
 	if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0) {
+		if (background) return MAX_COMMAND_TIMEOUT_SECONDS;
 		return (commandTimeoutMsOverride ?? DEFAULT_COMMAND_TIMEOUT_SECONDS * 1000) / 1000;
 	}
 	return Math.max(MIN_COMMAND_TIMEOUT_SECONDS, Math.min(timeout, MAX_COMMAND_TIMEOUT_SECONDS));
@@ -127,7 +133,7 @@ const bashSchema = Type.Object({
 	timeout: Type.Optional(
 		Type.Number({
 			maximum: MAX_COMMAND_TIMEOUT_SECONDS,
-			description: `Wall-clock timeout in SECONDS, not milliseconds. Defaults to ${DEFAULT_COMMAND_TIMEOUT_SECONDS}; positive overrides are capped at ${MAX_COMMAND_TIMEOUT_SECONDS}. Zero or negative values use the default.`,
+			description: `Wall-clock timeout in SECONDS, not milliseconds. Defaults to ${DEFAULT_COMMAND_TIMEOUT_SECONDS} (${MAX_COMMAND_TIMEOUT_SECONDS} for a background run); positive overrides are capped at ${MAX_COMMAND_TIMEOUT_SECONDS}. Zero or negative values use the default.`,
 		}),
 	),
 	background: Type.Optional(
@@ -824,7 +830,7 @@ function createShellToolDefinition(
 	return {
 		name: toolName,
 		label: toolName,
-		description: `${contractDescription} Returns stdout and stderr. Output is truncated to a head+tail preview within ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a managed file. Recognized test runners return a bounded failure/summary projection when it is materially smaller, with exact output saved to a managed file. Search, compiler and large JSON output is reduced the same way (raw output persisted, one notice naming it); for JSON prefer a jq projection up front (e.g. | jq -c '.items[] | {id,status}') and query a persisted document with jq instead of reading it whole. Broad rg/grep/find/fd scans are rejected before execution; when an exhaustive scan is unavoidable, set broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}" to route all output to a managed file instead of model context. Commands have a ${DEFAULT_COMMAND_TIMEOUT_SECONDS}-second wall-clock default, including commands that keep producing output; use a positive timeout only when a scoped operation justifies a larger bound (maximum ${MAX_COMMAND_TIMEOUT_SECONDS} seconds).`,
+		description: `${contractDescription} Returns stdout and stderr. Output is truncated to a head+tail preview within ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a managed file. Recognized test runners return a bounded failure/summary projection when it is materially smaller, with exact output saved to a managed file. Search, compiler and large JSON output is reduced the same way (raw output persisted, one notice naming it); for JSON prefer a jq projection up front (e.g. | jq -c '.items[] | {id,status}') and query a persisted document with jq instead of reading it whole. Broad rg/grep/find/fd scans are rejected before execution; when an exhaustive scan is unavoidable, set broadSearch="${BROAD_SEARCH_OUTPUT_ROUTE}" to route all output to a managed file instead of model context. Commands have a ${DEFAULT_COMMAND_TIMEOUT_SECONDS}-second wall-clock default (a background run defaults to the ${MAX_COMMAND_TIMEOUT_SECONDS}-second ceiling), including commands that keep producing output; use a positive timeout only when a scoped operation justifies a larger bound (maximum ${MAX_COMMAND_TIMEOUT_SECONDS} seconds).`,
 		promptSnippet: routesWindowsContract
 			? "Run Bash-like commands; Pi routes Windows."
 			: "Execute Bash commands (ls, grep, find, etc.)",
@@ -843,7 +849,7 @@ function createShellToolDefinition(
 		parameters: bashSchema,
 		backgroundRequested: (input) => input.background === true,
 		failureRecovery: {
-			getTimeoutMs: (params) => resolveCommandTimeoutSeconds(params.timeout) * 1000,
+			getTimeoutMs: (params) => resolveCommandTimeoutSeconds(params.timeout, params.background === true) * 1000,
 			getFailureTargets: (params, failure) =>
 				failureRecoveryAuthority &&
 				/^exit_-?[1-9]\d*$/.test(failure.failureCode) &&
@@ -1116,7 +1122,7 @@ function createShellToolDefinition(
 					"operation_outcome",
 				);
 			};
-			const effectiveTimeoutSeconds = resolveCommandTimeoutSeconds(timeout);
+			const effectiveTimeoutSeconds = resolveCommandTimeoutSeconds(timeout, background === true);
 
 			// One execution path for the shell: routing on the Windows contract, the operator's command
 			// prefix, the spawn hook, the session env, the mutation barrier. The main command and the

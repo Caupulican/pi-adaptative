@@ -10,6 +10,7 @@
 - The activity row of a finished turn ends with its submission instead of staying on as "Working" or "Preparing, no token yet" while background work runs.
 - A print, json or rpc run in a project with no trust decision says the project runs untrusted and names `--approve`.
 - A quota failover or a move off a model the account no longer offers carries the conversation's talker to the model the work continued on.
+- A backgrounded bash or python run without an explicit timeout gets the tool's ceiling (3600 s bash, 300 s python) instead of the foreground default, so long background builds and suites are no longer killed at 120 s (30 s for python).
 
 ## [0.99.46] - 2026-09-24
 

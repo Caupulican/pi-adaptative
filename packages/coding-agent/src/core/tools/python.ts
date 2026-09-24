@@ -73,7 +73,7 @@ const pythonSchema = Type.Object(
 		),
 		timeoutSeconds: Type.Optional(
 			Type.Number({
-				description: `Wall-clock timeout. Defaults to ${DEFAULT_PYTHON_TIMEOUT_SECONDS} seconds and is capped at ${MAX_PYTHON_TIMEOUT_SECONDS}.`,
+				description: `Wall-clock timeout. Defaults to ${DEFAULT_PYTHON_TIMEOUT_SECONDS} seconds (${MAX_PYTHON_TIMEOUT_SECONDS} for a background run) and is capped at ${MAX_PYTHON_TIMEOUT_SECONDS}.`,
 			}),
 		),
 		background: Type.Optional(
@@ -195,8 +195,10 @@ function clampInteger(value: number | undefined, fallback: number, minimum: numb
 	return Math.max(minimum, Math.min(maximum, Math.trunc(value)));
 }
 
-function resolvePythonTimeoutMs(timeoutSeconds: number | undefined): number {
-	return clampInteger(timeoutSeconds, DEFAULT_PYTHON_TIMEOUT_SECONDS, 1, MAX_PYTHON_TIMEOUT_SECONDS) * 1000;
+/** As for bash: a background run blocks nothing, so without an explicit timeout it gets the ceiling. */
+function resolvePythonTimeoutMs(timeoutSeconds: number | undefined, background = false): number {
+	const fallback = background ? MAX_PYTHON_TIMEOUT_SECONDS : DEFAULT_PYTHON_TIMEOUT_SECONDS;
+	return clampInteger(timeoutSeconds, fallback, 1, MAX_PYTHON_TIMEOUT_SECONDS) * 1000;
 }
 
 function createLocalPythonOperations(): PythonOperations {
@@ -287,7 +289,7 @@ export function createPythonToolDefinition(
 		parameters: pythonSchema,
 		backgroundRequested: (input) => input.background === true,
 		failureRecovery: {
-			getTimeoutMs: ({ timeoutSeconds }) => resolvePythonTimeoutMs(timeoutSeconds),
+			getTimeoutMs: ({ timeoutSeconds, background }) => resolvePythonTimeoutMs(timeoutSeconds, background === true),
 			actions: recoveryAuthority
 				? [
 						{
@@ -346,7 +348,7 @@ export function createPythonToolDefinition(
 				variables: composeExecutionEnvironment(backendEnvironment, []),
 			};
 			const args = input.args ? [...input.args] : [];
-			const timeoutMs = resolvePythonTimeoutMs(input.timeoutSeconds);
+			const timeoutMs = resolvePythonTimeoutMs(input.timeoutSeconds, input.background === true);
 			const maxOutputBytes = clampInteger(
 				input.maxOutputBytes,
 				50 * 1024,
