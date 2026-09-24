@@ -182,6 +182,13 @@ import type { MemoryProvider } from "./memory/memory-provider.ts";
 import type { ManagedMemoryDriftEntry, ManagedMemoryTarget } from "./memory/providers/file-store.ts";
 import { MemoryController } from "./memory-controller.ts";
 import {
+	formatGatheredEvidence,
+	GATHERED_EVIDENCE_CUSTOM_TYPE,
+	gatheringQuestions,
+	gatherWithMinions,
+	minionInstructions,
+} from "./minion-gathering.ts";
+import {
 	deriveModelCapabilityProfile,
 	evaluateLaneWorkerRefusal,
 	filterToolNamesForCapability,
@@ -2440,6 +2447,7 @@ export class AgentSession {
 			stack.objectiveController.bindSessionExecutors({
 				rootExecutor: this._goals.objectiveRootExecutor(),
 				chooseExecutor: (route) => this._chooseObjectiveExecutor(route),
+				retrieval: { execute: (route, signal) => this._retrieveForObjective(route, signal) },
 				waiter: { wait: (context) => this._waitForObjectiveWorkers(context) },
 				checkpoints: ledgerRoutes,
 				stalls: ledgerRoutes,
@@ -4250,6 +4258,47 @@ export class AgentSession {
 			this._emit({ type: "message_start", message: recorded });
 			this._emit({ type: "message_end", message: recorded });
 		}
+	}
+
+	/**
+	 * The objective loop's retrieve route: the talker reads on its warm prefix, or minions (read-only
+	 * workers, no forked turns) each gather one question on a small brief (`priceExecutor` decides, as
+	 * for any route the root may take). Only accepted reports reach the talker, as one bounded evidence
+	 * record on its next turn.
+	 */
+	private async _retrieveForObjective(route: ObjectiveRoute, signal?: AbortSignal): Promise<"root" | "worker"> {
+		if (this._chooseObjectiveExecutor(route) === "root") {
+			await this._goals.objectiveRootExecutor().execute(route, signal);
+			return "root";
+		}
+		const objective = this._goals.getState()?.userGoal ?? route.objective_id;
+		const reports = await gatherWithMinions(
+			gatheringQuestions(objective, route.target_requirement_ids ?? []),
+			async (question) => {
+				signal?.throwIfAborted();
+				const run = await this.runWorkerDelegationOnce({
+					instructions: minionInstructions(question),
+					authority: { readOnly: true },
+					forkTurns: "none",
+					// Each question is its own brief: minions never share one specialist's context.
+					parallelWork: { independentOf: [], justification: "one atomic gathering question per read-only minion" },
+				});
+				if (!run.started || !run.outcome)
+					return { question, accepted: false, reason: run.skipReason ?? "not started" };
+				return run.outcome.accepted
+					? { question, accepted: true, summary: run.outcome.claim.summary }
+					: { question, accepted: false, reason: run.outcome.reasonCode };
+			},
+		);
+		await this.sendCustomMessage(
+			{
+				customType: GATHERED_EVIDENCE_CUSTOM_TYPE,
+				content: formatGatheredEvidence(reports, MAX_DELEGATE_STATUS_OUTPUT_BYTES),
+				display: true,
+			},
+			{ deliverAs: "nextTurn" },
+		);
+		return "worker";
 	}
 
 	private async _ensureRouteModelReady(

@@ -158,7 +158,8 @@ export interface ObjectiveExecutionControllerDeps {
 		evaluate(objectiveId: string): Promise<StallEvaluation>;
 	};
 	retrieval?: {
-		execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void>;
+		/** Resolves with who gathered (the root or workers), recorded as the route's executor. */
+		execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<"root" | "worker" | undefined>;
 	};
 	verifier?: {
 		execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void>;
@@ -1116,7 +1117,7 @@ export class ObjectiveExecutionController {
 							deliveryBundle: bundle,
 						};
 					}
-					await this.deps.retrieval.execute(route, signal);
+					this._lastExecutor = (await this.deps.retrieval.execute(route, signal)) ?? this._lastExecutor;
 					break;
 
 				case "deterministic_test":
