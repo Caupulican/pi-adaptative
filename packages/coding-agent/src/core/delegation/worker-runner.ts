@@ -59,6 +59,11 @@ export interface WorkerCompletion {
 }
 
 export interface WorkerRunnerOptions {
+	/**
+	 * The conversation's previous task ran under another parent session: files and the tool results
+	 * above may have changed since, so the task says to re-read what it relies on.
+	 */
+	earlierSession?: boolean;
 	request: WorkerRequest;
 	/** Budget for this delegation; undefined disables this bound, while zero permits only free work. */
 	maxUsd?: number;
@@ -107,8 +112,13 @@ export interface WorkerRunOutcome {
 	modelPinBypass?: WorkerRole;
 }
 
-export function buildWorkerUserPrompt(request: WorkerRequest): string {
+/** Said once, at the top of a task a reused specialist takes up in a new parent session. */
+export const EARLIER_SESSION_NOTE =
+	"Earlier turns in this conversation ran in a previous session: files and tool results above may have changed since. Read again what this task relies on before reporting it.";
+
+export function buildWorkerUserPrompt(request: WorkerRequest, options: { earlierSession?: boolean } = {}): string {
 	return [
+		...(options.earlierSession ? [EARLIER_SESSION_NOTE] : []),
 		"TASK",
 		request.instructions,
 		"END TASK",
@@ -400,7 +410,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 							process: options.processCapable === true,
 							systemOne: options.systemOneCapable === true,
 						}),
-				userPrompt: buildWorkerUserPrompt(options.request),
+				userPrompt: buildWorkerUserPrompt(options.request, { earlierSession: options.earlierSession === true }),
 				signal,
 			}),
 	});

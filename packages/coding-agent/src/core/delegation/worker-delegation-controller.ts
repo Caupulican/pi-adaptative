@@ -3126,7 +3126,7 @@ export class WorkerDelegationController {
 		const conversation = preparedAgent.conversation;
 		if (prepared.attempt.status === "queued" || conversation.usesAttemptUsageBoundaries()) {
 			try {
-				conversation.beginAttemptUsage(prepared.attempt.attemptId);
+				conversation.beginAttemptUsage(prepared.attempt.attemptId, this.deps.getSessionId());
 			} catch (error) {
 				this.cancelAndPublish(lifecycle, prepared.record.laneId, "worker_conversation_unavailable");
 				this.safeWarn(

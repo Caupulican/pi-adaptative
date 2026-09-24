@@ -1264,15 +1264,32 @@ export class WorkerConversation {
 	 * a conversation across tasks, so recovery accounting must not replay an earlier task's spend as
 	 * the new attempt's baseline. The marker is idempotent and never enters provider context.
 	 */
-	beginAttemptUsage(attemptId: string): void {
+	beginAttemptUsage(attemptId: string, parentSessionId?: string): void {
 		const normalizedAttemptId = assertAttemptUsageId(attemptId);
 		this.enableAttemptUsageBoundaries();
 		if (attemptUsageBoundaryIndex(this.sessionManager, normalizedAttemptId) >= 0) return;
 		this.appendSessionEntry((sessionManager) =>
 			sessionManager.appendCustomEntry(WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE, {
 				attemptId: normalizedAttemptId,
+				// Which parent session ran the attempt: a later task in another session knows its context aged.
+				...(parentSessionId ? { parentSessionId } : {}),
 			}),
 		);
+	}
+
+	/**
+	 * The parent session the most recent other attempt on this conversation ran under, when its boundary
+	 * recorded one: a reused specialist's previous task.
+	 */
+	previousAttemptParentSession(currentAttemptId: string): string | undefined {
+		let previous: string | undefined;
+		for (const entry of this.sessionManager.getEntries()) {
+			if (entry.type !== "custom" || entry.customType !== WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE) continue;
+			const data = entry.data as { attemptId?: unknown; parentSessionId?: unknown } | undefined;
+			if (data?.attemptId === currentAttemptId) continue;
+			if (typeof data?.parentSessionId === "string") previous = data.parentSessionId;
+		}
+		return previous;
 	}
 
 	/**

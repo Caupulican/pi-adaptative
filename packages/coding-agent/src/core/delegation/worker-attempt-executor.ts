@@ -633,12 +633,14 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				);
 				if (options.signal) observeUsageSignal(options.signal);
 				options.signal?.throwIfAborted();
-				options.conversation.beginAttemptUsage(options.durableHandle.attemptId);
+				const earlierSession = options.conversation.previousAttemptParentSession(options.durableHandle.attemptId);
+				options.conversation.beginAttemptUsage(options.durableHandle.attemptId, options.parentSessionId);
 				if (!options.hasPersistedUsageCheckpoint) {
 					checkpointUsage("Persisted deterministic cumulative usage baseline for the durable worker transcript.");
 				}
 				const rawOutcome = await runWorker({
 					request: options.request,
+					earlierSession: earlierSession !== undefined && earlierSession !== options.parentSessionId,
 					maxUsd: options.grant.budget.maxCostUsd,
 					maxWallClockMs: options.grant.budget.maxWallClockMs ?? 0,
 					usageReportId: options.usageReportId,

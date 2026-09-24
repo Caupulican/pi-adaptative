@@ -853,6 +853,16 @@ describe("WorkerConversationStore", () => {
 		expect(reopened.getRawTranscript()[0]).toEqual(userMessage(`turn-0: ${"evidence ".repeat(80)}`));
 	});
 
+	it("remembers which parent session each attempt ran under, for a reused specialist's next task", () => {
+		const conversation = new WorkerConversationStore().create(createOptions());
+		expect(conversation.previousAttemptParentSession("attempt-1")).toBeUndefined();
+		conversation.beginAttemptUsage("attempt-1", "session-a");
+		expect(conversation.previousAttemptParentSession("attempt-1")).toBeUndefined();
+		conversation.beginAttemptUsage("attempt-2", "session-b");
+		expect(conversation.previousAttemptParentSession("attempt-2")).toBe("session-a");
+		expect(conversation.previousAttemptParentSession("attempt-3")).toBe("session-b");
+	});
+
 	it("compacts below the limit only when the early band's price admits it, and reports what it compacted", async () => {
 		const options = createOptions();
 		const conversation = new WorkerConversationStore().create(options);

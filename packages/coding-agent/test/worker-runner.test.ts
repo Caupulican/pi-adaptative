@@ -11,6 +11,7 @@ import { MAX_WORKER_CLAIM_SUMMARY_BYTES, MAX_WORKER_CLAIM_SUMMARY_CHARS } from "
 import {
 	buildWorkerSystemPrompt,
 	buildWorkerUserPrompt,
+	EARLIER_SESSION_NOTE,
 	parseWorkerOutput,
 	runWorker,
 	WORKER_LANE_SYSTEM_PROMPT,
@@ -151,6 +152,13 @@ describe("buildWorkerUserPrompt", () => {
 		expect(prompt).not.toContain("<task>");
 		expect(prompt).toContain("Do not replace the worker claim envelope");
 		expect(prompt).toContain('inside "summary" and "findings"');
+		expect(prompt).not.toContain(EARLIER_SESSION_NOTE);
+	});
+
+	it("tells a reused specialist, in a new parent session, to re-read what its task relies on", () => {
+		const prompt = buildWorkerUserPrompt(workerRequest(), { earlierSession: true });
+		expect(prompt.startsWith(EARLIER_SESSION_NOTE)).toBe(true);
+		expect(prompt).toContain("TASK\nScout the delegation module");
 	});
 });
 
