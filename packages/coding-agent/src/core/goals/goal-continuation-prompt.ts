@@ -21,9 +21,10 @@ export function buildGoalContinuationPrompt(): GoalContinuationPrompt {
 
 const ROUTE_BRIEFS: Readonly<Record<ObjectiveRoute["route"], string>> = {
 	retrieve:
-		"Gather the missing evidence: read the code and outputs that decide the open requirements. Do not modify files this turn.",
+		"Gather the missing evidence: read the code, outputs, or machine and service state that decide the open requirements. Change nothing this turn.",
 	investigate: "Investigate the open requirements: find the cause and the exact change needed, then state it.",
-	implement: "Do the next concrete implementation step toward the open requirements, then record what it proved.",
+	implement:
+		"Do the next concrete step toward the open requirements (code, configuration, the machine or a service), then record what it proved.",
 	deterministic_test:
 		"Run the deterministic checks (tests, builds, commands) for the open requirements and record their receipts.",
 	verify: "Verify the open requirements against real receipts: re-run the checks and record what passed or failed.",

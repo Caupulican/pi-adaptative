@@ -273,15 +273,15 @@ export const ROUTE_DECISION_PROGRAM = createDecisionProgram({
 			instruction: "Which task class best describes the current objective?",
 			options: {
 				bug_fix: { description: "Investigate and correct wrong behavior" },
-				feature: { description: "Implement new capabilities" },
+				feature: { description: "Add a new capability or outcome" },
 				refactor: { description: "Restructure code without changing behavior" },
-				exploration: { description: "Investigate codebase or documentation" },
+				exploration: { description: "Investigate code, documentation, the machine or a service" },
 			},
 		},
 		{
 			kind: "boolean",
 			id: "work_remaining",
-			instruction: "Does verifiable implementation work or required proof remain unsatisfied?",
+			instruction: "Does required work or required proof remain unsatisfied?",
 		},
 		{
 			kind: "choice",
@@ -289,19 +289,20 @@ export const ROUTE_DECISION_PROGRAM = createDecisionProgram({
 			instruction: "What primary canonical class of work remains to advance the objective?",
 			options: {
 				retrieve: {
-					description: "Retrieve code, tests, docs, or runtime context",
+					description:
+						"Retrieve the code, docs, outputs, or machine and service state the open requirements depend on",
 					notFor: "Required context and files are already loaded and verified",
 				},
 				investigate: {
-					description: "Inspect codebase, trace root cause, explore hypotheses",
+					description: "Inspect what the objective concerns, trace the cause, explore hypotheses",
 					notFor: "Root cause is understood and exact code changes are planned",
 				},
 				implement: {
-					description: "Author or edit source code to advance objective",
+					description: "Make the next change the objective needs: code, configuration, machine state or a service",
 					notFor: "Root cause or necessary evidence is still unresolved",
 				},
 				deterministic_test: {
-					description: "Run deterministic tests or static checks",
+					description: "Run deterministic tests, checks or observations",
 					notFor: "No test or check commands are available or needed",
 				},
 				verify: {
@@ -309,7 +310,7 @@ export const ROUTE_DECISION_PROGRAM = createDecisionProgram({
 					notFor: "Implementation has not yet changed",
 				},
 				review: {
-					description: "Review diff or verify architectural invariants",
+					description: "Review the changes (a diff, configuration or machine state) against the requirements",
 					notFor: "Significant implementation work is still incomplete",
 				},
 				replan: {
@@ -321,7 +322,7 @@ export const ROUTE_DECISION_PROGRAM = createDecisionProgram({
 					notFor: "Acceptance criteria or mechanical checks remain incomplete",
 				},
 				insufficient_evidence: {
-					description: "Insufficient evidence to determine next implementation action",
+					description: "Insufficient evidence to determine the next action",
 					notFor: "Clear path forward is established with available evidence",
 				},
 			},

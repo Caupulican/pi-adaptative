@@ -152,7 +152,7 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 				kind: "boolean",
 				id: "grounding_sufficient",
 				instruction:
-					"Does `request` name concrete enough targets (files, components, commands or observable behaviors) to begin investigating the repository?",
+					"Does `request` name concrete enough targets (files, components, commands, machine or service state, or observable behaviors) to begin the work?",
 			});
 			break;
 		}
@@ -172,9 +172,15 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 					id: "missing_work_class",
 					instruction: "Class of remaining work",
 					options: {
-						investigate: { description: "Inspect codebase, trace root cause" },
-						implement: { description: "Author or edit code" },
-						deterministic_verify: { description: "Run tests or checks" },
+						investigate: {
+							description:
+								"Inspect what the objective concerns (code, machine, service or sources) and trace the cause",
+						},
+						implement: {
+							description:
+								"Make the next change the objective needs: code, configuration, machine state or a service",
+						},
+						deterministic_verify: { description: "Run tests, checks or observations" },
 						independent_review: { description: "Adversarial review" },
 						replan: { description: "Strategy change needed" },
 						resolve_capability: { description: "Synthesize missing capability or specialist" },
