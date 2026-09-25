@@ -163,7 +163,7 @@ function parseControlFrame(buffer: Buffer): ParsedControlFrame | InvalidControlF
 
 export interface WindowsShellEngineOptions {
 	/** Override for tests: resolves the Python runtime outcome. Default: `ensurePythonRuntime`. */
-	resolveRuntime?: () => Promise<PythonRuntimeOutcome>;
+	resolveRuntime?: (options: { acquire: boolean }) => Promise<PythonRuntimeOutcome>;
 	/** Override for tests: absolute path to the engine's `main.py`. Default: the bundled runtime. */
 	engineScriptPath?: string;
 	/** Override for tests: the per-session state store lookup. Default: the shared module store. */
@@ -203,7 +203,7 @@ function degradationError(
 
 class PersistentWindowsShellEngineSession {
 	private readonly key: string;
-	private readonly resolveRuntime: () => Promise<PythonRuntimeOutcome>;
+	private readonly resolveRuntime: (options: { acquire: boolean }) => Promise<PythonRuntimeOutcome>;
 	private readonly engineScriptPath: string;
 	private readonly getState: (sessionKey: string) => WindowsShellState;
 	private readonly spawn: (command: string, args: string[], options: SpawnOptions) => ChildProcess;
@@ -217,7 +217,7 @@ class PersistentWindowsShellEngineSession {
 
 	constructor(key: string, options: WindowsShellEngineOptions) {
 		this.key = key;
-		this.resolveRuntime = options.resolveRuntime ?? (() => ensurePythonRuntime({ silent: true }));
+		this.resolveRuntime = options.resolveRuntime ?? (({ acquire }) => ensurePythonRuntime({ silent: true, acquire }));
 		this.engineScriptPath = options.engineScriptPath ?? resolveEngineScriptPath();
 		this.getState = options.getState ?? getOrCreateWindowsShellState;
 		this.spawn = options.spawn ?? spawnProcess;
@@ -250,7 +250,8 @@ class PersistentWindowsShellEngineSession {
 			if (this.disposed || this.coordinator.child) return;
 			try {
 				if (this.gnuToolsDir === undefined) this.gnuToolsDir = this.resolveGnuToolsDir();
-				await this.ensureChild(mergeEffectiveEnv(this.getState(this.key), env ?? getShellEnv()));
+				// A warm-up never downloads or installs the runtime: that is real use's side effect.
+				await this.ensureChild(mergeEffectiveEnv(this.getState(this.key), env ?? getShellEnv()), false);
 			} catch {
 				// The first real command retries and surfaces the complete failure.
 			}
@@ -471,9 +472,9 @@ class PersistentWindowsShellEngineSession {
 		}
 	}
 
-	private async ensureChild(env: NodeJS.ProcessEnv): Promise<ChildProcess> {
+	private async ensureChild(env: NodeJS.ProcessEnv, acquire = true): Promise<ChildProcess> {
 		if (this.coordinator.child) return this.coordinator.child;
-		const runtime = await this.resolveRuntime();
+		const runtime = await this.resolveRuntime({ acquire });
 		if (runtime.status !== "ready") throw degradationError(runtime);
 		if (this.disposed) throw new Error(`Windows shell engine session "${this.key}" is disposed`);
 

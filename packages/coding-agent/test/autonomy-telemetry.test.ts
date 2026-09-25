@@ -276,7 +276,8 @@ describe("autonomy telemetry emission (G3)", () => {
 			expect(event.version).toBe(1);
 			expect(typeof event.payload.id).toBe("string");
 			expect(event.payload.tier).toBe("cheap");
-			expect(event.payload.capabilities).toEqual(["filesystem.read", "filesystem.write"]);
+			// Every worker holds process execution for its host-guaranteed shell.
+			expect(event.payload.capabilities).toEqual(["filesystem.read", "filesystem.write", "process.exec"]);
 			expect(event.payload.capabilities).not.toContain("workflow.delegate");
 			expect(event.payload.capabilities).not.toContain("memory.query");
 			expect(typeof event.payload.maxEstimatedUsd).toBe("number");

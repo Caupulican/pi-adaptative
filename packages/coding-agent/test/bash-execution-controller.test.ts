@@ -25,7 +25,7 @@ function resolvePython(): string | null {
 	return null;
 }
 
-function makeController(): BashExecutionController {
+function makeController(edge?: { mode: "guarded" | "yolo"; allow: string[]; deny: string[] }): BashExecutionController {
 	return new BashExecutionController({
 		getAgent: () =>
 			({ state: { messages: [], model: { provider: "test", id: "test-model" }, thinkingLevel: "off" } }) as never,
@@ -42,12 +42,27 @@ function makeController(): BashExecutionController {
 				getShellPath: () => undefined,
 				getWindowsShellSettings: () => ({ pythonEngine: true, gnuToolsDir: "auto" }),
 				getExposeSessionEnvironment: () => true,
+				...(edge ? { getEdgeSettings: () => edge } : {}),
 			}) as never,
 		isStreaming: () => false,
 	});
 }
 
 describe("BashExecutionController", () => {
+	it("holds the owner's own shell to the YOLO machine floor and the deny list before anything runs", async () => {
+		const controller = makeController({ mode: "yolo", allow: [], deny: ["npm publish*"] });
+		await expect(controller.executeBash("rm -rf /")).rejects.toThrow("YOLO hardline: deletes a system directory");
+		await expect(controller.executeBash("npm publish --tag next")).rejects.toThrow(
+			"YOLO hardline: user deny rule: npm publish*",
+		);
+		// Repository deletion is never a standing grant: it needs a fresh owner decision every time.
+		await expect(controller.executeBash("rm -rf .")).rejects.toThrow(
+			"Owner approval required: deletes the repository",
+		);
+		// A refused command never leaves a running shell behind.
+		expect(controller.isBashRunning).toBe(false);
+	});
+
 	it("warms the session's Windows shell on demand and stays silent off Windows or with the engine disabled", async () => {
 		const controller = makeController();
 		// A long-lived mode calls this once at startup; every platform must resolve silently so a

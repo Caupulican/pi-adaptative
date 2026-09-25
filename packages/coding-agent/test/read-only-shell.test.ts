@@ -1,14 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, describe, expect, it } from "vitest";
 import { isMutatingToolCall, readOnlyShellViolation } from "../src/core/model-router/tool-escalation.ts";
 
-const cwd = "/home/caudev/GitHub/mine/pi-adaptative";
-describe("ro", () => {
-	it("cases", () => {
+// Existence decides whether a redirect edits something, so the fixture owns the files it names.
+const cwd = mkdtempSync(join(tmpdir(), "pi-read-only-shell-"));
+writeFileSync(join(cwd, "README.md"), "readme");
+writeFileSync(join(cwd, "package.json"), "{}");
+afterAll(() => rmSync(cwd, { recursive: true, force: true }));
+describe("read-only shell line", () => {
+	it("refuses edits to existing paths and allows reads and new-file captures", () => {
 		const cases: Array<[string, boolean]> = [
 			["git log --oneline -5", true],
 			["cd packages && git diff HEAD~1 --stat", true],
-			["rg foo src | head -20 > /tmp/claude-new-out-xyz.txt", true],
-			["git log 2>&1 | tee /tmp/claude-new-tee-xyz.txt", true],
+			["rg foo src | head -20 > new-output.txt", true],
+			["git log 2>&1 | tee new-tee.txt", true],
 			["cat README.md > README.md", false],
 			["echo hi >> package.json", false],
 			["sed -i s/a/b/ README.md", false],

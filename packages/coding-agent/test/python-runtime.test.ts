@@ -22,6 +22,7 @@ function createDeps(
 	return {
 		agentDir: "/agent",
 		ensureUv: async () => "/agent/bin/uv",
+		findUv: () => "/agent/bin/uv",
 		isOffline: () => false,
 		makeDirectory: () => {},
 		inspectInterpreter: (path) =>
@@ -48,6 +49,50 @@ describe("uv-managed Python runtime", () => {
 			}),
 		);
 		await expect(manager.ensure()).resolves.toMatchObject({ status: "ready", pythonPath });
+	});
+
+	it("probes without acquiring: no uv download, no install, and no cached failure for real use", async () => {
+		let ensureUvCalls = 0;
+		const commands: string[][] = [];
+		const manager = createPythonRuntimeManager(
+			createDeps(
+				async (_command, args) => {
+					commands.push(args);
+					if (args[1] === "find")
+						return commandResult(
+							commands.length > 1 ? 0 : 1,
+							commands.length > 1 ? "/agent/runtimes/python/cpython-3.13/bin/python\n" : "",
+						);
+					return commandResult(0);
+				},
+				{
+					ensureUv: async () => {
+						ensureUvCalls++;
+						return "/agent/bin/uv";
+					},
+					findUv: () => undefined,
+				},
+			),
+		);
+		// No uv installed: the probe reports it without downloading one.
+		await expect(manager.ensure({ acquire: false })).resolves.toMatchObject({ status: "uv-unavailable" });
+		expect(ensureUvCalls).toBe(0);
+		expect(commands).toEqual([]);
+		// Real use is not answered from the probe's failure: it acquires and resolves.
+		await expect(manager.ensure()).resolves.toMatchObject({ status: "ready" });
+		expect(ensureUvCalls).toBe(1);
+	});
+
+	it("probes an installed uv without installing Python", async () => {
+		const commands: string[][] = [];
+		const manager = createPythonRuntimeManager(
+			createDeps(async (_command, args) => {
+				commands.push(args);
+				return commandResult(1);
+			}),
+		);
+		await expect(manager.ensure({ acquire: false })).resolves.toMatchObject({ status: "python-unavailable" });
+		expect(commands.map((args) => args.slice(0, 2).join(" "))).toEqual(["python find"]);
 	});
 
 	it("rediscovers a removed cached interpreter without requiring force", async () => {

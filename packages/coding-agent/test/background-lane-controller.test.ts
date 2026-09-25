@@ -575,6 +575,7 @@ describe("quiesce registry", () => {
 						maxWallClockMs: 0,
 					}),
 					getModelCapabilitySettings: () => ({ mode: "off" }),
+					getEdgeSettings: () => ({ mode: "guarded", allow: [], deny: [] }),
 				}) as never,
 			getModel: () => model,
 			isModelExhausted: () => false,

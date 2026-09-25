@@ -220,7 +220,8 @@ describe("provider-neutral model contract matrix", () => {
 					provider: entry.provider,
 					reasoning: entry.profileThinking,
 					textProtocol: entry.expectedTextProtocol,
-					toolNames: entry.expectedTextProtocol ? [] : ["read"],
+					// A native-tool worker also receives the host-guaranteed shell.
+					toolNames: entry.expectedTextProtocol ? [] : ["read", "bash"],
 					textProtocolPrimer: entry.expectedTextProtocol === true,
 				});
 			} finally {

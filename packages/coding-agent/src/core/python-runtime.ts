@@ -1,7 +1,7 @@
 import { accessSync, constants, mkdirSync, statSync } from "node:fs";
 import { assertExecutionAbsolutePath } from "@caupulican/pi-agent-core/paths";
 import { getAgentDir } from "../config.ts";
-import { ensureTool } from "../utils/tools-manager.ts";
+import { ensureTool, getToolPath } from "../utils/tools-manager.ts";
 import { cacheFile, runtimesDir } from "./agent-paths.ts";
 import { execCommand } from "./exec.ts";
 import { withoutHarnessLaunchEnv } from "./harness-environment.ts";
@@ -31,6 +31,8 @@ export interface PythonRuntimeCommandResult {
 export interface PythonRuntimeDependencies {
 	agentDir: string;
 	ensureUv: (silent: boolean) => Promise<string | undefined>;
+	/** An already-installed uv, found without downloading anything. */
+	findUv: () => string | undefined;
 	isOffline: () => boolean;
 	makeDirectory: (path: string) => void;
 	/** Validate a literal absolute executable file and return its current opaque identity; undefined means unavailable. */
@@ -57,8 +59,19 @@ export type PythonRuntimeOutcome = Readonly<
 	  }
 >;
 
+export interface PythonRuntimeEnsureOptions {
+	silent?: boolean;
+	force?: boolean;
+	/**
+	 * False resolves only what is already installed: no uv download, no Python install. A warm-up
+	 * uses it, because acquiring software is a side effect that belongs to real use, which reports
+	 * its failures. A non-ready answer from such a probe is never cached. Default: true.
+	 */
+	acquire?: boolean;
+}
+
 export interface PythonRuntimeManager {
-	ensure(options?: { silent?: boolean; force?: boolean }): Promise<PythonRuntimeOutcome>;
+	ensure(options?: PythonRuntimeEnsureOptions): Promise<PythonRuntimeOutcome>;
 	getLastOutcome(): PythonRuntimeOutcome | undefined;
 }
 
@@ -98,8 +111,8 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 	let lastOutcomeAt = 0;
 	let lastInterpreterIdentity: string | undefined;
 
-	const ensureOnce = async (silent: boolean): Promise<PythonRuntimeOutcome> => {
-		const uvPath = await deps.ensureUv(silent);
+	const ensureOnce = async (silent: boolean, acquire: boolean): Promise<PythonRuntimeOutcome> => {
+		const uvPath = acquire ? await deps.ensureUv(silent) : deps.findUv();
 		if (!uvPath) {
 			return { status: "uv-unavailable", reason: "uv is unavailable; run `pi doctor` or reconnect and retry." };
 		}
@@ -143,6 +156,12 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 		const initialFind = await findPython();
 		const initialOutcome = resolveFoundPython(initialFind);
 		if (initialOutcome) return initialOutcome;
+		if (!acquire) {
+			return {
+				status: "python-unavailable",
+				reason: "No Python interpreter is installed yet; real use installs it.",
+			};
+		}
 		if (deps.isOffline()) {
 			return {
 				status: "offline",
@@ -177,6 +196,20 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 		ensure(options = {}) {
 			if (inFlight) return inFlight;
 			const force = options.force ?? false;
+			if (options.acquire === false) {
+				if (lastOutcome?.status === "ready") {
+					const current = deps.inspectInterpreter(lastOutcome.pythonPath);
+					if (current !== undefined && current === lastInterpreterIdentity) return Promise.resolve(lastOutcome);
+				}
+				// A probe neither shares nor replaces the acquiring path's state unless it found a ready runtime.
+				return ensureOnce(options.silent ?? true, false).then((outcome) => {
+					if (outcome.status === "ready") {
+						lastOutcome = Object.freeze(outcome);
+						lastOutcomeAt = deps.now();
+					}
+					return outcome;
+				});
+			}
 			if (!force && lastOutcome?.status === "ready") {
 				const current = deps.inspectInterpreter(lastOutcome.pythonPath);
 				if (current !== undefined && current === lastInterpreterIdentity) return Promise.resolve(lastOutcome);
@@ -189,7 +222,7 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 			) {
 				return Promise.resolve(lastOutcome);
 			}
-			inFlight = ensureOnce(options.silent ?? true)
+			inFlight = ensureOnce(options.silent ?? true, true)
 				.then((outcome) => {
 					lastOutcome = Object.freeze(outcome);
 					lastOutcomeAt = deps.now();
@@ -209,6 +242,7 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 const realPythonRuntimeDependencies: PythonRuntimeDependencies = {
 	agentDir: getAgentDir(),
 	ensureUv: (silent) => ensureTool("uv", silent),
+	findUv: () => getToolPath("uv") ?? undefined,
 	isOffline: () => isTruthyEnvFlag(process.env.PI_OFFLINE),
 	makeDirectory: (path) => mkdirSync(path, { recursive: true, mode: 0o700 }),
 	inspectInterpreter: inspectPythonInterpreter,
@@ -231,7 +265,7 @@ const realPythonRuntimeDependencies: PythonRuntimeDependencies = {
 
 const pythonRuntimeManager = createPythonRuntimeManager(realPythonRuntimeDependencies);
 
-export function ensurePythonRuntime(options?: { silent?: boolean; force?: boolean }): Promise<PythonRuntimeOutcome> {
+export function ensurePythonRuntime(options?: PythonRuntimeEnsureOptions): Promise<PythonRuntimeOutcome> {
 	return pythonRuntimeManager.ensure(options);
 }
 

@@ -369,6 +369,19 @@ function classifyEveryEdgeOperation(input: ClassifyEdgeInput): EdgeOperation[] {
 
 export type YoloBoundaryDecision = { kind: "block" | "confirm"; reason: string };
 
+const POSIX_SYSTEM_DIRECTORIES: ReadonlySet<string> = new Set([
+	"/",
+	"/home",
+	"/root",
+	"/etc",
+	"/usr",
+	"/var",
+	"/bin",
+	"/sbin",
+	"/boot",
+	"/lib",
+]);
+
 export interface YoloBoundaryInput extends ClassifyEdgeInput {
 	/** Exact shell-command globs the operator has forbidden, even in YOLO. */
 	denyCommands?: readonly string[];
@@ -431,15 +444,16 @@ export function classifyYoloBoundary(input: YoloBoundaryInput): YoloBoundaryDeci
 			for (const target of positional(rest)) {
 				const normalized = target.replace(/\/\*$/, "");
 				if (/^\$(?:HOME|\{HOME\})$/.test(target)) return { kind: "block", reason: "deletes home directory" };
-				const { resolved, api } = resolveTarget(normalized, input.cwd);
-				if (
-					api === nodePath &&
-					["/", "/home", "/root", "/etc", "/usr", "/var", "/bin", "/sbin", "/boot", "/lib"].includes(resolved)
-				) {
-					return { kind: "block", reason: "deletes a system directory" };
+				// A POSIX shell path means what the shell reads, whatever the host: on Windows the same text
+				// would otherwise resolve against the current drive and miss every system directory.
+				if (normalized.startsWith("/")) {
+					const shellPath = nodePath.posix.normalize(normalized).replace(/(?<=.)\/+$/, "");
+					if (POSIX_SYSTEM_DIRECTORIES.has(shellPath))
+						return { kind: "block", reason: "deletes a system directory" };
 				}
-				if (api === nodePath && resolved === nodePath.resolve(homedir()))
-					return { kind: "block", reason: "deletes home directory" };
+				const { resolved, api } = resolveTarget(normalized, input.cwd);
+				if (api.parse(resolved).root === resolved) return { kind: "block", reason: "deletes a filesystem root" };
+				if (resolved === api.resolve(homedir())) return { kind: "block", reason: "deletes home directory" };
 			}
 		}
 	}
