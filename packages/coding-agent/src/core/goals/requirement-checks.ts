@@ -4,7 +4,8 @@
  *
  * A check must pass the read-only shell line (readOnlyShellViolation): it observes the machine,
  * the repository or a service and never changes them, which is what makes running it from the
- * completion path safe without any further prompt. Output capture is bounded; a timeout kills the
+ * completion path safe without any further prompt. A run of the project's own tests is admitted
+ * too: it is how a check proves code works, and it runs nothing the agent could not already run. Output capture is bounded; a timeout kills the
  * process tree the check started (by handle, never by pid).
  */
 import type { ChildProcess } from "node:child_process";
@@ -31,7 +32,7 @@ export interface RequirementCheckResult {
 /** Why `check` cannot be a requirement check, or undefined when it can. */
 export function requirementCheckViolation(check: RequirementCheck, cwd: string): string | undefined {
 	if (!check.command.trim()) return "A check needs a command.";
-	const violation = readOnlyShellViolation(check.command, cwd);
+	const violation = readOnlyShellViolation(check.command, cwd, { admitTestRuns: true });
 	return violation
 		? `A check may only observe, but \`${check.command}\` ${violation.replace(/^it /u, "")}.`
 		: undefined;

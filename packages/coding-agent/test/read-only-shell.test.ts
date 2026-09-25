@@ -51,9 +51,41 @@ describe("read-only shell line", () => {
 			["LD_PRELOAD=/tmp/x.so cat README.md", false],
 			["GIT_EXTERNAL_DIFF=/tmp/x git diff", false],
 			["M=/srv; rm -rf $M", false],
+			// env is judged by the command it runs; node runs arbitrary code beyond version and syntax checks.
+			["env", true],
+			["env -u HOME LC_ALL=C sort README.md", true],
+			["env python3 -c 'import os; os.remove(\"x\")'", false],
+			["env PATH=/tmp/evil ls", false],
+			["env -S 'cat README.md'", false],
+			["node --version", true],
+			["node --check src/index.js", true],
+			["node -e \"require('fs').unlinkSync('x')\"", false],
+			["node --test", false],
 		];
 		for (const [cmd, ok] of cases) expect([cmd, readOnlyShellViolation(cmd, cwd) === undefined]).toEqual([cmd, ok]);
 		expect(isMutatingToolCall("bash", { command: "echo x > f" })).toBe(true);
 		expect(isMutatingToolCall("bash", { command: "git log" })).toBe(false);
+	});
+
+	it("admits a run of the project's tests only when asked, and never one that rewrites files", () => {
+		const cases: Array<[string, boolean]> = [
+			["node --test", true],
+			["npx vitest run test/slug.test.ts", true],
+			["npm test", true],
+			["npm run test:unit | tail -5", true],
+			["CI=1 pytest -q tests/test_slug.py", true],
+			["python3 -m pytest -q", true],
+			["go test ./...", true],
+			["cargo test", true],
+			["npx vitest run -u", false],
+			["npx jest --updateSnapshot", false],
+			["vitest --watch", false],
+			["npm test && rm -rf dist", false],
+			["PATH=/tmp/evil npm test", false],
+			["node --test $(ls)", false],
+		];
+		for (const [cmd, ok] of cases)
+			expect([cmd, readOnlyShellViolation(cmd, cwd, { admitTestRuns: true }) === undefined]).toEqual([cmd, ok]);
+		expect(readOnlyShellViolation("npm test", cwd)).toBeDefined();
 	});
 });

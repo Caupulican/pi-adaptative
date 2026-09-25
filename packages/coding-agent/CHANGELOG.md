@@ -13,6 +13,7 @@
 - `create_goal` is all or nothing: a requirement check that could change something refuses the call before the goal exists, instead of leaving a started goal holding only the requirements before it.
 - A read-only command that starts with a variable assignment (`M=/srv; test ! -e "$M/x"`, `LC_ALL=C sort f`) is read-only; an assignment to a variable that steers what runs (`PATH`, `LD_*`, `GIT_*` and similar) is not.
 - The goal tool states that `amend_goal` needs the rewritten objective in `userGoal` alongside the owner's quote.
+- The read-only shell line judges `env <command>` by the command it runs and admits `node` only to print its version or syntax-check a file: `env python3 -c …` and `node -e …` no longer pass as read-only for read-only workers and requirement checks.
 
 ### Added
 
@@ -20,6 +21,8 @@
 - `goal amend_goal` rewrites an active goal's objective from the owner's own complete message (verified on the active branch and recorded as the amendment's provenance), so a mid-run scope change such as "llama-cpp too" is what completion judges.
 - A goal requirement can carry a `check`: an observational command (validated against the read-only shell line) that the harness reruns at completion, in both the goal tool and the objective loop. Every result is recorded as host-verified `check` evidence; a passing check satisfies its requirement and a failing one reopens it and refuses completion with one sentence per failure, before System One is asked. `create_goal` accepts `{ text, check }` requirements and `set_requirement_check` attaches or removes one.
 - `npm run eval:completion` (packages/coding-agent) measures completion reliability against the real System One per outcome kind.
+- A requirement check may run the project's own tests (`node --test`, `vitest run`, `npm test`, `pytest`, `go test`, `cargo test` and similar), the natural proof for code; an option that rewrites files (snapshot update, fix) or watches is refused. Read-only workers keep the strict line.
+- `goal satisfy_requirement` accepts `requirementIds`: every named requirement is satisfied by the cited evidence, or none is.
 
 ## [0.99.50] - 2026-09-25
 

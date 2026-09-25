@@ -234,6 +234,23 @@ describe("goal tool", () => {
 		expect(state?.requirements.map((requirement) => requirement.evidenceIds)).toEqual([["e1"], ["e1"]]);
 	});
 
+	it("satisfies every requirement one satisfy_requirement names, or none of them", async () => {
+		const { run, getState, sessionManager } = createHarness();
+		await run({ action: "start", goalId: "g1", userGoal: "Ship feature" });
+		await run({ action: "add_requirement", requirementId: "r1", text: "Implement X" });
+		await run({ action: "add_requirement", requirementId: "r2", text: "Document X" });
+		sessionManager.appendMessage({ role: "user", content: "owner confirmed X", timestamp: 1000 });
+		await run({ action: "add_evidence", evidenceId: "e1", kind: "user", summary: "owner confirmed X" });
+
+		const refused = await run({ action: "satisfy_requirement", requirementIds: ["r1", "r9"], evidenceIds: ["e1"] });
+		expect(refused.isError).toBe(true);
+		expect(getState()?.requirements.map((requirement) => requirement.status)).toEqual(["open", "open"]);
+
+		const satisfied = await run({ action: "satisfy_requirement", requirementIds: ["r1", "r2"], evidenceIds: ["e1"] });
+		expect(satisfied.isError).not.toBe(true);
+		expect(getState()?.requirements.map((requirement) => requirement.status)).toEqual(["satisfied", "satisfied"]);
+	});
+
 	it("satisfies nothing, and says so, when the evidence in the same call did not verify", async () => {
 		const { run, getState } = createHarness();
 		await run({ action: "start", goalId: "g1", userGoal: "Ship feature" });

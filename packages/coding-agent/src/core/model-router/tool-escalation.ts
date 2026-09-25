@@ -202,15 +202,56 @@ const LEADING_ASSIGNMENT_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(?:"[^"]*"|'[^']*'|[^\s
 const EXECUTION_STEERING_VARIABLE_RE =
 	/^(?:PATH|IFS|ENV|BASH_ENV|SHELLOPTS|BASHOPTS|PS4|PROMPT_COMMAND|PAGER|[A-Z0-9_]*_PAGER|EDITOR|VISUAL|BROWSER|LESSOPEN|LESSCLOSE|LD_[A-Z0-9_]*|DYLD_[A-Z0-9_]*|GIT_[A-Z0-9_]*|NODE_OPTIONS|NODE_PATH|PYTHON[A-Z0-9_]*|PERL5[A-Z0-9_]*|RUBY[A-Z0-9_]*|SSH_[A-Z0-9_]*)$/u;
 
-function isReadOnlyShellSegment(segment: string): boolean {
+/** The segment after its leading assignments, or undefined when one of them steers what runs. */
+function withoutLeadingAssignments(segment: string): string | undefined {
 	let rest = segment.trim();
 	for (let assignment = LEADING_ASSIGNMENT_RE.exec(rest); assignment; assignment = LEADING_ASSIGNMENT_RE.exec(rest)) {
-		if (EXECUTION_STEERING_VARIABLE_RE.test(assignment[1]!)) return false;
+		if (EXECUTION_STEERING_VARIABLE_RE.test(assignment[1]!)) return undefined;
 		rest = rest.slice(assignment[0].length);
 	}
+	return rest;
+}
+
+function isReadOnlyShellSegment(segment: string): boolean {
+	const rest = withoutLeadingAssignments(segment);
+	if (rest === undefined) return false;
 	// A bare assignment changes only the shell's own variables.
 	if (!rest) return segment.trim().length > 0;
 	return isReadOnlyCommandSegment(rest);
+}
+
+/** `env`'s options that change neither what runs nor anything on disk. */
+const ENV_OPTION_RE = /^(?:-i|-0|--ignore-environment|--null|--|-u\s+\S+|--unset=\S+|-C\s+\S+|--chdir=\S+)(?:\s+|$)/u;
+
+/** What `env` runs: "" when it only prints the environment, undefined for an option not judged here (`-S` splits a string into a command). */
+function envWrappedCommand(segment: string): string | undefined {
+	let rest = segment.trim().replace(/^\S+\s*/u, "");
+	for (let option = ENV_OPTION_RE.exec(rest); option; option = ENV_OPTION_RE.exec(rest)) {
+		rest = rest.slice(option[0].length);
+	}
+	return rest.startsWith("-") ? undefined : rest;
+}
+
+/** Node runs arbitrary code; only printing its version and syntax-checking a file read nothing else. */
+const NODE_READ_ONLY_RE = /^\S+\s+(?:-v|--version|(?:-c|--check)\s+\S+)$/u;
+
+/**
+ * A run of the project's own tests: how a requirement check proves code works. It executes project
+ * code the agent may already run, and may write the runner's own caches and reports; an option that
+ * rewrites project files (snapshot update, fix) or never finishes (watch) is not a test run.
+ */
+const TEST_RUN_RE =
+	/^(?:(?:(?:npx|bunx)|(?:pnpm|yarn)\s+exec)\s+)?(?:vitest\s+run|jest|mocha|pytest)(?:\s|$)|^node\s+--test(?:\s|$)|^python3?\s+-m\s+(?:pytest|unittest)(?:\s|$)|^(?:go|cargo|deno|bun)\s+test(?:\s|$)|^(?:npm|pnpm|yarn)\s+(?:run\s+)?test(?::\S+)?(?:\s|$)/u;
+const TEST_RUN_WRITE_OPTION_RE = /(?:^|\s)(?:-u|--update\S*|--watch\S*|--fix\S*)(?:\s|=|$)/u;
+
+function isTestRunSegment(segment: string): boolean {
+	const rest = withoutLeadingAssignments(segment);
+	return (
+		rest !== undefined &&
+		TEST_RUN_RE.test(rest) &&
+		!TEST_RUN_WRITE_OPTION_RE.test(rest) &&
+		!UNSAFE_NESTED_SHELL_EXECUTION_RE.test(rest)
+	);
 }
 
 function isReadOnlyCommandSegment(segment: string): boolean {
@@ -229,6 +270,11 @@ function isReadOnlyCommandSegment(segment: string): boolean {
 		const subcommand = commandArg(segment, 1);
 		return Boolean(subcommand && READ_ONLY_NPM_SUBCOMMANDS.has(subcommand));
 	}
+	if (name === "env") {
+		const wrapped = envWrappedCommand(segment);
+		return wrapped !== undefined && (wrapped === "" || isReadOnlyShellSegment(wrapped));
+	}
+	if (name === "node") return NODE_READ_ONLY_RE.test(segment.trim());
 	// `command -v`/`-V` looks a name up; plain `command x` runs x.
 	if (name === "command") return /^command\s+-[vV]\s/u.test(segment.trim());
 	if (name === "systemctl") {
@@ -269,7 +315,14 @@ function unquoteShellWord(word: string): string {
  * scratch capture), but a redirect or tee onto an existing path, and every command the read/write
  * line above calls mutating, is refused. This inspects the command text; it is not OS isolation.
  */
-export function readOnlyShellViolation(command: string, cwd: string): string | undefined {
+export function readOnlyShellViolation(
+	command: string,
+	cwd: string,
+	options: {
+		/** A requirement check may run the project's tests (see TEST_RUN_RE); a read-only lane may not. */
+		admitTestRuns?: boolean;
+	} = {},
+): string | undefined {
 	const trimmed = command.trim();
 	if (!trimmed) return undefined;
 	const targetExists = (word: string): string | undefined => {
@@ -285,6 +338,7 @@ export function readOnlyShellViolation(command: string, cwd: string): string | u
 	const remaining: string[] = [];
 	for (const segment of withoutRedirections.split(SHELL_SEGMENT_SEPARATOR_RE).map((part) => part.trim())) {
 		if (!segment) continue;
+		if (options.admitTestRuns && isTestRunSegment(segment)) continue;
 		if (commandName(segment) !== "tee") {
 			remaining.push(segment);
 			continue;

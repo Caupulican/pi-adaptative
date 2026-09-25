@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createPackageResolver, directImporterTests, relativeImportSpecifiers, selectCommitTests } from "./affected-tests.mjs";
+import {
+	createPackageResolver,
+	directImporterTests,
+	guardedPaths,
+	relativeImportSpecifiers,
+	selectCommitTests,
+} from "./affected-tests.mjs";
 
 const sources = {
 	"packages/x/test/a.test.ts": 'import { a } from "../src/core/a.ts";\nvi.mock("../src/core/b.js");',
@@ -62,4 +68,21 @@ test("a package specifier reaches the module behind its entry point, through re-
 	]);
 	// An unknown package or an export the map does not name selects nothing.
 	assert.equal(createPackageResolver([])("@scope/core/node"), undefined);
+});
+
+test("a test that declares guarded paths is selected by a staged file under them, even past the hub bound", () => {
+	const files = {
+		"packages/x/test/budget.test.ts": 'import { measure } from "./harness.ts";\n// @guards src/core/tools/ src/core/surface.ts ../y/src/projection.ts\n',
+		"packages/x/test/other.test.ts": 'import { a } from "../src/core/a.ts";\n',
+	};
+	const read = (path) => files[path];
+	const tests = Object.keys(files);
+	assert.deepEqual(guardedPaths("packages/x/test/budget.test.ts", files["packages/x/test/budget.test.ts"]), [
+		"packages/x/src/core/tools/",
+		"packages/x/src/core/surface.ts",
+		"packages/y/src/projection.ts",
+	]);
+	assert.deepEqual(selectCommitTests(["packages/x/src/core/tools/goal.ts"], tests, read, 0), ["packages/x/test/budget.test.ts"]);
+	assert.deepEqual(selectCommitTests(["packages/y/src/projection.ts"], tests, read, 0), ["packages/x/test/budget.test.ts"]);
+	assert.deepEqual(selectCommitTests(["packages/x/src/core/toolsmith.ts"], tests, read), []);
 });

@@ -6,6 +6,10 @@ import {
 } from "../src/core/context/context-composition.ts";
 import { createHarness } from "./test-harness.ts";
 
+// The schema budget below measures every default tool's definition without importing it.
+// @guards src/core/tools/ src/core/default-tool-surface.ts src/core/improvement-loop.ts
+// @guards src/core/compaction/self-compaction.ts ../agent/src/provider-tool-projection.ts
+
 const user = (text: string) => ({ role: "user" as const, content: [{ type: "text" as const, text }], timestamp: 0 });
 
 describe("buildContextCompositionReport", () => {

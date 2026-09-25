@@ -7,6 +7,10 @@
  * source file directly, which is bounded and catches the tests written for that module. The rest of
  * the transitive set stays CI's job, and a red CI run comes back to every later commit through
  * `ci-status.mjs` (see commitObligation).
+ *
+ * A test that measures sources it does not import (a whole tool surface's schema budget, a doctrine
+ * scan) declares them: `// @guards <path> [<path>...]`, each path relative to the test's workspace,
+ * a file or a directory prefix ending in `/`. A staged file under a declared path selects the test.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, posix } from "node:path";
@@ -28,6 +32,22 @@ function matchAll(pattern, text) {
 }
 
 /** Every relative module specifier a test file imports, mocks, or requires. */
+const GUARDS_LINE = /^\s*\/\/\s*@guards(\s+)(.+)$/gmu;
+
+/** The repo-relative paths a test declares it guards (see the module comment). */
+export function guardedPaths(testFile, text) {
+	const workspace = testFile.split("/").slice(0, 2).join("/");
+	return matchAll(GUARDS_LINE, text).flatMap((line) =>
+		line
+			.split(/\s+/u)
+			.filter(Boolean)
+			.map((path) => {
+				const joined = posix.normalize(posix.join(workspace, path));
+				return path.endsWith("/") && !joined.endsWith("/") ? `${joined}/` : joined;
+			}),
+	);
+}
+
 export function relativeImportSpecifiers(text) {
 	return matchAll(IMPORT_SPECIFIER, text);
 }
@@ -139,6 +159,15 @@ export function selectCommitTests(
 		const kept =
 			importers.length > hubThreshold ? importers.filter((test) => test.split("/").pop().startsWith(stem)) : importers;
 		for (const test of kept) selected.add(test);
+	}
+	// A declared guard is explicit, so a hub never narrows it away.
+	for (const testFile of testFiles) {
+		const guards = guardedPaths(testFile, read(testFile) ?? "");
+		if (guards.length === 0 || changedFiles.includes(testFile)) continue;
+		const guarded = changedFiles.some((changed) =>
+			guards.some((guard) => (guard.endsWith("/") ? changed.startsWith(guard) : changed === guard)),
+		);
+		if (guarded) selected.add(testFile);
 	}
 	return [...selected].sort();
 }

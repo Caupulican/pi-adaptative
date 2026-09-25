@@ -129,7 +129,8 @@ const goalSchema = Type.Object(
 		),
 		requirementIds: Type.Optional(
 			Type.Array(Type.String(), {
-				description: "On add_evidence, every requirement this evidence satisfies once it verifies.",
+				description:
+					"On add_evidence, every requirement this evidence satisfies once it verifies. On satisfy_requirement, every requirement the cited evidence satisfies (all or none).",
 			}),
 		),
 		text: Type.Optional(Type.String({ description: "Requirement text. Required for add_requirement." })),
@@ -493,7 +494,8 @@ function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
 		case "satisfy_requirement":
 			return {
 				action: "satisfy_requirement",
-				requirementId: input.requirementId ?? "",
+				// The first requirement named; the rest are satisfied by the same call (requestedRequirementIds).
+				requirementId: input.requirementId?.trim() || input.requirementIds?.find((id) => id.trim())?.trim() || "",
 				evidenceIds: input.evidenceIds,
 			};
 		case "block_requirement":
@@ -903,9 +905,9 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			}
 			const evidenceState = action.action === "add_evidence" ? deps.getGoalState() : undefined;
 			let evidenceFailureReason: string | undefined;
-			// Requirements this add_evidence call also satisfies, in citation order and deduplicated.
+			// Requirements this add_evidence or satisfy_requirement call satisfies, in citation order and deduplicated.
 			const requestedRequirementIds =
-				mapped.action === "add_evidence"
+				mapped.action === "add_evidence" || mapped.action === "satisfy_requirement"
 					? [
 							...new Set(
 								[input.requirementId, ...(input.requirementIds ?? [])]
@@ -1178,6 +1180,23 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					}
 				}
 				let committed = result.state;
+				// Every requirement one satisfy_requirement names, or none: the first was applied above.
+				if (action.action === "satisfy_requirement") {
+					for (const requirementId of requestedRequirementIds.slice(1)) {
+						const applied = applyGoalAction(committed, { ...action, requirementId }, now(), {
+							requireVerifiedEvidenceForCompletion: deps.requireVerifiedEvidenceForCompletion?.() ?? true,
+							openTaskSteps: deps.getOpenTaskSteps?.(),
+							backgroundToolTasks: deps.getBackgroundToolTasks?.(),
+						});
+						if (!applied.ok)
+							return goalExecutionError(
+								input.action,
+								`requirement '${requirementId}': ${applied.error} No requirement was satisfied.`,
+								current,
+							);
+						committed = applied.state;
+					}
+				}
 				// One call, one outcome: evidence that verifies satisfies the requirements it was recorded
 				// for, through the same reducer a following satisfy_requirement would drive. Splitting the
 				// two cost a whole provider request for every verified evidence entry.
