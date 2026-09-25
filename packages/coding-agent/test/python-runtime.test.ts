@@ -308,6 +308,35 @@ describe("uv-managed Python runtime", () => {
 		});
 	});
 
+	it("never installs on a find that did not finish: it asks again, then reports it could not tell", async () => {
+		const run = (results: PythonRuntimeCommandResult[]) => {
+			const calls: string[][] = [];
+			const deps = createDeps(async (_command, args) => {
+				calls.push(args);
+				const next = results.shift();
+				if (!next) throw new Error("Unexpected command");
+				return next;
+			});
+			return { calls, manager: createPythonRuntimeManager(deps) };
+		};
+		const timedOutThenFound = run([
+			commandResult(1, "", "", { killed: true }),
+			commandResult(0, "/agent/runtimes/python/cpython-3.13/bin/python\n"),
+		]);
+		await expect(timedOutThenFound.manager.ensure()).resolves.toMatchObject({
+			status: "ready",
+			pythonInstalled: false,
+		});
+		expect(timedOutThenFound.calls.every((args) => args[1] === "find")).toBe(true);
+
+		const neverAnswers = run([
+			commandResult(1, "", "", { killed: true }),
+			commandResult(1, "", "", { killed: true }),
+		]);
+		await expect(neverAnswers.manager.ensure()).resolves.toMatchObject({ status: "python-unavailable" });
+		expect(neverAnswers.calls.map((args) => args[1])).toEqual(["find", "find"]);
+	});
+
 	it("does not attempt a Python download in offline mode", async () => {
 		const calls: string[][] = [];
 		const manager = createPythonRuntimeManager(

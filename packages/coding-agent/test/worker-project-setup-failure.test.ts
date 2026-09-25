@@ -52,7 +52,7 @@ it.each(["before", "after", "none"])(
 			expect(requests).toBe(phase === "none" ? 1 : 0);
 			spy.mockRestore();
 			const next = await second.session.runWorkerDelegationOnce({ instructions: "Next project task" });
-			expect(next.record?.status).toBe("succeeded");
+			expect(next.record?.status, JSON.stringify(next)).toBe("succeeded");
 			expect(requests).toBe(phase === "none" ? 2 : 1);
 		} finally {
 			spy.mockRestore();

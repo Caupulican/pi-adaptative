@@ -13,6 +13,7 @@
 - `create_goal` is all or nothing: a requirement check that could change something refuses the call before the goal exists, instead of leaving a started goal holding only the requirements before it.
 - A read-only command that starts with a variable assignment (`M=/srv; test ! -e "$M/x"`, `LC_ALL=C sort f`) is read-only; an assignment to a variable that steers what runs (`PATH`, `LD_*`, `GIT_*` and similar) is not.
 - The goal tool states that `amend_goal` needs the rewritten objective in `userGoal` alongside the owner's quote.
+- The Python runtime never installs a second interpreter because `uv python find` did not finish in time: a find that timed out is asked once more, and if it still cannot answer the runtime reports that instead of running `uv python install`.
 - The read-only shell line judges `env <command>` by the command it runs and admits `node` only to print its version or syntax-check a file: `env python3 -c …` and `node -e …` no longer pass as read-only for read-only workers and requirement checks.
 
 ### Added

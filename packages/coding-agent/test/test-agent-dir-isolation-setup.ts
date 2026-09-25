@@ -6,23 +6,21 @@ import { dirname, join } from "node:path";
 import { afterAll } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import { removeTreeSync } from "../src/core/util/remove-tree.ts";
+import { SHARED_TEST_RUNTIME_ROOT } from "./global-test-runtimes.ts";
 import { launchEnvBackup } from "./test-launch-env-setup.ts";
 
 /**
  * Rebuildable runtimes are shared by the whole run, not isolated per file: each fresh agent dir
  * otherwise installs its own CPython into `runtimes/python` from a cold `cache/uv` the first time a
  * Windows test reaches the shell engine. That per-file download stalled Windows CI tests for 30-70 s
- * (captured by ci-hang-diagnostics-setup.ts). User state (settings, auth, sessions) stays isolated.
+ * (captured by ci-hang-diagnostics-setup.ts). The shared directory is provisioned once per run by
+ * global-test-runtimes.ts. User state (settings, auth, sessions) stays isolated.
  */
-const SHARED_RUNTIME_LINKS: ReadonlyArray<readonly [string[], string]> = [
-	[["runtimes"], "runtimes"],
-	[["cache", "uv"], "uv-cache"],
-];
-const sharedRuntimeRoot = join(realpathSync.native(tmpdir()), "pi-agent-test-shared");
+const SHARED_RUNTIME_LINKS: ReadonlyArray<readonly string[]> = [["runtimes"], ["cache", "uv"]];
 
 function linkSharedRuntimes(agentDir: string): void {
-	for (const [segments, shared] of SHARED_RUNTIME_LINKS) {
-		const target = join(sharedRuntimeRoot, shared);
+	for (const segments of SHARED_RUNTIME_LINKS) {
+		const target = join(SHARED_TEST_RUNTIME_ROOT, ...segments);
 		const link = join(agentDir, ...segments);
 		mkdirSync(target, { recursive: true });
 		mkdirSync(dirname(link), { recursive: true });
@@ -32,7 +30,7 @@ function linkSharedRuntimes(agentDir: string): void {
 
 /** Remove the links themselves first, so deleting the agent dir never reaches the shared runtimes. */
 function removeAgentDir(agentDir: string): void {
-	for (const [segments] of SHARED_RUNTIME_LINKS) {
+	for (const segments of SHARED_RUNTIME_LINKS) {
 		const link = join(agentDir, ...segments);
 		try {
 			if (lstatSync(link).isSymbolicLink()) rmSync(link);

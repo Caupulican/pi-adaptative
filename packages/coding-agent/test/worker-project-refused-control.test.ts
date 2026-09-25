@@ -39,7 +39,7 @@ it.each(["empty", "oversized", "none"])(
 				expect(() => controller.startWorkerAgentTask(initial.record!.agentId!, message)).toThrow();
 			}
 			const next = await second.session.runWorkerDelegationOnce({ instructions: "Continue project ownership work" });
-			expect(next.record?.status).toBe("succeeded");
+			expect(next.record?.status, JSON.stringify(next)).toBe("succeeded");
 			expect(requests).toHaveLength(2);
 			expect(requests[1]).toContain("Retained project finding");
 		} finally {

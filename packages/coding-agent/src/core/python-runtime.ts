@@ -153,7 +153,16 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 			return { status: "ready", uvPath, pythonPath, pythonInstalled: false };
 		};
 
-		const initialFind = await findPython();
+		let initialFind = await findPython();
+		// A find that did not finish said nothing about what is installed: a cold first run of uv can
+		// outlast the bound. Ask once more; if it still cannot answer, report that, never install on it.
+		if (initialFind.killed) initialFind = await findPython();
+		if (initialFind.killed) {
+			return {
+				status: "python-unavailable",
+				reason: `uv python find did not finish within ${PYTHON_RUNTIME_FIND_TIMEOUT_MS} ms twice; not installing a Python it may already have.`,
+			};
+		}
 		const initialOutcome = resolveFoundPython(initialFind);
 		if (initialOutcome) return initialOutcome;
 		if (!acquire) {

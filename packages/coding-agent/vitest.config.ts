@@ -76,6 +76,8 @@ export default defineConfig({
 		globals: true,
 		environment: "node",
 		testTimeout: 30000,
+		// Windows: provision uv and the shell engine's Python once per run (see the file).
+		globalSetup: ["./test/global-test-runtimes.ts"],
 		setupFiles: [
 			"./test/test-agent-dir-isolation-setup.ts",
 			// Windows CI only (see the file): evidence for tests that stall on the runner.

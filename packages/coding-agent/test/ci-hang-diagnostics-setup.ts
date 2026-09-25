@@ -7,6 +7,7 @@
  * descendants, plus every shell, interpreter and git process on the machine with its parent, so an
  * orphan still holding a pipe shows up even after its parent exited. Output is bounded stderr.
  */
+import { createHook } from "node:async_hooks";
 import { execFile } from "node:child_process";
 import { afterEach, beforeEach } from "vitest";
 
@@ -14,6 +15,31 @@ const LEAD_MS = 5_000;
 const WATCHED_NAMES =
 	/^(?:bash|sh|dash|python\d*(?:\.\d+)?|pythonw?|uv|node|git|git-remote-https|powershell|pwsh|cmd|taskkill)\.exe$/iu;
 const MAX_ROWS = 60;
+const MAX_PENDING_FS = 6;
+
+/**
+ * Where each in-flight filesystem request was made: a stall on a pending `FSReqPromise` otherwise
+ * names no file and no caller. Entries leave the map when the request completes.
+ */
+const pendingFs = new Map<number, { type: string; at: number; stack: string }>();
+createHook({
+	init(asyncId, type) {
+		if (type !== "FSREQPROMISE" && type !== "FSREQCALLBACK") return;
+		const stack = (new Error().stack ?? "")
+			.split("\n")
+			.slice(2)
+			.filter((line) => !line.includes("node:internal") && !line.includes("ci-hang-diagnostics"))
+			.slice(0, 8)
+			.join(" <- ");
+		pendingFs.set(asyncId, { type, at: Date.now(), stack });
+	},
+	destroy(asyncId) {
+		pendingFs.delete(asyncId);
+	},
+	promiseResolve(asyncId) {
+		pendingFs.delete(asyncId);
+	},
+}).enable();
 
 interface ProcessRow {
 	ProcessId: number;
@@ -23,21 +49,21 @@ interface ProcessRow {
 	CreationDate: string | null;
 }
 
-function listProcesses(): Promise<ProcessRow[]> {
+function listProcesses(): Promise<{ rows: ProcessRow[]; error?: string }> {
 	const script =
 		"Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine,@{n='CreationDate';e={$_.CreationDate.ToString('o')}} | ConvertTo-Json -Compress";
 	return new Promise((resolve) => {
 		execFile(
 			"powershell.exe",
 			["-NoProfile", "-NonInteractive", "-Command", script],
-			{ timeout: 15_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+			{ timeout: 40_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
 			(error, stdout) => {
-				if (error) return resolve([]);
+				if (error) return resolve({ rows: [], error: error.message.slice(0, 200) });
 				try {
 					const parsed = JSON.parse(stdout) as ProcessRow | ProcessRow[];
-					resolve(Array.isArray(parsed) ? parsed : [parsed]);
-				} catch {
-					resolve([]);
+					resolve({ rows: Array.isArray(parsed) ? parsed : [parsed] });
+				} catch (parseError) {
+					resolve({ rows: [], error: `unparsable listing: ${String(parseError).slice(0, 200)}` });
 				}
 			},
 		);
@@ -49,7 +75,13 @@ async function report(testName: string, startedAt: number): Promise<void> {
 		counts[name] = (counts[name] ?? 0) + 1;
 		return counts;
 	}, {});
-	const rows = await listProcesses();
+	const now = Date.now();
+	const oldestFs = [...pendingFs.values()]
+		.sort((a, b) => a.at - b.at)
+		.slice(0, MAX_PENDING_FS)
+		.map((entry) => `  ${entry.type} pending ${now - entry.at}ms: ${entry.stack.slice(0, 700)}`);
+	const listing = await listProcesses();
+	const rows = listing.rows;
 	const byParent = new Map<number, ProcessRow[]>();
 	for (const row of rows) byParent.set(row.ParentProcessId, [...(byParent.get(row.ParentProcessId) ?? []), row]);
 	const descendants = new Set<number>();
@@ -81,7 +113,9 @@ async function report(testName: string, startedAt: number): Promise<void> {
 		[
 			`[ci-hang] "${testName}" still running after ${Date.now() - startedAt}ms in worker ${process.pid}`,
 			`[ci-hang] active resources: ${JSON.stringify(resources)}`,
-			`[ci-hang] processes (${rows.length} on host, ${descendants.size} descendants):`,
+			`[ci-hang] oldest in-flight filesystem requests (${pendingFs.size}):`,
+			...oldestFs,
+			`[ci-hang] processes (${rows.length} on host, ${descendants.size} descendants)${listing.error ? ` listing failed: ${listing.error}` : ""}:`,
 			...shown,
 		].join("\n"),
 	);
