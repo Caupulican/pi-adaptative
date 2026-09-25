@@ -70,6 +70,39 @@ function listProcesses(): Promise<{ rows: ProcessRow[]; error?: string }> {
 	});
 }
 
+/** What is consuming the runner: per-process CPU seconds over a 1.5 s window, overall load, free memory. */
+function sampleLoad(): Promise<string> {
+	const script = [
+		"$before = @{}; Get-Process | ForEach-Object { $before[$_.Id] = [double]$_.CPU }",
+		"Start-Sleep -Milliseconds 1500",
+		"$load = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average",
+		"$freeMb = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1024)",
+		"$top = Get-Process | ForEach-Object { [pscustomobject]@{ Id = $_.Id; Name = $_.Name; Cpu = [math]::Round([double]$_.CPU - [double]$before[$_.Id], 2); Mb = [math]::Round($_.WorkingSet64 / 1MB) } } | Sort-Object Cpu -Descending | Select-Object -First 10",
+		"@{ load = $load; freeMb = $freeMb; top = @($top) } | ConvertTo-Json -Compress -Depth 3",
+	].join("; ");
+	return new Promise((resolve) => {
+		execFile(
+			"powershell.exe",
+			["-NoProfile", "-NonInteractive", "-Command", script],
+			{ timeout: 40_000, maxBuffer: 1024 * 1024, windowsHide: true },
+			(error, stdout) => {
+				if (error) return resolve(`load sample failed: ${error.message.slice(0, 200)}`);
+				try {
+					const sample = JSON.parse(stdout) as {
+						load: number;
+						freeMb: number;
+						top: Array<{ Id: number; Name: string; Cpu: number; Mb: number }>;
+					};
+					const busiest = sample.top.map((row) => `${row.Name}(${row.Id}) ${row.Cpu}s ${row.Mb}MB`).join(", ");
+					resolve(`cpu load ${sample.load}%, free memory ${sample.freeMb} MB; busiest over 1.5 s: ${busiest}`);
+				} catch (parseError) {
+					resolve(`load sample unparsable: ${String(parseError).slice(0, 200)}`);
+				}
+			},
+		);
+	});
+}
+
 async function report(testName: string, startedAt: number): Promise<void> {
 	const resources = process.getActiveResourcesInfo().reduce<Record<string, number>>((counts, name) => {
 		counts[name] = (counts[name] ?? 0) + 1;
@@ -80,7 +113,7 @@ async function report(testName: string, startedAt: number): Promise<void> {
 		.sort((a, b) => a.at - b.at)
 		.slice(0, MAX_PENDING_FS)
 		.map((entry) => `  ${entry.type} pending ${now - entry.at}ms: ${entry.stack.slice(0, 700)}`);
-	const listing = await listProcesses();
+	const [listing, load] = await Promise.all([listProcesses(), sampleLoad()]);
 	const rows = listing.rows;
 	const byParent = new Map<number, ProcessRow[]>();
 	for (const row of rows) byParent.set(row.ParentProcessId, [...(byParent.get(row.ParentProcessId) ?? []), row]);
@@ -113,6 +146,7 @@ async function report(testName: string, startedAt: number): Promise<void> {
 		[
 			`[ci-hang] "${testName}" still running after ${Date.now() - startedAt}ms in worker ${process.pid}`,
 			`[ci-hang] active resources: ${JSON.stringify(resources)}`,
+			`[ci-hang] ${load}`,
 			`[ci-hang] oldest in-flight filesystem requests (${pendingFs.size}):`,
 			...oldestFs,
 			`[ci-hang] processes (${rows.length} on host, ${descendants.size} descendants)${listing.error ? ` listing failed: ${listing.error}` : ""}:`,
