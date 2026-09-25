@@ -12,7 +12,15 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { applyGoalEvent, createGoalState, type GoalEvidenceKind, type GoalState } from "../../goals/goal-state.ts";
+import {
+	applyGoalEvent,
+	createGoalState,
+	type GoalEvidenceKind,
+	type GoalState,
+	type RequirementCheck,
+} from "../../goals/goal-state.ts";
+import { describeRequirementCheckRefusal, proveRequirementChecks } from "../../goals/prove-requirement-checks.ts";
+import { runRequirementCheck } from "../../goals/requirement-checks.ts";
 import type { JevAdapter } from "../adapter.ts";
 import { projectCanonicalTruth } from "../canonical-truth.ts";
 import { SystemOneController } from "../controller.ts";
@@ -29,6 +37,13 @@ export interface CompletionEvalCase {
 	requirements: readonly string[];
 	/** Evidence the agent recorded, satisfying the requirement at the same index. */
 	evidence: readonly { kind: GoalEvidenceKind; summary: string; uri?: string }[];
+	/**
+	 * The requirement checks the agent attached, aligned with `requirements` (undefined = none).
+	 * `{machine}` in a command is the scratch directory standing in for the machine's state.
+	 */
+	checks?: readonly (RequirementCheck | undefined)[];
+	/** Files that exist on the "machine" (outside the repository) when completion is judged. */
+	machine?: Readonly<Record<string, string>>;
 	/** Repository files as they were before the goal (committed in the base the diff starts from). */
 	repositoryBase?: Readonly<Record<string, string>>;
 	/** Repository files the work changed (written before completion, after the goal started). */
@@ -52,6 +67,11 @@ export const COMPLETION_EVAL_CASES: readonly CompletionEvalCase[] = [
 	{
 		id: "machine-uninstall-done",
 		kind: "machine",
+		checks: [
+			{ command: "test ! -e {machine}/usr/local/bin/ollama" },
+			{ command: "test ! -e {machine}/home/.ollama" },
+		],
+		machine: { "home/.pi/agent/models.json": '{"providers":{"openai-codex":{}}}' },
 		goal: "Remove the local Ollama server and its downloaded models from this machine.",
 		requirements: [
 			"Ollama server binary and service are removed and nothing listens on port 11434",
@@ -70,6 +90,11 @@ export const COMPLETION_EVAL_CASES: readonly CompletionEvalCase[] = [
 	{
 		id: "machine-uninstall-models-left",
 		kind: "machine",
+		checks: [
+			{ command: "test ! -e {machine}/usr/local/bin/ollama" },
+			{ command: "test ! -e {machine}/home/.ollama" },
+		],
+		machine: { "home/.ollama/models/blobs/sha256-7a1f": "model weights" },
 		goal: "Remove the local Ollama server and its downloaded models from this machine.",
 		requirements: [
 			"Ollama server binary and service are removed and nothing listens on port 11434",
@@ -93,6 +118,11 @@ export const COMPLETION_EVAL_CASES: readonly CompletionEvalCase[] = [
 	{
 		id: "machine-config-done",
 		kind: "machine",
+		checks: [
+			{ command: "grep -c ollama {machine}/home/.pi/agent/models.json", expectExitCode: 1 },
+			{ command: "grep -c openai-codex {machine}/home/.pi/agent/models.json" },
+		],
+		machine: { "home/.pi/agent/models.json": '{"providers":{"openai-codex":{},"xai":{},"llama-cpp":{}}}' },
 		goal: "Remove the ollama provider entry from ~/.pi/agent/models.json and keep every other provider.",
 		requirements: ["models.json has no ollama provider", "All other providers in models.json are unchanged"],
 		evidence: [
@@ -112,6 +142,11 @@ export const COMPLETION_EVAL_CASES: readonly CompletionEvalCase[] = [
 	{
 		id: "machine-config-port-still-open",
 		kind: "machine",
+		checks: [
+			{ command: "test ! -e {machine}/run/llama-server.pid" },
+			{ command: "grep -c enabled {machine}/home/.config/systemd/llama-server.state", expectExitCode: 1 },
+		],
+		machine: { "run/llama-server.pid": "4412", "home/.config/systemd/llama-server.state": "disabled" },
 		goal: "Stop the local llama-cpp server and disable it from starting at login.",
 		requirements: ["No llama-cpp server process is running", "The llama-cpp autostart entry is disabled"],
 		evidence: [
@@ -217,6 +252,11 @@ export const COMPLETION_EVAL_CASES: readonly CompletionEvalCase[] = [
 	{
 		id: "mixed-config-and-code-done",
 		kind: "mixed",
+		checks: [
+			{ command: "grep -c ollama {machine}/home/.pi/agent/models.json", expectExitCode: 1 },
+			{ command: "grep -c ollama config/defaults.json", expectExitCode: 1 },
+		],
+		machine: { "home/.pi/agent/models.json": '{"providers":{"openai-codex":{},"xai":{}}}' },
 		goal: "Stop using the Ollama provider: remove it from ~/.pi/agent/models.json and delete the repo's ollama default in config/defaults.json.",
 		requirements: ["models.json has no ollama provider", "config/defaults.json no longer names ollama"],
 		evidence: [
@@ -292,10 +332,17 @@ function scratchRepository(testCase: CompletionEvalCase, goalStartedAt: string):
 }
 
 /** The goal as a session builds it: requirements, evidence, each requirement satisfied by its evidence. */
-export function buildEvalGoal(testCase: CompletionEvalCase, now: string): GoalState {
+export function buildEvalGoal(testCase: CompletionEvalCase, now: string, machineRoot = "{machine}"): GoalState {
 	let goal = createGoalState({ goalId: `goal-eval-${testCase.id}`, userGoal: testCase.goal, now });
 	testCase.requirements.forEach((text, index) => {
-		goal = applyGoalEvent(goal, { type: "add_requirement", id: `req-${index + 1}`, text, now });
+		const check = testCase.checks?.[index];
+		goal = applyGoalEvent(goal, {
+			type: "add_requirement",
+			id: `req-${index + 1}`,
+			text,
+			...(check ? { check: { ...check, command: check.command.replaceAll("{machine}", machineRoot) } } : {}),
+			now,
+		});
 	});
 	testCase.evidence.forEach((evidence, index) => {
 		goal = applyGoalEvent(goal, {
@@ -323,9 +370,25 @@ export async function evaluateCompletionOnce(
 	adapter: JevAdapter,
 ): Promise<{ verdict: string; reasons: string[] }> {
 	const now = new Date().toISOString();
-	const goal = buildEvalGoal(testCase, now);
+	const machine = mkdtempSync(join(tmpdir(), "pi-completion-eval-machine-"));
+	for (const [path, content] of Object.entries(testCase.machine ?? {})) {
+		mkdirSync(dirname(join(machine, path)), { recursive: true });
+		writeFileSync(join(machine, path), content);
+	}
 	const cwd = scratchRepository(testCase, now);
 	try {
+		// The goal tool's completion order: rerun every requirement check first; a failed one refuses
+		// completion before System One is asked.
+		const proof = await proveRequirementChecks({
+			state: buildEvalGoal(testCase, now, machine),
+			runCheck: (check, signal) => runRequirementCheck(check, { cwd, ...(signal ? { signal } : {}) }),
+			now: () => new Date().toISOString(),
+			save: () => {},
+			requireVerifiedEvidenceForCompletion: true,
+		});
+		const refusal = describeRequirementCheckRefusal(proof);
+		if (refusal) return { verdict: "refused_by_check", reasons: [refusal] };
+		const goal = proof.state;
 		const revision = git(cwd, ["rev-parse", "HEAD"]).trim();
 		const store = new ExecutionStore({
 			run_id: `eval-${testCase.id}`,
@@ -339,6 +402,7 @@ export async function evaluateCompletionOnce(
 		return { verdict: verdict.verdict, reasons: verdict.failed_gates.map((gate) => gate.reason) };
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
+		rmSync(machine, { recursive: true, force: true });
 	}
 }
 

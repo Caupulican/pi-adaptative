@@ -48,6 +48,17 @@ const SHELL_TOOL_NAMES = new Set(["bash", "powershell", "exec", "execute", "run"
 
 const READ_ONLY_COMMANDS = new Set([
 	"awk",
+	"command",
+	"curl",
+	"free",
+	"hostname",
+	"id",
+	"lsof",
+	"netstat",
+	"pgrep",
+	"ps",
+	"ss",
+	"systemctl",
 	"basename",
 	"cat",
 	"cd",
@@ -93,6 +104,7 @@ const READ_ONLY_COMMANDS = new Set([
 	"select-string",
 	"sha1sum",
 	"sha256sum",
+	"sleep",
 	"sort",
 	"stat",
 	"tail",
@@ -102,7 +114,9 @@ const READ_ONLY_COMMANDS = new Set([
 	"tree",
 	"tsc",
 	"uniq",
+	"uname",
 	"wc",
+	"whoami",
 	"where-object",
 	"which",
 	"write-output",
@@ -131,6 +145,19 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
 const GIT_REF_LISTING_SUBCOMMANDS = new Set(["branch", "tag"]);
 const GIT_REF_MUTATING_FLAG_RE =
 	/^(?:-[dDmMcCfu]|--delete|--move|--copy|--force|--set-upstream-to(?:=.*)?|--unset-upstream|--edit-description|-a|--annotate|-s|--sign|-F|--file(?:=.*)?)$/;
+const READ_ONLY_SYSTEMCTL_SUBCOMMANDS = new Set([
+	"cat",
+	"is-active",
+	"is-enabled",
+	"is-failed",
+	"list-timers",
+	"list-unit-files",
+	"list-units",
+	"show",
+	"status",
+]);
+const CURL_MUTATING_OPTION_RE =
+	/(?:^|\s)(?:-[a-zA-Z]*[XdFToO][a-zA-Z]*|--(?:request|data[a-z-]*|form[a-z-]*|upload-file|output|remote-name[a-z-]*|json|post[a-z0-9-]*))(?:[\s=]|$)/u;
 const READ_ONLY_NPM_SUBCOMMANDS = new Set(["info", "list", "ls", "outdated", "view", "whoami"]);
 const MUTATING_SHELL_TOKEN_RE =
 	/(^|\s)(>|>>|2>|&>|tee\b|rm\b|mv\b|cp\b|mkdir\b|touch\b|chmod\b|chown\b|install\b|commit\b|push\b|publish\b|deploy\b|apply\b|add\b|checkout\b|switch\b|reset\b|clean\b|stash\b|merge\b|rebase\b|remove-item\b|move-item\b|copy-item\b|new-item\b|rename-item\b|set-content\b|add-content\b|out-file\b|set-item\b|start-process\b|npm\s+(?:i|install|ci|update|publish|run)\b|pnpm\s+(?:i|install|update|publish|run)\b|yarn\s+(?:add|install|upgrade|publish|run)\b)/i;
@@ -185,6 +212,18 @@ function isReadOnlyShellSegment(segment: string): boolean {
 		const subcommand = commandArg(segment, 1);
 		return Boolean(subcommand && READ_ONLY_NPM_SUBCOMMANDS.has(subcommand));
 	}
+	// `command -v`/`-V` looks a name up; plain `command x` runs x.
+	if (name === "command") return /^command\s+-[vV]\s/u.test(segment.trim());
+	if (name === "systemctl") {
+		const subcommand = segment
+			.trim()
+			.split(/\s+/u)
+			.slice(1)
+			.find((token) => !token.startsWith("-"));
+		return Boolean(subcommand && READ_ONLY_SYSTEMCTL_SUBCOMMANDS.has(subcommand));
+	}
+	// A GET that writes nothing: no request body, upload, non-GET method, or output file.
+	if (name === "curl") return !CURL_MUTATING_OPTION_RE.test(segment);
 	return true;
 }
 

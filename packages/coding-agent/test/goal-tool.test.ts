@@ -1093,3 +1093,119 @@ describe("goal grant_edge with narrow toolkit selectors", () => {
 		expect(getToolResultText(result)).toContain("no user message on the active branch matches");
 	});
 });
+
+describe("goal requirement checks", () => {
+	function checkedHarness(checkResults: Record<string, boolean>, systemOneVerdict?: "complete" | "rework") {
+		let state: GoalState | undefined;
+		const ran: string[] = [];
+		const evaluateCompletion = vi.fn(async () => ({
+			verdict: systemOneVerdict ?? "complete",
+			failed_gates: [],
+		}));
+		const tool = createGoalToolDefinition({
+			getGoalState: () => state,
+			saveGoalState: (next) => {
+				state = next;
+			},
+			now: () => "2026-09-25T10:00:00.000Z",
+			getCwd: () => process.cwd(),
+			runRequirementCheck: async (check) => {
+				ran.push(check.command);
+				const passed = checkResults[check.command] ?? false;
+				return {
+					passed,
+					exitCode: passed ? 0 : 1,
+					output: passed ? "" : "LISTEN 0 4096 127.0.0.1:11434",
+					reason: passed
+						? `\`${check.command}\` exited 0 as expected.`
+						: `\`${check.command}\` exited 1, expected 0.`,
+				};
+			},
+			...(systemOneVerdict
+				? { getSystemOneController: () => ({ executeCompletionTransaction: evaluateCompletion }) as never }
+				: {}),
+		});
+		const run = async (input: GoalToolInput) => {
+			const result = await tool.execute("call-1", input, undefined, undefined, ctx);
+			return { text: getToolResultText(result), isError: result.isError === true };
+		};
+		return { tool, run, ran, evaluateCompletion, getState: () => state };
+	}
+
+	it("refuses a check that would change something when the requirement is added", async () => {
+		const { run, getState } = checkedHarness({});
+		await run({ action: "start", goalId: "g1", userGoal: "Remove the model server" });
+		const added = await run({
+			action: "add_requirement",
+			requirementId: "r1",
+			text: "Models are gone",
+			check: { command: "rm -rf ~/.ollama" },
+		});
+		expect(added.isError).toBe(true);
+		expect(added.text).toMatch(/A check may only observe/u);
+		expect(getState()?.requirements).toHaveLength(0);
+	});
+
+	it("proves a checked requirement by rerunning its check and completes without the agent's evidence", async () => {
+		const { run, ran, evaluateCompletion, getState } = checkedHarness({ "test ! -e ~/.ollama": true }, "complete");
+		await run({ action: "start", goalId: "g1", userGoal: "Remove the model server" });
+		await run({
+			action: "add_requirement",
+			requirementId: "r1",
+			text: "Models are gone",
+			check: { command: "test ! -e ~/.ollama" },
+		});
+		const completed = await run({ action: "complete" });
+		expect(completed.isError).toBe(false);
+		expect(ran).toEqual(["test ! -e ~/.ollama"]);
+		expect(evaluateCompletion).toHaveBeenCalledOnce();
+		expect(getState()?.status).toBe("completed");
+		expect(getState()?.requirements[0]?.status).toBe("satisfied");
+		expect(getState()?.evidence.find((evidence) => evidence.kind === "check")).toMatchObject({
+			uri: "r1",
+			verified: true,
+			outcome: "succeeded",
+		});
+	});
+
+	it("refuses completion on a failed check with a whole reason, without asking System One, and keeps the proof", async () => {
+		const { run, evaluateCompletion, getState } = checkedHarness({}, "complete");
+		await run({ action: "start", goalId: "g1", userGoal: "Stop the model server" });
+		await run({
+			action: "add_requirement",
+			requirementId: "r1",
+			text: "Nothing listens on 11434",
+			check: { command: "ss -ltn | grep -c 11434", expectExitCode: 1 },
+		});
+		const refused = await run({ action: "complete" });
+		expect(refused.isError).toBe(true);
+		expect(refused.text).toContain("Completion refused: 1 of 1 requirement check(s) failed.");
+		expect(refused.text).toContain("- r1 (Nothing listens on 11434):");
+		expect(evaluateCompletion).not.toHaveBeenCalled();
+		expect(getState()?.status).toBe("active");
+		expect(getState()?.evidence.filter((evidence) => evidence.kind === "check")).toHaveLength(1);
+	});
+
+	it("creates a goal with its checks in one call", async () => {
+		const { tool, getState } = checkedHarness({});
+		const [create] = createGoalLifecycleToolDefinitions(tool);
+		const created = await create.execute(
+			"call-create",
+			{
+				objective: "Remove the model server",
+				requirements: [
+					"Tell the owner what was removed",
+					{ text: "Models are gone", check: { command: "test ! -e ~/.ollama" } },
+				],
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(created.isError).not.toBe(true);
+		expect(getState()?.requirements.map((requirement) => requirement.check?.command)).toEqual([
+			undefined,
+			"test ! -e ~/.ollama",
+		]);
+	});
+});

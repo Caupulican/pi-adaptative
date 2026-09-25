@@ -99,6 +99,7 @@ import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import type { OpenTaskStepRef } from "./goals/goal-tool-core.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "./goals/goal-tool-names.ts";
+import { runRequirementCheck } from "./goals/requirement-checks.ts";
 import { resolveSessionToolEvidence, resolveSessionUserEvidence } from "./goals/session-goal-evidence.ts";
 import { createImprovementLoopTool } from "./improvement-loop.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
@@ -520,6 +521,11 @@ export class RuntimeBuilder {
 	private readonly _fileMutationIntents: FileMutationIntentController;
 	private readonly _workerSessionPrivatePathEnvelope: CapabilityEnvelope | undefined;
 	private readonly _taskDirectories: TaskDirectoryRuntime;
+
+	/** The directory task tools (and requirement checks) run in. */
+	get taskCwd(): string {
+		return this._taskDirectories.cwd;
+	}
 	private readonly _taskAutomationAdapter: TaskAutomationRuntimeAdapter;
 
 	private readonly deps: RuntimeBuilderDeps;
@@ -1276,6 +1282,9 @@ export class RuntimeBuilder {
 					getGoalState: () => this.deps.getGoalStateSnapshot(),
 					getActiveVerificationIds: () => this.deps.getActiveVerificationIds?.() ?? [],
 					getSystemOneController: () => this.deps.getSystemOneController?.(),
+					getCwd: () => this._taskDirectories.cwd,
+					runRequirementCheck: (check, signal) =>
+						runRequirementCheck(check, { cwd: this._taskDirectories.cwd, ...(signal ? { signal } : {}) }),
 					grantEdge: this.deps.grantEdgeFromInstructions
 						? (grant) => this.deps.grantEdgeFromInstructions?.(grant)
 						: undefined,

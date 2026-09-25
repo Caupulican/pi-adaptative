@@ -189,6 +189,8 @@ import { GoalSessionController } from "./goals/goal-session-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import { hasGoalContinuationControl } from "./goals/goal-tool-names.ts";
 import { type ExplicitGoalStartAuthority, parseExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
+import { proveRequirementChecks } from "./goals/prove-requirement-checks.ts";
+import { runRequirementCheck } from "./goals/requirement-checks.ts";
 import { HostTurnReasoningController } from "./host-turn-reasoning.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
 import { subscribeHumanInputActivity } from "./human-input-activity.ts";
@@ -2697,6 +2699,22 @@ export class AgentSession {
 				},
 				waitForRepositoryQuiescence: (objectiveId, signal) =>
 					this._repositoryObserver.waitForQuiescence(objectiveId, signal),
+				proveRequirementChecks: async (signal) => {
+					const goal = this.getGoalStateSnapshot();
+					if (!goal) return undefined;
+					return proveRequirementChecks({
+						state: goal,
+						runCheck: (check, checkSignal) =>
+							runRequirementCheck(check, {
+								cwd: this._runtimeBuilder.taskCwd,
+								...(checkSignal ? { signal: checkSignal } : {}),
+							}),
+						now: () => new Date().toISOString(),
+						save: (state, expected) => this.saveGoalStateSnapshot(state, expected),
+						requireVerifiedEvidenceForCompletion: true,
+						...(signal ? { signal } : {}),
+					});
+				},
 				ownedPathDigests: () => this._mutationLedger.ownedDigests(this.objectiveMutationId()),
 				localCommitBranch: () => this._localCommitBranch,
 				ruleAuthority: () => this._ruleAuthority,

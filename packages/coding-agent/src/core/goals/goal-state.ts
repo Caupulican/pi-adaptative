@@ -16,7 +16,8 @@ export type RequirementStatus = "open" | "satisfied" | "blocked";
  */
 export type GoalClarificationCategory = "information" | "ambiguous_requirement" | "blocked_by_user_decision";
 export type GoalClarificationStatus = "pending" | "answered" | "cancelled";
-export type GoalEvidenceKind = "file" | "test" | "tool" | "user" | "finding" | "worker";
+/** `check` is host-only: the result of the harness rerunning a requirement's check at completion. */
+export type GoalEvidenceKind = "file" | "test" | "tool" | "user" | "finding" | "worker" | "check";
 export type GoalEvidenceOutcome = "succeeded" | "failed" | "canceled";
 
 export const MAX_GOAL_OBJECTIVE_LENGTH = 4_000;
@@ -143,9 +144,25 @@ export interface GoalClarification {
 	answerSummary?: string;
 }
 
+/**
+ * An observational command whose result proves a requirement, rerun by the harness at completion.
+ * It must pass the read-only shell line (it observes, never changes), so running it is safe.
+ */
+export interface RequirementCheck {
+	command: string;
+	/** Exit code that means the requirement holds. Default 0. */
+	expectExitCode?: number;
+	/** Text the command's output must contain. */
+	outputContains?: string;
+	/** Text the command's output must not contain. */
+	outputExcludes?: string;
+}
+
 export interface Requirement {
 	id: string;
 	text: string;
+	/** How the harness proves this requirement at completion; absent means it is judged on evidence. */
+	check?: RequirementCheck;
 	status: RequirementStatus;
 	evidenceIds: readonly string[];
 	blockedReason?: string;
@@ -189,7 +206,16 @@ export interface GoalEvidenceRef {
 
 export type GoalEvent =
 	| { type: "edit_goal"; userGoal: string; tokenBudget?: number; now: string }
-	| { type: "add_requirement"; id: string; text: string; dependencies?: readonly string[]; now: string }
+	| {
+			type: "add_requirement";
+			id: string;
+			text: string;
+			dependencies?: readonly string[];
+			check?: RequirementCheck;
+			now: string;
+	  }
+	/** Attach, replace, or (without `check`) remove a requirement's check. */
+	| { type: "set_requirement_check"; id: string; check?: RequirementCheck; now: string }
 	| { type: "satisfy_requirement"; id: string; evidenceIds: readonly string[]; now: string }
 	| { type: "block_requirement"; id: string; blockedReason: string; now: string }
 	| { type: "reopen_requirement"; id: string; now: string }
@@ -317,7 +343,8 @@ function isGoalEvidenceKind(value: unknown): value is GoalEvidenceKind {
 		value === "tool" ||
 		value === "user" ||
 		value === "finding" ||
-		value === "worker"
+		value === "worker" ||
+		value === "check"
 	);
 }
 
@@ -342,11 +369,27 @@ function hasOptionalFiniteNumber(record: Record<string, unknown>, key: string): 
 	return record[key] === undefined || (typeof record[key] === "number" && Number.isFinite(record[key]));
 }
 
+export function isRequirementCheck(value: unknown): value is RequirementCheck {
+	if (!isPlainRecord(value)) return false;
+	return (
+		typeof value.command === "string" &&
+		value.command.trim().length > 0 &&
+		(value.expectExitCode === undefined || Number.isSafeInteger(value.expectExitCode)) &&
+		hasOptionalString(value, "outputContains") &&
+		hasOptionalString(value, "outputExcludes")
+	);
+}
+
+function hasOptionalRequirementCheck(record: Record<string, unknown>): boolean {
+	return record.check === undefined || isRequirementCheck(record.check);
+}
+
 function isRequirement(value: unknown): value is Requirement {
 	if (!isPlainRecord(value)) return false;
 	return (
 		typeof value.id === "string" &&
 		typeof value.text === "string" &&
+		hasOptionalRequirementCheck(value) &&
 		isRequirementStatus(value.status) &&
 		isStringArray(value.evidenceIds) &&
 		hasOptionalStringArray(value, "dependencies") &&
@@ -380,8 +423,11 @@ export function isGoalEvent(value: unknown): value is GoalEvent {
 			return (
 				typeof value.id === "string" &&
 				typeof value.text === "string" &&
-				hasOptionalStringArray(value, "dependencies")
+				hasOptionalStringArray(value, "dependencies") &&
+				hasOptionalRequirementCheck(value)
 			);
+		case "set_requirement_check":
+			return typeof value.id === "string" && hasOptionalRequirementCheck(value);
 		case "satisfy_requirement":
 			return typeof value.id === "string" && isStringArray(value.evidenceIds);
 		case "block_requirement":
@@ -501,6 +547,7 @@ function cloneRequirement(requirement: Requirement): Requirement {
 		...requirement,
 		evidenceIds: [...requirement.evidenceIds],
 		...(requirement.dependencies ? { dependencies: [...requirement.dependencies] } : {}),
+		...(requirement.check ? { check: { ...requirement.check } } : {}),
 	};
 }
 
@@ -511,6 +558,9 @@ function cloneGoalEvidenceRef(evidence: GoalEvidenceRef): GoalEvidenceRef {
 function cloneGoalEvent(event: GoalEvent): GoalEvent {
 	if (event.type === "satisfy_requirement") {
 		return { ...event, evidenceIds: [...event.evidenceIds] };
+	}
+	if ((event.type === "add_requirement" || event.type === "set_requirement_check") && event.check) {
+		return { ...event, check: { ...event.check } };
 	}
 	return { ...event };
 }
@@ -636,6 +686,7 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			const newRequirement: Requirement = {
 				id: event.id,
 				text: event.text,
+				...(event.check ? { check: { ...event.check } } : {}),
 				status: "open",
 				evidenceIds: [],
 				dependencies: event.dependencies,
@@ -650,6 +701,14 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 				newState.requirements = [...newState.requirements, newRequirement];
 			}
 			newState.progressRevision = (state.progressRevision ?? 0) + 1;
+			break;
+		}
+
+		case "set_requirement_check": {
+			updateRequirement(newState, event.id, (requirement) => {
+				const { check: _previous, ...rest } = requirement;
+				return { ...rest, ...(event.check ? { check: { ...event.check } } : {}), updatedAt: event.now };
+			});
 			break;
 		}
 

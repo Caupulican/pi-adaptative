@@ -17,6 +17,7 @@ import {
 	type GoalState,
 	type GoalStatus,
 	isGoalExecutionActive,
+	type RequirementCheck,
 } from "../goals/goal-state.ts";
 import {
 	applyGoalAction,
@@ -27,6 +28,8 @@ import {
 	summarizeGoalState,
 } from "../goals/goal-tool-core.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
+import { describeRequirementCheckRefusal, proveRequirementChecks } from "../goals/prove-requirement-checks.ts";
+import { type RequirementCheckResult, requirementCheckViolation } from "../goals/requirement-checks.ts";
 import { awaitPreflight } from "../preflight.ts";
 import { requestsBugFix } from "../system-one/bug-fix.ts";
 import type { SystemOneController } from "../system-one/controller.ts";
@@ -38,6 +41,27 @@ import {
 	renderOrchestrationToolResult,
 } from "./orchestration-panel.ts";
 
+/** How the harness proves a requirement: an observational command it reruns at completion. */
+const requirementCheckSchema = Type.Object(
+	{
+		command: Type.String({
+			minLength: 1,
+			description:
+				"Read-only shell command that observes the outcome (test, command -v, ss, systemctl is-active, jq, grep, curl GET, a test runner run). It must not change anything.",
+		}),
+		expectExitCode: Type.Optional(
+			Type.Integer({ description: "Exit code that means the requirement holds. Default 0." }),
+		),
+		outputContains: Type.Optional(Type.String({ description: "Text the output must contain." })),
+		outputExcludes: Type.Optional(Type.String({ description: "Text the output must not contain." })),
+	},
+	{
+		additionalProperties: false,
+		description:
+			"add_requirement / set_requirement_check: how the harness proves this requirement. At completion it reruns the command and a failed check refuses completion; the agent's own account never substitutes for it. Omit on set_requirement_check to remove the check.",
+	},
+);
+
 const goalSchema = Type.Object(
 	{
 		action: Type.Union(
@@ -45,6 +69,7 @@ const goalSchema = Type.Object(
 				Type.Literal("get"),
 				Type.Literal("start"),
 				Type.Literal("add_requirement"),
+				Type.Literal("set_requirement_check"),
 				Type.Literal("satisfy_requirement"),
 				Type.Literal("block_requirement"),
 				Type.Literal("reopen_requirement"),
@@ -103,6 +128,7 @@ const goalSchema = Type.Object(
 					"Optional IDs of requirements that must be satisfied before this one. Valid for add_requirement.",
 			}),
 		),
+		check: Type.Optional(requirementCheckSchema),
 		instructions: Type.Optional(Type.String({ description: "Worker instructions. Required for dispatch_worker." })),
 		evidenceId: Type.Optional(
 			Type.String({ description: "Evidence id. Omit on add_evidence for a stable host id." }),
@@ -147,12 +173,21 @@ const createGoalSchema = Type.Object(
 	{
 		objective: Type.String({ description: "Required. The concrete objective to start pursuing." }),
 		requirements: Type.Optional(
-			Type.Array(Type.String({ minLength: 1 }), {
-				minItems: 1,
-				maxItems: 20,
-				description:
-					"Every requirement the goal must satisfy, recorded in this same call with stable host ids. Prefer this over adding them one call at a time afterwards.",
-			}),
+			Type.Array(
+				Type.Union([
+					Type.String({ minLength: 1 }),
+					Type.Object(
+						{ text: Type.String({ minLength: 1 }), check: Type.Optional(requirementCheckSchema) },
+						{ additionalProperties: false },
+					),
+				]),
+				{
+					minItems: 1,
+					maxItems: 20,
+					description:
+						"Every requirement the goal must satisfy, recorded in this same call with stable host ids. A requirement whose outcome a command can observe should carry `check`: the harness reruns it at completion and a failed check refuses completion.",
+				},
+			),
 		),
 		token_budget: Type.Optional(
 			Type.Integer({ minimum: 1, description: "Positive token budget. Omit unless explicitly requested." }),
@@ -307,6 +342,13 @@ export interface GoalToolDependencies {
 	grantEdge?: (grant: { class: EdgeClass; quote: string; messageEntryId: string; scopeKey?: string }) => void;
 	/** System One semantic control plane controller for two-stage completion validation. */
 	getSystemOneController?: () => SystemOneController | undefined;
+	/** Where requirement checks run and are validated: the session's task directory. */
+	getCwd?: () => string;
+	/**
+	 * Rerun one requirement check. Wired by the host to {@link runRequirementCheck}; when absent,
+	 * completion cannot prove checked requirements and refuses rather than skipping their checks.
+	 */
+	runRequirementCheck?: (check: RequirementCheck, signal?: AbortSignal) => Promise<RequirementCheckResult>;
 	/**
 	 * Narrow operation scope resolver for toolkit.script grants. Resolves registered script name
 	 * and exact argv to an internal scope key using host registry and execution context.
@@ -417,6 +459,13 @@ function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
 					}),
 				text: input.text ?? "",
 				dependencies: input.dependencies,
+				...(input.check ? { check: input.check } : {}),
+			};
+		case "set_requirement_check":
+			return {
+				action: "set_requirement_check",
+				requirementId: input.requirementId ?? "",
+				...(input.check ? { check: input.check } : {}),
 			};
 		case "satisfy_requirement":
 			return {
@@ -509,6 +558,25 @@ function goalPanelModel(details: GoalToolDetails | undefined): OrchestrationPane
 		],
 		emptyText: "No requirements recorded.",
 	};
+}
+
+/** Rerun a goal's requirement checks through the session's host deps and phrase any refusal. */
+async function proveGoalRequirementChecks(
+	state: GoalState,
+	deps: GoalToolDependencies,
+	now: () => string,
+	signal: AbortSignal | undefined,
+): Promise<{ state: GoalState } | { refusal: string; state: GoalState }> {
+	const proof = await proveRequirementChecks({
+		state,
+		runCheck: deps.runRequirementCheck,
+		now,
+		save: (next, expected) => deps.saveGoalState(next, expected),
+		requireVerifiedEvidenceForCompletion: deps.requireVerifiedEvidenceForCompletion?.() ?? true,
+		...(signal ? { signal } : {}),
+	});
+	const refusal = describeRequirementCheckRefusal(proof);
+	return refusal ? { refusal, state: proof.state } : { state: proof.state };
 }
 
 function goalExecutionError(
@@ -699,6 +767,16 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			}
 
 			let action: GoalAction = mapped;
+			if ((action.action === "add_requirement" || action.action === "set_requirement_check") && action.check) {
+				const violation = requirementCheckViolation(action.check, deps.getCwd?.() ?? process.cwd());
+				if (violation) {
+					return {
+						content: [{ type: "text" as const, text: `goal ${input.action} failed: ${violation}` }],
+						details: { action: input.action, applied: false, error: violation },
+						isError: true,
+					};
+				}
+			}
 			const evidenceState = action.action === "add_evidence" ? deps.getGoalState() : undefined;
 			let evidenceFailureReason: string | undefined;
 			// Requirements this add_evidence call also satisfies, in citation order and deduplicated.
@@ -826,7 +904,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			// Parallel evidence may extend the same goal while verification waits. Rebase only across
 			// those additions; replacements and other transitions still invalidate the observation.
 			const latest = deps.getGoalState();
-			const current =
+			let current =
 				action.action === "add_evidence" ? resolveGoalEvidenceCommitState(evidenceState, latest) : latest;
 			let nextState: GoalState;
 			// The action the response summarizes: a combined add_evidence + satisfy reads as the
@@ -854,12 +932,13 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 								requirement.boundLaneId ? [requirement.boundLaneId] : [],
 							),
 						);
+						const activeGoalId = current.goalId;
 						activeGoalLaneIds = deps
 							.getLaneRecords?.()
 							.filter(
 								(record) =>
 									(record.status === "queued" || record.status === "running") &&
-									(record.goalId === current.goalId || boundLaneIds.has(record.laneId)),
+									(record.goalId === activeGoalId || boundLaneIds.has(record.laneId)),
 							)
 							.map((record) => record.laneId);
 					} catch (error) {
@@ -872,6 +951,13 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 						const message = `Cannot verify active pipeline state: ${error instanceof Error ? error.message : String(error)}`;
 						return goalExecutionError(input.action, message, current);
 					}
+				}
+				// Checked requirements are proven by the harness rerunning their checks, never by the
+				// agent's account: every result is recorded as check evidence before anything is judged.
+				if (action.action === "complete" && current && isGoalExecutionActive(current.status)) {
+					const proven = await proveGoalRequirementChecks(current, deps, now, signal);
+					if ("refusal" in proven) return goalExecutionError(input.action, proven.refusal, proven.state);
+					current = proven.state;
 				}
 				const result = applyGoalAction(current, action, now(), {
 					requireVerifiedEvidenceForCompletion: deps.requireVerifiedEvidenceForCompletion?.() ?? true,
@@ -1019,10 +1105,12 @@ export function createGoalLifecycleToolDefinitions(goalTool: GoalToolDefinition)
 			// journaling are exactly what one call per requirement produced; the last result renders
 			// the whole goal. Before this, setting up a goal cost one provider round trip per requirement.
 			let last = started;
-			for (const text of input.requirements) {
+			for (const requirement of input.requirements) {
+				const text = typeof requirement === "string" ? requirement : requirement.text;
+				const check = typeof requirement === "string" ? undefined : requirement.check;
 				last = await goalTool.execute(
 					toolCallId,
-					{ action: "add_requirement", goalId, text },
+					{ action: "add_requirement", goalId, text, ...(check ? { check } : {}) },
 					signal,
 					onUpdate,
 					context,

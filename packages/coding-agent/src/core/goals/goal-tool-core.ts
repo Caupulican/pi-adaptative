@@ -17,6 +17,7 @@ import {
 	isGoalExecutionActive,
 	isGoalUnfinishedStatus,
 	MAX_GOAL_OBJECTIVE_LENGTH,
+	type RequirementCheck,
 } from "./goal-state.ts";
 
 const MAX_GOAL_ID_LENGTH = 128;
@@ -38,7 +39,16 @@ const MIN_AGENT_BLOCK_STALL_TURNS = 3;
  */
 export type GoalAction =
 	| { action: "start"; goalId: string; userGoal: string; tokenBudget?: number }
-	| { action: "add_requirement"; requirementId: string; text: string; dependencies?: readonly string[] }
+	| {
+			action: "add_requirement";
+			requirementId: string;
+			text: string;
+			dependencies?: readonly string[];
+			/** Observational command the harness reruns at completion; the tool layer validates it. */
+			check?: RequirementCheck;
+	  }
+	/** Attach, replace, or (without `check`) remove a requirement's check. */
+	| { action: "set_requirement_check"; requirementId: string; check?: RequirementCheck }
 	| { action: "satisfy_requirement"; requirementId: string; evidenceIds?: readonly string[] }
 	| { action: "block_requirement"; requirementId: string; reason: string }
 	| { action: "reopen_requirement"; requirementId: string }
@@ -304,7 +314,25 @@ function toGoalEvent(
 					}
 				}
 			}
-			return { ok: true, event: { type: "add_requirement", id, text, dependencies: action.dependencies, now } };
+			return {
+				ok: true,
+				event: {
+					type: "add_requirement",
+					id,
+					text,
+					dependencies: action.dependencies,
+					...(action.check ? { check: action.check } : {}),
+					now,
+				},
+			};
+		}
+		case "set_requirement_check": {
+			const id = action.requirementId.trim();
+			if (!requirementExists(state, id)) return { ok: false, error: `Requirement '${id}' does not exist.` };
+			return {
+				ok: true,
+				event: { type: "set_requirement_check", id, ...(action.check ? { check: action.check } : {}), now },
+			};
 		}
 		case "satisfy_requirement": {
 			const id = action.requirementId.trim();

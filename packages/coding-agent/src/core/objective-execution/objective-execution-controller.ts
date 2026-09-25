@@ -34,6 +34,7 @@ import type {
 	ExpertSelectionService,
 } from "../expert-routing/index.ts";
 import { buildWorkerCapabilityRequest, NoEligibleExpertError } from "../expert-routing/index.ts";
+import { describeRequirementCheckRefusal, type RequirementCheckProof } from "../goals/prove-requirement-checks.ts";
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import {
@@ -48,7 +49,6 @@ import {
 	captureCandidateSnapshot,
 } from "../system-one/candidate-snapshot.ts";
 import type { SystemOneControlDirective } from "../system-one/control-directive.ts";
-
 import type { TerminalCompletionProof } from "../system-one/controller.ts";
 import type { FinalCompletionVerdict } from "../system-one/policy.ts";
 import type { ExecutionState } from "../system-one/types.ts";
@@ -213,6 +213,11 @@ export interface ObjectiveExecutionControllerDeps {
 	deliveryBlockReason?(): string | undefined;
 	/** Resolves when no mutation-capable call for this objective is still running. */
 	waitForRepositoryQuiescence?(objectiveId: string, signal?: AbortSignal): Promise<void>;
+	/**
+	 * Rerun the goal's requirement checks and record their results (goals/prove-requirement-checks.ts),
+	 * the same proof the goal tool's completion takes. Undefined when there is no goal.
+	 */
+	proveRequirementChecks?(signal?: AbortSignal): Promise<RequirementCheckProof | undefined>;
 	ownedPathDigests?(): readonly { readonly path: string; readonly digest: string }[];
 	gitExecutor?: DeliveryGitExecutor;
 	releaseExecutor?: DeliveryReleaseExecutor;
@@ -460,6 +465,7 @@ export class ObjectiveExecutionController {
 				| "attributedMutationPaths"
 				| "deliveryBlockReason"
 				| "waitForRepositoryQuiescence"
+				| "proveRequirementChecks"
 				| "ownedPathDigests"
 				| "localCommitBranch"
 				| "ruleAuthority"
@@ -1255,6 +1261,31 @@ export class ObjectiveExecutionController {
 
 				case "completion_candidate": {
 					await this.deps.waitForRepositoryQuiescence?.(objectiveId, signal);
+					// A checked requirement is proven by rerunning its check, before any judgment. A failed
+					// check is repair work for the loop, never a terminal state.
+					const checkProof = await this.deps.proveRequirementChecks?.(signal);
+					const checkRefusal = checkProof ? describeRequirementCheckRefusal(checkProof) : undefined;
+					if (checkProof && checkRefusal) {
+						const failedChecks = checkProof.unrunnable
+							? [{ gate_id: "requirement_check", reason: checkRefusal }]
+							: checkProof.failures.map((failure) => ({
+									gate_id: "requirement_check",
+									reason: `${failure.requirementId} (${failure.text}): ${failure.reason}`,
+									required_next_proof:
+										"Fix the outcome so the check passes; the harness reruns it at completion.",
+								}));
+						await this._recordCompletionOutcomes(objectiveId, route, {
+							completionChallengeRejected: true,
+							repairRoundsCaused: failedChecks.length,
+						});
+						if (this.deps.runtime.ensureRepairTasks) {
+							await this.deps.runtime.ensureRepairTasks(
+								objectiveId,
+								completionFailuresToRepairWork(failedChecks, objectiveId),
+							);
+						}
+						break;
+					}
 					// FIN-060: Single completion owner via CompletionCoordinator
 					const profile = resolveEffectiveCompletionProfile({
 						requestedProfile: this.deps.completionProfile,

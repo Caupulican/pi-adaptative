@@ -33,6 +33,17 @@ describe("read-only shell line", () => {
 			["ls $(pwd)", false],
 			["npm install", false],
 			["python3 x.py", false],
+			// Observational commands a requirement check uses.
+			["command -v ollama", true],
+			["command ollama serve", false],
+			["ss -ltn | grep -c 11434", true],
+			["systemctl --user is-enabled llama-server", true],
+			["systemctl --user disable llama-server", false],
+			["pgrep -f llama-server", true],
+			["curl -s https://docs.example.test/version", true],
+			["curl -s -X POST https://api.example.test/deploy", false],
+			["curl -sd payload https://api.example.test", false],
+			["curl -o page.html https://example.test", false],
 		];
 		for (const [cmd, ok] of cases) expect([cmd, readOnlyShellViolation(cmd, cwd) === undefined]).toEqual([cmd, ok]);
 		expect(isMutatingToolCall("bash", { command: "echo x > f" })).toBe(true);

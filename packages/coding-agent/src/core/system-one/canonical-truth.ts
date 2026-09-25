@@ -175,6 +175,23 @@ export function projectCanonicalTruth(input: CanonicalTruthInput): CanonicalHydr
 		covers_acceptance_ids: [],
 		observation_ids: [],
 	}));
+	// A requirement's check is the harness's own proof: its latest rerun, passed or failed, covers it.
+	for (const requirement of goal?.requirements ?? []) {
+		if (!requirement.check) continue;
+		const latest = goal?.evidence.findLast(
+			(evidence) => evidence.kind === "check" && evidence.uri === requirement.id,
+		);
+		verification.push({
+			id: `VR-check-${requirement.id}`,
+			kind: verificationKindForCommand(requirement.check.command),
+			status: latest ? (latest.outcome === "succeeded" ? "passed" : "failed") : "failed",
+			timestamp: latest?.createdAt ?? now,
+			command: requirement.check.command,
+			artifact_ref: null,
+			covers_acceptance_ids: [requirement.id],
+			observation_ids: latest ? [latest.id] : [],
+		});
+	}
 
 	const plan_steps: PlanStep[] = [];
 	if (input.lastRoute?.route) {

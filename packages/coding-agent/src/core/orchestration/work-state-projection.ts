@@ -56,6 +56,7 @@ function orchestrationEvidenceKind(kind: GoalState["evidence"][number]["kind"]):
 		case "test":
 			return "test";
 		case "tool":
+		case "check":
 			return "command";
 		case "worker":
 			return "review";
