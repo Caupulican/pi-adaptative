@@ -79,21 +79,18 @@ likely (47% against a 9% baseline). Pinned by `packages/coding-agent/test/cache-
 request an append, one reasoning level, and no unsanctioned break in the ledger; a worker's tool loop
 leaves no unsanctioned break and is observed on its own conversation).
 
-**A conversation keeps one talker; every other model reads a brief.** The first substantive owner
-message is routed once and its model becomes the talker; later owner messages and internal turns
-run on it with no swap, and only `/model` or a hard failure (quota, account, billing) moves it. A
-model switch is a full cache write, so work reaches another model only when the arithmetic says it
-is cheaper, and then on a brief orders of magnitude smaller than the talker's context: a small
-message's side trip reads a note that the earlier conversation is not shown, the talker's last reply
-and the message, keeps the whole tool surface (reaching for a mutating tool reruns the message on the
-talker, so the side trip loses no capability) and searches what the brief omits with
-`conversation_history`. A worker or a minion gets the route's brief. Why: measured on the
-owner's sessions, 8 replying-model switches in 217 owner turns each re-sent the whole context; and
-the free side-trip model searched the conversation when it could (10 of 10) where it would not hand
-a message back (0 of 28). Pinned by the conversation stage routing tests in
-`packages/coding-agent/test/agent-session-model-router.test.ts` (one route judgment at the opening,
-the talker kept, a side trip reading only its brief and searching the rest on its own model, a side
-trip reaching for a mutating tool rerunning on the talker).
+**Every owner message reaches the selected root model.** Greetings, substantive requests and
+toolkit names enter the root's full conversation with its tool surface. The host does not pre-route
+them to a cheap tier or run a toolkit script before the root decides. Internal turns stay on that
+root; `/model` or a hard provider failure can move it. The root may delegate bounded work under
+worker authority, and a worker reads a brief instead of silently becoming the owner-facing model.
+A selected local root boots its managed runtime or fails visibly; it is not silently replaced by a
+configured cloud tier. An explicitly routed local model may use the configured tier fallback when
+its runtime is unavailable. Why: automatic foreground model swaps re-send the conversation and
+override the owner's selected root. Pinned by
+`packages/coding-agent/test/agent-session-model-router.test.ts`,
+`packages/coding-agent/test/agent-session-local-runtime.test.ts`, and
+`packages/coding-agent/test/interactive-mode-ollama-install-smoke.test.ts`.
 
 **Every agent runs the conversation mechanics; only the head orchestrates.** A worker plans each
 request with root's own request-context controller (context GC on its own lane, path aliases, the
@@ -773,6 +770,12 @@ goes to the operator (root) or is refused (worker). A Noul has no confidence of 
 probability is the certainty), so only Choice and Score answers are gated on confidence, and a
 low-confidence answer is a doubt routed to `gather_more`, never an exception that ends the run.
 Pinned by `packages/coding-agent/test/system-one/authority-line.test.ts`.
+
+**An owner question is observable before presentation and stays open on timeout.** The host
+publishes `waiting` before it invokes the presenter, then publishes `settled` even when presentation
+fails. An unanswered deadline leaves a pending snapshot and grants no authority; an external owner
+message may later resolve it. Pinned by `packages/coding-agent/test/human-input-activity.test.ts`
+and `packages/coding-agent/test/human-input.test.ts`.
 
 **Every answer's claims are checked against the turn's receipts** (`system-one/claim-delivery.ts`), with or
 without a live objective. System One answers one atomic question per claim kind (the answer states tests

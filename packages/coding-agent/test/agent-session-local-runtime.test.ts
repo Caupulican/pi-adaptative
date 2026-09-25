@@ -525,6 +525,7 @@ describe("AgentSession local runtime readiness — end to end through prompt()",
 		});
 		const ollamaFaux = registerOllamaFaux(harness, ["qwen3:0.6b"]);
 		try {
+			await harness.session.setModel(ollamaFaux.models[0]);
 			ollamaFaux.setResponses([fauxAssistantMessage("answered locally")]);
 
 			await harness.session.prompt("Explain this code block");
@@ -538,7 +539,6 @@ describe("AgentSession local runtime readiness — end to end through prompt()",
 			expect(harness.eventsOfType("warning")).toHaveLength(0);
 			expect(serveEnv?.OLLAMA_NUM_PARALLEL).toBe("1");
 			expect(serveEnv?.OLLAMA_KEEP_ALIVE).toBe("10m");
-			// The router's boot path uses the same canonical pi-owned store as /models add.
 			expect(serveEnv?.OLLAMA_MODELS?.replaceAll("\\", "/")).toContain("models/ollama");
 		} finally {
 			ollamaFaux.unregister();
@@ -546,7 +546,7 @@ describe("AgentSession local runtime readiness — end to end through prompt()",
 		}
 	});
 
-	it("warns (WHY + WHICH tier) and falls back to the configured medium tier when the local server can't be started — never dead-ends the turn", async () => {
+	it("keeps an unavailable selected local root instead of silently switching to the configured medium tier", async () => {
 		const harness = await createHarness({
 			models: [{ id: "medium-cloud" }],
 			settings: {
@@ -560,24 +560,13 @@ describe("AgentSession local runtime readiness — end to end through prompt()",
 		});
 		const ollamaFaux = registerOllamaFaux(harness, ["qwen3:0.6b"]);
 		try {
-			// Never queued a response for ollamaFaux — if the (unready) local model were somehow
-			// still called, the faux provider would throw "no more responses configured".
+			await harness.session.setModel(ollamaFaux.models[0]);
 			harness.setResponses([fauxAssistantMessage("answered on cloud")]);
-
-			await harness.session.prompt("Explain this code block");
-
-			const assistantTexts = harness.session.messages
-				.filter((message) => message.role === "assistant")
-				.flatMap((message) => (message.role === "assistant" ? message.content : []))
-				.filter((part): part is { type: "text"; text: string } => part.type === "text")
-				.map((part) => part.text);
-			expect(assistantTexts).toEqual(["answered on cloud"]);
-
-			const warnings = harness.eventsOfType("warning");
-			expect(warnings).toHaveLength(1);
-			expect(warnings[0]?.message).toContain("unavailable");
-			expect(warnings[0]?.message).toContain("never curl|sh");
-			expect(warnings[0]?.message).toContain("medium");
+			await expect(harness.session.prompt("Explain this code block")).rejects.toThrow(
+				/Managed local model.*unavailable/u,
+			);
+			expect(harness.getPendingResponseCount()).toBe(1);
+			expect(harness.session.model?.provider).toBe("ollama");
 		} finally {
 			ollamaFaux.unregister();
 			harness.cleanup();
@@ -646,13 +635,15 @@ describe("AgentSession local runtime readiness — confirmed-up cache", () => {
 		});
 		const ollamaFaux = registerOllamaFaux(harness, ["qwen3:0.6b"]);
 		try {
+			await harness.session.setModel(ollamaFaux.models[0]);
+			const baselineTagCalls = tagCalls;
 			ollamaFaux.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "connection reset" })]);
 			await harness.session.prompt("Explain this code block").catch(() => {});
-			expect(tagCalls).toBe(1); // one detect also carries the requested-model presence list
+			expect(tagCalls).toBe(baselineTagCalls + 1);
 
 			ollamaFaux.appendResponses([fauxAssistantMessage("recovered")]);
 			await harness.session.prompt("Explain this code block again");
-			expect(tagCalls).toBe(2); // the prior error invalidated the cache — one fresh detect
+			expect(tagCalls).toBe(baselineTagCalls + 2);
 		} finally {
 			ollamaFaux.unregister();
 			harness.cleanup();

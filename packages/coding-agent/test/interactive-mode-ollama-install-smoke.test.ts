@@ -165,6 +165,7 @@ describe("#31 real interactive smoke — install-ollama confirm through Interact
 		(harness.session as unknown as { _extensionUIContext?: ExtensionUIContext })._extensionUIContext = realUIContext;
 
 		try {
+			await harness.session.setModel(ollamaFaux.models[0]);
 			// Negative control: a pre-aborted request must settle without mounting or displacing a dialog.
 			const aborted = new AbortController();
 			aborted.abort();

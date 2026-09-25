@@ -4,7 +4,7 @@ import { createHumanInputRequest, resolveHumanInput } from "../src/core/human-in
 import { subscribeHumanInputActivity } from "../src/core/human-input-activity.ts";
 
 describe("human input lifecycle authority", () => {
-	it("emits a paired waiting/settled event from the shared presenter, including failures", async () => {
+	it("publishes waiting before presentation and settles the activity after a failure", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const sequence: string[] = [];
 		const off = subscribeHumanInputActivity(sessionManager, (event) => sequence.push(event.phase));
@@ -19,7 +19,7 @@ describe("human input lifecycle authority", () => {
 				},
 			}),
 		).rejects.toThrow("presentation failed");
-		expect(sequence).toEqual(["present", "waiting", "settled"]);
+		expect(sequence).toEqual(["waiting", "present", "settled"]);
 		off();
 	});
 	it("does not report a cancelled-before-presentation request or another session's question", async () => {
