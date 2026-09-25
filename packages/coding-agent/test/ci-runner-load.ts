@@ -22,7 +22,7 @@ function cpuTimes(): { idle: number; total: number } {
 }
 
 /** Milliseconds to start and finish `cmd /c exit 0`: how fast this runner creates a process right now. */
-function spawnLatency(): Promise<string> {
+export function spawnLatency(): Promise<string> {
 	const startedAt = Date.now();
 	return new Promise((resolve) => {
 		execFile("cmd.exe", ["/d", "/c", "exit 0"], { timeout: 60_000, windowsHide: true }, (error) =>
@@ -31,6 +31,27 @@ function spawnLatency(): Promise<string> {
 					? `failed after ${Date.now() - startedAt} ms (${error.message.slice(0, 80)})`
 					: `${Date.now() - startedAt} ms`,
 			),
+		);
+	});
+}
+
+/** The Windows services each svchost pid hosts, from `tasklist /svc` (a busy svchost names nothing on its own). */
+function servicesByPid(): Promise<Map<string, string>> {
+	return new Promise((resolve) => {
+		execFile(
+			"tasklist.exe",
+			["/svc", "/fo", "csv", "/nh"],
+			{ timeout: 60_000, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+			(error, stdout) => {
+				const services = new Map<string, string>();
+				if (!error) {
+					for (const line of stdout.split(/\r?\n/u)) {
+						const cells = line.match(/"([^"]*)"/gu)?.map((cell) => cell.slice(1, -1)) ?? [];
+						if (cells.length >= 3 && cells[2] !== "N/A") services.set(cells[1] ?? "", cells[2] ?? "");
+					}
+				}
+				resolve(services);
+			},
 		);
 	});
 }
@@ -60,7 +81,16 @@ function busiestByCpuTime(): Promise<string> {
 					.filter((row) => row.pid !== "0")
 					.sort((a, b) => b.seconds - a.seconds)
 					.slice(0, 10);
-				resolve(rows.map((row) => `${row.name}(${row.pid}) ${row.seconds}s ${row.memory}`).join(", "));
+				void servicesByPid().then((services) =>
+					resolve(
+						rows
+							.map((row) => {
+								const hosted = services.get(row.pid ?? "");
+								return `${row.name}(${row.pid}${hosted ? ` ${hosted}` : ""}) ${row.seconds}s ${row.memory}`;
+							})
+							.join(", "),
+					),
+				);
 			},
 		);
 	});

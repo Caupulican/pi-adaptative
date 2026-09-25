@@ -13,12 +13,43 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import { defenderStatus, sampleRunnerLoad } from "./ci-runner-load.ts";
+import { defenderStatus, sampleRunnerLoad, spawnLatency } from "./ci-runner-load.ts";
 
 export const SHARED_TEST_RUNTIME_ROOT = join(realpathSync.native(tmpdir()), "pi-agent-test-shared");
 
-export default async function setup(): Promise<void> {
-	if (process.platform !== "win32") return;
+/**
+ * Process-start latency through the whole run, in the main vitest process (which lives as long as the
+ * tests; a sampler started by an earlier CI step is killed when that step ends). Samples over 1 s are
+ * logged as they happen, with the load sample, so a stall's timestamps line up with the runner's state.
+ */
+function startLatencyWatch(): () => void {
+	const samples: number[] = [];
+	let slow = 0;
+	const timer = setInterval(() => {
+		const startedAt = Date.now();
+		void spawnLatency().then(async () => {
+			const elapsed = Date.now() - startedAt;
+			samples.push(elapsed);
+			if (elapsed < 1_000) return;
+			slow++;
+			process.stderr.write(
+				`[runner] ${new Date().toISOString()} process start took ${elapsed} ms: ${await sampleRunnerLoad()}\n`,
+			);
+		});
+	}, 5_000);
+	timer.unref();
+	return () => {
+		clearInterval(timer);
+		const sorted = [...samples].sort((a, b) => a - b);
+		const at = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] ?? 0;
+		process.stderr.write(
+			`[runner] process start over the run: ${samples.length} samples, median ${at(0.5)} ms, p95 ${at(0.95)} ms, max ${sorted.at(-1) ?? 0} ms, ${slow} over 1 s\n`,
+		);
+	};
+}
+
+export default async function setup(): Promise<(() => void) | undefined> {
+	if (process.platform !== "win32") return undefined;
 	const evidence = process.env.PI_CI_HANG_DIAGNOSTICS === "1";
 	if (evidence) {
 		const [defender, load] = await Promise.all([defenderStatus(), sampleRunnerLoad()]);
@@ -41,4 +72,5 @@ export default async function setup(): Promise<void> {
 	}
 	if (evidence) process.stderr.write(`[runner] provisioning took ${Date.now() - startedAt} ms\n`);
 	process.env.PATH = `${join(SHARED_TEST_RUNTIME_ROOT, "bin")}${delimiter}${process.env.PATH ?? ""}`;
+	return evidence ? startLatencyWatch() : undefined;
 }

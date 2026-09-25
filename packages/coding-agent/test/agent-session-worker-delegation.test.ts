@@ -1877,17 +1877,29 @@ describe("AgentSession worker delegation", () => {
 				),
 			).toBe(false);
 
+			// The subject lane settles only after its verifier: wait for that terminal event, not a
+			// wall-clock poll (a slow runner outlasted vi.waitFor's 1 s default).
+			const subjectSettled = new Promise<void>((resolve) => {
+				const unsubscribe = harness.session.subscribe((event) => {
+					if (
+						event.type === "delegate_workers" &&
+						event.terminalSinceFlush.some((record) => record.laneId === subjectLaneId)
+					) {
+						unsubscribe();
+						resolve();
+					}
+				});
+			});
 			resolveVerifier(
 				fauxAssistantMessage(
 					'{"summary":"focused verification passed","status":"completed","verdict":"accepted","reasonCodes":["focused_checks_passed"],"findings":[]}',
 				),
 			);
-			await vi.waitFor(() => {
-				expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2);
-				expect(harness.session.getLaneRecords().find((record) => record.laneId === subjectLaneId)).toMatchObject({
-					status: "succeeded",
-					reasonCode: "independent_verification_accepted",
-				});
+			await subjectSettled;
+			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2);
+			expect(harness.session.getLaneRecords().find((record) => record.laneId === subjectLaneId)).toMatchObject({
+				status: "succeeded",
+				reasonCode: "independent_verification_accepted",
 			});
 
 			const verifierResult = harness.session

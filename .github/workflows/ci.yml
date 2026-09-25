@@ -313,16 +313,6 @@ jobs:
       # after shard 1's own tests have finished, so no budgeted test ever competes with it for the
       # runner. That "shard == 1" gate fires exactly once regardless of shard count (1 or 4), so
       # narrowed runs keep this coverage unchanged.
-      # Evidence for Windows test stalls: process-creation latency sampled every 5 s in the
-      # background for the whole test step, printed after it (scripts/ci-runner-readiness.mjs).
-      - name: Start runner readiness sampler
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          PI_RUNNER_READINESS_MS: "1200000"
-        run: |
-          Start-Process -FilePath node -ArgumentList "scripts/ci-runner-readiness.mjs" -RedirectStandardOutput "$env:RUNNER_TEMP\runner-readiness.log" -WindowStyle Hidden
-
       - name: Test coding-agent shard
         if: needs.plan.outputs.coding_agent_narrow != 'true'
         working-directory: packages/coding-agent
@@ -351,11 +341,6 @@ jobs:
           PI_CI_HANG_DIAGNOSTICS: ${{ runner.os == 'Windows' && '1' || '' }}
           PI_CI_RELATED_FILES: ${{ needs.plan.outputs.coding_agent_related_files }}
         run: node ../../scripts/run-coding-agent-related.mjs --bail=0 --reporter=default --reporter=json --outputFile.json=test-report.json
-
-      - name: Print runner readiness samples
-        if: always() && runner.os == 'Windows'
-        shell: pwsh
-        run: Get-Content "$env:RUNNER_TEMP\runner-readiness.log" -ErrorAction SilentlyContinue
 
       - name: Upload coding-agent test report for failure carry-forward
         if: failure()
