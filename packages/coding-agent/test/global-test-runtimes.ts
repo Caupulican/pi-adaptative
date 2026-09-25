@@ -13,11 +13,18 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ENV_AGENT_DIR } from "../src/config.ts";
+import { defenderStatus, sampleRunnerLoad } from "./ci-runner-load.ts";
 
 export const SHARED_TEST_RUNTIME_ROOT = join(realpathSync.native(tmpdir()), "pi-agent-test-shared");
 
-export default function setup(): void {
+export default async function setup(): Promise<void> {
 	if (process.platform !== "win32") return;
+	const evidence = process.env.PI_CI_HANG_DIAGNOSTICS === "1";
+	if (evidence) {
+		const [defender, load] = await Promise.all([defenderStatus(), sampleRunnerLoad()]);
+		process.stderr.write(`[runner] ${defender}\n[runner] before provisioning: ${load}\n`);
+	}
+	const startedAt = Date.now();
 	mkdirSync(SHARED_TEST_RUNTIME_ROOT, { recursive: true });
 	const script = fileURLToPath(new URL("./provision-test-runtimes.ts", import.meta.url));
 	const result = spawnSync(process.execPath, ["--conditions=pi-source", script], {
@@ -32,5 +39,6 @@ export default function setup(): void {
 			`[test-runtimes] provisioning failed (${result.error?.message ?? `exit ${result.status}`}): ${(result.stdout ?? "").trim()} ${(result.stderr ?? "").trim().slice(-600)}\n`,
 		);
 	}
+	if (evidence) process.stderr.write(`[runner] provisioning took ${Date.now() - startedAt} ms\n`);
 	process.env.PATH = `${join(SHARED_TEST_RUNTIME_ROOT, "bin")}${delimiter}${process.env.PATH ?? ""}`;
 }
