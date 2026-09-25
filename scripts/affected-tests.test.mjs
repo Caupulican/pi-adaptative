@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { directImporterTests, relativeImportSpecifiers, selectCommitTests } from "./affected-tests.mjs";
+import { createPackageResolver, directImporterTests, relativeImportSpecifiers, selectCommitTests } from "./affected-tests.mjs";
 
 const sources = {
 	"packages/x/test/a.test.ts": 'import { a } from "../src/core/a.ts";\nvi.mock("../src/core/b.js");',
@@ -30,4 +30,36 @@ test("a hub module narrows to the tests named after it", () => {
 		"packages/x/test/hub-module.test.ts",
 	]);
 	assert.equal(selectCommitTests(["packages/x/src/hub-module.ts"], hubTests, hubRead, 10).length, 5);
+});
+
+test("a package specifier reaches the module behind its entry point, through re-exporting barrels", () => {
+	const files = {
+		"packages/core/src/node.ts": 'export * from "./session/index.ts";\nexport { tool } from "./tool.ts";',
+		"packages/core/src/session/index.ts": 'export * from "./manager.ts";',
+		"packages/core/src/session/manager.ts": "export const manager = 1;",
+		"packages/core/src/tool.ts": "export const tool = 1;",
+		"packages/core/src/other.ts": "export const other = 1;",
+		"packages/app/test/uses-node.test.ts": 'import { manager } from "@scope/core/node";',
+		"packages/app/test/uses-root.test.ts": 'import { other } from "@scope/core";',
+	};
+	const readText = (path) => files[path];
+	const resolvePackage = createPackageResolver([
+		{
+			name: "@scope/core",
+			directory: "packages/core",
+			exports: { ".": { "pi-source": "./src/other.ts" }, "./node": { "pi-source": "./src/node.ts" } },
+		},
+	]);
+	const tests = ["packages/app/test/uses-node.test.ts", "packages/app/test/uses-root.test.ts"];
+	assert.deepEqual(directImporterTests(["packages/core/src/session/manager.ts"], tests, readText, resolvePackage), [
+		"packages/app/test/uses-node.test.ts",
+	]);
+	assert.deepEqual(directImporterTests(["packages/core/src/tool.ts"], tests, readText, resolvePackage), [
+		"packages/app/test/uses-node.test.ts",
+	]);
+	assert.deepEqual(directImporterTests(["packages/core/src/other.ts"], tests, readText, resolvePackage), [
+		"packages/app/test/uses-root.test.ts",
+	]);
+	// An unknown package or an export the map does not name selects nothing.
+	assert.equal(createPackageResolver([])("@scope/core/node"), undefined);
 });
