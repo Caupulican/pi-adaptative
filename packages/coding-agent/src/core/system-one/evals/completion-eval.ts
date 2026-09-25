@@ -532,6 +532,9 @@ function scratchRepository(testCase: CompletionEvalCase, goalStartedAt: string):
 
 /** The goal as a session builds it: requirements, evidence, each requirement satisfied by its evidence. */
 export function buildEvalGoal(testCase: CompletionEvalCase, now: string, machineRoot = "{machine}"): GoalState {
+	// Checks run in bash: the root goes in as one quoted word with forward slashes, which bash on every
+	// platform reads as the same path (unquoted, a Windows path loses its backslashes to escaping).
+	const shellRoot = `'${machineRoot.replaceAll("\\", "/").replaceAll("'", "'\\''")}'`;
 	let goal = createGoalState({ goalId: `goal-eval-${testCase.id}`, userGoal: testCase.goal, now });
 	testCase.requirements.forEach((text, index) => {
 		const check = testCase.checks?.[index];
@@ -539,7 +542,7 @@ export function buildEvalGoal(testCase: CompletionEvalCase, now: string, machine
 			type: "add_requirement",
 			id: `req-${index + 1}`,
 			text,
-			...(check ? { check: { ...check, command: check.command.replaceAll("{machine}", machineRoot) } } : {}),
+			...(check ? { check: { ...check, command: check.command.replaceAll("{machine}", shellRoot) } } : {}),
 			now,
 		});
 	});

@@ -171,8 +171,8 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// enum-heavy surface measures 864 tokens (875 ceiling). task_steps measures 607 tokens
 			// (1,200 ceiling). skill measures 150 tokens (160 ceiling, roughly 6.7% headroom) after
 			// deliberate additions for inspect, versioned repair with versionToken, and session-wide
-			// exclude with reason. goal measures 323 tokens (333 ceiling, retaining 10 tokens of
-			// headroom). Its closed edgeClass enum adds 28 tokens to the prior 295-token surface;
+			// exclude with reason. goal measured 330 tokens before requirement checks (see the
+			// goal-checks allowance below). Its closed edgeClass enum adds 28 tokens to the prior 295-token surface;
 			// provider projection already strips descriptions and compacts literal unions. Those
 			// six exact values prevent invented grants; the aggregate allowance remains unchanged.
 			// The requested Jev tool gets its own 512-token policy ceiling inside the unchanged
@@ -182,11 +182,19 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// own 100-token ceiling on the same terms: added to the aggregate, removed from the base
 			// subtotal by its actual cost, never a slack for the pre-existing surface.
 			// repo_read is the root git read now that bash refuses raw git. Measured 143 tokens.
+			// Requirement checks and owner amendments are a deliberate goal addition: the check object
+			// on goal and in create_goal's requirements, plus amend_goal and set_requirement_check.
+			// Measured growth over the prior surfaces (goal 330, create_goal 84): 162 tokens. The base
+			// subtotal removes only that measured growth, never the whole allowance.
+			const goalChecksAllowance = 162;
 			expect(
 				report.toolSchemaTokens,
 				JSON.stringify(report.tools.map(({ name, schemaTokens }) => ({ name, schemaTokens }))),
-			).toBeLessThanOrEqual(4_500 + 350 + 720 + 100 + 143 + 140);
+			).toBeLessThanOrEqual(4_500 + 350 + 720 + 100 + 143 + 140 + goalChecksAllowance);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
+			expect(toolTokens.get("goal")).toBeLessThanOrEqual(399);
+			expect(toolTokens.get("create_goal")).toBeLessThanOrEqual(177);
+			const goalChecksGrowth = toolTokens.get("goal")! - 330 + (toolTokens.get("create_goal")! - 84);
 			expect(toolTokens.get("task_directory")).toBeLessThanOrEqual(350);
 			expect(toolTokens.get("task_automation")).toBeLessThanOrEqual(720);
 			expect(toolTokens.get("typesafe_review")).toBeGreaterThan(0);
@@ -204,7 +212,8 @@ describe("AgentSession.getContextCompositionReport", () => {
 					toolTokens.get("typesafe_review")! -
 					toolTokens.get("decision_ledger_read")! -
 					toolTokens.get("repo_read")! -
-					toolTokens.get("self_compact")!,
+					toolTokens.get("self_compact")! -
+					goalChecksGrowth,
 			).toBeLessThanOrEqual(4_500);
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(160);
 			// Explicit independent work adds one bounded object to delegate's wire contract. Keep
@@ -229,7 +238,6 @@ describe("AgentSession.getContextCompositionReport", () => {
 			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875 + parallelTokens);
 			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(1_200);
 			expect(toolTokens.get("secret_store")).toBeLessThanOrEqual(330);
-			expect(toolTokens.get("goal")).toBeLessThanOrEqual(333);
 			expect(toolTokens.get("pipeline")).toBeLessThanOrEqual(220);
 			// sorted heaviest-first
 			for (let index = 1; index < report.tools.length; index++) {
