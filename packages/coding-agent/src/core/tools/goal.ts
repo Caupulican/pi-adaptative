@@ -12,6 +12,7 @@ import {
 	resolveGoalEvidenceCommitState,
 } from "../goals/goal-lifecycle.ts";
 import {
+	applyGoalEvent,
 	type GoalEvidenceKind,
 	type GoalEvidenceOutcome,
 	type GoalState,
@@ -349,6 +350,8 @@ export interface GoalToolDependencies {
 	 * completion cannot prove checked requirements and refuses rather than skipping their checks.
 	 */
 	runRequirementCheck?: (check: RequirementCheck, signal?: AbortSignal) => Promise<RequirementCheckResult>;
+	/** Hand one decision to the owner (the session's owner items); used once per unchanged refusal. */
+	deliverToOwner?: (items: readonly string[]) => void;
 	/**
 	 * Narrow operation scope resolver for toolkit.script grants. Resolves registered script name
 	 * and exact argv to an internal scope key using host registry and execution context.
@@ -1021,16 +1024,55 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 						);
 					}
 					const systemOne = deps.getSystemOneController?.();
-					if (systemOne) {
+					if (systemOne && current) {
+						// The same completion view gets the same answer: an unchanged repeat is refused
+						// without asking again, and the owner is asked to decide once.
+						const fingerprint = createHash("sha256")
+							.update(JSON.stringify(systemOne.completionView().view))
+							.digest("hex")
+							.slice(0, 16);
+						const previous = current.lastCompletionRejection;
+						if (previous?.fingerprint === fingerprint) {
+							const askOwner = previous.ownerAskedAt === undefined;
+							const recorded = applyGoalEvent(current, {
+								type: "completion_rejected",
+								fingerprint,
+								reasons: previous.reasons,
+								...(askOwner ? { ownerAsked: true } : {}),
+								now: now(),
+							});
+							deps.saveGoalState(recorded, getGoalStateRevision(current));
+							if (askOwner) {
+								deps.deliverToOwner?.([
+									`Goal "${current.userGoal}" cannot complete: System One refused the same completion again with nothing it reads changed (${previous.reasons[0] ?? "no reason given"}). Accept it as done with /goal complete, change it with /goal edit, or tell the agent what is missing.`,
+								]);
+							}
+							return goalCompletionRefusal(
+								input.action,
+								[
+									`Completion refused again: nothing System One reads has changed since it refused this completion (${recorded.lastCompletionRejection?.count ?? 2} times). Its reasons stand:`,
+									...previous.reasons.map((reason) => `- ${reason}`),
+									"Change the outcome or its evidence before completing again; the owner has been asked to decide.",
+								].join("\n"),
+								recorded,
+							);
+						}
 						const completionDecision = await systemOne.executeCompletionTransaction(
 							requestsBugFix(result.state.goalId, result.state.userGoal),
 							{ persistTerminal: false },
 						);
 						if (completionDecision.verdict !== "complete") {
+							const recorded = applyGoalEvent(current, {
+								type: "completion_rejected",
+								fingerprint,
+								reasons: completionDecision.failed_gates.map((gate) => gate.reason),
+								now: now(),
+							});
+							deps.saveGoalState(recorded, getGoalStateRevision(current));
 							return goalCompletionRefusal(
 								input.action,
 								describeCompletionRejection(completionDecision),
-								current,
+								recorded,
 							);
 						}
 					}

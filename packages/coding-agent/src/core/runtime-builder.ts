@@ -377,6 +377,8 @@ export interface RuntimeBuilderDeps {
 	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string;
 	/** Trusted active verification identities reconstructed by the session owner. */
 	getActiveVerificationIds?(): readonly string[];
+	/** Queue items the owner must decide (the session's owner items message). */
+	deliverToOwner?(items: readonly string[]): void;
 	/** System One semantic control plane controller. */
 	getSystemOneController?(): SystemOneController | undefined;
 	/** System One steering plane driving semantic validation and certification. */
@@ -1283,6 +1285,7 @@ export class RuntimeBuilder {
 					getActiveVerificationIds: () => this.deps.getActiveVerificationIds?.() ?? [],
 					getSystemOneController: () => this.deps.getSystemOneController?.(),
 					getCwd: () => this._taskDirectories.cwd,
+					deliverToOwner: (items) => this.deps.deliverToOwner?.(items),
 					runRequirementCheck: (check, signal) =>
 						runRequirementCheck(check, { cwd: this._taskDirectories.cwd, ...(signal ? { signal } : {}) }),
 					grantEdge: this.deps.grantEdgeFromInstructions

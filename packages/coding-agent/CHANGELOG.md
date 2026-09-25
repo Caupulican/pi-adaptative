@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- A goal no longer loops on System One completion refusals: an unchanged repeat (nothing System One reads changed) is refused at once without asking again, with the earlier reasons, and the owner is asked to decide once. New evidence or a changed outcome gets a fresh judgment.
 - A goal completion refusal (failed check or System One rejection) reaches the agent verbatim as the operation's outcome, one reason per line with System One's number, the bound it missed and the next step, instead of a failure record cut to 240 characters from the middle.
 
 ### Added

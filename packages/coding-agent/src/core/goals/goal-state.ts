@@ -129,6 +129,22 @@ export interface GoalState {
 	 * before clarification correlation existed carry none.
 	 */
 	clarifications?: readonly GoalClarification[];
+	/**
+	 * System One's last refusal of this goal's completion, keyed by a fingerprint of everything it read
+	 * (the completion view). The same view gets the same answer, so an unchanged repeat is refused
+	 * without asking again and handed to the owner once; any change to the outcome or its evidence
+	 * changes the fingerprint and completion is judged afresh.
+	 */
+	lastCompletionRejection?: GoalCompletionRejection;
+}
+
+export interface GoalCompletionRejection {
+	fingerprint: string;
+	reasons: readonly string[];
+	/** Refusals of this same fingerprint so far. */
+	count: number;
+	/** Set once the owner was asked to decide, so they are asked once per fingerprint. */
+	ownerAskedAt?: string;
 }
 
 /** One owner question correlated to this objective, and the owner's own answer to it. */
@@ -244,6 +260,8 @@ export type GoalEvent =
 			now: string;
 	  }
 	| { type: "progress"; now: string }
+	/** System One refused completion over the view with this fingerprint; `ownerAsked` marks the hand-off. */
+	| { type: "completion_rejected"; fingerprint: string; reasons: readonly string[]; ownerAsked?: boolean; now: string }
 	| { type: "no_progress"; now: string }
 	| {
 			type: "clarification_requested";
@@ -478,6 +496,12 @@ export function isGoalEvent(value: unknown): value is GoalEvent {
 				(value.status === "blocked" || value.status === "usage_limited" || value.status === "budget_limited") &&
 				typeof value.reason === "string"
 			);
+		case "completion_rejected":
+			return (
+				typeof value.fingerprint === "string" &&
+				isStringArray(value.reasons) &&
+				hasOptionalBoolean(value, "ownerAsked")
+			);
 		case "record_continuation_budget":
 			return (
 				typeof value.turns === "number" &&
@@ -532,7 +556,19 @@ export function isGoalState(value: unknown): value is GoalState {
 				Number.isSafeInteger(value.systemFailureStreak) &&
 				value.systemFailureStreak >= 0)) &&
 		isValidConsumedRunawaySignatures(value.consumedRunawaySignatures) &&
-		isValidGoalClarifications(value.clarifications)
+		isValidGoalClarifications(value.clarifications) &&
+		(value.lastCompletionRejection === undefined || isGoalCompletionRejection(value.lastCompletionRejection))
+	);
+}
+
+function isGoalCompletionRejection(value: unknown): value is GoalCompletionRejection {
+	return (
+		isPlainRecord(value) &&
+		typeof value.fingerprint === "string" &&
+		isStringArray(value.reasons) &&
+		typeof value.count === "number" &&
+		Number.isSafeInteger(value.count) &&
+		hasOptionalString(value, "ownerAskedAt")
 	);
 }
 
@@ -562,6 +598,7 @@ function cloneGoalEvent(event: GoalEvent): GoalEvent {
 	if ((event.type === "add_requirement" || event.type === "set_requirement_check") && event.check) {
 		return { ...event, check: { ...event.check } };
 	}
+	if (event.type === "completion_rejected") return { ...event, reasons: [...event.reasons] };
 	return { ...event };
 }
 
@@ -578,6 +615,14 @@ function cloneGoalState(state: GoalState): GoalState {
 		...(state.consumedRunawaySignatures ? { consumedRunawaySignatures: [...state.consumedRunawaySignatures] } : {}),
 		...(state.clarifications
 			? { clarifications: state.clarifications.map((clarification) => ({ ...clarification })) }
+			: {}),
+		...(state.lastCompletionRejection
+			? {
+					lastCompletionRejection: {
+						...state.lastCompletionRejection,
+						reasons: [...state.lastCompletionRejection.reasons],
+					},
+				}
 			: {}),
 	};
 }
@@ -843,6 +888,19 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			// The owner's own reply (an answer, or an explicit decline) is new information the next
 			// continuation has to re-evaluate against, so it counts as progress.
 			newState.progressRevision = (state.progressRevision ?? 0) + 1;
+			break;
+		}
+
+		case "completion_rejected": {
+			const previous = state.lastCompletionRejection;
+			const same = previous?.fingerprint === event.fingerprint;
+			const ownerAskedAt = event.ownerAsked ? event.now : same ? previous?.ownerAskedAt : undefined;
+			newState.lastCompletionRejection = {
+				fingerprint: event.fingerprint,
+				reasons: [...event.reasons],
+				count: same && previous ? previous.count + 1 : 1,
+				...(ownerAskedAt ? { ownerAskedAt } : {}),
+			};
 			break;
 		}
 

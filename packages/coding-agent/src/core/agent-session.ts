@@ -1907,6 +1907,9 @@ export class AgentSession {
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			saveGoalStateSnapshot: (state, expected) => this.saveGoalStateSnapshot(state, expected),
 			getActiveVerificationIds: () => this._getActiveVerificationIds(),
+			deliverToOwner: (items) => {
+				this._deliverToOwner(items);
+			},
 			getSystemOneController: () => this._systemOneController,
 			getSteeringPlane: () => this._steeringPlane,
 			getSemanticDecisionEngine: () => this._semanticDecisionEngine(),

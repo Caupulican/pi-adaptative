@@ -1123,7 +1123,13 @@ describe("goal requirement checks", () => {
 				};
 			},
 			...(systemOneVerdict
-				? { getSystemOneController: () => ({ executeCompletionTransaction: evaluateCompletion }) as never }
+				? {
+						getSystemOneController: () =>
+							({
+								executeCompletionTransaction: evaluateCompletion,
+								completionView: () => ({ view: { outcome_evidence: [] }, repositoryOutcome: false }),
+							}) as never,
+					}
 				: {}),
 		});
 		const run = async (input: GoalToolInput) => {
@@ -1240,5 +1246,60 @@ describe("goal requirement checks", () => {
 			undefined,
 			"test ! -e ~/.ollama",
 		]);
+	});
+});
+
+describe("goal completion loop bound", () => {
+	it("refuses an unchanged repeat without asking System One again and asks the owner once", async () => {
+		let state: GoalState | undefined;
+		let view = { outcome_evidence: [{ criterion_id: "r1", evidence: [] }] };
+		const evaluateCompletion = vi.fn(async () => ({
+			verdict: "retrieve_more",
+			failed_gates: [
+				{
+					id: "JEV-outcomes_achieved",
+					reason:
+						"The evidence does not show every required outcome achieved (System One: 0.40, needs at least 0.70).",
+					required_next_proof: "Record the evidence.",
+				},
+			],
+		}));
+		const owner: string[][] = [];
+		const tool = createGoalToolDefinition({
+			getGoalState: () => state,
+			saveGoalState: (next) => {
+				state = next;
+			},
+			now: () => "2026-09-25T10:00:00.000Z",
+			deliverToOwner: (items) => owner.push([...items]),
+			getSystemOneController: () =>
+				({
+					executeCompletionTransaction: evaluateCompletion,
+					completionView: () => ({ view, repositoryOutcome: false }),
+				}) as never,
+		});
+		const run = (input: GoalToolInput) => tool.execute("call", input, undefined, undefined, ctx);
+		await run({ action: "start", goalId: "g1", userGoal: "Remove the model server" });
+
+		const first = await run({ action: "complete" });
+		expect(getToolResultText(first)).toContain("Completion refused: System One found 1 issue(s)");
+		expect(evaluateCompletion).toHaveBeenCalledTimes(1);
+
+		const second = await run({ action: "complete" });
+		expect(getToolResultText(second)).toContain("Completion refused again: nothing System One reads has changed");
+		expect(getToolResultText(second)).toContain("(System One: 0.40, needs at least 0.70)");
+		expect(evaluateCompletion).toHaveBeenCalledTimes(1);
+		expect(owner).toHaveLength(1);
+		expect(owner[0]?.[0]).toContain('Goal "Remove the model server" cannot complete');
+
+		await run({ action: "complete" });
+		expect(evaluateCompletion).toHaveBeenCalledTimes(1);
+		expect(owner).toHaveLength(1);
+		expect(state?.lastCompletionRejection?.count).toBe(3);
+
+		// New evidence changes what System One reads: completion is judged afresh.
+		view = { outcome_evidence: [{ criterion_id: "r1", evidence: [{ id: "OBS-ev-1" }] as never[] }] };
+		await run({ action: "complete" });
+		expect(evaluateCompletion).toHaveBeenCalledTimes(2);
 	});
 });
