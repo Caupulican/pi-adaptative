@@ -12,7 +12,9 @@ export function sampleRunnerLoad(): Promise<string> {
 		"$load = (Get-CimInstance Win32_Processor | Measure-Object LoadPercentage -Average).Average",
 		"$freeMb = [math]::Round((Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1024)",
 		"$top = Get-Process | ForEach-Object { [pscustomobject]@{ Id = $_.Id; Name = $_.Name; Cpu = [math]::Round([double]$_.CPU - [double]$before[$_.Id], 2); Mb = [math]::Round($_.WorkingSet64 / 1MB) } } | Sort-Object Cpu -Descending | Select-Object -First 10",
-		"@{ load = $load; freeMb = $freeMb; top = @($top) } | ConvertTo-Json -Compress -Depth 3",
+		"$d = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter \"Name='_Total'\"",
+		"$disk = 'read {0} ms, write {1} ms, queue {2}, idle {3}%' -f ($d.AvgDisksecPerRead * 1000), ($d.AvgDisksecPerWrite * 1000), $d.CurrentDiskQueueLength, $d.PercentIdleTime",
+		"@{ load = $load; freeMb = $freeMb; disk = ($disk -join ', '); top = @($top) } | ConvertTo-Json -Compress -Depth 3",
 	].join("; ");
 	return new Promise((resolve) => {
 		execFile(
@@ -25,10 +27,13 @@ export function sampleRunnerLoad(): Promise<string> {
 					const sample = JSON.parse(stdout) as {
 						load: number;
 						freeMb: number;
+						disk: string;
 						top: Array<{ Id: number; Name: string; Cpu: number; Mb: number }>;
 					};
 					const busiest = sample.top.map((row) => `${row.Name}(${row.Id}) ${row.Cpu}s ${row.Mb}MB`).join(", ");
-					resolve(`cpu load ${sample.load}%, free memory ${sample.freeMb} MB; busiest over 1.5 s: ${busiest}`);
+					resolve(
+						`cpu load ${sample.load}%, free memory ${sample.freeMb} MB, disk ${sample.disk}; busiest over 1.5 s: ${busiest}`,
+					);
 				} catch (parseError) {
 					resolve(`load sample unparsable: ${String(parseError).slice(0, 200)}`);
 				}
