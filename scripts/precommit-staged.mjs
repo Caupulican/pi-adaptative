@@ -155,16 +155,27 @@ export function planStagedGates(staged, options) {
 	return plan;
 }
 
-/** Group carried failing tests (from a red CI verdict) into one batched run per workspace. */
-export function planCarriedTests(tests, fileExists) {
+/** The CI platform name (as ci-status.mjs records it) for this machine. */
+export function ciPlatform(platform = process.platform) {
+	return platform === "win32" ? "windows" : platform === "darwin" ? "macos" : "ubuntu";
+}
+
+/**
+ * Group carried failing tests (from a red CI verdict) into one batched run per workspace. Files that
+ * failed only on other platforms still run here, but are listed in `elsewhere`: a pass on this
+ * platform cannot clear them; only the next CI run can.
+ */
+export function planCarriedTests(tests, fileExists, platform = ciPlatform()) {
 	const byWorkspace = new Map();
 	for (const test of tests) {
 		if (!VITEST_WORKSPACES.has(test.workspace) || !fileExists(`${test.workspace}/${test.file}`)) continue;
-		const files = byWorkspace.get(test.workspace) ?? [];
-		files.push(test.file);
-		byWorkspace.set(test.workspace, files);
+		const entry = byWorkspace.get(test.workspace) ?? { cwd: test.workspace, runner: "vitest", files: [], elsewhere: [] };
+		entry.files.push(test.file);
+		const platforms = test.platforms ?? [];
+		if (platforms.length > 0 && !platforms.includes(platform)) entry.elsewhere.push({ file: test.file, platforms });
+		byWorkspace.set(test.workspace, entry);
 	}
-	return [...byWorkspace].map(([cwd, files]) => ({ cwd, runner: "vitest", files }));
+	return [...byWorkspace.values()];
 }
 
 function stagedFiles() {
@@ -235,6 +246,11 @@ function runCarriedObligation() {
 				`❌ precommit: ${branch} is red in CI (${obligation.status.url ?? obligation.status.sha}) and these tests still fail here. Fix them first: nothing lands on a red branch until its failures pass.`,
 			);
 			process.exit(result.status ?? 1);
+		}
+		if (entry.elsewhere.length > 0) {
+			process.stdout.write(
+				`⚠ precommit: these failed in CI only on another platform; passing on ${ciPlatform()} does not clear them, the next CI run decides:\n${entry.elsewhere.map((item) => `  ${entry.cwd}/${item.file} (${item.platforms.join(", ")})`).join("\n")}\n`,
+			);
 		}
 	}
 	if (obligation.untestedFailures.length > 0) {

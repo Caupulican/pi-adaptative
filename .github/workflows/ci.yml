@@ -319,6 +319,7 @@ jobs:
         env:
           NODE_OPTIONS: --conditions=pi-source
           PI_VITEST_ISOLATE_CORPUS: "1"
+          PI_CI_HANG_DIAGNOSTICS: ${{ runner.os == 'Windows' && '1' || '' }}
         # --bail=0 on the shard: every failure in the shard is reported in one run. With --bail=1
         # each red shard showed exactly one failure and the next push found the next one
         # (2026-09-12: two candidates, nine red jobs each, seven distinct causes). The local
@@ -337,6 +338,7 @@ jobs:
         env:
           NODE_OPTIONS: --conditions=pi-source
           PI_VITEST_ISOLATE_CORPUS: "1"
+          PI_CI_HANG_DIAGNOSTICS: ${{ runner.os == 'Windows' && '1' || '' }}
           PI_CI_RELATED_FILES: ${{ needs.plan.outputs.coding_agent_related_files }}
         run: node ../../scripts/run-coding-agent-related.mjs --bail=0 --reporter=default --reporter=json --outputFile.json=test-report.json
 

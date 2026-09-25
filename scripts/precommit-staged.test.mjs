@@ -139,10 +139,32 @@ test("carried failing tests from a red CI run batch per workspace and skip files
 				{ workspace: "packages/agent", file: "test/b.test.ts", platforms: ["ubuntu"] },
 			],
 			(path) => !path.endsWith("deleted.test.ts"),
+			"ubuntu",
 		),
 		[
-			{ cwd: "packages/coding-agent", runner: "vitest", files: ["test/a.test.ts"] },
-			{ cwd: "packages/agent", runner: "vitest", files: ["test/b.test.ts"] },
+			{ cwd: "packages/coding-agent", runner: "vitest", files: ["test/a.test.ts"], elsewhere: [] },
+			{ cwd: "packages/agent", runner: "vitest", files: ["test/b.test.ts"], elsewhere: [] },
+		],
+	);
+});
+
+test("a carried test that failed only on another platform still runs, and is named as not cleared here", () => {
+	assert.deepEqual(
+		planCarriedTests(
+			[
+				{ workspace: "packages/coding-agent", file: "test/tools.test.ts", platforms: ["windows"] },
+				{ workspace: "packages/coding-agent", file: "test/both.test.ts", platforms: ["ubuntu", "windows"] },
+			],
+			() => true,
+			"ubuntu",
+		),
+		[
+			{
+				cwd: "packages/coding-agent",
+				runner: "vitest",
+				files: ["test/tools.test.ts", "test/both.test.ts"],
+				elsewhere: [{ file: "test/tools.test.ts", platforms: ["windows"] }],
+			},
 		],
 	);
 });

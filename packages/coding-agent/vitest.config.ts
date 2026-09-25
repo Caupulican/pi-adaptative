@@ -76,7 +76,11 @@ export default defineConfig({
 		globals: true,
 		environment: "node",
 		testTimeout: 30000,
-		setupFiles: ["./test/test-agent-dir-isolation-setup.ts"],
+		setupFiles: [
+			"./test/test-agent-dir-isolation-setup.ts",
+			// Windows CI only (see the file): evidence for tests that stall on the runner.
+			...(process.env.PI_CI_HANG_DIAGNOSTICS === "1" ? ["./test/ci-hang-diagnostics-setup.ts"] : []),
+		],
 		execArgv: ["--conditions=pi-source"],
 		experimental: {
 			// Node 24 executes this repository's erasable TypeScript directly. Keep Vitest's loader
