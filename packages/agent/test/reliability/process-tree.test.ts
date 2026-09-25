@@ -223,4 +223,23 @@ describe("process-tree", () => {
 			process.kill(child.pid!, "SIGKILL");
 		}
 	});
+
+	it('killTree settles "already_dead" without a failure diagnostic when taskkill finds no such process', async () => {
+		const originalPlatform = process.platform;
+		const child = spawnDetached("sleep 30");
+		const diagnostics: string[] = [];
+		try {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			// taskkill exits 128 when the pid is gone: the child exited after the terminal check.
+			vi.mocked(spawnSync).mockReturnValueOnce({ status: 128 } as unknown as ReturnType<typeof spawnSync>);
+
+			const outcome = await killTree(child, { graceMs: 100, onDiagnostic: (diag) => diagnostics.push(diag) });
+
+			expect(outcome).toBe("already_dead");
+			expect(diagnostics).toEqual([]);
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+			process.kill(child.pid!, "SIGKILL");
+		}
+	});
 });

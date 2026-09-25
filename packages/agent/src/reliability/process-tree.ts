@@ -182,6 +182,8 @@ export type KillTreeOutcome = "already_dead" | "terminated" | "killed" | "failed
 export interface KillTreeNowResult {
 	success: boolean;
 	error?: string;
+	/** Windows: taskkill found no process with that pid; it exited before the kill ran. */
+	gone?: boolean;
 }
 
 /** Graceful tree kill: SIGTERM → child exit event or one-shot deadline → SIGKILL. */
@@ -229,6 +231,11 @@ export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<K
 		if (process.platform === "win32") {
 			escalated = true;
 			const outcome = taskkillTree(pid);
+			// It exited between the terminal check above and taskkill: the POSIX path's "gone".
+			if (outcome.gone) {
+				settle("already_dead");
+				return;
+			}
 			if (!outcome.success && outcome.error) {
 				opts?.onDiagnostic?.(`Windows taskkill failed: ${outcome.error}`);
 			}
@@ -291,6 +298,9 @@ export function killTree(child: ChildProcess, opts?: KillTreeOptions): Promise<K
 }
 
 /** Windows tree kill for an authorized pid: synchronous `taskkill /F /T`. */
+/** taskkill's exit code for "the process was not found" (verified on a Windows host). */
+const TASKKILL_NOT_FOUND = 128;
+
 function taskkillTree(pid: number): KillTreeNowResult {
 	const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
 	const result = spawnSync(taskkill, ["/F", "/T", "/PID", String(pid)], {
@@ -300,6 +310,10 @@ function taskkillTree(pid: number): KillTreeNowResult {
 	});
 	if (result.error) {
 		return { success: false, error: result.error.message };
+	}
+	// It exited before taskkill ran: nothing is left to kill under that pid.
+	if (result.status === TASKKILL_NOT_FOUND) {
+		return { success: false, gone: true, error: `process ${pid} had already exited` };
 	}
 	if (result.status !== 0) {
 		return { success: false, error: `taskkill exited with code ${result.status}` };
