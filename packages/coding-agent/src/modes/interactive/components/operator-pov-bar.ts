@@ -1,4 +1,5 @@
 import { type Component, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
+import type { CiStatusView } from "../../../core/ci-status-view.ts";
 import type { SelfCompactionView } from "../../../core/compaction/self-compaction-controller.ts";
 import type { SessionCostSummary } from "../../../core/cost/cost-summary.ts";
 import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
@@ -25,6 +26,8 @@ export interface OperatorPovSource {
 	getCostSummary(): Pick<SessionCostSummary, "currentCost" | "subagentCost" | "subagentReports">;
 	getSessionWorkState?(): SessionWorkState;
 	getSelfCompactionView?(): SelfCompactionView;
+	/** The branch's recorded CI verdict (core/ci-status-view.ts); absent when none is recorded. */
+	getCiStatus?(): CiStatusView | undefined;
 }
 
 export type OperatorPovSegmentId =
@@ -39,6 +42,7 @@ export type OperatorPovSegmentId =
 	| "system-one"
 	| "cost"
 	| "proof"
+	| "ci"
 	| "ctx";
 
 export interface OperatorPovSegment {
@@ -232,6 +236,27 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 			label: "PROOF",
 			value: `${projection.proof.satisfied}/${projection.proof.total}`,
 			dropOrder: 15,
+		});
+	}
+
+	const ci = source.getCiStatus?.();
+	if (ci) {
+		segments.push({
+			id: "ci",
+			label: "CI",
+			value:
+				ci.state === "red" && ci.failingTests > 0
+					? `red ${ci.failingTests}`
+					: ci.state === "unknown"
+						? "?"
+						: ci.state,
+			// A red branch is the fact to keep in view; a green or running one yields width early.
+			dropOrder: ci.state === "red" ? 50 : 12,
+			...(ci.state === "red"
+				? { tone: "error" as const }
+				: ci.state === "unknown"
+					? { tone: "warning" as const }
+					: {}),
 		});
 	}
 

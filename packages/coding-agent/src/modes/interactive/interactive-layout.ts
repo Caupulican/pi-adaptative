@@ -5,6 +5,7 @@ import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { Container, EditorComponent, TUI } from "@caupulican/pi-tui";
 import { APP_NAME } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
+import { readCiStatusView } from "../../core/ci-status-view.ts";
 import { expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
 import type { ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts";
@@ -227,6 +228,7 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		getCostSummary: () => host.session.getCostSummary(),
 		getSessionWorkState: () => host.session.getSessionWorkState(),
 		getSelfCompactionView: () => host.session.getSelfCompactionView(),
+		getCiStatus: () => readCiStatusView(host.session.sessionManager.getCwd()),
 	});
 	const humanInput = subscribeInteractiveLayout(host);
 	const view = new WorkbenchComponent({

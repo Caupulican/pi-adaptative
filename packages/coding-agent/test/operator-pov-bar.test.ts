@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
+import { ciStatusViewFromRecord } from "../src/core/ci-status-view.ts";
 import type { ForegroundRouteSnapshot } from "../src/core/model-router-controller.ts";
 import type { OperatorProjection } from "../src/core/operator-projection/types.ts";
 import {
@@ -433,5 +434,41 @@ describe("Operator POV bar", () => {
 			if (row.includes("NEXT")) expect(row, String(width)).toContain("FORCED");
 		}
 		expect(renderPlain(forced, 260)).toContain("FORCED");
+	});
+});
+
+describe("Operator POV bar CI verdict", () => {
+	it("reads the branch's recorded CI verdict and keeps a red one in view", () => {
+		expect(ciStatusViewFromRecord({ state: "pending" }, "main")).toEqual({
+			state: "running",
+			failingTests: 0,
+			branch: "main",
+		});
+		expect(ciStatusViewFromRecord({ state: "completed", conclusion: "success" }, "main")?.state).toBe("green");
+		expect(
+			ciStatusViewFromRecord({ state: "completed", conclusion: "failure", failingTests: [{}, {}] }, "main"),
+		).toEqual({
+			state: "red",
+			failingTests: 2,
+			branch: "main",
+		});
+		expect(ciStatusViewFromRecord({ state: "watch_failed" }, "main")?.state).toBe("unknown");
+
+		const red = { ...source({}), getCiStatus: () => ({ state: "red" as const, failingTests: 10, branch: "main" }) };
+		expect(buildOperatorPovSegments(red).find((segment) => segment.id === "ci")).toMatchObject({
+			label: "CI",
+			value: "red 10",
+			tone: "error",
+		});
+		expect(renderPlain(red, 240)).toContain("CI red 10");
+		const green = {
+			...source({}),
+			getCiStatus: () => ({ state: "green" as const, failingTests: 0, branch: "main" }),
+		};
+		expect(renderPlain(green, 240)).toContain("CI green");
+		// No record, no segment.
+		expect(buildOperatorPovSegments(source({})).some((segment) => segment.id === "ci")).toBe(false);
+		// On a narrow line a green verdict yields its width before a red one would.
+		expect(renderPlain(green, 90)).not.toContain("CI green");
 	});
 });
