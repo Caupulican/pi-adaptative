@@ -151,6 +151,7 @@ describe("repo_read", () => {
 			"--since=2.weeks",
 			"-L10,20",
 		]);
+		expect(compileRepoReadOptions("log", ["--simplify-by-decoration"])).toEqual(["--simplify-by-decoration"]);
 	});
 
 	it("keeps revisions, pathspecs and object paths inside the run directory", async () => {

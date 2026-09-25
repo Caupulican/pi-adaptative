@@ -164,7 +164,7 @@ describe("delegate exact-action input corrections", () => {
 			instructions: "b",
 		});
 	});
-	it("rejects readOnly together with shell tools before any lane exists", async () => {
+	it("forwards readOnly with shell tools to admission", async () => {
 		const start = vi.fn(() => ({ started: false, skipReason: "fixture" }));
 		const tool = toolWithSpies(controlSpies(), start);
 		const result = await tool.execute(
@@ -174,10 +174,11 @@ describe("delegate exact-action input corrections", () => {
 			undefined,
 			context,
 		);
-		expect(result).toMatchObject({ isError: true, details: { skipReason: "read_only_tool_conflict" } });
-		expect(delegateText(result)).toContain("readOnly excludes bash, python");
-		expect(delegateText(result)).toContain("Drop readOnly to grant them, or drop them from toolNames");
-		expect(start).not.toHaveBeenCalled();
+		expect(result).toMatchObject({ details: { skipReason: "fixture" } });
+		expect(start).toHaveBeenCalledWith(
+			expect.objectContaining({ authority: { readOnly: true, toolNames: ["read", "bash", "python"] } }),
+			undefined,
+		);
 	});
 	it("forwards readOnly with read-only tools unchanged", async () => {
 		const start = vi.fn(() => ({ started: false, skipReason: "fixture" }));

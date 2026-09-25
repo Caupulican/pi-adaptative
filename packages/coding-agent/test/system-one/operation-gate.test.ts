@@ -196,6 +196,15 @@ describe("operation gate", () => {
 		expect(await operationGate.check("bash", command, scope, "root")).toBeUndefined();
 	});
 
+	it("lets worker shell use the deterministic extreme-destruction edge without semantic review", async () => {
+		const { operationGate, fake, askOperator } = gate({ answers: { ...OUTWARD, request_authorizes: 0.5 } });
+		expect(
+			await operationGate.check("bash", { command: "git log --simplify-by-decoration" }, scope, "worker"),
+		).toBeUndefined();
+		expect(fake.calls).toBe(0);
+		expect(askOperator).not.toHaveBeenCalled();
+	});
+
 	it("runs what System One finds local and reversible without a word, and never asks about a read", async () => {
 		const { operationGate, fake, notices } = gate({ answers: LOCAL });
 		expect(await operationGate.check("bash", { command: "npm test" }, scope, "root")).toBeUndefined();
@@ -204,7 +213,7 @@ describe("operation gate", () => {
 		expect(fake.calls).toBe(1);
 	});
 
-	it("asks the operator for the root, refuses a worker, and judges a repeat only once per turn", async () => {
+	it("asks the operator for the root and judges a repeat only once per turn", async () => {
 		const unsettled = { ...OUTWARD, request_authorizes: 0.5 };
 		const root = gate({ answers: unsettled });
 		expect(await root.operationGate.check("bash", command, scope, "root")).toMatchObject({
@@ -217,12 +226,6 @@ describe("operation gate", () => {
 		);
 		await root.operationGate.check("bash", command, scope, "root");
 		expect(root.fake.calls).toBe(1);
-
-		const worker = gate({ answers: unsettled, asks: false });
-		expect(await worker.operationGate.check("bash", command, scope, "worker")).toMatchObject({
-			block: true,
-			reason: expect.stringContaining("Report the unresolved boundary to the parent"),
-		});
 	});
 
 	it("runs under the operator's standing grant and says what System One found", async () => {

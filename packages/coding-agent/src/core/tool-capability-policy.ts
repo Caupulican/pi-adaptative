@@ -43,7 +43,7 @@ const DELEGATE_POLICY = policy([["workflow.delegate"]], "control-plane");
 
 const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	...["read", "ls", "grep", "find"].map((toolName) => [toolName, READ_POLICY] as const),
-	// Read-only git without process authority: the read grain of `process.exec`, kept by readOnly.
+	// Bounded read-only git remains available even when a caller uses no shell.
 	["repo_read", policy([["repo.read"]], "path-scope")],
 	...["write", "edit", "edit-diff"].map((toolName) => [toolName, WRITE_POLICY] as const),
 	...["bash", "python", "powershell", "shell", "run_toolkit_script", "run_process"].map(
@@ -102,12 +102,13 @@ export function hasToolCapabilityPolicy(toolName: string): boolean {
 }
 
 /**
- * Whether a capability survives a `readOnly` worker grant: local reads plus the two read-only
- * broker capabilities. Shell, process, write, network, and delegation capabilities do not.
+ * Whether a capability survives a `readOnly` worker grant. Workers retain process execution
+ * for their host-provided shell; direct write, network, and delegation grants are narrowed.
  */
 export function capabilitySurvivesReadOnly(capability: HarnessCapability): boolean {
 	return (
 		resolveCapabilityPathAccess([capability]) === "read" ||
+		capability === "process.exec" ||
 		capability === "memory.query" ||
 		capability === "semantic.judge" ||
 		capability === "settings.read"

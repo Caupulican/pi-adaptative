@@ -2,8 +2,8 @@
  * The operation gate: one check per tool call, after the envelope and the edge. With System One bound it asks
  * about every operation {@link triageOperation} sends to it, caches the verdict for the rest
  * of the turn (a repeated call is not judged twice), and applies it: the operator's standing grant of
- * `operation.irreversible` authorizes; otherwise the root asks the operator at the edge and a worker
- * is refused. Whatever System One found that matters is shown to the operator.
+ * `operation.irreversible` authorizes; otherwise the root asks the operator at the edge.
+ * Workers use the deterministic extreme-destruction edge directly, without semantic command review.
  */
 
 import { tmpdir } from "node:os";
@@ -49,6 +49,7 @@ export class OperationGate {
 		actor: "root" | "worker",
 		signal?: AbortSignal,
 	): Promise<{ block: true; reason: string } | undefined> {
+		if (actor === "worker") return undefined;
 		const scopeCwd = this.deps.getScopeCwd();
 		const triage = triageOperation({ toolName, args, cwd, scopeCwd, tempDir: tmpdir() });
 		if (triage.kind === "decided") return undefined;
@@ -76,7 +77,7 @@ export class OperationGate {
 			this.verdicts.set(key, verdict);
 		}
 		const shown = triage.operation.replace(/\s+/g, " ").trim();
-		const subject = `${actor === "worker" ? "a worker's " : ""}${shown.length <= 160 ? shown : `${shown.slice(0, 159)}…`}`;
+		const subject = shown.length <= 160 ? shown : `${shown.slice(0, 159)}…`;
 		if (verdict.action === "proceed") {
 			if (verdict.notable) this.deps.notify(`System One: ${subject}: ${verdict.finding}; it runs.`);
 			return undefined;
@@ -92,7 +93,7 @@ export class OperationGate {
 			this.deps.notify(refusal);
 			return {
 				block: true,
-				reason: `${refusal} ${actor === "worker" ? "Report the unresolved boundary to the parent or do the work another way." : "Ask the owner before running it, or do the work another way."}`,
+				reason: `${refusal} Ask the owner before running it, or do the work another way.`,
 			};
 		}
 		const answer = await this.deps.askOperator(

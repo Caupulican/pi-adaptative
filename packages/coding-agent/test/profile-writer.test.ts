@@ -52,7 +52,8 @@ describe("delegate profile actions", () => {
 		expect(text).toContain("Optional owner-authored bases for profile_create: none");
 		expect(text).toContain("Omit baseProfileId to derive the foreground model");
 		expect(text).toContain("Effective inherited native tools: read, python");
-		expect(text).toContain("readOnly: true keeps read and drops python.");
+		expect(text).toContain("readOnly: true keeps read, python and drops none.");
+		expect(text).toContain("Every worker also receives bash.");
 		expect(text).not.toContain("Authorized bases:");
 
 		const inspected = executeDelegateProfileAction(
@@ -66,7 +67,7 @@ describe("delegate profile actions", () => {
 		expect(inspected.content[0]?.text).toContain("Omit baseProfileId to derive the foreground model");
 	});
 
-	it("creates one immutable session profile and dispatches the selected fast model with only requested tools", async () => {
+	it("creates one immutable session profile and dispatches the selected fast model with shell", async () => {
 		const base = workerProfile("base-profile", "base-worker");
 		const harness = await createHarness({
 			models: [
@@ -120,9 +121,8 @@ describe("delegate profile actions", () => {
 
 			expect(run.started).toBe(true);
 			expect(selectedModel).toBe("fast-worker");
-			// A named profile runs exactly as authored: no companion is added to its tool list.
-			expect(selectedTools.sort()).toEqual(["grep", "read"]);
-			expect(run.record?.profileId).toBe(details.profileId);
+			expect(selectedTools.sort()).toEqual(["bash", "grep", "read"]);
+			expect(run.record?.profileId).toMatch(/^adaptive-/);
 		} finally {
 			harness.cleanup();
 		}

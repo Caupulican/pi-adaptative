@@ -292,7 +292,7 @@ describe("native worker autonomy", () => {
 		}
 	});
 
-	it("gives a readOnly review worker native reads and read-only git, never a shell", async () => {
+	it("gives a readOnly review worker native reads, git, and a shell", async () => {
 		const harness = await createHarness({
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
@@ -324,12 +324,14 @@ describe("native worker autonomy", () => {
 			});
 
 			expect(run.started).toBe(true);
-			expect(materializedTools).toEqual(expect.arrayContaining(["read", "grep", "find", "ls", "repo_read"]));
-			for (const denied of ["bash", "python", "write", "edit"]) expect(materializedTools).not.toContain(denied);
+			expect(materializedTools).toEqual(
+				expect.arrayContaining(["read", "grep", "find", "ls", "repo_read", "bash", "python"]),
+			);
+			for (const denied of ["write", "edit"]) expect(materializedTools).not.toContain(denied);
 			expect(toolResults).toContain("true");
 			const worker = firstExecutionContract(harness);
 			expect(worker?.authority.capabilities).toContain("repo.read");
-			expect(worker?.authority.capabilities).not.toContain("process.exec");
+			expect(worker?.authority.capabilities).toContain("process.exec");
 			expect(worker?.authority.toolNames).toContain("repo_read");
 		} finally {
 			await harness.cleanup();
@@ -487,7 +489,7 @@ describe("native worker autonomy", () => {
 					cwd: resolve(workspace),
 					readPaths: [resolve(workspace)],
 					writePaths: [resolve(workspace)],
-					toolNames: ["read", "write"],
+					toolNames: ["read", "write", "bash"],
 				},
 			});
 		} finally {

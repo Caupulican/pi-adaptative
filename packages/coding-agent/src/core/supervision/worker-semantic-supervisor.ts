@@ -355,9 +355,20 @@ export class WorkerSemanticSupervisor {
 					action = "continue";
 					summaryEvent = undefined;
 					reasonCodes.push("steer_grace_pending");
+				} else if (
+					!risk(answers.work_off_track) &&
+					!attempt.isStalled &&
+					!attempt.isRepeating &&
+					(attempt.recentFailures?.length ?? 0) === 0
+				) {
+					// A semantic low-progress score alone cannot cancel a worker that is still making
+					// distinct successful calls. Require observed stall, repetition, or failure.
+					action = "continue";
+					summaryEvent = undefined;
+					reasonCodes.push("reroute_without_observed_stall");
 				} else {
 					action = "stop_and_reroute";
-					summaryEvent = "Worker rerouted · implementation stalled after repeated test failure";
+					summaryEvent = "Worker rerouted · progress stalled after steering";
 					reasonCodes.push("worker_stalled_repeated_reroute");
 				}
 			} else {

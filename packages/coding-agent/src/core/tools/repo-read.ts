@@ -14,10 +14,9 @@ import { formatCollapsibleToolResult, renderTextComponent, str, toolTextResult }
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 /**
- * Read-only git for lanes without process authority.
+ * Bounded read-only git for lanes that prefer a structured Git tool.
  *
- * A read-only worker used to be unable to answer "what changed" because every git question went
- * through bash and bash needs `process.exec`. This tool runs `git` directly with an argv allow-list:
+ * This tool runs `git` directly with an argv allow-list:
  * no shell, only read subcommands, only options that shape output, pathspecs and object paths kept
  * inside the directory it runs in, external diff/textconv drivers and the fsmonitor hook disabled,
  * no pager, no prompts, no optional index locks. It needs `repo.read`, which survives `readOnly`.
@@ -143,6 +142,7 @@ const OPTION_RULES: Readonly<Record<string, OptionRule>> = {
 	"--abbrev": { value: "optional" },
 	"--abbrev-commit": { value: "none", actions: HISTORY_ACTIONS },
 	"--no-abbrev-commit": { value: "none", actions: HISTORY_ACTIONS },
+	"--simplify-by-decoration": { value: "none", actions: ["log"] },
 	"-M": { value: "optional", actions: [...DIFF_ACTIONS, "blame"] },
 	"--find-renames": { value: "optional", actions: DIFF_ACTIONS },
 	"-C": { value: "optional", actions: [...DIFF_ACTIONS, "blame"] },
@@ -481,7 +481,7 @@ export function createRepoReadToolDefinition(
 		label: "repo_read",
 		readOnly: true,
 		description:
-			"Read-only git: status, log, diff, show, blame, ls-files, rev-parse. Runs git directly (no shell) with an option allow-list; never writes, never runs hooks, pagers or diff drivers. Use it for history and change questions instead of bash. Batchable with other independent reads.",
+			"Bounded read-only git: status, log, diff, show, blame, ls-files, rev-parse. Runs git directly with a limited option set and no hooks, pagers or diff drivers. Use bash for Git options or commands this tool does not support. Batchable with other independent reads.",
 		promptSnippet: "Read git status, history, diffs and blame (read-only)",
 		parameters: repoReadSchema,
 		async execute(_toolCallId, input: RepoReadToolInput, signal?: AbortSignal) {

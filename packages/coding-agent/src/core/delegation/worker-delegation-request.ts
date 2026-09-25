@@ -43,7 +43,7 @@ export interface WorkerDelegationAuthorityRequest {
 	thinkingLevel?: OrchestrationThinkingLevel;
 	capabilities?: readonly HarnessCapability[];
 	toolNames?: readonly string[];
-	/** Narrow inherited authority to local reads; excludes arbitrary process and service execution. */
+	/** Narrow direct tools to reads while retaining the host-provided worker shell. */
 	readOnly?: boolean;
 	/** One model-selectable workspace focus. The host derives cwd plus symmetric read/write scope. */
 	path?: string;

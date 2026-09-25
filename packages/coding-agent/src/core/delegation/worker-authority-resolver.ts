@@ -425,6 +425,8 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 			configuredToolNames.filter((toolName) => toolName !== "delegate" && !deniedForegroundTools.has(toolName)),
 		),
 	];
+	// Worker shell is a host guarantee, independent of the parent's surface and task-level narrowing.
+	if (!uniqueToolNames.includes(STABLE_SHELL_TOOL_NAME)) uniqueToolNames.push(STABLE_SHELL_TOOL_NAME);
 	if (input.authority?.toolNames?.includes("delegate")) {
 		return { ok: false, reason: "orchestration_tool_unavailable:delegate" };
 	}
@@ -441,6 +443,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 			input.foregroundEnvelope?.capabilities.includes("memory.query") === true;
 		const uninheritedTools = uniqueToolNames.filter(
 			(toolName) =>
+				toolName !== STABLE_SHELL_TOOL_NAME &&
 				!inheritedSurface.has(toolName) &&
 				!(toolName === WORKER_MEMORY_READ_TOOL_NAME && boundedMemoryReadInherited),
 		);
@@ -470,6 +473,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 			if (!capabilitySurvivesReadOnly(capability)) capabilities.delete(capability);
 		}
 	}
+	capabilities.add("process.exec");
 	const capabilityList = [...capabilities];
 	const toolNames: string[] = [];
 	for (const toolName of uniqueToolNames) {
@@ -485,7 +489,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	}
 	// The root's rule for its own surface: a tool whose output is packed brings artifact_retrieve, so the
 	// worker's large outputs are packed too and every packed handle stays resolvable by the agent that sees it.
-	// A named profile stays exactly as authored: its tool list is its identity.
+	// A named profile retains its authored tools plus the host-guaranteed shell.
 	if (
 		!input.base &&
 		input.artifactRetrieveAvailable === true &&

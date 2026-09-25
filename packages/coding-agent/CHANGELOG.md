@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- Delegated workers always receive shell and Git access, including read-only and narrow profiles. Their shell calls use the extreme-destruction edge without semantic operation review.
+
+### Fixed
+
+- Distinct reads no longer count as a repeated worker strategy, and a semantic low-progress score alone cannot cancel a worker after steering; `repo_read log` accepts `--simplify-by-decoration`.
+
 ## [0.99.48] - 2026-09-25
 
 ### Changed

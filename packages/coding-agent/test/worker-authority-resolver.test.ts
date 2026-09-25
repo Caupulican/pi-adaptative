@@ -76,7 +76,7 @@ describe("resolveWorkerAuthority", () => {
 			settings: { enabled: true, writeEnabled: true, maxUsd: 1, maxWallClockMs: 120_000, maxConcurrent: 4 },
 		});
 		expect(plan.writeEnabled).toBe(readOnly !== true);
-		expect(plan.processEnabled).toBe(readOnly !== true);
+		expect(plan.processEnabled).toBe(true);
 		const compiled = compileWorkerExecutionGrant({
 			target: { objectiveId: "objective", taskId: "task", attemptId: "attempt" },
 			profile: resolution.shipment.profile,
@@ -86,14 +86,24 @@ describe("resolveWorkerAuthority", () => {
 		expect(compiled.ok).toBe(true);
 		if (!compiled.ok) throw new Error(compiled.reasonCodes.join(","));
 		if (readOnly) {
-			// Read is read: the parent's bash lends the catalog read tools and read-only git natively.
-			expect(resolution.shipment.profile.capabilityCeiling).toEqual(["filesystem.read", "repo.read"]);
-			expect(plan.requiredCapabilities).toEqual(["filesystem.read", "repo.read"]);
-			expect(plan.toolManifests.map((entry) => entry.toolName)).toEqual(["read", "grep", "find", "ls", "repo_read"]);
+			expect(resolution.shipment.profile.capabilityCeiling).toEqual([
+				"filesystem.read",
+				"process.exec",
+				"repo.read",
+			]);
+			expect(plan.requiredCapabilities).toEqual(["filesystem.read", "process.exec", "repo.read"]);
+			expect(plan.toolManifests.map((entry) => entry.toolName)).toEqual([
+				"read",
+				"bash",
+				"grep",
+				"find",
+				"ls",
+				"repo_read",
+			]);
 			expect(plan.readPaths).not.toEqual([]);
 			expect(plan.writePaths).toEqual([]);
-			expect(compiled.grant.capabilities).toEqual(["filesystem.read", "repo.read"]);
-			expect(compiled.grant.allowedTools).toEqual(["read", "grep", "find", "ls", "repo_read"]);
+			expect(compiled.grant.capabilities).toEqual(["filesystem.read", "process.exec", "repo.read"]);
+			expect(compiled.grant.allowedTools).toEqual(["read", "bash", "grep", "find", "ls", "repo_read"]);
 			expect(compiled.grant.writePaths).toEqual([]);
 		}
 	});
@@ -104,7 +114,8 @@ describe("resolveWorkerAuthority", () => {
 			expect(() => parseWorkerDelegationAuthorityRequest({ readOnly })).toThrow("readOnly");
 		}
 	});
-	it.each(["write", "bash", "python"])("refuses an explicit %s override of read-only authority", (toolName) => {
+	it("refuses an explicit write override of read-only authority", () => {
+		const toolName = "write";
 		expect(
 			resolveWorkerAuthority({
 				authority: { readOnly: true, toolNames: [toolName] },
@@ -146,10 +157,10 @@ describe("resolveWorkerAuthority", () => {
 				artifactRetrieveAvailable,
 			});
 		const brokered = admit(true);
-		expect(brokered.ok && brokered.shipment.profile.toolNames).toEqual(["grep", "read", "artifact_retrieve"]);
+		expect(brokered.ok && brokered.shipment.profile.toolNames).toEqual(["grep", "read", "bash", "artifact_retrieve"]);
 		// Without the host adapter the companion is not granted: a tool the worker cannot get never is.
 		const unbrokered = admit(false);
-		expect(unbrokered.ok && unbrokered.shipment.profile.toolNames).toEqual(["grep", "read"]);
+		expect(unbrokered.ok && unbrokered.shipment.profile.toolNames).toEqual(["grep", "read", "bash"]);
 	});
 
 	it("keeps an explicit capability restriction authoritative for leaf workers", () => {
@@ -200,8 +211,8 @@ describe("resolveWorkerAuthority", () => {
 
 		expect(resolution.ok).toBe(true);
 		if (!resolution.ok) return;
-		expect(resolution.shipment.profile.toolNames).toEqual(["memory_read"]);
-		expect(resolution.shipment.profile.capabilityCeiling).toEqual(["memory.query"]);
+		expect(resolution.shipment.profile.toolNames).toEqual(["memory_read", "bash"]);
+		expect(resolution.shipment.profile.capabilityCeiling).toEqual(["memory.query", "process.exec"]);
 	});
 
 	it("inherits every compatible active foreground tool and strips root-only tools", () => {
@@ -214,7 +225,7 @@ describe("resolveWorkerAuthority", () => {
 
 		expect(resolution.ok).toBe(true);
 		if (!resolution.ok) return;
-		expect(resolution.shipment.profile.toolNames).toEqual(["read", "python"]);
+		expect(resolution.shipment.profile.toolNames).toEqual(["read", "python", "bash"]);
 	});
 
 	it("inherits run_toolkit_script only when it is active in the foreground, and keeps explicit requests deterministic", () => {
@@ -225,7 +236,7 @@ describe("resolveWorkerAuthority", () => {
 			isModelExhausted: () => false,
 		});
 		expect(inherited.ok).toBe(true);
-		if (inherited.ok) expect(inherited.shipment.profile.toolNames).toEqual(["read", "run_toolkit_script"]);
+		if (inherited.ok) expect(inherited.shipment.profile.toolNames).toEqual(["read", "run_toolkit_script", "bash"]);
 
 		const explicit = resolveWorkerAuthority({
 			authority: { toolNames: ["run_toolkit_script"] },
@@ -235,7 +246,7 @@ describe("resolveWorkerAuthority", () => {
 			isModelExhausted: () => false,
 		});
 		expect(explicit.ok).toBe(true);
-		if (explicit.ok) expect(explicit.shipment.profile.toolNames).toEqual(["run_toolkit_script"]);
+		if (explicit.ok) expect(explicit.shipment.profile.toolNames).toEqual(["run_toolkit_script", "bash"]);
 
 		const unavailable = resolveWorkerAuthority({
 			authority: { toolNames: ["run_toolkit_script"] },
@@ -250,7 +261,7 @@ describe("resolveWorkerAuthority", () => {
 		});
 	});
 
-	it("rejects an explicit classified tool when its capability is unavailable", () => {
+	it("grants a process tool when the parent has no process capability", () => {
 		const resolution = resolveWorkerAuthority({
 			authority: { toolNames: ["python"] },
 			foregroundModel: model,
@@ -259,10 +270,8 @@ describe("resolveWorkerAuthority", () => {
 			isModelExhausted: () => false,
 		});
 
-		expect(resolution).toEqual({
-			ok: false,
-			reason: "orchestration_tool_capability_missing:python",
-		});
+		expect(resolution.ok).toBe(true);
+		if (resolution.ok) expect(resolution.shipment.profile.toolNames).toEqual(["python", "bash"]);
 	});
 
 	it("rejects a sibling tool that was not active in the inherited foreground surface", () => {
@@ -292,10 +301,10 @@ describe("resolveWorkerAuthority", () => {
 
 		expect(resolution.ok).toBe(true);
 		if (!resolution.ok) return;
-		expect(resolution.shipment.profile.toolNames).toEqual(["read", "grep", "find", "ls", "repo_read"]);
+		expect(resolution.shipment.profile.toolNames).toEqual(["read", "grep", "find", "ls", "repo_read", "bash"]);
 	});
 
-	it("keeps a readOnly worker on native reads and read-only git, never bash", () => {
+	it("keeps native reads and read-only git alongside the worker shell", () => {
 		const resolution = resolveWorkerAuthority({
 			authority: { readOnly: true, toolNames: ["read", "grep", "repo_read"] },
 			foregroundModel: model,
@@ -310,8 +319,8 @@ describe("resolveWorkerAuthority", () => {
 
 		expect(resolution.ok).toBe(true);
 		if (!resolution.ok) throw new Error(resolution.reason);
-		expect(resolution.shipment.profile.toolNames).toEqual(["read", "grep", "repo_read"]);
-		expect(resolution.shipment.profile.capabilityCeiling).toEqual(["filesystem.read", "repo.read"]);
+		expect(resolution.shipment.profile.toolNames).toEqual(["read", "grep", "repo_read", "bash"]);
+		expect(resolution.shipment.profile.capabilityCeiling).toEqual(["filesystem.read", "process.exec", "repo.read"]);
 	});
 
 	it("does not invent repo.read for an explicit capability list or a base profile", () => {
@@ -336,7 +345,7 @@ describe("resolveWorkerAuthority", () => {
 
 		expect(resolution.ok).toBe(true);
 		if (!resolution.ok) return;
-		expect(resolution.shipment.profile.toolNames).toEqual(["read", "grep", "find", "ls"]);
+		expect(resolution.shipment.profile.toolNames).toEqual(["read", "grep", "find", "ls", "bash"]);
 	});
 
 	it("still refuses grep/find/ls/repo_read when the parent has neither those tools nor bash", () => {
@@ -366,7 +375,7 @@ describe("resolveWorkerAuthority", () => {
 				profileId: "exact-leaf-base",
 				model,
 				capabilityCeiling: ["filesystem.read", "process.exec"],
-				toolNames: ["read", "python"],
+				toolNames: ["read", "python", "bash"],
 			}),
 			{ delegationLimits: { maxDepth: 0, maxChildrenPerAgent: 0, maxNestedAgentsPerSession: 0 } },
 		);
@@ -701,5 +710,34 @@ describe("resolveWorkerAuthority", () => {
 		expect(rebound.profile.profileId).toMatch(/^adaptive-/);
 		expect(rebound.profile.profileId).not.toBe(profile.profileId);
 		expect(bindCompiledVerifierIdentity(rebound, "adaptive-verifier")).toBe(rebound);
+	});
+
+	it.each([true, false])("always grants worker shell when readOnly=%s and root denies bash", (readOnly) => {
+		const resolution = resolveWorkerAuthority({
+			authority: { readOnly, capabilities: ["filesystem.read"], toolNames: ["read"] },
+			foregroundModel: model,
+			foregroundToolNames: ["read"],
+			foregroundEnvelope: {
+				id: "parent",
+				capabilities: ["filesystem.read"],
+				allowedTools: ["read"],
+				deniedTools: ["bash"],
+			},
+			modelRegistry,
+			isModelExhausted: () => false,
+		});
+		expect(resolution.ok).toBe(true);
+		if (!resolution.ok) throw new Error(resolution.reason);
+		expect(resolution.shipment.profile.toolNames).toContain("bash");
+		expect(resolution.shipment.profile.capabilityCeiling).toContain("process.exec");
+		const plan = buildWorkerExecutionPlan({
+			profile: resolution.shipment.profile,
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: false,
+			settings: { enabled: true, writeEnabled: true, maxUsd: 1, maxWallClockMs: 120_000, maxConcurrent: 4 },
+		});
+		expect(plan.processEnabled).toBe(true);
+		expect(plan.toolManifests.map((entry) => entry.toolName)).toContain("bash");
 	});
 });

@@ -594,9 +594,11 @@ provider: xai", which points at the wrong fix. Pinned by
 **Workers deny by default and never exceed the parent's surface.** A worker's tools come from the
 parent's active tool set; root-only tools and nested delegation are refused with the rule named.
 Read is read: a parent with `bash` lends the catalog read tools (`grep`, `find`, `ls`) and read-only
-git (`repo_read`, capability `repo.read`) natively, so `readOnly: true` — which removes write,
-process, network and service authority — still leaves a worker able to search files and read
-repository history. `repo_read` runs git with an argv allow-list: no shell, no hooks, pager or diff
+git (`repo_read`, capability `repo.read`) natively. Every worker also receives `bash` and
+`process.exec`, including `readOnly: true`, named profiles, narrow tool lists, and a foreground
+session without bash. `readOnly` removes direct write, network and service tools. Worker shell
+commands run through the deterministic extreme-destruction edge, without semantic operation review.
+`repo_read` runs git with an argv allow-list: no shell, no hooks, pager or diff
 drivers, only output-shaping options, pathspecs and object paths inside its directory, credential
 files model-blind like `read`. A plain `log` request returns at most the requested number of concise
 one-line commits; explicit log options retain their own formatting. Prose cannot narrow a grant.
@@ -995,7 +997,7 @@ measurement gains no new surface.
 | 2026-09-06 | A worker turn is capped by the model's own output limit, never the 2048-token lane summary cap; a length stop before the claim envelope closes is `output_truncated`, not invalid JSON. |
 | 2026-09-06 | The output-repetition guard collapses ordered-list markers before comparing windows; an enumerated loop is a loop. |
 | 2026-09-06 | `task_steps update` with no field to change refuses and names the accepted fields; a no-op is never "recorded". |
-| 2026-09-08 | A `readOnly` worker grant keeps exactly the capabilities that survive the read-only rule owned by the tool capability policy (local reads, skill reads, memory query, settings read). A `readOnly` start that names an excluded tool is refused before a lane exists and says which tools to drop; `profile_inspect` prints what `readOnly` keeps and drops; a capability-missing skip explains itself. The `read` tool returns a bounded, directories-first listing for a directory path instead of `EISDIR`, so a read-only worker can enumerate a tree. |
+| 2026-09-08 | A `readOnly` worker grant keeps the capabilities that survive the read-only rule owned by the tool capability policy (local reads, skill reads, memory query, settings read, process execution). A `readOnly` start that names an excluded direct write tool is refused before a lane exists and says which tools to drop; `profile_inspect` prints what `readOnly` keeps and drops; a capability-missing skip explains itself. The `read` tool returns a bounded, directories-first listing for a directory path instead of `EISDIR`, so a read-only worker can enumerate a tree. |
 | 2026-09-08 | A validation bounce on a well-typed value names the violated constraint and the received measure (`task: maxLength must not have more than 3500 characters (received 3610 characters)`), never "expected string, received string". A delegate start whose brief arrives in the shared-schema `task` field is folded onto `instructions` before schema validation, so the 16k start cap applies; `profile_create` keeps its own cap and a start carrying both fields is still a runtime conflict. |
 | 2026-09-08 | The summary output budget grows with the conversation it must cover (one output token per forty input tokens, never below the gate demand, never above 80% of the reserve); a length-stopped checkpoint retries chunked with a halved recent window and a doubled budget instead of repeating the same request; a deterministic checkpoint tells the model the narrative was lost and the host emits a warning naming the cause; a metered model with a price tier below the default trigger compacts before crossing it, while an explicit owner trigger and the xAI subscription policy keep their own values. |
 | 2026-09-08 | A goal continuation turn that ends in a provider error (after the session's own retries) blocks the goal with the classified reason and stops the loop with `turn_errored`; the blocked decision names that reason. An owner abort still leaves the goal active and untouched. A silently active goal after an outage was the failure this replaces. |

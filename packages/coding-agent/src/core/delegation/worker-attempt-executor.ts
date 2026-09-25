@@ -228,6 +228,13 @@ export interface WorkerAttemptExecutorOptions {
 	}): void;
 }
 
+/** Distinct arguments to the same tool are progress, especially during read-only review. */
+export function isRepeatedWorkerToolInvocation(calls: readonly { name: string; args: unknown }[]): boolean {
+	if (calls.length < 3) return false;
+	const recent = calls.slice(-3);
+	return recent.every((call) => call.name === recent[0]!.name && isDeepStrictEqual(call.args, recent[0]!.args));
+}
+
 function workerCompletionCallbackFailure(error: unknown): Error {
 	if (
 		error instanceof WorkerCompletionProtocolError ||
@@ -327,19 +334,21 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	 */
 	let attemptTranscriptStart = 0;
 	const recentToolNames: string[] = [];
+	const recentToolCalls: { name: string; args: unknown }[] = [];
 	let executedToolCalls = 0;
 	let changedFileCountAtChurnWindowStart = changedFiles.size;
 	/**
 	 * One live supervision observation per executed tool call. The deterministic churn check runs
 	 * first, because repeated broad validation with no new implementation needs no semantic judgment.
 	 */
-	const observeToolCall = async (toolName: string): Promise<void> => {
+	const observeToolCall = async (toolName: string, args: unknown): Promise<void> => {
 		if (!options.observeWorkerProgress) return;
 		executedToolCalls++;
 		recentToolNames.push(toolName);
 		if (recentToolNames.length > 8) recentToolNames.shift();
-		const lastTool = recentToolNames.at(-1);
-		const isRepeating = recentToolNames.length >= 3 && recentToolNames.slice(-3).every((name) => name === lastTool);
+		recentToolCalls.push({ name: toolName, args });
+		if (recentToolCalls.length > 3) recentToolCalls.shift();
+		const isRepeating = isRepeatedWorkerToolInvocation(recentToolCalls);
 		const isStalled = changedFiles.size === 0 && executedToolCalls >= 4 && (isRepeating || toolIssues.size > 0);
 		let outputTail = "";
 		try {
@@ -865,7 +874,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 													}
 												}
 												signal.throwIfAborted();
-												await observeToolCall(toolCall.name);
+												await observeToolCall(toolCall.name, args);
 												return duplicateNote
 													? {
 															content: [
