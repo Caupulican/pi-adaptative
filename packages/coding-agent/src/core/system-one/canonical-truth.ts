@@ -70,7 +70,7 @@ function actionClassForRoute(route: string): PlanActionClass {
 }
 
 function sourceKindForEvidence(kind: string): SourceKind {
-	if (kind === "test" || kind === "command") return "test";
+	if (kind === "test" || kind === "command" || kind === "check") return "test";
 	if (kind === "review") return "log";
 	if (kind === "external") return "external_doc";
 	return "user";
@@ -189,7 +189,7 @@ export function projectCanonicalTruth(input: CanonicalTruthInput): CanonicalHydr
 			command: requirement.check.command,
 			artifact_ref: null,
 			covers_acceptance_ids: [requirement.id],
-			observation_ids: latest ? [latest.id] : [],
+			observation_ids: latest ? [`OBS-${latest.id}`] : [],
 		});
 	}
 

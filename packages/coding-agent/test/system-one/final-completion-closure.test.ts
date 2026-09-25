@@ -104,7 +104,7 @@ function passingAdapter() {
 			return {
 				model: "jev-1.13.0",
 				answers: {
-					implementation_matches_goal: { noul: 0.99 },
+					outcomes_achieved: { noul: 0.99 },
 					root_cause_addressed: { noul: 0.99 },
 					required_behavior_unverified: { noul: 0.01 },
 					material_claim_unsupported: { noul: 0.01 },
@@ -856,7 +856,7 @@ describe("completion catalog thresholds and release binding", () => {
 	const directive = { action: "continue_current_work" as const, reasonCodes: [] };
 	const plane = new SystemOneSteeringPlane();
 	const strong = {
-		implementation_matches_goal: { noul: 0.96 },
+		outcomes_achieved: { noul: 0.96 },
 		root_cause_addressed: { noul: 0.5 },
 		required_behavior_unverified: { noul: 0.05 },
 		material_claim_unsupported: { noul: 0.05 },
@@ -875,20 +875,16 @@ describe("completion catalog thresholds and release binding", () => {
 		expect(result?.status).toBe("complete");
 	});
 
-	it("JEV-025 requires the completion policy hard pass, not a 0.5 noul", () => {
-		const weak = plane.evaluateSemanticOutcome(
-			"JEV-025",
-			{ ...strong, implementation_matches_goal: { noul: 0.9 } },
-			directive,
-		);
+	it("JEV-025 judges with the measured completion bounds the goal tool uses, not a 0.5 noul", () => {
+		const weak = plane.evaluateSemanticOutcome("JEV-025", { ...strong, outcomes_achieved: { noul: 0.5 } }, directive);
 		expect(weak.semantic_outcome).toBe("repair");
-		expect(weak.failed_semantic_predicates).toContain("implementation_matches_goal");
+		expect(weak.failed_semantic_predicates).toContain("outcomes_achieved");
 		expect(plane.evaluateSemanticOutcome("JEV-025", strong, directive).semantic_outcome).toBe("pass");
 		const bug = plane.evaluateSemanticOutcome("JEV-025", strong, directive, { bugFix: true });
 		expect(bug.failed_semantic_predicates).toContain("root_cause_addressed");
 	});
 
-	it("JEV-026 requires a confident no on the challenge pack", () => {
+	it("JEV-026 fails a challenge System One judges more likely present than not", () => {
 		const passed = plane.evaluateSemanticOutcome(
 			"JEV-026",
 			{
@@ -903,7 +899,7 @@ describe("completion catalog thresholds and release binding", () => {
 		const challenged = plane.evaluateSemanticOutcome(
 			"JEV-026",
 			{
-				missing_requirement: { noul: 0.2 },
+				missing_requirement: { noul: 0.6 },
 				hidden_assumption: { noul: 0.05 },
 				plausible_regression_not_tested: { noul: 0.05 },
 				conclusion_overstates_evidence: { noul: 0.05 },

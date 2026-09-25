@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Goal completion judges the outcome a goal promised, not a repository diff. System One reads per-criterion outcome evidence (checks and cited evidence); the repository diff and the code-only questions (root cause, scope of the diff, duplicated responsibility, untested regression paths) apply only when the goal changed the repository, and root cause only for a fix. Thresholds are measured (`SystemOneThresholds.completion`): a defect fails when System One judges it more likely present than not, and the verdict must be `complete` at confidence 0.70 or more. The objective loop's JEV-025/JEV-026 judge the same view through the same policy. Measured on the real System One: correct completions accepted 0% before, 100% after, planted gaps rejected 100%, on the calibration set and on a held-out set.
+
 ### Added
 
 - A goal requirement can carry a `check`: an observational command (validated against the read-only shell line) that the harness reruns at completion, in both the goal tool and the objective loop. Every result is recorded as host-verified `check` evidence; a passing check satisfies its requirement and a failing one reopens it and refuses completion with one sentence per failure, before System One is asked. `create_goal` accepts `{ text, check }` requirements and `set_requirement_check` attaches or removes one.

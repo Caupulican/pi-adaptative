@@ -41,8 +41,27 @@ export interface SystemOneScoreThresholds {
 	readonly require_confidence_for_hard_gate: number;
 }
 
+/**
+ * Where completion answers decide, measured against the real System One on the completion eval set
+ * (`npm run eval:completion`, 2026-09-25: repository, machine, remote, information and mixed goals,
+ * each done and with a planted gap). Done goals scored every required outcome 0.89-0.98 and every
+ * defect at most 0.47, and always chose `complete` (confidence 0.76-1.00); planted gaps scored the
+ * outcome 0.05-0.35, the gating defects 0.59 or more, and never chose `complete`.
+ */
+export interface SystemOneCompletionThresholds {
+	/** A required outcome holds at or above this. */
+	readonly outcome_min: number;
+	/** A defect holds (is judged absent) at or below this: it fails when more likely present than not. */
+	readonly defect_max: number;
+	/** The completion verdict must choose `complete` with at least this confidence ... */
+	readonly verdict_min_confidence: number;
+	/** ... and at least this margin over its runner-up. */
+	readonly verdict_min_margin: number;
+}
+
 export interface SystemOneThresholds {
 	readonly choice: SystemOneChoiceThresholds;
+	readonly completion: SystemOneCompletionThresholds;
 	readonly noul_required_true: SystemOneNoulRequiredTrueThresholds;
 	readonly noul_required_false: SystemOneNoulRequiredFalseThresholds;
 	readonly score: SystemOneScoreThresholds;
@@ -141,6 +160,12 @@ export const DEFAULT_SYSTEM_ONE_CONFIG: SystemOneConfig = Object.freeze({
 		}),
 		score: Object.freeze({
 			require_confidence_for_hard_gate: 0.88,
+		}),
+		completion: Object.freeze({
+			outcome_min: 0.7,
+			defect_max: 0.5,
+			verdict_min_confidence: 0.7,
+			verdict_min_margin: 0.15,
 		}),
 	}),
 

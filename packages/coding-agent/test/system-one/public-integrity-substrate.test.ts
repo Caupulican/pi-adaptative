@@ -364,7 +364,7 @@ describe("Public Execution-Integrity Substrate (PI-001 to PI-030)", () => {
 			evaluate: async () => ({
 				model: "jev-1.13.0",
 				answers: {
-					implementation_matches_goal: { noul: 0.99 },
+					outcomes_achieved: { noul: 0.99 },
 					completion_verdict: { choice: "complete", confidence: 0.99, probabilities: { complete: 0.99 } },
 				},
 				latency_ms: 10,
@@ -422,7 +422,7 @@ describe("Public Execution-Integrity Substrate (PI-001 to PI-030)", () => {
 				return {
 					model: "jev-1.13.0",
 					answers: {
-						implementation_matches_goal: { noul: 0.96 },
+						outcomes_achieved: { noul: 0.96 },
 						root_cause_addressed: { noul: 0.95 },
 						required_behavior_unverified: { noul: 0.01 },
 						material_claim_unsupported: { noul: 0.01 },

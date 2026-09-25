@@ -1,5 +1,5 @@
 import type { ExecutionState, ToolImpact } from "./types.ts";
-import type { WorkDiff } from "./work-diff.ts";
+import { hasRepositoryOutcome, type WorkDiff } from "./work-diff.ts";
 
 /**
  * Secret redaction patterns.
@@ -386,25 +386,55 @@ export class StateProjector {
 				severity: r.severity,
 			}));
 
+		const observationsById = new Map(state.observations.map((observation) => [observation.id, observation]));
+		const observationView = (id: string) => {
+			const observation = observationsById.get(id) ?? observationsById.get(`OBS-${id}`);
+			return observation
+				? { id: observation.id, text: this.redactText(observation.text), trust: observation.source.trust }
+				: undefined;
+		};
+		// Each required outcome with what shows it: the harness's own checks first, then the evidence
+		// the criterion cites. This, not a repository diff, is what completion is judged on.
+		const outcomeEvidence = state.objective.acceptance_criteria.map((criterion) => {
+			const checks = state.verification.filter((run) => run.covers_acceptance_ids?.includes(criterion.id));
+			return {
+				criterion_id: criterion.id,
+				text: this.redactText(criterion.text),
+				required: criterion.required,
+				status: criterion.status,
+				checks: checks.map((run) => ({
+					command: run.command ?? null,
+					status: run.status,
+					observed: (run.observation_ids ?? []).map(observationView).filter((view) => view !== undefined),
+				})),
+				evidence: criterion.evidence_ids.map(observationView).filter((view) => view !== undefined),
+			};
+		});
+
 		return {
 			objective: {
 				normalized_goal: this.redactText(state.objective.normalized_goal),
 				non_goals: state.objective.non_goals.map((ng) => this.redactText(ng)),
 			},
 			acceptance_matrix: acceptanceMatrix,
+			outcome_evidence: outcomeEvidence,
 			claim_matrix: claimMatrix,
 			verification_matrix: verificationMatrix,
-			// The work itself when the repository can show it; the change manifest alone is paths and
-			// hashes, which leaves "does the diff satisfy the goal" unanswerable.
-			final_diff: work
+			// The repository work only when the goal changed the repository; a machine, service or answer
+			// outcome has no diff to judge, and asking about one misjudges it.
+			...(hasRepositoryOutcome(work, state.changes.length)
 				? {
-						base_commit: work.base,
-						patch: this.redactText(work.patch),
-						...(work.omittedChars > 0 ? { patch_truncated_chars: work.omittedChars } : {}),
-						new_untracked_files: work.untracked,
-						recorded_changes: changesManifest,
+						final_diff: work
+							? {
+									base_commit: work.base,
+									patch: this.redactText(work.patch),
+									...(work.omittedChars > 0 ? { patch_truncated_chars: work.omittedChars } : {}),
+									new_untracked_files: work.untracked,
+									recorded_changes: changesManifest,
+								}
+							: changesManifest,
 					}
-				: changesManifest,
+				: {}),
 			// What the acceptance matrix's evidence ids refer to.
 			evidence: state.observations.map((observation) => ({
 				id: observation.id,

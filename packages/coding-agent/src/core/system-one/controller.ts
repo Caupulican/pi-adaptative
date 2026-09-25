@@ -47,7 +47,7 @@ import { StateProjector } from "./projector.ts";
 import { doubtReason, type SemanticEvaluationObserver } from "./semantic-evaluation-ledger.ts";
 import type { ExecutionState, ToolImpact, ValidationDecision, ValidationStage } from "./types.ts";
 import { CONSULT_GROUNDING_QUESTIONS, RESERVED_DECISION_KINDS, unsettledQuestionId } from "./unsettled-ladder.ts";
-import type { WorkDiff } from "./work-diff.ts";
+import { hasRepositoryOutcome, type WorkDiff } from "./work-diff.ts";
 
 /** The four questions that only mean something when written rules were supplied. */
 /** Asked only when written rules exist. `full_handoff` is not among them: it governs owner questions too. */
@@ -1061,6 +1061,20 @@ export class SystemOneController {
 	 * R-060: Blocked external dependencies route to blocked_external.
 	 * PI-021: External completion gate runs before terminal transition.
 	 */
+	/**
+	 * What every completion judgment reads: the cold completion projection (outcome evidence per
+	 * criterion; the repository diff only when the goal changed the repository) and whether it did.
+	 */
+	completionView(): { view: Record<string, unknown>; repositoryOutcome: boolean } {
+		this.syncCanonicalTruth();
+		const work = this.workDiffSource?.();
+		const snapshot = this.store.snapshot();
+		return {
+			view: this.projector.completion(snapshot, work),
+			repositoryOutcome: hasRepositoryOutcome(work, snapshot.changes.length),
+		};
+	}
+
 	async executeCompletionTransaction(
 		isBugFix = false,
 		options?: {
@@ -1083,14 +1097,25 @@ export class SystemOneController {
 			};
 		}
 
-		// 2. Cold primary completion pack (R-048, R-049)
+		// 2. Cold primary completion pack (R-048, R-049). Code-only questions are asked only when the goal
+		// changed the repository; a machine, service or answer outcome is judged on its outcome evidence.
 		const work = this.workDiffSource?.();
+		const repositoryOutcome = hasRepositoryOutcome(work, this.store.snapshot().changes.length);
+		const primaryOmit = [
+			...(repositoryOutcome && isBugFix ? [] : ["root_cause_addressed"]),
+			...(repositoryOutcome ? [] : ["out_of_scope_change_present", "duplicate_responsibility_introduced"]),
+		];
 		const primaryProjection = this.projector.completion(this.store.snapshot(), work);
-		const primaryStage = await this.runStageValidation("completion", primaryProjection);
+		const primaryStage = await this.runStageValidation("completion", primaryProjection, "read_only", primaryOmit);
 
 		// 3. Cold challenge pack (R-058)
 		const challengeProjection = this.projector.completionChallenge(this.store.snapshot(), work);
-		const challengeStage = await this.runStageValidation("completion_challenge", challengeProjection);
+		const challengeStage = await this.runStageValidation(
+			"completion_challenge",
+			challengeProjection,
+			"read_only",
+			repositoryOutcome ? [] : ["plausible_regression_not_tested"],
+		);
 
 		// 4. Policy engine final verdict
 		const finalVerdict = decideFinalCompletion({
@@ -1098,6 +1123,7 @@ export class SystemOneController {
 			primaryAnswers: primaryStage.answers,
 			challengeAnswers: challengeStage.answers,
 			isBugFix,
+			repositoryOutcome,
 			config: this.config,
 		});
 

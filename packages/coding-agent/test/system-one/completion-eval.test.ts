@@ -8,7 +8,7 @@ import {
 } from "../../src/core/system-one/evals/completion-eval.ts";
 
 const POSITIVE = {
-	implementation_matches_goal: { noul: 0.97 },
+	outcomes_achieved: { noul: 0.97 },
 	root_cause_addressed: { noul: 0.97 },
 	required_behavior_unverified: { noul: 0.02 },
 	material_claim_unsupported: { noul: 0.02 },
@@ -33,7 +33,7 @@ function judgingAdapter(seen: Array<Record<string, unknown>>): JevAdapter {
 				answers: gap
 					? {
 							...POSITIVE,
-							implementation_matches_goal: { noul: 0.1 },
+							outcomes_achieved: { noul: 0.1 },
 							completion_verdict: { choice: "rework", confidence: 0.9, probabilities: { rework: 0.9 } },
 						}
 					: POSITIVE,
@@ -53,9 +53,10 @@ describe("completion reliability evaluation harness", () => {
 		expect(repositoryDiff.patch).toContain("parseDuration");
 		seen.length = 0;
 		await evaluateCompletionOnce(machine, judgingAdapter(seen));
-		const machineDiff = seen[0]?.final_diff as { patch?: string };
-		expect(machineDiff.patch ?? "").toBe("");
-		// The goal's requirements and the agent's evidence reach the judge.
+		// A machine outcome has no diff to judge; its outcome evidence carries the harness's own checks.
+		expect(seen[0]).not.toHaveProperty("final_diff");
+		const outcomes = seen[0]?.outcome_evidence as Array<{ text: string; checks: Array<{ status: string }> }>;
+		expect(outcomes.map((outcome) => outcome.checks.map((check) => check.status))).toEqual([["passed"], ["passed"]]);
 		expect(JSON.stringify(seen[0])).toContain("Downloaded Ollama models under ~/.ollama are deleted");
 	});
 

@@ -115,6 +115,8 @@ export interface ObjectiveExecutionControllerDeps {
 	systemOne?: {
 		adapter?: { provenance?: string };
 		snapshot?(): ExecutionState;
+		/** The completion projection every completion judgment reads (SystemOneController.completionView). */
+		completionView?(): { view: Record<string, unknown>; repositoryOutcome: boolean };
 		evaluateObjectiveRoute?(objectiveId: string, options?: { signal?: AbortSignal }): Promise<SemanticRouteJudgments>;
 		executeCompletionTransaction?(
 			isBugFix: boolean,
@@ -1455,6 +1457,12 @@ export class ObjectiveExecutionController {
 					});
 
 					if (evalResult.verdict === "complete") {
+						// JEV-025/JEV-026 read the same completion view the goal tool's completion judges: the
+						// outcome evidence per criterion, the diff only when the repository changed.
+						const completion = this.deps.systemOne?.completionView?.();
+						const completionEvidence = completion
+							? { ...completion.view, repository_outcome: completion.repositoryOutcome }
+							: {};
 						// 3. PH-152, FC-063: JEV-025 primary semantic completion (proof-bearing)
 						if (this.deps.steeringPlane) {
 							const j25 = await judgeTransition(
@@ -1462,6 +1470,7 @@ export class ObjectiveExecutionController {
 								"JEV-025",
 								{
 									...canonicalProofState,
+									...completionEvidence,
 									mechanicalVerdict: evalResult.verdict,
 									evalResultDetails: evalResult,
 									bugFix,
@@ -1498,6 +1507,7 @@ export class ObjectiveExecutionController {
 								coldChallenge: true,
 								verificationMatrix,
 								diffDigest,
+								...completionEvidence,
 							};
 							const j26 = await judgeTransition(this.deps.steeringPlane, "JEV-026", coldProofState, {
 								objectiveId,

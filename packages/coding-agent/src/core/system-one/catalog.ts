@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ValidationStage } from "./types.ts";
 
-export const SYSTEM_ONE_CATALOG_VERSION = "1.0.0";
+export const SYSTEM_ONE_CATALOG_VERSION = "1.1.0";
 export const SYSTEM_ONE_PINNED_MODEL = "jev-1.13.0";
 export const SYSTEM_ONE_PREVIEW_MODEL = "jev-preview";
 
@@ -373,10 +373,10 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 	}),
 
 	completion: Object.freeze({
-		implementation_matches_goal: Object.freeze({
+		outcomes_achieved: Object.freeze({
 			type: "boolean",
 			instructions:
-				"Does `final_diff` satisfy `objective.normalized_goal` as constrained by every required acceptance criterion?",
+				"Does `outcome_evidence` show every required outcome in `acceptance_matrix` achieved, as `objective.normalized_goal` asks?",
 		}),
 		root_cause_addressed: Object.freeze({
 			type: "boolean",
@@ -386,7 +386,7 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 		required_behavior_unverified: Object.freeze({
 			type: "boolean",
 			instructions:
-				"Is any required behavior in `acceptance_matrix` still unverified by deterministic results or fresh semantic evidence?",
+				"Is any required outcome in `acceptance_matrix` still not shown by `outcome_evidence` (a passing check, a verified tool, test or file result, or a sourced answer)?",
 		}),
 		material_claim_unsupported: Object.freeze({
 			type: "boolean",
@@ -407,11 +407,10 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 			type: "choice",
 			instructions: "Given only the evidence-backed completion state, what should the harness do?",
 			criteria: Object.freeze({
-				complete: "All required outcomes are implemented and verified; no material unresolved issue remains.",
-				retrieve_more: "The implementation may be correct but evidence is insufficient for completion.",
-				verify_more: "Additional build/test/static/semantic verification is necessary.",
-				rework:
-					"The implementation materially misses a required behavior, root cause, scope, or architecture obligation.",
+				complete: "Every required outcome is achieved and shown by evidence; nothing material remains.",
+				retrieve_more: "The outcomes may be achieved, but the evidence does not show it yet.",
+				verify_more: "A required outcome still needs a check, test or observation that has not been run.",
+				rework: "A required outcome is missing, wrong, or out of the requested scope.",
 				blocked_external:
 					"A required proof or outcome depends on unavailable external access, information, or authorization.",
 			}),
@@ -427,7 +426,7 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 		hidden_assumption: Object.freeze({
 			type: "boolean",
 			instructions:
-				"Does the claimed completion depend on a material assumption not established by the evidence package?",
+				"Does the claimed completion depend on a material assumption that `outcome_evidence` does not establish?",
 		}),
 		plausible_regression_not_tested: Object.freeze({
 			type: "boolean",

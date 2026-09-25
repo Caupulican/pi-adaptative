@@ -49,7 +49,7 @@ describe("System One Completion Gate", () => {
 			evaluate: async () => ({
 				model: "jev-1.13.0",
 				answers: {
-					implementation_matches_goal: { noul: 0.99 },
+					outcomes_achieved: { noul: 0.99 },
 					completion_verdict: { choice: "complete", confidence: 0.99, probabilities: { complete: 0.99 } },
 				},
 				latency_ms: 10,
@@ -90,7 +90,7 @@ describe("System One Completion Gate", () => {
 			evaluate: async () => ({
 				model: "jev-1.13.0",
 				answers: {
-					implementation_matches_goal: { noul: 0.99 },
+					outcomes_achieved: { noul: 0.99 },
 					completion_verdict: { choice: "complete", confidence: 0.99, probabilities: { complete: 0.99 } },
 				},
 				latency_ms: 10,
@@ -138,7 +138,7 @@ describe("System One Completion Gate", () => {
 				return {
 					model: "jev-1.13.0",
 					answers: {
-						implementation_matches_goal: { noul: 0.95 },
+						outcomes_achieved: { noul: 0.95 },
 						root_cause_addressed: { noul: 0.1 }, // Fails root cause gate
 						required_behavior_unverified: { noul: 0.02 },
 						material_claim_unsupported: { noul: 0.02 },
@@ -155,6 +155,13 @@ describe("System One Completion Gate", () => {
 			store,
 			adapter: fauxAdapter,
 		});
+		// Root cause is judged on the repository change a fix made.
+		controller.setWorkDiffSource(() => ({
+			base: "base",
+			patch: "--- a/src/account.ts\n+++ b/src/account.ts\n@@\n-return account.name;\n+return account?.name ?? '';\n",
+			omittedChars: 0,
+			untracked: [],
+		}));
 
 		const result = await controller.executeCompletionTransaction(true);
 		expect(result.verdict).toBe("rework");
@@ -191,7 +198,7 @@ describe("System One Completion Gate", () => {
 				return {
 					model: "jev-1.13.0",
 					answers: {
-						implementation_matches_goal: { noul: 0.96 },
+						outcomes_achieved: { noul: 0.96 },
 						root_cause_addressed: { noul: 0.95 },
 						required_behavior_unverified: { noul: 0.01 },
 						material_claim_unsupported: { noul: 0.01 },
@@ -242,7 +249,7 @@ describe("System One Completion Gate", () => {
 				return {
 					model: "jev-1.13.0",
 					answers: {
-						implementation_matches_goal: { noul: 0.96 },
+						outcomes_achieved: { noul: 0.96 },
 						root_cause_addressed: { noul: 0.95 },
 						required_behavior_unverified: { noul: 0.01 },
 						material_claim_unsupported: { noul: 0.01 },

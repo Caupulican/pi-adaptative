@@ -5,6 +5,7 @@
  *
  * It spends System One evaluations (two per attempt), so the default is 5 repeats per case.
  */
+import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { AuthStorage } from "../../auth-storage.ts";
 import { TypeSafeReviewer } from "../../review/typesafe-reviewer.ts";
@@ -12,7 +13,12 @@ import { SettingsManager } from "../../settings-manager.ts";
 import { systemOneAccessFromSession } from "../access.ts";
 import { SystemOneJevAdapter } from "../adapter.ts";
 import { createSystemOneConfig } from "../config.ts";
-import { COMPLETION_EVAL_CASES, type CompletionEvalSummary, runCompletionEval } from "./completion-eval.ts";
+import {
+	COMPLETION_EVAL_CASES,
+	COMPLETION_EVAL_HELDOUT_CASES,
+	type CompletionEvalSummary,
+	runCompletionEval,
+} from "./completion-eval.ts";
 
 /** Release thresholds (outcome-completion plan, WO-9). */
 export const COMPLETION_EVAL_THRESHOLDS = Object.freeze({ doneAccepted: 0.95, incompleteRejected: 1 });
@@ -48,11 +54,16 @@ export function formatCompletionEval(summary: CompletionEvalSummary): string {
 async function main(argv: string[]): Promise<number> {
 	const repeatsIndex = argv.indexOf("--repeats");
 	const repeats = repeatsIndex >= 0 ? Number(argv[repeatsIndex + 1]) : 5;
+	const setIndex = argv.indexOf("--set");
+	const pool =
+		setIndex >= 0 && argv[setIndex + 1] === "heldout" ? COMPLETION_EVAL_HELDOUT_CASES : COMPLETION_EVAL_CASES;
 	const caseIndex = argv.indexOf("--case");
 	const cases =
 		caseIndex >= 0
-			? COMPLETION_EVAL_CASES.filter((testCase) => testCase.id === argv[caseIndex + 1])
-			: COMPLETION_EVAL_CASES;
+			? [...COMPLETION_EVAL_CASES, ...COMPLETION_EVAL_HELDOUT_CASES].filter(
+					(testCase) => testCase.id === argv[caseIndex + 1],
+				)
+			: pool;
 	const settings = SettingsManager.create(process.cwd());
 	const access = systemOneAccessFromSession(settings, AuthStorage.create());
 	if ((await access.resolve()).kind !== "ready") {
@@ -69,6 +80,9 @@ async function main(argv: string[]): Promise<number> {
 		onRun: (run) => process.stderr.write(`${run.caseId}: ${run.verdicts.join(", ")}\n`),
 	});
 	process.stdout.write(`${formatCompletionEval(summary)}\n`);
+	const dumpIndex = argv.indexOf("--dump");
+	if (dumpIndex >= 0)
+		writeFileSync(argv[dumpIndex + 1] ?? "completion-eval.json", `${JSON.stringify(summary, null, 2)}\n`);
 	const passed =
 		summary.doneAccepted >= COMPLETION_EVAL_THRESHOLDS.doneAccepted &&
 		summary.incompleteRejected >= COMPLETION_EVAL_THRESHOLDS.incompleteRejected;

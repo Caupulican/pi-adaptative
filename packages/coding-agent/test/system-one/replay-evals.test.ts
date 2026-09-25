@@ -51,7 +51,7 @@ describe("System One Replay Evaluation Harness", () => {
 					return {
 						model: "jev-1.13.0",
 						answers: {
-							implementation_matches_goal: { noul: 0.96 },
+							outcomes_achieved: { noul: 0.96 },
 							root_cause_addressed: { noul: 0.95 },
 							required_behavior_unverified: { noul: 0.01 },
 							material_claim_unsupported: { noul: 0.01 },
@@ -66,7 +66,7 @@ describe("System One Replay Evaluation Harness", () => {
 					return {
 						model: "jev-1.13.0",
 						answers: {
-							implementation_matches_goal: { noul: 0.6 },
+							outcomes_achieved: { noul: 0.6 },
 							root_cause_addressed: { noul: 0.5 },
 							required_behavior_unverified: { noul: 0.85 }, // Catches unverified
 							material_claim_unsupported: { noul: 0.9 }, // Catches unsupported claim

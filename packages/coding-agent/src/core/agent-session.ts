@@ -2736,6 +2736,7 @@ export class AgentSession {
 										return systemOneController.adapter;
 									},
 									snapshot: () => systemOneController.store.snapshot(),
+									completionView: () => systemOneController.completionView(),
 									executeCompletionTransaction: (isBugFix, options) =>
 										this._systemOneController!.executeCompletionTransaction(isBugFix, options),
 									commitTerminalCompletion: (input, options) =>

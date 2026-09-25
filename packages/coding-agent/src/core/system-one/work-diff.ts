@@ -18,6 +18,15 @@ export interface WorkDiff {
 	readonly untracked: readonly string[];
 }
 
+/**
+ * Whether the goal changed the repository: only then do the code-only completion questions (root
+ * cause, scope of the diff, duplicated responsibility, untested regression paths) apply. A goal that
+ * changed the machine, a service, or delivered an answer is judged on its outcome evidence alone.
+ */
+export function hasRepositoryOutcome(work: WorkDiff | undefined, recordedChanges = 0): boolean {
+	return recordedChanges > 0 || (work !== undefined && (work.patch.trim().length > 0 || work.untracked.length > 0));
+}
+
 /** Enough for any focused change; larger work is judged on its first part and the file list. */
 const PATCH_LIMIT = 24_000;
 const UNTRACKED_LIMIT = 50;

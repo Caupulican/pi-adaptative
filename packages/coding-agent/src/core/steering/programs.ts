@@ -58,9 +58,14 @@ function compileCandidateFitChoices(
 	return options;
 }
 
-function buildDecisionsFromPack(stage: ValidationStage, decisions: DecisionDefinition[]): void {
+function buildDecisionsFromPack(
+	stage: ValidationStage,
+	decisions: DecisionDefinition[],
+	omit: readonly string[] = [],
+): void {
 	const pack = getQuestionPack(stage);
 	for (const [id, question] of Object.entries(pack)) {
+		if (omit.includes(id)) continue;
 		if (question.type === "choice") {
 			const options: Record<string, ChoiceOption> = {};
 			if (question.criteria && !Array.isArray(question.criteria)) {
@@ -500,13 +505,24 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 			break;
 		}
 
+		// Completion asks what the goal promised: the code-only questions only when it changed the
+		// repository (`repository_outcome`, from SystemOneController.completionView), root cause only for a fix.
 		case "JEV-025": {
-			buildDecisionsFromPack("completion", decisions);
+			const repository = s.repository_outcome !== false;
+			const bugFix = s.bugFix === true || s.isBugFix === true;
+			buildDecisionsFromPack("completion", decisions, [
+				...(repository && bugFix ? [] : ["root_cause_addressed"]),
+				...(repository ? [] : ["out_of_scope_change_present", "duplicate_responsibility_introduced"]),
+			]);
 			break;
 		}
 
 		case "JEV-026": {
-			buildDecisionsFromPack("completion_challenge", decisions);
+			buildDecisionsFromPack(
+				"completion_challenge",
+				decisions,
+				s.repository_outcome === false ? ["plausible_regression_not_tested"] : [],
+			);
 			break;
 		}
 

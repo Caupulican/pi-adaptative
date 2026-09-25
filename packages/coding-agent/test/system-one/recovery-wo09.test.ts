@@ -89,7 +89,7 @@ describe("System One recovery WO-09 production paths", () => {
 			adapter: {
 				evaluate: async () => ({
 					model: "jev-1.13.0",
-					answers: { implementation_matches_goal: { noul: 0.99 } },
+					answers: { outcomes_achieved: { noul: 0.99 } },
 					latency_ms: 1,
 				}),
 			},

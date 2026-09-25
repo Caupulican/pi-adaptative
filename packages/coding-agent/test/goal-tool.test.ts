@@ -526,7 +526,7 @@ describe("goal tool", () => {
 					return {
 						model: "jev-1.13.0",
 						answers: {
-							implementation_matches_goal: { noul: 0.99 },
+							outcomes_achieved: { noul: 0.99 },
 							root_cause_addressed: { noul: 0.99 },
 							required_behavior_unverified: { noul: 0.01 },
 							material_claim_unsupported: { noul: 0.01 },

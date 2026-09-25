@@ -276,6 +276,203 @@ export const COMPLETION_EVAL_CASES: readonly CompletionEvalCase[] = [
 	},
 ];
 
+const FORMAT_BASE = {
+	"src/format.ts": "export function formatBytes(bytes: number): string {\n\treturn bytes + ' B';\n}\n",
+	"src/ui/status.ts":
+		"import { formatBytes } from '../format.ts';\nexport const label = (size: number) => formatBytes(size);\n",
+	"src/ui/files.ts":
+		"import { formatBytes } from '../format.ts';\nexport const row = (size: number) => formatBytes(size);\n",
+};
+
+/**
+ * Held-out goals: never used to choose a question or a threshold. They measure whether completion
+ * generalises to new wording and new domains (`npm run eval:completion -- --set heldout`).
+ */
+export const COMPLETION_EVAL_HELDOUT_CASES: readonly CompletionEvalCase[] = [
+	{
+		id: "heldout-install-done",
+		kind: "machine",
+		goal: "Install ripgrep so the rg command is available.",
+		requirements: ["ripgrep is installed and rg is on the PATH"],
+		evidence: [{ kind: "tool", summary: "apt-get install ripgrep finished; `rg --version` prints ripgrep 14.1.0." }],
+		checks: [{ command: "test -e {machine}/usr/bin/rg" }],
+		machine: { "usr/bin/rg": "binary" },
+		done: true,
+	},
+	{
+		id: "heldout-install-missing",
+		kind: "machine",
+		goal: "Install ripgrep so the rg command is available.",
+		requirements: ["ripgrep is installed and rg is on the PATH"],
+		evidence: [{ kind: "tool", summary: "apt-get install ripgrep was run." }],
+		checks: [{ command: "test -e {machine}/usr/bin/rg" }],
+		done: false,
+		plantedGap: "not actually installed",
+	},
+	{
+		id: "heldout-logs-done",
+		kind: "machine",
+		goal: "Delete pi session logs older than 30 days, keeping the recent ones.",
+		requirements: ["Logs older than 30 days are deleted", "Logs from the last 30 days are kept"],
+		evidence: [
+			{ kind: "tool", summary: "Removed 14 logs dated before 2026-08-26; `ls logs` shows none older." },
+			{ kind: "tool", summary: "`ls logs` still lists the 9 logs from September." },
+		],
+		checks: [
+			{ command: "test ! -e {machine}/logs/2026-07-01.log" },
+			{ command: "test -e {machine}/logs/2026-09-20.log" },
+		],
+		machine: { "logs/2026-09-20.log": "recent" },
+		done: true,
+	},
+	{
+		id: "heldout-logs-deleted-all",
+		kind: "machine",
+		goal: "Delete pi session logs older than 30 days, keeping the recent ones.",
+		requirements: ["Logs older than 30 days are deleted", "Logs from the last 30 days are kept"],
+		evidence: [
+			{ kind: "tool", summary: "Removed the old logs with `find logs -mtime +30 -delete`." },
+			{ kind: "tool", summary: "Recent logs kept." },
+		],
+		checks: [
+			{ command: "test ! -e {machine}/logs/2026-07-01.log" },
+			{ command: "test -e {machine}/logs/2026-09-20.log" },
+		],
+		done: false,
+		plantedGap: "recent logs deleted too",
+	},
+	{
+		id: "heldout-rename-done",
+		kind: "repository",
+		goal: "Rename the helper formatBytes to formatByteSize everywhere it is used.",
+		requirements: [
+			"formatBytes is renamed to formatByteSize in its definition",
+			"Every call site uses formatByteSize",
+		],
+		evidence: [
+			{ kind: "tool", summary: "Renamed the export in src/format.ts." },
+			{ kind: "tool", summary: "`grep -rn formatBytes src` prints nothing; both call sites use formatByteSize." },
+		],
+		repositoryBase: FORMAT_BASE,
+		repositoryChanges: {
+			"src/format.ts": "export function formatByteSize(bytes: number): string {\n\treturn bytes + ' B';\n}\n",
+			"src/ui/status.ts":
+				"import { formatByteSize } from '../format.ts';\nexport const label = (size: number) => formatByteSize(size);\n",
+			"src/ui/files.ts":
+				"import { formatByteSize } from '../format.ts';\nexport const row = (size: number) => formatByteSize(size);\n",
+		},
+		done: true,
+	},
+	{
+		id: "heldout-rename-call-site-left",
+		kind: "repository",
+		goal: "Rename the helper formatBytes to formatByteSize everywhere it is used.",
+		requirements: [
+			"formatBytes is renamed to formatByteSize in its definition",
+			"Every call site uses formatByteSize",
+		],
+		evidence: [
+			{ kind: "tool", summary: "Renamed the export in src/format.ts." },
+			{ kind: "tool", summary: "`grep -rn formatBytes src` still prints src/ui/files.ts:1 and src/ui/files.ts:2." },
+		],
+		repositoryBase: FORMAT_BASE,
+		repositoryChanges: {
+			"src/format.ts": "export function formatByteSize(bytes: number): string {\n\treturn bytes + ' B';\n}\n",
+			"src/ui/status.ts":
+				"import { formatByteSize } from '../format.ts';\nexport const label = (size: number) => formatByteSize(size);\n",
+		},
+		done: false,
+		plantedGap: "one call site left",
+	},
+	{
+		id: "heldout-issue-done",
+		kind: "remote",
+		goal: "Close issue #412 with a comment that links the fix commit abc1234.",
+		requirements: ["Issue #412 is closed", "A comment on #412 links commit abc1234"],
+		evidence: [
+			{ kind: "tool", summary: "`gh issue view 412 --json state` returns CLOSED." },
+			{ kind: "tool", summary: "The last comment on #412 reads 'Fixed in abc1234'." },
+		],
+		done: true,
+	},
+	{
+		id: "heldout-issue-still-open",
+		kind: "remote",
+		goal: "Close issue #412 with a comment that links the fix commit abc1234.",
+		requirements: ["Issue #412 is closed", "A comment on #412 links commit abc1234"],
+		evidence: [
+			{
+				kind: "tool",
+				summary:
+					"`gh issue view 412 --json state` still returns OPEN after `gh issue close` reported a permissions error.",
+			},
+			{ kind: "tool", summary: "The last comment on #412 reads 'Fixed in abc1234'." },
+		],
+		done: false,
+		plantedGap: "issue not closed",
+	},
+	{
+		id: "heldout-port-answer-done",
+		kind: "information",
+		goal: "Tell me which process listens on port 5173 and what started it.",
+		requirements: ["Name the process listening on 5173", "Say what started it"],
+		evidence: [
+			{ kind: "tool", summary: "`ss -ltnp` shows node (pid 4410) listening on 127.0.0.1:5173." },
+			{ kind: "tool", summary: "`ps -o args= -p 4410` shows `vite` launched by `npm run dev` in ~/app." },
+		],
+		done: true,
+	},
+	{
+		id: "heldout-port-answer-guessed",
+		kind: "information",
+		goal: "Tell me which process listens on port 5173 and what started it.",
+		requirements: ["Name the process listening on 5173", "Say what started it"],
+		evidence: [
+			{ kind: "finding", summary: "Port 5173 is the Vite default, so it is probably a Vite dev server." },
+			{ kind: "finding", summary: "It was most likely started by an npm script." },
+		],
+		done: false,
+		plantedGap: "guessed from the port number",
+	},
+	{
+		id: "heldout-staging-done",
+		kind: "mixed",
+		goal: "Point the app at the staging API: set API_URL in .env.staging and export it in ~/.bashrc.",
+		requirements: [".env.staging sets API_URL to the staging URL", "~/.bashrc exports API_URL"],
+		evidence: [
+			{
+				kind: "file",
+				summary: ".env.staging now contains API_URL=https://staging.example.test.",
+				uri: ".env.staging",
+			},
+			{ kind: "tool", summary: "`grep API_URL ~/.bashrc` prints export API_URL=https://staging.example.test." },
+		],
+		checks: [undefined, { command: "grep -c 'export API_URL' {machine}/home/.bashrc" }],
+		machine: { "home/.bashrc": "export API_URL=https://staging.example.test\n" },
+		repositoryChanges: { ".env.staging": "API_URL=https://staging.example.test\n" },
+		done: true,
+	},
+	{
+		id: "heldout-staging-bashrc-missing",
+		kind: "mixed",
+		goal: "Point the app at the staging API: set API_URL in .env.staging and export it in ~/.bashrc.",
+		requirements: [".env.staging sets API_URL to the staging URL", "~/.bashrc exports API_URL"],
+		evidence: [
+			{
+				kind: "file",
+				summary: ".env.staging now contains API_URL=https://staging.example.test.",
+				uri: ".env.staging",
+			},
+			{ kind: "tool", summary: "Appended the export to ~/.bashrc." },
+		],
+		checks: [undefined, { command: "grep -c 'export API_URL' {machine}/home/.bashrc" }],
+		machine: { "home/.bashrc": "alias ll='ls -l'\n" },
+		repositoryChanges: { ".env.staging": "API_URL=https://staging.example.test\n" },
+		done: false,
+		plantedGap: "bashrc export missing",
+	},
+];
+
 export interface CompletionEvalRun {
 	caseId: string;
 	kind: OutcomeKind;
@@ -283,6 +480,8 @@ export interface CompletionEvalRun {
 	verdicts: string[];
 	/** The failed gate reasons of each non-complete verdict, in order. */
 	reasons: string[][];
+	/** System One's raw answers per attempt (absent when a check refused before it was asked). */
+	answers?: Array<Record<string, unknown> | undefined>;
 }
 
 export interface CompletionEvalSummary {
@@ -368,7 +567,7 @@ export function buildEvalGoal(testCase: CompletionEvalCase, now: string, machine
 export async function evaluateCompletionOnce(
 	testCase: CompletionEvalCase,
 	adapter: JevAdapter,
-): Promise<{ verdict: string; reasons: string[] }> {
+): Promise<{ verdict: string; reasons: string[]; answers?: Record<string, unknown> }> {
 	const now = new Date().toISOString();
 	const machine = mkdtempSync(join(tmpdir(), "pi-completion-eval-machine-"));
 	for (const [path, content] of Object.entries(testCase.machine ?? {})) {
@@ -399,7 +598,9 @@ export async function evaluateCompletionOnce(
 		controller.setTruthSource(() => projectCanonicalTruth({ goal, currentRevision: revision }));
 		controller.setWorkDiffSource(() => readWorkDiff(cwd, goal.createdAt));
 		const verdict = await controller.executeCompletionTransaction(false, { persistTerminal: false });
-		return { verdict: verdict.verdict, reasons: verdict.failed_gates.map((gate) => gate.reason) };
+		// System One's raw answers for every question it was asked: what calibration is measured on.
+		const answers = Object.assign({}, ...store.snapshot().decisions.map((decision) => decision.answers));
+		return { verdict: verdict.verdict, reasons: verdict.failed_gates.map((gate) => gate.reason), answers };
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 		rmSync(machine, { recursive: true, force: true });
@@ -426,6 +627,7 @@ export async function runCompletionEval(
 				const result = await evaluateCompletionOnce(testCase, adapter);
 				run.verdicts.push(result.verdict);
 				run.reasons.push(result.reasons);
+				run.answers = [...(run.answers ?? []), result.answers];
 			} catch (error) {
 				run.verdicts.push(`error: ${error instanceof Error ? error.message : String(error)}`);
 				run.reasons.push([]);

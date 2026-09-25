@@ -496,19 +496,181 @@ export function evaluateDeterministicCompletionGates(state: ExecutionState): {
 }
 
 /**
- * A completion check holds when its answer clears the ambiguous band's edge in the direction it
- * needs: at least `ambiguous_high` for a yes the goal needs, at most `ambiguous_low` for a defect.
- * That is where live System One separates finished work from unfinished (measured on one goal's real
- * diff against a broken and an unrelated one: the goal match 0.87-0.88 vs 0.30-0.33 and 0.06, every
- * defect at most 0.28 vs up to 0.74). The hard-pass edges (0.93, 0.07) lie beyond what System One
- * gives finished work, so requiring all ten at once rejected correct work. A missing answer never holds.
+ * A completion check holds when its answer is on the right side of the measured completion bound
+ * (SystemOneThresholds.completion): at least `outcome_min` for an outcome the goal needs, at most
+ * `defect_max` for a defect, so a defect fails only when System One judges it more likely present
+ * than not. The earlier edges (a defect failed above 0.30, inside System One's "unsure, leans no"
+ * band) rejected done goals whose defect scores sat at 0.29-0.34 on every repeat. A missing answer
+ * never holds.
  */
 function completionCheckHolds(answer: unknown, direction: NoulDirection, thresholds: SystemOneThresholds): boolean {
 	const read = noulFromAnswer(answer, direction === "required_false");
 	const probability = typeof read === "boolean" ? (read ? 1 : 0) : read;
 	return direction === "required_true"
-		? probability >= thresholds.noul_required_true.ambiguous_high
-		: probability <= thresholds.noul_required_false.ambiguous_low;
+		? probability >= thresholds.completion.outcome_min
+		: probability <= thresholds.completion.defect_max;
+}
+
+/**
+ * One completion question pack's failures under the measured completion thresholds. The goal
+ * tool's completion transaction and the objective loop's JEV-025/JEV-026 both judge through this,
+ * so one set of questions has one set of bounds, one applicability rule and one set of reasons. The
+ * code-only questions (root cause, scope of the diff, duplicated responsibility, untested regression
+ * paths) apply only when the goal changed the repository; an unasked question is not a failure.
+ */
+export function completionPackFailures(
+	stage: "completion" | "completion_challenge",
+	answers: Record<string, unknown>,
+	options: { isBugFix: boolean; repositoryOutcome?: boolean; config?: SystemOneConfig },
+): CompletionRejectionDetail[] {
+	// 2. Primary completion pack checks. The code-only questions (root cause, scope of the diff,
+	// duplicated responsibility, untested regression paths) apply only when the goal changed the
+	// repository; the controller does not ask them otherwise, and an unasked question is not a failure.
+	const failedGates: CompletionRejectionDetail[] = [];
+	const config = options.config ?? DEFAULT_SYSTEM_ONE_CONFIG;
+	const repositoryOutcome = options.repositoryOutcome ?? true;
+	const primaryAnswers = stage === "completion" ? answers : {};
+	const challengeAnswers = stage === "completion_challenge" ? answers : {};
+	const check = (
+		answer: unknown,
+		direction: NoulDirection,
+		id: string,
+		finding: string,
+		requiredNextProof: string,
+	): void => {
+		if (completionCheckHolds(answer, direction, config.thresholds)) return;
+		const read = noulFromAnswer(answer, direction === "required_false");
+		const probability = typeof read === "boolean" ? (read ? 1 : 0) : read;
+		const bound =
+			direction === "required_true"
+				? `needs at least ${config.thresholds.completion.outcome_min.toFixed(2)}`
+				: `needs at most ${config.thresholds.completion.defect_max.toFixed(2)}`;
+		failedGates.push({
+			id,
+			reason:
+				answer === undefined
+					? `${finding} (System One gave no answer).`
+					: `${finding} (System One: ${probability.toFixed(2)}, ${bound}).`,
+			required_next_proof: requiredNextProof,
+		});
+	};
+
+	if (stage === "completion") {
+		check(
+			primaryAnswers.outcomes_achieved,
+			"required_true",
+			"JEV-outcomes_achieved",
+			"The evidence does not show every required outcome achieved",
+			"Achieve the missing outcome, or record the check or evidence that shows it.",
+		);
+		if (options.isBugFix && repositoryOutcome) {
+			check(
+				primaryAnswers.root_cause_addressed,
+				"required_true",
+				"JEV-root_cause_addressed",
+				"The fix does not address the evidenced cause",
+				"Address the causal mechanism rather than its symptom.",
+			);
+		}
+		check(
+			primaryAnswers.required_behavior_unverified,
+			"required_false",
+			"JEV-required_behavior_unverified",
+			"A required outcome is not yet shown by a check or verified evidence",
+			"Run the check, test or observation that shows it.",
+		);
+		check(
+			primaryAnswers.material_claim_unsupported,
+			"required_false",
+			"JEV-material_claim_unsupported",
+			"A material claim is unsupported or rests on stale evidence",
+			"Support the claim with fresh evidence, or drop it.",
+		);
+		if (repositoryOutcome) {
+			check(
+				primaryAnswers.out_of_scope_change_present,
+				"required_false",
+				"JEV-out_of_scope_change_present",
+				"The repository change goes beyond the requested scope",
+				"Revert the out-of-scope change or record why it is required.",
+			);
+			check(
+				primaryAnswers.duplicate_responsibility_introduced,
+				"required_false",
+				"JEV-duplicate_responsibility_introduced",
+				"The repository change duplicates a responsibility that already has an owner",
+				"Reuse or extract the existing owner.",
+			);
+		}
+
+		// completion_verdict (choice: complete with hard confidence and margin)
+		const verdictAns = primaryAnswers.completion_verdict as
+			| {
+					choice: string;
+					confidence: number;
+					probabilities: Record<string, number>;
+			  }
+			| undefined;
+		if (verdictAns) {
+			// The verdict's choice separates done from undone work; its confidence bar is the measured one.
+			const evalVerdict = evaluateChoice(verdictAns, "normal", {
+				...config.thresholds,
+				choice: {
+					...config.thresholds.choice,
+					normal_auto_confidence: config.thresholds.completion.verdict_min_confidence,
+					min_top2_margin_normal: config.thresholds.completion.verdict_min_margin,
+				},
+			});
+			if (!evalVerdict.accepted || evalVerdict.choice !== "complete") {
+				const shortfall = evalVerdict.choice === "complete" ? `; ${(evalVerdict.reasons ?? []).join("; ")}` : "";
+				failedGates.push({
+					id: "JEV-completion_verdict",
+					reason: `System One's completion verdict is '${evalVerdict.choice}' at confidence ${evalVerdict.confidence.toFixed(2)}${shortfall}.`,
+					required_next_proof: "Address outstanding completion issues before re-submitting.",
+				});
+			}
+		} else {
+			failedGates.push({
+				id: "JEV-completion_verdict",
+				reason: "System One gave no completion verdict.",
+				required_next_proof: "Provide completion_verdict evaluation.",
+			});
+		}
+	}
+	if (stage === "completion_challenge") {
+		// 3. Challenge pack checks (R-058)
+		check(
+			challengeAnswers.missing_requirement,
+			"required_false",
+			"JEV-CHALLENGE-missing_requirement",
+			"A required outcome or constraint is missing from the evidence",
+			"Satisfy every required acceptance criterion.",
+		);
+		check(
+			challengeAnswers.hidden_assumption,
+			"required_false",
+			"JEV-CHALLENGE-hidden_assumption",
+			"Completion rests on an assumption the evidence does not establish",
+			"Establish the assumption with a check or observation.",
+		);
+		if (repositoryOutcome) {
+			check(
+				challengeAnswers.plausible_regression_not_tested,
+				"required_false",
+				"JEV-CHALLENGE-plausible_regression_not_tested",
+				"The repository change has a plausible regression path no recorded verification covers",
+				"Add a test or check that covers the path.",
+			);
+		}
+		check(
+			challengeAnswers.conclusion_overstates_evidence,
+			"required_false",
+			"JEV-CHALLENGE-conclusion_overstates_evidence",
+			"The conclusion claims more than the evidence shows",
+			"Bound the conclusion to what the evidence shows.",
+		);
+	}
+	return failedGates;
 }
 
 /**
@@ -522,9 +684,10 @@ export function decideFinalCompletion(input: {
 	primaryAnswers: Record<string, unknown>;
 	challengeAnswers: Record<string, unknown>;
 	isBugFix: boolean;
+	/** Whether the goal changed the repository (see hasRepositoryOutcome). Default true. */
+	repositoryOutcome?: boolean;
 	config?: SystemOneConfig;
 }): FinalCompletionVerdict {
-	const config = input.config ?? DEFAULT_SYSTEM_ONE_CONFIG;
 	const failedGates: CompletionRejectionDetail[] = [];
 
 	// 1. Check deterministic gates first (R-020, R-035)
@@ -541,128 +704,10 @@ export function decideFinalCompletion(input: {
 		return { verdict: "rework", failed_gates: failedGates };
 	}
 
-	// 2. Primary completion pack checks
-	const { primaryAnswers } = input;
-
-	// implementation_matches_goal (required_true, hard pass)
-	if (!completionCheckHolds(primaryAnswers.implementation_matches_goal, "required_true", config.thresholds)) {
-		failedGates.push({
-			id: "JEV-implementation_matches_goal",
-			reason: "Implementation does not sufficiently match the normalized goal and acceptance criteria.",
-			required_next_proof: "Align changes with required goal outcomes.",
-		});
-	}
-
-	// root_cause_addressed for bug fixes (R-015, R-057)
-	if (input.isBugFix) {
-		if (!completionCheckHolds(primaryAnswers.root_cause_addressed, "required_true", config.thresholds)) {
-			failedGates.push({
-				id: "JEV-root_cause_addressed",
-				reason: "For bug fix, the evidenced causal mechanism was not addressed.",
-				required_next_proof: "Address the causal mechanism rather than symptoms.",
-			});
-		}
-	}
-
-	// required_behavior_unverified (required_false)
-	if (!completionCheckHolds(primaryAnswers.required_behavior_unverified, "required_false", config.thresholds)) {
-		failedGates.push({
-			id: "JEV-required_behavior_unverified",
-			reason: "Some required behavior remains unverified by fresh evidence.",
-			required_next_proof: "Add verification evidence for required behavior.",
-		});
-	}
-
-	// material_claim_unsupported (required_false)
-	if (!completionCheckHolds(primaryAnswers.material_claim_unsupported, "required_false", config.thresholds)) {
-		failedGates.push({
-			id: "JEV-material_claim_unsupported",
-			reason: "Material claims remain unsupported or based on stale evidence.",
-			required_next_proof: "Validate material claims with fresh evidence.",
-		});
-	}
-
-	// out_of_scope_change_present (required_false)
-	if (!completionCheckHolds(primaryAnswers.out_of_scope_change_present, "required_false", config.thresholds)) {
-		failedGates.push({
-			id: "JEV-out_of_scope_change_present",
-			reason: "Diff contains changes outside the task's allowed semantic scope.",
-			required_next_proof: "Revert or document reasons for out-of-scope changes.",
-		});
-	}
-
-	// duplicate_responsibility_introduced (required_false)
-	if (!completionCheckHolds(primaryAnswers.duplicate_responsibility_introduced, "required_false", config.thresholds)) {
-		failedGates.push({
-			id: "JEV-duplicate_responsibility_introduced",
-			reason: "Diff introduces duplicate logic for a responsibility with an existing owner.",
-			required_next_proof: "Reuse or extract existing owner logic.",
-		});
-	}
-
-	// completion_verdict (choice: complete with hard confidence and margin)
-	const verdictAns = primaryAnswers.completion_verdict as
-		| {
-				choice: string;
-				confidence: number;
-				probabilities: Record<string, number>;
-		  }
-		| undefined;
-	if (verdictAns) {
-		const evalVerdict = evaluateChoice(verdictAns, "hard", config.thresholds);
-		if (!evalVerdict.accepted || evalVerdict.choice !== "complete") {
-			failedGates.push({
-				id: "JEV-completion_verdict",
-				reason: `Completion verdict chose '${evalVerdict.choice}' (confidence ${evalVerdict.confidence.toFixed(2)})`,
-				required_next_proof: "Address outstanding completion issues before re-submitting.",
-			});
-		}
-	} else {
-		failedGates.push({
-			id: "JEV-completion_verdict",
-			reason: "Missing completion_verdict answer.",
-			required_next_proof: "Provide completion_verdict evaluation.",
-		});
-	}
-
-	// 3. Challenge pack checks (R-058)
-	const { challengeAnswers } = input;
-
-	// missing_requirement (required_false)
-	if (!completionCheckHolds(challengeAnswers.missing_requirement, "required_false", config.thresholds)) {
-		failedGates.push({
-			id: "JEV-CHALLENGE-missing_requirement",
-			reason: "Challenge evaluation found a missing acceptance requirement or constraint.",
-			required_next_proof: "Satisfy all required acceptance criteria.",
-		});
-	}
-
-	// hidden_assumption (required_false)
-	if (!completionCheckHolds(challengeAnswers.hidden_assumption, "required_false", config.thresholds)) {
-		failedGates.push({
-			id: "JEV-CHALLENGE-hidden_assumption",
-			reason: "Challenge evaluation found completion depends on an unverified hidden assumption.",
-			required_next_proof: "Ground assumptions with concrete observations.",
-		});
-	}
-
-	// plausible_regression_not_tested (required_false)
-	if (!completionCheckHolds(challengeAnswers.plausible_regression_not_tested, "required_false", config.thresholds)) {
-		failedGates.push({
-			id: "JEV-CHALLENGE-plausible_regression_not_tested",
-			reason: "Challenge evaluation found untested plausible regression paths in the diff.",
-			required_next_proof: "Add regression test coverage for affected paths.",
-		});
-	}
-
-	// conclusion_overstates_evidence (required_false)
-	if (!completionCheckHolds(challengeAnswers.conclusion_overstates_evidence, "required_false", config.thresholds)) {
-		failedGates.push({
-			id: "JEV-CHALLENGE-conclusion_overstates_evidence",
-			reason: "Conclusion claims more than the evidence package proves.",
-			required_next_proof: "Bound claims to verified evidence.",
-		});
-	}
+	failedGates.push(
+		...completionPackFailures("completion", input.primaryAnswers, input),
+		...completionPackFailures("completion_challenge", input.challengeAnswers, input),
+	);
 
 	if (failedGates.length === 0) {
 		return { verdict: "complete", failed_gates: [] };

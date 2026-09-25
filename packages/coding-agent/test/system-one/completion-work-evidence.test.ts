@@ -20,7 +20,7 @@ const passedGates = [{ id: "G-OBJ", kind: "deterministic" as const, required: tr
 const MEASURED = {
 	finished: {
 		primary: {
-			implementation_matches_goal: noul(0.87),
+			outcomes_achieved: noul(0.87),
 			required_behavior_unverified: noul(0.08),
 			material_claim_unsupported: noul(0.09),
 			out_of_scope_change_present: noul(0.2),
@@ -36,7 +36,7 @@ const MEASURED = {
 	},
 	broken: {
 		primary: {
-			implementation_matches_goal: noul(0.33),
+			outcomes_achieved: noul(0.33),
 			required_behavior_unverified: noul(0.23),
 			material_claim_unsupported: noul(0.09),
 			out_of_scope_change_present: noul(0.44),
@@ -65,7 +65,7 @@ describe("completion judges the work itself", () => {
 		const broken = decide(MEASURED.broken);
 		expect(broken.verdict).not.toBe("complete");
 		expect(broken.failed_gates.map((gate) => gate.id)).toEqual(
-			expect.arrayContaining(["JEV-implementation_matches_goal", "JEV-CHALLENGE-hidden_assumption"]),
+			expect.arrayContaining(["JEV-outcomes_achieved", "JEV-CHALLENGE-hidden_assumption"]),
 		);
 		// A missing answer never holds.
 		const { hidden_assumption: _missing, ...withoutAssumption } = MEASURED.finished.challenge;

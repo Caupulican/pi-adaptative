@@ -13,7 +13,7 @@ import { isForbiddenRequiredProvenance } from "../decision/policy.ts";
 import type { DecisionProgram } from "../decision/program.ts";
 import type { JevAdapter } from "../system-one/adapter.ts";
 import { type AuthorityKind, authorityForCheckpoint, decideByAuthority } from "../system-one/authority-line.ts";
-import { evaluateChoice, evaluateNoul, noulFromAnswer } from "../system-one/policy.ts";
+import { completionPackFailures, evaluateNoul, noulFromAnswer } from "../system-one/policy.ts";
 import { type SemanticEvaluationObserver, verdictFromCertificate } from "../system-one/semantic-evaluation-ledger.ts";
 import { canonicalDigest } from "./canonical.ts";
 import { SteeringCertificateStore } from "./certificate-store.ts";
@@ -74,6 +74,11 @@ export interface SystemOneSteeringPlaneDeps {
 	readonly certificates?: SteeringCertificateStore;
 	readonly policy?: SteeringPolicyConfig;
 	readonly persistentPath?: string;
+}
+
+/** A completion gate id (`JEV-outcomes_achieved`, `JEV-CHALLENGE-hidden_assumption`) as its predicate name. */
+function completionPredicate(gateId: string): string {
+	return gateId.replace(/^JEV-(?:CHALLENGE-)?/u, "");
 }
 
 export class SystemOneSteeringPlane {
@@ -318,27 +323,6 @@ export class SystemOneSteeringPlane {
 	private hardPass(answer: unknown, direction: "required_true" | "required_false"): boolean {
 		const fallback = direction !== "required_true";
 		return evaluateNoul(noulFromAnswer(answer, fallback), direction) === "hard_pass";
-	}
-
-	private hardComplete(answer: unknown): boolean {
-		if (!answer || typeof answer !== "object") return false;
-		const record = answer as {
-			choice?: unknown;
-			selected?: unknown;
-			confidence?: unknown;
-			probabilities?: unknown;
-			distribution?: unknown;
-		};
-		const choice =
-			typeof record.choice === "string"
-				? record.choice
-				: typeof record.selected === "string"
-					? record.selected
-					: undefined;
-		const probabilities = (record.probabilities ?? record.distribution) as Record<string, number> | undefined;
-		if (!choice || typeof record.confidence !== "number" || !probabilities) return false;
-		const verdict = evaluateChoice({ choice, confidence: record.confidence, probabilities }, "hard");
-		return verdict.accepted && verdict.choice === "complete";
 	}
 
 	/**
@@ -640,21 +624,15 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-025": {
+				// The same questions, bounds and applicability the goal tool's completion judges with.
 				const record = state && typeof state === "object" ? (state as Record<string, unknown>) : {};
 				const bugFix = record.bugFix === true || record.isBugFix === true;
-				if (!this.hardPass(answers.implementation_matches_goal, "required_true"))
-					failed.push("implementation_matches_goal");
-				if (bugFix && !this.hardPass(answers.root_cause_addressed, "required_true"))
-					failed.push("root_cause_addressed");
-				if (!this.hardPass(answers.required_behavior_unverified, "required_false"))
-					failed.push("required_behavior_unverified");
-				if (!this.hardPass(answers.material_claim_unsupported, "required_false"))
-					failed.push("material_claim_unsupported");
-				if (!this.hardPass(answers.out_of_scope_change_present, "required_false"))
-					failed.push("out_of_scope_change_present");
-				if (!this.hardPass(answers.duplicate_responsibility_introduced, "required_false"))
-					failed.push("duplicate_responsibility_introduced");
-				if (!this.hardComplete(answers.completion_verdict)) failed.push("completion_verdict");
+				failed.push(
+					...completionPackFailures("completion", answers, {
+						isBugFix: bugFix,
+						repositoryOutcome: record.repository_outcome !== false,
+					}).map((gate) => completionPredicate(gate.id)),
+				);
 				if (
 					answers.acceptance_satisfied !== undefined &&
 					!this.hardPass(answers.acceptance_satisfied, "required_true")
@@ -678,12 +656,13 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-026": {
-				if (!this.hardPass(answers.missing_requirement, "required_false")) failed.push("missing_requirement");
-				if (!this.hardPass(answers.hidden_assumption, "required_false")) failed.push("hidden_assumption");
-				if (!this.hardPass(answers.plausible_regression_not_tested, "required_false"))
-					failed.push("plausible_regression_not_tested");
-				if (!this.hardPass(answers.conclusion_overstates_evidence, "required_false"))
-					failed.push("conclusion_overstates_evidence");
+				const challengeRecord = state && typeof state === "object" ? (state as Record<string, unknown>) : {};
+				failed.push(
+					...completionPackFailures("completion_challenge", answers, {
+						isBugFix: false,
+						repositoryOutcome: challengeRecord.repository_outcome !== false,
+					}).map((gate) => completionPredicate(gate.id)),
+				);
 				if (
 					answers.unhandled_edge_cases !== undefined &&
 					!this.hardPass(answers.unhandled_edge_cases, "required_false")
