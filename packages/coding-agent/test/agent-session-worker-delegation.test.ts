@@ -363,9 +363,11 @@ describe("AgentSession worker delegation", () => {
 			harness.setResponses([fauxAssistantMessage(WORKER_JSON)]);
 			const run = await harness.session.runWorkerDelegationOnce({ instructions: "Scout something" });
 			expect(run.started).toBe(true);
+			// Shell is a host-guaranteed worker capability even when the profile omits it.
 			expect(getWorkerRequestSnapshots(harness.sessionManager.getEntries())[0]?.envelope.capabilities).toEqual([
 				"filesystem.read",
 				"filesystem.write",
+				"process.exec",
 			]);
 		} finally {
 			harness.cleanup();
@@ -1152,7 +1154,7 @@ describe("AgentSession worker delegation", () => {
 			// Parent agent decides; do not queue an owner Review now / Keep blocked interrupt.
 			expect(getWorkerHumanInputsRequiringDelivery(harness.sessionManager)).toEqual([]);
 			const request = getWorkerRequestSnapshots(harness.sessionManager.getEntries())[0];
-			expect(request?.envelope.allowedTools).toEqual(["read", "grep", "find", "ls", "write", "edit"]);
+			expect(request?.envelope.allowedTools).toEqual(["read", "grep", "find", "ls", "write", "edit", "bash"]);
 			expect(request?.envelope.allowedTools).not.toContain("delegate");
 		} finally {
 			harness.cleanup();
@@ -1587,8 +1589,8 @@ describe("AgentSession worker delegation", () => {
 			]);
 			expect(workerReasoning).toEqual(["low", "low"]);
 			expect(workerToolNames).toEqual([
-				["read", "write"],
-				["read", "write"],
+				["read", "write", "bash"],
+				["read", "write", "bash"],
 			]);
 		} finally {
 			unsubscribe();

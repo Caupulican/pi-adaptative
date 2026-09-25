@@ -35,6 +35,7 @@ import {
 	getToolCapabilityPolicy,
 } from "../tool-capability-policy.ts";
 import type { WorkerDelegationAuthorityRequest } from "./worker-delegation-request.ts";
+import { YOLO_WORKER_CAPABILITIES } from "./worker-execution-policy.ts";
 import { LEAF_WORKER_DELEGATION_LIMITS } from "./worker-fleet-limits.ts";
 import { resolveWorkerWorkspacePath } from "./worker-machine-scope.ts";
 import type { ResolvedWorkerProfile } from "./worker-profile-resolver.ts";
@@ -79,6 +80,8 @@ const DEFAULT_CAPABILITIES: readonly HarnessCapability[] = [
 	"semantic.judge",
 ];
 export interface WorkerAuthorityResolutionInput {
+	/** Bypass the parent/profile execution surface while retaining model and lifecycle identity. */
+	yolo?: boolean;
 	authority?: WorkerDelegationAuthorityRequest;
 	base?: ResolvedWorkerProfile;
 	modelPin?: OrchestrationModelBinding;
@@ -91,6 +94,8 @@ export interface WorkerAuthorityResolutionInput {
 	foregroundToolNames?: readonly string[];
 	/** Whether the host brokers artifact_retrieve to workers: the companion a packed-output tool brings. */
 	artifactRetrieveAvailable?: boolean;
+	/** Host materializable adapters, independent of the active parent tool list in YOLO. */
+	workerToolAdapterNames?: readonly string[];
 	foregroundEnvelope?: CapabilityEnvelope;
 	cwd?: string;
 	/** Caller task cwd for explicit relative path intent; preset paths remain anchored to cwd. */
@@ -367,9 +372,9 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	// The owner's model policy bounds the fallbacks as it bounds the first choice.
 	let fallbacks = selected.fallbacks.filter((fallback) => {
 		const model = input.modelRegistry.find(fallback.provider, fallback.modelId);
-		return model !== undefined && (!input.isModelAllowed || input.isModelAllowed(model));
+		return model !== undefined && (input.yolo || !input.isModelAllowed || input.isModelAllowed(model));
 	});
-	if (input.isModelAllowed && !input.isModelAllowed(boundModel.model)) {
+	if (!input.yolo && input.isModelAllowed && !input.isModelAllowed(boundModel.model)) {
 		fallbacks = [];
 		const allowed = input.allocateAllowedModel?.();
 		if (!allowed) return { ok: false, reason: "orchestration_model_policy_no_allowed_model" };
@@ -383,6 +388,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		};
 	}
 	if (
+		!input.yolo &&
 		input.modelPin &&
 		((input.authority?.model !== undefined &&
 			(input.authority.model.provider !== input.modelPin.provider ||
@@ -422,7 +428,22 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	const deniedForegroundTools = new Set(input.base ? [] : (input.foregroundEnvelope?.deniedTools ?? []));
 	const uniqueToolNames = [
 		...new Set(
-			configuredToolNames.filter((toolName) => toolName !== "delegate" && !deniedForegroundTools.has(toolName)),
+			(input.yolo
+				? [
+						"read",
+						"grep",
+						"find",
+						"ls",
+						"repo_read",
+						"write",
+						"edit",
+						"python",
+						STABLE_SHELL_TOOL_NAME,
+						...(input.workerToolAdapterNames ?? []),
+						...configuredToolNames,
+					]
+				: configuredToolNames
+			).filter((toolName) => toolName !== "delegate" && (input.yolo || !deniedForegroundTools.has(toolName))),
 		),
 	];
 	// Worker shell is a host guarantee, independent of the parent's surface and task-level narrowing.
@@ -434,7 +455,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	if (unavailableTools.length > 0) {
 		return { ok: false, reason: `orchestration_tool_unavailable:${unavailableTools.join(",")}` };
 	}
-	if (input.authority?.toolNames !== undefined) {
+	if (!input.yolo && input.authority?.toolNames !== undefined) {
 		const inheritedSurface = new Set(inheritedSurfaceNames);
 		const foregroundTools = input.foregroundToolNames ?? input.foregroundEnvelope?.allowedTools ?? DEFAULT_TOOL_NAMES;
 		const boundedMemoryReadInherited =
@@ -459,6 +480,11 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	);
 	capabilities.delete("workflow.delegate");
 	capabilities.delete("memory.mutate");
+	if (input.yolo) {
+		for (const capability of YOLO_WORKER_CAPABILITIES) {
+			capabilities.add(capability);
+		}
+	}
 	// A parent that may run processes can already read its repository through git; the read grain
 	// of that authority is lent alongside. An explicit capability list or a base profile stays exact.
 	if (
@@ -468,7 +494,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	) {
 		capabilities.add("repo.read");
 	}
-	if (input.authority?.readOnly) {
+	if (!input.yolo && input.authority?.readOnly) {
 		for (const capability of capabilities) {
 			if (!capabilitySurvivesReadOnly(capability)) capabilities.delete(capability);
 		}

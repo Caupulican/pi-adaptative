@@ -45,6 +45,8 @@ type BeforeToolCall = NonNullable<Agent["beforeToolCall"]>;
 type AfterToolCall = NonNullable<Agent["afterToolCall"]>;
 
 export interface ToolGateControllerDeps {
+	/** Execution permission mode. YOLO keeps lifecycle bookkeeping but bypasses harness vetoes. */
+	getExecutionMode?(): "guarded" | "yolo";
 	gateSelfCompaction?(toolName: string, assistantMessage: AssistantMessage): BeforeToolCallResult | undefined;
 	/** Router escalation: block a tool the active cheap route is not allowed to run. */
 	maybeEscalateToolCall(toolName: string, args: unknown): { block: true; reason: string } | undefined;
@@ -202,19 +204,22 @@ export class ToolGateController {
 		signal,
 	) => {
 		signal?.throwIfAborted();
-		const selfCompactionBlock = this.deps.gateSelfCompaction?.(toolCall.name, assistantMessage);
+		const yolo = this.deps.getExecutionMode?.() === "yolo";
+		const selfCompactionBlock = yolo ? undefined : this.deps.gateSelfCompaction?.(toolCall.name, assistantMessage);
 		if (selfCompactionBlock) return selfCompactionBlock;
 		// Session model selection may change during a provider response or any awaited hook.
 		const modelRef = `${assistantMessage.provider}/${assistantMessage.model}`;
-		const escalation = this.deps.maybeEscalateToolCall(toolCall.name, args);
+		const escalation = yolo ? undefined : this.deps.maybeEscalateToolCall(toolCall.name, args);
 		if (escalation) {
 			return escalation;
 		}
-		const refusedPush = refuseLocalPush(
-			this.deps.localCommitBranch ? { branch: () => this.deps.localCommitBranch?.() } : undefined,
-			toolCall.name,
-			args,
-		);
+		const refusedPush = yolo
+			? undefined
+			: refuseLocalPush(
+					this.deps.localCommitBranch ? { branch: () => this.deps.localCommitBranch?.() } : undefined,
+					toolCall.name,
+					args,
+				);
 		if (refusedPush) return refusedPush;
 
 		// The capability envelope is evaluated twice per call - once on the raw arguments before any
@@ -224,7 +229,7 @@ export class ToolGateController {
 		// that publication, so an early hook block, hook failure or later cancellation still leaves
 		// exactly one record - the last envelope decision that actually completed. A call cancelled
 		// before any evaluation completes leaves none (there is no decision to record).
-		const envelope = structuredClone(this.deps.getCapabilityEnvelope());
+		const envelope = yolo ? undefined : structuredClone(this.deps.getCapabilityEnvelope());
 		const scopeCwd = this.deps.getCwd();
 		const evaluateEnvelope = async (currentArgs: unknown): Promise<GateOutcome> => {
 			signal?.throwIfAborted();
@@ -256,7 +261,7 @@ export class ToolGateController {
 
 			// External acquisition is screened before any extension hook can rewrite the command, so the
 			// bytes the gate judged are the bytes that would have run.
-			if (this.deps.checkExternalAcquisition) {
+			if (!yolo && this.deps.checkExternalAcquisition) {
 				const acquisitionBlock = await this.deps.checkExternalAcquisition(toolCall.name, args, signal);
 				if (acquisitionBlock) return acquisitionBlock;
 			}
@@ -282,14 +287,14 @@ export class ToolGateController {
 					}
 					throw new Error(`Extension failed, blocking execution: ${String(err)}`);
 				}
-				if (extensionResult?.block) return extensionResult;
+				if (!yolo && extensionResult?.block) return extensionResult;
 			}
 
 			// 3. Post-hook arguments: direct-script gate, then the envelope on what will really run
 			// Hooks rewrite event.input in place. The executor retains this same args object;
 			// extension return values carry control decisions, never replacement arguments.
 			const effectiveCwd = executionContext?.cwd ?? scopeCwd;
-			if (this.deps.checkDirectScriptExecution) {
+			if (!yolo && this.deps.checkDirectScriptExecution) {
 				const directCheck = this.deps.checkDirectScriptExecution(toolCall.name, args, effectiveCwd);
 				if (directCheck) {
 					return directCheck;
@@ -302,7 +307,9 @@ export class ToolGateController {
 			// 4. Single edge authorization on the actual final operation
 			const edge = await this.deps.checkEdge?.(toolCall.name, args, executionContext?.cwd, signal);
 			if (edge) return edge;
-			const operation = await this.deps.checkOperation?.(toolCall.name, args, executionContext?.cwd, signal);
+			const operation = yolo
+				? undefined
+				: await this.deps.checkOperation?.(toolCall.name, args, executionContext?.cwd, signal);
 			if (operation) return operation;
 
 			// 5. System One semantic tool gate
@@ -328,7 +335,7 @@ export class ToolGateController {
 					: toolCall.name.includes("edit") || toolCall.name.includes("write")
 						? "repo_mutation"
 						: "read_only";
-			if (systemOne && !isControlPlaneTool && !isOperatorAuthorizedEdge) {
+			if (systemOne && !yolo && !isControlPlaneTool && !isOperatorAuthorizedEdge) {
 				if (systemOne.hookCoordinator?.hasExtensions()) {
 					const beforeToolResult = await systemOne.hookCoordinator.runHook("before_tool", {
 						schema_version: "1.0",
@@ -393,7 +400,7 @@ export class ToolGateController {
 				observationHandedOff = true;
 				this.pendingObservations.set(toolCall.id, observationToken);
 			}
-			return extensionResult;
+			return yolo ? undefined : extensionResult;
 		} finally {
 			if (observationToken && !observationHandedOff) {
 				await this.deps.repositoryObserver?.finish({
@@ -491,7 +498,11 @@ export class ToolGateController {
 			// this result an error; the RepairWork it queued is durable on the session.
 			if (!resolvedIsError) {
 				const changedFiles = collectMutatedPaths(toolCall.name, args);
-				if (changedFiles.length > 0 && this.deps.validateMutationAcceptance) {
+				if (
+					changedFiles.length > 0 &&
+					this.deps.getExecutionMode?.() !== "yolo" &&
+					this.deps.validateMutationAcceptance
+				) {
 					const verdict = await this.deps.validateMutationAcceptance({
 						toolName: toolCall.name,
 						changedFiles,

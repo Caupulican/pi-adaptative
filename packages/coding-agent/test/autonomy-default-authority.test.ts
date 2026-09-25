@@ -11,6 +11,40 @@ import { formatAutonomyStatus } from "../src/modes/interactive/autonomy-commands
 import { createHarness, getMessageText } from "./suite/harness.ts";
 
 describe("autonomous default authority", () => {
+	it("keeps execution gating by default and resolves explicit YOLO only from valid settings", () => {
+		expect(SettingsManager.inMemory().getEdgeSettings().mode).toBe("guarded");
+		expect(SettingsManager.inMemory({ edge: { mode: "yolo", allow: [] } }).getEdgeSettings()).toEqual({
+			mode: "yolo",
+			allow: [],
+			deny: [],
+		});
+		const storage = new InMemorySettingsStorage();
+		storage.withLock("global", () => "{");
+		expect(SettingsManager.fromStorage(storage).getEdgeSettings().mode).toBe("guarded");
+	});
+
+	it("retains explicit command denies in YOLO and fails closed on malformed deny lists", () => {
+		expect(
+			SettingsManager.inMemory({ edge: { mode: "yolo", deny: ["npm publish*", "npm publish*"] } }).getEdgeSettings(),
+		).toMatchObject({ mode: "yolo", deny: ["npm publish*"] });
+		const storage = new InMemorySettingsStorage();
+		storage.withLock("global", () => JSON.stringify({ edge: { mode: "yolo", deny: "npm publish*" } }));
+		expect(SettingsManager.fromStorage(storage).getEdgeSettings().mode).toBe("guarded");
+	});
+
+	it("YOLO activates core execution tools from a narrow foreground request", async () => {
+		const harness = await createHarness({
+			initialActiveToolNames: ["read"],
+			settings: { edge: { mode: "yolo" }, modelCapability: { mode: "off" } },
+		});
+		try {
+			expect(harness.session.getActiveToolNames()).toEqual(
+				expect.arrayContaining(["read", "bash", "write", "edit", "delegate"]),
+			);
+		} finally {
+			await harness.cleanup();
+		}
+	});
 	it("grants every registered edge by default and retains it across settings reload", async () => {
 		const settings = SettingsManager.inMemory();
 		expect(settings.getEdgeSettings().allow).toEqual(EDGE_CLASSES);

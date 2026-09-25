@@ -477,6 +477,54 @@ describe("classified lane tool surface", () => {
 		).toThrow("initial usage must contain finite non-negative values and safe-integer counts");
 	});
 
+	it("YOLO materializes write tools and bypasses profile, grant, path, and edge vetoes", async () => {
+		const grant: ExecutionGrant = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			grantId: "yolo-narrow",
+			objectiveId: "o",
+			taskId: "t",
+			attemptId: "a",
+			subjectId: "s",
+			role: "explorer",
+			capabilities: ["filesystem.read"],
+			allowedTools: ["read"],
+			resources: [],
+			readPaths: [cwd],
+			writePaths: [],
+			deniedPaths: [outside],
+			budget: {},
+			policyVersion: "test",
+			decisionTrace: [],
+			issuedAt: "2026-09-25T00:00:00.000Z",
+		};
+		const options = {
+			cwd,
+			grant,
+			profile: profile({ tools: { block: ["*"] } }),
+			deniedPaths: [outside],
+			toolManifests: [
+				{
+					toolName: "read",
+					moduleSpecifier: "./read.ts",
+					capabilities: ["filesystem.read"],
+					roles: ["explorer"],
+					enforcements: ["path-scope"],
+				},
+			] as ToolCapabilityManifest[],
+			checkEdge: () => ({ block: true as const, reason: "edge" }),
+		};
+		const guarded = createLaneToolSurface(options);
+		expect(guarded.allowedTools).toEqual(["read"]);
+		const yolo = createLaneToolSurface({ ...options, yolo: true });
+		try {
+			expect(yolo.allowedTools).toEqual(expect.arrayContaining(["read", "write", "edit"]));
+			expect(await gate(yolo, "write", { path: path.join(outside, "test.txt"), content: "ok" })).toBeUndefined();
+		} finally {
+			await guarded.dispose();
+			await yolo.dispose();
+		}
+	});
+
 	it("rethrows a token-budget denial so the worker loop terminals instead of retrying tools", async () => {
 		const grant: ExecutionGrant = {
 			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,

@@ -367,6 +367,89 @@ function classifyEveryEdgeOperation(input: ClassifyEdgeInput): EdgeOperation[] {
 	return operations;
 }
 
+export type YoloBoundaryDecision = { kind: "block" | "confirm"; reason: string };
+
+export interface YoloBoundaryInput extends ClassifyEdgeInput {
+	/** Exact shell-command globs the operator has forbidden, even in YOLO. */
+	denyCommands?: readonly string[];
+}
+
+function commandMatchesDeny(command: string, pattern: string): boolean {
+	const escaped = pattern
+		.replace(/[.+^${}()|[\]\\]/g, "\\$&")
+		.replace(/\*/g, ".*")
+		.replace(/\?/g, ".");
+	return new RegExp(`^${escaped}$`, "s").test(command.trim());
+}
+
+/** The small execution floor evaluated before YOLO grants or standing edge grants. */
+export function classifyYoloBoundary(input: YoloBoundaryInput): YoloBoundaryDecision | undefined {
+	const args = input.args && typeof input.args === "object" ? (input.args as Record<string, unknown>) : {};
+	const name = input.toolName.toLowerCase();
+	const command =
+		name === "bash" || name === "shell" || name === "powershell"
+			? typeof args.command === "string"
+				? args.command
+				: ""
+			: name === "run_process" || name === "run-process"
+				? [args.executable, ...(Array.isArray(args.args) ? args.args : [])]
+						.filter((part) => typeof part === "string")
+						.join(" ")
+				: "";
+	if (!command) return undefined;
+	const invocations = shellInvocations(command);
+	for (const pattern of input.denyCommands ?? []) {
+		if (
+			[command, ...invocations.map((argv) => argv.join(" "))].some((candidate) =>
+				commandMatchesDeny(candidate, pattern),
+			)
+		) {
+			return { kind: "block", reason: `user deny rule: ${pattern}` };
+		}
+	}
+	if (/:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/.test(command)) {
+		return { kind: "block", reason: "fork bomb" };
+	}
+	for (const argv of invocations) {
+		const tool = commandTool(argv[0]);
+		const rest = argv.slice(1);
+		if (["shutdown", "reboot", "halt", "poweroff"].includes(tool))
+			return { kind: "block", reason: "system shutdown or reboot" };
+		if ((tool === "init" || tool === "telinit") && ["0", "6"].includes(rest[0] ?? ""))
+			return { kind: "block", reason: "system shutdown or reboot" };
+		if (tool === "systemctl" && ["poweroff", "reboot", "halt", "kexec"].includes(rest[0] ?? ""))
+			return { kind: "block", reason: "system shutdown or reboot" };
+		if (tool === "kill" && rest.includes("-1")) return { kind: "block", reason: "kills all processes" };
+		if (tool.startsWith("mkfs") || tool === "diskpart" || tool === "format")
+			return { kind: "block", reason: "formats a volume" };
+		if (tool === "dd" && rest.some((part) => /^of=\/dev\/(?:sd|nvme|hd|mmcblk|vd|xvd)/i.test(part)))
+			return { kind: "block", reason: "writes a raw block device" };
+		if (
+			(tool === "rm" || tool === "find" || POWERSHELL_REMOVE.has(tool)) &&
+			(tool !== "find" || findDeletesTree(rest))
+		) {
+			for (const target of positional(rest)) {
+				const normalized = target.replace(/\/\*$/, "");
+				if (/^\$(?:HOME|\{HOME\})$/.test(target)) return { kind: "block", reason: "deletes home directory" };
+				const { resolved, api } = resolveTarget(normalized, input.cwd);
+				if (
+					api === nodePath &&
+					["/", "/home", "/root", "/etc", "/usr", "/var", "/bin", "/sbin", "/boot", "/lib"].includes(resolved)
+				) {
+					return { kind: "block", reason: "deletes a system directory" };
+				}
+				if (api === nodePath && resolved === nodePath.resolve(homedir()))
+					return { kind: "block", reason: "deletes home directory" };
+			}
+		}
+	}
+	const repositoryDeletion = classifyAllEdgeOperations(input).find(
+		(operation) => operation.class === "destructive.fs" && operation.reason.startsWith("deletes the "),
+	);
+	if (repositoryDeletion) return { kind: "confirm", reason: "deletes the repository" };
+	return undefined;
+}
+
 /** Classify the first edge operation for display callers; undefined means ordinary work. */
 export function classifyEdgeOperation(input: ClassifyEdgeInput): EdgeOperation | undefined {
 	return classifyAllEdgeOperations(input)[0];

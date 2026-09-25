@@ -945,15 +945,19 @@ export class WorkerDelegationController {
 	private authorityBase(): Pick<
 		WorkerAuthorityResolutionInput,
 		| "cwd"
+		| "yolo"
 		| "modelRegistry"
 		| "isModelExhausted"
 		| "isModelAllowed"
 		| "allocateAllowedModel"
 		| "artifactRetrieveAvailable"
+		| "workerToolAdapterNames"
 	> {
 		return {
 			cwd: this.deps.getCwd(),
+			yolo: this.deps.getSettingsManager().getEdgeSettings().mode === "yolo",
 			artifactRetrieveAvailable: this.workerToolAdapterNames().includes("artifact_retrieve"),
+			workerToolAdapterNames: this.workerToolAdapterNames(),
 			modelRegistry: this.deps.getModelRegistry(),
 			isModelExhausted: (model) => this.deps.isModelExhausted(model),
 			...(this.deps.isModelAllowed
@@ -1156,12 +1160,13 @@ export class WorkerDelegationController {
 		const instructions = request.instructions;
 		if (!instructions.trim()) return { ok: false, skipReason: "missing_instructions" };
 		if (!this.deps.isDelegateToolActive()) return { ok: false, skipReason: "delegate_tool_inactive" };
+		const yolo = this.deps.getSettingsManager().getEdgeSettings().mode === "yolo";
 		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
-		if (!settings.enabled) return { ok: false, skipReason: "worker_delegation_disabled" };
+		if (!yolo && !settings.enabled) return { ok: false, skipReason: "worker_delegation_disabled" };
 		const modelPinPolicy = pinnedContract
 			? ({ status: "absent" } as const)
 			: this.deps.getSettingsManager().getWorkerModelPinPolicy();
-		if (modelPinPolicy.status === "invalid") {
+		if (!yolo && modelPinPolicy.status === "invalid") {
 			return { ok: false, skipReason: "worker_model_pins_invalid" };
 		}
 		const parentAgent = request.parentAgentId ? this.lifecycle.getAgent(request.parentAgentId) : undefined;
@@ -1214,7 +1219,7 @@ export class WorkerDelegationController {
 		}
 		const effectiveRole: WorkerRole =
 			authority?.role ?? baseShipment?.profile.role ?? basePreset?.profile.role ?? "implementer";
-		const modelPin = resolveWorkerModelPin(modelPinPolicy, effectiveRole);
+		const modelPin = yolo ? undefined : resolveWorkerModelPin(modelPinPolicy, effectiveRole);
 		// The model itself is authority?.model, not `role` — role selects which pin applies, but a
 		// roles-only policy (no `default`) leaves an unlisted role with no pin at all, so a caller
 		// can name that role plus an explicit model and admission never sees anything to enforce.
@@ -1284,7 +1289,7 @@ export class WorkerDelegationController {
 			if (!narrowed.ok) return narrowed;
 			verifierShipment = narrowed.shipment;
 		}
-		if (!this.laneCapabilityProfile(shipment.model).backgroundLanesEnabled) {
+		if (!yolo && !this.laneCapabilityProfile(shipment.model).backgroundLanesEnabled) {
 			return { ok: false, skipReason: "model_delegation_unsupported" };
 		}
 		// The model-facing delegate surface cannot name profile resources. An absent or empty
@@ -1332,9 +1337,10 @@ export class WorkerDelegationController {
 			);
 		}
 		const inheritedAuthority = pinnedContract?.worker.authority ?? parentContract?.worker.authority;
-		const executionPlan = inheritedAuthority
-			? narrowWorkerExecutionPlan(inheritedAuthority, currentExecutionPlan)
-			: currentExecutionPlan;
+		const executionPlan =
+			inheritedAuthority && this.deps.getSettingsManager().getEdgeSettings().mode !== "yolo"
+				? narrowWorkerExecutionPlan(inheritedAuthority, currentExecutionPlan)
+				: currentExecutionPlan;
 		const verifierExecutionPlan = verifierShipment
 			? this.buildWorkerExecutionPlan(verifierShipment.profile, settings, executionCwd)
 			: undefined;
@@ -1349,7 +1355,9 @@ export class WorkerDelegationController {
 		}
 		const inheritedVerifierAuthority = parentContract?.verifier?.authority ?? parentContract?.worker.authority;
 		const boundedVerifierExecutionPlan =
-			verifierExecutionPlan && inheritedVerifierAuthority
+			verifierExecutionPlan &&
+			inheritedVerifierAuthority &&
+			this.deps.getSettingsManager().getEdgeSettings().mode !== "yolo"
 				? narrowWorkerExecutionPlan(inheritedVerifierAuthority, verifierExecutionPlan)
 				: verifierExecutionPlan;
 		const executionContract =
@@ -1955,6 +1963,7 @@ export class WorkerDelegationController {
 		executionCwd?: string,
 	): WorkerExecutionPlan {
 		return buildWorkerExecutionPlan({
+			yolo: this.deps.getSettingsManager().getEdgeSettings().mode === "yolo",
 			profile,
 			settings,
 			cwd: this.deps.getCwd(),
@@ -3106,6 +3115,7 @@ export class WorkerDelegationController {
 			grant = prepared.attempt.grant;
 		} else {
 			const compiled = compileWorkerExecutionGrant({
+				yolo: this.deps.getSettingsManager().getEdgeSettings().mode === "yolo",
 				target: {
 					objectiveId: durableTask.task.objectiveId,
 					taskId: prepared.attempt.taskId,
@@ -3275,6 +3285,7 @@ export class WorkerDelegationController {
 						signal,
 					}),
 				authorize: (request) => {
+					if (this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") return { authorized: true };
 					if (!request.script.danger) {
 						return { authorized: true };
 					}
@@ -3306,6 +3317,8 @@ export class WorkerDelegationController {
 			: undefined;
 		const sharedToolOptions = this.deps.getSharedLaneToolOptions?.();
 		const toolSurface = createLaneToolSurface({
+			yolo: this.deps.getSettingsManager().getEdgeSettings().mode === "yolo",
+			denyCommands: this.deps.getSettingsManager().getEdgeSettings().deny,
 			cwd: executionPlan.cwd,
 			...(sharedToolOptions ? { sharedToolOptions } : {}),
 			...(this.deps.getPathAliasTable ? { getPathAliasTable: this.deps.getPathAliasTable } : {}),
@@ -3322,6 +3335,7 @@ export class WorkerDelegationController {
 			toolManifests: executionPlan.toolManifests,
 			...(workerToolAdapters ? { workerToolAdapters } : {}),
 			checkEdge: (toolName, args, executionCwd) => {
+				if (this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") return undefined;
 				const refusedPush = refuseLocalPush(
 					this.deps.localCommitBranch ? { branch: () => this.deps.localCommitBranch?.() } : undefined,
 					toolName,

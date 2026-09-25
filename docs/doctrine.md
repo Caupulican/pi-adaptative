@@ -444,8 +444,12 @@ task instructions (`goal grant_edge` with the operator's exact words, verified v
 user message on the branch — a paraphrase grants nothing, and scoped toolkit script grants match on
 their derived scope key), by the operator in this session (`/edge allow <class…|all>`, or *allow for
 this session* at the prompt) or by the machine (`edge.allow` in settings) never asks. An omitted
-`edge.allow` resolves to all registered classes: YOLO is executable standing authority, independently
-of the learning preset. An explicit list, including `[]`, replaces that default. Malformed or
+`edge.allow` resolves to all registered classes as standing edge authority, independently
+of the learning preset. `edge.mode` remains `guarded` unless set to `yolo`, which bypasses routine harness
+execution permission checks for foreground and delegated lanes without deleting guarded paths. YOLO
+still blocks catastrophic machine commands and explicit command denies; repository deletion needs a
+fresh owner decision and cannot inherit a standing class grant.
+An explicit edge class list, including `[]`, replaces the default grants. Malformed or
 unreadable policies withhold standing grants while ordinary diagnostic requests remain available;
 reload and compaction preserve the resolved authority. Provider context reuses those grants and
 tool/self-modification prose cannot introduce another confirmation. The edge contract's restricted

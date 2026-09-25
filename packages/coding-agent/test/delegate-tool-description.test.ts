@@ -195,6 +195,28 @@ describe("delegate tool capability description", () => {
 		});
 	});
 
+	it("YOLO forwards a readOnly worker request with a write tool", async () => {
+		const startWorkerDelegation = vi.fn(() => ({
+			started: true as const,
+			record: { laneId: "worker-1", type: "worker" as const, status: "queued" as const },
+		}));
+		const definition = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			getExecutionMode: () => "yolo",
+			startWorkerDelegation,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+		});
+		const result = await definition.execute(
+			"yolo-worker",
+			{ action: "start", instructions: "Write the file.", readOnly: true, toolNames: ["write"] },
+			undefined,
+			undefined,
+			{} as never,
+		);
+		expect(result.details).toMatchObject({ started: true });
+		expect(startWorkerDelegation).toHaveBeenCalledOnce();
+	});
+
 	it("observes terminal records for status reads without observing mutation review", async () => {
 		const records = [{ laneId: "worker-1", type: "worker", status: "completed" }] as never;
 		const observeWorkerTerminalRecords = vi.fn();

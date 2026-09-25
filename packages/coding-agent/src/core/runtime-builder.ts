@@ -606,6 +606,7 @@ export class RuntimeBuilder {
 	 */
 	private _createToolAccessPolicy(): RuntimeToolAccessPolicy {
 		const role = getSessionRole();
+		const yolo = this.deps.getSettingsManager().getEdgeSettings().mode === "yolo";
 		const configuredAllowedToolNames = this.deps.getAllowedToolNames();
 		const allowedToolNames = configuredAllowedToolNames
 			? new Set(mapToolNamesForPlatform([...configuredAllowedToolNames]))
@@ -627,6 +628,7 @@ export class RuntimeBuilder {
 			allows: (name) => {
 				// Strict worker UAC ceiling wins over every explicit grant.
 				if (role === "worker" && WORKER_FORBIDDEN_TOOLS.has(name)) return false;
+				if (yolo) return true;
 				if (allowedToolNames && !allowedToolNames.has(name)) return false;
 				if (excludedToolNames?.has(name)) return false;
 				if (!toolProfileFilter) return true;
@@ -653,7 +655,10 @@ export class RuntimeBuilder {
 		const scopeCwd = this.deps.getCwd();
 		const cwd = this._taskDirectories.cwd;
 		const envelope = this.deps.getCapabilityEnvelope?.();
-		const childEnvelope = deriveCompositeChildEnvelope("context_scout", ["read", "grep", "find"], envelope);
+		const childEnvelope =
+			this.deps.getSettingsManager().getEdgeSettings().mode === "yolo"
+				? undefined
+				: deriveCompositeChildEnvelope("context_scout", ["read", "grep", "find"], envelope);
 		const exposureMode = this.credentialExposureMode();
 		const controller = new ScoutController({
 			resolveScoutModel: async () =>
@@ -684,6 +689,7 @@ export class RuntimeBuilder {
 					childEnvelope,
 					scopeCwd,
 				);
+				if (this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") return [readTool, grepTool, findTool];
 				return [
 					wrapToolWithCredentialExposureGuard(readTool, toolCwd, this._credentialExposureBoundary, exposureMode),
 					wrapToolWithCredentialExposureGuard(grepTool, toolCwd, this._credentialExposureBoundary, exposureMode),
@@ -847,15 +853,21 @@ export class RuntimeBuilder {
 					bound = this._taskDirectories.bindTool(tool);
 				}
 			}
-			const guarded = wrapToolWithCredentialExposureGuard(
-				bound,
-				this.deps.getCwd(),
-				this._credentialExposureBoundary,
-				this.credentialExposureMode(),
-			);
-			const scoped = this._workerSessionPrivatePathEnvelope
-				? wrapToolWithEnvelopeScope(guarded, this._workerSessionPrivatePathEnvelope, this.deps.getCwd())
-				: guarded;
+			const guarded =
+				this.deps.getSettingsManager().getEdgeSettings().mode === "yolo"
+					? bound
+					: wrapToolWithCredentialExposureGuard(
+							bound,
+							this.deps.getCwd(),
+							this._credentialExposureBoundary,
+							this.credentialExposureMode(),
+						);
+			const scoped =
+				this.deps.getSettingsManager().getEdgeSettings().mode === "yolo"
+					? guarded
+					: this._workerSessionPrivatePathEnvelope
+						? wrapToolWithEnvelopeScope(guarded, this._workerSessionPrivatePathEnvelope, this.deps.getCwd())
+						: guarded;
 			toolRegistry.set(scoped.name, scoped);
 		}
 		this._toolRegistry = toolRegistry;
@@ -864,6 +876,11 @@ export class RuntimeBuilder {
 			? mapToolNamesForPlatform(options.activeToolNames)
 			: [...previousActiveToolNames];
 		const nextActiveToolNames = requestedBase.filter((name) => isAllowedTool(name));
+		if (this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") {
+			for (const name of ["bash", "write", "edit", "delegate"]) {
+				if (this._toolRegistry.has(name)) nextActiveToolNames.push(name);
+			}
+		}
 
 		const persistentAutoActivated: string[] = [];
 		if (allowedToolNames) {
@@ -1483,6 +1500,7 @@ export class RuntimeBuilder {
 				const delegatePromptGuidelineWarnings: string[] = [];
 				const delegateToolDefinition = createDelegateToolDefinition({
 					caller: { kind: "session_root" },
+					getExecutionMode: () => this.deps.getSettingsManager().getEdgeSettings().mode,
 					resolveMessageReplayScope: () => {
 						const sessionManager = this.deps.getSessionManager();
 						return {
@@ -1553,7 +1571,12 @@ export class RuntimeBuilder {
 					execute: (script, scriptArgs, signal) => {
 						const executionCwd = this._taskDirectories.cwd;
 						const authorizedCwd = authorizedScriptCwds.get(script);
-						if (script.danger && authorizedCwd && authorizedCwd !== executionCwd) {
+						if (
+							script.danger &&
+							authorizedCwd &&
+							authorizedCwd !== executionCwd &&
+							this.deps.getSettingsManager().getEdgeSettings().mode !== "yolo"
+						) {
 							throw new Error(
 								`Execution cwd changed from authorized "${authorizedCwd}" to "${executionCwd}". Reauthorization required.`,
 							);

@@ -184,6 +184,8 @@ export class ResearchLaneController {
 			});
 			const maxUsd = clampLaneMaxUsd(settings.maxUsd, this.deps.getCapabilityEnvelope()?.maxEstimatedUsd);
 			const activeToolSurface = createLaneToolSurface({
+				yolo: this.deps.getSettingsManager().getEdgeSettings().mode === "yolo",
+				denyCommands: this.deps.getSettingsManager().getEdgeSettings().deny,
 				cwd: this.deps.getCwd(),
 				profile: laneProfile,
 				deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),

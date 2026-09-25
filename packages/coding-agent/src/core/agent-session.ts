@@ -2130,6 +2130,7 @@ export class AgentSession {
 			},
 		});
 		this._toolGate = new ToolGateController({
+			getExecutionMode: () => this.settingsManager.getEdgeSettings().mode,
 			gateSelfCompaction: (toolName, assistantMessage) =>
 				this._selfCompaction.gateToolCall(toolName, assistantMessage),
 			getMutationScope: () => this.mutationScope,
@@ -3049,10 +3050,12 @@ export class AgentSession {
 
 	private _edgeDeps(): SessionEdgeDeps {
 		return {
+			getMode: () => this.settingsManager.getEdgeSettings().mode,
 			getBranch: () => this.sessionManager.getBranch(),
 			getEdgeRecords: () =>
 				this.sessionManager.getCustomEntriesOnBranch([EDGE_GRANT_CUSTOM_TYPE, EDGE_REVOKE_CUSTOM_TYPE]),
 			getSettingsAllow: () => this.settingsManager.getEdgeSettings().allow,
+			getDenyCommands: () => this.settingsManager.getEdgeSettings().deny,
 			appendCustomEntry: (customType, data) => this.sessionManager.appendCustomEntry(customType, data),
 			getCwd: () => this._cwd,
 			isChildSession: () => this._isChildSession,
@@ -4317,7 +4320,10 @@ export class AgentSession {
 		if (requested.includes("skill")) {
 			requested.push("skillify", "skill_audit");
 		}
-		const capabilityFiltered = filterToolNamesForCapability(requested, this.getModelCapabilityProfile(), this.model);
+		const capabilityFiltered =
+			this.settingsManager.getEdgeSettings().mode === "yolo"
+				? requested
+				: filterToolNamesForCapability(requested, this.getModelCapabilityProfile(), this.model);
 
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];

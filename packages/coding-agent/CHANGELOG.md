@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- `edge.mode: "yolo"` gives root sessions and delegated lanes broad harness tool execution, including shell and native writes, while catastrophic machine commands and `edge.deny` command rules remain blocked. Repository deletion requires a fresh owner decision. `"guarded"` retains the existing permission gates.
+
 ### Changed
 
 - Delegated workers always receive shell and Git access, including read-only and narrow profiles. Their shell calls use the extreme-destruction edge without semantic operation review.

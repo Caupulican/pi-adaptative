@@ -39,6 +39,7 @@ import { disposeShellExecutionSession } from "../tools/shell-execution-session.t
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { createWriteTool } from "../tools/write.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
+import { classifyYoloBoundary } from "./edge-policy.ts";
 import { evaluateToolGate } from "./gates.ts";
 import { LaneToolUsage } from "./lane-tool-usage.ts";
 import type { WorkerToolAdapterRegistry } from "./worker-tool-adapter-registry.ts";
@@ -103,6 +104,9 @@ export interface LaneToolSurface {
 }
 
 export interface LaneToolSurfaceOptions {
+	/** Bypass harness tool, path, credential, and edge permission gates for this lane. */
+	yolo?: boolean;
+	denyCommands?: readonly string[];
 	cwd: string;
 	profile?: NormalizedProfile;
 	/** Private harness state that generic file tools must never traverse. */
@@ -269,9 +273,9 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	// build), while a lane in its own worktree shares nothing (see tools/file-mutation-queue.ts).
 	const mutationScope = mutationScopeForWorktree(options.cwd);
 	const fileMutationIntents = new FileMutationIntentController({ mutationScope });
-	const writeCapable = options.writeEnabled === true && (options.writePaths?.length ?? 0) > 0;
+	const writeCapable = options.yolo || (options.writeEnabled === true && (options.writePaths?.length ?? 0) > 0);
 	const pythonCapable =
-		options.toolManifests?.some((manifest) => manifest.toolName === PYTHON_LANE_TOOL_NAME) === true;
+		options.yolo || options.toolManifests?.some((manifest) => manifest.toolName === PYTHON_LANE_TOOL_NAME) === true;
 	const builtInCandidateNames = [
 		...READ_ONLY_LANE_TOOL_NAMES,
 		...(options.readMemory ? [WORKER_MEMORY_READ_TOOL_NAME] : []),
@@ -293,24 +297,29 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	if (unmaterializedGrantTool) {
 		throw new Error(`Compiled lane grant references unmaterializable tool '${unmaterializedGrantTool}'.`);
 	}
-	const deniedTools = candidateNames.filter((name) =>
-		options.grant ? !compiledToolNames.has(name) : matchesResourceProfilePattern(name, patterns.block),
-	);
-	const unboundAllowPatterns = options.grant
+	const deniedTools = options.yolo
 		? []
-		: patterns.allow.filter(
-				(pattern) => !candidateNames.some((name) => matchesResourceProfilePattern(name, [pattern])),
+		: candidateNames.filter((name) =>
+				options.grant ? !compiledToolNames.has(name) : matchesResourceProfilePattern(name, patterns.block),
 			);
-	const allowedTools = options.grant
-		? candidateNames.filter((name) => compiledToolNames.has(name))
-		: candidateNames.filter(
-				(name) =>
-					(patterns.allow.length === 0 || matchesResourceProfilePattern(name, patterns.allow)) &&
-					!matchesResourceProfilePattern(name, patterns.block),
-			);
+	const unboundAllowPatterns =
+		options.yolo || options.grant
+			? []
+			: patterns.allow.filter(
+					(pattern) => !candidateNames.some((name) => matchesResourceProfilePattern(name, [pattern])),
+				);
+	const allowedTools = options.yolo
+		? candidateNames
+		: options.grant
+			? candidateNames.filter((name) => compiledToolNames.has(name))
+			: candidateNames.filter(
+					(name) =>
+						(patterns.allow.length === 0 || matchesResourceProfilePattern(name, patterns.allow)) &&
+						!matchesResourceProfilePattern(name, patterns.block),
+				);
 	const allowedToolSet = new Set<string>(allowedTools);
 	const manifestsByName = new Map(options.toolManifests?.map((manifest) => [manifest.toolName, manifest]) ?? []);
-	if (options.grant?.allowedTools.some((name) => !manifestsByName.has(name))) {
+	if (!options.yolo && options.grant?.allowedTools.some((name) => !manifestsByName.has(name))) {
 		throw new Error("Compiled lane grant references a tool without a capability manifest.");
 	}
 	const gateway = options.grant
@@ -322,7 +331,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			})
 		: undefined;
 	const toolUsage = new LaneToolUsage(gateway ? (usage) => gateway.recordUsage(usage) : undefined);
-	const deniedPaths = options.deniedPaths?.map((entry) => path.resolve(entry));
+	const deniedPaths = options.yolo ? undefined : options.deniedPaths?.map((entry) => path.resolve(entry));
 	const privatePathBoundary =
 		deniedPaths && deniedPaths.length > 0
 			? {
@@ -401,6 +410,24 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			// Git freedom is the orchestrator's decision, applied through checkEdge at dispatch.
 			if (!allowedToolSet.has(toolCall.name)) {
 				return { block: true, reason: `Lane tool '${toolCall.name}' is outside the materialized UAC surface.` };
+			}
+			if (options.yolo) {
+				const boundary = classifyYoloBoundary({
+					toolName: toolCall.name,
+					args,
+					cwd: options.cwd,
+					scopeCwd: options.cwd,
+					denyCommands: options.denyCommands,
+				});
+				return boundary
+					? {
+							block: true,
+							reason:
+								boundary.kind === "confirm"
+									? `Owner approval required: ${boundary.reason}`
+									: `YOLO hardline: ${boundary.reason}`,
+						}
+					: undefined;
 			}
 			if (gateway) {
 				const manifest = manifestsByName.get(toolCall.name);

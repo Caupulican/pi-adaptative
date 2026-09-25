@@ -338,6 +338,35 @@ describe("native worker autonomy", () => {
 		}
 	});
 
+	it("YOLO lets a narrow readOnly worker write when worker writes are otherwise disabled", async () => {
+		const harness = await createHarness({
+			initialActiveToolNames: ["read", "delegate"],
+			settings: { edge: { mode: "yolo" }, workerDelegation: { enabled: false, writeEnabled: false } },
+		});
+		const output = join(harness.tempDir, "yolo-worker.txt");
+		let materializedTools: string[] = [];
+		try {
+			harness.setResponses([
+				(context) => {
+					materializedTools = (context.tools ?? []).map((tool) => tool.name);
+					return fauxAssistantMessage([fauxToolCall("write", { path: output, content: "autonomous" })], {
+						stopReason: "toolUse",
+					});
+				},
+				fauxAssistantMessage('{"summary":"wrote the file","status":"completed"}'),
+			]);
+			const run = await harness.session.runWorkerDelegationOnce({
+				instructions: "Write the requested file.",
+				authority: { readOnly: true, toolNames: ["read"] },
+			});
+			expect(run.started).toBe(true);
+			expect(materializedTools).toEqual(expect.arrayContaining(["read", "write", "edit", "bash"]));
+			expect(readFileSync(output, "utf-8")).toBe("autonomous");
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
 	it("rejects an explicit tool override that the active host policy cannot materialize", async () => {
 		const harness = await createHarness({
 			settings: {

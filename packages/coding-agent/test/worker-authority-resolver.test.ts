@@ -126,6 +126,32 @@ describe("resolveWorkerAuthority", () => {
 			}),
 		).toEqual({ ok: false, reason: `orchestration_tool_capability_missing:${toolName}` });
 	});
+	it("YOLO gives a read-only narrow worker the native write tools and process access", () => {
+		const resolution = resolveWorkerAuthority({
+			yolo: true,
+			authority: { readOnly: true, toolNames: ["read"], capabilities: ["filesystem.read"] },
+			foregroundModel: model,
+			foregroundToolNames: ["read"],
+			foregroundEnvelope: { id: "parent", capabilities: ["filesystem.read"], deniedTools: ["write"] },
+			modelRegistry,
+			isModelExhausted: () => false,
+		});
+		expect(resolution.ok).toBe(true);
+		if (!resolution.ok) throw new Error(resolution.reason);
+		const plan = buildWorkerExecutionPlan({
+			yolo: true,
+			profile: resolution.shipment.profile,
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: false,
+			settings: { enabled: true, writeEnabled: false, maxUsd: 1, maxWallClockMs: 120_000, maxConcurrent: 4 },
+		});
+		expect(plan.toolManifests.map((entry) => entry.toolName)).toEqual(
+			expect.arrayContaining(["read", "write", "edit", "bash"]),
+		);
+		expect(plan.writeEnabled).toBe(true);
+		expect(plan.processEnabled).toBe(true);
+	});
 	it("makes every adaptive worker a leaf even when an ordinary tool list is narrowed", () => {
 		const resolution = resolveWorkerAuthority({
 			authority: { toolNames: ["read", "bash"] },

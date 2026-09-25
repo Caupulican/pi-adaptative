@@ -604,11 +604,15 @@ const MAX_BACKGROUND_TOOL_CALL_AFTER_MS = 3_600_000;
 
 /** The edge (`src/core/autonomy/edge-policy.ts`): operation classes this machine grants standing. */
 export interface EdgeSettings {
-	allow?: string[]; // default: all EDGE_CLASSES (YOLO); an explicit list, including [], replaces the default; unknown names are ignored
+	mode?: "guarded" | "yolo"; // default: guarded; yolo bypasses harness execution permission gates
+	allow?: string[]; // default: all EDGE_CLASSES; an explicit list, including [], replaces the default; unknown names are ignored
+	deny?: string[]; // shell-command globs that remain blocked in yolo; empty by default
 }
 
 export interface ResolvedEdgeSettings {
+	mode: "guarded" | "yolo";
 	allow: EdgeClass[];
+	deny: string[];
 }
 
 /** Windows shell contract engine tier (`src/core/tools/windows-shell-engine.ts`). */
@@ -4700,13 +4704,25 @@ export class SettingsManager {
 			this.globalSettingsLoadError ?? this.projectSettingsLoadError ?? this.directoryProfileSettingsLoadError;
 		// Load diagnostics already report the file error. Withhold standing grants, but keep
 		// provider planning and ordinary tools available so the session can diagnose and repair it.
-		if (loadError || (this.settings.edge !== undefined && !isPlainRecord(this.settings.edge))) return { allow: [] };
+		if (loadError || (this.settings.edge !== undefined && !isPlainRecord(this.settings.edge)))
+			return { mode: "guarded", allow: [], deny: [] };
 		const configured = this.settings.edge?.allow;
+		const configuredDeny = this.settings.edge?.deny;
+		if (
+			configuredDeny !== undefined &&
+			(!Array.isArray(configuredDeny) || configuredDeny.some((value) => typeof value !== "string" || !value.trim()))
+		) {
+			return { mode: "guarded", allow: [], deny: [] };
+		}
 		// Resolve once here: foreground, worker inheritance and provider authority context all
 		// consume these grants. Autonomy/learning presets never narrow execution authority.
 		const allow =
 			configured === undefined ? EDGE_CLASSES : Array.isArray(configured) ? configured.filter(isEdgeClass) : [];
-		return { allow: [...new Set(allow)] };
+		return {
+			mode: this.settings.edge?.mode === "yolo" ? "yolo" : "guarded",
+			allow: [...new Set(allow)],
+			deny: [...new Set((configuredDeny ?? []).map((value) => value.trim()))],
+		};
 	}
 
 	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings {

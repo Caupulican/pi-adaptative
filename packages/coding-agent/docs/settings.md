@@ -119,17 +119,27 @@ The agent is instructed to edit only that source checkout, preserve unrelated ch
 
 Use `/settings` → **Autonomy** to choose one preset and the foreground goal-loop round budget, or `/autonomy off|safe|balanced|full` to switch the preset while preserving the configured round budget. Main-session reflection is enabled in every mode, including `off`; eligible turns queue a durable root-only cue for the orchestrator's next ordinary current-session provider turn. It does not create a separate or background model request, and increasing autonomy never disables learning. `full` additionally grants standing authority for broader user/project skill, extension/tool, autonomy-setting, and authorized self-modification work when validation and rollback evidence are recorded.
 
-Execution uses YOLO defaults independently of the learning preset: all registered edge classes have standing grants when `edge.allow` is omitted. Foreground tools, delegated workers, and model authority context consume the same grants. The agent executes covered work without asking again, while retaining the task's explicit scope, restrictions, and release conditions. `/autonomy status` shows learning policy; `/edge list` shows execution grants.
+Execution authority is independent of the learning preset. The default `edge.allow` grants every registered edge class, while the default `edge.mode: "guarded"` still applies tool, path, credential, and semantic permission gates. Set `edge.mode: "yolo"` to bypass those harness execution gates for the foreground and delegated lanes. `/autonomy status` shows learning policy; `/edge list` shows standing edge grants.
 
 #### Execution authority
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `edge.allow` | string[] | All registered edge classes | Standing grants: `git.publish`, `package.publish`, `package.install`, `destructive.fs`, `settings.authority`, `toolkit.script`. An explicit array replaces the default; `[]` opts into confirmation for ungranted edge operations. Unknown names are ignored. |
+| `edge.mode` | `"guarded" \| "yolo"` | `"guarded"` | `"yolo"` bypasses routine harness execution permission gates for root and delegated lanes. The hardline boundary, explicit command denies, and fresh owner approval for repository deletion still apply. |
+| `edge.allow` | string[] | All registered edge classes | Standing grants: `git.publish`, `package.publish`, `package.install`, `destructive.fs`, `settings.authority`, `toolkit.script`, `operation.irreversible`. An explicit array replaces the default; `[]` opts into confirmation for ungranted edge operations in guarded mode. Unknown names are ignored. |
+| `edge.deny` | string[] | `[]` | Exact shell-command globs to block even in YOLO; `*` matches any span and `?` one character. A malformed deny list disables YOLO until corrected. |
 
 No per-operation `goal grant_edge` call or `/edge allow all` command is needed with the default policy. Settings grants survive reload and compaction. To restrict execution, set `edge.allow` explicitly in the desired settings scope; `/edge revoke` removes session and instruction grants, while standing settings grants are changed in settings. An unreadable settings file reports its load error and withholds standing grants until repaired and reloaded. Provider turns and ordinary diagnostic tools remain available; the error never silently replaces restrictions with defaults.
 
-These grants control operation approval. Explicit tool/path restrictions, worker ownership, credential-value protection, cancellation, and verification of results still apply. A failed check calls for repair and re-verification; a grant never converts failure into success. Optional extension-provided permission dialogs belong to the extension and are not governed by `edge.allow`.
+In guarded mode, these grants control operation approval. Explicit tool/path restrictions, worker ownership, credential-value protection, cancellation, and verification of results still apply. YOLO bypasses routine tool, path, credential, edge, System One operation, acquisition, script, and mutation-acceptance permission checks, including extension `tool_call` vetoes. It blocks machine-wide destructive commands and `edge.deny` matches before execution. Deleting the repository requires a fresh owner decision every time; workers and headless sessions cannot make that decision. Cancellation, accounting, unavailable models or tools, and task budgets can still stop work. The command boundary inspects direct tool arguments; it is not OS isolation against destructive code hidden inside an interpreter or script.
+
+```json
+{
+  "edge": { "mode": "yolo" }
+}
+```
+
+Start a new session or run `/reload` after changing `edge.mode` so the tool registry reflects the mode.
 
 ```json
 {

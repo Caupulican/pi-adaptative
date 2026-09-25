@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BeforeToolCallResult } from "@caupulican/pi-agent-core";
-import { fauxAssistantMessage } from "@caupulican/pi-ai/faux";
+import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CapabilityEnvelope, GateOutcome } from "../src/core/autonomy/contracts.ts";
 import type { ExtensionRunner } from "../src/core/extensions/index.ts";
@@ -309,5 +309,55 @@ describe("ToolGateController publishes one gate outcome per tool call", () => {
 		expect(edgeCalls).toBe(1);
 		expect(outcomes).toHaveLength(1);
 		expect(outcomes[0]).toMatchObject({ outcome: "allow" });
+	});
+
+	it("YOLO admits a tool despite harness permission gates while guarded mode still blocks it", async () => {
+		const { cwd, outside } = scope();
+		const envelope: CapabilityEnvelope = {
+			id: "narrow",
+			capabilities: [],
+			deniedTools: ["read"],
+			allowedPaths: [cwd],
+		};
+		const checked: string[] = [];
+		const makeController = (mode: "guarded" | "yolo") =>
+			new ToolGateController({
+				getExecutionMode: () => mode,
+				gateSelfCompaction: () => ({ block: true, reason: "compaction" }),
+				maybeEscalateToolCall: () => ({ block: true, reason: "router" }),
+				getCwd: () => cwd,
+				getCapabilityEnvelope: () => envelope,
+				recordGateOutcome: () => {},
+				getExtensionRunner: () => fakeRunner([]),
+				checkEdge: async () => {
+					checked.push("edge");
+					return mode === "yolo" ? undefined : { block: true, reason: "edge" };
+				},
+				checkOperation: async () => {
+					checked.push("operation");
+					return { block: true, reason: "operation" };
+				},
+				checkDirectScriptExecution: () => {
+					checked.push("script");
+					return { block: true, reason: "script" };
+				},
+				checkExternalAcquisition: async () => {
+					checked.push("acquisition");
+					return { block: true, reason: "acquisition" };
+				},
+			});
+		const call = (controller: ToolGateController) =>
+			controller.beforeToolCall(
+				{
+					assistantMessage: fauxAssistantMessage(""),
+					toolCall: fauxToolCall("read", { path: join(outside, "file") }),
+					args: { path: join(outside, "file") },
+					context: { systemPrompt: "test", messages: [], tools: [] },
+				} as Parameters<typeof controller.beforeToolCall>[0],
+				undefined,
+			);
+		expect(await call(makeController("guarded"))).toMatchObject({ block: true });
+		expect(await call(makeController("yolo"))).toBeUndefined();
+		expect(checked).toEqual(["edge"]);
 	});
 });

@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
+import { HARNESS_CAPABILITIES } from "../capability-contract.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { WORKER_MEMORY_READ_TOOL_NAME, WORKER_ROOT_MEMORY_TOOL_NAMES } from "../memory/worker-memory-tools.ts";
 import type {
@@ -23,6 +24,11 @@ import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-mac
 const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const REPO_READ_TOOL_NAME = "repo_read";
 const WRITE_TOOL_NAMES = ["write", "edit"] as const;
+
+/** The YOLO lane still excludes root-only control-plane capabilities. */
+export const YOLO_WORKER_CAPABILITIES = HARNESS_CAPABILITIES.filter(
+	(capability) => capability !== "workflow.delegate" && capability !== "memory.mutate",
+);
 
 /** Capabilities that put a lane's read paths in play (repo.read reads the repository under them). */
 function isReadPathCapability(capability: HarnessCapability): boolean {
@@ -112,6 +118,7 @@ export function narrowWorkerExecutionPlan(
 }
 
 export function buildWorkerExecutionPlan(args: {
+	yolo?: boolean;
 	profile: OrchestrationProfile;
 	settings: ResolvedWorkerDelegationSettings;
 	cwd: string;
@@ -126,23 +133,35 @@ export function buildWorkerExecutionPlan(args: {
 	const cwd = args.profile.workspacePath
 		? resolveWorkerWorkspacePath(parentCwd, args.profile.workspacePath)
 		: resolveWorkerWorkspacePath(parentCwd, args.executionCwd ?? parentCwd);
-	const pathScopes = args.profile.workspacePath ? [cwd] : workerMachinePathRoots(parentCwd);
+	const pathScopes = args.yolo || !args.profile.workspacePath ? workerMachinePathRoots(parentCwd) : [cwd];
 	const profileToolNames = new Set(
 		mapToolNamesForPlatform(args.profile.toolNames).filter((name) => !WORKER_ROOT_MEMORY_TOOL_NAMES.has(name)),
 	);
+	if (args.yolo)
+		for (const name of [
+			...READ_TOOL_NAMES,
+			REPO_READ_TOOL_NAME,
+			...WRITE_TOOL_NAMES,
+			"python",
+			STABLE_SHELL_TOOL_NAME,
+		])
+			profileToolNames.add(name);
 	const grantsRead =
+		args.yolo ||
 		args.profile.capabilityCeiling.includes("filesystem.read") ||
 		args.profile.capabilityCeiling.includes("worktree.read");
-	const grantsRepoRead = args.profile.capabilityCeiling.includes("repo.read");
+	const grantsRepoRead = args.yolo || args.profile.capabilityCeiling.includes("repo.read");
 	const writeEligible =
-		args.settings.writeEnabled &&
+		(args.yolo || args.settings.writeEnabled) &&
 		(args.profile.capabilityCeiling.includes("filesystem.write") ||
-			args.profile.capabilityCeiling.includes("worktree.mutate"));
+			args.profile.capabilityCeiling.includes("worktree.mutate") ||
+			args.yolo);
 	const memoryEligible =
 		args.memoryEnabled &&
 		profileToolNames.has(WORKER_MEMORY_READ_TOOL_NAME) &&
 		args.profile.capabilityCeiling.includes("memory.query");
 	const processEligible =
+		args.yolo ||
 		args.profile.capabilityCeiling.includes("process.exec") ||
 		args.profile.capabilityCeiling.includes("tests.execute");
 	const enabledProcessToolNames = processEligible
@@ -152,7 +171,9 @@ export function buildWorkerExecutionPlan(args: {
 				...(profileToolNames.has(STABLE_SHELL_TOOL_NAME) ? [STABLE_SHELL_TOOL_NAME] : []),
 			]
 		: [];
-	const enabledAdapterToolNames = (args.workerToolAdapterNames ?? []).filter((name) => profileToolNames.has(name));
+	const enabledAdapterToolNames = (args.workerToolAdapterNames ?? []).filter(
+		(name) => args.yolo || profileToolNames.has(name),
+	);
 	const enabledToolNames = [
 		...(grantsRead ? READ_TOOL_NAMES : []),
 		...(grantsRepoRead ? [REPO_READ_TOOL_NAME] : []),
@@ -161,7 +182,16 @@ export function buildWorkerExecutionPlan(args: {
 		...enabledProcessToolNames,
 		...enabledAdapterToolNames,
 	];
-	const toolManifests = buildLaneToolManifests(args.profile, enabledToolNames);
+	const toolManifests = buildLaneToolManifests(
+		args.yolo
+			? {
+					...args.profile,
+					toolNames: [...new Set([...args.profile.toolNames, ...enabledToolNames])],
+					capabilityCeiling: YOLO_WORKER_CAPABILITIES,
+				}
+			: args.profile,
+		enabledToolNames,
+	);
 	const grantedTools = new Set(toolManifests.map((manifest) => manifest.toolName));
 	const readEnabled = toolManifests.some((manifest) => manifest.capabilities.some(isReadPathCapability));
 	const writeEnabled = grantedTools.has("write") || grantedTools.has("edit");
@@ -182,13 +212,15 @@ export function buildWorkerExecutionPlan(args: {
 		requiredCapabilities: [...new Set(toolManifests.flatMap((manifest) => manifest.capabilities))],
 		readPaths: readEnabled ? pathScopes : [],
 		writePaths: writeEnabled ? pathScopes : [],
-		deniedPaths: [
-			...new Set(
-				[...args.deniedPaths, join(cwd, ".pi", "settings.json")].map((entry) =>
-					resolveWorkerWorkspacePath(cwd, entry),
-				),
-			),
-		],
+		deniedPaths: args.yolo
+			? []
+			: [
+					...new Set(
+						[...args.deniedPaths, join(cwd, ".pi", "settings.json")].map((entry) =>
+							resolveWorkerWorkspacePath(cwd, entry),
+						),
+					),
+				],
 		readMemory: memoryEligible && grantedTools.has(WORKER_MEMORY_READ_TOOL_NAME),
 		writeEnabled,
 		processEnabled,
@@ -197,6 +229,7 @@ export function buildWorkerExecutionPlan(args: {
 }
 
 export function compileWorkerExecutionGrant(args: {
+	yolo?: boolean;
 	target: { objectiveId: string; taskId: string; attemptId: string };
 	profile: OrchestrationProfile;
 	plan: WorkerExecutionPlan;
@@ -210,7 +243,7 @@ export function compileWorkerExecutionGrant(args: {
 		role: args.profile.role,
 		requiredCapabilities: args.plan.requiredCapabilities,
 		requestedCapabilities: args.plan.requiredCapabilities,
-		authorityCapabilities: args.profile.capabilityCeiling,
+		authorityCapabilities: args.yolo ? args.plan.requiredCapabilities : args.profile.capabilityCeiling,
 		requestedTools: args.plan.toolManifests.map((manifest) => manifest.toolName),
 		toolManifests: args.plan.toolManifests,
 		resources: args.resources,

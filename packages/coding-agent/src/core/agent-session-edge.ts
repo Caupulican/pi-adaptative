@@ -7,6 +7,7 @@ import type { BeforeToolCallResult } from "@caupulican/pi-agent-core";
 import type { SessionEntry } from "@caupulican/pi-agent-core/node";
 import {
 	classifyAllEdgeOperations,
+	classifyYoloBoundary,
 	collectEdgeGrants,
 	EDGE_GRANT_CUSTOM_TYPE,
 	EDGE_REVOKE_CUSTOM_TYPE,
@@ -23,10 +24,12 @@ import {
 } from "./autonomy/edge-policy.ts";
 
 export interface SessionEdgeDeps {
+	getMode?(): "guarded" | "yolo";
 	getBranch(): readonly SessionEntry[];
 	/** The branch's edge grant and revoke records in order, read incrementally (see `getCustomEntriesOnBranch`). */
 	getEdgeRecords(): readonly SessionEntry[];
 	getSettingsAllow(): readonly string[];
+	getDenyCommands?(): readonly string[];
 	appendCustomEntry(customType: string, data: unknown): void;
 	getCwd(): string;
 	isChildSession(): boolean;
@@ -108,6 +111,7 @@ export async function enforceSessionEdgeOperation(
 	toolName = "operation",
 	signal?: AbortSignal,
 ): Promise<{ authorized: boolean; decision?: EdgeDecision; reason?: string }> {
+	if (deps.getMode?.() === "yolo") return { authorized: true };
 	const grants = sessionEdgeGrants(deps);
 	if (isEdgeOperationGranted(operation, grants)) {
 		return { authorized: true };
@@ -177,6 +181,30 @@ export async function enforceSessionEdge(
 	signal: AbortSignal | undefined,
 ): Promise<BeforeToolCallResult | undefined> {
 	const scopeCwd = deps.getCwd();
+	if (deps.getMode?.() === "yolo") {
+		const boundary = classifyYoloBoundary({
+			toolName,
+			args,
+			cwd: executionCwd ?? scopeCwd,
+			scopeCwd,
+			denyCommands: deps.getDenyCommands?.(),
+		});
+		if (!boundary) return undefined;
+		if (boundary.kind === "block") return { block: true, reason: `YOLO hardline: ${boundary.reason}` };
+		const handler = deps.isChildSession() ? undefined : deps.getConfirmation();
+		if (!handler) return { block: true, reason: `Owner approval required: ${boundary.reason}` };
+		const decision = await handler(
+			{
+				class: "destructive.fs",
+				operation: String((args as { command?: unknown })?.command ?? toolName),
+				reason: boundary.reason,
+				toolName,
+			},
+			signal,
+		);
+		signal?.throwIfAborted();
+		return decision === "deny" ? { block: true, reason: `Owner denied: ${boundary.reason}` } : undefined;
+	}
 	const classified = classifyAllEdgeOperations(
 		{ toolName, args, cwd: executionCwd ?? scopeCwd, scopeCwd },
 		{ includeConditional: true },

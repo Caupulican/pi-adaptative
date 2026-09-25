@@ -12,6 +12,7 @@ import type { Agent, BashExecutionMessage } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getShellEnv } from "../utils/shell.ts";
 import type { ManagedToolResolver } from "../utils/tools-manager.ts";
+import { classifyYoloBoundary } from "./autonomy/edge-policy.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { withoutHarnessLaunchEnv } from "./harness-environment.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -97,6 +98,24 @@ export class BashExecutionController {
 		const platform = options?.platform ?? process.platform;
 		const enableGitFilter = !options?.operations && !commandPrefix && !shellPath;
 		const cwd = this.deps.getSessionManager().getCwd();
+		const edgeSettings = this.deps.getSettingsManager().getEdgeSettings?.();
+		if (edgeSettings?.mode === "yolo") {
+			const boundary = classifyYoloBoundary({
+				toolName: "bash",
+				args: { command },
+				cwd,
+				scopeCwd: cwd,
+				denyCommands: edgeSettings.deny,
+			});
+			if (boundary) {
+				this._bashAbortControllers.delete(abortController);
+				throw new Error(
+					boundary.kind === "confirm"
+						? `Owner approval required: ${boundary.reason}`
+						: `YOLO hardline: ${boundary.reason}`,
+				);
+			}
+		}
 		const inheritedEnvironment: NodeJS.ProcessEnv = withoutHarnessLaunchEnv({
 			...process.env,
 			...this.deps.getEnvironment?.(cwd),
