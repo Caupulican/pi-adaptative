@@ -2,8 +2,9 @@
  * The operation gate: one check per tool call, after the envelope and the edge. With System One bound it asks
  * about every operation {@link triageOperation} sends to it, caches the verdict for the rest
  * of the turn (a repeated call is not judged twice), and applies it: the operator's standing grant of
- * `operation.irreversible` authorizes; otherwise the root asks the operator at the edge.
- * Workers use the deterministic extreme-destruction edge directly, without semantic command review.
+ * `operation.irreversible` authorizes; otherwise the root asks the operator at the edge and a worker
+ * is refused, since only the root can reach the owner. A worker under the standing grant is not judged
+ * at all: the verdict could only authorize, and a System One call per shell command would stall it.
  */
 
 import { tmpdir } from "node:os";
@@ -28,7 +29,7 @@ export interface OperationGateDeps {
 	getTurnKey(): string;
 	/** Whether the operator granted `operation.irreversible` (standing authority). */
 	isGranted(): boolean;
-	/** Ask the operator at the edge; absent for a worker, which is refused instead. */
+	/** Ask the operator at the edge; never used for a worker, which is refused instead. */
 	askOperator?(operation: EdgeOperation, signal?: AbortSignal): Promise<{ authorized: boolean; reason?: string }>;
 	notify(message: string): void;
 }
@@ -49,7 +50,7 @@ export class OperationGate {
 		actor: "root" | "worker",
 		signal?: AbortSignal,
 	): Promise<{ block: true; reason: string } | undefined> {
-		if (actor === "worker") return undefined;
+		if (actor === "worker" && this.deps.isGranted()) return undefined;
 		const scopeCwd = this.deps.getScopeCwd();
 		const triage = triageOperation({ toolName, args, cwd, scopeCwd, tempDir: tmpdir() });
 		if (triage.kind === "decided") return undefined;
@@ -77,7 +78,7 @@ export class OperationGate {
 			this.verdicts.set(key, verdict);
 		}
 		const shown = triage.operation.replace(/\s+/g, " ").trim();
-		const subject = shown.length <= 160 ? shown : `${shown.slice(0, 159)}…`;
+		const subject = `${actor === "worker" ? "a worker's " : ""}${shown.length <= 160 ? shown : `${shown.slice(0, 159)}…`}`;
 		if (verdict.action === "proceed") {
 			if (verdict.notable) this.deps.notify(`System One: ${subject}: ${verdict.finding}; it runs.`);
 			return undefined;
@@ -89,11 +90,11 @@ export class OperationGate {
 			return undefined;
 		}
 		const refusal = `System One ${verdict.action === "refuse" ? "refused" : "held"} ${subject}: ${verdict.finding}.`;
-		if (verdict.action === "refuse" || !this.deps.askOperator) {
+		if (verdict.action === "refuse" || actor === "worker" || !this.deps.askOperator) {
 			this.deps.notify(refusal);
 			return {
 				block: true,
-				reason: `${refusal} Ask the owner before running it, or do the work another way.`,
+				reason: `${refusal} ${actor === "worker" ? "Report the unresolved boundary to the parent or do the work another way." : "Ask the owner before running it, or do the work another way."}`,
 			};
 		}
 		const answer = await this.deps.askOperator(

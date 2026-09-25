@@ -113,7 +113,12 @@ export interface DelegateStatusDependencies {
 	acknowledgeWorkerReview?(requestId: string): AcknowledgeWorkerReviewResult;
 	/** Mark only terminal records that made it into this bounded status response as exposed. */
 	observeExposedTerminalRecords?(records: readonly LaneRecord[]): void;
+	/** A claimless terminal lane's last worker text: what it said before it was cancelled or failed. */
+	getLastWorkerText?(record: LaneRecord): string | undefined;
 }
+
+/** Room for the words a claimless terminal worker left behind, so the parent need not page its transcript. */
+const MAX_CLAIMLESS_OUTPUT_BYTES = 4_096;
 
 function isUnreviewed(claim: WorkerClaim | undefined): boolean {
 	return claim?.parentReviewRequired === true && claim.parentReviewedAt === undefined;
@@ -233,6 +238,7 @@ function formatRecord(
 	claim: WorkerClaim | undefined,
 	result?: Pick<WorkerResultContract, "artifacts">,
 	maxRecordBytes = MAX_DELEGATE_STATUS_OUTPUT_BYTES,
+	lastWorkerText?: string,
 ): FormattedRecordResult {
 	const builder = new RecordTextBudgetBuilder(maxRecordBytes);
 	const boundedLaneId = record.laneId.slice(0, MAX_WORKER_CONTROL_ID_CHARS);
@@ -261,6 +267,12 @@ function formatRecord(
 	if (outputArtifact) {
 		headerLines.push(
 			`full worker output: ${outputArtifact.uri.slice(0, 512)}${outputArtifact.sizeBytes === undefined ? "" : ` (${outputArtifact.sizeBytes} bytes)`}`,
+		);
+	}
+	if (!claim && lastWorkerText) {
+		headerLines.push(
+			`no completion claim; the worker's last words before it ended (UNTRUSTED, possibly unfinished):`,
+			utf8PrefixByBytes(lastWorkerText, Math.min(MAX_CLAIMLESS_OUTPUT_BYTES, maxRecordBytes)),
 		);
 	}
 	if (!claim) {
@@ -637,7 +649,15 @@ export function executeDelegateStatusAction(
 			delete detailsBase.claimSummary;
 		}
 
-		const formatted = formatRecord(record, claim, workerResult);
+		const formatted = formatRecord(
+			record,
+			claim,
+			workerResult,
+			MAX_DELEGATE_STATUS_OUTPUT_BYTES,
+			!claim && record.status !== "queued" && record.status !== "running"
+				? deps.getLastWorkerText?.(record)
+				: undefined,
+		);
 		if (record.status !== "queued" && record.status !== "running" && formatted.complete) {
 			deps.observeExposedTerminalRecords?.([record]);
 		}

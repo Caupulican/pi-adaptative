@@ -391,6 +391,11 @@ export interface WorkerAgentControlPort {
 	): WorkerAgentRetireResult;
 	/** The lane of the agent's latest attempt, so a status question about an agent has one exact answer. */
 	resolveWorkerAgentLane?(agentId: string, scope?: WorkerAgentControlScope): WorkerAgentLaneResolution | undefined;
+	/**
+	 * The agent's last assistant text when `laneId` is still its latest task: what a worker had said
+	 * before a cancellation or failure that left no completion claim. Undefined when there is none.
+	 */
+	readWorkerAgentLastText?(agentId: string, laneId: string, scope?: WorkerAgentControlScope): string | undefined;
 	waitForWorkerAgent(
 		agentId: string,
 		timeoutMs?: number,

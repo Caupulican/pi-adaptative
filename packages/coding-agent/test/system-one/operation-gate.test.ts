@@ -196,11 +196,12 @@ describe("operation gate", () => {
 		expect(await operationGate.check("bash", command, scope, "root")).toBeUndefined();
 	});
 
-	it("lets worker shell use the deterministic extreme-destruction edge without semantic review", async () => {
-		const { operationGate, fake, askOperator } = gate({ answers: { ...OUTWARD, request_authorizes: 0.5 } });
-		expect(
-			await operationGate.check("bash", { command: "git log --simplify-by-decoration" }, scope, "worker"),
-		).toBeUndefined();
+	it("does not judge a worker's command under the standing grant: the verdict could only authorize", async () => {
+		const { operationGate, fake, askOperator } = gate({
+			answers: { ...OUTWARD, request_authorizes: 0.5 },
+			granted: true,
+		});
+		expect(await operationGate.check("bash", command, scope, "worker")).toBeUndefined();
 		expect(fake.calls).toBe(0);
 		expect(askOperator).not.toHaveBeenCalled();
 	});
@@ -213,7 +214,7 @@ describe("operation gate", () => {
 		expect(fake.calls).toBe(1);
 	});
 
-	it("asks the operator for the root and judges a repeat only once per turn", async () => {
+	it("asks the operator for the root, refuses a worker, and judges a repeat only once per turn", async () => {
 		const unsettled = { ...OUTWARD, request_authorizes: 0.5 };
 		const root = gate({ answers: unsettled });
 		expect(await root.operationGate.check("bash", command, scope, "root")).toMatchObject({
@@ -226,6 +227,14 @@ describe("operation gate", () => {
 		);
 		await root.operationGate.check("bash", command, scope, "root");
 		expect(root.fake.calls).toBe(1);
+
+		// Only the root reaches the owner: a worker without the grant is refused, never parked on a prompt.
+		const worker = gate({ answers: unsettled });
+		expect(await worker.operationGate.check("bash", command, scope, "worker")).toMatchObject({
+			block: true,
+			reason: expect.stringContaining("Report the unresolved boundary to the parent"),
+		});
+		expect(worker.askOperator).not.toHaveBeenCalled();
 	});
 
 	it("runs under the operator's standing grant and says what System One found", async () => {

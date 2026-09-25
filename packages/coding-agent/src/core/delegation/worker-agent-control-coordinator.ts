@@ -59,6 +59,7 @@ import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { formatWorkerDispatchWait, type WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
 import { evaluateReusableWorkerTaskAdmission } from "./worker-fleet-limits.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
+import { isWorkerTaskPrompt } from "./worker-runner.ts";
 import { projectWorkerTaskSessionView } from "./worker-task-view.ts";
 import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "./worker-terminal-handoff-coordinator.ts";
 import { workerTerminalOutputArtifact } from "./worker-terminal-output-artifact.ts";
@@ -1289,6 +1290,40 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	resolveWorkerAgentLane(agentId: string, scope: WorkerAgentControlScope = {}): WorkerAgentLaneResolution | undefined {
 		const { attempt } = this.controlledAgentAttempt(agentId, scope);
 		return attempt ? { laneId: attempt.taskId, status: attempt.status } : undefined;
+	}
+
+	readWorkerAgentLastText(agentId: string, laneId: string, scope: WorkerAgentControlScope = {}): string | undefined {
+		this.requireControl();
+		const { attempt } = this.controlledAgentAttempt(agentId, scope);
+		// An older lane's words are not this lane's: only the agent's latest task is read.
+		if (attempt?.taskId !== laneId) return undefined;
+		const agent = this.requireControllableAgent(agentId, scope);
+		const messages = this.conversations
+			.open({
+				agentDir: this.options.agentDir,
+				resumeContext: agent.resumeContext,
+				expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
+			})
+			.getRawTranscript();
+		for (let index = messages.length - 1; index >= 0; index--) {
+			const message = messages[index]!;
+			if (message.role === "user") {
+				// The attempt's own task prompt bounds the search: nothing before it belongs to this lane.
+				const text =
+					typeof message.content === "string"
+						? message.content
+						: message.content.flatMap((content) => (content.type === "text" ? [content.text] : [])).join("");
+				if (isWorkerTaskPrompt(text)) return undefined;
+				continue;
+			}
+			if (message.role !== "assistant") continue;
+			const text = message.content
+				.flatMap((content) => (content.type === "text" ? [content.text] : []))
+				.join("")
+				.trim();
+			if (text) return text;
+		}
+		return undefined;
 	}
 
 	retireWorkerAgent(

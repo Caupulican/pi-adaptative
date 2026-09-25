@@ -30,6 +30,11 @@ export const YOLO_WORKER_CAPABILITIES = HARNESS_CAPABILITIES.filter(
 	(capability) => capability !== "workflow.delegate" && capability !== "memory.mutate",
 );
 
+/** Capabilities that let a lane change files. */
+function isWriteCapability(capability: HarnessCapability): boolean {
+	return capability === "filesystem.write" || capability === "worktree.mutate";
+}
+
 /** Capabilities that put a lane's read paths in play (repo.read reads the repository under them). */
 function isReadPathCapability(capability: HarnessCapability): boolean {
 	return capability === "filesystem.read" || capability === "worktree.read" || capability === "repo.read";
@@ -50,6 +55,8 @@ export interface WorkerExecutionPlan {
 	readMemory: boolean;
 	writeEnabled: boolean;
 	processEnabled: boolean;
+	/** A `readOnly` grant: the lane's shell may run only commands that edit nothing that exists. */
+	shellReadOnly: boolean;
 	budget: RiskBudget;
 }
 
@@ -113,6 +120,7 @@ export function narrowWorkerExecutionPlan(
 			grantedTools.has("run_process") ||
 			grantedTools.has(STABLE_SHELL_TOOL_NAME) ||
 			grantedTools.has("run_toolkit_script"),
+		shellReadOnly: current.shellReadOnly,
 		budget: intersectRiskBudgets(admitted.budget, current.budget),
 	};
 }
@@ -134,6 +142,9 @@ export function buildWorkerExecutionPlan(args: {
 		? resolveWorkerWorkspacePath(parentCwd, args.profile.workspacePath)
 		: resolveWorkerWorkspacePath(parentCwd, args.executionCwd ?? parentCwd);
 	const pathScopes = args.yolo || !args.profile.workspacePath ? workerMachinePathRoots(parentCwd) : [cwd];
+	// A readOnly grant stays read-only in YOLO too: YOLO removes permission prompts, not the parent's
+	// promise that this worker edits nothing.
+	const readOnly = args.profile.readOnly === true;
 	const profileToolNames = new Set(
 		mapToolNamesForPlatform(args.profile.toolNames).filter((name) => !WORKER_ROOT_MEMORY_TOOL_NAMES.has(name)),
 	);
@@ -141,8 +152,7 @@ export function buildWorkerExecutionPlan(args: {
 		for (const name of [
 			...READ_TOOL_NAMES,
 			REPO_READ_TOOL_NAME,
-			...WRITE_TOOL_NAMES,
-			"python",
+			...(readOnly ? [] : [...WRITE_TOOL_NAMES, "python"]),
 			STABLE_SHELL_TOOL_NAME,
 		])
 			profileToolNames.add(name);
@@ -151,11 +161,9 @@ export function buildWorkerExecutionPlan(args: {
 		args.profile.capabilityCeiling.includes("filesystem.read") ||
 		args.profile.capabilityCeiling.includes("worktree.read");
 	const grantsRepoRead = args.yolo || args.profile.capabilityCeiling.includes("repo.read");
-	const writeEligible =
-		(args.yolo || args.settings.writeEnabled) &&
-		(args.profile.capabilityCeiling.includes("filesystem.write") ||
-			args.profile.capabilityCeiling.includes("worktree.mutate") ||
-			args.yolo);
+	const writeEligible = args.yolo
+		? !readOnly
+		: args.settings.writeEnabled && args.profile.capabilityCeiling.some(isWriteCapability);
 	const memoryEligible =
 		args.memoryEnabled &&
 		profileToolNames.has(WORKER_MEMORY_READ_TOOL_NAME) &&
@@ -187,7 +195,9 @@ export function buildWorkerExecutionPlan(args: {
 			? {
 					...args.profile,
 					toolNames: [...new Set([...args.profile.toolNames, ...enabledToolNames])],
-					capabilityCeiling: YOLO_WORKER_CAPABILITIES,
+					capabilityCeiling: readOnly
+						? YOLO_WORKER_CAPABILITIES.filter((capability) => !isWriteCapability(capability))
+						: YOLO_WORKER_CAPABILITIES,
 				}
 			: args.profile,
 		enabledToolNames,
@@ -212,18 +222,19 @@ export function buildWorkerExecutionPlan(args: {
 		requiredCapabilities: [...new Set(toolManifests.flatMap((manifest) => manifest.capabilities))],
 		readPaths: readEnabled ? pathScopes : [],
 		writePaths: writeEnabled ? pathScopes : [],
-		deniedPaths: args.yolo
-			? []
-			: [
-					...new Set(
-						[...args.deniedPaths, join(cwd, ".pi", "settings.json")].map((entry) =>
-							resolveWorkerWorkspacePath(cwd, entry),
-						),
-					),
-				],
+		// Private harness state (credentials, sessions) stays denied in YOLO; only the project settings
+		// file, which guarded mode protects as settings authority, opens up.
+		deniedPaths: [
+			...new Set(
+				[...args.deniedPaths, ...(args.yolo ? [] : [join(cwd, ".pi", "settings.json")])].map((entry) =>
+					resolveWorkerWorkspacePath(cwd, entry),
+				),
+			),
+		],
 		readMemory: memoryEligible && grantedTools.has(WORKER_MEMORY_READ_TOOL_NAME),
 		writeEnabled,
 		processEnabled,
+		shellReadOnly: processEnabled && readOnly,
 		budget,
 	};
 }

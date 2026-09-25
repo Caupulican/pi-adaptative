@@ -854,12 +854,14 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 				{
 					kind: "boolean",
 					id: "meaningful_progress",
-					instruction: "Is the worker making meaningful progress on its mission?",
+					instruction:
+						"Is the worker making meaningful progress on its mission for its `role`? An explorer or verifier progresses by reading, searching and reporting; only an implementer is expected to change files.",
 				},
 				{
 					kind: "boolean",
 					id: "worker_stuck",
-					instruction: "Is the worker stuck or making no progress?",
+					instruction:
+						"Is the worker stuck or making no progress for its `role`? Distinct reads and searches are progress for an explorer or verifier.",
 				},
 				{
 					kind: "boolean",
@@ -874,7 +876,8 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 				{
 					kind: "boolean",
 					id: "needs_independent_verification",
-					instruction: "Is the implementation finished and ready for independent verification?",
+					instruction:
+						"Is the implementation finished and ready for independent verification? An explorer or verifier writes no implementation, so for those roles the answer is no.",
 				},
 				{
 					kind: "boolean",
@@ -932,9 +935,15 @@ export const STEERING_QUESTION_PACKS: Record<string, SteeringQuestionPack> = {
 			{
 				id: "meaningful_progress",
 				kind: "boolean",
-				description: "Is the worker making meaningful progress on its mission?",
+				description:
+					"Is the worker making meaningful progress on its mission for its `role`? An explorer or verifier progresses by reading, searching and reporting; only an implementer is expected to change files.",
 			},
-			{ id: "worker_stuck", kind: "boolean", description: "Is the worker stuck or making no progress?" },
+			{
+				id: "worker_stuck",
+				kind: "boolean",
+				description:
+					"Is the worker stuck or making no progress for its `role`? Distinct reads and searches are progress for an explorer or verifier.",
+			},
 			{ id: "work_off_track", kind: "boolean", description: "Has the worker drifted off-track from the mission?" },
 			{
 				id: "strategy_repetition",
@@ -944,7 +953,8 @@ export const STEERING_QUESTION_PACKS: Record<string, SteeringQuestionPack> = {
 			{
 				id: "needs_independent_verification",
 				kind: "boolean",
-				description: "Is the implementation finished and ready for independent verification?",
+				description:
+					"Is the implementation finished and ready for independent verification? An explorer or verifier writes no implementation, so for those roles the answer is no.",
 			},
 			{
 				id: "specialist_gap_present",

@@ -32,6 +32,7 @@ export interface LiveWorkerAttempt {
 	readonly elapsedMs: number;
 	readonly outputTail?: string;
 	readonly recentFailures?: readonly string[];
+	readonly recentToolNames?: readonly string[];
 	readonly changedFiles?: readonly string[];
 	readonly isRepeating?: boolean;
 	readonly isStalled?: boolean;
@@ -42,9 +43,13 @@ export interface SupervisionObservationState {
 	readonly objectiveId: string;
 	readonly taskId: string;
 	readonly attemptId: string;
+	/** What the worker is for; progress is judged against it (an explorer changes no files). */
+	readonly role: string;
 	readonly mission: string;
 	readonly elapsedMs: number;
 	readonly toolCalls: number;
+	/** The last few tools it ran, oldest first. */
+	readonly recentToolNames: readonly string[];
 	readonly outputTail: string;
 	readonly changedFiles: readonly string[];
 	readonly recentFailures: readonly string[];

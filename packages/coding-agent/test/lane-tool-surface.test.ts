@@ -477,7 +477,7 @@ describe("classified lane tool surface", () => {
 		).toThrow("initial usage must contain finite non-negative values and safe-integer counts");
 	});
 
-	it("YOLO materializes write tools and bypasses profile, grant, path, and edge vetoes", async () => {
+	it("YOLO materializes write tools and bypasses profile, grant and path vetoes, keeping the local-commit rule", async () => {
 		const grant: ExecutionGrant = {
 			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 			grantId: "yolo-narrow",
@@ -511,17 +511,59 @@ describe("classified lane tool surface", () => {
 					enforcements: ["path-scope"],
 				},
 			] as ToolCapabilityManifest[],
-			checkEdge: () => ({ block: true as const, reason: "edge" }),
+			// Stands in for the controller's checkEdge, which in YOLO only applies the owner's local-commit branch rule.
+			checkEdge: (toolName: string) =>
+				toolName === "bash" ? { block: true as const, reason: "local commit branch" } : undefined,
 		};
 		const guarded = createLaneToolSurface(options);
 		expect(guarded.allowedTools).toEqual(["read"]);
-		const yolo = createLaneToolSurface({ ...options, yolo: true });
+		const shellSessionKey = `lane-yolo-${Math.random().toString(36).slice(2)}`;
+		const yolo = createLaneToolSurface({ ...options, yolo: true, shellSessionKey });
 		try {
-			expect(yolo.allowedTools).toEqual(expect.arrayContaining(["read", "write", "edit"]));
+			expect(yolo.allowedTools).toEqual(expect.arrayContaining(["read", "write", "edit", "bash"]));
 			expect(await gate(yolo, "write", { path: path.join(outside, "test.txt"), content: "ok" })).toBeUndefined();
+			expect(await gate(yolo, "bash", { command: "git push" })).toMatchObject({
+				block: true,
+				reason: "local commit branch",
+			});
 		} finally {
 			await guarded.dispose();
 			await yolo.dispose();
+		}
+	});
+
+	it("holds a read-only lane's shell to commands that edit nothing that exists, in every mode", async () => {
+		writeFileSync(path.join(cwd, "notes.txt"), "original");
+		for (const yolo of [false, true]) {
+			const shellSessionKey = `lane-read-only-${Math.random().toString(36).slice(2)}`;
+			const surface = createLaneToolSurface({
+				cwd,
+				profile: profile({ tools: { allow: ["bash"] } }),
+				shellSessionKey,
+				shellReadOnly: true,
+				yolo,
+			});
+			try {
+				// YOLO does not widen a read-only lane to write tools.
+				expect(surface.allowedTools).not.toContain("write");
+				for (const command of ["rm notes.txt", "echo x > notes.txt", "sed -i s/o/0/ notes.txt", "git checkout ."]) {
+					expect(await gate(surface, "bash", { command }), `${command} (yolo=${yolo})`).toMatchObject({
+						block: true,
+						reason: expect.stringContaining("Read-only worker"),
+					});
+				}
+				for (const command of [
+					"git log --oneline -3",
+					"rg original . > review-report.txt",
+					"ls | tee listing.txt",
+				]) {
+					const outcome = await gate(surface, "bash", { command });
+					expect(outcome?.reason ?? "", `${command} (yolo=${yolo})`).not.toContain("Read-only worker");
+				}
+			} finally {
+				await surface.dispose();
+				disposePersistentShellSession(shellSessionKey);
+			}
 		}
 	});
 

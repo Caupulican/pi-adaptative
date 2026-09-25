@@ -12,12 +12,19 @@ const answers = {
 	external_block_present: 0.05,
 };
 
+const judgedStates: unknown[] = [];
+
 function supervisor() {
 	return new WorkerSemanticSupervisor({
 		debounceMs: 0,
 		minToolCalls: 0,
 		minElapsedMs: 0,
-		steering: { requireCertificate: async () => ({ certificate_id: "adverse", answers }) },
+		steering: {
+			requireCertificate: async (_checkpoint: string, state: unknown) => {
+				judgedStates.push(state);
+				return { certificate_id: "adverse", answers };
+			},
+		},
 	});
 }
 
@@ -43,6 +50,12 @@ describe("worker reroute evidence", () => {
 		const instance = supervisor();
 		expect((await instance.observe(observation("reader", 4)))?.action).toBe("steer_once");
 		expect((await instance.observe(observation("reader", 7)))?.action).toBe("continue");
+	});
+
+	it("tells System One the worker's role and recent tools, so a reader is judged as a reader", async () => {
+		judgedStates.length = 0;
+		await supervisor().observe({ ...observation("role", 4), recentToolNames: ["read", "grep", "repo_read"] });
+		expect(judgedStates[0]).toMatchObject({ role: "explorer", recentToolNames: ["read", "grep", "repo_read"] });
 	});
 
 	it("still reroutes an exactly repeated strategy after the steering grace window", async () => {

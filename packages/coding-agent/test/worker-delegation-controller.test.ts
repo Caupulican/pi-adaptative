@@ -352,6 +352,7 @@ describe("WorkerDelegationController integration invariants", () => {
 				getCapabilityEnvelope: () => undefined,
 				getSettingsManager: () => ({
 					getMemoryRetrievalSettings: () => ({ enabled: true }),
+					getEdgeSettings: () => ({ mode: "guarded", allow: [], deny: [] }),
 				}),
 			},
 		}) as unknown as WorkerDelegationController;

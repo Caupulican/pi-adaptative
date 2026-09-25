@@ -86,7 +86,8 @@ describe("leaf worker orchestration", () => {
 		try {
 			harness.setResponses([
 				(context) => {
-					expect(context.tools?.map((tool) => tool.name)).toEqual(["read"]);
+					// Every worker also receives the host-guaranteed shell; delegate is still stripped.
+					expect(context.tools?.map((tool) => tool.name)).toEqual(["read", "bash"]);
 					return fauxAssistantMessage('{"summary":"leaf completed","status":"completed"}');
 				},
 			]);
@@ -1146,13 +1147,14 @@ describe("leaf worker orchestration", () => {
 			});
 
 			expect(run.record?.status).toBe("succeeded");
-			expect(tools).toEqual(["read"]);
+			// The narrowed list plus the host-guaranteed shell.
+			expect(tools).toEqual(["read", "bash"]);
 			const snapshot = new WorkerLifecycle({
 				agentDir: harness.tempDir,
 				sessionId: harness.session.sessionId,
 			}).getTaskRuntimeSnapshot();
-			expect(Object.values(snapshot.attempts)[0]?.grant?.allowedTools).toEqual(["read"]);
-			expect(Object.values(snapshot.attempts)[0]?.grant?.capabilities).toEqual(["filesystem.read"]);
+			expect(Object.values(snapshot.attempts)[0]?.grant?.allowedTools).toEqual(["read", "bash"]);
+			expect(Object.values(snapshot.attempts)[0]?.grant?.capabilities).toEqual(["filesystem.read", "process.exec"]);
 			expect(
 				Object.values(snapshot.attempts)[0]?.dispatch.executionContract?.worker.profile.delegationLimits,
 			).toEqual({

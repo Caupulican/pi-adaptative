@@ -292,15 +292,18 @@ describe("native worker autonomy", () => {
 		}
 	});
 
-	it("gives a readOnly review worker native reads, git, and a shell", async () => {
+	it("gives a readOnly review worker native reads, git, and a shell that edits nothing", async () => {
 		const harness = await createHarness({
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
 		let materializedTools: string[] = [];
 		let toolResults = "";
+		const existing = join(harness.tempDir, "notes.txt");
+		const report = join(harness.tempDir, "review-report.txt");
 		try {
 			const init = spawnProcessSync("git", ["init", "-q"], { cwd: harness.tempDir, encoding: "utf-8" });
 			expect(init.status).toBe(0);
+			writeFileSync(existing, "original");
 			harness.setResponses([
 				(context) => {
 					materializedTools = (context.tools ?? []).map((tool) => tool.name);
@@ -309,6 +312,12 @@ describe("native worker autonomy", () => {
 						{ stopReason: "toolUse" },
 					);
 				},
+				fauxAssistantMessage([fauxToolCall("bash", { command: `echo changed > ${existing}` })], {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage([fauxToolCall("bash", { command: `git status --short > ${report}` })], {
+					stopReason: "toolUse",
+				}),
 				(context) => {
 					toolResults = context.messages
 						.filter((message) => message.role === "toolResult")
@@ -324,11 +333,14 @@ describe("native worker autonomy", () => {
 			});
 
 			expect(run.started).toBe(true);
-			expect(materializedTools).toEqual(
-				expect.arrayContaining(["read", "grep", "find", "ls", "repo_read", "bash", "python"]),
-			);
-			for (const denied of ["write", "edit"]) expect(materializedTools).not.toContain(denied);
+			expect(materializedTools).toEqual(expect.arrayContaining(["read", "grep", "find", "ls", "repo_read", "bash"]));
+			// An interpreter cannot be judged from its arguments, so readOnly drops it with write/edit.
+			for (const denied of ["write", "edit", "python"]) expect(materializedTools).not.toContain(denied);
 			expect(toolResults).toContain("true");
+			// Editing an existing file is refused; capturing output into a new file is not.
+			expect(toolResults).toContain("Read-only worker");
+			expect(readFileSync(existing, "utf-8")).toBe("original");
+			expect(existsSync(report)).toBe(true);
 			const worker = firstExecutionContract(harness);
 			expect(worker?.authority.capabilities).toContain("repo.read");
 			expect(worker?.authority.capabilities).toContain("process.exec");
@@ -338,10 +350,10 @@ describe("native worker autonomy", () => {
 		}
 	});
 
-	it("YOLO lets a narrow readOnly worker write when worker writes are otherwise disabled", async () => {
+	it("YOLO lets a narrow worker write when worker writes are otherwise disabled", async () => {
 		const harness = await createHarness({
 			initialActiveToolNames: ["read", "delegate"],
-			settings: { edge: { mode: "yolo" }, workerDelegation: { enabled: false, writeEnabled: false } },
+			settings: { edge: { mode: "yolo" }, workerDelegation: { enabled: true, writeEnabled: false } },
 		});
 		const output = join(harness.tempDir, "yolo-worker.txt");
 		let materializedTools: string[] = [];
@@ -357,11 +369,50 @@ describe("native worker autonomy", () => {
 			]);
 			const run = await harness.session.runWorkerDelegationOnce({
 				instructions: "Write the requested file.",
-				authority: { readOnly: true, toolNames: ["read"] },
+				authority: { toolNames: ["read"] },
 			});
 			expect(run.started).toBe(true);
 			expect(materializedTools).toEqual(expect.arrayContaining(["read", "write", "edit", "bash"]));
 			expect(readFileSync(output, "utf-8")).toBe("autonomous");
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("YOLO keeps a readOnly worker read-only: the caller's promise is not a permission prompt", async () => {
+		const harness = await createHarness({
+			initialActiveToolNames: ["read", "delegate"],
+			settings: { edge: { mode: "yolo" }, workerDelegation: { enabled: true } },
+		});
+		const existing = join(harness.tempDir, "keep.txt");
+		writeFileSync(existing, "original");
+		let materializedTools: string[] = [];
+		let toolResults = "";
+		try {
+			harness.setResponses([
+				(context) => {
+					materializedTools = (context.tools ?? []).map((tool) => tool.name);
+					return fauxAssistantMessage([fauxToolCall("bash", { command: `rm -f ${existing}` })], {
+						stopReason: "toolUse",
+					});
+				},
+				(context) => {
+					toolResults = context.messages
+						.filter((message) => message.role === "toolResult")
+						.map(getMessageText)
+						.join("\n");
+					return fauxAssistantMessage('{"summary":"left it alone","status":"completed"}');
+				},
+			]);
+			const run = await harness.session.runWorkerDelegationOnce({
+				instructions: "Review the file.",
+				authority: { readOnly: true },
+			});
+			expect(run.started).toBe(true);
+			expect(materializedTools).toContain("bash");
+			for (const denied of ["write", "edit", "python"]) expect(materializedTools).not.toContain(denied);
+			expect(toolResults).toContain("Read-only worker");
+			expect(readFileSync(existing, "utf-8")).toBe("original");
 		} finally {
 			await harness.cleanup();
 		}

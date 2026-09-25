@@ -164,21 +164,30 @@ describe("delegate exact-action input corrections", () => {
 			instructions: "b",
 		});
 	});
-	it("forwards readOnly with shell tools to admission", async () => {
+	it("forwards readOnly with the shell to admission and refuses an interpreter before a lane exists", async () => {
 		const start = vi.fn(() => ({ started: false, skipReason: "fixture" }));
 		const tool = toolWithSpies(controlSpies(), start);
 		const result = await tool.execute(
 			"read-only-shell",
-			{ action: "start", instructions: "Audit the diff.", readOnly: true, toolNames: ["read", "bash", "python"] },
+			{ action: "start", instructions: "Audit the diff.", readOnly: true, toolNames: ["read", "bash"] },
 			undefined,
 			undefined,
 			context,
 		);
 		expect(result).toMatchObject({ details: { skipReason: "fixture" } });
 		expect(start).toHaveBeenCalledWith(
-			expect.objectContaining({ authority: { readOnly: true, toolNames: ["read", "bash", "python"] } }),
+			expect.objectContaining({ authority: { readOnly: true, toolNames: ["read", "bash"] } }),
 			undefined,
 		);
+		const refused = await tool.execute(
+			"read-only-python",
+			{ action: "start", instructions: "Audit the diff.", readOnly: true, toolNames: ["read", "python"] },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(refused).toMatchObject({ details: { skipReason: "read_only_tool_conflict" } });
+		expect(start).toHaveBeenCalledOnce();
 	});
 	it("forwards readOnly with read-only tools unchanged", async () => {
 		const start = vi.fn(() => ({ started: false, skipReason: "fixture" }));
@@ -194,6 +203,58 @@ describe("delegate exact-action input corrections", () => {
 			expect.objectContaining({ authority: { readOnly: true, toolNames: ["read", "skill"] } }),
 			undefined,
 		);
+	});
+	it("routes a named start carrying parallelWork to that worker instead of refusing it", async () => {
+		const startWorkerAgentTask = vi.fn(() => ({ started: true, steering: false as const, messageId: "turn-1" }));
+		const tool = createDelegateToolDefinition({
+			caller: { kind: "session_root" },
+			resolveMessageReplayScope: fixedReplayScope,
+			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+			workerAgentControl: workerAgentControl({ startWorkerAgentTask }),
+		});
+		const parallelWork = { independentOf: ["worker-3"], justification: "Disjoint files, read-only review." };
+		await tool.execute(
+			"named-parallel",
+			{ action: "start", agentId: "worker-2", instructions: "Review the usage monitor.", parallelWork },
+			undefined,
+			undefined,
+			context,
+		);
+		// The named recipient is the routing decision; it runs alongside worker-3 without a separate context.
+		expect(startWorkerAgentTask).toHaveBeenCalledOnce();
+		expect(startWorkerAgentTask).toHaveBeenCalledWith("worker-2", "Review the usage monitor.", expect.anything());
+		const itself = await tool.execute(
+			"named-parallel-self",
+			{
+				action: "start",
+				agentId: "worker-2",
+				instructions: "Review the usage monitor.",
+				parallelWork: { independentOf: ["worker-2"], justification: "x" },
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		expect(itself).toMatchObject({ details: { skipReason: "worker_parallel_intent_invalid" } });
+		expect(startWorkerAgentTask).toHaveBeenCalledOnce();
+	});
+	it("tells the orchestrator to choose the recipient when several idle workers fit", async () => {
+		const start = vi.fn(() => ({
+			started: false,
+			skipReason: "worker_specialist_choice_required:worker-2,worker-3",
+		}));
+		const tool = toolWithSpies(controlSpies(), start);
+		const result = await tool.execute(
+			"ambiguous",
+			{ action: "start", instructions: "Review the release." },
+			undefined,
+			undefined,
+			context,
+		);
+		const text = delegateText(result);
+		expect(text).toContain("(worker-2, worker-3)");
+		expect(text).toContain("choose the recipient");
+		expect(text).toContain("agentId");
 	});
 	it.each([true, false])(
 		"forwards readOnly=%s reuse validation and reports the host's incompatibility",

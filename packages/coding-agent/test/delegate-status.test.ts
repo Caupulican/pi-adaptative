@@ -127,6 +127,33 @@ describe("delegate status", () => {
 		expect(text).toContain("tmux-worker-1: succeeded (worker_completed)");
 	});
 
+	it("shows a cancelled worker's last words when it left no completion claim", () => {
+		const cancelled: LaneRecord = {
+			laneId: "worker-7",
+			type: "worker",
+			status: "canceled",
+			reasonCode: "Worker rerouted · progress stalled after steering",
+			agentId: "worker-7",
+		};
+		const asked: string[] = [];
+		const result = executeDelegateStatusAction(
+			"status",
+			{ laneId: "worker-7" },
+			{
+				getLaneRecords: () => [cancelled],
+				getWorkerClaimSnapshots: () => [],
+				getLastWorkerText: (record) => {
+					asked.push(record.laneId);
+					return "Survey: three packages, vitest, biome.";
+				},
+			},
+		);
+		const text = result.content[0]?.text ?? "";
+		expect(asked).toEqual(["worker-7"]);
+		expect(text).toContain("no completion claim; the worker's last words before it ended");
+		expect(text).toContain("Survey: three packages, vitest, biome.");
+	});
+
 	it("identifies a durable transient retry as nonterminal instead of presenting a failure token", () => {
 		const retrying: LaneRecord = {
 			laneId: "worker-retrying",

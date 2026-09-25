@@ -692,7 +692,7 @@ describe("worker model pin lifecycle", () => {
 			expect(childAgents).toHaveLength(0);
 			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(1);
 			expect(observedModelIds).toEqual(["pinned"]);
-			expect(observedTools).toEqual(["read"]);
+			expect(observedTools).toEqual(["read", "bash"]);
 			expect(harness.session.getLaneRecords()).toEqual(
 				expect.arrayContaining([expect.objectContaining({ modelRef: "faux/pinned", thinkingLevel: "high" })]),
 			);

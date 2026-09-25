@@ -6,6 +6,7 @@ import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../context/path-alias-tool-wrap.ts";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
+import { readOnlyShellViolation } from "../model-router/tool-escalation.ts";
 import {
 	CapabilityGateway,
 	CapabilityGatewayDeniedError,
@@ -24,6 +25,7 @@ import {
 } from "../secrets/credential-exposure-guard.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import { matchesResourceProfilePattern } from "../settings-manager.ts";
+import { READ_ONLY_SHELL_TOOL_NAMES } from "../tool-capability-policy.ts";
 import { type BashToolOptions, createBashTool } from "../tools/bash.ts";
 import { createEditTool, type EditToolOptions } from "../tools/edit.ts";
 import { FileMutationIntentController } from "../tools/file-mutation-intent.ts";
@@ -104,9 +106,11 @@ export interface LaneToolSurface {
 }
 
 export interface LaneToolSurfaceOptions {
-	/** Bypass harness tool, path, credential, and edge permission gates for this lane. */
+	/** Bypass harness tool, path and edge permission gates for this lane; private state stays denied. */
 	yolo?: boolean;
 	denyCommands?: readonly string[];
+	/** A `readOnly` grant: shell commands may not edit anything that exists. */
+	shellReadOnly?: boolean;
 	cwd: string;
 	profile?: NormalizedProfile;
 	/** Private harness state that generic file tools must never traverse. */
@@ -273,9 +277,11 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	// build), while a lane in its own worktree shares nothing (see tools/file-mutation-queue.ts).
 	const mutationScope = mutationScopeForWorktree(options.cwd);
 	const fileMutationIntents = new FileMutationIntentController({ mutationScope });
-	const writeCapable = options.yolo || (options.writeEnabled === true && (options.writePaths?.length ?? 0) > 0);
+	// YOLO widens a lane to every tool except where the lane is read-only: that is the parent's promise.
+	const yoloWrites = options.yolo === true && options.shellReadOnly !== true;
+	const writeCapable = yoloWrites || (options.writeEnabled === true && (options.writePaths?.length ?? 0) > 0);
 	const pythonCapable =
-		options.yolo || options.toolManifests?.some((manifest) => manifest.toolName === PYTHON_LANE_TOOL_NAME) === true;
+		yoloWrites || options.toolManifests?.some((manifest) => manifest.toolName === PYTHON_LANE_TOOL_NAME) === true;
 	const builtInCandidateNames = [
 		...READ_ONLY_LANE_TOOL_NAMES,
 		...(options.readMemory ? [WORKER_MEMORY_READ_TOOL_NAME] : []),
@@ -331,7 +337,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			})
 		: undefined;
 	const toolUsage = new LaneToolUsage(gateway ? (usage) => gateway.recordUsage(usage) : undefined);
-	const deniedPaths = options.yolo ? undefined : options.deniedPaths?.map((entry) => path.resolve(entry));
+	const deniedPaths = options.deniedPaths?.map((entry) => path.resolve(entry));
 	const privatePathBoundary =
 		deniedPaths && deniedPaths.length > 0
 			? {
@@ -411,6 +417,16 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			if (!allowedToolSet.has(toolCall.name)) {
 				return { block: true, reason: `Lane tool '${toolCall.name}' is outside the materialized UAC surface.` };
 			}
+			if (options.shellReadOnly && READ_ONLY_SHELL_TOOL_NAMES.has(toolCall.name.toLowerCase())) {
+				const command = (args as { command?: unknown } | undefined)?.command;
+				const violation = typeof command === "string" ? readOnlyShellViolation(command, options.cwd) : undefined;
+				if (violation) {
+					return {
+						block: true,
+						reason: `Read-only worker: ${violation}. Read, search and inspect freely, and redirect output into a new file if needed; report any change that is required to the parent instead of making it.`,
+					};
+				}
+			}
 			if (options.yolo) {
 				const boundary = classifyYoloBoundary({
 					toolName: toolCall.name,
@@ -419,15 +435,17 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 					scopeCwd: options.cwd,
 					denyCommands: options.denyCommands,
 				});
-				return boundary
-					? {
-							block: true,
-							reason:
-								boundary.kind === "confirm"
-									? `Owner approval required: ${boundary.reason}`
-									: `YOLO hardline: ${boundary.reason}`,
-						}
-					: undefined;
+				if (boundary) {
+					return {
+						block: true,
+						reason:
+							boundary.kind === "confirm"
+								? `Owner approval required: ${boundary.reason}`
+								: `YOLO hardline: ${boundary.reason}`,
+					};
+				}
+				// checkEdge keeps the owner's local-commit branch rule; every permission gate below is skipped.
+				return options.checkEdge ? await options.checkEdge(toolCall.name, args, options.cwd) : undefined;
 			}
 			if (gateway) {
 				const manifest = manifestsByName.get(toolCall.name);

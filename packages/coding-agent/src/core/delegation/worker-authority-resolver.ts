@@ -20,6 +20,7 @@ import {
 	type OrchestrationModelBinding,
 	type OrchestrationProfile,
 	type OrchestrationThinkingLevel,
+	type WorkerRole,
 } from "../orchestration/contracts.ts";
 import { CLASSIFIED_LANE_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
 import { resolvePinnedOrchestrationModel } from "../orchestration/model-binding.ts";
@@ -33,6 +34,7 @@ import {
 	capabilitySurvivesReadOnly,
 	envelopeHasToolCapability,
 	getToolCapabilityPolicy,
+	toolSurvivesReadOnly,
 } from "../tool-capability-policy.ts";
 import type { WorkerDelegationAuthorityRequest } from "./worker-delegation-request.ts";
 import { YOLO_WORKER_CAPABILITIES } from "./worker-execution-policy.ts";
@@ -292,7 +294,7 @@ function selectModelBinding(
 		const routed = routedWorkerModels({
 			foregroundModel,
 			routing: accountRouting,
-			role: authority?.role ?? "implementer",
+			role: defaultWorkerRole(authority, base),
 			modelRegistry,
 			isModelExhausted,
 			isModelLimited,
@@ -336,6 +338,18 @@ function selectModelBinding(
 	return authored({ provider, modelId, thinkingLevel });
 }
 
+/**
+ * The role a worker runs as when the caller names none: an authored role, else the base profile's,
+ * else what the grant makes it. A `readOnly` worker cannot change files, so it explores and reports;
+ * judging it as an implementer is what made supervision call a healthy review "stalled".
+ */
+export function defaultWorkerRole(
+	authority: Pick<WorkerDelegationAuthorityRequest, "role" | "readOnly"> | undefined,
+	base?: Pick<ResolvedWorkerProfile, "profile">,
+): WorkerRole {
+	return authority?.role ?? base?.profile.role ?? (authority?.readOnly ? "explorer" : "implementer");
+}
+
 function adaptiveProfileId(value: object): string {
 	return `adaptive-${createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 32)}`;
 }
@@ -372,9 +386,9 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	// The owner's model policy bounds the fallbacks as it bounds the first choice.
 	let fallbacks = selected.fallbacks.filter((fallback) => {
 		const model = input.modelRegistry.find(fallback.provider, fallback.modelId);
-		return model !== undefined && (input.yolo || !input.isModelAllowed || input.isModelAllowed(model));
+		return model !== undefined && (!input.isModelAllowed || input.isModelAllowed(model));
 	});
-	if (!input.yolo && input.isModelAllowed && !input.isModelAllowed(boundModel.model)) {
+	if (input.isModelAllowed && !input.isModelAllowed(boundModel.model)) {
 		fallbacks = [];
 		const allowed = input.allocateAllowedModel?.();
 		if (!allowed) return { ok: false, reason: "orchestration_model_policy_no_allowed_model" };
@@ -388,7 +402,6 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		};
 	}
 	if (
-		!input.yolo &&
 		input.modelPin &&
 		((input.authority?.model !== undefined &&
 			(input.authority.model.provider !== input.modelPin.provider ||
@@ -398,7 +411,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	) {
 		return {
 			ok: false,
-			reason: `worker_model_pin_conflict:${input.authority?.role ?? input.base?.profile.role ?? "implementer"}`,
+			reason: `worker_model_pin_conflict:${defaultWorkerRole(input.authority, input.base)}`,
 		};
 	}
 
@@ -494,7 +507,10 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	) {
 		capabilities.add("repo.read");
 	}
-	if (!input.yolo && input.authority?.readOnly) {
+	// readOnly is the caller's promise that this worker edits nothing. It is not a permission check,
+	// so YOLO keeps it: the parent may be relying on it to run workers side by side.
+	const readOnly = input.authority?.readOnly === true || input.base?.profile.readOnly === true;
+	if (readOnly) {
 		for (const capability of capabilities) {
 			if (!capabilitySurvivesReadOnly(capability)) capabilities.delete(capability);
 		}
@@ -505,7 +521,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	for (const toolName of uniqueToolNames) {
 		const policy = getToolCapabilityPolicy(toolName);
 		if (!policy) return { ok: false, reason: `orchestration_tool_unclassified:${toolName}` };
-		if (envelopeHasToolCapability(capabilityList, toolName)) {
+		if (envelopeHasToolCapability(capabilityList, toolName) && (!readOnly || toolSurvivesReadOnly(toolName))) {
 			toolNames.push(toolName);
 			continue;
 		}
@@ -528,7 +544,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	const budget = structuredClone(input.authority?.budget ?? input.base?.profile.budget ?? {});
 	const floorFailure = tokenBudgetFloorFailure(budget.maxTokens);
 	if (floorFailure) return { ok: false, reason: floorFailure };
-	const role = input.authority?.role ?? input.base?.profile.role ?? "implementer";
+	const role = defaultWorkerRole(input.authority, input.base);
 	const delegationLimits = structuredClone(LEAF_WORKER_DELEGATION_LIMITS);
 	const requestedWorkspacePath = input.authority?.path ?? input.base?.profile.workspacePath;
 	const workspacePath = requestedWorkspacePath
@@ -541,6 +557,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	const descriptor = {
 		baseProfileId: input.base?.profile.profileId ?? null,
 		role,
+		readOnly,
 		binding: resolvedModel.binding,
 		fallbacks,
 		capabilities: [...capabilities],
@@ -568,6 +585,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 				: { mode: "fixed", candidates: [resolvedModel.binding] },
 		capabilityCeiling: [...capabilities],
 		toolNames,
+		...(readOnly ? { readOnly: true } : {}),
 		...(workspacePath ? { workspacePath } : {}),
 		resourceProfileNames: [...(input.base?.profile.resourceProfileNames ?? [])],
 		dispatchProfileIds: [...(input.base?.profile.dispatchProfileIds ?? [])],

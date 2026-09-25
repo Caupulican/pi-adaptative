@@ -4707,17 +4707,19 @@ export class SettingsManager {
 		if (loadError || (this.settings.edge !== undefined && !isPlainRecord(this.settings.edge)))
 			return { mode: "guarded", allow: [], deny: [] };
 		const configured = this.settings.edge?.allow;
-		const configuredDeny = this.settings.edge?.deny;
-		if (
-			configuredDeny !== undefined &&
-			(!Array.isArray(configuredDeny) || configuredDeny.some((value) => typeof value !== "string" || !value.trim()))
-		) {
-			return { mode: "guarded", allow: [], deny: [] };
-		}
 		// Resolve once here: foreground, worker inheritance and provider authority context all
 		// consume these grants. Autonomy/learning presets never narrow execution authority.
 		const allow =
 			configured === undefined ? EDGE_CLASSES : Array.isArray(configured) ? configured.filter(isEdgeClass) : [];
+		const configuredDeny = this.settings.edge?.deny;
+		// A deny list that cannot be read cannot be enforced, so YOLO waits until it is corrected. The
+		// standing grants do not depend on it and stay as configured.
+		if (
+			configuredDeny !== undefined &&
+			(!Array.isArray(configuredDeny) || configuredDeny.some((value) => typeof value !== "string" || !value.trim()))
+		) {
+			return { mode: "guarded", allow: [...new Set(allow)], deny: [] };
+		}
 		return {
 			mode: this.settings.edge?.mode === "yolo" ? "yolo" : "guarded",
 			allow: [...new Set(allow)],

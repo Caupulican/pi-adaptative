@@ -6,13 +6,14 @@ import {
 } from "../src/core/tool-capability-policy.ts";
 
 describe("readOnly tool partition", () => {
-	it("keeps local read and read-broker capabilities and drops everything else", () => {
+	it("keeps local read, read-broker and process capabilities and drops everything else", () => {
 		expect(capabilitySurvivesReadOnly("filesystem.read")).toBe(true);
 		expect(capabilitySurvivesReadOnly("repo.read")).toBe(true);
 		expect(capabilitySurvivesReadOnly("skill.read")).toBe(true);
 		expect(capabilitySurvivesReadOnly("memory.query")).toBe(true);
 		expect(capabilitySurvivesReadOnly("settings.read")).toBe(true);
-		expect(capabilitySurvivesReadOnly("process.exec")).toBe(false);
+		// The worker shell survives; its commands are held to the read-only line at the lane.
+		expect(capabilitySurvivesReadOnly("process.exec")).toBe(true);
 		expect(capabilitySurvivesReadOnly("filesystem.write")).toBe(false);
 		expect(capabilitySurvivesReadOnly("network.http")).toBe(false);
 	});
@@ -20,8 +21,10 @@ describe("readOnly tool partition", () => {
 	it("evaluates every conjunctive clause of a tool policy", () => {
 		expect(toolSurvivesReadOnly("read")).toBe(true);
 		expect(toolSurvivesReadOnly("skill")).toBe(true);
-		expect(toolSurvivesReadOnly("bash")).toBe(false);
+		expect(toolSurvivesReadOnly("bash")).toBe(true);
+		// An interpreter's effect cannot be judged from its arguments, so it does not survive.
 		expect(toolSurvivesReadOnly("python")).toBe(false);
+		expect(toolSurvivesReadOnly("run_toolkit_script")).toBe(false);
 		expect(toolSurvivesReadOnly("edit")).toBe(false);
 		// image_generate needs network AND credentials AND filesystem.read: one dropped clause excludes it.
 		expect(toolSurvivesReadOnly("image_generate")).toBe(false);
@@ -30,8 +33,8 @@ describe("readOnly tool partition", () => {
 
 	it("partitions a tool list in the caller's order", () => {
 		expect(partitionToolsForReadOnly(["read", "bash", "skill", "python", "artifact_retrieve"])).toEqual({
-			kept: ["read", "skill", "artifact_retrieve"],
-			excluded: ["bash", "python"],
+			kept: ["read", "bash", "skill", "artifact_retrieve"],
+			excluded: ["python"],
 		});
 	});
 });

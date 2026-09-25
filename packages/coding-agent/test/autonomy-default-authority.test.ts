@@ -23,13 +23,17 @@ describe("autonomous default authority", () => {
 		expect(SettingsManager.fromStorage(storage).getEdgeSettings().mode).toBe("guarded");
 	});
 
-	it("retains explicit command denies in YOLO and fails closed on malformed deny lists", () => {
+	it("retains explicit command denies in YOLO and disables only YOLO on a malformed deny list", () => {
 		expect(
 			SettingsManager.inMemory({ edge: { mode: "yolo", deny: ["npm publish*", "npm publish*"] } }).getEdgeSettings(),
 		).toMatchObject({ mode: "yolo", deny: ["npm publish*"] });
 		const storage = new InMemorySettingsStorage();
 		storage.withLock("global", () => JSON.stringify({ edge: { mode: "yolo", deny: "npm publish*" } }));
-		expect(SettingsManager.fromStorage(storage).getEdgeSettings().mode).toBe("guarded");
+		// Only YOLO waits for a readable deny list; the standing grants do not depend on it.
+		expect(SettingsManager.fromStorage(storage).getEdgeSettings()).toMatchObject({
+			mode: "guarded",
+			allow: [...EDGE_CLASSES],
+		});
 	});
 
 	it("YOLO activates core execution tools from a narrow foreground request", async () => {

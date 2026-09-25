@@ -126,10 +126,10 @@ describe("resolveWorkerAuthority", () => {
 			}),
 		).toEqual({ ok: false, reason: `orchestration_tool_capability_missing:${toolName}` });
 	});
-	it("YOLO gives a read-only narrow worker the native write tools and process access", () => {
+	it("YOLO gives a narrow worker the native write tools and process access", () => {
 		const resolution = resolveWorkerAuthority({
 			yolo: true,
-			authority: { readOnly: true, toolNames: ["read"], capabilities: ["filesystem.read"] },
+			authority: { toolNames: ["read"], capabilities: ["filesystem.read"] },
 			foregroundModel: model,
 			foregroundToolNames: ["read"],
 			foregroundEnvelope: { id: "parent", capabilities: ["filesystem.read"], deniedTools: ["write"] },
@@ -151,6 +151,37 @@ describe("resolveWorkerAuthority", () => {
 		);
 		expect(plan.writeEnabled).toBe(true);
 		expect(plan.processEnabled).toBe(true);
+		expect(plan.shellReadOnly).toBe(false);
+	});
+	it("keeps a readOnly worker read-only in YOLO and defaults it to the explorer role", () => {
+		for (const yolo of [false, true]) {
+			const resolution = resolveWorkerAuthority({
+				yolo,
+				authority: { readOnly: true },
+				foregroundModel: model,
+				modelRegistry,
+				isModelExhausted: () => false,
+			});
+			expect(resolution.ok).toBe(true);
+			if (!resolution.ok) throw new Error(resolution.reason);
+			const profile = resolution.shipment.profile;
+			expect(profile.role).toBe("explorer");
+			expect(profile.capabilityCeiling).not.toContain("filesystem.write");
+			expect(profile.capabilityCeiling).not.toContain("worktree.mutate");
+			expect(profile.toolNames).toContain("bash");
+			for (const denied of ["write", "edit", "python"]) expect(profile.toolNames).not.toContain(denied);
+			const plan = buildWorkerExecutionPlan({
+				yolo,
+				profile,
+				cwd: "/repo",
+				deniedPaths: [],
+				memoryEnabled: false,
+				settings: { enabled: true, writeEnabled: true, maxUsd: 1, maxWallClockMs: 120_000, maxConcurrent: 4 },
+			});
+			expect(plan.writeEnabled).toBe(false);
+			expect(plan.shellReadOnly).toBe(true);
+			expect(plan.toolManifests.map((entry) => entry.toolName)).not.toContain("python");
+		}
 	});
 	it("makes every adaptive worker a leaf even when an ordinary tool list is narrowed", () => {
 		const resolution = resolveWorkerAuthority({

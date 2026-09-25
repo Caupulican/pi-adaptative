@@ -52,8 +52,8 @@ describe("delegate profile actions", () => {
 		expect(text).toContain("Optional owner-authored bases for profile_create: none");
 		expect(text).toContain("Omit baseProfileId to derive the foreground model");
 		expect(text).toContain("Effective inherited native tools: read, python");
-		expect(text).toContain("readOnly: true keeps read, python and drops none.");
-		expect(text).toContain("Every worker also receives bash.");
+		expect(text).toContain("readOnly: true keeps read and drops python.");
+		expect(text).toContain("Every worker also receives bash; under readOnly it runs only commands that edit nothing");
 		expect(text).not.toContain("Authorized bases:");
 
 		const inspected = executeDelegateProfileAction(

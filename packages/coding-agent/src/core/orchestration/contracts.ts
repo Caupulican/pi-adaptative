@@ -272,6 +272,11 @@ export interface OrchestrationProfile {
 	modelPolicy: OrchestrationModelPolicy;
 	capabilityCeiling: readonly HarnessCapability[];
 	toolNames: readonly string[];
+	/**
+	 * The worker edits nothing that exists: its shell runs only commands that change no existing file,
+	 * and no write, interpreter or script tool is granted. Absent means an ordinary grant.
+	 */
+	readOnly?: boolean;
 	/** Optional worker cwd and symmetric filesystem focus. Omitted means host-level machine scope. */
 	workspacePath?: string;
 	resourceProfileNames: readonly string[];

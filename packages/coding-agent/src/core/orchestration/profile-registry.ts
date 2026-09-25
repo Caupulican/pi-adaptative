@@ -322,6 +322,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 			"modelPolicy",
 			"capabilityCeiling",
 			"toolNames",
+			"readOnly",
 			"workspacePath",
 			"resourceProfileNames",
 			"dispatchProfileIds",
@@ -399,6 +400,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 				HARNESS_CAPABILITIES.includes(capability as (typeof HARNESS_CAPABILITIES)[number]),
 		) ||
 		!isStringArray(value.toolNames) ||
+		(value.readOnly !== undefined && typeof value.readOnly !== "boolean") ||
 		(value.workspacePath !== undefined &&
 			(typeof value.workspacePath !== "string" ||
 				!value.workspacePath.trim() ||
@@ -430,6 +432,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 		modelPolicy: { mode: modelPolicy.mode as OrchestrationProfile["modelPolicy"]["mode"], candidates },
 		capabilityCeiling: value.capabilityCeiling as OrchestrationProfile["capabilityCeiling"],
 		toolNames: value.toolNames,
+		...(value.readOnly === true ? { readOnly: true } : {}),
 		...(typeof value.workspacePath === "string" ? { workspacePath: value.workspacePath } : {}),
 		resourceProfileNames: value.resourceProfileNames,
 		dispatchProfileIds: value.dispatchProfileIds,

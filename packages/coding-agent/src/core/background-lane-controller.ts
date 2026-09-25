@@ -709,6 +709,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._getWorkerController().getAgentControl().resolveWorkerAgentLane?.(agentId, scope);
 	}
 
+	readWorkerAgentLastText(agentId: string, laneId: string, scope?: WorkerAgentControlScope): string | undefined {
+		if (!this.deps.isDelegateToolActive())
+			throw new Error("Worker delegation control is unavailable in this UAC surface.");
+		return this._getWorkerController().getAgentControl().readWorkerAgentLastText?.(agentId, laneId, scope);
+	}
+
 	waitForWorkerAgent(
 		agentId: string,
 		timeoutMs?: number,

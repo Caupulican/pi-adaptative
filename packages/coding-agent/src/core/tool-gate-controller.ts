@@ -45,7 +45,11 @@ type BeforeToolCall = NonNullable<Agent["beforeToolCall"]>;
 type AfterToolCall = NonNullable<Agent["afterToolCall"]>;
 
 export interface ToolGateControllerDeps {
-	/** Execution permission mode. YOLO keeps lifecycle bookkeeping but bypasses harness vetoes. */
+	/**
+	 * Execution permission mode. YOLO skips the permission checks (envelope, acquisition, extension
+	 * vetoes, script authorization, edge prompts, System One review) and keeps self-regulation: context
+	 * compaction, router escalation, the local-commit branch rule and project-rule acceptance.
+	 */
 	getExecutionMode?(): "guarded" | "yolo";
 	gateSelfCompaction?(toolName: string, assistantMessage: AssistantMessage): BeforeToolCallResult | undefined;
 	/** Router escalation: block a tool the active cheap route is not allowed to run. */
@@ -205,21 +209,19 @@ export class ToolGateController {
 	) => {
 		signal?.throwIfAborted();
 		const yolo = this.deps.getExecutionMode?.() === "yolo";
-		const selfCompactionBlock = yolo ? undefined : this.deps.gateSelfCompaction?.(toolCall.name, assistantMessage);
+		const selfCompactionBlock = this.deps.gateSelfCompaction?.(toolCall.name, assistantMessage);
 		if (selfCompactionBlock) return selfCompactionBlock;
 		// Session model selection may change during a provider response or any awaited hook.
 		const modelRef = `${assistantMessage.provider}/${assistantMessage.model}`;
-		const escalation = yolo ? undefined : this.deps.maybeEscalateToolCall(toolCall.name, args);
+		const escalation = this.deps.maybeEscalateToolCall(toolCall.name, args);
 		if (escalation) {
 			return escalation;
 		}
-		const refusedPush = yolo
-			? undefined
-			: refuseLocalPush(
-					this.deps.localCommitBranch ? { branch: () => this.deps.localCommitBranch?.() } : undefined,
-					toolCall.name,
-					args,
-				);
+		const refusedPush = refuseLocalPush(
+			this.deps.localCommitBranch ? { branch: () => this.deps.localCommitBranch?.() } : undefined,
+			toolCall.name,
+			args,
+		);
 		if (refusedPush) return refusedPush;
 
 		// The capability envelope is evaluated twice per call - once on the raw arguments before any
@@ -498,11 +500,7 @@ export class ToolGateController {
 			// this result an error; the RepairWork it queued is durable on the session.
 			if (!resolvedIsError) {
 				const changedFiles = collectMutatedPaths(toolCall.name, args);
-				if (
-					changedFiles.length > 0 &&
-					this.deps.getExecutionMode?.() !== "yolo" &&
-					this.deps.validateMutationAcceptance
-				) {
+				if (changedFiles.length > 0 && this.deps.validateMutationAcceptance) {
 					const verdict = await this.deps.validateMutationAcceptance({
 						toolName: toolCall.name,
 						changedFiles,

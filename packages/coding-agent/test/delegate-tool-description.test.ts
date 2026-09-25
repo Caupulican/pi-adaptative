@@ -195,26 +195,26 @@ describe("delegate tool capability description", () => {
 		});
 	});
 
-	it("YOLO forwards a readOnly worker request with a write tool", async () => {
+	it("refuses a readOnly worker request that names a write tool before a lane exists", async () => {
 		const startWorkerDelegation = vi.fn(() => ({
 			started: true as const,
 			record: { laneId: "worker-1", type: "worker" as const, status: "queued" as const },
 		}));
 		const definition = createDelegateToolDefinition({
 			caller: { kind: "session_root" },
-			getExecutionMode: () => "yolo",
 			startWorkerDelegation,
 			runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
 		});
 		const result = await definition.execute(
-			"yolo-worker",
+			"read-only-worker",
 			{ action: "start", instructions: "Write the file.", readOnly: true, toolNames: ["write"] },
 			undefined,
 			undefined,
 			{} as never,
 		);
-		expect(result.details).toMatchObject({ started: true });
-		expect(startWorkerDelegation).toHaveBeenCalledOnce();
+		// readOnly is the caller's promise that the worker edits nothing; it holds in every mode.
+		expect(result.details).toMatchObject({ started: false, skipReason: "read_only_tool_conflict" });
+		expect(startWorkerDelegation).not.toHaveBeenCalled();
 	});
 
 	it("observes terminal records for status reads without observing mutation review", async () => {

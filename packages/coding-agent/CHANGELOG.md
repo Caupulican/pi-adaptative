@@ -6,11 +6,18 @@
 
 ### Changed
 
-- Delegated workers always receive shell and Git access, including read-only and narrow profiles. Their shell calls use the extreme-destruction edge without semantic operation review.
+- Delegated workers always receive shell and Git access, including read-only and narrow profiles. A `readOnly` worker's shell runs only commands that edit nothing that exists (redirecting output into a new file is allowed), `readOnly` drops interpreters and scripts, holds in YOLO, and defaults the worker's role to `explorer`.
+- In guarded mode a worker's shell and code calls go through System One operation review unless `operation.irreversible` is granted; a held operation is refused and reported to the parent.
+- YOLO skips permission checks only. Context compaction, router escalation, the model capability filter, owner model pins and policy, `workerDelegation.enabled`, tool allow/exclude settings, credential masking, private harness state, the local-commit branch rule and project-rule acceptance stay active.
+- `delegate status` shows the last words of a worker that ended without a completion claim, and the refusal for several matching idle workers tells the root to name the recipient.
 
 ### Fixed
 
 - Distinct reads no longer count as a repeated worker strategy, and a semantic low-progress score alone cannot cancel a worker after steering; `repo_read log` accepts `--simplify-by-decoration`.
+- Worker supervision judges progress against the worker's role, so a read-only review is no longer steered or cancelled for changing no files.
+- A malformed `edge.deny` disables YOLO without withdrawing standing `edge.allow` grants.
+- A named `delegate start` that also carries `parallelWork` runs on the named worker instead of being refused.
+- The shared read/write shell classifier treats `sed -i`, emitting `tsc`, and ref-creating `git branch`/`git tag` as mutating, and recognises more read-only commands (`cd`, `diff`, `sort`, `git blame`, `git grep`, ...).
 
 ## [0.99.48] - 2026-09-25
 

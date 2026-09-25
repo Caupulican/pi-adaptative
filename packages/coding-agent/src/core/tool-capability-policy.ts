@@ -102,8 +102,9 @@ export function hasToolCapabilityPolicy(toolName: string): boolean {
 }
 
 /**
- * Whether a capability survives a `readOnly` worker grant. Workers retain process execution
- * for their host-provided shell; direct write, network, and delegation grants are narrowed.
+ * Whether a capability survives a `readOnly` worker grant. Process execution survives for the
+ * host-provided shell, whose commands must then be read-only (see {@link toolSurvivesReadOnly});
+ * write, network, and delegation grants are removed.
  */
 export function capabilitySurvivesReadOnly(capability: HarnessCapability): boolean {
 	return (
@@ -120,9 +121,16 @@ export function capabilitySurvivesReadOnly(capability: HarnessCapability): boole
  * conjunctive clause must keep at least one surviving alternative. Unknown tools are reported as
  * excluded so a caller never claims a grant this policy cannot back.
  */
+/**
+ * The process tools a `readOnly` lane keeps: a shell whose command text the read/write line can judge
+ * (`readOnlyShellViolation`). Interpreters and scripts cannot be judged from their arguments.
+ */
+export const READ_ONLY_SHELL_TOOL_NAMES: ReadonlySet<string> = new Set(["bash", "powershell", "shell"]);
+
 export function toolSurvivesReadOnly(toolName: string): boolean {
 	const policy = getToolCapabilityPolicy(toolName);
 	if (!policy) return false;
+	if (policy === PROCESS_POLICY && !READ_ONLY_SHELL_TOOL_NAMES.has(toolName.toLowerCase())) return false;
 	return policy.capabilityClauses.every((clause) => clause.some(capabilitySurvivesReadOnly));
 }
 

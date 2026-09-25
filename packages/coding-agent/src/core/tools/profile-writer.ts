@@ -75,7 +75,7 @@ export function formatTaskProfileInspection(inspection: TaskProfileInspection): 
 		inspection.inheritedToolNames.length > 0
 			? ` readOnly: true keeps ${kept.join(", ") || "none"} and drops ${excluded.join(", ") || "none"}.`
 			: "";
-	return `Optional owner-authored bases for profile_create: ${bases}. Omit baseProfileId to derive the foreground model, reasoning, compatible tools, and machine scope. Effective inherited native tools: ${inheritedTools}.${readOnlyNote} Every worker also receives bash. Optional model, thinkingLevel, path, and toolNames fields narrow the other tools. Available configured models: ${inspection.models.length}.`;
+	return `Optional owner-authored bases for profile_create: ${bases}. Omit baseProfileId to derive the foreground model, reasoning, compatible tools, and machine scope. Effective inherited native tools: ${inheritedTools}.${readOnlyNote} Every worker also receives bash; under readOnly it runs only commands that edit nothing that exists. Optional model, thinkingLevel, path, and toolNames fields narrow the other tools. Available configured models: ${inspection.models.length}.`;
 }
 
 export function executeDelegateProfileAction(

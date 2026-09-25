@@ -606,7 +606,6 @@ export class RuntimeBuilder {
 	 */
 	private _createToolAccessPolicy(): RuntimeToolAccessPolicy {
 		const role = getSessionRole();
-		const yolo = this.deps.getSettingsManager().getEdgeSettings().mode === "yolo";
 		const configuredAllowedToolNames = this.deps.getAllowedToolNames();
 		const allowedToolNames = configuredAllowedToolNames
 			? new Set(mapToolNamesForPlatform([...configuredAllowedToolNames]))
@@ -628,7 +627,6 @@ export class RuntimeBuilder {
 			allows: (name) => {
 				// Strict worker UAC ceiling wins over every explicit grant.
 				if (role === "worker" && WORKER_FORBIDDEN_TOOLS.has(name)) return false;
-				if (yolo) return true;
 				if (allowedToolNames && !allowedToolNames.has(name)) return false;
 				if (excludedToolNames?.has(name)) return false;
 				if (!toolProfileFilter) return true;
@@ -689,7 +687,6 @@ export class RuntimeBuilder {
 					childEnvelope,
 					scopeCwd,
 				);
-				if (this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") return [readTool, grepTool, findTool];
 				return [
 					wrapToolWithCredentialExposureGuard(readTool, toolCwd, this._credentialExposureBoundary, exposureMode),
 					wrapToolWithCredentialExposureGuard(grepTool, toolCwd, this._credentialExposureBoundary, exposureMode),
@@ -853,21 +850,16 @@ export class RuntimeBuilder {
 					bound = this._taskDirectories.bindTool(tool);
 				}
 			}
-			const guarded =
-				this.deps.getSettingsManager().getEdgeSettings().mode === "yolo"
-					? bound
-					: wrapToolWithCredentialExposureGuard(
-							bound,
-							this.deps.getCwd(),
-							this._credentialExposureBoundary,
-							this.credentialExposureMode(),
-						);
-			const scoped =
-				this.deps.getSettingsManager().getEdgeSettings().mode === "yolo"
-					? guarded
-					: this._workerSessionPrivatePathEnvelope
-						? wrapToolWithEnvelopeScope(guarded, this._workerSessionPrivatePathEnvelope, this.deps.getCwd())
-						: guarded;
+			// Credential masking and private-state scoping are not permission prompts: YOLO keeps both.
+			const guarded = wrapToolWithCredentialExposureGuard(
+				bound,
+				this.deps.getCwd(),
+				this._credentialExposureBoundary,
+				this.credentialExposureMode(),
+			);
+			const scoped = this._workerSessionPrivatePathEnvelope
+				? wrapToolWithEnvelopeScope(guarded, this._workerSessionPrivatePathEnvelope, this.deps.getCwd())
+				: guarded;
 			toolRegistry.set(scoped.name, scoped);
 		}
 		this._toolRegistry = toolRegistry;
@@ -876,9 +868,11 @@ export class RuntimeBuilder {
 			? mapToolNamesForPlatform(options.activeToolNames)
 			: [...previousActiveToolNames];
 		const nextActiveToolNames = requestedBase.filter((name) => isAllowedTool(name));
+		// YOLO activates the execution tools, never past the owner's tool allow/exclude configuration.
 		if (this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") {
 			for (const name of ["bash", "write", "edit", "delegate"]) {
-				if (this._toolRegistry.has(name)) nextActiveToolNames.push(name);
+				if (this._toolRegistry.has(name) && isAllowedTool(name) && !nextActiveToolNames.includes(name))
+					nextActiveToolNames.push(name);
 			}
 		}
 
@@ -1500,7 +1494,6 @@ export class RuntimeBuilder {
 				const delegatePromptGuidelineWarnings: string[] = [];
 				const delegateToolDefinition = createDelegateToolDefinition({
 					caller: { kind: "session_root" },
-					getExecutionMode: () => this.deps.getSettingsManager().getEdgeSettings().mode,
 					resolveMessageReplayScope: () => {
 						const sessionManager = this.deps.getSessionManager();
 						return {

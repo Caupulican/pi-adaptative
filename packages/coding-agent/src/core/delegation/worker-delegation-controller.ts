@@ -107,6 +107,7 @@ import {
 import {
 	bindCompiledToolSurface,
 	bindCompiledVerifierIdentity,
+	defaultWorkerRole,
 	previewWorkerModel,
 	resolveWorkerAuthority,
 	type WorkerAuthorityResolution,
@@ -1160,13 +1161,12 @@ export class WorkerDelegationController {
 		const instructions = request.instructions;
 		if (!instructions.trim()) return { ok: false, skipReason: "missing_instructions" };
 		if (!this.deps.isDelegateToolActive()) return { ok: false, skipReason: "delegate_tool_inactive" };
-		const yolo = this.deps.getSettingsManager().getEdgeSettings().mode === "yolo";
 		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
-		if (!yolo && !settings.enabled) return { ok: false, skipReason: "worker_delegation_disabled" };
+		if (!settings.enabled) return { ok: false, skipReason: "worker_delegation_disabled" };
 		const modelPinPolicy = pinnedContract
 			? ({ status: "absent" } as const)
 			: this.deps.getSettingsManager().getWorkerModelPinPolicy();
-		if (!yolo && modelPinPolicy.status === "invalid") {
+		if (modelPinPolicy.status === "invalid") {
 			return { ok: false, skipReason: "worker_model_pins_invalid" };
 		}
 		const parentAgent = request.parentAgentId ? this.lifecycle.getAgent(request.parentAgentId) : undefined;
@@ -1218,8 +1218,8 @@ export class WorkerDelegationController {
 			basePreset = configured.preset;
 		}
 		const effectiveRole: WorkerRole =
-			authority?.role ?? baseShipment?.profile.role ?? basePreset?.profile.role ?? "implementer";
-		const modelPin = yolo ? undefined : resolveWorkerModelPin(modelPinPolicy, effectiveRole);
+			authority?.role ?? baseShipment?.profile.role ?? basePreset?.profile.role ?? defaultWorkerRole(authority);
+		const modelPin = resolveWorkerModelPin(modelPinPolicy, effectiveRole);
 		// The model itself is authority?.model, not `role` — role selects which pin applies, but a
 		// roles-only policy (no `default`) leaves an unlisted role with no pin at all, so a caller
 		// can name that role plus an explicit model and admission never sees anything to enforce.
@@ -1289,7 +1289,7 @@ export class WorkerDelegationController {
 			if (!narrowed.ok) return narrowed;
 			verifierShipment = narrowed.shipment;
 		}
-		if (!yolo && !this.laneCapabilityProfile(shipment.model).backgroundLanesEnabled) {
+		if (!this.laneCapabilityProfile(shipment.model).backgroundLanesEnabled) {
 			return { ok: false, skipReason: "model_delegation_unsupported" };
 		}
 		// The model-facing delegate surface cannot name profile resources. An absent or empty
@@ -3319,6 +3319,7 @@ export class WorkerDelegationController {
 		const toolSurface = createLaneToolSurface({
 			yolo: this.deps.getSettingsManager().getEdgeSettings().mode === "yolo",
 			denyCommands: this.deps.getSettingsManager().getEdgeSettings().deny,
+			shellReadOnly: executionPlan.shellReadOnly,
 			cwd: executionPlan.cwd,
 			...(sharedToolOptions ? { sharedToolOptions } : {}),
 			...(this.deps.getPathAliasTable ? { getPathAliasTable: this.deps.getPathAliasTable } : {}),
@@ -3335,13 +3336,14 @@ export class WorkerDelegationController {
 			toolManifests: executionPlan.toolManifests,
 			...(workerToolAdapters ? { workerToolAdapters } : {}),
 			checkEdge: (toolName, args, executionCwd) => {
-				if (this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") return undefined;
+				// A local-commit branch is the owner's integration setup, not a permission prompt: YOLO keeps it.
 				const refusedPush = refuseLocalPush(
 					this.deps.localCommitBranch ? { branch: () => this.deps.localCommitBranch?.() } : undefined,
 					toolName,
 					args,
 				);
 				if (refusedPush) return refusedPush;
+				if (this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") return undefined;
 				const parentGrants = this.deps.getEdgeGrants?.() ?? [];
 				const operations = classifyAllEdgeOperations({
 					toolName,

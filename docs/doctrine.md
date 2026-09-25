@@ -595,13 +595,20 @@ provider: xai", which points at the wrong fix. Pinned by
 
 ## Workers
 
-**Workers deny by default and never exceed the parent's surface.** A worker's tools come from the
-parent's active tool set; root-only tools and nested delegation are refused with the rule named.
+**Workers deny by default; the shell is the one host guarantee.** A worker's other tools come from
+the parent's active tool set; root-only tools and nested delegation are refused with the rule named.
 Read is read: a parent with `bash` lends the catalog read tools (`grep`, `find`, `ls`) and read-only
 git (`repo_read`, capability `repo.read`) natively. Every worker also receives `bash` and
 `process.exec`, including `readOnly: true`, named profiles, narrow tool lists, and a foreground
-session without bash. `readOnly` removes direct write, network and service tools. Worker shell
-commands run through the deterministic extreme-destruction edge, without semantic operation review.
+session without bash. A `readOnly` grant, persisted on the worker's profile, holds that shell to
+commands that edit nothing that exists: output may still be redirected or `tee`d into a new file,
+while a redirect onto an existing path and every command the shared read/write line calls mutating
+are refused with the reason. `readOnly` also drops write, interpreter, script, network and service
+tools, holds in YOLO, and defaults the worker's role to `explorer`. A profile that grants process
+execution without file writes keeps an unrestricted shell: only `readOnly` restricts commands. In guarded mode a worker's shell and code calls go through the same System One
+operation review as the root's, except under the standing `operation.irreversible` grant, where the
+verdict could only authorize; a held or refused operation is refused and reported to the parent,
+because only the root reaches the owner.
 `repo_read` runs git with an argv allow-list: no shell, no hooks, pager or diff
 drivers, only output-shaping options, pathspecs and object paths inside its directory, credential
 files model-blind like `read`. A plain `log` request returns at most the requested number of concise
@@ -1018,3 +1025,4 @@ measurement gains no new surface.
 | 2026-09-24 | No invariant moved: the path-alias contract test closes the runtimes it opens before removing their directories, since Windows cannot delete an open database. |
 | 2026-09-24 | A side trip searches the conversation its brief omits (`conversation_history`) instead of handing its message back: the free side-trip model looked the conversation up 10 of 10 times and handed back 0 of 28. It keeps the whole tool surface, since reaching for a mutating tool is how work it cannot do reaches the talker. |
 | 2026-09-24 | Path aliasing's scan cursor is the set of scanned message fingerprints, not the `last_scanned_timestamp` mark, so same-millisecond, replaced, branch-switched and pause-time messages are scanned once and scanned history is not rescanned; the contract test's persistence case counts fingerprints instead of reading the mark. |
+| 2026-09-25 | A `readOnly` worker keeps `bash` but runs only commands that edit nothing that exists (new-file redirects allowed), loses interpreters and scripts, keeps this in YOLO, and defaults to the `explorer` role; worker supervision judges progress against the worker's role; a guarded worker's operation without the standing grant is judged and refused to the parent instead of skipped. |

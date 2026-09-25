@@ -171,6 +171,7 @@ function createExecutorHarness(
 		executionPlan: {
 			cwd: process.cwd(),
 			processEnabled: false,
+			shellReadOnly: false,
 			writeEnabled: false,
 			readMemory: false,
 			readPaths: [process.cwd()],

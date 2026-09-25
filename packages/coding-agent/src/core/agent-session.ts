@@ -4320,10 +4320,7 @@ export class AgentSession {
 		if (requested.includes("skill")) {
 			requested.push("skillify", "skill_audit");
 		}
-		const capabilityFiltered =
-			this.settingsManager.getEdgeSettings().mode === "yolo"
-				? requested
-				: filterToolNamesForCapability(requested, this.getModelCapabilityProfile(), this.model);
+		const capabilityFiltered = filterToolNamesForCapability(requested, this.getModelCapabilityProfile(), this.model);
 
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];

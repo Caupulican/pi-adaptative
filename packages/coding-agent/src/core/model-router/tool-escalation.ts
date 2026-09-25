@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import * as nodePath from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { ModelTier } from "../autonomy/contracts.ts";
 import { isLocalExecutionModel } from "../background-lane-controller.ts";
@@ -46,11 +48,21 @@ const SHELL_TOOL_NAMES = new Set(["bash", "powershell", "exec", "execute", "run"
 
 const READ_ONLY_COMMANDS = new Set([
 	"awk",
+	"basename",
 	"cat",
+	"cd",
+	"column",
+	"comm",
+	"cut",
 	"date",
 	"df",
+	"diff",
+	"dirname",
 	"du",
+	"echo",
 	"env",
+	"fd",
+	"file",
 	"find",
 	"format-list",
 	"format-table",
@@ -65,19 +77,31 @@ const READ_ONLY_COMMANDS = new Set([
 	"head",
 	"jq",
 	"ls",
+	"md5sum",
+	"nl",
 	"node",
 	"npm",
 	"pnpm",
+	"printf",
 	"pwd",
+	"readlink",
+	"realpath",
 	"resolve-path",
 	"rg",
 	"sed",
 	"select-object",
 	"select-string",
+	"sha1sum",
+	"sha256sum",
+	"sort",
+	"stat",
 	"tail",
 	"test",
 	"test-path",
+	"tr",
+	"tree",
 	"tsc",
+	"uniq",
 	"wc",
 	"where-object",
 	"which",
@@ -85,7 +109,28 @@ const READ_ONLY_COMMANDS = new Set([
 	"yarn",
 ]);
 
-const READ_ONLY_GIT_SUBCOMMANDS = new Set(["branch", "diff", "log", "rev-parse", "show", "status", "tag"]);
+const READ_ONLY_GIT_SUBCOMMANDS = new Set([
+	"blame",
+	"cat-file",
+	"describe",
+	"diff",
+	"grep",
+	"log",
+	"ls-files",
+	"ls-tree",
+	"merge-base",
+	"name-rev",
+	"rev-list",
+	"rev-parse",
+	"shortlog",
+	"show",
+	"show-ref",
+	"status",
+]);
+/** `git branch` and `git tag` list refs, but a positional name or a ref-changing flag creates, moves or deletes one. */
+const GIT_REF_LISTING_SUBCOMMANDS = new Set(["branch", "tag"]);
+const GIT_REF_MUTATING_FLAG_RE =
+	/^(?:-[dDmMcCfu]|--delete|--move|--copy|--force|--set-upstream-to(?:=.*)?|--unset-upstream|--edit-description|-a|--annotate|-s|--sign|-F|--file(?:=.*)?)$/;
 const READ_ONLY_NPM_SUBCOMMANDS = new Set(["info", "list", "ls", "outdated", "view", "whoami"]);
 const MUTATING_SHELL_TOKEN_RE =
 	/(^|\s)(>|>>|2>|&>|tee\b|rm\b|mv\b|cp\b|mkdir\b|touch\b|chmod\b|chown\b|install\b|commit\b|push\b|publish\b|deploy\b|apply\b|add\b|checkout\b|switch\b|reset\b|clean\b|stash\b|merge\b|rebase\b|remove-item\b|move-item\b|copy-item\b|new-item\b|rename-item\b|set-content\b|add-content\b|out-file\b|set-item\b|start-process\b|npm\s+(?:i|install|ci|update|publish|run)\b|pnpm\s+(?:i|install|update|publish|run)\b|yarn\s+(?:add|install|upgrade|publish|run)\b)/i;
@@ -112,13 +157,30 @@ function commandArg(segment: string, index: number): string | undefined {
 	return segment.trim().split(/\s+/)[index]?.toLowerCase();
 }
 
+function isReadOnlyGitRefListing(segment: string, subcommand: string): boolean {
+	const rest = segment.trim().split(/\s+/).slice(2);
+	const listing = rest.some((token) => token === "-l" || token === "--list");
+	for (const token of rest) {
+		// `git tag -a` annotates, but `git branch -a` lists all branches.
+		if (subcommand === "branch" && token === "-a") continue;
+		if (GIT_REF_MUTATING_FLAG_RE.test(token)) return false;
+		if (!token.startsWith("-") && !listing) return false;
+	}
+	return true;
+}
+
 function isReadOnlyShellSegment(segment: string): boolean {
 	const name = commandName(segment);
 	if (!name || !READ_ONLY_COMMANDS.has(name)) return false;
 	if (name === "git") {
 		const subcommand = commandArg(segment, 1);
+		if (subcommand && GIT_REF_LISTING_SUBCOMMANDS.has(subcommand))
+			return isReadOnlyGitRefListing(segment, subcommand);
 		return Boolean(subcommand && READ_ONLY_GIT_SUBCOMMANDS.has(subcommand));
 	}
+	// In-place editing and emitting compilers change files.
+	if (name === "sed" && /(?:^|\s)(?:-[a-zA-Z]*i[a-zA-Z]*|--in-place(?:=\S*)?)(?:\s|$)/.test(segment)) return false;
+	if (name === "tsc" && !/(?:^|\s)--noEmit(?:\s|$)/.test(segment)) return false;
 	if (name === "npm" || name === "pnpm" || name === "yarn") {
 		const subcommand = commandArg(segment, 1);
 		return Boolean(subcommand && READ_ONLY_NPM_SUBCOMMANDS.has(subcommand));
@@ -126,11 +188,59 @@ function isReadOnlyShellSegment(segment: string): boolean {
 	return true;
 }
 
+const SHELL_SEGMENT_SEPARATOR_RE = /\s*(?:&&|\|\||[;|\r\n])\s*/;
+
 function isReadOnlyShellCommand(command: string): boolean {
 	if (!command || MUTATING_SHELL_TOKEN_RE.test(command) || UNSAFE_NESTED_SHELL_EXECUTION_RE.test(command))
 		return false;
-	const segments = command.split(/\s*(?:&&|\|\||[;|\r\n])\s*/).map((segment) => segment.trim());
+	const segments = command.split(SHELL_SEGMENT_SEPARATOR_RE).map((segment) => segment.trim());
 	return segments.length > 0 && segments.every((segment) => segment.length > 0 && isReadOnlyShellSegment(segment));
+}
+
+/** An output redirection and its target: `>`, `>>`, `2>`, `&>`, `&>>`; `2>&1`-style fd duplication is not a file. */
+const OUTPUT_REDIRECTION_RE = /(?:^|(?<=\s))(?:\d|&)?>>?\s*("[^"]*"|'[^']*'|&\d+|&-|[^\s;&|<>]+)/g;
+const STREAM_TARGET_RE = /^(?:&\d+|&-|\/dev\/(?:null|stdout|stderr|tty))$/;
+
+function unquoteShellWord(word: string): string {
+	return (word.startsWith('"') && word.endsWith('"')) || (word.startsWith("'") && word.endsWith("'"))
+		? word.slice(1, -1)
+		: word;
+}
+
+/**
+ * Why a read-only lane may not run `command`, or undefined when it may. Read-only means nothing that
+ * already exists is edited: output may still be redirected or `tee`d into a NEW file (a report, a
+ * scratch capture), but a redirect or tee onto an existing path, and every command the read/write
+ * line above calls mutating, is refused. This inspects the command text; it is not OS isolation.
+ */
+export function readOnlyShellViolation(command: string, cwd: string): string | undefined {
+	const trimmed = command.trim();
+	if (!trimmed) return undefined;
+	const targetExists = (word: string): string | undefined => {
+		const target = unquoteShellWord(word);
+		if (STREAM_TARGET_RE.test(target)) return undefined;
+		return existsSync(nodePath.resolve(cwd, target)) ? target : undefined;
+	};
+	for (const match of trimmed.matchAll(OUTPUT_REDIRECTION_RE)) {
+		const existing = targetExists(match[1]!);
+		if (existing) return `it writes into the existing path ${existing}`;
+	}
+	const withoutRedirections = trimmed.replace(OUTPUT_REDIRECTION_RE, " ");
+	const remaining: string[] = [];
+	for (const segment of withoutRedirections.split(SHELL_SEGMENT_SEPARATOR_RE).map((part) => part.trim())) {
+		if (!segment) continue;
+		if (commandName(segment) !== "tee") {
+			remaining.push(segment);
+			continue;
+		}
+		for (const word of segment.split(/\s+/).slice(1)) {
+			if (word.startsWith("-")) continue;
+			const existing = targetExists(word);
+			if (existing) return `it writes into the existing path ${existing}`;
+		}
+	}
+	if (remaining.length === 0) return undefined;
+	return isReadOnlyShellCommand(remaining.join(" ; ")) ? undefined : "it may change files or repository state";
 }
 
 export function shouldEscalateModelRouterTool(options: {

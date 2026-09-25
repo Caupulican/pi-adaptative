@@ -320,11 +320,12 @@ describe("ToolGateController publishes one gate outcome per tool call", () => {
 			allowedPaths: [cwd],
 		};
 		const checked: string[] = [];
-		const makeController = (mode: "guarded" | "yolo") =>
+		const makeController = (mode: "guarded" | "yolo", selfRegulation?: "compaction" | "router") =>
 			new ToolGateController({
 				getExecutionMode: () => mode,
-				gateSelfCompaction: () => ({ block: true, reason: "compaction" }),
-				maybeEscalateToolCall: () => ({ block: true, reason: "router" }),
+				gateSelfCompaction: () =>
+					selfRegulation === "compaction" ? { block: true, reason: "compaction" } : undefined,
+				maybeEscalateToolCall: () => (selfRegulation === "router" ? { block: true, reason: "router" } : undefined),
 				getCwd: () => cwd,
 				getCapabilityEnvelope: () => envelope,
 				recordGateOutcome: () => {},
@@ -359,5 +360,8 @@ describe("ToolGateController publishes one gate outcome per tool call", () => {
 		expect(await call(makeController("guarded"))).toMatchObject({ block: true });
 		expect(await call(makeController("yolo"))).toBeUndefined();
 		expect(checked).toEqual(["edge"]);
+		// Context compaction and router escalation are self-regulation, not permission: YOLO keeps both.
+		expect(await call(makeController("yolo", "compaction"))).toMatchObject({ block: true, reason: "compaction" });
+		expect(await call(makeController("yolo", "router"))).toMatchObject({ block: true, reason: "router" });
 	});
 });

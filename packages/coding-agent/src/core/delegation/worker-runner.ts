@@ -126,6 +126,12 @@ export function buildWorkerUserPrompt(request: WorkerRequest, options: { earlier
 	].join("\n");
 }
 
+/** Whether a user message is the task prompt {@link buildWorkerUserPrompt} opened an attempt with. */
+export function isWorkerTaskPrompt(text: string): boolean {
+	const body = text.startsWith(`${EARLIER_SESSION_NOTE}\n`) ? text.slice(EARLIER_SESSION_NOTE.length + 1) : text;
+	return body.startsWith("TASK\n") && body.includes("\nEND TASK\n");
+}
+
 export interface ParsedWorkerOutput {
 	summary: string;
 	status: "completed" | "blocked";
