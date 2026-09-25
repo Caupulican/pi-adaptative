@@ -196,7 +196,24 @@ function isReadOnlyGitRefListing(segment: string, subcommand: string): boolean {
 	return true;
 }
 
+/** A leading `NAME=value`: sets a shell variable, or one command's environment when a command follows. */
+const LEADING_ASSIGNMENT_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(?:"[^"]*"|'[^']*'|[^\s"']*)(?:\s+|$)/u;
+/** Variables the shell, the loader or a common tool consults to decide what runs: setting one can turn a read into anything. */
+const EXECUTION_STEERING_VARIABLE_RE =
+	/^(?:PATH|IFS|ENV|BASH_ENV|SHELLOPTS|BASHOPTS|PS4|PROMPT_COMMAND|PAGER|[A-Z0-9_]*_PAGER|EDITOR|VISUAL|BROWSER|LESSOPEN|LESSCLOSE|LD_[A-Z0-9_]*|DYLD_[A-Z0-9_]*|GIT_[A-Z0-9_]*|NODE_OPTIONS|NODE_PATH|PYTHON[A-Z0-9_]*|PERL5[A-Z0-9_]*|RUBY[A-Z0-9_]*|SSH_[A-Z0-9_]*)$/u;
+
 function isReadOnlyShellSegment(segment: string): boolean {
+	let rest = segment.trim();
+	for (let assignment = LEADING_ASSIGNMENT_RE.exec(rest); assignment; assignment = LEADING_ASSIGNMENT_RE.exec(rest)) {
+		if (EXECUTION_STEERING_VARIABLE_RE.test(assignment[1]!)) return false;
+		rest = rest.slice(assignment[0].length);
+	}
+	// A bare assignment changes only the shell's own variables.
+	if (!rest) return segment.trim().length > 0;
+	return isReadOnlyCommandSegment(rest);
+}
+
+function isReadOnlyCommandSegment(segment: string): boolean {
 	const name = commandName(segment);
 	if (!name || !READ_ONLY_COMMANDS.has(name)) return false;
 	if (name === "git") {

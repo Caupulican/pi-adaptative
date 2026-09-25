@@ -115,7 +115,7 @@ const goalSchema = Type.Object(
 		userGoal: Type.Optional(
 			Type.String({
 				description:
-					"The goal statement. Required for 'start'; for 'amend_goal', the objective rewritten to include what the owner's quoted message adds or changes.",
+					"The goal statement. Required for 'start' and 'amend_goal'; for 'amend_goal', the objective rewritten to include what the owner's quoted message adds or changes.",
 			}),
 		),
 		tokenBudget: Type.Optional(
@@ -245,6 +245,16 @@ export interface GoalToolDetails {
 	 * re-dispatch against an already-bound requirement (`requirement_already_bound`/`bound_lane_indeterminate`).
 	 * The binding is recorded (or, for a guard refusal, left exactly as it was) with no NEW laneId. */
 	dispatchSkipReason?: string;
+	/**
+	 * Set on a completion that reran requirement checks: how many passed and failed in this call.
+	 * A receipt key, so it survives the retention stub that replaces the (large) goal state.
+	 */
+	piReceipts?: { requirementChecks: GoalCheckRuns };
+}
+
+export interface GoalCheckRuns {
+	passed: number;
+	failed: number;
 }
 
 export type GoalToolEvidenceResolution =
@@ -579,7 +589,7 @@ async function proveGoalRequirementChecks(
 	deps: GoalToolDependencies,
 	now: () => string,
 	signal: AbortSignal | undefined,
-): Promise<{ state: GoalState } | { refusal: string; state: GoalState }> {
+): Promise<{ state: GoalState; refusal?: string; runs?: GoalCheckRuns }> {
 	const proof = await proveRequirementChecks({
 		state,
 		runCheck: deps.runRequirementCheck,
@@ -589,7 +599,13 @@ async function proveGoalRequirementChecks(
 		...(signal ? { signal } : {}),
 	});
 	const refusal = describeRequirementCheckRefusal(proof);
-	return refusal ? { refusal, state: proof.state } : { state: proof.state };
+	// Checks that could not run ran nothing: there are no runs to report.
+	const ran = proof.checked > 0 && !proof.unrunnable;
+	return {
+		state: proof.state,
+		...(refusal ? { refusal } : {}),
+		...(ran ? { runs: { passed: proof.checked - proof.failures.length, failed: proof.failures.length } } : {}),
+	};
 }
 
 /**
@@ -792,7 +808,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			"Plans: task_steps. Workers: delegate. Background tools: tool_task wait once; cite taskId as kind=tool evidence.",
 			"increment satisfies the current open requirement from unused evidence, or completes when none remain.",
 			"When a command can observe a requirement's outcome, give it a check (add_requirement or set_requirement_check): the harness reruns it at completion, so the outcome is proven, not asserted.",
-			"When the owner adds to or changes the goal mid-run, amend_goal with their complete message as quote, then add requirements for what it adds; completion judges the goal as recorded.",
+			"When the owner adds to or changes the goal mid-run, amend_goal with their complete message as quote and the rewritten objective as userGoal, then add requirements for what it adds; completion judges the goal as recorded.",
 			"grant_edge: record a grant only when the operator's words authorize deleting the repository, the home directory, a filesystem root, a disk, or a toolkit script. Git, publishing, installing, and settings edits run without a grant. A granted class never asks; an ungranted destructive.fs or toolkit.script asks once. When the operator authorized one concrete toolkit script and arguments, specify toolkitScript and toolkitArgs; omit them for a broad class grant only when their instruction covers the class.",
 			"complete needs current authoritative evidence, no remaining work, no active goal-owned lanes, no open task_steps, no goal-owned or cited running tool_task, and no active pipeline. Failed or canceled tool_task results are terminal and stop blocking liveness, but never become verified evidence automatically. block_requirement/block_goal only when the same verified owner/approval boundary or capability impossibility persists for 3 consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; otherwise keep working.",
 		],
@@ -1012,6 +1028,13 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			// Parallel evidence may extend the same goal while verification waits. Rebase only across
 			// those additions; replacements and other transitions still invalidate the observation.
 			const latest = deps.getGoalState();
+			// Requirement checks the completion below reruns: every outcome of that completion reports them,
+			// so the runs are a mechanical receipt the end-of-turn claim check can read.
+			let checkRuns: GoalCheckRuns | undefined;
+			const withCheckRuns = <T extends { details: GoalToolDetails }>(result: T): T =>
+				checkRuns
+					? { ...result, details: { ...result.details, piReceipts: { requirementChecks: checkRuns } } }
+					: result;
 			let current =
 				action.action === "add_evidence" ? resolveGoalEvidenceCommitState(evidenceState, latest) : latest;
 			let nextState: GoalState;
@@ -1064,7 +1087,9 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 				// agent's account: every result is recorded as check evidence before anything is judged.
 				if (action.action === "complete" && current && isGoalExecutionActive(current.status)) {
 					const proven = await proveGoalRequirementChecks(current, deps, now, signal);
-					if ("refusal" in proven) return goalCompletionRefusal(input.action, proven.refusal, proven.state);
+					checkRuns = proven.runs;
+					if (proven.refusal)
+						return withCheckRuns(goalCompletionRefusal(input.action, proven.refusal, proven.state));
 					current = proven.state;
 				}
 				const result = applyGoalAction(current, action, now(), {
@@ -1075,11 +1100,11 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					activeGoalLaneIds,
 				});
 				if (!result.ok) {
-					return {
+					return withCheckRuns({
 						content: [{ type: "text" as const, text: `goal ${input.action} failed: ${result.error}` }],
 						details: { action: input.action, applied: false, error: result.error, state: current },
 						isError: true,
-					};
+					});
 				}
 				if (result.state.status === "completed") {
 					let activeVerificationIds: readonly string[];
@@ -1087,13 +1112,15 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 						activeVerificationIds = deps.getActiveVerificationIds?.() ?? [];
 					} catch (error) {
 						const message = `Cannot verify active verification obligations: ${error instanceof Error ? error.message : String(error)}`;
-						return goalExecutionError(input.action, message, current);
+						return withCheckRuns(goalExecutionError(input.action, message, current));
 					}
 					if (activeVerificationIds.length > 0) {
-						return goalExecutionError(
-							input.action,
-							`Cannot transition goal to ${result.state.status}: active verification obligation(s) remain (${activeVerificationIds.join(", ")}). The same verification id must report status passed first.`,
-							current,
+						return withCheckRuns(
+							goalExecutionError(
+								input.action,
+								`Cannot transition goal to ${result.state.status}: active verification obligation(s) remain (${activeVerificationIds.join(", ")}). The same verification id must report status passed first.`,
+								current,
+							),
 						);
 					}
 					const systemOne = deps.getSystemOneController?.();
@@ -1120,14 +1147,16 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 									`Goal "${current.userGoal}" cannot complete: System One refused the same completion again with nothing it reads changed (${previous.reasons[0] ?? "no reason given"}). Accept it as done with /goal complete, change it with /goal edit, or tell the agent what is missing.`,
 								]);
 							}
-							return goalCompletionRefusal(
-								input.action,
-								[
-									`Completion refused again: nothing System One reads has changed since it refused this completion (${recorded.lastCompletionRejection?.count ?? 2} times). Its reasons stand:`,
-									...previous.reasons.map((reason) => `- ${reason}`),
-									"Change the outcome or its evidence before completing again; the owner has been asked to decide.",
-								].join("\n"),
-								recorded,
+							return withCheckRuns(
+								goalCompletionRefusal(
+									input.action,
+									[
+										`Completion refused again: nothing System One reads has changed since it refused this completion (${recorded.lastCompletionRejection?.count ?? 2} times). Its reasons stand:`,
+										...previous.reasons.map((reason) => `- ${reason}`),
+										"Change the outcome or its evidence before completing again; the owner has been asked to decide.",
+									].join("\n"),
+									recorded,
+								),
 							);
 						}
 						const completionDecision = await systemOne.executeCompletionTransaction(
@@ -1142,10 +1171,8 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 								now: now(),
 							});
 							deps.saveGoalState(recorded, getGoalStateRevision(current));
-							return goalCompletionRefusal(
-								input.action,
-								describeCompletionRejection(completionDecision),
-								recorded,
+							return withCheckRuns(
+								goalCompletionRefusal(input.action, describeCompletionRejection(completionDecision), recorded),
 							);
 						}
 					}
@@ -1210,7 +1237,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			const text = [receipt, evidenceNote, satisfyNote, summary, dispatchNote]
 				.filter((line): line is string => Boolean(line))
 				.join("\n");
-			return {
+			return withCheckRuns({
 				content: [{ type: "text" as const, text }],
 				details: {
 					action: input.action,
@@ -1219,7 +1246,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					...(action.action === "dispatch_worker" && action.laneId ? { dispatchedLaneId: action.laneId } : {}),
 					...(action.action === "dispatch_worker" && !action.laneId ? { dispatchSkipReason } : {}),
 				},
-			};
+			});
 		},
 	};
 }
@@ -1229,7 +1256,10 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
  * goal executor. The wrappers own no state and duplicate no validation, persistence, accounting,
  * completion gate, or start-authority rule.
  */
-export function createGoalLifecycleToolDefinitions(goalTool: GoalToolDefinition) {
+export function createGoalLifecycleToolDefinitions(
+	goalTool: GoalToolDefinition,
+	options: { getCwd?: () => string } = {},
+) {
 	const createGoal: ToolDefinition = {
 		name: GOAL_LIFECYCLE_TOOL_NAMES[0],
 		label: GOAL_LIFECYCLE_TOOL_NAMES[0],
@@ -1238,6 +1268,20 @@ export function createGoalLifecycleToolDefinitions(goalTool: GoalToolDefinition)
 		promptSnippet: "Start durable goal.",
 		parameters: createGoalSchema,
 		async execute(toolCallId, input: Static<typeof createGoalSchema>, signal, onUpdate, context) {
+			// All or nothing: a check the goal could never run refuses the whole call before the goal
+			// exists, instead of leaving a started goal holding only the requirements before it.
+			for (const requirement of input.requirements ?? []) {
+				if (typeof requirement === "string" || !requirement.check) continue;
+				const violation = requirementCheckViolation(requirement.check, options.getCwd?.() ?? process.cwd());
+				if (violation) {
+					const error = `requirement "${requirement.text}": ${violation} No goal was created.`;
+					return {
+						content: [{ type: "text" as const, text: `create_goal failed: ${error}` }],
+						details: { action: "start" as const, applied: false, error },
+						isError: true,
+					};
+				}
+			}
 			const goalId = `goal-${randomUUID()}`;
 			const started = await goalTool.execute(
 				toolCallId,

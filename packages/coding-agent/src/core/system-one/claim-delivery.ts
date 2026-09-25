@@ -16,6 +16,7 @@ import {
 } from "@caupulican/pi-agent-core/verification-obligations";
 import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@caupulican/pi-ai";
 import { settledAnswer } from "../decision/noul.ts";
+import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import type { LadderOutcome } from "./unsettled-ladder.ts";
 
 /** A counted delivery: how many attempts succeeded and how many failed during the work. */
@@ -25,7 +26,10 @@ export interface DeliveryReceipt {
 }
 
 export interface ClaimReceipts {
-	/** Test verifications recorded on the turn's tool results, in order. */
+	/**
+	 * Test verifications recorded on the turn's tool results, and requirement checks the goal
+	 * completion reran, in order: the claim they back is "the tests or checks that were run passed".
+	 */
 	readonly tests: { readonly passed: number; readonly failed: number; readonly lastPassed: boolean | undefined };
 	readonly commits: DeliveryReceipt;
 	readonly pushes: DeliveryReceipt;
@@ -49,6 +53,18 @@ const COMMIT = /\bgit\b[^\n|;&]*\bcommit\b/;
 const PUSH = /\bgit\b[^\n|;&]*\bpush\b/;
 const PUBLISH = /\b(?:npm|pnpm|yarn|bun)\s+publish\b|\bcargo\s+publish\b|\btwine\s+upload\b|\bgh\s+release\s+create\b/;
 const SHELL_TOOLS = new Set(["bash", "powershell", "run_process"]);
+const GOAL_TOOLS: ReadonlySet<string> = new Set([LEGACY_GOAL_TOOL_NAME, ...GOAL_LIFECYCLE_TOOL_NAMES]);
+
+/** The requirement checks a goal completion reran, as its result's receipt reports them. */
+function goalCheckRuns(details: unknown): { passed: number; failed: number } | undefined {
+	if (!details || typeof details !== "object") return undefined;
+	const receipts = (details as { piReceipts?: unknown }).piReceipts;
+	if (!receipts || typeof receipts !== "object") return undefined;
+	const runs = (receipts as { requirementChecks?: unknown }).requirementChecks;
+	if (!runs || typeof runs !== "object") return undefined;
+	const { passed, failed } = runs as { passed?: unknown; failed?: unknown };
+	return typeof passed === "number" && typeof failed === "number" ? { passed, failed } : undefined;
+}
 
 function countDelivery(counts: { succeeded: number; failed: number }, ok: boolean): void {
 	if (ok) counts.succeeded += 1;
@@ -80,6 +96,12 @@ export function collectClaimReceipts(turnMessages: readonly AgentMessage[]): Cla
 			if (passed) tests.passed += 1;
 			else tests.failed += 1;
 			tests.lastPassed = passed;
+		}
+		const checks = GOAL_TOOLS.has(result.toolName) ? goalCheckRuns(result.details) : undefined;
+		if (checks && checks.passed + checks.failed > 0) {
+			tests.passed += checks.passed;
+			tests.failed += checks.failed;
+			tests.lastPassed = checks.failed === 0;
 		}
 		const call = calls.get(result.toolCallId);
 		const args = (call?.arguments ?? {}) as Record<string, unknown>;

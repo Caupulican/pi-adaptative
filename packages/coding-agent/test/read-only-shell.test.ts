@@ -44,6 +44,13 @@ describe("read-only shell line", () => {
 			["curl -s -X POST https://api.example.test/deploy", false],
 			["curl -sd payload https://api.example.test", false],
 			["curl -o page.html https://example.test", false],
+			// A variable assignment changes only the shell; one that steers what runs is refused.
+			['M=/srv/machine; test ! -e "$M/usr/local/bin/ollama"', true],
+			["LC_ALL=C sort README.md", true],
+			["PATH=/tmp/evil ls", false],
+			["LD_PRELOAD=/tmp/x.so cat README.md", false],
+			["GIT_EXTERNAL_DIFF=/tmp/x git diff", false],
+			["M=/srv; rm -rf $M", false],
 		];
 		for (const [cmd, ok] of cases) expect([cmd, readOnlyShellViolation(cmd, cwd) === undefined]).toEqual([cmd, ok]);
 		expect(isMutatingToolCall("bash", { command: "echo x > f" })).toBe(true);

@@ -1134,7 +1134,11 @@ describe("goal requirement checks", () => {
 		});
 		const run = async (input: GoalToolInput) => {
 			const result = await tool.execute("call-1", input, undefined, undefined, ctx);
-			return { text: getToolResultText(result), isError: result.isError === true };
+			return {
+				text: getToolResultText(result),
+				isError: result.isError === true,
+				checkRuns: (result.details as GoalToolDetails | undefined)?.piReceipts?.requirementChecks,
+			};
 		};
 		return { tool, run, ran, evaluateCompletion, getState: () => state };
 	}
@@ -1165,6 +1169,8 @@ describe("goal requirement checks", () => {
 		const completed = await run({ action: "complete" });
 		expect(completed.isError).toBe(false);
 		expect(ran).toEqual(["test ! -e ~/.ollama"]);
+		// The runs are the receipt the end-of-turn claim check reads.
+		expect(completed.checkRuns).toEqual({ passed: 1, failed: 0 });
 		expect(evaluateCompletion).toHaveBeenCalledOnce();
 		expect(getState()?.status).toBe("completed");
 		expect(getState()?.requirements[0]?.status).toBe("satisfied");
@@ -1220,6 +1226,7 @@ describe("goal requirement checks", () => {
 		expect(refused.isError).toBe(true);
 		expect(refused.text).toContain("Completion refused: 1 of 1 requirement check(s) failed.");
 		expect(refused.text).toContain("- r1 (Nothing listens on 11434):");
+		expect((refusal.details as GoalToolDetails).piReceipts?.requirementChecks).toEqual({ passed: 0, failed: 1 });
 		expect(evaluateCompletion).not.toHaveBeenCalled();
 		expect(getState()?.status).toBe("active");
 		expect(getState()?.evidence.filter((evidence) => evidence.kind === "check")).toHaveLength(1);
@@ -1246,6 +1253,27 @@ describe("goal requirement checks", () => {
 			undefined,
 			"test ! -e ~/.ollama",
 		]);
+	});
+
+	it("creates nothing when one requirement's check could change something", async () => {
+		const { tool, getState } = checkedHarness({});
+		const [create] = createGoalLifecycleToolDefinitions(tool);
+		const refused = await create.execute(
+			"call-create",
+			{
+				objective: "Remove the model server",
+				requirements: [
+					{ text: "Binary is gone", check: { command: "test ! -e /usr/local/bin/ollama" } },
+					{ text: "Models are gone", check: { command: "rm -rf ~/.ollama" } },
+				],
+			},
+			undefined,
+			undefined,
+			ctx,
+		);
+		expect(refused.isError).toBe(true);
+		expect(getToolResultText(refused)).toContain("No goal was created.");
+		expect(getState()).toBeUndefined();
 	});
 });
 

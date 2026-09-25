@@ -60,7 +60,15 @@ function estimateJsonLikeBytes(value: unknown, maxBytes: number): { bytes: numbe
  */
 export const MAX_TUI_RETAINED_DETAILS_BYTES = 512 * 1024;
 
-/** Replace oversized details on any retained holder with a small truncation stub. */
+/**
+ * Details keys that are receipts: small mechanical facts about what the tool did (a test verification,
+ * the checks a goal completion reran) that consumers read after the result is retained, such as the
+ * end-of-turn claim check. The stub keeps them; dropping one turns a proven claim into an unproven one.
+ */
+export const RETAINED_RECEIPT_DETAIL_KEYS = ["piVerification", "piReceipts"] as const;
+const MAX_RETAINED_RECEIPT_BYTES = 4 * 1024;
+
+/** Replace oversized details on any retained holder with a small truncation stub that keeps its receipts. */
 export function compactRetainedDetails(
 	holder: { details?: unknown },
 	maxBytes = MAX_RETAINED_TOOL_RESULT_DETAILS_BYTES,
@@ -68,12 +76,22 @@ export function compactRetainedDetails(
 	if (holder.details === undefined) return;
 	const estimate = estimateJsonLikeBytes(holder.details, maxBytes);
 	if (!estimate.exceeded) return;
-	holder.details = {
+	const stub: Record<string, unknown> = {
 		piToolResultDetailsTruncated: true,
 		reason: "Tool result details exceeded retention budget; model-visible content was retained.",
 		minimumBytes: estimate.bytes,
 		maxRetainedBytes: maxBytes,
 	};
+	if (holder.details && typeof holder.details === "object") {
+		for (const key of RETAINED_RECEIPT_DETAIL_KEYS) {
+			const descriptor = Object.getOwnPropertyDescriptor(holder.details, key);
+			if (!descriptor || !("value" in descriptor)) continue;
+			if (estimateJsonLikeBytes(descriptor.value, MAX_RETAINED_RECEIPT_BYTES).exceeded) continue;
+			// The same descriptor: an executor-owned receipt stays as immutable as it was written.
+			Object.defineProperty(stub, key, descriptor);
+		}
+	}
+	holder.details = stub;
 }
 
 /** Replace oversized tool result details with a small truncation stub. No-op for other roles. */

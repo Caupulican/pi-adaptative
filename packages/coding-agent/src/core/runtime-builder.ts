@@ -1383,7 +1383,9 @@ export class RuntimeBuilder {
 						this.bindNativeDefinition(() => goalToolDefinition),
 					);
 				}
-				for (const definition of createGoalLifecycleToolDefinitions(goalToolDefinition)) {
+				for (const definition of createGoalLifecycleToolDefinitions(goalToolDefinition, {
+					getCwd: () => this._taskDirectories.cwd,
+				})) {
 					if (toolAccess.allows(definition.name)) {
 						this._baseToolDefinitions.set(
 							definition.name,

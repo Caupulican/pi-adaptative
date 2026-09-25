@@ -8,6 +8,11 @@
 
 - A goal no longer loops on System One completion refusals: an unchanged repeat (nothing System One reads changed) is refused at once without asking again, with the earlier reasons, and the owner is asked to decide once. New evidence or a changed outcome gets a fresh judgment.
 - A goal completion refusal (failed check or System One rejection) reaches the agent verbatim as the operation's outcome, one reason per line with System One's number, the bound it missed and the next step, instead of a failure record cut to 240 characters from the middle.
+- A final answer that says checks passed is backed by the requirement checks the goal completion reran: the completion result carries them as a receipt, so the claim check no longer asks the owner about checks the harness itself proved.
+- Test and check receipts survive when a tool result's details exceed the retention budget: a large test output window or goal state no longer turns a proven "tests pass" into an unproven claim.
+- `create_goal` is all or nothing: a requirement check that could change something refuses the call before the goal exists, instead of leaving a started goal holding only the requirements before it.
+- A read-only command that starts with a variable assignment (`M=/srv; test ! -e "$M/x"`, `LC_ALL=C sort f`) is read-only; an assignment to a variable that steers what runs (`PATH`, `LD_*`, `GIT_*` and similar) is not.
+- The goal tool states that `amend_goal` needs the rewritten objective in `userGoal` alongside the owner's quote.
 
 ### Added
 

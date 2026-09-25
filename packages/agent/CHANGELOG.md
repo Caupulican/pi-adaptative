@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- The tool-result retention stub keeps receipt keys (`piVerification`, `piReceipts`) when it replaces oversized details, so consumers reading results after `message_end` still see what the tool proved.
+
 ## [0.99.50] - 2026-09-25
 
 ## [0.99.49] - 2026-09-25

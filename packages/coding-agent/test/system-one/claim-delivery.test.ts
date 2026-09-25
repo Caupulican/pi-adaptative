@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
+import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { enforceSessionEdgeOperation, type SessionEdgeDeps } from "../../src/core/agent-session-edge.ts";
@@ -51,6 +52,79 @@ describe("claims against deliveries", () => {
 			["committed", "unsupported"],
 			["pushed", "contradicted"],
 		]);
+	});
+
+	it("counts the requirement checks a goal completion reran as the checks the answer says passed", () => {
+		const completion = (toolName: string, requirementChecks: { passed: number; failed: number }, isError: boolean) =>
+			[
+				{
+					role: "toolResult",
+					toolCallId: `g${++callSeq}`,
+					toolName,
+					content: [{ type: "text", text: "" }],
+					details: { action: "complete", applied: !isError, piReceipts: { requirementChecks } },
+					isError,
+					timestamp: 0,
+				},
+			] as AgentMessage[];
+		const passed = collectClaimReceipts(completion("update_goal", { passed: 3, failed: 0 }, false));
+		expect(passed.tests).toEqual({ passed: 3, failed: 0, lastPassed: true });
+		expect(judgeClaims({ states_tests_pass: yes }, passed)).toEqual([]);
+
+		const failed = collectClaimReceipts(completion("goal", { passed: 2, failed: 1 }, true));
+		expect(judgeClaims({ states_tests_pass: yes }, failed).map((f) => f.verdict)).toEqual(["contradicted"]);
+
+		// Only the goal tools report check runs: the same field on another tool is no receipt.
+		const foreign = collectClaimReceipts(completion("some_extension", { passed: 3, failed: 0 }, false));
+		expect(foreign.tests.passed).toBe(0);
+	});
+
+	it("keeps test and check receipts when a result's details exceed the retention budget", () => {
+		// A goal result carries the whole goal state and a test run its output window: both outgrow the
+		// budget, and the claim check reads them only after message_end compacted them.
+		const bulk = "x".repeat(20_000);
+		const goalResult = {
+			role: "toolResult",
+			toolCallId: `g${++callSeq}`,
+			toolName: "goal",
+			content: [{ type: "text", text: "goal complete recorded." }],
+			details: {
+				action: "complete",
+				applied: true,
+				state: { bulk },
+				piReceipts: { requirementChecks: { passed: 2, failed: 0 } },
+			},
+			isError: false,
+			timestamp: 0,
+		};
+		const testDetails: Record<string, unknown> = { output: bulk };
+		Object.defineProperty(testDetails, "piVerification", {
+			value: {
+				version: 1,
+				id: "unit",
+				status: "passed",
+				summary: "unit passed",
+				evidence: "tests",
+				outcome: "executed",
+			},
+			enumerable: true,
+			writable: false,
+			configurable: false,
+		});
+		const testResult = {
+			role: "toolResult",
+			toolCallId: `t${++callSeq}`,
+			toolName: "bash",
+			content: [{ type: "text", text: "3 passed" }],
+			details: testDetails,
+			isError: false,
+			timestamp: 0,
+		};
+		for (const message of [goalResult, testResult]) compactToolResultDetailsForRetention(message);
+		expect(goalResult.details).toMatchObject({ piToolResultDetailsTruncated: true });
+		expect(testResult.details).toMatchObject({ piToolResultDetailsTruncated: true });
+		const receipts = collectClaimReceipts([goalResult, testResult] as AgentMessage[]);
+		expect(receipts.tests).toEqual({ passed: 3, failed: 0, lastPassed: true });
 	});
 
 	it("claims nothing when System One could not settle whether the answer states it", () => {
