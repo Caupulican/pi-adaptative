@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- The JEV-024 completion checkpoint omits an absent repository snapshot or delivery candidate instead of sending `undefined`, which System One refused as invalid evidence and which blocked every goal completion without a git delivery candidate.
+
 ## [0.99.49] - 2026-09-25
 
 ### Added

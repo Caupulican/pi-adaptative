@@ -1319,18 +1319,22 @@ export class ObjectiveExecutionController {
 						acceptanceCriteria: objRecord?.objective?.acceptanceCriteria ?? [],
 						evidenceRefs: objRecord?.evidence?.map((e) => e.evidenceId) ?? [],
 						diffDigest,
-						candidateSnapshot: snapshotIdentity,
 						artifacts,
 						limitations,
-						deliveryCandidate: frozenGit
+						// System One evidence is JSON: an absent snapshot or delivery candidate is omitted,
+						// never sent as `undefined` (the transport refuses it and JEV-024 could never run).
+						...(snapshotIdentity ? { candidateSnapshot: snapshotIdentity } : {}),
+						...(frozenGit
 							? {
-									approvedParent: frozenGit.parent,
-									approvedTreeOid: frozenGit.tree,
-									treeDigest: candidateTreeDigest(frozenGit.tree),
-									ownedPaths: frozenPaths,
-									ownedDigests: frozenDigests,
+									deliveryCandidate: {
+										approvedParent: frozenGit.parent,
+										approvedTreeOid: frozenGit.tree,
+										treeDigest: candidateTreeDigest(frozenGit.tree),
+										ownedPaths: frozenPaths,
+										ownedDigests: frozenDigests,
+									},
 								}
-							: undefined,
+							: {}),
 					};
 
 					// 1. PH-150, FC-062: JEV-024 completion plausibility on canonical proof state BEFORE finalization gates

@@ -14,6 +14,7 @@ import { createRepoGitDelivery } from "../../src/core/objective-execution/delive
 import { ObjectiveExecutionController } from "../../src/core/objective-execution/objective-execution-controller.ts";
 import { createRepoReleaseDelivery } from "../../src/core/objective-execution/release-delivery.ts";
 import type { TaskRuntimeProjection } from "../../src/core/orchestration/task-runtime.ts";
+import { serializeEvaluation } from "../../src/core/review/typesafe-contract.ts";
 import {
 	SteeringJudgmentUnavailableError,
 	SystemOneSteeringPlane,
@@ -436,6 +437,33 @@ describe("FC-01 terminal complete", () => {
 			systemOne.commitTerminalCompletion({ objectiveId: "obj-1", candidateDigest: "digest" }),
 		).rejects.toThrow(/invalid_phase/);
 		expect(store.phase).toBe("aborted");
+	});
+});
+
+describe("FC-01b completion evidence is JSON", () => {
+	it("JEV-024 judges an objective with no git delivery or repository snapshot on transportable evidence", async () => {
+		const judged: Array<{ checkpoint: string; state: Record<string, unknown> }> = [];
+		const controller = new ObjectiveExecutionController({
+			mode: "objective_primary",
+			completionProfile: "mechanical",
+			runtime: { reconcileObjective: async () => runtime("obj-1") },
+			steeringPlane: {
+				policy: { mode: "system_one_optional" },
+				requireCertificate: async (checkpoint: string, state: Record<string, unknown>) => {
+					judged.push({ checkpoint, state });
+					return certificate(checkpoint);
+				},
+			} as never,
+			// Not a repository: no candidate snapshot, and no charter asks for a commit.
+			repoRoot: mkdtempSync(join(tmpdir(), "pi-final-completion-plain-")),
+		});
+		await controller.run("obj-1");
+		const completion = judged.find((entry) => entry.checkpoint === "JEV-024");
+		expect(completion).toBeDefined();
+		// The System One transport refuses `undefined`; absent evidence must be absent, not undefined.
+		expect(() => serializeEvaluation({ state: completion?.state })).not.toThrow();
+		expect(completion?.state).not.toHaveProperty("deliveryCandidate");
+		expect(completion?.state).not.toHaveProperty("candidateSnapshot");
 	});
 });
 
