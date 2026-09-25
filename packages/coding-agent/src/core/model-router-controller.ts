@@ -72,7 +72,6 @@ import {
 	routerPoolModelRefs,
 } from "./model-router/candidate-pool.ts";
 import { collectModelRouterConfigDiagnostics } from "./model-router/config-diagnostics.ts";
-import { classifyExecutorTurn } from "./model-router/executor-route.ts";
 import {
 	evaluateSurfaceFitness,
 	type FitnessGatedSurface,
@@ -893,7 +892,7 @@ export class ModelRouterController {
 	 * with no model (`toolkit`). With the router off the session model answers (`direct`).
 	 */
 	async routeOwnerMessage(
-		prompt: string,
+		_prompt: string,
 		input: {
 			talkerChosen: boolean;
 			hasImages?: boolean;
@@ -901,40 +900,7 @@ export class ModelRouterController {
 			sideTripApproves(model: Model<Api>): boolean;
 		},
 	): Promise<OwnerMessageRoute> {
-		// An exact toolkit hit is the harness's own work: the script runs with no model at all.
-		const toolkit = classifyExecutorTurn(prompt, this.deps.getSettingsManager().getToolkitScripts());
-		if (toolkit.execute && toolkit.scriptName) return { kind: "toolkit", scriptName: toolkit.scriptName };
-		const baseline = this._resolveModelRouterTurnRoute(prompt);
-		if (!baseline) return { kind: "direct" };
-		if (baseline.decision.tier === "cheap") {
-			const session = this.deps.getModel();
-			// The owner's cheap-tier pin runs the side trip in any selection mode, as it runs a judged cheap route.
-			const pinned = this._usablePin("cheap", {
-				hasImages: input.hasImages === true,
-				contextTokens: input.contextTokens ?? 0,
-			}).model;
-			const model = pinned ?? baseline.model;
-			if (!(session && modelsAreEqual(session, model)) && input.sideTripApproves(model)) {
-				return {
-					kind: "side_trip",
-					model,
-					decision: {
-						...baseline.decision,
-						model: formatModelRouterModel(model),
-						...(pinned ? { selection: "manual" as const } : {}),
-						reasonCode: SIDE_TRIP_REASON_CODE,
-						reasons: [...baseline.decision.reasons, "small message: one side trip on a brief; the talker stays"],
-					},
-				};
-			}
-			return { kind: input.talkerChosen ? "talker" : "direct" };
-		}
-		if (input.talkerChosen) return { kind: "talker" };
-		const opening = await this.resolveTurnRouteJudged(prompt, {
-			...(input.hasImages !== undefined ? { hasImages: input.hasImages } : {}),
-			...(input.contextTokens !== undefined ? { contextTokens: input.contextTokens } : {}),
-		});
-		return opening ? { kind: "opening", ...opening } : { kind: "direct" };
+		return { kind: input.talkerChosen ? "talker" : "direct" };
 	}
 
 	/**

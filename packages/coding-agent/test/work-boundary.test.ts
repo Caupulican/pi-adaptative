@@ -44,6 +44,10 @@ describe("the read/write line", () => {
 	it("separates calls that may change the world from reads", () => {
 		expect(isMutatingToolCall("read", { path: "a" })).toBe(false);
 		expect(isMutatingToolCall("bash", { command: "ls -la" })).toBe(false);
+		expect(isMutatingToolCall("bash", { command: "find . -maxdepth 3 -type f" })).toBe(false);
+		expect(isMutatingToolCall("bash", { command: "find . -exec touch {} \\;" })).toBe(true);
+		expect(isMutatingToolCall("bash", { command: "find . -delete" })).toBe(true);
+		expect(isMutatingToolCall("bash", { command: "find . -fprint report.txt" })).toBe(true);
 		expect(isMutatingToolCall("bash", { command: "echo hi > a.txt" })).toBe(true);
 		expect(isMutatingToolCall("edit", { path: "a" })).toBe(true);
 	});

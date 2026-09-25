@@ -19,6 +19,7 @@ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
 import type { ModelCapabilityProfile } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import { ANTIGRAVITY_EFFORT_ORDER, antigravityGeminiEffortFamily } from "./models/antigravity-effort.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import { OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import type { OllamaRuntime } from "./models/local-runtime.ts";
@@ -284,6 +285,30 @@ export class ModelSelectionController {
 	 */
 	cycleThinkingLevel(): ThinkingLevel | undefined {
 		if (!this.supportsThinking()) return undefined;
+		const model = this.deps.getModel();
+		const family = model ? antigravityGeminiEffortFamily(model) : undefined;
+		if (family && model) {
+			const scoped = this.deps.getScopedModels();
+			const candidates =
+				scoped.length > 0 ? scoped.map((entry) => entry.model) : this.deps.getModelRegistry().getAvailable();
+			const variants = candidates.filter(
+				(candidate) =>
+					antigravityGeminiEffortFamily(candidate) === family &&
+					this.deps.getModelRegistry().hasConfiguredAuth(candidate),
+			);
+			const levels = ANTIGRAVITY_EFFORT_ORDER.filter((level) =>
+				variants.some((candidate) => candidate.defaultThinkingLevel === level),
+			);
+			if (levels.length > 1) {
+				const currentIndex = levels.indexOf(model.defaultThinkingLevel as (typeof levels)[number]);
+				const nextLevel = levels[(currentIndex + 1) % levels.length]!;
+				const nextModel = variants.find((candidate) => candidate.defaultThinkingLevel === nextLevel)!;
+				void this.setModel(nextModel).catch((error: unknown) => {
+					this.deps.emit({ type: "warning", message: error instanceof Error ? error.message : String(error) });
+				});
+				return nextLevel;
+			}
+		}
 
 		const levels = this.getAvailableThinkingLevels();
 		const currentIndex = levels.indexOf(this.deps.getThinkingLevel());

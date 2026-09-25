@@ -92,7 +92,7 @@ export class OperationGate {
 			this.deps.notify(refusal);
 			return {
 				block: true,
-				reason: `${refusal} Ask the owner before running it, or do the work another way.`,
+				reason: `${refusal} ${actor === "worker" ? "Report the unresolved boundary to the parent or do the work another way." : "Ask the owner before running it, or do the work another way."}`,
 			};
 		}
 		const answer = await this.deps.askOperator(

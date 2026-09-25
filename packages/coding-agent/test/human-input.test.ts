@@ -2,16 +2,19 @@ import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { createInMemoryArtifactStore } from "../src/core/context/context-artifacts.ts";
+import type { ExtensionUIContext } from "../src/core/extensions/index.ts";
 import {
 	appendHumanInputSnapshot,
 	beginHumanInputRequest,
 	createHumanInputRequest,
 	formatHumanInputAnswerText,
+	getLatestHumanInputSnapshots,
 	getResumableHumanInputSnapshot,
 	getWorkerHumanInputsRequiringDelivery,
 	HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE,
 	resolveHumanInput,
 } from "../src/core/human-input.ts";
+import { HumanInputController } from "../src/core/human-input-controller.ts";
 import { createHarness } from "./suite/harness.ts";
 
 const questions = [
@@ -111,6 +114,112 @@ describe("durable human input", () => {
 		expect(formatHumanInputAnswerText(resolved.snapshot)).toContain(
 			`artifact tool-output:${answer.customArtifact!.id}`,
 		);
+	});
+
+	it("keeps a timed-out owner question pending rather than recording a cancellation", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const request = createHumanInputRequest({
+			source: "tool",
+			toolCallId: "call-absent",
+			questions,
+			acceptsImages: false,
+		});
+		beginHumanInputRequest(sessionManager, request);
+		const resolved = await resolveHumanInput({
+			sessionManager,
+			request,
+			timeoutMs: 1,
+			present: (_presentation, options) =>
+				new Promise((resolve) => {
+					options?.signal?.addEventListener(
+						"abort",
+						() => resolve({ answers: [], cancelled: true, reason: "interrupted", imageContents: [] }),
+						{ once: true },
+					);
+				}),
+		});
+		expect(resolved.snapshot).toMatchObject({ status: "pending", reason: "owner_unavailable", answers: [] });
+		expect(formatHumanInputAnswerText(resolved.snapshot)).toContain("unanswered");
+	});
+
+	it("defers an overdue restored question without opening UI", async () => {
+		const sessionManager = SessionManager.inMemory();
+		appendToolCall(sessionManager, "call-overdue");
+		const request = createHumanInputRequest({
+			source: "tool",
+			toolCallId: "call-overdue",
+			questions,
+			acceptsImages: false,
+			now: () => "2020-01-01T00:00:00.000Z",
+		});
+		beginHumanInputRequest(sessionManager, request);
+		const prompts: unknown[] = [];
+		const followUps: string[] = [];
+		const controller = new HumanInputController({
+			getSessionManager: () => sessionManager,
+			getUIContext: () => undefined,
+			isDisposed: () => false,
+			isStreaming: () => false,
+			getModel: () => undefined,
+			getArtifactStore: () => createInMemoryArtifactStore(),
+			getImageStore: () => undefined,
+			runAgentPrompt: async (message) => {
+				prompts.push(message);
+			},
+			recordOwnerFollowUp: (unanswered) => {
+				followUps.push(unanswered.requestId);
+				return "/tmp/follow-ups/s.md";
+			},
+		});
+		expect(await controller.resumePending()).toBe(true);
+		expect(followUps).toEqual([request.requestId]);
+		expect(JSON.stringify(prompts[0])).toContain("Continue only independent authorized work");
+		expect(getLatestHumanInputSnapshots(sessionManager)[0]).toMatchObject({
+			status: "pending",
+			reason: "owner_unavailable",
+		});
+	});
+
+	it("defers a restored question during full handoff even when UI is available", async () => {
+		const sessionManager = SessionManager.inMemory();
+		appendToolCall(sessionManager, "call-handoff");
+		const request = createHumanInputRequest({
+			source: "tool",
+			toolCallId: "call-handoff",
+			questions,
+			acceptsImages: false,
+		});
+		beginHumanInputRequest(sessionManager, request);
+		let presentations = 0;
+		const followUps: string[] = [];
+		const prompts: unknown[] = [];
+		const controller = new HumanInputController({
+			getSessionManager: () => sessionManager,
+			getUIContext: () =>
+				({
+					askQuestions: async () => {
+						presentations++;
+						return { answers: [], cancelled: true, imageContents: [] };
+					},
+				}) as unknown as ExtensionUIContext,
+			isHandoff: () => true,
+			isDisposed: () => false,
+			isStreaming: () => false,
+			getModel: () => undefined,
+			getArtifactStore: () => createInMemoryArtifactStore(),
+			getImageStore: () => undefined,
+			runAgentPrompt: async (message) => {
+				prompts.push(message);
+			},
+			recordOwnerFollowUp: (unanswered) => {
+				followUps.push(unanswered.requestId);
+				return "/tmp/follow-ups/s.md";
+			},
+		});
+		expect(await controller.resumePending()).toBe(true);
+		expect(presentations).toBe(0);
+		expect(followUps).toEqual([request.requestId]);
+		expect(JSON.stringify(prompts[0])).toContain("No decision or authority was granted");
 	});
 
 	it("rejects malformed host answers instead of trusting RPC-owned question metadata", async () => {

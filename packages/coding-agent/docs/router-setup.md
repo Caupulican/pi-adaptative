@@ -6,13 +6,10 @@ choice. Nothing on this screen runs a provider call by being opened.
 
 ## Conversation stages
 
-The router decides once per conversation, not once per message:
-
-- **Opening.** The first owner message the classifier does not mark small is routed once (System One judges it when configured). Its model becomes the conversation's talker: it is set as the session model, so later turns and a resumed session run on it with no swap, and the choice is recorded as a `conversation_talker` entry.
-- **Talker.** Every later substantive owner message goes to the talker with no route judged. `/model` changes the talker like any session model change. A conversation that outgrows the talker's window is compacted, never moved.
-- **Side trip.** A message the classifier marks small (no System One call) takes one turn on the cheap tier (its pin first) when that costs less than the talker answering on its warm cache: writing the side trip's brief at the cheap model's cold price, against the talker's cache-read price for its prefix. A free model always qualifies. The side trip reads a small brief (a note that the earlier conversation is not shown, the talker's last reply and the new message), never the whole transcript, with the whole tool surface, and its reply stays in the conversation. When the message needs something said earlier, it searches the conversation with `conversation_history`. If it reaches for a mutating tool, the message reruns on the talker.
-- **Toolkit hit.** A message that is exactly a registered toolkit script's name or one of its taught aliases (project-scoped scripts load only in a trusted project) runs that script through `run_toolkit_script` (its authorization and danger confirmation unchanged) with no model request, and the run is recorded like a `!` command for the talker to read next turn. A message that only reads like a script ("is the status report green?") goes to the talker. `executorModel` no longer takes foreground turns; it stays in the pool.
-- **Internal turns** (goal continuations, System One route briefs, lane follow-ups, reflection) run on the talker with no tier swap. Work meant for another model goes to a worker through the objective route.
+- **Owner messages.** Every message first reaches the selected session model, including greetings, questions and requests that name a toolkit script. `/model` changes that root model. The host does not pre-route owner messages to a cheap model or run a toolkit script before the root sees the request.
+- **Explicit delegation.** The root decides when independent work merits a worker and calls `delegate`. It can consult TypeSafe for a bounded judgment about worker fit. The host applies authority, model policy, capacity and budget checks, then resolves an eligible worker model. System One does not replace the root or execute tools.
+- **Toolkit scripts.** The root can call `run_toolkit_script`. Script authorization and danger confirmation still apply.
+- **Internal turns** (goal continuations, System One route briefs, lane follow-ups, reflection) run on the root with no tier swap. Objective execution may route bounded work to a worker under its own authority.
 - **Work boundary.** Work starts where it is declared (a goal starting) or, with nothing declared, at the first tool call that may change the world. Each start is recorded once as a `work_unit` entry; an enforced unit ends when the owner speaks again, a declared one when its goal ends. For a route the root may take, the objective loop hands the work to a worker only when that is cheaper: writing the route's brief on the worker and appending its report, against the talker reading its whole prefix on each of the requests that route kind has learned to take (the root keeps the work until it has learned that). A retrieve route follows the same price: when the talker's reads would cost more, read-only minions (no forked turns, one per requirement the route targets) gather in parallel, and only their accepted reports reach the talker, as one bounded `gathered_evidence` record on its next turn.
 
 ## Selection mode
@@ -33,7 +30,7 @@ The pool is the existing **Models** configuration and nothing else, and it carri
 `enabledModels` in settings (`Models config`), the `--models` flag (`--models`), an SDK caller's scope
 (`SDK scope`) or a live edit in the Models selector (`Models selector`). An uncustomized configuration
 means every model with configured auth (`all enabled models (N)`); a customized list is a hard boundary
-(`N selected models (Models config)`) that no automatic route — router or H-MoE — can leave. The pool is
+(`N selected models (Models config)`) that no automatic selection — router or H-MoE — can leave. The pool is
 separate from the model-cycling list: an orchestration profile pins cycling to its root model but is
 never a pool source, so a profiled session still routes across everything you enabled. Favorites order
 pickers only; they never enter the pool or weigh a route. A model outside a customized pool can still
@@ -93,8 +90,8 @@ be marked fit by hand; correct routing structure through manual/hybrid pins inst
 
 ## Preview route
 
-Enter an example task. The deterministic preview classifies it exactly as a turn would and resolves
-the model through the same code path — intent, baseline tier, risk, reason, mode, pin, pool,
+Enter an example task. The preview shows a hypothetical tier selection and resolves
+the model through the router's selection path — intent, baseline tier, risk, reason, mode, pin, pool,
 subscription candidates, eligible candidates, the model it would choose, its source and fitness —
 without any provider call and without touching the session model or the router's status. Prefix the
 task with `live:` to run the judged path (the System One routing judge and H-MoE may spend); that is
@@ -139,7 +136,7 @@ allocate is refused with the reason and the previous policy stays. System One it
 
 ## System One allocation
 
-When System One is bound, a routed turn is allocated in three steps. System One judges which kind of
+For an explicitly evaluated router route, System One judges which kind of
 model and thinking the work needs (one Choice over flash-light, flash-deep, strong-medium, strong-deep),
 and each category names a tier. The owner's pin for that tier runs it, in any selection mode, whenever
 the pin has auth, is allowed by the model policy, is not exhausted, has a working tool path and can take

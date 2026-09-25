@@ -31,6 +31,7 @@ export interface SessionEdgeDeps {
 	getCwd(): string;
 	isChildSession(): boolean;
 	getConfirmation(): EdgeConfirmationHandler | undefined;
+	deferOwnerOperation?(operation: EdgeOperation): string | undefined;
 	/**
 	 * Whether the worktree currently holds changes at paths this session never wrote. Resolves the
 	 * `unowned_worktree_changes` condition. Absent means the state cannot be read, and a conditional
@@ -113,7 +114,11 @@ export async function enforceSessionEdgeOperation(
 	}
 	const handler = deps.isChildSession() ? undefined : deps.getConfirmation();
 	if (!handler) {
-		return { authorized: false, reason: edgeBlockReason(operation, false) };
+		const followUp = deps.isChildSession() ? undefined : deps.deferOwnerOperation?.(operation);
+		return {
+			authorized: false,
+			reason: `${edgeBlockReason(operation, false)}${followUp ? ` Owner follow-up: ${followUp}.` : ""}`,
+		};
 	}
 	const decision = await handler({ ...operation, toolName }, signal);
 	signal?.throwIfAborted();

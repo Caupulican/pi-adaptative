@@ -601,7 +601,9 @@ git (`repo_read`, capability `repo.read`) natively, so `readOnly: true` — whic
 process, network and service authority — still leaves a worker able to search files and read
 repository history. `repo_read` runs git with an argv allow-list: no shell, no hooks, pager or diff
 drivers, only output-shaping options, pathspecs and object paths inside its directory, credential
-files model-blind like `read`. Prose cannot narrow a grant. Persistent reuse retains its existing grant.
+files model-blind like `read`. A plain `log` request returns at most the requested number of concise
+one-line commits; explicit log options retain their own formatting. Prose cannot narrow a grant.
+Persistent reuse retains its existing grant.
 Named starts route their complete options, including `readOnly`, through host admission: equivalent
 compiled options may select that specialist, while changed authority is refused before dispatch.
 The tool must not preempt that decision or silently discard options. Compatible idle specialists

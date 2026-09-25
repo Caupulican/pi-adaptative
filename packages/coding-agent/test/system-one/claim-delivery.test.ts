@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { enforceSessionEdgeOperation, type SessionEdgeDeps } from "../../src/core/agent-session-edge.ts";
 import {
 	AnswerClaimChecker,
 	collectClaimReceipts,
@@ -189,6 +192,93 @@ describe("claims against deliveries", () => {
 		afterEach(async () => {
 			await harness?.cleanup();
 			harness = undefined;
+		});
+
+		it("records handoff questions without displaying an owner notice", async () => {
+			harness = await createHarness();
+			const delivery = harness.session as unknown as {
+				_handoff: boolean;
+				_deliverToOwner(items: readonly string[]): string | undefined;
+				_flushOwnerItems(lease: undefined): Promise<void>;
+			};
+			delivery._deliverToOwner(["The release risk remains unsettled"]);
+			delivery._handoff = true;
+			const path = delivery._deliverToOwner(["The worker could not settle the release scope"]);
+			expect(path).toBeDefined();
+			await delivery._flushOwnerItems(undefined);
+			expect(readFileSync(path!, "utf8")).toContain("release scope");
+			expect(readFileSync(path!, "utf8")).toContain("release risk");
+			expect(
+				harness.session.agent.state.messages.filter(
+					(message) => message.role === "custom" && message.customType === "owner_items",
+				),
+			).toHaveLength(0);
+			expect(harness.eventsOfType("warning")).toEqual([]);
+		});
+
+		it("shows newly recorded follow-ups once when the owner returns", async () => {
+			harness = await createHarness();
+			const delivery = harness.session as unknown as {
+				_handoff: boolean;
+				_deliverToOwner(items: readonly string[]): string | undefined;
+			};
+			delivery._handoff = true;
+			const path = delivery._deliverToOwner(["The release scope needs the owner"]);
+			delivery._handoff = false;
+			harness.setResponses([fauxAssistantMessage("Welcome back"), fauxAssistantMessage("Continuing")]);
+			await harness.session.prompt("I'm back");
+			await harness.session.prompt("Continue");
+			const notices = harness.eventsOfType("warning").filter((event) => event.message.includes("follow-ups"));
+			expect(notices).toHaveLength(1);
+			expect(notices[0]?.message).toContain(path);
+		});
+
+		it("defers an ungranted operation during handoff without opening confirmation", async () => {
+			harness = await createHarness({ settings: { edge: { allow: [] } } });
+			const delivery = harness.session as unknown as {
+				_handoff: boolean;
+				_edgeDeps(): SessionEdgeDeps;
+			};
+			delivery._handoff = true;
+			const confirm = vi.fn(async () => "allow-once" as const);
+			harness.session.setEdgeConfirmation(confirm);
+			const result = await enforceSessionEdgeOperation(delivery._edgeDeps(), {
+				class: "operation.irreversible",
+				operation: "publish the release",
+				reason: "Owner approval is missing",
+			});
+			expect(result.authorized).toBe(false);
+			expect(confirm).not.toHaveBeenCalled();
+			const path = join(harness.tempDir, "follow-ups", `${harness.sessionManager.getSessionId()}.md`);
+			expect(readFileSync(path, "utf8")).toContain("publish the release");
+			expect(harness.eventsOfType("warning")).toEqual([]);
+		});
+
+		it("preserves owner authority across an internal goal continuation", async () => {
+			harness = await createHarness();
+			const session = harness.session as unknown as {
+				_handoff: boolean;
+				_lastUserRequest: string;
+				_enableCapabilitiesAuthorizedByUser(request: string, signal?: AbortSignal): Promise<string | undefined>;
+			};
+			session._handoff = true;
+			session._lastUserRequest = "Finish the release and hand it off";
+			const classify = vi.spyOn(session, "_enableCapabilitiesAuthorizedByUser").mockImplementation(async () => {
+				session._handoff = false;
+				return undefined;
+			});
+			harness.setResponses([fauxAssistantMessage("Continuing"), fauxAssistantMessage("Owner returned")]);
+			await harness.session.prompt("Continue active goal.", {
+				internalContextType: "goal_continuation_trigger",
+				autoContinueGoal: false,
+			});
+			expect(classify).not.toHaveBeenCalled();
+			expect(session._handoff).toBe(true);
+			expect(session._lastUserRequest).toBe("Finish the release and hand it off");
+			await harness.session.prompt("I am back", { autoContinueGoal: false });
+			expect(classify).toHaveBeenCalledOnce();
+			expect(session._handoff).toBe(false);
+			expect(session._lastUserRequest).toBe("I am back");
 		});
 
 		it("a contradicted claim buys exactly one correction turn, with or without a live objective", async () => {

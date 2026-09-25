@@ -142,7 +142,7 @@ describe("AgentSession provider-neutral delegation orchestration", () => {
 		}
 	});
 
-	it("keeps delegation policy for a side trip on another provider/model", async () => {
+	it("keeps delegation policy and selected thinking on the root despite a cheap pin", async () => {
 		const harness = await createHarness({
 			models: [
 				{ id: "sol", reasoning: true, contextWindow: 372_000 },
@@ -170,10 +170,9 @@ describe("AgentSession provider-neutral delegation orchestration", () => {
 				},
 			]);
 
-			// A small owner message takes its side trip on the cheap pin with the tier's thinking.
 			await harness.session.prompt("Explain this code block");
 
-			expect(routedReasoning).toBe("max");
+			expect(routedReasoning).toBe("ultra");
 			expect(routedPrompt).toContain(DELEGATION_POLICY_HEADING);
 			expect(routedPrompt).toContain(DELEGATION_DECISION_RULE);
 			expect(harness.session.thinkingLevel).toBe("ultra");

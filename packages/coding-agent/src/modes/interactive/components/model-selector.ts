@@ -10,6 +10,7 @@ import {
 	visibleWidth,
 } from "@caupulican/pi-tui";
 import type { ModelRegistry } from "../../../core/model-registry.ts";
+import { ANTIGRAVITY_EFFORT_ORDER, antigravityGeminiEffortFamily } from "../../../core/models/antigravity-effort.ts";
 import type { SettingsManager } from "../../../core/settings-manager.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -37,23 +38,16 @@ interface ScopedModelItem {
 
 type ModelScope = "all" | "favorites" | "scoped";
 
-const EFFORT_ORDER = ["low", "medium", "high"] as const;
-
 function groupAntigravityModels(items: ModelItem[], currentModel?: Model<any>): ModelItem[] {
 	const grouped = new Map<string, ModelItem[]>();
 	const result: ModelItem[] = [];
 	for (const item of items) {
-		const label = /^(Gemini .+) \((Low|Medium|High)\)$/.exec(item.model.name);
-		if (
-			item.provider !== "google-antigravity" ||
-			!item.id.startsWith("gemini-") ||
-			!label ||
-			item.model.defaultThinkingLevel !== label[2]?.toLowerCase()
-		) {
+		const family = antigravityGeminiEffortFamily(item.model);
+		if (!family) {
 			result.push(item);
 			continue;
 		}
-		const key = `${item.provider}\u0000${label[1]}`;
+		const key = `${item.provider}\u0000${family}`;
 		const variants = grouped.get(key) ?? [];
 		variants.push(item);
 		grouped.set(key, variants);
@@ -70,8 +64,8 @@ function groupAntigravityModels(items: ModelItem[], currentModel?: Model<any>): 
 			.map((item) => item.model)
 			.sort(
 				(a, b) =>
-					EFFORT_ORDER.indexOf(a.defaultThinkingLevel as (typeof EFFORT_ORDER)[number]) -
-					EFFORT_ORDER.indexOf(b.defaultThinkingLevel as (typeof EFFORT_ORDER)[number]),
+					ANTIGRAVITY_EFFORT_ORDER.indexOf(a.defaultThinkingLevel as (typeof ANTIGRAVITY_EFFORT_ORDER)[number]) -
+					ANTIGRAVITY_EFFORT_ORDER.indexOf(b.defaultThinkingLevel as (typeof ANTIGRAVITY_EFFORT_ORDER)[number]),
 			);
 		const selected =
 			variants.find((model) => modelsAreEqual(currentModel, model)) ??

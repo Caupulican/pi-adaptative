@@ -11,7 +11,14 @@ import { isPlainRecord, isStringArray } from "./util/value-guards.ts";
 export const HUMAN_INPUT_CUSTOM_TYPE = "human_input_request";
 export const HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE = "worker-owner-response";
 export const HUMAN_INPUT_INLINE_BYTES = 16 * 1024;
+export const DEFAULT_OWNER_WAIT_TIMEOUT_MS = 300_000;
+export const OWNER_UNAVAILABLE_REASON =
+	"The owner did not answer before the question deadline; no decision was granted.";
 const HUMAN_INPUT_PREVIEW_CHARS = 4_000;
+
+export function unansweredOwnerQuestionText(path: string | undefined): string {
+	return `Owner did not answer. The decision remains open${path ? ` in ${path}` : ""}. No decision or authority was granted. Continue only independent authorized work. Do not ask again this turn; if none remains, stop without claiming completion.`;
+}
 
 export interface HumanInputOption {
 	label: string;
@@ -44,7 +51,12 @@ export interface HumanInputAnswer {
 	skipped: boolean;
 }
 
-export type HumanInputStopReason = "user_cancelled" | "ui_unavailable" | "interrupted" | "invalid_questions";
+export type HumanInputStopReason =
+	| "user_cancelled"
+	| "ui_unavailable"
+	| "interrupted"
+	| "invalid_questions"
+	| "owner_unavailable";
 
 export interface HumanInputPresentationRequest {
 	requestId: string;
@@ -127,6 +139,7 @@ export interface ResolveHumanInputOptions {
 	getImageStore?: () => Pick<SessionImageStore, "retainContent"> | undefined;
 	signal?: AbortSignal;
 	now?: () => string;
+	timeoutMs?: number;
 }
 
 function cloneQuestion(question: HumanInputQuestion): HumanInputQuestion {
@@ -359,7 +372,8 @@ function decodeSnapshot(data: unknown): HumanInputSnapshot | undefined {
 			snapshot.reason !== "user_cancelled" &&
 			snapshot.reason !== "ui_unavailable" &&
 			snapshot.reason !== "interrupted" &&
-			snapshot.reason !== "invalid_questions") ||
+			snapshot.reason !== "invalid_questions" &&
+			snapshot.reason !== "owner_unavailable") ||
 		typeof snapshot.updatedAt !== "string"
 	) {
 		return undefined;
@@ -556,31 +570,70 @@ export async function resolveHumanInput(options: ResolveHumanInputOptions): Prom
 }> {
 	const now = options.now ?? (() => new Date().toISOString());
 	let result: HumanInputPresentationResult;
+	let timedOut = false;
 	if (options.signal?.aborted) {
 		result = { answers: [], cancelled: true, reason: "interrupted", imageContents: [] };
+	} else if (options.timeoutMs !== undefined && options.timeoutMs <= 0) {
+		timedOut = true;
+		result = { answers: [], cancelled: true, reason: "owner_unavailable", imageContents: [] };
 	} else {
-		const presentation = options.present(
-			{
-				requestId: options.request.requestId,
-				questions: options.request.questions,
-				acceptsImages: options.request.acceptsImages,
-			},
-			{ signal: options.signal },
+		const controller = new AbortController();
+		const onAbort = () => controller.abort();
+		options.signal?.addEventListener("abort", onAbort, { once: true });
+		if (options.signal?.aborted) controller.abort();
+		const presentation = Promise.resolve().then(() =>
+			controller.signal.aborted
+				? ({ answers: [], cancelled: true, reason: "interrupted", imageContents: [] } as const)
+				: options.present(
+						{
+							requestId: options.request.requestId,
+							questions: options.request.questions,
+							acceptsImages: options.request.acceptsImages,
+						},
+						{ signal: controller.signal },
+					),
 		);
 		publishHumanInputActivity(options.sessionManager, { phase: "waiting", request: options.request });
+		let deadline: ReturnType<typeof setTimeout> | undefined;
+		let onPresentationAbort: (() => void) | undefined;
 		try {
+			const interrupted = new Promise<HumanInputPresentationResult>((resolve) => {
+				onPresentationAbort = () =>
+					resolve({ answers: [], cancelled: true, reason: "interrupted", imageContents: [] });
+				controller.signal.addEventListener("abort", onPresentationAbort, { once: true });
+				if (controller.signal.aborted) onPresentationAbort();
+			});
+			const presented =
+				options.timeoutMs === undefined
+					? await Promise.race([presentation, interrupted])
+					: await Promise.race([
+							presentation,
+							interrupted,
+							new Promise<undefined>((resolve) => {
+								deadline = setTimeout(() => {
+									timedOut = true;
+									controller.abort();
+									resolve(undefined);
+								}, options.timeoutMs);
+							}),
+						]);
 			result = persistPresentationImages(
-				normalizePresentationResult(options.request, await presentation),
+				timedOut
+					? { answers: [], cancelled: true, reason: "owner_unavailable", imageContents: [] }
+					: normalizePresentationResult(options.request, presented),
 				options.getImageStore?.(),
 			);
 		} finally {
+			if (deadline) clearTimeout(deadline);
+			if (onPresentationAbort) controller.signal.removeEventListener("abort", onPresentationAbort);
+			options.signal?.removeEventListener("abort", onAbort);
 			publishHumanInputActivity(options.sessionManager, { phase: "settled", request: options.request });
 		}
 	}
 	const answers = result.answers.map((answer) => externalizeAnswer(options.request, answer, options.artifactStore));
 	const snapshot: HumanInputSnapshot = {
 		request: cloneRequest(options.request),
-		status: result.cancelled ? "cancelled" : "answered",
+		status: timedOut ? "pending" : result.cancelled ? "cancelled" : "answered",
 		answers,
 		...(result.reason ? { reason: result.reason } : {}),
 		updatedAt: now(),
@@ -590,6 +643,7 @@ export async function resolveHumanInput(options: ResolveHumanInputOptions): Prom
 }
 
 export function formatHumanInputAnswerText(snapshot: HumanInputSnapshot): string {
+	if (snapshot.status === "pending") return "Owner question remains unanswered. No decision or authority was granted.";
 	if (snapshot.status === "cancelled") {
 		return snapshot.reason === "interrupted"
 			? "User question was interrupted."

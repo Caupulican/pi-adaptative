@@ -63,6 +63,13 @@ Evaluation results are evidence, not approval. Noul has no separate confidence;
 do not invent one or treat 0.5 as medium intensity. An uncertain result calls
 for more evidence or a better question, never an assertion of certainty.
 
+An uncertain or unavailable result returns to the LLM that owns the work. The LLM may gather
+new evidence, use a stronger reasoning model, or make a reversible decision within its grant.
+It must keep unsettled facts distinct from confirmed ones. A worker reports decisions it cannot
+settle to its parent; the parent reviews the evidence before the root asks the owner. During a
+full handoff, reserved owner decisions go to the session's follow-up document. No answer means
+the decision remains open; silence is never approval or cancellation.
+
 ### Design focused approval checks
 
 Use `action: "review"` and a `review` object containing `state`, `questions`

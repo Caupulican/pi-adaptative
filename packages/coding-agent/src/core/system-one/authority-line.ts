@@ -77,7 +77,6 @@ export function decideByAuthority(
 			if (reading === "fail") return { action: "replan" };
 			return { action: "hold", doubt: "System One unavailable: the objective stays open until it is judged" };
 		case "irreversible":
-			if (reading === "doubt") return { action: "proceed", doubt: "provisional judgment" };
 			if (reading === "fail") return { action: "refuse" };
 			if (actor === "worker") return { action: "refuse", doubt: "a worker cannot ask the operator" };
 			return {

@@ -25,7 +25,9 @@ describe("authority line", () => {
 
 	it("sends an unsettled irreversible operation to the operator, and refuses it for a worker", () => {
 		expect(decideByAuthority("irreversible", "unavailable", 0, "root").action).toBe("ask_operator");
+		expect(decideByAuthority("irreversible", "doubt", 0, "root").action).toBe("ask_operator");
 		expect(decideByAuthority("irreversible", "ambiguous", 0, "worker").action).toBe("refuse");
+		expect(decideByAuthority("irreversible", "doubt", 0, "worker").action).toBe("refuse");
 		expect(decideByAuthority("irreversible", "pass", 0, "worker").action).toBe("proceed");
 	});
 

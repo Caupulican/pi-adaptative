@@ -8,7 +8,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isDecisivelyFalse, isDecisivelyTrue } from "../decision/noul.ts";
 import { quotedIn, RESERVED_DECISION_KINDS, type UnsettledItemJudge } from "./unsettled-ladder.ts";
@@ -132,6 +132,15 @@ export async function groundConsultAnswer(
 /** The owner's follow-up document for one session: one per session, appended, never rewritten. */
 export function ownerFollowUpPath(agentDir: string, sessionId: string): string {
 	return join(agentDir, "follow-ups", `${sessionId}.md`);
+}
+
+export function ownerFollowUpBytes(path: string): number {
+	try {
+		return statSync(path).size;
+	} catch (error) {
+		if (error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT") return 0;
+		throw error;
+	}
 }
 
 function requestMarker(request: string): string {

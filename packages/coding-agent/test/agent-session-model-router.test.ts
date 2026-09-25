@@ -205,9 +205,8 @@ function createContext(
 }
 
 describe("AgentSession model router turn selection", () => {
-	it("reruns a side trip that reaches for a mutating tool on the talker, without duplicating the user message", async () => {
+	it("lets the selected root execute its tool call without an implicit model switch", async () => {
 		const harness = await createHarness({
-			// The session model is the talker; the small message takes its side trip on the cheap tier.
 			models: [{ id: "expensive" }, { id: "cheap" }],
 			baseToolsOverride: [bashTool],
 			settings: {
@@ -221,7 +220,7 @@ describe("AgentSession model router turn selection", () => {
 		try {
 			harness.setResponses([
 				fauxAssistantMessage([fauxToolCall("bash", { command: "cp source target" })], { stopReason: "toolUse" }),
-				fauxAssistantMessage("retried on the talker"),
+				fauxAssistantMessage("root completed"),
 			]);
 
 			await harness.session.prompt("Explain whether this command is safe: cp source target");
@@ -236,16 +235,12 @@ describe("AgentSession model router turn selection", () => {
 						entry.type === "message" &&
 						entry.message.role === "assistant" &&
 						entry.message.model === "expensive" &&
-						entry.message.content.some(
-							(block) => block.type === "text" && block.text === "retried on the talker",
-						),
+						entry.message.content.some((block) => block.type === "text" && block.text === "root completed"),
 				),
 			).toHaveLength(1);
-			expect(branch.filter((entry) => entry.type === "foreground_tool_start")).toHaveLength(0);
-			expect(branch.filter((entry) => entry.type === "foreground_tool_terminal")).toHaveLength(0);
-			expect(harness.session.getModelRouterStatus()).toContain(
-				"cheap/read-only -> faux/cheap (side_trip, escalated -> faux/expensive, selected by manual)",
-			);
+			expect(branch.filter((entry) => entry.type === "foreground_tool_start")).toHaveLength(1);
+			expect(branch.filter((entry) => entry.type === "foreground_tool_terminal")).toHaveLength(1);
+			expect(harness.session.getModelRouterStatus()).toContain("Last decision: none");
 		} finally {
 			harness.cleanup();
 		}
@@ -1244,21 +1239,36 @@ describe("conversation stage routing", () => {
 			.getEntries()
 			.filter((entry) => entry.type === "custom" && entry.customType === CONVERSATION_TALKER_CUSTOM_TYPE);
 
-	it("chooses the talker once at the opening and keeps it for later substantive messages", async () => {
+	it("sends greetings and repository review to the selected root before any worker routing", async () => {
+		const requests: FauxRequestEvent[] = [];
+		const harness = await routedHarness(requests);
+		try {
+			await harness.session.setModel(harness.getModel("root")!);
+			harness.setResponses([fauxAssistantMessage("hello"), fauxAssistantMessage("reviewed")]);
+			await harness.session.prompt("hi");
+			await harness.session.prompt("i want to review this repo, mk yourself familair, confirm the findings");
+			const replies = harness.session.messages.filter((message) => message.role === "assistant");
+			expect(replies.map((message) => (message as AssistantMessage).model)).toEqual(["root", "root"]);
+			expect(requests).toHaveLength(2);
+			expect(harness.session.getModelRouterStatus()).toContain("Last decision: none");
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("keeps the configured root across substantive messages without an opening reroute", async () => {
 		const requests: FauxRequestEvent[] = [];
 		const harness = await routedHarness(requests);
 		try {
 			harness.setResponses([fauxAssistantMessage("plan one"), fauxAssistantMessage("plan two")]);
 			await harness.session.prompt("Plan the migration of the ledger to a new schema; list the steps.");
-			expect(harness.session.model?.id).toBe("medium");
-			expect(talkerEntries(harness)).toHaveLength(1);
+			expect(harness.session.model?.id).toBe("root");
+			expect(talkerEntries(harness)).toHaveLength(0);
 			await harness.session.prompt("Plan the rollback for that migration; list the steps.");
-			// No second route: the talker answered, and it is still the session model.
-			expect(talkerEntries(harness)).toHaveLength(1);
-			expect(harness.session.model?.id).toBe("medium");
+			expect(talkerEntries(harness)).toHaveLength(0);
+			expect(harness.session.model?.id).toBe("root");
 			const replies = harness.session.messages.filter((message) => message.role === "assistant");
-			expect(replies.map((message) => (message as AssistantMessage).model)).toEqual(["medium", "medium"]);
-			// The talker's second request appends to its first.
+			expect(replies.map((message) => (message as AssistantMessage).model)).toEqual(["root", "root"]);
 			expect(requests[1]?.cachedChars).toBeGreaterThan(0);
 		} finally {
 			harness.cleanup();
@@ -1327,68 +1337,43 @@ describe("conversation stage routing", () => {
 		}
 	});
 
-	it("lets a side trip search the conversation its brief omits, on its own model, with the talker left in place", async () => {
+	it("gives the root the earlier conversation when a later question refers to it", async () => {
 		const requests: FauxRequestEvent[] = [];
 		const harness = await routedHarness(requests);
 		try {
-			let sideTrip: { tools: string[]; brief: string } | undefined;
-			let talkerTools: string[] = [];
-			let found = "";
+			let laterContext = "";
 			harness.setResponses([
-				(context: Context) => {
-					talkerTools = (context.tools ?? []).map((tool) => tool.name);
-					return fauxAssistantMessage("Step one exports the ledger; step two migrates it.");
-				},
+				fauxAssistantMessage("Step one exports the ledger; step two migrates it."),
 				fauxAssistantMessage("ok"),
 				(context: Context) => {
-					const note = context.messages.at(-2);
-					sideTrip = {
-						tools: (context.tools ?? []).map((tool) => tool.name),
-						brief: note?.role === "user" && typeof note.content !== "string" ? JSON.stringify(note.content) : "",
-					};
-					return fauxAssistantMessage([fauxToolCall("conversation_history", { query: "step one" })], {
-						stopReason: "toolUse",
-					});
-				},
-				(context: Context) => {
-					const result = context.messages.at(-1);
-					found = result?.role === "toolResult" ? JSON.stringify(result.content) : "";
+					laterContext = JSON.stringify(context.messages);
 					return fauxAssistantMessage("Step one exports the ledger.");
 				},
 			]);
 			await harness.session.prompt("Plan the migration of the ledger to a new schema; list the steps.");
 			await harness.session.prompt("thanks!");
 			await harness.session.prompt("What did the first step say?");
-			// The side trip keeps the whole surface (reaching for a mutating tool hands the work to the
-			// talker) and gains the search.
-			// Exactly the tools the talker's own request carried, plus the search.
-			expect(talkerTools.length).toBeGreaterThan(0);
-			expect(sideTrip?.tools).toEqual([...talkerTools, "conversation_history"]);
-			expect(sideTrip?.brief).toContain("search it with conversation_history");
-			// The search reads the conversation before the brief, which the brief itself never sent.
-			expect(found).toContain("Step one exports the ledger");
+			expect(laterContext).toContain("Step one exports the ledger");
 			const reply = harness.session.messages.at(-1) as AssistantMessage;
-			expect(reply.model).toBe("cheap");
-			expect(harness.session.model?.id).toBe("medium");
+			expect(reply.model).toBe("root");
+			expect(harness.session.model?.id).toBe("root");
 			expect(harness.session.getModelRouterStatus()).not.toContain("escalated");
 		} finally {
 			harness.cleanup();
 		}
 	});
 
-	it("sends a small message on a side trip that reads only its brief, leaving the talker in place", async () => {
+	it("sends a small follow-up to the root with conversation context", async () => {
 		const requests: FauxRequestEvent[] = [];
 		const harness = await routedHarness(requests);
 		try {
 			harness.setResponses([fauxAssistantMessage("the plan"), fauxAssistantMessage("you're welcome")]);
 			await harness.session.prompt("Plan the migration of the ledger to a new schema; list the steps.");
 			await harness.session.prompt("thanks!");
-			const sideTrip = harness.session.messages.at(-1) as AssistantMessage;
-			expect(sideTrip.model).toBe("cheap");
-			expect(harness.session.model?.id).toBe("medium");
-			// The brief is the talker's last reply and the new message, never the transcript.
-			expect(requests[1]?.messageCount).toBe(2);
-			expect(requests[1]?.messageCount).toBeLessThan(harness.session.messages.length);
+			const reply = harness.session.messages.at(-1) as AssistantMessage;
+			expect(reply.model).toBe("root");
+			expect(harness.session.model?.id).toBe("root");
+			expect(requests[1]?.messageCount).toBeGreaterThan(2);
 		} finally {
 			harness.cleanup();
 		}

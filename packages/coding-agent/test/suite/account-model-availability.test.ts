@@ -4,7 +4,7 @@
  * turn re-sent on the replacement.
  */
 
-import { type Api, type AssistantMessage, fauxAssistantMessage, type Model } from "@caupulican/pi-ai";
+import { type AssistantMessage, fauxAssistantMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AccountModelCatalog } from "../../src/core/model-router/account-models.ts";
 import { createHarness } from "./harness.ts";
@@ -20,9 +20,6 @@ const MODELS = [
 	contextWindow: 128_000,
 	maxTokens: 16_384,
 }));
-
-/** The talker first: the session model is gpt-5.6-sol and gpt-5.4 is only the cheap pin. */
-const TALKER_FIRST = [MODELS[1], MODELS[0]];
 
 /** A ChatGPT OAuth access token shape: the Codex client reads the account id from it. */
 function accessToken(): string {
@@ -107,9 +104,8 @@ describe("account model availability", () => {
 		expect(last).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
 
-	it("moves a routed turn the provider refused to the next usable model and restores the root after", async () => {
+	it("keeps the root selected despite an enabled cheap pin", async () => {
 		const harness = await createHarness({
-			// The root runs gpt-5.6-sol; the cheap tier is pinned to gpt-5.4, which the account refuses.
 			models: [MODELS[1]!, MODELS[0]!],
 			fauxProvider: { provider: "openai-codex" },
 			settings: {
@@ -122,27 +118,22 @@ describe("account model availability", () => {
 		});
 		const seen: string[] = [];
 		harness.setResponses([
-			(_context, _options, _state, model): AssistantMessage => {
-				seen.push(model.id);
-				return fauxAssistantMessage("", { stopReason: "error", errorMessage: REFUSAL });
-			},
 			(_context, _options, _state, model) => {
 				seen.push(model.id);
 				return fauxAssistantMessage("answered on sol");
 			},
 		]);
 		await harness.session.prompt("Explain this read-only value");
-		expect(seen).toEqual(["gpt-5.4", "gpt-5.6-sol"]);
+		expect(seen).toEqual(["gpt-5.6-sol"]);
 		expect(harness.session.model?.id).toBe("gpt-5.6-sol");
-		expect(harness.eventsOfType("warning").map((event) => event.message)).toContain(
-			"openai-codex/gpt-5.4 is not available on this account; this turn continues on openai-codex/gpt-5.6-sol.",
-		);
-		// The refused pin is not routed to again, and status says why.
-		harness.setResponses([fauxAssistantMessage("second")]);
+		harness.setResponses([
+			(_context, _options, _state, model) => {
+				seen.push(model.id);
+				return fauxAssistantMessage("second");
+			},
+		]);
 		await harness.session.prompt("Explain this other read-only value");
-		expect(harness.session.getModelRouterStatus()).toContain(
-			"cheap model openai-codex/gpt-5.4 is not available on this account (refused by openai-codex:",
-		);
+		expect(seen).toEqual(["gpt-5.6-sol", "gpt-5.6-sol"]);
 	});
 
 	it("names a redeemable reset when Codex's usage limit is reached, and a redeemed reset clears the limit", async () => {
@@ -183,61 +174,6 @@ describe("account model availability", () => {
 
 		harness.session.noteSubscriptionUsageReset("openai-codex");
 		expect(harness.session.getModelRouterStatus()).not.toContain("Exhausted models:");
-	});
-
-	it("keeps a refused side trip's replacement inside the turn and never moves the session model", async () => {
-		// The session (the talker) runs gpt-5.6-sol and the cheap tier is pinned to gpt-5.4: a small message
-		// takes its side trip there, Codex refuses it, and the turn continues on the talker without the
-		// session model moving.
-		const harness = await createHarness({
-			models: TALKER_FIRST,
-			fauxProvider: { provider: "openai-codex" },
-			settings: { modelRouter: { enabled: true, cheapModel: "openai-codex/gpt-5.4" } },
-			accountModels: {
-				fetch: codexModels([
-					{ slug: "gpt-5.4", priority: 1 },
-					{ slug: "gpt-5.6-sol", priority: 4 },
-				]),
-				apiKey: accessToken(),
-			},
-		});
-		const seen: string[] = [];
-		harness.setResponses([
-			(_context, _options, _state, model): AssistantMessage => {
-				seen.push(model.id);
-				return fauxAssistantMessage("", { stopReason: "error", errorMessage: REFUSAL });
-			},
-			(_context, _options, _state, model) => {
-				seen.push(model.id);
-				return fauxAssistantMessage("answered on sol");
-			},
-		]);
-		await harness.session.prompt("Explain this read-only value");
-		expect(seen).toEqual(["gpt-5.4", "gpt-5.6-sol"]);
-		expect(harness.session.model?.id).toBe("gpt-5.6-sol");
-		expect(harness.eventsOfType("warning").map((event) => event.message)).toContain(
-			"openai-codex/gpt-5.4 is not available on this account; this turn continues on openai-codex/gpt-5.6-sol.",
-		);
-	});
-
-	it("never retries a refused side trip's pin, even when the talker it moved to fails too", async () => {
-		const harness = await createHarness({
-			models: TALKER_FIRST,
-			fauxProvider: { provider: "openai-codex" },
-			settings: { modelRouter: { enabled: true, cheapModel: "openai-codex/gpt-5.4" } },
-		});
-		const seen: string[] = [];
-		const refuse =
-			(text: string) =>
-			(_context: unknown, _options: unknown, _state: unknown, model: Model<Api>): AssistantMessage => {
-				seen.push(model.id);
-				return fauxAssistantMessage("", { stopReason: "error", errorMessage: text });
-			};
-		harness.setResponses([refuse(REFUSAL), refuse(REFUSAL.replace("gpt-5.4", "gpt-5.6-sol")), refuse(REFUSAL)]);
-		await harness.session.prompt("Explain this read-only value");
-		expect(seen[0]).toBe("gpt-5.4");
-		expect(seen.slice(1)).not.toContain("gpt-5.4");
-		expect(harness.session.model?.id).not.toBe("gpt-5.4");
 	});
 
 	it("checks for Codex resets again after a check that found none", async () => {

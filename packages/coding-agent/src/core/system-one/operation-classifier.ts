@@ -146,7 +146,7 @@ const EFFECT_WORDS: Readonly<Record<string, string>> = {
 function irreversibleAction(reading: JudgmentReading, actor: "root" | "worker"): OperationVerdict["action"] {
 	const decision = decideByAuthority("irreversible", reading, 0, actor);
 	if (decision.action === "proceed") return "proceed";
-	return decision.action === "ask_operator" || reading !== "fail" ? "confirm" : "refuse";
+	return decision.action === "ask_operator" ? "confirm" : "refuse";
 }
 
 /**

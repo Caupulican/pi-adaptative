@@ -215,6 +215,55 @@ describe("objective-correlated ask_question", () => {
 		expect((result.content[0] as { text: string }).text).toContain("do not wait");
 	});
 
+	it("records a handed-off owner decision without interactive UI", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const followUps: string[] = [];
+		const { tool } = routedTool(sessionManager, {
+			isHandoff: () => true,
+			consultStrongerModel: async () => ({ kind: "needs_owner", reason: "scope", model: "big/model" }),
+			recordOwnerFollowUp: (entry) => {
+				followUps.push(entry.question);
+				return "/tmp/follow-ups/s.md";
+			},
+		});
+		const result = await tool.execute("call-headless", { questions }, undefined, undefined, {
+			hasUI: false,
+		} as ExtensionContext);
+		expect(followUps).toHaveLength(1);
+		expect(result.details.reason).not.toBe("ui_unavailable");
+		expect((result.content[0] as { text: string }).text).toContain("owner follow-up");
+	});
+
+	it("leaves an unanswered owner decision pending after the wait deadline", async () => {
+		const sessionManager = SessionManager.inMemory();
+		startActiveGoal(sessionManager);
+		const followUps: string[] = [];
+		const { tool, port } = routedTool(sessionManager, {
+			isHandoff: () => false,
+			ownerWaitTimeoutMs: 1,
+			recordOwnerFollowUp: (entry) => {
+				followUps.push(entry.question);
+				return "/tmp/follow-ups/s.md";
+			},
+		});
+		const result = await tool.execute("call-unanswered", { questions }, undefined, undefined, {
+			hasUI: true,
+			ui: {
+				askQuestions: (_request: unknown, options?: { signal?: AbortSignal }) =>
+					new Promise((resolve) => {
+						options?.signal?.addEventListener(
+							"abort",
+							() => resolve({ answers: [], cancelled: true, reason: "interrupted", imageContents: [] }),
+							{ once: true },
+						);
+					}),
+			} as ExtensionUIContext,
+		} as ExtensionContext);
+		expect(result.details.reason).toBe("owner_unavailable");
+		expect(followUps).toHaveLength(1);
+		expect(port.getGoalState()?.clarifications?.[0]?.status).toBe("pending");
+	});
+
 	it("under a handoff with nowhere to record a follow-up, the owner is asked rather than skipped", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const { tool, ctx, counter } = routedTool(sessionManager, {
@@ -259,7 +308,7 @@ describe("objective-correlated ask_question", () => {
 			category: "ambiguous_requirement",
 			questions,
 			acceptsImages: false,
-			now: () => "2026-09-20T00:00:01.000Z",
+			now: () => new Date().toISOString(),
 		});
 		beginHumanInputRequest(sessionManager, request);
 		appendGoalStateSnapshot(

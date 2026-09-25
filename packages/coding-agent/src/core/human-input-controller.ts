@@ -4,12 +4,21 @@ import type { Api, ImageContent, Model, ToolResultMessage } from "@caupulican/pi
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { ExtensionUIContext } from "./extensions/index.ts";
 import { clarificationAnsweredEvent, type GoalClarificationEvent } from "./goals/goal-clarification-log.ts";
-import { formatHumanInputAnswerText, getResumableHumanInputSnapshot, resolveHumanInput } from "./human-input.ts";
+import {
+	DEFAULT_OWNER_WAIT_TIMEOUT_MS,
+	formatHumanInputAnswerText,
+	getResumableHumanInputSnapshot,
+	type HumanInputRequest,
+	OWNER_UNAVAILABLE_REASON,
+	resolveHumanInput,
+	unansweredOwnerQuestionText,
+} from "./human-input.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 
 interface HumanInputControllerDeps {
 	getSessionManager(): SessionManager;
 	getUIContext(): ExtensionUIContext | undefined;
+	isHandoff?(): boolean;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	getModel(): Model<Api> | undefined;
@@ -18,6 +27,7 @@ interface HumanInputControllerDeps {
 	runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void>;
 	/** Durable objective-side clarification writer, for a question that outlived its own process. */
 	recordObjectiveClarification?(objectiveId: string, event: GoalClarificationEvent): void;
+	recordOwnerFollowUp?(request: HumanInputRequest, reason: string): string | undefined;
 }
 
 /** Owns durable ask_question replay after a restart or idle resume.
@@ -34,22 +44,31 @@ export class HumanInputController {
 		const sessionManager = this.deps.getSessionManager();
 		const pending = getResumableHumanInputSnapshot(sessionManager);
 		const ui = this.deps.getUIContext();
-		if (!ui) return false;
+		if (!pending) return false;
 		let resumed = false;
 
 		if (pending?.request.toolCallId) {
 			let snapshot = pending;
 			let imageContents: readonly ImageContent[] = [];
 			if (pending.status === "pending") {
+				const elapsed = Date.now() - Date.parse(pending.request.createdAt);
+				const timeoutMs =
+					ui && !this.deps.isHandoff?.()
+						? Math.max(0, DEFAULT_OWNER_WAIT_TIMEOUT_MS - (Number.isFinite(elapsed) ? elapsed : 0))
+						: 0;
 				const resolved = await resolveHumanInput({
 					sessionManager,
 					request: {
 						...pending.request,
 						acceptsImages: this.deps.getModel()?.input.includes("image") ?? false,
 					},
-					present: (request, options) => ui.askQuestions(request, options),
+					present: (request, options) =>
+						ui
+							? ui.askQuestions(request, options)
+							: Promise.resolve({ answers: [], cancelled: true, reason: "ui_unavailable", imageContents: [] }),
 					artifactStore: this.deps.getArtifactStore(),
 					getImageStore: () => this.deps.getImageStore(),
+					timeoutMs,
 				});
 				snapshot = resolved.snapshot;
 				imageContents = resolved.imageContents;
@@ -66,7 +85,7 @@ export class HumanInputController {
 			// The objective that asked this question may be several process lifetimes away; its ledger
 			// is settled here, from the same snapshot the tool result is built from.
 			const objectiveId = snapshot.request.objectiveId;
-			if (objectiveId) {
+			if (objectiveId && snapshot.status !== "pending") {
 				this.deps.recordObjectiveClarification?.(
 					objectiveId,
 					clarificationAnsweredEvent({
@@ -88,6 +107,15 @@ export class HumanInputController {
 				imageContents.length > 0 && !modelAcceptsImages
 					? "\n\n[Attached images were retained but not sent because the selected model does not accept image input.]"
 					: "";
+			const ownerFollowUp =
+				snapshot.status === "pending"
+					? this.deps.recordOwnerFollowUp?.(
+							snapshot.request,
+							this.deps.isHandoff?.()
+								? "Owner question deferred under full handoff; no decision was granted."
+								: OWNER_UNAVAILABLE_REASON,
+						)
+					: undefined;
 			const toolResult: ToolResultMessage = {
 				role: "toolResult",
 				toolCallId: pending.request.toolCallId,
@@ -95,7 +123,7 @@ export class HumanInputController {
 				content: [
 					{
 						type: "text",
-						text: `${formatHumanInputAnswerText(snapshot)}${missingImageNotice}${unsupportedImageNotice}`,
+						text: `${snapshot.status === "pending" ? unansweredOwnerQuestionText(ownerFollowUp) : formatHumanInputAnswerText(snapshot)}${missingImageNotice}${unsupportedImageNotice}`,
 					},
 					...(modelAcceptsImages ? imageContents : []),
 				],
@@ -103,6 +131,7 @@ export class HumanInputController {
 					questions: snapshot.request.questions,
 					answers: snapshot.answers,
 					cancelled: snapshot.status === "cancelled",
+					...(snapshot.status === "pending" ? { reason: "owner_unavailable" } : {}),
 					...(snapshot.reason ? { reason: snapshot.reason } : {}),
 				},
 				isError: false,

@@ -105,6 +105,15 @@ describe("repo_read", () => {
 		expect(text(inSubdirectory).trim()).toBe("src/");
 	});
 
+	it("returns the requested number of concise commits for a plain log", async () => {
+		const tool = createRepoReadToolDefinition(repo);
+		const result = await tool.execute("log", { action: "log", limit: 1 }, undefined, undefined, NO_CONTEXT);
+		expect(text(result).trim().split("\n")).toHaveLength(1);
+		expect(text(result)).toContain("second");
+		expect(text(result)).not.toContain("line limit reached");
+		expect(result.details?.truncation).toBeUndefined();
+	});
+
 	it("reports git's own failure as the tool result instead of a harness error", async () => {
 		const tool = createRepoReadToolDefinition(repo);
 		const result = await tool.execute(

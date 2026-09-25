@@ -340,6 +340,7 @@ import {
 	type ClaimReceipts,
 	collectClaimReceipts,
 } from "./system-one/claim-delivery.ts";
+import { formatClarificationQuestion } from "./system-one/clarification.ts";
 import { CodeDuplicateReviewer } from "./system-one/code-duplicates.ts";
 import { type SystemOneController, USER_REQUEST_RULE_BUDGET } from "./system-one/controller.ts";
 import { createSessionForegroundControl, type SystemOneForegroundControl } from "./system-one/foreground-control.ts";
@@ -350,6 +351,7 @@ import {
 	groundConsultAnswer,
 	OWNER_QUESTION_CONSULT_PROMPT,
 	type OwnerQuestionConsult,
+	ownerFollowUpBytes,
 	ownerFollowUpPath,
 	parseConsultReply,
 } from "./system-one/owner-question-routing.ts";
@@ -631,6 +633,8 @@ export class AgentSession {
 	private _deliveryClassificationUnavailable = false;
 	/** The latest user request handed decisions to the agents; owner questions then route through System One. */
 	private _handoff = false;
+	private _lastAnnouncedFollowUp?: { sessionId: string; bytes: number };
+	private _followUpReadErrorSessionId?: string;
 	/** The owner's latest request text, for owner questions asked outside an objective. */
 	private _lastUserRequest = "";
 	private readonly _codeDuplicates = new CodeDuplicateReviewer({
@@ -684,8 +688,6 @@ export class AgentSession {
 	);
 	/** Findings nothing could settle this turn, delivered to the owner by the host when the turn ends. */
 	private _pendingOwnerItems: string[] = [];
-	/** The follow-up document this turn's items were written to under a handoff, if any. */
-	private _pendingOwnerFollowUp: string | undefined;
 	private _adaptationProjection?: AdaptationProjection;
 	private _deliveryState: DeliveryState = "none";
 	private _foregroundControl?: SystemOneForegroundControl;
@@ -1066,6 +1068,7 @@ export class AgentSession {
 		this._humanInput = new HumanInputController({
 			getSessionManager: () => this.sessionManager,
 			getUIContext: () => this._extensionUIContext,
+			isHandoff: () => this._handoff,
 			isDisposed: () => this._disposed,
 			isStreaming: () => this.isStreaming,
 			getModel: () => this.model,
@@ -1084,6 +1087,13 @@ export class AgentSession {
 					event,
 				);
 			},
+			recordOwnerFollowUp: (request, reason) =>
+				appendOwnerFollowUp(ownerFollowUpPath(this._agentDir, this.sessionManager.getSessionId()), {
+					question: formatClarificationQuestion(request.questions),
+					reason,
+					request: this._lastUserRequest,
+					at: new Date().toISOString(),
+				}),
 		});
 		this._goals = new GoalSessionController({
 			getSessionManager: () => this.sessionManager,
@@ -1907,7 +1917,6 @@ export class AgentSession {
 						...entry,
 						at: new Date().toISOString(),
 					});
-					this._emit({ type: "warning", message: `Owner follow-up recorded (${path}): ${entry.question}` });
 					return path;
 				},
 			}),
@@ -2740,7 +2749,9 @@ export class AgentSession {
 			isGranted: () => this.getEdgeGrants().some((grant) => grant.class === "operation.irreversible"),
 			askOperator: async (operation, signal) =>
 				enforceSessionEdgeOperation(this._edgeDeps(), operation, "operation", signal),
-			notify: (message) => this._emit({ type: "warning", message }),
+			notify: (message) => {
+				if (!this._handoff) this._emit({ type: "warning", message });
+			},
 		});
 		return this._operationGateInstance;
 	}
@@ -3045,7 +3056,16 @@ export class AgentSession {
 			appendCustomEntry: (customType, data) => this.sessionManager.appendCustomEntry(customType, data),
 			getCwd: () => this._cwd,
 			isChildSession: () => this._isChildSession,
-			getConfirmation: () => this._edgeConfirmation,
+			getConfirmation: () => (this._handoff ? undefined : this._edgeConfirmation),
+			deferOwnerOperation: (operation) => {
+				if (!this._handoff || this._isChildSession) return undefined;
+				return appendOwnerFollowUp(ownerFollowUpPath(this._agentDir, this.sessionManager.getSessionId()), {
+					question: `Authorize ${operation.class}: ${operation.operation}?`,
+					reason: operation.reason,
+					request: this._lastUserRequest,
+					at: new Date().toISOString(),
+				});
+			},
 			mayHoldUnownedWorktreeChanges: (signal) =>
 				mayHoldUnownedWorktreeChanges(
 					this._cwd,
@@ -5277,8 +5297,12 @@ export class AgentSession {
 		this._goals.setStartAuthority(goalToolStartAuthority);
 		try {
 			this._toolProtocol.resetTurnState();
-			this._lastUserRequest = userRequest;
-			const requestNote = await this._enableCapabilitiesAuthorizedByUser(userRequest, submissionSignal);
+			let requestNote: string | undefined;
+			if (!options?.internalContextType) {
+				this._lastUserRequest = userRequest;
+				requestNote = await this._enableCapabilitiesAuthorizedByUser(userRequest, submissionSignal);
+				this._announceOwnerFollowUpsWhenPresent();
+			}
 			if (requestNote) {
 				messages.push(
 					createCustomMessage("request_authority", requestNote, false, undefined, new Date().toISOString()),
@@ -6294,33 +6318,60 @@ export class AgentSession {
 		return { settled, unsettled, ...(ownerFollowUp ? { ownerFollowUp } : {}) };
 	}
 
+	private _announceOwnerFollowUpsWhenPresent(): void {
+		if (this._isChildSession || this._handoff) return;
+		const sessionId = this.sessionManager.getSessionId();
+		const path = ownerFollowUpPath(this._agentDir, sessionId);
+		let bytes: number;
+		try {
+			bytes = ownerFollowUpBytes(path);
+			this._followUpReadErrorSessionId = undefined;
+		} catch (error) {
+			if (this._followUpReadErrorSessionId !== sessionId) {
+				this._followUpReadErrorSessionId = sessionId;
+				this._emit({
+					type: "warning",
+					message: `Could not inspect owner follow-ups in ${path}: ${error instanceof Error ? error.message : String(error)}`,
+				});
+			}
+			return;
+		}
+		if (bytes <= (this._lastAnnouncedFollowUp?.sessionId === sessionId ? this._lastAnnouncedFollowUp.bytes : 0))
+			return;
+		this._lastAnnouncedFollowUp = { sessionId, bytes };
+		this._emit({
+			type: "warning",
+			message: `Owner follow-ups are recorded in ${path}. Review them before relying on unresolved decisions.`,
+		});
+	}
+
 	/**
 	 * Items nothing could settle go to the owner by the host, never by trusting a model to relay them:
 	 * written to the follow-up document under a handoff, and posted to the owner when the turn ends.
 	 */
 	private _deliverToOwner(items: readonly string[]): string | undefined {
 		if (items.length === 0) return undefined;
+		if (this._handoff) return this._recordUnsettledForOwner(items);
 		this._pendingOwnerItems.push(...items.filter((item) => !this._pendingOwnerItems.includes(item)));
-		const path = this._recordUnsettledForOwner(items);
-		if (path) this._pendingOwnerFollowUp = path;
-		return path;
+		return undefined;
 	}
 
 	/** Post this turn's unsettled items to the owner as one displayed message, then clear them. */
 	private async _flushOwnerItems(lease: ForegroundSubmissionLease | undefined): Promise<void> {
 		if (this._pendingOwnerItems.length === 0) return;
 		const items = this._pendingOwnerItems;
-		const followUp = this._pendingOwnerFollowUp;
+		if (this._handoff) {
+			this._recordUnsettledForOwner(items);
+			this._pendingOwnerItems = [];
+			return;
+		}
 		this._pendingOwnerItems = [];
-		this._pendingOwnerFollowUp = undefined;
 		const content = [
-			followUp
-				? `Needs you (recorded in ${followUp}; the run continued without it):`
-				: "Needs you: nothing the agents could check settled these. Answer before relying on them:",
+			"Needs you: nothing the agents could check settled these. Answer before relying on them:",
 			...items.map((item) => `- ${item}`),
 		].join("\n");
 		await this._sendCustomMessage(
-			{ customType: "owner_items", content, display: true, details: { items, ...(followUp ? { followUp } : {}) } },
+			{ customType: "owner_items", content, display: true, details: { items } },
 			undefined,
 			lease,
 		);
@@ -6341,10 +6392,6 @@ export class AgentSession {
 				request: this._lastUserRequest,
 				at,
 			});
-		this._emit({
-			type: "warning",
-			message: `Owner follow-up recorded (${path}): ${items.length} unsettled finding(s)`,
-		});
 		return path;
 	}
 

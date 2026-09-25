@@ -51,6 +51,7 @@ const READ_ONLY_COMMANDS = new Set([
 	"df",
 	"du",
 	"env",
+	"find",
 	"format-list",
 	"format-table",
 	"get-childitem",
@@ -88,7 +89,8 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set(["branch", "diff", "log", "rev-parse",
 const READ_ONLY_NPM_SUBCOMMANDS = new Set(["info", "list", "ls", "outdated", "view", "whoami"]);
 const MUTATING_SHELL_TOKEN_RE =
 	/(^|\s)(>|>>|2>|&>|tee\b|rm\b|mv\b|cp\b|mkdir\b|touch\b|chmod\b|chown\b|install\b|commit\b|push\b|publish\b|deploy\b|apply\b|add\b|checkout\b|switch\b|reset\b|clean\b|stash\b|merge\b|rebase\b|remove-item\b|move-item\b|copy-item\b|new-item\b|rename-item\b|set-content\b|add-content\b|out-file\b|set-item\b|start-process\b|npm\s+(?:i|install|ci|update|publish|run)\b|pnpm\s+(?:i|install|update|publish|run)\b|yarn\s+(?:add|install|upgrade|publish|run)\b)/i;
-const UNSAFE_NESTED_SHELL_EXECUTION_RE = /(`|\$\(|\bfind\b[\s\S]*\s-exec(?:dir)?\b|\bxargs\b)/i;
+const UNSAFE_NESTED_SHELL_EXECUTION_RE =
+	/(`|\$\(|\bfind\b[\s\S]*\s-(?:exec(?:dir)?|ok(?:dir)?|delete|fprint(?:0|f)?|fls)\b|\bxargs\b)/i;
 const MUTATING_TOOL_NAME_RE =
 	/(bash|powershell|exec|execute|run|shell|write|edit|patch|replace|delete|remove|move|rename|create|mkdir|touch|install|commit|push|publish|deploy|apply)/i;
 

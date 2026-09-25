@@ -101,6 +101,40 @@ describe("AgentSession model and extension characterization", () => {
 		expect(harness.session.thinkingLevel).toBe("ultra");
 	});
 
+	it("cycles advertised Antigravity Gemini efforts by switching the exact model variant", async () => {
+		const levels = ["low", "medium", "high"] as const;
+		const harness = await createHarness({
+			fauxProvider: { provider: "google-antigravity" },
+			models: levels.map((level) => ({
+				id: `gemini-3.8-flash-${level}`,
+				name: `Gemini 3.8 Flash (${level[0]!.toUpperCase()}${level.slice(1)})`,
+				reasoning: true,
+				defaultThinkingLevel: level,
+				thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: null, [level]: level },
+			})),
+		});
+		harnesses.push(harness);
+		await harness.session.setModel(harness.getModel("gemini-3.8-flash-medium")!);
+		expect(harness.session.getAvailableThinkingLevels()).toEqual(["medium"]);
+
+		expect(harness.session.cycleThinkingLevel()).toBe("high");
+		expect(harness.session.model?.id).toBe("gemini-3.8-flash-high");
+		expect(harness.session.thinkingLevel).toBe("high");
+		expect(harness.session.cycleThinkingLevel()).toBe("low");
+		expect(harness.session.model?.id).toBe("gemini-3.8-flash-low");
+		expect(harness.session.thinkingLevel).toBe("low");
+		expect(harness.session.cycleThinkingLevel()).toBe("medium");
+		expect(harness.session.model?.id).toBe("gemini-3.8-flash-medium");
+		expect(harness.session.thinkingLevel).toBe("medium");
+		harness.session.setScopedModels([
+			{ model: harness.getModel("gemini-3.8-flash-medium")! },
+			{ model: harness.getModel("gemini-3.8-flash-high")! },
+		]);
+		expect(harness.session.cycleThinkingLevel()).toBe("high");
+		expect(harness.session.cycleThinkingLevel()).toBe("medium");
+		expect(harness.session.model?.id).toBe("gemini-3.8-flash-medium");
+	});
+
 	it("throws when setModel is called without configured auth", async () => {
 		const harness = await createHarness({
 			models: [

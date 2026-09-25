@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Changed
+
+- Every owner message reaches the selected root model, which may call tools and delegate explicitly.
+
+### Fixed
+
+- Shift+Tab cycles the advertised low, medium and high Antigravity Gemini variants of the selected model family.
+- Plain `repo_read log` calls return bounded one-line commit summaries instead of truncating verbose history mid-commit.
+- Tool-effect classification treats observational TypeSafe calls and read-only shell `find` queries as non-mutating.
+- Unanswered owner questions remain pending after a bounded wait and become durable follow-ups; handoffs defer ungranted operations without opening a dialog, notify the owner of follow-ups on return, and workers escalate uncertainty through the parent.
+
 ## [0.99.47] - 2026-09-24
 
 ### Changed

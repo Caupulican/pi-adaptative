@@ -95,6 +95,12 @@ describe("worker TypeSafe review", () => {
 						expect(context.tools?.find((tool) => tool.name === "typesafe_review")?.description).toContain(
 							"Check typesafe_review status at work start",
 						);
+						expect(context.tools?.find((tool) => tool.name === "typesafe_review")?.description).toContain(
+							"load the typesafe-review skill",
+						);
+						expect(context.tools?.find((tool) => tool.name === "typesafe_review")?.description).toContain(
+							"Workers report unresolved decisions to the parent",
+						);
 						return fauxAssistantMessage(
 							fauxToolCall("typesafe_review", {
 								action: "review",

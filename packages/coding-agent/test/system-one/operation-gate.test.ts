@@ -110,6 +110,7 @@ describe("operation judgment", () => {
 
 	it("sends an unsettled effect, or a System One that cannot answer, to the operator", async () => {
 		expect(await judge({ ...OUTWARD, request_authorizes: 0.5 })).toMatchObject({ action: "confirm" });
+		expect(await judge({ ...OUTWARD, request_authorizes: 0.5 }, "worker")).toMatchObject({ action: "refuse" });
 		expect(
 			await judge({
 				leaves_machine: 0.6,
@@ -220,7 +221,7 @@ describe("operation gate", () => {
 		const worker = gate({ answers: unsettled, asks: false });
 		expect(await worker.operationGate.check("bash", command, scope, "worker")).toMatchObject({
 			block: true,
-			reason: expect.stringContaining("System One held a worker's"),
+			reason: expect.stringContaining("Report the unresolved boundary to the parent"),
 		});
 	});
 

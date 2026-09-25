@@ -136,9 +136,17 @@ with `INCONCLUSIVE:` lines in their report; those go straight to step 3.
 The root agent's own answer climbs the same ladder: a claim no receipt backs (the harness reads
 receipts only from the tools it knows) is judged against the turn's tool results. Confirmed, it
 stands; refuted, it is a contradiction and buys the one correction turn; still open, it goes to the
-owner. What goes to the owner is delivered by the host, never relayed by a model: at the end of the
-turn a displayed `owner_items` message lists every open item, with the follow-up document named
-under a handoff.
+owner. What goes to the owner is delivered by the host, never relayed by a model. With the owner
+present, the turn displays one `owner_items` message. During a full handoff, the host records the
+items in the follow-up document without displaying a question or warning.
+An ungranted irreversible operation during a full handoff is blocked and recorded there too.
+The next owner message outside a handoff receives one notice pointing to newly recorded follow-ups.
+
+An unanswered interactive question has a five-minute deadline. The dialog closes and the durable
+question remains pending; the owner did not cancel or authorize anything. The root continues only
+independent authorized work and records the decision in the follow-up document. A restored question
+uses the remaining time from its original request; an overdue question or a headless restore is
+deferred without opening a dialog.
 
 A handed-off owner question follows the same rule. A stronger model may answer it on a basis copied
 from the owner's request, which code checks is in the request (case, punctuation and spacing folded)
@@ -160,4 +168,3 @@ Candidates rank by IDF-weighted shared calls and normalized-token fingerprints; 
 naming the function to reuse; a provisional one is a warning. `npm run scan:semantic-duplicates`
 judges every production unit against its closest candidates, batched and concurrent (scaled to the
 machine's cores and free memory), and prints a report.
-

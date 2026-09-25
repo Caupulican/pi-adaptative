@@ -136,7 +136,7 @@ export const SKILL_VAULT_SYSTEM_RULE =
  * atomic questions over the real source, and report what stays unsettled instead of rounding it up.
  */
 export const SYSTEM_ONE_VALIDATION_RULE =
-	"SYSTEM ONE: confirm non-trivial findings with typesafe_review, one atomic fact per question over sent source. Unsettled is a result: never reword to pass; report it as inconclusive with what is missing.";
+	"SYSTEM ONE: use typesafe_review for focused semantic judgments over supplied evidence; batch independent questions. Jev grants no authority. Uncertain results return to you: gather new evidence or decide only within grant. Workers report unresolved items to the parent in inconclusive; the parent owns owner questions. Never reroll unchanged evidence.";
 
 export function buildWorkerSystemPrompt(capabilities: {
 	write: boolean;

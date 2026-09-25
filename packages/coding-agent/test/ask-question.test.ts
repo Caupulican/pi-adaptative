@@ -273,7 +273,7 @@ describe("ask_question", () => {
 				imageContents: [{ type: "image" as const, data: "BAUG", mimeType: "image/webp" }],
 			}),
 		} as unknown as ExtensionUIContext;
-		const context = { hasUI: true, ui } as unknown as ExtensionContext;
+		const context = { hasUI: true, ui, model: { input: ["text", "image"] } } as unknown as ExtensionContext;
 		const result = await createAskQuestionToolDefinition().execute(
 			"call",
 			{ questions },
@@ -402,5 +402,21 @@ describe("ask_question", () => {
 		controller.abort();
 		const result = await pending;
 		expect(result.details).toMatchObject({ cancelled: true, reason: "interrupted" });
+	});
+
+	it("ends an unanswered dialog without treating silence as cancellation", async () => {
+		const ui = {
+			askQuestions: () => new Promise(() => {}),
+		} as unknown as ExtensionUIContext;
+		const context = { hasUI: true, ui } as unknown as ExtensionContext;
+		const result = await createAskQuestionToolDefinition({ ownerWaitTimeoutMs: 1 }).execute(
+			"call-absent",
+			{ questions },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(result.details).toMatchObject({ cancelled: false, reason: "owner_unavailable" });
+		expect((result.content[0] as { text: string }).text).toContain("decision remains open");
 	});
 });

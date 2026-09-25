@@ -28,14 +28,16 @@ import type { GoalClarification, GoalClarificationCategory } from "../goals/goal
 import {
 	beginHumanInputRequest,
 	createHumanInputRequest,
+	DEFAULT_OWNER_WAIT_TIMEOUT_MS,
 	formatHumanInputAnswerText,
 	type HumanInputAnswer,
 	type HumanInputAnswerImage,
 	type HumanInputPresentationResult,
 	type HumanInputQuestion,
-	type HumanInputSnapshot,
 	type HumanInputStopReason,
+	OWNER_UNAVAILABLE_REASON,
 	resolveHumanInput,
+	unansweredOwnerQuestionText,
 } from "../human-input.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
 import type { SessionImageStore } from "../session-image-store.ts";
@@ -164,6 +166,7 @@ export interface AskQuestionToolOptions {
 	}) => Promise<OwnerQuestionConsult | undefined>;
 	/** Append a decision only the owner can make to the follow-up document; returns its path. */
 	recordOwnerFollowUp?: (entry: { question: string; reason: string; request: string }) => string | undefined;
+	ownerWaitTimeoutMs?: number;
 }
 
 export interface AskQuestionClipboardOptions {
@@ -817,6 +820,9 @@ function questionPanelModel(details: AskQuestionToolDetails | undefined): Orches
 			emptyText: details.error ?? "User input is unavailable.",
 		};
 	}
+	if (details.reason === "owner_unavailable") {
+		return { label: "question", action: "pending", status: "warning", emptyText: "Owner decision remains open." };
+	}
 	const rows = details.questions.map((question) => {
 		const answer = details.answers.find((candidate) => candidate.id === question.id);
 		const values = answer ? [...answer.selected, ...(answer.custom ? [previewAnswer(answer.custom)] : [])] : [];
@@ -901,8 +907,19 @@ function followUpResult(
 	questions: readonly AskQuestion[],
 	path: string,
 ): { content: Array<{ type: "text"; text: string }>; details: AskQuestionToolDetails } {
-	const text = `ask_question recorded as an owner follow-up (${path}). The owner handed this work off: do not wait. Continue with everything that does not depend on this decision, and list the follow-up in your final answer.`;
+	const text = `ask_question recorded as an owner follow-up (${path}). The owner handed this work off: do not wait. Continue with everything that does not depend on this decision. If nothing independent remains, stop quietly without claiming completion.`;
 	return { content: [{ type: "text", text }], details: { questions, answers: [], cancelled: true, error: text } };
+}
+
+function unansweredResult(
+	questions: readonly AskQuestion[],
+	path: string | undefined,
+): { content: Array<{ type: "text"; text: string }>; details: AskQuestionToolDetails } {
+	const text = unansweredOwnerQuestionText(path);
+	return {
+		content: [{ type: "text", text }],
+		details: { questions, answers: [], cancelled: false, reason: "owner_unavailable" },
+	};
 }
 
 export function createAskQuestionToolDefinition(options: AskQuestionToolOptions = {}) {
@@ -919,6 +936,7 @@ export function createAskQuestionToolDefinition(options: AskQuestionToolOptions 
 			"Concise labels, concrete consequence/tradeoff. Never add Other/Skip/None/filler; harness adds Other/Skip.",
 			"multiSelect only for independent choices. Never delegate decisions fixed by owner profile/policy.",
 			"Skipped/cancelled is owner intent. Never repeat immediately; proceed safely or report unresolved boundary.",
+			"No answer by the question deadline means the owner is unavailable, not cancelled or approving. Leave dependent work pending and do not re-prompt this turn.",
 		],
 		parameters: askQuestionSchema,
 		executionMode: "sequential",
@@ -941,9 +959,6 @@ export function createAskQuestionToolDefinition(options: AskQuestionToolOptions 
 		async execute(_toolCallId, input, signal, onUpdate, ctx) {
 			const validationError = validateQuestions(input.questions);
 			if (validationError) return stoppedResult(input.questions, "invalid_questions", validationError);
-			if (!ctx.hasUI) {
-				return stoppedResult(input.questions, "ui_unavailable", "ask_question requires interactive UI.");
-			}
 			if (signal?.aborted) return stoppedResult(input.questions, "interrupted");
 
 			const objectiveId = options.getObjectiveId?.();
@@ -987,6 +1002,9 @@ export function createAskQuestionToolDefinition(options: AskQuestionToolOptions 
 				// No follow-up document to hold it: the owner is asked, never silently skipped.
 				if (followUp) return followUpResult(input.questions, followUp);
 			}
+			if (!ctx.hasUI) {
+				return stoppedResult(input.questions, "ui_unavailable", "ask_question requires interactive UI.");
+			}
 
 			phase("waiting");
 			const request = createHumanInputRequest({
@@ -1010,38 +1028,23 @@ export function createAskQuestionToolDefinition(options: AskQuestionToolOptions 
 					}),
 				);
 			}
-			const resolved = options.sessionManager
-				? await resolveHumanInput({
-						sessionManager: options.sessionManager,
-						request,
-						present: (presentation, dialogOptions) => ctx.ui.askQuestions(presentation, dialogOptions),
-						artifactStore: options.artifactStore,
-						getImageStore: options.getImageStore,
-						signal,
-					})
-				: await (async (): Promise<{
-						snapshot: HumanInputSnapshot;
-						imageContents: AskQuestionDialogResult["imageContents"];
-					}> => {
-						const result = await ctx.ui.askQuestions(
-							{
-								requestId: request.requestId,
-								questions: request.questions,
-								acceptsImages: request.acceptsImages,
-							},
-							{ signal },
-						);
-						return {
-							snapshot: {
-								request,
-								status: result.cancelled ? "cancelled" : "answered",
-								answers: result.answers,
-								...(result.reason ? { reason: result.reason } : {}),
-								updatedAt: new Date().toISOString(),
-							},
-							imageContents: result.imageContents,
-						};
-					})();
+			const resolved = await resolveHumanInput({
+				sessionManager: options.sessionManager ?? { appendCustomEntry: () => "" },
+				request,
+				present: (presentation, dialogOptions) => ctx.ui.askQuestions(presentation, dialogOptions),
+				artifactStore: options.artifactStore,
+				getImageStore: options.getImageStore,
+				signal,
+				timeoutMs: options.ownerWaitTimeoutMs ?? DEFAULT_OWNER_WAIT_TIMEOUT_MS,
+			});
+			if (resolved.snapshot.status === "pending") {
+				const followUp = options.recordOwnerFollowUp?.({
+					question: formatClarificationQuestion(input.questions),
+					reason: OWNER_UNAVAILABLE_REASON,
+					request: options.getObjectiveClarificationState?.()?.userGoal ?? options.getRequestText?.() ?? "",
+				});
+				return unansweredResult(input.questions, followUp);
+			}
 
 			const details: AskQuestionToolDetails = {
 				questions: input.questions,

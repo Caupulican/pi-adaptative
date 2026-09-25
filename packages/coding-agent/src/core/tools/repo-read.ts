@@ -76,7 +76,9 @@ const repoReadSchema = Type.Object({
 		}),
 	),
 	limit: Type.Optional(
-		Type.Number({ description: `Maximum output lines (default ${DEFAULT_LINE_LIMIT}, at most ${MAX_LINE_LIMIT}).` }),
+		Type.Number({
+			description: `Maximum output lines (default ${DEFAULT_LINE_LIMIT}, at most ${MAX_LINE_LIMIT}); for a plain log, also the number of one-line commits.`,
+		}),
 	),
 });
 
@@ -495,6 +497,9 @@ export function createRepoReadToolDefinition(
 			}
 			if (!directory) throw new Error(`Not a directory: ${runDir}`);
 			const optionArgv = compileRepoReadOptions(action, input.options);
+			const limit = Math.min(MAX_LINE_LIMIT, Math.max(1, Math.floor(input.limit ?? DEFAULT_LINE_LIMIT)));
+			const effectiveOptions =
+				action === "log" && optionArgv.length === 0 ? ["--oneline", `-n${limit}`] : optionArgv;
 			const revisions = validateRepoReadRevisions(input.revisions);
 			const paths = (input.paths ?? []).map((spec) => resolvePathspec(runDir, spec, "pathspec"));
 			// `rev:path` object paths are repository-root-relative unless they start with `./`;
@@ -517,7 +522,7 @@ export function createRepoReadToolDefinition(
 				...GLOBAL_ARGV,
 				action,
 				...safety,
-				...optionArgv,
+				...effectiveOptions,
 				...revisions,
 				...(paths.length > 0 ? ["--", ...paths] : []),
 			];
@@ -538,7 +543,7 @@ export function createRepoReadToolDefinition(
 				};
 			}
 			if (run.capped) details.capped = true;
-			const command = `git ${action}${optionArgv.length > 0 ? ` ${optionArgv.join(" ")}` : ""}`;
+			const command = `git ${action}${effectiveOptions.length > 0 ? ` ${effectiveOptions.join(" ")}` : ""}`;
 			const reduction = reduceToolOutput({
 				tool: "repo_read",
 				command,
@@ -547,7 +552,6 @@ export function createRepoReadToolDefinition(
 				level: "standard",
 			});
 			if (reduction) details.outputReduction = reduction.details;
-			const limit = Math.min(MAX_LINE_LIMIT, Math.max(1, Math.floor(input.limit ?? DEFAULT_LINE_LIMIT)));
 			const truncation = truncateHead(reduction?.text ?? run.stdout, { maxLines: limit });
 			let text = truncation.content;
 			if (truncation.truncated) details.truncation = truncation;

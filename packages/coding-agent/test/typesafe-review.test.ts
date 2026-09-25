@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createInMemoryArtifactStore } from "../src/core/context/context-artifacts.ts";
+import { shouldEscalateModelRouterTool } from "../src/core/model-router/tool-escalation.ts";
 import { TypeSafeEvidenceStore } from "../src/core/review/typesafe-evidence-store.ts";
 import { type ReviewInput, TypeSafeReviewer } from "../src/core/review/typesafe-reviewer.ts";
 import { createTypeSafeReviewToolDefinition as createTool } from "../src/core/tools/typesafe-review.ts";
@@ -40,6 +41,19 @@ afterEach(() => {
 });
 
 describe("TypeSafe review boundary", () => {
+	it("keeps observational review calls on a cheap research route", () => {
+		const tool = createTypeSafeReviewToolDefinition(new TypeSafeReviewer({ getApiKey: async () => "fixture-key" }));
+		for (const action of ["status", "evidence", "evaluate", "review"] as const) {
+			expect(
+				shouldEscalateModelRouterTool({
+					tier: "cheap",
+					toolName: tool.name,
+					args: { action },
+					readOnly: tool.readOnly,
+				}),
+			).toBe(false);
+		}
+	});
 	it("keeps arbitrary cancellation reasons out of review records", async () => {
 		const tool = createTypeSafeReviewToolDefinition(new TypeSafeReviewer({ getApiKey: async () => "fixture-key" }));
 		const result = await tool.execute(

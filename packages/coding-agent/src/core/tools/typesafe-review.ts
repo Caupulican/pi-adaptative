@@ -104,13 +104,15 @@ export function createTypeSafeReviewToolDefinition(
 	return {
 		name: "typesafe_review",
 		label: "TypeSafe review",
+		readOnly: true,
 		description:
 			"Use Jev for semantic decisions and independent verification in any domain. Status checks setup. Evaluate batches Choice, Noul and Score questions for classification, detection, routing, ranking, retrieval, extraction, ambiguity, planning, guardrails and evidence checks. Review gates claims at high (0.95) or max (0.99) confidence. Evidence reads retained records by id and offset. Sends explicit state only; does not execute or authorize actions.",
 		promptSnippet: "Jev: semantic judgments and high/max claim review.",
 		promptGuidelines: [
-			"Check typesafe_review status at work start. When enabled and authenticationVerified are true, use Jev for semantic decisions and reviews throughout work, in any domain.",
+			"Check typesafe_review status at work start. When the typesafe-review skill is listed and the skill tool is available, load the typesafe-review skill. Use Jev for semantic decisions and reviews throughout work, in any domain.",
 			"Batch independent narrow questions with complete relevant source, tests, prior findings and limitations; never hide adverse evidence. Reproduce bug candidates before fixing.",
 			"Approval requires every expected verdict and high/max confidence; fix findings or add missing evidence. Never reroll unchanged evidence for a better score. Credentials belong in /login typesafe, never tool arguments.",
+			"An uncertain or unavailable Jev result returns to the owning LLM. Workers report unresolved decisions to the parent; only the root asks the owner when authority or evidence is still missing. Silence grants nothing.",
 			SYSTEM_ONE_VALIDATION_RULE,
 		],
 		parameters,

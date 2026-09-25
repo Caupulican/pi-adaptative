@@ -11,7 +11,6 @@ import { completedWorkerOutput } from "./worker-output-fixture.ts";
 
 const RESEARCH_JSON = '{"findings":[{"summary":"Reuse the evidence-bundle helper","confidence":0.9}]}';
 const WORKER_JSON = completedWorkerOutput("Validator blocks out-of-scope changes.", []);
-const JUDGE_MEDIUM = '{"tier":"medium","risk":"read-only","trivial":false,"reason":"non-trivial planning"}';
 
 interface StoredTelemetry {
 	version: number;
@@ -34,32 +33,21 @@ function seedActiveGoal(harness: Harness): void {
 }
 
 describe("autonomy telemetry emission (G3)", () => {
-	it("the opening's judged route emits a route_decision event with the route's codes", async () => {
+	it("the first owner message stays on the root without an automatic route decision", async () => {
 		const harness = await createHarness({
 			models: [{ id: "cheap" }, { id: "medium" }],
 			settings: { modelRouter: { enabled: true, cheapModel: "faux/cheap", mediumModel: "faux/medium" } },
 		});
 		try {
-			harness.setResponses([fauxAssistantMessage(JUDGE_MEDIUM), fauxAssistantMessage("answered on medium")]);
+			harness.setResponses([fauxAssistantMessage("answered on root")]);
 
-			// The conversation's first substantive message is judged once and chooses the talker.
 			await harness.session.prompt("Plan the structure of the cache invalidation subsystem; list the parts.");
 
 			const routes = telemetryEvents(harness).filter(
 				(event) => event.type === AUTONOMY_TELEMETRY_EVENT_TYPES.routeDecision,
 			);
-			expect(routes).toHaveLength(1);
-			const [route] = routes;
-			expect(route.version).toBe(1);
-			expect(typeof route.timestamp).toBe("string");
-			expect(route.timestamp.length).toBeGreaterThan(0);
-			expect(route.payload.tier).toBe("medium");
-			expect(route.payload.outcome).toBe("routed");
-			expect(typeof route.payload.reasonCode).toBe("string");
-			expect(typeof route.payload.confidence).toBe("number");
-			// The sink stores codes/numbers only — never the prompt text.
-			expect(JSON.stringify(route.payload)).not.toContain("cache invalidation");
-			expect(harness.session.model?.id).toBe("medium");
+			expect(routes).toHaveLength(0);
+			expect(harness.session.model?.id).toBe("cheap");
 		} finally {
 			harness.cleanup();
 		}
