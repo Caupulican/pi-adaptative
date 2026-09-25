@@ -579,6 +579,38 @@ async function proveGoalRequirementChecks(
 	return refusal ? { refusal, state: proof.state } : { state: proof.state };
 }
 
+/**
+ * Completion was judged to its end and the answer is no. That is the operation's outcome, not a tool
+ * failure: the reasons reach the model verbatim (errorKind operation_outcome) instead of a bounded
+ * failure record, so the agent sees every failed check or judgment and what would change it.
+ */
+function goalCompletionRefusal(
+	action: GoalToolDetails["action"],
+	message: string,
+	state: GoalState | undefined,
+): {
+	content: Array<{ type: "text"; text: string }>;
+	details: GoalToolDetails;
+	isError: true;
+	errorKind: "operation_outcome";
+} {
+	return { ...goalExecutionError(action, message, state), errorKind: "operation_outcome" };
+}
+
+/** System One's completion rejection as one line per failed judgment, then what would change it. */
+export function describeCompletionRejection(verdict: {
+	verdict: string;
+	failed_gates: ReadonlyArray<{ reason: string; required_next_proof?: string }>;
+}): string {
+	if (verdict.failed_gates.length === 0) return `Completion refused: System One's verdict is '${verdict.verdict}'.`;
+	const nextSteps = [...new Set(verdict.failed_gates.map((gate) => gate.required_next_proof).filter(Boolean))];
+	return [
+		`Completion refused: System One found ${verdict.failed_gates.length} issue(s) (verdict: ${verdict.verdict}).`,
+		...verdict.failed_gates.map((gate) => `- ${gate.reason}`),
+		...(nextSteps.length > 0 ? ["Next:", ...nextSteps.map((step) => `- ${step}`)] : []),
+	].join("\n");
+}
+
 function goalExecutionError(
 	action: GoalToolDetails["action"],
 	message: string,
@@ -956,7 +988,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 				// agent's account: every result is recorded as check evidence before anything is judged.
 				if (action.action === "complete" && current && isGoalExecutionActive(current.status)) {
 					const proven = await proveGoalRequirementChecks(current, deps, now, signal);
-					if ("refusal" in proven) return goalExecutionError(input.action, proven.refusal, proven.state);
+					if ("refusal" in proven) return goalCompletionRefusal(input.action, proven.refusal, proven.state);
 					current = proven.state;
 				}
 				const result = applyGoalAction(current, action, now(), {
@@ -995,10 +1027,9 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 							{ persistTerminal: false },
 						);
 						if (completionDecision.verdict !== "complete") {
-							const reasons = completionDecision.failed_gates.map((g) => g.reason).join("; ");
-							return goalExecutionError(
+							return goalCompletionRefusal(
 								input.action,
-								`System One semantic completion gate rejected: ${reasons || completionDecision.verdict}`,
+								describeCompletionRejection(completionDecision),
 								current,
 							);
 						}

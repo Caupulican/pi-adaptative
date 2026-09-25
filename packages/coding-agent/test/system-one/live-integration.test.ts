@@ -169,8 +169,10 @@ describe("System One Live Integration", () => {
 		);
 		expect(result.isError).toBe(true);
 		expect((result.details as any)?.applied).toBe(false);
-		expect(JSON.stringify(result.content)).toContain("System One semantic completion gate rejected");
+		expect(JSON.stringify(result.content)).toContain("Completion refused: System One found");
 		expect(JSON.stringify(result.content)).toContain("Unsatisfied acceptance criteria: AC-1");
+		// A judged refusal is the operation's outcome: its reasons reach the model verbatim.
+		expect((result as { errorKind?: string }).errorKind).toBe("operation_outcome");
 		expect(currentState.status).toBe("active");
 	});
 

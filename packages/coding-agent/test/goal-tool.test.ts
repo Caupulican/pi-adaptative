@@ -11,6 +11,7 @@ import { ExecutionStore } from "../src/core/system-one/execution-state.ts";
 import {
 	createGoalLifecycleToolDefinitions,
 	createGoalToolDefinition,
+	describeCompletionRejection,
 	type GoalToolDetails,
 	type GoalToolInput,
 } from "../src/core/tools/goal.ts";
@@ -1168,8 +1169,37 @@ describe("goal requirement checks", () => {
 		});
 	});
 
+	it("phrases a System One rejection one judgment per line, with the numbers and what would change it", () => {
+		expect(
+			describeCompletionRejection({
+				verdict: "verify_more",
+				failed_gates: [
+					{
+						reason:
+							"The evidence does not show every required outcome achieved (System One: 0.52, needs at least 0.70).",
+						required_next_proof: "Achieve the missing outcome, or record the check or evidence that shows it.",
+					},
+					{
+						reason:
+							"Completion rests on an assumption the evidence does not establish (System One: 0.88, needs at most 0.50).",
+						required_next_proof: "Establish the assumption with a check or observation.",
+					},
+				],
+			}),
+		).toBe(
+			[
+				"Completion refused: System One found 2 issue(s) (verdict: verify_more).",
+				"- The evidence does not show every required outcome achieved (System One: 0.52, needs at least 0.70).",
+				"- Completion rests on an assumption the evidence does not establish (System One: 0.88, needs at most 0.50).",
+				"Next:",
+				"- Achieve the missing outcome, or record the check or evidence that shows it.",
+				"- Establish the assumption with a check or observation.",
+			].join("\n"),
+		);
+	});
+
 	it("refuses completion on a failed check with a whole reason, without asking System One, and keeps the proof", async () => {
-		const { run, evaluateCompletion, getState } = checkedHarness({}, "complete");
+		const { tool, run, evaluateCompletion, getState } = checkedHarness({}, "complete");
 		await run({ action: "start", goalId: "g1", userGoal: "Stop the model server" });
 		await run({
 			action: "add_requirement",
@@ -1177,7 +1207,10 @@ describe("goal requirement checks", () => {
 			text: "Nothing listens on 11434",
 			check: { command: "ss -ltn | grep -c 11434", expectExitCode: 1 },
 		});
-		const refused = await run({ action: "complete" });
+		const refusal = await tool.execute("call-1", { action: "complete" }, undefined, undefined, ctx);
+		// The refusal is completion's judged outcome, so the model sees it verbatim, not a failure record.
+		expect((refusal as { errorKind?: string }).errorKind).toBe("operation_outcome");
+		const refused = { isError: refusal.isError === true, text: getToolResultText(refusal) };
 		expect(refused.isError).toBe(true);
 		expect(refused.text).toContain("Completion refused: 1 of 1 requirement check(s) failed.");
 		expect(refused.text).toContain("- r1 (Nothing listens on 11434):");
