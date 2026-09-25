@@ -1,6 +1,6 @@
 {
 	"name": "@caupulican/pi-adaptative",
-	"version": "0.99.50",
+	"version": "0.99.51",
 	"private": true,
 	"description": "Reliability-first coding-agent harness with verified tool execution, recovery, and standalone releases",
 	"type": "module",
@@ -90,9 +90,9 @@
 		"eval:completion": "node --conditions=pi-source src/core/system-one/evals/completion-eval-cli.ts"
 	},
 	"dependencies": {
-		"@caupulican/pi-agent-core": "^0.99.50",
-		"@caupulican/pi-ai": "^0.99.50",
-		"@caupulican/pi-tui": "^0.99.50",
+		"@caupulican/pi-agent-core": "^0.99.51",
+		"@caupulican/pi-ai": "^0.99.51",
+		"@caupulican/pi-tui": "^0.99.51",
 		"@effect/platform": "0.97.1",
 		"@effect/platform-node": "0.108.1",
 		"@silvia-odwyer/photon-node": "0.3.4",
