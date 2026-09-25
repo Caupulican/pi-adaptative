@@ -11,6 +11,7 @@
 
 ### Added
 
+- `goal amend_goal` rewrites an active goal's objective from the owner's own complete message (verified on the active branch and recorded as the amendment's provenance), so a mid-run scope change such as "llama-cpp too" is what completion judges.
 - A goal requirement can carry a `check`: an observational command (validated against the read-only shell line) that the harness reruns at completion, in both the goal tool and the objective loop. Every result is recorded as host-verified `check` evidence; a passing check satisfies its requirement and a failing one reopens it and refuses completion with one sentence per failure, before System One is asked. `create_goal` accepts `{ text, check }` requirements and `set_requirement_check` attaches or removes one.
 - `npm run eval:completion` (packages/coding-agent) measures completion reliability against the real System One per outcome kind.
 

@@ -18,6 +18,7 @@ import {
 	type GoalState,
 	type GoalStatus,
 	isGoalExecutionActive,
+	MAX_GOAL_OBJECTIVE_LENGTH,
 	type RequirementCheck,
 } from "../goals/goal-state.ts";
 import {
@@ -82,6 +83,7 @@ const goalSchema = Type.Object(
 				Type.Literal("increment"),
 				Type.Literal("block_goal"),
 				Type.Literal("grant_edge"),
+				Type.Literal("amend_goal"),
 			],
 			{ description: "Goal record action." },
 		),
@@ -104,10 +106,18 @@ const goalSchema = Type.Object(
 			}),
 		),
 		quote: Type.Optional(
-			Type.String({ description: "grant_edge: the operator's complete sentence granting it, verbatim." }),
+			Type.String({
+				description:
+					"grant_edge / amend_goal: the owner's complete message, verbatim (a paraphrase or part of a message grants and amends nothing).",
+			}),
 		),
 		goalId: Type.Optional(Type.String({ description: "Stable goal id. Required for action 'start'." })),
-		userGoal: Type.Optional(Type.String({ description: "The goal statement. Required for action 'start'." })),
+		userGoal: Type.Optional(
+			Type.String({
+				description:
+					"The goal statement. Required for 'start'; for 'amend_goal', the objective rewritten to include what the owner's quoted message adds or changes.",
+			}),
+		),
 		tokenBudget: Type.Optional(
 			Type.Integer({ minimum: 1, description: "Optional positive token budget for action 'start'." }),
 		),
@@ -216,7 +226,7 @@ export type GoalToolInput = Static<typeof goalSchema>;
 export type GoalToolDefinition = ToolDefinition;
 
 export interface GoalToolDetails {
-	action: GoalActionName | "get" | "grant_edge";
+	action: GoalActionName | "get" | "grant_edge" | "amend_goal";
 	applied: boolean;
 	error?: string;
 	state?: GoalState;
@@ -631,6 +641,66 @@ function goalExecutionError(
  * the quote must resolve verbatim to a user message on the branch (the provenance check goal
  * evidence uses), and the grant is recorded on the session, where the edge reads it.
  */
+/**
+ * The owner changed the goal's scope mid-run ("llama-cpp too"). The objective is rewritten only on the
+ * owner's own complete message, verified on the active branch, and that message is recorded as the
+ * amendment's provenance; completion then judges the amended scope instead of the old one.
+ */
+function executeAmendGoal(
+	input: GoalToolInput,
+	deps: GoalToolDependencies,
+	now: () => string,
+): { content: { type: "text"; text: string }[]; details: GoalToolDetails; isError?: boolean } {
+	const fail = (error: string) => ({
+		content: [{ type: "text" as const, text: `goal amend_goal failed: ${error}` }],
+		details: { action: "amend_goal" as const, applied: false, error },
+		isError: true,
+	});
+	const state = deps.getGoalState();
+	if (!state || !isGoalExecutionActive(state.status)) return fail("there is no active goal to amend.");
+	const userGoal = input.userGoal?.trim() ?? "";
+	if (!userGoal) return fail("userGoal must state the amended objective.");
+	if (userGoal.length > MAX_GOAL_OBJECTIVE_LENGTH) {
+		return fail(`userGoal must be at most ${MAX_GOAL_OBJECTIVE_LENGTH} characters.`);
+	}
+	const quote = input.quote?.trim() ?? "";
+	if (!quote) return fail("quote the owner's complete message that changes the goal.");
+	if (!deps.resolveUserEvidence) return fail("owner messages cannot be verified in this session.");
+	const resolved = deps.resolveUserEvidence(quote);
+	if (!resolved.verified) {
+		return fail(
+			`${resolved.reason ?? "the quote did not resolve to a user message"}. Only the owner's own complete message amends a goal; if they have not said it, ask them.`,
+		);
+	}
+	const at = now();
+	const evidenceId = generatedGoalRecordId("ev", { amend: quote, entry: resolved.messageEntryId });
+	const recorded = applyGoalAction(
+		state,
+		{
+			action: "add_evidence",
+			evidenceId,
+			kind: "user",
+			summary: quote,
+			uri: `user-message:${resolved.messageEntryId}`,
+			verified: true,
+		},
+		at,
+		{ requireVerifiedEvidenceForCompletion: deps.requireVerifiedEvidenceForCompletion?.() ?? true },
+	);
+	if (!recorded.ok) return fail(recorded.error);
+	const amended = applyGoalEvent(recorded.state, { type: "edit_goal", userGoal, now: at });
+	deps.saveGoalState(amended, getGoalStateRevision(state));
+	return {
+		content: [
+			{
+				type: "text" as const,
+				text: `Goal amended from the owner's message ("${quote}"). Objective: ${userGoal}\nAdd a requirement (with a check where a command can observe it) for each outcome the amendment adds.`,
+			},
+		],
+		details: { action: "amend_goal", applied: true, state: amended },
+	};
+}
+
 function executeGrantEdge(
 	input: GoalToolInput,
 	deps: GoalToolDependencies,
@@ -721,6 +791,8 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			"After bounded read-only survey, make the project-relative delivery contract explicit in the goal requirements: POC/MVP proves the requested capability; complete means full integration across affected project surfaces.",
 			"Plans: task_steps. Workers: delegate. Background tools: tool_task wait once; cite taskId as kind=tool evidence.",
 			"increment satisfies the current open requirement from unused evidence, or completes when none remain.",
+			"When a command can observe a requirement's outcome, give it a check (add_requirement or set_requirement_check): the harness reruns it at completion, so the outcome is proven, not asserted.",
+			"When the owner adds to or changes the goal mid-run, amend_goal with their complete message as quote, then add requirements for what it adds; completion judges the goal as recorded.",
 			"grant_edge: record a grant only when the operator's words authorize deleting the repository, the home directory, a filesystem root, a disk, or a toolkit script. Git, publishing, installing, and settings edits run without a grant. A granted class never asks; an ungranted destructive.fs or toolkit.script asks once. When the operator authorized one concrete toolkit script and arguments, specify toolkitScript and toolkitArgs; omit them for a broad class grant only when their instruction covers the class.",
 			"complete needs current authoritative evidence, no remaining work, no active goal-owned lanes, no open task_steps, no goal-owned or cited running tool_task, and no active pipeline. Failed or canceled tool_task results are terminal and stop blocking liveness, but never become verified evidence automatically. block_requirement/block_goal only when the same verified owner/approval boundary or capability impossibility persists for 3 consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; otherwise keep working.",
 		],
@@ -776,6 +848,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 				};
 			}
 			if (input.action === "grant_edge") return executeGrantEdge(input, deps);
+			if (input.action === "amend_goal") return executeAmendGoal(input, deps, now);
 			let normalizedInput = input;
 			if (input.action === "start" && deps.authorizeStart) {
 				const authority = deps.authorizeStart(input);

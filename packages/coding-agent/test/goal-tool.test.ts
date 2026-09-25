@@ -1303,3 +1303,33 @@ describe("goal completion loop bound", () => {
 		expect(evaluateCompletion).toHaveBeenCalledTimes(2);
 	});
 });
+
+describe("goal amendment from the owner's words", () => {
+	it("rewrites the objective only on the owner's complete message and records it as the provenance", async () => {
+		const { run, sessionManager, getState } = createHarness();
+		sessionManager.appendMessage({
+			role: "user",
+			content: "remove the local ollama server and its models",
+			timestamp: 1000,
+		});
+		await run({ action: "start", goalId: "g1", userGoal: "Remove the local Ollama server and its models." });
+		sessionManager.appendMessage({ role: "user", content: "llama-cpp too,", timestamp: 2000 });
+
+		const paraphrased = await run({
+			action: "amend_goal",
+			userGoal: "Remove Ollama and llama-cpp.",
+			quote: "also remove llama-cpp",
+		});
+		expect(paraphrased.isError).toBe(true);
+		expect(getState()?.userGoal).toBe("Remove the local Ollama server and its models.");
+
+		const amended = await run({
+			action: "amend_goal",
+			userGoal: "Remove the local Ollama server, its models, and the llama-cpp server.",
+			quote: "llama-cpp too,",
+		});
+		expect(amended.isError).not.toBe(true);
+		expect(getState()?.userGoal).toBe("Remove the local Ollama server, its models, and the llama-cpp server.");
+		expect(getState()?.evidence.at(-1)).toMatchObject({ kind: "user", summary: "llama-cpp too,", verified: true });
+	});
+});
