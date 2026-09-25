@@ -46,7 +46,8 @@
 - Hydrate/update locally with `npm install --ignore-scripts`; clean/CI-style with `npm ci --ignore-scripts`. Don't run lifecycle scripts unless the user asks.
 - If dep metadata changes, refresh `package-lock.json` with `npm install --package-lock-only --ignore-scripts`.
 - Pre-commit blocks lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1`. Don't bypass unless the user wants the lockfile change committed.
-- The pre-commit hook is staged-scoped (`scripts/precommit-staged.mjs`): exclude/lockfile guards, biome on the staged files biome.json covers (restaged after `--write`), the contract-doctrine gate, the browser smoke check when `packages/ai`, `packages/web-ui` or the manifests are staged, every staged `*.test.ts` / `scripts/*.test.mjs` file with its workspace runner, and one project `tsc --noEmit` when a TypeScript source under `packages/` is staged. It never runs the repo-wide `npm run check` chain or a whole suite; CI and `npm run release:*` own those. `node scripts/precommit-staged.mjs --dry-run` prints the plan for the current staged set.
+- The pre-commit hook is staged-scoped (`scripts/precommit-staged.mjs`): exclude/lockfile guards, biome on the staged files biome.json covers (restaged after `--write`), the contract-doctrine gate, the browser smoke check when `packages/ai`, `packages/web-ui` or the manifests are staged, every staged `*.test.ts` / `scripts/*.test.mjs` file with its workspace runner, the tests that directly import a staged source file (one batch per workspace; a hub module imported by more than 25 tests narrows to its own named tests, see `scripts/affected-tests.mjs`), and one project `tsc --noEmit` when a TypeScript source under `packages/` is staged. When the branch's last recorded CI verdict is red, its failing test files are carried into every commit and the commit is refused until they pass; CI failures it cannot rerun (check, coverage) are printed. It never runs the repo-wide `npm run check` chain or a whole suite; CI and `npm run release:*` own those. `node scripts/precommit-staged.mjs --dry-run` prints the plan for the current staged set.
+- The pre-push hook starts one detached watcher per pushed branch head (`scripts/ci-status.mjs`). It follows that commit's `ci.yml` run to its end and records the verdict and failing test files in `<git-common-dir>/pi-ci/<branch>.json`, which the next commit reads. `node scripts/ci-status.mjs show` prints it. A watcher never blocks a push.
 
 ## Git
 
@@ -132,7 +133,7 @@ Attribution:
 
 3. **Standalone release verification**: the tag workflow builds the Linux, Windows, and retained macOS archives, executes both repository installers against the just-built archives, and uploads `install.sh`, `install.ps1`, and `SHA256SUMS` to the GitHub release. The normal local check gate runs the focused installer and binary regression suites; do not substitute npm package or local registry smoke tests.
 
-4. **Run the release script**: the flow is split into `prepare` (bump/changelog/commit/push, no tag) and `promote` (gate on destructive.yml, then tag/push). The complete `ci.yml` matrix runs on the tag, not on every main commit.
+4. **Run the release script** (it refuses to start unless `ci.yml` succeeded on the exact `main` commit being released; push and wait for green first): the flow is split into `prepare` (bump/changelog/commit/push, no tag) and `promote` (gate on destructive.yml, then tag/push). The complete `ci.yml` matrix runs on the tag, not on every main commit.
    ```bash
    npm run release:patch    # fixes + additions: prepare, push, destructive gate, then tag
    npm run release:minor    # breaking changes: same flow
@@ -141,7 +142,7 @@ Attribution:
 
    `release:patch`/`release:minor`/`release:major` run **prepare** then automatically chain into **promote**:
    - Prepare: preflight (on `main`, clean tree, `origin/main` is an ancestor of `HEAD`, prospective tag unused) -> version bump -> changelogs -> `npm run check` -> commit `Release vX.Y.Z` -> push `main` -> add fresh `## [Unreleased]` sections -> commit `Add [Unreleased] section for next cycle` -> push `main`. The release command never runs the full suite locally. A failure anywhere after preflight resets the local tree back to the preflight commit; nothing is tagged.
-   - Promote: finds the `Release vX.Y.Z` commit, polls `destructive.yml` for that exact SHA (dispatching a run if none exists), and on success creates and pushes the `vX.Y.Z` tag. That tag triggers `.github/workflows/build-binaries.yml`, which runs the complete `ci.yml` matrix as quality-gate and publishes assets only after that matrix, provenance, and binary gates succeed.
+   - Promote: finds the `Release vX.Y.Z` commit, polls `destructive.yml` for that exact SHA (dispatching a run if none exists), and on success creates and pushes the `vX.Y.Z` tag, then deletes every remote `release-vX.Y.Z` dispatch branch whose version is tagged (an untagged in-flight candidate stays; `npm run release:prune [-- --dry-run]` does the same on demand). That tag triggers `.github/workflows/build-binaries.yml`, which runs the complete `ci.yml` matrix as quality-gate and publishes assets only after that matrix, provenance, and binary gates succeed.
 
    Review any lockfile diffs the release creates before push. Model catalogs (`packages/ai/src/*.generated.ts`) are never regenerated by the release script - it's a pure function of the already-committed, already-tested tree; catalog freshness is governed separately by the weekly `check:model-catalog` workflow.
 

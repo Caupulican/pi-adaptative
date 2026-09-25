@@ -8,8 +8,10 @@ import {
 	computeReleaseAllowlist,
 	parsePorcelainPath,
 	partitionReleaseChanges,
+	mainCiGateDecision,
 	matchesReleaseCandidateSubject,
 	pickWorkflowConclusion,
+	releaseBranchesToPrune,
 	stripEmptyUnreleasedSection,
 } from "./release-staging.mjs";
 
@@ -132,5 +134,49 @@ test("release repair removes only an empty next-cycle section", () => {
 	assert.throws(
 		() => stripEmptyUnreleasedSection("## [0.93.6]\n\n## [Unreleased]\n\n## [0.93.5]\n"),
 		/first version section/,
+	);
+});
+
+test("the release gate needs a green main CI run on the exact commit", () => {
+	const sha = "abc";
+	assert.deepEqual(mainCiGateDecision([{ headSha: sha, status: "completed", conclusion: "success" }], sha), {
+		verdict: "green",
+	});
+	// A cancelled duplicate does not hide the run that succeeded.
+	assert.deepEqual(
+		mainCiGateDecision(
+			[
+				{ headSha: sha, status: "completed", conclusion: "cancelled" },
+				{ headSha: sha, status: "completed", conclusion: "success" },
+			],
+			sha,
+		),
+		{ verdict: "green" },
+	);
+	assert.deepEqual(mainCiGateDecision([{ headSha: sha, status: "in_progress", conclusion: "" }], sha), {
+		verdict: "wait",
+		status: "in_progress",
+	});
+	assert.deepEqual(mainCiGateDecision([{ headSha: sha, status: "completed", conclusion: "failure" }], sha), {
+		verdict: "red",
+		conclusion: "failure",
+	});
+	assert.deepEqual(mainCiGateDecision([{ headSha: sha, status: "completed", conclusion: "cancelled" }], sha), {
+		verdict: "red",
+		conclusion: "cancelled",
+	});
+	// Another commit's green run proves nothing about this one.
+	assert.deepEqual(mainCiGateDecision([{ headSha: "other", status: "completed", conclusion: "success" }], sha), {
+		verdict: "missing",
+	});
+});
+
+test("only tagged release dispatch branches are pruned; an in-flight candidate stays", () => {
+	assert.deepEqual(
+		releaseBranchesToPrune(
+			["release-v0.99.49", "release-v0.99.50", "release-notes", "release-v1.0", "main"],
+			["v0.99.48", "v0.99.49"],
+		),
+		["release-v0.99.49"],
 	);
 });

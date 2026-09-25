@@ -5,6 +5,7 @@ import {
 	biomeCoveredFiles,
 	globToRegExp,
 	partitionBiomeFiles,
+	planCarriedTests,
 	planStagedGates,
 	stagedCopyPath,
 	withoutHookGitLocation,
@@ -40,7 +41,7 @@ test("biome globs: includes cover package sources and tests, negations remove ge
 
 test("a docs-only commit buys no gate beyond the guards", () => {
 	const plan = planStagedGates(["docs/workbench.md", "AGENTS.md"], { biomeIncludes });
-	assert.deepEqual(plan, { biome: [], browserSmoke: false, typecheck: false, tests: [] });
+	assert.deepEqual(plan, { biome: [], browserSmoke: false, typecheck: false, tests: [], relatedTests: [] });
 });
 
 test("a staged test file runs only itself, with its workspace's runner", () => {
@@ -105,4 +106,43 @@ test("staged tests drop the hook git location and keep the rest of the environme
 test("a staged blob is checked as a sibling copy with the same extension", () => {
 	assert.equal(stagedCopyPath("packages/coding-agent/src/core/agent-session.ts"), "packages/coding-agent/src/core/.precommit-staged-agent-session.ts");
 	assert.equal(stagedCopyPath("top.mjs"), ".precommit-staged-top.mjs");
+});
+
+test("tests importing a staged source run as one batch per workspace, never twice and never destructive", () => {
+	const plan = planStagedGates(
+		["packages/coding-agent/src/core/python-runtime.ts", "packages/coding-agent/test/python-runtime.test.ts"],
+		{
+			biomeIncludes,
+			findRelated: (workspace, files) => {
+				assert.ok(files.includes("packages/coding-agent/src/core/python-runtime.ts"));
+				return workspace === "packages/coding-agent"
+					? [
+							"packages/coding-agent/test/python-runtime.test.ts",
+							"packages/coding-agent/test/windows-shell-engine.test.ts",
+							"packages/coding-agent/test-destructive/chaos.test.ts",
+						]
+					: [];
+			},
+		},
+	);
+	assert.deepEqual(plan.relatedTests, [
+		{ cwd: "packages/coding-agent", runner: "vitest", files: ["test/windows-shell-engine.test.ts"] },
+	]);
+});
+
+test("carried failing tests from a red CI run batch per workspace and skip files that no longer exist", () => {
+	assert.deepEqual(
+		planCarriedTests(
+			[
+				{ workspace: "packages/coding-agent", file: "test/a.test.ts", platforms: ["ubuntu"] },
+				{ workspace: "packages/coding-agent", file: "test/deleted.test.ts", platforms: ["windows"] },
+				{ workspace: "packages/agent", file: "test/b.test.ts", platforms: ["ubuntu"] },
+			],
+			(path) => !path.endsWith("deleted.test.ts"),
+		),
+		[
+			{ cwd: "packages/coding-agent", runner: "vitest", files: ["test/a.test.ts"] },
+			{ cwd: "packages/agent", runner: "vitest", files: ["test/b.test.ts"] },
+		],
+	);
 });

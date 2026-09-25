@@ -50,7 +50,9 @@ import { parseGithubOriginSlug } from "./github-origin.mjs";
 import {
 	matchesReleaseCandidateSubject,
 	partitionReleaseChanges,
+	mainCiGateDecision,
 	pickWorkflowConclusion,
+	releaseBranchesToPrune,
 	stripEmptyUnreleasedSection,
 	prepareAdoptedChangelog,
 	validateAdoptionVersions,
@@ -64,12 +66,22 @@ const isPrepareTarget = BUMP_TYPES.has(RELEASE_TARGET) || SEMVER_RE.test(RELEASE
 const isRepairTarget = RELEASE_TARGET === "repair";
 const isAdoptTarget = RELEASE_TARGET === "adopt";
 
-if (RELEASE_TARGET !== "promote" && !isPrepareTarget && !isRepairTarget && !isAdoptTarget && RELEASE_TARGET !== "status") {
-	console.error("Usage: node scripts/release.mjs <major|minor|patch|x.y.z|repair|adopt|status|promote>");
+if (
+	RELEASE_TARGET !== "promote" &&
+	!isPrepareTarget &&
+	!isRepairTarget &&
+	!isAdoptTarget &&
+	RELEASE_TARGET !== "status" &&
+	RELEASE_TARGET !== "prune"
+) {
+	console.error("Usage: node scripts/release.mjs <major|minor|patch|x.y.z|repair|adopt|status|promote|prune [--dry-run]>");
 	process.exit(1);
 }
 
 const DESTRUCTIVE_WORKFLOW = "destructive.yml";
+const MAIN_CI_WORKFLOW = "ci.yml";
+/** A just-pushed commit's ci.yml run takes a moment to register; after this, "missing" is final. */
+const MAIN_CI_REGISTRATION_GRACE_MS = 3 * 60_000;
 const CI_POLL_INTERVAL_MS = Number.parseInt(process.env.PI_RELEASE_WORKFLOW_POLL_INTERVAL_MS ?? "", 10) || 20_000;
 const CI_POLL_TIMEOUT_MS = Number.parseInt(process.env.PI_RELEASE_WORKFLOW_POLL_TIMEOUT_MS ?? "", 10) || 60 * 60_000;
 
@@ -454,6 +466,80 @@ async function waitForWorkflow(sha, workflow, options = {}) {
 	throw new Error(`Timed out after ${Math.round(CI_POLL_TIMEOUT_MS / 60_000)}m waiting for ${workflow} on ${sha}.`);
 }
 
+/**
+ * Refuse to prepare a release from a commit whose own main CI is not green. Waits for a run still
+ * in progress; a red, cancelled or missing run stops the release with the reason and the fix.
+ */
+async function requireGreenMainCi() {
+	run("git fetch origin", { silent: true });
+	const sha = run("git rev-parse HEAD", { silent: true }).trim();
+	if (run(`git merge-base --is-ancestor ${shellQuote(sha)} origin/main`, { silent: true, ignoreError: true }) === null) {
+		throw new Error(`HEAD ${sha} is not on origin/main. Push main and let ${MAIN_CI_WORKFLOW} finish before releasing.`);
+	}
+	const repo = getRepoSlug();
+	console.log(`Requiring a green ${MAIN_CI_WORKFLOW} on ${sha} before any release change...`);
+	const startedAt = Date.now();
+	while (Date.now() - startedAt < CI_POLL_TIMEOUT_MS) {
+		const listing = run(
+			`gh run list -R ${shellQuote(repo)} --workflow=${MAIN_CI_WORKFLOW} --commit ${shellQuote(sha)} --json headSha,status,conclusion,url --limit 20`,
+			{ silent: true, ignoreError: true },
+		);
+		const runs = listing ? JSON.parse(listing) : [];
+		const decision = mainCiGateDecision(runs, sha);
+		if (decision.verdict === "green") {
+			console.log(`  ${MAIN_CI_WORKFLOW} succeeded on ${sha}\n`);
+			return;
+		}
+		if (decision.verdict === "red") {
+			const urls = runs.filter((entry) => entry.headSha === sha).map((entry) => entry.url).join("\n  ");
+			throw new Error(
+				`${MAIN_CI_WORKFLOW} on ${sha} concluded "${decision.conclusion}"; main is not releasable.\n  ${urls}\n` +
+					"Fix the failures on main (or rerun a cancelled run), wait for a green run, then release again.",
+			);
+		}
+		if (decision.verdict === "missing" && Date.now() - startedAt > MAIN_CI_REGISTRATION_GRACE_MS) {
+			throw new Error(`No ${MAIN_CI_WORKFLOW} run exists for ${sha}. Push main (or dispatch ${MAIN_CI_WORKFLOW}) first.`);
+		}
+		console.log(`  ${MAIN_CI_WORKFLOW} on ${sha}: ${decision.verdict === "wait" ? decision.status : "not registered yet"}...`);
+		await sleep(CI_POLL_INTERVAL_MS);
+	}
+	throw new Error(`Timed out after ${Math.round(CI_POLL_TIMEOUT_MS / 60_000)}m waiting for ${MAIN_CI_WORKFLOW} on ${sha}.`);
+}
+
+/** Delete remote release dispatch branches whose version is tagged; untagged candidates stay. */
+function pruneReleaseBranches({ dryRun = false } = {}) {
+	const refNames = (output, prefix) =>
+		(output ?? "")
+			.split("\n")
+			.map((line) => line.split("\t")[1]?.trim())
+			.filter((ref) => ref?.startsWith(prefix))
+			.map((ref) => ref.slice(prefix.length).replace(/\^\{\}$/, ""));
+	const branches = refNames(run("git ls-remote --heads origin 'refs/heads/release-v*'", { silent: true }), "refs/heads/");
+	const tags = refNames(run("git ls-remote --tags origin 'refs/tags/v*'", { silent: true }), "refs/tags/");
+	const prunable = releaseBranchesToPrune(branches, tags);
+	const kept = branches.filter((branch) => !prunable.includes(branch));
+	console.log(`Release dispatch branches: ${branches.length}; tagged (prunable): ${prunable.length}; kept: ${kept.join(", ") || "none"}`);
+	if (dryRun || prunable.length === 0) return prunable;
+	for (let index = 0; index < prunable.length; index += 50) {
+		const chunk = prunable.slice(index, index + 50);
+		run(`git push origin --delete ${chunk.map((branch) => shellQuote(branch)).join(" ")}`, { silent: true });
+	}
+	console.log(`  Deleted ${prunable.length} tagged release dispatch branch(es).`);
+	return prunable;
+}
+
+/** After a tag lands its dispatch branch is spent; a failed cleanup never undoes a finished release. */
+function pruneAfterRelease() {
+	try {
+		pruneReleaseBranches();
+	} catch (error) {
+		console.warn(
+			`Warning: release branch cleanup failed (${error instanceof Error ? error.message : String(error)}). ` +
+				'The release is complete; run "npm run release:prune" to retry.',
+		);
+	}
+}
+
 async function waitForDestructive(sha, version) {
 	return waitForWorkflow(sha, DESTRUCTIVE_WORKFLOW, {
 		dispatchIfMissing: true,
@@ -502,6 +588,7 @@ async function promoteRelease(versionArg) {
 
 	if (existingLocalTag?.trim()) {
 		ensureTagPushed(tag);
+		pruneAfterRelease();
 		console.log(`\n=== ${tag} already promoted ===\n`);
 		return;
 	}
@@ -517,6 +604,7 @@ async function promoteRelease(versionArg) {
 		throw error;
 	}
 
+	pruneAfterRelease();
 	console.log(`\n=== Released ${tag}; standalone binary publishing starts now ===\n`);
 }
 
@@ -529,14 +617,18 @@ try {
 		const repo = getRepoSlug();
 		const sha = run("git rev-parse HEAD", { silent: true }).trim();
 		console.log(JSON.stringify({ version, repo, sha, workingTree: run("git status --porcelain", { silent: true }).trim(), remoteTag: run(`git ls-remote --tags origin ${shellQuote(`v${version}`)}`, { silent: true }).trim() }, null, 2));
+	} else if (RELEASE_TARGET === "prune") {
+		pruneReleaseBranches({ dryRun: process.argv.includes("--dry-run") });
 	} else if (RELEASE_TARGET === "adopt") {
 		await promoteRelease(adoptRelease());
 	} else if (RELEASE_TARGET === "promote") {
 		await promoteRelease();
 	} else if (isRepairTarget) {
+		await requireGreenMainCi();
 		const version = prepareReleaseRepair();
 		await promoteRelease(version);
 	} else {
+		await requireGreenMainCi();
 		const version = prepareRelease();
 		await promoteRelease(version);
 	}

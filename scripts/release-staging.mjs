@@ -94,6 +94,38 @@ export function pickWorkflowConclusion(runs, sha) {
 	return { state: "missing" };
 }
 
+/**
+ * The release gate's verdict on main's own CI for the exact commit a release would start from.
+ * main CI runs the tests each commit touched and carries a red run forward into the next commit,
+ * so a green run on this commit means nothing earlier on main is still failing. A release built
+ * on a red main ships known failures into the tag's full suite.
+ */
+export function mainCiGateDecision(runs, sha) {
+	const picked = pickWorkflowConclusion(runs, sha);
+	if (picked.state === "completed" && picked.conclusion === "success") return { verdict: "green" };
+	if (picked.state === "pending") return { verdict: "wait", status: picked.status };
+	if (picked.state === "missing") return { verdict: "missing" };
+	return { verdict: "red", conclusion: picked.conclusion };
+}
+
+const RELEASE_DISPATCH_BRANCH = /^release-v(\d+\.\d+\.\d+)$/;
+
+/**
+ * Remote `release-vX.Y.Z` branches that can go: promote pushes one only so destructive.yml can be
+ * dispatched on an exact commit, and once `vX.Y.Z` is tagged nothing reads it again (provenance
+ * looks runs up by commit, and run records outlive their branch). An untagged one is a candidate
+ * still in flight and stays.
+ */
+export function releaseBranchesToPrune(branchNames, tagNames) {
+	const tags = new Set(tagNames);
+	return branchNames
+		.filter((branch) => {
+			const match = RELEASE_DISPATCH_BRANCH.exec(branch);
+			return match !== null && tags.has(`v${match[1]}`);
+		})
+		.sort();
+}
+
 export function matchesReleaseCandidateSubject(subject, version) {
 	return subject === `Release v${version}` || subject === `Repair release v${version}`;
 }

@@ -1,0 +1,5 @@
+#!/bin/sh
+
+# Start a detached watcher for each pushed branch head. It records that commit's ci.yml verdict
+# (and failing tests) where the next commit's pre-commit gate reads it. Never blocks the push.
+node scripts/ci-status.mjs pre-push "$@"

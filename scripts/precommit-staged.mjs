@@ -10,12 +10,20 @@
  * (per-file type checking is unsound: an importer of the changed file can break). Everything else in
  * `npm run check` stays a CI and release gate.
  *
+ * Two test sets join the staged test files. The tests that import a staged source file directly
+ * (see affected-tests.mjs; hub modules narrow to their named tests) run in one batch per workspace:
+ * the transitive set is most of the suite and stays CI's. And when the branch's last recorded CI
+ * verdict is red (see ci-status.mjs), its failing test files are carried into every commit on top
+ * of it: the commit is refused until they pass, so a red main is fixed before new work lands on it.
+ *
  * `--dry-run` prints the plan for the current staged set without running anything.
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { findCommitTests } from "./affected-tests.mjs";
+import { commitObligation, describeStatus, readCiStatus } from "./ci-status.mjs";
 import { pinGithubOriginGhDefault } from "./github-origin.mjs";
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
@@ -103,7 +111,10 @@ export function stagedCopyPath(path) {
 	return `${directory}.precommit-staged-${name}`;
 }
 
-/** Pure planner: staged repo-relative paths plus biome includes → the gates this commit buys. */
+/**
+ * Pure planner: staged repo-relative paths plus biome includes → the gates this commit buys.
+ * `findRelated(workspace, stagedFiles)` returns the repo-relative tests that import a staged source.
+ */
 export function planStagedGates(staged, options) {
 	const files = staged.map((path) => path.replaceAll("\\", "/"));
 	const plan = {
@@ -111,6 +122,7 @@ export function planStagedGates(staged, options) {
 		browserSmoke: files.some((path) => BROWSER_SMOKE_INPUTS.test(path)),
 		typecheck: files.some((path) => TYPESCRIPT_SOURCE.test(path)),
 		tests: [],
+		relatedTests: [],
 	};
 	for (const path of files) {
 		if (/^scripts\/[^/]+\.test\.mjs$/.test(path)) {
@@ -125,7 +137,34 @@ export function planStagedGates(staged, options) {
 		if (NODE_TEST_WORKSPACES.has(workspace)) plan.tests.push({ cwd: workspace, runner: "node-test", file: relative });
 		else if (VITEST_WORKSPACES.has(workspace)) plan.tests.push({ cwd: workspace, runner: "vitest", file: relative });
 	}
+	if (options.findRelated) {
+		const stagedTests = new Set(plan.tests.map((entry) => `${entry.cwd}/${entry.file}`));
+		for (const workspace of VITEST_WORKSPACES) {
+			const related = options
+				.findRelated(workspace, files)
+				.filter((path) => !stagedTests.has(path) && !path.slice(workspace.length + 1).startsWith("test-destructive/"));
+			if (related.length > 0) {
+				plan.relatedTests.push({
+					cwd: workspace,
+					runner: "vitest",
+					files: related.map((path) => path.slice(workspace.length + 1)),
+				});
+			}
+		}
+	}
 	return plan;
+}
+
+/** Group carried failing tests (from a red CI verdict) into one batched run per workspace. */
+export function planCarriedTests(tests, fileExists) {
+	const byWorkspace = new Map();
+	for (const test of tests) {
+		if (!VITEST_WORKSPACES.has(test.workspace) || !fileExists(`${test.workspace}/${test.file}`)) continue;
+		const files = byWorkspace.get(test.workspace) ?? [];
+		files.push(test.file);
+		byWorkspace.set(test.workspace, files);
+	}
+	return [...byWorkspace].map(([cwd, files]) => ({ cwd, runner: "vitest", files }));
 }
 
 function stagedFiles() {
@@ -159,13 +198,58 @@ function run(label, command, args, cwd = repoRoot, env = process.env) {
 }
 
 function testCommand(entry) {
-	if (entry.runner === "vitest") return [process.execPath, [join(repoRoot, "node_modules/vitest/vitest.mjs"), "run", entry.file]];
-	return [process.execPath, ["--test", entry.file]];
+	const files = entry.files ?? [entry.file];
+	if (entry.runner === "vitest") return [process.execPath, [join(repoRoot, "node_modules/vitest/vitest.mjs"), "run", ...files]];
+	return [process.execPath, ["--test", ...files]];
+}
+
+function currentBranch() {
+	return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
+}
+
+function isAncestorOfHead(sha) {
+	return spawnSync("git", ["merge-base", "--is-ancestor", sha, "HEAD"], { cwd: repoRoot }).status === 0;
+}
+
+/** Hold this commit to the branch's last recorded CI verdict (written by ci-status.mjs after a push). */
+function runCarriedObligation() {
+	const branch = currentBranch();
+	const obligation = commitObligation(readCiStatus(branch), isAncestorOfHead);
+	if (obligation.kind === "pending") {
+		process.stdout.write(`precommit: CI for ${branch} is still running (${obligation.status.sha.slice(0, 9)}); its verdict applies to the next commit\n`);
+		return;
+	}
+	if (obligation.kind === "unknown") {
+		process.stdout.write(`⚠ precommit: the CI verdict for ${branch} is unknown:\n${describeStatus(obligation.status)}\n  Check it with: gh run list --workflow ci.yml --branch ${branch}\n`);
+		return;
+	}
+	if (obligation.kind !== "red") return;
+	process.stdout.write(`⚠ precommit: ${branch} is red in CI; its failing tests are carried into this commit:\n${describeStatus(obligation.status)}\n`);
+	for (const entry of planCarriedTests(obligation.tests, (path) => existsSync(join(repoRoot, path)))) {
+		const [command, args] = testCommand(entry);
+		const label = `carried failing tests from red CI (${entry.files.length} file(s) in ${entry.cwd})`;
+		process.stdout.write(`precommit: ${label}\n`);
+		const result = spawnSync(command, args, { cwd: resolve(repoRoot, entry.cwd), stdio: "inherit", env: withoutHookGitLocation() });
+		if (result.status !== 0) {
+			console.error(
+				`❌ precommit: ${branch} is red in CI (${obligation.status.url ?? obligation.status.sha}) and these tests still fail here. Fix them first: nothing lands on a red branch until its failures pass.`,
+			);
+			process.exit(result.status ?? 1);
+		}
+	}
+	if (obligation.untestedFailures.length > 0) {
+		process.stdout.write(
+			`⚠ precommit: CI failures this hook cannot rerun (check, coverage, or a job without a report): ${obligation.untestedFailures.join("; ")}. Reproduce them before pushing.\n`,
+		);
+	}
 }
 
 export function main(argv = process.argv.slice(2)) {
 	const staged = stagedFiles();
-	const plan = planStagedGates(staged, { biomeIncludes: readBiomeIncludes() });
+	const plan = planStagedGates(staged, {
+		biomeIncludes: readBiomeIncludes(),
+		findRelated: (workspace, files) => findCommitTests(repoRoot, workspace, files),
+	});
 	if (argv.includes("--dry-run")) {
 		process.stdout.write(`${JSON.stringify({ staged, plan }, null, 2)}\n`);
 		return;
@@ -227,6 +311,11 @@ export function main(argv = process.argv.slice(2)) {
 		const [command, args] = testCommand(entry);
 		run(`${entry.runner} ${entry.cwd}/${entry.file}`, command, args, entry.cwd, withoutHookGitLocation());
 	}
+	for (const entry of plan.relatedTests) {
+		const [command, args] = testCommand(entry);
+		run(`tests importing staged source (${entry.files.length} file(s) in ${entry.cwd})`, command, args, entry.cwd, withoutHookGitLocation());
+	}
+	runCarriedObligation();
 	if (plan.typecheck) run("project type check (staged TypeScript source)", process.execPath, [join(scriptsDir, "run-tsc.mjs"), "--noEmit"]);
 	process.stdout.write(`✅ precommit: staged gates passed in ${((Date.now() - started) / 1000).toFixed(1)}s\n`);
 }

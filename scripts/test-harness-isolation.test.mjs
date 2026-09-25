@@ -621,9 +621,11 @@ function createReleaseExecutionProofFixture(context, ciConclusion) {
 }
 
 test(
-	"release.mjs does not require GitHub CI before version mutation and never runs a local suite (execution proof)",
+	"release.mjs refuses a red main before any version mutation and never runs a local suite (execution proof)",
 	{ skip: process.platform === "win32" },
 	(context) => {
+		// main CI carries a red run forward into later commits, so a red run on the release's own
+		// commit means main still holds known failures: preparing from it ships them into the tag.
 		const fixture = createReleaseExecutionProofFixture(context, "failure");
 		const result = spawnSync(process.execPath, [releasePath, "patch"], {
 			cwd: fixture.workDir,
@@ -632,7 +634,25 @@ test(
 		});
 
 		assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
-		assert.doesNotMatch(result.stdout + result.stderr, /ci\.yml concluded failure/);
+		assert.match(result.stderr, /ci\.yml on [0-9a-f]{40} concluded "failure"; main is not releasable/);
+		assert.equal(existsSync(fixture.testShCapture), false, "release preparation must not invoke local ./test.sh");
+		assert.equal(existsSync(fixture.npmCapture), false, "a red main must stop the release before any version bump");
+	},
+);
+
+test(
+	"release.mjs prepares from a green main without running a local suite (execution proof)",
+	{ skip: process.platform === "win32" },
+	(context) => {
+		const fixture = createReleaseExecutionProofFixture(context, "success");
+		const result = spawnSync(process.execPath, [releasePath, "patch"], {
+			cwd: fixture.workDir,
+			encoding: "utf8",
+			env: fixture.releaseEnv,
+		});
+
+		assert.equal(result.status, 1, `${result.stdout}\n${result.stderr}`);
+		assert.match(result.stdout, /ci\.yml succeeded on [0-9a-f]{40}/);
 		assert.match(result.stdout, /GitHub Actions on the version tag is the full-suite authority/);
 		assert.equal(existsSync(fixture.testShCapture), false, "release preparation must not invoke local ./test.sh");
 		const npmCalls = readFileSync(fixture.npmCapture, "utf8")
