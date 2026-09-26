@@ -91,7 +91,10 @@ export interface UsageOverviewRegistry {
 
 export interface AccountUsageRequest {
 	account: AuthenticatedAccount;
-	run(signal: AbortSignal): Promise<Omit<AccountUsageSnapshot, "observedAt" | "source">>;
+	run(
+		signal: AbortSignal,
+		isCurrent: () => boolean,
+	): Promise<Omit<AccountUsageSnapshot, "observedAt" | "source"> | undefined>;
 }
 
 export interface AccountUsageAdapter {

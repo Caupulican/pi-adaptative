@@ -46,9 +46,10 @@ export function createOpenAICodexUsageAdapter(fetchImpl?: typeof fetch): Account
 			const model = registry.getAll().find((candidate) => candidate.provider === OPENAI_CODEX_PROVIDER);
 			return {
 				account,
-				run: async (signal) => {
+				run: async (signal, isCurrent) => {
 					const accessToken = await registry.getApiKeyForProvider(OPENAI_CODEX_PROVIDER);
 					if (!accessToken) throw new AccountCredentialsUnavailableError();
+					if (!isCurrent()) return undefined;
 					return codexUsageSnapshot(
 						await getOpenAICodexUsage({
 							accessToken,
@@ -71,9 +72,10 @@ export function createAnthropicUsageAdapter(fetchImpl?: typeof fetch): AccountUs
 			if (!isSubscriptionLogin(account)) return undefined;
 			return {
 				account,
-				run: async (signal) => {
+				run: async (signal, isCurrent) => {
 					const accessToken = await registry.getApiKeyForProvider(ANTHROPIC_PROVIDER);
 					if (!accessToken) throw new AccountCredentialsUnavailableError();
+					if (!isCurrent()) return undefined;
 					return anthropicUsageSnapshot(
 						await getAnthropicOAuthUsage({ accessToken, signal, ...(fetchImpl ? { fetch: fetchImpl } : {}) }),
 					);
@@ -90,9 +92,10 @@ export function createOpenRouterUsageAdapter(fetchImpl?: typeof fetch): AccountU
 			const model = registry.getAll().find((candidate) => candidate.provider === OPENROUTER_PROVIDER);
 			return {
 				account,
-				run: async (signal) => {
+				run: async (signal, isCurrent) => {
 					const apiKey = await registry.getApiKeyForProvider(OPENROUTER_PROVIDER);
 					if (!apiKey) throw new AccountCredentialsUnavailableError();
+					if (!isCurrent()) return undefined;
 					return openRouterUsageSnapshot(
 						await getOpenRouterAccountUsage({
 							apiKey,
@@ -255,7 +258,10 @@ export class AccountUsageMonitor {
 		const key = request.account.accountKey;
 		const previous = this.cache.get(key)?.snapshot;
 		try {
-			const result = await request.run(AbortSignal.timeout(this.timeoutMs));
+			const isCurrent = () => currentAccountKey(request.account.provider) === key;
+			if (!isCurrent()) return;
+			const result = await request.run(AbortSignal.timeout(this.timeoutMs), isCurrent);
+			if (!result) return;
 			if (currentAccountKey(request.account.provider) !== key) return;
 			this.cache.set(key, { snapshot: { ...result, observedAt: this.now(), source: "account_api" } });
 		} catch (error) {

@@ -6,6 +6,7 @@ import { ModelRegistry } from "../src/core/model-registry.ts";
 import {
 	AccountUsageMonitor,
 	createOpenAICodexUsageAdapter,
+	createOpenRouterUsageAdapter,
 	describeAccountFailure,
 } from "../src/core/provider-admission/account-usage-monitor.ts";
 import type { ProviderLoadView } from "../src/core/provider-admission/load-view.ts";
@@ -233,6 +234,94 @@ describe("account usage monitor", () => {
 		expect(monitor.state(accounts[0]!, registry)).toEqual({ kind: "idle" });
 	});
 
+	it("does not start a queued usage request after that provider switches accounts", async () => {
+		const registry = fakeRegistry({ anthropic: { oauth: true, accountId: "acct-a" }, openrouter: {} });
+		const accounts = listAuthenticatedAccounts(registry);
+		const firstStarted = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const staleRun = vi.fn(async () => ({ windows: [] as [] }));
+		const monitor = new AccountUsageMonitor({
+			adapters: [
+				adapter("anthropic", async () => {
+					firstStarted.resolve();
+					await releaseFirst.promise;
+					return { windows: [] };
+				}),
+				adapter("openrouter", staleRun),
+			],
+			concurrency: 1,
+			minIntervalMs: 0,
+		});
+		const current = new Map(accounts.map((account) => [account.provider, account.accountKey]));
+		const refresh = monitor.refresh(accounts, registry, {
+			currentAccountKey: (provider) => current.get(provider) ?? provider,
+		});
+
+		await firstStarted.promise;
+		current.set("openrouter", "openrouter#replacement");
+		releaseFirst.resolve();
+		await refresh;
+
+		expect(staleRun).not.toHaveBeenCalled();
+		const oldAccount = accounts.find((account) => account.provider === "openrouter")!;
+		expect(monitor.state(oldAccount, registry)).toEqual({ kind: "idle" });
+	});
+
+	it("starts a queued usage request while its captured account remains current", async () => {
+		const registry = fakeRegistry({ anthropic: { oauth: true, accountId: "acct-a" }, openrouter: {} });
+		const accounts = listAuthenticatedAccounts(registry);
+		const firstStarted = Promise.withResolvers<void>();
+		const releaseFirst = Promise.withResolvers<void>();
+		const queuedRun = vi.fn(async () => ({ windows: [] as [] }));
+		const monitor = new AccountUsageMonitor({
+			adapters: [
+				adapter("anthropic", async () => {
+					firstStarted.resolve();
+					await releaseFirst.promise;
+					return { windows: [] };
+				}),
+				adapter("openrouter", queuedRun),
+			],
+			concurrency: 1,
+			minIntervalMs: 0,
+		});
+		const current = new Map(accounts.map((account) => [account.provider, account.accountKey]));
+		const refresh = monitor.refresh(accounts, registry, {
+			currentAccountKey: (provider) => current.get(provider) ?? provider,
+		});
+
+		await firstStarted.promise;
+		releaseFirst.resolve();
+		await refresh;
+
+		expect(queuedRun).toHaveBeenCalledOnce();
+		const currentAccount = accounts.find((account) => account.provider === "openrouter")!;
+		expect(monitor.state(currentAccount, registry)).toMatchObject({ kind: "fetched" });
+	});
+
+	it("does not send after the account switches during credential resolution", async () => {
+		const baseRegistry = fakeRegistry({ openrouter: {} });
+		const credential = Promise.withResolvers<string | undefined>();
+		const getApiKeyForProvider = vi.fn(() => credential.promise);
+		const registry: UsageOverviewRegistry = { ...baseRegistry, getApiKeyForProvider };
+		const accounts = listAuthenticatedAccounts(registry);
+		const fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: { limit: 1, usage: 0 } })));
+		const monitor = new AccountUsageMonitor({
+			adapters: [createOpenRouterUsageAdapter(fetchMock)],
+			minIntervalMs: 0,
+		});
+		let current = accounts[0]!.accountKey;
+		const refresh = monitor.refresh(accounts, registry, { currentAccountKey: () => current });
+
+		await vi.waitFor(() => expect(getApiKeyForProvider).toHaveBeenCalledOnce());
+		current = "openrouter#replacement";
+		credential.resolve(SECRET_TOKEN);
+		await refresh;
+
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(monitor.state(accounts[0]!, registry)).toEqual({ kind: "idle" });
+	});
+
 	it("reads Codex usage through the real adapter and never renders an unparsable balance", async () => {
 		initTheme("dark");
 		const registry = fakeRegistry({ "openai-codex": { oauth: true, accountId: "acct-real" } });
@@ -287,7 +376,9 @@ describe("account usage FedRAMP routing", () => {
 		const run = async (storage: AuthStorage) => {
 			const registry = ModelRegistry.inMemory(storage);
 			const account = listAuthenticatedAccounts(registry).find((entry) => entry.provider === "openai-codex");
-			await createOpenAICodexUsageAdapter(fetchMock).request(account!, registry)!.run(AbortSignal.timeout(5_000));
+			await createOpenAICodexUsageAdapter(fetchMock)
+				.request(account!, registry)!
+				.run(AbortSignal.timeout(5_000), () => true);
 		};
 		await run(AuthStorage.inMemory({ "openai-codex": { ...credential, chatgptAccountIsFedramp: true } }));
 		await run(AuthStorage.inMemory({ "openai-codex": credential }));
