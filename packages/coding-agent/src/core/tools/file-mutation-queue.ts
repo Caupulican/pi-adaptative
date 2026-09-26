@@ -13,6 +13,13 @@ interface BackendQueueState {
 	queues: Map<string, Promise<void>>;
 	registration: Promise<void>;
 }
+
+interface FileMutationQueueRegistration {
+	key: string;
+	currentQueue: Promise<void>;
+	chainedQueue: Promise<void>;
+	releaseNext: () => void;
+}
 /**
  * Per-path serialization, process-wide on purpose. Two sessions that write the same file must still
  * take turns: that is a property of the FILE, not of the session. The group lock is scoped by the
@@ -630,8 +637,17 @@ export async function withFileMutationQueue<T>(
 		backendQueues.set(backend, state);
 	}
 	const queues = state.queues;
+	const signal = options?.signal;
+	let registeredQueue: FileMutationQueueRegistration | undefined;
 	const registration = state.registration.then(async () => {
-		const key = await backend.resolveKey(filePath);
+		// Registration is backend-wide so two spellings that resolve to one identity cannot overtake
+		// each other. Cancellation must still terminate this position: an abandoned resolver cannot
+		// retain the tail and block unrelated files forever.
+		if (signal?.aborted) throw signal.reason;
+		const key = await raceAbort(backend.resolveKey(filePath), signal);
+		// The resolver and abort can settle in the same turn. Do not publish a queue position after
+		// cancellation won at the ownership handoff.
+		if (signal?.aborted) throw signal.reason;
 		if (typeof key !== "string" || key.length === 0)
 			throw new Error("Mutation backend returned an invalid resource identity.");
 		const currentQueue = queues.get(key) ?? Promise.resolve();
@@ -641,39 +657,45 @@ export async function withFileMutationQueue<T>(
 			releaseNext = resolveQueue;
 		});
 		const chainedQueue = currentQueue.then(() => nextQueue);
+		registeredQueue = { key, currentQueue, chainedQueue, releaseNext };
 		queues.set(key, chainedQueue);
 
-		return { key, currentQueue, chainedQueue, releaseNext };
+		return registeredQueue;
 	});
 	state.registration = registration.then(
 		() => undefined,
 		() => undefined,
 	);
 
-	const { key, currentQueue, chainedQueue, releaseNext } = await registration;
-	const scope = getMutationLockScope(options?.scope);
+	let scope: MutationLockScope | undefined;
 	let holdsLock = false;
 	try {
+		const { currentQueue } = await raceAbort(registration, signal);
+		scope = getMutationLockScope(options?.scope);
 		// Emission order, before the lock is touched: a mutation must not outrun a command run its own
 		// batch emitted earlier but that has not reached the lock yet.
-		await scope.waitForEarlierAnnouncedCalls(options?.callId, "shell", options?.signal, options?.announcer);
+		await scope.waitForEarlierAnnouncedCalls(options?.callId, "shell", signal, options?.announcer);
 		// Join the mutation group as soon as this call is admitted, before waiting on the per-file
 		// queue: a mutation already queued behind another on the same file must still count as
 		// in-flight for a command run, not just the one executing.
-		await scope.joinMutationGroup(options?.callId, options?.signal, options?.announcer);
+		await scope.joinMutationGroup(options?.callId, signal, options?.announcer);
 		holdsLock = true;
-		await raceAbort(currentQueue, options?.signal);
+		await raceAbort(currentQueue, signal);
 		// The predecessor can settle in the same turn that cancellation arrives. Recheck at the exact
 		// ownership handoff so a cancelled waiter never invokes its mutation after winning that race.
-		if (options?.signal?.aborted) throw options.signal.reason;
+		if (signal?.aborted) throw signal.reason;
 		return await fn();
 	} finally {
 		// A cancelled wait never joined the lock; releasing it would credit a holder that was never
 		// counted and let a command run start while mutations are still in flight.
-		if (holdsLock) scope.releaseLock();
-		releaseNext();
-		if (queues.get(key) === chainedQueue) {
-			queues.delete(key);
+		if (holdsLock) scope?.releaseLock();
+		// The outer abort race can win after registration published its queue entry but before its
+		// promise resumes here. Cleanup follows the entry itself, not only the successful await.
+		if (registeredQueue) {
+			registeredQueue.releaseNext();
+			if (queues.get(registeredQueue.key) === registeredQueue.chainedQueue) {
+				queues.delete(registeredQueue.key);
+			}
 		}
 	}
 }

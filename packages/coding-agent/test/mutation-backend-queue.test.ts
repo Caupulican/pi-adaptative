@@ -2,6 +2,32 @@ import { setImmediate } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
 import { withFileMutationQueue } from "../src/core/tools/file-mutation-queue.ts";
 
+function createStalledFirstResolutionBackend(): {
+	backend: { resolveKey(filePath: string): Promise<string> };
+	firstStarted: Promise<void>;
+	releaseFirst: () => void;
+	resolverCalls: () => number;
+} {
+	const firstStarted = Promise.withResolvers<void>();
+	const releaseFirst = Promise.withResolvers<void>();
+	let resolverCalls = 0;
+	return {
+		backend: {
+			async resolveKey(filePath: string) {
+				resolverCalls += 1;
+				if (filePath === "first-file") {
+					firstStarted.resolve();
+					await releaseFirst.promise;
+				}
+				return filePath;
+			},
+		},
+		firstStarted: firstStarted.promise,
+		releaseFirst: releaseFirst.resolve,
+		resolverCalls: () => resolverCalls,
+	};
+}
+
 describe("backend-scoped mutation queues", () => {
 	it("does not let stalled resource resolution block an unrelated backend", async () => {
 		const key = Promise.withResolvers<string>();
@@ -27,6 +53,98 @@ describe("backend-scoped mutation queues", () => {
 			key.resolve("same-spelling");
 			await Promise.all([blocked, independent]);
 		}
+	});
+
+	it("abandons a canceled stalled resolution and admits an unrelated resource on the same backend", async () => {
+		const { backend, firstStarted, releaseFirst, resolverCalls } = createStalledFirstResolutionBackend();
+		const controller = new AbortController();
+		let firstRan = false;
+		const firstOutcome = withFileMutationQueue(
+			"first-file",
+			async () => {
+				firstRan = true;
+			},
+			backend,
+			{ signal: controller.signal },
+		).then(
+			() => "resolved",
+			(error: unknown) => error,
+		);
+		await firstStarted;
+
+		let secondRan = false;
+		const secondOutcome = withFileMutationQueue(
+			"second-file",
+			async () => {
+				secondRan = true;
+			},
+			backend,
+		).then(
+			() => "resolved",
+			(error: unknown) => error,
+		);
+		let firstSettled = false;
+		let secondSettled = false;
+		void firstOutcome.then(() => {
+			firstSettled = true;
+		});
+		void secondOutcome.then(() => {
+			secondSettled = true;
+		});
+		await setImmediate();
+		const preservedLiveRegistrationOrder = resolverCalls() === 1;
+
+		controller.abort("turn cancelled");
+		await setImmediate();
+		const firstRejectedWhileResolverPending = firstSettled;
+		const secondCompletedWhileResolverPending = secondSettled;
+
+		releaseFirst();
+		const [resolvedFirstOutcome, resolvedSecondOutcome] = await Promise.all([firstOutcome, secondOutcome]);
+		expect(preservedLiveRegistrationOrder).toBe(true);
+		expect(firstRejectedWhileResolverPending).toBe(true);
+		expect(secondCompletedWhileResolverPending).toBe(true);
+		expect(resolvedFirstOutcome).toBe("turn cancelled");
+		expect(resolvedSecondOutcome).toBe("resolved");
+		expect(firstRan).toBe(false);
+		expect(secondRan).toBe(true);
+	});
+
+	it("rejects a canceled queued registration without starting its resolver later", async () => {
+		const { backend, firstStarted, releaseFirst, resolverCalls } = createStalledFirstResolutionBackend();
+		const first = withFileMutationQueue("first-file", async () => undefined, backend);
+		await firstStarted;
+
+		const controller = new AbortController();
+		let secondRan = false;
+		const secondOutcome = withFileMutationQueue(
+			"second-file",
+			async () => {
+				secondRan = true;
+			},
+			backend,
+			{ signal: controller.signal },
+		).then(
+			() => "resolved",
+			(error: unknown) => error,
+		);
+		let secondSettled = false;
+		void secondOutcome.then(() => {
+			secondSettled = true;
+		});
+		await setImmediate();
+		expect(resolverCalls()).toBe(1);
+
+		controller.abort("turn cancelled");
+		await setImmediate();
+		expect(secondSettled).toBe(true);
+		expect(await secondOutcome).toBe("turn cancelled");
+
+		releaseFirst();
+		await first;
+		await setImmediate();
+		expect(resolverCalls()).toBe(1);
+		expect(secondRan).toBe(false);
 	});
 
 	it("serializes distinct aliases by the backend identity across callers", async () => {
