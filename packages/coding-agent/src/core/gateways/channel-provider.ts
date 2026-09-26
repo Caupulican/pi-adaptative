@@ -64,6 +64,40 @@ export interface GatewayRegistryOptions {
 
 export const DEFAULT_GATEWAY_LIFECYCLE_TIMEOUT_MS = 30_000;
 
+type LifecycleProvider = ChannelProvider | JobSchedulerProvider;
+type LifecyclePhase = "start" | "stop";
+type LifecycleSettlement = "fulfilled" | "rejected";
+type LifecycleOutcome = LifecycleSettlement | "timed_out";
+
+interface LifecycleRun {
+	settlement: Promise<LifecycleSettlement>;
+	bounded: Promise<LifecycleOutcome>;
+}
+
+interface DesiredProviderStart {
+	id: number;
+	operation: () => void | Promise<void>;
+	isCurrent: () => boolean;
+}
+
+interface ProviderStartAttempt {
+	request: DesiredProviderStart;
+	settlement: Promise<LifecycleSettlement>;
+	bounded?: Promise<void>;
+}
+
+interface ProviderStopAttempt {
+	settlement: Promise<LifecycleSettlement>;
+	bounded?: Promise<void>;
+}
+
+interface ProviderLifecycleState {
+	desiredStart?: DesiredProviderStart;
+	lastStartAttemptId?: number;
+	startAttempt?: ProviderStartAttempt;
+	stopAttempt?: ProviderStopAttempt;
+}
+
 /**
  * Holds registered channel + scheduler providers and drives their lifecycle. A session starts all
  * registered providers when it binds and stops them on dispose. Registration is additive and idempotent
@@ -75,6 +109,8 @@ export class GatewayRegistry {
 	private started = false;
 	private inboundHandler: ChannelInboundHandler = () => {};
 	private readonly pendingLifecycle = new Set<Promise<void>>();
+	private readonly providerLifecycle = new WeakMap<LifecycleProvider, ProviderLifecycleState>();
+	private nextStartRequestId = 0;
 	private readonly lifecycleTimeoutMs: number;
 	private readonly onDiagnostic: (message: string) => void;
 
@@ -86,53 +122,178 @@ export class GatewayRegistry {
 		this.onDiagnostic = options.onDiagnostic ?? (() => {});
 	}
 
-	private async runLifecycle(
+	private beginLifecycle(
 		providerName: string,
-		phase: "start" | "stop",
+		phase: LifecyclePhase,
 		operation: () => void | Promise<void>,
-		onLateStart?: () => void,
-	): Promise<void> {
-		let operationPromise: Promise<void>;
+	): LifecycleRun {
+		let settlement: Promise<LifecycleSettlement>;
 		try {
-			operationPromise = Promise.resolve(operation());
-		} catch {
-			return;
-		}
-		let timeout: ReturnType<typeof setTimeout> | undefined;
-		const outcome = await Promise.race([
-			operationPromise.then(
-				() => "settled" as const,
-				() => "settled" as const,
-			),
-			new Promise<"timed_out">((resolve) => {
-				timeout = setTimeout(() => resolve("timed_out"), this.lifecycleTimeoutMs);
-				timeout.unref?.();
-			}),
-		]);
-		if (timeout) clearTimeout(timeout);
-		if (outcome !== "timed_out") return;
-		try {
-			this.onDiagnostic(
-				`Gateway ${providerName} ${phase} timed out after ${this.lifecycleTimeoutMs}ms; session lifecycle continued.`,
+			settlement = Promise.resolve(operation()).then(
+				() => "fulfilled",
+				() => "rejected",
 			);
-		} catch {}
-		if (onLateStart) void operationPromise.then(onLateStart, () => undefined);
+		} catch {
+			settlement = Promise.resolve("rejected");
+		}
+		const bounded = (async (): Promise<LifecycleOutcome> => {
+			let timeout: ReturnType<typeof setTimeout> | undefined;
+			try {
+				const outcome = await Promise.race([
+					settlement,
+					new Promise<"timed_out">((resolve) => {
+						timeout = setTimeout(() => resolve("timed_out"), this.lifecycleTimeoutMs);
+						timeout.unref?.();
+					}),
+				]);
+				if (outcome === "timed_out") {
+					try {
+						this.onDiagnostic(
+							`Gateway ${providerName} ${phase} timed out after ${this.lifecycleTimeoutMs}ms; session lifecycle continued.`,
+						);
+					} catch {}
+				}
+				return outcome;
+			} finally {
+				if (timeout) clearTimeout(timeout);
+			}
+		})();
+		return { settlement, bounded };
 	}
 
-	private trackLifecycle(
-		providerName: string,
-		phase: "start" | "stop",
+	private trackLifecycle(pending: Promise<void>): void {
+		this.pendingLifecycle.add(pending);
+		void pending.then(
+			() => this.pendingLifecycle.delete(pending),
+			() => this.pendingLifecycle.delete(pending),
+		);
+	}
+
+	private stateFor(provider: LifecycleProvider): ProviderLifecycleState {
+		let state = this.providerLifecycle.get(provider);
+		if (!state) {
+			state = {};
+			this.providerLifecycle.set(provider, state);
+		}
+		return state;
+	}
+
+	private requestProviderStart(
+		provider: LifecycleProvider,
 		operation: () => void | Promise<void>,
-		onLateStart?: () => void,
-	): void {
-		let pending: Promise<void>;
-		try {
-			pending = this.runLifecycle(providerName, phase, operation, onLateStart);
-		} catch {
+		isCurrent: () => boolean,
+	): Promise<void> {
+		const state = this.stateFor(provider);
+		state.desiredStart = { id: ++this.nextStartRequestId, operation, isCurrent };
+		return this.startDesiredProvider(provider, state);
+	}
+
+	private startDesiredProvider(provider: LifecycleProvider, state: ProviderLifecycleState): Promise<void> {
+		const desired = state.desiredStart;
+		if (
+			!this.started ||
+			!desired?.isCurrent() ||
+			state.startAttempt ||
+			state.stopAttempt ||
+			state.lastStartAttemptId === desired.id
+		) {
+			return Promise.resolve();
+		}
+		state.lastStartAttemptId = desired.id;
+		const run = this.beginLifecycle(provider.name, "start", desired.operation);
+		const attempt: ProviderStartAttempt = { request: desired, settlement: run.settlement };
+		state.startAttempt = attempt;
+		const bounded = this.observeProviderStart(provider, state, attempt, run.bounded);
+		attempt.bounded = bounded;
+		this.trackLifecycle(bounded);
+		return bounded;
+	}
+
+	private async observeProviderStart(
+		provider: LifecycleProvider,
+		state: ProviderLifecycleState,
+		attempt: ProviderStartAttempt,
+		boundedOutcome: Promise<LifecycleOutcome>,
+	): Promise<void> {
+		const outcome = await boundedOutcome;
+		if (outcome === "timed_out") {
+			void attempt.settlement.then((settlement) => {
+				this.trackLifecycle(this.finishProviderStart(provider, state, attempt, settlement, true));
+			});
 			return;
 		}
-		this.pendingLifecycle.add(pending);
-		void pending.finally(() => this.pendingLifecycle.delete(pending));
+		await this.finishProviderStart(provider, state, attempt, outcome, false);
+	}
+
+	private async finishProviderStart(
+		provider: LifecycleProvider,
+		state: ProviderLifecycleState,
+		attempt: ProviderStartAttempt,
+		settlement: LifecycleSettlement,
+		timedOut: boolean,
+	): Promise<void> {
+		if (state.startAttempt !== attempt) return;
+		state.startAttempt = undefined;
+		const stillDesired =
+			this.started &&
+			state.desiredStart?.id === attempt.request.id &&
+			attempt.request.isCurrent() &&
+			!state.stopAttempt;
+		if (!stillDesired || (settlement === "fulfilled" && timedOut)) {
+			await this.startProviderStop(provider, state);
+		}
+		await this.startDesiredProvider(provider, state);
+	}
+
+	private requestProviderStop(provider: LifecycleProvider): Promise<void> {
+		const state = this.stateFor(provider);
+		state.desiredStart = undefined;
+		const pendingStart = state.startAttempt;
+		if (pendingStart?.bounded) {
+			const bounded = pendingStart.bounded.then(async () => {
+				if (state.startAttempt === pendingStart) await this.startProviderStop(provider, state);
+			});
+			this.trackLifecycle(bounded);
+			return bounded;
+		}
+		return this.startProviderStop(provider, state);
+	}
+
+	private startProviderStop(provider: LifecycleProvider, state: ProviderLifecycleState): Promise<void> {
+		if (state.stopAttempt) return state.stopAttempt.bounded ?? Promise.resolve();
+		const run = this.beginLifecycle(provider.name, "stop", () => provider.stop());
+		const attempt: ProviderStopAttempt = { settlement: run.settlement };
+		state.stopAttempt = attempt;
+		const bounded = this.observeProviderStop(provider, state, attempt, run.bounded);
+		attempt.bounded = bounded;
+		this.trackLifecycle(bounded);
+		return bounded;
+	}
+
+	private async observeProviderStop(
+		provider: LifecycleProvider,
+		state: ProviderLifecycleState,
+		attempt: ProviderStopAttempt,
+		boundedOutcome: Promise<LifecycleOutcome>,
+	): Promise<void> {
+		const outcome = await boundedOutcome;
+		if (outcome === "timed_out") {
+			void attempt.settlement.then(() => {
+				this.trackLifecycle(this.finishProviderStop(provider, state, attempt));
+			});
+			return;
+		}
+		await this.finishProviderStop(provider, state, attempt);
+	}
+
+	private async finishProviderStop(
+		provider: LifecycleProvider,
+		state: ProviderLifecycleState,
+		attempt: ProviderStopAttempt,
+	): Promise<void> {
+		if (state.stopAttempt !== attempt) return;
+		state.stopAttempt = undefined;
+		await this.startDesiredProvider(provider, state);
 	}
 
 	private async drainLifecycle(): Promise<void> {
@@ -144,31 +305,27 @@ export class GatewayRegistry {
 	registerChannel(provider: ChannelProvider): void {
 		// Stop a same-named provider being replaced so its listeners/sockets don't leak (Bug #17).
 		const existing = this.channels.get(provider.name);
-		if (existing && existing !== provider) this.trackLifecycle(existing.name, "stop", () => existing.stop());
+		if (existing === provider) return;
+		if (existing) void this.requestProviderStop(existing);
 		this.channels.set(provider.name, provider);
 		if (this.started)
-			this.trackLifecycle(
-				provider.name,
-				"start",
+			void this.requestProviderStart(
+				provider,
 				() => provider.start(this.inboundHandler),
-				() => {
-					this.trackLifecycle(provider.name, "stop", () => provider.stop());
-				},
+				() => this.channels.get(provider.name) === provider,
 			);
 	}
 
 	registerScheduler(provider: JobSchedulerProvider): void {
 		const existing = this.schedulers.get(provider.name);
-		if (existing && existing !== provider) this.trackLifecycle(existing.name, "stop", () => existing.stop());
+		if (existing === provider) return;
+		if (existing) void this.requestProviderStop(existing);
 		this.schedulers.set(provider.name, provider);
 		if (this.started)
-			this.trackLifecycle(
-				provider.name,
-				"start",
+			void this.requestProviderStart(
+				provider,
 				() => provider.start(),
-				() => {
-					this.trackLifecycle(provider.name, "stop", () => provider.stop());
-				},
+				() => this.schedulers.get(provider.name) === provider,
 			);
 	}
 
@@ -194,23 +351,17 @@ export class GatewayRegistry {
 		this.inboundHandler = onInbound;
 		await Promise.all([
 			...[...this.channels.values()].map((channel) =>
-				this.runLifecycle(
-					channel.name,
-					"start",
+				this.requestProviderStart(
+					channel,
 					() => channel.start(onInbound),
-					() => {
-						this.trackLifecycle(channel.name, "stop", () => channel.stop());
-					},
+					() => this.channels.get(channel.name) === channel,
 				),
 			),
 			...[...this.schedulers.values()].map((scheduler) =>
-				this.runLifecycle(
-					scheduler.name,
-					"start",
+				this.requestProviderStart(
+					scheduler,
 					() => scheduler.start(),
-					() => {
-						this.trackLifecycle(scheduler.name, "stop", () => scheduler.stop());
-					},
+					() => this.schedulers.get(scheduler.name) === scheduler,
 				),
 			),
 		]);
@@ -224,14 +375,12 @@ export class GatewayRegistry {
 			return;
 		}
 		this.started = false;
-		// Late-registration starts and replacement stops must settle before the final stop pass;
-		// otherwise an async start can complete after shutdown and leak a listener/process.
-		await this.drainLifecycle();
 		await Promise.all([
-			...[...this.channels.values()].map((channel) => this.runLifecycle(channel.name, "stop", () => channel.stop())),
-			...[...this.schedulers.values()].map((scheduler) =>
-				this.runLifecycle(scheduler.name, "stop", () => scheduler.stop()),
-			),
+			...[...this.channels.values()].map((channel) => this.requestProviderStop(channel)),
+			...[...this.schedulers.values()].map((scheduler) => this.requestProviderStop(scheduler)),
 		]);
+		// A start may settle while the stop pass is running and admit a compensating stop. Drain until
+		// no bounded lifecycle work remains; raw timed-out operations stay quarantined per provider.
+		await this.drainLifecycle();
 	}
 }
