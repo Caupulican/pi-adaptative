@@ -2764,7 +2764,8 @@ export class AgentSession {
 									validateObjectivePostflight: (objectiveId) =>
 										this._systemOneController!.validateObjectivePostflight(objectiveId),
 									peekControlDirective: () => this._systemOneController!.peekControlDirective(),
-									consumeControlDirective: () => this._systemOneController!.consumeControlDirective(),
+									consumeControlDirective: (directive) =>
+										this._systemOneController!.consumeControlDirective(directive),
 									noteControlDirective: (directive) =>
 										this._systemOneController!.noteControlDirective(directive),
 								},

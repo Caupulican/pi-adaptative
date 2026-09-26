@@ -20,6 +20,7 @@
 - Worker supervision receives a bounded window of actual tool failures, so repeated distinct failures are no longer mistaken for successful read-only progress and recovered workers shed stale failure evidence.
 - Failed semantic worker assessments remain retryable after debounce until the per-attempt breaker opens, while successful identical evidence stays deduplicated.
 - Worker supervision bounds observational and diagnostic retention without evicting unconsumed root requests, permanently drops terminal-attempt requests, and keeps deterministic intervention IDs unique after history saturation.
+- Supervision requests and System One directives remain pending until their selected route accepts execution, with exact producer and replacement-identity fencing across retries.
 
 ## [0.99.52] - 2026-09-26
 

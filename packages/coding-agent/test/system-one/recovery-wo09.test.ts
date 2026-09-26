@@ -349,7 +349,7 @@ describe("System One recovery WO-09 production paths", () => {
 		]);
 	});
 
-	it("evaluateRouteOnce keeps a retrieve directive through wait_for_worker and owner_required, then reroutes", async () => {
+	it("evaluateRouteOnce keeps a retrieve directive through precedence and route composition", async () => {
 		const systemOne = new SystemOneController({
 			store: emptyStore("directive-after-wait"),
 			adapter: { evaluate: async () => ({ model: "jev-1.13.0", answers: {}, latency_ms: 1 }) },
@@ -390,7 +390,7 @@ describe("System One recovery WO-09 production paths", () => {
 			ownerRequired: () => ownerRequired,
 			systemOne: {
 				peekControlDirective: () => systemOne.peekControlDirective(),
-				consumeControlDirective: () => systemOne.consumeControlDirective(),
+				consumeControlDirective: (directive) => systemOne.consumeControlDirective(directive),
 				noteControlDirective: (directive) => systemOne.noteControlDirective(directive),
 			},
 		});
@@ -409,7 +409,140 @@ describe("System One recovery WO-09 production paths", () => {
 		const retrieved = await controller.evaluateRouteOnce("goal:fix-parser");
 		expect(retrieved.route).toBe("retrieve");
 		expect(retrieved.reason_codes).toContain("system_one_preflight_retrieve");
+		expect(systemOne.peekControlDirective()).toBe(pending);
+	});
+
+	it("keeps a System One directive pending until its requested route execution accepts it", async () => {
+		const systemOne = new SystemOneController({
+			store: emptyStore("directive-after-rejection"),
+			adapter: { evaluate: async () => ({ model: "jev-1.13.0", answers: {}, latency_ms: 1 }) },
+		});
+		const pending = directiveFromPreflight("retrieve");
+		if (!pending) throw new Error('directiveFromPreflight("retrieve") must return a directive');
+		systemOne.noteControlDirective(pending);
+
+		let rejectExecution = true;
+		let executions = 0;
+		const controller = new ObjectiveExecutionController({
+			mode: "objective_primary",
+			runtime: {
+				reconcileObjective: async () =>
+					({
+						lastOrdinal: 0,
+						agents: {},
+						objectives: {},
+						tasks: {},
+						attempts: {},
+						checkpoints: {},
+						approvals: {},
+						notifications: {},
+					}) as TaskRuntimeProjection,
+			},
+			retrieval: {
+				execute: async () => {
+					executions += 1;
+					if (rejectExecution) throw new Error("retrieval rejected");
+				},
+			},
+			systemOne: {
+				peekControlDirective: () => systemOne.peekControlDirective(),
+				consumeControlDirective: (directive) => systemOne.consumeControlDirective(directive),
+				noteControlDirective: (directive) => systemOne.noteControlDirective(directive),
+			},
+		});
+
+		await expect(controller.runCycles("goal:fix-parser", 1)).rejects.toThrow("retrieval rejected");
+		expect(systemOne.peekControlDirective()).toBe(pending);
+
+		rejectExecution = false;
+		await expect(controller.runCycles("goal:fix-parser", 1)).resolves.toBeUndefined();
+		expect(executions).toBe(2);
 		expect(systemOne.peekControlDirective()).toBeUndefined();
+	});
+
+	it("acknowledges only the higher-priority producer when supervision and System One request the same route", async () => {
+		const systemOne = new SystemOneController({
+			store: emptyStore("same-route-producers"),
+			adapter: { evaluate: async () => ({ model: "jev-1.13.0", answers: {}, latency_ms: 1 }) },
+		});
+		const directive = {
+			source: "postflight" as const,
+			objectiveRoute: "verify" as const,
+			reasonCodes: ["system_one_postflight_verify"],
+		};
+		systemOne.noteControlDirective(directive);
+		const pending = [
+			{
+				signal_id: "sig-verify-priority",
+				action: "request_verifier" as const,
+				reason_codes: ["independent_verification_needed"],
+			},
+		];
+		const consumed: string[] = [];
+		const dispatchedReasons: string[][] = [];
+		const controller = new ObjectiveExecutionController({
+			mode: "objective_primary",
+			runtime: {
+				reconcileObjective: async () =>
+					({
+						lastOrdinal: 0,
+						agents: {},
+						objectives: {},
+						tasks: {},
+						attempts: {},
+						checkpoints: {},
+						approvals: {},
+						notifications: {},
+					}) as TaskRuntimeProjection,
+			},
+			workerDispatcher: {
+				dispatch: async (route) => {
+					dispatchedReasons.push([...route.reason_codes]);
+				},
+				continueWorker: async () => {},
+				dispatchEscalated: async () => {},
+			},
+			pendingSupervisionRequests: () => pending.filter((item) => !consumed.includes(item.signal_id)),
+			consumePendingSupervisionRequest: (signalId) => {
+				consumed.push(signalId);
+			},
+			systemOne: {
+				peekControlDirective: () => systemOne.peekControlDirective(),
+				consumeControlDirective: (next) => systemOne.consumeControlDirective(next),
+				noteControlDirective: (next) => systemOne.noteControlDirective(next),
+			},
+		});
+
+		await controller.runCycles("goal:fix-parser", 1);
+		expect(consumed).toEqual(["sig-verify-priority"]);
+		expect(systemOne.peekControlDirective()).toBe(directive);
+		expect(dispatchedReasons[0]).toContain("independent_verification_needed");
+
+		await controller.runCycles("goal:fix-parser", 1);
+		expect(systemOne.peekControlDirective()).toBeUndefined();
+		expect(dispatchedReasons[1]).toContain("system_one_postflight_verify");
+	});
+
+	it("does not consume a replacement System One directive through a stale expected identity", () => {
+		const systemOne = new SystemOneController({
+			store: emptyStore("directive-identity"),
+			adapter: { evaluate: async () => ({ model: "jev-1.13.0", answers: {}, latency_ms: 1 }) },
+		});
+		const stale = {
+			source: "preflight" as const,
+			objectiveRoute: "retrieve" as const,
+			reasonCodes: ["stale-retrieve"],
+		};
+		const replacement = {
+			source: "tool_gate" as const,
+			objectiveRoute: "replan" as const,
+			reasonCodes: ["replacement-replan"],
+		};
+		systemOne.noteControlDirective(stale);
+		systemOne.noteControlDirective(replacement);
+
+		expect(systemOne.consumeControlDirective(stale)).toBeUndefined();
+		expect(systemOne.peekControlDirective()).toBe(replacement);
 	});
 
 	it("composeObjectiveRoute executes a System One retrieve directive after waits/owner checks", () => {

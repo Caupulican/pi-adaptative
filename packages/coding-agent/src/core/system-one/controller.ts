@@ -211,7 +211,8 @@ export class SystemOneController {
 		return this.pendingDirective;
 	}
 
-	consumeControlDirective(): SystemOneControlDirective | undefined {
+	consumeControlDirective(expected?: SystemOneControlDirective): SystemOneControlDirective | undefined {
+		if (expected !== undefined && this.pendingDirective !== expected) return undefined;
 		const directive = this.pendingDirective;
 		this.pendingDirective = undefined;
 		return directive;

@@ -416,7 +416,7 @@ describe("next-release hardening", () => {
 		expect(owner.reason_codes).not.toContain("specialist_gap_detected");
 	});
 
-	it("does not consume a pending specialist request while owner_required wins", async () => {
+	it("route evaluation does not consume a pending specialist request before execution", async () => {
 		const pending = [
 			{
 				signal_id: "sig-spec-1",
@@ -453,7 +453,55 @@ describe("next-release hardening", () => {
 		ownerRequired = false;
 		const escalated = await controller.evaluateRouteOnce("o");
 		expect(escalated.route).toBe("escalate_capability");
-		expect(consumed).toEqual(["sig-spec-1"]);
+		expect(consumed).toEqual([]);
+	});
+
+	it("keeps a specialist request pending until escalation dispatch accepts it", async () => {
+		const pending = [
+			{
+				signal_id: "sig-spec-delivery",
+				action: "request_specialist" as const,
+				reason_codes: ["specialist_gap_detected"],
+			},
+		];
+		const consumed: string[] = [];
+		let rejectDispatch = true;
+		let escalatedDispatches = 0;
+		const controller = new ObjectiveExecutionController({
+			mode: "objective_primary",
+			runtime: {
+				reconcileObjective: async () =>
+					({
+						lastOrdinal: 0,
+						agents: {},
+						objectives: {},
+						tasks: {},
+						attempts: {},
+						checkpoints: {},
+						approvals: {},
+						notifications: {},
+					}) as TaskRuntimeProjection,
+			},
+			workerDispatcher: {
+				dispatch: async () => {},
+				continueWorker: async () => {},
+				dispatchEscalated: async () => {
+					escalatedDispatches += 1;
+					if (rejectDispatch) throw new Error("escalation rejected");
+				},
+			},
+			pendingSupervisionRequests: () => pending.filter((item) => !consumed.includes(item.signal_id)),
+			consumePendingSupervisionRequest: (signalId) => {
+				consumed.push(signalId);
+			},
+		});
+
+		await expect(controller.runCycles("o", 1)).rejects.toThrow("escalation rejected");
+		expect(consumed).toEqual([]);
+		rejectDispatch = false;
+		await expect(controller.runCycles("o", 1)).resolves.toBeUndefined();
+		expect(escalatedDispatches).toBe(2);
+		expect(consumed).toEqual(["sig-spec-delivery"]);
 	});
 
 	it("consumes mark_external_block once when the composed route is blocked_external", async () => {
@@ -485,9 +533,9 @@ describe("next-release hardening", () => {
 				consumed.push(signalId);
 			},
 		});
-		const blocked = await controller.evaluateRouteOnce("o");
-		expect(blocked.route).toBe("blocked_external");
-		expect(blocked.reason_codes).toContain("external_dependency_unavailable");
+		const blocked = await controller.runCycles("o", 1);
+		expect(blocked?.status).toBe("blocked");
+		expect(blocked?.reasonCodes).toContain("external_dependency_unavailable");
 		expect(consumed).toEqual(["sig-ext-1"]);
 		const again = await controller.evaluateRouteOnce("o");
 		expect(again.route).not.toBe("blocked_external");

@@ -101,6 +101,10 @@ export interface DisagreementTelemetryEvent {
 	reasonCodes: readonly string[];
 }
 
+type RouteAcknowledgment =
+	| { readonly kind: "supervision"; readonly signalId: string }
+	| { readonly kind: "system_one"; readonly directive: SystemOneControlDirective };
+
 export interface ObjectiveExecutionControllerDeps {
 	runtime: {
 		reconcileObjective(objectiveId: string): Promise<TaskRuntimeProjection>;
@@ -126,7 +130,8 @@ export interface ObjectiveExecutionControllerDeps {
 		validateObjectivePostflight?(objectiveId: string): Promise<void>;
 		recordHostEvidence?(evidence: unknown): Promise<void>;
 		peekControlDirective?(): SystemOneControlDirective | undefined;
-		consumeControlDirective?(): SystemOneControlDirective | undefined;
+		/** With `expected`, clears only the still-current directive represented by the executed route. */
+		consumeControlDirective?(expected?: SystemOneControlDirective): SystemOneControlDirective | undefined;
 		noteControlDirective?(directive: SystemOneControlDirective): void;
 	};
 	repoRoot?: string;
@@ -420,6 +425,7 @@ export class ObjectiveExecutionController {
 	private readonly admittedObjectives = new Set<string>();
 	private readonly admissionCerts = new Map<string, string[]>();
 	private readonly alternativesTried = new Set<string>();
+	private readonly routeAcknowledgments = new WeakMap<ObjectiveRoute, RouteAcknowledgment>();
 	private cycleCounter = 0;
 	private _lastBinding?: ExpertBinding;
 	private _lastRoute?: ObjectiveRoute;
@@ -433,6 +439,18 @@ export class ObjectiveExecutionController {
 	private async _noteExecutor(route: ObjectiveRoute, executor: string): Promise<void> {
 		this._lastExecutor = executor;
 		await this.deps.checkpoints?.recordRouteOutcome?.(route, executor);
+	}
+
+	private acknowledgeRouteRequests(route: ObjectiveRoute): void {
+		const acknowledgment = this.routeAcknowledgments.get(route);
+		if (!acknowledgment) return;
+
+		if (acknowledgment.kind === "supervision") {
+			this.deps.consumePendingSupervisionRequest?.(acknowledgment.signalId);
+		} else {
+			this.deps.systemOne?.consumeControlDirective?.(acknowledgment.directive);
+		}
+		this.routeAcknowledgments.delete(route);
 	}
 	private ownerBlockerSink?: (blocker: string | undefined) => void;
 
@@ -743,10 +761,18 @@ export class ObjectiveExecutionController {
 			}
 		}
 
-		const pendingDirective =
-			this.deps.systemOne?.peekControlDirective?.() ?? this.deps.systemOne?.consumeControlDirective?.();
-		const consumedWithoutPeek =
-			pendingDirective !== undefined && this.deps.systemOne?.peekControlDirective === undefined;
+		let pendingDirective = this.deps.systemOne?.peekControlDirective?.();
+		if (
+			pendingDirective === undefined &&
+			this.deps.systemOne?.peekControlDirective === undefined &&
+			this.deps.systemOne?.consumeControlDirective &&
+			this.deps.systemOne.noteControlDirective
+		) {
+			// Legacy consume-only adapters borrow and immediately restore the directive. Execution later
+			// acknowledges the exact identity; composition itself never transfers ownership.
+			pendingDirective = this.deps.systemOne.consumeControlDirective();
+			if (pendingDirective) this.deps.systemOne.noteControlDirective(pendingDirective);
+		}
 		const pendingSupervision = requiredWorkerInFlight ? undefined : this.deps.pendingSupervisionRequests?.()[0];
 		const supervisionAction =
 			pendingSupervision?.action === "request_specialist" ||
@@ -781,6 +807,7 @@ export class ObjectiveExecutionController {
 					}
 				: {}),
 		});
+		let adoptedSupervisionSignalId: string | undefined;
 		if (supervisionAction && pendingSupervision) {
 			const adopted =
 				(supervisionAction === "request_specialist" &&
@@ -795,21 +822,23 @@ export class ObjectiveExecutionController {
 				(supervisionAction === "mark_external_block" &&
 					route.route === "blocked_external" &&
 					route.reason_codes.includes("external_dependency_unavailable"));
-			if (adopted) {
-				this.deps.consumePendingSupervisionRequest?.(pendingSupervision.signal_id);
-			}
+			if (adopted) adoptedSupervisionSignalId = pendingSupervision.signal_id;
 		}
-		if (pendingDirective) {
-			const adopted = route.route === pendingDirective.objectiveRoute;
-			if (adopted && !consumedWithoutPeek) {
-				this.deps.systemOne?.consumeControlDirective?.();
-			} else if (!adopted && consumedWithoutPeek) {
-				this.deps.systemOne?.noteControlDirective?.(pendingDirective);
-			}
-		}
+		const adoptedDirective =
+			adoptedSupervisionSignalId === undefined &&
+			pendingDirective !== undefined &&
+			route.route === pendingDirective.objectiveRoute &&
+			pendingDirective.reasonCodes.every((reasonCode) => route.reason_codes.includes(reasonCode))
+				? pendingDirective
+				: undefined;
 
 		validateObjectiveRoute(route);
 		await this.deps.checkpoints?.recordRoute?.(route);
+		if (adoptedSupervisionSignalId) {
+			this.routeAcknowledgments.set(route, { kind: "supervision", signalId: adoptedSupervisionSignalId });
+		} else if (adoptedDirective) {
+			this.routeAcknowledgments.set(route, { kind: "system_one", directive: adoptedDirective });
+		}
 
 		// Record disagreement telemetry in shadow mode
 		if (options?.legacyActionHint && this.deps.onDisagreementTelemetry) {
@@ -1184,6 +1213,7 @@ export class ObjectiveExecutionController {
 					const failure = await this._dispatchWithExpertSelection(objectiveId, route, runtime, false, signal);
 					if (failure) return failure;
 
+					this.acknowledgeRouteRequests(route);
 					await this._runObjectivePostflight(objectiveId, route, runtime, signal);
 					break;
 				}
@@ -1199,6 +1229,7 @@ export class ObjectiveExecutionController {
 						};
 					}
 					await this.deps.workerDispatcher.continueWorker(route, signal, this._lastBinding);
+					this.acknowledgeRouteRequests(route);
 					await this._runObjectivePostflight(objectiveId, route, runtime, signal);
 					break;
 
@@ -1258,6 +1289,7 @@ export class ObjectiveExecutionController {
 					}
 					const failure = await this._dispatchWithExpertSelection(objectiveId, route, runtime, true, signal);
 					if (failure) return failure;
+					this.acknowledgeRouteRequests(route);
 					await this._runObjectivePostflight(objectiveId, route, runtime, signal);
 					break;
 				}
@@ -1456,6 +1488,7 @@ export class ObjectiveExecutionController {
 					const evalResult = await CompletionCoordinator.evaluate(objectiveId, profile, completionContext, {
 						signal,
 					});
+					this.acknowledgeRouteRequests(route);
 
 					if (evalResult.verdict === "complete") {
 						// JEV-025/JEV-026 read the same completion view the goal tool's completion judges: the
@@ -1771,6 +1804,7 @@ export class ObjectiveExecutionController {
 					};
 					const deliveryStatus = statusMap[terminal.status] ?? "unrecoverable";
 					const bundle = await this.buildBundle(objectiveId, deliveryStatus, runtime);
+					this.acknowledgeRouteRequests(route);
 					return {
 						...terminal,
 						cycleCount: this.cycleCounter,
@@ -1793,6 +1827,7 @@ export class ObjectiveExecutionController {
 					break;
 			}
 
+			this.acknowledgeRouteRequests(route);
 			await this.deps.checkpoints?.recordRouteOutcome?.(route, this._lastExecutor ?? route.route);
 			this._lastExecutor = undefined;
 
