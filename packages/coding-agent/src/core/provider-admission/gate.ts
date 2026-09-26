@@ -144,32 +144,34 @@ export async function admitProviderRequest(
 		const startedAt = now();
 		const inflightAtStart = inflightNow();
 		deps.onWait?.({ ...base, phase: "start", reason: "emergency_stop" });
-		while (deps.isEmergencyStopEngaged?.()) {
-			const waitedMs = now() - startedAt;
-			if (waitedMs >= policy.maxWaitMs) {
-				deps.record?.({
-					...base,
-					reason: "emergency_stop",
-					inflightAtStart,
-					inflightAtAdmission: inflightNow(),
-					waitedMs,
-					timedOut: true,
-				});
-				deps.onWait?.({ ...base, phase: "end", reason: "emergency_stop", waitedMs });
-				throw new EmergencyStopError(waitedMs);
+		try {
+			while (deps.isEmergencyStopEngaged?.()) {
+				const waitedMs = now() - startedAt;
+				if (waitedMs >= policy.maxWaitMs) {
+					deps.record?.({
+						...base,
+						reason: "emergency_stop",
+						inflightAtStart,
+						inflightAtAdmission: inflightNow(),
+						waitedMs,
+						timedOut: true,
+					});
+					throw new EmergencyStopError(waitedMs);
+				}
+				await sleep(Math.min(EMERGENCY_STOP_POLL_MS, Math.max(1, policy.maxWaitMs - waitedMs)), signal);
 			}
-			await sleep(Math.min(EMERGENCY_STOP_POLL_MS, Math.max(1, policy.maxWaitMs - waitedMs)), signal);
+			deps.record?.({
+				...base,
+				reason: "emergency_stop",
+				inflightAtStart,
+				inflightAtAdmission: inflightNow(),
+				waitedMs: now() - startedAt,
+				timedOut: false,
+			});
+			signal?.throwIfAborted();
+		} finally {
+			deps.onWait?.({ ...base, phase: "end", reason: "emergency_stop", waitedMs: now() - startedAt });
 		}
-		deps.record?.({
-			...base,
-			reason: "emergency_stop",
-			inflightAtStart,
-			inflightAtAdmission: inflightNow(),
-			waitedMs: now() - startedAt,
-			timedOut: false,
-		});
-		deps.onWait?.({ ...base, phase: "end", reason: "emergency_stop", waitedMs: now() - startedAt });
-		signal?.throwIfAborted();
 	}
 
 	const limitWaitStartedAt = now();
