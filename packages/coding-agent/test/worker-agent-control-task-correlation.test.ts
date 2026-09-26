@@ -1,29 +1,13 @@
 /**
- * The public reuse seam cannot say "this is new work".
- *
- * `delegate start` with an `agentId` reaches `WorkerAgentControlCoordinator.startWorkerAgentTask`,
- * which enqueues a durable mailbox message carrying `WorkerAgentTaskMetadata` (`kind: "agent_turn"`,
- * plus `dependsOnTaskIds`) and then reconciles it into `WorkerLifecycle.prepareAgentTurn`. That
- * metadata has no slot for the new task's own goal correlation, and `prepareAgentTurn` inherits the
- * prior task's objective, requirements, acceptance criteria and resources.
- *
- * So through the real public seam - not just the ledger - a genuinely new task dispatched onto a
- * reused specialist is filed under the goal that specialist happened to run first. Mandatory reuse
- * would apply that to every reused specialist.
- *
- * The fix must ride the PERSISTED mailbox task metadata, not a process-local map: a follow-up may be
- * enqueued in one process and reconciled after a restart. These tests therefore reopen the mailbox in
- * a second coordinator over the same `agentDir` and assert the correlation survives.
- *
- * The proposed input is `newTask` on `WorkerAgentTaskStartOptions`, mirrored into the persisted
- * `WorkerAgentTaskMetadata`. Current code ignores it, which is what makes the inherited correlation
- * observable rather than a compile error. Nothing here fakes a method or relies on an import failing.
+ * Persistent-specialist mailbox turns own their task correlation and serialize by durable message
+ * order. `delegate start` with an `agentId` reaches `WorkerAgentControlCoordinator`, which persists
+ * `newTask` metadata before reconciling it into `WorkerLifecycle.prepareAgentTurn`. A follow-up may
+ * be enqueued in one process and reconciled after restart, so none of that authority may live only in
+ * memory. The compound serialization case also proves that multiple arrivals during one active turn
+ * cannot prepare a second durable attempt until the first mailbox turn becomes terminal.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import type { WorkerAgentTaskStartOptions } from "../src/core/delegation/worker-agent-control.ts";
+import { describe, expect, it, vi } from "vitest";
+import { WorkerAgentMailbox, type WorkerAgentTaskStartOptions } from "../src/core/delegation/worker-agent-control.ts";
 import { WorkerAgentControlCoordinator } from "../src/core/delegation/worker-agent-control-coordinator.ts";
 import type { WorkerDelegationRequest } from "../src/core/delegation/worker-delegation-request.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
@@ -42,6 +26,7 @@ import {
 	createTestWorkerExecutionAuthority,
 	createTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const LEASE_TTL_MS = 60_000;
 const PARENT_SESSION = "parent-session";
@@ -50,26 +35,6 @@ const PRIOR_GOAL_ID = "goal-alpha";
 const PRIOR_REQUIREMENT_ID = "req-alpha";
 const NEXT_GOAL_ID = "goal-beta";
 const NEXT_REQUIREMENT_ID = "req-beta";
-
-const roots: string[] = [];
-afterEach(() => {
-	while (roots.length > 0) {
-		const directory = roots.pop();
-		if (directory) rmSync(directory, { recursive: true, force: true });
-	}
-});
-
-/**
- * The durable new-task correlation the public seam needs. Proposed on the existing start options so
- * a fix persists it in `WorkerAgentTaskMetadata` rather than a process-local side map.
- */
-type ProposedTaskStartOptions = WorkerAgentTaskStartOptions & {
-	newTask?: {
-		goal?: GoalState;
-		requirementIds?: readonly string[];
-		acceptanceCriterionIds?: readonly string[];
-	};
-};
 
 function goalFixture(goalId: string, requirementId: string): GoalState {
 	const now = new Date().toISOString();
@@ -206,8 +171,7 @@ function buildCoordinator(
 
 /** Register a specialist whose first task is complete and bound to its own goal. */
 function seamWithIdleSpecialist(sessionId: string): Seam {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-agent-task-correlation-"));
-	roots.push(agentDir);
+	const agentDir = tempDir("pi-worker-agent-task-correlation-");
 	const lifecycle = new WorkerLifecycle({ agentDir, sessionId });
 	const profile = profileFixture();
 	const prepared = lifecycle.prepare(
@@ -258,7 +222,7 @@ function seamWithIdleSpecialist(sessionId: string): Seam {
 	};
 }
 
-function newTaskOptions(overrides: Partial<ProposedTaskStartOptions> = {}): ProposedTaskStartOptions {
+function newTaskOptions(overrides: Partial<WorkerAgentTaskStartOptions> = {}): WorkerAgentTaskStartOptions {
 	return {
 		newTask: {
 			goal: goalFixture(NEXT_GOAL_ID, NEXT_REQUIREMENT_ID),
@@ -295,6 +259,12 @@ function agentTurnTaskIds(lifecycle: WorkerLifecycle): string[] {
 	return Object.values(lifecycle.getTaskRuntimeSnapshot().attempts)
 		.filter((attempt) => attempt.dispatch.logicalLaneId === AGENT_ID && attempt.taskId !== AGENT_ID)
 		.map((attempt) => attempt.taskId);
+}
+
+function attemptForControlMessage(lifecycle: WorkerLifecycle, messageId: string): AttemptRuntimeState | undefined {
+	return Object.values(lifecycle.getTaskRuntimeSnapshot().attempts).find(
+		(attempt) => attempt.dispatch.controlMessageId === messageId,
+	);
 }
 
 describe("worker agent control new-task correlation", () => {
@@ -345,7 +315,7 @@ describe("worker agent control new-task correlation", () => {
 		// New work that belongs to no goal must not be filed under the specialist's first goal. The
 		// options go through the same structural variable as every other case here: an inline literal
 		// would be an excess-property error against today's `WorkerAgentTaskStartOptions`.
-		const options: ProposedTaskStartOptions = { newTask: {} };
+		const options: WorkerAgentTaskStartOptions = { newTask: {} };
 		const started = seam.coordinator.startWorkerAgentTask(AGENT_ID, "ungoaled new work", options);
 
 		expect(started.messageId).not.toBe("");
@@ -366,7 +336,7 @@ describe("worker agent control new-task correlation", () => {
 		const conflicting = seam.coordinator.startWorkerAgentTask(AGENT_ID, "same work", {
 			idempotencyKey,
 			newTask: { goal: goalFixture("goal-gamma", "req-gamma"), requirementIds: ["req-gamma"] },
-		} as ProposedTaskStartOptions);
+		});
 
 		expect(conflicting.started).toBe(false);
 		expect(conflicting.skipReason ?? "").toMatch(/conflict/i);
@@ -404,5 +374,53 @@ describe("worker agent control new-task correlation", () => {
 		seam.coordinator.startWorkerAgentTask(AGENT_ID, "unrelated new work", options);
 
 		expect(Object.keys(seam.lifecycle.getTaskRuntimeSnapshot().tasks)).toHaveLength(afterFirst);
+	});
+
+	it("serializes multiple task-bearing arrivals through one specialist generation", () => {
+		const seam = seamWithIdleSpecialist("seam-serialized-mailbox");
+		const carrier = seam.coordinator.startWorkerAgentTask(AGENT_ID, "carrier turn");
+		expect(carrier).toMatchObject({ started: true, steering: false });
+		if (!carrier.record) throw new Error("carrier turn was not scheduled");
+
+		const first = seam.coordinator.followUpWorkerAgent(AGENT_ID, "first queued follow-up");
+		const second = seam.coordinator.followUpWorkerAgent(AGENT_ID, "second queued follow-up");
+		expect(first).toMatchObject({ started: false, steering: true });
+		expect(second).toMatchObject({ started: false, steering: true });
+		expect(attemptForControlMessage(seam.lifecycle, first.messageId)).toBeUndefined();
+		expect(attemptForControlMessage(seam.lifecycle, second.messageId)).toBeUndefined();
+
+		// Repeated event edges while the carrier is queued may re-offer that exact lane to the
+		// idempotent scheduler, but cannot prepare either later mailbox message.
+		seam.coordinator.signalStateChanged();
+		seam.coordinator.signalStateChanged();
+		expect(attemptForControlMessage(seam.lifecycle, first.messageId)).toBeUndefined();
+		expect(attemptForControlMessage(seam.lifecycle, second.messageId)).toBeUndefined();
+
+		seam.lifecycle.cancel(carrier.record.laneId, "test_carrier_terminal");
+		seam.coordinator.signalStateChanged();
+		const firstAttempt = attemptForControlMessage(seam.lifecycle, first.messageId);
+		expect(firstAttempt).toMatchObject({ status: "queued" });
+		expect(attemptForControlMessage(seam.lifecycle, second.messageId)).toBeUndefined();
+
+		// A fresh reconciliation observes the first queued attempt as active. The second intent remains
+		// durable and pending instead of reaching the scheduler's single deferred slot.
+		seam.coordinator.signalStateChanged();
+		seam.coordinator.signalStateChanged();
+		expect(attemptForControlMessage(seam.lifecycle, second.messageId)).toBeUndefined();
+		expect(
+			new WorkerAgentMailbox({
+				agentDir: seam.agentDir,
+				parentSessionId: PARENT_SESSION,
+				agentId: AGENT_ID,
+			}).pendingTaskBearing(),
+		).toEqual([
+			expect.objectContaining({ messageId: first.messageId }),
+			expect.objectContaining({ messageId: second.messageId }),
+		]);
+
+		if (!firstAttempt) throw new Error("first queued follow-up was not prepared");
+		seam.lifecycle.cancel(firstAttempt.taskId, "test_first_follow_up_terminal");
+		seam.coordinator.signalStateChanged();
+		expect(attemptForControlMessage(seam.lifecycle, second.messageId)).toMatchObject({ status: "queued" });
 	});
 });
