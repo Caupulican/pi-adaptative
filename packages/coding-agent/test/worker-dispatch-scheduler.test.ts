@@ -575,6 +575,177 @@ describe("WorkerDispatchScheduler resume while the previous run settles", () => 
 		}
 	});
 
+	it("retains a deferred resume when the bounded queue is full at prior-run settlement", async () => {
+		const firstRun = Promise.withResolvers<{ started: true }>();
+		const run = vi.fn((request: { instructions: string }) =>
+			request.instructions === "first run" ? firstRun.promise : Promise.resolve({ started: true as const }),
+		);
+		const warn = vi.fn();
+		const scheduler = new WorkerDispatchScheduler({
+			agentDir: "/unused",
+			registerInFlightWork: () => () => undefined,
+			isDisposed: () => false,
+			admit: (_request, lane) =>
+				lane.laneId === "worker-0" ? { action: "start" } : { action: "wait", reason: "capacity" },
+			getRecord: (laneId) => {
+				const index = Number(laneId.slice("worker-".length));
+				return Number.isSafeInteger(index) ? record(index) : undefined;
+			},
+			run,
+			cancel: vi.fn(),
+			warn,
+		});
+
+		scheduler.enqueue(record(0), { instructions: "first run" });
+		scheduler.drain();
+		scheduler.enqueue(record(0), { instructions: "resumed" });
+		for (let index = 1; index <= DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches; index += 1) {
+			scheduler.enqueue(record(index), { instructions: `queue filler ${index}` }, false, true);
+		}
+
+		firstRun.resolve({ started: true });
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(run.mock.calls.map(([request]) => request.instructions)).toEqual(["first run"]);
+
+		// The first released slot restores mandatory-verifier headroom; the second is an ordinary
+		// capacity signal. The deferred resume must still own its request and enter that slot without
+		// requiring a process restart.
+		expect(scheduler.dropQueued("worker-1")).toBe(true);
+		expect(scheduler.dropQueued("worker-2")).toBe(true);
+		scheduler.drain();
+		await new Promise((resolve) => setImmediate(resolve));
+
+		expect(run.mock.calls.map(([request]) => request.instructions)).toEqual(["first run", "resumed"]);
+		expect(warn).not.toHaveBeenCalled();
+		scheduler.cancelQueued();
+	});
+
+	it("preserves priority headroom while an ordinary deferred resume waits for capacity", async () => {
+		const ordinaryFirstRun = Promise.withResolvers<{ started: true }>();
+		const priorityFirstRun = Promise.withResolvers<{ started: true }>();
+		const run = vi.fn((request: { instructions: string }) => {
+			if (request.instructions === "ordinary first") return ordinaryFirstRun.promise;
+			if (request.instructions === "priority first") return priorityFirstRun.promise;
+			return Promise.resolve({ started: true as const });
+		});
+		const scheduler = new WorkerDispatchScheduler({
+			agentDir: "/unused",
+			registerInFlightWork: () => () => undefined,
+			isDisposed: () => false,
+			admit: (_request, lane) =>
+				lane.laneId === "worker-0" || lane.laneId === "worker-1"
+					? { action: "start" }
+					: { action: "wait", reason: "capacity" },
+			getRecord: (laneId) => {
+				const index = Number(laneId.slice("worker-".length));
+				return Number.isSafeInteger(index) ? record(index) : undefined;
+			},
+			run,
+			cancel: vi.fn(),
+			warn: vi.fn(),
+		});
+
+		scheduler.enqueue(record(0), { instructions: "ordinary first" });
+		scheduler.enqueue(record(1), { instructions: "priority first" }, false, true);
+		scheduler.drain();
+		scheduler.enqueue(record(0), { instructions: "ordinary resumed" });
+		scheduler.enqueue(record(1), { instructions: "priority resumed" }, false, true);
+		for (let index = 2; index <= DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches; index += 1) {
+			scheduler.enqueue(record(index), { instructions: `ordinary filler ${index}` });
+		}
+
+		ordinaryFirstRun.resolve({ started: true });
+		priorityFirstRun.resolve({ started: true });
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(run.mock.calls.map(([request]) => request.instructions)).toEqual([
+			"priority first",
+			"ordinary first",
+			"priority resumed",
+		]);
+
+		expect(scheduler.dropQueued("worker-2")).toBe(true);
+		scheduler.drain();
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(run.mock.calls.map(([request]) => request.instructions)).toEqual([
+			"priority first",
+			"ordinary first",
+			"priority resumed",
+			"ordinary resumed",
+		]);
+		scheduler.cancelQueued();
+	});
+
+	it("retains a deferred resume when reload-gate registration temporarily fails", async () => {
+		const firstRun = Promise.withResolvers<{ started: true }>();
+		let registrationAvailable = true;
+		const run = vi.fn((request: { instructions: string }) =>
+			request.instructions === "first run" ? firstRun.promise : Promise.resolve({ started: true as const }),
+		);
+		const scheduler = new WorkerDispatchScheduler({
+			agentDir: "/unused",
+			registerInFlightWork: () => {
+				if (!registrationAvailable) throw new Error("reload registration unavailable");
+				return () => undefined;
+			},
+			isDisposed: () => false,
+			admit: () => ({ action: "start" }),
+			getRecord: () => record(0),
+			run,
+			cancel: vi.fn(),
+			warn: vi.fn(),
+		});
+
+		scheduler.enqueue(record(0), { instructions: "first run" });
+		scheduler.drain();
+		scheduler.enqueue(record(0), { instructions: "resumed" });
+		registrationAvailable = false;
+		firstRun.resolve({ started: true });
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(run).toHaveBeenCalledTimes(1);
+		expect(scheduler.ownsLane("worker-0")).toBe(true);
+
+		registrationAvailable = true;
+		scheduler.drain();
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(run.mock.calls.map(([request]) => request.instructions)).toEqual(["first run", "resumed"]);
+		scheduler.cancelQueued();
+	});
+
+	it("does not promote a deferred resume through unresolved durable cancellation", async () => {
+		const firstRun = Promise.withResolvers<{ started: false; skipReason: string }>();
+		let cancellationAvailable = false;
+		const run = vi.fn((request: { instructions: string }) =>
+			request.instructions === "first run" ? firstRun.promise : Promise.resolve({ started: true as const }),
+		);
+		const cancel = vi.fn(() => {
+			if (!cancellationAvailable) throw new Error("durable cancellation unavailable");
+		});
+		const scheduler = new WorkerDispatchScheduler({
+			agentDir: "/unused",
+			registerInFlightWork: () => () => undefined,
+			isDisposed: () => false,
+			admit: () => ({ action: "start" }),
+			getRecord: () => record(0),
+			run,
+			cancel,
+			warn: vi.fn(),
+		});
+
+		scheduler.enqueue(record(0), { instructions: "first run" });
+		scheduler.drain();
+		scheduler.enqueue(record(0), { instructions: "must be cancelled" });
+		firstRun.resolve({ started: false, skipReason: "worker_not_started" });
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(run).toHaveBeenCalledTimes(1);
+
+		cancellationAvailable = true;
+		scheduler.drain();
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(run).toHaveBeenCalledTimes(1);
+		expect(cancel).toHaveBeenLastCalledWith("worker-0", "worker_not_started");
+		expect(scheduler.ownsLane("worker-0")).toBe(false);
+	});
+
 	it("a cancel withdraws a resume that was waiting for the previous run", async () => {
 		const { agentDir, settle, run, scheduler } = harness();
 		try {

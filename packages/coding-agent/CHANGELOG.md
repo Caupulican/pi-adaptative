@@ -15,6 +15,7 @@
 - Process-matrix startup reconciliation waits for every admitted prune and recovery mutation before maintenance or session shutdown settles, so one failed store operation cannot leave a sibling durable write running after stop.
 - Integrity hook extensions receive detached copies of one point-in-time context snapshot, so a timed-out hook cannot rewrite admitted tool arguments and one extension cannot alter the evidence a later extension validates.
 - Worker cancellation, timeout, and session shutdown seal admitted file mutations into durable claims before terminalization, while late tool callbacks cannot mutate worker progress or learning state.
+- Worker resumes retained while a prior run unwinds survive queue saturation and reload-gate failures, preserve verifier headroom, and bind completion observers to the resumed generation instead of the prior terminal.
 
 ## [0.99.52] - 2026-09-26
 

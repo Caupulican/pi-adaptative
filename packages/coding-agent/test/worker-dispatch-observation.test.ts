@@ -313,6 +313,62 @@ describe("worker dispatch lane observation", () => {
 		await expect(observed).resolves.toMatchObject({ state: "ran" });
 	});
 
+	it("binds an observer registered after deferred acceptance to the resumed run", async () => {
+		const harness = schedulerHarness();
+		const record = laneRecord("lane-deferred-observer");
+		harness.records.set(record.laneId, record);
+		harness.scheduler.enqueue(record, { instructions: "first run" });
+		harness.scheduler.drain();
+
+		// A reused turn is accepted in the narrow interval where the specialist has released its
+		// resources but the prior scheduler promise has not unwound yet.
+		harness.scheduler.enqueue(record, { instructions: "resumed run" });
+		const started: LaneRecord[] = [];
+		const observed = harness.scheduler.observeLane(record.laneId, {
+			onStarted: (startedRecord) => started.push(startedRecord),
+		});
+		expect(started).toEqual([]);
+		harness.settleRun(record.laneId, {
+			started: true,
+			record: { ...laneRecord(record.laneId, "succeeded"), reasonCode: "prior_run" },
+		});
+		await flush();
+
+		expect(harness.runs).toEqual([record.laneId, record.laneId]);
+		expect(started).toHaveLength(1);
+		expect(await Promise.race([observed, Promise.resolve("pending" as const)])).toBe("pending");
+
+		harness.settleRun(record.laneId, {
+			started: true,
+			record: { ...laneRecord(record.laneId, "succeeded"), reasonCode: "resumed_run" },
+		});
+		await expect(observed).resolves.toMatchObject({
+			state: "ran",
+			outcome: { record: { reasonCode: "resumed_run" } },
+		});
+	});
+
+	it("settles only the deferred observer when that resume is explicitly dropped", async () => {
+		const harness = schedulerHarness();
+		const record = laneRecord("lane-dropped-deferred-observer");
+		harness.records.set(record.laneId, record);
+		harness.scheduler.enqueue(record, { instructions: "first run" });
+		harness.scheduler.drain();
+		harness.scheduler.enqueue(record, { instructions: "resumed run" });
+		const observed = harness.scheduler.observeLane(record.laneId);
+
+		expect(harness.scheduler.dropQueued(record.laneId)).toBe(true);
+		await expect(observed).resolves.toEqual({ state: "cancelled", reasonCode: "worker_dispatch_dropped" });
+
+		// The prior run remains independently owned and can still settle normally.
+		harness.settleRun(record.laneId, {
+			started: true,
+			record: { ...laneRecord(record.laneId, "succeeded"), reasonCode: "prior_run" },
+		});
+		await flush();
+		expect(harness.runs).toEqual([record.laneId]);
+	});
+
 	it("negative control: a waiting admission keeps the lane queued and settles nothing", async () => {
 		const harness = schedulerHarness();
 		const record = laneRecord("lane-waiting");

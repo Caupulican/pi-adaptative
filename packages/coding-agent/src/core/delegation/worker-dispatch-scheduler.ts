@@ -32,6 +32,8 @@ export type WorkerLaneOutcome =
 interface WorkerLaneObserver {
 	resolve(outcome: WorkerLaneOutcome): void;
 	onStarted?(record: LaneRecord): void;
+	/** True while this observer belongs to a resume waiting behind the lane's current run. */
+	deferredGeneration: boolean;
 }
 
 /** One line for status views: `write_reservation: … (since 2026-09-08T08:14:26.000Z)`. */
@@ -170,7 +172,9 @@ export class WorkerDispatchScheduler {
 
 	/** Does this scheduler currently own this lane's queue entry or its run? */
 	ownsLane(laneId: string): boolean {
-		return this.queued.has(laneId) || this.running.has(laneId) || this.preflights.has(laneId);
+		return (
+			this.queued.has(laneId) || this.running.has(laneId) || this.deferred.has(laneId) || this.preflights.has(laneId)
+		);
 	}
 
 	/**
@@ -182,25 +186,43 @@ export class WorkerDispatchScheduler {
 	 */
 	observeLane(laneId: string, hooks: { onStarted?: (record: LaneRecord) => void } = {}): Promise<WorkerLaneOutcome> {
 		if (!this.ownsLane(laneId)) return Promise.resolve({ state: "unowned" });
+		const deferredGeneration = this.deferred.has(laneId);
 		const observed = new Promise<WorkerLaneOutcome>((resolve) => {
 			const observers = this.laneObservers.get(laneId) ?? new Set<WorkerLaneObserver>();
-			observers.add({ resolve, ...(hooks.onStarted ? { onStarted: hooks.onStarted } : {}) });
+			observers.add({
+				resolve,
+				deferredGeneration,
+				...(hooks.onStarted ? { onStarted: hooks.onStarted } : {}),
+			});
 			this.laneObservers.set(laneId, observers);
 		});
 		// The start transition may already have happened. An observer that arrives afterwards still
-		// needs it once, reported from the lane's own current projection.
-		if (hooks.onStarted && this.running.has(laneId)) {
+		// needs it once, reported from the lane's own current projection. A deferred observer belongs
+		// to the next run and must not receive the previous generation's running record.
+		if (hooks.onStarted && !deferredGeneration && this.running.has(laneId)) {
 			const started = this.options.getRecord(laneId);
 			if (started?.status === "running") this.notifyStart(laneId, hooks.onStarted, started);
 		}
 		return observed;
 	}
 
-	private settleLaneObservers(laneId: string, outcome: WorkerLaneOutcome): void {
+	private settleLaneObservers(laneId: string, outcome: WorkerLaneOutcome, deferredGeneration = false): void {
 		const observers = this.laneObservers.get(laneId);
 		if (!observers) return;
-		this.laneObservers.delete(laneId);
-		for (const observer of observers) observer.resolve(outcome);
+		for (const observer of [...observers]) {
+			if (observer.deferredGeneration !== deferredGeneration) continue;
+			observers.delete(observer);
+			observer.resolve(outcome);
+		}
+		if (observers.size === 0) this.laneObservers.delete(laneId);
+	}
+
+	private promoteDeferredObservers(laneId: string): void {
+		const observers = this.laneObservers.get(laneId);
+		if (!observers) return;
+		for (const observer of observers) {
+			if (observer.deferredGeneration) observer.deferredGeneration = false;
+		}
 	}
 
 	private notifyStart(laneId: string, onStarted: (record: LaneRecord) => void, record: LaneRecord): void {
@@ -223,7 +245,9 @@ export class WorkerDispatchScheduler {
 		const started = this.options.getRecord(laneId);
 		if (started?.status !== "running") return;
 		for (const observer of observers) {
-			if (observer.onStarted) this.notifyStart(laneId, observer.onStarted, started);
+			if (!observer.deferredGeneration && observer.onStarted) {
+				this.notifyStart(laneId, observer.onStarted, started);
+			}
 		}
 	}
 
@@ -285,11 +309,17 @@ export class WorkerDispatchScheduler {
 		for (const [laneId, pending] of [...this.pendingCancellations]) {
 			this.registerPendingCancellation(laneId, pending);
 			if (!this.cancelBestEffort(laneId, pending.reasonCode)) continue;
+			// A durable cancellation terminals the lane rather than freeing its deferred resume for
+			// promotion. Delete that ownership before removeQueued releases capacity to other lanes.
+			const hadDeferred = this.deferred.delete(laneId);
 			this.removePendingCancellation(laneId);
 			// The lane is durably cancelled now, so its queue entry goes and its observers learn the
 			// outcome exactly once -- without the lane ever having run.
 			this.removeQueued(laneId);
 			this.settleLaneObservers(laneId, { state: "cancelled", reasonCode: pending.reasonCode });
+			if (hadDeferred) {
+				this.settleLaneObservers(laneId, { state: "cancelled", reasonCode: pending.reasonCode }, true);
+			}
 		}
 	}
 
@@ -328,24 +358,42 @@ export class WorkerDispatchScheduler {
 
 	private finishTrackedRun(laneId: string): void {
 		this.running.delete(laneId);
-		const deferred = this.deferred.get(laneId);
-		this.deferred.delete(laneId);
 		if (this.options.isDisposed()) {
 			// A disposed generation has no future scheduler signal. Its durable state is recovered by the
 			// next generation, so do not leak this generation's process-local reload blocker.
+			if (this.deferred.delete(laneId)) {
+				this.settleLaneObservers(laneId, { state: "cancelled", reasonCode: "session_disposed" }, true);
+			}
 			this.removePendingCancellation(laneId);
 			return;
 		}
-		if (deferred) {
+		this.promoteDeferred();
+		this.redrainBestEffort(laneId);
+	}
+
+	/** Transfer retained resumes into real bounded queue slots without an ownership gap. */
+	private promoteDeferred(): void {
+		const candidates = [...this.deferred].sort(
+			([, left], [, right]) => Number(right.priority) - Number(left.priority),
+		);
+		for (const [laneId, deferred] of candidates) {
+			if (this.running.has(laneId) || this.pendingCancellations.has(laneId)) continue;
+			if (!this.hasQueueCapacity(deferred.priority)) continue;
 			try {
 				this.enqueue(deferred.record, deferred.request, deferred.recovered, deferred.priority);
 			} catch (error) {
 				this.warnBestEffort(
-					`Worker ${laneId} could not be requeued after its run settled: ${error instanceof Error ? error.message : String(error)}`,
+					`Worker ${laneId} deferred resume promotion failed; retaining it for the next scheduler signal: ${error instanceof Error ? error.message : String(error)}`,
 				);
+				continue;
 			}
+			// enqueue can decline a lane already owned by cancellation. Transfer ownership only when the
+			// bounded queue demonstrably contains the exact lane.
+			if (!this.queued.has(laneId)) continue;
+			this.deferred.delete(laneId);
+			this.promoteDeferredObservers(laneId);
+			if (this.draining) this.redrainRequested = true;
 		}
-		this.redrainBestEffort(laneId);
 	}
 
 	private redrainBestEffort(laneId: string): void {
@@ -413,6 +461,7 @@ export class WorkerDispatchScheduler {
 			// Promise settlement and every later scheduler signal retry each retained durable cancellation
 			// once. Keep this outside the redrain loop so a reentrant signal cannot create a busy retry.
 			this.retryPendingCancellations();
+			this.promoteDeferred();
 			do {
 				this.redrainRequested = false;
 				const passReservationAvailable = this.reservationAvailabilityRequested;
@@ -481,6 +530,9 @@ export class WorkerDispatchScheduler {
 	}
 
 	cancelQueued(): void {
+		for (const laneId of this.deferred.keys()) {
+			this.settleLaneObservers(laneId, { state: "cancelled", reasonCode: "session_disposed" }, true);
+		}
 		this.deferred.clear();
 		for (const laneId of [...this.queued.keys()]) {
 			// The controller owns durable cancellation and any pre-admission resources (for example a
@@ -510,6 +562,9 @@ export class WorkerDispatchScheduler {
 	dropQueued(laneId: string): boolean {
 		// A cancel also withdraws a resume that was waiting for the previous run to settle.
 		const hadDeferred = this.deferred.delete(laneId);
+		if (hadDeferred) {
+			this.settleLaneObservers(laneId, { state: "cancelled", reasonCode: "worker_dispatch_dropped" }, true);
+		}
 		if (!this.queued.has(laneId)) return hadDeferred;
 		this.removeQueued(laneId);
 		this.settleLaneObservers(laneId, { state: "cancelled", reasonCode: "worker_dispatch_dropped" });
@@ -531,7 +586,12 @@ export class WorkerDispatchScheduler {
 				`Worker ${laneId} reload-gate deregistration failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
-		if (removed) this.notifyQueueCapacityAvailable();
+		if (removed) {
+			// Capacity is an event, not a poll. A resume retained while its previous run unwound owns the
+			// released slot before external recovery listeners compete for it.
+			this.promoteDeferred();
+			this.notifyQueueCapacityAvailable();
+		}
 	}
 
 	private notifyQueueCapacityAvailable(): void {
