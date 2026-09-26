@@ -8,7 +8,6 @@ import {
 	createRuntimeCommandRunner,
 	fetchRuntimeDownload,
 	type RuntimeCommandRunner,
-	removePartialDownload,
 	runtimeCommandAvailable,
 	tryFileSizeBytes,
 	writeRuntimeDownload,
@@ -437,22 +436,22 @@ export class NeedleRuntime {
 		if (!download.ok) return download;
 
 		const hash = createHash("sha256");
-		const written = await writeRuntimeDownload(
-			download.body as unknown as Readable,
-			destPath,
-			hashingPassThrough(hash),
-		);
+		let actualBytes: number | undefined;
+		let actualSha256 = "";
+		const written = await writeRuntimeDownload(download.body as unknown as Readable, destPath, {
+			transform: hashingPassThrough(hash),
+			validateStaged: (stagedPath) => {
+				actualBytes = tryFileSizeBytes(stagedPath);
+				actualSha256 = hash.digest("hex");
+				return actualBytes === this._weightsIntegrity.bytes && actualSha256 === this._weightsIntegrity.sha256
+					? { ok: true }
+					: {
+							ok: false,
+							error: `integrity-fail: downloaded ${NEEDLE_CHECKPOINT_FILENAME} does not match the pinned checksum — expected sha256 ${this._weightsIntegrity.sha256} (${this._weightsIntegrity.bytes} bytes), got ${actualSha256} (${actualBytes ?? 0} bytes). Refusing to keep a pickle file that failed integrity verification.`,
+						};
+			},
+		});
 		if (!written.ok) return written;
-
-		const actualBytes = tryFileSizeBytes(destPath);
-		const actualSha256 = hash.digest("hex");
-		if (actualBytes !== this._weightsIntegrity.bytes || actualSha256 !== this._weightsIntegrity.sha256) {
-			removePartialDownload(destPath);
-			return {
-				ok: false,
-				error: `integrity-fail: downloaded ${NEEDLE_CHECKPOINT_FILENAME} does not match the pinned checksum — expected sha256 ${this._weightsIntegrity.sha256} (${this._weightsIntegrity.bytes} bytes), got ${actualSha256} (${actualBytes ?? 0} bytes). Refusing to keep a pickle file that failed integrity verification.`,
-			};
-		}
 
 		onProgress?.(`${NEEDLE_CHECKPOINT_FILENAME} downloaded and verified (sha256 ${actualSha256}).`);
 		return { ok: true, path: destPath };

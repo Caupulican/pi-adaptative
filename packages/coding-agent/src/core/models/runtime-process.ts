@@ -1,5 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { createWriteStream, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { createWriteStream, existsSync, mkdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { Readable, Transform, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -222,20 +223,37 @@ export function waitForWritableClosed(stream: Writable & { closed?: boolean }): 
 	});
 }
 
-/** Stream a runtime payload to disk, closing and deleting partial output on any failure. */
+export interface RuntimeDownloadWriteOptions {
+	transform?: Transform;
+	/** Validate the closed staged file before it becomes visible at the destination. */
+	validateStaged?: (stagedPath: string) => { ok: true } | { ok: false; error: string };
+}
+
+/**
+ * Stage a runtime payload beside its destination and atomically publish only a complete stream.
+ * A failed replacement never truncates or deletes the last-known-good file, and concurrent writers
+ * cannot interleave bytes in the final path.
+ */
 export async function writeRuntimeDownload(
 	input: Readable,
 	destPath: string,
-	transform?: Transform,
+	options: RuntimeDownloadWriteOptions = {},
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-	const writeStream = createWriteStream(destPath);
+	const stagedPath = `${destPath}.partial-${process.pid}-${randomUUID()}`;
+	const writeStream = createWriteStream(stagedPath);
 	try {
-		if (transform) await pipeline(input, transform, writeStream);
+		if (options.transform) await pipeline(input, options.transform, writeStream);
 		else await pipeline(input, writeStream);
+		const validation = options.validateStaged?.(stagedPath);
+		if (validation && !validation.ok) {
+			removePartialDownload(stagedPath);
+			return validation;
+		}
+		renameSync(stagedPath, destPath);
 		return { ok: true };
 	} catch (error) {
 		await waitForWritableClosed(writeStream);
-		removePartialDownload(destPath);
+		removePartialDownload(stagedPath);
 		return { ok: false, error: `download-fail: ${error instanceof Error ? error.message : String(error)}` };
 	}
 }

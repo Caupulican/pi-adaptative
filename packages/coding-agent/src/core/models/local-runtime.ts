@@ -19,6 +19,7 @@ import {
 	type LocalInferenceProfileMode,
 	ollamaEnvironmentForLocalInferenceProfile,
 } from "./local-inference-profile.ts";
+import { SerializedOperationCoordinator } from "./runtime-operation-coordinator.ts";
 import {
 	createRuntimeCommandRunner,
 	extractZipArchive,
@@ -204,44 +205,6 @@ interface RuntimeStartResult {
 	reason: string;
 }
 
-interface RuntimeStartRecord {
-	key: string;
-	generation: number;
-	promise: Promise<RuntimeStartResult>;
-}
-
-/** One runtime instance owns one start transaction. Equivalent starts share it; conflicting start
- * modes wait and re-probe. Retirement fences every continuation without poisoning a later start. */
-class RuntimeStartCoordinator {
-	private generation = 0;
-	private inFlight: RuntimeStartRecord | undefined;
-
-	run(key: string, operation: (isCurrent: () => boolean) => Promise<RuntimeStartResult>): Promise<RuntimeStartResult> {
-		const active = this.inFlight;
-		if (active && active.key === key && active.generation === this.generation) return active.promise;
-		if (active) {
-			return active.promise.then(
-				() => this.run(key, operation),
-				() => this.run(key, operation),
-			);
-		}
-
-		const generation = this.generation;
-		const promise = Promise.resolve().then(() => operation(() => this.generation === generation));
-		const record = { key, generation, promise };
-		this.inFlight = record;
-		const clear = (): void => {
-			if (this.inFlight === record) this.inFlight = undefined;
-		};
-		void promise.then(clear, clear);
-		return promise;
-	}
-
-	retire(): void {
-		this.generation++;
-	}
-}
-
 function cancelledRuntimeStart(): RuntimeStartResult {
 	return { started: false, reason: "start_cancelled" };
 }
@@ -330,7 +293,7 @@ export class OllamaRuntime {
 	private readonly _hasCommand: (command: string) => boolean;
 	private readonly _extractArchiveFn: NonNullable<LocalRuntimeDeps["extractArchive"]>;
 	private readonly _profile: LocalInferenceProfile;
-	private readonly _starts = new RuntimeStartCoordinator();
+	private readonly _starts = new SerializedOperationCoordinator<RuntimeStartResult>();
 	private _child: Pick<ChildProcess, "pid" | "kill" | "unref" | "on"> | undefined;
 	private _childModelsDir: string | undefined;
 
@@ -991,7 +954,7 @@ export class TransformersRuntime {
 	private readonly _platform: () => string;
 	private readonly _runCommand: RuntimeCommandRunner;
 	private readonly _serverScriptPath: string;
-	private readonly _starts = new RuntimeStartCoordinator();
+	private readonly _starts = new SerializedOperationCoordinator<RuntimeStartResult>();
 	private _proc?: Pick<ChildProcess, "pid" | "kill" | "unref" | "on">;
 
 	constructor(args: { agentDir: string; modelId: string; baseUrl?: string; deps?: LocalRuntimeDeps }) {

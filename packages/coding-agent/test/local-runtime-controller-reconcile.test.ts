@@ -264,6 +264,74 @@ describe("LocalRuntimeController.reconcile — Ollama", () => {
 });
 
 describe("LocalRuntimeController.reconcile — Transformers", () => {
+	it("shares one pending exact-model readiness transaction", async () => {
+		const agentDir = tempDir("pi-controller-transformers-single-flight-");
+		const ctrl = controller(agentDir);
+		const model = transformersModel("shared-model", 18_105);
+		const runtime = ctrl.getTransformersRuntime("shared-model", "http://127.0.0.1:18105");
+		const detected = Promise.withResolvers<TransformersRuntimeStatus>();
+		const detect = vi.spyOn(runtime, "detect").mockImplementation(() => detected.promise);
+
+		const first = ctrl.ensureTransformersModelReady(model);
+		const second = ctrl.ensureTransformersModelReady(model);
+		await vi.waitFor(() => expect(detect).toHaveBeenCalled());
+		expect(detect).toHaveBeenCalledTimes(1);
+
+		detected.resolve({
+			runtimeInstalled: false,
+			serverUp: false,
+			baseUrl: runtime.baseUrl,
+			modelId: runtime.modelId,
+			venvDir: runtime.venvDir,
+			cacheDir: runtime.cacheDir,
+			serverScriptPath: "/test/transformers-server.py",
+		});
+		await expect(Promise.all([first, second])).resolves.toEqual([
+			expect.objectContaining({ ready: false, reason: "runtime_missing" }),
+			expect.objectContaining({ ready: false, reason: "runtime_missing" }),
+		]);
+	});
+
+	it("keeps concurrent readiness independent across provider identities sharing a URL and model id", async () => {
+		const agentDir = tempDir("pi-controller-provider-identity-");
+		const ctrl = controller(agentDir);
+		const sharedId = "same-id";
+		const sharedBaseUrl = "http://127.0.0.1:18106/v1";
+		const ollama = ollamaModel(sharedId, { baseUrl: sharedBaseUrl });
+		const transformers = transformersModel(sharedId, 18_106);
+		const ollamaRuntime = ctrl.getLocalRuntime("http://127.0.0.1:18106");
+		const transformersRuntime = ctrl.getTransformersRuntime(sharedId, "http://127.0.0.1:18106");
+		const ollamaDetect = vi.spyOn(ollamaRuntime, "detect").mockResolvedValue({
+			binaryPath: undefined,
+			serverUp: false,
+			serverUrl: ollamaRuntime.baseUrl,
+			managedByPi: false,
+			ownedModelsDir: ollamaRuntime.ownedModelsDir(),
+			userModelsDir: ollamaRuntime.userModelsDir(),
+			ownedStore: { kind: "pi-owned", path: ollamaRuntime.ownedModelsDir(), modelCount: 0 },
+			userStore: { kind: "user", path: ollamaRuntime.userModelsDir(), modelCount: 0 },
+			serverModels: [],
+		});
+		const transformersDetect = vi.spyOn(transformersRuntime, "detect").mockResolvedValue({
+			runtimeInstalled: false,
+			serverUp: false,
+			baseUrl: transformersRuntime.baseUrl,
+			modelId: transformersRuntime.modelId,
+			venvDir: transformersRuntime.venvDir,
+			cacheDir: transformersRuntime.cacheDir,
+			serverScriptPath: "/test/transformers-server.py",
+		});
+
+		await expect(
+			Promise.all([ctrl.ensureLocalModelReady(ollama), ctrl.ensureTransformersModelReady(transformers)]),
+		).resolves.toEqual([
+			expect.objectContaining({ ready: false, reason: "binary_missing" }),
+			expect.objectContaining({ ready: false, reason: "runtime_missing" }),
+		]);
+		expect(ollamaDetect).toHaveBeenCalledTimes(1);
+		expect(transformersDetect).toHaveBeenCalledTimes(1);
+	});
+
 	it("stops a dropped model's runtime and evicts it, leaves a different eligible model's runtime alone", async () => {
 		const agentDir = scratchDir("transformers");
 		try {

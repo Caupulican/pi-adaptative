@@ -37,6 +37,7 @@ import {
 	RuntimeResidencyArbiter,
 	TransformersRuntimeResidencyAdapter,
 } from "./models/runtime-arbiter.ts";
+import { KeyedSingleFlight } from "./models/runtime-operation-coordinator.ts";
 
 /** User-facing router tiers in ascending order — "learning" is never selected for a user turn, so
  * it has no place in the escalation ladder (#27's ensureRouteModelReady walks this forward only). */
@@ -126,6 +127,8 @@ export class LocalRuntimeController {
 	private readonly _recentEvictions: RuntimeEvictionRecord[] = [];
 	/** Exact-model readiness generations. Reconcile aborts only removed models; retained work keeps its fence. */
 	private readonly _runtimeOperationFences = new Map<string, AbortController>();
+	/** Exact provider/server/model readiness shares detection, residency, download, and publication. */
+	private readonly _readiness = new KeyedSingleFlight<LocalRuntimeReadiness>();
 
 	private readonly deps: LocalRuntimeControllerDeps;
 
@@ -245,11 +248,11 @@ export class LocalRuntimeController {
 	 * the cache hit at {@link ensureLocalModelReady}/{@link ensurePrismLlamaCppModelReady} short-
 	 * circuits BEFORE the installed-model check and the residency arbiter run, so a genuinely missing
 	 * model surfaced as a raw runtime error instead of `model_missing_on_server`, and residency
-	 * bookkeeping silently skipped a model it never actually admitted. Transformers already had this
-	 * right (one server per model, by construction); this makes every provider consistent.
+	 * bookkeeping silently skipped a model it never actually admitted. Provider is also part of the
+	 * identity: adapters may expose the same model id and URL with different lifecycle semantics.
 	 */
 	private confirmationKey(model: Model<Api>, serverUrl: string): string {
-		return `${serverUrl}\0${model.id}`;
+		return `${model.provider}\0${serverUrl}\0${model.id}`;
 	}
 
 	private invalidateIfLastCallFailed(model: Model<Api>, serverUrl: string): void {
@@ -484,13 +487,20 @@ export class LocalRuntimeController {
 	 * Transformers model) so steady-state routing pays the health-check round trip once; invalidated
 	 * above when a prior local call failed so a dead sidecar gets re-detected instead of trusted.
 	 */
-	async ensureLocalModelReady(
-		model: Model<Api>,
-	): Promise<{ ready: boolean; reason: string; installGuide?: string[] }> {
+	ensureLocalModelReady(model: Model<Api>): Promise<{ ready: boolean; reason: string; installGuide?: string[] }> {
 		if (model.provider !== OLLAMA_PROVIDER) {
-			return { ready: true, reason: "not_local" };
+			return Promise.resolve({ ready: true, reason: "not_local" });
 		}
 		const serverUrl = this.deriveOllamaServerUrl(model.baseUrl);
+		return this._readiness.run(this.confirmationKey(model, serverUrl), () =>
+			this.ensureLocalModelReadyTransaction(model, serverUrl),
+		);
+	}
+
+	private async ensureLocalModelReadyTransaction(
+		model: Model<Api>,
+		serverUrl: string,
+	): Promise<LocalRuntimeReadiness> {
 		const operation = this.beginRuntimeReadiness(model, serverUrl);
 		if (!operation) return { ready: true, reason: "confirmed_up_cached" };
 		const { confirmedKey, fence } = operation;
@@ -559,13 +569,22 @@ export class LocalRuntimeController {
 		return { ready: started.started, reason: started.reason };
 	}
 
-	async ensureTransformersModelReady(
+	ensureTransformersModelReady(
 		model: Model<Api>,
 	): Promise<{ ready: boolean; reason: string; installGuide?: string[] }> {
 		if (model.provider !== HF_TRANSFORMERS_PROVIDER) {
-			return { ready: true, reason: "not_transformers" };
+			return Promise.resolve({ ready: true, reason: "not_transformers" });
 		}
 		const serverUrl = this.deriveOpenAICompatServerUrl(model.baseUrl);
+		return this._readiness.run(this.confirmationKey(model, serverUrl), () =>
+			this.ensureTransformersModelReadyTransaction(model, serverUrl),
+		);
+	}
+
+	private async ensureTransformersModelReadyTransaction(
+		model: Model<Api>,
+		serverUrl: string,
+	): Promise<LocalRuntimeReadiness> {
 		const operation = this.beginRuntimeReadiness(model, serverUrl);
 		if (!operation) return { ready: true, reason: "confirmed_up_cached" };
 		const { confirmedKey, fence } = operation;
@@ -617,13 +636,22 @@ export class LocalRuntimeController {
 	 * server can never end up with a different served context than the rest of the session (e.g.
 	 * compaction) already assumes.
 	 */
-	private async ensurePrismLlamaCppModelReady(
+	private ensurePrismLlamaCppModelReady(
 		model: Model<Api>,
 	): Promise<{ ready: boolean; reason: string; installGuide?: string[] }> {
 		if (!isPiManagedPrismLlamaCppModel(model)) {
-			return { ready: true, reason: "not_pi_managed_llama_cpp" };
+			return Promise.resolve({ ready: true, reason: "not_pi_managed_llama_cpp" });
 		}
 		const serverUrl = this.deriveOpenAICompatServerUrl(model.baseUrl);
+		return this._readiness.run(this.confirmationKey(model, serverUrl), () =>
+			this.ensurePrismLlamaCppModelReadyTransaction(model, serverUrl),
+		);
+	}
+
+	private async ensurePrismLlamaCppModelReadyTransaction(
+		model: Model<Api>,
+		serverUrl: string,
+	): Promise<LocalRuntimeReadiness> {
 		const fence = this.captureRuntimeOperation(model, serverUrl);
 		const runtime = this.getPrismLlamaCppRuntime();
 		const isCurrent = this.trackRuntimeOperation(fence, () => this._prismLlamaCppRuntime === runtime);
@@ -872,7 +900,7 @@ export class LocalRuntimeController {
 	 * is pi-managed prism.
 	 *
 	 * The `_confirmedUp` cache is pruned separately, in ONE pass over every provider: since
-	 * `confirmationKey` is uniformly `${serverUrl}\0${model.id}` across every provider, a single
+	 * `confirmationKey` is uniformly `${provider}\0${serverUrl}\0${model.id}` across every provider, a single
 	 * eligible-keys set built the same way covers all three providers. This also correctly drops a
 	 * model's stale confirmation even when its SERVER survives (e.g. two Ollama models on one server,
 	 * only one still eligible) — a case the coarser per-server runtime eviction above can't see on
@@ -889,6 +917,7 @@ export class LocalRuntimeController {
 		for (const [key, controller] of this._runtimeOperationFences) {
 			if (eligibleConfirmationKeys.has(key)) continue;
 			controller.abort(new Error(RUNTIME_RECONCILED_REASON));
+			this._readiness.retire(key);
 			this._runtimeOperationFences.set(key, new AbortController());
 		}
 

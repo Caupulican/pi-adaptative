@@ -13,13 +13,13 @@ import {
 	type LocalInferenceProfileMode,
 } from "./local-inference-profile.ts";
 import { probePrismLlamaCppServer } from "./prism-llamacpp-server-probe.ts";
+import { KeyedSingleFlight, SerializedOperationCoordinator } from "./runtime-operation-coordinator.ts";
 import {
 	extractZipArchive,
 	fetchRuntimeDownload,
 	installRuntimeArchive,
 	type ManagedRuntimeChild,
 	type ManagedRuntimeSpawn,
-	removePartialDownload,
 	requireRuntimeStdin,
 	resolveRuntimeLifecycleDependencies,
 	runtimeCommandAvailable,
@@ -253,6 +253,8 @@ export class PrismLlamaCppRuntime {
 	private readonly _healthPollIntervalMs: number;
 	private readonly _profile: LocalInferenceProfile;
 	private readonly _processLifecycle: PrismProcessLifecycle;
+	private readonly _downloads = new KeyedSingleFlight<PrismDownloadResult>();
+	private readonly _serves = new SerializedOperationCoordinator<PrismServeResult>();
 	private _child: ManagedRuntimeChild | undefined;
 
 	constructor(args: {
@@ -472,11 +474,19 @@ export class PrismLlamaCppRuntime {
 	 * `content-length` and deletes the partial file on any failure or mismatch — never leaves a
 	 * corrupt/truncated weight file behind for a later load to silently misread.
 	 */
-	async downloadModel(
+	downloadModel(
 		args: { repo: string; file: string },
 		onProgress?: (status: string) => void,
 	): Promise<PrismDownloadResult> {
 		const destPath = join(this.modelsDir(), args.repo, args.file);
+		return this._downloads.run(destPath, () => this._downloadModel(args, destPath, onProgress));
+	}
+
+	private async _downloadModel(
+		args: { repo: string; file: string },
+		destPath: string,
+		onProgress?: (status: string) => void,
+	): Promise<PrismDownloadResult> {
 		const url = `https://huggingface.co/${args.repo}/resolve/main/${args.file}`;
 		mkdirSync(dirname(destPath), { recursive: true });
 
@@ -493,14 +503,16 @@ export class PrismLlamaCppRuntime {
 		if (!download.ok) return download;
 
 		const expectedBytes = parseContentLength(download.response.headers.get("content-length"));
-		const written = await writeRuntimeDownload(download.body as unknown as Readable, destPath);
+		let actualBytes: number | undefined;
+		const written = await writeRuntimeDownload(download.body as unknown as Readable, destPath, {
+			validateStaged: (stagedPath) => {
+				actualBytes = tryFileSizeBytes(stagedPath);
+				return expectedBytes === undefined || actualBytes === expectedBytes
+					? { ok: true }
+					: { ok: false, error: `size-mismatch: expected ${expectedBytes} bytes, got ${actualBytes ?? 0}` };
+			},
+		});
 		if (!written.ok) return written;
-
-		const actualBytes = tryFileSizeBytes(destPath);
-		if (expectedBytes !== undefined && actualBytes !== expectedBytes) {
-			removePartialDownload(destPath);
-			return { ok: false, error: `size-mismatch: expected ${expectedBytes} bytes, got ${actualBytes ?? 0}` };
-		}
 
 		onProgress?.(`${args.file} downloaded (${actualBytes ?? 0} bytes).`);
 		return { ok: true, path: destPath };
@@ -511,13 +523,28 @@ export class PrismLlamaCppRuntime {
 	 * calling stop()) and poll `/health` until ready. `-ngl 99` is only added when the installed
 	 * asset's persisted `backend` is `"cuda"`, not from the host's current GPU state.
 	 */
-	async serve(args: {
+	serve(args: {
 		modelPath: string;
 		modelAlias: string;
 		mmprojPath?: string;
 		port: number;
 		numCtx: number;
 	}): Promise<PrismServeResult> {
+		const key = JSON.stringify([args.modelPath, args.modelAlias, args.mmprojPath ?? null, args.port, args.numCtx]);
+		return this._serves.run(key, (isCurrent) => this._serve(args, isCurrent));
+	}
+
+	private async _serve(
+		args: {
+			modelPath: string;
+			modelAlias: string;
+			mmprojPath?: string;
+			port: number;
+			numCtx: number;
+		},
+		isCurrent: () => boolean,
+	): Promise<PrismServeResult> {
+		if (!isCurrent()) return { ok: false, error: "serve_cancelled" };
 		const manifest = this._readManifest();
 		if (!manifest) return { ok: false, error: "binary-missing" };
 		const binaryPath = join(this.runtimeDir(), manifest.binaryRelPath);
@@ -525,11 +552,12 @@ export class PrismLlamaCppRuntime {
 
 		const baseUrl = `http://127.0.0.1:${args.port}`;
 		const existing = await probePrismLlamaCppServer(baseUrl, args.modelAlias, this._fetch, HEALTH_CHECK_TIMEOUT_MS);
+		if (!isCurrent()) return { ok: false, error: "serve_cancelled" };
 		if (existing.status === "matching") return { ok: true, baseUrl };
 		if (existing.status === "conflict" && !this._child) {
 			return { ok: false, error: modelIdentityConflictError(existing.servedModelIds) };
 		}
-		if (this._child) this.stop();
+		if (this._child) this._stopOwnedChild();
 		const argv = [
 			"-m",
 			args.modelPath,
@@ -575,18 +603,25 @@ export class PrismLlamaCppRuntime {
 
 		for (let attempt = 0; attempt < this._healthPollAttempts; attempt++) {
 			const probe = await probePrismLlamaCppServer(baseUrl, args.modelAlias, this._fetch, HEALTH_CHECK_TIMEOUT_MS);
+			if (!isCurrent()) return { ok: false, error: "serve_cancelled" };
 			if (probe.status === "matching") return { ok: true, baseUrl };
 			if (probe.status === "conflict") {
-				this.stop();
+				this._stopOwnedChild();
 				return { ok: false, error: modelIdentityConflictError(probe.servedModelIds) };
 			}
 			await this._sleep(this._healthPollIntervalMs);
+			if (!isCurrent()) return { ok: false, error: "serve_cancelled" };
 		}
-		this.stop();
+		this._stopOwnedChild();
 		return { ok: false, error: "health-timeout" };
 	}
 
 	stop(): { stopped: boolean } {
+		this._serves.retire();
+		return this._stopOwnedChild();
+	}
+
+	private _stopOwnedChild(): { stopped: boolean } {
 		const child = this._child;
 		if (!child) return { stopped: false };
 		this._child = undefined;

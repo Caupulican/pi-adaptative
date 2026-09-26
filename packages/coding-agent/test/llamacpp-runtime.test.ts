@@ -12,6 +12,7 @@ import {
 	resolvePrismLlamaAsset,
 } from "../src/core/models/llamacpp-runtime.ts";
 import type { ManagedRuntimeChild } from "../src/core/models/runtime-process.ts";
+import { tempDir } from "./temp-dir.ts";
 
 class PrismLlamaCppRuntime extends ProductionPrismLlamaCppRuntime {
 	constructor(args: ConstructorParameters<typeof ProductionPrismLlamaCppRuntime>[0]) {
@@ -428,6 +429,86 @@ describe("installManaged", () => {
 });
 
 describe("downloadModel", () => {
+	it("shares one in-flight transfer for concurrent requests targeting the same model path", async () => {
+		const agentDir = tempDir("pi-prism-download-single-flight-");
+		const responses: Array<PromiseWithResolvers<Response>> = [];
+		const runtime = new PrismLlamaCppRuntime({
+			agentDir,
+			deps: {
+				fetchFn: (async () => {
+					const response = Promise.withResolvers<Response>();
+					responses.push(response);
+					return response.promise;
+				}) as typeof fetch,
+			},
+		});
+
+		const first = runtime.downloadModel({ repo: "acme", file: "shared.gguf" });
+		const second = runtime.downloadModel({ repo: "acme", file: "shared.gguf" });
+		await vi.waitFor(() => expect(responses).toHaveLength(1));
+		responses[0]?.resolve(new Response("shared-model-bytes", { status: 200 }));
+
+		const [firstResult, secondResult] = await Promise.all([first, second]);
+		expect(firstResult).toEqual(secondResult);
+		expect(firstResult).toMatchObject({ ok: true, path: expect.stringContaining("shared.gguf") });
+	});
+
+	it("keeps downloads for different model paths parallel", async () => {
+		const agentDir = tempDir("pi-prism-download-parallel-");
+		const responses: Array<PromiseWithResolvers<Response>> = [];
+		const runtime = new PrismLlamaCppRuntime({
+			agentDir,
+			deps: {
+				fetchFn: (async () => {
+					const response = Promise.withResolvers<Response>();
+					responses.push(response);
+					return response.promise;
+				}) as typeof fetch,
+			},
+		});
+
+		const first = runtime.downloadModel({ repo: "acme", file: "first.gguf" });
+		const second = runtime.downloadModel({ repo: "acme", file: "second.gguf" });
+		await vi.waitFor(() => expect(responses).toHaveLength(2));
+		responses[0]?.resolve(new Response("first", { status: 200 }));
+		responses[1]?.resolve(new Response("second", { status: 200 }));
+
+		await expect(Promise.all([first, second])).resolves.toEqual([
+			expect.objectContaining({ ok: true, path: expect.stringContaining("first.gguf") }),
+			expect.objectContaining({ ok: true, path: expect.stringContaining("second.gguf") }),
+		]);
+	});
+
+	it("clears a failed shared download so a later retry starts fresh", async () => {
+		const agentDir = tempDir("pi-prism-download-retry-");
+		const responses: Array<PromiseWithResolvers<Response>> = [];
+		const runtime = new PrismLlamaCppRuntime({
+			agentDir,
+			deps: {
+				fetchFn: (async () => {
+					const response = Promise.withResolvers<Response>();
+					responses.push(response);
+					return response.promise;
+				}) as typeof fetch,
+			},
+		});
+		const args = { repo: "acme", file: "retry.gguf" };
+
+		const first = runtime.downloadModel(args);
+		const joined = runtime.downloadModel(args);
+		await vi.waitFor(() => expect(responses).toHaveLength(1));
+		responses[0]?.resolve(new Response(null, { status: 503 }));
+		await expect(Promise.all([first, joined])).resolves.toEqual([
+			{ ok: false, error: "download-fail: HTTP 503" },
+			{ ok: false, error: "download-fail: HTTP 503" },
+		]);
+
+		const retry = runtime.downloadModel(args);
+		await vi.waitFor(() => expect(responses).toHaveLength(2));
+		responses[1]?.resolve(new Response("recovered", { status: 200 }));
+		await expect(retry).resolves.toMatchObject({ ok: true, path: expect.stringContaining("retry.gguf") });
+	});
+
 	it("streams the response body to <agentDir>/models/llamacpp/<repo>/<file>", async () => {
 		const agentDir = scratchDir("download-ok");
 		try {
@@ -553,9 +634,202 @@ describe("downloadModel", () => {
 			rmSync(agentDir, { recursive: true, force: true });
 		}
 	});
+
+	it("keeps the last-known-good model when a replacement fails size verification", async () => {
+		const agentDir = tempDir("pi-prism-download-invalid-replacement-");
+		const destPath = join(agentDir, "models", "llamacpp", "acme", "model.gguf");
+		mkdirSync(join(agentDir, "models", "llamacpp", "acme"), { recursive: true });
+		writeFileSync(destPath, "last-known-good");
+		const runtime = new PrismLlamaCppRuntime({
+			agentDir,
+			deps: {
+				fetchFn: (async (_input: string, init?: RequestInit) => {
+					if (init?.method === "HEAD") {
+						return new Response(null, { status: 200, headers: { "content-length": "999" } });
+					}
+					return new Response("truncated", { status: 200, headers: { "content-length": "999" } });
+				}) as typeof fetch,
+			},
+		});
+
+		await expect(runtime.downloadModel({ repo: "acme", file: "model.gguf" })).resolves.toMatchObject({
+			ok: false,
+			error: expect.stringContaining("size-mismatch"),
+		});
+		expect(readFileSync(destPath, "utf8")).toBe("last-known-good");
+	});
 });
 
 describe("serve", () => {
+	it("shares one process transaction for concurrent equivalent serve requests", async () => {
+		const agentDir = tempDir("pi-prism-serve-single-flight-");
+		writeManifest(agentDir, {
+			release: PRISM_LLAMACPP_PINNED_RELEASE,
+			binaryRelPath: "bin/llama-server",
+			backend: "cpu",
+		});
+		const binaryPath = join(agentDir, "runtimes", "prism-llamacpp", "bin", "llama-server");
+		const initialHealth = Promise.withResolvers<Response>();
+		let up = false;
+		const spawnFn = vi.fn(() => {
+			up = true;
+			return fakeChild(4300 + spawnFn.mock.calls.length);
+		});
+		const runtime = new PrismLlamaCppRuntime({
+			agentDir,
+			deps: {
+				existsFn: (path) => path === binaryPath,
+				sleepFn: async () => {},
+				fetchFn: (async (input) => {
+					if (!up) return initialHealth.promise;
+					return String(input).endsWith("/v1/models")
+						? Response.json({ data: [{ id: "acme/m" }] })
+						: new Response("", { status: 200 });
+				}) as typeof fetch,
+				spawnFn,
+			},
+		});
+		const args = { modelPath: "/models/m.gguf", modelAlias: "acme/m", port: 8127, numCtx: 4096 };
+
+		const first = runtime.serve(args);
+		const second = runtime.serve(args);
+		initialHealth.resolve(new Response("", { status: 503 }));
+
+		await expect(Promise.all([first, second])).resolves.toEqual([
+			{ ok: true, baseUrl: "http://127.0.0.1:8127" },
+			{ ok: true, baseUrl: "http://127.0.0.1:8127" },
+		]);
+		expect(spawnFn).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not spawn after stop retires a serve awaiting its initial probe", async () => {
+		const agentDir = tempDir("pi-prism-serve-stop-probe-");
+		writeManifest(agentDir, {
+			release: PRISM_LLAMACPP_PINNED_RELEASE,
+			binaryRelPath: "bin/llama-server",
+			backend: "cpu",
+		});
+		const binaryPath = join(agentDir, "runtimes", "prism-llamacpp", "bin", "llama-server");
+		const initialHealth = Promise.withResolvers<Response>();
+		let probeStarted = false;
+		const spawnFn = vi.fn(() => fakeChild(4400));
+		const runtime = new PrismLlamaCppRuntime({
+			agentDir,
+			deps: {
+				existsFn: (path) => path === binaryPath,
+				sleepFn: async () => {},
+				fetchFn: (async () => {
+					probeStarted = true;
+					return initialHealth.promise;
+				}) as typeof fetch,
+				spawnFn,
+			},
+		});
+
+		const serving = runtime.serve({ modelPath: "/models/m.gguf", modelAlias: "acme/m", port: 8128, numCtx: 4096 });
+		await vi.waitFor(() => expect(probeStarted).toBe(true));
+		expect(runtime.stop()).toEqual({ stopped: false });
+		initialHealth.resolve(new Response("", { status: 503 }));
+
+		await expect(serving).resolves.toEqual({ ok: false, error: "serve_cancelled" });
+		expect(spawnFn).not.toHaveBeenCalled();
+	});
+
+	it("cancels a post-spawn poll on stop and lets a fresh serve generation run", async () => {
+		const agentDir = tempDir("pi-prism-serve-stop-poll-");
+		writeManifest(agentDir, {
+			release: PRISM_LLAMACPP_PINNED_RELEASE,
+			binaryRelPath: "bin/llama-server",
+			backend: "cpu",
+		});
+		const binaryPath = join(agentDir, "runtimes", "prism-llamacpp", "bin", "llama-server");
+		const oldPoll = Promise.withResolvers<Response>();
+		let healthCalls = 0;
+		let up = false;
+		let servedAlias = "";
+		const terminate = vi.fn(() => {
+			up = false;
+		});
+		const spawnFn = vi.fn((_command: string, argv: string[]) => {
+			servedAlias = argv[argv.indexOf("--alias") + 1] ?? "";
+			up = true;
+			return fakeChild(4500 + spawnFn.mock.calls.length);
+		});
+		const runtime = new PrismLlamaCppRuntime({
+			agentDir,
+			deps: {
+				existsFn: (path) => path === binaryPath,
+				sleepFn: async () => {},
+				fetchFn: (async (input) => {
+					if (String(input).endsWith("/v1/models")) return Response.json({ data: [{ id: servedAlias }] });
+					healthCalls += 1;
+					if (healthCalls === 1) return new Response("", { status: 503 });
+					if (healthCalls === 2) return oldPoll.promise;
+					return new Response("", { status: up ? 200 : 503 });
+				}) as typeof fetch,
+				spawnFn,
+				processLifecycle: { track: () => {}, untrack: () => {}, terminate },
+			},
+		});
+		const args = { modelPath: "/models/m.gguf", modelAlias: "acme/m", port: 8129, numCtx: 4096 };
+
+		const stale = runtime.serve(args);
+		await vi.waitFor(() => expect(healthCalls).toBe(2));
+		expect(runtime.stop()).toEqual({ stopped: true });
+		const fresh = runtime.serve(args);
+		oldPoll.resolve(new Response("", { status: 200 }));
+
+		await expect(stale).resolves.toEqual({ ok: false, error: "serve_cancelled" });
+		await expect(fresh).resolves.toEqual({ ok: true, baseUrl: "http://127.0.0.1:8129" });
+		expect(spawnFn).toHaveBeenCalledTimes(2);
+		expect(terminate).toHaveBeenCalledTimes(1);
+	});
+
+	it("serializes conflicting serve intent instead of coalescing it", async () => {
+		const agentDir = tempDir("pi-prism-serve-conflict-");
+		writeManifest(agentDir, {
+			release: PRISM_LLAMACPP_PINNED_RELEASE,
+			binaryRelPath: "bin/llama-server",
+			backend: "cpu",
+		});
+		const binaryPath = join(agentDir, "runtimes", "prism-llamacpp", "bin", "llama-server");
+		const initialHealth = Promise.withResolvers<Response>();
+		let up = false;
+		let servedAlias = "";
+		const terminate = vi.fn(() => {
+			up = false;
+		});
+		const spawnFn = vi.fn((_command: string, argv: string[]) => {
+			servedAlias = argv[argv.indexOf("--alias") + 1] ?? "";
+			up = true;
+			return fakeChild(4600 + spawnFn.mock.calls.length);
+		});
+		const runtime = new PrismLlamaCppRuntime({
+			agentDir,
+			deps: {
+				existsFn: (path) => path === binaryPath,
+				sleepFn: async () => {},
+				fetchFn: (async (input) => {
+					if (!up) return initialHealth.promise;
+					return String(input).endsWith("/v1/models")
+						? Response.json({ data: [{ id: servedAlias }] })
+						: new Response("", { status: 200 });
+				}) as typeof fetch,
+				spawnFn,
+				processLifecycle: { track: () => {}, untrack: () => {}, terminate },
+			},
+		});
+
+		const first = runtime.serve({ modelPath: "/models/a.gguf", modelAlias: "acme/a", port: 8130, numCtx: 4096 });
+		const second = runtime.serve({ modelPath: "/models/b.gguf", modelAlias: "acme/b", port: 8130, numCtx: 4096 });
+		initialHealth.resolve(new Response("", { status: 503 }));
+
+		await expect(first).resolves.toEqual({ ok: true, baseUrl: "http://127.0.0.1:8130" });
+		await expect(second).resolves.toEqual({ ok: true, baseUrl: "http://127.0.0.1:8130" });
+		expect(spawnFn).toHaveBeenCalledTimes(2);
+		expect(terminate).toHaveBeenCalledTimes(1);
+	});
+
 	it("reports binary-missing when there is no manifest at all", async () => {
 		const spawnFn = vi.fn();
 		const runtime = new PrismLlamaCppRuntime({

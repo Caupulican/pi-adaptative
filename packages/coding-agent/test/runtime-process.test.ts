@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Readable, Transform } from "node:stream";
@@ -14,6 +14,7 @@ import {
 	waitForWritableClosed,
 	writeRuntimeDownload,
 } from "../src/core/models/runtime-process.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("runtime process ownership", () => {
 	it("retains an exact bounded tail while progress receives every fragmented output unit", async () => {
@@ -149,7 +150,7 @@ describe("runtime process ownership", () => {
 					callback(new Error("integrity stream failed"));
 				},
 			});
-			await expect(writeRuntimeDownload(Readable.from(["partial"]), partial, fail)).resolves.toEqual({
+			await expect(writeRuntimeDownload(Readable.from(["partial"]), partial, { transform: fail })).resolves.toEqual({
 				ok: false,
 				error: "download-fail: integrity stream failed",
 			});
@@ -157,6 +158,25 @@ describe("runtime process ownership", () => {
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
+	});
+
+	it("preserves the published destination when a replacement stream fails", async () => {
+		const root = tempDir("pi-runtime-atomic-replacement-");
+		const destination = join(root, "model.gguf");
+		writeFileSync(destination, "last-known-good");
+		const fail = new Transform({
+			transform(_chunk, _encoding, callback) {
+				callback(new Error("replacement failed"));
+			},
+		});
+
+		await expect(
+			writeRuntimeDownload(Readable.from(["corrupt-replacement"]), destination, { transform: fail }),
+		).resolves.toEqual({
+			ok: false,
+			error: "download-fail: replacement failed",
+		});
+		expect(readFileSync(destination, "utf8")).toBe("last-known-good");
 	});
 
 	it("detects the current runtime executable and rejects a missing command", () => {
