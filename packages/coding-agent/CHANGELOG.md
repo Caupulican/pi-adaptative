@@ -23,6 +23,7 @@
 - Supervision requests and System One directives remain pending until their selected route accepts execution, with exact producer and replacement-identity fencing across retries.
 - Explicit independent-verifier supervision requests always dispatch to a worker, while ordinary verification remains eligible for root execution.
 - Shared-worktree mutation coordination owns provider-local call IDs by session across announcements, command holds, terminal retirement, and background handoff, so parallel sessions cannot overwrite or release one another's same-ID state.
+- A canceled file mutation waiting behind an earlier same-file mutation now rejects immediately and cannot execute after the predecessor settles.
 
 ## [0.99.52] - 2026-09-26
 

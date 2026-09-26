@@ -662,7 +662,10 @@ export async function withFileMutationQueue<T>(
 		// in-flight for a command run, not just the one executing.
 		await scope.joinMutationGroup(options?.callId, options?.signal, options?.announcer);
 		holdsLock = true;
-		await currentQueue;
+		await raceAbort(currentQueue, options?.signal);
+		// The predecessor can settle in the same turn that cancellation arrives. Recheck at the exact
+		// ownership handoff so a cancelled waiter never invokes its mutation after winning that race.
+		if (options?.signal?.aborted) throw options.signal.reason;
 		return await fn();
 	} finally {
 		// A cancelled wait never joined the lock; releasing it would credit a holder that was never

@@ -55,6 +55,61 @@ describe("withFileMutationQueue", () => {
 		expect(order).toEqual(["first:start", "first:end", "second:start", "second:end"]);
 	});
 
+	it("aborting a same-file waiter rejects at once and never runs it after the predecessor settles", async () => {
+		const firstStarted = createDeferred();
+		const releaseFirst = createDeferred();
+		const secondRegistered = createDeferred();
+		let resolutions = 0;
+		const backend = {
+			async resolveKey() {
+				resolutions += 1;
+				if (resolutions === 2) secondRegistered.resolve();
+				return "same-file";
+			},
+		};
+		const first = withFileMutationQueue(
+			"first-spelling",
+			async () => {
+				firstStarted.resolve();
+				await releaseFirst.promise;
+			},
+			backend,
+		);
+		await firstStarted.promise;
+
+		const controller = new AbortController();
+		let secondRan = false;
+		const second = withFileMutationQueue(
+			"second-spelling",
+			async () => {
+				secondRan = true;
+			},
+			backend,
+			{ signal: controller.signal },
+		);
+		const secondOutcome = second.then(
+			() => "resolved",
+			(error: unknown) => error,
+		);
+		let secondSettled = false;
+		void secondOutcome.then(() => {
+			secondSettled = true;
+		});
+		await secondRegistered.promise;
+		await delay(0);
+
+		controller.abort("turn cancelled");
+		await delay(0);
+		const rejectedBeforePredecessorSettled = secondSettled;
+		releaseFirst.resolve();
+		await first;
+		const outcome = await secondOutcome;
+
+		expect(rejectedBeforePredecessorSettled).toBe(true);
+		expect(outcome).toBe("turn cancelled");
+		expect(secondRan).toBe(false);
+	});
+
 	it("allows different files to proceed in parallel", async () => {
 		const order: string[] = [];
 
