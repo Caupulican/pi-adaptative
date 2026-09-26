@@ -1,5 +1,6 @@
 /** One production lifecycle boundary for every process/state resource owned by a shell session. */
 
+import { settleIndependentLifecycle } from "../lifecycle-settlement.ts";
 import { disposeShellSessionLanes } from "./shell-lane-pool.ts";
 import { disposePersistentShellSession } from "./shell-session.ts";
 import { disposeWindowsShellEngineSession } from "./windows-shell-engine.ts";
@@ -20,13 +21,14 @@ export function disposeShellExecutionSession(sessionKey: string): void {
 	const p3 = disposeShellSessionLanes(sessionKey);
 
 	const previous = inFlightTerminalPromises.get(sessionKey);
-	const combined = Promise.all([previous ?? Promise.resolve(), p1, p2, p3])
-		.then(() => undefined)
-		.finally(() => {
-			if (inFlightTerminalPromises.get(sessionKey) === combined) {
-				inFlightTerminalPromises.delete(sessionKey);
-			}
-		});
+	const combined = settleIndependentLifecycle(
+		[() => previous ?? Promise.resolve(), () => p1, () => p2, () => p3],
+		"Shell execution session disposal failed",
+	).finally(() => {
+		if (inFlightTerminalPromises.get(sessionKey) === combined) {
+			inFlightTerminalPromises.delete(sessionKey);
+		}
+	});
 
 	inFlightTerminalPromises.set(sessionKey, combined);
 }

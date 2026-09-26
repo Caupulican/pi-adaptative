@@ -5,6 +5,7 @@
  * durable owner rules, project-rule hooks, worker supervision, acquisition screening, the live
  * operator projection and semantic-plane health.
  */
+// @guards src/core/agent-session.ts src/core/tool-gate-controller.ts
 
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -86,6 +87,10 @@ describe("Session closure surfaces", () => {
 
 	it("screens an acquisition-shaped command at the boundary and passes ordinary work", async () => {
 		const harness = await createRcSdkHarness({ prompt: "build and test the project" });
+		harness.replyWith("persisted owner");
+		await harness.session.prompt("establish the persisted owner for direct tool-gate integration");
+		const assistantMessage = harness.session.agent.state.messages.at(-1);
+		if (assistantMessage?.role !== "assistant") throw new Error("Expected a persisted assistant message");
 		const gate = (
 			harness.session as unknown as {
 				_toolGate: {
@@ -93,7 +98,6 @@ describe("Session closure surfaces", () => {
 				};
 			}
 		)._toolGate;
-		const assistantMessage = { provider: "faux", model: "faux-model", content: [] };
 
 		const ordinary = await gate.beforeToolCall({
 			toolCall: { id: "call-1", name: "bash", arguments: {} },

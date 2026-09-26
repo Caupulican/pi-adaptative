@@ -119,6 +119,10 @@ export function createExtensionAPI(
 	eventBus: EventBus,
 	agentDir: string,
 ): ExtensionAPI {
+	const generationAbort = new AbortController();
+	// This host-owned disposer is registered before the factory receives the API, so generation
+	// teardown cancels admitted commands before any extension-owned disposer can wait on them.
+	extension.disposers.push(() => generationAbort.abort());
 	const sharedRuntime = runtime;
 	runtime = new Proxy(sharedRuntime, {
 		get(target, property, receiver) {
@@ -246,7 +250,12 @@ export function createExtensionAPI(
 		},
 		exec(command: string, args: string[], options?: ExecOptions) {
 			runtime.assertActive();
-			return execCommand(command, args, options?.cwd ?? cwd, options);
+			return execCommand(command, args, options?.cwd ?? cwd, {
+				...options,
+				signal: options?.signal
+					? AbortSignal.any([options.signal, generationAbort.signal])
+					: generationAbort.signal,
+			});
 		},
 		getActiveTools() {
 			runtime.assertActive();
