@@ -583,6 +583,7 @@ export class RuntimeBuilder {
 		// The group lock is the worktree's (shared with every session working in it); emission order is per session.
 		this._fileMutationIntents = new FileMutationIntentController({
 			mutationScope: mutationScopeForWorktree(deps.getCwd()),
+			mutationAnnouncer: deps.getShellSessionKey(),
 		});
 		this._taskAutomationAdapter = new TaskAutomationRuntimeAdapter({
 			getCwd: () => this._taskDirectories.cwd,
@@ -1099,6 +1100,7 @@ export class RuntimeBuilder {
 				// Not `sessionKey`: a task-directory invocation rebinds that to its own shell lane, while
 				// the lock this run takes must stay the one the session's writes and announcements use.
 				mutationScope: mutationScopeForWorktree(this.deps.getCwd()),
+				mutationAnnouncer: this.deps.getShellSessionKey(),
 				platform: process.platform,
 				windowsShellPythonEngine: windowsShell.pythonEngine,
 				windowsShellEngineOptions: { gnuToolsDir: windowsShell.gnuToolsDir },
@@ -1119,6 +1121,7 @@ export class RuntimeBuilder {
 				environment: (cwd) => this._credentialManager.getEnvironmentForCwd(cwd) ?? {},
 				omitEnvironmentVariables: ["BW_SESSION"],
 				mutationScope: mutationScopeForWorktree(this.deps.getCwd()),
+				mutationAnnouncer: this.deps.getShellSessionKey(),
 			},
 			write: { intentController: this._fileMutationIntents },
 			edit: { intentController: this._fileMutationIntents, fileEncodings },

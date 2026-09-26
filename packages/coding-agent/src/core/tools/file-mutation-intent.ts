@@ -158,6 +158,8 @@ export interface FileMutationIntentControllerOptions {
 	 * which is what a single-session host had all along.
 	 */
 	mutationScope?: string;
+	/** Session owner within a shared worktree scope; provider call ids are only unique for this owner. */
+	mutationAnnouncer?: string;
 }
 
 function errorCode(error: unknown): string | undefined {
@@ -354,6 +356,7 @@ export class FileMutationIntentController {
 	private readonly now: () => number;
 	/** Session identity forwarded to the group lock; undefined keeps the process-wide default scope. */
 	private readonly mutationScope: string | undefined;
+	private readonly mutationAnnouncer: string | undefined;
 	private mutationScopeReleased = false;
 	private readonly contentReferences = new Map<string, ContentReferenceRecord>();
 	private readonly mutationPayloads = new Map<string, MutationPayloadRecord>();
@@ -400,6 +403,7 @@ export class FileMutationIntentController {
 		);
 		this.now = options.now ?? Date.now;
 		this.mutationScope = options.mutationScope;
+		this.mutationAnnouncer = options.mutationAnnouncer;
 		if (this.mutationScope !== undefined) retainMutationLockScope(this.mutationScope);
 	}
 
@@ -436,6 +440,7 @@ export class FileMutationIntentController {
 		return withFileMutationQueue(absolutePath, operation, this.operations.mutationQueue, {
 			...options,
 			...(this.mutationScope !== undefined ? { scope: this.mutationScope } : {}),
+			...(this.mutationAnnouncer !== undefined ? { announcer: this.mutationAnnouncer } : {}),
 		});
 	}
 

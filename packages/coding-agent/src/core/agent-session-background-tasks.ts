@@ -31,6 +31,8 @@ export interface SessionBackgroundToolTaskDeps {
 	): BackgroundToolTerminalDeliveryResult | Promise<BackgroundToolTerminalDeliveryResult>;
 	/** Session identity of the group lock a handed-off command run holds. */
 	getMutationScope(): string;
+	/** Owner of provider-local tool-call ids within the shared group lock. */
+	getMutationAnnouncer(): string;
 	emit(event: AgentSessionEvent): void;
 	addSpawnedUsage(usage: Usage, options: { label?: string; sourceSessionId?: string; reportId?: string }): void;
 }
@@ -43,6 +45,7 @@ export function createSessionBackgroundToolTasks(deps: SessionBackgroundToolTask
 		getSessionLineageIds: () => deps.getSessionManager().getSessionLineageIds(),
 		isForegroundWait: (tool, args) => deps.isForegroundWait(tool, args),
 		getMutationScope: () => deps.getMutationScope(),
+		getMutationAnnouncer: () => deps.getMutationAnnouncer(),
 		getArtifactStore: () => deps.getArtifactStore(),
 		loadPersistedRecordsNewestFirst: () => loadBackgroundToolTaskRecordsNewestFirst(deps.getSessionManager()),
 		persist: (record, kind) => {

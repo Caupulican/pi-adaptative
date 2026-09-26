@@ -95,6 +95,8 @@ export interface ToolGateControllerDeps {
 	 * (see file-mutation-queue.ts). Omitted retires in the process-wide default scope.
 	 */
 	getMutationScope?(): string;
+	/** Owner of provider-local call ids within the shared mutation scope. */
+	getMutationAnnouncer?(): string;
 	/** Direct script execution gate: intercepts shell/process execution of registered automation scripts. */
 	checkDirectScriptExecution?(toolName: string, args: unknown, cwd?: string): BeforeToolCallResult | undefined;
 	/**
@@ -421,7 +423,7 @@ export class ToolGateController {
 		// longer start a file mutation, so a sibling exclusive run emitted after it must stop waiting.
 		// Retired first and synchronously, before any hook here can throw -- a write rejected by its own
 		// preflight would otherwise park a later bash in the same batch for the rest of the turn.
-		retireToolCall(toolCall.id, this.deps.getMutationScope?.());
+		retireToolCall(toolCall.id, this.deps.getMutationScope?.(), this.deps.getMutationAnnouncer?.());
 		const selection = this.deps.getToolSelectionController?.();
 		let finishSucceeded = !isError;
 		try {

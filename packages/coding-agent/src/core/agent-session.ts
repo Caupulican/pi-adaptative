@@ -1395,6 +1395,7 @@ export class AgentSession {
 			isForegroundWait: (tool, args) => this.getToolDefinition(tool)?.foregroundWait?.(args as never) === true,
 			getArtifactStore: () => this._getToolArtifactStore(),
 			getMutationScope: () => this.mutationScope,
+			getMutationAnnouncer: () => this._shellSessionKey,
 			notifyTerminal: (records, wakeParent) => this._terminalHandoffs.notifyTools(records, wakeParent),
 			emit: (event) => this._emit(event),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
@@ -2142,6 +2143,7 @@ export class AgentSession {
 			gateSelfCompaction: (toolName, assistantMessage) =>
 				this._selfCompaction.gateToolCall(toolName, assistantMessage),
 			getMutationScope: () => this.mutationScope,
+			getMutationAnnouncer: () => this._shellSessionKey,
 			noteMutatingCall: (toolName, assistantMessage) => {
 				// The enforced work boundary: the first call that may change the world with no work declared
 				// (a goal being worked declares its own unit) opens one unit until the owner speaks again.

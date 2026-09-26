@@ -193,7 +193,15 @@ function createLaneTools(
 		["repo_read", () => createRepoReadTool(cwd)],
 		["write", () => createWriteTool(cwd, { intentController: fileMutationIntents })],
 		["edit", () => createEditTool(cwd, { ...shared.edit, intentController: fileMutationIntents })],
-		[PYTHON_LANE_TOOL_NAME, () => createPythonTool(cwd, { ...shared.python, mutationScope })],
+		[
+			PYTHON_LANE_TOOL_NAME,
+			() =>
+				createPythonTool(cwd, {
+					...shared.python,
+					mutationScope,
+					...(shellSessionKey ? { mutationAnnouncer: shellSessionKey } : {}),
+				}),
+		],
 	]);
 	if (executionPolicy) {
 		factories.set(PROCESS_LANE_TOOL_NAME, () =>
@@ -206,6 +214,7 @@ function createLaneTools(
 				...shared.bash,
 				sessionKey: shellSessionKey,
 				mutationScope,
+				mutationAnnouncer: shellSessionKey,
 				forceCwd: true,
 				prewarmWindowsShell: true,
 				...(shellOutputDirectory ? { outputDirectory: shellOutputDirectory } : {}),
@@ -276,7 +285,10 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	// with the parent's command runs and writes (a lane's write waits for the parent's running
 	// build), while a lane in its own worktree shares nothing (see tools/file-mutation-queue.ts).
 	const mutationScope = mutationScopeForWorktree(options.cwd);
-	const fileMutationIntents = new FileMutationIntentController({ mutationScope });
+	const fileMutationIntents = new FileMutationIntentController({
+		mutationScope,
+		...(options.shellSessionKey ? { mutationAnnouncer: options.shellSessionKey } : {}),
+	});
 	// YOLO widens a lane to every tool except where the lane is read-only: that is the parent's promise.
 	const yoloWrites = options.yolo === true && options.shellReadOnly !== true;
 	const writeCapable = yoloWrites || (options.writeEnabled === true && (options.writePaths?.length ?? 0) > 0);

@@ -256,6 +256,8 @@ export interface BackgroundToolTaskControllerDeps {
 	 * Omitted releases in the process-wide default scope.
 	 */
 	getMutationScope?(): string;
+	/** Owner of provider-local call ids within the shared mutation scope. */
+	getMutationAnnouncer?(): string;
 }
 
 interface BackgroundToolTaskState {
@@ -741,6 +743,7 @@ export class BackgroundToolTaskController {
 		// Resolve dependencies before registering ownership: the core retains foreground ownership
 		// when handoff throws. A failed lookup must not leave a second completion subscriber here.
 		const mutationScope = this.deps.getMutationScope?.();
+		const mutationAnnouncer = this.deps.getMutationAnnouncer?.();
 		const sessionId = this.deps.getSessionId();
 		const taskId = `tool-task-${this.nextTaskId++}`;
 		const startedAt = this.now().toISOString();
@@ -786,7 +789,7 @@ export class BackgroundToolTaskController {
 		// process-wide exclusive mutation barrier its tool took when it started. A command requested as
 		// background never takes the barrier at all; a clock or manual handoff releases it here, which
 		// is the only reason a 30-minute job used to park every sibling bash/python behind it.
-		releaseExclusiveHold(context.toolCall.id, mutationScope);
+		releaseExclusiveHold(context.toolCall.id, mutationScope, mutationAnnouncer);
 
 		return {
 			result: {

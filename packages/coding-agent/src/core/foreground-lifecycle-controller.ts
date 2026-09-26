@@ -135,7 +135,8 @@ export class ForegroundLifecycleController {
 	/** Drop in-flight associations when the host swaps/reloads the active session branch. */
 	resetForSessionReload(): void {
 		const scope = this.deps.getMutationScope?.();
-		for (const identity of this.startedTools.values()) retireToolCall(identity.callId, scope);
+		const announcer = this.deps.getAnnouncer?.();
+		for (const identity of this.startedTools.values()) retireToolCall(identity.callId, scope, announcer);
 		this.startedTools.clear();
 		this.pendingToolsByCall.clear();
 		this.terminalProviderRequests.clear();
@@ -347,7 +348,7 @@ export class ForegroundLifecycleController {
 		const result = message as ToolResultMessage;
 		// Durable terminal for the emission-order announcement. ToolGateController already retires it
 		// at the execution terminal; this covers a reserved call that never reached execution at all.
-		retireToolCall(result.toolCallId, this.deps.getMutationScope?.());
+		retireToolCall(result.toolCallId, this.deps.getMutationScope?.(), this.deps.getAnnouncer?.());
 		const pending = this.pendingToolsByCall.get(this.callKey(result.toolCallId, result.toolName));
 		if (pending?.size !== 1) return;
 		const key = pending.values().next().value as string;

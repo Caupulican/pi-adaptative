@@ -64,7 +64,7 @@ describe("tool start reservation cleanup", () => {
 			parameters,
 			mutationTarget: () => "/fixture/alpha.txt",
 			async execute(id) {
-				await scope.joinMutationGroup(id, undefined);
+				await scope.joinMutationGroup(id, undefined, "fixture");
 				try {
 					executed.push(id);
 					return { content: [{ type: "text", text: "Mutation completed" }], details: {} };
@@ -255,7 +255,7 @@ describe("tool start reservation cleanup", () => {
 			})),
 		);
 		try {
-			const wait = scope.waitForEarlierAnnouncedCalls("second", "shell", undefined);
+			const wait = scope.waitForEarlierAnnouncedCalls("second", "shell", undefined, "fixture");
 			if (toolName === "read") {
 				await wait;
 			} else {

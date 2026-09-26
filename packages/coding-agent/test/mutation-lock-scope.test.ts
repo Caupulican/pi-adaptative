@@ -12,6 +12,7 @@ import {
 	disposeMutationLockScope,
 	getMutationLockScope,
 	mutationScopeForWorktree,
+	releaseExclusiveHold,
 	retainMutationLockScope,
 	retireToolCall,
 	withExclusiveMutationBarrier,
@@ -125,18 +126,18 @@ describe("per-session mutation lock scopes", () => {
 
 	it("a batch switch in one scope leaves another scope's announcements pending", async () => {
 		const started: string[] = [];
-		announceToolCall("b-write", 0, true, "batch-b", "session-b");
-		announceToolCall("b-bash", 1, false, "batch-b", "session-b");
-		announceToolCall("a-write", 0, true, "batch-a1", "session-a");
+		announceToolCall("b-write", 0, true, "batch-b", "session-b", "session-b");
+		announceToolCall("b-bash", 1, false, "batch-b", "session-b", "session-b");
+		announceToolCall("a-write", 0, true, "batch-a1", "session-a", "session-a");
 
 		// A new wave in session A retires session A's leftovers only.
-		announceToolCall("a2-write", 0, true, "batch-a2", "session-a");
+		announceToolCall("a2-write", 0, true, "batch-a2", "session-a", "session-a");
 
 		const bRun = withExclusiveMutationBarrier(
 			async () => {
 				started.push("b-bash");
 			},
-			{ holdId: "b-bash", scope: "session-b" },
+			{ holdId: "b-bash", scope: "session-b", announcer: "session-b" },
 		);
 		expect(await settled(bRun)).toBe(false);
 		expect(started).toEqual([]);
@@ -146,16 +147,16 @@ describe("per-session mutation lock scopes", () => {
 			async () => {
 				started.push("a-bash");
 			},
-			{ holdId: "a-write", scope: "session-a" },
+			{ holdId: "a-write", scope: "session-a", announcer: "session-a" },
 		);
 		await aRun;
 		expect(started).toEqual(["a-bash"]);
 
-		retireToolCall("b-write", "session-b");
+		retireToolCall("b-write", "session-b", "session-b");
 		await bRun;
 		expect(started).toEqual(["a-bash", "b-bash"]);
-		retireToolCall("b-bash", "session-b");
-		retireToolCall("a2-write", "session-a");
+		retireToolCall("b-bash", "session-b", "session-b");
+		retireToolCall("a2-write", "session-a", "session-a");
 	});
 
 	it("two sessions in one worktree: a wave switch in one leaves the other's announcements pending", async () => {
@@ -165,13 +166,17 @@ describe("per-session mutation lock scopes", () => {
 		announceToolCall("a-write", 0, true, "batch-a1", scope, "session-a");
 		// Session A moves to its next wave; B's calls are still in flight.
 		announceToolCall("a2-write", 0, true, "batch-a2", scope, "session-a");
-		const bBash = withExclusiveMutationBarrier(async () => "b-ran", { holdId: "b-bash", scope });
+		const bBash = withExclusiveMutationBarrier(async () => "b-ran", {
+			holdId: "b-bash",
+			scope,
+			announcer: "session-b",
+		});
 		// B's bash waits for B's earlier write, which is still pending, so it must not have run yet.
 		expect(await settled(bBash)).toBe(false);
-		retireToolCall("b-write", scope);
+		retireToolCall("b-write", scope, "session-b");
 		expect(await bBash).toBe("b-ran");
-		retireToolCall("b-bash", scope);
-		retireToolCall("a2-write", scope);
+		retireToolCall("b-bash", scope, "session-b");
+		retireToolCall("a2-write", scope, "session-a");
 	});
 
 	it("two sessions in one worktree: emission order is compared only among one session's calls", async () => {
@@ -179,11 +184,90 @@ describe("per-session mutation lock scopes", () => {
 		// Session A has a pending write at index 0; session B's bash is index 1 of ITS OWN wave.
 		announceToolCall("a-write", 0, true, "batch-a", scope, "session-a");
 		announceToolCall("b-bash", 1, false, "batch-b", scope, "session-b");
-		const bBash = withExclusiveMutationBarrier(async () => "b-ran", { holdId: "b-bash", scope });
+		const bBash = withExclusiveMutationBarrier(async () => "b-ran", {
+			holdId: "b-bash",
+			scope,
+			announcer: "session-b",
+		});
 		// A's index-0 write is not "earlier" for B: B's bash runs without waiting for it.
 		expect(await bBash).toBe("b-ran");
-		retireToolCall("a-write", scope);
-		retireToolCall("b-bash", scope);
+		retireToolCall("a-write", scope, "session-a");
+		retireToolCall("b-bash", scope, "session-b");
+	});
+
+	it("two sessions in one worktree retain separate same-id announcements", async () => {
+		const scope = "worktree-call-collision";
+		announceToolCall("shared-call", 0, "mutation", "batch-a", scope, "session-a");
+		announceToolCall("a-bash", 1, "shell", "batch-a", scope, "session-a");
+		announceToolCall("shared-call", 0, "mutation", "batch-b", scope, "session-b");
+
+		let aBashStarted = false;
+		const aBash = withExclusiveMutationBarrier(
+			async () => {
+				aBashStarted = true;
+				return "a-ran";
+			},
+			{
+				holdId: "a-bash",
+				scope,
+				announcer: "session-a",
+			},
+		);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		const ranBeforeOwnWriteRetired = aBashStarted;
+
+		retireToolCall("shared-call", scope, "session-a");
+		expect(await aBash).toBe("a-ran");
+		retireToolCall("a-bash", scope, "session-a");
+		retireToolCall("shared-call", scope, "session-b");
+		expect(ranBeforeOwnWriteRetired).toBe(false);
+	});
+
+	it("two sessions in one worktree release only their own same-id shell hold", async () => {
+		const scope = "worktree-hold-collision";
+		const firstGate = deferred();
+		const secondGate = deferred();
+		const started: string[] = [];
+		announceToolCall("shared-shell", 0, "shell", "batch-a", scope, "session-a");
+		announceToolCall("shared-shell", 0, "shell", "batch-b", scope, "session-b");
+		const first = withExclusiveMutationBarrier(
+			async () => {
+				started.push("a");
+				await firstGate.promise;
+			},
+			{ holdId: "shared-shell", scope, announcer: "session-a" },
+		);
+		const second = withExclusiveMutationBarrier(
+			async () => {
+				started.push("b");
+				await secondGate.promise;
+			},
+			{ holdId: "shared-shell", scope, announcer: "session-b" },
+		);
+		await waitUntil(() => started.length === 2);
+
+		expect(releaseExclusiveHold("shared-shell", scope, "session-a")).toBe(true);
+		firstGate.resolve();
+		await first;
+		let mutationRan = false;
+		const mutation = withFileMutationQueue(
+			path.join(tmpdir(), "pi-same-id-hold.txt"),
+			async () => {
+				mutationRan = true;
+			},
+			undefined,
+			{ scope },
+		);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		const remainedBlockedBySessionB = !mutationRan;
+		const releasedSessionB = releaseExclusiveHold("shared-shell", scope, "session-b");
+		secondGate.resolve();
+		await Promise.all([second, mutation]);
+		retireToolCall("shared-shell", scope, "session-a");
+		retireToolCall("shared-shell", scope, "session-b");
+
+		expect(remainedBlockedBySessionB).toBe(true);
+		expect(releasedSessionB).toBe(true);
 	});
 
 	it("two sessions in one worktree still interlock: one's exclusive run blocks the other's write", async () => {

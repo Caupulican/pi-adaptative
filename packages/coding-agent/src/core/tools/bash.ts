@@ -531,6 +531,8 @@ export interface BashToolOptions {
 	 * is ordered against belong to the AGENT SESSION. Omitted keeps the process-wide default scope.
 	 */
 	mutationScope?: string;
+	/** Session owner within a shared worktree scope; remains stable when a task rebinds `sessionKey`. */
+	mutationAnnouncer?: string;
 	/** Host-owned task pin. Each invocation starts in cwd; command-local cd remains available. */
 	forceCwd?: boolean;
 	/** Route complex/state-mutating Bash constructs and portable builtins to the Python engine on Windows. Default: true. */
@@ -740,6 +742,9 @@ function createShellToolDefinition(
 	const toolName = "bash";
 	const sessionKey = options?.sessionKey ?? `bash-tool:${randomUUID()}`;
 	const mutationScope = options?.mutationScope;
+	// Only the host-supplied key identifies announced calls. A generated standalone shell key must
+	// remain in the unowned compatibility namespace used by callers that do not announce tool calls.
+	const mutationAnnouncer = options?.mutationAnnouncer;
 	const ops =
 		options?.operations ??
 		(backendShell === "powershell"
@@ -1236,10 +1241,15 @@ function createShellToolDefinition(
 				// becomes a session task after it already started (see releaseExclusiveHold).
 				const result = await withExclusiveMutationBarrier(
 					async () => {
-						if (background === true) releaseExclusiveHold(toolCallId, mutationScope);
+						if (background === true) releaseExclusiveHold(toolCallId, mutationScope, mutationAnnouncer);
 						return runCommand();
 					},
-					{ signal, holdId: toolCallId, ...(mutationScope !== undefined ? { scope: mutationScope } : {}) },
+					{
+						signal,
+						holdId: toolCallId,
+						...(mutationScope !== undefined ? { scope: mutationScope } : {}),
+						...(mutationAnnouncer !== undefined ? { announcer: mutationAnnouncer } : {}),
+					},
 				);
 				const { resolvedCommand, spawnContext } = prepared;
 				// The lane pool records the directory of every command it ran itself. A caller-supplied

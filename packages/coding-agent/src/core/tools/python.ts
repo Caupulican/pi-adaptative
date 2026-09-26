@@ -165,6 +165,8 @@ export interface PythonToolOptions {
 	 * (see file-mutation-queue.ts). Omitted keeps the process-wide default scope.
 	 */
 	mutationScope?: string;
+	/** Session owner within a shared worktree scope; provider call ids are only unique for this owner. */
+	mutationAnnouncer?: string;
 }
 
 export function resolvePythonToolPath(
@@ -267,6 +269,7 @@ export function createPythonToolDefinition(
 	const resolveRuntime = options.resolveRuntime ?? (() => ensurePythonRuntime({ silent: true }));
 	const operations = options.operations ?? createLocalPythonOperations();
 	const mutationScope = options.mutationScope;
+	const mutationAnnouncer = options.mutationAnnouncer;
 	const recoveryAuthority = selectFileFailureRecoveryAuthority(
 		options.operations !== undefined,
 		options.failureRecoveryAuthority,
@@ -460,10 +463,15 @@ export function createPythonToolDefinition(
 				// drop the barrier for a run that only becomes a session task after it started.
 				execution = await withExclusiveMutationBarrier(
 					async () => {
-						if (input.background === true) releaseExclusiveHold(toolCallId, mutationScope);
+						if (input.background === true) releaseExclusiveHold(toolCallId, mutationScope, mutationAnnouncer);
 						return runSnippet();
 					},
-					{ signal, holdId: toolCallId, ...(mutationScope !== undefined ? { scope: mutationScope } : {}) },
+					{
+						signal,
+						holdId: toolCallId,
+						...(mutationScope !== undefined ? { scope: mutationScope } : {}),
+						...(mutationAnnouncer !== undefined ? { announcer: mutationAnnouncer } : {}),
+					},
 				);
 				const snapshots = finishStreams();
 				const sections: string[] = [];
