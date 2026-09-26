@@ -49,6 +49,7 @@ describe("worker reroute evidence", () => {
 	it("does not cancel a reader solely because semantic scoring says progress is poor", async () => {
 		const instance = supervisor();
 		expect((await instance.observe(observation("reader", 4)))?.action).toBe("steer_once");
+		instance.noteSteering("reader", 4); // The coordinator commits this only after control delivery.
 		expect((await instance.observe(observation("reader", 7)))?.action).toBe("continue");
 	});
 
@@ -61,6 +62,7 @@ describe("worker reroute evidence", () => {
 	it("still reroutes an exactly repeated strategy after the steering grace window", async () => {
 		const instance = supervisor();
 		expect((await instance.observe(observation("repeat", 4, true)))?.action).toBe("steer_once");
+		instance.noteSteering("repeat", 4); // Negative control: the steer reached worker control.
 		expect((await instance.observe(observation("repeat", 7, true)))?.action).toBe("stop_and_reroute");
 	});
 });

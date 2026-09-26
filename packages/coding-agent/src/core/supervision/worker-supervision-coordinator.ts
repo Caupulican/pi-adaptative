@@ -126,6 +126,27 @@ export class WorkerSupervisionCoordinator {
 		this.consumedRootRequestIds.add(signalId);
 	}
 
+	private reportError(attemptId: string, error: unknown): void {
+		const text = error instanceof Error ? error.message : String(error);
+		const fingerprint = `${attemptId}:${text}`;
+		const lastReportedAt = this.lastErrorTimestamp.get(fingerprint) ?? 0;
+		const now = Date.now();
+		// F12: Debounce repeated identical supervision/control errors for the same attempt by 30 seconds.
+		if (now - lastReportedAt <= 30_000) return;
+		this.lastErrorTimestamp.set(fingerprint, now);
+		try {
+			this.deps.onSupervisionError?.(error);
+		} catch {
+			// A diagnostic observer is outside supervision authority and cannot fail the worker.
+		}
+	}
+
+	private clearErrors(attemptId: string): void {
+		for (const key of this.lastErrorTimestamp.keys()) {
+			if (key.startsWith(`${attemptId}:`)) this.lastErrorTimestamp.delete(key);
+		}
+	}
+
 	/**
 	 * Observes one live worker event and applies the resulting signal through root control.
 	 * Returns the signal when the supervisor produced one, so the caller can record it.
@@ -147,26 +168,11 @@ export class WorkerSupervisionCoordinator {
 		} catch (error) {
 			// Supervision is advisory. A failed assessment must never fail the worker it observes;
 			// the worker keeps running and no intervention is applied on unknown state.
-			const text = error instanceof Error ? error.message : String(error);
-			const fingerprint = `${observation.attemptId}:${text}`;
-			const lastReportedAt = this.lastErrorTimestamp.get(fingerprint) ?? 0;
-			const now = Date.now();
-			// F12: Debounce repeated identical evaluation errors for the same worker attempt by 30 seconds
-			if (now - lastReportedAt > 30_000) {
-				this.lastErrorTimestamp.set(fingerprint, now);
-				this.deps.onSupervisionError?.(error);
-			}
+			this.reportError(observation.attemptId, error);
 			return undefined;
 		}
 		if (!verdict) return undefined;
-		for (const key of this.lastErrorTimestamp.keys()) {
-			if (key.startsWith(`${observation.attemptId}:`)) {
-				this.lastErrorTimestamp.delete(key);
-			}
-		}
-		this.signals.push(verdict);
-		await this.apply(verdict, observation);
-		return verdict;
+		return this.applyAndRecord(verdict, observation);
 	}
 
 	/**
@@ -174,10 +180,12 @@ export class WorkerSupervisionCoordinator {
 	 * building. This is deterministic: it does not need a semantic judgment to fire, and it is
 	 * applied through the same control surface as any other steer.
 	 */
-	async steerValidationChurn(agentId: string, attempt: LiveWorkerAttempt): Promise<WorkerSupervisionSignal> {
+	async steerValidationChurn(
+		agentId: string,
+		attempt: LiveWorkerAttempt,
+	): Promise<WorkerSupervisionSignal | undefined> {
 		const prior = this.deps.supervisor.getPriorSteeringCount(attempt.attemptId);
 		const reroute = prior > 0;
-		if (!reroute) this.deps.supervisor.noteSteering(attempt.attemptId, attempt.toolCalls);
 		const verdict: WorkerSupervisionSignal = {
 			schema_version: "1.0",
 			signal_id: `sig-churn-${attempt.attemptId}-${this.signals.length + 1}`,
@@ -197,23 +205,20 @@ export class WorkerSupervisionCoordinator {
 				? "Worker rerouted · repeated broad validation with no new implementation"
 				: "Worker steered · repeated broad validation with no new implementation",
 		};
-		this.signals.push(verdict);
-		if (reroute) {
-			await this.deps.control.cancelWorker(agentId, verdict.summaryEvent ?? "validation churn reroute");
-		} else {
-			await this.deps.control.steerWorker(agentId, VALIDATION_CHURN_DIRECTIVE);
-		}
-		this.deps.onIntervention?.(verdict);
-		return verdict;
+		return this.applyAndRecord(verdict, { ...attempt, agentId }, VALIDATION_CHURN_DIRECTIVE);
 	}
 
-	private async apply(verdict: WorkerSupervisionSignal, observation: WorkerProgressObservation): Promise<void> {
+	private async applyControl(
+		verdict: WorkerSupervisionSignal,
+		observation: WorkerProgressObservation,
+		steerDirective: string,
+	): Promise<void> {
 		const action: WorkerSupervisionAction = verdict.action;
 		if (action === "continue") return;
 
 		// The worker receives the directive; the signal's explanation is the operator's label for it.
 		if (action === "steer_once") {
-			await this.deps.control.steerWorker(observation.agentId, STALL_DIRECTIVE, "queue");
+			await this.deps.control.steerWorker(observation.agentId, steerDirective, "queue");
 		} else if (action === "steer_now") {
 			await this.deps.control.steerWorker(observation.agentId, OFF_TRACK_DIRECTIVE, "now");
 		} else if (action === "stop_and_reroute") {
@@ -222,8 +227,36 @@ export class WorkerSupervisionCoordinator {
 				verdict.summaryEvent ?? "supervisor requested reroute",
 			);
 		}
-		// request_verifier / request_specialist / request_capability / mark_external_block are root
-		// decisions: they are recorded for the root to retrieve, never executed here.
-		this.deps.onIntervention?.(verdict);
+	}
+
+	private async applyAndRecord(
+		verdict: WorkerSupervisionSignal,
+		observation: WorkerProgressObservation,
+		steerDirective = STALL_DIRECTIVE,
+	): Promise<WorkerSupervisionSignal | undefined> {
+		try {
+			await this.applyControl(verdict, observation, steerDirective);
+		} catch (error) {
+			// The command did not cross its authority boundary. It is neither a delivered steer nor a
+			// completed reroute, and identical evidence must remain eligible for a safe retry.
+			this.deps.supervisor.invalidateAssessment(observation.attemptId);
+			this.reportError(observation.attemptId, error);
+			return undefined;
+		}
+		if (verdict.action === "steer_once" || verdict.action === "steer_now") {
+			this.deps.supervisor.noteSteering(observation.attemptId, observation.toolCalls);
+		}
+		this.clearErrors(observation.attemptId);
+		this.signals.push(verdict);
+		if (verdict.action !== "continue") {
+			try {
+				// request_verifier / request_specialist / request_capability / mark_external_block are root
+				// decisions: recorded for root retrieval, never executed here.
+				this.deps.onIntervention?.(verdict);
+			} catch (error) {
+				this.reportError(observation.attemptId, error);
+			}
+		}
+		return verdict;
 	}
 }

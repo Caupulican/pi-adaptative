@@ -381,6 +381,9 @@ describe("Release Freeze Master Bundle v1.7 Regressions", () => {
 			expect(signal1).toBeDefined();
 			expect(signal1!.action).toBe("steer_once");
 			expect(signal1!.summaryEvent).toBeDefined();
+			// Assessment proposes the action; the coordinator commits it only after control accepts it.
+			expect(supervisor.getPriorSteeringCount(stalledAttempt.attemptId)).toBe(0);
+			supervisor.noteSteering(stalledAttempt.attemptId, stalledAttempt.toolCalls);
 			expect(supervisor.getPriorSteeringCount(stalledAttempt.attemptId)).toBe(1);
 
 			// Second intervention on repeated stall after grace (a full window of tool calls): stop_and_reroute

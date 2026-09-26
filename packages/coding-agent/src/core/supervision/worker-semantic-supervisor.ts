@@ -133,14 +133,21 @@ export class WorkerSemanticSupervisor {
 	}
 
 	/**
-	 * Share anti-oscillation with deterministic churn steers on the same attempt. `toolCalls` is the
-	 * attempt's executed tool-call count when the steer was sent, the start of its grace window.
+	 * Commit one successfully accepted steer for anti-oscillation across semantic and deterministic
+	 * supervision. `toolCalls` is the attempt's executed tool-call count at the control boundary, the
+	 * start of its grace window.
 	 */
 	noteSteering(attemptId: string, toolCalls = 0): number {
 		const next = this.getPriorSteeringCount(attemptId) + 1;
 		this.steeringInterventions.set(attemptId, next);
 		this.steeredAtToolCalls.set(attemptId, toolCalls);
 		return next;
+	}
+
+	/** A failed control action changed no worker state, so the same evidence may be assessed again. */
+	invalidateAssessment(attemptId: string): void {
+		this.lastAssessmentAt.delete(attemptId);
+		this.lastAssessmentHash.delete(attemptId);
 	}
 
 	/**
@@ -339,12 +346,10 @@ export class WorkerSemanticSupervisor {
 				// work is redirected now, not at the worker's next turn; a stall waits for that turn.
 				if (priorSteeringCount === 0 && risk(answers.work_off_track)) {
 					action = "steer_now";
-					this.noteSteering(attempt.attemptId, attempt.toolCalls);
 					summaryEvent = "Worker redirected now · work off the mission";
 					reasonCodes.push("worker_off_track_steer_now");
 				} else if (priorSteeringCount === 0) {
 					action = "steer_once";
-					this.noteSteering(attempt.attemptId, attempt.toolCalls);
 					summaryEvent =
 						answers.meaningful_progress < 0.3
 							? "Worker steering initiated · insufficient meaningful progress"
