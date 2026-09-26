@@ -19,6 +19,7 @@ import {
 	validateOkfMemoryDocumentInput,
 } from "../../context/okf-memory.ts";
 import type { AgentToolResult, ToolDefinition } from "../../extensions/types.ts";
+import { settleIndependentLifecycle } from "../../lifecycle-settlement.ts";
 import { PERSONA_PROJECTION_RULE } from "../../provider-prompt-contracts.ts";
 import {
 	hasInvisibleUnicode,
@@ -591,11 +592,32 @@ export class FileStoreProvider implements MemoryProvider {
 		await fs.mkdir(ctx.agentDir, { recursive: true });
 		await fs.mkdir(projectMemoryDir(ctx.agentDir, identity.hash), { recursive: true });
 		this.okfStore = new OkfProjectMemoryStore(ctx.agentDir, ctx.cwd);
-		[this.lastWrittenMemory, this.lastWrittenUser, this.lastWrittenProjectMemory] = await Promise.all([
-			this.initializeManagedFile("memory", this.memoryFilePath, this.memoryStatePath),
-			this.initializeManagedFile("user", this.userFilePath, this.userStatePath),
-			this.initializeManagedFile("project", this.projectMemoryFilePath, this.projectMemoryStatePath),
-		]);
+		let memorySnapshot = "";
+		let userSnapshot = "";
+		let projectSnapshot = "";
+		await settleIndependentLifecycle(
+			[
+				async () => {
+					memorySnapshot = await this.initializeManagedFile("memory", this.memoryFilePath, this.memoryStatePath);
+				},
+				async () => {
+					userSnapshot = await this.initializeManagedFile("user", this.userFilePath, this.userStatePath);
+				},
+				async () => {
+					projectSnapshot = await this.initializeManagedFile(
+						"project",
+						this.projectMemoryFilePath,
+						this.projectMemoryStatePath,
+					);
+				},
+			],
+			"Managed memory initialization failed",
+		);
+		[this.lastWrittenMemory, this.lastWrittenUser, this.lastWrittenProjectMemory] = [
+			memorySnapshot,
+			userSnapshot,
+			projectSnapshot,
+		];
 		this.frozenUser = undefined;
 		this.frozenPromptLines = undefined;
 		await this.refreshArchivedUserLines();
