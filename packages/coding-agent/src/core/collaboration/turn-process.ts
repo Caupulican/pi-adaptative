@@ -43,11 +43,33 @@ export async function launchCollaborationTurnProcess(
 			child.off("message", onMessage);
 			reject(error);
 		};
+		const settleStartupTimeout = async (): Promise<void> => {
+			if (settled) return;
+			// Timeout wins admission synchronously. A late ready message must stay fenced while the
+			// bounded process-tree owner reaches its own terminal.
+			settled = true;
+			clearTimeout(timer);
+			child.off("message", onMessage);
+			try {
+				const outcome = await killTree(child);
+				reject(
+					new Error(
+						outcome === "failed"
+							? "Collaboration controller startup timed out. Helper process-tree termination is unproven."
+							: "Collaboration controller startup timed out.",
+					),
+				);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				reject(
+					new Error(
+						`Collaboration controller startup timed out. Helper process-tree termination failed (${message}); termination is unproven.`,
+					),
+				);
+			}
+		};
 		const timer = setTimeout(() => {
-			fail(new Error("Collaboration controller startup timed out."));
-			void killTree(child).catch(() => {
-				/* Exact-turn cleanup remains with the coordinator watchdog. */
-			});
+			void settleStartupTimeout();
 		}, 30000);
 		child.once("error", fail);
 		const onMessage = (value: unknown) => {

@@ -78,6 +78,67 @@ it("terminates a startup timeout through the process-tree owner and ignores late
 	f.child.emit("exit", 1);
 });
 
+it("does not publish startup timeout until helper process-tree termination settles", async () => {
+	const f = fixture();
+	const termination = Promise.withResolvers<"terminated">();
+	ports.kill.mockReturnValueOnce(termination.promise);
+	const started = f.start();
+	let launchSettled = false;
+	const outcome = started.then(
+		() => ({ kind: "resolved" as const }),
+		(error: unknown) => ({ kind: "rejected" as const, error }),
+	);
+	void outcome.then(() => {
+		launchSettled = true;
+	});
+
+	await vi.advanceTimersByTimeAsync(30000);
+	await Promise.resolve();
+	expect(ports.kill).toHaveBeenCalledExactlyOnceWith(f.child);
+	expect(launchSettled).toBe(false);
+	f.child.emit("message", { type: "ready", turnId: "turn" });
+	expect(f.child.unref).not.toHaveBeenCalled();
+
+	termination.resolve("terminated");
+	await expect(outcome).resolves.toMatchObject({
+		kind: "rejected",
+		error: expect.objectContaining({ message: expect.stringMatching(/startup timed out/) }),
+	});
+});
+
+it("discloses an unproven helper termination in the startup-timeout failure", async () => {
+	const f = fixture();
+	ports.kill.mockResolvedValueOnce("failed");
+	const started = f.start();
+	const outcome = started.then(
+		() => ({ kind: "resolved" as const }),
+		(error: unknown) => ({ kind: "rejected" as const, error }),
+	);
+
+	await vi.advanceTimersByTimeAsync(30000);
+	await expect(outcome).resolves.toMatchObject({
+		kind: "rejected",
+		error: expect.objectContaining({ message: expect.stringMatching(/termination is unproven/) }),
+	});
+});
+
+it("discloses a rejected helper termination in the startup-timeout failure", async () => {
+	const f = fixture();
+	ports.kill.mockRejectedValueOnce(new Error("signal adapter failed"));
+	const outcome = f.start().then(
+		() => ({ kind: "resolved" as const }),
+		(error: unknown) => ({ kind: "rejected" as const, error }),
+	);
+
+	await vi.advanceTimersByTimeAsync(30000);
+	await expect(outcome).resolves.toMatchObject({
+		kind: "rejected",
+		error: expect.objectContaining({
+			message: expect.stringMatching(/termination failed \(signal adapter failed\); termination is unproven/),
+		}),
+	});
+});
+
 it("an early helper exit cleans only the admitted current turn without replaying input", async () => {
 	const f = fixture();
 	const rejected = expect(f.start()).rejects.toThrow(/before admission/);
