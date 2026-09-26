@@ -34,6 +34,7 @@ import { getProcessWorkRun } from "../utils/work-directory.ts";
 import { gitDir, npmDir } from "./agent-paths.ts";
 import { createRollingOutputBuffer } from "./exec.ts";
 import { isExtensionPathAllowedForImport } from "./extension-import-authority.ts";
+import { settleIndependentLifecycle } from "./lifecycle-settlement.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
 import { createResourceIgnoreMatcher, toPosixResourcePath } from "./resource-ignore.ts";
 import { mergeResourceProfileMap, parseResourceProfileBlocks } from "./resource-profile-blocks.ts";
@@ -864,12 +865,12 @@ export class DefaultPackageManager implements PackageManager {
 			}
 		}
 
-		const tasks: Promise<void>[] = [];
+		const tasks: Array<() => Promise<void>> = [];
 		if (userNpmUpdates.length > 0) {
-			tasks.push(this.updateNpmBatch(userNpmUpdates, "user"));
+			tasks.push(() => this.updateNpmBatch(userNpmUpdates, "user"));
 		}
 		if (projectNpmUpdates.length > 0) {
-			tasks.push(this.updateNpmBatch(projectNpmUpdates, "project"));
+			tasks.push(() => this.updateNpmBatch(projectNpmUpdates, "project"));
 		}
 		if (gitCandidates.length > 0) {
 			const gitTasks = gitCandidates.map(
@@ -878,10 +879,10 @@ export class DefaultPackageManager implements PackageManager {
 						await this.updateGit(entry.parsed, entry.scope);
 					}),
 			);
-			tasks.push(this.runWithConcurrency(gitTasks, GIT_UPDATE_CONCURRENCY).then(() => {}));
+			tasks.push(() => this.runWithConcurrency(gitTasks, GIT_UPDATE_CONCURRENCY).then(() => {}));
 		}
 
-		await Promise.all(tasks);
+		await settleIndependentLifecycle(tasks, "Package updates failed");
 	}
 
 	private async shouldUpdateNpmSource(source: NpmSource, scope: InstalledSourceScope): Promise<boolean> {
@@ -1387,7 +1388,10 @@ export class DefaultPackageManager implements PackageManager {
 			}
 		};
 
-		await Promise.all(Array.from({ length: workerCount }, () => worker()));
+		await settleIndependentLifecycle(
+			Array.from({ length: workerCount }, () => worker),
+			"Concurrent package operations failed",
+		);
 		return results;
 	}
 
