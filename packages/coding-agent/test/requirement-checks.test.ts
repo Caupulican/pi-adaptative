@@ -1,7 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+// @isolated: requirement checks spawn and terminate real child process trees
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { killTree } from "@caupulican/pi-agent-core/process-tree";
+import { describe, expect, it, vi } from "vitest";
 import { applyGoalEvent, createGoalState, type GoalState } from "../src/core/goals/goal-state.ts";
 import { describeRequirementCheckRefusal, proveRequirementChecks } from "../src/core/goals/prove-requirement-checks.ts";
 import {
@@ -10,10 +11,10 @@ import {
 	runRequirementCheck,
 } from "../src/core/goals/requirement-checks.ts";
 import { projectCanonicalTruth } from "../src/core/system-one/canonical-truth.ts";
+import { tempDir } from "./temp-dir.ts";
 
-const cwd = mkdtempSync(join(tmpdir(), "pi-requirement-checks-"));
+const cwd = tempDir("pi-requirement-checks-");
 mkdirSync(join(cwd, "present"));
-afterAll(() => rmSync(cwd, { recursive: true, force: true }));
 
 function goalWith(requirements: Array<{ id: string; text: string; command?: string; satisfied?: boolean }>): GoalState {
 	const now = "2026-09-25T10:00:00.000Z";
@@ -85,6 +86,92 @@ describe("requirement checks", () => {
 			passed: false,
 			exitCode: null,
 		});
+	});
+
+	it.each(["timeout", "abort"] as const)(
+		"waits for owned process-tree termination before publishing a %s terminal",
+		async (trigger) => {
+			const releaseTermination = Promise.withResolvers<void>();
+			const controller = new AbortController();
+			let terminationStarted = false;
+			let checkSettled = false;
+			const check = runRequirementCheck(
+				{ command: "tail -f /dev/null" },
+				{
+					cwd,
+					timeoutMs: trigger === "timeout" ? 10 : 10_000,
+					signal: controller.signal,
+					terminateTree: async (child) => {
+						terminationStarted = true;
+						await releaseTermination.promise;
+						return killTree(child, { graceMs: 0 });
+					},
+				},
+			);
+			void check.then(() => {
+				checkSettled = true;
+			});
+			if (trigger === "abort") controller.abort();
+			await vi.waitFor(() => expect(terminationStarted).toBe(true));
+			await new Promise<void>((resolve) => setImmediate(resolve));
+
+			let earlySettlementError: unknown;
+			try {
+				expect(checkSettled).toBe(false);
+			} catch (error) {
+				earlySettlementError = error;
+			} finally {
+				releaseTermination.resolve();
+			}
+			const result = await check;
+			if (earlySettlementError) throw earlySettlementError;
+			expect(result).toMatchObject({
+				passed: false,
+				exitCode: null,
+				reason: trigger === "timeout" ? expect.stringContaining("did not finish") : "The check was cancelled.",
+			});
+		},
+	);
+
+	it("discloses an unproven process-tree termination without changing the check failure", async () => {
+		const result = await runRequirementCheck(
+			{ command: "tail -f /dev/null" },
+			{
+				cwd,
+				timeoutMs: 10,
+				terminateTree: async (child) => {
+					await killTree(child, { graceMs: 0 });
+					return "failed";
+				},
+			},
+		);
+
+		expect(result).toMatchObject({ passed: false, exitCode: null });
+		expect(result.reason).toContain("process-tree termination is unproven");
+	});
+
+	it("observes cancellation that already existed when the check was admitted", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const terminateTree = vi.fn((child: Parameters<typeof killTree>[0]) => killTree(child, { graceMs: 0 }));
+
+		const result = await runRequirementCheck(
+			{ command: "tail -f /dev/null" },
+			{ cwd, timeoutMs: 20, signal: controller.signal, terminateTree },
+		);
+
+		expect(result).toMatchObject({ passed: false, exitCode: null, reason: "The check was cancelled." });
+		expect(terminateTree).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not terminate a check that reaches its normal exit", async () => {
+		const terminateTree = vi.fn(async () => "terminated" as const);
+
+		await expect(runRequirementCheck({ command: "test -d present" }, { cwd, terminateTree })).resolves.toMatchObject({
+			passed: true,
+			exitCode: 0,
+		});
+		expect(terminateTree).not.toHaveBeenCalled();
 	});
 
 	it("records every result as host-verified check evidence, satisfying or reopening the requirement", async () => {

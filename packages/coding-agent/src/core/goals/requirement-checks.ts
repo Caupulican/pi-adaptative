@@ -9,7 +9,7 @@
  * process tree the check started (by handle, never by pid).
  */
 import type { ChildProcess } from "node:child_process";
-import { killTree } from "@caupulican/pi-agent-core/process-tree";
+import { type KillTreeOutcome, killTree } from "@caupulican/pi-agent-core/process-tree";
 import { spawnProcess } from "../../utils/child-process.ts";
 import { getShellConfig } from "../../utils/shell.ts";
 import { withoutHarnessLaunchEnv } from "../harness-environment.ts";
@@ -60,7 +60,12 @@ export function judgeRequirementCheck(
 /** Run one check in `cwd`. A check that cannot run is a failed check, never a pass. */
 export function runRequirementCheck(
 	check: RequirementCheck,
-	options: { cwd: string; timeoutMs?: number; signal?: AbortSignal },
+	options: {
+		cwd: string;
+		timeoutMs?: number;
+		signal?: AbortSignal;
+		terminateTree?: (child: ChildProcess) => Promise<KillTreeOutcome>;
+	},
 ): Promise<RequirementCheckResult> {
 	const violation = requirementCheckViolation(check, options.cwd);
 	if (violation) return Promise.resolve({ passed: false, exitCode: null, output: "", reason: violation });
@@ -85,6 +90,7 @@ export function runRequirementCheck(
 	return new Promise((resolve) => {
 		let output = "";
 		let settled = false;
+		let stopping = false;
 		const append = (chunk: Buffer) => {
 			output = (output + chunk.toString("utf8")).slice(-MAX_CHECK_OUTPUT_CHARS);
 		};
@@ -95,20 +101,44 @@ export function runRequirementCheck(
 			options.signal?.removeEventListener("abort", onAbort);
 			resolve(result);
 		};
-		const stop = (reason: string) => {
-			void killTree(child);
-			finish({ passed: false, exitCode: null, output, reason });
+		const stop = async (reason: string): Promise<void> => {
+			if (settled || stopping) return;
+			stopping = true;
+			try {
+				const outcome = await (options.terminateTree ?? killTree)(child);
+				finish({
+					passed: false,
+					exitCode: null,
+					output,
+					reason: outcome === "failed" ? `${reason} The process-tree termination is unproven.` : reason,
+				});
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				finish({
+					passed: false,
+					exitCode: null,
+					output,
+					reason: `${reason} Process-tree termination failed (${message}); termination is unproven.`,
+				});
+			}
 		};
 		const timeoutMs = options.timeoutMs ?? REQUIREMENT_CHECK_TIMEOUT_MS;
-		const timer = setTimeout(() => stop(`\`${check.command}\` did not finish within ${timeoutMs} ms.`), timeoutMs);
-		const onAbort = () => stop("The check was cancelled.");
-		options.signal?.addEventListener("abort", onAbort, { once: true });
+		const timer = setTimeout(() => {
+			void stop(`\`${check.command}\` did not finish within ${timeoutMs} ms.`);
+		}, timeoutMs);
+		const onAbort = () => {
+			void stop("The check was cancelled.");
+		};
+		if (options.signal?.aborted) onAbort();
+		else options.signal?.addEventListener("abort", onAbort, { once: true });
 		child.stdout?.on("data", append);
 		child.stderr?.on("data", append);
-		child.on("error", (error) =>
-			finish({ passed: false, exitCode: null, output, reason: `The check failed to run: ${error.message}.` }),
-		);
+		child.on("error", (error) => {
+			if (!stopping)
+				finish({ passed: false, exitCode: null, output, reason: `The check failed to run: ${error.message}.` });
+		});
 		child.on("close", (code) => {
+			if (stopping) return;
 			if (code === null)
 				return finish({ passed: false, exitCode: null, output, reason: "The check was terminated." });
 			finish({ exitCode: code, output, ...judgeRequirementCheck(check, code, output) });
