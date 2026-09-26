@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
+import { committedRepo } from "../git-fixture.ts";
+import { tempDir } from "../temp-dir.ts";
 
 for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"]) {
 	delete process.env[key];
 }
 
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { compileExecutionCharter } from "../../src/core/autonomy/execution-charter.ts";
@@ -33,16 +34,7 @@ function trackUpstream(root: string, remote: string): string {
 }
 
 function gitRepo(): string {
-	const root = mkdtempSync(join(tmpdir(), "pi-final-completion-"));
-	execFileSync("git", ["init"], { cwd: root });
-	execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: root });
-	execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: root });
-	execFileSync("git", ["config", "tag.gpgsign", "false"], { cwd: root });
-	writeFileSync(join(root, "README.md"), "one\n");
-	execFileSync("git", ["add", "README.md"], { cwd: root });
-	execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "init"], { cwd: root });
-	return root;
+	return committedRepo("pi-final-completion-");
 }
 
 function runtime(objectiveId = "obj-1"): TaskRuntimeProjection {
@@ -455,7 +447,7 @@ describe("FC-01b completion evidence is JSON", () => {
 				},
 			} as never,
 			// Not a repository: no candidate snapshot, and no charter asks for a commit.
-			repoRoot: mkdtempSync(join(tmpdir(), "pi-final-completion-plain-")),
+			repoRoot: tempDir("pi-final-completion-plain-"),
 		});
 		await controller.run("obj-1");
 		const completion = judged.find((entry) => entry.checkpoint === "JEV-024");
@@ -730,7 +722,7 @@ describe("FC-03 receipt binding", () => {
 
 	it("the session git delivery port commits owned paths, pushes the frozen upstream, and proves that tree", async () => {
 		const root = gitRepo();
-		const bare = mkdtempSync(join(tmpdir(), "pi-final-remote-"));
+		const bare = tempDir("pi-final-remote-");
 		execFileSync("git", ["init", "--bare"], { cwd: bare });
 		execFileSync("git", ["remote", "add", "origin", bare], { cwd: root });
 		const delivery = createRepoGitDelivery(root);
@@ -779,7 +771,7 @@ describe("FC-03 receipt binding", () => {
 
 	it("a detached HEAD push fails and does not write refs/heads/main", async () => {
 		const root = gitRepo();
-		const bare = mkdtempSync(join(tmpdir(), "pi-final-detached-"));
+		const bare = tempDir("pi-final-detached-");
 		execFileSync("git", ["init", "--bare"], { cwd: bare });
 		execFileSync("git", ["remote", "add", "origin", bare], { cwd: root });
 		const delivery = createRepoGitDelivery(root);
@@ -806,7 +798,7 @@ describe("FC-03 receipt binding", () => {
 
 	it("a push uses the branch upstream and does not invent origin", async () => {
 		const root = gitRepo();
-		const bare = mkdtempSync(join(tmpdir(), "pi-final-upstream-"));
+		const bare = tempDir("pi-final-upstream-");
 		execFileSync("git", ["init", "--bare"], { cwd: bare });
 		execFileSync("git", ["remote", "add", "upstream", bare], { cwd: root });
 		const delivery = createRepoGitDelivery(root);
@@ -918,7 +910,7 @@ describe("completion catalog thresholds and release binding", () => {
 	});
 
 	it("binds npm publish only for a public package and does not promote a deploy script", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-release-"));
+		const root = tempDir("pi-release-");
 		expect(createRepoReleaseDelivery(root)).toBeUndefined();
 		writeFileSync(join(root, "package.json"), JSON.stringify({ name: "pkg", version: "1.0.0", private: true }));
 		expect(createRepoReleaseDelivery(root)).toBeUndefined();

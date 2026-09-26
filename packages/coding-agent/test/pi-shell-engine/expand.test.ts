@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { tempDir } from "../temp-dir.ts";
 
 const ENGINE_DIR = join(import.meta.dirname, "..", "..", "src", "bundled-resources", "runtimes", "pi-shell-engine");
 
@@ -104,7 +104,7 @@ describe("pi-shell-engine expand_word", () => {
 		return;
 	}
 
-	const tmpDir = mkdtempSync(join(tmpdir(), "pi-shell-expand-"));
+	const tmpDir = tempDir("pi-shell-expand-");
 	writeFileSync(join(tmpDir, "a.txt"), "");
 	writeFileSync(join(tmpDir, "b.txt"), "");
 	writeFileSync(join(tmpDir, "c.log"), "");

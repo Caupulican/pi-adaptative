@@ -1,6 +1,3 @@
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { Agent } from "@caupulican/pi-agent-core";
 import { classifyFailure, DEFAULT_RETRY_POLICY } from "@caupulican/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
@@ -16,6 +13,7 @@ import type { LaneFitnessScore, ModelFitnessReport } from "../../src/core/resear
 import { resolveScoutModel } from "../../src/core/runtime-builder.ts";
 import type { ModelRouterSelectionMode } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
+import { tempDir } from "../temp-dir.ts";
 import {
 	createChaosProvider,
 	expectBoundedOutbound,
@@ -295,7 +293,7 @@ describe("provider limit red-team matrix", () => {
 		const exhausted = new ExhaustedProviderRegistry();
 		exhausted.markExhausted("openai-codex/codex-spark");
 		const harness = compactionHarness({
-			agentDir: mkdtempSync(join(tmpdir(), "pi-red-team-compaction-exhausted-")),
+			agentDir: tempDir("pi-red-team-compaction-exhausted-"),
 			exhausted,
 		});
 		const selected = harness.support.resolveModel(codexDefault);
@@ -305,7 +303,7 @@ describe("provider limit red-team matrix", () => {
 	});
 
 	it("Digest-failed router cheap is blocked from compaction but can still route research", () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-red-team-compaction-digest-"));
+		const agentDir = tempDir("pi-red-team-compaction-digest-");
 		FitnessStore.forAgentDir(agentDir).save(
 			"openai-codex/codex-spark",
 			report({ digest: lane(1, 3), research: lane(3, 3), toolCall: lane(3, 3) }),
@@ -338,7 +336,7 @@ describe("provider limit red-team matrix", () => {
 	});
 
 	it("Unprobed router cheap remains eligible for compaction", () => {
-		const harness = compactionHarness({ agentDir: mkdtempSync(join(tmpdir(), "pi-red-team-compaction-unprobed-")) });
+		const harness = compactionHarness({ agentDir: tempDir("pi-red-team-compaction-unprobed-") });
 		expect(harness.support.resolveModel(codexDefault)).toBe(codexSpark);
 		expect(harness.warnings).toEqual([]);
 	});

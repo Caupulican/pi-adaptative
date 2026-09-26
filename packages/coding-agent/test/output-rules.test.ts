@@ -3,8 +3,7 @@
  * replace, maxLines, tailLines, onEmpty), inline tests run, later sources override by name, and the
  * rule reducer matches on the program and its arguments with prefixes folded away.
  */
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { classifyCommandFamily } from "../src/core/tools/command-family.ts";
@@ -17,6 +16,7 @@ import {
 	loadOutputRules,
 	runOutputRuleTests,
 } from "../src/core/tools/output-rules.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const request = { tool: "bash", command: "", text: "", exitCode: 0, level: "standard" as const };
 
@@ -94,8 +94,8 @@ describe("loadOutputRules", () => {
 	});
 
 	it("merges bundled, user, project and extra files with later names winning", () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-rules-agent-"));
-		const cwd = mkdtempSync(join(tmpdir(), "pi-rules-cwd-"));
+		const agentDir = tempDir("pi-rules-agent-");
+		const cwd = tempDir("pi-rules-cwd-");
 		mkdirSync(join(cwd, ".pi"));
 		const extra = join(cwd, "extra.json");
 		writeFileSync(
@@ -119,7 +119,7 @@ describe("loadOutputRules", () => {
 	});
 
 	it("fails with the file named when a file is malformed", () => {
-		const cwd = mkdtempSync(join(tmpdir(), "pi-rules-bad-"));
+		const cwd = tempDir("pi-rules-bad-");
 		const file = join(cwd, "bad.json");
 		writeFileSync(file, "{ not json");
 		expect(() => loadOutputRules({ cwd, extraFiles: [file], bundled: [] })).toThrow(

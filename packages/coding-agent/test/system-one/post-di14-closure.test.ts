@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { compileExecutionCharter } from "../../src/core/autonomy/execution-charter.ts";
@@ -17,16 +16,10 @@ import { WorkerSupervisionCoordinator } from "../../src/core/supervision/worker-
 import { captureCandidateSnapshot } from "../../src/core/system-one/candidate-snapshot.ts";
 import { SystemOneController } from "../../src/core/system-one/controller.ts";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
+import { committedRepo } from "../git-fixture.ts";
 
 function gitRepo(): string {
-	const root = mkdtempSync(join(tmpdir(), "pi-candidate-"));
-	execFileSync("git", ["init"], { cwd: root });
-	execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: root });
-	writeFileSync(join(root, "README.md"), "one\n");
-	execFileSync("git", ["add", "README.md"], { cwd: root });
-	execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "init"], { cwd: root });
-	return root;
+	return committedRepo("pi-candidate-");
 }
 
 function runtime(objectiveId = "obj-1"): TaskRuntimeProjection {

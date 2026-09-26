@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -32,6 +31,7 @@ import {
 	WaiverStore,
 } from "../src/core/index.ts";
 import type { JevAdapter, JevEvaluationRequest, JevEvaluationResponse } from "../src/core/system-one/adapter.ts";
+import { tempDir } from "./temp-dir.ts";
 
 class MockJevAdapter implements JevAdapter {
 	evaluateResponse: Partial<JevEvaluationResponse> = {};
@@ -358,7 +358,7 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 			const controller = new AdaptiveCapabilityController({
 				steering: plane,
 				catalog,
-				capabilityArtifactRoot: mkdtempSync(join(tmpdir(), "pi-s1a-capabilities-")),
+				capabilityArtifactRoot: tempDir("pi-s1a-capabilities-"),
 				// The builder's model binding must be an actual H-MoE selection; this test's subject is
 				// the synthesis pipeline, so the selection is a fixed one rather than absent.
 				experts: {
@@ -370,7 +370,7 @@ describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () =
 				builder: {
 					// Activation smokes the artifact by running it, so the builder produces a real one.
 					build: async (_spec) => {
-						const directory = mkdtempSync(join(tmpdir(), "pi-s1a-capability-"));
+						const directory = tempDir("pi-s1a-capability-");
 						const artifactPath = join(directory, `${_spec.capability_id}.mjs`);
 						const code = "export default async function run() { return true; }\n";
 						writeFileSync(artifactPath, code, "utf-8");

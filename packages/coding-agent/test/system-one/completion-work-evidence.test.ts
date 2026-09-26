@@ -1,11 +1,11 @@
 import { execFileSync } from "node:child_process";
+import { tempDir } from "../temp-dir.ts";
 
 for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"]) {
 	delete process.env[key];
 }
 
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
@@ -129,7 +129,7 @@ describe("completion judges the work itself", () => {
 	});
 
 	it("reads the work since the goal started: commits made during it, edits and new files", () => {
-		const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-work-diff-")));
+		const repo = realpathSync.native(tempDir("pi-work-diff-"));
 		const git = (...args: string[]) =>
 			execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", ...args], {
 				cwd: repo,

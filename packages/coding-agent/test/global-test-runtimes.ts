@@ -8,11 +8,12 @@
  * machine with uv installed), while `runtimes/` and `cache/uv` are linked into every isolated agent dir.
  */
 import { spawnSync } from "node:child_process";
-import { mkdirSync, realpathSync } from "node:fs";
+import { mkdirSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ENV_AGENT_DIR } from "../src/config.ts";
+import { removeTreeSync } from "../src/core/util/remove-tree.ts";
 import { defenderStatus, sampleRunnerLoad, spawnLatency } from "./ci-runner-load.ts";
 
 export const SHARED_TEST_RUNTIME_ROOT = join(realpathSync.native(tmpdir()), "pi-agent-test-shared");
@@ -48,7 +49,30 @@ function startLatencyWatch(): () => void {
 	};
 }
 
+const STALE_AGENT_DIR_MS = 60 * 60 * 1000;
+
+/**
+ * Remove per-file agent dirs (test-agent-dir-isolation-setup.ts) that a killed worker left behind:
+ * they are removed on a normal exit only. Anything younger than an hour may belong to a run that is
+ * still going, and the shared runtime directory is never touched.
+ */
+function sweepStaleAgentDirs(): void {
+	const root = realpathSync.native(tmpdir());
+	const now = Date.now();
+	for (const name of readdirSync(root)) {
+		if (!name.startsWith("pi-agent-test-")) continue;
+		const path = join(root, name);
+		if (path === SHARED_TEST_RUNTIME_ROOT) continue;
+		try {
+			if (now - statSync(path).mtimeMs > STALE_AGENT_DIR_MS) removeTreeSync(path);
+		} catch {
+			// Removed concurrently, or still in use by another run: the next sweep retries.
+		}
+	}
+}
+
 export default async function setup(): Promise<(() => void) | undefined> {
+	sweepStaleAgentDirs();
 	if (process.platform !== "win32") return undefined;
 	const evidence = process.env.PI_CI_HANG_DIAGNOSTICS === "1";
 	if (evidence) {

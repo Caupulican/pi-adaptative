@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { tempDir } from "../temp-dir.ts";
 
 const ENGINE_DIR = join(import.meta.dirname, "..", "..", "src", "bundled-resources", "runtimes", "pi-shell-engine");
 
@@ -250,7 +250,7 @@ describe("pi-shell-engine commands/strings.py", () => {
 		});
 
 		it("-e/-f/-d resolve a relative operand against ctx.cwd, not the process cwd", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-strings-test-"));
+			const dir = tempDir("pi-strings-test-");
 			writeFileSync(join(dir, "a.txt"), "hi");
 			expect(
 				(runBuiltin(python, "strings.cmd_test", { argv: ["test", "-f", "a.txt"], cwd: dir }) as Result).exitCode,

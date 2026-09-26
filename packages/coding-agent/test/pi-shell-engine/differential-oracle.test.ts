@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { tempDir } from "../temp-dir.ts";
 
 const ENGINE_DIR = join(import.meta.dirname, "..", "..", "src", "bundled-resources", "runtimes", "pi-shell-engine");
 const MAIN_PY = join(ENGINE_DIR, "main.py");
@@ -181,14 +181,14 @@ describe("pi-shell-engine differential oracle (D-marked corpus vs scrubbed bash)
 	}
 
 	function withSeededDir<T>(fn: (dir: string) => T): T {
-		const dir = mkdtempSync(join(tmpdir(), "pi-differential-"));
+		const dir = tempDir("pi-differential-");
 		seedFileTree(dir);
 		return fn(dir);
 	}
 
 	it.each(DIFFERENTIAL_CORPUS.map((row) => [row.label, row.command] as const))("%s: %s", (_label, command) => {
 		withSeededDir((dir) => {
-			const home = mkdtempSync(join(tmpdir(), "pi-differential-home-"));
+			const home = tempDir("pi-differential-home-");
 			const env = scrubbedEnv(home);
 			const bashResult = runBashReference(command, dir, env);
 			const engineResult = runEngine(python, command, dir, env);
@@ -199,7 +199,7 @@ describe("pi-shell-engine differential oracle (D-marked corpus vs scrubbed bash)
 
 	it("test -d/-f/-e (and other path unary operators) resolve against ctx.cwd, not the engine process's OS cwd", () => {
 		withSeededDir((dir) => {
-			const home = mkdtempSync(join(tmpdir(), "pi-differential-home-"));
+			const home = tempDir("pi-differential-home-");
 			const env = scrubbedEnv(home);
 			const bashResult = runBashReference("test -d sub", dir, env);
 			const engineResult = runEngine(python, "test -d sub", dir, env);
@@ -209,7 +209,7 @@ describe("pi-shell-engine differential oracle (D-marked corpus vs scrubbed bash)
 
 	it("[ -f FILE ] resolves a relative FILE against ctx.cwd, not the engine process's OS cwd", () => {
 		withSeededDir((dir) => {
-			const home = mkdtempSync(join(tmpdir(), "pi-differential-home-"));
+			const home = tempDir("pi-differential-home-");
 			const env = scrubbedEnv(home);
 			const bashResult = runBashReference("[ -f a.txt ]", dir, env);
 			const engineResult = runEngine(python, "[ -f a.txt ]", dir, env);
@@ -223,7 +223,7 @@ describe("pi-shell-engine differential oracle (D-marked corpus vs scrubbed bash)
 		writeFileSync(marker, "x");
 		try {
 			const relative = marker.slice(dir.length + 1);
-			const home = mkdtempSync(join(tmpdir(), "pi-differential-home-"));
+			const home = tempDir("pi-differential-home-");
 			const env = scrubbedEnv(home);
 			const command = `[ -f ${relative} ]`;
 			const bashResult = runBashReference(command, dir, env);

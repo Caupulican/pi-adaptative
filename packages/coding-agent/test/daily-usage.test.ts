@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FileEntry, SessionEntry } from "@caupulican/pi-agent-core/node";
 import type { AssistantMessage, Usage } from "@caupulican/pi-ai";
@@ -11,6 +10,7 @@ import {
 	aggregateDailyUsageFromSessionRoot,
 	formatDailyUsageBreakdown,
 } from "../src/core/cost/daily-usage.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function usage(costTotal: number): Usage {
 	return {
@@ -82,7 +82,7 @@ describe("daily usage aggregation", () => {
 	});
 
 	it("loads and sums all session files in a directory for the active-day total", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-daily-usage-"));
+		const dir = tempDir("pi-daily-usage-");
 		const dayStart = Date.parse("2026-06-28T00:00:00.000Z");
 		const dayEnd = Date.parse("2026-06-29T00:00:00.000Z");
 		const writeSession = (name: string, entries: FileEntry[]) => {
@@ -105,7 +105,7 @@ describe("daily usage aggregation", () => {
 	});
 
 	it("uses live entries for the active session instead of reparsing its growing JSONL", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-daily-usage-live-"));
+		const dir = tempDir("pi-daily-usage-live-");
 		const filePath = join(dir, "active.jsonl");
 		writeFileSync(filePath, "deliberately not parseable\n");
 		const dayStart = Date.parse("2026-06-28T00:00:00.000Z");
@@ -121,7 +121,7 @@ describe("daily usage aggregation", () => {
 	});
 
 	it("loads and sums session files across all project session directories", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-daily-usage-root-"));
+		const root = tempDir("pi-daily-usage-root-");
 		const dirA = join(root, "project-a");
 		const dirB = join(root, "project-b");
 		mkdirSync(dirA, { recursive: true });
@@ -148,7 +148,7 @@ describe("daily usage aggregation", () => {
 	});
 
 	it("ignores non-directory entries under the session root", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-daily-usage-root-file-"));
+		const root = tempDir("pi-daily-usage-root-file-");
 		writeFileSync(join(root, "stray.lock"), "not a directory");
 
 		const total = aggregateDailyUsageFromSessionRoot(root, {
@@ -160,7 +160,7 @@ describe("daily usage aggregation", () => {
 	});
 
 	it("skips stale session files without parsing them", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-daily-usage-stale-"));
+		const dir = tempDir("pi-daily-usage-stale-");
 		const file = join(dir, "stale.jsonl");
 		writeFileSync(file, "not json\n");
 		const stale = new Date("2026-06-27T00:00:00.000Z");

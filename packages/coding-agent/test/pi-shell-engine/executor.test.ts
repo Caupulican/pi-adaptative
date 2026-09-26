@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { tempDir } from "../temp-dir.ts";
 
 const ENGINE_DIR = join(import.meta.dirname, "..", "..", "src", "bundled-resources", "runtimes", "pi-shell-engine");
 
@@ -221,7 +222,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 
 	describe("redirects", () => {
 		it("> truncates to a file", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-exec-"));
+			const dir = tempDir("pi-exec-");
 			const target = join(dir, "out.txt");
 			const result = run(python, `echo hello > ${target}`, dir);
 			expect(result.stdout).toBe("");
@@ -233,7 +234,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 		});
 
 		it(">> appends to a file", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-exec-"));
+			const dir = tempDir("pi-exec-");
 			const target = join(dir, "out.txt");
 			run(python, `echo one > ${target}`, dir);
 			run(python, `echo two >> ${target}`, dir);
@@ -244,7 +245,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 		});
 
 		it("< reads a file as stdin for an external command", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-exec-"));
+			const dir = tempDir("pi-exec-");
 			const src = join(dir, "in.txt");
 			spawnSync(python, ["-c", `open(${JSON.stringify(src)}, "w").write("from-file\\n")`]);
 			const command = `${pyPath} -c 'import sys; print(sys.stdin.read().strip())' < ${src}`;
@@ -253,7 +254,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 		});
 
 		it("2> sends stderr only to the file, never the merged sink", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-exec-"));
+			const dir = tempDir("pi-exec-");
 			const errFile = join(dir, "err.txt");
 			const command = `${pyPath} -c 'import sys; sys.stderr.write("boom\\n")' 2> ${errFile}`;
 			const result = run(python, command, dir, { PATH: process.env.PATH ?? "" });
@@ -265,7 +266,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 		});
 
 		it("2>&1 merges stderr into stdout", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-exec-"));
+			const dir = tempDir("pi-exec-");
 			const command = `${pyPath} -c 'import sys; sys.stderr.write("err-line\\n")' > ${join(dir, "combined.txt")} 2>&1`;
 			run(python, command, dir, { PATH: process.env.PATH ?? "" });
 			const content = spawnSync(
@@ -279,7 +280,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 
 	describe("subshell vs brace-group scoping", () => {
 		it("subshell: cd and export do NOT leak to the parent state", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-exec-"));
+			const dir = tempDir("pi-exec-");
 			const sub = mkdtempSync(join(dir, "sub-"));
 			const result = run(python, `( cd ${sub} && export FOO=bar )`, dir);
 			expect(result.cwd).toBe(dir);
@@ -287,7 +288,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 		});
 
 		it("brace group: cd and export DO persist to the parent state", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-exec-"));
+			const dir = tempDir("pi-exec-");
 			const sub = mkdtempSync(join(dir, "sub-"));
 			const result = run(python, `{ cd ${sub} ; export FOO=bar ; }`, dir);
 			expect(result.cwd).toBe(sub);
@@ -310,7 +311,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 
 	describe("state builtins", () => {
 		it("cd changes state.cwd in the frame", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-exec-"));
+			const dir = tempDir("pi-exec-");
 			const sub = mkdtempSync(join(dir, "sub-"));
 			const result = run(python, `cd ${sub}`, dir);
 			expect(result.cwd).toBe(sub);
@@ -327,7 +328,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 		});
 
 		it("cd - prints the new cwd plus newline after a successful change", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-exec-"));
+			const dir = tempDir("pi-exec-");
 			const sub = mkdtempSync(join(dir, "sub-"));
 			run(python, `cd ${sub}`, dir);
 			// OLDPWD only gets set by a real `cd`; drive it explicitly via env for `cd -`.
@@ -358,7 +359,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 		});
 
 		it("a pipeline stage's own 2> redirect is honored (not ignored)", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-exec-"));
+			const dir = tempDir("pi-exec-");
 			const errFile = join(dir, "stage-err.txt");
 			const command = `${pyPath} -c 'import sys; sys.stderr.write("boom\\n"); print("kept")' 2> ${errFile} | ${pyPath} -c 'import sys; print(sys.stdin.read().strip())'`;
 			const result = run(python, command, dir, { PATH: process.env.PATH ?? "" });
@@ -370,7 +371,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 		});
 
 		it("routes an un-redirected pipeline stage's stderr to ctx.stderr when set (group-level 2>)", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-exec-"));
+			const dir = tempDir("pi-exec-");
 			const sessionErrPath = join(dir, "session-err.txt");
 			const command = `${pyPath} -c 'import sys; sys.stderr.write("group-err\\n"); print("piped")' | ${pyPath} -c 'import sys; print(sys.stdin.read().strip())'`;
 			const result = run(python, command, dir, { PATH: process.env.PATH ?? "" }, sessionErrPath);
@@ -392,7 +393,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 
 	describe("subshell/brace-group stderr threading (architect fix #5)", () => {
 		it("( ... ) 2>file captures the inner external command's un-redirected stderr", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-exec-"));
+			const dir = tempDir("pi-exec-");
 			const errFile = join(dir, "sub-err.txt");
 			const command = `( ${pyPath} -c 'import sys; sys.stderr.write("inner-err\\n")' ) 2> ${errFile}`;
 			run(python, command, dir, { PATH: process.env.PATH ?? "" });
@@ -403,7 +404,7 @@ describe("pi-shell-engine executor (exec.py)", () => {
 		});
 
 		it("{ ...; } 2>file captures the inner external command's un-redirected stderr", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-exec-"));
+			const dir = tempDir("pi-exec-");
 			const errFile = join(dir, "brace-err.txt");
 			const command = `{ ${pyPath} -c 'import sys; sys.stderr.write("brace-err\\n")' ; } 2> ${errFile}`;
 			run(python, command, dir, { PATH: process.env.PATH ?? "" });
@@ -512,7 +513,7 @@ describe("pi-shell-engine main.py ParamExpansionError handling (architect fix #1
 
 	it("find -exec runs every command through the engine dispatcher, so builtins like echo work on each host", () => {
 		// Live defect: `-exec echo` spawned a process named `echo`, which does not exist on Windows.
-		const dir = mkdtempSync(join(tmpdir(), "pi-find-exec-"));
+		const dir = tempDir("pi-find-exec-");
 		mkdirSync(join(dir, "sub", "deep"), { recursive: true });
 		writeFileSync(join(dir, "sub", "deep", "leaf.txt"), "leaf\n");
 		writeFileSync(join(dir, "sub", "other.txt"), "other\n");
@@ -531,7 +532,7 @@ describe("pi-shell-engine main.py ParamExpansionError handling (architect fix #1
 	});
 
 	it("captures a failed command status and frames an explicit exit without terminating the protocol", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-shell-status-"));
+		const dir = tempDir("pi-shell-status-");
 		const log = join(dir, "command.log").replaceAll("\\", "/");
 		const command = `{ printf 'failure detail\\n'; false; } >"${log}" 2>&1; rc=$?; printf 'exit=%s\\n' "$rc"; tail -80 "${log}"; exit 0`;
 		const { stdout, stderr, frame } = runMain(command, dir);
@@ -606,7 +607,7 @@ describe("pi-shell-engine main.py ParamExpansionError handling (architect fix #1
 	});
 
 	it("expands globs and command substitutions before iterating a word-list loop", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-for-expand-"));
+		const dir = tempDir("pi-for-expand-");
 		writeFileSync(join(dir, "a.txt"), "a");
 		writeFileSync(join(dir, "b.txt"), "b");
 		const { stdout, frame } = runMain(`for item in *.txt $(printf extra); do printf '[%s]\n' "$item"; done`, dir);
@@ -637,7 +638,7 @@ describe("pi-shell-engine main.py ParamExpansionError handling (architect fix #1
 	});
 
 	it("pipes and redirects an arithmetic loop as one compound command", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-for-redirect-"));
+		const dir = tempDir("pi-for-redirect-");
 		const output = join(dir, "loop.txt").replaceAll("\\", "/");
 		const command = `for ((i=0; i<3; i++)); do printf '%s\n' "$i"; done > "${output}"; cat "${output}" | wc -l`;
 		const { stdout, frame } = runMain(command, dir);

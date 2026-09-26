@@ -7,7 +7,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -31,6 +31,7 @@ import {
 } from "../../src/core/adaptive/index.ts";
 import type { CapabilityKind } from "../../src/core/adaptive/types.ts";
 import { RELEASE_WIRING_MANIFEST } from "../../src/core/release/release-wiring-manifest.ts";
+import { tempDir } from "../temp-dir.ts";
 
 const ALL_KINDS: readonly CapabilityKind[] = [
 	"composition",
@@ -45,7 +46,7 @@ const ALL_KINDS: readonly CapabilityKind[] = [
 ];
 
 function writeArtifact(body: string): { path: string; uri: string; digest: string } {
-	const directory = mkdtempSync(join(tmpdir(), "pi-activation-"));
+	const directory = tempDir("pi-activation-");
 	mkdirSync(directory, { recursive: true });
 	const path = join(directory, "capability.mjs");
 	writeFileSync(path, body, "utf-8");
@@ -56,7 +57,7 @@ function controllerWith(overrides: Record<string, unknown> = {}): AdaptiveCapabi
 	return new AdaptiveCapabilityController({
 		steering: {} as never,
 		catalog: new CapabilityCatalog(),
-		capabilityArtifactRoot: mkdtempSync(join(tmpdir(), "pi-activation-capabilities-")),
+		capabilityArtifactRoot: tempDir("pi-activation-capabilities-"),
 		proofRunner: new CapabilityProofRunner(),
 		...overrides,
 	} as never);

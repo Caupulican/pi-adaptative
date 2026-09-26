@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { tempDir } from "../temp-dir.ts";
 
 const ENGINE_DIR = join(
 	dirname(fileURLToPath(import.meta.url)),
@@ -90,7 +91,7 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 	}
 
 	function withTmpDir<T>(fn: (dir: string) => T): T {
-		const dir = mkdtempSync(join(tmpdir(), "pi-conformance-"));
+		const dir = tempDir("pi-conformance-");
 		return fn(dir);
 	}
 
@@ -138,7 +139,7 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 				// The corpus target must be a directory guaranteed to exist on both POSIX and
 				// win32 — hardcoding "/tmp" only holds on POSIX. Use a per-test tmp subdirectory
 				// created by the harness and pass it into the command, quoted.
-				const target = mkdtempSync(join(tmpdir(), "pi-conformance-brace-"));
+				const target = tempDir("pi-conformance-brace-");
 				const { frame } = runEngine(python, `{ cd "${target}" ; export FOO=bar ; }`, dir);
 				if (process.platform === "win32") {
 					expect(frame.cwd.replace(/\//g, "\\").toLowerCase()).toBe(target.replace(/\//g, "\\").toLowerCase());
@@ -241,7 +242,7 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 
 		it("tilde: ~ and ~/x expand to $HOME", () => {
 			withTmpDir((dir) => {
-				const home = mkdtempSync(join(tmpdir(), "pi-home-"));
+				const home = tempDir("pi-home-");
 				expect(runEngine(python, "echo ~", dir, { HOME: home }).stdout).toBe(`${home}\n`);
 				expect(runEngine(python, "echo ~/x", dir, { HOME: home }).stdout).toBe(`${home}/x\n`);
 			});
@@ -385,7 +386,7 @@ describe("pi-shell-engine conformance (main.py end-to-end)", () => {
 
 		it("which resolves in PATH, not-found -> exit 1", () => {
 			withTmpDir((dir) => {
-				const bin = mkdtempSync(join(tmpdir(), "pi-bin-"));
+				const bin = tempDir("pi-bin-");
 				// PATHEXT gates executable resolution on win32: an extension-less file is
 				// correctly rejected there (engine behavior, not a bug), so the fixture must
 				// create a PATHEXT-valid executable on that platform and keep the

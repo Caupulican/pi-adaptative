@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
+import { committedRepo } from "../git-fixture.ts";
+import { tempDir } from "../temp-dir.ts";
 
 for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"]) {
 	delete process.env[key];
 }
 
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Agent } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -45,16 +46,7 @@ afterEach(() => {
 });
 
 function gitRepo(): string {
-	const root = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-oc-"));
-	execFileSync("git", ["init"], { cwd: root });
-	execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: root });
-	execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: root });
-	execFileSync("git", ["config", "tag.gpgsign", "false"], { cwd: root });
-	writeFileSync(join(root, "README.md"), "one\n");
-	execFileSync("git", ["add", "README.md"], { cwd: root });
-	execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "init"], { cwd: root });
-	return root;
+	return committedRepo("pi-oc-");
 }
 
 function head(root: string): string {
@@ -231,7 +223,7 @@ describe("delivery authority operational closure", () => {
 	});
 
 	it("does not publish from a public manifest unless the charter intent matches, and freezes the tarball", async () => {
-		const root = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-oc-pkg-"));
+		const root = tempDir("pi-oc-pkg-");
 		writeFileSync(join(root, "package.json"), JSON.stringify({ name: "pkg", version: "1.0.0" }));
 		writeFileSync(join(root, "index.js"), "module.exports = 1;\n");
 		expect(createRepoReleaseDelivery(root)).toBeUndefined();
@@ -325,12 +317,12 @@ describe("delivery authority operational closure", () => {
 
 	it("commits the frozen tree through the session binding and refreezes a later edit", async () => {
 		const root = gitRepo();
-		const bare = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-oc-remote-"));
+		const bare = tempDir("pi-oc-remote-");
 		execFileSync("git", ["init", "--bare"], { cwd: bare });
 		const branch = track(root, bare);
 		const admitted = head(root);
 		const objectiveId = "obj-live";
-		const agentDir = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-oc-agent-"));
+		const agentDir = tempDir("pi-oc-agent-");
 		agentDirs.push(agentDir);
 		const model = getModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Missing test model");
@@ -420,7 +412,7 @@ describe("delivery authority operational closure", () => {
 		await session.disposeAndWait();
 
 		const driftRoot = gitRepo();
-		const driftBare = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-oc-drift-remote-"));
+		const driftBare = tempDir("pi-oc-drift-remote-");
 		execFileSync("git", ["init", "--bare"], { cwd: driftBare });
 		track(driftRoot, driftBare);
 		execFileSync("git", ["push", "origin", "HEAD"], { cwd: driftRoot });

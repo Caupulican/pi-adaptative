@@ -1,13 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { enforceSessionEdge, type SessionEdgeDeps } from "../src/core/agent-session-edge.ts";
 import { mayHoldUnownedWorktreeChanges } from "../src/core/objective-execution/worktree-ownership.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function gitRepo(): string {
-	const root = realpathSync.native(mkdtempSync(join(realpathSync.native(tmpdir()), "pi-own-")));
+	const root = tempDir("pi-own-");
 	const run = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
 	run("init");
 	run("config", "user.email", "it@example.invalid");
@@ -48,7 +48,7 @@ describe("worktree ownership", () => {
 	});
 
 	it("is false outside a repository, where there is no worktree to discard", async () => {
-		const outside = realpathSync.native(mkdtempSync(join(realpathSync.native(tmpdir()), "pi-nogit-")));
+		const outside = tempDir("pi-nogit-");
 		expect(await mayHoldUnownedWorktreeChanges(outside, [])).toBe(false);
 	});
 

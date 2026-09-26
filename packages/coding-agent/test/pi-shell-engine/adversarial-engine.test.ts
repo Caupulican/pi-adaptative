@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { tempDir } from "../temp-dir.ts";
 
 // Adversarial coverage for the Windows bash tool's Python shell engine
 // (src/bundled-resources/runtimes/pi-shell-engine/), driven through the REAL persistent
@@ -92,10 +92,6 @@ function runLine(python: string, command: string, cwd: string, env: Record<strin
 	};
 }
 
-function tempDir(prefix = "pi-adversarial-"): string {
-	return mkdtempSync(join(tmpdir(), prefix));
-}
-
 /** The exact bytes of a file: written to the child's binary stdout so no OS newline translation applies. */
 function readFile(python: string, path: string): string {
 	const result = spawnSync(
@@ -125,43 +121,43 @@ describe("pi-shell-engine adversarial", () => {
 
 	describe("1. quoting", () => {
 		it("nested double quotes with an escaped inner quote unescape to one literal quote", () => {
-			const result = runLine(py, 'echo "a\\"b"', tempDir());
+			const result = runLine(py, 'echo "a\\"b"', tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe('a"b\n');
 			expect(result.exitCode).toBe(0);
 		});
 
 		it("backslashes inside a double-quoted Windows-style path stay literal", () => {
-			const result = runLine(py, 'echo "D:\\\\x\\\\y"', tempDir());
+			const result = runLine(py, 'echo "D:\\\\x\\\\y"', tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("D:\\x\\y\n");
 			expect(result.exitCode).toBe(0);
 		});
 
 		it("$'a\\tb' expands the ANSI-C escape to a real tab", () => {
-			const result = runLine(py, "echo $'a\\tb'", tempDir());
+			const result = runLine(py, "echo $'a\\tb'", tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("a\tb\n");
 			expect(result.exitCode).toBe(0);
 		});
 
 		it('a standalone escaped \\" unescapes to a literal quote character', () => {
-			const result = runLine(py, 'echo \\"quoted\\"', tempDir());
+			const result = runLine(py, 'echo \\"quoted\\"', tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe('"quoted"\n');
 			expect(result.exitCode).toBe(0);
 		});
 
 		it("a single-quoted string containing $var does NOT expand", () => {
-			const result = runLine(py, "A=set; echo 'value=$A'", tempDir());
+			const result = runLine(py, "A=set; echo 'value=$A'", tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("value=$A\n");
 			expect(result.exitCode).toBe(0);
 		});
 
 		it("a double-quoted string containing $var DOES expand", () => {
-			const result = runLine(py, 'A=set; echo "value=$A"', tempDir());
+			const result = runLine(py, 'A=set; echo "value=$A"', tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("value=set\n");
 			expect(result.exitCode).toBe(0);
 		});
 
 		it("adjacent quoted fragments 'a'\"b\"c concatenate into one word", () => {
-			const result = runLine(py, "echo 'a'\"b\"c", tempDir());
+			const result = runLine(py, "echo 'a'\"b\"c", tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("abc\n");
 			expect(result.exitCode).toBe(0);
 		});
@@ -169,37 +165,37 @@ describe("pi-shell-engine adversarial", () => {
 
 	describe("2. line endings", () => {
 		it("CRLF between commands behaves like LF", () => {
-			const result = runLine(py, "echo a\r\necho b\r\n", tempDir());
+			const result = runLine(py, "echo a\r\necho b\r\n", tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("a\nb\n");
 			expect(result.exitCode).toBe(0);
 		});
 
 		it("a trailing CRLF after the last command does not change behavior", () => {
-			const withCrlf = runLine(py, "echo only\r\n", tempDir());
-			const withLf = runLine(py, "echo only\n", tempDir());
+			const withCrlf = runLine(py, "echo only\r\n", tempDir("pi-adversarial-"));
+			const withLf = runLine(py, "echo only\n", tempDir("pi-adversarial-"));
 			expect(withCrlf.stdout).toBe(withLf.stdout);
 			expect(withCrlf.exitCode).toBe(withLf.exitCode);
 		});
 
 		it("CRLF-separated sequencing preserves state across commands (assignment then use)", () => {
-			const result = runLine(py, "A=1\r\nexport A\r\necho $A\r\n", tempDir());
+			const result = runLine(py, "A=1\r\nexport A\r\necho $A\r\n", tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("1\n");
 			expect(result.envDelta.A).toBe("1");
 		});
 
 		it("CRLF-separated && list preserves short-circuit semantics", () => {
-			const result = runLine(py, "true && echo yes\r\nfalse && echo no\r\n", tempDir());
+			const result = runLine(py, "true && echo yes\r\nfalse && echo no\r\n", tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("yes\n");
 			expect(result.exitCode).toBe(1);
 		});
 
 		it("a lone CR without LF inside an otherwise normal line does not crash the engine", () => {
-			const result = runLine(py, "echo before\recho after", tempDir());
+			const result = runLine(py, "echo before\recho after", tempDir("pi-adversarial-"));
 			assertNoCrash(result);
 		});
 
 		it("CRLF around a pipeline behaves like LF", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			const crlf = runLine(py, "echo hi\r\n | cat\r\n", dir, { PATH: process.env.PATH ?? "" });
 			const lf = runLine(py, "echo hi\n | cat\n", dir, { PATH: process.env.PATH ?? "" });
 			expect(crlf.stdout).toBe(lf.stdout);
@@ -207,7 +203,7 @@ describe("pi-shell-engine adversarial", () => {
 	});
 
 	describe("3. paths with spaces, parentheses, and unicode", () => {
-		const dir = tempDir();
+		const dir = tempDir("pi-adversarial-");
 		const parenDir = "(Repo 7 v7";
 		const uniDir = "日本語";
 		mkdirSync(join(dir, parenDir));
@@ -255,7 +251,7 @@ describe("pi-shell-engine adversarial", () => {
 
 	describe("4. redirections", () => {
 		it("> writes into a file whose name has a space, and the content is exact", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			const result = runLine(py, "echo hello > 'out file.txt'", dir);
 			expect(result.stdout).toBe("");
 			expect(result.exitCode).toBe(0);
@@ -263,21 +259,21 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it(">> appends across two invocations", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			runLine(py, "echo one > out.txt", dir);
 			runLine(py, "echo two >> out.txt", dir);
 			expect(readFile(py, join(dir, "out.txt"))).toBe("one\ntwo\n");
 		});
 
 		it("2>&1 merges stderr into the redirected file", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			const command = `${py} -c 'import sys; sys.stderr.write("err\\n")' > combined.txt 2>&1`;
 			runLine(py, command, dir);
 			expect(normalizeChildOutput(readFile(py, join(dir, "combined.txt")))).toBe("err\n");
 		});
 
 		it("2>/dev/null discards stderr and keeps stdout clean", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			const command = `${py} -c 'import sys; sys.stderr.write("noisy\\n"); print("kept")' 2>/dev/null`;
 			const result = runLine(py, command, dir);
 			expect(normalizeChildOutput(result.stdout)).toBe("kept\n");
@@ -285,7 +281,7 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("< reads a file as stdin for an external command", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			writeFileSync(join(dir, "in.txt"), "from-file\n");
 			const command = `${py} -c 'import sys; print(sys.stdin.read().strip())' < in.txt`;
 			const result = runLine(py, command, dir);
@@ -293,14 +289,14 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("> file 2>&1 | ... redirects the producer fully to the file, leaving the pipe empty", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			const result = runLine(py, "echo a > out.txt 2>&1 | cat", dir);
 			expect(result.stdout).toBe("");
 			expect(readFile(py, join(dir, "out.txt"))).toBe("a\n");
 		});
 
 		it("> into a file inside a unicode directory writes and reads back the exact content", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			mkdirSync(join(dir, "日本語"));
 			runLine(py, 'echo hi > "日本語/out.txt"', dir);
 			expect(readFile(py, join(dir, "日本語", "out.txt"))).toBe("hi\n");
@@ -309,7 +305,7 @@ describe("pi-shell-engine adversarial", () => {
 
 	describe("5. pipelines and lists", () => {
 		it("builtin | external | builtin chains through the pipe correctly", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			const command = `printf 'l1\\nl2\\n' | ${py} -c 'import sys; print(sys.stdin.read().strip().upper())' | wc -l`;
 			const result = runLine(py, command, dir);
 			expect(result.stdout.trim()).toBe("2");
@@ -317,30 +313,30 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("false | true exits 0 (status is the last pipeline element)", () => {
-			const result = runLine(py, "false | true; echo $?", tempDir());
+			const result = runLine(py, "false | true; echo $?", tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("0\n");
 		});
 
 		it("a && b || c follows bash left-to-right precedence in both branches", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			expect(runLine(py, "true && echo a || echo b", dir).stdout).toBe("a\n");
 			expect(runLine(py, "false && echo a || echo b", dir).stdout).toBe("b\n");
 		});
 
 		it("! negates the exit status of the following command", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			expect(runLine(py, "! true; echo $?", dir).stdout).toBe("1\n");
 			expect(runLine(py, "! false; echo $?", dir).stdout).toBe("0\n");
 		});
 
 		it("; sequences unconditionally regardless of the first command's status", () => {
-			const result = runLine(py, "false ; echo still-ran", tempDir());
+			const result = runLine(py, "false ; echo still-ran", tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("still-ran\n");
 			expect(result.exitCode).toBe(0);
 		});
 
 		it("cd sub; pwd persists the directory change across the semicolon", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			mkdirSync(join(dir, "sub"));
 			const result = runLine(py, "cd sub; pwd", dir);
 			expect(result.stdout).toBe(`${join(dir, "sub")}\n`);
@@ -348,7 +344,7 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("cd sub && pwd also persists the directory change", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			mkdirSync(join(dir, "sub"));
 			const result = runLine(py, "cd sub && pwd", dir);
 			expect(result.stdout).toBe(`${join(dir, "sub")}\n`);
@@ -356,7 +352,7 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("an empty subshell ( ) is a supported no-op, not a refusal", () => {
-			const result = runLine(py, "( )", tempDir());
+			const result = runLine(py, "( )", tempDir("pi-adversarial-"));
 			expect(result.refused).toBe(false);
 			expect(result.stdout).toBe("");
 			expect(result.exitCode).toBe(0);
@@ -372,7 +368,7 @@ describe("pi-shell-engine adversarial", () => {
 		}
 
 		it("invokes a generated .cmd with a quoted space-containing argument", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			writeScript(dir, "hello.cmd", "@echo off\r\necho from cmd %1\r\n");
 			const result = runLine(py, "./hello.cmd 'arg with space'", dir);
 			assertNoCrash(result);
@@ -387,7 +383,7 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("invokes a generated .bat with a quoted space-containing argument", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			writeScript(dir, "hello.bat", "@echo off\r\necho from bat %1\r\n");
 			const result = runLine(py, "./hello.bat 'arg with space'", dir);
 			assertNoCrash(result);
@@ -400,7 +396,7 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("invokes a generated .ps1 with a quoted space-containing argument", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			writeScript(dir, "hello.ps1", 'param($a)\r\nWrite-Output "from ps1 $a"\r\n');
 			const result = runLine(py, "./hello.ps1 'arg with space'", dir);
 			assertNoCrash(result);
@@ -416,7 +412,7 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("invokes a generated .py directly as an executable with a quoted space-containing argument", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			writeScript(dir, "hello.py", "#!/usr/bin/env python3\nimport sys\nprint('from py', sys.argv[1:])\n");
 			const result = runLine(py, "./hello.py 'arg with space'", dir);
 			assertNoCrash(result);
@@ -436,7 +432,7 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("invoking a .py through the interpreter explicitly always works, on every platform", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			writeFileSync(join(dir, "plain.py"), "import sys\nprint('via-interpreter', sys.argv[1:])\n");
 			const result = runLine(py, `${py} plain.py 'quoted arg'`, dir);
 			expect(normalizeChildOutput(result.stdout)).toBe("via-interpreter ['quoted arg']\n");
@@ -444,7 +440,7 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("a bare launcher name with no path separator and no PATH entry is a clean not-found, never a hang", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			writeScript(dir, "hello3.cmd", "@echo off\r\necho unreachable-from-bare-name\r\n");
 			const result = runLine(py, "hello3.cmd", dir, { PATH: "" });
 			assertNoCrash(result);
@@ -455,26 +451,26 @@ describe("pi-shell-engine adversarial", () => {
 
 	describe("7. environment", () => {
 		it("A=1 python -c ... reads the transient assignment without leaking into the parent env", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			const result = runLine(py, `A=1 ${py} -c "import os; print(os.environ['A'])"`, dir);
 			expect(normalizeChildOutput(result.stdout)).toBe("1\n");
 			expect(result.envDelta.A).toBeUndefined();
 		});
 
 		it("export A=1; ... persists the variable in envDelta and to a spawned child", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			const result = runLine(py, `export A=1; ${py} -c "import os; print(os.environ['A'])"`, dir);
 			expect(normalizeChildOutput(result.stdout)).toBe("1\n");
 			expect(result.envDelta.A).toBe("1");
 		});
 
 		it("unset removes a previously-set variable (envDelta -> null)", () => {
-			const result = runLine(py, "unset A", tempDir(), { A: "was-set" });
+			const result = runLine(py, "unset A", tempDir("pi-adversarial-"), { A: "was-set" });
 			expect(result.envDelta.A).toBeNull();
 		});
 
 		it("$HOME and ~ both expand to the HOME entry in the request env", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			const home = runLine(py, "echo $HOME", dir, { HOME: "/home/adversarial" });
 			const tilde = runLine(py, "echo ~", dir, { HOME: "/home/adversarial" });
 			expect(home.stdout).toBe("/home/adversarial\n");
@@ -482,7 +478,7 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("${A:-default} substitutes when unset, ${A:+alt} substitutes only when set, ${#A} is the length", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			expect(runLine(py, "echo ${A:-default}", dir).stdout).toBe("default\n");
 			expect(runLine(py, "A=x; echo ${A:+alt}", dir).stdout).toBe("alt\n");
 			expect(runLine(py, "unset A; echo ${A:+alt}", dir).stdout).toBe("\n");
@@ -490,7 +486,7 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("${A#pre}, ${A%suf} and ${A/x/y} strip and substitute with GNU bash semantics", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			expect(runLine(py, "A=preval; echo ${A#pre}", dir).stdout).toBe("val\n");
 			expect(runLine(py, "A=valsuf; echo ${A%suf}", dir).stdout).toBe("val\n");
 			expect(runLine(py, "A=xyz; echo ${A/x/y}", dir).stdout).toBe("yyz\n");
@@ -503,33 +499,33 @@ describe("pi-shell-engine adversarial", () => {
 
 	describe("8. arithmetic and substitution", () => {
 		it("$(( 1 + 2 )) evaluates arithmetic expansion", () => {
-			const result = runLine(py, "echo $(( 1 + 2 ))", tempDir());
+			const result = runLine(py, "echo $(( 1 + 2 ))", tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("3\n");
 			expect(result.exitCode).toBe(0);
 		});
 
 		it("$(echo hi) runs command substitution", () => {
-			const result = runLine(py, "echo $(echo hi)", tempDir());
+			const result = runLine(py, "echo $(echo hi)", tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("hi\n");
 		});
 
 		it("backticks run command substitution identically to $()", () => {
-			const result = runLine(py, "echo `echo hi`", tempDir());
+			const result = runLine(py, "echo `echo hi`", tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("hi\n");
 		});
 
 		it("nested $(echo $(echo x)) resolves both levels", () => {
-			const result = runLine(py, "echo $(echo $(echo x))", tempDir());
+			const result = runLine(py, "echo $(echo $(echo x))", tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("x\n");
 		});
 
 		it("command substitution inside a double-quoted argument interpolates in place", () => {
-			const result = runLine(py, 'echo "pre-$(echo mid)-post"', tempDir());
+			const result = runLine(py, 'echo "pre-$(echo mid)-post"', tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("pre-mid-post\n");
 		});
 
 		it("division by zero in $((...)) fails only that command and does not stop the list", () => {
-			const result = runLine(py, "echo $((1/0)); echo after", tempDir());
+			const result = runLine(py, "echo $((1/0)); echo after", tempDir("pi-adversarial-"));
 			assertNoCrash(result);
 			expect(result.stdout).toBe("bash: 1/0: division by zero\nafter\n");
 		});
@@ -538,20 +534,20 @@ describe("pi-shell-engine adversarial", () => {
 	describe("9. limits", () => {
 		it("an argument list over 8000 characters is accepted and echoed back exactly", () => {
 			const arg = "a".repeat(8500);
-			const result = runLine(py, `echo ${arg}`, tempDir());
+			const result = runLine(py, `echo ${arg}`, tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe(`${arg}\n`);
 			expect(result.exitCode).toBe(0);
 		});
 
 		it("200 semicolon-separated true commands all run without truncation", () => {
 			const command = `${Array(200).fill("true").join(";")};echo done`;
-			const result = runLine(py, command, tempDir());
+			const result = runLine(py, command, tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("done\n");
 			expect(result.exitCode).toBe(0);
 		});
 
 		it("a 1 MB stdout from an external command passes through the pipe intact", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			// Binary stdout: a text-mode print would add a "\r" on Windows and the count would be host-dependent.
 			const command = `${py} -c 'import sys; sys.stdout.buffer.write(b"x"*1000000 + b"\\n")' | wc -c`;
 			const result = runLine(py, command, dir);
@@ -559,21 +555,21 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("an empty command is a clean no-op", () => {
-			const result = runLine(py, "", tempDir());
+			const result = runLine(py, "", tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("");
 			expect(result.exitCode).toBe(0);
 			expect(result.refused).toBe(false);
 		});
 
 		it("a whitespace-only command is a clean no-op", () => {
-			const result = runLine(py, "    \t  ", tempDir());
+			const result = runLine(py, "    \t  ", tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("");
 			expect(result.exitCode).toBe(0);
 			expect(result.refused).toBe(false);
 		});
 
 		it("a comment-only command is a clean no-op", () => {
-			const result = runLine(py, "# just a comment, nothing to run", tempDir());
+			const result = runLine(py, "# just a comment, nothing to run", tempDir("pi-adversarial-"));
 			expect(result.stdout).toBe("");
 			expect(result.exitCode).toBe(0);
 			expect(result.refused).toBe(false);
@@ -582,7 +578,7 @@ describe("pi-shell-engine adversarial", () => {
 
 	describe("10. Windows oddities (run everywhere, expectations by platform)", () => {
 		it("a redirect target named NUL/CON is a plain filename on POSIX, and a device sink on win32", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			const result = runLine(py, "echo hi > NUL; cat NUL", dir);
 			assertNoCrash(result);
 			if (win32) {
@@ -595,7 +591,7 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("/dev/null is always writable and reads back empty", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			const command = "echo discarded > /dev/null; cat /dev/null; echo done";
 			const result = runLine(py, command, dir);
 			assertNoCrash(result);
@@ -606,7 +602,7 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("trailing dots and trailing spaces in a filename round-trip through cat", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			writeFileSync(join(dir, "trail."), "dot\n");
 			writeFileSync(join(dir, "trail "), "space\n");
 			const dotResult = runLine(py, 'cat "trail."', dir);
@@ -620,7 +616,7 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("dir lists the current directory as a clear success or a named refusal, never a hang", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			writeFileSync(join(dir, "a.txt"), "x");
 			const result = runLine(py, "dir", dir);
 			assertNoCrash(result);
@@ -628,7 +624,7 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("a forward-slash path spelling resolves a file inside a subdirectory", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			mkdirSync(join(dir, "subdir"));
 			writeFileSync(join(dir, "subdir", "f.txt"), "f\n");
 			const result = runLine(py, "cat subdir/f.txt", dir);
@@ -637,7 +633,7 @@ describe("pi-shell-engine adversarial", () => {
 		});
 
 		it("an unquoted backslash escapes the next character as in bash on every host; a quoted relative backslash path resolves only on win32", () => {
-			const dir = tempDir();
+			const dir = tempDir("pi-adversarial-");
 			mkdirSync(join(dir, "subdir"));
 			writeFileSync(join(dir, "subdir", "f.txt"), "f\n");
 			// `subdir\f.txt` is `subdirf.txt` to bash (the backslash escapes `f`); the engine keeps

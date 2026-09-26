@@ -1,6 +1,3 @@
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { Agent } from "@caupulican/pi-agent-core";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
@@ -32,6 +29,7 @@ import { formatModelRouterStatus } from "../src/core/model-router/status.ts";
 import { ModelRouterController, type ModelRouterControllerDeps } from "../src/core/model-router-controller.ts";
 import { FitnessStore } from "../src/core/models/fitness-store.ts";
 import type { ModelFitnessReport } from "../src/core/research/model-fitness.ts";
+import { tempDir } from "./temp-dir.ts";
 
 type TestModel = Model<Api>;
 
@@ -122,7 +120,7 @@ function createController(options: {
 	/** Model refs System One judges superseded by a later version among the offered models. */
 	supersededRefs?: string[];
 }): ControllerFixture {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-router-modes-"));
+	const agentDir = tempDir("pi-router-modes-");
 	let current = settings(options.settings);
 	let scoped: TestModel[] | undefined = options.pool;
 	const authed = options.authed ?? ALL;

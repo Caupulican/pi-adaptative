@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { tempDir } from "../temp-dir.ts";
 
 const ENGINE_DIR = join(import.meta.dirname, "..", "..", "src", "bundled-resources", "runtimes", "pi-shell-engine");
 
@@ -64,7 +64,7 @@ except UnsupportedConstruct as e:
 }
 
 function withTmpFiles(files: Record<string, string>): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-shell-search-"));
+	const dir = tempDir("pi-shell-search-");
 	for (const [name, content] of Object.entries(files)) {
 		writeFileSync(join(dir, name), content, "utf-8");
 	}
@@ -219,7 +219,7 @@ describe("pi-shell-engine commands/search.py", () => {
 
 		it("resolves a relative FILE operand against ctx.cwd, not the process's OS cwd", () => {
 			const dir = withTmpFiles({ "g.txt": "abc\nxyz\n" });
-			const processCwd = mkdtempSync(join(tmpdir(), "pi-shell-search-elsewhere-"));
+			const processCwd = tempDir("pi-shell-search-elsewhere-");
 			const r = runBuiltinWithDivergentProcessCwd(python, "search.cmd_grep", {
 				argv: ["grep", "-F", "abc", "g.txt"],
 				cwd: dir,
@@ -366,7 +366,7 @@ describe("pi-shell-engine commands/search.py", () => {
 
 		it("resolves a relative FILE operand against ctx.cwd, not the process's OS cwd", () => {
 			const dir = withTmpFiles({ "in.txt": "foo bar\n" });
-			const processCwd = mkdtempSync(join(tmpdir(), "pi-shell-search-elsewhere-"));
+			const processCwd = tempDir("pi-shell-search-elsewhere-");
 			const r = runBuiltinWithDivergentProcessCwd(python, "search.cmd_sed", {
 				argv: ["sed", "s/foo/baz/", "in.txt"],
 				cwd: dir,

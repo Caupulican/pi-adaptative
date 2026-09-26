@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { compileExecutionCharter } from "../../src/core/autonomy/execution-charter.ts";
@@ -14,18 +13,11 @@ import { createRepoReleaseDelivery } from "../../src/core/objective-execution/re
 import { SystemOneController, TerminalHookRejectedError } from "../../src/core/system-one/controller.ts";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
 import { IntegrityHookCoordinator } from "../../src/core/system-one/integrity-hooks.ts";
+import { committedRepo } from "../git-fixture.ts";
+import { tempDir } from "../temp-dir.ts";
 
 function gitRepo(): string {
-	const root = mkdtempSync(join(tmpdir(), "pi-blast-"));
-	execFileSync("git", ["init"], { cwd: root });
-	execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: root });
-	execFileSync("git", ["config", "user.name", "test"], { cwd: root });
-	execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: root });
-	execFileSync("git", ["config", "tag.gpgsign", "false"], { cwd: root });
-	writeFileSync(join(root, "README.md"), "one\n");
-	execFileSync("git", ["add", "README.md"], { cwd: root });
-	execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-m", "init"], { cwd: root });
-	return root;
+	return committedRepo("pi-blast-");
 }
 
 function head(root: string): string {
@@ -151,7 +143,7 @@ describe("delivery authority blast radius", () => {
 
 	it("does not retarget a push when the upstream changes", async () => {
 		const root = gitRepo();
-		const bare = mkdtempSync(join(tmpdir(), "pi-blast-remote-"));
+		const bare = tempDir("pi-blast-remote-");
 		execFileSync("git", ["init", "--bare"], { cwd: bare });
 		execFileSync("git", ["remote", "add", "origin", bare], { cwd: root });
 		const delivery = createRepoGitDelivery(root);
@@ -189,7 +181,7 @@ describe("delivery authority blast radius", () => {
 	});
 
 	it("does not let a deploy script become a privileged adapter", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-blast-deploy-"));
+		const root = tempDir("pi-blast-deploy-");
 		writeFileSync(
 			join(root, "package.json"),
 			JSON.stringify({ private: true, scripts: { deploy: "echo owned", "deploy:status": "echo id" } }),
@@ -216,7 +208,7 @@ describe("delivery authority blast radius", () => {
 	});
 
 	it("rejects publish when the manifest identity drifts from admission", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-blast-pkg-"));
+		const root = tempDir("pi-blast-pkg-");
 		writeFileSync(join(root, "package.json"), JSON.stringify({ name: "pkg", version: "1.0.0" }));
 		const delivery = createRepoReleaseDelivery(root, {
 			packageIntent: { packageName: "pkg", version: "1.0.0", registry: "https://registry.example.test" },

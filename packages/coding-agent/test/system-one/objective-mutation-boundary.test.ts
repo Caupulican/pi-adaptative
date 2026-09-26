@@ -11,6 +11,7 @@ import { repositoryEffectForCall } from "../../src/core/objective-execution/repo
 import { RepositoryMutationObserver } from "../../src/core/objective-execution/repository-mutation-observer.ts";
 import { resolveObjectiveWorkspaceSafetyMode } from "../../src/core/objective-execution/workspace-safety.ts";
 import { ToolGateController } from "../../src/core/tool-gate-controller.ts";
+import { committedRepo } from "../git-fixture.ts";
 
 for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"]) {
 	delete process.env[key];
@@ -30,24 +31,8 @@ function tempDir(prefix: string): string {
 	return path;
 }
 
-function git(root: string, args: readonly string[]): void {
-	execFileSync("git", args, { cwd: root });
-}
-
 function gitRepo(): string {
-	const root = tempDir("pi-mb-");
-	git(root, ["init"]);
-	git(root, ["config", "user.email", "test@example.com"]);
-	git(root, ["config", "user.name", "test"]);
-	git(root, ["config", "commit.gpgsign", "false"]);
-	execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: root });
-	const readme = join(root, "README.md");
-	const fd = openSync(readme, "w");
-	writeSync(fd, "one\n");
-	closeSync(fd);
-	git(root, ["add", "README.md"]);
-	git(root, ["-c", "commit.gpgsign=false", "commit", "-m", "init"]);
-	return root;
+	return committedRepo("pi-mb-");
 }
 
 function gate(cwd: string, hostEffect?: "none" | "observe" | "typed_paths") {

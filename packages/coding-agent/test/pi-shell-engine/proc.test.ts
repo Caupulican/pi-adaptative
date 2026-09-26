@@ -1,8 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { tempDir } from "../temp-dir.ts";
 
 const ENGINE_DIR = join(import.meta.dirname, "..", "..", "src", "bundled-resources", "runtimes", "pi-shell-engine");
 
@@ -36,7 +35,7 @@ describe("pi-shell-engine proc (external-command spawn + deadline kill)", () => 
 	const pyPath = resolveAbsolutePython(python);
 
 	it("spawns an external command in the requested cwd", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-proc-"));
+		const dir = tempDir("pi-proc-");
 		const program = `
 import sys, subprocess, os
 sys.path.insert(0, ${JSON.stringify(ENGINE_DIR)})
@@ -57,7 +56,7 @@ sys.stdout.write(out.decode("utf-8"))
 	});
 
 	it("spawns an external command with the requested env (not the ambient process env)", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-proc-"));
+		const dir = tempDir("pi-proc-");
 		const program = `
 import sys, subprocess, os
 sys.path.insert(0, ${JSON.stringify(ENGINE_DIR)})
@@ -78,7 +77,7 @@ sys.stdout.write(out.decode("utf-8"))
 	});
 
 	it("a breached deadline kills a sleeping child and reports exit code 124", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-proc-"));
+		const dir = tempDir("pi-proc-");
 		const program = `
 import sys, subprocess, os, time
 sys.path.insert(0, ${JSON.stringify(ENGINE_DIR)})
