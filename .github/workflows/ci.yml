@@ -313,6 +313,13 @@ jobs:
       # after shard 1's own tests have finished, so no budgeted test ever competes with it for the
       # runner. That "shard == 1" gate fires exactly once regardless of shard count (1 or 4), so
       # narrowed runs keep this coverage unchanged.
+      # Test temp churn on a Dev Drive (scripts/ci-windows-dev-drive.ps1): faster file operations and
+      # off the system volume the runner's background services saturate.
+      - name: Put TEMP on a Dev Drive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/ci-windows-dev-drive.ps1
+
       - name: Test coding-agent shard
         if: needs.plan.outputs.coding_agent_narrow != 'true'
         working-directory: packages/coding-agent

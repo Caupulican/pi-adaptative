@@ -20,27 +20,30 @@ const MAX_PENDING_FS = 6;
 
 /**
  * Where each in-flight filesystem request was made: a stall on a pending `FSReqPromise` otherwise
- * names no file and no caller. Entries leave the map when the request completes.
+ * names no file and no caller. Entries leave the map when the request completes. The hook costs
+ * about 20% of test time, so it runs only when asked for (PI_CI_HANG_FS_TRACE=1).
  */
 const pendingFs = new Map<number, { type: string; at: number; stack: string }>();
-createHook({
-	init(asyncId, type) {
-		if (type !== "FSREQPROMISE" && type !== "FSREQCALLBACK") return;
-		const stack = (new Error().stack ?? "")
-			.split("\n")
-			.slice(2)
-			.filter((line) => !line.includes("node:internal") && !line.includes("ci-hang-diagnostics"))
-			.slice(0, 8)
-			.join(" <- ");
-		pendingFs.set(asyncId, { type, at: Date.now(), stack });
-	},
-	destroy(asyncId) {
-		pendingFs.delete(asyncId);
-	},
-	promiseResolve(asyncId) {
-		pendingFs.delete(asyncId);
-	},
-}).enable();
+if (process.env.PI_CI_HANG_FS_TRACE === "1") {
+	createHook({
+		init(asyncId, type) {
+			if (type !== "FSREQPROMISE" && type !== "FSREQCALLBACK") return;
+			const stack = (new Error().stack ?? "")
+				.split("\n")
+				.slice(2)
+				.filter((line) => !line.includes("node:internal") && !line.includes("ci-hang-diagnostics"))
+				.slice(0, 8)
+				.join(" <- ");
+			pendingFs.set(asyncId, { type, at: Date.now(), stack });
+		},
+		destroy(asyncId) {
+			pendingFs.delete(asyncId);
+		},
+		promiseResolve(asyncId) {
+			pendingFs.delete(asyncId);
+		},
+	}).enable();
+}
 
 interface ProcessRow {
 	ProcessId: number;
@@ -115,7 +118,9 @@ async function report(testName: string, startedAt: number): Promise<void> {
 			`[ci-hang] "${testName}" still running after ${Date.now() - startedAt}ms in worker ${process.pid}`,
 			`[ci-hang] active resources: ${JSON.stringify(resources)}`,
 			`[ci-hang] ${load}`,
-			`[ci-hang] oldest in-flight filesystem requests (${pendingFs.size}):`,
+			...(process.env.PI_CI_HANG_FS_TRACE === "1"
+				? [`[ci-hang] oldest in-flight filesystem requests (${pendingFs.size}):`]
+				: []),
 			...oldestFs,
 			`[ci-hang] processes (${rows.length} on host, ${descendants.size} descendants)${listing.error ? ` listing failed: ${listing.error}` : ""}:`,
 			...shown,
