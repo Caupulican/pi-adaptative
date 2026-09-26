@@ -46,6 +46,17 @@ const MODEL_ROUTER_TIER_ORDER: readonly ("cheap" | "medium" | "expensive")[] = [
  * long enough to read and decide, short enough that an unattended session doesn't hang a turn on it. */
 const OLLAMA_INSTALL_CONFIRM_TIMEOUT_MS = 30_000;
 const LOCAL_MODEL_ANTI_THRASH_MS = 5 * 60_000;
+const RUNTIME_RECONCILED_REASON = "runtime_reconciled";
+
+interface RuntimeOperationFence {
+	readonly key: string;
+	readonly controller: AbortController;
+}
+
+interface RuntimeReadinessOperation {
+	readonly confirmedKey: string;
+	readonly fence: RuntimeOperationFence;
+}
 
 interface LocalRuntimeReadiness {
 	ready: boolean;
@@ -113,6 +124,8 @@ export class LocalRuntimeController {
 	/** All live runtime adapters participate in one session-wide residency view. */
 	private readonly _residencyAdapters = new Map<string, RuntimeResidencyAdapter>();
 	private readonly _recentEvictions: RuntimeEvictionRecord[] = [];
+	/** Exact-model readiness generations. Reconcile aborts only removed models; retained work keeps its fence. */
+	private readonly _runtimeOperationFences = new Map<string, AbortController>();
 
 	private readonly deps: LocalRuntimeControllerDeps;
 
@@ -256,32 +269,111 @@ export class LocalRuntimeController {
 		return this._confirmedUp.has(key) ? "" : key;
 	}
 
+	private captureRuntimeOperation(model: Model<Api>, serverUrl: string): RuntimeOperationFence {
+		const key = this.confirmationKey(model, serverUrl);
+		let controller = this._runtimeOperationFences.get(key);
+		if (!controller || controller.signal.aborted) {
+			controller = new AbortController();
+			this._runtimeOperationFences.set(key, controller);
+		}
+		return { key, controller };
+	}
+
+	private beginRuntimeReadiness(model: Model<Api>, serverUrl: string): RuntimeReadinessOperation | undefined {
+		const confirmedKey = this.unconfirmedKey(model, serverUrl);
+		if (!confirmedKey) return undefined;
+		return { confirmedKey, fence: this.captureRuntimeOperation(model, serverUrl) };
+	}
+
+	private isRuntimeOperationCurrent(fence: RuntimeOperationFence): boolean {
+		return !fence.controller.signal.aborted && this._runtimeOperationFences.get(fence.key) === fence.controller;
+	}
+
+	private trackRuntimeOperation(fence: RuntimeOperationFence, ownsRuntime: () => boolean): () => boolean {
+		return () => this.isRuntimeOperationCurrent(fence) && ownsRuntime();
+	}
+
+	private publishRuntimeReady(confirmedKey: string, isCurrent: () => boolean): boolean {
+		if (!isCurrent()) return false;
+		this._confirmedUp.add(confirmedKey);
+		return true;
+	}
+
+	private reconciledReadiness(): { ready: false; reason: string } {
+		return { ready: false, reason: RUNTIME_RECONCILED_REASON };
+	}
+
+	private refusedResidency(result: { reason?: string }): { ready: false; reason: string } {
+		return { ready: false, reason: result.reason ?? "residency_refused" };
+	}
+
+	private async confirmManagedRuntimeInstall(
+		ui: ExtensionUIContext,
+		title: string,
+		message: string,
+	): Promise<boolean> {
+		this.deps.emit({ type: "routing_end" });
+		try {
+			return await ui.confirm(title, message, { timeout: OLLAMA_INSTALL_CONFIRM_TIMEOUT_MS });
+		} finally {
+			this.deps.emit({ type: "routing_start" });
+		}
+	}
+
+	private ollamaResidencyAdapterId(serverUrl: string): string {
+		return `ollama:${serverUrl}`;
+	}
+
+	private transformersResidencyAdapterId(modelId: string, serverUrl: string): string {
+		return `transformers:${modelId}:${serverUrl}`;
+	}
+
+	private deleteResidencyAdapter(adapterId: string, adapter: RuntimeResidencyAdapter): void {
+		if (this._residencyAdapters.get(adapterId) === adapter) this._residencyAdapters.delete(adapterId);
+	}
+
 	private async ensureResidentWithAdapter(
 		model: Model<Api>,
 		adapterId: string,
 		adapter: RuntimeResidencyAdapter,
 		bytes: number,
+		fence: RuntimeOperationFence,
+		ownsRuntime: () => boolean,
 	): Promise<{ ok: boolean; reason?: string }> {
+		const isCurrent = this.trackRuntimeOperation(fence, ownsRuntime);
+		if (!isCurrent()) return { ok: false, reason: RUNTIME_RECONCILED_REASON };
 		this._residencyAdapters.set(adapterId, adapter);
 		const arbiter = this.createResidencyArbiter();
 		try {
 			const nowMs = Date.now();
-			const plan = await arbiter.ensureResident(adapterId, {
-				model: model.id,
-				bytes,
-				role: "active",
-				priority: 100,
-				nowMs,
-				antiThrashWindowMs: LOCAL_MODEL_ANTI_THRASH_MS,
-				pinActiveModel: model.id,
-				recentEvictions: this._recentEvictions,
-				// Cold model loads can take minutes. The adaptive stream owns that wait; admission
-				// must not front-run it with an empty generation.
-				loadModel: false,
-			});
+			const plan = await arbiter.ensureResident(
+				adapterId,
+				{
+					model: model.id,
+					bytes,
+					role: "active",
+					priority: 100,
+					nowMs,
+					antiThrashWindowMs: LOCAL_MODEL_ANTI_THRASH_MS,
+					pinActiveModel: model.id,
+					recentEvictions: this._recentEvictions,
+					// Cold model loads can take minutes. The adaptive stream owns that wait; admission
+					// must not front-run it with an empty generation.
+					loadModel: false,
+				},
+				fence.controller.signal,
+			);
 			this.recordEvictions(plan.evict, model.id, nowMs, adapterId);
+			if (!isCurrent()) {
+				this.deleteResidencyAdapter(adapterId, adapter);
+				return { ok: false, reason: RUNTIME_RECONCILED_REASON };
+			}
 			return plan.status === "fits" ? { ok: true } : { ok: false, reason: `residency_refused:${plan.reason}` };
 		} catch (error) {
+			if (!isCurrent()) {
+				this.deleteResidencyAdapter(adapterId, adapter);
+				return { ok: false, reason: RUNTIME_RECONCILED_REASON };
+			}
 			return { ok: false, reason: `residency_error:${error instanceof Error ? error.message : String(error)}` };
 		}
 	}
@@ -289,6 +381,7 @@ export class LocalRuntimeController {
 	private async ensureOllamaResident(
 		model: Model<Api>,
 		runtime: OllamaRuntime,
+		fence: RuntimeOperationFence,
 		knownSizeBytes?: number,
 	): Promise<{ ok: boolean; reason?: string }> {
 		let bytes = knownSizeBytes ?? 0;
@@ -301,26 +394,31 @@ export class LocalRuntimeController {
 			}
 		}
 		const serverUrl = this.deriveOllamaServerUrl(model.baseUrl);
-		const adapterId = `ollama:${serverUrl}`;
+		const adapterId = this.ollamaResidencyAdapterId(serverUrl);
 		return this.ensureResidentWithAdapter(
 			model,
 			adapterId,
 			new OllamaRuntimeResidencyAdapter(adapterId, runtime),
 			bytes,
+			fence,
+			() => this._runtimes.get(serverUrl) === runtime,
 		);
 	}
 
 	private async ensureTransformersResident(
 		model: Model<Api>,
 		runtime: TransformersRuntime,
+		fence: RuntimeOperationFence,
 	): Promise<{ ok: boolean; reason?: string }> {
 		const serverUrl = this.deriveOpenAICompatServerUrl(model.baseUrl);
-		const adapterId = `transformers:${model.id}:${serverUrl}`;
+		const adapterId = this.transformersResidencyAdapterId(model.id, serverUrl);
 		return this.ensureResidentWithAdapter(
 			model,
 			adapterId,
 			new TransformersRuntimeResidencyAdapter(adapterId, runtime, model.id, 0),
 			0,
+			fence,
+			() => this._transformersRuntimes.get(this._transformersRuntimeKey(model.id, serverUrl)) === runtime,
 		);
 	}
 
@@ -393,12 +491,13 @@ export class LocalRuntimeController {
 			return { ready: true, reason: "not_local" };
 		}
 		const serverUrl = this.deriveOllamaServerUrl(model.baseUrl);
-		const confirmedKey = this.unconfirmedKey(model, serverUrl);
-		if (!confirmedKey) {
-			return { ready: true, reason: "confirmed_up_cached" };
-		}
+		const operation = this.beginRuntimeReadiness(model, serverUrl);
+		if (!operation) return { ready: true, reason: "confirmed_up_cached" };
+		const { confirmedKey, fence } = operation;
 		const runtime = this.getLocalRuntime(serverUrl);
+		const isCurrent = this.trackRuntimeOperation(fence, () => this._runtimes.get(serverUrl) === runtime);
 		const status = await runtime.detect();
+		if (!isCurrent()) return this.reconciledReadiness();
 		if (status.serverUp) {
 			// Server ownership is not a capability boundary. Reuse a configured user/system server
 			// when it exposes the requested model; this preserves its accelerator settings and warm
@@ -410,9 +509,9 @@ export class LocalRuntimeController {
 					reason: `model_missing_on_server:${model.id}:${status.activeStore?.path ?? "external/unknown"}`,
 				};
 			}
-			const resident = await this.ensureOllamaResident(model, runtime, installedEntry.sizeBytes);
-			if (!resident.ok) return { ready: false, reason: resident.reason ?? "residency_refused" };
-			this._confirmedUp.add(confirmedKey);
+			const resident = await this.ensureOllamaResident(model, runtime, fence, installedEntry.sizeBytes);
+			if (!resident.ok) return this.refusedResidency(resident);
+			if (!this.publishRuntimeReady(confirmedKey, isCurrent)) return this.reconciledReadiness();
 			return {
 				ready: true,
 				reason: status.managedByPi ? "already_running_managed" : "already_running_configured_server",
@@ -422,13 +521,22 @@ export class LocalRuntimeController {
 			return { ready: false, reason: "binary_missing", installGuide: runtime.installGuide() };
 		}
 		const started = await runtime.start();
+		if (!isCurrent()) {
+			if (started.started) runtime.stop();
+			return this.reconciledReadiness();
+		}
 		if (started.started) {
 			let installedEntry: { name: string; sizeBytes: number } | undefined;
 			try {
 				const installed = await runtime.list();
+				if (!isCurrent()) {
+					runtime.stop();
+					return this.reconciledReadiness();
+				}
 				installedEntry = installed.find((entry) => matchesInstalledLocalModel(model.id, entry.name));
 			} catch (error) {
 				runtime.stop();
+				if (!isCurrent()) return this.reconciledReadiness();
 				return {
 					ready: false,
 					reason: `model_list_failed_after_start:${error instanceof Error ? error.message : String(error)}`,
@@ -438,12 +546,15 @@ export class LocalRuntimeController {
 				runtime.stop();
 				return { ready: false, reason: `model_missing_on_started_server:${model.id}` };
 			}
-			const resident = await this.ensureOllamaResident(model, runtime, installedEntry.sizeBytes);
+			const resident = await this.ensureOllamaResident(model, runtime, fence, installedEntry.sizeBytes);
 			if (!resident.ok) {
 				runtime.stop();
-				return { ready: false, reason: resident.reason ?? "residency_refused" };
+				return this.refusedResidency(resident);
 			}
-			this._confirmedUp.add(confirmedKey);
+			if (!this.publishRuntimeReady(confirmedKey, isCurrent)) {
+				runtime.stop();
+				return this.reconciledReadiness();
+			}
 		}
 		return { ready: started.started, reason: started.reason };
 	}
@@ -455,26 +566,38 @@ export class LocalRuntimeController {
 			return { ready: true, reason: "not_transformers" };
 		}
 		const serverUrl = this.deriveOpenAICompatServerUrl(model.baseUrl);
-		const confirmedKey = this.unconfirmedKey(model, serverUrl);
-		if (!confirmedKey) {
-			return { ready: true, reason: "confirmed_up_cached" };
-		}
+		const operation = this.beginRuntimeReadiness(model, serverUrl);
+		if (!operation) return { ready: true, reason: "confirmed_up_cached" };
+		const { confirmedKey, fence } = operation;
 		const runtime = this.getTransformersRuntime(model.id, serverUrl);
+		const runtimeKey = this._transformersRuntimeKey(model.id, serverUrl);
+		const isCurrent = this.trackRuntimeOperation(fence, () => this._transformersRuntimes.get(runtimeKey) === runtime);
 		const status = await runtime.detect();
+		if (!isCurrent()) return this.reconciledReadiness();
 		if (status.serverUp) {
-			const resident = await this.ensureTransformersResident(model, runtime);
-			if (!resident.ok) return { ready: false, reason: resident.reason ?? "residency_refused" };
-			this._confirmedUp.add(confirmedKey);
+			const resident = await this.ensureTransformersResident(model, runtime, fence);
+			if (!resident.ok) return this.refusedResidency(resident);
+			if (!this.publishRuntimeReady(confirmedKey, isCurrent)) return this.reconciledReadiness();
 			return { ready: true, reason: "already_running" };
 		}
 		if (!status.runtimeInstalled) {
 			return { ready: false, reason: "runtime_missing", installGuide: runtime.installGuide() };
 		}
 		const started = await runtime.start();
+		if (!isCurrent()) {
+			if (started.started || started.reason === "already_running") runtime.stop();
+			return this.reconciledReadiness();
+		}
 		if (started.started || started.reason === "already_running") {
-			const resident = await this.ensureTransformersResident(model, runtime);
-			if (!resident.ok) return { ready: false, reason: resident.reason ?? "residency_refused" };
-			this._confirmedUp.add(confirmedKey);
+			const resident = await this.ensureTransformersResident(model, runtime, fence);
+			if (!resident.ok) {
+				if (resident.reason === RUNTIME_RECONCILED_REASON) runtime.stop();
+				return this.refusedResidency(resident);
+			}
+			if (!this.publishRuntimeReady(confirmedKey, isCurrent)) {
+				runtime.stop();
+				return this.reconciledReadiness();
+			}
 			return { ready: true, reason: started.reason };
 		}
 		return { ready: false, reason: started.reason };
@@ -501,12 +624,15 @@ export class LocalRuntimeController {
 			return { ready: true, reason: "not_pi_managed_llama_cpp" };
 		}
 		const serverUrl = this.deriveOpenAICompatServerUrl(model.baseUrl);
+		const fence = this.captureRuntimeOperation(model, serverUrl);
+		const runtime = this.getPrismLlamaCppRuntime();
+		const isCurrent = this.trackRuntimeOperation(fence, () => this._prismLlamaCppRuntime === runtime);
 		const probe = await probePrismLlamaCppServer(serverUrl, model.id, this.deps.prismLlamaCppDeps?.fetchFn);
+		if (!isCurrent()) return this.reconciledReadiness();
 		if (probe.status === "matching") {
 			return { ready: true, reason: "already_running" };
 		}
 		if (probe.status === "conflict") {
-			const runtime = this.getPrismLlamaCppRuntime();
 			if (!runtime.isRunning() || !runtime.stop().stopped) {
 				return {
 					ready: false,
@@ -521,11 +647,15 @@ export class LocalRuntimeController {
 			return { ready: false, reason: `no_curated_descriptor:${model.id}` };
 		}
 		const served = await ensurePrismModelFilesThenServe(
-			this.getPrismLlamaCppRuntime(),
+			runtime,
 			descriptor,
 			{ port: PRISM_LLAMACPP_SERVE_PORT, numCtx: model.contextWindow },
 			() => {},
 		);
+		if (!isCurrent()) {
+			runtime.stop();
+			return this.reconciledReadiness();
+		}
 		if (!served.ok) {
 			return { ready: false, reason: `${served.stage}:${served.error}` };
 		}
@@ -553,31 +683,29 @@ export class LocalRuntimeController {
 		const ui = this.deps.getUIContext();
 		if (!ui || readiness.ready || readiness.reason !== "binary_missing") return readiness;
 
-		const modelLabel = this.deps.formatModel(model);
-		this.deps.emit({ type: "routing_end" });
-		let confirmed: boolean;
-		try {
-			confirmed = await ui.confirm(
-				"Install Ollama?",
-				`Ollama isn't installed, so the local model "${modelLabel}" can't run. Pi can download and ` +
-					"install it now (a large one-time download, possibly over 1 GB depending on your platform) " +
-					"into its own runtimes folder — never curl|sh, never touching anything outside pi's own " +
-					"directory. Install it now?",
-				{ timeout: OLLAMA_INSTALL_CONFIRM_TIMEOUT_MS },
-			);
-		} finally {
-			this.deps.emit({ type: "routing_start" });
-		}
-		if (!confirmed) return readiness;
-
 		const serverUrl = this.deriveOllamaServerUrl(model.baseUrl);
+		const fence = this.captureRuntimeOperation(model, serverUrl);
+		const modelLabel = this.deps.formatModel(model);
+		const confirmed = await this.confirmManagedRuntimeInstall(
+			ui,
+			"Install Ollama?",
+			`Ollama isn't installed, so the local model "${modelLabel}" can't run. Pi can download and ` +
+				"install it now (a large one-time download, possibly over 1 GB depending on your platform) " +
+				"into its own runtimes folder — never curl|sh, never touching anything outside pi's own " +
+				"directory. Install it now?",
+		);
+		if (!confirmed) return readiness;
+		if (!this.isRuntimeOperationCurrent(fence)) return this.reconciledReadiness();
+
 		const runtime = this.getLocalRuntime(serverUrl);
+		const isCurrent = this.trackRuntimeOperation(fence, () => this._runtimes.get(serverUrl) === runtime);
 		let installResult: { ok: boolean; error?: string };
 		try {
 			installResult = await runtime.installManaged((status) => ui.setStatus("ollama-install", status));
 		} finally {
 			ui.setStatus("ollama-install", undefined);
 		}
+		if (!isCurrent()) return this.reconciledReadiness();
 		if (!installResult.ok) {
 			return { ready: false, reason: "install_failed", installAttemptError: installResult.error };
 		}
@@ -591,31 +719,30 @@ export class LocalRuntimeController {
 		const ui = this.deps.getUIContext();
 		if (!ui || readiness.ready || readiness.reason !== "runtime_missing") return readiness;
 
-		const modelLabel = this.deps.formatModel(model);
-		this.deps.emit({ type: "routing_end" });
-		let confirmed: boolean;
-		try {
-			confirmed = await ui.confirm(
-				"Install Transformers runtime?",
-				`The Hugging Face model "${modelLabel}" needs a pi-managed Python venv with Transformers ` +
-					"and CPU PyTorch before it can run. Pi will install those packages into its own runtimes " +
-					"folder, download the model into a pi-owned Hugging Face cache, and leave system Python, " +
-					"your Ollama models, and your user HF cache untouched. Install it now?",
-				{ timeout: OLLAMA_INSTALL_CONFIRM_TIMEOUT_MS },
-			);
-		} finally {
-			this.deps.emit({ type: "routing_start" });
-		}
-		if (!confirmed) return readiness;
-
 		const serverUrl = this.deriveOpenAICompatServerUrl(model.baseUrl);
+		const fence = this.captureRuntimeOperation(model, serverUrl);
+		const modelLabel = this.deps.formatModel(model);
+		const confirmed = await this.confirmManagedRuntimeInstall(
+			ui,
+			"Install Transformers runtime?",
+			`The Hugging Face model "${modelLabel}" needs a pi-managed Python venv with Transformers ` +
+				"and CPU PyTorch before it can run. Pi will install those packages into its own runtimes " +
+				"folder, download the model into a pi-owned Hugging Face cache, and leave system Python, " +
+				"your Ollama models, and your user HF cache untouched. Install it now?",
+		);
+		if (!confirmed) return readiness;
+		if (!this.isRuntimeOperationCurrent(fence)) return this.reconciledReadiness();
+
 		const runtime = this.getTransformersRuntime(model.id, serverUrl);
+		const runtimeKey = this._transformersRuntimeKey(model.id, serverUrl);
+		const isCurrent = this.trackRuntimeOperation(fence, () => this._transformersRuntimes.get(runtimeKey) === runtime);
 		let installResult: { ok: boolean; error?: string };
 		try {
 			installResult = await runtime.installManaged((status) => ui.setStatus("transformers-install", status));
 		} finally {
 			ui.setStatus("transformers-install", undefined);
 		}
+		if (!isCurrent()) return this.reconciledReadiness();
 		if (!installResult.ok) {
 			return { ready: false, reason: "install_failed", installAttemptError: installResult.error };
 		}
@@ -625,6 +752,7 @@ export class LocalRuntimeController {
 		} finally {
 			ui.setStatus("transformers-download", undefined);
 		}
+		if (!isCurrent()) return this.reconciledReadiness();
 		if (!downloadResult.ok) {
 			return { ready: false, reason: "download_failed", installAttemptError: downloadResult.error };
 		}
@@ -751,6 +879,19 @@ export class LocalRuntimeController {
 	 * its own.
 	 */
 	reconcile(eligibleModels: readonly Model<Api>[]): void {
+		// Fence removed exact-model operations before any runtime is stopped. A continuation resuming
+		// from an earlier await then observes cancellation before it can start, evict, or publish.
+		const eligibleConfirmationKeys = new Set(
+			eligibleModels
+				.filter((model) => this.isManagedLocalModel(model))
+				.map((model) => this.confirmationKey(model, this.deriveOllamaServerUrl(model.baseUrl))),
+		);
+		for (const [key, controller] of this._runtimeOperationFences) {
+			if (eligibleConfirmationKeys.has(key)) continue;
+			controller.abort(new Error(RUNTIME_RECONCILED_REASON));
+			this._runtimeOperationFences.set(key, new AbortController());
+		}
+
 		const eligibleOllamaServers = new Set(
 			eligibleModels
 				.filter((model) => model.provider === OLLAMA_PROVIDER)
@@ -759,6 +900,7 @@ export class LocalRuntimeController {
 		for (const [serverUrl, runtime] of this._runtimes) {
 			if (eligibleOllamaServers.has(serverUrl)) continue;
 			this._runtimes.delete(serverUrl);
+			this._residencyAdapters.delete(this.ollamaResidencyAdapterId(serverUrl));
 			this.stopRuntimeBestEffort(`Ollama runtime ${serverUrl}`, () => runtime.stop());
 		}
 
@@ -770,6 +912,7 @@ export class LocalRuntimeController {
 		for (const [runtimeKey, runtime] of this._transformersRuntimes) {
 			if (eligibleTransformersRuntimeKeys.has(runtimeKey)) continue;
 			this._transformersRuntimes.delete(runtimeKey);
+			this._residencyAdapters.delete(this.transformersResidencyAdapterId(runtime.modelId, runtime.baseUrl));
 			this.stopRuntimeBestEffort(`Transformers runtime ${runtimeKey.replace("\0", "/")}`, () => runtime.stop());
 		}
 
@@ -782,11 +925,6 @@ export class LocalRuntimeController {
 		// deriveOllamaServerUrl strips a trailing `/v1` regardless of provider (same body as the
 		// private deriveOpenAICompatServerUrl it mirrors), so it's safe to reuse here for every
 		// managed-local provider's baseUrl when building the confirmationKey-shaped eligible set.
-		const eligibleConfirmationKeys = new Set(
-			eligibleModels
-				.filter((model) => this.isManagedLocalModel(model))
-				.map((model) => this.confirmationKey(model, this.deriveOllamaServerUrl(model.baseUrl))),
-		);
 		for (const key of this._confirmedUp) {
 			if (!eligibleConfirmationKeys.has(key)) this._confirmedUp.delete(key);
 		}

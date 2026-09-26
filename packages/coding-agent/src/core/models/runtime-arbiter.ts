@@ -72,9 +72,15 @@ export class RuntimeResidencyArbiter {
 		this.adapters = new Map(args.adapters.map((adapter) => [adapter.id, adapter]));
 	}
 
-	async ensureResident(adapterId: string, request: RuntimeLoadRequest): Promise<RuntimeResidencyPlan> {
+	async ensureResident(
+		adapterId: string,
+		request: RuntimeLoadRequest,
+		signal?: AbortSignal,
+	): Promise<RuntimeResidencyPlan> {
+		signal?.throwIfAborted();
 		const adapter = this.adapters.get(adapterId);
 		const residents = (await Promise.all([...this.adapters.values()].map((entry) => entry.list()))).flat();
+		signal?.throwIfAborted();
 		if (!adapter) {
 			return {
 				status: "refuse",
@@ -94,12 +100,15 @@ export class RuntimeResidencyArbiter {
 		const plan = planRuntimeResidency({ budgetBytes: this.budgetBytes, residents, request: requestForAdapter });
 		if (plan.status !== "fits") return plan;
 		for (const resident of plan.evict) {
+			signal?.throwIfAborted();
 			await this.adapters.get(resident.adapterId)?.release(resident.model);
+			signal?.throwIfAborted();
 		}
 		const alreadyResident = residents.some(
 			(resident) => resident.adapterId === adapterId && resident.model === request.model,
 		);
 		if (request.loadModel !== false && !alreadyResident) await adapter.ensureResident(request.model);
+		signal?.throwIfAborted();
 		return plan;
 	}
 }

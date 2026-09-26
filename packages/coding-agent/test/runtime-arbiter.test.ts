@@ -245,6 +245,40 @@ describe("runtime residency arbiter", () => {
 		expect(replacementLoads).toBe(0);
 	});
 
+	it("checks a retired residency transaction after asynchronous inventory before side effects", async () => {
+		const inventory = Promise.withResolvers<void>();
+		let releases = 0;
+		let replacementLoads = 0;
+		const adapter: RuntimeResidencyAdapter = {
+			id: "ollama",
+			residencyControl: "keep-alive",
+			list: async () => {
+				await inventory.promise;
+				return [resident({ adapterId: "ollama", model: "resident" })];
+			},
+			ensureResident: async () => {
+				replacementLoads += 1;
+			},
+			release: async () => {
+				releases += 1;
+			},
+		};
+		const arbiter = new RuntimeResidencyArbiter({ budgetBytes: 1_000, adapters: [adapter] });
+		const retired = new AbortController();
+		const admission = arbiter.ensureResident(
+			"ollama",
+			{ model: "replacement", bytes: 1_000, role: "active", priority: 100, nowMs: 1 },
+			retired.signal,
+		);
+
+		retired.abort(new Error("runtime_reconciled"));
+		inventory.resolve();
+
+		await expect(admission).rejects.toThrow("runtime_reconciled");
+		expect(releases).toBe(0);
+		expect(replacementLoads).toBe(0);
+	});
+
 	it("applies arbiter evictions and refuses synthetic 10GB reservations honestly", async () => {
 		const ollama = new FauxRuntimeAdapter("ollama", "keep-alive", ["resident-9b"]);
 		const transformers = new FauxRuntimeAdapter("transformers", "full");

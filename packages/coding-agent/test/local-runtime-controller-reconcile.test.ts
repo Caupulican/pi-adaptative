@@ -10,7 +10,12 @@ import {
 	type PrismLlamaCppDeps,
 } from "../src/core/models/llamacpp-runtime.ts";
 import { HF_TRANSFORMERS_PROVIDER } from "../src/core/models/local-registration.ts";
-import type { LocalRuntimeDeps } from "../src/core/models/local-runtime.ts";
+import type {
+	LocalRuntimeDeps,
+	LocalRuntimeStatus,
+	TransformersRuntimeStatus,
+} from "../src/core/models/local-runtime.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * Reload/profile-switch away from a local model must stop that model's pi-spawned runtime
@@ -127,6 +132,37 @@ describe("LocalRuntimeController.reconcile — Ollama", () => {
 		} finally {
 			rmSync(agentDir, { recursive: true, force: true });
 		}
+	});
+
+	it("fences a pending Ollama probe before it can start a removed runtime", async () => {
+		const agentDir = tempDir("pi-controller-reconcile-ollama-race-");
+		const ctrl = controller(agentDir);
+		const model = ollamaModel("retired-ollama");
+		const runtime = ctrl.getLocalRuntime("http://127.0.0.1:11434");
+		const detected = Promise.withResolvers<LocalRuntimeStatus>();
+		vi.spyOn(runtime, "detect").mockImplementation(() => detected.promise);
+		const start = vi.spyOn(runtime, "start").mockResolvedValue({ started: true, reason: "started" });
+
+		const readiness = ctrl.ensureLocalModelReady(model);
+		ctrl.reconcile([]);
+		const ownedModelsDir = runtime.ownedModelsDir();
+		const userModelsDir = runtime.userModelsDir();
+		detected.resolve({
+			binaryPath: "/test/ollama",
+			binarySource: "system",
+			serverUp: false,
+			serverUrl: runtime.baseUrl,
+			managedByPi: false,
+			ownedModelsDir,
+			userModelsDir,
+			ownedStore: { kind: "pi-owned", path: ownedModelsDir, modelCount: 0 },
+			userStore: { kind: "user", path: userModelsDir, modelCount: 0 },
+			serverModels: [],
+		});
+
+		await expect(readiness).resolves.toEqual({ ready: false, reason: "runtime_reconciled" });
+		expect(start).not.toHaveBeenCalled();
+		expect(ctrl.getLocalRuntime("http://127.0.0.1:11434")).not.toBe(runtime);
 	});
 
 	it("drops the stale confirmed-up cache entry too — a later ensure call re-probes for real", async () => {
@@ -262,6 +298,85 @@ describe("LocalRuntimeController.reconcile — Transformers", () => {
 			rmSync(agentDir, { recursive: true, force: true });
 		}
 	});
+
+	it("fences a pending readiness probe before it can start a runtime removed by reconcile", async () => {
+		const agentDir = tempDir("pi-controller-reconcile-transformers-race-");
+		const ctrl = controller(agentDir);
+		const model = transformersModel("retired-model", 18_102);
+		const runtime = ctrl.getTransformersRuntime("retired-model", "http://127.0.0.1:18102");
+		const detected = Promise.withResolvers<TransformersRuntimeStatus>();
+		vi.spyOn(runtime, "detect").mockImplementation(() => detected.promise);
+		const start = vi.spyOn(runtime, "start").mockResolvedValue({ started: true, reason: "started" });
+
+		const readiness = ctrl.ensureTransformersModelReady(model);
+		ctrl.reconcile([]);
+		detected.resolve({
+			runtimeInstalled: true,
+			serverUp: false,
+			baseUrl: runtime.baseUrl,
+			modelId: runtime.modelId,
+			venvDir: runtime.venvDir,
+			cacheDir: runtime.cacheDir,
+			serverScriptPath: "/test/transformers-server.py",
+		});
+
+		await expect(readiness).resolves.toEqual({ ready: false, reason: "runtime_reconciled" });
+		expect(start).not.toHaveBeenCalled();
+		expect(ctrl.getTransformersRuntime("retired-model", "http://127.0.0.1:18102")).not.toBe(runtime);
+	});
+
+	it("stops a runtime whose start completes after reconcile retired its owner", async () => {
+		const agentDir = tempDir("pi-controller-reconcile-transformers-late-start-");
+		const ctrl = controller(agentDir);
+		const model = transformersModel("late-model", 18_104);
+		const runtime = ctrl.getTransformersRuntime("late-model", "http://127.0.0.1:18104");
+		vi.spyOn(runtime, "detect").mockResolvedValue({
+			runtimeInstalled: true,
+			serverUp: false,
+			baseUrl: runtime.baseUrl,
+			modelId: runtime.modelId,
+			venvDir: runtime.venvDir,
+			cacheDir: runtime.cacheDir,
+			serverScriptPath: "/test/transformers-server.py",
+		});
+		const started = Promise.withResolvers<{ started: boolean; reason: string }>();
+		const start = vi.spyOn(runtime, "start").mockImplementation(() => started.promise);
+		const stop = vi.spyOn(runtime, "stop");
+
+		const readiness = ctrl.ensureTransformersModelReady(model);
+		await vi.waitFor(() => expect(start).toHaveBeenCalledTimes(1));
+		ctrl.reconcile([]);
+		started.resolve({ started: true, reason: "started" });
+
+		await expect(readiness).resolves.toEqual({ ready: false, reason: "runtime_reconciled" });
+		expect(stop).toHaveBeenCalledTimes(2);
+	});
+
+	it("lets a pending readiness probe continue when reconcile retains its exact runtime", async () => {
+		const agentDir = tempDir("pi-controller-reconcile-transformers-retained-");
+		const ctrl = controller(agentDir);
+		const model = transformersModel("retained-model", 18_103);
+		const runtime = ctrl.getTransformersRuntime("retained-model", "http://127.0.0.1:18103");
+		const detected = Promise.withResolvers<TransformersRuntimeStatus>();
+		vi.spyOn(runtime, "detect").mockImplementation(() => detected.promise);
+		const start = vi.spyOn(runtime, "start").mockResolvedValue({ started: true, reason: "started" });
+
+		const readiness = ctrl.ensureTransformersModelReady(model);
+		ctrl.reconcile([model]);
+		detected.resolve({
+			runtimeInstalled: true,
+			serverUp: false,
+			baseUrl: runtime.baseUrl,
+			modelId: runtime.modelId,
+			venvDir: runtime.venvDir,
+			cacheDir: runtime.cacheDir,
+			serverScriptPath: "/test/transformers-server.py",
+		});
+
+		await expect(readiness).resolves.toEqual({ ready: true, reason: "started" });
+		expect(start).toHaveBeenCalledTimes(1);
+		expect(ctrl.getTransformersRuntime("retained-model", "http://127.0.0.1:18103")).toBe(runtime);
+	});
 });
 
 describe("LocalRuntimeController.reconcile — prism llama.cpp", () => {
@@ -322,6 +437,26 @@ describe("LocalRuntimeController.reconcile — prism llama.cpp", () => {
 		} finally {
 			rmSync(agentDir, { recursive: true, force: true });
 		}
+	});
+
+	it("fences a pending prism probe before it can self-heal a removed runtime", async () => {
+		const agentDir = tempDir("pi-controller-reconcile-prism-race-");
+		const health = Promise.withResolvers<Response>();
+		let fetches = 0;
+		const ctrl = controller(agentDir, undefined, {
+			fetchFn: (async () => {
+				fetches += 1;
+				if (fetches === 1) return health.promise;
+				return new Response("", { status: 500 });
+			}) as unknown as typeof fetch,
+		});
+
+		const readiness = ctrl.ensureIsolatedModelReady(bonsaiModel());
+		ctrl.reconcile([]);
+		health.resolve(new Response("", { status: 500 }));
+
+		await expect(readiness).rejects.toThrow("runtime_reconciled");
+		expect(fetches).toBe(1);
 	});
 });
 
