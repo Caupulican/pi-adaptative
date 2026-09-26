@@ -30,7 +30,10 @@ import { spawnProcess, waitForChildProcessWithTermination } from "./child-proces
 import { getProcessWorkRun } from "./work-directory.ts";
 import { extractZipFile } from "./zip-extractor.ts";
 
-const TOOLS_DIR = getBinDir();
+/** Read per call: the agent directory can differ between callers in one process (tests, SDK hosts). */
+function managedToolsDir(): string {
+	return getBinDir();
+}
 const DOWNLOAD_TIMEOUT_MS = 120_000;
 const COMMAND_PROBE_TIMEOUT_MS = 5_000;
 const ARCHIVE_EXTRACTION_TIMEOUT_MS = 5 * 60_000;
@@ -42,8 +45,9 @@ export const RG_VERSION = "15.2.0";
 export const JQ_VERSION = "1.8.2";
 export const UV_VERSION = "0.12.9";
 export const HERDR_VERSION = "0.8.2";
-const FFF_MANAGED_DIR = join(TOOLS_DIR, "fff-node");
-const FFF_MANAGED_PACKAGE_JSON = join(FFF_MANAGED_DIR, "package.json");
+function fffManagedDir(): string {
+	return join(managedToolsDir(), "fff-node");
+}
 
 type ModuleRequire = ((id: string) => unknown) & { resolve?: (id: string) => string };
 
@@ -281,7 +285,7 @@ export function getToolDownloadKind(tool: ManagedToolName, targetPlatform: strin
 export function getManagedToolBinaryPath(
 	tool: ManagedToolName,
 	targetPlatform: string = platform(),
-	toolsDir: string = TOOLS_DIR,
+	toolsDir: string = managedToolsDir(),
 ): string {
 	const config = TOOLS[tool];
 	const root =
@@ -671,7 +675,7 @@ async function downloadTool(tool: ManagedToolName): Promise<string> {
 	}
 
 	// Create tools directory
-	mkdirSync(TOOLS_DIR, { recursive: true });
+	mkdirSync(managedToolsDir(), { recursive: true });
 
 	const downloadUrl = `https://github.com/${config.repo}/releases/download/${config.tagPrefix}${version}/${assetName}`;
 	const downloadWorkDir = getProcessWorkRun(getAgentDir(), "downloads", "tools").path;
@@ -790,8 +794,8 @@ function getFffPlatformPackageName(): string | undefined {
 }
 
 function createManagedFffRequire(): ModuleRequire | undefined {
-	if (!existsSync(FFF_MANAGED_PACKAGE_JSON)) return undefined;
-	return createRequire(pathToFileURL(FFF_MANAGED_PACKAGE_JSON).href);
+	if (!existsSync(join(fffManagedDir(), "package.json"))) return undefined;
+	return createRequire(pathToFileURL(join(fffManagedDir(), "package.json")).href);
 }
 
 const FFF_DIST_CANDIDATE_ENTRIES = [
@@ -916,7 +920,7 @@ export function loadAvailableFffNodePackage(requires?: readonly ModuleRequire[])
 async function runNpmInstall(args: string[]): Promise<{ code: number | null; stderr: string }> {
 	try {
 		const child = spawnProcess("npm", args, {
-			cwd: FFF_MANAGED_DIR,
+			cwd: fffManagedDir(),
 			detached: process.platform !== "win32",
 			stdio: ["ignore", "pipe", "pipe"],
 		});
@@ -1029,8 +1033,8 @@ function recordFffInstallFailure(reason: string): void {
  * optional packages whose os/cpu/libc match, and ffi-rs looks each one up by its own triple.
  */
 export function stageFfiRsNativeBindings(): void {
-	const ffiRsDir = join(FFF_MANAGED_DIR, "node_modules", "ffi-rs");
-	const scopeDir = join(FFF_MANAGED_DIR, "node_modules", "@yuuang");
+	const ffiRsDir = join(fffManagedDir(), "node_modules", "ffi-rs");
+	const scopeDir = join(fffManagedDir(), "node_modules", "@yuuang");
 	if (!existsSync(ffiRsDir) || !existsSync(scopeDir)) return;
 	for (const packageName of readdirSync(scopeDir)) {
 		const packageDir = join(scopeDir, packageName);
@@ -1046,9 +1050,12 @@ export function stageFfiRsNativeBindings(): void {
 
 async function installManagedFffNodePackage(platformPackage: string, silent: boolean): Promise<unknown | undefined> {
 	try {
-		mkdirSync(FFF_MANAGED_DIR, { recursive: true });
-		if (!existsSync(FFF_MANAGED_PACKAGE_JSON)) {
-			writeFileSync(FFF_MANAGED_PACKAGE_JSON, '{"name":"pi-managed-fff-node","private":true,"version":"0.0.0"}\n');
+		mkdirSync(fffManagedDir(), { recursive: true });
+		if (!existsSync(join(fffManagedDir(), "package.json"))) {
+			writeFileSync(
+				join(fffManagedDir(), "package.json"),
+				'{"name":"pi-managed-fff-node","private":true,"version":"0.0.0"}\n',
+			);
 		}
 
 		if (!silent) {
@@ -1064,7 +1071,7 @@ async function installManagedFffNodePackage(platformPackage: string, silent: boo
 			"--no-fund",
 			"--package-lock=false",
 			"--prefix",
-			FFF_MANAGED_DIR,
+			fffManagedDir(),
 			`@ff-labs/fff-node@${FFF_NODE_VERSION}`,
 			`${platformPackage}@${FFF_NODE_VERSION}`,
 		];
@@ -1080,7 +1087,7 @@ async function installManagedFffNodePackage(platformPackage: string, silent: boo
 		stageFfiRsNativeBindings();
 		lastFffLoadError = undefined;
 		const loaded =
-			loadFffNodeWith(createRequire(pathToFileURL(FFF_MANAGED_PACKAGE_JSON).href)) ??
+			loadFffNodeWith(createRequire(pathToFileURL(join(fffManagedDir(), "package.json")).href)) ??
 			loadFffNodeFromManagedInstall();
 		if (!loaded) {
 			const reason = `Managed FFF install completed but @ff-labs/fff-node could not be loaded${lastFffLoadError ? `: ${lastFffLoadError}` : "."}`;

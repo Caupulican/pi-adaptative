@@ -1,3 +1,4 @@
+// @isolated: asserts a process-wide payload budget; other files' allocations in a shared process would count against it.
 import { describe, expect, it } from "vitest";
 import { FileMutationIntentController } from "../src/core/tools/file-mutation-intent.ts";
 

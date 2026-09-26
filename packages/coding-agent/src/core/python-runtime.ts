@@ -249,7 +249,10 @@ export function createPythonRuntimeManager(deps: PythonRuntimeDependencies): Pyt
 }
 
 const realPythonRuntimeDependencies: PythonRuntimeDependencies = {
-	agentDir: getAgentDir(),
+	// Read per call: the agent directory can differ between callers in one process (tests, SDK hosts).
+	get agentDir() {
+		return getAgentDir();
+	},
 	ensureUv: (silent) => ensureTool("uv", silent),
 	findUv: () => getToolPath("uv") ?? undefined,
 	isOffline: () => isTruthyEnvFlag(process.env.PI_OFFLINE),

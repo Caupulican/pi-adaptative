@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Managed tools (uv, rg, fd, the fff package) and the uv-managed Python runtime follow the current agent directory on every call instead of the one in effect when the module loaded, so a process that runs sessions for different agent directories installs and finds them in the right place.
+
 ## [0.99.51] - 2026-09-25
 
 ### Changed

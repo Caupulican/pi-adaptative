@@ -36,6 +36,8 @@
 - Never run the full vitest suite directly: it includes e2e tests that activate only with `PI_LIVE_TESTS=1` set. The full non-e2e suite is owned by GitHub Actions; local `./test.sh` with no arguments is forbidden unless the user explicitly requests it.
 - If you create or modify a test file, run it and iterate on test or implementation until it passes.
 - For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` + the faux provider. No real provider APIs, keys, or paid tokens.
+- Test scratch space: use `tempDir(prefix)` from `packages/coding-agent/test/temp-dir.ts` (removed when the test finishes) instead of raw `mkdtempSync`, and `committedRepo(prefix)` from `test/git-fixture.ts` for a committed git repository (copied from a per-run template). Raw temp directories leaked tens of megabytes per run.
+- coding-agent tests run in two module-cache modes (`vitest.config.ts`): files with no process-wide state share one module cache per worker (`shared-module-cache`, about 5x faster); anything using a session harness, faux provider, module mocks, env/cwd/process mutation, fake timers or child processes stays isolated. A file with process-wide state the scan cannot see opts out with a first-line `// @isolated: <reason>` comment.
 - Put issue-specific regressions under `packages/coding-agent/test/suite/regressions/` named `<issue-number>-<short-slug>.test.ts`.
 - For ad-hoc scripts, `write` them to a temp file (e.g. `/tmp`), run, edit if needed, remove when done. Don't embed multi-line scripts in `bash` commands.
 - Never commit unless the user asks.

@@ -1,3 +1,4 @@
+// @isolated: failed intermittently when sharing a module cache with other files (cause not yet identified; see the 2026-09-25 readiness report).
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";

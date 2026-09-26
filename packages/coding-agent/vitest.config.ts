@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { configDefaults, defineConfig } from "vitest/config";
 import { piAiSourceAliases } from "../agent/vitest-ai-source-aliases.ts";
@@ -71,6 +73,37 @@ const viteMockCompatibilityTests = [
 	"test/visual-truncate.test.ts",
 ];
 
+/**
+ * Test files that share one module cache per worker (`isolate: false`). Isolation re-imports the
+ * module graph and re-runs setup for every file: measured on 787 such files, 406 s isolated against
+ * 80 s shared, with import and setup at 80% of the isolated time. A file shares only when nothing in it
+ * holds process-wide state another file could see: no session harness or faux provider, no module
+ * mocks or stubbed globals/env, no env/cwd/process mutation, no fake timers, no child processes, and
+ * no `// @isolated: <reason>` marker (for state the scan cannot see, such as a process-wide budget).
+ * New test files are classified by the same rule, so the split maintains itself.
+ */
+const PROCESS_STATE_RE =
+	/createHarness|createTestHarness|createReuseHarness|createHarnessWithExtensions|registerFauxProvider|vi\.mock\(|vi\.doMock\(|vi\.hoisted\(|vi\.stubEnv|vi\.stubGlobal|vi\.useFakeTimers|process\.env\[[^\]]+\]\s*=|process\.env\.[A-Za-z_]+\s*=|delete process\.env|process\.chdir|Object\.defineProperty\(process|globalThis\.[A-Za-z_]+\s*=|spawn|exec(File)?(Sync)?\(|fork\(|Worker\(|^\s*\/\/\s*@isolated\b/mu;
+
+function sharedModuleCacheTests(): string[] {
+	const root = fileURLToPath(new URL("./test", import.meta.url));
+	const shared: string[] = [];
+	const walk = (directory: string, relative: string) => {
+		for (const entry of readdirSync(directory, { withFileTypes: true })) {
+			const path = relative ? `${relative}/${entry.name}` : entry.name;
+			if (entry.isDirectory()) walk(join(directory, entry.name), path);
+			else if (entry.name.endsWith(".test.ts")) {
+				const file = `test/${path}`;
+				if (viteMockCompatibilityTests.includes(file)) continue;
+				if (!PROCESS_STATE_RE.test(readFileSync(join(directory, entry.name), "utf8"))) shared.push(file);
+			}
+		}
+	};
+	walk(root, "");
+	return shared;
+}
+const sharedModuleCache = sharedModuleCacheTests();
+
 export default defineConfig({
 	test: {
 		globals: true,
@@ -100,7 +133,17 @@ export default defineConfig({
 				extends: true,
 				test: {
 					name: "native-source",
-					exclude: [...defaultTestExcludes, ...viteMockCompatibilityTests],
+					exclude: [...defaultTestExcludes, ...viteMockCompatibilityTests, ...sharedModuleCache],
+					experimental: { viteModuleRunner: false },
+				},
+			},
+			{
+				extends: true,
+				test: {
+					name: "shared-module-cache",
+					include: sharedModuleCache,
+					exclude: defaultTestExcludes,
+					isolate: false,
 					experimental: { viteModuleRunner: false },
 				},
 			},
