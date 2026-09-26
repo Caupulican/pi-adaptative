@@ -199,6 +199,71 @@ const TRANSFORMERS_PINNED_PACKAGES = ["transformers==5.16.1", "huggingface-hub==
 const TRANSFORMERS_REQUIRED_MODULES = ["torch", "transformers", "huggingface_hub", "safetensors"];
 const TORCH_PINNED_VERSION = "2.14.0";
 
+interface RuntimeStartResult {
+	started: boolean;
+	reason: string;
+}
+
+interface RuntimeStartRecord {
+	key: string;
+	generation: number;
+	promise: Promise<RuntimeStartResult>;
+}
+
+/** One runtime instance owns one start transaction. Equivalent starts share it; conflicting start
+ * modes wait and re-probe. Retirement fences every continuation without poisoning a later start. */
+class RuntimeStartCoordinator {
+	private generation = 0;
+	private inFlight: RuntimeStartRecord | undefined;
+
+	run(key: string, operation: (isCurrent: () => boolean) => Promise<RuntimeStartResult>): Promise<RuntimeStartResult> {
+		const active = this.inFlight;
+		if (active && active.key === key && active.generation === this.generation) return active.promise;
+		if (active) {
+			return active.promise.then(
+				() => this.run(key, operation),
+				() => this.run(key, operation),
+			);
+		}
+
+		const generation = this.generation;
+		const promise = Promise.resolve().then(() => operation(() => this.generation === generation));
+		const record = { key, generation, promise };
+		this.inFlight = record;
+		const clear = (): void => {
+			if (this.inFlight === record) this.inFlight = undefined;
+		};
+		void promise.then(clear, clear);
+		return promise;
+	}
+
+	retire(): void {
+		this.generation++;
+	}
+}
+
+function cancelledRuntimeStart(): RuntimeStartResult {
+	return { started: false, reason: "start_cancelled" };
+}
+
+async function awaitRuntimeStart(args: {
+	attempts: number;
+	serverUp: () => Promise<boolean>;
+	sleep: (ms: number) => Promise<void>;
+	isCurrent: () => boolean;
+	onTimeout: () => void;
+}): Promise<RuntimeStartResult> {
+	for (let attempt = 0; attempt < args.attempts; attempt++) {
+		const up = await args.serverUp();
+		if (!args.isCurrent()) return cancelledRuntimeStart();
+		if (up) return { started: true, reason: "started" };
+		await args.sleep(START_POLL_INTERVAL_MS);
+		if (!args.isCurrent()) return cancelledRuntimeStart();
+	}
+	args.onTimeout();
+	return { started: false, reason: "health_check_timeout" };
+}
+
 function terminateManagedRuntimeProcess(child: ChildProcess): void {
 	const terminationController = new AbortController();
 	terminationController.abort();
@@ -265,6 +330,7 @@ export class OllamaRuntime {
 	private readonly _hasCommand: (command: string) => boolean;
 	private readonly _extractArchiveFn: NonNullable<LocalRuntimeDeps["extractArchive"]>;
 	private readonly _profile: LocalInferenceProfile;
+	private readonly _starts = new RuntimeStartCoordinator();
 	private _child: Pick<ChildProcess, "pid" | "kill" | "unref" | "on"> | undefined;
 	private _childModelsDir: string | undefined;
 
@@ -652,7 +718,9 @@ export class OllamaRuntime {
 	private async _spawnAndPoll(
 		binary: { path: string },
 		extraEnv: NodeJS.ProcessEnv,
+		isCurrent: () => boolean,
 	): Promise<{ started: boolean; reason: string }> {
+		if (!isCurrent()) return cancelledRuntimeStart();
 		const host = this._baseUrl.replace(/^https?:\/\//, "");
 		const env: NodeJS.ProcessEnv = { ...process.env, OLLAMA_HOST: host, ...extraEnv };
 		this._childModelsDir = env.OLLAMA_MODELS ?? this.userModelsDir();
@@ -662,25 +730,43 @@ export class OllamaRuntime {
 			stdio: "ignore",
 		});
 		this._child.unref?.();
-		for (let attempt = 0; attempt < START_POLL_ATTEMPTS; attempt++) {
-			if (await this._serverUp()) return { started: true, reason: "started" };
-			await this._sleep(START_POLL_INTERVAL_MS);
-		}
-		this.stop();
-		return { started: false, reason: "health_check_timeout" };
+		return awaitRuntimeStart({
+			attempts: START_POLL_ATTEMPTS,
+			serverUp: () => this._serverUp(),
+			sleep: this._sleep,
+			isCurrent,
+			onTimeout: () => this.stop(),
+		});
 	}
 
-	private async _startServer(modelsDir?: string): Promise<{ started: boolean; reason: string }> {
-		if (await this._serverUp()) {
+	private _startServer(modelsDir?: string): Promise<RuntimeStartResult> {
+		return this._starts.run(JSON.stringify(modelsDir ?? null), (isCurrent) =>
+			this._startServerOnce(modelsDir, isCurrent),
+		);
+	}
+
+	private async _startServerOnce(
+		modelsDir: string | undefined,
+		isCurrent: () => boolean,
+	): Promise<RuntimeStartResult> {
+		if (!isCurrent()) return cancelledRuntimeStart();
+		const serverUp = await this._serverUp();
+		if (!isCurrent()) return cancelledRuntimeStart();
+		if (serverUp) {
 			return { started: false, reason: this._child ? "already_running_managed" : "already_running_system" };
 		}
 		const binary = this._findBinary();
 		if (!binary) return { started: false, reason: "binary_missing" };
 		if (modelsDir) mkdirSync(modelsDir, { recursive: true });
-		return this._spawnAndPoll(binary, {
-			...(modelsDir ? { OLLAMA_MODELS: modelsDir } : {}),
-			...ollamaEnvironmentForLocalInferenceProfile(this._profile),
-		});
+		if (!isCurrent()) return cancelledRuntimeStart();
+		return this._spawnAndPoll(
+			binary,
+			{
+				...(modelsDir ? { OLLAMA_MODELS: modelsDir } : {}),
+				...ollamaEnvironmentForLocalInferenceProfile(this._profile),
+			},
+			isCurrent,
+		);
 	}
 
 	/**
@@ -709,6 +795,7 @@ export class OllamaRuntime {
 
 	/** Resource hygiene only: stops the pi-managed serve process; never deletes anything. */
 	stop(): { stopped: boolean } {
+		this._starts.retire();
 		const child = this._child;
 		if (!child) return { stopped: false };
 		this._child = undefined;
@@ -904,6 +991,7 @@ export class TransformersRuntime {
 	private readonly _platform: () => string;
 	private readonly _runCommand: RuntimeCommandRunner;
 	private readonly _serverScriptPath: string;
+	private readonly _starts = new RuntimeStartCoordinator();
 	private _proc?: Pick<ChildProcess, "pid" | "kill" | "unref" | "on">;
 
 	constructor(args: { agentDir: string; modelId: string; baseUrl?: string; deps?: LocalRuntimeDeps }) {
@@ -1188,12 +1276,20 @@ export class TransformersRuntime {
 			: { ok: false, error: `download-fail: ${sanitizeCommandOutput(result.error ?? result.stderr)}` };
 	}
 
-	async start(): Promise<{ started: boolean; reason: string }> {
-		if (await this.serverUp()) return { started: false, reason: "already_running" };
+	start(): Promise<RuntimeStartResult> {
+		return this._starts.run("transformers", (isCurrent) => this.startOnce(isCurrent));
+	}
+
+	private async startOnce(isCurrent: () => boolean): Promise<RuntimeStartResult> {
+		if (!isCurrent()) return cancelledRuntimeStart();
+		const serverUp = await this.serverUp();
+		if (!isCurrent()) return cancelledRuntimeStart();
+		if (serverUp) return { started: false, reason: "already_running" };
 		if (!this._exists(this.pythonPath)) return { started: false, reason: "runtime_missing" };
 		if (!this._exists(this._serverScriptPath)) return { started: false, reason: "server_script_missing" };
 		mkdirSync(this.cacheDir, { recursive: true });
 		const env = this.runtimeEnv();
+		if (!isCurrent()) return cancelledRuntimeStart();
 		this._proc = this._spawn(
 			this.pythonPath,
 			[
@@ -1210,15 +1306,17 @@ export class TransformersRuntime {
 			{ detached: process.platform !== "win32", env, stdio: "ignore" },
 		);
 		this._proc.unref?.();
-		for (let attempt = 0; attempt < TRANSFORMERS_START_POLL_ATTEMPTS; attempt++) {
-			if (await this.serverUp()) return { started: true, reason: "started" };
-			await this._sleep(START_POLL_INTERVAL_MS);
-		}
-		this.stop();
-		return { started: false, reason: "health_check_timeout" };
+		return awaitRuntimeStart({
+			attempts: TRANSFORMERS_START_POLL_ATTEMPTS,
+			serverUp: () => this.serverUp(),
+			sleep: this._sleep,
+			isCurrent,
+			onTimeout: () => this.stop(),
+		});
 	}
 
 	stop(): { stopped: boolean } {
+		this._starts.retire();
 		const child = this._proc;
 		if (!child) return { stopped: false };
 		this._proc = undefined;

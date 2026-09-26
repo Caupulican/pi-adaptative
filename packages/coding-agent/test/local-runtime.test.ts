@@ -9,6 +9,7 @@ import {
 	resolveOllamaAsset,
 	resolveTransformersBaseUrl,
 } from "../src/core/models/local-runtime.ts";
+import { tempDir } from "./temp-dir.ts";
 
 class OllamaRuntime extends ProductionOllamaRuntime {
 	constructor(args: ConstructorParameters<typeof ProductionOllamaRuntime>[0]) {
@@ -314,6 +315,110 @@ describe.skipIf(process.platform === "win32")("TransformersRuntime", () => {
 		expect(serveEnv?.OLLAMA_MODELS).toBeUndefined();
 	});
 
+	it("single-flights concurrent starts so one Transformers child remains owned", async () => {
+		const agentDir = tempDir("pi-transformers-concurrent-start-");
+		const initialHealth = Promise.withResolvers<void>();
+		let initialProbes = 0;
+		let up = false;
+		const spawnFn = vi.fn(() => {
+			up = true;
+			return { pid: 1234, kill: vi.fn(), unref: vi.fn(), on: vi.fn() } as never;
+		});
+		const runtime = new TransformersRuntime({
+			agentDir,
+			modelId: "openbmb/MiniCPM5-1B",
+			baseUrl: "http://127.0.0.1:18125",
+			deps: {
+				existsFn: (path) =>
+					path === `${agentDir}/runtimes/hf-transformers/venv/bin/python` || path === "/tmp/server.py",
+				transformersServerScriptPath: "/tmp/server.py",
+				sleepFn: async () => {},
+				fetchFn: async () => {
+					if (!up) {
+						initialProbes++;
+						await initialHealth.promise;
+						return new Response("", { status: 500 });
+					}
+					return new Response(JSON.stringify({ model: "openbmb/MiniCPM5-1B" }), { status: 200 });
+				},
+				spawnFn,
+			},
+		});
+
+		const first = runtime.start();
+		const second = runtime.start();
+		await vi.waitFor(() => expect(initialProbes).toBeGreaterThan(0));
+		initialHealth.resolve();
+
+		await expect(Promise.all([first, second])).resolves.toEqual([
+			{ started: true, reason: "started" },
+			{ started: true, reason: "started" },
+		]);
+		expect(spawnFn).toHaveBeenCalledTimes(1);
+		expect(runtime.stop()).toEqual({ stopped: true });
+	});
+
+	it("does not spawn a Transformers child after stop retires a pending start", async () => {
+		const agentDir = tempDir("pi-transformers-stop-pending-start-");
+		const initialHealth = Promise.withResolvers<void>();
+		const spawnFn = vi.fn(() => ({ pid: 1234, kill: vi.fn(), unref: vi.fn(), on: vi.fn() }) as never);
+		const runtime = new TransformersRuntime({
+			agentDir,
+			modelId: "openbmb/MiniCPM5-1B",
+			baseUrl: "http://127.0.0.1:18126",
+			deps: {
+				existsFn: (path) =>
+					path === `${agentDir}/runtimes/hf-transformers/venv/bin/python` || path === "/tmp/server.py",
+				transformersServerScriptPath: "/tmp/server.py",
+				sleepFn: async () => {},
+				fetchFn: async () => {
+					await initialHealth.promise;
+					return new Response("", { status: 500 });
+				},
+				spawnFn,
+			},
+		});
+
+		const start = runtime.start();
+		expect(runtime.stop()).toEqual({ stopped: false });
+		initialHealth.resolve();
+
+		await expect(start).resolves.toEqual({ started: false, reason: "start_cancelled" });
+		expect(spawnFn).not.toHaveBeenCalled();
+	});
+
+	it("retires a Transformers poll continuation after stop owns the spawned child", async () => {
+		const agentDir = tempDir("pi-transformers-stop-pending-poll-");
+		const pollHealth = Promise.withResolvers<void>();
+		let probes = 0;
+		const spawnFn = vi.fn(() => ({ pid: 1234, kill: vi.fn(), unref: vi.fn(), on: vi.fn() }) as never);
+		const runtime = new TransformersRuntime({
+			agentDir,
+			modelId: "openbmb/MiniCPM5-1B",
+			baseUrl: "http://127.0.0.1:18127",
+			deps: {
+				existsFn: (path) =>
+					path === `${agentDir}/runtimes/hf-transformers/venv/bin/python` || path === "/tmp/server.py",
+				transformersServerScriptPath: "/tmp/server.py",
+				fetchFn: async () => {
+					probes++;
+					if (probes === 1) return new Response("", { status: 500 });
+					await pollHealth.promise;
+					return new Response(JSON.stringify({ model: "openbmb/MiniCPM5-1B" }), { status: 200 });
+				},
+				spawnFn,
+			},
+		});
+
+		const start = runtime.start();
+		await vi.waitFor(() => expect(spawnFn).toHaveBeenCalledTimes(1));
+		expect(runtime.stop()).toEqual({ stopped: true });
+		pollHealth.resolve();
+
+		await expect(start).resolves.toEqual({ started: false, reason: "start_cancelled" });
+		expect(runtime.stop()).toEqual({ stopped: false });
+	});
+
 	it("treats an existing venv with missing Transformers modules as not installed", async () => {
 		const agentDir = `${process.cwd()}/.scratch-transformers-runtime-missing-deps`;
 		const commands: Array<{ command: string; args: string[] }> = [];
@@ -410,6 +515,177 @@ describe.skipIf(process.platform === "win32")("OllamaRuntime", () => {
 		expect(serveEnv?.LLAMA_ARG_CACHE_RAM).toBe("512");
 		expect(serveEnv?.LLAMA_ARG_THREADS).toBe("4");
 		expect(serveEnv?.LLAMA_ARG_THREADS_BATCH).toBe("4");
+		expect(runtime.stop()).toEqual({ stopped: true });
+	});
+
+	it("single-flights concurrent starts so one Ollama child remains owned", async () => {
+		const agentDir = tempDir("pi-ollama-concurrent-start-");
+		const initialHealth = Promise.withResolvers<void>();
+		let initialProbes = 0;
+		let up = false;
+		const spawnFn = vi.fn(() => {
+			up = true;
+			return { pid: 1234, kill: vi.fn(), unref: vi.fn(), on: vi.fn() } as never;
+		});
+		const runtime = new OllamaRuntime({
+			agentDir,
+			deps: {
+				existsFn: (path) => path === "/usr/bin/ollama",
+				envPath: "/usr/bin",
+				homeDir: "/home/u",
+				sleepFn: async () => {},
+				fetchFn: async () => {
+					if (!up) {
+						initialProbes++;
+						await initialHealth.promise;
+						return new Response("", { status: 500 });
+					}
+					return new Response('{"models":[]}', { status: 200 });
+				},
+				spawnFn,
+			},
+		});
+
+		const first = runtime.start();
+		const second = runtime.start();
+		await vi.waitFor(() => expect(initialProbes).toBeGreaterThan(0));
+		initialHealth.resolve();
+
+		await expect(Promise.all([first, second])).resolves.toEqual([
+			{ started: true, reason: "started" },
+			{ started: true, reason: "started" },
+		]);
+		expect(spawnFn).toHaveBeenCalledTimes(1);
+		expect(runtime.stop()).toEqual({ stopped: true });
+	});
+
+	it("serializes conflicting Ollama store modes instead of coalescing their intent", async () => {
+		const agentDir = tempDir("pi-ollama-conflicting-start-");
+		const initialHealth = Promise.withResolvers<void>();
+		let up = false;
+		const spawnFn = vi.fn(() => {
+			up = true;
+			return { pid: 1234, kill: vi.fn(), unref: vi.fn(), on: vi.fn() } as never;
+		});
+		const runtime = new OllamaRuntime({
+			agentDir,
+			deps: {
+				existsFn: (path) => path === "/usr/bin/ollama",
+				envPath: "/usr/bin",
+				homeDir: "/home/u",
+				sleepFn: async () => {},
+				fetchFn: async () => {
+					if (!up) {
+						await initialHealth.promise;
+						return new Response("", { status: 500 });
+					}
+					return new Response('{"models":[]}', { status: 200 });
+				},
+				spawnFn,
+			},
+		});
+
+		const owned = runtime.start();
+		const reused = runtime.startReuseExisting();
+		initialHealth.resolve();
+
+		await expect(owned).resolves.toEqual({ started: true, reason: "started" });
+		await expect(reused).resolves.toEqual({ started: false, reason: "already_running_managed" });
+		expect(spawnFn).toHaveBeenCalledTimes(1);
+		expect(runtime.stop()).toEqual({ stopped: true });
+	});
+
+	it("does not spawn an Ollama child after stop retires a pending start", async () => {
+		const agentDir = tempDir("pi-ollama-stop-pending-start-");
+		const initialHealth = Promise.withResolvers<void>();
+		const spawnFn = vi.fn(() => ({ pid: 1234, kill: vi.fn(), unref: vi.fn(), on: vi.fn() }) as never);
+		const runtime = new OllamaRuntime({
+			agentDir,
+			deps: {
+				existsFn: (path) => path === "/usr/bin/ollama",
+				envPath: "/usr/bin",
+				homeDir: "/home/u",
+				sleepFn: async () => {},
+				fetchFn: async () => {
+					await initialHealth.promise;
+					return new Response("", { status: 500 });
+				},
+				spawnFn,
+			},
+		});
+
+		const start = runtime.start();
+		expect(runtime.stop()).toEqual({ stopped: false });
+		initialHealth.resolve();
+
+		await expect(start).resolves.toEqual({ started: false, reason: "start_cancelled" });
+		expect(spawnFn).not.toHaveBeenCalled();
+	});
+
+	it("retires an Ollama poll continuation after stop owns the spawned child", async () => {
+		const agentDir = tempDir("pi-ollama-stop-pending-poll-");
+		const pollHealth = Promise.withResolvers<void>();
+		let probes = 0;
+		const spawnFn = vi.fn(() => ({ pid: 1234, kill: vi.fn(), unref: vi.fn(), on: vi.fn() }) as never);
+		const runtime = new OllamaRuntime({
+			agentDir,
+			deps: {
+				existsFn: (path) => path === "/usr/bin/ollama",
+				envPath: "/usr/bin",
+				homeDir: "/home/u",
+				fetchFn: async () => {
+					probes++;
+					if (probes === 1) return new Response("", { status: 500 });
+					await pollHealth.promise;
+					return new Response('{"models":[]}', { status: 200 });
+				},
+				spawnFn,
+			},
+		});
+
+		const start = runtime.start();
+		await vi.waitFor(() => expect(spawnFn).toHaveBeenCalledTimes(1));
+		expect(runtime.stop()).toEqual({ stopped: true });
+		pollHealth.resolve();
+
+		await expect(start).resolves.toEqual({ started: false, reason: "start_cancelled" });
+		expect(runtime.stop()).toEqual({ stopped: false });
+	});
+
+	it("runs a fresh Ollama start after a stopped pending generation settles", async () => {
+		const agentDir = tempDir("pi-ollama-restart-after-stop-");
+		const initialHealth = Promise.withResolvers<void>();
+		let probes = 0;
+		let up = false;
+		const spawnFn = vi.fn(() => {
+			up = true;
+			return { pid: 1234, kill: vi.fn(), unref: vi.fn(), on: vi.fn() } as never;
+		});
+		const runtime = new OllamaRuntime({
+			agentDir,
+			deps: {
+				existsFn: (path) => path === "/usr/bin/ollama",
+				envPath: "/usr/bin",
+				homeDir: "/home/u",
+				sleepFn: async () => {},
+				fetchFn: async () => {
+					probes++;
+					if (probes === 1) await initialHealth.promise;
+					return new Response(up ? '{"models":[]}' : "", { status: up ? 200 : 500 });
+				},
+				spawnFn,
+			},
+		});
+
+		const retired = runtime.start();
+		await vi.waitFor(() => expect(probes).toBe(1));
+		expect(runtime.stop()).toEqual({ stopped: false });
+		const replacement = runtime.start();
+		initialHealth.resolve();
+
+		await expect(retired).resolves.toEqual({ started: false, reason: "start_cancelled" });
+		await expect(replacement).resolves.toEqual({ started: true, reason: "started" });
+		expect(spawnFn).toHaveBeenCalledTimes(1);
 		expect(runtime.stop()).toEqual({ stopped: true });
 	});
 
