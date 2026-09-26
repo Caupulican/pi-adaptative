@@ -138,7 +138,8 @@ export class OllamaRuntimeResidencyAdapter implements RuntimeResidencyAdapter {
 	}
 
 	async release(model: string): Promise<void> {
-		await this.runtime.releaseResident(model);
+		const result = await this.runtime.releaseResident(model);
+		if (!result.ok) throw new Error(result.error);
 	}
 }
 

@@ -221,6 +221,30 @@ describe("runtime residency arbiter", () => {
 		expect((await external.list())[0]).toMatchObject({ residencyControl: "advisory" });
 	});
 
+	it("aborts replacement loading when Ollama refuses the planned eviction", async () => {
+		let replacementLoads = 0;
+		const ollama = new OllamaRuntimeResidencyAdapter("ollama", {
+			listResidentModels: async () => [{ name: "resident", sizeBytes: 1_000 }],
+			ensureResident: async () => {
+				replacementLoads += 1;
+				return { ok: true };
+			},
+			releaseResident: async () => ({ ok: false, error: "runtime kept the resident loaded" }),
+		});
+		const arbiter = new RuntimeResidencyArbiter({ budgetBytes: 1_000, adapters: [ollama] });
+
+		await expect(
+			arbiter.ensureResident("ollama", {
+				model: "replacement",
+				bytes: 1_000,
+				role: "active",
+				priority: 100,
+				nowMs: 1,
+			}),
+		).rejects.toThrow("runtime kept the resident loaded");
+		expect(replacementLoads).toBe(0);
+	});
+
 	it("applies arbiter evictions and refuses synthetic 10GB reservations honestly", async () => {
 		const ollama = new FauxRuntimeAdapter("ollama", "keep-alive", ["resident-9b"]);
 		const transformers = new FauxRuntimeAdapter("transformers", "full");
