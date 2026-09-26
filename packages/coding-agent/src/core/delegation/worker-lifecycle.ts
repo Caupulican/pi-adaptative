@@ -495,6 +495,57 @@ export class WorkerLifecycle {
 		return record;
 	}
 
+	/**
+	 * Cancel scheduler-owned work only while the exact attempt remains unleased. The runtime's ordinal
+	 * fence carries that observation through the append lock, so a competing start wins without being
+	 * cancelled by this stale owner. Unrelated durable writes remain retryable errors.
+	 */
+	cancelUnleased(
+		laneId: string,
+		reasonCode: string,
+		expectedAttemptId?: string,
+	): { cancelled: boolean; record: LaneRecord | undefined } {
+		const snapshot = this.ledger.runtime.getSnapshot();
+		const attempt = selectedWorkerAttempt(snapshot, laneId);
+		const record = projectWorkerLaneRecord(snapshot, laneId);
+		const expectedAttempt = expectedAttemptId === undefined || attempt?.attemptId === expectedAttemptId;
+		if (attempt?.status === "cancelled" && expectedAttempt && attempt.reasonCode === reasonCode.trim()) {
+			if (record) this.enqueueTerminalNotification(record);
+			return { cancelled: true, record };
+		}
+		if (
+			!attempt ||
+			!expectedAttempt ||
+			attempt.lease ||
+			(attempt.status !== "queued" && attempt.status !== "suspended")
+		) {
+			return { cancelled: false, record };
+		}
+		try {
+			this.ledger.runtime.cancelAttempt(attempt.attemptId, reasonCode, {
+				expectedLastOrdinal: snapshot.lastOrdinal,
+				unleasedOnly: true,
+			});
+		} catch (error) {
+			let currentSnapshot: TaskRuntimeProjection;
+			try {
+				currentSnapshot = this.ledger.runtime.getSnapshot();
+			} catch {
+				throw error;
+			}
+			const current = selectedWorkerAttempt(currentSnapshot, laneId);
+			const stillOwned =
+				current?.attemptId === attempt.attemptId &&
+				!current.lease &&
+				(current.status === "queued" || current.status === "suspended");
+			if (stillOwned) throw error;
+			return { cancelled: false, record: projectWorkerLaneRecord(currentSnapshot, laneId) };
+		}
+		const terminal = this.getRecord(laneId);
+		if (terminal) this.enqueueTerminalNotification(terminal);
+		return { cancelled: true, record: terminal };
+	}
+
 	recoverQueued(): Array<{
 		record: LaneRecord;
 		attempt: AttemptRuntimeState;

@@ -62,6 +62,7 @@ describe("scheduler cancellation intent and start evidence", () => {
 		"announces only actual running state, with projection %s",
 		async (status) => {
 			const record: LaneRecord = { laneId: "start-evidence", type: "worker", status };
+			let projection: LaneRecord = { ...record, status: "queued" };
 			let settle!: (outcome: WorkerDelegationRunOutcome) => void;
 			const completion = new Promise<WorkerDelegationRunOutcome>((resolve) => {
 				settle = resolve;
@@ -70,9 +71,12 @@ describe("scheduler cancellation intent and start evidence", () => {
 				agentDir: "owned-test-seam",
 				registerInFlightWork: () => () => {},
 				isDisposed: () => false,
-				getRecord: () => record,
+				getRecord: () => projection,
 				admit: () => ({ action: "start" }),
-				run: () => completion,
+				run: () => {
+					projection = record;
+					return completion;
+				},
 				cancel: () => {},
 				warn: () => {},
 			});

@@ -338,6 +338,7 @@ describe("WorkerAgentControlCoordinator", () => {
 			isDisposed: () => false,
 			admit,
 			getRecord: lifecycle.getRecord.bind(lifecycle),
+			getDispatchToken: () => attempt.attemptId,
 			run: scheduledRun,
 			cancel: cancelLane,
 			warn: vi.fn(),

@@ -319,13 +319,15 @@ describe("worker controller dependency dispatch", () => {
 				role: "implementer",
 			});
 			runtime.failTask("failed-cancel-input", "test_dependency_failed");
-			const cancel = lifecycle.cancel.bind(lifecycle);
+			const cancelUnleased = lifecycle.cancelUnleased.bind(lifecycle);
 			const cancelSpy = vi
-				.spyOn(lifecycle, "cancel")
+				.spyOn(lifecycle, "cancelUnleased")
 				.mockImplementationOnce(() => {
 					throw new Error("simulated durable cancel failure");
 				})
-				.mockImplementation((laneId, reasonCode) => cancel(laneId, reasonCode));
+				.mockImplementation((laneId, reasonCode, expectedAttemptId) =>
+					cancelUnleased(laneId, reasonCode, expectedAttemptId),
+				);
 			const controller = controls._getWorkerController();
 			const publish = vi.spyOn(controller, "publishTerminalRecord").mockImplementationOnce(() => {
 				throw new Error("simulated publication observer failure");

@@ -1,7 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import {
@@ -17,21 +14,11 @@ import {
 	createTestWorkerExecutionAuthority,
 	createTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
-
-const roots: string[] = [];
+import { tempDir } from "./temp-dir.ts";
 
 function root(): string {
-	const value = mkdtempSync(join(tmpdir(), "pi-worker-lifecycle-"));
-	roots.push(value);
-	return value;
+	return tempDir("pi-worker-lifecycle-");
 }
-
-afterEach(() => {
-	while (roots.length > 0) {
-		const value = roots.pop();
-		if (value) rmSync(value, { recursive: true, force: true });
-	}
-});
 
 function resultFor(
 	handle: StartedDelegationAttempt,
@@ -734,6 +721,70 @@ describe("WorkerLifecycle", () => {
 			status: "canceled",
 			reasonCode: "session_disposed",
 		});
+	});
+
+	it("conditionally cancels only the exact still-unleased attempt", () => {
+		const agentDir = root();
+		const sessionId = "session-conditional-cancel";
+		const lifecycle = new WorkerLifecycle({ agentDir, sessionId });
+		const competingOwner = new WorkerLifecycle({ agentDir, sessionId });
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "worker",
+			model: { provider: "test", id: "model" },
+		});
+		const prepared = lifecycle.prepare({
+			instructions: "race the scheduler",
+			executionContract: executionContract(profile),
+			requiredCapabilities: [],
+		});
+		const task = lifecycle.getTask(prepared.record.laneId);
+		if (!task) throw new Error("Expected durable task");
+		lifecycle.bindGrant(
+			prepared.attempt.attemptId,
+			createTestExecutionGrant({
+				objectiveId: task.task.objectiveId,
+				taskId: prepared.attempt.taskId,
+				attemptId: prepared.attempt.attemptId,
+				role: task.task.role,
+			}),
+		);
+
+		const originalCancel = lifecycle.ledger.runtime.cancelAttempt.bind(lifecycle.ledger.runtime);
+		const cancelRace = vi
+			.spyOn(lifecycle.ledger.runtime, "cancelAttempt")
+			.mockImplementation((attemptId, reasonCode, guard) => {
+				competingOwner.start(prepared.record.laneId, profile.leaseTtlMs);
+				return originalCancel(attemptId, reasonCode, guard);
+			});
+
+		expect(
+			lifecycle.cancelUnleased(prepared.record.laneId, "worker_start_unavailable", prepared.attempt.attemptId),
+		).toMatchObject({ cancelled: false, record: { status: "running" } });
+		expect(competingOwner.getActiveAttempt(prepared.record.laneId)).toMatchObject({
+			attemptId: prepared.attempt.attemptId,
+			status: "running",
+			lease: expect.objectContaining({ fencingToken: 1 }),
+		});
+		expect(lifecycle.getPendingTerminalNotifications()).toEqual([]);
+		cancelRace.mockRestore();
+
+		const untouched = lifecycle.prepare({
+			instructions: "cancel this queued attempt",
+			executionContract: executionContract(profile),
+			requiredCapabilities: [],
+		});
+		const cancelled = lifecycle.cancelUnleased(
+			untouched.record.laneId,
+			"session_disposed",
+			untouched.attempt.attemptId,
+		);
+		expect(cancelled).toMatchObject({
+			cancelled: true,
+			record: { status: "canceled", reasonCode: "session_disposed" },
+		});
+		expect(
+			lifecycle.cancelUnleased(untouched.record.laneId, "session_disposed", untouched.attempt.attemptId),
+		).toMatchObject({ cancelled: true, record: { status: "canceled", reasonCode: "session_disposed" } });
 	});
 
 	it("synchronizes goal pause, resume, and cancellation into durable worker state", () => {

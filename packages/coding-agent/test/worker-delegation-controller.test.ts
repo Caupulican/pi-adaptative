@@ -1,9 +1,7 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { WorkerDelegationController } from "../src/core/delegation/worker-delegation-controller.ts";
 import { MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH } from "../src/core/orchestration/contracts.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function controllerWithRunningCaller(): WorkerDelegationController {
 	return Object.assign(Object.create(WorkerDelegationController.prototype) as object, {
@@ -23,70 +21,95 @@ function controllerWithRunningCaller(): WorkerDelegationController {
 
 describe("WorkerDelegationController integration invariants", () => {
 	it("shares its conversation store with logical-agent control", () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-controller-store-ownership-"));
-		try {
-			const controller = new WorkerDelegationController(
-				{
-					getAgentDir: () => agentDir,
-					getSessionId: () => "session-store-ownership",
-					isDelegateToolActive: () => true,
-					isDisposed: () => false,
-					emit: vi.fn(),
-				} as unknown as ConstructorParameters<typeof WorkerDelegationController>[0],
-				{ statusChanged: vi.fn() } as unknown as ConstructorParameters<typeof WorkerDelegationController>[1],
-				{
-					getTaskRuntimeSnapshot: () => ({ agents: {} }),
-				} as unknown as ConstructorParameters<typeof WorkerDelegationController>[2],
-			);
+		const agentDir = tempDir("pi-worker-controller-store-ownership-");
+		const controller = new WorkerDelegationController(
+			{
+				getAgentDir: () => agentDir,
+				getSessionId: () => "session-store-ownership",
+				isDelegateToolActive: () => true,
+				isDisposed: () => false,
+				emit: vi.fn(),
+			} as unknown as ConstructorParameters<typeof WorkerDelegationController>[0],
+			{ statusChanged: vi.fn() } as unknown as ConstructorParameters<typeof WorkerDelegationController>[1],
+			{
+				getTaskRuntimeSnapshot: () => ({ agents: {} }),
+			} as unknown as ConstructorParameters<typeof WorkerDelegationController>[2],
+		);
 
-			const conversations = Reflect.get(controller, "conversations");
-			const agentControl = Reflect.get(controller, "agentControl") as object;
+		const conversations = Reflect.get(controller, "conversations");
+		const agentControl = Reflect.get(controller, "agentControl") as object;
 
-			expect(conversations).toBeDefined();
-			expect(Reflect.get(agentControl, "conversations")).toBe(conversations);
-		} finally {
-			rmSync(agentDir, { recursive: true, force: true });
-		}
+		expect(conversations).toBeDefined();
+		expect(Reflect.get(agentControl, "conversations")).toBe(conversations);
 	});
 
 	it("keeps a running lane's write reservation through cancellation until its run releases it", () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-cancel-reservation-"));
-		try {
-			const controller = new WorkerDelegationController(
-				{
-					getAgentDir: () => agentDir,
-					getSessionId: () => "session-cancel-reservation",
-					isDelegateToolActive: () => true,
-					isDisposed: () => false,
-					emit: vi.fn(),
-				} as unknown as ConstructorParameters<typeof WorkerDelegationController>[0],
-				{ statusChanged: vi.fn() } as unknown as ConstructorParameters<typeof WorkerDelegationController>[1],
-				{
-					getTaskRuntimeSnapshot: () => ({ agents: {} }),
-					cancel: () => undefined,
-				} as unknown as ConstructorParameters<typeof WorkerDelegationController>[2],
-			);
-			const running = new Set(["running-lane"]);
-			const release = vi.fn();
-			Reflect.set(controller, "scheduler", {
-				dropQueued: vi.fn(),
-				drain: vi.fn(),
-				isRunning: (laneId: string) => running.has(laneId),
-			});
-			Reflect.set(controller, "writeReservations", { release });
-			const options = Reflect.get(Reflect.get(controller, "agentControl") as object, "options") as {
-				cancelLane(laneId: string, reasonCode: string): unknown;
-			};
+		const agentDir = tempDir("pi-worker-cancel-reservation-");
+		const controller = new WorkerDelegationController(
+			{
+				getAgentDir: () => agentDir,
+				getSessionId: () => "session-cancel-reservation",
+				isDelegateToolActive: () => true,
+				isDisposed: () => false,
+				emit: vi.fn(),
+			} as unknown as ConstructorParameters<typeof WorkerDelegationController>[0],
+			{ statusChanged: vi.fn() } as unknown as ConstructorParameters<typeof WorkerDelegationController>[1],
+			{
+				getTaskRuntimeSnapshot: () => ({ agents: {} }),
+				cancel: () => undefined,
+			} as unknown as ConstructorParameters<typeof WorkerDelegationController>[2],
+		);
+		const running = new Set(["running-lane"]);
+		const release = vi.fn();
+		Reflect.set(controller, "scheduler", {
+			dropQueued: vi.fn(),
+			drain: vi.fn(),
+			isRunning: (laneId: string) => running.has(laneId),
+		});
+		Reflect.set(controller, "writeReservations", { release });
+		const options = Reflect.get(Reflect.get(controller, "agentControl") as object, "options") as {
+			cancelLane(laneId: string, reasonCode: string): unknown;
+		};
 
-			// The abort is asynchronous: an in-flight edit can still write, so the run's own end releases.
-			options.cancelLane("running-lane", "owner_cancelled");
-			expect(release).not.toHaveBeenCalled();
-			// A queued lane has no run to release it.
-			options.cancelLane("queued-lane", "owner_cancelled");
-			expect(release).toHaveBeenCalledWith("queued-lane");
-		} finally {
-			rmSync(agentDir, { recursive: true, force: true });
-		}
+		// The abort is asynchronous: an in-flight edit can still write, so the run's own end releases.
+		options.cancelLane("running-lane", "owner_cancelled");
+		expect(release).not.toHaveBeenCalled();
+		// A queued lane has no run to release it.
+		options.cancelLane("queued-lane", "owner_cancelled");
+		expect(release).toHaveBeenCalledWith("queued-lane");
+	});
+
+	it("reports lost scheduler cancellation ownership without publishing a false terminal", () => {
+		const release = vi.fn();
+		const publishTerminalRecord = vi.fn();
+		const cancelUnleased = vi.fn(() => ({
+			cancelled: false,
+			record: { laneId: "worker-race", type: "worker", status: "running" },
+		}));
+		const controller = Object.assign(Object.create(WorkerDelegationController.prototype) as object, {
+			lifecycle: {
+				getActiveAttempt: () => ({ attemptId: "attempt-race", dispatch: {} }),
+				getAgent: () => undefined,
+				getRecord: () => ({ laneId: "worker-race", type: "worker", status: "running" }),
+				cancelUnleased,
+			},
+			writeReservations: { release },
+			publishTerminalRecord,
+			deps: { isDisposed: () => false, emit: vi.fn() },
+			scheduler: { drain: vi.fn() },
+		}) as unknown as WorkerDelegationController;
+		const cancelScheduledWorker = Reflect.get(controller, "cancelScheduledWorker") as (
+			laneId: string,
+			reasonCode: string,
+			attemptId: string,
+		) => boolean;
+
+		expect(cancelScheduledWorker.call(controller, "worker-race", "worker_start_unavailable", "attempt-race")).toBe(
+			false,
+		);
+		expect(release).toHaveBeenCalledWith("worker-race");
+		expect(cancelUnleased).toHaveBeenCalledWith("worker-race", "worker_start_unavailable", "attempt-race");
+		expect(publishTerminalRecord).not.toHaveBeenCalled();
 	});
 
 	it("retains a caller capacity yield until every independent wait lease releases it", () => {

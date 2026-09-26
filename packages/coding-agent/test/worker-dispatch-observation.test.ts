@@ -7,19 +7,8 @@
  * options -- its documented seam -- plus the real controller entrance where the behaviour is
  * reachable there, and assert what an observer is TOLD versus what actually happened.
  *
- * Current behaviour these pin (draft baseline):
- * - a preflight rejection settles observers with `cancelled` even when the durable cancellation
- *   failed and the lane is still queued and executable;
- * - disposal does the same when the durable cancellation throws;
- * - the start callback fires before `options.run`, so it announces a start that a synchronously
- *   failing run never made, and it carries the pre-start queued record;
- * - an observer that registers while the lane is already running never receives the start callback.
- *
  * Every wait is an event or an explicit transition; there are no readiness sleeps.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkerDelegationRunOutcome } from "../src/core/agent-session-contracts.ts";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
@@ -30,8 +19,8 @@ import {
 	type WorkerDispatchSchedulerOptions,
 } from "../src/core/delegation/worker-dispatch-scheduler.ts";
 import { createReuseHarness } from "./fixtures/specialist-reuse-harness.ts";
+import { tempDir } from "./temp-dir.ts";
 
-const roots: string[] = [];
 /** Schedulers built by this suite; each one is released before its scratch directory is removed. */
 const liveSchedulers: Array<{ dispose(): void }> = [];
 
@@ -44,16 +33,10 @@ afterEach(() => {
 			// Teardown must reach every scratch directory even when a release throws.
 		}
 	}
-	while (roots.length > 0) {
-		const directory = roots.pop();
-		if (directory) rmSync(directory, { recursive: true, force: true });
-	}
 });
 
 function scratchAgentDir(): string {
-	const directory = mkdtempSync(join(tmpdir(), "pi-dispatch-observation-"));
-	roots.push(directory);
-	return directory;
+	return tempDir("pi-dispatch-observation-");
 }
 
 function laneRecord(laneId: string, status: LaneRecord["status"] = "queued"): LaneRecord {
@@ -79,9 +62,13 @@ interface Harness {
  * The real scheduler over deterministic host callbacks. Runs are promises this harness settles, so
  * every transition is explicit; preflight and cancellation behaviour are injected per lane.
  */
-function schedulerHarness(
-	overrides: Partial<Pick<WorkerDispatchSchedulerOptions, "preflight" | "cancel" | "run">> = {},
-): Harness {
+type SchedulerHarnessOverrides = Partial<
+	Pick<WorkerDispatchSchedulerOptions, "getDispatchToken" | "preflight" | "run">
+> & {
+	cancel?(laneId: string, reasonCode: string, dispatchToken?: string): boolean | undefined;
+};
+
+function schedulerHarness(overrides: SchedulerHarnessOverrides = {}): Harness {
 	const records = new Map<string, LaneRecord>();
 	const admissions = new Map<string, WorkerDispatchAdmission>();
 	const cancelled: Array<{ laneId: string; reasonCode: string }> = [];
@@ -111,15 +98,16 @@ function schedulerHarness(
 					pending.set(record.laneId, { resolve, reject });
 				});
 			}),
-		cancel: (laneId, reasonCode) => {
+		cancel: (laneId, reasonCode, dispatchToken) => {
 			cancelled.push({ laneId, reasonCode });
 			if (cleanupMode || !overrides.cancel) return;
-			overrides.cancel(laneId, reasonCode);
+			return overrides.cancel(laneId, reasonCode, dispatchToken);
 		},
 		warn: (message) => {
 			warnings.push(message);
 		},
 		...(overrides.preflight ? { preflight: overrides.preflight } : {}),
+		...(overrides.getDispatchToken ? { getDispatchToken: overrides.getDispatchToken } : {}),
 	});
 	liveSchedulers.push({
 		dispose: () => {
@@ -158,6 +146,96 @@ async function flush(rounds = 8): Promise<void> {
 }
 
 describe("worker dispatch lane observation", () => {
+	it("drops a queued copy when its exact durable attempt generation changed", async () => {
+		let attemptId = "attempt-original";
+		const harness = schedulerHarness({ getDispatchToken: () => attemptId });
+		const record = laneRecord("lane-newer-attempt");
+		harness.records.set(record.laneId, record);
+		harness.scheduler.enqueue(record, REQUEST);
+		const observed = harness.scheduler.observeLane(record.laneId);
+
+		attemptId = "attempt-newer";
+		harness.scheduler.drain();
+		await flush();
+
+		expect(harness.runs).toEqual([]);
+		expect(harness.cancelled).toEqual([]);
+		expect(harness.scheduler.ownsLane(record.laneId)).toBe(false);
+		await expect(observed).resolves.toEqual({ state: "unowned" });
+	});
+
+	it("drops a queued copy when another scheduler already started the durable lane", async () => {
+		const harness = schedulerHarness();
+		const record = laneRecord("lane-started-elsewhere");
+		harness.records.set(record.laneId, record);
+		harness.scheduler.enqueue(record, REQUEST);
+		const observed = harness.scheduler.observeLane(record.laneId);
+
+		// Another process wins the durable lease after this scheduler queued its local recovery copy.
+		harness.records.set(record.laneId, laneRecord(record.laneId, "running"));
+		harness.scheduler.drain();
+		await flush();
+
+		expect(harness.runs).toEqual([]);
+		expect(harness.cancelled).toEqual([]);
+		expect(harness.scheduler.ownsLane(record.laneId)).toBe(false);
+		await expect(observed).resolves.toEqual({ state: "unowned" });
+	});
+
+	it("does not apply a stale preflight rejection after another scheduler starts the lane", async () => {
+		let releasePreflight: (() => void) | undefined;
+		const preflightBarrier = new Promise<void>((resolve) => {
+			releasePreflight = resolve;
+		});
+		const harness = schedulerHarness({
+			preflight: async () => {
+				await preflightBarrier;
+				return { action: "cancel", reasonCode: "worker_directory_unavailable" };
+			},
+		});
+		const record = laneRecord("lane-preflight-started-elsewhere");
+		harness.records.set(record.laneId, record);
+		harness.scheduler.enqueue(record, REQUEST);
+		const observed = harness.scheduler.observeLane(record.laneId);
+		harness.scheduler.drain();
+		await flush();
+
+		// The durable owner changes while this process's read-only preflight is pending.
+		harness.records.set(record.laneId, laneRecord(record.laneId, "running"));
+		releasePreflight?.();
+		await flush();
+
+		expect(harness.runs).toEqual([]);
+		expect(harness.cancelled).toEqual([]);
+		expect(harness.scheduler.ownsLane(record.laneId)).toBe(false);
+		await expect(observed).resolves.toEqual({ state: "unowned" });
+	});
+
+	it("reports unowned when conditional cancellation loses the durable race", async () => {
+		let harness: Harness;
+		harness = schedulerHarness({
+			preflight: async () => ({ action: "cancel", reasonCode: "worker_directory_unavailable" }),
+			cancel: (laneId) => {
+				// The record was queued at the scheduler's last revalidation, but another process leases
+				// it before the cancellation append can commit. The durable adapter reports that lost CAS.
+				harness.records.set(laneId, laneRecord(laneId, "running"));
+				return false;
+			},
+		});
+		const record = laneRecord("lane-cancel-race-lost");
+		harness.records.set(record.laneId, record);
+		harness.scheduler.enqueue(record, REQUEST);
+		const observed = harness.scheduler.observeLane(record.laneId);
+
+		harness.scheduler.drain();
+		await flush();
+
+		expect(harness.runs).toEqual([]);
+		expect(harness.records.get(record.laneId)?.status).toBe("running");
+		expect(harness.scheduler.ownsLane(record.laneId)).toBe(false);
+		await expect(observed).resolves.toEqual({ state: "unowned" });
+	});
+
 	it("waits while a failed durable cancellation leaves the lane owned, then settles once it succeeds", async () => {
 		let cancellationFails = true;
 		const harness = schedulerHarness({
@@ -322,6 +400,7 @@ describe("worker dispatch lane observation", () => {
 
 		// A reused turn is accepted in the narrow interval where the specialist has released its
 		// resources but the prior scheduler promise has not unwound yet.
+		harness.records.set(record.laneId, record);
 		harness.scheduler.enqueue(record, { instructions: "resumed run" });
 		const started: LaneRecord[] = [];
 		const observed = harness.scheduler.observeLane(record.laneId, {

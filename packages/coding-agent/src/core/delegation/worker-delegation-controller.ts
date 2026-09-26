@@ -513,8 +513,14 @@ export class WorkerDelegationController {
 				return reasonCode ? { action: "cancel", reasonCode } : { action: "start" };
 			},
 			getRecord: (laneId) => this.getWorkerLifecycle().getRecord(laneId),
+			getDispatchToken: (laneId) => {
+				const attempt = this.getWorkerLifecycle().getActiveAttempt(laneId);
+				return attempt && (attempt.status === "queued" || attempt.status === "suspended")
+					? attempt.attemptId
+					: undefined;
+			},
 			run: (request, record) => this.runOnce(request, undefined, record, true),
-			cancel: (laneId, reasonCode) => this.cancelScheduledWorker(laneId, reasonCode),
+			cancel: (laneId, reasonCode, attemptId) => this.cancelScheduledWorker(laneId, reasonCode, attemptId),
 			warn: (message) => this.safeWarn(message),
 		});
 		this.recovery = new WorkerRecoveryCoordinator({
@@ -641,8 +647,31 @@ export class WorkerDelegationController {
 		}
 	}
 
-	private cancelScheduledWorker(laneId: string, reasonCode: string): void {
-		if (!this.ownsProjectLane(laneId)) return;
+	private cancelUnleasedAndPublish(
+		lifecycle: WorkerLifecycle,
+		laneId: string,
+		reasonCode: string,
+		expectedAttemptId?: string,
+	): { cancelled: boolean; record: LaneRecord | undefined } {
+		if (!this.ownsProjectLane(laneId)) return { cancelled: false, record: lifecycle.getRecord(laneId) };
+		const outcome = lifecycle.cancelUnleased(laneId, reasonCode, expectedAttemptId);
+		if (outcome.cancelled && outcome.record) {
+			try {
+				this.publishTerminalRecord(outcome.record);
+			} catch (error) {
+				// The durable cancellation is authoritative. Publication remains recoverable from its
+				// pending notification and must not make the scheduler requeue a terminal attempt.
+				this.safeWarn(
+					`Failed to publish canceled worker ${laneId}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			if (!this.deps.isDisposed()) this.scheduler.drain();
+		}
+		return outcome;
+	}
+
+	private cancelScheduledWorker(laneId: string, reasonCode: string, expectedAttemptId?: string): boolean {
+		if (!this.ownsProjectLane(laneId)) return false;
 		try {
 			this.writeReservations.release(laneId);
 		} catch (error) {
@@ -651,24 +680,14 @@ export class WorkerDelegationController {
 			);
 			throw error;
 		}
-		let terminal: LaneRecord | undefined;
 		try {
-			terminal = this.getWorkerLifecycle().cancel(laneId, reasonCode);
+			return this.cancelUnleasedAndPublish(this.getWorkerLifecycle(), laneId, reasonCode, expectedAttemptId)
+				.cancelled;
 		} catch (error) {
 			this.safeWarn(
 				`Failed to cancel durable worker ${laneId}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 			throw error;
-		}
-		if (!terminal) return;
-		try {
-			this.publishTerminalRecord(terminal);
-		} catch (error) {
-			// The durable cancellation is authoritative. Publication remains recoverable from its
-			// pending notification and must not make the scheduler requeue a terminal attempt.
-			this.safeWarn(
-				`Failed to publish canceled worker ${laneId}: ${error instanceof Error ? error.message : String(error)}`,
-			);
 		}
 	}
 
@@ -3214,8 +3233,26 @@ export class WorkerDelegationController {
 						);
 		} catch (error) {
 			this.writeReservations.release(prepared.record.laneId);
-			if (prepared.attempt.status !== "suspended")
-				this.cancelAndPublish(lifecycle, prepared.record.laneId, "worker_start_unavailable");
+			if (prepared.attempt.status !== "suspended") {
+				try {
+					const cancellation = this.cancelUnleasedAndPublish(
+						lifecycle,
+						prepared.record.laneId,
+						"worker_start_unavailable",
+						prepared.attempt.attemptId,
+					);
+					if (!cancellation.cancelled && cancellation.record) {
+						this.safeWarn(
+							`Worker start lost durable ownership: ${error instanceof Error ? error.message : String(error)}`,
+						);
+						return { started: true, record: cancellation.record };
+					}
+				} catch (cancelError) {
+					this.safeWarn(
+						`Worker start cancellation could not be fenced: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`,
+					);
+				}
+			}
 			this.safeWarn(`Worker start failed: ${error instanceof Error ? error.message : String(error)}`);
 			return { started: false, skipReason: "worker_start_unavailable" };
 		}
