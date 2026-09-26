@@ -248,7 +248,7 @@ export class AuthDialogsController {
 	private async logoutProvider(providerOption: AuthSelectorProvider): Promise<void> {
 		try {
 			this.session.modelRegistry.authStorage.logout(providerOption.id);
-			this.session.modelRegistry.refresh();
+			await this.session.refreshModelsAfterAuthChange(providerOption.id);
 			await this.ui.updateAvailableProviderCount();
 			const message =
 				providerOption.authType === "oauth"
@@ -382,7 +382,7 @@ export class AuthDialogsController {
 		authType: "oauth" | "api_key",
 		previousModel: Model<any> | undefined,
 	): Promise<void> {
-		this.session.modelRegistry.refresh();
+		await this.session.refreshModelsAfterAuthChange(providerId);
 		if (providerId === TYPESAFE_PROVIDER) {
 			this.ui.showStatus(
 				"TypeSafe review enabled. Jev is available through typesafe_review; authentication is checked on the first review.",

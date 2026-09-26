@@ -2258,6 +2258,12 @@ export class AgentSession {
 		return this._modelRegistry;
 	}
 
+	/** Reconcile both session-owned model views after an interactive credential change. */
+	async refreshModelsAfterAuthChange(provider: string): Promise<void> {
+		this._modelRegistry.refresh();
+		await this._accountModels.refreshAfterAuthChange(provider);
+	}
+
 	/** System One semantic control plane controller, if active for this session. */
 	get systemOneController(): SystemOneController | undefined {
 		return this._systemOneController;

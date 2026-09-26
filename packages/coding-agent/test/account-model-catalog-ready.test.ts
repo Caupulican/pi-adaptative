@@ -1,5 +1,5 @@
 import type { Api, Model } from "@caupulican/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AccountModelCatalog } from "../src/core/model-router/account-models.ts";
 
 /**
@@ -91,5 +91,19 @@ describe("account model catalog readiness", () => {
 		await catalog.refresh();
 		expect(catalog.availability(model)).toBe("unknown");
 		expect(catalog.describe()).toEqual([]);
+	});
+
+	it("does not recheck account providers after an unrelated provider's auth changes", async () => {
+		const model = { provider: "openrouter", id: "deepseek/x", baseUrl: "https://openrouter.ai/api/v1" } as Model<Api>;
+		const fetch = vi.fn(async () => new Response("{}", { status: 200 }));
+		const catalog = new AccountModelCatalog({
+			getModels: () => [model],
+			hasConfiguredAuth: () => true,
+			getRequestAuth: async () => ({ apiKey: "valid-key" }),
+			fetch,
+		});
+		await catalog.refresh();
+		await catalog.refreshAfterAuthChange("anthropic");
+		expect(fetch).toHaveBeenCalledOnce();
 	});
 });

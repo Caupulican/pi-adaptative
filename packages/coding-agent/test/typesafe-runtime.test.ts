@@ -431,6 +431,7 @@ describe("packaged TypeSafe reviewer", () => {
 					({
 						model: { provider: "unknown", id: "unknown", api: "unknown" },
 						modelRegistry: { authStorage, getAll: () => [], refresh: vi.fn() },
+						refreshModelsAfterAuthChange: vi.fn(async () => {}),
 						setModel,
 					}) as never,
 				ui: {

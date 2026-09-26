@@ -1,5 +1,7 @@
+import type { Api, Model } from "@caupulican/pi-ai";
 import { Container } from "@caupulican/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { AccountModelCatalog } from "../src/core/model-router/account-models.ts";
 import { AuthDialogsController } from "../src/modes/interactive/auth-dialogs-controller.ts";
 import { LoginDialogComponent } from "../src/modes/interactive/components/login-dialog.ts";
 import { OAuthSelectorComponent } from "../src/modes/interactive/components/oauth-selector.ts";
@@ -20,6 +22,96 @@ afterEach(() => {
 });
 
 describe("authentication dialog liveness", () => {
+	it("refreshes account availability after logout before reporting success", async () => {
+		const model = { provider: "openrouter", id: "deepseek/x", baseUrl: "https://openrouter.ai/api/v1" } as Model<Api>;
+		let configured = true;
+		const accountModels = new AccountModelCatalog({
+			getModels: () => [model],
+			hasConfiguredAuth: () => configured,
+			getRequestAuth: async () => ({ apiKey: "rejected-key" }),
+			fetch: async () => new Response("{}", { status: 401 }),
+		});
+		await accountModels.refresh();
+		expect(accountModels.availability(model)).toBe("unavailable");
+		const order: string[] = [];
+		const controller = new AuthDialogsController({
+			getSession: () =>
+				({
+					modelRegistry: {
+						authStorage: {
+							list: () => ["openrouter"],
+							get: () => ({ type: "api_key", key: "secret" }),
+							logout: () => {
+								order.push("logout");
+								configured = false;
+							},
+						},
+						getProviderDisplayName: () => "OpenRouter",
+						refresh: () => order.push("uncoordinated-registry"),
+					},
+					refreshModelsAfterAuthChange: async (provider: string) => {
+						order.push("registry");
+						order.push(`account:${provider}`);
+						await accountModels.refreshAfterAuthChange(provider);
+					},
+				}) as never,
+			ui: {
+				updateAvailableProviderCount: async () => {
+					order.push("count");
+				},
+				showStatus: () => order.push("status"),
+				showError: vi.fn(),
+			} as never,
+		});
+
+		await controller.showOAuthSelector("logout", "openrouter");
+
+		expect(accountModels.availability(model)).toBe("unknown");
+		expect(order).toEqual(["logout", "registry", "account:openrouter", "count", "status"]);
+	});
+
+	it("waits for account availability refresh before reporting login success", async () => {
+		const refresh = Promise.withResolvers<void>();
+		const refreshModelsAfterAuthChange = vi.fn(() => refresh.promise);
+		const updateAvailableProviderCount = vi.fn(async () => {});
+		const showStatus = vi.fn();
+		const previousModel = { provider: "openrouter", id: "deepseek/x" } as Model<Api>;
+		const controller = new AuthDialogsController({
+			getSession: () =>
+				({
+					model: previousModel,
+					modelRegistry: { refresh: vi.fn() },
+					refreshModelsAfterAuthChange,
+				}) as never,
+			ui: {
+				updateAvailableProviderCount,
+				invalidateFooter: vi.fn(),
+				updateEditorBorderColor: vi.fn(),
+				showStatus,
+				maybeWarnAboutAnthropicSubscriptionAuth: vi.fn(),
+			} as never,
+		});
+		const completion = (
+			controller as unknown as {
+				completeProviderAuthentication(
+					providerId: string,
+					providerName: string,
+					authType: "oauth" | "api_key",
+					previousModel: Model<Api> | undefined,
+				): Promise<void>;
+			}
+		).completeProviderAuthentication("openrouter", "OpenRouter", "api_key", previousModel);
+		await Promise.resolve();
+
+		expect(refreshModelsAfterAuthChange).toHaveBeenCalledWith("openrouter");
+		expect(updateAvailableProviderCount).not.toHaveBeenCalled();
+		expect(showStatus).not.toHaveBeenCalled();
+		refresh.resolve();
+		await completion;
+		expect(updateAvailableProviderCount).toHaveBeenCalledOnce();
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Saved API key for OpenRouter"));
+	});
+
 	it("closes and focuses the provider selector before dispatching its selected action", async () => {
 		const order: string[] = [];
 		let mounted: { component: unknown; focus: unknown } | undefined;
@@ -38,6 +130,7 @@ describe("authentication dialog liveness", () => {
 						getProviderDisplayName: () => "Test Provider",
 						refresh: vi.fn(),
 					},
+					refreshModelsAfterAuthChange: async () => order.push("refresh"),
 				}) as never,
 			ui: {
 				showSelector: (create: (done: () => void) => { component: unknown; focus: unknown }) => {
@@ -55,7 +148,7 @@ describe("authentication dialog liveness", () => {
 		mounted.component.handleInput("\r");
 		await vi.waitFor(() => expect(logout).toHaveBeenCalledOnce());
 
-		expect(order).toEqual(["done", "logout"]);
+		expect(order).toEqual(["done", "logout", "refresh"]);
 	});
 
 	it("reports API-key and OAuth failures only after restoring the editor", async () => {

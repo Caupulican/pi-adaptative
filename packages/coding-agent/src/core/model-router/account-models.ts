@@ -107,6 +107,12 @@ export class AccountModelCatalog {
 		return run;
 	}
 
+	/** Refresh account-derived availability only when this catalog owns that provider. */
+	async refreshAfterAuthChange(provider: string): Promise<void> {
+		if (!(provider in ACCOUNT_CHECKS)) return;
+		await this.refresh();
+	}
+
 	/** Resolves once the latest check has settled (immediately when none was started). */
 	/**
 	 * Settles when every account check has, or when `signal` aborts first: a submission the owner
