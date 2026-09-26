@@ -11,6 +11,7 @@
  * Conforms to GOVERNANCE_LIVE_PATHS.md and RCG-044, RCG-014.
  */
 
+import { MAX_ORCHESTRATION_ATTEMPTS } from "../orchestration/contracts.ts";
 import type { LiveWorkerAttempt, WorkerSupervisionAction, WorkerSupervisionSignal } from "./types.ts";
 import type { WorkerSemanticSupervisor } from "./worker-semantic-supervisor.ts";
 
@@ -91,49 +92,51 @@ export class WorkerSupervisionCoordinator {
 	private readonly deps: WorkerSupervisionCoordinatorDeps;
 	private readonly signals: WorkerSupervisionSignal[] = [];
 	private readonly lastErrorTimestamp = new Map<string, number>();
-	private readonly consumedRootRequestIds = new Set<string>();
+	private readonly pendingRootRequests = new Map<string, WorkerSupervisionSignal>();
+	private nextDeterministicSignalSequence = 0;
 
 	constructor(deps: WorkerSupervisionCoordinatorDeps) {
 		this.deps = deps;
 	}
 
-	/** Every signal this session's supervisor produced, newest last. */
+	/** Bounded history of this session's supervisor signals, newest last. */
 	getSignals(): readonly WorkerSupervisionSignal[] {
 		return [...this.signals];
 	}
 
 	/** Signals the root has not yet acted on that ask for a new owner (specialist, capability, verifier). */
 	getPendingRootRequests(): readonly WorkerSupervisionSignal[] {
-		// One request per (attempt, action), the newest, and only while that attempt is live: every tool
-		// call can re-emit the same fact, and a finished attempt's request no longer describes the work.
-		const latest = new Map<string, WorkerSupervisionSignal>();
-		for (const signal of this.signals) {
-			if (this.consumedRootRequestIds.has(signal.signal_id)) continue;
-			if (
-				signal.action !== "request_specialist" &&
-				signal.action !== "request_capability" &&
-				signal.action !== "request_verifier" &&
-				signal.action !== "mark_external_block"
-			)
-				continue;
-			if (this.deps.isAttemptLive && !this.deps.isAttemptLive(signal.attempt_id)) continue;
-			latest.set(`${signal.attempt_id}\u0000${signal.action}`, signal);
+		// Pending ownership is independent of observational history: capacity eviction cannot silently
+		// discard work the root has not consumed. A terminal attempt makes that ownership permanently stale.
+		for (const [key, signal] of this.pendingRootRequests) {
+			if (this.deps.isAttemptLive && !this.deps.isAttemptLive(signal.attempt_id)) {
+				this.pendingRootRequests.delete(key);
+			}
 		}
-		return [...latest.values()];
+		return [...this.pendingRootRequests.values()];
 	}
 
 	consumePendingRootRequest(signalId: string): void {
-		this.consumedRootRequestIds.add(signalId);
+		for (const [key, signal] of this.pendingRootRequests) {
+			if (signal.signal_id !== signalId) continue;
+			this.pendingRootRequests.delete(key);
+			return;
+		}
 	}
 
 	private reportError(attemptId: string, error: unknown): void {
 		const text = error instanceof Error ? error.message : String(error);
 		const fingerprint = `${attemptId}:${text}`;
-		const lastReportedAt = this.lastErrorTimestamp.get(fingerprint) ?? 0;
+		const lastReportedAt = this.lastErrorTimestamp.get(fingerprint);
 		const now = Date.now();
 		// F12: Debounce repeated identical supervision/control errors for the same attempt by 30 seconds.
-		if (now - lastReportedAt <= 30_000) return;
+		if (lastReportedAt !== undefined && now - lastReportedAt <= 30_000) return;
+		this.lastErrorTimestamp.delete(fingerprint);
 		this.lastErrorTimestamp.set(fingerprint, now);
+		if (this.lastErrorTimestamp.size > MAX_ORCHESTRATION_ATTEMPTS) {
+			const oldest = this.lastErrorTimestamp.keys().next().value;
+			if (oldest !== undefined) this.lastErrorTimestamp.delete(oldest);
+		}
 		try {
 			this.deps.onSupervisionError?.(error);
 		} catch {
@@ -188,7 +191,7 @@ export class WorkerSupervisionCoordinator {
 		const reroute = prior > 0;
 		const verdict: WorkerSupervisionSignal = {
 			schema_version: "1.0",
-			signal_id: `sig-churn-${attempt.attemptId}-${this.signals.length + 1}`,
+			signal_id: `sig-churn-${attempt.attemptId}-${++this.nextDeterministicSignalSequence}`,
 			objective_id: attempt.objectiveId,
 			task_id: attempt.taskId,
 			attempt_id: attempt.attemptId,
@@ -248,6 +251,17 @@ export class WorkerSupervisionCoordinator {
 		}
 		this.clearErrors(observation.attemptId);
 		this.signals.push(verdict);
+		if (this.signals.length > MAX_ORCHESTRATION_ATTEMPTS) {
+			this.signals.splice(0, this.signals.length - MAX_ORCHESTRATION_ATTEMPTS);
+		}
+		if (
+			verdict.action === "request_specialist" ||
+			verdict.action === "request_capability" ||
+			verdict.action === "request_verifier" ||
+			verdict.action === "mark_external_block"
+		) {
+			this.pendingRootRequests.set(`${verdict.attempt_id}\u0000${verdict.action}`, verdict);
+		}
 		if (verdict.action !== "continue") {
 			try {
 				// request_verifier / request_specialist / request_capability / mark_external_block are root
