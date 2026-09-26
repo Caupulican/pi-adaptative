@@ -322,10 +322,27 @@ idle extras retired after a minute; the pool owns the working directory so a `cd
 moves the next command wherever it runs, exported variables reach every lane through the export ledger), and the
 mutation barrier is a group lock: announced command runs hold it together, file mutations hold it
 together, the two groups never overlap, admission is in emission order, and an unannounced run stays
-exclusive. Why: one persistent shell plus a FIFO writer lock turned three commands emitted in one
-message into three sequential waits. Pinned by `packages/coding-agent/test/shell-lane-pool.test.ts`,
+exclusive. Shutdown starts every independent lane/resource close, waits for all of them to settle,
+then reports one failure or their aggregate; a fast failed close cannot let session disposal finish
+while a slower sibling still owns a process. Why: one persistent shell plus a FIFO writer lock turned
+three commands emitted in one message into three sequential waits, and fail-fast cleanup later let a
+session terminal race a sibling shell close. Pinned by `packages/coding-agent/test/shell-lane-pool.test.ts`,
+`packages/coding-agent/test/task-shell-sessions.test.ts`,
 `packages/coding-agent/test/bash-concurrent-lanes.test.ts` and
 `packages/coding-agent/test/bash-edit-write-race.test.ts`.
+
+**A maintenance terminal covers every durable mutation it admitted.** Independent reconciliation
+mutations all start, all settle, and only then report one failure or their aggregate; `waitForIdle`
+and session shutdown cannot finish while a sibling durable write is still pending. Why: fail-fast
+process-matrix startup reconciliation let a failed prune settle the master maintenance promise while
+an interrupted-worker recovery write could still land after stop. Pinned by
+`packages/coding-agent/test/process-matrix-reconciliation-settlement.test.ts`.
+
+**Integrity hooks inspect snapshots; they never borrow execution state.** One point-in-time context
+snapshot is captured per hook run, and every extension receives its own detached copy. A timed-out
+hook may finish late but cannot rewrite the caller's admitted tool arguments; one extension cannot
+change the evidence a later extension evaluates. High-impact timeout remains fail-closed. Pinned by
+`packages/coding-agent/test/system-one/integrity-hook-context-isolation.test.ts`.
 
 **The group lock belongs to the worktree; emission order belongs to the session; the per-path
 queue belongs to the process.** The barrier's holders and waiters live in a scope keyed by the
@@ -734,7 +751,10 @@ record. Each record in the wake-up's `details` carries `outputBytes` (the output
 `inlined` (whether this message carried it in full), so the byte budget is priced from what was
 delivered instead of assumed; persisted task records drop their output, so nothing else can answer
 that afterwards. The handoff stub, the `tool_task` guideline and the `background` descriptions all say the
-same thing: wait only for an omitted output, never poll. Why: listing only `taskId: status` made
+same thing: wait only for an omitted output, never poll. Shutdown cancels an active
+terminal-notification backoff and resolves its waiter before draining. The terminal is already
+durable, so a failed notifier can neither hold session disposal until its retry clock expires nor
+erase the completion that the next owner must recover. Why: listing only `taskId: status` made
 every background job cost a second provider request whose sole purpose was to fetch bytes the
 record already held, 10-45 s on a slow-first-token provider. Pinned by
 `packages/coding-agent/test/background-tool-task-controller.test.ts` and
@@ -794,7 +814,10 @@ and `packages/coding-agent/test/human-input.test.ts`.
 without a live objective. System One answers one atomic question per claim kind (the answer states tests
 passed, a commit, a push, a publish, changed files); code combines each settled answer with the
 turn's mechanical receipts. A claim the receipts contradict buys one correction turn; one no receipt
-backs is an unverified-claim warning. Pinned by `packages/coding-agent/test/system-one/claim-delivery.test.ts`.
+backs is an unverified-claim warning. An enforced work unit is anchored to the assistant message that
+owns its first mutating call; provider lifecycle records written between that message and tool admission
+cannot cut the call out of the receipt window. Pinned by
+`packages/coding-agent/test/system-one/claim-delivery.test.ts`.
 
 **What no agent could settle climbs a ladder, then reaches the owner** (`system-one/unsettled-ladder.ts`).
 A worker reports findings it could not confirm as `inconclusive`, never rounded up. System One judges
@@ -977,6 +1000,11 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-26 | Integrity hooks receive per-extension copies of one detached context snapshot, fencing late and sibling mutations without weakening high-impact timeout policy. |
+| 2026-09-26 | Process-matrix maintenance starts and settles every admitted reconciliation mutation before idle or shutdown can be reported. |
+| 2026-09-26 | Independent shell-lane, task-shell, and runtime-resource terminals all settle before shutdown reports sibling failures. |
+| 2026-09-26 | Enforced work units anchor to the mutating assistant message, so interposed provider lifecycle terminals cannot remove the delivery command from claim receipts. |
+| 2026-09-26 | Background terminal delivery remains durable across notifier failure, while shutdown cancels notification backoff immediately so a retry clock cannot delay session disposal. |
 | 2026-09-24 | Self-monitoring compaction: the agent sees its gauge and lines, hands itself off with `self_compact` at a clean checkpoint through the host compaction owner, and continues from its exact note; `self_compact` gets its own 140-token schema allowance, aggregate ceiling 5,953, base subtotal unchanged at 4,500. |
 | 2026-09-24 | The provider-limit contract now pins Bedrock throttling classification and requires a known reset before sharing its limit, so sibling requests do not invent a cooldown. |
 | 2026-09-21 | The tool gate's replan verdict refuses one call and never cancels the turn; relevance is judged only against a real step or goal; a System One cancel of the root turn inside the objective loop is a re-route, the operator's interruption a stop. |

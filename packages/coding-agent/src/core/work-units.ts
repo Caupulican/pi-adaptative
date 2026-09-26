@@ -56,8 +56,9 @@ export function currentWorkUnit(
 export function openWorkUnit(
 	manager: WorkUnitSessionView,
 	record: Omit<WorkUnitRecord, "startEntryId" | "openedAt">,
+	startEntryId: string | null = manager.getLeafEntry()?.id ?? null,
 ): string {
-	const full: WorkUnitRecord = { ...record, startEntryId: manager.getLeafEntry()?.id ?? null, openedAt: Date.now() };
+	const full: WorkUnitRecord = { ...record, startEntryId, openedAt: Date.now() };
 	return manager.appendCustomEntry(WORK_UNIT_CUSTOM_TYPE, full);
 }
 

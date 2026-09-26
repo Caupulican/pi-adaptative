@@ -90,8 +90,7 @@ import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../setti
 import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
 import { systemOneAccessFromSession } from "../system-one/access.ts";
 import { executeToolkitScript } from "../toolkit/script-runner.ts";
-import { disposeShellSessionLanes } from "../tools/shell-lane-pool.ts";
-import { disposePersistentShellSession } from "../tools/shell-session.ts";
+import { disposeShellExecutionSessionAndWait } from "../tools/shell-execution-session.ts";
 import type { ReadOnlySkillBroker } from "../tools/skill.ts";
 import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
 import { selectSanitizedContextFork } from "./sanitized-context-fork.ts";
@@ -709,7 +708,7 @@ export class WorkerDelegationController {
 		this.lifecycle.markNotificationsDelivered(notificationIds);
 	}
 
-	abort(): void {
+	abort(): Promise<void> {
 		this.runTeardownStep("abort worker execution", () => this.workerAbort.abort());
 		// Bound attempts have an authoritative transcript and agent identity. A normal owner-session
 		// shutdown is an execution interruption, not an explicit worker cancellation: fence it into
@@ -796,16 +795,36 @@ export class WorkerDelegationController {
 		this.runTeardownStep("dispose worker recovery", () => this.recovery.dispose());
 		this.runTeardownStep("dispose worker terminal handoffs", () => this.terminalHandoffs.dispose());
 		this.runTeardownStep("dispose worker write reservations", () => this.writeReservations.dispose());
+		const shellShutdowns: Promise<void>[] = [];
+		const shellShutdownErrors: unknown[] = [];
 		for (const shellSessionKey of this.shellSessionKeys) {
-			this.runTeardownStep(`dispose worker shell ${shellSessionKey}`, () => {
-				disposePersistentShellSession(shellSessionKey);
-				// Foreground commands run on a pool of lanes keyed under the session; disposing only
-				// the session key would leave every lane's shell behind.
-				void disposeShellSessionLanes(shellSessionKey);
-			});
+			try {
+				// The shared execution owner synchronously kills every shell tier and lane, then resolves
+				// only after physical child close (or its bounded watchdog). Session teardown awaits the
+				// returned aggregate instead of letting worker processes escape as detached cleanup.
+				shellShutdowns.push(disposeShellExecutionSessionAndWait(shellSessionKey));
+			} catch (error) {
+				shellShutdownErrors.push(error);
+			}
 		}
 		this.shellSessionKeys.clear();
 		this.runTeardownStep("clear worker conversation cache", () => this.conversations.clearCache());
+		const completion = Promise.allSettled(shellShutdowns).then((results) => {
+			for (const result of results) {
+				if (result.status === "rejected") shellShutdownErrors.push(result.reason);
+			}
+			for (const error of shellShutdownErrors) {
+				this.safeWarn(
+					`Worker shell terminal release failed during teardown: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			if (shellShutdownErrors.length === 1) throw shellShutdownErrors[0];
+			if (shellShutdownErrors.length > 1) {
+				throw new AggregateError(shellShutdownErrors, "Worker shell terminal release failed.");
+			}
+		});
+		void completion.catch(() => undefined);
+		return completion;
 	}
 
 	private runTeardownStep(label: string, step: () => void): void {

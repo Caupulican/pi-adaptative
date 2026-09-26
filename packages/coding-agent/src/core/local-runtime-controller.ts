@@ -758,8 +758,8 @@ export class LocalRuntimeController {
 		);
 		for (const [serverUrl, runtime] of this._runtimes) {
 			if (eligibleOllamaServers.has(serverUrl)) continue;
-			runtime.stop();
 			this._runtimes.delete(serverUrl);
+			this.stopRuntimeBestEffort(`Ollama runtime ${serverUrl}`, () => runtime.stop());
 		}
 
 		const eligibleTransformersRuntimeKeys = new Set(
@@ -769,13 +769,14 @@ export class LocalRuntimeController {
 		);
 		for (const [runtimeKey, runtime] of this._transformersRuntimes) {
 			if (eligibleTransformersRuntimeKeys.has(runtimeKey)) continue;
-			runtime.stop();
 			this._transformersRuntimes.delete(runtimeKey);
+			this.stopRuntimeBestEffort(`Transformers runtime ${runtimeKey.replace("\0", "/")}`, () => runtime.stop());
 		}
 
 		if (this._prismLlamaCppRuntime && !eligibleModels.some((model) => isPiManagedPrismLlamaCppModel(model))) {
-			this._prismLlamaCppRuntime.stop();
+			const runtime = this._prismLlamaCppRuntime;
 			this._prismLlamaCppRuntime = undefined;
+			this.stopRuntimeBestEffort("prism llama.cpp runtime", () => runtime.stop());
 		}
 
 		// deriveOllamaServerUrl strips a trailing `/v1` regardless of provider (same body as the
@@ -794,6 +795,21 @@ export class LocalRuntimeController {
 	/** Full teardown of every pi-spawned local runtime — reconcile against an empty eligible set. */
 	dispose(): void {
 		this.reconcile([]);
+	}
+
+	private stopRuntimeBestEffort(label: string, stop: () => unknown): void {
+		try {
+			stop();
+		} catch (error) {
+			try {
+				this.deps.emit({
+					type: "warning",
+					message: `Failed to stop ${label}: ${error instanceof Error ? error.message : String(error)}`,
+				});
+			} catch {
+				// Diagnostics are best-effort and cannot interrupt sibling runtime teardown.
+			}
+		}
 	}
 
 	/** Shared cache-key shape for {@link _transformersRuntimes}, factored out so

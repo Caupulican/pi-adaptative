@@ -1,3 +1,5 @@
+import { settleIndependentLifecycle } from "../lifecycle-settlement.ts";
+
 /** Bounded, task-keyed shell lifecycle. Retirement is event-driven and never evicts an active lease. */
 export class TaskShellSessions {
 	private readonly retire: (key: string) => Promise<void>;
@@ -61,11 +63,12 @@ export class TaskShellSessions {
 	async dispose(): Promise<void> {
 		this.disposed = true;
 		await this.tail;
-		await Promise.all(
-			[...this.entries.keys()].map(async (key) => {
+		await settleIndependentLifecycle(
+			[...this.entries.keys()].map((key) => async () => {
 				await this.retire(key);
 				this.entries.delete(key);
 			}),
+			"Task shell retirement failed",
 		);
 	}
 }

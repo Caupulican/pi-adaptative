@@ -74,6 +74,7 @@ export class WorkerRecoveryCoordinator {
 	private readonly options: WorkerRecoveryCoordinatorOptions;
 	private queueRecovered = false;
 	private recoveringDurableState = false;
+	private disposed = false;
 	private readonly verificationRecoveryFailures = new Map<string, string>();
 	private readonly retryTimers = new Map<string, PendingRetryDispatch>();
 	private readonly unsubscribeQueueCapacity: (() => void) | undefined;
@@ -81,6 +82,7 @@ export class WorkerRecoveryCoordinator {
 	constructor(options: WorkerRecoveryCoordinatorOptions) {
 		this.options = options;
 		this.unsubscribeQueueCapacity = options.scheduler.onQueueCapacityAvailable?.(() => {
+			if (this.disposed) return;
 			this.flushDueRetries();
 			// Mandatory verifier dispatches remain derivable from durable subject state even after the
 			// ordinary queue was fully recovered. Every released slot must replay that retained demand.
@@ -90,7 +92,7 @@ export class WorkerRecoveryCoordinator {
 
 	/** Idempotently rebuild in-process queues, terminal outboxes, and task-bearing mailboxes. */
 	recover(): void {
-		if (this.recoveringDurableState) return;
+		if (this.disposed || this.recoveringDurableState) return;
 		this.recoveringDurableState = true;
 		const { lifecycle } = this.options;
 		try {
@@ -213,6 +215,7 @@ export class WorkerRecoveryCoordinator {
 		/** The attempt's contract has another usable candidate for a quota failure (see evaluateWorkerRetry). */
 		failover?: boolean;
 	}): WorkerRetryScheduleResult {
+		if (this.disposed) return { scheduled: false, reason: "disposed" };
 		const attempt = this.options.lifecycle.getActiveAttempt(args.laneId);
 		const record = this.options.lifecycle.getRecord(args.laneId);
 		if (!attempt || !record) return { scheduled: false, reason: "attempt_missing" };
@@ -265,11 +268,23 @@ export class WorkerRecoveryCoordinator {
 
 	/** Cancel only process-local alarms; the retained deadline remains authoritative on disk. */
 	dispose(): void {
-		this.unsubscribeQueueCapacity?.();
+		if (this.disposed) return;
+		this.disposed = true;
 		for (const entry of this.retryTimers.values()) {
 			if (entry.timer) clearTimeout(entry.timer);
 		}
 		this.retryTimers.clear();
+		try {
+			this.unsubscribeQueueCapacity?.();
+		} catch (error) {
+			try {
+				this.options.warn(
+					`Worker recovery queue-capacity unsubscribe failed during disposal: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			} catch {
+				// Diagnostics cannot reactivate a disposed recovery coordinator.
+			}
+		}
 	}
 
 	clearScheduledRetry(laneId: string): void {
@@ -282,6 +297,7 @@ export class WorkerRecoveryCoordinator {
 
 	/** Keep an externally requested wake queued while the durable retry deadline is still retained. */
 	deferRetryIfNeeded(record: LaneRecord, request: WorkerDelegationRequest): boolean {
+		if (this.disposed) return false;
 		const attempt = this.options.lifecycle.getActiveAttempt(record.laneId);
 		if (attempt?.status !== "suspended" || !attempt.retry || Date.parse(attempt.retry.notBefore) <= this.now()) {
 			return false;
@@ -328,6 +344,7 @@ export class WorkerRecoveryCoordinator {
 	}
 
 	private onRetryTimer(attemptId: string): void {
+		if (this.disposed) return;
 		const entry = this.retryTimers.get(attemptId);
 		if (!entry) return;
 		delete entry.timer;
@@ -372,6 +389,7 @@ export class WorkerRecoveryCoordinator {
 	}
 
 	private flushDueRetries(): void {
+		if (this.disposed) return;
 		for (const [attemptId, entry] of this.retryTimers) {
 			if (entry.timer || Date.parse(entry.notBefore) > this.now()) continue;
 			if (this.tryEnqueueDueRetry(attemptId, entry) === "full") break;

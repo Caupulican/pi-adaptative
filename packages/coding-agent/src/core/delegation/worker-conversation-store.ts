@@ -28,6 +28,7 @@ import {
 import { createToolFailureContextMemory } from "@caupulican/pi-agent-core/tool-failure-memory";
 import type {
 	AgentMessage,
+	AgentMessageOrigin,
 	ProviderRequestPrefixState,
 	ProviderRequestSnapshotContext,
 } from "@caupulican/pi-agent-core/types";
@@ -1567,9 +1568,9 @@ export class WorkerConversation {
 	}
 
 	/** Append one already-authorized worker message to the canonical transcript. */
-	appendMessage(message: WorkerTranscriptMessage): string {
+	appendMessage(message: WorkerTranscriptMessage, origin?: AgentMessageOrigin): string {
 		return this.appendSessionEntry((sessionManager) =>
-			sessionManager.appendMessage(structuredClone(workerMessageForPersistence(message))),
+			sessionManager.appendMessage(structuredClone(workerMessageForPersistence(message)), origin),
 		);
 	}
 

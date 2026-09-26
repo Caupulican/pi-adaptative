@@ -8,6 +8,12 @@
 - One-shot process deadlines and cancellation now cover the complete owned process group, including descendants that outlive their leader and failed group-kill delivery.
 - Gateway provider startup and shutdown are bounded and concurrent, so one non-settling extension cannot block unrelated providers or session disposal indefinitely.
 - Tool preparation or cancellation failures no longer publish a second terminal for the provider response that preceded them.
+- Background worker notifications, usage receipts, recovery alarms, write reservations, managed lanes, and provider holds now release independently when a sibling cleanup fails.
+- Session disposal now awaits worker shell lanes and local runtimes, while late background completions are fenced from disposed controllers.
+- Work-unit receipt windows remain anchored to the mutating assistant call when provider lifecycle terminals are recorded between that call and tool admission, so failed commits, pushes, and publishes still trigger claim correction.
+- Shell-lane, task-shell, and runtime-resource shutdown waits for every started sibling cleanup before reporting failures, so one failed close cannot let session disposal finish while another owned process is still live.
+- Process-matrix startup reconciliation waits for every admitted prune and recovery mutation before maintenance or session shutdown settles, so one failed store operation cannot leave a sibling durable write running after stop.
+- Integrity hook extensions receive detached copies of one point-in-time context snapshot, so a timed-out hook cannot rewrite admitted tool arguments and one extension cannot alter the evidence a later extension validates.
 
 ## [0.99.52] - 2026-09-26
 

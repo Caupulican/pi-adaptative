@@ -83,7 +83,7 @@ export interface ToolGateControllerDeps {
 		signal: AbortSignal | undefined,
 	): Promise<BeforeToolCallResult | undefined>;
 	/** An admitted tool call that may change the world (see `isMutatingToolCall`): the work boundary. */
-	noteMutatingCall?(toolName: string): void;
+	noteMutatingCall?(toolName: string, assistantMessage: AssistantMessage): void;
 	/** The tool's own `readOnly` declaration, when it made one. */
 	isToolReadOnly?(toolName: string): boolean | undefined;
 	/** Branch this task must commit onto. Set only after Jev classifies the request as local commits. */
@@ -384,7 +384,7 @@ export class ToolGateController {
 			}
 			// Admitted: a call that may change the world opens the work boundary when no work is declared.
 			if (!isControlPlaneTool && isMutatingToolCall(toolCall.name, args, this.deps.isToolReadOnly?.(toolCall.name)))
-				this.deps.noteMutatingCall?.(toolCall.name);
+				this.deps.noteMutatingCall?.(toolCall.name, assistantMessage);
 
 			let releaseObservation: (() => void) | undefined;
 			try {

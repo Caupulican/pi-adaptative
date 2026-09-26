@@ -343,4 +343,33 @@ describe("LocalRuntimeController.dispose", () => {
 			rmSync(agentDir, { recursive: true, force: true });
 		}
 	});
+
+	it("continues releasing sibling runtimes when one stop fails", () => {
+		const agentDir = scratchDir("dispose-stop-failure");
+		try {
+			const ctrl = controller(agentDir);
+			const failedOllama = ctrl.getLocalRuntime("http://127.0.0.1:11434");
+			const siblingOllama = ctrl.getLocalRuntime("http://127.0.0.1:11435");
+			const transformers = ctrl.getTransformersRuntime("model-a", "http://127.0.0.1:18100");
+			const prism = ctrl.getPrismLlamaCppRuntime();
+			vi.spyOn(failedOllama, "stop").mockImplementation(() => {
+				throw new Error("first child stop failed");
+			});
+			const siblingStop = vi.spyOn(siblingOllama, "stop");
+			const transformersStop = vi.spyOn(transformers, "stop");
+			const prismStop = vi.spyOn(prism, "stop");
+
+			expect(() => ctrl.dispose()).not.toThrow();
+
+			expect(siblingStop).toHaveBeenCalledTimes(1);
+			expect(transformersStop).toHaveBeenCalledTimes(1);
+			expect(prismStop).toHaveBeenCalledTimes(1);
+			expect(ctrl.getLocalRuntime("http://127.0.0.1:11434")).not.toBe(failedOllama);
+			expect(ctrl.getLocalRuntime("http://127.0.0.1:11435")).not.toBe(siblingOllama);
+			expect(ctrl.getTransformersRuntime("model-a", "http://127.0.0.1:18100")).not.toBe(transformers);
+			expect(ctrl.getPrismLlamaCppRuntime()).not.toBe(prism);
+		} finally {
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	});
 });

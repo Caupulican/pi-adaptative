@@ -922,7 +922,8 @@ describe("BackgroundToolTaskController", () => {
 		await controller.shutdown();
 	});
 
-	it("does not hot-loop on a permanent terminal notification failure during shutdown", async () => {
+	it("cancels terminal-notification backoff immediately during shutdown", async () => {
+		vi.useFakeTimers();
 		const notifyTerminal = vi.fn(async () => {
 			throw new Error("handoff unavailable");
 		});
@@ -939,12 +940,23 @@ describe("BackgroundToolTaskController", () => {
 			result: { content: [{ type: "text", text: "done" }], details: {} },
 			isError: false,
 		});
-		await Promise.resolve();
-		await Promise.resolve();
-
-		await controller.shutdown();
-
+		await vi.advanceTimersByTimeAsync(0);
 		expect(notifyTerminal).toHaveBeenCalledOnce();
+
+		const shutdown = controller.shutdown();
+		let settledBeforeBackoff = false;
+		void shutdown.then(() => {
+			settledBeforeBackoff = true;
+		});
+		for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+		if (!settledBeforeBackoff) {
+			await vi.runOnlyPendingTimersAsync();
+			await shutdown;
+		}
+
+		expect(settledBeforeBackoff).toBe(true);
+		expect(notifyTerminal).toHaveBeenCalledOnce();
+		vi.useRealTimers();
 	});
 
 	it("restores only the admitted session lineage and deterministically closes orphaned running tasks", async () => {

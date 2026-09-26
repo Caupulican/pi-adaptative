@@ -42,6 +42,13 @@ test("has one compiler execution path with no legacy fallback", () => {
 	assert.throws(() => readFileSync(join("scripts", "tsgo-or-tsc.mjs"), "utf8"), { code: "ENOENT" });
 });
 
+test("root typechecking resolves agent compaction subpaths to workspace source", () => {
+	const rootTsconfig = JSON.parse(readFileSync("tsconfig.json", "utf8"));
+	assert.deepEqual(rootTsconfig.compilerOptions.paths["@caupulican/pi-agent-core/compaction/*"], [
+		"./packages/agent/src/compaction/*.ts",
+	]);
+});
+
 test("keeps CI and release toolchain assertions on the pinned Vite and Vitest versions", () => {
 	for (const relativePath of [".github/workflows/ci.yml", ".github/workflows/build-binaries.yml"]) {
 		const source = readFileSync(relativePath, "utf8");

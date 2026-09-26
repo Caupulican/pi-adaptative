@@ -142,7 +142,7 @@ export class ForegroundLifecycleController {
 		this.lastRequestId = undefined;
 	}
 
-	private findPersistedMessageEntryId(message: AgentMessage): string | undefined {
+	getPersistedMessageEntryId(message: AgentMessage): string | undefined {
 		return this.persistedMessages.get(message);
 	}
 
@@ -238,7 +238,7 @@ export class ForegroundLifecycleController {
 		const flushed = this.deps.modelRouter.commitSessionBuffer();
 		for (const [message, entryId] of flushed) this.onMessagePersisted(message, entryId);
 		const assistantMessage = calls[0]!.assistantMessage;
-		const assistantMessageEntryId = this.findPersistedMessageEntryId(assistantMessage);
+		const assistantMessageEntryId = this.getPersistedMessageEntryId(assistantMessage);
 		if (!assistantMessageEntryId) {
 			throw new Error("Foreground tool reservation rejected: assistant message is not canonically persisted.");
 		}

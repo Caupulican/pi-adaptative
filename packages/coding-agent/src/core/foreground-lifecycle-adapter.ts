@@ -77,6 +77,10 @@ export class ForegroundLifecycleAdapter {
 		this.lifecycle.resetForSessionReload();
 	}
 
+	getPersistedMessageEntryId(message: Message): string | undefined {
+		return this.lifecycle.getPersistedMessageEntryId(message);
+	}
+
 	appendMessage(message: Message, origin?: AgentMessageOrigin): string {
 		const entryId = this.sessionManager.appendMessage(message, origin);
 		this.lifecycle.onMessagePersisted(message, entryId, origin);

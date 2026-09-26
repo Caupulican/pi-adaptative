@@ -173,6 +173,7 @@ describe("AgentSession bash and persistence characterization", () => {
 			"custom",
 			"request_snapshot",
 			"message",
+			"provider_request_terminal",
 			// The first call that may change the world opens the turn's work unit (see work-units.ts).
 			"custom",
 			"foreground_tool_start",
@@ -180,13 +181,18 @@ describe("AgentSession bash and persistence characterization", () => {
 			"foreground_tool_terminal",
 			"request_snapshot",
 			"message",
+			"provider_request_terminal",
 			"custom",
 		]);
-		expect(entries[6]).toMatchObject({
+		expect(entries[7]).toMatchObject({
 			type: "custom",
 			customType: WORK_UNIT_CUSTOM_TYPE,
-			data: { kind: "enforced" },
+			data: { kind: "enforced", startEntryId: entries[5]?.id },
 		});
+		expect(entries.filter((entry) => entry.type === "provider_request_terminal")).toEqual([
+			expect.objectContaining({ outcome: "completed", assistantMessageEntryId: entries[5]?.id }),
+			expect.objectContaining({ outcome: "completed", assistantMessageEntryId: entries[12]?.id }),
+		]);
 		// The owner's prompt is persisted (entry 2) and immediately followed by its owner-evidence
 		// record (entry 3): the session marks the message as operator input and the reflection
 		// controller records the original words at persistence, bound to that message's entry id.

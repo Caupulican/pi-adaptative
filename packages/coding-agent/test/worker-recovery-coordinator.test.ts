@@ -601,6 +601,66 @@ describe("WorkerRecoveryCoordinator", () => {
 		recovery.dispose();
 	});
 
+	it("clears retry alarms even when the scheduler unsubscribe fails", () => {
+		vi.useFakeTimers();
+		try {
+			const now = Date.parse("2026-08-07T01:00:00.000Z");
+			vi.setSystemTime(now);
+			const record: LaneRecord = { laneId: "lane-dispose", type: "worker", status: "running" };
+			const attempt = {
+				attemptId: "attempt-dispose",
+				taskId: record.laneId,
+				agentId: "agent-dispose",
+				dispatch: {
+					provider: "pi",
+					taskId: record.laneId,
+					instructions: "retry only after the durable deadline",
+					profileId: "recovery-profile",
+					logicalLaneId: "agent-dispose",
+					resourcePointerIds: [],
+				},
+				status: "suspended",
+				reasonCode: "retry_scheduled:server_error",
+				retry: { retriesUsed: 1, notBefore: new Date(now + 1_000).toISOString() },
+				checkpointIds: [],
+				createdAt: new Date(now).toISOString(),
+				updatedAt: new Date(now).toISOString(),
+			} as AttemptRuntimeState;
+			const lifecycle = {
+				getActiveAttempt: () => attempt,
+				getRecord: () => record,
+			} as unknown as WorkerLifecycle;
+			const enqueue = vi.fn();
+			let capacityListener: (() => void) | undefined;
+			const recovery = new WorkerRecoveryCoordinator({
+				lifecycle,
+				scheduler: {
+					enqueue,
+					onQueueCapacityAvailable: (listener) => {
+						capacityListener = listener;
+						return () => {
+							throw new Error("scheduler unsubscribe failed");
+						};
+					},
+				},
+				recoverWriteReservations: vi.fn(),
+				publishTerminalRecord: vi.fn(),
+				dispatchVerification: () => ({ started: false, skipReason: "unused" }),
+				recoverTaskBearingMailboxTurns: vi.fn(),
+				recoverSessionRootReplies: vi.fn(),
+				warn: vi.fn(),
+			});
+
+			expect(recovery.deferRetryIfNeeded(record, { instructions: "retry later" })).toBe(true);
+			expect(() => recovery.dispose()).not.toThrow();
+			expect(() => capacityListener?.()).not.toThrow();
+			vi.advanceTimersByTime(1_000);
+			expect(enqueue).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("isolates a throwing verifier dispatch and continues every remaining recovery owner", () => {
 		const terminalRecord = { laneId: "terminal", type: "worker" as const, status: "succeeded" as const };
 		const recoveries = ["subject-throws", "subject-starts"].map((subjectTaskId) => ({

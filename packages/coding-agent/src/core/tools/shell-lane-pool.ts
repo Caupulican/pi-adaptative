@@ -13,6 +13,7 @@
  * `disposeLane`.
  */
 
+import { settleIndependentLifecycle } from "../lifecycle-settlement.ts";
 import { waitInQueue } from "./abortable-queue-wait.ts";
 import { disposePersistentShellSession, ShellExportLedger } from "./shell-session.ts";
 
@@ -144,7 +145,7 @@ export class ShellLanePool<TLane> {
 	}
 
 	/** Dispose every lane and reject every waiter. Resolves once all lane disposals have settled. */
-	dispose(): Promise<void> {
+	async dispose(): Promise<void> {
 		if (!this.disposed) {
 			this.disposed = true;
 			for (const waiter of this.waiters.splice(0)) {
@@ -156,7 +157,10 @@ export class ShellLanePool<TLane> {
 				this.trackDisposal(entry.lane);
 			}
 		}
-		return Promise.all([...this.disposals]).then(() => undefined);
+		await settleIndependentLifecycle(
+			[...this.disposals].map((disposal) => () => disposal),
+			"Shell lane disposal failed",
+		);
 	}
 
 	private ensureWarmLanes(): void {

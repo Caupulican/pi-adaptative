@@ -76,7 +76,7 @@ async function invokeRequestPreflight(options: IsolatedCompletionOptions) {
 function createExecutorHarness(
 	runIsolatedCompletion: (options: IsolatedCompletionOptions) => Promise<IsolatedCompletionResult>,
 	maxTokens = 100,
-	appendMessage?: (message: WorkerTranscriptMessage) => void,
+	appendMessage?: (message: WorkerTranscriptMessage, origin?: "local") => void,
 	retentionPolicy?: { maxContextTokens: number; keepRecentTokens: number },
 	signal?: AbortSignal,
 	maxWallClockMs = 30_000,
@@ -89,10 +89,10 @@ function createExecutorHarness(
 	const events: string[] = [];
 	const conversation = workerConversation();
 	const append = conversation.appendMessage.bind(conversation);
-	conversation.appendMessage = (message) => {
+	conversation.appendMessage = (message, origin?) => {
 		events.push(`append:${message.role}`);
-		appendMessage?.(message);
-		return append(message);
+		appendMessage?.(message, origin);
+		return append(message, origin);
 	};
 	const grant: ExecutionGrant = {
 		...createTestExecutionGrant({ objectiveId: "objective", taskId: "worker-task", attemptId: "attempt" }),
@@ -869,43 +869,48 @@ describe("worker attempt executor", () => {
 	});
 
 	it("persists a local terminal assistant after a tool result without consuming a provider reservation", async () => {
-		const harness = createExecutorHarness(async (options) => {
-			await invokeRequestPreflight(options);
-			const assistant = assistantToolRequest(20);
-			const toolCall = assistant.content.find((content) => content.type === "toolCall");
-			if (toolCall?.type !== "toolCall" || !options.beforeToolCall) {
-				throw new Error("Expected a worker tool gate.");
-			}
-			await options.onMessage?.(assistant);
-			await options.beforeToolCall(
-				{
-					assistantMessage: assistant,
-					toolCall,
-					args: { path: "focused.ts" },
-					context: { systemPrompt: "", messages: [], tools: [] },
-				},
-				undefined,
-			);
-			const toolResult: Message = {
-				role: "toolResult",
-				toolCallId: toolCall.id,
-				toolName: toolCall.name,
-				content: [{ type: "text", text: "focused result" }],
-				isError: false,
-				timestamp: 2,
-			};
-			await options.onMessage?.(toolResult);
-			const localTerminal = fauxAssistantMessage(
-				'{"summary":"local terminal handoff persisted","status":"completed"}',
-			) as AssistantMessage;
-			await options.onMessage?.(localTerminal, "local");
-			return {
-				text: '{"summary":"local terminal handoff persisted","status":"completed"}',
-				usage: assistant.usage,
-				stopReason: "stop",
-				messages: [...(options.history ?? []), assistant, toolResult, localTerminal],
-			};
-		});
+		const persistedOrigins: Array<"local" | undefined> = [];
+		const harness = createExecutorHarness(
+			async (options) => {
+				await invokeRequestPreflight(options);
+				const assistant = assistantToolRequest(20);
+				const toolCall = assistant.content.find((content) => content.type === "toolCall");
+				if (toolCall?.type !== "toolCall" || !options.beforeToolCall) {
+					throw new Error("Expected a worker tool gate.");
+				}
+				await options.onMessage?.(assistant);
+				await options.beforeToolCall(
+					{
+						assistantMessage: assistant,
+						toolCall,
+						args: { path: "focused.ts" },
+						context: { systemPrompt: "", messages: [], tools: [] },
+					},
+					undefined,
+				);
+				const toolResult: Message = {
+					role: "toolResult",
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					content: [{ type: "text", text: "focused result" }],
+					isError: false,
+					timestamp: 2,
+				};
+				await options.onMessage?.(toolResult);
+				const localTerminal = fauxAssistantMessage(
+					'{"summary":"local terminal handoff persisted","status":"completed"}',
+				) as AssistantMessage;
+				await options.onMessage?.(localTerminal, "local");
+				return {
+					text: '{"summary":"local terminal handoff persisted","status":"completed"}',
+					usage: assistant.usage,
+					stopReason: "stop",
+					messages: [...(options.history ?? []), assistant, toolResult, localTerminal],
+				};
+			},
+			100,
+			(_message, origin) => persistedOrigins.push(origin),
+		);
 
 		const result = await harness.executor.run();
 
@@ -916,6 +921,7 @@ describe("worker attempt executor", () => {
 			"toolResult",
 			"assistant",
 		]);
+		expect(persistedOrigins).toEqual([undefined, undefined, "local"]);
 		expect(result.usage).toMatchObject({ inputTokens: 20, totalTokens: 20 });
 	});
 

@@ -51,4 +51,33 @@ describe("bounded task shell ownership", () => {
 		release();
 		await pool.dispose();
 	});
+
+	it("waits for every shell retirement before reporting a sibling failure", async () => {
+		const secondClose = Promise.withResolvers<void>();
+		const retire = vi.fn((key: string) =>
+			key === "first" ? Promise.reject(new Error("first close failed")) : secondClose.promise,
+		);
+		const pool = new TaskShellSessions(retire, 2);
+		(await pool.acquire("first"))();
+		(await pool.acquire("second"))();
+
+		const disposal = pool.dispose();
+		let settled = false;
+		const observed = disposal.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		try {
+			expect(settled).toBe(false);
+		} finally {
+			secondClose.resolve();
+			await observed;
+		}
+		await expect(disposal).rejects.toThrow("first close failed");
+	});
 });

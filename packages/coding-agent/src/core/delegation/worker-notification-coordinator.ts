@@ -71,6 +71,8 @@ interface PendingWorkerNotification {
 
 export interface WorkerNotificationCoordinatorOptions {
 	getWorkerRecords(): readonly LaneRecord[];
+	/** Bind a transient terminal to its durable notification before attempting delivery. */
+	ensureDurableNotification?(record: WorkerTerminalHandoffRecord): string | undefined;
 	emitStatus(status: WorkerNotificationStatus): void;
 	notify(records: readonly WorkerTerminalHandoffRecord[]): Promise<void>;
 	warn(message: string): void;
@@ -281,6 +283,18 @@ export class WorkerNotificationCoordinator {
 		const queued = workerRecords.filter((record) => record.status === "queued").length;
 		const running = workerRecords.filter((record) => record.status === "running").length;
 		const terminalSinceFlush = batch.map((notification) => notification.record);
+		for (const notification of batch) {
+			if (notification.durableNotificationId) continue;
+			try {
+				notification.durableNotificationId = this.options.ensureDurableNotification?.(notification.record);
+			} catch (error) {
+				this.warnBestEffort(
+					`Failed to durably back the worker terminal notification for ${notification.record.laneId}: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+			}
+		}
 		const status = {
 			active: queued + running,
 			queued,
@@ -315,6 +329,10 @@ export class WorkerNotificationCoordinator {
 			} finally {
 				watchdog.clear();
 			}
+			// Disposal clears the process-local outbox but deliberately leaves its durable receipt
+			// pending for the next session owner. A late notifier must not write through the retired
+			// lifecycle after a replacement session may already have opened the same ledger.
+			if (this.disposed) return;
 			for (const notification of batch) this.inFlight.delete(notification.key);
 			this.retryCount = 0;
 			const durableIds = batch.flatMap((notification) =>
@@ -336,6 +354,7 @@ export class WorkerNotificationCoordinator {
 			}
 		});
 		this.deliveryTail = delivery.catch((error: unknown) => {
+			if (this.disposed) return;
 			for (const notification of batch) {
 				this.inFlight.delete(notification.key);
 				this.pending.set(notification.key, notification);

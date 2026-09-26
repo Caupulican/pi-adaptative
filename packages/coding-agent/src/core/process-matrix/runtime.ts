@@ -348,22 +348,29 @@ async function reconcileAndRunOrphanScan(
 	});
 	const originalByEntryId = new Map(entries.map((entry) => [entry.entryId, entry]));
 	const recoveredEntryIdSet = new Set(reconciled.recoveredEntryIds);
-	const [, recoveredOutcomes] = await Promise.all([
-		Promise.all(
-			reconciled.prunedEntryIds.map((entryId) => {
-				const original = originalByEntryId.get(entryId);
-				return original ? store.removeEntryIfUnchanged(config.agentDir, original) : false;
-			}),
-		),
-		Promise.all(
-			reconciled.kept
-				.filter((entry) => recoveredEntryIdSet.has(entry.entryId))
-				.map((entry) => {
-					const original = originalByEntryId.get(entry.entryId);
-					return original ? store.writeEntryIfUnchanged(config.agentDir, entry.entryId, original, entry) : false;
-				}),
-		),
-	]);
+	const pruneActions = reconciled.prunedEntryIds.map((entryId) => () => {
+		const original = originalByEntryId.get(entryId);
+		return original ? store.removeEntryIfUnchanged(config.agentDir, original) : false;
+	});
+	const recoveryActions = reconciled.kept
+		.filter((entry) => recoveredEntryIdSet.has(entry.entryId))
+		.map((entry) => () => {
+			const original = originalByEntryId.get(entry.entryId);
+			return original ? store.writeEntryIfUnchanged(config.agentDir, entry.entryId, original, entry) : false;
+		});
+	// Store adapters are independent at this boundary. Start every mutation even if an adapter throws
+	// synchronously, and do not publish the maintenance terminal until every admitted mutation settles.
+	const mutationResults = await Promise.allSettled(
+		[...pruneActions, ...recoveryActions].map((action) => Promise.resolve().then(action)),
+	);
+	const failures = mutationResults
+		.filter((result): result is PromiseRejectedResult => result.status === "rejected")
+		.map((result) => result.reason);
+	if (failures.length === 1) throw failures[0];
+	if (failures.length > 1) throw new AggregateError(failures, "Process-matrix reconciliation mutations failed");
+	const recoveredOutcomes = mutationResults
+		.slice(pruneActions.length)
+		.map((result) => (result.status === "fulfilled" ? result.value : false));
 	if (signal.aborted) return;
 	const recoveredCount = recoveredOutcomes.filter(Boolean).length;
 	if (recoveredCount > 0) {

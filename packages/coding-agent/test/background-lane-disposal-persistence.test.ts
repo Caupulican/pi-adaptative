@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkerClaim, WorkerRequest } from "../src/core/autonomy/contracts.ts";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { BackgroundLaneController } from "../src/core/background-lane-controller.ts";
@@ -229,5 +229,39 @@ describe("background lane disposal persistence", () => {
 
 		expect(() => controller.abortInFlightLanes()).not.toThrow();
 		expect(internals._laneTracker.getRecords().every((record) => record.status === "canceled")).toBe(true);
+	});
+
+	it("continues every subsystem teardown and returns the worker shutdown barrier", async () => {
+		const controller = new BackgroundLaneController({} as never);
+		const releaseManaged = vi.fn(() => {
+			throw new Error("managed teardown failed");
+		});
+		const workerShutdown = Promise.resolve();
+		const abortWorkers = vi.fn(() => workerShutdown);
+		const disposeUsage = vi.fn();
+		const disposeNotifications = vi.fn();
+		const unsubscribe = vi.fn();
+		const internals = controller as unknown as {
+			_managedLanes?: { release(): void };
+			_workers?: { abort(): Promise<void> };
+			_workerUsage?: { dispose(): void };
+			_workerNotifications?: { dispose(): void };
+			_unsubscribeLaneRecordStore?: () => void;
+		};
+		internals._managedLanes = { release: releaseManaged };
+		internals._workers = { abort: abortWorkers };
+		internals._workerUsage = { dispose: disposeUsage };
+		internals._workerNotifications = { dispose: disposeNotifications };
+		internals._unsubscribeLaneRecordStore = unsubscribe;
+
+		const shutdown = controller.abortInFlightLanes();
+		expect(shutdown).toBe(workerShutdown);
+		await shutdown;
+		expect(releaseManaged).toHaveBeenCalledOnce();
+		expect(abortWorkers).toHaveBeenCalledOnce();
+		expect(disposeUsage).toHaveBeenCalledOnce();
+		expect(disposeNotifications).toHaveBeenCalledOnce();
+		expect(unsubscribe).toHaveBeenCalledOnce();
+		expect(internals._unsubscribeLaneRecordStore).toBeUndefined();
 	});
 });

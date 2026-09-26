@@ -260,4 +260,51 @@ describe("WorkerWriteReservationCoordinator", () => {
 		).toEqual([]);
 		state.coordinator.dispose();
 	});
+
+	it("disposes every reservation watcher even when one watcher teardown throws", () => {
+		const state = fixture();
+		const first = vi.fn(() => {
+			throw new Error("first watcher teardown failed");
+		});
+		const second = vi.fn();
+		const internals = state.coordinator as unknown as { watchDisposes: Map<string, () => void> };
+		internals.watchDisposes.set("first", first);
+		internals.watchDisposes.set("second", second);
+
+		expect(() => state.coordinator.dispose()).not.toThrow();
+		expect(first).toHaveBeenCalledOnce();
+		expect(second).toHaveBeenCalledOnce();
+		expect(state.warnings).toEqual([expect.stringContaining("first")]);
+
+		state.coordinator.dispose();
+		expect(first).toHaveBeenCalledOnce();
+		expect(second).toHaveBeenCalledOnce();
+	});
+
+	it("contains a throwing queue drain and still wakes reservation waiters", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-worker-reservation-wakeup-"));
+		tempDirs.push(root);
+		const listener = vi.fn();
+		const warn = vi.fn();
+		const coordinator = new WorkerWriteReservationCoordinator({
+			agentDir: join(root, "agent"),
+			getCwd: () => root,
+			getParentSessionId: () => "parent",
+			ownerId: "pi-worker:123:11111111-1111-4111-8111-111111111111",
+			drainQueuedWorkers: () => {
+				throw new Error("queue drain failed");
+			},
+			warn,
+		});
+		const internals = coordinator as unknown as {
+			availabilityListeners: Set<() => void>;
+			emitAvailability(): void;
+		};
+		internals.availabilityListeners.add(listener);
+
+		expect(() => internals.emitAvailability()).not.toThrow();
+		expect(listener).toHaveBeenCalledOnce();
+		expect(warn).toHaveBeenCalledWith(expect.stringContaining("queue drain failed"));
+		coordinator.dispose();
+	});
 });

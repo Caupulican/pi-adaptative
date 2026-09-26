@@ -94,6 +94,10 @@ export class IntegrityHookCoordinator {
 		const reasonCodes: string[] = [];
 		const validationRefs: string[] = [];
 		let compositeDecision: IntegrityDecision = "allow";
+		// The hook boundary is observational. Capture one point-in-time value for this run, then give
+		// every extension its own copy so a timed-out hook cannot retain authority over caller state
+		// and one extension cannot rewrite the evidence a later extension evaluates.
+		const contextSnapshot = structuredClone(context);
 
 		for (const ext of this.extensions) {
 			if (!ext.onHook) continue;
@@ -110,7 +114,7 @@ export class IntegrityHookCoordinator {
 				});
 
 				try {
-					extResult = await Promise.race([ext.onHook(hook, context), timeoutPromise]);
+					extResult = await Promise.race([ext.onHook(hook, structuredClone(contextSnapshot)), timeoutPromise]);
 				} finally {
 					if (timerId !== undefined) clearTimeout(timerId);
 				}

@@ -153,7 +153,15 @@ export class ProviderAdmissionLedger {
 
 	/** Release every hold this ledger still owns (session disposal). */
 	releaseAll(): void {
-		for (const release of [...this.holds.values()]) release();
+		for (const release of [...this.holds.values()]) {
+			try {
+				release();
+			} catch {
+				// Each release stops and forgets its heartbeat before removing the file. A failed unlink
+				// leaves bounded stale evidence for normal pruning; it must not keep sibling holds alive or
+				// abort the rest of session teardown.
+			}
+		}
 	}
 
 	private ensureDir(): void {

@@ -300,4 +300,24 @@ describe("worker usage receipt delivery", () => {
 		expect(deliver).toHaveBeenCalledTimes(calls);
 		expect(pending()).toHaveLength(2);
 	});
+
+	it("does not acknowledge through an owner that is disposed during parent persistence", async () => {
+		const { runtime, lease, analytics, connect, deliver, flushParent, pending, state } = setup();
+		flushParent();
+		deliver.mockImplementationOnce((usage, options) => {
+			const disposition = analytics.deliverSpawnedUsageReceipt(usage, options);
+			state.disposed = true;
+			return disposition;
+		});
+		connect();
+
+		runtime.beginAttemptUsage(lease, tokens(0));
+		runtime.recordAttemptUsage(lease, tokens(10));
+		await Promise.resolve();
+
+		expect(deliver).toHaveBeenCalledOnce();
+		expect(analytics.getCumulativeUsage().totalTokens).toBe(10);
+		// The durable receipt remains for the replacement owner, which will deduplicate the parent write.
+		expect(pending()).toHaveLength(1);
+	});
 });

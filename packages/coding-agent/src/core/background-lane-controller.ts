@@ -212,14 +212,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _getWorkerNotificationCoordinator(): WorkerNotificationCoordinator {
 		this._workerNotifications ??= new WorkerNotificationCoordinator({
 			getWorkerRecords: () => this._workerLifecycle?.getAllRecords() ?? [],
+			ensureDurableNotification: (record) => this._ensureDurableNotification(record),
 			emitStatus: (status) => {
-				// Runs once per flush, with the EXACT batch about to be handed to notify() -- the
-				// natural checkpoint to backfill durability before that batch can get stuck behind
-				// an unsettled notify() call with no durable trace. (getOutstandingRecords() is not
-				// usable here: the coordinator emits status BEFORE moving this same batch from
-				// `pending` into `inFlight`, so at this exact moment it would report nothing
-				// outstanding — status.terminalSinceFlush is the batch, directly, no timing gap.)
-				this._ensureDurableNotifications(status.terminalSinceFlush);
 				try {
 					this.deps.emit({
 						type: "delegate_workers",
@@ -292,17 +286,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * the next construction can only find what was durably enqueued, so it would be lost instead of
 	 * replayed.
 	 */
-	private _ensureDurableNotifications(records: readonly Pick<LaneRecord, "laneId">[]): void {
-		if (!this._workerLifecycle) return;
-		for (const record of records) {
-			try {
-				this._workerLifecycle.getTerminalNotification(record.laneId);
-			} catch (error) {
-				this._safeWarn(
-					`Failed to durably back the worker terminal notification for ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			}
-		}
+	private _ensureDurableNotification(record: Pick<LaneRecord, "laneId">): string | undefined {
+		return this._workerLifecycle?.getTerminalNotification(record.laneId)?.notificationId;
 	}
 
 	private _getManagedLaneController(): ManagedLaneController {
@@ -432,10 +417,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * complete-in-memory, so a throw from one lane's persist cannot skip another's; each persist gets
 	 * its own try/catch — dispose must never throw.
 	 */
-	abortInFlightLanes(): void {
-		this._goalAutoContinue.clearTimer();
-		this._research.abort();
-		this._fitness.abort();
+	abortInFlightLanes(): Promise<void> {
+		let workerShutdown = Promise.resolve();
+		this._runTeardownStep("clear goal auto-continue timer", () => this._goalAutoContinue.clearTimer());
+		this._runTeardownStep("abort research lanes", () => this._research.abort());
+		this._runTeardownStep("abort model-fitness lanes", () => this._fitness.abort());
 		for (const record of this._laneTracker.getRecords()) {
 			if (record.status !== "queued" && record.status !== "running") continue;
 			if (record.type === "tmux-worker") continue;
@@ -452,13 +438,24 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				);
 			}
 		}
-		this._managedLanes?.release();
-
-		this._workers?.abort();
-		this._workerUsage?.dispose();
-		this._workerNotifications?.dispose();
-		this._unsubscribeLaneRecordStore?.();
+		this._runTeardownStep("release managed lanes", () => this._managedLanes?.release());
+		this._runTeardownStep("abort worker delegation", () => {
+			workerShutdown = this._workers?.abort() ?? Promise.resolve();
+		});
+		this._runTeardownStep("dispose worker usage delivery", () => this._workerUsage?.dispose());
+		this._runTeardownStep("dispose worker notifications", () => this._workerNotifications?.dispose());
+		const unsubscribeLaneRecordStore = this._unsubscribeLaneRecordStore;
 		this._unsubscribeLaneRecordStore = undefined;
+		this._runTeardownStep("unsubscribe lane records", () => unsubscribeLaneRecordStore?.());
+		return workerShutdown;
+	}
+
+	private _runTeardownStep(label: string, step: () => void): void {
+		try {
+			step();
+		} catch (error) {
+			this._safeWarn(`Failed to ${label}: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 
 	clearGoalAutoContinueTimer(): void {

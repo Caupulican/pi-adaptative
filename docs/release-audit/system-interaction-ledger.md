@@ -1,0 +1,80 @@
+# System Interaction Audit Ledger
+
+> Cross-system audit log. A component-level green test is not closure. Current source and deterministic
+> reproductions outrank this summary when they disagree.
+
+## Method
+
+Every edge is reviewed in this order:
+
+1. **Structure** — which producer, owner, consumer, and cleanup path are connected?
+2. **State** — which identity and transition are authoritative now?
+3. **Time** — what can change while a callback, provider request, process, timer, or cleanup is pending?
+4. **Failure** — what happens if that change occurs at the worst possible boundary?
+
+Static scans, logs, and Jev judgments generate candidates. A defect is confirmed only by a deterministic
+reproduction with a negative control. A repair closes only after the focused regression and adjacent tests pass.
+
+Status vocabulary:
+
+- `FIXED/PUSHED`: confirmed, repaired, tested, committed, and pushed.
+- `FIXED/STAGED`: confirmed, repaired, and tested in the current worktree; not yet committed.
+- `CONFIRMED`: deterministic reproduction exists; repair is not complete.
+- `CANDIDATE`: source or Jev indicates risk; deterministic reproduction is pending.
+- `REJECTED`: the candidate is unreachable or an existing owner/guard preserves the invariant.
+- `INCOMPLETE`: required evidence could not be obtained.
+
+## Findings
+
+| ID | Boundary | Structure | State | Time | Worst-moment failure | Evidence | Status |
+|---|---|---|---|---|---|---|---|
+| SI-001 | provider response ↔ tool preparation | Provider terminal persistence observes assistant completion while tool preparation may fail afterward. | One request may have one durable terminal. | Preparation/cancellation can fail after the response is already terminal. | A second terminal makes repair ambiguous. | `foreground-lifecycle-controller.test.ts` | FIXED/PUSHED (`4a40ff8ff`) |
+| SI-002 | process leader ↔ descendant group | Bash/Python/process tools own a process group, not only its leader PID. | Terminal means every owned descendant has exited or been killed. | A descendant can outlive a leader or a group-kill attempt. | The harness reports completion while a child keeps locks, pipes, or CPU alive. | `process-group-wait.test.ts`, `run-process.test.ts` | FIXED/PUSHED (`4a40ff8ff`) |
+| SI-003 | gateway registry ↔ provider instances | Registry startup/shutdown coordinates independent extension providers. | Each started provider must reach its own terminal. | One provider can hang or reject while siblings are stopping. | Sequential/unbounded teardown blocks the session or skips siblings. | `gateway-registry.test.ts` | FIXED/PUSHED (`4a40ff8ff`) |
+| SI-004 | provider stream ↔ activity projection | Provider stream emits hidden reasoning and visible text to one UI lane. | First visible output and first hidden reasoning are distinct facts. | Hidden reasoning may arrive before readable text. | The UI reports a readable first token that never existed. | `activity-lane.test.ts` | FIXED/PUSHED (`4a40ff8ff`) |
+| SI-005 | background terminal ↔ notifier retry ↔ session shutdown | A durable task terminal owns a bounded notification retry timer. | Terminal persistence survives notifier failure; shutdown owns the retry clock. | Shutdown can begin during retry backoff. | Disposal waits for an irrelevant clock or a late retry touches torn-down state. | `background-tool-task-controller.test.ts`; doctrine contract | FIXED/STAGED |
+| SI-006 | worker terminal ↔ parent notification ↔ disposed controller | Worker completion persists first, then notifies the owning foreground session. | A late callback may publish only while its controller is live and still owns the lane. | Notification completion can race disposal or lane reuse. | A stale worker wakes or mutates the wrong foreground owner. | `worker-notification-coordinator.test.ts`, `worker-delegation-controller.test.ts` | FIXED/STAGED |
+| SI-007 | write reservation ↔ blocked restore waiter | Reservation release publishes availability to waiters. | The subscription and lease are owned together and both terminate on shutdown. | Release or disposal can occur between the state check and subscription. | A missed wake leaves restore blocked until the watchdog. | `worker-write-reservation-coordinator.test.ts` | FIXED/STAGED |
+| SI-008 | managed/background lanes ↔ sibling cleanup | Lane teardown releases several independent resources. | Every release is mandatory even when a sibling release fails. | Any cleanup can reject before later cleanups run. | A held lane/resource permanently reduces admission and can deadlock later work. | `managed-lane-release.test.ts`, `background-lane-controller.test.ts` | FIXED/STAGED |
+| SI-009 | provider admission ledger ↔ independent holds | One session may own several provider/account admission holds. | `releaseAll` must attempt every owned hold. | An adapter can throw during one release. | Later holds remain counted until stale-heartbeat recovery. | `provider-admission-release.test.ts` | FIXED/STAGED |
+| SI-010 | local runtime registry ↔ session and sibling runtimes | A session controller owns several local runtime instances. | Disposal fences new work and stops every owned instance. | One stop can reject while siblings are still live. | Session exit leaves a model server/process resident. | `local-runtime-controller-reconcile.test.ts`, `session-oom-fixes.test.ts` | FIXED/STAGED |
+| SI-011 | worker recovery timer ↔ disposal | Recovery schedules delayed host-owned retries. | A disposed coordinator cannot resume a worker or retain a live timer. | Disposal can occur after scheduling and before callback delivery. | A late recovery mutates a closed lane/session. | `worker-recovery-coordinator.test.ts` | FIXED/STAGED |
+| SI-012 | worker outbox/transcript/usage receipt ↔ disposal | Worker persistence and receipt delivery finish asynchronously around lane terminal state. | No post-disposal write may create a new durable record. | Completion callbacks can arrive after cleanup begins. | Closed sessions acquire late transcript or accounting state. | `worker-conversation-store.test.ts`, `worker-usage-receipt-delivery.test.ts` | FIXED/STAGED |
+| SI-013 | background lane terminal persistence ↔ teardown | Background lanes must persist their terminal before ownership disappears. | Teardown waits for required terminal publication and independently releases siblings. | Abort, persistence failure, and cleanup can overlap. | A lane vanishes without a terminal or blocks all later disposal. | `background-lane-disposal-persistence.test.ts` | FIXED/STAGED |
+| SI-014 | worker shell lanes ↔ session disposal | Worker tool execution owns persistent shell lanes outside the foreground shell key. | Session disposal is not complete until every owned shell lane terminates. | A worker shell may still be closing when foreground disposal finishes. | The process/session exits while a worker shell retains descendants or handles. | `session-oom-fixes.test.ts` | FIXED/STAGED |
+| SI-015 | provider lifecycle ledger ↔ work-unit receipts ↔ claim correction | Provider persistence inserts a terminal between an assistant tool call and tool admission; work-unit accounting consumes the same branch. | The mutating assistant message is the authoritative work-unit start. | The provider terminal is appended after assistant persistence but before `noteMutatingCall`. | The command falls outside the receipt window; a failed push becomes “no push ran” and no correction turn executes. | `claim-delivery.test.ts`, `agent-session-bash-persistence.test.ts`; 26 focused tests plus 60 adjacent tests pass | FIXED/STAGED |
+| SI-016 | shell/task lane pools ↔ runtime builder ↔ session shutdown | Pool disposal starts several independent terminal closes; runtime and session shutdown await the aggregate. | Shutdown completion must mean every started lane close settled, while retaining all failures. | One close can reject before a sibling close resolves. | Fail-fast `Promise.all` lets `disposeAndWait` return with a live shell/resource. | `shell-lane-pool.test.ts`, `task-shell-sessions.test.ts`; 13 focused tests plus 45 adjacent tests pass (2 skipped); post-repair Jev gate passed | FIXED/STAGED |
+| SI-017 | process-matrix reconciliation ↔ master maintenance ↔ shutdown | Startup maintenance launches independent prune and interrupted-worker recovery mutations; `waitForIdle` and `stop` expose its terminal. | Maintenance is terminal only after every mutation it admitted has settled. | A prune can reject while a sibling recovery write is still pending. | Fail-fast nested `Promise.all` settles maintenance and shutdown before the durable recovery write, which can mutate state after stop. | `process-matrix-reconciliation-settlement.test.ts`; 2 focused plus 97 adjacent tests pass; post-repair Jev gate passed | FIXED/STAGED |
+| SI-018 | integrity hook timeout ↔ tool-gate arguments ↔ sibling extensions | The tool gate exposes live nested arguments through hook metadata; extensions run sequentially under a response timeout. | Hook context is an inspection snapshot, never extension-owned execution state. | A hook can retain the context after timeout, or mutate it before the next extension runs. | A timed-out advisory hook rewrites the already-admitted command after the decision, or one extension changes what a later validator sees. | `integrity-hook-context-isolation.test.ts`; 3 focused plus 67 adjacent tests pass; post-repair Jev gate passed | FIXED/STAGED |
+
+## Rejected candidates
+
+| ID | Candidate | Why rejected | Evidence |
+|---|---|---|---|
+| SR-001 | Provider lifecycle records break the compaction loop's trailing-compaction guard. | Coding-agent supplies a compactable branch that removes lifecycle entries and reconnects ancestry before the generic loop inspects the tail. | `CompactionController.getRawCompactionBranch`, provider replan tests |
+| SR-002 | A dispatched tool failure makes the agent loop return before sibling tools settle. | Each dispatched promise catches its failure into the batch-owned failure slot; the final `Promise.all` therefore drains all dispatched calls before result publication. | `agent-loop.ts` partition drain and tool concurrency tests |
+| SR-003 | Work-unit admission needs a fallback anchor when a tool gate receives an unpersisted assistant message. | Production tool execution persists the live assistant object before tool admission; accepting an unpersisted object would restore the physical-leaf ownership bug fixed by SI-015. The failing direct-gate integration used a fabricated object, so it now establishes its anchor through a faux-provider turn. | `dogfood-safety-closure.test.ts`; focused 4 tests and 26 adjacent ownership tests pass |
+
+## Jev review log
+
+Raw request/response artifacts remain outside the repository. This ledger records their immutable bundle and
+request hashes, resolved model, answer probabilities, and confidence; deterministic regressions remain the proof
+gate.
+
+| Finding | Phase | Model and immutable evidence | Judgments | Disposition |
+|---|---|---|---|---|
+| SI-015 | Post-repair verification | `jev-1.13.0`; bundle `afeb7921da2566ce48fd947a83427add95ad65c4a6642ce3e3a1399fbc853737`; request `40e05747e06434639ce14636ab25f5064fb158a04194d03713a04aa177d52504` | Receipt/correction `preserved` (`0.99` probability, `0.98` confidence) | Accepted at the `0.90` gate after adding the persisted-ordering and end-to-end failed-push regressions. |
+| SI-016 | Pre-repair discovery | `jev-1.13.0`; request `496b7c225efd532cac0aeb297bc6aba45a7af10e20626fcf142dff2282337fbe` | Shell boundary leaned early-return (`0.53`, `0.29` confidence); task boundary leaned waits-all (`0.64`, `0.46` confidence); transitive boundary leaned cannot-finish-early (`0.54`, `0.30` confidence); top-level negative control `preserved` (`1.00` confidence) | Not accepted. Dissent retained; two deterministic tests subsequently reproduced early settlement at the nested boundaries. |
+| SI-016 | Post-repair verification | `jev-1.13.0`; bundle `afeb7921da2566ce48fd947a83427add95ad65c4a6642ce3e3a1399fbc853737`; request `5d8f1ad0d5dbadee7889ab7b17925e068a545c276e96c9452a6a370795dc3982` | Nested completion `preserved` (`0.98`, `0.96` confidence); failure preservation `preserved` (`1.00`, `1.00`); session barrier `cannot_finish_early` (`1.00`, `0.99`) | Accepted at the `0.90` gate after the all-settlement repair and deterministic regressions. |
+| SI-017 | Pre-repair discovery | `jev-1.13.0`; bundle `29380e61431da988dd1ce28b138b5a86e795a496a5c6b86efac2442474f02eba`; request `af560992675b8072cc4bfb010a6364db642878fe30de5519974dfd2d17875bb5` | Early finish `can_finish_early` (`0.62`, `0.43` confidence); successful control `preserved` (`1.00`, `0.99`); post-stop mutation `possible` (`0.75`, `0.63`) | Not accepted. Dissent retained; the adversarial regression then deterministically reproduced shutdown returning while the recovery write remained pending. |
+| SI-017 | Post-repair verification | `jev-1.13.0`; bundle `afdb9505ac995b9859128db3f835ab4e0acc43f38e0449f72d3828f6dd92ccd8`; request `b6300d1b0a23b6860f669676de9ac7a9538410728233c51ee3e481100a3ea8db` | Settlement barrier `cannot_finish_early` (`1.00`, `0.99` confidence); failure reporting `preserved` (`1.00`, `1.00`) | Accepted at the `0.90` gate after deterministic reproduction, all-settlement admission, and adjacent process-matrix verification. |
+| SI-018 | Pre-repair discovery | `jev-1.13.0`; bundle `e610727ffbd5de04053b28ac31a548d36dd791aefd0c29c5bd5de89658986d5e`; request `09a871c859efa9e417a2926b1ac122990cdb7e004da911704aa51aef2ce5becb` | Late mutation `possible` (`1.00`, `0.99` confidence); sibling contamination `possible` (`1.00`, `0.99`); high-impact fail-closed control `preserved` (`0.97`, `0.95`) | Accepted at the `0.90` discovery gate; both mutation paths were then reproduced deterministically. |
+| SI-018 | Post-repair verification | `jev-1.13.0`; bundle `5fd5db5c599de9b2f0d3d86de7d8a65ca9f1a3c93b7a1440d21fab5d3cdd11e6`; request `28e540f3de93e3981c06d8e5d336f193551a4851767f6e47ab55dc950b501c9a` | Caller isolation `prevented` (`1.00`, `1.00` confidence); sibling isolation `prevented` (`1.00`, `1.00`); high-impact policy `preserved` (`1.00`, `1.00`) | Accepted at the `0.90` gate after the two deterministic mutation regressions and adjacent integrity-system verification. |
+
+## Open coverage
+
+- Shared session-branch consumers that infer meaning from adjacency or the physical leaf.
+- Multi-resource shutdown paths that use fail-fast aggregation.
+- Timer/subscription callbacks whose owner can be disposed or replaced while delivery is queued.
+- Mutable “latest/current” identities read after an await instead of identities captured at admission.
+- Completion and retry paths where durable terminal publication and in-memory cleanup have different owners.

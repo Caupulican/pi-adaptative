@@ -68,6 +68,10 @@ export class WorkerUsageReceiptDelivery {
 							if (receipt.kind === "baseline") break;
 							continue;
 						}
+						// Parent persistence may synchronously retire this owner (for example through a
+						// session-transition observer). Leave the durable receipt pending so the replacement
+						// owner can deduplicate the completed parent write before acknowledging it.
+						if (this.disposed || this.deps.isDisposed()) return;
 						this.deps.runtime.acknowledgeUsageReceipt(attempt.attemptId, receipt.receiptId);
 					} catch (error) {
 						this.warn(

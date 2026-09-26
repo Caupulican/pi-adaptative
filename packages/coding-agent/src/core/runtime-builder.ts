@@ -102,6 +102,7 @@ import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "./goals/goal-t
 import { runRequirementCheck } from "./goals/requirement-checks.ts";
 import { resolveSessionToolEvidence, resolveSessionUserEvidence } from "./goals/session-goal-evidence.ts";
 import { createImprovementLoopTool } from "./improvement-loop.ts";
+import { settleIndependentLifecycle } from "./lifecycle-settlement.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryControllerReloadSnapshot } from "./memory-controller.ts";
 import type { LaneWorkerRefusal } from "./model-capability.ts";
@@ -768,7 +769,10 @@ export class RuntimeBuilder {
 	/** Release session-owned mutation payload leases retained by the write/edit tool pair. */
 	async dispose(): Promise<void> {
 		this._credentialManager.lock();
-		await Promise.all([this._fileMutationIntents.dispose(), this._taskDirectories.dispose()]);
+		await settleIndependentLifecycle(
+			[() => this._fileMutationIntents.dispose(), () => this._taskDirectories.dispose()],
+			"Runtime resource disposal failed",
+		);
 	}
 
 	refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {

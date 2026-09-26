@@ -178,6 +178,35 @@ describe("ShellLanePool", () => {
 		await expect(pool.acquire()).rejects.toThrow(/disposed/);
 	});
 
+	it("waits for every lane disposal before reporting a sibling failure", async () => {
+		const secondClose = Promise.withResolvers<void>();
+		const { pool } = createHarness({
+			minLanes: 2,
+			maxLanes: 2,
+			disposeLane: (lane) =>
+				lane.index === 0 ? Promise.reject(new Error("first close failed")) : secondClose.promise,
+		});
+		await pool.acquire();
+		const disposal = pool.dispose();
+		let settled = false;
+		const observed = disposal.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		try {
+			expect(settled).toBe(false);
+		} finally {
+			secondClose.resolve();
+			await observed;
+		}
+		await expect(disposal).rejects.toThrow("first close failed");
+	});
+
 	it("defaults the idle retirement window to one minute", () => {
 		expect(DEFAULT_SHELL_LANE_IDLE_RETIRE_MS).toBe(60_000);
 	});

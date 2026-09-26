@@ -23,7 +23,7 @@
 			],
 			"@caupulican/pi-agent-core/agent-loop": ["./packages/agent/src/agent-loop.ts"],
 			"@caupulican/pi-agent-core/compaction": ["./packages/agent/src/compaction/index.ts"],
-			"@caupulican/pi-agent-core/compaction/*": ["./packages/agent/src/compaction/*"],
+			"@caupulican/pi-agent-core/compaction/*": ["./packages/agent/src/compaction/*.ts"],
 			"@caupulican/pi-agent-core/message-retention": [
 				"./packages/agent/src/session/message-retention.ts"
 			],

@@ -262,7 +262,7 @@ describe("WorkerDelegationController integration invariants", () => {
 		expect(Reflect.get(controller, "publishedTerminalAttemptIds")).toEqual(new Set());
 	});
 
-	it("continues teardown after durable suspension and individual cleanup failures", () => {
+	it("continues teardown after durable suspension and awaits worker shell terminals", async () => {
 		const stages: string[] = [];
 		const emit = vi.fn();
 		const controller = Object.assign(Object.create(WorkerDelegationController.prototype) as object, {
@@ -291,11 +291,13 @@ describe("WorkerDelegationController integration invariants", () => {
 			},
 			writeReservations: { dispose: () => stages.push("reservations") },
 			conversations: { clearCache: () => stages.push("conversations") },
-			shellSessionKeys: new Set<string>(),
+			shellSessionKeys: new Set(["worker:session:agent"]),
 			deps: { emit },
 		}) as unknown as WorkerDelegationController;
 
-		expect(() => controller.abort()).not.toThrow();
+		const shutdown = controller.abort();
+		expect(shutdown).toBeInstanceOf(Promise);
+		await expect(shutdown).resolves.toBeUndefined();
 		expect(stages).toEqual([
 			"abort",
 			"suspend",

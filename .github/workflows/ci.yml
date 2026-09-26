@@ -149,7 +149,7 @@ jobs:
 
       - name: Verify native TypeScript test toolchain
         run: |
-          npm ls vite@8.2.2 vitest@5.0.0 --depth=0
+          npm ls vite@8.2.2 vitest@5.0.1 --depth=0
           node node_modules/vitest/vitest.mjs --version
           node node_modules/vite/bin/vite.js --version
 
@@ -300,7 +300,7 @@ jobs:
 
       - name: Verify native TypeScript test toolchain
         run: |
-          npm ls vite@8.2.2 vitest@5.0.0 --depth=0
+          npm ls vite@8.2.2 vitest@5.0.1 --depth=0
           node node_modules/vitest/vitest.mjs --version
           node node_modules/vite/bin/vite.js --version
 

@@ -323,8 +323,7 @@ export class ManagedLaneController {
 	}
 
 	release(): void {
-		for (const deregister of this.deregisterByLane.values()) deregister();
-		this.deregisterByLane.clear();
+		for (const laneId of [...this.deregisterByLane.keys()]) this.releaseRegistration(laneId);
 	}
 
 	private ensureRegistration(laneId: string): void {
@@ -333,8 +332,19 @@ export class ManagedLaneController {
 	}
 
 	private releaseRegistration(laneId: string): void {
-		this.deregisterByLane.get(laneId)?.();
+		const deregister = this.deregisterByLane.get(laneId);
 		this.deregisterByLane.delete(laneId);
+		try {
+			deregister?.();
+		} catch (error) {
+			try {
+				this.warn(
+					`Managed worker ${laneId} reload-blocker deregistration failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			} catch {
+				// Teardown must keep releasing sibling registrations even when diagnostics fail.
+			}
+		}
 	}
 
 	/** A replay after a crash between claim append and lifecycle finalization must not duplicate the claim. */

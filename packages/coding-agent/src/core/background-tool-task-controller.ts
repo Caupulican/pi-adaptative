@@ -865,6 +865,7 @@ export class BackgroundToolTaskController {
 	async shutdown(): Promise<void> {
 		if (!this.disposed) {
 			this.disposed = true;
+			this.cancelNotificationRetry();
 			this.handoffRequests.clear();
 			for (const state of this.tasks.values()) {
 				if (state.record.status !== "running") continue;
@@ -1128,6 +1129,15 @@ export class BackgroundToolTaskController {
 			this.scheduleNotificationDrain();
 		}, delayMs);
 		this.notificationRetryTimer.unref?.();
+	}
+
+	private cancelNotificationRetry(): void {
+		if (this.notificationRetryTimer) clearTimeout(this.notificationRetryTimer);
+		this.notificationRetryTimer = undefined;
+		const resolve = this.resolveNotificationRetry;
+		this.resolveNotificationRetry = undefined;
+		this.notificationRetryCompletion = undefined;
+		resolve?.();
 	}
 
 	private async drainNotifications(): Promise<void> {

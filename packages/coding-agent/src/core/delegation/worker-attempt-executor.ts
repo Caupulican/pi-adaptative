@@ -940,7 +940,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 													// Tool service usage is separate from assistant reservation epochs.
 													options.toolSurface.toolUsage.settle(message.toolCallId, message.usage);
 												}
-												options.conversation.appendMessage(message);
+												options.conversation.appendMessage(message, origin);
 												options.agentControl.acknowledgeMailboxMessage(options.agentId, message);
 												if (message.role === "assistant" && origin !== "local") {
 													checkpointUsage(

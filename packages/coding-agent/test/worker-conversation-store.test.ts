@@ -157,6 +157,31 @@ describe("WorkerConversationStore", () => {
 		]);
 	});
 
+	it("preserves local assistant provenance so lifecycle recovery does not invent a second provider response", () => {
+		const options = createOptions();
+		const conversation = new WorkerConversationStore().create(options);
+		conversation.appendRequestSnapshot({
+			requestId: "worker-provider-request",
+			model: { api: "openai", provider: "openai", id: "gpt-test" },
+			reasoning: "medium",
+			maxTokens: 256,
+			attempt: 0,
+			context: { systemPrompt: "worker", tools: [], messages: [] },
+		} as never);
+		conversation.appendMessage(assistantMessage("provider response"));
+		conversation.appendMessage(assistantMessage("host-local terminal handoff"), "local");
+
+		const reopened = SessionManager.open(
+			conversation.getResumeContext().sessionFile!,
+			options.agentDir,
+			conversation.getResumeContext().sessionDir,
+		);
+		const inspection = reopened.inspectSessionLifecycle();
+		expect(inspection.providerResponses).toHaveLength(1);
+		expect(inspection.duplicateProviderResponses).toEqual([]);
+		expect(reopened.getEntries().at(-1)).toMatchObject({ type: "message", origin: "local" });
+	});
+
 	it("rejects oversized worker metadata before parsing or cloning it", () => {
 		const options = createOptions();
 		const store = new WorkerConversationStore();

@@ -71,6 +71,52 @@ describe("session dispose releases long-session resources", () => {
 		expect(result).toBeNull();
 	});
 
+	it("continues session teardown when provider-admission release fails", async () => {
+		const session = await newSession();
+		const abortLanes = vi.spyOn(
+			(session as unknown as { _backgroundLanes: { abortInFlightLanes(): void } })._backgroundLanes,
+			"abortInFlightLanes",
+		);
+		const firstRelease = vi.fn(() => {
+			throw new Error("provider admission teardown failed");
+		});
+		const secondRelease = vi.fn();
+		const ledger = (session as unknown as { _providerAdmissionLedger: { holds: Map<string, () => void> } })
+			._providerAdmissionLedger;
+		ledger.holds.set("first", firstRelease);
+		ledger.holds.set("second", secondRelease);
+
+		expect(() => session.dispose()).not.toThrow();
+		expect(firstRelease).toHaveBeenCalledOnce();
+		expect(secondRelease).toHaveBeenCalledOnce();
+		expect(abortLanes).toHaveBeenCalledOnce();
+		expect(session.agent.afterToolCall).toBeUndefined();
+	});
+
+	it("disposeAndWait reports a worker process terminal-release failure", async () => {
+		const session = await newSession();
+		const workerShutdown = Promise.reject(new Error("worker shell terminal release failed"));
+		void workerShutdown.catch(() => undefined);
+		vi.spyOn(
+			(session as unknown as { _backgroundLanes: { abortInFlightLanes(): Promise<void> } })._backgroundLanes,
+			"abortInFlightLanes",
+		).mockReturnValue(workerShutdown);
+
+		await expect(session.disposeAndWait()).rejects.toThrow("worker shell terminal release failed");
+	});
+
+	it("stops session-owned local model runtimes during disposal", async () => {
+		const session = await newSession();
+		const disposeLocalRuntimes = vi.spyOn(
+			(session as unknown as { _localRuntimeController: { dispose(): void } })._localRuntimeController,
+			"dispose",
+		);
+
+		session.dispose();
+
+		expect(disposeLocalRuntimes).toHaveBeenCalledOnce();
+	});
+
 	it("getSpawnedUsage stays correct (cached) after recording new usage (Bug #22)", async () => {
 		const session = await newSession();
 		const usage = {

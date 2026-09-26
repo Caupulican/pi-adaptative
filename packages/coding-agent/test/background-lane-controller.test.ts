@@ -250,7 +250,7 @@ describe("worker terminal handoffs", () => {
 		}
 	});
 
-	it("backfills a durable notification for a transient record the moment it flushes, not only whenever a later WorkerLifecycle construction happens to sweep for it", async () => {
+	it("backfills and acknowledges a durable notification for a transient record in the same delivery", async () => {
 		// getOutstandingRecords() with zero callers isn't durability by itself. What THIS fix adds:
 		// WorkerLifecycle.getPendingTerminalNotifications() already sweeps and backfills every
 		// terminal durable task's notification as a side effect of ensureTerminalNotifications() --
@@ -267,9 +267,11 @@ describe("worker terminal handoffs", () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "pi-background-lane-restart-replay-"));
 		try {
 			const sessionId = "session-restart-replay";
-			// Never resolves -- strands the batch behind an in-flight notify(), exactly like the
-			// scenario the wave-1 watchdog observes but cannot itself fix.
-			const notifyWorkerTerminalHandoff = vi.fn(() => new Promise<void>(() => {}));
+			let resolveHandoff!: () => void;
+			const handoff = new Promise<void>((resolve) => {
+				resolveHandoff = resolve;
+			});
+			const notifyWorkerTerminalHandoff = vi.fn(() => handoff);
 			const controller = new BackgroundLaneController({
 				getAgentDir: () => agentDir,
 				getSessionId: () => sessionId,
@@ -329,7 +331,12 @@ describe("worker terminal handoffs", () => {
 
 			// Same raw read as above, same lifecycle instance -- no NEW WorkerLifecycle construction
 			// (and therefore no NEW sweep) happens between the two reads.
-			expect(notificationId in lifecycle.ledger.runtime.getSnapshot().notifications).toBe(true);
+			expect(lifecycle.ledger.runtime.getSnapshot().notifications[notificationId]?.status).toBe("pending");
+
+			resolveHandoff();
+			await vi.waitFor(() => {
+				expect(lifecycle.ledger.runtime.getSnapshot().notifications[notificationId]?.status).toBe("delivered");
+			});
 
 			controller.abortInFlightLanes();
 		} finally {

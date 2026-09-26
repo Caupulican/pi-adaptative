@@ -2141,13 +2141,21 @@ export class AgentSession {
 			gateSelfCompaction: (toolName, assistantMessage) =>
 				this._selfCompaction.gateToolCall(toolName, assistantMessage),
 			getMutationScope: () => this.mutationScope,
-			noteMutatingCall: (toolName) => {
+			noteMutatingCall: (toolName, assistantMessage) => {
 				// The enforced work boundary: the first call that may change the world with no work declared
 				// (a goal being worked declares its own unit) opens one unit until the owner speaks again.
 				const goal = this._goals.getState();
 				const activeGoalId = goal && isGoalExecutionActive(goal.status) ? goal.goalId : undefined;
 				if (currentWorkUnit(this.sessionManager, activeGoalId)) return;
-				openWorkUnit(this.sessionManager, { kind: "enforced", reason: `first mutating call: ${toolName}` });
+				const assistantMessageEntryId = this._foregroundLifecycle.getPersistedMessageEntryId(assistantMessage);
+				if (!assistantMessageEntryId) {
+					throw new Error("Cannot open a work unit before its mutating assistant message is persisted.");
+				}
+				openWorkUnit(
+					this.sessionManager,
+					{ kind: "enforced", reason: `first mutating call: ${toolName}` },
+					assistantMessageEntryId,
+				);
 			},
 			maybeEscalateToolCall: (toolName, args) => this._modelRouter.maybeEscalateToolCall(toolName, args),
 			isToolReadOnly: (toolName) => this.agent.state.tools.find((tool) => tool.name === toolName)?.readOnly,
@@ -4183,9 +4191,10 @@ export class AgentSession {
 		track(() => this._gatewayRegistry.stop());
 		track(() => this._backgroundToolTasks.shutdown());
 		track(() => this._runtimeBuilder.dispose());
+		safely(() => this._localRuntimeController.dispose());
 		safely(() => this._reflection.dispose());
 		safely(() => this._reflectionAbort.abort());
-		safely(() => this._backgroundLanes.abortInFlightLanes());
+		trackRequired(() => this._backgroundLanes.abortInFlightLanes());
 		safely(() => this._providerRequestRuntime.dispose());
 		safely(() => {
 			this.agent.afterToolCall = undefined;

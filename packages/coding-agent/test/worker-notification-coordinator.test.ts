@@ -166,6 +166,60 @@ describe("WorkerNotificationCoordinator", () => {
 		expect(warn).not.toHaveBeenCalled();
 	});
 
+	it("does not acknowledge an in-flight handoff that resolves after disposal", async () => {
+		vi.useFakeTimers();
+		const record: LaneRecord = {
+			laneId: "worker-late-success",
+			type: "worker",
+			status: "succeeded",
+			completedAt: "2026-08-12T00:00:00.000Z",
+		};
+		const delivery = Promise.withResolvers<void>();
+		const markDurableDelivered = vi.fn();
+		const coordinator = new WorkerNotificationCoordinator({
+			getWorkerRecords: () => [record],
+			emitStatus: vi.fn(),
+			notify: () => delivery.promise,
+			warn: vi.fn(),
+			markDurableDelivered,
+		});
+
+		coordinator.recordTerminal(record, "notification-late-success");
+		await vi.advanceTimersByTimeAsync(0);
+		coordinator.dispose();
+		delivery.resolve();
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(markDurableDelivered).not.toHaveBeenCalled();
+		expect(coordinator.getOutstandingRecords()).toEqual([]);
+	});
+
+	it("does not repopulate a disposed outbox when an in-flight handoff rejects", async () => {
+		vi.useFakeTimers();
+		const record: LaneRecord = {
+			laneId: "worker-late-failure",
+			type: "worker",
+			status: "failed",
+			completedAt: "2026-08-12T00:00:00.000Z",
+		};
+		const delivery = Promise.withResolvers<void>();
+		const coordinator = new WorkerNotificationCoordinator({
+			getWorkerRecords: () => [record],
+			emitStatus: vi.fn(),
+			notify: () => delivery.promise,
+			warn: vi.fn(),
+			markDurableDelivered: vi.fn(),
+		});
+
+		coordinator.recordTerminal(record, "notification-late-failure");
+		await vi.advanceTimersByTimeAsync(0);
+		coordinator.dispose();
+		delivery.reject(new Error("session notifier closed"));
+		await vi.advanceTimersByTimeAsync(0);
+
+		expect(coordinator.getOutstandingRecords()).toEqual([]);
+	});
+
 	it("retains goal ownership on a durable terminal notification", async () => {
 		vi.useFakeTimers();
 		const record: LaneRecord = {

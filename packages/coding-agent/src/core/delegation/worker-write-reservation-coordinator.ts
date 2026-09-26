@@ -218,7 +218,7 @@ export class WorkerWriteReservationCoordinator {
 		try {
 			this.store.release(held);
 		} catch (error) {
-			this.options.warn(
+			this.warnBestEffort(
 				`Failed to release worker write reservation ${laneId}: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		} finally {
@@ -252,8 +252,17 @@ export class WorkerWriteReservationCoordinator {
 	}
 
 	dispose(): void {
-		for (const dispose of this.watchDisposes.values()) dispose();
+		const watchers = [...this.watchDisposes];
 		this.watchDisposes.clear();
+		for (const [workspace, dispose] of watchers) {
+			try {
+				dispose();
+			} catch (error) {
+				this.warnBestEffort(
+					`Worker write reservation watcher ${workspace} teardown failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
 		this.availabilityListeners.clear();
 		// Release every held lease through the same path release() uses (best-effort store release,
 		// warn on failure, forgetLease bookkeeping) — dispose() previously dropped this coordinator's
@@ -432,13 +441,27 @@ export class WorkerWriteReservationCoordinator {
 	}
 
 	private emitAvailability(): void {
-		this.options.drainQueuedWorkers();
+		try {
+			this.options.drainQueuedWorkers();
+		} catch (error) {
+			this.warnBestEffort(
+				`Worker write reservation queue drain failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 		for (const listener of this.availabilityListeners) {
 			try {
 				listener();
 			} catch {
 				// Waiters re-enter restore; a throwing observer cannot consume the release event.
 			}
+		}
+	}
+
+	private warnBestEffort(message: string): void {
+		try {
+			this.options.warn(message);
+		} catch {
+			// Diagnostics cannot interrupt teardown or consume a reservation-availability event.
 		}
 	}
 

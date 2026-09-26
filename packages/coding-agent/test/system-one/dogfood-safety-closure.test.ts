@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
-import { getModel } from "@caupulican/pi-ai";
+import { type AssistantMessage, fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
@@ -27,8 +27,10 @@ for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIR
 }
 
 const cleanups: string[] = [];
+const providerCleanups: Array<() => void> = [];
 
 afterEach(() => {
+	while (providerCleanups.length > 0) providerCleanups.pop()?.();
 	while (cleanups.length > 0) {
 		const path = cleanups.pop();
 		if (path) rmSync(path, { recursive: true, force: true });
@@ -110,6 +112,12 @@ function certificate(checkpoint: string) {
 		directive: checkpoint === "JEV-024" ? "completion_candidate" : "allow",
 		failed_semantic_predicates: undefined,
 	};
+}
+
+function lastAssistantMessage(session: AgentSession): AssistantMessage {
+	const message = session.agent.state.messages.at(-1);
+	if (message?.role !== "assistant") throw new Error("Expected a persisted assistant message");
+	return message;
 }
 
 function gateFor(cwd: string): { gate: ToolGateController; observer: RepositoryMutationObserver } {
@@ -244,8 +252,12 @@ describe("dogfood safety closure", () => {
 		const admitted = git(root, ["rev-parse", "HEAD"]);
 		const objectiveId = "obj-dogfood";
 		const agentDir = tempDir("pi-df-agent-");
-		const model = getModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Missing test model");
+		const faux = registerFauxProvider();
+		providerCleanups.push(() => faux.unregister());
+		faux.setResponses([fauxAssistantMessage("first owner turn"), fauxAssistantMessage("second owner turn")]);
+		const model = faux.getModel();
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(model.provider, "test");
 		const agent = new Agent({
 			getApiKey: () => "test",
 			initialState: { model, systemPrompt: "test", tools: [], thinkingLevel: "off" },
@@ -257,8 +269,10 @@ describe("dogfood safety closure", () => {
 			resourceLoader: createTestResourceLoader(),
 			cwd: root,
 			agentDir,
-			modelRegistry: ModelRegistry.inMemory(AuthStorage.inMemory()),
+			modelRegistry: ModelRegistry.inMemory(authStorage),
 		});
+		await session.prompt("establish the persisted owner for direct tool-gate integration");
+		const ownerAssistantMessage = lastAssistantMessage(session);
 		const seen: string[] = [];
 		const prompt = "fix the file, run the targeted test, commit and push when complete";
 		const charter = compileExecutionCharter({
@@ -320,7 +334,7 @@ describe("dogfood safety closure", () => {
 					arguments: { command: gitCommit },
 				},
 				args: { command: gitCommit },
-				assistantMessage: { provider: "test", model: "test", content: [] } as never,
+				assistantMessage: ownerAssistantMessage,
 				context: {} as never,
 			} as Parameters<typeof beforeToolCall>[0],
 			undefined,
@@ -351,7 +365,7 @@ describe("dogfood safety closure", () => {
 			{
 				toolCall: { type: "toolCall", id: "t1", name: "bash", arguments: { command: testCommand } },
 				args: { command: testCommand },
-				assistantMessage: { provider: "test", model: "test", content: [] } as never,
+				assistantMessage: ownerAssistantMessage,
 				context: {} as never,
 			} as Parameters<typeof beforeToolCall>[0],
 			undefined,
@@ -393,6 +407,8 @@ describe("dogfood safety closure", () => {
 			getApiKey: () => "test",
 			initialState: { model, systemPrompt: "test", tools: [], thinkingLevel: "off" },
 		});
+		const dirtyAuthStorage = AuthStorage.inMemory();
+		dirtyAuthStorage.setRuntimeApiKey(model.provider, "test");
 		const dirtySession = new AgentSession({
 			agent: dirtyAgentModel,
 			sessionManager: SessionManager.inMemory(dirtyRoot),
@@ -400,8 +416,10 @@ describe("dogfood safety closure", () => {
 			resourceLoader: createTestResourceLoader(),
 			cwd: dirtyRoot,
 			agentDir: dirtyAgent,
-			modelRegistry: ModelRegistry.inMemory(AuthStorage.inMemory()),
+			modelRegistry: ModelRegistry.inMemory(dirtyAuthStorage),
 		});
+		await dirtySession.prompt("establish the persisted owner for direct tool-gate integration");
+		const dirtyOwnerAssistantMessage = lastAssistantMessage(dirtySession);
 		const dirtyCharter = compileExecutionCharter({
 			objectiveId: dirtyObjective,
 			prompt,
@@ -439,7 +457,7 @@ describe("dogfood safety closure", () => {
 			{
 				toolCall: { type: "toolCall", id: "b2", name: "bash", arguments: { command: mutate } },
 				args: { command: mutate },
-				assistantMessage: { provider: "test", model: "test", content: [] } as never,
+				assistantMessage: dirtyOwnerAssistantMessage,
 				context: {} as never,
 			} as Parameters<typeof dirtyBefore>[0],
 			undefined,
