@@ -5,7 +5,9 @@ import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import {
 	BACKGROUND_TOOL_TASK_CUSTOM_TYPE,
+	BACKGROUND_TOOL_TASK_DELIVERY_CUSTOM_TYPE,
 	type BackgroundToolTaskRecord,
+	loadBackgroundToolTaskRecordsNewestFirst,
 } from "../src/core/background-tool-task-controller.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
@@ -291,8 +293,31 @@ describe("AgentSession background tool tasks", () => {
 			expect(persistedTransitions).toEqual([
 				{ status: "running", terminalDelivery: undefined },
 				{ status: "completed", terminalDelivery: "pending" },
-				{ status: "completed", terminalDelivery: "delivered" },
 			]);
+			const deliveryReceipts = harness.sessionManager
+				.getEntries()
+				.flatMap((entry) =>
+					entry.type === "custom" && entry.customType === BACKGROUND_TOOL_TASK_DELIVERY_CUSTOM_TYPE
+						? [entry.data]
+						: [],
+				);
+			expect(deliveryReceipts).toEqual([
+				expect.objectContaining({
+					sessionId: harness.session.sessionId,
+					taskId: "tool-task-1",
+					terminalDelivery: "delivered",
+				}),
+			]);
+			expect(JSON.stringify(deliveryReceipts)).not.toContain("slow result");
+			const restored = loadBackgroundToolTaskRecordsNewestFirst(
+				harness.sessionManager,
+			) as BackgroundToolTaskRecord[];
+			expect(restored[0]).toMatchObject({
+				taskId: "tool-task-1",
+				status: "completed",
+				terminalDelivery: "delivered",
+				output: "slow result",
+			});
 		} finally {
 			unsubscribe();
 			releaseSlow?.();
@@ -512,18 +537,22 @@ describe("AgentSession background tool tasks", () => {
 			const handedOffTaskIds = handoffTexts.flatMap((text) => text.match(/tool-task-\d+/g) ?? []);
 			expect(handedOffTaskIds).toHaveLength(taskCount);
 			expect(new Set(handedOffTaskIds)).toEqual(new Set(Array.from(taskIdByCallId.values())));
-			const terminalRecords = harness.sessionManager
-				.getEntries()
-				.flatMap((entry) =>
-					entry.type === "custom" && entry.customType === BACKGROUND_TOOL_TASK_CUSTOM_TYPE
-						? [entry.data as BackgroundToolTaskRecord]
-						: [],
-				)
-				.filter((record) => record.status === "completed" && record.terminalDelivery === "delivered");
+			const terminalRecords = (
+				loadBackgroundToolTaskRecordsNewestFirst(harness.sessionManager) as BackgroundToolTaskRecord[]
+			).filter((record) => record.status === "completed" && record.terminalDelivery === "delivered");
 			expect(terminalRecords).toHaveLength(taskCount);
 			expect(new Set(terminalRecords.map((record) => record.toolCallId))).toEqual(
 				new Set(Array.from({ length: taskCount }, (_, index) => `slow-call-${index}`)),
 			);
+			const deliveryReceipts = harness.sessionManager
+				.getEntries()
+				.flatMap((entry) =>
+					entry.type === "custom" && entry.customType === BACKGROUND_TOOL_TASK_DELIVERY_CUSTOM_TYPE
+						? [entry.data]
+						: [],
+				);
+			expect(deliveryReceipts).toHaveLength(taskCount);
+			expect(deliveryReceipts.every((receipt) => !JSON.stringify(receipt).includes("slow completed"))).toBe(true);
 		} finally {
 			unsubscribe();
 			for (const resolve of release) resolve();
@@ -991,6 +1020,41 @@ describe("AgentSession background tool tasks", () => {
 		} finally {
 			harness.cleanup();
 		}
+	});
+
+	it("does not apply stale, foreign, or malformed delivery receipts to a pending terminal", () => {
+		const sessionManager = SessionManager.inMemory();
+		const sessionId = sessionManager.getSessionId();
+		const completedAt = "2026-08-01T12:00:01.000Z";
+		const retained: BackgroundToolTaskRecord = {
+			sessionId,
+			taskId: "tool-task-7",
+			toolCallId: "retained-call",
+			toolName: "slow",
+			status: "completed",
+			startedAt: "2026-08-01T12:00:00.000Z",
+			completedAt,
+			elapsedBeforeHandoffMs: 15_000,
+			summary: "slow completed: retained output",
+			output: "retained output",
+			terminalDelivery: "pending",
+		};
+		sessionManager.appendCustomEntry(BACKGROUND_TOOL_TASK_CUSTOM_TYPE, retained);
+		for (const receipt of [
+			{ sessionId, taskId: retained.taskId, completedAt: "2026-08-01T12:00:02.000Z", terminalDelivery: "delivered" },
+			{ sessionId: "foreign-session", taskId: retained.taskId, completedAt, terminalDelivery: "delivered" },
+			{ sessionId, taskId: "tool-task-8", completedAt, terminalDelivery: "delivered" },
+			{ sessionId, taskId: retained.taskId, completedAt, terminalDelivery: "delivered", output: "forged" },
+		]) {
+			sessionManager.appendCustomEntry(BACKGROUND_TOOL_TASK_DELIVERY_CUSTOM_TYPE, receipt);
+		}
+
+		const restored = loadBackgroundToolTaskRecordsNewestFirst(sessionManager) as BackgroundToolTaskRecord[];
+		expect(restored[0]).toMatchObject({
+			taskId: retained.taskId,
+			terminalDelivery: "pending",
+			output: "retained output",
+		});
 	});
 
 	it("inherits durable task records only through a legitimate fork lineage", async () => {

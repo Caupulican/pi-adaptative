@@ -60,6 +60,8 @@ function handoffHeadline(context: BackgroundToolCallContext, taskId: string): st
  */
 export const DEFAULT_BACKGROUND_TOOL_TASK_WAIT_TIMEOUT_MS = 300_000;
 export const BACKGROUND_TOOL_TASK_CUSTOM_TYPE = "background_tool_task";
+/** Compact post-notification receipt; the preceding terminal snapshot remains the sole output owner. */
+export const BACKGROUND_TOOL_TASK_DELIVERY_CUSTOM_TYPE = "background_tool_task_delivery";
 
 const MAX_RETAINED_TERMINAL_TASKS = 64;
 const MAX_INLINE_OUTPUT_BYTES = 32 * 1024;
@@ -95,9 +97,12 @@ const RECORD_KEYS = [
 	"piToolInvocation",
 	"executionContext",
 ] as const;
+const DELIVERY_RECEIPT_KEYS = ["sessionId", "taskId", "completedAt", "terminalDelivery"] as const;
 
 export type BackgroundToolTaskStatus = "running" | "completed" | "failed" | "canceled";
 export type BackgroundToolTerminalDelivery = "pending" | "delivered";
+/** Lets the session adapter avoid duplicating a bounded terminal output for a one-field transition. */
+export type BackgroundToolTaskPersistenceKind = "snapshot" | "delivery_receipt";
 
 type BackgroundToolVerification = VerificationRecord & {
 	/** Host-bound origin used to order delayed background observations in the foreground transcript. */
@@ -225,7 +230,8 @@ export interface BackgroundToolTaskControllerDeps {
 	getArtifactStore(): ArtifactStore | undefined;
 	/** Durable task records on the active branch, newest first, without rebuilding full model context. */
 	loadPersistedRecordsNewestFirst?(): readonly unknown[];
-	persist(record: BackgroundToolTaskRecord): void;
+	/** Snapshot writes own complete task state; delivery receipts own only the exact post-notification transition. */
+	persist(record: BackgroundToolTaskRecord, kind: BackgroundToolTaskPersistenceKind): void;
 	/**
 	 * Deliver a terminal batch. The receipt names the task ids whose final output the delivered
 	 * message carried in full; the controller marks exactly those observed. A notifier that
@@ -262,19 +268,73 @@ interface BackgroundToolTaskState {
 	artifactHolderId: string;
 }
 
-/** Read only task records on the active branch without allocating or hydrating the full branch context. */
+/**
+ * Read task snapshots plus compact delivery receipts on the active branch without rebuilding model
+ * context. An exact receipt projects its matching full terminal snapshot as delivered; it never
+ * replaces the snapshot or its output.
+ */
 export function loadBackgroundToolTaskRecordsNewestFirst(
 	sessionManager: Pick<SessionManager, "getLatestCustomEntryOnBranch">,
 ): unknown[] {
+	const delivered = new Set<string>();
+	let deliveryFromId: string | undefined;
+	for (;;) {
+		const entry = sessionManager.getLatestCustomEntryOnBranch(
+			BACKGROUND_TOOL_TASK_DELIVERY_CUSTOM_TYPE,
+			deliveryFromId,
+		);
+		if (!entry) break;
+		const identity = deliveryReceiptIdentity(entry.data);
+		if (identity) delivered.add(identity);
+		if (entry.parentId === null) break;
+		deliveryFromId = entry.parentId;
+	}
 	const records: unknown[] = [];
 	let fromId: string | undefined;
 	for (;;) {
 		const entry = sessionManager.getLatestCustomEntryOnBranch(BACKGROUND_TOOL_TASK_CUSTOM_TYPE, fromId);
 		if (!entry) return records;
-		records.push(entry.data);
+		const identity = terminalRecordDeliveryIdentity(entry.data);
+		records.push(
+			identity && delivered.has(identity) && isPlainRecord(entry.data)
+				? { ...entry.data, terminalDelivery: "delivered" }
+				: entry.data,
+		);
 		if (entry.parentId === null) return records;
 		fromId = entry.parentId;
 	}
+}
+
+function deliveryIdentity(sessionId: string, taskId: string, completedAt: string): string {
+	return `${sessionId}\0${taskId}\0${completedAt}`;
+}
+
+function deliveryReceiptIdentity(value: unknown): string | undefined {
+	if (!isPlainRecord(value) || !hasOnlyKeys(value, DELIVERY_RECEIPT_KEYS)) return undefined;
+	if (
+		typeof value.sessionId !== "string" ||
+		value.sessionId.length === 0 ||
+		typeof value.taskId !== "string" ||
+		taskNumber(value.taskId) === undefined ||
+		typeof value.completedAt !== "string" ||
+		!Number.isFinite(Date.parse(value.completedAt)) ||
+		value.terminalDelivery !== "delivered"
+	) {
+		return undefined;
+	}
+	return deliveryIdentity(value.sessionId, value.taskId, value.completedAt);
+}
+
+function terminalRecordDeliveryIdentity(value: unknown): string | undefined {
+	if (
+		!isPlainRecord(value) ||
+		typeof value.sessionId !== "string" ||
+		typeof value.taskId !== "string" ||
+		typeof value.completedAt !== "string"
+	) {
+		return undefined;
+	}
+	return deliveryIdentity(value.sessionId, value.taskId, value.completedAt);
 }
 
 /** One included record's body in the wake-up: its final output inline, or the wait hint that replaces it. */
@@ -1062,12 +1122,12 @@ export class BackgroundToolTaskController {
 		if (notify) this.notify(terminalRecord, state.waitingConsumers === 0);
 	}
 
-	private persist(record: BackgroundToolTaskRecord): boolean {
+	private persist(record: BackgroundToolTaskRecord, kind: BackgroundToolTaskPersistenceKind = "snapshot"): boolean {
 		try {
 			const durableRecord = { ...record };
 			delete durableRecord.observedAt;
 			delete durableRecord.ownerEpoch;
-			this.deps.persist(durableRecord);
+			this.deps.persist(durableRecord, kind);
 			return true;
 		} catch (error) {
 			this.reportError(`Failed to persist background tool task ${record.taskId}`, error);
@@ -1088,7 +1148,7 @@ export class BackgroundToolTaskController {
 	private markNotificationDelivered(record: BackgroundToolTaskRecord): void {
 		if (record.terminalDelivery !== "pending") return;
 		const delivered = { ...record, terminalDelivery: "delivered" as const };
-		if (this.persist(delivered)) {
+		if (this.persist(delivered, "delivery_receipt")) {
 			const state = this.tasks.get(record.taskId);
 			if (state && state.record.completedAt === record.completedAt) state.record = delivered;
 		}

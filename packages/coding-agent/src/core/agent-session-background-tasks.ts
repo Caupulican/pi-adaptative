@@ -10,6 +10,7 @@ import type { Usage } from "@caupulican/pi-ai";
 import type { AgentSessionEvent } from "./agent-session-contracts.ts";
 import {
 	BACKGROUND_TOOL_TASK_CUSTOM_TYPE,
+	BACKGROUND_TOOL_TASK_DELIVERY_CUSTOM_TYPE,
 	BackgroundToolTaskController,
 	type BackgroundToolTaskControllerDeps,
 	type BackgroundToolTaskRecord,
@@ -44,7 +45,19 @@ export function createSessionBackgroundToolTasks(deps: SessionBackgroundToolTask
 		getMutationScope: () => deps.getMutationScope(),
 		getArtifactStore: () => deps.getArtifactStore(),
 		loadPersistedRecordsNewestFirst: () => loadBackgroundToolTaskRecordsNewestFirst(deps.getSessionManager()),
-		persist: (record) => deps.getSessionManager().appendCustomEntry(BACKGROUND_TOOL_TASK_CUSTOM_TYPE, record),
+		persist: (record, kind) => {
+			if (kind === "delivery_receipt") {
+				if (!record.completedAt) throw new Error("Background tool delivery receipt requires completion identity.");
+				deps.getSessionManager().appendCustomEntry(BACKGROUND_TOOL_TASK_DELIVERY_CUSTOM_TYPE, {
+					sessionId: record.sessionId,
+					taskId: record.taskId,
+					completedAt: record.completedAt,
+					terminalDelivery: "delivered",
+				});
+				return;
+			}
+			deps.getSessionManager().appendCustomEntry(BACKGROUND_TOOL_TASK_CUSTOM_TYPE, record);
+		},
 		notifyTerminal: (records, options) => deps.notifyTerminal(records, options.wakeParent),
 		onLiveTasksChanged: (tasks) => deps.emit({ type: "background_tools", tasks }),
 		recordUsage: (taskId, usage) => {
