@@ -224,6 +224,7 @@ export class WorkerSemanticSupervisor {
 			return undefined;
 		}
 
+		const assessmentHash = this.assessmentKey(attempt);
 		const priorSteeringCount = this.getPriorSteeringCount(attempt.attemptId);
 
 		// FR-061: Bounded observation projection
@@ -248,7 +249,6 @@ export class WorkerSemanticSupervisor {
 
 		this.inFlightAssessments.add(attempt.attemptId);
 		this.lastAssessmentAt.set(attempt.attemptId, Date.now());
-		this.lastAssessmentHash.set(attempt.attemptId, this.assessmentKey(attempt));
 
 		try {
 			let certId = `cert-supervision-${Date.now()}`;
@@ -399,6 +399,9 @@ export class WorkerSemanticSupervisor {
 				summaryEvent,
 			};
 
+			// Only a complete verdict owns this assessment identity. A semantic failure retains the
+			// admission timestamp for debounce but leaves identical evidence retryable afterward.
+			this.lastAssessmentHash.set(attempt.attemptId, assessmentHash);
 			return signalRecord;
 		} finally {
 			this.inFlightAssessments.delete(attempt.attemptId);

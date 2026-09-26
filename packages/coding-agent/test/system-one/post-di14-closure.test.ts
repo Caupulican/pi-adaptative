@@ -443,15 +443,46 @@ describe("post-DI14 closure gates", () => {
 			},
 			onSupervisionError: (error) => errors.push(error),
 		});
-		const observe = (tail: string) => coordinator.observe({ ...attempt("brk"), agentId: "w-brk", outputTail: tail });
-		expect(await observe("1")).toBeUndefined();
-		expect(await observe("2")).toBeUndefined();
-		expect(await observe("3")).toBeUndefined();
+		const observe = () => coordinator.observe({ ...attempt("brk"), agentId: "w-brk", outputTail: "same stall" });
+		expect(await observe()).toBeUndefined();
+		expect(await observe()).toBeUndefined();
+		expect(await observe()).toBeUndefined();
 		expect(calls).toBe(3);
 		expect(errors.at(-1)).toBeInstanceOf(WorkerSupervisionPausedError);
-		expect(await observe("4")).toBeUndefined();
+		expect(await observe()).toBeUndefined();
 		expect(calls).toBe(3);
 		expect(cancelled).toEqual([]);
+	});
+
+	it("Gate 8 negative control: successful identical evidence remains deduplicated", async () => {
+		let calls = 0;
+		const supervisor = new WorkerSemanticSupervisor({
+			debounceMs: 0,
+			minToolCalls: 0,
+			minElapsedMs: 0,
+			steering: {
+				requireCertificate: async () => {
+					calls += 1;
+					return {
+						certificate_id: "healthy",
+						answers: {
+							meaningful_progress: 0.9,
+							worker_stuck: 0.1,
+							work_off_track: 0.1,
+							strategy_repetition: 0.1,
+							needs_independent_verification: 0.1,
+							specialist_gap_present: 0.1,
+							capability_gap_present: 0.1,
+							external_block_present: 0.1,
+						},
+					};
+				},
+			},
+		});
+		const observation = { ...attempt("healthy"), outputTail: "same healthy state" };
+		expect((await supervisor.observe(observation))?.action).toBe("continue");
+		expect(await supervisor.observe(observation)).toBeUndefined();
+		expect(calls).toBe(1);
 	});
 
 	it("pending root requests include mark_external_block", async () => {
