@@ -337,7 +337,7 @@ describe("runWorker", () => {
 	it("surfaces host-observed claim overflow instead of silently preserving an incomplete file review", async () => {
 		const outcome = await runWorker(
 			runnerOptions({
-				getChangedFiles: () => Array.from({ length: 300 }, (_entry, index) => `src/${index}-${"p".repeat(3_000)}`),
+				sealChangedFiles: () => Array.from({ length: 300 }, (_entry, index) => `src/${index}-${"p".repeat(3_000)}`),
 				complete: async () => ({
 					...completionOf('{"summary":"partial result","status":"completed"}'),
 					blockers: Array.from({ length: 100 }, (_entry, index) => `${index}:${"blocked ".repeat(300)}`),
@@ -488,9 +488,11 @@ describe("runWorker", () => {
 
 	it("cancels on external abort and times out on wall clock breach", async () => {
 		const controller = new AbortController();
+		const sealCanceledChangedFiles = vi.fn(() => ["src/admitted-before-cancel.ts"]);
 		const pendingCancel = runWorker(
 			runnerOptions({
 				signal: controller.signal,
+				sealChangedFiles: sealCanceledChangedFiles,
 				complete: ({ signal }) =>
 					new Promise((_resolve, reject) => {
 						signal?.addEventListener("abort", () => reject(new Error("aborted")));
@@ -501,11 +503,14 @@ describe("runWorker", () => {
 		const canceled = await pendingCancel;
 		expect(canceled.claim.status).toBe("cancelled");
 		expect(canceled.laneStatus).toBe("canceled");
+		expect(canceled.claim.changedFiles).toEqual(["src/admitted-before-cancel.ts"]);
+		expect(sealCanceledChangedFiles).toHaveBeenCalledOnce();
 
+		const sealTimedOutChangedFiles = vi.fn(() => ["src/already-written.ts"]);
 		const timedOut = await runWorker(
 			runnerOptions({
 				maxWallClockMs: 10,
-				getChangedFiles: () => ["src/already-written.ts"],
+				sealChangedFiles: sealTimedOutChangedFiles,
 				complete: ({ signal }) =>
 					new Promise((_resolve, reject) => {
 						signal?.addEventListener("abort", () => reject(new Error("aborted")));
@@ -516,6 +521,7 @@ describe("runWorker", () => {
 		expect(timedOut.laneStatus).toBe("timeout");
 		expect(timedOut.reasonCode).toBe("wall_clock_exceeded");
 		expect(timedOut.claim.changedFiles).toEqual(["src/already-written.ts"]);
+		expect(sealTimedOutChangedFiles).toHaveBeenCalledOnce();
 	});
 
 	it("keeps the worker system prompt static for provider prompt caching", async () => {

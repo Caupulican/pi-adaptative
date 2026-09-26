@@ -1201,6 +1201,7 @@ export class AgentSession {
 						selection.begin(toolCallId, toolName, args, { modelRef });
 					},
 					complete: (toolCallId, succeeded, content) => selection.complete(toolCallId, succeeded, content),
+					discard: (toolCallId) => selection.discard(toolCallId),
 				};
 			},
 			markModelExhausted: (model, retryAfterMs) =>

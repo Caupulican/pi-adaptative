@@ -14,6 +14,7 @@
 - Shell-lane, task-shell, and runtime-resource shutdown waits for every started sibling cleanup before reporting failures, so one failed close cannot let session disposal finish while another owned process is still live.
 - Process-matrix startup reconciliation waits for every admitted prune and recovery mutation before maintenance or session shutdown settles, so one failed store operation cannot leave a sibling durable write running after stop.
 - Integrity hook extensions receive detached copies of one point-in-time context snapshot, so a timed-out hook cannot rewrite admitted tool arguments and one extension cannot alter the evidence a later extension validates.
+- Worker cancellation, timeout, and session shutdown seal admitted file mutations into durable claims before terminalization, while late tool callbacks cannot mutate worker progress or learning state.
 
 ## [0.99.52] - 2026-09-26
 

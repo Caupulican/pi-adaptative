@@ -75,8 +75,11 @@ export interface WorkerRunnerOptions {
 	 */
 	usageReportId: string;
 	complete: (args: { systemPrompt: string; userPrompt: string; signal: AbortSignal }) => Promise<WorkerCompletion>;
-	/** Live successful worker-tool mutations, including writes completed before timeout/cancellation. */
-	getChangedFiles?: () => readonly string[];
+	/**
+	 * Seal the live mutation producer after bounded execution returns, then return its terminal snapshot.
+	 * The callback is synchronous so late non-cooperative completion callbacks cannot race the claim.
+	 */
+	sealChangedFiles?: () => readonly string[];
 	signal?: AbortSignal;
 	now?: () => string;
 	/** Enables the WRITE lane: only honored when the request envelope grants "filesystem.write". The
@@ -421,7 +424,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 			}),
 	});
 	const costUsd = bounded.completion?.costUsd ?? 0;
-	const liveChangedFilesReport = collectBoundedWorkerClaimChangedFiles(options.getChangedFiles?.() ?? []);
+	const liveChangedFilesReport = collectBoundedWorkerClaimChangedFiles(options.sealChangedFiles?.() ?? []);
 	const liveChangedFiles = liveChangedFilesReport.values;
 
 	if (bounded.failure) {

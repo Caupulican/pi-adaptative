@@ -59,6 +59,7 @@ export interface RecoveredWorkerTerminalCompletion {
 /** The live mutable state that must be visible to session disposal before provider work yields. */
 export interface WorkerAttemptExecutionLedger {
 	changedFiles: Set<string>;
+	sealChangedFiles(): readonly string[];
 	getUsage(): AttemptUsageSnapshot;
 }
 
@@ -147,6 +148,7 @@ export interface WorkerToolSelection {
 	hints(): string | undefined;
 	begin(toolCallId: string, toolName: string, args: unknown): void;
 	complete(toolCallId: string, succeeded: boolean, content: readonly unknown[]): void;
+	discard(toolCallId: string): void;
 }
 
 /** One worker provider response, with what the cache survival estimator measures it against. */
@@ -404,6 +406,58 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			);
 		}
 	};
+	const mutationTarget = (toolName: string, args: unknown): string | undefined => {
+		if ((toolName !== "write" && toolName !== "edit") || !args || typeof args !== "object" || Array.isArray(args)) {
+			return undefined;
+		}
+		const rawPath = (args as Record<string, unknown>).path;
+		if (typeof rawPath !== "string" || rawPath.length === 0) return undefined;
+		const absolutePath = path.isAbsolute(rawPath) ? path.resolve(rawPath) : path.resolve(options.cwd, rawPath);
+		let canonicalPath = absolutePath;
+		try {
+			canonicalPath = safeRealpathSync(absolutePath);
+		} catch {
+			// A not-yet-created write target still needs a conservative lexical identity at cancellation.
+		}
+		return path.relative(options.cwd, canonicalPath).split(path.sep).join("/");
+	};
+	const recordMutationTarget = (filePath: string): void => {
+		recordChangedFile(filePath);
+		options.recordObjectiveMutation?.({
+			kind: "owned_write",
+			path: filePath,
+			cwd: options.cwd,
+		});
+	};
+	const admittedMutationTargets = new Map<string, string>();
+	const admittedToolSelectionIds = new Set<string>();
+	let callbackBoundarySealed = false;
+	const sealChangedFiles = (): readonly string[] => {
+		if (!callbackBoundarySealed) {
+			callbackBoundarySealed = true;
+			const unresolvedTargets = [...admittedMutationTargets.values()];
+			admittedMutationTargets.clear();
+			const unresolvedSelectionIds = [...admittedToolSelectionIds];
+			admittedToolSelectionIds.clear();
+			let failure: { error: unknown } | undefined;
+			for (const filePath of unresolvedTargets) {
+				try {
+					recordMutationTarget(filePath);
+				} catch (error) {
+					failure ??= { error };
+				}
+			}
+			for (const toolCallId of unresolvedSelectionIds) {
+				try {
+					options.toolSelection?.discard(toolCallId);
+				} catch (error) {
+					failure ??= { error };
+				}
+			}
+			if (failure) throw failure.error;
+		}
+		return [...changedFiles];
+	};
 	const actionJournal = options.request.envelope.capabilities.includes("filesystem.write")
 		? new WorkerActionJournal({
 				agentDir: options.agentDir,
@@ -619,6 +673,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	};
 	const ledger: WorkerAttemptExecutionLedger = {
 		changedFiles,
+		sealChangedFiles,
 		getUsage: currentUsage,
 	};
 
@@ -653,7 +708,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 					maxUsd: options.grant.budget.maxCostUsd,
 					maxWallClockMs: options.grant.budget.maxWallClockMs ?? 0,
 					usageReportId: options.usageReportId,
-					getChangedFiles: () => [...changedFiles],
+					sealChangedFiles,
 					signal: options.signal,
 					cwd: options.cwd,
 					processCapable: options.processCapable,
@@ -827,6 +882,20 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 														context.toolCall.name,
 														context.args,
 													);
+													if (options.toolSelection) {
+														admittedToolSelectionIds.add(context.toolCall.id);
+														context.registerCleanup?.(() => {
+															admittedToolSelectionIds.delete(context.toolCall.id);
+															options.toolSelection?.discard(context.toolCall.id);
+														});
+													}
+													const target = mutationTarget(context.toolCall.name, context.args);
+													if (target) {
+														admittedMutationTargets.set(context.toolCall.id, target);
+														context.registerCleanup?.(() =>
+															admittedMutationTargets.delete(context.toolCall.id),
+														);
+													}
 												}
 												return decision;
 											} catch (error) {
@@ -836,43 +905,28 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 										},
 										afterToolCall: async ({ toolCall, args, result, isError }) => {
 											try {
-												options.toolSelection?.complete(toolCall.id, !isError, result.content);
-												let duplicateNote: string | undefined;
-												if (
-													(toolCall.name === "write" || toolCall.name === "edit") &&
-													args &&
-													typeof args === "object" &&
-													!Array.isArray(args)
-												) {
-													const rawPath = (args as Record<string, unknown>).path;
-													if (typeof rawPath === "string" && rawPath.length > 0) {
-														const absolutePath = path.isAbsolute(rawPath)
-															? path.resolve(rawPath)
-															: path.resolve(options.cwd, rawPath);
-														let canonicalPath = absolutePath;
-														try {
-															canonicalPath = safeRealpathSync(absolutePath);
-														} catch {
-															// The operation entered execution; retain its lexical target if canonicalization failed.
-														}
-														const relativePath = path
-															.relative(options.cwd, canonicalPath)
-															.split(path.sep)
-															.join("/");
-														recordChangedFile(relativePath);
-														options.recordObjectiveMutation?.({
-															kind: "owned_write",
-															path: relativePath,
-															cwd: options.cwd,
-														});
-														if (!isError)
-															duplicateNote = await options.reviewNewCode?.({
-																toolName: toolCall.name,
-																args,
-																cwd: options.cwd,
-															});
-													}
+												if (callbackBoundarySealed) {
+													signal.throwIfAborted();
+													throw new WorkerCompletionProtocolError(
+														"Worker tool completion arrived after its changed-file boundary was sealed.",
+													);
 												}
+												let duplicateNote: string | undefined;
+												const admittedTarget = admittedMutationTargets.get(toolCall.id);
+												if (admittedTarget) {
+													admittedMutationTargets.delete(toolCall.id);
+													const completedTarget = mutationTarget(toolCall.name, args) ?? admittedTarget;
+													recordMutationTarget(completedTarget);
+												}
+												signal.throwIfAborted();
+												options.toolSelection?.complete(toolCall.id, !isError, result.content);
+												admittedToolSelectionIds.delete(toolCall.id);
+												if (admittedTarget && !isError)
+													duplicateNote = await options.reviewNewCode?.({
+														toolName: toolCall.name,
+														args,
+														cwd: options.cwd,
+													});
 												signal.throwIfAborted();
 												await observeToolCall(toolCall.name, args);
 												return duplicateNote

@@ -588,6 +588,7 @@ describe("worker attempt executor", () => {
 					hints: () => "TOOL SELECTION HINTS\n- read: `read` established for this model",
 					begin: (id, name) => calls.push(`begin:${name}:${id}`),
 					complete: (id, succeeded) => calls.push(`complete:${succeeded}:${id}`),
+					discard: () => undefined,
 				},
 			},
 		);
@@ -1920,6 +1921,180 @@ describe("worker attempt executor", () => {
 
 		expect(result.rawOutcome.accepted).toBe(false);
 		expect(harness.conversation.getRawTranscript().map((message) => message.role)).toEqual(["user"]);
+	});
+
+	it("seals admitted changed-file state before a non-cooperative completion terminates", async () => {
+		const controller = new AbortController();
+		let isolatedOptions: IsolatedCompletionOptions | undefined;
+		const recordObjectiveMutation = vi.fn();
+		const completeToolSelection = vi.fn();
+		const discardToolSelection = vi.fn();
+		const reviewNewCode = vi.fn(async () => undefined);
+		const observeWorkerProgress = vi.fn();
+		const harness = createExecutorHarness(
+			async (options) => {
+				isolatedOptions = options;
+				return new Promise<IsolatedCompletionResult>(() => undefined);
+			},
+			100,
+			undefined,
+			undefined,
+			controller.signal,
+			30_000,
+			true,
+			undefined,
+			[],
+			undefined,
+			{
+				recordObjectiveMutation,
+				reviewNewCode,
+				observeWorkerProgress,
+				toolSelection: {
+					hints: () => undefined,
+					begin: vi.fn(),
+					complete: completeToolSelection,
+					discard: discardToolSelection,
+				},
+			},
+		);
+		const execution = harness.executor.run();
+		for (let tick = 0; tick < 20 && !isolatedOptions; tick += 1) await Promise.resolve();
+		expect(isolatedOptions).toBeDefined();
+
+		const assistant = fauxAssistantMessage([fauxToolCall("write", { path: "late.ts", content: "late" })], {
+			stopReason: "toolUse",
+		});
+		const toolCall = assistant.content.find((content) => content.type === "toolCall");
+		if (toolCall?.type !== "toolCall" || !isolatedOptions?.beforeToolCall || !isolatedOptions.afterToolCall) {
+			throw new Error("Expected captured write lifecycle callbacks.");
+		}
+		await isolatedOptions.beforeToolCall({
+			assistantMessage: assistant,
+			toolCall,
+			args: { path: "late.ts", content: "late" },
+			context: { systemPrompt: "", messages: [], tools: [] },
+		});
+
+		controller.abort(new Error("cancel before late write completion"));
+		const result = await execution;
+		expect(result.changedFiles).toEqual(["late.ts"]);
+		expect(result.rawOutcome.claim.changedFiles).toEqual(["late.ts"]);
+		expect(harness.conversation.getChangedFiles("attempt")).toEqual(["late.ts"]);
+		expect(recordObjectiveMutation).toHaveBeenCalledTimes(1);
+		expect(completeToolSelection).not.toHaveBeenCalled();
+		expect(discardToolSelection).toHaveBeenCalledTimes(1);
+		expect(reviewNewCode).not.toHaveBeenCalled();
+		expect(observeWorkerProgress).not.toHaveBeenCalled();
+
+		await expect(
+			isolatedOptions.afterToolCall({
+				assistantMessage: assistant,
+				toolCall,
+				args: { path: "late.ts", content: "late" },
+				result: { content: [{ type: "text", text: "wrote late.ts" }], details: {} },
+				isError: false,
+				context: { systemPrompt: "", messages: [], tools: [] },
+			}),
+		).rejects.toThrow("cancel before late write completion");
+
+		expect(harness.conversation.getChangedFiles("attempt")).toEqual(["late.ts"]);
+		expect(recordObjectiveMutation).toHaveBeenCalledTimes(1);
+		expect(completeToolSelection).not.toHaveBeenCalled();
+		expect(discardToolSelection).toHaveBeenCalledTimes(1);
+		expect(reviewNewCode).not.toHaveBeenCalled();
+		expect(observeWorkerProgress).not.toHaveBeenCalled();
+	});
+
+	it("drops an admitted mutation target when invocation cleanup proves execution was abandoned", async () => {
+		const controller = new AbortController();
+		let isolatedOptions: IsolatedCompletionOptions | undefined;
+		let releasePreparation: (() => void) | undefined;
+		const recordObjectiveMutation = vi.fn();
+		const harness = createExecutorHarness(
+			async (options) => {
+				isolatedOptions = options;
+				return new Promise<IsolatedCompletionResult>(() => undefined);
+			},
+			100,
+			undefined,
+			undefined,
+			controller.signal,
+			30_000,
+			true,
+			undefined,
+			[],
+			undefined,
+			{ recordObjectiveMutation },
+		);
+		const execution = harness.executor.run();
+		for (let tick = 0; tick < 20 && !isolatedOptions; tick += 1) await Promise.resolve();
+		expect(isolatedOptions).toBeDefined();
+
+		const assistant = fauxAssistantMessage([fauxToolCall("write", { path: "abandoned.ts", content: "no" })], {
+			stopReason: "toolUse",
+		});
+		const toolCall = assistant.content.find((content) => content.type === "toolCall");
+		if (toolCall?.type !== "toolCall" || !isolatedOptions?.beforeToolCall) {
+			throw new Error("Expected a captured write admission callback.");
+		}
+		await isolatedOptions.beforeToolCall({
+			assistantMessage: assistant,
+			toolCall,
+			args: { path: "abandoned.ts", content: "no" },
+			context: { systemPrompt: "", messages: [], tools: [] },
+			registerCleanup: (cleanup) => {
+				releasePreparation = cleanup;
+			},
+		});
+		releasePreparation?.();
+		controller.abort(new Error("cancel after abandoned preparation"));
+
+		const result = await execution;
+		expect(result.changedFiles).toEqual([]);
+		expect(result.rawOutcome.claim.changedFiles).toEqual([]);
+		expect(harness.conversation.getChangedFiles("attempt")).toEqual([]);
+		expect(recordObjectiveMutation).not.toHaveBeenCalled();
+	});
+
+	it("retains a write that completed before the worker cancellation terminal", async () => {
+		const controller = new AbortController();
+		const harness = createExecutorHarness(
+			async (options) => {
+				const assistant = fauxAssistantMessage([fauxToolCall("write", { path: "before.ts", content: "ok" })], {
+					stopReason: "toolUse",
+				});
+				const toolCall = assistant.content.find((content) => content.type === "toolCall");
+				if (toolCall?.type !== "toolCall" || !options.beforeToolCall || !options.afterToolCall) {
+					throw new Error("Expected write lifecycle callbacks.");
+				}
+				await options.beforeToolCall({
+					assistantMessage: assistant,
+					toolCall,
+					args: { path: "before.ts", content: "ok" },
+					context: { systemPrompt: "", messages: [], tools: [] },
+				});
+				await options.afterToolCall({
+					assistantMessage: assistant,
+					toolCall,
+					args: { path: "before.ts", content: "ok" },
+					result: { content: [{ type: "text", text: "wrote before.ts" }], details: {} },
+					isError: false,
+					context: { systemPrompt: "", messages: [], tools: [] },
+				});
+				controller.abort(new Error("cancel after write completion"));
+				return new Promise<IsolatedCompletionResult>(() => undefined);
+			},
+			100,
+			undefined,
+			undefined,
+			controller.signal,
+		);
+
+		const result = await harness.executor.run();
+
+		expect(result.changedFiles).toEqual(["before.ts"]);
+		expect(result.rawOutcome.claim.changedFiles).toEqual(["before.ts"]);
+		expect(harness.conversation.getChangedFiles("attempt")).toEqual(["before.ts"]);
 	});
 
 	it("retains billed usage but does not apply a compaction that resolves after the composed signal aborts", async () => {

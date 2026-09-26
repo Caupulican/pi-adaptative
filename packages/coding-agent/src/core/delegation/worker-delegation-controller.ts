@@ -483,6 +483,7 @@ export class WorkerDelegationController {
 		string,
 		{
 			changedFiles: Set<string>;
+			sealChangedFiles: () => readonly string[];
 			getUsage: () => AttemptUsageSnapshot;
 			request: WorkerRequest;
 			handle: StartedDelegationAttempt;
@@ -710,6 +711,17 @@ export class WorkerDelegationController {
 
 	abort(): Promise<void> {
 		this.runTeardownStep("abort worker execution", () => this.workerAbort.abort());
+		// Abort makes further tool admission impossible. Seal every already-admitted mutation before
+		// restart suspension snapshots the conversation; the bounded executor may not resume in time.
+		for (const [laneId, ledger] of this.inFlightLedgers) {
+			try {
+				ledger.sealChangedFiles();
+			} catch (error) {
+				this.safeWarn(
+					`Failed to seal worker mutation state ${laneId} during teardown: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
 		// Bound attempts have an authoritative transcript and agent identity. A normal owner-session
 		// shutdown is an execution interruption, not an explicit worker cancellation: fence it into
 		// suspended state before the abort continuation can observe the signal.
@@ -3545,6 +3557,7 @@ export class WorkerDelegationController {
 				// Register before the first execution await: disposal sees the live mutable ledger.
 				this.inFlightLedgers.set(startedRecord.laneId, {
 					changedFiles: executor.ledger.changedFiles,
+					sealChangedFiles: executor.ledger.sealChangedFiles,
 					getUsage: executor.ledger.getUsage,
 					request: workerRequest,
 					handle: durableHandle,

@@ -2,7 +2,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { IsolatedCompletionOptions } from "../src/core/agent-session-contracts.ts";
 import type { WorkerClaim, WorkerRequest } from "../src/core/autonomy/contracts.ts";
 import { getLaneRecordSnapshots } from "../src/core/autonomy/session-lane-record.ts";
 import { BackgroundLaneController } from "../src/core/background-lane-controller.ts";
@@ -15,16 +17,6 @@ import {
 	saveTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
 import { createTestResourceLoader } from "./utilities.ts";
-
-interface FakeAfterToolCallArgs {
-	toolCall: { name: string };
-	args: unknown;
-	isError: boolean;
-}
-
-interface FakeIsolatedCompletionOptions {
-	afterToolCall?: (args: FakeAfterToolCallArgs) => Promise<unknown> | undefined;
-}
 
 function makeTrackedSessionManager(): {
 	sessionManager: SessionManager;
@@ -75,7 +67,7 @@ describe("background lane disposal persistence", () => {
 		const { sessionManager, entries, getAppendCount } = makeTrackedSessionManager();
 
 		let disposed = false;
-		let capturedAfterToolCall: FakeIsolatedCompletionOptions["afterToolCall"];
+		let capturedCompletion: IsolatedCompletionOptions | undefined;
 		const running = Promise.withResolvers<void>();
 
 		const controller = new BackgroundLaneController({
@@ -97,8 +89,8 @@ describe("background lane disposal persistence", () => {
 			// Never resolves: the worker stays suspended at `await runWorker(...)` inside
 			// runWorkerDelegationOnce for the whole test, mirroring the real cutoff scenario where
 			// abortInFlightLanes() runs while a delegation is genuinely mid-flight.
-			runIsolatedCompletion: (opts: FakeIsolatedCompletionOptions) => {
-				capturedAfterToolCall = opts.afterToolCall;
+			runIsolatedCompletion: (opts: IsolatedCompletionOptions) => {
+				capturedCompletion = opts;
 				running.resolve();
 				return new Promise(() => {});
 			},
@@ -113,10 +105,31 @@ describe("background lane disposal persistence", () => {
 		const runPromise = controller.runWorkerDelegationOnce({ instructions: "write a note to disk" });
 		await running.promise;
 
-		expect(capturedAfterToolCall).toBeDefined();
-		// Simulate a real file mutation the worker already applied before dispose interrupts it —
-		// the same `afterToolCall` hook a real isolated-completion tool loop would drive.
-		await capturedAfterToolCall?.({ toolCall: { name: "write" }, args: { path: "notes/output.md" }, isError: false });
+		if (!capturedCompletion?.beforeToolCall || !capturedCompletion.model) {
+			throw new Error("Expected captured worker tool admission.");
+		}
+		await capturedCompletion.requestPreflight?.({
+			model: capturedCompletion.model,
+			context: {
+				systemPrompt: capturedCompletion.systemPrompt,
+				messages: capturedCompletion.history ?? [],
+				tools: capturedCompletion.tools ?? [],
+			},
+			maxTokens: capturedCompletion.maxTokens,
+		});
+		const assistant = fauxAssistantMessage([fauxToolCall("write", { path: "notes/output.md", content: "pending" })], {
+			stopReason: "toolUse",
+		});
+		const toolCall = assistant.content.find((content) => content.type === "toolCall");
+		if (toolCall?.type !== "toolCall") throw new Error("Expected write tool call.");
+		// The write is authorized but its execution terminal has not crossed afterToolCall. Disposal must
+		// conservatively persist the target before fencing this attempt for restart.
+		await capturedCompletion.beforeToolCall({
+			assistantMessage: assistant,
+			toolCall,
+			args: { path: "notes/output.md", content: "pending" },
+			context: { systemPrompt: "", messages: [], tools: [] },
+		});
 
 		expect(getAppendCount()).toBe(0); // nothing durable yet -- the worker is still "running"
 
