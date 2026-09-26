@@ -87,10 +87,11 @@ const ACCOUNT_CHECKS: Readonly<
 
 export class AccountModelCatalog {
 	private readonly deps: AccountModelCatalogDeps;
-	private readonly states = new Map<string, ProviderAccountState>();
+	private states = new Map<string, ProviderAccountState>();
 	/** Models a provider refused for this account at request time, with the provider's words. */
 	private readonly refused = new Map<string, string>();
 	private pending: Promise<void> | undefined;
+	private refreshGeneration = 0;
 
 	constructor(deps: AccountModelCatalogDeps) {
 		this.deps = deps;
@@ -98,7 +99,10 @@ export class AccountModelCatalog {
 
 	/** Ask every provider that can answer, for the accounts that have a credential. */
 	refresh(): Promise<void> {
-		const run = this.checkAll();
+		const generation = ++this.refreshGeneration;
+		const run = this.checkAll().then((states) => {
+			if (generation === this.refreshGeneration) this.states = states;
+		});
 		this.pending = run;
 		return run;
 	}
@@ -126,18 +130,20 @@ export class AccountModelCatalog {
 		}
 	}
 
-	private async checkAll(): Promise<void> {
+	private async checkAll(): Promise<Map<string, ProviderAccountState>> {
 		const fetchImpl = this.deps.fetch ?? globalThis.fetch;
 		const representatives = new Map<string, Model<Api>>();
+		const states = new Map<string, ProviderAccountState>();
 		for (const model of this.deps.getModels()) {
 			if (!(model.provider in ACCOUNT_CHECKS) || representatives.has(model.provider)) continue;
 			if (this.deps.hasConfiguredAuth(model)) representatives.set(model.provider, model);
 		}
 		await Promise.all(
 			[...representatives].map(async ([provider, model]) => {
-				this.states.set(provider, await this.checkProvider(model, fetchImpl));
+				states.set(provider, await this.checkProvider(model, fetchImpl));
 			}),
 		);
+		return states;
 	}
 
 	private async checkProvider(model: Model<Api>, fetchImpl: typeof fetch): Promise<ProviderAccountState> {
