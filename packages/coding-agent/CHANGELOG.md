@@ -17,6 +17,7 @@
 - Worker cancellation, timeout, and session shutdown seal admitted file mutations into durable claims before terminalization, while late tool callbacks cannot mutate worker progress or learning state.
 - Worker resumes retained while a prior run unwinds survive queue saturation and reload-gate failures, preserve verifier headroom, and bind completion observers to the resumed generation instead of the prior terminal.
 - Worker supervision commits steering and reroute signals only after worker control accepts them, so a failed steer cannot authorize a later cancellation and failed control actions remain retryable.
+- Worker supervision receives a bounded window of actual tool failures, so repeated distinct failures are no longer mistaken for successful read-only progress and recovered workers shed stale failure evidence.
 
 ## [0.99.52] - 2026-09-26
 

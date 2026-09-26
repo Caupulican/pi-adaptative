@@ -652,6 +652,73 @@ describe("worker attempt executor", () => {
 		expect(tails.every((tail) => !tail.includes("EARLIER REPORT"))).toBe(true);
 	});
 
+	it("distinguishes repeated failed tool executions from successful read-only progress", async () => {
+		type Observation = Parameters<NonNullable<WorkerAttemptExecutorOptions["observeWorkerProgress"]>>[0];
+		const runScenario = async (outcomes: readonly boolean[]): Promise<Observation[]> => {
+			const observations: Observation[] = [];
+			const harness = createExecutorHarness(
+				async (options) => {
+					if (!options.afterToolCall) throw new Error("Missing tool completion hook.");
+					for (const [index, isError] of outcomes.entries()) {
+						const assistant = fauxAssistantMessage([fauxToolCall("read", { path: `distinct-${index}.ts` })], {
+							stopReason: "toolUse",
+						});
+						const toolCall = assistant.content.find((content) => content.type === "toolCall");
+						if (toolCall?.type !== "toolCall") throw new Error("Expected a tool call.");
+						await options.afterToolCall({
+							assistantMessage: assistant,
+							toolCall,
+							args: { path: `distinct-${index}.ts` },
+							result: {
+								content: [{ type: "text", text: isError ? "file not found" : "file contents" }],
+								details: {},
+							},
+							isError,
+							context: { systemPrompt: "", messages: [], tools: [] },
+						});
+					}
+					const terminal = fauxAssistantMessage('{"summary":"observed","status":"completed"}');
+					await options.onMessage?.(terminal);
+					return {
+						text: '{"summary":"observed","status":"completed"}',
+						usage: ZERO_USAGE,
+						stopReason: "stop",
+						messages: [...(options.history ?? []), terminal],
+					};
+				},
+				100,
+				undefined,
+				undefined,
+				undefined,
+				30_000,
+				true,
+				undefined,
+				[],
+				undefined,
+				{ observeWorkerProgress: (observation) => void observations.push(observation) },
+			);
+			const result = await harness.executor.run();
+			expect(result.rawOutcome.accepted).toBe(true);
+			return observations;
+		};
+
+		const failed = await runScenario([true, true, true, true]);
+		const successful = await runScenario([false, false, false, false]);
+		const recovered = await runScenario([true, false, false, false, false, false, false, false, false]);
+
+		expect(failed.at(-1)).toMatchObject({
+			isRepeating: false,
+			isStalled: true,
+			recentFailures: ["read failed", "read failed", "read failed", "read failed"],
+		});
+		expect(successful.at(-1)).toMatchObject({
+			isRepeating: false,
+			isStalled: false,
+			recentFailures: [],
+		});
+		expect(recovered.at(-1)).toMatchObject({ isStalled: false, recentFailures: [] });
+	});
+
 	it("threads final worker context into the isolated system prompt", async () => {
 		let capturedSystemPrompt = "";
 		const harness = createExecutorHarness(

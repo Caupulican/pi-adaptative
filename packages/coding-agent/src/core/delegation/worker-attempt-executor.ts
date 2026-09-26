@@ -83,6 +83,9 @@ const WORKER_PROVIDER_RETRY_POLICY: RetryPolicy = {
 	jitterRatio: 0.2,
 };
 
+const RECENT_SUPERVISION_TOOL_WINDOW = 8;
+const CONSECUTIVE_TOOL_FAILURE_THRESHOLD = 3;
+
 export async function runProviderCompletionWithBackoff(args: {
 	attempt: () => Promise<IsolatedCompletionResult>;
 	/** Release per-attempt provider reservations before waiting; the final failure is rethrown. */
@@ -337,21 +340,30 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	let attemptTranscriptStart = 0;
 	const recentToolNames: string[] = [];
 	const recentToolCalls: { name: string; args: unknown }[] = [];
+	const recentToolOutcomes: { name: string; failed: boolean }[] = [];
 	let executedToolCalls = 0;
 	let changedFileCountAtChurnWindowStart = changedFiles.size;
 	/**
 	 * One live supervision observation per executed tool call. The deterministic churn check runs
 	 * first, because repeated broad validation with no new implementation needs no semantic judgment.
 	 */
-	const observeToolCall = async (toolName: string, args: unknown): Promise<void> => {
+	const observeToolCall = async (toolName: string, args: unknown, isError: boolean): Promise<void> => {
 		if (!options.observeWorkerProgress) return;
 		executedToolCalls++;
 		recentToolNames.push(toolName);
-		if (recentToolNames.length > 8) recentToolNames.shift();
+		if (recentToolNames.length > RECENT_SUPERVISION_TOOL_WINDOW) recentToolNames.shift();
 		recentToolCalls.push({ name: toolName, args });
 		if (recentToolCalls.length > 3) recentToolCalls.shift();
+		recentToolOutcomes.push({ name: toolName, failed: isError });
+		if (recentToolOutcomes.length > RECENT_SUPERVISION_TOOL_WINDOW) recentToolOutcomes.shift();
 		const isRepeating = isRepeatedWorkerToolInvocation(recentToolCalls);
-		const isStalled = changedFiles.size === 0 && executedToolCalls >= 4 && (isRepeating || toolIssues.size > 0);
+		const consecutiveToolFailures =
+			recentToolOutcomes.length >= CONSECUTIVE_TOOL_FAILURE_THRESHOLD &&
+			recentToolOutcomes.slice(-CONSECUTIVE_TOOL_FAILURE_THRESHOLD).every((outcome) => outcome.failed);
+		const isStalled =
+			changedFiles.size === 0 &&
+			executedToolCalls >= 4 &&
+			(isRepeating || consecutiveToolFailures || toolIssues.size > 0);
 		let outputTail = "";
 		try {
 			// Only this attempt's own output: supervision judges the current task, never an earlier one's report.
@@ -378,7 +390,10 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			toolCalls: executedToolCalls,
 			elapsedMs: Date.now() - attemptStartedAt,
 			changedFiles: [...changedFiles],
-			recentFailures: [...toolIssues],
+			recentFailures: [
+				...toolIssues,
+				...recentToolOutcomes.flatMap((outcome) => (outcome.failed ? [`${outcome.name} failed`] : [])),
+			],
 			recentToolNames: [...recentToolNames],
 			changedFileCountAtWindowStart: changedFileCountAtChurnWindowStart,
 			changedFileCount: changedFiles.size,
@@ -928,7 +943,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 														cwd: options.cwd,
 													});
 												signal.throwIfAborted();
-												await observeToolCall(toolCall.name, args);
+												await observeToolCall(toolCall.name, args, isError);
 												return duplicateNote
 													? {
 															content: [
