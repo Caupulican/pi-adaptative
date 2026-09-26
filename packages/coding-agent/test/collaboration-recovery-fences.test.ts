@@ -91,3 +91,27 @@ it("publishes the same failure when its binding and saved turn remain unchanged"
 		expect.stringContaining("current server disconnected"),
 	);
 });
+
+it("waits for every active recovery worker before surfacing a publication failure", async () => {
+	const f = fixture(4);
+	const publicationFailure = new Error("injected publication failure");
+	f.publish.mockImplementation((jobId: string) => {
+		if (jobId === "job-0") throw publicationFailure;
+	});
+	const restored = reconcileCollaborationSessions(f.store, f.backend, f.publish, () => true);
+	let settled = false;
+	const observed = restored
+		.catch((error: unknown) => error)
+		.finally(() => {
+			settled = true;
+		});
+
+	f.pending[0]!.resolve(f.native);
+	await vi.waitFor(() => expect(f.publish).toHaveBeenCalledWith("job-0", expect.any(String), undefined));
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(settled).toBe(false);
+
+	for (const gate of f.pending.slice(1)) gate.resolve(f.native);
+	expect(await observed).toBe(publicationFailure);
+	expect(f.publish).toHaveBeenCalledTimes(4);
+});

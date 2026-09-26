@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { settleIndependentLifecycle } from "../lifecycle-settlement.ts";
 import type { CollaborationBackend, CollaborationAgent as NativeAgent } from "./backend.ts";
 import type { CollaborationCoordinatorDeps } from "./coordinator.ts";
 import type { CollaborationAgent, CollaborationJob, CollaborationJobStore } from "./job-store.ts";
@@ -148,42 +149,44 @@ export async function reconcileCollaborationSessions(
 ): Promise<void> {
 	const jobs = store.list().filter((job) => !job.dismissed && job.agents.some((agent) => !agent.closed));
 	let next = 0;
-	await Promise.all(
-		Array.from({ length: Math.min(4, jobs.length) }, async () => {
-			while (next < jobs.length && isCurrent()) {
-				const job = jobs[next++];
-				let identity = recoveryIdentity(job);
-				let failure: string | undefined;
-				try {
-					const client = await backend(job, false);
-					const native = await client.listAgents();
-					// Resolve any member stranded mid-stop before checking reattachment: a member this
-					// settles can never poison the job's own identity check with a shape it no longer has.
-					for (const initial of job.agents) {
-						const current = store.load(job.id).agents.find((candidate) => candidate.id === initial.id);
-						if (!current || current.closed || !current.stopping) continue;
-						await resolveStrandedMember(store, client, job.id, current, native);
-					}
-					const settled = store.load(job.id);
-					identity = recoveryIdentity(settled);
-					for (const expected of settled.agents) {
-						if (expected.closed) continue;
-						const actual = native.find((agent) => agent.name === expected.backendName);
-						assertCollaborationNativeIdentity(expected, actual);
-						if (expected.steering) {
-							throw new Error(
-								`Saved agent ${expected.id} has pending steering (turn ${expected.turnId}); successor intent: "${expected.steering.prompt.slice(0, 100)}".`,
-							);
-						}
-					}
-				} catch (error) {
-					failure = `Saved collaboration session could not be reattached: ${String(error).slice(0, 400)}`;
+	const workers = Array.from({ length: Math.min(4, jobs.length) }, async () => {
+		while (next < jobs.length && isCurrent()) {
+			const job = jobs[next++];
+			let identity = recoveryIdentity(job);
+			let failure: string | undefined;
+			try {
+				const client = await backend(job, false);
+				const native = await client.listAgents();
+				// Resolve any member stranded mid-stop before checking reattachment: a member this
+				// settles can never poison the job's own identity check with a shape it no longer has.
+				for (const initial of job.agents) {
+					const current = store.load(job.id).agents.find((candidate) => candidate.id === initial.id);
+					if (!current || current.closed || !current.stopping) continue;
+					await resolveStrandedMember(store, client, job.id, current, native);
 				}
-				if (!isCurrent()) return;
-				// A concurrent new turn/close owns a different reconciliation; this result is stale.
-				if (recoveryIdentity(store.load(job.id)) !== identity) continue;
-				publish(job.id, identity, failure);
+				const settled = store.load(job.id);
+				identity = recoveryIdentity(settled);
+				for (const expected of settled.agents) {
+					if (expected.closed) continue;
+					const actual = native.find((agent) => agent.name === expected.backendName);
+					assertCollaborationNativeIdentity(expected, actual);
+					if (expected.steering) {
+						throw new Error(
+							`Saved agent ${expected.id} has pending steering (turn ${expected.turnId}); successor intent: "${expected.steering.prompt.slice(0, 100)}".`,
+						);
+					}
+				}
+			} catch (error) {
+				failure = `Saved collaboration session could not be reattached: ${String(error).slice(0, 400)}`;
 			}
-		}),
+			if (!isCurrent()) return;
+			// A concurrent new turn/close owns a different reconciliation; this result is stale.
+			if (recoveryIdentity(store.load(job.id)) !== identity) continue;
+			publish(job.id, identity, failure);
+		}
+	});
+	await settleIndependentLifecycle(
+		workers.map((worker) => () => worker),
+		"Collaboration session reconciliation workers failed",
 	);
 }
