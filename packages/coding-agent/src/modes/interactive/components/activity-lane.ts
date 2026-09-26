@@ -29,6 +29,8 @@ export interface ActivityLaneItem {
 	 * Belongs to the turn that owns `startedAt`: a fresh clock always begins unmarked.
 	 */
 	firstTokenAt?: number;
+	/** Epoch ms when the first provider content visible in the transcript arrived. */
+	firstVisibleTokenAt?: number;
 	/** Frozen display-clock end, independent of terminal retention. */
 	completedAt?: number;
 	/** Producer wall-clock origin, converted once into `startedAt`. */
@@ -414,6 +416,7 @@ function sameActivityItem(a: ActivityLaneItem | undefined, b: ActivityLaneItem):
 		a.scope === b.scope &&
 		a.startedAt === b.startedAt &&
 		a.firstTokenAt === b.firstTokenAt &&
+		a.firstVisibleTokenAt === b.firstVisibleTokenAt &&
 		a.completedAt === b.completedAt &&
 		a.originAt === b.originAt &&
 		a.elapsedBeforeMs === b.elapsedBeforeMs &&
@@ -458,11 +461,17 @@ export function renderActivityLaneLine(
 		const total = formatElapsed((item.completedAt ?? now) - item.startedAt);
 		const kind = item.clockKind === "observed" ? "observed " : item.timingRole === "oldest" ? "oldest " : "";
 		if (!isTurnActivityItem(item) || slots.overlay) return ` (${kind}${total})`;
-		const waitedMs = (item.firstTokenAt ?? now) - item.startedAt;
-		if (waitedMs < FIRST_TOKEN_NOTICE_MS) return ` (${kind}${total})`;
-		return item.firstTokenAt === undefined
-			? ` (${kind}${total}, no token yet)`
-			: ` (${kind}${total}, first ${formatElapsed(waitedMs)})`;
+		const totalMs = (item.completedAt ?? now) - item.startedAt;
+		if (totalMs < FIRST_TOKEN_NOTICE_MS) return ` (${kind}${total})`;
+		if (item.firstTokenAt === undefined) return ` (${kind}${total}, no token yet)`;
+		const providerWaitMs = item.firstTokenAt - item.startedAt;
+		if (item.firstVisibleTokenAt === undefined) {
+			return ` (${kind}${total}, hidden thinking after ${formatElapsed(providerWaitMs)})`;
+		}
+		const visibleWaitMs = item.firstVisibleTokenAt - item.startedAt;
+		return item.firstVisibleTokenAt === item.firstTokenAt
+			? ` (${kind}${total}, first ${formatElapsed(providerWaitMs)})`
+			: ` (${kind}${total}, first visible ${formatElapsed(visibleWaitMs)})`;
 	};
 
 	// Turn slot: alive-anchor glyph plus the subject of the work and how long it has run. The one
@@ -651,12 +660,14 @@ export class ActivityLaneComponent implements Component {
 		const previous = this.live.get(item.id);
 		const clock = resolveDisplayClock(item, this.now(), previous, isBackgroundToolActivityItem(item), this.wallNow());
 		const firstTokenAt = item.firstTokenAt ?? previous?.firstTokenAt;
+		const firstVisibleTokenAt = item.firstVisibleTokenAt ?? previous?.firstVisibleTokenAt;
 		const next = {
 			...item,
 			label: boundedLabel(item.label),
 			status,
 			...clock,
 			firstTokenAt,
+			firstVisibleTokenAt,
 		};
 		if (sameActivityItem(previous, next)) return false;
 		this.live.set(item.id, next);
@@ -759,14 +770,18 @@ export class ActivityLaneComponent implements Component {
 	}
 
 	/**
-	 * Stamp the arrival of this turn's first provider token. Idempotent within the turn: the first
-	 * call wins and later ones are no-ops, so the caller may mark on every content delta. A no-op for
-	 * an item that is not live or has no clock to measure against.
+	 * Stamp the arrival of provider content and whether the operator can see it. The first provider
+	 * and first visible stamps are independently idempotent, so callers may mark every content delta.
+	 * A no-op for an item that is not live or has no clock to measure against.
 	 */
-	markFirstToken(id: string, at: number = this.now()): void {
+	markFirstToken(id: string, visibility: "visible" | "hidden" = "visible", at: number = this.now()): void {
 		const current = this.live.get(id);
-		if (!current || current.startedAt === undefined || current.firstTokenAt !== undefined) return;
-		this.live.set(id, { ...current, firstTokenAt: at });
+		if (!current || current.startedAt === undefined) return;
+		const firstTokenAt = current.firstTokenAt ?? at;
+		const firstVisibleTokenAt =
+			visibility === "visible" ? (current.firstVisibleTokenAt ?? at) : current.firstVisibleTokenAt;
+		if (firstTokenAt === current.firstTokenAt && firstVisibleTokenAt === current.firstVisibleTokenAt) return;
+		this.live.set(id, { ...current, firstTokenAt, firstVisibleTokenAt });
 		this.requestRender();
 	}
 

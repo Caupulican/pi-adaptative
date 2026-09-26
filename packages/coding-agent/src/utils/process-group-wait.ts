@@ -5,10 +5,16 @@
  * procfs does not emit inotify, so a remaining member is waited on with pidfd, not a timer.
  * A tree that cannot be observed does not look successful.
  */
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
+import {
+	type ChildProcessTerminationOptions,
+	type ChildProcessTerminationResult,
+	waitForChildProcessWithTermination,
+} from "./child-process.ts";
 
 const PYTHON = "python3";
+const PROCESS_GROUP_KILL_ACKNOWLEDGEMENT_MS = 1_000;
 const PIDFD_WAIT = [
 	"import errno, os, select, sys",
 	"poller = select.poll()",
@@ -150,37 +156,82 @@ function waitForPidExitEvent(pids: readonly number[], signal?: AbortSignal): Pro
 	});
 }
 
+async function waitForObservableProcessGroupExit(
+	pid: number,
+	phase: "exit" | "cancellation",
+	signal?: AbortSignal,
+): Promise<"exited" | "aborted"> {
+	let previousKey = "";
+	while (!groupGone(pid)) {
+		if (process.platform !== "linux") {
+			throw new ProcessTreeUntrackedError(
+				phase === "exit"
+					? `process group ${pid} outlived its leader`
+					: `process group ${pid} did not confirm cancellation`,
+			);
+		}
+		const members = membersOfGroup(pid);
+		if (members.length === 0) {
+			if (groupGone(pid)) return "exited";
+			throw new ProcessTreeUntrackedError(`process group ${pid} is live but has no readable members`);
+		}
+		const key = members.join(",");
+		if (key === previousKey) {
+			if (groupGone(pid)) return "exited";
+			throw new ProcessTreeUntrackedError(`process group ${pid} remained after its ${phase} event`);
+		}
+		previousKey = key;
+		try {
+			await waitForPidExitEvent(members, signal);
+		} catch (error) {
+			if (signal?.aborted) return "aborted";
+			throw error;
+		}
+	}
+	return "exited";
+}
+
 async function waitForProcessGroupExit(pid: number, signal?: AbortSignal): Promise<void> {
+	let abortKillOutcome: "delivered" | "gone" | "failed" | undefined;
+	let abortKillErrorCode: string | undefined;
 	const killGroup = (): void => {
 		try {
 			process.kill(-pid, "SIGKILL");
-		} catch {
-			// Absence is the loop condition. A failed kill stays untracked below.
+			abortKillOutcome = "delivered";
+		} catch (error) {
+			abortKillErrorCode = errorCode(error);
+			abortKillOutcome = abortKillErrorCode === "ESRCH" ? "gone" : "failed";
 		}
 	};
 	if (signal?.aborted) killGroup();
 	else signal?.addEventListener("abort", killGroup, { once: true });
 	try {
-		let previousKey = "";
-		while (!groupGone(pid)) {
-			if (process.platform !== "linux") {
-				throw new ProcessTreeUntrackedError(`process group ${pid} outlived its leader`);
-			}
-			const members = membersOfGroup(pid);
-			if (members.length === 0) {
-				if (groupGone(pid)) return;
-				throw new ProcessTreeUntrackedError(`process group ${pid} is live but has no readable members`);
-			}
-			const key = members.join(",");
-			if (key === previousKey) {
-				if (groupGone(pid)) return;
-				throw new ProcessTreeUntrackedError(`process group ${pid} remained after its exit event`);
-			}
-			previousKey = key;
-			await waitForPidExitEvent(members);
+		if ((await waitForObservableProcessGroupExit(pid, "exit", signal)) === "exited") return;
+		if (abortKillOutcome === "gone" || groupGone(pid)) return;
+		if (abortKillOutcome !== "delivered") {
+			throw new ProcessTreeUntrackedError(
+				`process group ${pid} could not be killed after cancellation (${abortKillErrorCode ?? "error"})`,
+			);
 		}
+		await waitForKilledProcessGroupExit(pid);
 	} finally {
 		signal?.removeEventListener("abort", killGroup);
+	}
+}
+
+/** A delivered SIGKILL still needs a bounded terminal acknowledgement. */
+async function waitForKilledProcessGroupExit(pid: number): Promise<void> {
+	const acknowledgement = new AbortController();
+	const timeout = setTimeout(() => acknowledgement.abort(), PROCESS_GROUP_KILL_ACKNOWLEDGEMENT_MS);
+	timeout.unref?.();
+	try {
+		if ((await waitForObservableProcessGroupExit(pid, "cancellation", acknowledgement.signal)) === "exited") return;
+		if (groupGone(pid)) return;
+		throw new ProcessTreeUntrackedError(
+			`process group ${pid} did not exit within ${PROCESS_GROUP_KILL_ACKNOWLEDGEMENT_MS}ms after cancellation`,
+		);
+	} finally {
+		clearTimeout(timeout);
 	}
 }
 
@@ -199,6 +250,41 @@ export async function awaitOwnedProcessGroup(
 	} catch (error) {
 		if (error instanceof ProcessTreeUntrackedError) noteProcessTreeUntracked(cwd);
 		throw error;
+	}
+}
+
+/** One deadline owner for the leader and every process that remains in its owned group. */
+export async function waitForOwnedProcessTreeWithTermination(
+	child: ChildProcess,
+	cwd: string,
+	options: ChildProcessTerminationOptions = {},
+): Promise<ChildProcessTerminationResult> {
+	const lifecycle = new AbortController();
+	let requestedReason: "aborted" | "timeout" | undefined;
+	let timeout: NodeJS.Timeout | undefined;
+	const requestTermination = (reason: "aborted" | "timeout"): void => {
+		if (requestedReason !== undefined) return;
+		requestedReason = reason;
+		lifecycle.abort();
+	};
+	const onAbort = (): void => requestTermination("aborted");
+	if (options.signal?.aborted) onAbort();
+	else options.signal?.addEventListener("abort", onAbort, { once: true });
+	if (options.timeoutMs !== undefined) {
+		timeout = setTimeout(() => requestTermination("timeout"), Math.max(0, options.timeoutMs));
+		timeout.unref();
+	}
+	try {
+		const terminal = await waitForChildProcessWithTermination(child, {
+			signal: lifecycle.signal,
+			killGraceMs: options.killGraceMs,
+			onDiagnostic: options.onDiagnostic,
+		});
+		await awaitOwnedProcessGroup(child.pid, cwd, lifecycle.signal);
+		return { code: terminal.code, reason: requestedReason ?? terminal.reason };
+	} finally {
+		if (timeout) clearTimeout(timeout);
+		options.signal?.removeEventListener("abort", onAbort);
 	}
 }
 

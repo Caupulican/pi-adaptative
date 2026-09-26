@@ -1,10 +1,11 @@
-import type { AgentMessage } from "@caupulican/pi-agent-core";
+import type { AgentMessage, AgentMessageOrigin } from "@caupulican/pi-agent-core";
 import type { Message } from "@caupulican/pi-ai";
 
 export type ModelRouterBufferedSessionMessage =
 	| {
 			kind: "message";
 			message: Message;
+			origin?: AgentMessageOrigin;
 	  }
 	| {
 			kind: "custom";
@@ -25,8 +26,12 @@ export function createModelRouterSessionBuffer(): ModelRouterSessionBuffer {
 	return { messages: [], committed: false, prefixCommitted: false, prefixMessageCount: 0 };
 }
 
-export function bufferModelRouterSessionMessage(buffer: ModelRouterSessionBuffer, message: Message): void {
-	buffer.messages.push({ kind: "message", message });
+export function bufferModelRouterSessionMessage(
+	buffer: ModelRouterSessionBuffer,
+	message: Message,
+	origin?: AgentMessageOrigin,
+): void {
+	buffer.messages.push({ kind: "message", message, ...(origin === undefined ? {} : { origin }) });
 }
 
 export function bufferModelRouterSessionCustomMessage(

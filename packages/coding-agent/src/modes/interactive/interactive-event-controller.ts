@@ -255,11 +255,12 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 
 		case "message_update":
 			if (event.message.role !== "assistant") break;
-			// The turn's time-to-first-token ends here, at the provider's first produced content, not
-			// at the framing events around it: `isFirstTokenEvent` is the same predicate the agent
-			// loop stamps `firstTokenAt` with. The mark is idempotent, so every later delta is a no-op.
+			// Provider activity and visible output are separate clocks: hidden thinking proves the
+			// provider answered, but must not claim that the operator has received readable output.
 			if (isFirstTokenEvent(event.assistantMessageEvent)) {
-				host.activityLane?.markFirstToken(RUNTIME_TURN_ACTIVITY_ID);
+				const visibility =
+					event.assistantMessageEvent.type === "thinking_delta" && host.hideThinkingBlock ? "hidden" : "visible";
+				host.activityLane?.markFirstToken(RUNTIME_TURN_ACTIVITY_ID, visibility);
 			}
 			if (host.streamingComponent) {
 				updateCommentaryActivity(host, event.message);

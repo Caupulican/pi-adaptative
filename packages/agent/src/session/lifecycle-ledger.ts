@@ -42,6 +42,16 @@ export interface RequestSnapshotEntry extends SessionEntryBase {
 
 export type SessionRequestSnapshotInput = Omit<RequestSnapshotEntry, "type" | "id" | "parentId" | "timestamp">;
 
+export type ProviderRequestOutcome = "completed" | "aborted" | "error" | "interrupted";
+
+export interface ProviderRequestTerminalEntry extends SessionEntryBase {
+	type: "provider_request_terminal";
+	requestId: string;
+	outcome: ProviderRequestOutcome;
+	/** Canonical assistant response for every transport terminal except a recovered interruption. */
+	assistantMessageEntryId?: string;
+}
+
 export interface ForegroundToolStartEntry extends SessionEntryBase {
 	type: "foreground_tool_start";
 	requestId: string;
@@ -83,6 +93,7 @@ export interface CompactionEndEntry extends SessionEntryBase {
 
 export type SessionLifecycleEntry =
 	| RequestSnapshotEntry
+	| ProviderRequestTerminalEntry
 	| ForegroundToolStartEntry
 	| ForegroundToolTerminalEntry
 	| CompactionStartEntry
@@ -157,6 +168,8 @@ function fieldsForType(type: string): readonly string[] {
 				"firstDivergentKind",
 				"messageCount",
 			];
+		case "provider_request_terminal":
+			return ["requestId", "outcome", "assistantMessageEntryId"];
 		case "foreground_tool_start":
 			return ["requestId", "assistantMessageEntryId", "callId", "toolName"];
 		case "foreground_tool_terminal":
@@ -234,6 +247,27 @@ export function validateSessionLifecycleEntry(value: unknown): asserts value is 
 			}
 			if (record.firstDivergentKind !== undefined)
 				assertBoundedString(record.firstDivergentKind, "firstDivergentKind", 256);
+			break;
+		case "provider_request_terminal":
+			assertExternalId(record.requestId, "requestId");
+			if (
+				record.outcome !== "completed" &&
+				record.outcome !== "aborted" &&
+				record.outcome !== "error" &&
+				record.outcome !== "interrupted"
+			) {
+				throw lifecycleValidationError("outcome", "expected completed, aborted, error, or interrupted");
+			}
+			if (record.outcome === "interrupted") {
+				if (record.assistantMessageEntryId !== undefined) {
+					throw lifecycleValidationError(
+						"assistantMessageEntryId",
+						"interrupted requests cannot reference an assistant response",
+					);
+				}
+			} else {
+				assertSessionEntryId(record.assistantMessageEntryId, "assistantMessageEntryId");
+			}
 			break;
 		case "foreground_tool_start":
 			assertExternalId(record.requestId, "requestId");
@@ -355,6 +389,13 @@ export interface SessionLifecycleToolResult {
 	errorKind?: "tool_failure" | "operation_outcome";
 }
 
+export interface SessionLifecycleProviderResponse {
+	requestId: string;
+	assistantMessageEntryId: string;
+	position: number;
+	outcome: Exclude<ProviderRequestOutcome, "interrupted">;
+}
+
 export interface SessionLifecycleToolRecord {
 	starts: readonly ForegroundToolStartEntry[];
 	terminals: readonly ForegroundToolTerminalEntry[];
@@ -386,6 +427,8 @@ export interface SessionLifecycleIndex {
 	entryTypes: ReadonlyMap<string, string>;
 	entriesById: ReadonlyMap<string, SessionEntry>;
 	requestSnapshots: readonly RequestSnapshotEntry[];
+	providerRequestTerminals: readonly ProviderRequestTerminalEntry[];
+	providerResponses: readonly SessionLifecycleProviderResponse[];
 	assistantToolCalls: readonly SessionLifecycleAssistantToolCall[];
 	toolResults: readonly SessionLifecycleToolResult[];
 	toolsByIdentity: ReadonlyMap<string, SessionLifecycleToolRecord>;
@@ -422,6 +465,12 @@ export interface SessionLifecycleTerminalPromotion {
 export interface SessionLifecycleInspection extends SessionLifecycleIndex {
 	refusalReasons: readonly string[];
 	duplicateRequestSnapshots: readonly RequestSnapshotEntry[];
+	unansweredProviderRequests: readonly RequestSnapshotEntry[];
+	unmatchedProviderRequestTerminals: readonly ProviderRequestTerminalEntry[];
+	duplicateProviderRequestTerminals: readonly ProviderRequestTerminalEntry[];
+	duplicateProviderResponses: readonly SessionLifecycleProviderResponse[];
+	mismatchedProviderRequestTerminals: readonly string[];
+	outOfOrderProviderRequestTerminals: readonly string[];
 	unmatchedToolStarts: readonly ForegroundToolStartEntry[];
 	unmatchedToolTerminals: readonly ForegroundToolTerminalEntry[];
 	duplicateToolStarts: readonly ForegroundToolStartEntry[];
@@ -445,6 +494,11 @@ export interface SessionLifecycleInspection extends SessionLifecycleIndex {
 export interface SessionLifecycleRepairPlan {
 	refused: boolean;
 	refusalReasons: readonly string[];
+	providerRequestClosers: readonly {
+		requestId: string;
+		sourceEntryId: string;
+		outcome: "interrupted";
+	}[];
 	toolClosers: readonly {
 		requestId?: string;
 		assistantMessageEntryId: string;
@@ -488,6 +542,9 @@ export function indexSessionLifecycle(entries: readonly SessionEntry[], leafId?:
 		entriesById.set(branch[position]!.id, branch[position]!);
 	}
 	const requestSnapshots = branch.filter((entry): entry is RequestSnapshotEntry => entry.type === "request_snapshot");
+	const providerRequestTerminals = branch.filter(
+		(entry): entry is ProviderRequestTerminalEntry => entry.type === "provider_request_terminal",
+	);
 	const requestAtPosition: Array<RequestSnapshotEntry | undefined> = [];
 	let currentRequest: RequestSnapshotEntry | undefined;
 	for (let position = 0; position < branch.length; position += 1) {
@@ -496,6 +553,7 @@ export function indexSessionLifecycle(entries: readonly SessionEntry[], leafId?:
 		requestAtPosition[position] = currentRequest;
 	}
 	const assistantToolCalls: SessionLifecycleAssistantToolCall[] = [];
+	const providerResponses: SessionLifecycleProviderResponse[] = [];
 	const assistantCallsByMessageCall = new Map<string, SessionLifecycleAssistantToolCall[]>();
 	const pendingCallsByRequestAndCall = new Map<string, SessionLifecycleAssistantToolCall[]>();
 	const completedCallsByRequestAndCall = new Map<string, SessionLifecycleAssistantToolCall>();
@@ -528,6 +586,19 @@ export function indexSessionLifecycle(entries: readonly SessionEntry[], leafId?:
 		if (entry.type !== "message") continue;
 		if (entry.message.role === "assistant") {
 			const request = requestAtPosition[position];
+			if (request && entry.origin !== "local") {
+				providerResponses.push({
+					requestId: request.requestId,
+					assistantMessageEntryId: entry.id,
+					position,
+					outcome:
+						entry.message.stopReason === "aborted"
+							? "aborted"
+							: entry.message.stopReason === "error"
+								? "error"
+								: "completed",
+				});
+			}
 			for (const block of entry.message.content) {
 				if (block.type !== "toolCall") continue;
 				const call: SessionLifecycleAssistantToolCall = {
@@ -647,6 +718,8 @@ export function indexSessionLifecycle(entries: readonly SessionEntry[], leafId?:
 		entryTypes,
 		entriesById,
 		requestSnapshots,
+		providerRequestTerminals,
+		providerResponses,
 		assistantToolCalls,
 		toolResults,
 		toolsByIdentity,
@@ -667,9 +740,58 @@ export function inspectSessionLifecycle(
 	const index = indexSessionLifecycle(entries, leafId);
 	const duplicateRequestSnapshots: RequestSnapshotEntry[] = [];
 	const requestIds = new Set<string>();
+	const snapshotsByRequest = new Map<string, RequestSnapshotEntry>();
 	for (const request of index.requestSnapshots) {
 		if (requestIds.has(request.requestId)) duplicateRequestSnapshots.push(request);
 		requestIds.add(request.requestId);
+		if (!snapshotsByRequest.has(request.requestId)) snapshotsByRequest.set(request.requestId, request);
+	}
+	const responsesByRequest = new Map<string, SessionLifecycleProviderResponse[]>();
+	for (const response of index.providerResponses) {
+		const responses = responsesByRequest.get(response.requestId) ?? [];
+		responses.push(response);
+		responsesByRequest.set(response.requestId, responses);
+	}
+	const terminalsByRequest = new Map<string, ProviderRequestTerminalEntry[]>();
+	for (const terminal of index.providerRequestTerminals) {
+		const terminals = terminalsByRequest.get(terminal.requestId) ?? [];
+		terminals.push(terminal);
+		terminalsByRequest.set(terminal.requestId, terminals);
+	}
+	const unansweredProviderRequests: RequestSnapshotEntry[] = [];
+	const unmatchedProviderRequestTerminals: ProviderRequestTerminalEntry[] = [];
+	const duplicateProviderRequestTerminals: ProviderRequestTerminalEntry[] = [];
+	const duplicateProviderResponses: SessionLifecycleProviderResponse[] = [];
+	const mismatchedProviderRequestTerminals: string[] = [];
+	const outOfOrderProviderRequestTerminals: string[] = [];
+	for (const [requestId, terminals] of terminalsByRequest) {
+		if (!snapshotsByRequest.has(requestId)) unmatchedProviderRequestTerminals.push(...terminals);
+		if (terminals.length > 1) duplicateProviderRequestTerminals.push(...terminals.slice(1));
+	}
+	for (const request of index.requestSnapshots) {
+		const responses = responsesByRequest.get(request.requestId) ?? [];
+		const terminals = terminalsByRequest.get(request.requestId) ?? [];
+		if (responses.length > 1) duplicateProviderResponses.push(...responses.slice(1));
+		if (responses.length === 0 && terminals.length === 0) unansweredProviderRequests.push(request);
+		const terminal = terminals[0];
+		if (!terminal) continue;
+		const requestPosition = index.entryPositions.get(request.id) ?? -1;
+		const terminalPosition = index.entryPositions.get(terminal.id) ?? -1;
+		if (terminalPosition <= requestPosition) outOfOrderProviderRequestTerminals.push(terminal.id);
+		const response = responses[0];
+		if (terminal.outcome === "interrupted") {
+			if (response) mismatchedProviderRequestTerminals.push(terminal.id);
+			continue;
+		}
+		if (
+			!response ||
+			terminal.assistantMessageEntryId !== response.assistantMessageEntryId ||
+			terminal.outcome !== response.outcome
+		) {
+			mismatchedProviderRequestTerminals.push(terminal.id);
+			continue;
+		}
+		if (terminalPosition <= response.position) outOfOrderProviderRequestTerminals.push(terminal.id);
 	}
 	const unmatchedToolStarts: ForegroundToolStartEntry[] = [];
 	const unmatchedToolTerminals: ForegroundToolTerminalEntry[] = [];
@@ -807,6 +929,11 @@ export function inspectSessionLifecycle(
 		...(index.ambiguousResultEntryIds.length > 0 ? ["ambiguous tool-result association"] : []),
 		...(index.unmatchedResultEntryIds.length > 0 ? ["unmatched tool-result association"] : []),
 		...(duplicateRequestSnapshots.length > 0 ? ["duplicate request snapshots"] : []),
+		...(unmatchedProviderRequestTerminals.length > 0 ? ["unmatched provider request terminals"] : []),
+		...(duplicateProviderRequestTerminals.length > 0 ? ["duplicate provider request terminals"] : []),
+		...(duplicateProviderResponses.length > 0 ? ["duplicate provider responses"] : []),
+		...(mismatchedProviderRequestTerminals.length > 0 ? ["mismatched provider request terminals"] : []),
+		...(outOfOrderProviderRequestTerminals.length > 0 ? ["out-of-order provider request lifecycle"] : []),
 		...(unmatchedToolStarts.length > 0 ? ["unmatched lifecycle tool starts"] : []),
 		...(unmatchedToolTerminals.length > 0 ? ["unmatched lifecycle tool terminals"] : []),
 		...(duplicateToolStarts.length > 0 ? ["duplicate lifecycle tool starts"] : []),
@@ -825,6 +952,12 @@ export function inspectSessionLifecycle(
 		...index,
 		refusalReasons,
 		duplicateRequestSnapshots,
+		unansweredProviderRequests,
+		unmatchedProviderRequestTerminals,
+		duplicateProviderRequestTerminals,
+		duplicateProviderResponses,
+		mismatchedProviderRequestTerminals,
+		outOfOrderProviderRequestTerminals,
 		unmatchedToolStarts,
 		unmatchedToolTerminals,
 		duplicateToolStarts,
@@ -844,6 +977,7 @@ export function inspectSessionLifecycle(
 		terminalPromotions,
 		balanced:
 			refusalReasons.length === 0 &&
+			unansweredProviderRequests.length === 0 &&
 			unstartedTools.length === 0 &&
 			unknownToolOutcomes.length === 0 &&
 			terminalPromotions.length === 0 &&
@@ -861,6 +995,7 @@ export function planSessionLifecycleRepair(
 		return {
 			refused: true,
 			refusalReasons: inspection.refusalReasons,
+			providerRequestClosers: [],
 			toolClosers: [],
 			terminalPromotions: [],
 			compactionClosers: [],
@@ -885,6 +1020,11 @@ export function planSessionLifecycleRepair(
 	return {
 		refused: false,
 		refusalReasons: [],
+		providerRequestClosers: inspection.unansweredProviderRequests.map((request) => ({
+			requestId: request.requestId,
+			sourceEntryId: request.id,
+			outcome: "interrupted" as const,
+		})),
 		toolClosers,
 		terminalPromotions: inspection.terminalPromotions,
 		compactionClosers: inspection.orphanedCompactions.map((start) => ({

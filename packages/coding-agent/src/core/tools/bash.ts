@@ -23,9 +23,8 @@ import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.ts";
 import { theme } from "../../modes/interactive/theme/theme.ts";
-import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { createPowerShellHostEnvironment, POWERSHELL_7_GUARD } from "../../utils/powershell-session-protocol.ts";
-import { awaitOwnedProcessGroup } from "../../utils/process-group-wait.ts";
+import { waitForOwnedProcessTreeWithTermination } from "../../utils/process-group-wait.ts";
 import {
 	getPlatformShellToolName,
 	getShellConfig,
@@ -261,12 +260,11 @@ function createLocalShellOperations(
 				if (signal.aborted) onAbort();
 				else signal.addEventListener("abort", onAbort, { once: true });
 			}
-			const terminal = await waitForChildProcessWithTermination(child, {
+			const terminal = await waitForOwnedProcessTreeWithTermination(child, cwd, {
 				signal: terminationController.signal,
 				timeoutMs: timeout !== undefined && timeout > 0 ? timeout * 1000 : undefined,
 				killGraceMs: 2_000,
 			});
-			await awaitOwnedProcessGroup(child.pid, cwd, signal);
 			if (signal?.aborted) throw new Error("aborted");
 			if (terminal.reason === "timeout") throw new Error(`timeout:${timeout}`);
 			if (silenceKilled) throw new Error(`silence:${silenceMs / 1000}`);

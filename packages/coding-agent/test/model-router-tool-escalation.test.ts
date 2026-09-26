@@ -37,6 +37,13 @@ describe("model router tool escalation", () => {
 				args: { command: "npm view @caupulican/pi version" },
 			}),
 		).toBe(false);
+		expect(
+			shouldEscalateModelRouterTool({
+				tier: "cheap",
+				toolName: "bash",
+				args: { command: "find . -maxdepth 2 -type f 2>/dev/null | head -20" },
+			}),
+		).toBe(false);
 	});
 
 	it("classifies native PowerShell reads and mutations", () => {

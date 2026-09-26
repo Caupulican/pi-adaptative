@@ -31,7 +31,7 @@
  * ModelRouterControllerDeps.getToolProbeVerdict}).
  */
 
-import type { Agent, AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core";
+import type { Agent, AgentMessage, AgentMessageOrigin, ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { SessionManager, SessionMessageBatchEntry } from "@caupulican/pi-agent-core/node";
 import type { Api, Message, Model, Usage } from "@caupulican/pi-ai";
 import { clampThinkingLevel, modelsAreEqual } from "@caupulican/pi-ai/models";
@@ -444,7 +444,7 @@ export class ModelRouterController {
 	 * buffer instead of persisting them (they are flushed on success or discarded on escalation).
 	 * Returns true when the message was buffered, so the host skips its own persistence.
 	 */
-	captureSessionMessage(message: AgentMessage): boolean {
+	captureSessionMessage(message: AgentMessage, origin?: AgentMessageOrigin): boolean {
 		const modelRouterBuffer = this._modelRouterSessionBuffer;
 		if (!modelRouterBuffer || modelRouterBuffer.committed) return false;
 		if (message.role === "custom") {
@@ -452,7 +452,7 @@ export class ModelRouterController {
 			return true;
 		}
 		if (message.role === "user" || message.role === "assistant" || message.role === "toolResult") {
-			bufferModelRouterSessionMessage(modelRouterBuffer, message as Message);
+			bufferModelRouterSessionMessage(modelRouterBuffer, message as Message, origin);
 			return true;
 		}
 		return false;

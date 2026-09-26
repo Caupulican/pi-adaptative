@@ -180,6 +180,74 @@ describe("session lifecycle ledger", () => {
 		]);
 	});
 
+	it("repairs only provider requests that have no persisted assistant response", () => {
+		const interrupted = SessionManager.inMemory();
+		const requestEntryId = interrupted.appendRequestSnapshot(requestSnapshot("request-interrupted"));
+		expect(interrupted.inspectSessionLifecycle()).toMatchObject({
+			unansweredProviderRequests: [{ id: requestEntryId, requestId: "request-interrupted" }],
+			balanced: false,
+		});
+		expect(interrupted.planSessionLifecycleRepair()).toMatchObject({
+			providerRequestClosers: [
+				{ requestId: "request-interrupted", sourceEntryId: requestEntryId, outcome: "interrupted" },
+			],
+		});
+
+		const completed = SessionManager.inMemory();
+		completed.appendRequestSnapshot(requestSnapshot("request-completed"));
+		completed.appendMessage(fauxAssistantMessage("done"));
+		expect(completed.inspectSessionLifecycle()).toMatchObject({ unansweredProviderRequests: [], balanced: true });
+		expect(completed.planSessionLifecycleRepair()).toMatchObject({ providerRequestClosers: [] });
+	});
+
+	it("rejects duplicate or contradictory provider terminals and detects a late response after interruption", () => {
+		const failed = SessionManager.inMemory();
+		failed.appendRequestSnapshot(requestSnapshot("request-failed"));
+		const failedAssistantId = failed.appendMessage(
+			fauxAssistantMessage("failed", { stopReason: "error", errorMessage: "provider failed" }),
+		);
+		expect(() => failed.appendProviderRequestTerminal("request-failed", "completed", failedAssistantId)).toThrow(
+			/contradicts/,
+		);
+		failed.appendProviderRequestTerminal("request-failed", "error", failedAssistantId);
+		expect(() => failed.appendProviderRequestTerminal("request-failed", "error", failedAssistantId)).toThrow(
+			/duplicate provider request terminal/i,
+		);
+
+		const interrupted = SessionManager.inMemory();
+		interrupted.appendRequestSnapshot(requestSnapshot("request-late"));
+		interrupted.appendProviderRequestTerminal("request-late", "interrupted");
+		interrupted.appendMessage(fauxAssistantMessage("late"));
+		expect(interrupted.inspectSessionLifecycle()).toMatchObject({
+			mismatchedProviderRequestTerminals: [expect.any(String)],
+			balanced: false,
+		});
+		expect(interrupted.planSessionLifecycleRepair().refused).toBe(true);
+	});
+
+	it("keeps a host-local assistant handoff out of provider-response identity", () => {
+		const session = SessionManager.inMemory();
+		session.appendRequestSnapshot(requestSnapshot("request-provider-complete"));
+		const providerResponseId = session.appendMessage(fauxAssistantMessage("provider response"));
+		session.appendProviderRequestTerminal("request-provider-complete", "completed", providerResponseId);
+		const localHandoffId = session.appendMessage(
+			fauxAssistantMessage("local handoff", { stopReason: "error", errorMessage: "tool scheduling failed" }),
+			"local",
+		);
+
+		const inspection = session.inspectSessionLifecycle();
+		expect(inspection.providerResponses).toEqual([
+			expect.objectContaining({
+				requestId: "request-provider-complete",
+				assistantMessageEntryId: providerResponseId,
+			}),
+		]);
+		expect(inspection.duplicateProviderResponses).toEqual([]);
+		expect(inspection.mismatchedProviderRequestTerminals).toEqual([]);
+		expect(inspection.balanced).toBe(true);
+		expect(session.getEntry(localHandoffId)).toMatchObject({ origin: "local" });
+	});
+
 	it("accepts provider identifiers containing colon and pipe and keeps model order", () => {
 		const session = SessionManager.inMemory();
 		session.appendRequestSnapshot(requestSnapshot("provider:req|1"));
@@ -269,6 +337,7 @@ describe("session lifecycle ledger", () => {
 		expect(planSessionLifecycleRepair(session.getEntries())).toEqual({
 			refused: false,
 			refusalReasons: [],
+			providerRequestClosers: [],
 			toolClosers: [],
 			terminalPromotions: [],
 			compactionClosers: [],

@@ -56,6 +56,14 @@ export interface JobSchedulerProvider {
 	stop(): void | Promise<void>;
 }
 
+export interface GatewayRegistryOptions {
+	/** Bound for each provider lifecycle callback. */
+	lifecycleTimeoutMs?: number;
+	onDiagnostic?: (message: string) => void;
+}
+
+export const DEFAULT_GATEWAY_LIFECYCLE_TIMEOUT_MS = 30_000;
+
 /**
  * Holds registered channel + scheduler providers and drives their lifecycle. A session starts all
  * registered providers when it binds and stops them on dispose. Registration is additive and idempotent
@@ -67,11 +75,59 @@ export class GatewayRegistry {
 	private started = false;
 	private inboundHandler: ChannelInboundHandler = () => {};
 	private readonly pendingLifecycle = new Set<Promise<void>>();
+	private readonly lifecycleTimeoutMs: number;
+	private readonly onDiagnostic: (message: string) => void;
 
-	private trackLifecycle(operation: () => void | Promise<void>): void {
+	constructor(options: GatewayRegistryOptions = {}) {
+		this.lifecycleTimeoutMs = options.lifecycleTimeoutMs ?? DEFAULT_GATEWAY_LIFECYCLE_TIMEOUT_MS;
+		if (!Number.isSafeInteger(this.lifecycleTimeoutMs) || this.lifecycleTimeoutMs < 1) {
+			throw new TypeError("Gateway lifecycle timeout must be a positive safe integer.");
+		}
+		this.onDiagnostic = options.onDiagnostic ?? (() => {});
+	}
+
+	private async runLifecycle(
+		providerName: string,
+		phase: "start" | "stop",
+		operation: () => void | Promise<void>,
+		onLateStart?: () => void,
+	): Promise<void> {
+		let operationPromise: Promise<void>;
+		try {
+			operationPromise = Promise.resolve(operation());
+		} catch {
+			return;
+		}
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const outcome = await Promise.race([
+			operationPromise.then(
+				() => "settled" as const,
+				() => "settled" as const,
+			),
+			new Promise<"timed_out">((resolve) => {
+				timeout = setTimeout(() => resolve("timed_out"), this.lifecycleTimeoutMs);
+				timeout.unref?.();
+			}),
+		]);
+		if (timeout) clearTimeout(timeout);
+		if (outcome !== "timed_out") return;
+		try {
+			this.onDiagnostic(
+				`Gateway ${providerName} ${phase} timed out after ${this.lifecycleTimeoutMs}ms; session lifecycle continued.`,
+			);
+		} catch {}
+		if (onLateStart) void operationPromise.then(onLateStart, () => undefined);
+	}
+
+	private trackLifecycle(
+		providerName: string,
+		phase: "start" | "stop",
+		operation: () => void | Promise<void>,
+		onLateStart?: () => void,
+	): void {
 		let pending: Promise<void>;
 		try {
-			pending = Promise.resolve(operation()).catch(() => {});
+			pending = this.runLifecycle(providerName, phase, operation, onLateStart);
 		} catch {
 			return;
 		}
@@ -88,16 +144,32 @@ export class GatewayRegistry {
 	registerChannel(provider: ChannelProvider): void {
 		// Stop a same-named provider being replaced so its listeners/sockets don't leak (Bug #17).
 		const existing = this.channels.get(provider.name);
-		if (existing && existing !== provider) this.trackLifecycle(() => existing.stop());
+		if (existing && existing !== provider) this.trackLifecycle(existing.name, "stop", () => existing.stop());
 		this.channels.set(provider.name, provider);
-		if (this.started) this.trackLifecycle(() => provider.start(this.inboundHandler));
+		if (this.started)
+			this.trackLifecycle(
+				provider.name,
+				"start",
+				() => provider.start(this.inboundHandler),
+				() => {
+					this.trackLifecycle(provider.name, "stop", () => provider.stop());
+				},
+			);
 	}
 
 	registerScheduler(provider: JobSchedulerProvider): void {
 		const existing = this.schedulers.get(provider.name);
-		if (existing && existing !== provider) this.trackLifecycle(() => existing.stop());
+		if (existing && existing !== provider) this.trackLifecycle(existing.name, "stop", () => existing.stop());
 		this.schedulers.set(provider.name, provider);
-		if (this.started) this.trackLifecycle(() => provider.start());
+		if (this.started)
+			this.trackLifecycle(
+				provider.name,
+				"start",
+				() => provider.start(),
+				() => {
+					this.trackLifecycle(provider.name, "stop", () => provider.stop());
+				},
+			);
 	}
 
 	getChannel(name: string): ChannelProvider | undefined {
@@ -120,18 +192,28 @@ export class GatewayRegistry {
 		}
 		this.started = true;
 		this.inboundHandler = onInbound;
-		for (const channel of this.channels.values()) {
-			try {
-				await channel.start(onInbound);
-			} catch {
-				// a failing channel must not block the others
-			}
-		}
-		for (const scheduler of this.schedulers.values()) {
-			try {
-				await scheduler.start();
-			} catch {}
-		}
+		await Promise.all([
+			...[...this.channels.values()].map((channel) =>
+				this.runLifecycle(
+					channel.name,
+					"start",
+					() => channel.start(onInbound),
+					() => {
+						this.trackLifecycle(channel.name, "stop", () => channel.stop());
+					},
+				),
+			),
+			...[...this.schedulers.values()].map((scheduler) =>
+				this.runLifecycle(
+					scheduler.name,
+					"start",
+					() => scheduler.start(),
+					() => {
+						this.trackLifecycle(scheduler.name, "stop", () => scheduler.stop());
+					},
+				),
+			),
+		]);
 		await this.drainLifecycle();
 	}
 
@@ -145,15 +227,11 @@ export class GatewayRegistry {
 		// Late-registration starts and replacement stops must settle before the final stop pass;
 		// otherwise an async start can complete after shutdown and leak a listener/process.
 		await this.drainLifecycle();
-		for (const channel of this.channels.values()) {
-			try {
-				await channel.stop();
-			} catch {}
-		}
-		for (const scheduler of this.schedulers.values()) {
-			try {
-				await scheduler.stop();
-			} catch {}
-		}
+		await Promise.all([
+			...[...this.channels.values()].map((channel) => this.runLifecycle(channel.name, "stop", () => channel.stop())),
+			...[...this.schedulers.values()].map((scheduler) =>
+				this.runLifecycle(scheduler.name, "stop", () => scheduler.stop()),
+			),
+		]);
 	}
 }

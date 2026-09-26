@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type ChannelInboundHandler,
 	type ChannelMessage,
@@ -46,6 +46,8 @@ class FakeScheduler implements JobSchedulerProvider {
 }
 
 describe("GatewayRegistry (R8 interface-driven gateways/cron)", () => {
+	afterEach(() => vi.useRealTimers());
+
 	it("starts and stops registered providers and routes inbound messages", async () => {
 		const registry = new GatewayRegistry();
 		const channel = new FakeChannel();
@@ -109,6 +111,58 @@ describe("GatewayRegistry (R8 interface-driven gateways/cron)", () => {
 		releaseStart();
 		await shutdown;
 		expect(stopCalled).toBe(true);
+	});
+
+	it("bounds a provider start that never settles and continues starting independent providers", async () => {
+		vi.useFakeTimers();
+		const diagnostics: string[] = [];
+		const registry = new GatewayRegistry({
+			lifecycleTimeoutMs: 25,
+			onDiagnostic: (message) => diagnostics.push(message),
+		});
+		registry.registerChannel({
+			name: "hanging-start",
+			start: () => new Promise<void>(() => {}),
+			send: () => {},
+			stop: () => {},
+		});
+		const scheduler = new FakeScheduler();
+		registry.registerScheduler(scheduler);
+
+		const starting = registry.start(() => {});
+		expect(scheduler.started).toBe(true);
+		await vi.advanceTimersByTimeAsync(25);
+		await starting;
+
+		expect(scheduler.started).toBe(true);
+		expect(diagnostics).toEqual([expect.stringContaining("hanging-start start timed out")]);
+		await registry.stop();
+	});
+
+	it("bounds a provider stop that never settles", async () => {
+		vi.useFakeTimers();
+		const diagnostics: string[] = [];
+		const registry = new GatewayRegistry({
+			lifecycleTimeoutMs: 25,
+			onDiagnostic: (message) => diagnostics.push(message),
+		});
+		registry.registerChannel({
+			name: "hanging-stop",
+			start: () => {},
+			send: () => {},
+			stop: () => new Promise<void>(() => {}),
+		});
+		const scheduler = new FakeScheduler();
+		registry.registerScheduler(scheduler);
+		await registry.start(() => {});
+
+		const stopping = registry.stop();
+		await Promise.resolve();
+		expect(scheduler.stopped).toBe(true);
+		await vi.advanceTimersByTimeAsync(25);
+		await stopping;
+
+		expect(diagnostics).toEqual([expect.stringContaining("hanging-stop stop timed out")]);
 	});
 
 	it("is a no-op when empty (the default — no transports baked in)", async () => {

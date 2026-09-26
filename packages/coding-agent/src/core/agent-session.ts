@@ -542,7 +542,9 @@ export class AgentSession {
 	private _toolProfileFilter?: Required<ResourceProfileFilterSettings>;
 	private readonly _isExplicitModel: boolean;
 	private readonly _isExplicitThinking: boolean;
-	private readonly _gatewayRegistry = new GatewayRegistry();
+	private readonly _gatewayRegistry = new GatewayRegistry({
+		onDiagnostic: (message) => this._emit({ type: "warning", message }),
+	});
 	/** Usage/cost/stats accounting, /context estimate, and session export (see session-analytics.ts);
 	 * owns the spawned-usage and daily-usage memo caches. */
 	private readonly _analytics: SessionAnalytics;
@@ -3896,7 +3898,7 @@ export class AgentSession {
 		if (event.type === "message_end") {
 			compactToolResultDetailsForRetention(event.message);
 			let messagePersisted = false;
-			if (this._modelRouter.captureSessionMessage(event.message)) {
+			if (this._modelRouter.captureSessionMessage(event.message, event.origin)) {
 				// buffered by the router; persistence is deferred to the routed-turn flush
 			} else if (event.message.role === "custom") {
 				this.sessionManager.appendCustomMessageEntry(
@@ -3912,7 +3914,7 @@ export class AgentSession {
 				event.message.role === "assistant" ||
 				event.message.role === "toolResult"
 			) {
-				this._foregroundLifecycle.appendMessage(event.message);
+				this._foregroundLifecycle.appendMessage(event.message, event.origin);
 				messagePersisted = true;
 			}
 			// Track the response for ordered retry/failover/compaction handling after agent_end.

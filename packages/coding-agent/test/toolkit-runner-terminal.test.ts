@@ -2,11 +2,14 @@ import { ChildProcess } from "node:child_process";
 import { PassThrough } from "node:stream";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnScriptExecutor } from "../src/core/toolkit/script-runner.ts";
-import { spawnProcess, waitForChildProcessWithTermination } from "../src/utils/child-process.ts";
+import { spawnProcess } from "../src/utils/child-process.ts";
+import { waitForOwnedProcessTreeWithTermination } from "../src/utils/process-group-wait.ts";
 
 vi.mock("../src/utils/child-process.ts", () => ({
 	spawnProcess: vi.fn(),
-	waitForChildProcessWithTermination: vi.fn(),
+}));
+vi.mock("../src/utils/process-group-wait.ts", () => ({
+	waitForOwnedProcessTreeWithTermination: vi.fn(),
 }));
 
 describe("native toolkit terminal reason projection", () => {
@@ -19,7 +22,7 @@ describe("native toolkit terminal reason projection", () => {
 				stderr: new PassThrough(),
 			});
 			vi.mocked(spawnProcess).mockReturnValue(child);
-			vi.mocked(waitForChildProcessWithTermination).mockImplementation(async () => {
+			vi.mocked(waitForOwnedProcessTreeWithTermination).mockImplementation(async () => {
 				child.stdout?.emit("data", Buffer.from("actual stdout"));
 				return { code: 0, reason };
 			});
@@ -30,7 +33,7 @@ describe("native toolkit terminal reason projection", () => {
 				stdout: "actual stdout",
 			});
 			expect(spawnProcess).toHaveBeenCalledOnce();
-			expect(waitForChildProcessWithTermination).toHaveBeenCalledOnce();
+			expect(waitForOwnedProcessTreeWithTermination).toHaveBeenCalledOnce();
 		},
 	);
 
@@ -41,7 +44,7 @@ describe("native toolkit terminal reason projection", () => {
 			stderr: new PassThrough(),
 		});
 		vi.mocked(spawnProcess).mockReturnValue(child);
-		vi.mocked(waitForChildProcessWithTermination).mockImplementation(async () => {
+		vi.mocked(waitForOwnedProcessTreeWithTermination).mockImplementation(async () => {
 			abort.abort();
 			return { code: 0, reason: "exited" };
 		});
@@ -57,7 +60,7 @@ describe("native toolkit terminal reason projection", () => {
 			stderr: new PassThrough(),
 		});
 		vi.mocked(spawnProcess).mockReturnValue(child);
-		vi.mocked(waitForChildProcessWithTermination).mockImplementation(async () => {
+		vi.mocked(waitForOwnedProcessTreeWithTermination).mockImplementation(async () => {
 			child.stdout?.emit("data", Buffer.alloc(512 * 1024 + 1, "x"));
 			return { code: 0, reason: "exited" };
 		});
@@ -85,7 +88,7 @@ describe("native toolkit terminal reason projection", () => {
 				stderr: new PassThrough(),
 			});
 			vi.mocked(spawnProcess).mockReturnValue(child);
-			vi.mocked(waitForChildProcessWithTermination).mockImplementation(async () => {
+			vi.mocked(waitForOwnedProcessTreeWithTermination).mockImplementation(async () => {
 				child.stdout.emit("data", Buffer.from("partial result"));
 				child.stderr.emit("data", Buffer.from("script diagnostic"));
 				throw error;
@@ -105,7 +108,7 @@ describe("native toolkit terminal reason projection", () => {
 			stderr: new PassThrough(),
 		});
 		vi.mocked(spawnProcess).mockReturnValue(child);
-		vi.mocked(waitForChildProcessWithTermination).mockImplementation(async () => {
+		vi.mocked(waitForOwnedProcessTreeWithTermination).mockImplementation(async () => {
 			child.stderr.emit("data", Buffer.from("script diagnostic"));
 			child.stdout.emit("data", Buffer.alloc(512 * 1024 + 1, "x"));
 			throw new Error("waiter failed");
@@ -126,6 +129,6 @@ describe("native toolkit terminal reason projection", () => {
 			stderr: "spawn failed",
 			timedOut: false,
 		});
-		expect(waitForChildProcessWithTermination).not.toHaveBeenCalled();
+		expect(waitForOwnedProcessTreeWithTermination).not.toHaveBeenCalled();
 	});
 });

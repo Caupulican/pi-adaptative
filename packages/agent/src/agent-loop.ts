@@ -639,8 +639,8 @@ async function runLoop(
 						signal?.aborted ?? false,
 						signal?.reason,
 					);
-					await emit({ type: "message_start", message: failure });
-					await emit({ type: "message_end", message: failure });
+					await emit({ type: "message_start", message: failure, origin: "local" });
+					await emit({ type: "message_end", message: failure, origin: "local" });
 					newMessages.push(failure);
 					await emit({ type: "turn_end", message: failure, toolResults });
 					await emit({ type: "agent_end", messages: newMessages });

@@ -129,6 +129,34 @@ describe("activity lane", () => {
 		lane.dispose();
 	});
 
+	it("distinguishes hidden thinking from the first visible provider output", () => {
+		let now = 1_000_000;
+		const lane = new ActivityLaneComponent(
+			theme,
+			() => {},
+			2_000,
+			() => now,
+		);
+		const text = () => stripAnsi(lane.render(100).join("\n"));
+		lane.start({ id: "runtime:turn", kind: "runtime", label: "Working..." });
+
+		now += 1_000;
+		lane.markFirstToken("runtime:turn", "hidden");
+		now += 8_000;
+		expect(text()).toContain("(9s, hidden thinking after 1s)");
+		expect(text()).not.toContain("first 1s");
+
+		now += 3_000;
+		lane.markFirstToken("runtime:turn", "visible");
+		expect(text()).toContain("(12s, first visible 12s)");
+
+		// Later hidden deltas cannot move either timestamp.
+		now += 5_000;
+		lane.markFirstToken("runtime:turn", "hidden");
+		expect(text()).toContain("(17s, first visible 12s)");
+		lane.dispose();
+	});
+
 	it("a long subject yields width to the timing suffix instead of swallowing it", () => {
 		let now = 1_000_000;
 		const lane = new ActivityLaneComponent(

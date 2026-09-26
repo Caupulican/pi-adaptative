@@ -139,10 +139,11 @@ describe("interactive delegate worker events", () => {
 	 * "it is writing". The mark must land on the first event that carries produced content and on
 	 * nothing else - a framing event or an empty delta would report a token that never arrived.
 	 */
-	it("marks the turn's first token on the first content delta and never on framing events", async () => {
+	it("marks visible output separately from hidden thinking and never marks framing events", async () => {
 		const markFirstToken = vi.fn();
 		const host = {
 			isInitialized: true,
+			hideThinkingBlock: true,
 			footer: { invalidate() {} },
 			ui: { requestRender() {} },
 			activityLane: { markFirstToken },
@@ -159,9 +160,12 @@ describe("interactive delegate worker events", () => {
 		await handleInteractiveEvent(host, update({ type: "text_delta", contentIndex: 0, delta: "he", partial }));
 		await handleInteractiveEvent(host, update({ type: "thinking_delta", contentIndex: 0, delta: "llo", partial }));
 
-		// Marking on every delta is deliberate: the lane itself keeps the first stamp, so the
-		// controller never has to remember whether this turn has already been marked.
-		expect(markFirstToken.mock.calls).toEqual([["runtime:turn"], ["runtime:turn"]]);
+		// Marking on every delta is deliberate: the lane owns the first provider and first visible
+		// stamps, so the controller only projects whether this content is actually shown.
+		expect(markFirstToken.mock.calls).toEqual([
+			["runtime:turn", "visible"],
+			["runtime:turn", "hidden"],
+		]);
 	});
 
 	it("leaves a user-message update alone", async () => {

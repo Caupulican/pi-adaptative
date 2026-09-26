@@ -293,9 +293,14 @@ function isReadOnlyCommandSegment(segment: string): boolean {
 const SHELL_SEGMENT_SEPARATOR_RE = /\s*(?:&&|\|\||[;|\r\n])\s*/;
 
 function isReadOnlyShellCommand(command: string): boolean {
-	if (!command || MUTATING_SHELL_TOKEN_RE.test(command) || UNSAFE_NESTED_SHELL_EXECUTION_RE.test(command))
+	const commandWithoutStreamRedirections = stripSafeStreamRedirections(command);
+	if (
+		!commandWithoutStreamRedirections ||
+		MUTATING_SHELL_TOKEN_RE.test(commandWithoutStreamRedirections) ||
+		UNSAFE_NESTED_SHELL_EXECUTION_RE.test(commandWithoutStreamRedirections)
+	)
 		return false;
-	const segments = command.split(SHELL_SEGMENT_SEPARATOR_RE).map((segment) => segment.trim());
+	const segments = commandWithoutStreamRedirections.split(SHELL_SEGMENT_SEPARATOR_RE).map((segment) => segment.trim());
 	return segments.length > 0 && segments.every((segment) => segment.length > 0 && isReadOnlyShellSegment(segment));
 }
 
@@ -307,6 +312,12 @@ function unquoteShellWord(word: string): string {
 	return (word.startsWith('"') && word.endsWith('"')) || (word.startsWith("'") && word.endsWith("'"))
 		? word.slice(1, -1)
 		: word;
+}
+
+function stripSafeStreamRedirections(command: string): string {
+	return command.replace(OUTPUT_REDIRECTION_RE, (match, target: string) =>
+		STREAM_TARGET_RE.test(unquoteShellWord(target)) ? " " : match,
+	);
 }
 
 /**

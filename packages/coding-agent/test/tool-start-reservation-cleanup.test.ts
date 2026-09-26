@@ -132,9 +132,9 @@ describe("tool start reservation cleanup", () => {
 					if (event.type !== "message_end") return;
 					const message = event.message;
 					if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") return;
-					const entryId = sessionManager.appendMessage(message);
+					const entryId = sessionManager.appendMessage(message, event.origin);
 					persisted.push(message);
-					lifecycle.onMessagePersisted(message, entryId);
+					lifecycle.onMessagePersisted(message, entryId, event.origin);
 				},
 				abort.signal,
 				() => {

@@ -3,9 +3,9 @@ import type { TruncationResult } from "@caupulican/pi-agent-core/node";
 import { type AgentTool, AgentToolExecutionError } from "@caupulican/pi-agent-core/types";
 import { Text } from "@caupulican/pi-tui";
 import { type Static, Type } from "typebox";
-import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
+import { spawnProcess } from "../../utils/child-process.ts";
 import { type PathInputOptions, resolvePath } from "../../utils/paths.ts";
-import { awaitOwnedProcessGroup } from "../../utils/process-group-wait.ts";
+import { waitForOwnedProcessTreeWithTermination } from "../../utils/process-group-wait.ts";
 import { composeExecutionEnvironment, type ExecutionEnvironment } from "../execution-environment.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { withoutHarnessLaunchEnv } from "../harness-environment.ts";
@@ -227,12 +227,11 @@ function createLocalPythonOperations(): PythonOperations {
 			child.stdout?.on("data", (chunk: Buffer) => request.onStdout(chunk));
 			child.stderr?.on("data", (chunk: Buffer) => request.onStderr(chunk));
 			child.stdin?.end(request.stdin ?? "");
-			const terminal = await waitForChildProcessWithTermination(child, {
+			const terminal = await waitForOwnedProcessTreeWithTermination(child, request.cwd, {
 				killGraceMs: PYTHON_KILL_GRACE_MS,
 				signal: request.signal,
 				timeoutMs: request.timeoutMs,
 			});
-			await awaitOwnedProcessGroup(child.pid, request.cwd, request.signal);
 			return { exitCode: terminal.code, reason: terminal.reason, signal: child.signalCode };
 		},
 	};

@@ -1,4 +1,4 @@
-import type { Agent, AgentMessage } from "@caupulican/pi-agent-core";
+import type { Agent, AgentMessage, AgentMessageOrigin } from "@caupulican/pi-agent-core";
 import type { SessionLifecycleInspection, SessionManager } from "@caupulican/pi-agent-core/session";
 import { sessionLifecycleToolIdentityKey } from "@caupulican/pi-agent-core/session";
 import type {
@@ -108,6 +108,8 @@ export class ForegroundLifecycleController {
 	private readonly startedTools = new Map<string, StartedToolIdentity>();
 	private readonly pendingToolsByCall = new Map<string, Set<string>>();
 	private readonly completedResultMessages = new WeakSet<object>();
+	private readonly completedProviderMessages = new WeakSet<object>();
+	private readonly terminalProviderRequests = new Set<string>();
 	/**
 	 * The requestId of the most recently snapshotted provider request, captured in
 	 * `onProviderRequestSnapshot` (which always runs before the resulting assistant message can
@@ -136,6 +138,8 @@ export class ForegroundLifecycleController {
 		for (const identity of this.startedTools.values()) retireToolCall(identity.callId, scope);
 		this.startedTools.clear();
 		this.pendingToolsByCall.clear();
+		this.terminalProviderRequests.clear();
+		this.lastRequestId = undefined;
 	}
 
 	private findPersistedMessageEntryId(message: AgentMessage): string | undefined {
@@ -148,7 +152,7 @@ export class ForegroundLifecycleController {
 	): Promise<void> {
 		signal?.throwIfAborted();
 		const flushed = this.deps.modelRouter.commitSessionBufferPrefix();
-		for (const [message, entryId] of flushed) this.notePersistedMessage(message, entryId);
+		for (const [message, entryId] of flushed) this.onMessagePersisted(message, entryId);
 		const requestId = context.requestId;
 		this.lastRequestId = requestId;
 		this.deps.sessionManager.appendRequestSnapshot(buildRequestSnapshotInput(context, this.deps.sessionManager));
@@ -232,7 +236,7 @@ export class ForegroundLifecycleController {
 		}
 
 		const flushed = this.deps.modelRouter.commitSessionBuffer();
-		for (const [message, entryId] of flushed) this.notePersistedMessage(message, entryId);
+		for (const [message, entryId] of flushed) this.onMessagePersisted(message, entryId);
 		const assistantMessage = calls[0]!.assistantMessage;
 		const assistantMessageEntryId = this.findPersistedMessageEntryId(assistantMessage);
 		if (!assistantMessageEntryId) {
@@ -316,8 +320,28 @@ export class ForegroundLifecycleController {
 	}
 
 	/** Called after the canonical message entry has been appended by AgentSession. */
-	onMessagePersisted(message: AgentMessage, entryId: string): void {
+	onMessagePersisted(message: AgentMessage, entryId: string, origin?: AgentMessageOrigin): void {
 		this.notePersistedMessage(message, entryId);
+		if (message.role === "assistant") {
+			if (this.completedProviderMessages.has(message)) return;
+			const requestId = this.lastRequestId;
+			if (!requestId) return;
+			if (origin === "local") {
+				this.completedProviderMessages.add(message);
+				if (this.terminalProviderRequests.has(requestId)) return;
+				this.deps.sessionManager.appendProviderRequestTerminal(requestId, "interrupted");
+				this.terminalProviderRequests.add(requestId);
+				return;
+			}
+			this.deps.sessionManager.appendProviderRequestTerminal(
+				requestId,
+				message.stopReason === "aborted" ? "aborted" : message.stopReason === "error" ? "error" : "completed",
+				entryId,
+			);
+			this.terminalProviderRequests.add(requestId);
+			this.completedProviderMessages.add(message);
+			return;
+		}
 		if (message.role !== "toolResult") return;
 		if (this.completedResultMessages.has(message)) return;
 		const result = message as ToolResultMessage;
@@ -351,6 +375,9 @@ export class ForegroundLifecycleController {
 	 */
 	repair(): string[] {
 		const inspection = this.deps.sessionManager.inspectSessionLifecycle();
+		for (const terminal of inspection.providerRequestTerminals) {
+			this.terminalProviderRequests.add(terminal.requestId);
+		}
 		if (isAmbiguousInspection(inspection)) {
 			const warning = boundedWarning(
 				"Session lifecycle repair refused: duplicate, mismatched, or out-of-order records require manual review.",
@@ -361,6 +388,10 @@ export class ForegroundLifecycleController {
 		const plan = this.deps.sessionManager.planSessionLifecycleRepair();
 		const index = this.deps.sessionManager.getSessionLifecycleIndex();
 		const warnings: string[] = [];
+		for (const closer of plan.providerRequestClosers) {
+			this.deps.sessionManager.appendProviderRequestTerminal(closer.requestId, closer.outcome);
+			this.terminalProviderRequests.add(closer.requestId);
+		}
 		for (const closer of plan.toolClosers) {
 			const record = index.toolsByIdentity.get(
 				sessionLifecycleToolIdentityKey(closer.requestId, closer.assistantMessageEntryId, closer.callId),

@@ -1,5 +1,5 @@
-import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
-import { awaitOwnedProcessGroup } from "../../utils/process-group-wait.ts";
+import { spawnProcess } from "../../utils/child-process.ts";
+import { waitForOwnedProcessTreeWithTermination } from "../../utils/process-group-wait.ts";
 import type { ToolkitScript } from "./script-registry.ts";
 
 /**
@@ -84,12 +84,11 @@ export const spawnScriptExecutor: ScriptExecutor = async (command, argv, cwd, ti
 		child.stderr?.on("data", (chunk: Buffer) => {
 			stderrBytes = appendChunk(stderrChunks, chunk, stderrBytes);
 		});
-		const terminal = await waitForChildProcessWithTermination(child, {
+		const terminal = await waitForOwnedProcessTreeWithTermination(child, cwd, {
 			signal: terminationController.signal,
 			timeoutMs,
 			killGraceMs: SCRIPT_KILL_GRACE_MS,
 		});
-		await awaitOwnedProcessGroup(child.pid, cwd, terminationController.signal);
 		const stdout = Buffer.concat(stdoutChunks).toString("utf8");
 		return {
 			// A cooperative child can exit zero after termination was requested. Preserve the

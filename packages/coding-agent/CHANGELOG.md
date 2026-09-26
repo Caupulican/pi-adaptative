@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Fixed
+
+- Restart repair closes a provider request left unanswered by interruption, while contradictory or duplicate request outcomes stop automatic repair.
+- The activity lane distinguishes hidden reasoning from visible provider output instead of reporting hidden thinking as the first readable token.
+- Read-only shell classification permits stream redirection to `/dev/null` without misclassifying the command as a filesystem mutation.
+- One-shot process deadlines and cancellation now cover the complete owned process group, including descendants that outlive their leader and failed group-kill delivery.
+- Gateway provider startup and shutdown are bounded and concurrent, so one non-settling extension cannot block unrelated providers or session disposal indefinitely.
+- Tool preparation or cancellation failures no longer publish a second terminal for the provider response that preceded them.
+
 ## [0.99.52] - 2026-09-26
 
 ### Fixed

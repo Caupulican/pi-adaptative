@@ -1,4 +1,4 @@
-import type { Agent } from "@caupulican/pi-agent-core";
+import type { Agent, AgentMessageOrigin } from "@caupulican/pi-agent-core";
 import type { SessionManager, SessionMessageBatchEntry } from "@caupulican/pi-agent-core/session";
 import type { ProviderRequestSnapshotContext } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage, Message } from "@caupulican/pi-ai";
@@ -77,9 +77,9 @@ export class ForegroundLifecycleAdapter {
 		this.lifecycle.resetForSessionReload();
 	}
 
-	appendMessage(message: Message): string {
-		const entryId = this.sessionManager.appendMessage(message);
-		this.lifecycle.onMessagePersisted(message, entryId);
+	appendMessage(message: Message, origin?: AgentMessageOrigin): string {
+		const entryId = this.sessionManager.appendMessage(message, origin);
+		this.lifecycle.onMessagePersisted(message, entryId, origin);
 		this.observeMessagePersisted?.(message, entryId);
 		return entryId;
 	}
@@ -111,7 +111,7 @@ export class ForegroundLifecycleAdapter {
 		for (let index = 0; index < batch.length; index += 1) {
 			const item = batch[index]!;
 			if (item.kind !== "message") continue;
-			this.lifecycle.onMessagePersisted(item.message, entryIds[index]!);
+			this.lifecycle.onMessagePersisted(item.message, entryIds[index]!, item.origin);
 			this.observeMessagePersisted?.(item.message, entryIds[index]!);
 		}
 		return entryIds;

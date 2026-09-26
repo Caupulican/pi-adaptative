@@ -26,7 +26,7 @@ import {
 	createCustomMessage,
 } from "../messages.ts";
 import { classifyTransientRecord } from "../transient-records.ts";
-import type { AgentMessage } from "../types.ts";
+import type { AgentMessage, AgentMessageOrigin } from "../types.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { uuidv7 } from "../uuid.ts";
 import {
@@ -39,6 +39,7 @@ import {
 	indexSessionLifecycle,
 	inspectSessionLifecycle,
 	isSessionLifecycleEntry,
+	type ProviderRequestTerminalEntry,
 	planSessionLifecycleRepair,
 	type RequestSnapshotEntry,
 	type SessionLifecycleEntry,
@@ -86,6 +87,8 @@ export interface SessionEntryBase {
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+	/** Provenance for host-synthesized messages; absent means provider/conversation-native. */
+	origin?: AgentMessageOrigin;
 }
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
@@ -221,7 +224,7 @@ export interface SessionContext {
 
 /** One source-order item accepted by the atomic model-router/session append boundary. */
 export type SessionMessageBatchEntry =
-	| { kind: "message"; message: Message }
+	| { kind: "message"; message: Message; origin?: AgentMessageOrigin }
 	| { kind: "custom"; message: CustomMessage };
 
 interface SessionContextCache {
@@ -254,11 +257,19 @@ interface LifecycleActiveCache {
 	positions: Map<string, number>;
 	entryTypes: Map<string, string>;
 	requestIds: Set<string>;
+	requestSnapshotsById: Map<string, RequestSnapshotEntry>;
+	providerTerminalsByRequest: Set<string>;
+	providerResponsesByRequest: Map<string, ProviderResponseReference | "duplicate">;
 	startsByIdentity: Set<string>;
 	terminalsByIdentity: Set<string>;
 	compactionStarts: Map<string, CompactionStartEntry>;
 	compactionEnds: Set<string>;
 	assistantToolsByIdentity: Map<string, AssistantToolReference | "duplicate">;
+}
+
+interface ProviderResponseReference {
+	assistantMessageEntryId: string;
+	outcome: Exclude<ProviderRequestTerminalEntry["outcome"], "interrupted">;
 }
 
 interface AssistantToolReference {
@@ -1820,6 +1831,9 @@ export class SessionManager {
 			positions: new Map(),
 			entryTypes: new Map(),
 			requestIds: new Set(),
+			requestSnapshotsById: new Map(),
+			providerTerminalsByRequest: new Set(),
+			providerResponsesByRequest: new Map(),
 			startsByIdentity: new Set(),
 			terminalsByIdentity: new Set(),
 			compactionStarts: new Map(),
@@ -1840,6 +1854,9 @@ export class SessionManager {
 		if (entry.type === "request_snapshot") {
 			cache.currentRequestId = entry.requestId;
 			cache.requestIds.add(entry.requestId);
+			cache.requestSnapshotsById.set(entry.requestId, entry);
+		} else if (entry.type === "provider_request_terminal") {
+			cache.providerTerminalsByRequest.add(entry.requestId);
 		} else if (entry.type === "foreground_tool_start") {
 			cache.startsByIdentity.add(
 				sessionLifecycleToolIdentityKey(entry.requestId, entry.assistantMessageEntryId, entry.callId),
@@ -1852,7 +1869,22 @@ export class SessionManager {
 			cache.compactionStarts.set(entry.compactionId, entry);
 		} else if (entry.type === "compaction_end") {
 			cache.compactionEnds.add(entry.compactionId);
-		} else if (entry.type === "message" && entry.message.role === "assistant") {
+		} else if (entry.type === "message" && entry.message.role === "assistant" && entry.origin !== "local") {
+			if (cache.currentRequestId) {
+				const response: ProviderResponseReference = {
+					assistantMessageEntryId: entry.id,
+					outcome:
+						entry.message.stopReason === "aborted"
+							? "aborted"
+							: entry.message.stopReason === "error"
+								? "error"
+								: "completed",
+				};
+				cache.providerResponsesByRequest.set(
+					cache.currentRequestId,
+					cache.providerResponsesByRequest.has(cache.currentRequestId) ? "duplicate" : response,
+				);
+			}
 			for (const block of entry.message.content) {
 				if (block.type !== "toolCall") continue;
 				const key = assistantToolIdentityKey(entry.id, block.id);
@@ -1926,13 +1958,14 @@ export class SessionManager {
 	 * so it is easier to find them.
 	 * These need to be appended via appendCompaction() and appendBranchSummary() methods.
 	 */
-	appendMessage(message: Message | CustomMessage | BashExecutionMessage): string {
+	appendMessage(message: Message | CustomMessage | BashExecutionMessage, origin?: AgentMessageOrigin): string {
 		const entry: SessionMessageEntry = {
 			type: "message",
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			message,
+			...(origin === undefined ? {} : { origin }),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1968,6 +2001,7 @@ export class SessionManager {
 					parentId,
 					timestamp: new Date().toISOString(),
 					message: item.message,
+					...(item.origin === undefined ? {} : { origin: item.origin }),
 				};
 			} else if (item.kind === "custom") {
 				if (!item.message || typeof item.message !== "object") {
@@ -2114,6 +2148,33 @@ export class SessionManager {
 		}
 	}
 
+	private _validateProviderRequestTerminal(entry: ProviderRequestTerminalEntry): void {
+		validateSessionLifecycleEntry(entry);
+		const cache = this._getLifecycleActiveCache();
+		if (!cache.requestSnapshotsById.has(entry.requestId)) {
+			throw new Error(`Provider request terminal has no matching snapshot: ${entry.requestId}.`);
+		}
+		if (cache.providerTerminalsByRequest.has(entry.requestId)) {
+			throw new Error(`Duplicate provider request terminal identity: ${entry.requestId}.`);
+		}
+		const response = cache.providerResponsesByRequest.get(entry.requestId);
+		if (response === "duplicate") {
+			throw new Error(`Provider request terminal has multiple assistant responses: ${entry.requestId}.`);
+		}
+		if (entry.outcome === "interrupted") {
+			if (response)
+				throw new Error(`Interrupted provider request already has an assistant response: ${entry.requestId}.`);
+			return;
+		}
+		if (
+			!response ||
+			entry.assistantMessageEntryId !== response.assistantMessageEntryId ||
+			entry.outcome !== response.outcome
+		) {
+			throw new Error(`Provider request terminal contradicts its canonical assistant response: ${entry.requestId}.`);
+		}
+	}
+
 	private _validateForegroundToolTerminal(entry: ForegroundToolTerminalEntry): void {
 		validateSessionLifecycleEntry(entry);
 		const call = this._findAssistantToolCall(entry.assistantMessageEntryId, entry.callId);
@@ -2209,6 +2270,26 @@ export class SessionManager {
 		};
 		validateSessionLifecycleEntry(entry);
 		this._validateRequestSnapshot(entry);
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append the bounded terminal outcome for one provider request. */
+	appendProviderRequestTerminal(
+		requestId: string,
+		outcome: ProviderRequestTerminalEntry["outcome"],
+		assistantMessageEntryId?: string,
+	): string {
+		const entry: ProviderRequestTerminalEntry = {
+			type: "provider_request_terminal",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date().toISOString(),
+			requestId,
+			outcome,
+			...(assistantMessageEntryId === undefined ? {} : { assistantMessageEntryId }),
+		};
+		this._validateProviderRequestTerminal(entry);
 		this._appendEntry(entry);
 		return entry.id;
 	}

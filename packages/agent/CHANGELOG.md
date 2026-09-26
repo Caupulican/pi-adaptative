@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Added
+
+- Provider requests now have durable terminal lifecycle records, and interrupted requests are identified for bounded restart repair without rewriting completed legacy history.
+
+### Fixed
+
+- Host-synthesized assistant handoffs retain their origin so provider lifecycle recovery does not mistake them for transport responses.
+
 ## [0.99.52] - 2026-09-26
 
 ## [0.99.51] - 2026-09-25

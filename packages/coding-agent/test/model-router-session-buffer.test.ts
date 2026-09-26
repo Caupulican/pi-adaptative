@@ -90,4 +90,22 @@ describe("model router session buffer", () => {
 		expect(persisted).toEqual([user, assistant]);
 		expect(buffer.committed).toBe(true);
 	});
+
+	it("preserves host-local provenance while a routed turn is buffered", () => {
+		const buffer = createModelRouterSessionBuffer();
+		const assistant = fauxAssistantMessage([{ type: "text", text: "local failure" }], {
+			stopReason: "error",
+			errorMessage: "local failure",
+		});
+		bufferModelRouterSessionMessage(buffer, assistant, "local");
+
+		let persistedOrigin: string | undefined;
+		flushModelRouterSessionBuffer(buffer, (entries) => {
+			const entry = entries[0];
+			if (entry?.kind === "message") persistedOrigin = entry.origin;
+			return ["assistant-entry"];
+		});
+
+		expect(persistedOrigin).toBe("local");
+	});
 });

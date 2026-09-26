@@ -1,6 +1,9 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OrchestrationExecutionPolicy } from "../src/core/orchestration/contracts.ts";
 import { createRunProcessTool, createRunProcessToolDefinition } from "../src/core/tools/run-process.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const originalScoped = process.env.PI_RUN_PROCESS_TEST_VISIBLE;
 const originalSecret = process.env.PI_RUN_PROCESS_TEST_SECRET;
@@ -90,6 +93,37 @@ describe("run_process", () => {
 		expect(result.details).toMatchObject({ outcome: "output_limit", truncated: true });
 		expect(result.isError).toBe(true);
 	});
+
+	it.runIf(process.platform === "linux")(
+		"keeps the wall-clock deadline active until the owned process group is empty",
+		async () => {
+			const scratch = tempDir("run-process-tree-deadline-");
+			const pidFile = join(scratch, "leader.pid");
+			const tool = createRunProcessTool(process.cwd(), { policy: policy(), maxWallClockMs: 100 });
+			const execution = tool.execute("call-tree-deadline", {
+				executable: process.execPath,
+				args: [
+					"-e",
+					"const fs=require('node:fs'); const {spawn}=require('node:child_process'); fs.writeFileSync(process.argv[1],String(process.pid)); spawn(process.execPath,['-e','setTimeout(()=>{},10000)'],{stdio:'ignore'}); process.exit(0)",
+					pidFile,
+				],
+			});
+			const guard = Symbol("still-pending");
+			const observed = await Promise.race([
+				execution,
+				new Promise<typeof guard>((resolve) => setTimeout(() => resolve(guard), 1_500)),
+			]);
+			if (observed === guard && existsSync(pidFile)) {
+				try {
+					process.kill(-Number(readFileSync(pidFile, "utf8")), "SIGKILL");
+				} catch {}
+				await execution.catch(() => undefined);
+			}
+
+			expect(observed).not.toBe(guard);
+			if (observed !== guard) expect(observed.details).toMatchObject({ outcome: "timeout" });
+		},
+	);
 
 	it("marks a non-zero process exit as a tool failure while retaining bounded diagnostics", async () => {
 		const tool = createRunProcessTool(process.cwd(), { policy: policy(), maxWallClockMs: 5_000 });

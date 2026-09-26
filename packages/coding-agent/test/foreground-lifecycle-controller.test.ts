@@ -83,11 +83,17 @@ describe("foreground lifecycle controller", () => {
 			);
 			const startEntries = entries.filter((entry) => entry.type === "foreground_tool_start");
 			const terminalEntries = entries.filter((entry) => entry.type === "foreground_tool_terminal");
+			const providerTerminals = entries.filter((entry) => String(entry.type) === "provider_request_terminal");
 			expect(snapshotIndex).toBeGreaterThanOrEqual(0);
 			expect(assistantIndex).toBeGreaterThan(snapshotIndex);
 			expect(startEntries.map((entry) => entry.type)).toHaveLength(2);
 			expect(startEntries.map((entry) => entry.callId)).toEqual(["call-a", "call-b"]);
 			expect(terminalEntries).toHaveLength(2);
+			expect(providerTerminals).toHaveLength(2);
+			expect(providerTerminals).toEqual([
+				expect.objectContaining({ outcome: "completed" }),
+				expect.objectContaining({ outcome: "completed" }),
+			]);
 			expect(calls).toEqual(expect.arrayContaining(["alpha:a", "beta:b"]));
 
 			const firstResultIndex = entries.findIndex(
@@ -102,6 +108,84 @@ describe("foreground lifecycle controller", () => {
 		} finally {
 			await harness.cleanup();
 		}
+	});
+
+	it("repairs an unanswered provider request as interrupted and leaves legacy completed requests intact", () => {
+		const interrupted = SessionManager.inMemory();
+		interrupted.appendRequestSnapshot(requestSnapshot());
+		const resetSanitizerPrefixHorizon = vi.fn();
+		const controller = new ForegroundLifecycleController({
+			agent: { state: { messages: [] }, resetSanitizerPrefixHorizon },
+			sessionManager: interrupted,
+			modelRouter: {} as ModelRouterController,
+			emitWarning: () => {},
+		});
+		controller.repair();
+		expect(interrupted.getEntries().filter((entry) => String(entry.type) === "provider_request_terminal")).toEqual([
+			expect.objectContaining({ requestId: "repair-request", outcome: "interrupted" }),
+		]);
+		// Provider lifecycle records never enter model context, so repair must not perturb prefix state.
+		expect(resetSanitizerPrefixHorizon).not.toHaveBeenCalled();
+		controller.repair();
+		expect(
+			interrupted.getEntries().filter((entry) => String(entry.type) === "provider_request_terminal"),
+		).toHaveLength(1);
+
+		const completed = SessionManager.inMemory();
+		completed.appendRequestSnapshot(requestSnapshot());
+		completed.appendMessage(fauxAssistantMessage("done"));
+		const completedController = new ForegroundLifecycleController({
+			agent: { state: { messages: [] }, resetSanitizerPrefixHorizon: () => {} },
+			sessionManager: completed,
+			modelRouter: {} as ModelRouterController,
+			emitWarning: () => {},
+		});
+		completedController.repair();
+		expect(completed.getEntries().filter((entry) => String(entry.type) === "provider_request_terminal")).toHaveLength(
+			0,
+		);
+	});
+
+	it("closes a request interrupted by a host-local failure without treating the handoff as a provider response", async () => {
+		const sessionManager = SessionManager.inMemory();
+		const agent: ForegroundLifecycleAgentDependency & {
+			onProviderRequestSnapshot?: (...args: never[]) => Promise<void>;
+		} = {
+			state: { messages: [] },
+			resetSanitizerPrefixHorizon: () => {},
+		};
+		const controller = new ForegroundLifecycleController({
+			agent,
+			sessionManager,
+			modelRouter: { commitSessionBufferPrefix: () => new Map() } as ModelRouterController,
+			emitWarning: () => {},
+		});
+		controller.install();
+		await agent.onProviderRequestSnapshot?.(
+			{
+				requestId: "host-failure-request",
+				model: { api: "faux", provider: "faux", id: "faux-1" },
+				reasoning: "off",
+				maxTokens: 128,
+				attempt: 1,
+				context: { systemPrompt: "", tools: [], messages: [] },
+			} as never,
+			undefined,
+		);
+		const handoff = fauxAssistantMessage("local failure", {
+			stopReason: "error",
+			errorMessage: "tool scheduling failed",
+		});
+		const handoffEntryId = sessionManager.appendMessage(handoff, "local");
+		controller.onMessagePersisted(handoff, handoffEntryId, "local");
+
+		expect(sessionManager.inspectSessionLifecycle()).toMatchObject({
+			providerResponses: [],
+			providerRequestTerminals: [
+				expect.objectContaining({ requestId: "host-failure-request", outcome: "interrupted" }),
+			],
+			balanced: true,
+		});
 	});
 
 	it("distinguishes same-length provider history without persisting its raw content", async () => {
