@@ -127,12 +127,16 @@ describe("immutable runtime artifacts", () => {
 		);
 		const first = await pooled.capture();
 		const second = await pooled.capture();
-		const [a, b] = await Promise.all([lstat(join(first, "src", "cli.mjs")), lstat(join(second, "src", "cli.mjs"))]);
+		// bigint stats: ReFS (a Windows Dev Drive) has 128-bit file ids that a number ino rounds together.
+		const [a, b] = await Promise.all([
+			lstat(join(first, "src", "cli.mjs"), { bigint: true }),
+			lstat(join(second, "src", "cli.mjs"), { bigint: true }),
+		]);
 		// One pooled copy shared by both generations, never the source inode itself.
 		expect(a.ino).toBe(b.ino);
-		expect(a.ino).not.toBe((await lstat(join(f.origin, "src", "cli.mjs"))).ino);
-		expect(a.nlink).toBe(3);
-		expect(a.mode & 0o222).toBe(0);
+		expect(a.ino).not.toBe((await lstat(join(f.origin, "src", "cli.mjs"), { bigint: true })).ino);
+		expect(a.nlink).toBe(3n);
+		expect(a.mode & 0o222n).toBe(0n);
 		// An in-place edit of the source is a new version: the generations keep what they captured.
 		await writeFile(join(f.origin, "src", "cli.mjs"), "edited in place");
 		const third = await pooled.capture();
@@ -157,11 +161,12 @@ describe("immutable runtime artifacts", () => {
 		await pooled.settle();
 		const entries = async () =>
 			(await Promise.all((await readdir(pool)).map((shard) => readdir(join(pool, shard))))).flat();
-		const captured = (await lstat(join(old, "src", "cli.mjs"))).ino;
+		const captured = (await lstat(join(old, "src", "cli.mjs"), { bigint: true })).ino;
 		let oldPath: string | undefined;
 		for (const shard of await readdir(pool))
 			for (const name of await readdir(join(pool, shard)))
-				if ((await lstat(join(pool, shard, name))).ino === captured) oldPath = join(pool, shard, name);
+				if ((await lstat(join(pool, shard, name), { bigint: true })).ino === captured)
+					oldPath = join(pool, shard, name);
 		if (!oldPath) throw new Error("The captured version is not pooled.");
 		const oldEntry = basename(oldPath);
 		await pooled.retire(old);

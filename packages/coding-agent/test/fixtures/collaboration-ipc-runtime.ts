@@ -6,8 +6,9 @@ import type {
 import { launchCollaborationTurnProcess } from "../../src/core/collaboration/turn-process.ts";
 
 if (process.argv[2] === "--collaboration-worker") {
-	// Keep a real IPC child alive until its parent exits. The deadline bounds a failed probe.
-	const watchdog = setTimeout(() => process.exit(2), 5000);
+	// Keep a real IPC child alive until its parent exits. The deadline bounds a failed probe; it sits
+	// far past the test's bound so a parent that waits for this child can never pass.
+	const watchdog = setTimeout(() => process.exit(2), 60_000);
 	process.once("disconnect", () => {
 		clearTimeout(watchdog);
 		process.exit(0);
