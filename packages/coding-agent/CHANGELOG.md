@@ -21,6 +21,7 @@
 - Failed semantic worker assessments remain retryable after debounce until the per-attempt breaker opens, while successful identical evidence stays deduplicated.
 - Worker supervision bounds observational and diagnostic retention without evicting unconsumed root requests, permanently drops terminal-attempt requests, and keeps deterministic intervention IDs unique after history saturation.
 - Supervision requests and System One directives remain pending until their selected route accepts execution, with exact producer and replacement-identity fencing across retries.
+- Explicit independent-verifier supervision requests always dispatch to a worker, while ordinary verification remains eligible for root execution.
 
 ## [0.99.52] - 2026-09-26
 

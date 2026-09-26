@@ -82,7 +82,7 @@ import {
 	routeToTerminal,
 	validateObjectiveRoute,
 } from "./objective-route.ts";
-import { composeObjectiveRoute } from "./objective-route-policy.ts";
+import { composeObjectiveRoute, INDEPENDENT_VERIFICATION_REASON_CODE } from "./objective-route-policy.ts";
 import {
 	projectBoundedCombinedState,
 	type RouteHistoryEntry,
@@ -818,7 +818,7 @@ export class ObjectiveExecutionController {
 					route.reason_codes.includes("capability_gap_detected")) ||
 				(supervisionAction === "request_verifier" &&
 					route.route === "verify" &&
-					route.reason_codes.includes("independent_verification_needed")) ||
+					route.reason_codes.includes(INDEPENDENT_VERIFICATION_REASON_CODE)) ||
 				(supervisionAction === "mark_external_block" &&
 					route.route === "blocked_external" &&
 					route.reason_codes.includes("external_dependency_unavailable"));
@@ -1891,7 +1891,7 @@ export class ObjectiveExecutionController {
 			this.deps.rootExecutor &&
 			!escalated &&
 			route.route !== "review" &&
-			!route.reason_codes.includes("independent_verification_required") &&
+			!route.reason_codes.includes(INDEPENDENT_VERIFICATION_REASON_CODE) &&
 			(!this.deps.workerDispatcher?.dispatch || (this.deps.chooseExecutor?.(route) ?? "root") === "root")
 		) {
 			await this._noteExecutor(route, "root");

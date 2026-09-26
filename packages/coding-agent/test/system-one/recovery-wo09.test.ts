@@ -523,6 +523,79 @@ describe("System One recovery WO-09 production paths", () => {
 		expect(dispatchedReasons[1]).toContain("system_one_postflight_verify");
 	});
 
+	it("routes an explicit independent-verifier request to a worker while ordinary verification may stay on root", async () => {
+		const systemOne = new SystemOneController({
+			store: emptyStore("independent-verifier-executor"),
+			adapter: { evaluate: async () => ({ model: "jev-1.13.0", answers: {}, latency_ms: 1 }) },
+		});
+		const pending = [
+			{
+				signal_id: "sig-independent-verifier",
+				action: "request_verifier" as const,
+				reason_codes: ["independent_verification_needed"],
+			},
+		];
+		const consumed: string[] = [];
+		const executions: Array<{ executor: "root" | "worker"; reasons: readonly string[] }> = [];
+		let ordinaryVerificationQueued = false;
+		const queueOrdinaryVerification = () => {
+			if (ordinaryVerificationQueued) return;
+			ordinaryVerificationQueued = true;
+			systemOne.noteControlDirective({
+				source: "postflight",
+				objectiveRoute: "verify",
+				reasonCodes: ["verification_required"],
+			});
+		};
+		const controller = new ObjectiveExecutionController({
+			mode: "objective_primary",
+			runtime: {
+				reconcileObjective: async () =>
+					({
+						lastOrdinal: 0,
+						agents: {},
+						objectives: {},
+						tasks: {},
+						attempts: {},
+						checkpoints: {},
+						approvals: {},
+						notifications: {},
+					}) as TaskRuntimeProjection,
+			},
+			rootExecutor: {
+				execute: async (route) => {
+					executions.push({ executor: "root", reasons: [...route.reason_codes] });
+					queueOrdinaryVerification();
+				},
+			},
+			workerDispatcher: {
+				dispatch: async (route) => {
+					executions.push({ executor: "worker", reasons: [...route.reason_codes] });
+					queueOrdinaryVerification();
+				},
+				continueWorker: async () => {},
+				dispatchEscalated: async () => {},
+			},
+			chooseExecutor: () => "root",
+			pendingSupervisionRequests: () => pending.filter((item) => !consumed.includes(item.signal_id)),
+			consumePendingSupervisionRequest: (signalId) => {
+				consumed.push(signalId);
+			},
+			systemOne: {
+				peekControlDirective: () => systemOne.peekControlDirective(),
+				consumeControlDirective: (next) => systemOne.consumeControlDirective(next),
+				noteControlDirective: (next) => systemOne.noteControlDirective(next),
+			},
+		});
+
+		await controller.runCycles("goal:fix-parser", 2);
+		expect(executions.map((execution) => execution.executor)).toEqual(["worker", "root"]);
+		expect(executions[0]?.reasons).toContain("independent_verification_required");
+		expect(executions[1]?.reasons).toContain("verification_required");
+		expect(consumed).toEqual(["sig-independent-verifier"]);
+		expect(systemOne.peekControlDirective()).toBeUndefined();
+	});
+
 	it("does not consume a replacement System One directive through a stale expected identity", () => {
 		const systemOne = new SystemOneController({
 			store: emptyStore("directive-identity"),

@@ -11,6 +11,8 @@ import {
 } from "./objective-route.ts";
 import type { SemanticRouteJudgments } from "./objective-route-projector.ts";
 
+export const INDEPENDENT_VERIFICATION_REASON_CODE = "independent_verification_required";
+
 export interface RouteCompositionInput {
 	readonly cycleId: string;
 	readonly objectiveId: string;
@@ -115,7 +117,7 @@ export function composeObjectiveRoute(input: RouteCompositionInput): ObjectiveRo
 			cycleId,
 			objectiveId,
 			"verify",
-			["independent_verification_needed", ...input.supervisionRequest.reasonCodes],
+			[INDEPENDENT_VERIFICATION_REASON_CODE, ...input.supervisionRequest.reasonCodes],
 			input,
 		);
 	}
@@ -162,7 +164,7 @@ export function composeObjectiveRoute(input: RouteCompositionInput): ObjectiveRo
 
 		case "verify":
 			if (sem.independentWorkerRequired) {
-				return buildRoute(cycleId, objectiveId, "verify", ["independent_verification_required"], input);
+				return buildRoute(cycleId, objectiveId, "verify", [INDEPENDENT_VERIFICATION_REASON_CODE], input);
 			}
 			return buildRoute(cycleId, objectiveId, "verify", ["verification_required"], input);
 
