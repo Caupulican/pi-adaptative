@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Terminal input dispatch now uses a fixed listener generation, so listeners added or removed during an input event take effect on the next event without truncating current propagation.
+
 ## [0.99.52] - 2026-09-26
 
 ## [0.99.51] - 2026-09-25

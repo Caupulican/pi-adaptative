@@ -9,6 +9,7 @@
 - Host-synthesized assistant handoffs retain their origin so provider lifecycle recovery does not mistake them for transport responses.
 - Caller cancellation settles stream watchdogs within a bounded grace period when an established provider ignores abort, while preserving cooperative provider abort terminals.
 - Provider requests freeze their credential account scope and routing headers beside the resolved API key, so lifecycle snapshots and transport wrappers cannot observe different auth state.
+- Agent event publication snapshots the listener generation at dispatch start, so listeners added or removed by a callback take effect on the next event without changing delivery of the current event.
 
 ## [0.99.52] - 2026-09-26
 

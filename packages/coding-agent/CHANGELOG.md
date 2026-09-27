@@ -71,6 +71,17 @@
 - Provider-admission cleanup failures no longer replace provider failures or escape terminal-result callbacks; failed record removal remains bounded by stale-record recovery.
 - Cloud requests resolve one atomic credential projection before dispatch across foreground turns, context scouts, isolated completions, tool probes, compaction, and branch summaries; runtime overrides are attributed to the key actually sent, retry cooldowns stay on that account, and 401 recovery cannot switch an admitted request to another OAuth account.
 - Effective-settings notifications now use a fixed observer generation and contain returned promise rejections, preventing listener registration or failure from extending or escaping a committed settings transition.
+- Concurrent package updates, managed-memory initialization, collaboration recovery, extension commands, and shell teardown now wait for every admitted sibling operation before publishing success or aggregated failure.
+- Provider-admission waits always publish their matching terminal event when cancellation or timeout rejects the active wait, preserving truthful admission state.
+- Account usage and model-catalog refreshes are fenced to the credential generation that started them; login and logout await the relevant refresh, and an older completion cannot overwrite newer account state.
+- Local runtime probes, starts, downloads, replacements, and shutdowns are serialized by exact intent and generation; retired work cannot spawn or self-heal a removed runtime, and a failed Ollama eviction or model replacement preserves the current runtime.
+- Requirement-check and collaboration-helper timeouts await owned process-tree termination and disclose when termination cannot be proven instead of publishing completion while a child may remain live.
+- Gateway provider replacement, restart, and shutdown fence pending starts and late cleanup by provider generation, preventing stale completion from stopping or reviving the current instance.
+- Cross-process worker schedulers start and cancel only the exact durable attempt generation they observed, drop stale queued copies, and refuse to publish a false terminal after losing ownership.
+- Background tool delivery acknowledgement is stored as a compact identity-bound receipt, avoiding duplicate retained output while rejecting stale, foreign, or malformed receipts.
+- Session, extension, worker, scheduler, mailbox, operator, activity, diagnostic, footer, RPC, collaboration, and reservation notifications now dispatch over a fixed observer generation with per-listener failure isolation.
+- Completed worker reservation waiters restore before ordinary queued work can reclaim their scope, and released worker capacity is restored before queue draining even when that drain fails.
+- A failing extension terminal-input listener is contained and detached while unchanged input continues to later listeners and the focused component.
 
 ## [0.99.52] - 2026-09-26
 
