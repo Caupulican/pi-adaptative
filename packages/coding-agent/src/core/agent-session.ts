@@ -4188,10 +4188,11 @@ export class AgentSession {
 
 	/**
 	 * Notify all extensions-changed listeners.
-	 * Called after successful load/unload operations.
+	 * Called after successful load/unload operations. Freeze the generation so listener-owned rebinds
+	 * cannot skip an existing observer or pull a newly registered observer into the current transition.
 	 */
 	private _notifyExtensionsChanged(): void {
-		for (const listener of this._extensionsChangedListeners) {
+		for (const listener of [...this._extensionsChangedListeners]) {
 			try {
 				listener();
 			} catch {
