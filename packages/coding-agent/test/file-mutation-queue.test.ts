@@ -1,12 +1,12 @@
-import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rename, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { createEditTool } from "../src/core/tools/edit.ts";
+import { describe, expect, it } from "vitest";
+import { createEditTool, localEditOperations } from "../src/core/tools/edit.ts";
 import { FileMutationIntentController } from "../src/core/tools/file-mutation-intent.ts";
 import { withExclusiveMutationBarrier, withFileMutationQueue } from "../src/core/tools/file-mutation-queue.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
 import { FILE_SYMLINK_TESTS_SUPPORTED } from "./helpers/filesystem-links.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function delay(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -24,17 +24,9 @@ async function resolvesWithin(promise: Promise<unknown>, ms: number): Promise<bo
 	return Promise.race([promise.then(() => true), delay(ms).then(() => false)]);
 }
 
-const tempDirs: string[] = [];
-
 async function createTempDir(): Promise<string> {
-	const dir = await mkdtemp(join(tmpdir(), "pi-file-mutation-queue-"));
-	tempDirs.push(dir);
-	return dir;
+	return tempDir("pi-file-mutation-queue-");
 }
-
-afterEach(async () => {
-	await Promise.all(tempDirs.splice(0, tempDirs.length).map((dir) => rm(dir, { recursive: true, force: true })));
-});
 
 describe("withFileMutationQueue", () => {
 	it("serializes operations for the same file", async () => {
@@ -203,14 +195,21 @@ describe("built-in edit and write tools", () => {
 		const intentController = new FileMutationIntentController();
 		const editTool = createEditTool(dir, {
 			operations: {
-				readFile: async (path) => {
-					const buffer = await readFile(path);
-					await delay(30);
-					return buffer;
-				},
-				writeFile: async (path, content) => {
-					await delay(30);
-					await writeFile(path, content, "utf8");
+				...localEditOperations,
+				openFile: async (path) => {
+					const opened = await localEditOperations.openFile(path);
+					return {
+						...opened,
+						readFile: async () => {
+							const buffer = await opened.readFile();
+							await delay(30);
+							return buffer;
+						},
+						writeFile: async (content) => {
+							await delay(30);
+							await opened.writeFile(content);
+						},
+					};
 				},
 			},
 			intentController,
@@ -233,14 +232,21 @@ describe("built-in edit and write tools", () => {
 		const intentController = new FileMutationIntentController();
 		const editTool = createEditTool(dir, {
 			operations: {
-				readFile: async (path) => {
-					const buffer = await readFile(path);
-					await delay(30);
-					return buffer;
-				},
-				writeFile: async (path, content) => {
-					await delay(30);
-					await writeFile(path, content, "utf8");
+				...localEditOperations,
+				openFile: async (path) => {
+					const opened = await localEditOperations.openFile(path);
+					return {
+						...opened,
+						readFile: async () => {
+							const buffer = await opened.readFile();
+							await delay(30);
+							return buffer;
+						},
+						writeFile: async (content) => {
+							await delay(30);
+							await opened.writeFile(content);
+						},
+					};
 				},
 			},
 			intentController,
@@ -309,20 +315,26 @@ describe("built-in edit and write tools", () => {
 
 		const editTool = createEditTool(dir, {
 			operations: {
-				readFile,
-				writeFile: async (path, content) => {
-					if (content === "ALPHA\nbeta\n") {
-						firstWriteStarted.resolve();
-						await finishFirstWrite.promise;
-						await writeFile(path, content, "utf8");
-						firstWriteSettled = true;
-						return;
-					}
+				...localEditOperations,
+				openFile: async (path) => {
+					const opened = await localEditOperations.openFile(path);
+					return {
+						...opened,
+						writeFile: async (content) => {
+							if (content.toString() === "ALPHA\nbeta\n") {
+								firstWriteStarted.resolve();
+								await finishFirstWrite.promise;
+								await opened.writeFile(content);
+								firstWriteSettled = true;
+								return;
+							}
 
-					if (content === "ALPHA\nBETA\n") {
-						expect(firstWriteSettled).toBe(true);
-					}
-					await writeFile(path, content, "utf8");
+							if (content.toString() === "ALPHA\nBETA\n") {
+								expect(firstWriteSettled).toBe(true);
+							}
+							await opened.writeFile(content);
+						},
+					};
 				},
 			},
 			intentController,
@@ -352,5 +364,43 @@ describe("built-in edit and write tools", () => {
 
 		const content = await readFile(filePath, "utf8");
 		expect(content).toBe("ALPHA\nBETA\n");
+	});
+
+	it("preserves a foreign replacement installed in the final edit write window", async () => {
+		const dir = await createTempDir();
+		const filePath = join(dir, "replace-race.txt");
+		const displacedPath = join(dir, "displaced.txt");
+		await writeFile(filePath, "before\n", "utf8");
+		const intentController = new FileMutationIntentController();
+		let replaced = false;
+		const editTool = createEditTool(dir, {
+			operations: {
+				...localEditOperations,
+				openFile: async (path) => {
+					const opened = await localEditOperations.openFile(path);
+					return {
+						...opened,
+						writeFile: async (content) => {
+							if (!replaced) {
+								replaced = true;
+								await rename(path, displacedPath);
+								await writeFile(path, "foreign replacement\n", "utf8");
+							}
+							await opened.writeFile(content);
+						},
+					};
+				},
+			},
+			intentController,
+		});
+
+		await expect(
+			editTool.execute("replace-race", {
+				path: filePath,
+				edits: [{ oldText: "before", newText: "after" }],
+			}),
+		).rejects.toThrow(/changed|replacement|stale/i);
+		expect(await readFile(filePath, "utf8")).toBe("foreign replacement\n");
+		expect(await readFile(displacedPath, "utf8")).toBe("after\n");
 	});
 });

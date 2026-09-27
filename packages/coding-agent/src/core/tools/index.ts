@@ -54,6 +54,8 @@ export {
 	type EditToolDetails,
 	type EditToolInput,
 	type EditToolOptions,
+	localEditOperations,
+	type OpenEditFile,
 } from "./edit.ts";
 export {
 	createExtensionifyTool,
@@ -80,6 +82,8 @@ export {
 	type FilePathIdentity,
 	type FilePathInspection,
 	localFileMutationIntentOperations,
+	normalizeFilePathIdentity,
+	type OpenEditFileInspection,
 } from "./file-mutation-intent.ts";
 export { withFileMutationQueue } from "./file-mutation-queue.ts";
 export {

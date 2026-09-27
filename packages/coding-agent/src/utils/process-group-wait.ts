@@ -47,6 +47,7 @@ const PIDFD_WAIT = [
 ].join("\n");
 
 const untrackedDirectories = new Set<string>();
+const NO_IGNORED_PROCESS_IDS: ReadonlySet<number> = new Set<number>();
 
 export class ProcessTreeUntrackedError extends Error {
 	constructor(detail: string) {
@@ -292,13 +293,14 @@ export async function awaitOwnedProcessDescendants(
 	pid: number | undefined,
 	cwd: string,
 	signal?: AbortSignal,
+	ignoredPids: ReadonlySet<number> = NO_IGNORED_PROCESS_IDS,
 ): Promise<void> {
 	if (process.platform !== "linux" || !ownedPid(pid)) return;
 	try {
 		let previousKey = "";
 		for (;;) {
 			if (signal?.aborted) throw new Error("aborted");
-			const children = readChildPids(pid);
+			const children = readChildPids(pid).filter((childPid) => !ignoredPids.has(childPid));
 			if (children.length === 0) return;
 			const key = children.join(",");
 			if (key === previousKey) {

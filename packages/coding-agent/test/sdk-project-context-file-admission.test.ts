@@ -1,6 +1,6 @@
-// @isolated: failed intermittently when sharing a module cache with other files (cause not yet identified; see the 2026-09-25 readiness report).
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+// @isolated: mocks node:fs and exercises process-wide project-instruction admission state.
+import type * as nodeFs from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAgentSessionServices } from "../src/core/agent-session-services.ts";
@@ -9,6 +9,25 @@ import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { createDirectoryLink } from "./helpers/filesystem-links.ts";
+import { tempDir } from "./temp-dir.ts";
+
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = (await importOriginal()) as typeof nodeFs;
+	const tempRoot =
+		process.platform === "win32"
+			? (process.env.TEMP ?? process.env.TMP ?? `${process.env.SystemRoot ?? "C:\\Windows"}\\Temp`)
+			: (process.env.TMPDIR ?? process.env.TMP ?? process.env.TEMP ?? "/tmp");
+	const normalize = (value: string): string => {
+		const normalized = value.replace(/[\\/]+/gu, "/").replace(/\/$/u, "");
+		return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+	};
+	const foreignTempGitMarker = normalize(`${tempRoot}/.git`);
+	return {
+		...actual,
+		existsSync: (path: nodeFs.PathLike): boolean =>
+			typeof path === "string" && normalize(path) === foreignTempGitMarker ? false : actual.existsSync(path),
+	};
+});
 
 const PROMPT_PATH_CASES = [
 	"absolute-project-path",
@@ -29,7 +48,7 @@ describe("SDK project-context file admission", () => {
 	let disposables: Array<{ dispose(): void | Promise<void> }>;
 
 	beforeEach(() => {
-		root = mkdtempSync(join(tmpdir(), "pi-sdk-project-context-"));
+		root = tempDir("pi-sdk-project-context-");
 		cwd = join(root, "project");
 		agentDir = join(root, "agent");
 		mkdirSync(cwd, { recursive: true });
@@ -40,7 +59,6 @@ describe("SDK project-context file admission", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		for (const disposable of disposables.reverse()) await disposable.dispose();
-		rmSync(root, { recursive: true, force: true });
 	});
 
 	function track<T extends { dispose(): void | Promise<void> }>(disposable: T): T {

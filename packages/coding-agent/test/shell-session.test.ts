@@ -83,6 +83,35 @@ afterEach(() => {
 });
 
 describe("PersistentShellSession startup", () => {
+	it("kills a Bash child that reports an invalid relay pid and retains its terminal barrier", async () => {
+		const child = createFakeChild();
+		const session = new PersistentShellSession("invalid-bash-relay-pid", "bash", {
+			spawn: () => child,
+			startupTimeoutMs: 2_000,
+		});
+		try {
+			const prewarm = session.prewarm(process.cwd(), process.env);
+			await Promise.resolve();
+			child.stderr?.emit("data", Buffer.from("\x1ePI_BASH_RELAY:not-a-pid\x1e\n", "latin1"));
+
+			await expect(prewarm).rejects.toThrow("Bash output relay reported an invalid pid");
+			expect(child.kill).toHaveBeenCalledTimes(1);
+
+			let terminalSettled = false;
+			const terminal = session.terminalPromise.then(() => {
+				terminalSettled = true;
+			});
+			await waitOneEventLoopTurn();
+			expect(terminalSettled).toBe(false);
+
+			child.emit("close", 1);
+			await terminal;
+			expect(terminalSettled).toBe(true);
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("prewarms one usable PowerShell process and falls back without a disposable probe", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "pi-shell-prewarm-"));
 		const badFixture = join(directory, "bad-powershell.mjs");
@@ -90,26 +119,29 @@ describe("PersistentShellSession startup", () => {
 		writeFileSync(badFixture, "process.exit(9);\n");
 		writeFileSync(
 			goodFixture,
-			`const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
+			`import { readSync, writeSync } from "node:fs";
+const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
 const stderrMarker = ${JSON.stringify(POWERSHELL_SESSION_STDERR_READY_MARKER)};
-process.stderr.write(stderrMarker);
-process.stdout.write(marker.slice(0, 4));
-setImmediate(() => process.stdout.write(marker.slice(4)));
+writeSync(2, stderrMarker);
+writeSync(1, marker.slice(0, 4));
+writeSync(1, marker.slice(4));
 let pending = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-	pending += chunk;
+const input = Buffer.alloc(64 * 1024);
+for (;;) {
+	const count = readSync(0, input, 0, input.length, null);
+	if (count === 0) break;
+	pending += input.subarray(0, count).toString("utf8");
 	let newline = pending.indexOf("\\n");
 	while (newline !== -1) {
 		const line = pending.slice(0, newline);
 		pending = pending.slice(newline + 1);
 		const separator = line.indexOf(" ");
 		const nonce = line.slice(0, separator);
-		process.stderr.write("\\x1e" + nonce + ":stderr\\x1e\\n");
-		process.stdout.write("ok\\n\\n\\x1e" + nonce + ":0\\x1e");
+		writeSync(2, "\\x1e" + nonce + ":stderr\\x1e\\n");
+		writeSync(1, "ok\\n\\n\\x1e" + nonce + ":0\\x1e");
 		newline = pending.indexOf("\\n");
 	}
-});
+}
 `,
 		);
 		chmodSync(badFixture, 0o755);
@@ -164,28 +196,29 @@ process.stdin.on("data", (chunk) => {
 		const fixture = join(directory, "powershell-fixture.mjs");
 		writeFileSync(
 			fixture,
-			`const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
+			`import { readSync, writeSync } from "node:fs";
+const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
 const stderrMarker = ${JSON.stringify(POWERSHELL_SESSION_STDERR_READY_MARKER)};
-process.stderr.write(stderrMarker);
-process.stdout.write(marker);
+writeSync(2, stderrMarker);
+writeSync(1, marker);
 let pending = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-	pending += chunk;
+const input = Buffer.alloc(64 * 1024);
+for (;;) {
+	const count = readSync(0, input, 0, input.length, null);
+	if (count === 0) break;
+	pending += input.subarray(0, count).toString("utf8");
 	let newline = pending.indexOf("\\n");
 	while (newline !== -1) {
 		const line = pending.slice(0, newline);
 		pending = pending.slice(newline + 1);
 		const separator = line.indexOf(" ");
 		const nonce = line.slice(0, separator);
-		process.stdout.write("host-before-stderr\\n\\n\\x1e" + nonce + ":0\\x1e");
-		setTimeout(
-			() => process.stderr.write("late-stderr\\x1e" + nonce + ":stderr\\x1e\\n"),
-			50,
-		);
+		writeSync(1, "host-before-stderr\\n\\n\\x1e" + nonce + ":0\\x1e");
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+		writeSync(2, "late-stderr\\x1e" + nonce + ":stderr\\x1e\\n");
 		newline = pending.indexOf("\\n");
 	}
-});
+}
 `,
 		);
 		chmodSync(fixture, 0o755);
@@ -223,15 +256,18 @@ describe("PersistentShellSession sentinel cwd parsing", () => {
 		const fixture = join(directory, "degrade-fixture.mjs");
 		writeFileSync(
 			fixture,
-			`const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
+			`import { readSync, writeSync } from "node:fs";
+const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
 const stderrMarker = ${JSON.stringify(POWERSHELL_SESSION_STDERR_READY_MARKER)};
-process.stderr.write(stderrMarker);
-process.stdout.write(marker);
+writeSync(2, stderrMarker);
+writeSync(1, marker);
 let commands = 0;
 let pending = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-	pending += chunk;
+const input = Buffer.alloc(64 * 1024);
+for (;;) {
+	const count = readSync(0, input, 0, input.length, null);
+	if (count === 0) break;
+	pending += input.subarray(0, count).toString("utf8");
 	let newline = pending.indexOf("\\n");
 	while (newline !== -1) {
 		const line = pending.slice(0, newline);
@@ -239,12 +275,12 @@ process.stdin.on("data", (chunk) => {
 		const separator = line.indexOf(" ");
 		const nonce = line.slice(0, separator);
 		commands += 1;
-		process.stderr.write("\\x1e" + nonce + ":stderr\\x1e\\n");
+		writeSync(2, "\\x1e" + nonce + ":stderr\\x1e\\n");
 		const payload = commands === 1 ? ":5" : ":0:";
-		process.stdout.write("data\\n\\n\\x1e" + nonce + payload + "\\x1e");
+		writeSync(1, "data\\n\\n\\x1e" + nonce + payload + "\\x1e");
 		newline = pending.indexOf("\\n");
 	}
-});
+}
 `,
 		);
 		const session = makeFixtureSession(fixture, "cwd-degrade");
@@ -269,42 +305,41 @@ process.stdin.on("data", (chunk) => {
 		const fixture = join(directory, "split-fixture.mjs");
 		writeFileSync(
 			fixture,
-			`const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
+			`import { readSync, writeSync } from "node:fs";
+const marker = ${JSON.stringify(POWERSHELL_SESSION_READY_MARKER)};
 const stderrMarker = ${JSON.stringify(POWERSHELL_SESSION_STDERR_READY_MARKER)};
-process.stderr.write(stderrMarker);
-process.stdout.write(marker);
+writeSync(2, stderrMarker);
+writeSync(1, marker);
 const cwdBytes = Buffer.from(${JSON.stringify(expectedCwd)}, "utf8");
 let pending = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-	pending += chunk;
+const input = Buffer.alloc(64 * 1024);
+for (;;) {
+	const count = readSync(0, input, 0, input.length, null);
+	if (count === 0) break;
+	pending += input.subarray(0, count).toString("utf8");
 	let newline = pending.indexOf("\\n");
 	while (newline !== -1) {
 		const line = pending.slice(0, newline);
 		pending = pending.slice(newline + 1);
 		const separator = line.indexOf(" ");
 		const nonce = line.slice(0, separator);
-		process.stderr.write("\\x1e" + nonce + ":stderr\\x1e\\n");
-		process.stdout.write("head ");
-		setImmediate(() => {
-			process.stdout.write("output\\n");
-			setImmediate(() => {
-				process.stdout.write("\\n\\x1e" + nonce.slice(0, 6));
-				setImmediate(() => {
-					// Split inside the nonce, at a colon, and mid-multibyte-character.
-					process.stdout.write(
-						Buffer.concat([
-							Buffer.from(nonce.slice(6) + ":v1:3:" + cwdBytes.length + ":", "utf8"),
-							cwdBytes.subarray(0, 21),
-						]),
-					);
-					setImmediate(() => process.stdout.write(Buffer.concat([cwdBytes.subarray(21), Buffer.from("\\x1e", "latin1")])));
-				});
-			});
-		});
+		writeSync(2, "\\x1e" + nonce + ":stderr\\x1e\\n");
+		writeSync(1, "head ");
+		writeSync(1, "output\\n");
+		writeSync(1, "\\n\\x1e" + nonce.slice(0, 6));
+		// Split inside the nonce, at a colon, and mid-multibyte-character.
+		writeSync(
+			1,
+			Buffer.concat([
+				Buffer.from(nonce.slice(6) + ":v1:3:" + cwdBytes.length + ":", "utf8"),
+				cwdBytes.subarray(0, 21),
+			]),
+		);
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+		writeSync(1, Buffer.concat([cwdBytes.subarray(21), Buffer.from("\\x1e", "latin1")]));
 		newline = pending.indexOf("\\n");
 	}
-});
+}
 `,
 		);
 		const session = makeFixtureSession(fixture, "cwd-split");

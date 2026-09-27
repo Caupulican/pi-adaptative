@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+// @isolated: mocks node:fs so a foreign repository marker at the host temp root cannot redefine fixture topology.
+import type * as nodeFs from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
@@ -14,6 +15,25 @@ import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
 import { createDirectoryLink } from "./helpers/filesystem-links.ts";
 import { loadedSuiteTimeout } from "./loaded-suite-timeout.ts";
+import { tempDir as testTempDir } from "./temp-dir.ts";
+
+vi.mock("node:fs", async (importOriginal) => {
+	const actual = (await importOriginal()) as typeof nodeFs;
+	const tempRoot =
+		process.platform === "win32"
+			? (process.env.TEMP ?? process.env.TMP ?? `${process.env.SystemRoot ?? "C:\\Windows"}\\Temp`)
+			: (process.env.TMPDIR ?? process.env.TMP ?? process.env.TEMP ?? "/tmp");
+	const normalize = (value: string): string => {
+		const normalized = value.replace(/[\\/]+/gu, "/").replace(/\/$/u, "");
+		return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+	};
+	const foreignTempGitMarker = normalize(`${tempRoot}/.git`);
+	return {
+		...actual,
+		existsSync: (path: nodeFs.PathLike): boolean =>
+			typeof path === "string" && normalize(path) === foreignTempGitMarker ? false : actual.existsSync(path),
+	};
+});
 
 function settingsWithExtensionsGranted(...allowedExtensions: string[]): SettingsManager {
 	return SettingsManager.inMemory({
@@ -36,15 +56,11 @@ describe("DefaultResourceLoader", () => {
 	let cwd: string;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `rl-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		tempDir = testTempDir("rl-test-");
 		agentDir = join(tempDir, "agent");
 		cwd = join(tempDir, "project");
 		mkdirSync(agentDir, { recursive: true });
 		mkdirSync(cwd, { recursive: true });
-	});
-
-	afterEach(() => {
-		rmSync(tempDir, { recursive: true, force: true });
 	});
 
 	describe("reload", () => {
@@ -1614,25 +1630,21 @@ Content`,
 
 describe("refreshSkills", () => {
 	it("picks up a skill directory created after the initial scan", async () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "pi-loader-refresh-"));
-		try {
-			const cwd = join(tempDir, "project");
-			const agentDir = join(tempDir, "agent");
-			mkdirSync(cwd, { recursive: true });
-			mkdirSync(join(agentDir, "skills"), { recursive: true });
-			const loader = new DefaultResourceLoader({ cwd, agentDir });
-			await loader.reload();
-			expect(loader.getSkills().skills.some((skill) => skill.name === "late-skill")).toBe(false);
-			mkdirSync(join(agentDir, "skills", "late-skill"), { recursive: true });
-			writeFileSync(
-				join(agentDir, "skills", "late-skill", "SKILL.md"),
-				"---\nname: late-skill\ndescription: Written after the scan\n---\nBody.",
-			);
-			loader.refreshSkills();
-			expect(loader.getSkills().skills.some((skill) => skill.name === "late-skill")).toBe(true);
-			expect(loader.getActiveSkills().some((skill) => skill.name === "late-skill")).toBe(true);
-		} finally {
-			rmSync(tempDir, { recursive: true, force: true });
-		}
+		const scratch = testTempDir("pi-loader-refresh-");
+		const cwd = join(scratch, "project");
+		const agentDir = join(scratch, "agent");
+		mkdirSync(cwd, { recursive: true });
+		mkdirSync(join(agentDir, "skills"), { recursive: true });
+		const loader = new DefaultResourceLoader({ cwd, agentDir });
+		await loader.reload();
+		expect(loader.getSkills().skills.some((skill) => skill.name === "late-skill")).toBe(false);
+		mkdirSync(join(agentDir, "skills", "late-skill"), { recursive: true });
+		writeFileSync(
+			join(agentDir, "skills", "late-skill", "SKILL.md"),
+			"---\nname: late-skill\ndescription: Written after the scan\n---\nBody.",
+		);
+		loader.refreshSkills();
+		expect(loader.getSkills().skills.some((skill) => skill.name === "late-skill")).toBe(true);
+		expect(loader.getActiveSkills().some((skill) => skill.name === "late-skill")).toBe(true);
 	});
 });

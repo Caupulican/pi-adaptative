@@ -1,11 +1,10 @@
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { agentLoop } from "@caupulican/pi-agent-core/agent-loop";
 import type { AgentEvent, AgentMessage } from "@caupulican/pi-agent-core/types";
 import { EventStream } from "@caupulican/pi-ai/event-stream";
 import type { AssistantMessage, AssistantMessageEvent, Message } from "@caupulican/pi-ai/types";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { wrapToolWithCredentialExposureGuard } from "../src/core/secrets/credential-exposure-guard.ts";
 import { createBashTool } from "../src/core/tools/bash.ts";
 import { createEditTool } from "../src/core/tools/edit.ts";
@@ -23,18 +22,11 @@ import { createLsTool } from "../src/core/tools/ls.ts";
 import { createReadTool } from "../src/core/tools/read.ts";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
-
-const temporaryRoots: string[] = [];
+import { tempDir } from "./temp-dir.ts";
 
 async function createTemporaryRoot(prefix: string): Promise<string> {
-	const root = await mkdtemp(join(await realpath(tmpdir()), prefix));
-	temporaryRoots.push(root);
-	return root;
+	return tempDir(prefix);
 }
-
-afterEach(async () => {
-	await Promise.all(temporaryRoots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
-});
 
 describe("tool-owned failure recovery contracts", () => {
 	it("emits stable failure identity from the complete shell output", async () => {
@@ -287,7 +279,9 @@ describe("tool-owned failure recovery contracts", () => {
 		const edit = createEditTool(cwd, {
 			operations: {
 				readFile: async () => Buffer.from("remote"),
-				writeFile: async () => {},
+				openFile: async () => {
+					throw new Error("Not used by this contract-only fixture.");
+				},
 			},
 			intentController: new FileMutationIntentController(),
 		});

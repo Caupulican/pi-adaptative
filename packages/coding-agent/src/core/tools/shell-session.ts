@@ -21,7 +21,7 @@
  * pipeline "completes" — waits for the grandchild to die instead of the direct child. The bare
  * invocation lets a native command's stdout/stderr handles be inherited directly by the child
  * process; the direct child's own exit is what unblocks the sentinel line, exactly like the
- * per-command backend and like bash's stdio inheritance above. The bounded consequence: a native
+ * per-command backend and like bash's ordered output relay above. The bounded consequence: a native
  * command's stderr no longer merges into the session's stdout pipe (there is no capturing pipeline
  * stage to merge it) — it arrives on the session's own stderr pipe instead. A nonce-bearing barrier
  * on that pipe joins it deterministically with the stdout completion frame before the command
@@ -68,6 +68,7 @@ const SENTINEL_BYTE = 0x1e;
 const BASH_SENTINEL_PAYLOAD_PREFIX = Buffer.from("v1:", "latin1");
 const BASH_SENTINEL_PAYLOAD_PREFIX_V2 = Buffer.from("v2:", "latin1");
 const MAX_STARTUP_DIAGNOSTIC_BYTES = 16 * 1024;
+const BASH_SESSION_RELAY_READY_PREFIX = Buffer.from("\x1ePI_BASH_RELAY:", "latin1");
 const POWERSHELL_SESSION_READY_BYTES = Buffer.from(POWERSHELL_SESSION_READY_MARKER, "latin1");
 const POWERSHELL_SESSION_STDERR_READY_BYTES = Buffer.from(POWERSHELL_SESSION_STDERR_READY_MARKER, "latin1");
 
@@ -207,6 +208,49 @@ function escapeSingleQuotesPowerShell(value: string): string {
 }
 
 /**
+ * Node hosts child stdio with Unix sockets. A nested Node process can finish before asynchronous
+ * writes to that inherited socket reach the host. Bash process substitution supplies a real pipe;
+ * one native cat then forwards the ordered byte stream to the host socket synchronously. The relay
+ * is a session-owned child and is deliberately excluded from per-command job waits.
+ */
+const BASH_SESSION_OUTPUT_RELAY_BOOTSTRAP = [
+	"exec {__PI_OUTPUT_RELAY_FD}> >(cat)",
+	"readonly __PI_OUTPUT_RELAY_PID=$!",
+	"readonly __PI_OUTPUT_RELAY_FD",
+	"printf '\\036PI_BASH_RELAY:%s\\036\\n' \"$__PI_OUTPUT_RELAY_PID\" >&2",
+	'exec 1>&"$__PI_OUTPUT_RELAY_FD" 2>&1',
+	"",
+].join("\n");
+
+function buildBashEvaluation(command: string, nonce: string, outputFdVariable?: string): string[] {
+	const outputRedirect = outputFdVariable === undefined ? "" : ` >&"$${outputFdVariable}"`;
+	return [`{ eval "$(cat <<'PI_EOF_${nonce}'`, command, `PI_EOF_${nonce}`, `)"; } < /dev/null${outputRedirect} 2>&1`];
+}
+
+function buildBashJobWait(excludedPidVariable: string): string[] {
+	return [
+		`for __pi_job_pid in $(jobs -pr); do if [ "$__pi_job_pid" != "$${excludedPidVariable}" ]; then wait "$__pi_job_pid" || :; fi; done`,
+		"unset -v __pi_job_pid",
+	];
+}
+
+/** Host one Bash command in a fresh process while preserving its status after the output relay drains. */
+export function buildBashOneShotWire(command: string): string {
+	const nonce = randomBytes(8).toString("hex");
+	return [
+		"exec {__pi_output_fd}> >(cat)",
+		"__pi_output_relay=$!",
+		...buildBashEvaluation(command, nonce, "__pi_output_fd"),
+		"__pi_status=$?",
+		...buildBashJobWait("__pi_output_relay"),
+		"exec {__pi_output_fd}>&-",
+		'wait "$__pi_output_relay" || :',
+		'exit "$__pi_status"',
+		"",
+	].join("\n");
+}
+
+/**
  * The whole command is heredoc-quoted data: eval keeps syntax errors contained (a raw syntax
  * error on the session's stdin would abort the shell), and the random delimiter makes content
  * collisions with agent output practically impossible. `< /dev/null` gives commands the same
@@ -225,13 +269,12 @@ export function buildBashWire(command: string, nonce: string, cdTo: string | nul
 		"__pi_exports_before=",
 		// biome-ignore lint/suspicious/noTemplateCurlyInString: bash parameter expansion, not a template literal
 		'if [ -z "${__PI_EXPORT_SNAPSHOT+x}" ]; then __PI_EXPORT_SNAPSHOT=$(unset -v _ PWD OLDPWD SHLVL; export -p); __pi_exports_before=$__PI_EXPORT_SNAPSHOT; fi',
-		`{ eval "$(cat <<'PI_EOF_${nonce}'`,
-		body,
-		`PI_EOF_${nonce}`,
-		`)"; } < /dev/null 2>&1`,
+		...buildBashEvaluation(body, nonce),
 		"__pi_status=$?",
-		// Job-table children stay inside this command. The saved status is the command's, not wait's.
-		"wait",
+		// Job-table children stay inside this command. The session relay is lifecycle infrastructure,
+		// not command work; waiting on it would deadlock every command. The saved status is the
+		// command's, not any background job's.
+		...buildBashJobWait("__PI_OUTPUT_RELAY_PID"),
 		"__pi_exports=$(unset -v _ PWD OLDPWD SHLVL; export -p)",
 		'if [ "$__pi_exports" != "$__PI_EXPORT_SNAPSHOT" ]; then __PI_EXPORT_SNAPSHOT=$__pi_exports; __pi_exports_out=$__pi_exports; else __pi_exports_out=; fi',
 		// Version and byte lengths make the frame unambiguous even when a legal POSIX path or an
@@ -451,6 +494,7 @@ export class PersistentShellSession {
 	private appliedExportVersion = 0;
 	private activeExec: ActiveExec | null = null;
 	private rejectStartup: ((error: Error) => void) | null = null;
+	private readonly bashInfrastructurePids = new Set<number>();
 	private disposed = false;
 
 	constructor(key: string, kind: PlatformShellToolName, options: PersistentShellSessionOptions = {}) {
@@ -628,7 +672,7 @@ export class PersistentShellSession {
 				const finishTracked = async (exitCode: number | null) => {
 					try {
 						if (this.kind !== "powershell") {
-							await awaitOwnedProcessDescendants(child.pid, cwd, trackAbort.signal);
+							await awaitOwnedProcessDescendants(child.pid, cwd, trackAbort.signal, this.bashInfrastructurePids);
 						}
 					} catch (error) {
 						if (!settled) settle(() => reject(error instanceof Error ? error : new Error(String(error))));
@@ -773,14 +817,7 @@ export class PersistentShellSession {
 		} else {
 			const { shell } = getShellConfig(undefined, this.kind);
 			const args = basename(shell).toLowerCase().includes("bash") ? ["--noprofile", "--norc"] : [];
-			const child = this.spawnProcess(shell, args, {
-				cwd,
-				env,
-				detached: process.platform !== "win32",
-				stdio: ["pipe", "pipe", "pipe"],
-				windowsHide: true,
-			});
-			this.attachReadyChild(child);
+			await this.spawnBashChild(shell, args, cwd, env);
 		}
 		this.childEnv = { ...spawnedEnv };
 		this.lastRequestedCwd = spawnedCwd;
@@ -788,6 +825,86 @@ export class PersistentShellSession {
 		// A fresh process holds the spawn environment: the ledger's baseline, nothing applied yet.
 		this.lastReportedExports = undefined;
 		this.appliedExportVersion = 0;
+	}
+
+	private spawnBashChild(shell: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<void> {
+		return new Promise<void>((resolve, reject) => {
+			let startupSettled = false;
+			let startupStderr: Buffer = Buffer.alloc(0);
+			let timeoutTimer: NodeJS.Timeout | undefined;
+			let child: ChildProcess;
+
+			const settleStartup = (finish: () => void): void => {
+				if (startupSettled) return;
+				startupSettled = true;
+				if (timeoutTimer) clearTimeout(timeoutTimer);
+				if (this.rejectStartup === rejectStartup) this.rejectStartup = null;
+				child.stderr?.off("data", onStderr);
+				child.off("error", onError);
+				child.off("close", onClose);
+				finish();
+			};
+			const diagnostic = (): string => {
+				const text = startupStderr.toString("utf8").trim();
+				return text ? `: ${text}` : "";
+			};
+			const rejectStartup = (error: Error): void => {
+				this.coordinator.kill();
+				this.resetChildState();
+				settleStartup(() => reject(error));
+			};
+			const onStderr = (data: Buffer): void => {
+				startupStderr =
+					startupStderr.length === 0
+						? data
+						: Buffer.concat([startupStderr, data]).subarray(-MAX_STARTUP_DIAGNOSTIC_BYTES);
+				const markerStart = startupStderr.indexOf(BASH_SESSION_RELAY_READY_PREFIX);
+				if (markerStart === -1) return;
+				const pidStart = markerStart + BASH_SESSION_RELAY_READY_PREFIX.length;
+				const markerEnd = startupStderr.indexOf(0x1e, pidStart);
+				if (markerEnd === -1) return;
+				const relayPid = Number.parseInt(startupStderr.subarray(pidStart, markerEnd).toString("latin1"), 10);
+				if (!Number.isInteger(relayPid) || relayPid <= 0) {
+					rejectStartup(new Error(`Bash output relay reported an invalid pid${diagnostic()}`));
+					return;
+				}
+				this.bashInfrastructurePids.clear();
+				this.bashInfrastructurePids.add(relayPid);
+				settleStartup(resolve);
+			};
+			const onError = (error: Error): void =>
+				rejectStartup(new Error(`spawn failed: ${error.message}${diagnostic()}`));
+			const onClose = (code: number | null): void =>
+				rejectStartup(new Error(`exited with code ${code ?? "null"} before readiness${diagnostic()}`));
+
+			try {
+				child = this.spawnOwnedShell(shell, args, cwd, env);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				reject(new Error(`spawn failed: ${message}`));
+				return;
+			}
+
+			this.attachReadyChild(child);
+			this.rejectStartup = rejectStartup;
+			child.stderr?.on("data", onStderr);
+			child.once("error", onError);
+			child.once("close", onClose);
+			if (!child.stdin) {
+				rejectStartup(new Error("Bash output relay has no stdin"));
+				return;
+			}
+			timeoutTimer = setTimeout(() => {
+				this.coordinator.kill();
+				this.resetChildState();
+				rejectStartup(
+					new Error(`Bash output relay startup timed out after ${this.startupTimeoutMs}ms${diagnostic()}`),
+				);
+			}, this.startupTimeoutMs);
+			child.stdin.write(BASH_SESSION_OUTPUT_RELAY_BOOTSTRAP, (error) => {
+				if (error) rejectStartup(new Error(`Bash output relay startup write failed: ${error.message}`));
+			});
+		});
 	}
 
 	private async spawnPowerShellChild(
@@ -847,13 +964,7 @@ export class PersistentShellSession {
 
 			let child: ChildProcess;
 			try {
-				child = this.spawnProcess(shell, [...POWERSHELL_ARGS, POWERSHELL_BOOTSTRAP], {
-					cwd,
-					env,
-					detached: process.platform !== "win32",
-					stdio: ["pipe", "pipe", "pipe"],
-					windowsHide: true,
-				});
+				child = this.spawnOwnedShell(shell, [...POWERSHELL_ARGS, POWERSHELL_BOOTSTRAP], cwd, env);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				rejectStartup(new Error(`spawn failed: ${message}`));
@@ -908,6 +1019,16 @@ export class PersistentShellSession {
 		});
 	}
 
+	private spawnOwnedShell(shell: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): ChildProcess {
+		return this.spawnProcess(shell, args, {
+			cwd,
+			env,
+			detached: process.platform !== "win32",
+			stdio: ["pipe", "pipe", "pipe"],
+			windowsHide: true,
+		});
+	}
+
 	private attachReadyChild(child: ChildProcess): void {
 		this.coordinator.attach(child, {
 			onStdout: (data) => this.activeExec?.onStdout(data),
@@ -929,6 +1050,7 @@ export class PersistentShellSession {
 		this.lastReportedCwd = undefined;
 		this.lastReportedExports = undefined;
 		this.appliedExportVersion = 0;
+		this.bashInfrastructurePids.clear();
 	}
 
 	private killChild(): void {

@@ -38,23 +38,26 @@ export function memoryFileBackend(flavor: "posix" | "win32") {
 			return key(path);
 		},
 	};
+	const inspect = (path: string): FilePathInspection | undefined => {
+		const kind = files.has(key(path)) ? "file" : directories.has(key(path)) ? "directory" : undefined;
+		if (!kind) return undefined;
+		return {
+			kind,
+			identity: {
+				dev: "fixture",
+				ino: key(path),
+				mode: "fixture",
+				size: String(files.get(key(path))?.length ?? 0),
+				mtimeMs: String(versions.get(key(path)) ?? 0),
+				ctimeMs: "0",
+			},
+		};
+	};
 	const operations: FileMutationIntentOperations = {
 		mutationQueue,
 		async inspect(path): Promise<FilePathInspection | undefined> {
 			probes.push(path);
-			const kind = files.has(key(path)) ? "file" : directories.has(key(path)) ? "directory" : undefined;
-			if (!kind) return undefined;
-			return {
-				kind,
-				identity: {
-					dev: "fixture",
-					ino: key(path),
-					mode: "fixture",
-					size: String(files.get(key(path))?.length ?? 0),
-					mtimeMs: String(versions.get(key(path)) ?? 0),
-					ctimeMs: "0",
-				},
-			};
+			return inspect(path);
 		},
 		async access(path) {
 			if (!files.has(key(path)) && !directories.has(key(path))) throw error("ENOENT");
@@ -93,10 +96,28 @@ export function memoryFileBackend(flavor: "posix" | "win32") {
 		write: { createFile: create, mkdir: async (path: string) => mkdir(path) },
 		edit: {
 			readFile: async (path: string) => Buffer.from(read(path)),
-			writeFile: async (path: string, content: string | Buffer) => {
-				read(path);
-				if (Buffer.isBuffer(content)) throw new Error("This text fixture does not model encoded files");
-				put(path, content);
+			openFile: async (path: string) => {
+				const resource = key(path);
+				read(resource);
+				const initialInspection = inspect(resource);
+				if (initialInspection?.kind !== "file") throw error("ENOENT");
+				let lastIdentity = initialInspection.identity;
+				return {
+					readFile: async () => Buffer.from(read(resource)),
+					writeFile: async (content: string | Buffer) => {
+						read(resource);
+						put(resource, Buffer.isBuffer(content) ? content.toString("utf8") : content);
+					},
+					inspect: async () => {
+						const current = inspect(resource);
+						if (current?.kind === "file") lastIdentity = current.identity;
+						return {
+							identity: lastIdentity,
+							linkCount: current?.kind === "file" ? "1" : "0",
+						};
+					},
+					close: async () => {},
+				};
 			},
 		},
 	};

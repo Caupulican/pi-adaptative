@@ -1,6 +1,6 @@
 import { type AgentTool, createAgentToolFailureRecoveryAuthority } from "@caupulican/pi-agent-core/types";
 import { Box, Container, Spacer, Text } from "@caupulican/pi-tui";
-import { readFile as fsReadFile, stat as fsStat, writeFile as fsWriteFile } from "fs/promises";
+import { type FileHandle, open as fsOpen, readFile as fsReadFile, stat as fsStat } from "fs/promises";
 import { type Static, Type } from "typebox";
 import { renderDiff } from "../../modes/interactive/components/diff.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
@@ -41,6 +41,8 @@ import {
 	FileMutationIntentController,
 	type FileMutationLease,
 	FileMutationPreflightError,
+	normalizeFilePathIdentity,
+	type OpenEditFileInspection,
 	resolveMutationPathTarget,
 } from "./file-mutation-intent.ts";
 import { renderToolPath, str } from "./render-utils.ts";
@@ -135,15 +137,62 @@ export interface EditToolDetails {
  * Override these to delegate file editing to remote systems (for example SSH).
  */
 export interface EditOperations {
-	/** Read file contents as a Buffer */
+	/** Read file contents for non-mutating previews. */
 	readFile: (absolutePath: string) => Promise<Buffer>;
-	/** Write content to a file */
-	writeFile: (absolutePath: string, content: string | Buffer) => Promise<void>;
+	/** Open one stable resource for the execution read, write, and identity checks. */
+	openFile: (absolutePath: string) => Promise<OpenEditFile>;
 }
 
-const defaultEditOperations: EditOperations = {
+export interface OpenEditFile {
+	readFile: () => Promise<Buffer>;
+	writeFile: (content: string | Buffer) => Promise<void>;
+	inspect: () => Promise<OpenEditFileInspection>;
+	close: () => Promise<void>;
+}
+
+async function readOpenFile(handle: FileHandle): Promise<Buffer> {
+	const { size } = await handle.stat({ bigint: true });
+	if (size > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("File is too large to edit safely.");
+	const content = Buffer.alloc(Number(size));
+	let offset = 0;
+	while (offset < content.length) {
+		const { bytesRead } = await handle.read(content, offset, content.length - offset, offset);
+		if (bytesRead === 0) break;
+		offset += bytesRead;
+	}
+	return offset === content.length ? content : content.subarray(0, offset);
+}
+
+async function writeOpenFile(handle: FileHandle, content: string | Buffer): Promise<void> {
+	const buffer = Buffer.isBuffer(content) ? content : Buffer.from(content, "utf8");
+	let offset = 0;
+	while (offset < buffer.length) {
+		const { bytesWritten } = await handle.write(buffer, offset, buffer.length - offset, offset);
+		if (bytesWritten === 0) throw new Error("Edit write made no progress.");
+		offset += bytesWritten;
+	}
+	await handle.truncate(buffer.length);
+}
+
+async function inspectOpenFile(handle: FileHandle): Promise<OpenEditFileInspection> {
+	const stats = await handle.stat({ bigint: true });
+	return {
+		identity: normalizeFilePathIdentity(stats),
+		linkCount: String(stats.nlink),
+	};
+}
+
+export const localEditOperations: EditOperations = {
 	readFile: (path) => fsReadFile(path),
-	writeFile: (path, content) => fsWriteFile(path, content, "utf-8"),
+	openFile: async (path) => {
+		const handle = await fsOpen(path, "r+");
+		return {
+			readFile: () => readOpenFile(handle),
+			writeFile: (content) => writeOpenFile(handle, content),
+			inspect: () => inspectOpenFile(handle),
+			close: () => handle.close(),
+		};
+	},
 };
 
 export interface EditToolOptions {
@@ -477,7 +526,7 @@ export function createEditToolDefinition(
 	cwd: string,
 	options?: EditToolOptions,
 ): ToolDefinition<typeof editSchema, EditToolDetails | undefined, EditRenderState> {
-	const ops = options?.operations ?? defaultEditOperations;
+	const ops = options?.operations ?? localEditOperations;
 	const failureRecoveryAuthority = selectFileFailureRecoveryAuthority(
 		options?.operations !== undefined,
 		options?.failureRecoveryAuthority,
@@ -646,9 +695,13 @@ export function createEditToolDefinition(
 						}
 					}
 					let staleLeaseRefreshes = 0;
-					const confirmLeaseOrRefresh = async (): Promise<boolean> => {
+					const confirmLeaseOrRefresh = async (opened?: OpenEditFile): Promise<boolean> => {
 						try {
-							await intentController.assertCurrent(lease, signal);
+							if (opened) {
+								await intentController.assertOpenEditFileCurrent(lease, await opened.inspect(), signal);
+							} else {
+								await intentController.assertCurrent(lease, signal);
+							}
 							return true;
 						} catch (error) {
 							if (
@@ -663,14 +716,10 @@ export function createEditToolDefinition(
 						}
 					};
 
-					// One round reads content bracketed by two matching identity observations of the
-					// lease version and re-checks that identity immediately before writing. Same-process
-					// edits are serialized by the file mutation queue. The pre-write check is a
-					// point-in-time observation, not a hold on the file: an external write landing
-					// between that check and ops.writeFile is neither detected nor preserved. The round
-					// writes the full buffer computed from its own read, so the external write is
-					// overwritten, its bytes are unrecoverable, and nothing observes the loss — not this
-					// round, and not any later one.
+					// One round binds its read and write to one open resource. Path and resource identity
+					// must agree before the read, immediately before the write, and after the write. A
+					// concurrent rename-over can make our resource stale, but cannot redirect the write
+					// into the foreign resource now occupying the pathname.
 					const runEditRound = async (): Promise<
 						| {
 								baseContent: string;
@@ -682,93 +731,100 @@ export function createEditToolDefinition(
 						  }
 						| undefined
 					> => {
-						if (!(await confirmLeaseOrRefresh())) return undefined;
 						throwIfAborted();
-
-						// Read the file.
-						const buffer = await ops.readFile(absolutePath);
-						const {
-							text: content,
-							bom,
-							recovery: recovered,
-						} = await decodeEditDocument(buffer, path, encoding, signal);
-						throwIfAborted();
-
-						// Strip BOM before matching. The model will not include an invisible BOM in oldText.
-						const normalizedContent = normalizeToLF(content);
-						const cachedForInput =
-							cachedMatchPlan?.absolutePath === absolutePath && editsMatch(cachedMatchPlan.edits, edits)
-								? cachedMatchPlan
-								: undefined;
-						if (cachedForInput) cachedMatchPlan = undefined;
-						const matchPlanReused =
-							cachedForInput !== undefined &&
-							cachedForInput.sourceDigest === digestNormalizedEditSource(normalizedContent);
-						let applied: ReturnType<typeof applyEditMatchPlanToSource>;
+						const opened = await ops.openFile(absolutePath);
 						try {
-							const plan = matchPlanReused
-								? cachedForInput.plan
-								: planEditsToNormalizedContent(normalizedContent, edits, path);
-							applied = applyEditMatchPlanToSource(content, plan, path);
-						} catch (error) {
-							throw error instanceof Error && intentController.hasProducedContent(absolutePath, buffer)
-								? new Error(
-										`The current content of ${path} was produced by an earlier mutation in this run; re-match oldText against it. ${error.message}`,
-									)
-								: error;
-						}
-						throwIfAborted();
+							if (!(await confirmLeaseOrRefresh(opened))) return undefined;
+							throwIfAborted();
 
-						const finalContent = recovered
-							? await recovered.encode(applied.splices)
-							: bom + applied.sourceContent;
-						if (recovered?.detected && sourceMtimeMs !== undefined) {
-							rememberDetectedFileEncoding(absolutePath, sourceMtimeMs, recovered.encoding);
+							const buffer = await opened.readFile();
+							const {
+								text: content,
+								bom,
+								recovery: recovered,
+							} = await decodeEditDocument(buffer, path, encoding, signal);
+							throwIfAborted();
+
+							// Strip BOM before matching. The model will not include an invisible BOM in oldText.
+							const normalizedContent = normalizeToLF(content);
+							const cachedForInput =
+								cachedMatchPlan?.absolutePath === absolutePath && editsMatch(cachedMatchPlan.edits, edits)
+									? cachedMatchPlan
+									: undefined;
+							if (cachedForInput) cachedMatchPlan = undefined;
+							const matchPlanReused =
+								cachedForInput !== undefined &&
+								cachedForInput.sourceDigest === digestNormalizedEditSource(normalizedContent);
+							let applied: ReturnType<typeof applyEditMatchPlanToSource>;
+							try {
+								const plan = matchPlanReused
+									? cachedForInput.plan
+									: planEditsToNormalizedContent(normalizedContent, edits, path);
+								applied = applyEditMatchPlanToSource(content, plan, path);
+							} catch (error) {
+								throw error instanceof Error && intentController.hasProducedContent(absolutePath, buffer)
+									? new Error(
+											`The current content of ${path} was produced by an earlier mutation in this run; re-match oldText against it. ${error.message}`,
+										)
+									: error;
+							}
+							throwIfAborted();
+
+							const finalContent = recovered
+								? await recovered.encode(applied.splices)
+								: bom + applied.sourceContent;
+							if (recovered?.detected && sourceMtimeMs !== undefined) {
+								rememberDetectedFileEncoding(absolutePath, sourceMtimeMs, recovered.encoding);
+							}
+							if (!(await confirmLeaseOrRefresh(opened))) return undefined;
+							throwIfAborted();
+							const expectedContent = Buffer.isBuffer(finalContent)
+								? Buffer.from(finalContent)
+								: Buffer.from(finalContent, "utf8");
+							// Keep the verification witness private: an adapter may mutate the buffer it receives.
+							await opened.writeFile(Buffer.from(expectedContent));
+							if (!(await opened.readFile()).equals(expectedContent)) {
+								throw new Error(
+									"Edit write verification failed; file outcome requires inspection before retry.",
+								);
+							}
+							await intentController.assertOpenEditFileStillTarget(lease, await opened.inspect(), signal);
+							// The bytes just written are in the resolved encoding by construction, so the next
+							// read or edit of this file resolves it without detecting it a second time.
+							if (recovered?.detected && options?.operations === undefined) {
+								const written = await fsStat(absolutePath).then(
+									(stats) => stats.mtimeMs,
+									() => undefined,
+								);
+								if (written !== undefined)
+									rememberDetectedFileEncoding(absolutePath, written, recovered.encoding);
+							}
+							throwIfAborted();
+							return {
+								baseContent: applied.baseContent,
+								newContent: applied.newContent,
+								finalContent,
+								...(recovered
+									? {
+											encodingRecovery: {
+												codec: "python" as const,
+												encoding: recovered.encoding,
+												verified: true as const,
+												source: recovered.detected
+													? PYTHON_DETECTION_SOURCE
+													: (encodingSource ?? "the encoding argument"),
+											},
+										}
+									: {}),
+								matchPlanReused,
+								diffResult:
+									matchPlanReused && cachedForInput
+										? { diff: cachedForInput.diff, firstChangedLine: cachedForInput.firstChangedLine }
+										: generateDiffString(applied.baseContent, applied.newContent),
+							};
+						} finally {
+							await opened.close();
 						}
-						if (!(await confirmLeaseOrRefresh())) return undefined;
-						throwIfAborted();
-						// Keep the verification witness private: an adapter may mutate the buffer it receives.
-						await ops.writeFile(
-							absolutePath,
-							Buffer.isBuffer(finalContent) ? Buffer.from(finalContent) : finalContent,
-						);
-						if (Buffer.isBuffer(finalContent) && !(await ops.readFile(absolutePath)).equals(finalContent)) {
-							throw new Error(
-								"Encoding recovery write verification failed; file outcome requires inspection before retry.",
-							);
-						}
-						// The bytes just written are in the resolved encoding by construction, so the next
-						// read or edit of this file resolves it without detecting it a second time.
-						if (recovered?.detected && options?.operations === undefined) {
-							const written = await fsStat(absolutePath).then(
-								(stats) => stats.mtimeMs,
-								() => undefined,
-							);
-							if (written !== undefined) rememberDetectedFileEncoding(absolutePath, written, recovered.encoding);
-						}
-						throwIfAborted();
-						return {
-							baseContent: applied.baseContent,
-							newContent: applied.newContent,
-							finalContent,
-							...(recovered
-								? {
-										encodingRecovery: {
-											codec: "python" as const,
-											encoding: recovered.encoding,
-											verified: true as const,
-											source: recovered.detected
-												? PYTHON_DETECTION_SOURCE
-												: (encodingSource ?? "the encoding argument"),
-										},
-									}
-								: {}),
-							matchPlanReused,
-							diffResult:
-								matchPlanReused && cachedForInput
-									? { diff: cachedForInput.diff, firstChangedLine: cachedForInput.firstChangedLine }
-									: generateDiffString(applied.baseContent, applied.newContent),
-						};
 					};
 
 					let completedRound: Awaited<ReturnType<typeof runEditRound>>;

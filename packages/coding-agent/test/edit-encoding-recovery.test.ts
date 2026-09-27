@@ -1,15 +1,15 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ensurePythonRuntime } from "../src/core/python-runtime.ts";
-import { createEditTool } from "../src/core/tools/edit.ts";
+import { createEditTool, localEditOperations } from "../src/core/tools/edit.ts";
 import { pythonEditByteCodec } from "../src/core/tools/edit-byte-codec.ts";
 import { computeEditsPlannedDiff } from "../src/core/tools/edit-diff.ts";
 import { FileMutationIntentController } from "../src/core/tools/file-mutation-intent.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
 import { memoryFileBackend } from "./fixtures/memory-file-backend.ts";
+import { tempDir } from "./temp-dir.ts";
 
 // Exercise the packaged codec with a real local interpreter, never uv downloads or a provider.
 vi.mock("../src/core/python-runtime.ts", () => ({
@@ -21,14 +21,8 @@ vi.mock("../src/core/python-runtime.ts", () => ({
 	})),
 }));
 
-const directories: string[] = [];
-afterEach(async () => {
-	await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
-});
-
 async function fixture(bytes: Buffer) {
-	const cwd = await mkdtemp(join(tmpdir(), "pi-encoding-recovery-"));
-	directories.push(cwd);
+	const cwd = tempDir("pi-encoding-recovery-");
 	const path = join(cwd, "source é.txt");
 	await writeFile(path, bytes);
 	const intentController = new FileMutationIntentController();
@@ -131,7 +125,16 @@ describe("managed edit encoding recovery", () => {
 	it("does not certify a backend that acknowledges but drops the encoded write", async () => {
 		const before = Buffer.from("\uFEFFtarget", "utf16le");
 		const { cwd, path, intentController } = await fixture(before);
-		const tool = createEditTool(cwd, { intentController, operations: { readFile, writeFile: async () => {} } });
+		const tool = createEditTool(cwd, {
+			intentController,
+			operations: {
+				...localEditOperations,
+				openFile: async (target) => {
+					const opened = await localEditOperations.openFile(target);
+					return { ...opened, writeFile: async () => {} };
+				},
+			},
+		});
 		await expect(
 			tool.execute("recover", { path, edits: [{ oldText: "target", newText: "changed" }] }),
 		).rejects.toThrow(/write verification failed/);
@@ -143,11 +146,17 @@ describe("managed edit encoding recovery", () => {
 		const tool = createEditTool(cwd, {
 			intentController,
 			operations: {
-				readFile,
-				writeFile: async (target, content) => {
-					if (!Buffer.isBuffer(content)) throw new Error("Expected recovery bytes");
-					content.fill(0);
-					await writeFile(target, content);
+				...localEditOperations,
+				openFile: async (target) => {
+					const opened = await localEditOperations.openFile(target);
+					return {
+						...opened,
+						writeFile: async (content) => {
+							if (!Buffer.isBuffer(content)) throw new Error("Expected recovery bytes");
+							content.fill(0);
+							await opened.writeFile(content);
+						},
+					};
 				},
 			},
 		});
@@ -163,12 +172,18 @@ describe("managed edit encoding recovery", () => {
 		const tool = createEditTool(cwd, {
 			intentController,
 			operations: {
-				readFile: async (target) => {
-					const bytes = await readFile(target);
-					if (++reads === 1) await writeFile(target, Buffer.from("\uFEFFexternal\ntarget\r\n", "utf16le"));
-					return bytes;
+				...localEditOperations,
+				openFile: async (target) => {
+					const opened = await localEditOperations.openFile(target);
+					return {
+						...opened,
+						readFile: async () => {
+							const bytes = await opened.readFile();
+							if (++reads === 1) await writeFile(target, Buffer.from("\uFEFFexternal\ntarget\r\n", "utf16le"));
+							return bytes;
+						},
+					};
 				},
-				writeFile,
 			},
 		});
 		await tool.execute("recover", { path, edits: [{ oldText: "target", newText: "changed" }] });
@@ -220,11 +235,22 @@ describe("managed edit encoding recovery", () => {
 					expect(target).toBe(path);
 					return Buffer.from(bytes);
 				},
-				writeFile: async (target, content) => {
+				openFile: async (target) => {
 					expect(target).toBe(path);
-					expect(Buffer.isBuffer(content)).toBe(true);
-					bytes = Buffer.from(content);
-					backend.seed(path, "changed metadata");
+					return {
+						readFile: async () => Buffer.from(bytes),
+						writeFile: async (content) => {
+							expect(Buffer.isBuffer(content)).toBe(true);
+							bytes = Buffer.from(content);
+							backend.seed(path, "changed metadata");
+						},
+						inspect: async () => {
+							const inspection = await backend.operations.inspect(path, true);
+							if (!inspection) throw new Error("Expected backend file");
+							return { identity: inspection.identity, linkCount: "1" };
+						},
+						close: async () => {},
+					};
 				},
 			},
 		});

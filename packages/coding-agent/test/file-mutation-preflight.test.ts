@@ -1,14 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { validateToolArguments } from "@caupulican/pi-ai";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createEditTool } from "../src/core/tools/edit.ts";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createEditTool, localEditOperations } from "../src/core/tools/edit.ts";
 import {
 	FileMutationIntentController,
 	localFileMutationIntentOperations,
 } from "../src/core/tools/file-mutation-intent.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
+import { tempDir } from "./temp-dir.ts";
 
 vi.mock("../src/core/python-runtime.ts", () => ({
 	ensurePythonRuntime: async () => ({
@@ -50,12 +50,7 @@ describe("file mutation preflight", () => {
 	let testDir: string;
 
 	beforeEach(() => {
-		testDir = join(tmpdir(), `pi-file-preflight-${process.pid}-${Date.now()}`);
-		mkdirSync(testDir, { recursive: true });
-	});
-
-	afterEach(() => {
-		rmSync(testDir, { recursive: true, force: true });
+		testDir = tempDir("pi-file-preflight-");
 	});
 
 	it("publishes single-call mutation schemas without harness-owned preparation fields", () => {
@@ -158,8 +153,9 @@ describe("file mutation preflight", () => {
 					operationCalls++;
 					return Buffer.from("");
 				},
-				writeFile: async () => {
+				openFile: async () => {
 					operationCalls++;
+					throw new Error("Missing target must fail before open.");
 				},
 			},
 			intentController,
@@ -410,9 +406,16 @@ describe("file mutation preflight", () => {
 		});
 		const tool = createEditTool(testDir, {
 			operations: {
-				readFile: async (target) => readFileSync(target),
-				writeFile: async () => {
-					writeCalls++;
+				...localEditOperations,
+				openFile: async (target) => {
+					const opened = await localEditOperations.openFile(target);
+					return {
+						...opened,
+						writeFile: async (content) => {
+							writeCalls++;
+							await opened.writeFile(content);
+						},
+					};
 				},
 			},
 			intentController,
@@ -437,14 +440,22 @@ describe("file mutation preflight", () => {
 		const intentController = new FileMutationIntentController();
 		const tool = createEditTool(testDir, {
 			operations: {
-				readFile: async (target) => {
-					readCalls++;
-					const original = readFileSync(target);
-					writeFileSync(target, "external change after read\n", "utf8");
-					return original;
-				},
-				writeFile: async () => {
-					writeCalls++;
+				...localEditOperations,
+				openFile: async (target) => {
+					const opened = await localEditOperations.openFile(target);
+					return {
+						...opened,
+						readFile: async () => {
+							readCalls++;
+							const original = await opened.readFile();
+							writeFileSync(target, "external change after read\n", "utf8");
+							return original;
+						},
+						writeFile: async (content) => {
+							writeCalls++;
+							await opened.writeFile(content);
+						},
+					};
 				},
 			},
 			intentController,
@@ -601,12 +612,19 @@ describe("file mutation preflight", () => {
 		});
 		const tool = createEditTool(testDir, {
 			operations: {
-				readFile: async (target) => {
-					readCalls++;
-					return readFileSync(target);
-				},
-				writeFile: async () => {
-					throw new Error("The edit must not write while the target keeps changing.");
+				...localEditOperations,
+				openFile: async (target) => {
+					const opened = await localEditOperations.openFile(target);
+					return {
+						...opened,
+						readFile: async () => {
+							readCalls++;
+							return opened.readFile();
+						},
+						writeFile: async () => {
+							throw new Error("The edit must not write while the target keeps changing.");
+						},
+					};
 				},
 			},
 			intentController,
@@ -644,9 +662,15 @@ describe("file mutation preflight", () => {
 		});
 		const tool = createEditTool(testDir, {
 			operations: {
-				readFile: async (target) => readFileSync(target),
-				writeFile: async () => {
-					throw new Error("The edit must not write over a sub-millisecond external rewrite.");
+				...localEditOperations,
+				openFile: async (target) => {
+					const opened = await localEditOperations.openFile(target);
+					return {
+						...opened,
+						writeFile: async () => {
+							throw new Error("The edit must not write over a sub-millisecond external rewrite.");
+						},
+					};
 				},
 			},
 			intentController,
@@ -681,8 +705,20 @@ describe("file mutation preflight", () => {
 		});
 		const tool = createEditTool(testDir, {
 			operations: {
-				readFile: async (target) => readFileSync(target),
-				writeFile: async (target, content) => writeFileSync(target, content, "utf8"),
+				...localEditOperations,
+				openFile: async (target) => {
+					const opened = await localEditOperations.openFile(target);
+					return {
+						...opened,
+						inspect: async () => {
+							const inspection = await opened.inspect();
+							return {
+								...inspection,
+								identity: { ...inspection.identity, mtimeNs: "1787017242670530976" },
+							};
+						},
+					};
+				},
 			},
 			intentController,
 		});
@@ -703,10 +739,7 @@ describe("file mutation preflight", () => {
 			operations: { ...localFileMutationIntentOperations, access },
 		});
 		const tool = createEditTool(testDir, {
-			operations: {
-				readFile: async (target) => readFileSync(target),
-				writeFile: async (target, content) => writeFileSync(target, content, "utf8"),
-			},
+			operations: localEditOperations,
 			intentController,
 		});
 

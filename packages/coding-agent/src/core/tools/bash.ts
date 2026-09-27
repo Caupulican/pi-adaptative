@@ -76,7 +76,7 @@ import {
 	type ShellOutputProjectionDetails,
 	type ShellOutputProjectorLike,
 } from "./shell-output-projection.ts";
-import { acquirePersistentShellSession } from "./shell-session.ts";
+import { acquirePersistentShellSession, buildBashOneShotWire } from "./shell-session.ts";
 import { classifyShellVerificationCommand } from "./shell-test-command.ts";
 import { TestVerificationOutput } from "./test-verification-output.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -225,7 +225,8 @@ function createLocalShellOperations(
 		if (signal?.aborted) throw new Error("aborted");
 
 		const shellEnvironment = env ?? getShellEnv();
-		const hostedCommand = shellName === "powershell" ? `${POWERSHELL_7_GUARD}${command}` : command;
+		const hostedCommand =
+			shellName === "powershell" ? `${POWERSHELL_7_GUARD}${command}` : buildBashOneShotWire(command);
 		const child = spawn(shell, [...args, hostedCommand], {
 			cwd,
 			detached: process.platform !== "win32",

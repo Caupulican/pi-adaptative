@@ -73,6 +73,13 @@ export interface FilePathInspection {
 	identity: FilePathIdentity;
 }
 
+/** Identity observed through an already-open edit resource, independent of its pathname. */
+export interface OpenEditFileInspection {
+	identity: FilePathIdentity;
+	/** Number of directory entries still linked to this resource. */
+	linkCount: string;
+}
+
 export interface FileMutationIntentOperations {
 	/** Canonical resource identities and serialization scope belong to this backend, never the operator filesystem. */
 	readonly mutationQueue: FileMutationQueueBackend;
@@ -176,7 +183,7 @@ function positiveBound(value: number | undefined, fallback: number, label: strin
 	return resolvedValue;
 }
 
-function normalizedIdentity(value: {
+export function normalizeFilePathIdentity(value: {
 	dev: number | bigint;
 	ino: number | bigint;
 	mode: number | bigint;
@@ -226,7 +233,7 @@ async function inspectLocalPath(path: string, followSymlinks: boolean): Promise<
 		const result = followSymlinks ? await stat(path, { bigint: true }) : await lstat(path, { bigint: true });
 		return {
 			kind: result.isFile() ? "file" : result.isDirectory() ? "directory" : "other",
-			identity: normalizedIdentity(result),
+			identity: normalizeFilePathIdentity(result),
 		};
 	} catch (error) {
 		if (isMissingPathError(error)) return undefined;
@@ -522,12 +529,51 @@ export class FileMutationIntentController {
 	}
 
 	/**
+	 * Verify that a stable resource opened for this edit still names the exact preflight version.
+	 * Path and resource observations are both required: either one alone leaves a replacement gap.
+	 */
+	async assertOpenEditFileCurrent(
+		lease: FileMutationLease,
+		opened: OpenEditFileInspection,
+		signal?: AbortSignal,
+	): Promise<void> {
+		if (lease.kind !== "edit") {
+			throw new Error(`Could not verify open edit resource for ${lease.displayPath}: lease is not an edit.`);
+		}
+		await this.assertCurrent(lease, signal);
+		if (opened.linkCount === "0" || !identitiesMatch(lease.identity, opened.identity)) {
+			throw new FileMutationIdentityError(lease.displayPath);
+		}
+	}
+
+	/**
+	 * After a resource-relative write, prove that the requested path still resolves to that resource.
+	 * A rename-over may make the edit outcome unreachable, but it can never redirect the write into
+	 * the foreign replacement because the write itself does not reopen the path.
+	 */
+	async assertOpenEditFileStillTarget(
+		lease: FileMutationLease,
+		opened: OpenEditFileInspection,
+		signal?: AbortSignal,
+	): Promise<void> {
+		if (signal?.aborted) throw new Error("Operation aborted");
+		if (lease.kind !== "edit") {
+			throw new Error(`Could not verify open edit resource for ${lease.displayPath}: lease is not an edit.`);
+		}
+		const current = await this.operations.inspect(lease.path, true);
+		if (opened.linkCount === "0" || current?.kind !== "file" || !identitiesMatch(opened.identity, current.identity)) {
+			throw new FileMutationIdentityError(lease.displayPath);
+		}
+		lease.identity = opened.identity;
+	}
+
+	/**
 	 * Re-anchor an edit lease to the file's current identity after an observed change.
 	 * The caller must then re-read and re-validate its content against that same version;
 	 * the next assertCurrent re-verifies that identity immediately before the caller writes.
-	 * That re-verification is a point-in-time observation, not a hold on the file: a write by
-	 * another process landing between it and the caller's write is neither detected nor
-	 * preserved — the caller's buffer overwrites it and nothing observes the loss afterwards.
+	 * The caller must also bind its read and write to one stable open resource and verify that
+	 * resource through assertOpenEditFileCurrent/assertOpenEditFileStillTarget. Refreshing the
+	 * pathname identity alone is not a mutation lease.
 	 */
 	async refreshIdentity(lease: FileMutationLease, signal?: AbortSignal): Promise<void> {
 		if (signal?.aborted) throw new Error("Operation aborted");

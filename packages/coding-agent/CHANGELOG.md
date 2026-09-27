@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Custom `EditOperations` adapters now provide `openFile`, whose stable resource owns execution reads, writes, identity inspection, and close; the former path-based `writeFile` adapter is removed.
+
 ### Added
 
 - Versioned context projections expose the latest accepted provider request with stable identities, content revisions, provenance, and freshness while keeping speculative plans and worker lanes isolated.
@@ -11,6 +15,8 @@
 
 ### Fixed
 
+- Bash command output now crosses a shell-owned pipe before reaching the host, so nested Node stdout and stderr drain before one-shot and persistent commands terminalize without treating the persistent relay or detached descendants as command-owned work.
+- Edits bind execution to one open resource and verify its pathname before and after mutation, so an external rename-over cannot redirect the write into a foreign replacement while local and SSH backends retain the same safety contract.
 - Concurrent delegated-memory reads now share one immutable source-versioned in-flight snapshot, wait for admitted provider turn writes, and reject results made stale by durable writes or memory lifecycle transitions.
 - Live project-rule compilation now fences its cache by the complete ordered instruction sources, so a same-length edit to an admitted AGENTS-family file takes effect without restarting the session.
 - Objective retrieval now prices the complete read-only worker fan-out, including every independent cold prefix, actual brief, and generated report, before choosing it over the root's warm cache.

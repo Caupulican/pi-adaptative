@@ -68,7 +68,9 @@ const viteMockCompatibilityTests = [
 	"test/clipboard-image.test.ts",
 	"test/copy-command.test.ts",
 	"test/output-accumulator-io-errors.test.ts",
+	"test/resource-loader.test.ts",
 	"test/restore-sandbox-env.test.ts",
+	"test/sdk-project-context-file-admission.test.ts",
 	"test/theme-builtin-resilience.test.ts",
 	"test/visual-truncate.test.ts",
 ];

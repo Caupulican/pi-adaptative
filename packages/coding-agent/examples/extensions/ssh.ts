@@ -10,10 +10,10 @@
  *
  * Requirements:
  *   - SSH key-based auth (no password prompts)
- *   - bash and GNU coreutils (sha256sum, stat) on remote
+ *   - bash, procfs, and GNU coreutils (base64, sha256sum, stat) on remote
  */
 
-import { spawn } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { constants } from "node:fs";
 import type { ExtensionAPI } from "@caupulican/pi-adaptative";
 import {
@@ -26,6 +26,7 @@ import {
 	FileMutationIntentController,
 	type FileMutationIntentOperations,
 	type FilePathInspection,
+	type OpenEditFile,
 	type ReadOperations,
 	type WriteOperations,
 } from "@caupulican/pi-adaptative";
@@ -88,12 +89,163 @@ function createRemoteWriteOps(remote: string, remoteCwd: string, localCwd: strin
 	};
 }
 
-function createRemoteEditOps(remote: string, remoteCwd: string, localCwd: string): EditOperations {
+const REMOTE_EDIT_RESOURCE_SERVER = String.raw`
+set -u
+exec 3<> "$1" || exit 41
+printf 'READY\n'
+while IFS= read -r command; do
+	case "$command" in
+		READ)
+			printf 'DATA\t'
+			base64 -w0 -- /proc/self/fd/3 || exit 42
+			printf '\n'
+			;;
+		STAT)
+			printf 'STAT\t'
+			stat -L --printf '%d\t%i\t%f\t%s\t%y\t%z\t%h\n' -- /proc/self/fd/3 || exit 43
+			;;
+		WRITE$'\t'*)
+			IFS=$'\t' read -r _ payload <<< "$command"
+			printf '%s' "$payload" | base64 -d > /proc/self/fd/3 || exit 44
+			printf 'OK\n'
+			;;
+		CLOSE)
+			printf 'OK\n'
+			exit 0
+			;;
+		*) exit 45 ;;
+	esac
+done
+`;
+
+function boundedStderr(current: Buffer, chunk: Buffer): Buffer {
+	const combined = Buffer.concat([current, chunk]);
+	return combined.length <= 8192 ? combined : combined.subarray(combined.length - 8192);
+}
+
+export type RemoteEditResourceStarter = (
+	remote: string,
+	path: string,
+	server: string,
+) => ChildProcessWithoutNullStreams;
+
+const startRemoteEditResource: RemoteEditResourceStarter = (remote, path, server) =>
+	spawn("ssh", [remote, `bash -c ${shellQuote(server)} bash ${shellQuote(path)}`], {
+		stdio: ["pipe", "pipe", "pipe"],
+	});
+
+export async function openRemoteEditFile(
+	remote: string,
+	path: string,
+	start: RemoteEditResourceStarter = startRemoteEditResource,
+): Promise<OpenEditFile> {
+	const child = start(remote, path, REMOTE_EDIT_RESOURCE_SERVER);
+	let stderr: Buffer = Buffer.alloc(0);
+	child.stderr.on("data", (chunk: Buffer) => {
+		stderr = boundedStderr(stderr, chunk);
+	});
+	let stdout: Buffer = Buffer.alloc(0);
+	let ended = false;
+	let streamError: unknown;
+	const waiters = new Set<() => void>();
+	const wake = (): void => {
+		for (const waiter of waiters) waiter();
+		waiters.clear();
+	};
+	child.stdout.on("data", (chunk: Buffer) => {
+		stdout = Buffer.concat([stdout, chunk]);
+		wake();
+	});
+	child.stdout.on("error", (error) => {
+		streamError = error;
+		wake();
+	});
+	child.stdout.on("end", () => {
+		ended = true;
+		wake();
+	});
+	child.stdin.on("error", (error) => {
+		streamError ??= error;
+		wake();
+	});
+
+	const readLine = async (): Promise<string> => {
+		while (true) {
+			const newline = stdout.indexOf(0x0a);
+			if (newline >= 0) {
+				const line = stdout.subarray(0, newline).toString("utf8");
+				stdout = stdout.subarray(newline + 1);
+				return line;
+			}
+			if (streamError) throw streamError;
+			if (ended) {
+				throw new Error(`Remote edit resource closed unexpectedly: ${stderr.toString("utf8").trim()}`);
+			}
+			await new Promise<void>((resolve) => waiters.add(resolve));
+		}
+	};
+	const writeLine = async (line: string): Promise<void> => {
+		await new Promise<void>((resolve, reject) => {
+			child.stdin.write(`${line}\n`, (error) => (error ? reject(error) : resolve()));
+		});
+	};
+	let operationTail = Promise.resolve();
+	const run = <T>(operation: () => Promise<T>): Promise<T> => {
+		const result = operationTail.then(operation, operation);
+		operationTail = result.then(
+			() => undefined,
+			() => undefined,
+		);
+		return result;
+	};
+	const ready = await readLine();
+	if (ready !== "READY") throw new Error(`Unexpected remote edit resource response: ${ready}`);
+	let closed = false;
+
+	return {
+		readFile: () =>
+			run(async () => {
+				await writeLine("READ");
+				const response = await readLine();
+				if (!response.startsWith("DATA\t")) throw new Error(`Unexpected remote edit read response: ${response}`);
+				return Buffer.from(response.slice(5), "base64");
+			}),
+		writeFile: (content) =>
+			run(async () => {
+				const encoded = (Buffer.isBuffer(content) ? content : Buffer.from(content, "utf8")).toString("base64");
+				await writeLine(`WRITE\t${encoded}`);
+				const response = await readLine();
+				if (response !== "OK") throw new Error(`Unexpected remote edit write response: ${response}`);
+			}),
+		inspect: () =>
+			run(async () => {
+				await writeLine("STAT");
+				const response = await readLine();
+				const [tag, dev, ino, mode, size, mtimeMs, ctimeMs, linkCount] = response.split("\t");
+				if (tag !== "STAT" || !dev || !ino || !mode || !size || !mtimeMs || !ctimeMs || !linkCount) {
+					throw new Error(`Unexpected remote edit stat response for ${path}`);
+				}
+				return { identity: { dev, ino, mode, size, mtimeMs, ctimeMs }, linkCount };
+			}),
+		close: () =>
+			run(async () => {
+				if (closed) return;
+				closed = true;
+				if (ended || child.exitCode !== null || child.signalCode !== null) return;
+				await writeLine("CLOSE");
+				const response = await readLine();
+				child.stdin.end();
+				if (response !== "OK") throw new Error(`Unexpected remote edit close response: ${response}`);
+			}),
+	};
+}
+
+export function createRemoteEditOps(remote: string, remoteCwd: string, localCwd: string): EditOperations {
 	const r = createRemoteReadOps(remote, remoteCwd, localCwd);
 	const toRemote = (p: string) => p.replace(localCwd, remoteCwd);
 	return {
 		readFile: r.readFile,
-		writeFile: (p, content) => writeRemoteContent(remote, toRemote(p), content, false),
+		openFile: (p) => openRemoteEditFile(remote, toRemote(p)),
 	};
 }
 

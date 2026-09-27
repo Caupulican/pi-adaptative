@@ -504,7 +504,9 @@ describe("Coding Agent Tools", () => {
 			const genericFailureTool = createEditTool(testDir, {
 				operations: {
 					readFile: async () => Buffer.from("hello\n", "utf-8"),
-					writeFile: async () => {},
+					openFile: async () => {
+						throw new Error("Access failure must prevent opening the edit resource.");
+					},
 				},
 				intentController,
 			});
