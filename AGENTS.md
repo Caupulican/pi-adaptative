@@ -13,6 +13,7 @@
 
 - Final Pi Adaptative behavior, extensions, templates, tests, and documentation must live in this repository/package. User-level files may be temporary migration or validation sources only; restore or remove those runtime edits after the packaged implementation is validated.
 - Every managed background process must emit a terminal signal, persist a bounded handoff, and notify the owning parent session. Completion detection must be event-driven; never poll or peek into process output merely to discover whether work ended.
+- Keep `docs/` limited to current, durable product documentation. Store transient audit, session, plan, and generated review artifacts in bounded storage under `<git-common-dir>/pi-audits`, never in `docs/`.
 
 ## Code Quality
 

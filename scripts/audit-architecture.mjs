@@ -3,19 +3,20 @@
  * Release architecture audit.
  *
  * Builds the deterministic architecture projection, decides the outcome from mechanical facts, and
- * writes a secret-free artifact to docs/release-audit/<sha>-architecture-audit.json.
+ * writes a secret-free artifact to bounded git-local storage.
  *
  * A semantic review is optional and local: with credentials present it records that the review can
  * run; without them the artifact says `not run` and the command still exits 0. CI never fails for
  * missing credentials, and no credential is ever written into the artifact.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, relative } from "node:path";
+import { gitAuditDirectory, writeBoundedAuditArtifact } from "./audit-artifact-store.mjs";
 
 const REPO_ROOT = join(import.meta.dirname, "..");
-const AUDIT_DIR = join(REPO_ROOT, "docs", "release-audit");
+const AUDIT_DIR = gitAuditDirectory(REPO_ROOT, "architecture");
 
 function readSource(repoRelativePath) {
 	const absolute = join(REPO_ROOT, repoRelativePath);
@@ -78,11 +79,15 @@ const artifact = {
 	},
 };
 
-mkdirSync(AUDIT_DIR, { recursive: true });
-const artifactPath = join(AUDIT_DIR, `${sourceRevision}-architecture-audit.json`);
-writeFileSync(artifactPath, `${JSON.stringify(artifact, null, "\t")}\n`, "utf-8");
+const { artifactPath, removed } = writeBoundedAuditArtifact({
+	directory: AUDIT_DIR,
+	fileName: `${sourceRevision}-architecture-audit.json`,
+	content: `${JSON.stringify(artifact, null, "\t")}\n`,
+	managedSuffix: "-architecture-audit.json",
+});
 
 console.log(`architecture audit: ${projection.outcome} (${relative(REPO_ROOT, artifactPath)})`);
+console.log(`  pruned artifacts: ${removed.length}`);
 console.log(`  subsystems: ${projection.subsystem_triples.length}`);
 console.log(`  negative-path coverage: ${projection.negative_path_coverage.filter((c) => c.covered).length}/${projection.negative_path_coverage.length}`);
 console.log(`  semantic review: ${artifact.semantic_review.status}`);

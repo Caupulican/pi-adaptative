@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Architecture audit artifacts now use bounded git-local storage instead of accumulating under `docs/`, and the repository check rejects transient audit, session, plan, and generated lab artifacts there.
+
 ### Fixed
 
 - Restart repair closes a provider request left unanswered by interruption, while contradictory or duplicate request outcomes stop automatic repair.
