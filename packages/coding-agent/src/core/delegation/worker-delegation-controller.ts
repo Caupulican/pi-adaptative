@@ -1698,6 +1698,11 @@ export class WorkerDelegationController {
 			// on that throw path permanently over-counts virtual headroom in hasWorkerCapacity()
 			// for the rest of this attempt's life, silently admitting maxConcurrent+1 workers.
 			let stillBlocked = false;
+			const releaseYield = () => {
+				this.yieldedCapacityAttemptIds.delete(attempt.attemptId);
+				this.yieldedWriteReservations.delete(attempt.attemptId);
+				restored = true;
+			};
 			try {
 				const current = this.lifecycle.getLatestAgentAttempt(caller.agentId);
 				if (
@@ -1718,19 +1723,17 @@ export class WorkerDelegationController {
 						}
 					}
 				}
+				releaseYield();
 				// An availability generation restores every current waiter before its owner drains the
 				// ordinary queue. Re-entering the scheduler here would let an earlier waiter consume a
-				// later waiter's released scope. Other restore paths still need this immediate drain.
+				// later waiter's released scope. Other restore paths still need this immediate drain,
+				// but the restored caller must count against capacity before admission runs.
 				if (!this.deps.isDisposed() && !this.writeReservations.isDeliveringAvailability()) {
 					this.scheduler.drain(true);
 				}
 				return true;
 			} finally {
-				if (!stillBlocked) {
-					this.yieldedCapacityAttemptIds.delete(attempt.attemptId);
-					this.yieldedWriteReservations.delete(attempt.attemptId);
-					restored = true;
-				}
+				if (!stillBlocked && !restored) releaseYield();
 			}
 		};
 		try {

@@ -2,8 +2,10 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import { WorkerAgentControlCoordinator } from "../src/core/delegation/worker-agent-control-coordinator.ts";
 import { WorkerDelegationController } from "../src/core/delegation/worker-delegation-controller.ts";
+import { WorkerDispatchScheduler } from "../src/core/delegation/worker-dispatch-scheduler.ts";
 import type { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { WorkerWriteReservationCoordinator } from "../src/core/delegation/worker-write-reservation-coordinator.ts";
 import { type AgentBindingContract, ORCHESTRATION_SCHEMA_VERSION } from "../src/core/orchestration/contracts.ts";
@@ -149,6 +151,107 @@ describe("worker wait deadlock prevention", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("does not admit queued work while restoring the caller's capacity", () => {
+		const callerAttempt = attempt("caller", "caller-task", "running");
+		const caller = agent("caller", callerAttempt.attemptId);
+		const queuedRecord: LaneRecord = { laneId: "queued-worker", type: "worker", status: "queued" };
+		const run = vi.fn(async () => ({ started: true as const }));
+		let restorationReady = false;
+		let controller!: WorkerDelegationController;
+		const scheduler = new WorkerDispatchScheduler({
+			agentDir: tempDir("pi-worker-wait-capacity-restore-"),
+			isDisposed: () => false,
+			admit: () => {
+				if (!restorationReady) return { action: "wait", reason: "dependencies" };
+				const hasWorkerCapacity = Reflect.get(controller, "hasWorkerCapacity") as (settings: {
+					maxConcurrent: number;
+				}) => boolean;
+				return hasWorkerCapacity.call(controller, { maxConcurrent: 1 })
+					? { action: "start" }
+					: { action: "wait", reason: "capacity" };
+			},
+			getRecord: () => queuedRecord,
+			run,
+			cancel: vi.fn(),
+			warn: vi.fn(),
+		});
+		controller = Object.assign(Object.create(WorkerDelegationController.prototype) as object, {
+			lifecycle: {
+				getAgent: (agentId: string) => (agentId === caller.agentId ? caller : undefined),
+				getLatestAgentAttempt: (agentId: string) => (agentId === caller.agentId ? callerAttempt : undefined),
+				getTaskRuntimeSnapshot: () => ({
+					agents: { [caller.agentId]: caller },
+					tasks: { [callerAttempt.taskId]: { attemptIds: [callerAttempt.attemptId] } },
+					attempts: { [callerAttempt.attemptId]: callerAttempt },
+				}),
+				getRunningCount: () => 1,
+			},
+			writeReservations: { isDeliveringAvailability: () => false },
+			yieldedCapacityAttemptIds: new Map<string, number>(),
+			yieldedWriteReservations: new Map(),
+			deps: { isDisposed: () => false },
+			scheduler,
+			laneAbortControllers: new Map(),
+		}) as unknown as WorkerDelegationController;
+		const yieldWorkerForWait = Reflect.get(controller, "yieldWorkerForWait") as (
+			callerAgentId: string,
+		) => () => boolean;
+
+		try {
+			scheduler.enqueue(queuedRecord, { instructions: "start only after the wait" });
+			scheduler.drain();
+			const restore = yieldWorkerForWait.call(controller, caller.agentId);
+			expect(scheduler.queuedCount).toBe(1);
+			expect(run).not.toHaveBeenCalled();
+
+			restorationReady = true;
+			expect(restore()).toBe(true);
+
+			expect(run).not.toHaveBeenCalled();
+			expect(scheduler.queuedCount).toBe(1);
+		} finally {
+			scheduler.cancelQueued();
+		}
+	});
+
+	it("keeps restored capacity truthful when the ordinary queue drain throws", () => {
+		const callerAttempt = attempt("caller", "caller-task", "running");
+		const caller = agent("caller", callerAttempt.attemptId);
+		const drain = vi
+			.fn()
+			.mockImplementationOnce(() => undefined)
+			.mockImplementationOnce(() => {
+				throw new Error("post-restore drain failed");
+			});
+		const controller = Object.assign(Object.create(WorkerDelegationController.prototype) as object, {
+			lifecycle: {
+				getAgent: (agentId: string) => (agentId === caller.agentId ? caller : undefined),
+				getLatestAgentAttempt: (agentId: string) => (agentId === caller.agentId ? callerAttempt : undefined),
+				getTaskRuntimeSnapshot: () => ({ attempts: { [callerAttempt.attemptId]: callerAttempt } }),
+				getRunningCount: () => 1,
+			},
+			writeReservations: { isDeliveringAvailability: () => false },
+			yieldedCapacityAttemptIds: new Map<string, number>(),
+			yieldedWriteReservations: new Map(),
+			deps: { isDisposed: () => false },
+			scheduler: { drain },
+			laneAbortControllers: new Map(),
+		}) as unknown as WorkerDelegationController;
+		const yieldWorkerForWait = Reflect.get(controller, "yieldWorkerForWait") as (
+			callerAgentId: string,
+		) => () => boolean;
+		const hasWorkerCapacity = Reflect.get(controller, "hasWorkerCapacity") as (settings: {
+			maxConcurrent: number;
+		}) => boolean;
+
+		const restore = yieldWorkerForWait.call(controller, caller.agentId);
+		expect(() => restore()).toThrow("post-restore drain failed");
+
+		expect(hasWorkerCapacity.call(controller, { maxConcurrent: 1 })).toBe(false);
+		expect(restore()).toBe(true);
+		expect(drain).toHaveBeenCalledTimes(2);
 	});
 
 	it("does not return a timed-out wait until the caller's yielded resources are restored", async () => {
