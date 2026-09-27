@@ -319,27 +319,27 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 		try {
 			options?.signal?.throwIfAborted();
 			inner = await streamFn(model, context, options);
+			inner.result().then(
+				(message) => {
+					releaseOnce();
+					if (deps.limits) {
+						try {
+							observeProviderResult(deps.limits, message, (deps.now ?? Date.now)(), key, requestStartedAt);
+						} catch {
+							// Shared-state bookkeeping must never fail the request it observes.
+						}
+					}
+				},
+				(error) => {
+					releaseOnce();
+					recordFailureLimit(error);
+				},
+			);
 		} catch (error) {
 			releaseOnce();
 			recordFailureLimit(error);
 			throw error;
 		}
-		inner.result().then(
-			(message) => {
-				releaseOnce();
-				if (deps.limits) {
-					try {
-						observeProviderResult(deps.limits, message, (deps.now ?? Date.now)(), key, requestStartedAt);
-					} catch {
-						// Shared-state bookkeeping must never fail the request it observes.
-					}
-				}
-			},
-			(error) => {
-				releaseOnce();
-				recordFailureLimit(error);
-			},
-		);
 		return inner;
 	};
 }

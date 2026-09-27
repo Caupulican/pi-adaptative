@@ -32,6 +32,7 @@
 - Shell-lane pool disposal now attempts every owned lane when a lane adapter throws synchronously, while preserving synchronous idle-retirement behavior.
 - Gateway providers whose startup rejects now receive bounded compensating cleanup immediately or after late timeout settlement, preventing partial listeners and sockets from remaining active for the session.
 - Synchronously throwing extension shortcut handlers are now contained and reported without escaping the terminal input loop, matching asynchronous rejection handling.
+- Provider admission releases its machine-wide hold when a malformed custom stream throws while exposing its terminal result, preventing phantom in-flight capacity from delaying later workers.
 
 ## [0.99.52] - 2026-09-26
 
