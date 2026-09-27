@@ -980,7 +980,10 @@ function createShellToolDefinition(
 				output.finish();
 				clearUpdateTimer();
 				emitOutputUpdate();
-				return output.snapshot({ persistIfTruncated: true, persistAlways });
+				output.snapshot({ persistIfTruncated: true, persistAlways });
+				await output.closeTempFile();
+				// Close may invalidate and remove the artifact; publish only the settled state.
+				return output.snapshot();
 			};
 
 			const finishProjection = (exitCode: number | null): ShellOutputProjection | undefined => {
