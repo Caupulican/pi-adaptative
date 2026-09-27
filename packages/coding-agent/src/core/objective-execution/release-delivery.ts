@@ -135,9 +135,15 @@ export function createRepoReleaseDelivery(
 	const liveRegistry = adapters && !Array.isArray(adapters) ? adapters : undefined;
 	const staticAdapters = Array.isArray(adapters) ? adapters : [];
 	if (!publishIdentity && !liveRegistry && staticAdapters.length === 0) return undefined;
-	const npm = npmExec(options?.npmCommand);
+	let npmCommand: ReturnType<typeof npmExec> | undefined;
 	let prepared: PreparedPackageArtifact | undefined;
 	let preparedDir: string | undefined;
+
+	function getNpmCommand(): ReturnType<typeof npmExec> {
+		// Standalone sessions and deploy adapters do not require a Node/npm installation.
+		npmCommand ??= npmExec(options?.npmCommand);
+		return npmCommand;
+	}
 
 	function adapterList(): readonly TrustedDeployAdapter[] {
 		if (!adapters) return [];
@@ -156,6 +162,7 @@ export function createRepoReleaseDelivery(
 		if (!current || current.name !== publishIdentity.name || current.version !== publishIdentity.version) {
 			throw new Error("package_identity_mismatch");
 		}
+		const npm = getNpmCommand();
 		const directory = mkdtempSync(join(tmpdir(), "pi-publish-"));
 		preparedDir = directory;
 		const packed = await run(
@@ -198,6 +205,7 @@ export function createRepoReleaseDelivery(
 						if (identity.integrity !== artifact.integrity || identity.shasum !== artifact.shasum) {
 							throw new Error("package_artifact_mismatch");
 						}
+						const npm = getNpmCommand();
 						await run(
 							npm.command,
 							[
@@ -222,6 +230,7 @@ export function createRepoReleaseDelivery(
 					async provePublish(publicationId: string) {
 						if (!prepared) throw new Error("publish_proof_unavailable");
 						if (publicationId !== prepared.id) throw new Error("publish_id_mismatch");
+						const npm = getNpmCommand();
 						const parsed = JSON.parse(
 							await run(
 								npm.command,

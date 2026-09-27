@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Standalone Windows sessions no longer require npm during startup or trusted deployment; npm is resolved only when a package publish operation needs it.
+
 ## [0.100.0] - 2026-09-27
 
 ### Breaking Changes
