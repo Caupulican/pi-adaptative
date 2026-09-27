@@ -104,4 +104,75 @@ describe("AgentSession extension operations", () => {
 		await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
 		expect(showError).not.toHaveBeenCalled();
 	});
+
+	it("contains a synchronous shortcut failure inside the extension UI boundary", () => {
+		const showError = vi.fn();
+		const defaultEditor: { onExtensionShortcut?: (data: string) => boolean } = {};
+		const session = {
+			sessionManager: { getCwd: () => "/workspace" },
+			modelRegistry: {},
+			model: undefined,
+			isStreaming: false,
+			agent: { signal: undefined },
+			pendingMessageCount: 0,
+			getContextUsage: () => undefined,
+			compactForExtension: () => {},
+			systemPrompt: "system prompt",
+		} as unknown as AgentSession;
+		const ui = {
+			keybindings: { getEffectiveConfig: () => ({}) },
+			defaultEditor,
+			showError,
+		} as unknown as ExtensionUiHostUi;
+		const runner = {
+			getShortcuts: () =>
+				new Map([
+					[
+						"ctrl+k",
+						{
+							handler: () => {
+								throw new Error("shortcut failed synchronously");
+							},
+						},
+					],
+				]),
+		} as unknown as ExtensionRunner;
+		const host = new ExtensionUiHost({ getSession: () => session, ui });
+
+		host.setupExtensionShortcuts(runner);
+		expect(defaultEditor.onExtensionShortcut?.("\u000b")).toBe(true);
+		expect(showError).toHaveBeenCalledWith("Shortcut handler error: shortcut failed synchronously");
+	});
+
+	it("reports an asynchronous shortcut rejection without blocking input", async () => {
+		const showError = vi.fn();
+		const defaultEditor: { onExtensionShortcut?: (data: string) => boolean } = {};
+		const session = {
+			sessionManager: { getCwd: () => "/workspace" },
+			modelRegistry: {},
+			model: undefined,
+			isStreaming: false,
+			agent: { signal: undefined },
+			pendingMessageCount: 0,
+			getContextUsage: () => undefined,
+			compactForExtension: () => {},
+			systemPrompt: "system prompt",
+		} as unknown as AgentSession;
+		const ui = {
+			keybindings: { getEffectiveConfig: () => ({}) },
+			defaultEditor,
+			showError,
+		} as unknown as ExtensionUiHostUi;
+		const runner = {
+			getShortcuts: () =>
+				new Map([["ctrl+k", { handler: async () => Promise.reject(new Error("shortcut failed asynchronously")) }]]),
+		} as unknown as ExtensionRunner;
+		const host = new ExtensionUiHost({ getSession: () => session, ui });
+
+		host.setupExtensionShortcuts(runner);
+		expect(defaultEditor.onExtensionShortcut?.("\u000b")).toBe(true);
+		await vi.waitFor(() =>
+			expect(showError).toHaveBeenCalledWith("Shortcut handler error: shortcut failed asynchronously"),
+		);
+	});
 });

@@ -209,10 +209,15 @@ export class ExtensionUiHost {
 			for (const [shortcutStr, shortcut] of shortcuts) {
 				// Cast to KeyId - extension shortcuts use the same format
 				if (matchesKey(data, shortcutStr as KeyId)) {
-					// Run handler async, don't block input
-					Promise.resolve(shortcut.handler(createContext())).catch((err) => {
+					const reportError = (err: unknown) => {
 						this.ui.showError(`Shortcut handler error: ${err instanceof Error ? err.message : String(err)}`);
-					});
+					};
+					// Preserve synchronous invocation while observing asynchronous settlement without blocking input.
+					try {
+						void Promise.resolve(shortcut.handler(createContext())).catch(reportError);
+					} catch (err) {
+						reportError(err);
+					}
 					return true;
 				}
 			}
