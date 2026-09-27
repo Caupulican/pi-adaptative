@@ -1,4 +1,5 @@
 import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
+import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { setChildProcessLoopRef } from "../../utils/child-process-ref.ts";
 import {
 	createPowerShellHostEnvironment,
@@ -8,7 +9,7 @@ import {
 	POWERSHELL_SESSION_STDERR_READY_MARKER,
 	POWERSHELL_STARTUP_PROBE_TIMEOUT_MS,
 } from "../../utils/powershell-session-protocol.ts";
-import { killProcessTree, trackDetachedChild, untrackDetachedChild } from "../../utils/shell.ts";
+import { trackDetachedChild, untrackDetachedChild } from "../../utils/shell.ts";
 
 const MAX_STARTUP_DIAGNOSTIC_BYTES = 16 * 1024;
 const READY_BYTES = Buffer.from(POWERSHELL_SESSION_READY_MARKER, "latin1");
@@ -63,7 +64,9 @@ function waitForReady(
 			settled = true;
 			if (timeoutTimer) clearTimeout(timeoutTimer);
 			releaseStartupListeners();
-			child.kill();
+			// The candidate owner below performs the one cleanup path after this rejection. It can
+			// distinguish a live spawned child from ENOENT before any pid/spawn ownership existed;
+			// signaling here cannot, and a pre-spawn child.kill() may target the caller's group.
 			reject(error);
 		};
 		const resolveWhenReady = (): void => {
@@ -128,7 +131,7 @@ async function startFirstUsableSession(
 		} catch {
 			// This host is a dead end. Kill its process before trying the next one, or every failed
 			// candidate leaves a live shell behind for the lifetime of the CLI.
-			releaseWarmStartChild(child);
+			await releaseWarmStartChild(child);
 		}
 	}
 	return null;
@@ -165,13 +168,21 @@ export async function claimCliPowerShellWarmStart(): Promise<ReadyCliPowerShellS
 	return ready;
 }
 
-/** Kill an unowned warm-start child and stop tracking it. Safe to call more than once. */
-function releaseWarmStartChild(child: ChildProcess): void {
+/** Kill an unowned warm-start child, observe bounded settlement, and stop tracking it. */
+async function releaseWarmStartChild(child: ChildProcess): Promise<void> {
 	untrackDetachedChild(child);
+	if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) return;
+
+	// The warm start was deliberately unreferenced while speculative. Its cleanup is now an awaited
+	// shutdown handoff, so re-arm every handle until the shared termination owner observes or bounds
+	// terminal settlement instead of reporting completion immediately after signal delivery.
+	setChildProcessLoopRef(child, true);
+	const termination = new AbortController();
+	termination.abort();
 	try {
-		if (child.exitCode === null && child.signalCode === null) killProcessTree(child);
-	} catch {
-		// Best-effort reaping of a process nothing owns.
+		await waitForChildProcessWithTermination(child, { signal: termination.signal, killGraceMs: 0 });
+	} finally {
+		setChildProcessLoopRef(child, false);
 	}
 }
 
@@ -187,7 +198,7 @@ export async function disposeUnclaimedCliPowerShellWarmStart(): Promise<void> {
 	const ready = await pending;
 	if (!ready) return;
 	ready.releaseStartupListeners();
-	releaseWarmStartChild(ready.child);
+	await releaseWarmStartChild(ready.child);
 }
 
 export async function resetCliPowerShellWarmStartForTests(): Promise<void> {
@@ -198,5 +209,5 @@ export async function resetCliPowerShellWarmStartForTests(): Promise<void> {
 	const ready = await pending;
 	if (!ready) return;
 	ready.releaseStartupListeners();
-	ready.child.kill();
+	await releaseWarmStartChild(ready.child);
 }

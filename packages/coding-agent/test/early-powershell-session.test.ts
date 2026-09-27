@@ -1,8 +1,9 @@
-import { type SpawnOptions, spawn } from "node:child_process";
+import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	claimCliPowerShellWarmStart,
 	disposeUnclaimedCliPowerShellWarmStart,
@@ -35,6 +36,29 @@ afterEach(async () => {
 });
 
 describe("early CLI PowerShell session handoff", () => {
+	it("does not signal a candidate whose spawn failed before ownership was granted", async () => {
+		const child = new EventEmitter() as ChildProcess;
+		Object.defineProperties(child, {
+			exitCode: { value: null, writable: true },
+			signalCode: { value: null, writable: true },
+		});
+		child.ref = vi.fn() as unknown as ChildProcess["ref"];
+		child.unref = vi.fn() as unknown as ChildProcess["unref"];
+		child.kill = vi.fn() as unknown as ChildProcess["kill"];
+		startCliPowerShellWarmStart({
+			platform: "win32",
+			cwd: process.cwd(),
+			env: { ...process.env },
+			candidates: ["missing-pwsh"],
+			spawn: () => child,
+		});
+
+		child.emit("error", Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }));
+
+		await disposeUnclaimedCliPowerShellWarmStart();
+		expect(child.kill).not.toHaveBeenCalled();
+	});
+
 	it("starts before the runtime import, reconciles the final environment, and reuses the same process", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "pi-early-powershell-"));
 		const fixture = join(directory, "powershell-fixture.mjs");
@@ -174,10 +198,9 @@ setInterval(() => {}, 1000);
 			await disposeUnclaimedCliPowerShellWarmStart();
 
 			expect(spawned).toBeDefined();
-			// The host process must be gone: nothing else in production reaps an unclaimed warm start.
-			await expect
-				.poll(() => spawned?.exitCode !== null || spawned?.signalCode !== null, { timeout: 10_000 })
-				.toBe(true);
+			// Disposal is the shutdown handoff. It must not report completion while the unowned host
+			// remains live, because nothing else in production will wait for physical termination.
+			expect(spawned?.exitCode !== null || spawned?.signalCode !== null).toBe(true);
 		} finally {
 			rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 		}
