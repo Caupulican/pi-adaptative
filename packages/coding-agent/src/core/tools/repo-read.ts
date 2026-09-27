@@ -397,13 +397,26 @@ async function runGit(
 	signal: AbortSignal | undefined,
 	stdoutCap: number,
 ): Promise<{ stdout: string; stderr: string; code: number | null; reason: string; capped: boolean }> {
+	if (signal?.aborted) {
+		return { stdout: "", stderr: "", code: null, reason: "aborted", capped: false };
+	}
 	const spawn = options?.spawn ?? spawnProcess;
 	const child = spawn("git", [...argv], {
 		cwd: runDir,
+		detached: process.platform !== "win32",
 		env: repoReadEnvironment(options?.environment?.() ?? process.env),
 		stdio: ["ignore", "pipe", "pipe"],
 		windowsHide: true,
 	});
+	const termination = new AbortController();
+	let cancellationCause: "aborted" | "capped" | undefined;
+	const requestCancellation = (cause: "aborted" | "capped"): void => {
+		if (cancellationCause !== undefined) return;
+		cancellationCause = cause;
+		termination.abort();
+	};
+	const onAbort = (): void => requestCancellation("aborted");
+	signal?.addEventListener("abort", onAbort, { once: true });
 	const stdoutChunks: Buffer[] = [];
 	const stderrChunks: Buffer[] = [];
 	let stdoutBytes = 0;
@@ -412,12 +425,13 @@ async function runGit(
 	child.stdout?.on("data", (chunk: Buffer) => {
 		if (capped) return;
 		const room = stdoutCap - stdoutBytes;
-		if (chunk.length >= room) {
-			stdoutChunks.push(chunk.subarray(0, room));
+		if (chunk.length > room) {
+			if (room > 0) stdoutChunks.push(chunk.subarray(0, room));
 			stdoutBytes += room;
 			capped = true;
-			// The head is all the model will see; stop paying for the rest.
-			child.kill();
+			// The head is all the model will see. Terminate through the same bounded owner as
+			// timeout/user cancellation so descendants and physical settlement cannot diverge.
+			requestCancellation("capped");
 			return;
 		}
 		stdoutChunks.push(chunk);
@@ -429,16 +443,21 @@ async function runGit(
 		stderrChunks.push(chunk.subarray(0, room));
 		stderrBytes += Math.min(room, chunk.length);
 	});
-	const terminal = await waitForChildProcessWithTermination(child, {
-		signal,
-		timeoutMs: options?.timeoutMs ?? TIMEOUT_MS,
-		killGraceMs: KILL_GRACE_MS,
-	});
+	let terminal: Awaited<ReturnType<typeof waitForChildProcessWithTermination>>;
+	try {
+		terminal = await waitForChildProcessWithTermination(child, {
+			signal: termination.signal,
+			timeoutMs: options?.timeoutMs ?? TIMEOUT_MS,
+			killGraceMs: KILL_GRACE_MS,
+		});
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+	}
 	return {
 		stdout: Buffer.concat(stdoutChunks).toString("utf-8"),
 		stderr: Buffer.concat(stderrChunks).toString("utf-8"),
 		code: terminal.code,
-		reason: terminal.reason,
+		reason: terminal.reason === "aborted" ? (cancellationCause ?? "aborted") : terminal.reason,
 		capped,
 	};
 }

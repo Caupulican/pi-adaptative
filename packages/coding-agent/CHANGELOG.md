@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Structured Git reads now terminate byte-capped output through the bounded process-tree owner, preserve first-cancellation cause, and avoid treating exactly full output as overflow.
 - Supervised runtime shutdown now defers termination until the child grants spawn ownership and fences late spawn events after a terminal failure.
 - Capability proofs refuse already-cancelled work before launch and use bounded process-tree settlement for live cancellation and timeouts.
 - Repository mutation fingerprints resolve the checkout root from subdirectory tool working directories, drain Git diagnostics, and terminate timed-out Git trees through the bounded child-process owner.
