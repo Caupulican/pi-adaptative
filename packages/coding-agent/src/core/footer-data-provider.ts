@@ -227,7 +227,13 @@ export class FooterDataProvider {
 	}
 
 	private notifyBranchChange(): void {
-		for (const cb of this.branchChangeCallbacks) cb();
+		for (const callback of [...this.branchChangeCallbacks]) {
+			try {
+				void Promise.resolve(callback()).catch(() => {});
+			} catch {
+				// Branch state is authoritative; one advisory observer cannot interrupt later delivery.
+			}
+		}
 	}
 
 	private scheduleRefresh(): void {
