@@ -48,13 +48,21 @@ export interface ResearchLaneControllerDeps {
 	getPathAliasTable?: () => PathAliasTable;
 }
 
+type ResearchLaneScheduleSettings = Pick<
+	ReturnType<SettingsManager["getResearchLaneSettings"]>,
+	"enabled" | "idleDelayMs" | "maxRunsPerSession" | "model" | "profile"
+> & { autonomyMode: ReturnType<SettingsManager["getAutonomySettings"]>["mode"] };
+
 /** Owns autonomous research demand, scheduling, execution, persistence, and cancellation. */
 export class ResearchLaneController {
 	private _timer: ReturnType<typeof setTimeout> | undefined;
 	private _isRunning = false;
+	private _aborted = false;
 	private _lastSkipReason: string | undefined;
 	private _historySeeded = false;
 	private _persistedRunCount = 0;
+	private _scheduleSettings: ResearchLaneScheduleSettings | undefined;
+	private _unsubscribeSettingsChanges: (() => void) | undefined;
 
 	private readonly abortController = new AbortController();
 	private readonly warnedUnboundToolGrants = new Set<string>();
@@ -81,6 +89,10 @@ export class ResearchLaneController {
 	}
 
 	abort(): void {
+		if (this._aborted) return;
+		this._aborted = true;
+		this._unsubscribeSettingsChanges?.();
+		this._unsubscribeSettingsChanges = undefined;
 		this.clearTimer();
 		this.abortController.abort();
 	}
@@ -102,40 +114,53 @@ export class ResearchLaneController {
 	}
 
 	scheduleFromIdle(): void {
-		if (this._isRunning || this.deps.isDisposed() || this.deps.isChildSession()) return;
-		const research = this.deps.getSettingsManager().getResearchLaneSettings();
+		if (this._isRunning || this._aborted || this.deps.isDisposed() || this.deps.isChildSession()) return;
+		const settingsManager = this.deps.getSettingsManager();
+		const research = settingsManager.getResearchLaneSettings();
+		const { mode } = settingsManager.getAutonomySettings();
+		this.ensureSettingsSubscription(settingsManager, research, mode);
 		if (!research.enabled) {
 			this._lastSkipReason = "research_lane_disabled";
+			this.clearTimer();
 			return;
 		}
-		const { mode } = this.deps.getSettingsManager().getAutonomySettings();
 		if (mode === "off") {
 			this._lastSkipReason = "autonomy_mode_off";
+			this.clearTimer();
 			return;
 		}
 		this.seedHistory();
 		if (this._persistedRunCount >= research.maxRunsPerSession) {
 			this._lastSkipReason = "max_runs_reached";
+			this.clearTimer();
 			return;
 		}
-		if (!this.buildDemand()) return;
+		if (!this.buildDemand()) {
+			this.clearTimer();
+			return;
+		}
 		const shipment = this.models.resolveShipment(research, "no_research_model");
 		if (!shipment.ok) {
 			this._lastSkipReason = shipment.skipReason;
+			this.clearTimer();
 			return;
 		}
 		if (!this.models.capabilityProfile(shipment.model).backgroundLanesEnabled) {
 			this._lastSkipReason = "model_research_unsupported";
+			this.clearTimer();
 			return;
 		}
 
-		this.clearTimer();
-		this._timer = setTimeout(() => {
+		this._lastSkipReason = undefined;
+		const timer = setTimeout(() => {
+			if (this._timer !== timer) return;
 			this._timer = undefined;
 			void this.runScheduled().finally(() => this.deps.onContinuationActivity?.());
 		}, research.idleDelayMs);
+		const previous = this._timer;
+		this._timer = timer;
+		if (previous !== undefined) clearTimeout(previous);
 		this.deps.onContinuationActivity?.();
-		const timer = this._timer;
 		if (typeof timer === "object" && timer && "unref" in timer) {
 			const { unref } = timer as { unref?: () => void };
 			unref?.call(timer);
@@ -144,7 +169,7 @@ export class ResearchLaneController {
 
 	async runOnce(request?: { query?: string; context?: string; goalId?: string }): Promise<ResearchLaneRunOutcome> {
 		if (this._isRunning) return { started: false, skipReason: "research_lane_already_running" };
-		if (this.deps.isDisposed()) return { started: false, skipReason: "session_disposed" };
+		if (this._aborted || this.deps.isDisposed()) return { started: false, skipReason: "session_disposed" };
 
 		const settings = this.deps.getSettingsManager().getResearchLaneSettings();
 		const demand = request?.query
@@ -311,16 +336,79 @@ export class ResearchLaneController {
 	}
 
 	private async runScheduled(): Promise<void> {
-		if (this._isRunning || this.deps.isDisposed()) return;
-		const research = this.deps.getSettingsManager().getResearchLaneSettings();
-		const { mode } = this.deps.getSettingsManager().getAutonomySettings();
-		if (!research.enabled || mode === "off") return;
 		try {
+			if (this._isRunning || this._aborted || this.deps.isDisposed()) return;
+			const research = this.deps.getSettingsManager().getResearchLaneSettings();
+			const { mode } = this.deps.getSettingsManager().getAutonomySettings();
+			if (!research.enabled || mode === "off") return;
 			await this.runOnce();
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.deps.emit({ type: "warning", message: `Research lane failed: ${message}` });
 		}
+	}
+
+	private ensureSettingsSubscription(
+		settingsManager: SettingsManager,
+		research: ReturnType<SettingsManager["getResearchLaneSettings"]>,
+		autonomyMode: ReturnType<SettingsManager["getAutonomySettings"]>["mode"],
+	): void {
+		this._scheduleSettings = this.scheduleSettings(research, autonomyMode);
+		if (
+			this._unsubscribeSettingsChanges !== undefined ||
+			this._aborted ||
+			typeof settingsManager.subscribeChanges !== "function"
+		)
+			return;
+		this._unsubscribeSettingsChanges = settingsManager.subscribeChanges(() => this.reconcileSettingsChange());
+	}
+
+	private reconcileSettingsChange(): void {
+		if (this._aborted || this.deps.isDisposed()) return;
+		const previous = this._scheduleSettings;
+		try {
+			const settingsManager = this.deps.getSettingsManager();
+			const research = settingsManager.getResearchLaneSettings();
+			const next = this.scheduleSettings(research, settingsManager.getAutonomySettings().mode);
+			if (previous !== undefined && this.sameScheduleSettings(previous, next)) return;
+			if (this._isRunning) {
+				this._scheduleSettings = next;
+				return;
+			}
+			this.scheduleFromIdle();
+		} catch (error) {
+			this._scheduleSettings = previous;
+			const message = error instanceof Error ? error.message : String(error);
+			this.deps.emit({
+				type: "warning",
+				message: `Research lane settings reconciliation failed: ${message}`,
+			});
+		}
+	}
+
+	private scheduleSettings(
+		research: ReturnType<SettingsManager["getResearchLaneSettings"]>,
+		autonomyMode: ReturnType<SettingsManager["getAutonomySettings"]>["mode"],
+	): ResearchLaneScheduleSettings {
+		return {
+			enabled: research.enabled,
+			idleDelayMs: research.idleDelayMs,
+			maxRunsPerSession: research.maxRunsPerSession,
+			model: research.model,
+			profile: research.profile,
+			autonomyMode,
+		};
+	}
+
+	private sameScheduleSettings(left: ResearchLaneScheduleSettings, right: ResearchLaneScheduleSettings): boolean {
+		return (
+			left.enabled === right.enabled &&
+			left.idleDelayMs === right.idleDelayMs &&
+			left.maxRunsPerSession === right.maxRunsPerSession &&
+			left.model === right.model &&
+			left.profile === right.profile &&
+			left.autonomyMode === right.autonomyMode
+		);
 	}
 
 	private buildEnvelope(

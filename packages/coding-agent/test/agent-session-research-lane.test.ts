@@ -328,4 +328,86 @@ describe("AgentSession research lane (idle trigger)", () => {
 			harness.cleanup();
 		}
 	});
+
+	it("reconciles an armed idle run across live research and autonomy setting transitions", async () => {
+		const harness = await createHarness({
+			settings: {
+				researchLane: { enabled: true, idleDelayMs: 300_000 },
+				autonomy: { mode: "balanced", goalAutoContinue: false },
+			},
+		});
+		try {
+			seedActiveGoal(harness);
+			harness.setResponses([fauxAssistantMessage("turn done"), fauxAssistantMessage(RESEARCH_JSON)]);
+
+			await harness.session.prompt("please work on the goal");
+			expect(harness.session.nativeActivity.isSettled()).toBe(false);
+			expect(vi.getTimerCount()).toBe(1);
+
+			harness.settingsManager.setResearchLaneSettings({
+				...harness.settingsManager.getResearchLaneSettings(),
+				enabled: false,
+			});
+			expect(harness.session.nativeActivity.isSettled()).toBe(true);
+			expect(vi.getTimerCount()).toBe(0);
+
+			harness.settingsManager.setResearchLaneSettings({
+				...harness.settingsManager.getResearchLaneSettings(),
+				enabled: true,
+			});
+			expect(harness.session.nativeActivity.isSettled()).toBe(false);
+			expect(vi.getTimerCount()).toBe(1);
+
+			harness.settingsManager.setAutonomySettings({
+				...harness.settingsManager.getAutonomySettings(),
+				mode: "off",
+			});
+			expect(harness.session.nativeActivity.isSettled()).toBe(true);
+			expect(vi.getTimerCount()).toBe(0);
+
+			harness.settingsManager.setAutonomySettings({
+				...harness.settingsManager.getAutonomySettings(),
+				mode: "balanced",
+			});
+			expect(harness.session.nativeActivity.isSettled()).toBe(false);
+			expect(vi.getTimerCount()).toBe(1);
+			await vi.advanceTimersByTimeAsync(299_999);
+			expect(researchLaneRecords(harness)).toHaveLength(0);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(researchLaneRecords(harness)).toHaveLength(1);
+			expect(harness.session.nativeActivity.isSettled()).toBe(true);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("contains a scheduled settings-read failure instead of rejecting unobserved", async () => {
+		const harness = await createHarness({
+			settings: {
+				researchLane: { enabled: true, idleDelayMs: 10 },
+				autonomy: { mode: "balanced", goalAutoContinue: false },
+			},
+		});
+		const warnings: string[] = [];
+		const unsubscribe = harness.session.subscribe((event) => {
+			if (event.type === "warning") warnings.push(event.message);
+		});
+		try {
+			seedActiveGoal(harness);
+			harness.setResponses([fauxAssistantMessage("turn done")]);
+			await harness.session.prompt("please work on the goal");
+			vi.spyOn(harness.settingsManager, "getResearchLaneSettings").mockImplementationOnce(() => {
+				throw new Error("research settings unavailable");
+			});
+
+			await vi.advanceTimersByTimeAsync(10);
+
+			expect(warnings).toEqual(["Research lane failed: research settings unavailable"]);
+			expect(researchLaneRecords(harness)).toHaveLength(0);
+			expect(harness.session.nativeActivity.isSettled()).toBe(true);
+		} finally {
+			unsubscribe();
+			harness.cleanup();
+		}
+	});
 });
