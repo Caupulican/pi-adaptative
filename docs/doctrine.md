@@ -106,6 +106,14 @@ override the owner's selected root. Pinned by
 `packages/coding-agent/test/agent-session-local-runtime.test.ts`, and
 `packages/coding-agent/test/interactive-mode-ollama-install-smoke.test.ts`.
 
+**A discretionary retrieve fan-out is priced as the execution it will actually launch.** The root
+pays its learned request count against its warm prefix. The worker alternative freezes one question
+list for both the decision and execution, then prices every independent worker's fixed prefix, actual
+brief, repeated cache reads, and generated bounded report; the combined bounded evidence is charged
+once when it returns to the root. Missing prices, learned request counts, worker-prefix evidence, or
+a valid fan-out count keep work on the root. Capability-required workers and failure recovery remain
+constraints, not cost-vetoed choices. Pinned by `packages/coding-agent/test/work-boundary.test.ts`.
+
 **Every agent runs the conversation mechanics; only the head orchestrates.** A worker plans each
 request with root's own request-context controller (context GC on its own lane, path aliases, the
 authority context), pays its early compaction and GC rewrites by root's prices on its own cache facts,

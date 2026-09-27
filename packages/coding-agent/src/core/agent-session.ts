@@ -4728,22 +4728,40 @@ export class AgentSession {
 	}
 
 	/**
-	 * The root (the talker) or a worker for a route the root may take (`priceExecutor`). The talker's
-	 * cost is its learned requests for this route kind reading its prefix; the worker writes the route's
-	 * brief and reports back within the delegate result bound. The worker is priced on the model it would
-	 * run on now (the owner's pin for its role, account routing, or the session model), the same choice
-	 * admission makes.
+	 * The root (the talker) or a minion fan-out for a retrieve route (`priceExecutor`). The talker's
+	 * cost is its learned requests for this route kind reading its prefix; every independent worker pays
+	 * its own actual brief and bounded report. The workers are priced on the model admission would use
+	 * now (the owner's pin for the role, account routing, or the session model).
 	 */
 	private _chooseObjectiveExecutor(route: ObjectiveRoute): "root" | "worker" {
-		const model = this.model;
-		const prefixTokens = this.getContextUsage()?.tokens ?? 0;
-		const pricing = model ? resolveEffectiveModelPricing(model, prefixTokens) : undefined;
-		const workerModel = this._backgroundLanes.previewWorkerModel() ?? model;
 		const briefTokens = estimateTokens({
 			role: "user",
 			content: buildObjectiveRoutePrompt(route).text,
 			timestamp: 0,
 		});
+		return this._priceObjectiveExecutor(route, briefTokens, 1);
+	}
+
+	/** Price a retrieve route against the exact immutable question fan-out execution will consume. */
+	private _chooseRetrieveExecutor(route: ObjectiveRoute, questions: readonly string[]): "root" | "worker" {
+		const briefTokens = Math.max(
+			0,
+			...questions.map((question) =>
+				estimateTokens({ role: "user", content: minionInstructions(question), timestamp: 0 }),
+			),
+		);
+		return this._priceObjectiveExecutor(route, briefTokens, questions.length);
+	}
+
+	/** One cache-economic owner for discretionary root-versus-worker objective execution. */
+	private _priceObjectiveExecutor(route: ObjectiveRoute, briefTokens: number, workers: number): "root" | "worker" {
+		const model = this.model;
+		const prefixTokens = this.getContextUsage()?.tokens ?? 0;
+		const pricing = model ? resolveEffectiveModelPricing(model, prefixTokens) : undefined;
+		const workerModel = this._backgroundLanes.previewWorkerModel() ?? model;
+		const workerPrefixTokens = this.getDecisionLedger()?.medianWorkerPrefixTokens(
+			Date.now() - negligibleAgeMs(CACHE_SURVIVAL_CALIBRATION.halfLifeMs),
+		);
 		const verdict = priceExecutor({
 			talkerPrefixTokens: prefixTokens,
 			briefTokens,
@@ -4752,12 +4770,13 @@ export class AgentSession {
 				content: " ".repeat(MAX_DELEGATE_STATUS_OUTPUT_BYTES),
 				timestamp: 0,
 			}),
+			workers,
 			requests: this.getDecisionLedger()?.learnedRootRouteRequests(route.route),
-			workerPrefixTokens: this.getDecisionLedger()?.medianWorkerPrefixTokens(
-				Date.now() - negligibleAgeMs(CACHE_SURVIVAL_CALIBRATION.halfLifeMs),
-			),
+			workerPrefixTokens,
 			talker: pricing,
-			worker: workerModel ? resolveEffectiveModelPricing(workerModel, briefTokens) : undefined,
+			worker: workerModel
+				? resolveEffectiveModelPricing(workerModel, (workerPrefixTokens ?? 0) + briefTokens)
+				: undefined,
 		});
 		this._recordCacheDecision({
 			kind: "executor",
@@ -4768,6 +4787,7 @@ export class AgentSession {
 				route: route.route,
 				prefixTokens,
 				briefTokens,
+				workers,
 				...(workerModel ? { workerModel: `${workerModel.provider}/${workerModel.id}` } : {}),
 			},
 		});
@@ -4843,32 +4863,30 @@ export class AgentSession {
 	 * record on its next turn.
 	 */
 	private async _retrieveForObjective(route: ObjectiveRoute, signal?: AbortSignal): Promise<"root" | "worker"> {
-		const executor = this._chooseObjectiveExecutor(route);
+		const objective = this._goals.getState()?.userGoal ?? route.objective_id;
+		const questions = gatheringQuestions(objective, route.target_requirement_ids ?? []);
+		const executor = this._chooseRetrieveExecutor(route, questions);
 		// Recorded before the route runs, so an interrupted route still teaches its request count.
 		this.getDecisionLedger()?.noteRouteExecutor(this.sessionId, route.cycle_id, executor);
 		if (executor === "root") {
 			await this._goals.objectiveRootExecutor().execute(route, signal);
 			return "root";
 		}
-		const objective = this._goals.getState()?.userGoal ?? route.objective_id;
-		const reports = await gatherWithMinions(
-			gatheringQuestions(objective, route.target_requirement_ids ?? []),
-			async (question) => {
-				signal?.throwIfAborted();
-				const run = await this.runWorkerDelegationOnce({
-					instructions: minionInstructions(question),
-					authority: { readOnly: true },
-					forkTurns: "none",
-					// Each question is its own brief: minions never share one specialist's context.
-					parallelWork: { independentOf: [], justification: "one atomic gathering question per read-only minion" },
-				});
-				if (!run.started || !run.outcome)
-					return { question, accepted: false, reason: run.skipReason ?? "not started" };
-				return run.outcome.accepted
-					? { question, accepted: true, summary: run.outcome.claim.summary }
-					: { question, accepted: false, reason: run.outcome.reasonCode };
-			},
-		);
+		const reports = await gatherWithMinions(questions, async (question) => {
+			signal?.throwIfAborted();
+			const run = await this.runWorkerDelegationOnce({
+				instructions: minionInstructions(question),
+				authority: { readOnly: true },
+				forkTurns: "none",
+				// Each question is its own brief: minions never share one specialist's context.
+				parallelWork: { independentOf: [], justification: "one atomic gathering question per read-only minion" },
+			});
+			if (!run.started || !run.outcome)
+				return { question, accepted: false, reason: run.skipReason ?? "not started" };
+			return run.outcome.accepted
+				? { question, accepted: true, summary: run.outcome.claim.summary }
+				: { question, accepted: false, reason: run.outcome.reasonCode };
+		});
 		await this.sendCustomMessage(
 			{
 				customType: GATHERED_EVIDENCE_CUSTOM_TYPE,

@@ -142,4 +142,24 @@ describe("the retrieve route's executor", () => {
 			harness.cleanup();
 		}
 	});
+
+	it("keeps the reading on the warm talker when the complete minion fan-out costs more", async () => {
+		const harness = await priced();
+		try {
+			learnRootRetrieval(harness);
+			harness.setResponses([fauxAssistantMessage("read on the root")]);
+			const targets = Array.from({ length: 20 }, (_, index) => `R${index + 1}`);
+			expect(await retrieve(harness, targets)).toBe("root");
+			const decision = harness.session
+				.getDecisionLedger()
+				?.cacheDecisions(harness.session.sessionId)
+				.filter((entry) => entry.kind === "executor")
+				.at(-1);
+			expect(decision?.admit).toBe(false);
+			expect(decision?.reason).toContain("20 workers");
+			expect(decision?.detail?.workers).toBe(20);
+		} finally {
+			harness.cleanup();
+		}
+	});
 });

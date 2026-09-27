@@ -211,9 +211,10 @@ export function planIdlePreparation(
 /**
  * Who executes a unit of work (conversation-continuity Q8 as refined by the KV-cache rule): the talker
  * on its own warm cache, or a worker given a brief. The talker pays each of its learned requests for the
- * work reading its whole prefix from cache. The worker writes the brief cold, reads its small prefix on
- * each request, and its report is appended to the talker's prefix once, cold. The worker wins only when
- * that is cheaper; without prices or a learned request count the talker keeps the work.
+ * work reading its whole prefix from cache. Each independent worker writes its own brief cold, reads its
+ * small prefix on each request, and generates a bounded report; the combined evidence is appended to the
+ * talker's prefix once, cold. Workers win only when the complete fan-out is cheaper; without prices, a
+ * learned request count, or a valid fan-out count the talker keeps the work.
  */
 export function priceExecutor(input: {
 	readonly talkerPrefixTokens: number;
@@ -224,36 +225,51 @@ export function priceExecutor(input: {
 	 */
 	readonly workerPrefixTokens: number | undefined;
 	readonly reportTokens: number;
+	/** Independent worker conversations launched for this route. Every one pays prefix, brief, and output. */
+	readonly workers: number;
 	/** The requests this kind of work has learned to take on the talker. */
 	readonly requests: number | undefined;
 	readonly talker: EffectiveModelPricing | undefined;
 	readonly worker: EffectiveModelPricing | undefined;
 }): { executor: "root" | "worker"; reason: string; talkerUsd?: number; workerUsd?: number } {
 	const { talker, worker, requests } = input;
-	if (!talker || !worker || requests === undefined || requests <= 0 || input.workerPrefixTokens === undefined) {
+	const workers = Number.isInteger(input.workers) && input.workers > 0 ? input.workers : undefined;
+	if (
+		!talker ||
+		!worker ||
+		requests === undefined ||
+		requests <= 0 ||
+		input.workerPrefixTokens === undefined ||
+		worker.output === undefined ||
+		workers === undefined
+	) {
 		return {
 			executor: "root",
-			reason: "no learned request count, worker prefix or prices; the talker keeps the work",
+			reason: "no learned request count, worker prefix, valid fan-out count or prices; the talker keeps the work",
 		};
 	}
 	const coldOf = (pricing: EffectiveModelPricing) => (pricing.cacheWrite > 0 ? pricing.cacheWrite : pricing.input);
 	const talkerUsd = requests * usd(input.talkerPrefixTokens, talker.cacheRead);
-	// The worker pays its own prefix and the brief cold once, then reads them from cache.
+	// Every independent worker pays its own prefix and brief cold once, reads them on later requests,
+	// and generates its own bounded report. Only the final combined evidence is appended to the talker.
 	const workerStart = input.workerPrefixTokens + input.briefTokens;
 	const workerUsd =
-		usd(workerStart, coldOf(worker)) +
-		Math.max(0, requests - 1) * usd(workerStart, worker.cacheRead) +
+		workers *
+			(usd(workerStart, coldOf(worker)) +
+				Math.max(0, requests - 1) * usd(workerStart, worker.cacheRead) +
+				usd(input.reportTokens, worker.output)) +
 		usd(input.reportTokens, coldOf(talker));
+	const workerLabel = `${workers} worker${workers === 1 ? "" : "s"}`;
 	return workerUsd < talkerUsd
 		? {
 				executor: "worker",
-				reason: `a worker on a brief costs ${workerUsd.toFixed(6)} USD against ${talkerUsd.toFixed(6)} USD on the talker over ${requests} requests`,
+				reason: `${workerLabel} on independent briefs cost ${workerUsd.toFixed(6)} USD against ${talkerUsd.toFixed(6)} USD on the talker over ${requests} requests`,
 				talkerUsd,
 				workerUsd,
 			}
 		: {
 				executor: "root",
-				reason: `the talker's warm prefix costs ${talkerUsd.toFixed(6)} USD against ${workerUsd.toFixed(6)} USD for a worker over ${requests} requests`,
+				reason: `the talker's warm prefix costs ${talkerUsd.toFixed(6)} USD against ${workerUsd.toFixed(6)} USD for ${workerLabel} over ${requests} requests`,
 				talkerUsd,
 				workerUsd,
 			};

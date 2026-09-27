@@ -71,6 +71,7 @@ describe("executor price", () => {
 			workerPrefixTokens: 8_000,
 			reportTokens: 4_000,
 			requests: 12,
+			workers: 1,
 			talker,
 			worker: talker,
 		});
@@ -86,6 +87,7 @@ describe("executor price", () => {
 				workerPrefixTokens: undefined,
 				reportTokens: 4_000,
 				requests: 12,
+				workers: 1,
 				talker,
 				worker: talker,
 			}).executor,
@@ -97,6 +99,7 @@ describe("executor price", () => {
 				workerPrefixTokens: 8_000,
 				reportTokens: 4_000,
 				requests: 3,
+				workers: 1,
 				talker,
 				worker: talker,
 			}).executor,
@@ -108,10 +111,41 @@ describe("executor price", () => {
 				workerPrefixTokens: 8_000,
 				reportTokens: 4_000,
 				requests: undefined,
+				workers: 1,
 				talker,
 				worker: talker,
 			}).executor,
 		).toBe("root");
+	});
+
+	it("prices every independent worker before admitting fan-out", () => {
+		const verdict = priceExecutor({
+			talkerPrefixTokens: 80_000,
+			briefTokens: 2_000,
+			workerPrefixTokens: 8_000,
+			reportTokens: 4_000,
+			requests: 10,
+			workers: 4,
+			talker,
+			worker: { ...talker, output: 0 },
+		});
+		expect(verdict.executor).toBe("root");
+		expect(verdict.reason).toContain("4 workers");
+	});
+
+	it("counts generated worker reports as extra output, not only as talker input", () => {
+		const verdict = priceExecutor({
+			talkerPrefixTokens: 30_000,
+			briefTokens: 2_000,
+			workerPrefixTokens: 8_000,
+			reportTokens: 4_000,
+			requests: 10,
+			workers: 1,
+			talker,
+			worker: talker,
+		});
+		expect(verdict.executor).toBe("root");
+		expect(verdict.workerUsd).toBeGreaterThan(verdict.talkerUsd ?? 0);
 	});
 });
 
