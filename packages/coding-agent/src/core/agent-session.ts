@@ -3886,11 +3886,11 @@ export class AgentSession {
 
 	/** Emit an event to all listeners */
 	private _emit(event: AgentSessionEvent): void {
-		for (const listener of this._eventListeners) {
+		for (const listener of [...this._eventListeners]) {
 			try {
-				// Public listeners are observers. Invoke them synchronously to preserve existing ordering,
-				// but contain both synchronous failures and rejected thenables so one observer cannot
-				// reject the session operation or prevent later observers from receiving the event.
+				// Public listeners are observers. Freeze this emission's generation and invoke it
+				// synchronously to preserve ordering, but contain both synchronous failures and rejected
+				// thenables so one observer cannot alter sibling delivery or reject the session operation.
 				const result = listener(event) as unknown;
 				if (result !== null && (typeof result === "object" || typeof result === "function") && "then" in result) {
 					void Promise.resolve(result).catch(() => {});
