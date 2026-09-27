@@ -938,7 +938,7 @@ export class TUI extends Container {
 
 		if (this.inputListeners.size > 0) {
 			let current = data;
-			for (const listener of this.inputListeners) {
+			for (const listener of [...this.inputListeners]) {
 				const result = listener(current);
 				if (result?.consume) {
 					return;
