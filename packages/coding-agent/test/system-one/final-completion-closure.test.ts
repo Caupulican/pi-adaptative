@@ -828,6 +828,10 @@ describe("FC-03 receipt binding", () => {
 	it("tag.gpgsign failure does not create an unsigned tag", async () => {
 		const root = gitRepo();
 		execFileSync("git", ["config", "tag.gpgsign", "true"], { cwd: root });
+		// Use a deterministic, non-interactive failing signer. A missing test key delegated failure
+		// behavior to the runner's GPG installation and on Windows could consume the same 30-second
+		// deadline as the delivery watchdog, racing Vitest's own 30-second timeout.
+		execFileSync("git", ["config", "gpg.program", "git"], { cwd: root });
 		execFileSync("git", ["config", "user.signingkey", "0000000000000000"], { cwd: root });
 		const delivery = createRepoGitDelivery(root);
 		writeFileSync(join(root, "README.md"), "two\n");

@@ -12,7 +12,7 @@ import type { EdgeGrantView } from "./autonomy/edge-policy.ts";
 import { SELF_COMPACTION_GUIDANCE_CUSTOM_TYPE } from "./compaction/self-compaction.ts";
 import type { ContextAuditReport } from "./context/context-audit.ts";
 import type { ContextProjection } from "./context/context-projection.ts";
-import type { PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
+import type { EnforcePromptPolicyResult } from "./context/context-prompt-enforcement.ts";
 import type { PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
 import { PATH_ALIAS_LEGEND_CUSTOM_TYPE } from "./context/path-alias-table.ts";
@@ -58,7 +58,10 @@ export interface ProviderRequestContextControllerDeps {
 	runPromptEnforcement?(
 		messages: AgentMessage[],
 		report: PromptPolicyShadowReport,
-	): { messages: AgentMessage[]; report: PromptEnforcementReport };
+		sourceMessages: AgentMessage[],
+		frozenBelow: number,
+		gcReport: ContextGcReport,
+	): EnforcePromptPolicyResult;
 	enqueueRelevanceCuration?(messages: AgentMessage[], report: PromptPolicyShadowReport): void;
 	maybeDrainBrainCuration?(): void;
 	appendMemoryEvidence?(messages: AgentMessage[], report: MemoryRetrievalReport): AgentMessage[];
@@ -342,14 +345,23 @@ export class ProviderRequestContextController {
 		const previewProviderMessages = [...pathAliasPlan.messages, ...providerTransients];
 		const previewEnforcement =
 			shadowReport && this.deps.runPromptEnforcement
-				? this.deps.runPromptEnforcement(previewProviderMessages, shadowReport)
-				: { messages: previewProviderMessages };
+				? this.deps.runPromptEnforcement(
+						previewProviderMessages,
+						shadowReport,
+						extensionMessages,
+						frozenBelow,
+						previewGc.report,
+					)
+				: { messages: previewProviderMessages, transientMessages: [], isCurrent: () => true };
 		if (previewEnforcement.messages.length !== previewProviderMessages.length) {
 			throw new Error("Provider request enforcement changed message cardinality");
 		}
 		const compactableMessages = previewEnforcement.messages.slice(0, previewGc.messages.length);
 		const goalState = this.deps.getGoalState?.();
-		const withExtensionTransients = previewEnforcement.messages.slice(previewGc.messages.length);
+		const withExtensionTransients = [
+			...previewEnforcement.messages.slice(previewGc.messages.length),
+			...previewEnforcement.transientMessages,
+		];
 		const withMemory =
 			memoryReport && this.deps.appendMemoryEvidence
 				? this.deps.appendMemoryEvidence([...compactableMessages, ...withExtensionTransients], memoryReport)
@@ -405,6 +417,7 @@ export class ProviderRequestContextController {
 		const planCurrent = () =>
 			dependenciesCurrent() &&
 			previewGc.isCurrent() &&
+			previewEnforcement.isCurrent() &&
 			skillVault?.previewSystemPromptSection() === skillSection &&
 			skillVault?.previewExclusionReminder?.() === exclusionReminder;
 
@@ -419,7 +432,7 @@ export class ProviderRequestContextController {
 				}
 				previewGc.commit();
 				this.deps.correlatePromptPolicyWithContextGc?.(previewGc.report);
-				if (shadowReport) this.deps.enqueueRelevanceCuration?.(previewProviderMessages, shadowReport);
+				if (shadowReport) this.deps.enqueueRelevanceCuration?.(extensionMessages, shadowReport);
 				this.deps.maybeDrainBrainCuration?.();
 				if (skillVault && skillVault.commitSystemPromptSection() !== skillSection) {
 					throw new Error("Committed active skill context diverged from its accepted plan");

@@ -111,6 +111,8 @@ export interface ContextGcPackedRecord {
 	originalTokens: number;
 	packedTokens: number;
 	storagePath?: string;
+	/** True only when the context original is readable now; a planned path is not availability. */
+	retrievalAvailable: boolean;
 	path?: string;
 	command?: string;
 	key?: string;
@@ -495,12 +497,17 @@ function storagePathFor(storageDir: string | undefined, key: string): string | u
  */
 const storedOriginalPaths = new Set<string>();
 
-function storeOriginal(options: ContextGcOptions, record: ContextGcPackedRecord, original: string): void {
+function contextOriginalAvailable(storagePath: string | undefined): boolean {
+	return storagePath !== undefined && existsSync(storagePath);
+}
+
+function storeOriginal(options: ContextGcOptions, record: ContextGcPackedRecord, original: string): boolean {
 	try {
 		const key = record.key ?? "";
 		const storageDir = options.acquireStorageDir?.() ?? options.storageDir;
 		const path = storagePathFor(storageDir, key);
-		if (!path || !storageDir || storedOriginalPaths.has(path)) return;
+		if (!path || !storageDir) return false;
+		if (storedOriginalPaths.has(path)) return true;
 		// Content-addressed and immutable: a concurrent writer produces the same bytes and the atomic
 		// rename leaves whichever lands last, identical, so the write needs no lock around it.
 		if (!existsSync(path)) writeFileAtomicSync(path, original);
@@ -518,9 +525,11 @@ function storeOriginal(options: ContextGcOptions, record: ContextGcPackedRecord,
 			writeFileAtomicSync(sidecar, JSON.stringify(metadata));
 		}
 		storedOriginalPaths.add(path);
+		return existsSync(path);
 	} catch {
 		// Best-effort: the packed message still names the planned path; a missing original reads as
 		// unavailable rather than failing the request.
+		return false;
 	}
 }
 
@@ -555,12 +564,14 @@ const packedMemos = new WeakMap<AgentMessage, PackedMemo>();
  * frozen stub either.
  */
 function emitMemoizedPack(pass: PackingPass, messageIndex: number, memo: PackedMemo): void {
+	// An active session lease owns retained originals. `commit()` updates the memo's record after the
+	// one first write, so re-emitting it must not add a filesystem stat per packed item per request.
 	const record: ContextGcPackedRecord = { ...memo.record, messageIndex };
 	pass.nextMessages[messageIndex] = memo.packed;
 	pass.report.records.push(record);
 	pass.report.originalTokens += record.originalTokens;
 	pass.report.packedTokens += record.packedTokens;
-	pass.pending.push({ record, originalText: memo.originalText });
+	pass.pending.push({ record, originalText: memo.originalText, availabilityOwner: memo.record });
 }
 
 interface PackDecision {
@@ -668,7 +679,12 @@ interface PackingPass {
 	readonly report: ContextGcReport;
 	readonly nextMessages: AgentMessage[];
 	readonly resolvedDigests: Map<string, string | undefined>;
-	readonly pending: Array<{ record: ContextGcPackedRecord; originalText: string }>;
+	readonly pending: Array<{
+		record: ContextGcPackedRecord;
+		originalText: string;
+		/** Memo-owned availability that future frozen-prefix emissions copy. */
+		availabilityOwner: ContextGcPackedRecord;
+	}>;
 }
 
 function commitPackedMessage<TMessage extends AgentMessage>(
@@ -709,7 +725,11 @@ function commitPackedMessage<TMessage extends AgentMessage>(
 	pass.report.records.push(record);
 	pass.report.originalTokens += record.originalTokens;
 	pass.report.packedTokens += record.packedTokens;
-	pass.pending.push({ record, originalText });
+	pass.pending.push({
+		record,
+		originalText,
+		availabilityOwner: memo && memo.key === key && memo.shape === shape ? memo.record : record,
+	});
 }
 
 function noEffectResult(messages: AgentMessage[], report: ContextGcReport): ContextGcResult {
@@ -833,6 +853,7 @@ export function applyContextGc(
 					originalTokens,
 					packedTokens: 0,
 					storagePath,
+					retrievalAvailable: contextOriginalAvailable(storagePath),
 					key,
 				};
 				decisions.push({ index, message, memo, originalText, key, record, makePacked: makePackedTransientRecord });
@@ -864,6 +885,7 @@ export function applyContextGc(
 					originalTokens,
 					packedTokens: 0,
 					storagePath,
+					retrievalAvailable: contextOriginalAvailable(storagePath),
 					key,
 				};
 				decisions.push({
@@ -920,6 +942,7 @@ export function applyContextGc(
 			originalTokens,
 			packedTokens: 0,
 			storagePath,
+			retrievalAvailable: contextOriginalAvailable(storagePath),
 			path,
 			command,
 			key,
@@ -988,8 +1011,12 @@ export function applyContextGc(
 	const commit = () => {
 		if (committed) return;
 		committed = true;
-		for (const { record, originalText } of pass.pending) {
-			if (record.storagePath && !record.retrieved) storeOriginal(options, record, originalText);
+		for (const { record, originalText, availabilityOwner } of pass.pending) {
+			const retrievalAvailable = record.retrieved
+				? contextOriginalAvailable(record.storagePath)
+				: storeOriginal(options, record, originalText);
+			record.retrievalAvailable = retrievalAvailable;
+			availabilityOwner.retrievalAvailable = retrievalAvailable;
 		}
 	};
 	const isCurrent = () => {

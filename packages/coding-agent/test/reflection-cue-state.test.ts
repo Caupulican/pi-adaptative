@@ -187,7 +187,12 @@ describe("durable current-turn reflection cue state", () => {
 				commit: () => {},
 			}),
 			correlatePromptPolicyWithContextGc: (_report: unknown) => undefined,
-			runPromptEnforcement: (messages: AgentMessage[], _report: unknown) => ({ messages, report: {} }),
+			runPromptEnforcement: (messages: AgentMessage[], _report: unknown) => ({
+				messages,
+				transientMessages: [],
+				report: {},
+				isCurrent: () => true,
+			}),
 			enqueueRelevanceCuration: (_messages: AgentMessage[], _report: unknown) => undefined,
 			maybeDrainBrainCuration: () => undefined,
 			appendMemoryEvidence: (messages: AgentMessage[], _report: unknown) => messages,

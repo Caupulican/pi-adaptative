@@ -1,7 +1,9 @@
+import { existsSync } from "node:fs";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { AssistantMessage, ToolResultMessage, Usage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { applyContextGc, getContextGcSettings } from "../src/core/context-gc.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const usage: Usage = {
 	input: 0,
@@ -132,6 +134,57 @@ describe("context GC packed-message commit", () => {
 
 	it("defaults preserveRecentMessages to 24 (ledger #144 window raise)", () => {
 		expect(getContextGcSettings().preserveRecentMessages).toBe(24);
+	});
+
+	it("reports a retrieval path as available only after its original exists", () => {
+		const storageDir = tempDir("pi-context-gc-availability-");
+		const messages: AgentMessage[] = [toolResult("grep-old", "grep", bulky("STORED LATER"))];
+		const options = {
+			cwd: "/repo",
+			storageDir,
+			preserveRecentMessages: 0,
+			minToolResultChars: 20,
+			writePayloads: false,
+		};
+
+		const beforeCommit = applyContextGc(messages, options);
+		expect(beforeCommit.report.records[0]).toMatchObject({ retrievalAvailable: false });
+		expect(existsSync(beforeCommit.report.records[0]?.storagePath ?? "")).toBe(false);
+
+		beforeCommit.commit();
+		expect(existsSync(beforeCommit.report.records[0]?.storagePath ?? "")).toBe(true);
+
+		const afterCommit = applyContextGc(messages, options);
+		expect(afterCommit.report.records[0]).toMatchObject({ retrievalAvailable: true });
+	});
+
+	it("retains recovered retrieval availability when the packed message enters the frozen prefix", () => {
+		const storageDir = tempDir("pi-context-gc-recovered-availability-");
+		const messages: AgentMessage[] = [toolResult("grep-retry", "grep", bulky("RECOVERED LATER"))];
+		let storageAvailable = false;
+		const options = {
+			cwd: "/repo",
+			storageDir,
+			acquireStorageDir: () => {
+				if (!storageAvailable) throw new Error("storage temporarily unavailable");
+				return storageDir;
+			},
+			preserveRecentMessages: 0,
+			minToolResultChars: 20,
+			writePayloads: false,
+		};
+
+		const failed = applyContextGc(messages, options);
+		failed.commit();
+		expect(failed.report.records[0]).toMatchObject({ retrievalAvailable: false });
+
+		storageAvailable = true;
+		const recovered = applyContextGc(messages, { ...options, frozenBelow: 1 });
+		recovered.commit();
+		expect(recovered.report.records[0]).toMatchObject({ retrievalAvailable: true });
+
+		const frozen = applyContextGc(messages, { ...options, frozenBelow: 1 });
+		expect(frozen.report.records[0]).toMatchObject({ retrievalAvailable: true });
 	});
 });
 

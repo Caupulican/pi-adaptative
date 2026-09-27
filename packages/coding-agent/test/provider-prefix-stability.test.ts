@@ -178,7 +178,12 @@ describe("path alias legend placement", () => {
 			runMemoryRetrieval: async () => ({}) as never,
 			applyContextGc: (messages) => ({ messages, report: {} as never, isCurrent: () => true, commit: () => {} }),
 			correlatePromptPolicyWithContextGc: () => {},
-			runPromptEnforcement: (messages) => ({ messages, report: {} as never }),
+			runPromptEnforcement: (messages) => ({
+				messages,
+				transientMessages: [],
+				report: {} as never,
+				isCurrent: () => true,
+			}),
 			enqueueRelevanceCuration: () => {},
 			maybeDrainBrainCuration: () => {},
 			appendMemoryEvidence: (messages) => messages,

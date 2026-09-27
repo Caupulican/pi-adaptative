@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Query-time context policy now selects bounded hidden, short, long, or full evidence for the exact current query without rewriting the provider's stable prefix; evidence already packed by context GC is restored through request-only tail projections, uses a retrieval key only after its original is readable, otherwise fails open to the full evidence, forces replanning on stale verdicts, and `/context` reports added or saved tokens with the correct sign.
 - Context relevance advisories are fenced by the exact query and evidence revision, preventing a stale verdict from another turn from evicting newly relevant evidence.
 - Accepted context projections materialize only when inspected and retain immutable provenance lookups, keeping provider-request work flat across long sessions without letting later cache changes rewrite an older snapshot.
 - Restart repair closes a provider request left unanswered by interruption, while contradictory or duplicate request outcomes stop automatic repair.

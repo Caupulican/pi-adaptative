@@ -107,6 +107,7 @@ describe("ContextPipeline packed artifact release", () => {
 					originalChars: 100,
 					originalTokens: 100,
 					packedTokens: 10,
+					retrievalAvailable: false,
 				},
 			],
 		};

@@ -118,6 +118,7 @@ describe("context-prompt-policy: correlateWithContextGc", () => {
 					originalChars: 1000,
 					originalTokens: 250,
 					packedTokens: 10,
+					retrievalAvailable: false,
 				},
 			],
 		};
@@ -159,6 +160,7 @@ describe("context-prompt-policy: correlateWithContextGc", () => {
 					originalChars: 5000,
 					originalTokens: 1250,
 					packedTokens: 20,
+					retrievalAvailable: false,
 				},
 			],
 		};

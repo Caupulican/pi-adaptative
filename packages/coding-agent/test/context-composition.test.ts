@@ -78,10 +78,33 @@ describe("buildContextCompositionReport", () => {
 		expect(report.estimatedRequestTokens).toBe(
 			report.systemPromptTokens + report.toolSchemaTokens + report.messageTokens,
 		);
-		expect(report.adjustments).toEqual({ memoryEvidenceTokens: 0, enforcementSavedTokens: 0 });
+		expect(report.adjustments).toEqual({
+			memoryEvidenceTokens: 0,
+			enforcementSavedTokens: 0,
+			enforcementAddedTokens: 0,
+		});
 		// Provider projection removes annotation prose, preventing a source-only schema hotspot.
 		expect(report.observations.some((line) => line.includes("mega_tool"))).toBe(false);
 		expect(report.observations.some((line) => line.includes("provider-reported"))).toBe(true);
+	});
+
+	it("accounts for query-visibility tail overlays as additions rather than fictional stub savings", () => {
+		const report = buildContextCompositionReport({
+			systemPrompt: "",
+			tools: [],
+			extensions: [],
+			messages: [user("base")],
+			providerReportedTokens: null,
+			contextWindow: 10_000,
+			adjustments: {
+				memoryEvidenceTokens: 0,
+				enforcementSavedTokens: 100,
+				enforcementAddedTokens: 250,
+			},
+		});
+
+		expect(report.estimatedRequestTokens).toBe(report.messageTokens + 150);
+		expect(formatContextCompositionDashboard(report)).toContain("+250 query visibility, -100 policy projections");
 	});
 
 	it("renders a bounded dashboard with every section", () => {
@@ -258,7 +281,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 });
 
 describe("send-time adjustments", () => {
-	it("folds the memory evidence block in and the enforcement stub savings out", () => {
+	it("folds memory and query overlays in and policy projection savings out", () => {
 		const report = buildContextCompositionReport({
 			systemPrompt: "p".repeat(400),
 			tools: [],
@@ -266,10 +289,10 @@ describe("send-time adjustments", () => {
 			messages: [user("hello")],
 			providerReportedTokens: null,
 			contextWindow: null,
-			adjustments: { memoryEvidenceTokens: 300, enforcementSavedTokens: 120 },
+			adjustments: { memoryEvidenceTokens: 300, enforcementAddedTokens: 40, enforcementSavedTokens: 120 },
 		});
-		expect(report.estimatedRequestTokens).toBe(report.systemPromptTokens + report.messageTokens + 300 - 120);
+		expect(report.estimatedRequestTokens).toBe(report.systemPromptTokens + report.messageTokens + 300 + 40 - 120);
 		const text = formatContextCompositionDashboard(report);
-		expect(text).toContain("send-time adjustments: +300 memory evidence, -120 policy stubs");
+		expect(text).toContain("+300 memory evidence, +40 query visibility, -120 policy projections");
 	});
 });

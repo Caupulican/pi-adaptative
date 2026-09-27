@@ -26,6 +26,7 @@ import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import type { FauxRequestEvent } from "@caupulican/pi-ai/faux";
 import { describe, expect, it } from "vitest";
+import { SELF_COMPACT_TOOL_NAME } from "../../src/core/compaction/self-compaction.ts";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "../../src/core/context-gc.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "../../src/core/default-tool-surface.ts";
 import { createHarness, getMessageText } from "../suite/harness.ts";
@@ -35,6 +36,10 @@ import { createHostResponseScript } from "./host-response-script.ts";
 const TURNS = Number(process.env.PI_PROFILE_TURNS ?? 300);
 const OUT_DIR = process.env.PI_PROFILE_DIR ?? join(process.cwd(), "profiles-node");
 const CHUNK = 60;
+// Large-output tool calls can cross several thousand tokens apiece. Observe the self-compaction
+// gauge every eight calls so the profile reaches the real handoff before the forced line locks the
+// ordinary tool surface. Goal/delegation traffic is small enough to retain the 60-turn chunk.
+const TOOLS_CHUNK = 8;
 /**
  * PI_PROFILE_SCENARIO selects the tool mix:
  * - `goal` (default): task_steps / get_goal / update_goal / read, the mix that dominates the real
@@ -175,7 +180,10 @@ function renderPressureReport(samples: PressureSample[], spawns: SpawnRecord[]):
  * (something inside the previously sent messages changed). Rewrites are grouped by where they hit,
  * counted from the previous request's end, and by the head of the message that changed.
  */
-function renderCacheReport(events: FauxRequestEvent[]): string {
+function renderCacheReport(
+	events: FauxRequestEvent[],
+	expectations: { expectedCompactions: number; largeOutputWorkload: boolean },
+): string {
 	const bySession = new Map<string, FauxRequestEvent[]>();
 	for (const event of events) {
 		const key = event.sessionId ?? "(no session)";
@@ -191,6 +199,12 @@ function renderCacheReport(events: FauxRequestEvent[]): string {
 	let uncachedCharsTotal = 0;
 	let uncachedCharsOnRewrites = 0;
 	let unpackFlips = 0;
+	let appendPrefixMisses = 0;
+	let gcPackRewrites = 0;
+	let compactionRewrites = 0;
+	let unexpectedRewrites = 0;
+	let segmentMaxMessageCount = main[0]?.messageCount ?? 0;
+	let gcCrossingBudget = 0;
 	const depthBuckets = new Map<string, number>();
 	const rewriteKinds = new Map<string, number>();
 	for (let index = 1; index < main.length; index++) {
@@ -202,6 +216,8 @@ function renderCacheReport(events: FauxRequestEvent[]): string {
 		uncachedCharsTotal += Math.max(0, event.promptChars - event.cachedChars);
 		if (event.divergedAt === undefined || event.divergedAt >= previous.messageCount) {
 			appends += 1;
+			if (event.cachedChars !== previous.promptChars) appendPrefixMisses++;
+			segmentMaxMessageCount = Math.max(segmentMaxMessageCount, event.messageCount);
 			continue;
 		}
 		rewrites += 1;
@@ -211,11 +227,29 @@ function renderCacheReport(events: FauxRequestEvent[]): string {
 		const bucket = depth <= 36 ? "<=36" : depth <= 100 ? "37-100" : depth <= 300 ? "101-300" : ">300";
 		depthBuckets.set(bucket, (depthBuckets.get(bucket) ?? 0) + 1);
 		// Heads read `<role>:<tool> <text>`, so the marker sits inside the head, not at its start.
-		if (
+		const gcPackRewrite =
 			(event.previousDivergedText ?? "").includes("[Context GC packed") &&
-			!(event.divergedText ?? "").includes("[Context GC packed")
-		) {
-			unpackFlips += 1;
+			!(event.divergedText ?? "").includes("[Context GC packed");
+		if (gcPackRewrite) unpackFlips += 1;
+		const packedNow =
+			(event.divergedText ?? "").includes("[Context GC packed") &&
+			!(event.previousDivergedText ?? "").includes("[Context GC packed");
+		const compactedNow =
+			event.divergedRole === "user" &&
+			(event.divergedText ?? "").includes("The conversation history before this point was compacted");
+		if (packedNow) {
+			gcPackRewrites++;
+			segmentMaxMessageCount = Math.max(segmentMaxMessageCount, event.messageCount);
+		} else if (compactedNow) {
+			const { preserveRecentMessages, packStrideMessages } = DEFAULT_CONTEXT_GC_SETTINGS;
+			gcCrossingBudget += Math.floor(
+				Math.max(0, segmentMaxMessageCount - preserveRecentMessages) / packStrideMessages,
+			);
+			compactionRewrites++;
+			segmentMaxMessageCount = event.messageCount;
+		} else {
+			unexpectedRewrites++;
+			segmentMaxMessageCount = Math.max(segmentMaxMessageCount, event.messageCount);
 		}
 		const head = (event.divergedText ?? "").replace(/\s+/g, " ").replace(/\d+/g, "#").slice(0, 60);
 		const was = (event.previousDivergedText ?? "(nothing)").replace(/\s+/g, " ").replace(/\d+/g, "#").slice(0, 60);
@@ -223,6 +257,8 @@ function renderCacheReport(events: FauxRequestEvent[]): string {
 		rewriteKinds.set(kind, (rewriteKinds.get(kind) ?? 0) + 1);
 	}
 	const measured = appends + rewrites;
+	const { preserveRecentMessages, packStrideMessages } = DEFAULT_CONTEXT_GC_SETTINGS;
+	gcCrossingBudget += Math.floor(Math.max(0, segmentMaxMessageCount - preserveRecentMessages) / packStrideMessages);
 	const p50 = reuse.length > 0 ? median(reuse) : 1;
 	const high = reuse.length > 0 ? reuse.filter((value) => value >= 0.9).length / reuse.length : 1;
 	// The contract gate (PI_PROFILE_GATE=1, run in CI on a short session): every request is a
@@ -231,11 +267,23 @@ function renderCacheReport(events: FauxRequestEvent[]): string {
 	// stride, never one message per turn, never a whole run at a new prompt). A regression here is a
 	// cache invalidation the census would pay for.
 	if (process.env.PI_PROFILE_GATE === "1") {
-		const { preserveRecentMessages, packStrideMessages } = DEFAULT_CONTEXT_GC_SETTINGS;
-		const lastMessageCount = main[main.length - 1]?.messageCount ?? 0;
-		const crossings = Math.floor(Math.max(0, lastMessageCount - preserveRecentMessages) / packStrideMessages);
-		expect(p50).toBeGreaterThanOrEqual(0.98);
-		expect(rewrites).toBeLessThanOrEqual(crossings + 1);
+		if (expectations.largeOutputWorkload) {
+			// A large appended result is legitimately uncached, so cachedChars/promptChars measures
+			// output size rather than invalidation. Prove the stronger structural contract instead:
+			// every append retains the complete prior byte prefix, and every rewrite is exactly one
+			// bounded GC pack or one requested compaction checkpoint.
+			expect(appendPrefixMisses).toBe(0);
+			expect(unpackFlips).toBe(0);
+			expect(unexpectedRewrites).toBe(0);
+			expect(compactionRewrites).toBe(expectations.expectedCompactions);
+			expect(rewrites).toBe(gcPackRewrites + compactionRewrites);
+			expect(gcPackRewrites).toBeLessThanOrEqual(gcCrossingBudget + compactionRewrites + 1);
+		} else {
+			const lastMessageCount = main[main.length - 1]?.messageCount ?? 0;
+			const crossings = Math.floor(Math.max(0, lastMessageCount - preserveRecentMessages) / packStrideMessages);
+			expect(p50).toBeGreaterThanOrEqual(0.98);
+			expect(rewrites).toBeLessThanOrEqual(crossings + 1);
+		}
 	}
 	const lastPromptChars = main[main.length - 1]?.promptChars ?? 0;
 	const depthSummary = ["<=36", "37-100", "101-300", ">300"]
@@ -243,6 +291,7 @@ function renderCacheReport(events: FauxRequestEvent[]): string {
 		.join(" ");
 	const lines = [
 		`cache: requests=${main.length} p50 reuse=${p50.toFixed(2)} share>=0.9=${high.toFixed(2)} appends=${appends}/${measured} rewrites=${rewrites}/${measured}`,
+		`cache structure: append prefix misses=${appendPrefixMisses} gc packs=${gcPackRewrites}/${gcCrossingBudget + compactionRewrites + 1} compaction checkpoints=${compactionRewrites}/${expectations.expectedCompactions} unexpected rewrites=${unexpectedRewrites}`,
 		`cache cost: prompt chars total=${promptCharsTotal} uncached total=${uncachedCharsTotal} (${promptCharsTotal > 0 ? ((100 * uncachedCharsTotal) / promptCharsTotal).toFixed(2) : "0"}%) uncached on rewrites=${uncachedCharsOnRewrites} last prompt chars=${lastPromptChars}`,
 		`rewrite depth (messages before the previous request's end): ${depthSummary}; unpack flips (packed stub replaced by its original): ${unpackFlips}`,
 		`reuse by decile (median cachedChars/promptChars): ${deciles(reuse)}`,
@@ -279,7 +328,7 @@ function stopProfiler(session: inspector.Session): Promise<unknown> {
 }
 
 describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session profile", () => {
-	it("profiles the goal/task_steps tool mix over a long session", async () => {
+	it("profiles a long host tool workload", async () => {
 		mkdirSync(OUT_DIR, { recursive: true });
 		const report = join(OUT_DIR, "host-session-profile.txt");
 		writeFileSync(report, "");
@@ -315,6 +364,7 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 		const smallOutputCommand = `node -e "console.log('ok')"`;
 		const delegateDurations: number[] = [];
 		const delegateStatuses = new Map<string, number>();
+		let selfCompactions = 0;
 
 		// Child-process pressure: how many processes the scenario spawns, tagged with the turn that
 		// spawned them. All the project's own callers (bash/grep/git tools) import `spawn` etc. as a
@@ -377,9 +427,24 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 			const profiler = await startProfiler();
 			const wallStart = performance.now();
 			let turn = 0;
+			const workloadChunk = SCENARIO === "tools" ? TOOLS_CHUNK : CHUNK;
+			const promptWhenReady = async (text: string) => {
+				// A worker or self-compaction handoff can hold the foreground exactly when the next
+				// scripted prompt arrives. Keep this prompt's script aligned by waiting for that bounded
+				// ownership interval instead of queueing the prompt behind it.
+				for (let attempt = 0; ; attempt++) {
+					try {
+						await harness.session.prompt(text, { autoContinueGoal: false });
+						return;
+					} catch (error) {
+						if (!(error instanceof AgentBusyError) || attempt >= 500) throw error;
+						await new Promise((resolve) => setTimeout(resolve, 10));
+					}
+				}
+			};
 			while (turn < TURNS) {
 				const steps = [];
-				const chunkEnd = Math.min(TURNS, turn + CHUNK);
+				const chunkEnd = Math.min(TURNS, turn + workloadChunk);
 				for (; turn < chunkEnd; turn++) {
 					// One self-contained action per turn, in the mix the real corpus shows dominating long
 					// sessions. The task_steps add creates the active step; the update two turns later
@@ -414,21 +479,35 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 												: fauxToolCall("update_goal", { status: "active" });
 					steps.push(fauxAssistantMessage([call], { stopReason: "toolUse" }));
 				}
-				steps.push(
-					fauxAssistantMessage([fauxToolCall("task_steps", { action: "compact" })], { stopReason: "toolUse" }),
-				);
+				if (SCENARIO !== "tools") {
+					steps.push(
+						fauxAssistantMessage([fauxToolCall("task_steps", { action: "compact" })], { stopReason: "toolUse" }),
+					);
+				}
 				steps.push(fauxAssistantMessage(`Chunk done at ${turn}.`));
 				script.setResponses(steps);
-				// A worker's completion handoff can hold the foreground exactly when the next scripted
-				// prompt arrives. The scripted queue must stay aligned with THIS prompt, so wait the
-				// handoff out (bounded) instead of queuing behind it.
-				for (let attempt = 0; ; attempt++) {
-					try {
-						await harness.session.prompt(`Continue ${turn}.`, { autoContinueGoal: false });
-						break;
-					} catch (error) {
-						if (!(error instanceof AgentBusyError) || attempt >= 500) throw error;
-						await new Promise((resolve) => setTimeout(resolve, 10));
+				await promptWhenReady(`Continue ${turn}.`);
+				if (SCENARIO === "tools") {
+					const before = harness.session.getSelfCompactionView();
+					if (before.level === "notice" || before.level === "warning" || before.level === "forced") {
+						const expectedCycle = before.cycles + 1;
+						script.setResponses([
+							fauxAssistantMessage(
+								[
+									fauxToolCall(SELF_COMPACT_TOOL_NAME, {
+										note_to_self: `Goal: profile ${TURNS} large-output tool turns. Done: ${turn} turns. NEXT ACTION: continue at turn ${turn}.`,
+									}),
+								],
+								{ stopReason: "toolUse" },
+							),
+							fauxAssistantMessage(`Self-compaction cycle ${expectedCycle} resumed.`),
+						]);
+						await promptWhenReady(`Checkpoint after tool turn ${turn}.`);
+						await harness.session.waitForSelfCompactionHandoff();
+						const after = harness.session.getSelfCompactionView();
+						expect(after.cycles).toBe(expectedCycle);
+						expect(after.toolsLocked).toBe(false);
+						selfCompactions++;
 					}
 				}
 				if (SCENARIO === "delegate") {
@@ -511,7 +590,7 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 				}
 			}
 			log(
-				`turns=${TURNS} scenario=${SCENARIO} wall=${wallMs.toFixed(0)}ms entries=${entries.length} toolErrors=${errors} summaryRequests=${script.getSummaryCount()}`,
+				`turns=${TURNS} completedToolResults=${turnsCompleted} scenario=${SCENARIO} wall=${wallMs.toFixed(0)}ms entries=${entries.length} toolErrors=${errors} selfCompactions=${selfCompactions} summaryRequests=${script.getSummaryCount()}`,
 			);
 			log(`host pre-request ms by decile: ${deciles(snapshotGaps)}  (n=${snapshotGaps.length})`);
 			// The contract gate: per-request host work must not grow with history. The last decile's
@@ -540,7 +619,7 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 				JSON.stringify({ samples: pressureSamples, spawns: spawnRecords }, null, 2),
 			);
 			const pressureLines = [
-				`turns=${TURNS} scenario=${SCENARIO}`,
+				`turns=${TURNS} completedToolResults=${turnsCompleted} scenario=${SCENARIO} selfCompactions=${selfCompactions}`,
 				renderPressureReport(pressureSamples, spawnRecords),
 			];
 			if (typeof global.gc === "function") {
@@ -560,7 +639,10 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 
 			// Prompt-cache reuse as the faux provider's byte-prefix cache saw every request: what the
 			// owner pays for is every request that is not an append of the previous one.
-			const cacheReport = renderCacheReport(requestEvents);
+			const cacheReport = renderCacheReport(requestEvents, {
+				expectedCompactions: selfCompactions,
+				largeOutputWorkload: SCENARIO === "tools",
+			});
 			writeFileSync(
 				join(OUT_DIR, "host-session-cache.txt"),
 				`turns=${TURNS} scenario=${SCENARIO}\n${cacheReport}\n`,
@@ -571,9 +653,11 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 			// Its valid synthetic actions must nevertheless all execute: compaction cannot consume
 			// scripted foreground responses and silently remove work from the measured scenario.
 			expect(errors).toBe(0);
-			expect(turnsCompleted).toBe(1 + TURNS + Math.ceil(TURNS / CHUNK));
+			const coordinationTurns = SCENARIO === "tools" ? selfCompactions : Math.ceil(TURNS / CHUNK);
+			expect(turnsCompleted).toBe(1 + TURNS + coordinationTurns);
 			expect(entries.length).toBeGreaterThan(TURNS);
 			expect(byTool.size).toBeGreaterThan(0);
+			if (SCENARIO === "tools" && TURNS >= 60) expect(selfCompactions).toBeGreaterThan(0);
 			if (SCENARIO === "delegate") {
 				const expectedDelegations = Math.ceil(TURNS / CHUNK) * (CHUNK / DELEGATE_EVERY);
 				expect(delegateDurations).toHaveLength(expectedDelegations);

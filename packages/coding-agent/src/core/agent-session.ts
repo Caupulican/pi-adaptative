@@ -135,8 +135,9 @@ import {
 	formatContextCompositionDashboard,
 } from "./context/context-composition.ts";
 import type { ContextProjection } from "./context/context-projection.ts";
-import type { PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
+import type { EnforcePromptPolicyResult, PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
 import type { PromptPolicyGcCorrelationReport, PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
+import { CONTEXT_VISIBILITY_LONG_CHARS, CONTEXT_VISIBILITY_SHORT_CHARS } from "./context/context-query-visibility.ts";
 import type { MemoryPromptInclusionReport } from "./context/memory-diagnostics.ts";
 import type { MemoryProvider as ContextMemoryProvider } from "./context/memory-provider-contract.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
@@ -1240,8 +1241,12 @@ export class AgentSession {
 					previewContextProjection: (history) => this._pipeline.previewContextProjection(history, contextPolicy),
 					commitContextProjection: (projection) =>
 						this._pipeline.commitContextProjection(projection, contextPolicy),
-					runPromptEnforcement: (history, report) =>
-						this._pipeline.runPromptEnforcement(history, report, contextPolicy),
+					runPromptEnforcement: (history, report, sourceMessages, frozenBelow, gcReport) =>
+						this._pipeline.runPromptEnforcement(history, report, contextPolicy, {
+							sourceMessages,
+							frozenBelow,
+							gcReport,
+						}),
 					applyContextGc: (history, writePayloads, frozenBelow) =>
 						this._pipeline.applyContextGc(history, writePayloads, frozenBelow, lane),
 					applyPathAliases: (history) => this._pipeline.applyPathAliases(history),
@@ -1565,7 +1570,8 @@ export class AgentSession {
 			applyContextGc: (messages, writePayloads, frozenBelow) =>
 				this._applyContextGc(messages, writePayloads, frozenBelow),
 			correlatePromptPolicyWithContextGc: (report) => this._correlatePromptPolicyWithContextGc(report),
-			runPromptEnforcement: (messages, report) => this._runPromptEnforcement(messages, report),
+			runPromptEnforcement: (messages, report, sourceMessages, frozenBelow, gcReport) =>
+				this._runPromptEnforcement(messages, report, sourceMessages, frozenBelow, gcReport),
 			enqueueRelevanceCuration: (messages, report) => this._enqueueRelevanceCuration(messages, report),
 			maybeDrainBrainCuration: () => this._maybeDrainBrainCuration(),
 			appendMemoryEvidence: (messages, report) => this._memory.appendPromptMemory(messages, report),
@@ -3408,8 +3414,15 @@ export class AgentSession {
 	private _runPromptEnforcement(
 		messages: AgentMessage[],
 		shadowReport: PromptPolicyShadowReport,
-	): { messages: AgentMessage[]; report: PromptEnforcementReport } {
-		return this._pipeline.runPromptEnforcement(messages, shadowReport);
+		sourceMessages: AgentMessage[],
+		frozenBelow: number,
+		gcReport: ContextGcReport,
+	): EnforcePromptPolicyResult {
+		return this._pipeline.runPromptEnforcement(messages, shadowReport, undefined, {
+			sourceMessages,
+			frozenBelow,
+			gcReport,
+		});
 	}
 
 	/**
@@ -3668,11 +3681,34 @@ export class AgentSession {
 		const promptInclusion = this.getMemoryPromptInclusionReport();
 		const memoryEvidenceTokens =
 			promptInclusion.status === "included" ? Math.ceil(promptInclusion.blockChars / 4) : 0;
-		// Enforcement stubs are applied at SEND time (not persisted), so the message view here
-		// still holds raw text for them; subtract what stubbing reclaims per request.
+		// Query projections are applied at send time. In-place short/hidden views save against the
+		// raw message shown here; tail overlays restore evidence after GC and therefore add tokens.
+		const projectionTokens = (item: (typeof enforcementItems)[number]) => {
+			const originalChars = item.originalChars ?? 0;
+			if (item.deliveredVisibility === "hidden") return 50;
+			if (item.deliveredVisibility === "short") {
+				return Math.ceil((Math.min(originalChars, CONTEXT_VISIBILITY_SHORT_CHARS) + 256) / 4);
+			}
+			if (item.deliveredVisibility === "long") {
+				return Math.ceil((Math.min(originalChars, CONTEXT_VISIBILITY_LONG_CHARS) + 256) / 4);
+			}
+			return Math.ceil((originalChars + 256) / 4);
+		};
 		const enforcementSavedTokens = enforcementItems
-			.filter((item) => item.enforced && typeof item.originalChars === "number")
-			.reduce((sum, item) => sum + Math.max(0, Math.ceil((item.originalChars ?? 0) / 4) - 50), 0);
+			.filter(
+				(item) =>
+					item.enforced && item.projectionPlacement === "in_place" && typeof item.originalChars === "number",
+			)
+			.reduce(
+				(sum, item) => sum + Math.max(0, Math.ceil((item.originalChars ?? 0) / 4) - projectionTokens(item)),
+				0,
+			);
+		const enforcementAddedTokens = enforcementItems
+			.filter(
+				(item) =>
+					item.enforced && item.projectionPlacement === "tail_overlay" && typeof item.originalChars === "number",
+			)
+			.reduce((sum, item) => sum + projectionTokens(item), 0);
 		return buildContextCompositionReport({
 			systemPrompt: requestSystemPrompt ?? "",
 			tools: this.agent.state.tools.map((tool) => ({
@@ -3694,7 +3730,9 @@ export class AgentSession {
 			gc: { packedCount: gcResult.report.packedCount, savedTokens: gcResult.report.savedTokens },
 			enforcement: {
 				enforcedCount: enforcementItems.filter((item) => item.enforced).length,
-				advisoryEvictions: enforcementItems.filter((item) => item.advisory === "brain_irrelevant").length,
+				advisoryEvictions: enforcementItems.filter(
+					(item) => item.advisory === "brain_irrelevant" && item.deliveredVisibility === "hidden",
+				).length,
 			},
 			curation: {
 				enabled: curationStatus.enabled,
@@ -3702,7 +3740,7 @@ export class AgentSession {
 				lastSkipReason: curationStatus.lastSkipReason,
 			},
 			spawned: { cost: spawned.cost, reports: spawned.reports },
-			adjustments: { memoryEvidenceTokens, enforcementSavedTokens },
+			adjustments: { memoryEvidenceTokens, enforcementSavedTokens, enforcementAddedTokens },
 			extraObservations: [
 				...this._resourceLoader.getAgentsDiagnostics().map((diagnostic) => diagnostic.message),
 				...this._profileFilter.profileDeniedResourceObservations(),

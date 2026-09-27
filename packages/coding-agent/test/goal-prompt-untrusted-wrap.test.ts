@@ -27,7 +27,12 @@ function createProviderRequestController(state: GoalState): ProviderRequestConte
 		runMemoryRetrieval: async () => ({}),
 		applyContextGc: (messages: AgentMessage[]) => ({ messages, report: {} }),
 		correlatePromptPolicyWithContextGc: () => undefined,
-		runPromptEnforcement: (messages: AgentMessage[]) => ({ messages, report: {} }),
+		runPromptEnforcement: (messages: AgentMessage[]) => ({
+			messages,
+			transientMessages: [],
+			report: {},
+			isCurrent: () => true,
+		}),
 		enqueueRelevanceCuration: () => undefined,
 		maybeDrainBrainCuration: () => undefined,
 		appendMemoryEvidence: (messages: AgentMessage[]) => messages,

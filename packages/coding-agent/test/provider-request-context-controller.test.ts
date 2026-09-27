@@ -47,7 +47,12 @@ describe("ProviderRequestContextController", () => {
 			runMemoryRetrieval: async () => ({}) as any,
 			applyContextGc: (msgs) => ({ messages: msgs, report: {} as any, isCurrent: () => true, commit: () => {} }),
 			correlatePromptPolicyWithContextGc: () => {},
-			runPromptEnforcement: (msgs) => ({ messages: msgs, report: {} as any }),
+			runPromptEnforcement: (msgs) => ({
+				messages: msgs,
+				transientMessages: [],
+				report: {} as any,
+				isCurrent: () => true,
+			}),
 			enqueueRelevanceCuration: () => {},
 			maybeDrainBrainCuration: () => {},
 			appendMemoryEvidence: (msgs) => msgs,
@@ -101,7 +106,12 @@ describe("ProviderRequestContextController", () => {
 			runMemoryRetrieval: async () => ({}) as any,
 			applyContextGc: (msgs) => ({ messages: msgs, report: {} as any, isCurrent: () => true, commit: () => {} }),
 			correlatePromptPolicyWithContextGc: () => {},
-			runPromptEnforcement: (msgs) => ({ messages: msgs, report: {} as any }),
+			runPromptEnforcement: (msgs) => ({
+				messages: msgs,
+				transientMessages: [],
+				report: {} as any,
+				isCurrent: () => true,
+			}),
 			enqueueRelevanceCuration: () => {},
 			maybeDrainBrainCuration: () => {},
 			appendMemoryEvidence: (msgs) => msgs,
@@ -169,7 +179,12 @@ describe("ProviderRequestContextController", () => {
 					semanticMemory: { preserveRecentPages: 0, minChars: Number.MAX_SAFE_INTEGER },
 				}),
 			correlatePromptPolicyWithContextGc: () => {},
-			runPromptEnforcement: (msgs) => ({ messages: msgs, report: {} as any }),
+			runPromptEnforcement: (msgs) => ({
+				messages: msgs,
+				transientMessages: [],
+				report: {} as any,
+				isCurrent: () => true,
+			}),
 			enqueueRelevanceCuration: () => {},
 			maybeDrainBrainCuration: () => {},
 			appendMemoryEvidence: (msgs) => msgs,
@@ -195,6 +210,82 @@ describe("ProviderRequestContextController", () => {
 		expect(() => plan.commit?.()).not.toThrow();
 	});
 
+	it("keeps GC as prefix owner while query visibility receives raw evidence and emits a request-only tail", async () => {
+		const raw: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "grep",
+			content: [{ type: "text", text: "raw evidence" }],
+			details: { artifactId: "tool-output-1" },
+			isError: false,
+			timestamp: 1,
+		};
+		const packed: ToolResultMessage = {
+			...raw,
+			content: [{ type: "text", text: "packed evidence" }],
+			details: { artifactId: "tool-output-1", contextGc: { packed: true } },
+		};
+		const overlay = createCustomMessage(
+			"context_visibility_projection",
+			[{ type: "text", text: "query projection" }],
+			false,
+			undefined,
+			new Date(1).toISOString(),
+		);
+		let enforcementInput:
+			| { base: AgentMessage[]; source: AgentMessage[]; frozenBelow: number; gcPackedCount: number }
+			| undefined;
+		let enqueuedMessages: AgentMessage[] | undefined;
+		const controller = new ProviderRequestContextController({
+			transformExtensions: async (messages) => ({ messages, transientMessages: [] }),
+			runContextAudit: () => ({}) as any,
+			runPromptPolicyPlanning: () => ({ turnIndex: 0, items: [] }),
+			applyContextGc: () => ({
+				messages: [packed],
+				report: {
+					enabled: true,
+					packedCount: 1,
+					originalTokens: 10,
+					packedTokens: 2,
+					savedTokens: 8,
+					records: [],
+				},
+				isCurrent: () => true,
+				commit: () => {},
+			}),
+			runPromptEnforcement: (base, _report, source, frozenBelow, gcReport) => {
+				enforcementInput = {
+					base,
+					source,
+					frozenBelow,
+					gcPackedCount: gcReport.packedCount,
+				};
+				return {
+					messages: base,
+					transientMessages: [overlay],
+					report: { turnIndex: 0, items: [] },
+					isCurrent: () => true,
+				};
+			},
+			enqueueRelevanceCuration: (messages) => {
+				enqueuedMessages = messages;
+			},
+			applyPathAliases: (messages) => ({ messages }),
+		});
+
+		const plan = await controller.plan([raw], 1);
+		expect(enforcementInput).toEqual({
+			base: [packed],
+			source: [raw],
+			frozenBelow: 1,
+			gcPackedCount: 1,
+		});
+		expect(plan.messages).toEqual([packed]);
+		expect(plan.transientMessages).toContain(overlay);
+		plan.commit?.();
+		expect(enqueuedMessages).toEqual([raw]);
+	});
+
 	it("offers the active skill context as a durable record and clears it once the last skill leaves", async () => {
 		let section: string | undefined =
 			"ACTIVE SKILL test\nBASE /repo/skills/test\nNON-NEGOTIABLE WHILE ACTIVE:\nUse the skill body.";
@@ -212,7 +303,12 @@ describe("ProviderRequestContextController", () => {
 			applyContextGc: (msgs) =>
 				({ messages: msgs, report: {} as any, isCurrent: () => true, commit: () => {} }) as any,
 			correlatePromptPolicyWithContextGc: () => {},
-			runPromptEnforcement: (msgs) => ({ messages: msgs, report: {} as any }),
+			runPromptEnforcement: (msgs) => ({
+				messages: msgs,
+				transientMessages: [],
+				report: {} as any,
+				isCurrent: () => true,
+			}),
 			enqueueRelevanceCuration: () => {},
 			maybeDrainBrainCuration: () => {},
 			appendMemoryEvidence: (msgs) => msgs,
@@ -272,9 +368,11 @@ describe("ProviderRequestContextController", () => {
 			correlatePromptPolicyWithContextGc: () => {},
 			runPromptEnforcement: (msgs) => ({
 				messages: msgs,
+				transientMessages: [],
 				report: {} as ReturnType<
 					NonNullable<ProviderRequestContextControllerDeps["runPromptEnforcement"]>
 				>["report"],
+				isCurrent: () => true,
 			}),
 			enqueueRelevanceCuration: () => {},
 			maybeDrainBrainCuration: () => {},
@@ -422,9 +520,11 @@ describe("directory request-plan projection", () => {
 			correlatePromptPolicyWithContextGc: () => {},
 			runPromptEnforcement: (messages) => ({
 				messages,
+				transientMessages: [],
 				report: {} as ReturnType<
 					NonNullable<ProviderRequestContextControllerDeps["runPromptEnforcement"]>
 				>["report"],
+				isCurrent: () => true,
 			}),
 			enqueueRelevanceCuration: () => {},
 			maybeDrainBrainCuration: () => {},
@@ -531,9 +631,11 @@ describe("task automation request-plan projection", () => {
 			correlatePromptPolicyWithContextGc: () => {},
 			runPromptEnforcement: (messages) => ({
 				messages,
+				transientMessages: [],
 				report: {} as ReturnType<
 					NonNullable<ProviderRequestContextControllerDeps["runPromptEnforcement"]>
 				>["report"],
+				isCurrent: () => true,
 			}),
 			enqueueRelevanceCuration: () => {},
 			maybeDrainBrainCuration: () => {},

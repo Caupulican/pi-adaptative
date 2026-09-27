@@ -69,20 +69,27 @@ import {
 	type ContextProjectionOptions,
 	emptyContextProjection,
 } from "./context/context-projection.ts";
-import { enforcePromptPolicy, type PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
+import {
+	type EnforcePromptPolicyResult,
+	enforcePromptPolicy,
+	type PromptEnforcementContext,
+	type PromptEnforcementReport,
+} from "./context/context-prompt-enforcement.ts";
 import {
 	correlateWithContextGc,
 	type PromptPolicyGcCorrelationReport,
 	type PromptPolicyShadowReport,
 	planPromptPolicy,
 } from "./context/context-prompt-policy.ts";
+import { contextVisibilityExcerpt } from "./context/context-query-visibility.ts";
 import {
 	acquireContextStoreRetention,
 	type ContextStoreRetentionLease,
 	getContextStoreDir,
 	migrateLegacyContextStores,
 } from "./context/context-store-retention.ts";
-import { latestUserPromptText, textContentPrefix } from "./context/message-text.ts";
+import { getToolResultText } from "./context/context-tool-result.ts";
+import { latestUserPromptText } from "./context/message-text.ts";
 import { PathAliasRuntime } from "./context/path-alias-session.ts";
 import type { PathAliasTable } from "./context/path-alias-table.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "./context/tool-output-packer.ts";
@@ -651,18 +658,19 @@ export class ContextPipeline {
 	}
 
 	/**
-	 * First enforcement pilot (see context/context-prompt-enforcement.ts): opt-in,
-	 * default-disabled stub-in-place of stale artifact-backed tool_output results in the
-	 * provider-visible message array only. Runs on `messages` AFTER context-gc has already
-	 * produced its own result, so legacy context-gc's own packing/reporting is completely
-	 * unaffected by this pass -- it only ever acts on messages gc left untouched this turn.
+	 * Query-time visibility projection (see context/context-prompt-enforcement.ts): opt-in,
+	 * default-disabled hide/short/long/full selection over stale artifact-backed tool outputs.
+	 * Runs after context-GC, but receives the aligned pre-GC source through `context`: unsent
+	 * results can project in place while evidence GC already removed from the stable prefix is
+	 * restored at the request tail without invalidating the provider's prefix cache.
 	 * Never throws into a live turn: any failure degrades to returning `messages` unchanged.
 	 */
 	runPromptEnforcement(
 		messages: AgentMessage[],
 		shadowReport: PromptPolicyShadowReport,
 		lane?: ContextPolicyLane,
-	): { messages: AgentMessage[]; report: PromptEnforcementReport } {
+		context?: PromptEnforcementContext,
+	): EnforcePromptPolicyResult {
 		try {
 			const persistedSettings = this.deps.getSettingsManager().getContextPromptEnforcementSettings();
 			// Relevance curation is the head's: a lane's enforcement reads only its own facts.
@@ -679,13 +687,13 @@ export class ContextPipeline {
 					? (scope: ContextRelevanceScope) => this._brainCurator.getRelevance(scope)
 					: undefined,
 			};
-			const result = enforcePromptPolicy(messages, shadowReport, settings);
+			const result = enforcePromptPolicy(messages, shadowReport, settings, context);
 			if (!lane) this._latestPromptEnforcementReport = result.report;
 			return result;
 		} catch {
 			const report: PromptEnforcementReport = { turnIndex: this.deps.getTurnIndex(), items: [] };
 			if (!lane) this._latestPromptEnforcementReport = report;
-			return { messages, report };
+			return { messages, transientMessages: [], report, isCurrent: () => true };
 		}
 	}
 
@@ -708,7 +716,7 @@ export class ContextPipeline {
 					| { contextGc?: { packed?: unknown }; promptPolicy?: { enforced?: unknown } }
 					| undefined;
 				if (details?.contextGc?.packed === true || details?.promptPolicy?.enforced === true) continue;
-				const text = textContentPrefix(message.content, CURATION_RELEVANCE_CONTENT_MAX_CHARS);
+				const text = contextVisibilityExcerpt(getToolResultText(message), CURATION_RELEVANCE_CONTENT_MAX_CHARS);
 				if (text.length === 0) continue;
 				this._brainCurator.enqueue({
 					kind: "relevance",

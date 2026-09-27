@@ -67,7 +67,11 @@ export interface ContextCompositionReport {
 	/** Background/side-channel spend that does NOT ride in this context but bills the account. */
 	spawned: { cost: number; reports: number } | null;
 	/** Send-time-only deltas folded into estimatedRequestTokens: +evidence block, -policy stubs. */
-	adjustments: { memoryEvidenceTokens: number; enforcementSavedTokens: number };
+	adjustments: {
+		memoryEvidenceTokens: number;
+		enforcementSavedTokens: number;
+		enforcementAddedTokens: number;
+	};
 	/** Actionable, bounded observations derived from the numbers above. */
 	observations: string[];
 }
@@ -94,7 +98,11 @@ export interface BuildContextCompositionInput {
 	enforcement?: { enforcedCount: number; advisoryEvictions: number };
 	curation?: { enabled: boolean; telemetry: CurationTelemetrySnapshot; lastSkipReason?: string };
 	spawned?: { cost: number; reports: number };
-	adjustments?: { memoryEvidenceTokens: number; enforcementSavedTokens: number };
+	adjustments?: {
+		memoryEvidenceTokens: number;
+		enforcementSavedTokens: number;
+		enforcementAddedTokens: number;
+	};
 	/** Pre-formed warnings from other subsystems (e.g. profile-withheld context files). */
 	extraObservations?: string[];
 }
@@ -175,14 +183,19 @@ export function buildContextCompositionReport(input: BuildContextCompositionInpu
 	}
 	const messageClasses = [...classes.values()].sort((a, b) => b.tokens - a.tokens);
 
-	const adjustments = input.adjustments ?? { memoryEvidenceTokens: 0, enforcementSavedTokens: 0 };
+	const adjustments = input.adjustments ?? {
+		memoryEvidenceTokens: 0,
+		enforcementSavedTokens: 0,
+		enforcementAddedTokens: 0,
+	};
 	const estimatedRequestTokens = Math.max(
 		0,
 		systemPromptTokens +
 			toolSchemaTokens +
 			messageTokens +
 			adjustments.memoryEvidenceTokens -
-			adjustments.enforcementSavedTokens,
+			adjustments.enforcementSavedTokens +
+			adjustments.enforcementAddedTokens,
 	);
 
 	const observations: string[] = [...(input.extraObservations ?? [])];
@@ -265,9 +278,13 @@ export function formatContextCompositionDashboard(report: ContextCompositionRepo
 		}
 	}
 	lines.push("", `session messages: ${report.messageCount} row(s), ~${report.messageTokens} tokens`);
-	if (report.adjustments.memoryEvidenceTokens > 0 || report.adjustments.enforcementSavedTokens > 0) {
+	if (
+		report.adjustments.memoryEvidenceTokens > 0 ||
+		report.adjustments.enforcementAddedTokens > 0 ||
+		report.adjustments.enforcementSavedTokens > 0
+	) {
 		lines.push(
-			`send-time adjustments: +${report.adjustments.memoryEvidenceTokens} memory evidence, -${report.adjustments.enforcementSavedTokens} policy stubs (applied when the request is built)`,
+			`send-time adjustments: +${report.adjustments.memoryEvidenceTokens} memory evidence, +${report.adjustments.enforcementAddedTokens} query visibility, -${report.adjustments.enforcementSavedTokens} policy projections (applied when the request is built)`,
 		);
 	}
 	for (const row of report.messageClasses.slice(0, 10)) {
@@ -281,7 +298,7 @@ export function formatContextCompositionDashboard(report: ContextCompositionRepo
 	}
 	if (report.enforcement) {
 		lines.push(
-			`prompt policy: ${report.enforcement.enforcedCount} stub(s) this turn (${report.enforcement.advisoryEvictions} via brain advisory)`,
+			`prompt policy: ${report.enforcement.enforcedCount} projection(s) this turn (${report.enforcement.advisoryEvictions} relevant high-confidence eviction(s))`,
 		);
 	}
 	if (report.curation) {

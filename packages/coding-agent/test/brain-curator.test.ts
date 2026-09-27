@@ -291,6 +291,71 @@ describe("enforcement advisory lever (surface 1: relevance)", () => {
 		expect(result.messages).toBe(messages);
 	});
 
+	it("fails open to full evidence while the current-query judgment is missing", () => {
+		const { messages, plan } = eligibleWorld("find release evidence");
+		const result = enforcePromptPolicy(messages, plan, {
+			...baseSettings,
+			preserveRecentMessages: 2,
+			brainRelevance: () => undefined,
+		});
+
+		expect(result.messages).toBe(messages);
+		expect(result.report.items[0]).toMatchObject({
+			enforced: false,
+			selectedVisibility: "full",
+			visibilityReason: "judgment_missing",
+		});
+	});
+
+	it("projects stale evidence through long, short, and hidden query-time tiers", () => {
+		const relevantWorld = eligibleWorld("find release evidence");
+		const long = enforcePromptPolicy(relevantWorld.messages, relevantWorld.plan, {
+			...baseSettings,
+			preserveRecentMessages: 2,
+			brainRelevance: () => ({ relevant: true, confidence: 0.95 }),
+		});
+		const uncertainWorld = eligibleWorld("find release evidence");
+		const short = enforcePromptPolicy(uncertainWorld.messages, uncertainWorld.plan, {
+			...baseSettings,
+			preserveRecentMessages: 2,
+			brainRelevance: () => ({ relevant: true, confidence: 0.5 }),
+		});
+		const irrelevantWorld = eligibleWorld("find release evidence");
+		const hidden = enforcePromptPolicy(irrelevantWorld.messages, irrelevantWorld.plan, {
+			...baseSettings,
+			preserveRecentMessages: 2,
+			brainRelevance: () => ({ relevant: false, confidence: 0.95 }),
+		});
+
+		expect(long.report.items[0]).toMatchObject({
+			enforced: true,
+			action: "artifact_preview",
+			selectedVisibility: "long",
+			visibilityReason: "query_relevant",
+			advisory: "brain_relevant",
+		});
+		expect(short.report.items[0]).toMatchObject({
+			enforced: true,
+			action: "artifact_preview",
+			selectedVisibility: "short",
+			visibilityReason: "query_uncertain",
+			advisory: "brain_uncertain",
+		});
+		expect(hidden.report.items[0]).toMatchObject({
+			enforced: true,
+			action: "artifact_stub",
+			selectedVisibility: "hidden",
+			visibilityReason: "query_irrelevant",
+			advisory: "brain_irrelevant",
+		});
+		const longText = JSON.stringify(long.messages[0]);
+		const shortText = JSON.stringify(short.messages[0]);
+		expect(longText).toContain("visibility long");
+		expect(shortText).toContain("visibility short");
+		expect(shortText.length).toBeLessThan(longText.length);
+		expect(longText.length).toBeLessThan(BIG.length);
+	});
+
 	it("queues a fresh relevance judgment when the user query changes", () => {
 		const harness = createHarness();
 		try {

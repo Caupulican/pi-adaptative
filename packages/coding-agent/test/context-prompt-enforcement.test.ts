@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createInMemoryArtifactStore } from "../src/core/context/context-artifacts.ts";
 import { runContextAudit } from "../src/core/context/context-audit.ts";
 import {
+	CONTEXT_VISIBILITY_PROJECTION_CUSTOM_TYPE,
 	type ContextPromptEnforcementSettings,
 	enforcePromptPolicy,
 } from "../src/core/context/context-prompt-enforcement.ts";
@@ -99,6 +100,8 @@ describe("enforcePromptPolicy: enabled, artifact-backed eligible stale item", ()
 				artifactId: ref.id,
 				originalChars: BIG.length,
 				reason: "stale_artifact_backed_tool_output",
+				selectedVisibility: "hidden",
+				visibilityReason: "legacy_stale",
 			});
 			// The original artifactId field is preserved alongside the new promptPolicy marker.
 			expect((stubbed.details as { artifactId?: string }).artifactId).toBe(ref.id);
@@ -223,6 +226,222 @@ describe("enforcePromptPolicy: conservative skip conditions", () => {
 
 		expect(result.messages).toBe(messages);
 		expect(result.report.items[0]?.skipReason).toBe("already_stubbed_or_packed");
+	});
+
+	it("projects query-relevant evidence at the request tail when GC already owns the stable prefix", () => {
+		const store = createInMemoryArtifactStore();
+		const { ref } = store.write({
+			kind: "tool_output",
+			content: BIG,
+			toolName: "grep",
+			createdAtTurn: 0,
+			reproducible: true,
+		});
+		const sourceMessages = [
+			toolResultMessage({ toolCallId: "tc-1", artifactId: ref.id, text: BIG }),
+			toolResultMessage({ toolCallId: "tc-2" }),
+			toolResultMessage({ toolCallId: "tc-3" }),
+			toolResultMessage({ toolCallId: "tc-4" }),
+		];
+		const audit = runContextAudit(sourceMessages, { turnIndex: 0, artifactStore: store });
+		const plan = planPromptPolicy(audit);
+		const packedMessages = sourceMessages.slice();
+		packedMessages[0] = toolResultMessage({
+			toolCallId: "tc-1",
+			artifactId: ref.id,
+			text: "[Context GC packed stale tool result]",
+			extraDetails: { contextGc: { packed: true } },
+		});
+
+		const result = enforcePromptPolicy(
+			packedMessages,
+			plan,
+			settings({ brainRelevance: () => ({ relevant: true, confidence: 0.99 }) }),
+			{
+				sourceMessages,
+				frozenBelow: 1,
+				gcReport: {
+					enabled: true,
+					packedCount: 1,
+					originalTokens: 5_000,
+					packedTokens: 100,
+					savedTokens: 4_900,
+					records: [
+						{
+							toolName: "grep",
+							toolCallId: "tc-1",
+							messageIndex: 0,
+							reason: "stale-tool-result",
+							originalChars: BIG.length,
+							originalTokens: 5_000,
+							packedTokens: 100,
+							key: "stored-original",
+							storagePath: "/store/stored-original.txt",
+							retrievalAvailable: true,
+						},
+					],
+				},
+			},
+		);
+
+		expect(result.messages).toBe(packedMessages);
+		expect(result.transientMessages).toHaveLength(1);
+		const overlay = result.transientMessages[0];
+		expect(overlay).toMatchObject({
+			role: "custom",
+			customType: CONTEXT_VISIBILITY_PROJECTION_CUSTOM_TYPE,
+			display: false,
+		});
+		if (overlay?.role !== "custom") throw new Error("Expected a custom visibility projection");
+		expect(Array.isArray(overlay.content)).toBe(true);
+		expect(typeof overlay.content === "string" ? overlay.content : JSON.stringify(overlay.content)).toContain(
+			"artifact_retrieve context:stored-original",
+		);
+		expect(JSON.stringify(overlay.content)).not.toContain(ref.id);
+		expect(result.report.items[0]).toMatchObject({
+			selectedVisibility: "long",
+			deliveredVisibility: "long",
+			projectionPlacement: "tail_overlay",
+		});
+	});
+
+	it("fails open to a full tail view while a GC retrieval path is only planned, not readable", () => {
+		const store = createInMemoryArtifactStore();
+		const { ref } = store.write({
+			kind: "tool_output",
+			content: BIG,
+			toolName: "grep",
+			createdAtTurn: 0,
+			reproducible: true,
+		});
+		const sourceMessages = [
+			toolResultMessage({ toolCallId: "tc-1", artifactId: ref.id, text: BIG }),
+			toolResultMessage({ toolCallId: "tc-2" }),
+			toolResultMessage({ toolCallId: "tc-3" }),
+			toolResultMessage({ toolCallId: "tc-4" }),
+		];
+		const plan = planPromptPolicy(runContextAudit(sourceMessages, { turnIndex: 0, artifactStore: store }));
+		const packedMessages = sourceMessages.slice();
+		packedMessages[0] = toolResultMessage({
+			toolCallId: "tc-1",
+			artifactId: ref.id,
+			text: "[Context GC packed stale tool result]",
+			extraDetails: { contextGc: { packed: true } },
+		});
+
+		const result = enforcePromptPolicy(
+			packedMessages,
+			plan,
+			settings({ brainRelevance: () => ({ relevant: true, confidence: 0.99 }) }),
+			{
+				sourceMessages,
+				frozenBelow: 1,
+				gcReport: {
+					enabled: true,
+					packedCount: 1,
+					originalTokens: 5_000,
+					packedTokens: 100,
+					savedTokens: 4_900,
+					records: [
+						{
+							toolName: "grep",
+							toolCallId: "tc-1",
+							messageIndex: 0,
+							reason: "stale-tool-result",
+							originalChars: BIG.length,
+							originalTokens: 5_000,
+							packedTokens: 100,
+							key: "planned-only",
+							storagePath: "/store/planned-only.txt",
+							retrievalAvailable: false,
+						},
+					],
+				},
+			},
+		);
+
+		expect(result.transientMessages).toHaveLength(1);
+		const [projection] = result.transientMessages;
+		expect(projection?.role).toBe("custom");
+		if (projection?.role !== "custom") throw new Error("expected a custom visibility projection");
+		expect(JSON.stringify(projection.content)).toContain(BIG);
+		expect(JSON.stringify(projection.content)).not.toContain("context:planned-only");
+		expect(result.report.items[0]).toMatchObject({
+			selectedVisibility: "long",
+			deliveredVisibility: "full",
+			projectionPlacement: "tail_overlay",
+			skipReason: "gc_retrieval_unavailable",
+		});
+	});
+
+	it("does not rewrite an already-sent raw prefix merely to reduce its query visibility", () => {
+		const store = createInMemoryArtifactStore();
+		const { ref } = store.write({
+			kind: "tool_output",
+			content: BIG,
+			toolName: "grep",
+			createdAtTurn: 0,
+			reproducible: true,
+		});
+		const messages = [
+			toolResultMessage({ toolCallId: "tc-1", artifactId: ref.id, text: BIG }),
+			toolResultMessage({ toolCallId: "tc-2" }),
+			toolResultMessage({ toolCallId: "tc-3" }),
+			toolResultMessage({ toolCallId: "tc-4" }),
+		];
+		const plan = planPromptPolicy(runContextAudit(messages, { turnIndex: 0, artifactStore: store }));
+
+		const result = enforcePromptPolicy(
+			messages,
+			plan,
+			settings({ brainRelevance: () => ({ relevant: false, confidence: 0.99 }) }),
+			{
+				sourceMessages: messages,
+				frozenBelow: 1,
+				gcReport: {
+					enabled: true,
+					packedCount: 0,
+					originalTokens: 0,
+					packedTokens: 0,
+					savedTokens: 0,
+					records: [],
+				},
+			},
+		);
+
+		expect(result.messages).toBe(messages);
+		expect(result.transientMessages).toEqual([]);
+		expect(result.report.items[0]).toMatchObject({
+			selectedVisibility: "hidden",
+			deliveredVisibility: "full",
+			projectionPlacement: "frozen_original",
+			enforced: false,
+		});
+	});
+
+	it("invalidates a speculative projection when its relevance fact changes before acceptance", () => {
+		const store = createInMemoryArtifactStore();
+		const { ref } = store.write({
+			kind: "tool_output",
+			content: BIG,
+			toolName: "grep",
+			createdAtTurn: 0,
+			reproducible: true,
+		});
+		const messages = [
+			toolResultMessage({ toolCallId: "tc-1", artifactId: ref.id, text: BIG }),
+			toolResultMessage({ toolCallId: "tc-2" }),
+			toolResultMessage({ toolCallId: "tc-3" }),
+			toolResultMessage({ toolCallId: "tc-4" }),
+		];
+		const plan = planPromptPolicy(runContextAudit(messages, { turnIndex: 0, artifactStore: store }));
+		let verdict = { relevant: true, confidence: 0.99 };
+
+		const result = enforcePromptPolicy(messages, plan, settings({ brainRelevance: () => verdict }));
+
+		expect(result.isCurrent()).toBe(true);
+		verdict = { relevant: false, confidence: 0.99 };
+		expect(result.isCurrent()).toBe(false);
 	});
 
 	it("leaves an item below minChars unchanged", () => {

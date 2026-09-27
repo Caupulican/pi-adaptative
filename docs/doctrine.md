@@ -18,18 +18,32 @@ byte-identical prefix, and a rewrite anywhere re-prefills everything after it; m
 sessions, losing this took cache reuse from 0.97 to 0.11. Pinned by
 `packages/agent/test/provider-request-prefix-stability.test.ts`,
 `packages/coding-agent/test/provider-prefix-stability.test.ts`, and the long-session contract gate
-(`PI_PROFILE_GATE=1` on `test/profiling/host-long-session.profile.test.ts`: reuse p50 at or above
-0.98, and no more rewrites than grid crossings of the context-GC boundary plus one). The gate's
-cache report prices rewrites rather than counting them: bytes the provider could not serve from
-its prefix cache, overall and on rewrites, each rewrite's depth before the previous request's end,
-and packed stubs replaced by their original, because a rewrite 30 messages deep and one 300
-messages deep are not the same cost.
+(`PI_PROFILE_GATE=1` on `test/profiling/host-long-session.profile.test.ts`). The ordinary workload
+requires reuse p50 at or above 0.98 and no more rewrites than grid crossings of the context-GC
+boundary plus one. The large-output workload cannot use that ratio as a correctness gate because
+newly appended tool bytes are legitimately uncached; it instead requires every append to retain
+the complete previous byte prefix, and every rewrite to be exactly a bounded GC pack or a requested
+self-compaction checkpoint, with no packed-to-original flip. The gate's cache report still prices
+rewrites: bytes the provider could not serve from its prefix cache, overall and on rewrites, each
+rewrite's depth before the previous request's end, and packed stubs replaced by their original,
+because a rewrite 30 messages deep and one 300 messages deep are not the same cost.
 
 **Sent bytes are never rewritten.** Deduplication and erasure act only on history the provider has
 not seen (`sentPrefixCount`); host records are opaque to path aliasing so their bytes are the same
 on the request that introduces them and every request after. Pinned by
 `packages/agent/test/provider-request-prefix-stability.test.ts` and
 `packages/coding-agent/test/path-alias-session.test.ts`.
+
+**Query visibility preserves prefix custody and reports its signed cost.** A relevance verdict is
+scoped to the exact query and bounded evidence revision it judged. An unsent stale result may become
+hidden, short, long or full; an already-sent raw result stays byte-identical; and evidence context GC
+already packed returns only as a request-tail projection. A bounded tail projection advertises a
+GC retrieval key only after the original is readable; until then it fails open to the full evidence.
+Missing judgments also fail open, and a changed verdict invalidates the request plan before send.
+The context dashboard subtracts only in-place reductions, adds tail-projection tokens, and counts an
+advisory eviction only when high-confidence irrelevant evidence was actually hidden. Pinned by
+`packages/coding-agent/test/provider-prefix-stability.test.ts` and
+`packages/coding-agent/test/context-composition.test.ts`.
 
 **A host record carries only what changed, and the sent prefix survives a new prompt.** Append
 once per change was not enough: measured on the owner's 0.97.25 sessions the alias legend was
@@ -1008,6 +1022,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-27 | Query-time visibility is query/evidence-versioned, preserves already-sent bytes, restores GC-packed evidence through request-only tails, advertises only readable retrieval handles, fails open on uncertainty, and reports additions versus savings with the correct sign. Large-output profiles prove exact append-prefix retention and classify every intentional rewrite instead of treating new output bytes as invalidation. |
 | 2026-09-26 | Caller cancellation owns outer-stream settlement: cooperative provider abort terminals retain a bounded grace period, then a silent abort-ignoring stream settles as aborted rather than deadlocking or becoming a retryable stall. |
 | 2026-09-26 | Integrity hooks receive per-extension copies of one detached context snapshot, fencing late and sibling mutations without weakening high-impact timeout policy. |
 | 2026-09-26 | Process-matrix maintenance starts and settles every admitted reconciliation mutation before idle or shutdown can be reported. |

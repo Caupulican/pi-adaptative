@@ -79,7 +79,12 @@ function createMockController(
 				commit: () => {},
 			}) as unknown as ContextGcResult,
 		correlatePromptPolicyWithContextGc: () => {},
-		runPromptEnforcement: (msgs) => ({ messages: msgs, report: {} as unknown as PromptEnforcementReport }),
+		runPromptEnforcement: (msgs) => ({
+			messages: msgs,
+			transientMessages: [],
+			report: {} as unknown as PromptEnforcementReport,
+			isCurrent: () => true,
+		}),
 		enqueueRelevanceCuration: () => {},
 		maybeDrainBrainCuration: () => {},
 		appendMemoryEvidence: (msgs) => msgs,
