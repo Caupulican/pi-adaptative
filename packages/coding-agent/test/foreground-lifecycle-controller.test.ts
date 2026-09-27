@@ -378,7 +378,7 @@ describe("foreground lifecycle controller", () => {
 		await agent.onProviderRequestSnapshot?.(
 			{
 				requestId: "req-retry",
-				model: { api: "faux", provider: "faux", id: "faux-1" },
+				model: { api: "faux", provider: "routed-faux", id: "side-trip-1" },
 				reasoning: "off",
 				maxTokens: 128,
 				attempt: 0,
@@ -387,14 +387,14 @@ describe("foreground lifecycle controller", () => {
 			undefined,
 		);
 
-		controller.recordRetryEvent(
-			{ type: "auto_retry_start", attempt: 1, maxAttempts: 3, delayMs: 2000, errorMessage: "429 rate limit" },
-			{ provider: "faux", id: "faux-1" },
-		);
-		controller.recordRetryEvent(
-			{ type: "auto_retry_end", success: true, attempt: 1 },
-			{ provider: "faux", id: "faux-1" },
-		);
+		controller.recordRetryEvent({
+			type: "auto_retry_start",
+			attempt: 1,
+			maxAttempts: 3,
+			delayMs: 2000,
+			errorMessage: "429 rate limit",
+		});
+		controller.recordRetryEvent({ type: "auto_retry_end", success: true, attempt: 1 });
 
 		const records = sessionManager
 			.getEntries()
@@ -403,15 +403,22 @@ describe("foreground lifecycle controller", () => {
 		expect(records).toEqual([
 			{
 				requestId: "req-retry",
-				provider: "faux",
-				modelId: "faux-1",
+				provider: "routed-faux",
+				modelId: "side-trip-1",
 				phase: "start",
 				attempt: 1,
 				maxAttempts: 3,
 				delayMs: 2000,
 				errorMessage: "429 rate limit",
 			},
-			{ requestId: "req-retry", provider: "faux", modelId: "faux-1", phase: "end", attempt: 1, success: true },
+			{
+				requestId: "req-retry",
+				provider: "routed-faux",
+				modelId: "side-trip-1",
+				phase: "end",
+				attempt: 1,
+				success: true,
+			},
 		]);
 	});
 

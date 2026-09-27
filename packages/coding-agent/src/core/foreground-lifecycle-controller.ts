@@ -61,6 +61,8 @@ interface ForegroundLifecycleControllerDeps {
 	modelRouter: ModelRouterController;
 	emitWarning(message: string): void;
 	observeProviderRequest?(context: ProviderRequestSnapshotContext): void;
+	/** Resolve the same credential-scoped provider key admission uses, at request-snapshot time. */
+	resolveProviderAccountKey?(provider: string): string;
 	/**
 	 * Session identity of the group lock these announcements order (see file-mutation-queue.ts).
 	 * Omitted announces into the process-wide default scope, which is what a single-session host had.
@@ -117,6 +119,8 @@ export class ForegroundLifecycleController {
 	 * carry a requestId on `AssistantMessage` itself.
 	 */
 	private lastRequestId: string | undefined;
+	/** Exact transport model captured with `lastRequestId`; session model state may already differ. */
+	private lastRequestModel: { provider: string; id: string; accountKey: string } | undefined;
 
 	constructor(deps: ForegroundLifecycleControllerDeps) {
 		this.deps = deps;
@@ -141,6 +145,7 @@ export class ForegroundLifecycleController {
 		this.pendingToolsByCall.clear();
 		this.terminalProviderRequests.clear();
 		this.lastRequestId = undefined;
+		this.lastRequestModel = undefined;
 	}
 
 	getPersistedMessageEntryId(message: AgentMessage): string | undefined {
@@ -156,6 +161,12 @@ export class ForegroundLifecycleController {
 		for (const [message, entryId] of flushed) this.onMessagePersisted(message, entryId);
 		const requestId = context.requestId;
 		this.lastRequestId = requestId;
+		const provider = context.model.provider;
+		this.lastRequestModel = {
+			provider,
+			id: context.model.id,
+			accountKey: this.deps.resolveProviderAccountKey?.(provider) ?? provider,
+		};
 		this.deps.sessionManager.appendRequestSnapshot(buildRequestSnapshotInput(context, this.deps.sessionManager));
 		dumpProviderRequest(requestId, context.context);
 		signal?.throwIfAborted();
@@ -193,10 +204,13 @@ export class ForegroundLifecycleController {
 
 	/**
 	 * Durably record one automatic retry lifecycle event, correlated to the request that failed via
-	 * `lastRequestId` and stamped with the model the session was on. Never throws: a failed
+	 * `lastRequestId` and stamped with the exact model captured by that request snapshot. Never throws: a failed
 	 * diagnostic write must never fail the recovery it observes (see `recordTransportTelemetry`).
 	 */
-	recordRetryEvent(event: ProviderRetryLifecycleEvent, model?: { provider: string; id: string }): void {
+	recordRetryEvent(
+		event: ProviderRetryLifecycleEvent,
+	): { provider: string; id: string; accountKey: string } | undefined {
+		const model = this.lastRequestModel;
 		const data =
 			event.type === "auto_retry_start"
 				? {
@@ -223,6 +237,7 @@ export class ForegroundLifecycleController {
 		} catch {
 			// A failed diagnostic write must never fail the recovery it observes.
 		}
+		return model;
 	}
 
 	private async onToolCallStart(

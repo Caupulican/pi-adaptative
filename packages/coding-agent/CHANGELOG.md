@@ -34,6 +34,7 @@
 - Synchronously throwing extension shortcut handlers are now contained and reported without escaping the terminal input loop, matching asynchronous rejection handling.
 - Provider admission releases its machine-wide hold when a malformed custom stream throws while exposing its terminal result, preventing phantom in-flight capacity from delaying later workers.
 - Provider-admission cleanup failures no longer replace provider failures or escape terminal-result callbacks; failed record removal remains bounded by stale-record recovery.
+- Foreground retry cooldowns retain the routed request's exact model and credential-scoped admission key, so one account's backoff neither disappears from its own lane nor leaks onto another account.
 
 ## [0.99.52] - 2026-09-26
 

@@ -1633,11 +1633,7 @@ export class AgentSession {
 				// Retry lifecycle events are persisted before they reach the UI so a retried-and-
 				// recovered provider failure leaves a session record a census can count.
 				if (event.type === "auto_retry_start" || event.type === "auto_retry_end") {
-					const model = this.model;
-					this._foregroundLifecycle.recordRetryEvent(
-						event,
-						model ? { provider: model.provider, id: model.id } : undefined,
-					);
+					this._foregroundLifecycle.recordRetryEvent(event);
 				}
 				this._emit(event);
 			},
@@ -1751,6 +1747,7 @@ export class AgentSession {
 			() => this.mutationScope,
 			() => this._shellSessionKey,
 			this._providerLimitStore,
+			(provider) => resolveProviderAccountKey(this._modelRegistry.authStorage, provider),
 			(message, entryId) => this._reflection.noteOwnerInputPersisted(message, entryId),
 			() =>
 				this._eventListeners.length > 0 ? (message: string) => this._emit({ type: "warning", message }) : undefined,

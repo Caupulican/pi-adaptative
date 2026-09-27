@@ -36,6 +36,7 @@ export class ForegroundLifecycleAdapter {
 		getMutationScope?: () => string,
 		getAnnouncer?: () => string,
 		providerLimitStore?: ProviderLimitStore,
+		resolveProviderAccountKey?: (provider: string) => string,
 		observeMessagePersisted?: (message: Message, entryId: string) => void,
 		liveWarningSink?: () => ((message: string) => void) | undefined,
 		observeProviderRequest?: (context: ProviderRequestSnapshotContext) => void,
@@ -50,6 +51,7 @@ export class ForegroundLifecycleAdapter {
 			modelRouter,
 			emitWarning: (message) => this.pendingWarnings.push(message),
 			observeProviderRequest,
+			...(resolveProviderAccountKey ? { resolveProviderAccountKey } : {}),
 			...(getMutationScope ? { getMutationScope } : {}),
 			...(getAnnouncer ? { getAnnouncer } : {}),
 		});
@@ -97,14 +99,14 @@ export class ForegroundLifecycleAdapter {
 	 * delay machine-wide: it is the exact wait the provider or the backoff dictated, so sibling
 	 * processes stop sending to the same account until it passes.
 	 */
-	recordRetryEvent(event: ProviderRetryLifecycleEvent, model?: { provider: string; id: string }): void {
-		this.lifecycle.recordRetryEvent(event, model);
+	recordRetryEvent(event: ProviderRetryLifecycleEvent): void {
+		const model = this.lifecycle.recordRetryEvent(event);
 		if (event.type !== "auto_retry_start" || !model || !this.providerLimitStore) return;
 		const now = Date.now();
 		const limit = providerLimitFromFailure(model.provider, event.errorMessage, now, event.delayMs);
 		if (!limit) return;
 		try {
-			this.providerLimitStore.record(model.provider, limit);
+			this.providerLimitStore.record(model.accountKey, limit);
 		} catch {
 			// Shared-state bookkeeping must never fail the retry it observes.
 		}
