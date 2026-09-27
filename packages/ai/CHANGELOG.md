@@ -12,6 +12,7 @@
 ### Fixed
 
 - Google Antigravity OAuth credentials refresh five minutes before expiry, matching AGY's browser OAuth clock-skew window for long-running sessions.
+- OpenAI Codex WebSocket responses rejected with HTTP 401 use the same one-shot OAuth recovery path and request-wide recovery budget as SSE, including replacement credential headers and socket identity.
 
 ## [0.99.52] - 2026-09-26
 

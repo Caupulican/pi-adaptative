@@ -131,7 +131,7 @@ export interface StreamOptions {
 	/** Request-scoped host boundary for human authentication. Never invoked by background requests. */
 	onInteractiveAuthRecovery?: InteractiveAuthRecoveryHandler;
 	/**
-	 * Recover one rejected OAuth credential before any response body is consumed.
+	 * Recover one rejected OAuth credential before any assistant output is accepted.
 	 * The callback must not expose credentials in diagnostics.
 	 */
 	onAuthRejection?: (event: {

@@ -373,7 +373,8 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				cacheSessionId,
 				model.openaiResponsesLite === true,
 			);
-			const websocketHeaders = buildWebSocketHeaders(
+			let websocketApiKey = apiKey;
+			let websocketHeaders = buildWebSocketHeaders(
 				model.headers,
 				options?.headers,
 				options?.credentialHeaders,
@@ -390,6 +391,34 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
 			const transport = options?.transport || "auto";
 			let startEmitted = false;
+			let authRecoveryAttempt = 0;
+			const recoverRejectedCredential = async (): Promise<string | undefined> => {
+				if (authRecoveryAttempt !== 0 || !options?.onAuthRejection) return undefined;
+				authRecoveryAttempt = 1;
+				return options.onAuthRejection({ providerId: model.provider, status: 401, attempt: authRecoveryAttempt });
+			};
+			const adoptRecoveredCredential = (replacementKey: string): void => {
+				websocketApiKey = replacementKey;
+				const replacementAccountId = requireOpenAICodexAccountId(replacementKey);
+				const replacementCredentialHeaders = options?.credentialHeadersFor?.(replacementKey);
+				websocketHeaders = buildWebSocketHeaders(
+					model.headers,
+					options?.headers,
+					replacementCredentialHeaders,
+					replacementAccountId,
+					replacementKey,
+					websocketRequestId,
+				);
+				sseHeaders = buildSSEHeaders(
+					model.headers,
+					options?.headers,
+					replacementCredentialHeaders,
+					replacementAccountId,
+					replacementKey,
+					cacheSessionId,
+					model.openaiResponsesLite === true,
+				);
+			};
 			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(cacheSessionId);
 			if (websocketDisabledForSession) {
 				recordWebSocketSseFallback(cacheSessionId);
@@ -422,10 +451,18 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 								idleTimeoutMs,
 								websocketConnectTimeoutMs,
 								cacheSessionId,
+								websocketApiKey,
 								options,
 							);
 							break;
 						} catch (error) {
+							if (isCodexAuthRejection(error)) {
+								const replacementKey = await recoverRejectedCredential();
+								if (replacementKey) {
+									adoptRecoveredCredential(replacementKey);
+									continue;
+								}
+							}
 							const missingContinuationCanReplay =
 								!options?.signal?.aborted &&
 								missingContinuationRetries < PREVIOUS_RESPONSE_NOT_FOUND_RETRIES &&
@@ -507,7 +544,6 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			let response: Response | undefined;
 			let lastError: Error | undefined;
 			const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
-			let authRecoveryAttempt = 0;
 
 			for (let attempt = 0; attempt <= maxRetries; ) {
 				if (options?.signal?.aborted) {
@@ -530,23 +566,10 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 						break;
 					}
 
-					if (response.status === 401 && authRecoveryAttempt === 0 && options?.onAuthRejection) {
-						authRecoveryAttempt = 1;
-						const replacementKey = await options.onAuthRejection({
-							providerId: model.provider,
-							status: 401,
-							attempt: authRecoveryAttempt,
-						});
+					if (response.status === 401) {
+						const replacementKey = await recoverRejectedCredential();
 						if (replacementKey) {
-							sseHeaders = buildSSEHeaders(
-								model.headers,
-								options?.headers,
-								options?.credentialHeadersFor?.(replacementKey),
-								requireOpenAICodexAccountId(replacementKey),
-								replacementKey,
-								cacheSessionId,
-								model.openaiResponsesLite === true,
-							);
+							adoptRecoveredCredential(replacementKey);
 							continue;
 						}
 					}
@@ -886,6 +909,10 @@ function isWebSocketConnectionLimitError(error: unknown): boolean {
 
 function isPreviousResponseNotFoundError(error: unknown): boolean {
 	return error instanceof CodexApiError && error.code === PREVIOUS_RESPONSE_NOT_FOUND_ERROR_CODE;
+}
+
+function isCodexAuthRejection(error: unknown): boolean {
+	return error instanceof CodexApiError && error.payload?.status === 401;
 }
 
 /**
@@ -1813,6 +1840,7 @@ async function processWebSocketStream(
 	idleTimeoutMs: number | undefined,
 	websocketConnectTimeoutMs: number | undefined,
 	cacheSessionId: string | undefined,
+	authIdentity: string,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
 	const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
@@ -1820,7 +1848,7 @@ async function processWebSocketStream(
 		url,
 		headers,
 		cacheSessionId,
-		options?.apiKey ?? "",
+		authIdentity,
 		options?.signal,
 		websocketConnectTimeoutMs,
 	);
