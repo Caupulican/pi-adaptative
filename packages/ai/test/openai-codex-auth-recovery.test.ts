@@ -322,6 +322,65 @@ describe("OpenAI Codex auth recovery", () => {
 		}
 	});
 
+	it("processes an already-delivered terminal Blob frame before the following socket close", async () => {
+		let releaseTerminalDecode: (() => void) | undefined;
+		installWebSocketResponses([
+			(dispatch) => {
+				const terminalBytes = new TextEncoder().encode(JSON.stringify(websocketSuccess.at(-1)));
+				dispatch("message", {
+					data: {
+						arrayBuffer: () =>
+							new Promise<ArrayBuffer>((resolve) => {
+								releaseTerminalDecode = () => resolve(terminalBytes.buffer as ArrayBuffer);
+							}),
+					},
+				});
+				dispatch("close", { code: 1000, reason: "response complete", wasClean: true });
+				setTimeout(() => releaseTerminalDecode?.(), 0);
+			},
+		]);
+
+		const result = await streamSimpleOpenAICodexResponses(
+			model,
+			{ messages: [] },
+			{ apiKey, transport: "websocket" },
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it("decodes WebSocket Blob frames in wire arrival order", async () => {
+		let releaseDeltaDecode: (() => void) | undefined;
+		installWebSocketResponses([
+			(dispatch) => {
+				for (const event of websocketSuccess.slice(0, 2)) {
+					dispatch("message", { data: JSON.stringify(event) });
+				}
+				const deltaBytes = new TextEncoder().encode(JSON.stringify(websocketSuccess[2]));
+				dispatch("message", {
+					data: {
+						arrayBuffer: () =>
+							new Promise<ArrayBuffer>((resolve) => {
+								releaseDeltaDecode = () => resolve(deltaBytes.buffer as ArrayBuffer);
+							}),
+					},
+				});
+				const terminalBytes = new TextEncoder().encode(JSON.stringify(websocketSuccess.at(-1)));
+				dispatch("message", { data: { arrayBuffer: async () => terminalBytes.buffer as ArrayBuffer } });
+				setTimeout(() => releaseDeltaDecode?.(), 0);
+			},
+		]);
+
+		const result = await streamSimpleOpenAICodexResponses(
+			model,
+			{ messages: [] },
+			{ apiKey, transport: "websocket" },
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "Recovered" }));
+	});
+
 	it("does not replay a WebSocket 401 when credential recovery declines (control)", async () => {
 		const harness = installWebSocketResponses([[websocketUnauthorized]]);
 		const onAuthRejection = vi.fn(() => undefined);

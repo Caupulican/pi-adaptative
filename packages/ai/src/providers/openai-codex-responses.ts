@@ -1593,6 +1593,9 @@ async function* parseWebSocket(
 	let done = false;
 	let failed: Error | null = null;
 	let sawCompletion = false;
+	let pendingMessageDecodes = 0;
+	let deferredSocketFailure: Error | null = null;
+	let messageDecodes = Promise.resolve();
 
 	const wake = () => {
 		if (!pending) return;
@@ -1600,14 +1603,38 @@ async function* parseWebSocket(
 		pending = null;
 		resolve();
 	};
+	const finishDeferredSocketFailure = () => {
+		if (pendingMessageDecodes !== 0 || done || !deferredSocketFailure) return;
+		if (!sawCompletion && !failed) failed = deferredSocketFailure;
+		deferredSocketFailure = null;
+		done = true;
+		wake();
+	};
+	const finishOrDeferSocketFailure = (error: Error) => {
+		if (sawCompletion) {
+			done = true;
+			wake();
+			return;
+		}
+		if (pendingMessageDecodes > 0) {
+			deferredSocketFailure ??= error;
+			return;
+		}
+		if (!failed) failed = error;
+		done = true;
+		wake();
+	};
 
 	const onMessage: WebSocketListener = (event) => {
-		void (async () => {
-			let text: string | null = null;
-			try {
-				if (!event || typeof event !== "object" || !("data" in event)) return;
-				text = await decodeWebSocketData((event as { data?: unknown }).data);
-				if (!text) return;
+		if (!event || typeof event !== "object" || !("data" in event)) return;
+		const data = (event as { data?: unknown }).data;
+		let text: string | null = null;
+		pendingMessageDecodes++;
+		messageDecodes = messageDecodes
+			.then(async () => {
+				if (done && failed) return;
+				text = await decodeWebSocketData(data);
+				if ((done && failed) || !text) return;
 				const parsed = JSON.parse(text) as Record<string, unknown>;
 				const type = typeof parsed.type === "string" ? parsed.type : "";
 				if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
@@ -1616,34 +1643,27 @@ async function* parseWebSocket(
 				}
 				queue.push(parsed);
 				wake();
-			} catch (cause) {
+			})
+			.catch((cause: unknown) => {
 				failed = new CodexProtocolError(`Invalid Codex WebSocket JSON: ${formatThrownValue(cause)}`, {
 					cause,
 					payload: text,
 				});
 				done = true;
 				wake();
-			}
-		})();
+			})
+			.finally(() => {
+				pendingMessageDecodes--;
+				finishDeferredSocketFailure();
+			});
 	};
 
 	const onError: WebSocketListener = (event) => {
-		failed = extractWebSocketError(event);
-		done = true;
-		wake();
+		finishOrDeferSocketFailure(extractWebSocketError(event));
 	};
 
 	const onClose: WebSocketListener = (event) => {
-		if (sawCompletion) {
-			done = true;
-			wake();
-			return;
-		}
-		if (!failed) {
-			failed = extractWebSocketCloseError(event);
-		}
-		done = true;
-		wake();
+		finishOrDeferSocketFailure(extractWebSocketCloseError(event));
 	};
 
 	const onAbort = () => {
