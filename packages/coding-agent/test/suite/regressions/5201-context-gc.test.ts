@@ -297,7 +297,7 @@ describe("Context GC", () => {
 		});
 
 		expect(result.report.records.map((record) => record.reason)).toEqual(["stale-semantic-memory"]);
-		expect(textOf(result.messages[0])).toContain("Semantic GC packed stale Automata/Mind context page");
+		expect(textOf(result.messages[0])).toContain("Context GC packed stale deterministic context page");
 		expect(textOf(result.messages[1])).toContain("keep my real prompt intact");
 		expect(textOf(result.messages[6])).toContain("<automata_response");
 		expect(textOf(result.messages[6])).not.toContain("Semantic GC packed");
@@ -314,7 +314,7 @@ describe("Context GC", () => {
 		});
 
 		expect(result.report.records.map((record) => record.reason)).toEqual(["stale-semantic-memory"]);
-		expect(textOf(result.messages[0])).toContain("Semantic GC packed stale Automata/Mind context page");
+		expect(textOf(result.messages[0])).toContain("Context GC packed stale deterministic context page");
 	});
 
 	it("session GC packs stale default-provider recall pages (<memory_context) under DEFAULT settings", () => {

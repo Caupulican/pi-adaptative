@@ -15,7 +15,8 @@
 
 ### Fixed
 
-- Bash command output now crosses a shell-owned pipe before reaching the host, so nested Node stdout and stderr drain before one-shot and persistent commands terminalize without treating the persistent relay or detached descendants as command-owned work.
+- On POSIX, Bash command output now crosses a shell-owned pipe before reaching the host, so nested Node stdout and stderr drain before one-shot and persistent commands terminalize without treating the persistent relay as command-owned work. Windows one-shot Bash retains direct stdio settlement so a detached descendant inheriting its handles cannot keep the relay and shell alive.
+- Stale deterministic pipeline context pages now use the configured semantic-GC threshold and retain accurate context-type retrieval metadata, while the latest page stays verbatim.
 - Edits bind execution to one open resource and verify its pathname before and after mutation, so an external rename-over cannot redirect the write into a foreign replacement while local and SSH backends retain the same safety contract.
 - Concurrent delegated-memory reads now share one immutable source-versioned in-flight snapshot, wait for admitted provider turn writes, and reject results made stale by durable writes or memory lifecycle transitions.
 - Live project-rule compilation now fences its cache by the complete ordered instruction sources, so a same-length edit to an admitted AGENTS-family file takes effect without restarting the session.

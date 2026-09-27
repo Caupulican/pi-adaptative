@@ -1,14 +1,33 @@
 import { randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLocalBashOperations } from "../src/core/tools/bash.ts";
-import { acquirePersistentShellSession, disposePersistentShellSession } from "../src/core/tools/shell-session.ts";
+import {
+	acquirePersistentShellSession,
+	buildBashOneShotWire,
+	disposePersistentShellSession,
+} from "../src/core/tools/shell-session.ts";
 
 const IS_WINDOWS = process.platform === "win32";
 const liveSessionKeys: string[] = [];
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	for (const key of liveSessionKeys) disposePersistentShellSession(key);
 	liveSessionKeys.length = 0;
+});
+
+describe("Bash one-shot output relay selection", () => {
+	it("does not install the EOF relay on Windows where detached descendants inherit its handle", () => {
+		vi.spyOn(process, "platform", "get").mockReturnValue("win32");
+
+		expect(buildBashOneShotWire("printf child-exiting")).toBe("printf child-exiting");
+	});
+
+	it("keeps the relay on POSIX where it drains Node's Unix-socket stdout", () => {
+		vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+
+		expect(buildBashOneShotWire("printf child-exiting")).toContain("__pi_output_relay");
+	});
 });
 
 describe.skipIf(IS_WINDOWS)("Bash inherited Node stdio", () => {

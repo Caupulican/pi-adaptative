@@ -105,11 +105,11 @@ describe("task_steps_context GC eligibility", () => {
 		const turn3Index = messages.indexOf(turn3);
 		const turn4Index = messages.indexOf(turn4);
 
-		expect(textOf(result.messages[turn1Index])).toContain("Semantic GC packed stale Automata/Mind context page");
+		expect(textOf(result.messages[turn1Index])).toContain("Context GC packed stale deterministic context page");
 		expect(textOf(result.messages[turn1Index])).not.toContain("Investigate root cause");
-		expect(textOf(result.messages[turn2Index])).toContain("Semantic GC packed stale Automata/Mind context page");
+		expect(textOf(result.messages[turn2Index])).toContain("Context GC packed stale deterministic context page");
 		expect(textOf(result.messages[turn2Index])).not.toContain("narrowed down the cause");
-		expect(textOf(result.messages[turn3Index])).toContain("Semantic GC packed stale Automata/Mind context page");
+		expect(textOf(result.messages[turn3Index])).toContain("Context GC packed stale deterministic context page");
 		expect(textOf(result.messages[turn3Index])).not.toContain("Write regression test");
 
 		// The most recent task_steps_context page is untouched by GC (block still renders each turn).

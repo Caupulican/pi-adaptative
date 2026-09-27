@@ -363,9 +363,9 @@ function joinedPartsContainAnyMarker(parts: string[], markers: readonly string[]
 }
 
 // Gates which custom-message types are eligible for the semantic-memory packer below. Despite the
-// name, this now also covers the injected task_steps checklist page (customType "task_steps_context",
-// see agent-session.ts) -- it is a deterministic, re-derivable-from-live-state context page exactly
-// like a memory recall page, so it gets the same GC treatment. A marker match alone
+// name, this also covers deterministic injected task_steps and pipeline pages. They are
+// re-derivable from live state exactly like a memory recall page, so they get the same GC treatment.
+// A marker match alone
 // is not enough: semanticMessageHasMarker/agentMessageText only inspect a custom message's text at all
 // once it passes this gate, so a customType that doesn't match here never reaches the marker check.
 function isSemanticMemoryCustomMessage(message: AgentMessage): boolean {
@@ -375,7 +375,8 @@ function isSemanticMemoryCustomMessage(message: AgentMessage): boolean {
 		customType.includes("automata") ||
 		customType.includes("memory") ||
 		customType.includes("mind") ||
-		customType.includes("task_steps")
+		customType.includes("task_steps") ||
+		customType === "pipeline_context"
 	);
 }
 
@@ -602,7 +603,7 @@ function buildSummary(record: ContextGcPackedRecord): string {
 	const supersededRecord = record.reason === "superseded-transient-record";
 	const lines = [
 		semantic
-			? "[Semantic GC packed stale Automata/Mind context page]"
+			? "[Context GC packed stale deterministic context page]"
 			: supersededRecord
 				? `[Context GC packed superseded ${record.toolName} record; a later record of this kind is current]`
 				: "[Context GC packed stale tool result]",
@@ -877,7 +878,7 @@ export function applyContextGc(
 								.slice(0, 24);
 				const storagePath = storagePathFor(options.storageDir, key);
 				const record: ContextGcPackedRecord = {
-					toolName: "automata-mind",
+					toolName: message.role === "custom" ? message.customType : "semantic-context",
 					toolCallId: `semantic-${index}`,
 					messageIndex: index,
 					reason: "stale-semantic-memory",

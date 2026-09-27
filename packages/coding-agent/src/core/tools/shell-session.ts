@@ -234,8 +234,14 @@ function buildBashJobWait(excludedPidVariable: string): string[] {
 	];
 }
 
-/** Host one Bash command in a fresh process while preserving its status after the output relay drains. */
+/**
+ * Host one Bash command in a fresh process while preserving its status after the output relay drains.
+ * Windows child stdio is not the Unix socket this relay repairs, and a detached descendant can inherit
+ * the relay pipe handle there without remaining in Bash's job table. Waiting for EOF would then keep
+ * the shell alive until that unrelated descendant exits, defeating the Windows exit/stdio grace owner.
+ */
 export function buildBashOneShotWire(command: string): string {
+	if (process.platform === "win32") return command;
 	const nonce = randomBytes(8).toString("hex");
 	return [
 		"exec {__pi_output_fd}> >(cat)",
