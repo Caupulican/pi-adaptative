@@ -23,6 +23,59 @@ async function makeRunner(factory: ExtensionFactory) {
 }
 
 describe("extension diagnostic listener isolation", () => {
+	it("admits listeners registered during a diagnostic on the next event", async () => {
+		const runner = await makeRunner(() => {});
+		const observed: string[] = [];
+		const late = vi.fn((error: { event: string }) => observed.push(`late:${error.event}`));
+		runner.onError((error) => {
+			observed.push(`first:${error.event}`);
+			runner.onError(late);
+		});
+		runner.onError((error) => observed.push(`existing:${error.event}`));
+
+		runner.emitError({ extensionPath: "test", event: "first", error: "first failure" });
+		expect(observed).toEqual(["first:first", "existing:first"]);
+
+		observed.length = 0;
+		runner.emitError({ extensionPath: "test", event: "second", error: "second failure" });
+		expect(observed).toEqual(["first:second", "existing:second", "late:second"]);
+	});
+
+	it("applies listener removal after the current diagnostic generation", async () => {
+		const runner = await makeRunner(() => {});
+		const observed: string[] = [];
+		let removeSecond = () => {};
+		runner.onError((error) => {
+			observed.push(`first:${error.event}`);
+			removeSecond();
+		});
+		removeSecond = runner.onError((error) => observed.push(`second:${error.event}`));
+
+		runner.emitError({ extensionPath: "test", event: "first", error: "first failure" });
+		expect(observed).toEqual(["first:first", "second:first"]);
+
+		observed.length = 0;
+		runner.emitError({ extensionPath: "test", event: "second", error: "second failure" });
+		expect(observed).toEqual(["first:second"]);
+	});
+
+	it("bounds recursively registered diagnostic listeners to later generations", async () => {
+		const runner = await makeRunner(() => {});
+		const observed: number[] = [];
+		let nextId = 1;
+		const register = () => {
+			const id = nextId++;
+			runner.onError(() => {
+				observed.push(id);
+				if (id < 4) register();
+			});
+		};
+		register();
+
+		runner.emitError({ extensionPath: "test", event: "recursive", error: "recursive failure" });
+		expect(observed).toEqual([1]);
+	});
+
 	it.each([
 		["null prototype", () => Object.create(null)],
 		[

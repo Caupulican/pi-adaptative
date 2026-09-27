@@ -573,7 +573,7 @@ export class ExtensionRunner {
 	}
 
 	emitError(error: ExtensionError): void {
-		for (const listener of this.errorListeners) {
+		for (const listener of [...this.errorListeners]) {
 			try {
 				// Diagnostics cannot replace an execution failure or interrupt result delivery.
 				// Do not await listeners: a pending reporter must not hold up the tool loop.
