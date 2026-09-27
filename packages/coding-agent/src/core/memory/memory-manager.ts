@@ -311,6 +311,13 @@ export class MemoryManager {
 		return results.join("\n\n");
 	}
 
+	/** Whether this admitted generation has a provider whose turn hook can change prefetch state. */
+	public hasActiveTurnSyncProvider(): boolean {
+		return this.providers.some(
+			(provider) => this.activeProviders.has(provider.name) && provider.syncTurn !== undefined,
+		);
+	}
+
 	public async syncTurn(user: string, assistant: string): Promise<void> {
 		if (this.ctx?.isChildSession) {
 			return; // Write-gated: skip writes in child sessions

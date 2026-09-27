@@ -1,14 +1,14 @@
 import { createHash } from "node:crypto";
-import { tmpdir } from "node:os";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryManager } from "../src/core/memory/memory-manager.ts";
 import type { MemoryLifecycleContext, MemoryProvider } from "../src/core/memory/memory-provider.ts";
 import { FileStoreProvider } from "../src/core/memory/providers/file-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("Memory Subsystem - Registry & Manager", () => {
-	const testDir = join(process.cwd(), "test-memory-tmp");
+	const testDir = tempDir("pi-memory-manager-");
 	const agentDir = join(testDir, "agent");
 
 	beforeEach(() => {
@@ -103,6 +103,25 @@ describe("Memory Subsystem - Registry & Manager", () => {
 
 		// Can re-register without throwing "already registered"
 		expect(() => manager.registerProvider(mockProvider)).not.toThrow();
+	});
+
+	it("reports turn-sync capability only while its provider is admitted", async () => {
+		const manager = new MemoryManager();
+		const provider: MemoryProvider = {
+			name: "turn-sync-provider",
+			isAvailable: () => true,
+			getCapabilities: () => ({ surfaces: ["context"] }),
+			initialize: async () => {},
+			syncTurn: async () => {},
+			shutdown: async () => {},
+		};
+		manager.registerProvider(provider);
+
+		expect(manager.hasActiveTurnSyncProvider()).toBe(false);
+		await manager.initializeAll("test-sess", { agentDir, cwd: testDir, isChildSession: false });
+		expect(manager.hasActiveTurnSyncProvider()).toBe(true);
+		await manager.shutdownAll();
+		expect(manager.hasActiveTurnSyncProvider()).toBe(false);
 	});
 
 	it("should refuse registration of providers with reserved core tool names", () => {
@@ -364,7 +383,7 @@ describe("Memory Subsystem - Registry & Manager", () => {
 });
 
 describe("Memory Subsystem - FileStoreProvider", () => {
-	const testDir = join(process.cwd(), "test-filestore-tmp");
+	const testDir = tempDir("pi-file-store-");
 	const agentDir = join(testDir, "agent");
 
 	beforeEach(() => {
@@ -811,26 +830,22 @@ describe("Memory Subsystem - FileStoreProvider", () => {
 
 describe("memory budget as an operation outcome", () => {
 	it("returns the budget refusal as an error the loop can see, not as plain text", async () => {
-		const dir = join(tmpdir(), `pi-mem-budget-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		const dir = tempDir("pi-mem-budget-");
 		const agentDirLocal = join(dir, "agent");
 		mkdirSync(agentDirLocal, { recursive: true });
-		try {
-			const provider = new FileStoreProvider();
-			await provider.initialize("budget-session", { agentDir: agentDirLocal, cwd: dir, isChildSession: false });
-			const memoryTool = provider.getToolDefinitions().find((t) => t.name === "memory");
-			const result = await memoryTool!.execute(
-				"call-budget",
-				{ action: "add", target: "memory", content: "x".repeat(512_001) },
-				undefined,
-				undefined,
-				{} as any,
-			);
-			expect((result as any).isError).toBe(true);
-			expect((result as any).errorKind).toBe("operation_outcome");
-			expect((result as any).content[0].text).toContain("Resource overflow");
-		} finally {
-			rmSync(dir, { recursive: true, force: true });
-		}
+		const provider = new FileStoreProvider();
+		await provider.initialize("budget-session", { agentDir: agentDirLocal, cwd: dir, isChildSession: false });
+		const memoryTool = provider.getToolDefinitions().find((t) => t.name === "memory");
+		const result = await memoryTool!.execute(
+			"call-budget",
+			{ action: "add", target: "memory", content: "x".repeat(512_001) },
+			undefined,
+			undefined,
+			{} as any,
+		);
+		expect((result as any).isError).toBe(true);
+		expect((result as any).errorKind).toBe("operation_outcome");
+		expect((result as any).content[0].text).toContain("Resource overflow");
 	});
 });
 
@@ -839,7 +854,7 @@ describe("project-scoped hot memory", () => {
 		const agentDirLocal = join(root, "agent");
 		const cwdLocal = join(root, project);
 		mkdirSync(agentDirLocal, { recursive: true });
-		mkdirSync(cwdLocal, { recursive: true });
+		mkdirSync(join(cwdLocal, ".git"), { recursive: true });
 		const provider = new FileStoreProvider();
 		await provider.initialize(`session-${project}`, {
 			agentDir: agentDirLocal,
@@ -852,101 +867,89 @@ describe("project-scoped hot memory", () => {
 	}
 
 	it("routes writes to the project's own file by default and keeps projects apart", async () => {
-		const root = join(tmpdir(), `pi-mem-project-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		try {
-			const a = await providerIn(root, "alpha");
-			const b = await providerIn(root, "beta");
-			const written = await a.memoryTool.execute(
-				"w1",
-				{ action: "add", content: "Alpha builds with make" },
-				undefined,
-				undefined,
-				{} as any,
-			);
-			expect((written as any).details.success).toBe(true);
-			expect((written as any).content[0].text).toContain("MEMORY.md (project)");
-			expect(readFileSync(a.provider.getProjectMemoryFilePath(), "utf-8")).toContain("Alpha builds with make");
-			expect(readFileSync(join(a.agentDirLocal, "MEMORY.md"), "utf-8")).not.toContain("Alpha builds");
-			expect(a.provider.systemPromptBlock()).toContain("## MEMORY.md (project alpha):");
-			expect(a.provider.systemPromptBlock()).toContain("Alpha builds with make");
-			expect(b.provider.systemPromptBlock()).not.toContain("Alpha builds");
-			expect(a.provider.getProjectMemoryFilePath()).toContain(join("memory", "projects"));
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
+		const root = tempDir("pi-mem-project-");
+		const a = await providerIn(root, "alpha");
+		const b = await providerIn(root, "beta");
+		const written = await a.memoryTool.execute(
+			"w1",
+			{ action: "add", content: "Alpha builds with make" },
+			undefined,
+			undefined,
+			{} as any,
+		);
+		expect((written as any).details.success).toBe(true);
+		expect((written as any).content[0].text).toContain("MEMORY.md (project)");
+		expect(readFileSync(a.provider.getProjectMemoryFilePath(), "utf-8")).toContain("Alpha builds with make");
+		expect(readFileSync(join(a.agentDirLocal, "MEMORY.md"), "utf-8")).not.toContain("Alpha builds");
+		expect(a.provider.systemPromptBlock()).toContain("## MEMORY.md (project alpha):");
+		expect(a.provider.systemPromptBlock()).toContain("Alpha builds with make");
+		expect(b.provider.systemPromptBlock()).not.toContain("Alpha builds");
+		expect(a.provider.getProjectMemoryFilePath()).toContain(join("memory", "projects"));
 	});
 
 	it("keeps the general file for general facts, hints when a write looks project-specific, and lists all three", async () => {
-		const root = join(tmpdir(), `pi-mem-general-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		try {
-			const { memoryTool, agentDirLocal } = await providerIn(root, "gamma");
-			const general = await memoryTool.execute(
-				"g1",
-				{ action: "add", target: "memory", content: "Prefer explicit-path git adds" },
-				undefined,
-				undefined,
-				{} as any,
-			);
-			expect((general as any).content[0].text).toBe("Successfully updated MEMORY.md (general).");
-			expect(readFileSync(join(agentDirLocal, "MEMORY.md"), "utf-8")).toContain("Prefer explicit-path git adds");
-			const hinted = await memoryTool.execute(
-				"g2",
-				{ action: "add", target: "memory", content: "PROJ-1234 ships from C:\\work\\Deploy" },
-				undefined,
-				undefined,
-				{} as any,
-			);
-			expect((hinted as any).details.success).toBe(true);
-			expect((hinted as any).content[0].text).toContain('consider target "project"');
-			const listed = await memoryTool.execute("g3", { action: "list" }, undefined, undefined, {} as any);
-			const text = (listed as any).content[0].text as string;
-			expect(text).toContain("## MEMORY.md (general)");
-			expect(text).toContain("approximate tokens");
-			expect(text).toContain("bytes");
-			expect(text).toContain("## MEMORY.md (project gamma)");
+		const root = tempDir("pi-mem-general-");
+		const { memoryTool, agentDirLocal } = await providerIn(root, "gamma");
+		const general = await memoryTool.execute(
+			"g1",
+			{ action: "add", target: "memory", content: "Prefer explicit-path git adds" },
+			undefined,
+			undefined,
+			{} as any,
+		);
+		expect((general as any).content[0].text).toBe("Successfully updated MEMORY.md (general).");
+		expect(readFileSync(join(agentDirLocal, "MEMORY.md"), "utf-8")).toContain("Prefer explicit-path git adds");
+		const hinted = await memoryTool.execute(
+			"g2",
+			{ action: "add", target: "memory", content: "PROJ-1234 ships from C:\\work\\Deploy" },
+			undefined,
+			undefined,
+			{} as any,
+		);
+		expect((hinted as any).details.success).toBe(true);
+		expect((hinted as any).content[0].text).toContain('consider target "project"');
+		const listed = await memoryTool.execute("g3", { action: "list" }, undefined, undefined, {} as any);
+		const text = (listed as any).content[0].text as string;
+		expect(text).toContain("## MEMORY.md (general)");
+		expect(text).toContain("approximate tokens");
+		expect(text).toContain("bytes");
+		expect(text).toContain("## MEMORY.md (project gamma)");
 
-			expect(text).toContain("## USER.md");
-			const over = await memoryTool.execute(
-				"g4",
-				{ action: "add", target: "memory", content: "y".repeat(512000) },
-				undefined,
-				undefined,
-				{} as any,
-			);
-			expect((over as any).isError).toBe(true);
-			expect((over as any).content[0].text).toContain("Resource overflow");
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
+		expect(text).toContain("## USER.md");
+		const over = await memoryTool.execute(
+			"g4",
+			{ action: "add", target: "memory", content: "y".repeat(512000) },
+			undefined,
+			undefined,
+			{} as any,
+		);
+		expect((over as any).isError).toBe(true);
+		expect((over as any).content[0].text).toContain("Resource overflow");
 	});
 
 	it("rejects resource-overflow writes without emitting a triage prompt", async () => {
-		const root = join(tmpdir(), `pi-mem-resource-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		try {
-			const agentDirLocal = join(root, "agent");
-			mkdirSync(agentDirLocal, { recursive: true });
-			const oversized = `${"project fact ".repeat(40000)}\n`;
-			writeFileSync(join(agentDirLocal, "MEMORY.md"), oversized);
-			const provider = new FileStoreProvider();
-			await provider.initialize("resource-guard", { agentDir: agentDirLocal, cwd: root, isChildSession: false });
-			const memoryTool = provider.getToolDefinitions().find((t) => t.name === "memory")!;
-			const addResult = await memoryTool.execute(
-				"overflow-check",
-				{
-					action: "add",
-					target: "memory",
-					content: "Too much new content that would overflow the resource ceiling",
-				},
-				undefined,
-				undefined,
-				{} as any,
-			);
-			expect(addResult.details).toMatchObject({ success: false });
-			expect((addResult as any).content[0].text).toContain("Resource overflow");
-			expect((addResult as any).content[0].text).toContain("512000");
-			expect(provider.systemPromptBlock()).not.toContain("triage");
-		} finally {
-			rmSync(root, { recursive: true, force: true });
-		}
+		const root = tempDir("pi-mem-resource-");
+		const agentDirLocal = join(root, "agent");
+		mkdirSync(agentDirLocal, { recursive: true });
+		const oversized = `${"project fact ".repeat(40000)}\n`;
+		writeFileSync(join(agentDirLocal, "MEMORY.md"), oversized);
+		const provider = new FileStoreProvider();
+		await provider.initialize("resource-guard", { agentDir: agentDirLocal, cwd: root, isChildSession: false });
+		const memoryTool = provider.getToolDefinitions().find((t) => t.name === "memory")!;
+		const addResult = await memoryTool.execute(
+			"overflow-check",
+			{
+				action: "add",
+				target: "memory",
+				content: "Too much new content that would overflow the resource ceiling",
+			},
+			undefined,
+			undefined,
+			{} as any,
+		);
+		expect(addResult.details).toMatchObject({ success: false });
+		expect((addResult as any).content[0].text).toContain("Resource overflow");
+		expect((addResult as any).content[0].text).toContain("512000");
+		expect(provider.systemPromptBlock()).not.toContain("triage");
 	});
 });

@@ -156,6 +156,22 @@ export interface MemoryControllerReloadSnapshot {
 	fileStoreMemoryProvider: ContextMemoryProvider | undefined;
 }
 
+/** One immutable, source-versioned delegated-memory view shared by concurrent equivalent reads. */
+export interface LaneMemoryReadSnapshot {
+	readonly snapshotId: string;
+	readonly sourceGeneration: number;
+	readonly sourceRevision: number;
+	readonly content: string;
+}
+
+/** A memory mutation or lifecycle transition invalidated a delegated read before it could be used. */
+export class LaneMemorySnapshotStaleError extends Error {
+	constructor() {
+		super("memory_snapshot_stale: memory changed while the delegated read was in flight; retry the read.");
+		this.name = "LaneMemorySnapshotStaleError";
+	}
+}
+
 export class MemoryController {
 	private _memoryOkfProvider: ContextMemoryProvider | undefined = undefined;
 	private _fileStoreMemoryProvider: ContextMemoryProvider | undefined = undefined;
@@ -182,6 +198,10 @@ export class MemoryController {
 	private _shutdownPromise: Promise<void> | undefined;
 	private _activeMemorySystem: MemorySystem | undefined;
 	private _memoryGeneration = 0;
+	/** Monotone process-local revision advanced by the durable writer's authoritative change callback. */
+	private _memoryContentRevision = 0;
+	/** Active equivalent reads only. Completed snapshots are not cached across possible external file changes. */
+	private readonly _laneMemoryReads = new Map<string, Promise<LaneMemoryReadSnapshot>>();
 	private _transitioning = false;
 	private _initializationFailed = false;
 
@@ -299,6 +319,9 @@ export class MemoryController {
 	scheduleTurnSync(userText: string, assistantText: string): void {
 		if (!this._legacyMemoryEnabled() || (!userText.trim() && !assistantText.trim())) return;
 		const manager = this._memoryManager;
+		// Admit the revision before queuing the write: an older read must fail even while this hook waits
+		// behind prior lifecycle work, and a newer read will wait for the exact captured tail below.
+		if (manager.hasActiveTurnSyncProvider()) this._memoryContentRevision++;
 		this._lifecycleTail = this._lifecycleTail
 			.then(() => manager.syncTurn(userText, assistantText))
 			.catch((error) => {
@@ -819,29 +842,97 @@ export class MemoryController {
 		return this.getFileStoreWriter()?.getHandoffPersonaGuidance();
 	}
 
-	/** Bounded, read-only memory view for an explicitly authorized delegated worker. */
-	async readMemoryForLane(query: string): Promise<string> {
-		if (!this._legacyMemoryEnabled()) return "ICM: legacy memory is offline; use scoped native file reads.";
+	/**
+	 * One immutable delegated-memory snapshot. Equivalent concurrent reads share the exact promise and
+	 * object while completed reads are discarded, so a later call observes fresh external state.
+	 */
+	readMemorySnapshotForLane(query: string): Promise<LaneMemoryReadSnapshot> {
 		const generation = this._memoryGeneration;
+		const revision = this._memoryContentRevision;
+		if (!this._legacyMemoryEnabled()) {
+			return Promise.resolve(
+				this._laneMemorySnapshot(
+					generation,
+					revision,
+					"ICM: legacy memory is offline; use scoped native file reads.",
+				),
+			);
+		}
 		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
-		if (!settings.enabled) return "Memory retrieval is disabled by policy.";
+		if (!settings.enabled) {
+			return Promise.resolve(
+				this._laneMemorySnapshot(generation, revision, "Memory retrieval is disabled by policy."),
+			);
+		}
+		const normalizedQuery = query.trim();
 		const budget = this._memoryBudget(settings.maxResults);
+		const maxResults = Math.min(3, settings.maxResults);
+		const turnIndex = this.deps.getTurnIndex();
+		const key = JSON.stringify([generation, revision, turnIndex, normalizedQuery, maxResults, budget]);
+		const active = this._laneMemoryReads.get(key);
+		if (active) return active;
+		const loading = this._loadLaneMemorySnapshot({
+			generation,
+			revision,
+			query: normalizedQuery,
+			maxResults,
+			turnIndex,
+			budget,
+			lifecycleTail: this._lifecycleTail,
+		});
+		this._laneMemoryReads.set(key, loading);
+		void loading
+			.finally(() => {
+				if (this._laneMemoryReads.get(key) === loading) this._laneMemoryReads.delete(key);
+			})
+			.catch(() => {});
+		return loading;
+	}
+
+	/** Bounded, read-only memory view for an explicitly authorized delegated worker. */
+	readMemoryForLane(query: string): Promise<string> {
+		return this.readMemorySnapshotForLane(query).then((snapshot) => snapshot.content);
+	}
+
+	private async _loadLaneMemorySnapshot(input: {
+		generation: number;
+		revision: number;
+		query: string;
+		maxResults: number;
+		turnIndex: number;
+		budget: MemoryPromptBudget;
+		lifecycleTail: Promise<void>;
+	}): Promise<LaneMemoryReadSnapshot> {
+		await input.lifecycleTail;
+		if (
+			!this._legacyMemoryEnabled() ||
+			input.generation !== this._memoryGeneration ||
+			input.revision !== this._memoryContentRevision
+		) {
+			throw new LaneMemorySnapshotStaleError();
+		}
 		const staticBlock = this._memoryManager
-			.buildSystemPromptBlockFresh(budget)
+			.buildSystemPromptBlockFresh(input.budget)
 			.replace(FILE_STORE_MEMORY_SYSTEM_NOTE, "[Read-only snapshot for a delegated worker.]");
 		const [recalled, okfReport] = await Promise.all([
-			this.prefetchRecall(query),
+			this.prefetchRecall(input.query),
 			retrieveMemoryForContext(
 				[this._getMemoryOkfProvider()],
-				{ query, maxResults: Math.min(3, settings.maxResults) },
+				{ query: input.query, maxResults: input.maxResults },
 				{
-					createdAtTurn: this.deps.getTurnIndex(),
-					maxResults: Math.min(3, settings.maxResults),
+					createdAtTurn: input.turnIndex,
+					maxResults: input.maxResults,
 					defaultLocalPolicy: DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
 				},
 			),
 		]);
-		if (!this._legacyMemoryEnabled() || generation !== this._memoryGeneration) return "Legacy memory is offline.";
+		if (
+			!this._legacyMemoryEnabled() ||
+			input.generation !== this._memoryGeneration ||
+			input.revision !== this._memoryContentRevision
+		) {
+			throw new LaneMemorySnapshotStaleError();
+		}
 		const okf = okfReport.results
 			.map(({ item }) => `[OKF ${item.title ?? item.id}] ${item.summary}\n${item.content ?? ""}`)
 			.join("\n\n");
@@ -849,9 +940,21 @@ export class MemoryController {
 			.filter((part) => part.trim().length > 0)
 			.join("\n\n")
 			.slice(0, 8000);
-		return combined.length > 0
-			? wrapUntrustedText(combined, "worker-memory")
-			: "No relevant standing memory was found.";
+		const content =
+			combined.length > 0 ? wrapUntrustedText(combined, "worker-memory") : "No relevant standing memory was found.";
+		return this._laneMemorySnapshot(input.generation, input.revision, content);
+	}
+
+	private _laneMemorySnapshot(
+		sourceGeneration: number,
+		sourceRevision: number,
+		content: string,
+	): LaneMemoryReadSnapshot {
+		const snapshotId = createHash("sha256")
+			.update(JSON.stringify([sourceGeneration, sourceRevision, content]))
+			.digest("hex")
+			.slice(0, 32);
+		return Object.freeze({ snapshotId, sourceGeneration, sourceRevision, content });
 	}
 
 	/** Parent reflection's only structured-memory mutation port. Workers never receive this capability. */
@@ -923,6 +1026,7 @@ export class MemoryController {
 						const admitUserPreference = this.deps.admitUserPreference;
 						writer = new FileStoreProvider({
 							onDurableMemoryChanged: () => {
+								this._memoryContentRevision++;
 								this._memoryOkfProvider = undefined;
 							},
 							...(admitUserPreference ? { admitUserPreference: (request) => admitUserPreference(request) } : {}),
