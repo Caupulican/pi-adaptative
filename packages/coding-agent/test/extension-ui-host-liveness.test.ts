@@ -1,5 +1,5 @@
 import { Container, type Terminal, Text, TUI } from "@caupulican/pi-tui";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { ExtensionInputComponent } from "../src/modes/interactive/components/extension-input.ts";
 import type { ExtensionSelectorComponent } from "../src/modes/interactive/components/extension-selector.ts";
 import { EditorOverlayHost } from "../src/modes/interactive/editor-overlay-host.ts";
@@ -10,8 +10,13 @@ class FakeTerminal implements Terminal {
 	columns = 80;
 	rows = 24;
 	kittyProtocolActive = true;
-	start(): void {}
-	stop(): void {}
+	private inputHandler: ((data: string) => void) | undefined;
+	start(onInput: (data: string) => void): void {
+		this.inputHandler = onInput;
+	}
+	stop(): void {
+		this.inputHandler = undefined;
+	}
 	async drainInput(): Promise<void> {}
 	write(_data: string): void {}
 	moveBy(_lines: number): void {}
@@ -22,10 +27,14 @@ class FakeTerminal implements Terminal {
 	clearScreen(): void {}
 	setTitle(_title: string): void {}
 	setProgress(_active: boolean): void {}
+	sendInput(data: string): void {
+		this.inputHandler?.(data);
+	}
 }
 
 function createHost() {
-	const tui = new TUI(new FakeTerminal());
+	const terminal = new FakeTerminal();
+	const tui = new TUI(terminal);
 	let renderRequests = 0;
 	tui.requestRender = () => {
 		renderRequests += 1;
@@ -33,6 +42,7 @@ function createHost() {
 	const editorContainer = new Container();
 	let editorText = "";
 	const editor = new Text(editorText, 0, 0);
+	const editorInput: string[] = [];
 	const setEditorText = editor.setText.bind(editor);
 	Object.assign(editor, {
 		getText: () => editorText,
@@ -40,10 +50,14 @@ function createHost() {
 			editorText = value;
 			setEditorText(value);
 		},
+		handleInput: (data: string) => editorInput.push(data),
 	});
 	editorContainer.addChild(editor);
+	const showError = vi.fn();
 	return {
+		terminal,
 		editorContainer,
+		editorInput,
 		getRenderRequests: () => renderRequests,
 		extensionSelector: undefined as ExtensionSelectorComponent | undefined,
 		activeExtensionDialogCancel: undefined as (() => void) | undefined,
@@ -65,12 +79,14 @@ function createHost() {
 			defaultEditor: { onExtensionShortcut: undefined },
 			updateTerminalTitle: () => {},
 			resetWorkingIndicators: () => {},
+			showError,
 		},
 		showExtensionDialog: Reflect.get(ExtensionUiHost.prototype, "showExtensionDialog"),
 		showExtensionSelector: Reflect.get(ExtensionUiHost.prototype, "showExtensionSelector"),
 		hideExtensionSelector: Reflect.get(ExtensionUiHost.prototype, "hideExtensionSelector"),
 		showExtensionInput: Reflect.get(ExtensionUiHost.prototype, "showExtensionInput"),
 		hideExtensionInput: Reflect.get(ExtensionUiHost.prototype, "hideExtensionInput"),
+		addExtensionTerminalInputListener: Reflect.get(ExtensionUiHost.prototype, "addExtensionTerminalInputListener"),
 		clearExtensionTerminalInputListeners: () => {},
 		setExtensionFooter: () => {},
 		setExtensionHeader: () => {},
@@ -93,6 +109,9 @@ const showInput = Reflect.get(ExtensionUiHost.prototype, "showExtensionInput") a
 	opts?: { signal?: AbortSignal; timeout?: number; sensitive?: boolean },
 ) => Promise<string | undefined>;
 const resetExtensionUI = Reflect.get(ExtensionUiHost.prototype, "resetExtensionUI") as (this: TestHost) => void;
+const createExtensionUIContext = Reflect.get(ExtensionUiHost.prototype, "createExtensionUIContext") as (
+	this: TestHost,
+) => ReturnType<ExtensionUiHost["createExtensionUIContext"]>;
 const showCustom = Reflect.get(ExtensionUiHost.prototype, "showExtensionCustom") as <T>(
 	this: TestHost,
 	factory: (...args: unknown[]) => Text | Promise<Text>,
@@ -221,6 +240,78 @@ describe("extension UI dialog liveness", () => {
 
 		await expect(pending).resolves.toBeUndefined();
 		expect(host.extensionSelector).toBeUndefined();
+	});
+
+	it("isolates and retires a failing extension terminal-input listener", () => {
+		const host = createHost();
+		const extensionUI = createExtensionUIContext.call(host);
+		const failingListener = vi.fn(() => {
+			throw new Error("terminal listener failed");
+		});
+		extensionUI.onTerminalInput(failingListener);
+		const laterListener = vi.fn((data: string) => ({ data: `${data}:later` }));
+		host.ui.tui.addInputListener(laterListener);
+		host.ui.tui.setFocus(host.ui.getEditor());
+		host.ui.tui.start();
+		try {
+			expect(() => host.terminal.sendInput("first")).not.toThrow();
+			expect(failingListener).toHaveBeenCalledOnce();
+			expect(laterListener).toHaveBeenLastCalledWith("first");
+			expect(host.editorInput).toEqual(["first:later"]);
+			expect(host.ui.showError).toHaveBeenCalledOnce();
+			expect(host.ui.showError).toHaveBeenCalledWith("Terminal input handler error: terminal listener failed");
+
+			host.terminal.sendInput("second");
+			expect(failingListener).toHaveBeenCalledOnce();
+			expect(laterListener).toHaveBeenLastCalledWith("second");
+			expect(host.editorInput).toEqual(["first:later", "second:later"]);
+			expect(host.ui.showError).toHaveBeenCalledOnce();
+		} finally {
+			host.ui.tui.stop();
+		}
+	});
+
+	it("retains successful extension terminal-input transformation across events", () => {
+		const host = createHost();
+		const extensionUI = createExtensionUIContext.call(host);
+		const extensionListener = vi.fn((data: string) => ({ data: `${data}:extension` }));
+		extensionUI.onTerminalInput(extensionListener);
+		host.ui.tui.addInputListener((data) => ({ data: `${data}:later` }));
+		host.ui.tui.setFocus(host.ui.getEditor());
+		host.ui.tui.start();
+		try {
+			host.terminal.sendInput("first");
+			host.terminal.sendInput("second");
+			expect(extensionListener).toHaveBeenCalledTimes(2);
+			expect(host.editorInput).toEqual(["first:extension:later", "second:extension:later"]);
+			expect(host.ui.showError).not.toHaveBeenCalled();
+		} finally {
+			host.ui.tui.stop();
+		}
+	});
+
+	it("contains a throwing extension terminal-input result getter", () => {
+		const host = createHost();
+		const extensionUI = createExtensionUIContext.call(host);
+		const hostileResult: { data?: string } = {};
+		Object.defineProperty(hostileResult, "data", {
+			get: () => {
+				throw Object.create(null);
+			},
+		});
+		const extensionListener = vi.fn(() => hostileResult);
+		extensionUI.onTerminalInput(extensionListener);
+		host.ui.tui.setFocus(host.ui.getEditor());
+		host.ui.tui.start();
+		try {
+			expect(() => host.terminal.sendInput("first")).not.toThrow();
+			host.terminal.sendInput("second");
+			expect(extensionListener).toHaveBeenCalledOnce();
+			expect(host.editorInput).toEqual(["first", "second"]);
+			expect(host.ui.showError).toHaveBeenCalledWith("Terminal input handler error: Handler failed.");
+		} finally {
+			host.ui.tui.stop();
+		}
 	});
 
 	it("rejects a pending custom factory when an unrelated overlay supersedes it", async () => {

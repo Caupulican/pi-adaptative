@@ -14,6 +14,7 @@
  * autocomplete rebuild) stay host-side and are invoked here as delegations.
  */
 
+import { safeErrorMessage } from "@caupulican/pi-agent-core/types";
 import type {
 	AutocompleteProvider,
 	Component,
@@ -453,7 +454,19 @@ export class ExtensionUiHost {
 	private addExtensionTerminalInputListener(
 		handler: (data: string) => { consume?: boolean; data?: string } | undefined,
 	): () => void {
-		const unsubscribe = this.ui.tui.addInputListener(handler);
+		let unsubscribe = () => {};
+		const guardedHandler = (data: string): { consume?: boolean; data?: string } | undefined => {
+			try {
+				const result = handler(data);
+				return result ? { consume: result.consume, data: result.data } : undefined;
+			} catch (error) {
+				unsubscribe();
+				this.extensionTerminalInputUnsubscribers.delete(unsubscribe);
+				this.ui.showError(`Terminal input handler error: ${safeErrorMessage(error, "Handler failed.")}`);
+				return undefined;
+			}
+		};
+		unsubscribe = this.ui.tui.addInputListener(guardedHandler);
 		this.extensionTerminalInputUnsubscribers.add(unsubscribe);
 		return () => {
 			unsubscribe();
