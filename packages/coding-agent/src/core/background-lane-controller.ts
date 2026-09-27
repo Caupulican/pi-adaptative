@@ -419,7 +419,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 */
 	abortInFlightLanes(): Promise<void> {
 		let workerShutdown = Promise.resolve();
-		this._runTeardownStep("clear goal auto-continue timer", () => this._goalAutoContinue.clearTimer());
+		this._runTeardownStep("dispose goal auto-continue", () => this._goalAutoContinue.dispose());
 		this._runTeardownStep("abort research lanes", () => this._research.abort());
 		this._runTeardownStep("abort model-fitness lanes", () => this._fitness.abort());
 		for (const record of this._laneTracker.getRecords()) {

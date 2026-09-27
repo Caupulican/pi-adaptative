@@ -23,6 +23,13 @@ export interface GoalAutoContinueControllerDeps {
 	onContinuationActivity?(): void;
 }
 
+type GoalAutoContinueScheduleSettings = Pick<
+	ReturnType<SettingsManager["getAutonomySettings"]>,
+	"goalAutoContinue" | "goalAutoContinueDelayMs" | "maxStallTurns"
+>;
+
+type GoalAutoContinueTimerPlan = { action: "clear" } | { action: "arm"; delayMs: number };
+
 /**
  * The continuation waits for the foreground and is itself foreground work.
  * Its own wait and prompt run inside this store so they do not observe that bit.
@@ -38,6 +45,9 @@ export function isOwnIdleContinuationAdmission(): boolean {
 export class GoalAutoContinueController {
 	private _timer: ReturnType<typeof setTimeout> | undefined;
 	private _isContinuing = false;
+	private _disposed = false;
+	private _schedulerSettings: GoalAutoContinueScheduleSettings | undefined;
+	private _unsubscribeSettingsChanges: (() => void) | undefined;
 	private readonly deps: GoalAutoContinueControllerDeps;
 
 	constructor(deps: GoalAutoContinueControllerDeps) {
@@ -54,20 +64,34 @@ export class GoalAutoContinueController {
 	}
 
 	clearTimer(): void {
-		if (this._timer !== undefined) {
-			clearTimeout(this._timer);
-			this._timer = undefined;
-			this.deps.onContinuationActivity?.();
-		}
+		this.cancelTimer(true);
+	}
+
+	dispose(): void {
+		if (this._disposed) return;
+		this._disposed = true;
+		this._unsubscribeSettingsChanges?.();
+		this._unsubscribeSettingsChanges = undefined;
+		this.clearTimer();
 	}
 
 	scheduleFromIdle(options?: PromptOptions): void {
-		if (options?.autoContinueGoal === false || this._isContinuing || this.deps.isDisposed()) return;
+		if (options?.autoContinueGoal === false || this._isContinuing || this._disposed || this.deps.isDisposed()) return;
 
-		const { maxStallTurns, goalAutoContinue, goalAutoContinueDelayMs } = this.deps
-			.getSettingsManager()
-			.getAutonomySettings();
-		if (!goalAutoContinue) return;
+		const settingsManager = this.deps.getSettingsManager();
+		const settings = settingsManager.getAutonomySettings();
+		this.ensureSettingsSubscription(settingsManager, settings);
+		const plan = this.planTimer(settings);
+		if (plan.action === "clear") {
+			this.clearTimer();
+			return;
+		}
+		this.armTimer(plan.delayMs);
+	}
+
+	private planTimer(settings: ReturnType<SettingsManager["getAutonomySettings"]>): GoalAutoContinueTimerPlan {
+		const { maxStallTurns, goalAutoContinue, goalAutoContinueDelayMs } = settings;
+		if (!goalAutoContinue) return { action: "clear" };
 		const snapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
 		const continuation = snapshot.continuation;
 		const resumeAtMs = continuation.resumeAt === undefined ? Number.NaN : Date.parse(continuation.resumeAt);
@@ -75,7 +99,7 @@ export class GoalAutoContinueController {
 			continuation.action === "waiting" &&
 			continuation.reasonCode === "worker_in_flight" &&
 			Number.isFinite(resumeAtMs);
-		if (continuation.action !== "continue" && !waitingForWorkerDeadline) return;
+		if (continuation.action !== "continue" && !waitingForWorkerDeadline) return { action: "clear" };
 		const activeGoalId = snapshot.goalState?.goalId;
 		if (
 			activeGoalId !== undefined &&
@@ -83,19 +107,28 @@ export class GoalAutoContinueController {
 			continuation.reasonCode !== "worker_wait_timeout" &&
 			!waitingForWorkerDeadline
 		) {
-			return;
+			return { action: "clear" };
 		}
+		return {
+			action: "arm",
+			delayMs: waitingForWorkerDeadline ? Math.max(0, resumeAtMs - Date.now()) : goalAutoContinueDelayMs,
+		};
+	}
 
-		this.clearTimer();
-		this._timer = setTimeout(
-			() => {
-				this._timer = undefined;
-				void this.runScheduled().finally(() => this.deps.onContinuationActivity?.());
-			},
-			waitingForWorkerDeadline ? Math.max(0, resumeAtMs - Date.now()) : goalAutoContinueDelayMs,
-		);
+	private armTimer(delayMs: number): void {
+		// Acquire the replacement before releasing the last valid timer. Planning or allocation
+		// failure therefore cannot erase the only event that owns future goal progress.
+		const timer = setTimeout(() => {
+			if (this._timer !== timer) return;
+			this._timer = undefined;
+			void this.runScheduled()
+				.catch((error: unknown) => this.emitContinuationFailure(error))
+				.finally(() => this.deps.onContinuationActivity?.());
+		}, delayMs);
+		const previous = this._timer;
+		this._timer = timer;
+		if (previous !== undefined) clearTimeout(previous);
 		this.deps.onContinuationActivity?.();
-		const timer = this._timer;
 		if (typeof timer === "object" && timer && "unref" in timer) {
 			const { unref } = timer as { unref?: () => void };
 			unref?.call(timer);
@@ -132,14 +165,14 @@ export class GoalAutoContinueController {
 	}
 
 	private unavailableResult(options: GoalContinuationLoopOptions): GoalContinuationLoopResult | undefined {
-		if (this.deps.isDisposed()) return this.skippedResult(options, "session_disposed");
+		if (this._disposed || this.deps.isDisposed()) return this.skippedResult(options, "session_disposed");
 		if (this.deps.isGoalToolActive()) return undefined;
 		this.deps.markGoalToolUnavailable();
 		return this.skippedResult(options, "goal_tool_unavailable");
 	}
 
 	private async runScheduled(): Promise<void> {
-		if (this._isContinuing || this.deps.isDisposed()) return;
+		if (this._isContinuing || this._disposed || this.deps.isDisposed()) return;
 		const { maxStallTurns, goalContinueTurns, goalContinueMaxWallClockMinutes, goalAutoContinue } = this.deps
 			.getSettingsManager()
 			.getAutonomySettings();
@@ -169,15 +202,90 @@ export class GoalAutoContinueController {
 				interrupted = true;
 			}
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			this.deps.emit({ type: "warning", message: `Goal auto-continuation failed: ${message}` });
+			this.emitContinuationFailure(error);
 		}
-		if (!interrupted && !this.deps.isDisposed()) {
+		if (!interrupted && !this._disposed && !this.deps.isDisposed()) {
 			const nextSnapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
 			if (nextSnapshot.continuation.action === "continue") {
 				this.scheduleFromIdle();
 			}
 		}
+	}
+
+	private emitContinuationFailure(error: unknown): void {
+		const message = error instanceof Error ? error.message : String(error);
+		this.deps.emit({ type: "warning", message: `Goal auto-continuation failed: ${message}` });
+	}
+
+	private cancelTimer(notify: boolean): boolean {
+		if (this._timer === undefined) return false;
+		clearTimeout(this._timer);
+		this._timer = undefined;
+		if (notify) this.deps.onContinuationActivity?.();
+		return true;
+	}
+
+	private ensureSettingsSubscription(
+		settingsManager: SettingsManager,
+		settings: ReturnType<SettingsManager["getAutonomySettings"]>,
+	): void {
+		this._schedulerSettings = this.schedulerSettings(settings);
+		if (
+			this._unsubscribeSettingsChanges !== undefined ||
+			this._disposed ||
+			typeof settingsManager.subscribeChanges !== "function"
+		) {
+			return;
+		}
+		this._unsubscribeSettingsChanges = settingsManager.subscribeChanges(() => this.reconcileSettingsChange());
+	}
+
+	private reconcileSettingsChange(): void {
+		if (this._disposed) return;
+		const settings = this.deps.getSettingsManager().getAutonomySettings();
+		const next = this.schedulerSettings(settings);
+		const previous = this._schedulerSettings;
+		if (
+			previous !== undefined &&
+			previous.goalAutoContinue === next.goalAutoContinue &&
+			previous.goalAutoContinueDelayMs === next.goalAutoContinueDelayMs &&
+			previous.maxStallTurns === next.maxStallTurns
+		) {
+			return;
+		}
+		if (!next.goalAutoContinue || this.deps.isDisposed()) {
+			this._schedulerSettings = next;
+			this.clearTimer();
+			return;
+		}
+		if (this._isContinuing) {
+			this._schedulerSettings = next;
+			return;
+		}
+
+		try {
+			this.scheduleFromIdle();
+		} catch (error) {
+			// SettingsManager deliberately contains listener failures. Preserve the last valid
+			// timer and prior reconciliation mark so an exact repeat can retry the current
+			// settings instead of silently losing ownership.
+			this._schedulerSettings = previous;
+			const message = error instanceof Error ? error.message : String(error);
+			this.deps.emit({
+				type: "warning",
+				message: `Goal auto-continuation settings reconciliation failed: ${message}`,
+			});
+		}
+	}
+
+	private schedulerSettings(
+		settings: ReturnType<SettingsManager["getAutonomySettings"]>,
+	): GoalAutoContinueScheduleSettings {
+		return {
+			goalAutoContinue: settings.goalAutoContinue,
+			goalAutoContinueDelayMs: settings.goalAutoContinueDelayMs,
+			maxStallTurns: settings.maxStallTurns,
+		};
 	}
 
 	private skippedResult(

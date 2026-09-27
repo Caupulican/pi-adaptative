@@ -3,6 +3,8 @@ import { GoalAutoContinueController } from "../src/core/goals/goal-auto-continue
 import { evaluateGoalContinuation } from "../src/core/goals/goal-continuation-controller.ts";
 import type { GoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapshot.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const AUTONOMY_SETTINGS = {
 	goalAutoContinue: true,
@@ -155,6 +157,197 @@ describe("GoalAutoContinueController idle autosteer", () => {
 
 		expect(snapshotSettings).toEqual([]);
 		expect(continuationOptions).toEqual([]);
+	});
+
+	it("reconciles an armed continuation when live autonomy settings disable and re-enable it", async () => {
+		const settingsManager = SettingsManager.create(
+			tempDir("pi-goal-autosteer-project-"),
+			tempDir("pi-goal-autosteer-agent-"),
+		);
+		settingsManager.setAutonomySettings({ ...AUTONOMY_SETTINGS, goalAutoContinueDelayMs: 25 });
+		let loopCalls = 0;
+		const activityStates: boolean[] = [];
+		const controller = new GoalAutoContinueController({
+			isDisposed: () => false,
+			isGoalToolActive: () => true,
+			getSettingsManager: () => settingsManager,
+			getGoalRuntimeSnapshot: () => activeSnapshot(),
+			hasInFlightLaneForGoal: () => false,
+			continueGoalLoop: async () => {
+				loopCalls++;
+				return {
+					turnsSubmitted: 1,
+					stopReason: "turn_interrupted",
+					finalSnapshot: activeSnapshot(),
+				};
+			},
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
+			markGoalToolUnavailable: () => {},
+			emit: () => {},
+			onContinuationActivity: () => activityStates.push(controller.hasPendingContinuation()),
+		});
+
+		controller.scheduleFromIdle();
+		expect(controller.hasPendingContinuation()).toBe(true);
+		expect(activityStates).toEqual([true]);
+
+		settingsManager.setAutonomySettings({ ...settingsManager.getAutonomySettings(), goalAutoContinueDelayMs: 40 });
+		expect(controller.hasPendingContinuation()).toBe(true);
+		expect(activityStates).toEqual([true, true]);
+		await vi.advanceTimersByTimeAsync(25);
+		expect(loopCalls).toBe(0);
+
+		settingsManager.setAutonomySettings({ ...settingsManager.getAutonomySettings(), goalAutoContinue: false });
+		expect(controller.hasPendingContinuation()).toBe(false);
+		expect(vi.getTimerCount()).toBe(0);
+		expect(activityStates.at(-1)).toBe(false);
+		await vi.advanceTimersByTimeAsync(40);
+		expect(loopCalls).toBe(0);
+
+		settingsManager.setAutonomySettings({ ...settingsManager.getAutonomySettings(), goalAutoContinue: true });
+		expect(controller.hasPendingContinuation()).toBe(true);
+		expect(activityStates.at(-1)).toBe(true);
+		await vi.advanceTimersByTimeAsync(39);
+		expect(loopCalls).toBe(0);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(loopCalls).toBe(1);
+		expect(controller.hasPendingContinuation()).toBe(false);
+		await settingsManager.flush();
+	});
+
+	it("unsubscribes settings reconciliation and clears its timer on disposal", () => {
+		let settings = { ...AUTONOMY_SETTINGS, goalAutoContinueDelayMs: 25 };
+		let settingsListener: (() => void) | undefined;
+		let unsubscribeCalls = 0;
+		const controller = new GoalAutoContinueController({
+			isDisposed: () => false,
+			isGoalToolActive: () => true,
+			getSettingsManager: () =>
+				({
+					getAutonomySettings: () => settings,
+					subscribeChanges: (listener: () => void) => {
+						settingsListener = listener;
+						return () => {
+							unsubscribeCalls++;
+						};
+					},
+				}) as never,
+			getGoalRuntimeSnapshot: () => activeSnapshot(),
+			hasInFlightLaneForGoal: () => false,
+			continueGoalLoop: async () => ({
+				turnsSubmitted: 1,
+				stopReason: "turn_interrupted",
+				finalSnapshot: activeSnapshot(),
+			}),
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
+			markGoalToolUnavailable: () => {},
+			emit: () => {},
+		});
+
+		controller.scheduleFromIdle();
+		controller.dispose();
+		expect(unsubscribeCalls).toBe(1);
+		expect(controller.hasPendingContinuation()).toBe(false);
+		expect(vi.getTimerCount()).toBe(0);
+
+		settings = { ...settings, goalAutoContinueDelayMs: 1 };
+		settingsListener?.();
+		controller.dispose();
+		expect(unsubscribeCalls).toBe(1);
+		expect(controller.hasPendingContinuation()).toBe(false);
+	});
+
+	it("retains the last valid timer when live settings re-evaluation fails", async () => {
+		const settingsManager = SettingsManager.create(
+			tempDir("pi-goal-autosteer-failure-project-"),
+			tempDir("pi-goal-autosteer-failure-agent-"),
+		);
+		settingsManager.setAutonomySettings({ ...AUTONOMY_SETTINGS, goalAutoContinueDelayMs: 25 });
+		let failSnapshot = false;
+		let loopCalls = 0;
+		const activityStates: boolean[] = [];
+		const warnings: string[] = [];
+		const controller = new GoalAutoContinueController({
+			isDisposed: () => false,
+			isGoalToolActive: () => true,
+			getSettingsManager: () => settingsManager,
+			getGoalRuntimeSnapshot: () => {
+				if (failSnapshot) throw new Error("snapshot unavailable");
+				return activeSnapshot();
+			},
+			hasInFlightLaneForGoal: () => false,
+			continueGoalLoop: async () => {
+				loopCalls++;
+				return {
+					turnsSubmitted: 1,
+					stopReason: "turn_interrupted",
+					finalSnapshot: activeSnapshot(),
+				};
+			},
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
+			markGoalToolUnavailable: () => {},
+			emit: (event) => {
+				if (event.type === "warning") warnings.push(event.message);
+			},
+			onContinuationActivity: () => activityStates.push(controller.hasPendingContinuation()),
+		});
+
+		controller.scheduleFromIdle();
+		failSnapshot = true;
+		settingsManager.setAutonomySettings({ ...settingsManager.getAutonomySettings(), goalAutoContinueDelayMs: 40 });
+
+		expect(controller.hasPendingContinuation()).toBe(true);
+		expect(vi.getTimerCount()).toBe(1);
+		expect(activityStates).toEqual([true]);
+		expect(warnings).toEqual(["Goal auto-continuation settings reconciliation failed: snapshot unavailable"]);
+
+		failSnapshot = false;
+		settingsManager.setAutonomySettings({ ...settingsManager.getAutonomySettings() });
+		expect(controller.hasPendingContinuation()).toBe(true);
+		expect(vi.getTimerCount()).toBe(1);
+		expect(activityStates).toEqual([true, true]);
+		await vi.advanceTimersByTimeAsync(39);
+		expect(loopCalls).toBe(0);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(loopCalls).toBe(1);
+		await settingsManager.flush();
+	});
+
+	it("contains and reports a scheduled snapshot failure instead of rejecting unobserved", async () => {
+		let snapshotReads = 0;
+		const warnings: string[] = [];
+		const controller = new GoalAutoContinueController({
+			isDisposed: () => false,
+			isGoalToolActive: () => true,
+			getSettingsManager: () =>
+				({
+					getAutonomySettings: () => ({ ...AUTONOMY_SETTINGS, goalAutoContinueDelayMs: 10 }),
+				}) as never,
+			getGoalRuntimeSnapshot: () => {
+				snapshotReads++;
+				if (snapshotReads > 1) throw new Error("scheduled snapshot unavailable");
+				return activeSnapshot();
+			},
+			hasInFlightLaneForGoal: () => false,
+			continueGoalLoop: async () => {
+				throw new Error("must not run");
+			},
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
+			markGoalToolUnavailable: () => {},
+			emit: (event) => {
+				if (event.type === "warning") warnings.push(event.message);
+			},
+		});
+
+		controller.scheduleFromIdle();
+		await vi.advanceTimersByTimeAsync(10);
+
+		expect(controller.hasPendingContinuation()).toBe(false);
+		expect(warnings).toEqual(["Goal auto-continuation failed: scheduled snapshot unavailable"]);
 	});
 
 	it("wakes at a bound worker's recovery deadline without polling or an external terminal event", async () => {
