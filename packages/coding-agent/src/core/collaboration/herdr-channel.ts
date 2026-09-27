@@ -7,6 +7,18 @@ export interface HerdrEventChannel {
 	close(): void;
 }
 
+/** Deliver one channel event through the same subscriber path used by the socket owner. */
+export function dispatchHerdrChannelEvent(listeners: ReadonlySet<(event: unknown) => void>, event: unknown): void {
+	for (const listener of [...listeners]) {
+		try {
+			listener(event);
+		} catch {
+			// Subscribers are independent observers. One adapter failure must not suppress the same
+			// terminal event for a sibling waiter or escape from the socket's data/error callback.
+		}
+	}
+}
+
 /** Herdr owns one request per socket. Only events.subscribe keeps its dedicated socket open. */
 export async function connectHerdrChannel(path: string, signal: AbortSignal): Promise<HerdrEventChannel> {
 	if (signal.aborted) throw new CollaborationBackendError("aborted", "Herdr connection cancelled.", "not-submitted");
@@ -28,7 +40,7 @@ export async function connectHerdrChannel(path: string, signal: AbortSignal): Pr
 			socket.destroy();
 		}
 		connections.clear();
-		for (const listener of listeners) listener({ error: { code: "connection_closed" } });
+		dispatchHerdrChannelEvent(listeners, { error: { code: "connection_closed" } });
 		listeners.clear();
 	};
 	signal.addEventListener("abort", fail, { once: true });
@@ -137,7 +149,7 @@ export async function connectHerdrChannel(path: string, signal: AbortSignal): Pr
 								return;
 							}
 						} else if (streaming && envelope.event) {
-							for (const listener of listeners) listener(value);
+							dispatchHerdrChannelEvent(listeners, value);
 						} else return fail();
 						newline = buffer.indexOf("\n");
 					}

@@ -3,7 +3,7 @@ import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { connectHerdrChannel } from "../src/core/collaboration/herdr-channel.ts";
+import { connectHerdrChannel, dispatchHerdrChannelEvent } from "../src/core/collaboration/herdr-channel.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -60,6 +60,20 @@ async function serverFixture() {
 }
 
 describe("Herdr single-request socket protocol", () => {
+	it("isolates event subscribers so one failure cannot withhold a terminal from its siblings", () => {
+		const delivered: unknown[] = [];
+		const listeners = new Set<(event: unknown) => void>([
+			() => {
+				throw new Error("broken observer");
+			},
+			(event) => delivered.push(event),
+		]);
+		const terminal = { error: { code: "connection_closed" } };
+
+		expect(() => dispatchHerdrChannelEvent(listeners, terminal)).not.toThrow();
+		expect(delivered).toEqual([terminal]);
+	});
+
 	it("uses independent RPC sockets while retaining the acknowledged event subscription", async () => {
 		const server = await serverFixture();
 		const channel = await connectHerdrChannel(server.path, AbortSignal.timeout(5000));
