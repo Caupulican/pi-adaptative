@@ -15,6 +15,9 @@
 
 ### Fixed
 
+- Supervised runtime shutdown now defers termination until the child grants spawn ownership and fences late spawn events after a terminal failure.
+- Capability proofs refuse already-cancelled work before launch and use bounded process-tree settlement for live cancellation and timeouts.
+- Repository mutation fingerprints resolve the checkout root from subdirectory tool working directories, drain Git diagnostics, and terminate timed-out Git trees through the bounded child-process owner.
 - CLI PowerShell warm-start failures no longer signal before spawn ownership exists, and unclaimed or failed candidates now complete bounded terminal settlement before shutdown or candidate retry continues.
 - Persistent shell and Windows-engine children retain termination ownership across runtime errors, rejected duplicate admission, and pre-spawn disposal; strict shutdown still waits for physical close, and the inherited-stdio regression gate no longer conflates cold Git Bash startup with exit settlement.
 - Idle compaction preparation now follows live compaction policy: obsolete work is canceled and cannot block the next owner request, persisted summaries cannot bypass current admission, and captured callbacks from replaced timers are identity-fenced.

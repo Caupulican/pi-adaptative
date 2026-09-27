@@ -2,10 +2,11 @@
  * Size-independent checkout fingerprint. Git output and file bytes are hashed as
  * streams. A moving checkout is retried once, then reported unstable.
  */
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, lstatSync, openSync, readlinkSync, readSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
+import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { withoutInheritedGitLocation } from "../exec.ts";
 
 export type RepoDeliveryFingerprint =
@@ -15,6 +16,10 @@ export type RepoDeliveryFingerprint =
 export interface FingerprintHooks {
 	/** Test seam: runs after each fence so a caller can move the checkout under the hash. */
 	afterFence?: () => void;
+	/** Test seam for process-lifecycle failure injection. */
+	spawnGit?: (command: string, args: string[], options: SpawnOptions) => ChildProcess;
+	/** Test seam for bounded timeout verification. */
+	gitTimeoutMs?: number;
 }
 
 const GIT_TIMEOUT_MS = 20_000;
@@ -24,42 +29,53 @@ function gitEnv(): NodeJS.ProcessEnv {
 	return { ...withoutInheritedGitLocation(), GIT_TERMINAL_PROMPT: "0" };
 }
 
-function runGit(repoRoot: string, args: readonly string[], onData: (chunk: Buffer) => void): Promise<boolean> {
-	return new Promise((resolve) => {
-		let child: ChildProcess;
-		try {
-			child = spawn("git", args, {
-				cwd: repoRoot,
-				env: gitEnv(),
-				stdio: ["ignore", "pipe", "pipe"],
-				windowsHide: true,
-			});
-		} catch {
-			resolve(false);
-			return;
-		}
-		const timer = setTimeout(() => {
-			child.kill();
-		}, GIT_TIMEOUT_MS);
-		child.stdout?.on("data", (chunk: Buffer) => {
-			onData(chunk);
+async function runGit(
+	repoRoot: string,
+	args: readonly string[],
+	onData: (chunk: Buffer) => void,
+	hooks?: FingerprintHooks,
+): Promise<boolean> {
+	let child: ChildProcess;
+	try {
+		child = (hooks?.spawnGit ?? spawn)("git", [...args], {
+			cwd: repoRoot,
+			detached: process.platform !== "win32",
+			env: gitEnv(),
+			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
 		});
-		child.on("error", () => {
-			clearTimeout(timer);
-			resolve(false);
+	} catch {
+		return false;
+	}
+	child.stdout?.on("data", onData);
+	// Git diagnostics are not part of the fingerprint, but the pipe must remain drained or enough
+	// stderr can block the child before its terminal event and turn a deadline into a false hang.
+	child.stderr?.resume();
+	try {
+		const terminal = await waitForChildProcessWithTermination(child, {
+			timeoutMs: hooks?.gitTimeoutMs ?? GIT_TIMEOUT_MS,
+			killGraceMs: 1_000,
 		});
-		child.on("close", (code) => {
-			clearTimeout(timer);
-			resolve(code === 0);
-		});
-	});
+		return terminal.reason === "exited" && terminal.code === 0;
+	} catch {
+		return false;
+	}
 }
 
-async function gitText(repoRoot: string, args: readonly string[]): Promise<string | undefined> {
+async function gitText(
+	repoRoot: string,
+	args: readonly string[],
+	hooks?: FingerprintHooks,
+): Promise<string | undefined> {
 	const chunks: Buffer[] = [];
-	const ok = await runGit(repoRoot, args, (chunk) => {
-		chunks.push(chunk);
-	});
+	const ok = await runGit(
+		repoRoot,
+		args,
+		(chunk) => {
+			chunks.push(chunk);
+		},
+		hooks,
+	);
 	if (!ok) return undefined;
 	return Buffer.concat(chunks).toString("utf8").trim();
 }
@@ -161,23 +177,33 @@ interface Fence {
 	readonly token: string;
 }
 
-async function readFence(repoRoot: string): Promise<Fence | undefined> {
-	const head = await gitText(repoRoot, ["rev-parse", "HEAD"]);
+async function readFence(repoRoot: string, hooks?: FingerprintHooks): Promise<Fence | undefined> {
+	const head = await gitText(repoRoot, ["rev-parse", "HEAD"], hooks);
 	if (!head) return undefined;
 	const index = createHash("sha256");
-	const indexOk = await runGit(repoRoot, ["ls-files", "--stage", "-z"], (chunk) => {
-		index.update(chunk);
-	});
+	const indexOk = await runGit(
+		repoRoot,
+		["ls-files", "--stage", "-z"],
+		(chunk) => {
+			index.update(chunk);
+		},
+		hooks,
+	);
 	if (!indexOk) return undefined;
 	const indexDigest = index.digest("hex");
 	const records: StatusRecord[] = [];
 	let pending = Buffer.alloc(0);
-	const statusOk = await runGit(repoRoot, ["status", "--porcelain=v2", "-z", "--untracked-files=all"], (chunk) => {
-		pending = Buffer.concat([pending, chunk]);
-		const taken = takeStatusRecords(pending);
-		records.push(...taken.records);
-		pending = Buffer.from(taken.rest);
-	});
+	const statusOk = await runGit(
+		repoRoot,
+		["status", "--porcelain=v2", "-z", "--untracked-files=all"],
+		(chunk) => {
+			pending = Buffer.concat([pending, chunk]);
+			const taken = takeStatusRecords(pending);
+			records.push(...taken.records);
+			pending = Buffer.from(taken.rest);
+		},
+		hooks,
+	);
 	if (!statusOk || pending.length > 0) return undefined;
 	const token = createHash("sha256");
 	token.update(head);
@@ -196,6 +222,7 @@ async function readFence(repoRoot: string): Promise<Fence | undefined> {
 async function digestFence(
 	repoRoot: string,
 	fence: Fence,
+	hooks?: FingerprintHooks,
 ): Promise<{ readonly digest: string; readonly entries: Map<string, string> } | undefined> {
 	const hash = createHash("sha256");
 	const entries = new Map<string, string>();
@@ -215,7 +242,7 @@ async function digestFence(
 		if (!absolute) return undefined;
 		let mark: string | undefined;
 		if (record.submodule) {
-			const sub = await gitText(absolute, ["rev-parse", "HEAD"]);
+			const sub = await gitText(absolute, ["rev-parse", "HEAD"], hooks);
 			mark = sub ? `submodule ${sub}` : "submodule";
 		} else mark = streamHashFile(absolute);
 		if (!mark) return undefined;
@@ -233,18 +260,20 @@ async function digestFence(
 }
 
 export async function captureRepoDeliveryFingerprint(
-	repoRoot: string,
+	workingDirectory: string,
 	hooks?: FingerprintHooks,
 ): Promise<RepoDeliveryFingerprint> {
+	if (!workingDirectory) return { ok: false, reason: "repository_fingerprint_unavailable" };
+	const repoRoot = await gitText(workingDirectory, ["rev-parse", "--show-toplevel"], hooks);
 	if (!repoRoot) return { ok: false, reason: "repository_fingerprint_unavailable" };
 	const attempt = async (): Promise<RepoDeliveryFingerprint | "retry"> => {
 		try {
-			const before = await readFence(repoRoot);
+			const before = await readFence(repoRoot, hooks);
 			if (!before) return { ok: false, reason: "repository_fingerprint_unavailable" };
 			hooks?.afterFence?.();
-			const digested = await digestFence(repoRoot, before);
+			const digested = await digestFence(repoRoot, before, hooks);
 			if (!digested) return { ok: false, reason: "repository_fingerprint_unavailable" };
-			const after = await readFence(repoRoot);
+			const after = await readFence(repoRoot, hooks);
 			if (!after) return { ok: false, reason: "repository_fingerprint_unavailable" };
 			if (before.token !== after.token) return "retry";
 			return { ok: true, digest: digested.digest, entries: digested.entries };

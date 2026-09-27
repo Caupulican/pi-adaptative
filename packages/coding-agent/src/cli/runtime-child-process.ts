@@ -20,18 +20,43 @@ export function launchRuntimeChild(
 		stdio: [terminalMode, terminalMode, terminalMode, "ipc"],
 	});
 	let killTimer: ReturnType<typeof setTimeout> | undefined;
+	let spawned = false;
+	let stopRequested = false;
+	let terminalSettled = false;
+	const requestTermination = (): void => {
+		if (terminalSettled || killTimer || child.exitCode !== null || child.signalCode !== null) return;
+		killTimer = setTimeout(() => {
+			try {
+				child.kill("SIGKILL");
+			} catch {
+				// The terminal promise remains authoritative; a signal exception is not an exit.
+			}
+		}, 5000);
+		try {
+			child.kill("SIGTERM");
+		} catch {
+			// The bounded fallback retains termination ownership after a failed first signal.
+		}
+	};
 	const terminal = new Promise<number>((resolve) => {
-		child.once("exit", (code) => {
+		const settleTerminal = (code: number): void => {
+			if (terminalSettled) return;
+			terminalSettled = true;
 			clearTimeout(killTimer);
-			resolve(code ?? 1);
-		});
+			child.off("spawn", onSpawn);
+			resolve(code);
+		};
+		const onSpawn = (): void => {
+			if (terminalSettled) return;
+			spawned = true;
+			if (stopRequested) requestTermination();
+		};
+		child.once("exit", (code) => settleTerminal(code ?? 1));
+		child.once("spawn", onSpawn);
 		// A failed spawn has no writer. Errors on an existing process (e.g. kill denied) do not
 		// prove it stopped; only its terminal event may release the single-writer fence.
 		child.on("error", () => {
-			if (child.pid === undefined) {
-				clearTimeout(killTimer);
-				resolve(1);
-			}
+			if (!spawned) settleTerminal(1);
 		});
 	});
 	return {
@@ -48,9 +73,11 @@ export function launchRuntimeChild(
 			if (child.connected) child.send(message, () => {});
 		},
 		stop() {
-			if (killTimer || child.exitCode !== null || child.signalCode !== null) return;
-			child.kill("SIGTERM");
-			killTimer = setTimeout(() => child.kill("SIGKILL"), 5000);
+			if (terminalSettled || stopRequested || child.exitCode !== null || child.signalCode !== null) return;
+			stopRequested = true;
+			// A failed spawn can retain a native handle before its error. Only the child's own
+			// spawn event grants signal ownership; an earlier stop remains armed until then.
+			if (spawned) requestTermination();
 		},
 	};
 }
