@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, type WriteStream } from "node:fs";
+import { existsSync, rmSync, type WriteStream } from "node:fs";
 import { join, resolve } from "node:path";
 import { getAgentDir } from "../../config.ts";
 import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
-import { createSafeWriteStream } from "../../utils/safe-write-stream.ts";
+import { createSafeWriteStream, endWriteStream } from "../../utils/safe-write-stream.ts";
 import { trackDetachedChild, untrackDetachedChild } from "../../utils/shell.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import { hasShellOnlySyntax, isChangeDirectoryInvocation, parseShellCommandSequence } from "./shell-command-parser.ts";
@@ -20,6 +20,7 @@ const DEFAULT_MAX_RETAINED_GIT_OUTPUT_BYTES = 48 * 1024 * 1024;
 const MAX_RETAINED_GIT_STDERR_BYTES = 8 * 1024 * 1024;
 const DEFAULT_GIT_FILTER_TIMEOUT_SECONDS = 10 * 60;
 const GIT_FILTER_KILL_GRACE_MS = 2_000;
+const DEFAULT_GIT_FILTER_SPILL_FLUSH_TIMEOUT_MS = 30_000;
 
 function maxRetainedGitOutputBytes(): number {
 	const raw = process.env.PI_GIT_FILTER_MAX_RETAINED_BYTES;
@@ -68,6 +69,8 @@ interface GitFilterOptions {
 	signal?: AbortSignal;
 	timeout?: number;
 	environment?: NodeJS.ProcessEnv;
+	/** Test seam and safety bound for terminal spill settlement. */
+	spillFlushTimeoutMs?: number;
 }
 
 export function unicodeTruncate(str: string, maxLength: number): string {
@@ -130,7 +133,55 @@ export async function runGitQuery(
 	let overflowPath: string | undefined;
 	let overflowStream: WriteStream | undefined;
 	let overflowStreamEnded = false;
+	let overflowPublished = false;
 	let overflowWriteError: Error | undefined;
+	let overflowBackpressured = false;
+	const releaseOverflowBackpressure = (): void => {
+		if (!overflowBackpressured) return;
+		overflowBackpressured = false;
+		child.stdout?.resume();
+	};
+	const recordOverflowWriteError = (error: Error): void => {
+		overflowWriteError ??= error;
+		overflowStream?.off("drain", releaseOverflowBackpressure);
+		releaseOverflowBackpressure();
+	};
+	const writeOverflowChunk = (chunk: Buffer | string): void => {
+		const stream = overflowStream;
+		if (!stream || overflowWriteError !== undefined || stream.destroyed) return;
+		let accepted: boolean;
+		try {
+			accepted = stream.write(chunk);
+		} catch (error) {
+			recordOverflowWriteError(error instanceof Error ? error : new Error(String(error)));
+			return;
+		}
+		if (!accepted && overflowWriteError === undefined && !stream.destroyed && !overflowBackpressured) {
+			overflowBackpressured = true;
+			child.stdout?.pause();
+			stream.once("drain", releaseOverflowBackpressure);
+		}
+	};
+	const endOverflowStream = async (): Promise<void> => {
+		const stream = overflowStream;
+		if (!stream || overflowStreamEnded) return;
+		const timeoutMs = Math.max(0, options?.spillFlushTimeoutMs ?? DEFAULT_GIT_FILTER_SPILL_FLUSH_TIMEOUT_MS);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const flushed = endWriteStream(stream).then(() => true);
+		const completed = await Promise.race([
+			flushed,
+			new Promise<false>((resolveTimeout) => {
+				timer = setTimeout(() => resolveTimeout(false), timeoutMs);
+			}),
+		]);
+		if (timer) clearTimeout(timer);
+		if (!completed) {
+			overflowWriteError ??= new Error(`spill flush timed out after ${timeoutMs}ms`);
+			stream.destroy();
+			await endWriteStream(stream);
+		}
+		overflowStreamEnded = true;
+	};
 	const timeoutSeconds =
 		options?.timeout && options.timeout > 0 ? options.timeout : DEFAULT_GIT_FILTER_TIMEOUT_SECONDS;
 
@@ -138,7 +189,7 @@ export async function runGitQuery(
 		child.stdout?.on("data", (chunk: Buffer) => {
 			totalStdoutBytes += chunk.length;
 			if (overflowStream) {
-				overflowStream.write(chunk);
+				writeOverflowChunk(chunk);
 				return;
 			}
 			stdoutChunks.push(chunk);
@@ -148,10 +199,8 @@ export async function runGitQuery(
 					getProcessWorkRun(getAgentDir(), "outputs", "git").path,
 					`pi-git-${randomBytes(8).toString("hex")}.log`,
 				);
-				overflowStream = createSafeWriteStream(overflowPath, (error) => {
-					overflowWriteError = error;
-				});
-				for (const retained of stdoutChunks) overflowStream.write(retained);
+				overflowStream = createSafeWriteStream(overflowPath, recordOverflowWriteError);
+				writeOverflowChunk(Buffer.concat(stdoutChunks));
 			}
 		});
 		child.stderr?.on("data", (chunk: Buffer) => {
@@ -172,15 +221,11 @@ export async function runGitQuery(
 		const stdoutBuffer = Buffer.concat(stdoutChunks);
 		const stderrBuffer = Buffer.concat(stderrChunks);
 		if (overflowStream !== undefined && overflowPath !== undefined) {
-			if (stderrBuffer.length > 0 && !overflowStream.writableEnded) {
-				overflowStream.write("\n--- stderr ---\n");
-				overflowStream.write(stderrBuffer);
+			if (stderrBuffer.length > 0 && overflowWriteError === undefined && !overflowStream.writableEnded) {
+				writeOverflowChunk("\n--- stderr ---\n");
+				writeOverflowChunk(stderrBuffer);
 			}
-			const stream = overflowStream;
-			await new Promise<void>((resolveEnd) => {
-				stream.end(() => resolveEnd());
-			});
-			overflowStreamEnded = true;
+			await endOverflowStream();
 			if (overflowWriteError !== undefined) {
 				// Spill failed (e.g. disk full): disclose the loss instead of pointing
 				// consumers at a broken artifact, and keep the retained head usable.
@@ -190,6 +235,7 @@ export async function runGitQuery(
 					status,
 				};
 			}
+			overflowPublished = true;
 			return {
 				stdout: stdoutBuffer.toString("utf-8"),
 				stderr: stderrBuffer.toString("utf-8"),
@@ -205,7 +251,19 @@ export async function runGitQuery(
 		};
 	} finally {
 		untrackDetachedChild(child);
-		if (overflowStream !== undefined && !overflowStreamEnded) overflowStream.end();
+		overflowStream?.off("drain", releaseOverflowBackpressure);
+		releaseOverflowBackpressure();
+		try {
+			await endOverflowStream();
+		} finally {
+			if (overflowPath !== undefined && !overflowPublished) {
+				try {
+					rmSync(overflowPath, { force: true });
+				} catch {
+					// Managed work-run retention remains the fallback for an OS-level removal failure.
+				}
+			}
+		}
 	}
 }
 
