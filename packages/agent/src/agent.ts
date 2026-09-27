@@ -805,7 +805,7 @@ export class Agent {
 		if (!signal) {
 			throw new Error("Agent listener invoked outside active run");
 		}
-		for (const listener of this.listeners) {
+		for (const listener of [...this.listeners]) {
 			await listener(event, signal);
 		}
 	}

@@ -102,6 +102,33 @@ describe("Agent", () => {
 		expect(eventCount).toBe(0); // Should not increase
 	});
 
+	it("delivers each event to the listener generation present when that event starts", async () => {
+		const agent = new Agent({
+			streamFn: () => {
+				throw new Error("expected provider stop");
+			},
+		});
+		const lateEventTypes: string[] = [];
+		let existingStarts = 0;
+		let unsubscribeFirst = () => {};
+		unsubscribeFirst = agent.subscribe((event) => {
+			if (event.type !== "agent_start") return;
+			unsubscribeFirst();
+			agent.subscribe((lateEvent) => {
+				lateEventTypes.push(lateEvent.type);
+			});
+		});
+		agent.subscribe((event) => {
+			if (event.type === "agent_start") existingStarts++;
+		});
+
+		await agent.prompt("hello");
+
+		expect(existingStarts).toBe(1);
+		expect(lateEventTypes[0]).toBe("turn_start");
+		expect(lateEventTypes).not.toContain("agent_start");
+	});
+
 	it("emits full lifecycle events for thrown run failures", async () => {
 		const agent = new Agent({
 			streamFn: () => {
