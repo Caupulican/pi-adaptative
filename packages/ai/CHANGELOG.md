@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- Google Antigravity requests identify as the locally installed AGY 1.2.11 client.
+
+### Fixed
+
+- Google Antigravity OAuth credentials refresh five minutes before expiry, matching AGY's browser OAuth clock-skew window for long-running sessions.
+
 ## [0.99.52] - 2026-09-26
 
 ## [0.99.51] - 2026-09-25

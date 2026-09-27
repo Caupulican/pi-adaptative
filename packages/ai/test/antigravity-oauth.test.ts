@@ -36,7 +36,10 @@ function callbacks(overrides: Partial<OAuthLoginCallbacks> = {}): OAuthLoginCall
 		...overrides,
 	};
 }
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+	vi.useRealTimers();
+	vi.unstubAllGlobals();
+});
 
 describe("Antigravity subscription login", () => {
 	it("owns a separate transport and the CLI service endpoint", () => {
@@ -69,7 +72,21 @@ describe("Antigravity subscription login", () => {
 		const params = authorization?.searchParams;
 		expect(authorization?.origin).toBe("https://accounts.google.com");
 		expect(params?.get("redirect_uri")).toBe("https://antigravity.google/oauth-callback");
-		expect(params?.get("scope")?.split(" ")).toContain("openid");
+		expect(params?.get("client_id")).toBe(
+			"1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
+		);
+		expect(params?.get("response_type")).toBe("code");
+		expect(params?.get("scope")?.split(" ")).toEqual([
+			"https://www.googleapis.com/auth/cloud-platform",
+			"https://www.googleapis.com/auth/userinfo.email",
+			"https://www.googleapis.com/auth/userinfo.profile",
+			"https://www.googleapis.com/auth/cclog",
+			"https://www.googleapis.com/auth/experimentsandconfigs",
+			"https://www.googleapis.com/auth/aicode",
+			"openid",
+		]);
+		expect(params?.get("access_type")).toBe("offline");
+		expect(params?.get("prompt")).toBe("consent");
 		expect(params?.get("code_challenge_method")).toBe("S256");
 		expect(params?.get("state")).toMatch(/^[A-Za-z0-9_-]{22}$/);
 		const fields = fetchMock.mock.calls[0][1].body as URLSearchParams;
@@ -80,6 +97,14 @@ describe("Antigravity subscription login", () => {
 		expect(JSON.stringify(credentials.modelCatalog)).not.toContain("quotaInfo");
 		expect(provider.modifyModels?.([], credentials)).toHaveLength(1);
 		expect(provider.getApiKey(credentials)).toBe("access-fixture");
+	});
+
+	it("refreshes browser OAuth five minutes before expiry", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-09-26T12:00:00Z"));
+		mockDiscovery();
+		const credentials = await provider.login(callbacks());
+		expect(credentials.expires).toBe(Date.now() + 55 * 60 * 1000);
 	});
 
 	it("rejects mismatched callback state before token exchange", async () => {

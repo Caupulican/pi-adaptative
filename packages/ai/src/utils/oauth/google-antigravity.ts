@@ -34,7 +34,7 @@ async function exchangeToken(
 	signal?.throwIfAborted();
 	return {
 		...previous,
-		...parseOAuthTokenCredentials(token, "Antigravity", 60, previous?.refresh),
+		...parseOAuthTokenCredentials(token, "Antigravity", 5 * 60, previous?.refresh),
 	};
 }
 
