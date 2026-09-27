@@ -1718,7 +1718,12 @@ export class WorkerDelegationController {
 						}
 					}
 				}
-				if (!this.deps.isDisposed()) this.scheduler.drain(true);
+				// An availability generation restores every current waiter before its owner drains the
+				// ordinary queue. Re-entering the scheduler here would let an earlier waiter consume a
+				// later waiter's released scope. Other restore paths still need this immediate drain.
+				if (!this.deps.isDisposed() && !this.writeReservations.isDeliveringAvailability()) {
+					this.scheduler.drain(true);
+				}
 				return true;
 			} finally {
 				if (!stillBlocked) {

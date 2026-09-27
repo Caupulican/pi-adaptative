@@ -15,7 +15,7 @@ function controllerWithRunningCaller(): WorkerDelegationController {
 		scheduler: { drain: vi.fn() },
 		yieldedCapacityAttemptIds: new Map<string, number>(),
 		yieldedWriteReservations: new Map(),
-		writeReservations: { yieldForWait: vi.fn(() => undefined) },
+		writeReservations: { yieldForWait: vi.fn(() => undefined), isDeliveringAvailability: () => false },
 	}) as unknown as WorkerDelegationController;
 }
 
@@ -155,7 +155,7 @@ describe("WorkerDelegationController integration invariants", () => {
 			laneAbortControllers: new Map(),
 			yieldedCapacityAttemptIds: new Map<string, number>(),
 			yieldedWriteReservations: new Map(),
-			writeReservations: { yieldForWait, restoreAfterWait },
+			writeReservations: { yieldForWait, restoreAfterWait, isDeliveringAvailability: () => false },
 		}) as unknown as WorkerDelegationController;
 		const yieldCaller = Reflect.get(controller, "yieldWorkerForWait") as (callerAgentId: string) => () => boolean;
 
@@ -195,7 +195,7 @@ describe("WorkerDelegationController integration invariants", () => {
 			laneAbortControllers: new Map([["caller-task", { abort }]]),
 			yieldedCapacityAttemptIds: new Map<string, number>(),
 			yieldedWriteReservations: new Map(),
-			writeReservations: { yieldForWait, restoreAfterWait },
+			writeReservations: { yieldForWait, restoreAfterWait, isDeliveringAvailability: () => false },
 		}) as unknown as WorkerDelegationController;
 		const yieldCaller = Reflect.get(controller, "yieldWorkerForWait") as (callerAgentId: string) => () => boolean;
 

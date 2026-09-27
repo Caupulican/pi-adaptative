@@ -79,6 +79,7 @@ export class WorkerWriteReservationCoordinator {
 	private readonly blockedByLocalLaneIds = new Map<string, Set<string>>();
 	private readonly availabilityListeners = new Set<() => void>();
 	private readonly watchDisposes = new Map<string, () => void>();
+	private availabilityDeliveryDepth = 0;
 
 	constructor(options: WorkerWriteReservationCoordinatorOptions) {
 		this.options = options;
@@ -146,6 +147,11 @@ export class WorkerWriteReservationCoordinator {
 		return () => {
 			this.availabilityListeners.delete(listener);
 		};
+	}
+
+	/** True only while the current release generation is giving every waiter first restoration access. */
+	isDeliveringAvailability(): boolean {
+		return this.availabilityDeliveryDepth > 0;
 	}
 
 	/** Release one exact live caller lane while its model turn is blocked inside a worker wait. */
@@ -441,19 +447,27 @@ export class WorkerWriteReservationCoordinator {
 	}
 
 	private emitAvailability(): void {
+		// A completed wait still owns its logical attempt and must restore the reservation it yielded
+		// before ordinary queued work can consume the release. Snapshot this wake generation so a
+		// callback cannot extend the synchronous dispatch by registering more waiters.
+		this.availabilityDeliveryDepth += 1;
+		try {
+			for (const listener of [...this.availabilityListeners]) {
+				try {
+					listener();
+				} catch {
+					// Waiters re-enter restore; a throwing observer cannot consume the release event.
+				}
+			}
+		} finally {
+			this.availabilityDeliveryDepth -= 1;
+		}
 		try {
 			this.options.drainQueuedWorkers();
 		} catch (error) {
 			this.warnBestEffort(
 				`Worker write reservation queue drain failed: ${error instanceof Error ? error.message : String(error)}`,
 			);
-		}
-		for (const listener of this.availabilityListeners) {
-			try {
-				listener();
-			} catch {
-				// Waiters re-enter restore; a throwing observer cannot consume the release event.
-			}
 		}
 	}
 

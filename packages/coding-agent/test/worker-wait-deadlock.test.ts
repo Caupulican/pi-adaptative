@@ -8,6 +8,7 @@ import type { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts
 import { WorkerWriteReservationCoordinator } from "../src/core/delegation/worker-write-reservation-coordinator.ts";
 import { type AgentBindingContract, ORCHESTRATION_SCHEMA_VERSION } from "../src/core/orchestration/contracts.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../src/core/orchestration/task-runtime.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -209,6 +210,32 @@ describe("worker wait deadlock prevention", () => {
 		}
 	});
 
+	it("does not restore an active waiter merely because reservation availability changed", async () => {
+		let status: AttemptRuntimeState["status"] = "queued";
+		const restore = vi.fn(() => true);
+		const availabilityListeners = new Set<() => void>();
+		const coordinator = waitCoordinator(
+			undefined,
+			() => restore,
+			() => status,
+			(listener) => {
+				availabilityListeners.add(listener);
+				return () => {
+					availabilityListeners.delete(listener);
+				};
+			},
+		);
+		const waiting = coordinator.waitForWorkerAgents(["child"], "all", 60_000, { callerAgentId: "caller" });
+
+		for (const listener of availabilityListeners) listener();
+		expect(restore).not.toHaveBeenCalled();
+
+		status = "completed";
+		coordinator.signalStateChanged();
+		await expect(waiting).resolves.toMatchObject({ timedOut: false });
+		expect(restore).toHaveBeenCalledOnce();
+	});
+
 	it("rejects instead of hanging forever when a blocked restore never clears within its retry bound", async () => {
 		vi.useFakeTimers();
 		try {
@@ -386,6 +413,235 @@ describe("worker wait deadlock prevention", () => {
 			vi.useRealTimers();
 			reservations.dispose();
 		}
+	});
+
+	it("restores a completed waiter before ordinary queued work can reclaim its released scope", async () => {
+		const root = tempDir("pi-worker-wait-restore-priority-");
+		const workspace = join(root, "workspace");
+		const source = join(workspace, "src");
+		mkdirSync(source, { recursive: true });
+		const plan = { writeEnabled: true, writePaths: [source] };
+		let queuedAdmission: ReturnType<WorkerWriteReservationCoordinator["acquire"]> | undefined;
+		let queueReady = false;
+		let reservations!: WorkerWriteReservationCoordinator;
+		reservations = new WorkerWriteReservationCoordinator({
+			agentDir: join(root, "agent"),
+			getCwd: () => workspace,
+			getParentSessionId: () => "parent-restore-priority",
+			ownerId: "pi-worker:123:11111111-1111-4111-8111-111111111111",
+			drainQueuedWorkers: () => {
+				if (!queueReady) return;
+				queueReady = false;
+				queuedAdmission = reservations.acquire("competitor-task", { attemptId: "competitor-attempt" }, plan);
+			},
+			warn: vi.fn(),
+		});
+
+		expect(reservations.acquire("caller-task", { attemptId: "caller-attempt" }, plan)).toEqual({
+			kind: "granted",
+		});
+		const yielded = reservations.yieldForWait("caller-task", "caller-attempt", 1);
+		expect(yielded).toBeDefined();
+		expect(reservations.acquire("child-task", { attemptId: "child-attempt" }, plan)).toEqual({ kind: "granted" });
+
+		let restoreAdmission: ReturnType<WorkerWriteReservationCoordinator["restoreAfterWait"]> | undefined;
+		const unsubscribe = reservations.subscribeAvailability(() => {
+			restoreAdmission ??= reservations.restoreAfterWait(yielded!);
+		});
+		queueReady = true;
+		reservations.release("child-task");
+		await Promise.resolve();
+
+		expect(restoreAdmission).toEqual({ kind: "granted" });
+		expect(queuedAdmission).toMatchObject({ kind: "blocked" });
+		unsubscribe();
+		reservations.dispose();
+	});
+
+	it("still drains queued work that does not overlap a completed waiter's scope", async () => {
+		const root = tempDir("pi-worker-wait-restore-disjoint-");
+		const workspace = join(root, "workspace");
+		const source = join(workspace, "src");
+		const other = join(workspace, "other");
+		mkdirSync(source, { recursive: true });
+		mkdirSync(other, { recursive: true });
+		const callerPlan = { writeEnabled: true, writePaths: [source] };
+		const queuedPlan = { writeEnabled: true, writePaths: [other] };
+		let queuedAdmission: ReturnType<WorkerWriteReservationCoordinator["acquire"]> | undefined;
+		let queueReady = false;
+		let reservations!: WorkerWriteReservationCoordinator;
+		reservations = new WorkerWriteReservationCoordinator({
+			agentDir: join(root, "agent"),
+			getCwd: () => workspace,
+			getParentSessionId: () => "parent-restore-disjoint",
+			ownerId: "pi-worker:123:11111111-1111-4111-8111-111111111111",
+			drainQueuedWorkers: () => {
+				if (!queueReady) return;
+				queueReady = false;
+				queuedAdmission = reservations.acquire("competitor-task", { attemptId: "competitor-attempt" }, queuedPlan);
+			},
+			warn: vi.fn(),
+		});
+
+		expect(reservations.acquire("caller-task", { attemptId: "caller-attempt" }, callerPlan)).toEqual({
+			kind: "granted",
+		});
+		const yielded = reservations.yieldForWait("caller-task", "caller-attempt", 1);
+		expect(yielded).toBeDefined();
+		expect(reservations.acquire("child-task", { attemptId: "child-attempt" }, callerPlan)).toEqual({
+			kind: "granted",
+		});
+
+		let restoreAdmission: ReturnType<WorkerWriteReservationCoordinator["restoreAfterWait"]> | undefined;
+		const unsubscribe = reservations.subscribeAvailability(() => {
+			restoreAdmission ??= reservations.restoreAfterWait(yielded!);
+		});
+		queueReady = true;
+		reservations.release("child-task");
+		await Promise.resolve();
+
+		expect(restoreAdmission).toEqual({ kind: "granted" });
+		expect(queuedAdmission).toEqual({ kind: "granted" });
+		unsubscribe();
+		reservations.dispose();
+	});
+
+	it("isolates one availability generation before draining queued work", async () => {
+		const root = tempDir("pi-worker-wait-availability-generation-");
+		const workspace = join(root, "workspace");
+		const source = join(workspace, "src");
+		mkdirSync(source, { recursive: true });
+		const delivery: string[] = [];
+		const reservations = new WorkerWriteReservationCoordinator({
+			agentDir: join(root, "agent"),
+			getCwd: () => workspace,
+			getParentSessionId: () => "parent-availability-generation",
+			ownerId: "pi-worker:123:11111111-1111-4111-8111-111111111111",
+			drainQueuedWorkers: () => delivery.push("drain"),
+			warn: vi.fn(),
+		});
+		const plan = { writeEnabled: true, writePaths: [source] };
+		expect(reservations.acquire("holder-task", { attemptId: "holder-attempt" }, plan)).toEqual({
+			kind: "granted",
+		});
+
+		reservations.subscribeAvailability(() => {
+			delivery.push("throwing-waiter");
+			reservations.subscribeAvailability(() => delivery.push("late-waiter"));
+			throw new Error("broken waiter");
+		});
+		reservations.subscribeAvailability(() => delivery.push("healthy-waiter"));
+
+		reservations.release("holder-task");
+		await Promise.resolve();
+
+		expect(delivery).toEqual(["throwing-waiter", "healthy-waiter", "drain"]);
+		reservations.dispose();
+	});
+
+	it("restores every current waiter before a restore-triggered queue drain can steal a sibling scope", async () => {
+		const root = tempDir("pi-worker-wait-multi-restore-");
+		const workspace = join(root, "workspace");
+		const sourceA = join(workspace, "source-a");
+		const sourceB = join(workspace, "source-b");
+		mkdirSync(sourceA, { recursive: true });
+		mkdirSync(sourceB, { recursive: true });
+		const planA = { writeEnabled: true, writePaths: [sourceA] };
+		const planB = { writeEnabled: true, writePaths: [sourceB] };
+		const childPlan = { writeEnabled: true, writePaths: [sourceA, sourceB] };
+		let queueReady = false;
+		let competitorAdmission: ReturnType<WorkerWriteReservationCoordinator["acquire"]> | undefined;
+		let schedulerDrain = (_reservationAvailable?: boolean): void => undefined;
+		const reservations = new WorkerWriteReservationCoordinator({
+			agentDir: join(root, "agent"),
+			getCwd: () => workspace,
+			getParentSessionId: () => "parent-multi-restore",
+			ownerId: "pi-worker:123:11111111-1111-4111-8111-111111111111",
+			drainQueuedWorkers: () => schedulerDrain(true),
+			warn: vi.fn(),
+		});
+		const attemptA = {
+			...attempt("caller-a", "caller-a-task", "running"),
+			lease: {
+				leaseId: "caller-a-lease",
+				attemptId: "attempt-caller-a",
+				ownerId: "pi-worker:123:11111111-1111-4111-8111-111111111111",
+				fencingToken: 1,
+				issuedAt: "2026-08-12T00:00:00.000Z",
+				expiresAt: "2026-08-12T01:00:00.000Z",
+			},
+		};
+		const attemptB = {
+			...attempt("caller-b", "caller-b-task", "running"),
+			lease: {
+				leaseId: "caller-b-lease",
+				attemptId: "attempt-caller-b",
+				ownerId: "pi-worker:123:11111111-1111-4111-8111-111111111111",
+				fencingToken: 1,
+				issuedAt: "2026-08-12T00:00:00.000Z",
+				expiresAt: "2026-08-12T01:00:00.000Z",
+			},
+		};
+		const callerA = agent("caller-a", attemptA.attemptId);
+		const callerB = agent("caller-b", attemptB.attemptId);
+		const scheduler = {
+			drain: vi.fn((_reservationAvailable?: boolean) => {
+				if (!queueReady) return;
+				queueReady = false;
+				competitorAdmission = reservations.acquire(
+					"competitor-b-task",
+					{ attemptId: "competitor-b-attempt" },
+					planB,
+				);
+			}),
+		};
+		schedulerDrain = (reservationAvailable) => scheduler.drain(reservationAvailable);
+		const controller = Object.assign(Object.create(WorkerDelegationController.prototype) as object, {
+			lifecycle: {
+				getAgent: (agentId: string) => ({ "caller-a": callerA, "caller-b": callerB })[agentId],
+				getLatestAgentAttempt: (agentId: string) => ({ "caller-a": attemptA, "caller-b": attemptB })[agentId],
+			},
+			writeReservations: reservations,
+			yieldedCapacityAttemptIds: new Map<string, number>(),
+			yieldedWriteReservations: new Map(),
+			deps: { isDisposed: () => false },
+			scheduler,
+			laneAbortControllers: new Map(),
+		}) as unknown as WorkerDelegationController;
+		const yieldWorkerForWait = Reflect.get(controller, "yieldWorkerForWait") as (
+			callerAgentId: string,
+		) => () => boolean;
+
+		expect(reservations.acquire("caller-a-task", { attemptId: attemptA.attemptId }, planA)).toEqual({
+			kind: "granted",
+		});
+		expect(reservations.acquire("caller-b-task", { attemptId: attemptB.attemptId }, planB)).toEqual({
+			kind: "granted",
+		});
+		const restoreA = yieldWorkerForWait.call(controller, "caller-a");
+		const restoreB = yieldWorkerForWait.call(controller, "caller-b");
+		expect(reservations.acquire("child-task", { attemptId: "child-attempt" }, childPlan)).toEqual({
+			kind: "granted",
+		});
+
+		let restoredA: boolean | undefined;
+		let restoredB: boolean | undefined;
+		reservations.subscribeAvailability(() => {
+			restoredA = restoreA();
+		});
+		reservations.subscribeAvailability(() => {
+			restoredB = restoreB();
+		});
+		scheduler.drain.mockClear();
+		queueReady = true;
+		reservations.release("child-task");
+		await Promise.resolve();
+
+		expect(restoredA).toBe(true);
+		expect(restoredB).toBe(true);
+		expect(competitorAdmission).toMatchObject({ kind: "blocked" });
+		expect(scheduler.drain).toHaveBeenCalledOnce();
+		reservations.dispose();
 	});
 
 	it("releases every held lease on dispose() instead of only forgetting them in memory", () => {
