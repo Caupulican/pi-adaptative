@@ -51,12 +51,6 @@ interface ContextProjectionEntryBase {
 	sourceTimestamp: number;
 }
 
-/**
- * Per-message content-hash memo. Agent messages are immutable records: replacement creates a new
- * object, matching the same contract used by the audit and token-estimate memos.
- */
-export type ContextProjectionMemo = Map<AgentMessage, ContextProjectionEntryBase>;
-
 function sha256(value: string): string {
 	return createHash("sha256").update(value).digest("hex");
 }
@@ -127,58 +121,59 @@ function buildEntryBase(message: AgentMessage): ContextProjectionEntryBase {
 export function buildContextProjection(
 	messages: readonly AgentMessage[],
 	options: ContextProjectionOptions,
-	memo?: ContextProjectionMemo,
 ): ContextProjection {
-	const entries: ContextProjectionEntry[] = [];
-	const liveMemoEntries: [AgentMessage, ContextProjectionEntryBase][] = [];
-	const identityOccurrences = new Map<string, number>();
+	let materialized: { revision: string; entries: ContextProjectionEntry[] } | undefined;
+	const materialize = (): { revision: string; entries: ContextProjectionEntry[] } => {
+		if (materialized) return materialized;
+		const entries: ContextProjectionEntry[] = [];
+		const identityOccurrences = new Map<string, number>();
 
-	for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
-		const message = messages[messageIndex];
-		let base = memo?.get(message);
-		if (!base) {
-			base = buildEntryBase(message);
-			memo?.set(message, base);
+		for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
+			const message = messages[messageIndex];
+			const base = buildEntryBase(message);
+			const sessionEntryId =
+				message.role === "toolResult" ? options.sessionEntryIdForToolCallId?.(message.toolCallId) : undefined;
+			const provenance: ContextProjectionProvenance = sessionEntryId
+				? { kind: "session_entry", sourceId: sessionEntryId }
+				: { kind: "request_derived", sourceId: base.logicalSourceId };
+			const identitySeed = `${provenance.kind}:${provenance.sourceId}`;
+			const occurrence = (identityOccurrences.get(identitySeed) ?? 0) + 1;
+			identityOccurrences.set(identitySeed, occurrence);
+			const identity = `context:${sha256(identitySeed).slice(0, 24)}`;
+
+			entries.push({
+				id: occurrence === 1 ? identity : `${identity}:${occurrence}`,
+				revision: base.revision,
+				messageIndex,
+				role: base.role,
+				kind: base.kind,
+				source: base.source,
+				provenance,
+				freshness: {
+					observedAtTurn: options.turnIndex,
+					sourceTimestamp: base.sourceTimestamp,
+				},
+			});
 		}
-		if (memo) liveMemoEntries.push([message, base]);
 
-		const sessionEntryId =
-			message.role === "toolResult" ? options.sessionEntryIdForToolCallId?.(message.toolCallId) : undefined;
-		const provenance: ContextProjectionProvenance = sessionEntryId
-			? { kind: "session_entry", sourceId: sessionEntryId }
-			: { kind: "request_derived", sourceId: base.logicalSourceId };
-		const identitySeed = `${provenance.kind}:${provenance.sourceId}`;
-		const occurrence = (identityOccurrences.get(identitySeed) ?? 0) + 1;
-		identityOccurrences.set(identitySeed, occurrence);
-		const identity = `context:${sha256(identitySeed).slice(0, 24)}`;
-
-		entries.push({
-			id: occurrence === 1 ? identity : `${identity}:${occurrence}`,
-			revision: base.revision,
-			messageIndex,
-			role: base.role,
-			kind: base.kind,
-			source: base.source,
-			provenance,
-			freshness: {
-				observedAtTurn: options.turnIndex,
-				sourceTimestamp: base.sourceTimestamp,
-			},
-		});
-	}
-
-	if (memo) {
-		memo.clear();
-		for (const [message, base] of liveMemoEntries) memo.set(message, base);
-	}
+		materialized = {
+			revision: sha256(
+				`${CONTEXT_PROJECTION_SCHEMA_VERSION}\n${entries.map((entry) => `${entry.id}:${entry.revision}`).join("\n")}`,
+			),
+			entries,
+		};
+		return materialized;
+	};
 
 	return {
 		schemaVersion: CONTEXT_PROJECTION_SCHEMA_VERSION,
-		revision: sha256(
-			`${CONTEXT_PROJECTION_SCHEMA_VERSION}\n${entries.map((entry) => `${entry.id}:${entry.revision}`).join("\n")}`,
-		),
+		get revision() {
+			return materialize().revision;
+		},
 		observedAtTurn: options.turnIndex,
-		entries,
+		get entries() {
+			return materialize().entries;
+		},
 	};
 }
 

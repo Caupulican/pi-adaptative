@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- Context relevance advisories are fenced by the exact query and evidence revision, preventing a stale verdict from another turn from evicting newly relevant evidence.
+- Accepted context projections materialize only when inspected and retain immutable provenance lookups, keeping provider-request work flat across long sessions without letting later cache changes rewrite an older snapshot.
 - Restart repair closes a provider request left unanswered by interruption, while contradictory or duplicate request outcomes stop automatic repair.
 - The activity lane distinguishes hidden reasoning from visible provider output instead of reporting hidden thinking as the first readable token.
 - Read-only shell classification permits stream redirection to `/dev/null` without misclassifying the command as a filesystem mutation.

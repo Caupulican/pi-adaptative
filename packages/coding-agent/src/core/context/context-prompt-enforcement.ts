@@ -32,9 +32,15 @@
  */
 
 import type { AgentMessage } from "@caupulican/pi-agent-core";
-import { CURATION_RELEVANCE_MIN_CONFIDENCE } from "./brain-curator.ts";
+import {
+	type ContextRelevanceScope,
+	CURATION_RELEVANCE_CONTENT_MAX_CHARS,
+	CURATION_RELEVANCE_MIN_CONFIDENCE,
+	CURATION_RELEVANCE_QUERY_MAX_CHARS,
+} from "./brain-curator.ts";
 import type { PromptPolicyShadowReport } from "./context-prompt-policy.ts";
 import { getToolResultArtifactId, getToolResultText } from "./context-tool-result.ts";
+import { latestUserPromptText, textContentPrefix } from "./message-text.ts";
 import { quantizeRecentBoundary, resolveRecentBoundaryStride } from "./prefix-stability.ts";
 
 export interface ContextPromptEnforcementSettings {
@@ -54,7 +60,7 @@ export interface ContextPromptEnforcementSettings {
 	 * floor), but an advisory can never keep an item the policy wants gone, never stub a
 	 * hard-constraint-protected item, and its absence is byte-for-byte today's behavior.
 	 */
-	brainRelevance?: (itemId: string) => { relevant: boolean; confidence: number } | undefined;
+	brainRelevance?: (scope: ContextRelevanceScope) => { relevant: boolean; confidence: number } | undefined;
 }
 
 export type PromptEnforcementSkipReason =
@@ -145,6 +151,9 @@ export function enforcePromptPolicy(
 	// Advisory evictions may reach inside the recent window but NEVER past this absolute floor:
 	// the last few messages are what the model is actively reasoning over.
 	const absoluteFloorIndex = Math.max(0, messages.length - ENFORCEMENT_ABSOLUTE_RECENT_FLOOR);
+	const currentQuery = settings.brainRelevance
+		? latestUserPromptText(messages, CURATION_RELEVANCE_QUERY_MAX_CHARS)
+		: "";
 	const nextMessages = messages.slice();
 	let changed = false;
 	const items: PromptEnforcementItemReport[] = [];
@@ -157,7 +166,11 @@ export function enforcePromptPolicy(
 		}
 		let advisoryEviction = false;
 		if (planItem.messageIndex >= recentCutoffIndex) {
-			const advisory = settings.brainRelevance?.(planItem.itemId);
+			const advisory = settings.brainRelevance?.({
+				itemId: planItem.itemId,
+				query: currentQuery,
+				content: textContentPrefix(message.content, CURATION_RELEVANCE_CONTENT_MAX_CHARS),
+			});
 			advisoryEviction =
 				advisory !== undefined &&
 				!advisory.relevant &&

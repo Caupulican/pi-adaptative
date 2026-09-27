@@ -46,7 +46,15 @@ import {
 	resolveEffectiveModelPricing,
 	type SentPrefixRewriteVerdict,
 } from "./compaction/early-compaction-economics.ts";
-import { BrainCurator, type CurationTelemetrySnapshot, preDigestConversationText } from "./context/brain-curator.ts";
+import {
+	BrainCurator,
+	type ContextRelevanceScope,
+	CURATION_RELEVANCE_CONTENT_MAX_CHARS,
+	CURATION_RELEVANCE_QUERY_MAX_CHARS,
+	type CurationTelemetrySnapshot,
+	contextRelevanceKey,
+	preDigestConversationText,
+} from "./context/brain-curator.ts";
 import type { CustodyTarget } from "./context/cache-custody.ts";
 import { type ArtifactStore, createFileArtifactStore } from "./context/context-artifacts.ts";
 import {
@@ -58,7 +66,6 @@ import {
 import {
 	buildContextProjection,
 	type ContextProjection,
-	type ContextProjectionMemo,
 	type ContextProjectionOptions,
 	emptyContextProjection,
 } from "./context/context-projection.ts";
@@ -118,8 +125,6 @@ export interface ContextPolicyLane {
 }
 
 interface ContextProjectionLaneState {
-	readonly memo: ContextProjectionMemo;
-	memoMessages: readonly AgentMessage[];
 	latest: ContextProjection | undefined;
 }
 
@@ -284,7 +289,6 @@ export class ContextPipeline {
 	 * message object identity -- see {@link ContextAuditMemo}'s doc for the invalidation
 	 * contract. Rebuilt fresh (stale entries dropped) by `runContextAudit` every pass. */
 	private readonly _auditMemo: ContextAuditMemo = new Map();
-	private readonly _contextProjectionMemo: ContextProjectionMemo = new Map();
 	private readonly _contextProjectionLaneStates = new WeakMap<ContextPolicyLane, ContextProjectionLaneState>();
 	/**
 	 * The messages each memo above was last filled for, one lineage per memo: the audit and the
@@ -294,7 +298,6 @@ export class ContextPipeline {
 	 * that memo is emptied and refilled. Rebuilding on every pass copied every entry per request.
 	 */
 	private _auditMemoMessages: readonly AgentMessage[] = [];
-	private _contextProjectionMemoMessages: readonly AgentMessage[] = [];
 	private _tokenMemoMessages: readonly AgentMessage[] = [];
 	private readonly _usageFinder = createApplicableAssistantUsageFinder();
 	/** Incremental memo for the per-message token estimate `estimateContextTokensMemoized`
@@ -401,10 +404,8 @@ export class ContextPipeline {
 		// Release memoized message references promptly so a disposed session's messages are
 		// GC-eligible even if this ContextPipeline instance itself briefly lingers.
 		this._auditMemo.clear();
-		this._contextProjectionMemo.clear();
 		this._tokenMemo.clear();
 		this._auditMemoMessages = [];
-		this._contextProjectionMemoMessages = [];
 		this._tokenMemoMessages = [];
 		this._latestCompactionScan.reset();
 	}
@@ -423,18 +424,24 @@ export class ContextPipeline {
 	private _buildSessionEntryIdLookup(
 		wantedToolCallIds: ReadonlySet<string>,
 	): (toolCallId: string) => string | undefined {
+		const resolveFrom = (byToolCallId: ReadonlyMap<string, string>) => (toolCallId: string) =>
+			byToolCallId.get(toolCallId);
 		const sessionManager = this.deps.getSessionManager();
 		const index = resolveSessionEntryIndex(sessionManager);
 		const leafId = index?.leafId;
 		const cached = this._sessionEntryLookupCache;
 		if (cached) {
+			let pruned: Map<string, string> | undefined;
 			for (const toolCallId of cached.byToolCallId.keys()) {
-				if (!wantedToolCallIds.has(toolCallId)) cached.byToolCallId.delete(toolCallId);
+				if (wantedToolCallIds.has(toolCallId)) continue;
+				pruned ??= new Map(cached.byToolCallId);
+				pruned.delete(toolCallId);
 			}
+			if (pruned) cached.byToolCallId = pruned;
 		}
 		if (index && leafId !== undefined) {
 			if (cached?.leafId === leafId) {
-				return (toolCallId) => cached.byToolCallId.get(toolCallId);
+				return resolveFrom(cached.byToolCallId);
 			}
 			if (cached) {
 				const appendedEntries: SessionEntry[] = [];
@@ -446,6 +453,7 @@ export class ContextPipeline {
 					cursor = entry.parentId;
 				}
 				if (cursor === cached.leafId) {
+					let appended: Map<string, string> | undefined;
 					for (let index = appendedEntries.length - 1; index >= 0; index--) {
 						const entry = appendedEntries[index];
 						if (
@@ -453,11 +461,13 @@ export class ContextPipeline {
 							entry.message.role === "toolResult" &&
 							wantedToolCallIds.has(entry.message.toolCallId)
 						) {
-							cached.byToolCallId.set(entry.message.toolCallId, entry.id);
+							appended ??= new Map(cached.byToolCallId);
+							appended.set(entry.message.toolCallId, entry.id);
 						}
 					}
+					if (appended) cached.byToolCallId = appended;
 					cached.leafId = leafId;
-					return (toolCallId) => cached.byToolCallId.get(toolCallId);
+					return resolveFrom(cached.byToolCallId);
 				}
 			}
 		}
@@ -473,7 +483,7 @@ export class ContextPipeline {
 			}
 		}
 		if (leafId !== undefined) this._sessionEntryLookupCache = { leafId, byToolCallId };
-		return (toolCallId) => byToolCallId.get(toolCallId);
+		return resolveFrom(byToolCallId);
 	}
 
 	/** Options shared by the memoized hot path and the no-memo full-scan path. */
@@ -502,7 +512,7 @@ export class ContextPipeline {
 	private _projectionStateForLane(lane: ContextPolicyLane): ContextProjectionLaneState {
 		let state = this._contextProjectionLaneStates.get(lane);
 		if (!state) {
-			state = { memo: new Map(), memoMessages: [], latest: undefined };
+			state = { latest: undefined };
 			this._contextProjectionLaneStates.set(lane, state);
 		}
 		return state;
@@ -511,20 +521,9 @@ export class ContextPipeline {
 	/** Build a speculative provider-request projection. Publishing is a separate accepted-plan step. */
 	previewContextProjection(messages: readonly AgentMessage[], lane?: ContextPolicyLane): ContextProjection {
 		if (lane) {
-			const state = this._projectionStateForLane(lane);
-			state.memoMessages = continueMemoLineage(state.memo, state.memoMessages, messages);
-			return buildContextProjection(messages, { turnIndex: this.deps.getTurnIndex() }, state.memo);
+			return buildContextProjection(messages, { turnIndex: this.deps.getTurnIndex() });
 		}
-		this._contextProjectionMemoMessages = continueMemoLineage(
-			this._contextProjectionMemo,
-			this._contextProjectionMemoMessages,
-			messages,
-		);
-		return buildContextProjection(
-			messages,
-			this._buildContextProjectionOptions(messages),
-			this._contextProjectionMemo,
-		);
+		return buildContextProjection(messages, this._buildContextProjectionOptions(messages));
 	}
 
 	/** Publish only the projection belonging to a provider plan that passed its currency gate. */
@@ -676,7 +675,9 @@ export class ContextPipeline {
 				// tools can differ turn to turn -- see context-prompt-enforcement.ts's doc
 				// comment on why this is checked separately from hasAvailableRetrievalPath.
 				retrievalToolAvailable: toolNames.includes("artifact_retrieve"),
-				brainRelevance: curationEnabled ? (itemId: string) => this._brainCurator.getRelevance(itemId) : undefined,
+				brainRelevance: curationEnabled
+					? (scope: ContextRelevanceScope) => this._brainCurator.getRelevance(scope)
+					: undefined,
 			};
 			const result = enforcePromptPolicy(messages, shadowReport, settings);
 			if (!lane) this._latestPromptEnforcementReport = result.report;
@@ -697,7 +698,7 @@ export class ContextPipeline {
 		try {
 			const settings = this.deps.getSettingsManager().getContextCurationSettings();
 			if (!settings.enabled) return;
-			const goal = latestUserPromptText(messages, 400);
+			const goal = latestUserPromptText(messages, CURATION_RELEVANCE_QUERY_MAX_CHARS);
 			for (const item of shadowReport.items) {
 				if (!item.hasAvailableRetrievalPath) continue;
 				const message = messages[item.messageIndex];
@@ -707,9 +708,14 @@ export class ContextPipeline {
 					| { contextGc?: { packed?: unknown }; promptPolicy?: { enforced?: unknown } }
 					| undefined;
 				if (details?.contextGc?.packed === true || details?.promptPolicy?.enforced === true) continue;
-				const text = textContentPrefix(message.content, 4000);
+				const text = textContentPrefix(message.content, CURATION_RELEVANCE_CONTENT_MAX_CHARS);
 				if (text.length === 0) continue;
-				this._brainCurator.enqueue({ kind: "relevance", key: item.itemId, content: text, goal });
+				this._brainCurator.enqueue({
+					kind: "relevance",
+					key: contextRelevanceKey({ itemId: item.itemId, query: goal, content: text }),
+					content: text,
+					goal,
+				});
 			}
 		} catch {
 			// curation is a sidecar; it must never disrupt a turn

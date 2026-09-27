@@ -85,4 +85,24 @@ describe("context projection", () => {
 		);
 		expect(reordered.revision).not.toBe(original.revision);
 	});
+
+	it("defers complete projection work until a consumer reads the accepted snapshot", () => {
+		let provenanceLookups = 0;
+		const projection = buildContextProjection([toolResultMessage("result")], {
+			turnIndex: 1,
+			sessionEntryIdForToolCallId: () => {
+				provenanceLookups++;
+				return "session-entry-1";
+			},
+		});
+
+		expect(provenanceLookups).toBe(0);
+		expect(projection.observedAtTurn).toBe(1);
+		expect(projection.revision).toHaveLength(64);
+		expect(projection.entries[0]?.provenance).toEqual({
+			kind: "session_entry",
+			sourceId: "session-entry-1",
+		});
+		expect(provenanceLookups).toBe(1);
+	});
 });

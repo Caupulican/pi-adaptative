@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	BrainCurator,
 	type CurationComplete,
+	contextRelevanceKey,
 	parseCurationDigest,
 	parseCurationRelevance,
 	preDigestConversationText,
@@ -66,10 +67,26 @@ describe("BrainCurator queue and results", () => {
 
 	it("drains relevance jobs and exposes verdicts only for parsed results", async () => {
 		const curator = new BrainCurator();
-		curator.enqueue({ kind: "relevance", key: "item-1", content: "old grep output", goal: "ship the release" });
+		const scope = { itemId: "item-1", query: "ship the release", content: "old grep output" };
+		curator.enqueue({
+			kind: "relevance",
+			key: contextRelevanceKey(scope),
+			content: scope.content,
+			goal: scope.query,
+		});
 		await curator.drain({ maxJobs: 5, complete: scripted(['{"relevant":false,"confidence":0.92}']) });
-		expect(curator.getRelevance("item-1")).toEqual({ relevant: false, confidence: 0.92 });
-		expect(curator.getDigest("item-1")).toBeUndefined();
+		expect(curator.getRelevance(scope)).toEqual({ relevant: false, confidence: 0.92 });
+		expect(curator.getDigest(contextRelevanceKey(scope))).toBeUndefined();
+	});
+
+	it("versions relevance identities by item, query, and evidence content", () => {
+		const scope = { itemId: "item-1", query: "ship the release", content: "old grep output" };
+		expect(contextRelevanceKey(scope)).toBe(contextRelevanceKey({ ...scope }));
+		expect(contextRelevanceKey(scope)).not.toBe(contextRelevanceKey({ ...scope, itemId: "item-2" }));
+		expect(contextRelevanceKey(scope)).not.toBe(contextRelevanceKey({ ...scope, query: "debug latency" }));
+		expect(contextRelevanceKey(scope)).not.toBe(contextRelevanceKey({ ...scope, content: "new grep output" }));
+		expect(contextRelevanceKey(scope)).not.toContain(scope.query);
+		expect(contextRelevanceKey(scope)).not.toContain(scope.content);
 	});
 
 	it("respects maxJobs and leaves the remainder queued", async () => {
@@ -191,7 +208,7 @@ describe("context-gc curation hooks (surface 2: stub digests)", () => {
 describe("enforcement advisory lever (surface 1: relevance)", () => {
 	const BIG = "x".repeat(20_000);
 
-	function eligibleWorld() {
+	function eligibleWorld(goal = "e") {
 		const store = createInMemoryArtifactStore();
 		const { ref } = store.write({
 			kind: "tool_output",
@@ -216,7 +233,7 @@ describe("enforcement advisory lever (surface 1: relevance)", () => {
 		});
 		// 6 messages; the tool result at index 0 is INSIDE preserveRecentMessages: 20 (the recent
 		// window) but OUTSIDE the absolute floor of 4 (indexes 2..5).
-		const messages = [toolResult, user("a"), user("b"), user("c"), user("d"), user("e")];
+		const messages = [toolResult, user("a"), user("b"), user("c"), user("d"), user(goal)];
 		const audit = runContextAudit(messages, { turnIndex: 0, artifactStore: store });
 		const plan = planPromptPolicy(audit);
 		return { messages, plan };
@@ -256,6 +273,48 @@ describe("enforcement advisory lever (surface 1: relevance)", () => {
 		]) {
 			const result = enforcePromptPolicy(messages, plan, { ...baseSettings, brainRelevance: () => verdict });
 			expect(result.messages).toBe(messages);
+		}
+	});
+
+	it("binds a relevance lookup to the exact current user query", () => {
+		const { messages, plan } = eligibleWorld("find release evidence");
+		const lookups: Array<{ itemId: string; query: string }> = [];
+		const result = enforcePromptPolicy(messages, plan, {
+			...baseSettings,
+			brainRelevance: (scope) => {
+				lookups.push({ itemId: scope.itemId, query: scope.query });
+				return scope.query === "an older unrelated query" ? { relevant: false, confidence: 0.99 } : undefined;
+			},
+		});
+
+		expect(lookups).toEqual([{ itemId: "tool-output:tc-1", query: "find release evidence" }]);
+		expect(result.messages).toBe(messages);
+	});
+
+	it("queues a fresh relevance judgment when the user query changes", () => {
+		const harness = createHarness();
+		try {
+			const session = harness.session as unknown as {
+				settingsManager: { setContextCurationSettings: (settings: object) => void };
+				_pipeline: {
+					enqueueRelevanceCuration: (
+						messages: ReturnType<typeof eligibleWorld>["messages"],
+						plan: ReturnType<typeof eligibleWorld>["plan"],
+					) => void;
+				};
+				getContextCurationStatus: () => { telemetry: { queued: number } };
+			};
+			session.settingsManager.setContextCurationSettings({ enabled: true });
+			const first = eligibleWorld("find release evidence");
+			const second = eligibleWorld("diagnose database latency");
+
+			session._pipeline.enqueueRelevanceCuration(first.messages, first.plan);
+			session._pipeline.enqueueRelevanceCuration(second.messages, second.plan);
+			session._pipeline.enqueueRelevanceCuration(second.messages, second.plan);
+
+			expect(session.getContextCurationStatus().telemetry.queued).toBe(2);
+		} finally {
+			harness.cleanup();
 		}
 	});
 

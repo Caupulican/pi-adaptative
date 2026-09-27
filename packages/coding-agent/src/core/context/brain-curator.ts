@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
 import { parseModelOutputJsonObject } from "../model-output-json.ts";
 import {
@@ -19,7 +20,8 @@ export { CURATION_COMPACTION_DIGEST_SYSTEM_PROMPT, CURATION_DIGEST_SYSTEM_PROMPT
  *
  * Memory bounds are explicit: the queue and result map are both capped, and drops are counted in
  * telemetry rather than silent. Results are keyed for idempotency (digests by the GC record's
- * content hash, relevance by the audit item id), so re-enqueueing the same work is free.
+ * content hash, relevance by the exact item/query/content scope), so re-enqueueing the same work
+ * is free without allowing a stale verdict to cross a state or query revision.
  */
 
 export function parseCompactionChunkDigest(text: string): string | undefined {
@@ -98,7 +100,8 @@ export async function preDigestConversationText(args: {
 
 export interface CurationJob {
 	kind: "stub_digest" | "relevance";
-	/** Idempotency key: digest jobs use the GC record's content hash, relevance jobs the item id. */
+	/** Idempotency key: digest jobs use the GC record's content hash; relevance jobs must use
+	 * `contextRelevanceKey` so a verdict cannot cross item, query, or content revisions. */
 	key: string;
 	/** Bounded chunk the local model must actually be able to process (sliced on enqueue). */
 	content: string;
@@ -147,9 +150,27 @@ export type CurationComplete = (input: {
 const MAX_QUEUE = 32;
 const MAX_RESULTS = 200;
 const MAX_JOB_CONTENT_CHARS = 8_000;
+export const CURATION_RELEVANCE_QUERY_MAX_CHARS = 400;
+export const CURATION_RELEVANCE_CONTENT_MAX_CHARS = 4_000;
 const DIGEST_MAX_WALL_CLOCK_MS = 20_000;
 const RELEVANCE_MAX_WALL_CLOCK_MS = 8_000;
 export const CURATION_RELEVANCE_MIN_CONFIDENCE = 0.8;
+
+export interface ContextRelevanceScope {
+	itemId: string;
+	query: string;
+	content: string;
+}
+
+/**
+ * One relevance verdict is authoritative only for one exact evidence revision under one exact
+ * current query. The opaque digest keeps user/tool text out of persisted curation identities.
+ */
+export function contextRelevanceKey(scope: ContextRelevanceScope): string {
+	return `relevance:${createHash("sha256")
+		.update(JSON.stringify([scope.itemId, scope.query, scope.content]))
+		.digest("hex")}`;
+}
 
 export function parseCurationDigest(text: string): string | undefined {
 	const parsed = parseModelOutputJsonObject(text);
@@ -218,8 +239,8 @@ export class BrainCurator {
 		this._digestsServed++;
 	}
 
-	getRelevance(key: string): { relevant: boolean; confidence: number } | undefined {
-		const result = this._results.get(key);
+	getRelevance(scope: ContextRelevanceScope): { relevant: boolean; confidence: number } | undefined {
+		const result = this._results.get(contextRelevanceKey(scope));
 		if (!result?.ok || result.kind !== "relevance" || result.relevant === undefined) return undefined;
 		return { relevant: result.relevant, confidence: result.confidence ?? 0 };
 	}

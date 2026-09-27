@@ -17,6 +17,8 @@ function toolResult(toolCallId: string, timestamp: number): AgentMessage {
 function createPipeline(branch: SessionEntry[]): ContextPipeline {
 	const sessionManager = {
 		getBranch: () => branch,
+		getLeafId: () => branch.at(-1)?.id ?? null,
+		getEntry: (id: string) => branch.find((entry) => entry.id === id),
 	} as unknown as SessionManager;
 	return new ContextPipeline({
 		getTurnIndex: () => 7,
@@ -64,5 +66,34 @@ describe("ContextPipeline provider projection", () => {
 		pipeline.commitContextProjection(workerPreview, workerLane);
 
 		expect(pipeline.getContextProjection()).toBe(rootPreview);
+	});
+
+	it("keeps deferred provenance bound to the request snapshot that created it", () => {
+		const firstTool = toolResult("first-call", 10);
+		const secondTool = toolResult("second-call", 20);
+		const pipeline = createPipeline([
+			{
+				type: "message",
+				id: "entry-first-call",
+				parentId: null,
+				timestamp: new Date(10).toISOString(),
+				message: firstTool,
+			},
+			{
+				type: "message",
+				id: "entry-second-call",
+				parentId: "entry-first-call",
+				timestamp: new Date(20).toISOString(),
+				message: secondTool,
+			},
+		]);
+		const firstPreview = pipeline.previewContextProjection([firstTool]);
+
+		pipeline.previewContextProjection([secondTool]);
+
+		expect(firstPreview.entries[0]?.provenance).toEqual({
+			kind: "session_entry",
+			sourceId: "entry-first-call",
+		});
 	});
 });
