@@ -144,7 +144,8 @@ export interface AgentOptions {
 	 */
 	requestPreflight?: AgentLoopConfig["requestPreflight"];
 	streamFn?: StreamFn;
-	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
+	getApiKey?: AgentLoopConfig["getApiKey"];
+	resolveProviderRequestAuth?: AgentLoopConfig["resolveProviderRequestAuth"];
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
 	textToolCallProtocol?: SimpleStreamOptions["textToolCallProtocol"];
@@ -254,7 +255,8 @@ export class Agent {
 	public onSentPrefixDisturbance?: AgentLoopConfig["onSentPrefixDisturbance"];
 	public requestPreflight?: AgentLoopConfig["requestPreflight"];
 	public streamFn: StreamFn;
-	public getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
+	public getApiKey?: AgentLoopConfig["getApiKey"];
+	public resolveProviderRequestAuth?: AgentLoopConfig["resolveProviderRequestAuth"];
 	public onPayload?: SimpleStreamOptions["onPayload"];
 	public onResponse?: SimpleStreamOptions["onResponse"];
 	public textToolCallProtocol?: SimpleStreamOptions["textToolCallProtocol"];
@@ -338,6 +340,7 @@ export class Agent {
 		this.requestPreflight = options.requestPreflight;
 		this.streamFn = options.streamFn ?? streamSimple;
 		this.getApiKey = options.getApiKey;
+		this.resolveProviderRequestAuth = options.resolveProviderRequestAuth;
 		this.onPayload = options.onPayload;
 		this.onResponse = options.onResponse;
 		this.textToolCallProtocol = options.textToolCallProtocol;
@@ -681,6 +684,7 @@ export class Agent {
 			onSentPrefixDisturbance: this.onSentPrefixDisturbance,
 			requestPreflight: this.requestPreflight,
 			getApiKey: this.getApiKey,
+			resolveProviderRequestAuth: this.resolveProviderRequestAuth,
 			getSteeringMessages: async () => {
 				await this.beforeSteeringPoll?.(this.signal);
 				if (skipInitialSteeringPoll) {

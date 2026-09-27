@@ -61,8 +61,6 @@ interface ForegroundLifecycleControllerDeps {
 	modelRouter: ModelRouterController;
 	emitWarning(message: string): void;
 	observeProviderRequest?(context: ProviderRequestSnapshotContext): void;
-	/** Resolve the same credential-scoped provider key admission uses, at request-snapshot time. */
-	resolveProviderAccountKey?(provider: string): string;
 	/**
 	 * Session identity of the group lock these announcements order (see file-mutation-queue.ts).
 	 * Omitted announces into the process-wide default scope, which is what a single-session host had.
@@ -165,7 +163,7 @@ export class ForegroundLifecycleController {
 		this.lastRequestModel = {
 			provider,
 			id: context.model.id,
-			accountKey: this.deps.resolveProviderAccountKey?.(provider) ?? provider,
+			accountKey: context.providerAccountKey ?? provider,
 		};
 		this.deps.sessionManager.appendRequestSnapshot(buildRequestSnapshotInput(context, this.deps.sessionManager));
 		dumpProviderRequest(requestId, context.context);

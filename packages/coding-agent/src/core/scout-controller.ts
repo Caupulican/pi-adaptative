@@ -1,5 +1,5 @@
 import { Agent } from "@caupulican/pi-agent-core/agent";
-import type { AgentTool, StreamFn } from "@caupulican/pi-agent-core/types";
+import type { AgentTool, ResolvedProviderRequestAuth, StreamFn } from "@caupulican/pi-agent-core/types";
 import type { Api, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { SCOUT_SYSTEM_PROMPT } from "./provider-prompt-contracts.ts";
 import { registerInFlightWork } from "./reload-blockers.ts";
@@ -29,6 +29,8 @@ export interface ScoutControllerDeps {
 				model: Model<Api>;
 				apiKey?: string;
 				headers?: Record<string, string>;
+				credentialHeaders?: Record<string, string>;
+				providerAccountKey?: string;
 				textToolCallProtocol?: SimpleStreamOptions["textToolCallProtocol"];
 		  }
 		| { failure: string }
@@ -36,6 +38,7 @@ export interface ScoutControllerDeps {
 	getCwd(): string;
 	buildReadOnlyTools(cwd: string): AgentTool<any>[];
 	streamFn?: StreamFn;
+	resolveProviderRequestAuth?(model: Model<Api>): Promise<ResolvedProviderRequestAuth>;
 	fileExists(path: string): boolean;
 	countLines(path: string): number | undefined;
 	onEvent?(event: { type: "scout_turn" | "scout_end"; detail: string }): void;
@@ -100,6 +103,18 @@ export class ScoutController {
 				},
 				streamFn: this.deps.streamFn,
 				getApiKey: () => modelResolution.apiKey,
+				resolveProviderRequestAuth:
+					this.deps.resolveProviderRequestAuth ??
+					(() => ({
+						...(modelResolution.apiKey !== undefined ? { apiKey: modelResolution.apiKey } : {}),
+						...(modelResolution.headers !== undefined ? { headers: modelResolution.headers } : {}),
+						...(modelResolution.credentialHeaders !== undefined
+							? { credentialHeaders: modelResolution.credentialHeaders }
+							: {}),
+						...(modelResolution.providerAccountKey !== undefined
+							? { providerAccountKey: modelResolution.providerAccountKey }
+							: {}),
+					})),
 				textToolCallProtocol: modelResolution.textToolCallProtocol,
 				maxStallTurns: turnLimit,
 			});

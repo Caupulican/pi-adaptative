@@ -1,5 +1,6 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+// @isolated: stubs global fetch and exercises mutable credential state
+// @guards packages/coding-agent/src/core/session-stream-chain.ts packages/coding-agent/src/core/sdk.ts
+
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Model } from "@caupulican/pi-ai";
@@ -11,12 +12,10 @@ import { ProviderAdmissionLedger } from "../src/core/provider-admission/ledger.t
 import { ProviderLimitStore } from "../src/core/provider-admission/limit-state.ts";
 import { buildSessionStreamFn } from "../src/core/session-stream-chain.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
-
-const dirs: string[] = [];
+import { tempDir } from "./temp-dir.ts";
 
 afterEach(() => {
 	vi.unstubAllGlobals();
-	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 const access = `e30.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct" } })).toString("base64url")}.signature`;
@@ -35,9 +34,12 @@ const model: Model<"openai-codex-responses"> = {
 	headers: { "x-openai-fedramp": "true" },
 };
 
-async function sentFedramp(storage: AuthStorage, apiKey: string): Promise<string | null> {
-	const dir = mkdtempSync(join(tmpdir(), "pi-chain-credential-"));
-	dirs.push(dir);
+async function sentFedramp(
+	storage: AuthStorage,
+	apiKey: string,
+	credentialHeaders?: Record<string, string>,
+): Promise<string | null> {
+	const dir = tempDir("pi-chain-credential-");
 	const streamFn = buildSessionStreamFn({
 		baseStreamFn: streamSimple,
 		settingsManager: SettingsManager.inMemory({}),
@@ -66,7 +68,7 @@ async function sentFedramp(storage: AuthStorage, apiKey: string): Promise<string
 			transport: "sse",
 			maxRetries: 0,
 			headers: { "X-OpenAI-Fedramp": "true" },
-			credentialHeaders: { "X-OpenAI-Fedramp": "true" },
+			credentialHeaders,
 		},
 	);
 	await stream.result();
@@ -75,7 +77,7 @@ async function sentFedramp(storage: AuthStorage, apiKey: string): Promise<string
 }
 
 describe("raw session stream chain credential headers", () => {
-	it("sends the routing header from the stored credential of the exact key, over any caller value", async () => {
+	it("keeps frozen routing headers authoritative over later credential-state changes", async () => {
 		const credential = {
 			type: "oauth" as const,
 			access,
@@ -84,8 +86,12 @@ describe("raw session stream chain credential headers", () => {
 			accountId: "acct",
 		};
 		const fedramp = AuthStorage.inMemory({ "openai-codex": { ...credential, chatgptAccountIsFedramp: true } });
+		expect(
+			await sentFedramp(AuthStorage.inMemory({ "openai-codex": credential }), access, {
+				"X-OpenAI-Fedramp": "true",
+			}),
+		).toBe("true");
 		expect(await sentFedramp(fedramp, access)).toBe("true");
 		expect(await sentFedramp(fedramp, `${access}-other`)).toBeNull();
-		expect(await sentFedramp(AuthStorage.inMemory({ "openai-codex": credential }), access)).toBeNull();
 	});
 });

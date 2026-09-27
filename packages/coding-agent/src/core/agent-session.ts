@@ -1747,7 +1747,6 @@ export class AgentSession {
 			() => this.mutationScope,
 			() => this._shellSessionKey,
 			this._providerLimitStore,
-			(provider) => resolveProviderAccountKey(this._modelRegistry.authStorage, provider),
 			(message, entryId) => this._reflection.noteOwnerInputPersisted(message, entryId),
 			() =>
 				this._eventListeners.length > 0 ? (message: string) => this._emit({ type: "warning", message }) : undefined,
@@ -2950,7 +2949,12 @@ export class AgentSession {
 				model: model.id,
 				headers,
 			});
-			return { apiKey: result.apiKey, headers };
+			return {
+				apiKey: result.apiKey,
+				headers,
+				credentialHeaders: result.credentialHeaders,
+				providerAccountKey: result.providerAccountKey,
+			};
 		}
 
 		const isOAuth = this._modelRegistry.isUsingOAuth(model);

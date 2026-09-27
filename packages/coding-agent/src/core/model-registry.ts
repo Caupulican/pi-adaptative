@@ -28,8 +28,9 @@ import { stripJsonComments } from "../utils/json.ts";
 import { normalizePath } from "../utils/paths.ts";
 import type { AuthStatus, AuthStorage } from "./auth-storage.ts";
 import { MODEL_DEFAULT_THINKING_LEVEL_SCHEMA } from "./orchestration/thinking-level-schema.ts";
+import { resolveProviderAccountKey } from "./provider-admission/account-key.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.ts";
-import { hasAuthenticationHeaders, hasUsableRequestAuth } from "./request-auth.ts";
+import { hasAuthenticationHeaders, hasUsableRequestAuth, type RequestAuth } from "./request-auth.ts";
 import {
 	clearConfigValueCache,
 	getConfigValueEnvVarNames,
@@ -312,12 +313,7 @@ function migrateLegacyRegisterProviderConfigValues(
 }
 
 export type ResolvedRequestAuth =
-	| {
-			ok: true;
-			apiKey?: string;
-			headers?: Record<string, string>;
-			credentialHeaders?: Record<string, string>;
-	  }
+	| ({ ok: true; providerAccountKey: string } & RequestAuth)
 	| {
 			ok: false;
 			error: string;
@@ -849,6 +845,7 @@ export class ModelRegistry {
 				apiKey,
 				headers: headers && Object.keys(headers).length > 0 ? headers : undefined,
 				...(credentialHeaders ? { credentialHeaders } : {}),
+				providerAccountKey: resolveProviderAccountKey(this.authStorage, model.provider, apiKey),
 			};
 		} catch (error) {
 			return {

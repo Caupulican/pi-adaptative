@@ -60,6 +60,8 @@ import { SessionTaskProfileStore } from "./orchestration/session-task-profile-st
 import { TaskProfileWriter } from "./orchestration/task-profile-writer.ts";
 import { DurableTaskRuntime } from "./orchestration/task-runtime.ts";
 import { createWorkerExecutionContract } from "./orchestration/worker-execution-contract.ts";
+import { fenceRecoveredProviderApiKey } from "./provider-admission/account-key.ts";
+import { materializeRequestAuth } from "./request-auth.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { parseResourceProfileInput } from "./resource-profile-blocks.ts";
@@ -543,6 +545,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			tools: [],
 		},
 		convertToLlm: convertToLlmWithBlockImages,
+		getApiKey: async (_provider, requestModel) => {
+			if (!requestModel) return authStorage.getApiKey(_provider);
+			const auth = await modelRegistry.getApiKeyAndHeaders(requestModel);
+			return auth.ok ? auth.apiKey : undefined;
+		},
+		resolveProviderRequestAuth: async (requestModel) => {
+			const auth = await modelRegistry.getApiKeyAndHeaders(requestModel);
+			if (!auth.ok) throw new Error(auth.error);
+			return materializeRequestAuth(auth);
+		},
 		streamFn: async (model, context, options) => {
 			const bedrockScope =
 				model.provider === BEDROCK_PROVIDER_ID ? getActiveBedrockScope(settingsManager) : undefined;
@@ -551,10 +563,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					"Amazon Bedrock requires a verified profile/region scope. Run /login amazon-bedrock before using this model.",
 				);
 			}
-			const auth = await modelRegistry.getApiKeyAndHeaders(model);
-			if (!auth.ok) {
-				throw new Error(auth.error);
-			}
+			const requestApiKey = options?.apiKey;
 			const providerRetrySettings = settingsManager.getProviderRetrySettings();
 			const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
 			// SDKs treat timeout=0 as 0ms (immediate timeout), not "no timeout".
@@ -575,20 +584,24 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				...(bedrockScope ? { region: bedrockScope.region, profile: bedrockScope.profile } : {}),
 				interactionMode: forceBackgroundRequests ? "background" : (options?.interactionMode ?? "user"),
 				onInteractiveAuthRecovery: options?.onInteractiveAuthRecovery ?? recoverBedrockSsoAuthentication,
-				apiKey: auth.apiKey,
+				apiKey: requestApiKey,
 				onAuthRejection:
-					auth.apiKey && (model.provider === "openai-codex" || getOAuthProvider(model.provider) !== undefined)
-						? async () => modelRegistry.recoverRejectedOAuthApiKey(model.provider, auth.apiKey as string)
+					requestApiKey && (model.provider === "openai-codex" || getOAuthProvider(model.provider) !== undefined)
+						? async () =>
+								fenceRecoveredProviderApiKey(
+									modelRegistry.authStorage,
+									model.provider,
+									await modelRegistry.recoverRejectedOAuthApiKey(model.provider, requestApiKey),
+									options?.providerAccountKey,
+								)
 						: options?.onAuthRejection,
 				timeoutMs,
 				websocketConnectTimeoutMs,
 				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
 				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
 				headers:
-					attributionHeaders || auth.headers || options?.headers
-						? { ...attributionHeaders, ...auth.headers, ...options?.headers }
-						: undefined,
-				credentialHeaders: auth.credentialHeaders,
+					attributionHeaders || options?.headers ? { ...attributionHeaders, ...options?.headers } : undefined,
+				credentialHeaders: options?.credentialHeaders,
 				credentialHeadersFor: (apiKey: string) =>
 					modelRegistry.authStorage.getOAuthRequestHeaders(model.provider, apiKey),
 			};

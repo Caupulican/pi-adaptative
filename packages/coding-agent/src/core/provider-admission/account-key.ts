@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { getOAuthProvider } from "@caupulican/pi-ai/oauth";
 import type { AuthCredential } from "../auth-storage.ts";
+import { resolveConfigValue } from "../resolve-config-value.ts";
 
 /**
  * The identity a machine-wide provider limit or in-flight count is keyed on: the provider id plus
@@ -58,6 +60,7 @@ export function providerAccountKey(provider: string, credential: AuthCredential 
 export function resolveProviderAccountKey(
 	auth: { get(provider: string): AuthCredential | undefined },
 	provider: string,
+	apiKey?: string,
 ): string {
 	let credential: AuthCredential | undefined;
 	try {
@@ -65,7 +68,34 @@ export function resolveProviderAccountKey(
 	} catch {
 		credential = undefined;
 	}
+	if (apiKey !== undefined) {
+		let credentialApiKey: string | undefined;
+		try {
+			credentialApiKey =
+				credential?.type === "oauth"
+					? getOAuthProvider(provider)?.getApiKey(credential)
+					: credential?.type === "api_key"
+						? resolveConfigValue(credential.key)
+						: undefined;
+		} catch {
+			credentialApiKey = undefined;
+		}
+		if (credentialApiKey !== apiKey) return providerAccountKey(provider, { type: "api_key", key: apiKey });
+	}
 	return providerAccountKey(provider, credential);
+}
+
+/** Keep an in-flight OAuth recovery inside the credential scope admitted for the request. */
+export function fenceRecoveredProviderApiKey(
+	auth: { get(provider: string): AuthCredential | undefined },
+	provider: string,
+	recoveredApiKey: string | undefined,
+	expectedAccountKey: string | undefined,
+): string | undefined {
+	if (!recoveredApiKey || !expectedAccountKey) return recoveredApiKey;
+	return resolveProviderAccountKey(auth, provider, recoveredApiKey) === expectedAccountKey
+		? recoveredApiKey
+		: undefined;
 }
 
 export function splitProviderAccountKey(key: string): ProviderAccountKey {

@@ -3,6 +3,7 @@ import type { AssistantMessage, AssistantMessageEvent, Message, Model } from "@c
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { startAgentProviderRequest } from "../src/agent-loop.ts";
+import { resolveProviderRequestAuthOptions } from "../src/provider-request-planner.ts";
 import type {
 	AgentContext,
 	AgentLoopConfig,
@@ -71,6 +72,40 @@ function toLlm(messages: AgentMessage[]): Message[] {
 }
 
 describe("provider request planning", () => {
+	it("keeps trusted credential routing authoritative while merging ordinary request headers", async () => {
+		const resolved = await resolveProviderRequestAuthOptions({
+			model: model(),
+			apiKey: "caller-key",
+			headers: { shared: "request", request: "header" },
+			credentialHeaders: { "x-credential-route": "forged" },
+			providerAccountKey: "test#forged",
+			resolveProviderRequestAuth: async () => ({
+				apiKey: "trusted-key",
+				headers: { provider: "header", shared: "provider" },
+			}),
+		});
+
+		expect(resolved).toEqual({
+			apiKey: "trusted-key",
+			headers: { provider: "header", shared: "request", request: "header" },
+			credentialHeaders: undefined,
+			providerAccountKey: undefined,
+		});
+
+		const ownerless = await resolveProviderRequestAuthOptions({
+			model: model(),
+			apiKey: "caller-key",
+			credentialHeaders: { "x-credential-route": "explicit" },
+			providerAccountKey: "test#explicit",
+		});
+		expect(ownerless).toEqual({
+			apiKey: "caller-key",
+			headers: undefined,
+			credentialHeaders: { "x-credential-route": "explicit" },
+			providerAccountKey: "test#explicit",
+		});
+	});
+
 	it("runs the accepted request lifecycle in validation, commit, snapshot, transport order", async () => {
 		const order: string[] = [];
 		const initial: AgentContext = { systemPrompt: "SYSTEM", messages: [user("old")], tools: [] };

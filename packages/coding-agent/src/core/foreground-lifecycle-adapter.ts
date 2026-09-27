@@ -36,7 +36,6 @@ export class ForegroundLifecycleAdapter {
 		getMutationScope?: () => string,
 		getAnnouncer?: () => string,
 		providerLimitStore?: ProviderLimitStore,
-		resolveProviderAccountKey?: (provider: string) => string,
 		observeMessagePersisted?: (message: Message, entryId: string) => void,
 		liveWarningSink?: () => ((message: string) => void) | undefined,
 		observeProviderRequest?: (context: ProviderRequestSnapshotContext) => void,
@@ -51,7 +50,6 @@ export class ForegroundLifecycleAdapter {
 			modelRouter,
 			emitWarning: (message) => this.pendingWarnings.push(message),
 			observeProviderRequest,
-			...(resolveProviderAccountKey ? { resolveProviderAccountKey } : {}),
 			...(getMutationScope ? { getMutationScope } : {}),
 			...(getAnnouncer ? { getAnnouncer } : {}),
 		});

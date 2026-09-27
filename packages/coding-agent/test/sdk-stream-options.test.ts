@@ -1,7 +1,7 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
+import { resolveProviderRequestAuthOptions } from "@caupulican/pi-agent-core/provider-request-planner";
 import {
 	type Api,
 	type AssistantMessage,
@@ -9,11 +9,12 @@ import {
 	type Model,
 	type SimpleStreamOptions,
 } from "@caupulican/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { type CreateAgentSessionOptions, createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { tempDir as createTempDir } from "./temp-dir.ts";
 
 describe("createAgentSession stream options", () => {
 	let tempDir: string;
@@ -21,17 +22,11 @@ describe("createAgentSession stream options", () => {
 	let agentDir: string;
 
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-sdk-stream-options-"));
+		tempDir = createTempDir("pi-sdk-stream-options-");
 		cwd = join(tempDir, "project");
 		agentDir = join(tempDir, "agent");
 		mkdirSync(cwd, { recursive: true });
 		mkdirSync(agentDir, { recursive: true });
-	});
-
-	afterEach(() => {
-		if (tempDir) {
-			rmSync(tempDir, { recursive: true, force: true });
-		}
 	});
 
 	function createModel(api: Api, provider = "capture-provider"): Model<Api> {
@@ -114,7 +109,16 @@ describe("createAgentSession stream options", () => {
 		});
 
 		try {
-			await session.agent.streamFn(model, { messages: [] }, requestOptions);
+			const requestAuth = await resolveProviderRequestAuthOptions({
+				model,
+				apiKey: requestOptions.apiKey,
+				headers: requestOptions.headers,
+				credentialHeaders: requestOptions.credentialHeaders,
+				providerAccountKey: requestOptions.providerAccountKey,
+				getApiKey: session.agent.getApiKey,
+				resolveProviderRequestAuth: session.agent.resolveProviderRequestAuth,
+			});
+			await session.agent.streamFn(model, { messages: [] }, { ...requestOptions, ...requestAuth });
 			return capturedOptions;
 		} finally {
 			await session.disposeAndWait();
@@ -326,9 +330,19 @@ describe("createAgentSession stream options", () => {
 		});
 		const forged = { credentialHeaders: { "X-OpenAI-Fedramp": "true" }, headers: { "X-OpenAI-Fedramp": "true" } };
 		try {
-			await session.agent.streamFn(model, { messages: [] }, forged);
+			const streamRequest = async () => {
+				const requestAuth = await resolveProviderRequestAuthOptions({
+					model,
+					headers: forged.headers,
+					credentialHeaders: forged.credentialHeaders,
+					getApiKey: session.agent.getApiKey,
+					resolveProviderRequestAuth: session.agent.resolveProviderRequestAuth,
+				});
+				await session.agent.streamFn(model, { messages: [] }, { ...forged, ...requestAuth });
+			};
+			await streamRequest();
 			authStorage.set("openai-codex", credential);
-			await session.agent.streamFn(model, { messages: [] }, forged);
+			await streamRequest();
 		} finally {
 			await session.disposeAndWait();
 			modelRegistry.unregisterProvider(model.provider);

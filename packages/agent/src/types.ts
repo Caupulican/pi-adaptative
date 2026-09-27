@@ -462,10 +462,21 @@ export interface ProviderRequestAdmissionContext extends RequestPreflightContext
 export interface ProviderRequestSnapshotContext extends ProviderRequestAdmissionContext {
 	/** Opaque identity generated only after final plan validation and adoption. */
 	requestId: AgentRequestId;
+	/** Non-secret account scope frozen with the API key that this request will transport. */
+	providerAccountKey?: string;
 	/** Request-local reasoning value that will be sent to transport. */
 	reasoning: SimpleStreamOptions["reasoning"];
 	/** Zero-based admission generation for the accepted plan. */
 	attempt: number;
+}
+
+/** Ephemeral request auth resolved once before lifecycle snapshot and transport dispatch. */
+export interface ResolvedProviderRequestAuth {
+	apiKey?: string;
+	headers?: Record<string, string>;
+	credentialHeaders?: Record<string, string>;
+	/** Non-secret account scope derived from `apiKey`; never sent to a provider. */
+	providerAccountKey?: string;
 }
 
 export type ProviderRequestAdmissionResult =
@@ -670,7 +681,17 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 *
 	 * Contract: must not throw or reject. Return undefined when no key is available.
 	 */
-	getApiKey?: (provider: string) => Promise<string | undefined> | string | undefined;
+	getApiKey?: (provider: string, model?: Model<Api>) => Promise<string | undefined> | string | undefined;
+
+	/**
+	 * Resolve the complete auth projection for one routed model exactly once. When present, this is
+	 * authoritative over `getApiKey`; the planner freezes its key, ordinary auth headers,
+	 * credential-routing headers, and account scope into the accepted request before any lifecycle
+	 * callback runs. Throwing prevents request acceptance and transport.
+	 */
+	resolveProviderRequestAuth?: (
+		model: Model<Api>,
+	) => ResolvedProviderRequestAuth | Promise<ResolvedProviderRequestAuth>;
 
 	/**
 	 * Called after each turn fully completes and `turn_end` has been emitted.

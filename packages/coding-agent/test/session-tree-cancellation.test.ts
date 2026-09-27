@@ -1,3 +1,4 @@
+import type { Api, Model } from "@caupulican/pi-ai";
 import { fauxAssistantMessage } from "@caupulican/pi-ai/faux";
 import { describe, expect, it, vi } from "vitest";
 import { createHarness } from "./suite/harness.ts";
@@ -200,6 +201,45 @@ describe("native summary usage handoff", () => {
 		totalTokens: 4,
 		cost: { input: 0.003, output: 0.001, cacheRead: 0, cacheWrite: 0, total: 0.004 },
 	};
+
+	it("carries the branch summary credential projection unchanged to transport", async () => {
+		const harness = await createHarness();
+		try {
+			const target = harness.sessionManager.appendMessage({ role: "user", content: "First", timestamp: 1 });
+			harness.sessionManager.appendMessage({ role: "user", content: "Second", timestamp: 2 });
+			const sessionWithAuth = harness.session as unknown as {
+				_getRequiredRequestAuth(model: Model<Api>): Promise<{
+					apiKey: string;
+					headers: Record<string, string>;
+					credentialHeaders: Record<string, string>;
+					providerAccountKey: string;
+				}>;
+			};
+			vi.spyOn(sessionWithAuth, "_getRequiredRequestAuth").mockResolvedValue({
+				apiKey: "credential-a",
+				headers: { Authorization: "Bearer credential-a" },
+				credentialHeaders: { "x-account-route": "account-a" },
+				providerAccountKey: "faux#account-a",
+			});
+			const baseStream = harness.session.agent.streamFn;
+			const stream = vi.fn((model, context, options) => {
+				expect(options).toMatchObject({
+					apiKey: "credential-a",
+					headers: { Authorization: "Bearer credential-a" },
+					credentialHeaders: { "x-account-route": "account-a" },
+					providerAccountKey: "faux#account-a",
+				});
+				return baseStream(model, context, options);
+			});
+			harness.session.agent.streamFn = stream;
+			harness.setResponses([fauxAssistantMessage("Provider summary")]);
+
+			expect((await harness.session.navigateTree(target, { summarize: true })).cancelled).toBe(false);
+			expect(stream).toHaveBeenCalledOnce();
+		} finally {
+			await harness.cleanup();
+		}
+	});
 
 	it.each(["stop", "aborted", "error", "length"] as const)(
 		"records the actual provider charge once for terminal %s",

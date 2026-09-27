@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Stream options carry an optional non-secret, host-only provider account scope for request admission and lifecycle correlation.
+
 ### Changed
 
 - Google Antigravity requests identify as the locally installed AGY 1.2.11 client.

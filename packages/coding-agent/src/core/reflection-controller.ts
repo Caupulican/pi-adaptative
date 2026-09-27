@@ -16,7 +16,10 @@ import {
 	runAgentLoop,
 	startAgentProviderRequest,
 } from "@caupulican/pi-agent-core/agent-loop";
-import { resolveRequestPreflightMaxTokens } from "@caupulican/pi-agent-core/provider-request-planner";
+import {
+	resolveProviderRequestAuthOptions,
+	resolveRequestPreflightMaxTokens,
+} from "@caupulican/pi-agent-core/provider-request-planner";
 import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/session";
 import type { AgentContext, AgentLoopConfig, AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
@@ -1478,6 +1481,8 @@ export class ReflectionController {
 				}
 				options.apiKey = auth.apiKey;
 				options.headers = auth.headers;
+				options.credentialHeaders = auth.credentialHeaders;
+				options.providerAccountKey = auth.providerAccountKey;
 			}
 			const agent = this.deps.getAgent();
 			const foregroundModel = agent.state.model;
@@ -1495,7 +1500,10 @@ export class ReflectionController {
 				sessionId: affinityKey,
 				...(options.apiKey !== undefined ? { apiKey: options.apiKey } : {}),
 				...(options.headers !== undefined ? { headers: options.headers } : {}),
+				...(options.credentialHeaders !== undefined ? { credentialHeaders: options.credentialHeaders } : {}),
+				...(options.providerAccountKey !== undefined ? { providerAccountKey: options.providerAccountKey } : {}),
 				getApiKey: agent.getApiKey,
+				resolveProviderRequestAuth: agent.resolveProviderRequestAuth,
 				// The host's reasoning policy, applied to this conversation's own state.
 				resolveRequestReasoning:
 					opts.conversationId !== undefined && agent.resolveRequestReasoning
@@ -1669,12 +1677,12 @@ export class ReflectionController {
 					maxTokens: opts.maxTokens,
 					signal: opts.signal,
 				});
-				const apiKey = (agent.getApiKey ? await agent.getApiKey(model.provider) : undefined) || options.apiKey;
+				const requestAuth = await resolveProviderRequestAuthOptions(loopConfig);
 				const streamFunction = agent.streamFn ?? streamSimple;
 				const rawStream = await streamFunction(model, requestContext, {
 					...options,
+					...requestAuth,
 					...(maxTokens !== undefined ? { maxTokens } : {}),
-					...(apiKey !== undefined ? { apiKey } : {}),
 				});
 				const response = await rawStream.result();
 				await opts.onMessage?.(response);

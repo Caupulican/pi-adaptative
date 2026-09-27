@@ -31,7 +31,12 @@ import {
 	type SessionEntry,
 	type SessionManager,
 } from "@caupulican/pi-agent-core/session";
-import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
+import type {
+	AgentMessage,
+	ResolvedProviderRequestAuth,
+	StreamFn,
+	ThinkingLevel,
+} from "@caupulican/pi-agent-core/types";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { isContextOverflow } from "@caupulican/pi-ai/overflow";
 import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
@@ -63,6 +68,7 @@ import { IdlePreparationTimer } from "./context/idle-preparation-timer.ts";
 import { packSupersededHostRecords } from "./context-gc.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "./extensions/index.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
+import type { RequestAuth } from "./request-auth.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { LatestCompactionEntryScan, resolveSessionEntryIndex } from "./session-entry-index.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -174,11 +180,11 @@ export interface CompactionControllerDeps {
 	settingsManager: SettingsManager;
 	getModel(): Model<Api> | undefined;
 	getAdaptedSettings(): CompactionSettings;
-	getRequestAuth(model: Model<Api>): Promise<{ apiKey?: string; headers?: Record<string, string> }>;
+	getRequestAuth(model: Model<Api>): Promise<RequestAuth>;
 	resolveModelAndAuth(
 		compactionModel: Model<Api>,
 		sessionModel: Model<Api>,
-	): Promise<{ model: Model<Api>; apiKey?: string; headers?: Record<string, string>; failure?: string }>;
+	): Promise<{ model: Model<Api>; failure?: string } & ResolvedProviderRequestAuth>;
 	resolveModel(sessionModel: Model<Api>): Model<Api>;
 	getSelectionReason(): string | undefined;
 	resolveThinkingLevel(compactionModel: Model<Api>, sessionModel: Model<Api>): ThinkingLevel | undefined;
@@ -469,6 +475,19 @@ export class CompactionController {
 			sessionId: this.deps.sessionManager.getSessionId(),
 		});
 		return { chunked, summaryBudgetScale, ...(structuredRequest ? { structuredRequest } : {}) };
+	}
+
+	private streamWithFrozenAuth(
+		credentialHeaders: Record<string, string> | undefined,
+		providerAccountKey: string | undefined,
+	): StreamFn {
+		const streamFn = this.deps.agent.streamFn;
+		return (model, context, options) =>
+			streamFn(model, context, {
+				...options,
+				...(credentialHeaders !== undefined ? { credentialHeaders } : {}),
+				...(providerAccountKey !== undefined ? { providerAccountKey } : {}),
+			});
 	}
 
 	/**
@@ -798,7 +817,7 @@ export class CompactionController {
 				const model = modelTier === "cheap" ? selectedCompactionModel : sessionModel;
 				return this.deps.resolveModelAndAuth(model, sessionModel);
 			},
-			summarizeAndVerify: async (params, model, apiKey, headers, branch) => {
+			summarizeAndVerify: async (params, model, apiKey, headers, credentialHeaders, providerAccountKey, branch) => {
 				const preparation = this.prepareCompactionWithPackedHostRecords(
 					branch,
 					{ ...settings, keepRecentTokens: params.keepRecentTokens },
@@ -816,7 +835,7 @@ export class CompactionController {
 							effectiveInstructions,
 							signal,
 							compactionThinkingLevel,
-							this.deps.agent.streamFn,
+							this.streamWithFrozenAuth(credentialHeaders, providerAccountKey),
 							this.deps.buildPreDigest(),
 							this.buildExecutionOptions(
 								preparation,
@@ -1131,7 +1150,15 @@ export class CompactionController {
 				getBaseKeepRecentTokens: () => settings.keepRecentTokens,
 				resolveModelAndAuth: async (modelTier) =>
 					this.deps.resolveModelAndAuth(modelTier === "session" ? model : this.deps.resolveModel(model), model),
-				summarizeAndVerify: async (params, compactModel, apiKey, headers, branchEntries) => {
+				summarizeAndVerify: async (
+					params,
+					compactModel,
+					apiKey,
+					headers,
+					credentialHeaders,
+					providerAccountKey,
+					branchEntries,
+				) => {
 					fromExtension = false;
 					const preparation = this.prepareCompactionWithPackedHostRecords(
 						branchEntries,
@@ -1173,7 +1200,7 @@ export class CompactionController {
 								effectiveInstructions,
 								signal,
 								compactionThinkingLevel,
-								this.deps.agent.streamFn,
+								this.streamWithFrozenAuth(credentialHeaders, providerAccountKey),
 								this.deps.buildPreDigest(),
 								this.buildExecutionOptions(
 									preparation,
@@ -1515,7 +1542,7 @@ export class CompactionController {
 					undefined,
 					signal,
 					this.deps.resolveThinkingLevel(auth.model, model),
-					this.deps.agent.streamFn,
+					this.streamWithFrozenAuth(auth.credentialHeaders, auth.providerAccountKey),
 					this.deps.buildPreDigest(),
 					this.buildExecutionOptions(preparation, auth.model, model, false),
 				),

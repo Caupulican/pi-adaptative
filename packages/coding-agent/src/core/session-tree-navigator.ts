@@ -181,7 +181,7 @@ export class SessionTreeNavigator {
 			let summaryDetails: unknown;
 			if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
 				const model = this.deps.getModel()!;
-				const { apiKey, headers } = await this.deps.getRequiredRequestAuth(model);
+				const requestAuth = await this.deps.getRequiredRequestAuth(model);
 				if (branchSummaryAbort.signal.aborted) {
 					return { cancelled: true, aborted: true };
 				}
@@ -189,13 +189,22 @@ export class SessionTreeNavigator {
 				const extensionUsage = summaryUsage;
 				const result = await generateBranchSummary(entriesToSummarize, {
 					model,
-					apiKey,
-					headers,
+					apiKey: requestAuth.apiKey,
+					headers: requestAuth.headers,
 					signal: branchSummaryAbort.signal,
 					customInstructions,
 					replaceInstructions,
 					reserveTokens: branchSummarySettings.reserveTokens,
-					streamFn: this.deps.getAgent().streamFn,
+					streamFn: (streamModel, context, streamOptions) =>
+						this.deps.getAgent().streamFn(streamModel, context, {
+							...streamOptions,
+							...(requestAuth.credentialHeaders !== undefined
+								? { credentialHeaders: requestAuth.credentialHeaders }
+								: {}),
+							...(requestAuth.providerAccountKey !== undefined
+								? { providerAccountKey: requestAuth.providerAccountKey }
+								: {}),
+						}),
 					onUsage: (usage) => {
 						// The generator publishes cumulative snapshots before a later attempt can
 						// throw. Replace its previous contribution; retain extension charges once.

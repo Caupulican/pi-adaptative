@@ -1,6 +1,3 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { Agent } from "@caupulican/pi-agent-core";
 import {
 	type Api,
@@ -15,6 +12,7 @@ import { ModelAdaptationStore } from "../src/core/models/adaptation-store.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { ToolProtocolController } from "../src/core/tool-protocol-controller.ts";
 import { nodeFs } from "../src/core/util/faultable-fs.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const model: Model<Api> = {
 	id: "probe-model",
@@ -29,18 +27,15 @@ const model: Model<Api> = {
 	maxTokens: 1024,
 };
 const modelKey = `${model.provider}/${model.id}`;
-const dirs: string[] = [];
 afterEach(() => {
 	vi.restoreAllMocks();
-	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 function fixture(
 	respond: (context: Context, index: number) => AssistantMessage | AssistantMessageEventStream,
 	isDisposed: () => boolean = () => false,
 ) {
-	const dir = mkdtempSync(join(tmpdir(), "pi-probe-boundaries-"));
-	dirs.push(dir);
+	const dir = tempDir("pi-probe-boundaries-");
 	const store = ModelAdaptationStore.forAgentDir(dir);
 	const agent = new Agent({ initialState: { model } });
 	const requests: Context[] = [];
@@ -191,11 +186,16 @@ describe("tool probe failure boundaries", () => {
 	it("accounts for a late result without persisting it after disposal", async () => {
 		let disposed = false;
 		const delayed = createAssistantMessageEventStream();
+		const reached = Promise.withResolvers<void>();
 		const { controller, store, requests, addSpawnedUsage } = fixture(
-			() => delayed,
+			() => {
+				reached.resolve();
+				return delayed;
+			},
 			() => disposed,
 		);
 		const probe = controller.probeToolCallingForModel(model);
+		await reached.promise;
 		disposed = true;
 		const result = response(matchingContent(requests[0]), "toolUse");
 		delayed.push({ type: "done", reason: "toolUse", message: result });

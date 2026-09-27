@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Agent, StreamFn } from "@caupulican/pi-agent-core";
+import { resolveProviderRequestAuthOptions } from "@caupulican/pi-agent-core/provider-request-planner";
 import {
 	formatVariantEnvelope,
 	generateTextToolProtocolPrimer,
@@ -524,13 +525,25 @@ export class ToolProtocolController {
 	private async streamForProbe(run: ToolProbeRun, context: Context, options: SimpleStreamOptions) {
 		this.assertCurrentProbe(run);
 		const model = run.model;
-		let requestOptions = options;
-		if (this.deps.isRawStreamSimple(this.deps.agent.streamFn)) {
+		let requestOptions: SimpleStreamOptions;
+		if (this.deps.isRawStreamSimple(this.deps.agent.streamFn) && !this.deps.agent.resolveProviderRequestAuth) {
 			const auth = await this.deps.getRequiredRequestAuth(model);
 			requestOptions = {
 				...options,
 				apiKey: auth.apiKey,
 				headers: auth.headers || options.headers ? { ...auth.headers, ...options.headers } : undefined,
+				credentialHeaders: auth.credentialHeaders ?? options.credentialHeaders,
+				providerAccountKey: auth.providerAccountKey ?? options.providerAccountKey,
+			};
+		} else {
+			requestOptions = {
+				...options,
+				...(await resolveProviderRequestAuthOptions({
+					model,
+					...options,
+					getApiKey: this.deps.agent.getApiKey,
+					resolveProviderRequestAuth: this.deps.agent.resolveProviderRequestAuth,
+				})),
 			};
 		}
 		this.assertCurrentProbe(run);

@@ -400,7 +400,15 @@ describe("runCompactionLoop", () => {
 		const measureLiveTokens = scriptedMeasure([3000, 2500, 2500, 900]);
 		let previousSummaryOnRetry: string | undefined;
 		const summarizeAndVerify = vi.fn(
-			async (params: CompactionCycleParams, _model, _apiKey, _headers, currentBranch) => {
+			async (
+				params: CompactionCycleParams,
+				_model,
+				_apiKey,
+				_headers,
+				_credentialHeaders,
+				_providerAccountKey,
+				currentBranch,
+			) => {
 				summarizeCalls += 1;
 				const preparation = prepareCompaction(
 					currentBranch,

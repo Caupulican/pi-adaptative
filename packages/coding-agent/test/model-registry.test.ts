@@ -9,6 +9,7 @@ import { listModels } from "../src/cli/list-models.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { clearApiKeyCache, ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.ts";
 import { defaultModelPerProvider } from "../src/core/model-resolver.ts";
+import { providerAccountKey } from "../src/core/provider-admission/account-key.ts";
 import { clearDeprecationWarningsForTests } from "../src/utils/deprecation.ts";
 import {
 	createCounterConfigCommand,
@@ -1929,6 +1930,7 @@ describe("ModelRegistry", () => {
 					ok: true,
 					apiKey: "token-1",
 					headers: { Authorization: "Bearer token-1" },
+					providerAccountKey: providerAccountKey("custom-provider", { type: "api_key", key: "token-1" }),
 				});
 
 				writeFileSync(tokenFile, "token-2");
@@ -1938,6 +1940,7 @@ describe("ModelRegistry", () => {
 					ok: true,
 					apiKey: "token-2",
 					headers: { Authorization: "Bearer token-2" },
+					providerAccountKey: providerAccountKey("custom-provider", { type: "api_key", key: "token-2" }),
 				});
 			});
 

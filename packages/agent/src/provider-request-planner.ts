@@ -18,6 +18,7 @@ import type {
 	ProviderRequestPrefixState,
 	RequestPreflightContext,
 	RequestPreflightResult,
+	ResolvedProviderRequestAuth,
 	SentPrefixDisturbanceInfo,
 	StreamFn,
 } from "./types.ts";
@@ -170,6 +171,40 @@ export async function resolveRequestPreflightMaxTokens(options: {
 		options.signal,
 	);
 	return narrowRequestMaxTokens(options.maxTokens, preflight?.maxTokens, options.model.maxTokens, "requestPreflight");
+}
+
+/**
+ * Resolve one request's complete auth projection once. Exported for the one isolated request-context
+ * path that deliberately bypasses normal context planning but must share these ownership rules.
+ */
+export async function resolveProviderRequestAuthOptions(
+	config: Pick<
+		AgentLoopConfig,
+		| "model"
+		| "apiKey"
+		| "headers"
+		| "credentialHeaders"
+		| "providerAccountKey"
+		| "getApiKey"
+		| "resolveProviderRequestAuth"
+	>,
+): Promise<ResolvedProviderRequestAuth> {
+	const resolved = config.resolveProviderRequestAuth
+		? await config.resolveProviderRequestAuth(config.model)
+		: undefined;
+	const resolverOwnsAuth = resolved !== undefined;
+	const apiKey = resolverOwnsAuth
+		? resolved.apiKey
+		: (config.getApiKey ? await config.getApiKey(config.model.provider, config.model) : undefined) || config.apiKey;
+	const headers = resolved?.headers || config.headers ? { ...resolved?.headers, ...config.headers } : undefined;
+	const credentialHeaders = resolverOwnsAuth ? resolved.credentialHeaders : config.credentialHeaders;
+	const providerAccountKey = resolverOwnsAuth ? resolved.providerAccountKey : config.providerAccountKey;
+	return {
+		apiKey,
+		headers,
+		credentialHeaders,
+		providerAccountKey,
+	};
 }
 
 export interface StartedAgentProviderRequest {
@@ -471,8 +506,7 @@ export async function startPlannedAgentProviderRequestWithId(
 			});
 			signal?.throwIfAborted();
 
-			const resolvedApiKey =
-				(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
+			const requestAuth = await resolveProviderRequestAuthOptions(config);
 			signal?.throwIfAborted();
 			const requestReasoning = config.resolveRequestReasoning
 				? config.resolveRequestReasoning(config.reasoning, {
@@ -532,6 +566,7 @@ export async function startPlannedAgentProviderRequestWithId(
 					sourceContext,
 					maxTokens: requestMaxTokens,
 					requestId,
+					providerAccountKey: requestAuth.providerAccountKey,
 					reasoning: requestReasoning,
 					attempt: admissionAttempt,
 				},
@@ -543,7 +578,7 @@ export async function startPlannedAgentProviderRequestWithId(
 				materialized,
 				{
 					...config,
-					apiKey: resolvedApiKey,
+					...requestAuth,
 					maxTokens: requestMaxTokens,
 					reasoning: requestReasoning,
 					signal,

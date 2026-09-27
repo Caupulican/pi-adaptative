@@ -677,6 +677,11 @@ export class RuntimeBuilder {
 					(model) => this.deps.isModelExhausted(model),
 					resolveCurrentToolRepairSettings(this.deps.getSettingsManager().settings).textProtocol,
 				),
+			resolveProviderRequestAuth: async (model) => {
+				const auth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
+				if (!auth.ok) throw new Error(auth.error);
+				return auth;
+			},
 			getCwd: () => cwd,
 			buildReadOnlyTools: (toolCwd) => {
 				const readTool = wrapToolWithCapabilityEnvelopeGate(
@@ -2240,6 +2245,8 @@ export async function resolveScoutModel(
 		model,
 		apiKey: auth.apiKey,
 		headers: auth.headers,
+		credentialHeaders: auth.credentialHeaders,
+		providerAccountKey: auth.providerAccountKey,
 		textToolCallProtocol: protocolResolution.protocol,
 	};
 }

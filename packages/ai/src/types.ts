@@ -144,6 +144,11 @@ export interface StreamOptions {
 	signal?: AbortSignal;
 	apiKey?: string;
 	/**
+	 * Non-secret host identity for the exact credential frozen into this request. Infrastructure
+	 * wrappers may use it for account-scoped admission and limits; providers must not transmit it.
+	 */
+	providerAccountKey?: string;
+	/**
 	 * Preferred transport for providers that support multiple transports.
 	 * Providers that do not support this option ignore it.
 	 */

@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
+import { resolveProviderRequestAuthOptions } from "@caupulican/pi-agent-core/provider-request-planner";
 import {
 	type Api,
 	type AssistantMessage,
@@ -9,11 +9,12 @@ import {
 	type Model,
 	type SimpleStreamOptions,
 } from "@caupulican/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { tempDir as createTempDir } from "./temp-dir.ts";
 
 describe("createAgentSession OpenRouter attribution headers", () => {
 	let tempDir: string;
@@ -21,17 +22,11 @@ describe("createAgentSession OpenRouter attribution headers", () => {
 	let agentDir: string;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `pi-sdk-openrouter-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		tempDir = createTempDir("pi-sdk-openrouter-test-");
 		cwd = join(tempDir, "project");
 		agentDir = join(tempDir, "agent");
 		mkdirSync(cwd, { recursive: true });
 		mkdirSync(agentDir, { recursive: true });
-	});
-
-	afterEach(() => {
-		if (tempDir && existsSync(tempDir)) {
-			rmSync(tempDir, { recursive: true, force: true });
-		}
 	});
 
 	function createModel(provider: string, baseUrl: string): Model<Api> {
@@ -117,14 +112,17 @@ describe("createAgentSession OpenRouter attribution headers", () => {
 		});
 
 		try {
-			await session.agent.streamFn(
+			const requestOptions = {
+				sessionId: session.sessionId,
+				...(options.requestHeaders ? { headers: options.requestHeaders } : {}),
+			};
+			const requestAuth = await resolveProviderRequestAuthOptions({
 				model,
-				{ messages: [] },
-				{
-					sessionId: session.sessionId,
-					...(options.requestHeaders ? { headers: options.requestHeaders } : {}),
-				},
-			);
+				headers: requestOptions.headers,
+				getApiKey: session.agent.getApiKey,
+				resolveProviderRequestAuth: session.agent.resolveProviderRequestAuth,
+			});
+			await session.agent.streamFn(model, { messages: [] }, { ...requestOptions, ...requestAuth });
 			return capturedOptions?.headers;
 		} finally {
 			await session.disposeAndWait();

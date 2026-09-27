@@ -19,6 +19,8 @@ export interface ModelAndAuth {
 	model: Model<any>;
 	apiKey?: string;
 	headers?: Record<string, string>;
+	credentialHeaders?: Record<string, string>;
+	providerAccountKey?: string;
 	failure?: string;
 }
 
@@ -33,6 +35,8 @@ export interface CompactionLoopDeps {
 		model: Model<any>,
 		apiKey: string | undefined,
 		headers: Record<string, string> | undefined,
+		credentialHeaders: Record<string, string> | undefined,
+		providerAccountKey: string | undefined,
 		branch: SessionEntry[],
 	): Promise<{ result: CompactionResult }>;
 	buildDeterministicCheckpoint(
@@ -163,6 +167,8 @@ export async function runCompactionLoop(deps: CompactionLoopDeps): Promise<Compa
 				modelInfo.model,
 				modelInfo.apiKey,
 				modelInfo.headers,
+				modelInfo.credentialHeaders,
+				modelInfo.providerAccountKey,
 				branch,
 			));
 		} catch (error) {

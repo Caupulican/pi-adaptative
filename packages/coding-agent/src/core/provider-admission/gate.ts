@@ -67,7 +67,7 @@ export interface ProviderAdmissionGateDeps {
 	/** Machine-wide emergency stop; omitted means never engaged. */
 	isEmergencyStopEngaged?(): boolean;
 	/** Provider account key for `provider` (see account-key.ts); omitted keys on the bare provider id. */
-	getAccountKey?(provider: string): string;
+	getAccountKey?(provider: string, apiKey?: string): string;
 	getLane?(): ProviderRequestLane;
 	record?(record: ProviderAdmissionWaitRecord): void;
 	now?(): number;
@@ -291,7 +291,8 @@ export async function admitProviderRequest(
  */
 export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissionGateDeps): StreamFn {
 	return async (model, context, options) => {
-		const key = deps.getAccountKey?.(model.provider) ?? model.provider;
+		const key =
+			options?.providerAccountKey ?? deps.getAccountKey?.(model.provider, options?.apiKey) ?? model.provider;
 		const release = await admitProviderRequest(
 			model.provider,
 			{ ...deps, getAccountKey: () => key },

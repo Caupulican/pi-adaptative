@@ -208,6 +208,40 @@ src/ok.ts:1-2
 		expect(capturedProtocol).toEqual({ variant: "fenced-json" });
 	});
 
+	it("passes the resolved credential projection into the isolated scout Agent", async () => {
+		let capturedOptions: Parameters<NonNullable<ScoutControllerDeps["streamFn"]>>[2];
+		const controller = makeController(["<final_answer>\nok\n</final_answer>"], {
+			resolveScoutModel: async () => ({
+				model: createModel(),
+				apiKey: "credential-a",
+				headers: { Authorization: "Bearer credential-a" },
+				credentialHeaders: { "x-account-route": "account-a" },
+				providerAccountKey: "anthropic#account-a",
+			}),
+			streamFn: (_model, _context, options) => {
+				capturedOptions = options;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: assistantMessage("<final_answer>\nok\n</final_answer>"),
+					});
+				});
+				return stream;
+			},
+		});
+
+		await controller.run("Find code", 8);
+
+		expect(capturedOptions).toMatchObject({
+			apiKey: "credential-a",
+			headers: { Authorization: "Bearer credential-a" },
+			credentialHeaders: { "x-account-route": "account-a" },
+			providerAccountKey: "anthropic#account-a",
+		});
+	});
+
 	it("propagates abort as a clean partial result", async () => {
 		const controller = new AbortController();
 		const scout = makeController(["partial"], {

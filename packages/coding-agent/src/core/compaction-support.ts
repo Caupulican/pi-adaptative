@@ -12,13 +12,14 @@ import {
 	summarizerCanIngest,
 } from "@caupulican/pi-agent-core/compaction/compaction";
 import { convertToLlm } from "@caupulican/pi-agent-core/messages";
-import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
+import type { AgentMessage, ResolvedProviderRequestAuth, ThinkingLevel } from "@caupulican/pi-agent-core/types";
 import type { Api, Context, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
-import type { RequestAuth } from "./request-auth.ts";
+import { resolveProviderAccountKey } from "./provider-admission/account-key.ts";
+import { materializeRequestAuth, type RequestAuth } from "./request-auth.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
@@ -197,7 +198,20 @@ export class CompactionSupport {
 		}
 
 		const result = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
-		return result.ok ? { apiKey: result.apiKey, headers: result.headers } : {};
+		return result.ok
+			? {
+					apiKey: result.apiKey,
+					headers: result.headers,
+					credentialHeaders: result.credentialHeaders,
+					providerAccountKey: result.providerAccountKey,
+				}
+			: {};
+	}
+
+	private freezeRequestAuth(model: Model<Api>, auth: RequestAuth): ResolvedProviderRequestAuth {
+		return materializeRequestAuth(auth, () =>
+			resolveProviderAccountKey(this.deps.getModelRegistry().authStorage, model.provider, auth.apiKey),
+		);
 	}
 
 	/**
@@ -229,14 +243,14 @@ export class CompactionSupport {
 	async resolveModelAndAuth(
 		compactionModel: Model<Api>,
 		sessionModel: Model<Api>,
-	): Promise<{ model: Model<Api>; apiKey?: string; headers?: Record<string, string>; failure?: string }> {
+	): Promise<{ model: Model<Api>; failure?: string } & ResolvedProviderRequestAuth> {
 		if (this.deps.isRawStream()) {
 			const registry = this.deps.getModelRegistry();
 			let auth = await registry.getApiKeyAndHeaders(compactionModel);
 			let readiness: string | undefined;
 			if (registry.canUseResolvedRequestAuth(compactionModel, auth)) {
 				readiness = await this.readinessFailure(compactionModel);
-				if (!readiness) return { model: compactionModel, apiKey: auth.apiKey, headers: auth.headers };
+				if (!readiness) return { model: compactionModel, ...this.freezeRequestAuth(compactionModel, auth) };
 			}
 			const isSameModel =
 				compactionModel.provider === sessionModel.provider && compactionModel.id === sessionModel.id;
@@ -244,7 +258,7 @@ export class CompactionSupport {
 				auth = await registry.getApiKeyAndHeaders(sessionModel);
 				if (registry.canUseResolvedRequestAuth(sessionModel, auth)) {
 					readiness = await this.readinessFailure(sessionModel);
-					if (!readiness) return { model: sessionModel, apiKey: auth.apiKey, headers: auth.headers };
+					if (!readiness) return { model: sessionModel, ...this.freezeRequestAuth(sessionModel, auth) };
 				}
 			}
 			return {
@@ -257,17 +271,16 @@ export class CompactionSupport {
 
 		// Custom streamFn owns auth injection (CLI path) — resolve best-effort, never fail on auth
 		// here; a managed-local summarizer must still pass the readiness gate before compact() runs.
-		const { apiKey, headers } = await this.getRequestAuth(compactionModel);
+		const requestAuth = this.freezeRequestAuth(compactionModel, await this.getRequestAuth(compactionModel));
 		const readiness = await this.readinessFailure(compactionModel);
 		if (readiness) {
 			return {
 				model: compactionModel,
-				apiKey,
-				headers,
+				...requestAuth,
 				failure: `summarizer ${compactionModel.id} not ready: ${readiness}`,
 			};
 		}
-		return { model: compactionModel, apiKey, headers };
+		return { model: compactionModel, ...requestAuth };
 	}
 
 	private getExplicitCompactionModelSetting(): string | undefined {

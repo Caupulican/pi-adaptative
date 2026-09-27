@@ -81,9 +81,11 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 			? (model, context, options) =>
 					baseStreamFn(model, context, {
 						...options,
-						credentialHeaders: options?.apiKey
-							? input.authStorage.getOAuthRequestHeaders(model.provider, options.apiKey)
-							: undefined,
+						credentialHeaders:
+							options?.credentialHeaders ??
+							(options?.apiKey
+								? input.authStorage.getOAuthRequestHeaders(model.provider, options.apiKey)
+								: undefined),
 						credentialHeadersFor: (apiKey: string) =>
 							input.authStorage.getOAuthRequestHeaders(model.provider, apiKey),
 					})
@@ -118,7 +120,7 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 		ledger: providerAdmissionLedger,
 		limits: input.providerLimitStore,
 		isEmergencyStopEngaged: () => isEmergencyStopEngaged(input.agentDir),
-		getAccountKey: (provider) => resolveProviderAccountKey(input.authStorage, provider),
+		getAccountKey: (provider, apiKey) => resolveProviderAccountKey(input.authStorage, provider, apiKey),
 		...(input.onWait ? { onWait: input.onWait } : {}),
 		getPolicy: () => settingsManager.getProviderAdmissionSettings(),
 		record: (record) => {
