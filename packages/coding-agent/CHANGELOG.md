@@ -25,6 +25,7 @@
 - Shared-worktree mutation coordination owns provider-local call IDs by session across announcements, command holds, terminal retirement, and background handoff, so parallel sessions cannot overwrite or release one another's same-ID state.
 - A canceled file mutation waiting behind an earlier same-file mutation now rejects immediately and cannot execute after the predecessor settles.
 - A canceled mutation now abandons pending resource-identity resolution and releases the backend registration queue, so an unresolved resolver cannot deadlock unrelated file mutations.
+- Shell-lane pool disposal now attempts every owned lane when a lane adapter throws synchronously, while preserving synchronous idle-retirement behavior.
 
 ## [0.99.52] - 2026-09-26
 

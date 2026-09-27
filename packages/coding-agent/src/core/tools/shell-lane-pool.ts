@@ -223,7 +223,13 @@ export class ShellLanePool<TLane> {
 	}
 
 	private trackDisposal(lane: TLane): void {
-		const settled = Promise.resolve(this.disposeLane(lane)).then(
+		let disposal: Promise<void>;
+		try {
+			disposal = Promise.resolve(this.disposeLane(lane));
+		} catch (error) {
+			disposal = Promise.reject(error);
+		}
+		const settled = disposal.then(
 			() => {
 				this.disposals.delete(settled);
 			},

@@ -207,6 +207,20 @@ describe("ShellLanePool", () => {
 		await expect(disposal).rejects.toThrow("first close failed");
 	});
 
+	it("attempts every lane disposal when the adapter throws synchronously", async () => {
+		const attempts: number[] = [];
+		const { pool } = createHarness({
+			disposeLane: (lane) => {
+				attempts.push(lane.index);
+				if (lane.index === 0) throw new Error("first close threw");
+			},
+		});
+		await pool.acquire();
+
+		await expect(pool.dispose()).rejects.toThrow("first close threw");
+		expect(attempts).toEqual([0, 1, 2]);
+	});
+
 	it("defaults the idle retirement window to one minute", () => {
 		expect(DEFAULT_SHELL_LANE_IDLE_RETIRE_MS).toBe(60_000);
 	});
