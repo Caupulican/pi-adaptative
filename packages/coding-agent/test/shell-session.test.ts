@@ -644,6 +644,9 @@ describe.skipIf(!HAS_BASH)("PersistentShellSession (shell dies under a live gran
 
 	it("resolves promptly when the shell exits while a backgrounded grandchild still holds the inherited stdio pipes", async () => {
 		const session = makeSession("bash");
+		// Cold Git Bash startup varies independently on Windows runners. Prewarm before measuring so
+		// this gate isolates exit/stdio arbitration instead of occasionally charging process startup.
+		await session.prewarm(cwd);
 		const start = Date.now();
 		// `exit 3` inside the command kills the shell before the sentinel. Settlement follows that
 		// exit and ends the shell's process group, so the grandchild's pipes do not hold the result.
@@ -654,8 +657,9 @@ describe.skipIf(!HAS_BASH)("PersistentShellSession (shell dies under a live gran
 	});
 });
 
-function createFakeChild(): ChildProcess {
+function createFakeChild(pid: number | null = 999_999): ChildProcess {
 	const child = new EventEmitter() as ChildProcess;
+	if (pid !== null) Object.defineProperty(child, "pid", { configurable: true, value: pid });
 	child.stdout = Object.assign(new EventEmitter(), {
 		ref: vi.fn(),
 		unref: vi.fn(),
@@ -689,6 +693,46 @@ async function waitOneEventLoopTurn(): Promise<void> {
 }
 
 describe("PersistentProcessCoordinator lifecycle and terminal barrier", () => {
+	it("rejects and terminates a second child without abandoning its terminal", async () => {
+		const coordinator = new PersistentProcessCoordinator();
+		const firstChild = createFakeChild();
+		const rejectedChild = createFakeChild(999_998);
+		attachFakeChild(coordinator, firstChild);
+
+		expect(() => attachFakeChild(coordinator, rejectedChild)).toThrow(
+			"Persistent process coordinator already owns a child",
+		);
+		expect(coordinator.child).toBe(firstChild);
+		expect(rejectedChild.kill).toHaveBeenCalledTimes(1);
+
+		let settled = false;
+		const terminal = coordinator.terminalPromise.then(() => {
+			settled = true;
+		});
+		firstChild.emit("close", 0);
+		await waitOneEventLoopTurn();
+		expect(settled).toBe(false);
+		rejectedChild.emit("close", 1);
+		await terminal;
+		expect(settled).toBe(true);
+		coordinator.dispose();
+	});
+
+	it("defers disposal signaling until a pending child proves it spawned", async () => {
+		const coordinator = new PersistentProcessCoordinator();
+		const pendingChild = createFakeChild(null);
+		attachFakeChild(coordinator, pendingChild);
+
+		coordinator.dispose();
+		expect(pendingChild.kill).not.toHaveBeenCalled();
+
+		Object.defineProperty(pendingChild, "pid", { configurable: true, value: 999_997 });
+		pendingChild.emit("spawn");
+		expect(pendingChild.kill).toHaveBeenCalledTimes(1);
+		pendingChild.emit("close", null);
+		await coordinator.terminalPromise;
+	});
+
 	it("re-arms an idle child's terminal handles before initiating teardown", () => {
 		const coordinator = new PersistentProcessCoordinator();
 		const fakeChild = createFakeChild();
@@ -767,11 +811,18 @@ describe("PersistentProcessCoordinator lifecycle and terminal barrier", () => {
 		expect(settled).toBe(true);
 	});
 
-	it("does not treat an error from a spawned child as physical terminal release", async () => {
+	it("retains runtime-error ownership through the handler, terminates the child, and still awaits close", async () => {
 		const coordinator = new PersistentProcessCoordinator();
 		const fakeChild = createFakeChild();
-		Object.defineProperty(fakeChild, "pid", { value: 999_999 });
-		attachFakeChild(coordinator, fakeChild);
+		let childSeenByHandler: ChildProcess | null = null;
+		coordinator.attach(fakeChild, {
+			onStdout: () => {},
+			onStderr: () => {},
+			onError: () => {
+				childSeenByHandler = coordinator.child;
+			},
+			onClose: () => {},
+		});
 		const terminal = coordinator.terminalPromise;
 		let settled = false;
 		terminal.then(() => {
@@ -780,10 +831,26 @@ describe("PersistentProcessCoordinator lifecycle and terminal barrier", () => {
 
 		fakeChild.emit("error", new Error("runtime failure"));
 		await waitOneEventLoopTurn();
+		expect(childSeenByHandler).toBe(fakeChild);
+		expect(fakeChild.kill).toHaveBeenCalledTimes(1);
+		expect(coordinator.child).toBeNull();
 		expect(settled).toBe(false);
 		fakeChild.emit("close", 1);
 		await terminal;
 		expect(settled).toBe(true);
+		coordinator.dispose();
+	});
+
+	it("negative control: a pre-spawn error releases an unowned child without signaling it", async () => {
+		const coordinator = new PersistentProcessCoordinator();
+		const fakeChild = createFakeChild(null);
+		attachFakeChild(coordinator, fakeChild);
+
+		fakeChild.emit("error", Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }));
+
+		await coordinator.terminalPromise;
+		expect(coordinator.child).toBeNull();
+		expect(fakeChild.kill).not.toHaveBeenCalled();
 		coordinator.dispose();
 	});
 

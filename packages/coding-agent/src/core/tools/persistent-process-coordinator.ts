@@ -63,9 +63,22 @@ export class PersistentProcessCoordinator {
 			this.terminateChild(child);
 			throw new Error("Persistent process coordinator is disposed");
 		}
-		if (this.currentChild) throw new Error("Persistent process coordinator already owns a child");
+		if (this.currentChild) {
+			// `attach` transfers lifecycle ownership. A rejected second transfer still has to end
+			// inside this coordinator's terminal barrier; otherwise the just-spawned process becomes
+			// an untracked orphan as the admission error propagates to its caller.
+			this.trackTerminal(child);
+			this.terminateChild(child);
+			throw new Error("Persistent process coordinator already owns a child");
+		}
 		this.currentChild = child;
-		trackDetachedChild(child);
+		if (child.pid === undefined) {
+			child.once("spawn", () => {
+				if (this.currentChild === child) trackDetachedChild(child);
+			});
+		} else {
+			trackDetachedChild(child);
+		}
 		this.trackTerminal(child);
 
 		child.stdout?.on("data", (data: Buffer) => {
@@ -75,8 +88,23 @@ export class PersistentProcessCoordinator {
 			if (this.currentChild === child) handlers.onStderr(data);
 		});
 		child.on("error", (error) => {
-			if (!this.clear(child)) return;
-			handlers.onError(error instanceof Error ? error : new Error(String(error)));
+			if (this.currentChild !== child) return;
+			const normalized = error instanceof Error ? error : new Error(String(error));
+			// A failed spawn never grants process ownership and must not be signaled. A runtime
+			// error is different: keep the live child authoritative while its adapter fails the
+			// active operation, then terminate it here if the adapter did not already do so. Clearing
+			// before the callback makes adapter-owned kill/reset paths no-ops and can leave both the
+			// child and this coordinator's physical-close barrier alive forever.
+			if (child.pid === undefined) {
+				this.clear(child);
+				handlers.onError(normalized);
+				return;
+			}
+			try {
+				handlers.onError(normalized);
+			} finally {
+				if (this.clear(child)) this.terminateChild(child);
+			}
 		});
 		let exitCode: number | null = null;
 		let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
@@ -108,16 +136,38 @@ export class PersistentProcessCoordinator {
 	}
 
 	private terminateChild(child: ChildProcess): void {
-		// Bun's Windows child-process bridge can stop publishing terminal events after every
-		// handle has been unref'd. Re-arm the already-installed close observer before killing so
-		// strict teardown can distinguish physical handle release from process exit.
-		setChildProcessLoopRef(child, true);
-		killProcessTree(child);
-		try {
-			child.kill();
-		} catch {
-			// Process already dead
+		const terminateSpawnedChild = (): void => {
+			// Bun's Windows child-process bridge can stop publishing terminal events after every
+			// handle has been unref'd. Re-arm the already-installed close observer before killing so
+			// strict teardown can distinguish physical handle release from process exit.
+			setChildProcessLoopRef(child, true);
+			killProcessTree(child);
+			try {
+				child.kill();
+			} catch {
+				// Process already dead
+			}
+		};
+		if (child.pid !== undefined) {
+			terminateSpawnedChild();
+			return;
 		}
+
+		// A failed spawn can retain a native handle before its error event. Signaling in that
+		// window can target the caller's process group, so wait for the child's spawn event to
+		// grant ownership. Error/close proves no later spawn can need termination.
+		const cleanup = (): void => {
+			child.off("spawn", onSpawn);
+			child.off("error", cleanup);
+			child.off("close", cleanup);
+		};
+		const onSpawn = (): void => {
+			cleanup();
+			terminateSpawnedChild();
+		};
+		child.once("spawn", onSpawn);
+		child.once("error", cleanup);
+		child.once("close", cleanup);
 	}
 
 	dispose(): void {
