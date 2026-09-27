@@ -1012,6 +1012,11 @@ batch cannot evict a member of that same batch. Pinned by
 `packages/coding-agent/test/memory-recovery.test.ts`, and
 `packages/coding-agent/test/skill-vault.test.ts`.
 
+**Admitted project rules are fenced by their source bytes, not their apparent size.** The live
+semantic-rule controller keys reuse by the ordered instruction paths and complete contents, so an
+AGENTS-family edit takes effect even when its byte count does not change. Pinned by
+`packages/coding-agent/test/session-project-rules.test.ts`.
+
 **Goal accounting starts at ownership, and instructions scale to intent.** A goal created during
 a foreground run acquires that run's lease at creation; earlier unrelated usage stays outside it.
 Usage and active time flush once at response/end boundaries. Orientation, requested evaluation,
@@ -1041,6 +1046,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-27 | Live project-rule compilation fingerprints complete ordered instruction sources, so same-length edits cannot retain stale semantic gates. |
 | 2026-09-27 | Supported Claude surfaces may defer schemas behind bounded tool search; unsupported, small, routed, or fallback surfaces keep all real schemas eager, and `/context` reports accepted disclosure evidence without changing its current estimate. |
 | 2026-09-27 | Query-time visibility is query/evidence-versioned, preserves already-sent bytes, restores GC-packed evidence through request-only tails, advertises only readable retrieval handles, fails open on uncertainty, and reports additions versus savings with the correct sign. Large-output profiles prove exact append-prefix retention and classify every intentional rewrite instead of treating new output bytes as invalidation. |
 | 2026-09-26 | Caller cancellation owns outer-stream settlement: cooperative provider abort terminals retain a bounded grace period, then a silent abort-ignoring stream settles as aborted rather than deadlocking or becoming a retryable stall. |

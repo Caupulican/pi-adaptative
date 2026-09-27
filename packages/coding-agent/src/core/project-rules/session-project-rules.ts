@@ -8,6 +8,7 @@
  * Conforms to GOVERNANCE_LIVE_PATHS.md and RCG-041..RCG-043, RCG-046.
  */
 
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import { createRetentionDecisionEngine } from "../compaction/retention-decision-engine.ts";
@@ -70,10 +71,14 @@ export class SessionProjectRules {
 	private getController(): SemanticProjectRuleController {
 		const sources = this.deps.getTrustedRuleSources();
 		const policies = this.deps.getOwnerRulePolicies();
-		const signature = [
-			...sources.map((source) => `${source.path}:${source.content.length}`),
-			...policies.map((policy) => `${policy.id}:${policy.revision}`),
-		].join("|");
+		const signature = createHash("sha256")
+			.update(
+				JSON.stringify({
+					sources: sources.map((source) => [source.path, source.content]),
+					policies: policies.map((policy) => [policy.id, policy.revision]),
+				}),
+			)
+			.digest("hex");
 		if (this.controller && this.compiledSignature === signature) return this.controller;
 
 		const rules: SemanticRule[] = [];

@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Live project-rule compilation now fences its cache by the complete ordered instruction sources, so a same-length edit to an admitted AGENTS-family file takes effect without restarting the session.
 - Objective retrieval now prices the complete read-only worker fan-out, including every independent cold prefix, actual brief, and generated report, before choosing it over the root's warm cache.
 - Query-time context policy now selects bounded hidden, short, long, or full evidence for the exact current query without rewriting the provider's stable prefix; evidence already packed by context GC is restored through request-only tail projections, uses a retrieval key only after its original is readable, otherwise fails open to the full evidence, forces replanning on stale verdicts, and `/context` reports added or saved tokens with the correct sign.
 - Context relevance advisories are fenced by the exact query and evidence revision, preventing a stale verdict from another turn from evicting newly relevant evidence.
