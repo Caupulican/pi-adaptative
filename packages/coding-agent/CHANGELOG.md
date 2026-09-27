@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Versioned context projections expose the latest accepted provider request with stable identities, content revisions, provenance, and freshness while keeping speculative plans and worker lanes isolated.
+
 ### Changed
 
 - Architecture audit artifacts now use bounded git-local storage instead of accumulating under `docs/`, and the repository check rejects transient audit, session, plan, and generated lab artifacts there.

@@ -134,6 +134,7 @@ import {
 	type ContextCompositionReport,
 	formatContextCompositionDashboard,
 } from "./context/context-composition.ts";
+import type { ContextProjection } from "./context/context-projection.ts";
 import type { PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
 import type { PromptPolicyGcCorrelationReport, PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
 import type { MemoryPromptInclusionReport } from "./context/memory-diagnostics.ts";
@@ -1236,6 +1237,9 @@ export class AgentSession {
 				return new ProviderRequestContextController({
 					runContextAudit: (history) => this._pipeline.runContextAudit(history, contextPolicy),
 					runPromptPolicyPlanning: (report) => this._pipeline.runPromptPolicyPlanning(report, contextPolicy),
+					previewContextProjection: (history) => this._pipeline.previewContextProjection(history, contextPolicy),
+					commitContextProjection: (projection) =>
+						this._pipeline.commitContextProjection(projection, contextPolicy),
 					runPromptEnforcement: (history, report) =>
 						this._pipeline.runPromptEnforcement(history, report, contextPolicy),
 					applyContextGc: (history, writePayloads, frozenBelow) =>
@@ -1555,6 +1559,8 @@ export class AgentSession {
 			transformExtensions: this._memory.createContextProjection(() => this._extensionRunner),
 			runContextAudit: (messages) => this._runContextAudit(messages),
 			runPromptPolicyPlanning: (report) => this._runPromptPolicyPlanning(report),
+			previewContextProjection: (messages) => this._pipeline.previewContextProjection(messages),
+			commitContextProjection: (projection) => this._pipeline.commitContextProjection(projection),
 			runMemoryRetrieval: (messages) => this._memory.runMemoryRetrieval(messages),
 			applyContextGc: (messages, writePayloads, frozenBelow) =>
 				this._applyContextGc(messages, writePayloads, frozenBelow),
@@ -3362,6 +3368,11 @@ export class AgentSession {
 	/** Read-only inspection of the context audit (delegates to {@link ContextPipeline.getContextAuditReport}). */
 	getContextAuditReport(messages?: AgentMessage[]): ContextAuditReport {
 		return this._pipeline.getContextAuditReport(messages);
+	}
+
+	/** Read-only latest accepted provider-context projection, or a pure preview for explicit messages. */
+	getContextProjection(messages?: readonly AgentMessage[]): ContextProjection {
+		return this._pipeline.getContextProjection(messages);
 	}
 
 	/**

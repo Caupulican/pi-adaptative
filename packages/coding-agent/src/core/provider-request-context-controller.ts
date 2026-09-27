@@ -11,6 +11,7 @@ import {
 import type { EdgeGrantView } from "./autonomy/edge-policy.ts";
 import { SELF_COMPACTION_GUIDANCE_CUSTOM_TYPE } from "./compaction/self-compaction.ts";
 import type { ContextAuditReport } from "./context/context-audit.ts";
+import type { ContextProjection } from "./context/context-projection.ts";
 import type { PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
 import type { PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
@@ -42,6 +43,10 @@ export interface ProviderRequestContextControllerDeps {
 	}>;
 	runContextAudit?(messages: AgentMessage[]): ContextAuditReport;
 	runPromptPolicyPlanning?(report: ContextAuditReport): PromptPolicyShadowReport;
+	/** Capture the complete final provider-visible request without publishing speculative state. */
+	previewContextProjection?(messages: readonly AgentMessage[]): ContextProjection;
+	/** Publish a projection only after the surrounding provider plan is accepted. */
+	commitContextProjection?(projection: ContextProjection): void;
 	runMemoryRetrieval?(messages: AgentMessage[]): Promise<MemoryRetrievalReport>;
 	applyContextGc(
 		messages: AgentMessage[],
@@ -381,6 +386,7 @@ export class ProviderRequestContextController {
 
 		const withAuthority = appendAuthorityContext(beforeSkill.slice(compactableMessages.length), authorityContext);
 		const transientMessages = appendPathAliasLegend(appendActiveSkillContext(withAuthority, skillContext), legend);
+		const contextProjection = this.deps.previewContextProjection?.([...compactableMessages, ...transientMessages]);
 
 		const dependenciesCurrent = () =>
 			extensionPlan.isCurrent?.() !== false &&
@@ -419,6 +425,7 @@ export class ProviderRequestContextController {
 					throw new Error("Committed active skill context diverged from its accepted plan");
 				}
 				reflectionCuePlan?.commit();
+				if (contextProjection) this.deps.commitContextProjection?.(contextProjection);
 			},
 		};
 	}

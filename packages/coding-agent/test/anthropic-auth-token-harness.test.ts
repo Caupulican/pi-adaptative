@@ -23,6 +23,7 @@ describe("Anthropic bearer-token harness auth", () => {
 			ok: true,
 			apiKey: undefined,
 			headers: { Authorization: "Bearer harness-auth-token" },
+			providerAccountKey: "anthropic",
 		});
 		expect(registry.canUseResolvedRequestAuth(model!, auth)).toBe(true);
 	});

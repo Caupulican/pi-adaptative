@@ -55,6 +55,13 @@ import {
 	type ContextAuditReport,
 	runContextAudit,
 } from "./context/context-audit.ts";
+import {
+	buildContextProjection,
+	type ContextProjection,
+	type ContextProjectionMemo,
+	type ContextProjectionOptions,
+	emptyContextProjection,
+} from "./context/context-projection.ts";
 import { enforcePromptPolicy, type PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
 import {
 	correlateWithContextGc,
@@ -108,6 +115,12 @@ export interface ContextPolicyLane {
 	readonly memo: ContextAuditMemo;
 	memoMessages: readonly AgentMessage[];
 	toolNames: readonly string[];
+}
+
+interface ContextProjectionLaneState {
+	readonly memo: ContextProjectionMemo;
+	memoMessages: readonly AgentMessage[];
+	latest: ContextProjection | undefined;
 }
 
 /** Per-message memo of `estimateTokens(message)`, keyed by message object identity --
@@ -255,6 +268,7 @@ export class ContextPipeline {
 	private _pathAliasRuntime: PathAliasRuntime | undefined = undefined;
 	private _contextStoreRetentionLease: ContextStoreRetentionLease | undefined;
 	private _latestContextAuditReport: ContextAuditReport | undefined = undefined;
+	private _latestContextProjection: ContextProjection | undefined = undefined;
 	private _latestPromptPolicyReport: PromptPolicyShadowReport | undefined = undefined;
 	private _latestPromptPolicyGcCorrelation: PromptPolicyGcCorrelationReport | undefined = undefined;
 	private _latestPromptEnforcementReport: PromptEnforcementReport | undefined = undefined;
@@ -270,6 +284,8 @@ export class ContextPipeline {
 	 * message object identity -- see {@link ContextAuditMemo}'s doc for the invalidation
 	 * contract. Rebuilt fresh (stale entries dropped) by `runContextAudit` every pass. */
 	private readonly _auditMemo: ContextAuditMemo = new Map();
+	private readonly _contextProjectionMemo: ContextProjectionMemo = new Map();
+	private readonly _contextProjectionLaneStates = new WeakMap<ContextPolicyLane, ContextProjectionLaneState>();
 	/**
 	 * The messages each memo above was last filled for, one lineage per memo: the audit and the
 	 * estimate are fed different projections of the history, and a shared lineage made each call
@@ -278,6 +294,7 @@ export class ContextPipeline {
 	 * that memo is emptied and refilled. Rebuilding on every pass copied every entry per request.
 	 */
 	private _auditMemoMessages: readonly AgentMessage[] = [];
+	private _contextProjectionMemoMessages: readonly AgentMessage[] = [];
 	private _tokenMemoMessages: readonly AgentMessage[] = [];
 	private readonly _usageFinder = createApplicableAssistantUsageFinder();
 	/** Incremental memo for the per-message token estimate `estimateContextTokensMemoized`
@@ -384,8 +401,10 @@ export class ContextPipeline {
 		// Release memoized message references promptly so a disposed session's messages are
 		// GC-eligible even if this ContextPipeline instance itself briefly lingers.
 		this._auditMemo.clear();
+		this._contextProjectionMemo.clear();
 		this._tokenMemo.clear();
 		this._auditMemoMessages = [];
+		this._contextProjectionMemoMessages = [];
 		this._tokenMemoMessages = [];
 		this._latestCompactionScan.reset();
 	}
@@ -458,15 +477,69 @@ export class ContextPipeline {
 	}
 
 	/** Options shared by the memoized hot path and the no-memo full-scan path. */
-	private _buildContextAuditOptions(messages: AgentMessage[]): ContextAuditOptions {
+	private _sessionEntryIdResolver(messages: readonly AgentMessage[]): (toolCallId: string) => string | undefined {
 		const wantedToolCallIds = new Set(
 			messages.filter((message) => message.role === "toolResult").map((message) => message.toolCallId),
 		);
+		return this._buildSessionEntryIdLookup(wantedToolCallIds);
+	}
+
+	private _buildContextAuditOptions(messages: AgentMessage[]): ContextAuditOptions {
 		return {
 			turnIndex: this.deps.getTurnIndex(),
 			artifactStore: this._toolArtifactStore,
-			sessionEntryIdForToolCallId: this._buildSessionEntryIdLookup(wantedToolCallIds),
+			sessionEntryIdForToolCallId: this._sessionEntryIdResolver(messages),
 		};
+	}
+
+	private _buildContextProjectionOptions(messages: readonly AgentMessage[]): ContextProjectionOptions {
+		return {
+			turnIndex: this.deps.getTurnIndex(),
+			sessionEntryIdForToolCallId: this._sessionEntryIdResolver(messages),
+		};
+	}
+
+	private _projectionStateForLane(lane: ContextPolicyLane): ContextProjectionLaneState {
+		let state = this._contextProjectionLaneStates.get(lane);
+		if (!state) {
+			state = { memo: new Map(), memoMessages: [], latest: undefined };
+			this._contextProjectionLaneStates.set(lane, state);
+		}
+		return state;
+	}
+
+	/** Build a speculative provider-request projection. Publishing is a separate accepted-plan step. */
+	previewContextProjection(messages: readonly AgentMessage[], lane?: ContextPolicyLane): ContextProjection {
+		if (lane) {
+			const state = this._projectionStateForLane(lane);
+			state.memoMessages = continueMemoLineage(state.memo, state.memoMessages, messages);
+			return buildContextProjection(messages, { turnIndex: this.deps.getTurnIndex() }, state.memo);
+		}
+		this._contextProjectionMemoMessages = continueMemoLineage(
+			this._contextProjectionMemo,
+			this._contextProjectionMemoMessages,
+			messages,
+		);
+		return buildContextProjection(
+			messages,
+			this._buildContextProjectionOptions(messages),
+			this._contextProjectionMemo,
+		);
+	}
+
+	/** Publish only the projection belonging to a provider plan that passed its currency gate. */
+	commitContextProjection(projection: ContextProjection, lane?: ContextPolicyLane): void {
+		if (lane) {
+			this._projectionStateForLane(lane).latest = projection;
+			return;
+		}
+		this._latestContextProjection = projection;
+	}
+
+	/** Latest accepted root projection, or a pure full-scan preview for explicit messages. */
+	getContextProjection(messages?: readonly AgentMessage[]): ContextProjection {
+		if (messages) return buildContextProjection(messages, this._buildContextProjectionOptions(messages));
+		return this._latestContextProjection ?? emptyContextProjection(this.deps.getTurnIndex());
 	}
 
 	/**
