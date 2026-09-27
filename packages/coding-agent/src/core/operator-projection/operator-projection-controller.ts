@@ -79,7 +79,7 @@ export class OperatorProjectionController {
 			objective_id: this.projection.objective_id,
 		};
 
-		for (const listener of this.projectionListeners) {
+		for (const listener of [...this.projectionListeners]) {
 			try {
 				listener(this.projection);
 			} catch {
@@ -109,7 +109,7 @@ export class OperatorProjectionController {
 		this.events.push(event);
 		while (this.events.length > MAX_OPERATOR_EVENTS) this.events.shift();
 
-		for (const listener of this.eventListeners) {
+		for (const listener of [...this.eventListeners]) {
 			try {
 				listener(event);
 			} catch {

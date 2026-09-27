@@ -180,7 +180,7 @@ export class SessionOperatorProjection {
 		});
 		for (const event of this.events) controller.emitEvent(event);
 		controller.subscribe((projection) => {
-			for (const listener of this.listeners) {
+			for (const listener of [...this.listeners]) {
 				try {
 					listener(projection);
 				} catch {
@@ -272,7 +272,7 @@ export class SessionOperatorProjection {
 		// The stage log observes the projection's own transitions; it never decides one. Recorded at
 		// the single point a real change publishes, so it cannot drift from what subscribers saw.
 		if (this.currentStageLog().observe(published, Date.now())) {
-			for (const listener of this.stageListeners) {
+			for (const listener of [...this.stageListeners]) {
 				try {
 					listener();
 				} catch {

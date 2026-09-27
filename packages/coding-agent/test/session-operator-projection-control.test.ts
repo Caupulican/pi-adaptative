@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { GoalContinuationDecision } from "../src/core/goals/goal-continuation-controller.ts";
 import type { GoalState, GoalStatus, Requirement } from "../src/core/goals/goal-state.ts";
 import type { DecisionStageSink } from "../src/core/operator-projection/decision-stage-log.ts";
+import { OperatorProjectionController } from "../src/core/operator-projection/operator-projection-controller.ts";
 import {
 	type LiveLaneView,
 	type PendingOwnerQuestion,
@@ -84,6 +85,85 @@ function projectionFor(overrides: Parameters<typeof depsFor>[0]) {
 }
 
 describe("Operator control projection", () => {
+	it("bounds controller projection delivery to the observer generation present at dispatch start", () => {
+		const controller = new OperatorProjectionController({ objectiveId: "goal-1", hasGoal: true, title: "fixture" });
+		const projectionDelivery: string[] = [];
+		const lateProjection = () => projectionDelivery.push("late");
+		controller.subscribe(() => {
+			projectionDelivery.push("first");
+			controller.subscribe(lateProjection);
+		});
+		controller.subscribe(() => projectionDelivery.push("existing"));
+
+		controller.updateProjection({ current_action: "first transition" });
+		expect(projectionDelivery).toEqual(["first", "existing"]);
+		controller.updateProjection({ current_action: "second transition" });
+		expect(projectionDelivery).toEqual(["first", "existing", "first", "existing", "late"]);
+	});
+
+	it("bounds controller event delivery to the observer generation present at dispatch start", () => {
+		const controller = new OperatorProjectionController({ objectiveId: "goal-1", hasGoal: true, title: "fixture" });
+		const eventDelivery: string[] = [];
+		const lateEvent = () => eventDelivery.push("late");
+		controller.onEvent(() => {
+			eventDelivery.push("first");
+			controller.onEvent(lateEvent);
+		});
+		controller.onEvent(() => eventDelivery.push("existing"));
+		const event = { severity: "info" as const, category: "plan" as const, title: "transition", detail: "edge" };
+		controller.emitEvent(event);
+		expect(eventDelivery).toEqual(["first", "existing"]);
+		controller.emitEvent(event);
+		expect(eventDelivery).toEqual(["first", "existing", "first", "existing", "late"]);
+	});
+
+	it("bounds session projection delivery to the observer generation present at transition start", () => {
+		let busy = false;
+		const projection = new SessionOperatorProjection({ ...depsFor({}), isForegroundBusy: () => busy });
+		projection.getProjection();
+		const projectionDelivery: string[] = [];
+		const lateProjection = () => projectionDelivery.push("late");
+		projection.subscribe(() => {
+			projectionDelivery.push("first");
+			projection.subscribe(lateProjection);
+		});
+		projection.subscribe(() => projectionDelivery.push("existing"));
+
+		busy = true;
+		projection.getProjection();
+		expect(projectionDelivery).toEqual(["first", "existing"]);
+
+		busy = false;
+		projection.getProjection();
+		expect(projectionDelivery).toEqual(["first", "existing", "first", "existing", "late"]);
+	});
+
+	it("bounds session stage delivery to the observer generation present at transition start", () => {
+		let busy = false;
+		let blocker: string | undefined;
+		const projection = new SessionOperatorProjection({
+			...depsFor({}),
+			isForegroundBusy: () => busy,
+			getBlocker: () => blocker,
+		});
+		projection.getProjection();
+		const stageDelivery: string[] = [];
+		const lateStage = () => stageDelivery.push("late");
+		projection.onStageChange(() => {
+			stageDelivery.push("first");
+			projection.onStageChange(lateStage);
+		});
+		projection.onStageChange(() => stageDelivery.push("existing"));
+
+		busy = true;
+		projection.getProjection();
+		expect(stageDelivery).toEqual(["first", "existing"]);
+
+		blocker = "operator intervention";
+		projection.getProjection();
+		expect(stageDelivery).toEqual(["first", "existing", "first", "existing", "late"]);
+	});
+
 	it("gives control to the root loop when no objective exists, split by foreground activity", () => {
 		expect(projectionFor({}).control).toEqual({
 			owner: "root",
