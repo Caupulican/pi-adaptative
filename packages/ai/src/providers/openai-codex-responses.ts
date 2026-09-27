@@ -76,6 +76,8 @@ const PREVIOUS_RESPONSE_NOT_FOUND_ERROR_CODE = "previous_response_not_found";
 const PREVIOUS_RESPONSE_NOT_FOUND_RETRIES = 1;
 const OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite";
 const WS_RESPONSES_LITE_CLIENT_METADATA_KEY = "ws_request_header_x_openai_internal_codex_responses_lite";
+const MAX_CODEX_EVENT_FRAME_SIZE = 8 * 1024 * 1024;
+const MAX_PENDING_WEBSOCKET_FRAMES = 256;
 
 function assertSuccessfulTerminalResponse(output: AssistantMessage): void {
 	if (output.stopReason === "error" || output.stopReason === "aborted") {
@@ -1005,7 +1007,6 @@ function normalizeCodexStatus(status: unknown): CodexResponseStatus | undefined 
 // ============================================================================
 
 const MAX_SSE_LINE_CHARS = 64 * 1024 * 1024;
-const MAX_SSE_FRAME_CHARS = 8 * 1024 * 1024;
 
 async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerator<Record<string, unknown>> {
 	if (!response.body) return;
@@ -1039,8 +1040,8 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 					continue;
 				}
 				frameChars += line.length;
-				if (frameChars > MAX_SSE_FRAME_CHARS) {
-					throw new Error(`Codex SSE frame exceeded the ${MAX_SSE_FRAME_CHARS} character limit`);
+				if (frameChars > MAX_CODEX_EVENT_FRAME_SIZE) {
+					throw new Error(`Codex SSE frame exceeded the ${MAX_CODEX_EVENT_FRAME_SIZE} character limit`);
 				}
 				frameLines.push(line);
 			}
@@ -1048,8 +1049,8 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 				const finalLine = lines.finish();
 				if (finalLine !== undefined) {
 					frameChars += finalLine.length;
-					if (frameChars > MAX_SSE_FRAME_CHARS) {
-						throw new Error(`Codex SSE frame exceeded the ${MAX_SSE_FRAME_CHARS} character limit`);
+					if (frameChars > MAX_CODEX_EVENT_FRAME_SIZE) {
+						throw new Error(`Codex SSE frame exceeded the ${MAX_CODEX_EVENT_FRAME_SIZE} character limit`);
 					}
 					frameLines.push(finalLine);
 				}
@@ -1567,17 +1568,30 @@ function extractWebSocketCloseError(event: unknown): Error {
 }
 
 async function decodeWebSocketData(data: unknown): Promise<string | null> {
-	if (typeof data === "string") return data;
+	const assertFrameSize = (size: number, unit: "byte" | "character") => {
+		if (size <= MAX_CODEX_EVENT_FRAME_SIZE) return;
+		throw new CodexProtocolError(`Codex WebSocket frame exceeded the ${MAX_CODEX_EVENT_FRAME_SIZE} ${unit} limit`, {
+			payload: { size, unit, limit: MAX_CODEX_EVENT_FRAME_SIZE },
+		});
+	};
+	if (typeof data === "string") {
+		assertFrameSize(data.length, "character");
+		return data;
+	}
 	if (data instanceof ArrayBuffer) {
+		assertFrameSize(data.byteLength, "byte");
 		return new TextDecoder().decode(new Uint8Array(data));
 	}
 	if (ArrayBuffer.isView(data)) {
 		const view = data as ArrayBufferView;
+		assertFrameSize(view.byteLength, "byte");
 		return new TextDecoder().decode(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
 	}
 	if (data && typeof data === "object" && "arrayBuffer" in data) {
-		const blobLike = data as { arrayBuffer: () => Promise<ArrayBuffer> };
+		const blobLike = data as { size?: unknown; arrayBuffer: () => Promise<ArrayBuffer> };
+		if (typeof blobLike.size === "number") assertFrameSize(blobLike.size, "byte");
 		const arrayBuffer = await blobLike.arrayBuffer();
+		assertFrameSize(arrayBuffer.byteLength, "byte");
 		return new TextDecoder().decode(new Uint8Array(arrayBuffer));
 	}
 	return null;
@@ -1589,13 +1603,15 @@ async function* parseWebSocket(
 	idleTimeoutMs?: number,
 ): AsyncGenerator<Record<string, unknown>> {
 	const queue: Record<string, unknown>[] = [];
+	let queueIndex = 0;
+	const messageDataQueue: unknown[] = [];
+	let messageDataIndex = 0;
+	let decodingMessage = false;
 	let pending: (() => void) | null = null;
 	let done = false;
 	let failed: Error | null = null;
 	let sawCompletion = false;
-	let pendingMessageDecodes = 0;
 	let deferredSocketFailure: Error | null = null;
-	let messageDecodes = Promise.resolve();
 
 	const wake = () => {
 		if (!pending) return;
@@ -1603,11 +1619,17 @@ async function* parseWebSocket(
 		pending = null;
 		resolve();
 	};
+	const clearPendingMessageData = () => {
+		messageDataQueue.length = 0;
+		messageDataIndex = 0;
+	};
+	const hasPendingMessageWork = () => decodingMessage || messageDataIndex < messageDataQueue.length;
 	const finishDeferredSocketFailure = () => {
-		if (pendingMessageDecodes !== 0 || done || !deferredSocketFailure) return;
+		if (hasPendingMessageWork() || done || !deferredSocketFailure) return;
 		if (!sawCompletion && !failed) failed = deferredSocketFailure;
 		deferredSocketFailure = null;
 		done = true;
+		clearPendingMessageData();
 		wake();
 	};
 	const finishOrDeferSocketFailure = (error: Error) => {
@@ -1616,46 +1638,76 @@ async function* parseWebSocket(
 			wake();
 			return;
 		}
-		if (pendingMessageDecodes > 0) {
+		if (hasPendingMessageWork()) {
 			deferredSocketFailure ??= error;
 			return;
 		}
 		if (!failed) failed = error;
 		done = true;
+		clearPendingMessageData();
 		wake();
+	};
+	const failMessageDecode = (cause: unknown, text: string | null) => {
+		failed =
+			cause instanceof CodexProtocolError
+				? cause
+				: new CodexProtocolError(`Invalid Codex WebSocket JSON: ${formatThrownValue(cause)}`, {
+						cause,
+						payload: text,
+					});
+		done = true;
+		clearPendingMessageData();
+		wake();
+	};
+	const drainMessageData = async () => {
+		try {
+			while (messageDataIndex < messageDataQueue.length && !(done && failed)) {
+				const data = messageDataQueue[messageDataIndex++];
+				if (messageDataIndex === messageDataQueue.length) clearPendingMessageData();
+				let text: string | null = null;
+				try {
+					text = await decodeWebSocketData(data);
+					if ((done && failed) || !text) continue;
+					const parsed = JSON.parse(text) as Record<string, unknown>;
+					const type = typeof parsed.type === "string" ? parsed.type : "";
+					if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
+						sawCompletion = true;
+						done = true;
+						clearPendingMessageData();
+					}
+					queue.push(parsed);
+					wake();
+					if (done) break;
+				} catch (cause) {
+					failMessageDecode(cause, text);
+					break;
+				}
+			}
+		} catch (cause) {
+			failMessageDecode(cause, null);
+		} finally {
+			decodingMessage = false;
+			finishDeferredSocketFailure();
+		}
 	};
 
 	const onMessage: WebSocketListener = (event) => {
-		if (!event || typeof event !== "object" || !("data" in event)) return;
+		if (done || !event || typeof event !== "object" || !("data" in event)) return;
 		const data = (event as { data?: unknown }).data;
-		let text: string | null = null;
-		pendingMessageDecodes++;
-		messageDecodes = messageDecodes
-			.then(async () => {
-				if (done && failed) return;
-				text = await decodeWebSocketData(data);
-				if ((done && failed) || !text) return;
-				const parsed = JSON.parse(text) as Record<string, unknown>;
-				const type = typeof parsed.type === "string" ? parsed.type : "";
-				if (type === "response.completed" || type === "response.done" || type === "response.incomplete") {
-					sawCompletion = true;
-					done = true;
-				}
-				queue.push(parsed);
-				wake();
-			})
-			.catch((cause: unknown) => {
-				failed = new CodexProtocolError(`Invalid Codex WebSocket JSON: ${formatThrownValue(cause)}`, {
-					cause,
-					payload: text,
-				});
-				done = true;
-				wake();
-			})
-			.finally(() => {
-				pendingMessageDecodes--;
-				finishDeferredSocketFailure();
-			});
+		const pendingFrameCount = messageDataQueue.length - messageDataIndex + (decodingMessage ? 1 : 0);
+		if (pendingFrameCount >= MAX_PENDING_WEBSOCKET_FRAMES) {
+			failMessageDecode(
+				new CodexProtocolError(`Codex WebSocket pending frame limit exceeded (${MAX_PENDING_WEBSOCKET_FRAMES})`, {
+					payload: { limit: MAX_PENDING_WEBSOCKET_FRAMES },
+				}),
+				null,
+			);
+			return;
+		}
+		messageDataQueue.push(data);
+		if (decodingMessage) return;
+		decodingMessage = true;
+		void drainMessageData();
 	};
 
 	const onError: WebSocketListener = (event) => {
@@ -1669,6 +1721,7 @@ async function* parseWebSocket(
 	const onAbort = () => {
 		failed = new Error("Request was aborted");
 		done = true;
+		clearPendingMessageData();
 		wake();
 	};
 
@@ -1682,8 +1735,13 @@ async function* parseWebSocket(
 			if (signal?.aborted) {
 				throw new Error("Request was aborted");
 			}
-			if (queue.length > 0) {
-				yield queue.shift()!;
+			if (queueIndex < queue.length) {
+				const event = queue[queueIndex++];
+				if (queueIndex === queue.length) {
+					queue.length = 0;
+					queueIndex = 0;
+				}
+				yield event!;
 				continue;
 			}
 			if (done) break;
@@ -1695,6 +1753,7 @@ async function* parseWebSocket(
 						const error = new Error(`WebSocket idle timeout after ${idleTimeoutMs}ms`);
 						failed = error;
 						done = true;
+						clearPendingMessageData();
 						pending = null;
 						closeWebSocketSilently(socket, 1000, "idle_timeout");
 						reject(error);
@@ -1714,6 +1773,7 @@ async function* parseWebSocket(
 			throw new Error("WebSocket stream closed before response.completed");
 		}
 	} finally {
+		clearPendingMessageData();
 		socket.removeEventListener("message", onMessage);
 		socket.removeEventListener("error", onError);
 		socket.removeEventListener("close", onClose);

@@ -381,6 +381,118 @@ describe("OpenAI Codex auth recovery", () => {
 		expect(result.content).toContainEqual(expect.objectContaining({ type: "text", text: "Recovered" }));
 	});
 
+	it("rejects an oversized WebSocket Blob before materializing its bytes", async () => {
+		const terminalBytes = new TextEncoder().encode(JSON.stringify(websocketSuccess.at(-1)));
+		const arrayBuffer = vi.fn(async () => terminalBytes.buffer as ArrayBuffer);
+		installWebSocketResponses([
+			(dispatch) => {
+				dispatch("message", { data: JSON.stringify(websocketSuccess[0]) });
+				dispatch("message", { data: { size: 8 * 1024 * 1024 + 1, arrayBuffer } });
+			},
+		]);
+		const fetchMock = vi.fn(async () => {
+			throw new Error("must not replay after WebSocket output");
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const result = await streamSimpleOpenAICodexResponses(
+			model,
+			{ messages: [] },
+			{ apiKey, transport: "websocket" },
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("WebSocket frame exceeded");
+		expect(arrayBuffer).not.toHaveBeenCalled();
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("accepts a WebSocket Blob reported at the frame-size boundary", async () => {
+		const terminalBytes = new TextEncoder().encode(JSON.stringify(websocketSuccess.at(-1)));
+		const arrayBuffer = vi.fn(async () => terminalBytes.buffer as ArrayBuffer);
+		installWebSocketResponses([
+			(dispatch) => {
+				dispatch("message", { data: { size: 8 * 1024 * 1024, arrayBuffer } });
+			},
+		]);
+
+		const result = await streamSimpleOpenAICodexResponses(
+			model,
+			{ messages: [] },
+			{ apiKey, transport: "websocket" },
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(arrayBuffer).toHaveBeenCalledTimes(1);
+	});
+
+	it("rechecks WebSocket Blob size after materializing untrusted bytes", async () => {
+		const arrayBuffer = vi.fn(async () => new ArrayBuffer(8 * 1024 * 1024 + 1));
+		installWebSocketResponses([
+			(dispatch) => {
+				dispatch("message", { data: JSON.stringify(websocketSuccess[0]) });
+				dispatch("message", { data: { size: 1, arrayBuffer } });
+			},
+		]);
+		const fetchMock = vi.fn(async () => {
+			throw new Error("must not replay after WebSocket output");
+		});
+		vi.stubGlobal("fetch", fetchMock);
+
+		const result = await streamSimpleOpenAICodexResponses(
+			model,
+			{ messages: [] },
+			{ apiKey, transport: "websocket" },
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("WebSocket frame exceeded");
+		expect(arrayBuffer).toHaveBeenCalledTimes(1);
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("fails a stalled WebSocket decoder when its pending frame backlog reaches the bound", async () => {
+		installWebSocketResponses([
+			(dispatch) => {
+				dispatch("message", { data: { arrayBuffer: () => new Promise<ArrayBuffer>(() => {}) } });
+				for (let index = 0; index < 256; index++) {
+					dispatch("message", { data: "{}" });
+				}
+			},
+		]);
+		const fetchMock = vi.fn(async () => invalid());
+		vi.stubGlobal("fetch", fetchMock);
+
+		const result = await streamSimpleOpenAICodexResponses(
+			model,
+			{ messages: [] },
+			{ apiKey, transport: "websocket", timeoutMs: 20 },
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(JSON.stringify(result.diagnostics)).toContain("pending frame limit");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("accepts a synchronous WebSocket burst at the pending frame bound", async () => {
+		installWebSocketResponses([
+			(dispatch) => {
+				for (let index = 0; index < 255; index++) {
+					dispatch("message", { data: "{}" });
+				}
+				dispatch("message", { data: JSON.stringify(websocketSuccess.at(-1)) });
+			},
+		]);
+
+		const result = await streamSimpleOpenAICodexResponses(
+			model,
+			{ messages: [] },
+			{ apiKey, transport: "websocket" },
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+	});
+
 	it("does not replay a WebSocket 401 when credential recovery declines (control)", async () => {
 		const harness = installWebSocketResponses([[websocketUnauthorized]]);
 		const onAuthRejection = vi.fn(() => undefined);
