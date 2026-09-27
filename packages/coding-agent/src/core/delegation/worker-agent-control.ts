@@ -1660,7 +1660,7 @@ export class WorkerAgentMailbox {
 	}
 
 	private notify(): void {
-		for (const listener of this.listeners) {
+		for (const listener of [...this.listeners]) {
 			try {
 				listener();
 			} catch {

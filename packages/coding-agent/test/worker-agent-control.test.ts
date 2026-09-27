@@ -498,6 +498,25 @@ describe("WorkerAgentMailbox", () => {
 		expect(observed).toHaveBeenCalledTimes(3);
 	});
 
+	it("bounds each mailbox notification to the subscriber generation present at its start", () => {
+		const mailbox = new WorkerAgentMailbox({ agentDir: root(), parentSessionId: "parent-1", agentId: "agent-1" });
+		const delivery: string[] = [];
+		const lateSubscriber = vi.fn(() => delivery.push("late"));
+		mailbox.subscribe(() => {
+			delivery.push("first");
+			mailbox.subscribe(lateSubscriber);
+		});
+		mailbox.subscribe(() => delivery.push("existing"));
+
+		const message = mailbox.enqueue({ kind: "follow_up", content: "first notification" });
+		expect(delivery).toEqual(["first", "existing"]);
+		expect(lateSubscriber).not.toHaveBeenCalled();
+
+		mailbox.acknowledgeDelivered(message.messageId);
+		expect(delivery).toEqual(["first", "existing", "first", "existing", "late"]);
+		expect(lateSubscriber).toHaveBeenCalledOnce();
+	});
+
 	it("persists peer thread identity and reply expectations through delivery", () => {
 		const mailbox = new WorkerAgentMailbox({ agentDir: root(), parentSessionId: "parent-1", agentId: "agent-2" });
 		const notice = mailbox.enqueue({
