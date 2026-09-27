@@ -191,4 +191,45 @@ describe("provider admission completion boundaries", () => {
 		).rejects.toBe(failure);
 		expect(h.ledger.countInflight("anthropic").total).toBe(0);
 	});
+
+	it("preserves the transport failure when ledger cleanup also fails", async () => {
+		const h = harness();
+		const transportFailure = new Error("transport unavailable");
+		const cleanupFailure = new Error("ledger unlink failed");
+		const release = vi.fn(() => {
+			throw cleanupFailure;
+		});
+		vi.spyOn(h.ledger, "acquire").mockReturnValue({ id: "failing-release", release });
+		const wrapped = withProviderAdmission(
+			() => {
+				throw transportFailure;
+			},
+			{ ...h, getLane: () => "foreground" },
+		);
+
+		await expect(
+			wrapped({ api: "faux", provider: "anthropic", id: "fixture" } as Model<Api>, { messages: [] }, {}),
+		).rejects.toBe(transportFailure);
+		expect(release).toHaveBeenCalledOnce();
+	});
+
+	it("contains ledger cleanup failure after a normal terminal result", async () => {
+		const h = harness();
+		const release = vi.fn(() => {
+			throw new Error("ledger unlink failed");
+		});
+		vi.spyOn(h.ledger, "acquire").mockReturnValue({ id: "failing-release", release });
+		const inner = createAssistantMessageEventStream();
+		const wrapped = withProviderAdmission(() => inner, { ...h, getLane: () => "foreground" });
+		const stream = await wrapped(
+			{ api: "faux", provider: "anthropic", id: "fixture" } as Model<Api>,
+			{ messages: [] },
+			{},
+		);
+
+		inner.end(fauxAssistantMessage("ok"));
+		await expect(stream.result()).resolves.toMatchObject({ stopReason: "stop" });
+		await Promise.resolve();
+		expect(release).toHaveBeenCalledOnce();
+	});
 });

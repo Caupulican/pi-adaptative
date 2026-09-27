@@ -303,7 +303,13 @@ export function withProviderAdmission(streamFn: StreamFn, deps: ProviderAdmissio
 			if (released) return;
 			released = true;
 			options?.signal?.removeEventListener("abort", releaseOnce);
-			release();
+			try {
+				release();
+			} catch {
+				// ProviderAdmissionLedger stops the failed hold's heartbeat before unlinking it, so
+				// stale-record pruning remains the recovery owner. Cleanup must not replace the provider
+				// failure or create an unobserved rejection from a terminal-result callback.
+			}
 		};
 		options?.signal?.addEventListener("abort", releaseOnce, { once: true });
 		const recordFailureLimit = (error: unknown): void => {
