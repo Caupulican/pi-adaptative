@@ -319,7 +319,9 @@ export class EvidenceRetentionPlanner {
 		this.lastStats = stats;
 
 		// One-line compact operator summary event (FR-131)
-		const summaryEvent = `Context optimized · ${totalPairs} tool results → ${retainedCount} retained · proof preserved`;
+		const summaryEvent = failureReason
+			? `Context retention unavailable · ${totalPairs} tool results retained exactly · proof preserved`
+			: `Context optimized · ${totalPairs} tool results → ${retainedCount} retained · proof preserved`;
 
 		return {
 			decisions: allDecisions,

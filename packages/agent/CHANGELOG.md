@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Provider request snapshots now retain the accepted history extent after a reply is appended, so same-lane compaction includes that reply.
+
 ## [0.100.1] - 2026-09-27
 
 ## [0.100.0] - 2026-09-27

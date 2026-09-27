@@ -150,6 +150,29 @@ describe("provider request planning", () => {
 		expect(order).toEqual(["final-validation", "commit", "snapshot", "transport"]);
 	});
 
+	it("keeps the accepted request snapshot fixed when the live history gains the reply", async () => {
+		const initial: AgentContext = { systemPrompt: "SYSTEM", messages: [user("read the projects")], tools: [] };
+		let snapshot: AgentContext | undefined;
+		const response = await startAgentProviderRequest(
+			initial,
+			{
+				model: model(),
+				convertToLlm: toLlm,
+				onProviderRequestSnapshot: ({ sourceContext }) => {
+					snapshot = sourceContext;
+				},
+			},
+			undefined,
+			() => new MockAssistantStream(assistant("Read. Waiting for the next step.")),
+		);
+		const reply = await response.result();
+		initial.messages.push(reply);
+
+		expect(snapshot?.messages).toEqual([initial.messages[0]]);
+		expect(snapshot?.messages[0]).toBe(initial.messages[0]);
+		expect(snapshot?.messages).not.toBe(initial.messages);
+	});
+
 	it("offers only an accepted plan to the snapshot hook and fails closed before transport", async () => {
 		let planCount = 0;
 		let snapshotCount = 0;

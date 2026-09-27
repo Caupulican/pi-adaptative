@@ -412,7 +412,7 @@ export class CompactionController {
 				artifactStore: this.deps.getRetentionArtifactStore?.(),
 				boundedState: {
 					sessionId: this.deps.sessionManager.getSessionId(),
-					activeTask: this.deps.getActiveTask?.(),
+					activeTask: this.deps.getActiveTask?.() ?? null,
 					unresolvedProofObligations: pins.unresolvedProofObligations ?? [],
 				},
 				signal,

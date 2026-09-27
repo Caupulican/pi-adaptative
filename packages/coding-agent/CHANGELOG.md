@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Evidence-retention decisions now accept sessions without an active goal and report decision failures accurately instead of claiming context was optimized.
+
 ## [0.100.1] - 2026-09-27
 
 ### Fixed

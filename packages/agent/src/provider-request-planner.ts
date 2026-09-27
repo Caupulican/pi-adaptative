@@ -563,7 +563,9 @@ export async function startPlannedAgentProviderRequestWithId(
 					model: config.model,
 					context: materialized.context,
 					nonCompactableContext,
-					sourceContext,
+					// The loop appends the provider reply to its live history after this callback.
+					// Freeze the accepted source extent so cache-lane compaction can identify that reply as newer.
+					sourceContext: { ...sourceContext, messages: sourceContext.messages.slice() },
 					maxTokens: requestMaxTokens,
 					requestId,
 					providerAccountKey: requestAuth.providerAccountKey,

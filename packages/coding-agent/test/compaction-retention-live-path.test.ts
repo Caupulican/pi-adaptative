@@ -6,8 +6,9 @@
  * than against the planner alone.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RETENTION_AUDIT_CUSTOM_TYPE } from "../src/core/compaction/evidence-retention-projection.ts";
+import { serializeEvaluation } from "../src/core/review/typesafe-contract.ts";
 import { appendToolExchange, createRcSdkHarness, type RcSdkHarness } from "./suite/rc-sdk-harness.ts";
 
 type CompactionInternals = {
@@ -17,7 +18,11 @@ type CompactionInternals = {
 		getRetentionPlanner(): { getLastAuditStats(): unknown };
 		getRetentionAuditStats(): unknown;
 		getAppliedRetentionAudit():
-			| { stats: { pairsRemoved: number; jevRequestCount: number }; droppedCallIds: readonly string[] }
+			| {
+					stats: { pairsRemoved: number; jevRequestCount: number };
+					summaryEvent: string;
+					droppedCallIds: readonly string[];
+			  }
 			| undefined;
 	};
 };
@@ -77,6 +82,24 @@ describe("Evidence retention inside the real compaction owner", () => {
 		expect(compaction.getRetentionPlanner().getLastAuditStats()).toBeDefined();
 	});
 
+	it("sends valid JSON evidence to the decision engine when no goal is active", async () => {
+		const harness = await createRcSdkHarness({
+			decisions: { fallback: { kind: "boolean", probabilityTrue: 0.05 } },
+		});
+		fillTranscript(harness, 20);
+		const evaluate = harness.decisions.evaluate.bind(harness.decisions);
+		vi.spyOn(harness.decisions, "evaluate").mockImplementation((program, state, options) => {
+			serializeEvaluation({ state });
+			return evaluate(program, state, options);
+		});
+
+		await compactionOf(harness).planEvidenceRetention(new AbortController().signal);
+
+		const audit = compactionOf(harness).getAppliedRetentionAudit();
+		expect(audit?.stats.jevRequestCount).toBe(1);
+		expect(audit?.droppedCallIds.length).toBeGreaterThan(0);
+	});
+
 	it("truncates a large result instead of dropping it when only the call stays useful", async () => {
 		const harness = await createRcSdkHarness({
 			decisions: {
@@ -112,6 +135,7 @@ describe("Evidence retention inside the real compaction owner", () => {
 
 		expect(toolResultCount(compaction.getCompactionBranch())).toBe(before);
 		expect(compaction.getAppliedRetentionAudit()?.droppedCallIds).toEqual([]);
+		expect(compaction.getAppliedRetentionAudit()?.summaryEvent).toContain("retention unavailable");
 		expect(
 			harness.session.sessionManager
 				.getBranch()
