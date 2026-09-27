@@ -70,6 +70,7 @@
 - Provider admission releases its machine-wide hold when a malformed custom stream throws while exposing its terminal result, preventing phantom in-flight capacity from delaying later workers.
 - Provider-admission cleanup failures no longer replace provider failures or escape terminal-result callbacks; failed record removal remains bounded by stale-record recovery.
 - Cloud requests resolve one atomic credential projection before dispatch across foreground turns, context scouts, isolated completions, tool probes, compaction, and branch summaries; runtime overrides are attributed to the key actually sent, retry cooldowns stay on that account, and 401 recovery cannot switch an admitted request to another OAuth account.
+- Effective-settings notifications now use a fixed observer generation and contain returned promise rejections, preventing listener registration or failure from extending or escaping a committed settings transition.
 
 ## [0.99.52] - 2026-09-26
 

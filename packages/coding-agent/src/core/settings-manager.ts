@@ -1858,16 +1858,16 @@ export class SettingsManager {
 		this.notifyChanges();
 	}
 
-	/** Subscribe to synchronous effective-settings transitions. Listener failures never break persistence. */
+	/** Subscribe to effective-settings transitions. Listeners start synchronously; returned promises are not awaited. */
 	subscribeChanges(listener: () => void): () => void {
 		this.changeListeners.add(listener);
 		return () => this.changeListeners.delete(listener);
 	}
 
 	private notifyChanges(): void {
-		for (const listener of this.changeListeners) {
+		for (const listener of [...this.changeListeners]) {
 			try {
-				listener();
+				void Promise.resolve(listener()).catch(() => {});
 			} catch {
 				// Settings persistence is authoritative; a runtime projection can recover on its next refresh.
 			}
