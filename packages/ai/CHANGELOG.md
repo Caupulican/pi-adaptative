@@ -3,6 +3,7 @@
 ### Added
 
 - Stream options carry an optional non-secret, host-only provider account scope for request admission and lifecycle correlation.
+- Supported Claude requests can defer non-core tool schemas behind a bounded client-side search; unsupported models, small surfaces, custom SDK clients, and unverified endpoints keep every real schema eager and omit the synthetic search tool.
 
 ### Changed
 

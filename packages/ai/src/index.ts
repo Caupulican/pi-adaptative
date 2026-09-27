@@ -30,6 +30,7 @@ export * from "./providers/openrouter-account.ts";
 export * from "./providers/register-builtins.ts";
 export * from "./session-resources.ts";
 export * from "./stream.ts";
+export * from "./tool-schema-disclosure.ts";
 export * from "./types.ts";
 export * from "./usage.ts";
 export * from "./utils/diagnostics.ts";

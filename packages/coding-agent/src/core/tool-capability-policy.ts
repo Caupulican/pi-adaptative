@@ -1,3 +1,4 @@
+import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import type { HarnessCapability } from "./capability-contract.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
 import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_READ_TOOL_NAME } from "./memory/worker-memory-tools.ts";
@@ -40,6 +41,7 @@ const WRITE_POLICY = policy([["filesystem.write", "worktree.mutate"]], "path-sco
 const PROCESS_POLICY = policy([["process.exec", "tests.execute"]], "process-launcher");
 const NETWORK_POLICY = policy([["network.http", "service.mcp"]], "service-proxy");
 const DELEGATE_POLICY = policy([["workflow.delegate"]], "control-plane");
+const TOOL_SCHEMA_SEARCH_POLICY = policy([], "control-plane");
 
 const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	...["read", "ls", "grep", "find"].map((toolName) => [toolName, READ_POLICY] as const),
@@ -52,6 +54,7 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	...["fetch", "web_search"].map((toolName) => [toolName, NETWORK_POLICY] as const),
 	["webfetch", policy([["network.http"]], "service-proxy")],
 	["typesafe_review", policy([["semantic.judge"]], "service-proxy")],
+	[TOOL_SCHEMA_SEARCH_NAME, TOOL_SCHEMA_SEARCH_POLICY],
 	[
 		"image_generate",
 		policy([["network.http"], ["credentials.use"], ["filesystem.read"]], ["service-proxy", "path-scope"]),
@@ -206,8 +209,9 @@ export function resolveToolCallCapabilities(
 	toolName: string,
 	args?: unknown,
 ): readonly HarnessCapability[] | undefined {
+	if (!getToolCapabilityPolicy(toolName)) return undefined;
 	const clauses = toolCapabilityRequirementClauses(toolName, args);
-	if (clauses.length === 0) return undefined;
+	if (clauses.length === 0) return [];
 	const resolved: HarnessCapability[] = [];
 	for (const clause of clauses) {
 		const match = clause.find((capability) => capabilities.includes(capability));
@@ -254,8 +258,9 @@ export function resolveProfileToolCapabilities(
 	profile: Pick<OrchestrationProfile, "capabilityCeiling">,
 	toolName: string,
 ): readonly HarnessCapability[] | undefined {
+	if (!getToolCapabilityPolicy(toolName)) return undefined;
 	const clauses = toolCapabilityRequirementClauses(toolName);
-	if (clauses.length === 0) return undefined;
+	if (clauses.length === 0) return [];
 	const resolved: HarnessCapability[] = [];
 	for (const clause of clauses) {
 		const match = clause.find((capability) => profile.capabilityCeiling.includes(capability));

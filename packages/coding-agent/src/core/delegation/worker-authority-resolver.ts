@@ -10,7 +10,7 @@ import {
 	WORKER_MEMORY_READ_TOOL_NAME,
 	WORKER_ROOT_MEMORY_TOOL_NAMES,
 } from "../memory/worker-memory-tools.ts";
-import { deriveModelCapabilityProfile } from "../model-capability.ts";
+import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { defaultModelPerProvider } from "../model-resolver.ts";
 import {
@@ -439,7 +439,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		input.authority?.toolNames ?? input.base?.profile.toolNames ?? inheritedSurfaceNames,
 	).filter((toolName) => !WORKER_ROOT_MEMORY_TOOL_NAMES.has(toolName));
 	const deniedForegroundTools = new Set(input.base ? [] : (input.foregroundEnvelope?.deniedTools ?? []));
-	const uniqueToolNames = [
+	const requestedToolNames = [
 		...new Set(
 			(input.yolo
 				? [
@@ -459,6 +459,11 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 			).filter((toolName) => toolName !== "delegate" && (input.yolo || !deniedForegroundTools.has(toolName))),
 		),
 	];
+	const uniqueToolNames = filterToolNamesForCapability(
+		requestedToolNames,
+		deriveModelCapabilityProfile({ contextWindow: resolvedModel.model.contextWindow }),
+		resolvedModel.model,
+	);
 	// Worker shell is a host guarantee, independent of the parent's surface and task-level narrowing.
 	if (!uniqueToolNames.includes(STABLE_SHELL_TOOL_NAME)) uniqueToolNames.push(STABLE_SHELL_TOOL_NAME);
 	if (input.authority?.toolNames?.includes("delegate")) {

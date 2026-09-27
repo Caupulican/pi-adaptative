@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { AgentLoopConfig, AgentTool, BeforeToolCallResult } from "@caupulican/pi-agent-core";
+import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { type Static, Type } from "typebox";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { PathAliasTable } from "../context/path-alias-table.ts";
@@ -38,6 +39,8 @@ import { createReadTool, type ReadToolOptions } from "../tools/read.ts";
 import { createRepoReadTool } from "../tools/repo-read.ts";
 import { createRunProcessTool } from "../tools/run-process.ts";
 import { disposeShellExecutionSession } from "../tools/shell-execution-session.ts";
+import { createToolSchemaSearchDefinition } from "../tools/tool_search.ts";
+import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { createWriteTool } from "../tools/write.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
@@ -193,6 +196,7 @@ function createLaneTools(
 		["repo_read", () => createRepoReadTool(cwd)],
 		["write", () => createWriteTool(cwd, { intentController: fileMutationIntents })],
 		["edit", () => createEditTool(cwd, { ...shared.edit, intentController: fileMutationIntents })],
+		[TOOL_SCHEMA_SEARCH_NAME, () => wrapToolDefinition(createToolSchemaSearchDefinition())],
 		[
 			PYTHON_LANE_TOOL_NAME,
 			() =>
@@ -294,8 +298,11 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	const writeCapable = yoloWrites || (options.writeEnabled === true && (options.writePaths?.length ?? 0) > 0);
 	const pythonCapable =
 		yoloWrites || options.toolManifests?.some((manifest) => manifest.toolName === PYTHON_LANE_TOOL_NAME) === true;
+	const schemaSearchCapable =
+		options.toolManifests?.some((manifest) => manifest.toolName === TOOL_SCHEMA_SEARCH_NAME) === true;
 	const builtInCandidateNames = [
 		...READ_ONLY_LANE_TOOL_NAMES,
+		...(schemaSearchCapable ? [TOOL_SCHEMA_SEARCH_NAME] : []),
 		...(options.readMemory ? [WORKER_MEMORY_READ_TOOL_NAME] : []),
 		...(writeCapable ? WRITE_LANE_TOOL_NAMES : []),
 		...(pythonCapable ? [PYTHON_LANE_TOOL_NAME] : []),

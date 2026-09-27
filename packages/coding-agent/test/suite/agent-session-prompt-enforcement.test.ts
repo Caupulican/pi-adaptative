@@ -85,7 +85,7 @@ describe("AgentSession live prompt-policy enforcement (opt-in, default disabled)
 		expect(text).not.toContain("content replaced by prompt-policy");
 	});
 
-	it("stubs a stale artifact-backed result in provider-visible messages when enabled, leaving the transcript byte-identical", async () => {
+	it("preserves an already-sent stale artifact result when enabled, leaving the provider prefix and transcript byte-identical", async () => {
 		const harness = await createHarness({
 			initialActiveToolNames: ["read", "bash", "edit", "write", "context_audit", "goal", "grep"],
 			settings: {
@@ -125,11 +125,17 @@ describe("AgentSession live prompt-policy enforcement (opt-in, default disabled)
 		await harness.session.prompt("continue 2");
 
 		const text = toolResultContextText(captured as Context, toolCallId as string);
-		expect(text).toContain("content replaced by prompt-policy");
-		expect(text).toContain("artifact_retrieve");
+		expect(text).toContain("needle occurrence number 0");
+		expect(text).not.toContain("content replaced by prompt-policy");
 
 		const report = harness.session.getPromptEnforcementReport();
-		expect(report.items.some((item) => item.enforced && item.toolCallId === toolCallId)).toBe(true);
+		expect(report.items.find((item) => item.toolCallId === toolCallId)).toMatchObject({
+			enforced: false,
+			skipReason: "frozen_prefix_preserved",
+			selectedVisibility: "hidden",
+			deliveredVisibility: "full",
+			projectionPlacement: "frozen_original",
+		});
 
 		// The transcript/session history is never touched by enforcement: the prefix of
 		// session.messages captured before enforcement ever ran must remain byte-identical,
@@ -212,7 +218,7 @@ describe("AgentSession live prompt-policy enforcement (opt-in, default disabled)
 		expect(entry?.skipReason).toBe("retrieval_tool_unavailable");
 	});
 
-	it("skips a real legacy-context-gc-packed result (not just a synthetic details marker) instead of double-stubbing it", async () => {
+	it("recognizes a real legacy-context-gc-packed result as the delivered hidden view instead of double-stubbing it", async () => {
 		const harness = await createHarness({
 			initialActiveToolNames: ["read", "bash", "edit", "write", "context_audit", "goal", "grep"],
 			settings: {
@@ -262,7 +268,14 @@ describe("AgentSession live prompt-policy enforcement (opt-in, default disabled)
 
 		const report = harness.session.getPromptEnforcementReport();
 		const entry = report.items.find((item) => item.toolCallId === toolCallId);
-		expect(entry?.skipReason).toBe("already_stubbed_or_packed");
+		expect(entry).toMatchObject({
+			enforced: true,
+			action: "artifact_stub",
+			selectedVisibility: "hidden",
+			deliveredVisibility: "hidden",
+			projectionPlacement: "gc_stub",
+			retrievalId: expect.stringMatching(/^context:/u),
+		});
 	});
 
 	it("does not release/reclaim artifact references from the read-only enforcement getter", async () => {

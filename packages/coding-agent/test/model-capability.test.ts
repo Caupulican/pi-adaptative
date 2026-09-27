@@ -1,3 +1,4 @@
+import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
 	DEFAULT_WORKER_MAX_OUTPUT_TOKENS,
@@ -195,6 +196,48 @@ describe("filterToolNamesForCapability", () => {
 			"read",
 		]);
 		expect(filterToolNamesForCapability([], minimal)).toEqual([]);
+	});
+
+	it("exposes schema search only to a supported Anthropic request surface", () => {
+		const profile = deriveModelCapabilityProfile({ contextWindow: 200_000 });
+		const requested = [
+			"read",
+			TOOL_SCHEMA_SEARCH_NAME,
+			"bash",
+			"edit",
+			"write",
+			"grep",
+			"find",
+			"delegate",
+			"memory",
+			"pipeline",
+			"task_steps",
+		];
+		const supported = {
+			provider: "anthropic",
+			api: "anthropic-messages",
+			id: "claude-sonnet-4-5",
+			baseUrl: "https://api.anthropic.com",
+		};
+
+		expect(filterToolNamesForCapability(requested, profile, supported)).toEqual(requested);
+		expect(filterToolNamesForCapability(["read", TOOL_SCHEMA_SEARCH_NAME, "bash"], profile, supported)).toEqual([
+			"read",
+			"bash",
+		]);
+		expect(
+			filterToolNamesForCapability(requested, deriveModelCapabilityProfile({ contextWindow: 8_192 }), supported),
+		).toEqual(["read", "bash", "edit", "write"]);
+		for (const model of [
+			{ ...supported, provider: "proxy", baseUrl: "https://proxy.example.test" },
+			{ ...supported, api: "openai-responses" },
+			{ ...supported, id: "claude-opus-3-7" },
+			{ provider: "anthropic" },
+		]) {
+			expect(filterToolNamesForCapability(requested, profile, model)).toEqual(
+				requested.filter((name) => name !== TOOL_SCHEMA_SEARCH_NAME),
+			);
+		}
 	});
 });
 

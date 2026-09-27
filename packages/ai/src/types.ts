@@ -545,6 +545,8 @@ export interface AnthropicMessagesCompat {
 	 * Default: true.
 	 */
 	supportsEagerToolInputStreaming?: boolean;
+	/** Whether this exact endpoint/model accepts deferred schemas plus `tool_reference` results. Unknown endpoints default false. */
+	supportsToolSearch?: boolean;
 	/** Whether the provider supports Anthropic long cache retention (`cache_control.ttl: "1h"`). Default: true. */
 	supportsLongCacheRetention?: boolean;
 	/**

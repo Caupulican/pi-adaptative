@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import { HARNESS_CAPABILITIES } from "../capability-contract.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
@@ -152,6 +153,7 @@ export function buildWorkerExecutionPlan(args: {
 		for (const name of [
 			...READ_TOOL_NAMES,
 			REPO_READ_TOOL_NAME,
+			TOOL_SCHEMA_SEARCH_NAME,
 			...(readOnly ? [] : [...WRITE_TOOL_NAMES, "python"]),
 			STABLE_SHELL_TOOL_NAME,
 		])
@@ -182,11 +184,13 @@ export function buildWorkerExecutionPlan(args: {
 	const enabledAdapterToolNames = (args.workerToolAdapterNames ?? []).filter(
 		(name) => args.yolo || profileToolNames.has(name),
 	);
+	const enabledZeroAuthorityToolNames = profileToolNames.has(TOOL_SCHEMA_SEARCH_NAME) ? [TOOL_SCHEMA_SEARCH_NAME] : [];
 	const enabledToolNames = [
 		...(grantsRead ? READ_TOOL_NAMES : []),
 		...(grantsRepoRead ? [REPO_READ_TOOL_NAME] : []),
 		...(writeEligible ? WRITE_TOOL_NAMES : []),
 		...(memoryEligible ? [WORKER_MEMORY_READ_TOOL_NAME] : []),
+		...enabledZeroAuthorityToolNames,
 		...enabledProcessToolNames,
 		...enabledAdapterToolNames,
 	];

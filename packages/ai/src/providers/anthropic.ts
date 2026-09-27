@@ -5,8 +5,18 @@ import type {
 	MessageCreateParamsStreaming,
 	MessageParam,
 	RawMessageStreamEvent,
+	ToolResultBlockParam,
 } from "@anthropic-ai/sdk/resources/messages.js";
 import { calculateCost } from "../models.ts";
+import {
+	isToolSchemaSearchDetails,
+	measureToolSchemaDisclosureRequest,
+	planToolSchemaDisclosure,
+	searchDeferredToolSchemas,
+	TOOL_SCHEMA_DISCLOSURE_BETA,
+	TOOL_SCHEMA_SEARCH_NAME,
+	type ToolSchemaDisclosurePlan,
+} from "../tool-schema-disclosure.ts";
 import type {
 	AnthropicMessagesCompat,
 	AssistantMessage,
@@ -84,6 +94,7 @@ const claudeCodeTools = [
 	"TodoWrite",
 	"WebFetch",
 	"WebSearch",
+	"ToolSearch",
 ];
 
 const ccToolLookup = new Map(claudeCodeTools.map((t) => [t.toLowerCase(), t]));
@@ -159,6 +170,7 @@ function getAnthropicCompat(
 	return {
 		authFormat: model.compat?.authFormat ?? "api-key",
 		supportsEagerToolInputStreaming: model.compat?.supportsEagerToolInputStreaming ?? !isFireworks,
+		supportsToolSearch: model.compat?.supportsToolSearch ?? false,
 		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? !isFireworks,
 		sendSessionAffinityHeaders:
 			model.compat?.sendSessionAffinityHeaders ?? !!(isFireworks || isCloudflareAiGatewayAnthropic),
@@ -503,6 +515,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 
 	(async () => {
 		const output = createAssistantMessage(model);
+		const disclosureStartedAt = Date.now();
 
 		try {
 			let client: Anthropic;
@@ -511,6 +524,12 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			let copilotDynamicHeaders: Record<string, string> | undefined;
 			const cacheRetention = options?.cacheRetention ?? resolveCacheRetention();
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
+			// A caller-owned SDK client also owns its default beta headers. Without a way to merge
+			// those headers safely, keep its schemas eager instead of emitting an unusable deferred surface.
+			const toolDisclosure = planToolSchemaDisclosure(
+				options?.client ? { ...model, compat: { supportsToolSearch: false } } : model,
+				context.tools ?? [],
+			);
 
 			const initClient = (key: string | undefined) => {
 				if (!key && !hasAuthorizationHeader(model.headers, options?.headers)) {
@@ -530,6 +549,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					key,
 					options?.interleavedThinking ?? true,
 					shouldUseFineGrainedToolStreamingBeta(model, context),
+					toolDisclosure.enabled,
 					options?.headers,
 					copilotDynamicHeaders,
 					cacheSessionId,
@@ -549,7 +569,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				isOAuth ? { normalizeName: toClaudeCodeName } : undefined,
 			);
 			let params = await applyProviderPayloadHook(
-				buildParams(model, context, isOAuth, toolNameMap, options),
+				buildParams(model, context, isOAuth, toolNameMap, toolDisclosure, options),
 				model,
 				options?.onPayload,
 			);
@@ -573,7 +593,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						isOAuth ? { normalizeName: toClaudeCodeName } : undefined,
 					);
 					params = await applyProviderPayloadHook(
-						buildParams(model, context, isOAuth, toolNameMap, options),
+						buildParams(model, context, isOAuth, toolNameMap, toolDisclosure, options),
 						model,
 						options?.onPayload,
 					);
@@ -753,6 +773,18 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				}
 			}
 
+			if (toolDisclosure.enabled) {
+				appendAssistantMessageDiagnostic(output, {
+					type: "tool_schema_disclosure",
+					timestamp: Date.now(),
+					details: {
+						provider: model.provider,
+						model: model.id,
+						...measureToolSchemaDisclosureRequest(toolDisclosure, context.messages),
+						providerResponseMs: Math.max(0, Date.now() - disclosureStartedAt),
+					},
+				});
+			}
 			completeAssistantStream(stream, output, options?.signal);
 		} catch (error) {
 			if (typeof error === "object" && error !== null && "headers" in error) {
@@ -837,6 +869,7 @@ function createClient(
 	apiKey: string | undefined,
 	interleavedThinking: boolean,
 	useFineGrainedToolStreamingBeta: boolean,
+	useToolSchemaDisclosure: boolean,
 	optionsHeaders?: Record<string, string>,
 	dynamicHeaders?: Record<string, string>,
 	sessionId?: string,
@@ -847,6 +880,7 @@ function createClient(
 	if (useFineGrainedToolStreamingBeta) {
 		betaFeatures.push(FINE_GRAINED_TOOL_STREAMING_BETA);
 	}
+	if (useToolSchemaDisclosure) betaFeatures.push(TOOL_SCHEMA_DISCLOSURE_BETA);
 	if (needsInterleavedBeta) {
 		betaFeatures.push(INTERLEAVED_THINKING_BETA);
 	}
@@ -964,13 +998,32 @@ function buildParams(
 	context: Context,
 	isOAuthToken: boolean,
 	toolNameMap: ToolNameMap,
+	toolDisclosure: ToolSchemaDisclosurePlan,
 	options?: AnthropicOptions,
 ): MessageCreateParamsStreaming {
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention);
 	const compat = getAnthropicCompat(model);
+	const requestTools = toolDisclosure.enabled
+		? context.tools
+		: context.tools?.filter((tool) => tool.name !== TOOL_SCHEMA_SEARCH_NAME);
+	if (
+		!toolDisclosure.enabled &&
+		options?.toolChoice &&
+		typeof options.toolChoice !== "string" &&
+		options.toolChoice.name === TOOL_SCHEMA_SEARCH_NAME
+	) {
+		throw new Error("Anthropic tool_search cannot be forced when deferred tool disclosure is unavailable.");
+	}
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
-		messages: convertMessages(context.messages, model, toolNameMap, cacheControl, compat.allowEmptySignature),
+		messages: convertMessages(
+			context.messages,
+			model,
+			toolNameMap,
+			toolDisclosure,
+			cacheControl,
+			compat.allowEmptySignature,
+		),
 		max_tokens: options?.maxTokens ?? model.maxTokens,
 		stream: true,
 	};
@@ -1008,12 +1061,14 @@ function buildParams(
 		params.temperature = options.temperature;
 	}
 
-	if (context.tools && context.tools.length > 0) {
+	if (requestTools && requestTools.length > 0) {
 		params.tools = convertTools(
-			context.tools,
+			requestTools,
 			toolNameMap,
+			toolDisclosure,
 			compat.supportsEagerToolInputStreaming,
 			compat.supportsCacheControlOnTools ? cacheControl : undefined,
+			options?.toolChoice && typeof options.toolChoice !== "string" ? options.toolChoice.name : undefined,
 		);
 	}
 
@@ -1076,6 +1131,7 @@ function convertMessages(
 	messages: Message[],
 	model: Model<"anthropic-messages">,
 	toolNameMap: ToolNameMap,
+	toolDisclosure: ToolSchemaDisclosurePlan,
 	cacheControl?: CacheControlEphemeral,
 	allowEmptySignature = false,
 ): MessageParam[] {
@@ -1216,7 +1272,7 @@ function convertMessages(
 			toolResults.push({
 				type: "tool_result",
 				tool_use_id: msg.toolCallId,
-				content: convertContentBlocks(msg.content),
+				content: convertToolResultContent(msg, toolNameMap, toolDisclosure),
 				is_error: msg.isError,
 			});
 
@@ -1227,7 +1283,7 @@ function convertMessages(
 				toolResults.push({
 					type: "tool_result",
 					tool_use_id: nextMsg.toolCallId,
-					content: convertContentBlocks(nextMsg.content),
+					content: convertToolResultContent(nextMsg, toolNameMap, toolDisclosure),
 					is_error: nextMsg.isError,
 				});
 				j++;
@@ -1275,16 +1331,44 @@ function shouldUseFineGrainedToolStreamingBeta(model: Model<"anthropic-messages"
 	return !!context.tools?.length && !getAnthropicCompat(model).supportsEagerToolInputStreaming;
 }
 
+function convertToolResultContent(
+	message: ToolResultMessage,
+	toolNameMap: ToolNameMap,
+	toolDisclosure: ToolSchemaDisclosurePlan,
+): NonNullable<ToolResultBlockParam["content"]> {
+	if (
+		message.toolName === TOOL_SCHEMA_SEARCH_NAME &&
+		isToolSchemaSearchDetails(message.details) &&
+		toolDisclosure.enabled
+	) {
+		const matches = searchDeferredToolSchemas(toolDisclosure, message.details.query, message.details.maxResults);
+		if (matches.length > 0) {
+			return matches.map((tool) => ({
+				type: "tool_reference" as const,
+				tool_name: toolNameMap.toProviderName(tool.name),
+			}));
+		}
+		return "No matching deferred tools found.";
+	}
+	return convertContentBlocks(message.content);
+}
+
 function convertTools(
 	tools: Tool[],
 	toolNameMap: ToolNameMap,
+	toolDisclosure: ToolSchemaDisclosurePlan,
 	supportsEagerToolInputStreaming: boolean,
 	cacheControl?: CacheControlEphemeral,
+	forcedToolName?: string,
 ): Anthropic.Messages.Tool[] {
 	if (!tools) return [];
+	const deferredToolNames = new Set(toolDisclosure.deferredToolNames);
+	if (forcedToolName) deferredToolNames.delete(forcedToolName);
+	const cacheControlIndex = cacheControl ? tools.findLastIndex((tool) => !deferredToolNames.has(tool.name)) : -1;
 
 	return tools.map((tool, index) => {
 		const schema = tool.parameters as { properties?: unknown; required?: string[] };
+		const deferred = toolDisclosure.enabled && deferredToolNames.has(tool.name);
 
 		return {
 			name: toolNameMap.toProviderName(tool.name),
@@ -1295,7 +1379,8 @@ function convertTools(
 				properties: schema.properties ?? {},
 				required: schema.required ?? [],
 			},
-			...(cacheControl && index === tools.length - 1 ? { cache_control: cacheControl } : {}),
+			...(deferred ? { defer_loading: true } : {}),
+			...(cacheControl && index === cacheControlIndex ? { cache_control: cacheControl } : {}),
 		};
 	});
 }

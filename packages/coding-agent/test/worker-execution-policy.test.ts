@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import {
 	buildWorkerExecutionPlan,
@@ -119,6 +120,29 @@ describe("buildWorkerExecutionPlan", () => {
 		expect(plan.writeEnabled).toBe(false);
 		expect(plan.writePaths).toEqual([]);
 		expect(plan.readMemory).toBe(false);
+	});
+
+	it("admits zero-authority schema search without a host adapter", () => {
+		const profile = createTestWorkerOrchestrationProfile({
+			profileId: "schema-search",
+			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+			capabilityCeiling: [],
+			toolNames: [TOOL_SCHEMA_SEARCH_NAME],
+		});
+
+		const plan = buildWorkerExecutionPlan({
+			profile,
+			settings: settings(),
+			cwd: "/repo",
+			deniedPaths: [],
+			memoryEnabled: false,
+		});
+
+		expect(plan.toolManifests).toMatchObject([
+			{ toolName: TOOL_SCHEMA_SEARCH_NAME, capabilities: [], enforcements: ["control-plane"] },
+		]);
+		expect(plan.requiredCapabilities).toEqual([]);
+		expect(plan.readPaths).toEqual([]);
 	});
 
 	it("materializes only the bounded memory_read adapter when the profile permits query access", () => {

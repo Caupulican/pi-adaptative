@@ -3,6 +3,7 @@
 ### Added
 
 - Versioned context projections expose the latest accepted provider request with stable identities, content revisions, provenance, and freshness while keeping speculative plans and worker lanes isolated.
+- Supported Claude cloud sessions expose read-only, zero-authority tool-schema search for large root and worker surfaces, re-evaluate support across worker routing and quota fallback, and report accepted disclosure savings and search misses through `/context`.
 
 ### Changed
 

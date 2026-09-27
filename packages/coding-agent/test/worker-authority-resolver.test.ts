@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import type { Api, Model } from "@caupulican/pi-ai";
+import { type Api, type Model, TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
 	bindCompiledVerifierIdentity,
@@ -283,6 +283,66 @@ describe("resolveWorkerAuthority", () => {
 		expect(resolution.ok).toBe(true);
 		if (!resolution.ok) return;
 		expect(resolution.shipment.profile.toolNames).toEqual(["read", "python", "bash"]);
+	});
+
+	it("re-resolves schema-search support against the worker model after account routing", () => {
+		const workerTools = [
+			TOOL_SCHEMA_SEARCH_NAME,
+			"read",
+			"grep",
+			"find",
+			"ls",
+			"repo_read",
+			"write",
+			"edit",
+			"python",
+			"bash",
+			"typesafe_review",
+		];
+		const claude = {
+			id: "claude-sonnet-4-5",
+			provider: "anthropic",
+			api: "anthropic-messages",
+			baseUrl: "https://api.anthropic.com",
+			contextWindow: 200_000,
+		} as Model<Api>;
+		const codex = {
+			id: "gpt-5.6-sol",
+			provider: "openai-codex",
+			api: "openai-responses",
+			baseUrl: "https://api.openai.com",
+			contextWindow: 200_000,
+		} as Model<Api>;
+		const registry = {
+			find: (provider: string, modelId: string) =>
+				[claude, codex].find((entry) => entry.provider === provider && entry.id === modelId),
+			getAvailable: () => [claude, codex],
+			hasConfiguredAuth: () => true,
+			authStorage: { hasAuth: () => true },
+		} as unknown as ModelRegistry;
+		const resolveFor = (workerModel: Model<Api>) => {
+			const resolution = resolveWorkerAuthority({
+				authority: {
+					model: { provider: workerModel.provider, modelId: workerModel.id },
+					toolNames: workerTools,
+					capabilities: ["filesystem.read", "repo.read", "filesystem.write", "process.exec", "semantic.judge"],
+				},
+				foregroundModel: claude,
+				foregroundToolNames: workerTools,
+				foregroundEnvelope: {
+					id: "claude-root",
+					capabilities: ["filesystem.read", "repo.read", "filesystem.write", "process.exec", "semantic.judge"],
+					allowedTools: workerTools,
+				},
+				modelRegistry: registry,
+				isModelExhausted: () => false,
+			});
+			if (!resolution.ok) throw new Error(resolution.reason);
+			return resolution.shipment.profile.toolNames;
+		};
+
+		expect(resolveFor(claude)).toEqual(workerTools);
+		expect(resolveFor(codex)).toEqual(workerTools.filter((name) => name !== TOOL_SCHEMA_SEARCH_NAME));
 	});
 
 	it("inherits run_toolkit_script only when it is active in the foreground, and keeps explicit requests deterministic", () => {

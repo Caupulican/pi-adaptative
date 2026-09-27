@@ -44,6 +44,22 @@ export interface MessageClassRow {
 	tokens: number;
 }
 
+export interface ToolSchemaDisclosureComposition {
+	provider: string;
+	model: string;
+	totalToolCount: number;
+	eagerToolCount: number;
+	deferredToolCount: number;
+	estimatedEagerSchemaTokens: number;
+	estimatedDeferredSchemaTokens: number;
+	searchCount: number;
+	searchMissCount: number;
+	referencedToolCount: number;
+	searchResolutionMs: number | null;
+	providerResponseMs: number;
+	observedAt: number;
+}
+
 export interface ContextCompositionReport {
 	/** Estimated tokens of the system prompt sent on every request. */
 	systemPromptTokens: number;
@@ -66,6 +82,8 @@ export interface ContextCompositionReport {
 	curation: { enabled: boolean; telemetry: CurationTelemetrySnapshot; lastSkipReason?: string } | null;
 	/** Background/side-channel spend that does NOT ride in this context but bills the account. */
 	spawned: { cost: number; reports: number } | null;
+	/** Historical measurement from the latest accepted provider request that used schema disclosure. */
+	toolSchemaDisclosure: ToolSchemaDisclosureComposition | null;
 	/** Send-time-only deltas folded into estimatedRequestTokens: +evidence block, -policy stubs. */
 	adjustments: {
 		memoryEvidenceTokens: number;
@@ -138,6 +156,81 @@ function classifyMessage(message: AgentMessage): string {
 	return message.role;
 }
 
+function nonNegativeInteger(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function latestToolSchemaDisclosure(messages: readonly AgentMessage[]): ToolSchemaDisclosureComposition | null {
+	for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex--) {
+		const message = messages[messageIndex];
+		if (message?.role !== "assistant") continue;
+		const diagnostics = (message as { diagnostics?: unknown }).diagnostics;
+		if (!Array.isArray(diagnostics)) continue;
+		for (let diagnosticIndex = diagnostics.length - 1; diagnosticIndex >= 0; diagnosticIndex--) {
+			const diagnostic = diagnostics[diagnosticIndex];
+			if (!diagnostic || typeof diagnostic !== "object" || Array.isArray(diagnostic)) continue;
+			const record = diagnostic as Record<string, unknown>;
+			if (record.type !== "tool_schema_disclosure" || !record.details || typeof record.details !== "object")
+				continue;
+			const details = record.details as Record<string, unknown>;
+			const totalToolCount = nonNegativeInteger(details.totalToolCount);
+			const eagerToolCount = nonNegativeInteger(details.eagerToolCount);
+			const deferredToolCount = nonNegativeInteger(details.deferredToolCount);
+			const estimatedEagerSchemaTokens = nonNegativeInteger(details.estimatedEagerSchemaTokens);
+			const estimatedDeferredSchemaTokens = nonNegativeInteger(details.estimatedDeferredSchemaTokens);
+			const searchCount = nonNegativeInteger(details.searchCount);
+			const searchMissCount = nonNegativeInteger(details.searchMissCount);
+			const referencedToolCount = nonNegativeInteger(details.referencedToolCount);
+			const providerResponseMs = nonNegativeInteger(details.providerResponseMs);
+			const observedAt = nonNegativeInteger(record.timestamp);
+			const searchResolutionMs =
+				details.searchResolutionMs === null ? null : nonNegativeInteger(details.searchResolutionMs);
+			if (
+				typeof details.provider !== "string" ||
+				details.provider.length === 0 ||
+				details.provider.length > 200 ||
+				typeof details.model !== "string" ||
+				details.model.length === 0 ||
+				details.model.length > 200 ||
+				totalToolCount === undefined ||
+				eagerToolCount === undefined ||
+				deferredToolCount === undefined ||
+				estimatedEagerSchemaTokens === undefined ||
+				estimatedDeferredSchemaTokens === undefined ||
+				searchCount === undefined ||
+				searchMissCount === undefined ||
+				referencedToolCount === undefined ||
+				searchResolutionMs === undefined ||
+				providerResponseMs === undefined ||
+				observedAt === undefined ||
+				eagerToolCount + deferredToolCount !== totalToolCount ||
+				eagerToolCount === 0 ||
+				deferredToolCount === 0 ||
+				searchMissCount > searchCount ||
+				referencedToolCount > searchCount * 10
+			) {
+				continue;
+			}
+			return {
+				provider: details.provider,
+				model: details.model,
+				totalToolCount,
+				eagerToolCount,
+				deferredToolCount,
+				estimatedEagerSchemaTokens,
+				estimatedDeferredSchemaTokens,
+				searchCount,
+				searchMissCount,
+				referencedToolCount,
+				searchResolutionMs,
+				providerResponseMs,
+				observedAt,
+			};
+		}
+	}
+	return null;
+}
+
 export function buildContextCompositionReport(input: BuildContextCompositionInput): ContextCompositionReport {
 	const systemPromptTokens = estimateTextTokens(input.systemPrompt);
 
@@ -199,6 +292,7 @@ export function buildContextCompositionReport(input: BuildContextCompositionInpu
 	);
 
 	const observations: string[] = [...(input.extraObservations ?? [])];
+	const toolSchemaDisclosure = latestToolSchemaDisclosure(input.messages);
 	const heaviestTool = tools[0];
 	if (heaviestTool && toolSchemaTokens > 0 && heaviestTool.schemaTokens > Math.max(500, toolSchemaTokens * 0.3)) {
 		observations.push(
@@ -227,6 +321,11 @@ export function buildContextCompositionReport(input: BuildContextCompositionInpu
 	if (input.curation?.enabled && input.curation.lastSkipReason) {
 		observations.push(`curation is enabled but idle: ${input.curation.lastSkipReason}`);
 	}
+	if (toolSchemaDisclosure && toolSchemaDisclosure.searchMissCount > 0) {
+		observations.push(
+			`last tool-schema disclosure had ${toolSchemaDisclosure.searchMissCount}/${toolSchemaDisclosure.searchCount} search miss(es) — refine the batched capability query before adding eager schemas`,
+		);
+	}
 
 	return {
 		systemPromptTokens,
@@ -244,6 +343,7 @@ export function buildContextCompositionReport(input: BuildContextCompositionInpu
 		enforcement: input.enforcement ?? null,
 		curation: input.curation ?? null,
 		spawned: input.spawned ?? null,
+		toolSchemaDisclosure,
 		adjustments,
 		observations,
 	};
@@ -268,6 +368,13 @@ export function formatContextCompositionDashboard(report: ContextCompositionRepo
 	if (report.tools.length > maxToolRows) {
 		const rest = report.tools.slice(maxToolRows).reduce((sum, tool) => sum + tool.schemaTokens, 0);
 		lines.push(`  - (+${report.tools.length - maxToolRows} more: ~${rest} tok)`);
+	}
+	if (report.toolSchemaDisclosure) {
+		const disclosure = report.toolSchemaDisclosure;
+		lines.push(
+			`last schema disclosure (${disclosure.provider}/${disclosure.model}): ${disclosure.eagerToolCount} eager + ${disclosure.deferredToolCount} deferred of ${disclosure.totalToolCount}, ~${disclosure.estimatedDeferredSchemaTokens} model-hidden schema tokens`,
+			`  searches: ${disclosure.searchCount}, misses: ${disclosure.searchMissCount}, references: ${disclosure.referencedToolCount}, provider response: ${disclosure.providerResponseMs}ms${disclosure.searchResolutionMs === null ? "" : `, search resolution: ${disclosure.searchResolutionMs}ms`}`,
+		);
 	}
 	if (report.extensions.length > 0) {
 		lines.push("", "extensions:");

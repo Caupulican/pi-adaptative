@@ -1,3 +1,4 @@
+import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { mapToolNamesForPlatform } from "../default-tool-surface.ts";
 import { WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
 import { getToolCapabilityPolicy, resolveProfileToolCapabilities } from "../tool-capability-policy.ts";
@@ -5,6 +6,7 @@ import type { OrchestrationProfile, ToolCapabilityManifest } from "./contracts.t
 
 export const CLASSIFIED_LANE_TOOL_NAMES = [
 	"read",
+	TOOL_SCHEMA_SEARCH_NAME,
 	"grep",
 	"find",
 	"ls",

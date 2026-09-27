@@ -1,7 +1,7 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Api, Model } from "@caupulican/pi-ai";
+import { type Api, type Model, TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { previewWorkerModel, resolveWorkerAuthority } from "../src/core/delegation/worker-authority-resolver.ts";
 import { WorkerProfileResolver } from "../src/core/delegation/worker-profile-resolver.ts";
@@ -9,6 +9,7 @@ import { evaluateWorkerRetry } from "../src/core/delegation/worker-retry-policy.
 import type { ModelRegistry } from "../src/core/model-registry.ts";
 import { OrchestrationEventStore } from "../src/core/orchestration/event-store.ts";
 import { DurableTaskRuntime } from "../src/core/orchestration/task-runtime.ts";
+import { createTestWorkerOrchestrationProfile } from "./orchestration-profile-fixture.ts";
 
 /**
  * A routed worker whose account runs out of quota moves to the next routing candidate, the way root's
@@ -45,7 +46,7 @@ function contractResolver(exhausted: Set<string>): WorkerProfileResolver {
 	return new WorkerProfileResolver({
 		agentDir: "/unused",
 		cwd: "/repo",
-		getSettingsManager: () => ({}) as never,
+		getSettingsManager: () => ({ getModelCapabilitySettings: () => ({ mode: "auto" }) }) as never,
 		getResourceLoader: () => ({}) as never,
 		getModelRegistry: () => registry,
 		isModelExhausted: (m) => exhausted.has(`${m.provider}/${m.id}`),
@@ -90,6 +91,76 @@ describe("worker quota failover", () => {
 		exhausted.add("openai-codex/gpt-5.6-sol");
 		const moved = resolver.resolveContract(contract);
 		expect(moved.ok && moved.resolved.model.provider).toBe("openrouter");
+	});
+
+	it("narrows model-specific tools when an ordered fallback changes providers", () => {
+		const workerTools = [
+			TOOL_SCHEMA_SEARCH_NAME,
+			"read",
+			"grep",
+			"find",
+			"ls",
+			"repo_read",
+			"write",
+			"edit",
+			"python",
+			"bash",
+			"typesafe_review",
+		];
+		const claude = {
+			id: "claude-sonnet-4-5",
+			provider: "anthropic-proxy",
+			api: "anthropic-messages",
+			baseUrl: "https://proxy.example.test",
+			compat: { supportsToolSearch: true },
+			contextWindow: 200_000,
+		} as Model<Api>;
+		const fallback = {
+			id: "gpt-5.6-sol",
+			provider: "openai-codex",
+			api: "openai-responses",
+			baseUrl: "https://api.openai.com",
+			contextWindow: 200_000,
+		} as Model<Api>;
+		const fallbackRegistry = {
+			find: (provider: string, modelId: string) =>
+				[claude, fallback].find((entry) => entry.provider === provider && entry.id === modelId),
+			hasConfiguredAuth: () => true,
+		} as unknown as ModelRegistry;
+		const exhausted = new Set<string>();
+		const resolver = new WorkerProfileResolver({
+			agentDir: "/unused",
+			cwd: "/repo",
+			getSettingsManager: () => ({ getModelCapabilitySettings: () => ({ mode: "auto" }) }) as never,
+			getResourceLoader: () => ({}) as never,
+			getModelRegistry: () => fallbackRegistry,
+			isModelExhausted: (entry) => exhausted.has(`${entry.provider}/${entry.id}`),
+			getTaskProfileStore: () => ({}) as never,
+			onDiagnostic: () => {},
+		});
+		const firstBinding = { provider: claude.provider, modelId: claude.id, thinkingLevel: "off" as const };
+		const fallbackBinding = {
+			provider: fallback.provider,
+			modelId: fallback.id,
+			thinkingLevel: "off" as const,
+		};
+		const profile = {
+			...createTestWorkerOrchestrationProfile({
+				profileId: "schema-search-fallback",
+				model: claude,
+				toolNames: workerTools,
+				capabilityCeiling: ["process.exec"],
+			}),
+			modelPolicy: { mode: "ordered-fallback" as const, candidates: [firstBinding, fallbackBinding] },
+		};
+		const contract = { modelBinding: firstBinding, profile, resourcePointers: [] } as never;
+
+		const initial = resolver.resolveContract(contract);
+		expect(initial.ok && initial.resolved.profile.toolNames).toContain(TOOL_SCHEMA_SEARCH_NAME);
+		exhausted.add(`${claude.provider}/${claude.id}`);
+		const moved = resolver.resolveContract(contract);
+		expect(moved.ok && moved.resolved.model.provider).toBe(fallback.provider);
+		expect(moved.ok && moved.resolved.profile.toolNames).not.toContain(TOOL_SCHEMA_SEARCH_NAME);
 	});
 
 	it("retries a quota failure only with a failover, without spending the attempt ceiling", () => {

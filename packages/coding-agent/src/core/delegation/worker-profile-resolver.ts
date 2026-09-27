@@ -1,4 +1,5 @@
 import type { Api, Model } from "@caupulican/pi-ai";
+import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type {
 	OrchestrationModelBinding,
@@ -163,12 +164,21 @@ export class WorkerProfileResolver {
 				? resolveConfiguredOrchestrationModel(contract.profile, this.options.getModelRegistry(), isUnavailable)
 				: resolvePinnedOrchestrationModel(contract.modelBinding, this.options.getModelRegistry(), isUnavailable);
 		if (!resolvedModel) return { ok: false, reason: "orchestration_profile_model_unavailable" };
+		const profile = structuredClone(contract.profile);
+		profile.toolNames = filterToolNamesForCapability(
+			profile.toolNames,
+			deriveModelCapabilityProfile({
+				contextWindow: resolvedModel.model.contextWindow,
+				mode: this.options.getSettingsManager().getModelCapabilitySettings().mode,
+			}),
+			resolvedModel.model,
+		);
 		return {
 			ok: true,
 			resolved: {
 				model: resolvedModel.model,
 				modelBinding: resolvedModel.binding,
-				profile: structuredClone(contract.profile),
+				profile,
 				resourcePointers: structuredClone(contract.resourcePointers),
 				...(contract.soul ? { soul: contract.soul } : {}),
 			},

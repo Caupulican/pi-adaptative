@@ -298,6 +298,17 @@ per-turn schema churn. Pinned by
 `packages/coding-agent/test/suite/runtime-update.test.ts`, and
 `packages/coding-agent/test/suite/image-generation-provider-surface.test.ts`.
 
+**Deferred tool schemas remain bound to the model and surface that will execute them.** A verified
+Anthropic model and endpoint may expose the stateless, zero-authority `tool_search` only when the
+final capability-filtered request has at least ten real tools; every other request omits the
+synthetic tool and sends every real schema eagerly. Fresh worker routing and durable quota fallback
+re-evaluate that rule against the selected worker model, so an inherited Claude surface cannot
+lend search to another provider. Search results reference only the exact current request's deferred
+set. `/context` reports the latest accepted disclosure counts, estimated hidden schema tokens,
+misses, and latency as historical evidence without subtracting them from the current request
+estimate. Pinned by `packages/coding-agent/test/worker-authority-resolver.test.ts` and
+`packages/coding-agent/test/context-composition.test.ts`.
+
 **Equivalent action branches compact only at the provider boundary.** Identical `anyOf` branches
 may share an enum discriminator when every other validation constraint matches. Exclusive unions
 remain intact; local validation retains the original branches and their actionable repair text.
@@ -1022,6 +1033,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-27 | Supported Claude surfaces may defer schemas behind bounded tool search; unsupported, small, routed, or fallback surfaces keep all real schemas eager, and `/context` reports accepted disclosure evidence without changing its current estimate. |
 | 2026-09-27 | Query-time visibility is query/evidence-versioned, preserves already-sent bytes, restores GC-packed evidence through request-only tails, advertises only readable retrieval handles, fails open on uncertainty, and reports additions versus savings with the correct sign. Large-output profiles prove exact append-prefix retention and classify every intentional rewrite instead of treating new output bytes as invalidation. |
 | 2026-09-26 | Caller cancellation owns outer-stream settlement: cooperative provider abort terminals retain a bounded grace period, then a silent abort-ignoring stream settles as aborted rather than deadlocking or becoming a retryable stall. |
 | 2026-09-26 | Integrity hooks receive per-extension copies of one detached context snapshot, fencing late and sibling mutations without weakening high-impact timeout policy. |

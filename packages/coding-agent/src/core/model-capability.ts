@@ -9,6 +9,11 @@
  * per class via the `modelCapability.mode` setting.
  */
 
+import {
+	MIN_TOOL_SCHEMA_DISCLOSURE_SEARCHABLE_TOOLS,
+	supportsToolSchemaDisclosure,
+	TOOL_SCHEMA_SEARCH_NAME,
+} from "@caupulican/pi-ai";
 import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
 
 export type ModelCapabilityClass = "full" | "lean" | "minimal" | "chat";
@@ -82,6 +87,7 @@ export const MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS: readonly string[] = [
 ];
 export const MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS: readonly string[] = [
 	"read",
+	TOOL_SCHEMA_SEARCH_NAME,
 	"skill",
 	"bash",
 	"python",
@@ -212,7 +218,13 @@ export function deriveModelCapabilityProfile(args: {
 export function filterToolNamesForCapability(
 	toolNames: readonly string[],
 	profile: ModelCapabilityProfile,
-	model?: { provider: string },
+	model?: {
+		provider: string;
+		api?: string;
+		id?: string;
+		baseUrl?: string;
+		compat?: unknown;
+	},
 ): string[] {
 	let filtered = toolNames.filter((name) => name !== "image_generate" || model?.provider === "openai-codex");
 	if (profile.allowedToolNames !== undefined) {
@@ -223,6 +235,21 @@ export function filterToolNamesForCapability(
 		const blocked = new Set(profile.blockedToolNames);
 		filtered = filtered.filter((name) => !blocked.has(name));
 	}
+	const toolSearchSupported =
+		filtered.filter((name) => name !== TOOL_SCHEMA_SEARCH_NAME).length >=
+			MIN_TOOL_SCHEMA_DISCLOSURE_SEARCHABLE_TOOLS &&
+		model?.api !== undefined &&
+		model.id !== undefined &&
+		model.baseUrl !== undefined
+			? supportsToolSchemaDisclosure({
+					api: model.api,
+					id: model.id,
+					baseUrl: model.baseUrl,
+					provider: model.provider,
+					compat: model.compat,
+				})
+			: false;
+	filtered = filtered.filter((name) => name !== TOOL_SCHEMA_SEARCH_NAME || toolSearchSupported);
 	return filtered;
 }
 

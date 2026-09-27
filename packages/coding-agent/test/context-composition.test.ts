@@ -141,6 +141,114 @@ describe("buildContextCompositionReport", () => {
 		expect(text).toContain("spawned/background spend");
 		expect(text).toContain("$0.1200");
 	});
+
+	it("projects bounded historical schema-disclosure token, miss, and latency evidence", () => {
+		const disclosureMessage = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "continue" }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			diagnostics: [
+				{
+					type: "tool_schema_disclosure",
+					timestamp: 123,
+					details: {
+						provider: "anthropic",
+						model: "claude-sonnet-4-5",
+						totalToolCount: 15,
+						eagerToolCount: 5,
+						deferredToolCount: 10,
+						estimatedEagerSchemaTokens: 400,
+						estimatedDeferredSchemaTokens: 1_200,
+						searchCount: 2,
+						searchMissCount: 1,
+						referencedToolCount: 3,
+						searchResolutionMs: 850,
+						providerResponseMs: 700,
+					},
+				},
+			],
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop" as const,
+			timestamp: 123,
+		};
+		const report = buildContextCompositionReport({
+			systemPrompt: "",
+			tools: [],
+			extensions: [],
+			messages: [disclosureMessage],
+			providerReportedTokens: null,
+			contextWindow: null,
+		});
+
+		expect(report.toolSchemaDisclosure).toMatchObject({
+			deferredToolCount: 10,
+			estimatedDeferredSchemaTokens: 1_200,
+			searchMissCount: 1,
+			searchResolutionMs: 850,
+		});
+		expect(report.observations).toContainEqual(expect.stringContaining("1/2 search miss"));
+		expect(formatContextCompositionDashboard(report)).toContain("~1200 model-hidden schema tokens");
+	});
+
+	it("rejects internally inconsistent schema-disclosure diagnostics", () => {
+		const report = buildContextCompositionReport({
+			systemPrompt: "",
+			tools: [],
+			extensions: [],
+			messages: [
+				{
+					role: "assistant",
+					content: [],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					diagnostics: [
+						{
+							type: "tool_schema_disclosure",
+							timestamp: 123,
+							details: {
+								provider: "anthropic",
+								model: "claude-sonnet-4-5",
+								totalToolCount: 99,
+								eagerToolCount: 5,
+								deferredToolCount: 10,
+								estimatedEagerSchemaTokens: 400,
+								estimatedDeferredSchemaTokens: 1_200,
+								searchCount: 0,
+								searchMissCount: 1,
+								referencedToolCount: 0,
+								searchResolutionMs: null,
+								providerResponseMs: 700,
+							},
+						},
+					],
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: 123,
+				},
+			],
+			providerReportedTokens: null,
+			contextWindow: null,
+		});
+
+		expect(report.toolSchemaDisclosure).toBeNull();
+	});
 });
 
 describe("AgentSession.getContextCompositionReport", () => {

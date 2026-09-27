@@ -2,7 +2,12 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { AgentContext, AgentTool, ExecutionContext } from "@caupulican/pi-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
+import {
+	fauxAssistantMessage,
+	fauxToolCall,
+	TOOL_SCHEMA_SEARCH_DETAILS_KIND,
+	TOOL_SCHEMA_SEARCH_NAME,
+} from "@caupulican/pi-ai";
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLaneToolSurface, type LaneToolSurface } from "../src/core/autonomy/lane-tool-surface.ts";
@@ -84,6 +89,48 @@ describe("classified lane tool surface", () => {
 		expect(first.allowedTools).not.toContain("delegate");
 		expect(first.allowedTools).not.toContain("ask_question");
 		expect(first.allowedTools).not.toContain("bash");
+	});
+
+	it("materializes schema search as a stateless zero-authority worker tool", async () => {
+		const manifest: ToolCapabilityManifest = {
+			toolName: TOOL_SCHEMA_SEARCH_NAME,
+			moduleSpecifier: "../tools/tool_search.ts",
+			capabilities: [],
+			roles: ["explorer"],
+			enforcements: ["control-plane"],
+		};
+		const grant: ExecutionGrant = {
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			grantId: "schema-search-grant",
+			objectiveId: "objective-1",
+			taskId: "task-1",
+			attemptId: "attempt-1",
+			subjectId: "worker-1",
+			role: "explorer",
+			capabilities: [],
+			allowedTools: [TOOL_SCHEMA_SEARCH_NAME],
+			resources: [],
+			readPaths: [],
+			writePaths: [],
+			deniedPaths: [],
+			budget: {},
+			policyVersion: "test",
+			decisionTrace: [],
+			issuedAt: "2026-09-27T00:00:00.000Z",
+		};
+		const surface = createLaneToolSurface({
+			cwd,
+			grant,
+			toolManifests: [manifest],
+		});
+
+		expect(surface.allowedTools).toEqual([TOOL_SCHEMA_SEARCH_NAME]);
+		const schemaSearch = surface.tools.find((tool) => tool.name === TOOL_SCHEMA_SEARCH_NAME);
+		if (!schemaSearch) throw new Error("Expected the worker schema-search tool.");
+		expect(await gate(surface, TOOL_SCHEMA_SEARCH_NAME, { query: "memory" })).toBeUndefined();
+		await expect(schemaSearch.execute("search-1", { query: "memory" })).resolves.toMatchObject({
+			details: { kind: TOOL_SCHEMA_SEARCH_DETAILS_KIND, query: "memory", maxResults: 5 },
+		});
 	});
 
 	it.each([

@@ -9,6 +9,8 @@
  * PowerShell on Windows. `python` is a separate bounded, uv-managed execution contract.
  * Root git reads are `repo_read`. Root bash does not admit a git invocation.
  */
+
+import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "./goals/goal-tool-names.ts";
 
 export const STABLE_SHELL_TOOL_NAME = "bash" as const;
@@ -16,6 +18,7 @@ export const STABLE_SHELL_TOOL_NAME = "bash" as const;
 export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.platform): readonly string[] {
 	return [
 		"read",
+		TOOL_SCHEMA_SEARCH_NAME,
 		"webfetch",
 		"decision_ledger_read",
 		"image_generate",

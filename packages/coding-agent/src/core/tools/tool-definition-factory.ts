@@ -14,6 +14,7 @@ import { createReadToolDefinition, type ReadToolOptions } from "./read.ts";
 import { createRepoReadToolDefinition, type RepoReadToolOptions } from "./repo-read.ts";
 import { createSkillAuditToolDefinition, type SkillAuditToolOptions } from "./skill-audit.ts";
 import { createSkillifyToolDefinition, type SkillifyToolOptions } from "./skillify.ts";
+import { createToolSchemaSearchDefinition } from "./tool_search.ts";
 import { createWebFetchToolDefinition, type WebFetchOptions } from "./webfetch.ts";
 import { createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
@@ -35,6 +36,7 @@ export type ToolName =
 	| "extensionify"
 	| "artifact_retrieve"
 	| "decision_ledger_read"
+	| "tool_search"
 	| "webfetch";
 
 export const allToolNames: ReadonlySet<ToolName> = new Set([
@@ -52,6 +54,7 @@ export const allToolNames: ReadonlySet<ToolName> = new Set([
 	"extensionify",
 	"artifact_retrieve",
 	"decision_ledger_read",
+	"tool_search",
 	"webfetch",
 ]);
 
@@ -107,6 +110,8 @@ export function createToolDefinitionWithRuntime(
 			return createArtifactRetrieveToolDefinition(cwd, options.artifact_retrieve);
 		case "decision_ledger_read":
 			return createDecisionLedgerReadToolDefinition(cwd, options.decision_ledger_read);
+		case "tool_search":
+			return createToolSchemaSearchDefinition();
 		case "webfetch":
 			return createWebFetchToolDefinition(cwd, options.webfetch);
 	}
