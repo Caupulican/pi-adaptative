@@ -180,6 +180,7 @@ export interface CompactionControllerDeps {
 	settingsManager: SettingsManager;
 	getModel(): Model<Api> | undefined;
 	getAdaptedSettings(): CompactionSettings;
+	getCompactionModelSetting(): string;
 	getRequestAuth(model: Model<Api>): Promise<RequestAuth>;
 	resolveModelAndAuth(
 		compactionModel: Model<Api>,
@@ -282,6 +283,7 @@ export type IdlePreparationView =
 export interface PreparedCompactionRecord {
 	readonly result: CompactionResult;
 	readonly lane: { readonly provider: string; readonly id: string; readonly api: string };
+	readonly settingsKey: string;
 	readonly preparedAt: number;
 }
 
@@ -341,7 +343,14 @@ export class CompactionController {
 	/** Fires the planned preparation while the session lane idles (see `onLaneIdle`). */
 	private readonly idleTimer = new IdlePreparationTimer();
 	/** A compaction being summarized while the lane idles, not yet recorded. */
-	private idlePreparation: { abort: AbortController; done: Promise<PreparedCompactionRecord | undefined> } | undefined;
+	private idlePreparation:
+		| {
+				abort: AbortController;
+				settingsKey: string;
+				done: Promise<PreparedCompactionRecord | undefined>;
+		  }
+		| undefined;
+	private idlePreparationSettingsKey: string | undefined;
 	private idleView: IdlePreparationView | undefined;
 	private compactableHistory: { key: string; value: boolean } | undefined;
 	private pendingEarlyCompactionPrediction?: {
@@ -599,12 +608,18 @@ export class CompactionController {
 
 	async admitProviderRequest(input: ProviderRequestCompactionInput): Promise<ProviderRequestCompactionDecision> {
 		this.onLaneBusy();
+		const settings = this.deps.getAdaptedSettings();
+		if (!settings.enabled) this.cancelIdlePreparation();
 		const model = this.deps.getModel();
 		const contextWindow = model?.contextWindow ?? 0;
 		if (!model || contextWindow <= 0) return { action: "send" };
 		// Held tool results and owner messages alike reach the lane through here: a summary prepared
 		// while it idled is used or let go now, before any other compaction decision.
-		if (input.attempt === 0 && (await this.admitPreparedCompaction(model, input.requestTokens))) {
+		if (
+			settings.enabled &&
+			input.attempt === 0 &&
+			(await this.admitPreparedCompaction(model, input.requestTokens, this.idlePreparationKey(settings)))
+		) {
 			return { action: "replan" };
 		}
 
@@ -613,7 +628,6 @@ export class CompactionController {
 				`The non-compactable request envelope needs about ${input.nonCompactableTokens} tokens, exceeding the ${contextWindow}-token model context. Mandatory context was not dropped. Reduce the system/tool/active-skill envelope or select a larger-context model.`,
 			);
 		}
-		const settings = this.deps.getAdaptedSettings();
 		const triggerTokens = model.autoCompactionTriggerTokens;
 		const requestNeed = assessCompactionNeed(input.requestTokens, contextWindow, settings, triggerTokens);
 		const envelopeNeed = assessCompactionNeed(input.nonCompactableTokens, contextWindow, settings, triggerTokens);
@@ -1435,10 +1449,17 @@ export class CompactionController {
 
 	onLaneIdle(reply: AssistantMessage): void {
 		this.idleTimer.disarm();
+		this.idlePreparationSettingsKey = undefined;
 		// A resume outcome stays visible until a new preparation is planned.
 		if (this.idleView?.state !== "resumed") this.idleView = undefined;
 		const model = this.deps.getModel();
-		if (!model || this.isRunning() || this.deps.getExtensionRunner().hasHandlers("session_before_compact")) return;
+		if (
+			!model ||
+			this.idlePreparation ||
+			this.isRunning() ||
+			this.deps.getExtensionRunner().hasHandlers("session_before_compact")
+		)
+			return;
 		const settings = this.deps.getAdaptedSettings();
 		if (!settings.enabled) return;
 		const now = Date.now();
@@ -1471,29 +1492,52 @@ export class CompactionController {
 			detail: { prefixTokens, prepareAtMs: plan.prepareAtMs, holder },
 		});
 		this.idleTimer.arm(plan.prepareAtMs, () => this.startIdlePreparation());
+		this.idlePreparationSettingsKey = this.idlePreparationKey(settings);
 		this.idleView = { state: "armed", prepareAt: now + plan.prepareAtMs, valueUsd: plan.valueUsd };
 	}
 
 	/** The lane is busy again (a request is being admitted): nothing idle remains to prepare for. */
 	onLaneBusy(): void {
 		this.idleTimer.disarm();
+		this.idlePreparationSettingsKey = undefined;
 		if (this.idleView?.state === "armed") this.idleView = undefined;
+	}
+
+	/** Invalidate optional idle work admitted under a compaction policy that is no longer current. */
+	reconcileIdlePreparationSettings(): void {
+		const admitted = this.idlePreparationSettingsKey ?? this.idlePreparation?.settingsKey;
+		if (admitted !== undefined && admitted !== this.idlePreparationKey(this.deps.getAdaptedSettings())) {
+			this.cancelIdlePreparation();
+		}
 	}
 
 	/** Drop the idle timer and abort a preparation in flight (an owner message, a model change, shutdown). */
 	cancelIdlePreparation(): void {
 		this.idleTimer.disarm();
 		this.idlePreparation?.abort.abort();
-		if (this.idleView?.state === "armed" || this.idleView?.state === "preparing") this.idleView = undefined;
+		this.idlePreparationSettingsKey = undefined;
+		if (this.idleView?.state !== "resumed") this.idleView = undefined;
 	}
 
 	private startIdlePreparation(): void {
 		if (this.idlePreparation || this.isRunning()) return;
+		const settings = this.deps.getAdaptedSettings();
+		const model = this.deps.getModel();
+		const settingsKey = this.idlePreparationKey(settings);
+		if (!settings.enabled || !model || this.idlePreparationSettingsKey !== settingsKey) {
+			this.cancelIdlePreparation();
+			return;
+		}
 		this.idleView = { state: "preparing", since: Date.now() };
 		const abort = new AbortController();
-		const preparation: { abort: AbortController; done: Promise<PreparedCompactionRecord | undefined> } = {
+		const preparation: {
+			abort: AbortController;
+			settingsKey: string;
+			done: Promise<PreparedCompactionRecord | undefined>;
+		} = {
 			abort,
-			done: this.runIdlePreparation(abort.signal)
+			settingsKey,
+			done: this.runIdlePreparation(abort.signal, settings, settingsKey)
 				.catch((error: unknown) => {
 					if (!abort.signal.aborted) {
 						this.deps.emit({
@@ -1521,10 +1565,13 @@ export class CompactionController {
 	 * System One evaluation, both wasted on a summary that may be discarded; the summary covers the raw
 	 * branch, as a compaction does when that planner is unavailable.
 	 */
-	private async runIdlePreparation(signal: AbortSignal): Promise<PreparedCompactionRecord | undefined> {
+	private async runIdlePreparation(
+		signal: AbortSignal,
+		settings: CompactionSettings,
+		settingsKey: string,
+	): Promise<PreparedCompactionRecord | undefined> {
 		const model = this.deps.getModel();
 		if (!model) return undefined;
-		const settings = this.deps.getAdaptedSettings();
 		const sessionId = this.deps.sessionManager.getSessionId();
 		const readLeafId = this.deps.sessionManager.getLeafEntry()?.id;
 		const preparation = this.prepareCompactionWithPackedHostRecords(this.getRawCompactionBranch(), settings);
@@ -1557,6 +1604,7 @@ export class CompactionController {
 		const record: PreparedCompactionRecord = {
 			result,
 			lane: { provider: model.provider, id: model.id, api: model.api },
+			settingsKey,
 			preparedAt: Date.now(),
 		};
 		this.deps.sessionManager.appendCustomEntry(COMPACTION_PREPARED_CUSTOM_TYPE, record);
@@ -1582,7 +1630,7 @@ export class CompactionController {
 	 * no request or compaction after it on the branch. Once a request has gone out on the full history the
 	 * summary no longer describes what the lane caches, and a compaction replaced the history it read.
 	 */
-	private findPreparedCompaction(model: Model<Api>): PreparedCompactionRecord | undefined {
+	private findPreparedCompaction(model: Model<Api>, settingsKey: string): PreparedCompactionRecord | undefined {
 		const manager = this.deps.sessionManager;
 		for (
 			let entry = manager.getLeafEntry();
@@ -1593,7 +1641,11 @@ export class CompactionController {
 			if (entry.type === "custom" && entry.customType === COMPACTION_PREPARED_CUSTOM_TYPE) {
 				const record = entry.data as PreparedCompactionRecord | undefined;
 				const lane = record?.lane;
-				return lane && lane.provider === model.provider && lane.id === model.id && lane.api === model.api
+				return lane &&
+					record.settingsKey === settingsKey &&
+					lane.provider === model.provider &&
+					lane.id === model.id &&
+					lane.api === model.api
 					? record
 					: undefined;
 			}
@@ -1607,10 +1659,17 @@ export class CompactionController {
 	 * already paid for), otherwise resume and let it go. A preparation still in flight is awaited only when
 	 * continuing from it wins; when resuming wins it is aborted.
 	 */
-	private async admitPreparedCompaction(model: Model<Api>, requestTokens: number): Promise<boolean> {
+	private async admitPreparedCompaction(
+		model: Model<Api>,
+		requestTokens: number,
+		settingsKey: string,
+	): Promise<boolean> {
 		if (this.isRunning() || this.activeCompactionLifecycle) return false;
-		const inFlight = this.idlePreparation;
-		const recorded = this.findPreparedCompaction(model);
+		const candidate = this.idlePreparation;
+		const inFlight =
+			candidate && !candidate.abort.signal.aborted && candidate.settingsKey === settingsKey ? candidate : undefined;
+		if (this.idlePreparation && !inFlight) this.idlePreparation.abort.abort();
+		const recorded = this.findPreparedCompaction(model, settingsKey);
 		if (!recorded && !inFlight) return false;
 		const now = Date.now();
 		const facts = this.deps.getCacheEconomics?.(model, now);
@@ -1659,6 +1718,10 @@ export class CompactionController {
 		this.finishCompactionLifecycle(result.deterministic ? "fallback" : "success", result.deterministic?.cause);
 		this.deps.emit({ type: "compaction_end", reason: "threshold", result, aborted: false, willRetry: false });
 		return true;
+	}
+
+	private idlePreparationKey(settings: CompactionSettings): string {
+		return JSON.stringify({ settings, compactionModel: this.deps.getCompactionModelSetting() });
 	}
 
 	/**

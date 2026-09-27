@@ -171,6 +171,7 @@ function createFixture(options: {
 				keepRecentTokens: 1_200,
 				triggerPercent: 0,
 			},
+		getCompactionModelSetting: () => "auto",
 		getRequestAuth,
 		resolveModelAndAuth: async () => ({ model: model as Model<Api> }),
 		resolveModel: () => model as Model<Api>,
@@ -1236,6 +1237,67 @@ describe("CompactionController base-envelope warnings", () => {
 			}),
 		]);
 		expect(events.filter((event) => event.type === "compaction_end")).toHaveLength(1);
+	});
+});
+
+describe("CompactionController idle preparation ownership", () => {
+	it("does not arm a replacement while an aborted preparation still owns the provider lane", async () => {
+		vi.useFakeTimers();
+		let settlePreparation!: (result: CompactionResult) => void;
+		const pendingPreparation = new Promise<CompactionResult>((resolve) => {
+			settlePreparation = resolve;
+		});
+		const model = {
+			...createModel(),
+			id: "priced",
+			contextWindow: 200_000,
+			cost: { input: 5, output: 15, cacheRead: 0.5, cacheWrite: 6.25 },
+		};
+		const fixture = createFixture({
+			model,
+			settings: { enabled: true, reserveTokens: 1_000, keepRecentTokens: 100, triggerPercent: 0 },
+			measureLiveContextTokens: () => 10_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			compactWithRetry: async () => pendingPreparation,
+			cacheEconomics: {
+				retained: { retained: 0, standardError: 0 },
+				outcome: { afterRatio: 0.2, outputRatio: 0.01 },
+				remainingRequests: 8,
+				retainedAt: (gapMs) => ({ retained: gapMs < 2_000 ? 1 : 0, standardError: 0 }),
+				returnGapsMs: () => [6_000],
+				gapResolutionMs: [500, 1_500],
+			},
+		});
+		try {
+			const reply = assistantWithUsage(10_000, Date.now());
+			fixture.controller.onLaneIdle(reply);
+			const armed = fixture.controller.getIdlePreparationView();
+			expect(armed).toMatchObject({ state: "armed" });
+			if (armed?.state !== "armed") throw new Error("idle preparation was not armed");
+
+			await vi.advanceTimersByTimeAsync(armed.prepareAt - Date.now());
+			expect(fixture.controller.getIdlePreparationView()).toMatchObject({ state: "preparing" });
+
+			fixture.controller.cancelIdlePreparation();
+			let admissionSettled = false;
+			const admission = fixture.controller
+				.admitProviderRequest({ requestTokens: 10_000, nonCompactableTokens: 100, attempt: 0 })
+				.then((result) => {
+					admissionSettled = true;
+					return result;
+				});
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(admissionSettled).toBe(true);
+			await expect(admission).resolves.toEqual({ action: "send" });
+
+			fixture.controller.onLaneIdle({ ...reply, timestamp: reply.timestamp + 1 });
+			expect(fixture.controller.getIdlePreparationView()).toBeUndefined();
+		} finally {
+			settlePreparation(checkpoint(0, fixture.entryIds));
+			await Promise.resolve();
+			vi.useRealTimers();
+		}
 	});
 });
 

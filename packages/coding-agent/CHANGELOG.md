@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Idle compaction preparation now follows live compaction policy: obsolete work is canceled and cannot block the next owner request, persisted summaries cannot bypass current admission, and captured callbacks from replaced timers are identity-fenced.
 - Live research/autonomy setting changes now atomically re-plan the idle research timer, immediately release settlement when work becomes ineligible, re-arm eligible work without another foreground turn, and contain scheduled settings-read failures.
 - Permanent live tool-surface changes now immediately reconcile durable goal capability: losing `goal`/`update_goal` blocks and settles an armed continuation, while restoring control resumes only the matching system block and re-arms eligible work.
 - Transient settings or runtime-snapshot failures in the goal wake path now retain pending ownership through bounded exponential retry without resurrecting a timer after auto-continuation is disabled.

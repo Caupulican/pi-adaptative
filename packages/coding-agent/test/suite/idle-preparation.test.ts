@@ -211,4 +211,42 @@ describe("idle preparation", () => {
 		expect(call).toBeGreaterThan(0);
 		expect(result).toBeGreaterThan(call);
 	}, 20_000);
+
+	it("honors a live auto-compaction disable for armed and already prepared idle work", async () => {
+		const armedRequests: FauxRequestEvent[] = [];
+		const armedHarness = await preparedHarness({ requests: armedRequests });
+		harnesses.push(armedHarness);
+		armedHarness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage(SUMMARY)]);
+
+		const preparedRequests: FauxRequestEvent[] = [];
+		const prepared = await preparedHarness({ requests: preparedRequests });
+		harnesses.push(prepared);
+		prepared.setResponses([
+			fauxAssistantMessage("first"),
+			fauxAssistantMessage(SUMMARY),
+			fauxAssistantMessage("after"),
+		]);
+
+		await armedHarness.session.prompt("hello");
+		await prepared.session.prompt("hello");
+		expect(armedHarness.session.getIdlePreparationView()).toMatchObject({ state: "armed" });
+		expect(prepared.session.getIdlePreparationView()).toMatchObject({ state: "armed" });
+
+		armedHarness.session.setAutoCompactionEnabled(false);
+		expect(armedHarness.session.getIdlePreparationView()).toBeUndefined();
+
+		await sleep(RETURN_GAP_MS);
+		expect(armedRequests).toHaveLength(1);
+		expect(
+			armedHarness.sessionManager
+				.getEntries()
+				.some((entry) => entry.type === "custom" && entry.customType === COMPACTION_PREPARED_CUSTOM_TYPE),
+		).toBe(false);
+		expect(prepared.session.getIdlePreparationView()).toMatchObject({ state: "prepared" });
+
+		prepared.session.setAutoCompactionEnabled(false);
+		await prepared.session.prompt("again");
+		expect(prepared.sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(false);
+		expect(preparedRequests).toHaveLength(3);
+	}, 20_000);
 });

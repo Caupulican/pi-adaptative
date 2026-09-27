@@ -21,7 +21,8 @@ export class IdlePreparationTimer {
 	arm(delayMs: number, fire: () => void): void {
 		this.disarm();
 		const timer = this.schedule(() => {
-			if (this.timer === timer) this.timer = undefined;
+			if (this.timer !== timer) return;
+			this.timer = undefined;
 			fire();
 		}, delayMs);
 		this.timer = timer;

@@ -1419,6 +1419,7 @@ export class AgentSession {
 			settingsManager: this.settingsManager,
 			getModel: () => this.model,
 			getAdaptedSettings: () => this._getAdaptedCompactionSettings(),
+			getCompactionModelSetting: () => this.settingsManager.getCompactionModel(),
 			getRequestAuth: (model) => this._compactionSupport.getRequestAuth(model),
 			resolveModelAndAuth: (compactionModel, sessionModel) =>
 				this._compactionSupport.resolveModelAndAuth(compactionModel, sessionModel),
@@ -2259,6 +2260,7 @@ export class AgentSession {
 			includeAllExtensionTools: true,
 		});
 		this._unsubscribeSettingsChanges = this.settingsManager.subscribeChanges(() => {
+			this._compaction.reconcileIdlePreparationSettings();
 			this._refreshBaseSystemPrompt();
 		});
 		this._localPrefixWarm.schedule(this.agent.state.model);
