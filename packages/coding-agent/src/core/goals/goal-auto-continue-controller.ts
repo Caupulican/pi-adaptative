@@ -69,15 +69,31 @@ export class GoalAutoContinueController {
 			.getAutonomySettings();
 		if (!goalAutoContinue) return;
 		const snapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
-		if (snapshot.continuation.action !== "continue") return;
+		const continuation = snapshot.continuation;
+		const resumeAtMs = continuation.resumeAt === undefined ? Number.NaN : Date.parse(continuation.resumeAt);
+		const waitingForWorkerDeadline =
+			continuation.action === "waiting" &&
+			continuation.reasonCode === "worker_in_flight" &&
+			Number.isFinite(resumeAtMs);
+		if (continuation.action !== "continue" && !waitingForWorkerDeadline) return;
 		const activeGoalId = snapshot.goalState?.goalId;
-		if (activeGoalId !== undefined && this.deps.hasInFlightLaneForGoal(activeGoalId)) return;
+		if (
+			activeGoalId !== undefined &&
+			this.deps.hasInFlightLaneForGoal(activeGoalId) &&
+			continuation.reasonCode !== "worker_wait_timeout" &&
+			!waitingForWorkerDeadline
+		) {
+			return;
+		}
 
 		this.clearTimer();
-		this._timer = setTimeout(() => {
-			this._timer = undefined;
-			void this.runScheduled().finally(() => this.deps.onContinuationActivity?.());
-		}, goalAutoContinueDelayMs);
+		this._timer = setTimeout(
+			() => {
+				this._timer = undefined;
+				void this.runScheduled().finally(() => this.deps.onContinuationActivity?.());
+			},
+			waitingForWorkerDeadline ? Math.max(0, resumeAtMs - Date.now()) : goalAutoContinueDelayMs,
+		);
 		this.deps.onContinuationActivity?.();
 		const timer = this._timer;
 		if (typeof timer === "object" && timer && "unref" in timer) {
@@ -129,7 +145,19 @@ export class GoalAutoContinueController {
 			.getAutonomySettings();
 		if (!goalAutoContinue) return;
 		const snapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
-		if (snapshot.continuation.action !== "continue") return;
+		if (snapshot.continuation.action !== "continue") {
+			// The deadline may move while this timer is armed (a fresher bound worker, clock correction,
+			// or an early host wake). Re-evaluate through the single scheduler instead of dropping the
+			// only event that can make the never-hang recovery branch reachable.
+			if (
+				snapshot.continuation.action === "waiting" &&
+				snapshot.continuation.reasonCode === "worker_in_flight" &&
+				snapshot.continuation.resumeAt !== undefined
+			) {
+				this.scheduleFromIdle();
+			}
+			return;
+		}
 		let interrupted = false;
 		try {
 			const result = await this.continueExclusive({

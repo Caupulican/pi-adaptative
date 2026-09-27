@@ -157,6 +157,149 @@ describe("GoalAutoContinueController idle autosteer", () => {
 		expect(continuationOptions).toEqual([]);
 	});
 
+	it("wakes at a bound worker's recovery deadline without polling or an external terminal event", async () => {
+		vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+		let goalState = createGoalState({ goalId: "g1", userGoal: "Ship large task", now: "2026-01-01T00:00:00.000Z" });
+		goalState = applyGoalEvent(goalState, {
+			type: "add_requirement",
+			id: "req-1",
+			text: "Finish delegated work",
+			now: "2026-01-01T00:00:00.000Z",
+		});
+		goalState = applyGoalEvent(goalState, {
+			type: "dispatch_worker",
+			id: "req-1",
+			instructions: "finish it",
+			laneId: "lane-1",
+			now: "2026-01-01T00:00:00.000Z",
+		});
+		let terminal = false;
+		let loopCalls = 0;
+		const snapshot = (): GoalRuntimeSnapshot => {
+			const continuation = terminal
+				? {
+						action: "stop" as const,
+						reasonCode: "goal_cancelled" as const,
+						message: "recovery completed",
+						goalId: goalState.goalId,
+						openRequirementIds: [],
+						blockedRequirementIds: [],
+						satisfiedRequirementIds: [],
+					}
+				: evaluateGoalContinuation({
+						state: goalState,
+						settings: { maxStallTurns: AUTONOMY_SETTINGS.maxStallTurns },
+						inFlightGoalLaneIds: new Set(["lane-1"]),
+						now: new Date().toISOString(),
+						maxWorkerWaitMs: 60_000,
+					});
+			return { goalState, workerClaims: [], learningDecisions: [], continuation };
+		};
+		const controller = new GoalAutoContinueController({
+			isDisposed: () => false,
+			isGoalToolActive: () => true,
+			getSettingsManager: () =>
+				({
+					getAutonomySettings: () => AUTONOMY_SETTINGS,
+				}) as never,
+			getGoalRuntimeSnapshot: snapshot,
+			hasInFlightLaneForGoal: () => true,
+			continueGoalLoop: async () => {
+				loopCalls++;
+				terminal = true;
+				return { turnsSubmitted: 1, stopReason: "continuation_not_allowed", finalSnapshot: snapshot() };
+			},
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
+			markGoalToolUnavailable: () => {},
+			emit: () => {},
+		});
+
+		controller.scheduleFromIdle();
+
+		expect(snapshot().continuation).toMatchObject({
+			action: "waiting",
+			reasonCode: "worker_in_flight",
+			resumeAt: "2026-01-01T00:01:00.000Z",
+		});
+		expect(vi.getTimerCount()).toBe(1);
+		await vi.advanceTimersByTimeAsync(59_999);
+		expect(loopCalls).toBe(0);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(loopCalls).toBe(1);
+		expect(controller.hasPendingContinuation()).toBe(false);
+	});
+
+	it("re-arms when the scheduled wake observes a newer worker deadline", async () => {
+		vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+		const goalState = createGoalState({ goalId: "g1", userGoal: "Ship large task", now: "T0" });
+		let phase: "first_wait" | "later_wait" | "recover" | "done" = "first_wait";
+		let loopCalls = 0;
+		const snapshot = (): GoalRuntimeSnapshot => ({
+			goalState,
+			workerClaims: [],
+			learningDecisions: [],
+			continuation:
+				phase === "done"
+					? {
+							action: "stop",
+							reasonCode: "goal_cancelled",
+							message: "done",
+							openRequirementIds: [],
+							blockedRequirementIds: [],
+							satisfiedRequirementIds: [],
+						}
+					: phase === "recover"
+						? {
+								action: "continue",
+								reasonCode: "worker_wait_timeout",
+								message: "recover",
+								openRequirementIds: ["req-1"],
+								blockedRequirementIds: [],
+								satisfiedRequirementIds: [],
+							}
+						: {
+								action: "waiting",
+								reasonCode: "worker_in_flight",
+								message: "wait",
+								resumeAt: phase === "first_wait" ? "2026-01-01T00:00:00.100Z" : "2026-01-01T00:00:00.200Z",
+								openRequirementIds: ["req-1"],
+								blockedRequirementIds: [],
+								satisfiedRequirementIds: [],
+							},
+		});
+		const controller = new GoalAutoContinueController({
+			isDisposed: () => false,
+			isGoalToolActive: () => true,
+			getSettingsManager: () =>
+				({
+					getAutonomySettings: () => AUTONOMY_SETTINGS,
+				}) as never,
+			getGoalRuntimeSnapshot: snapshot,
+			hasInFlightLaneForGoal: () => true,
+			continueGoalLoop: async () => {
+				loopCalls++;
+				phase = "done";
+				return { turnsSubmitted: 1, stopReason: "continuation_not_allowed", finalSnapshot: snapshot() };
+			},
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
+			markGoalToolUnavailable: () => {},
+			emit: () => {},
+		});
+
+		controller.scheduleFromIdle();
+		phase = "later_wait";
+		await vi.advanceTimersByTimeAsync(100);
+		expect(loopCalls).toBe(0);
+		expect(vi.getTimerCount()).toBe(1);
+
+		phase = "recover";
+		await vi.advanceTimersByTimeAsync(100);
+		expect(loopCalls).toBe(1);
+		expect(controller.hasPendingContinuation()).toBe(false);
+	});
+
 	it("re-arms scheduleFromIdle after a batch until the goal completes", async () => {
 		let callCount = 0;
 		const goalState = createGoalState({ goalId: "g1", userGoal: "Ship large task", now: "T0" });

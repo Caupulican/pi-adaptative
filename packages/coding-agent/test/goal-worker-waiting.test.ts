@@ -1,6 +1,6 @@
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { SessionManager as InMemorySessionManager } from "@caupulican/pi-agent-core/node";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import { BackgroundLaneController, type BackgroundLaneControllerDeps } from "../src/core/background-lane-controller.ts";
 import { GoalLoopController, type GoalLoopControllerDeps } from "../src/core/goal-loop-controller.ts";
@@ -8,6 +8,7 @@ import { buildGoalRuntimeSnapshot } from "../src/core/goals/goal-runtime-snapsho
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import { createTestManagedLaneDispatch } from "./managed-lane-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * REPRO-FIRST: this file proves the bug before proving the fix.
@@ -26,6 +27,7 @@ import { createTestManagedLaneDispatch } from "./managed-lane-fixture.ts";
  */
 
 let nextTestSession = 1;
+const testAgentDir = tempDir("pi-goal-worker-waiting-");
 
 function buildLaneControllerDeps(overrides: Partial<BackgroundLaneControllerDeps> = {}): BackgroundLaneControllerDeps {
 	const sessionManager =
@@ -39,7 +41,7 @@ function buildLaneControllerDeps(overrides: Partial<BackgroundLaneControllerDeps
 		isDisposed: () => false,
 		getSessionId: () => sessionId,
 		getCwd: () => "/repo",
-		getAgentDir: () => "/tmp/pi-test-goal-worker-waiting",
+		getAgentDir: () => testAgentDir,
 		getSessionManager: () => sessionManager,
 		getGoalStateSnapshot: () => undefined,
 		getCapabilityEnvelope: () => undefined,
@@ -446,25 +448,18 @@ describe("idle scheduler does not arm while a bound worker is in flight (belt-an
 			dispatch: createTestManagedLaneDispatch(),
 		});
 
-		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
-		try {
-			controller.scheduleGoalAutoContinueFromIdle();
-			expect(timeoutSpy).not.toHaveBeenCalled();
-		} finally {
-			timeoutSpy.mockRestore();
-		}
+		controller.scheduleGoalAutoContinueFromIdle();
+		expect(controller.hasPendingIdleContinuation()).toBe(false);
 	});
 
 	it("still arms the idle timer when no lane is in flight for the active goal (no regression)", () => {
 		const controller = new BackgroundLaneController(makeAutoContinueDeps());
 
-		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
 		try {
 			controller.scheduleGoalAutoContinueFromIdle();
-			expect(timeoutSpy).toHaveBeenCalledTimes(1);
+			expect(controller.hasPendingIdleContinuation()).toBe(true);
 		} finally {
 			controller.clearGoalAutoContinueTimer();
-			timeoutSpy.mockRestore();
 		}
 	});
 
@@ -477,17 +472,15 @@ describe("idle scheduler does not arm while a bound worker is in flight (belt-an
 			dispatch: createTestManagedLaneDispatch(),
 		});
 
-		const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
 		try {
 			controller.scheduleGoalAutoContinueFromIdle();
-			expect(timeoutSpy).not.toHaveBeenCalled();
+			expect(controller.hasPendingIdleContinuation()).toBe(false);
 
 			controller.recordManagedLane({ laneId: "tmux-job-4", phase: "terminal", status: "succeeded" });
 			controller.scheduleGoalAutoContinueFromIdle();
-			expect(timeoutSpy.mock.calls.filter((call) => call[1] === 0)).toHaveLength(1);
+			expect(controller.hasPendingIdleContinuation()).toBe(true);
 		} finally {
 			controller.clearGoalAutoContinueTimer();
-			timeoutSpy.mockRestore();
 		}
 	});
 });

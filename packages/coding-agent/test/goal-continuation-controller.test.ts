@@ -280,6 +280,7 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 
 			expect(decision.action).toBe("waiting");
 			expect(decision.reasonCode).toBe("worker_in_flight");
+			expect(decision.resumeAt).toBeUndefined();
 		});
 
 		it("boundAt within maxWorkerWaitMs of now stays 'waiting'", () => {
@@ -295,6 +296,7 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 
 			expect(decision.action).toBe("waiting");
 			expect(decision.reasonCode).toBe("worker_in_flight");
+			expect(decision.resumeAt).toBe("2026-01-01T01:00:00.000Z");
 		});
 
 		it("boundAt past maxWorkerWaitMs continues into autonomous worker recovery", () => {
@@ -357,6 +359,7 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 
 			expect(decision.action).toBe("waiting");
 			expect(decision.reasonCode).toBe("worker_in_flight");
+			expect(decision.resumeAt).toBe("2026-01-01T01:55:00.000Z");
 		});
 
 		it("a bound-in-flight requirement missing boundAt (legacy/pre-field data) does not escalate", () => {
@@ -381,6 +384,7 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 
 			expect(decision.action).toBe("waiting");
 			expect(decision.reasonCode).toBe("worker_in_flight");
+			expect(decision.resumeAt).toBeUndefined();
 		});
 
 		it("only now supplied (maxWorkerWaitMs omitted) keeps waiting", () => {
@@ -606,7 +610,7 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 			id: "req-1",
 			instructions: "do it",
 			laneId: "lane-1",
-			now: "T1",
+			now: "2026-01-01T00:00:00.000Z",
 		});
 		state = applyGoalEvent(state, {
 			type: "system_stop_goal",
@@ -619,10 +623,42 @@ describe("Phase 10A: Goal Continuation Controller", () => {
 			state,
 			settings: { maxStallTurns: 3 },
 			inFlightGoalLaneIds: new Set(["lane-1"]),
+			now: "2026-01-01T00:30:00.000Z",
+			maxWorkerWaitMs: 60 * 60_000,
 		});
 
 		expect(decision.action).toBe("waiting");
 		expect(decision.reasonCode).toBe("worker_in_flight");
 		expect(decision.message).toContain("A system interruption occurred");
+		expect(decision.resumeAt).toBe("2026-01-01T01:00:00.000Z");
+	});
+
+	it("system interruption recovers after the in-flight worker deadline instead of waiting forever", () => {
+		let state = createGoalState({ goalId: "g1", userGoal: "Test", now: "T0" });
+		state = applyGoalEvent(state, { type: "add_requirement", id: "req-1", text: "Req 1", now: "T0" });
+		state = applyGoalEvent(state, {
+			type: "dispatch_worker",
+			id: "req-1",
+			instructions: "do it",
+			laneId: "lane-1",
+			now: "2026-01-01T00:00:00.000Z",
+		});
+		state = applyGoalEvent(state, {
+			type: "system_stop_goal",
+			status: "blocked",
+			reason: "rate_limit: 429 Too Many Requests",
+			now: "T2",
+		});
+
+		const decision = evaluateGoalContinuation({
+			state,
+			settings: { maxStallTurns: 3 },
+			inFlightGoalLaneIds: new Set(["lane-1"]),
+			now: "2026-01-01T01:00:00.000Z",
+			maxWorkerWaitMs: 60 * 60_000,
+		});
+
+		expect(decision.action).toBe("continue");
+		expect(decision.reasonCode).toBe("worker_wait_timeout");
 	});
 });

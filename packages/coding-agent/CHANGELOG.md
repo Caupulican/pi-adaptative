@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Durable goals waiting on bound workers now arm the exact latest worker-recovery deadline, re-arm if that boundary moves, and bypass in-flight suppression only after timeout, so an unbounded hung worker cannot strand an idle parent forever.
 - On POSIX, Bash command output now crosses a shell-owned pipe before reaching the host, so nested Node stdout and stderr drain before one-shot and persistent commands terminalize without treating the persistent relay as command-owned work. Windows one-shot Bash retains direct stdio settlement so a detached descendant inheriting its handles cannot keep the relay and shell alive.
 - Stale deterministic pipeline context pages now use the configured semantic-GC threshold and retain accurate context-type retrieval metadata, while the latest page stays verbatim.
 - Edits bind execution to one open resource and verify its pathname before and after mutation, so an external rename-over cannot redirect the write into a foreign replacement while local and SSH backends retain the same safety contract.

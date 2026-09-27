@@ -15,6 +15,28 @@ function getBoundInFlightRequirements(
 	);
 }
 
+function workerWaitTiming(
+	requirements: readonly Requirement[],
+	now: string | undefined,
+	maxWorkerWaitMs: number | undefined,
+): { timedOut: boolean; resumeAt?: string } {
+	if (now === undefined || maxWorkerWaitMs === undefined) return { timedOut: false };
+	const nowMs = Date.parse(now);
+	if (!Number.isFinite(nowMs)) return { timedOut: false };
+	let recoveryAtMs = Number.NEGATIVE_INFINITY;
+	for (const requirement of requirements) {
+		if (requirement.boundAt === undefined) return { timedOut: false };
+		const boundAtMs = Date.parse(requirement.boundAt);
+		const deadlineMs = boundAtMs + maxWorkerWaitMs;
+		if (!Number.isFinite(deadlineMs)) return { timedOut: false };
+		recoveryAtMs = Math.max(recoveryAtMs, deadlineMs);
+	}
+	if (!Number.isFinite(recoveryAtMs)) return { timedOut: false };
+	return recoveryAtMs <= nowMs
+		? { timedOut: true }
+		: { timedOut: false, resumeAt: new Date(recoveryAtMs).toISOString() };
+}
+
 export type GoalContinuationAction = "continue" | "ask-user" | "finalize" | "stop" | "waiting";
 export type GoalContinuationReasonCode =
 	| "goal_active"
@@ -40,12 +62,50 @@ export interface GoalContinuationDecision {
 	action: GoalContinuationAction;
 	reasonCode: GoalContinuationReasonCode;
 	message: string;
+	/** Exact event-driven wake boundary for a currently valid wait; absent when no safe deadline exists. */
+	resumeAt?: string;
 	goalId?: string;
 	stallTurns?: number;
 	maxStallTurns?: number;
 	openRequirementIds: readonly string[];
 	blockedRequirementIds: readonly string[];
 	satisfiedRequirementIds: readonly string[];
+}
+
+type GoalContinuationBaseDecision = Pick<
+	GoalContinuationDecision,
+	| "goalId"
+	| "stallTurns"
+	| "maxStallTurns"
+	| "openRequirementIds"
+	| "blockedRequirementIds"
+	| "satisfiedRequirementIds"
+>;
+
+function boundWorkerContinuation(args: {
+	boundInFlightRequirements: readonly Requirement[];
+	baseDecision: GoalContinuationBaseDecision;
+	now: string | undefined;
+	maxWorkerWaitMs: number | undefined;
+	waitingMessage: string;
+}): GoalContinuationDecision | undefined {
+	if (args.boundInFlightRequirements.length === 0) return undefined;
+	const timing = workerWaitTiming(args.boundInFlightRequirements, args.now, args.maxWorkerWaitMs);
+	if (timing.timedOut && args.maxWorkerWaitMs !== undefined) {
+		return {
+			...args.baseDecision,
+			action: "continue",
+			reasonCode: "worker_wait_timeout",
+			message: `A dispatched worker has not completed within the maximum wait of ${args.maxWorkerWaitMs}ms. Inspect its authoritative status and evidence, then recover it, reassign the requirement, or use another approach without waiting indefinitely.`,
+		};
+	}
+	return {
+		...args.baseDecision,
+		action: "waiting",
+		reasonCode: "worker_in_flight",
+		message: args.waitingMessage,
+		...(timing.resumeAt ? { resumeAt: timing.resumeAt } : {}),
+	};
 }
 
 export interface GoalContinuationSettings {
@@ -179,15 +239,15 @@ export function evaluateGoalContinuation(args: {
 		// A system-originated block (transient provider failure, runaway guard, temporary tool
 		// unavailability) is recoverable. If independent work is running, wait on it.
 		const boundInFlightRequirements = getBoundInFlightRequirements(state.requirements, args.inFlightGoalLaneIds);
-		if (boundInFlightRequirements.length > 0) {
-			return {
-				...baseDecision,
-				action: "waiting",
-				reasonCode: "worker_in_flight",
-				message:
-					"A system interruption occurred, but a worker is dispatched against an open requirement; waiting for it before stopping.",
-			};
-		}
+		const blockedWorkerContinuation = boundWorkerContinuation({
+			boundInFlightRequirements,
+			baseDecision,
+			now: args.now,
+			maxWorkerWaitMs: args.maxWorkerWaitMs,
+			waitingMessage:
+				"A system interruption occurred, but a worker is dispatched against an open requirement; waiting for it before stopping.",
+		});
+		if (blockedWorkerContinuation) return blockedWorkerContinuation;
 		if (args.inFlightToolTaskIds && args.inFlightToolTaskIds.size > 0) {
 			return {
 				...baseDecision,
@@ -354,39 +414,18 @@ export function evaluateGoalContinuation(args: {
 	// Checked BEFORE the stall check so an in-flight worker always wins over an accumulated stall
 	// count: the goal isn't stalled, it's actively being worked by something other than this loop.
 	const boundInFlightRequirements = getBoundInFlightRequirements(state.requirements, args.inFlightGoalLaneIds);
-
-	if (boundInFlightRequirements.length > 0) {
-		// Never-hang backstop: a worker alive-but-hung past its deadline must return control to the
-		// autonomous parent for inspection and recovery instead of waiting forever. Only evaluated when
-		// the caller supplies BOTH a clock reading and a deadline; recovers only once EVERY bound-in-flight
-		// requirement has individually timed out, so one fresh binding keeps the goal legitimately waiting.
-		if (args.now !== undefined && args.maxWorkerWaitMs !== undefined) {
-			const nowMs = Date.parse(args.now);
-			const maxWorkerWaitMs = args.maxWorkerWaitMs;
-			const allTimedOut =
-				Number.isFinite(nowMs) &&
-				boundInFlightRequirements.every((requirement) => {
-					if (requirement.boundAt === undefined) return false;
-					const boundAtMs = Date.parse(requirement.boundAt);
-					return Number.isFinite(boundAtMs) && boundAtMs + maxWorkerWaitMs <= nowMs;
-				});
-			if (allTimedOut) {
-				return {
-					...baseDecision,
-					action: "continue",
-					reasonCode: "worker_wait_timeout",
-					message: `A dispatched worker has not completed within the maximum wait of ${maxWorkerWaitMs}ms. Inspect its authoritative status and evidence, then recover it, reassign the requirement, or use another approach without waiting indefinitely.`,
-				};
-			}
-		}
-
-		return {
-			...baseDecision,
-			action: "waiting",
-			reasonCode: "worker_in_flight",
-			message: "A worker is dispatched against an open requirement; waiting for it to finish before continuing.",
-		};
-	}
+	// Never-hang backstop: a worker alive-but-hung past its deadline must return control to the
+	// autonomous parent for inspection and recovery instead of waiting forever. Only evaluated when
+	// the caller supplies BOTH a clock reading and a deadline; recovers only once EVERY bound-in-flight
+	// requirement has individually timed out, so one fresh binding keeps the goal legitimately waiting.
+	const workerContinuation = boundWorkerContinuation({
+		boundInFlightRequirements,
+		baseDecision,
+		now: args.now,
+		maxWorkerWaitMs: args.maxWorkerWaitMs,
+		waitingMessage: "A worker is dispatched against an open requirement; waiting for it to finish before continuing.",
+	});
+	if (workerContinuation) return workerContinuation;
 
 	if (args.inFlightToolTaskIds && args.inFlightToolTaskIds.size > 0) {
 		return {
