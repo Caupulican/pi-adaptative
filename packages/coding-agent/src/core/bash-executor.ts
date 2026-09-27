@@ -6,17 +6,15 @@
  * - Direct calls from modes that need bash execution
  */
 
-import { randomBytes } from "node:crypto";
-import type { WriteStream } from "node:fs";
-import { join, resolve as resolvePath } from "node:path";
+import { resolve as resolvePath } from "node:path";
 import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core/shell-output";
-import { DEFAULT_MAX_BYTES, truncateMiddle } from "@caupulican/pi-agent-core/truncate";
+import { DEFAULT_MAX_BYTES } from "@caupulican/pi-agent-core/truncate";
 import { getAgentDir } from "../config.ts";
 import { stripAnsi } from "../utils/ansi.ts";
-import { createSafeWriteStream, endWriteStream } from "../utils/safe-write-stream.ts";
 import { getProcessWorkRun } from "../utils/work-directory.ts";
 import type { BashOperations } from "./tools/bash.ts";
 import { applyGitTailStage, classifyGitCommand, executeFilteredGit } from "./tools/git-filter.ts";
+import { OutputAccumulator, type OutputSnapshot } from "./tools/output-accumulator.ts";
 import { createShellOutputDecoder } from "./tools/shell-output-decoder.ts";
 
 // ============================================================================
@@ -55,8 +53,19 @@ export interface BashResult {
 // Implementation
 // ============================================================================
 
-function getBashOutputPath(id: string): string {
-	return join(getProcessWorkRun(getAgentDir(), "outputs", "bash").path, `pi-bash-${id}.log`);
+function createBashOutputAccumulator(): OutputAccumulator {
+	return new OutputAccumulator({
+		tempDirectory: getProcessWorkRun(getAgentDir(), "outputs", "bash").path,
+		tempFilePrefix: "pi-bash",
+	});
+}
+
+async function publishBashOutput(output: OutputAccumulator, persistAlways = false): Promise<OutputSnapshot> {
+	output.finish();
+	output.snapshot({ persistIfTruncated: true, persistAlways });
+	await output.closeTempFile();
+	// Re-read publication state after close: a close failure invalidates and removes the artifact.
+	return output.snapshot();
 }
 
 /**
@@ -82,22 +91,16 @@ export async function executeBashWithOperations(
 				{ signal: options.signal, timeout: options.timeout, environment: options.environment },
 			);
 			if (res.exitCode !== -100) {
+				const rawOutputIncomplete = res.rawBytes === undefined;
 				const rawBytes = res.rawBytes ?? Buffer.from(res.rawOut, "utf-8");
-				// The filter already spills oversized output to a temp file; reuse it
-				// instead of materializing another full copy here.
+				// The filter already spills oversized output to a temp file; reuse that
+				// authoritative artifact. A missing rawBytes value means only a retained
+				// head is available and must never be relabelled as complete output.
 				let fullOutputPath = res.fullOutputPath;
-				if (fullOutputPath === undefined && rawBytes.length > DEFAULT_MAX_BYTES) {
-					const id = randomBytes(8).toString("hex");
-					const spillPath = getBashOutputPath(id);
-					fullOutputPath = spillPath;
-					// On stream failure (e.g. disk full), drop the advertised path instead of
-					// pointing at a partial/missing file.
-					const tempFileStream = createSafeWriteStream(spillPath, () => {
-						fullOutputPath = undefined;
-					});
-					tempFileStream.write(rawBytes);
-					// Await the flush so the returned path points at a COMPLETE file, not one mid-write.
-					await endWriteStream(tempFileStream);
+				if (fullOutputPath === undefined && !rawOutputIncomplete && rawBytes.length > DEFAULT_MAX_BYTES) {
+					const persisted = createBashOutputAccumulator();
+					persisted.append(rawBytes);
+					fullOutputPath = (await publishBashOutput(persisted, true)).fullOutputPath;
 				}
 				const filteredOutput = applyGitTailStage(res.output, classification.tailStage);
 				options.onChunk?.(filteredOutput);
@@ -105,63 +108,23 @@ export async function executeBashWithOperations(
 					output: filteredOutput,
 					exitCode: res.exitCode,
 					cancelled: options.signal?.aborted ?? false,
-					truncated: res.fullOutputPath !== undefined || rawBytes.length > DEFAULT_MAX_BYTES,
+					truncated: rawOutputIncomplete || rawBytes.length > DEFAULT_MAX_BYTES,
 					fullOutputPath,
 				};
 			}
 		}
 	}
 
-	const outputChunks: string[] = [];
-	let outputBytes = 0;
-	const maxOutputBytes = DEFAULT_MAX_BYTES * 2;
-
-	let tempFilePath: string | undefined;
-	let tempFileStream: WriteStream | undefined;
-	let totalBytes = 0;
-
-	const ensureTempFile = () => {
-		if (tempFilePath) {
-			return;
-		}
-		const id = randomBytes(8).toString("hex");
-		tempFilePath = getBashOutputPath(id);
-		// On stream failure (e.g. disk full), drop the artifact instead of
-		// crashing the process; the rolling in-memory output is still returned.
-		tempFileStream = createSafeWriteStream(tempFilePath, () => {
-			tempFileStream = undefined;
-			tempFilePath = undefined;
-		});
-		for (const chunk of outputChunks) {
-			tempFileStream.write(chunk);
-		}
-	};
-
+	const output = createBashOutputAccumulator();
 	const decoder = createShellOutputDecoder(options?.windowsCompatibleEncoding);
+	let acceptingOutput = true;
 
 	const appendDecodedOutput = (decoded: string) => {
 		// Sanitize: strip ANSI, replace binary garbage, normalize newlines
 		const text = sanitizeBinaryOutput(stripAnsi(decoded)).replace(/\r/g, "");
 		if (text.length === 0) return;
 
-		// Start writing to temp file if exceeds threshold
-		if (totalBytes > DEFAULT_MAX_BYTES) {
-			ensureTempFile();
-		}
-
-		// Guard writableEnded: custom BashOperations may deliver late onData
-		// callbacks after an abort path has already ended the stream.
-		if (tempFileStream && !tempFileStream.writableEnded) {
-			tempFileStream.write(text);
-		}
-
-		// Keep rolling buffer
-		outputChunks.push(text);
-		outputBytes += text.length;
-		while (outputBytes > maxOutputBytes && outputChunks.length > 1) {
-			const removed = outputChunks.shift()!;
-			outputBytes -= removed.length;
-		}
+		output.append(Buffer.from(text, "utf-8"));
 
 		// Stream to callback
 		if (options?.onChunk) {
@@ -169,10 +132,14 @@ export async function executeBashWithOperations(
 		}
 	};
 	const onData = (data: Buffer) => {
-		totalBytes += data.length;
+		if (!acceptingOutput) return;
 		appendDecodedOutput(decoder.decode(data, { stream: true }));
 	};
-	const finishDecoding = () => appendDecodedOutput(decoder.decode());
+	const finishDecoding = () => {
+		if (!acceptingOutput) return;
+		acceptingOutput = false;
+		appendDecodedOutput(decoder.decode());
+	};
 
 	try {
 		const result = await operations.exec(command, cwd, {
@@ -183,49 +150,32 @@ export async function executeBashWithOperations(
 		});
 		finishDecoding();
 
-		const fullOutput = outputChunks.join("");
-		const truncationResult = truncateMiddle(fullOutput);
-		if (truncationResult.truncated) {
-			ensureTempFile();
-		}
-		if (tempFileStream) {
-			// Await the flush so fullOutputPath refers to a fully-written file on return, not one still
-			// draining its buffer — otherwise a fast reader can see partial/empty content.
-			await endWriteStream(tempFileStream);
-		}
+		const snapshot = await publishBashOutput(output);
 		const cancelled = options?.signal?.aborted ?? false;
 
 		return {
-			output: truncationResult.truncated ? truncationResult.content : fullOutput,
+			output: snapshot.content,
 			exitCode: cancelled ? undefined : (result.exitCode ?? undefined),
 			cancelled,
-			truncated: truncationResult.truncated,
-			fullOutputPath: tempFilePath,
+			truncated: snapshot.truncation.truncated,
+			fullOutputPath: snapshot.fullOutputPath,
 		};
 	} catch (err) {
 		finishDecoding();
 		// Check if it was an abort
 		if (options?.signal?.aborted) {
-			const fullOutput = outputChunks.join("");
-			const truncationResult = truncateMiddle(fullOutput);
-			if (truncationResult.truncated) {
-				ensureTempFile();
-			}
-			if (tempFileStream) {
-				await endWriteStream(tempFileStream);
-			}
+			const snapshot = await publishBashOutput(output);
 			return {
-				output: truncationResult.truncated ? truncationResult.content : fullOutput,
+				output: snapshot.content,
 				exitCode: undefined,
 				cancelled: true,
-				truncated: truncationResult.truncated,
-				fullOutputPath: tempFilePath,
+				truncated: snapshot.truncation.truncated,
+				fullOutputPath: snapshot.fullOutputPath,
 			};
 		}
 
-		if (tempFileStream) {
-			await endWriteStream(tempFileStream);
-		}
+		output.finish();
+		await output.discardTempFile();
 
 		// The silence watchdog (see tools/bash.ts) throws a raw `silence:<secs>` sentinel.
 		// Map it to the same user-facing message the interactive bash tool shows, instead of

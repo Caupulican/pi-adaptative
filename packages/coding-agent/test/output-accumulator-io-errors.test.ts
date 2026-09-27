@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 const fsMocks = vi.hoisted(() => ({
 	closeSync: vi.fn(),
 	openSync: vi.fn(() => 123),
+	rmSync: vi.fn(),
 	writeSync: vi.fn(),
 }));
 
@@ -17,6 +18,7 @@ describe("OutputAccumulator temp-file I/O errors", () => {
 	it("does not throw or leak an open descriptor when full-output writes fail", async () => {
 		fsMocks.closeSync.mockReset();
 		fsMocks.openSync.mockReset().mockReturnValue(123);
+		fsMocks.rmSync.mockReset();
 		fsMocks.writeSync.mockReset().mockImplementation(() => {
 			throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
 		});
@@ -32,6 +34,7 @@ describe("OutputAccumulator temp-file I/O errors", () => {
 		expect(snapshot.truncation.truncated).toBe(true);
 		expect(snapshot.fullOutputPath).toBeUndefined();
 		expect(snapshot.fullOutputError).toContain("ENOSPC");
+		expect(fsMocks.rmSync).toHaveBeenCalledWith(expect.stringMatching(/pi-output-[0-9a-f]+\.log$/u), { force: true });
 	});
 
 	it("does not throw if closing the temp descriptor fails", async () => {
@@ -39,6 +42,7 @@ describe("OutputAccumulator temp-file I/O errors", () => {
 			throw Object.assign(new Error("bad file descriptor"), { code: "EBADF" });
 		});
 		fsMocks.openSync.mockReset().mockReturnValue(456);
+		fsMocks.rmSync.mockReset();
 		fsMocks.writeSync.mockReset().mockReturnValue(0);
 
 		const output = new OutputAccumulator({ maxLines: 1, maxBytes: 4, tempDirectory: "test-output" });

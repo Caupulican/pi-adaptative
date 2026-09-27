@@ -19,13 +19,21 @@ vi.mock("node:fs", async (importOriginal) => {
 	return {
 		...actual,
 		// Only bash-executor's own git-filter spill file (named `pi-bash-*.log`) is redirected;
-		// git-filter's own overflow spill and everything else pass through untouched.
+		// cover both the former stream writer and the authoritative accumulator's descriptor writer.
+		// Git-filter's own overflow spill and everything else pass through untouched.
 		createWriteStream: (...args: Parameters<typeof actual.createWriteStream>) => {
 			const path = args[0];
 			if (typeof path === "string" && path.includes(`${sep}pi-bash-`)) {
 				return actual.createWriteStream(join(blockedSpill.notADirectory, "spill.log"));
 			}
 			return actual.createWriteStream(...args);
+		},
+		openSync: (...args: Parameters<typeof actual.openSync>) => {
+			const path = args[0];
+			if (typeof path === "string" && path.includes(`${sep}pi-bash-`)) {
+				return actual.openSync(join(blockedSpill.notADirectory, "spill.log"), args[1], args[2]);
+			}
+			return actual.openSync(...args);
 		},
 	};
 });

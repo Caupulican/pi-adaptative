@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { closeSync, openSync, writeSync } from "node:fs";
+import { closeSync, openSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import {
 	DEFAULT_MAX_BYTES,
@@ -202,8 +202,14 @@ export class OutputAccumulator {
 		try {
 			closeSync(fd);
 		} catch (error) {
-			this.tempFileError ??= formatIoError(error);
+			this.recordTempFileError(error);
 		}
+	}
+
+	/** Close and remove output that has no caller-visible publication path. */
+	async discardTempFile(): Promise<void> {
+		await this.closeTempFile();
+		this.removeTempFile();
 	}
 
 	getLastLineBytes(): number {
@@ -490,6 +496,18 @@ export class OutputAccumulator {
 			} catch (closeError) {
 				this.tempFileError += `; close failed: ${formatIoError(closeError)}`;
 			}
+		}
+		this.removeTempFile();
+	}
+
+	private removeTempFile(): void {
+		const path = this.tempFilePath;
+		this.tempFilePath = undefined;
+		if (path === undefined) return;
+		try {
+			rmSync(path, { force: true });
+		} catch {
+			// Managed work-run retention remains the fallback for an OS-level removal failure.
 		}
 	}
 }

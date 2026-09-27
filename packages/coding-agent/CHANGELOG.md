@@ -15,6 +15,7 @@
 
 ### Fixed
 
+- Interactive and RPC Bash output now uses the shared byte-bounded accumulator, removes unpublished or failed artifacts, and never republishes a retained Git head as complete output.
 - Filtered Git output now applies spill-file backpressure, bounds terminal flushes, and removes partial artifacts that are not published to the caller.
 - Structured Git reads now terminate byte-capped output through the bounded process-tree owner, preserve first-cancellation cause, and avoid treating exactly full output as overflow.
 - Supervised runtime shutdown now defers termination until the child grants spawn ownership and fences late spawn events after a terminal failure.
