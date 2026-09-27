@@ -429,6 +429,37 @@ describe("WorkerDispatchScheduler queue bounds", () => {
 		}
 	});
 
+	it("bounds each capacity release to the observer generation present when its microtask starts", async () => {
+		const lane = record(0);
+		const scheduler = new WorkerDispatchScheduler({
+			agentDir: "/unused",
+			registerInFlightWork: () => () => undefined,
+			isDisposed: () => false,
+			admit: () => ({ action: "wait", reason: "capacity" }),
+			getRecord: () => lane,
+			run: async () => ({ started: false, skipReason: "must_not_run" }),
+			cancel: () => undefined,
+			warn: () => undefined,
+		});
+		const delivery: string[] = [];
+		const late = () => delivery.push("late");
+		scheduler.onQueueCapacityAvailable(() => {
+			delivery.push("first");
+			scheduler.onQueueCapacityAvailable(late);
+		});
+		scheduler.onQueueCapacityAvailable(() => delivery.push("existing"));
+
+		scheduler.enqueue(lane, { instructions: "first capacity edge" });
+		scheduler.dropQueued(lane.laneId);
+		await Promise.resolve();
+		expect(delivery).toEqual(["first", "existing"]);
+
+		scheduler.enqueue(lane, { instructions: "second capacity edge" });
+		scheduler.dropQueued(lane.laneId);
+		await Promise.resolve();
+		expect(delivery).toEqual(["first", "existing", "first", "existing", "late"]);
+	});
+
 	it("contains throwing queue-capacity listeners and their warning observer", async () => {
 		const lane = record(0);
 		const warn = vi.fn(() => {

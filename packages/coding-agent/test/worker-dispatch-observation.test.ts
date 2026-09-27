@@ -366,6 +366,39 @@ describe("worker dispatch lane observation", () => {
 		await expect(observed).resolves.toMatchObject({ state: "ran" });
 	});
 
+	it("replays running state once to an observer added by a start callback", async () => {
+		const harness = schedulerHarness();
+		const record = laneRecord("lane-reentrant-start-observer");
+		harness.records.set(record.laneId, record);
+		harness.scheduler.enqueue(record, REQUEST);
+		const delivery: string[] = [];
+		const observed: Array<Promise<unknown>> = [];
+		observed.push(
+			harness.scheduler.observeLane(record.laneId, {
+				onStarted: () => {
+					delivery.push("first");
+					observed.push(
+						harness.scheduler.observeLane(record.laneId, {
+							onStarted: () => delivery.push("late"),
+						}),
+					);
+				},
+			}),
+		);
+		observed.push(
+			harness.scheduler.observeLane(record.laneId, {
+				onStarted: () => delivery.push("existing"),
+			}),
+		);
+
+		harness.scheduler.drain();
+		expect(delivery).toEqual(["first", "late", "existing"]);
+		expect(observed).toHaveLength(3);
+
+		harness.settleRun(record.laneId, { started: true, record: laneRecord(record.laneId, "succeeded") });
+		await Promise.all(observed);
+	});
+
 	it("announces a start exactly once for one dispatched lane", async () => {
 		const harness = schedulerHarness();
 		const record = laneRecord("lane-once");

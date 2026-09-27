@@ -1,5 +1,6 @@
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import { IndependentObserverSet } from "../observer-dispatch.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { workerQueueHasCapacity } from "./worker-fleet-limits.ts";
@@ -96,7 +97,7 @@ export class WorkerDispatchScheduler {
 	private readonly pendingCancellations = new Map<string, PendingCancellation>();
 	private readonly reservationBlocked = new Set<string>();
 	private readonly waitStates = new Map<string, WorkerDispatchWaitState>();
-	private readonly queueCapacityListeners = new Set<() => void>();
+	private readonly queueCapacityListeners = new IndependentObserverSet<() => void>();
 	/**
 	 * Callers awaiting the outcome this scheduler produces for a lane. Entries exist only while an
 	 * observer is waiting: every terminal transition settles and removes its set, so no completed run
@@ -138,8 +139,7 @@ export class WorkerDispatchScheduler {
 
 	/** Notify retained priority work when a bounded queue slot is released. */
 	onQueueCapacityAvailable(listener: () => void): () => void {
-		this.queueCapacityListeners.add(listener);
-		return () => this.queueCapacityListeners.delete(listener);
+		return this.queueCapacityListeners.subscribe(listener);
 	}
 
 	enqueue(
@@ -266,7 +266,7 @@ export class WorkerDispatchScheduler {
 		if (!observers || observers.size === 0) return;
 		const started = this.options.getRecord(laneId);
 		if (started?.status !== "running") return;
-		for (const observer of observers) {
+		for (const observer of [...observers]) {
 			if (!observer.deferredGeneration && observer.onStarted) {
 				this.notifyStart(laneId, observer.onStarted, started);
 			}
@@ -702,15 +702,14 @@ export class WorkerDispatchScheduler {
 		this.queueCapacityNotificationPending = true;
 		queueMicrotask(() => {
 			this.queueCapacityNotificationPending = false;
-			for (const listener of this.queueCapacityListeners) {
-				try {
-					listener();
-				} catch (error) {
+			this.queueCapacityListeners.notify(
+				(listener) => listener(),
+				(error) => {
 					this.warnBestEffort(
 						`Worker queue-capacity listener failed: ${error instanceof Error ? error.message : String(error)}`,
 					);
-				}
-			}
+				},
+			);
 		});
 	}
 }
