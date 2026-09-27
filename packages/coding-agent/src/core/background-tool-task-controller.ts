@@ -43,12 +43,13 @@ export const DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS = 0;
 
 /** First line of the handoff stub: says what moved the call, so a requested task never reads as a timeout. */
 function handoffHeadline(context: BackgroundToolCallContext, taskId: string): string {
-	const seconds = Math.max(1, Math.round(context.elapsedMs / 1000));
+	const elapsedMs = Number.isFinite(context.elapsedMs) ? Math.max(0, context.elapsedMs) : 0;
+	const seconds = Math.max(1, Math.round(elapsedMs / 1000));
 	switch (context.trigger) {
 		case "requested":
 			return `Tool ${context.toolCall.name} started as session task ${taskId} (background requested).`;
 		case "manual":
-			return `Tool ${context.toolCall.name} moved to session task ${taskId} by the operator${context.elapsedMs >= 1000 ? ` after ${seconds}s` : ""}.`;
+			return `Tool ${context.toolCall.name} moved to session task ${taskId} by the operator${elapsedMs >= 1000 ? ` after ${seconds}s` : ""}.`;
 		default:
 			return `Tool ${context.toolCall.name} exceeded ${seconds}s; running as session task ${taskId}.`;
 	}
@@ -59,6 +60,10 @@ function handoffHeadline(context: BackgroundToolCallContext, taskId: string): st
  * minutes) instead of returning "still running" after thirty seconds and inviting a poll.
  */
 export const DEFAULT_BACKGROUND_TOOL_TASK_WAIT_TIMEOUT_MS = 300_000;
+/** Absolute in-process ownership bound for a detached tool that provides no terminal event. */
+export const DEFAULT_BACKGROUND_TOOL_TASK_MAX_RUNTIME_MS = 3_600_000;
+/** Grace for an abort-aware executor to publish its real terminal result before the host fences it. */
+export const DEFAULT_BACKGROUND_TOOL_TASK_CANCEL_GRACE_MS = 5_000;
 export const BACKGROUND_TOOL_TASK_CUSTOM_TYPE = "background_tool_task";
 /** Compact post-notification receipt; the preceding terminal snapshot remains the sole output owner. */
 export const BACKGROUND_TOOL_TASK_DELIVERY_CUSTOM_TYPE = "background_tool_task_delivery";
@@ -76,6 +81,7 @@ const MAX_TERMINAL_HANDOFF_RECORDS = 8;
  * rest an exact `tool_task wait` to collect.
  */
 const MAX_TERMINAL_MESSAGE_BYTES = 24 * 1024;
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const TASK_ID_PATTERN = /^tool-task-([1-9]\d*)$/;
 const RECORD_KEYS = [
 	"sessionId",
@@ -85,6 +91,7 @@ const RECORD_KEYS = [
 	"goalId",
 	"status",
 	"startedAt",
+	"deadlineAt",
 	"completedAt",
 	"elapsedBeforeHandoffMs",
 	"summary",
@@ -142,6 +149,8 @@ export interface BackgroundToolTaskRecord {
 	goalId?: string;
 	status: BackgroundToolTaskStatus;
 	startedAt: string;
+	/** Durable latest time at which the controller must force a terminal record. */
+	deadlineAt?: string;
 	completedAt?: string;
 	elapsedBeforeHandoffMs: number;
 	summary: string;
@@ -175,6 +184,7 @@ export interface BackgroundToolTaskLiveView {
 	toolName: string;
 	description: string;
 	startedAt?: string;
+	deadlineAt?: string;
 	elapsedBeforeHandoffMs?: number;
 }
 
@@ -249,6 +259,10 @@ export interface BackgroundToolTaskControllerDeps {
 	now?(): Date;
 	/** Event-wait watchdog; completion still arrives through the terminal handoff after this bound. */
 	waitTimeoutMs?: number;
+	/** Absolute managed lifetime including foreground time before handoff. */
+	maxRuntimeMs?: number;
+	/** Bound after cancellation for an executor that ignores or cannot process abort. */
+	cancelGraceMs?: number;
 	/** True when the tool declares this call a foreground wait; such a call is never handed off. */
 	isForegroundWait?: (toolName: string, args: unknown) => boolean;
 	/**
@@ -268,6 +282,7 @@ interface BackgroundToolTaskState {
 	terminal: Promise<BackgroundToolTaskRecord>;
 	resolveTerminal: (record: BackgroundToolTaskRecord) => void;
 	artifactHolderId: string;
+	terminalWatchdog?: ReturnType<typeof setTimeout>;
 }
 
 /**
@@ -641,6 +656,8 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
 		!Number.isFinite(Date.parse(value.startedAt)) ||
 		(value.completedAt !== undefined &&
 			(typeof value.completedAt !== "string" || !Number.isFinite(Date.parse(value.completedAt)))) ||
+		(value.deadlineAt !== undefined &&
+			(typeof value.deadlineAt !== "string" || !Number.isFinite(Date.parse(value.deadlineAt)))) ||
 		(value.status !== "running" && value.completedAt === undefined) ||
 		(value.goalId !== undefined && (typeof value.goalId !== "string" || value.goalId.length === 0)) ||
 		typeof value.elapsedBeforeHandoffMs !== "number" ||
@@ -690,6 +707,7 @@ function decodeRecord(value: unknown, sessionIds: ReadonlySet<string>): Backgrou
 		...(value.goalId ? { goalId: value.goalId } : {}),
 		status: value.status,
 		startedAt: value.startedAt,
+		...(value.deadlineAt ? { deadlineAt: value.deadlineAt } : {}),
 		...(value.completedAt ? { completedAt: value.completedAt } : {}),
 		elapsedBeforeHandoffMs: value.elapsedBeforeHandoffMs,
 		summary: value.summary,
@@ -720,14 +738,22 @@ export class BackgroundToolTaskController {
 	private resolveNotificationRetry: (() => void) | undefined;
 	private notificationRetryCount = 0;
 	private readonly waitTimeoutMs: number;
+	private readonly maxRuntimeMs: number;
+	private readonly cancelGraceMs: number;
 	private nextTaskId = 1;
 	private disposed = false;
 
 	constructor(deps: BackgroundToolTaskControllerDeps) {
 		this.deps = deps;
 		this.waitTimeoutMs = deps.waitTimeoutMs ?? DEFAULT_BACKGROUND_TOOL_TASK_WAIT_TIMEOUT_MS;
-		if (!Number.isSafeInteger(this.waitTimeoutMs) || this.waitTimeoutMs < 1) {
-			throw new TypeError("Background tool task wait timeout must be a positive safe integer.");
+		this.maxRuntimeMs = deps.maxRuntimeMs ?? DEFAULT_BACKGROUND_TOOL_TASK_MAX_RUNTIME_MS;
+		this.cancelGraceMs = deps.cancelGraceMs ?? DEFAULT_BACKGROUND_TOOL_TASK_CANCEL_GRACE_MS;
+		if (
+			![this.waitTimeoutMs, this.maxRuntimeMs, this.cancelGraceMs].every(
+				(value) => Number.isSafeInteger(value) && value >= 1 && value <= MAX_TIMER_DELAY_MS,
+			)
+		) {
+			throw new TypeError("Background tool task timeouts must be positive integers in the supported timer range.");
 		}
 		this.restorePersistedTasks();
 	}
@@ -746,7 +772,11 @@ export class BackgroundToolTaskController {
 		const mutationAnnouncer = this.deps.getMutationAnnouncer?.();
 		const sessionId = this.deps.getSessionId();
 		const taskId = `tool-task-${this.nextTaskId++}`;
-		const startedAt = this.now().toISOString();
+		const startedAtTime = this.now();
+		const startedAt = startedAtTime.toISOString();
+		const elapsedBeforeHandoffMs = Number.isFinite(context.elapsedMs) ? Math.max(0, context.elapsedMs) : 0;
+		const remainingRuntimeMs = Math.max(1, this.maxRuntimeMs - elapsedBeforeHandoffMs);
+		const deadlineAt = new Date(startedAtTime.getTime() + remainingRuntimeMs).toISOString();
 		const goalId = this.deps.getGoalId?.();
 		const ownerEpoch = this.deps.getCurrentSubmissionEpoch?.();
 		const executionContext = context.executionContext ? captureExecutionContext(context.executionContext) : undefined;
@@ -769,7 +799,8 @@ export class BackgroundToolTaskController {
 			...(ownerEpoch !== undefined ? { ownerEpoch } : {}),
 			status: "running",
 			startedAt,
-			elapsedBeforeHandoffMs: context.elapsedMs,
+			deadlineAt,
+			elapsedBeforeHandoffMs,
 			summary: `${context.toolCall.name} running in the background`,
 			output: "",
 			...(invocation ? { piToolInvocation: invocation } : {}),
@@ -780,6 +811,12 @@ export class BackgroundToolTaskController {
 			this.tasks.delete(taskId);
 			return undefined;
 		}
+		this.armTerminalWatchdog(state, remainingRuntimeMs, () => {
+			this.requestCancellation(
+				state,
+				`Background tool exceeded its maximum managed lifetime of ${this.maxRuntimeMs}ms and did not settle within ${this.cancelGraceMs}ms after cancellation; the underlying operation outcome is unknown.`,
+			);
+		});
 		this.emitLiveTasks();
 		context.completion.then(
 			(completion) => this.settle(state, completion),
@@ -833,8 +870,10 @@ export class BackgroundToolTaskController {
 
 	wait(taskId: string, signal?: AbortSignal, timeoutMs?: number): Promise<BackgroundToolTaskRecord> {
 		const waitBoundMs = timeoutMs ?? this.waitTimeoutMs;
-		if (!Number.isSafeInteger(waitBoundMs) || waitBoundMs < 1) {
-			return Promise.reject(new TypeError("Background tool task wait timeout must be a positive safe integer."));
+		if (!Number.isSafeInteger(waitBoundMs) || waitBoundMs < 1 || waitBoundMs > MAX_TIMER_DELAY_MS) {
+			return Promise.reject(
+				new TypeError("Background tool task wait timeout must be a positive integer in the supported timer range."),
+			);
 		}
 		const state = this.tasks.get(taskId);
 		if (!state) return Promise.reject(new Error(`Unknown background tool task: ${taskId}`));
@@ -874,13 +913,10 @@ export class BackgroundToolTaskController {
 	cancel(taskId: string): boolean {
 		const state = this.tasks.get(taskId);
 		if (state?.record.status !== "running") return false;
-		state.cancellationRequested = true;
-		state.record = { ...state.record, cancellationRequested: true };
-		try {
-			state.cancel();
-		} catch (error) {
-			this.reportError(`Failed to cancel background tool task ${taskId}`, error);
-		}
+		this.requestCancellation(
+			state,
+			`Background tool cancellation did not settle within ${this.cancelGraceMs}ms; the underlying operation outcome is unknown.`,
+		);
 		return true;
 	}
 
@@ -1045,6 +1081,33 @@ export class BackgroundToolTaskController {
 		};
 	}
 
+	private requestCancellation(state: BackgroundToolTaskState, unsettledOutput: string): void {
+		if (state.record.status !== "running" || state.cancellationRequested) return;
+		state.cancellationRequested = true;
+		const deadlineAt = new Date(this.now().getTime() + this.cancelGraceMs).toISOString();
+		state.record = { ...state.record, cancellationRequested: true, deadlineAt };
+		this.persist(state.record);
+		try {
+			state.cancel();
+		} catch (error) {
+			this.reportError(`Failed to cancel background tool task ${state.record.taskId}`, error);
+		}
+		this.emitLiveTasks();
+		this.armTerminalWatchdog(state, this.cancelGraceMs, () => {
+			if (state.record.status !== "running") return;
+			this.finishState(state, "canceled", unsettledOutput, undefined, true);
+		});
+	}
+
+	private armTerminalWatchdog(state: BackgroundToolTaskState, delayMs: number, onElapsed: () => void): void {
+		if (state.terminalWatchdog) clearTimeout(state.terminalWatchdog);
+		state.terminalWatchdog = setTimeout(() => {
+			state.terminalWatchdog = undefined;
+			onElapsed();
+		}, delayMs);
+		state.terminalWatchdog.unref?.();
+	}
+
 	private finishState(
 		state: BackgroundToolTaskState,
 		status: Exclude<BackgroundToolTaskStatus, "running">,
@@ -1054,6 +1117,8 @@ export class BackgroundToolTaskController {
 		verification?: VerificationRecord,
 		invocation?: ToolInvocationReceipt,
 	): void {
+		if (state.terminalWatchdog) clearTimeout(state.terminalWatchdog);
+		state.terminalWatchdog = undefined;
 		const admitted = state.record.piToolInvocation;
 		const terminalInvocation = admitted
 			? invocation?.requestId === admitted.requestId &&
@@ -1254,6 +1319,7 @@ export class BackgroundToolTaskController {
 				toolName: state.record.toolName,
 				description: state.record.summary,
 				startedAt: state.record.startedAt,
+				deadlineAt: state.record.deadlineAt,
 				elapsedBeforeHandoffMs: state.record.elapsedBeforeHandoffMs,
 			}));
 		try {
