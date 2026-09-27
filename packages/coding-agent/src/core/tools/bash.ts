@@ -1338,8 +1338,24 @@ function createShellToolDefinition(
 							{ signal, timeout: effectiveTimeoutSeconds, environment: filterContext.env },
 						);
 						if (res.exitCode !== -100) {
+							const rawOutputIncomplete = res.rawBytes === undefined;
 							output.append(res.rawBytes ?? Buffer.from(res.rawOut, "utf-8"));
-							const snapshot = await finishOutput();
+							let snapshot = await finishOutput();
+							if (rawOutputIncomplete) {
+								// The accumulator saw only Git's retained head. Its artifact is not the
+								// complete command output and must never compete with Git's owner path.
+								await output.discardTempFile();
+								snapshot = {
+									...snapshot,
+									fullOutputPath: res.fullOutputPath,
+									fullOutputError:
+										res.fullOutputPath === undefined
+											? "complete filtered Git output is unavailable"
+											: undefined,
+									persistedOutputTruncated: undefined,
+									persistedOutputBytes: undefined,
+								};
+							}
 							if (res.exitCode !== 0) {
 								const { text: rawOutputText } = formatOutput(snapshot);
 								throw createExitError(rawOutputText, res.exitCode, gitCwd);
