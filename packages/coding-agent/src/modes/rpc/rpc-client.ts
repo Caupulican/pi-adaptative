@@ -518,8 +518,12 @@ export class RpcClient {
 			}
 
 			// Otherwise it's an event
-			for (const listener of this.eventListeners) {
-				listener(data as AgentEvent);
+			for (const listener of [...this.eventListeners]) {
+				try {
+					listener(data as AgentEvent);
+				} catch {
+					// Application observers cannot suppress sibling wait/collection subscribers.
+				}
 			}
 		} catch {
 			// Ignore non-JSON lines

@@ -1,5 +1,5 @@
 import { visibleWidth } from "@caupulican/pi-tui";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session-contracts.ts";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import type { HumanInputActivity } from "../src/core/human-input-activity.ts";
@@ -98,6 +98,27 @@ describe("flow trace", () => {
 			event({ type: "agent_end", messages: [{ role: "assistant", stopReason: "aborted" }], willRetry: false }),
 		);
 		expect(trace.snapshot().map((e) => e.outcome)).toEqual(["cancelled", "failed"]);
+	});
+
+	it("isolates observers so one failure cannot corrupt an open action or suppress its siblings", () => {
+		const trace = new FlowTrace({ now: () => 5 });
+		trace.subscribe(() => {
+			throw new Error("broken observer");
+		});
+		const healthyObserver = vi.fn();
+		trace.subscribe(healthyObserver);
+
+		expect(() => trace.observe(event({ type: "agent_start" }))).not.toThrow();
+		expect(() =>
+			trace.observe(
+				event({ type: "agent_end", messages: [{ role: "assistant", stopReason: "stop" }], willRetry: false }),
+			),
+		).not.toThrow();
+
+		expect(healthyObserver).toHaveBeenCalledTimes(2);
+		expect(trace.snapshot()).toEqual([
+			expect.objectContaining({ kind: "turn", startedAt: 5, endedAt: 5, outcome: "ok" }),
+		]);
 	});
 });
 

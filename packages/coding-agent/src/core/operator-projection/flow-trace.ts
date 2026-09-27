@@ -336,6 +336,12 @@ export class FlowTrace {
 	}
 
 	private changed(): void {
-		for (const listener of this.listeners) listener();
+		for (const listener of [...this.listeners]) {
+			try {
+				listener();
+			} catch {
+				// Projection observers cannot interrupt lifecycle bookkeeping or suppress sibling updates.
+			}
+		}
 	}
 }

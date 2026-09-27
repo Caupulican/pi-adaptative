@@ -180,8 +180,20 @@ function reservationFile(agentDir: string, repositoryRoot: string): string {
 	return stateFile(agentDir, "orchestration", "worker-write-reservations", `${digest}.json`);
 }
 
+function queueAvailabilityNotification(listener: () => void): void {
+	queueMicrotask(() => {
+		try {
+			listener();
+		} catch {
+			// Admission re-check observers cannot crash the process or consume sibling wakeups.
+		}
+	});
+}
+
 function notifyAvailability(filePath: string): void {
-	for (const listener of availabilityListeners.get(filePath) ?? []) queueMicrotask(listener);
+	for (const listener of [...(availabilityListeners.get(filePath) ?? [])]) {
+		queueAvailabilityNotification(listener);
+	}
 }
 
 function leaseFromRecord(filePath: string, record: PersistedReservation): WorkerWriteReservationLease {
@@ -445,7 +457,7 @@ export class WorkerWriteReservationStore {
 		const schedule = () => {
 			if (scheduled) return;
 			scheduled = true;
-			queueMicrotask(() => {
+			queueAvailabilityNotification(() => {
 				scheduled = false;
 				listener();
 			});

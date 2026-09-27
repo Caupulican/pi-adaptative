@@ -266,6 +266,25 @@ describe("WorkerWriteReservationStore", () => {
 		expect(notifications).toBe(seenBeforeDispose);
 	});
 
+	it("isolates availability observers so one failure cannot crash or suppress sibling wakeups", async () => {
+		const paths = fixture();
+		const store = new WorkerWriteReservationStore({ agentDir: paths.agentDir });
+		const lease = grantedLease(store.acquire(request(paths)));
+		const disposeBroken = store.watchAvailability(request(paths).workspace, () => {
+			throw new Error("broken availability observer");
+		});
+		const healthyObserver = vi.fn();
+		const disposeHealthy = store.watchAvailability(request(paths).workspace, healthyObserver);
+
+		try {
+			expect(store.release(lease)).toEqual({ kind: "released" });
+			await vi.waitFor(() => expect(healthyObserver).toHaveBeenCalled());
+		} finally {
+			disposeBroken();
+			disposeHealthy();
+		}
+	});
+
 	it("wakes queued admission for Windows null and Buffer watcher filenames", async () => {
 		const paths = fixture();
 		let watcherListener: ((eventType: string, fileName: string | Buffer | null) => void) | undefined;
