@@ -373,7 +373,6 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				cacheSessionId,
 				model.openaiResponsesLite === true,
 			);
-			let websocketApiKey = apiKey;
 			let websocketHeaders = buildWebSocketHeaders(
 				model.headers,
 				options?.headers,
@@ -398,7 +397,6 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				return options.onAuthRejection({ providerId: model.provider, status: 401, attempt: authRecoveryAttempt });
 			};
 			const adoptRecoveredCredential = (replacementKey: string): void => {
-				websocketApiKey = replacementKey;
 				const replacementAccountId = requireOpenAICodexAccountId(replacementKey);
 				const replacementCredentialHeaders = options?.credentialHeadersFor?.(replacementKey);
 				websocketHeaders = buildWebSocketHeaders(
@@ -451,7 +449,6 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 								idleTimeoutMs,
 								websocketConnectTimeoutMs,
 								cacheSessionId,
-								websocketApiKey,
 								options,
 							);
 							break;
@@ -1128,7 +1125,7 @@ interface PreparedWebSocketRequest {
 
 interface CachedWebSocketConnection {
 	socket: WebSocketLike;
-	authIdentity: string;
+	connectionIdentity: string;
 	busy: boolean;
 	idleTimer?: ReturnType<typeof setTimeout>;
 	continuation?: CachedWebSocketContinuationState;
@@ -1318,17 +1315,44 @@ function closeWebSocketSilently(socket: WebSocketLike, code = 1000, reason = "do
 	} catch {}
 }
 
+function getWebSocketConnectionIdentity(url: string, headers: Headers): string {
+	return JSON.stringify([url, [...headers.entries()]]);
+}
+
 function scheduleSessionWebSocketExpiry(sessionId: string, entry: CachedWebSocketConnection): void {
 	if (entry.idleTimer) {
 		clearTimeout(entry.idleTimer);
 	}
-	entry.idleTimer = setTimeout(() => {
+	const timer = setTimeout(() => {
+		if (entry.idleTimer !== timer) return;
+		entry.idleTimer = undefined;
 		if (entry.busy) return;
 		closeWebSocketSilently(entry.socket, 1000, "idle_timeout");
 		if (websocketSessionCache.get(sessionId) === entry) {
 			websocketSessionCache.delete(sessionId);
 		}
 	}, SESSION_WEBSOCKET_CACHE_TTL_MS);
+	entry.idleTimer = timer;
+}
+
+function releaseSessionWebSocket(
+	sessionId: string,
+	entry: CachedWebSocketConnection,
+	{ keep }: { keep?: boolean } = {},
+): void {
+	if (!keep || !isWebSocketReusable(entry.socket) || websocketSessionCache.get(sessionId) !== entry) {
+		closeWebSocketSilently(entry.socket);
+		if (entry.idleTimer) {
+			clearTimeout(entry.idleTimer);
+			entry.idleTimer = undefined;
+		}
+		if (websocketSessionCache.get(sessionId) === entry) {
+			websocketSessionCache.delete(sessionId);
+		}
+		return;
+	}
+	entry.busy = false;
+	scheduleSessionWebSocketExpiry(sessionId, entry);
 }
 
 async function connectWebSocket(
@@ -1412,7 +1436,6 @@ async function acquireWebSocket(
 	url: string,
 	headers: Headers,
 	sessionId: string | undefined,
-	authIdentity: string,
 	signal?: AbortSignal,
 	connectTimeoutMs?: number,
 ): Promise<{
@@ -1430,13 +1453,12 @@ async function acquireWebSocket(
 		};
 	}
 
+	const connectionIdentity = getWebSocketConnectionIdentity(url, headers);
 	const cached = websocketSessionCache.get(sessionId);
-	if (cached && cached.authIdentity !== authIdentity) {
-		closeWebSocketSilently(cached.socket);
-		if (cached.idleTimer) clearTimeout(cached.idleTimer);
-		websocketSessionCache.delete(sessionId);
+	if (cached && cached.connectionIdentity !== connectionIdentity && !cached.busy) {
+		releaseSessionWebSocket(sessionId, cached);
 	}
-	if (cached && cached.authIdentity === authIdentity) {
+	if (cached && cached.connectionIdentity === connectionIdentity) {
 		if (cached.idleTimer) {
 			clearTimeout(cached.idleTimer);
 			cached.idleTimer = undefined;
@@ -1447,17 +1469,7 @@ async function acquireWebSocket(
 				socket: cached.socket,
 				entry: cached,
 				reused: true,
-				release: ({ keep } = {}) => {
-					if (!keep || !isWebSocketReusable(cached.socket)) {
-						closeWebSocketSilently(cached.socket);
-						if (websocketSessionCache.get(sessionId) === cached) {
-							websocketSessionCache.delete(sessionId);
-						}
-						return;
-					}
-					cached.busy = false;
-					scheduleSessionWebSocketExpiry(sessionId, cached);
-				},
+				release: (options) => releaseSessionWebSocket(sessionId, cached, options),
 			};
 		}
 		if (cached.busy) {
@@ -1477,24 +1489,40 @@ async function acquireWebSocket(
 	}
 
 	const socket = await connectWebSocket(url, headers, signal, connectTimeoutMs);
-	const entry: CachedWebSocketConnection = { socket, authIdentity, busy: true };
+	const current = websocketSessionCache.get(sessionId);
+	if (current && current !== cached && current.connectionIdentity === connectionIdentity) {
+		if (!current.busy && isWebSocketReusable(current.socket)) {
+			if (current.idleTimer) {
+				clearTimeout(current.idleTimer);
+				current.idleTimer = undefined;
+			}
+			closeWebSocketSilently(socket);
+			current.busy = true;
+			return {
+				socket: current.socket,
+				entry: current,
+				reused: true,
+				release: (options) => releaseSessionWebSocket(sessionId, current, options),
+			};
+		}
+		if (current.busy) {
+			return {
+				socket,
+				reused: false,
+				release: () => closeWebSocketSilently(socket),
+			};
+		}
+		releaseSessionWebSocket(sessionId, current);
+	} else if (current && current.connectionIdentity !== connectionIdentity && !current.busy) {
+		releaseSessionWebSocket(sessionId, current);
+	}
+	const entry: CachedWebSocketConnection = { socket, connectionIdentity, busy: true };
 	websocketSessionCache.set(sessionId, entry);
 	return {
 		socket,
 		entry,
 		reused: false,
-		release: ({ keep } = {}) => {
-			if (!keep || !isWebSocketReusable(entry.socket)) {
-				closeWebSocketSilently(entry.socket);
-				if (entry.idleTimer) clearTimeout(entry.idleTimer);
-				if (websocketSessionCache.get(sessionId) === entry) {
-					websocketSessionCache.delete(sessionId);
-				}
-				return;
-			}
-			entry.busy = false;
-			scheduleSessionWebSocketExpiry(sessionId, entry);
-		},
+		release: (options) => releaseSessionWebSocket(sessionId, entry, options),
 	};
 }
 
@@ -1840,7 +1868,6 @@ async function processWebSocketStream(
 	idleTimeoutMs: number | undefined,
 	websocketConnectTimeoutMs: number | undefined,
 	cacheSessionId: string | undefined,
-	authIdentity: string,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
 	const toolNameMap = createOpenAIResponsesToolNameMap(context.tools ?? []);
@@ -1848,7 +1875,6 @@ async function processWebSocketStream(
 		url,
 		headers,
 		cacheSessionId,
-		authIdentity,
 		options?.signal,
 		websocketConnectTimeoutMs,
 	);

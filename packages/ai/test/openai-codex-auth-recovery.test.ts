@@ -75,22 +75,28 @@ type WebSocketScript =
 function installWebSocketResponses(scripts: ReadonlyArray<WebSocketScript>): {
 	authorizations: string[];
 	fedrampHeaders: Array<string | null>;
+	routingHeaders: Array<string | null>;
+	urls: string[];
 } {
 	const authorizations: string[] = [];
 	const fedrampHeaders: Array<string | null> = [];
+	const routingHeaders: Array<string | null> = [];
+	const urls: string[] = [];
 
 	class MockWebSocket {
 		readyState = 1;
 		private readonly connectionIndex: number;
 		private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
 
-		constructor(_url: string, protocols?: string | string[] | { headers?: Record<string, string> }) {
+		constructor(url: string, protocols?: string | string[] | { headers?: Record<string, string> }) {
 			this.connectionIndex = authorizations.length;
 			const headers =
 				protocols && typeof protocols === "object" && !Array.isArray(protocols) ? protocols.headers : undefined;
 			const requestHeaders = new Headers(headers);
+			urls.push(url);
 			authorizations.push(requestHeaders.get("Authorization") ?? "");
 			fedrampHeaders.push(requestHeaders.get("X-OpenAI-Fedramp"));
+			routingHeaders.push(requestHeaders.get("X-Routing-Key"));
 			queueMicrotask(() => this.dispatch("open", {}));
 		}
 
@@ -122,6 +128,7 @@ function installWebSocketResponses(scripts: ReadonlyArray<WebSocketScript>): {
 
 		close(): void {
 			this.readyState = 3;
+			this.dispatch("close", { code: 1000, reason: "client closed", wasClean: true });
 		}
 
 		private dispatch(type: string, event: unknown): void {
@@ -130,7 +137,7 @@ function installWebSocketResponses(scripts: ReadonlyArray<WebSocketScript>): {
 	}
 
 	vi.stubGlobal("WebSocket", MockWebSocket);
-	return { authorizations, fedrampHeaders };
+	return { authorizations, fedrampHeaders, routingHeaders, urls };
 }
 
 async function run(responses: Array<() => Response>, options: Partial<SimpleStreamOptions>) {
@@ -204,6 +211,115 @@ describe("OpenAI Codex auth recovery", () => {
 		expect(recovered.stopReason).toBe("stop");
 		expect(reused.stopReason).toBe("stop");
 		expect(harness.authorizations).toEqual([`Bearer ${apiKey}`, `Bearer ${replacementKey}`]);
+	});
+
+	it("replaces a cached session socket when the provider endpoint changes", async () => {
+		const harness = installWebSocketResponses([websocketSuccess, websocketSuccess]);
+		const sessionId = "websocket-endpoint-owner";
+		const replacementModel = { ...model, baseUrl: "https://replacement.invalid" };
+
+		await streamSimpleOpenAICodexResponses(
+			model,
+			{ messages: [] },
+			{ apiKey, sessionId, transport: "websocket" },
+		).result();
+		await streamSimpleOpenAICodexResponses(
+			replacementModel,
+			{ messages: [] },
+			{ apiKey, sessionId, transport: "websocket" },
+		).result();
+		await streamSimpleOpenAICodexResponses(
+			replacementModel,
+			{ messages: [] },
+			{ apiKey, sessionId, transport: "websocket" },
+		).result();
+
+		expect(harness.urls).toEqual([
+			"wss://example.invalid/codex/responses",
+			"wss://replacement.invalid/codex/responses",
+		]);
+	});
+
+	it("replaces a cached session socket when effective connection headers change", async () => {
+		const harness = installWebSocketResponses([websocketSuccess, websocketSuccess]);
+		const sessionId = "websocket-header-owner";
+
+		await streamSimpleOpenAICodexResponses(
+			model,
+			{ messages: [] },
+			{ apiKey, sessionId, transport: "websocket", headers: { "X-Routing-Key": "route-a" } },
+		).result();
+		await streamSimpleOpenAICodexResponses(
+			model,
+			{ messages: [] },
+			{ apiKey, sessionId, transport: "websocket", headers: { "X-Routing-Key": "route-b" } },
+		).result();
+
+		expect(harness.routingHeaders).toEqual(["route-a", "route-b"]);
+	});
+
+	it("does not close a busy old-identity socket while installing its replacement", async () => {
+		let releaseHeldResponse: (() => void) | undefined;
+		installWebSocketResponses([
+			(dispatch) => {
+				releaseHeldResponse = () => {
+					for (const event of websocketSuccess) dispatch("message", { data: JSON.stringify(event) });
+				};
+			},
+			websocketSuccess,
+		]);
+		const sessionId = "websocket-busy-identity-handoff";
+		const firstResult = streamSimpleOpenAICodexResponses(
+			model,
+			{ messages: [] },
+			{ apiKey, sessionId, transport: "websocket" },
+		).result();
+		await vi.waitFor(() => expect(releaseHeldResponse).toBeTypeOf("function"));
+
+		const replacementResult = await streamSimpleOpenAICodexResponses(
+			{ ...model, baseUrl: "https://replacement.invalid" },
+			{ messages: [] },
+			{ apiKey, sessionId, transport: "websocket" },
+		).result();
+		releaseHeldResponse?.();
+		const originalResult = await firstResult;
+
+		expect(replacementResult.stopReason).toBe("stop");
+		expect(originalResult.stopReason).toBe("stop");
+	});
+
+	it("ignores a stale idle-expiry callback after the cached socket is rearmed", async () => {
+		const timerSpy = vi.spyOn(globalThis, "setTimeout");
+		const harness = installWebSocketResponses([websocketSuccess]);
+		const sessionId = "websocket-stale-expiry";
+
+		try {
+			await streamSimpleOpenAICodexResponses(
+				model,
+				{ messages: [] },
+				{ apiKey, sessionId, transport: "websocket" },
+			).result();
+			const staleExpiry = timerSpy.mock.calls.find(([, delay]) => delay === 5 * 60 * 1000)?.[0];
+			expect(staleExpiry).toBeTypeOf("function");
+
+			await streamSimpleOpenAICodexResponses(
+				model,
+				{ messages: [] },
+				{ apiKey, sessionId, transport: "websocket" },
+			).result();
+			if (typeof staleExpiry === "function") staleExpiry();
+			await streamSimpleOpenAICodexResponses(
+				model,
+				{ messages: [] },
+				{ apiKey, sessionId, transport: "websocket" },
+			).result();
+
+			expect(harness.urls).toEqual(["wss://example.invalid/codex/responses"]);
+		} finally {
+			for (const result of timerSpy.mock.results) {
+				if (result.type === "return") clearTimeout(result.value as ReturnType<typeof setTimeout>);
+			}
+		}
 	});
 
 	it("does not replay a WebSocket 401 when credential recovery declines (control)", async () => {
