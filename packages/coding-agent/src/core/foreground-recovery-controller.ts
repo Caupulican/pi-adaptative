@@ -14,6 +14,7 @@ import { BillingFailoverController, ExhaustedProviderRegistry } from "./billing-
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { ModelRouterFailoverStatus } from "./model-router/status.ts";
+import { IndependentObserverSet } from "./observer-dispatch.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
 type ForegroundRecoveryEvent =
@@ -72,7 +73,7 @@ export class ForegroundRecoveryController {
 	private nextSubmissionEpoch = 1;
 	private shutdownReason: Error | undefined;
 	private readonly idleWaiters = new Set<() => void>();
-	private readonly activityListeners = new Set<() => void>();
+	private readonly activityListeners = new IndependentObserverSet<() => void>();
 	private readonly deps: ForegroundRecoveryControllerDeps;
 
 	constructor(deps: ForegroundRecoveryControllerDeps) {
@@ -174,20 +175,14 @@ export class ForegroundRecoveryController {
 
 	/** Observe authority changes; consumers still await waitForIdle before declaring settlement. */
 	subscribeActivity(listener: () => void): () => void {
-		this.activityListeners.add(listener);
-		return () => {
-			this.activityListeners.delete(listener);
-		};
+		return this.activityListeners.subscribe(listener);
 	}
 
 	private notifyActivity(): void {
-		for (const listener of this.activityListeners) {
-			try {
-				listener();
-			} catch {
-				this.deps.emit({ type: "warning", message: "Foreground activity observer failed." });
-			}
-		}
+		this.activityListeners.notify(
+			(listener) => listener(),
+			() => this.deps.emit({ type: "warning", message: "Foreground activity observer failed." }),
+		);
 	}
 
 	/** Wait until foreground ownership can be acquired without a check-then-act gap. */

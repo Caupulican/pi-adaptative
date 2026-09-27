@@ -1,9 +1,60 @@
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { describe, expect, it, vi } from "vitest";
 import { createHumanInputRequest, resolveHumanInput } from "../src/core/human-input.ts";
-import { subscribeHumanInputActivity } from "../src/core/human-input-activity.ts";
+import { publishHumanInputActivity, subscribeHumanInputActivity } from "../src/core/human-input-activity.ts";
 
 describe("human input lifecycle authority", () => {
+	it("replays a pending question once without duplicating it through the active publish generation", () => {
+		const sessionManager = SessionManager.inMemory();
+		const request = createHumanInputRequest({ source: "tool", questions: [], acceptsImages: false });
+		const delivery: string[] = [];
+		const late = (event: { phase: "waiting" | "settled" }) => delivery.push(`late:${event.phase}`);
+		subscribeHumanInputActivity(sessionManager, (event) => {
+			delivery.push(`first:${event.phase}`);
+			subscribeHumanInputActivity(sessionManager, late);
+		});
+		subscribeHumanInputActivity(sessionManager, (event) => delivery.push(`existing:${event.phase}`));
+
+		publishHumanInputActivity(sessionManager, { phase: "waiting", request });
+		expect(delivery).toEqual(["first:waiting", "late:waiting", "existing:waiting"]);
+
+		publishHumanInputActivity(sessionManager, { phase: "settled", request });
+		expect(delivery).toEqual([
+			"first:waiting",
+			"late:waiting",
+			"existing:waiting",
+			"first:settled",
+			"existing:settled",
+			"late:settled",
+		]);
+	});
+
+	it("does not expose a settled publication to a subscriber added after pending state is cleared", () => {
+		const sessionManager = SessionManager.inMemory();
+		const request = createHumanInputRequest({ source: "tool", questions: [], acceptsImages: false });
+		const delivery: string[] = [];
+		const late = (event: { phase: "waiting" | "settled" }) => delivery.push(`late:${event.phase}`);
+		subscribeHumanInputActivity(sessionManager, (event) => {
+			delivery.push(`first:${event.phase}`);
+			if (event.phase === "settled") subscribeHumanInputActivity(sessionManager, late);
+		});
+		subscribeHumanInputActivity(sessionManager, (event) => delivery.push(`existing:${event.phase}`));
+
+		publishHumanInputActivity(sessionManager, { phase: "waiting", request });
+		delivery.length = 0;
+		publishHumanInputActivity(sessionManager, { phase: "settled", request });
+		expect(delivery).toEqual(["first:settled", "existing:settled"]);
+
+		publishHumanInputActivity(sessionManager, { phase: "waiting", request });
+		expect(delivery).toEqual([
+			"first:settled",
+			"existing:settled",
+			"first:waiting",
+			"existing:waiting",
+			"late:waiting",
+		]);
+	});
+
 	it("publishes waiting before presentation and settles the activity after a failure", async () => {
 		const sessionManager = SessionManager.inMemory();
 		const sequence: string[] = [];

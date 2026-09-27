@@ -5,6 +5,7 @@ import type { SessionManager } from "@caupulican/pi-agent-core/session";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import type { ContextUsage, ToolDefinition } from "../extensions/types.ts";
+import { IndependentObserverSet } from "../observer-dispatch.ts";
 import { resolveSessionEntryIndex } from "../session-entry-index.ts";
 import {
 	batchSelfCompactionNote,
@@ -114,7 +115,7 @@ export class SelfCompactionController {
 	private running: Promise<void> | undefined;
 	private announcedLevel: SelfCompactionLevel = "idle";
 	private renderedGuidance: { key: string; text: string | undefined } | undefined;
-	private readonly activityListeners = new Set<() => void>();
+	private readonly activityListeners = new IndependentObserverSet<() => void>();
 
 	constructor(deps: SelfCompactionControllerDeps) {
 		this.deps = deps;
@@ -409,22 +410,18 @@ export class SelfCompactionController {
 	}
 
 	subscribeActivity(listener: () => void): () => void {
-		this.activityListeners.add(listener);
-		return () => {
-			this.activityListeners.delete(listener);
-		};
+		return this.activityListeners.subscribe(listener);
 	}
 
 	private notifyActivity(): void {
-		for (const listener of [...this.activityListeners]) {
-			try {
-				listener();
-			} catch (error) {
+		this.activityListeners.notify(
+			(listener) => listener(),
+			(error) => {
 				this.deps.warn(
 					`self-compaction: activity observer failed: ${error instanceof Error ? error.message : String(error)}`,
 				);
-			}
-		}
+			},
+		);
 	}
 
 	schedule(): boolean {

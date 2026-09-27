@@ -176,6 +176,24 @@ describe("the whole-program settled marker on malformed certificates", () => {
 });
 
 describe("SemanticPlaneHealthRecorder as the one sink", () => {
+	it("bounds each settlement edge to the observer generation present at dispatch start", () => {
+		const recorder = new SemanticPlaneHealthRecorder();
+		const delivery: string[] = [];
+		const late = () => delivery.push("late");
+		recorder.subscribe(() => {
+			delivery.push("first");
+			recorder.subscribe(late);
+		});
+		recorder.subscribe(() => delivery.push("existing"));
+		const evaluationId = recorder.start({ programId: "system-one:preflight" });
+
+		recorder.settleOk(evaluationId);
+		expect(delivery).toEqual(["first", "existing"]);
+
+		recorder.noteVerdict(evaluationId, "allow");
+		expect(delivery).toEqual(["first", "existing", "first", "existing", "late"]);
+	});
+
 	it("bounds the ring, notes verdicts after settlement, and forwards to the durable ledger", () => {
 		let now = 1000;
 		const recorder = new SemanticPlaneHealthRecorder(() => now);

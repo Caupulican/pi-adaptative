@@ -14,6 +14,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Consequence } from "../decision/primitives.ts";
+import { IndependentObserverSet } from "../observer-dispatch.ts";
 import {
 	type SemanticEvaluationObserver,
 	type SemanticEvaluationRecord,
@@ -54,7 +55,7 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver {
 	private observed = false;
 	private readonly open = new Map<string, SemanticEvaluationStart>();
 	private readonly recent: SemanticEvaluationRecord[] = [];
-	private readonly listeners = new Set<(record: SemanticEvaluationRecord) => void>();
+	private readonly listeners = new IndependentObserverSet<(record: SemanticEvaluationRecord) => void>();
 	private durable?: () => SemanticEvaluationDurableSink | undefined;
 	private durableFailure?: string;
 	private readonly now: () => number;
@@ -144,10 +145,7 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver {
 
 	/** Fires on every settlement and verdict note; the Execution pane's Jev previews hang off it. */
 	subscribe(listener: (record: SemanticEvaluationRecord) => void): () => void {
-		this.listeners.add(listener);
-		return () => {
-			this.listeners.delete(listener);
-		};
+		return this.listeners.subscribe(listener);
 	}
 
 	/** `bound` is whether a semantic plane exists at all for this session. */
@@ -201,13 +199,12 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver {
 	}
 
 	private notify(record: SemanticEvaluationRecord): void {
-		for (const listener of this.listeners) {
-			try {
-				listener(record);
-			} catch {
+		this.listeners.notify(
+			(listener) => listener(record),
+			() => {
 				// A failing listener must not break the plane.
-			}
-		}
+			},
+		);
 	}
 
 	private toDurable(write: (sink: SemanticEvaluationDurableSink) => void): void {

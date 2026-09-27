@@ -64,6 +64,7 @@ import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/g
 import type { GoalState } from "./goals/goal-state.ts";
 import type { ModelCapabilityProfile } from "./model-capability.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
+import { IndependentObserverSet } from "./observer-dispatch.ts";
 import type { WorkerResultContract } from "./orchestration/contracts.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import type {
@@ -128,7 +129,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _workerNotifications: WorkerNotificationCoordinator | undefined;
 	/** Active event waits consume matching terminal edges before a redundant parent wake is admitted. */
 	private readonly _workerWaitConsumers = new Map<string, number>();
-	private readonly _continuationListeners = new Set<() => void>();
+	private readonly _continuationListeners = new IndependentObserverSet<() => void>();
 	private readonly deps: BackgroundLaneControllerDeps;
 
 	/** Emit a warning without ever throwing — used from disposal-adjacent persistence where a
@@ -496,20 +497,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	subscribeIdleContinuationActivity(listener: () => void): () => void {
-		this._continuationListeners.add(listener);
-		return () => {
-			this._continuationListeners.delete(listener);
-		};
+		return this._continuationListeners.subscribe(listener);
 	}
 
 	private _notifyContinuationActivity(): void {
-		for (const listener of this._continuationListeners) {
-			try {
-				listener();
-			} catch {
-				this._safeWarn("Idle continuation activity observer failed.");
-			}
-		}
+		this._continuationListeners.notify(
+			(listener) => listener(),
+			() => this._safeWarn("Idle continuation activity observer failed."),
+		);
 	}
 
 	scheduleResearchLaneFromIdle(): void {

@@ -2,6 +2,34 @@ import { describe, expect, it, vi } from "vitest";
 import { BackgroundLaneController } from "../src/core/background-lane-controller.ts";
 
 describe("continuation activity authority", () => {
+	it("bounds each continuation edge to the observer generation present at dispatch start", () => {
+		const controller = new BackgroundLaneController({
+			isDisposed: () => false,
+			isGoalToolActive: () => true,
+			getSettingsManager: () => ({
+				getAutonomySettings: () => ({ maxStallTurns: 3, goalAutoContinue: true, goalAutoContinueDelayMs: 10 }),
+			}),
+			getGoalRuntimeSnapshot: () => ({ continuation: { action: "continue" } }),
+		} as never);
+		const delivery: string[] = [];
+		const late = () => delivery.push("late");
+		controller.subscribeIdleContinuationActivity(() => {
+			delivery.push("first");
+			controller.subscribeIdleContinuationActivity(late);
+		});
+		controller.subscribeIdleContinuationActivity(() => delivery.push("existing"));
+
+		try {
+			controller.scheduleGoalAutoContinueFromIdle();
+			expect([...delivery]).toEqual(["first", "existing"]);
+
+			controller.clearGoalAutoContinueTimer();
+			expect(delivery).toEqual(["first", "existing", "first", "existing", "late"]);
+		} finally {
+			controller.clearGoalAutoContinueTimer();
+		}
+	});
+
 	it("notifies when an armed goal is cancelled or becomes ineligible without submitting another model turn", async () => {
 		vi.useFakeTimers();
 		let enabled = true;

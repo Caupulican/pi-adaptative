@@ -65,6 +65,23 @@ async function handleFailure(fixture: ReturnType<typeof createFixture>, message:
 }
 
 describe("ForegroundRecoveryController", () => {
+	it("bounds each activity edge to the observer generation present at dispatch start", () => {
+		const f = createFixture();
+		const delivery: string[] = [];
+		const late = () => delivery.push("late");
+		f.controller.subscribeActivity(() => {
+			delivery.push("first");
+			f.controller.subscribeActivity(late);
+		});
+		f.controller.subscribeActivity(() => delivery.push("existing"));
+
+		const lease = f.controller.tryAcquireSubmission()!;
+		expect(delivery).toEqual(["first", "existing"]);
+
+		f.controller.releaseSubmission(lease);
+		expect(delivery).toEqual(["first", "existing", "first", "existing", "late"]);
+	});
+
 	it("reports lease changes without treating an agent end or a foreign release as settlement", async () => {
 		const f = createFixture();
 		const activity: Array<number | undefined> = [];
