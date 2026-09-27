@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- Permanent live tool-surface changes now immediately reconcile durable goal capability: losing `goal`/`update_goal` blocks and settles an armed continuation, while restoring control resumes only the matching system block and re-arms eligible work.
+- Transient settings or runtime-snapshot failures in the goal wake path now retain pending ownership through bounded exponential retry without resurrecting a timer after auto-continuation is disabled.
 - Live autonomy setting changes now reconcile at the idle goal timer owner, so disabling automation clears `continuation_armed`, valid replacement is atomic, failed re-planning retains a retryable last-valid timer, and scheduled snapshot failures warn instead of becoming unhandled rejections.
 - Background tool tasks now have a durable maximum lifetime and a bounded cancellation grace, so an abort-ignoring extension cannot remain `running` and strand a durable goal forever; late completions are fenced after the controller publishes the terminal outcome.
 - Durable goals waiting on bound workers now arm the exact latest worker-recovery deadline, re-arm if that boundary moves, and bypass in-flight suppression only after timeout, so an unbounded hung worker cannot strand an idle parent forever.

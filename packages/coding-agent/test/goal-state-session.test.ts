@@ -293,6 +293,29 @@ describe("GoalSessionController transient recovery and bounded failure streak", 
 		return { controller, sessionManager, getScheduledCount: () => scheduledCount };
 	}
 
+	it("resumes only a goal_tool_unavailable system block when capability returns", () => {
+		const restored = createTestController().controller;
+		restored.saveState(createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" }));
+		restored.markToolUnavailable();
+		expect(restored.getState()).toMatchObject({
+			status: "blocked",
+			blockedReason: expect.stringContaining("goal_tool_unavailable"),
+		});
+		expect(restored.resumeGoalToolAvailable("T1")).toBe("g1");
+		expect(restored.getState()).toMatchObject({ status: "active", blockedReason: undefined });
+
+		const unrelated = createTestController().controller;
+		const networkBlocked = applyGoalEvent(createGoalState({ goalId: "g2", userGoal: "Keep waiting", now: "T0" }), {
+			type: "system_stop_goal",
+			status: "blocked",
+			reason: "network: unavailable",
+			now: "T1",
+		});
+		unrelated.saveState(networkBlocked);
+		expect(unrelated.resumeGoalToolAvailable("T2")).toBeUndefined();
+		expect(unrelated.getState()).toMatchObject({ status: "blocked", blockedReason: "network: unavailable" });
+	});
+
 	it("recovers transient provider failure on first attempt and rearms auto-continue", () => {
 		const { controller, getScheduledCount } = createTestController();
 		controller.saveState(createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" }));

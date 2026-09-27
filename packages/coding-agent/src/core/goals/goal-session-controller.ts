@@ -306,11 +306,25 @@ export class GoalSessionController {
 	 * prompt path may pass it; automatic callers never impersonate owner intent.
 	 */
 	resumeSystemBlockedGoal(now = new Date().toISOString(), source: "system" | "owner" = "system"): string | undefined {
+		return this.resumeMatchingSystemBlockedGoal(now, source);
+	}
+
+	/** Resume only the capability-loss block once the permanent foreground surface restores control. */
+	resumeGoalToolAvailable(now = new Date().toISOString()): string | undefined {
+		return this.resumeMatchingSystemBlockedGoal(now, "system", "goal_tool_unavailable:");
+	}
+
+	private resumeMatchingSystemBlockedGoal(
+		now: string,
+		source: "system" | "owner",
+		requiredPrefix?: string,
+	): string | undefined {
 		const current = this.getState();
 		if (!current || !isSystemBlockedGoal(current) || !current.blockedReason) return undefined;
 
 		const prefix = getAutoResumableReasonPrefix(current.blockedReason);
 		if (!prefix) return undefined;
+		if (requiredPrefix !== undefined && prefix !== requiredPrefix) return undefined;
 
 		if (source === "system" && !this.isAutomaticRecoveryAllowed(current, prefix)) return undefined;
 

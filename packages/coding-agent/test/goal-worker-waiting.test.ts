@@ -39,12 +39,14 @@ function buildLaneControllerDeps(overrides: Partial<BackgroundLaneControllerDeps
 	const sessionId = sessionManager.getSessionId?.() ?? `test-session:${process.pid}:${nextTestSession++}`;
 	return {
 		isDisposed: () => false,
+		isGoalToolActive: () => true,
 		getSessionId: () => sessionId,
 		getCwd: () => "/repo",
 		getAgentDir: () => testAgentDir,
 		getSessionManager: () => sessionManager,
 		getGoalStateSnapshot: () => undefined,
 		getCapabilityEnvelope: () => undefined,
+		markGoalToolUnavailable: () => {},
 		saveWorkerClaimSnapshot: () => "worker-claim-entry",
 		...overrides,
 	} as unknown as BackgroundLaneControllerDeps;

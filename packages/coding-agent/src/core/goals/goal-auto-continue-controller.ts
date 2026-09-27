@@ -30,6 +30,9 @@ type GoalAutoContinueScheduleSettings = Pick<
 
 type GoalAutoContinueTimerPlan = { action: "clear" } | { action: "arm"; delayMs: number };
 
+const INITIAL_SCHEDULED_FAILURE_RETRY_MS = 1_000;
+const MAX_SCHEDULED_FAILURE_RETRY_MS = 60_000;
+
 /**
  * The continuation waits for the foreground and is itself foreground work.
  * Its own wait and prompt run inside this store so they do not observe that bit.
@@ -46,6 +49,7 @@ export class GoalAutoContinueController {
 	private _timer: ReturnType<typeof setTimeout> | undefined;
 	private _isContinuing = false;
 	private _disposed = false;
+	private _scheduledFailureRetryMs = INITIAL_SCHEDULED_FAILURE_RETRY_MS;
 	private _schedulerSettings: GoalAutoContinueScheduleSettings | undefined;
 	private _unsubscribeSettingsChanges: (() => void) | undefined;
 	private readonly deps: GoalAutoContinueControllerDeps;
@@ -81,12 +85,59 @@ export class GoalAutoContinueController {
 		const settingsManager = this.deps.getSettingsManager();
 		const settings = settingsManager.getAutonomySettings();
 		this.ensureSettingsSubscription(settingsManager, settings);
+		if (settings.goalAutoContinue && !this.deps.isGoalToolActive() && this.tryMarkGoalToolUnavailable()) {
+			this.clearTimer();
+			return;
+		}
 		const plan = this.planTimer(settings);
 		if (plan.action === "clear") {
 			this.clearTimer();
 			return;
 		}
+		this._scheduledFailureRetryMs = INITIAL_SCHEDULED_FAILURE_RETRY_MS;
 		this.armTimer(plan.delayMs);
+	}
+
+	/** Reconcile a permanent live tool-surface transition with any admitted continuation. */
+	reconcileToolAvailability(resumeGoalToolAvailable?: () => boolean): void {
+		if (this._disposed || this.deps.isDisposed()) return;
+		if (this.deps.isGoalToolActive()) {
+			let resumed = false;
+			try {
+				resumed = resumeGoalToolAvailable?.() === true;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				this.deps.emit({
+					type: "warning",
+					message: `Goal continuation capability restoration failed: ${message}`,
+				});
+				return;
+			}
+			if (!resumed) return;
+			try {
+				this.scheduleFromIdle();
+			} catch (error) {
+				this.handleScheduledFailure(error);
+			}
+			return;
+		}
+		if (this.tryMarkGoalToolUnavailable()) this.clearTimer();
+	}
+
+	private tryMarkGoalToolUnavailable(): boolean {
+		try {
+			// Persist the terminal durable state before publishing that the timer is gone. If
+			// persistence fails, retain the last admitted wake so its callback can retry.
+			this.deps.markGoalToolUnavailable();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.deps.emit({
+				type: "warning",
+				message: `Goal continuation capability reconciliation failed: ${message}`,
+			});
+			return false;
+		}
+		return true;
 	}
 
 	private planTimer(settings: ReturnType<SettingsManager["getAutonomySettings"]>): GoalAutoContinueTimerPlan {
@@ -115,20 +166,23 @@ export class GoalAutoContinueController {
 		};
 	}
 
-	private armTimer(delayMs: number): void {
+	private armTimer(delayMs: number, notify = true): void {
 		// Acquire the replacement before releasing the last valid timer. Planning or allocation
 		// failure therefore cannot erase the only event that owns future goal progress.
 		const timer = setTimeout(() => {
 			if (this._timer !== timer) return;
 			this._timer = undefined;
 			void this.runScheduled()
-				.catch((error: unknown) => this.emitContinuationFailure(error))
+				.then(() => {
+					this._scheduledFailureRetryMs = INITIAL_SCHEDULED_FAILURE_RETRY_MS;
+				})
+				.catch((error: unknown) => this.handleScheduledFailure(error))
 				.finally(() => this.deps.onContinuationActivity?.());
 		}, delayMs);
 		const previous = this._timer;
 		this._timer = timer;
 		if (previous !== undefined) clearTimeout(previous);
-		this.deps.onContinuationActivity?.();
+		if (notify) this.deps.onContinuationActivity?.();
 		if (typeof timer === "object" && timer && "unref" in timer) {
 			const { unref } = timer as { unref?: () => void };
 			unref?.call(timer);
@@ -215,6 +269,32 @@ export class GoalAutoContinueController {
 	private emitContinuationFailure(error: unknown): void {
 		const message = error instanceof Error ? error.message : String(error);
 		this.deps.emit({ type: "warning", message: `Goal auto-continuation failed: ${message}` });
+	}
+
+	private handleScheduledFailure(error: unknown): void {
+		this.emitContinuationFailure(error);
+		if (this._disposed || this.deps.isDisposed()) return;
+		try {
+			// A settings transition can run synchronously inside the failing read after this
+			// callback has consumed its timer. Respect a proven disable; an unreadable setting is
+			// unknown and retains liveness through the bounded retry below.
+			if (!this.deps.getSettingsManager().getAutonomySettings().goalAutoContinue) return;
+		} catch {
+			// Preserve the retry when current policy cannot be read; the next wake re-evaluates it.
+		}
+		const delayMs = this._scheduledFailureRetryMs;
+		this._scheduledFailureRetryMs = Math.min(MAX_SCHEDULED_FAILURE_RETRY_MS, delayMs * 2);
+		try {
+			// Keep the retry admission atomic with the callback's final activity publication so
+			// observers never see a transient settled state between failure and recovery.
+			this.armTimer(delayMs, false);
+		} catch (retryError) {
+			const message = retryError instanceof Error ? retryError.message : String(retryError);
+			this.deps.emit({
+				type: "warning",
+				message: `Goal auto-continuation recovery timer failed: ${message}`,
+			});
+		}
 	}
 
 	private cancelTimer(notify: boolean): boolean {

@@ -4448,6 +4448,9 @@ export class AgentSession {
 		// Rebuild base system prompt with new tool set
 		this._baseSystemPrompt = this._rebuildSystemPrompt(validToolNames);
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
+		this._backgroundLanes.reconcileGoalContinuationToolAvailability(
+			() => this._goals.resumeGoalToolAvailable() !== undefined,
+		);
 
 		this._checkContextWindowUsageWarning();
 	}

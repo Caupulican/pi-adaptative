@@ -210,6 +210,45 @@ describe("goal continuation interruption containment", () => {
 		expect(harness.faux.state.callCount).toBe(2);
 	});
 
+	it("terminalizes an armed goal immediately when the live tool surface loses continuation control", async () => {
+		vi.useFakeTimers();
+		const harness = await createHarness();
+		seedOpenGoal(harness);
+		harness.settingsManager.setAutonomySettings({
+			goalAutoContinue: true,
+			goalAutoContinueDelayMs: 3_600_000,
+			goalContinueTurns: 1,
+			goalContinueMaxWallClockMinutes: 0,
+			maxStallTurns: 20,
+		});
+		harness.setResponses([fauxAssistantMessage("foreground complete")]);
+
+		await harness.session.prompt("foreground work");
+		expect(harness.session.getGoalStateSnapshot()).toMatchObject({ status: "active" });
+		expect(harness.session.nativeActivity.isSettled()).toBe(false);
+
+		// A surface change that retains update_goal is a negative control: the admitted
+		// continuation remains owned and the durable goal stays active.
+		harness.session.setActiveToolsByName(["read", "update_goal"]);
+		expect(harness.session.getGoalStateSnapshot()).toMatchObject({ status: "active" });
+		expect(harness.session.nativeActivity.isSettled()).toBe(false);
+
+		harness.session.setActiveToolsByName(["read"]);
+
+		expect(harness.session.getGoalStateSnapshot()).toMatchObject({
+			status: "blocked",
+			blockedReason: expect.stringContaining("goal_tool_unavailable"),
+		});
+		expect(harness.session.nativeActivity.isSettled()).toBe(true);
+		expect(vi.getTimerCount()).toBe(0);
+
+		harness.session.setActiveToolsByName(["read", "update_goal"]);
+
+		expect(harness.session.getGoalStateSnapshot()).toMatchObject({ status: "active" });
+		expect(harness.session.nativeActivity.isSettled()).toBe(false);
+		expect(vi.getTimerCount()).toBe(1);
+	});
+
 	it("uses a fresh abort signal for the user turn after an interrupted foreground run", async () => {
 		const harness = await createHarness();
 		seedOpenGoal(harness);

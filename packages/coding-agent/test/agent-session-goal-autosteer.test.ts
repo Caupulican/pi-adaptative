@@ -318,6 +318,7 @@ describe("GoalAutoContinueController idle autosteer", () => {
 
 	it("contains and reports a scheduled snapshot failure instead of rejecting unobserved", async () => {
 		let snapshotReads = 0;
+		let loopCalls = 0;
 		const warnings: string[] = [];
 		const controller = new GoalAutoContinueController({
 			isDisposed: () => false,
@@ -328,7 +329,109 @@ describe("GoalAutoContinueController idle autosteer", () => {
 				}) as never,
 			getGoalRuntimeSnapshot: () => {
 				snapshotReads++;
-				if (snapshotReads > 1) throw new Error("scheduled snapshot unavailable");
+				if (snapshotReads === 2) throw new Error("scheduled snapshot unavailable");
+				return activeSnapshot();
+			},
+			hasInFlightLaneForGoal: () => false,
+			continueGoalLoop: async () => {
+				loopCalls++;
+				return {
+					turnsSubmitted: 1,
+					stopReason: "turn_interrupted",
+					finalSnapshot: activeSnapshot(),
+				};
+			},
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
+			markGoalToolUnavailable: () => {},
+			emit: (event) => {
+				if (event.type === "warning") warnings.push(event.message);
+			},
+		});
+
+		controller.scheduleFromIdle();
+		await vi.advanceTimersByTimeAsync(10);
+
+		expect(controller.hasPendingContinuation()).toBe(true);
+		expect(vi.getTimerCount()).toBe(1);
+		expect(loopCalls).toBe(0);
+		expect(warnings).toEqual(["Goal auto-continuation failed: scheduled snapshot unavailable"]);
+
+		await vi.advanceTimersByTimeAsync(999);
+		expect(loopCalls).toBe(0);
+		expect(controller.hasPendingContinuation()).toBe(true);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(loopCalls).toBe(1);
+		expect(controller.hasPendingContinuation()).toBe(false);
+	});
+
+	it("retains an admitted wake when capability terminalization fails and retries on the next surface event", () => {
+		let goalToolActive = true;
+		let failTerminalization = true;
+		let markUnavailableCalls = 0;
+		const warnings: string[] = [];
+		const controller = new GoalAutoContinueController({
+			isDisposed: () => false,
+			isGoalToolActive: () => goalToolActive,
+			getSettingsManager: () =>
+				({
+					getAutonomySettings: () => ({ ...AUTONOMY_SETTINGS, goalAutoContinueDelayMs: 3_600_000 }),
+				}) as never,
+			getGoalRuntimeSnapshot: () => activeSnapshot(),
+			hasInFlightLaneForGoal: () => false,
+			continueGoalLoop: async () => ({
+				turnsSubmitted: 1,
+				stopReason: "turn_interrupted",
+				finalSnapshot: activeSnapshot(),
+			}),
+			isForegroundBusy: () => false,
+			waitForForegroundIdle: async () => {},
+			markGoalToolUnavailable: () => {
+				markUnavailableCalls++;
+				if (failTerminalization) throw new Error("goal persistence unavailable");
+			},
+			emit: (event) => {
+				if (event.type === "warning") warnings.push(event.message);
+			},
+		});
+
+		controller.scheduleFromIdle();
+		goalToolActive = false;
+		controller.reconcileToolAvailability();
+
+		expect(markUnavailableCalls).toBe(1);
+		expect(controller.hasPendingContinuation()).toBe(true);
+		expect(vi.getTimerCount()).toBe(1);
+		expect(warnings).toEqual(["Goal continuation capability reconciliation failed: goal persistence unavailable"]);
+
+		failTerminalization = false;
+		controller.reconcileToolAvailability();
+		expect(markUnavailableCalls).toBe(2);
+		expect(controller.hasPendingContinuation()).toBe(false);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("does not resurrect a retry when settings disable continuation during the failing wake", async () => {
+		const settingsManager = SettingsManager.create(
+			tempDir("pi-goal-autosteer-disable-race-project-"),
+			tempDir("pi-goal-autosteer-disable-race-agent-"),
+		);
+		settingsManager.setAutonomySettings({ ...AUTONOMY_SETTINGS, goalAutoContinueDelayMs: 10 });
+		let snapshotReads = 0;
+		const warnings: string[] = [];
+		const controller = new GoalAutoContinueController({
+			isDisposed: () => false,
+			isGoalToolActive: () => true,
+			getSettingsManager: () => settingsManager,
+			getGoalRuntimeSnapshot: () => {
+				snapshotReads++;
+				if (snapshotReads === 2) {
+					settingsManager.setAutonomySettings({
+						...settingsManager.getAutonomySettings(),
+						goalAutoContinue: false,
+					});
+					throw new Error("snapshot failed after disable");
+				}
 				return activeSnapshot();
 			},
 			hasInFlightLaneForGoal: () => false,
@@ -346,8 +449,10 @@ describe("GoalAutoContinueController idle autosteer", () => {
 		controller.scheduleFromIdle();
 		await vi.advanceTimersByTimeAsync(10);
 
+		expect(warnings).toEqual(["Goal auto-continuation failed: snapshot failed after disable"]);
 		expect(controller.hasPendingContinuation()).toBe(false);
-		expect(warnings).toEqual(["Goal auto-continuation failed: scheduled snapshot unavailable"]);
+		expect(vi.getTimerCount()).toBe(0);
+		await settingsManager.flush();
 	});
 
 	it("wakes at a bound worker's recovery deadline without polling or an external terminal event", async () => {
@@ -637,12 +742,12 @@ describe("GoalAutoContinueController idle autosteer", () => {
 		});
 
 		controller.scheduleFromIdle();
-		await vi.runAllTimersAsync();
-
 		expect(markUnavailableCount).toBe(1);
 		expect(loopCallCount).toBe(0);
 		expect(controller.hasPendingContinuation()).toBe(false);
 		expect(vi.getTimerCount()).toBe(0);
+		await vi.runAllTimersAsync();
+		expect(markUnavailableCount).toBe(1);
 	});
 
 	it("automatically rearms after host-resumed transient throw at common settled boundary", async () => {

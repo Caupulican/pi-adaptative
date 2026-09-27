@@ -466,6 +466,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._goalAutoContinue.scheduleFromIdle(options);
 	}
 
+	reconcileGoalContinuationToolAvailability(resumeGoalToolAvailable?: () => boolean): void {
+		this._goalAutoContinue.reconcileToolAvailability(resumeGoalToolAvailable);
+	}
+
 	/**
 	 * Single-flight entry point for EVERY goal-continuation loop invocation — idle autosteer
 	 * ({@link _runScheduledGoalAutoContinue}) AND the manual `/goal start` / `/goal-continue`
