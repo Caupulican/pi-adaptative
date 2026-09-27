@@ -17,6 +17,7 @@
 - OpenAI Codex WebSocket streaming decodes binary frames in wire order and lets already-delivered terminal frames settle before a following close or error.
 - OpenAI Codex treats malformed WebSocket frames as transport corruption, evicts their connection state, and falls back to SSE only before any response output is published.
 - OpenAI Codex bounds WebSocket event frames and pending decode backlogs, rejecting oversized or stalled-frame amplification before decoder-owned memory can grow without limit.
+- OpenAI Codex rejects malformed UTF-8 and bounds unterminated SSE lines, SSE frame line counts, and aggregate queued WebSocket payload bytes.
 
 ## [0.99.52] - 2026-09-26
 

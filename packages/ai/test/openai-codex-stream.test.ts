@@ -154,6 +154,7 @@ interface ScriptedWebSocketSend {
 	sendIndex: number;
 	body: Record<string, unknown>;
 	emit: (events: readonly Record<string, unknown>[]) => void;
+	emitData: (data: unknown) => void;
 }
 
 type WebSocketScript = readonly Record<string, unknown>[] | ((send: ScriptedWebSocketSend) => void);
@@ -199,14 +200,17 @@ function installScriptedWebSocket(scripts: readonly WebSocketScript[]): {
 			const script = scripts[this.connectionIndex] ?? [];
 			const sendIndex = sendCounts[this.connectionIndex] ?? 0;
 			sendCounts[this.connectionIndex] = sendIndex + 1;
+			const emitData = (messageData: unknown) => {
+				this.dispatch("message", { data: messageData });
+			};
 			const emit = (events: readonly Record<string, unknown>[]) => {
 				for (const event of events) {
-					this.dispatch("message", { data: JSON.stringify(event) });
+					emitData(JSON.stringify(event));
 				}
 			};
 			queueMicrotask(() => {
 				if (typeof script === "function") {
-					script({ connectionIndex: this.connectionIndex, sendIndex, body, emit });
+					script({ connectionIndex: this.connectionIndex, sendIndex, body, emit, emitData });
 				} else {
 					emit(script);
 				}
@@ -546,6 +550,245 @@ describe("openai-codex streaming", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("Codex SSE frame exceeded");
+	});
+
+	it("rejects an over-limit unterminated SSE line without waiting for its connection to close", async () => {
+		const token = mockToken();
+		const controller = new AbortController();
+		const chunk = new TextEncoder().encode("x".repeat(1024 * 1024));
+		let cancelled = false;
+		const body = new ReadableStream<Uint8Array>({
+			start(streamController) {
+				for (let index = 0; index < 9; index++) streamController.enqueue(chunk);
+			},
+			cancel() {
+				cancelled = true;
+			},
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } })),
+		);
+
+		const resultPromise = streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: token,
+			transport: "sse",
+			signal: controller.signal,
+		}).result();
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const result = await Promise.race([
+			resultPromise,
+			new Promise<undefined>((resolve) => {
+				timeout = setTimeout(() => resolve(undefined), 100);
+			}),
+		]);
+		if (timeout) clearTimeout(timeout);
+		if (!result) {
+			controller.abort();
+			await resultPromise;
+		}
+
+		expect(result?.stopReason).toBe("error");
+		expect(result?.errorMessage).toContain("8388608 character line limit");
+		expect(cancelled).toBe(true);
+	});
+
+	it("rejects an over-limit SSE line backlog without waiting for its connection to close", async () => {
+		const controller = new AbortController();
+		let cancelled = false;
+		const body = new ReadableStream<Uint8Array>({
+			start(streamController) {
+				streamController.enqueue(new TextEncoder().encode(":\n".repeat(1025)));
+			},
+			cancel() {
+				cancelled = true;
+			},
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } })),
+		);
+
+		const resultPromise = streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: mockToken(),
+			transport: "sse",
+			signal: controller.signal,
+		}).result();
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const result = await Promise.race([
+			resultPromise,
+			new Promise<undefined>((resolve) => {
+				timeout = setTimeout(() => resolve(undefined), 100);
+			}),
+		]);
+		if (timeout) clearTimeout(timeout);
+		if (!result) {
+			controller.abort();
+			await resultPromise;
+		}
+
+		expect(result?.stopReason).toBe("error");
+		expect(result?.errorMessage).toContain("1024 line limit");
+		expect(cancelled).toBe(true);
+	});
+
+	it("accepts an SSE frame at the line-count boundary", async () => {
+		const payload = `${":\n".repeat(1024)}\ndata: ${JSON.stringify({
+			type: "response.completed",
+			response: {
+				status: "completed",
+				usage: {
+					input_tokens: 1,
+					output_tokens: 1,
+					total_tokens: 2,
+					input_tokens_details: { cached_tokens: 0 },
+				},
+			},
+		})}\n\n`;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response(payload, { status: 200, headers: { "content-type": "text/event-stream" } })),
+		);
+
+		const result = await streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: mockToken(),
+			transport: "sse",
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it("rejects invalid UTF-8 instead of committing replacement characters from SSE", async () => {
+		const encoder = new TextEncoder();
+		const prefix = encoder.encode('data: {"type":"response.completed","response":{"id":"');
+		const suffix = encoder.encode(
+			'","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"input_tokens_details":{"cached_tokens":0}}}}\n\n',
+		);
+		const corrupted = new Uint8Array(prefix.length + 1 + suffix.length);
+		corrupted.set(prefix);
+		corrupted[prefix.length] = 0xff;
+		corrupted.set(suffix, prefix.length + 1);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => new Response(corrupted, { status: 200, headers: { "content-type": "text/event-stream" } })),
+		);
+
+		const result = await streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: mockToken(),
+			transport: "sse",
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("encoded data was not valid");
+	});
+
+	it("rejects invalid UTF-8 instead of committing replacement characters from WebSocket binary data", async () => {
+		const encoder = new TextEncoder();
+		const prefix = encoder.encode('{"type":"response.completed","response":{"id":"');
+		const suffix = encoder.encode(
+			'","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"input_tokens_details":{"cached_tokens":0}}}}',
+		);
+		const corrupted = new Uint8Array(prefix.length + 1 + suffix.length);
+		corrupted.set(prefix);
+		corrupted[prefix.length] = 0xff;
+		corrupted.set(suffix, prefix.length + 1);
+		installScriptedWebSocket([
+			({ emit, emitData }) => {
+				emit([buildWebSocketSuccessEvents()[0]!]);
+				emitData(corrupted);
+			},
+		]);
+		const fetchMock = vi.fn(async () => new Response("unexpected fetch", { status: 500 }));
+		vi.stubGlobal("fetch", fetchMock);
+
+		const result = await streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: mockToken(),
+			transport: "websocket",
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("encoded data was not valid");
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it("preflights a queued WebSocket Blob size behind a stalled decoder", async () => {
+		installScriptedWebSocket([
+			({ emitData }) => {
+				emitData({ size: 0, arrayBuffer: () => new Promise<ArrayBuffer>(() => {}) });
+				emitData({ size: 8 * 1024 * 1024 + 1, arrayBuffer: () => new Promise<ArrayBuffer>(() => {}) });
+			},
+		]);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(JSON.stringify({ error: { message: "Invalid fallback request" } }), { status: 400 }),
+			),
+		);
+
+		const result = await streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: mockToken(),
+			transport: "websocket",
+			timeoutMs: 20,
+		}).result();
+
+		expect(JSON.stringify(result.diagnostics)).toContain("WebSocket frame exceeded");
+		expect(JSON.stringify(result.diagnostics)).not.toContain("idle timeout");
+	});
+
+	it("bounds aggregate queued WebSocket payload bytes behind a stalled decoder", async () => {
+		installScriptedWebSocket([
+			({ emitData }) => {
+				emitData({ size: 0, arrayBuffer: () => new Promise<ArrayBuffer>(() => {}) });
+				emitData({ size: 8 * 1024 * 1024, arrayBuffer: () => new Promise<ArrayBuffer>(() => {}) });
+				emitData({ size: 8 * 1024 * 1024, arrayBuffer: () => new Promise<ArrayBuffer>(() => {}) });
+				emitData({ size: 8 * 1024 * 1024, arrayBuffer: () => new Promise<ArrayBuffer>(() => {}) });
+				emitData({ size: 1, arrayBuffer: () => new Promise<ArrayBuffer>(() => {}) });
+			},
+		]);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(JSON.stringify({ error: { message: "Invalid fallback request" } }), { status: 400 }),
+			),
+		);
+
+		const result = await streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: mockToken(),
+			transport: "websocket",
+			timeoutMs: 20,
+		}).result();
+
+		expect(JSON.stringify(result.diagnostics)).toContain("pending byte limit");
+		expect(JSON.stringify(result.diagnostics)).not.toContain("idle timeout");
+	});
+
+	it("accepts aggregate queued WebSocket payload bytes at the boundary", async () => {
+		installScriptedWebSocket([
+			({ emitData }) => {
+				emitData({ size: 0, arrayBuffer: () => new Promise<ArrayBuffer>(() => {}) });
+				emitData({ size: 8 * 1024 * 1024, arrayBuffer: () => new Promise<ArrayBuffer>(() => {}) });
+				emitData({ size: 8 * 1024 * 1024, arrayBuffer: () => new Promise<ArrayBuffer>(() => {}) });
+				emitData({ size: 8 * 1024 * 1024, arrayBuffer: () => new Promise<ArrayBuffer>(() => {}) });
+			},
+		]);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(
+				async () =>
+					new Response(JSON.stringify({ error: { message: "Invalid fallback request" } }), { status: 400 }),
+			),
+		);
+
+		const result = await streamOpenAICodexResponses(createCodexModel(), createCodexContext(), {
+			apiKey: mockToken(),
+			transport: "websocket",
+			timeoutMs: 20,
+		}).result();
+
+		expect(JSON.stringify(result.diagnostics)).toContain("idle timeout");
+		expect(JSON.stringify(result.diagnostics)).not.toContain("pending byte limit");
 	});
 
 	it("carries a misalignment block's explanation and steer for the host to offer continuation", async () => {

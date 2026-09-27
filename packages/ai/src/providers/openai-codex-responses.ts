@@ -77,7 +77,9 @@ const PREVIOUS_RESPONSE_NOT_FOUND_RETRIES = 1;
 const OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite";
 const WS_RESPONSES_LITE_CLIENT_METADATA_KEY = "ws_request_header_x_openai_internal_codex_responses_lite";
 const MAX_CODEX_EVENT_FRAME_SIZE = 8 * 1024 * 1024;
+const MAX_CODEX_SSE_FRAME_LINES = 1024;
 const MAX_PENDING_WEBSOCKET_FRAMES = 256;
+const MAX_PENDING_WEBSOCKET_BYTES = 3 * MAX_CODEX_EVENT_FRAME_SIZE;
 
 function assertSuccessfulTerminalResponse(output: AssistantMessage): void {
 	if (output.stopReason === "error" || output.stopReason === "aborted") {
@@ -1006,16 +1008,25 @@ function normalizeCodexStatus(status: unknown): CodexResponseStatus | undefined 
 // SSE Parsing
 // ============================================================================
 
-const MAX_SSE_LINE_CHARS = 64 * 1024 * 1024;
-
 async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerator<Record<string, unknown>> {
 	if (!response.body) return;
 
 	const reader = response.body.getReader();
-	const decoder = new TextDecoder();
-	const lines = new StreamingLineDecoder(MAX_SSE_LINE_CHARS);
+	const decoder = new TextDecoder("utf-8", { fatal: true });
+	const lines = new StreamingLineDecoder(MAX_CODEX_EVENT_FRAME_SIZE);
 	let frameLines: string[] = [];
 	let frameChars = 0;
+	const appendFrameLine = (line: string) => {
+		const nextFrameChars = frameChars + line.length;
+		if (nextFrameChars > MAX_CODEX_EVENT_FRAME_SIZE) {
+			throw new Error(`Codex SSE frame exceeded the ${MAX_CODEX_EVENT_FRAME_SIZE} character limit`);
+		}
+		if (frameLines.length >= MAX_CODEX_SSE_FRAME_LINES) {
+			throw new Error(`Codex SSE frame exceeded the ${MAX_CODEX_SSE_FRAME_LINES} line limit`);
+		}
+		frameChars = nextFrameChars;
+		frameLines.push(line);
+	};
 	const onAbort = () => {
 		void reader.cancel().catch(() => {});
 	};
@@ -1039,20 +1050,12 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 					if (event !== undefined) yield event;
 					continue;
 				}
-				frameChars += line.length;
-				if (frameChars > MAX_CODEX_EVENT_FRAME_SIZE) {
-					throw new Error(`Codex SSE frame exceeded the ${MAX_CODEX_EVENT_FRAME_SIZE} character limit`);
-				}
-				frameLines.push(line);
+				appendFrameLine(line);
 			}
 			if (done) {
 				const finalLine = lines.finish();
 				if (finalLine !== undefined) {
-					frameChars += finalLine.length;
-					if (frameChars > MAX_CODEX_EVENT_FRAME_SIZE) {
-						throw new Error(`Codex SSE frame exceeded the ${MAX_CODEX_EVENT_FRAME_SIZE} character limit`);
-					}
-					frameLines.push(finalLine);
+					appendFrameLine(finalLine);
 				}
 				const finalEvent = parseSSELines(frameLines);
 				if (finalEvent !== undefined) yield finalEvent;
@@ -1567,32 +1570,80 @@ function extractWebSocketCloseError(event: unknown): Error {
 	return new Error("WebSocket closed");
 }
 
-async function decodeWebSocketData(data: unknown): Promise<string | null> {
-	const assertFrameSize = (size: number, unit: "byte" | "character") => {
-		if (size <= MAX_CODEX_EVENT_FRAME_SIZE) return;
-		throw new CodexProtocolError(`Codex WebSocket frame exceeded the ${MAX_CODEX_EVENT_FRAME_SIZE} ${unit} limit`, {
-			payload: { size, unit, limit: MAX_CODEX_EVENT_FRAME_SIZE },
-		});
-	};
+function assertWebSocketFrameSize(size: number, unit: "byte" | "character"): void {
+	if (Number.isSafeInteger(size) && size >= 0 && size <= MAX_CODEX_EVENT_FRAME_SIZE) return;
+	throw new CodexProtocolError(`Codex WebSocket frame exceeded the ${MAX_CODEX_EVENT_FRAME_SIZE} ${unit} limit`, {
+		payload: { size, unit, limit: MAX_CODEX_EVENT_FRAME_SIZE },
+	});
+}
+
+function utf8ByteLength(text: string): number {
+	let bytes = 0;
+	for (let index = 0; index < text.length; index++) {
+		const codeUnit = text.charCodeAt(index);
+		if (codeUnit <= 0x7f) {
+			bytes++;
+		} else if (codeUnit <= 0x7ff) {
+			bytes += 2;
+		} else if (codeUnit >= 0xd800 && codeUnit <= 0xdbff && index + 1 < text.length) {
+			const nextCodeUnit = text.charCodeAt(index + 1);
+			if (nextCodeUnit >= 0xdc00 && nextCodeUnit <= 0xdfff) {
+				bytes += 4;
+				index++;
+			} else {
+				bytes += 3;
+			}
+		} else {
+			bytes += 3;
+		}
+	}
+	return bytes;
+}
+
+function webSocketFrameAdmissionBytes(data: unknown): number {
 	if (typeof data === "string") {
-		assertFrameSize(data.length, "character");
-		return data;
+		assertWebSocketFrameSize(data.length, "character");
+		return utf8ByteLength(data);
 	}
 	if (data instanceof ArrayBuffer) {
-		assertFrameSize(data.byteLength, "byte");
-		return new TextDecoder().decode(new Uint8Array(data));
+		assertWebSocketFrameSize(data.byteLength, "byte");
+		return data.byteLength;
+	}
+	if (ArrayBuffer.isView(data)) {
+		assertWebSocketFrameSize(data.byteLength, "byte");
+		return data.byteLength;
+	}
+	if (data && typeof data === "object" && "arrayBuffer" in data) {
+		const size = (data as { size?: unknown }).size;
+		if (typeof size === "number") {
+			assertWebSocketFrameSize(size, "byte");
+			return size;
+		}
+	}
+	return MAX_CODEX_EVENT_FRAME_SIZE;
+}
+
+async function decodeWebSocketData(data: unknown): Promise<string | null> {
+	if (typeof data === "string") {
+		assertWebSocketFrameSize(data.length, "character");
+		return data;
+	}
+	const decoder = new TextDecoder("utf-8", { fatal: true });
+	if (data instanceof ArrayBuffer) {
+		assertWebSocketFrameSize(data.byteLength, "byte");
+		return decoder.decode(new Uint8Array(data));
 	}
 	if (ArrayBuffer.isView(data)) {
 		const view = data as ArrayBufferView;
-		assertFrameSize(view.byteLength, "byte");
-		return new TextDecoder().decode(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+		assertWebSocketFrameSize(view.byteLength, "byte");
+		return decoder.decode(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
 	}
 	if (data && typeof data === "object" && "arrayBuffer" in data) {
 		const blobLike = data as { size?: unknown; arrayBuffer: () => Promise<ArrayBuffer> };
-		if (typeof blobLike.size === "number") assertFrameSize(blobLike.size, "byte");
+		if (typeof blobLike.size === "number") assertWebSocketFrameSize(blobLike.size, "byte");
 		const arrayBuffer = await blobLike.arrayBuffer();
-		assertFrameSize(arrayBuffer.byteLength, "byte");
-		return new TextDecoder().decode(new Uint8Array(arrayBuffer));
+		assertWebSocketFrameSize(arrayBuffer.byteLength, "byte");
+		return decoder.decode(new Uint8Array(arrayBuffer));
 	}
 	return null;
 }
@@ -1604,13 +1655,19 @@ async function* parseWebSocket(
 ): AsyncGenerator<Record<string, unknown>> {
 	const queue: Record<string, unknown>[] = [];
 	let queueIndex = 0;
-	const messageDataQueue: unknown[] = [];
+	const messageDataQueue: Array<{ data: unknown; admittedBytes: number; mayStall: boolean }> = [];
 	let messageDataIndex = 0;
+	let queuedMessageBytes = 0;
+	let queuedStallingMessages = 0;
+	let activeMessageBytes = 0;
+	let activeMessageMayStall = false;
 	let decodingMessage = false;
 	let pending: (() => void) | null = null;
 	let done = false;
 	let failed: Error | null = null;
 	let sawCompletion = false;
+	let messageAdmissionClosed = false;
+	let deferredAdmissionFailure: CodexProtocolError | null = null;
 	let deferredSocketFailure: Error | null = null;
 
 	const wake = () => {
@@ -1622,6 +1679,8 @@ async function* parseWebSocket(
 	const clearPendingMessageData = () => {
 		messageDataQueue.length = 0;
 		messageDataIndex = 0;
+		queuedMessageBytes = 0;
+		queuedStallingMessages = 0;
 	};
 	const hasPendingMessageWork = () => decodingMessage || messageDataIndex < messageDataQueue.length;
 	const finishDeferredSocketFailure = () => {
@@ -1647,26 +1706,42 @@ async function* parseWebSocket(
 		clearPendingMessageData();
 		wake();
 	};
+	const messageDecodeError = (cause: unknown, text: string | null): CodexProtocolError =>
+		cause instanceof CodexProtocolError
+			? cause
+			: new CodexProtocolError(`Invalid Codex WebSocket JSON: ${formatThrownValue(cause)}`, {
+					cause,
+					payload: text,
+				});
 	const failMessageDecode = (cause: unknown, text: string | null) => {
-		failed =
-			cause instanceof CodexProtocolError
-				? cause
-				: new CodexProtocolError(`Invalid Codex WebSocket JSON: ${formatThrownValue(cause)}`, {
-						cause,
-						payload: text,
-					});
+		failed = messageDecodeError(cause, text);
+		messageAdmissionClosed = true;
+		deferredAdmissionFailure = null;
 		done = true;
 		clearPendingMessageData();
 		wake();
 	};
+	const rejectMessageAdmission = (cause: unknown) => {
+		const error = messageDecodeError(cause, null);
+		messageAdmissionClosed = true;
+		if (!hasPendingMessageWork() || activeMessageMayStall || queuedStallingMessages > 0) {
+			failMessageDecode(error, null);
+			return;
+		}
+		deferredAdmissionFailure ??= error;
+	};
 	const drainMessageData = async () => {
 		try {
 			while (messageDataIndex < messageDataQueue.length && !(done && failed)) {
-				const data = messageDataQueue[messageDataIndex++];
+				const frame = messageDataQueue[messageDataIndex++];
+				queuedMessageBytes -= frame.admittedBytes;
+				if (frame.mayStall) queuedStallingMessages--;
+				activeMessageBytes = frame.admittedBytes;
+				activeMessageMayStall = frame.mayStall;
 				if (messageDataIndex === messageDataQueue.length) clearPendingMessageData();
 				let text: string | null = null;
 				try {
-					text = await decodeWebSocketData(data);
+					text = await decodeWebSocketData(frame.data);
 					if ((done && failed) || !text) continue;
 					const parsed = JSON.parse(text) as Record<string, unknown>;
 					const type = typeof parsed.type === "string" ? parsed.type : "";
@@ -1681,30 +1756,57 @@ async function* parseWebSocket(
 				} catch (cause) {
 					failMessageDecode(cause, text);
 					break;
+				} finally {
+					activeMessageBytes = 0;
+					activeMessageMayStall = false;
 				}
 			}
 		} catch (cause) {
 			failMessageDecode(cause, null);
 		} finally {
 			decodingMessage = false;
-			finishDeferredSocketFailure();
+			if (deferredAdmissionFailure && !done) {
+				const error = deferredAdmissionFailure;
+				deferredAdmissionFailure = null;
+				failMessageDecode(error, null);
+			} else {
+				finishDeferredSocketFailure();
+			}
 		}
 	};
 
 	const onMessage: WebSocketListener = (event) => {
-		if (done || !event || typeof event !== "object" || !("data" in event)) return;
+		if (done || messageAdmissionClosed || !event || typeof event !== "object" || !("data" in event)) return;
 		const data = (event as { data?: unknown }).data;
+		let admittedBytes: number;
+		try {
+			admittedBytes = webSocketFrameAdmissionBytes(data);
+		} catch (cause) {
+			rejectMessageAdmission(cause);
+			return;
+		}
 		const pendingFrameCount = messageDataQueue.length - messageDataIndex + (decodingMessage ? 1 : 0);
 		if (pendingFrameCount >= MAX_PENDING_WEBSOCKET_FRAMES) {
-			failMessageDecode(
+			rejectMessageAdmission(
 				new CodexProtocolError(`Codex WebSocket pending frame limit exceeded (${MAX_PENDING_WEBSOCKET_FRAMES})`, {
 					payload: { limit: MAX_PENDING_WEBSOCKET_FRAMES },
 				}),
-				null,
 			);
 			return;
 		}
-		messageDataQueue.push(data);
+		const pendingBytes = activeMessageBytes + queuedMessageBytes;
+		if (pendingBytes + admittedBytes > MAX_PENDING_WEBSOCKET_BYTES) {
+			rejectMessageAdmission(
+				new CodexProtocolError(`Codex WebSocket pending byte limit exceeded (${MAX_PENDING_WEBSOCKET_BYTES})`, {
+					payload: { pendingBytes, frameBytes: admittedBytes, limit: MAX_PENDING_WEBSOCKET_BYTES },
+				}),
+			);
+			return;
+		}
+		const mayStall = Boolean(data && typeof data === "object" && "arrayBuffer" in data);
+		messageDataQueue.push({ data, admittedBytes, mayStall });
+		queuedMessageBytes += admittedBytes;
+		if (mayStall) queuedStallingMessages++;
 		if (decodingMessage) return;
 		decodingMessage = true;
 		void drainMessageData();
