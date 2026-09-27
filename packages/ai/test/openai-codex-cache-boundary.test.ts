@@ -589,4 +589,144 @@ describe("transport telemetry (turn-economics transport-observability task)", ()
 			vi.useRealTimers();
 		}
 	});
+
+	it("evicts a protocol-corrupted websocket and safely falls back before output", async () => {
+		let connections = 0;
+		let sends = 0;
+		let closes = 0;
+
+		class MockWebSocket {
+			static readonly OPEN = 1;
+			static readonly CLOSED = 3;
+			readyState = MockWebSocket.OPEN;
+			private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
+
+			constructor() {
+				connections++;
+				queueMicrotask(() => this.dispatch("open", {}));
+			}
+
+			addEventListener(type: string, listener: (event: unknown) => void): void {
+				const listeners = this.listeners.get(type) ?? new Set<(event: unknown) => void>();
+				listeners.add(listener);
+				this.listeners.set(type, listeners);
+			}
+
+			removeEventListener(type: string, listener: (event: unknown) => void): void {
+				this.listeners.get(type)?.delete(listener);
+			}
+
+			send(): void {
+				sends++;
+				queueMicrotask(() => {
+					if (sends === 1) {
+						this.dispatch("message", { data: "{malformed" });
+						return;
+					}
+					for (const event of responseEvents("resp_ws", "msg_ws", "websocket recovered")) {
+						this.dispatch("message", { data: JSON.stringify(event) });
+					}
+				});
+			}
+
+			close(): void {
+				closes++;
+				this.readyState = MockWebSocket.CLOSED;
+			}
+
+			private dispatch(type: string, event: unknown): void {
+				for (const listener of this.listeners.get(type) ?? []) listener(event);
+			}
+		}
+
+		vi.stubGlobal("WebSocket", MockWebSocket);
+		const fetchMock = vi.fn(async () => completedSse("SSE recovered"));
+		vi.stubGlobal("fetch", fetchMock);
+		const options = { apiKey: mockToken(), transport: "auto" as const, sessionId: "protocol-corruption" };
+
+		const recovered = await streamOpenAICodexResponses(
+			model,
+			context([{ role: "user", content: "hello", timestamp: 1 }]),
+			options,
+		).result();
+		const next = await streamOpenAICodexResponses(
+			model,
+			context([{ role: "user", content: "next", timestamp: 2 }]),
+			options,
+		).result();
+
+		expect(recovered.stopReason).toBe("stop");
+		expect(recovered.content).toContainEqual(expect.objectContaining({ type: "text", text: "SSE recovered" }));
+		expect(next.stopReason).toBe("stop");
+		expect(next.content).toContainEqual(expect.objectContaining({ type: "text", text: "websocket recovered" }));
+		expect(connections).toBe(2);
+		expect(closes).toBe(1);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not replay through SSE after a corrupted websocket already emitted output", async () => {
+		let closes = 0;
+
+		class MockWebSocket {
+			static readonly OPEN = 1;
+			static readonly CLOSED = 3;
+			readyState = MockWebSocket.OPEN;
+			private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
+
+			constructor() {
+				queueMicrotask(() => this.dispatch("open", {}));
+			}
+
+			addEventListener(type: string, listener: (event: unknown) => void): void {
+				const listeners = this.listeners.get(type) ?? new Set<(event: unknown) => void>();
+				listeners.add(listener);
+				this.listeners.set(type, listeners);
+			}
+
+			removeEventListener(type: string, listener: (event: unknown) => void): void {
+				this.listeners.get(type)?.delete(listener);
+			}
+
+			send(): void {
+				queueMicrotask(() => {
+					this.dispatch("message", {
+						data: JSON.stringify({ type: "response.created", response: { id: "partial" } }),
+					});
+					this.dispatch("message", { data: "{malformed" });
+				});
+			}
+
+			close(): void {
+				closes++;
+				this.readyState = MockWebSocket.CLOSED;
+			}
+
+			private dispatch(type: string, event: unknown): void {
+				for (const listener of this.listeners.get(type) ?? []) listener(event);
+			}
+		}
+
+		vi.stubGlobal("WebSocket", MockWebSocket);
+		const fetchMock = vi.fn(async () => completedSse("next-turn recovery"));
+		vi.stubGlobal("fetch", fetchMock);
+		const options = { apiKey: mockToken(), transport: "auto" as const, sessionId: "started-protocol-corruption" };
+
+		const partial = await streamOpenAICodexResponses(
+			model,
+			context([{ role: "user", content: "hello", timestamp: 1 }]),
+			options,
+		).result();
+		expect(partial.stopReason).toBe("error");
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(closes).toBe(1);
+
+		const recovered = await streamOpenAICodexResponses(
+			model,
+			context([{ role: "user", content: "retry safely", timestamp: 2 }]),
+			options,
+		).result();
+		expect(recovered.stopReason).toBe("stop");
+		expect(recovered.content).toContainEqual(expect.objectContaining({ type: "text", text: "next-turn recovery" }));
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
 });

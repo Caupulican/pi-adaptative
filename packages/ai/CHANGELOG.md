@@ -15,6 +15,7 @@
 - OpenAI Codex WebSocket responses rejected with HTTP 401 use the same one-shot OAuth recovery path and request-wide recovery budget as SSE, including replacement credential headers and socket identity.
 - OpenAI Codex WebSocket pooling binds reusable connections to their exact endpoint and handshake headers, preserves a busy predecessor through identity replacement, and fences stale idle-expiry callbacks.
 - OpenAI Codex WebSocket streaming decodes binary frames in wire order and lets already-delivered terminal frames settle before a following close or error.
+- OpenAI Codex treats malformed WebSocket frames as transport corruption, evicts their connection state, and falls back to SSE only before any response output is published.
 
 ## [0.99.52] - 2026-09-26
 

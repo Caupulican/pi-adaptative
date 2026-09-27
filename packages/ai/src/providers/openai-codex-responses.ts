@@ -515,7 +515,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					return;
 				} catch (error) {
 					const aborted = options?.signal?.aborted;
-					if (aborted || isCodexNonTransportError(error)) {
+					if (aborted || isCodexResponseRejection(error)) {
 						throw error;
 					}
 					appendAssistantMessageDiagnostic(
@@ -896,8 +896,8 @@ class CodexProtocolError extends Error {
 	}
 }
 
-function isCodexNonTransportError(error: unknown): boolean {
-	return error instanceof CodexApiError || error instanceof CodexProtocolError;
+function isCodexResponseRejection(error: unknown): boolean {
+	return error instanceof CodexApiError;
 }
 
 function isWebSocketConnectionLimitError(error: unknown): boolean {
@@ -1986,7 +1986,7 @@ async function processWebSocketStream(
 		// transport failure, an unusable socket, or a continuation the server no longer has still
 		// resets both; the missing-continuation replay below handles the last case.
 		const rejectedOnLiveSocket =
-			isCodexNonTransportError(error) &&
+			isCodexResponseRejection(error) &&
 			!isPreviousResponseNotFoundError(error) &&
 			!isWebSocketConnectionLimitError(error) &&
 			isWebSocketReusable(socket);
