@@ -365,6 +365,26 @@ describe("withStreamIdleWatchdog (phase-aware)", () => {
 		expect(isStreamStallError(fake.signal()?.reason)).toBe(false);
 	});
 
+	it("bounds caller abort when an established inner stream ignores cancellation", async () => {
+		const fake = makeFakeStreamFn();
+		const controller = new AbortController();
+		const wrapped = withStreamIdleWatchdog(fake.streamFn, BOUNDS);
+		const stream = await wrapped({} as never, {} as never, { signal: controller.signal });
+		let settled = false;
+		void stream.result().then(() => {
+			settled = true;
+		});
+
+		controller.abort(new Error("owner cancelled"));
+		await vi.advanceTimersByTimeAsync(1_000);
+
+		expect(settled).toBe(true);
+		const result = await stream.result();
+		expect(result.stopReason).toBe("aborted");
+		expect(result.errorMessage).toContain("stream aborted before terminal event");
+		expect(result.errorMessage).not.toContain("stream stalled");
+	});
+
 	it("settles as aborted when caller abort makes the inner stream end without a terminal event", async () => {
 		const fake = makeFakeStreamFn();
 		const ac = new AbortController();

@@ -143,6 +143,7 @@ export const DEFAULT_OUTPUT_REPETITION_WINDOW_CHARS = 200;
 
 /** An ordered-list marker: a number followed by "." or ")" and whitespace, not part of a word or version. */
 const ORDERED_LIST_MARKER_RE = /(?<![\w.])\d+[.)](?=\s)/g;
+const CALLER_ABORT_TERMINAL_GRACE_MS = 1_000;
 
 function outputRepetition(message: AssistantMessage, opts: StreamIdleOptions): number | undefined {
 	const repeatsNeeded = opts.outputRepetitionRepeats ?? DEFAULT_OUTPUT_REPETITION_REPEATS;
@@ -256,8 +257,14 @@ export function withStreamIdleWatchdog(
 		let transportConfirmed = false;
 		let streamSetupSettled = false;
 		let terminalPushed = false;
+		let abortSettlementTimer: NodeJS.Timeout | undefined;
+		const clearAbortSettlementTimer = () => {
+			if (abortSettlementTimer) clearTimeout(abortSettlementTimer);
+			abortSettlementTimer = undefined;
+		};
 		const pushFailure = (error?: unknown) => {
 			if (terminalPushed || stalled) return;
+			clearAbortSettlementTimer();
 			const stopReason = callerAborted ? "aborted" : "error";
 			const detail = error instanceof Error ? `: ${error.message}` : error === undefined ? "" : `: ${String(error)}`;
 			terminalPushed = true;
@@ -294,6 +301,7 @@ export function withStreamIdleWatchdog(
 		const stall = (phase: StallPhase, elapsedMs: number) => {
 			if (callerAborted || stalled || terminalPushed) return;
 			stalled = true;
+			clearAbortSettlementTimer();
 			opts.onStall?.({ phase, elapsedMs });
 			const stallError = new StreamStallError(phase, elapsedMs);
 			const description = stallError.message;
@@ -321,8 +329,9 @@ export function withStreamIdleWatchdog(
 			watchdog.touch(opts.firstProgressMs);
 		};
 		const originalOnResponse = streamOptions?.onResponse;
-		const pushSetupAbort = () => {
-			if (streamSetupSettled || terminalPushed || stalled) return;
+		const pushAbortFallback = () => {
+			abortSettlementTimer = undefined;
+			if (!callerAborted || terminalPushed || stalled) return;
 			terminalPushed = true;
 			watchdog.disarm();
 			callerSignal?.removeEventListener("abort", onCallerAbort);
@@ -332,7 +341,9 @@ export function withStreamIdleWatchdog(
 				error: {
 					...latest,
 					stopReason: "aborted",
-					errorMessage: "stream aborted before terminal event during stream setup",
+					errorMessage: streamSetupSettled
+						? "stream aborted before terminal event"
+						: "stream aborted before terminal event during stream setup",
 				},
 			});
 			settleReady();
@@ -340,7 +351,12 @@ export function withStreamIdleWatchdog(
 		const onCallerAbort = () => {
 			callerAborted = true;
 			controller.abort(callerSignal?.reason);
-			pushSetupAbort();
+			if (!streamSetupSettled) {
+				pushAbortFallback();
+				return;
+			}
+			abortSettlementTimer = setTimeout(pushAbortFallback, CALLER_ABORT_TERMINAL_GRACE_MS);
+			abortSettlementTimer.unref?.();
 		};
 		if (callerAborted) {
 			onCallerAbort();
@@ -375,13 +391,14 @@ export function withStreamIdleWatchdog(
 				// stream is already terminal in that case, so never attach a late event pump.
 				if (terminalPushed || stalled || callerAborted) return;
 				for await (const event of inner) {
-					if (stalled) break;
+					if (stalled || terminalPushed) break;
 					latest = partialFromEvent(event);
 					const repeats = outputRepetition(latest, opts);
 					if (repeats !== undefined) {
 						// A degenerate loop: end it here, before the output cap, with a message the host
 						// classifies as a runaway rather than a retryable stall.
 						stalled = true;
+						clearAbortSettlementTimer();
 						watchdog.disarm();
 						callerSignal?.removeEventListener("abort", onCallerAbort);
 						controller.abort();
@@ -413,6 +430,7 @@ export function withStreamIdleWatchdog(
 					const terminal = event.type === "done" || event.type === "error";
 					if (terminal) {
 						terminalPushed = true;
+						clearAbortSettlementTimer();
 						watchdog.disarm();
 						callerSignal?.removeEventListener("abort", onCallerAbort);
 					}
@@ -434,6 +452,7 @@ export function withStreamIdleWatchdog(
 			} catch (error) {
 				pushFailure(error);
 			} finally {
+				clearAbortSettlementTimer();
 				watchdog.disarm();
 				callerSignal?.removeEventListener("abort", onCallerAbort);
 			}

@@ -580,6 +580,14 @@ comparison collapses ordered-list markers, so an enumerated loop whose only chan
 is still a loop, while rows that differ only in their numbers are still output.
 Pinned by `packages/agent/test/reliability/stream-idle.test.ts`.
 
+**Caller cancellation owns outer-stream settlement.** Before provider setup completes, cancellation
+settles immediately. After setup, the provider has a bounded grace period to publish its own abort
+terminal; if it ignores abort and remains silent, the watchdog publishes an `aborted` terminal
+itself. A cooperative provider terminal wins during that grace, and cancellation is never reported
+as a retryable stream stall. Why: once setup had completed, caller abort disabled both the setup
+fallback and the idle-stall fallback, so an abort-ignoring iterator could keep the harness pending
+forever. Pinned by `packages/agent/test/reliability/stream-idle.test.ts`.
+
 **A tool-loop runaway is evidence.** A repeated tool call, a stagnant tool cycle, or the
 provider-turn limit records a runaway stop, demotes the model to the strong tier for thirty days,
 and the goal continues on a recovery path. An output runaway from the stream guard ends the
@@ -1000,6 +1008,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-26 | Caller cancellation owns outer-stream settlement: cooperative provider abort terminals retain a bounded grace period, then a silent abort-ignoring stream settles as aborted rather than deadlocking or becoming a retryable stall. |
 | 2026-09-26 | Integrity hooks receive per-extension copies of one detached context snapshot, fencing late and sibling mutations without weakening high-impact timeout policy. |
 | 2026-09-26 | Process-matrix maintenance starts and settles every admitted reconciliation mutation before idle or shutdown can be reported. |
 | 2026-09-26 | Independent shell-lane, task-shell, and runtime-resource terminals all settle before shutdown reports sibling failures. |

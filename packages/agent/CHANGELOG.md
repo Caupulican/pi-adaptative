@@ -7,6 +7,7 @@
 ### Fixed
 
 - Host-synthesized assistant handoffs retain their origin so provider lifecycle recovery does not mistake them for transport responses.
+- Caller cancellation settles stream watchdogs within a bounded grace period when an established provider ignores abort, while preserving cooperative provider abort terminals.
 
 ## [0.99.52] - 2026-09-26
 
