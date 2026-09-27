@@ -239,7 +239,7 @@ export class GatewayRegistry {
 			state.desiredStart?.id === attempt.request.id &&
 			attempt.request.isCurrent() &&
 			!state.stopAttempt;
-		if (!stillDesired || (settlement === "fulfilled" && timedOut)) {
+		if (!stillDesired || settlement === "rejected" || timedOut) {
 			await this.startProviderStop(provider, state);
 		}
 		await this.startDesiredProvider(provider, state);

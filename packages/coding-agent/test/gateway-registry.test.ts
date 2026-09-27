@@ -249,6 +249,67 @@ describe("GatewayRegistry (R8 interface-driven gateways/cron)", () => {
 		expect(oldStopCalls).toBe(1);
 	});
 
+	it("compensates a synchronously rejected start that may have acquired resources", async () => {
+		const registry = new GatewayRegistry();
+		let active = false;
+		let startCalls = 0;
+		let stopCalls = 0;
+		registry.registerChannel({
+			name: "partial-sync-start",
+			start: () => {
+				startCalls += 1;
+				active = true;
+				throw new Error("start failed after allocation");
+			},
+			send: () => {},
+			stop: () => {
+				stopCalls += 1;
+				active = false;
+			},
+		});
+
+		await registry.start(() => {});
+
+		expect(startCalls).toBe(1);
+		expect(stopCalls).toBe(1);
+		expect(active).toBe(false);
+	});
+
+	it("compensates a timed-out start when its late settlement rejects", async () => {
+		vi.useFakeTimers();
+		const registry = new GatewayRegistry({ lifecycleTimeoutMs: 25 });
+		let rejectStart!: (error: Error) => void;
+		const startGate = new Promise<void>((_resolve, reject) => {
+			rejectStart = reject;
+		});
+		let active = false;
+		let stopCalls = 0;
+		registry.registerChannel({
+			name: "partial-late-start",
+			start: () => {
+				active = true;
+				return startGate;
+			},
+			send: () => {},
+			stop: () => {
+				stopCalls += 1;
+				active = false;
+			},
+		});
+
+		const starting = registry.start(() => {});
+		await vi.advanceTimersByTimeAsync(25);
+		await starting;
+		expect(active).toBe(true);
+		expect(stopCalls).toBe(0);
+
+		rejectStart(new Error("late start failure"));
+		await registry.start(() => {});
+
+		expect(stopCalls).toBe(1);
+		expect(active).toBe(false);
+	});
+
 	it("bounds a provider start that never settles and continues starting independent providers", async () => {
 		vi.useFakeTimers();
 		const diagnostics: string[] = [];

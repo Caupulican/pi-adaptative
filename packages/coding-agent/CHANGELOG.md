@@ -30,6 +30,7 @@
 - A canceled file mutation waiting behind an earlier same-file mutation now rejects immediately and cannot execute after the predecessor settles.
 - A canceled mutation now abandons pending resource-identity resolution and releases the backend registration queue, so an unresolved resolver cannot deadlock unrelated file mutations.
 - Shell-lane pool disposal now attempts every owned lane when a lane adapter throws synchronously, while preserving synchronous idle-retirement behavior.
+- Gateway providers whose startup rejects now receive bounded compensating cleanup immediately or after late timeout settlement, preventing partial listeners and sockets from remaining active for the session.
 
 ## [0.99.52] - 2026-09-26
 
