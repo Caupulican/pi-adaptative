@@ -26,6 +26,7 @@ import {
 } from "./adaptive/index.ts";
 import { configFile } from "./agent-paths.ts";
 import { AgentSession } from "./agent-session.ts";
+import { SEMANTIC_USAGE_CUSTOM_TYPE } from "./agent-session-contracts.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { compileExecutionCharter, type ExecutionCharter } from "./autonomy/execution-charter.ts";
@@ -650,7 +651,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// A session without any System One key starts without System One, as before; with one, every
 		// evaluation resolves provider, model and key anew, so a provider switch needs no restart.
 		if ((await access.resolve()).kind === "ready") {
-			const reviewer = new TypeSafeReviewer({ access });
+			const reviewer = new TypeSafeReviewer({
+				access,
+				onUsage: (receipt) => {
+					sessionManager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, {
+						reportId: receipt.receiptId,
+						provider: receipt.provider,
+						model: receipt.model,
+						attempt: receipt.attempt,
+						usage: receipt.usage,
+						costStatus: receipt.costStatus,
+					});
+				},
+			});
 			const adapter = new SystemOneJevAdapter(reviewer, createSystemOneConfig({ enabled: true }), {
 				access,
 				getUserKeys: () => access.keys(),

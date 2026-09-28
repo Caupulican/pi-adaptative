@@ -1,7 +1,12 @@
 import type { SessionEntry } from "@caupulican/pi-agent-core/session";
 import { getSessionEntryUsage } from "@caupulican/pi-agent-core/usage";
 import type { Usage } from "@caupulican/pi-ai";
-import { SPAWNED_USAGE_CUSTOM_TYPE, type SpawnedUsageReport } from "../agent-session-contracts.ts";
+import {
+	SEMANTIC_USAGE_CUSTOM_TYPE,
+	type SemanticUsageReport,
+	SPAWNED_USAGE_CUSTOM_TYPE,
+	type SpawnedUsageReport,
+} from "../agent-session-contracts.ts";
 import type { DailyUsageTotals, DailyUsageWindow } from "./daily-usage.ts";
 
 export interface CurrentSessionCostTotals {
@@ -13,6 +18,7 @@ export interface CurrentSessionCostTotals {
 
 export interface CurrentSessionCostAccumulator extends CurrentSessionCostTotals {
 	seenSubagentReportIds: Set<string>;
+	seenSemanticReportIds: Set<string>;
 }
 
 export interface SessionCostSummary extends CurrentSessionCostTotals {
@@ -39,6 +45,7 @@ export function createCurrentSessionCostAccumulator(): CurrentSessionCostAccumul
 		subagentReports: 0,
 		currentCost: 0,
 		seenSubagentReportIds: new Set<string>(),
+		seenSemanticReportIds: new Set<string>(),
 	};
 }
 
@@ -51,6 +58,16 @@ export function accumulateCurrentSessionCostsFromEntries(
 		if (usage) {
 			const total = getUsageTotalCost(usage);
 			if (total !== undefined) accumulator.ownCost += total;
+			continue;
+		}
+
+		if (entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE) {
+			const report = entry.data as SemanticUsageReport | undefined;
+			const total = getUsageTotalCost(report?.usage);
+			if (total === undefined || !report?.reportId || accumulator.seenSemanticReportIds.has(report.reportId))
+				continue;
+			accumulator.seenSemanticReportIds.add(report.reportId);
+			accumulator.ownCost += total;
 			continue;
 		}
 
@@ -70,10 +87,11 @@ export function accumulateCurrentSessionCostsFromEntries(
 }
 
 export function aggregateCurrentSessionCostsFromEntries(entries: readonly SessionEntry[]): CurrentSessionCostTotals {
-	const { seenSubagentReportIds: _seenSubagentReportIds, ...totals } = accumulateCurrentSessionCostsFromEntries(
-		createCurrentSessionCostAccumulator(),
-		entries,
-	);
+	const {
+		seenSubagentReportIds: _seenSubagentReportIds,
+		seenSemanticReportIds: _seenSemanticReportIds,
+		...totals
+	} = accumulateCurrentSessionCostsFromEntries(createCurrentSessionCostAccumulator(), entries);
 	return totals;
 }
 

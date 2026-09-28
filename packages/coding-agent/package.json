@@ -87,7 +87,8 @@
 		"test:destructive:stress": "vitest run --config vitest.destructive.config.ts test-destructive/stress",
 		"test:destructive:soak": "vitest run --config vitest.destructive.config.ts test-destructive/soak",
 		"postinstall": "node scripts/postinstall-python-runtime.mjs",
-		"eval:completion": "node --conditions=pi-source src/core/system-one/evals/completion-eval-cli.ts"
+		"eval:completion": "node --conditions=pi-source src/core/system-one/evals/completion-eval-cli.ts",
+		"eval:autonomy": "node --conditions=pi-source src/core/system-one/evals/autonomy-benchmark-cli.ts"
 	},
 	"dependencies": {
 		"@caupulican/pi-agent-core": "^0.100.2",

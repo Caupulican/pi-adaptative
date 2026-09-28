@@ -3,6 +3,7 @@ import type { Usage } from "@caupulican/pi-ai";
 import type { TSchema } from "typebox";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
+import { TypeSafeEvidenceMaterializer } from "../review/typesafe-evidence-materializer.ts";
 import type { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
 import { TypeSafeReviewer } from "../review/typesafe-reviewer.ts";
 import { type CredentialExposureBoundary, isProtectedCredentialPath } from "../secrets/credential-exposure-guard.ts";
@@ -165,6 +166,11 @@ export function createWorkerToolAdapterRegistry(sources: WorkerToolAdapterSource
 					new TypeSafeReviewer(dependencies),
 					dependencies.evidenceStore,
 					context.reportUsage,
+					new TypeSafeEvidenceMaterializer({
+						getCwd: () => context.cwd,
+						...(sources.artifactStore ? { artifactStore: sources.artifactStore } : {}),
+						...(context.credentialBoundary ? { credentialBoundary: context.credentialBoundary } : {}),
+					}),
 				);
 				// Isolated workers do not use the foreground prompt-guideline composer.
 				return wrapToolDefinition<typeof definition.parameters, unknown>({

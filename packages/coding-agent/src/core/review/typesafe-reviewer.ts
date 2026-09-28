@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { combineAbortSignals } from "@caupulican/pi-ai/abort-signals";
 import { retryProviderRequest } from "@caupulican/pi-ai/provider-retry";
 import { Value } from "typebox/value";
@@ -8,12 +8,14 @@ import {
 	type EvaluationInput,
 	type EvaluationResponse,
 	evaluationInputSchema,
+	getEvaluationUsage,
 	REVIEW_CONFIDENCE,
 	type ReviewInput,
 	reviewInputSchema,
 	serializeEvaluation,
 	validateEvaluationResponse,
 } from "./typesafe-contract.ts";
+import { type PricedTypeSafeUsage, priceTypeSafeUsage } from "./typesafe-usage.ts";
 
 export type { ReviewInput } from "./typesafe-contract.ts";
 
@@ -67,6 +69,13 @@ export interface TypeSafeTransportAttempt {
 	response?: unknown;
 }
 
+export interface TypeSafeUsageReceipt extends PricedTypeSafeUsage {
+	readonly receiptId: string;
+	readonly provider: string;
+	readonly model: string;
+	readonly attempt: number;
+}
+
 export interface EvaluationRecord {
 	request: EvaluationInput & { model: string };
 	requestSha256: string;
@@ -88,12 +97,14 @@ export class TypeSafeReviewError extends Error {
 	readonly requestSha256: string;
 	readonly request: EvaluationRecord["request"];
 	readonly transportAttempts: TypeSafeTransportAttempt[];
+	readonly failureKind: "transport" | "usage_recording";
 	constructor(
 		message: string,
 		requestSha256: string,
 		request: EvaluationRecord["request"],
 		response: unknown,
 		transportAttempts: TypeSafeTransportAttempt[],
+		failureKind: "transport" | "usage_recording" = "transport",
 	) {
 		super(message);
 		this.name = "TypeSafeReviewError";
@@ -101,6 +112,7 @@ export class TypeSafeReviewError extends Error {
 		this.request = request;
 		this.response = response;
 		this.transportAttempts = transportAttempts;
+		this.failureKind = failureKind;
 	}
 }
 
@@ -118,6 +130,8 @@ export interface SystemOneReviewerDeps {
 	model?: string;
 	endpoint?: string;
 	modelsEndpoint?: string;
+	/** One durable, provider-priced receipt for every response carrying valid usage, retries included. */
+	onUsage?(receipt: TypeSafeUsageReceipt): void;
 }
 
 /** One evaluation's connection: which provider, which model, which key (absent when not configured). */
@@ -231,7 +245,10 @@ export class SystemOneReviewer {
 	async review(
 		input: ReviewInput,
 		signal?: AbortSignal,
-		onResponse?: (attempts: readonly TypeSafeTransportAttempt[]) => void,
+		onResponse?: (
+			attempts: readonly TypeSafeTransportAttempt[],
+			connection: { readonly provider: string; readonly model: string },
+		) => void,
 	): Promise<ReviewRecord> {
 		signal?.throwIfAborted();
 		const snapshot: ReviewInput = JSON.parse(serializeEvaluation(input));
@@ -269,7 +286,10 @@ export class SystemOneReviewer {
 	async evaluate(
 		input: EvaluationInput,
 		signal?: AbortSignal,
-		onResponse?: (attempts: readonly TypeSafeTransportAttempt[]) => void,
+		onResponse?: (
+			attempts: readonly TypeSafeTransportAttempt[],
+			connection: { readonly provider: string; readonly model: string },
+		) => void,
 	): Promise<EvaluationRecord> {
 		signal?.throwIfAborted();
 		// Snapshot before any await. No omitted fields or context truncation are permitted.
@@ -292,6 +312,7 @@ export class SystemOneReviewer {
 		if (body.includes(JSON.stringify(key).slice(1, -1)) || API_CREDENTIAL.test(body))
 			throw new Error(`${providerName} evidence contains an API credential`);
 		const requestSha256 = createHash("sha256").update(body).digest("hex");
+		const evaluationId = randomUUID();
 		const timeout = new AbortController();
 		const timer = setTimeout(() => timeout.abort(), 50_000);
 		const combined = combineAbortSignals([signal, timeout.signal]);
@@ -336,7 +357,18 @@ export class SystemOneReviewer {
 					raw = decoded.raw;
 					attempt.response = raw;
 					try {
-						onResponse?.(transportAttempts);
+						const reportedUsage = getEvaluationUsage(raw);
+						if (reportedUsage) {
+							const priced = priceTypeSafeUsage(driver.id, request.model, reportedUsage);
+							this.deps.onUsage?.({
+								...priced,
+								receiptId: `${evaluationId}:${attempts}`,
+								provider: driver.id,
+								model: request.model,
+								attempt: attempts,
+							});
+						}
+						onResponse?.(transportAttempts, { provider: driver.id, model: request.model });
 					} catch {
 						// A local persistence failure must never inherit provider retry metadata.
 						throw new Error(`${providerName} usage recording failed`);
@@ -376,7 +408,16 @@ export class SystemOneReviewer {
 				: error instanceof Error && errorRegex.test(error.message)
 					? error.message
 					: `${providerName} request failed`;
-			throw new TypeSafeReviewError(redactReviewText(message, key), requestSha256, request, raw, transportAttempts);
+			throw new TypeSafeReviewError(
+				redactReviewText(message, key),
+				requestSha256,
+				request,
+				raw,
+				transportAttempts,
+				error instanceof Error && error.message === `${providerName} usage recording failed`
+					? "usage_recording"
+					: "transport",
+			);
 		} finally {
 			clearTimeout(timer);
 			combined.cleanup();

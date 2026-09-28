@@ -1,3 +1,4 @@
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -7,6 +8,7 @@ import {
 	triageOperation,
 } from "../../src/core/system-one/operation-classifier.ts";
 import { OperationGate } from "../../src/core/system-one/operation-gate.ts";
+import { tempDir } from "../temp-dir.ts";
 
 const scope = join(tmpdir(), "pi-operation-gate-task");
 
@@ -63,6 +65,11 @@ describe("operation triage", () => {
 				code: 'import urllib.request\nurllib.request.urlopen("https://api.example.test", data=b"x")',
 			}),
 		).toMatchObject({ kind: "judged", operationKind: "code" });
+		expect(triage("run_process", { executable: "node", args: ["script.js"] })).toMatchObject({
+			kind: "judged",
+			operationKind: "shell",
+			operation: '"node" "script.js"',
+		});
 		expect(triage("write", { path: "/srv/shared/team.yaml", content: "" })).toMatchObject({
 			kind: "judged",
 			operationKind: "write_outside_task",
@@ -254,5 +261,72 @@ describe("operation gate", () => {
 		turn = "turn-2";
 		await operationGate.check("bash", command, scope, "root");
 		expect(fake.calls).toBe(2);
+	});
+
+	it("keys judgments by canonical execution directory and local script content", async () => {
+		const workspace = tempDir("pi-operation-identity-");
+		const first = join(workspace, "first");
+		const second = join(workspace, "second");
+		mkdirSync(first);
+		mkdirSync(second);
+		writeFileSync(join(first, "task.sh"), "echo first\n");
+		writeFileSync(join(second, "task.sh"), "echo second\n");
+
+		const states: Record<string, unknown>[] = [];
+		const contextualEngine: OperationEffectEngine = {
+			async evaluate(_program, state) {
+				states.push(state ?? {});
+				return { answers: Object.fromEntries(Object.entries(LOCAL).map(([id, noul]) => [id, { noul }])) };
+			},
+		};
+		const operationGate = new OperationGate({
+			getEngine: () => contextualEngine,
+			getRequest: () => "Run the task script.",
+			getScopeCwd: () => workspace,
+			getTurnKey: () => "turn-1",
+			isGranted: () => true,
+			notify: () => {},
+		});
+		const script = { command: "bash ./task.sh" };
+
+		await operationGate.check("bash", script, first, "root");
+		await operationGate.check("bash", script, join(first, "."), "root");
+		await operationGate.check("bash", script, second, "root");
+		writeFileSync(join(first, "task.sh"), "echo changed\n");
+		await operationGate.check("bash", script, first, "root");
+
+		expect(states).toHaveLength(3);
+		expect(states.map((state) => (state.operation as { execution_directory: string }).execution_directory)).toEqual([
+			realpathSync(first),
+			realpathSync(second),
+			realpathSync(first),
+		]);
+		const scriptHashes = states.map(
+			(state) =>
+				(state.operation as { invocations: Array<{ script?: { sha256?: string } }> }).invocations[0]?.script
+					?.sha256,
+		);
+		expect(scriptHashes[0]).toMatch(/^[a-f0-9]{64}$/);
+		expect(scriptHashes[1]).not.toBe(scriptHashes[0]);
+		expect(scriptHashes[2]).not.toBe(scriptHashes[0]);
+	});
+
+	it("keeps YOLO capability when a configured System One becomes unavailable", async () => {
+		const notices: string[] = [];
+		const operationGate = new OperationGate({
+			getEngine: () => ({
+				evaluate: async () => {
+					throw new Error("engine down");
+				},
+			}),
+			getRequest: () => "Run autonomously.",
+			getScopeCwd: () => scope,
+			getTurnKey: () => "turn-1",
+			isGranted: () => true,
+			notify: (message) => notices.push(message),
+		});
+
+		expect(await operationGate.check("bash", command, scope, "root")).toBeUndefined();
+		expect(notices).toEqual([expect.stringContaining("it runs under your operation.irreversible grant")]);
 	});
 });

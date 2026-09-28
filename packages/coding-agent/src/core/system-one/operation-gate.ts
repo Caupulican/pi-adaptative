@@ -51,19 +51,19 @@ export class OperationGate {
 		signal?: AbortSignal,
 	): Promise<{ block: true; reason: string } | undefined> {
 		if (actor === "worker" && this.deps.isGranted()) return undefined;
+		// No semantic engine means deterministic gates own the call. Avoid filesystem identity work
+		// on this hot path; System One is an optional quality plane, never an execution dependency.
+		const engine = this.deps.getEngine();
+		if (!engine) return undefined;
 		const scopeCwd = this.deps.getScopeCwd();
 		const triage = triageOperation({ toolName, args, cwd, scopeCwd, tempDir: tmpdir() });
 		if (triage.kind === "decided") return undefined;
-		// A session without System One keeps the deterministic gates alone, as it always did; an outage
-		// of a bound System One is different and goes to the operator (the authority line).
-		const engine = this.deps.getEngine();
-		if (!engine) return undefined;
 		const turnKey = this.deps.getTurnKey();
 		if (turnKey !== this.turnKey) {
 			this.verdicts.clear();
 			this.turnKey = turnKey;
 		}
-		const key = `${actor}\u0000${getToolExecutionKey(toolName, args)}`;
+		const key = `${actor}\u0000${getToolExecutionKey(toolName, args)}\u0000${JSON.stringify(triage.identity)}`;
 		let verdict = this.verdicts.get(key);
 		if (!verdict) {
 			verdict = await judgeOperation(engine, {

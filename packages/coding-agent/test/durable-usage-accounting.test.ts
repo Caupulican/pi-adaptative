@@ -6,7 +6,7 @@ import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { CURRENT_SESSION_VERSION, type SessionHeader } from "@caupulican/pi-agent-core/session";
 import type { AssistantMessage, ToolResultMessage, Usage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
-import { SPAWNED_USAGE_CUSTOM_TYPE } from "../src/core/agent-session-contracts.ts";
+import { SEMANTIC_USAGE_CUSTOM_TYPE, SPAWNED_USAGE_CUSTOM_TYPE } from "../src/core/agent-session-contracts.ts";
 import { aggregateCurrentSessionCostsFromEntries } from "../src/core/cost/cost-summary.ts";
 import { aggregateDailyUsageFromEntries } from "../src/core/cost/daily-usage.ts";
 import {
@@ -232,5 +232,33 @@ describe("session usage ownership", () => {
 		expect(aggregateCumulativeUsageFromSessionEntries(entries)).toEqual({ ...usage(7), cost: usage(4).cost });
 		expect(entries).toEqual(before);
 		expect(aggregateCumulativeUsageFromSessionEntries([])).toEqual(usage(0));
+	});
+
+	it("counts retry-safe internal semantic receipts as own session usage", () => {
+		const session = SessionManager.inMemory("/tmp/pi-semantic-usage");
+		const report = {
+			reportId: "semantic-request:1",
+			provider: "typesafe",
+			model: "jev-1.13.0",
+			attempt: 1,
+			usage: usage(3),
+		};
+		session.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, report);
+		session.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, report);
+		const entries = session.getEntries();
+
+		expect(aggregateCumulativeUsageFromSessionEntries(entries)).toEqual(usage(3));
+		expect(aggregateCurrentSessionCostsFromEntries(entries)).toEqual({
+			ownCost: 3,
+			subagentCost: 0,
+			subagentReports: 0,
+			currentCost: 3,
+		});
+		expect(
+			aggregateDailyUsageFromEntries(entries, {
+				startMs: Date.now() - 60_000,
+				endMs: Date.now() + 60_000,
+			}),
+		).toMatchObject({ ownCost: 3, spawnedCost: 0, totalCost: 3, reports: 0 });
 	});
 });

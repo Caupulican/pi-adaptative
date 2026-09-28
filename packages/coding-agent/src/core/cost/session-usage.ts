@@ -3,7 +3,12 @@ import { basename, join } from "node:path";
 import { loadEntriesFromFile, type SessionEntry } from "@caupulican/pi-agent-core/session";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "@caupulican/pi-agent-core/usage";
 import type { Usage } from "@caupulican/pi-ai";
-import { SPAWNED_USAGE_CUSTOM_TYPE, type SpawnedUsageReport } from "../agent-session-contracts.ts";
+import {
+	SEMANTIC_USAGE_CUSTOM_TYPE,
+	type SemanticUsageReport,
+	SPAWNED_USAGE_CUSTOM_TYPE,
+	type SpawnedUsageReport,
+} from "../agent-session-contracts.ts";
 
 function isUsage(value: unknown): value is Usage {
 	if (!value || typeof value !== "object") return false;
@@ -92,6 +97,7 @@ export function findChildSessionFile(sessionDir: string, sessionId: string): str
 export function aggregateCumulativeUsageFromSessionEntries(entries: readonly SessionEntry[]): Usage {
 	const total = createEmptyUsage();
 	const seenSpawnedReportIds = new Set<string>();
+	const seenSemanticReportIds = new Set<string>();
 	for (const entry of entries) {
 		const usage = getSessionEntryUsage(entry);
 		if (usage && isUsage(usage)) {
@@ -103,6 +109,12 @@ export function aggregateCumulativeUsageFromSessionEntries(entries: readonly Ses
 				if (seenSpawnedReportIds.has(data.reportId)) continue;
 				seenSpawnedReportIds.add(data.reportId);
 			}
+			addUsage(total, data.usage);
+		} else if (entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE) {
+			const data = entry.data as SemanticUsageReport | undefined;
+			if (!data?.usage || !isUsage(data.usage) || !data.reportId || seenSemanticReportIds.has(data.reportId))
+				continue;
+			seenSemanticReportIds.add(data.reportId);
 			addUsage(total, data.usage);
 		}
 	}

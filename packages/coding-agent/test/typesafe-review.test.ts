@@ -1,9 +1,13 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createInMemoryArtifactStore } from "../src/core/context/context-artifacts.ts";
 import { shouldEscalateModelRouterTool } from "../src/core/model-router/tool-escalation.ts";
+import { TypeSafeEvidenceMaterializer } from "../src/core/review/typesafe-evidence-materializer.ts";
 import { TypeSafeEvidenceStore } from "../src/core/review/typesafe-evidence-store.ts";
 import { type ReviewInput, TypeSafeReviewer } from "../src/core/review/typesafe-reviewer.ts";
 import { createTypeSafeReviewToolDefinition as createTool } from "../src/core/tools/typesafe-review.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function createTypeSafeReviewToolDefinition(reviewer: TypeSafeReviewer) {
 	return createTool(reviewer, new TypeSafeEvidenceStore(createInMemoryArtifactStore()));
@@ -569,6 +573,45 @@ describe("TypeSafe review boundary", () => {
 		expect(JSON.parse(String(options.body))).toMatchObject({
 			model: "typesafe/jev-1.13",
 			state: input.state,
+		});
+	});
+	it("materializes referenced evidence into the request without loading it into the caller transcript", async () => {
+		const cwd = tempDir("pi-typesafe-tool-evidence-");
+		writeFileSync(join(cwd, "claim.ts"), "export const claim = true;\n");
+		const fetcher = vi.fn(async () => Response.json(response()));
+		const tool = createTool(
+			new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
+			new TypeSafeEvidenceStore(createInMemoryArtifactStore()),
+			undefined,
+			new TypeSafeEvidenceMaterializer({ getCwd: () => cwd }),
+		);
+
+		const result = await tool.execute("referenced", {
+			action: "review",
+			evidenceRefs: ["file:claim.ts"],
+			review: input,
+		});
+
+		expect(result).toMatchObject({
+			isError: false,
+			details: {
+				accepted: true,
+				sourceManifest: [expect.objectContaining({ kind: "file", label: "claim.ts" })],
+			},
+		});
+		const [, options] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
+		expect(JSON.parse(String(options.body)).state).toEqual({
+			provided_state: input.state,
+			referenced_evidence: {
+				schema_version: "1.0",
+				sources: [
+					expect.objectContaining({
+						kind: "file",
+						label: "claim.ts",
+						content: "export const claim = true;\n",
+					}),
+				],
+			},
 		});
 	});
 	it("reports openrouter key configuration error when unauthenticated", async () => {

@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Added
+
+- Added scoped file, tool-artifact, and git-diff evidence references for TypeSafe reviews.
+- Added a paired System One enabled/unavailable autonomy benchmark gate and CLI.
+
+### Fixed
+
+- Fixed operation judgments reusing cached verdicts across execution directories or changed local scripts.
+- Fixed TypeSafe and internal System One usage remaining unpriced or missing from session cost totals.
+
 ## [0.100.2] - 2026-09-27
 
 ### Fixed

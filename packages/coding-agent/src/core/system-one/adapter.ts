@@ -1,4 +1,5 @@
 import { TypeSafeEvidenceError } from "../review/typesafe-contract.ts";
+import { TypeSafeReviewError } from "../review/typesafe-reviewer.ts";
 import type { SystemOneAccessResolver } from "./access.ts";
 import { SYSTEM_ONE_PINNED_MODEL } from "./catalog.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
@@ -240,6 +241,9 @@ export class SystemOneJevAdapter implements JevAdapter {
 				lastError = error;
 				if (error instanceof JevAdapterFailure) {
 					throw error;
+				}
+				if (error instanceof TypeSafeReviewError && error.failureKind === "usage_recording") {
+					throw new JevAdapterFailure("unavailable", error.message, impact);
 				}
 				// The request we built is not JSON: retrying sends the same defect again.
 				if (error instanceof TypeSafeEvidenceError) {

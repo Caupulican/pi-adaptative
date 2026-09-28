@@ -12,9 +12,12 @@
  * owner's request asks for it; the authority line turns the answers into an action.
  */
 
+import { existsSync, realpathSync, statSync } from "node:fs";
 import nodePath from "node:path";
 import { commandFromToolArgs } from "../acquisition/acquisition-boundary.ts";
-import { classifyAllEdgeOperations } from "../autonomy/edge-policy.ts";
+import { computeScriptFileHash } from "../automation/task-automation-hash.ts";
+import { classifyAllEdgeOperations, shellInvocations } from "../autonomy/edge-policy.ts";
+import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { decideByAuthority, type JudgmentReading } from "./authority-line.ts";
 
 /** Why System One is asked: the operation runs code, or writes outside the task. */
@@ -27,7 +30,21 @@ export type OperationTriage =
 			readonly operationKind: JudgedOperationKind;
 			/** The operation as the operator reads it: the command, the code, or the written path. */
 			readonly operation: string;
+			/** Canonical facts that can change what identical-looking arguments execute. */
+			readonly identity: OperationJudgmentIdentity;
 	  };
+
+export interface OperationInvocationIdentity {
+	readonly command: string;
+	readonly resolved_executable?: string;
+	readonly script?: { readonly path: string; readonly sha256: string };
+}
+
+export interface OperationJudgmentIdentity {
+	readonly execution_directory: string;
+	readonly task_directory: string;
+	readonly invocations: readonly OperationInvocationIdentity[];
+}
 
 /** Tools that run arbitrary commands or code: what they do is only known by reading them. */
 const OPERATION_TOOLS: Readonly<Record<string, JudgedOperationKind>> = {
@@ -37,6 +54,138 @@ const OPERATION_TOOLS: Readonly<Record<string, JudgedOperationKind>> = {
 	python: "code",
 };
 const WRITE_TOOLS = new Set(["write", "edit"]);
+
+const SCRIPT_INTERPRETERS = new Set([
+	"bash",
+	"bun",
+	"deno",
+	"node",
+	"perl",
+	"php",
+	"powershell",
+	"pwsh",
+	"python",
+	"python3",
+	"ruby",
+	"sh",
+	"zsh",
+]);
+
+function canonicalDirectory(path: string): string {
+	try {
+		return safeRealpathSync(path);
+	} catch {
+		return nodePath.resolve(path);
+	}
+}
+
+function isRegularFile(path: string): boolean {
+	try {
+		return statSync(path).isFile();
+	} catch {
+		return false;
+	}
+}
+
+function resolveExecutable(command: string, cwd: string): string | undefined {
+	const hasPath = nodePath.isAbsolute(command) || command.includes("/") || command.includes("\\");
+	const candidates = hasPath
+		? [nodePath.resolve(cwd, command)]
+		: (process.env.PATH ?? "")
+				.split(nodePath.delimiter)
+				.filter(Boolean)
+				.flatMap((directory) => {
+					const base = nodePath.join(directory, command);
+					return process.platform === "win32"
+						? [base, ...[".exe", ".cmd", ".bat", ".com"].map((extension) => `${base}${extension}`)]
+						: [base];
+				});
+	for (const candidate of candidates) {
+		if (!existsSync(candidate) || !isRegularFile(candidate)) continue;
+		try {
+			return realpathSync(candidate);
+		} catch {
+			return nodePath.resolve(candidate);
+		}
+	}
+	return undefined;
+}
+
+function localScript(argv: readonly string[], cwd: string, scopeCwd: string) {
+	const executable = nodePath
+		.basename(argv[0] ?? "")
+		.replace(/\.(?:exe|cmd|bat)$/iu, "")
+		.toLowerCase();
+	let candidate: string | undefined;
+	if (SCRIPT_INTERPRETERS.has(executable)) {
+		for (let index = 1; index < argv.length; index++) {
+			const argument = argv[index];
+			if (["-c", "-e", "--eval", "--command"].includes(argument)) return undefined;
+			if (argument === "--") {
+				candidate = argv[index + 1];
+				break;
+			}
+			if (!argument.startsWith("-")) {
+				candidate = argument;
+				break;
+			}
+		}
+	} else if (argv[0] && (nodePath.isAbsolute(argv[0]) || argv[0].includes("/") || argv[0].includes("\\"))) {
+		candidate = argv[0];
+	}
+	if (!candidate) return undefined;
+	const path = canonicalDirectory(nodePath.resolve(cwd, candidate));
+	const sha256 = computeScriptFileHash(path, scopeCwd);
+	return sha256 ? { path, sha256 } : undefined;
+}
+
+function invocationIdentity(argv: readonly string[], cwd: string, scopeCwd: string): OperationInvocationIdentity {
+	const resolvedExecutable = argv[0] ? resolveExecutable(argv[0], cwd) : undefined;
+	const script = argv.length > 0 ? localScript(argv, cwd, scopeCwd) : undefined;
+	return {
+		command: argv.map((argument) => JSON.stringify(argument)).join(" "),
+		...(resolvedExecutable ? { resolved_executable: resolvedExecutable } : {}),
+		...(script ? { script } : {}),
+	};
+}
+
+function processArgv(args: unknown): string[] | undefined {
+	const record = args as { executable?: unknown; args?: unknown } | undefined;
+	if (typeof record?.executable !== "string" || !record.executable.trim()) return undefined;
+	return [
+		record.executable.trim(),
+		...(Array.isArray(record.args)
+			? record.args.filter((argument): argument is string => typeof argument === "string")
+			: []),
+	];
+}
+
+function operationIdentity(toolName: string, args: unknown, operation: string, cwd: string, scopeCwd: string) {
+	const executionDirectory = canonicalDirectory(cwd);
+	const taskDirectory = canonicalDirectory(scopeCwd);
+	let invocations: string[][] = [];
+	if (toolName === "run_process") {
+		const argv = processArgv(args);
+		if (argv) invocations = [argv];
+	} else if (toolName === "bash" || toolName === "powershell") {
+		invocations = shellInvocations(operation);
+	} else if (toolName === "python") {
+		const record = args as { scriptPath?: unknown } | undefined;
+		const argv = ["python", ...(typeof record?.scriptPath === "string" ? [record.scriptPath] : [])];
+		invocations = [argv];
+	}
+	return {
+		execution_directory: executionDirectory,
+		task_directory: taskDirectory,
+		invocations: invocations.map((argv) => invocationIdentity(argv, executionDirectory, taskDirectory)),
+	};
+}
+
+function describedOperation(toolName: string, args: unknown): string | undefined {
+	if (toolName !== "run_process") return commandFromToolArgs(args);
+	const argv = processArgv(args);
+	return argv?.map((argument) => JSON.stringify(argument)).join(" ");
+}
 
 /**
  * Which calls System One must judge. `decided` covers what the edge already owns, tools that cannot
@@ -58,8 +207,15 @@ export function triageOperation(input: {
 	if (edge.length > 0) return { kind: "decided" };
 	const operationKind = OPERATION_TOOLS[input.toolName];
 	if (operationKind) {
-		const operation = commandFromToolArgs(input.args);
-		return operation ? { kind: "judged", operationKind, operation } : { kind: "decided" };
+		const operation = describedOperation(input.toolName, input.args);
+		return operation
+			? {
+					kind: "judged",
+					operationKind,
+					operation,
+					identity: operationIdentity(input.toolName, input.args, operation, input.cwd, input.scopeCwd),
+				}
+			: { kind: "decided" };
 	}
 	if (WRITE_TOOLS.has(input.toolName)) {
 		const path = (input.args as { path?: unknown } | undefined)?.path;
@@ -70,7 +226,18 @@ export function triageOperation(input: {
 			return relative === "" || (!relative.startsWith("..") && !nodePath.isAbsolute(relative));
 		};
 		if (inside(input.scopeCwd) || inside(input.tempDir)) return { kind: "decided" };
-		return { kind: "judged", operationKind: "write_outside_task", operation: `${input.toolName} ${resolved}` };
+		return {
+			kind: "judged",
+			operationKind: "write_outside_task",
+			operation: `${input.toolName} ${resolved}`,
+			identity: operationIdentity(
+				input.toolName,
+				input.args,
+				`${input.toolName} ${resolved}`,
+				input.cwd,
+				input.scopeCwd,
+			),
+		};
 	}
 	return { kind: "decided" };
 }
@@ -200,8 +367,8 @@ export async function judgeOperation(
 						operation: {
 							tool: input.toolName,
 							command: input.triage.operation,
-							task_directory: input.scopeCwd,
 							kind: input.triage.operationKind,
+							...input.triage.identity,
 						},
 						request: input.request || "(no request recorded)",
 					},

@@ -1,15 +1,27 @@
 import { compactRetainedDetails } from "@caupulican/pi-agent-core/message-retention";
 import type { Usage } from "@caupulican/pi-ai";
-import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 import { type Static, Type } from "typebox";
 import { SYSTEM_ONE_VALIDATION_RULE } from "../provider-prompt-contracts.ts";
-import { evaluationInputSchema, getEvaluationUsage, reviewInputSchema } from "../review/typesafe-contract.ts";
+import {
+	type EvaluationInput,
+	evaluationInputSchema,
+	getEvaluationUsage,
+	type ReviewInput,
+	reviewInputSchema,
+} from "../review/typesafe-contract.ts";
+import {
+	MAX_TYPESAFE_EVIDENCE_REFERENCES,
+	type TypeSafeEvidenceManifestEntry,
+	type TypeSafeEvidenceMaterializer,
+	typeSafeEvidenceReferenceSchema,
+} from "../review/typesafe-evidence-materializer.ts";
 import type { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
 import {
 	TypeSafeReviewError,
 	type TypeSafeReviewer,
 	type TypeSafeTransportAttempt,
 } from "../review/typesafe-reviewer.ts";
+import { type PricedTypeSafeUsage, priceTypeSafeUsage } from "../review/typesafe-usage.ts";
 
 const schema = Type.Object(
 	{
@@ -21,6 +33,9 @@ const schema = Type.Object(
 		]),
 		id: Type.Optional(Type.String()),
 		offset: Type.Optional(Type.Integer({ minimum: 0 })),
+		evidenceRefs: Type.Optional(
+			Type.Array(typeSafeEvidenceReferenceSchema, { minItems: 1, maxItems: MAX_TYPESAFE_EVIDENCE_REFERENCES }),
+		),
 		evaluation: Type.Optional(evaluationInputSchema),
 		review: Type.Optional(reviewInputSchema),
 	},
@@ -34,6 +49,7 @@ const parameters = Type.Object(
 		action: schema.properties.action,
 		id: schema.properties.id,
 		offset: schema.properties.offset,
+		evidenceRefs: schema.properties.evidenceRefs,
 		evaluation: Type.Optional(
 			Type.Object(
 				{
@@ -82,31 +98,58 @@ const parameters = Type.Object(
 	{ additionalProperties: false },
 );
 
-function projectUsage(attempts: readonly TypeSafeTransportAttempt[]) {
-	const usage = createEmptyUsage();
+function projectUsage(
+	attempts: readonly TypeSafeTransportAttempt[],
+	connection: { readonly provider: string; readonly model: string },
+): PricedTypeSafeUsage | undefined {
+	let inputTokens = 0;
+	let outputTokens = 0;
 	let known = false;
 	for (const attempt of attempts) {
 		const reported = getEvaluationUsage(attempt.response);
 		if (!reported) continue;
 		known = true;
-		usage.input += reported.input_tokens;
-		usage.output += reported.output_tokens;
+		inputTokens += reported.input_tokens;
+		outputTokens += reported.output_tokens;
 	}
-	usage.totalTokens = usage.input + usage.output;
-	return known && Number.isSafeInteger(usage.totalTokens) ? usage : undefined;
+	return known && Number.isSafeInteger(inputTokens + outputTokens)
+		? priceTypeSafeUsage(connection.provider, connection.model, {
+				input_tokens: inputTokens,
+				output_tokens: outputTokens,
+			})
+		: undefined;
+}
+
+async function materializeReferencedEvidence<T extends ReviewInput | EvaluationInput>(
+	input: T,
+	evidenceRefs: Static<typeof schema>["evidenceRefs"],
+	materializer: TypeSafeEvidenceMaterializer | undefined,
+	signal?: AbortSignal,
+) {
+	if (!evidenceRefs) return { request: input, sourceManifest: undefined };
+	if (!materializer) throw new Error("TypeSafe referenced evidence is unavailable in this runtime");
+	const evidence = await materializer.materialize(evidenceRefs, signal);
+	return {
+		request: {
+			...input,
+			state: { provided_state: input.state, referenced_evidence: evidence.state },
+		},
+		sourceManifest: evidence.manifest,
+	};
 }
 
 export function createTypeSafeReviewToolDefinition(
 	reviewer: TypeSafeReviewer,
 	evidenceStore: TypeSafeEvidenceStore,
 	reportUsage?: (toolCallId: string, usage: Usage) => void,
+	evidenceMaterializer?: TypeSafeEvidenceMaterializer,
 ) {
 	return {
 		name: "typesafe_review",
 		label: "TypeSafe review",
 		readOnly: true,
 		description:
-			"Use Jev for semantic decisions and independent verification in any domain. Status checks setup. Evaluate batches Choice, Noul and Score questions for classification, detection, routing, ranking, retrieval, extraction, ambiguity, planning, guardrails and evidence checks. Review gates claims at high (0.95) or max (0.99) confidence. Evidence reads retained records by id and offset. Sends explicit state only; does not execute or authorize actions.",
+			"Use Jev for semantic decisions and independent verification. Status checks setup. Evaluate batched Choice, Noul and Score questions. Review gates claims at high (0.95) or max (0.99) confidence. evidenceRefs snapshots scoped files, artifacts, or git diffs. Evidence reads retained records by id and offset. Does not execute or authorize actions.",
 		promptSnippet: "Jev: semantic judgments and high/max claim review.",
 		promptGuidelines: [
 			"Check typesafe_review status at work start. When the typesafe-review skill is listed and the skill tool is available, load the typesafe-review skill. Use Jev for semantic decisions and reviews throughout work, in any domain.",
@@ -119,14 +162,19 @@ export function createTypeSafeReviewToolDefinition(
 		// Independent System One calls in one turn run together: evidence saves are synchronous under the
 		// session bundle lock and the reviewer holds no per-call state.
 		async execute(toolCallId: string, input: Static<typeof schema>, signal?: AbortSignal) {
-			const onResponse = (attempts: readonly TypeSafeTransportAttempt[]): void => {
-				const usage = projectUsage(attempts);
-				if (usage) reportUsage?.(toolCallId, usage);
+			let usageProjection: PricedTypeSafeUsage | undefined;
+			const onResponse = (
+				attempts: readonly TypeSafeTransportAttempt[],
+				connection: { readonly provider: string; readonly model: string },
+			): void => {
+				usageProjection = projectUsage(attempts, connection);
+				if (usageProjection) reportUsage?.(toolCallId, usageProjection.usage);
 			};
 			let record: Record<string, unknown>;
 			let isError = false;
 			let errorKind: "operation_outcome" | undefined;
 			let transportAttempts: TypeSafeTransportAttempt[] = [];
+			let sourceManifest: readonly TypeSafeEvidenceManifestEntry[] | undefined;
 			try {
 				signal?.throwIfAborted();
 				if (input.action === "evidence") {
@@ -143,11 +191,23 @@ export function createTypeSafeReviewToolDefinition(
 				if (input.action === "evaluate" && !input.evaluation)
 					throw new Error("evaluation is required for the evaluate action");
 				if (input.action === "review" && !input.review) throw new Error("review is required for the review action");
+				const prepared = await materializeReferencedEvidence(
+					input.action === "evaluate" ? input.evaluation! : input.review!,
+					input.evidenceRefs,
+					evidenceMaterializer,
+					signal,
+				);
+				sourceManifest = prepared.sourceManifest;
 				const result =
 					input.action === "evaluate"
-						? await reviewer.evaluate(input.evaluation!, signal, onResponse)
-						: await reviewer.review(input.review!, signal, onResponse);
-				record = { ...result, costStatus: "unpriced" };
+						? await reviewer.evaluate(prepared.request as EvaluationInput, signal, onResponse)
+						: await reviewer.review(prepared.request as ReviewInput, signal, onResponse);
+				record = {
+					...result,
+					...(sourceManifest ? { sourceManifest } : {}),
+					costStatus: usageProjection?.costStatus ?? "unpriced",
+					...(usageProjection?.costProvenance ? { costProvenance: usageProjection.costProvenance } : {}),
+				};
 				transportAttempts = result.transportAttempts;
 			} catch (error) {
 				const message = signal?.aborted
@@ -162,8 +222,10 @@ export function createTypeSafeReviewToolDefinition(
 				transportAttempts = error instanceof TypeSafeReviewError ? error.transportAttempts : [];
 				record = {
 					accepted: false,
-					costStatus: "unpriced",
+					costStatus: usageProjection?.costStatus ?? "unpriced",
+					...(usageProjection?.costProvenance ? { costProvenance: usageProjection.costProvenance } : {}),
 					error: message,
+					...(sourceManifest ? { sourceManifest } : {}),
 					...(error instanceof TypeSafeReviewError
 						? {
 								requestSha256: error.requestSha256,
@@ -188,7 +250,8 @@ export function createTypeSafeReviewToolDefinition(
 						accepted: record.accepted,
 						requestSha256: record.requestSha256,
 						evidence,
-						costStatus: "unpriced",
+						costStatus: record.costStatus,
+						...(record.costProvenance ? { costProvenance: record.costProvenance } : {}),
 					};
 				}
 				return {
@@ -196,7 +259,7 @@ export function createTypeSafeReviewToolDefinition(
 					errorKind,
 					content: [{ type: "text" as const, text: JSON.stringify({ ...summary, evidence }) }],
 					details: holder.details,
-					usage: projectUsage(transportAttempts),
+					usage: usageProjection?.usage,
 				};
 			} catch {
 				return {
@@ -204,8 +267,12 @@ export function createTypeSafeReviewToolDefinition(
 					content: [
 						{ type: "text" as const, text: "TypeSafe evidence could not be retained; review is not accepted." },
 					],
-					details: { accepted: false, costStatus: "unpriced" },
-					usage: projectUsage(transportAttempts),
+					details: {
+						accepted: false,
+						costStatus: usageProjection?.costStatus ?? "unpriced",
+						...(usageProjection?.costProvenance ? { costProvenance: usageProjection.costProvenance } : {}),
+					},
+					usage: usageProjection?.usage,
 				};
 			}
 		},

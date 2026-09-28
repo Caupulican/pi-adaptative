@@ -100,14 +100,25 @@ an explicit coverage manifest linking every requirement and interaction to a
 review. Partition by coherent ownership without splitting away the interaction
 under judgment. A partition passing does not approve uncovered scope.
 
-No automatic file reads or hidden transcript upload occur. Provide authorized
-evidence explicitly. Each evaluation/review retains its exact submitted state/questions
+No hidden transcript upload occurs. Provide inline evidence explicitly, or use
+top-level `evidenceRefs` to ask the host to snapshot an authorized source without first loading
+its content into the caller transcript. References are `file:<path>`,
+`artifact:tool-output:<id>`, `git-diff:<path>`, or `git-diff-staged:<path>`.
+Each source is capped at 512 KiB, the request total is capped
+at 1 MiB, canonical containment and credential-path checks run before reading, known
+credentials are redacted, and the retained record includes hashes plus the exact local
+source manifest. References never execute an arbitrary command.
+
+Each evaluation/review retains its exact submitted state/questions
 even after argument hooks, request hash, model, all answers, confidence, usage and
 failed question IDs in durable session evidence storage. Local details retain a
 reference when the complete record is too large for live metadata. The model receives
 judgments and the reference without a duplicate of the submitted evidence.
 Transport retries retain every received response in `transportAttempts`, including
 service errors; all valid reported token usage is counted across those attempts.
+Every receipt is priced against the exact provider/model catalog entry; unknown
+identities stay explicitly unpriced. Internal System One retries are also persisted
+as session usage rather than disappearing from cost totals.
 An HTTP failure remains an error with its evidence reference, never an approval.
 
 Use `action: "evidence", id: "<evidence.id>"` to read a retained record. Continue

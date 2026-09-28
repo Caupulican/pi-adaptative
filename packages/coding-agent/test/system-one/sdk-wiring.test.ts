@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { SEMANTIC_USAGE_CUSTOM_TYPE } from "../../src/core/agent-session-contracts.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SystemOneController } from "../../src/core/system-one/controller.ts";
@@ -23,6 +24,7 @@ describe("System One SDK Session Auto-Wiring and Resume Hook (R-062, R-071)", ()
 	});
 
 	afterEach(() => {
+		vi.unstubAllGlobals();
 		if (tempDir && existsSync(tempDir)) {
 			rmSync(tempDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 		}
@@ -83,6 +85,51 @@ describe("System One SDK Session Auto-Wiring and Resume Hook (R-062, R-071)", ()
 		expect(session.systemOneController).toBeDefined();
 		expect(session.systemOneController?.store).toBeDefined();
 		expect(session.systemOneController?.adapter).toBeDefined();
+
+		await session.disposeAndWait();
+	});
+
+	it("persists a priced receipt for an internal System One evaluation", async () => {
+		const model = getModel("anthropic", "claude-sonnet-4-5");
+		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
+		authStorage.setRuntimeApiKey("typesafe", "ts-test-key-12345");
+		const manager = SessionManager.inMemory(cwd);
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () =>
+				Response.json({
+					model: "jev-1.13.0",
+					answers: { q: { type: "noul", noul: 0.9 } },
+					usage: { input_tokens: 100, output_tokens: 10 },
+				}),
+			),
+		);
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			model: model!,
+			authStorage,
+			sessionManager: manager,
+		});
+
+		await session.systemOneController?.adapter.evaluate({
+			state: "fixture",
+			questions: { q: { type: "noul", instructions: "Fixture?" } },
+		});
+
+		const receipts = manager
+			.getEntries()
+			.filter((entry) => entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE);
+		expect(receipts).toHaveLength(1);
+		const receipt = receipts[0];
+		if (receipt?.type !== "custom") throw new Error("Expected a durable semantic usage receipt");
+		expect(receipt.data).toMatchObject({
+			provider: "typesafe",
+			model: "jev-1.13.0",
+			attempt: 1,
+			costStatus: "catalog_priced",
+			usage: { input: 100, output: 10, cost: { total: 0.0000375 } },
+		});
 
 		await session.disposeAndWait();
 	});

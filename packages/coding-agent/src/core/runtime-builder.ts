@@ -122,6 +122,7 @@ import type { ProfileFilterReloadSnapshot } from "./profile-filter-controller.ts
 import { assertReloadQuiescent } from "./reload-blockers.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
+import { TypeSafeEvidenceMaterializer } from "./review/typesafe-evidence-materializer.ts";
 import { TypeSafeEvidenceStore } from "./review/typesafe-evidence-store.ts";
 import { TypeSafeReviewer } from "./review/typesafe-reviewer.ts";
 import { ScoutController } from "./scout-controller.ts";
@@ -1210,6 +1211,12 @@ export class RuntimeBuilder {
 							this.deps.getSessionManager().getSessionId(),
 							this.deps.getSessionManager().getSessionLineageIds(),
 						),
+						undefined,
+						new TypeSafeEvidenceMaterializer({
+							getCwd: () => this._taskDirectories.cwd,
+							...(toolArtifactStore ? { artifactStore: toolArtifactStore } : {}),
+							credentialBoundary: this._credentialExposureBoundary,
+						}),
 					),
 				);
 			}

@@ -3,7 +3,12 @@ import { join, resolve } from "node:path";
 import { loadEntriesFromFile, type SessionEntry } from "@caupulican/pi-agent-core/session";
 import { getSessionEntryUsage } from "@caupulican/pi-agent-core/usage";
 import type { Usage } from "@caupulican/pi-ai";
-import { SPAWNED_USAGE_CUSTOM_TYPE, type SpawnedUsageReport } from "../agent-session-contracts.ts";
+import {
+	SEMANTIC_USAGE_CUSTOM_TYPE,
+	type SemanticUsageReport,
+	SPAWNED_USAGE_CUSTOM_TYPE,
+	type SpawnedUsageReport,
+} from "../agent-session-contracts.ts";
 
 export type DailyUsageWindow = {
 	startMs: number;
@@ -58,6 +63,7 @@ function addDailyUsageFromEntries(
 	entries: readonly SessionEntry[],
 	window: DailyUsageWindow,
 	seenSpawnedReportIds: Set<string>,
+	seenSemanticReportIds: Set<string>,
 ): boolean {
 	let hasUsage = false;
 	for (const entry of entries) {
@@ -78,6 +84,15 @@ function addDailyUsageFromEntries(
 			}
 			totals.spawnedCost += data.usage.cost.total;
 			totals.reports += 1;
+			addUsage(totals, data.usage);
+			hasUsage = true;
+			continue;
+		}
+		if (entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE) {
+			const data = entry.data as SemanticUsageReport | undefined;
+			if (!data?.usage || !data.reportId || seenSemanticReportIds.has(data.reportId)) continue;
+			seenSemanticReportIds.add(data.reportId);
+			totals.ownCost += data.usage.cost.total;
 			addUsage(totals, data.usage);
 			hasUsage = true;
 		}
@@ -103,7 +118,7 @@ export function aggregateDailyUsageFromEntries(
 	window: DailyUsageWindow,
 ): DailyUsageTotals {
 	const totals = createZeroTotals();
-	const hasUsage = addDailyUsageFromEntries(totals, entries, window, new Set());
+	const hasUsage = addDailyUsageFromEntries(totals, entries, window, new Set(), new Set());
 	totals.sessions = hasUsage ? 1 : 0;
 	return finishTotals(totals);
 }
@@ -129,12 +144,13 @@ export function aggregateDailyUsageFromSessionFiles(
 	const totals = createZeroTotals();
 	if (!sessionDir || !existsSync(sessionDir)) return totals;
 	const seenSpawnedReportIds = new Set<string>();
+	const seenSemanticReportIds = new Set<string>();
 	for (const name of readdirSync(sessionDir)) {
 		if (!name.endsWith(".jsonl")) continue;
 		const filePath = join(sessionDir, name);
 		if (!shouldReadSessionFile(filePath, window)) continue;
 		const entries = getSessionEntries(filePath, liveSession);
-		if (addDailyUsageFromEntries(totals, entries, window, seenSpawnedReportIds)) {
+		if (addDailyUsageFromEntries(totals, entries, window, seenSpawnedReportIds, seenSemanticReportIds)) {
 			totals.sessions += 1;
 		}
 	}
@@ -149,6 +165,7 @@ export function aggregateDailyUsageFromSessionRoot(
 	const totals = createZeroTotals();
 	if (!sessionRoot || !existsSync(sessionRoot)) return totals;
 	const seenSpawnedReportIds = new Set<string>();
+	const seenSemanticReportIds = new Set<string>();
 	for (const name of readdirSync(sessionRoot)) {
 		const dir = join(sessionRoot, name);
 		if (!existsSync(dir) || !statSync(dir).isDirectory()) continue;
@@ -157,7 +174,7 @@ export function aggregateDailyUsageFromSessionRoot(
 			const filePath = join(dir, fileName);
 			if (!shouldReadSessionFile(filePath, window)) continue;
 			const entries = getSessionEntries(filePath, liveSession);
-			if (addDailyUsageFromEntries(totals, entries, window, seenSpawnedReportIds)) {
+			if (addDailyUsageFromEntries(totals, entries, window, seenSpawnedReportIds, seenSemanticReportIds)) {
 				totals.sessions += 1;
 			}
 		}
