@@ -351,13 +351,13 @@ describe("FC-01 terminal complete", () => {
 		expect(store.phase).not.toBe("complete");
 	});
 
-	it("JEV-026 fail returns unrecoverable and leaves the store not complete", async () => {
+	it("JEV-026 fail returns incomplete for repair and leaves the store not complete", async () => {
 		const { result, store } = await deliver({
 			fail: "JEV-026",
 			profile: "system_one_required",
 			steeringMode: "system_one_required",
 		});
-		expect(result?.status).toBe("unrecoverable");
+		expect(result?.status).toBe("incomplete");
 		expect(result?.reasonCodes).toContain("adversarial_completion_failed");
 		expect(store.phase).not.toBe("complete");
 	});

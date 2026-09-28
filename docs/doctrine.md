@@ -811,11 +811,13 @@ route brief) for implement, investigate, replan, retrieval and non-independent v
 for review, independent verification and escalation; a wait on the running workers; the completion
 coordinator for a completion candidate. The legacy continuation is the input layer of that route and
 never a competing decider; `legacy_goal` stays available by setting and is the fallback without a
-plane. Completion is only the coordinator's verdict: the goal follows the objective's terminal and
-blocks, naming the unsatisfied requirements, when the two disagree. A completion check System One
-could not settle holds the goal: an outage only holds, while an ambiguity also becomes a question to
-the owner through the host's owner channel, naming the check and its doubts, since an objective
-transition never closes on a doubt.
+plane. Completion is only the coordinator's verdict: the goal completes only when every requirement
+is satisfied. A decisive rejection returns `incomplete`, keeps the goal active, records the missing
+work, and schedules the next repair mission. An unresolved required completion decision routes to the
+owner instead of becoming a hidden block: interactive sessions open the native question panel, while
+handoffs persist a bounded owner-review entry before booting the next mission. Optional System One
+absence or outage falls back to deterministic routing and completion so the autonomous loop remains
+live; explicit required policy still holds on unresolved judgment.
 Pinned by `packages/coding-agent/test/goal-session-primary-loop.test.ts` and
 `packages/coding-agent/test/session-objective-runtime.test.ts`.
 
@@ -1046,6 +1048,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-28 | Completion rejection now means active repair rather than a blocked goal; unresolved required decisions surface through the native question panel or a durable handoff ledger before the next mission. Optional System One failure falls back to deterministic proof so autonomy survives model absence and outages. |
 | 2026-09-27 | Live project-rule compilation fingerprints complete ordered instruction sources, so same-length edits cannot retain stale semantic gates. |
 | 2026-09-27 | Supported Claude surfaces may defer schemas behind bounded tool search; unsupported, small, routed, or fallback surfaces keep all real schemas eager, and `/context` reports accepted disclosure evidence without changing its current estimate. |
 | 2026-09-27 | Query-time visibility is query/evidence-versioned, preserves already-sent bytes, restores GC-packed evidence through request-only tails, advertises only readable retrieval handles, fails open on uncertainty, and reports additions versus savings with the correct sign. Large-output profiles prove exact append-prefix retention and classify every intentional rewrite instead of treating new output bytes as invalidation. |

@@ -118,7 +118,7 @@ describe("System One Live Integration", () => {
 		expect(systemOne.store.snapshot().tool_events.at(-1)).toMatchObject({ tool: "read", call_id: "call-2" });
 	});
 
-	it("gates goal complete transition on System One completion validation", async () => {
+	it("gates goal completion on System One evaluation", async () => {
 		const systemOne = createMockSystemOne({
 			completionOutcome: "reject",
 			completionReason: "Unsatisfied acceptance criteria: AC-1 has no passing verification",
@@ -174,6 +174,7 @@ describe("System One Live Integration", () => {
 		// A judged refusal is the operation's outcome: its reasons reach the model verbatim.
 		expect((result as { errorKind?: string }).errorKind).toBe("operation_outcome");
 		expect(currentState.status).toBe("active");
+		expect(systemOne.executeCompletionTransaction).toHaveBeenCalledOnce();
 	});
 
 	it("allows goal complete transition when System One approves", async () => {
@@ -227,6 +228,7 @@ describe("System One Live Integration", () => {
 		expect(result.isError).toBeFalsy();
 		expect((result.details as any)?.applied).toBe(true);
 		expect(currentState.status).toBe("completed");
+		expect(systemOne.executeCompletionTransaction).toHaveBeenCalledOnce();
 	});
 
 	it("revalidates repository revision and invalidates stale evidence upon session resume (R-062)", () => {

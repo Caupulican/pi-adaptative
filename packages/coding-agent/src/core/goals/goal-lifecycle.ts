@@ -73,16 +73,13 @@ const AUTO_RESUMABLE_SYSTEM_STOP_REASON_PREFIXES = [
 	"goal_tool_unavailable:",
 ] as const;
 
-/** True only when a bounded runaway/provider-turn guard caused the block, not owner/model/terminal intent. */
-export function isSystemBlockedGoal(state: GoalState | undefined): boolean {
+/** True when the latest lifecycle transition is a system-originated block, regardless of classification. */
+export function isSystemStoppedGoal(state: GoalState | undefined): boolean {
 	if (state?.status !== "blocked") return false;
 	for (let index = state.events.length - 1; index >= 0; index--) {
 		const event = state.events[index];
 		if (event?.type === "system_stop_goal") {
-			return (
-				event.status === "blocked" &&
-				AUTO_RESUMABLE_SYSTEM_STOP_REASON_PREFIXES.some((prefix) => event.reason.startsWith(prefix))
-			);
+			return event.status === "blocked";
 		}
 		if (
 			event?.type === "block_goal" ||
@@ -96,6 +93,14 @@ export function isSystemBlockedGoal(state: GoalState | undefined): boolean {
 		}
 	}
 	return false;
+}
+
+/** True only when a classified bounded guard or provider failure permits automatic recovery. */
+export function isSystemBlockedGoal(state: GoalState | undefined): boolean {
+	return (
+		isSystemStoppedGoal(state) &&
+		AUTO_RESUMABLE_SYSTEM_STOP_REASON_PREFIXES.some((prefix) => state?.blockedReason?.startsWith(prefix))
+	);
 }
 
 export function getAutoResumableReasonPrefix(reason: string | undefined): string | undefined {

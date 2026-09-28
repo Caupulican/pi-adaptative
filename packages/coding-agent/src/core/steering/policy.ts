@@ -92,7 +92,7 @@ export interface SteeringPolicyConfig {
 
 export const DEFAULT_STEERING_POLICY: SteeringPolicyConfig = {
 	version: STEERING_POLICY_VERSION,
-	mode: "system_one_required",
+	mode: "system_one_optional",
 	model: {
 		provider: JEV_PROVIDER,
 		id: PINNED_JEV_MODEL,
@@ -104,8 +104,8 @@ export const DEFAULT_STEERING_POLICY: SteeringPolicyConfig = {
 		notification: "terminal_only",
 	},
 	semantic_transition: {
-		certificate_required: true,
-		fail_open: false,
+		certificate_required: false,
+		fail_open: true,
 		human_fallback: false,
 		on_low_confidence: ["gather_more_evidence", "improve_projection", "independent_worker", "reroute", "fail_closed"],
 	},

@@ -269,12 +269,12 @@ describe("post-DI14 closure gates", () => {
 		expect(store.phase).not.toBe("complete");
 	});
 
-	it("Gate 3: run() inner semantic pass then JEV-025 fail terminals unrecoverable without completing the store", async () => {
+	it("Gate 3: run() inner semantic pass then JEV-025 starts repair without completing the store", async () => {
 		const { result, store, persistFlags, innerVerdicts } = await runWithFailedDeliveryCheckpoint("JEV-025");
 		expect(persistFlags).toEqual([false]);
 		expect(innerVerdicts).toEqual(["complete"]);
 		expect(store.phase).not.toBe("complete");
-		expect(result.status).toBe("unrecoverable");
+		expect(result.status).toBe("incomplete");
 		expect(result.reasonCodes).toContain("primary_completion_failed");
 	});
 

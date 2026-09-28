@@ -183,6 +183,10 @@ import { type ChannelProvider, GatewayRegistry, type JobSchedulerProvider } from
 import { reportGithubOriginPinForSession } from "./github-origin-pin.ts";
 import { isOwnIdleContinuationAdmission } from "./goals/goal-auto-continue-controller.ts";
 import { recordObjectiveClarification } from "./goals/goal-clarification-log.ts";
+import {
+	type GoalCompletionOwnerDecisionInput,
+	resolveGoalCompletionOwnerDecision,
+} from "./goals/goal-completion-owner-decision.ts";
 import { DEFAULT_GOAL_WORKER_WAIT_MS } from "./goals/goal-continuation-defaults.ts";
 import { buildObjectiveRoutePrompt } from "./goals/goal-continuation-prompt.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
@@ -1111,11 +1115,7 @@ export class AgentSession {
 			scheduleGoalAutoContinueFromIdle: () => this._backgroundLanes.scheduleGoalAutoContinueFromIdle(),
 			prompt: (text, options) => this.prompt(text, options),
 			emitWarning: (message) => this._emit({ type: "warning", message }),
-			// A running turn posts it when it ends; an idle session posts it now.
-			deliverToOwner: (items) => {
-				this._deliverToOwner(items);
-				if (!this._foregroundRecovery.isBusy) void this._flushOwnerItems(undefined);
-			},
+			resolveCompletionRejection: (input) => this._resolveGoalCompletionOwnerDecision(input),
 			getExecutionLoopMode: () => this._executionLoopMode,
 			getObjectiveExecutionController: () => this._objectiveExecutionController,
 		});
@@ -1920,6 +1920,7 @@ export class AgentSession {
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			saveGoalStateSnapshot: (state, expected) => this.saveGoalStateSnapshot(state, expected),
 			getActiveVerificationIds: () => this._getActiveVerificationIds(),
+			resolveGoalCompletionOwnerDecision: (input, signal) => this._resolveGoalCompletionOwnerDecision(input, signal),
 			deliverToOwner: (items) => {
 				this._deliverToOwner(items);
 			},
@@ -6463,6 +6464,27 @@ export class AgentSession {
 			type: "warning",
 			message: `Owner follow-ups are recorded in ${path}. Review them before relying on unresolved decisions.`,
 		});
+	}
+
+	/** One owner-completion boundary shared by the goal tool and objective-primary loop. */
+	private _resolveGoalCompletionOwnerDecision(input: GoalCompletionOwnerDecisionInput, signal?: AbortSignal) {
+		return resolveGoalCompletionOwnerDecision(
+			input,
+			{
+				sessionManager: this.sessionManager,
+				ui: this._extensionUIContext,
+				isHandoff: this._handoff,
+				requestText: this._lastUserRequest,
+				recordOwnerFollowUp: (entry) =>
+					appendOwnerFollowUp(ownerFollowUpPath(this._agentDir, this.sessionManager.getSessionId()), {
+						...entry,
+						at: new Date().toISOString(),
+					}),
+				artifactStore: this._getToolArtifactStore(),
+				getImageStore: () => this._getSessionImageStore(),
+			},
+			signal,
+		);
 	}
 
 	/**

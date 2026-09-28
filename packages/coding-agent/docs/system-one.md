@@ -1,9 +1,9 @@
 # System One
 
-System One is the objective controller: while a goal is active it owns CONTROL, decides the next
-transition and is the only thing that can say the objective is done. Jev is its semantic evaluator, a
-judge over supplied state, never an authority and never a model chooser. The root model and the
-workers execute what System One routes.
+System One is the objective controller: while a goal is active it owns semantic routing and objective
+completion judgments. Jev is its semantic evaluator, a judge over supplied state, never an authority
+and never a model chooser. Deterministic goal requirements remain the goal ledger's mechanical proof.
+The root model and the workers execute what System One routes.
 
 ## Loop modes
 
@@ -32,8 +32,11 @@ workers execute what System One routes.
 
 The goal follows the objective's terminal: `complete` completes the goal when every requirement is
 satisfied and otherwise blocks it naming the unsatisfied ones; `cancelled` cancels; `budget_exhausted`
-marks it budget-limited; every other terminal blocks with its reason codes. A continuation pass stops
-on a wait, a terminal, the turn or wall-clock limit, or two cycles that executed nothing.
+marks it budget-limited. An unsettled completion in explicit required mode keeps the goal active and
+routes one decision to the native question panel or the handoff follow-up ledger; continuing schedules
+a fresh continuation mission, while an explicit owner acceptance completes the goal. Other terminals
+block with their reason codes. A continuation pass stops on a wait, a terminal, the turn or wall-clock
+limit, or two cycles that executed nothing.
 
 ## Levers
 
@@ -73,9 +76,12 @@ Completion cannot pass an empty or disconnected objective, empty required criter
 objective, or unresolved verification.
 
 Production owners: SteeringPlane JEV-001..003 for admission, JEV-004 for routing, JEV-024/025/026
-for completion, JEV-041.. for semantic dedup. `SystemOneController` stage packs for intake, claim
-check, duplicate logic, patch review and drift remain callable for tests/hooks; they are not a
-second production control path.
+for objective-loop completion, JEV-041.. for semantic dedup. The goal tool first proves its
+deterministic requirements and checks, then asks `SystemOneController` to evaluate the same canonical
+completion view without persisting a terminal state. A first rejection steers more work. One unchanged
+repeat opens the native owner question panel, or records the decision in the handoff follow-up ledger
+and keeps the goal active. Other `SystemOneController` stage packs for intake, claim check, duplicate
+logic, patch review and drift remain callable for tests/hooks.
 
 ## The decision ledger
 
@@ -97,9 +103,11 @@ the [worker control tests](../test/system-one-worker-control.test.ts) and the
 
 `system-one/authority-line.ts` is the one table. Reversible work proceeds past a doubt or an outage
 with the doubt visible; an ambiguous judgment asks for evidence at most `GATHER_MORE_LIMIT` (2) times
-per evidence revision. An objective transition (JEV-024..028) never closes on a doubt and holds on
-an outage. An irreversible or outward operation goes to the operator, or is refused for a worker.
-Only Choice and Score answers are gated on confidence; a Noul's probability is its certainty.
+per evidence revision. The default `system_one_optional` policy also treats unsettled JEV-024..028
+objective-transition judgments as advisory after deterministic proof. Explicit
+`system_one_required` mode holds those transitions. An irreversible or outward operation goes to the
+operator, or is refused for a worker. Only Choice and Score answers are gated on confidence; a
+Noul's probability is its certainty.
 
 ## Claims against deliveries
 

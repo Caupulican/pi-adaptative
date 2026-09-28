@@ -118,6 +118,12 @@ class MockJevAdapter implements JevAdapter {
 	}
 }
 
+describe("default steering policy", () => {
+	it("keeps semantic judgment advisory for autonomous work", () => {
+		expect(DEFAULT_STEERING_POLICY.mode).toBe("system_one_optional");
+	});
+});
+
 describe("System One Steering, Adaptive Runtime, and Dedup (S1A-001..240)", () => {
 	describe("System One Steering Plane (S1A-001..028)", () => {
 		it("fails closed in system_one_required mode when adapter is missing", async () => {

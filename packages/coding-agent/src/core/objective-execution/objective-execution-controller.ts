@@ -517,9 +517,7 @@ export class ObjectiveExecutionController {
 	}
 
 	private throwIfRequiredSemantic(err: unknown): void {
-		if (this.deps.steeringPlane?.policy.mode === "system_one_required" || this.getMode() === "objective_primary") {
-			throw err;
-		}
+		if (this.deps.steeringPlane?.policy.mode === "system_one_required") throw err;
 	}
 
 	getHumanEdgeLedger(): DurableHumanEdgeLedger {
@@ -912,10 +910,10 @@ export class ObjectiveExecutionController {
 		reasonCodes: string[],
 	): Promise<ObjectiveTerminalResult> {
 		return {
-			status: "unrecoverable",
+			status: "incomplete",
 			reasonCodes,
 			cycleCount: this.cycleCounter,
-			deliveryBundle: await this.buildBundle(objectiveId, "unrecoverable", runtime, { reasonCodes }),
+			deliveryBundle: await this.buildBundle(objectiveId, "incomplete", runtime, { reasonCodes }),
 		};
 	}
 
@@ -1327,6 +1325,7 @@ export class ObjectiveExecutionController {
 						steeringMode: this.deps.steeringPlane?.policy.mode,
 						systemOneBound: Boolean(this.deps.systemOne || this.deps.steeringPlane),
 					});
+					const holdOnUnsettled = profile === "system_one_required";
 					const steeringCertRefs: string[] = [];
 
 					// FC-070, FC-071, FC-072: Canonical proof state on real projection without asserted verificationPassed:true
@@ -1409,14 +1408,18 @@ export class ObjectiveExecutionController {
 							objectiveId,
 							evidenceRevision,
 							signal,
+							holdOnUnsettled,
 						});
 						if (j24.certificate) steeringCertRefs.push(j24.certificate.certificate_id);
 						if (j24.kind === "held") return this.heldCompletion(objectiveId, runtime, j24.reasonCodes);
-						const c24 = j24.certificate;
-						if (c24.semantic_outcome !== "pass" || c24.directive !== "completion_candidate") {
+						if (
+							j24.kind === "judged" &&
+							(j24.certificate.semantic_outcome !== "pass" ||
+								j24.certificate.directive !== "completion_candidate")
+						) {
 							if (this.deps.runtime.ensureRepairTasks) {
 								const repairs = completionFailuresToRepairWork(
-									(c24.failed_semantic_predicates ?? ["completion_not_plausible"]).map((p) => ({
+									(j24.certificate.failed_semantic_predicates ?? ["completion_not_plausible"]).map((p) => ({
 										gate_id: p,
 									})),
 									objectiveId,
@@ -1509,25 +1512,26 @@ export class ObjectiveExecutionController {
 									evalResultDetails: evalResult,
 									bugFix,
 								},
-								{ objectiveId, evidenceRevision, signal },
+								{ objectiveId, evidenceRevision, signal, holdOnUnsettled },
 							);
 							if (j25.certificate) steeringCertRefs.push(j25.certificate.certificate_id);
 							if (j25.kind === "held") return this.heldCompletion(objectiveId, runtime, j25.reasonCodes);
-							const c25 = j25.certificate;
 
-							if (c25.semantic_outcome !== "pass") {
+							if (j25.kind === "judged" && j25.certificate.semantic_outcome !== "pass") {
 								if (this.deps.runtime.ensureRepairTasks) {
 									const repairs = completionFailuresToRepairWork(
-										(c25.failed_semantic_predicates ?? ["primary_completion_failed"]).map((p) => ({
-											gate_id: p,
-										})),
+										(j25.certificate.failed_semantic_predicates ?? ["primary_completion_failed"]).map(
+											(p) => ({
+												gate_id: p,
+											}),
+										),
 										objectiveId,
 									);
 									await this.deps.runtime.ensureRepairTasks(objectiveId, repairs);
 								}
 								return this.rejectedCompletion(objectiveId, runtime, [
 									"primary_completion_failed",
-									...(c25.failed_semantic_predicates ?? []),
+									...(j25.certificate.failed_semantic_predicates ?? []),
 								]);
 							}
 						}
@@ -1547,22 +1551,32 @@ export class ObjectiveExecutionController {
 								objectiveId,
 								evidenceRevision,
 								signal,
+								holdOnUnsettled,
 							});
 							if (j26.certificate) steeringCertRefs.push(j26.certificate.certificate_id);
 							if (j26.kind === "held") return this.heldCompletion(objectiveId, runtime, j26.reasonCodes);
-							const c26 = j26.certificate;
-
-							const adverseChallengeIds = [
-								"hidden_regressions",
-								"plausible_regression_not_tested",
-								"missing_requirement",
-								"hidden_assumption",
-								"conclusion_overstates_evidence",
-							].filter((id) => (c26.answers[id] as { value?: boolean } | undefined)?.value === true);
-							if (c26.semantic_outcome !== "pass" || adverseChallengeIds.length > 0) {
+							const adverseChallengeIds =
+								j26.kind === "judged"
+									? [
+											"hidden_regressions",
+											"plausible_regression_not_tested",
+											"missing_requirement",
+											"hidden_assumption",
+											"conclusion_overstates_evidence",
+										].filter(
+											(id) =>
+												(j26.certificate.answers[id] as { value?: boolean } | undefined)?.value === true,
+										)
+									: [];
+							if (
+								j26.kind === "judged" &&
+								(j26.certificate.semantic_outcome !== "pass" || adverseChallengeIds.length > 0)
+							) {
 								if (this.deps.runtime.ensureRepairTasks) {
 									const repairs = completionFailuresToRepairWork(
-										(c26.failed_semantic_predicates ?? ["hidden_regressions_or_edge_concern"]).map((p) => ({
+										(
+											j26.certificate.failed_semantic_predicates ?? ["hidden_regressions_or_edge_concern"]
+										).map((p) => ({
 											gate_id: p,
 										})),
 										objectiveId,
@@ -1572,7 +1586,7 @@ export class ObjectiveExecutionController {
 								return this.rejectedCompletion(objectiveId, runtime, [
 									"adversarial_completion_failed",
 									...adverseChallengeIds,
-									...(c26.failed_semantic_predicates ?? []),
+									...(j26.certificate.failed_semantic_predicates ?? []),
 								]);
 							}
 						}
@@ -1633,18 +1647,21 @@ export class ObjectiveExecutionController {
 										releaseRules: activeCharter.release,
 										packageArtifact,
 									},
-									{ objectiveId, evidenceRevision, signal },
+									{ objectiveId, evidenceRevision, signal, holdOnUnsettled },
 								);
 								if (j28.certificate) steeringCertRefs.push(j28.certificate.certificate_id);
 								if (j28.kind === "held") return this.heldCompletion(objectiveId, runtime, j28.reasonCodes);
-								const c28 = j28.certificate;
 
 								const deploySafe =
-									c28.semantic_outcome === "pass" &&
-									(c28.answers.deploy_safe as { value?: boolean })?.value !== false;
-								if (!deploySafe) {
+									j28.kind !== "judged" ||
+									(j28.certificate.semantic_outcome === "pass" &&
+										(j28.certificate.answers.deploy_safe as { value?: boolean })?.value !== false);
+								if (!deploySafe && j28.kind === "judged") {
 									const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime, {
-										reasonCodes: ["release_readiness_rejected", ...(c28.failed_semantic_predicates ?? [])],
+										reasonCodes: [
+											"release_readiness_rejected",
+											...(j28.certificate.failed_semantic_predicates ?? []),
+										],
 									});
 									return {
 										status: "unrecoverable",
@@ -1729,6 +1746,7 @@ export class ObjectiveExecutionController {
 							candidateDigest: candidateSnapshot?.digest ?? diffDigest,
 							snapshotIdentity,
 							steeringCertRefs,
+							holdOnUnsettled,
 							signal,
 							steeringPlane: this.deps.steeringPlane,
 							systemOne: this.deps.systemOne?.commitTerminalCompletion
@@ -2050,125 +2068,131 @@ export class ObjectiveExecutionController {
 		const taskId = `${objectiveId}-${route.route}-${this.cycleCounter}`;
 		const changedFiles = artifacts.map((a) => a.path);
 		const objRecord = runtime?.objectives?.[objectiveId];
+		const steeringPlane = this.deps.steeringPlane;
+		const requirePostflightCertificate = async (
+			...args: Parameters<SystemOneSteeringPlane["requireCertificate"]>
+		): Promise<void> => {
+			try {
+				await steeringPlane.requireCertificate(...args);
+			} catch (error) {
+				if (!isReversibleDoubtOrOutage(error) && steeringPlane.policy.mode === "system_one_required") {
+					throw error;
+				}
+			}
+		};
 
-		try {
-			// FC-050: JEV-017 worker claim support
-			await this.deps.steeringPlane.requireCertificate(
-				"JEV-017",
+		// FC-050: JEV-017 worker claim support
+		await requirePostflightCertificate(
+			"JEV-017",
+			{
+				objectiveId,
+				taskId,
+				route: route.route,
+				workerRole: this._lastBinding?.role ?? "implementer",
+				claims: ["work_completed", "progress_reported"],
+			},
+			{ objectiveId, taskId, evidenceRevision, signal },
+		);
+
+		// PRC-050, PRC-051: JEV-018 raw proof state (no asserted patchFit: true)
+		if (route.route === "implement") {
+			await requirePostflightCertificate(
+				"JEV-018",
 				{
 					objectiveId,
 					taskId,
-					route: route.route,
-					workerRole: this._lastBinding?.role ?? "implementer",
-					claims: ["work_completed", "progress_reported"],
+					changedFiles,
+					artifacts,
+					requirements:
+						objRecord?.objective?.acceptanceCriteria?.map((ac: any) => ac.text ?? ac.description) ?? [],
 				},
 				{ objectiveId, taskId, evidenceRevision, signal },
 			);
-
-			// PRC-050, PRC-051: JEV-018 raw proof state (no asserted patchFit: true)
-			if (route.route === "implement") {
-				await this.deps.steeringPlane.requireCertificate(
-					"JEV-018",
-					{
-						objectiveId,
-						taskId,
-						changedFiles,
-						artifacts,
-						requirements:
-							objRecord?.objective?.acceptanceCriteria?.map((ac: any) => ac.text ?? ac.description) ?? [],
-					},
-					{ objectiveId, taskId, evidenceRevision, signal },
-				);
-			}
-
-			// PRC-050, PRC-051: JEV-019 raw proof state (no asserted causalityVerified: true)
-			const isBugFix = requestsBugFix(objectiveId, objRecord?.objective?.description);
-			if (isBugFix) {
-				await this.deps.steeringPlane.requireCertificate(
-					"JEV-019",
-					{
-						objectiveId,
-						taskId,
-						bugFix: true,
-						changedFiles,
-						reproducerResults: (objRecord?.evidence ?? []).filter((e) => e.kind === "test"),
-						verificationMatrix,
-					},
-					{ objectiveId, taskId, evidenceRevision, signal },
-				);
-			}
-
-			// PRC-050, PRC-051: JEV-020 raw proof state (no asserted architectureFit: true)
-			const isArchitectureChange = Boolean(
-				route.route === "implement" &&
-					(objectiveId.toLowerCase().includes("refactor") ||
-						changedFiles.some((f) => f.includes("architecture") || f.includes("core"))),
-			);
-			if (isArchitectureChange) {
-				await this.deps.steeringPlane.requireCertificate(
-					"JEV-020",
-					{
-						objectiveId,
-						taskId,
-						changedFiles,
-						modulesAffected: changedFiles.map((f) => f.split("/")[0] || f),
-						boundaries: ["core", "orchestration", "adaptive", "steering"],
-					},
-					{ objectiveId, taskId, evidenceRevision, signal },
-				);
-			}
-
-			// PRC-050, PRC-051: JEV-022 raw proof state (no asserted verificationRelevance: true)
-			if (route.route === "verify") {
-				await this.deps.steeringPlane.requireCertificate(
-					"JEV-022",
-					{
-						objectiveId,
-						taskId,
-						verificationMatrix,
-						acceptanceCriteria:
-							objRecord?.objective?.acceptanceCriteria?.map((ac: any) => ac.text ?? ac.description) ?? [],
-					},
-					{ objectiveId, taskId, evidenceRevision, signal },
-				);
-			}
-
-			// PRC-050, PRC-051: JEV-023 raw proof state (no asserted repairAdequate: true)
-			const isRepair = Boolean(
-				route.route === "replan" || Object.keys(runtime.tasks).some((tid) => tid.includes("repair")),
-			);
-			if (isRepair) {
-				await this.deps.steeringPlane.requireCertificate(
-					"JEV-023",
-					{
-						objectiveId,
-						taskId,
-						repairWork: Object.keys(runtime.tasks).filter((tid) => tid.includes("repair")),
-						changedFiles,
-						failedGates: (objRecord as any)?.failedGates ?? [],
-					},
-					{ objectiveId, taskId, evidenceRevision, signal },
-				);
-			}
-
-			// FC-056: JEV-005 semantic progress
-			await this.deps.steeringPlane.requireCertificate(
-				"JEV-005",
-				{ objectiveId, cycleCount: this.cycleCounter },
-				{ objectiveId, taskId, evidenceRevision, signal },
-			);
-
-			// FC-057: JEV-006 repetition
-			await this.deps.steeringPlane.requireCertificate(
-				"JEV-006",
-				{ objectiveId, strategy: route.route },
-				{ objectiveId, taskId, evidenceRevision, signal },
-			);
-		} catch (err) {
-			if (this.deps.steeringPlane.policy.mode === "system_one_required") {
-				throw err;
-			}
 		}
+
+		// PRC-050, PRC-051: JEV-019 raw proof state (no asserted causalityVerified: true)
+		const isBugFix = requestsBugFix(objectiveId, objRecord?.objective?.description);
+		if (isBugFix) {
+			await requirePostflightCertificate(
+				"JEV-019",
+				{
+					objectiveId,
+					taskId,
+					bugFix: true,
+					changedFiles,
+					reproducerResults: (objRecord?.evidence ?? []).filter((e) => e.kind === "test"),
+					verificationMatrix,
+				},
+				{ objectiveId, taskId, evidenceRevision, signal },
+			);
+		}
+
+		// PRC-050, PRC-051: JEV-020 raw proof state (no asserted architectureFit: true)
+		const isArchitectureChange = Boolean(
+			route.route === "implement" &&
+				(objectiveId.toLowerCase().includes("refactor") ||
+					changedFiles.some((f) => f.includes("architecture") || f.includes("core"))),
+		);
+		if (isArchitectureChange) {
+			await requirePostflightCertificate(
+				"JEV-020",
+				{
+					objectiveId,
+					taskId,
+					changedFiles,
+					modulesAffected: changedFiles.map((f) => f.split("/")[0] || f),
+					boundaries: ["core", "orchestration", "adaptive", "steering"],
+				},
+				{ objectiveId, taskId, evidenceRevision, signal },
+			);
+		}
+
+		// PRC-050, PRC-051: JEV-022 raw proof state (no asserted verificationRelevance: true)
+		if (route.route === "verify") {
+			await requirePostflightCertificate(
+				"JEV-022",
+				{
+					objectiveId,
+					taskId,
+					verificationMatrix,
+					acceptanceCriteria:
+						objRecord?.objective?.acceptanceCriteria?.map((ac: any) => ac.text ?? ac.description) ?? [],
+				},
+				{ objectiveId, taskId, evidenceRevision, signal },
+			);
+		}
+
+		// PRC-050, PRC-051: JEV-023 raw proof state (no asserted repairAdequate: true)
+		const isRepair = Boolean(
+			route.route === "replan" || Object.keys(runtime.tasks).some((tid) => tid.includes("repair")),
+		);
+		if (isRepair) {
+			await requirePostflightCertificate(
+				"JEV-023",
+				{
+					objectiveId,
+					taskId,
+					repairWork: Object.keys(runtime.tasks).filter((tid) => tid.includes("repair")),
+					changedFiles,
+					failedGates: (objRecord as any)?.failedGates ?? [],
+				},
+				{ objectiveId, taskId, evidenceRevision, signal },
+			);
+		}
+
+		// FC-056: JEV-005 semantic progress
+		await requirePostflightCertificate(
+			"JEV-005",
+			{ objectiveId, cycleCount: this.cycleCounter },
+			{ objectiveId, taskId, evidenceRevision, signal },
+		);
+
+		// FC-057: JEV-006 repetition
+		await requirePostflightCertificate(
+			"JEV-006",
+			{ objectiveId, strategy: route.route },
+			{ objectiveId, taskId, evidenceRevision, signal },
+		);
 	}
 
 	private async _recordCompletionOutcomes(

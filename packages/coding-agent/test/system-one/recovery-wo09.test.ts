@@ -655,7 +655,7 @@ describe("System One recovery WO-09 production paths", () => {
 
 	it("system_one_required rejects synthetic_self_report as a required checkpoint success", async () => {
 		const plane = new SystemOneSteeringPlane({
-			policy: DEFAULT_STEERING_POLICY,
+			policy: { ...DEFAULT_STEERING_POLICY, mode: "system_one_required" },
 			router: {
 				evaluateOrFallback: async () => ({
 					schema_version: "2.0",

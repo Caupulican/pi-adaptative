@@ -6,6 +6,7 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { type GoalFileEvidenceResolver, resolveNativeGoalFileEvidence } from "../goals/file-evidence.ts";
+import type { GoalCompletionOwnerDecision } from "../goals/goal-completion-owner-decision.ts";
 import {
 	type GoalStateRevision,
 	getGoalStateRevision,
@@ -23,6 +24,7 @@ import {
 } from "../goals/goal-state.ts";
 import {
 	applyGoalAction,
+	completeGoalManually,
 	formatGoalRecoveryCatalogs,
 	type GoalAction,
 	type GoalActionName,
@@ -33,6 +35,7 @@ import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-
 import { describeRequirementCheckRefusal, proveRequirementChecks } from "../goals/prove-requirement-checks.ts";
 import { type RequirementCheckResult, requirementCheckViolation } from "../goals/requirement-checks.ts";
 import { awaitPreflight } from "../preflight.ts";
+import { JevAdapterFailure } from "../system-one/adapter.ts";
 import { requestsBugFix } from "../system-one/bug-fix.ts";
 import type { SystemOneController } from "../system-one/controller.ts";
 import {
@@ -362,7 +365,7 @@ export interface GoalToolDependencies {
 	 * quote resolved verbatim to a user message; absent when the host has no edge (tests, SDK).
 	 */
 	grantEdge?: (grant: { class: EdgeClass; quote: string; messageEntryId: string; scopeKey?: string }) => void;
-	/** System One semantic control plane controller for two-stage completion validation. */
+	/** System One semantic evaluator for goal completion. */
 	getSystemOneController?: () => SystemOneController | undefined;
 	/** Where requirement checks run and are validated: the session's task directory. */
 	getCwd?: () => string;
@@ -371,8 +374,11 @@ export interface GoalToolDependencies {
 	 * completion cannot prove checked requirements and refuses rather than skipping their checks.
 	 */
 	runRequirementCheck?: (check: RequirementCheck, signal?: AbortSignal) => Promise<RequirementCheckResult>;
-	/** Hand one decision to the owner (the session's owner items); used once per unchanged refusal. */
-	deliverToOwner?: (items: readonly string[]) => void;
+	/** Route one repeated, unchanged semantic rejection to handoff storage or the native owner panel. */
+	resolveCompletionRejection?: (
+		input: { toolCallId: string; goalId: string; userGoal: string; reasons: readonly string[] },
+		signal?: AbortSignal,
+	) => Promise<GoalCompletionOwnerDecision>;
 	/**
 	 * Narrow operation scope resolver for toolkit.script grants. Resolves registered script name
 	 * and exact argv to an internal scope key using host registry and execution context.
@@ -844,7 +850,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			});
 		},
 		async execute(
-			_toolCallId,
+			toolCallId,
 			input: GoalToolInput,
 			signal,
 		): Promise<{
@@ -1127,8 +1133,6 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					}
 					const systemOne = deps.getSystemOneController?.();
 					if (systemOne && current) {
-						// The same completion view gets the same answer: an unchanged repeat is refused
-						// without asking again, and the owner is asked to decide once.
 						const fingerprint = createHash("sha256")
 							.update(JSON.stringify(systemOne.completionView().view))
 							.digest("hex")
@@ -1136,46 +1140,89 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 						const previous = current.lastCompletionRejection;
 						if (previous?.fingerprint === fingerprint) {
 							const askOwner = previous.ownerAskedAt === undefined;
+							const ownerDecision =
+								askOwner && deps.resolveCompletionRejection
+									? await deps.resolveCompletionRejection(
+											{
+												toolCallId,
+												goalId: current.goalId,
+												userGoal: current.userGoal,
+												reasons: previous.reasons,
+											},
+											signal,
+										)
+									: undefined;
 							const recorded = applyGoalEvent(current, {
 								type: "completion_rejected",
 								fingerprint,
 								reasons: previous.reasons,
-								...(askOwner ? { ownerAsked: true } : {}),
+								...(ownerDecision ? { ownerAsked: true } : {}),
 								now: now(),
 							});
 							deps.saveGoalState(recorded, getGoalStateRevision(current));
-							if (askOwner) {
-								deps.deliverToOwner?.([
-									`Goal "${current.userGoal}" cannot complete: System One refused the same completion again with nothing it reads changed (${previous.reasons[0] ?? "no reason given"}). Accept it as done with /goal complete, change it with /goal edit, or tell the agent what is missing.`,
-								]);
+							if (ownerDecision?.decision === "accept_complete") {
+								const accepted = completeGoalManually(recorded, now());
+								if (!accepted.ok)
+									return withCheckRuns(goalExecutionError(input.action, accepted.error, recorded));
+								deps.saveGoalState(accepted.state, getGoalStateRevision(recorded));
+								return withCheckRuns({
+									content: [
+										{
+											type: "text" as const,
+											text: `goal complete recorded from the owner's explicit override.\n${summarizeGoalState(accepted.state, { action })}`,
+										},
+									],
+									details: { action: input.action, applied: true, state: accepted.state },
+								});
 							}
+							const ownerNote =
+								ownerDecision?.decision === "continue"
+									? `Owner chose to continue${ownerDecision.answer ? `: ${ownerDecision.answer}` : "."}`
+									: ownerDecision?.decision === "deferred"
+										? `Owner review was deferred${ownerDecision.followUpPath ? ` in ${ownerDecision.followUpPath}` : ""}; continue autonomous work on the missing proof.`
+										: "Continue autonomous work on the missing proof.";
 							return withCheckRuns(
 								goalCompletionRefusal(
 									input.action,
 									[
 										`Completion refused again: nothing System One reads has changed since it refused this completion (${recorded.lastCompletionRejection?.count ?? 2} times). Its reasons stand:`,
 										...previous.reasons.map((reason) => `- ${reason}`),
-										"Change the outcome or its evidence before completing again; the owner has been asked to decide.",
+										ownerNote,
 									].join("\n"),
 									recorded,
 								),
 							);
 						}
-						const completionDecision = await systemOne.executeCompletionTransaction(
-							requestsBugFix(result.state.goalId, result.state.userGoal),
-							{ persistTerminal: false },
-						);
-						if (completionDecision.verdict !== "complete") {
-							const recorded = applyGoalEvent(current, {
-								type: "completion_rejected",
-								fingerprint,
-								reasons: completionDecision.failed_gates.map((gate) => gate.reason),
-								now: now(),
-							});
-							deps.saveGoalState(recorded, getGoalStateRevision(current));
-							return withCheckRuns(
-								goalCompletionRefusal(input.action, describeCompletionRejection(completionDecision), recorded),
+						try {
+							const completionDecision = await systemOne.executeCompletionTransaction(
+								requestsBugFix(result.state.goalId, result.state.userGoal),
+								{ persistTerminal: false, signal },
 							);
+							if (completionDecision.verdict !== "complete") {
+								const recorded = applyGoalEvent(current, {
+									type: "completion_rejected",
+									fingerprint,
+									reasons: completionDecision.failed_gates.map((gate) => gate.reason),
+									now: now(),
+								});
+								deps.saveGoalState(recorded, getGoalStateRevision(current));
+								return withCheckRuns(
+									goalCompletionRefusal(
+										input.action,
+										describeCompletionRejection(completionDecision),
+										recorded,
+									),
+								);
+							}
+						} catch (error) {
+							signal?.throwIfAborted();
+							if (
+								!(error instanceof JevAdapterFailure) ||
+								(error.kind !== "unavailable" && error.kind !== "rate_limit" && error.kind !== "timeout")
+							) {
+								throw error;
+							}
+							// Optional System One is advisory on a real outage: deterministic completion remains available.
 						}
 					}
 				}

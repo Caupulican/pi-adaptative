@@ -754,6 +754,36 @@ describe("Final Closure v1.4 Regressions (FC-001..FC-090)", () => {
 			expect(evaluatedCheckpoints).toContain("JEV-019");
 			expect(evaluatedCheckpoints).toContain("JEV-020");
 		});
+
+		it("continues reversible postflight checks after an ambiguous semantic judgment", async () => {
+			const evaluatedCheckpoints: string[] = [];
+			const controller = new ObjectiveExecutionController({
+				runtime: {
+					objectives: {
+						"obj-postflight-ambiguity": {
+							objective: { description: "Implement feature", acceptanceCriteria: [] },
+							evidence: [],
+						},
+					},
+					tasks: {},
+					getArtifacts: () => [],
+				} as any,
+				steeringPlane: {
+					policy: { ...DEFAULT_STEERING_POLICY, mode: "system_one_required" },
+					requireCertificate: async (checkpointId: string) => {
+						evaluatedCheckpoints.push(checkpointId);
+						if (checkpointId === "JEV-017") {
+							throw new SteeringSemanticFailedError("JEV-017", "gather_more", ["claim_supported"]);
+						}
+						return {};
+					},
+				} as any,
+			});
+
+			await controller.enforcePostflightCertificates({ route: "implement" }, "obj-postflight-ambiguity");
+
+			expect(evaluatedCheckpoints).toEqual(["JEV-017", "JEV-018", "JEV-005", "JEV-006"]);
+		});
 	});
 
 	describe("Cluster 5: Semantic Gate Predicates & Negative Blockers (FC-060..FC-067)", () => {

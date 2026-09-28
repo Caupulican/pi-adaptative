@@ -26,6 +26,7 @@ export async function finalizeDelivery(input: {
 	readonly candidateDigest: string;
 	readonly snapshotIdentity: DeliveryBundle["candidate_snapshot"];
 	readonly steeringCertRefs: string[];
+	readonly holdOnUnsettled?: boolean;
 	readonly signal?: AbortSignal;
 	readonly steeringPlane?: TransitionCertifier<FinalizationCertificate>;
 	readonly systemOne?: {
@@ -47,7 +48,12 @@ export async function finalizeDelivery(input: {
 			input.steeringPlane,
 			"JEV-027",
 			{ ...bundle, candidateSnapshot: input.snapshotIdentity },
-			{ objectiveId: input.objectiveId, evidenceRevision: input.evidenceRevision, signal: input.signal },
+			{
+				objectiveId: input.objectiveId,
+				evidenceRevision: input.evidenceRevision,
+				signal: input.signal,
+				holdOnUnsettled: input.holdOnUnsettled,
+			},
 		);
 		if (judgment.certificate) steeringCertRefs.push(judgment.certificate.certificate_id);
 		if (judgment.kind === "held") {
@@ -60,14 +66,13 @@ export async function finalizeDelivery(input: {
 				]),
 			};
 		}
-		const certificate = judgment.certificate;
-		if (certificate.semantic_outcome !== "pass") {
+		if (judgment.kind === "judged" && judgment.certificate.semantic_outcome !== "pass") {
 			return {
 				status: "unrecoverable",
 				reasonCodes: ["delivery_certificate_rejected"],
 				bundle: certifiedBundle(input, bundle, steeringCertRefs, "unrecoverable", [
 					"delivery_certificate_rejected",
-					...(certificate.failed_semantic_predicates ?? []),
+					...(judgment.certificate.failed_semantic_predicates ?? []),
 				]),
 			};
 		}

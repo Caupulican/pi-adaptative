@@ -567,6 +567,24 @@ describe("Objective Execution Controller & Jev Substrate (OEL-001 to OEL-045)", 
 		expect((await controller.evaluateRouteOnce("goal:g1")).route).toBe("implement");
 	});
 
+	it("keeps objective-primary routing autonomous when optional System One is unavailable", async () => {
+		const { runtime } = createTestRuntime();
+		const controller = new ObjectiveExecutionController({
+			mode: "objective_primary",
+			runtime: { reconcileObjective: async () => runtime.getSnapshot() },
+			systemOne: {
+				evaluateObjectiveRoute: async () => {
+					throw new Error("System One offline");
+				},
+			},
+		});
+
+		const route = await controller.evaluateRouteOnce("goal:g1");
+
+		expect(route.route).toBe("implement");
+		expect(route.reason_codes).toContain("implementation_required");
+	});
+
 	it("OEL-036, OEL-037: GoalSessionController in shadow mode emits disagreement telemetry and primary mode bypasses legacy continuation", async () => {
 		const sessionManager = SessionManager.inMemory();
 		let telemetryEvent: DisagreementTelemetryEvent | undefined;

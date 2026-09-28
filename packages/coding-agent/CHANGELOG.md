@@ -3,6 +3,7 @@
 ### Fixed
 
 - Route persistent ICM memory and reusable pipeline scaffolding to the user-level Pi catalog unless project-local artifacts are explicitly requested.
+- Keep default autonomous goals moving when System One is absent, returns an unsettled judgment, or decisively requests completion repair; repeated unchanged completion rejections now open a durable owner question or enter the handoff follow-up ledger, owner prompts resume system-originated blocks, and projected system stops are attributed to the kernel.
 
 ## [0.100.3] - 2026-09-28
 

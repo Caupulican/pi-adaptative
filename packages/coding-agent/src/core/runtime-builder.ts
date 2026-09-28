@@ -95,6 +95,10 @@ import {
 import { disposeExtensionEventSubscriptions } from "./extensions/lifecycle.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { recordObjectiveClarification } from "./goals/goal-clarification-log.ts";
+import type {
+	GoalCompletionOwnerDecision,
+	GoalCompletionOwnerDecisionInput,
+} from "./goals/goal-completion-owner-decision.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import type { OpenTaskStepRef } from "./goals/goal-tool-core.ts";
@@ -379,6 +383,11 @@ export interface RuntimeBuilderDeps {
 	saveGoalStateSnapshot(state: GoalState, expected?: GoalStateRevision): string;
 	/** Trusted active verification identities reconstructed by the session owner. */
 	getActiveVerificationIds?(): readonly string[];
+	/** The session-owned route for unresolved completion: native panel or durable handoff ledger. */
+	resolveGoalCompletionOwnerDecision?(
+		input: GoalCompletionOwnerDecisionInput,
+		signal?: AbortSignal,
+	): Promise<GoalCompletionOwnerDecision>;
 	/** Queue items the owner must decide (the session's owner items message). */
 	deliverToOwner?(items: readonly string[]): void;
 	/** System One semantic control plane controller. */
@@ -1304,7 +1313,7 @@ export class RuntimeBuilder {
 					getActiveVerificationIds: () => this.deps.getActiveVerificationIds?.() ?? [],
 					getSystemOneController: () => this.deps.getSystemOneController?.(),
 					getCwd: () => this._taskDirectories.cwd,
-					deliverToOwner: (items) => this.deps.deliverToOwner?.(items),
+					resolveCompletionRejection: this.deps.resolveGoalCompletionOwnerDecision,
 					runRequirementCheck: (check, signal) =>
 						runRequirementCheck(check, { cwd: this._taskDirectories.cwd, ...(signal ? { signal } : {}) }),
 					grantEdge: this.deps.grantEdgeFromInstructions

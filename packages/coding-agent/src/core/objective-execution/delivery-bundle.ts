@@ -1,5 +1,6 @@
 export type DeliveryTerminalStatus =
 	| "complete"
+	| "incomplete"
 	| "blocked_external"
 	| "blocked_by_initial_authority"
 	| "owner_required"

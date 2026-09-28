@@ -23,6 +23,7 @@
     "terminal_status": {
       "enum": [
         "complete",
+        "incomplete",
         "blocked_external",
         "owner_required",
         "budget_exhausted",

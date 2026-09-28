@@ -1,6 +1,7 @@
 import { SessionManager } from "@caupulican/pi-agent-core/session";
 import type { AssistantMessage } from "@caupulican/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import type { GoalCompletionOwnerDecision } from "../src/core/goals/goal-completion-owner-decision.ts";
 import { GoalSessionController } from "../src/core/goals/goal-session-controller.ts";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import type { ObjectiveExecutionController } from "../src/core/objective-execution/index.ts";
@@ -74,7 +75,13 @@ function session(
 	options: {
 		afterPrompt?: (sessionManager: SessionManager, text: string) => void;
 		warnings?: string[];
-		ownerItems?: string[];
+		resolveCompletionRejection?: (input: {
+			toolCallId: string;
+			goalId: string;
+			userGoal: string;
+			reasons: readonly string[];
+		}) => Promise<GoalCompletionOwnerDecision>;
+		autoContinues?: string[];
 	} = {},
 ) {
 	const sessionManager = SessionManager.inMemory();
@@ -86,7 +93,9 @@ function session(
 		getTaskRuntimeSnapshot: () => ({ lastOrdinal: ordinal }) as never,
 		getBackgroundToolTasks: () => [],
 		synchronizeGoalState: () => {},
-		scheduleGoalAutoContinueFromIdle: () => {},
+		scheduleGoalAutoContinueFromIdle: () => {
+			options.autoContinues?.push("scheduled");
+		},
 		prompt: async (text) => {
 			prompts.push(text);
 			ordinal++;
@@ -95,9 +104,9 @@ function session(
 		emitWarning: (message) => {
 			options.warnings?.push(message);
 		},
-		deliverToOwner: (items) => {
-			options.ownerItems?.push(...items);
-		},
+		resolveCompletionRejection: options.resolveCompletionRejection
+			? async (input) => options.resolveCompletionRejection!(input)
+			: undefined,
 		getExecutionLoopMode: () => "objective_primary",
 		getObjectiveExecutionController: () => controller,
 	});
@@ -187,8 +196,9 @@ describe("System One primary loop", () => {
 		expect(goals.getState()?.blockedReason).toContain("unrecoverable: missing_required_executor:x");
 	});
 
-	it("asks the owner when System One cannot settle a completion check, and not when it is only down", async () => {
-		const ownerItems: string[] = [];
+	it("keeps an unsettled completion active, routes one owner decision, and schedules the next mission", async () => {
+		const autoContinues: string[] = [];
+		const resolveCompletionRejection = vi.fn(async () => ({ decision: "continue" as const }));
 		const ambiguous = scriptedController([
 			{
 				kind: "terminal",
@@ -198,14 +208,41 @@ describe("System One primary loop", () => {
 				},
 			},
 		]);
-		const goals = session(ambiguous.controller, [], { ownerItems });
+		const goals = session(ambiguous.controller, [], { autoContinues, resolveCompletionRejection });
 		await goals.continueLoop({ maxTurns: 1, maxStallTurns: 3 });
-		expect(goals.getState()?.status).toBe("blocked");
-		expect(ownerItems).toEqual([
-			"System One could not settle the objective's cold adversarial challenge check (hidden_regressions), so the goal is held open: say whether to accept it as complete, or what is still missing.",
-		]);
+		expect(goals.getState()?.status).toBe("active");
+		expect(resolveCompletionRejection).toHaveBeenCalledWith({
+			toolCallId: expect.stringMatching(/^objective-completion:/),
+			goalId: "g1",
+			userGoal: "Ship it",
+			reasons: [
+				"System One could not settle the objective's cold adversarial challenge check (hidden_regressions), so the goal is held open: say whether to accept it as complete, or what is still missing.",
+			],
+		});
+		expect(autoContinues).toEqual(["scheduled"]);
+	});
 
-		const outageItems: string[] = [];
+	it("closes an unsettled objective only after the owner explicitly accepts completion", async () => {
+		const resolveCompletionRejection = vi.fn(async () => ({ decision: "accept_complete" as const }));
+		const ambiguous = scriptedController([
+			{
+				kind: "terminal",
+				terminal: {
+					status: "semantic_gate_unavailable",
+					reasonCodes: ["system_one_ambiguous", "jev_026_ambiguous"],
+				},
+			},
+		]);
+		const goals = session(ambiguous.controller, [], { resolveCompletionRejection });
+
+		await goals.continueLoop({ maxTurns: 1, maxStallTurns: 3 });
+
+		expect(goals.getState()).toMatchObject({ status: "completed", acceptanceOverride: true });
+	});
+
+	it("does not ask the owner when strict System One is only down", async () => {
+		const resolveCompletionRejection = vi.fn(async () => ({ decision: "continue" as const }));
+
 		const outage = scriptedController([
 			{
 				kind: "terminal",
@@ -215,10 +252,29 @@ describe("System One primary loop", () => {
 				},
 			},
 		]);
-		const held = session(outage.controller, [], { ownerItems: outageItems });
+		const held = session(outage.controller, [], { resolveCompletionRejection });
 		await held.continueLoop({ maxTurns: 1, maxStallTurns: 3 });
 		expect(held.getState()?.blockedReason).toContain("jev_025_unavailable");
-		expect(outageItems).toEqual([]);
+		expect(resolveCompletionRejection).not.toHaveBeenCalled();
+	});
+
+	it("starts the next mission when System One decisively finds the objective incomplete", async () => {
+		const autoContinues: string[] = [];
+		const resolveCompletionRejection = vi.fn(async () => ({ decision: "continue" as const }));
+		const incomplete = scriptedController([
+			{
+				kind: "terminal",
+				terminal: { status: "incomplete", reasonCodes: ["primary_completion_failed", "missing_proof"] },
+			},
+		]);
+		const goals = session(incomplete.controller, [], { autoContinues, resolveCompletionRejection });
+
+		const result = await goals.continueLoop({ maxTurns: 1, maxStallTurns: 3 });
+
+		expect(goals.getState()?.status).toBe("active");
+		expect(autoContinues).toEqual(["scheduled"]);
+		expect(resolveCompletionRejection).not.toHaveBeenCalled();
+		expect(result.stopReason).toBe("continuation_not_allowed");
 	});
 
 	it("completes the goal from a complete terminal only when its requirements are satisfied, else blocks and says why", async () => {

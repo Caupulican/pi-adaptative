@@ -667,6 +667,23 @@ describe("GoalSessionController transient recovery and bounded failure streak", 
 		expect(controller.getState()).toMatchObject({ status: "active", systemFailureStreak: 1 });
 	});
 
+	it("lets the next owner prompt resume an unclassified system stop without making it auto-resumable", () => {
+		const { controller } = createTestController();
+		const active = createGoalState({ goalId: "g1", userGoal: "Fix bugs", now: "T0" });
+		controller.saveState(
+			applyGoalEvent(active, {
+				type: "system_stop_goal",
+				status: "blocked",
+				reason: "unknown: [JEV-017] Checkpoint semantic gate failed with outcome 'gather_more'",
+				now: "T1",
+			}),
+		);
+
+		expect(controller.resumeSystemBlockedGoal()).toBeUndefined();
+		expect(controller.resumeSystemBlockedGoal(undefined, "owner")).toBe("g1");
+		expect(controller.getState()?.status).toBe("active");
+	});
+
 	it("resets provider streak only on fresh completion turn ordinal after system resume while preserving runaway fence and resisting replayed ordinals", () => {
 		const sessionManager = SessionManager.inMemory();
 		const { controller } = createTestController({ sessionManager });

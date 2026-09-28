@@ -347,6 +347,24 @@ describe("DelegationOrchestrationLedger", () => {
 		expect(reopened.runtime.getSnapshot().tasks["worker-1"]?.task.acceptanceCriterionIds).toEqual([]);
 	});
 
+	it("attributes a projected system goal stop to the kernel", () => {
+		const agentDir = root();
+		const store = new OrchestrationEventStore({ agentDir, sessionId: "session-system-stop" });
+		const ledger = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-system-stop", store });
+		const active = goal([]);
+		ledger.synchronizeGoalState(active);
+		ledger.synchronizeGoalState(
+			applyGoalEvent(active, {
+				type: "system_stop_goal",
+				status: "blocked",
+				reason: "unknown: semantic checkpoint was ambiguous",
+				now: "2026-07-23T00:01:00.000Z",
+			}),
+		);
+
+		expect(store.readAll().findLast((event) => event.type === "objective.paused")?.actor).toBe("kernel");
+	});
+
 	it("rejects an oversized objective evidence batch before writing any synchronization prefix", () => {
 		const agentDir = root();
 		const sessionId = "session-goal-byte-preflight";

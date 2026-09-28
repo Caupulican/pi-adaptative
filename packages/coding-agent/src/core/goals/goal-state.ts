@@ -260,7 +260,7 @@ export type GoalEvent =
 			now: string;
 	  }
 	| { type: "progress"; now: string }
-	/** System One refused completion over the view with this fingerprint; `ownerAsked` marks the hand-off. */
+	/** System One refused completion over the view with this fingerprint; `ownerAsked` marks owner routing. */
 	| { type: "completion_rejected"; fingerprint: string; reasons: readonly string[]; ownerAsked?: boolean; now: string }
 	| { type: "no_progress"; now: string }
 	| {

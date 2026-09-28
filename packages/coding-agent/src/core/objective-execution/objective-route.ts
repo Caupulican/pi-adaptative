@@ -60,6 +60,7 @@ export interface ObjectiveRoute {
 export interface ObjectiveTerminalResult {
 	readonly status:
 		| "complete"
+		| "incomplete"
 		| "cancelled"
 		| "budget_exhausted"
 		| "blocked"

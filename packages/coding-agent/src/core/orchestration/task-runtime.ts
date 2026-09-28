@@ -29,6 +29,7 @@ import {
 	type ObjectiveContract,
 	type ObjectiveStatus,
 	ORCHESTRATION_SCHEMA_VERSION,
+	type OrchestrationActorKind,
 	type OrchestrationDispatchRequest,
 	type OrchestrationEvent,
 	type OrchestrationModelBinding,
@@ -1066,8 +1067,8 @@ export class DurableTaskRuntime {
 		return structuredClone(lease);
 	}
 
-	pauseObjective(objectiveId: string): void {
-		this.transitionObjective(objectiveId, "objective.paused", "paused");
+	pauseObjective(objectiveId: string, actor: OrchestrationActorKind = "human"): void {
+		this.transitionObjective(objectiveId, "objective.paused", "paused", {}, actor);
 	}
 
 	resumeObjective(objectiveId: string): void {
@@ -1264,6 +1265,7 @@ export class DurableTaskRuntime {
 		type: "objective.paused" | "objective.resumed" | "objective.cancelled" | "objective.completed",
 		target: ObjectiveStatus,
 		payload: JsonObject = {},
+		actor: OrchestrationActorKind = "human",
 	): void {
 		this.refresh();
 		const objective = this.requireObjective(objectiveId);
@@ -1279,7 +1281,7 @@ export class DurableTaskRuntime {
 		this.commit({
 			type,
 			aggregateId: objectiveId,
-			actor: "human",
+			actor,
 			idempotencyKey: `${type}:${objectiveId}:${this.state.lastOrdinal}`,
 			payload,
 		});

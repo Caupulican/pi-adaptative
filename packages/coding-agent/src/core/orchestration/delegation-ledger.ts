@@ -528,7 +528,7 @@ export class DelegationOrchestrationLedger {
 			case "blocked":
 			case "usage_limited":
 			case "budget_limited":
-				if (status === "active") this.runtime.pauseObjective(objective.objectiveId);
+				if (status === "active") this.runtime.pauseObjective(objective.objectiveId, "kernel");
 				break;
 			case "cancelled":
 				if (status !== "cancelled") this.runtime.cancelObjective(objective.objectiveId);

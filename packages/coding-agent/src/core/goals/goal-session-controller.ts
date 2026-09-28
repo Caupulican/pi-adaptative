@@ -22,6 +22,7 @@ import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import { systemOneAbortReason } from "../system-one/foreground-control.ts";
 import { openWorkUnit } from "../work-units.ts";
+import type { GoalCompletionOwnerDecision } from "./goal-completion-owner-decision.ts";
 import { buildObjectiveRoutePrompt, GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
 import {
 	GoalBudgetExhaustedError,
@@ -33,6 +34,7 @@ import {
 	getAutoResumableReasonPrefix,
 	getGoalStateRevision,
 	isSystemBlockedGoal,
+	isSystemStoppedGoal,
 	resumeGoal,
 	stopGoalFromSystem,
 } from "./goal-lifecycle.ts";
@@ -48,7 +50,7 @@ import {
 	isGoalUnfinishedStatus,
 	MAX_CONSUMED_RUNAWAY_SIGNATURES,
 } from "./goal-state.ts";
-import { applyGoalAction } from "./goal-tool-core.ts";
+import { applyGoalAction, completeGoalManually } from "./goal-tool-core.ts";
 import {
 	type ExplicitGoalStartAuthority,
 	parseExplicitChatGoal,
@@ -70,8 +72,13 @@ export interface GoalSessionControllerDeps {
 	scheduleGoalAutoContinueFromIdle(): void;
 	prompt(text: string, options?: PromptOptions): Promise<void>;
 	emitWarning(message: string): void;
-	/** Hand the owner a decision nobody else may make, through the host's own owner channel. */
-	deliverToOwner?(items: readonly string[]): void;
+	/** Route an unresolved completion to the native panel or the durable handoff ledger. */
+	resolveCompletionRejection?(input: {
+		toolCallId: string;
+		goalId: string;
+		userGoal: string;
+		reasons: readonly string[];
+	}): Promise<GoalCompletionOwnerDecision>;
 	getExecutionLoopMode?(): ExecutionLoopMode | undefined;
 	getObjectiveExecutionController?(): ObjectiveExecutionController | undefined;
 }
@@ -320,13 +327,17 @@ export class GoalSessionController {
 		requiredPrefix?: string,
 	): string | undefined {
 		const current = this.getState();
-		if (!current || !isSystemBlockedGoal(current) || !current.blockedReason) return undefined;
+		if (
+			!current ||
+			!(source === "owner" ? isSystemStoppedGoal(current) : isSystemBlockedGoal(current)) ||
+			!current.blockedReason
+		)
+			return undefined;
 
 		const prefix = getAutoResumableReasonPrefix(current.blockedReason);
-		if (!prefix) return undefined;
 		if (requiredPrefix !== undefined && prefix !== requiredPrefix) return undefined;
 
-		if (source === "system" && !this.isAutomaticRecoveryAllowed(current, prefix)) return undefined;
+		if (source === "system" && (!prefix || !this.isAutomaticRecoveryAllowed(current, prefix))) return undefined;
 
 		const resumed = resumeGoal(current, now, source);
 		if (!resumed.ok) return undefined;
@@ -822,9 +833,9 @@ export class GoalSessionController {
 	}
 
 	/** The objective reached a terminal: the goal follows it, and says so when they disagree. */
-	private applyObjectiveTerminal(terminal: ObjectiveTerminalResult): void {
+	private async applyObjectiveTerminal(terminal: ObjectiveTerminalResult): Promise<boolean> {
 		const state = this.getState();
-		if (!state || !isGoalExecutionActive(state.status)) return;
+		if (!state || !isGoalExecutionActive(state.status)) return false;
 		const now = new Date().toISOString();
 		const reasons = terminal.reasonCodes.join(", ");
 		switch (terminal.status) {
@@ -832,7 +843,7 @@ export class GoalSessionController {
 				const completed = applyGoalEvent(state, { type: "complete_goal", now });
 				if (completed.status === "completed") {
 					this.saveState(completed, getGoalStateRevision(state));
-					return;
+					return false;
 				}
 				const open = state.requirements
 					.filter((requirement) => requirement.status !== "satisfied")
@@ -841,22 +852,42 @@ export class GoalSessionController {
 					"blocked",
 					`System One judged the objective complete (${reasons}) but requirements ${open.join(", ")} are not marked satisfied`,
 				);
-				return;
+				return false;
 			}
 			case "cancelled":
 				this.saveState(applyGoalEvent(state, { type: "cancel_goal", now }), getGoalStateRevision(state));
-				return;
+				return false;
 			case "budget_exhausted":
 				this.stopActiveGoal("budget_limited", reasons || "objective budget exhausted");
-				return;
-			default:
-				this.stopActiveGoal("blocked", `${terminal.status}: ${reasons}`);
+				return false;
+			case "incomplete":
+				this.deps.scheduleGoalAutoContinueFromIdle();
+				return true;
+			default: {
 				if (
 					terminal.status === "semantic_gate_unavailable" &&
 					terminal.reasonCodes.includes("system_one_ambiguous")
 				) {
-					this.deps.deliverToOwner?.([ambiguousCompletionQuestion(terminal.reasonCodes)]);
+					const decision = await this.deps.resolveCompletionRejection?.({
+						toolCallId: `objective-completion:${state.goalId}:${state.revision ?? 0}`,
+						goalId: state.goalId,
+						userGoal: state.userGoal,
+						reasons: [ambiguousCompletionQuestion(terminal.reasonCodes)],
+					});
+					if (decision?.decision === "accept_complete") {
+						const completed = completeGoalManually(state, now);
+						if (completed.ok) this.saveState(completed.state, getGoalStateRevision(state));
+						return false;
+					}
+					if (!decision) {
+						this.deps.emitWarning("The completion decision router is unavailable; keeping the goal active.");
+					}
+					this.deps.scheduleGoalAutoContinueFromIdle();
+					return true;
 				}
+				this.stopActiveGoal("blocked", `${terminal.status}: ${reasons}`);
+				return false;
+			}
 		}
 	}
 
@@ -895,7 +926,14 @@ export class GoalSessionController {
 		const before = this.primaryRootTurns;
 		try {
 			const terminal = await controller.runCycles(goalObjectiveId(state.goalId), 1);
-			if (terminal) this.applyObjectiveTerminal(terminal);
+			const continuationRestartScheduled = terminal ? await this.applyObjectiveTerminal(terminal) : false;
+			const submitted = this.primaryRootTurns > before;
+			return {
+				submitted,
+				snapshot: snapshot(),
+				...(continuationRestartScheduled ? { continuationRestartScheduled: true } : {}),
+				...(submitted ? { turnOutcome: "completed" as const } : {}),
+			};
 		} catch (error) {
 			if (error instanceof ObjectiveRootTurnInterruptedError) {
 				return { submitted: true, snapshot: snapshot(), turnOutcome: "interrupted" };
@@ -907,8 +945,6 @@ export class GoalSessionController {
 			this.recordContinuationFailure(error);
 			throw error;
 		}
-		const submitted = this.primaryRootTurns > before;
-		return { submitted, snapshot: snapshot(), ...(submitted ? { turnOutcome: "completed" as const } : {}) };
 	}
 
 	continueLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
@@ -947,6 +983,7 @@ export class GoalSessionController {
 			if (once.turnOutcome === "interrupted") return stop("turn_interrupted");
 			if (once.turnOutcome === "errored") return stop("turn_errored");
 			if (once.submitted) turnsSubmitted++;
+			if (once.continuationRestartScheduled) return stop("continuation_not_allowed");
 			const after = this.getState();
 			if (!after || !isGoalExecutionActive(after.status)) {
 				return stop(after?.status === "budget_limited" ? "goal_budget_exhausted" : "continuation_not_allowed");

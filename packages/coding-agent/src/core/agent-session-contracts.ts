@@ -398,6 +398,8 @@ export interface GoalContinuationOnceOptions {
 export interface GoalContinuationOnceResult {
 	submitted: boolean;
 	snapshot: GoalRuntimeSnapshot;
+	/** Completion stayed open and a fresh autonomous continuation was scheduled. */
+	continuationRestartScheduled?: boolean;
 	prompt?: GoalContinuationPrompt;
 	/** Terminal outcome of the submitted provider turn; absent when no prompt was submitted. */
 	turnOutcome?: GoalContinuationTurnOutcome["outcome"];
