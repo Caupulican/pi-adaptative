@@ -1,3 +1,4 @@
+import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import { SessionManager } from "@caupulican/pi-agent-core/session";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
@@ -13,6 +14,7 @@ function scriptedController(
 		| { kind: "root"; route: ObjectiveRoute["route"] }
 		| { kind: "worker"; route: ObjectiveRoute["route"] }
 		| { kind: "wait" }
+		| { kind: "error"; error: Error }
 		| { kind: "terminal"; terminal: ObjectiveTerminalResult }
 	)[],
 ) {
@@ -37,6 +39,7 @@ function scriptedController(
 		runCycles: async (_objectiveId: string, _max: number): Promise<ObjectiveTerminalResult | undefined> => {
 			const step = steps[index++];
 			if (!step) throw new Error("script exhausted");
+			if (step.kind === "error") throw step.error;
 			if (step.kind === "terminal") return step.terminal;
 			lastRoute = route(step.kind === "wait" ? "wait_for_worker" : step.route);
 			routed.push(lastRoute.route);
@@ -122,6 +125,16 @@ function session(
 }
 
 describe("System One primary loop", () => {
+	it("keeps the goal active when foreground admission races with an automatic continuation", async () => {
+		const { controller } = scriptedController([
+			{ kind: "error", error: new AgentBusyError("Agent is already processing.") },
+		]);
+		const goals = session(controller, []);
+
+		await expect(goals.continueOnce({ maxStallTurns: 3 })).rejects.toBeInstanceOf(AgentBusyError);
+		expect(goals.getState()).toMatchObject({ status: "active", systemFailureStreak: 0 });
+	});
+
 	it("runs routed root turns with the route brief, stops on a wait, and follows the objective's terminal", async () => {
 		const prompts: string[] = [];
 		const { controller, routed } = scriptedController([

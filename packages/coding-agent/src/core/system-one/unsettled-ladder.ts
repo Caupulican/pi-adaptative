@@ -210,17 +210,21 @@ export async function settleUnsettledItems(
 	});
 	if (withFact.length === 0) return { settled, unsettled };
 	try {
-		// Per item: [evidence states the fact, the fact settles the item], all in one request.
-		const answers = await judge.evaluateUnsettledItems(
-			withFact.flatMap(({ entry, consult }) => [
-				{ statement: consult.fact, evidence: input.evidence },
-				{ statement: entry.item, evidence: consult.fact },
-			]),
-			input.signal,
-		);
-		withFact.forEach(({ entry, consult }, index) => {
-			const grounded = verdictAt(answers, index * 2) === "confirmed";
-			const verdict = grounded ? verdictAt(answers, index * 2 + 1) : undefined;
+		// Exact quote containment is a deterministic code fact. Paraphrases still require System One
+		// to judge grounding; every fact then gets a separate judgment about what it settles.
+		const checks: { statement: string; evidence: string }[] = [];
+		const judgments = withFact.map(({ entry, consult }) => {
+			const quoted = quotedIn(consult.fact, input.evidence);
+			const groundingIndex = quoted
+				? undefined
+				: checks.push({ statement: consult.fact, evidence: input.evidence }) - 1;
+			const settlementIndex = checks.push({ statement: entry.item, evidence: consult.fact }) - 1;
+			return { entry, consult, quoted, groundingIndex, settlementIndex };
+		});
+		const answers = await judge.evaluateUnsettledItems(checks, input.signal);
+		judgments.forEach(({ entry, consult, quoted, groundingIndex, settlementIndex }) => {
+			const grounded = quoted || verdictAt(answers, groundingIndex!) === "confirmed";
+			const verdict = grounded ? verdictAt(answers, settlementIndex) : undefined;
 			if (verdict)
 				settled.push({ item: entry.item, verdict, by: `system_one+${consult.model}`, basis: consult.fact });
 			else

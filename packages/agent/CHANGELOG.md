@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Classified OpenRouter routes that became paid-only as billing failover candidates.
+
 ## [0.100.4] - 2026-09-28
 
 ## [0.100.3] - 2026-09-28

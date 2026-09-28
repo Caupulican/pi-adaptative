@@ -19,6 +19,8 @@ const headers = new Headers();
 const OPENAI_QUOTA_MESSAGE = "429 You exceeded your current quota, please check your plan and billing details.";
 const OPENAI_RATE_LIMIT_MESSAGE = "429 Rate limit reached for gpt";
 const OPENROUTER_CREDITS_MESSAGE = "402 Insufficient credits. Add more credits to continue.";
+const OPENROUTER_FREE_MODEL_UNAVAILABLE =
+	"This model is unavailable for free. The paid version is available now - use this slug instead: inclusionai/ling-3.0-flash-fin";
 const XAI_CAPACITY_MESSAGE =
 	"Error Code null: The model is currently at capacity due to high demand. Please try again in a few minutes, or use a higher service tier for priority processing: https://docs.x.ai/developers/advanced-api-usage/priority-processing";
 const XAI_INTERNAL_GENERATION_MESSAGE = "Error Code null: Internal error during token generation";
@@ -104,6 +106,12 @@ function fixtureExpectations(): FixtureExpectation[] {
 			provisional: true,
 		},
 		{
+			provider: "openrouter",
+			message: OPENROUTER_FREE_MODEL_UNAVAILABLE,
+			reason: "billing_or_quota",
+			genericReason: "unknown",
+		},
+		{
 			provider: "xai",
 			message: XAI_CAPACITY_MESSAGE,
 			reason: "overloaded",
@@ -146,7 +154,7 @@ const providerRowFixtureCoverage: Record<string, readonly string[]> = {
 	"amazon-bedrock": [BEDROCK_THROTTLING_MESSAGE],
 	anthropic: ["Your credit balance is too low"],
 	mistral: ["Insufficient credits"],
-	openrouter: ["Insufficient credits"],
+	openrouter: ["Insufficient credits", OPENROUTER_FREE_MODEL_UNAVAILABLE],
 	xai: [XAI_CAPACITY_MESSAGE, XAI_INTERNAL_GENERATION_MESSAGE],
 	"openai-codex": [
 		"You have hit your ChatGPT usage limit",

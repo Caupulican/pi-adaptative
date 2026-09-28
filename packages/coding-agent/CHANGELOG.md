@@ -1,5 +1,11 @@
 ## [Unreleased]
 
+### Fixed
+
+- Kept worker dispatch adapters bound when objective routing selects them as callbacks.
+- Preserved active goals when automatic continuation races with foreground prompt admission.
+- Accepted exact quoted tool output as grounded evidence during unsettled claim review.
+
 ## [0.100.4] - 2026-09-28
 
 ### Fixed

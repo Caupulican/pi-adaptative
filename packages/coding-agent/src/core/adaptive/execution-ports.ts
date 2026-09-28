@@ -677,6 +677,12 @@ export class RealWorkerDispatcher {
 				"RealWorkerDispatcher requires a real worker execution owner (session or runWorkerDelegationOnce).",
 			);
 		}
+		// Execution coordinators consume these methods as callbacks. Bind the adapter boundary once so
+		// selecting a dispatch strategy cannot detach the session receiver used by the real port.
+		this.dispatch = this.dispatch.bind(this);
+		this.continueWorker = this.continueWorker.bind(this);
+		this.dispatchEscalated = this.dispatchEscalated.bind(this);
+		this.dispatchSpecialist = this.dispatchSpecialist.bind(this);
 	}
 
 	/** Every dispatched mission states the owner's standing development rules. */

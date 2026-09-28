@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import { MAX_SESSION_ENTRY_VISIT_COUNT, type SessionManager } from "@caupulican/pi-agent-core/session";
 import type { AgentMessage, AgentRunawayStopInfo } from "@caupulican/pi-agent-core/types";
@@ -935,6 +936,9 @@ export class GoalSessionController {
 				...(submitted ? { turnOutcome: "completed" as const } : {}),
 			};
 		} catch (error) {
+			// The auto-continuation owner waits for the foreground lease and retries this admission race.
+			// Recording it here would block the goal before that retry can run.
+			if (error instanceof AgentBusyError) throw error;
 			if (error instanceof ObjectiveRootTurnInterruptedError) {
 				return { submitted: true, snapshot: snapshot(), turnOutcome: "interrupted" };
 			}

@@ -7,6 +7,8 @@ const XAI_CAPACITY_ERROR =
 const XAI_GENERATION_ERROR = "Error Code null: Internal error during token generation";
 const OPENROUTER_RATE_LIMIT_ERROR =
 	"OpenRouter rate limit exceeded for model `openrouter/z-ai/glm-4.7` in organization `test` on tokens per min (TPM): Limit 10000, Used 0, Requested 23257. Please try again in 1m19.542s.";
+const OPENROUTER_FREE_MODEL_UNAVAILABLE =
+	"This model is unavailable for free. The paid version is available now - use this slug instead: inclusionai/ling-3.0-flash-fin";
 
 describe("classifyFailure", () => {
 	it("classifies rate limits as retryable + rotate + fallback", () => {
@@ -144,6 +146,14 @@ describe("classifyFailure", () => {
 		}
 	});
 
+	it("retires an OpenRouter free route when only its paid slug remains available", () => {
+		expect(classifyFailure({ provider: "openrouter", message: OPENROUTER_FREE_MODEL_UNAVAILABLE })).toMatchObject({
+			reason: "billing_or_quota",
+			retryable: false,
+			shouldFallback: true,
+		});
+	});
+
 	it("does not read a bare 402 count as a quota", () => {
 		expect(classifyFailure({ message: "prompt is 402 tokens too long" }).reason).not.toBe("billing_or_quota");
 	});
@@ -184,11 +194,13 @@ describe("classifyFailure", () => {
 				const message =
 					provider === "amazon-bedrock"
 						? "Throttling error: Request throttled"
-						: signature.reason === "billing_or_quota" && provider === "openai-codex"
-							? "You have hit your ChatGPT usage limit (plus plan). Try again in ~90 min."
-							: signature.reason === "model_unsupported" && provider === "openai-codex"
-								? "Codex error (status 400): The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account."
-								: signature.pattern.source;
+						: provider === "openrouter" && signature.source.includes("ling-3.0-flash-fin")
+							? OPENROUTER_FREE_MODEL_UNAVAILABLE
+							: signature.reason === "billing_or_quota" && provider === "openai-codex"
+								? "You have hit your ChatGPT usage limit (plus plan). Try again in ~90 min."
+								: signature.reason === "model_unsupported" && provider === "openai-codex"
+									? "Codex error (status 400): The 'gpt-5.4' model is not supported when using Codex with a ChatGPT account."
+									: signature.pattern.source;
 				const c = classifyFailure({ provider, message });
 				expect(c.reason, `${provider} ${signature.source}`).toBe(signature.reason);
 				if (signature.reason === "billing_or_quota") {

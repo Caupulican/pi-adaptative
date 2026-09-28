@@ -38,6 +38,11 @@ export const PROVIDER_FAILURE_SIGNATURES: Record<string, readonly ProviderSignat
 	openrouter: [
 		{
 			reason: "billing_or_quota",
+			pattern: /model is unavailable for free\.\s*the paid version is available now/i,
+			source: "corpus:openrouter/inclusionai/ling-3.0-flash-fin:free session 01a0e9d6-2c57-75c1-bcd8-845dbfffe81e",
+		},
+		{
+			reason: "billing_or_quota",
 			pattern: /insufficient credits/i,
 			source: "sdk:openai@6.26.0 node_modules/openai/core/error.js",
 			provisional: true,

@@ -54,14 +54,8 @@ describe("the unsettled-item ladder", () => {
 		expect(first.calls[0]?.every((check) => check.evidence === evidence)).toBe(true);
 	});
 
-	it("climbs to a stronger model's fact, and System One decides both the fact and what it settles", async () => {
-		const passes = judge(
-			[[unsure, unsure]],
-			[
-				[yes, no],
-				[yes, no],
-			],
-		);
+	it("accepts an exact quoted tool-result fact and asks System One only what it settles", async () => {
+		const passes = judge([[unsure, unsure]], [[yes, no]]);
 		const consulted: string[] = [];
 		const outcome = await settleUnsettledItems(
 			{
@@ -78,11 +72,8 @@ describe("the unsettled-item ladder", () => {
 			{ item: "the suite passes", verdict: "confirmed", by: "system_one+big/model", basis: "12 passed, 0 failed" },
 		]);
 		expect(outcome.unsettled).toEqual([]);
-		// The second pass carries new evidence: the fact against the results, and the item against the fact.
-		expect(passes.calls[1]).toEqual([
-			{ statement: "12 passed, 0 failed", evidence },
-			{ statement: "the suite passes", evidence: "12 passed, 0 failed" },
-		]);
+		// Exact quote containment is deterministic; System One only decides whether that fact settles the item.
+		expect(passes.calls[1]).toEqual([{ statement: "the suite passes", evidence: "12 passed, 0 failed" }]);
 	});
 
 	it("never takes the stronger model's word: an ungrounded fact leaves the item for the owner", async () => {

@@ -178,6 +178,21 @@ describe("worker quota failover", () => {
 		});
 		const failover = evaluateWorkerRetry({ ...quota, failover: true });
 		expect(failover).toMatchObject({ retry: true, reason: "billing_or_quota_failover" });
+		const retiredFreeRoute = {
+			...quota,
+			provider: "openrouter",
+			retriesUsed: 0,
+			reasonDetail:
+				"This model is unavailable for free. The paid version is available now - use this slug instead: inclusionai/ling-3.0-flash-fin",
+		};
+		expect(evaluateWorkerRetry(retiredFreeRoute)).toEqual({
+			retry: false,
+			reason: "not_retryable_billing_or_quota",
+		});
+		expect(evaluateWorkerRetry({ ...retiredFreeRoute, retriesUsed: 5, failover: true })).toMatchObject({
+			retry: true,
+			reason: "billing_or_quota_failover",
+		});
 		// A transient failure still stops at the ceiling.
 		expect(evaluateWorkerRetry({ ...quota, reasonDetail: "WebSocket error" })).toEqual({
 			retry: false,

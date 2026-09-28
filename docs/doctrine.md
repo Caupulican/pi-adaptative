@@ -817,7 +817,11 @@ work, and schedules the next repair mission. An unresolved required completion d
 owner instead of becoming a hidden block: interactive sessions open the native question panel, while
 handoffs persist a bounded owner-review entry before booting the next mission. Optional System One
 absence or outage falls back to deterministic routing and completion so the autonomous loop remains
-live; explicit required policy still holds on unresolved judgment.
+live; explicit required policy still holds on unresolved judgment. Foreground prompt admission is a
+coordination boundary, not an objective failure: when automatic continuation races another foreground
+owner, `AgentBusyError` returns to the auto-continuation owner for its idle wait and retry without
+blocking the goal or advancing its system-failure streak. Why: recording the admission race as an
+objective failure made the retry find an already-blocked goal and terminate reliable autonomous work.
 Pinned by `packages/coding-agent/test/goal-session-primary-loop.test.ts` and
 `packages/coding-agent/test/session-objective-runtime.test.ts`.
 
@@ -1048,6 +1052,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-28 | Foreground admission races during objective-primary continuation remain transient coordination: the auto-continuation owner waits and retries while the goal stays active and its failure streak stays unchanged. |
 | 2026-09-28 | Completion rejection now means active repair rather than a blocked goal; unresolved required decisions surface through the native question panel or a durable handoff ledger before the next mission. Optional System One failure falls back to deterministic proof so autonomy survives model absence and outages. |
 | 2026-09-27 | Live project-rule compilation fingerprints complete ordered instruction sources, so same-length edits cannot retain stale semantic gates. |
 | 2026-09-27 | Supported Claude surfaces may defer schemas behind bounded tool search; unsupported, small, routed, or fallback surfaces keep all real schemas eager, and `/context` reports accepted disclosure evidence without changing its current estimate. |
