@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Route persistent ICM memory and reusable pipeline scaffolding to the user-level Pi catalog unless project-local artifacts are explicitly requested.
+
 ## [0.100.3] - 2026-09-28
 
 ### Added

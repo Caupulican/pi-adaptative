@@ -37,6 +37,18 @@ describe("icm memory provider", () => {
 		expect(block).not.toContain(`${tempDir}/icm/`);
 	});
 
+	it("keeps durable ICM state in the user catalog unless project-local artifacts are explicitly requested", async () => {
+		await provider.initialize("test-session", {
+			agentDir: tempDir,
+			cwd: "/workspace/project",
+			isChildSession: false,
+		});
+		const block = provider.systemPromptBlock();
+		expect(block).toContain("Persistent ICM memory belongs under the User ICM catalog");
+		expect(block).toContain("Never create memory or pipeline scaffolding under Workspace");
+		expect(block).toContain("unless the user explicitly requests project-local artifacts");
+	});
+
 	it("does not create directories on initialize", async () => {
 		await provider.initialize("test-session", {
 			agentDir: tempDir,
