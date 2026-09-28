@@ -88,4 +88,21 @@ describe("read-only shell line", () => {
 			expect([cmd, readOnlyShellViolation(cmd, cwd, { admitTestRuns: true }) === undefined]).toEqual([cmd, ok]);
 		expect(readOnlyShellViolation("npm test", cwd)).toBeDefined();
 	});
+
+	it("admits bounded read-only SSH inspection and rejects opaque or mutating remote execution", () => {
+		const cases: Array<[string, boolean]> = [
+			["ssh -o BatchMode=yes -o ConnectTimeout=15 work pwd", true],
+			["ssh -o BatchMode=yes work 'git -C /repo status --short'", true],
+			[
+				"ssh -o BatchMode=yes work '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command \"Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Root\"'",
+				true,
+			],
+			["ssh work", false],
+			["ssh work 'rm -rf /repo'", false],
+			["ssh work \"git -c alias.status='!rm -rf /repo' status\"", false],
+			["ssh -o ProxyCommand='sh -c echo' work pwd", false],
+			["ssh work 'bash -lc \"cat /etc/hosts\"'", false],
+		];
+		for (const [cmd, ok] of cases) expect([cmd, readOnlyShellViolation(cmd, cwd) === undefined]).toEqual([cmd, ok]);
+	});
 });

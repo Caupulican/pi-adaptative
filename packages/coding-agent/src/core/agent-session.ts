@@ -6501,6 +6501,7 @@ export class AgentSession {
 	/** Post this turn's unsettled items to the owner as one displayed message, then clear them. */
 	private async _flushOwnerItems(lease: ForegroundSubmissionLease | undefined): Promise<void> {
 		if (this._pendingOwnerItems.length === 0) return;
+		if (this.getGoalStateSnapshot()?.status === "paused") return;
 		const items = this._pendingOwnerItems;
 		if (this._handoff) {
 			this._recordUnsettledForOwner(items);

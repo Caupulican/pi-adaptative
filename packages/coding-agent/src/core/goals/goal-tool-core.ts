@@ -82,6 +82,7 @@ export type GoalAction =
 	| { action: "no_progress" }
 	| { action: "complete" }
 	| { action: "increment" }
+	| { action: "pause_goal" }
 	| { action: "block_goal"; reason: string };
 
 export type GoalActionName = GoalAction["action"];
@@ -521,6 +522,8 @@ function toGoalEvent(
 				event: { type: "complete_goal", acceptanceOverride: !requireVerifiedEvidence, now },
 			};
 		}
+		case "pause_goal":
+			return { ok: true, event: { type: "pause_goal", now } };
 		case "block_goal": {
 			const reason = action.reason.trim();
 			if (!reason) return { ok: false, error: "block_goal requires a non-empty reason." };

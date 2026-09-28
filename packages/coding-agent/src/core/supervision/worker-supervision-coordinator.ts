@@ -12,6 +12,7 @@
  */
 
 import { MAX_ORCHESTRATION_ATTEMPTS } from "../orchestration/contracts.ts";
+import { classifyCommandFamily } from "../tools/command-family.ts";
 import type { LiveWorkerAttempt, WorkerSupervisionAction, WorkerSupervisionSignal } from "./types.ts";
 import type { WorkerSemanticSupervisor } from "./worker-semantic-supervisor.ts";
 
@@ -43,6 +44,8 @@ export interface WorkerProgressObservation extends LiveWorkerAttempt {
 	readonly agentId: string;
 	/** Tool names of the most recent executed calls, for the deterministic churn check. */
 	readonly recentToolNames?: readonly string[];
+	/** Tool calls behind those names, so discovery is not mistaken for tests or diagnostics. */
+	readonly recentToolCalls?: readonly { name: string; args: unknown }[];
 	/** Changed-file count when the current churn window opened. */
 	readonly changedFileCountAtWindowStart?: number;
 	readonly changedFileCount?: number;
@@ -65,9 +68,33 @@ const STALL_DIRECTIVE =
 const OFF_TRACK_DIRECTIVE =
 	"System One: the current work is off the mission. Stop the current line of work, return to the mission's open requirements, and say what you are doing next.";
 
-/** Tool names whose repeated use with no file change is validation, not implementation. */
-const BROAD_VALIDATION_TOOLS: readonly string[] = ["bash", "run_process", "python"];
 const VALIDATION_CHURN_THRESHOLD = 3;
+
+function commandFromToolCall(call: { name: string; args: unknown }): string | undefined {
+	if (!call.args || typeof call.args !== "object" || Array.isArray(call.args)) return undefined;
+	const args = call.args as Record<string, unknown>;
+	if (typeof args.command === "string") return args.command;
+	if (typeof args.code === "string") return args.code;
+	if (typeof args.executable !== "string") return undefined;
+	return [
+		args.executable,
+		...(Array.isArray(args.args) ? args.args.filter((arg): arg is string => typeof arg === "string") : []),
+	]
+		.join(" ")
+		.trim();
+}
+
+function isBroadValidationCall(call: { name: string; args: unknown }): boolean {
+	if (call.name !== "bash" && call.name !== "run_process" && call.name !== "python") return false;
+	const command = commandFromToolCall(call);
+	if (!command) return false;
+	const classification = classifyCommandFamily(command);
+	if (classification.family === "test" || classification.family === "diagnostics") return true;
+	return (
+		classification.family === "package-manager" &&
+		/^(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:build|check|lint|test)(?:\s|$)/u.test(command.trim())
+	);
+}
 
 /**
  * Recognizes repeated broad validation with no new implementation.
@@ -78,14 +105,20 @@ const VALIDATION_CHURN_THRESHOLD = 3;
  */
 export function isValidationChurn(observation: {
 	readonly recentToolNames?: readonly string[];
+	readonly recentToolCalls?: readonly { name: string; args: unknown }[];
 	readonly changedFileCountAtWindowStart?: number;
 	readonly changedFileCount?: number;
 }): boolean {
 	const changedNow = observation.changedFileCount ?? 0;
 	const changedAtStart = observation.changedFileCountAtWindowStart ?? 0;
 	if (changedNow > changedAtStart) return false;
+	const recentCalls = (observation.recentToolCalls ?? []).slice(-VALIDATION_CHURN_THRESHOLD);
+	if (recentCalls.length >= VALIDATION_CHURN_THRESHOLD) return recentCalls.every(isBroadValidationCall);
 	const recent = (observation.recentToolNames ?? []).slice(-VALIDATION_CHURN_THRESHOLD);
-	return recent.length >= VALIDATION_CHURN_THRESHOLD && recent.every((name) => BROAD_VALIDATION_TOOLS.includes(name));
+	return (
+		recent.length >= VALIDATION_CHURN_THRESHOLD &&
+		recent.every((name) => name === "bash" || name === "run_process" || name === "python")
+	);
 }
 
 export class WorkerSupervisionCoordinator {

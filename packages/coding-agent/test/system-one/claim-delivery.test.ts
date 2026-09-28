@@ -307,6 +307,26 @@ describe("claims against deliveries", () => {
 			expect(notices[0]?.message).toContain(path);
 		});
 
+		it("defers queued owner questions while the goal is paused", async () => {
+			harness = await createHarness();
+			const delivery = harness.session as unknown as {
+				_pendingOwnerItems: string[];
+				_deliverToOwner(items: readonly string[]): string | undefined;
+				_flushOwnerItems(lease: undefined): Promise<void>;
+			};
+			vi.spyOn(harness.session, "getGoalStateSnapshot").mockReturnValue({ status: "paused" } as never);
+			delivery._deliverToOwner(["The stopped worker still needs a decision"]);
+
+			await delivery._flushOwnerItems(undefined);
+
+			expect(
+				harness.session.agent.state.messages.filter(
+					(message) => message.role === "custom" && message.customType === "owner_items",
+				),
+			).toHaveLength(0);
+			expect(delivery._pendingOwnerItems).toEqual(["The stopped worker still needs a decision"]);
+		});
+
 		it("defers an ungranted operation during handoff without opening confirmation", async () => {
 			harness = await createHarness({ settings: { edge: { allow: [] } } });
 			const delivery = harness.session as unknown as {

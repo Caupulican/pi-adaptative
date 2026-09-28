@@ -215,10 +215,13 @@ const getGoalSchema = Type.Object({}, { additionalProperties: false });
 
 const updateGoalSchema = Type.Object(
 	{
-		status: Type.Union([Type.Literal("active"), Type.Literal("complete"), Type.Literal("blocked")], {
-			description:
-				"active records progress only; it does not change lifecycle or resume a blocked goal. complete requires an evidence audit; blocked requires the same blocker for three turns.",
-		}),
+		status: Type.Union(
+			[Type.Literal("active"), Type.Literal("complete"), Type.Literal("blocked"), Type.Literal("paused")],
+			{
+				description:
+					"active records progress only; it does not change lifecycle or resume a stopped goal. complete requires an evidence audit; blocked requires the same blocker for three turns; paused requires an explicit owner request to stop or pause this goal.",
+			},
+		),
 		reason: Type.Optional(
 			Type.String({ minLength: 1, description: "Required for blocked: the recurring external blocker." }),
 		),
@@ -226,7 +229,11 @@ const updateGoalSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-export type GoalToolInput = Static<typeof goalSchema>;
+type GoalToolSchemaInput = Static<typeof goalSchema>;
+/** Internal lifecycle wrappers may use actions that are intentionally absent from the legacy model schema. */
+export type GoalToolInput = Omit<GoalToolSchemaInput, "action"> & {
+	action: GoalToolSchemaInput["action"] | "pause_goal";
+};
 export type GoalToolDefinition = ToolDefinition;
 
 export interface GoalToolDetails {
@@ -539,6 +546,8 @@ function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
 			return { action: "complete" };
 		case "increment":
 			return { action: "increment" };
+		case "pause_goal":
+			return { action: "pause_goal" };
 		case "block_goal":
 			return { action: "block_goal", reason: input.reason ?? "" };
 		case "get":
@@ -1393,16 +1402,19 @@ export function createGoalLifecycleToolDefinitions(
 		name: GOAL_LIFECYCLE_TOOL_NAMES[2],
 		label: GOAL_LIFECYCLE_TOOL_NAMES[2],
 		description:
-			"Update the existing goal. active records progress only after concrete, verifiable progress in the current turn; it never changes lifecycle or resumes a blocked goal. Only the owner can resume it with /goal resume. Mark complete only when current evidence proves the full objective is achieved and no required work remains. Mark blocked only when the same verified owner/approval boundary or capability impossibility persists for at least three consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; include the evidence and attempted approaches in reason. Never use blocked merely because work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
+			"Update the existing goal. active records progress only after concrete, verifiable progress in the current turn; it never changes lifecycle or resumes a stopped goal. paused is allowed only when the owner explicitly asks to stop or pause this goal; report the paused status and stop goal work. Only the owner can resume it with /goal resume. Mark complete only when current evidence proves the full objective is achieved and no required work remains. Mark blocked only when the same verified owner/approval boundary or capability impossibility persists for at least three consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; include the evidence and attempted approaches in reason. Never use blocked merely because work is hard, slow, uncertain, incomplete, or would benefit from clarification.",
 		promptSnippet: "Update goal; complete/block only with evidence.",
 		parameters: updateGoalSchema,
 		execute(toolCallId, input: Static<typeof updateGoalSchema>, signal, onUpdate, context) {
 			const requestedGoalStatus: GoalStatus = input.status === "complete" ? "completed" : input.status;
-			const action: GoalToolInput = isGoalExecutionActive(requestedGoalStatus)
-				? { action: "progress" }
-				: input.status === "complete"
-					? { action: "complete" }
-					: { action: "block_goal", reason: input.reason ?? "" };
+			const action: GoalToolInput =
+				input.status === "paused"
+					? { action: "pause_goal" }
+					: isGoalExecutionActive(requestedGoalStatus)
+						? { action: "progress" }
+						: input.status === "complete"
+							? { action: "complete" }
+							: { action: "block_goal", reason: input.reason ?? "" };
 			return goalTool.execute(toolCallId, action, signal, onUpdate, context);
 		},
 	};

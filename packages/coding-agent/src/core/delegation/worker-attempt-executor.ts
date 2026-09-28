@@ -395,6 +395,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				...recentToolOutcomes.flatMap((outcome) => (outcome.failed ? [`${outcome.name} failed`] : [])),
 			],
 			recentToolNames: [...recentToolNames],
+			recentToolCalls: [...recentToolCalls],
 			changedFileCountAtWindowStart: changedFileCountAtChurnWindowStart,
 			changedFileCount: changedFiles.size,
 			outputTail,

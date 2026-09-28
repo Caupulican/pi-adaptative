@@ -5,6 +5,7 @@ import type { ModelTier } from "../autonomy/contracts.ts";
 import { isLocalExecutionModel } from "../background-lane-controller.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "../models/local-registration.ts";
 import { isPiManagedPrismLlamaCppModel } from "../models/prism-llamacpp-lifecycle.ts";
+import { parseShellCommandSequence } from "../tools/shell-command-parser.ts";
 
 /**
  * True for a model the capability-gate spine treats as LOCAL/MANAGED — never cloud.
@@ -83,6 +84,7 @@ const READ_ONLY_COMMANDS = new Set([
 	"get-item",
 	"get-location",
 	"get-process",
+	"get-psdrive",
 	"git",
 	"grep",
 	"head",
@@ -180,6 +182,101 @@ function commandName(segment: string): string | undefined {
 	return parts[parts.length - 1]?.toLowerCase();
 }
 
+const SAFE_SSH_FLAGS = new Set(["-4", "-6", "-q", "-t"]);
+const SAFE_SSH_VALUE_FLAGS = new Set(["-l", "-p"]);
+const SAFE_SSH_OPTIONS = new Set([
+	"batchmode",
+	"connectionattempts",
+	"connecttimeout",
+	"loglevel",
+	"serveralivecountmax",
+	"serveraliveinterval",
+]);
+const MAX_READ_ONLY_REMOTE_DEPTH = 2;
+
+function executableName(token: string): string {
+	return (token.replace(/\\/gu, "/").split("/").at(-1) ?? token).toLowerCase().replace(/\.exe$/u, "");
+}
+
+function isSafeSshOption(value: string): boolean {
+	const separator = value.indexOf("=");
+	if (separator <= 0 || separator === value.length - 1) return false;
+	return SAFE_SSH_OPTIONS.has(value.slice(0, separator).toLowerCase());
+}
+
+function isReadOnlyPowerShellInvocation(args: readonly string[], depth: number): boolean {
+	let index = 1;
+	while (index < args.length) {
+		const option = args[index]!.toLowerCase();
+		if (option === "-nologo" || option === "-noninteractive" || option === "-noprofile") {
+			index++;
+			continue;
+		}
+		if (option !== "-c" && option !== "-command") return false;
+		const command = args
+			.slice(index + 1)
+			.join(" ")
+			.trim();
+		return command.length > 0 && isReadOnlyShellCommand(command, depth + 1);
+	}
+	return false;
+}
+
+function isReadOnlySshInvocation(args: readonly string[], depth: number): boolean {
+	let index = 1;
+	while (index < args.length) {
+		const option = args[index]!;
+		if (option === "--") {
+			index++;
+			break;
+		}
+		if (!option.startsWith("-")) break;
+		if (SAFE_SSH_FLAGS.has(option)) {
+			index++;
+			continue;
+		}
+		if (SAFE_SSH_VALUE_FLAGS.has(option)) {
+			const value = args[index + 1];
+			if (!value || value.startsWith("-")) return false;
+			index += 2;
+			continue;
+		}
+		if (option === "-o") {
+			const value = args[index + 1];
+			if (!value || !isSafeSshOption(value)) return false;
+			index += 2;
+			continue;
+		}
+		if (option.startsWith("-o") && isSafeSshOption(option.slice(2))) {
+			index++;
+			continue;
+		}
+		return false;
+	}
+	const destination = args[index++];
+	if (!destination || !/^[A-Za-z0-9._%+@:-]+$/u.test(destination)) return false;
+	const remoteCommand = args.slice(index).join(" ").trim();
+	return remoteCommand.length > 0 && isReadOnlyShellCommand(remoteCommand, depth + 1);
+}
+
+function isReadOnlyInvocation(args: readonly string[], depth: number): boolean {
+	let index = 0;
+	while (index < args.length) {
+		const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=/u.exec(args[index]!);
+		if (!assignment) break;
+		if (EXECUTION_STEERING_VARIABLE_RE.test(assignment[1]!)) return false;
+		index++;
+	}
+	if (index === args.length) return args.length > 0;
+	const commandArgs = args.slice(index);
+	const name = executableName(commandArgs[0]!);
+	if (name === "ssh") return depth < MAX_READ_ONLY_REMOTE_DEPTH && isReadOnlySshInvocation(commandArgs, depth);
+	if (name === "powershell" || name === "pwsh") {
+		return depth < MAX_READ_ONLY_REMOTE_DEPTH && isReadOnlyPowerShellInvocation(commandArgs, depth);
+	}
+	return isReadOnlyCommandSegment(commandArgs.join(" "));
+}
+
 function commandArg(segment: string, index: number): string | undefined {
 	return segment.trim().split(/\s+/)[index]?.toLowerCase();
 }
@@ -194,6 +291,34 @@ function isReadOnlyGitRefListing(segment: string, subcommand: string): boolean {
 		if (!token.startsWith("-") && !listing) return false;
 	}
 	return true;
+}
+
+function gitCommandAfterGlobalOptions(segment: string): string | undefined {
+	const tokens = segment.trim().split(/\s+/u);
+	let index = 1;
+	while (index < tokens.length) {
+		const token = tokens[index]!;
+		if (token === "-C" || token === "--git-dir" || token === "--work-tree") {
+			if (index + 1 >= tokens.length) return undefined;
+			index += 2;
+			continue;
+		}
+		if (
+			token.startsWith("--git-dir=") ||
+			token.startsWith("--work-tree=") ||
+			token === "--no-pager" ||
+			token === "--literal-pathspecs" ||
+			token === "--glob-pathspecs" ||
+			token === "--noglob-pathspecs" ||
+			token === "--icase-pathspecs"
+		) {
+			index++;
+			continue;
+		}
+		if (token.startsWith("-")) return undefined;
+		return ["git", ...tokens.slice(index)].join(" ");
+	}
+	return undefined;
 }
 
 /** A leading `NAME=value`: sets a shell variable, or one command's environment when a command follows. */
@@ -217,7 +342,7 @@ function isReadOnlyShellSegment(segment: string): boolean {
 	if (rest === undefined) return false;
 	// A bare assignment changes only the shell's own variables.
 	if (!rest) return segment.trim().length > 0;
-	return isReadOnlyCommandSegment(rest);
+	return isReadOnlyShellCommand(rest);
 }
 
 /** `env`'s options that change neither what runs nor anything on disk. */
@@ -258,9 +383,11 @@ function isReadOnlyCommandSegment(segment: string): boolean {
 	const name = commandName(segment);
 	if (!name || !READ_ONLY_COMMANDS.has(name)) return false;
 	if (name === "git") {
-		const subcommand = commandArg(segment, 1);
+		const command = gitCommandAfterGlobalOptions(segment);
+		if (!command) return false;
+		const subcommand = commandArg(command, 1);
 		if (subcommand && GIT_REF_LISTING_SUBCOMMANDS.has(subcommand))
-			return isReadOnlyGitRefListing(segment, subcommand);
+			return isReadOnlyGitRefListing(command, subcommand);
 		return Boolean(subcommand && READ_ONLY_GIT_SUBCOMMANDS.has(subcommand));
 	}
 	// In-place editing and emitting compilers change files.
@@ -290,9 +417,7 @@ function isReadOnlyCommandSegment(segment: string): boolean {
 	return true;
 }
 
-const SHELL_SEGMENT_SEPARATOR_RE = /\s*(?:&&|\|\||[;|\r\n])\s*/;
-
-function isReadOnlyShellCommand(command: string): boolean {
+function isReadOnlyShellCommand(command: string, depth = 0): boolean {
 	const commandWithoutStreamRedirections = stripSafeStreamRedirections(command);
 	if (
 		!commandWithoutStreamRedirections ||
@@ -300,8 +425,12 @@ function isReadOnlyShellCommand(command: string): boolean {
 		UNSAFE_NESTED_SHELL_EXECUTION_RE.test(commandWithoutStreamRedirections)
 	)
 		return false;
-	const segments = commandWithoutStreamRedirections.split(SHELL_SEGMENT_SEPARATOR_RE).map((segment) => segment.trim());
-	return segments.length > 0 && segments.every((segment) => segment.length > 0 && isReadOnlyShellSegment(segment));
+	const sequence = parseShellCommandSequence(commandWithoutStreamRedirections);
+	return Boolean(
+		sequence &&
+			sequence.invocations.length > 0 &&
+			sequence.invocations.every((args) => isReadOnlyInvocation(args, depth)),
+	);
 }
 
 /** An output redirection and its target: `>`, `>>`, `2>`, `&>`, `&>>`; `2>&1`-style fd duplication is not a file. */
@@ -346,22 +475,29 @@ export function readOnlyShellViolation(
 		if (existing) return `it writes into the existing path ${existing}`;
 	}
 	const withoutRedirections = trimmed.replace(OUTPUT_REDIRECTION_RE, " ");
-	const remaining: string[] = [];
-	for (const segment of withoutRedirections.split(SHELL_SEGMENT_SEPARATOR_RE).map((part) => part.trim())) {
-		if (!segment) continue;
+	if (UNSAFE_NESTED_SHELL_EXECUTION_RE.test(withoutRedirections)) {
+		return "it may change files or repository state";
+	}
+	const sequence = parseShellCommandSequence(withoutRedirections);
+	if (!sequence) return "it may change files or repository state";
+	const remaining: string[][] = [];
+	for (const invocation of sequence.invocations) {
+		const segment = invocation.join(" ");
 		if (options.admitTestRuns && isTestRunSegment(segment)) continue;
-		if (commandName(segment) !== "tee") {
-			remaining.push(segment);
+		if (executableName(invocation[0] ?? "") !== "tee") {
+			remaining.push(invocation);
 			continue;
 		}
-		for (const word of segment.split(/\s+/).slice(1)) {
+		for (const word of invocation.slice(1)) {
 			if (word.startsWith("-")) continue;
 			const existing = targetExists(word);
 			if (existing) return `it writes into the existing path ${existing}`;
 		}
 	}
 	if (remaining.length === 0) return undefined;
-	return isReadOnlyShellCommand(remaining.join(" ; ")) ? undefined : "it may change files or repository state";
+	return remaining.every((invocation) => isReadOnlyInvocation(invocation, 0))
+		? undefined
+		: "it may change files or repository state";
 }
 
 export function shouldEscalateModelRouterTool(options: {
