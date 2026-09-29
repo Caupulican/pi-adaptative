@@ -1,9 +1,8 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
 	AdaptiveCapabilityController,
 	AdaptiveResolutionController,
@@ -29,6 +28,7 @@ import {
 	WaiverStore,
 } from "../../../src/core/index.ts";
 import type { JevAdapter, JevEvaluationRequest, JevEvaluationResponse } from "../../../src/core/system-one/adapter.ts";
+import { tempDir as testTempDir } from "../../temp-dir.ts";
 
 class MockFinalClosureJevAdapter implements JevAdapter {
 	evaluateCalls: JevEvaluationRequest[] = [];
@@ -140,15 +140,8 @@ describe("Final Closure v1.4 Regressions (FC-001..FC-090)", () => {
 	let certFile: string;
 
 	beforeEach(() => {
-		tempDir = join(tmpdir(), `fc-test-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
-		mkdirSync(tempDir, { recursive: true });
+		tempDir = testTempDir("pi-final-closure-");
 		certFile = join(tempDir, "certificates.json");
-	});
-
-	afterEach(() => {
-		if (existsSync(tempDir)) {
-			rmSync(tempDir, { recursive: true, force: true });
-		}
 	});
 
 	describe("Cluster 1: Production Composition & Live Readiness (FC-001..FC-005)", () => {
@@ -264,12 +257,12 @@ describe("Final Closure v1.4 Regressions (FC-001..FC-090)", () => {
 			const controller = new AdaptiveCapabilityController({
 				steering: plane,
 				catalog,
-				capabilityArtifactRoot: mkdtempSync(join(tmpdir(), "pi-fc-capabilities-")),
+				capabilityArtifactRoot: testTempDir("pi-fc-capabilities-"),
 				experts: expertService as any,
 				// Activation now runs the artifact, so the builder writes a real one.
 				builder: {
 					build: async (spec) => {
-						const directory = mkdtempSync(join(tmpdir(), "pi-fc010-"));
+						const directory = testTempDir("pi-fc010-");
 						const artifactPath = join(directory, `${spec.capability_id}.mjs`);
 						const code = "export default async function run() { return true; }\n";
 						writeFileSync(artifactPath, code, "utf-8");
@@ -334,7 +327,7 @@ describe("Final Closure v1.4 Regressions (FC-001..FC-090)", () => {
 			const controller = new AdaptiveCapabilityController({
 				steering: plane,
 				catalog,
-				capabilityArtifactRoot: mkdtempSync(join(tmpdir(), "pi-fc-capabilities-")),
+				capabilityArtifactRoot: testTempDir("pi-fc-capabilities-"),
 				// The builder's model binding must be an actual selection; this test's subject is the
 				// activation path, so the selection is a fixed one rather than absent.
 				experts: {
@@ -839,12 +832,15 @@ describe("Final Closure v1.4 Regressions (FC-001..FC-090)", () => {
 			);
 		});
 
-		it("FC-062: JEV-024 negative stops completion and halts before CompletionCoordinator", async () => {
+		it("FC-062: an explicitly required JEV-024 rejection stops completion before CompletionCoordinator", async () => {
 			const adapter = new MockFinalClosureJevAdapter();
 			adapter.overrides = {
 				completion_plausible: { type: "noul", noul: 0.05 },
 			};
-			const plane = new SystemOneSteeringPlane({ adapter, policy: DEFAULT_STEERING_POLICY });
+			const plane = new SystemOneSteeringPlane({
+				adapter,
+				policy: { ...DEFAULT_STEERING_POLICY, mode: "system_one_required" },
+			});
 
 			const charter = compileExecutionCharter({
 				objectiveId: "obj-c24-fail",

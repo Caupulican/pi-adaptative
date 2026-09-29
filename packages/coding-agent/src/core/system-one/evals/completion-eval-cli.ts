@@ -1,7 +1,8 @@
 /**
  * `npm run eval:completion [-- --repeats N] [-- --case <id>]` from packages/coding-agent: runs the
  * completion reliability evaluation against the REAL System One, with the credentials a session
- * uses, and prints per-case verdicts plus the release thresholds. Exits non-zero below them.
+ * uses, and prints per-case verdicts, advisory detection rates and assessment thresholds.
+ * Exits non-zero below them.
  *
  * It spends System One evaluations (two per attempt), so the default is 5 repeats per case.
  */
@@ -20,7 +21,7 @@ import {
 	runCompletionEval,
 } from "./completion-eval.ts";
 
-/** Release thresholds (outcome-completion plan, WO-9). */
+/** Completed work proceeds; planted gaps must refuse completion. */
 export const COMPLETION_EVAL_THRESHOLDS = Object.freeze({ doneAccepted: 0.95, incompleteRejected: 1 });
 
 function percent(value: number): string {
@@ -35,11 +36,11 @@ export function formatCompletionEval(summary: CompletionEvalSummary): string {
 	lines.push("");
 	for (const [kind, rates] of Object.entries(summary.byKind)) {
 		lines.push(
-			`${kind.padEnd(11)} done accepted ${percent(rates.doneAccepted)}, incomplete rejected ${percent(rates.incompleteRejected)}`,
+			`${kind.padEnd(11)} done accepted ${percent(rates.doneAccepted)}, incomplete rejected ${percent(rates.incompleteRejected)}, incomplete flagged ${percent(rates.incompleteFlagged)}`,
 		);
 	}
 	lines.push(
-		`overall     done accepted ${percent(summary.doneAccepted)} (need ${percent(COMPLETION_EVAL_THRESHOLDS.doneAccepted)}), incomplete rejected ${percent(summary.incompleteRejected)} (need ${percent(COMPLETION_EVAL_THRESHOLDS.incompleteRejected)})`,
+		`overall     done accepted ${percent(summary.doneAccepted)} (need ${percent(COMPLETION_EVAL_THRESHOLDS.doneAccepted)}), incomplete rejected ${percent(summary.incompleteRejected)} (need ${percent(COMPLETION_EVAL_THRESHOLDS.incompleteRejected)}), incomplete flagged ${percent(summary.incompleteFlagged)}`,
 	);
 	const firstReasons = summary.runs
 		.filter((run) => run.done && run.verdicts.some((verdict) => verdict !== "complete"))

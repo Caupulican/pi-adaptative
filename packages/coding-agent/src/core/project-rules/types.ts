@@ -53,10 +53,31 @@ export interface RuleRepairWork extends RepairWork {
 
 export interface RuleValidationResult {
 	readonly passed: boolean;
+	/** Evaluator unavailability is diagnostic and cannot manufacture repair work. */
+	readonly advisory?: boolean;
+	/** An answered concern must be verified in the receiving lane before affected work continues. */
+	readonly verificationRequired?: boolean;
 	readonly violations: readonly RuleViolation[];
 	readonly checkedRules: number;
 	readonly repairWork?: RuleRepairWork;
 	readonly summaryEvent?: string;
+}
+
+/** A candidate pauses affected work for verification; established violations require repair. */
+export function blocksRuleTransition(result: {
+	readonly passed: boolean;
+	readonly advisory?: boolean;
+	readonly verificationRequired?: boolean;
+	readonly violations: readonly { consequence: string }[];
+}): boolean {
+	return (
+		!result.passed &&
+		!result.advisory &&
+		(result.verificationRequired === true ||
+			result.violations.some(
+				(violation) => violation.consequence === "critical" || violation.consequence === "high",
+			))
+	);
 }
 
 export interface MutationRuleInput {
@@ -74,6 +95,7 @@ export interface TaskPostflightRuleInput {
 	readonly taskId: string;
 	readonly changedFiles: readonly string[];
 	readonly artifacts?: readonly unknown[];
+	readonly boundedDiffEvidence?: string | Record<string, unknown>;
 	readonly signal?: AbortSignal;
 }
 
@@ -81,5 +103,6 @@ export interface CompletionRuleInput {
 	readonly objectiveId: string;
 	readonly changedFiles: readonly string[];
 	readonly evidence?: readonly unknown[];
+	readonly boundedDiffEvidence?: string | Record<string, unknown>;
 	readonly signal?: AbortSignal;
 }

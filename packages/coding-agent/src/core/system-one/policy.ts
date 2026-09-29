@@ -28,6 +28,7 @@ export interface CompletionRejectionDetail {
 export interface FinalCompletionVerdict {
 	verdict: "complete" | "verify_more" | "retrieve_more" | "rework" | "blocked_external";
 	failed_gates: CompletionRejectionDetail[];
+	advisories?: CompletionRejectionDetail[];
 }
 
 /**
@@ -674,15 +675,14 @@ export function completionPackFailures(
 }
 
 /**
- * Two-stage completion decision engine.
- * R-057: Bug-fix completion MUST pass root_cause_addressed and MUST NOT pass if masks_symptom_only is strongly true.
- * R-058: A second completion_challenge pack MUST run after the primary completion pack.
- * R-059: Any failed hard completion gate routes to verify_more, retrieve_more, rework, or blocked_external; it never degrades to success.
+ * Deterministic failures require repair. Received semantic concerns require the receiving agent
+ * to verify the finding, revise confirmed failures, and recheck before completion.
+ * An unavailable stage is distinct from a successful evaluation with missing answers.
  */
 export function decideFinalCompletion(input: {
 	deterministicGates: CompletionGate[];
-	primaryAnswers: Record<string, unknown>;
-	challengeAnswers: Record<string, unknown>;
+	primaryAnswers: Record<string, unknown> | undefined;
+	challengeAnswers: Record<string, unknown> | undefined;
 	isBugFix: boolean;
 	/** Whether the goal changed the repository (see hasRepositoryOutcome). Default true. */
 	repositoryOutcome?: boolean;
@@ -704,25 +704,9 @@ export function decideFinalCompletion(input: {
 		return { verdict: "rework", failed_gates: failedGates };
 	}
 
-	failedGates.push(
-		...completionPackFailures("completion", input.primaryAnswers, input),
-		...completionPackFailures("completion_challenge", input.challengeAnswers, input),
-	);
-
-	if (failedGates.length === 0) {
-		return { verdict: "complete", failed_gates: [] };
-	}
-
-	// Categorize the failure for routing (R-059)
-	const hasUnverified = failedGates.some((g) => g.id.includes("unverified") || g.id.includes("regression"));
-	const hasMissingEvidence = failedGates.some((g) => g.id.includes("evidence") || g.id.includes("assumption"));
-
-	if (hasUnverified) {
-		return { verdict: "verify_more", failed_gates: failedGates };
-	}
-	if (hasMissingEvidence) {
-		return { verdict: "retrieve_more", failed_gates: failedGates };
-	}
-
-	return { verdict: "rework", failed_gates: failedGates };
+	if (input.primaryAnswers !== undefined)
+		failedGates.push(...completionPackFailures("completion", input.primaryAnswers, input));
+	if (input.challengeAnswers !== undefined)
+		failedGates.push(...completionPackFailures("completion_challenge", input.challengeAnswers, input));
+	return { verdict: failedGates.length > 0 ? "verify_more" : "complete", failed_gates: failedGates };
 }

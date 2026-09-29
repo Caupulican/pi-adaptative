@@ -1,5 +1,21 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed the goal tool's `resolveCompletionRejection` callback; repeated completion requests rerun current proof without an automatic owner-question latch.
+
+### Changed
+
+- Prioritized verification of project-rule and completion findings in the receiving agent's own lane, with revision and rechecking before affected work continues.
+- Distinguished evaluator outages from received findings without weakening completion evaluation thresholds.
+
+### Fixed
+
+- Prevented project-rule evaluator outages from manufacturing critical violations and exhausting the task ledger with repair work.
+- Prevented completion fallback from accepting an answered semantic failure, and supplied current verification receipts to project-rule rechecks.
+- Preserved owner cancellation across completion evaluations and availability fallback.
+- Accepted bounded non-login shell wrappers for observational commands and requirement checks, retaining mutation and execution-environment checks.
+
 ## [0.100.8] - 2026-09-29
 
 ### Fixed

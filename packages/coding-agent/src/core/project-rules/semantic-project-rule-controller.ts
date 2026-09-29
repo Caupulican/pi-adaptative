@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { noulHolds } from "../system-one/policy.ts";
+import { noulFromAnswer, settledNoul } from "../system-one/policy.ts";
 import type {
 	CompletionRuleInput,
 	MutationRuleInput,
@@ -157,11 +157,41 @@ function maxConsequence(rules: readonly SemanticRule[]): RuleConsequence {
 	return "low";
 }
 
+function ruleViolationAnswer(answer: unknown): number | boolean {
+	const fields = answer && typeof answer === "object" ? (answer as { probabilityTrue?: unknown }) : undefined;
+	const probability =
+		typeof fields?.probabilityTrue === "number" ? fields.probabilityTrue : noulFromAnswer(answer, true);
+	return typeof probability === "number" && (!Number.isFinite(probability) || probability < 0 || probability > 1)
+		? true
+		: probability;
+}
+
+function semanticRuleFindings(
+	rules: readonly SemanticRule[],
+	phase: RulePhase,
+	answers: Record<string, unknown> | undefined,
+	certificateId?: string,
+): RuleViolation[] {
+	const findings: RuleViolation[] = [];
+	for (const rule of rules) {
+		if (settledNoul(ruleViolationAnswer(answers?.[`violate::${rule.rule_id}`]), "required_false", true) === false)
+			continue;
+		findings.push({
+			ruleId: rule.rule_id,
+			phase,
+			consequence: rule.consequence,
+			explanation: `Verify project rule finding ${rule.rule_id}${certificateId ? ` from certificate ${certificateId}` : ""}: ${rule.text}`,
+			suggestedFix: `Reproduce the finding, revise confirmed failures, and recheck compliance with: ${rule.text}`,
+		});
+	}
+	return findings;
+}
+
 /**
  * SemanticProjectRuleController:
  * Evaluates repository-specific semantic rules across mutation, task_postflight, and completion phases.
  * Enforces deterministic vs Jev ownership split, prevents authority expansion,
- * and emits RepairWork on violation.
+ * emits RepairWork for deterministic violations, and asks the receiving agent to verify semantic candidates.
  * Implements FR-040..FR-050.
  */
 export class SemanticProjectRuleController {
@@ -233,6 +263,8 @@ export class SemanticProjectRuleController {
 			changedFiles: readonly string[];
 			diffContent?: string;
 			boundedDiffEvidence?: string | Record<string, unknown>;
+			artifacts?: readonly unknown[];
+			evidence?: readonly unknown[];
 			fileContents?: Record<string, string>;
 			signal?: AbortSignal;
 		},
@@ -245,6 +277,7 @@ export class SemanticProjectRuleController {
 		const deterministic = applicable.filter((r) => r.owner === "deterministic");
 		const semantic = applicable.filter((r) => r.owner === "jev");
 		const violations: RuleViolation[] = [];
+		const evidence = input.boundedDiffEvidence ?? input.evidence ?? input.artifacts;
 
 		// 1. Deterministic Mechanical Evaluation
 		for (const rule of deterministic) {
@@ -323,58 +356,29 @@ export class SemanticProjectRuleController {
 						program,
 						{
 							changedFiles: input.changedFiles,
-							evidence: input.boundedDiffEvidence,
+							evidence,
 						},
 						{ consequence: maxConsequence(semantic), signal: input.signal },
 					);
 
-					for (const rule of semantic) {
-						const key = `violate::${rule.rule_id}`;
-						const res = evaluation.results?.[key] ?? evaluation.answers?.[key];
-						const answer = res as
-							| {
-									probabilityTrue?: number;
-									noul?: number;
-									value?: boolean | number;
-									confidence?: { value?: number };
-							  }
-							| undefined;
-						const violateProb =
-							typeof answer?.probabilityTrue === "number"
-								? answer.probabilityTrue
-								: typeof answer?.noul === "number"
-									? answer.noul
-									: typeof answer?.value === "boolean"
-										? answer.value
-											? 1
-											: 0
-										: typeof answer?.value === "number"
-											? answer.value
-											: typeof answer?.confidence?.value === "number"
-												? answer.confidence.value
-												: 0;
-
-						// A violation blocks work: it takes a decisive yes, not a probability over a coin flip.
-						if (noulHolds(violateProb, "required_true")) {
-							violations.push({
-								ruleId: rule.rule_id,
-								phase,
-								consequence: rule.consequence,
-								explanation: `Semantic rule violation detected with confidence ${violateProb.toFixed(2)}: ${rule.text}`,
-								suggestedFix: `Refactor changes to comply with rule: ${rule.text}`,
-							});
-						}
-					}
-				} catch {
-					// Fall closed on decision engine error for critical consequence only, otherwise pass
-					if (semantic.some((r) => r.consequence === "critical")) {
-						violations.push({
-							ruleId: "critical_rule_eval_failure",
-							phase,
-							consequence: "critical",
-							explanation: "Failed to verify critical semantic project rules",
-						});
-					}
+					violations.push(
+						...semanticRuleFindings(semantic, phase, { ...evaluation.answers, ...evaluation.results }),
+					);
+				} catch (error) {
+					input.signal?.throwIfAborted();
+					violations.push({
+						ruleId: "semantic_rule_eval_unavailable",
+						phase,
+						consequence: maxConsequence(semantic),
+						explanation: `Semantic project-rule evaluation unavailable: ${String(error instanceof Error ? error.message : error).slice(0, 500)}`,
+					});
+					return this.toValidationResult(
+						violations,
+						applicable.length,
+						input.objectiveId,
+						input.taskId,
+						"advisory",
+					);
 				}
 			} else if (this.steering) {
 				// Require certificate JEV-PROJECT-RULE
@@ -385,45 +389,32 @@ export class SemanticProjectRuleController {
 							phase,
 							rules: semantic.map((r) => ({ id: r.rule_id, text: r.text })),
 							changedFiles: input.changedFiles,
-							evidence: input.boundedDiffEvidence,
+							evidence,
 						},
 						{ objectiveId: input.objectiveId, taskId: input.taskId, signal: input.signal },
 					);
 
-					for (const rule of semantic) {
-						const key = `violate::${rule.rule_id}`;
-						const ans = cert.answers?.[key] as any;
-						// "Did this change violate the rule?" A violation blocks work, so it takes a
-						// decisive yes. An undecided probability is not evidence of a violation.
-						const violated =
-							ans === true ||
-							ans?.value === true ||
-							noulHolds(ans?.probabilityTrue ?? ans?.noul, "required_true");
-						if (violated) {
-							violations.push({
-								ruleId: rule.rule_id,
-								phase,
-								consequence: rule.consequence,
-								explanation: `Project rule violation confirmed by certificate ${cert.certificate_id}: ${rule.text}`,
-								suggestedFix: `Refactor changes to comply with: ${rule.text}`,
-							});
-						}
-					}
-				} catch {
-					// Fail closed for critical rules
-					if (semantic.some((r) => r.consequence === "critical")) {
-						violations.push({
-							ruleId: "critical_rule_eval_failure",
-							phase,
-							consequence: "critical",
-							explanation: "Failed to obtain steering certificate for critical project rules",
-						});
-					}
+					violations.push(...semanticRuleFindings(semantic, phase, cert.answers, cert.certificate_id));
+				} catch (error) {
+					input.signal?.throwIfAborted();
+					violations.push({
+						ruleId: "semantic_rule_certificate_unavailable",
+						phase,
+						consequence: maxConsequence(semantic),
+						explanation: `Semantic project-rule certificate unavailable: ${String(error instanceof Error ? error.message : error).slice(0, 500)}`,
+					});
+					return this.toValidationResult(
+						violations,
+						applicable.length,
+						input.objectiveId,
+						input.taskId,
+						"advisory",
+					);
 				}
 			}
 		}
 
-		return this.toValidationResult(violations, applicable.length, input.objectiveId, input.taskId);
+		return this.toValidationResult(violations, applicable.length, input.objectiveId, input.taskId, "verification");
 	}
 
 	private toValidationResult(
@@ -431,6 +422,7 @@ export class SemanticProjectRuleController {
 		checkedRules: number,
 		objectiveId?: string,
 		taskId?: string,
+		mode: "deterministic" | "verification" | "advisory" = "deterministic",
 	): RuleValidationResult {
 		if (violations.length === 0) {
 			// FR-049: pass is silent in operator UI
@@ -438,6 +430,18 @@ export class SemanticProjectRuleController {
 				passed: true,
 				violations: [],
 				checkedRules,
+			};
+		}
+		if (mode !== "deterministic") {
+			return {
+				passed: false,
+				...(mode === "advisory" ? { advisory: true } : { verificationRequired: true }),
+				violations,
+				checkedRules,
+				summaryEvent: `${mode === "advisory" ? "Project rule diagnostic" : "Verify project rule findings in this lane before continuing"}: ${violations
+					.map((violation) => violation.explanation)
+					.join("; ")
+					.slice(0, 2000)}`,
 			};
 		}
 

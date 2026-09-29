@@ -1154,6 +1154,8 @@ function fastTextSignature(text: string): string {
 interface FailureFoldState {
 	callById: Map<string, AgentToolCall>;
 	callMessageIndexById: Map<string, number>;
+	/** Replay signatures bind the original batch; deduplication cannot erase individual calls. */
+	signatureBoundMessageIndexes: Set<number>;
 	/** Results whose call is unknown and that were omitted with their failure. */
 	omittedResults: Set<ToolResultMessage>;
 	/** Unbounded failure results to replace in place with their bounded record. */
@@ -1191,6 +1193,7 @@ function createFailureFoldState(): FailureFoldState {
 	return {
 		callById: new Map(),
 		callMessageIndexById: new Map(),
+		signatureBoundMessageIndexes: new Set(),
 		omittedResults: new Set(),
 		boundedReplacements: new Map(),
 		boundedMessages: new Map(),
@@ -1254,7 +1257,8 @@ function foldToolFailureContext(
 	 * The default of 0 means "nothing sent yet", i.e. dedup everything — the behavior every direct
 	 * caller and test relied on before the mark existed.
 	 */
-	const erasable = (callIndex: number): boolean => callIndex >= sentPrefixCount;
+	const erasable = (callIndex: number): boolean =>
+		callIndex >= sentPrefixCount && !fold.signatureBoundMessageIndexes.has(callIndex);
 	const {
 		callById,
 		callMessageIndexById,
@@ -1273,6 +1277,17 @@ function foldToolFailureContext(
 			activeDirectives.clear();
 			fold.batchKeys.clear();
 			const content = message.content;
+			if (
+				content.some((block) =>
+					block.type === "toolCall"
+						? Boolean(block.thoughtSignature)
+						: block.type === "thinking"
+							? Boolean(block.thinkingSignature)
+							: Boolean(block.textSignature),
+				)
+			) {
+				fold.signatureBoundMessageIndexes.add(index);
+			}
 			for (let blockIdx = 0; blockIdx < content.length; blockIdx++) {
 				const block = content[blockIdx];
 				if (block.type !== "toolCall") continue;

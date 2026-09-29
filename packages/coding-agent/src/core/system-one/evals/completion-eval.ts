@@ -1,6 +1,6 @@
 /**
  * Completion reliability evaluation: does the production completion transaction accept a goal that
- * is done and reject one that is not, for every kind of outcome a goal can promise?
+ * is done and surface planted gaps through deterministic refusal or semantic advice?
  *
  * Each case builds the goal the way a session does (createGoalState + applyGoalEvent), projects it
  * through the same canonical truth, runs the SAME `SystemOneController.executeCompletionTransaction`
@@ -480,6 +480,10 @@ export interface CompletionEvalRun {
 	verdicts: string[];
 	/** The failed gate reasons of each non-complete verdict, in order. */
 	reasons: string[][];
+	/** Visible semantic advice per attempt, independent of deterministic refusal. */
+	advisories?: string[][];
+	/** Every requested semantic question received an answer; outages never count as gap detection. */
+	assessmentComplete?: boolean[];
 	/** System One's raw answers per attempt (absent when a check refused before it was asked). */
 	answers?: Array<Record<string, unknown> | undefined>;
 }
@@ -490,7 +494,9 @@ export interface CompletionEvalSummary {
 	doneAccepted: number;
 	/** Share of planted-incomplete attempts rejected. */
 	incompleteRejected: number;
-	byKind: Record<string, { doneAccepted: number; incompleteRejected: number }>;
+	/** Share of planted-incomplete attempts refused or flagged by a complete semantic assessment. */
+	incompleteFlagged: number;
+	byKind: Record<string, { doneAccepted: number; incompleteRejected: number; incompleteFlagged: number }>;
 }
 
 function git(cwd: string, args: string[]): string {
@@ -507,6 +513,7 @@ function scratchRepository(testCase: CompletionEvalCase, goalStartedAt: string):
 		}
 	};
 	git(root, ["init", "-q"]);
+	git(root, ["config", "core.autocrlf", "false"]);
 	writeFileSync(join(root, "README.md"), "# fixture\n");
 	write(testCase.repositoryBase);
 	const baseDate = new Date(Date.parse(goalStartedAt) - 60_000).toISOString();
@@ -570,7 +577,13 @@ export function buildEvalGoal(testCase: CompletionEvalCase, now: string, machine
 export async function evaluateCompletionOnce(
 	testCase: CompletionEvalCase,
 	adapter: JevAdapter,
-): Promise<{ verdict: string; reasons: string[]; answers?: Record<string, unknown> }> {
+): Promise<{
+	verdict: string;
+	reasons: string[];
+	advisories?: string[];
+	assessmentComplete?: boolean;
+	answers?: Record<string, unknown>;
+}> {
 	const now = new Date().toISOString();
 	const machine = mkdtempSync(join(tmpdir(), "pi-completion-eval-machine-"));
 	for (const [path, content] of Object.entries(testCase.machine ?? {})) {
@@ -597,13 +610,38 @@ export async function evaluateCompletionOnce(
 			objective: { request: "", normalized_goal: "", acceptance_criteria: [], constraints: [] },
 			repo: { root: cwd, baseline_revision: revision, current_revision: revision },
 		});
-		const controller = new SystemOneController({ store, adapter });
+		let assessmentComplete = true;
+		let assessments = 0;
+		const controller = new SystemOneController({
+			store,
+			adapter: {
+				evaluate: async (input, options) => {
+					try {
+						const response = await adapter.evaluate(input, options);
+						assessments++;
+						assessmentComplete &&= Object.keys(input.questions).every((id) =>
+							Object.hasOwn(response.answers, id),
+						);
+						return response;
+					} catch (error) {
+						assessmentComplete = false;
+						throw error;
+					}
+				},
+			},
+		});
 		controller.setTruthSource(() => projectCanonicalTruth({ goal, currentRevision: revision }));
 		controller.setWorkDiffSource(() => readWorkDiff(cwd, goal.createdAt));
 		const verdict = await controller.executeCompletionTransaction(false, { persistTerminal: false });
 		// System One's raw answers for every question it was asked: what calibration is measured on.
 		const answers = Object.assign({}, ...store.snapshot().decisions.map((decision) => decision.answers));
-		return { verdict: verdict.verdict, reasons: verdict.failed_gates.map((gate) => gate.reason), answers };
+		return {
+			verdict: verdict.verdict,
+			reasons: verdict.failed_gates.map((gate) => gate.reason),
+			advisories: verdict.advisories?.map((advice) => advice.reason),
+			assessmentComplete: assessments > 0 && assessmentComplete,
+			answers,
+		};
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 		rmSync(machine, { recursive: true, force: true });
@@ -624,16 +662,24 @@ export async function runCompletionEval(
 			done: testCase.done,
 			verdicts: [],
 			reasons: [],
+			advisories: [],
+			assessmentComplete: [],
+			answers: [],
 		};
 		for (let attempt = 0; attempt < repeats; attempt++) {
 			try {
 				const result = await evaluateCompletionOnce(testCase, adapter);
 				run.verdicts.push(result.verdict);
 				run.reasons.push(result.reasons);
+				run.advisories?.push(result.advisories ?? []);
+				run.assessmentComplete?.push(result.assessmentComplete ?? false);
 				run.answers = [...(run.answers ?? []), result.answers];
 			} catch (error) {
 				run.verdicts.push(`error: ${error instanceof Error ? error.message : String(error)}`);
 				run.reasons.push([]);
+				run.advisories?.push([]);
+				run.assessmentComplete?.push(false);
+				run.answers?.push(undefined);
 			}
 		}
 		runs.push(run);
@@ -643,10 +689,25 @@ export async function runCompletionEval(
 }
 
 export function summarizeCompletionEval(runs: readonly CompletionEvalRun[]): CompletionEvalSummary {
-	const rate = (selected: readonly CompletionEvalRun[], accept: boolean): number => {
-		const verdicts = selected.flatMap((run) => run.verdicts);
-		if (verdicts.length === 0) return Number.NaN;
-		return verdicts.filter((verdict) => (verdict === "complete") === accept).length / verdicts.length;
+	const rate = (selected: readonly CompletionEvalRun[], mode: "accepted" | "rejected" | "flagged"): number => {
+		let attempts = 0;
+		let matches = 0;
+		for (const run of selected) {
+			for (const [index, verdict] of run.verdicts.entries()) {
+				attempts++;
+				const rejected = verdict !== "complete" && !verdict.startsWith("error:");
+				if (
+					mode === "accepted"
+						? verdict === "complete"
+						: rejected ||
+							(mode === "flagged" &&
+								run.assessmentComplete?.[index] === true &&
+								(run.advisories?.[index]?.length ?? 0) > 0)
+				)
+					matches++;
+			}
+		}
+		return attempts === 0 ? Number.NaN : matches / attempts;
 	};
 	const byKind: CompletionEvalSummary["byKind"] = {};
 	for (const kind of [...new Set(runs.map((run) => run.kind))]) {
@@ -654,11 +715,15 @@ export function summarizeCompletionEval(runs: readonly CompletionEvalRun[]): Com
 		byKind[kind] = {
 			doneAccepted: rate(
 				ofKind.filter((run) => run.done),
-				true,
+				"accepted",
 			),
 			incompleteRejected: rate(
 				ofKind.filter((run) => !run.done),
-				false,
+				"rejected",
+			),
+			incompleteFlagged: rate(
+				ofKind.filter((run) => !run.done),
+				"flagged",
 			),
 		};
 	}
@@ -666,11 +731,15 @@ export function summarizeCompletionEval(runs: readonly CompletionEvalRun[]): Com
 		runs: [...runs],
 		doneAccepted: rate(
 			runs.filter((run) => run.done),
-			true,
+			"accepted",
 		),
 		incompleteRejected: rate(
 			runs.filter((run) => !run.done),
-			false,
+			"rejected",
+		),
+		incompleteFlagged: rate(
+			runs.filter((run) => !run.done),
+			"flagged",
 		),
 		byKind,
 	};

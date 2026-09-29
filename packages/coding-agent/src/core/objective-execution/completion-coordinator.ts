@@ -393,6 +393,7 @@ export class CompletionCoordinator {
 
 				try {
 					const semanticResult = await context.semanticEvaluator.evaluateCompletion(objectiveId, options);
+					options?.signal?.throwIfAborted();
 					if (semanticResult.passed) {
 						const bundle = buildDeliveryBundle({
 							objectiveId,
@@ -433,6 +434,7 @@ export class CompletionCoordinator {
 						fallbackChain: [],
 					};
 				} catch (_err) {
+					options?.signal?.throwIfAborted();
 					// FIN-066: Semantic exception never directly becomes success
 					return {
 						verdict: "not_complete",
@@ -455,13 +457,22 @@ export class CompletionCoordinator {
 				if (context.semanticEvaluator) {
 					try {
 						const semanticResult = await context.semanticEvaluator.evaluateCompletion(objectiveId, options);
+						options?.signal?.throwIfAborted();
 						if (semanticResult.passed) {
 							semanticPassed = true;
 							semanticRef = semanticResult.decisionRef;
 						} else {
-							failedGates.push(...(semanticResult.failedGates ?? ["semantic_check_failed"]));
+							return {
+								verdict: "not_complete",
+								assuranceProfileRequested: profile,
+								deterministicGateRecords,
+								failedGates: [...(semanticResult.failedGates ?? ["semantic_check_failed"])],
+								requiredNextProof: ["verify_finding_revise_and_recheck"],
+								fallbackChain,
+							};
 						}
 					} catch (err) {
+						options?.signal?.throwIfAborted();
 						// Exception recorded in fallback chain
 						fallbackChain.push(`semantic_exception:${String(err)}`);
 					}

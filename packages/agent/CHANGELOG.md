@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved provider-signed assistant tool batches during duplicate-result folding, including unsigned sibling calls required for Gemini replay.
+
 ## [0.100.8] - 2026-09-29
 
 ## [0.100.7] - 2026-09-29

@@ -581,7 +581,7 @@ describe("Finalization v2.1 Verification Suite (FIN-001 to FIN-095)", () => {
 			expect(evalResult.failedGates).toContain("Missing documentation on edge cases");
 		});
 
-		it("FIN-063: semantic_enhanced falls back explicitly to mechanical profile when semantic check fails", async () => {
+		it("FIN-063: an answered semantic failure cannot fall back to mechanical success", async () => {
 			const runtime = createMockRuntime();
 			const context: CompletionEvaluationContext = {
 				runtime,
@@ -595,9 +595,9 @@ describe("Finalization v2.1 Verification Suite (FIN-001 to FIN-095)", () => {
 			};
 
 			const evalResult = await CompletionCoordinator.evaluate("test_obj_1", "semantic_enhanced", context);
-			expect(evalResult.verdict).toBe("complete");
-			expect(evalResult.assuranceProfileUsed).toBe("mechanical");
-			expect(evalResult.fallbackChain).toContain("fallback_to:mechanical");
+			expect(evalResult.verdict).toBe("not_complete");
+			expect(evalResult.failedGates).toContain("semantic_check_failed");
+			expect(evalResult.fallbackChain).not.toContain("fallback_to:mechanical");
 		});
 
 		it("FIN-064: system_one_required halts as semantic_gate_unavailable when calibrated engine is absent", async () => {

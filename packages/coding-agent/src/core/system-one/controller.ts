@@ -28,11 +28,14 @@ import {
 	directiveFromPostflight,
 	directiveFromPreflight,
 	directiveFromToolReplan,
+	isSameLaneVerificationDirective,
 	type SystemOneControlDirective,
+	sameLaneVerificationDirective,
 } from "./control-directive.ts";
 import type { CanonicalHydration, ExecutionStore } from "./execution-state.ts";
 import type { IntegrityHookCoordinator } from "./integrity-hooks.ts";
 import {
+	type CompletionRejectionDetail,
 	decideFinalCompletion,
 	decidePostflight,
 	decidePreflight,
@@ -137,6 +140,12 @@ export interface SystemOneControllerDeps {
 	workDiffSource?: () => WorkDiff | undefined;
 }
 
+interface StageValidation {
+	decision: ValidationDecision;
+	answers: Record<string, unknown>;
+	evaluationId: string | undefined;
+}
+
 /** The consequence class a stage's tool impact maps to, for the evaluation record. */
 function consequenceForImpact(impact: ToolImpact): Consequence {
 	switch (impact) {
@@ -204,6 +213,7 @@ export class SystemOneController {
 	}
 
 	noteControlDirective(directive: SystemOneControlDirective): void {
+		if (isSameLaneVerificationDirective(this.pendingDirective) && !isSameLaneVerificationDirective(directive)) return;
 		this.pendingDirective = directive;
 	}
 
@@ -257,7 +267,7 @@ export class SystemOneController {
 		/** Questions built for this one evaluation (per-item fan-out); the stage's catalog pack otherwise. */
 		builtQuestions?: Readonly<QuestionPack>,
 		signal?: AbortSignal,
-	): Promise<{ decision: ValidationDecision; answers: Record<string, unknown>; evaluationId: string | undefined }> {
+	): Promise<StageValidation> {
 		this.activeEvaluations++;
 		try {
 			const questions = builtQuestions ?? selectQuestions(stage, omitQuestions);
@@ -1056,9 +1066,9 @@ export class SystemOneController {
 	 * R-035: A deterministic failure MUST NOT be overridden by Jev.
 	 * R-048: Final completion validation MUST use a fresh cold projection.
 	 * R-049: The worker final summary MUST NOT be the primary state.
-	 * R-057: Bug-fix completion MUST pass root_cause_addressed.
+	 * Bug-fix root-cause findings remain recorded advice after deterministic proof.
 	 * R-058: A second completion_challenge pack MUST run after primary completion pack.
-	 * R-059: Any failed hard completion gate routes to verify_more, retrieve_more, rework, or blocked_external.
+	 * Failed deterministic and external gates still refuse completion.
 	 * R-060: Blocked external dependencies route to blocked_external.
 	 * PI-021: External completion gate runs before terminal transition.
 	 */
@@ -1084,6 +1094,7 @@ export class SystemOneController {
 			persistTerminal?: boolean;
 		},
 	): Promise<FinalCompletionVerdict> {
+		options?.signal?.throwIfAborted();
 		this.syncCanonicalTruth();
 		// 1. Evaluate all deterministic gates first (R-020, R-035)
 		const detResult = evaluateDeterministicCompletionGates(this.store.snapshot());
@@ -1107,29 +1118,59 @@ export class SystemOneController {
 			...(repositoryOutcome ? [] : ["out_of_scope_change_present", "duplicate_responsibility_introduced"]),
 		];
 		const primaryProjection = this.projector.completion(this.store.snapshot(), work);
-		const primaryStage = await this.runStageValidation("completion", primaryProjection, "read_only", primaryOmit);
-
-		// 3. Cold challenge pack (R-058)
 		const challengeProjection = this.projector.completionChallenge(this.store.snapshot(), work);
-		const challengeStage = await this.runStageValidation(
-			"completion_challenge",
-			challengeProjection,
-			"read_only",
-			repositoryOutcome ? [] : ["plausible_regression_not_tested"],
-		);
+		const stages = new Map<ValidationStage, StageValidation>();
+		const unavailable: CompletionRejectionDetail[] = [];
+		// Each judgment remains useful if its peer fails. Cancellation is never converted to advice.
+		for (const [stage, projection, omitted] of [
+			["completion", primaryProjection, primaryOmit],
+			["completion_challenge", challengeProjection, repositoryOutcome ? [] : ["plausible_regression_not_tested"]],
+		] as const) {
+			options?.signal?.throwIfAborted();
+			try {
+				stages.set(
+					stage,
+					await this.runStageValidation(stage, projection, "read_only", omitted, undefined, options?.signal),
+				);
+			} catch (error) {
+				options?.signal?.throwIfAborted();
+				unavailable.push({
+					id: `JEV-${stage}-unavailable`,
+					reason: `${stage} advice unavailable: ${String(error instanceof Error ? error.message : error).slice(0, 500)}`,
+					required_next_proof: "Inspect the recorded outcome evidence and evaluator diagnostic.",
+				});
+			}
+		}
+		options?.signal?.throwIfAborted();
 
 		// 4. Policy engine final verdict
 		const finalVerdict = decideFinalCompletion({
 			deterministicGates: detResult.gates,
-			primaryAnswers: primaryStage.answers,
-			challengeAnswers: challengeStage.answers,
+			primaryAnswers: stages.get("completion")?.answers,
+			challengeAnswers: stages.get("completion_challenge")?.answers,
 			isBugFix,
 			repositoryOutcome,
 			config: this.config,
 		});
 
-		this.sealDecision(primaryStage.decision, finalVerdict.verdict, primaryStage.evaluationId);
-		this.sealDecision(challengeStage.decision, finalVerdict.verdict, challengeStage.evaluationId);
+		if (unavailable.length > 0) finalVerdict.advisories = [...unavailable, ...(finalVerdict.advisories ?? [])];
+		if (finalVerdict.verdict === "verify_more") {
+			this.noteControlDirective(
+				sameLaneVerificationDirective(
+					finalVerdict.failed_gates.map(
+						(finding) => `${finding.id}: ${finding.reason}. ${finding.required_next_proof}`,
+					),
+				),
+			);
+		}
+		for (const stage of stages.values()) {
+			this.sealDecision(
+				stage.decision,
+				finalVerdict.verdict,
+				stage.evaluationId,
+				finalVerdict.advisories?.map((item) => `Advice: ${item.reason}`),
+			);
+		}
 
 		// 5. External completion gate and hooks check (PI-021)
 		if (finalVerdict.verdict === "complete") {

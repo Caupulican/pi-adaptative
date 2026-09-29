@@ -3,8 +3,8 @@
  *
  * One controller per session owns the rules compiled from the trusted instruction files the
  * resource loader admitted, plus the durable owner policies. It is consulted at the three real
- * transitions — mutation acceptance, task postflight, and completion — and a blocking violation
- * queues durable RepairWork instead of being reported and ignored.
+ * transitions — mutation acceptance, task postflight, and completion. Deterministic violations
+ * queue durable RepairWork; semantic findings require verification in the receiving lane.
  * Conforms to GOVERNANCE_LIVE_PATHS.md and RCG-041..RCG-043, RCG-046.
  */
 
@@ -17,6 +17,7 @@ import type { OwnerRulePolicy } from "./durable-owner-rules.ts";
 import { ownerRuleToSemanticRule } from "./durable-owner-rules.ts";
 import { compileRulesFromText, SemanticProjectRuleController } from "./semantic-project-rule-controller.ts";
 import type { RulePhase, RuleRepairWork, RuleValidationResult, SemanticRule } from "./types.ts";
+import { blocksRuleTransition } from "./types.ts";
 
 /** A rule source the host trusts: an instruction file the resource loader already admitted. */
 export interface TrustedRuleSource {
@@ -34,7 +35,7 @@ export interface SessionProjectRulesDeps {
 	getDecisionEngine(): SemanticDecisionEngine | undefined;
 	/** Durable sink for queued RepairWork. */
 	recordRepairWork(repair: RuleRepairWork): void;
-	/** Bounded operator-visible notice for a blocking violation. */
+	/** Bounded operator-visible notice for a violation or semantic advice. */
 	emitViolation?(result: RuleValidationResult): void;
 }
 
@@ -102,7 +103,7 @@ export class SessionProjectRules {
 
 	/** A blocking violation is critical or high: it stops the transition it was found at. */
 	static blocks(result: RuleValidationResult): boolean {
-		return !result.passed && result.violations.some((v) => v.consequence === "critical" || v.consequence === "high");
+		return blocksRuleTransition(result);
 	}
 
 	private consume(result: RuleValidationResult): RuleValidationResult {
@@ -111,7 +112,7 @@ export class SessionProjectRules {
 			this.queuedRepairs.push(result.repairWork);
 			this.deps.recordRepairWork(result.repairWork);
 		}
-		if (SessionProjectRules.blocks(result)) this.deps.emitViolation?.(result);
+		if (result.advisory || SessionProjectRules.blocks(result)) this.deps.emitViolation?.(result);
 		return result;
 	}
 
@@ -141,6 +142,7 @@ export class SessionProjectRules {
 		taskId: string;
 		changedFiles: readonly string[];
 		artifacts?: readonly unknown[];
+		boundedDiffEvidence?: string | Record<string, unknown>;
 		signal?: AbortSignal;
 	}): Promise<RuleValidationResult> {
 		return this.consume(await this.getController().validateTaskPostflight(input));
@@ -152,6 +154,7 @@ export class SessionProjectRules {
 			objectiveId: string;
 			changedFiles: readonly string[];
 			evidence?: readonly unknown[];
+			boundedDiffEvidence?: string | Record<string, unknown>;
 			signal?: AbortSignal;
 		},
 		options?: { record?: boolean },

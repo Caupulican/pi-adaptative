@@ -1,4 +1,5 @@
 import type { ObjectiveRoute } from "../objective-execution/objective-route.ts";
+import { isSameLaneVerificationDirective } from "../system-one/control-directive.ts";
 
 /** Hidden turn trigger. The current goal record is injected ephemerally during context assembly. */
 export const GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE = "goal_continuation_trigger";
@@ -51,8 +52,11 @@ export function buildObjectiveRoutePrompt(route: ObjectiveRoute): GoalContinuati
 		? ` Target requirements: ${route.target_requirement_ids.join(", ")}.`
 		: "";
 	const why = route.reason_codes.length ? ` (${route.reason_codes.join(", ")})` : "";
+	const brief = isSameLaneVerificationDirective({ objectiveRoute: route.route, reasonCodes: route.reason_codes })
+		? "Verify the finding against current evidence in this lane; revise confirmed failures and recheck before continuing affected work. Record the checks and their receipts."
+		: ROUTE_BRIEFS[route.route];
 	return {
-		text: `System One route: ${route.route}${why}.${targets} ${ROUTE_BRIEFS[route.route]}`,
+		text: `System One route: ${route.route}${why}.${targets} ${brief}`,
 		truncated: false,
 	};
 }

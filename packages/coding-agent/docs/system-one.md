@@ -78,9 +78,12 @@ objective, or unresolved verification.
 Production owners: SteeringPlane JEV-001..003 for admission, JEV-004 for routing, JEV-024/025/026
 for objective-loop completion, JEV-041.. for semantic dedup. The goal tool first proves its
 deterministic requirements and checks, then asks `SystemOneController` to evaluate the same canonical
-completion view without persisting a terminal state. A first rejection steers more work. One unchanged
-repeat opens the native owner question panel, or records the decision in the handoff follow-up ledger
-and keeps the goal active. Other `SystemOneController` stage packs for intake, claim check, duplicate
+completion view without persisting a terminal state. Every completion request reruns current proof;
+a previous rejection never latches an owner question. Received completion findings take priority in
+the receiving agent's own lane: verify against current evidence, revise confirmed failures, and
+recheck before continuing affected work. Failed requirement checks and unresolved findings refuse
+completion. Evaluator outages retain their actual diagnostics without inventing a defect.
+Other `SystemOneController` stage packs for intake, claim check, duplicate
 logic, patch review and drift remain callable for tests/hooks.
 
 ## The decision ledger
@@ -103,11 +106,21 @@ the [worker control tests](../test/system-one-worker-control.test.ts) and the
 
 `system-one/authority-line.ts` is the one table. Reversible work proceeds past a doubt or an outage
 with the doubt visible; an ambiguous judgment asks for evidence at most `GATHER_MORE_LIMIT` (2) times
-per evidence revision. The default `system_one_optional` policy also treats unsettled JEV-024..028
-objective-transition judgments as advisory after deterministic proof. Explicit
-`system_one_required` mode holds those transitions. An irreversible or outward operation goes to the
+per evidence revision. Received nonpassing JEV-024..028 judgments require verification in the
+receiving lane in both policy modes. They keep completion open without dispatching a substitute
+verifier or opening an owner-question latch. `system_one_optional` records evaluator outages as
+diagnostics after deterministic proof; `system_one_required` retains its availability gate.
+An irreversible or outward operation goes to the
 operator, or is refused for a worker. Only Choice and Score answers are gated on confidence; a
 Noul's probability is its certainty.
+
+Project-rule candidates across mutation, postflight and completion require the receiving agent to
+verify them. Current verification receipts reach the recheck. An evaluator outage reports its
+diagnostic without inventing a critical violation or queuing repair tasks. Deterministic instruction
+violations retain their corrective work and transition checks.
+
+The completion evaluation requires planted gaps to refuse completion and reports diagnostic notices separately.
+An incomplete semantic assessment or evaluator error never counts as detecting a planted gap.
 
 ## Claims against deliveries
 

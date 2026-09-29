@@ -1,0 +1,135 @@
+import { describe, expect, it, vi } from "vitest";
+import { SystemOneController } from "../../src/core/system-one/controller.ts";
+import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
+
+const passingAnswers = {
+	outcomes_achieved: true,
+	required_behavior_unverified: false,
+	material_claim_unsupported: false,
+	out_of_scope_change_present: false,
+	duplicate_responsibility_introduced: false,
+	completion_verdict: { choice: "complete", confidence: 0.99, probabilities: { complete: 0.99 } },
+	missing_requirement: false,
+	hidden_assumption: false,
+	plausible_regression_not_tested: false,
+	conclusion_overstates_evidence: false,
+};
+
+describe("completion advice lifecycle", () => {
+	it.each(["primary", "challenge", "both"] as const)(
+		"keeps %s evaluator failures advisory after deterministic proof",
+		async (failure) => {
+			const store = new ExecutionStore({
+				run_id: "advice",
+				objective: {
+					request: "Fix the outcome",
+					normalized_goal: "Fix the outcome",
+					acceptance_criteria: [{ id: "AC", text: "Outcome verified", required: true }],
+				},
+				repo: { root: "/repo", baseline_revision: "base" },
+			});
+			store.recordVerification({ kind: "unit_test", status: "passed", covers_acceptance_ids: ["AC"] });
+			const evaluate = vi.fn(async (input: { questions: Record<string, unknown> }) => {
+				const challenge = Object.hasOwn(input.questions, "missing_requirement");
+				if (failure === "both" || (challenge ? failure === "challenge" : failure === "primary"))
+					throw new Error("semantic service failed");
+				return { model: "fixture", answers: passingAnswers, latency_ms: 1 };
+			});
+			const controller = new SystemOneController({ store, adapter: { evaluate } });
+			const result = await controller.executeCompletionTransaction();
+			expect(result.verdict).toBe("complete");
+			expect(result.failed_gates).toEqual([]);
+			expect(result.advisories).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ reason: expect.stringContaining("semantic service failed") }),
+				]),
+			);
+			expect(evaluate).toHaveBeenCalledTimes(2);
+			expect(controller.isEvaluating).toBe(false);
+			expect(store.phase).toBe("verifying");
+		},
+	);
+
+	it("keeps a received finding ahead of ordinary work until it is verified and revised", async () => {
+		const store = new ExecutionStore({
+			run_id: "verify",
+			objective: {
+				request: "Fix",
+				normalized_goal: "Fix",
+				acceptance_criteria: [{ id: "AC", text: "Verified", required: true }],
+			},
+			repo: { root: "/repo", baseline_revision: "base" },
+		});
+		store.recordVerification({ kind: "unit_test", status: "passed", covers_acceptance_ids: ["AC"] });
+		let revised = false;
+		const controller = new SystemOneController({
+			store,
+			adapter: {
+				evaluate: async () => ({
+					model: "fixture",
+					answers: { ...passingAnswers, hidden_assumption: !revised },
+					latency_ms: 1,
+				}),
+			},
+		});
+		const rejected = await controller.executeCompletionTransaction();
+		expect(rejected.verdict).toBe("verify_more");
+		expect(rejected.failed_gates).toEqual(
+			expect.arrayContaining([expect.objectContaining({ id: "JEV-CHALLENGE-hidden_assumption" })]),
+		);
+		expect(store.phase).not.toBe("complete");
+		const priority = controller.peekControlDirective();
+		expect(priority).toMatchObject({
+			objectiveRoute: "deterministic_test",
+			reasonCodes: expect.arrayContaining(["same_lane_verification_required"]),
+		});
+		controller.noteControlDirective({
+			source: "postflight",
+			objectiveRoute: "completion_candidate",
+			reasonCodes: ["ordinary_work"],
+		});
+		expect(controller.peekControlDirective()).toBe(priority);
+		const replacement = { ...priority!, reasonCodes: ["same_lane_verification_required", "fresh_finding"] };
+		controller.noteControlDirective(replacement);
+		expect(controller.consumeControlDirective(priority)).toBeUndefined();
+		expect(controller.peekControlDirective()).toBe(replacement);
+		expect((await controller.executeCompletionTransaction()).verdict).toBe("verify_more");
+		controller.consumeControlDirective(controller.peekControlDirective());
+		revised = true;
+		expect((await controller.executeCompletionTransaction()).verdict).toBe("complete");
+	});
+
+	it.each(["primary", "challenge", "before"] as const)(
+		"propagates %s cancellation and leaves completion uncommitted",
+		async (at) => {
+			const store = new ExecutionStore({
+				run_id: "cancel",
+				objective: {
+					request: "Work",
+					normalized_goal: "Work",
+					acceptance_criteria: [{ id: "AC", text: "Outcome verified", required: true }],
+				},
+				repo: { root: "/repo", baseline_revision: "base" },
+			});
+			store.recordVerification({ kind: "unit_test", status: "passed", covers_acceptance_ids: ["AC"] });
+			const abort = new AbortController();
+			const cancelled = new Error("owner cancelled");
+			const evaluate = vi.fn(
+				async (input: { questions: Record<string, unknown> }, options?: { signal?: AbortSignal }) => {
+					expect(options?.signal).toBe(abort.signal);
+					if (at === "primary" || Object.hasOwn(input.questions, "missing_requirement")) {
+						abort.abort(cancelled);
+						throw cancelled;
+					}
+					return { model: "fixture", answers: {}, latency_ms: 1 };
+				},
+			);
+			const controller = new SystemOneController({ store, adapter: { evaluate } });
+			if (at === "before") abort.abort(cancelled);
+			await expect(controller.executeCompletionTransaction(false, { signal: abort.signal })).rejects.toBe(cancelled);
+			expect(store.phase).not.toBe("complete");
+			expect(controller.isEvaluating).toBe(false);
+			expect(evaluate).toHaveBeenCalledTimes(at === "before" ? 0 : at === "primary" ? 1 : 2);
+		},
+	);
+});

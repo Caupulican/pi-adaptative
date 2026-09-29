@@ -3,6 +3,7 @@
  * Implements deterministic route composition precedence per JEV_ROUTING_CONTRACT.md.
  */
 
+import { isSameLaneVerificationDirective } from "../system-one/control-directive.ts";
 import {
 	OBJECTIVE_ROUTE_SCHEMA_VERSION,
 	type ObjectiveRoute,
@@ -91,6 +92,15 @@ export function composeObjectiveRoute(input: RouteCompositionInput): ObjectiveRo
 			objectiveId,
 			"blocked_external",
 			["external_dependency_unavailable", ...input.supervisionRequest.reasonCodes],
+			input,
+		);
+	}
+	if (input.systemOneDirective && isSameLaneVerificationDirective(input.systemOneDirective)) {
+		return buildRoute(
+			cycleId,
+			objectiveId,
+			input.systemOneDirective.objectiveRoute,
+			[...input.systemOneDirective.reasonCodes],
 			input,
 		);
 	}

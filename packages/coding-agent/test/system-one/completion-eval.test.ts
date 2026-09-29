@@ -60,12 +60,61 @@ describe("completion reliability evaluation harness", () => {
 		expect(JSON.stringify(seen[0])).toContain("Downloaded Ollama models under ~/.ollama are deleted");
 	});
 
-	it("measures first-try acceptance of done cases and rejection of planted gaps, per outcome kind", async () => {
+	it("measures rejection of planted gaps independently from diagnostic notices", async () => {
 		const summary = await runCompletionEval(judgingAdapter([]), { repeats: 2 });
 		expect(summary.runs).toHaveLength(COMPLETION_EVAL_CASES.length);
 		expect(summary.doneAccepted).toBe(1);
 		expect(summary.incompleteRejected).toBe(1);
+		expect(summary.incompleteFlagged).toBe(1);
+		expect(summary.runs.filter((run) => !run.done).flatMap((run) => run.verdicts)).not.toContain("complete");
 		expect(Object.keys(summary.byKind).sort()).toEqual(["information", "machine", "mixed", "remote", "repository"]);
+	});
+
+	it("does not count an error or unavailable assessment as detection of a planted gap", () => {
+		const summary = summarizeCompletionEval([
+			{
+				caseId: "advice",
+				kind: "machine",
+				done: false,
+				verdicts: ["complete"],
+				reasons: [[]],
+				advisories: [["Evidence admits a gap"]],
+				assessmentComplete: [true],
+			},
+			{
+				caseId: "outage",
+				kind: "machine",
+				done: false,
+				verdicts: ["complete"],
+				reasons: [[]],
+				advisories: [["Advice unavailable"]],
+				assessmentComplete: [false],
+			},
+			{ caseId: "error", kind: "machine", done: false, verdicts: ["error: timeout"], reasons: [[]] },
+			{
+				caseId: "check",
+				kind: "machine",
+				done: false,
+				verdicts: ["refused_by_check"],
+				reasons: [["Required file exists"]],
+			},
+		]);
+		expect(summary.incompleteRejected).toBe(0.25);
+		expect(summary.incompleteFlagged).toBe(0.5);
+	});
+
+	it.each(["outage", "missing"] as const)("distinguishes %s from a complete semantic assessment", async (mode) => {
+		const testCase = COMPLETION_EVAL_CASES.find((entry) => entry.id === "repository-fix-done")!;
+		const result = await evaluateCompletionOnce(testCase, {
+			evaluate: async () => {
+				if (mode === "outage") throw new Error("offline");
+				return { model: "fixture", answers: {}, latency_ms: 1 };
+			},
+		});
+		expect(result.verdict).toBe(mode === "outage" ? "complete" : "verify_more");
+		expect(result.assessmentComplete).toBe(false);
+		if (mode === "outage") expect(result.advisories?.length).toBeGreaterThan(0);
+		else expect(result.reasons.length).toBeGreaterThan(0);
 	});
 
 	it("counts an evaluation error as a non-acceptance, never as a pass", () => {

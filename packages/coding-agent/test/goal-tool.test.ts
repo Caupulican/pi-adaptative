@@ -1296,7 +1296,7 @@ describe("goal requirement checks", () => {
 });
 
 describe("goal completion authority", () => {
-	it("falls back to deterministic completion only when optional System One is unavailable", async () => {
+	it("leaves evaluator outage handling to the completion owner", async () => {
 		let state: GoalState | undefined;
 		const systemOneFailure = vi.fn(
 			async () => await Promise.reject(new JevAdapterFailure("unavailable", "offline", "completion")),
@@ -1315,10 +1315,10 @@ describe("goal completion authority", () => {
 		} as Parameters<typeof createGoalToolDefinition>[0]);
 		await tool.execute("call-start", { action: "start", goalId: "g1", userGoal: "Ship" }, undefined, undefined, ctx);
 
-		const completed = await tool.execute("call-complete", { action: "complete" }, undefined, undefined, ctx);
-
-		expect(completed.isError).not.toBe(true);
-		expect(state?.status).toBe("completed");
+		await expect(
+			tool.execute("call-complete", { action: "complete" }, undefined, undefined, ctx),
+		).rejects.toMatchObject({ kind: "unavailable" });
+		expect(state?.status).toBe("active");
 		expect(systemOneFailure).toHaveBeenCalledOnce();
 	});
 
@@ -1345,23 +1345,17 @@ describe("goal completion authority", () => {
 		expect(state?.status).toBe("active");
 	});
 
-	it("uses System One to steer incomplete work and opens one owner decision after an unchanged repeat", async () => {
+	it("reevaluates deterministic refusals on every attempt without an owner latch", async () => {
 		let state: GoalState | undefined;
 		let view = { outcome_evidence: [{ criterion_id: "r1", evidence: [] }] };
 		const evaluateCompletion = vi.fn(async () => ({
-			verdict: "retrieve_more",
+			verdict: "rework",
 			failed_gates: [
 				{
-					id: "JEV-outcomes_achieved",
-					reason:
-						"The evidence does not show every required outcome achieved (System One: 0.40, needs at least 0.70).",
-					required_next_proof: "Record the evidence.",
+					id: "G-TEST",
+					reason: "The recorded regression failed.",
 				},
 			],
-		}));
-		const resolveCompletionRejection = vi.fn(async () => ({
-			decision: "continue" as const,
-			answer: "Keep working on the missing proof.",
 		}));
 		const tool = createGoalToolDefinition({
 			getGoalState: () => state,
@@ -1369,7 +1363,6 @@ describe("goal completion authority", () => {
 				state = next;
 			},
 			now: () => "2026-09-25T10:00:00.000Z",
-			resolveCompletionRejection,
 			getSystemOneController: () =>
 				({
 					executeCompletionTransaction: evaluateCompletion,
@@ -1382,24 +1375,22 @@ describe("goal completion authority", () => {
 		const first = await run({ action: "complete" });
 		expect(getToolResultText(first)).toContain("Completion refused: System One found 1 issue(s)");
 		expect(evaluateCompletion).toHaveBeenCalledTimes(1);
-		expect(resolveCompletionRejection).not.toHaveBeenCalled();
 
 		const second = await run({ action: "complete" });
-		expect(getToolResultText(second)).toContain("Owner chose to continue");
-		expect(evaluateCompletion).toHaveBeenCalledTimes(1);
-		expect(resolveCompletionRejection).toHaveBeenCalledTimes(1);
+		expect(getToolResultText(second)).toContain("The recorded regression failed.");
+		expect(evaluateCompletion).toHaveBeenCalledTimes(2);
 
 		await run({ action: "complete" });
-		expect(evaluateCompletion).toHaveBeenCalledTimes(1);
-		expect(resolveCompletionRejection).toHaveBeenCalledTimes(1);
+		expect(evaluateCompletion).toHaveBeenCalledTimes(3);
 		expect(state?.lastCompletionRejection?.count).toBe(3);
 
 		view = { outcome_evidence: [{ criterion_id: "r1", evidence: [{ id: "OBS-ev-1" }] as never[] }] };
 		await run({ action: "complete" });
-		expect(evaluateCompletion).toHaveBeenCalledTimes(2);
+		expect(evaluateCompletion).toHaveBeenCalledTimes(4);
+		expect(state?.status).toBe("active");
 	});
 
-	it("applies an explicit owner completion override from the decision panel", async () => {
+	it("reports completion advice without requesting a manual override", async () => {
 		let state: GoalState | undefined;
 		const tool = createGoalToolDefinition({
 			getGoalState: () => state,
@@ -1407,25 +1398,24 @@ describe("goal completion authority", () => {
 				state = next;
 			},
 			now: () => "2026-09-25T10:00:00.000Z",
-			resolveCompletionRejection: async () => ({ decision: "accept_complete" as const }),
 			getSystemOneController: () =>
 				({
 					executeCompletionTransaction: async () => ({
-						verdict: "retrieve_more",
-						failed_gates: [{ id: "JEV-outcomes_achieved", reason: "Missing proof." }],
+						verdict: "complete",
+						failed_gates: [],
+						advisories: [{ id: "JEV-outcomes_achieved", reason: "Review the proof." }],
 					}),
 					completionView: () => ({ view: { outcome_evidence: [] }, repositoryOutcome: false }),
 				}) as never,
 		} as Parameters<typeof createGoalToolDefinition>[0]);
 		const run = (input: GoalToolInput) => tool.execute("call", input, undefined, undefined, ctx);
 		await run({ action: "start", goalId: "g1", userGoal: "Ship" });
-		await run({ action: "complete" });
-
 		const accepted = await run({ action: "complete" });
 
 		expect(accepted.isError).not.toBe(true);
 		expect(state?.status).toBe("completed");
-		expect(state?.acceptanceOverride).toBe(true);
+		expect(state?.acceptanceOverride).not.toBe(true);
+		expect(getToolResultText(accepted)).toContain("Completion advice: Review the proof.");
 	});
 });
 

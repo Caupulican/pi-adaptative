@@ -350,6 +350,7 @@ import {
 } from "./system-one/claim-delivery.ts";
 import { formatClarificationQuestion } from "./system-one/clarification.ts";
 import { CodeDuplicateReviewer } from "./system-one/code-duplicates.ts";
+import { sameLaneVerificationDirective } from "./system-one/control-directive.ts";
 import { type SystemOneController, USER_REQUEST_RULE_BUDGET } from "./system-one/controller.ts";
 import { createSessionForegroundControl, type SystemOneForegroundControl } from "./system-one/foreground-control.ts";
 import { OperationGate } from "./system-one/operation-gate.ts";
@@ -874,9 +875,17 @@ export class AgentSession {
 				const violation = result.violations[0];
 				this._emit({
 					type: "warning",
-					message: `Project rule violation blocks this transition: ${result.summaryEvent ?? violation?.explanation ?? "unspecified"}`,
+					message:
+						result.advisory || result.verificationRequired
+							? (result.summaryEvent ?? "Project rule advice unavailable")
+							: `Project rule violation blocks this transition: ${result.summaryEvent ?? violation?.explanation ?? "unspecified"}`,
 				});
-				if (violation) {
+				if (result.verificationRequired) {
+					this._systemOneController?.noteControlDirective(
+						sameLaneVerificationDirective(result.violations.map((finding) => finding.explanation)),
+					);
+				}
+				if (violation && !result.advisory && !result.verificationRequired) {
 					this._operatorProjection.eventBridge.recordRuleRepair(
 						violation.ruleId,
 						violation.suggestedFix ?? violation.explanation,
@@ -1921,7 +1930,6 @@ export class AgentSession {
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			saveGoalStateSnapshot: (state, expected) => this.saveGoalStateSnapshot(state, expected),
 			getActiveVerificationIds: () => this._getActiveVerificationIds(),
-			resolveGoalCompletionOwnerDecision: (input, signal) => this._resolveGoalCompletionOwnerDecision(input, signal),
 			deliverToOwner: (items) => {
 				this._deliverToOwner(items);
 			},

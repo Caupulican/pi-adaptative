@@ -108,7 +108,7 @@ describe("System One Completion Gate", () => {
 		expect(store.phase).not.toBe("complete");
 	});
 
-	it("rejects bug-fix completion if root cause is unaddressed (R-015, R-057)", async () => {
+	it("requires verification of a root-cause finding before bug-fix completion", async () => {
 		const store = createStoreWithTask();
 
 		// Satisfy deterministic gates
@@ -164,12 +164,12 @@ describe("System One Completion Gate", () => {
 		}));
 
 		const result = await controller.executeCompletionTransaction(true);
-		expect(result.verdict).toBe("rework");
+		expect(result.verdict).toBe("verify_more");
 		expect(result.failed_gates.some((g) => g.id === "JEV-root_cause_addressed")).toBe(true);
 		expect(store.phase).not.toBe("complete");
 	});
 
-	it("rejects completion when independent challenge pack finds hidden assumption (R-058)", async () => {
+	it("requires verification when the cold challenge finds a hidden assumption", async () => {
 		const store = createStoreWithTask();
 
 		store.recordVerification({
@@ -217,6 +217,7 @@ describe("System One Completion Gate", () => {
 		});
 
 		const result = await controller.executeCompletionTransaction(true);
+		expect(result.verdict).toBe("verify_more");
 		expect(result.failed_gates.some((g) => g.id === "JEV-CHALLENGE-hidden_assumption")).toBe(true);
 		expect(store.phase).not.toBe("complete");
 	});

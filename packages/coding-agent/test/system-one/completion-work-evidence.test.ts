@@ -53,7 +53,7 @@ const MEASURED = {
 };
 
 describe("completion judges the work itself", () => {
-	it("closes finished work at the answers System One gives it, and keeps broken work open", () => {
+	it("closes verified work and requires verification of broken work", () => {
 		const decide = (answers: (typeof MEASURED)["finished"]) =>
 			decideFinalCompletion({
 				deterministicGates: passedGates,
@@ -63,11 +63,11 @@ describe("completion judges the work itself", () => {
 			});
 		expect(decide(MEASURED.finished)).toEqual({ verdict: "complete", failed_gates: [] });
 		const broken = decide(MEASURED.broken);
-		expect(broken.verdict).not.toBe("complete");
+		expect(broken.verdict).toBe("verify_more");
 		expect(broken.failed_gates.map((gate) => gate.id)).toEqual(
 			expect.arrayContaining(["JEV-outcomes_achieved", "JEV-CHALLENGE-hidden_assumption"]),
 		);
-		// A missing answer never holds.
+		// A successful but incomplete assessment must still be verified.
 		const { hidden_assumption: _missing, ...withoutAssumption } = MEASURED.finished.challenge;
 		expect(
 			decideFinalCompletion({
@@ -75,8 +75,8 @@ describe("completion judges the work itself", () => {
 				primaryAnswers: MEASURED.finished.primary,
 				challengeAnswers: withoutAssumption,
 				isBugFix: false,
-			}).verdict,
-		).not.toBe("complete");
+			}).failed_gates,
+		).toEqual(expect.arrayContaining([expect.objectContaining({ id: "JEV-CHALLENGE-hidden_assumption" })]));
 	});
 
 	it("gives System One the patch and the evidence the acceptance matrix cites", () => {

@@ -192,7 +192,7 @@ const SAFE_SSH_OPTIONS = new Set([
 	"serveralivecountmax",
 	"serveraliveinterval",
 ]);
-const MAX_READ_ONLY_REMOTE_DEPTH = 2;
+const MAX_READ_ONLY_WRAPPER_DEPTH = 2;
 
 function executableName(token: string): string {
 	return (token.replace(/\\/gu, "/").split("/").at(-1) ?? token).toLowerCase().replace(/\.exe$/u, "");
@@ -204,7 +204,7 @@ function isSafeSshOption(value: string): boolean {
 	return SAFE_SSH_OPTIONS.has(value.slice(0, separator).toLowerCase());
 }
 
-function isReadOnlyPowerShellInvocation(args: readonly string[], depth: number): boolean {
+function isReadOnlyPowerShellInvocation(args: readonly string[], depth: number, admitTestRuns: boolean): boolean {
 	let index = 1;
 	while (index < args.length) {
 		const option = args[index]!.toLowerCase();
@@ -217,12 +217,12 @@ function isReadOnlyPowerShellInvocation(args: readonly string[], depth: number):
 			.slice(index + 1)
 			.join(" ")
 			.trim();
-		return command.length > 0 && isReadOnlyShellCommand(command, depth + 1);
+		return command.length > 0 && isReadOnlyShellCommand(command, depth + 1, admitTestRuns);
 	}
 	return false;
 }
 
-function isReadOnlySshInvocation(args: readonly string[], depth: number): boolean {
+function isReadOnlySshInvocation(args: readonly string[], depth: number, admitTestRuns: boolean): boolean {
 	let index = 1;
 	while (index < args.length) {
 		const option = args[index]!;
@@ -256,10 +256,10 @@ function isReadOnlySshInvocation(args: readonly string[], depth: number): boolea
 	const destination = args[index++];
 	if (!destination || !/^[A-Za-z0-9._%+@:-]+$/u.test(destination)) return false;
 	const remoteCommand = args.slice(index).join(" ").trim();
-	return remoteCommand.length > 0 && isReadOnlyShellCommand(remoteCommand, depth + 1);
+	return remoteCommand.length > 0 && isReadOnlyShellCommand(remoteCommand, depth + 1, admitTestRuns);
 }
 
-function isReadOnlyInvocation(args: readonly string[], depth: number): boolean {
+function isReadOnlyInvocation(args: readonly string[], depth: number, admitTestRuns = false): boolean {
 	let index = 0;
 	while (index < args.length) {
 		const assignment = /^([A-Za-z_][A-Za-z0-9_]*)=/u.exec(args[index]!);
@@ -270,11 +270,31 @@ function isReadOnlyInvocation(args: readonly string[], depth: number): boolean {
 	if (index === args.length) return args.length > 0;
 	const commandArgs = args.slice(index);
 	const name = executableName(commandArgs[0]!);
-	if (name === "ssh") return depth < MAX_READ_ONLY_REMOTE_DEPTH && isReadOnlySshInvocation(commandArgs, depth);
-	if (name === "powershell" || name === "pwsh") {
-		return depth < MAX_READ_ONLY_REMOTE_DEPTH && isReadOnlyPowerShellInvocation(commandArgs, depth);
+	if (name === "bash" || name === "sh" || name === "dash" || name === "zsh") {
+		if (depth >= MAX_READ_ONLY_WRAPPER_DEPTH) return false;
+		let commandIndex = 1;
+		if (name === "bash") {
+			while (commandArgs[commandIndex] === "--noprofile" || commandArgs[commandIndex] === "--norc") commandIndex++;
+		}
+		// Login shells, scripts and positional arguments can execute or reinterpret other code.
+		const inner = commandArgs[commandIndex + 1];
+		return (
+			commandArgs[commandIndex] === "-c" &&
+			commandArgs.length === commandIndex + 2 &&
+			Boolean(inner?.trim()) &&
+			isReadOnlyShellCommand(inner!, depth + 1, admitTestRuns)
+		);
 	}
-	return isReadOnlyCommandSegment(commandArgs.join(" "));
+	if (name === "ssh")
+		return depth < MAX_READ_ONLY_WRAPPER_DEPTH && isReadOnlySshInvocation(commandArgs, depth, admitTestRuns);
+	if (name === "powershell" || name === "pwsh") {
+		return depth < MAX_READ_ONLY_WRAPPER_DEPTH && isReadOnlyPowerShellInvocation(commandArgs, depth, admitTestRuns);
+	}
+	const segment = commandArgs.join(" ");
+	return (
+		(admitTestRuns && isTestRunSegment(segment)) ||
+		(!MUTATING_SHELL_TOKEN_RE.test(segment) && isReadOnlyCommandSegment(segment))
+	);
 }
 
 function commandArg(segment: string, index: number): string | undefined {
@@ -417,11 +437,11 @@ function isReadOnlyCommandSegment(segment: string): boolean {
 	return true;
 }
 
-function isReadOnlyShellCommand(command: string, depth = 0): boolean {
+function isReadOnlyShellCommand(command: string, depth = 0, admitTestRuns = false): boolean {
 	const commandWithoutStreamRedirections = stripSafeStreamRedirections(command);
 	if (
 		!commandWithoutStreamRedirections ||
-		MUTATING_SHELL_TOKEN_RE.test(commandWithoutStreamRedirections) ||
+		(!admitTestRuns && MUTATING_SHELL_TOKEN_RE.test(commandWithoutStreamRedirections)) ||
 		UNSAFE_NESTED_SHELL_EXECUTION_RE.test(commandWithoutStreamRedirections)
 	)
 		return false;
@@ -429,7 +449,7 @@ function isReadOnlyShellCommand(command: string, depth = 0): boolean {
 	return Boolean(
 		sequence &&
 			sequence.invocations.length > 0 &&
-			sequence.invocations.every((args) => isReadOnlyInvocation(args, depth)),
+			sequence.invocations.every((args) => isReadOnlyInvocation(args, depth, admitTestRuns)),
 	);
 }
 
@@ -495,7 +515,7 @@ export function readOnlyShellViolation(
 		}
 	}
 	if (remaining.length === 0) return undefined;
-	return remaining.every((invocation) => isReadOnlyInvocation(invocation, 0))
+	return remaining.every((invocation) => isReadOnlyInvocation(invocation, 0, options.admitTestRuns ?? false))
 		? undefined
 		: "it may change files or repository state";
 }

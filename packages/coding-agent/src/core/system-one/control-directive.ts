@@ -22,6 +22,33 @@ export interface SystemOneControlDirective {
 	readonly reasonCodes: readonly string[];
 }
 
+export const SAME_LANE_VERIFICATION_REASON_CODE = "same_lane_verification_required";
+
+export function sameLaneVerificationDirective(reasonCodes: readonly string[]): SystemOneControlDirective {
+	return {
+		source: "postflight",
+		objectiveRoute: "deterministic_test",
+		reasonCodes: [
+			SAME_LANE_VERIFICATION_REASON_CODE,
+			...reasonCodes.slice(0, 12).map((reason) => reason.slice(0, 500)),
+		],
+	};
+}
+
+export function isSameLaneVerificationDirective(
+	directive:
+		| {
+				readonly objectiveRoute: ObjectiveRouteName;
+				readonly reasonCodes: readonly string[];
+		  }
+		| undefined,
+): boolean {
+	return (
+		directive?.objectiveRoute === "deterministic_test" &&
+		directive.reasonCodes.includes(SAME_LANE_VERIFICATION_REASON_CODE)
+	);
+}
+
 export function directiveFromPreflight(route: SystemOnePreflightRoute): SystemOneControlDirective | undefined {
 	switch (route) {
 		case "allow":
@@ -56,7 +83,7 @@ export function directiveFromPostflight(status: SystemOnePostflightStatus): Syst
 		case "continue":
 			return undefined;
 		case "verify":
-			return { source: "postflight", objectiveRoute: "verify", reasonCodes: ["system_one_postflight_verify"] };
+			return sameLaneVerificationDirective(["system_one_postflight_verify"]);
 		case "retrieve_more":
 			return {
 				source: "postflight",

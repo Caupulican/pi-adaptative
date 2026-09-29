@@ -355,7 +355,7 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 			expect(harness.session.getQueuedRuleRepairWork()).toEqual([]);
 		});
 
-		it("RCG-046: a critical semantic rule that cannot be evaluated fails closed", async () => {
+		it("RCG-046: a semantic evaluator outage is visible advice without repair work", async () => {
 			const harness = await createRcSdkHarness({
 				agentsFiles: [{ path: "AGENTS.md", content: "- Never leave a TODO in shipped code.\n" }],
 				decisions: { failWith: new Error("semantic transport unavailable") },
@@ -365,11 +365,14 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 			const result = await harness.session.projectRules.validateMutation({ changedFiles: [file] });
 
 			expect(result.passed).toBe(false);
-			expect(result.violations[0]?.ruleId).toBe("critical_rule_eval_failure");
+			expect(result.violations[0]?.ruleId).toBe("semantic_rule_eval_unavailable");
 			expect(result.violations[0]?.consequence).toBe("critical");
+			expect(result.summaryEvent).toContain("semantic transport unavailable");
+			expect(SessionProjectRules.blocks(result)).toBe(false);
+			expect(harness.session.getQueuedRuleRepairWork()).toEqual([]);
 		});
 
-		it("RCG-042, RCG-043: postflight and completion evaluate their own phase rules and block", async () => {
+		it("RCG-042, RCG-043: phase findings require verification before continuation", async () => {
 			const phaseRules = [
 				"## Code Quality",
 				"- Never use inline imports (`await import()`); top-level imports only.",
@@ -397,6 +400,7 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 			});
 			expect(postflight.passed).toBe(false);
 			expect(SessionProjectRules.blocks(postflight)).toBe(true);
+			expect(postflight.verificationRequired).toBe(true);
 
 			const completion = await harness.session.projectRules.validateCompletion({
 				objectiveId: "obj-1",
@@ -404,7 +408,8 @@ describe("RC Gapless Readiness Closure v1.7.1", () => {
 			});
 			expect(completion.passed).toBe(false);
 			expect(SessionProjectRules.blocks(completion)).toBe(true);
-			expect(harness.session.getQueuedRuleRepairWork().length).toBe(2);
+			expect(completion.verificationRequired).toBe(true);
+			expect(harness.session.getQueuedRuleRepairWork()).toEqual([]);
 		});
 
 		it("RCG-046: durable owner rules become blocking rules at all three phases", async () => {

@@ -35,6 +35,7 @@ export async function finalizeDelivery(input: {
 }): Promise<
 	| { readonly status: "complete"; readonly bundle: DeliveryBundle; readonly reasonCodes: readonly string[] }
 	| { readonly status: "unrecoverable"; readonly bundle: DeliveryBundle; readonly reasonCodes: readonly string[] }
+	| { readonly status: "incomplete"; readonly bundle: DeliveryBundle; readonly reasonCodes: readonly string[] }
 	| {
 			readonly status: "semantic_gate_unavailable";
 			readonly bundle: DeliveryBundle;
@@ -53,6 +54,9 @@ export async function finalizeDelivery(input: {
 				evidenceRevision: input.evidenceRevision,
 				signal: input.signal,
 				holdOnUnsettled: input.holdOnUnsettled,
+				onAdvisory: (advice) => {
+					bundle = { ...bundle, limitations: [...(bundle.limitations ?? []), advice] };
+				},
 			},
 		);
 		if (judgment.certificate) steeringCertRefs.push(judgment.certificate.certificate_id);
@@ -68,9 +72,9 @@ export async function finalizeDelivery(input: {
 		}
 		if (judgment.kind === "judged" && judgment.certificate.semantic_outcome !== "pass") {
 			return {
-				status: "unrecoverable",
-				reasonCodes: ["delivery_certificate_rejected"],
-				bundle: certifiedBundle(input, bundle, steeringCertRefs, "unrecoverable", [
+				status: "incomplete",
+				reasonCodes: ["delivery_certificate_rejected", ...(judgment.certificate.failed_semantic_predicates ?? [])],
+				bundle: certifiedBundle(input, bundle, steeringCertRefs, "incomplete", [
 					"delivery_certificate_rejected",
 					...(judgment.certificate.failed_semantic_predicates ?? []),
 				]),

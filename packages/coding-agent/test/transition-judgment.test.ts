@@ -5,7 +5,32 @@ import { SteeringJudgmentUnavailableError } from "../src/core/steering/system-on
 const options = { objectiveId: "objective-1", evidenceRevision: 1 };
 
 describe("transition judgment autonomy", () => {
-	it("keeps ambiguous optional judgments advisory", async () => {
+	it.each(["JEV-024", "JEV-025", "JEV-026", "JEV-027", "JEV-028"])(
+		"retains a %s rejection for verification in either mode",
+		async (checkpoint) => {
+			const certificate = {
+				certificate_id: "rejected",
+				semantic_outcome: "fail",
+				failed_semantic_predicates: ["scope_uncertain"],
+			};
+			const result = await judgeTransition(
+				{ requireCertificate: async () => certificate },
+				checkpoint,
+				{},
+				{ ...options, holdOnUnsettled: false },
+			);
+			expect(result).toEqual({ kind: "judged", certificate });
+			const strict = await judgeTransition(
+				{ requireCertificate: async () => certificate },
+				checkpoint,
+				{},
+				{ ...options, holdOnUnsettled: true },
+			);
+			expect(strict.kind).toBe("judged");
+		},
+	);
+
+	it("retains ambiguous judgments for the receiving agent to verify", async () => {
 		const result = await judgeTransition(
 			{
 				requireCertificate: async () => ({
@@ -19,7 +44,7 @@ describe("transition judgment autonomy", () => {
 			{ ...options, holdOnUnsettled: false },
 		);
 
-		expect(result.kind).toBe("advisory");
+		expect(result.kind).toBe("judged");
 	});
 
 	it("keeps an optional System One outage advisory", async () => {
@@ -37,7 +62,7 @@ describe("transition judgment autonomy", () => {
 		expect(result.kind).toBe("advisory");
 	});
 
-	it("holds an unsettled transition when strict System One is explicitly required", async () => {
+	it("keeps required ambiguity actionable without an owner-question latch", async () => {
 		const result = await judgeTransition(
 			{
 				requireCertificate: async () => ({
@@ -50,6 +75,6 @@ describe("transition judgment autonomy", () => {
 			options,
 		);
 
-		expect(result.kind).toBe("held");
+		expect(result.kind).toBe("judged");
 	});
 });

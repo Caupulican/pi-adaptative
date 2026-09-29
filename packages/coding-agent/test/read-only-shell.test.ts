@@ -1,15 +1,36 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { isMutatingToolCall, readOnlyShellViolation } from "../src/core/model-router/tool-escalation.ts";
+import { tempDir } from "./temp-dir.ts";
 
 // Existence decides whether a redirect edits something, so the fixture owns the files it names.
-const cwd = mkdtempSync(join(tmpdir(), "pi-read-only-shell-"));
+const cwd = tempDir("pi-read-only-shell-");
 writeFileSync(join(cwd, "README.md"), "readme");
 writeFileSync(join(cwd, "package.json"), "{}");
-afterAll(() => rmSync(cwd, { recursive: true, force: true }));
 describe("read-only shell line", () => {
+	it("inspects a non-login shell's command and retains its authority boundary", () => {
+		const cases: Array<[string, boolean]> = [
+			['bash -c "grep -q proof README.md && grep -c current_exe README.md"', true],
+			["sh -c 'git status --short'", true],
+			["bash -c \"sh -c 'cat README.md'\"", true],
+			["bash -c \"sh -c 'dash -c pwd'\"", false],
+			["bash -c \"sh -c 'cat README.md > README.md'\"", false],
+			["bash --noprofile --norc -c 'pwd && git log --oneline -5'", true],
+			["bash -c 'rm -rf README.md'", false],
+			["bash -lc 'cat README.md'", false],
+			["BASH_ENV=/tmp/script bash -c 'cat README.md'", false],
+			["bash -c 'cat README.md' extra", false],
+			["bash script.sh", false],
+		];
+		for (const [command, allowed] of cases) {
+			expect([command, readOnlyShellViolation(command, cwd) === undefined]).toEqual([command, allowed]);
+			expect(isMutatingToolCall("bash", { command })).toBe(!allowed);
+		}
+		expect(readOnlyShellViolation("bash -c 'cargo test'", cwd, { admitTestRuns: true })).toBeUndefined();
+		expect(readOnlyShellViolation("bash -c 'cargo test'", cwd)).toBeDefined();
+		expect(readOnlyShellViolation("bash -c 'cargo test && rm file'", cwd, { admitTestRuns: true })).toBeDefined();
+	});
 	it("refuses edits to existing paths and allows reads and new-file captures", () => {
 		const cases: Array<[string, boolean]> = [
 			["git log --oneline -5", true],

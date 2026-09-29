@@ -37,6 +37,7 @@ import { buildWorkerCapabilityRequest, NoEligibleExpertError } from "../expert-r
 import { describeRequirementCheckRefusal, type RequirementCheckProof } from "../goals/prove-requirement-checks.ts";
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { blocksRuleTransition } from "../project-rules/types.ts";
 import {
 	SteeringJudgmentUnavailableError,
 	SteeringSemanticFailedError,
@@ -48,7 +49,11 @@ import {
 	candidateSnapshotIdentity,
 	captureCandidateSnapshot,
 } from "../system-one/candidate-snapshot.ts";
-import type { SystemOneControlDirective } from "../system-one/control-directive.ts";
+import {
+	isSameLaneVerificationDirective,
+	type SystemOneControlDirective,
+	sameLaneVerificationDirective,
+} from "../system-one/control-directive.ts";
 import type { TerminalCompletionProof } from "../system-one/controller.ts";
 import type { FinalCompletionVerdict } from "../system-one/policy.ts";
 import type { ExecutionState } from "../system-one/types.ts";
@@ -247,25 +252,29 @@ export interface ObjectiveExecutionControllerDeps {
 			objectiveId: string;
 			taskId: string;
 			changedFiles: readonly string[];
+			boundedDiffEvidence?: Record<string, unknown>;
 			signal?: AbortSignal;
-		}): Promise<{ passed: boolean; violations: readonly { consequence: string; explanation: string }[] }>;
+		}): Promise<{
+			passed: boolean;
+			advisory?: boolean;
+			verificationRequired?: boolean;
+			violations: readonly { consequence: string; explanation: string }[];
+		}>;
 		validateCompletion(
 			input: {
 				objectiveId: string;
 				changedFiles: readonly string[];
+				boundedDiffEvidence?: Record<string, unknown>;
 				signal?: AbortSignal;
 			},
 			options?: { record?: boolean },
-		): Promise<{ passed: boolean; violations: readonly { consequence: string; explanation: string }[] }>;
+		): Promise<{
+			passed: boolean;
+			advisory?: boolean;
+			verificationRequired?: boolean;
+			violations: readonly { consequence: string; explanation: string }[];
+		}>;
 	};
-}
-
-/** A rule violation blocks when the owner marked the rule critical or high. */
-function ruleViolationBlocks(result: { passed: boolean; violations: readonly { consequence: string }[] }): boolean {
-	return (
-		!result.passed &&
-		result.violations.some((violation) => violation.consequence === "critical" || violation.consequence === "high")
-	);
 }
 
 export const ROUTE_DECISION_PROGRAM = createDecisionProgram({
@@ -649,8 +658,9 @@ export class ObjectiveExecutionController {
 
 		// Evaluate semantic route via SteeringPlane JEV-004 (PH-113: JEV-004 route owner)
 		let semantic: SemanticRouteJudgments = {};
+		const verificationPending = isSameLaneVerificationDirective(this.deps.systemOne?.peekControlDirective?.());
 
-		if (this.deps.decisions) {
+		if (!verificationPending && this.deps.decisions) {
 			try {
 				// FIN-034: Use bounded combined state projection
 				const stateProjection = routeStateProjection(
@@ -708,7 +718,7 @@ export class ObjectiveExecutionController {
 			} catch (err) {
 				this.throwIfRequiredSemantic(err);
 			}
-		} else if (this.deps.steeringPlane) {
+		} else if (!verificationPending && this.deps.steeringPlane) {
 			try {
 				const stateProjection = routeStateProjection(
 					this.deps,
@@ -751,7 +761,7 @@ export class ObjectiveExecutionController {
 					throw err;
 				}
 			}
-		} else if (this.deps.systemOne?.evaluateObjectiveRoute) {
+		} else if (!verificationPending && this.deps.systemOne?.evaluateObjectiveRoute) {
 			try {
 				semantic = await this.deps.systemOne.evaluateObjectiveRoute(objectiveId, { signal: options?.signal });
 			} catch (err) {
@@ -909,6 +919,7 @@ export class ObjectiveExecutionController {
 		runtime: TaskRuntimeProjection,
 		reasonCodes: string[],
 	): Promise<ObjectiveTerminalResult> {
+		this.deps.systemOne?.noteControlDirective?.(sameLaneVerificationDirective(reasonCodes));
 		return {
 			status: "incomplete",
 			reasonCodes,
@@ -1168,6 +1179,13 @@ export class ObjectiveExecutionController {
 					break;
 
 				case "deterministic_test":
+					if (isSameLaneVerificationDirective({ objectiveRoute: route.route, reasonCodes: route.reason_codes })) {
+						if (!this.deps.rootExecutor)
+							throw new Error("Same-lane verification requires the receiving root executor.");
+						await this._noteExecutor(route, "root");
+						await this.deps.rootExecutor.execute(route, signal);
+						break;
+					}
 					if (!this.deps.verifier?.execute && this.deps.rootExecutor) {
 						// No dedicated verifier: the root runs the checks, with the route's brief.
 						await this.deps.rootExecutor.execute(route, signal);
@@ -1327,6 +1345,10 @@ export class ObjectiveExecutionController {
 					});
 					const holdOnUnsettled = profile === "system_one_required";
 					const steeringCertRefs: string[] = [];
+					const completionAdvice: string[] = [];
+					const recordCompletionAdvice = (advice: string): void => {
+						completionAdvice.push(advice);
+					};
 
 					// FC-070, FC-071, FC-072: Canonical proof state on real projection without asserted verificationPassed:true
 					const objRecord = runtime.objectives[objectiveId];
@@ -1409,6 +1431,7 @@ export class ObjectiveExecutionController {
 							evidenceRevision,
 							signal,
 							holdOnUnsettled,
+							onAdvisory: recordCompletionAdvice,
 						});
 						if (j24.certificate) steeringCertRefs.push(j24.certificate.certificate_id);
 						if (j24.kind === "held") return this.heldCompletion(objectiveId, runtime, j24.reasonCodes);
@@ -1417,16 +1440,10 @@ export class ObjectiveExecutionController {
 							(j24.certificate.semantic_outcome !== "pass" ||
 								j24.certificate.directive !== "completion_candidate")
 						) {
-							if (this.deps.runtime.ensureRepairTasks) {
-								const repairs = completionFailuresToRepairWork(
-									(j24.certificate.failed_semantic_predicates ?? ["completion_not_plausible"]).map((p) => ({
-										gate_id: p,
-									})),
-									objectiveId,
-								);
-								await this.deps.runtime.ensureRepairTasks(objectiveId, repairs);
-							}
-							break;
+							return this.rejectedCompletion(objectiveId, runtime, [
+								"completion_not_plausible",
+								...(j24.certificate.failed_semantic_predicates ?? []),
+							]);
 						}
 					}
 
@@ -1438,11 +1455,19 @@ export class ObjectiveExecutionController {
 							{
 								objectiveId,
 								changedFiles: artifacts.map((artifact) => artifact.path),
+								boundedDiffEvidence: canonicalProofState,
 								signal,
 							},
 							{ record: ruleAuthority !== "ask" },
 						);
-						if (ruleViolationBlocks(completionRules)) {
+						if (blocksRuleTransition(completionRules)) {
+							if (completionRules.verificationRequired) {
+								return this.rejectedCompletion(
+									objectiveId,
+									runtime,
+									completionRules.violations.map((finding) => finding.explanation),
+								);
+							}
 							if (ruleAuthority !== "ask" && this.deps.runtime.ensureRepairTasks) {
 								await this.deps.runtime.ensureRepairTasks(
 									objectiveId,
@@ -1459,6 +1484,7 @@ export class ObjectiveExecutionController {
 					}
 
 					// 2. PH-151: CompletionCoordinator mechanical/common gates
+					let completionFinding: FinalCompletionVerdict | undefined;
 					const completionContext: CompletionEvaluationContext = {
 						runtime,
 						getExecutionState: this.deps.systemOne?.snapshot ? () => this.deps.systemOne!.snapshot!() : undefined,
@@ -1475,6 +1501,8 @@ export class ObjectiveExecutionController {
 											...opts,
 											persistTerminal: false,
 										});
+										completionAdvice.push(...(verdict.advisories ?? []).map((advice) => advice.reason));
+										completionFinding = verdict;
 										return {
 											passed: verdict.verdict === "complete",
 											decisionRef: (verdict as { decision_id?: string }).decision_id,
@@ -1492,6 +1520,15 @@ export class ObjectiveExecutionController {
 						signal,
 					});
 					this.acknowledgeRouteRequests(route);
+					if (completionFinding?.verdict === "verify_more") {
+						return this.rejectedCompletion(
+							objectiveId,
+							runtime,
+							completionFinding.failed_gates.map(
+								(finding) => `${finding.id}: ${finding.reason}. ${finding.required_next_proof}`,
+							),
+						);
+					}
 
 					if (evalResult.verdict === "complete") {
 						// JEV-025/JEV-026 read the same completion view the goal tool's completion judges: the
@@ -1512,23 +1549,12 @@ export class ObjectiveExecutionController {
 									evalResultDetails: evalResult,
 									bugFix,
 								},
-								{ objectiveId, evidenceRevision, signal, holdOnUnsettled },
+								{ objectiveId, evidenceRevision, signal, holdOnUnsettled, onAdvisory: recordCompletionAdvice },
 							);
 							if (j25.certificate) steeringCertRefs.push(j25.certificate.certificate_id);
 							if (j25.kind === "held") return this.heldCompletion(objectiveId, runtime, j25.reasonCodes);
 
 							if (j25.kind === "judged" && j25.certificate.semantic_outcome !== "pass") {
-								if (this.deps.runtime.ensureRepairTasks) {
-									const repairs = completionFailuresToRepairWork(
-										(j25.certificate.failed_semantic_predicates ?? ["primary_completion_failed"]).map(
-											(p) => ({
-												gate_id: p,
-											}),
-										),
-										objectiveId,
-									);
-									await this.deps.runtime.ensureRepairTasks(objectiveId, repairs);
-								}
 								return this.rejectedCompletion(objectiveId, runtime, [
 									"primary_completion_failed",
 									...(j25.certificate.failed_semantic_predicates ?? []),
@@ -1552,6 +1578,7 @@ export class ObjectiveExecutionController {
 								evidenceRevision,
 								signal,
 								holdOnUnsettled,
+								onAdvisory: recordCompletionAdvice,
 							});
 							if (j26.certificate) steeringCertRefs.push(j26.certificate.certificate_id);
 							if (j26.kind === "held") return this.heldCompletion(objectiveId, runtime, j26.reasonCodes);
@@ -1572,17 +1599,6 @@ export class ObjectiveExecutionController {
 								j26.kind === "judged" &&
 								(j26.certificate.semantic_outcome !== "pass" || adverseChallengeIds.length > 0)
 							) {
-								if (this.deps.runtime.ensureRepairTasks) {
-									const repairs = completionFailuresToRepairWork(
-										(
-											j26.certificate.failed_semantic_predicates ?? ["hidden_regressions_or_edge_concern"]
-										).map((p) => ({
-											gate_id: p,
-										})),
-										objectiveId,
-									);
-									await this.deps.runtime.ensureRepairTasks(objectiveId, repairs);
-								}
 								return this.rejectedCompletion(objectiveId, runtime, [
 									"adversarial_completion_failed",
 									...adverseChallengeIds,
@@ -1647,7 +1663,13 @@ export class ObjectiveExecutionController {
 										releaseRules: activeCharter.release,
 										packageArtifact,
 									},
-									{ objectiveId, evidenceRevision, signal, holdOnUnsettled },
+									{
+										objectiveId,
+										evidenceRevision,
+										signal,
+										holdOnUnsettled,
+										onAdvisory: recordCompletionAdvice,
+									},
 								);
 								if (j28.certificate) steeringCertRefs.push(j28.certificate.certificate_id);
 								if (j28.kind === "held") return this.heldCompletion(objectiveId, runtime, j28.reasonCodes);
@@ -1657,18 +1679,10 @@ export class ObjectiveExecutionController {
 									(j28.certificate.semantic_outcome === "pass" &&
 										(j28.certificate.answers.deploy_safe as { value?: boolean })?.value !== false);
 								if (!deploySafe && j28.kind === "judged") {
-									const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime, {
-										reasonCodes: [
-											"release_readiness_rejected",
-											...(j28.certificate.failed_semantic_predicates ?? []),
-										],
-									});
-									return {
-										status: "unrecoverable",
-										reasonCodes: ["release_readiness_rejected"],
-										cycleCount: this.cycleCounter,
-										deliveryBundle: bundle,
-									};
+									return this.rejectedCompletion(objectiveId, runtime, [
+										"release_readiness_rejected",
+										...(j28.certificate.failed_semantic_predicates ?? []),
+									]);
 								}
 							}
 						}
@@ -1704,7 +1718,7 @@ export class ObjectiveExecutionController {
 							diffDigest: candidateSnapshot?.digest ?? bundleBase.diff_digest,
 							acceptance: bundleBase.acceptance,
 							verification: bundleBase.verification,
-							limitations: bundleBase.limitations,
+							limitations: [...(bundleBase.limitations ?? []), ...completionAdvice],
 							artifacts: [
 								...(bundleBase.artifacts ?? []),
 								...(commitDetail
@@ -1757,6 +1771,10 @@ export class ObjectiveExecutionController {
 								: undefined,
 						});
 						if (finished.status !== "complete") {
+							if (finished.status === "incomplete")
+								this.deps.systemOne?.noteControlDirective?.(
+									sameLaneVerificationDirective(finished.reasonCodes),
+								);
 							return {
 								status: finished.status,
 								reasonCodes: [...finished.reasonCodes],
@@ -1856,15 +1874,23 @@ export class ObjectiveExecutionController {
 			// RCG-042: task postflight project rules. A blocking violation queues repair work and
 			// stops this cycle rather than letting the objective advance past it.
 			if (this.deps.projectRules) {
-				const postflightState = await this._resolveCanonicalEvidenceState(objectiveId, runtime);
+				const postflightState = await this._resolveCanonicalEvidenceState(
+					objectiveId,
+					await this.deps.runtime.reconcileObjective(objectiveId),
+				);
 				const postflight = await this.deps.projectRules.validateTaskPostflight({
 					objectiveId,
 					taskId: route.task_id ?? objectiveId,
 					changedFiles: postflightState.artifacts.map((artifact) => artifact.path),
+					boundedDiffEvidence: postflightState,
 					signal,
 				});
-				if (ruleViolationBlocks(postflight)) {
-					if (this.deps.runtime.ensureRepairTasks) {
+				if (blocksRuleTransition(postflight)) {
+					if (postflight.verificationRequired) {
+						this.deps.systemOne?.noteControlDirective?.(
+							sameLaneVerificationDirective(postflight.violations.map((finding) => finding.explanation)),
+						);
+					} else if (this.deps.runtime.ensureRepairTasks) {
 						await this.deps.runtime.ensureRepairTasks(
 							objectiveId,
 							completionFailuresToRepairWork(
@@ -1875,7 +1901,6 @@ export class ObjectiveExecutionController {
 							),
 						);
 					}
-					continue;
 				}
 			}
 

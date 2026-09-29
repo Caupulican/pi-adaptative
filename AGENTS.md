@@ -15,6 +15,13 @@
 - Every managed background process must emit a terminal signal, persist a bounded handoff, and notify the owning parent session. Completion detection must be event-driven; never poll or peek into process output merely to discover whether work ended.
 - Keep `docs/` limited to current, durable product documentation. Store transient audit, session, plan, and generated review artifacts in bounded storage under `<git-common-dir>/pi-audits`, never in `docs/`.
 
+## Autonomy and Verification
+
+- Autonomy fixes must preserve verification, evidence requirements, and the receiving agent's responsibility to resolve findings. Never remove a deadlock by converting an unresolved finding into successful completion.
+- A judgment requesting verification takes priority in the receiving agent's own lane before affected work continues. That agent must reproduce the candidate against current evidence, revise confirmed failures, and recheck the result. Do not dispatch a substitute verifier unless the owner explicitly requests one.
+- Evaluator outages are diagnostics, not evidence of a production defect. Preserve the actual failure cause; never manufacture repair tasks from missing judgments.
+- Changes to autonomy must include regressions and negative controls proving both that unresolved findings prevent affected progress and that verification, revision, and rechecking allow autonomous continuation. Never weaken a test oracle merely to make the new behavior pass.
+
 ## Code Quality
 
 - Read files in full before wide-ranging changes, before editing files you have not fully inspected, and when asked to investigate or audit. Do not rely on search snippets for broad changes.

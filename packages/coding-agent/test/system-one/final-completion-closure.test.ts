@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { compileExecutionCharter } from "../../src/core/autonomy/execution-charter.ts";
 import { resolveEffectiveCompletionProfile } from "../../src/core/decision/completion-profile.ts";
+import { CompletionCoordinator } from "../../src/core/objective-execution/completion-coordinator.ts";
 import { createRepoGitDelivery } from "../../src/core/objective-execution/delivery-proof.ts";
 import { ObjectiveExecutionController } from "../../src/core/objective-execution/objective-execution-controller.ts";
 import { createRepoReleaseDelivery } from "../../src/core/objective-execution/release-delivery.ts";
@@ -129,7 +130,7 @@ function certificate(checkpoint: string, failed?: string, outcome: "fail" | "gat
 }
 
 async function deliver(options?: {
-	readonly fail?: "JEV-025" | "JEV-026" | "JEV-027";
+	readonly fail?: "JEV-024" | "JEV-025" | "JEV-026" | "JEV-027";
 	/** How the failing checkpoint fails: a judged fail (default), an ambiguity, or System One down. */
 	readonly failAs?: "fail" | "gather_more" | "unavailable";
 	readonly commitSha?: string;
@@ -293,6 +294,68 @@ async function deliver(options?: {
 }
 
 describe("FC-01 terminal complete", () => {
+	it.each([
+		["semantic_enhanced", "throw"],
+		["system_one_required", "throw"],
+		["semantic_enhanced", "reply"],
+		["system_one_required", "reply"],
+	] as const)("preserves cancellation through %s completion evaluation with a %s", async (profile, response) => {
+		const abort = new AbortController();
+		const cancelled = new Error("owner cancelled");
+		const store = new ExecutionStore({
+			run_id: "cancel-coordinator",
+			objective: {
+				request: "Fix",
+				normalized_goal: "Fix",
+				acceptance_criteria: [{ id: "c1", text: "Verified", required: true }],
+			},
+			repo: { root: "/repo", baseline_revision: "base" },
+		});
+		store.recordVerification({ kind: "unit_test", status: "passed", covers_acceptance_ids: ["c1"] });
+		await expect(
+			CompletionCoordinator.evaluate(
+				"obj-1",
+				profile,
+				{
+					runtime: runtime(),
+					getExecutionState: () => store.snapshot(),
+					hasCalibratedEngine: () => true,
+					getSourceRevision: () => "abc1234",
+					semanticEvaluator: {
+						evaluateCompletion: async () => {
+							abort.abort(cancelled);
+							if (response === "throw") throw cancelled;
+							return { passed: true };
+						},
+					},
+				},
+				{ signal: abort.signal },
+			),
+		).rejects.toBe(cancelled);
+		expect(store.phase).not.toBe("complete");
+	});
+	it("retains an uncancelled outage diagnostic with mechanical fallback", async () => {
+		const result = await CompletionCoordinator.evaluate("obj-1", "semantic_enhanced", {
+			runtime: runtime(),
+			semanticEvaluator: {
+				evaluateCompletion: async () => {
+					throw new Error("service unavailable");
+				},
+			},
+		});
+		expect(result.verdict).toBe("complete");
+		expect(result.assuranceProfileUsed).toBe("mechanical");
+		expect(result.fallbackChain.join(" ")).toContain("service unavailable");
+	});
+	it("retains an answered semantic failure instead of falling through to mechanical success", async () => {
+		const result = await CompletionCoordinator.evaluate("obj-1", "semantic_enhanced", {
+			runtime: runtime(),
+			semanticEvaluator: { evaluateCompletion: async () => ({ passed: false, failedGates: ["hidden_assumption"] }) },
+		});
+		expect(result.verdict).toBe("not_complete");
+		expect(result.failedGates).toContain("hidden_assumption");
+		expect(result.fallbackChain).not.toContain("fallback_to:mechanical");
+	});
 	it("outer success persists complete once and runs the terminal hook once", async () => {
 		const { result, store, systemOne, terminalHooks, seenBugFix } = await deliver({
 			profile: "system_one_required",
@@ -364,7 +427,6 @@ describe("FC-01 terminal complete", () => {
 
 	it.each([
 		["JEV-025", "unavailable", "jev_025_unavailable"],
-		["JEV-026", "gather_more", "jev_026_ambiguous"],
 		["JEV-027", "unavailable", "jev_027_unavailable"],
 	] as const)(
 		"a %s that cannot settle (%s) holds the objective open and says why",
@@ -521,6 +583,38 @@ describe("FC-02 effective completion profile", () => {
 		expect(result?.status).toBe("complete");
 		expect(result?.deliveryBundle?.assurance_profile_requested).toBe("semantic_enhanced");
 		expect(result?.deliveryBundle?.assurance_profile_used).toBe("semantic_enhanced");
+	});
+
+	it.each([
+		["JEV-024", "fail"],
+		["JEV-024", "gather_more"],
+		["JEV-024", "unavailable"],
+		["JEV-025", "fail"],
+		["JEV-026", "fail"],
+		["JEV-027", "fail"],
+		["JEV-025", "gather_more"],
+		["JEV-026", "gather_more"],
+		["JEV-027", "gather_more"],
+		["JEV-025", "unavailable"],
+		["JEV-026", "unavailable"],
+		["JEV-027", "unavailable"],
+	] as const)("requires verification for received optional %s %s findings", async (checkpoint, failAs) => {
+		const { result, store } = await deliver({
+			fail: checkpoint,
+			failAs,
+			steeringMode: "system_one_optional",
+			grants: false,
+			wireTerminal: true,
+		});
+		if (failAs === "unavailable") {
+			expect(result?.status).toBe("complete");
+			expect(store.phase).toBe("complete");
+			expect(result?.deliveryBundle?.limitations?.join(" ")).toContain(checkpoint.toLowerCase().replace("-", "_"));
+		} else {
+			expect(result?.status).toBe("incomplete");
+			expect(store.phase).not.toBe("complete");
+			expect(result?.reasonCodes).toContain(`${checkpoint}_rejected`);
+		}
 	});
 
 	it("no semantic plane keeps the effective profile mechanical", async () => {
