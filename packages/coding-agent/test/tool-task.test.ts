@@ -119,6 +119,7 @@ describe("tool_task", () => {
 			...terminal,
 			taskId: `tool-task-${index + 1}`,
 			toolCallId: `call-${index + 1}`,
+			summary: `summary leaked task ${index + 1}`,
 			output: `full output of task ${index + 1}`,
 		}));
 		const tool = createToolTaskToolDefinition({
@@ -135,6 +136,7 @@ describe("tool_task", () => {
 		expect(text).not.toContain("tool-task-8:");
 		// A listing shows status only; the completion wake-up is what carries the output.
 		expect(text).not.toContain("full output of task");
+		expect(text).not.toContain("summary leaked task");
 	});
 
 	it("waits once on the controller's terminal event", async () => {

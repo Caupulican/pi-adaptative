@@ -118,7 +118,7 @@ const goalSchema = Type.Object(
 		userGoal: Type.Optional(
 			Type.String({
 				description:
-					"The goal statement. Required for 'start' and 'amend_goal'; for 'amend_goal', the objective rewritten to include what the owner's quoted message adds or changes.",
+					"Required for start/amend_goal. An amendment preserves the current objective text and appends only same-objective changes.",
 			}),
 		),
 		tokenBudget: Type.Optional(
@@ -675,10 +675,25 @@ function goalExecutionError(
  * evidence uses), and the grant is recorded on the session, where the edge reads it.
  */
 /**
- * The owner changed the goal's scope mid-run ("llama-cpp too"). The objective is rewritten only on the
+ * The owner extended the goal's scope mid-run ("llama-cpp too"). The objective is extended only on the
  * owner's own complete message, verified on the active branch, and that message is recorded as the
  * amendment's provenance; completion then judges the amended scope instead of the old one.
  */
+function normalizedGoalObjective(value: string): string {
+	return (
+		value
+			.normalize("NFKC")
+			.toLowerCase()
+			.match(/[\p{L}\p{N}]+/gu) ?? []
+	).join(" ");
+}
+
+function preservesGoalObjective(current: string, amended: string): boolean {
+	const normalizedCurrent = normalizedGoalObjective(current);
+	const normalizedAmended = normalizedGoalObjective(amended);
+	return normalizedCurrent.length > 0 && ` ${normalizedAmended} `.includes(` ${normalizedCurrent} `);
+}
+
 function executeAmendGoal(
 	input: GoalToolInput,
 	deps: GoalToolDependencies,
@@ -695,6 +710,11 @@ function executeAmendGoal(
 	if (!userGoal) return fail("userGoal must state the amended objective.");
 	if (userGoal.length > MAX_GOAL_OBJECTIVE_LENGTH) {
 		return fail(`userGoal must be at most ${MAX_GOAL_OBJECTIVE_LENGTH} characters.`);
+	}
+	if (!preservesGoalObjective(state.userGoal, userGoal)) {
+		return fail(
+			"an amendment may extend the current goal but cannot replace its existing objective. Preserve the existing objective text and append same-scope changes; handle unrelated work separately without changing this goal or its workers.",
+		);
 	}
 	const quote = input.quote?.trim() ?? "";
 	if (!quote) return fail("quote the owner's complete message that changes the goal.");
@@ -825,7 +845,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			"Plans: task_steps. Workers: delegate. Background tools: tool_task wait once; cite taskId as kind=tool evidence.",
 			"increment satisfies the current open requirement from unused evidence, or completes when none remain.",
 			"When a command can observe a requirement's outcome, give it a check (add_requirement or set_requirement_check): the harness reruns it at completion, so the outcome is proven, not asserted.",
-			"When the owner adds to or changes the goal mid-run, amend_goal with their complete message as quote and the rewritten objective as userGoal, then add requirements for what it adds; completion judges the goal as recorded.",
+			"amend_goal extends this objective only: quote the owner's full message, keep the current objective text in userGoal, then append its change and requirements. For unrelated work, leave this goal and its workers unchanged.",
 			"grant_edge: record a grant only when the operator's words authorize deleting the repository, the home directory, a filesystem root, a disk, or a toolkit script. Git, publishing, installing, and settings edits run without a grant. A granted class never asks; an ungranted destructive.fs or toolkit.script asks once. When the operator authorized one concrete toolkit script and arguments, specify toolkitScript and toolkitArgs; omit them for a broad class grant only when their instruction covers the class.",
 			"complete needs current authoritative evidence, no remaining work, no active goal-owned lanes, no open task_steps, no goal-owned or cited running tool_task, and no active pipeline. Failed or canceled tool_task results are terminal and stop blocking liveness, but never become verified evidence automatically. block_requirement/block_goal only when the same verified owner/approval boundary or capability impossibility persists for 3 consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; otherwise keep working.",
 		],

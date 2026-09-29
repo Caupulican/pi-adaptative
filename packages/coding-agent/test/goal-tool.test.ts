@@ -1430,7 +1430,33 @@ describe("goal completion authority", () => {
 });
 
 describe("goal amendment from the owner's words", () => {
-	it("rewrites the objective only on the owner's complete message and records it as the provenance", async () => {
+	it("refuses to replace one active objective with an unrelated project", async () => {
+		const { run, sessionManager, getState } = createHarness();
+		await run({
+			action: "start",
+			goalId: "grim-goal",
+			userGoal: "Prove GrimDex Trello card 84 on the work machine.",
+		});
+		sessionManager.appendMessage({
+			role: "user",
+			content: "feedtamer needs update, the shorts block stopped working",
+			timestamp: 1000,
+		});
+
+		const replaced = await run({
+			action: "amend_goal",
+			userGoal: "Fix FeedTamer Shorts blocking with a proper test setup.",
+			quote: "feedtamer needs update, the shorts block stopped working",
+		});
+
+		expect(replaced.isError).toBe(true);
+		expect(getToolResultText(replaced)).toContain("cannot replace its existing objective");
+		expect(getState()?.goalId).toBe("grim-goal");
+		expect(getState()?.userGoal).toBe("Prove GrimDex Trello card 84 on the work machine.");
+		expect(getState()?.evidence).toEqual([]);
+	});
+
+	it("extends the objective only on the owner's complete message and records it as the provenance", async () => {
 		const { run, sessionManager, getState } = createHarness();
 		sessionManager.appendMessage({
 			role: "user",
@@ -1450,11 +1476,13 @@ describe("goal amendment from the owner's words", () => {
 
 		const amended = await run({
 			action: "amend_goal",
-			userGoal: "Remove the local Ollama server, its models, and the llama-cpp server.",
+			userGoal: "Remove the local Ollama server and its models. Also remove the llama-cpp server.",
 			quote: "llama-cpp too,",
 		});
 		expect(amended.isError).not.toBe(true);
-		expect(getState()?.userGoal).toBe("Remove the local Ollama server, its models, and the llama-cpp server.");
+		expect(getState()?.userGoal).toBe(
+			"Remove the local Ollama server and its models. Also remove the llama-cpp server.",
+		);
 		expect(getState()?.evidence.at(-1)).toMatchObject({ kind: "user", summary: "llama-cpp too,", verified: true });
 	});
 });

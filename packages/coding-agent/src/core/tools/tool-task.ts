@@ -81,7 +81,7 @@ function projectList(records: readonly BackgroundToolTaskRecord[]): string {
 	const included = records.slice(-MAX_LISTED_TASKS);
 	const omitted = records.length - included.length;
 	return [
-		...included.map((record) => `${record.taskId}: ${record.status} — ${record.summary}`),
+		...included.map((record) => `${record.taskId}: ${record.status}`),
 		...(omitted > 0 ? [`${omitted} older task(s) omitted from this bounded snapshot.`] : []),
 		"Status only: a finished task's output still arrives in its completion wake-up, or from wait.",
 		"Do not poll. Continue independent work, or call wait once only when a running task is a dependency.",

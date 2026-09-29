@@ -5,6 +5,8 @@
 - Fixed explicit owner stop requests so the model-facing goal lifecycle can pause active work and defer queued owner questions until work resumes.
 - Fixed read-only workers rejecting bounded SSH and PowerShell inspection commands while continuing to reject interactive, mutating, nested-shell, and unsafe-option forms.
 - Fixed worker supervision canceling discovery work as validation churn merely because it used the shell repeatedly.
+- Fixed goal amendments replacing an unrelated active objective and mixing its requirement and worker ownership.
+- Fixed background task listings replaying terminal summaries despite their status-only contract.
 
 ## [0.100.5] - 2026-09-28
 

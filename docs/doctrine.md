@@ -785,19 +785,20 @@ naming the exact `tool_task wait` that collects it. The notifier builds the mess
 records still unread when it delivers and returns a receipt of the ids it inlined; the controller
 marks exactly those observed (the wake-up is the model-facing read) and never re-derives the set
 from an older snapshot; an omitted one stays unread until its own wait. `tool_task action=list` is
-a status-only read and never observes: it prints `taskId: status — summary` and no output, so
-consuming delivery there would make the notifier (which delivers only still-unread records) skip
-exactly the records whose output the listing never showed. Only the wake-up and `wait` consume a
-record. Each record in the wake-up's `details` carries `outputBytes` (the output's UTF-8 length) and
+a status-only read and never observes: it prints only `taskId: status`, never a summary derived from
+task output. Consuming delivery there would make the notifier (which delivers only still-unread
+records) skip exactly the records whose output the listing never showed. Only the wake-up and
+`wait` consume a record. Each record in the wake-up's `details` carries `outputBytes` (the output's
+UTF-8 length) and
 `inlined` (whether this message carried it in full), so the byte budget is priced from what was
 delivered instead of assumed; persisted task records drop their output, so nothing else can answer
 that afterwards. The handoff stub, the `tool_task` guideline and the `background` descriptions all say the
 same thing: wait only for an omitted output, never poll. Shutdown cancels an active
 terminal-notification backoff and resolves its waiter before draining. The terminal is already
 durable, so a failed notifier can neither hold session disposal until its retry clock expires nor
-erase the completion that the next owner must recover. Why: listing only `taskId: status` made
-every background job cost a second provider request whose sole purpose was to fetch bytes the
-record already held, 10-45 s on a slow-first-token provider. Pinned by
+erase the completion that the next owner must recover. Why: the completion wake-up already delivers
+the result; replaying output-derived summaries from a later list wastes context and can reintroduce
+stale failure diagnostics. Pinned by
 `packages/coding-agent/test/background-tool-task-controller.test.ts` and
 `packages/coding-agent/test/tool-task.test.ts`.
 
@@ -1052,6 +1053,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-28 | Background task lists expose task identity and status only; summaries are output-derived and remain owned by the completion wake-up or an explicit wait. |
 | 2026-09-28 | Foreground admission races during objective-primary continuation remain transient coordination: the auto-continuation owner waits and retries while the goal stays active and its failure streak stays unchanged. |
 | 2026-09-28 | Completion rejection now means active repair rather than a blocked goal; unresolved required decisions surface through the native question panel or a durable handoff ledger before the next mission. Optional System One failure falls back to deterministic proof so autonomy survives model absence and outages. |
 | 2026-09-27 | Live project-rule compilation fingerprints complete ordered instruction sources, so same-length edits cannot retain stale semantic gates. |
