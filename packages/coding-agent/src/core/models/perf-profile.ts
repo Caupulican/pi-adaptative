@@ -16,18 +16,24 @@ import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 const PERF_EWMA_ALPHA = 0.3;
 const DEFERRED_HEADERS_MAX_GAP_MS = 100;
 const DEFERRED_HEADERS_MIN_REQUEST_MS = 1_000;
+const CLOUD_CONNECT_PROFILE_MIN_SAMPLES = 3;
+const CLOUD_CONNECT_FLOOR_MS = 30_000;
+const CLOUD_CONNECT_EXPECTED_MULTIPLIER = 6;
 export const DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS = 30 * 60 * 1000;
+
+export interface ModelPerfStall {
+	elapsedMs: number;
+	promptTokens: number;
+	consecutive: number;
+	observedAt: string;
+}
 
 export interface ModelPerfProfile {
 	prefillTokensPerSecond?: number;
 	decodeTokensPerSecond?: number;
 	loadMs?: number;
-	firstProgressStall?: {
-		elapsedMs: number;
-		promptTokens: number;
-		consecutive: number;
-		observedAt: string;
-	};
+	firstProgressStall?: ModelPerfStall;
+	connectStall?: ModelPerfStall;
 	samples: number;
 	updatedAt: string;
 }
@@ -41,6 +47,8 @@ export interface ModelPerfSample {
 	loadMs?: number;
 	/** Censored observation: transport connected but emitted no model token before this bound. */
 	firstProgressStallMs?: number;
+	/** Censored observation: the provider emitted no headers or stream event before this bound. */
+	connectStallMs?: number;
 	at?: string;
 }
 
@@ -51,6 +59,8 @@ export interface AdaptiveStreamIdleInput {
 	ceilingMs?: number;
 	localClass?: boolean;
 	provider?: string;
+	/** The cloud connect budget is still at its default and may be reduced from established evidence. */
+	allowCloudConnectReduction?: boolean;
 }
 
 export interface ModelPerfProfileStreamRecorder {
@@ -68,7 +78,8 @@ export function isModelPerfProfile(value: unknown): value is ModelPerfProfile {
 		(record.prefillTokensPerSecond === undefined || isPositiveFiniteNumber(record.prefillTokensPerSecond)) &&
 		(record.decodeTokensPerSecond === undefined || isPositiveFiniteNumber(record.decodeTokensPerSecond)) &&
 		(record.loadMs === undefined || isPositiveFiniteNumber(record.loadMs)) &&
-		(record.firstProgressStall === undefined || isFirstProgressStall(record.firstProgressStall)) &&
+		(record.firstProgressStall === undefined || isModelPerfStall(record.firstProgressStall)) &&
+		(record.connectStall === undefined || isModelPerfStall(record.connectStall)) &&
 		typeof samples === "number" &&
 		Number.isInteger(samples) &&
 		samples >= 0 &&
@@ -81,7 +92,8 @@ export function hasUsableModelPerfSample(sample: ModelPerfSample): boolean {
 		prefillRateFromSample(sample) !== undefined ||
 		decodeRateFromSample(sample) !== undefined ||
 		isPositiveFiniteNumber(sample.loadMs) ||
-		(isPositiveFiniteNumber(sample.firstProgressStallMs) && isPositiveFiniteNumber(sample.promptTokens))
+		((isPositiveFiniteNumber(sample.firstProgressStallMs) || isPositiveFiniteNumber(sample.connectStallMs)) &&
+			isPositiveFiniteNumber(sample.promptTokens))
 	);
 }
 
@@ -96,23 +108,27 @@ export function updateModelPerfProfile(
 	const firstProgressStallMs = isPositiveFiniteNumber(sample.firstProgressStallMs)
 		? sample.firstProgressStallMs
 		: undefined;
+	const connectStallMs = isPositiveFiniteNumber(sample.connectStallMs) ? sample.connectStallMs : undefined;
 	const stallPromptTokens = isPositiveFiniteNumber(sample.promptTokens) ? sample.promptTokens : undefined;
 	if (
 		prefillRate === undefined &&
 		decodeRate === undefined &&
 		loadMs === undefined &&
-		firstProgressStallMs !== undefined &&
+		(firstProgressStallMs !== undefined || connectStallMs !== undefined) &&
 		stallPromptTokens !== undefined
 	) {
-		const previous = current?.firstProgressStall;
+		const stallField = connectStallMs !== undefined ? "connectStall" : "firstProgressStall";
+		const elapsedMs = connectStallMs ?? firstProgressStallMs;
+		if (elapsedMs === undefined) return current;
+		const previous = current?.[stallField];
 		const comparablePrompt =
 			previous !== undefined &&
 			stallPromptTokens >= previous.promptTokens / 2 &&
 			stallPromptTokens <= previous.promptTokens * 2;
 		return {
 			...current,
-			firstProgressStall: {
-				elapsedMs: firstProgressStallMs,
+			[stallField]: {
+				elapsedMs,
 				promptTokens: stallPromptTokens,
 				consecutive: comparablePrompt ? previous.consecutive + 1 : 1,
 				observedAt: at,
@@ -166,6 +182,21 @@ export function resolveAdaptiveStreamIdleOptions(input: AdaptiveStreamIdleInput)
 	const connectCeilingMs = Math.max(localConnectDefaultMs, input.ceilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS);
 
 	const expectedPrefillMs = expectedPrefillFromProfile(profile, input.promptTokens);
+	if (
+		input.allowCloudConnectReduction &&
+		!input.localClass &&
+		input.provider !== "xai" &&
+		profile !== undefined &&
+		profile.samples >= CLOUD_CONNECT_PROFILE_MIN_SAMPLES &&
+		expectedPrefillMs !== undefined &&
+		!isComparableStall(profile.connectStall, input.promptTokens)
+	) {
+		const profiledConnectMs = Math.max(
+			CLOUD_CONNECT_FLOOR_MS,
+			Math.ceil(expectedPrefillMs * CLOUD_CONNECT_EXPECTED_MULTIPLIER),
+		);
+		if (profiledConnectMs < input.base.connectMs) result.connectMs = profiledConnectMs;
+	}
 	if (expectedPrefillMs !== undefined) {
 		const firstProgressMs = adaptiveBound(firstProgressDefaultMs, firstProgressCeilingMs, expectedPrefillMs);
 		const currentFirstProgressMs = result.firstProgressMs ?? input.base.firstProgressMs;
@@ -204,34 +235,36 @@ export function withModelPerfProfile(streamFn: StreamFn, recorder: ModelPerfProf
 		const requestStartedAtMs = nowMs();
 		let responseHeadersAtMs: number | undefined;
 		let firstTokenAtMs: number | undefined;
-		let firstProgressStallRecorded = false;
+		let progressStallRecorded = false;
 		const originalOnResponse = streamOptions?.onResponse;
 		const signal = streamOptions?.signal;
-		const recordFirstProgressStall = (): void => {
+		const recordProgressStall = (): void => {
 			const reason = signal?.reason;
 			if (
-				firstProgressStallRecorded ||
+				progressStallRecorded ||
 				firstTokenAtMs !== undefined ||
 				!isStreamStallError(reason) ||
-				reason.phase !== "first-progress"
+				(reason.phase !== "connect" && reason.phase !== "first-progress")
 			) {
 				return;
 			}
-			firstProgressStallRecorded = true;
+			progressStallRecorded = true;
 			const modelKey = recorder.modelKey(model);
 			if (!modelKey) return;
 			try {
 				recorder.recordSample(modelKey, {
 					promptTokens: estimateContextPromptTokens(context),
-					firstProgressStallMs: reason.elapsedMs,
+					...(reason.phase === "connect"
+						? { connectStallMs: reason.elapsedMs }
+						: { firstProgressStallMs: reason.elapsedMs }),
 					at: nowIso(),
 				});
 			} catch {
 				// Perf profiling must never fail the user turn.
 			}
 		};
-		if (signal?.aborted) recordFirstProgressStall();
-		else signal?.addEventListener("abort", recordFirstProgressStall, { once: true });
+		if (signal?.aborted) recordProgressStall();
+		else signal?.addEventListener("abort", recordProgressStall, { once: true });
 		const outer = createAssistantMessageEventStream();
 		let latest = emptyAssistantMessage(model);
 		let inner: Awaited<ReturnType<StreamFn>>;
@@ -244,7 +277,7 @@ export function withModelPerfProfile(streamFn: StreamFn, recorder: ModelPerfProf
 				},
 			});
 		} catch (error) {
-			signal?.removeEventListener("abort", recordFirstProgressStall);
+			signal?.removeEventListener("abort", recordProgressStall);
 			outer.push(perfStreamFailure(latest, streamOptions?.signal?.aborted === true, error));
 			return outer;
 		}
@@ -281,7 +314,7 @@ export function withModelPerfProfile(streamFn: StreamFn, recorder: ModelPerfProf
 			} catch (error) {
 				outer.push(perfStreamFailure(latest, streamOptions?.signal?.aborted === true, error));
 			} finally {
-				signal?.removeEventListener("abort", recordFirstProgressStall);
+				signal?.removeEventListener("abort", recordProgressStall);
 			}
 		})();
 
@@ -391,7 +424,7 @@ function isPositiveFiniteNumber(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
-function isFirstProgressStall(value: unknown): value is NonNullable<ModelPerfProfile["firstProgressStall"]> {
+function isModelPerfStall(value: unknown): value is ModelPerfStall {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 	const record = value as Record<string, unknown>;
 	return (
@@ -402,4 +435,8 @@ function isFirstProgressStall(value: unknown): value is NonNullable<ModelPerfPro
 		record.consecutive > 0 &&
 		typeof record.observedAt === "string"
 	);
+}
+
+function isComparableStall(stall: ModelPerfProfile["connectStall"] | undefined, promptTokens: number): boolean {
+	return stall !== undefined && promptTokens >= stall.promptTokens / 2 && promptTokens <= stall.promptTokens * 2;
 }

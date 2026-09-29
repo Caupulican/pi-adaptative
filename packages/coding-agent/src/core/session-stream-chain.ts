@@ -97,11 +97,13 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 		},
 	});
 	const watched = withStreamIdleWatchdog(profiled, (model, context) => {
+		const stallBudget = resolveStreamStallBudget(model, settingsManager);
+		const testOverride = input.getStreamIdleOptionsOverride();
 		const configured = {
 			// Local/managed models and cloud providers draw on separate budgets; see resolveStreamStallBudget.
-			...resolveStreamStallBudget(model, settingsManager).base,
+			...stallBudget.base,
 			outputRepetitionRepeats: input.getRepetitionGuardRepeats(),
-			...input.getStreamIdleOptionsOverride(),
+			...testOverride,
 		};
 		const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
 		const httpBounded = constrainStreamIdleToHttpTimeout(configured, httpIdleTimeoutMs);
@@ -112,6 +114,10 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 			promptTokens: estimateContextPromptTokens(context),
 			localClass: isWarmableLocalModel(model),
 			provider: model.provider,
+			allowCloudConnectReduction:
+				stallBudget.modelClass === "cloud" &&
+				!stallBudget.connectConfigured &&
+				testOverride?.connectMs === undefined,
 			ceilingMs: httpBounded.adaptiveCeilingMs ?? DEFAULT_ADAPTIVE_STREAM_IDLE_CEILING_MS,
 		});
 		return { ...httpBounded.options, ...adaptive };

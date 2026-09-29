@@ -28,12 +28,12 @@ export interface StreamStallSettingsSource {
 export function resolveStreamStallBudget(
 	model: Model<Api>,
 	settings: StreamStallSettingsSource,
-): { modelClass: StreamStallModelClass; base: StreamIdleOptions } {
+): { modelClass: StreamStallModelClass; base: StreamIdleOptions; connectConfigured: boolean } {
 	const modelClass: StreamStallModelClass = isLocalOrManagedRouterModel(model) ? "local" : "cloud";
 	const configured = settings.getStreamStallSettings(modelClass);
 	const base: StreamIdleOptions = { ...(modelClass === "local" ? DEFAULT_STREAM_IDLE : DEFAULT_CLOUD_STREAM_IDLE) };
 	if (configured.connectMs !== undefined) base.connectMs = configured.connectMs;
 	if (configured.activeIdleMs !== undefined) base.activeIdleMs = configured.activeIdleMs;
 	if (configured.quietIdleMs !== undefined) base.quietIdleMs = configured.quietIdleMs;
-	return { modelClass, base };
+	return { modelClass, base, connectConfigured: configured.connectMs !== undefined };
 }

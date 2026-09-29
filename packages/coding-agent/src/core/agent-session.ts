@@ -383,6 +383,7 @@ import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
 import { captureSessionTaskDirectoryContext } from "./tasks/task-directory-context.ts";
 import { formatTaskStepsContext, type TaskStepsState } from "./tasks/task-state.ts";
+import { enforceExplicitOptionalToolRequest, optionalToolRequestAliases } from "./tool-applicability-gate.ts";
 import { ToolGateController } from "./tool-gate-controller.ts";
 import { type ToolProbeReport, type ToolProbeResult, ToolProtocolController } from "./tool-protocol-controller.ts";
 import { TOOL_RECOVERY_EVENT_LOG_FILE } from "./tool-recovery-log-records.ts";
@@ -2176,6 +2177,12 @@ export class AgentSession {
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			recordGateOutcome: (outcome) => this._recordGateOutcome(outcome),
 			getExtensionRunner: () => this._extensionRunner,
+			checkToolApplicability: (toolName) => {
+				const aliases = optionalToolRequestAliases(toolName, this._runtimeBuilder.getToolSourceInfo(toolName));
+				return aliases
+					? enforceExplicitOptionalToolRequest({ toolName, aliases, request: this._lastUserRequest })
+					: undefined;
+			},
 			getToolSelectionController: () => this._toolSelection,
 			checkEdge: (tool, args, cwd, signal) => enforceSessionEdge(this._edgeDeps(), tool, args, cwd, signal),
 			checkOperation: (tool, args, cwd, signal) =>

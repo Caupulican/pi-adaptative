@@ -165,6 +165,75 @@ describe("model perf profile", () => {
 		expect(resolveAdaptiveStreamIdleOptions(openAiInput)).toEqual({});
 	});
 
+	it("shortens only a well-profiled cloud connection and restores the full bound after a comparable stall", () => {
+		const base = { ...BASE_IDLE, connectMs: 120_000 };
+		const established = {
+			prefillTokensPerSecond: 10_000,
+			samples: 6,
+			updatedAt: "2026-09-29T02:03:35.810Z",
+		};
+		const cloudInput = {
+			base,
+			profile: established,
+			promptTokens: 20_000,
+			provider: "anthropic",
+			allowCloudConnectReduction: true,
+		};
+
+		expect(resolveAdaptiveStreamIdleOptions(cloudInput)).toMatchObject({ connectMs: 30_000 });
+		expect(
+			resolveAdaptiveStreamIdleOptions({
+				...cloudInput,
+				provider: "xai",
+			}),
+		).not.toHaveProperty("connectMs");
+		expect(
+			resolveAdaptiveStreamIdleOptions({
+				...cloudInput,
+				profile: { ...established, samples: 2 },
+			}),
+		).not.toHaveProperty("connectMs");
+		expect(
+			resolveAdaptiveStreamIdleOptions({
+				...cloudInput,
+				profile: {
+					...established,
+					connectStall: {
+						elapsedMs: 30_000,
+						promptTokens: 20_000,
+						consecutive: 1,
+						observedAt: "2026-09-29T02:04:05.810Z",
+					},
+				},
+			}),
+		).not.toHaveProperty("connectMs");
+	});
+
+	it("records a censored connect stall and clears it after a successful retry", () => {
+		const established = {
+			prefillTokensPerSecond: 10_000,
+			samples: 6,
+			updatedAt: "2026-09-29T02:03:35.810Z",
+		};
+		const stalled = updateModelPerfProfile(established, {
+			promptTokens: 20_000,
+			connectStallMs: 30_000,
+			at: "2026-09-29T02:04:05.810Z",
+		});
+
+		expect(stalled).toMatchObject({
+			connectStall: { elapsedMs: 30_000, promptTokens: 20_000, consecutive: 1 },
+			samples: 6,
+		});
+		const recovered = updateModelPerfProfile(stalled, {
+			promptTokens: 20_000,
+			completionTokens: 100,
+			requestToFirstTokenMs: 3_000,
+			firstTokenToDoneMs: 1_000,
+		});
+		expect(recovered).not.toHaveProperty("connectStall");
+	});
+
 	it("expands first-progress time from measured prefill instead of a fixed remote cap", () => {
 		const base = { ...BASE_IDLE, firstProgressMs: 500 };
 		const profile = {
@@ -351,6 +420,27 @@ describe("model perf profile", () => {
 		expect(samples).toEqual([
 			expect.objectContaining({ promptTokens: expect.any(Number), firstProgressStallMs: 500 }),
 		]);
+	});
+
+	it("records the watchdog connect stall through the profiled inner stream", async () => {
+		vi.useFakeTimers();
+		const samples: Array<Record<string, unknown>> = [];
+		const remote = neverRespondingStreamFn();
+		const profiled = withModelPerfProfile(remote.streamFn, {
+			modelKey: () => "anthropic/stalled",
+			recordSample: (_key, sample) => samples.push(sample as unknown as Record<string, unknown>),
+			nowMs: () => Date.now(),
+		});
+		const wrapped = withStreamIdleWatchdog(profiled, {
+			...BASE_IDLE,
+			connectMs: 500,
+		});
+
+		const stream = await wrapped(MODEL, CONTEXT, {});
+		await vi.advanceTimersByTimeAsync(500);
+		await stream.result();
+
+		expect(samples).toEqual([expect.objectContaining({ promptTokens: expect.any(Number), connectStallMs: 500 })]);
 	});
 
 	it("profiles the full prompt footprint including cache reads and writes", async () => {

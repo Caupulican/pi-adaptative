@@ -408,7 +408,7 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 		).rebuildSystemPrompt(["secret_store"]);
 
 		expect(prompt).toContain("availability is not a mandate");
-		expect(prompt).toContain("Context or guidance alone is not a trigger");
+		expect(prompt).toContain("Context, inferred dependence, and tool guidance are not triggers");
 		expect(prompt).not.toContain("wildcard profile");
 	});
 

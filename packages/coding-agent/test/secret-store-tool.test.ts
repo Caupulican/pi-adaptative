@@ -102,6 +102,25 @@ function createHarness(
 }
 
 describe("secret_store tool", () => {
+	it("marks invalid requests as operation failures", async () => {
+		const { tool } = createHarness();
+		const ui = createContext("rpc", "/work/project");
+
+		const invalid = await tool.execute(
+			"discover",
+			{ action: "discover", description: "Trello API key and token" },
+			undefined,
+			undefined,
+			ui.context,
+		);
+
+		expect(invalid).toMatchObject({
+			isError: true,
+			errorKind: "operation_outcome",
+			details: { status: "error", code: "unexpected_migration_input" },
+		});
+	});
+
 	it.each(["print", "rpc"] as const)("activates a bound profile autonomously in %s mode", async (mode) => {
 		const secret = "model-hidden-secret-value";
 		const { storage, manager, tool } = createHarness();
@@ -244,6 +263,7 @@ describe("secret_store tool", () => {
 		const result = await tool.execute("activate", { action: "activate" }, undefined, undefined, ui.context);
 
 		expect(result.details).toMatchObject({ action: "activate", status: "unavailable", code: "owner_setup_required" });
+		expect(result).toMatchObject({ isError: true, errorKind: "operation_outcome" });
 		expect(storage.connections).toEqual([]);
 		expect(ui.input).not.toHaveBeenCalled();
 		expect(ui.custom).not.toHaveBeenCalled();

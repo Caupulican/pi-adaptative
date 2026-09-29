@@ -95,6 +95,41 @@ describe("ToolGateController publishes one gate outcome per tool call", () => {
 		]);
 	});
 
+	it("blocks an optional extension before its hooks when the current request does not name it", async () => {
+		const { cwd } = scope();
+		let hookCalls = 0;
+		const controller = new ToolGateController({
+			maybeEscalateToolCall: () => undefined,
+			getCwd: () => cwd,
+			getCapabilityEnvelope: () => undefined,
+			recordGateOutcome: () => {},
+			getExtensionRunner: () =>
+				fakeRunner([
+					() => {
+						hookCalls++;
+						return undefined;
+					},
+				]),
+			checkToolApplicability: () => ({
+				block: true,
+				reason: "The current owner request does not explicitly ask for trello.",
+			}),
+		});
+
+		const result = await controller.beforeToolCall(
+			{
+				assistantMessage: fauxAssistantMessage(""),
+				toolCall: fauxToolCall("trello", { action: "resolve_project_scope" }, { id: "trello-call" }),
+				args: { action: "resolve_project_scope", project: "GrimDex" },
+				context: { systemPrompt: "test", messages: [], tools: [] },
+			} as Parameters<typeof controller.beforeToolCall>[0],
+			undefined,
+		);
+
+		expect(result).toMatchObject({ block: true, reason: expect.stringContaining("does not explicitly ask") });
+		expect(hookCalls).toBe(0);
+	});
+
 	it("a tool call makes no System One evaluation; System One records it with an intent built from its arguments", async () => {
 		const { cwd } = scope();
 		const recorded: { tool: string; args?: unknown; impact: string; call_id: string }[] = [];

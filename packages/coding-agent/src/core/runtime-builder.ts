@@ -778,6 +778,10 @@ export class RuntimeBuilder {
 		return this._toolDefinitions.get(name)?.definition;
 	}
 
+	getToolSourceInfo(name: string): SourceInfo | undefined {
+		return this._toolDefinitions.get(name)?.sourceInfo;
+	}
+
 	get credentialManager(): CredentialManager {
 		return this._credentialManager;
 	}

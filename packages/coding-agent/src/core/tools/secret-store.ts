@@ -131,12 +131,24 @@ export interface SecretStoreToolOptions {
 type SecretStoreResult = {
 	content: Array<{ type: "text"; text: string }>;
 	details: SecretStoreToolDetails;
+	isError?: true;
+	errorKind?: "operation_outcome" | "tool_failure";
 };
 
 function result(details: SecretStoreToolDetails, text: string): SecretStoreResult {
 	// Details feed the UI; the provider receives content, so actionable metadata must be here too.
 	const metadata = details.sources ?? details.profiles;
-	return { content: [{ type: "text", text: metadata ? `${text}\n${JSON.stringify(metadata)}` : text }], details };
+	const failure = details.status === "error" || details.status === "unavailable" || details.status === "cancelled";
+	return {
+		content: [{ type: "text", text: metadata ? `${text}\n${JSON.stringify(metadata)}` : text }],
+		details,
+		...(failure
+			? {
+					isError: true as const,
+					errorKind: details.status === "cancelled" ? ("tool_failure" as const) : ("operation_outcome" as const),
+				}
+			: {}),
+	};
 }
 
 function ownerSetupRequired(action: SecretStoreToolInput["action"]): SecretStoreResult {

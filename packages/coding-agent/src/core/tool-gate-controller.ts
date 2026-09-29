@@ -60,6 +60,8 @@ export interface ToolGateControllerDeps {
 	/** Record an autonomy gate outcome (only when a capability envelope is active). */
 	recordGateOutcome(outcome: GateOutcome): void;
 	getExtensionRunner(): ExtensionRunner;
+	/** Host-owned relevance gate for optional extension and credential tools. */
+	checkToolApplicability?(toolName: string, args: unknown): BeforeToolCallResult | undefined;
 	/** Observe an execution only after all pre-execution gates and extension hooks allow it. */
 	getToolSelectionController?(): ToolSelectionController | undefined;
 	/**
@@ -213,6 +215,8 @@ export class ToolGateController {
 		const yolo = this.deps.getExecutionMode?.() === "yolo";
 		const selfCompactionBlock = this.deps.gateSelfCompaction?.(toolCall.name, assistantMessage);
 		if (selfCompactionBlock) return selfCompactionBlock;
+		const applicabilityBlock = this.deps.checkToolApplicability?.(toolCall.name, args);
+		if (applicabilityBlock) return applicabilityBlock;
 		// Session model selection may change during a provider response or any awaited hook.
 		const modelRef = `${assistantMessage.provider}/${assistantMessage.model}`;
 		const escalation = this.deps.maybeEscalateToolCall(toolCall.name, args);
