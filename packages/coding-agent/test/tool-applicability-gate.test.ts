@@ -1,48 +1,86 @@
 import { describe, expect, it } from "vitest";
-import { enforceExplicitOptionalToolRequest, optionalToolRequestAliases } from "../src/core/tool-applicability-gate.ts";
+import {
+	enforceExplicitOptionalToolRequest,
+	type OptionalToolIntent,
+	optionalToolIntentFromAnswers,
+	optionalToolRequestAliases,
+	readOptionalToolIntent,
+} from "../src/core/tool-applicability-gate.ts";
 
 describe("optional tool applicability gate", () => {
-	it("rejects a project-name inference and speculative credential discovery", () => {
-		const request =
-			"We will work in GrimDex. We have work to finish. I want this to be a pure coding session without needing the work machine.";
+	const candidates = [
+		{ toolName: "trello", sourcePath: "/extensions/trello.ts", aliases: ["trello"] },
+		{ toolName: "secret_store", sourcePath: "builtin", aliases: ["credentials"] },
+	];
+	const answer = (choice: string, confidence = 0.99) => ({ choice, confidence });
+	const gate = (intent: OptionalToolIntent | undefined, tool = candidates[0]!) =>
+		enforceExplicitOptionalToolRequest({ ...tool, intent });
+	const requested = () =>
+		optionalToolIntentFromAnswers(
+			"Use Trello to inspect cards.",
+			{ candidates, previous: undefined },
+			{
+				optional_tool_task: answer("replace"),
+				optional_tool_0: answer("request"),
+				optional_tool_1: answer("unchanged"),
+			},
+		);
 
-		expect(enforceExplicitOptionalToolRequest({ toolName: "trello", aliases: ["trello"], request })).toMatchObject({
-			block: true,
-		});
-		expect(
-			enforceExplicitOptionalToolRequest({
-				toolName: "secret_store",
-				aliases: ["secret store", "credentials", "authentication", "oauth", "api key"],
-				request,
-			}),
-		).toMatchObject({ block: true });
+	it("retains admitted task intent through continuation and removes explicit revocation", () => {
+		const previous = requested();
+		expect(gate(previous)).toBeUndefined();
+		const continued = optionalToolIntentFromAnswers(
+			"Continue inspecting cards.",
+			{ candidates, previous },
+			{ optional_tool_task: answer("continue"), optional_tool_0: answer("unchanged") },
+		);
+		expect(gate(continued)).toBeUndefined();
+		const revoked = optionalToolIntentFromAnswers(
+			"Stop using Trello and continue locally.",
+			{ candidates, previous: continued },
+			{ optional_tool_task: answer("continue"), optional_tool_0: answer("revoke") },
+		);
+		expect(gate(revoked)?.block).toBe(true);
 	});
 
-	it("allows tools expressly named by the current owner request", () => {
-		expect(
-			enforceExplicitOptionalToolRequest({
-				toolName: "trello",
-				aliases: ["trello"],
-				request: "Use Trello to inspect the GrimDex cards before coding.",
-			}),
-		).toBeUndefined();
-		expect(
-			enforceExplicitOptionalToolRequest({
-				toolName: "secret_store",
-				aliases: ["secret store", "credentials", "authentication", "oauth", "api key"],
-				request: "Configure the credentials needed for Trello.",
-			}),
-		).toBeUndefined();
+	it("does not grant credentials, another tool source, or tools in a replacement task", () => {
+		const previous = requested();
+		expect(gate(previous, candidates[1]!)?.block).toBe(true);
+		expect(gate(previous, { ...candidates[0]!, sourcePath: "/evil/trello.ts" })?.block).toBe(true);
+		for (const relation of ["replace", "end"]) {
+			expect(
+				gate(
+					optionalToolIntentFromAnswers(
+						"New local task.",
+						{ candidates, previous },
+						{ optional_tool_task: answer(relation), optional_tool_0: answer("unchanged") },
+					),
+				)?.block,
+			).toBe(true);
+		}
 	});
 
-	it("requires whole alias words instead of substrings", () => {
-		expect(
-			enforceExplicitOptionalToolRequest({
-				toolName: "trello",
-				aliases: ["trello"],
-				request: "Inspect the trellometer implementation.",
-			}),
-		).toMatchObject({ block: true });
+	it("pauses on ambiguous, missing, or malformed judgments without reviving an older grant", () => {
+		for (const confidence of [NaN, Infinity, 1.1, 0.949]) {
+			expect(
+				gate(
+					optionalToolIntentFromAnswers(
+						"continue",
+						{ candidates, previous: requested() },
+						{ optional_tool_task: answer("continue", confidence), optional_tool_0: answer("request") },
+					),
+				)?.block,
+			).toBe(true);
+		}
+		expect(gate(undefined)?.block).toBe(true);
+		expect(readOptionalToolIntent({ ...requested(), allowedTools: [{ toolName: "trello" }] })).toBeUndefined();
+		expect(gate({ ...requested(), status: "paused" })?.block).toBe(true);
+		const continued = optionalToolIntentFromAnswers(
+			"continue",
+			{ candidates, previous: { ...requested(), status: "paused" } },
+			{ optional_tool_task: answer("continue"), optional_tool_0: answer("unchanged") },
+		);
+		expect(gate(continued)?.block).toBe(true);
 	});
 
 	it("gates profile extensions while leaving built-in and bundled tools alone", () => {

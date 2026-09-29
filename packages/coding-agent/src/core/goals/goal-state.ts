@@ -141,10 +141,76 @@ export interface GoalState {
 export interface GoalCompletionRejection {
 	fingerprint: string;
 	reasons: readonly string[];
+	/** Host-recorded judgment identities and checks, independent of tool-result retention. */
+	findings?: readonly GoalCompletionFinding[];
+	findingsOmitted?: number;
+	evidence?: GoalCompletionEvidence;
+	evidenceUnavailable?: string;
 	/** Refusals of this same fingerprint so far. */
 	count: number;
 	/** Set once the owner was asked to decide, so they are asked once per fingerprint. */
 	ownerAskedAt?: string;
+}
+
+export interface GoalCompletionFinding {
+	id: string;
+	reason: string;
+	required_next_proof?: string;
+	/** The full field values are in the retained evidence, never inferred from this preview. */
+	truncated?: true;
+}
+
+export interface GoalCompletionEvidence {
+	id: string;
+	sha256: string;
+	bytes: number;
+}
+
+const MAX_COMPLETION_FINDINGS = 12;
+
+function copyCompletionFindings(findings: readonly GoalCompletionFinding[]): GoalCompletionFinding[] {
+	return findings.slice(0, MAX_COMPLETION_FINDINGS).map((finding) => ({
+		id: finding.id.slice(0, 128),
+		reason: finding.reason.slice(0, 500),
+		...(finding.required_next_proof ? { required_next_proof: finding.required_next_proof.slice(0, 1000) } : {}),
+		...(finding.truncated ||
+		finding.id.length > 128 ||
+		finding.reason.length > 500 ||
+		(finding.required_next_proof?.length ?? 0) > 1000
+			? { truncated: true as const }
+			: {}),
+	}));
+}
+
+function isCompletionFindings(value: unknown): value is readonly GoalCompletionFinding[] {
+	return (
+		Array.isArray(value) &&
+		value.length <= MAX_COMPLETION_FINDINGS &&
+		value.every(
+			(finding) =>
+				isPlainRecord(finding) &&
+				typeof finding.id === "string" &&
+				finding.id.length <= 128 &&
+				typeof finding.reason === "string" &&
+				finding.reason.length <= 500 &&
+				(finding.required_next_proof === undefined ||
+					(typeof finding.required_next_proof === "string" && finding.required_next_proof.length <= 1000)) &&
+				(finding.truncated === undefined || finding.truncated === true),
+		)
+	);
+}
+
+function hasCompletionEvidence(value: Record<string, unknown>): boolean {
+	if (value.evidence === undefined) return true;
+	return (
+		isPlainRecord(value.evidence) &&
+		typeof value.evidence.id === "string" &&
+		/^[a-f0-9]{24}$/.test(value.evidence.id) &&
+		typeof value.evidence.sha256 === "string" &&
+		/^[a-f0-9]{64}$/.test(value.evidence.sha256) &&
+		Number.isSafeInteger(value.evidence.bytes) &&
+		Number(value.evidence.bytes) >= 0
+	);
 }
 
 /** One owner question correlated to this objective, and the owner's own answer to it. */
@@ -261,7 +327,17 @@ export type GoalEvent =
 	  }
 	| { type: "progress"; now: string }
 	/** System One refused completion over the view with this fingerprint; `ownerAsked` marks owner routing. */
-	| { type: "completion_rejected"; fingerprint: string; reasons: readonly string[]; ownerAsked?: boolean; now: string }
+	| {
+			type: "completion_rejected";
+			fingerprint: string;
+			reasons: readonly string[];
+			findings?: readonly GoalCompletionFinding[];
+			findingsOmitted?: number;
+			evidence?: GoalCompletionEvidence;
+			evidenceUnavailable?: string;
+			ownerAsked?: boolean;
+			now: string;
+	  }
 	| { type: "no_progress"; now: string }
 	| {
 			type: "clarification_requested";
@@ -497,11 +573,7 @@ export function isGoalEvent(value: unknown): value is GoalEvent {
 				typeof value.reason === "string"
 			);
 		case "completion_rejected":
-			return (
-				typeof value.fingerprint === "string" &&
-				isStringArray(value.reasons) &&
-				hasOptionalBoolean(value, "ownerAsked")
-			);
+			return hasCompletionRejectionFields(value) && hasOptionalBoolean(value, "ownerAsked");
 		case "record_continuation_budget":
 			return (
 				typeof value.turns === "number" &&
@@ -561,11 +633,23 @@ export function isGoalState(value: unknown): value is GoalState {
 	);
 }
 
+function hasCompletionRejectionFields(value: Record<string, unknown>): boolean {
+	return (
+		typeof value.fingerprint === "string" &&
+		isStringArray(value.reasons) &&
+		(value.findings === undefined || isCompletionFindings(value.findings)) &&
+		hasCompletionEvidence(value) &&
+		(value.evidenceUnavailable === undefined ||
+			(typeof value.evidenceUnavailable === "string" && value.evidenceUnavailable.length <= 500)) &&
+		(value.findingsOmitted === undefined ||
+			(Number.isSafeInteger(value.findingsOmitted) && Number(value.findingsOmitted) >= 0))
+	);
+}
+
 function isGoalCompletionRejection(value: unknown): value is GoalCompletionRejection {
 	return (
 		isPlainRecord(value) &&
-		typeof value.fingerprint === "string" &&
-		isStringArray(value.reasons) &&
+		hasCompletionRejectionFields(value) &&
 		typeof value.count === "number" &&
 		Number.isSafeInteger(value.count) &&
 		hasOptionalString(value, "ownerAskedAt")
@@ -598,7 +682,19 @@ function cloneGoalEvent(event: GoalEvent): GoalEvent {
 	if ((event.type === "add_requirement" || event.type === "set_requirement_check") && event.check) {
 		return { ...event, check: { ...event.check } };
 	}
-	if (event.type === "completion_rejected") return { ...event, reasons: [...event.reasons] };
+	if (event.type === "completion_rejected")
+		return {
+			...event,
+			reasons: [...event.reasons],
+			...(event.findings
+				? {
+						findings: copyCompletionFindings(event.findings),
+						findingsOmitted:
+							(event.findingsOmitted ?? 0) + Math.max(0, event.findings.length - MAX_COMPLETION_FINDINGS),
+					}
+				: {}),
+			...(event.evidence ? { evidence: { ...event.evidence } } : {}),
+		};
 	return { ...event };
 }
 
@@ -621,6 +717,12 @@ function cloneGoalState(state: GoalState): GoalState {
 					lastCompletionRejection: {
 						...state.lastCompletionRejection,
 						reasons: [...state.lastCompletionRejection.reasons],
+						...(state.lastCompletionRejection.findings
+							? { findings: copyCompletionFindings(state.lastCompletionRejection.findings) }
+							: {}),
+						...(state.lastCompletionRejection.evidence
+							? { evidence: { ...state.lastCompletionRejection.evidence } }
+							: {}),
 					},
 				}
 			: {}),
@@ -898,6 +1000,25 @@ export function applyGoalEvent(state: GoalState, event: GoalEvent): GoalState {
 			newState.lastCompletionRejection = {
 				fingerprint: event.fingerprint,
 				reasons: [...event.reasons],
+				...(event.findings
+					? { findings: copyCompletionFindings(event.findings) }
+					: same && previous?.findings
+						? { findings: copyCompletionFindings(previous.findings) }
+						: {}),
+				...(event.findings
+					? {
+							findingsOmitted:
+								(event.findingsOmitted ?? 0) + Math.max(0, event.findings.length - MAX_COMPLETION_FINDINGS),
+						}
+					: same && previous?.findingsOmitted
+						? { findingsOmitted: previous.findingsOmitted }
+						: {}),
+				...(event.evidenceUnavailable ? { evidenceUnavailable: event.evidenceUnavailable.slice(0, 500) } : {}),
+				...(event.evidence
+					? { evidence: { ...event.evidence } }
+					: same && previous?.evidence
+						? { evidence: { ...previous.evidence } }
+						: {}),
 				count: same && previous ? previous.count + 1 : 1,
 				...(ownerAskedAt ? { ownerAskedAt } : {}),
 			};

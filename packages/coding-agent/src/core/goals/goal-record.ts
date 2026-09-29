@@ -1,4 +1,4 @@
-import type { GoalClarification, GoalState, GoalStatus } from "./goal-state.ts";
+import type { GoalClarification, GoalCompletionRejection, GoalState, GoalStatus } from "./goal-state.ts";
 
 /** Most recent owner clarifications projected for the model; the durable ledger keeps the rest. */
 export const MAX_PROJECTED_GOAL_CLARIFICATIONS = 5;
@@ -29,6 +29,7 @@ export interface GoalRecord {
 	blockedReason?: string;
 	/** Bounded tail of the objective's owner-clarification ledger, oldest first. */
 	clarifications: readonly GoalClarification[];
+	completionRejection?: GoalCompletionRejection;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -49,6 +50,9 @@ export function projectGoalRecord(state: GoalState): GoalRecord {
 		timeUsedSeconds: Math.max(0, Math.ceil((state.continuationWallClockMs ?? 0) / 1000)),
 		blockedReason: state.blockedReason,
 		clarifications: (state.clarifications ?? []).slice(-MAX_PROJECTED_GOAL_CLARIFICATIONS),
+		...(state.status !== "completed" && state.lastCompletionRejection
+			? { completionRejection: state.lastCompletionRejection }
+			: {}),
 		createdAt: state.createdAt,
 		updatedAt: state.updatedAt,
 	};
@@ -64,6 +68,22 @@ export function formatGoalRecord(record: GoalRecord): string {
 		`Objective: ${record.objective}`,
 		`Usage: ${budget}; ${record.timeUsedSeconds}s active time.`,
 		...(record.blockedReason ? [`Reason: ${record.blockedReason}`] : []),
+		...(record.completionRejection?.findings?.length
+			? [
+					`Completion verification required (${record.completionRejection.fingerprint}):`,
+					...record.completionRejection.findings.map((finding) => `- ${JSON.stringify(finding)}`),
+					...(record.completionRejection.findingsOmitted
+						? [`${record.completionRejection.findingsOmitted} additional findings omitted from this preview.`]
+						: []),
+					...(record.completionRejection.evidence
+						? [
+								`Full judgment: typesafe_review action=evidence id=${record.completionRejection.evidence.id}; continue with nextOffset. SHA256=${record.completionRejection.evidence.sha256}.`,
+							]
+						: [
+								`Full judgment unavailable${record.completionRejection.evidenceUnavailable ? `: ${record.completionRejection.evidenceUnavailable}` : ""}; this preview may omit or truncate checks.`,
+							]),
+				]
+			: []),
 		...(record.clarifications.length > 0
 			? ["Owner clarifications:", ...record.clarifications.map((entry) => `- ${formatGoalClarificationLine(entry)}`)]
 			: []),

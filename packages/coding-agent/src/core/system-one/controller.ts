@@ -8,6 +8,13 @@ import {
 } from "../expert-routing/system-one-choice.ts";
 import type { IntegrityGateResult } from "../hooks/index.ts";
 import { MODEL_POOLS, type ModelPool, type ModelPoolChange } from "../model-router/owner-model-policy.ts";
+import {
+	MAX_OPTIONAL_TOOL_INTENT_TOOLS,
+	MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS,
+	type OptionalToolIntent,
+	type OptionalToolRequestContext,
+	optionalToolIntentFromAnswers,
+} from "../tool-applicability-gate.ts";
 import type { JevAdapter } from "./adapter.ts";
 import { AuditStore } from "./audit.ts";
 import { confidenceGate } from "./authority-line.ts";
@@ -15,6 +22,7 @@ import {
 	hashQuestions,
 	modelPoolFollowUp,
 	modelPoolQuestions,
+	optionalToolRequestQuestions,
 	type QuestionDefinition,
 	type QuestionPack,
 	SYSTEM_ONE_CATALOG_VERSION,
@@ -68,6 +76,7 @@ const RULE_AUTHORITY_QUESTION_IDS: ReadonlySet<string> = new Set([
 export const USER_REQUEST_RULE_BUDGET = 8_000;
 
 export interface UserRequestClassification {
+	readonly optionalToolIntent?: OptionalToolIntent;
 	/** Not a clear no: the request may turn a kind of model on or off; ask the pool questions. */
 	readonly mayChangeModelPools: boolean;
 	readonly capabilitiesAuthorized: boolean;
@@ -334,7 +343,7 @@ export class SystemOneController {
 		request: string,
 		writtenRules = "",
 		/** `signal`: the owner's submission; an abort before the run starts cancels the classification too. */
-		options: { capabilitiesPending?: boolean; signal?: AbortSignal } = {},
+		options: { capabilitiesPending?: boolean; signal?: AbortSignal; optionalTools?: OptionalToolRequestContext } = {},
 	): Promise<UserRequestClassificationOutcome> {
 		const userRequest = request.trim();
 		if (!userRequest) return { status: "skipped" };
@@ -346,6 +355,12 @@ export class SystemOneController {
 			if (RULE_AUTHORITY_QUESTION_IDS.has(id) && !rules) continue;
 			asked[id] = question;
 		}
+		const optionalTools = options.optionalTools;
+		const optionalToolsFit =
+			optionalTools !== undefined &&
+			userRequest.length <= MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS &&
+			optionalTools.candidates.length <= MAX_OPTIONAL_TOOL_INTENT_TOOLS;
+		if (optionalToolsFit) Object.assign(asked, optionalToolRequestQuestions(optionalTools));
 		if (Object.keys(asked).length === 0) return { status: "skipped" };
 		let response: Awaited<ReturnType<JevAdapter["evaluate"]>>;
 		try {
@@ -355,6 +370,13 @@ export class SystemOneController {
 					state: {
 						user_request: userRequest.slice(0, 4_000),
 						written_rules: rules || "(none)",
+						...(optionalToolsFit
+							? {
+									optional_tools: optionalTools.candidates,
+									previous_optional_tool_intent: optionalTools.previous ?? null,
+									pending_owner_requests: optionalTools.pendingRequests ?? [],
+								}
+							: {}),
 					},
 					questions: toTypeSafeEvaluationQuestions(asked as typeof USER_AUTHORIZATION_QUESTIONS),
 				},
@@ -372,6 +394,9 @@ export class SystemOneController {
 		return {
 			status: "classified",
 			classification: {
+				...(optionalTools
+					? { optionalToolIntent: optionalToolIntentFromAnswers(userRequest, optionalTools, response.answers) }
+					: {}),
 				mayChangeModelPools:
 					"changes_model_pools" in asked &&
 					evaluateNoul(

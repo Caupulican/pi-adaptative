@@ -11,6 +11,23 @@ import {
 } from "../../src/core/system-one/provider-driver.ts";
 
 describe("System One Adapter and Audit", () => {
+	it("does not retry permanent or unknown failures as temporary outages", async () => {
+		for (const message of ["401 Unauthorized", "Invalid choice confidence", "unexpected adapter defect"]) {
+			let attempts = 0;
+			const adapter = new SystemOneJevAdapter(
+				{
+					evaluate: async () => {
+						attempts++;
+						throw new Error(message);
+					},
+				},
+				undefined,
+				{ getApiKey: () => "test-user-key", sleep: async () => {} },
+			);
+			await expect(adapter.evaluate({ state: {}, questions: {} })).rejects.toThrow(message);
+			expect(attempts).toBe(1);
+		}
+	});
 	it("enforces pinned model jev-1.13.0 and rejects model drift (R-006, R-007)", async () => {
 		// Mock reviewer that returns an unpinned model drift
 		const driftingReviewer = {

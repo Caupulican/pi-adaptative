@@ -1,19 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
+import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import { combineAbortSignals } from "@caupulican/pi-ai/abort-signals";
 import { retryProviderRequest } from "@caupulican/pi-ai/provider-retry";
-import { Value } from "typebox/value";
 import type { SystemOneAccessResolver } from "../system-one/access.ts";
 import { getSystemOneProviderDriver, type SystemOneProviderDriver } from "../system-one/provider-driver.ts";
 import {
 	type EvaluationInput,
 	type EvaluationResponse,
-	evaluationInputSchema,
 	getEvaluationUsage,
 	REVIEW_CONFIDENCE,
 	type ReviewInput,
-	reviewInputSchema,
 	serializeEvaluation,
+	TYPESAFE_API_CREDENTIAL,
 	validateEvaluationResponse,
+	validateTypeSafeInput,
 } from "./typesafe-contract.ts";
 import { type PricedTypeSafeUsage, priceTypeSafeUsage } from "./typesafe-usage.ts";
 
@@ -21,7 +21,6 @@ export type { ReviewInput } from "./typesafe-contract.ts";
 
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
-const API_CREDENTIAL = /apikey_[A-Za-z0-9_-]+/;
 
 function redactReviewText(text: string, key: string): string {
 	return text
@@ -29,7 +28,7 @@ function redactReviewText(text: string, key: string): string {
 		.join("[REDACTED]")
 		.split(key)
 		.join("[REDACTED]")
-		.replace(/apikey_[A-Za-z0-9_-]+/g, "[REDACTED]");
+		.replace(new RegExp(TYPESAFE_API_CREDENTIAL.source, "g"), "[REDACTED]");
 }
 
 /** Validate grammar with the native parser, then preserve/reject ambiguous object members. */
@@ -252,11 +251,7 @@ export class SystemOneReviewer {
 	): Promise<ReviewRecord> {
 		signal?.throwIfAborted();
 		const snapshot: ReviewInput = JSON.parse(serializeEvaluation(input));
-		if (!Value.Check(reviewInputSchema, snapshot)) throw new Error("Invalid TypeSafe review input");
-		for (const question of Object.values(snapshot.questions)) {
-			if (!Object.hasOwn(question.criteria, question.expected))
-				throw new Error("Expected verdict must be a declared option");
-		}
+		validateTypeSafeInput("review", snapshot);
 		const result = await this.evaluate(
 			{
 				state: snapshot.state,
@@ -294,11 +289,11 @@ export class SystemOneReviewer {
 		signal?.throwIfAborted();
 		// Snapshot before any await. No omitted fields or context truncation are permitted.
 		const snapshot: EvaluationInput = JSON.parse(serializeEvaluation(input));
+		validateTypeSafeInput("evaluation", snapshot);
 		const { driver, model, key, setup } = await this.connection();
 		signal?.throwIfAborted();
 		const providerName = driver.displayName;
 		const endpoint = this.deps.endpoint ?? driver.decisionsEndpoint;
-		if (!Value.Check(evaluationInputSchema, snapshot)) throw new Error(`Invalid ${providerName} evaluation input`);
 		// One engine version for every path: a caller naming another version is refused, not rerouted.
 		if (this.deps.access && snapshot.model !== undefined && !driver.matchesModel(model, snapshot.model))
 			throw new Error(`System One runs ${model}; ${snapshot.model} was requested`);
@@ -309,7 +304,7 @@ export class SystemOneReviewer {
 				`${providerName} request exceeds 2 MiB; partition with explicit coverage, never truncate evidence`,
 			);
 		if (!key) throw new Error(`${providerName} is not configured. Use ${setup}`);
-		if (body.includes(JSON.stringify(key).slice(1, -1)) || API_CREDENTIAL.test(body))
+		if (body.includes(JSON.stringify(key).slice(1, -1)) || TYPESAFE_API_CREDENTIAL.test(body))
 			throw new Error(`${providerName} evidence contains an API credential`);
 		const requestSha256 = createHash("sha256").update(body).digest("hex");
 		const evaluationId = randomUUID();
@@ -328,13 +323,30 @@ export class SystemOneReviewer {
 					raw = undefined;
 					const attempt: TypeSafeTransportAttempt = { attempt: attempts };
 					transportAttempts.push(attempt);
-					const response = await (this.deps.fetch ?? fetch)(endpoint, {
-						method: "POST",
-						headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-						body,
-						redirect: "error",
-						signal: combined.signal,
-					});
+					let response: Response;
+					try {
+						response = await (this.deps.fetch ?? fetch)(endpoint, {
+							method: "POST",
+							headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+							body,
+							redirect: "error",
+							signal: combined.signal,
+						});
+					} catch (error) {
+						const failure = classifyFailure({
+							message: error instanceof Error ? error.message : String(error),
+							aborted: combined.signal?.aborted,
+							provider: driver.id,
+						});
+						if (!failure.retryable || failure.reason !== "network") throw error;
+						// Native fetch errors lack SDK status/header fields. Normalize only classified
+						// network failures into the existing provider retry owner; never replay a
+						// malformed response, credential error, or local persistence failure.
+						throw Object.assign(new Error(`${providerName} network error`, { cause: error }), {
+							status: undefined,
+							headers: undefined,
+						});
+					}
 					attempt.status = response.status;
 					if (!response.body) throw new Error(`Empty ${providerName} response`);
 					const reader = response.body.getReader();
@@ -402,7 +414,7 @@ export class SystemOneReviewer {
 		} catch (error) {
 			// Never project arbitrary transport messages: they can contain the Authorization header.
 			const errorRegex =
-				/^(Invalid (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) HTTP|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response exceeds|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) usage recording failed|Empty (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|Server requested)/;
+				/^(Invalid (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) HTTP|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) network error|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response exceeds|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) usage recording failed|Empty (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|Server requested)/;
 			const message = combined.signal?.aborted
 				? `${providerName} review cancelled or timed out`
 				: error instanceof Error && errorRegex.test(error.message)

@@ -1,3 +1,4 @@
+// @guards src/core/default-tool-surface.ts src/core/runtime-builder.ts src/core/tool-capability-policy.ts
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { ExtensionFactory } from "../../../src/index.ts";
@@ -62,6 +63,7 @@ describe("regression #5109: exclude tools", () => {
 				"goal",
 				"improvement_loop",
 				"memory",
+				"peer",
 				"pipeline",
 				"python",
 				"repo_read",
@@ -90,9 +92,9 @@ describe("regression #5109: exclude tools", () => {
 
 	it("lets excluded tools override the allowlist", async () => {
 		const harness = await createHarness({
-			allowedToolNames: ["read", "bash", "ask_question"],
-			excludedToolNames: ["read", "ask_question"],
-			initialActiveToolNames: ["read", "bash", "ask_question"],
+			allowedToolNames: ["read", "bash", "ask_question", "peer"],
+			excludedToolNames: ["read", "ask_question", "peer"],
+			initialActiveToolNames: ["read", "bash", "ask_question", "peer"],
 			extensionFactories,
 		});
 		try {
@@ -103,6 +105,7 @@ describe("regression #5109: exclude tools", () => {
 			expect(harness.session.systemPrompt).toContain("- bash:");
 			expect(harness.session.systemPrompt).not.toContain("- read:");
 			expect(harness.session.systemPrompt).not.toContain("ask_question");
+			expect(harness.session.systemPrompt).not.toContain("- peer:");
 		} finally {
 			harness.cleanup();
 		}

@@ -1,3 +1,5 @@
+import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
+import { abortableSleep } from "@caupulican/pi-ai/abort-signals";
 import { TypeSafeEvidenceError } from "../review/typesafe-contract.ts";
 import { TypeSafeReviewError } from "../review/typesafe-reviewer.ts";
 import type { SystemOneAccessResolver } from "./access.ts";
@@ -88,7 +90,7 @@ export function classifyJevFailure(error: unknown, aborted: boolean): JevFailure
 }
 
 export interface SystemOneJevAdapterDeps {
-	sleep?: (ms: number) => Promise<void>;
+	sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 	/** The session's System One access, resolved per evaluation: provider, pinned model and key. */
 	access?: SystemOneAccessResolver;
 	/** A fixed connection's key, when no access resolver is given. */
@@ -110,7 +112,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 	private readonly reviewer: SystemOneReviewerLike;
 	private readonly config: SystemOneConfig;
 	private readonly pinnedModel: string;
-	private readonly sleep: (ms: number) => Promise<void>;
+	private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
 	private readonly deps: SystemOneJevAdapterDeps;
 	private readonly driver: SystemOneProviderDriver;
 
@@ -124,7 +126,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 		this.pinnedModel = config.model.production || SYSTEM_ONE_PINNED_MODEL;
 		this.deps = deps;
 		this.driver = deps.driver ?? getSystemOneProviderDriver(config.provider);
-		this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+		this.sleep = deps.sleep ?? abortableSleep;
 	}
 
 	async evaluate(input: JevEvaluationRequest, options?: JevAdapterEvaluateOptions): Promise<JevEvaluationResponse> {
@@ -242,28 +244,28 @@ export class SystemOneJevAdapter implements JevAdapter {
 				if (error instanceof JevAdapterFailure) {
 					throw error;
 				}
-				if (error instanceof TypeSafeReviewError && error.failureKind === "usage_recording") {
+				if (deadline?.aborted && !options?.signal?.aborted) throw timedOut();
+				if (options?.signal?.aborted) throw error;
+				// The reviewer already exhausted its provider retry budget. Never multiply it here.
+				if (error instanceof TypeSafeReviewError) {
 					throw new JevAdapterFailure("unavailable", error.message, impact);
 				}
 				// The request we built is not JSON: retrying sends the same defect again.
 				if (error instanceof TypeSafeEvidenceError) {
 					throw new JevAdapterFailure("invalid_request", error.message, impact);
 				}
-				if (deadline?.aborted && !options?.signal?.aborted) throw timedOut();
 				// If model drift was detected, do not retry
 				if (error instanceof Error && error.message.includes("Model drift detected")) {
 					throw error;
 				}
 
-				// Check if aborted
-				if (options?.signal?.aborted) {
-					throw error;
-				}
+				const classified = classifyFailure({ message: error instanceof Error ? error.message : String(error) });
+				if (!classified.retryable) break;
 
 				// R-067: Bounded backoff for transient or rate limit errors
 				if (attempts < maxAttempts) {
 					const backoffMs = Math.min(1000 * 2 ** (attempts - 1) + Math.random() * 200, 5000);
-					await this.sleep(backoffMs);
+					await this.sleep(backoffMs, signal);
 				}
 			}
 		}

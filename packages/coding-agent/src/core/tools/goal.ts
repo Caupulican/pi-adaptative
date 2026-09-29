@@ -13,6 +13,7 @@ import {
 } from "../goals/goal-lifecycle.ts";
 import {
 	applyGoalEvent,
+	type GoalCompletionEvidence,
 	type GoalEvidenceKind,
 	type GoalEvidenceOutcome,
 	type GoalState,
@@ -33,6 +34,7 @@ import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-
 import { describeRequirementCheckRefusal, proveRequirementChecks } from "../goals/prove-requirement-checks.ts";
 import { type RequirementCheckResult, requirementCheckViolation } from "../goals/requirement-checks.ts";
 import { awaitPreflight } from "../preflight.ts";
+import { TYPESAFE_API_CREDENTIAL } from "../review/typesafe-contract.ts";
 import { requestsBugFix } from "../system-one/bug-fix.ts";
 import type { SystemOneController } from "../system-one/controller.ts";
 import type { FinalCompletionVerdict } from "../system-one/policy.ts";
@@ -276,6 +278,8 @@ export type GoalUserEvidenceResolution =
 	| { verified: false; reason: string };
 
 export interface GoalToolDependencies {
+	/** Full rejected judgment retained by the existing System One evidence paging owner. */
+	retainCompletionEvidence?: (toolCallId: string, decision: FinalCompletionVerdict) => GoalCompletionEvidence;
 	/** Read the latest persisted goal state for the active session. */
 	getGoalState: () => GoalState | undefined;
 	/** Persist a new goal state snapshot to the active session. */
@@ -875,7 +879,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			});
 		},
 		async execute(
-			_toolCallId,
+			toolCallId,
 			input: GoalToolInput,
 			signal,
 		): Promise<{
@@ -1169,10 +1173,25 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 						);
 						completionAdvisories = completionDecision.advisories;
 						if (completionDecision.verdict !== "complete") {
+							let evidence: GoalCompletionEvidence | undefined;
+							let evidenceUnavailable: string | undefined;
+							try {
+								evidence = deps.retainCompletionEvidence?.(toolCallId, completionDecision);
+							} catch (error) {
+								evidenceUnavailable =
+									error instanceof Error
+										? error.message
+												.replace(new RegExp(TYPESAFE_API_CREDENTIAL.source, "g"), "[redacted]")
+												.slice(0, 500)
+										: "Evidence retention failed";
+							}
 							const recorded = applyGoalEvent(current, {
 								type: "completion_rejected",
 								fingerprint,
 								reasons: completionDecision.failed_gates.map((gate) => gate.reason),
+								findings: completionDecision.failed_gates,
+								...(evidence ? { evidence } : {}),
+								...(evidenceUnavailable ? { evidenceUnavailable } : {}),
 								now: now(),
 							});
 							deps.saveGoalState(recorded, getGoalStateRevision(current));

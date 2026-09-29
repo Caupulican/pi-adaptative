@@ -327,10 +327,14 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// cost from the base subtotal and check the peer schema independently.
 			const goalChecksAllowance = 162;
 			const peerAllowance = 210;
+			// Same live runtime framing: HEAD compact schema 358, canonical schema 828.
+			const canonicalSchemaAllowance = 470;
 			expect(
 				report.toolSchemaTokens,
 				JSON.stringify(report.tools.map(({ name, schemaTokens }) => ({ name, schemaTokens }))),
-			).toBeLessThanOrEqual(4_500 + 350 + 720 + 100 + 143 + 140 + goalChecksAllowance + peerAllowance);
+			).toBeLessThanOrEqual(
+				4_500 + 350 + 720 + 100 + 143 + 140 + goalChecksAllowance + peerAllowance + canonicalSchemaAllowance,
+			);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
 			expect(toolTokens.get("goal")).toBeLessThanOrEqual(399);
 			expect(toolTokens.get("create_goal")).toBeLessThanOrEqual(177);
@@ -338,7 +342,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 			expect(toolTokens.get("task_directory")).toBeLessThanOrEqual(350);
 			expect(toolTokens.get("task_automation")).toBeLessThanOrEqual(720);
 			expect(toolTokens.get("typesafe_review")).toBeGreaterThan(0);
-			expect(toolTokens.get("typesafe_review")).toBeLessThanOrEqual(512);
+			expect(toolTokens.get("typesafe_review")).toBeLessThanOrEqual(512 + canonicalSchemaAllowance);
 			expect(toolTokens.get("decision_ledger_read")).toBeGreaterThan(0);
 			expect(toolTokens.get("decision_ledger_read")).toBeLessThanOrEqual(100);
 			expect(toolTokens.get("repo_read")).toBeGreaterThan(0);

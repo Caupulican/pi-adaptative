@@ -1202,6 +1202,13 @@ export class RuntimeBuilder {
 			this._baseToolDefinitions.set("tool_task", createToolTaskToolDefinition(toolTaskDependencies));
 		}
 		if (!baseToolsOverride) {
+			const typeSafeEvidenceStore = toolAccess.allows("typesafe_review")
+				? TypeSafeEvidenceStore.file(
+						this.deps.getAgentDir(),
+						this.deps.getSessionManager().getSessionId(),
+						this.deps.getSessionManager().getSessionLineageIds(),
+					)
+				: undefined;
 			if (this.deps.getPeerReviewModels && toolAccess.allows("peer")) {
 				this._baseToolDefinitions.set(
 					"peer",
@@ -1231,7 +1238,7 @@ export class RuntimeBuilder {
 					),
 				);
 			}
-			if (toolAccess.allows("typesafe_review")) {
+			if (typeSafeEvidenceStore) {
 				// The same access every System One path uses: one provider's key only ever goes to that
 				// provider, and a provider switch in settings applies to the next review.
 				const reviewer = new TypeSafeReviewer({
@@ -1244,11 +1251,7 @@ export class RuntimeBuilder {
 					"typesafe_review",
 					createTypeSafeReviewToolDefinition(
 						reviewer,
-						TypeSafeEvidenceStore.file(
-							this.deps.getAgentDir(),
-							this.deps.getSessionManager().getSessionId(),
-							this.deps.getSessionManager().getSessionLineageIds(),
-						),
+						typeSafeEvidenceStore,
 						undefined,
 						new TypeSafeEvidenceMaterializer({
 							getCwd: () => this._taskDirectories.cwd,
@@ -1339,6 +1342,12 @@ export class RuntimeBuilder {
 			if (shouldBuildGoalExecutor) {
 				const goalToolDefinition = createGoalToolDefinition({
 					getGoalState: () => this.deps.getGoalStateSnapshot(),
+					...(typeSafeEvidenceStore
+						? {
+								retainCompletionEvidence: (toolCallId, decision) =>
+									typeSafeEvidenceStore.save(toolCallId, { completionDecision: decision }),
+							}
+						: {}),
 					getActiveVerificationIds: () => this.deps.getActiveVerificationIds?.() ?? [],
 					getSystemOneController: () => this.deps.getSystemOneController?.(),
 					getCwd: () => this._taskDirectories.cwd,

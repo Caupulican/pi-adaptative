@@ -1,3 +1,4 @@
+// @isolated: mutates globalThis extension fixtures and uses process-wide session runtime state
 /**
  * Tests for AgentSession concurrent prompt guard.
  */
@@ -252,8 +253,10 @@ describe("AgentSession concurrent prompt guard", () => {
 		await assistantStarted;
 
 		// steer should work while streaming
-		expect(() => session.steer("Steering message")).not.toThrow();
+		await expect(session.steer("Steering message")).resolves.toBeUndefined();
 		expect(session.pendingMessageCount).toBe(1);
+		expect(session.getSteeringMessages()).toEqual(["Steering message"]);
+		expect(session.isStreaming).toBe(true);
 
 		// Cleanup
 		await session.abort("test abort");
@@ -269,8 +272,10 @@ describe("AgentSession concurrent prompt guard", () => {
 		await assistantStarted;
 
 		// followUp should work while streaming
-		expect(() => session.followUp("Follow-up message")).not.toThrow();
+		await expect(session.followUp("Follow-up message")).resolves.toBeUndefined();
 		expect(session.pendingMessageCount).toBe(1);
+		expect(session.getFollowUpMessages()).toEqual(["Follow-up message"]);
+		expect(session.isStreaming).toBe(true);
 
 		// Cleanup
 		await session.abort("test abort");

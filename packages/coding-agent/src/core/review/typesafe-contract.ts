@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { type Static, Type } from "typebox";
+import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 import { isPlainRecord } from "../util/value-guards.ts";
 
@@ -10,6 +10,11 @@ export const OPENROUTER_PROVIDER = "openrouter";
 export const OPENROUTER_DECISIONS_ENDPOINT = "https://openrouter.ai/api/alpha/decisions";
 export const OPENROUTER_MODELS_ENDPOINT = "https://openrouter.ai/api/v1/models?output_modalities=decisions";
 export const REVIEW_CONFIDENCE = { high: 0.95, max: 0.99 } as const;
+export const TYPESAFE_API_CREDENTIAL = /apikey_[A-Za-z0-9_-]+/;
+
+function diagnosticPath(path: string): string {
+	return path.replace(new RegExp(TYPESAFE_API_CREDENTIAL.source, "g"), "[REDACTED]").slice(0, 160);
+}
 
 const contextSchema = Type.Union([
 	Type.String(),
@@ -81,6 +86,50 @@ export const reviewInputSchema = Type.Object(
 	{ additionalProperties: false },
 );
 export type ReviewInput = Static<typeof reviewInputSchema>;
+
+/** Canonical input validation with bounded diagnostics; evidence values are never echoed. */
+export function validateTypeSafeInput(kind: "review" | "evaluation", value: unknown): void {
+	const schema = kind === "review" ? reviewInputSchema : evaluationInputSchema;
+	const diagnostics: string[] = [];
+	const addErrors = (type: TSchema, item: unknown, prefix = ""): void => {
+		for (const error of Value.Errors(type, item)) {
+			if (diagnostics.length === 6) break;
+			const path = `${prefix}${error.instancePath}` || "/";
+			let received: unknown = item;
+			for (const key of error.instancePath.split("/").slice(1)) {
+				const decoded = key.replace(/~1/g, "/").replace(/~0/g, "~");
+				received = received !== null && typeof received === "object" ? Reflect.get(received, decoded) : undefined;
+			}
+			diagnostics.push(
+				`${diagnosticPath(path)}: expected ${diagnosticPath(error.message).slice(0, 120)}; received ${Array.isArray(received) ? "array" : received === null ? "null" : typeof received}`,
+			);
+		}
+	};
+	if (kind === "evaluation" && isPlainRecord(value) && isPlainRecord(value.questions)) {
+		for (const [id, question] of Object.entries(value.questions)) {
+			const path = `/questions/${id.replace(/~/g, "~0").replace(/\//g, "~1")}`;
+			if (!isPlainRecord(question)) continue;
+			const branch = questionSchema.anyOf.find((candidate) => candidate.properties.type.const === question.type);
+			if (branch) addErrors(branch, question, path);
+			else
+				diagnostics.push(
+					`${diagnosticPath(path)}/type: expected choice, noul or score; received ${typeof question.type}`,
+				);
+			if (diagnostics.length >= 6) break;
+		}
+	}
+	if (!Value.Check(schema, value) && diagnostics.length === 0) addErrors(schema, value);
+	if (diagnostics.length) throw new Error(`Invalid TypeSafe ${kind} input: ${diagnostics.slice(0, 6).join("; ")}`);
+	if (kind === "review") {
+		const input = value as ReviewInput;
+		for (const [id, question] of Object.entries(input.questions)) {
+			if (!Object.hasOwn(question.criteria, question.expected))
+				throw new Error(
+					`Expected verdict must be a declared option at ${diagnosticPath(`/questions/${id.replace(/~/g, "~0").replace(/\//g, "~1")}/expected`)}; expected a criteria key; received undeclared string`,
+				);
+		}
+	}
+}
 
 const probability = Type.Number({ minimum: 0, maximum: 1 });
 const distribution = Type.Record(Type.String(), probability);

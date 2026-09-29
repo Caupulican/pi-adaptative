@@ -1,3 +1,4 @@
+// @guards src/core/default-tool-surface.ts src/core/runtime-builder.ts src/core/tool-capability-policy.ts
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -98,6 +99,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			"ls",
 			"memory",
 			"model_fitness",
+			"peer",
 			"pipeline",
 			"python",
 			"read",

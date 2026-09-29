@@ -47,6 +47,7 @@ import type { PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import type { ResourceProfileSettings, SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
+import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE } from "./tool-applicability-gate.ts";
 
 export interface ExtensionBindingControllerDeps {
 	getAgent(): Agent;
@@ -276,6 +277,8 @@ export class ExtensionBindingController {
 					});
 				},
 				appendEntry: (customType, data) => {
+					if (customType === OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)
+						throw new Error("Optional integration intent is a host-owned classification checkpoint");
 					this.deps.getSessionManager().appendCustomEntry(customType, data);
 				},
 				setSessionName: (name) => {

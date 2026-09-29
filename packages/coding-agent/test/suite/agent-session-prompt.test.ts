@@ -1,3 +1,4 @@
+// @guards src/core/default-tool-surface.ts src/core/runtime-builder.ts src/core/tool-capability-policy.ts
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -319,6 +320,7 @@ describe("AgentSession prompt characterization", () => {
 			"ask_question",
 			"secret_store",
 			"typesafe_review",
+			"peer",
 			"delegate",
 			"tool_task",
 			"run_toolkit_script",

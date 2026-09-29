@@ -8,6 +8,7 @@ import {
 	getEvaluationUsage,
 	type ReviewInput,
 	reviewInputSchema,
+	validateTypeSafeInput,
 } from "../review/typesafe-contract.ts";
 import {
 	MAX_TYPESAFE_EVIDENCE_REFERENCES,
@@ -38,62 +39,6 @@ const schema = Type.Object(
 		),
 		evaluation: Type.Optional(evaluationInputSchema),
 		review: Type.Optional(reviewInputSchema),
-	},
-	{ additionalProperties: false },
-);
-
-// Load the complete rubric through the skill instead of repeating every EntryType union
-// in each provider request. The reviewer always validates the full canonical contract.
-const parameters = Type.Object(
-	{
-		action: schema.properties.action,
-		id: schema.properties.id,
-		offset: schema.properties.offset,
-		evidenceRefs: schema.properties.evidenceRefs,
-		evaluation: Type.Optional(
-			Type.Object(
-				{
-					...evaluationInputSchema.properties,
-					questions: Type.Record(
-						Type.String(),
-						Type.Object(
-							{
-								type: Type.String({ description: "choice, noul or score" }),
-								instructions: Type.Unknown(),
-								criteria: Type.Optional(
-									Type.Unknown({
-										description: "Choice: option map. Noul: true/false descriptions. Score: ordered levels.",
-									}),
-								),
-							},
-							{ additionalProperties: false },
-						),
-						{ minProperties: 1 },
-					),
-				},
-				{ additionalProperties: false },
-			),
-		),
-		review: Type.Optional(
-			Type.Object(
-				{
-					...reviewInputSchema.properties,
-					questions: Type.Record(
-						Type.String(),
-						Type.Object(
-							{
-								instructions: Type.Unknown(),
-								criteria: Type.Unknown({ description: "Choice option map; descriptions may be structured." }),
-								expected: Type.String(),
-							},
-							{ additionalProperties: false },
-						),
-						{ minProperties: 1 },
-					),
-				},
-				{ additionalProperties: false },
-			),
-		),
 	},
 	{ additionalProperties: false },
 );
@@ -152,13 +97,15 @@ export function createTypeSafeReviewToolDefinition(
 			"Use Jev for semantic decisions and independent verification. Status checks setup. Evaluate batched Choice, Noul and Score questions. Review gates claims at high (0.95) or max (0.99) confidence. evidenceRefs snapshots scoped files, artifacts, or git diffs. Evidence reads retained records by id and offset. Does not execute or authorize actions.",
 		promptSnippet: "Jev: semantic judgments and high/max claim review.",
 		promptGuidelines: [
+			'For review, use an option map and a declared expected key, for example: {"action":"review","review":{"state":"relevant source and check results","questions":{"claim":{"instructions":"Does this evidence support the claim?","criteria":{"supports":"Supported","contradicts":"Contradicted","insufficient":"Missing evidence"},"expected":"supports"}}}}.',
 			"Check typesafe_review status at work start. When the typesafe-review skill is listed and the skill tool is available, load the typesafe-review skill. Use Jev for semantic decisions and reviews throughout work, in any domain.",
 			"Batch independent narrow questions with complete relevant source, tests, prior findings and limitations; never hide adverse evidence. Reproduce bug candidates before fixing.",
 			"Approval requires every expected verdict and high/max confidence; fix findings or add missing evidence. Never reroll unchanged evidence for a better score. Credentials belong in /login typesafe, never tool arguments.",
 			"An uncertain or unavailable Jev result returns to the owning LLM. Workers report unresolved decisions to the parent; only the root asks the owner when authority or evidence is still missing. Silence grants nothing.",
 			SYSTEM_ONE_VALIDATION_RULE,
 		],
-		parameters,
+		// The model and reviewer consume the same canonical input contract.
+		parameters: schema,
 		// Independent System One calls in one turn run together: evidence saves are synchronous under the
 		// session bundle lock and the reviewer holds no per-call state.
 		async execute(toolCallId: string, input: Static<typeof schema>, signal?: AbortSignal) {
@@ -191,6 +138,10 @@ export function createTypeSafeReviewToolDefinition(
 				if (input.action === "evaluate" && !input.evaluation)
 					throw new Error("evaluation is required for the evaluate action");
 				if (input.action === "review" && !input.review) throw new Error("review is required for the review action");
+				validateTypeSafeInput(
+					input.action === "evaluate" ? "evaluation" : "review",
+					input.action === "evaluate" ? input.evaluation : input.review,
+				);
 				const prepared = await materializeReferencedEvidence(
 					input.action === "evaluate" ? input.evaluation! : input.review!,
 					input.evidenceRefs,

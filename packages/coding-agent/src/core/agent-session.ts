@@ -385,7 +385,14 @@ import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
 import { captureSessionTaskDirectoryContext } from "./tasks/task-directory-context.ts";
 import { formatTaskStepsContext, type TaskStepsState } from "./tasks/task-state.ts";
-import { enforceExplicitOptionalToolRequest, optionalToolRequestAliases } from "./tool-applicability-gate.ts";
+import {
+	enforceExplicitOptionalToolRequest,
+	MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS,
+	OPTIONAL_TOOL_INTENT_CUSTOM_TYPE,
+	type OptionalToolCandidate,
+	optionalToolRequestAliases,
+	readOptionalToolIntent,
+} from "./tool-applicability-gate.ts";
 import { ToolGateController } from "./tool-gate-controller.ts";
 import { type ToolProbeReport, type ToolProbeResult, ToolProtocolController } from "./tool-protocol-controller.ts";
 import { TOOL_RECOVERY_EVENT_LOG_FILE } from "./tool-recovery-log-records.ts";
@@ -578,6 +585,7 @@ export class AgentSession {
 	private _disposed = false;
 	private _disposeCompletion: Promise<void> | undefined;
 	private readonly _reflectionAbort = new AbortController();
+	private _optionalIntentAbort: AbortController | undefined;
 	/** Owns the lifetime of the one detached end-of-work reflection turn; see reflection-turn-lifecycle.ts. */
 	private readonly _reflectionTurnLifecycle: ReflectionTurnLifecycle;
 	/** Root-owned version transition state; construction performs no filesystem I/O. */
@@ -2189,18 +2197,21 @@ export class AgentSession {
 			recordGateOutcome: (outcome) => this._recordGateOutcome(outcome),
 			getExtensionRunner: () => this._extensionRunner,
 			checkToolApplicability: (toolName) => {
-				const aliases = optionalToolRequestAliases(
-					toolName,
-					this._runtimeBuilder.getToolSourceInfo(toolName),
-					() => {
-						const verification = this.runtimeUpdates.getExtensionVerificationTarget();
-						return verification
-							? { toolName: verification.toolName, path: resolve(this._cwd, verification.extensionPath) }
-							: undefined;
-					},
-				);
+				const source = this._runtimeBuilder.getToolSourceInfo(toolName);
+				const aliases = optionalToolRequestAliases(toolName, source, () => {
+					const verification = this.runtimeUpdates.getExtensionVerificationTarget();
+					return verification
+						? { toolName: verification.toolName, path: resolve(this._cwd, verification.extensionPath) }
+						: undefined;
+				});
 				return aliases
-					? enforceExplicitOptionalToolRequest({ toolName, aliases, request: this._lastUserRequest })
+					? enforceExplicitOptionalToolRequest({
+							toolName,
+							sourcePath: source?.path ?? "",
+							intent: readOptionalToolIntent(
+								this.sessionManager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.data,
+							),
+						})
 					: undefined;
 			},
 			getToolSelectionController: () => this._toolSelection,
@@ -3211,15 +3222,18 @@ export class AgentSession {
 	private async _enableCapabilitiesAuthorizedByUser(
 		request: string,
 		signal?: AbortSignal,
+		trustedOwner = true,
 	): Promise<string | undefined> {
 		const controller = this._systemOneController;
 		if (!controller) return undefined;
 		const granted = new Set(this.getEdgeGrants().map((grant) => grant.class));
 		const capabilitiesPending = EDGE_CLASSES.some((edgeClass) => !granted.has(edgeClass));
-		const outcome = await controller.classifyUserRequest(request, this.writtenRuleText(), {
-			capabilitiesPending,
-			...(signal ? { signal } : {}),
-		});
+		const outcome = trustedOwner
+			? await this._classifyOwnerRequest(request, this.writtenRuleText(), capabilitiesPending, signal)
+			: await controller.classifyUserRequest(request, this.writtenRuleText(), {
+					capabilitiesPending,
+					...(signal ? { signal } : {}),
+				});
 		if (outcome.status === "skipped") return undefined;
 		if (outcome.status === "unavailable") {
 			// Unknown is not a handoff: an owner question goes to the owner.
@@ -3257,6 +3271,84 @@ export class AgentSession {
 			return this._ruleAuthority === "user" ? RULE_SETTLED_USER_NOTE : RULE_SETTLED_WRITTEN_NOTE;
 		}
 		return undefined;
+	}
+
+	/** Same user-request classification owner for ordinary submissions and trusted queued input. */
+	private async _classifyOwnerRequest(request: string, rules = "", capabilitiesPending = false, signal?: AbortSignal) {
+		if (signal?.aborted || this._disposed)
+			return {
+				status: "unavailable" as const,
+				superseded: true,
+				reason: "Owner intent classification was cancelled",
+			};
+		this._optionalIntentAbort?.abort();
+		const intentAbort = new AbortController();
+		this._optionalIntentAbort = intentAbort;
+		signal = AbortSignal.any([this._reflectionAbort.signal, intentAbort.signal, ...(signal ? [signal] : [])]);
+		const manager = this.sessionManager;
+		const sessionId = manager.getSessionId();
+		const snapshot = readOptionalToolIntent(
+			manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.data,
+		);
+		const pendingRequests = snapshot?.status === "paused" ? (snapshot.pendingRequests ?? []) : [];
+		const previous = snapshot?.status === "paused" ? snapshot.resumeIntent : snapshot;
+		const candidates: OptionalToolCandidate[] = this.getAllTools().flatMap((tool) => {
+			const source = this._runtimeBuilder.getToolSourceInfo(tool.name);
+			const aliases = optionalToolRequestAliases(tool.name, source);
+			return aliases ? [{ toolName: tool.name, sourcePath: source?.path ?? "", aliases }] : [];
+		});
+		const recoverable = request.length <= MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS && pendingRequests.length < 8;
+		const pendingId = manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, {
+			version: 1,
+			status: "paused",
+			taskRequest: request.slice(0, MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS),
+			allowedTools: [],
+			...(recoverable
+				? { ...(previous ? { resumeIntent: previous } : {}), pendingRequests: [...pendingRequests, request] }
+				: {}),
+		});
+		const controller = this._systemOneController;
+		const outcome = controller
+			? await controller.classifyUserRequest(request, rules, {
+					capabilitiesPending,
+					optionalTools: {
+						candidates,
+						previous: recoverable ? previous : undefined,
+						pendingRequests: recoverable ? pendingRequests : [],
+					},
+					...(signal ? { signal } : {}),
+				})
+			: { status: "unavailable" as const, reason: "System One classification is not configured" };
+		if (
+			signal.aborted &&
+			manager.getSessionId() === sessionId &&
+			manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.id === pendingId
+		)
+			manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, {
+				version: 1,
+				status: "paused",
+				taskRequest: "",
+				allowedTools: [],
+			});
+		if (
+			signal?.aborted ||
+			this._disposed ||
+			manager.getSessionId() !== sessionId ||
+			manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.id !== pendingId
+		)
+			return {
+				status: "unavailable" as const,
+				superseded: true,
+				reason: "Owner intent classification was cancelled or superseded",
+			};
+		if (outcome.status === "classified" && outcome.classification.optionalToolIntent)
+			manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, outcome.classification.optionalToolIntent);
+		else if (candidates.length)
+			this._emit({
+				type: "warning",
+				message: `Optional integrations paused: ${outcome.status === "unavailable" ? outcome.reason : "owner intent classification unavailable"}.`,
+			});
+		return outcome;
 	}
 
 	/** The owner's words may turn a model pool on or off; the policy changes for the next allocation. */
@@ -4977,6 +5069,13 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
+		const queuedOwnerClassification =
+			this.getSessionWorkState().busy &&
+			options?.streamingBehavior &&
+			!options.internalContextType &&
+			options.source !== "extension"
+				? this._classifyOwnerRequest(text, "", false, options.signal)
+				: undefined;
 		// The owner spoke: a summary being prepared while the lane idled never makes them wait.
 		this._compaction.cancelIdlePreparation();
 		// An owner development directive is policy, not prompt text: it is captured durably here,
@@ -4992,19 +5091,20 @@ export class AgentSession {
 		const submissionLease = this._foregroundRecovery.tryAcquireSubmission();
 		if (!submissionLease && this.getSessionWorkState().busy && options?.streamingBehavior) {
 			const run = this._streamingPromptSubmissionTail.then(
-				() => this._runPromptSubmission(text, options),
-				() => this._runPromptSubmission(text, options),
+				() => this._runPromptSubmission(text, options, undefined, queuedOwnerClassification),
+				() => this._runPromptSubmission(text, options, undefined, queuedOwnerClassification),
 			);
 			this._streamingPromptSubmissionTail = run.catch(() => {});
 			return run;
 		}
-		return this._runPromptSubmission(text, options, submissionLease);
+		return this._runPromptSubmission(text, options, submissionLease, queuedOwnerClassification);
 	}
 
 	private async _runPromptSubmission(
 		text: string,
 		options?: PromptOptions,
 		initialSubmissionLease?: ForegroundSubmissionLease,
+		queuedOwnerClassification?: ReturnType<AgentSession["_classifyOwnerRequest"]>,
 	): Promise<void> {
 		const submission = { lease: initialSubmissionLease };
 		if (submission.lease) this._foregroundPromptLease = submission.lease;
@@ -5016,7 +5116,7 @@ export class AgentSession {
 			? AbortSignal.any([options.signal, submissionAbort.signal])
 			: submissionAbort.signal;
 		try {
-			await this._promptUnserialized(text, { ...options, signal }, submission);
+			await this._promptUnserialized(text, { ...options, signal }, submission, queuedOwnerClassification);
 		} finally {
 			if (this._submissionAbort === submissionAbort) this._submissionAbort = undefined;
 			if (submission.lease) {
@@ -5039,6 +5139,7 @@ export class AgentSession {
 		text: string,
 		options: PromptOptions | undefined,
 		submission: { lease?: ForegroundSubmissionLease },
+		queuedOwnerClassification?: ReturnType<AgentSession["_classifyOwnerRequest"]>,
 	): Promise<void> {
 		const submissionSignal = options?.signal;
 		// Fast path for a submission cancelled before it ever started: nothing has been built, painted or
@@ -5074,6 +5175,10 @@ export class AgentSession {
 		let userRequest = text;
 
 		try {
+			if (queuedOwnerClassification) {
+				const classified = await queuedOwnerClassification;
+				if (submissionSignal?.aborted || ("superseded" in classified && classified.superseded)) return;
+			}
 			// Handle extension commands first. Programmatic extension messages may opt
 			// into command handling; if the agent is currently streaming, queue the
 			// command for the end of the run instead of sending it to the model.
@@ -5138,6 +5243,11 @@ export class AgentSession {
 					);
 				}
 				const ownerOriginalText = !options.internalContextType && options.source !== "extension" ? text : undefined;
+				if (ownerOriginalText !== undefined) {
+					const classified = await (queuedOwnerClassification ??
+						this._classifyOwnerRequest(ownerOriginalText, "", false, submissionSignal));
+					if (submissionSignal?.aborted || ("superseded" in classified && classified.superseded)) return;
+				}
 				if (options.streamingBehavior === "followUp") {
 					this._pendingQueue.queueFollowUp(expandedText, currentImages, goalToolStartAuthority, ownerOriginalText);
 				} else {
@@ -5453,7 +5563,11 @@ export class AgentSession {
 			let requestNote: string | undefined;
 			if (!options?.internalContextType) {
 				this._lastUserRequest = userRequest;
-				requestNote = await this._enableCapabilitiesAuthorizedByUser(userRequest, submissionSignal);
+				if (options?.source !== "extension") {
+					if (this._systemOneController)
+						requestNote = await this._enableCapabilitiesAuthorizedByUser(text, submissionSignal);
+					else await this._classifyOwnerRequest(text, "", false, submissionSignal);
+				} else requestNote = await this._enableCapabilitiesAuthorizedByUser(userRequest, submissionSignal, false);
 				this._announceOwnerFollowUpsWhenPresent();
 			}
 			if (requestNote) {
@@ -5538,6 +5652,8 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async steer(text: string, images?: ImageContent[]): Promise<void> {
+		const classified = await this._classifyOwnerRequest(text);
+		if ("superseded" in classified && classified.superseded) return;
 		this._pendingQueue.queueSteer(this._pendingQueue.prepareQueuedMessageText(text), images, undefined, text);
 		this._emitQueueUpdate();
 	}
@@ -5550,6 +5666,8 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async followUp(text: string, images?: ImageContent[]): Promise<void> {
+		const classified = await this._classifyOwnerRequest(text);
+		if ("superseded" in classified && classified.superseded) return;
 		this._pendingQueue.queueFollowUp(this._pendingQueue.prepareQueuedMessageText(text), images, undefined, text);
 		this._emitQueueUpdate();
 	}
@@ -5736,6 +5854,7 @@ export class AgentSession {
 	 * abort in the persisted aborted message; use a short, stable, lower-case label.
 	 */
 	async abort(reason: string): Promise<void> {
+		this._optionalIntentAbort?.abort();
 		// A submission still preparing has no run to abort: cancel the submission itself.
 		if (!this.agent.state.isStreaming) this._submissionAbort?.abort(reason);
 		this.runtimeUpdates.cancel();
