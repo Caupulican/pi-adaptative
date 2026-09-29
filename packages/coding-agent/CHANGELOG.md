@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Updated Fireworks, Together, and OpenCode Go defaults to their current Kimi K3 models.
+
 ## [0.100.6] - 2026-09-29
 
 ### Fixed

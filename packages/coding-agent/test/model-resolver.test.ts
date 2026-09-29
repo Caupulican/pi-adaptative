@@ -1,4 +1,4 @@
-import { getModels, type Model } from "@caupulican/pi-ai";
+import { getModels, type KnownProvider, type Model } from "@caupulican/pi-ai";
 import { describe, expect, test } from "vitest";
 import {
 	defaultModelPerProvider,
@@ -527,6 +527,15 @@ describe("resolveCliProviderDefault", () => {
 });
 
 describe("default model selection", () => {
+	test("every provider default belongs to the generated catalog", () => {
+		for (const [provider, modelId] of Object.entries(defaultModelPerProvider)) {
+			expect(
+				getModels(provider as KnownProvider).map((model) => model.id),
+				provider,
+			).toContain(modelId);
+		}
+	});
+
 	test("openai defaults track current models", () => {
 		expect(defaultModelPerProvider.openai).toBe("gpt-5.4");
 		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-5.6-sol");

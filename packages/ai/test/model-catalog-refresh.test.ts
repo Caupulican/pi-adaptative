@@ -75,6 +75,7 @@ describe("model catalog refresh publication", () => {
 		expect(output).toContain('id: "fixture-direct"');
 		expect(output).toContain('id: "fixture/router"');
 		expect(output).toContain('id: "fixture/gateway"');
+		expect(output).toContain('id: "claude-sonnet-5-5"');
 	});
 
 	it("uses alias target compatibility without changing alias identity or advertised prices", () => {

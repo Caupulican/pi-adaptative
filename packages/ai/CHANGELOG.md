@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added Claude Sonnet 5.5 and refreshed the live provider catalogs, including OpenRouter.
+
 ## [0.100.6] - 2026-09-29
 
 ## [0.100.5] - 2026-09-28

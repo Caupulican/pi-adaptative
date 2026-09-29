@@ -18,8 +18,8 @@ afterEach(() => {
 });
 
 describe("Fireworks models", () => {
-	it("registers the default Kimi K2.6 model via Anthropic-compatible Messages API", () => {
-		const model = getModel("fireworks", "accounts/fireworks/models/kimi-k2p6");
+	it("registers the default Kimi K3 model via Anthropic-compatible Messages API", () => {
+		const model = getModel("fireworks", "accounts/fireworks/models/kimi-k3");
 
 		expect(model).toBeDefined();
 		expect(model.api).toBe("anthropic-messages");
@@ -27,12 +27,12 @@ describe("Fireworks models", () => {
 		expect(model.baseUrl).toBe("https://api.fireworks.ai/inference");
 		expect(model.reasoning).toBe(true);
 		expect(model.input).toEqual(["text", "image"]);
-		expect(model.contextWindow).toBe(262000);
-		expect(model.maxTokens).toBe(262000);
+		expect(model.contextWindow).toBe(1_048_576);
+		expect(model.maxTokens).toBe(131_072);
 		expect(model.cost).toEqual({
-			input: 0.95,
-			output: 4,
-			cacheRead: 0.16,
+			input: 3,
+			output: 15,
+			cacheRead: 0.3,
 			cacheWrite: 0,
 		});
 	});
@@ -64,7 +64,7 @@ describe("Fireworks models", () => {
 	});
 
 	it("sets Fireworks-specific compat for session affinity and unsupported tool fields", () => {
-		const model = getModel("fireworks", "accounts/fireworks/models/kimi-k2p6");
+		const model = getModel("fireworks", "accounts/fireworks/models/kimi-k3");
 
 		expect(model.compat).toBeDefined();
 		expect(model.compat?.sendSessionAffinityHeaders).toBe(true);
@@ -89,16 +89,16 @@ const tool: Tool = {
 
 function createFireworksModel(compat?: Model<"anthropic-messages">["compat"]): Model<"anthropic-messages"> {
 	return {
-		id: "accounts/fireworks/models/kimi-k2p6",
-		name: "Kimi K2.6",
+		id: "accounts/fireworks/models/kimi-k3",
+		name: "Kimi K3",
 		api: "anthropic-messages",
 		provider: "fireworks",
 		baseUrl: "http://127.0.0.1:0", // overridden by captureAnthropicRequest
 		reasoning: true,
 		input: ["text", "image"],
-		cost: { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
-		contextWindow: 262000,
-		maxTokens: 262000,
+		cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
 		compat,
 	};
 }

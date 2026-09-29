@@ -2,6 +2,21 @@ import { describe, expect, it } from "vitest";
 import { getModel, getModels } from "../src/models.ts";
 
 describe("generated model routing", () => {
+	it("includes Claude Sonnet 5.5 with its published direct-provider metadata", () => {
+		const model = getModels("anthropic").find((candidate) => candidate.id === "claude-sonnet-5-5");
+		expect(model).toMatchObject({
+			api: "anthropic-messages",
+			reasoning: true,
+			defaultThinkingLevel: "medium",
+			thinkingLevelMap: { xhigh: "xhigh", max: "max" },
+			compat: { forceAdaptiveThinking: true },
+			input: ["text", "image"],
+			cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+		});
+	});
+
 	it("routes GitHub Copilot MAI-Code models through Responses", () => {
 		expect(getModel("github-copilot", "mai-code-1-flash-picker").api).toBe("openai-responses");
 	});

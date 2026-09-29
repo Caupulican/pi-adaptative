@@ -338,8 +338,8 @@ describe("Context overflow error handling", () => {
 	// =============================================================================
 
 	describe.skipIf(!liveEnvApiKey("together"))("Together AI", () => {
-		it("Kimi-K2.6 - should detect overflow via isContextOverflow", async () => {
-			const model = getModel("together", "moonshotai/Kimi-K2.6");
+		it("Kimi-K3 - should detect overflow via isContextOverflow", async () => {
+			const model = getModel("together", "moonshotai/Kimi-K3");
 			const result = await testContextOverflow(model, liveEnvApiKey("together")!);
 			logResult(result);
 

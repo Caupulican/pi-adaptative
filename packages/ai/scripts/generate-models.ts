@@ -641,8 +641,8 @@ function applyThinkingLevelMetadata(model: Model<any>, modelId = model.id): void
 		// Pi's low/medium/high pass through verbatim; OpenRouter normalizes to Mercury's vocabulary.
 		mergeThinkingLevelMap(model, { off: null });
 	}
-	if (model.provider === "opencode-go" && modelId === "kimi-k2.6") {
-		// OpenCode Go exposes Kimi K2.6 thinking as on/off, not distinct effort tiers.
+	if (model.provider === "opencode-go" && modelId === "kimi-k3") {
+		// OpenCode Go exposes Kimi K3 thinking as on/off, not distinct effort tiers.
 		mergeThinkingLevelMap(model, { minimal: null, low: null, medium: null });
 	}
 	if (model.provider === "opencode" && modelId === "grok-build-0.1") {
@@ -1246,9 +1246,12 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					compat = { ...(compat ?? {}), supportsReasoningEffort: false };
 				}
 
-				if ((variant.provider === "opencode" || variant.provider === "opencode-go") && modelId === "kimi-k2.6") {
-					// OpenCode Kimi K2.6 accepts Anthropic-style thinking objects
-					// and rejects string thinking values or combined reasoning_effort.
+				if (
+					(variant.provider === "opencode" || variant.provider === "opencode-go") &&
+					(modelId === "kimi-k2.6" || modelId === "kimi-k3")
+				) {
+					// OpenCode Kimi models accept Anthropic-style thinking objects
+					// and reject string thinking values or combined reasoning_effort.
 					compat = { ...(compat ?? {}), thinkingFormat: "deepseek", supportsReasoningEffort: false };
 				}
 
@@ -1796,6 +1799,30 @@ async function generateModels() {
 			},
 			contextWindow: 1000000,
 			maxTokens: 64000,
+		});
+	}
+
+	const sonnet55 = allModels.find((model) => model.provider === "anthropic" && model.id === "claude-sonnet-5-5");
+	if (sonnet55) {
+		sonnet55.defaultThinkingLevel = "medium";
+	} else {
+		allModels.push({
+			id: "claude-sonnet-5-5",
+			name: "Claude Sonnet 5.5",
+			api: "anthropic-messages",
+			baseUrl: "https://api.anthropic.com",
+			provider: "anthropic",
+			reasoning: true,
+			defaultThinkingLevel: "medium",
+			input: ["text", "image"],
+			cost: {
+				input: 2,
+				output: 10,
+				cacheRead: 0.2,
+				cacheWrite: 2.5,
+			},
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
 		});
 	}
 
