@@ -14,9 +14,12 @@ const UNGATED_TOOL_SOURCES = new Set(["builtin", "bundled", "inline", "sdk"]);
 export function optionalToolRequestAliases(
 	toolName: string,
 	sourceInfo: SourceInfo | undefined,
+	getExtensionVerificationTarget?: () => { toolName: string; path: string } | undefined,
 ): readonly string[] | undefined {
 	if (toolName === "secret_store") return SECRET_STORE_REQUEST_ALIASES;
 	if (!sourceInfo || UNGATED_TOOL_SOURCES.has(sourceInfo.source)) return undefined;
+	const verification = getExtensionVerificationTarget?.();
+	if (verification?.toolName === toolName && verification.path === sourceInfo.path) return undefined;
 	return [toolName.replaceAll("_", " ").replaceAll("-", " ")];
 }
 

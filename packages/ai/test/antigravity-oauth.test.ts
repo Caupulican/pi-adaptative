@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getApiProvider } from "../src/api-registry.ts";
+import { ANTIGRAVITY_CLIENT_CONFIG } from "../src/providers/antigravity-client-config.generated.ts";
 import { ANTIGRAVITY_ENDPOINT, antigravityHeaders, parseAntigravityModels } from "../src/utils/antigravity.ts";
 import "../src/providers/register-builtins.ts";
 import { antigravityOAuthProvider as provider } from "../src/utils/oauth/google-antigravity.ts";
@@ -46,6 +47,14 @@ describe("Antigravity subscription login", () => {
 		expect(getApiProvider("google-antigravity")).toBeDefined();
 		expect(getApiProvider("google-antigravity")).not.toBe(getApiProvider("anthropic-messages"));
 		expect(ANTIGRAVITY_ENDPOINT).toBe("https://daily-cloudcode-pa.googleapis.com");
+	});
+	it("uses the generated CLI identity by default and preserves an explicit identity override", () => {
+		expect(antigravityHeaders("fixture", { platform: "linux", arch: "x64" })["User-Agent"]).toBe(
+			`antigravity/cli/${ANTIGRAVITY_CLIENT_CONFIG.version} (aidev_client; os_type=linux; arch=amd64; auth_method=consumer)`,
+		);
+		expect(antigravityHeaders("fixture", undefined, "antigravity/cli/7.8.9")["User-Agent"]).toContain(
+			"antigravity/cli/7.8.9",
+		);
 	});
 	it.each([
 		["win32", "x64", "windows", "amd64"],

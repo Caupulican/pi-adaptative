@@ -1,8 +1,11 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
 import { Type } from "typebox";
-import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
 import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
+import { tempDir } from "../temp-dir.ts";
 import { createHarness, getAssistantTexts, getUserTexts } from "./harness.ts";
 import { createTestExtensionsResult, createTestResourceLoader } from "./test-resources.ts";
 
@@ -74,9 +77,11 @@ describe("runtime update continuation", () => {
 		expect(() => previousApi!.getActiveTools()).not.toThrow();
 	});
 
-	it("repairs a broken new extension, activates it and verifies it before returning to the task", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-update-extension-"));
-		onTestFinished(() => rmSync(dir, { recursive: true, force: true }));
+	it.each([
+		"Build this new tool, activate it, and resume my task",
+		"Build new_probe, activate it, and resume my task",
+	])("repairs and verifies a new extension for owner request: %s", async (request) => {
+		const dir = tempDir("pi-update-extension-");
 		const path = join(dir, "new-extension.ts");
 		writeFileSync(path, "export default () => { throw new Error('broken draft'); };\n");
 		const loader = new DefaultResourceLoader({ cwd: dir, agentDir: dir, noExtensions: true });
@@ -108,7 +113,10 @@ describe("runtime update continuation", () => {
 			fauxAssistantMessage([fauxToolCall("runtime_update", { action: "complete" })], { stopReason: "toolUse" }),
 			fauxAssistantMessage("original task resumed"),
 		]);
-		await harness.session.prompt("Build this new tool, activate it, and resume my task");
+		await harness.session.prompt(request);
+		expect(
+			harness.session.messages.find((message) => message.role === "toolResult" && message.toolName === "new_probe"),
+		).toMatchObject({ isError: false });
 		expect(harness.session.runtimeUpdates.getState()).toMatchObject({ status: "complete", attempts: 2 });
 		expect(getAssistantTexts(harness).at(-1)).toBe("original task resumed");
 		expect(getUserTexts(harness)).toHaveLength(1);
@@ -202,7 +210,3 @@ describe("runtime update continuation", () => {
 		expect(getAssistantTexts(harness).at(-1)).toBe("restart unavailable; stopped self-update");
 	});
 });
-
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";

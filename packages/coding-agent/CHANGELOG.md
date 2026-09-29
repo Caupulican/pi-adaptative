@@ -4,6 +4,7 @@
 
 - Recovered no-header cloud provider stalls from established per-model timing evidence while retaining full retry bounds after a stall and the longer xAI allowance.
 - Blocked optional extension and credential tools unless the current owner request explicitly names them, and reported negative `secret_store` outcomes as tool failures.
+- Kept runtime extension verification usable through the optional-tool gate, scoped to the active update's named tool and extension path.
 
 ## [0.100.7] - 2026-09-29
 

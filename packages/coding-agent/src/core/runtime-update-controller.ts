@@ -105,6 +105,21 @@ export class RuntimeUpdateController {
 		return this.state ? { ...this.state } : undefined;
 	}
 
+	/** The active branch's loaded extension verifier; it grants no other execution authority. */
+	getExtensionVerificationTarget(): { toolName: string; extensionPath: string } | undefined {
+		this.refreshState();
+		if (
+			!this.deps.isRoot() ||
+			this.cancellation.signal.aborted ||
+			this.state?.status !== "verifying" ||
+			this.state.mode !== "reload" ||
+			!this.state.extensionPath ||
+			!this.state.verificationAfter
+		)
+			return undefined;
+		return { toolName: this.state.verificationTool, extensionPath: this.state.extensionPath };
+	}
+
 	/** Host-owned location; never accepted as a tool argument or inferred from a retained artifact. */
 	setSourceOrigin(origin: string): void {
 		if (!origin || origin.length > 4096 || origin.includes("\0")) throw new Error("Invalid runtime source origin.");

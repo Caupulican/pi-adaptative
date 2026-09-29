@@ -20,6 +20,52 @@ function fixture(overrides: Partial<RuntimeUpdateControllerDeps> = {}) {
 }
 
 describe("bounded runtime update ownership", () => {
+	it("exposes extension verification only after activation on the current branch", async () => {
+		const f = fixture();
+		const parent = f.sessionManager.appendMessage(fauxAssistantMessage("before update"));
+		expect(f.controller.getExtensionVerificationTarget()).toBeUndefined();
+		await f.call({ action: "reload", verificationTool: "new_probe", extensionPath: "new-tool.ts" });
+		expect(f.controller.getExtensionVerificationTarget()).toBeUndefined();
+		await f.controller.settle();
+		expect(f.controller.getExtensionVerificationTarget()).toEqual({
+			toolName: "new_probe",
+			extensionPath: "new-tool.ts",
+		});
+		const child = new RuntimeUpdateController({ ...f.deps, isRoot: () => false });
+		expect(child.getExtensionVerificationTarget()).toBeUndefined();
+		f.sessionManager.branch(parent);
+		expect(f.controller.getExtensionVerificationTarget()).toBeUndefined();
+	});
+
+	it.each(["repairing", "restarting", "committing", "complete", "stopped"] as const)(
+		"withdraws extension verification in the %s state",
+		async (status) => {
+			const f = fixture();
+			await f.call({ action: "reload", verificationTool: "new_probe", extensionPath: "new-tool.ts" });
+			await f.controller.settle();
+			f.sessionManager.appendCustomEntry("runtime-update", { ...f.controller.getState(), status });
+			expect(f.controller.getExtensionVerificationTarget()).toBeUndefined();
+		},
+	);
+
+	it("withdraws extension verification immediately on cancellation and requires an extension reload", async () => {
+		const f = fixture();
+		await f.call({ action: "reload", verificationTool: "new_probe", extensionPath: "new-tool.ts" });
+		await f.controller.settle();
+		f.controller.cancel();
+		expect(f.controller.getExtensionVerificationTarget()).toBeUndefined();
+		const generic = fixture();
+		await generic.call({ action: "reload", verificationTool: "new_probe" });
+		await generic.controller.settle();
+		expect(generic.controller.getExtensionVerificationTarget()).toBeUndefined();
+		generic.sessionManager.appendCustomEntry("runtime-update", {
+			...generic.controller.getState(),
+			mode: "restart",
+			extensionPath: "new-tool.ts",
+		});
+		expect(generic.controller.getExtensionVerificationTarget()).toBeUndefined();
+	});
+
 	it("directs core repair to the host-owned origin rather than the running artifact", async () => {
 		const f = fixture();
 		await f.call({ action: "reload", verificationTool: "probe" });

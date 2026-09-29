@@ -58,4 +58,23 @@ describe("optional tool applicability gate", () => {
 		expect(optionalToolRequestAliases("read", source("builtin"))).toBeUndefined();
 		expect(optionalToolRequestAliases("secret_store", source("builtin"))).toContain("credentials");
 	});
+
+	it("admits only the active extension verifier while retaining credential and unrelated-tool gates", () => {
+		const source = {
+			path: "/extensions/new-tool.ts",
+			source: "local",
+			scope: "temporary" as const,
+			origin: "top-level" as const,
+		};
+		const verification = () => ({ toolName: "new_probe", path: source.path });
+		expect(optionalToolRequestAliases("new_probe", source, verification)).toBeUndefined();
+		expect(optionalToolRequestAliases("other_probe", source, verification)).toEqual(["other probe"]);
+		expect(
+			optionalToolRequestAliases("new_probe", { ...source, path: "/extensions/unrelated.ts" }, verification),
+		).toEqual(["new probe"]);
+		expect(optionalToolRequestAliases("new_probe", source, () => undefined)).toEqual(["new probe"]);
+		expect(
+			optionalToolRequestAliases("secret_store", source, () => ({ toolName: "secret_store", path: source.path })),
+		).toContain("credentials");
+	});
 });

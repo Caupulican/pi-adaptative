@@ -1,6 +1,6 @@
 # Providers
 
-Pi supports subscription-based providers via OAuth and API key providers via environment variables or auth file. For each provider, pi knows all available models. The list is updated with every pi release.
+Pi supports subscription-based providers via OAuth and API key providers via environment variables or auth file. Built-in model catalogs are updated with every Pi release; account-discovered providers refresh their available models during login and token refresh.
 
 ## Table of Contents
 
@@ -18,6 +18,7 @@ Use `/login` in interactive mode, then select a provider, or pass one directly (
 - ChatGPT Plus/Pro (Codex)
 - Claude Pro/Max
 - GitHub Copilot
+- Google Antigravity — `/login google-antigravity`. Discovers the agent models available to your Google account.
 - xAI (Grok/X subscription) — `/login xai`. Signs in with SuperGrok or X Premium via device-code OAuth; `XAI_API_KEY` remains available as an API key under [API Keys](#api-keys) for metered access instead.
 - Kimi Code (subscription) — `/login kimi-coding`.
 - OpenRouter — `/login openrouter`. This OAuth flow exchanges a browser sign-in for a permanent OpenRouter API key rather than a metered/subscription credential, so it does not get the subscription-hop failover behavior described below.
@@ -76,6 +77,18 @@ Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party h
 
 - Press Enter for github.com, or enter your GitHub Enterprise Server domain
 - If you get "model not supported", enable it in VS Code: Copilot Chat → model selector → select model → "Enable"
+
+### Google Antigravity
+
+Run `/login google-antigravity`, open the authorization URL, and paste the code or callback URL shown after Google sign-in. Pi stores its own OAuth credentials and refreshes them five minutes before expiry. Complete Antigravity account setup first if Google does not return an accessible project.
+
+Use `/model` to select an advertised Gemini, Claude, or GPT-OSS model under `google-antigravity`. Models, context limits, image support, upstream tool schemas, and thinking budgets come from the account's service catalog. Gemini effort selection switches between the advertised presets; each preset sends its catalog budget. Pi preserves service IDs such as `gemini-pro-agent` even when the native CLI displays a different ID for the same model.
+
+```bash
+pi --provider google-antigravity --model gemini-3.8-flash-low
+```
+
+Pi's provider connects directly to Antigravity and does not require the `agy` executable. Model discovery refreshes with OAuth; a new model appears when the service advertises it to your account.
 
 ## API Keys
 

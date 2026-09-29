@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
 import {
 	type CompactionResult,
@@ -2178,7 +2178,16 @@ export class AgentSession {
 			recordGateOutcome: (outcome) => this._recordGateOutcome(outcome),
 			getExtensionRunner: () => this._extensionRunner,
 			checkToolApplicability: (toolName) => {
-				const aliases = optionalToolRequestAliases(toolName, this._runtimeBuilder.getToolSourceInfo(toolName));
+				const aliases = optionalToolRequestAliases(
+					toolName,
+					this._runtimeBuilder.getToolSourceInfo(toolName),
+					() => {
+						const verification = this.runtimeUpdates.getExtensionVerificationTarget();
+						return verification
+							? { toolName: verification.toolName, path: resolve(this._cwd, verification.extensionPath) }
+							: undefined;
+					},
+				);
 				return aliases
 					? enforceExplicitOptionalToolRequest({ toolName, aliases, request: this._lastUserRequest })
 					: undefined;

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Google Antigravity request identity is refreshed from the inspected native CLI binary.
+
 ## [0.100.7] - 2026-09-29
 
 ### Added
