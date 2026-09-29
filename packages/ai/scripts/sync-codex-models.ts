@@ -1,12 +1,14 @@
 /**
- * Pins the Codex CLI's bundled model catalogue at one release, for the model generator and for the
+ * Pins the Codex CLI's bundled model catalogue at one release or commit, for the model generator and for the
  * client version pi reports to the Codex models endpoint. Codex's catalogue is the source of truth
  * for which models the ChatGPT backend serves to a Codex client and how each one is driven (context
  * window, reasoning levels, Responses Lite, Ultra's wire effort); pricing is not in it and comes from
  * the public listings in generate-models.ts.
  *
- *   node scripts/sync-codex-models.ts <codex-checkout> <release-tag>
- *   node scripts/sync-codex-models.ts ../../../external/codex rust-v0.156.1
+ *   node scripts/sync-codex-models.ts <codex-checkout> <release-tag-or-commit> [client-release-tag]
+ *   node scripts/sync-codex-models.ts /path/to/external/codex <commit-sha> rust-v0.159.0
+ *
+ * Unreleased Codex commits declare version 0.0.0; use the latest released client identity with them.
  *
  * Then regenerate (PI_FETCH_MODELS=1 npm run generate-models) and set OPENAI_CODEX_CLIENT_VERSION in
  * src/providers/openai-codex-account.ts to the written `clientVersion` (a test pins the two together).
@@ -41,14 +43,16 @@ function gitShow(checkout: string, tag: string, path: string): string {
 	});
 }
 
-const [checkout, tag] = process.argv.slice(2);
+const [checkout, tag, clientTag = tag] = process.argv.slice(2);
 if (!checkout || !tag) {
-	throw new Error("Usage: node scripts/sync-codex-models.ts <codex-checkout> <release-tag>");
+	throw new Error("Usage: node scripts/sync-codex-models.ts <codex-checkout> <release-tag-or-commit> [client-release-tag]");
 }
 
-const cargo = gitShow(checkout, tag, "codex-rs/Cargo.toml");
+const cargo = gitShow(checkout, clientTag, "codex-rs/Cargo.toml");
 const clientVersion = /\[workspace\.package\][^[]*?\nversion\s*=\s*"([^"]+)"/.exec(cargo)?.[1];
-if (!clientVersion) throw new Error(`No [workspace.package] version in codex-rs/Cargo.toml at ${tag}`);
+if (!clientVersion || clientVersion === "0.0.0") {
+	throw new Error(`No released client version in codex-rs/Cargo.toml at ${clientTag}; supply a client-release-tag`);
+}
 
 const catalogue = JSON.parse(gitShow(checkout, tag, "codex-rs/models-manager/models.json")) as {
 	models?: Record<string, unknown>[];
@@ -72,7 +76,7 @@ writeFileSync(
 	outputPath,
 	`${JSON.stringify(
 		{
-			source: { repository: "openai/codex", tag, path: "codex-rs/models-manager/models.json", clientVersion },
+			source: { repository: "openai/codex", tag, clientTag, path: "codex-rs/models-manager/models.json", clientVersion },
 			models,
 		},
 		null,

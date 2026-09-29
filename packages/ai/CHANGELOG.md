@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Added
+
+- Added GPT-6.1 Sol for OpenAI and ChatGPT Codex, including upstream reasoning defaults, Responses Lite, and pricing.
+
+### Changed
+
+- Refreshed provider model catalogs and the Codex reference to upstream commit `b1e72963c3b71a9265a551e54beff078384efed9`, using released Codex CLI 0.159.0 for account model discovery.
+
 ## [0.101.0] - 2026-09-29
 
 ## [0.100.8] - 2026-09-29

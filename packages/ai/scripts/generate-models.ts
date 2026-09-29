@@ -1880,6 +1880,8 @@ async function generateModels() {
 		{ id: "gpt-5.6-terra", name: "GPT-5.6 Terra", input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 },
 		{ id: "gpt-5.6-luna", name: "GPT-5.6 Luna", input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 },
 		{ id: "gpt-6-astra", name: "GPT-6 Astra", input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
+		// https://developers.openai.com/api/docs/pricing: GPT-6.1 Sol cached input is 5% of input.
+		{ id: "gpt-6.1-sol", name: "GPT-6.1 Sol", input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
 	] as const;
 	for (const spec of openAiGpt56Models) {
 		const existing = allModels.find((model) => model.provider === "openai" && model.id === spec.id);

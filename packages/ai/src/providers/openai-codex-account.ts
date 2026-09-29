@@ -190,10 +190,10 @@ export async function consumeOpenAICodexRateLimitResetCredit(
 /**
  * The Codex client release whose model protocol pi's Codex transport speaks. The models endpoint
  * lists only the models a client of this version may use, so it is part of what the account can use.
- * It is the release scripts/data/codex-models.json was pinned from (scripts/sync-codex-models.ts),
- * so the model catalogue and what the account is asked for always name the same release.
+ * It is the client release recorded in scripts/data/codex-models.json (scripts/sync-codex-models.ts).
+ * The catalogue can include newer upstream commits while retaining a released client identity.
  */
-export const OPENAI_CODEX_CLIENT_VERSION = "0.156.1";
+export const OPENAI_CODEX_CLIENT_VERSION = "0.159.0";
 
 export interface OpenAICodexAccountModel {
 	slug: string;

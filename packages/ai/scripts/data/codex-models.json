@@ -1,14 +1,39 @@
 {
 	"source": {
 		"repository": "openai/codex",
-		"tag": "rust-v0.156.1",
+		"tag": "b1e72963c3b71a9265a551e54beff078384efed9",
+		"clientTag": "rust-v0.159.0",
 		"path": "codex-rs/models-manager/models.json",
-		"clientVersion": "0.156.1"
+		"clientVersion": "0.159.0"
 	},
 	"models": [
 		{
 			"slug": "gpt-6-astra",
 			"display_name": "GPT-6-Astra",
+			"visibility": "list",
+			"priority": 2,
+			"minimal_client_version": "0.153.0",
+			"context_window": 272000,
+			"input_modalities": [
+				"text",
+				"image"
+			],
+			"default_reasoning_level": "low",
+			"supported_reasoning_levels": [
+				"low",
+				"medium",
+				"high",
+				"xhigh",
+				"max",
+				"ultra"
+			],
+			"multi_agent_reasoning_effort": "xhigh",
+			"use_responses_lite": true,
+			"supported_in_api": true
+		},
+		{
+			"slug": "gpt-6.1-sol",
+			"display_name": "GPT-6.1-Sol",
 			"visibility": "list",
 			"priority": 1,
 			"minimal_client_version": "0.153.0",
@@ -34,7 +59,7 @@
 			"slug": "gpt-6-sol",
 			"display_name": "GPT-6-Sol",
 			"visibility": "list",
-			"priority": 2,
+			"priority": 3,
 			"minimal_client_version": "0.155.0",
 			"context_window": 272000,
 			"input_modalities": [
@@ -58,7 +83,7 @@
 			"slug": "gpt-6-luna",
 			"display_name": "GPT-6-Luna",
 			"visibility": "list",
-			"priority": 3,
+			"priority": 4,
 			"minimal_client_version": "0.155.0",
 			"context_window": 272000,
 			"input_modalities": [
@@ -81,7 +106,7 @@
 			"slug": "gpt-5.6-sol",
 			"display_name": "GPT-5.6-Sol",
 			"visibility": "list",
-			"priority": 6,
+			"priority": 5,
 			"minimal_client_version": "0.144.0",
 			"context_window": 272000,
 			"input_modalities": [
@@ -97,6 +122,7 @@
 				"max",
 				"ultra"
 			],
+			"multi_agent_reasoning_effort": null,
 			"use_responses_lite": true,
 			"supported_in_api": true
 		},
@@ -104,7 +130,7 @@
 			"slug": "gpt-5.6-terra",
 			"display_name": "GPT-5.6-Terra",
 			"visibility": "list",
-			"priority": 7,
+			"priority": 8,
 			"minimal_client_version": "0.144.0",
 			"context_window": 272000,
 			"input_modalities": [
@@ -120,6 +146,7 @@
 				"max",
 				"ultra"
 			],
+			"multi_agent_reasoning_effort": null,
 			"use_responses_lite": true,
 			"supported_in_api": true
 		},
@@ -127,7 +154,7 @@
 			"slug": "gpt-5.6-luna",
 			"display_name": "GPT-5.6-Luna",
 			"visibility": "list",
-			"priority": 8,
+			"priority": 9,
 			"minimal_client_version": "0.144.0",
 			"context_window": 272000,
 			"input_modalities": [
@@ -142,6 +169,7 @@
 				"xhigh",
 				"max"
 			],
+			"multi_agent_reasoning_effort": null,
 			"use_responses_lite": true,
 			"supported_in_api": true
 		},
@@ -149,7 +177,7 @@
 			"slug": "gpt-daybreak-blue-latest",
 			"display_name": "Daybreak Blue",
 			"visibility": "hide",
-			"priority": 10,
+			"priority": 11,
 			"minimal_client_version": "0.142.2",
 			"context_window": 272000,
 			"input_modalities": [
@@ -172,7 +200,7 @@
 			"slug": "gpt-daybreak-red-latest",
 			"display_name": "Daybreak Red",
 			"visibility": "hide",
-			"priority": 11,
+			"priority": 12,
 			"minimal_client_version": "0.142.2",
 			"context_window": 372000,
 			"input_modalities": [
@@ -195,7 +223,7 @@
 			"slug": "gpt-5.5",
 			"display_name": "GPT-5.5",
 			"visibility": "list",
-			"priority": 12,
+			"priority": 13,
 			"minimal_client_version": "0.124.0",
 			"context_window": 272000,
 			"input_modalities": [
@@ -209,27 +237,7 @@
 				"high",
 				"xhigh"
 			],
-			"use_responses_lite": false,
-			"supported_in_api": true
-		},
-		{
-			"slug": "gpt-5.4",
-			"display_name": "GPT-5.4",
-			"visibility": "hide",
-			"priority": 16,
-			"minimal_client_version": "0.98.0",
-			"context_window": 272000,
-			"input_modalities": [
-				"text",
-				"image"
-			],
-			"default_reasoning_level": "medium",
-			"supported_reasoning_levels": [
-				"low",
-				"medium",
-				"high",
-				"xhigh"
-			],
+			"multi_agent_reasoning_effort": null,
 			"use_responses_lite": false,
 			"supported_in_api": true
 		},
@@ -252,6 +260,7 @@
 				"xhigh",
 				"max"
 			],
+			"multi_agent_reasoning_effort": null,
 			"use_responses_lite": true,
 			"supported_in_api": true
 		}

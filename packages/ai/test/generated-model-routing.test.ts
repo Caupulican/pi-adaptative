@@ -2,6 +2,28 @@ import { describe, expect, it } from "vitest";
 import { getModel, getModels } from "../src/models.ts";
 
 describe("generated model routing", () => {
+	it.each(["openai", "openai-codex"] as const)(
+		"includes GPT-6.1 Sol for %s with its supported controls",
+		(provider) => {
+			const model = getModels(provider).find((candidate) => candidate.id === "gpt-6.1-sol");
+			expect(model).toMatchObject({
+				api: provider === "openai" ? "openai-responses" : "openai-codex-responses",
+				reasoning: true,
+				defaultThinkingLevel: provider === "openai" ? "medium" : "low",
+				thinkingLevelMap: { off: null, minimal: null, xhigh: "xhigh", max: "max" },
+				input: ["text", "image"],
+				cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+				contextWindow: 272_000,
+				maxTokens: 128_000,
+			});
+			if (provider === "openai-codex") {
+				expect(model).toMatchObject({ openaiResponsesLite: true, thinkingLevelMap: { ultra: "xhigh" } });
+				const luna = getModel("openai-codex", "gpt-6-luna");
+				expect(luna.thinkingLevelMap).not.toHaveProperty("ultra");
+			}
+		},
+	);
+
 	it("includes Claude Sonnet 5.5 with its published direct-provider metadata", () => {
 		const model = getModels("anthropic").find((candidate) => candidate.id === "claude-sonnet-5-5");
 		expect(model).toMatchObject({
