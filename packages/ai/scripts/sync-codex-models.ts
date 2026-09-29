@@ -33,6 +33,8 @@ const KEPT_FIELDS = [
 	"multi_agent_reasoning_effort",
 	"use_responses_lite",
 	"supported_in_api",
+	"service_tiers",
+	"default_service_tier",
 ] as const;
 
 function gitShow(checkout: string, tag: string, path: string): string {

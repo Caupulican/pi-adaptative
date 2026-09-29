@@ -2,7 +2,6 @@ import type * as NodeOs from "node:os";
 import type {
 	NamespaceTool,
 	Tool as OpenAITool,
-	ResponseCreateParamsStreaming,
 	ResponseInput,
 	ResponseInputItem,
 	ResponseStreamEvent,
@@ -22,12 +21,14 @@ if (typeof process !== "undefined" && (process.versions?.node || process.version
 	});
 }
 
+import { isModelServiceTierAdvertised } from "../model-capabilities.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
 	Api,
 	AssistantMessage,
 	Context,
 	Model,
+	ServiceTier,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -135,7 +136,7 @@ interface RequestBody {
 	parallel_tool_calls?: boolean;
 	temperature?: number;
 	reasoning?: { effort?: string; summary?: string; context?: "auto" | "current_turn" | "all_turns" };
-	service_tier?: ResponseCreateParamsStreaming["service_tier"];
+	service_tier?: ServiceTier;
 	text?: { verbosity?: string };
 	include?: string[];
 	prompt_cache_key?: string;
@@ -363,6 +364,19 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				const nextBody = await options.onPayload(body, model);
 				if (nextBody !== undefined) body = nextBody as RequestBody;
 			}
+			// Host payload hooks remain usable; entitlement, handshake routing and pricing follow
+			// the final control fields rather than the pre-hook options.
+			const framing = body ?? { model: model.id, service_tier: options?.serviceTier };
+			if (
+				framing.service_tier === "ultrafast" &&
+				(framing.model !== model.id || !isModelServiceTierAdvertised(model, "ultrafast"))
+			) {
+				throw new Error(`The model catalog does not advertise ultrafast for ${framing.model}.`);
+			}
+			const effectiveOptions = body ? { ...options, serviceTier: body.service_tier } : options;
+			const routingHint = `model=${framing.model}${
+				framing.service_tier && framing.service_tier !== "default" ? `;tier=${framing.service_tier}` : ""
+			}`;
 			const getBody = (): RequestBody => {
 				if (!body) body = buildRequestBody(model, context, options, cacheSessionId);
 				return body;
@@ -376,6 +390,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				apiKey,
 				cacheSessionId,
 				model.openaiResponsesLite === true,
+				routingHint,
 			);
 			let websocketHeaders = buildWebSocketHeaders(
 				model.headers,
@@ -384,6 +399,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				accountId,
 				apiKey,
 				websocketRequestId,
+				routingHint,
 			);
 			let bodyJson: string | undefined;
 			const serializeBody = (): string => {
@@ -410,6 +426,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					replacementAccountId,
 					replacementKey,
 					websocketRequestId,
+					routingHint,
 				);
 				sseHeaders = buildSSEHeaders(
 					model.headers,
@@ -419,6 +436,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					replacementKey,
 					cacheSessionId,
 					model.openaiResponsesLite === true,
+					routingHint,
 				);
 			};
 			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(cacheSessionId);
@@ -453,7 +471,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 								idleTimeoutMs,
 								websocketConnectTimeoutMs,
 								cacheSessionId,
-								options,
+								effectiveOptions,
 							);
 							break;
 						} catch (error) {
@@ -636,7 +654,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 				startEmitted = true;
 				stream.push({ type: "start", partial: output });
 			}
-			await processStream(response, output, stream, model, context, options);
+			await processStream(response, output, stream, model, context, effectiveOptions);
 			markSseSuccess(cacheSessionId);
 
 			assertSuccessfulTerminalResponse(output);
@@ -796,10 +814,13 @@ function groupCodexResponsesLiteTools(tools: OpenAITool[]): OpenAITool[] {
 }
 
 function resolveCodexServiceTier(
-	responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-	requestServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-): ResponseCreateParamsStreaming["service_tier"] | undefined {
-	if (responseServiceTier === "default" && (requestServiceTier === "flex" || requestServiceTier === "priority")) {
+	responseServiceTier: ServiceTier | undefined,
+	requestServiceTier: ServiceTier | undefined,
+): ServiceTier | undefined {
+	if (
+		responseServiceTier === "default" &&
+		(requestServiceTier === "flex" || requestServiceTier === "priority" || requestServiceTier === "ultrafast")
+	) {
 		return requestServiceTier;
 	}
 	return responseServiceTier ?? requestServiceTier;
@@ -2207,9 +2228,10 @@ function buildBaseCodexHeaders(
 	credentialHeaders: Record<string, string> | undefined,
 	accountId: string,
 	token: string,
+	routingHint: string,
 ): Headers {
 	const userAgent = _os ? `pi (${_os.platform()} ${_os.release()}; ${_os.arch()})` : "pi (browser)";
-	return buildOpenAICodexHeaders({
+	const headers = buildOpenAICodexHeaders({
 		token,
 		accountId,
 		initial: initHeaders,
@@ -2217,6 +2239,9 @@ function buildBaseCodexHeaders(
 		credentialHeaders,
 		userAgent,
 	});
+	// Set after caller headers: routing follows the admitted model/tier, including cached sockets.
+	headers.set("x-codex-routing-hint", routingHint);
+	return headers;
 }
 
 function buildSSEHeaders(
@@ -2225,10 +2250,18 @@ function buildSSEHeaders(
 	credentialHeaders: Record<string, string> | undefined,
 	accountId: string,
 	token: string,
-	sessionId?: string,
-	useResponsesLite = false,
+	sessionId: string | undefined,
+	useResponsesLite: boolean,
+	routingHint: string,
 ): Headers {
-	const headers = buildBaseCodexHeaders(initHeaders, additionalHeaders, credentialHeaders, accountId, token);
+	const headers = buildBaseCodexHeaders(
+		initHeaders,
+		additionalHeaders,
+		credentialHeaders,
+		accountId,
+		token,
+		routingHint,
+	);
 	headers.set("OpenAI-Beta", "responses=experimental");
 	headers.set("accept", "text/event-stream");
 	headers.set("content-type", "application/json");
@@ -2251,8 +2284,16 @@ function buildWebSocketHeaders(
 	accountId: string,
 	token: string,
 	requestId: string,
+	routingHint: string,
 ): Headers {
-	const headers = buildBaseCodexHeaders(initHeaders, additionalHeaders, credentialHeaders, accountId, token);
+	const headers = buildBaseCodexHeaders(
+		initHeaders,
+		additionalHeaders,
+		credentialHeaders,
+		accountId,
+		token,
+		routingHint,
+	);
 	headers.delete("accept");
 	headers.delete("content-type");
 	headers.delete("OpenAI-Beta");

@@ -20,6 +20,17 @@ describe("subagent level-0 prompt composition", () => {
 		expect(composed).toContain("You do research.");
 	});
 
+	it("retains fixed settings, scoped autonomy and code evidence even under an override", () => {
+		const composed = composeSubagentSystemPrompt({ rolePrompt: "Repair the parser.", override: "Just say done." });
+		expect(composed).toContain("Model/effort fixed");
+		expect(composed).toContain("requested scope");
+		expect(composed).toContain("missing input or authority");
+		expect(composed).toContain("Check code");
+		expect(composed).toContain("command/result or missing check and why");
+		expect(composed).toContain("then stop");
+		expect(composeSubagentSystemPrompt({ rolePrompt: "Read-only research." })).toContain("Check code");
+	});
+
 	it("layers a profile soul above the role prompt", () => {
 		const composed = composeSubagentSystemPrompt({ soul: "You are in SCOUT mode.", rolePrompt: "You do research." });
 		const soulIndex = composed.indexOf("SCOUT mode");

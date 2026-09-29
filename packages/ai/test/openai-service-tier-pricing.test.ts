@@ -19,7 +19,7 @@ describe("OpenAI service-tier pricing", () => {
 	it("keeps both request APIs on the provider-neutral tier contract", () => {
 		expectTypeOf<OpenAIResponsesOptions["serviceTier"]>().toEqualTypeOf<StreamOptions["serviceTier"]>();
 		expectTypeOf<OpenAICodexResponsesOptions["serviceTier"]>().toEqualTypeOf<StreamOptions["serviceTier"]>();
-		expectTypeOf<"ultrafast">().not.toExtend<StreamOptions["serviceTier"]>();
+		expectTypeOf<"ultrafast">().toExtend<StreamOptions["serviceTier"]>();
 	});
 
 	it.each([
@@ -37,5 +37,11 @@ describe("OpenAI service-tier pricing", () => {
 			cacheWrite: 4 * multiplier,
 			total: 10 * multiplier,
 		});
+	});
+
+	it("marks Ultrafast dollars as a base-rate estimate rather than inventing a premium", () => {
+		const result = usage();
+		applyOpenAIServiceTierPricing(result, "ultrafast", { id: "gpt-6.1-sol" });
+		expect(result.cost).toMatchObject({ total: 10, estimate: "base-rates" });
 	});
 });

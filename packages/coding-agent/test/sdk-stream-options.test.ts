@@ -1,3 +1,4 @@
+// @isolated: account catalog integration spies on the process fetch implementation
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -9,7 +10,7 @@ import {
 	type Model,
 	type SimpleStreamOptions,
 } from "@caupulican/pi-ai";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { type CreateAgentSessionOptions, createAgentSession } from "../src/core/sdk.ts";
@@ -63,7 +64,8 @@ describe("createAgentSession stream options", () => {
 			stopReason: "stop",
 			timestamp: Date.now(),
 		};
-		stream.end(message);
+		stream.push({ type: "done", reason: "stop", message });
+		stream.end();
 		return stream;
 	}
 
@@ -72,14 +74,16 @@ describe("createAgentSession stream options", () => {
 		settings: {
 			httpIdleTimeoutMs?: number;
 			websocketConnectTimeoutMs?: number;
-			fastMode?: Record<string, boolean>;
+			fastMode?: Record<string, boolean | "ultrafast">;
 		},
 		requestOptions: SimpleStreamOptions = {},
 		provider = "capture-provider",
 		isChildSession = false,
 		sessionOptions: Pick<CreateAgentSessionOptions, "serviceTier"> = {},
+		modelMetadata: Pick<Model<Api>, "serviceTiers"> = {},
 	): Promise<SimpleStreamOptions | undefined> {
 		const model = createModel(api, provider);
+		Object.assign(model, modelMetadata);
 		const settingsManager = SettingsManager.inMemory(settings);
 
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
@@ -118,7 +122,11 @@ describe("createAgentSession stream options", () => {
 				getApiKey: session.agent.getApiKey,
 				resolveProviderRequestAuth: session.agent.resolveProviderRequestAuth,
 			});
-			await session.agent.streamFn(model, { messages: [] }, { ...requestOptions, ...requestAuth });
+			const stream = await session.agent.streamFn(model, { messages: [] }, { ...requestOptions, ...requestAuth });
+			const result = await stream.result();
+			if (result.stopReason === "error" || result.stopReason === "aborted") {
+				throw new Error(result.errorMessage);
+			}
 			return capturedOptions;
 		} finally {
 			await session.disposeAndWait();
@@ -233,6 +241,120 @@ describe("createAgentSession stream options", () => {
 
 		expect(options?.serviceTier).toBe("priority");
 	});
+
+	it.each([false, true])("forwards advertised Ultrafast from saved preferences (child=%s)", async (isChild) => {
+		const options = await captureStreamOptions(
+			"openai-codex-responses",
+			{ fastMode: { "openai-codex": "ultrafast" } },
+			{},
+			"openai-codex",
+			isChild,
+			{},
+			{ serviceTiers: [{ id: "ultrafast", name: "Ultrafast", description: "Lower latency" }] },
+		);
+		expect(options?.serviceTier).toBe("ultrafast");
+	});
+
+	it("filters saved Ultrafast when the selected model omits it", async () => {
+		const options = await captureStreamOptions(
+			"openai-codex-responses",
+			{ fastMode: { "openai-codex": "ultrafast" } },
+			{},
+			"openai-codex",
+			false,
+			{},
+			{ serviceTiers: [] },
+		);
+		expect(options?.serviceTier).toBeUndefined();
+	});
+
+	it("rejects an explicitly requested unadvertised Ultrafast tier", async () => {
+		await expect(
+			captureStreamOptions(
+				"openai-codex-responses",
+				{},
+				{ serviceTier: "ultrafast" },
+				"openai-codex",
+				false,
+				{},
+				{ serviceTiers: [] },
+			),
+		).rejects.toThrow("does not advertise ultrafast");
+	});
+
+	it("rejects unadvertised Ultrafast supplied as the session default", async () => {
+		await expect(
+			captureStreamOptions(
+				"openai-codex-responses",
+				{},
+				{},
+				"openai-codex",
+				false,
+				{ serviceTier: "ultrafast" },
+				{ serviceTiers: [] },
+			),
+		).rejects.toThrow("does not advertise ultrafast");
+	});
+
+	it.each([{ advertised: true }, { advertised: false }])(
+		"uses live account tiers throughout native requests (advertised=$advertised)",
+		async ({ advertised }) => {
+			const model = createModel("openai-codex-responses", "openai-codex");
+			model.serviceTiers = [{ id: "priority", name: "Fast", description: "Priority processing" }];
+			const tiers = advertised ? [{ id: "ultrafast", name: "Ultrafast", description: "Lower latency" }] : [];
+			const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+				new Response(
+					JSON.stringify({
+						models: [
+							{
+								slug: model.id,
+								visibility: "list",
+								priority: 1,
+								supported_in_api: true,
+								service_tiers: tiers,
+							},
+						],
+					}),
+				),
+			);
+			const token = `h.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture" } })).toString("base64url")}.s`;
+			const authStorage = AuthStorage.inMemory();
+			authStorage.setRuntimeApiKey("openai-codex", token);
+			const modelRegistry = ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+			let captured: SimpleStreamOptions | undefined;
+			let transported: Model<Api> | undefined;
+			modelRegistry.registerProvider("openai-codex", {
+				api: model.api,
+				streamSimple: (requestModel, _context, options) => {
+					captured = options;
+					transported = requestModel;
+					return createDoneStream(model.api);
+				},
+			});
+			let session: Awaited<ReturnType<typeof createAgentSession>>["session"] | undefined;
+			try {
+				({ session } = await createAgentSession({
+					cwd,
+					agentDir,
+					model,
+					authStorage,
+					modelRegistry,
+					settingsManager: SettingsManager.inMemory({ fastMode: { "openai-codex": "ultrafast" } }),
+					sessionManager: SessionManager.inMemory(cwd),
+				}));
+				const stream = await session.agent.streamFn(model, { messages: [] }, { apiKey: token });
+				expect((await stream.result()).stopReason).toBe("stop");
+				expect(captured?.serviceTier).toBe(advertised ? "ultrafast" : undefined);
+				expect(transported?.serviceTiers).toEqual(tiers);
+				expect(session.getFastModeServiceTiers(model)).toEqual(tiers);
+				expect(fetch).toHaveBeenCalledTimes(1);
+			} finally {
+				await session?.disposeAndWait();
+				modelRegistry.unregisterProvider("openai-codex");
+				fetch.mockRestore();
+			}
+		},
+	);
 
 	it("maps an explicit Codex fast-off preference to default even over a session tier", async () => {
 		const options = await captureStreamOptions(

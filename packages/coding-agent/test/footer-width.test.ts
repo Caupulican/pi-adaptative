@@ -116,7 +116,7 @@ function createSession(options: {
 			isUsingSubscription: () => options.subscription ?? false,
 		},
 		settingsManager: {
-			getFastModeEnabled: () => options.fastMode,
+			getFastModePreference: () => options.fastMode,
 			getCostGuardSettings: () => ({
 				enabled: options.costGuardEnabled ?? false,
 				maxTurnUsd: options.costGuardDecision?.thresholdUsd ?? 0,

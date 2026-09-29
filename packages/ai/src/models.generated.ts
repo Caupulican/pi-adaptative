@@ -10249,6 +10249,7 @@ export const MODELS = {
 			reasoning: true,
 			defaultThinkingLevel: "medium",
 			thinkingLevelMap: {"off":null,"minimal":"low","xhigh":"xhigh"},
+			serviceTiers: [{"id":"priority","name":"Fast","description":"1.5x speed, increased usage"}],
 			input: ["text", "image"],
 			cost: {
 				input: 5,
@@ -10270,6 +10271,7 @@ export const MODELS = {
 			defaultThinkingLevel: "medium",
 			thinkingLevelMap: {"off":null,"minimal":null,"xhigh":"xhigh","max":"max"},
 			openaiResponsesLite: true,
+			serviceTiers: [{"id":"priority","name":"Fast","description":"1.5x speed, increased usage"}],
 			input: ["text", "image"],
 			cost: {
 				input: 0.2,
@@ -10291,6 +10293,7 @@ export const MODELS = {
 			defaultThinkingLevel: "low",
 			thinkingLevelMap: {"off":null,"minimal":null,"xhigh":"xhigh","max":"max","ultra":"max"},
 			openaiResponsesLite: true,
+			serviceTiers: [{"id":"priority","name":"Fast","description":"1.5x speed, increased usage"}],
 			input: ["text", "image"],
 			cost: {
 				input: 4,
@@ -10312,6 +10315,7 @@ export const MODELS = {
 			defaultThinkingLevel: "medium",
 			thinkingLevelMap: {"off":null,"minimal":null,"xhigh":"xhigh","max":"max","ultra":"max"},
 			openaiResponsesLite: true,
+			serviceTiers: [{"id":"priority","name":"Fast","description":"1.5x speed, increased usage"}],
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -10333,6 +10337,7 @@ export const MODELS = {
 			defaultThinkingLevel: "low",
 			thinkingLevelMap: {"off":null,"minimal":null,"xhigh":"xhigh","max":"max","ultra":"xhigh"},
 			openaiResponsesLite: true,
+			serviceTiers: [{"id":"priority","name":"Fast","description":"2x speed, increased usage"}],
 			input: ["text", "image"],
 			cost: {
 				input: 10,
@@ -10354,6 +10359,8 @@ export const MODELS = {
 			defaultThinkingLevel: "medium",
 			thinkingLevelMap: {"off":null,"minimal":null,"xhigh":"xhigh","max":"max"},
 			openaiResponsesLite: true,
+			serviceTiers: [{"id":"priority","name":"Fast","description":"1.5x speed"}],
+			defaultServiceTier: "priority",
 			input: ["text", "image"],
 			cost: {
 				input: 0.1,
@@ -10375,6 +10382,8 @@ export const MODELS = {
 			defaultThinkingLevel: "medium",
 			thinkingLevelMap: {"off":null,"minimal":null,"xhigh":"xhigh","max":"max","ultra":"max"},
 			openaiResponsesLite: true,
+			serviceTiers: [{"id":"priority","name":"Fast","description":"1.5x speed"}],
+			defaultServiceTier: "priority",
 			input: ["text", "image"],
 			cost: {
 				input: 2,
@@ -10396,6 +10405,7 @@ export const MODELS = {
 			defaultThinkingLevel: "low",
 			thinkingLevelMap: {"off":null,"minimal":null,"xhigh":"xhigh","max":"max","ultra":"xhigh"},
 			openaiResponsesLite: true,
+			serviceTiers: [{"id":"priority","name":"Fast","description":"2x speed, increased usage"}],
 			input: ["text", "image"],
 			cost: {
 				input: 2,

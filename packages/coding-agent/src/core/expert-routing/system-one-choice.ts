@@ -40,6 +40,9 @@ export const lightweightQuestionId = (index: number): string => `lightweight_${i
 
 export const ROUTE_CHOICE_QUESTION_ID = "route_choice";
 
+/** Host route-choice request budget; callers needing complete evidence must fit or refuse explicitly. */
+export const MAX_ROUTE_CHOICE_REQUEST_CHARACTERS = 4_000;
+
 export type RouteCategory = "flash_light" | "flash_deep" | "strong_medium" | "strong_deep";
 
 /** What each category means to System One, with the work it is and is not for. */
@@ -90,6 +93,7 @@ export type CategoryOutcome =
 	| { readonly kind: "fallback"; readonly reason: string };
 
 interface ChoiceAnswer {
+	readonly type?: unknown;
 	readonly choice?: unknown;
 	readonly confidence?: unknown;
 	readonly probabilities?: unknown;
@@ -109,6 +113,7 @@ async function decideChoice<T extends string>(
 	options: readonly T[],
 	ask: (subset: readonly T[]) => Promise<ChoiceAnswer | undefined>,
 	provisional: boolean,
+	singleAttempt = false,
 ): Promise<ChoiceDecision<T> | { readonly fallback: string }> {
 	const isOption = (value: unknown): value is T => typeof value === "string" && options.includes(value as T);
 	try {
@@ -116,9 +121,12 @@ async function decideChoice<T extends string>(
 		if (!first || !isOption(first.choice)) return { fallback: "System One returned no option" };
 		const leader = first.choice;
 		const confidence = typeof first.confidence === "number" ? first.confidence : Number.NaN;
+		if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1)
+			return { fallback: "System One returned an invalid confidence" };
 		const gate = confidenceGate(confidence);
 		if (gate === "decide")
 			return { choice: leader, confidence, stage: "decided", reasons: [`confidence ${confidence}`] };
+		if (singleAttempt) return { fallback: `System One leaned ${leader} at only ${confidence}` };
 		const runnerUp =
 			first.probabilities && typeof first.probabilities === "object"
 				? Object.entries(first.probabilities as Record<string, unknown>)
@@ -129,7 +137,12 @@ async function decideChoice<T extends string>(
 		if (runnerUp) {
 			const narrowed = await ask([leader, runnerUp]);
 			const narrowedConfidence = typeof narrowed?.confidence === "number" ? narrowed.confidence : Number.NaN;
-			if (isOption(narrowed?.choice) && confidenceGate(narrowedConfidence) === "decide")
+			if (
+				isOption(narrowed?.choice) &&
+				(narrowed?.choice === leader || narrowed?.choice === runnerUp) &&
+				narrowedConfidence <= 1 &&
+				confidenceGate(narrowedConfidence) === "decide"
+			)
 				return {
 					choice: narrowed.choice,
 					confidence: narrowedConfidence,
@@ -152,6 +165,35 @@ async function decideChoice<T extends string>(
 	}
 }
 
+/** One settled choice among host-compiled model/effort profiles; uncertainty preserves the host default. */
+export async function chooseHostRouteProfile(
+	judge: RouteChoiceJudge | undefined,
+	input: {
+		readonly request: string;
+		readonly options: readonly { id: string; description: string }[];
+		readonly signal?: AbortSignal;
+	},
+): Promise<ChoiceDecision<string> | { readonly fallback: string }> {
+	input.signal?.throwIfAborted();
+	if (!judge) return { fallback: "System One is not bound" };
+	const ids = input.options.map((option) => option.id);
+	if (ids.length === 0 || new Set(ids).size !== ids.length || ids.some((id) => !id.trim()))
+		return { fallback: "no distinct host-approved profile" };
+	if (input.request.length > MAX_ROUTE_CHOICE_REQUEST_CHARACTERS)
+		return { fallback: "request exceeds the host route-choice budget" };
+	const result = await decideChoice(
+		ids,
+		async () => {
+			const answer = asChoice(await judge.evaluateRouteChoice(input, input.signal), ROUTE_CHOICE_QUESTION_ID);
+			return answer?.type === "choice" ? answer : undefined;
+		},
+		false,
+		true,
+	);
+	input.signal?.throwIfAborted();
+	return result;
+}
+
 export async function chooseRouteCategory(
 	judge: RouteChoiceJudge | undefined,
 	input: {
@@ -172,7 +214,7 @@ export async function chooseRouteCategory(
 			asChoice(
 				await judge.evaluateRouteChoice(
 					{
-						request: input.request,
+						request: `Select the lightest model category adequate for this task.\n${input.request}`,
 						options: subset.map((category) => ({ id: category, description: ROUTE_CATEGORIES[category] })),
 					},
 					input.signal,

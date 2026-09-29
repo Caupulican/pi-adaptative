@@ -54,6 +54,7 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	...["fetch", "web_search"].map((toolName) => [toolName, NETWORK_POLICY] as const),
 	["webfetch", policy([["network.http"]], "service-proxy")],
 	["typesafe_review", policy([["semantic.judge"]], "service-proxy")],
+	["peer", policy([["semantic.judge"], ["workflow.delegate"]], ["service-proxy", "control-plane"])],
 	[TOOL_SCHEMA_SEARCH_NAME, TOOL_SCHEMA_SEARCH_POLICY],
 	[
 		"image_generate",

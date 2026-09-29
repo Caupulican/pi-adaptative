@@ -165,12 +165,12 @@ environment value a lane-bound process can set to shed the worker ceiling below.
 ### Forbidden-tool ceiling
 
 A worker session can never activate: the legacy composite `goal`, `secret_store`, `memory`, `delegate`,
-`improvement_loop`, `model_fitness`, `pi_collaboration`, `runtime_update`, `image_generate`, or `context_scout`. This is enforced as the FIRST line of the tool registry's allow
+`improvement_loop`, `model_fitness`, `pi_collaboration`, `runtime_update`, `image_generate`, `peer`, or `context_scout`. This is enforced as the FIRST line of the tool registry's allow
 predicate (`RuntimeBuilder.refreshToolRegistry`'s `isAllowedTool`) -- it wins over an allow-list,
 an exclude-list, or an active resource profile that names the tool explicitly. The legacy `goal`
 stays root-only because its composite action set embeds `dispatch_worker`; its non-dispatching
 `create_goal`/`get_goal`/`update_goal` lifecycle tools inherit normally. `delegate`,
-`pi_collaboration`, `context_scout`, and `model_fitness` launch agent/provider worker loops.
+`pi_collaboration`, `context_scout`, `peer`, and `model_fitness` launch agent/provider worker loops.
 `memory` and `improvement_loop` mutate root-owned reflection state, while `secret_store` mutates
 machine credential/project bindings. Ordinary tools including `pipeline`, `ask_question`, `skill`,
 `extensionify`, `skillify`, and `run_toolkit_script` inherit when the orchestrator exposes them.

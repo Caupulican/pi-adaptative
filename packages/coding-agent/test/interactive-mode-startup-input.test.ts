@@ -40,8 +40,8 @@ type SubmitContext = {
 		model: Model<Api>;
 		readonly thinkingLevel: ThinkingLevel;
 		settingsManager: {
-			getFastModeEnabled(provider: string): boolean | undefined;
-			setFastModeEnabled(provider: string, enabled: boolean): void;
+			getFastModePreference(provider: string): boolean | "ultrafast" | undefined;
+			setFastModePreference(provider: string, enabled: boolean | "ultrafast"): void;
 		};
 		setThinkingLevel(level: ThinkingLevel, options?: { persistSettings?: boolean }): void;
 		prompt: (text: string, options?: unknown) => Promise<void>;
@@ -91,7 +91,7 @@ const interactiveModePrototype = InteractiveMode.prototype as unknown as Interac
 
 function createSubmitContext(): SubmitContext {
 	let thinkingLevel: ThinkingLevel = "high";
-	const fastMode = new Map<string, boolean>();
+	const fastMode = new Map<string, boolean | "ultrafast">();
 	const queued: { steering: QueuedInput[]; followUp: QueuedInput[] } = { steering: [], followUp: [] };
 	return {
 		compactionQueuedMessages: [],
@@ -138,8 +138,8 @@ function createSubmitContext(): SubmitContext {
 				return thinkingLevel;
 			},
 			settingsManager: {
-				getFastModeEnabled: (provider) => fastMode.get(provider),
-				setFastModeEnabled: (provider, enabled) => fastMode.set(provider, enabled),
+				getFastModePreference: (provider) => fastMode.get(provider),
+				setFastModePreference: (provider, enabled) => fastMode.set(provider, enabled),
 			},
 			setThinkingLevel: (level) => {
 				thinkingLevel = level;

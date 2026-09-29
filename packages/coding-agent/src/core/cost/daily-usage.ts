@@ -16,6 +16,7 @@ export type DailyUsageWindow = {
 };
 
 export type DailyUsageTotals = {
+	costEstimate?: "base-rates";
 	ownCost: number;
 	spawnedCost: number;
 	totalCost: number;
@@ -48,7 +49,7 @@ function isInsideWindow(timestamp: number, window: DailyUsageWindow): boolean {
 }
 
 function addUsage(
-	totals: Pick<DailyUsageTotals, "input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens">,
+	totals: Pick<DailyUsageTotals, "input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens" | "costEstimate">,
 	usage: Usage,
 ): void {
 	totals.input += usage.input;
@@ -56,6 +57,7 @@ function addUsage(
 	totals.cacheRead += usage.cacheRead;
 	totals.cacheWrite += usage.cacheWrite;
 	totals.totalTokens += usage.totalTokens;
+	if (usage.cost.estimate === "base-rates") totals.costEstimate = "base-rates";
 }
 
 function addDailyUsageFromEntries(
@@ -187,7 +189,7 @@ export function formatDailyUsageBreakdown(
 	formatLabel: (label: string) => string = (label) => label,
 ): string {
 	return [
-		`${formatLabel("Today:")} $${totals.totalCost.toFixed(4)}`,
+		`${formatLabel("Today:")} ${totals.costEstimate ? "~" : ""}$${totals.totalCost.toFixed(4)}${totals.costEstimate ? " (base-rate estimate)" : ""}`,
 		`${formatLabel("Own/session messages:")} $${totals.ownCost.toFixed(4)}`,
 		`${formatLabel("Spawned/background reports:")} $${totals.spawnedCost.toFixed(4)}`,
 		`${formatLabel("Sessions scanned:")} ${totals.sessions}`,

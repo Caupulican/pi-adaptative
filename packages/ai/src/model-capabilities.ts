@@ -1,4 +1,13 @@
-import type { Api, Model, ModelThinkingLevel } from "./types.ts";
+import type { Api, Model, ModelServiceTier, ModelThinkingLevel } from "./types.ts";
+
+/** Scheduling entitlement comes from exact advertised metadata, not a model-name heuristic. */
+export function isModelServiceTierAdvertised<TApi extends Api>(
+	model: Model<TApi>,
+	tier: string,
+	serviceTiers: readonly ModelServiceTier[] | undefined = model.serviceTiers,
+): boolean {
+	return serviceTiers?.some((candidate) => candidate.id === tier) ?? false;
+}
 
 const EXTENDED_THINKING_LEVELS: ModelThinkingLevel[] = [
 	"off",

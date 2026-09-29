@@ -24,6 +24,7 @@ import type {
 
 export type { HmoeIndependence, HmoePreference, HmoePreset, HmoeTeamStrategy, HmoeWeights };
 
+import type { FastModePreference } from "./fast-mode.ts";
 import {
 	DEFAULT_GOAL_AUTO_CONTINUE,
 	DEFAULT_GOAL_AUTO_CONTINUE_DELAY_MS,
@@ -865,8 +866,8 @@ export interface Settings {
 	/** Globally pinned model identities. Identity is the provider and model id pair, not id alone. */
 	modelFavorites?: ModelFavorite[];
 	memorySystem?: MemorySystem;
-	/** Provider-scoped fast-mode preferences. Concrete providers own the meaning of enabled. */
-	fastMode?: Record<string, boolean>;
+	/** Provider-scoped fast-mode preferences. Concrete providers own the supported modes. */
+	fastMode?: Record<string, FastModePreference>;
 	transport?: TransportSetting; // default: "auto"
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
@@ -3176,18 +3177,30 @@ export class SettingsManager {
 		this.save();
 	}
 
-	getFastModeEnabled(provider: string): boolean | undefined {
-		const enabled = this.settings.fastMode?.[provider];
-		return typeof enabled === "boolean" ? enabled : undefined;
+	getFastModePreference(provider: string): FastModePreference | undefined {
+		const preference = this.settings.fastMode?.[provider];
+		return typeof preference === "boolean" || preference === "ultrafast" ? preference : undefined;
 	}
 
-	setFastModeEnabled(provider: string, enabled: boolean): void {
+	setFastModePreference(provider: string, preference: FastModePreference): void {
 		if (!provider || provider === "__proto__" || provider === "constructor" || provider === "prototype") {
 			throw new TypeError(`Invalid fast-mode provider '${provider}'.`);
 		}
-		this.globalSettings.fastMode = { ...(this.globalSettings.fastMode ?? {}), [provider]: enabled };
+		if (typeof preference !== "boolean" && preference !== "ultrafast") {
+			throw new TypeError("Invalid fast-mode preference; expected a boolean or 'ultrafast'.");
+		}
+		this.globalSettings.fastMode = { ...(this.globalSettings.fastMode ?? {}), [provider]: preference };
 		this.markModified("fastMode", provider);
 		this.save();
+	}
+
+	getFastModeEnabled(provider: string): boolean | undefined {
+		const preference = this.getFastModePreference(provider);
+		return preference === "ultrafast" ? true : preference;
+	}
+
+	setFastModeEnabled(provider: string, enabled: boolean): void {
+		this.setFastModePreference(provider, enabled);
 	}
 
 	getTransport(): TransportSetting {

@@ -574,14 +574,30 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const websocketConnectTimeoutMs =
 				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
 			const attributionHeaders = getAttributionHeaders(model, options?.sessionId);
+			if (model.provider === "openai-codex") {
+				await accountModels.ready(options?.signal);
+				if (options?.signal?.aborted) throw new Error("Request was aborted");
+			}
+			const serviceTiers = accountModels.serviceTiers(model);
 			const fastModeServiceTier = resolveFastModeServiceTier(
 				model,
-				settingsManager.getFastModeEnabled(model.provider),
+				settingsManager.getFastModePreference(model.provider),
+				serviceTiers,
 			);
+			const serviceTier =
+				options?.serviceTier === undefined ? (fastModeServiceTier ?? defaultServiceTier) : options.serviceTier;
+			if (
+				(serviceTier === "ultrafast" || (model.provider === "openai-codex" && serviceTier === "priority")) &&
+				resolveFastModeServiceTier(model, serviceTier === "ultrafast" ? "ultrafast" : true, serviceTiers) !==
+					serviceTier
+			) {
+				throw new Error(
+					`The model/account catalog does not advertise ${serviceTier} for ${model.provider}/${model.id}.`,
+				);
+			}
 			const providerOptions = {
 				...options,
-				serviceTier:
-					options?.serviceTier === undefined ? (fastModeServiceTier ?? defaultServiceTier) : options.serviceTier,
+				serviceTier,
 				...(bedrockScope ? { region: bedrockScope.region, profile: bedrockScope.profile } : {}),
 				interactionMode: forceBackgroundRequests ? "background" : (options?.interactionMode ?? "user"),
 				onInteractiveAuthRecovery: options?.onInteractiveAuthRecovery ?? recoverBedrockSsoAuthentication,
@@ -606,7 +622,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				credentialHeadersFor: (apiKey: string) =>
 					modelRegistry.authStorage.getOAuthRequestHeaders(model.provider, apiKey),
 			};
-			return streamSimple(model, context, providerOptions);
+			const requestModel =
+				model.provider === "openai-codex" && serviceTiers !== model.serviceTiers
+					? { ...model, serviceTiers }
+					: model;
+			return streamSimple(requestModel, context, providerOptions);
 		},
 		onPayload: async (payload, _model) => {
 			const runner = extensionRunnerRef.current;

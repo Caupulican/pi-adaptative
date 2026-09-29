@@ -29,7 +29,15 @@
 			],
 			"multi_agent_reasoning_effort": "xhigh",
 			"use_responses_lite": true,
-			"supported_in_api": true
+			"supported_in_api": true,
+			"service_tiers": [
+				{
+					"id": "priority",
+					"name": "Fast",
+					"description": "2x speed, increased usage"
+				}
+			],
+			"default_service_tier": null
 		},
 		{
 			"slug": "gpt-6.1-sol",
@@ -53,7 +61,15 @@
 			],
 			"multi_agent_reasoning_effort": "xhigh",
 			"use_responses_lite": true,
-			"supported_in_api": true
+			"supported_in_api": true,
+			"service_tiers": [
+				{
+					"id": "priority",
+					"name": "Fast",
+					"description": "2x speed, increased usage"
+				}
+			],
+			"default_service_tier": null
 		},
 		{
 			"slug": "gpt-6-sol",
@@ -77,7 +93,15 @@
 			],
 			"multi_agent_reasoning_effort": null,
 			"use_responses_lite": true,
-			"supported_in_api": true
+			"supported_in_api": true,
+			"service_tiers": [
+				{
+					"id": "priority",
+					"name": "Fast",
+					"description": "1.5x speed"
+				}
+			],
+			"default_service_tier": "priority"
 		},
 		{
 			"slug": "gpt-6-luna",
@@ -100,7 +124,15 @@
 			],
 			"multi_agent_reasoning_effort": null,
 			"use_responses_lite": true,
-			"supported_in_api": true
+			"supported_in_api": true,
+			"service_tiers": [
+				{
+					"id": "priority",
+					"name": "Fast",
+					"description": "1.5x speed"
+				}
+			],
+			"default_service_tier": "priority"
 		},
 		{
 			"slug": "gpt-5.6-sol",
@@ -124,7 +156,15 @@
 			],
 			"multi_agent_reasoning_effort": null,
 			"use_responses_lite": true,
-			"supported_in_api": true
+			"supported_in_api": true,
+			"service_tiers": [
+				{
+					"id": "priority",
+					"name": "Fast",
+					"description": "1.5x speed, increased usage"
+				}
+			],
+			"default_service_tier": null
 		},
 		{
 			"slug": "gpt-5.6-terra",
@@ -148,7 +188,15 @@
 			],
 			"multi_agent_reasoning_effort": null,
 			"use_responses_lite": true,
-			"supported_in_api": true
+			"supported_in_api": true,
+			"service_tiers": [
+				{
+					"id": "priority",
+					"name": "Fast",
+					"description": "1.5x speed, increased usage"
+				}
+			],
+			"default_service_tier": null
 		},
 		{
 			"slug": "gpt-5.6-luna",
@@ -171,7 +219,15 @@
 			],
 			"multi_agent_reasoning_effort": null,
 			"use_responses_lite": true,
-			"supported_in_api": true
+			"supported_in_api": true,
+			"service_tiers": [
+				{
+					"id": "priority",
+					"name": "Fast",
+					"description": "1.5x speed, increased usage"
+				}
+			],
+			"default_service_tier": null
 		},
 		{
 			"slug": "gpt-daybreak-blue-latest",
@@ -194,7 +250,9 @@
 				"ultra"
 			],
 			"use_responses_lite": true,
-			"supported_in_api": true
+			"supported_in_api": true,
+			"service_tiers": [],
+			"default_service_tier": null
 		},
 		{
 			"slug": "gpt-daybreak-red-latest",
@@ -217,7 +275,9 @@
 				"ultra"
 			],
 			"use_responses_lite": true,
-			"supported_in_api": true
+			"supported_in_api": true,
+			"service_tiers": [],
+			"default_service_tier": null
 		},
 		{
 			"slug": "gpt-5.5",
@@ -239,7 +299,15 @@
 			],
 			"multi_agent_reasoning_effort": null,
 			"use_responses_lite": false,
-			"supported_in_api": true
+			"supported_in_api": true,
+			"service_tiers": [
+				{
+					"id": "priority",
+					"name": "Fast",
+					"description": "1.5x speed, increased usage"
+				}
+			],
+			"default_service_tier": null
 		},
 		{
 			"slug": "codex-auto-review",
@@ -262,7 +330,15 @@
 			],
 			"multi_agent_reasoning_effort": null,
 			"use_responses_lite": true,
-			"supported_in_api": true
+			"supported_in_api": true,
+			"service_tiers": [
+				{
+					"id": "priority",
+					"name": "Fast",
+					"description": "1.5x speed, increased usage"
+				}
+			],
+			"default_service_tier": null
 		}
 	]
 }

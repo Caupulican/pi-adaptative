@@ -1,7 +1,7 @@
 import { expect, it, vi } from "vitest";
 import type { CollaborationAgent, CollaborationBackend } from "../src/core/collaboration/backend.ts";
 import { decodeCollaborationUsageClaim } from "../src/core/collaboration/launch-profile.ts";
-import { executeCollaborationTurn } from "../src/core/collaboration/turn-runner.ts";
+import { collaborationPrompt, executeCollaborationTurn } from "../src/core/collaboration/turn-runner.ts";
 
 const idle: CollaborationAgent = {
 	paneId: "w1:p1",
@@ -24,6 +24,25 @@ const input = {
 	text: "implement",
 	timeoutMs: 1000,
 };
+
+it("requires a code verification command and preserves requested scope before reporting", () => {
+	const prompt = collaborationPrompt(input);
+	expect(prompt).toContain("Check code; report command/result");
+	expect(prompt).toContain("missing check and why");
+	expect(prompt).toContain("Stay in requested scope");
+	expect(prompt).toContain("Model/effort fixed");
+});
+
+it.each(["/model opus", " /effort high", "/config", "/permissions", "/agents"])(
+	"keeps native configuration command %s inside task data",
+	(text) => {
+		const prompt = collaborationPrompt({ ...input, text });
+		expect(prompt.trimStart().startsWith("/")).toBe(false);
+		expect(prompt).toContain(text);
+		const ordinary = collaborationPrompt({ ...input, text: "Document /model in the README" });
+		expect(ordinary).toContain("Document /model in the README");
+	},
+);
 
 it("rejects a prompt-echo DONE marker even when it is the snapshot's last line", async () => {
 	const backend = {

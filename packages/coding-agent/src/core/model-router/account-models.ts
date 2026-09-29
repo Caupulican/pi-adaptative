@@ -14,6 +14,7 @@ import {
 	type Api,
 	listOpenAICodexAccountModels,
 	type Model,
+	type ModelServiceTier,
 	OPENAI_CODEX_CLIENT_VERSION,
 	type OpenAICodexAccountModel,
 } from "@caupulican/pi-ai";
@@ -169,6 +170,14 @@ export class AccountModelCatalog {
 		if (state.kind === "rejected") return "unavailable";
 		if (state.kind === "key_valid") return "available";
 		return state.models.has(model.id) ? "available" : "unavailable";
+	}
+
+	/** Account metadata overrides bundled tiers, including an explicit empty list. No request is made here. */
+	serviceTiers(model: Model<Api>): readonly ModelServiceTier[] | undefined {
+		if (this.availability(model) === "unavailable") return [];
+		const state = this.states.get(model.provider);
+		if (state?.kind === "listed") return state.models.get(model.id)?.serviceTiers ?? model.serviceTiers;
+		return model.serviceTiers;
 	}
 
 	/** Why a model is unavailable on this account, for status and skip reasons. */

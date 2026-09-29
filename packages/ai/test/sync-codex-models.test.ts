@@ -23,7 +23,18 @@ describe("Codex catalogue reference sync", () => {
 		writeFileSync(cargo, '[workspace.package]\nversion = "0.0.0"\n');
 		writeFileSync(
 			catalogue,
-			JSON.stringify({ models: [{ slug: "gpt-6.1-sol", supported_reasoning_levels: [{ effort: "low" }] }] }),
+			JSON.stringify({
+				models: [
+					{
+						slug: "gpt-6.1-sol",
+						supported_reasoning_levels: [{ effort: "low" }],
+						service_tiers: [{ id: "ultrafast", name: "Ultrafast", description: "Account-provided speed tier" }],
+						default_service_tier: "ultrafast",
+					},
+					{ slug: "no-tiers", supported_reasoning_levels: [], service_tiers: [], default_service_tier: null },
+					{ slug: "unspecified", supported_reasoning_levels: [] },
+				],
+			}),
 		);
 		execFileSync("git", ["add", "codex-rs"], { cwd: checkout });
 		execFileSync("git", ["commit", "-m", "new model"], { cwd: checkout, stdio: "ignore" });
@@ -38,7 +49,16 @@ describe("Codex catalogue reference sync", () => {
 		expect(accepted.status, accepted.stderr).toBe(0);
 		expect(JSON.parse(readFileSync(output, "utf8"))).toMatchObject({
 			source: { tag: revision, clientTag: "rust-v0.159.0", clientVersion: "0.159.0" },
-			models: [{ slug: "gpt-6.1-sol", supported_reasoning_levels: ["low"] }],
+			models: [
+				{
+					slug: "gpt-6.1-sol",
+					supported_reasoning_levels: ["low"],
+					service_tiers: [{ id: "ultrafast", name: "Ultrafast", description: "Account-provided speed tier" }],
+					default_service_tier: "ultrafast",
+				},
+				{ slug: "no-tiers", supported_reasoning_levels: [], service_tiers: [], default_service_tier: null },
+				{ slug: "unspecified", supported_reasoning_levels: [] },
+			],
 		});
 	});
 });

@@ -1,5 +1,6 @@
 import type { Usage } from "@caupulican/pi-ai";
 import { INCONCLUSIVE_LINE_PREFIX, MAX_MANAGED_LANE_SUMMARY_BYTES } from "../extensions/types.ts";
+import { WORKER_EXECUTION_DISCIPLINE_RULE } from "../provider-prompt-contracts.ts";
 import type { CollaborationBackend, CollaborationQuestionAnswer } from "./backend.ts";
 import { boundCollaborationEvidence, type CollaborationTerminal } from "./job-store.ts";
 import type { CollaborationPendingQuestion, CollaborationResultClaim } from "./result-claim.ts";
@@ -16,8 +17,11 @@ export interface CollaborationTurnInput {
 
 export function collaborationPrompt(input: CollaborationTurnInput): string {
 	return [
-		input.text,
+		// Native CLIs dispatch leading slash commands before consulting their system prompt.
+		// The assigned task must always enter as conversation data, including on follow-up turns.
+		`Assigned task:\n${input.text}`,
 		"Work inside the assigned scope. Keep thinking, tool activity, and progress inside this persistent session.",
+		WORKER_EXECUTION_DISCIPLINE_RULE,
 		"If you need a decision or answer, stop work and state the precise question and relevant choices/context. Do not invent approval or widen authority.",
 		`Your current dispatch identity is ${input.turnId}. After completing and verifying your task, or when blocked, submit your bounded final evidence through the authenticated report command as your last tool action. Printed terminal markers are not completion evidence.`,
 		`Immediately before EVERY report, including after an answer or keyboard selection resumes you, run this command and read its returned turnId (answers create a fresh identity; never reuse an older one):\n${input.reportCommand} current`,

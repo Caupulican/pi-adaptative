@@ -1,3 +1,4 @@
+import type { ModelServiceTier } from "../types.ts";
 import { isRecord } from "../utils/value-guards.ts";
 import { requestBoundedAccountJson } from "./account-request.ts";
 import { buildOpenAICodexHeaders, DEFAULT_OPENAI_CODEX_BASE_URL } from "./openai-codex-auth.ts";
@@ -203,6 +204,8 @@ export interface OpenAICodexAccountModel {
 	supportedInApi: boolean;
 	/** Lower comes first: the Codex CLI's own default is the first listed model. */
 	priority: number;
+	serviceTiers?: readonly ModelServiceTier[];
+	defaultServiceTier?: string;
 }
 
 function parseAccountModel(value: unknown): OpenAICodexAccountModel {
@@ -211,12 +214,39 @@ function parseAccountModel(value: unknown): OpenAICodexAccountModel {
 	if (typeof supportedInApi !== "boolean") {
 		throw new OpenAICodexAccountError("OpenAI Codex models response has invalid supported_in_api");
 	}
+	const advertised = value.service_tiers;
+	let serviceTiers: ModelServiceTier[] | undefined;
+	if (advertised !== undefined) {
+		if (!Array.isArray(advertised) || advertised.length > 32) {
+			throw new OpenAICodexAccountError("OpenAI Codex models response has invalid service_tiers");
+		}
+		const ids = new Set<string>();
+		serviceTiers = advertised.map((tier) => {
+			if (
+				!isRecord(tier) ||
+				typeof tier.id !== "string" ||
+				!/^[a-z][a-z0-9_-]{0,63}$/.test(tier.id) ||
+				ids.has(tier.id) ||
+				typeof tier.name !== "string" ||
+				tier.name.length > 200 ||
+				typeof tier.description !== "string" ||
+				tier.description.length > 2000
+			) {
+				throw new OpenAICodexAccountError("OpenAI Codex models response has invalid service_tiers");
+			}
+			ids.add(tier.id);
+			return { id: tier.id, name: tier.name, description: tier.description };
+		});
+	}
+	const defaultServiceTier = optionalString(value, "default_service_tier");
 	return {
 		slug: requiredString(value, "slug"),
 		displayName: optionalString(value, "display_name") ?? requiredString(value, "slug"),
 		visibility: requiredString(value, "visibility"),
 		supportedInApi,
 		priority: requiredInteger(value, "priority"),
+		...(serviceTiers !== undefined ? { serviceTiers } : {}),
+		...(defaultServiceTier !== undefined ? { defaultServiceTier } : {}),
 	};
 }
 

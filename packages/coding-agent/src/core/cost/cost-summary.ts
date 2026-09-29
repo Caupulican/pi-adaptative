@@ -10,6 +10,7 @@ import {
 import type { DailyUsageTotals, DailyUsageWindow } from "./daily-usage.ts";
 
 export interface CurrentSessionCostTotals {
+	costEstimate?: "base-rates";
 	ownCost: number;
 	subagentCost: number;
 	subagentReports: number;
@@ -22,6 +23,7 @@ export interface CurrentSessionCostAccumulator extends CurrentSessionCostTotals 
 }
 
 export interface SessionCostSummary extends CurrentSessionCostTotals {
+	todayCostEstimate?: "base-rates";
 	todayCost: number;
 	todayOwnCost: number;
 	todaySubagentCost: number;
@@ -57,7 +59,10 @@ export function accumulateCurrentSessionCostsFromEntries(
 		const usage = getSessionEntryUsage(entry);
 		if (usage) {
 			const total = getUsageTotalCost(usage);
-			if (total !== undefined) accumulator.ownCost += total;
+			if (total !== undefined) {
+				accumulator.ownCost += total;
+				if (usage.cost.estimate === "base-rates") accumulator.costEstimate = "base-rates";
+			}
 			continue;
 		}
 
@@ -68,6 +73,7 @@ export function accumulateCurrentSessionCostsFromEntries(
 				continue;
 			accumulator.seenSemanticReportIds.add(report.reportId);
 			accumulator.ownCost += total;
+			if (report.usage.cost.estimate === "base-rates") accumulator.costEstimate = "base-rates";
 			continue;
 		}
 
@@ -80,6 +86,7 @@ export function accumulateCurrentSessionCostsFromEntries(
 			accumulator.seenSubagentReportIds.add(report.reportId);
 		}
 		accumulator.subagentCost += total;
+		if (report?.usage.cost.estimate === "base-rates") accumulator.costEstimate = "base-rates";
 		accumulator.subagentReports += 1;
 	}
 	accumulator.currentCost = accumulator.ownCost + accumulator.subagentCost;
@@ -103,6 +110,7 @@ export function createSessionCostSummary(args: {
 }): SessionCostSummary {
 	const currentSource = args.currentTotals ?? aggregateCurrentSessionCostsFromEntries(args.entries ?? []);
 	const current: CurrentSessionCostTotals = {
+		...(currentSource.costEstimate ? { costEstimate: currentSource.costEstimate } : {}),
 		ownCost: currentSource.ownCost,
 		subagentCost: currentSource.subagentCost,
 		subagentReports: currentSource.subagentReports,
@@ -110,6 +118,7 @@ export function createSessionCostSummary(args: {
 	};
 	return {
 		...current,
+		...(args.dailyTotals.costEstimate ? { todayCostEstimate: args.dailyTotals.costEstimate } : {}),
 		todayCost: args.dailyTotals.totalCost,
 		todayOwnCost: args.dailyTotals.ownCost,
 		todaySubagentCost: args.dailyTotals.spawnedCost,
@@ -137,10 +146,12 @@ export function formatFooterCostParts(
 ): string[] {
 	const parts: string[] = [];
 	if (summary.currentCost > 0 || hasSubagentCostSignal(summary) || options.subscription) {
-		parts.push(`CURRENT:${formatCost(summary.currentCost, precision)}${options.subscription ? " (sub)" : ""}`);
+		parts.push(
+			`CURRENT:${summary.costEstimate ? "~" : ""}${formatCost(summary.currentCost, precision)}${options.subscription ? " (sub)" : ""}`,
+		);
 	}
 	if (summary.todayCost > 0) {
-		parts.push(`TODAY:${formatCost(summary.todayCost, precision)}`);
+		parts.push(`TODAY:${summary.todayCostEstimate ? "~" : ""}${formatCost(summary.todayCost, precision)}`);
 	}
 	if (hasSubagentCostSignal(summary)) {
 		parts.push(`SUBAGENTS:${formatCost(summary.subagentCost, precision)} in CURRENT`);
@@ -150,8 +161,8 @@ export function formatFooterCostParts(
 
 export function formatStatusCostSummary(summary: SessionCostSummary, precision = 4): string {
 	const parts = [
-		`CURRENT ${formatCost(summary.currentCost, precision)}`,
-		`TODAY ${formatCost(summary.todayCost, precision)}`,
+		`CURRENT ${summary.costEstimate ? "~" : ""}${formatCost(summary.currentCost, precision)}${summary.costEstimate ? " (base-rate estimate)" : ""}`,
+		`TODAY ${summary.todayCostEstimate ? "~" : ""}${formatCost(summary.todayCost, precision)}${summary.todayCostEstimate ? " (base-rate estimate)" : ""}`,
 	];
 	if (hasSubagentCostSignal(summary)) {
 		parts.push(`SUBAGENTS ${formatCost(summary.subagentCost, precision)} (included in CURRENT)`);

@@ -14,6 +14,7 @@ import {
 import type { ToolDefinition } from "../src/core/extensions/index.ts";
 import { SessionAnalytics } from "../src/core/session-analytics.ts";
 import type { SettingsManager } from "../src/core/settings-manager.ts";
+import { tempDir as sessionScratch } from "./temp-dir.ts";
 
 function usage(costTotal: number): Usage {
 	return {
@@ -84,6 +85,110 @@ function createAnalytics(
 }
 
 describe("session cost summary", () => {
+	it("does not qualify current dollars for estimated usage that contributes no valid cost", () => {
+		const invalid = assistant("invalid-ultra", new Date(), Number.NaN);
+		if (invalid.type !== "message" || invalid.message.role !== "assistant") throw new Error("Expected assistant");
+		invalid.message.usage.cost.estimate = "base-rates";
+		const summary = createSessionCostSummary({
+			entries: [invalid, assistant("exact", new Date(), 1)],
+			dailyTotals: {
+				ownCost: 1,
+				spawnedCost: 0,
+				totalCost: 1,
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				sessions: 1,
+				reports: 0,
+			},
+			todayWindow: { startMs: 0, endMs: 86400000 },
+		});
+		expect(summary.currentCost).toBe(1);
+		expect(summary.costEstimate).toBeUndefined();
+	});
+	it("retains earlier estimated TODAY costs across a fresh exact session and cached redraws", () => {
+		const sessionDir = sessionScratch("pi-session-tier-estimate-");
+		const now = new Date();
+		const earlier = assistant("earlier-ultra", now, 1);
+		if (earlier.type !== "message" || earlier.message.role !== "assistant") throw new Error("Expected assistant");
+		earlier.message.usage.cost.estimate = "base-rates";
+		const header: FileEntry = {
+			type: "session",
+			id: "earlier-session",
+			timestamp: now.toISOString(),
+			cwd: sessionDir,
+		};
+		writeFileSync(
+			join(sessionDir, "earlier-session.jsonl"),
+			[header, earlier].map((entry) => JSON.stringify(entry)).join("\n"),
+		);
+		const currentEntries = [assistant("current-exact", now, 0.4)];
+		writeFileSync(
+			join(sessionDir, "session.jsonl"),
+			[{ ...header, id: "session-1" }, ...currentEntries].map((entry) => JSON.stringify(entry)).join("\n"),
+		);
+		const analytics = createAnalytics(sessionDir, currentEntries);
+
+		const totals = analytics.getDailyUsageTotals(now);
+		expect(analytics.getDailyUsageTotals(now)).toBe(totals);
+		expect(totals.totalCost).toBeCloseTo(1.4, 10);
+		expect(totals.costEstimate).toBe("base-rates");
+		const summary = analytics.getCostSummary(now);
+		expect(analytics.getCostSummary(now)).toBe(summary);
+		expect(summary.costEstimate).toBeUndefined();
+		expect(summary.todayCostEstimate).toBe("base-rates");
+		expect(formatFooterCostParts(summary)).toEqual(["CURRENT:$0.400", "TODAY:~$1.400"]);
+		expect(formatStatusCostSummary(summary)).toBe("CURRENT $0.4000, TODAY ~$1.4000 (base-rate estimate)");
+	});
+	it("qualifies today's dollars when a fresh session has no estimated requests", () => {
+		const summary = createSessionCostSummary({
+			entries: [],
+			dailyTotals: {
+				ownCost: 1,
+				spawnedCost: 0,
+				totalCost: 1,
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				sessions: 1,
+				reports: 0,
+				costEstimate: "base-rates",
+			},
+			todayWindow: { startMs: 0, endMs: 86400000 },
+		});
+		expect(summary.costEstimate).toBeUndefined();
+		expect(summary.todayCostEstimate).toBe("base-rates");
+		expect(formatFooterCostParts(summary)).toEqual(["TODAY:~$1.000"]);
+		expect(formatStatusCostSummary(summary)).toContain("TODAY ~$1.0000 (base-rate estimate)");
+	});
+	it("qualifies session dollars when a processing tier has no published prices", () => {
+		const entry = assistant("ultra", new Date(), 1);
+		if (entry.type !== "message" || entry.message.role !== "assistant") throw new Error("Expected assistant");
+		entry.message.usage.cost.estimate = "base-rates";
+		const summary = createSessionCostSummary({
+			entries: [entry],
+			dailyTotals: {
+				ownCost: 1,
+				spawnedCost: 0,
+				totalCost: 1,
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				sessions: 1,
+				reports: 0,
+			},
+			todayWindow: { startMs: 0, endMs: 86400000 },
+		});
+		expect(summary.costEstimate).toBe("base-rates");
+		expect(formatFooterCostParts(summary)[0]).toBe("CURRENT:~$1.000");
+		expect(formatStatusCostSummary(summary)).toContain("CURRENT ~$1.0000 (base-rate estimate)");
+	});
 	it("aggregates CURRENT/TODAY/SUBAGENTS once and formats both cost surfaces", () => {
 		const summary = createSessionCostSummary({
 			entries: [

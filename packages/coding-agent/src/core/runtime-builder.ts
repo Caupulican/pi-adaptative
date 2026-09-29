@@ -78,6 +78,7 @@ import { acknowledgeWorkerClaimReview } from "./delegation/session-worker-claim.
 import type { WorkerAgentControlPort, WorkerGrantSummary } from "./delegation/worker-agent-control.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { execCommand } from "./exec.ts";
+import { PeerReviewController } from "./expert-routing/peer-review.ts";
 import type { ExtensionImportAuthority } from "./extension-import-authority.ts";
 import { createCoreDiagnosticsToolDefinitions } from "./extensions/builtin.ts";
 import {
@@ -152,6 +153,7 @@ import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import { systemOneAccessFromSession } from "./system-one/access.ts";
 import type { ClarificationDecisionEngine } from "./system-one/clarification.ts";
+import { sameLaneVerificationDirective } from "./system-one/control-directive.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import { TaskDirectoryRuntime } from "./tasks/task-directory-runtime.ts";
 import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
@@ -173,6 +175,7 @@ import { createImageGenerateToolDefinition } from "./tools/image-generate.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
 import type { OutputReductionToolOptions } from "./tools/output-reduction.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";
+import { createPeerReviewToolDefinition } from "./tools/peer-review.ts";
 import { createPipelineToolDefinition } from "./tools/pipeline.ts";
 import { createReadTool } from "./tools/read.ts";
 import { createRunProcessToolDefinition } from "./tools/run-process.ts";
@@ -277,6 +280,8 @@ export interface RuntimeBuilderDeps {
 	integrationBranch?(): string | undefined;
 	/** Model registry, passed to the extension runner and profile model re-resolution. */
 	getModelRegistry(): ModelRegistry;
+	/** Host routing pool for explicit stronger-peer reviews. */
+	getPeerReviewModels?(): readonly Model<Api>[];
 	/** Session-scoped provider/model quota exhaustion guard. */
 	isModelExhausted(model: Model<Api>): boolean;
 	/** Extension/skill/prompt/theme discovery + the reload/commit/rollback generation swap. */
@@ -1197,6 +1202,35 @@ export class RuntimeBuilder {
 			this._baseToolDefinitions.set("tool_task", createToolTaskToolDefinition(toolTaskDependencies));
 		}
 		if (!baseToolsOverride) {
+			if (this.deps.getPeerReviewModels && toolAccess.allows("peer")) {
+				this._baseToolDefinitions.set(
+					"peer",
+					createPeerReviewToolDefinition(
+						new PeerReviewController({
+							getLead: () => {
+								const state = this.deps.getAgent().state;
+								return state.model ? { model: state.model, thinkingLevel: state.thinkingLevel } : undefined;
+							},
+							getModels: () => this.deps.getPeerReviewModels?.() ?? [],
+							hasAuth: (model) => this.deps.getModelRegistry().hasConfiguredAuth(model),
+							isExhausted: (model) => this.deps.isModelExhausted(model),
+							getJudge: () => this.deps.getSystemOneController?.(),
+							runCompletion: (options) => this.deps.runIsolatedCompletion(options),
+							requestVerification: (findings) =>
+								this.deps
+									.getSystemOneController?.()
+									?.noteControlDirective(
+										sameLaneVerificationDirective(
+											findings.map(
+												(finding) =>
+													`${finding.summary}: ${finding.requiredCheck}. Evidence: ${finding.evidence}`,
+											),
+										),
+									),
+						}),
+					),
+				);
+			}
 			if (toolAccess.allows("typesafe_review")) {
 				// The same access every System One path uses: one provider's key only ever goes to that
 				// provider, and a provider switch in settings applies to the next review.

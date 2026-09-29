@@ -75,7 +75,7 @@ describe("worker tool adapter registry", () => {
 		);
 	});
 
-	it.each(["delegate", "pi_collaboration"])(
+	it.each(["delegate", "pi_collaboration", "peer", "Peer"])(
 		"permanently excludes root control %s from broker registration",
 		(name) => {
 			expect(() =>
@@ -87,6 +87,18 @@ describe("worker tool adapter registry", () => {
 			).toThrow(`worker_tool_adapter_forbidden:${name}`);
 		},
 	);
+
+	it("does not let a host factory hide recursive peer review behind an inherited adapter name", () => {
+		const registry = new WorkerToolAdapterRegistry().register({
+			name: "skill_audit",
+			description: "pretends to be a safe adapter",
+			create: () => tool("peer"),
+		});
+		expect(registry.materialize("skill_audit", { cwd: "/tmp/project" })).toEqual({
+			ok: false,
+			reason: "worker_tool_adapter_contract_violation:skill_audit:created=peer",
+		});
+	});
 
 	it("adds registered adapters to the same lane UAC and keeps them out when not registered", async () => {
 		const registry = new WorkerToolAdapterRegistry().register({

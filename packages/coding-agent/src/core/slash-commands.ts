@@ -68,7 +68,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{ name: "model", description: "Select model (opens selector UI)" },
 	{ name: "thinking", description: "Select thinking level (/thinking [level])" },
-	{ name: "fast", description: "Toggle provider-native fast mode (/fast [on|off|status])" },
+	{ name: "fast", description: "Select provider processing tier (/fast [on|off|priority|ultrafast|status])" },
 	{ name: "profiles", description: "Select a runtime profile for this session" },
 	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
 	{ name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },

@@ -11,6 +11,7 @@ import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import type { SessionRequestSnapshotInput } from "@caupulican/pi-agent-core/session";
 import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
+import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import { getProcessWorkRun } from "../agent-paths.ts";
 import type {
 	AgentSessionEvent,
@@ -40,6 +41,11 @@ import {
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
+import {
+	chooseHostRouteProfile,
+	MAX_ROUTE_CHOICE_REQUEST_CHARACTERS,
+	type RouteChoiceJudge,
+} from "../expert-routing/system-one-choice.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -53,6 +59,7 @@ import {
 	type AttemptUsageSnapshot,
 	type ExecutionGrant,
 	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
+	type OrchestrationModelBinding,
 	type OrchestrationProfile,
 	type OrchestrationThinkingLevel,
 	type ResourcePointer,
@@ -250,6 +257,8 @@ export interface WorkerDelegationControllerDeps {
 	isModelExhausted(model: Model<Api>): boolean;
 	getModel(): Model<Api> | undefined;
 	getForegroundThinkingLevel?(): OrchestrationThinkingLevel;
+	/** The session's existing System One owner; admission never creates a separate reviewer. */
+	getRouteChoiceJudge?(): RouteChoiceJudge | undefined;
 	getForegroundToolNames?(): readonly string[];
 	isDelegateToolActive(): boolean;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
@@ -402,6 +411,11 @@ interface PreparedWorkerAttempt {
 	record: LaneRecord;
 	attempt?: AttemptRuntimeState;
 }
+
+type WorkerStartAdmission =
+	| { kind: "refused"; skipReason: string }
+	| { kind: "existing"; record: LaneRecord; replayed: boolean }
+	| { kind: "fresh"; admission: Extract<WorkerAdmission, { ok: true }>; releaseAllocation?: () => void };
 
 interface PreparedWorkerAgent {
 	conversation: WorkerConversation;
@@ -1204,6 +1218,7 @@ export class WorkerDelegationController {
 	private resolveWorkerAdmission(
 		request: WorkerDelegationRequest,
 		pinnedContract?: WorkerExecutionContract,
+		selectedBinding?: OrchestrationModelBinding,
 	): WorkerAdmission {
 		if (this.deps.isDisposed()) return { ok: false, skipReason: "session_disposed" };
 		// Same rule as the durable ledger: emptiness is judged on the trimmed view, but the brief the
@@ -1292,7 +1307,7 @@ export class WorkerDelegationController {
 					authority,
 					executionCwd,
 					...(baseShipment ? { base: baseShipment } : {}),
-					...(modelPin ? { modelPin: modelPin.binding } : {}),
+					...(modelPin || selectedBinding ? { modelPin: modelPin?.binding ?? selectedBinding } : {}),
 				});
 		if (!adaptive.ok) {
 			return {
@@ -1971,7 +1986,7 @@ export class WorkerDelegationController {
 	private admitNewWorkerRequest(
 		request: WorkerDelegationRequest,
 		pinnedContract?: WorkerExecutionContract,
-		options: { freshIdentity?: boolean } = {},
+		options: { freshIdentity?: boolean; selectedBinding?: OrchestrationModelBinding } = {},
 	): WorkerAdmission {
 		const freshIdentity = options.freshIdentity !== false;
 		if (request.parentAgentId && !pinnedContract) {
@@ -1983,7 +1998,7 @@ export class WorkerDelegationController {
 		if (fleetSkipReason) return { ok: false, skipReason: fleetSkipReason };
 		const treeAttemptSkipReason = this.workerTreeAttemptAdmissionSkipReason(request);
 		if (treeAttemptSkipReason) return { ok: false, skipReason: treeAttemptSkipReason };
-		const admission = this.resolveWorkerAdmission(request, pinnedContract);
+		const admission = this.resolveWorkerAdmission(request, pinnedContract, options.selectedBinding);
 		if (!admission.ok) return admission;
 		const contextForkSkipReason = this.workerContextForkAdmissionSkipReason(request, admission.executionContract);
 		if (contextForkSkipReason) return { ok: false, skipReason: contextForkSkipReason };
@@ -2818,43 +2833,269 @@ export class WorkerDelegationController {
 		}
 	}
 
+	/** Fresh unbound workers choose among profiles compiled by the mandatory host authority owner. */
+	private isWorkerRouteModelAvailable(model: Model<Api> | undefined): model is Model<Api> {
+		return (
+			model !== undefined &&
+			!this.deps.isModelExhausted(model) &&
+			!this.isAccountLimited(model) &&
+			this.deps.isModelAllowed?.(model) !== false
+		);
+	}
+
+	private async selectFreshWorkerRoute(
+		request: WorkerDelegationRequest,
+		admission: Extract<WorkerAdmission, { ok: true }>,
+		signal?: AbortSignal,
+	): Promise<WorkerAdmission> {
+		const judge = this.deps.getRouteChoiceJudge?.();
+		const settingsManager = this.deps.getSettingsManager();
+		const modelPinPolicy = settingsManager.getWorkerModelPinPolicy();
+		if (
+			!judge ||
+			request.authority?.model !== undefined ||
+			request.authority?.thinkingLevel !== undefined ||
+			request.profileId !== undefined ||
+			request.reuseAgentId ||
+			request.parentAgentId ||
+			request.verificationOfTaskId ||
+			settingsManager.getWorkerDelegationSettings().orchestrationProfile ||
+			(modelPinPolicy.status === "active" && resolveWorkerModelPin(modelPinPolicy, admission.shipment.profile.role))
+		)
+			return admission;
+		const liveState = () => ({
+			sessionId: this.deps.getSessionId(),
+			cwd: this.deps.getCwd(),
+			model: this.deps.getModel(),
+			thinking: this.deps.getForegroundThinkingLevel?.(),
+			pin: settingsManager.getWorkerModelPinPolicy(),
+			routing: settingsManager.getWorkerAccountRouting(),
+			thinkingPolicy: settingsManager.getWorkerThinkingPolicy(),
+			settings: settingsManager.getWorkerDelegationSettings(),
+			edge: settingsManager.getEdgeSettings(),
+			tools: this.deps.getForegroundToolNames?.(),
+			envelope: this.deps.getCapabilityEnvelope(),
+		});
+		const snapshot = structuredClone(liveState());
+		const profiles = [{ id: "host-default", admission, model: structuredClone(admission.shipment.model) }];
+		for (const binding of admission.shipment.profile.modelPolicy.candidates) {
+			const model = this.deps.getModelRegistry().find(binding.provider, binding.modelId);
+			if (!this.isWorkerRouteModelAvailable(model)) continue;
+			for (const thinkingLevel of ["medium", "high"] as const) {
+				if (profiles.length >= 8) break;
+				if (!getSupportedThinkingLevels(model).includes(thinkingLevel)) continue;
+				const selectedBinding = { provider: binding.provider, modelId: binding.modelId, thinkingLevel };
+				if (profiles.some((profile) => isDeepStrictEqual(profile.admission.shipment.modelBinding, selectedBinding)))
+					continue;
+				const compiled = this.resolveWorkerAdmission(request, undefined, selectedBinding);
+				if (!compiled.ok || !isDeepStrictEqual(compiled.shipment.modelBinding, selectedBinding)) continue;
+				// A route choice is not permission to widen the worker's original host grant.
+				if (
+					!isDeepStrictEqual(
+						compiled.executionContract.worker.authority,
+						admission.executionContract.worker.authority,
+					)
+				)
+					continue;
+				profiles.push({
+					id: `host-profile-${profiles.length}`,
+					admission: compiled,
+					model: structuredClone(model),
+				});
+			}
+		}
+		const boundedSignal = signal ? AbortSignal.any([this.workerAbort.signal, signal]) : this.workerAbort.signal;
+		const criteria =
+			"Select the lightest adequate host profile. Use medium effort for clear coding tasks; use higher supported effort for complex reasoning or strict JSON tasks. Each profile starts one worker session with fixed model and effort. Task:\n";
+		if (criteria.length + request.instructions.length > MAX_ROUTE_CHOICE_REQUEST_CHARACTERS) return admission;
+		let decision: Awaited<ReturnType<typeof chooseHostRouteProfile>>;
+		try {
+			decision = await chooseHostRouteProfile(judge, {
+				request: criteria + request.instructions,
+				options: profiles.map(({ id, admission: profile }) => ({
+					id,
+					description: `One session: ${profile.shipment.modelBinding.provider}/${profile.shipment.modelBinding.modelId}; effort=${profile.shipment.modelBinding.thinkingLevel}`,
+				})),
+				signal: boundedSignal,
+			});
+		} catch (error) {
+			if (boundedSignal.aborted) return { ok: false, skipReason: "worker_start_aborted" };
+			throw error;
+		}
+		if (this.deps.isDisposed() || snapshot.sessionId !== this.deps.getSessionId())
+			return { ok: false, skipReason: "worker_directory_session_changed" };
+		if (boundedSignal.aborted) return { ok: false, skipReason: "worker_start_aborted" };
+		// Model, permission or account changes invalidate the judgment, never authorize its stale profile.
+		const currentDefault = this.resolveWorkerAdmission(request);
+		if (!currentDefault.ok) return currentDefault;
+		if (
+			this.deps.getRouteChoiceJudge?.() !== judge ||
+			this.deps.getSettingsManager() !== settingsManager ||
+			!isDeepStrictEqual(snapshot, liveState()) ||
+			currentDefault.shipment.profile.profileId !== admission.shipment.profile.profileId ||
+			!isDeepStrictEqual(
+				currentDefault.executionContract.worker.authority,
+				admission.executionContract.worker.authority,
+			)
+		)
+			return this.admitWorkerDirectory(request, signal, { freshIdentity: false });
+		if ("fallback" in decision || decision.choice === "host-default") return admission;
+		const selected = profiles.find((profile) => profile.id === decision.choice);
+		if (!selected) return admission;
+		const binding = selected.admission.shipment.modelBinding;
+		const model = this.deps.getModelRegistry().find(binding.provider, binding.modelId);
+		if (
+			!this.isWorkerRouteModelAvailable(model) ||
+			!isDeepStrictEqual(model, selected.model) ||
+			!getSupportedThinkingLevels(model).includes(binding.thinkingLevel)
+		)
+			return this.admitWorkerDirectory(request, signal, { freshIdentity: false });
+		const current = this.resolveWorkerAdmission(request, undefined, binding);
+		if (
+			!current.ok ||
+			current.shipment.profile.profileId !== selected.admission.shipment.profile.profileId ||
+			!isDeepStrictEqual(
+				current.executionContract.worker.authority,
+				selected.admission.executionContract.worker.authority,
+			)
+		)
+			return admission;
+		// Directory identity was captured on the default grant and remains identical for this route.
+		const executionContract: WorkerExecutionContract = {
+			...current.executionContract,
+			worker: {
+				...current.executionContract.worker,
+				executionContext: admission.executionContract.worker.executionContext,
+			},
+		};
+		const checked = this.admitNewWorkerRequest(
+			{ ...request, profileId: current.shipment.profile.profileId },
+			executionContract,
+			{ freshIdentity: false },
+		);
+		return checked.ok ? { ...checked, modelRouteSource: "inherited" } : checked;
+	}
+
+	/** One fresh/replay/reuse transition shared by both native public entrances. */
+	private async admitWorkerStart(
+		request: WorkerDelegationRequest,
+		signal?: AbortSignal,
+	): Promise<WorkerStartAdmission> {
+		const prior = request.reuseAgentId
+			? this.lifecycle.getLatestAgentAttempt(request.reuseAgentId)
+			: this.replayedWorkerAttempt(request.messageReplayKey);
+		let selectedBinding: OrchestrationModelBinding | undefined;
+		if (prior && !request.profileId && !request.authority?.model && request.authority?.thinkingLevel === undefined) {
+			const current = this.resolveWorkerAdmission(request);
+			const binding = prior.dispatch.executionContract?.worker.modelBinding;
+			const model = binding ? this.deps.getModelRegistry().find(binding.provider, binding.modelId) : undefined;
+			const modelPinPolicy = this.deps.getSettingsManager().getWorkerModelPinPolicy();
+			if (
+				current.ok &&
+				binding &&
+				!this.deps.getSettingsManager().getWorkerDelegationSettings().orchestrationProfile &&
+				!(
+					modelPinPolicy.status === "active" &&
+					resolveWorkerModelPin(modelPinPolicy, current.shipment.profile.role)
+				) &&
+				this.isWorkerRouteModelAvailable(model) &&
+				getSupportedThinkingLevels(model).includes(binding.thinkingLevel) &&
+				current.shipment.profile.modelPolicy.candidates.some(
+					(candidate) => candidate.provider === binding.provider && candidate.modelId === binding.modelId,
+				)
+			)
+				selectedBinding = binding;
+		}
+		let shared = await this.admitWorkerDirectory(request, signal, { freshIdentity: false, selectedBinding });
+		if (!shared.ok) return { kind: "refused", skipReason: shared.skipReason };
+		const replay = this.resolveReplayedCommand(request, shared);
+		if (replay.kind === "conflict") return { kind: "refused", skipReason: replay.skipReason };
+		if (replay.kind === "replay") return { kind: "existing", record: replay.record, replayed: true };
+		let reuse = await this.resolveSpecialistReuse(request, shared, signal);
+		const routeJudge = this.deps.getRouteChoiceJudge?.();
+		let routeSelected = false;
+		let selectedModelSnapshot: Model<Api> | undefined;
+		if (reuse.outcome === "fresh") {
+			let selected: WorkerAdmission;
+			try {
+				selected = await this.selectFreshWorkerRoute(request, shared, signal);
+			} catch (error) {
+				reuse.releaseAllocation?.();
+				throw error;
+			}
+			if (selected !== shared) {
+				routeSelected =
+					selected.ok && !isDeepStrictEqual(selected.shipment.modelBinding, shared.shipment.modelBinding);
+				reuse.releaseAllocation?.();
+				this.projectSelections.delete(request);
+				if (!selected.ok) return { kind: "refused", skipReason: selected.skipReason };
+				shared = selected;
+				selectedModelSnapshot = structuredClone(shared.shipment.model);
+				reuse = await this.resolveSpecialistReuse(request, shared, signal);
+			}
+		}
+		if (reuse.outcome === "unavailable") return { kind: "refused", skipReason: reuse.skipReason };
+		if (reuse.outcome === "reuse") {
+			const accepted = this.startReusedSpecialistTask(reuse.agentId, request, shared.executionContract);
+			return accepted.started
+				? { kind: "existing", record: accepted.record, replayed: false }
+				: { kind: "refused", skipReason: accepted.skipReason };
+		}
+		if (signal?.aborted || this.workerAbort.signal.aborted) {
+			reuse.releaseAllocation?.();
+			return { kind: "refused", skipReason: "worker_start_aborted" };
+		}
+		if (routeSelected) {
+			const binding = shared.shipment.modelBinding;
+			const current = this.resolveWorkerAdmission(request, undefined, binding);
+			const model = this.deps.getModelRegistry().find(binding.provider, binding.modelId);
+			if (
+				this.deps.getRouteChoiceJudge?.() !== routeJudge ||
+				!this.isWorkerRouteModelAvailable(model) ||
+				!isDeepStrictEqual(model, selectedModelSnapshot) ||
+				!current.ok ||
+				current.shipment.profile.profileId !== shared.shipment.profile.profileId ||
+				!isDeepStrictEqual(current.executionContract.worker.authority, shared.executionContract.worker.authority)
+			) {
+				reuse.releaseAllocation?.();
+				return { kind: "refused", skipReason: "worker_route_selection_stale" };
+			}
+		}
+		const prepared = this.admitNewWorkerRequest(
+			{ ...request, profileId: shared.executionContract.worker.profile.profileId },
+			shared.executionContract,
+		);
+		if (!prepared.ok) {
+			reuse.releaseAllocation?.();
+			return { kind: "refused", skipReason: prepared.skipReason };
+		}
+		return {
+			kind: "fresh",
+			admission: {
+				...prepared,
+				modelRouteSource: shared.modelRouteSource,
+				...(shared.modelPinBypass ? { modelPinBypass: shared.modelPinBypass } : {}),
+			},
+			...(reuse.releaseAllocation ? { releaseAllocation: reuse.releaseAllocation } : {}),
+		};
+	}
+
 	async start(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<QueuedWorkerAttemptOutcome> {
 		const capturedRequest = structuredClone(request);
-		// The specialization decision precedes fresh identity allocation, so the directory is captured
-		// and the authority resolved without yet reserving a new logical worker slot.
-		const shared = await this.admitWorkerDirectory(capturedRequest, signal, { freshIdentity: false });
-		if (!shared.ok) return { started: false, skipReason: shared.skipReason };
-		// A replayed caller turn is the task it already admitted: no new durable work, no execution.
-		const replayed = this.resolveReplayedCommand(capturedRequest, shared);
-		if (replayed.kind === "conflict") return { started: false, skipReason: replayed.skipReason };
-		if (replayed.kind === "replay") return { started: true, record: replayed.record };
-		const reuse = await this.resolveSpecialistReuse(capturedRequest, shared, signal);
-		if (reuse.outcome === "unavailable") return { started: false, skipReason: reuse.skipReason };
-		if (reuse.outcome === "reuse")
-			return this.startReusedSpecialistTask(reuse.agentId, capturedRequest, shared.executionContract);
-		// Similar text remains an advisory signal. The specialization owner already distinguished the
-		// grants; text alone must not veto work under a different admitted grant.
+		const selected = await this.admitWorkerStart(capturedRequest, signal);
+		if (selected.kind === "refused") return { started: false, skipReason: selected.skipReason };
+		if (selected.kind === "existing") return { started: true, record: selected.record };
 		const similar =
 			capturedRequest.verificationOfTaskId || this.independentParallelIntent(capturedRequest)
 				? []
 				: findSimilarActiveWorkerLanes(this.lifecycle.getTaskRuntimeSnapshot(), capturedRequest.instructions);
-		let outcome: { started: false; skipReason: string } | { started: true; record: LaneRecord };
+		let outcome: ReturnType<WorkerDelegationController["startInternal"]>;
 		try {
-			const admission = this.admitNewWorkerRequest(
-				{ ...capturedRequest, profileId: shared.executionContract.worker.profile.profileId },
-				shared.executionContract,
-			);
-			outcome = admission.ok
-				? this.startInternal(capturedRequest, undefined, {
-						...admission,
-						...(shared.modelPinBypass ? { modelPinBypass: shared.modelPinBypass } : {}),
-					})
-				: { started: false as const, skipReason: admission.skipReason };
+			outcome = this.startInternal(capturedRequest, undefined, selected.admission);
 		} finally {
-			reuse.releaseAllocation?.();
+			selected.releaseAllocation?.();
 		}
 		if (!outcome.started) return outcome;
-		// A start that was queued already ran one scheduler admission; hand the parent its wait reason.
 		return {
 			...outcome,
 			record: this.withWaitReasons([outcome.record])[0] ?? outcome.record,
@@ -2865,7 +3106,7 @@ export class WorkerDelegationController {
 	private async admitWorkerDirectory(
 		request: WorkerDelegationRequest,
 		signal?: AbortSignal,
-		options: { freshIdentity?: boolean } = {},
+		options: { freshIdentity?: boolean; selectedBinding?: OrchestrationModelBinding } = {},
 	): Promise<WorkerAdmission> {
 		const sessionId = this.deps.getSessionId();
 		const admission = this.admitNewWorkerRequest(request, undefined, options);
@@ -3004,28 +3245,14 @@ export class WorkerDelegationController {
 				}
 			}
 		} else {
-			const shared = await this.admitWorkerDirectory(request, undefined, { freshIdentity: false });
-			if (!shared.ok) return { started: false, skipReason: shared.skipReason };
-			const replayed = this.resolveReplayedCommand(request, shared);
-			if (replayed.kind === "conflict") return { started: false, skipReason: replayed.skipReason };
-			if (replayed.kind === "replay") return { started: true, record: replayed.record };
-			const reuse = await this.resolveSpecialistReuse(request, shared);
-			if (reuse.outcome === "unavailable") return { started: false, skipReason: reuse.skipReason };
-			if (reuse.outcome === "reuse") {
-				const accepted = this.startReusedSpecialistTask(reuse.agentId, request, shared.executionContract);
-				if (!accepted.started) return accepted;
-				return this.completeReusedSpecialistTask(accepted.record, onStarted);
-			}
-			releaseAllocation = reuse.releaseAllocation;
-			const prepared = this.admitNewWorkerRequest(
-				{ ...request, profileId: shared.executionContract.worker.profile.profileId },
-				shared.executionContract,
-			);
-			if (!prepared.ok) {
-				releaseAllocation?.();
-				return { started: false, skipReason: prepared.skipReason };
-			}
-			admission = { ...prepared, ...(shared.modelPinBypass ? { modelPinBypass: shared.modelPinBypass } : {}) };
+			const selected = await this.admitWorkerStart(request);
+			if (selected.kind === "refused") return { started: false, skipReason: selected.skipReason };
+			if (selected.kind === "existing")
+				return selected.replayed
+					? { started: true, record: selected.record }
+					: this.completeReusedSpecialistTask(selected.record, onStarted);
+			releaseAllocation = selected.releaseAllocation;
+			admission = selected.admission;
 		}
 		let outcome: PreparedWorkerRun;
 		try {

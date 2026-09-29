@@ -538,7 +538,28 @@ describe("default model selection", () => {
 
 	test("openai defaults track current models", () => {
 		expect(defaultModelPerProvider.openai).toBe("gpt-5.4");
-		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-5.6-sol");
+		expect(defaultModelPerProvider["openai-codex"]).toBe("gpt-6.1-sol");
+	});
+
+	test("fresh Codex defaults use 6.1 while explicit and saved selections retain precedence", async () => {
+		const models = getModels("openai-codex");
+		const registry = {
+			getAll: () => models,
+			getAvailable: () => models,
+			find: (provider: string, id: string) => models.find((model) => model.provider === provider && model.id === id),
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+		const options = { scopedModels: [], isContinuing: false, modelRegistry: registry };
+		expect(resolveCliProviderDefault({ cliProvider: "codex", modelRegistry: registry }).model?.id).toBe(
+			"gpt-6.1-sol",
+		);
+		expect((await findInitialModel(options)).model?.id).toBe("gpt-6.1-sol");
+		expect((await findInitialModel({ ...options, cliProvider: "codex", cliModel: "gpt-5.6-sol" })).model?.id).toBe(
+			"gpt-5.6-sol",
+		);
+		expect(
+			(await findInitialModel({ ...options, defaultProvider: "openai-codex", defaultModelId: "gpt-5.6-sol" })).model
+				?.id,
+		).toBe("gpt-5.6-sol");
 	});
 
 	test("zai, minimax, and cerebras defaults track current models", () => {

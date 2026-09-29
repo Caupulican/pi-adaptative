@@ -1,3 +1,4 @@
+// @isolated: committed Git fixtures may initialize a shared template with child processes
 /**
  * The USER.md write transaction with learning metadata at the file-store owner. Admission is a
  * fake here (its real owner is tested in reflection-owner-evidence.test.ts); this file pins that an
@@ -6,10 +7,9 @@
  * host-checked in every projection, and that archived preferences stay in the projection.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import type { MemoryLifecycleContext } from "../src/core/memory/memory-provider.ts";
 import { FileStoreProvider } from "../src/core/memory/providers/file-store.ts";
 import {
@@ -21,6 +21,8 @@ import {
 } from "../src/core/memory/user-preference-metadata.ts";
 import { PERSONA_PROJECTION_RULE } from "../src/core/provider-prompt-contracts.ts";
 import { getDirectoryResourceProfileInfo } from "../src/core/settings-manager.ts";
+import { committedRepo } from "./git-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 type ToolParams = Record<string, unknown>;
 
@@ -31,7 +33,7 @@ describe("USER.md preference writes carry learning metadata", () => {
 	let admit: (request: UserPreferenceAdmissionRequest) => UserPreferenceAdmissionResult;
 
 	beforeEach(() => {
-		testDir = mkdtempSync(join(tmpdir(), "pi-user-pref-write-"));
+		testDir = tempDir("pi-user-pref-write-");
 		agentDir = join(testDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
 		admissions = [];
@@ -48,10 +50,6 @@ describe("USER.md preference writes carry learning metadata", () => {
 			},
 		});
 	});
-	afterEach(() => {
-		rmSync(testDir, { recursive: true, force: true });
-	});
-
 	async function start(cwd = testDir, withAdmitter = true) {
 		const provider = new FileStoreProvider(
 			withAdmitter
@@ -192,10 +190,13 @@ describe("USER.md preference writes carry learning metadata", () => {
 	});
 
 	it("checks project scope by directory key in the static block, the persona record and the handoff guidance", async () => {
-		const projectA = join(testDir, "a");
-		const projectB = join(testDir, "b");
-		mkdirSync(projectA);
-		mkdirSync(projectB);
+		const projectA = committedRepo("pi-user-pref-project-a-");
+		const projectB = committedRepo("pi-user-pref-project-b-");
+		expect(getDirectoryResourceProfileInfo(projectA, agentDir).root).toBe(projectA);
+		expect(getDirectoryResourceProfileInfo(projectB, agentDir).root).toBe(projectB);
+		expect(getDirectoryResourceProfileInfo(projectA, agentDir).hash).not.toBe(
+			getDirectoryResourceProfileInfo(projectB, agentDir).hash,
+		);
 		const a = await start(projectA);
 		await a.run({
 			action: "add",
@@ -228,6 +229,45 @@ describe("USER.md preference writes carry learning metadata", () => {
 		expect(b.provider.getHandoffPersonaGuidance()).not.toContain("Run the fast shard first here.");
 		expect(b.provider.getHandoffPersonaGuidance()).toContain("Keep status updates short.");
 		expect(b.provider.getHandoffPersonaGuidance()).toContain(PERSONA_PROJECTION_RULE);
+	});
+
+	it("negative control: sibling directories of the same canonical repository share project preferences", async () => {
+		const repository = committedRepo("pi-user-pref-shared-project-");
+		const directoryA = join(repository, "a");
+		const directoryB = join(repository, "b");
+		mkdirSync(directoryA);
+		mkdirSync(directoryB);
+		const identityA = getDirectoryResourceProfileInfo(directoryA, agentDir);
+		const identityB = getDirectoryResourceProfileInfo(directoryB, agentDir);
+		expect(identityA.root).toBe(repository);
+		expect(identityB.root).toBe(repository);
+		expect(identityA.hash).toBe(identityB.hash);
+		const a = await start(directoryA);
+		await a.run({
+			action: "add",
+			target: "user",
+			content: "Run the fast shard first here.",
+			scope: "project",
+			basis: "explicit",
+			evidence: [{ source: "s/1" }],
+		});
+		const b = await start(directoryB);
+		expect(b.provider.systemPromptBlock()).toContain("Run the fast shard first here.");
+		b.provider.onSystemPromptBlockFrozen("");
+		expect(b.provider.userPersonaProjection()?.content).toContain("Run the fast shard first here.");
+		expect(b.provider.getHandoffPersonaGuidance()).toContain("Run the fast shard first here.");
+		await b.run({
+			action: "add",
+			target: "user",
+			content: "Run the fast shard first here, always.",
+			scope: "project",
+			basis: "explicit",
+			evidence: [{ source: "s/2" }],
+		});
+		const lines = b.user().trim().split("\n").map(parseUserPreferenceLine);
+		expect(lines).toHaveLength(1);
+		expect(lines[0].text).toBe("Run the fast shard first here, always.");
+		expect(lines[0].metadata?.scope).toEqual({ kind: "project", projectKey: identityA.hash });
 	});
 
 	it("keeps applicable archived preferences in the projection after USER.md overflows into shards", async () => {
@@ -411,10 +451,8 @@ describe("USER.md preference writes carry learning metadata", () => {
 	});
 
 	it("scope identity: an add supersedes only its own scope, and a replace never touches another project's line", async () => {
-		const projectA = join(testDir, "scope-a");
-		const projectB = join(testDir, "scope-b");
-		mkdirSync(projectA);
-		mkdirSync(projectB);
+		const projectA = committedRepo("pi-user-pref-scope-a-");
+		const projectB = committedRepo("pi-user-pref-scope-b-");
 		// Identity as the real admission owner derives it: text plus project key when scoped.
 		admit = (request) => ({
 			outcome: "apply",

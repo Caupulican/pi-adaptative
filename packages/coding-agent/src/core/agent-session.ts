@@ -36,6 +36,7 @@ import {
 	listOpenAICodexRateLimitResetCredits,
 	type Message,
 	type Model,
+	type ModelServiceTier,
 	type TextContent,
 	type Usage,
 } from "@caupulican/pi-ai";
@@ -1152,6 +1153,7 @@ export class AgentSession {
 			isModelExhausted: (model) => this._isModelUnusable(model),
 			getModel: () => this.model ?? undefined,
 			getForegroundThinkingLevel: () => this.thinkingLevel,
+			getRouteChoiceJudge: () => this._systemOneController,
 			getForegroundToolNames: () => this.getActiveToolNames(),
 			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
 			// Live worker supervision: one observation per executed worker tool call, applied through
@@ -1860,6 +1862,7 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			integrationBranch: () => this._localCommitBranch || undefined,
 			getModelRegistry: () => this._modelRegistry,
+			getPeerReviewModels: () => this.getRouterCandidatePool().models,
 			isModelExhausted: (model) => this._isModelUnusable(model),
 			getResourceLoader: () => this._resourceLoader,
 			getSkillVault: () => this._skillVault,
@@ -2479,6 +2482,11 @@ export class AgentSession {
 		return resolveRouterCandidatePool(this._routerPool, this._modelRegistry, {
 			isRuntimeDisabled: (r) => !this.settingsManager.isLocalRuntimeEnabled(r),
 		});
+	}
+
+	/** Account-advertised speed tiers, with bundled capabilities before account discovery. */
+	getFastModeServiceTiers(model: Model<Api>): readonly ModelServiceTier[] | undefined {
+		return this._accountModels.serviceTiers(model);
 	}
 
 	/** The persisted `/toolprobe` record for a model, or undefined when never probed. */

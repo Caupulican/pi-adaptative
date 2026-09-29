@@ -1,3 +1,5 @@
+import { MODELS } from "../../src/models.generated.ts";
+
 const catalogs = new Map([
 	[
 		"https://models.dev/api.json",
@@ -69,6 +71,40 @@ const catalogs = new Map([
 		},
 	],
 ]);
+
+// Scoped offline Codex regeneration reuses committed OpenAI prices and output caps;
+// this is cached catalog input, not a claim that a fresh upstream feed was fetched.
+if (process.env.PI_CATALOG_COMMITTED_PRICING === "1") {
+	catalogs.set("https://models.dev/api.json", {
+		openai: {
+			models: Object.fromEntries(
+				Object.values(MODELS.openai).map((model) => [
+					model.id,
+					{
+						name: model.name,
+						tool_call: true,
+						reasoning: model.reasoning,
+						modalities: { input: model.input },
+						limit: { context: model.contextWindow, output: model.maxTokens },
+						cost: {
+							input: model.cost.input,
+							output: model.cost.output,
+							cache_read: model.cost.cacheRead,
+							cache_write: model.cost.cacheWrite,
+							tiers: model.cost.tiers?.map((tier) => ({
+								tier: { type: "context", size: tier.inputTokensAbove },
+								input: tier.input,
+								output: tier.output,
+								cache_read: tier.cacheRead,
+								cache_write: tier.cacheWrite,
+							})),
+						},
+					},
+				]),
+			),
+		},
+	});
+}
 
 // Deliberately never delegate to the real fetch: this child cannot make provider requests.
 globalThis.fetch = async (input) => {

@@ -21,6 +21,54 @@ function unexpectedSuccess(): never {
 }
 
 describe("OpenAI Codex account client", () => {
+	it("retains account-advertised service tiers and their default", async () => {
+		const tiers = [{ id: "ultrafast", name: "Ultrafast", description: "Lower latency" }];
+		const models = await listOpenAICodexAccountModels({
+			accessToken: createAccessToken(),
+			fetch: async () =>
+				new Response(
+					JSON.stringify({
+						models: [
+							{
+								slug: "gpt-6.1-sol",
+								visibility: "list",
+								supported_in_api: true,
+								priority: 1,
+								service_tiers: tiers,
+								default_service_tier: "ultrafast",
+							},
+						],
+					}),
+				),
+		});
+		expect(models[0]).toMatchObject({ serviceTiers: tiers, defaultServiceTier: "ultrafast" });
+	});
+
+	it.each(
+		[null, {}, [null], [{ id: "ultrafast", name: 9, description: "invalid" }]].map((service_tiers) => ({
+			service_tiers,
+		})),
+	)("rejects malformed advertised tiers $service_tiers", async ({ service_tiers }) => {
+		await expect(
+			listOpenAICodexAccountModels({
+				accessToken: createAccessToken(),
+				fetch: async () =>
+					new Response(
+						JSON.stringify({
+							models: [
+								{
+									slug: "gpt-6.1-sol",
+									visibility: "list",
+									supported_in_api: true,
+									priority: 1,
+									service_tiers,
+								},
+							],
+						}),
+					),
+			}),
+		).rejects.toThrow("service_tiers");
+	});
 	it("resolves ChatGPT and Codex API endpoint styles", () => {
 		expect(resolveOpenAICodexAccountEndpoint(undefined, "reset-credits")).toBe(
 			"https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",

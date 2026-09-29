@@ -1,7 +1,12 @@
 import { MODELS } from "./models.generated.ts";
 import type { Api, KnownProvider, Model } from "./types.ts";
 
-export { clampThinkingLevel, getSupportedThinkingLevels, resolveModelThinkingLevel } from "./model-capabilities.ts";
+export {
+	clampThinkingLevel,
+	getSupportedThinkingLevels,
+	isModelServiceTierAdvertised,
+	resolveModelThinkingLevel,
+} from "./model-capabilities.ts";
 export { calculateCost } from "./usage.ts";
 
 const modelRegistry: Map<string, Map<string, Model<Api>>> = new Map();

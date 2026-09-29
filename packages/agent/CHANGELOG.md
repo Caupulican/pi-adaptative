@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Retained service-tier cost estimate metadata when aggregating usage across model requests.
+
 ## [0.101.0] - 2026-09-29
 
 ### Fixed

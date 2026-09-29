@@ -24,6 +24,7 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	"model_fitness",
 	"pi_collaboration",
 	"context_scout",
+	"peer",
 	"runtime_update",
 	"image_generate",
 	"task_automation",

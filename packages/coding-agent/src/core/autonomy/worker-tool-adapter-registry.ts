@@ -50,6 +50,7 @@ export const WORKER_TOOL_ADAPTER_FORBIDDEN_NAMES: ReadonlySet<string> = new Set(
 	"delegate",
 	"pi_collaboration",
 	"context_scout",
+	"peer",
 	ROOT_MEMORY_TOOL_NAME,
 	WORKER_MEMORY_READ_TOOL_NAME,
 	"goal",

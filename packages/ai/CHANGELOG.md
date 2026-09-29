@@ -3,6 +3,7 @@
 ### Added
 
 - Added GPT-6.1 Sol for OpenAI and ChatGPT Codex, including upstream reasoning defaults, Responses Lite, and pricing.
+- Added advertised Codex service-tier metadata and Ultrafast requests with matching SSE/WebSocket routing hints, tier-aware socket reuse, and explicit base-rate cost estimates when tier pricing is unavailable.
 
 ### Changed
 

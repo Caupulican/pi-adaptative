@@ -1,8 +1,8 @@
 # System One
 
 System One is the objective controller: while a goal is active it owns semantic routing and objective
-completion judgments. Jev is its semantic evaluator, a judge over supplied state, never an authority
-and never a model chooser. Deterministic goal requirements remain the goal ledger's mechanical proof.
+completion judgments. Jev judges supplied state and host-approved model and effort choices. The host
+owns admission, permissions and approval. Deterministic goal requirements remain the goal ledger's mechanical proof.
 The root model and the workers execute what System One routes.
 
 ## Loop modes
@@ -85,6 +85,71 @@ recheck before continuing affected work. Failed requirement checks and unresolve
 completion. Evaluator outages retain their actual diagnostics without inventing a defect.
 Other `SystemOneController` stage packs for intake, claim check, duplicate
 logic, patch review and drift remain callable for tests/hooks.
+
+## Native worker model and effort
+
+Before a fresh unbound native worker starts, the host asks Jev once to select a profile from the
+existing account routing candidates and their supported effort settings. The host compiles every
+offered profile through worker admission with the same tools, paths, permissions and budget.
+The request favors medium effort for clear coding tasks and higher supported effort for complex
+reasoning or strict JSON tasks. This policy applies across providers.
+
+Only a supplied profile with a valid Choice answer and confidence at least 0.90 can replace the
+host default. Uncertainty, malformed answers, evaluator outages and requests exceeding the
+4,000-character judgment budget retain that default. There is no second selection question.
+The host rechecks current admission before persisting the selected model and effort.
+Cancellation prevents a fresh admission; stale judgments cannot authorize a changed grant.
+
+Authored model and effort, model pins and configured profiles retain precedence. A read-only or
+path-scoped request still receives model selection without widening its grant. Persistent worker
+reuse and replay preserve the admitted settings without another question. Worker concurrency and
+independent-work requirements remain governed by their existing host admission policy.
+
+Pinned by the [route choice tests](../test/expert-routing/system-one-allocation.test.ts) and
+[native worker admission tests](../test/suite/worker-route-admission.test.ts).
+
+## Explicit peer review
+
+The root model can request independent plan or delivery review with the native `peer` tool.
+It remains the executor; the peer receives only the supplied snapshot and has no tools or inherited
+foreground history. This review uses the host's configured provider connections and spends tokens on
+the chosen peer. Workers cannot launch a peer review.
+
+Call `peer` with `{"action":"options"}` to discover exact `provider/model` references and
+supported thinking levels above the current lead's setting. Options are limited to the host routing
+pool, configured authentication, available quota and reasoning support. They do not assert strength.
+If no higher effort is available, the peer review is unavailable; effort is never silently clamped.
+
+Then call `peer` with `action: "review"` and a `review` object containing:
+
+| Field | Required content |
+|---|---|
+| `peer` | Exact reference disclosed by `options`. |
+| `thinkingLevel` | Disclosed level strictly above the lead's current setting. |
+| `stage` | `plan` or `delivery`. |
+| `objective` | Requested outcome, up to 2,000 characters. |
+| `artifact` | Relevant complete plan or change snapshot, up to 24,000 characters. |
+| `evidence` | Source with references, checks, adverse findings and limitations, up to 48,000 characters. |
+
+Jev compares the proposed distinct peer with the lead for this task. Admission requires a `stronger`
+judgment at confidence at least 0.95; this is a task-specific judgment, not measured benchmark proof.
+Equal capability, uncertainty, a missing judge or an evaluator outage leaves review unavailable.
+The strength question carries the complete objective, stage and model facts within the host's
+4,000-character routing budget; oversized metadata is refused explicitly. The peer receives the full
+accepted artifact and evidence. The same model id under another provider is not a distinct peer.
+The host fixes the peer and effort for the call, rechecks admission before the provider request,
+and rejects results if the lead, peer configuration, pool, authentication or quota changes.
+
+The bounded response contains a snapshot digest, lead and peer settings, judgment provenance,
+findings and limitations. Each finding must quote supplied evidence and specify a reproducible check.
+Findings request verification in the receiving lead's own lane through the existing System One
+directive: reproduce, revise confirmed failures, and recheck before affected work continues.
+`no_findings` never clears an earlier unresolved directive or certifies completion. Missing evidence,
+malformed or truncated output, cancellation and service failures grant no validation. Reported peer
+usage is retained even when its response is unusable. Permissions and approval remain host-owned.
+
+Pinned by the [peer policy tests](../test/peer-review.test.ts) and
+[native session integration tests](../test/suite/agent-session-peer.test.ts).
 
 ## The decision ledger
 

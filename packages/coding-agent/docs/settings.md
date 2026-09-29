@@ -36,6 +36,25 @@ Edit directly or use `/settings` for common options.
 }
 ```
 
+#### Processing tiers
+
+`/fast on` and `/fast priority` select priority processing; `/fast off` selects the default tier. `/fast ultrafast` selects Codex Ultrafast only when the current model/account catalog advertises it. `/fast status` reports the selection and an unavailable saved tier. These commands preserve the model and thinking level.
+
+Preferences are stored per provider:
+
+```json
+{
+  "fastMode": {
+    "openai-codex": "ultrafast",
+    "xai": true
+  }
+}
+```
+
+Codex account model metadata overrides the bundled catalog. An explicit empty tier list excludes premium tiers; missing metadata preserves legacy priority support but never enables Ultrafast. An unavailable saved tier is withheld from requests. Explicit SDK request/session Ultrafast selections must pass the same advertised-tier check. Root and native child requests use the same preference, with matching SSE/WebSocket routing headers.
+
+The inspected Codex catalog supplies tier availability, not Ultrafast dollar prices. Ultrafast usage therefore retains base model rates with an estimate marker and a diagnostic. CURRENT and TODAY totals show `~$` and retain that qualification across sessions and cached redraws. Dollar budgets use these estimates; they do not measure Ultrafast charges or subscription quota consumption.
+
 ### UI & Display
 
 | Setting | Type | Default | Description |

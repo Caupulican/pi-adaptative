@@ -15,6 +15,7 @@ export function addUsage(target: Usage, usage: Usage): void {
 	target.cost.cacheRead += usage.cost.cacheRead;
 	target.cost.cacheWrite += usage.cost.cacheWrite;
 	target.cost.total += usage.cost.total;
+	if (usage.cost.estimate === "base-rates") target.cost.estimate = "base-rates";
 }
 
 export function combineUsage(...usages: Array<Usage | undefined>): Usage {

@@ -295,9 +295,14 @@ so retaining those validation values is deliberate. Explicit independent special
 `delegate.parallelWork` object: its projected field costs at most 75 tokens, measured separately
 from the unchanged 875-token ceiling for the prior delegate surface. The 4,500-token combined
 base-tool ceiling stays fixed. This is a deliberate new control for mandatory specialist reuse;
-it does not permit unrelated description growth. Live provider projection measures 5,059 total schema tokens against an aggregate ceiling
-of 5,570 (4,500 base + 350 task_directory + 720 task_automation), while core tools excluding automation
-and directory measure 4,246 tokens, strictly under the unchanged 4,500 base limit. The additions address
+it does not permit unrelated description growth. Explicit `peer` review adds a separate 210-token
+schema allowance, measured at 197 tokens. The live default surface measures 6,272 schema tokens
+against a 6,325-token aggregate ceiling (4,500 base + 350 task_directory + 720 task_automation +
+100 decision_ledger_read + 143 repo_read + 140 self_compact + 162 goal-check growth + 210 peer).
+The unchanged 4,500-token base subtotal excludes the actual costs of those separately budgeted
+tools, including `peer`, and the measured growth of `goal` and `create_goal` over their respective
+330-token and 84-token baselines. Every pre-existing aggregate component and individual schema
+ceiling stays unchanged; the peer allowance cannot subsidize unrelated tool growth. The additions address
 reproduced wrong-directory execution and safe task automation without widening worker grants or introducing
 per-turn schema churn. Pinned by
 `packages/coding-agent/test/context-composition.test.ts`,
@@ -1053,6 +1058,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-29 | Explicit `peer` review adds a separate 210-token schema allowance, measured at 197 tokens, bringing the default aggregate ceiling to 6,325 (4,500 + 350 + 720 + 100 + 143 + 140 + 162 + 210). The unchanged 4,500 base excludes actual peer cost alongside existing feature costs and measured goal growth; all pre-existing ceilings remain unchanged. |
 | 2026-09-28 | Background task lists expose task identity and status only; summaries are output-derived and remain owned by the completion wake-up or an explicit wait. |
 | 2026-09-28 | Foreground admission races during objective-primary continuation remain transient coordination: the auto-continuation owner waits and retries while the goal stays active and its failure streak stays unchanged. |
 | 2026-09-28 | Completion rejection now means active repair rather than a blocked goal; unresolved required decisions surface through the native question panel or a durable handoff ledger before the next mission. Optional System One failure falls back to deterministic proof so autonomy survives model absence and outages. |

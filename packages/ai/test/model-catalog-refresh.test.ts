@@ -1,26 +1,20 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
+import { tempDir } from "../../coding-agent/test/temp-dir.ts";
 
 const generator = fileURLToPath(new URL("../scripts/generate-models.ts", import.meta.url));
 const fixture = new URL("./fixtures/model-catalog-refresh-fetch.mjs", import.meta.url).href;
-const directories: string[] = [];
 const sources = [
 	"https://models.dev/api.json",
 	"https://openrouter.ai/api/v1/models",
 	"https://ai-gateway.vercel.sh/v1/models",
 ];
 
-afterEach(() => {
-	for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
-});
-
-function generate(source?: string, failure?: string, provider?: string) {
-	const directory = mkdtempSync(join(tmpdir(), "pi-model-catalog-"));
-	directories.push(directory);
+function generate(source?: string, failure?: string, provider?: string, committedPricing = false) {
+	const directory = tempDir("pi-model-catalog-");
 	const output = join(directory, "models.generated.ts");
 	const original = "// Existing committed catalog must survive a failed refresh.\n";
 	writeFileSync(output, original);
@@ -35,6 +29,7 @@ function generate(source?: string, failure?: string, provider?: string) {
 			PI_MODEL_CATALOG_PROVIDER: provider ?? "",
 			PI_CATALOG_FIXTURE_SOURCE: source ?? "",
 			PI_CATALOG_FIXTURE_FAILURE: failure ?? "",
+			PI_CATALOG_COMMITTED_PRICING: committedPricing ? "1" : "",
 		},
 	});
 	return { result, original, output: readFileSync(output, "utf8") };
@@ -76,6 +71,33 @@ describe("model catalog refresh publication", () => {
 		expect(output).toContain('id: "fixture/router"');
 		expect(output).toContain('id: "fixture/gateway"');
 		expect(output).toContain('id: "claude-sonnet-5-5"');
+	});
+
+	it("preserves Codex's advertised tiers without manufacturing Ultrafast or a null default", () => {
+		const { result, output } = generate();
+		expect(result.status, result.stderr).toBe(0);
+		const codexStart = output.indexOf('"openai-codex": {');
+		expect(codexStart).toBeGreaterThan(-1);
+		const codex = output.slice(codexStart, output.indexOf("\n\t},", codexStart));
+		const sol = modelBlock(codex, "gpt-6.1-sol");
+		expect(sol).toContain(
+			'serviceTiers: [{"id":"priority","name":"Fast","description":"2x speed, increased usage"}]',
+		);
+		expect(sol).not.toContain("defaultServiceTier:");
+		expect(codex).not.toContain('"ultrafast"');
+	});
+
+	it("regenerates only Codex tiers offline while preserving every existing non-tier fact", () => {
+		const { result, output } = generate(undefined, undefined, "openai-codex", true);
+		expect(result.status, result.stderr).toBe(0);
+		const committed = readFileSync(new URL("../src/models.generated.ts", import.meta.url), "utf8");
+		const withoutTiers = (catalog: string) =>
+			catalog.replace(/^\t\t\t(?:serviceTiers|defaultServiceTier):.*\n/gm, "");
+		expect(withoutTiers(output)).toBe(withoutTiers(committed));
+		const codex = output.slice(output.indexOf('"openai-codex": {'));
+		expect(modelBlock(codex, "gpt-6-sol")).toContain('defaultServiceTier: "priority"');
+		expect(modelBlock(codex, "gpt-6-luna")).toContain('defaultServiceTier: "priority"');
+		expect(modelBlock(codex, "gpt-6.1-sol")).not.toContain("defaultServiceTier:");
 	});
 
 	it("uses alias target compatibility without changing alias identity or advertised prices", () => {

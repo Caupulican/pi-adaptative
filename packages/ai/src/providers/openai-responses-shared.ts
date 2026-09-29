@@ -1,7 +1,6 @@
 import type OpenAI from "openai";
 import type {
 	Tool as OpenAITool,
-	ResponseCreateParamsStreaming,
 	ResponseFunctionCallOutputItemList,
 	ResponseFunctionToolCall,
 	ResponseInput,
@@ -21,6 +20,7 @@ import type {
 	Context,
 	ImageContent,
 	Model,
+	ServiceTier,
 	StopReason,
 	TextContent,
 	TextSignatureV1,
@@ -90,15 +90,12 @@ function parseTextSignature(
 
 export interface OpenAIResponsesStreamOptions {
 	toolNameMap?: ToolNameMap;
-	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
+	serviceTier?: ServiceTier;
 	resolveServiceTier?: (
-		responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-		requestServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-	) => ResponseCreateParamsStreaming["service_tier"] | undefined;
-	applyServiceTierPricing?: (
-		usage: Usage,
-		serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-	) => void;
+		responseServiceTier: ServiceTier | undefined,
+		requestServiceTier: ServiceTier | undefined,
+	) => ServiceTier | undefined;
+	applyServiceTierPricing?: (usage: Usage, serviceTier: ServiceTier | undefined) => void;
 }
 
 export interface ConvertResponsesToolsOptions {
@@ -159,9 +156,13 @@ function applyFuguUltraPricing<TApi extends Api>(model: Model<TApi>, usage: Usag
 
 export function applyOpenAIServiceTierPricing<TApi extends Api>(
 	usage: Usage,
-	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
+	serviceTier: ServiceTier | undefined,
 	model: Pick<Model<TApi>, "id">,
 ): void {
+	if (serviceTier === "ultrafast") {
+		usage.cost.estimate = "base-rates";
+		return;
+	}
 	const multiplier =
 		serviceTier === "flex" ? 0.5 : serviceTier === "priority" ? (model.id === "gpt-5.5" ? 2.5 : 2) : 1;
 	if (multiplier === 1) return;
@@ -701,6 +702,16 @@ export async function processResponsesStream<TApi extends Api>(
 				? options.resolveServiceTier(response?.service_tier, options.serviceTier)
 				: (response?.service_tier ?? options.serviceTier);
 			options.applyServiceTierPricing(output.usage, serviceTier);
+			if (output.usage.cost.estimate === "base-rates") {
+				output.diagnostics = [
+					...(output.diagnostics ?? []),
+					{
+						type: "service_tier_cost_estimate",
+						timestamp: Date.now(),
+						details: { serviceTier, estimate: "base-rates", tierPricing: "unavailable" },
+					},
+				];
+			}
 		}
 		applyResponseOutput(response.output ?? []);
 		// Map status to stop reason. An incomplete response is a length stop only when the output cap

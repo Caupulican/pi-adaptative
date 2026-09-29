@@ -2,6 +2,7 @@ import { isDecisivelyTrue } from "../decision/noul.ts";
 import type { Consequence } from "../decision/primitives.ts";
 import {
 	lightweightQuestionId,
+	MAX_ROUTE_CHOICE_REQUEST_CHARACTERS,
 	ROUTE_CHOICE_QUESTION_ID,
 	supersededQuestionId,
 } from "../expert-routing/system-one-choice.ts";
@@ -730,8 +731,8 @@ export class SystemOneController {
 	}
 
 	/**
-	 * Which kind of model and thinking a request needs: one Choice over the route categories
-	 * (expert-routing/system-one-choice.ts). Code then picks the model inside the category.
+	 * One Choice among host-approved options, following the caller's selection criteria.
+	 * The caller validates the choice before applying its model, effort, or peer selection.
 	 */
 	async evaluateRouteChoice(
 		input: { readonly request: string; readonly options: readonly { id: string; description: string }[] },
@@ -741,13 +742,13 @@ export class SystemOneController {
 			[ROUTE_CHOICE_QUESTION_ID]: {
 				type: "choice",
 				instructions:
-					"Which kind of model and thinking does `request` need? Pick the lightest option that fully meets the task; a heavier one only when the task needs it.",
+					"Which host-approved option best satisfies the selection criteria in `request`? Choose only from the supplied options and follow the request's priorities. Preserve uncertainty when the evidence does not distinguish the options; do not invent confidence.",
 				criteria: Object.fromEntries(input.options.map((option) => [option.id, option.description])),
 			},
 		};
 		const { decision, answers, evaluationId } = await this.runStageValidation(
 			"route_choice",
-			{ request: this.projector.redactText(input.request.slice(0, 4_000)) },
+			{ request: this.projector.redactText(input.request.slice(0, MAX_ROUTE_CHOICE_REQUEST_CHARACTERS)) },
 			"read_only",
 			[],
 			questions,

@@ -269,6 +269,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"get_goal",
 					"goal",
 					"improvement_loop",
+					"peer",
 					"pipeline",
 					"python",
 					"read",
@@ -321,11 +322,15 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// on goal and in create_goal's requirements, plus amend_goal and set_requirement_check.
 			// Measured growth over the prior surfaces (goal 330, create_goal 84): 162 tokens. The base
 			// subtotal removes only that measured growth, never the whole allowance.
+			// Explicit peer review is a requested default tool, measured at 197 tokens. Its own
+			// 210-token ceiling adds no headroom to the pre-existing surface: subtract its actual
+			// cost from the base subtotal and check the peer schema independently.
 			const goalChecksAllowance = 162;
+			const peerAllowance = 210;
 			expect(
 				report.toolSchemaTokens,
 				JSON.stringify(report.tools.map(({ name, schemaTokens }) => ({ name, schemaTokens }))),
-			).toBeLessThanOrEqual(4_500 + 350 + 720 + 100 + 143 + 140 + goalChecksAllowance);
+			).toBeLessThanOrEqual(4_500 + 350 + 720 + 100 + 143 + 140 + goalChecksAllowance + peerAllowance);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
 			expect(toolTokens.get("goal")).toBeLessThanOrEqual(399);
 			expect(toolTokens.get("create_goal")).toBeLessThanOrEqual(177);
@@ -340,6 +345,8 @@ describe("AgentSession.getContextCompositionReport", () => {
 			expect(toolTokens.get("repo_read")).toBeLessThanOrEqual(143);
 			expect(toolTokens.get("self_compact")).toBeGreaterThan(0);
 			expect(toolTokens.get("self_compact")).toBeLessThanOrEqual(140);
+			expect(toolTokens.get("peer")).toBeGreaterThan(0);
+			expect(toolTokens.get("peer")).toBeLessThanOrEqual(peerAllowance);
 			expect(
 				report.toolSchemaTokens -
 					toolTokens.get("task_directory")! -
@@ -348,6 +355,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 					toolTokens.get("decision_ledger_read")! -
 					toolTokens.get("repo_read")! -
 					toolTokens.get("self_compact")! -
+					toolTokens.get("peer")! -
 					goalChecksGrowth,
 			).toBeLessThanOrEqual(4_500);
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(160);

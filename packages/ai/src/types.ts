@@ -93,7 +93,14 @@ export interface PromptCacheOptions {
 }
 
 export type Transport = "sse" | "websocket" | "websocket-cached" | "auto";
-export type ServiceTier = "auto" | "default" | "fast" | "flex" | "scale" | "priority" | null;
+export type ServiceTier = "auto" | "default" | "fast" | "flex" | "scale" | "priority" | "ultrafast" | null;
+
+/** Provider-advertised processing tier; availability is model/account specific. */
+export interface ModelServiceTier {
+	id: string;
+	name: string;
+	description: string;
+}
 export type SessionAffinityFormat = "openai" | "openai-nosession" | "openrouter";
 
 export interface ProviderResponse {
@@ -354,6 +361,8 @@ export interface Usage {
 	cacheWrite: number;
 	totalTokens: number;
 	cost: {
+		/** A tier with no published dollar rates uses base model rates, not the actual premium. */
+		estimate?: "base-rates";
 		input: number;
 		output: number;
 		cacheRead: number;
@@ -709,6 +718,9 @@ export interface Model<TApi extends Api> {
 	samplingParams?: Record<string, unknown>;
 	/** Use the ChatGPT Codex Responses Lite request framing for this model. */
 	openaiResponsesLite?: boolean;
+	/** Advertised processing tiers. Missing metadata is distinct from an explicitly empty list. */
+	serviceTiers?: readonly ModelServiceTier[];
+	defaultServiceTier?: string;
 	/** Optional full-request pricing tier activated by total input tokens above a threshold. */
 	longContextPricing?: {
 		thresholdTokens: number;

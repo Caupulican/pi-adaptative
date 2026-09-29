@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Added
+
+- Added native `peer` plan and delivery review by a distinct host-admitted peer at higher supported effort, with task-specific Jev strength judgment, bounded evidence and same-lane verification of findings.
+- Added `/fast ultrafast` for Codex models that advertise the tier in the account catalog, preserving priority controls and qualifying unpriced tier costs in current and daily totals.
+
+### Changed
+
+- Unified native subagent and collaboration execution discipline: keep admitted model and effort fixed, complete requested scope, ask only for missing input or authority, and report a code check result or why no check could run before stopping.
+- Updated the unconfigured Codex provider default to GPT-6.1 Sol; explicit and saved model selections retain precedence.
+- Fresh unbound native workers now receive one Jev selection among host-approved model and effort profiles, preserving authored settings, permissions, immutable reuse and replay, and the host default when no valid selection is available.
+
 ## [0.101.0] - 2026-09-29
 
 ### Breaking Changes

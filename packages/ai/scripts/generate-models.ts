@@ -16,6 +16,7 @@ import type {
 	Api,
 	KnownProvider,
 	Model,
+	ModelServiceTier,
 	ModelThinkingLevel,
 	OpenAICompletionsCompat,
 	OpenAIResponsesCompat,
@@ -378,6 +379,8 @@ interface CodexCatalogueModel {
 	multi_agent_reasoning_effort?: string;
 	use_responses_lite?: boolean;
 	supported_in_api: boolean;
+	service_tiers?: readonly ModelServiceTier[];
+	default_service_tier?: string | null;
 }
 
 /**
@@ -2193,6 +2196,8 @@ async function generateModels() {
 			...(entry.default_reasoning_level ? { defaultThinkingLevel: entry.default_reasoning_level } : {}),
 			thinkingLevelMap: codexThinkingLevelMap(entry),
 			...(entry.use_responses_lite ? { openaiResponsesLite: true } : {}),
+			...(entry.service_tiers !== undefined ? { serviceTiers: entry.service_tiers } : {}),
+			...(typeof entry.default_service_tier === "string" ? { defaultServiceTier: entry.default_service_tier } : {}),
 			input: entry.input_modalities.filter((modality): modality is "text" | "image" =>
 				modality === "text" || modality === "image",
 			),
@@ -2610,6 +2615,12 @@ export const MODELS = {
 			}
 			if (model.openaiResponsesLite) {
 				output += `\t\t\topenaiResponsesLite: true,\n`;
+			}
+			if (model.serviceTiers !== undefined) {
+				output += `\t\t\tserviceTiers: ${JSON.stringify(model.serviceTiers)},\n`;
+			}
+			if (model.defaultServiceTier !== undefined) {
+				output += `\t\t\tdefaultServiceTier: ${JSON.stringify(model.defaultServiceTier)},\n`;
 			}
 			if (model.longContextPricing) {
 				output += `\t\t\tlongContextPricing: ${JSON.stringify(model.longContextPricing)},\n`;

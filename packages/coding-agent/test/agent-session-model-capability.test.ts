@@ -59,6 +59,7 @@ describe("model capability auto-detection", () => {
 				"ask_question",
 				"secret_store",
 				"typesafe_review",
+				"peer",
 				"delegate",
 				"tool_task",
 				"run_toolkit_script",

@@ -1,5 +1,5 @@
 import type { Api, Model } from "@caupulican/pi-ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ExpertAdmissionPolicy } from "../../src/core/expert-routing/admission.ts";
 
 import { ExpertCapacityService } from "../../src/core/expert-routing/capacity.ts";
@@ -9,8 +9,10 @@ import { ExpertRankingPolicy } from "../../src/core/expert-routing/ranking.ts";
 import { buildWorkerCapabilityRequest } from "../../src/core/expert-routing/request-builder.ts";
 import { ExpertSelectionService } from "../../src/core/expert-routing/service.ts";
 import {
+	chooseHostRouteProfile,
 	chooseRouteCategory,
 	classifyLightweightModels,
+	MAX_ROUTE_CHOICE_REQUEST_CHARACTERS,
 	type RouteChoiceJudge,
 } from "../../src/core/expert-routing/system-one-choice.ts";
 
@@ -49,7 +51,7 @@ function judge(...answers: { choice: string; confidence: number; probabilities?:
 	const value: RouteChoiceJudge = {
 		evaluateRouteChoice: async ({ options }) => {
 			asked.push(options.map((option) => option.id));
-			return { route_choice: answers[asked.length - 1] };
+			return { route_choice: { type: "choice", ...answers[asked.length - 1] } };
 		},
 		evaluateLightweightModels: async ({ models }) =>
 			Object.fromEntries(
@@ -60,6 +62,78 @@ function judge(...answers: { choice: string; confidence: number; probabilities?:
 }
 
 describe("System One allocation", () => {
+	it("selects an approved model and effort profile with exactly one judgment, or keeps the host default", async () => {
+		const options = [
+			{ id: "ordinary", description: "Host model A at medium effort" },
+			{ id: "complex", description: "Host model B at high effort" },
+		];
+		for (const confidence of [0.85, 1.1, Number.NaN, Number.POSITIVE_INFINITY]) {
+			const scripted = judge({ choice: "complex", confidence, probabilities: { ordinary: 0.1 } });
+			expect(await chooseHostRouteProfile(scripted.judge, { request: "task", options })).toHaveProperty("fallback");
+			expect(scripted.asked).toHaveLength(1);
+		}
+		const valid = judge({ choice: "complex", confidence: 0.95 });
+		expect(await chooseHostRouteProfile(valid.judge, { request: "task", options })).toMatchObject({
+			choice: "complex",
+			stage: "decided",
+		});
+		const forged = judge({ choice: "unapproved", confidence: 0.99 });
+		expect(await chooseHostRouteProfile(forged.judge, { request: "task", options })).toHaveProperty("fallback");
+		for (const type of ["noul", undefined]) {
+			const malformed = {
+				evaluateRouteChoice: async () => ({ route_choice: { type, choice: "complex", confidence: 0.99 } }),
+			};
+			expect(await chooseHostRouteProfile(malformed, { request: "task", options })).toHaveProperty("fallback");
+		}
+	});
+
+	it("does not accept a model category excluded from the narrowed host options", async () => {
+		const scripted = judge(
+			{ choice: "flash_deep", confidence: 0.85, probabilities: { strong_medium: 0.1 } },
+			{ choice: "strong_deep", confidence: 0.95 },
+		);
+		expect(
+			await chooseRouteCategory(scripted.judge, {
+				request: "task",
+				available: ["flash_deep", "strong_medium", "strong_deep"],
+			}),
+		).toMatchObject({ category: "flash_deep", stage: "provisional" });
+	});
+
+	it("preserves host authority on outage, cancellation, duplicate profiles and oversized evidence", async () => {
+		const options = [{ id: "host", description: "Host-approved model at medium effort" }];
+		const evaluateRouteChoice = vi.fn(async () => {
+			throw new Error("transport failed");
+		});
+		const systemOne = { evaluateRouteChoice };
+		expect(await chooseHostRouteProfile(systemOne, { request: "task", options })).toEqual({
+			fallback: "System One unavailable: transport failed",
+		});
+		expect(evaluateRouteChoice).toHaveBeenCalledTimes(1);
+		evaluateRouteChoice.mockClear();
+		for (const input of [
+			{ request: "task", options: [...options, ...options] },
+			{ request: "x".repeat(MAX_ROUTE_CHOICE_REQUEST_CHARACTERS + 1), options },
+		])
+			expect(await chooseHostRouteProfile(systemOne, input)).toHaveProperty("fallback");
+		expect(evaluateRouteChoice).not.toHaveBeenCalled();
+		const controller = new AbortController();
+		controller.abort(new Error("canceled"));
+		await expect(
+			chooseHostRouteProfile(systemOne, { request: "task", options, signal: controller.signal }),
+		).rejects.toThrow("canceled");
+		expect(evaluateRouteChoice).not.toHaveBeenCalled();
+		const late = new AbortController();
+		const during = {
+			evaluateRouteChoice: async () => {
+				late.abort(new Error("canceled during judgment"));
+				return { route_choice: { type: "choice", choice: "host", confidence: 0.99 } };
+			},
+		};
+		await expect(chooseHostRouteProfile(during, { request: "task", options, signal: late.signal })).rejects.toThrow(
+			"canceled during judgment",
+		);
+	});
 	it("flash is System One's judgment of each model, never a name rule in code, and nothing without it", async () => {
 		const models = [flashA, flashB, strong].map((m) => ({ id: `p/${m.id}`, description: m.id }));
 		expect([...(await classifyLightweightModels(judge().judge, models))]).toEqual(["p/flash-a", "p/flash-b"]);
