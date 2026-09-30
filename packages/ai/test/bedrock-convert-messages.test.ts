@@ -570,6 +570,7 @@ describe("bedrock convertMessages skips unknown content types", () => {
 
 	it("replaces blank tool result content with a placeholder", async () => {
 		const messages: Message[] = [
+			makeAssistant([{ type: "toolCall", id: "tool-1", name: "tool", arguments: {} }]),
 			{
 				role: "toolResult",
 				toolCallId: "tool-1",
@@ -582,10 +583,41 @@ describe("bedrock convertMessages skips unknown content types", () => {
 		const payload = await capturePayload({ messages });
 		expect(payload).toBeDefined();
 		const p = payload as {
-			messages: Array<{ role: string; content: Array<{ toolResult: { content: unknown[] } }> }>;
+			messages: Array<{
+				role: string;
+				content: Array<{ toolUse?: { toolUseId: string }; toolResult?: { content: unknown[] } }>;
+			}>;
+		};
+		expect(p.messages).toHaveLength(2);
+		expect(p.messages[0]).toMatchObject({
+			role: "assistant",
+			content: [{ toolUse: { toolUseId: "tool-1" } }],
+		});
+		expect(p.messages[1].role).toBe("user");
+		expect(p.messages[1].content[0].toolResult?.content).toEqual([{ text: "<empty>" }]);
+	});
+
+	it("preserves an orphan blank tool result as historical evidence without unmatched tool output", async () => {
+		const payload = await capturePayload({
+			messages: [
+				{
+					role: "toolResult",
+					toolCallId: "compacted-call",
+					toolName: "tool",
+					content: [{ type: "text", text: "" }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+			],
+		});
+		expect(payload).toBeDefined();
+		const p = payload as {
+			messages: Array<{ role: string; content: Array<{ text?: string; toolResult?: unknown }> }>;
 		};
 		expect(p.messages).toHaveLength(1);
-		expect(p.messages[0].content[0].toolResult.content).toEqual([{ text: "<empty>" }]);
+		expect(p.messages[0].role).toBe("user");
+		expect(p.messages[0].content[0].text).toContain("Historical tool output");
+		expect(p.messages[0].content.some((member) => member.toolResult !== undefined)).toBe(false);
 	});
 
 	it("skips assistant messages with only unknown content blocks", async () => {

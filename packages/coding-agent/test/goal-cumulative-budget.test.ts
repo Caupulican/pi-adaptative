@@ -1,7 +1,7 @@
 import { Agent } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel } from "@caupulican/pi-ai";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { applyGoalEvent, createGoalState, isGoalState } from "../src/core/goals/goal-state.ts";
@@ -9,6 +9,12 @@ import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestResourceLoader } from "./utilities.ts";
+
+const testSessions: AgentSession[] = [];
+
+afterEach(async () => {
+	await Promise.all(testSessions.splice(0).map((session) => session.disposeAndWait()));
+});
 
 function createTestSession() {
 	const sessionManager = SessionManager.inMemory();
@@ -33,6 +39,7 @@ function createTestSession() {
 		cwd: process.cwd(),
 		modelRegistry: ModelRegistry.inMemory(AuthStorage.inMemory()),
 	});
+	testSessions.push(session);
 
 	const promptCalls: { text: string; options: unknown }[] = [];
 	session.prompt = async (text: string, options?: unknown) => {

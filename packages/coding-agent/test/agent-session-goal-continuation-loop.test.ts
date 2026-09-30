@@ -1,6 +1,3 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { Agent } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel } from "@caupulican/pi-ai";
@@ -13,21 +10,18 @@ import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createTestManagedLaneDispatch } from "./managed-lane-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
-const testAgentDirs: string[] = [];
+const testSessions: AgentSession[] = [];
 
-afterEach(() => {
-	while (testAgentDirs.length > 0) {
-		const agentDir = testAgentDirs.pop();
-		if (agentDir) rmSync(agentDir, { recursive: true, force: true });
-	}
+afterEach(async () => {
+	await Promise.all(testSessions.splice(0).map((session) => session.disposeAndWait()));
 });
 
 describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 	function createTestSession() {
-		const agentDir = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-goal-continuation-"));
-		testAgentDirs.push(agentDir);
+		const agentDir = tempDir("pi-goal-continuation-");
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.inMemory();
 		const model = getModel("anthropic", "claude-sonnet-4-5");
@@ -51,6 +45,7 @@ describe("Phase 10E: AgentSession Goal Continuation Loop", () => {
 			agentDir,
 			modelRegistry: ModelRegistry.inMemory(AuthStorage.inMemory()),
 		});
+		testSessions.push(session);
 
 		const promptCalls: { text: string; options: unknown }[] = [];
 		session.prompt = async (text: string, options?: unknown) => {

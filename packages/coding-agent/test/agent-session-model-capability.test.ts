@@ -87,10 +87,12 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(4_096);
 			const composition = harness.session.getContextCompositionReport();
 			// The owner approved additional capacity for the canonical Jev schema: its live
-			// provider framing grew from 358 to 828 tokens. Charge that growth separately;
-			// unused Jev capacity must not hide growth in other tools or the system prompt.
+			// provider framing grew from 358 to 828 tokens. The advisory uncertainty actions add
+			// 104 measured tokens (932 total). Charge both named deltas separately; unused Jev
+			// capacity must not hide growth in other tools or the system prompt.
 			const priorJevSchemaTokens = 358;
-			const canonicalSchemaAllowance = 470;
+			const advisoryUncertaintyAllowance = 104;
+			const canonicalSchemaAllowance = 470 + advisoryUncertaintyAllowance;
 			const jevSchemaTokens = composition.tools.find((tool) => tool.name === "typesafe_review")!.schemaTokens;
 			expect(jevSchemaTokens).toBeGreaterThan(0);
 			expect(jevSchemaTokens).toBeLessThanOrEqual(priorJevSchemaTokens + canonicalSchemaAllowance);
