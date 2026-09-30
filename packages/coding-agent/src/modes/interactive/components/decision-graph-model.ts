@@ -12,12 +12,7 @@ import type { ForegroundRouteSnapshot } from "../../../core/model-router-control
 import type { DecisionStage, DecisionStageLogView } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { FlowEvent, FlowOutcome } from "../../../core/operator-projection/flow-trace.ts";
 import type { OperatorProjection } from "../../../core/operator-projection/types.ts";
-import {
-	DOUBT_REASON_PREFIX,
-	doubtsFromReasons,
-	PROGRAM_SETTLED_REASON,
-	type SemanticEvaluationRecord,
-} from "../../../core/system-one/semantic-evaluation-ledger.ts";
+import type { SemanticEvaluationRecord } from "../../../core/system-one/semantic-evaluation-ledger.ts";
 import type { SemanticPlaneHealth } from "../../../core/system-one/semantic-plane-health.ts";
 import { formatCompactDuration } from "../../../core/util/format-duration.ts";
 import { formatRouteValue, shortModelName } from "./operator-pov-bar.ts";
@@ -90,19 +85,6 @@ export interface DecisionParticipant {
 
 export type DecisionGoalBranch = "pending" | "deliver" | "delivered" | "repair" | "clarify";
 
-export interface DecisionDoubt {
-	/** The judgment that came back unsure, as the ledger recorded it. */
-	readonly text: string;
-	/** The evaluation that raised it, for the stage it belongs to. */
-	readonly label: string;
-	readonly at: number;
-}
-
-/** Doubts are read from the last few evaluations; older ones are history, not open questions. */
-export const DOUBT_EVALUATION_WINDOW = 3;
-/** The pane names at most this many; the count still reports all of them. */
-export const MAX_DOUBTS = 4;
-
 export interface DecisionGraphModel {
 	readonly objectiveId: string;
 	readonly you: {
@@ -135,14 +117,8 @@ export interface DecisionGraphModel {
 	readonly blocked?: string;
 	/** `present` is false for a plain request: it has no goal to satisfy, only a turn to finish. */
 	readonly goal: { readonly present: boolean; readonly branch: DecisionGoalBranch };
-	/**
-	 * Judgments that settled nothing and are still open, newest evaluation first.
-	 *
-	 * A doubt is the third state between a pass and a failure, and it is the one the pane never had:
-	 * without it an unsure judgment is drawn as a quiet yes. It is why the loop is going round again,
-	 * so it belongs on the drawing next to the stage that asked it.
-	 */
-	readonly doubts: readonly DecisionDoubt[];
+	/** Live unresolved semantic uncertainties, owned by the evaluation lifecycle rather than history. */
+	readonly unresolvedDoubtCount: number;
 	readonly hasRunningClock: boolean;
 	/** The request is in flight: something in the trace is still open (routing, the turn, a tool, a question). */
 	readonly turnRunning: boolean;
@@ -406,35 +382,8 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 						? "repair"
 						: "pending";
 
-	// Only the most recent evaluations are asked: a doubt from five judgments ago was either
-	// resolved by the work since, or it is being raised again by the evaluation that still holds it.
-	const deliveredAt =
-		projection.phase === "done" ? stageLog.entries.findLast((entry) => entry.stage === "done")?.enteredAt : undefined;
-	const questionKey = (record: SemanticEvaluationRecord, line: string) => {
-		const at = line.indexOf(": ");
-		return `${record.programId}\u0000${at > 0 ? line.slice(0, at) : line}`;
-	};
-	const settledQuestions = new Set<string>();
-	const settledPrograms = new Set<string>();
-	const doubts: DecisionDoubt[] = [];
-	for (const record of evaluations.slice(-DOUBT_EVALUATION_WINDOW).reverse()) {
-		const open = doubtsFromReasons(record.reasons);
-		const superseded = deliveredAt !== undefined && record.endedAt <= deliveredAt;
-		for (const text of superseded ? [] : open) {
-			if (settledPrograms.has(record.programId) || settledQuestions.has(questionKey(record, text))) continue;
-			if (doubts.some((doubt) => doubt.text === text)) continue;
-			doubts.push({ text, label: record.label, at: record.endedAt });
-		}
-		for (const line of record.reasons ?? [])
-			if (!line.startsWith(DOUBT_REASON_PREFIX)) settledQuestions.add(questionKey(record, line));
-		if (
-			record.outcome === "ok" &&
-			record.verdict === "pass" &&
-			record.reasons?.length === 1 &&
-			record.reasons[0] === PROGRAM_SETTLED_REASON
-		)
-			settledPrograms.add(record.programId);
-	}
+	// Evaluation history explains what happened; only the lifecycle owner decides what remains open.
+	const unresolvedDoubtCount = health.unresolvedDoubts?.length ?? 0;
 
 	const idle = input.idlePreparation;
 	const hasRunningClock = Boolean(
@@ -461,7 +410,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		evidence: input.receipts,
 		...(blocked ? { blocked } : {}),
 		goal: { present: projection.has_goal, branch },
-		doubts,
+		unresolvedDoubtCount,
 		hasRunningClock,
 		turnRunning,
 		...(lastTurnOutcome ? { lastTurnOutcome } : {}),

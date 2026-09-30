@@ -127,8 +127,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _workerUsage: WorkerUsageReceiptDelivery | undefined;
 	/** Shared terminal outbox for managed and in-process workers; lazy under UAC omission. */
 	private _workerNotifications: WorkerNotificationCoordinator | undefined;
-	/** Active event waits consume matching terminal edges before a redundant parent wake is admitted. */
-	private readonly _workerWaitConsumers = new Map<string, number>();
 	private readonly _continuationListeners = new IndependentObserverSet<() => void>();
 	private readonly deps: BackgroundLaneControllerDeps;
 
@@ -211,6 +209,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	private _getWorkerNotificationCoordinator(): WorkerNotificationCoordinator {
+		// Terminal observation is driven by exact lane IDs in the wait result, never by the presence
+		// of a live waiter at terminal-record time.
 		this._workerNotifications ??= new WorkerNotificationCoordinator({
 			getWorkerRecords: () => this._workerLifecycle?.getAllRecords() ?? [],
 			ensureDurableNotification: (record) => this._ensureDurableNotification(record),
@@ -228,7 +228,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			notify: (records) => this.deps.notifyWorkerTerminalHandoff(records),
 			warn: (message) => this._safeWarn(message),
 			markDurableDelivered: (notificationIds) => this._workerLifecycle?.markNotificationsDelivered(notificationIds),
-			isObserved: (record) => this._isWorkerTerminalAwaited(record),
 		});
 		return this._workerNotifications;
 	}
@@ -240,24 +239,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return attempt?.agentId ?? attempt?.dispatch.logicalLaneId ?? record.laneId;
 	}
 
-	private _isWorkerTerminalAwaited(record: Pick<LaneRecord, "laneId">): boolean {
-		return (this._workerWaitConsumers.get(this._workerAgentIdForRecord(record)) ?? 0) > 0;
-	}
-
-	private _retainWorkerWaitConsumers(agentIds: readonly string[]): () => void {
-		const unique = [...new Set(agentIds)];
-		for (const agentId of unique) {
-			this._workerWaitConsumers.set(agentId, (this._workerWaitConsumers.get(agentId) ?? 0) + 1);
-		}
-		return () => {
-			for (const agentId of unique) {
-				const remaining = (this._workerWaitConsumers.get(agentId) ?? 1) - 1;
-				if (remaining > 0) this._workerWaitConsumers.set(agentId, remaining);
-				else this._workerWaitConsumers.delete(agentId);
-			}
-		};
-	}
-
 	/** Observe only logical-agent terminals explicitly exposed by a bounded model result. */
 	observeWorkerAgentTerminals(agentIds: readonly string[]): void {
 		if (!this._workerLifecycle) return;
@@ -266,6 +247,17 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this.getLaneRecords().filter(
 				(record) => isLaneTerminalStatus(record.status) && targets.has(this._workerAgentIdForRecord(record)),
 			),
+		);
+	}
+
+	private observeCapturedWorkerTerminals(laneIds: readonly string[] | undefined): void {
+		if (!this._workerLifecycle) return;
+		const capturedLaneIds = new Set(laneIds ?? []);
+		if (capturedLaneIds.size === 0) return;
+		this.observeWorkerTerminalRecords(
+			this._workerLifecycle
+				.getAllRecords()
+				.filter((record) => isLaneTerminalStatus(record.status) && capturedLaneIds.has(record.laneId)),
 		);
 	}
 
@@ -718,20 +710,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	): ReturnType<WorkerAgentControlPort["waitForWorkerAgent"]> {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		const release = this._retainWorkerWaitConsumers([agentId]);
-		let wait: ReturnType<WorkerAgentControlPort["waitForWorkerAgent"]>;
-		try {
-			wait = this._getWorkerController().getAgentControl().waitForWorkerAgent(agentId, timeoutMs, scope);
-		} catch (error) {
-			release();
-			throw error;
-		}
-		return wait
-			.then((result) => {
-				this.observeWorkerAgentTerminals([agentId]);
-				return result;
-			})
-			.finally(release);
+		const control = this._getWorkerController().getAgentControl();
+		return control.waitForWorkerAgent(agentId, timeoutMs, scope).then((result) => {
+			this.observeCapturedWorkerTerminals(result.terminalLaneIds);
+			return result;
+		});
 	}
 
 	waitForWorkerAgents(
@@ -742,20 +725,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	): Promise<WorkerAgentWaitResult> {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		const release = this._retainWorkerWaitConsumers(agentIds);
-		let wait: Promise<WorkerAgentWaitResult>;
-		try {
-			wait = this._getWorkerController().getAgentControl().waitForWorkerAgents(agentIds, mode, timeoutMs, scope);
-		} catch (error) {
-			release();
-			throw error;
-		}
-		return wait
-			.then((result) => {
-				this.observeWorkerAgentTerminals(agentIds);
-				return result;
-			})
-			.finally(release);
+		const control = this._getWorkerController().getAgentControl();
+		return control.waitForWorkerAgents(agentIds, mode, timeoutMs, scope).then((result) => {
+			this.observeCapturedWorkerTerminals(result.terminalLaneIds);
+			return result;
+		});
 	}
 
 	broadcastWorkerAgentMessage(

@@ -14,7 +14,11 @@ import type { DecisionProgram } from "../decision/program.ts";
 import type { JevAdapter } from "../system-one/adapter.ts";
 import { type AuthorityKind, authorityForCheckpoint, decideByAuthority } from "../system-one/authority-line.ts";
 import { completionPackFailures, evaluateNoul, noulFromAnswer } from "../system-one/policy.ts";
-import { type SemanticEvaluationObserver, verdictFromCertificate } from "../system-one/semantic-evaluation-ledger.ts";
+import {
+	type SemanticEvaluationObserver,
+	semanticWorkerTaskScope,
+	verdictFromCertificate,
+} from "../system-one/semantic-evaluation-ledger.ts";
 import { canonicalDigest } from "./canonical.ts";
 import { SteeringCertificateStore } from "./certificate-store.ts";
 import {
@@ -907,7 +911,13 @@ export class SystemOneSteeringPlane {
 
 		// A cache hit above records nothing: no evaluation ran. From here on one did, and the one
 		// recorder learns its start, its verdict and its failure or cancellation.
-		const evaluationId = this.evaluationObserver?.start({ programId: program.id, consequence });
+		const evaluationId = this.evaluationObserver?.start({
+			programId: program.id,
+			consequence,
+			...(request.objectiveId && request.taskId
+				? { evaluationScope: semanticWorkerTaskScope(request.objectiveId, request.taskId) }
+				: {}),
+		});
 		try {
 			return await this.evaluateFresh(request, program, evaluationId, {
 				stateDigest,
@@ -971,6 +981,9 @@ export class SystemOneSteeringPlane {
 			try {
 				evaluation = await this.decisionEngine.evaluate(program, request.state, {
 					consequence,
+					...(request.objectiveId && request.taskId
+						? { evaluationScope: semanticWorkerTaskScope(request.objectiveId, request.taskId) }
+						: {}),
 					...(request.signal ? { signal: request.signal } : {}),
 				});
 			} catch (err) {
@@ -1123,8 +1136,8 @@ export class SystemOneSteeringPlane {
 		await this.certificates.persist(certificate);
 
 		if (evaluationId !== undefined) {
-			const { verdict, reasons } = verdictFromCertificate(certificate);
-			this.evaluationObserver?.settleOk(evaluationId, verdict, reasons);
+			const { verdict, reasons, questionStates } = verdictFromCertificate(certificate);
+			this.evaluationObserver?.settleOk(evaluationId, verdict, reasons, questionStates);
 		}
 		return { certificate, directive };
 	}

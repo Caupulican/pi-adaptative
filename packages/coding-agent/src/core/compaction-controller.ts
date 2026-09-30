@@ -59,6 +59,7 @@ import {
 } from "./compaction/evidence-retention-planner.ts";
 import {
 	applyRetentionDecisionsToBranch,
+	applyRetentionDecisionsToMessages,
 	collectToolCallResultPairs,
 	type RetentionPinContext,
 	resolvePreserveRecentPairs,
@@ -527,10 +528,15 @@ export class CompactionController {
 		...[branch, settings, options]: Parameters<typeof prepareCompaction>
 	): ReturnType<typeof prepareCompaction> {
 		const activeTask = this.deps.getActiveTask?.();
-		return prepareCompaction(branch, settings, {
+		const retentionDecisions = this.activeRetentionDecisions;
+		const sourceBranch = retentionDecisions ? this.getRawCompactionBranch() : branch;
+		return prepareCompaction(sourceBranch, settings, {
 			...options,
 			...(activeTask ? { activeTask } : {}),
-			packHostRecords: packSupersededHostRecords,
+			packHostRecords: (messages) =>
+				packSupersededHostRecords(
+					retentionDecisions ? applyRetentionDecisionsToMessages(messages, retentionDecisions).messages : messages,
+				),
 		});
 	}
 

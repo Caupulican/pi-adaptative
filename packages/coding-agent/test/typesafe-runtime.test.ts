@@ -343,6 +343,18 @@ describe("packaged TypeSafe reviewer", () => {
 			expect(session.getActiveToolNames()).toContain("typesafe_review");
 			const tool = session.getToolDefinition("typesafe_review");
 			if (!tool) throw new Error("missing built-in review tool");
+			const uncertainties = await tool.execute(
+				"uncertainties-root",
+				{ action: "uncertainties" },
+				undefined,
+				undefined,
+				{} as never,
+			);
+			expect(uncertainties.details).toMatchObject({
+				kind: "active_semantic_uncertainties",
+				advisoryOnly: true,
+				uncertainties: [],
+			});
 			expect(await tool.execute("status-1", { action: "status" }, undefined, undefined, {} as never)).toMatchObject({
 				details: { enabled: false },
 			});

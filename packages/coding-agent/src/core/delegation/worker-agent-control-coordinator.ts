@@ -14,6 +14,7 @@ import {
 } from "../orchestration/contracts.ts";
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { terminalAttemptStatus } from "../orchestration/task-runtime-state.ts";
 import {
 	SessionRootMailbox,
 	type SessionRootReply,
@@ -93,7 +94,7 @@ export interface WorkerAgentControlCoordinatorOptions {
 	isSpecialistSettled?(agentId: string): boolean;
 	waitBlockedByCaller?(callerAgentId: string, targetAgentIds: readonly string[]): readonly string[];
 	/** Yield caller-owned scheduler and mutation resources until the returned restorer succeeds. */
-	yieldCallerForWait?(callerAgentId: string): () => boolean | undefined;
+	yieldCallerForWait?(callerAgentId: string): (() => boolean | undefined) | undefined;
 	/**
 	 * Wake a wait that is blocked on restoring the caller's write reservation. Reservation release
 	 * is a separate subsystem from subscribeStateChanges; this is that subsystem's event, not a poll.
@@ -1377,10 +1378,11 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		agentId: string,
 		timeoutMs = 30_000,
 		scope: WorkerAgentControlScope = {},
-	): Promise<{ status: WorkerAgentActivity; timedOut: boolean }> {
+	): ReturnType<WorkerAgentControlPort["waitForWorkerAgent"]> {
 		return this.waitForWorkerAgents([agentId], "all", timeoutMs, scope).then((result) => ({
 			status: result.statuses[0]?.status ?? "unknown",
 			timedOut: result.timedOut,
+			...(result.terminalLaneIds ? { terminalLaneIds: result.terminalLaneIds } : {}),
 		}));
 	}
 
@@ -1417,7 +1419,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				};
 			});
 		};
-		const currentStatuses = () => statusesFromSnapshot(this.options.getLifecycle().getTaskRuntimeSnapshot());
+		const currentSnapshot = () => this.options.getLifecycle().getTaskRuntimeSnapshot();
 		const baselineStatuses = statusesFromSnapshot(baselineSnapshot);
 		const baselineByAgentId = new Map(baselineStatuses.map(({ agentId, status }) => [agentId, status]));
 		const updatedAgentIds = new Set<string>();
@@ -1431,12 +1433,22 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				? statuses.some(({ status }) => status !== "active")
 				: statuses.every(({ status }) => status !== "active");
 		};
-		const result = (statuses: typeof baselineStatuses, timedOut: boolean) => ({
-			statuses,
-			updatedAgentIds: canonicalAgentIds.filter((agentId) => updatedAgentIds.has(agentId)),
-			timedOut,
-		});
-		if (waitSatisfied(baselineStatuses)) return Promise.resolve(result(baselineStatuses, false));
+		const result = (statuses: typeof baselineStatuses, timedOut: boolean, snapshot: TaskRuntimeProjection) => {
+			const latestAttempts = this.latestAttemptsByAgent(snapshot);
+			const statusByAgentId = new Map(statuses.map(({ agentId, status }) => [agentId, status]));
+			return {
+				statuses,
+				updatedAgentIds: canonicalAgentIds.filter((agentId) => updatedAgentIds.has(agentId)),
+				timedOut,
+				terminalLaneIds: canonicalAgentIds.flatMap((agentId) => {
+					const attempt = latestAttempts.get(agentId);
+					return statusByAgentId.get(agentId) === "idle" && attempt && terminalAttemptStatus(attempt.status)
+						? [attempt.taskId]
+						: [];
+				}),
+			};
+		};
+		if (waitSatisfied(baselineStatuses)) return Promise.resolve(result(baselineStatuses, false, baselineSnapshot));
 		if (callerAgentId) {
 			const activeAgentIds = new Set(
 				baselineStatuses.filter(({ status }) => status === "active").map(({ agentId }) => agentId),
@@ -1478,7 +1490,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			};
 			const settle = () => {
 				if (settled || !yieldInitialized) return;
-				const statuses = currentStatuses();
+				const snapshot = currentSnapshot();
+				const statuses = statusesFromSnapshot(snapshot);
 				recordUpdates(statuses);
 				if (!hasFailure && completionTimedOut === undefined) {
 					if (!waitSatisfied(statuses)) return;
@@ -1514,7 +1527,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				settled = true;
 				cleanup();
 				if (hasFailure) reject(failure);
-				else resolve(result(statuses, completionTimedOut ?? false));
+				else resolve(result(statuses, completionTimedOut ?? false, snapshot));
 			};
 			unsubscribeState = this.subscribeStateChanges(settle);
 			if (this.options.subscribeReservationAvailability) {
@@ -1534,7 +1547,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 					yielded = restoreYield !== undefined;
 				}
 				if (!yielded && callerAgentId) {
-					const statuses = currentStatuses();
+					const statuses = statusesFromSnapshot(currentSnapshot());
 					const activeAgentIds = new Set(
 						statuses.filter(({ status }) => status === "active").map(({ agentId }) => agentId),
 					);

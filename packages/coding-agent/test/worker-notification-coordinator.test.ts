@@ -527,37 +527,6 @@ describe("WorkerNotificationCoordinator", () => {
 		coordinator.dispose();
 	});
 
-	it("marks a terminal observed at record time while an event-driven parent wait owns it", async () => {
-		vi.useFakeTimers();
-		const record: LaneRecord = {
-			laneId: "task-waited",
-			type: "worker",
-			status: "succeeded",
-			completedAt: "2026-08-21T20:00:00.000Z",
-		};
-		const notify = vi.fn(async () => undefined);
-		const coordinator = new WorkerNotificationCoordinator({
-			getWorkerRecords: () => [record],
-			emitStatus: vi.fn(),
-			notify,
-			warn: vi.fn(),
-			markDurableDelivered: vi.fn(),
-			isObserved: () => true,
-		});
-
-		coordinator.recordTerminal(record, "notification-waited");
-		await vi.runAllTimersAsync();
-
-		expect(notify).toHaveBeenCalledWith([
-			expect.objectContaining({
-				laneId: record.laneId,
-				completedAt: record.completedAt,
-				observedAt: expect.any(String),
-			}),
-		]);
-		coordinator.dispose();
-	});
-
 	it("carries the noted owner epoch onto the terminal handoff record", async () => {
 		// Mirrors the real production capture site (WorkerDelegationController.prepareWorkerAttempt's
 		// fresh-creation branch): the owning surface calls noteLaneOwnerEpoch exactly once, at genuine

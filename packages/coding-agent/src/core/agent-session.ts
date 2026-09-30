@@ -366,6 +366,7 @@ import {
 	parseConsultReply,
 } from "./system-one/owner-question-routing.ts";
 import { changesPlan, reviewPlan } from "./system-one/plan-review.ts";
+import type { SemanticUncertaintyPort } from "./system-one/semantic-doubts.ts";
 import { type SemanticEvaluationRecord, verdictFromEvaluation } from "./system-one/semantic-evaluation-ledger.ts";
 import {
 	type SemanticEvaluationDurableSink,
@@ -747,7 +748,10 @@ export class AgentSession {
 		// System One's stage controller; the recorder forwards to the durable ledger.
 		this._bindSemanticObserver(this._steeringPlane);
 		this._systemOneController?.setEvaluationObserver(this._semanticPlaneHealth);
-		this._semanticPlaneHealth.bindDurable(() => this._semanticLedgerSink());
+		this._semanticPlaneHealth.bindDurable(
+			() => this._semanticLedgerSink(),
+			() => this.sessionManager.getSessionId(),
+		);
 		this._adaptiveReadiness = config.adaptiveReadiness;
 		this._agentDirForLedger = config.agentDir ?? getAgentDir();
 		this._ownerRules = new DurableOwnerRuleStore({
@@ -1945,6 +1949,7 @@ export class AgentSession {
 				this._deliverToOwner(items);
 			},
 			getSystemOneController: () => this._systemOneController,
+			getSemanticUncertainties: () => (this._isChildSession ? undefined : this.getSemanticUncertainties()),
 			getSteeringPlane: () => this._steeringPlane,
 			getSemanticDecisionEngine: () => this._semanticDecisionEngine(),
 			askQuestionRouting: () => ({
@@ -2373,12 +2378,13 @@ export class AgentSession {
 				const evaluationId = this._semanticPlaneHealth.start({
 					programId: program.id,
 					...(options?.consequence ? { consequence: options.consequence } : {}),
+					...(options?.evaluationScope ? { evaluationScope: options.evaluationScope } : {}),
 					model: engine.model,
 				});
 				try {
 					const evaluation = await engine.evaluate(program, state, options);
-					const { verdict, reasons } = verdictFromEvaluation(evaluation);
-					this._semanticPlaneHealth.settleOk(evaluationId, verdict, reasons);
+					const { verdict, reasons, questionStates } = verdictFromEvaluation(evaluation);
+					this._semanticPlaneHealth.settleOk(evaluationId, verdict, reasons, questionStates);
 					return evaluation;
 				} catch (error) {
 					// A cancelled evaluation is not a degraded plane: the abort came from the operator or
@@ -2446,6 +2452,29 @@ export class AgentSession {
 		const sessionId = this.sessionManager.getSessionId();
 		const cwd = this.sessionManager.getCwd();
 		return {
+			sessionId,
+			readDoubtDecisions: () => ledger.semanticDoubtDecisions(sessionId),
+			recordDoubtDecision: (decision) => ledger.recordSemanticDoubtDecision(sessionId, decision),
+			readEvaluations: () =>
+				ledger.semanticEvaluations(sessionId).flatMap((row) => {
+					if (row.endedAt === undefined || row.outcome === undefined) return [];
+					return [
+						{
+							evaluationId: row.evaluationId,
+							programId: row.programId,
+							label: row.label,
+							...(row.evaluationScope ? { evaluationScope: row.evaluationScope } : {}),
+							...(row.questionNamespace ? { questionNamespace: row.questionNamespace } : {}),
+							startedAt: row.startedAt,
+							endedAt: row.endedAt,
+							durationMs: Math.max(0, row.endedAt - row.startedAt),
+							outcome: row.outcome,
+							...(row.verdict !== undefined ? { verdict: row.verdict } : {}),
+							...(row.reasons ? { reasons: row.reasons } : {}),
+							...(row.questionStates ? { questionStates: row.questionStates } : {}),
+						},
+					];
+				}),
 			start: (record) =>
 				ledger.startSemanticEvaluation({
 					evaluationId: record.evaluationId,
@@ -2454,6 +2483,8 @@ export class AgentSession {
 					programId: record.programId,
 					label: record.label,
 					startedAt: record.startedAt,
+					...(record.evaluationScope ? { evaluationScope: record.evaluationScope } : {}),
+					...(record.questionNamespace ? { questionNamespace: record.questionNamespace } : {}),
 					...(record.consequence ? { consequence: record.consequence } : {}),
 					...(record.model ? { model: record.model } : {}),
 				}),
@@ -2463,8 +2494,10 @@ export class AgentSession {
 					outcome: record.outcome,
 					...(record.verdict !== undefined ? { verdict: record.verdict } : {}),
 					...(record.reasons ? { reasons: record.reasons } : {}),
+					...(record.questionStates ? { questionStates: record.questionStates } : {}),
 				}),
-			noteVerdict: (evaluationId, verdict, reasons) => ledger.noteSemanticVerdict(evaluationId, verdict, reasons),
+			noteVerdict: (evaluationId, verdict, reasons, questionStates) =>
+				ledger.noteSemanticVerdict(evaluationId, verdict, reasons, questionStates),
 		};
 	}
 
@@ -2481,6 +2514,11 @@ export class AgentSession {
 	/** Observed health of this session's semantic plane. */
 	getSemanticPlaneHealth(): SemanticPlaneHealth {
 		return this._semanticPlaneHealth.getHealth(Boolean(this._steeringPlane?.decisionEngine));
+	}
+
+	/** Live semantic uncertainty decisions, scoped to this root session by the health recorder. */
+	getSemanticUncertainties(): SemanticUncertaintyPort {
+		return this._semanticPlaneHealth;
 	}
 
 	/** Live foreground routing truth (root vs active model, route source) for the operator POV. */
@@ -3370,7 +3408,6 @@ export class AgentSession {
 			});
 			return;
 		}
-		for (const doubt of evaluated.doubts) this._emit({ type: "warning", message: `Model policy: ${doubt}` });
 		// Only models that can actually run count: a pool that is on but has no authenticated model, or
 		// a local runtime that is off, allocates nothing.
 		const runnable = this.getRouterCandidatePool().models.filter((model) =>

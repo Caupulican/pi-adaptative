@@ -408,20 +408,38 @@ describe("Workbench input boundary", () => {
 		view.applyGeometry({ rows: 16, collapsed: false, inspector: "hidden", executionMaximized: false });
 		controller.beginCycle();
 		const base = { programId: "system-one:verify", label: "verify", startedAt: 1000, outcome: "ok" as const };
-		controller.recordSystemOneEvaluation({ ...base, evaluationId: "e1", endedAt: 2000, durationMs: 1000 });
-		controller.recordSystemOneEvaluation({ ...base, evaluationId: "e2", endedAt: 4000, durationMs: 3000 });
+		const uncertainty = ["unsure: evidence_sufficient: P(yes)=0.55 · unsure (needs yes)"];
+		controller.recordSystemOneEvaluation({
+			...base,
+			evaluationId: "e1",
+			endedAt: 2000,
+			durationMs: 1000,
+			verdict: "gather_more",
+			reasons: uncertainty,
+		});
+		controller.recordSystemOneEvaluation({
+			...base,
+			evaluationId: "e2",
+			endedAt: 4000,
+			durationMs: 3000,
+			verdict: "gather_more",
+			reasons: uncertainty,
+		});
 		// A verdict noted later updates the same evaluation, never adds a row.
 		controller.recordSystemOneEvaluation({
 			...base,
 			evaluationId: "e2",
 			endedAt: 4000,
 			durationMs: 3000,
-			verdict: "pass",
+			verdict: "gather_more",
+			reasons: uncertainty,
 		});
 		const rendered = stripAnsi(view.render(110).join("\n"));
 		expect(rendered.match(/◆ System One/g)?.length).toBe(1);
 		expect(rendered).toMatch(/◆ System One · 2 evaluations · avg 2(\.0)?s/);
-		expect(rendered).toContain("last: verify · pass");
+		expect(rendered).toContain("last: verify · gather_more");
+		expect(rendered).not.toContain("P(yes)=0.55");
+		expect(rendered.split("\n").filter((line) => line.includes("unsure:")).length).toBe(0);
 		controller.recordSystemOneEvaluation({
 			...base,
 			evaluationId: "e3",

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Replayed orphaned tool outputs from older compacted sessions as labeled historical evidence, preserving their content, error status and supported images without sending unmatched function outputs.
+
 ## [0.101.2] - 2026-09-30
 
 ## [0.101.1] - 2026-09-30

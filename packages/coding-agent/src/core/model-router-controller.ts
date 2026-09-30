@@ -949,13 +949,12 @@ export class ModelRouterController {
 		const baselineTier = baseline.decision.tier;
 		// Internally generated turns (goal continuation, lane follow-ups) keep the deterministic route: a
 		// 20-turn loop must not buy 20 allocation judgments. Deterministic executor routes are decided.
-		if (options?.skipJudge) return baseline;
 		if (baselineTier !== "cheap" && baselineTier !== "medium" && baselineTier !== "expensive") return baseline;
 		const signal = this.deps.getReflectionSignal();
 		const facts = { hasImages: options?.hasImages === true, contextTokens: options?.contextTokens ?? 0 };
 
 		// System One judges the kind of model and thinking the work needs; its category names a tier.
-		const judge = this.deps.getRouteJudge?.();
+		const judge = options?.skipJudge ? undefined : this.deps.getRouteJudge?.();
 		const judged = judge
 			? await chooseRouteCategory(judge, { request: prompt, available: ALL_ROUTE_CATEGORIES, signal })
 			: undefined;
@@ -1020,6 +1019,13 @@ export class ModelRouterController {
 				picked.decision.reasons = [...pinNote, ...picked.decision.reasons];
 				return picked;
 			}
+		}
+		if (!baselineFits) {
+			this._lastModelRouterSkipReason =
+				facts.hasImages && !baseline.model.input.includes("image")
+					? `${tier} tier has no candidate that can read images`
+					: `${tier} tier has no candidate with a context window large enough for this turn`;
+			return undefined;
 		}
 		baseline.decision.reasons = [...baseline.decision.reasons, ...judgedReasons, ...pinNote];
 		return baseline;

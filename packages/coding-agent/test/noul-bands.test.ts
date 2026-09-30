@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { settledBoolean } from "../src/core/decision/evaluation.ts";
-import { noulBand, settledFromBand } from "../src/core/decision/noul.ts";
+import { isDecisivelyFalse, isDecisivelyTrue, noulBand, settledFromBand } from "../src/core/decision/noul.ts";
 import { noulHolds, noulHoldsDecisively, settledNoul } from "../src/core/system-one/policy.ts";
 
 describe("noul bands", () => {
@@ -64,5 +64,23 @@ describe("noul bands", () => {
 				confidence,
 			}),
 		).toBeUndefined();
+	});
+
+	test("explicit hard bands report proposition truth in either requested direction", () => {
+		expect(isDecisivelyTrue({ band: "hard_pass", direction: "required_true" })).toBe(true);
+		expect(isDecisivelyFalse({ band: "hard_fail", direction: "required_true" })).toBe(true);
+		expect(isDecisivelyFalse({ band: "hard_pass", direction: "required_false" })).toBe(true);
+		expect(isDecisivelyTrue({ band: "hard_fail", direction: "required_false" })).toBe(true);
+		expect(isDecisivelyTrue({ band: "hard_pass", direction: "required_false" })).toBe(false);
+		expect(isDecisivelyFalse({ band: "hard_fail", direction: "required_false" })).toBe(false);
+		expect(isDecisivelyTrue({ band: "soft_pass", direction: "required_true" })).toBe(false);
+		expect(isDecisivelyFalse({ band: "ambiguous", direction: "required_true" })).toBe(false);
+	});
+
+	test("raw-probability decisiveness retains the existing hard thresholds", () => {
+		expect(isDecisivelyTrue({ noul: 0.93 })).toBe(true);
+		expect(isDecisivelyTrue({ noul: 0.929 })).toBe(false);
+		expect(isDecisivelyFalse({ noul: 0.07 })).toBe(true);
+		expect(isDecisivelyFalse({ noul: 0.071 })).toBe(false);
 	});
 });

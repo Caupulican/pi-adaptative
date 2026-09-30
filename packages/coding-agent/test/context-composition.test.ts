@@ -327,8 +327,10 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// subtract its actual cost so unused peer capacity cannot hide unrelated schema growth.
 			const goalChecksAllowance = 162;
 			const peerAllowance = 350;
-			// Same live runtime framing: HEAD compact schema 358, canonical schema 828.
-			const canonicalSchemaAllowance = 470;
+			// Same live runtime framing: HEAD compact schema 358, canonical schema 828. The canonical
+			// owner-uncertainty actions and their validated disposition object add 104 measured tokens
+			// (canonical schema 932), budgeted only as this feature's schema growth.
+			const canonicalSchemaAllowance = 574;
 			expect(
 				report.toolSchemaTokens,
 				JSON.stringify(report.tools.map(({ name, schemaTokens }) => ({ name, schemaTokens }))),

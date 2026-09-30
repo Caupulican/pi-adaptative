@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- Added session-owned advisory uncertainty inspection and evidence-backed decision recording through `typesafe_review`, with explicit receiving-agent instructions and no change to verification or execution authority.
+
+### Fixed
+
+- Selected compaction boundaries from durable history while applying evidence-retention decisions only to the selected summarization input, preventing unmatched tool outputs after session reload.
+- Deferred routes whose candidates cannot fit the supplied context or image requirements to the session model, including deterministic routes that skip the allocation judge.
+- Acknowledged only the exact worker terminal generations returned by a wait, preventing a timeout or a newer worker attempt from suppressing the parent completion notification.
+- Counted unresolved Jev questions in live status instead of appending uncertainty lines, preserving full question identities beyond bounded previews, resolving matching rechecks, isolating worker tasks and restoring state on session reopen.
+- Preserved model-policy uncertainty throughout follow-up judgments and interpreted decisive negative Noul bands using their declared direction.
+
 ## [0.101.2] - 2026-09-30
 
 ### Fixed

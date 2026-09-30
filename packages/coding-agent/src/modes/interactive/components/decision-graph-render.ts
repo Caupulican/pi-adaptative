@@ -10,7 +10,7 @@ import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
 import { evaluationResultText } from "../../../core/system-one/semantic-evaluation-ledger.ts";
 import { type ThemeColor, theme } from "../theme/theme.ts";
-import { type DecisionGraphModel, type DecisionParticipant, MAX_DOUBTS } from "./decision-graph-model.ts";
+import type { DecisionGraphModel, DecisionParticipant } from "./decision-graph-model.ts";
 
 export interface DecisionGraphRows {
 	readonly rows: readonly string[];
@@ -72,11 +72,11 @@ function queuedText(participant: DecisionParticipant): string {
 }
 
 function plainTurnStatus(model: DecisionGraphModel): [string, ThemeColor] {
-	const unsure = model.doubts.length ? ` · ${model.doubts.length} unsure` : "";
+	const unsure = model.unresolvedDoubtCount ? ` · ${model.unresolvedDoubtCount} unsure` : "";
 	if (model.turnRunning) return [`turn running${unsure}`, "accent"];
 	if (model.lastTurnOutcome === "failed") return [`turn failed${unsure}`, "error"];
 	if (model.lastTurnOutcome === "cancelled") return [`turn cancelled${unsure}`, "dim"];
-	return [`turn finished${unsure}`, model.doubts.length ? SYSTEM_ONE_TONE : "success"];
+	return [`turn finished${unsure}`, model.unresolvedDoubtCount ? SYSTEM_ONE_TONE : "success"];
 }
 
 function planProgress(model: DecisionGraphModel): string {
@@ -263,14 +263,6 @@ export function renderDecisionList(
 			item(glyph, tone, check.text, check.status === "pending" ? "dim" : "muted");
 		}
 	}
-	if (model.doubts.length) {
-		// The open doubts, named. A judgment that settled nothing is why the loop is going round
-		// again, and it used to be invisible: drawn either as a quiet pass or as nothing at all.
-		head("DOUBTS", theme.fg(SYSTEM_ONE_TONE, `${model.doubts.length} open`));
-		for (const doubt of model.doubts.slice(0, MAX_DOUBTS)) {
-			item("?", SYSTEM_ONE_TONE, doubt.text, "muted", theme.fg("dim", `  ${doubt.label}`));
-		}
-	}
 	if (!model.goal.present) {
 		arrow();
 		const [status, tone] = plainTurnStatus(model);
@@ -279,7 +271,7 @@ export function renderDecisionList(
 	}
 	arrow("back to System One");
 	const openChecks = model.checks.filter((check) => check.status !== "satisfied").length;
-	const doubts = model.doubts.length;
+	const doubts = model.unresolvedDoubtCount;
 	const openNote = [
 		openChecks > 0 ? `${openChecks} open` : "",
 		doubts > 0 ? `${doubts} ${doubts === 1 ? "doubt" : "doubts"}` : "",
@@ -360,7 +352,7 @@ function graphFocusKey(model: DecisionGraphModel): string {
 		.map((p) => `${p.id}:${p.acted}`)
 		.join(",");
 	const proof = `${model.evidence.actions}:${model.evidence.fileEffects}:${model.evidence.failures}`;
-	return `obj:${model.objectiveId}/stage:${model.current?.stage ?? "idle"}/loop:${model.current?.loop ?? model.loop}/branch:${model.goal.branch}/eval:${evaluating}:${evalId}:${evalCount}/proof:${proof}/parts:${activeParticipants}/open:${open}/next:${model.next ?? ""}`;
+	return `obj:${model.objectiveId}/stage:${model.current?.stage ?? "idle"}/loop:${model.current?.loop ?? model.loop}/branch:${model.goal.branch}/eval:${evaluating}:${evalId}:${evalCount}/proof:${proof}/parts:${activeParticipants}/open:${open}/doubts:${model.unresolvedDoubtCount}/next:${model.next ?? ""}`;
 }
 
 function goalYesNode(
@@ -368,7 +360,7 @@ function goalYesNode(
 	currentStage: DecisionStage | undefined,
 ): DiagramNode & { readonly lit: boolean } {
 	const pending = model.checks.filter((check) => check.status !== "satisfied").length;
-	const doubts = model.doubts.length;
+	const doubts = model.unresolvedDoubtCount;
 	// An unsettled judgment holds the goal open the same way an unmet check does. Delivering over
 	// one would be the drawing claiming a yes that System One never gave.
 	const open = pending + doubts;
@@ -519,20 +511,6 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 					tone: SYSTEM_ONE_TONE,
 				},
 			],
-		});
-	}
-	if (model.doubts.length) {
-		// Named on the drawing, under the judgment that raised them: the chain of thought the pane
-		// can actually keep true is the judgments and what each one left unresolved.
-		levels.push({
-			kind: "tree",
-			title: `unsure · ${model.doubts.length}`,
-			items: model.doubts.slice(0, MAX_DOUBTS).map((doubt) => ({
-				text: doubt.text,
-				glyph: "?",
-				glyphTone: SYSTEM_ONE_TONE,
-				tone: "muted" as ThemeColor,
-			})),
 		});
 	}
 	if (model.blocked)

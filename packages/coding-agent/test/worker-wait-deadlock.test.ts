@@ -393,6 +393,7 @@ describe("worker wait deadlock prevention", () => {
 				statuses: [{ agentId: "child", status: "idle" }],
 				updatedAgentIds: ["child"],
 				timedOut: false,
+				terminalLaneIds: ["child-task"],
 			});
 		} finally {
 			vi.useRealTimers();

@@ -90,6 +90,7 @@ function settings(overrides: Partial<RouterSettings> = {}): RouterSettings {
 interface ControllerFixture {
 	controller: ModelRouterController;
 	agent: { state: { model: TestModel; thinkingLevel: string; messages: unknown[]; systemPrompt: string } };
+	runAgentPrompt: ReturnType<typeof vi.fn>;
 	agentDir: string;
 	expertSelect: ReturnType<typeof vi.fn>;
 	expertRelease: ReturnType<typeof vi.fn>;
@@ -156,6 +157,7 @@ function createController(options: {
 	const isolatedCompletion = vi.fn(
 		async () => ({ text: "tier: cheap", stopReason: "stop", usage: judgeUsage }) as never,
 	);
+	const runAgentPrompt = vi.fn(async () => {});
 	const agent = { state: { model: apiCheap, thinkingLevel: "off", messages: [], tools: [], systemPrompt: "" } };
 	const deps: ModelRouterControllerDeps = {
 		getAgent: () => agent as unknown as Agent,
@@ -175,7 +177,7 @@ function createController(options: {
 		getAgentDir: () => agentDir,
 		getReflectionSignal: () => new AbortController().signal,
 		getBaseSystemPrompt: () => "",
-		runAgentPrompt: async () => {},
+		runAgentPrompt,
 		runAgentContinuation: async () => {},
 		buildSystemPromptForToolNames: () => {
 			if (options.buildSystemPromptError) throw new Error(options.buildSystemPromptError);
@@ -232,6 +234,7 @@ function createController(options: {
 	return {
 		controller: new ModelRouterController(deps),
 		agent,
+		runAgentPrompt,
 		agentDir,
 		expertSelect,
 		expertRelease,
@@ -305,8 +308,58 @@ describe("System One picks the tier; the owner's pin runs it", () => {
 			routeCategory: "strong_deep",
 		});
 		const routed = await controller.resolveTurnRouteJudged(RESEARCH_PROMPT, { hasImages: true });
-		expect(routed?.model).not.toBe(apiBig);
-		expect(routed?.decision.reasons.join(" ")).toContain("cannot read images");
+		expect(routed).toBeUndefined();
+	});
+
+	it("uses an image-capable candidate when the tier pin cannot read images", async () => {
+		const imageModel = model("image-provider", "vision", { input: ["text", "image"] });
+		const { controller } = createController({
+			settings: { enabled: true, selectionMode: "auto", expensiveModel: "api-provider/api-max" },
+			routeCategory: "strong_deep",
+			pool: [imageModel],
+			authed: [...ALL, imageModel],
+		});
+
+		const routed = await controller.resolveTurnRouteJudged(RESEARCH_PROMPT, { hasImages: true });
+
+		expect(routed?.model).toBe(imageModel);
+	});
+
+	it("falls through to the session model when no candidate fits the projected context", async () => {
+		const { controller, runAgentPrompt } = createController({
+			settings: { enabled: true, selectionMode: "manual", cheapModel: "api-provider/api-mini" },
+		});
+
+		const routed = await controller.resolveTurnRouteJudged(RESEARCH_PROMPT, { contextTokens: 250000 });
+		await controller.runRoutedTurn([], routed?.model, routed?.decision);
+
+		expect(routed).toBeUndefined();
+		expect(runAgentPrompt).toHaveBeenCalledOnce();
+		expect(controller.getStatus()).toContain("cheap tier has no candidate with a context window large enough");
+	});
+
+	it("enforces turn facts when allocation judgment is skipped", async () => {
+		const { controller } = createController({
+			settings: { enabled: true, selectionMode: "manual", cheapModel: "api-provider/api-mini" },
+			routeCategory: "strong_deep",
+		});
+
+		const routed = await controller.resolveTurnRouteJudged(RESEARCH_PROMPT, {
+			skipJudge: true,
+			contextTokens: 250000,
+		});
+
+		expect(routed).toBeUndefined();
+	});
+
+	it("keeps routing when the pinned model can fit the projected context", async () => {
+		const { controller } = createController({
+			settings: { enabled: true, selectionMode: "manual", cheapModel: "api-provider/api-mini" },
+		});
+
+		const routed = await controller.resolveTurnRouteJudged(RESEARCH_PROMPT, { contextTokens: 150000 });
+
+		expect(routed?.model).toBe(apiCheap);
 	});
 });
 

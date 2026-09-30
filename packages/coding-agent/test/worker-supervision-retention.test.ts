@@ -34,6 +34,39 @@ function observation(attemptId: string, outputTail = attemptId) {
 }
 
 describe("worker supervision retention", () => {
+	it("scopes direct semantic evaluations to the exact logical worker task", async () => {
+		let options: { evaluationScope?: { kind: string; id: string } } | undefined;
+		const supervisor = new WorkerSemanticSupervisor({
+			debounceMs: 0,
+			minToolCalls: 0,
+			minElapsedMs: 0,
+			decisionEngine: {
+				evaluate: async (_program, _state, receivedOptions) => {
+					options = receivedOptions;
+					return {
+						answers: Object.fromEntries(Object.entries(HEALTHY_ANSWERS).map(([id, value]) => [id, { value }])),
+					};
+				},
+			},
+		});
+
+		await supervisor.observe({
+			objectiveId: "objective/one",
+			taskId: "task:two",
+			attemptId: "attempt-1",
+			role: "explorer",
+			mission: "inspect",
+			toolCalls: 4,
+			elapsedMs: 10_000,
+			outputTail: "progress",
+		});
+
+		expect(options?.evaluationScope).toEqual({
+			kind: "worker-task",
+			id: JSON.stringify(["objective/one", "task:two"]),
+		});
+	});
+
 	it("bounds observational history without evicting pending root-request ownership", async () => {
 		const supervisor = new WorkerSemanticSupervisor({
 			debounceMs: 0,

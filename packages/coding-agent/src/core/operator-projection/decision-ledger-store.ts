@@ -11,6 +11,8 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { openSqliteDatabase, type SqliteDatabase } from "../context/sqlite-database.ts";
+import type { SemanticDoubtDecision } from "../system-one/semantic-doubts.ts";
+import type { SemanticEvaluationScope, SemanticQuestionState } from "../system-one/semantic-evaluation-ledger.ts";
 import type {
 	DecisionStage,
 	DecisionStageSink,
@@ -29,11 +31,14 @@ export interface SemanticEvaluationLedgerRow {
 	readonly programId: string;
 	readonly label: string;
 	readonly consequence?: string;
+	readonly evaluationScope?: SemanticEvaluationScope;
+	readonly questionNamespace?: string;
 	readonly startedAt: number;
 	readonly endedAt?: number;
 	readonly outcome?: "ok" | "failed" | "cancelled";
 	readonly verdict?: string;
 	readonly reasons?: readonly string[];
+	readonly questionStates?: readonly SemanticQuestionState[];
 	readonly model?: string;
 }
 
@@ -192,10 +197,25 @@ export class DecisionLedgerStore {
 				outcome TEXT,
 				verdict TEXT,
 				reasons TEXT,
-				model TEXT
+				question_states TEXT,
+				model TEXT,
+				scope_kind TEXT,
+				scope_id TEXT,
+				question_namespace TEXT
 			);
 			CREATE INDEX IF NOT EXISTS semantic_evaluations_session ON semantic_evaluations (session_id, started_at);
 			CREATE INDEX IF NOT EXISTS semantic_evaluations_cwd ON semantic_evaluations (cwd, started_at);
+			CREATE TABLE IF NOT EXISTS semantic_doubt_decisions (
+				session_id TEXT NOT NULL,
+				evaluation_id TEXT NOT NULL,
+				question TEXT NOT NULL,
+				disposition TEXT NOT NULL CHECK (disposition IN ('conservative_path', 'evidence_based_decision')),
+				reason TEXT NOT NULL,
+				evidence TEXT NOT NULL,
+				decided_at INTEGER NOT NULL,
+				PRIMARY KEY (session_id, evaluation_id, question)
+			);
+			CREATE INDEX IF NOT EXISTS semantic_doubt_decisions_session ON semantic_doubt_decisions (session_id, decided_at);
 			CREATE TABLE IF NOT EXISTS route_decisions (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				session_id TEXT NOT NULL,
@@ -271,6 +291,15 @@ export class DecisionLedgerStore {
 		this.database.exec(
 			"CREATE INDEX IF NOT EXISTS cache_observations_lineage ON cache_observations (session_id, lineage, observed_at)",
 		);
+		const evaluationColumns = new Set(
+			this.database
+				.prepare("PRAGMA table_info(semantic_evaluations)")
+				.all()
+				.map((column) => column.name),
+		);
+		for (const column of ["scope_kind", "scope_id", "question_namespace", "question_states"])
+			if (!evaluationColumns.has(column))
+				this.database.exec(`ALTER TABLE semantic_evaluations ADD COLUMN ${column} TEXT`);
 		this.database
 			.prepare("INSERT OR IGNORE INTO ledger_meta (key, value) VALUES ('schema_version', ?)")
 			.run(String(DECISION_LEDGER_SCHEMA_VERSION));
@@ -365,12 +394,13 @@ export class DecisionLedgerStore {
 
 	/** Records the start of a semantic evaluation; settled later by `settleSemanticEvaluation`. */
 	startSemanticEvaluation(
-		row: Omit<SemanticEvaluationLedgerRow, "endedAt" | "outcome" | "verdict" | "reasons">,
+		row: Omit<SemanticEvaluationLedgerRow, "endedAt" | "outcome" | "verdict" | "reasons" | "questionStates">,
 	): void {
 		this.database
 			.prepare(
-				`INSERT OR IGNORE INTO semantic_evaluations (evaluation_id, session_id, cwd, program_id, label, consequence, started_at, model)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				`INSERT OR IGNORE INTO semantic_evaluations
+				 (evaluation_id, session_id, cwd, program_id, label, consequence, started_at, model, scope_kind, scope_id, question_namespace)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			)
 			.run(
 				row.evaluationId,
@@ -381,6 +411,9 @@ export class DecisionLedgerStore {
 				row.consequence ?? null,
 				row.startedAt,
 				row.model ?? null,
+				row.evaluationScope?.kind ?? null,
+				row.evaluationScope?.id ?? null,
+				row.questionNamespace ?? null,
 			);
 	}
 
@@ -391,26 +424,40 @@ export class DecisionLedgerStore {
 			outcome: "ok" | "failed" | "cancelled";
 			verdict?: string;
 			reasons?: readonly string[];
+			questionStates?: readonly SemanticQuestionState[];
 		},
 	): void {
 		this.database
 			.prepare(
-				"UPDATE semantic_evaluations SET ended_at = ?, outcome = ?, verdict = COALESCE(?, verdict), reasons = COALESCE(?, reasons) WHERE evaluation_id = ?",
+				"UPDATE semantic_evaluations SET ended_at = ?, outcome = ?, verdict = COALESCE(?, verdict), reasons = COALESCE(?, reasons), question_states = COALESCE(?, question_states) WHERE evaluation_id = ?",
 			)
 			.run(
 				settlement.endedAt,
 				settlement.outcome,
 				settlement.verdict ?? null,
 				settlement.reasons ? JSON.stringify(settlement.reasons) : null,
+				settlement.questionStates !== undefined ? JSON.stringify(settlement.questionStates) : null,
 				evaluationId,
 			);
 	}
 
 	/** The verdict of an evaluation that settled before its policy result was known (System One stages). */
-	noteSemanticVerdict(evaluationId: string, verdict: string, reasons?: readonly string[]): void {
+	noteSemanticVerdict(
+		evaluationId: string,
+		verdict: string,
+		reasons?: readonly string[],
+		questionStates?: readonly SemanticQuestionState[],
+	): void {
 		this.database
-			.prepare("UPDATE semantic_evaluations SET verdict = ?, reasons = COALESCE(?, reasons) WHERE evaluation_id = ?")
-			.run(verdict, reasons ? JSON.stringify(reasons) : null, evaluationId);
+			.prepare(
+				"UPDATE semantic_evaluations SET verdict = ?, reasons = COALESCE(?, reasons), question_states = COALESCE(?, question_states) WHERE evaluation_id = ?",
+			)
+			.run(
+				verdict,
+				reasons ? JSON.stringify(reasons) : null,
+				questionStates !== undefined ? JSON.stringify(questionStates) : null,
+				evaluationId,
+			);
 	}
 
 	/** Sessions recorded for a working directory, newest activity first, bounded. */
@@ -785,8 +832,90 @@ export class DecisionLedgerStore {
 	/** Recent evaluations of a session, newest first, bounded. */
 	recentSemanticEvaluations(sessionId: string, limit: number): SemanticEvaluationLedgerRow[] {
 		const rows = this.database
-			.prepare("SELECT * FROM semantic_evaluations WHERE session_id = ? ORDER BY started_at DESC LIMIT ?")
+			.prepare(
+				"SELECT * FROM semantic_evaluations WHERE session_id = ? ORDER BY started_at DESC, rowid DESC LIMIT ?",
+			)
 			.all(sessionId, Math.max(1, Math.floor(limit)));
+		return this.semanticEvaluationRows(rows, sessionId);
+	}
+
+	/** Every evaluation of a session, in durable start order for live doubt restoration. */
+	semanticEvaluations(sessionId: string): SemanticEvaluationLedgerRow[] {
+		const rows = this.database
+			.prepare("SELECT * FROM semantic_evaluations WHERE session_id = ? ORDER BY started_at ASC, rowid ASC")
+			.all(sessionId);
+		return this.semanticEvaluationRows(rows, sessionId);
+	}
+
+	/** Appends one immutable advisory choice for a live doubt; exact retries are idempotent. */
+	recordSemanticDoubtDecision(sessionId: string, decision: SemanticDoubtDecision): void {
+		this.database
+			.prepare(
+				`INSERT INTO semantic_doubt_decisions
+				 (session_id, evaluation_id, question, disposition, reason, evidence, decided_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)
+				 ON CONFLICT (session_id, evaluation_id, question) DO NOTHING`,
+			)
+			.run(
+				sessionId,
+				decision.evaluationId,
+				decision.question,
+				decision.disposition,
+				decision.reason,
+				decision.evidence,
+				decision.decidedAt,
+			);
+		const stored = this.database
+			.prepare(
+				`SELECT disposition, reason, evidence, decided_at FROM semantic_doubt_decisions
+				 WHERE session_id = ? AND evaluation_id = ? AND question = ?`,
+			)
+			.get(sessionId, decision.evaluationId, decision.question);
+		if (
+			stored?.disposition !== decision.disposition ||
+			stored.reason !== decision.reason ||
+			stored.evidence !== decision.evidence ||
+			stored.decided_at !== decision.decidedAt
+		)
+			throw new Error(
+				`Conflicting semantic doubt decision for evaluation ${decision.evaluationId}, question ${decision.question}`,
+			);
+	}
+
+	/** Every durable advisory choice for a session, in decision order. */
+	semanticDoubtDecisions(sessionId: string): SemanticDoubtDecision[] {
+		const rows = this.database
+			.prepare(
+				`SELECT evaluation_id, question, disposition, reason, evidence, decided_at
+				 FROM semantic_doubt_decisions WHERE session_id = ? ORDER BY decided_at, rowid`,
+			)
+			.all(sessionId);
+		const decisions: SemanticDoubtDecision[] = [];
+		for (const row of rows) {
+			const evaluationId = asText(row.evaluation_id);
+			const question = asText(row.question);
+			const disposition = asText(row.disposition);
+			const reason = asText(row.reason);
+			const evidence = asText(row.evidence);
+			const decidedAt = asInteger(row.decided_at);
+			if (
+				evaluationId === undefined ||
+				question === undefined ||
+				(disposition !== "conservative_path" && disposition !== "evidence_based_decision") ||
+				reason === undefined ||
+				evidence === undefined ||
+				decidedAt === undefined
+			)
+				continue;
+			decisions.push({ evaluationId, question, disposition, reason, evidence, decidedAt });
+		}
+		return decisions;
+	}
+
+	private semanticEvaluationRows(
+		rows: readonly Record<string, unknown>[],
+		sessionId: string,
+	): SemanticEvaluationLedgerRow[] {
 		const out: SemanticEvaluationLedgerRow[] = [];
 		for (const row of rows) {
 			const evaluationId = asText(row.evaluation_id);
@@ -815,8 +944,32 @@ export class DecisionLedgerStore {
 			}
 			const endedAt = asInteger(row.ended_at);
 			const verdict = asText(row.verdict);
+			let questionStates: SemanticQuestionState[] | undefined;
+			const rawQuestionStates = asText(row.question_states);
+			if (rawQuestionStates !== undefined) {
+				try {
+					const parsed: unknown = JSON.parse(rawQuestionStates);
+					if (
+						Array.isArray(parsed) &&
+						parsed.every(
+							(item) =>
+								typeof item === "object" &&
+								item !== null &&
+								typeof item.question === "string" &&
+								typeof item.uncertain === "boolean" &&
+								(item.text === undefined || typeof item.text === "string"),
+						)
+					)
+						questionStates = parsed;
+				} catch {
+					questionStates = undefined;
+				}
+			}
 			const consequence = asText(row.consequence);
 			const model = asText(row.model);
+			const scopeKind = asText(row.scope_kind);
+			const scopeId = asText(row.scope_id);
+			const questionNamespace = asText(row.question_namespace);
 			out.push({
 				evaluationId,
 				sessionId,
@@ -829,7 +982,12 @@ export class DecisionLedgerStore {
 				...(outcome === "ok" || outcome === "failed" || outcome === "cancelled" ? { outcome } : {}),
 				...(verdict !== undefined ? { verdict } : {}),
 				...(reasons !== undefined ? { reasons } : {}),
+				...(questionStates !== undefined ? { questionStates } : {}),
 				...(model !== undefined ? { model } : {}),
+				...(scopeId !== undefined && (scopeKind === "session" || scopeKind === "worker-task")
+					? { evaluationScope: { kind: scopeKind, id: scopeId } }
+					: {}),
+				...(questionNamespace !== undefined ? { questionNamespace } : {}),
 			});
 		}
 		return out;

@@ -23,15 +23,11 @@ import {
 	type TypeSafeTransportAttempt,
 } from "../review/typesafe-reviewer.ts";
 import { type PricedTypeSafeUsage, priceTypeSafeUsage } from "../review/typesafe-usage.ts";
+import type { SemanticUncertaintyPort } from "../system-one/semantic-doubts.ts";
 
 const schema = Type.Object(
 	{
-		action: Type.Union([
-			Type.Literal("status"),
-			Type.Literal("evaluate"),
-			Type.Literal("review"),
-			Type.Literal("evidence"),
-		]),
+		action: Type.Enum(["status", "evaluate", "review", "evidence", "uncertainties", "resolve_uncertainty"]),
 		id: Type.Optional(Type.String()),
 		offset: Type.Optional(Type.Integer({ minimum: 0 })),
 		evidenceRefs: Type.Optional(
@@ -39,6 +35,18 @@ const schema = Type.Object(
 		),
 		evaluation: Type.Optional(evaluationInputSchema),
 		review: Type.Optional(reviewInputSchema),
+		uncertainty: Type.Optional(
+			Type.Object(
+				{
+					evaluationId: Type.String({ minLength: 1 }),
+					question: Type.String({ minLength: 1 }),
+					disposition: Type.Enum(["conservative_path", "evidence_based_decision"]),
+					reason: Type.String({ minLength: 1 }),
+					evidence: Type.String({ minLength: 1 }),
+				},
+				{ additionalProperties: false },
+			),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -88,19 +96,23 @@ export function createTypeSafeReviewToolDefinition(
 	evidenceStore: TypeSafeEvidenceStore,
 	reportUsage?: (toolCallId: string, usage: Usage) => void,
 	evidenceMaterializer?: TypeSafeEvidenceMaterializer,
+	uncertainties?: SemanticUncertaintyPort,
 ) {
+	const uncertaintyPrompt = uncertainties
+		? "At turn entry and before delivery, inspect active uncertainties. For worker-task questions, gather evidence from the responsible worker and steer it as needed; after reviewing that evidence, the owning session may record an advisory disposition for any current question in its own journal. Include a conservative path or evidence-based decision with concise evidence and reason. Keep mandatory same-lane verification and recheck requirements active. This disposition is not a Jev pass, verification proof, certificate proof, or permission. Reject stale questions and questions explicitly scoped to a foreign root session."
+		: "Worker lanes cannot disposition session-owner uncertainties. Recheck your own mandatory findings in this lane, report unresolved advisory questions and evidence to the parent, and continue independent work where appropriate.";
 	return {
 		name: "typesafe_review",
 		label: "TypeSafe review",
 		readOnly: true,
-		description:
-			"Use Jev for semantic decisions and independent verification. Status checks setup. Evaluate batched Choice, Noul and Score questions. Review gates claims at high (0.95) or max (0.99) confidence. evidenceRefs snapshots scoped files, artifacts, or git diffs. Evidence reads retained records by id and offset. Does not execute or authorize actions.",
+		description: `Use Jev for semantic decisions and independent verification. Status checks setup. Evaluate batched Choice, Noul and Score questions. Review gates claims at high (0.95) or max (0.99) confidence. evidenceRefs snapshots scoped files, artifacts, or git diffs. Evidence reads retained records by id and offset. ${uncertainties ? "The session owner can list and disposition advisory uncertainties; this never proves verification or grants permission." : "Workers report unresolved task questions to their owner and recheck mandatory findings in their own lane."} Does not execute or authorize actions.`,
 		promptSnippet: "Jev: semantic judgments and high/max claim review.",
 		promptGuidelines: [
 			'For review, use an option map and a declared expected key, for example: {"action":"review","review":{"state":"relevant source and check results","questions":{"claim":{"instructions":"Does this evidence support the claim?","criteria":{"supports":"Supported","contradicts":"Contradicted","insufficient":"Missing evidence"},"expected":"supports"}}}}.',
 			"Check typesafe_review status at work start. When the typesafe-review skill is listed and the skill tool is available, load the typesafe-review skill. Use Jev for semantic decisions and reviews throughout work, in any domain.",
 			"Batch independent narrow questions with complete relevant source, tests, prior findings and limitations; never hide adverse evidence. Reproduce bug candidates before fixing.",
 			"Approval requires every expected verdict and high/max confidence; fix findings or add missing evidence. Never reroll unchanged evidence for a better score. Credentials belong in /login typesafe, never tool arguments.",
+			uncertaintyPrompt,
 			"An uncertain or unavailable Jev result returns to the owning LLM. Workers report unresolved decisions to the parent; only the root asks the owner when authority or evidence is still missing. Silence grants nothing.",
 			SYSTEM_ONE_VALIDATION_RULE,
 		],
@@ -124,6 +136,54 @@ export function createTypeSafeReviewToolDefinition(
 			let sourceManifest: readonly TypeSafeEvidenceManifestEntry[] | undefined;
 			try {
 				signal?.throwIfAborted();
+				if (input.action === "uncertainties") {
+					if (!uncertainties) {
+						return {
+							isError: true,
+							content: [
+								{ type: "text" as const, text: "Only the session owner can list semantic uncertainties." },
+							],
+							details: { advisoryOnly: true },
+						};
+					}
+					const unresolved = uncertainties.listOwnSession();
+					const record = { kind: "active_semantic_uncertainties", advisoryOnly: true, uncertainties: unresolved };
+					return {
+						content: [{ type: "text" as const, text: JSON.stringify(record) }],
+						details: record,
+					};
+				}
+				if (input.action === "resolve_uncertainty") {
+					if (!uncertainties) {
+						return {
+							isError: true,
+							content: [
+								{
+									type: "text" as const,
+									text: "Only the session owner can disposition semantic uncertainties.",
+								},
+							],
+							details: { advisoryOnly: true },
+						};
+					}
+					if (!input.uncertainty) throw new Error("uncertainty is required for the resolve_uncertainty action");
+					const resolution = uncertainties.resolveOwnSession(input.uncertainty);
+					const record = {
+						kind: "advisory_semantic_disposition",
+						advisoryOnly: true,
+						...resolution,
+						...(resolution.resolved
+							? { disposition: input.uncertainty.disposition, evaluationId: input.uncertainty.evaluationId }
+							: {}),
+						message: resolution.resolved
+							? "Recorded owner-model advisory disposition. This is not Jev verification, certificate proof, or permission."
+							: "No uncertainty was settled. Refresh the active questions; the evaluation or question may have changed or belong to another lane.",
+					};
+					return {
+						content: [{ type: "text" as const, text: JSON.stringify(record) }],
+						details: record,
+					};
+				}
 				if (input.action === "evidence") {
 					const page = evidenceStore.read(input.id ?? "", input.offset);
 					return {

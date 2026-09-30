@@ -6,6 +6,7 @@ import { createInMemoryArtifactStore } from "../src/core/context/context-artifac
 import { reserveSessionBundleDeletion } from "../src/core/orchestration/session-bundle-lifecycle.ts";
 import { TypeSafeEvidenceStore } from "../src/core/review/typesafe-evidence-store.ts";
 import { TypeSafeReviewer } from "../src/core/review/typesafe-reviewer.ts";
+import type { SemanticUncertaintyPort } from "../src/core/system-one/semantic-doubts.ts";
 import { createTypeSafeReviewToolDefinition } from "../src/core/tools/typesafe-review.ts";
 
 const directories: string[] = [];
@@ -119,6 +120,129 @@ describe("TypeSafe durable evidence", () => {
 			const page = await tool.execute("inspect", { action: "evidence", id });
 			expect(JSON.parse(page.content[0].text)).toMatchObject({ id, offset: 0, nextOffset: 8192 });
 		}
+		expect(fetcher).toHaveBeenCalledOnce();
+	});
+
+	it("lists active semantic questions without invoking Jev", async () => {
+		const doubt = {
+			programId: "semantic-check",
+			question: "source: Is the behavior supported?",
+			text: "source: Is the behavior supported? Jev is unsure.",
+			label: "Semantic check",
+			evaluationId: "evaluation-current",
+			at: 100,
+			evaluationScope: { kind: "worker-task" as const, id: "worker-task-7" },
+		};
+		const uncertainties: SemanticUncertaintyPort = {
+			listOwnSession: vi.fn(() => [doubt]),
+			resolveOwnSession: vi.fn(() => ({ resolved: false, reason: "not_owned" as const })),
+		};
+		const fetcher = vi.fn<typeof fetch>();
+		const tool = createTypeSafeReviewToolDefinition(
+			new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
+			new TypeSafeEvidenceStore(createInMemoryArtifactStore()),
+			undefined,
+			undefined,
+			uncertainties,
+		);
+
+		const result = await tool.execute("list-uncertainties", { action: "uncertainties" } as never);
+
+		expect(result.isError).toBeUndefined();
+		expect(uncertainties.listOwnSession).toHaveBeenCalledOnce();
+		expect(result.content[0]?.text).toContain(doubt.evaluationId);
+		expect(result.content[0]?.text).toContain(doubt.question);
+		expect(fetcher).not.toHaveBeenCalled();
+	});
+
+	it("records a fenced owner decision as advisory evidence without rewriting the Jev evaluation", async () => {
+		const uncertainty = {
+			evaluationId: "evaluation-current",
+			question: "source: Is the behavior supported?",
+			disposition: "conservative_path",
+			reason: "Keep the existing guarded behavior until stronger evidence arrives.",
+			evidence: "The checked call site already preserves the required safety condition.",
+		};
+		const uncertainties: SemanticUncertaintyPort = {
+			listOwnSession: vi.fn(() => []),
+			resolveOwnSession: vi
+				.fn()
+				.mockReturnValueOnce({ resolved: true })
+				.mockReturnValueOnce({ resolved: false, reason: "stale_question" as const })
+				.mockReturnValueOnce({ resolved: false, reason: "not_owned" as const }),
+		};
+		const fetcher = vi.fn<typeof fetch>();
+		const tool = createTypeSafeReviewToolDefinition(
+			new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
+			new TypeSafeEvidenceStore(createInMemoryArtifactStore()),
+			undefined,
+			undefined,
+			uncertainties,
+		);
+
+		const result = await tool.execute("resolve-uncertainty", {
+			action: "resolve_uncertainty",
+			uncertainty,
+		} as never);
+
+		expect(result.isError).toBeUndefined();
+		expect(uncertainties.resolveOwnSession).toHaveBeenCalledOnce();
+		expect(uncertainties.resolveOwnSession).toHaveBeenCalledWith(uncertainty);
+		expect(result.content[0]?.text).toContain("advisory");
+		expect(result.content[0]?.text).not.toContain('"verified":true');
+		expect(fetcher).not.toHaveBeenCalled();
+
+		const stale = await tool.execute("resolve-stale", {
+			action: "resolve_uncertainty",
+			uncertainty,
+		} as never);
+		expect(stale.content[0]?.text).toContain('"resolved":false');
+		expect(stale.content[0]?.text).toContain("stale_question");
+		expect(stale.content[0]?.text).toContain("Refresh the active questions");
+		expect(uncertainties.resolveOwnSession).toHaveBeenCalledTimes(2);
+
+		const workerScoped = await tool.execute("resolve-worker-scoped", {
+			action: "resolve_uncertainty",
+			uncertainty: { ...uncertainty, evaluationId: "worker-evaluation" },
+		} as never);
+		expect(workerScoped.content[0]?.text).toContain('"resolved":false');
+		expect(workerScoped.content[0]?.text).toContain("not_owned");
+		expect(workerScoped.content[0]?.text).toContain("Refresh the active questions");
+		expect(uncertainties.resolveOwnSession).toHaveBeenCalledTimes(3);
+		expect(fetcher).not.toHaveBeenCalled();
+	});
+
+	it("does not expose the session-owner uncertainty port in a worker tool, while retaining Jev review", async () => {
+		const fetcher = vi.fn(async () =>
+			Response.json({
+				model: "jev-latest",
+				answers: { q: { type: "choice", choice: "yes", confidence: 1, probabilities: { yes: 1, no: 0 } } },
+				usage: { input_tokens: 1, output_tokens: 1 },
+			}),
+		);
+		const tool = createTypeSafeReviewToolDefinition(
+			new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
+			new TypeSafeEvidenceStore(createInMemoryArtifactStore()),
+		);
+
+		const unavailable = await tool.execute("worker-uncertainties", { action: "uncertainties" } as never);
+		const reviewed = await tool.execute("worker-review", {
+			action: "review",
+			review: {
+				state: "worker evidence",
+				questions: {
+					q: {
+						instructions: "Supported?",
+						criteria: { yes: "Supported", no: "Contradicted" },
+						expected: "yes",
+					},
+				},
+			},
+		} as never);
+
+		expect(unavailable).toMatchObject({ isError: true });
+		expect(unavailable.content[0]?.text).toContain("Only the session owner");
+		expect(reviewed).toMatchObject({ isError: false, details: { accepted: true } });
 		expect(fetcher).toHaveBeenCalledOnce();
 	});
 });

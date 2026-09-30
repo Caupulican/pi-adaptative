@@ -19,6 +19,7 @@ import { createCustomMessage } from "../../src/messages.ts";
 import {
 	buildSessionContext,
 	type CompactionEntry,
+	type CustomMessageEntry,
 	type ModelChangeEntry,
 	migrateSessionEntries,
 	parseSessionEntries,
@@ -95,6 +96,21 @@ function createMessageEntry(message: AgentMessage): SessionMessageEntry {
 		parentId: lastId,
 		timestamp: new Date().toISOString(),
 		message,
+	};
+	lastId = id;
+	return entry;
+}
+
+function createCustomMessageEntry(content: string): CustomMessageEntry {
+	const id = `test-id-${entryCounter++}`;
+	const entry: CustomMessageEntry = {
+		type: "custom_message",
+		id,
+		parentId: lastId,
+		timestamp: new Date().toISOString(),
+		customType: "large-host-context",
+		content,
+		display: false,
 	};
 	lastId = id;
 	return entry;
@@ -313,6 +329,67 @@ describe("shouldCompact", () => {
 });
 
 describe("findCutPoint", () => {
+	it("counts large custom_message context when choosing a retained window", () => {
+		const content = "host-owned verification and handoff context ".repeat(500);
+		const oldUser = createMessageEntry(createUserMessage("old request"));
+		const oldAssistant = createMessageEntry(createAssistantMessage("old answer"));
+		const hostContext = createCustomMessageEntry(content);
+		const recentUser = createMessageEntry(createUserMessage("recent request"));
+		const recentAssistant = createMessageEntry(createAssistantMessage("recent answer"));
+		const entries: SessionEntry[] = [oldUser, oldAssistant, hostContext, recentUser, recentAssistant];
+		const settings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 100 };
+
+		const preparation = prepareCompaction(entries, settings);
+
+		expect(
+			buildSessionContext(entries).messages.some(
+				(message) => message.role === "custom" && message.content === content,
+			),
+		).toBe(true);
+		expect(preparation?.firstKeptEntryId).toBe(hostContext.id);
+		expect(preparation?.messagesToSummarize.map((message) => message.role)).toEqual(["user", "assistant"]);
+	});
+
+	it("counts the same large payload in a persisted custom message (negative control)", () => {
+		const content = "host-owned verification and handoff context ".repeat(500);
+		const controlOldUser = createMessageEntry(createUserMessage("old request"));
+		const controlOldAssistant = createMessageEntry(createAssistantMessage("old answer"));
+		const controlContext = createMessageEntry(
+			createCustomMessage("large-host-context", content, false, undefined, new Date().toISOString()),
+		);
+		const controlRecentUser = createMessageEntry(createUserMessage("recent request"));
+		const controlRecentAssistant = createMessageEntry(createAssistantMessage("recent answer"));
+		const control = prepareCompaction(
+			[controlOldUser, controlOldAssistant, controlContext, controlRecentUser, controlRecentAssistant],
+			{ ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 100 },
+		);
+		expect(control?.firstKeptEntryId).toBe(controlContext.id);
+	});
+
+	it("keeps a final oversized tool result with its call while trimming older history", () => {
+		const oldUser = createMessageEntry(createUserMessage("old request"));
+		const oldAssistant = createMessageEntry(createAssistantMessage("old answer"));
+		const currentUser = createMessageEntry(createUserMessage("current request"));
+		const toolCall = createAssistantMessage("", createMockUsage(0, 0));
+		toolCall.content = [{ type: "toolCall", id: "call-large", name: "bash", arguments: { command: "inspect" } }];
+		const callEntry = createMessageEntry(toolCall);
+		const resultEntry = createMessageEntry({
+			role: "toolResult",
+			toolCallId: "call-large",
+			toolName: "bash",
+			content: [{ type: "text", text: "large tool output ".repeat(2_000) }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		const entries: SessionEntry[] = [oldUser, oldAssistant, currentUser, callEntry, resultEntry];
+
+		const preparation = prepareCompaction(entries, { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 100 });
+
+		expect(preparation?.firstKeptEntryId).toBe(callEntry.id);
+		expect(preparation?.messagesToSummarize.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(preparation?.turnPrefixMessages.map((message) => message.role)).toEqual(["user"]);
+	});
+
 	it("should find cut point based on actual token differences", () => {
 		// Create entries with cumulative token counts
 		const entries: SessionEntry[] = [];

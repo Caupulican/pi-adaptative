@@ -153,7 +153,11 @@ Valid cut points are:
 - BashExecution messages
 - Custom messages (custom_message, branch_summary)
 
-Never cut at tool results (they must stay with their tool call).
+Never cut at tool results or between a tool call and its completed results. Host messages that arrive between parallel results stay with that exchange. The retained-token count includes custom messages and branch summaries. When the final exchange exceeds the recent-token budget by itself, compaction retains that exchange and summarizes the older history.
+
+The durable branch determines the cut point. Evidence-retention projections can reduce the selected summarization input, but cannot choose a boundary that splits a tool exchange when the durable history reloads.
+
+Older sessions may already contain a retained tool output whose call was compacted away. Provider replay preserves that output as labeled historical tool evidence, including its error status and supported images, so the session can continue. It does not invent a call or treat the evidence as an owner instruction.
 
 ### CompactionEntry Structure
 

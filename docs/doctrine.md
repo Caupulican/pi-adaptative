@@ -297,9 +297,9 @@ from the unchanged 875-token ceiling for the prior delegate surface. The 4,500-t
 base-tool ceiling stays fixed. This is a deliberate new control for mandatory specialist reuse;
 it does not permit unrelated description growth. Explicit `peer` review has a separate 350-token
 schema allowance, measured at 333 tokens, for review, durable obligation inspection and proof resolution.
-Canonical Jev input validation shares one schema with provider projection, replacing the permissive compact rubric. Under identical live runtime framing, the prior schema costs 358 tokens and the canonical schema costs 828; its explicit 470-token delta receives a separate allowance. The live default surface measures 6,878 schema tokens
-against a 6,935-token aggregate ceiling (4,500 base + 350 task_directory + 720 task_automation +
-100 decision_ledger_read + 143 repo_read + 140 self_compact + 162 goal-check growth + 350 peer + 470 canonical Jev schema).
+Canonical Jev input validation shares one schema with provider projection, replacing the permissive compact rubric. Under identical live runtime framing, the prior schema costs 358 tokens and the canonical schema costs 828; its explicit 470-token delta receives a separate allowance. The root may also list and disposition current advisory uncertainties in its own journal through `typesafe_review`; these owner-model judgments do not prove Jev verification, satisfy mandatory obligations, or authorize actions. The canonical schema now costs 932 tokens, adding a measured 104-token allowance for those uncertainty actions and their validated disposition object. The live default surface measures 6,982 schema tokens
+against a 7,039-token aggregate ceiling (4,500 base + 350 task_directory + 720 task_automation +
+100 decision_ledger_read + 143 repo_read + 140 self_compact + 162 goal-check growth + 350 peer + 574 canonical Jev schema, comprising the original 470-token delta and 104-token advisory-uncertainty addition).
 The unchanged 4,500-token base subtotal excludes the actual costs of those separately budgeted
 tools, including `peer`, and the measured growth of `goal` and `create_goal` over their respective
 330-token and 84-token baselines. Every pre-existing aggregate component and individual schema
@@ -1059,6 +1059,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-30 | The root may list and disposition advisory uncertainties in its own journal through `typesafe_review`; this does not prove verification, settle mandatory obligations, or grant permission. The measured canonical schema addition is 104 tokens, raising only the canonical allowance to 574 and the aggregate ceiling to 7,039; the 4,500-token base remains unchanged. |
 | 2026-09-29 | Durable peer obligation inspection and proof resolution increase the peer allowance from 210 to 350 tokens (333 measured), making the aggregate ceiling 6,935. Actual peer cost remains excluded from the unchanged 4,500-token base, so verification actions cannot hide unrelated schema growth. |
 | 2026-09-29 | Canonical Jev tool schema replaces the permissive projection: live prior 358 tokens, canonical 828, separate delta 470; aggregate 6,795, measured 6,742. The old 4,500 base and all prior individual ceilings remain unchanged. Completion refusal status preserves bounded judgment identities and next checks; oversized originals use the existing evidence archive, with explicit truncation and retention-failure disclosure. |
 | 2026-09-29 | Explicit `peer` review adds a separate 210-token schema allowance, measured at 197 tokens, bringing the default aggregate ceiling to 6,325 (4,500 + 350 + 720 + 100 + 143 + 140 + 162 + 210). The unchanged 4,500 base excludes actual peer cost alongside existing feature costs and measured goal growth; all pre-existing ceilings remain unchanged. |

@@ -2,15 +2,16 @@
  * Evidence retention projection.
  *
  * Turns a live session branch into the tool call/result pairs the EvidenceRetentionPlanner reasons
- * about, and applies the planner's decisions back onto a branch projection before
- * `prepareCompaction` reads it. Planner ownership alone is not delivery: the decisions have to
- * change what the real compaction keeps. Conforms to COMPACTION_LIVE_PATH.md and RCG-030..RCG-035.
+ * about, and applies its decisions to branch and summary-message projections. The projected branch
+ * is a planner/audit view; the durable compaction cut always comes from the raw branch. Conforms to
+ * COMPACTION_LIVE_PATH.md and RCG-030..RCG-035.
  *
  * Only tool call/result pairs are ever eligible. Every other entry — user turns, durable owner rule
  * records, charter provenance, checkpoints — passes through untouched, which is what pins them.
  */
 
 import type { SessionEntry } from "@caupulican/pi-agent-core/session";
+import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "@caupulican/pi-ai";
 import type {
 	EvidenceRetentionDecision,
@@ -113,8 +114,8 @@ export function resolvePreserveRecentPairs(pins: RetentionPinContext = {}): numb
 	return pins.preserveRecentPairs ?? DEFAULT_PRESERVE_RECENT_PAIRS;
 }
 
-function truncatedResultText(original: string, decision: EvidenceRetentionDecision): string {
-	const reference = decision.artifactRef ? ` Full evidence retained at ${decision.artifactRef}.` : "";
+function truncatedResultText(original: string, decision: EvidenceRetentionDecision | undefined): string {
+	const reference = decision?.artifactRef ? ` Full evidence retained at ${decision.artifactRef}.` : "";
 	return `[compaction] Result elided by evidence-preserving compaction (${original.length} bytes).${reference}`;
 }
 
@@ -122,6 +123,73 @@ export interface AppliedRetentionProjection {
 	readonly branch: SessionEntry[];
 	readonly droppedCallIds: readonly string[];
 	readonly truncatedCallIds: readonly string[];
+}
+
+export interface AppliedRetentionMessages {
+	readonly messages: AgentMessage[];
+	readonly droppedCallIds: readonly string[];
+	readonly truncatedCallIds: readonly string[];
+}
+
+function createRetentionMessageProjector(decisions: readonly EvidenceRetentionDecision[]) {
+	const byCallId = new Map<string, RetentionDisposition>();
+	const artifactRefs = new Map<string, EvidenceRetentionDecision>();
+	const dropped = new Set<string>();
+	const truncated = new Set<string>();
+	for (const decision of decisions) {
+		if (decision.disposition === "keep_exact") continue;
+		byCallId.set(decision.callId, decision.disposition);
+		artifactRefs.set(decision.callId, decision);
+	}
+
+	const projectMessage = (message: AgentMessage): AgentMessage | undefined => {
+		if (message.role === "assistant") {
+			const keptContent = message.content.filter(
+				(block) => !(block.type === "toolCall" && byCallId.get(block.id) === "drop_pair"),
+			);
+			if (keptContent.length === message.content.length) return message;
+			for (const block of message.content) {
+				if (block.type === "toolCall" && byCallId.get(block.id) === "drop_pair") dropped.add(block.id);
+			}
+			return keptContent.length > 0 ? { ...message, content: keptContent } : undefined;
+		}
+		if (message.role !== "toolResult") return message;
+
+		const disposition = byCallId.get(message.toolCallId);
+		if (disposition === "drop_pair") {
+			dropped.add(message.toolCallId);
+			return undefined;
+		}
+		if (disposition !== "keep_call_truncate_result") return message;
+		truncated.add(message.toolCallId);
+		const decision = artifactRefs.get(message.toolCallId);
+		return {
+			...message,
+			content: [{ type: "text", text: truncatedResultText(resultText(message), decision) }],
+		};
+	};
+	const projectMessages = (messages: readonly AgentMessage[]): AppliedRetentionMessages => {
+		const projected: AgentMessage[] = [];
+		for (const message of messages) {
+			const nextMessage = projectMessage(message);
+			if (nextMessage) projected.push(nextMessage);
+		}
+		return { messages: projected, droppedCallIds: [...dropped], truncatedCallIds: [...truncated] };
+	};
+	return {
+		projectMessage,
+		projectMessages,
+		getDroppedCallIds: () => [...dropped],
+		getTruncatedCallIds: () => [...truncated],
+	};
+}
+
+/** Applies the branch's evidence decisions to exactly the message span selected for summarization. */
+export function applyRetentionDecisionsToMessages(
+	messages: readonly AgentMessage[],
+	decisions: readonly EvidenceRetentionDecision[],
+): AppliedRetentionMessages {
+	return createRetentionMessageProjector(decisions).projectMessages(messages);
 }
 
 /**
@@ -135,21 +203,10 @@ export function applyRetentionDecisionsToBranch(
 	branch: readonly SessionEntry[],
 	decisions: readonly EvidenceRetentionDecision[],
 ): AppliedRetentionProjection {
-	const byCallId = new Map<string, RetentionDisposition>();
-	const artifactRefs = new Map<string, EvidenceRetentionDecision>();
-	for (const decision of decisions) {
-		if (decision.disposition === "keep_exact") continue;
-		byCallId.set(decision.callId, decision.disposition);
-		artifactRefs.set(decision.callId, decision);
-	}
-	if (byCallId.size === 0) {
+	if (decisions.every((decision) => decision.disposition === "keep_exact")) {
 		return { branch: [...branch], droppedCallIds: [], truncatedCallIds: [] };
 	}
-
-	// A call is only dropped when its result is dropped with it, which the pairing already ensures:
-	// both sides carry the same callId and the same disposition.
-	const dropped = new Set<string>();
-	const truncated = new Set<string>();
+	const projectMessages = createRetentionMessageProjector(decisions);
 	const projected: SessionEntry[] = [];
 	let retainedParentId: string | null = null;
 
@@ -157,40 +214,11 @@ export function applyRetentionDecisionsToBranch(
 		const message = entryMessage(entry);
 		let nextEntry: SessionEntry = entry;
 
-		if (message?.role === "assistant") {
-			const keptContent = message.content.filter(
-				(block) => !(block.type === "toolCall" && byCallId.get(block.id) === "drop_pair"),
-			);
-			if (keptContent.length !== message.content.length) {
-				for (const block of message.content) {
-					if (block.type === "toolCall" && byCallId.get(block.id) === "drop_pair") dropped.add(block.id);
-				}
-				// An assistant turn whose every block was a dropped call carries nothing; removing it
-				// keeps the projection coherent instead of emitting an empty assistant message.
-				if (keptContent.length === 0) continue;
-				nextEntry = { ...entry, message: { ...message, content: keptContent } } as SessionEntry;
-			}
-		} else if (message?.role === "toolResult") {
-			const disposition = byCallId.get(message.toolCallId);
-			if (disposition === "drop_pair") {
-				dropped.add(message.toolCallId);
-				continue;
-			}
-			if (disposition === "keep_call_truncate_result") {
-				truncated.add(message.toolCallId);
-				const decision = artifactRefs.get(message.toolCallId);
-				nextEntry = {
-					...entry,
-					message: {
-						...message,
-						content: [
-							{
-								type: "text",
-								text: truncatedResultText(resultText(message), decision as EvidenceRetentionDecision),
-							},
-						],
-					},
-				} as SessionEntry;
+		if (message) {
+			const projectedMessage = projectMessages.projectMessage(message);
+			if (!projectedMessage) continue;
+			if (projectedMessage !== message) {
+				nextEntry = { ...entry, message: projectedMessage } as SessionEntry;
 			}
 		}
 
@@ -205,7 +233,7 @@ export function applyRetentionDecisionsToBranch(
 
 	return {
 		branch: projected,
-		droppedCallIds: [...dropped],
-		truncatedCallIds: [...truncated],
+		droppedCallIds: projectMessages.getDroppedCallIds(),
+		truncatedCallIds: projectMessages.getTruncatedCallIds(),
 	};
 }

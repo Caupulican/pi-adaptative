@@ -26,6 +26,30 @@ describe("TypeSafe input contract", () => {
 		expect(Value.Check(tool.parameters, { action: "review", review })).toBe(true);
 		expect(
 			Value.Check(tool.parameters, {
+				action: "resolve_uncertainty",
+				uncertainty: {
+					evaluationId: "evaluation-1",
+					question: "behavior boundary",
+					disposition: "conservative_path",
+					reason: "The current implementation preserves the established invariant.",
+					evidence: "The relevant branch and regression test agree.",
+				},
+			}),
+		).toBe(true);
+		expect(
+			Value.Check(tool.parameters, {
+				action: "resolve_uncertainty",
+				uncertainty: {
+					evaluationId: "evaluation-1",
+					question: "behavior boundary",
+					disposition: "accepted",
+					reason: "",
+					evidence: "The relevant branch and regression test agree.",
+				},
+			}),
+		).toBe(false);
+		expect(
+			Value.Check(tool.parameters, {
 				action: "review",
 				review: { ...review, questions: { claim: { ...review.questions.claim, criteria: "yes or no" } } },
 			}),

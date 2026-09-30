@@ -280,6 +280,71 @@ describe("AgentSession model router turn selection", () => {
 		}
 	});
 
+	it("keeps the root prompt and permitted tool usable after compaction with a narrower cheap pin", async () => {
+		const calls: string[] = [];
+		const requests: FauxRequestEvent[] = [];
+		const harness = await createHarness({
+			models: [
+				{ id: "root", contextWindow: 32_000 },
+				{ id: "cheap", contextWindow: 1_024 },
+			],
+			baseToolsOverride: [makeLifecycleReadTool(calls)],
+			initialActiveToolNames: ["read_probe"],
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => ({
+						compaction: {
+							summary: "summary after compacting the established context",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							details: { source: "router-liveness-test" },
+						},
+					}));
+				},
+			],
+			fauxProvider: { onRequest: (event) => requests.push(event) },
+			settings: {
+				modelRouter: {
+					enabled: true,
+					selectionMode: "manual",
+					cheapModel: "faux/cheap",
+					expensiveModel: "faux/root",
+				},
+				compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 128 },
+			},
+		});
+		try {
+			harness.setResponses([
+				fauxAssistantMessage("initial context established"),
+				fauxAssistantMessage([fauxToolCall("read_probe", { value: "after-compaction" })], {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("root completed"),
+			]);
+
+			await harness.session.prompt(`Record this context: ${"relevant evidence ".repeat(1_000)}`);
+			const compacted = await harness.session.compact();
+			await harness.session.prompt("Explain the compacted record and inspect this read-only value.");
+
+			expect(compacted.summary).toContain("summary after compacting");
+			expect(requests).toHaveLength(3);
+			expect(calls).toEqual(["after-compaction"]);
+			expect(
+				harness.session.messages
+					.filter((message) => message.role === "assistant")
+					.map((message) => (message as AssistantMessage).model),
+			).toEqual(["root", "root", "root"]);
+			expect((harness.session.messages.at(-1) as AssistantMessage).model).toBe("root");
+			expect(harness.session.model?.id).toBe("root");
+			const branch = harness.sessionManager.getBranch();
+			expect(branch.some((entry) => entry.type === "compaction")).toBe(true);
+			expect(branch.filter((entry) => entry.type === "foreground_tool_start")).toHaveLength(1);
+			expect(branch.filter((entry) => entry.type === "foreground_tool_terminal")).toHaveLength(1);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
 	it("does nothing when model routing is disabled", () => {
 		const selected = routerPrototype._resolveModelRouterTurnModel.call(
 			createContext({ enabled: false, cheapModel: "anthropic/claude-haiku-4-5" }),

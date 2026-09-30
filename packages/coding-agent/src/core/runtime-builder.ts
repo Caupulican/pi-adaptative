@@ -154,6 +154,7 @@ import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plan
 import { systemOneAccessFromSession } from "./system-one/access.ts";
 import type { ClarificationDecisionEngine } from "./system-one/clarification.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
+import type { SemanticUncertaintyPort } from "./system-one/semantic-doubts.ts";
 import { createSessionVerificationHost, wrapToolWithVerification } from "./system-one/session-verification-host.ts";
 import { TaskDirectoryRuntime } from "./tasks/task-directory-runtime.ts";
 import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
@@ -388,6 +389,8 @@ export interface RuntimeBuilderDeps {
 	deliverToOwner?(items: readonly string[]): void;
 	/** System One semantic control plane controller. */
 	getSystemOneController?(): SystemOneController | undefined;
+	/** Foreground session-root view of active semantic uncertainties and advisory dispositions. */
+	getSemanticUncertainties?(): SemanticUncertaintyPort | undefined;
 	/** System One steering plane driving semantic validation and certification. */
 	getSteeringPlane?(): SystemOneSteeringPlane | undefined;
 	/**
@@ -1288,6 +1291,7 @@ export class RuntimeBuilder {
 							...(toolArtifactStore ? { artifactStore: toolArtifactStore } : {}),
 							credentialBoundary: this._credentialExposureBoundary,
 						}),
+						this.deps.getSemanticUncertainties?.(),
 					),
 				);
 			}

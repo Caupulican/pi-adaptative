@@ -7,6 +7,7 @@ import {
 	MAX_EVALUATION_REASONS,
 	PROGRAM_SETTLED_REASON,
 	semanticEvaluationLabel,
+	semanticQuestionNamespace,
 	verdictFromCertificate,
 	verdictFromEvaluation,
 } from "../src/core/system-one/semantic-evaluation-ledger.ts";
@@ -37,6 +38,13 @@ describe("semanticEvaluationLabel", () => {
 		expect(semanticEvaluationLabel("retention_eval_1")).toBe("retention");
 		expect(semanticEvaluationLabel("supervision_eval_1")).toBe("worker supervision");
 		expect(semanticEvaluationLabel("something-else")).toBe("something-else");
+		expect(semanticQuestionNamespace("rule_program_1758400000")).toBe("project-rules");
+		expect(semanticQuestionNamespace("rule_program_1758400001")).toBe("project-rules");
+		expect(semanticQuestionNamespace("retention_eval_1")).toBe("retention");
+		expect(semanticQuestionNamespace("pi:steering:program:JEV-WORKER-SUPERVISION:1.0")).toBe(
+			"pi:steering:program:JEV-WORKER-SUPERVISION:1.0",
+		);
+		expect(semanticQuestionNamespace("custom-program")).toBe("custom-program");
 	});
 });
 
@@ -100,7 +108,11 @@ describe("verdict extraction", () => {
 			semantic_outcome: "pass",
 			created_at: "2026-09-20T10:00:00.000Z",
 		};
-		expect(verdictFromCertificate(base)).toEqual({ verdict: "pass", reasons: [PROGRAM_SETTLED_REASON] });
+		expect(verdictFromCertificate(base)).toEqual({
+			verdict: "pass",
+			reasons: [PROGRAM_SETTLED_REASON],
+			questionStates: [],
+		});
 		expect(
 			verdictFromCertificate({ ...base, semantic_outcome: undefined, policy_result: "pass" }).reasons,
 		).not.toContain(PROGRAM_SETTLED_REASON);
@@ -113,7 +125,11 @@ describe("verdict extraction", () => {
 		).not.toContain(PROGRAM_SETTLED_REASON);
 		expect(
 			verdictFromCertificate({ ...base, semantic_outcome: "repair", failed_semantic_predicates: ["tests_pass"] }),
-		).toEqual({ verdict: "repair", reasons: ["directive: proceed", "tests_pass"] });
+		).toEqual({
+			verdict: "repair",
+			reasons: ["directive: proceed", "tests_pass"],
+			questionStates: [{ question: "tests_pass", uncertain: false, text: "tests_pass" }],
+		});
 	});
 });
 
@@ -136,7 +152,11 @@ describe("the whole-program settled marker on malformed certificates", () => {
 	const many = Array.from({ length: 10 }, (_, index) => `predicate_${index}`);
 
 	it("marks only a clean pass as settled (control)", () => {
-		expect(verdictFromCertificate(clean)).toEqual({ verdict: "pass", reasons: [PROGRAM_SETTLED_REASON] });
+		expect(verdictFromCertificate(clean)).toEqual({
+			verdict: "pass",
+			reasons: [PROGRAM_SETTLED_REASON],
+			questionStates: [],
+		});
 	});
 
 	it("does not mark a pass that also carries failed or unsure predicates", () => {
@@ -176,6 +196,52 @@ describe("the whole-program settled marker on malformed certificates", () => {
 });
 
 describe("SemanticPlaneHealthRecorder as the one sink", () => {
+	it("uses every result question to resolve a seventh doubt beyond the bounded display preview", () => {
+		const recorder = new SemanticPlaneHealthRecorder();
+		const result = (probabilityTrue: number) => ({
+			kind: "boolean" as const,
+			probabilityTrue,
+			direction: "required_true" as const,
+			band: probabilityTrue === 0.5 ? ("ambiguous" as const) : ("hard_pass" as const),
+			confidence,
+		});
+		const first = recorder.start({ programId: "check" });
+		const firstResult = verdictFromEvaluation(evaluation({ results: { question_7: result(0.5) } }));
+		recorder.settleOk(first, firstResult.verdict, firstResult.reasons, firstResult.questionStates);
+		expect(recorder.listOwnSession().map((doubt) => doubt.question)).toEqual(["question_7"]);
+
+		const results = Object.fromEntries([
+			...Array.from({ length: 6 }, (_, index) => [`question_${index + 1}`, result(0.99)] as const),
+			["question_7", result(0.99)],
+		]);
+		const recheck = recorder.start({ programId: "check" });
+		const recheckResult = verdictFromEvaluation(evaluation({ results }));
+		recorder.settleOk(recheck, recheckResult.verdict, recheckResult.reasons, recheckResult.questionStates);
+		expect(recheckResult.reasons).toHaveLength(MAX_EVALUATION_REASONS);
+		expect(recorder.listOwnSession()).toHaveLength(0);
+	});
+
+	it("keeps separate uncertainties for long result ids that share the bounded display prefix", () => {
+		const recorder = new SemanticPlaneHealthRecorder();
+		const sharedPrefix = `question_${"x".repeat(130)}`;
+		const firstId = `${sharedPrefix}_first`;
+		const secondId = `${sharedPrefix}_second`;
+		const result = (probabilityTrue: number) => ({
+			kind: "boolean" as const,
+			probabilityTrue,
+			direction: "required_true" as const,
+			band: probabilityTrue === 0.5 ? ("ambiguous" as const) : ("hard_pass" as const),
+			confidence,
+		});
+		const first = recorder.start({ programId: "check" });
+		const firstResult = verdictFromEvaluation(evaluation({ results: { [firstId]: result(0.5) } }));
+		recorder.settleOk(first, firstResult.verdict, firstResult.reasons, firstResult.questionStates);
+		const recheck = recorder.start({ programId: "check" });
+		const recheckResult = verdictFromEvaluation(evaluation({ results: { [secondId]: result(0.5) } }));
+		recorder.settleOk(recheck, recheckResult.verdict, recheckResult.reasons, recheckResult.questionStates);
+		expect(recorder.listOwnSession().map((doubt) => doubt.question)).toEqual([firstId, secondId]);
+	});
+
 	it("bounds each settlement edge to the observer generation present at dispatch start", () => {
 		const recorder = new SemanticPlaneHealthRecorder();
 		const delivery: string[] = [];
@@ -216,6 +282,23 @@ describe("SemanticPlaneHealthRecorder as the one sink", () => {
 		expect(recorder.getHealth(true).state).toBe("ok");
 	});
 
+	it("forwards an authoritative typed policy-state update to durable sinks", () => {
+		let noted: readonly { question: string; uncertain: boolean }[] | undefined;
+		const recorder = new SemanticPlaneHealthRecorder();
+		recorder.bindDurable(() => ({
+			start: () => {},
+			settle: () => {},
+			noteVerdict: (_id, _verdict, _reasons, questionStates) => {
+				noted = questionStates;
+			},
+		}));
+		const id = recorder.start({ programId: "check" });
+		recorder.settleOk(id, "evaluated", ["unsure: exact_id: old"], [{ question: "exact_id", uncertain: true }]);
+		recorder.noteVerdict(id, "policy-reviewed", ["exact_id: settled"], [{ question: "exact_id", uncertain: false }]);
+		expect(noted).toEqual([{ question: "exact_id", uncertain: false }]);
+		expect(recorder.listOwnSession()).toHaveLength(0);
+	});
+
 	it("records the steering plane's own evaluations, including cancellation, through the observer", async () => {
 		const recorder = new SemanticPlaneHealthRecorder();
 		const controller = new AbortController();
@@ -243,9 +326,22 @@ describe("SemanticPlaneHealthRecorder as the one sink", () => {
 		});
 		plane.setEvaluationObserver(recorder);
 		await expect(
-			plane.requireCertificate("JEV-001", { objective: "x" }, { signal: controller.signal, requirePass: false }),
+			plane.requireCertificate(
+				"JEV-001",
+				{ objective: "x" },
+				{
+					objectiveId: "objective/one",
+					taskId: "task:two",
+					signal: controller.signal,
+					requirePass: false,
+				},
+			),
 		).rejects.toThrow();
 		expect(recorder.getHealth(true).state).toBe("unknown");
-		expect(recorder.getLastEvaluation()).toMatchObject({ label: "objective intake", outcome: "cancelled" });
+		expect(recorder.getLastEvaluation()).toMatchObject({
+			label: "objective intake",
+			outcome: "cancelled",
+			evaluationScope: { kind: "worker-task", id: JSON.stringify(["objective/one", "task:two"]) },
+		});
 	});
 });

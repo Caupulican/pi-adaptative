@@ -6,12 +6,8 @@ import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { DecisionStageLogView } from "../src/core/operator-projection/decision-stage-log.ts";
 import { DecisionStageLog } from "../src/core/operator-projection/decision-stage-log.ts";
 import type { OperatorProjection } from "../src/core/operator-projection/types.ts";
-import type { SteeringCertificate } from "../src/core/steering/types.ts";
-import {
-	PROGRAM_SETTLED_REASON,
-	type SemanticEvaluationRecord,
-	verdictFromCertificate,
-} from "../src/core/system-one/semantic-evaluation-ledger.ts";
+import type { SemanticDoubt } from "../src/core/system-one/semantic-doubts.ts";
+import type { SemanticEvaluationRecord } from "../src/core/system-one/semantic-evaluation-ledger.ts";
 import {
 	buildDecisionGraphModel,
 	type DecisionGraphInput,
@@ -60,6 +56,18 @@ function evaluation(label: string, verdict: string, startedAt: number): Semantic
 		outcome: "ok",
 		verdict,
 		reasons: ["criterion 3: exit 1"],
+	};
+}
+
+function semanticDoubt(overrides: Partial<SemanticDoubt> = {}): SemanticDoubt {
+	return {
+		programId: "pi:steering:program:JEV-001:1.0",
+		question: "evidence_sufficient",
+		text: "evidence_sufficient: P(yes)=0.55 · unsure (needs yes)",
+		label: "verify criterion 3",
+		evaluationId: "verify-criterion-3",
+		at: T0 + 6_500,
+		...overrides,
 	};
 }
 
@@ -331,28 +339,26 @@ describe("Decision graph model", () => {
 		expect(model.hasRunningClock).toBe(true);
 	});
 
-	it("carries an unsettled judgment as an open doubt and keeps the goal open on it", () => {
+	it("shows one live uncertainty count without appending finding lines", () => {
 		const base = SCENARIOS.rootOnlyBuild!();
 		const unsure: SemanticEvaluationRecord = {
 			...evaluation("verify criterion 3", "gather_more", T0 + 5_000),
 			reasons: ["unsure: evidence_sufficient: P(yes)=0.55 · unsure (needs yes)", "criterion 3: exit 1"],
 		};
-		const model = buildDecisionGraphModel({ ...base, evaluations: [unsure] });
-		expect(model.doubts).toEqual([
-			{
-				text: "evidence_sufficient: P(yes)=0.55 · unsure (needs yes)",
-				label: "verify criterion 3",
-				at: T0 + 6_500,
-			},
-		]);
+		const model = buildDecisionGraphModel({
+			...base,
+			health: { state: "ok", unresolvedDoubts: [semanticDoubt()] },
+			evaluations: [unsure],
+		});
+		expect(model.unresolvedDoubtCount).toBe(1);
 		const list = stripAnsi(renderDecisionList(model, 96).rows.join("\n"));
-		expect(list).toContain("DOUBTS");
-		expect(list).toContain("evidence_sufficient: P(yes)=0.55");
+		expect(list).not.toContain("DOUBTS");
+		expect(list).not.toContain("evidence_sufficient: P(yes)=0.55");
 		expect(list).toContain("not closed · 1 open · 1 doubt");
 		expect(list).not.toContain("yes → deliver");
 		const diagram = stripAnsi(renderDecisionDiagram(model, 96).rows.join("\n"));
-		expect(diagram).toContain("unsure · 1");
 		expect(diagram).toContain("not closed · 1 open · 1 unsure");
+		expect(diagram).not.toContain("evidence_sufficient: P(yes)=0.55");
 	});
 
 	it("keeps a settled judgment out of the doubts, so a clean run still reads as one", () => {
@@ -362,7 +368,7 @@ describe("Decision graph model", () => {
 			reasons: ["evidence_sufficient: P(yes)=0.97 · pass (needs yes)"],
 		};
 		const model = buildDecisionGraphModel({ ...base, evaluations: [settled] });
-		expect(model.doubts).toEqual([]);
+		expect(model.unresolvedDoubtCount).toBe(0);
 		expect(stripAnsi(renderDecisionList(model, 96).rows.join("\n"))).not.toContain("DOUBTS");
 	});
 
@@ -614,7 +620,7 @@ describe("Decision graph review findings", () => {
 	const diagramText = (input: DecisionGraphInput) =>
 		stripAnsi(renderDecisionDiagram(buildDecisionGraphModel(input), 96).rows.join("\n"));
 
-	it("clears an earlier doubt once a later judgment settles the same question", () => {
+	it("does not infer active uncertainty from history after resolution", () => {
 		const model = buildDecisionGraphModel({
 			...SCENARIOS.rootOnlyBuild!(),
 			evaluations: [
@@ -622,25 +628,30 @@ describe("Decision graph review findings", () => {
 				judged("completion", T0 + 8_000, ["evidence_sufficient: P(yes)=0.97 · pass (needs yes)"]),
 			],
 		});
-		expect(model.doubts).toEqual([]);
+		expect(model.unresolvedDoubtCount).toBe(0);
 	});
 
-	it("keeps an earlier doubt when the later judgment answered a different question (control)", () => {
+	it("keeps the lifecycle owner's active count when a later judgment answers another question", () => {
 		const model = buildDecisionGraphModel({
 			...SCENARIOS.rootOnlyBuild!(),
+			health: { state: "ok", unresolvedDoubts: [semanticDoubt()] },
 			evaluations: [
 				judged("completion", T0 + 5_000, ["unsure: evidence_sufficient: P(yes)=0.55 · unsure (needs yes)"]),
 				judged("completion", T0 + 8_000, ["work_remaining: P(yes)=0.03 · pass (needs no)"]),
 			],
 		});
-		expect(model.doubts.map((doubt) => doubt.text)).toEqual([
-			"evidence_sufficient: P(yes)=0.55 · unsure (needs yes)",
-		]);
+		expect(model.unresolvedDoubtCount).toBe(1);
 	});
 
 	it("keeps an earlier question open after a later pass of the same program that proves nothing about it", () => {
 		const model = buildDecisionGraphModel({
 			...SCENARIOS.rootOnlyBuild!(),
+			health: {
+				state: "ok",
+				unresolvedDoubts: [
+					semanticDoubt({ question: "addresses_evidenced_need", text: "addresses_evidenced_need: unsure" }),
+				],
+			},
 			evaluations: [
 				judged(
 					"patch review",
@@ -659,101 +670,35 @@ describe("Decision graph review findings", () => {
 				},
 			],
 		});
-		expect(model.doubts.map((doubt) => doubt.text)).toEqual([
-			"addresses_evidenced_need: P(yes)=0.6 · unsure (needs yes)",
-		]);
+		expect(model.unresolvedDoubtCount).toBe(1);
 	});
 
-	it("clears every earlier question of a program once a later record proves the whole program settled (control)", () => {
-		const program = "pi:steering:program:JEV-024:1.0";
-		const model = buildDecisionGraphModel({
+	it("does not reactivate a resolved doubt from historical evaluation records", () => {
+		const input: DecisionGraphInput = {
 			...SCENARIOS.rootOnlyBuild!(),
+			health: { state: "ok", unresolvedDoubts: [] },
 			evaluations: [
-				judged("objective route", T0 + 5_000, ["directive: gather_more", "unsure: evidence_sufficient"], program),
-				{ ...judged("objective route", T0 + 8_000, [PROGRAM_SETTLED_REASON], program), verdict: "pass" },
-			],
-		});
-		expect(model.doubts).toEqual([]);
-	});
-
-	function settledBy(record: Pick<SemanticEvaluationRecord, "verdict" | "reasons">) {
-		const program = "pi:steering:program:JEV-024:1.0";
-		return buildDecisionGraphModel({
-			...SCENARIOS.rootOnlyBuild!(),
-			evaluations: [
-				judged("objective route", T0 + 5_000, ["directive: gather_more", "unsure: evidence_sufficient"], program),
-				{ ...judged("objective route", T0 + 8_000, [], program), ...record },
-			],
-		}).doubts.map((doubt) => doubt.text);
-	}
-	const certificate: SteeringCertificate = {
-		schema_version: "1.0",
-		certificate_id: "SCERT-3",
-		objective_id: "obj",
-		checkpoint_id: "JEV-024",
-		state_digest: "d",
-		evidence_revision: 1,
-		policy: { id: "p", version: "1", digest: "x" },
-		question_pack: { id: "pi:steering:pack:objective_route:1.0", version: "1.0", digest: "y" },
-		engine: { provider: "typesafe", model: "jev" },
-		answers: {},
-		directive: "proceed",
-		semantic_outcome: "pass",
-		created_at: "2026-09-20T10:00:00.000Z",
-	};
-
-	it("does not clear a program's doubts on a failed predicate whose text reads like the marker", () => {
-		expect(
-			settledBy(
-				verdictFromCertificate({
-					...certificate,
-					semantic_outcome: "repair",
-					failed_semantic_predicates: [PROGRAM_SETTLED_REASON],
-				}),
-			),
-		).toEqual(["evidence_sufficient"]);
-		expect(
-			settledBy(verdictFromCertificate({ ...certificate, failed_semantic_predicates: [PROGRAM_SETTLED_REASON] })),
-		).toEqual(["evidence_sufficient"]);
-	});
-
-	it("clears a program's doubts on a clean pass certificate's ledger reasons (control)", () => {
-		expect(settledBy(verdictFromCertificate(certificate))).toEqual([]);
-	});
-
-	it("shows a delivered goal as delivered, not held open by a doubt raised before delivery", () => {
-		const input = {
-			...SCENARIOS.delivered!(),
-			evaluations: [
-				judged(
-					"drift check",
-					T0 + 30_000,
-					["unsure: on_track: P(yes)=0.6 · unsure (needs yes)"],
-					"system-one:drift_check",
-				),
-				evaluation("completion", "pass", T0 + 48_000),
+				{
+					...evaluation("completion", "gather_more", T0 + 30_000),
+					reasons: ["unsure: on_track: P(yes)=0.6 · unsure (needs yes)"],
+				},
 			],
 		};
-		expect(buildDecisionGraphModel(input).doubts).toEqual([]);
-		expect(listText(input)).toContain("yes → delivered");
-		expect(diagramText(input)).toMatch(/delivered/);
+		expect(buildDecisionGraphModel(input).unresolvedDoubtCount).toBe(0);
+		expect(listText(input)).not.toContain("on_track");
 		expect(diagramText(input)).not.toContain("unsure");
 	});
 
-	it("still names a doubt raised after delivery (control)", () => {
-		const input = {
+	it("keeps an active uncertainty counted even on a delivered projection", () => {
+		const input: DecisionGraphInput = {
 			...SCENARIOS.delivered!(),
-			evaluations: [
-				evaluation("completion", "pass", T0 + 48_000),
-				judged(
-					"answer claims",
-					T0 + 54_000,
-					["unsure: states_tests_pass: P(yes)=0.6 · unsure (needs yes)"],
-					"system-one:claim_delivery",
-				),
-			],
+			health: { state: "ok", unresolvedDoubts: [semanticDoubt()] },
 		};
-		expect(buildDecisionGraphModel(input).doubts.map((doubt) => doubt.label)).toEqual(["answer claims"]);
+		expect(buildDecisionGraphModel(input).unresolvedDoubtCount).toBe(1);
+		expect(listText(input)).toContain("not closed · 1 doubt");
+		expect(listText(input)).not.toContain("yes → delivered");
+		expect(diagramText(input)).toContain("not closed · 1 unsure");
+		expect(diagramText(input)).not.toContain("delivered");
 	});
 
 	function plainTurn(done: boolean, running = false): DecisionGraphInput {

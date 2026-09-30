@@ -101,26 +101,32 @@ export function settledAnswer(
 	return undefined;
 }
 
-/**
- * True only when a required-true Noul answer reached `hard_pass`. A provisional `soft_pass` is not
- * decisive: what settles an item, closes a goal or names a duplicate outright needs the hard band.
- */
-/** True only when a Noul answer is decisively false: P(true) reached the required-false hard band. */
+function decisiveAnswer(answer: unknown, expected: boolean, thresholds: NoulBandThresholds): boolean {
+	if (!answer || typeof answer !== "object") return false;
+	const record = answer as { band?: unknown; direction?: unknown; noul?: unknown };
+	if (typeof record.band === "string") {
+		if (record.band !== "hard_pass" && record.band !== "hard_fail") return false;
+		const direction = record.direction === "required_false" ? "required_false" : "required_true";
+		return settledFromBand(record.band, direction) === expected;
+	}
+	return (
+		isNoulProbability(record.noul) &&
+		noulBand(record.noul, expected ? "required_true" : "required_false", thresholds) === "hard_pass"
+	);
+}
+
+/** True only when the answer decisively says the proposition itself is false. */
 export function isDecisivelyFalse(
 	answer: unknown,
 	thresholds: NoulBandThresholds = DEFAULT_NOUL_BAND_THRESHOLDS,
 ): boolean {
-	if (!answer || typeof answer !== "object") return false;
-	const record = answer as { noul?: unknown };
-	return isNoulProbability(record.noul) && noulBand(record.noul, "required_false", thresholds) === "hard_pass";
+	return decisiveAnswer(answer, false, thresholds);
 }
 
+/** True only when the answer decisively says the proposition itself is true. */
 export function isDecisivelyTrue(
 	answer: unknown,
 	thresholds: NoulBandThresholds = DEFAULT_NOUL_BAND_THRESHOLDS,
 ): boolean {
-	if (!answer || typeof answer !== "object") return false;
-	const record = answer as { band?: unknown; noul?: unknown };
-	if (typeof record.band === "string") return record.band === "hard_pass";
-	return isNoulProbability(record.noul) && noulBand(record.noul, "required_true", thresholds) === "hard_pass";
+	return decisiveAnswer(answer, true, thresholds);
 }

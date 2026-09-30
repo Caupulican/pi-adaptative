@@ -563,9 +563,35 @@ export function estimateTokens(message: AgentMessage): number {
  * BashExecutionMessage is treated like a user message (user-initiated context).
  */
 function findValidCutPoints(entries: SessionEntry[], startIndex: number, endIndex: number): number[] {
-	const cutPoints: number[] = [];
+	// Host messages can arrive between parallel tool results. A cut there would retain a result
+	// after discarding its call. Protect the whole completed exchange, including interleaved records.
+	const pendingCallsById = new Map<string, number[]>();
+	const resultIndicesByAssistant = new Map<number, number>();
 	for (let i = startIndex; i < endIndex; i++) {
 		const entry = entries[i];
+		if (entry.type !== "message") continue;
+		if (entry.message.role === "assistant") {
+			for (const block of entry.message.content) {
+				if (block.type !== "toolCall") continue;
+				const pending = pendingCallsById.get(block.id) ?? [];
+				pending.push(i);
+				pendingCallsById.set(block.id, pending);
+			}
+		} else if (entry.message.role === "toolResult") {
+			const pending = pendingCallsById.get(entry.message.toolCallId);
+			const assistantIndex = pending?.pop();
+			if (assistantIndex !== undefined) resultIndicesByAssistant.set(assistantIndex, i);
+		}
+	}
+	const cutPoints: number[] = [];
+	let protectedThrough = startIndex - 1;
+	for (let i = startIndex; i < endIndex; i++) {
+		const entry = entries[i];
+		const canCut = i > protectedThrough;
+		if (entry.type === "message" && entry.message.role === "assistant") {
+			protectedThrough = Math.max(protectedThrough, resultIndicesByAssistant.get(i) ?? i);
+		}
+		if (!canCut) continue;
 		switch (entry.type) {
 			case "message": {
 				const role = entry.message.role;
@@ -667,14 +693,18 @@ export function findCutPoint(
 
 	for (let i = endIndex - 1; i >= startIndex; i--) {
 		const entry = entries[i];
-		if (entry.type !== "message") continue;
+		const message = getMessageFromEntryForCompaction(entry);
+		if (!message) continue;
 
 		// Estimate this message's size
-		const messageTokens = estimateTokens(entry.message);
+		const messageTokens = estimateTokens(message);
 		accumulatedTokens += messageTokens;
 
 		// Check if we've exceeded the budget
 		if (accumulatedTokens >= keepRecentTokens) {
+			// A final tool batch may exceed the budget by itself, with no later safe boundary.
+			// Keep that batch from its last safe start rather than retaining the entire history.
+			cutIndex = cutPoints[cutPoints.length - 1];
 			// Find the closest valid cut point at or after this entry
 			for (let c = 0; c < cutPoints.length; c++) {
 				if (cutPoints[c] >= i) {
@@ -693,8 +723,9 @@ export function findCutPoint(
 		if (prevEntry.type === "compaction") {
 			break;
 		}
-		if (prevEntry.type === "message") {
-			// Stop if we hit any message
+		if (getMessageFromEntry(prevEntry)) {
+			// Context-bearing host records are messages too; pulling them across the cut defeats
+			// the recent-token bound and can split an exchange protected by findValidCutPoints.
 			break;
 		}
 		// Include this non-message entry (bash, settings change, etc.)

@@ -9,7 +9,10 @@ import {
 	clampLaneMaxUsd,
 	isLocalExecutionModel,
 } from "../src/core/background-lane-controller.ts";
+import type { WorkerAgentWaitResult } from "../src/core/delegation/worker-agent-control.ts";
 import type { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
+import type { WorkerTerminalHandoffRecord } from "../src/core/delegation/worker-notification-coordinator.ts";
+import { ForegroundTerminalHandoffController } from "../src/core/foreground-terminal-handoff-controller.ts";
 import { ORCHESTRATION_SCHEMA_VERSION, type WorkerResultContract } from "../src/core/orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../src/core/orchestration/delegation-ledger.ts";
 import { createWorkerExecutionContract } from "../src/core/orchestration/worker-execution-contract.ts";
@@ -48,6 +51,98 @@ function resultFor(
 	};
 }
 
+function createWorkerWaitRaceFixture() {
+	const runningRecord = {
+		laneId: "task-old-attempt",
+		type: "worker" as const,
+		status: "running" as const,
+	};
+	const terminalRecord = {
+		laneId: "task-new-attempt",
+		type: "worker" as const,
+		status: "succeeded" as const,
+		completedAt: "2026-09-30T12:00:00.000Z",
+	};
+	const capturedTerminalRecord = { ...terminalRecord, laneId: runningRecord.laneId };
+	let currentRecords: (typeof runningRecord | typeof terminalRecord)[] = [runningRecord];
+	let resolveWait!: (result: WorkerAgentWaitResult) => void;
+	const wait = new Promise<WorkerAgentWaitResult>((resolve) => {
+		resolveWait = resolve;
+	});
+	const agentControl = {
+		waitForWorkerAgents: vi.fn(() => wait),
+		resolveWorkerAgentLane: () => ({ laneId: runningRecord.laneId, status: "running" as const }),
+	};
+	const workers = {
+		getAgentControl: () => agentControl,
+		getRecords: () => currentRecords,
+		abort: () => {},
+	};
+	const lifecycle = {
+		getActiveAttempt: (laneId: string) =>
+			laneId === terminalRecord.laneId || laneId === runningRecord.laneId
+				? { agentId: "agent-1", taskId: laneId, dispatch: { logicalLaneId: "agent-1" } }
+				: undefined,
+		getManagedAttempt: () => undefined,
+		getManagedRecords: () => [],
+		getAllRecords: () => currentRecords,
+		getTerminalNotification: () => undefined,
+		markNotificationsDelivered: vi.fn(),
+	};
+	let resolveHandoff!: () => void;
+	const handoff = new Promise<void>((resolve) => {
+		resolveHandoff = resolve;
+	});
+	let delivered: readonly { laneId: string; observedAt?: string }[] | undefined;
+	const startCustomMessageTurn = vi.fn(async () => ({ completion: Promise.resolve() }));
+	const foregroundHandoff = new ForegroundTerminalHandoffController({
+		foreground: {
+			waitForIdle: async () => {},
+			tryAcquireSubmission: () => ({}),
+			releaseSubmission: () => {},
+		} as never,
+		isDisposed: () => false,
+		getGoalStateSnapshot: () => undefined,
+		startCustomMessageTurn,
+		enqueueCustomMessageTurn: async () => {},
+		sendCustomMessage: async () => {},
+		warn: () => {},
+	});
+	const notifyWorkerTerminalHandoff = vi.fn(async (records: readonly WorkerTerminalHandoffRecord[]) => {
+		delivered = records;
+		await foregroundHandoff.notifyWorkers(records);
+		resolveHandoff();
+	});
+	const controller = new BackgroundLaneController({
+		isDelegateToolActive: () => true,
+		getSessionManager: () => ({ getEntries: () => [] }) as unknown as SessionManager,
+		emit: () => {},
+		notifyWorkerTerminalHandoff,
+	} as never);
+	Object.assign(controller as object, { _workers: workers, _workerLifecycle: lifecycle });
+	const recordTerminal = (
+		controller as unknown as {
+			_recordWorkerTerminal(record: typeof terminalRecord, durableNotificationId: string): void;
+		}
+	)._recordWorkerTerminal.bind(controller);
+
+	return {
+		handoff,
+		notifyWorkerTerminalHandoff,
+		startCustomMessageTurn,
+		recordTerminal: (record = terminalRecord) => {
+			currentRecords = [...currentRecords.filter((current) => current.laneId !== record.laneId), record];
+			recordTerminal(record, `notification-${record.laneId}`);
+		},
+		resolveWait,
+		capturedTerminalRecord,
+		runningRecord,
+		terminalRecord,
+		controller,
+		delivered: () => delivered,
+	};
+}
+
 describe("background lane budgets", () => {
 	it("clamps research lane spend to the foreground envelope cap", () => {
 		expect(clampLaneMaxUsd(1.5, 0.25)).toBe(0.25);
@@ -75,6 +170,99 @@ describe("background lane history", () => {
 });
 
 describe("worker terminal handoffs", () => {
+	it("does not treat a terminal after a timed-out active snapshot as consumed", async () => {
+		const fixture = createWorkerWaitRaceFixture();
+		const waiting = fixture.controller.waitForWorkerAgents(["agent-1"], "all");
+		fixture.resolveWait({
+			statuses: [{ agentId: "agent-1", status: "active" }],
+			updatedAgentIds: [],
+			timedOut: true,
+			terminalLaneIds: [],
+		});
+		// A new attempt finishes after the wait captured its active/timed-out result but before the
+		// BackgroundLaneController's promise reaction reads the live terminal projection.
+		fixture.recordTerminal();
+
+		await expect(waiting).resolves.toEqual({
+			statuses: [{ agentId: "agent-1", status: "active" }],
+			updatedAgentIds: [],
+			timedOut: true,
+			terminalLaneIds: [],
+		});
+		await fixture.handoff;
+
+		expect(fixture.notifyWorkerTerminalHandoff).toHaveBeenCalledOnce();
+		expect(fixture.startCustomMessageTurn).toHaveBeenCalledOnce();
+		expect(fixture.delivered()).toEqual([
+			expect.objectContaining({ laneId: fixture.terminalRecord.laneId, status: "succeeded" }),
+		]);
+		expect(fixture.delivered()?.[0]?.observedAt).toBeUndefined();
+		fixture.controller.abortInFlightLanes();
+	});
+
+	it("consumes a terminal included in the captured worker-wait result", async () => {
+		const fixture = createWorkerWaitRaceFixture();
+		const waiting = fixture.controller.waitForWorkerAgents(["agent-1"], "all");
+		fixture.recordTerminal(fixture.capturedTerminalRecord);
+		fixture.resolveWait({
+			statuses: [{ agentId: "agent-1", status: "idle" }],
+			updatedAgentIds: ["agent-1"],
+			timedOut: false,
+			terminalLaneIds: [fixture.capturedTerminalRecord.laneId],
+		});
+
+		await waiting;
+		await fixture.handoff;
+
+		expect(fixture.notifyWorkerTerminalHandoff).toHaveBeenCalledOnce();
+		expect(
+			fixture.delivered()?.find(({ laneId }) => laneId === fixture.capturedTerminalRecord.laneId)?.observedAt,
+		).toEqual(expect.any(String));
+		expect(fixture.startCustomMessageTurn).not.toHaveBeenCalled();
+		fixture.controller.abortInFlightLanes();
+	});
+
+	it("observes only the attempt captured when a successful wait began", async () => {
+		const fixture = createWorkerWaitRaceFixture();
+		const waiting = fixture.controller.waitForWorkerAgents(["agent-1"], "all");
+		fixture.recordTerminal(fixture.capturedTerminalRecord);
+		fixture.resolveWait({
+			statuses: [{ agentId: "agent-1", status: "idle" }],
+			updatedAgentIds: ["agent-1"],
+			timedOut: false,
+			terminalLaneIds: [fixture.capturedTerminalRecord.laneId],
+		});
+		fixture.recordTerminal();
+
+		await waiting;
+		await fixture.handoff;
+
+		const delivered = fixture.delivered() ?? [];
+		expect(delivered.find(({ laneId }) => laneId === fixture.capturedTerminalRecord.laneId)?.observedAt).toEqual(
+			expect.any(String),
+		);
+		expect(delivered.find(({ laneId }) => laneId === fixture.terminalRecord.laneId)?.observedAt).toBeUndefined();
+		expect(fixture.startCustomMessageTurn).toHaveBeenCalledOnce();
+		fixture.controller.abortInFlightLanes();
+	});
+
+	it("delivers a terminal published after a timed-out wait as an unobserved handoff", async () => {
+		const fixture = createWorkerWaitRaceFixture();
+		const waiting = fixture.controller.waitForWorkerAgents(["agent-1"], "all");
+		fixture.resolveWait({
+			statuses: [{ agentId: "agent-1", status: "active" }],
+			updatedAgentIds: [],
+			timedOut: true,
+			terminalLaneIds: [],
+		});
+		await waiting;
+		fixture.recordTerminal();
+		await fixture.handoff;
+
+		expect(fixture.delivered()?.[0]?.observedAt).toBeUndefined();
+		fixture.controller.abortInFlightLanes();
+	});
+
 	it("retains goal ownership through the asynchronous terminal outbox", async () => {
 		let resolveHandoff!: () => void;
 		const handoff = new Promise<void>((resolve) => {
@@ -149,7 +337,7 @@ describe("worker terminal handoffs", () => {
 		controller.abortInFlightLanes();
 	});
 
-	it("marks a terminal read before delivery when an event-driven agent wait already owns it", async () => {
+	it("marks only the terminal returned by an event-driven wait before handoff delivery", async () => {
 		const record = {
 			laneId: "task-1",
 			type: "worker" as const,
@@ -157,8 +345,8 @@ describe("worker terminal handoffs", () => {
 			completedAt: "2026-08-21T20:00:00.000Z",
 		};
 		let resolveWait!: () => void;
-		const wait = new Promise<{ status: "idle"; timedOut: false }>((resolve) => {
-			resolveWait = () => resolve({ status: "idle", timedOut: false });
+		const wait = new Promise<{ status: "idle"; timedOut: false; terminalLaneIds: string[] }>((resolve) => {
+			resolveWait = () => resolve({ status: "idle", timedOut: false, terminalLaneIds: [record.laneId] });
 		});
 		const agentControl = { waitForWorkerAgent: vi.fn(() => wait) };
 		const workers = {
@@ -195,6 +383,8 @@ describe("worker terminal handoffs", () => {
 				_recordWorkerTerminal(terminalRecord: typeof record, durableNotificationId: string): void;
 			}
 		)._recordWorkerTerminal(record, "notification-task-1");
+		resolveWait();
+		await waiting;
 		await vi.waitFor(() => expect(notifyWorkerTerminalHandoff).toHaveBeenCalledOnce());
 
 		expect(delivered).toEqual([
@@ -204,8 +394,6 @@ describe("worker terminal handoffs", () => {
 				observedAt: expect.any(String),
 			}),
 		]);
-		resolveWait();
-		await waiting;
 		controller.abortInFlightLanes();
 	});
 
@@ -519,7 +707,7 @@ describe("worker runtime construction", () => {
 		expect(retireWorkerAgent).toHaveBeenCalledWith("child", scope);
 	});
 
-	it("releases an active wait-consumer receipt when a worker wait throws synchronously", () => {
+	it("propagates synchronous worker wait failures", () => {
 		const waitForWorkerAgent = vi.fn(() => {
 			throw new Error("worker wait unavailable");
 		});
@@ -536,9 +724,6 @@ describe("worker runtime construction", () => {
 
 		expect(() => controller.waitForWorkerAgent("child")).toThrow("worker wait unavailable");
 		expect(() => controller.waitForWorkerAgents(["child", "peer"], "all")).toThrow("worker waits unavailable");
-		expect((controller as unknown as { _workerWaitConsumers: Map<string, number> })._workerWaitConsumers).toEqual(
-			new Map(),
-		);
 	});
 });
 

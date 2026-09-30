@@ -200,12 +200,78 @@ describe("WorkerAgentControlCoordinator", () => {
 		await expect(coordinator.waitForWorkerAgent(agent.agentId, 1)).resolves.toEqual({
 			status: "active",
 			timedOut: true,
+			terminalLaneIds: [],
 		});
 		await expect(coordinator.waitForWorkerAgents([agent.agentId], "all", 1)).resolves.toMatchObject({
 			statuses: [{ agentId: agent.agentId, status: "active" }],
 			timedOut: true,
 		});
 		expect(getLatestAgentAttempt).not.toHaveBeenCalled();
+	});
+
+	it("does not issue a terminal receipt when the captured worker is suspended", async () => {
+		const agent = registeredAgent({ status: "suspended" });
+		const attempt = { ...activeAttempt("completed"), agentId: agent.agentId };
+		const lifecycle = {
+			getTaskRuntimeSnapshot: () => ({
+				agents: { [agent.agentId]: agent },
+				attempts: { [attempt.attemptId]: attempt },
+			}),
+		} as unknown as WorkerLifecycle;
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir: root(),
+			parentSessionId: "parent-suspended-terminal-wait",
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+		});
+
+		await expect(coordinator.waitForWorkerAgents([agent.agentId], "all")).resolves.toEqual({
+			statuses: [{ agentId: agent.agentId, status: "suspended" }],
+			updatedAgentIds: [],
+			timedOut: false,
+			terminalLaneIds: [],
+		});
+	});
+
+	it("rejects a wait when an active target is blocked by the caller's reservation and capacity cannot yield", async () => {
+		const caller = registeredAgent({ agentId: "caller", rootAgentId: "caller", status: "active" });
+		const peer = registeredAgent({ agentId: "peer", rootAgentId: "peer", status: "active" });
+		const callerAttempt = { ...activeAttempt("running"), agentId: "caller", taskId: "caller-task" };
+		const peerAttempt = { ...activeAttempt("running"), agentId: "peer", taskId: "peer-task" };
+		const lifecycle = {
+			getTaskRuntimeSnapshot: () => ({
+				agents: { caller, peer },
+				attempts: { [callerAttempt.attemptId]: callerAttempt, [peerAttempt.attemptId]: peerAttempt },
+			}),
+		} as unknown as WorkerLifecycle;
+		const blockedByCaller = vi.fn(() => ["peer"]);
+		const coordinator = new WorkerAgentControlCoordinator({
+			agentDir: root(),
+			parentSessionId: "parent-wait-reservation-block",
+			processOwnerId: "pi-worker:1:owner",
+			isControlAvailable: () => true,
+			getLifecycle: () => lifecycle,
+			recoveredRequest: () => ({ instructions: "unused" }),
+			run: async () => ({ started: false, skipReason: "unused" }),
+			scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+			statusChanged: vi.fn(),
+			abortLane: vi.fn(),
+			cancelLane: vi.fn(),
+			yieldCallerForWait: () => undefined,
+			waitBlockedByCaller: blockedByCaller,
+		});
+
+		await expect(
+			coordinator.waitForWorkerAgents(["peer"], "all", 10_000, { callerAgentId: "caller" }),
+		).rejects.toThrow("Worker wait would deadlock: peer is blocked by the caller's write reservation.");
+		expect(blockedByCaller).toHaveBeenCalledWith("caller", ["peer"]);
 	});
 
 	it("owns follow-up scheduling, event-driven state waits, and cancellation callbacks without controller wrappers", async () => {
@@ -292,7 +358,7 @@ describe("WorkerAgentControlCoordinator", () => {
 		const waiting = coordinator.waitForWorkerAgent("agent-1", 10_000);
 		agent = registeredAgent({ activeAttemptId: attempt.attemptId, status: "suspended" });
 		coordinator.signalStateChanged();
-		await expect(waiting).resolves.toEqual({ status: "suspended", timedOut: false });
+		await expect(waiting).resolves.toEqual({ status: "suspended", timedOut: false, terminalLaneIds: [] });
 
 		attempt = activeAttempt("suspended");
 		enqueue.mockClear();
@@ -1684,7 +1750,7 @@ describe("WorkerAgentControlCoordinator", () => {
 		peerAttempt = { ...peerAttempt, status: "completed" };
 		coordinator.signalStateChanged();
 
-		await expect(waiting).resolves.toEqual({ status: "idle", timedOut: false });
+		await expect(waiting).resolves.toEqual({ status: "idle", timedOut: false, terminalLaneIds: ["peer"] });
 		expect(releaseYield).toHaveBeenCalledOnce();
 	});
 
@@ -1772,6 +1838,7 @@ describe("WorkerAgentControlCoordinator", () => {
 				],
 				updatedAgentIds: ["peer-b"],
 				timedOut: false,
+				terminalLaneIds: ["peer-b-task"],
 			});
 			expect(releaseYield).toHaveBeenCalledOnce();
 			// One snapshot reconciles mailboxes and one projects every target status; neither scales by target count.
@@ -1897,6 +1964,7 @@ describe("WorkerAgentControlCoordinator", () => {
 				],
 				updatedAgentIds: ["peer-a"],
 				timedOut: true,
+				terminalLaneIds: ["peer-a-task"],
 			});
 			expect(yieldCapacity).toHaveBeenCalledOnce();
 			expect(releaseYield).toHaveBeenCalledOnce();

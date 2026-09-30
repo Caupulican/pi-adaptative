@@ -77,8 +77,6 @@ export interface WorkerNotificationCoordinatorOptions {
 	notify(records: readonly WorkerTerminalHandoffRecord[]): Promise<void>;
 	warn(message: string): void;
 	markDurableDelivered(notificationIds: readonly string[]): void;
-	/** Active event-driven waits consume matching terminals before a second foreground wake is admitted. */
-	isObserved?(record: LaneRecord): boolean;
 }
 
 function terminalIdentity(record: Pick<LaneRecord, "laneId" | "status" | "completedAt" | "reasonCode">): string {
@@ -146,17 +144,10 @@ export class WorkerNotificationCoordinator {
 			// A terminal can be observed again while its handoff is still awaiting the parent. Keep
 			// the existing receipt and consumer: replacing it in `pending` would enqueue a second
 			// wake as soon as the first delivery settles.
-			if (this.options.isObserved?.(record)) {
-				const observedAt = new Date().toISOString();
-				this.rememberObserved(terminalIdentity(record), observedAt);
-				inFlight.record.observedAt = observedAt;
-			}
 			return;
 		}
 		const identity = terminalIdentity(record);
-		const observedAt = this.options.isObserved?.(record)
-			? new Date().toISOString()
-			: this.observedTerminals.get(identity);
+		const observedAt = this.observedTerminals.get(identity);
 		if (observedAt) this.rememberObserved(identity, observedAt);
 		// Consumed exactly once, here, at the same point `goalId` is read off the durable projection --
 		// see `noteLaneOwnerEpoch`'s doc comment for why an absent entry must never be treated as epoch 0

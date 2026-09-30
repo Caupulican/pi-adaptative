@@ -192,6 +192,29 @@ objective's recent routes are a history block in the state the judge reads; "rep
 evidence" is one route on one evidence marker, twice. The root reads the ledger with
 `decision_ledger_read` (`sessions`, `stages`, `evaluations`, `replay`); workers never do.
 
+The TUI counts unresolved questions in live System One status instead of appending a line for each
+uncertain evaluation. Repeated judgments update the same question; decisive matching evidence
+removes it. Worker tasks have separate question identities, retained across retries. Unrelated
+judgments, cancellation and evaluator outages cannot clear an open question. The ledger restores
+this live state when a session reopens; the bounded recent-history display does not expire questions.
+Complete question identities and states are stored separately from the six-line preview, so a large
+evaluation or truncated label cannot hide a question or prevent its matching recheck from resolving it.
+These display facts do not discharge mandatory verification findings, which retain their own proof
+requirements above.
+
+The root inspects `typesafe_review` with `action: "uncertainties"` at turn entry and before delivery.
+It gathers evidence within the existing grant. For a worker-task question, it gathers evidence from
+the responsible worker and may steer it to recheck; after reviewing that evidence, the owning session
+may record an advisory disposition for any current question in its own journal. Use
+`action: "resolve_uncertainty"` with `uncertainty` containing its exact `evaluationId`, `question`,
+`disposition` (`conservative_path` or `evidence_based_decision`), `reason` and `evidence`.
+The host records this owner-model decision separately from the Jev evaluation. A newer judgment
+reopens its question; stale identities, questions explicitly scoped to a foreign root session and
+failed journal writes cannot acknowledge it. Missing scope on a legacy evaluation remains unknown
+and does not acquire root provenance during hydration. This advisory disposition does not alter Jev
+evidence or discharge mandatory same-lane verification, and grants no permission, certificate proof
+or finding resolution. Independent authorized work continues while evidence is gathered.
+
 ## Verification
 
 Pinned by the [primary loop tests](../test/goal-session-primary-loop.test.ts), the [session objective

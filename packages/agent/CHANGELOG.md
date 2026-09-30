@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Preserved complete tool exchanges across compaction cuts, including host messages between parallel results and repeated call identifiers in later turns.
+- Counted custom messages and branch summaries in retained context, and trimmed older history when the final tool exchange alone exceeds the recent-token budget.
+
 ## [0.101.2] - 2026-09-30
 
 ## [0.101.1] - 2026-09-30

@@ -268,6 +268,15 @@ export interface WorkerAgentWaitResult {
 	statuses: WorkerAgentWaitStatus[];
 	updatedAgentIds: string[];
 	timedOut: boolean;
+	/** Exact terminal generations included in this wait result; absent means no observation receipt. */
+	terminalLaneIds?: string[];
+}
+
+export interface WorkerAgentSingleWaitResult {
+	status: WorkerAgentActivity;
+	timedOut: boolean;
+	/** Exact terminal generation included in this wait result; absent means no observation receipt. */
+	terminalLaneIds?: string[];
 }
 
 export type WorkerAgentBroadcastTargetResult =
@@ -400,7 +409,7 @@ export interface WorkerAgentControlPort {
 		agentId: string,
 		timeoutMs?: number,
 		scope?: WorkerAgentControlScope,
-	): Promise<{ status: WorkerAgentActivity; timedOut: boolean }>;
+	): Promise<WorkerAgentSingleWaitResult>;
 	waitForWorkerAgents(
 		agentIds: readonly string[],
 		mode: WorkerAgentWaitMode,

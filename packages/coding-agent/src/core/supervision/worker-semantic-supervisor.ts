@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { compileDecisionProgramForCheckpoint } from "../steering/programs.ts";
 import { evaluateNoul, noulFromAnswer } from "../system-one/policy.ts";
+import { type SemanticEvaluationScope, semanticWorkerTaskScope } from "../system-one/semantic-evaluation-ledger.ts";
 import type {
 	LiveWorkerAttempt,
 	SupervisionObservationState,
@@ -20,7 +21,7 @@ export interface DecisionEngine {
 	evaluate(
 		program: unknown,
 		state?: Record<string, unknown>,
-		options?: { consequence?: string; signal?: AbortSignal },
+		options?: { consequence?: string; signal?: AbortSignal; evaluationScope?: SemanticEvaluationScope },
 	): Promise<{
 		answers?: Record<string, { type?: string; noul?: number; choice?: string; value?: boolean | number }>;
 		results?: Record<string, { kind?: string; confidence?: { value?: number }; selected?: unknown }>;
@@ -269,7 +270,11 @@ export class WorkerSemanticSupervisor {
 					const evalRes = await this.decisionEngine.evaluate(
 						compileDecisionProgramForCheckpoint("JEV-WORKER-SUPERVISION", state),
 						state as unknown as Record<string, unknown>,
-						{ consequence: "medium", signal },
+						{
+							consequence: "medium",
+							signal,
+							evaluationScope: semanticWorkerTaskScope(attempt.objectiveId, attempt.taskId),
+						},
 					);
 					// Per decision: the normalized result when present, else the raw answer. An empty
 					// `results` object must not hide populated answers.

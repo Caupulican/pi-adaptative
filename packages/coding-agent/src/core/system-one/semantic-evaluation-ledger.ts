@@ -5,6 +5,7 @@
  * can read. No path may record an evaluation any other way; that is how `S1 eval` under-reported.
  */
 
+import type { SemanticEvaluationScope } from "../decision/engine.ts";
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
 import type { NoulBand } from "../decision/noul.ts";
 import type { Consequence } from "../decision/primitives.ts";
@@ -14,6 +15,13 @@ import type { ValidationStage } from "./types.ts";
 
 export type SemanticEvaluationOutcome = "ok" | "failed" | "cancelled";
 
+export type { SemanticEvaluationScope } from "../decision/engine.ts";
+
+/** Collision-free worker question identity for one objective and logical task across retries. */
+export function semanticWorkerTaskScope(objectiveId: string, taskId: string): SemanticEvaluationScope {
+	return { kind: "worker-task", id: JSON.stringify([objectiveId, taskId]) };
+}
+
 /** One evaluation the plane is running right now. */
 export interface SemanticEvaluationStart {
 	readonly evaluationId: string;
@@ -21,6 +29,9 @@ export interface SemanticEvaluationStart {
 	/** Operator-readable name for the judgment; see {@link semanticEvaluationLabel}. */
 	readonly label: string;
 	readonly consequence?: Consequence;
+	readonly evaluationScope?: SemanticEvaluationScope;
+	/** Stable family for matching repeated invocations whose program ids include run timestamps. */
+	readonly questionNamespace?: string;
 	/** Epoch ms. */
 	readonly startedAt: number;
 }
@@ -34,28 +45,54 @@ export interface SemanticEvaluationRecord extends SemanticEvaluationStart {
 	readonly verdict?: string;
 	/** Bounded reason lines, as the pane's preview body. */
 	readonly reasons?: readonly string[];
+	/** Full question identities and states; absent only on legacy/reasons-only records. */
+	readonly questionStates?: readonly SemanticQuestionState[];
+}
+
+/** Unbounded question text and its semantic state, separate from the bounded display preview. */
+export interface SemanticQuestionState {
+	/** Exact identity (result key or certificate predicate), never display-truncated. */
+	readonly question: string;
+	readonly uncertain: boolean;
+	/** Optional bounded explanation for display; the identity above remains complete. */
+	readonly text?: string;
 }
 
 /** The one sink every semantic evaluation in the session reports to. */
 export interface SemanticEvaluationObserver {
 	/** `model` is the engine or pinned model the evaluation runs on, kept for the durable ledger. */
-	start(input: { programId: string; consequence?: Consequence; model?: string }): string;
-	settleOk(evaluationId: string, verdict?: string, reasons?: readonly string[]): void;
+	start(input: {
+		programId: string;
+		consequence?: Consequence;
+		model?: string;
+		evaluationScope?: SemanticEvaluationScope;
+	}): string;
+	settleOk(
+		evaluationId: string,
+		verdict?: string,
+		reasons?: readonly string[],
+		questionStates?: readonly SemanticQuestionState[],
+	): void;
 	settleFailed(evaluationId: string, error: unknown): void;
 	settleCancelled(evaluationId: string): void;
 	/** Sets the verdict on an already-settled record (System One's policy result arrives later). */
-	noteVerdict(evaluationId: string, verdict: string, reasons?: readonly string[]): void;
+	noteVerdict(
+		evaluationId: string,
+		verdict: string,
+		reasons?: readonly string[],
+		questionStates?: readonly SemanticQuestionState[],
+	): void;
 }
 
 const LABEL_LIMIT = 64;
 export const MAX_EVALUATION_REASONS = 6;
 const REASON_LIMIT = 120;
 
-const HOST_PROGRAM_LABELS: readonly (readonly [RegExp, string])[] = [
-	[/^rule_program_/, "project rules"],
-	[/^retention_eval_/, "retention"],
-	[/^supervision_eval_/, "worker supervision"],
-	[/^objective-route-v2$/, "objective route"],
+const HOST_PROGRAM_FAMILIES: readonly { pattern: RegExp; label: string; namespace: string }[] = [
+	{ pattern: /^rule_program_/, label: "project rules", namespace: "project-rules" },
+	{ pattern: /^retention_eval_/, label: "retention", namespace: "retention" },
+	{ pattern: /^supervision_eval_/, label: "worker supervision", namespace: "worker-supervision" },
+	{ pattern: /^objective-route-v2$/, label: "objective route", namespace: "objective-route" },
 ];
 
 /** Checkpoints whose registered pack is the synthesized fallback but whose call site names them. */
@@ -117,8 +154,14 @@ export function semanticEvaluationLabel(programId: string): string {
 		if (checkpoint) return bounded(labelForCheckpoint(checkpoint), LABEL_LIMIT);
 	}
 	if (/^JEV-[A-Z0-9-]+$/.test(programId)) return bounded(labelForCheckpoint(programId), LABEL_LIMIT);
-	for (const [pattern, label] of HOST_PROGRAM_LABELS) if (pattern.test(programId)) return label;
+	for (const family of HOST_PROGRAM_FAMILIES) if (family.pattern.test(programId)) return family.label;
 	return bounded(programId, LABEL_LIMIT);
+}
+
+/** Canonical identity for repeated semantic questions, independent of ephemeral invocation ids. */
+export function semanticQuestionNamespace(programId: string): string {
+	for (const family of HOST_PROGRAM_FAMILIES) if (family.pattern.test(programId)) return family.namespace;
+	return programId;
 }
 
 /**
@@ -166,63 +209,72 @@ export const NOUL_BAND_LABEL: Readonly<Record<NoulBand, string>> = Object.freeze
 export function verdictFromEvaluation(evaluation: DecisionEvaluation): {
 	verdict?: string;
 	reasons: readonly string[];
+	questionStates: readonly SemanticQuestionState[];
 } {
 	const reasons: string[] = [];
+	const questionStates: SemanticQuestionState[] = [];
 	let verdict: string | undefined = evaluation.proposedFunctionCall?.name;
 	for (const [id, result] of Object.entries(evaluation.results)) {
-		if (reasons.length >= MAX_EVALUATION_REASONS) break;
+		const includeInPreview = reasons.length < MAX_EVALUATION_REASONS;
+		let line: string;
+		let uncertain = false;
 		switch (result.kind) {
 			case "boolean": {
 				// The probability and the band are the answer. Printing the old derived boolean taught
 				// the 0.5 cutoff to anyone reading the pane: `x: true (p=0.51)` is not a yes.
-				const line = `${id}: P(yes)=${result.probabilityTrue.toFixed(2)} · ${NOUL_BAND_LABEL[result.band]} (${
+				line = `${id}: P(yes)=${result.probabilityTrue.toFixed(2)} · ${NOUL_BAND_LABEL[result.band]} (${
 					result.direction === "required_false" ? "needs no" : "needs yes"
 				})`;
-				reasons.push(result.band === "ambiguous" ? doubtReason(line) : bounded(line, REASON_LIMIT));
+				uncertain = result.band === "ambiguous";
 				break;
 			}
 			case "choice":
-				if (verdict === undefined) verdict = result.selected;
-				reasons.push(bounded(`${id}: ${result.selected}`, REASON_LIMIT));
+				if (includeInPreview && verdict === undefined) verdict = result.selected;
+				line = `${id}: ${result.selected}`;
 				break;
 			case "score":
-				reasons.push(bounded(`${id}: ${result.value}`, REASON_LIMIT));
+				line = `${id}: ${result.value}`;
 				break;
 			case "set":
-				reasons.push(bounded(`${id}: ${result.selected.join(", ")}`, REASON_LIMIT));
+				line = `${id}: ${result.selected.join(", ")}`;
 				break;
 			case "function_call":
-				reasons.push(bounded(`${id}: ${result.name}`, REASON_LIMIT));
+				line = `${id}: ${result.name}`;
 				break;
 			default:
-				reasons.push(bounded(`${id}: unsupported (${result.reason})`, REASON_LIMIT));
+				line = `${id}: unsupported (${result.reason})`;
 		}
+		if (result.kind !== "unsupported")
+			questionStates.push({ question: id, uncertain, text: bounded(line, REASON_LIMIT) });
+		if (includeInPreview) reasons.push(uncertain ? doubtReason(line) : bounded(line, REASON_LIMIT));
 	}
-	return { ...(verdict !== undefined ? { verdict } : {}), reasons };
+	return { ...(verdict !== undefined ? { verdict } : {}), reasons, questionStates };
 }
 
 /** What a steering certificate decided. */
 export function verdictFromCertificate(certificate: SteeringCertificate): {
 	verdict: string;
 	reasons: readonly string[];
+	questionStates: readonly SemanticQuestionState[];
 } {
 	const verdict = certificate.semantic_outcome ?? certificate.policy_result ?? certificate.directive;
 	const reasons: string[] = [];
+	const questionStates: SemanticQuestionState[] = [];
 	const failed = certificate.failed_semantic_predicates ?? [];
 	const unsure = certificate.unsure_semantic_predicates ?? [];
 	const settled = certificate.semantic_outcome === "pass" && failed.length === 0 && unsure.length === 0;
 	if (!settled) reasons.push(bounded(`directive: ${certificate.directive}`, REASON_LIMIT));
 	for (const predicate of failed) {
-		if (reasons.length >= MAX_EVALUATION_REASONS) break;
-		reasons.push(bounded(predicate, REASON_LIMIT));
+		questionStates.push({ question: predicate, uncertain: false, text: bounded(predicate, REASON_LIMIT) });
+		if (reasons.length < MAX_EVALUATION_REASONS) reasons.push(bounded(predicate, REASON_LIMIT));
 	}
 	// A predicate that was only unsure is an open doubt, not a rejection: it is why the checkpoint
 	// wants another look, and the pane has to be able to say so.
 	for (const predicate of unsure) {
-		if (reasons.length >= MAX_EVALUATION_REASONS) break;
 		if (failed.includes(predicate)) continue;
-		reasons.push(doubtReason(predicate));
+		questionStates.push({ question: predicate, uncertain: true, text: bounded(predicate, REASON_LIMIT) });
+		if (reasons.length < MAX_EVALUATION_REASONS) reasons.push(doubtReason(predicate));
 	}
 	if (settled) reasons.push(PROGRAM_SETTLED_REASON);
-	return { verdict, reasons };
+	return { verdict, reasons, questionStates };
 }

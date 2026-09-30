@@ -1,4 +1,4 @@
-import { isDecisivelyTrue } from "../decision/noul.ts";
+import { isDecisivelyFalse, isDecisivelyTrue } from "../decision/noul.ts";
 import type { Consequence } from "../decision/primitives.ts";
 import {
 	lightweightQuestionId,
@@ -57,7 +57,11 @@ import {
 	noulFromAnswer,
 } from "./policy.ts";
 import { StateProjector } from "./projector.ts";
-import { doubtReason, type SemanticEvaluationObserver } from "./semantic-evaluation-ledger.ts";
+import {
+	doubtReason,
+	type SemanticEvaluationObserver,
+	type SemanticQuestionState,
+} from "./semantic-evaluation-ledger.ts";
 import type { ExecutionState, ToolImpact, ValidationDecision, ValidationStage } from "./types.ts";
 import { CONSULT_GROUNDING_QUESTIONS, RESERVED_DECISION_KINDS, unsettledQuestionId } from "./unsettled-ladder.ts";
 import { VerificationCoordinator, type VerificationHost } from "./verification-coordinator.ts";
@@ -287,6 +291,7 @@ export class SystemOneController {
 		policyResult: string,
 		evaluationId: string | undefined,
 		reasons?: readonly string[],
+		questionStates?: readonly SemanticQuestionState[],
 	): void {
 		decision.policy_result = policyResult;
 		const { id: _provisional, timestamp: _drafted, ...draft } = decision;
@@ -294,7 +299,8 @@ export class SystemOneController {
 		decision.id = sealed.id;
 		decision.timestamp = sealed.timestamp;
 		this.audit.recordDecision(this.store.runId, sealed);
-		if (evaluationId !== undefined) this.evaluationObserver?.noteVerdict(evaluationId, policyResult, reasons);
+		if (evaluationId !== undefined)
+			this.evaluationObserver?.noteVerdict(evaluationId, policyResult, reasons, questionStates);
 	}
 
 	private activeEvaluations = 0;
@@ -470,34 +476,72 @@ export class SystemOneController {
 		const change: ModelPoolChange = {};
 		const doubts: string[] = [];
 		const followUps: QuestionPack = {};
+		const followUpDirections = new Map<ModelPool, boolean>();
+		const reasons: string[] = [];
+		const questionStates: SemanticQuestionState[] = [];
 		for (const pool of MODEL_POOLS) {
-			const answer = first.answers[`model_pool_${pool}`] as { choice?: unknown; confidence?: unknown } | undefined;
-			if (answer?.choice !== "enable" && answer?.choice !== "disable") continue;
+			const questionId = `model_pool_${pool}`;
+			const answer = first.answers[questionId] as { choice?: unknown; confidence?: unknown } | undefined;
+			if (answer === undefined) continue;
+			if (answer.choice !== "enable" && answer.choice !== "disable" && answer.choice !== "unchanged") {
+				const text = `${questionId}: answer was not a recognized choice`;
+				doubts.push(`${pool} models: answer was inconclusive, not applied`);
+				reasons.push(doubtReason(text));
+				questionStates.push({ question: questionId, uncertain: true });
+				continue;
+			}
+			if (answer.choice === "unchanged") {
+				if (confidenceGate(answer.confidence) === "decide") {
+					reasons.push(`${questionId}: unchanged (${String(answer.confidence)})`);
+					questionStates.push({ question: questionId, uncertain: false });
+				} else {
+					doubts.push(`${pool} models: unchanged at confidence ${String(answer.confidence)}, not applied`);
+					reasons.push(doubtReason(`${questionId}: unchanged answer is inconclusive`));
+					questionStates.push({ question: questionId, uncertain: true });
+				}
+				continue;
+			}
 			const enable = answer.choice === "enable";
 			const gate = confidenceGate(answer.confidence);
-			if (gate === "decide") change[pool] = enable;
-			else if (gate === "ask_more")
-				followUps[`${pool}:${enable ? "enable" : "disable"}`] = modelPoolFollowUp(pool, enable);
-			else doubts.push(`${pool} models: "${answer.choice}" at confidence ${String(answer.confidence)}, not applied`);
+			if (gate === "decide") {
+				change[pool] = enable;
+				reasons.push(`${questionId}: ${answer.choice} (${String(answer.confidence)})`);
+				questionStates.push({ question: questionId, uncertain: false });
+			} else if (gate === "ask_more") {
+				followUps[questionId] = modelPoolFollowUp(pool, enable);
+				followUpDirections.set(pool, enable);
+				reasons.push(doubtReason(`${questionId}: ${answer.choice} awaits a follow-up`));
+				questionStates.push({ question: questionId, uncertain: true });
+			} else {
+				doubts.push(`${pool} models: "${answer.choice}" at confidence ${String(answer.confidence)}, not applied`);
+				reasons.push(doubtReason(`${questionId}: ${answer.choice} is below the decision threshold`));
+				questionStates.push({ question: questionId, uncertain: true });
+			}
 		}
-		const reasons = MODEL_POOLS.map((pool) => {
-			const answer = first.answers[`model_pool_${pool}`] as { choice?: unknown; confidence?: unknown } | undefined;
-			return `${pool}: ${String(answer?.choice)} (${String(answer?.confidence)})`;
-		});
-		this.sealDecision(first.decision, "evaluated", first.evaluationId, [...reasons, ...doubts.map(doubtReason)]);
+		this.sealDecision(first.decision, "evaluated", first.evaluationId, reasons, questionStates);
 		if (Object.keys(followUps).length === 0) return { change, doubts };
 		const second = await this.runStageValidation("intake", state, "read_only", [], followUps, signal);
-		for (const id of Object.keys(followUps)) {
-			const [pool, direction] = id.split(":") as [ModelPool, "enable" | "disable"];
-			if (isDecisivelyTrue(second.answers[id])) change[pool] = direction === "enable";
-			else doubts.push(`${pool} models: "${direction}" not confirmed by the follow-up, not applied`);
+		const followUpReasons: string[] = [];
+		const followUpQuestionStates: SemanticQuestionState[] = [];
+		for (const [pool, enable] of followUpDirections) {
+			const questionId = `model_pool_${pool}`;
+			const answer = second.answers[questionId];
+			if (isDecisivelyTrue(answer)) {
+				change[pool] = enable;
+				followUpReasons.push(`${questionId}: follow-up confirmed ${enable ? "enable" : "disable"}`);
+				followUpQuestionStates.push({ question: questionId, uncertain: false });
+			} else if (isDecisivelyFalse(answer)) {
+				followUpReasons.push(`${questionId}: follow-up ruled out ${enable ? "enable" : "disable"}`);
+				followUpQuestionStates.push({ question: questionId, uncertain: false });
+			} else {
+				doubts.push(
+					`${pool} models: "${enable ? "enable" : "disable"}" not confirmed by the follow-up, not applied`,
+				);
+				followUpReasons.push(doubtReason(`${questionId}: follow-up remains inconclusive`));
+				followUpQuestionStates.push({ question: questionId, uncertain: true });
+			}
 		}
-		this.sealDecision(
-			second.decision,
-			"evaluated",
-			second.evaluationId,
-			Object.keys(followUps).map((id) => `${id} P=${probabilityText(second.answers[id])}`),
-		);
+		this.sealDecision(second.decision, "evaluated", second.evaluationId, followUpReasons, followUpQuestionStates);
 		return { change, doubts };
 	}
 

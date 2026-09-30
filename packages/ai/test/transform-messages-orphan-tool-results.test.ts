@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { convertResponsesMessages } from "../src/providers/openai-responses-shared.ts";
 import { INTERRUPTED_TOOL_RESULT_TEXT, transformMessages } from "../src/providers/transform-messages.ts";
 import type { AssistantMessage, Message, Model, ToolCall, ToolResultMessage, UserMessage } from "../src/types.ts";
 
@@ -55,6 +56,38 @@ function toolResult(toolCallId: string): ToolResultMessage {
 const nextUser: UserMessage = { role: "user", content: "next", timestamp: 3 };
 
 describe("transformMessages orphan tool results", () => {
+	it("preserves a compacted orphan output as labeled evidence instead of an invalid wire result", () => {
+		const orphan = toolResult("call_compacted|fc_compacted");
+		const messages: Message[] = [nextUser, orphan];
+		const result = transformMessages(messages, model);
+
+		expect(result.filter((message) => message.role === "toolResult")).toHaveLength(0);
+		expect(result.at(-1)).toMatchObject({ role: "user", timestamp: orphan.timestamp });
+		const evidence = result.at(-1)!;
+		expect(JSON.stringify(evidence)).toContain("call_compacted|fc_compacted");
+		expect(JSON.stringify(evidence)).toContain("result");
+		expect(JSON.stringify(evidence)).toContain("Historical tool output");
+		expect(messages).toEqual([nextUser, orphan]);
+
+		const responsesModel = { ...model, api: "openai-responses" as const, provider: "openai" };
+		const wire = convertResponsesMessages(responsesModel, { messages }, new Set(["openai"]));
+		expect(wire.some((item) => item.type === "function_call_output")).toBe(false);
+	});
+
+	it("retains images and negative operation status in unpaired historical evidence", () => {
+		const orphan: ToolResultMessage = {
+			...toolResult("compacted"),
+			isError: true,
+			content: [{ type: "image", data: "image-bytes", mimeType: "image/png" }],
+		};
+		const result = transformMessages([orphan], { ...model, input: ["text", "image"] });
+		expect(result[0]).toMatchObject({
+			role: "user",
+			content: [expect.objectContaining({ type: "text" }), orphan.content[0]],
+		});
+		expect(JSON.stringify(result[0])).toContain("isError=true");
+	});
+
 	it("drops tool results for skipped errored assistant tool calls", () => {
 		const messages: Message[] = [assistant("error", [toolCall("dropped")]), toolResult("dropped"), nextUser];
 
