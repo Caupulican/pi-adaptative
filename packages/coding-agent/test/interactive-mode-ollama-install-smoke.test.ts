@@ -207,7 +207,9 @@ describe("#31 real interactive smoke — install-ollama confirm through Interact
 				.filter((part): part is { type: "text"; text: string } => part.type === "text")
 				.map((part) => part.text);
 			expect(assistantTexts).toEqual(["answered locally after install"]);
-			expect(harness.eventsOfType("warning")).toHaveLength(0);
+			expect(harness.eventsOfType("warning").map((event) => event.message)).toEqual([
+				"Optional integrations paused: System One classification is not configured.",
+			]);
 		} finally {
 			ollamaFaux.unregister();
 			harness.cleanup();

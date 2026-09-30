@@ -27,6 +27,8 @@ describe("native completion evidence wiring", () => {
 				warnings: [],
 			};
 			const controller = {
+				setVerificationHost: () => {},
+				verification: { status: () => ({ obligations: [] }) },
 				setEvaluationObserver: () => {},
 				setEvaluationIdleListener: () => {},
 				completionView: () => ({ view: { candidate: "current" }, repositoryOutcome: true }),

@@ -349,7 +349,15 @@ describe("claims against deliveries", () => {
 		});
 
 		it("preserves owner authority across an internal goal continuation", async () => {
-			harness = await createHarness();
+			const systemOneController = new SystemOneController({
+				store: new ExecutionStore({
+					run_id: "handoff-continuation",
+					objective: { request: "", normalized_goal: "", acceptance_criteria: [], constraints: [] },
+					repo: { root: "/repo", baseline_revision: "rev-0" },
+				}),
+				adapter: { evaluate: async () => ({ model: "jev-1.13.0", latency_ms: 1, answers: {} }) },
+			});
+			harness = await createHarness({ systemOneController });
 			const session = harness.session as unknown as {
 				_handoff: boolean;
 				_lastUserRequest: string;

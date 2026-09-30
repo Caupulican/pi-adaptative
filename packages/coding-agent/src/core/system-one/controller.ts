@@ -38,6 +38,7 @@ import {
 	directiveFromPreflight,
 	directiveFromToolReplan,
 	isSameLaneVerificationDirective,
+	SAME_LANE_VERIFICATION_REASON_CODE,
 	type SystemOneControlDirective,
 	sameLaneVerificationDirective,
 } from "./control-directive.ts";
@@ -59,6 +60,7 @@ import { StateProjector } from "./projector.ts";
 import { doubtReason, type SemanticEvaluationObserver } from "./semantic-evaluation-ledger.ts";
 import type { ExecutionState, ToolImpact, ValidationDecision, ValidationStage } from "./types.ts";
 import { CONSULT_GROUNDING_QUESTIONS, RESERVED_DECISION_KINDS, unsettledQuestionId } from "./unsettled-ladder.ts";
+import { VerificationCoordinator, type VerificationHost } from "./verification-coordinator.ts";
 import { hasRepositoryOutcome, type WorkDiff } from "./work-diff.ts";
 
 /** The four questions that only mean something when written rules were supplied. */
@@ -185,6 +187,7 @@ export class SystemOneController {
 	private truthSource?: () => CanonicalHydration | undefined;
 	private workDiffSource?: () => WorkDiff | undefined;
 	private pendingDirective?: SystemOneControlDirective;
+	readonly verification: VerificationCoordinator;
 
 	constructor(deps: SystemOneControllerDeps) {
 		this.store = deps.store;
@@ -196,6 +199,34 @@ export class SystemOneController {
 		this.evaluationObserver = deps.evaluationObserver;
 		this.truthSource = deps.truthSource;
 		this.workDiffSource = deps.workDiffSource;
+		let verificationRecord: ReturnType<VerificationHost["storage"]["readRecords"]>;
+		this.verification = new VerificationCoordinator(
+			{
+				storage: {
+					getBranchKey: () => this.store.runId,
+					readRecords: () => verificationRecord,
+					appendRecord: (_branch, record) => {
+						verificationRecord = record;
+					},
+				},
+				getReceiverId: () => this.store.runId,
+				getCandidate: () => ({
+					id: this.store.snapshot().repo.baseline_revision,
+					scope: this.store.snapshot().repo.root,
+					kind: "repository",
+				}),
+				captureFence: () => () => true,
+			},
+			async (state, questions, signal) => {
+				const result = await this.runStageValidation("evidence_check", state, "read_only", [], questions, signal);
+				this.sealDecision(result.decision, "verification_evaluated", result.evaluationId);
+				return { id: result.decision.id, answers: result.answers };
+			},
+		);
+	}
+
+	setVerificationHost(host: VerificationHost): void {
+		this.verification.bindHost(host);
 	}
 
 	/** Binds the session's evaluation sink; late-bound because the controller is built before the session. */
@@ -223,15 +254,24 @@ export class SystemOneController {
 	}
 
 	noteControlDirective(directive: SystemOneControlDirective): void {
-		if (isSameLaneVerificationDirective(this.pendingDirective) && !isSameLaneVerificationDirective(directive)) return;
+		if (isSameLaneVerificationDirective(directive)) {
+			this.verification.require(
+				directive.source,
+				directive.reasonCodes.filter((reason) => reason !== SAME_LANE_VERIFICATION_REASON_CODE),
+			);
+			this.pendingDirective = undefined;
+			return;
+		}
 		this.pendingDirective = directive;
 	}
 
 	peekControlDirective(): SystemOneControlDirective | undefined {
-		return this.pendingDirective;
+		return this.verification.directive() ?? this.pendingDirective;
 	}
 
 	consumeControlDirective(expected?: SystemOneControlDirective): SystemOneControlDirective | undefined {
+		// Execution acknowledges a route, never the finding that caused it.
+		if (this.verification.directive()) return undefined;
 		if (expected !== undefined && this.pendingDirective !== expected) return undefined;
 		const directive = this.pendingDirective;
 		this.pendingDirective = undefined;
@@ -1053,6 +1093,7 @@ export class SystemOneController {
 	 * and runs the terminal hook once. A duplicate proof does not transition or hook again.
 	 */
 	async commitTerminalCompletion(input: TerminalCompletionProof, options?: { signal?: AbortSignal }): Promise<void> {
+		this.verification.assertResolved();
 		const ref = terminalProofRef(input);
 		const classified = this.store.classifyTerminalProof(ref);
 		if (classified.outcome === "duplicate") return;
@@ -1077,6 +1118,7 @@ export class SystemOneController {
 				throw new TerminalHookRejectedError(hookResult.reasonCodes.join("; ") || hookResult.decision);
 			}
 		}
+		this.verification.assertResolved();
 		const noted = this.store.noteTerminalProof(ref);
 		if (noted.outcome === "duplicate") return;
 		if (noted.outcome === "rejected") {
@@ -1122,6 +1164,17 @@ export class SystemOneController {
 	): Promise<FinalCompletionVerdict> {
 		options?.signal?.throwIfAborted();
 		this.syncCanonicalTruth();
+		const pendingVerification = this.verification.status().obligations;
+		if (pendingVerification.length)
+			return {
+				verdict: "verify_more",
+				failed_gates: pendingVerification.map((finding) => ({
+					id: finding.id,
+					reason: finding.reason,
+					required_next_proof:
+						"Resolve with receiving-lane evidence through peer resolve before retrying completion.",
+				})),
+			};
 		// 1. Evaluate all deterministic gates first (R-020, R-035)
 		const detResult = evaluateDeterministicCompletionGates(this.store.snapshot());
 		for (const g of detResult.gates) {
@@ -1237,6 +1290,17 @@ export class SystemOneController {
 					});
 				}
 			}
+		}
+
+		if (finalVerdict.verdict === "complete" && this.verification.status().obligations.length) {
+			finalVerdict.verdict = "verify_more";
+			finalVerdict.failed_gates.push(
+				...this.verification.status().obligations.map((finding) => ({
+					id: finding.id,
+					reason: finding.reason,
+					required_next_proof: "Resolve receiving-lane verification.",
+				})),
+			);
 		}
 
 		// 6. Update state phase according to verdict. Omitted or explicit

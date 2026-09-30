@@ -78,6 +78,8 @@ export interface PeerReviewDependencies {
 	runCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** Receiving lead's canonical verification lane; never substitutes another reviewer. */
 	requestVerification(findings: PeerReport["findings"]): void;
+	/** Host candidate and receiving-lane fence, captured before any reviewer await. */
+	captureVerificationFence?(): () => void;
 }
 
 interface PeerOption {
@@ -149,6 +151,7 @@ export class PeerReviewController {
 				throw new Error("Invalid or oversized peer review request");
 			// Copy caller data before any asynchronous boundary; neither prompts nor settings can drift.
 			const input = { ...request };
+			const verificationFence = this.deps.captureVerificationFence?.();
 			const currentLead = this.deps.getLead();
 			if (!currentLead) throw new Error("No foreground model is available");
 			const lead = structuredClone(currentLead);
@@ -210,6 +213,7 @@ export class PeerReviewController {
 			)
 				throw new Error("Jev did not establish a stronger task-specific peer at confidence >= 0.95");
 			const recheck = (): void => {
+				verificationFence?.();
 				signal?.throwIfAborted();
 				if (this.deps.getJudge() !== judge)
 					throw new Error("System One binding changed; peer strength judgment is stale");

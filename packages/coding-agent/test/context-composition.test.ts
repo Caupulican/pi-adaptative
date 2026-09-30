@@ -322,11 +322,11 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// on goal and in create_goal's requirements, plus amend_goal and set_requirement_check.
 			// Measured growth over the prior surfaces (goal 330, create_goal 84): 162 tokens. The base
 			// subtotal removes only that measured growth, never the whole allowance.
-			// Explicit peer review is a requested default tool, measured at 197 tokens. Its own
-			// 210-token ceiling adds no headroom to the pre-existing surface: subtract its actual
-			// cost from the base subtotal and check the peer schema independently.
+			// Peer review now includes durable obligation inspection and proof resolution, measured
+			// at 333 tokens. Its 350-token ceiling budgets those requested verification actions;
+			// subtract its actual cost so unused peer capacity cannot hide unrelated schema growth.
 			const goalChecksAllowance = 162;
-			const peerAllowance = 210;
+			const peerAllowance = 350;
 			// Same live runtime framing: HEAD compact schema 358, canonical schema 828.
 			const canonicalSchemaAllowance = 470;
 			expect(

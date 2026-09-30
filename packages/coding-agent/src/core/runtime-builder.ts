@@ -153,8 +153,8 @@ import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import { systemOneAccessFromSession } from "./system-one/access.ts";
 import type { ClarificationDecisionEngine } from "./system-one/clarification.ts";
-import { sameLaneVerificationDirective } from "./system-one/control-directive.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
+import { createSessionVerificationHost, wrapToolWithVerification } from "./system-one/session-verification-host.ts";
 import { TaskDirectoryRuntime } from "./tasks/task-directory-runtime.ts";
 import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
 import type { TaskStepsState } from "./tasks/task-state.ts";
@@ -888,7 +888,14 @@ export class RuntimeBuilder {
 			const scoped = this._workerSessionPrivatePathEnvelope
 				? wrapToolWithEnvelopeScope(guarded, this._workerSessionPrivatePathEnvelope, this.deps.getCwd())
 				: guarded;
-			toolRegistry.set(scoped.name, scoped);
+			toolRegistry.set(
+				scoped.name,
+				wrapToolWithVerification(
+					scoped,
+					() => this.deps.getSystemOneController?.()?.verification,
+					() => this._taskDirectories.cwd,
+				),
+			);
 		}
 		this._toolRegistry = toolRegistry;
 
@@ -1079,6 +1086,12 @@ export class RuntimeBuilder {
 		includeAllExtensionTools?: boolean;
 		onError?: ExtensionErrorListener;
 	}): (() => void) | undefined {
+		this.deps.getSystemOneController?.()?.setVerificationHost(
+			createSessionVerificationHost(
+				() => this.deps.getSessionManager(),
+				() => this.deps.getCwd(),
+			),
+		);
 		const settingsManager = this.deps.getSettingsManager();
 		const autoResizeImages = settingsManager.getImageAutoResize();
 		const shellCommandPrefix = settingsManager.getShellCommandPrefix();
@@ -1165,6 +1178,7 @@ export class RuntimeBuilder {
 			},
 		};
 		this._sharedLaneToolOptions = {
+			getVerification: () => this.deps.getSystemOneController?.()?.verification,
 			bash: {
 				outputReduction,
 				...(shellCommandPrefix !== undefined ? { commandPrefix: shellCommandPrefix } : {}),
@@ -1223,18 +1237,21 @@ export class RuntimeBuilder {
 							isExhausted: (model) => this.deps.isModelExhausted(model),
 							getJudge: () => this.deps.getSystemOneController?.(),
 							runCompletion: (options) => this.deps.runIsolatedCompletion(options),
+							captureVerificationFence: () =>
+								this.deps.getSystemOneController?.()?.verification.captureReviewFence() ??
+								(() => {
+									throw new Error("System One verification is unavailable");
+								}),
 							requestVerification: (findings) =>
-								this.deps
-									.getSystemOneController?.()
-									?.noteControlDirective(
-										sameLaneVerificationDirective(
-											findings.map(
-												(finding) =>
-													`${finding.summary}: ${finding.requiredCheck}. Evidence: ${finding.evidence}`,
-											),
-										),
+								this.deps.getSystemOneController?.()?.verification.require(
+									"peer_review",
+									findings.map(
+										(finding) =>
+											`${finding.summary}: ${finding.requiredCheck}. Evidence: ${finding.evidence}`,
 									),
+								),
 						}),
+						() => this.deps.getSystemOneController?.()?.verification,
 					),
 				);
 			}
@@ -1348,7 +1365,13 @@ export class RuntimeBuilder {
 									typeSafeEvidenceStore.save(toolCallId, { completionDecision: decision }),
 							}
 						: {}),
-					getActiveVerificationIds: () => this.deps.getActiveVerificationIds?.() ?? [],
+					getActiveVerificationIds: () => [
+						...(this.deps.getActiveVerificationIds?.() ?? []),
+						...(this.deps
+							.getSystemOneController?.()
+							?.verification.status()
+							.obligations.map((item) => item.id) ?? []),
+					],
 					getSystemOneController: () => this.deps.getSystemOneController?.(),
 					getCwd: () => this._taskDirectories.cwd,
 					runRequirementCheck: (check, signal) =>

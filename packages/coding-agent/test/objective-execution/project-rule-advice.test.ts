@@ -9,6 +9,7 @@ import { SemanticProjectRuleController } from "../../src/core/project-rules/sema
 import { SessionProjectRules } from "../../src/core/project-rules/session-project-rules.ts";
 import { SystemOneController } from "../../src/core/system-one/controller.ts";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
+import type { SemanticVerificationSnapshot } from "../../src/core/system-one/verification-obligations.ts";
 import { tempDir } from "../temp-dir.ts";
 
 describe("postflight semantic outages", () => {
@@ -94,7 +95,27 @@ describe("postflight semantic outages", () => {
 				objective: { request: "Fix", normalized_goal: "Fix", acceptance_criteria: [] },
 				repo: { root: agentDir, baseline_revision: "base" },
 			}),
-			adapter: { evaluate: async () => ({ model: "fixture", answers: {}, latency_ms: 1 }) },
+			adapter: {
+				evaluate: async () => ({
+					model: "fixture",
+					answers: { verification_resolution_valid: { noul: 0.99 } },
+					latency_ms: 1,
+				}),
+			},
+		});
+		let candidate = "base";
+		let snapshot: SemanticVerificationSnapshot | undefined;
+		systemOne.setVerificationHost({
+			storage: {
+				getBranchKey: () => "verification",
+				readRecords: () => snapshot,
+				appendRecord: (_key, record) => {
+					snapshot = record;
+				},
+			},
+			getReceiverId: () => "verification",
+			getCandidate: () => ({ id: candidate, scope: agentDir, kind: "repository" }),
+			captureFence: () => () => true,
 		});
 		const routes: string[] = [];
 		const repair = vi.fn();
@@ -116,7 +137,45 @@ describe("postflight semantic outages", () => {
 					if (route.route === "deterministic_test") {
 						expect(route.reason_codes.join(" ")).toContain("candidate");
 						checks.push(defect);
-						if (checks.length === 2) defect = false;
+						const verification = systemOne.verification;
+						if (checks.length === 1) {
+							const callId = verification.beginCall("verification", "bash");
+							verification.finishCall({
+								callId,
+								tool: "bash",
+								args: { command: "reproduce" },
+								output: "FAIL: confirmed candidate",
+								succeeded: false,
+							});
+						} else if (checks.length === 2) {
+							const repairId = verification.beginCall("verification", "edit");
+							defect = false;
+							candidate = "fixed";
+							verification.finishCall({
+								callId: repairId,
+								tool: "edit",
+								args: { path: "owner.ts" },
+								output: "Fixed cause",
+								succeeded: true,
+							});
+							const recheckId = verification.beginCall("verification", "bash");
+							verification.finishCall({
+								callId: recheckId,
+								tool: "bash",
+								args: { command: "recheck" },
+								output: "PASS",
+								succeeded: !defect,
+							});
+							const status = verification.status();
+							const evidence = status.receipts.map((receipt, index) => ({
+								receiptId: receipt.id,
+								role: (["reproduction", "repair", "recheck"] as const)[index],
+							}));
+							for (const obligation of status.obligations)
+								expect(
+									await verification.resolve({ id: obligation.id, disposition: "repaired", evidence }),
+								).toMatchObject({ status: "resolved" });
+						}
 					}
 				},
 			},

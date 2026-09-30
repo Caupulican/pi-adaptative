@@ -49,6 +49,14 @@ export function isSameLaneVerificationDirective(
 	);
 }
 
+/** Execution permission and a completed executor do not settle a mandatory finding. */
+export function assertVerificationResolved(directive: SystemOneControlDirective | undefined): void {
+	if (isSameLaneVerificationDirective(directive))
+		throw new Error(
+			`same_lane_verification_required: ${directive?.reasonCodes.join("; ")}. Use peer obligations and resolve with receiving-lane reproduction, repair when confirmed, and recheck evidence.`,
+		);
+}
+
 export function directiveFromPreflight(route: SystemOnePreflightRoute): SystemOneControlDirective | undefined {
 	switch (route) {
 		case "allow":

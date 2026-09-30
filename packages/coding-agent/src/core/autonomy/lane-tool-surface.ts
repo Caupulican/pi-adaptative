@@ -26,6 +26,8 @@ import {
 } from "../secrets/credential-exposure-guard.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import { matchesResourceProfilePattern } from "../settings-manager.ts";
+import { wrapToolWithVerification } from "../system-one/session-verification-host.ts";
+import type { VerificationCoordinator } from "../system-one/verification-coordinator.ts";
 import { READ_ONLY_SHELL_TOOL_NAMES } from "../tool-capability-policy.ts";
 import { type BashToolOptions, createBashTool } from "../tools/bash.ts";
 import { createEditTool, type EditToolOptions } from "../tools/edit.ts";
@@ -57,6 +59,8 @@ import type { WorkerToolAdapterRegistry } from "./worker-tool-adapter-registry.t
  * owner's credentials.
  */
 export interface SharedLaneToolOptions {
+	/** The parent owns unresolved findings even when a worker executes concrete tools. */
+	readonly getVerification?: () => VerificationCoordinator | undefined;
 	readonly bash?: Pick<
 		BashToolOptions,
 		| "outputReduction"
@@ -262,12 +266,20 @@ function createLaneTools(
 			tool = materialized.tool;
 		}
 		// A lane's private-path boundary is authority, not visibility: it denies before running.
-		const guarded = wrapToolWithCredentialExposureGuard(
+		const privateGuarded = wrapToolWithCredentialExposureGuard(
 			bindTool ? bindTool(tool) : tool,
 			cwd,
 			privatePathBoundary,
 			"deny",
 		);
+		const guarded = shared.getVerification
+			? wrapToolWithVerification(
+					privateGuarded,
+					shared.getVerification,
+					() => cwd,
+					`worker:${shellSessionKey ?? mutationScope}`,
+				)
+			: privateGuarded;
 		return [
 			wrapToolExecution(guarded, (executor) => ({
 				...executor,

@@ -381,10 +381,14 @@ describe("AgentSession retry and event characterization", () => {
 		// No custom pair for the root reflection cue: it is request-local (never committed to durable
 		// history, so never announced as a message), and this first turn does not even carry it on the
 		// wire — a cue rides the first request AFTER a unit of work ends.
+		expect(harness.eventsOfType("warning").map((event) => event.message)).toEqual([
+			"Optional integrations paused: System One classification is not configured.",
+		]);
 		expect(normalizeEventOrder(harness.events)).toEqual([
 			"message_start:user",
 			"routing_start",
 			"routing_end",
+			"warning",
 			"agent_start",
 			"turn_start",
 			"message_end:user",

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { SystemOneController } from "../../src/core/system-one/controller.ts";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
+import type { SemanticVerificationSnapshot } from "../../src/core/system-one/verification-obligations.ts";
 
 const passingAnswers = {
 	outcomes_achieved: true,
@@ -13,6 +14,7 @@ const passingAnswers = {
 	hidden_assumption: false,
 	plausible_regression_not_tested: false,
 	conclusion_overstates_evidence: false,
+	verification_resolution_valid: { noul: 0.99 },
 };
 
 describe("completion advice lifecycle", () => {
@@ -72,6 +74,20 @@ describe("completion advice lifecycle", () => {
 				}),
 			},
 		});
+		let candidate = "base";
+		let snapshot: SemanticVerificationSnapshot | undefined;
+		controller.setVerificationHost({
+			storage: {
+				getBranchKey: () => "verify",
+				readRecords: () => snapshot,
+				appendRecord: (_key, record) => {
+					snapshot = record;
+				},
+			},
+			getReceiverId: () => "verify",
+			getCandidate: () => ({ id: candidate, scope: "/repo", kind: "repository" }),
+			captureFence: () => () => true,
+		});
 		const rejected = await controller.executeCompletionTransaction();
 		expect(rejected.verdict).toBe("verify_more");
 		expect(rejected.failed_gates).toEqual(
@@ -92,10 +108,49 @@ describe("completion advice lifecycle", () => {
 		const replacement = { ...priority!, reasonCodes: ["same_lane_verification_required", "fresh_finding"] };
 		controller.noteControlDirective(replacement);
 		expect(controller.consumeControlDirective(priority)).toBeUndefined();
-		expect(controller.peekControlDirective()).toBe(replacement);
+		expect(controller.verification.status().obligations).toHaveLength(2);
+		expect(controller.peekControlDirective()?.reasonCodes.join(" ")).toContain("fresh_finding");
 		expect((await controller.executeCompletionTransaction()).verdict).toBe("verify_more");
-		controller.consumeControlDirective(controller.peekControlDirective());
+		expect(controller.consumeControlDirective(controller.peekControlDirective())).toBeUndefined();
 		revised = true;
+		// A clean later evaluation or acknowledged executor is insufficient: prove the repair.
+		expect((await controller.executeCompletionTransaction()).verdict).toBe("verify_more");
+		const verification = controller.verification;
+		const reproduction = verification.beginCall("verify", "bash");
+		verification.finishCall({
+			callId: reproduction,
+			tool: "bash",
+			args: { command: "reproduce" },
+			output: "Confirmed defect",
+			succeeded: false,
+		});
+		const repair = verification.beginCall("verify", "edit");
+		candidate = "fixed";
+		verification.finishCall({
+			callId: repair,
+			tool: "edit",
+			args: { path: "owner.ts" },
+			output: "Fixed cause",
+			succeeded: true,
+		});
+		const recheck = verification.beginCall("verify", "bash");
+		verification.finishCall({
+			callId: recheck,
+			tool: "bash",
+			args: { command: "recheck" },
+			output: "PASS: outcome verified",
+			succeeded: true,
+		});
+		const status = verification.status();
+		const evidence = status.receipts.map((receipt, index) => ({
+			receiptId: receipt.id,
+			role: (["reproduction", "repair", "recheck"] as const)[index],
+		}));
+		for (const obligation of status.obligations) {
+			expect(await verification.resolve({ id: obligation.id, disposition: "repaired", evidence })).toMatchObject({
+				status: "resolved",
+			});
+		}
 		expect((await controller.executeCompletionTransaction()).verdict).toBe("complete");
 	});
 

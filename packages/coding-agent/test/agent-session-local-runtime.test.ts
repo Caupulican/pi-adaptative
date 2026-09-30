@@ -536,7 +536,9 @@ describe("AgentSession local runtime readiness — end to end through prompt()",
 				.filter((part): part is { type: "text"; text: string } => part.type === "text")
 				.map((part) => part.text);
 			expect(assistantTexts).toEqual(["answered locally"]);
-			expect(harness.eventsOfType("warning")).toHaveLength(0);
+			expect(harness.eventsOfType("warning").map((event) => event.message)).toEqual([
+				"Optional integrations paused: System One classification is not configured.",
+			]);
 			expect(serveEnv?.OLLAMA_NUM_PARALLEL).toBe("1");
 			expect(serveEnv?.OLLAMA_KEEP_ALIVE).toBe("10m");
 			expect(serveEnv?.OLLAMA_MODELS?.replaceAll("\\", "/")).toContain("models/ollama");

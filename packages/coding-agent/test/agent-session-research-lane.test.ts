@@ -263,6 +263,7 @@ describe("AgentSession research lane (idle trigger)", () => {
 			settings: {
 				researchLane: { enabled: true, model: "faux/research-model" },
 				autonomy: { mode: "balanced", goalAutoContinue: false },
+				compaction: { enabled: false },
 			},
 		});
 		try {
@@ -271,8 +272,11 @@ describe("AgentSession research lane (idle trigger)", () => {
 			harness.setResponses([
 				fauxAssistantMessage("turn done"),
 				(_context, _options, _state, model) => {
-					laneModelId = model.id;
-					return fauxAssistantMessage(RESEARCH_JSON);
+					if (model.id === "research-model") {
+						laneModelId = model.id;
+						return fauxAssistantMessage(RESEARCH_JSON);
+					}
+					return fauxAssistantMessage("turn done");
 				},
 			]);
 
@@ -282,6 +286,7 @@ describe("AgentSession research lane (idle trigger)", () => {
 			expect(laneModelId).toBe("research-model");
 			expect(researchLaneRecords(harness)).toHaveLength(1);
 			expect(harness.session.getEvidenceBundleSnapshot()?.query).toBe("goal:g1 requirements:req-1");
+			expect(harness.getPendingResponseCount()).toBe(0);
 		} finally {
 			harness.cleanup();
 		}
@@ -402,7 +407,10 @@ describe("AgentSession research lane (idle trigger)", () => {
 
 			await vi.advanceTimersByTimeAsync(10);
 
-			expect(warnings).toEqual(["Research lane failed: research settings unavailable"]);
+			expect(warnings).toEqual([
+				"Optional integrations paused: System One classification is not configured.",
+				"Research lane failed: research settings unavailable",
+			]);
 			expect(researchLaneRecords(harness)).toHaveLength(0);
 			expect(harness.session.nativeActivity.isSettled()).toBe(true);
 		} finally {

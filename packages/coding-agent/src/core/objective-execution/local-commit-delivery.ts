@@ -23,7 +23,13 @@ export function readHeadBranch(cwd: string): string | undefined {
 
 const LEADING_WRAPPERS = new Set(["sudo", "command", "exec", "nohup", "time", "nice", "doas"]);
 
-function gitSubcommandIsPush(tokens: readonly string[]): boolean {
+interface GitInvocation {
+	push: boolean;
+	changesRepositoryTarget: boolean;
+}
+
+function parseGitInvocation(tokens: readonly string[]): GitInvocation {
+	let changesRepositoryTarget = false;
 	let index = 0;
 	while (index < tokens.length && LEADING_WRAPPERS.has((tokens[index] ?? "").toLowerCase())) {
 		const wrapper = (tokens[index] ?? "").toLowerCase();
@@ -35,7 +41,7 @@ function gitSubcommandIsPush(tokens: readonly string[]): boolean {
 			}
 		}
 	}
-	if (!isGitExecutableToken(tokens[index] ?? "")) return false;
+	if (!isGitExecutableToken(tokens[index] ?? "")) return { push: false, changesRepositoryTarget };
 	index += 1;
 	while (index < tokens.length) {
 		const token = tokens[index] ?? "";
@@ -43,24 +49,50 @@ function gitSubcommandIsPush(tokens: readonly string[]): boolean {
 			index += 1;
 			break;
 		}
-		if (
-			token === "-c" ||
-			token === "-C" ||
-			token === "--git-dir" ||
-			token === "--work-tree" ||
-			token === "--namespace" ||
-			token === "--exec-path"
-		) {
+		if (token === "-C" || token === "--git-dir" || token === "--work-tree" || token === "--namespace") {
+			changesRepositoryTarget = true;
 			index += 2;
+			continue;
+		}
+		if (token === "-c") {
+			changesRepositoryTarget = true;
+			index += 2;
+			continue;
+		}
+		if (token === "--exec-path") {
+			index += 2;
+			continue;
+		}
+		if (
+			(token.startsWith("-C") && token.length > 2) ||
+			token.startsWith("--git-dir=") ||
+			token.startsWith("--work-tree=") ||
+			token.startsWith("--namespace=")
+		) {
+			changesRepositoryTarget = true;
+			index += 1;
+			continue;
+		}
+		if (token.startsWith("-c") && token.length > 2) {
+			changesRepositoryTarget = true;
+			index += 1;
+			continue;
+		}
+		if (token.startsWith("--exec-path=")) {
+			index += 1;
 			continue;
 		}
 		if (token.startsWith("-")) {
 			index += 1;
 			continue;
 		}
-		return token.toLowerCase() === "push";
+		return { push: token.toLowerCase() === "push", changesRepositoryTarget };
 	}
-	return false;
+	return { push: false, changesRepositoryTarget };
+}
+
+function gitSubcommandIsPush(tokens: readonly string[]): boolean {
+	return parseGitInvocation(tokens).push;
 }
 
 function withoutQuotes(command: string): string {
@@ -92,6 +124,44 @@ export function toolCallPushesGit(toolName: string, args: unknown): boolean {
 			: [];
 		if (!executable) return false;
 		return gitSubcommandIsPush([executable, ...processArgs]);
+	}
+	return false;
+}
+
+const SHELL_CWD_CHANGERS = new Set(["cd", "pushd", "popd", "chdir", "set-location", "sl", "source", ".", "eval"]);
+
+function segmentChangesWorkingDirectory(tokens: readonly string[]): boolean {
+	let index = 0;
+	while (index < tokens.length && (tokens[index] ?? "").toLowerCase() === "command") index += 1;
+	return SHELL_CWD_CHANGERS.has((tokens[index] ?? "").toLowerCase());
+}
+
+/**
+ * True only when a tool call definitely pushes from its inherited current checkout.
+ * Alternate Git directories and shell commands that may have changed cwd are left to scoped review.
+ */
+export function toolCallPushesGitAtCwd(toolName: string, args: unknown): boolean {
+	const record = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+	const name = toolName.toLowerCase();
+	if (name === "run_process" || name === "run-process") {
+		if (Object.hasOwn(record, "cwd")) return false;
+		const executable = typeof record.executable === "string" ? record.executable : "";
+		const processArgs = Array.isArray(record.args)
+			? record.args.filter((item): item is string => typeof item === "string")
+			: [];
+		const invocation = parseGitInvocation([executable, ...processArgs]);
+		return invocation.push && !invocation.changesRepositoryTarget;
+	}
+	if (name !== "bash" && name !== "shell" && name !== "powershell") return false;
+	if (typeof record.command !== "string") return false;
+	const lexed = lexShellCommand(record.command);
+	if (!lexed.ok) return false;
+	for (let index = 0; index < lexed.segments.length; index += 1) {
+		const segment = lexed.segments[index] ?? [];
+		const invocation = parseGitInvocation(segment);
+		if (!invocation.push) continue;
+		if (invocation.changesRepositoryTarget) return false;
+		return !lexed.segments.slice(0, index).some(segmentChangesWorkingDirectory);
 	}
 	return false;
 }

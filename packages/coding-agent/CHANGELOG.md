@@ -7,12 +7,14 @@
 
 ### Changed
 
+- Updated context budget checks to account separately for the canonical Jev schema and peer verification actions, preserving the prior budget for other prompt and tool overhead.
 - Unified native subagent and collaboration execution discipline: keep admitted model and effort fixed, complete requested scope, ask only for missing input or authority, and report a code check result or why no check could run before stopping.
 - Updated the unconfigured Codex provider default to GPT-6.1 Sol; explicit and saved model selections retain precedence.
 - Fresh unbound native workers now receive one Jev selection among host-approved model and effort profiles, preserving authored settings, permissions, immutable reuse and replay, and the host default when no valid selection is available.
 
 ### Fixed
 
+- Made mandatory peer and System One findings durable and proof-bound: root and worker execution hold affected progress, delivery rechecks each effect, and only fresh receiving-lane evidence plus a decisive judgment can resolve findings.
 - Preserved classified optional integration intent across task follow-ups and session reopening, while honoring revocation, pausing during outages and fencing cancelled or superseded requests.
 - Retried temporary System One transport outages within one bounded provider retry budget; permanent failures, invalid judgments and cancellation do not authorize integrations.
 - Unified advertised Jev inputs with the canonical validation schema and added bounded field diagnostics before credential lookup or provider calls.

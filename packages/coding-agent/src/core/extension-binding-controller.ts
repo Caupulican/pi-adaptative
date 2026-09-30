@@ -47,6 +47,7 @@ import type { PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import type { ResourceProfileSettings, SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
+import { VERIFICATION_OBLIGATIONS_CUSTOM_TYPE } from "./system-one/verification-obligations.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE } from "./tool-applicability-gate.ts";
 
 export interface ExtensionBindingControllerDeps {
@@ -277,6 +278,8 @@ export class ExtensionBindingController {
 					});
 				},
 				appendEntry: (customType, data) => {
+					if (customType === VERIFICATION_OBLIGATIONS_CUSTOM_TYPE)
+						throw new Error("Mandatory verification is a host-owned evidence checkpoint");
 					if (customType === OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)
 						throw new Error("Optional integration intent is a host-owned classification checkpoint");
 					this.deps.getSessionManager().appendCustomEntry(customType, data);

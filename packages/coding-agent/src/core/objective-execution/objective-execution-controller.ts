@@ -50,6 +50,7 @@ import {
 	captureCandidateSnapshot,
 } from "../system-one/candidate-snapshot.ts";
 import {
+	assertVerificationResolved,
 	isSameLaneVerificationDirective,
 	type SystemOneControlDirective,
 	sameLaneVerificationDirective,
@@ -1692,6 +1693,7 @@ export class ObjectiveExecutionController {
 								? applyLocalCommitCharter(activeCharter)
 								: activeCharter;
 						const sideEffects = await executeDelivery({
+							beforeEffect: () => assertVerificationResolved(this.deps.systemOne?.peekControlDirective?.()),
 							charter: deliveryCharter,
 							git: this.deps.gitExecutor,
 							release: this.deps.releaseExecutor,
@@ -1704,6 +1706,17 @@ export class ObjectiveExecutionController {
 							worktreeClean,
 							expectedArtifactDigest: packageArtifact?.integrity,
 						});
+						if (isSameLaneVerificationDirective(this.deps.systemOne?.peekControlDirective?.())) {
+							const reasons = this.deps.systemOne?.peekControlDirective?.()?.reasonCodes ?? [];
+							return {
+								status: "incomplete",
+								reasonCodes: [...reasons],
+								cycleCount: this.cycleCounter,
+								deliveryBundle: await this.buildBundle(objectiveId, "incomplete", runtime, {
+									reasonCodes: reasons,
+								}),
+							};
+						}
 						const requiredReceiptFailed = deliveryReceiptFailed(sideEffects);
 
 						const bundleBase =

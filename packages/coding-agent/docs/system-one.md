@@ -50,7 +50,7 @@ event:
   is idle; a worker's attempt is interrupted, the directive queued on its mailbox, and the attempt
   resumed.
 
-The tool gate does not ask System One about a single call. Each admitted call is recorded with an intent
+Ordinary tool admission does not ask System One about a single call. Each admitted call is recorded with an intent
 built from its own arguments (`bash command=…`, `edit path=…`) and its terminal (`succeeded` or
 `failed`) is written on the same `call_id`, so postflight judges the step's relevance and scope over
 real events. Preflight and postflight System One packs run only with a live objective; the claim check and
@@ -138,18 +138,51 @@ The strength question carries the complete objective, stage and model facts with
 4,000-character routing budget; oversized metadata is refused explicitly. The peer receives the full
 accepted artifact and evidence. The same model id under another provider is not a distinct peer.
 The host fixes the peer and effort for the call, rechecks admission before the provider request,
-and rejects results if the lead, peer configuration, pool, authentication or quota changes.
+and rejects results if the lead, peer configuration, pool, authentication, quota, reviewed candidate
+or session branch changes.
 
 The bounded response contains a snapshot digest, lead and peer settings, judgment provenance,
 findings and limitations. Each finding must quote supplied evidence and specify a reproducible check.
-Findings request verification in the receiving lead's own lane through the existing System One
-directive: reproduce, revise confirmed failures, and recheck before affected work continues.
+Findings open durable obligations in the receiving lead's own lane: reproduce, revise confirmed
+failures, and recheck before affected work continues. The session branch journal retains the full
+bounded finding, candidate identity and scope across reopening. A trusted fork carries active
+findings into its receiving lane and discards parent proof receipts.
 `no_findings` never clears an earlier unresolved directive or certifies completion. Missing evidence,
 malformed or truncated output, cancellation and service failures grant no validation. Reported peer
 usage is retained even when its response is unusable. Permissions and approval remain host-owned.
 
-Pinned by the [peer policy tests](../test/peer-review.test.ts) and
-[native session integration tests](../test/suite/agent-session-peer.test.ts).
+Use `peer` with `{"action":"obligations"}` to inspect pending findings and host-recorded tool
+receipts. Resolve one with `action: "resolve"` and a `resolution` object:
+
+| Field | Required content |
+|---|---|
+| `id` | Pending obligation ID. |
+| `disposition` | `rejected` or `repaired`. |
+| `evidence` | Receipt IDs with roles `reproduction`, `repair` or `recheck`. |
+
+A rejection needs a passing reproduction on the current candidate. A repair needs ordered
+reproduction, successful repair steps and a passing final recheck on the repaired candidate.
+The host verifies the receiving lane, candidate identities, order and complete receipt payloads.
+System One then judges whether those exact receipts establish the requested disposition and cover
+the finding's required checks, with probability at least 0.95. This action never dispatches another
+peer. Prose, a successful executor return or a later clean review cannot discharge an obligation.
+Denied proof cannot be rerolled by running unrelated tools; fresh relevant evidence is required.
+
+While findings remain open, the concrete root and worker tool executors gate affected progress,
+including YOLO calls. A same-checkout Git push is refused directly. Other operations require a
+decisive judgment that they investigate, reproduce, repair or recheck in the receiving lane, or
+are unrelated to the finding's scope. Native evidence reads and obligation inspection remain
+available during evaluator outages. Classification can retry on the next operation; resolution
+can retry the same proof after an outage. Outages retain their actual cause and never resolve a
+finding. Typed delivery rechecks obligations immediately before each external effect.
+
+The journal bounds active findings to 32 and receipts to the latest 64 calls. Truncated or evicted
+receipts cannot establish resolution; gather fresh proof within that evidence window.
+
+Pinned by the [peer policy tests](../test/peer-review.test.ts),
+[native session integration tests](../test/suite/agent-session-peer.test.ts),
+[delivery and recovery regressions](../test/suite/mandatory-verification-delivery.test.ts) and
+[verification lifecycle tests](../test/system-one/verification-obligations.test.ts).
 
 ## The decision ledger
 

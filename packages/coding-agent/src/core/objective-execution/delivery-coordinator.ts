@@ -57,6 +57,8 @@ export interface DeliveryReleaseExecutor {
 }
 
 export interface DeliveryExecutionInput {
+	/** Live verification constraint, independent of frozen delivery authority; checked per effect. */
+	readonly beforeEffect?: () => void;
 	readonly charter?: ExecutionCharter;
 	readonly git?: DeliveryGitExecutor;
 	readonly release?: DeliveryReleaseExecutor;
@@ -134,6 +136,7 @@ export async function executeDelivery(input: DeliveryExecutionInput): Promise<De
 								signal: input.signal,
 							}
 						: undefined;
+					input.beforeEffect?.();
 					const commitRes = await input.git.commit(request);
 					if (commitRes && typeof commitRes === "object" && "sha" in commitRes && commitRes.sha) {
 						reportedCommitSha = String(commitRes.sha);
@@ -161,6 +164,7 @@ export async function executeDelivery(input: DeliveryExecutionInput): Promise<De
 			if (!tagTargetSha) tagError = "tag_target_unspecified";
 			else {
 				try {
+					input.beforeEffect?.();
 					const tagRes = await input.git.tag(intent.git.tag.name, input.signal, tagTargetSha);
 					if (tagRes && typeof tagRes === "object" && "tag" in tagRes && tagRes.tag)
 						reportedTag = String(tagRes.tag);
@@ -169,6 +173,7 @@ export async function executeDelivery(input: DeliveryExecutionInput): Promise<De
 						if (!intent.git.tag.remote) tagError = "tag_push_upstream_unavailable";
 						else if (!input.git.pushTag) tagError = "tag_push_unavailable";
 						else {
+							input.beforeEffect?.();
 							const pushed = await input.git.pushTag(
 								{ remote: intent.git.tag.remote, name: intent.git.tag.name, expectedSha: tagTargetSha },
 								input.signal,
@@ -192,6 +197,7 @@ export async function executeDelivery(input: DeliveryExecutionInput): Promise<De
 		else if (!input.git?.push) pushError = "Git push unavailable";
 		else {
 			try {
+				input.beforeEffect?.();
 				const pushRes = await input.git.push(frozen, input.signal);
 				if (pushRes && typeof pushRes === "object" && "ref" in pushRes && pushRes.ref) {
 					reportedPushRef = String(pushRes.ref);
@@ -212,6 +218,7 @@ export async function executeDelivery(input: DeliveryExecutionInput): Promise<De
 		else if (!input.release?.publish) publishError = "Package publish unavailable";
 		else {
 			try {
+				input.beforeEffect?.();
 				const pubRes = await input.release.publish();
 				if (pubRes && typeof pubRes === "object" && "id" in pubRes && pubRes.id) {
 					reportedPublicationId = String(pubRes.id);
@@ -230,6 +237,7 @@ export async function executeDelivery(input: DeliveryExecutionInput): Promise<De
 		} else {
 			for (const target of charter.release.deploy_targets) {
 				try {
+					input.beforeEffect?.();
 					const depRes = await input.release.deploy(target);
 					if (depRes && typeof depRes === "object" && "id" in depRes && depRes.id) {
 						reportedDeploys.push({ target, id: String(depRes.id) });

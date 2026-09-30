@@ -6,6 +6,8 @@ import {
 	refuseLocalPush,
 	resolveDeliveryBinding,
 	resolveRuleAuthority,
+	toolCallPushesGit,
+	toolCallPushesGitAtCwd,
 } from "../src/core/objective-execution/local-commit-delivery.ts";
 import { ToolGateController } from "../src/core/tool-gate-controller.ts";
 
@@ -37,6 +39,25 @@ describe("local commit delivery", () => {
 		expect(commandPushesGit('git commit -m "do not push"')).toBe(false);
 		expect(commandPushesGit("echo git push")).toBe(false);
 		expect(commandPushesGit("git status")).toBe(false);
+	});
+
+	it("scopes deterministic push recognition to the current checkout", () => {
+		expect(toolCallPushesGitAtCwd("bash", { command: "git push origin HEAD" })).toBe(true);
+		expect(toolCallPushesGitAtCwd("bash", { command: "sudo git push origin HEAD" })).toBe(true);
+		expect(toolCallPushesGitAtCwd("bash", { command: "git -C /other-repo push" })).toBe(false);
+		expect(toolCallPushesGit("bash", { command: "git -C /other-repo push" })).toBe(true);
+		expect(toolCallPushesGitAtCwd("bash", { command: "git -C/other-repo push" })).toBe(false);
+		expect(toolCallPushesGitAtCwd("bash", { command: "git -C '/other repo' push" })).toBe(false);
+		expect(toolCallPushesGitAtCwd("bash", { command: "git --git-dir=/other/.git push" })).toBe(false);
+		expect(toolCallPushesGitAtCwd("bash", { command: "git --work-tree /other push" })).toBe(false);
+		expect(toolCallPushesGitAtCwd("bash", { command: "git --namespace other push" })).toBe(false);
+		expect(toolCallPushesGitAtCwd("bash", { command: "cd /other-repo && git push" })).toBe(false);
+		expect(toolCallPushesGitAtCwd("bash", { command: "git status; pushd /other-repo; git push" })).toBe(false);
+		expect(toolCallPushesGitAtCwd("bash", { command: "echo 'cd /other-repo'; git push" })).toBe(true);
+		expect(toolCallPushesGitAtCwd("bash", { command: "git commit -m 'git push'" })).toBe(false);
+		expect(toolCallPushesGitAtCwd("bash", { command: 'git "$(pwd)" push' })).toBe(false);
+		expect(toolCallPushesGitAtCwd("run_process", { executable: "git", args: ["push"], cwd: "/other" })).toBe(false);
+		expect(toolCallPushesGitAtCwd("run_process", { executable: "git", args: ["push"] })).toBe(true);
 	});
 
 	it("refuses the push for a bound policy and allows it when the policy is off", () => {
