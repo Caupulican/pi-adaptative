@@ -26,10 +26,25 @@ afterEach(() => {
 	for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-describe("packaged TypeSafe reviewer", () => {
+describe("packaged System One tool", () => {
+	it("exposes the provider-neutral systemone tool name without a legacy tool alias", async () => {
+		const harness = await createHarness();
+		try {
+			expect(harness.session.getActiveToolNames()).toContain("systemone");
+			expect(harness.session.getToolDefinition("systemone")).toMatchObject({
+				name: "systemone",
+				label: "System One",
+			});
+			expect(harness.session.getActiveToolNames()).not.toContain("typesafe_review");
+			expect(harness.session.getToolDefinition("typesafe_review")).toBeUndefined();
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
 	it.each([false, true])("retrieves inherited review evidence only for a real fork: fork=%s", async (fork) => {
 		const harness = await createHarness({
-			initialActiveToolNames: ["typesafe_review"],
+			initialActiveToolNames: ["systemone"],
 			settings: { workerDelegation: { orchestrationProfile: undefined } },
 		});
 		try {
@@ -61,7 +76,7 @@ describe("packaged TypeSafe reviewer", () => {
 			});
 			try {
 				const result = await session
-					.getToolDefinition("typesafe_review")!
+					.getToolDefinition("systemone")!
 					.execute("read-inherited", { action: "evidence", id: ref.id }, undefined, undefined, {} as never);
 				if (fork) {
 					expect(result).not.toMatchObject({ isError: true });
@@ -71,12 +86,12 @@ describe("packaged TypeSafe reviewer", () => {
 					});
 				} else expect(result).toMatchObject({ isError: true });
 				harness.setResponses([
-					fauxAssistantMessage(fauxToolCall("typesafe_review", { action: "evidence", id: ref.id }), {
+					fauxAssistantMessage(fauxToolCall("systemone", { action: "evidence", id: ref.id }), {
 						stopReason: "toolUse",
 					}),
 					(context) => {
 						const reviewed = context.messages.find(
-							(message) => message.role === "toolResult" && message.toolName === "typesafe_review",
+							(message) => message.role === "toolResult" && message.toolName === "systemone",
 						);
 						expect(reviewed, JSON.stringify(reviewed)).toMatchObject({ isError: !fork });
 						if (fork) expect(JSON.stringify(reviewed)).toContain("inherited adverse evidence");
@@ -119,7 +134,7 @@ describe("packaged TypeSafe reviewer", () => {
 					candidates: [{ provider: model.provider, modelId: model.id, thinkingLevel: "off" }],
 				},
 				capabilityCeiling: capabilities,
-				toolNames: ["typesafe_review"],
+				toolNames: ["systemone"],
 				resourceProfileNames: [],
 				dispatchProfileIds: [],
 				budget: { maxWallClockMs: 5_000, maxToolCalls: 4, maxTokens: 8_192, maxCostUsd: 1 },
@@ -156,7 +171,7 @@ describe("packaged TypeSafe reviewer", () => {
 				harness.authStorage.set("typesafe", { type: "api_key", key: "fixture-key" });
 				harness.setResponses([
 					fauxAssistantMessage(
-						fauxToolCall("typesafe_review", {
+						fauxToolCall("systemone", {
 							action: "review",
 							review: {
 								state: "fixture",
@@ -177,7 +192,7 @@ describe("packaged TypeSafe reviewer", () => {
 				expect(fetcher).toHaveBeenCalledOnce();
 				expect(
 					harness.session.messages.find(
-						(message) => message.role === "toolResult" && message.toolName === "typesafe_review",
+						(message) => message.role === "toolResult" && message.toolName === "systemone",
 					),
 				).toMatchObject({ isError: false, details: { accepted: true } });
 			} finally {
@@ -192,8 +207,8 @@ describe("packaged TypeSafe reviewer", () => {
 			const harness = await createHarness({ models: [{ id: "reviewer-client", contextWindow }] });
 			try {
 				harness.authStorage.set("typesafe", { type: "api_key", key: "fixture-key" });
-				expect(harness.session.getActiveToolNames()).toContain("typesafe_review");
-				const definition = harness.session.getToolDefinition("typesafe_review");
+				expect(harness.session.getActiveToolNames()).toContain("systemone");
+				const definition = harness.session.getToolDefinition("systemone");
 				if (!definition) throw new Error("Missing reviewer");
 				expect(
 					await definition.execute("status", { action: "status" }, undefined, undefined, {} as never),
@@ -204,11 +219,11 @@ describe("packaged TypeSafe reviewer", () => {
 		},
 	);
 	it("honors explicit exclusions even when Jev is configured", async () => {
-		const harness = await createHarness({ excludedToolNames: ["typesafe_review"] });
+		const harness = await createHarness({ excludedToolNames: ["systemone"] });
 		try {
 			harness.authStorage.set("typesafe", { type: "api_key", key: "fixture-key" });
-			expect(harness.session.getActiveToolNames()).not.toContain("typesafe_review");
-			expect(harness.session.getToolDefinition("typesafe_review")).toBeUndefined();
+			expect(harness.session.getActiveToolNames()).not.toContain("systemone");
+			expect(harness.session.getToolDefinition("systemone")).toBeUndefined();
 		} finally {
 			await harness.cleanup();
 		}
@@ -221,13 +236,13 @@ describe("packaged TypeSafe reviewer", () => {
 		"persists native review evidence, verdict and usage through the agent loop with hook=$withHook HTTP=$status",
 		async ({ withHook, status }) => {
 			const harness = await createHarness({
-				initialActiveToolNames: ["typesafe_review"],
+				initialActiveToolNames: ["systemone"],
 				extensionFactories: [
 					(pi) => {
 						pi.on("tool_call", (event) => {
 							if (
 								withHook &&
-								event.toolName === "typesafe_review" &&
+								event.toolName === "systemone" &&
 								typeof event.input.review === "object" &&
 								event.input.review !== null
 							) {
@@ -258,7 +273,7 @@ describe("packaged TypeSafe reviewer", () => {
 				harness.authStorage.set("typesafe", { type: "api_key", key: "fixture-key" });
 				harness.setResponses([
 					fauxAssistantMessage(
-						fauxToolCall("typesafe_review", {
+						fauxToolCall("systemone", {
 							action: "review",
 							review: {
 								state: { fixture: "red square" },
@@ -277,7 +292,7 @@ describe("packaged TypeSafe reviewer", () => {
 				]);
 				await harness.session.prompt("Verify the fixture with Jev.");
 				const result = harness.session.messages.find(
-					(message) => message.role === "toolResult" && message.toolName === "typesafe_review",
+					(message) => message.role === "toolResult" && message.toolName === "systemone",
 				);
 				expect(result).toMatchObject({
 					role: "toolResult",
@@ -295,7 +310,7 @@ describe("packaged TypeSafe reviewer", () => {
 						.find((entry) => entry.type === "message" && entry.message.role === "toolResult"),
 				).toMatchObject({
 					message: {
-						toolName: "typesafe_review",
+						toolName: "systemone",
 						details: { accepted: status === 200 },
 						usage: { totalTokens: 110 },
 					},
@@ -330,7 +345,7 @@ describe("packaged TypeSafe reviewer", () => {
 		const authStorage = AuthStorage.create(authPath);
 		const loader = new DefaultResourceLoader({ cwd, agentDir });
 		await loader.reload();
-		expect(loader.getSkills().skills.find((skill) => skill.name === "typesafe-review")).toBeDefined();
+		expect(loader.getSkills().skills.find((skill) => skill.name === "systemone")).toBeDefined();
 		const { session } = await createAgentSession({
 			cwd,
 			agentDir,
@@ -340,8 +355,8 @@ describe("packaged TypeSafe reviewer", () => {
 			sessionManager: SessionManager.inMemory(),
 		});
 		try {
-			expect(session.getActiveToolNames()).toContain("typesafe_review");
-			const tool = session.getToolDefinition("typesafe_review");
+			expect(session.getActiveToolNames()).toContain("systemone");
+			const tool = session.getToolDefinition("systemone");
 			if (!tool) throw new Error("missing built-in review tool");
 			const uncertainties = await tool.execute(
 				"uncertainties-root",
@@ -385,7 +400,7 @@ describe("packaged TypeSafe reviewer", () => {
 				details: { enabled: true },
 			});
 			await session.reload();
-			const reloaded = session.getToolDefinition("typesafe_review");
+			const reloaded = session.getToolDefinition("systemone");
 			if (!reloaded) throw new Error("Reviewer was lost on reload");
 			expect(
 				await reloaded.execute("status-reload", { action: "status" }, undefined, undefined, {} as never),
@@ -393,16 +408,16 @@ describe("packaged TypeSafe reviewer", () => {
 			expect(session.model?.provider).toBe("anthropic");
 			vi.spyOn(loader, "reload").mockRejectedValueOnce(new Error("fixture reload failure"));
 			await expect(session.reload()).rejects.toThrow("fixture reload failure");
-			expect(session.getActiveToolNames()).toContain("typesafe_review");
+			expect(session.getActiveToolNames()).toContain("systemone");
 			expect(
 				await session
-					.getToolDefinition("typesafe_review")!
+					.getToolDefinition("systemone")!
 					.execute("status-rollback", { action: "status" }, undefined, undefined, {} as never),
 			).toMatchObject({ details: { enabled: true } });
 			authStorage.setRuntimeApiKey("openai", "fixture-openai-key");
 			await session.setModel(getModel("openai", "gpt-4.1"));
 			expect(session.model?.provider).toBe("openai");
-			expect(session.getActiveToolNames()).toContain("typesafe_review");
+			expect(session.getActiveToolNames()).toContain("systemone");
 			authStorage.logout("typesafe");
 			expect(await AuthStorage.create(authPath).getApiKey("typesafe")).toBeUndefined();
 			expect(await tool.execute("status-3", { action: "status" }, undefined, undefined, {} as never)).toMatchObject({
@@ -421,8 +436,8 @@ describe("packaged TypeSafe reviewer", () => {
 	it("is authorized by semantic judgment, which a read-only grant keeps", () => {
 		// The host brokers the call and holds the credential: network or credential authority is neither
 		// needed nor sufficient, and a read-only reviewer still gets System One.
-		expect(envelopeHasToolCapability(["network.http", "credentials.use"], "typesafe_review")).toBe(false);
-		expect(envelopeHasToolCapability(["semantic.judge"], "typesafe_review")).toBe(true);
+		expect(envelopeHasToolCapability(["network.http", "credentials.use"], "systemone")).toBe(false);
+		expect(envelopeHasToolCapability(["semantic.judge"], "systemone")).toBe(true);
 		expect(capabilitySurvivesReadOnly("semantic.judge")).toBe(true);
 	});
 	it.each([false, true])(
@@ -465,7 +480,7 @@ describe("packaged TypeSafe reviewer", () => {
 				expect(showStatus).not.toHaveBeenCalled();
 			} else {
 				expect(showError).not.toHaveBeenCalled();
-				expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("review"));
+				expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("System One"));
 			}
 		},
 	);

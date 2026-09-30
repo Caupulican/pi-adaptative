@@ -5,8 +5,9 @@ import type { ArtifactStore } from "../context/context-artifacts.ts";
 import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
 import { TypeSafeEvidenceMaterializer } from "../review/typesafe-evidence-materializer.ts";
 import type { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
-import { TypeSafeReviewer } from "../review/typesafe-reviewer.ts";
+import { SystemOneReviewer } from "../review/typesafe-reviewer.ts";
 import { type CredentialExposureBoundary, isProtectedCredentialPath } from "../secrets/credential-exposure-guard.ts";
+import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { createArtifactRetrieveTool } from "../tools/artifact-retrieve.ts";
 import {
 	createRunToolkitScriptToolDefinition,
@@ -20,8 +21,8 @@ import {
 	DEFAULT_WORKER_SKILL_AUDIT_MAX_SKILLS,
 	type SkillAuditToolOptions,
 } from "../tools/skill-audit.ts";
+import { createSystemOneToolDefinition } from "../tools/systemone.ts";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
-import { createTypeSafeReviewToolDefinition } from "../tools/typesafe-review.ts";
 
 /**
  * Host-owned inputs available while constructing one fresh worker tool.
@@ -77,7 +78,7 @@ export const WORKER_TOOL_ADAPTER_NAMES: ReadonlySet<string> = new Set([
 	"run_toolkit_script",
 	"skill",
 	"skill_audit",
-	"typesafe_review",
+	SYSTEM_ONE_TOOL_NAME,
 ]);
 
 export type WorkerToolAdapterMaterialization =
@@ -86,7 +87,7 @@ export type WorkerToolAdapterMaterialization =
 
 export interface WorkerToolAdapterSources {
 	/** Host-owned credential lookup; workers receive judgments, never credential access. */
-	typeSafe?: ConstructorParameters<typeof TypeSafeReviewer>[0] & { evidenceStore: TypeSafeEvidenceStore };
+	systemOne?: ConstructorParameters<typeof SystemOneReviewer>[0] & { evidenceStore: TypeSafeEvidenceStore };
 	/** Session-owned packed output store; retrieval is bounded and identifier-only. */
 	artifactStore?: ArtifactStore;
 	/** The parent session's context-GC store: a forked worker can retrieve the stubs it inherited. */
@@ -98,6 +99,34 @@ export interface WorkerToolAdapterSources {
 	/** Optional read-only skill audit broker with host-path redaction. */
 	skillAudit?: Pick<SkillAuditToolOptions, "getSkills" | "maxSkills" | "maxComparisonPairs" | "maxDraftFieldChars"> &
 		Required<Pick<SkillAuditToolOptions, "redactPath">>;
+}
+
+function composeCredentialExposureBoundaries(
+	host: CredentialExposureBoundary | undefined,
+	lane: CredentialExposureBoundary | undefined,
+): CredentialExposureBoundary | undefined {
+	if (!host) return lane;
+	if (!lane) return host;
+	const hostTextRedactor = host.createSensitiveTextRedactor;
+	const laneTextRedactor = lane.createSensitiveTextRedactor;
+	return {
+		protectedFiles: [...new Set([...(host.protectedFiles ?? []), ...(lane.protectedFiles ?? [])])],
+		protectedDirectories: [...new Set([...(host.protectedDirectories ?? []), ...(lane.protectedDirectories ?? [])])],
+		...((host.agentDir ?? lane.agentDir) ? { agentDir: host.agentDir ?? lane.agentDir } : {}),
+		redactSensitiveText: (text, additionalValues) =>
+			host.redactSensitiveText(lane.redactSensitiveText(text), additionalValues),
+		...(hostTextRedactor && laneTextRedactor
+			? {
+					createSensitiveTextRedactor: (additionalValues?: readonly string[]) => {
+						const laneRedact = laneTextRedactor.call(lane);
+						const hostRedact = hostTextRedactor.call(host, additionalValues);
+						return (text: string) => hostRedact(laneRedact(text));
+					},
+				}
+			: {}),
+		...(host.getSensitiveValues ? { getSensitiveValues: () => host.getSensitiveValues?.() ?? [] } : {}),
+		...((lane.getPathProbe ?? host.getPathProbe) ? { getPathProbe: lane.getPathProbe ?? host.getPathProbe } : {}),
+	};
 }
 
 /**
@@ -157,20 +186,24 @@ export class WorkerToolAdapterRegistry {
 /** Build the default safe adapters from host-owned brokers. Omitted sources stay unsupported. */
 export function createWorkerToolAdapterRegistry(sources: WorkerToolAdapterSources = {}): WorkerToolAdapterRegistry {
 	const registry = new WorkerToolAdapterRegistry();
-	if (sources.typeSafe) {
-		const dependencies = sources.typeSafe;
+	if (sources.systemOne) {
+		const dependencies = sources.systemOne;
 		registry.register({
-			name: "typesafe_review",
-			description: "Use Jev through the host-owned review service.",
+			name: SYSTEM_ONE_TOOL_NAME,
+			description: "Use System One through the host-owned review service.",
 			create: (context) => {
-				const definition = createTypeSafeReviewToolDefinition(
-					new TypeSafeReviewer(dependencies),
+				const credentialBoundary = composeCredentialExposureBoundaries(
+					dependencies.credentialBoundary,
+					context.credentialBoundary,
+				);
+				const definition = createSystemOneToolDefinition(
+					new SystemOneReviewer(dependencies),
 					dependencies.evidenceStore,
 					context.reportUsage,
 					new TypeSafeEvidenceMaterializer({
 						getCwd: () => context.cwd,
 						...(sources.artifactStore ? { artifactStore: sources.artifactStore } : {}),
-						...(context.credentialBoundary ? { credentialBoundary: context.credentialBoundary } : {}),
+						...(credentialBoundary ? { credentialBoundary } : {}),
 					}),
 				);
 				// Isolated workers do not use the foreground prompt-guideline composer.

@@ -1,7 +1,10 @@
 import type { StreamFn } from "@caupulican/pi-agent-core";
 import { type StreamIdleOptions, withStreamIdleWatchdog } from "@caupulican/pi-agent-core/reliability";
 import type { SessionManager } from "@caupulican/pi-agent-core/session";
+import type { AssistantMessage, Context } from "@caupulican/pi-ai";
+import { createAssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
 import { streamSimple } from "@caupulican/pi-ai/stream";
+import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 import type { AuthCredential } from "./auth-storage.ts";
 import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
 import { isWarmableLocalModel } from "./local-prefix-warm-controller.ts";
@@ -22,6 +25,8 @@ import {
 } from "./provider-admission/gate.ts";
 import type { ProviderAdmissionLedger } from "./provider-admission/ledger.ts";
 import type { ProviderLimitStore } from "./provider-admission/limit-state.ts";
+import { isCredentialSecretKey } from "./secrets/credential-content-mock.ts";
+import { CredentialContentProjectionError, redactCredentialContent } from "./secrets/credential-model-content.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { resolveStreamStallBudget } from "./stream-stall-budget.ts";
 
@@ -66,6 +71,12 @@ export interface SessionStreamChainInput {
 		get(provider: string): AuthCredential | undefined;
 		getOAuthRequestHeaders(provider: string, apiKey: string): Record<string, string> | undefined;
 	};
+	/** The current host credential boundary; looked up lazily for each request. */
+	redactSensitiveText?: (text: string, additionalValues?: readonly string[]) => string;
+	/** Precomputed exact-value redactor used for every string in this request. */
+	createSensitiveTextRedactor?: (additionalValues?: readonly string[]) => (text: string) => string;
+	/** Snapshot host credential values once at the request boundary, without refreshing providers. */
+	getSensitiveValues?: () => readonly string[] | Promise<readonly string[]>;
 	/** Live wait notifications for the operator's activity lane. */
 	onWait?: (event: ProviderAdmissionWaitEvent) => void;
 	/** The output repetition guard's threshold follows the model's capability tier. */
@@ -74,12 +85,139 @@ export interface SessionStreamChainInput {
 	getStreamIdleOptionsOverride: () => Partial<StreamIdleOptions> | undefined;
 }
 
+const REQUEST_IDENTITY_FIELDS = new Set([
+	"role",
+	"api",
+	"provider",
+	"model",
+	"responseModel",
+	"responseId",
+	"stopReason",
+	"timestamp",
+	"type",
+	"id",
+	"toolName",
+	"toolCallId",
+	"mimeType",
+	"textSignature",
+	"thinkingSignature",
+	"thoughtSignature",
+]);
+
+type CredentialRequestOptions = NonNullable<Parameters<StreamFn>[2]> & {
+	credentialHeaders?: Record<string, string>;
+};
+
+function isPayloadIdentityKey(key: string): boolean {
+	return REQUEST_IDENTITY_FIELDS.has(key) || key === "name";
+}
+
+function requestCredentialValues(options: Parameters<StreamFn>[2]): readonly string[] | undefined {
+	const values = new Set<string>();
+	const credentialOptions = options as CredentialRequestOptions | undefined;
+	if (credentialOptions?.apiKey) values.add(credentialOptions.apiKey);
+	for (const headers of [credentialOptions?.headers, credentialOptions?.credentialHeaders]) {
+		for (const [name, value] of Object.entries(headers ?? {})) {
+			if (isCredentialSecretKey(name) && value) {
+				values.add(value);
+				const bearer = /^\s*Bearer\s+(.+?)\s*$/iu.exec(value);
+				if (bearer?.[1]) values.add(bearer[1]);
+			}
+		}
+	}
+	return values.size > 0 ? [...values] : undefined;
+}
+
+function combineCredentialValues(
+	hostValues: readonly string[],
+	requestValues: readonly string[] | undefined,
+): readonly string[] | undefined {
+	if (hostValues.length === 0 && !requestValues?.length) return undefined;
+	const values = new Set(hostValues);
+	for (const value of requestValues ?? []) values.add(value);
+	return [...values];
+}
+
+function redactRequestContext(context: Context, redact: (text: string) => string): Context {
+	const preserveKey = (path: readonly (string | number)[], key: string) =>
+		REQUEST_IDENTITY_FIELDS.has(key) || (key === "name" && (path.at(-2) === "tools" || path.at(-2) === "content"));
+	const preserveImage = (_path: readonly (string | number)[], value: object) => {
+		const type = Object.getOwnPropertyDescriptor(value, "type");
+		return type?.enumerable === true && "value" in type && type.value === "image";
+	};
+	return redactCredentialContent(context, redact, preserveKey, preserveImage);
+}
+
+function failedRedactionStream(
+	model: Parameters<StreamFn>[0],
+	error: unknown,
+): ReturnType<typeof createAssistantMessageEventStream> {
+	const message = error instanceof Error ? error.message : String(error);
+	const failure: AssistantMessage = {
+		role: "assistant",
+		content: [],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: createEmptyUsage(),
+		stopReason: "error",
+		errorMessage: `Credential redaction failed; request withheld (${message})`,
+		timestamp: Date.now(),
+	};
+	Object.defineProperty(failure, "cause", {
+		value: error instanceof Error ? (error.cause ?? error) : error,
+		enumerable: false,
+	});
+	const stream = createAssistantMessageEventStream();
+	stream.push({ type: "error", reason: "error", error: failure });
+	stream.end();
+	return stream;
+}
+
 export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 	const { baseStreamFn, settingsManager, sessionManager, modelAdaptationStore, providerAdmissionLedger } = input;
+	const redactedBase: StreamFn = async (model, context, options) => {
+		if (!input.redactSensitiveText && !input.createSensitiveTextRedactor) {
+			return baseStreamFn(model, context, options);
+		}
+		let redactedContext = context;
+		let redactedOptions = options;
+		try {
+			const hostValues = (await input.getSensitiveValues?.()) ?? [];
+			options?.signal?.throwIfAborted();
+			const additionalValues = combineCredentialValues(hostValues, requestCredentialValues(options));
+			const redact =
+				input.createSensitiveTextRedactor?.(additionalValues) ??
+				((text: string) => input.redactSensitiveText!(text, additionalValues));
+			redactedContext = redactRequestContext(context, redact);
+			const onPayload = options?.onPayload;
+			redactedOptions = onPayload
+				? {
+						...options,
+						onPayload: async (payload: unknown, payloadModel: Parameters<NonNullable<typeof onPayload>>[1]) => {
+							const safePayload = redactCredentialContent(payload, redact, (_path, key) =>
+								isPayloadIdentityKey(key),
+							);
+							const hooked = await onPayload(safePayload, payloadModel);
+							return redactCredentialContent(hooked === undefined ? safePayload : hooked, redact, (_path, key) =>
+								isPayloadIdentityKey(key),
+							);
+						},
+					}
+				: options;
+		} catch (error) {
+			if (options?.signal?.aborted) throw error;
+			const reason =
+				error instanceof CredentialContentProjectionError ? error.failure : "credential source unavailable";
+			return failedRedactionStream(model, new Error(reason, { cause: error }));
+		}
+		// Provider failures retain the transport owner's classification and retry behavior.
+		return baseStreamFn(model, redactedContext, redactedOptions);
+	};
 	const credentialed: StreamFn =
 		baseStreamFn === streamSimple
 			? (model, context, options) =>
-					baseStreamFn(model, context, {
+					redactedBase(model, context, {
 						...options,
 						credentialHeaders:
 							options?.credentialHeaders ??
@@ -89,7 +227,7 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 						credentialHeadersFor: (apiKey: string) =>
 							input.authStorage.getOAuthRequestHeaders(model.provider, apiKey),
 					})
-			: baseStreamFn;
+			: redactedBase;
 	const profiled = withModelPerfProfile(credentialed, {
 		modelKey: (model) => formatModelRouterModel(model),
 		recordSample: (modelKey, sample) => {

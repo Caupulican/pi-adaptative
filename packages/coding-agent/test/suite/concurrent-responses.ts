@@ -1,6 +1,11 @@
 import { type FauxResponseFactory, type FauxResponseStep, fauxAssistantMessage } from "@caupulican/pi-ai/faux";
 import type { Harness } from "./harness.ts";
 
+/** The provider session namespace is the harness's canonical worker-versus-foreground signal. */
+export function isWorkerProviderRequest(options: { sessionId?: string } | undefined): boolean {
+	return options?.sessionId?.startsWith("lane:worker:") === true;
+}
+
 /** Independent scripts for workers and foreground handoffs; filesystem latency cannot reorder their evidence. */
 export function setConcurrentResponses(
 	harness: Pick<Harness, "setResponses">,
@@ -10,7 +15,7 @@ export function setConcurrentResponses(
 	let workerIndex = 0;
 	let foregroundIndex = 0;
 	const respond: FauxResponseFactory = (context, options, state, model) => {
-		const isWorker = options?.sessionId?.startsWith("lane:worker:") === true;
+		const isWorker = isWorkerProviderRequest(options);
 		const step = isWorker ? worker[workerIndex++] : foreground[foregroundIndex++];
 		if (!step) {
 			if (isWorker) throw new Error("Unexpected worker provider request: synthetic script exhausted");

@@ -9,7 +9,9 @@
 import { writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { AuthStorage } from "../../auth-storage.ts";
-import { TypeSafeReviewer } from "../../review/typesafe-reviewer.ts";
+import { ModelRegistry } from "../../model-registry.ts";
+import { SystemOneReviewer } from "../../review/typesafe-reviewer.ts";
+import { createCredentialTextRedactor, redactCredentialValues } from "../../secrets/credential-manager.ts";
 import { SettingsManager } from "../../settings-manager.ts";
 import { systemOneAccessFromSession } from "../access.ts";
 import { SystemOneJevAdapter } from "../adapter.ts";
@@ -66,15 +68,29 @@ async function main(argv: string[]): Promise<number> {
 				)
 			: pool;
 	const settings = SettingsManager.create(process.cwd());
-	const access = systemOneAccessFromSession(settings, AuthStorage.create());
-	if ((await access.resolve()).kind !== "ready") {
-		process.stderr.write("System One is not configured for this user; log in with /login typesafe first.\n");
+	const authStorage = AuthStorage.create();
+	const modelRegistry = ModelRegistry.create(authStorage);
+	const credentialBoundary = {
+		getSensitiveValues: async () => modelRegistry.getKnownCredentialValues(),
+		createSensitiveTextRedactor: (additionalValues: readonly string[] = []) =>
+			createCredentialTextRedactor([...modelRegistry.getKnownCredentialValues(), ...additionalValues]),
+		redactSensitiveText: (text: string, additionalValues: readonly string[] = []) =>
+			redactCredentialValues(text, [...modelRegistry.getKnownCredentialValues(), ...additionalValues]),
+	};
+	const access = systemOneAccessFromSession(settings, authStorage);
+	const outcome = await access.resolve();
+	if (outcome.kind !== "ready") {
+		process.stderr.write(`System One is not configured for this user; ${outcome.setup}.\n`);
 		return 2;
 	}
-	const adapter = new SystemOneJevAdapter(new TypeSafeReviewer({ access }), createSystemOneConfig({ enabled: true }), {
-		access,
-		getUserKeys: () => access.keys(),
-	});
+	const adapter = new SystemOneJevAdapter(
+		new SystemOneReviewer({ access, credentialBoundary }),
+		createSystemOneConfig({ enabled: true }),
+		{
+			access,
+			getUserKeys: () => access.keys(),
+		},
+	);
 	const summary = await runCompletionEval(adapter, {
 		repeats,
 		cases,

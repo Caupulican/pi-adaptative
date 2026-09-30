@@ -299,7 +299,10 @@ describe("profile-shipped lanes", () => {
 		expect(run.record?.status).toBe("succeeded");
 		expect(seenSystemPrompt?.startsWith(SUBAGENT_CORE_SYSTEM_PROMPT)).toBe(true);
 		expect(seenSystemPrompt).toContain("Answer with a single JSON summary field.");
-		expect(seenSystemPrompt).toContain("Autonomous leaf worker. Contract:");
+		expect(seenSystemPrompt).toContain("Latest task and grant; parent history is context.");
+		expect(seenSystemPrompt).toContain(
+			"Choose investigation, implementation and focused checks without parent approval.",
+		);
 		expect(seenSystemPrompt).toContain("The workspace tools are read-only; do not claim file changes.");
 	});
 });

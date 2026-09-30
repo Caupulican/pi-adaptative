@@ -1,7 +1,7 @@
 import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import { abortableSleep } from "@caupulican/pi-ai/abort-signals";
+import { SystemOneReviewError } from "../review/system-one-review-port.ts";
 import { TypeSafeEvidenceError } from "../review/typesafe-contract.ts";
-import { TypeSafeReviewError } from "../review/typesafe-reviewer.ts";
 import type { SystemOneAccessResolver } from "./access.ts";
 import { SYSTEM_ONE_PINNED_MODEL } from "./catalog.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
@@ -52,8 +52,6 @@ export interface SystemOneReviewerLike {
 		elapsedMs: number;
 	}>;
 }
-
-export type TypeSafeReviewerLike = SystemOneReviewerLike;
 
 export type JevFailureKind =
 	| "invalid_request"
@@ -247,7 +245,7 @@ export class SystemOneJevAdapter implements JevAdapter {
 				if (deadline?.aborted && !options?.signal?.aborted) throw timedOut();
 				if (options?.signal?.aborted) throw error;
 				// The reviewer already exhausted its provider retry budget. Never multiply it here.
-				if (error instanceof TypeSafeReviewError) {
+				if (error instanceof SystemOneReviewError) {
 					throw new JevAdapterFailure("unavailable", error.message, impact);
 				}
 				// The request we built is not JSON: retrying sends the same defect again.

@@ -38,7 +38,7 @@ describe("native completion evidence wiring", () => {
 				agentDir,
 				persistSession: true,
 				systemOneController: controller,
-				excludedToolNames: excluded ? ["typesafe_review"] : undefined,
+				excludedToolNames: excluded ? ["systemone"] : undefined,
 			});
 			harness.sessionManager.appendMessage(fauxAssistantMessage("Work started."));
 			appendGoalStateSnapshot(
@@ -59,7 +59,7 @@ describe("native completion evidence wiring", () => {
 			expect(rejection?.findings).toMatchObject(decision.failed_gates);
 			if (excluded) {
 				expect(rejection?.evidence).toBeUndefined();
-				expect(harness.session.getToolDefinition("typesafe_review")).toBeUndefined();
+				expect(harness.session.getToolDefinition("systemone")).toBeUndefined();
 			} else {
 				expect(rejection?.evidence).toMatchObject({
 					id: expect.any(String),
@@ -68,7 +68,7 @@ describe("native completion evidence wiring", () => {
 				});
 				const reference = rejection?.evidence;
 				if (!reference) throw new Error("Expected retained native completion evidence");
-				const review = harness.session.getToolDefinition("typesafe_review");
+				const review = harness.session.getToolDefinition("systemone");
 				if (!review) throw new Error("Expected native evidence reader");
 				const page = await review.execute(
 					"read-proof",

@@ -1,5 +1,21 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Renamed the native semantic tool and bundled skill to `systemone`, keeping TypeSafe as a provider adapter. Update explicit tool grants and skill references from `typesafe_review` and `typesafe-review`; the old agent-facing names are removed.
+
+### Changed
+
+- Made ordinary peer review independent by default at any supported effort, including the root's maximum effort. Explicit stronger review retains task-specific System One strength judgment and higher-effort admission.
+- Clarified root ownership of assignments and integration, worker autonomy over local methods and focused checks, and host ownership of deterministic transitions and execution authority.
+
+### Fixed
+
+- Honored standing operation authority for both root and workers before semantic evaluation, while preserving cancellation and exact scoped-grant matching.
+- Allowed diagnostic evidence inspection and advisory uncertainty dispositions during evaluator outages without clearing mandatory verification findings.
+- Fenced delayed worker supervision by objective, task, live attempt and cancellation, preventing an earlier or aborted assignment from steering or cancelling a persistent worker's next task.
+- Redacted configured credentials from model requests, tool output and System One evidence, including credentials for unselected providers, while preserving authorized local use and transport authentication.
+
 ## [0.101.3] - 2026-09-30
 
 ### Added

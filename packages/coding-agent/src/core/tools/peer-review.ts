@@ -7,12 +7,12 @@ import type { VerificationCoordinator } from "../system-one/verification-coordin
 const resolutionSchema = Type.Object(
 	{
 		id: Type.String({ minLength: 1, maxLength: 256 }),
-		disposition: Type.Union([Type.Literal("rejected"), Type.Literal("repaired")]),
+		disposition: Type.Enum(["rejected", "repaired"]),
 		evidence: Type.Array(
 			Type.Object(
 				{
 					receiptId: Type.String({ minLength: 1, maxLength: 256 }),
-					role: Type.Union([Type.Literal("reproduction"), Type.Literal("repair"), Type.Literal("recheck")]),
+					role: Type.Enum(["reproduction", "repair", "recheck"]),
 				},
 				{ additionalProperties: false },
 			),
@@ -24,12 +24,7 @@ const resolutionSchema = Type.Object(
 
 const schema = Type.Object(
 	{
-		action: Type.Union([
-			Type.Literal("options"),
-			Type.Literal("review"),
-			Type.Literal("obligations"),
-			Type.Literal("resolve"),
-		]),
+		action: Type.Enum(["options", "review", "obligations", "resolve"]),
 		review: Type.Optional(peerReviewRequestSchema),
 		resolution: Type.Optional(resolutionSchema),
 	},
@@ -45,10 +40,11 @@ export function createPeerReviewToolDefinition(
 		label: "Peer review",
 		readOnly: true,
 		description:
-			"Explicit independent plan or delivery review by a distinct host-admitted peer at higher supported thinking. Options lists peers; review asks Jev whether the peer is stronger at >=0.95 confidence. Obligations lists pending findings and host receipts; resolve submits receiving-lane proof without another peer. Lead retains execution, permissions and responsibility. Unavailable or incomplete review grants no validation.",
-		promptSnippet: "Request a stronger peer's plan or delivery review with peer.",
+			"Plan or delivery review by a distinct host-admitted peer. Ordinary review is independent and accepts any supported peer effort; select stronger explicitly to require higher supported effort and System One task-strength confidence >=0.95. Options lists both effort sets. Obligations lists pending findings and host receipts; resolve submits receiving-lane proof without another peer. Lead retains execution, permissions and responsibility. Unavailable or incomplete review grants no validation.",
+		promptSnippet:
+			"Use peer for an independent review, or explicitly select stronger when task-strength judgment is required.",
 		promptGuidelines: [
-			"When a stronger peer review is requested, call peer options and explicitly request peer review with the exact peer and a strictly higher supported thinkingLevel. Supply the complete relevant plan/change, source evidence, checks and known limitations; do not hide adverse findings.",
+			"For ordinary independent review, call peer options and request review with the exact peer and any listed supported thinkingLevel; equal effort is allowed. To request a stronger peer, set selection to stronger and choose a listed strongerThinkingLevel. Supply the complete relevant plan/change, source evidence, checks and known limitations; do not hide adverse findings.",
 			"Keep executing as the lead. Reproduce every candidate in your own lane, fix confirmed failures, and recheck the revised result before affected work continues. Report rejected candidates with evidence. Peer no_findings is not a completion or approval gate. Outages and insufficient evidence remain unresolved; never reroll an unchanged request for a favorable review.",
 			"Use peer obligations to inspect mandatory findings and host-recorded tool receipt IDs. After reproducing a candidate, use peer resolve with disposition rejected and reproduction evidence, or repaired with ordered reproduction, repair and recheck receipt IDs. The host checks actual same-lane evidence against the current candidate; your prose or a successful executor return cannot resolve a finding. This action uses System One and never dispatches another peer.",
 		],

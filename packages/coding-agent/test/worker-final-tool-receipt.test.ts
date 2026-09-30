@@ -18,12 +18,12 @@ describe("worker final-only tool receipt delivery", () => {
 		{ dispose: true, failure: "after_write" },
 	] as const)("settles a native loop result: $dispose, storage failure=$failure", async ({ dispose, failure }) => {
 		const harness = await createHarness({
-			initialActiveToolNames: ["delegate", "typesafe_review"],
+			initialActiveToolNames: ["delegate", "systemone"],
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
 		const sessionId = harness.sessionManager.getSessionId();
 		const fetcher = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected network request"));
-		const call = fauxToolCall("typesafe_review", {
+		const call = fauxToolCall("systemone", {
 			action: "evaluate",
 			evaluation: { state: "fixture", questions: { q: { type: "noul", instructions: "Is this a fixture?" } } },
 		});
@@ -82,7 +82,7 @@ describe("worker final-only tool receipt delivery", () => {
 			context,
 		) {
 			const result = materialize.call(this, name, context);
-			if (name !== "typesafe_review" || !result.ok) return result;
+			if (name !== "systemone" || !result.ok) return result;
 			return { ok: true, tool: { ...result.tool, execute: backend } };
 		});
 		const report = vi.spyOn(LaneToolUsage.prototype, "report");

@@ -15,7 +15,7 @@ describe("worker billed review cancellation", () => {
 		{ shutdown: false, failUsageWrite: true },
 	])("retains a received service charge: %j", async ({ shutdown, failUsageWrite }) => {
 		const harness = await createHarness({
-			initialActiveToolNames: ["delegate", "typesafe_review", "skill"],
+			initialActiveToolNames: ["delegate", "systemone", "skill"],
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
 		const sessionId = harness.sessionManager.getSessionId();
@@ -62,7 +62,7 @@ describe("worker billed review cancellation", () => {
 			harness.authStorage.set("typesafe", { type: "api_key", key: "worker-cancel-fixture-key" });
 			harness.setResponses([
 				fauxAssistantMessage(
-					fauxToolCall("typesafe_review", {
+					fauxToolCall("systemone", {
 						action: "review",
 						review: {
 							state: "fixture",

@@ -36,7 +36,7 @@ const DEFAULT_ACTIVE = [
 	"model_fitness",
 	"context_scout",
 	"pi_collaboration",
-	"typesafe_review",
+	"systemone",
 ];
 
 describe("deriveModelCapabilityProfile", () => {
@@ -160,7 +160,7 @@ describe("filterToolNamesForCapability", () => {
 			"update_goal",
 			"ask_question",
 			"run_toolkit_script",
-			"typesafe_review",
+			"systemone",
 		]);
 
 		const chat = deriveModelCapabilityProfile({ contextWindow: 4_096 });
@@ -169,14 +169,14 @@ describe("filterToolNamesForCapability", () => {
 			"create_goal",
 			"get_goal",
 			"update_goal",
-			"typesafe_review",
+			"systemone",
 		]);
 	});
 	it.each([200_000, 16_384, 8_192, 4_096])(
 		"makes Jev available at window %s without inventing an unrequested tool",
 		(contextWindow) => {
 			const profile = deriveModelCapabilityProfile({ contextWindow });
-			expect(filterToolNamesForCapability(["typesafe_review"], profile)).toEqual(["typesafe_review"]);
+			expect(filterToolNamesForCapability(["systemone"], profile)).toEqual(["systemone"]);
 			expect(filterToolNamesForCapability([], profile)).toEqual([]);
 		},
 	);

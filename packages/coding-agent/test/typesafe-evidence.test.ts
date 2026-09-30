@@ -5,9 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createInMemoryArtifactStore } from "../src/core/context/context-artifacts.ts";
 import { reserveSessionBundleDeletion } from "../src/core/orchestration/session-bundle-lifecycle.ts";
 import { TypeSafeEvidenceStore } from "../src/core/review/typesafe-evidence-store.ts";
-import { TypeSafeReviewer } from "../src/core/review/typesafe-reviewer.ts";
+import { SystemOneReviewer } from "../src/core/review/typesafe-reviewer.ts";
 import type { SemanticUncertaintyPort } from "../src/core/system-one/semantic-doubts.ts";
-import { createTypeSafeReviewToolDefinition } from "../src/core/tools/typesafe-review.ts";
+import { createSystemOneToolDefinition } from "../src/core/tools/systemone.ts";
 
 const directories: string[] = [];
 afterEach(() => {
@@ -96,8 +96,8 @@ describe("TypeSafe durable evidence", () => {
 				usage: { input_tokens: 100, output_tokens: 10 },
 			}),
 		);
-		const tool = createTypeSafeReviewToolDefinition(
-			new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
+		const tool = createSystemOneToolDefinition(
+			new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
 			archive,
 		);
 		const result = await tool.execute("call", {
@@ -138,8 +138,8 @@ describe("TypeSafe durable evidence", () => {
 			resolveOwnSession: vi.fn(() => ({ resolved: false, reason: "not_owned" as const })),
 		};
 		const fetcher = vi.fn<typeof fetch>();
-		const tool = createTypeSafeReviewToolDefinition(
-			new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
+		const tool = createSystemOneToolDefinition(
+			new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
 			new TypeSafeEvidenceStore(createInMemoryArtifactStore()),
 			undefined,
 			undefined,
@@ -172,8 +172,8 @@ describe("TypeSafe durable evidence", () => {
 				.mockReturnValueOnce({ resolved: false, reason: "not_owned" as const }),
 		};
 		const fetcher = vi.fn<typeof fetch>();
-		const tool = createTypeSafeReviewToolDefinition(
-			new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
+		const tool = createSystemOneToolDefinition(
+			new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
 			new TypeSafeEvidenceStore(createInMemoryArtifactStore()),
 			undefined,
 			undefined,
@@ -220,8 +220,8 @@ describe("TypeSafe durable evidence", () => {
 				usage: { input_tokens: 1, output_tokens: 1 },
 			}),
 		);
-		const tool = createTypeSafeReviewToolDefinition(
-			new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
+		const tool = createSystemOneToolDefinition(
+			new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
 			new TypeSafeEvidenceStore(createInMemoryArtifactStore()),
 		);
 

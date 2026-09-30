@@ -193,17 +193,17 @@ export function serializeEvaluation(value: unknown): string {
 		if (typeof item === "number" && Number.isFinite(item) && !Object.is(item, -0)) return;
 		if (typeof item !== "object" || (!Array.isArray(item) && !isPlainRecord(item)))
 			throw new TypeSafeEvidenceError(
-				`TypeSafe evidence must be finite, acyclic JSON (got ${describeValue(item)})`,
+				`System One evidence must be finite, acyclic JSON (got ${describeValue(item)})`,
 				path,
 			);
 		if (ancestors.has(item))
-			throw new TypeSafeEvidenceError("TypeSafe evidence must be finite, acyclic JSON (cycle)", path);
+			throw new TypeSafeEvidenceError("System One evidence must be finite, acyclic JSON (cycle)", path);
 		ancestors.add(item);
 		for (const key of Reflect.ownKeys(item)) {
 			if (Array.isArray(item) && key === "length") continue;
 			const descriptor = Object.getOwnPropertyDescriptor(item, key);
 			if (typeof key !== "string" || !descriptor?.enumerable || !("value" in descriptor))
-				throw new TypeSafeEvidenceError("TypeSafe evidence must be ordinary JSON data", `${path}.${String(key)}`);
+				throw new TypeSafeEvidenceError("System One evidence must be ordinary JSON data", `${path}.${String(key)}`);
 			visit(descriptor.value, depth + 1, Array.isArray(item) ? `${path}[${key}]` : `${path}.${key}`);
 		}
 		if (

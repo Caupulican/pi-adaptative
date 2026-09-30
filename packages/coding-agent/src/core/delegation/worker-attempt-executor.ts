@@ -32,6 +32,7 @@ import { CapabilityGatewayDeniedError, type ProviderBudgetReservation } from "..
 import type { ArtifactContract, AttemptUsageSnapshot, ExecutionGrant } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
+import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { WorkerActionJournal } from "./worker-action-journal.ts";
 import type { AppliedActionsReport, WorkerAction } from "./worker-actions.ts";
 import type { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
@@ -205,7 +206,7 @@ export interface WorkerAttemptExecutorOptions {
 	 * attempt. Supervision is advisory: it never blocks the call it observes, and a failure inside it
 	 * is swallowed by its own owner rather than failing the worker.
 	 */
-	observeWorkerProgress?(observation: WorkerProgressObservation): Promise<unknown> | unknown;
+	observeWorkerProgress?(observation: WorkerProgressObservation, signal?: AbortSignal): Promise<unknown> | unknown;
 	/**
 	 * Plan one request's context with root's own request-context controller, on this conversation's
 	 * lane (context GC, path aliases, the authority context; the head-only steps absent).
@@ -406,7 +407,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			changedFileCountAtChurnWindowStart = changedFiles.size;
 		}
 		try {
-			await options.observeWorkerProgress(observation);
+			await options.observeWorkerProgress(observation, options.signal);
 		} catch {
 			// Supervision must not fail the worker it observes.
 		}
@@ -728,7 +729,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 					signal: options.signal,
 					cwd: options.cwd,
 					processCapable: options.processCapable,
-					systemOneCapable: options.toolSurface.allowedTools.includes("typesafe_review"),
+					systemOneCapable: options.toolSurface.allowedTools.includes(SYSTEM_ONE_TOOL_NAME),
 					...(options.verificationSubjectTaskId
 						? { verificationSubjectTaskId: options.verificationSubjectTaskId }
 						: {}),

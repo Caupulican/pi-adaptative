@@ -72,7 +72,7 @@ describe("Tool Gate Friction Remediations", () => {
 				};
 			},
 		};
-		const request = { tool: "typesafe_review", intent: "Invoke tool typesafe_review", impact: "read_only" as const };
+		const request = { tool: "systemone", intent: "Invoke tool systemone", impact: "read_only" as const };
 
 		const plain = new ExecutionStore({
 			run_id: "plain-session",

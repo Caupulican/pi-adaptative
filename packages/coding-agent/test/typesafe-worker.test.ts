@@ -12,7 +12,7 @@ import { createHarness } from "./suite/harness.ts";
 
 afterEach(() => vi.restoreAllMocks());
 
-describe("worker TypeSafe review", () => {
+describe("worker System One review", () => {
 	it.each([
 		{ name: "default inherited", capabilities: undefined, permitted: true },
 		{ name: "large evidence", capabilities: undefined, permitted: true, evidence: "e".repeat(20_000) },
@@ -54,13 +54,13 @@ describe("worker TypeSafe review", () => {
 					this: WorkerConversation,
 					message: WorkerTranscriptMessage,
 				) {
-					if (message.role === "toolResult" && message.toolName === "typesafe_review")
+					if (message.role === "toolResult" && message.toolName === "systemone")
 						throw new Error("Fixture transcript storage failure after billed Jev response");
 					return append.call(this, message);
 				});
 			}
 			const harness = await createHarness({
-				initialActiveToolNames: ["delegate", "typesafe_review", "skill"],
+				initialActiveToolNames: ["delegate", "systemone", "skill"],
 				settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 			});
 			const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -91,18 +91,18 @@ describe("worker TypeSafe review", () => {
 				harness.authStorage.set("typesafe", { type: "api_key", key: "worker-fixture-key" });
 				harness.setResponses([
 					(context) => {
-						expect(context.tools?.map((tool) => tool.name)).toContain("typesafe_review");
-						expect(context.tools?.find((tool) => tool.name === "typesafe_review")?.description).toContain(
-							"Check typesafe_review status at work start",
+						expect(context.tools?.map((tool) => tool.name)).toContain("systemone");
+						expect(context.tools?.find((tool) => tool.name === "systemone")?.description).toContain(
+							"Check systemone status at work start",
 						);
-						expect(context.tools?.find((tool) => tool.name === "typesafe_review")?.description).toContain(
-							"load the typesafe-review skill",
+						expect(context.tools?.find((tool) => tool.name === "systemone")?.description).toContain(
+							"load the systemone skill",
 						);
-						expect(context.tools?.find((tool) => tool.name === "typesafe_review")?.description).toContain(
+						expect(context.tools?.find((tool) => tool.name === "systemone")?.description).toContain(
 							"Workers report unresolved decisions to the parent",
 						);
 						return fauxAssistantMessage(
-							fauxToolCall("typesafe_review", {
+							fauxToolCall("systemone", {
 								action: "review",
 								review: {
 									state: { fixture: evidence },
@@ -121,11 +121,11 @@ describe("worker TypeSafe review", () => {
 					(context) => {
 						expect(
 							context.messages.find(
-								(message) => message.role === "toolResult" && message.toolName === "typesafe_review",
+								(message) => message.role === "toolResult" && message.toolName === "systemone",
 							),
 						).toMatchObject({ isError: status !== 200 });
 						const projected = context.messages.find(
-							(message) => message.role === "toolResult" && message.toolName === "typesafe_review",
+							(message) => message.role === "toolResult" && message.toolName === "systemone",
 						);
 						expect(JSON.stringify(projected?.content)).not.toContain("worker evidence");
 						expect(JSON.stringify(context)).not.toContain("worker-fixture-key");
@@ -136,7 +136,7 @@ describe("worker TypeSafe review", () => {
 				]);
 				const result = await harness.session.runWorkerDelegationOnce({
 					instructions: "Review the supplied fixture with Jev.",
-					...(capabilities ? { authority: { capabilities, toolNames: ["typesafe_review"] } } : {}),
+					...(capabilities ? { authority: { capabilities, toolNames: ["systemone"] } } : {}),
 				});
 				if (permitted) {
 					expect(result, JSON.stringify(result)).toMatchObject({
@@ -165,7 +165,7 @@ describe("worker TypeSafe review", () => {
 					});
 					const persisted = conversation
 						.getRawTranscript()
-						.find((message) => message.role === "toolResult" && message.toolName === "typesafe_review");
+						.find((message) => message.role === "toolResult" && message.toolName === "systemone");
 					const assistantUsage = conversation.getRawTranscript().reduce(
 						(usage, message) => {
 							if (message.role === "assistant") {
@@ -225,7 +225,7 @@ describe("worker TypeSafe review", () => {
 				} else {
 					expect(result).toEqual({
 						started: false,
-						skipReason: "orchestration_tool_capability_missing:typesafe_review",
+						skipReason: "orchestration_tool_capability_missing:systemone",
 					});
 					expect(fetcher).not.toHaveBeenCalled();
 				}

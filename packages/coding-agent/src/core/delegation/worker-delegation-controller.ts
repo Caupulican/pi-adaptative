@@ -92,10 +92,12 @@ import { ProviderLimitStore } from "../provider-admission/limit-state.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
+import type { CredentialExposureBoundary } from "../secrets/credential-exposure-guard.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../settings-manager.ts";
 import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
 import { systemOneAccessFromSession } from "../system-one/access.ts";
+import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { executeToolkitScript } from "../toolkit/script-runner.ts";
 import { disposeShellExecutionSessionAndWait } from "../tools/shell-execution-session.ts";
 import type { ReadOnlySkillBroker } from "../tools/skill.ts";
@@ -263,7 +265,7 @@ export interface WorkerDelegationControllerDeps {
 	isDelegateToolActive(): boolean;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	/** Live worker supervision hook; one observation per executed worker tool call. */
-	observeWorkerProgress?(observation: WorkerProgressObservation): Promise<unknown> | unknown;
+	observeWorkerProgress?(observation: WorkerProgressObservation, signal?: AbortSignal): Promise<unknown> | unknown;
 	/**
 	 * Plan a worker request's context with root's request-context controller on the worker's lane:
 	 * context GC priced on the worker's model and retention trigger, path aliases, the authority context.
@@ -304,6 +306,8 @@ export interface WorkerDelegationControllerDeps {
 	markModelExhausted?(model: Model<Api>, retryAfterMs?: number): void;
 	/** Root's tool mechanics (output reduction, encodings, shell engine, packing), shared with every lane. */
 	getSharedLaneToolOptions?(): SharedLaneToolOptions;
+	/** Parent session's canonical credential source; worker evidence and reviewer calls share it. */
+	getCredentialExposureBoundary?(): CredentialExposureBoundary;
 	/** Each worker provider response, as a cache observation on the worker conversation's own history. */
 	observeWorkerResponse?(message: AssistantMessage, observation: WorkerResponseObservation): void;
 	emit(event: AgentSessionEvent): void;
@@ -2057,7 +2061,7 @@ export class WorkerDelegationController {
 		if (active.has("skill") && this.deps.getSkillReadBroker) names.push("skill");
 		if (active.has("skill_audit") && this.deps.getSkillAuditSource) names.push("skill_audit");
 		if (active.has("run_toolkit_script")) names.push("run_toolkit_script");
-		if (active.has("typesafe_review")) names.push("typesafe_review");
+		if (active.has(SYSTEM_ONE_TOOL_NAME)) names.push(SYSTEM_ONE_TOOL_NAME);
 		return names;
 	}
 
@@ -3545,8 +3549,9 @@ export class WorkerDelegationController {
 			? getProcessWorkRun(this.deps.getAgentDir(), "outputs", "tool-streams").path
 			: undefined;
 		const adapterSources: WorkerToolAdapterSources = {};
-		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === "typesafe_review")) {
-			adapterSources.typeSafe = {
+		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === SYSTEM_ONE_TOOL_NAME)) {
+			const credentialBoundary = this.deps.getCredentialExposureBoundary?.();
+			adapterSources.systemOne = {
 				evidenceStore: TypeSafeEvidenceStore.file(
 					this.deps.getAgentDir(),
 					this.deps.getSessionId(),
@@ -3558,6 +3563,7 @@ export class WorkerDelegationController {
 					this.deps.getSettingsManager(),
 					this.deps.getModelRegistry().authStorage,
 				),
+				...(credentialBoundary ? { credentialBoundary } : {}),
 			};
 		}
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === "artifact_retrieve")) {

@@ -45,15 +45,17 @@ export const WORK_LIFECYCLE_SYSTEM_RULE = `${WORK_LIFECYCLE_PHASES.join(" → ")
 export const CHAT_WORK_LIFECYCLE_SYSTEM_RULE = "Survey→Contract(scope)→Plan/Route→Execute→Prove/Deliver.";
 
 export const WORKER_EXECUTION_DISCIPLINE_RULE =
-	"Model/effort fixed. Stay in requested scope; ask only for missing input or authority. Check code; report command/result or missing check and why; then stop.";
+	"Model/effort fixed; stay in scope. Ask only missing input/authority. Check code; report command/results or missing checks and why; stop.";
+
+/** One shared source for root-to-worker assignment, local choice, judgment and host authority. */
+export const WORKER_DECISION_RIGHTS_RULE =
+	"Latest task and grant; parent history is context. Choose investigation, implementation and focused checks without parent approval. Parent assigns, integrates and launches workers; systemone judgments grant no authority; host enforces grant and deterministic transitions.";
 
 export const SUBAGENT_CORE_SYSTEM_PROMPT = [
-	"Autonomous leaf worker. Contract:",
-	"1. Use exposed tools; host enforces inherited authority.",
-	"2. Work only on the latest task; the parent owns orchestration and other workers.",
-	"3. Host owns limits/cancellation; never invent ceilings or irreversible authority.",
-	"4. Never invent facts, paths, APIs, results; state uncertainty.",
-	"5. Obey the output contract; your result is independently verifiable evidence.",
+	"Leaf worker.",
+	WORKER_DECISION_RIGHTS_RULE,
+	"Never invent ceilings, facts, paths, APIs or results; state uncertainty.",
+	"Follow output contract; report verifiable evidence.",
 	WORKER_EXECUTION_DISCIPLINE_RULE,
 ].join("\n");
 
@@ -136,11 +138,11 @@ export const SKILL_VAULT_SYSTEM_RULE =
 
 /** Builds one capability-exact prompt; role text never denies a policy-granted tool. */
 /**
- * System One validation doctrine shared by every agent that holds `typesafe_review`: settle findings on
+ * System One validation doctrine shared by every agent that holds `systemone`: settle findings on
  * atomic questions over the real source, and report what stays unsettled instead of rounding it up.
  */
 export const SYSTEM_ONE_VALIDATION_RULE =
-	"SYSTEM ONE: use typesafe_review for focused semantic judgments over supplied evidence; batch independent questions. Jev grants no authority. Uncertain results return to you: gather new evidence or decide only within grant. Workers report unresolved items to the parent in inconclusive; the parent owns owner questions. Never reroll unchanged evidence.";
+	"SYSTEMONE: use systemone for focused typed judgments over evidence; batch independent questions. Typed results advise; the host enforces grants and transitions. On uncertainty, gather new evidence or decide within grant. Workers report unresolved items in inconclusive; the parent owns owner questions. Never reroll unchanged evidence.";
 
 export function buildWorkerSystemPrompt(capabilities: {
 	write: boolean;
@@ -151,8 +153,8 @@ export function buildWorkerSystemPrompt(capabilities: {
 		? '{"summary":"<what you did>","status":"completed"|"blocked","blockers":[],"findings":[{"summary":"<finding>","confidence":<0..1>}],"inconclusive":["<unsettled finding: what is missing>"],"actions":[{"op":"write","path":"<relative path>","content":"<full file content>"},{"op":"edit","path":"<relative path>","old":"<exact text>","new":"<replacement>"}]}'
 		: '{"summary":"<what you concluded>","status":"completed"|"blocked","blockers":["<failure or missing authority>"],"findings":[{"summary":"<one concrete finding>","confidence":<0..1>}],"inconclusive":["<unsettled finding: what is missing>"]}';
 	return [
-		"Autonomous durable leaf worker; use tools. Host enforces grant.",
-		"CAVEMAN MODE - MANDATORY: Inherited parent history is context only. Execute only the latest TASK envelope. Parent-owned orchestration stays parent-owned; decide work from that TASK, never inherited parent intent.",
+		"Durable worker; use tools; host enforces grant.",
+		WORKER_DECISION_RIGHTS_RULE,
 		...(capabilities.write
 			? ["Write/edit tools and actions are path-scoped; touch only that scope."]
 			: ["The workspace tools are read-only; do not claim file changes."]),
@@ -164,7 +166,7 @@ export function buildWorkerSystemPrompt(capabilities: {
 		"STRICT JSON only:",
 		resultShape,
 		...(capabilities.write ? ["Keep edits exact. Do not repeat tool-applied changes in fallback actions."] : []),
-		'Use status "blocked" plus blockers when the grant cannot complete the task. Never invent output, paths, APIs, or facts.',
+		'If blocked by the grant, return status "blocked" with blockers. Never invent facts or output.',
 		"Unconfirmed findings go in inconclusive, never findings.",
 		...(capabilities.systemOne ? [SYSTEM_ONE_VALIDATION_RULE] : []),
 	].join("\n");

@@ -3,6 +3,11 @@ import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { EDGE_CONFIRMATION_REQUIRED, type EdgeConfirmationRequest } from "../src/core/autonomy/edge-policy.ts";
+import type { SemanticDecisionEngine } from "../src/core/decision/engine.ts";
+import { createDecisionEvaluation } from "../src/core/decision/evaluation.ts";
+import { noulBand } from "../src/core/decision/noul.ts";
+import type { DecisionProgram } from "../src/core/decision/program.ts";
+import { SystemOneSteeringPlane } from "../src/core/steering/system-one-steering-plane.ts";
 import { createHarness } from "./suite/harness.ts";
 
 const bashParameters = Type.Object({ command: Type.String() });
@@ -141,6 +146,87 @@ describe("the edge in a session", () => {
 			]);
 			await harness.session.prompt("Delete the repository");
 			expect(bash.commands).toEqual(["rm -rf ."]);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("does not treat a scoped operation grant as blanket authority for a different command", async () => {
+		const command = "git status --short";
+		const bash = bashSpy();
+		const harness = await createHarness({ baseToolsOverride: [bash.tool], settings: { edge: { allow: [] } } });
+		const probabilities: Readonly<Record<string, number>> = {
+			leaves_machine: 0.98,
+			cannot_be_undone: 0.01,
+			touches_outside_task: 0.01,
+			acquires_external_code: 0.01,
+			request_authorizes: 0.01,
+		};
+		let evaluations = 0;
+		const decisionEngine: SemanticDecisionEngine = {
+			id: "scoped-grant-test",
+			model: "faux/scoped-grant-test",
+			capabilities: () => ({
+				boolean: true,
+				choice: true,
+				score: true,
+				set: true,
+				fullDistributions: false,
+				parallelIndependentDecisions: true,
+				confidenceProvenance: "native_calibrated",
+			}),
+			async evaluate(program: DecisionProgram) {
+				evaluations++;
+				const results = Object.fromEntries(
+					program.decisions.map(({ id }) => {
+						const probabilityTrue = probabilities[id] ?? 0.01;
+						return [
+							id,
+							{
+								kind: "boolean" as const,
+								probabilityTrue,
+								direction: "required_true" as const,
+								band: noulBand(probabilityTrue, "required_true"),
+								confidence: {
+									value: 0.99,
+									provenance: "native_calibrated" as const,
+									isCalibrated: true,
+									noulProbabilityTrue: probabilityTrue,
+								},
+							},
+						];
+					}),
+				);
+				return createDecisionEvaluation({
+					programId: program.id,
+					programVersion: program.version,
+					engineId: this.id,
+					model: this.model,
+					confidenceProvenance: "native_calibrated",
+					results,
+				});
+			},
+		};
+		harness.session.attachAdaptiveRuntime({ steeringPlane: new SystemOneSteeringPlane({ decisionEngine }) });
+		harness.session.grantEdge("operation.irreversible", "operator", { scopeKey: "different-command-only" });
+		try {
+			harness.setResponses([
+				fauxAssistantMessage([fauxToolCall("bash", { command })], { stopReason: "toolUse" }),
+				fauxAssistantMessage("Done"),
+			]);
+			await harness.session.prompt("Summarise the build only; do not send it anywhere.");
+			expect(evaluations).toBe(1);
+			expect(bash.commands).toEqual([]);
+			expect(lastToolResultText(harness)).toContain("System One refused");
+
+			harness.session.grantEdge("operation.irreversible", "operator");
+			harness.setResponses([
+				fauxAssistantMessage([fauxToolCall("bash", { command })], { stopReason: "toolUse" }),
+				fauxAssistantMessage("Done"),
+			]);
+			await harness.session.prompt("Summarise the build only; do not send it anywhere.");
+			expect(evaluations).toBe(1);
+			expect(bash.commands).toEqual([command]);
 		} finally {
 			await harness.cleanup();
 		}

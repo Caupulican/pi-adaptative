@@ -129,6 +129,152 @@ describe("worker supervision control delivery", () => {
 		});
 	});
 
+	it.each([
+		{ label: "steer", previouslySteered: false, toolCalls: 4 },
+		{ label: "reroute", previouslySteered: true, toolCalls: 7 },
+	] as const)("drops a delayed $label after the logical agent has moved to a newer attempt", async (scenario) => {
+		const decisiveStall = {
+			meaningful_progress: 0.05,
+			worker_stuck: 0.95,
+			strategy_repetition: 0.95,
+			work_off_track: 0.05,
+			needs_independent_verification: 0.05,
+			specialist_gap_present: 0.05,
+			capability_gap_present: 0.05,
+			external_block_present: 0.05,
+		};
+		let releaseCertificate:
+			| ((certificate: { certificate_id: string; answers: typeof decisiveStall }) => void)
+			| undefined;
+		let markAssessmentStarted: (() => void) | undefined;
+		const assessmentStarted = new Promise<void>((resolve) => {
+			markAssessmentStarted = resolve;
+		});
+		const pendingCertificate = new Promise<{ certificate_id: string; answers: typeof decisiveStall }>((resolve) => {
+			releaseCertificate = resolve;
+		});
+		const supervisor = new WorkerSemanticSupervisor({
+			debounceMs: 0,
+			minToolCalls: 0,
+			minElapsedMs: 0,
+			steering: {
+				requireCertificate: async () => {
+					markAssessmentStarted?.();
+					return pendingCertificate;
+				},
+			},
+		});
+		if (scenario.previouslySteered) supervisor.noteSteering("attempt-1", 4);
+		let currentAttemptId = "attempt-1";
+		const steered: string[] = [];
+		const cancelled: string[] = [];
+		const coordinator = new WorkerSupervisionCoordinator({
+			supervisor,
+			control: {
+				steerWorker: (agentId) => {
+					steered.push(agentId);
+				},
+				cancelWorker: (agentId) => {
+					cancelled.push(agentId);
+				},
+			},
+			isAttemptLive: (attemptId) => attemptId === currentAttemptId,
+		});
+
+		const delayed = coordinator.observe({
+			...observation({ toolCalls: scenario.toolCalls, outputTail: "stalled attempt 1", role: "explorer" }),
+			agentId: "persistent-agent",
+		});
+		await assessmentStarted;
+		currentAttemptId = "attempt-2";
+		releaseCertificate?.({ certificate_id: "decisive-stall", answers: decisiveStall });
+
+		expect(await delayed).toBeUndefined();
+		expect(steered).toEqual([]);
+		expect(cancelled).toEqual([]);
+		expect(coordinator.getSignals().map((signal) => signal.action)).toEqual([]);
+	});
+
+	it("drops an aborted semantic result even while the suspended attempt remains live", async () => {
+		const decisiveStall = {
+			meaningful_progress: 0.05,
+			worker_stuck: 0.95,
+			strategy_repetition: 0.95,
+			work_off_track: 0.05,
+			needs_independent_verification: 0.05,
+			specialist_gap_present: 0.05,
+			capability_gap_present: 0.05,
+			external_block_present: 0.05,
+		};
+		let releaseCertificate:
+			| ((certificate: { certificate_id: string; answers: typeof decisiveStall }) => void)
+			| undefined;
+		let markAssessmentStarted: (() => void) | undefined;
+		const assessmentStarted = new Promise<void>((resolve) => {
+			markAssessmentStarted = resolve;
+		});
+		const pendingCertificate = new Promise<{ certificate_id: string; answers: typeof decisiveStall }>((resolve) => {
+			releaseCertificate = resolve;
+		});
+		const controller = new AbortController();
+		const supervisor = new WorkerSemanticSupervisor({
+			debounceMs: 0,
+			minToolCalls: 0,
+			minElapsedMs: 0,
+			steering: {
+				requireCertificate: async () => {
+					markAssessmentStarted?.();
+					return pendingCertificate;
+				},
+			},
+		});
+		supervisor.noteSteering("attempt-1", 4);
+		const cancelled: string[] = [];
+		const coordinator = new WorkerSupervisionCoordinator({
+			supervisor,
+			control: {
+				steerWorker: () => {},
+				cancelWorker: (agentId) => {
+					cancelled.push(agentId);
+				},
+			},
+			// The session treats suspended attempts as resumable, so liveness alone does not fence abort.
+			isAttemptLive: () => true,
+		});
+
+		const delayed = coordinator.observe(
+			observation({ toolCalls: 7, outputTail: "stalled attempt 1" }),
+			controller.signal,
+		);
+		await assessmentStarted;
+		controller.abort();
+		releaseCertificate?.({ certificate_id: "decisive-stall", answers: decisiveStall });
+
+		expect(await delayed).toBeUndefined();
+		expect(cancelled).toEqual([]);
+		expect(coordinator.getSignals()).toEqual([]);
+	});
+
+	it("still applies decisive supervision to the current attempt", async () => {
+		const supervisor = new WorkerSemanticSupervisor({ debounceMs: 0, minToolCalls: 0, minElapsedMs: 0 });
+		supervisor.noteSteering("attempt-1", 4);
+		const cancelled: string[] = [];
+		const coordinator = new WorkerSupervisionCoordinator({
+			supervisor,
+			control: {
+				steerWorker: () => {},
+				cancelWorker: (agentId) => {
+					cancelled.push(agentId);
+				},
+			},
+			isAttemptLive: (attemptId) => attemptId === "attempt-1",
+		});
+
+		const result = await coordinator.observe(observation({ toolCalls: 7, outputTail: "stalled attempt 1" }));
+		expect(result?.action).toBe("stop_and_reroute");
+		expect(cancelled).toEqual(["worker-1"]);
+	});
+
 	it("does not count a rejected validation-churn steer or reroute on the next window", async () => {
 		const supervisor = new WorkerSemanticSupervisor({ debounceMs: 0, minToolCalls: 0, minElapsedMs: 0 });
 		const errors: string[] = [];

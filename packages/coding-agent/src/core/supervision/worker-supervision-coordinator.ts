@@ -191,12 +191,13 @@ export class WorkerSupervisionCoordinator {
 		observation: WorkerProgressObservation,
 		signal?: AbortSignal,
 	): Promise<WorkerSupervisionSignal | undefined> {
+		if (signal?.aborted) return undefined;
 		// The deterministic churn check needs no semantic judgment and runs first. It applies to the role
 		// whose job is building: re-running validation is a verifier's or explorer's work, not churn.
 		if (observation.role === "implementer" && isValidationChurn(observation)) {
 			const steered = this.deps.supervisor.getPriorSteeringCount(observation.attemptId) > 0;
 			if (!steered || this.deps.supervisor.steerGraceElapsed(observation.attemptId, observation.toolCalls))
-				return this.steerValidationChurn(observation.agentId, observation);
+				return this.steerValidationChurn(observation.agentId, observation, signal);
 		}
 		let verdict: WorkerSupervisionSignal | undefined;
 		try {
@@ -208,7 +209,7 @@ export class WorkerSupervisionCoordinator {
 			return undefined;
 		}
 		if (!verdict) return undefined;
-		return this.applyAndRecord(verdict, observation);
+		return this.applyAndRecord(verdict, observation, STALL_DIRECTIVE, signal);
 	}
 
 	/**
@@ -219,6 +220,7 @@ export class WorkerSupervisionCoordinator {
 	async steerValidationChurn(
 		agentId: string,
 		attempt: LiveWorkerAttempt,
+		signal?: AbortSignal,
 	): Promise<WorkerSupervisionSignal | undefined> {
 		const prior = this.deps.supervisor.getPriorSteeringCount(attempt.attemptId);
 		const reroute = prior > 0;
@@ -241,7 +243,7 @@ export class WorkerSupervisionCoordinator {
 				? "Worker rerouted · repeated broad validation with no new implementation"
 				: "Worker steered · repeated broad validation with no new implementation",
 		};
-		return this.applyAndRecord(verdict, { ...attempt, agentId }, VALIDATION_CHURN_DIRECTIVE);
+		return this.applyAndRecord(verdict, { ...attempt, agentId }, VALIDATION_CHURN_DIRECTIVE, signal);
 	}
 
 	private async applyControl(
@@ -269,7 +271,19 @@ export class WorkerSupervisionCoordinator {
 		verdict: WorkerSupervisionSignal,
 		observation: WorkerProgressObservation,
 		steerDirective = STALL_DIRECTIVE,
+		signal?: AbortSignal,
 	): Promise<WorkerSupervisionSignal | undefined> {
+		// An assessment can settle after its attempt. Fence at the shared control boundary so a stale
+		// signal cannot steer or cancel a newer assignment on the same persistent logical agent.
+		if (
+			verdict.objective_id !== observation.objectiveId ||
+			verdict.task_id !== observation.taskId ||
+			verdict.attempt_id !== observation.attemptId ||
+			signal?.aborted ||
+			(this.deps.isAttemptLive && !this.deps.isAttemptLive(observation.attemptId))
+		) {
+			return undefined;
+		}
 		try {
 			await this.applyControl(verdict, observation, steerDirective);
 		} catch (error) {

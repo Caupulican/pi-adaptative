@@ -21,7 +21,7 @@ describe("worker service receipt after execution shutdown", () => {
 		const failUsageWrite = state === "disposed_surface_write_retry" || state === "disposed_surface_postcommit_retry";
 		const waitForSurfaceDisposal = state === "disposed_surface" || failUsageWrite;
 		const harness = await createHarness({
-			initialActiveToolNames: ["delegate", "typesafe_review"],
+			initialActiveToolNames: ["delegate", "systemone"],
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
 		const sessionId = harness.sessionManager.getSessionId();
@@ -125,7 +125,7 @@ describe("worker service receipt after execution shutdown", () => {
 			harness.authStorage.set("typesafe", { type: "api_key", key: "late-receipt-fixture-key" });
 			harness.setResponses([
 				fauxAssistantMessage(
-					fauxToolCall("typesafe_review", {
+					fauxToolCall("systemone", {
 						action: "evaluate",
 						evaluation: {
 							state: "fixture",

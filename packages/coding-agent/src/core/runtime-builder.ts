@@ -125,7 +125,7 @@ import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { TypeSafeEvidenceMaterializer } from "./review/typesafe-evidence-materializer.ts";
 import { TypeSafeEvidenceStore } from "./review/typesafe-evidence-store.ts";
-import { TypeSafeReviewer } from "./review/typesafe-reviewer.ts";
+import { SystemOneReviewer } from "./review/typesafe-reviewer.ts";
 import { ScoutController } from "./scout-controller.ts";
 import { BitwardenCredentialStorageRouter } from "./secrets/bitwarden-credential-storage-router.ts";
 import {
@@ -156,6 +156,7 @@ import type { ClarificationDecisionEngine } from "./system-one/clarification.ts"
 import type { SystemOneController } from "./system-one/controller.ts";
 import type { SemanticUncertaintyPort } from "./system-one/semantic-doubts.ts";
 import { createSessionVerificationHost, wrapToolWithVerification } from "./system-one/session-verification-host.ts";
+import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 import { TaskDirectoryRuntime } from "./tasks/task-directory-runtime.ts";
 import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
 import type { TaskStepsState } from "./tasks/task-state.ts";
@@ -184,6 +185,7 @@ import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script
 import { createSecretStoreToolDefinition } from "./tools/secret-store.ts";
 import { disposeShellExecutionSession } from "./tools/shell-execution-session.ts";
 import { createSkillVaultToolDefinition } from "./tools/skill.ts";
+import { createSystemOneToolDefinition } from "./tools/systemone.ts";
 import { createTaskDirectoryToolDefinition } from "./tools/task-directory.ts";
 import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
 import {
@@ -195,7 +197,6 @@ import {
 import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/tool-definition-wrapper.ts";
 import { wrapToolExecution } from "./tools/tool-execution-wrapper.ts";
 import { createToolTaskToolDefinition, type ToolTaskDependencies } from "./tools/tool-task.ts";
-import { createTypeSafeReviewToolDefinition } from "./tools/typesafe-review.ts";
 import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
 import { countFileLinesSync } from "./util/bounded-file.ts";
 import { WORKER_FORBIDDEN_TOOLS } from "./worker-tool-ceiling.ts";
@@ -509,6 +510,11 @@ interface RuntimeToolAccessPolicy {
  * {@link AgentSession}. See the module header for the snapshot-ownership and host-binding boundaries.
  */
 export class RuntimeBuilder {
+	/** The canonical host-only source and exact-value redactor shared with model request boundaries. */
+	get credentialExposureBoundary(): CredentialExposureBoundary {
+		return this._credentialExposureBoundary;
+	}
+
 	/** The tool mechanics a worker lane shares with root (see `SharedLaneToolOptions`). */
 	getSharedLaneToolOptions(): SharedLaneToolOptions {
 		return this._sharedLaneToolOptions;
@@ -584,7 +590,11 @@ export class RuntimeBuilder {
 			},
 		});
 		this._credentialExposureBoundary = {
-			redactSensitiveText: (text) => this._credentialManager.redactSensitiveText(text),
+			redactSensitiveText: (text, additionalValues) =>
+				this._credentialManager.redactSensitiveText(text, additionalValues),
+			createSensitiveTextRedactor: (additionalValues) =>
+				this._credentialManager.createSensitiveTextRedactor(additionalValues),
+			getSensitiveValues: () => this.deps.getModelRegistry().getKnownCredentialValues(),
 			// Data from the retired local vault remains protected even though it is no longer executable.
 			protectedFiles: [secretVaultFile(deps.getAgentDir()), ...this._credentialBootstrapFiles],
 			// Worker process tools remain host-wide for ordinary sibling-project work, but the
@@ -889,7 +899,7 @@ export class RuntimeBuilder {
 				if (
 					!policy ||
 					policy.enforcements.some((kind) => kind === "path-scope" || kind === "process-launcher") ||
-					["typesafe_review", "peer"].includes(tool.name)
+					[SYSTEM_ONE_TOOL_NAME, "peer"].includes(tool.name)
 				) {
 					bound = this._taskDirectories.bindTool(tool);
 				}
@@ -1232,7 +1242,7 @@ export class RuntimeBuilder {
 			this._baseToolDefinitions.set("tool_task", createToolTaskToolDefinition(toolTaskDependencies));
 		}
 		if (!baseToolsOverride) {
-			const typeSafeEvidenceStore = toolAccess.allows("typesafe_review")
+			const systemOneEvidenceStore = toolAccess.allows(SYSTEM_ONE_TOOL_NAME)
 				? TypeSafeEvidenceStore.file(
 						this.deps.getAgentDir(),
 						this.deps.getSessionManager().getSessionId(),
@@ -1271,20 +1281,21 @@ export class RuntimeBuilder {
 					),
 				);
 			}
-			if (typeSafeEvidenceStore) {
+			if (systemOneEvidenceStore) {
 				// The same access every System One path uses: one provider's key only ever goes to that
 				// provider, and a provider switch in settings applies to the next review.
-				const reviewer = new TypeSafeReviewer({
+				const reviewer = new SystemOneReviewer({
 					access: systemOneAccessFromSession(
 						this.deps.getSettingsManager(),
 						this.deps.getModelRegistry().authStorage,
 					),
+					credentialBoundary: this._credentialExposureBoundary,
 				});
 				this._baseToolDefinitions.set(
-					"typesafe_review",
-					createTypeSafeReviewToolDefinition(
+					SYSTEM_ONE_TOOL_NAME,
+					createSystemOneToolDefinition(
 						reviewer,
-						typeSafeEvidenceStore,
+						systemOneEvidenceStore,
 						undefined,
 						new TypeSafeEvidenceMaterializer({
 							getCwd: () => this._taskDirectories.cwd,
@@ -1376,10 +1387,10 @@ export class RuntimeBuilder {
 			if (shouldBuildGoalExecutor) {
 				const goalToolDefinition = createGoalToolDefinition({
 					getGoalState: () => this.deps.getGoalStateSnapshot(),
-					...(typeSafeEvidenceStore
+					...(systemOneEvidenceStore
 						? {
 								retainCompletionEvidence: (toolCallId, decision) =>
-									typeSafeEvidenceStore.save(toolCallId, { completionDecision: decision }),
+									systemOneEvidenceStore.save(toolCallId, { completionDecision: decision }),
 							}
 						: {}),
 					getActiveVerificationIds: () => [

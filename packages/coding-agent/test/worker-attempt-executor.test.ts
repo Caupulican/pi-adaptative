@@ -21,6 +21,8 @@ import {
 import { CapabilityGateway, type SharedCapabilityBudget } from "../src/core/orchestration/capability-gateway.ts";
 import type { AttemptCheckpoint, AttemptUsageSnapshot, ExecutionGrant } from "../src/core/orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../src/core/orchestration/delegation-ledger.ts";
+import { WorkerSemanticSupervisor } from "../src/core/supervision/worker-semantic-supervisor.ts";
+import { WorkerSupervisionCoordinator } from "../src/core/supervision/worker-supervision-coordinator.ts";
 import { createTestExecutionGrant } from "./orchestration-profile-fixture.ts";
 
 const ZERO_USAGE: Usage = {
@@ -717,6 +719,109 @@ describe("worker attempt executor", () => {
 			recentFailures: [],
 		});
 		expect(recovered.at(-1)).toMatchObject({ isStalled: false, recentFailures: [] });
+	});
+
+	it("forwards the native attempt abort to deferred worker supervision", async () => {
+		const controller = new AbortController();
+		const decisiveStall = {
+			meaningful_progress: 0.05,
+			worker_stuck: 0.95,
+			strategy_repetition: 0.95,
+			work_off_track: 0.95,
+			needs_independent_verification: 0.05,
+			specialist_gap_present: 0.05,
+			capability_gap_present: 0.05,
+			external_block_present: 0.05,
+		};
+		let releaseCertificate:
+			| ((certificate: { certificate_id: string; answers: typeof decisiveStall }) => void)
+			| undefined;
+		let markAssessmentStarted: (() => void) | undefined;
+		const assessmentStarted = new Promise<void>((resolve) => {
+			markAssessmentStarted = resolve;
+		});
+		const pendingCertificate = new Promise<{ certificate_id: string; answers: typeof decisiveStall }>((resolve) => {
+			releaseCertificate = resolve;
+		});
+		const supervisor = new WorkerSemanticSupervisor({
+			debounceMs: 0,
+			minToolCalls: 0,
+			minElapsedMs: 0,
+			steering: {
+				requireCertificate: async () => {
+					markAssessmentStarted?.();
+					return pendingCertificate;
+				},
+			},
+		});
+		const cancelled: string[] = [];
+		const steered: string[] = [];
+		const coordinator = new WorkerSupervisionCoordinator({
+			supervisor,
+			control: {
+				steerWorker: (agentId) => {
+					steered.push(agentId);
+				},
+				cancelWorker: (agentId) => {
+					cancelled.push(agentId);
+				},
+			},
+			isAttemptLive: () => true,
+		});
+		let receivedSignal: AbortSignal | undefined;
+		const harness = createExecutorHarness(
+			async (options) => {
+				if (!options.afterToolCall) throw new Error("Missing tool completion hook.");
+				const assistant = fauxAssistantMessage([fauxToolCall("read", { path: "same.ts" })], {
+					stopReason: "toolUse",
+				});
+				const toolCall = assistant.content.find((content) => content.type === "toolCall");
+				if (toolCall?.type !== "toolCall") throw new Error("Expected a tool call.");
+				await options.afterToolCall({
+					assistantMessage: assistant,
+					toolCall,
+					args: { path: "same.ts" },
+					result: { content: [{ type: "text", text: "file contents" }], details: {} },
+					isError: false,
+					context: { systemPrompt: "", messages: [], tools: [] },
+				});
+				const terminal = fauxAssistantMessage('{"summary":"observed","status":"completed"}');
+				await options.onMessage?.(terminal);
+				return {
+					text: '{"summary":"observed","status":"completed"}',
+					usage: ZERO_USAGE,
+					stopReason: "stop",
+					messages: [...(options.history ?? []), terminal],
+				};
+			},
+			100,
+			undefined,
+			undefined,
+			controller.signal,
+			30_000,
+			true,
+			undefined,
+			[],
+			undefined,
+			{
+				observeWorkerProgress: (observation, signal) => {
+					receivedSignal = signal;
+					return coordinator.observe(observation, signal);
+				},
+			},
+		);
+
+		const execution = harness.executor.run();
+		await assessmentStarted;
+		controller.abort(new Error("suspend observed worker attempt"));
+		releaseCertificate?.({ certificate_id: "late-stall", answers: decisiveStall });
+		const result = await execution;
+
+		expect(receivedSignal).toBe(controller.signal);
+		expect(cancelled).toEqual([]);
+		expect(steered).toEqual([]);
+		expect(coordinator.getSignals()).toEqual([]);
+		expect(result.rawOutcome.accepted).toBe(false);
 	});
 
 	it("threads final worker context into the isolated system prompt", async () => {

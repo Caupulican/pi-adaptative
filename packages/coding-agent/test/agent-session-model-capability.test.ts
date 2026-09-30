@@ -20,7 +20,7 @@ const MINIMAL_ACTIVE_TOOL_NAMES = [
 	"get_goal",
 	"update_goal",
 	"ask_question",
-	"typesafe_review",
+	"systemone",
 	"run_toolkit_script",
 	"artifact_retrieve",
 ];
@@ -58,7 +58,7 @@ describe("model capability auto-detection", () => {
 				"pipeline",
 				"ask_question",
 				"secret_store",
-				"typesafe_review",
+				"systemone",
 				"peer",
 				"delegate",
 				"tool_task",
@@ -93,7 +93,7 @@ describe("model capability auto-detection", () => {
 			const priorJevSchemaTokens = 358;
 			const advisoryUncertaintyAllowance = 104;
 			const canonicalSchemaAllowance = 470 + advisoryUncertaintyAllowance;
-			const jevSchemaTokens = composition.tools.find((tool) => tool.name === "typesafe_review")!.schemaTokens;
+			const jevSchemaTokens = composition.tools.find((tool) => tool.name === "systemone")!.schemaTokens;
 			expect(jevSchemaTokens).toBeGreaterThan(0);
 			expect(jevSchemaTokens).toBeLessThanOrEqual(priorJevSchemaTokens + canonicalSchemaAllowance);
 			expect(composition.systemPromptTokens + composition.toolSchemaTokens).toBeLessThanOrEqual(
@@ -126,12 +126,7 @@ describe("model capability auto-detection", () => {
 		const harness = await createHarness({ models: [{ id: "tiny-model", contextWindow: 4_096 }] });
 		try {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("chat");
-			expect(harness.session.getActiveToolNames()).toEqual([
-				"create_goal",
-				"get_goal",
-				"update_goal",
-				"typesafe_review",
-			]);
+			expect(harness.session.getActiveToolNames()).toEqual(["create_goal", "get_goal", "update_goal", "systemone"]);
 			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative concise chat assistant\./);
 			expect(harness.session.systemPrompt).toContain(CHAT_WORK_LIFECYCLE_SYSTEM_RULE);
 			expect(harness.session.systemPrompt).not.toContain("Current working directory:");

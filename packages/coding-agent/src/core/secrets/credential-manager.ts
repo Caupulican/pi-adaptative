@@ -246,6 +246,22 @@ function cloneEnvironment(values: Record<string, string>): Record<string, string
 	return Object.fromEntries(Object.entries(values));
 }
 
+/** Canonical exact-value replacement for host-known credentials shared with standalone adapters. */
+export function createCredentialTextRedactor(values: Iterable<string>): (text: string) => string {
+	const uniqueValues = [...new Set([...values].filter((value) => value.length > 0))].sort(
+		(left, right) => right.length - left.length,
+	);
+	return (text) => {
+		let redacted = text;
+		for (const value of uniqueValues) redacted = redacted.split(value).join("[REDACTED_SECRET]");
+		return redacted;
+	};
+}
+
+export function redactCredentialValues(text: string, values: Iterable<string>): string {
+	return createCredentialTextRedactor(values)(text);
+}
+
 function findReplaceableProfile(
 	summaries: readonly StoredCredentialProfileSummary[],
 	profile: string,
@@ -522,12 +538,12 @@ export class CredentialManager {
 		return this.getEnvironmentForCwd(cwd) !== undefined;
 	}
 
-	redactSensitiveText(text: string): string {
-		let redacted = text;
-		for (const value of [...this.sensitiveValues].sort((left, right) => right.length - left.length)) {
-			if (value.length > 0) redacted = redacted.split(value).join("[REDACTED_SECRET]");
-		}
-		return redacted;
+	redactSensitiveText(text: string, additionalValues: readonly string[] = []): string {
+		return redactCredentialValues(text, [...this.sensitiveValues, ...additionalValues]);
+	}
+
+	createSensitiveTextRedactor(additionalValues: readonly string[] = []): (text: string) => string {
+		return createCredentialTextRedactor([...this.sensitiveValues, ...additionalValues]);
 	}
 
 	lock(): void {

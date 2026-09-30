@@ -275,7 +275,8 @@ export function resolveHeadersOrThrow(
 	if (!headers) return undefined;
 	const resolved: Record<string, string> = {};
 	for (const [key, value] of Object.entries(headers)) {
-		resolved[key] = resolveConfigValueOrThrow(value, `${description} header "${key}"`);
+		const resolvedValue = resolveConfigValueOrThrow(value, `${description} header "${key}"`);
+		resolved[key] = resolvedValue;
 	}
 	return Object.keys(resolved).length > 0 ? resolved : undefined;
 }
@@ -283,4 +284,9 @@ export function resolveHeadersOrThrow(
 /** Clear the config value command cache. Exported for testing. */
 export function clearConfigValueCache(): void {
 	commandResultCache.clear();
+}
+
+/** A value already produced for this exact credential reference; never runs a command. */
+export function getCachedConfigValue(config: string): string | undefined {
+	return commandResultCache.get(config);
 }

@@ -60,7 +60,36 @@ const accepted = {
 };
 
 describe("mandatory verification coordination", () => {
-	it("omits an absent wrapper receiver from the TypeSafe classification payload", async () => {
+	it.each(["status", "evidence", "uncertainties", "resolve_uncertainty"])(
+		"allows advisory management and evidence inspection during an outage: %s",
+		async (action) => {
+			const judge = vi.fn<VerificationJudge>().mockRejectedValue(new Error("temporary transport outage"));
+			const { coordinator } = fixture(judge);
+			const before = coordinator.status();
+			await expect(
+				coordinator.checkOperation({ tool: "systemone", args: { action }, cwd: "/repo" }),
+			).resolves.toBeUndefined();
+			expect(judge).not.toHaveBeenCalled();
+			expect(coordinator.status()).toEqual(before);
+			expect(() => coordinator.assertResolved()).toThrow("same_lane_verification_required");
+			expect(coordinator.beginCall("root-lane", "systemone")).toBeUndefined();
+		},
+	);
+
+	it.each(["evaluate", "review", "resolve", undefined])(
+		"keeps fresh judgments and unknown actions subject to pending verification: %s",
+		async (action) => {
+			const judge = vi.fn<VerificationJudge>().mockRejectedValue(new Error("temporary transport outage"));
+			const { coordinator } = fixture(judge);
+			await expect(
+				coordinator.checkOperation({ tool: "systemone", args: { action }, cwd: "/repo" }),
+			).rejects.toThrow("temporary transport outage");
+			expect(judge).toHaveBeenCalledOnce();
+			expect(coordinator.status().obligations).toHaveLength(1);
+		},
+	);
+
+	it("omits an absent wrapper receiver from the System One classification payload", async () => {
 		const judge = vi.fn<VerificationJudge>(async (state) => {
 			serializeEvaluation(state);
 			return accepted;
@@ -89,9 +118,9 @@ describe("mandatory verification coordination", () => {
 		);
 	});
 
-	it("keeps the TypeSafe serializer strict for explicitly malformed evidence", () => {
+	it("keeps the System One serializer strict for explicitly malformed evidence", () => {
 		expect(() => serializeEvaluation({ operation: { receiverId: undefined } })).toThrow(
-			"TypeSafe evidence must be finite, acyclic JSON",
+			"System One evidence must be finite, acyclic JSON",
 		);
 	});
 

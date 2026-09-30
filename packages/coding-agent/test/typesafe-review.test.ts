@@ -5,11 +5,11 @@ import { createInMemoryArtifactStore } from "../src/core/context/context-artifac
 import { shouldEscalateModelRouterTool } from "../src/core/model-router/tool-escalation.ts";
 import { TypeSafeEvidenceMaterializer } from "../src/core/review/typesafe-evidence-materializer.ts";
 import { TypeSafeEvidenceStore } from "../src/core/review/typesafe-evidence-store.ts";
-import { type ReviewInput, TypeSafeReviewer } from "../src/core/review/typesafe-reviewer.ts";
-import { createTypeSafeReviewToolDefinition as createTool } from "../src/core/tools/typesafe-review.ts";
+import { type ReviewInput, SystemOneReviewer } from "../src/core/review/typesafe-reviewer.ts";
+import { createSystemOneToolDefinition as createTool } from "../src/core/tools/systemone.ts";
 import { tempDir } from "./temp-dir.ts";
 
-function createTypeSafeReviewToolDefinition(reviewer: TypeSafeReviewer) {
+function createSystemOneToolDefinition(reviewer: SystemOneReviewer) {
 	return createTool(reviewer, new TypeSafeEvidenceStore(createInMemoryArtifactStore()));
 }
 
@@ -44,9 +44,9 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-describe("TypeSafe review boundary", () => {
+describe("System One review boundary", () => {
 	it("keeps observational review calls on a cheap research route", () => {
-		const tool = createTypeSafeReviewToolDefinition(new TypeSafeReviewer({ getApiKey: async () => "fixture-key" }));
+		const tool = createSystemOneToolDefinition(new SystemOneReviewer({ getApiKey: async () => "fixture-key" }));
 		for (const action of ["status", "evidence", "evaluate", "review"] as const) {
 			expect(
 				shouldEscalateModelRouterTool({
@@ -59,7 +59,7 @@ describe("TypeSafe review boundary", () => {
 		}
 	});
 	it("keeps arbitrary cancellation reasons out of review records", async () => {
-		const tool = createTypeSafeReviewToolDefinition(new TypeSafeReviewer({ getApiKey: async () => "fixture-key" }));
+		const tool = createSystemOneToolDefinition(new SystemOneReviewer({ getApiKey: async () => "fixture-key" }));
 		const result = await tool.execute(
 			"cancelled",
 			{ action: "review", review: input },
@@ -75,7 +75,7 @@ describe("TypeSafe review boundary", () => {
 				{ status: 529, headers: { "retry-after": "0", "x-should-retry": String(allowed) } },
 			),
 		);
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		await expect(reviewer.review(input)).rejects.toThrow("TypeSafe HTTP 529");
 		expect(fetcher).toHaveBeenCalledTimes(allowed ? 3 : 1);
 		const bodies = fetcher.mock.calls.map((call) => (call as unknown as [string, RequestInit])[1].body);
@@ -96,8 +96,8 @@ describe("TypeSafe review boundary", () => {
 		},
 	])("keeps canonical validation mandatory behind the compact model schema: $action", async (data) => {
 		const fetcher = vi.fn();
-		const tool = createTypeSafeReviewToolDefinition(
-			new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
+		const tool = createSystemOneToolDefinition(
+			new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
 		);
 		expect(await tool.execute("invalid", JSON.parse(JSON.stringify(data)))).toMatchObject({
 			isError: true,
@@ -110,7 +110,7 @@ describe("TypeSafe review boundary", () => {
 			...response(),
 			metadata: { first: { repeated: '"choice":"contradicts"{}[]\\"' }, second: { repeated: "control" } },
 		};
-		const reviewer = new TypeSafeReviewer({
+		const reviewer = new SystemOneReviewer({
 			getApiKey: async () => "fixture-key",
 			fetch: async () => Response.json(raw),
 		});
@@ -124,8 +124,8 @@ describe("TypeSafe review boundary", () => {
 				`"choice":"contradicts","${key}":"supports"`,
 			);
 			const fetcher = vi.fn(async () => new Response(body));
-			const result = await createTypeSafeReviewToolDefinition(
-				new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
+			const result = await createSystemOneToolDefinition(
+				new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
 			).execute("call", { action: "review", review: input });
 			expect(result).toMatchObject({
 				isError: true,
@@ -142,8 +142,8 @@ describe("TypeSafe review boundary", () => {
 			const fetcher = vi.fn(async () =>
 				Response.json(status === 200 ? response(0.94) : { error: "Unauthorized" }, { status }),
 			);
-			const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
-			const tool = createTypeSafeReviewToolDefinition(reviewer);
+			const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+			const tool = createSystemOneToolDefinition(reviewer);
 			const result = await tool.execute("call", {
 				action: "review",
 				review: { ...input, state: "unique evidence snapshot" },
@@ -179,7 +179,7 @@ describe("TypeSafe review boundary", () => {
 		},
 	])("preserves advanced EntryType data in $question.type questions and answers", async ({ question, answer }) => {
 		const fetcher = vi.fn(async () => Response.json({ ...response(), answers: { entry: answer } }));
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		const data = JSON.parse(
 			JSON.stringify({ state: { source: "Present and direct" }, questions: { entry: question } }),
 		);
@@ -189,7 +189,7 @@ describe("TypeSafe review boundary", () => {
 	});
 	it("does not widen state to null when supporting nullable question entries", async () => {
 		const fetcher = vi.fn();
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		await expect(
 			reviewer.evaluate(JSON.parse('{"state":null,"questions":{"q":{"type":"noul","instructions":"Present?"}}}')),
 		).rejects.toThrow("Invalid TypeSafe evaluation input");
@@ -197,7 +197,7 @@ describe("TypeSafe review boundary", () => {
 	});
 	it("rejects null Score levels as the live API does, preserving non-null structured levels", async () => {
 		const fetcher = vi.fn();
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		const data = JSON.parse(
 			'{"state":"fixture","questions":{"q":{"type":"score","instructions":"Direct?","criteria":[null,{"meaning":"Direct"}]}}}',
 		);
@@ -210,7 +210,7 @@ describe("TypeSafe review boundary", () => {
 				for (const choice of ["supports", "contradicts"]) {
 					const raw = response(confidence, choice);
 					const answers = { control: response().answers.claim, claim: raw.answers.claim };
-					const reviewer = new TypeSafeReviewer({
+					const reviewer = new SystemOneReviewer({
 						getApiKey: async () => "fixture-key",
 						fetch: async () => Response.json({ ...raw, answers }),
 					});
@@ -228,8 +228,8 @@ describe("TypeSafe review boundary", () => {
 	});
 	it("redacts credentials decoded from JSON escapes in provider errors", async () => {
 		const fetcher = vi.fn(async () => new Response(String.raw`{"error":"\u0066ixture-key"}`, { status: 401 }));
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
-		const result = await createTypeSafeReviewToolDefinition(reviewer).execute("call", {
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const result = await createSystemOneToolDefinition(reviewer).execute("call", {
 			action: "review",
 			review: input,
 		});
@@ -242,8 +242,8 @@ describe("TypeSafe review boundary", () => {
 			.fn<typeof fetch>()
 			.mockResolvedValueOnce(Response.json(overload, { status: 529, headers: { "retry-after": "0" } }))
 			.mockResolvedValueOnce(Response.json(response(), { status }));
-		const result = await createTypeSafeReviewToolDefinition(
-			new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
+		const result = await createSystemOneToolDefinition(
+			new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
 		).execute("retry", { action: "review", review: input });
 		expect(result).toMatchObject({
 			isError: status !== 200,
@@ -263,7 +263,7 @@ describe("TypeSafe review boundary", () => {
 		const fetcher = vi.fn(async () =>
 			Response.json({ error: "rate limited" }, { status: 429, headers: { "retry-after": "15" } }),
 		);
-		const pending = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }).review(
+		const pending = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }).review(
 			input,
 			abort.signal,
 		);
@@ -283,7 +283,7 @@ describe("TypeSafe review boundary", () => {
 					}),
 				),
 		);
-		const pending = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }).review(input);
+		const pending = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }).review(input);
 		const failed = expect(pending).rejects.toThrow("timed out");
 		await vi.advanceTimersByTimeAsync(50_000);
 		await failed;
@@ -291,11 +291,11 @@ describe("TypeSafe review boundary", () => {
 		expect(vi.getTimerCount()).toBe(0);
 	});
 	it("charges provider-reported tokens even when malformed answers fail validation", async () => {
-		const reviewer = new TypeSafeReviewer({
+		const reviewer = new SystemOneReviewer({
 			getApiKey: async () => "fixture-key",
 			fetch: async () => Response.json({ ...response(), answers: {} }),
 		});
-		const result = await createTypeSafeReviewToolDefinition(reviewer).execute("call", {
+		const result = await createSystemOneToolDefinition(reviewer).execute("call", {
 			action: "review",
 			review: input,
 		});
@@ -308,11 +308,11 @@ describe("TypeSafe review boundary", () => {
 	it.each(["evaluate", "review"] as const)(
 		"charges successful %s tokens through the tool usage contract",
 		async (action) => {
-			const reviewer = new TypeSafeReviewer({
+			const reviewer = new SystemOneReviewer({
 				getApiKey: async () => "fixture-key",
 				fetch: async () => Response.json(response()),
 			});
-			const result = await createTypeSafeReviewToolDefinition(reviewer).execute("call", {
+			const result = await createSystemOneToolDefinition(reviewer).execute("call", {
 				action,
 				review: input,
 				evaluation: {
@@ -331,7 +331,7 @@ describe("TypeSafe review boundary", () => {
 	);
 	it("retains the distinction of negative zero evidence by refusing lossy JSON", async () => {
 		const fetcher = vi.fn(async () => Response.json(response()));
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		await expect(reviewer.review({ ...input, state: { value: -0 } })).rejects.toThrow("JSON");
 		expect(fetcher).not.toHaveBeenCalled();
 	});
@@ -348,7 +348,7 @@ describe("TypeSafe review boundary", () => {
 			},
 		};
 		const fetcher = vi.fn(async () => Response.json({ ...response(), answers }));
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		const result = await reviewer.evaluate({
 			state: { task: "Classify and rank this evidence" },
 			questions: {
@@ -374,12 +374,12 @@ describe("TypeSafe review boundary", () => {
 		expect(fetcher).toHaveBeenCalledOnce();
 	});
 	it.each(["status", "review"] as const)("does not expose credential resolver failures through %s", async (action) => {
-		const reviewer = new TypeSafeReviewer({
+		const reviewer = new SystemOneReviewer({
 			getApiKey: async () => {
 				throw new Error("fixture-private-credential");
 			},
 		});
-		const result = await createTypeSafeReviewToolDefinition(reviewer).execute("call", { action, review: input });
+		const result = await createSystemOneToolDefinition(reviewer).execute("call", { action, review: input });
 		expect(result).toMatchObject({ isError: true, details: { accepted: false } });
 		expect(JSON.stringify(result)).not.toContain("fixture-private-credential");
 	});
@@ -387,14 +387,14 @@ describe("TypeSafe review boundary", () => {
 		"refuses evidence that JSON would silently change: %s",
 		async (value) => {
 			const fetcher = vi.fn(async () => Response.json(response()));
-			const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+			const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 			await expect(reviewer.review({ ...input, state: { evidence: value } })).rejects.toThrow("JSON");
 			expect(fetcher).not.toHaveBeenCalled();
 		},
 	);
 	it("captures expectations and evidence before deferred credentials resolve", async () => {
 		let resolveKey!: (key: string) => void;
-		const reviewer = new TypeSafeReviewer({
+		const reviewer = new SystemOneReviewer({
 			getApiKey: () =>
 				new Promise((resolve) => {
 					resolveKey = resolve;
@@ -410,8 +410,8 @@ describe("TypeSafe review boundary", () => {
 	});
 	it("does not retry authentication errors and retains a redacted provider error", async () => {
 		const fetcher = vi.fn(async () => Response.json({ error: "fixture-key" }, { status: 401 }));
-		const tool = createTypeSafeReviewToolDefinition(
-			new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
+		const tool = createSystemOneToolDefinition(
+			new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
 		);
 		const result = await tool.execute("call", { action: "review", review: input });
 		expect(result).toMatchObject({ isError: true, details: { accepted: false, response: { error: "[REDACTED]" } } });
@@ -421,7 +421,7 @@ describe("TypeSafe review boundary", () => {
 		const fetcher = vi.fn(async () =>
 			Response.json({ error: "rate limited" }, { status: 429, headers: { "retry-after": "120" } }),
 		);
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		await expect(reviewer.review(input)).rejects.toThrow("Server requested 120s");
 		expect(fetcher).toHaveBeenCalledOnce();
 	});
@@ -438,13 +438,13 @@ describe("TypeSafe review boundary", () => {
 					}),
 				),
 		);
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		await expect(reviewer.review(input)).rejects.toThrow("exceeds 256 KiB");
 		expect(cancel).toHaveBeenCalledOnce();
 	});
 	it("reports missing setup without sending a request or exposing a key", async () => {
 		const fetcher = vi.fn();
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => undefined, fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => undefined, fetch: fetcher });
 		expect(await reviewer.status()).toMatchObject({ enabled: false, authenticationVerified: false });
 		await expect(reviewer.review(input)).rejects.toThrow("/login typesafe");
 		expect(fetcher).not.toHaveBeenCalled();
@@ -454,7 +454,7 @@ describe("TypeSafe review boundary", () => {
 			if (String(url).includes("/models")) return Response.json({ models: [] });
 			return Response.json(response());
 		});
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		expect(await reviewer.status()).toMatchObject({ enabled: true, authenticationVerified: true });
 		expect(fetcher).toHaveBeenCalledWith("https://api.typesafe.ai/v1/models", expect.any(Object));
 
@@ -468,7 +468,7 @@ describe("TypeSafe review boundary", () => {
 	});
 	it("reports authentication failure when status connection receives 401", async () => {
 		const fetcher = vi.fn(async () => new Response("Unauthorized", { status: 401 }));
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "invalid-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "invalid-key", fetch: fetcher });
 		expect(await reviewer.status()).toMatchObject({
 			enabled: true,
 			authenticationVerified: false,
@@ -478,7 +478,7 @@ describe("TypeSafe review boundary", () => {
 	});
 	it("sends complete state once to the fixed endpoint and retains the raw judgment", async () => {
 		const fetcher = vi.fn(async () => Response.json(response()));
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		const result = await reviewer.review(input);
 		expect(result).toMatchObject({ accepted: true, threshold: 0.95, response: response() });
 		const [url, options] = fetcher.mock.calls[0] as unknown as [string, RequestInit];
@@ -503,12 +503,12 @@ describe("TypeSafe review boundary", () => {
 		[1, "contradicts", false],
 	] as const)("gates confidence %s and verdict %s without rerolling", async (confidence, choice, accepted) => {
 		const fetcher = vi.fn(async () => Response.json(response(confidence, choice)));
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		expect((await reviewer.review(input)).accepted).toBe(accepted);
 		expect(fetcher).toHaveBeenCalledOnce();
 	});
 	it("max confidence is distinct from high", async () => {
-		const reviewer = new TypeSafeReviewer({
+		const reviewer = new SystemOneReviewer({
 			getApiKey: async () => "fixture-key",
 			fetch: async () => Response.json(response(0.98)),
 		});
@@ -530,19 +530,19 @@ describe("TypeSafe review boundary", () => {
 		{ claim: { type: "noul", noul: 1 } },
 	])("rejects incomplete, contradictory or wrong-type answers", async (answers) => {
 		const fetcher = vi.fn(async () => Response.json({ ...response(), answers }));
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		await expect(reviewer.review(input)).rejects.toThrow("Invalid TypeSafe response");
 		expect(fetcher).toHaveBeenCalledOnce();
 	});
 	it("rejects secret-bearing state before transport", async () => {
 		const fetcher = vi.fn();
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		await expect(reviewer.review({ ...input, state: "fixture-key" })).rejects.toThrow("credential");
 		expect(fetcher).not.toHaveBeenCalled();
 	});
 	it("does not send when already cancelled", async () => {
 		const fetcher = vi.fn();
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		await expect(reviewer.review(input, AbortSignal.abort())).rejects.toThrow();
 		expect(fetcher).not.toHaveBeenCalled();
 	});
@@ -551,7 +551,7 @@ describe("TypeSafe review boundary", () => {
 			if (String(url).includes("/models")) return Response.json({ data: [] });
 			return Response.json(response(0.99, "supports"));
 		});
-		const reviewer = new TypeSafeReviewer({
+		const reviewer = new SystemOneReviewer({
 			provider: "openrouter",
 			getApiKey: async () => "openrouter-key",
 			fetch: fetcher,
@@ -580,7 +580,7 @@ describe("TypeSafe review boundary", () => {
 		writeFileSync(join(cwd, "claim.ts"), "export const claim = true;\n");
 		const fetcher = vi.fn(async () => Response.json(response()));
 		const tool = createTool(
-			new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
+			new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
 			new TypeSafeEvidenceStore(createInMemoryArtifactStore()),
 			undefined,
 			new TypeSafeEvidenceMaterializer({ getCwd: () => cwd }),
@@ -615,7 +615,7 @@ describe("TypeSafe review boundary", () => {
 		});
 	});
 	it("reports openrouter key configuration error when unauthenticated", async () => {
-		const reviewer = new TypeSafeReviewer({
+		const reviewer = new SystemOneReviewer({
 			provider: "openrouter",
 			getApiKey: async () => undefined,
 		});

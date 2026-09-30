@@ -50,6 +50,17 @@ describe("recurring provider prompt budgets", () => {
 		expect(prompt.length).toBeLessThanOrEqual(maxChars);
 	});
 
+	it("assigns local worker choices to the task while root and host retain their decision rights", () => {
+		for (const prompt of [SUBAGENT_CORE_SYSTEM_PROMPT, WORKER_LANE_SYSTEM_PROMPT]) {
+			expect(prompt).toContain("task and grant");
+			expect(prompt).toContain("investigation, implementation and focused checks");
+			expect(prompt).toContain("without parent approval");
+			expect(prompt).toContain("Parent assigns, integrates and launches workers");
+			expect(prompt).toContain("systemone judgments grant no authority");
+			expect(prompt).toContain("host enforces grant and deterministic transitions");
+		}
+	});
+
 	it("keeps the recurring-contract owner import-free for cross-platform startup", () => {
 		const source = readFileSync(new URL("../src/core/provider-prompt-contracts.ts", import.meta.url), "utf8");
 		expect(source).not.toMatch(/^\s*import\s/m);

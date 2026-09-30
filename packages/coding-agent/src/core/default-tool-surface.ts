@@ -12,6 +12,7 @@
 
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "./goals/goal-tool-names.ts";
+import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 
 export const STABLE_SHELL_TOOL_NAME = "bash" as const;
 
@@ -38,7 +39,7 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 		"pipeline",
 		"ask_question",
 		"secret_store",
-		"typesafe_review",
+		SYSTEM_ONE_TOOL_NAME,
 		"peer",
 		"memory",
 		"delegate",

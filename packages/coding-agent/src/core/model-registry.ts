@@ -33,14 +33,17 @@ import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.ts";
 import { hasAuthenticationHeaders, hasUsableRequestAuth, type RequestAuth } from "./request-auth.ts";
 import {
 	clearConfigValueCache,
+	getCachedConfigValue,
 	getConfigValueEnvVarNames,
 	isCommandConfigValue,
 	isConfigValueConfigured,
 	isLegacyEnvVarNameConfigValue,
+	resolveConfigValue,
 	resolveConfigValueOrThrow,
 	resolveConfigValueUncached,
 	resolveHeadersOrThrow,
 } from "./resolve-config-value.ts";
+import { isCredentialSecretKey } from "./secrets/credential-content-mock.ts";
 
 // Schema for OpenRouter routing preferences
 const PercentileCutoffsSchema = Type.Object({
@@ -703,6 +706,40 @@ export class ModelRegistry {
 	 */
 	getAll(): Model<Api>[] {
 		return this.models.filter((m) => m.kind !== "judge");
+	}
+
+	/** Known request credentials for the exposure boundary, without refreshing providers or running commands. */
+	getKnownCredentialValues(): string[] {
+		const providers = new Set([
+			...this.models.map((model) => model.provider),
+			...this.registeredProviders.keys(),
+			...this.providerRequestConfigs.keys(),
+		]);
+		const values = new Set(this.authStorage.getKnownCredentialValues(providers));
+		const addConfigValue = (configured: string | undefined): string | undefined => {
+			if (!configured) return undefined;
+			const resolved = isCommandConfigValue(configured)
+				? getCachedConfigValue(configured)
+				: resolveConfigValue(configured);
+			if (resolved) values.add(resolved);
+			return resolved;
+		};
+		const addHeaders = (headers: Record<string, string> | undefined): void => {
+			if (!headers) return;
+			for (const [name, value] of Object.entries(headers)) {
+				if (!isCredentialSecretKey(name)) continue;
+				const resolved = addConfigValue(value);
+				const bearer = /^Bearer\s+(.+)$/iu.exec(resolved ?? "")?.[1];
+				if (bearer) values.add(bearer);
+			}
+		};
+		for (const config of this.providerRequestConfigs.values()) {
+			addConfigValue(config.apiKey);
+			addHeaders(config.headers);
+		}
+		for (const headers of this.modelRequestHeaders.values()) addHeaders(headers);
+		for (const model of this.models) addHeaders(model.headers);
+		return [...values];
 	}
 
 	/**

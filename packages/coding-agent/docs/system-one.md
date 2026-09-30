@@ -1,9 +1,16 @@
 # System One
 
-System One is the objective controller: while a goal is active it owns semantic routing and objective
-completion judgments. Jev judges supplied state and host-approved model and effort choices. The host
-owns admission, permissions and approval. Deterministic goal requirements remain the goal ledger's mechanical proof.
-The root model and the workers execute what System One routes.
+System One is the provider-neutral semantic judgment system. Jev is its current judgment model;
+TypeSafe and OpenRouter are provider adapters. The agent-facing tool and bundled skill are named
+`systemone`; changing the provider does not change their contract.
+
+The root owns assignments, integration and the owner conversation. Workers choose their local
+investigation, implementation and focused checks within their admitted task and authority. Peers
+review supplied snapshots and return findings to the root. System One supplies typed judgments;
+the host applies routing policy, state transitions, admission, permissions and cancellation.
+Deterministic goal requirements remain the goal ledger's mechanical proof. An advisory doubt
+returns to the responsible model for evidence or a decision; it does not suspend independent work.
+Mandatory findings require receiving-lane reproduction, repair when confirmed, and rechecking.
 
 ## Loop modes
 
@@ -58,7 +65,8 @@ the duplicate review run in every session.
 Inside the objective loop a System One cancel of the root's own turn is a re-route (the next cycle
 routes again); only the operator's interruption stops the loop. The worker supervisor redirects a
 worker judged off the mission now, steers a stalled one at its next turn, and reroutes a repeated
-stall.
+stall. A delayed result must still name the observed objective, task and live attempt when applied;
+a terminal attempt cannot steer or cancel a newer task on the same persistent worker.
 
 Preflight outcomes other than `allow` skip the current root turn and become the next
 `composeObjectiveRoute` input (`retrieve`, `replan`, `deterministic_test`, `escalate_capability`,
@@ -116,24 +124,32 @@ foreground history. This review uses the host's configured provider connections 
 the chosen peer. Workers cannot launch a peer review.
 
 Call `peer` with `{"action":"options"}` to discover exact `provider/model` references and
-supported thinking levels above the current lead's setting. Options are limited to the host routing
-pool, configured authentication, available quota and reasoning support. They do not assert strength.
-If no higher effort is available, the peer review is unavailable; effort is never silently clamped.
+all supported `thinkingLevels`, plus the strictly higher `strongerThinkingLevels` for explicit
+stronger review. Options are limited to the host routing
+pool, configured authentication, available quota and supported effort. They do not assert strength.
+Ordinary independent review works at equal effort, including when the root is at maximum effort.
+Effort is never silently clamped.
 
 Then call `peer` with `action: "review"` and a `review` object containing:
 
 | Field | Required content |
 |---|---|
 | `peer` | Exact reference disclosed by `options`. |
-| `thinkingLevel` | Disclosed level strictly above the lead's current setting. |
+| `thinkingLevel` | Any disclosed supported level for independent review; a higher level for stronger review. |
+| `selection` | Optional `independent` (default) or `stronger`. |
 | `stage` | `plan` or `delivery`. |
 | `objective` | Requested outcome, up to 2,000 characters. |
 | `artifact` | Relevant complete plan or change snapshot, up to 24,000 characters. |
 | `evidence` | Source with references, checks, adverse findings and limitations, up to 48,000 characters. |
 
-Jev compares the proposed distinct peer with the lead for this task. Admission requires a `stronger`
-judgment at confidence at least 0.95; this is a task-specific judgment, not measured benchmark proof.
-Equal capability, uncertainty, a missing judge or an evaluator outage leaves review unavailable.
+Independent review needs no model-strength judgment and remains available during a strength
+evaluator outage when the host verification journal and candidate fence are bound. It requires
+`workflow.delegate`; stronger selection and proof resolution additionally require `semantic.judge`.
+
+For explicit `stronger` selection, System One compares the proposed distinct peer with the lead for
+this task. Admission requires higher supported effort and a `stronger` judgment at confidence at
+least 0.95. This is task-specific judgment, not measured benchmark proof. Equal capability,
+uncertainty, a missing judge or an evaluator outage leaves only this stronger request unavailable.
 The strength question carries the complete objective, stage and model facts within the host's
 4,000-character routing budget; oversized metadata is refused explicitly. The peer receives the full
 accepted artifact and evidence. The same model id under another provider is not a distinct peer.
@@ -141,8 +157,9 @@ The host fixes the peer and effort for the call, rechecks admission before the p
 and rejects results if the lead, peer configuration, pool, authentication, quota, reviewed candidate
 or session branch changes.
 
-The bounded response contains a snapshot digest, lead and peer settings, judgment provenance,
-findings and limitations. Each finding must quote supplied evidence and specify a reproducible check.
+The bounded response contains a snapshot digest, lead and peer settings, selection, findings and
+limitations. Only stronger review includes strength judgment provenance. Each finding must quote
+supplied evidence and specify a reproducible check.
 Findings open durable obligations in the receiving lead's own lane: reproduce, revise confirmed
 failures, and recheck before affected work continues. The session branch journal retains the full
 bounded finding, candidate identity and scope across reopening. A trusted fork carries active
@@ -172,7 +189,9 @@ While findings remain open, the concrete root and worker tool executors gate aff
 including YOLO calls. A same-checkout Git push is refused directly. Other operations require a
 decisive judgment that they investigate, reproduce, repair or recheck in the receiving lane, or
 are unrelated to the finding's scope. Native evidence reads and obligation inspection remain
-available during evaluator outages. Classification can retry on the next operation; resolution
+available during evaluator outages, as do `systemone` status, retained evidence inspection, and
+owner advisory uncertainty dispositions. These actions never clear mandatory findings or create
+verification receipts. Classification can retry on the next operation; resolution
 can retry the same proof after an outage. Outages retain their actual cause and never resolve a
 finding. Typed delivery rechecks obligations immediately before each external effect.
 
@@ -202,7 +221,7 @@ evaluation or truncated label cannot hide a question or prevent its matching rec
 These display facts do not discharge mandatory verification findings, which retain their own proof
 requirements above.
 
-The root inspects `typesafe_review` with `action: "uncertainties"` at turn entry and before delivery.
+The root inspects `systemone` with `action: "uncertainties"` at turn entry and before delivery.
 It gathers evidence within the existing grant. For a worker-task question, it gathers evidence from
 the responsible worker and may steer it to recheck; after reviewing that evidence, the owning session
 may record an advisory disposition for any current question in its own journal. Use
@@ -256,7 +275,7 @@ verifier inspected nothing or its last test run failed.
 
 ## Findings nobody could settle
 
-A worker holding `typesafe_review` confirms findings with atomic System One questions and lists what stays
+A worker holding `systemone` confirms findings with atomic System One questions and lists what stays
 unsettled in its result's `inconclusive`, instead of rounding it up or rewording a question to pass.
 Each item climbs a ladder (`system-one/unsettled-ladder.ts`), at most two System One passes, each with
 evidence the last one did not have:

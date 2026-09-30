@@ -41,6 +41,7 @@ const request: PeerReviewRequest = {
 	artifact: "Release on cancellation.",
 	evidence: "src/owner.ts: release held resource.",
 };
+const strongerRequest: PeerReviewRequest = { ...request, selection: "stronger" };
 const noFindings = {
 	verdict: "no_findings",
 	summary: "No candidate in provided snapshot.",
@@ -73,6 +74,7 @@ function fixture() {
 		isExhausted: () => state.exhausted,
 		getJudge: () => judge,
 		requestVerification: () => {},
+		captureVerificationFence: () => () => {},
 		runCompletion: async (options: IsolatedCompletionOptions) => {
 			calls.push(options);
 			onRun?.();
@@ -108,32 +110,113 @@ describe("explicit stronger peer review", () => {
 		expect(DEFAULT_ACTIVE_TOOL_NAMES).toContain("peer");
 		expect(DEFAULT_ACTIVE_TOOL_NAMES).not.toContain("advisor");
 	});
-	it("is discoverable by default and requires judgment plus delegation authority; workers cannot launch it", () => {
+	it("requires only delegation for independent review, and adds judgment for stronger review or resolution", () => {
 		expect(DEFAULT_ACTIVE_TOOL_NAMES).toContain("peer");
 		expect(WORKER_FORBIDDEN_TOOLS.has("peer")).toBe(true);
-		expect(envelopeHasToolCapability(["semantic.judge"], "peer")).toBe(false);
-		expect(envelopeHasToolCapability(["workflow.delegate"], "peer")).toBe(false);
-		expect(envelopeHasToolCapability(["semantic.judge", "workflow.delegate"], "peer")).toBe(true);
+		expect(envelopeHasToolCapability(["semantic.judge"], "peer", { action: "options" })).toBe(false);
+		expect(envelopeHasToolCapability(["workflow.delegate"], "peer", { action: "options" })).toBe(true);
+		expect(
+			envelopeHasToolCapability(["workflow.delegate"], "peer", {
+				action: "review",
+				review: { ...request },
+			}),
+		).toBe(true);
+		expect(
+			envelopeHasToolCapability(["workflow.delegate"], "peer", {
+				action: "review",
+				review: { ...request, selection: "stronger" },
+			}),
+		).toBe(false);
+		expect(
+			envelopeHasToolCapability(["workflow.delegate", "semantic.judge"], "peer", {
+				action: "review",
+				review: { ...request, selection: "stronger" },
+			}),
+		).toBe(true);
+		expect(envelopeHasToolCapability(["workflow.delegate"], "peer", { action: "obligations" })).toBe(true);
+		expect(envelopeHasToolCapability(["workflow.delegate"], "peer", { action: "resolve" })).toBe(false);
+		expect(envelopeHasToolCapability(["workflow.delegate", "semantic.judge"], "peer", { action: "resolve" })).toBe(
+			true,
+		);
 	});
-	it("discloses authenticated pool peers and strictly higher supported effort, without asserting strength", () => {
+	it("discloses authenticated peers and both supported effort sets without asserting strength", () => {
 		const f = fixture();
 		expect(f.controller.options()).toMatchObject({
 			status: "options",
-			strength: "requires_task_judgment",
-			peers: [{ ref: "test/peer", thinkingLevels: ["high", "xhigh", "max"] }],
+			strength: "optional_stronger_selection",
+			peers: [
+				{
+					ref: "test/peer",
+					thinkingLevels: expect.arrayContaining(["medium", "high", "xhigh", "max"]),
+					strongerThinkingLevels: ["high", "xhigh", "max"],
+				},
+			],
 		});
 		f.state.auth = false;
 		expect(f.controller.options().peers).toEqual([]);
 	});
 
+	it("discloses every supported independent effort and the stronger subset from the same peer entry", () => {
+		const f = fixture();
+		f.state.lead.thinkingLevel = "max";
+		expect(f.controller.options()).toMatchObject({
+			lead: { thinkingLevel: "max" },
+			peers: [
+				{
+					ref: "test/peer",
+					thinkingLevels: expect.arrayContaining(["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
+					strongerThinkingLevels: [],
+				},
+			],
+		});
+	});
+
+	it("allows independent review by a distinct authenticated nonreasoning peer at its supported off effort", async () => {
+		const f = fixture();
+		const nonreasoningPeer: Model<Api> = { ...peer, id: "nonreasoning", reasoning: false };
+		f.state.pool = [lead, nonreasoningPeer];
+
+		expect(f.controller.options().peers).toEqual([
+			{ ref: "test/nonreasoning", thinkingLevels: ["off"], strongerThinkingLevels: [] },
+		]);
+		expect(await f.controller.review({ ...request, peer: "test/nonreasoning", thinkingLevel: "off" })).toMatchObject({
+			status: "reviewed",
+			selection: "independent",
+		});
+		expect(f.calls[0]).toMatchObject({ model: nonreasoningPeer, thinkingLevel: "off", tools: [] });
+	});
+
+	it("defaults to independent review at equal maximum effort without consulting an unavailable strength judge", async () => {
+		const f = fixture();
+		f.state.lead.thinkingLevel = "max";
+		const independent = new PeerReviewController({ ...f.deps, getJudge: () => undefined });
+
+		const result = await independent.review({ ...request, thinkingLevel: "max" });
+
+		expect(result).toMatchObject({
+			status: "reviewed",
+			selection: "independent",
+			lead: { ref: "test/lead", thinkingLevel: "max" },
+			peer: { ref: "test/peer", thinkingLevel: "max" },
+			review: noFindings,
+			usage,
+		});
+		expect(result).not.toHaveProperty("strength");
+		expect(f.calls).toHaveLength(1);
+		expect(f.calls[0]).toMatchObject({ model: peer, thinkingLevel: "max", tools: [] });
+		expect((await independent.review({ ...strongerRequest, thinkingLevel: "max" })).status).toBe("unavailable");
+		expect(f.calls).toHaveLength(1);
+	});
+
 	it("pins distinct peer and higher effort in a tool-free call; review never certifies completion", async () => {
 		const f = fixture();
-		const result = await f.controller.review(request);
+		const result = await f.controller.review(strongerRequest);
 		expect(result).toMatchObject({
 			status: "reviewed",
 			validation: "peer_review_only",
 			leadMustResolve: true,
-			strength: { source: "jev_task_judgment", confidence: 0.97 },
+			selection: "stronger",
+			strength: { source: "system_one_task_judgment", confidence: 0.97 },
 			review: noFindings,
 			usage,
 		});
@@ -160,7 +243,7 @@ describe("explicit stronger peer review", () => {
 			},
 		};
 		const maximal = {
-			...request,
+			...strongerRequest,
 			objective: "o".repeat(2000),
 			artifact: "a".repeat(24_000),
 			evidence: "e".repeat(48_000),
@@ -177,15 +260,17 @@ describe("explicit stronger peer review", () => {
 		const f = fixture();
 		f.state.pool = [{ ...peer, id: lead.id, provider: "other" }];
 		expect(f.controller.options().peers).toEqual([]);
-		expect((await f.controller.review({ ...request, peer: `other/${lead.id}` })).status).toBe("unavailable");
+		expect((await f.controller.review({ ...strongerRequest, peer: `other/${lead.id}` })).status).toBe("unavailable");
 		expect(f.calls).toHaveLength(0);
 	});
 
 	it("refuses oversized objective or model facts rather than silently cutting judgment evidence", async () => {
 		const f = fixture();
-		expect((await f.controller.review({ ...request, objective: "o".repeat(2001) })).status).toBe("unavailable");
+		expect((await f.controller.review({ ...strongerRequest, objective: "o".repeat(2001) })).status).toBe(
+			"unavailable",
+		);
 		f.state.pool = [{ ...peer, name: "p".repeat(MAX_ROUTE_CHOICE_REQUEST_CHARACTERS) }];
-		expect(await f.controller.review(request)).toMatchObject({
+		expect(await f.controller.review(strongerRequest)).toMatchObject({
 			status: "unavailable",
 			reason: expect.stringContaining("host judgment limit"),
 		});
@@ -193,10 +278,10 @@ describe("explicit stronger peer review", () => {
 	});
 
 	it.each([
-		{ ...request, peer: "test/lead" },
-		{ ...request, peer: "other/peer" },
-		{ ...request, thinkingLevel: "medium" as const },
-		{ ...request, thinkingLevel: "ultra" as const },
+		{ ...strongerRequest, peer: "test/lead" },
+		{ ...strongerRequest, peer: "other/peer" },
+		{ ...strongerRequest, thinkingLevel: "medium" as const },
+		{ ...strongerRequest, thinkingLevel: "ultra" as const },
 	])("refuses same, outside-pool, equal or unsupported peers before paid review: %j", async (input) => {
 		const f = fixture();
 		expect((await f.controller.review(input)).status).toBe("unavailable");
@@ -208,22 +293,22 @@ describe("explicit stronger peer review", () => {
 		async (confidence) => {
 			const f = fixture();
 			f.setAnswer({ route_choice: { type: "choice", choice: "stronger", confidence } });
-			expect((await f.controller.review(request)).status).toBe("unavailable");
+			expect((await f.controller.review(strongerRequest)).status).toBe("unavailable");
 			expect(f.calls).toHaveLength(0);
 		},
 	);
 
-	it.each(["not_stronger", "unknown"])("rejects Jev's %s without rerolling", async (choice) => {
+	it.each(["not_stronger", "unknown"])("rejects System One's %s without rerolling", async (choice) => {
 		const f = fixture();
 		f.setAnswer({ route_choice: { type: "choice", choice, confidence: 0.99 } });
-		expect((await f.controller.review(request)).status).toBe("unavailable");
+		expect((await f.controller.review(strongerRequest)).status).toBe("unavailable");
 		expect(f.calls).toHaveLength(0);
 	});
 
 	it("keeps missing judge and evaluator outage diagnostic, never successful", async () => {
 		const f = fixture();
 		const absent = new PeerReviewController({ ...f.deps, getJudge: () => undefined });
-		expect((await absent.review(request)).status).toBe("unavailable");
+		expect((await absent.review(strongerRequest)).status).toBe("unavailable");
 		const offline = new PeerReviewController({
 			...f.deps,
 			getJudge: () => ({
@@ -232,7 +317,7 @@ describe("explicit stronger peer review", () => {
 				},
 			}),
 		});
-		expect(await offline.review(request)).toMatchObject({ status: "unavailable", reason: "service offline" });
+		expect(await offline.review(strongerRequest)).toMatchObject({ status: "unavailable", reason: "service offline" });
 		expect(f.calls).toHaveLength(0);
 	});
 
@@ -244,7 +329,7 @@ describe("explicit stronger peer review", () => {
 			if (change === "pool") f.state.pool = [lead];
 			if (change === "lead") f.state.lead = { ...f.state.lead, model: peer };
 		});
-		expect((await f.controller.review(request)).status).toBe("unavailable");
+		expect((await f.controller.review(strongerRequest)).status).toBe("unavailable");
 		expect(f.calls).toHaveLength(0);
 	});
 
@@ -255,7 +340,7 @@ describe("explicit stronger peer review", () => {
 		f.onJudge(() => {
 			judge = undefined;
 		});
-		expect((await controller.review(request)).status).toBe("unavailable");
+		expect((await controller.review(strongerRequest)).status).toBe("unavailable");
 		expect(f.calls).toHaveLength(0);
 	});
 
@@ -331,7 +416,7 @@ describe("explicit stronger peer review", () => {
 		const f = fixture();
 		const abort = new AbortController();
 		f.onJudge(() => abort.abort());
-		expect((await f.controller.review(request, abort.signal)).status).toBe("unavailable");
+		expect((await f.controller.review(strongerRequest, abort.signal)).status).toBe("unavailable");
 		expect(f.calls).toHaveLength(0);
 		const second = fixture();
 		second.onRun(() => {
@@ -343,8 +428,8 @@ describe("explicit stronger peer review", () => {
 	it("does not silently clamp highest-effort leads, oversized evidence or inconsistent verdicts", async () => {
 		const f = fixture();
 		f.state.lead.thinkingLevel = "ultra";
-		expect(f.controller.options().peers).toEqual([]);
-		expect((await f.controller.review(request)).status).toBe("unavailable");
+		expect(f.controller.options().peers).toMatchObject([{ ref: "test/peer", strongerThinkingLevels: [] }]);
+		expect((await f.controller.review({ ...strongerRequest, thinkingLevel: "max" })).status).toBe("unavailable");
 		expect(f.calls).toHaveLength(0);
 		f.state.lead.thinkingLevel = "medium";
 		expect((await f.controller.review({ ...request, evidence: "a".repeat(48_001) })).status).toBe("unavailable");

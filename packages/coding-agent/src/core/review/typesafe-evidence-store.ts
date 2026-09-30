@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { typeSafeEvidenceDir } from "../agent-paths.ts";
 import { type ArtifactStore, createFileArtifactStore, isMissingArtifactMarker } from "../context/context-artifacts.ts";
 import { withSessionBundleAdmission } from "../orchestration/session-bundle-lifecycle.ts";
+import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 
 export interface TypeSafeEvidenceRef {
 	id: string;
@@ -20,7 +21,7 @@ export interface TypeSafeEvidencePage {
 
 class TypeSafeEvidenceUnavailableError extends Error {
 	constructor() {
-		super("TypeSafe evidence is unavailable");
+		super("System One evidence is unavailable");
 	}
 }
 
@@ -56,7 +57,7 @@ export class TypeSafeEvidenceStore {
 			const sha256 = createHash("sha256").update(content).digest("hex");
 			const stored = this.artifacts.write({
 				kind: "tool_output",
-				toolName: "typesafe_review",
+				toolName: SYSTEM_ONE_TOOL_NAME,
 				command: sha256,
 				content,
 				createdAtTurn: 0,
@@ -67,7 +68,7 @@ export class TypeSafeEvidenceStore {
 				stored.ref.command !== sha256 ||
 				!this.artifacts.addReference(stored.ref.id, `typesafe:${stored.ref.id}`)
 			) {
-				throw new Error("TypeSafe evidence could not be retained");
+				throw new Error("System One evidence could not be retained");
 			}
 			return { id: stored.ref.id, sha256, bytes: Buffer.byteLength(content) };
 		});
@@ -76,17 +77,17 @@ export class TypeSafeEvidenceStore {
 	/** Every character is reachable by continuation; paging changes projection, never stored evidence. */
 	read(id: string, offset = 0): TypeSafeEvidencePage {
 		if (!/^[a-f0-9]{24}$/.test(id) || !Number.isSafeInteger(offset) || offset < 0)
-			throw new Error("Invalid TypeSafe evidence reference or offset");
+			throw new Error("Invalid System One evidence reference or offset");
 		try {
 			return this.admit(() => {
 				const stored = this.artifacts.read(id);
 				if (isMissingArtifactMarker(stored)) {
-					if (stored.reason === "unavailable") throw new Error("TypeSafe evidence could not be read");
+					if (stored.reason === "unavailable") throw new Error("System One evidence could not be read");
 					throw new TypeSafeEvidenceUnavailableError();
 				}
 				const sha256 = createHash("sha256").update(stored.content).digest("hex");
 				if (stored.ref.command !== sha256 || offset > stored.content.length)
-					throw new Error("TypeSafe evidence integrity or offset check failed");
+					throw new Error("System One evidence integrity or offset check failed");
 				const end = Math.min(stored.content.length, offset + 8_192);
 				return {
 					id,

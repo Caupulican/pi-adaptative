@@ -1,6 +1,7 @@
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { mapToolNamesForPlatform } from "../default-tool-surface.ts";
 import { WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
+import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { getToolCapabilityPolicy, resolveProfileToolCapabilities } from "../tool-capability-policy.ts";
 import type { OrchestrationProfile, ToolCapabilityManifest } from "./contracts.ts";
 
@@ -21,7 +22,7 @@ export const CLASSIFIED_LANE_TOOL_NAMES = [
 	"run_toolkit_script",
 	"skill",
 	"skill_audit",
-	"typesafe_review",
+	SYSTEM_ONE_TOOL_NAME,
 ] as const;
 export const ORCHESTRATION_PROFILE_TOOL_NAMES = [...CLASSIFIED_LANE_TOOL_NAMES, "delegate", "task_directory"] as const;
 

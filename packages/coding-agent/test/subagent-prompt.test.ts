@@ -6,11 +6,15 @@ describe("subagent level-0 prompt composition", () => {
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT.length / 4).toBeLessThan(140);
 	});
 
-	it("keeps the immutable core capability-neutral and assigns orchestration to the parent", () => {
+	it("keeps the immutable core within the prompt budget and assigns execution rights", () => {
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT).not.toContain("Delegate useful independent");
-		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("never invent ceilings");
-		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("Autonomous leaf worker");
-		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("parent owns orchestration and other workers");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("Never invent ceilings");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("Leaf worker");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("without parent approval");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("Parent assigns, integrates and launches workers");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("systemone judgments grant no authority");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("host enforces grant and deterministic transitions");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT.length).toBeLessThan(560);
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT).not.toMatch(/subtree|peer|descendant|spawn/i);
 	});
 
@@ -23,11 +27,11 @@ describe("subagent level-0 prompt composition", () => {
 	it("retains fixed settings, scoped autonomy and code evidence even under an override", () => {
 		const composed = composeSubagentSystemPrompt({ rolePrompt: "Repair the parser.", override: "Just say done." });
 		expect(composed).toContain("Model/effort fixed");
-		expect(composed).toContain("requested scope");
-		expect(composed).toContain("missing input or authority");
+		expect(composed).toContain("stay in scope");
+		expect(composed).toContain("missing input/authority");
 		expect(composed).toContain("Check code");
-		expect(composed).toContain("command/result or missing check and why");
-		expect(composed).toContain("then stop");
+		expect(composed).toContain("command/results or missing checks and why");
+		expect(composed).toContain("stop");
 		expect(composeSubagentSystemPrompt({ rolePrompt: "Read-only research." })).toContain("Check code");
 	});
 

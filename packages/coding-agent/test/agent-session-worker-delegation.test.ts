@@ -28,7 +28,7 @@ import { OrchestrationProfileStore } from "../src/core/orchestration/profile-sto
 import { createWorkerExecutionContract } from "../src/core/orchestration/worker-execution-contract.ts";
 import { createWorkerResultContract } from "../src/core/orchestration/worker-result-adapter.ts";
 import { createTestExecutionGrant, createTestWorkerExecutionAuthority } from "./orchestration-profile-fixture.ts";
-import { setConcurrentResponses } from "./suite/concurrent-responses.ts";
+import { isWorkerProviderRequest, setConcurrentResponses } from "./suite/concurrent-responses.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 import { createTestResourceLoader } from "./suite/test-resources.ts";
 import { verifierInspection } from "./worker-output-fixture.ts";
@@ -957,8 +957,8 @@ describe("AgentSession worker delegation", () => {
 			});
 			if (!initial.started || !initial.record) throw new Error("Expected the initial worker task to complete.");
 
-			const routeFollowUp: FauxResponseFactory = (context) =>
-				context.systemPrompt?.includes("Autonomous leaf worker")
+			const routeFollowUp: FauxResponseFactory = (_context, options) =>
+				isWorkerProviderRequest(options)
 					? fauxAssistantMessage('{"summary":"second task done","status":"completed"}')
 					: fauxAssistantMessage("Background handoff acknowledged.");
 			harness.setResponses([routeFollowUp, routeFollowUp, routeFollowUp]);
@@ -1516,7 +1516,7 @@ describe("AgentSession worker delegation", () => {
 			const workerReasoning: unknown[] = [];
 			const workerToolNames: string[][] = [];
 			const routeResponse: FauxResponseFactory = (context, options, _state, model) => {
-				if (!context.systemPrompt?.includes("Autonomous leaf worker")) {
+				if (!isWorkerProviderRequest(options)) {
 					return fauxAssistantMessage("Delegations started.");
 				}
 				workerModelIds.push(model.id);
@@ -1818,8 +1818,8 @@ describe("AgentSession worker delegation", () => {
 	it("lets the model delegate through the delegate tool in a full turn", async () => {
 		const harness = await createHarness({ settings: { workerDelegation: { enabled: true } } });
 		try {
-			const routeResponse: FauxResponseFactory = (context) =>
-				context.systemPrompt?.includes("Autonomous leaf worker")
+			const routeResponse: FauxResponseFactory = (_context, options) =>
+				isWorkerProviderRequest(options)
 					? fauxAssistantMessage(WORKER_JSON)
 					: fauxAssistantMessage("Delegation reviewed.");
 			harness.setResponses([

@@ -1,3 +1,4 @@
+import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import type { GoalClarification, GoalCompletionRejection, GoalState, GoalStatus } from "./goal-state.ts";
 
 /** Most recent owner clarifications projected for the model; the durable ledger keeps the rest. */
@@ -77,7 +78,7 @@ export function formatGoalRecord(record: GoalRecord): string {
 						: []),
 					...(record.completionRejection.evidence
 						? [
-								`Full judgment: typesafe_review action=evidence id=${record.completionRejection.evidence.id}; continue with nextOffset. SHA256=${record.completionRejection.evidence.sha256}.`,
+								`Full judgment: ${SYSTEM_ONE_TOOL_NAME} action=evidence id=${record.completionRejection.evidence.id}; continue with nextOffset. SHA256=${record.completionRejection.evidence.sha256}.`,
 							]
 						: [
 								`Full judgment unavailable${record.completionRejection.evidenceUnavailable ? `: ${record.completionRejection.evidenceUnavailable}` : ""}; this preview may omit or truncate checks.`,

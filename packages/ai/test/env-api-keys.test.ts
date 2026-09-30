@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { findEnvKeys, getEnvApiKey } from "../src/env-api-keys.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { findEnvKeys, getEnvApiKey, getEnvCredentialValues } from "../src/env-api-keys.ts";
 
 const originalCopilotGitHubToken = process.env.COPILOT_GITHUB_TOKEN;
 const originalGhToken = process.env.GH_TOKEN;
@@ -24,6 +24,7 @@ function withoutProcess(callback: () => void): void {
 }
 
 afterEach(() => {
+	vi.unstubAllEnvs();
 	if (originalCopilotGitHubToken === undefined) {
 		delete process.env.COPILOT_GITHUB_TOKEN;
 	} else {
@@ -106,6 +107,39 @@ describe("environment API keys", () => {
 		withoutProcess(() => {
 			expect(findEnvKeys("openai")).toBeUndefined();
 			expect(getEnvApiKey("openai")).toBeUndefined();
+			expect(getEnvCredentialValues("amazon-bedrock")).toEqual([]);
 		});
+	});
+
+	it("exposes actual Bedrock environment credentials without profile or authentication status", () => {
+		vi.stubEnv("AWS_PROFILE", "ordinary-profile-name");
+		vi.stubEnv("AWS_ACCESS_KEY_ID", "fixture-aws-access-id");
+		vi.stubEnv("AWS_SECRET_ACCESS_KEY", "fixture-aws-secret");
+		vi.stubEnv("AWS_SESSION_TOKEN", "fixture-aws-session");
+		vi.stubEnv("AWS_BEARER_TOKEN_BEDROCK", "fixture-bedrock-bearer");
+		vi.stubEnv("AWS_CONTAINER_AUTHORIZATION_TOKEN", "fixture-container-auth");
+
+		expect(getEnvApiKey("amazon-bedrock")).toBe("<authenticated>");
+		expect(getEnvCredentialValues("amazon-bedrock")).toEqual([
+			"fixture-aws-access-id",
+			"fixture-aws-secret",
+			"fixture-aws-session",
+			"fixture-bedrock-bearer",
+			"fixture-container-auth",
+		]);
+		expect(findEnvKeys("amazon-bedrock")).toBeUndefined();
+	});
+
+	it("includes alternate environment keys and header tokens without reading another provider", () => {
+		vi.stubEnv("SAKANA_API_KEY", "fixture-sakana-key");
+		vi.stubEnv("FUGU_API_KEY", "fixture-fugu-key");
+		vi.stubEnv("ANTHROPIC_AUTH_TOKEN", "fixture-anthropic-header-token");
+		vi.stubEnv("ANTHROPIC_API_KEY", "fixture-anthropic-key");
+		vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", "");
+		vi.stubEnv("CLAUDE_CODE_OAUTH_TOKEN", "");
+
+		expect(getEnvCredentialValues("fugu")).toEqual(["fixture-sakana-key", "fixture-fugu-key"]);
+		expect(getEnvCredentialValues("anthropic")).toEqual(["fixture-anthropic-header-token", "fixture-anthropic-key"]);
+		expect(getEnvCredentialValues("fixture-unknown-provider")).toEqual([]);
 	});
 });

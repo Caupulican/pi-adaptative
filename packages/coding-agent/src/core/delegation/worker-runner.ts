@@ -88,7 +88,7 @@ export interface WorkerRunnerOptions {
 	applyActions?: (actions: readonly WorkerAction[]) => AppliedActionsReport;
 	/** Enables the constrained direct-argv operator role prompt. */
 	processCapable?: boolean;
-	/** The lane holds `typesafe_review`: the prompt asks the worker to validate findings with System One. */
+	/** The lane holds `systemone`: the prompt asks the worker to validate findings with System One. */
 	systemOneCapable?: boolean;
 	/** Session cwd — the baseline for relative changed-file and envelope paths in parent
 	 * validation. Defaults to process.cwd(). */

@@ -7,6 +7,7 @@ import {
 	type SystemOneControlDirective,
 	sameLaneVerificationDirective,
 } from "./control-directive.ts";
+import { SYSTEM_ONE_TOOL_NAME } from "./tool-names.ts";
 import { SemanticVerificationObligationTracker } from "./verification-obligations.ts";
 
 type StoragePort = ConstructorParameters<typeof SemanticVerificationObligationTracker>[0];
@@ -129,6 +130,15 @@ export class VerificationCoordinator {
 		if (!active.length) return;
 		// These calls gather evidence or enter the canonical completion/obligation gate themselves.
 		if (RECOVERY_TOOLS.has(input.tool)) return;
+		if (input.tool === SYSTEM_ONE_TOOL_NAME && input.args && typeof input.args === "object") {
+			const action = "action" in input.args ? input.args.action : undefined;
+			// Diagnostics and owner advisory dispositions cannot discharge mandatory findings.
+			if (
+				typeof action === "string" &&
+				["status", "evidence", "uncertainties", "resolve_uncertainty"].includes(action)
+			)
+				return;
+		}
 		const fence = this.host.captureFence();
 		const candidate = this.host.getCandidate(input.cwd);
 		const operation = {
@@ -179,7 +189,7 @@ export class VerificationCoordinator {
 
 	beginCall(receiverId?: string, tool?: string, cwd?: string): string | undefined {
 		// Reviews and routing do not create fresh receiving-lane check evidence or a reroll budget.
-		if (tool && ["peer", "typesafe_review", "delegate", "tool_task", "goal"].includes(tool)) return;
+		if (tool && ["peer", SYSTEM_ONE_TOOL_NAME, "delegate", "tool_task", "goal"].includes(tool)) return;
 		if (!this.tracker.active().length || this.starts.size >= 64) return;
 		const candidate = this.host.getCandidate(cwd);
 		// Provider tool-call IDs can collide between lanes or turns. Only the host identifies receipts.

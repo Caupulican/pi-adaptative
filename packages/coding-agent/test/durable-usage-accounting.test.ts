@@ -217,7 +217,7 @@ describe("session usage ownership", () => {
 		session.appendMessage({
 			role: "toolResult",
 			toolCallId: "review-1",
-			toolName: "typesafe_review",
+			toolName: "systemone",
 			content: [{ type: "text", text: "reviewed" }],
 			usage: freeUsage,
 			isError: false,

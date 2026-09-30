@@ -3,6 +3,11 @@ import type { Usage } from "@caupulican/pi-ai";
 import { type Static, Type } from "typebox";
 import { SYSTEM_ONE_VALIDATION_RULE } from "../provider-prompt-contracts.ts";
 import {
+	SystemOneReviewError,
+	type SystemOneReviewPort,
+	type SystemOneTransportAttempt,
+} from "../review/system-one-review-port.ts";
+import {
 	type EvaluationInput,
 	evaluationInputSchema,
 	getEvaluationUsage,
@@ -17,13 +22,9 @@ import {
 	typeSafeEvidenceReferenceSchema,
 } from "../review/typesafe-evidence-materializer.ts";
 import type { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
-import {
-	TypeSafeReviewError,
-	type TypeSafeReviewer,
-	type TypeSafeTransportAttempt,
-} from "../review/typesafe-reviewer.ts";
 import { type PricedTypeSafeUsage, priceTypeSafeUsage } from "../review/typesafe-usage.ts";
 import type { SemanticUncertaintyPort } from "../system-one/semantic-doubts.ts";
+import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 
 const schema = Type.Object(
 	{
@@ -52,7 +53,7 @@ const schema = Type.Object(
 );
 
 function projectUsage(
-	attempts: readonly TypeSafeTransportAttempt[],
+	attempts: readonly SystemOneTransportAttempt[],
 	connection: { readonly provider: string; readonly model: string },
 ): PricedTypeSafeUsage | undefined {
 	let inputTokens = 0;
@@ -80,7 +81,7 @@ async function materializeReferencedEvidence<T extends ReviewInput | EvaluationI
 	signal?: AbortSignal,
 ) {
 	if (!evidenceRefs) return { request: input, sourceManifest: undefined };
-	if (!materializer) throw new Error("TypeSafe referenced evidence is unavailable in this runtime");
+	if (!materializer) throw new Error("System One referenced evidence is unavailable in this runtime");
 	const evidence = await materializer.materialize(evidenceRefs, signal);
 	return {
 		request: {
@@ -91,29 +92,29 @@ async function materializeReferencedEvidence<T extends ReviewInput | EvaluationI
 	};
 }
 
-export function createTypeSafeReviewToolDefinition(
-	reviewer: TypeSafeReviewer,
+export function createSystemOneToolDefinition(
+	reviewer: SystemOneReviewPort,
 	evidenceStore: TypeSafeEvidenceStore,
 	reportUsage?: (toolCallId: string, usage: Usage) => void,
 	evidenceMaterializer?: TypeSafeEvidenceMaterializer,
 	uncertainties?: SemanticUncertaintyPort,
 ) {
 	const uncertaintyPrompt = uncertainties
-		? "At turn entry and before delivery, inspect active uncertainties. For worker-task questions, gather evidence from the responsible worker and steer it as needed; after reviewing that evidence, the owning session may record an advisory disposition for any current question in its own journal. Include a conservative path or evidence-based decision with concise evidence and reason. Keep mandatory same-lane verification and recheck requirements active. This disposition is not a Jev pass, verification proof, certificate proof, or permission. Reject stale questions and questions explicitly scoped to a foreign root session."
+		? "At turn entry and before delivery, inspect active uncertainties. For worker-task questions, gather evidence from the responsible worker and steer it as needed; after reviewing that evidence, the owning session may record an advisory disposition for any current question in its own journal. Include a conservative path or evidence-based decision with concise evidence and reason. Keep mandatory same-lane verification and recheck requirements active. This disposition is not a System One pass, verification proof, certificate proof, or permission. Reject stale questions and questions explicitly scoped to a foreign root session."
 		: "Worker lanes cannot disposition session-owner uncertainties. Recheck your own mandatory findings in this lane, report unresolved advisory questions and evidence to the parent, and continue independent work where appropriate.";
 	return {
-		name: "typesafe_review",
-		label: "TypeSafe review",
+		name: SYSTEM_ONE_TOOL_NAME,
+		label: "System One",
 		readOnly: true,
-		description: `Use Jev for semantic decisions and independent verification. Status checks setup. Evaluate batched Choice, Noul and Score questions. Review gates claims at high (0.95) or max (0.99) confidence. evidenceRefs snapshots scoped files, artifacts, or git diffs. Evidence reads retained records by id and offset. ${uncertainties ? "The session owner can list and disposition advisory uncertainties; this never proves verification or grants permission." : "Workers report unresolved task questions to their owner and recheck mandatory findings in their own lane."} Does not execute or authorize actions.`,
-		promptSnippet: "Jev: semantic judgments and high/max claim review.",
+		description: `Use System One for semantic decisions and independent verification. Status checks setup. Evaluate batched Choice, Noul and Score questions. Review gates claims at high (0.95) or max (0.99) confidence. evidenceRefs snapshots scoped files, artifacts, or git diffs. Evidence reads retained records by id and offset. ${uncertainties ? "The session owner can list and disposition advisory uncertainties; this never proves verification or grants permission." : "Workers report unresolved task questions to their owner and recheck mandatory findings in their own lane."} Does not execute or authorize actions.`,
+		promptSnippet: "System One: semantic judgments and high/max claim review.",
 		promptGuidelines: [
 			'For review, use an option map and a declared expected key, for example: {"action":"review","review":{"state":"relevant source and check results","questions":{"claim":{"instructions":"Does this evidence support the claim?","criteria":{"supports":"Supported","contradicts":"Contradicted","insufficient":"Missing evidence"},"expected":"supports"}}}}.',
-			"Check typesafe_review status at work start. When the typesafe-review skill is listed and the skill tool is available, load the typesafe-review skill. Use Jev for semantic decisions and reviews throughout work, in any domain.",
+			"Check systemone status at work start. When the systemone skill is listed and the skill tool is available, load the systemone skill. Use System One for semantic decisions and reviews throughout work, in any domain.",
 			"Batch independent narrow questions with complete relevant source, tests, prior findings and limitations; never hide adverse evidence. Reproduce bug candidates before fixing.",
-			"Approval requires every expected verdict and high/max confidence; fix findings or add missing evidence. Never reroll unchanged evidence for a better score. Credentials belong in /login typesafe, never tool arguments.",
+			"Approval requires every expected verdict and high/max confidence; fix findings or add missing evidence. Never reroll unchanged evidence for a better score. Use the configured provider login flow reported by systemone status; never put credentials in tool arguments.",
 			uncertaintyPrompt,
-			"An uncertain or unavailable Jev result returns to the owning LLM. Workers report unresolved decisions to the parent; only the root asks the owner when authority or evidence is still missing. Silence grants nothing.",
+			"An uncertain or unavailable System One result returns to the owning LLM. Workers report unresolved decisions to the parent; only the root asks the owner when authority or evidence is still missing. Silence grants nothing.",
 			SYSTEM_ONE_VALIDATION_RULE,
 		],
 		// The model and reviewer consume the same canonical input contract.
@@ -123,7 +124,7 @@ export function createTypeSafeReviewToolDefinition(
 		async execute(toolCallId: string, input: Static<typeof schema>, signal?: AbortSignal) {
 			let usageProjection: PricedTypeSafeUsage | undefined;
 			const onResponse = (
-				attempts: readonly TypeSafeTransportAttempt[],
+				attempts: readonly SystemOneTransportAttempt[],
 				connection: { readonly provider: string; readonly model: string },
 			): void => {
 				usageProjection = projectUsage(attempts, connection);
@@ -132,7 +133,7 @@ export function createTypeSafeReviewToolDefinition(
 			let record: Record<string, unknown>;
 			let isError = false;
 			let errorKind: "operation_outcome" | undefined;
-			let transportAttempts: TypeSafeTransportAttempt[] = [];
+			let transportAttempts: SystemOneTransportAttempt[] = [];
 			let sourceManifest: readonly TypeSafeEvidenceManifestEntry[] | undefined;
 			try {
 				signal?.throwIfAborted();
@@ -176,7 +177,7 @@ export function createTypeSafeReviewToolDefinition(
 							? { disposition: input.uncertainty.disposition, evaluationId: input.uncertainty.evaluationId }
 							: {}),
 						message: resolution.resolved
-							? "Recorded owner-model advisory disposition. This is not Jev verification, certificate proof, or permission."
+							? "Recorded owner-model advisory disposition. This is not System One verification, certificate proof, or permission."
 							: "No uncertainty was settled. Refresh the active questions; the evaluation or question may have changed or belong to another lane.",
 					};
 					return {
@@ -222,22 +223,22 @@ export function createTypeSafeReviewToolDefinition(
 				transportAttempts = result.transportAttempts;
 			} catch (error) {
 				const message = signal?.aborted
-					? "TypeSafe review cancelled"
+					? "System One review cancelled"
 					: error instanceof Error
 						? error.message
-						: "TypeSafe review failed";
+						: "System One review failed";
 				isError = true;
 				// A completed service attempt owns its negative result and evidence. Generic
 				// tool-failure rewriting would replace that record with a lossy diagnostic.
-				if (error instanceof TypeSafeReviewError) errorKind = "operation_outcome";
-				transportAttempts = error instanceof TypeSafeReviewError ? error.transportAttempts : [];
+				if (error instanceof SystemOneReviewError) errorKind = "operation_outcome";
+				transportAttempts = error instanceof SystemOneReviewError ? error.transportAttempts : [];
 				record = {
 					accepted: false,
 					costStatus: usageProjection?.costStatus ?? "unpriced",
 					...(usageProjection?.costProvenance ? { costProvenance: usageProjection.costProvenance } : {}),
 					error: message,
 					...(sourceManifest ? { sourceManifest } : {}),
-					...(error instanceof TypeSafeReviewError
+					...(error instanceof SystemOneReviewError
 						? {
 								requestSha256: error.requestSha256,
 								request: error.request,
@@ -276,7 +277,7 @@ export function createTypeSafeReviewToolDefinition(
 				return {
 					isError: true,
 					content: [
-						{ type: "text" as const, text: "TypeSafe evidence could not be retained; review is not accepted." },
+						{ type: "text" as const, text: "System One evidence could not be retained; review is not accepted." },
 					],
 					details: {
 						accepted: false,

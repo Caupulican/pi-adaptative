@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { createInMemoryArtifactStore } from "../src/core/context/context-artifacts.ts";
 import { TypeSafeEvidenceStore } from "../src/core/review/typesafe-evidence-store.ts";
-import { TypeSafeReviewer } from "../src/core/review/typesafe-reviewer.ts";
+import { SystemOneReviewer } from "../src/core/review/typesafe-reviewer.ts";
 import { SystemOneJevAdapter } from "../src/core/system-one/adapter.ts";
-import { createTypeSafeReviewToolDefinition } from "../src/core/tools/typesafe-review.ts";
+import { createSystemOneToolDefinition } from "../src/core/tools/systemone.ts";
 
 describe("TypeSafe billing receipt delivery", () => {
 	it.each([false, true])(
@@ -23,8 +23,8 @@ describe("TypeSafe billing receipt delivery", () => {
 						headers: { "retry-after": "0" },
 					});
 			});
-			const tool = createTypeSafeReviewToolDefinition(
-				new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
+			const tool = createSystemOneToolDefinition(
+				new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
 				new TypeSafeEvidenceStore(createInMemoryArtifactStore()),
 				accounting,
 			);
@@ -49,8 +49,8 @@ describe("TypeSafe billing receipt delivery", () => {
 	);
 
 	it("prices OpenRouter independently from direct TypeSafe pricing", async () => {
-		const tool = createTypeSafeReviewToolDefinition(
-			new TypeSafeReviewer({
+		const tool = createSystemOneToolDefinition(
+			new SystemOneReviewer({
 				provider: "openrouter",
 				getApiKey: async () => "fixture-key",
 				fetch: async () =>
@@ -91,7 +91,7 @@ describe("TypeSafe billing receipt delivery", () => {
 					usage: { input_tokens: 100, output_tokens: 10 },
 				}),
 			);
-		const reviewer = new TypeSafeReviewer({
+		const reviewer = new SystemOneReviewer({
 			getApiKey: async () => "fixture-key",
 			fetch: fetcher,
 			onUsage: receipts,
@@ -120,7 +120,7 @@ describe("TypeSafe billing receipt delivery", () => {
 				usage: { input_tokens: 100, output_tokens: 10 },
 			}),
 		);
-		const reviewer = new TypeSafeReviewer({
+		const reviewer = new SystemOneReviewer({
 			getApiKey: async () => "fixture-key",
 			fetch: fetcher,
 			onUsage: () => {

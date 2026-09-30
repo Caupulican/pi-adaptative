@@ -296,8 +296,8 @@ so retaining those validation values is deliberate. Explicit independent special
 from the unchanged 875-token ceiling for the prior delegate surface. The 4,500-token combined
 base-tool ceiling stays fixed. This is a deliberate new control for mandatory specialist reuse;
 it does not permit unrelated description growth. Explicit `peer` review has a separate 350-token
-schema allowance, measured at 333 tokens, for review, durable obligation inspection and proof resolution.
-Canonical Jev input validation shares one schema with provider projection, replacing the permissive compact rubric. Under identical live runtime framing, the prior schema costs 358 tokens and the canonical schema costs 828; its explicit 470-token delta receives a separate allowance. The root may also list and disposition current advisory uncertainties in its own journal through `typesafe_review`; these owner-model judgments do not prove Jev verification, satisfy mandatory obligations, or authorize actions. The canonical schema now costs 932 tokens, adding a measured 104-token allowance for those uncertainty actions and their validated disposition object. The live default surface measures 6,982 schema tokens
+schema allowance, measured at 344 tokens, for independent or stronger review, durable obligation inspection and proof resolution.
+Canonical System One input validation shares one schema with provider projection, replacing the permissive compact rubric. Under identical live runtime framing, the prior schema costs 358 tokens and the canonical schema costs 828; its explicit 470-token delta receives a separate allowance. The root may also list and disposition current advisory uncertainties in its own journal through `systemone`; these owner-model judgments do not prove verification, satisfy mandatory obligations, or authorize actions. The canonical schema now costs 932 tokens, adding a measured 104-token allowance for those uncertainty actions and their validated disposition object. The live default surface measures 6,991 schema tokens
 against a 7,039-token aggregate ceiling (4,500 base + 350 task_directory + 720 task_automation +
 100 decision_ledger_read + 143 repo_read + 140 self_compact + 162 goal-check growth + 350 peer + 574 canonical Jev schema, comprising the original 470-token delta and 104-token advisory-uncertainty addition).
 The unchanged 4,500-token base subtotal excludes the actual costs of those separately budgeted
@@ -465,8 +465,11 @@ leaves the machine). The irreversible row of the authority line then decides: no
 silently; an established effect runs when the request asks for it (0.8), is refused when it clearly
 does not (0.2), and otherwise goes to the operator as `operation.irreversible` at the edge, as does
 an unsettled effect or a System One that cannot answer within 8 s; a worker is refused instead of
-asking. A standing `operation.irreversible` grant authorizes, and what System One found is shown
-either way. Verdicts are cached for identical calls within a turn; a session without System One keeps
+asking. A broad standing `operation.irreversible` grant authorizes both root and worker before
+semantic classification; an existing owner decision cannot be vetoed or delayed by another evaluator
+call. Scoped grants retain their exact operation identity and never become blanket authority.
+Cancellation, capability envelopes, path boundaries and mandatory verification remain authoritative.
+Verdicts for ungranted work are cached for identical calls within a turn; a session without System One keeps
 the deterministic gates alone. Pinned by `packages/coding-agent/test/edge-policy.test.ts` and
 `packages/coding-agent/test/system-one/operation-gate.test.ts`.
 
@@ -810,7 +813,19 @@ stale failure diagnostics. Pinned by
 
 ## System One
 
-**System One decides the loop; the root and the workers execute.** Whenever System One is bound the
+**The host routes the loop from System One judgments; the root owns execution.** System One is the
+provider-neutral judgment contract, exposed through `systemone`; TypeSafe is a provider adapter.
+The root owns assignment and integration. Workers choose local methods and focused checks within
+their task and grant without parent approval. Peers provide independent review; ordinary review
+does not require a stronger model or higher effort. Explicit stronger selection retains its
+task-strength judgment. Host policy owns transitions, permissions, resource limits and cancellation;
+semantic uncertainty never creates authority or completes unresolved verification.
+An advisory uncertainty is resolved by the responsible model's evidence-backed decision, recorded
+separately from a judgment. Diagnostic status, retained evidence and advisory management remain
+available during an evaluator outage without clearing mandatory findings or creating proof receipts.
+Worker supervision checks the original objective, task and live attempt before delivering control,
+so late judgments cannot affect a persistent worker's next assignment.
+Whenever System One is bound the
 goal loop runs in `objective_primary` mode: each continuation pass evaluates one objective route from
 deterministic facts (cancellation, budget, running attempts, the ledger's stall reading) and Jev's
 judgments, then executes it. A route names its executor: the root (one foreground turn carrying the
@@ -878,7 +893,7 @@ A worker reports findings it could not confirm as `inconclusive`, never rounded 
 each against the worker's own tool results; then a stronger model names the settling fact and System
 One judges it; each pass carries new evidence, at most two. The model finds, System One decides. What stays
 open goes to the owner: asked through the parent with the owner in the loop, written to the follow-up
-document under a handoff while the run continues around it. `typesafe_review` is authorized by
+document under a handoff while the run continues around it. `systemone` is authorized by
 `semantic.judge`, which read-only grants keep. Pinned by
 `packages/coding-agent/test/system-one/unsettled-ladder.test.ts` and
 `packages/coding-agent/test/worker-inconclusive-ladder.test.ts`.
@@ -971,6 +986,15 @@ and search names the skills the loader could not index. Why: measured live, a sk
 time. Pinned by `packages/coding-agent/test/skill-vault.test.ts` and
 `packages/coding-agent/test/resource-loader.test.ts` (refreshSkills).
 
+**Credentials remain local execution data.** The host may read and use authorized credentials;
+model-facing text contains redacted values rather than credentials. The credential boundary gathers
+stored API and OAuth values, runtime overrides and configured provider values without refreshing
+OAuth or executing credential commands merely to redact. Root and worker requests, isolated review
+and compaction, tool results and System One evidence use that boundary. Authentication headers and
+local source remain usable; redaction preserves ordinary text and unchanged request references.
+Pinned by `packages/coding-agent/test/session-model-credential-boundary.test.ts` and
+`packages/coding-agent/test/system-one-credential-boundary.test.ts`.
+
 **A refusal names a real ambiguity or a real risk, never a shape the harness can absorb.** The
 credential guard accepts a literal filename prefix as a narrow glob, treats the harness's own
 memory, skills and sessions as searchable without a glob, judges a multi-line script line by line
@@ -1059,6 +1083,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-30 | Provider-neutral `systemone` replaces the native tool and skill names; root assignment/integration and worker local autonomy remain explicit. Ordinary peer review admits supported effort without strength judgment; explicit stronger review retains its checks. Standing operation authority avoids redundant evaluator calls, scoped grants remain exact, advisory management remains available during outages, and supervision rejects obsolete or aborted attempt judgments. Existing prompt and schema ceilings remain unchanged. |
 | 2026-09-30 | The root may list and disposition advisory uncertainties in its own journal through `typesafe_review`; this does not prove verification, settle mandatory obligations, or grant permission. The measured canonical schema addition is 104 tokens, raising only the canonical allowance to 574 and the aggregate ceiling to 7,039; the 4,500-token base remains unchanged. |
 | 2026-09-29 | Durable peer obligation inspection and proof resolution increase the peer allowance from 210 to 350 tokens (333 measured), making the aggregate ceiling 6,935. Actual peer cost remains excluded from the unchanged 4,500-token base, so verification actions cannot hide unrelated schema growth. |
 | 2026-09-29 | Canonical Jev tool schema replaces the permissive projection: live prior 358 tokens, canonical 828, separate delta 470; aggregate 6,795, measured 6,742. The old 4,500 base and all prior individual ceilings remain unchanged. Completion refusal status preserves bounded judgment identities and next checks; oversized originals use the existing evidence archive, with explicit truncation and retention-failure disclosure. |

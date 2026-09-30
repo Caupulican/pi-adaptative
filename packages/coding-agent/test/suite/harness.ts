@@ -86,7 +86,7 @@ export interface HarnessOptions {
 	systemPrompt?: string;
 	/**
 	 * Replaces the session's whole base tool set (the session config's `baseToolsOverride`): only the
-	 * listed tools exist, so builtins such as `delegate`, `bash` and `typesafe_review` are absent and
+	 * listed tools exist, so builtins such as `delegate`, `bash` and `systemone` are absent and
 	 * a worker delegation reports `delegate_tool_inactive`. To hand a worker a real tool, keep the
 	 * default set and grant it through `workerOrchestrationProfile` instead.
 	 */

@@ -179,6 +179,28 @@ export function findEnvKeys(provider: string): string[] | undefined {
 	return found.length > 0 ? found : undefined;
 }
 
+/** Actual host-known environment credentials, without status markers, credential files or refresh. */
+export function getEnvCredentialValues(provider: string): string[] {
+	const procEnv = getProcessEnv();
+	if (!procEnv) return [];
+	const names =
+		provider === "amazon-bedrock"
+			? [
+					"AWS_ACCESS_KEY_ID",
+					"AWS_SECRET_ACCESS_KEY",
+					"AWS_SESSION_TOKEN",
+					"AWS_BEARER_TOKEN_BEDROCK",
+					"AWS_CONTAINER_AUTHORIZATION_TOKEN",
+				]
+			: (getApiKeyEnvVars(provider) ?? []);
+	const values = new Set<string>();
+	for (const name of names) {
+		const value = procEnv[name] || getProcEnv(name);
+		if (value) values.add(value);
+	}
+	return [...values];
+}
+
 /**
  * Get API key for provider from known environment variables, e.g. OPENAI_API_KEY.
  *

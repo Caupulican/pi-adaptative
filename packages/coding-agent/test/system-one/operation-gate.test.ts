@@ -177,10 +177,11 @@ describe("operation gate", () => {
 
 	function gate(options: { answers: Record<string, number>; granted?: boolean; asks?: boolean; turn?: () => string }) {
 		const fake = engine(options.answers);
+		const getEngine = vi.fn(() => fake);
 		const notices: string[] = [];
 		const askOperator = vi.fn(async () => ({ authorized: false, reason: "operator denied" }));
 		const operationGate = new OperationGate({
-			getEngine: () => fake,
+			getEngine,
 			getRequest: () => "Summarise the build.",
 			getScopeCwd: () => scope,
 			getTurnKey: options.turn ?? (() => "turn-1"),
@@ -188,7 +189,7 @@ describe("operation gate", () => {
 			...(options.asks === false ? {} : { askOperator }),
 			notify: (message) => notices.push(message),
 		});
-		return { operationGate, fake, notices, askOperator };
+		return { operationGate, fake, getEngine, notices, askOperator };
 	}
 
 	it("leaves a session without System One to the deterministic gates", async () => {
@@ -204,13 +205,80 @@ describe("operation gate", () => {
 	});
 
 	it("does not judge a worker's command under the standing grant: the verdict could only authorize", async () => {
-		const { operationGate, fake, askOperator } = gate({
+		const { operationGate, fake, getEngine, askOperator } = gate({
 			answers: { ...OUTWARD, request_authorizes: 0.5 },
 			granted: true,
 		});
 		expect(await operationGate.check("bash", command, scope, "worker")).toBeUndefined();
 		expect(fake.calls).toBe(0);
+		expect(getEngine).not.toHaveBeenCalled();
 		expect(askOperator).not.toHaveBeenCalled();
+	});
+
+	it("does not judge a root command under the standing grant", async () => {
+		const fake = engine({ ...OUTWARD, request_authorizes: 0.02 });
+		const askOperator = vi.fn(async () => ({ authorized: false, reason: "operator denied" }));
+		const getEngine = vi.fn(() => fake);
+		const getScopeCwd = vi.fn(() => scope);
+		const getTurnKey = vi.fn(() => "turn-1");
+		const operationGate = new OperationGate({
+			getEngine,
+			getRequest: () => "Summarise the build.",
+			getScopeCwd,
+			getTurnKey,
+			isGranted: () => true,
+			askOperator,
+			notify: () => {},
+		});
+
+		expect(await operationGate.check("bash", command, scope, "root")).toBeUndefined();
+		expect(fake.calls).toBe(0);
+		expect(getEngine).not.toHaveBeenCalled();
+		expect(getScopeCwd).not.toHaveBeenCalled();
+		expect(getTurnKey).not.toHaveBeenCalled();
+		expect(askOperator).not.toHaveBeenCalled();
+	});
+
+	it("does not reuse a standing grant after it has been revoked", async () => {
+		let granted = true;
+		const { fake, askOperator } = gate({
+			answers: { ...OUTWARD, request_authorizes: 0.02 },
+		});
+		const revocableGate = new OperationGate({
+			getEngine: () => fake,
+			getRequest: () => "Summarise the build.",
+			getScopeCwd: () => scope,
+			getTurnKey: () => "turn-1",
+			isGranted: () => granted,
+			askOperator,
+			notify: () => {},
+		});
+
+		expect(await revocableGate.check("bash", command, scope, "root")).toBeUndefined();
+		granted = false;
+		expect(await revocableGate.check("bash", command, scope, "root")).toMatchObject({
+			block: true,
+			reason: expect.stringContaining("System One refused"),
+		});
+		expect(fake.calls).toBe(1);
+		expect(askOperator).not.toHaveBeenCalled();
+	});
+
+	it("honors cancellation before a standing-grant fast path", async () => {
+		const fake = engine(LOCAL);
+		const operationGate = new OperationGate({
+			getEngine: () => fake,
+			getRequest: () => "Summarise the build.",
+			getScopeCwd: () => scope,
+			getTurnKey: () => "turn-1",
+			isGranted: () => true,
+			notify: () => {},
+		});
+		const cancellation = new AbortController();
+		cancellation.abort();
+
+		await expect(operationGate.check("bash", command, scope, "root", cancellation.signal)).rejects.toThrow();
+		expect(fake.calls).toBe(0);
 	});
 
 	it("runs what System One finds local and reversible without a word, and never asks about a read", async () => {
@@ -244,14 +312,15 @@ describe("operation gate", () => {
 		expect(worker.askOperator).not.toHaveBeenCalled();
 	});
 
-	it("runs under the operator's standing grant and says what System One found", async () => {
-		const { operationGate, notices, askOperator } = gate({
+	it("runs under the operator's standing grant without asking System One", async () => {
+		const { operationGate, fake, notices, askOperator } = gate({
 			answers: { ...OUTWARD, request_authorizes: 0.02 },
 			granted: true,
 		});
 		expect(await operationGate.check("bash", command, scope, "root")).toBeUndefined();
+		expect(fake.calls).toBe(0);
 		expect(askOperator).not.toHaveBeenCalled();
-		expect(notices[0]).toContain("it runs under your operation.irreversible grant");
+		expect(notices).toEqual([]);
 	});
 
 	it("judges again in a new turn", async () => {
@@ -284,7 +353,7 @@ describe("operation gate", () => {
 			getRequest: () => "Run the task script.",
 			getScopeCwd: () => workspace,
 			getTurnKey: () => "turn-1",
-			isGranted: () => true,
+			isGranted: () => false,
 			notify: () => {},
 		});
 		const script = { command: "bash ./task.sh" };
@@ -311,8 +380,9 @@ describe("operation gate", () => {
 		expect(scriptHashes[2]).not.toBe(scriptHashes[0]);
 	});
 
-	it("keeps YOLO capability when a configured System One becomes unavailable", async () => {
+	it("keeps a root call blocked when System One is unavailable and no grant exists", async () => {
 		const notices: string[] = [];
+		const askOperator = vi.fn(async () => ({ authorized: false, reason: "operator still decides" }));
 		const operationGate = new OperationGate({
 			getEngine: () => ({
 				evaluate: async () => {
@@ -322,11 +392,19 @@ describe("operation gate", () => {
 			getRequest: () => "Run autonomously.",
 			getScopeCwd: () => scope,
 			getTurnKey: () => "turn-1",
-			isGranted: () => true,
+			isGranted: () => false,
+			askOperator,
 			notify: (message) => notices.push(message),
 		});
 
-		expect(await operationGate.check("bash", command, scope, "root")).toBeUndefined();
-		expect(notices).toEqual([expect.stringContaining("it runs under your operation.irreversible grant")]);
+		expect(await operationGate.check("bash", command, scope, "root")).toMatchObject({
+			block: true,
+			reason: "operator still decides",
+		});
+		expect(askOperator).toHaveBeenCalledWith(
+			expect.objectContaining({ reason: expect.stringContaining("System One could not judge it (engine down)") }),
+			undefined,
+		);
+		expect(notices).toEqual([]);
 	});
 });

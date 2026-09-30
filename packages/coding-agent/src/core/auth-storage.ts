@@ -6,7 +6,7 @@
  * try to refresh tokens simultaneously.
  */
 
-import { findEnvKeys, getEnvApiKey, getEnvAuthHeaders } from "@caupulican/pi-ai/env-api-keys";
+import { findEnvKeys, getEnvApiKey, getEnvAuthHeaders, getEnvCredentialValues } from "@caupulican/pi-ai/env-api-keys";
 import {
 	getOAuthApiKey,
 	getOAuthProvider,
@@ -26,7 +26,8 @@ import { isDeepStrictEqual } from "util";
 import { getAgentDir } from "../config.ts";
 import { normalizePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
-import { resolveConfigValue } from "./resolve-config-value.ts";
+import { getCachedConfigValue, isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.ts";
+import { isCredentialSecretKey } from "./secrets/credential-content-mock.ts";
 import {
 	acquireFileLockSync,
 	LOW_LATENCY_FILE_LOCK_OPTIONS,
@@ -458,6 +459,41 @@ export class AuthStorage {
 	 */
 	getAll(): AuthStorageData {
 		return { ...this.data };
+	}
+
+	/** Current known host credentials, read locally without refreshing OAuth or running config commands. */
+	getKnownCredentialValues(providers: Iterable<string> = []): string[] {
+		const values = new Set<string>();
+		const add = (value: string | undefined): void => {
+			if (value) values.add(value);
+		};
+		for (const [providerId, credential] of Object.entries(this.data)) {
+			if (credential.type === "api_key") {
+				add(
+					isCommandConfigValue(credential.key)
+						? getCachedConfigValue(credential.key)
+						: resolveConfigValue(credential.key),
+				);
+				continue;
+			}
+			add(credential.access);
+			add(credential.refresh);
+			for (const [name, value] of Object.entries(credential)) {
+				if (name === "access" || name === "refresh" || isCredentialSecretKey(name)) {
+					if (typeof value === "string") add(value);
+				}
+			}
+			try {
+				add(getOAuthProvider(providerId)?.getApiKey(credential));
+			} catch {
+				// Malformed or plugin-specific OAuth data remains in storage; redaction must stay available.
+			}
+		}
+		for (const value of this.runtimeOverrides.values()) add(value);
+		for (const provider of providers) {
+			for (const value of getEnvCredentialValues(provider)) add(value);
+		}
+		return [...values];
 	}
 
 	drainErrors(): Error[] {

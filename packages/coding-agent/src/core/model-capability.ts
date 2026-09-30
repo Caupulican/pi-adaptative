@@ -15,6 +15,7 @@ import {
 	TOOL_SCHEMA_SEARCH_NAME,
 } from "@caupulican/pi-ai";
 import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
+import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 
 export type ModelCapabilityClass = "full" | "lean" | "minimal" | "chat";
 
@@ -98,10 +99,13 @@ export const MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS: readonly string[] = [
 	"ask_question",
 	// The executor tool: minimal-class models ARE the daily-ops executors, and its schema is tiny.
 	"run_toolkit_script",
-	"typesafe_review",
+	SYSTEM_ONE_TOOL_NAME,
 ];
 // Independent semantic assistance is available across model classes; authority filters still apply.
-export const MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS: readonly string[] = [...GOAL_LIFECYCLE_TOOL_NAMES, "typesafe_review"];
+export const MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS: readonly string[] = [
+	...GOAL_LIFECYCLE_TOOL_NAMES,
+	SYSTEM_ONE_TOOL_NAME,
+];
 
 export const DEFAULT_LANE_MAX_OUTPUT_TOKENS = 2048;
 const MIN_LANE_MAX_OUTPUT_TOKENS = 256;

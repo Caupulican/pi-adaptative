@@ -4,8 +4,8 @@ import { createInMemoryArtifactStore } from "../src/core/context/context-artifac
 import { evaluationInputSchema, reviewInputSchema } from "../src/core/review/typesafe-contract.ts";
 import { TypeSafeEvidenceMaterializer } from "../src/core/review/typesafe-evidence-materializer.ts";
 import { TypeSafeEvidenceStore } from "../src/core/review/typesafe-evidence-store.ts";
-import { TypeSafeReviewer } from "../src/core/review/typesafe-reviewer.ts";
-import { createTypeSafeReviewToolDefinition } from "../src/core/tools/typesafe-review.ts";
+import { SystemOneReviewer } from "../src/core/review/typesafe-reviewer.ts";
+import { createSystemOneToolDefinition } from "../src/core/tools/systemone.ts";
 
 const review = {
 	state: "fixture source",
@@ -16,8 +16,8 @@ const review = {
 
 describe("TypeSafe input contract", () => {
 	it("advertises the same mandatory schemas the reviewer validates", () => {
-		const tool = createTypeSafeReviewToolDefinition(
-			new TypeSafeReviewer({ getApiKey: async () => "fixture-key" }),
+		const tool = createSystemOneToolDefinition(
+			new SystemOneReviewer({ getApiKey: async () => "fixture-key" }),
 			new TypeSafeEvidenceStore(createInMemoryArtifactStore()),
 		);
 		const { evaluation, review: advertisedReview } = tool.parameters.properties;
@@ -70,7 +70,7 @@ describe("TypeSafe input contract", () => {
 		},
 	])("returns bounded field repair diagnostics without source values: $path", async ({ input, path }) => {
 		const fetcher = vi.fn<typeof fetch>();
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		let message = "";
 		try {
 			await reviewer.review(input as typeof review);
@@ -86,7 +86,7 @@ describe("TypeSafe input contract", () => {
 	});
 	it("points an invalid question type at its field before credential lookup", async () => {
 		const getApiKey = vi.fn(async () => "fixture-key");
-		const reviewer = new TypeSafeReviewer({ getApiKey });
+		const reviewer = new SystemOneReviewer({ getApiKey });
 		await expect(
 			reviewer.evaluate(
 				JSON.parse('{"state":"fixture","questions":{"q":{"type":"invalid","instructions":"Check"}}}'),
@@ -95,7 +95,7 @@ describe("TypeSafe input contract", () => {
 		expect(getApiKey).not.toHaveBeenCalled();
 	});
 	it("bounds many malformed questions and long identifiers", async () => {
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key" });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key" });
 		const questions = Object.fromEntries(
 			Array.from({ length: 100 }, (_, index) => [
 				`${"q".repeat(4000)}${index}`,
@@ -112,7 +112,7 @@ describe("TypeSafe input contract", () => {
 		expect(message).not.toContain("private-source-value");
 	});
 	it("reports discriminated Score criteria instead of an opaque union mismatch", async () => {
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key" });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key" });
 		await expect(
 			reviewer.evaluate(
 				JSON.parse(
@@ -122,7 +122,7 @@ describe("TypeSafe input contract", () => {
 		).rejects.toThrow("/questions/score/criteria");
 	});
 	it("accepts the canonical valid option map without changing confidence semantics", async () => {
-		const reviewer = new TypeSafeReviewer({
+		const reviewer = new SystemOneReviewer({
 			getApiKey: async () => "fixture-key",
 			fetch: async () =>
 				Response.json({
@@ -147,8 +147,8 @@ describe("TypeSafe input contract", () => {
 				usage: { input_tokens: 1, output_tokens: 1 },
 			}),
 		);
-		const tool = createTypeSafeReviewToolDefinition(
-			new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
+		const tool = createSystemOneToolDefinition(
+			new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher }),
 			new TypeSafeEvidenceStore(createInMemoryArtifactStore()),
 			undefined,
 			materializer,
@@ -165,7 +165,7 @@ describe("TypeSafe input contract", () => {
 	it.each(["apikey_PRIVATE_SECRET", "claim"])(
 		"keeps recognized credentials out of diagnostic paths: %s",
 		async (id) => {
-			const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key" });
+			const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key" });
 			let message = "";
 			try {
 				await reviewer.evaluate(

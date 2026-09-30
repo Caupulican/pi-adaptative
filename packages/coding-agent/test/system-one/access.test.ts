@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { TypeSafeReviewer } from "../../src/core/review/typesafe-reviewer.ts";
+import { SystemOneReviewer } from "../../src/core/review/typesafe-reviewer.ts";
 import { type SystemOneProviderChoice, sessionSystemOneAccess } from "../../src/core/system-one/access.ts";
 
 function access(choice: { value: SystemOneProviderChoice }, keys: { typesafe?: string; openrouter?: string }) {
@@ -31,7 +31,7 @@ describe("System One access", () => {
 	it("sends each provider's key only to that provider, and refuses another engine version", async () => {
 		const choice = { value: "openrouter" as SystemOneProviderChoice };
 		const calls: { url: string; auth: string; model: string }[] = [];
-		const reviewer = new TypeSafeReviewer({
+		const reviewer = new SystemOneReviewer({
 			access: access(choice, { typesafe: "ts-key", openrouter: "or-key" }),
 			fetch: (async (url: string | URL | Request, init?: RequestInit) => {
 				const body = JSON.parse(String(init?.body)) as { model: string };

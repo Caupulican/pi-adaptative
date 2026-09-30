@@ -282,6 +282,40 @@ describe("credential exposure guard", () => {
 		await expect(failing.execute("call", {})).rejects.not.toThrow(secret);
 	});
 
+	it("snapshots the canonical output redactor once per result while preserving ordinary text", async () => {
+		const secret = "factory-secret-output-marker";
+		const createSensitiveTextRedactor = vi.fn((values: readonly string[]) => (text: string) => {
+			let result = text;
+			for (const value of values) result = result.split(value).join("[REDACTED_SECRET]");
+			return result;
+		});
+		const boundary = {
+			getSensitiveValues: () => [secret],
+			createSensitiveTextRedactor,
+			redactSensitiveText: vi.fn((text: string) => text),
+		};
+		const tool: AgentTool<typeof testSchema> = {
+			name: "example",
+			label: "example",
+			description: "test tool",
+			parameters: testSchema,
+			async execute() {
+				return {
+					content: [{ type: "text", text: `ordinary output ${secret}` }],
+					details: { nested: `ordinary detail ${secret}` },
+				};
+			},
+		};
+
+		const result = await wrapToolWithCredentialExposureGuard(tool, "/workspace", boundary).execute("call", {});
+
+		expect(result.content).toEqual([{ type: "text", text: "ordinary output [REDACTED_SECRET]" }]);
+		expect(result.details).toEqual({ nested: "ordinary detail [REDACTED_SECRET]" });
+		expect(createSensitiveTextRedactor).toHaveBeenCalledOnce();
+		expect(createSensitiveTextRedactor).toHaveBeenCalledWith([secret]);
+		expect(boundary.redactSensitiveText).not.toHaveBeenCalled();
+	});
+
 	it("runs credential consumers while masking their unknown named keys in streamed and final output", async () => {
 		const secret = "opaque-trello-secret-value";
 		const consume = vi.fn((value: string) => value === secret);

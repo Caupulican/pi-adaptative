@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added host-only environment credential discovery for redaction, including Bedrock IAM, session and bearer credentials, without treating authentication status or profile names as secrets.
+
 ## [0.101.3] - 2026-09-30
 
 ### Fixed

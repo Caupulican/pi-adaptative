@@ -7,7 +7,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { TypeSafeReviewer } from "../packages/coding-agent/src/core/review/typesafe-reviewer.ts";
+import { SystemOneReviewer } from "../packages/coding-agent/src/core/review/typesafe-reviewer.ts";
 import { SystemOneJevAdapter } from "../packages/coding-agent/src/core/system-one/adapter.ts";
 import { createSystemOneConfig } from "../packages/coding-agent/src/core/system-one/config.ts";
 import { SystemOneController } from "../packages/coding-agent/src/core/system-one/controller.ts";
@@ -32,7 +32,7 @@ export function liveSystemOneController(scriptName) {
 		process.exit(2);
 	}
 	const config = createSystemOneConfig({ enabled: true, provider: "typesafe", productionModel: SYSTEM_ONE_LIVE_MODEL });
-	const reviewer = new TypeSafeReviewer({ provider: "typesafe", model: SYSTEM_ONE_LIVE_MODEL, getApiKey: async () => key });
+	const reviewer = new SystemOneReviewer({ provider: "typesafe", model: SYSTEM_ONE_LIVE_MODEL, getApiKey: async () => key });
 	const adapter = new SystemOneJevAdapter(reviewer, config, { getApiKey: async () => key, getUserKeys: async () => [key] });
 	const store = new ExecutionStore({
 		run_id: scriptName,

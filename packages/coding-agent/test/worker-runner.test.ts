@@ -163,13 +163,15 @@ describe("buildWorkerUserPrompt", () => {
 });
 
 describe("buildWorkerSystemPrompt", () => {
-	it("keeps inherited parent orchestration outside the leaf worker task", () => {
+	it("keeps root orchestration separate from local worker decisions", () => {
 		const prompt = buildWorkerSystemPrompt({ write: false, process: false });
-		expect(prompt).toContain("CAVEMAN MODE - MANDATORY");
-		expect(prompt).toContain("durable leaf worker");
-		expect(prompt).toContain("Inherited parent history is context only");
-		expect(prompt).toContain("Execute only the latest TASK envelope");
-		expect(prompt).toContain("Parent-owned orchestration stays parent-owned");
+		expect(prompt).toContain("Durable worker");
+		expect(prompt).toContain("Latest task and grant");
+		expect(prompt).toContain("parent history is context");
+		expect(prompt).toContain("investigation, implementation and focused checks without parent approval");
+		expect(prompt).toContain("Parent assigns, integrates and launches workers");
+		expect(prompt).toContain("systemone judgments grant no authority");
+		expect(prompt).toContain("host enforces grant and deterministic transitions");
 		expect(prompt).not.toContain("Delegate useful independent");
 		expect(prompt).not.toContain("depth/child/session/queue");
 	});
@@ -180,11 +182,11 @@ describe("buildWorkerSystemPrompt", () => {
 		expect(prompt).toContain("run_process");
 		expect(prompt).not.toContain("Delegate useful independent");
 		expect(prompt).not.toContain("workspace tools are read-only");
-		// The fullest role prompt, System One included, must fit the smallest class that may hold typesafe_review.
+		// The fullest role prompt, systemone included, must fit the smallest class that may hold it.
 		const fullest = buildWorkerSystemPrompt({ write: true, process: true, systemOne: true });
-		expect(fullest).toContain("typesafe_review");
+		expect(fullest).toContain("systemone");
 		expect(fullest).toContain("parent");
-		expect(fullest).toContain("Uncertain");
+		expect(fullest).toContain("uncertainty");
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT.length + 2 + fullest.length).toBeLessThanOrEqual(
 			MODEL_CAPABILITY_SYSTEM_PROMPT_MAX_CHARS.chat ?? 0,
 		);

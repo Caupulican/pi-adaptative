@@ -75,8 +75,8 @@ function readBoundedFile(path: string): { content: string; sha256: string; bytes
 	try {
 		descriptor = openSync(path, "r");
 		const stat = fstatSync(descriptor);
-		if (!stat.isFile()) throw new Error("TypeSafe evidence source is not a regular file");
-		if (stat.size > MAX_TYPESAFE_EVIDENCE_SOURCE_BYTES) throw new Error("TypeSafe evidence source exceeds 512 KiB");
+		if (!stat.isFile()) throw new Error("System One evidence source is not a regular file");
+		if (stat.size > MAX_TYPESAFE_EVIDENCE_SOURCE_BYTES) throw new Error("System One evidence source exceeds 512 KiB");
 		const buffer = Buffer.allocUnsafe(MAX_TYPESAFE_EVIDENCE_SOURCE_BYTES + 1);
 		let offset = 0;
 		while (offset < buffer.length) {
@@ -84,7 +84,7 @@ function readBoundedFile(path: string): { content: string; sha256: string; bytes
 			if (count === 0) break;
 			offset += count;
 		}
-		if (offset > MAX_TYPESAFE_EVIDENCE_SOURCE_BYTES) throw new Error("TypeSafe evidence source exceeds 512 KiB");
+		if (offset > MAX_TYPESAFE_EVIDENCE_SOURCE_BYTES) throw new Error("System One evidence source exceeds 512 KiB");
 		const snapshot = buffer.subarray(0, offset);
 		let content: string;
 		try {
@@ -129,7 +129,7 @@ function normalizeReference(reference: TypeSafeEvidenceReferenceInput): TypeSafe
 	const scheme = schemes.find((candidate) => reference.startsWith(candidate));
 	const value = scheme ? reference.slice(scheme.length) : "";
 	if (!scheme || !value.trim())
-		throw new Error("TypeSafe evidence reference requires file:, artifact:, git-diff:, or git-diff-staged:");
+		throw new Error("System One evidence reference requires file:, artifact:, git-diff:, or git-diff-staged:");
 	if (scheme === "file:") return { kind: "file", path: value };
 	if (scheme === "artifact:") return { kind: "artifact", id: value };
 	return { kind: "git_diff", paths: [value], ...(scheme === "git-diff-staged:" ? { staged: true } : {}) };
@@ -146,9 +146,9 @@ export class TypeSafeEvidenceMaterializer {
 	private canonicalFile(rawPath: string, cwd: string): string {
 		const canonical = safeRealpathSync(resolve(cwd, rawPath));
 		if (!isPathWithinScope(canonical, cwd))
-			throw new Error(`TypeSafe evidence path is outside the task directory: ${rawPath}`);
+			throw new Error(`System One evidence path is outside the task directory: ${rawPath}`);
 		if (isProtectedCredentialPath(canonical, cwd, this.deps.credentialBoundary))
-			throw new Error(`TypeSafe evidence path is a protected credential file: ${rawPath}`);
+			throw new Error(`System One evidence path is a protected credential file: ${rawPath}`);
 		return canonical;
 	}
 
@@ -179,7 +179,7 @@ export class TypeSafeEvidenceMaterializer {
 			if (stored.ref.path && isProtectedCredentialPath(stored.ref.path, cwd, this.deps.credentialBoundary))
 				throw new Error(`TypeSafe artifact evidence names a protected credential file: ${artifactId}`);
 			if (Buffer.byteLength(stored.content) > MAX_TYPESAFE_EVIDENCE_SOURCE_BYTES)
-				throw new Error("TypeSafe evidence source exceeds 512 KiB");
+				throw new Error("System One evidence source exceeds 512 KiB");
 			return {
 				kind: reference.kind,
 				label: `${stored.ref.toolName ?? stored.ref.kind}:${artifactId}`,
@@ -208,8 +208,12 @@ export class TypeSafeEvidenceMaterializer {
 		signal?: AbortSignal,
 	): Promise<TypeSafeMaterializedEvidence> {
 		if (references.length === 0 || references.length > MAX_TYPESAFE_EVIDENCE_REFERENCES)
-			throw new Error(`TypeSafe evidence requires from 1 through ${MAX_TYPESAFE_EVIDENCE_REFERENCES} references`);
+			throw new Error(`System One evidence requires from 1 through ${MAX_TYPESAFE_EVIDENCE_REFERENCES} references`);
 		const cwd = safeRealpathSync(this.deps.getCwd());
+		const sensitiveValues = (await this.deps.credentialBoundary?.getSensitiveValues?.()) ?? [];
+		const redact =
+			this.deps.credentialBoundary?.createSensitiveTextRedactor?.(sensitiveValues) ??
+			((text: string) => this.deps.credentialBoundary?.redactSensitiveText(text, sensitiveValues) ?? text);
 		const sources: TypeSafeMaterializedSource[] = [];
 		const manifest: TypeSafeEvidenceManifestEntry[] = [];
 		let totalSourceBytes = 0;
@@ -218,14 +222,14 @@ export class TypeSafeEvidenceMaterializer {
 			const raw = await this.rawSource(normalizeReference(references[index]), cwd, signal);
 			totalSourceBytes += raw.bytes;
 			if (totalSourceBytes > MAX_TYPESAFE_REFERENCED_EVIDENCE_BYTES)
-				throw new Error("TypeSafe referenced evidence exceeds 1 MiB");
-			const content = this.deps.credentialBoundary?.redactSensitiveText(raw.content) ?? raw.content;
+				throw new Error("System One referenced evidence exceeds 1 MiB");
+			const content = redact(raw.content);
 			const submittedBytes = Buffer.byteLength(content);
 			if (submittedBytes > MAX_TYPESAFE_EVIDENCE_SOURCE_BYTES)
-				throw new Error("Redacted TypeSafe evidence source exceeds 512 KiB");
+				throw new Error("Redacted System One evidence source exceeds 512 KiB");
 			totalSubmittedBytes += submittedBytes;
 			if (totalSubmittedBytes > MAX_TYPESAFE_REFERENCED_EVIDENCE_BYTES)
-				throw new Error("Redacted TypeSafe referenced evidence exceeds 1 MiB");
+				throw new Error("Redacted System One referenced evidence exceeds 1 MiB");
 			const common = {
 				id: `source-${index + 1}`,
 				kind: raw.kind,

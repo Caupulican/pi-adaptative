@@ -2,11 +2,19 @@ import { createHash, randomUUID } from "node:crypto";
 import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import { combineAbortSignals } from "@caupulican/pi-ai/abort-signals";
 import { retryProviderRequest } from "@caupulican/pi-ai/provider-retry";
+import type { CredentialExposureBoundary } from "../secrets/credential-exposure-guard.ts";
+import { redactCredentialContent } from "../secrets/credential-model-content.ts";
 import type { SystemOneAccessResolver } from "../system-one/access.ts";
 import { getSystemOneProviderDriver, type SystemOneProviderDriver } from "../system-one/provider-driver.ts";
 import {
+	type SystemOneEvaluationRecord,
+	SystemOneReviewError,
+	type SystemOneReviewRecord,
+	type SystemOneReviewResponseObserver,
+	type SystemOneTransportAttempt,
+} from "./system-one-review-port.ts";
+import {
 	type EvaluationInput,
-	type EvaluationResponse,
 	getEvaluationUsage,
 	REVIEW_CONFIDENCE,
 	type ReviewInput,
@@ -22,50 +30,73 @@ export type { ReviewInput } from "./typesafe-contract.ts";
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 
-function redactReviewText(text: string, key: string): string {
-	return text
-		.split(JSON.stringify(key).slice(1, -1))
-		.join("[REDACTED]")
-		.split(key)
-		.join("[REDACTED]")
-		.replace(new RegExp(TYPESAFE_API_CREDENTIAL.source, "g"), "[REDACTED]");
+function redactReviewText(text: string, key: string | undefined): string {
+	const redacted = key ? text.split(key).join("[REDACTED]") : text;
+	return redacted.replace(new RegExp(TYPESAFE_API_CREDENTIAL.source, "g"), "[REDACTED]");
 }
 
-/** Validate grammar with the native parser, then preserve/reject ambiguous object members. */
-function decodeReviewResponse(text: string, key: string): { raw: unknown; duplicateKeys: boolean } {
-	try {
-		JSON.parse(text);
-	} catch {
-		return { raw: redactReviewText(text, key), duplicateKeys: false };
-	}
+function preserveEvaluationKey(path: readonly (string | number)[], key: string): boolean {
+	if (path.length === 0) return key === "model" || key === "state" || key === "questions";
+	return path.length === 2 && path[0] === "questions" && ["type", "instructions", "criteria"].includes(key);
+}
+
+function preserveResponseKey(path: readonly (string | number)[], key: string): boolean {
+	if (path.length === 0) return ["model", "answers", "usage"].includes(key);
+	if (path[0] === "usage") return true;
+	return (
+		path.length === 2 &&
+		path[0] === "answers" &&
+		["type", "confidence", "choice", "score", "probabilities", "legend"].includes(key)
+	);
+}
+
+/** Scan original JSON before any projection so duplicate provider members remain adverse evidence. */
+function hasDuplicateJsonKeys(text: string): boolean {
 	const objects: Set<string>[] = [];
 	let duplicateKeys = false;
-	// Strings are single tokens, so braces, escaped quotes and colons inside values cannot
-	// change the nesting. Native JSON.parse above already checked the complete grammar.
-	const normalized = text.replace(/"(?:[^"\\]|\\.)*"|[{}[\]]/g, (token: string, offset: number) => {
+	text.replace(/"(?:[^"\\]|\\.)*"|[{}[\]]/g, (token: string, offset: number) => {
 		if (token === "{" || token === "[") objects.push(new Set());
 		else if (token === "}" || token === "]") objects.pop();
 		else {
-			const value = redactReviewText(JSON.parse(token), key);
 			let next = offset + token.length;
 			while (/[ \t\r\n]/.test(text[next] ?? "")) next++;
 			if (text[next] === ":") {
 				const keys = objects.at(-1)!;
-				if (keys.has(value)) duplicateKeys = true;
-				keys.add(value);
+				const decodedKey = JSON.parse(token) as string;
+				if (keys.has(decodedKey)) duplicateKeys = true;
+				keys.add(decodedKey);
 			}
-			return JSON.stringify(value);
 		}
 		return token;
 	});
-	// Keep both conflicting values in the redacted error record; do not lose one via JSON.parse.
-	return { raw: duplicateKeys ? normalized : JSON.parse(normalized), duplicateKeys };
+	return duplicateKeys;
 }
 
-export interface TypeSafeTransportAttempt {
-	attempt: number;
-	status?: number;
-	response?: unknown;
+/** Validate original grammar and duplicate keys before projecting decoded string values and keys. */
+function decodeReviewResponse(
+	text: string,
+	key: string | undefined,
+	redact: (text: string) => string,
+): { raw: unknown; duplicateKeys: boolean } {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch {
+		return { raw: redact(redactReviewText(text, key)), duplicateKeys: false };
+	}
+	const duplicateKeys = hasDuplicateJsonKeys(text);
+	if (duplicateKeys) {
+		// Retain both conflicting members in a sanitized receipt rather than letting JSON.parse erase one.
+		const projectedText = text.replace(/"(?:[^"\\]|\\.)*"/g, (token: string) => {
+			const value = JSON.parse(token) as string;
+			return JSON.stringify(redact(redactReviewText(value, key)));
+		});
+		return { raw: projectedText, duplicateKeys: true };
+	}
+	return {
+		raw: redactCredentialContent(parsed, (value) => redact(redactReviewText(value, key)), preserveResponseKey),
+		duplicateKeys: false,
+	};
 }
 
 export interface TypeSafeUsageReceipt extends PricedTypeSafeUsage {
@@ -73,46 +104,6 @@ export interface TypeSafeUsageReceipt extends PricedTypeSafeUsage {
 	readonly provider: string;
 	readonly model: string;
 	readonly attempt: number;
-}
-
-export interface EvaluationRecord {
-	request: EvaluationInput & { model: string };
-	requestSha256: string;
-	response: EvaluationResponse;
-	attempts: number;
-	transportAttempts: TypeSafeTransportAttempt[];
-	elapsedMs: number;
-}
-
-export interface ReviewRecord extends EvaluationRecord {
-	threshold: number;
-	expected: Record<string, string>;
-	accepted: boolean;
-	failures: string[];
-}
-
-export class TypeSafeReviewError extends Error {
-	readonly response: unknown;
-	readonly requestSha256: string;
-	readonly request: EvaluationRecord["request"];
-	readonly transportAttempts: TypeSafeTransportAttempt[];
-	readonly failureKind: "transport" | "usage_recording";
-	constructor(
-		message: string,
-		requestSha256: string,
-		request: EvaluationRecord["request"],
-		response: unknown,
-		transportAttempts: TypeSafeTransportAttempt[],
-		failureKind: "transport" | "usage_recording" = "transport",
-	) {
-		super(message);
-		this.name = "TypeSafeReviewError";
-		this.requestSha256 = requestSha256;
-		this.request = request;
-		this.response = response;
-		this.transportAttempts = transportAttempts;
-		this.failureKind = failureKind;
-	}
 }
 
 export interface SystemOneReviewerDeps {
@@ -131,6 +122,11 @@ export interface SystemOneReviewerDeps {
 	modelsEndpoint?: string;
 	/** One durable, provider-priced receipt for every response carrying valid usage, retries included. */
 	onUsage?(receipt: TypeSafeUsageReceipt): void;
+	/** The same host credential boundary that protects model requests and tool output. */
+	credentialBoundary?: Pick<
+		CredentialExposureBoundary,
+		"redactSensitiveText" | "createSensitiveTextRedactor" | "getSensitiveValues"
+	>;
 }
 
 /** One evaluation's connection: which provider, which model, which key (absent when not configured). */
@@ -140,8 +136,6 @@ interface ReviewerConnection {
 	readonly key: string | undefined;
 	readonly setup: string;
 }
-
-export type TypeSafeReviewerDeps = SystemOneReviewerDeps;
 
 /** Separate judge port: does not generate code, choose tools, or authorize side effects. */
 export class SystemOneReviewer {
@@ -244,11 +238,8 @@ export class SystemOneReviewer {
 	async review(
 		input: ReviewInput,
 		signal?: AbortSignal,
-		onResponse?: (
-			attempts: readonly TypeSafeTransportAttempt[],
-			connection: { readonly provider: string; readonly model: string },
-		) => void,
-	): Promise<ReviewRecord> {
+		onResponse?: SystemOneReviewResponseObserver,
+	): Promise<SystemOneReviewRecord> {
 		signal?.throwIfAborted();
 		const snapshot: ReviewInput = JSON.parse(serializeEvaluation(input));
 		validateTypeSafeInput("review", snapshot);
@@ -266,8 +257,15 @@ export class SystemOneReviewer {
 			onResponse,
 		);
 		const threshold = REVIEW_CONFIDENCE[snapshot.confidence ?? "high"];
+		const safeQuestionIds = Object.keys(result.request.questions);
 		const expected = Object.fromEntries(
-			Object.entries(snapshot.questions).map(([id, question]) => [id, question.expected]),
+			Object.entries(snapshot.questions).map(([id, question], index) => {
+				const safeId = safeQuestionIds[index] ?? id;
+				const criteriaKeys = Object.keys(question.criteria);
+				const safeCriteriaKeys = Object.keys(result.request.questions[safeId]?.criteria ?? {});
+				const expectedIndex = criteriaKeys.indexOf(question.expected);
+				return [safeId, safeCriteriaKeys[expectedIndex] ?? question.expected];
+			}),
 		);
 		const failures = Object.entries(result.response.answers)
 			.filter(
@@ -281,16 +279,15 @@ export class SystemOneReviewer {
 	async evaluate(
 		input: EvaluationInput,
 		signal?: AbortSignal,
-		onResponse?: (
-			attempts: readonly TypeSafeTransportAttempt[],
-			connection: { readonly provider: string; readonly model: string },
-		) => void,
-	): Promise<EvaluationRecord> {
+		onResponse?: SystemOneReviewResponseObserver,
+	): Promise<SystemOneEvaluationRecord> {
 		signal?.throwIfAborted();
 		// Snapshot before any await. No omitted fields or context truncation are permitted.
 		const snapshot: EvaluationInput = JSON.parse(serializeEvaluation(input));
 		validateTypeSafeInput("evaluation", snapshot);
 		const { driver, model, key, setup } = await this.connection();
+		signal?.throwIfAborted();
+		const sensitiveValues = (await this.deps.credentialBoundary?.getSensitiveValues?.()) ?? [];
 		signal?.throwIfAborted();
 		const providerName = driver.displayName;
 		const endpoint = this.deps.endpoint ?? driver.decisionsEndpoint;
@@ -298,14 +295,25 @@ export class SystemOneReviewer {
 		if (this.deps.access && snapshot.model !== undefined && !driver.matchesModel(model, snapshot.model))
 			throw new Error(`System One runs ${model}; ${snapshot.model} was requested`);
 		const request = this.deps.access ? { ...snapshot, model } : { model: snapshot.model ?? model, ...snapshot };
-		const body = JSON.stringify(request);
+		const rawBody = JSON.stringify(request);
+		const serializedKey = key ? JSON.stringify(key).slice(1, -1) : undefined;
+		if (key && (rawBody.includes(key) || rawBody.includes(serializedKey!)))
+			throw new Error(`${providerName} evidence contains the selected API credential`);
+		const redactSensitive =
+			this.deps.credentialBoundary?.createSensitiveTextRedactor?.(sensitiveValues) ??
+			((text: string) => this.deps.credentialBoundary?.redactSensitiveText(text, sensitiveValues) ?? text);
+		const redact = (text: string): string => {
+			return redactReviewText(redactSensitive(text), key);
+		};
+		const safeRequest = redactCredentialContent(request, redact, preserveEvaluationKey);
+		validateTypeSafeInput("evaluation", safeRequest);
+		const body = JSON.stringify(safeRequest);
 		if (Buffer.byteLength(body) > MAX_REQUEST_BYTES)
 			throw new Error(
 				`${providerName} request exceeds 2 MiB; partition with explicit coverage, never truncate evidence`,
 			);
 		if (!key) throw new Error(`${providerName} is not configured. Use ${setup}`);
-		if (body.includes(JSON.stringify(key).slice(1, -1)) || TYPESAFE_API_CREDENTIAL.test(body))
-			throw new Error(`${providerName} evidence contains an API credential`);
+		if (TYPESAFE_API_CREDENTIAL.test(body)) throw new Error(`${providerName} evidence contains an API credential`);
 		const requestSha256 = createHash("sha256").update(body).digest("hex");
 		const evaluationId = randomUUID();
 		const timeout = new AbortController();
@@ -313,7 +321,7 @@ export class SystemOneReviewer {
 		const combined = combineAbortSignals([signal, timeout.signal]);
 		const started = Date.now();
 		let attempts = 0;
-		const transportAttempts: TypeSafeTransportAttempt[] = [];
+		const transportAttempts: SystemOneTransportAttempt[] = [];
 		let raw: unknown;
 		try {
 			raw = await retryProviderRequest(
@@ -321,7 +329,7 @@ export class SystemOneReviewer {
 					combined.signal?.throwIfAborted();
 					attempts++;
 					raw = undefined;
-					const attempt: TypeSafeTransportAttempt = { attempt: attempts };
+					const attempt: SystemOneTransportAttempt = { attempt: attempts };
 					transportAttempts.push(attempt);
 					let response: Response;
 					try {
@@ -365,7 +373,7 @@ export class SystemOneReviewer {
 						reader.releaseLock();
 					}
 					const text = Buffer.concat(chunks).toString("utf8");
-					const decoded = decodeReviewResponse(text, key);
+					const decoded = decodeReviewResponse(text, key, redact);
 					raw = decoded.raw;
 					attempt.response = raw;
 					try {
@@ -401,10 +409,10 @@ export class SystemOneReviewer {
 				{ maxRetries: 2, maxRetryDelayMs: 15_000, signal: combined.signal },
 			);
 			combined.signal?.throwIfAborted();
-			validateEvaluationResponse(raw, snapshot);
+			validateEvaluationResponse(raw, safeRequest);
 			this.verifiedKey = key;
 			return {
-				request,
+				request: safeRequest,
 				requestSha256,
 				response: raw,
 				attempts,
@@ -412,7 +420,7 @@ export class SystemOneReviewer {
 				elapsedMs: Date.now() - started,
 			};
 		} catch (error) {
-			// Never project arbitrary transport messages: they can contain the Authorization header.
+			// Keep arbitrary transport messages out; sanitize the accepted diagnostic with the request snapshot.
 			const errorRegex =
 				/^(Invalid (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) HTTP|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) network error|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response exceeds|(?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) usage recording failed|Empty (?:TypeSafe|OpenRouter|SystemOne|[A-Za-z0-9_-]+) response|Server requested)/;
 			const message = combined.signal?.aborted
@@ -420,10 +428,10 @@ export class SystemOneReviewer {
 				: error instanceof Error && errorRegex.test(error.message)
 					? error.message
 					: `${providerName} request failed`;
-			throw new TypeSafeReviewError(
-				redactReviewText(message, key),
+			throw new SystemOneReviewError(
+				redact(message),
 				requestSha256,
-				request,
+				safeRequest,
 				raw,
 				transportAttempts,
 				error instanceof Error && error.message === `${providerName} usage recording failed`
@@ -436,7 +444,3 @@ export class SystemOneReviewer {
 		}
 	}
 }
-
-export const TypeSafeReviewer = SystemOneReviewer;
-export type TypeSafeReviewer = SystemOneReviewer;
-export type SystemOneReviewError = TypeSafeReviewError;

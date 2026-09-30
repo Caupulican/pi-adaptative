@@ -67,7 +67,9 @@ const JQ_OPTIONS_WITH_ONE_OPERAND = new Set(["-L", "--indent"]);
 const JQ_OPTIONS_WITH_TWO_OPERANDS = new Set(["--arg", "--argjson", "--rawfile", "--slurpfile"]);
 
 export interface CredentialExposureBoundary extends CredentialPathProtection {
-	redactSensitiveText(text: string): string;
+	redactSensitiveText(text: string, additionalValues?: readonly string[]): string;
+	createSensitiveTextRedactor?(additionalValues?: readonly string[]): (text: string) => string;
+	getSensitiveValues?(): readonly string[] | Promise<readonly string[]>;
 	/** Explicit backend facts; errors never substitute native filesystem results. */
 	getPathProbe?(context?: ExecutionContext): CredentialPathProbe;
 }
@@ -721,16 +723,26 @@ export async function credentialToolBlockReasonAsync(
 function createOutputRedactor(
 	boundary: CredentialExposureBoundary | undefined,
 	mock: (text: string) => string,
+	additionalValues: readonly string[],
 ): (text: string) => string {
-	return (text) => mock(boundary ? boundary.redactSensitiveText(text) : text);
+	const redactSensitive = boundary?.createSensitiveTextRedactor?.(additionalValues);
+	return (text) =>
+		mock(
+			redactSensitive
+				? redactSensitive(text)
+				: boundary
+					? boundary.redactSensitiveText(text, additionalValues)
+					: text,
+		);
 }
 
 function redactResult<T>(
 	result: AgentToolResult<T>,
 	boundary?: CredentialExposureBoundary,
 	mock: (text: string) => string = mockCredentialFields,
+	additionalValues: readonly string[] = [],
 ): AgentToolResult<T> {
-	const redact = createOutputRedactor(boundary, mock);
+	const redact = createOutputRedactor(boundary, mock, additionalValues);
 	const budget = { nodes: 0 };
 	return {
 		...result,
@@ -823,13 +835,15 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 		},
 		async execute(toolCallId, params, signal, onUpdate) {
 			let mock: (text: string) => string = mockCredentialFields;
+			let sensitiveValues: readonly string[] = [];
 			const safeUpdate = onUpdate
 				? (partial: AgentToolResult<TDetails>) => {
-						onUpdate(redactResult(partial, boundary, mock));
+						onUpdate(redactResult(partial, boundary, mock, sensitiveValues));
 					}
 				: undefined;
 			try {
 				signal?.throwIfAborted();
+				sensitiveValues = (await boundary?.getSensitiveValues?.()) ?? [];
 				const assessment = await assessCredentialExposureAsync(
 					tool.name,
 					params,
@@ -849,13 +863,18 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 				}
 				mock = createExposureMock(assessment, cwd, boundary, executionContext, pathAuthority);
 				signal?.throwIfAborted();
-				return redactResult(await executor.execute(toolCallId, params, signal, safeUpdate), boundary, mock);
+				return redactResult(
+					await executor.execute(toolCallId, params, signal, safeUpdate),
+					boundary,
+					mock,
+					sensitiveValues,
+				);
 			} catch (error) {
 				// A cancellation is not this guard's to describe: the run's abort reason (a plain string for a
 				// named abort, thrown verbatim by throwIfAborted) passes through untouched so the loop finalizes
 				// the call as `Operation aborted (<reason>)` without a second line about the guard.
 				if (signal?.aborted || (signal?.reason !== undefined && error === signal.reason)) throw error;
-				const redact = createOutputRedactor(boundary, mockCredentialFields);
+				const redact = createOutputRedactor(boundary, mockCredentialFields, sensitiveValues);
 				const classified = readAgentToolExecutionError(error);
 				if (classified) {
 					throw new AgentToolExecutionError(

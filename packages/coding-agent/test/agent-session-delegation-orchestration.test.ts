@@ -1,6 +1,7 @@
 import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
 import { describe, expect, it } from "vitest";
 import { DELEGATION_DECISION_RULE } from "../src/core/provider-prompt-contracts.ts";
+import { isWorkerProviderRequest } from "./suite/concurrent-responses.ts";
 import { createHarness } from "./suite/harness.ts";
 
 const DELEGATION_POLICY_HEADING = "PI DELEGATION";
@@ -57,8 +58,8 @@ describe("AgentSession provider-neutral delegation orchestration", () => {
 			harness.getModel().thinkingLevelMap = { xhigh: "xhigh", max: "max", ultra: "max" };
 			harness.session.setThinkingLevel(level);
 			expect(harness.session.thinkingLevel).toBe(level);
-			const reply: FauxResponseFactory = (context) => {
-				if (context.systemPrompt?.includes("Autonomous leaf worker")) {
+			const reply: FauxResponseFactory = (context, options) => {
+				if (isWorkerProviderRequest(options)) {
 					workerRequests++;
 					expect(context.systemPrompt).not.toContain(DELEGATION_POLICY_HEADING);
 					return fauxAssistantMessage(

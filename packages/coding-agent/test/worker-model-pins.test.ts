@@ -1,5 +1,5 @@
 import type { Api, Model } from "@caupulican/pi-ai";
-import { fauxAssistantMessage } from "@caupulican/pi-ai/faux";
+import { type FauxResponseFactory, fauxAssistantMessage } from "@caupulican/pi-ai/faux";
 import { describe, expect, it } from "vitest";
 import { resolveWorkerAuthority } from "../src/core/delegation/worker-authority-resolver.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
@@ -12,7 +12,7 @@ import {
 import { compileWorkerModelPinPolicy, resolveWorkerModelPin } from "../src/core/orchestration/worker-model-pins.ts";
 import { InMemorySettingsStorage, SettingsManager } from "../src/core/settings-manager.ts";
 import { createDelegateToolDefinition } from "../src/core/tools/delegate.ts";
-import { setConcurrentResponses } from "./suite/concurrent-responses.ts";
+import { isWorkerProviderRequest, setConcurrentResponses } from "./suite/concurrent-responses.ts";
 import { createHarness } from "./suite/harness.ts";
 
 const foreground = { id: "foreground", provider: "faux", reasoning: true } as Model<Api>;
@@ -356,13 +356,8 @@ describe("worker model pin lifecycle", () => {
 		});
 		const observedModelIds: string[] = [];
 		try {
-			const routeResponse = (
-				context: { systemPrompt?: string },
-				_options: unknown,
-				_state: unknown,
-				model: Model<Api>,
-			) => {
-				if (!context.systemPrompt?.includes("Autonomous leaf worker")) {
+			const routeResponse: FauxResponseFactory = (_context, options, _state, model) => {
+				if (!isWorkerProviderRequest(options)) {
 					return fauxAssistantMessage("Terminal handoff observed.");
 				}
 				observedModelIds.push(model.id);
@@ -408,13 +403,8 @@ describe("worker model pin lifecycle", () => {
 		});
 		const observedModelIds: string[] = [];
 		try {
-			const routeResponse = (
-				context: { systemPrompt?: string },
-				_options: unknown,
-				_state: unknown,
-				model: Model<Api>,
-			) => {
-				if (!context.systemPrompt?.includes("Autonomous leaf worker")) {
+			const routeResponse: FauxResponseFactory = (_context, options, _state, model) => {
+				if (!isWorkerProviderRequest(options)) {
 					return fauxAssistantMessage("Terminal handoff observed.");
 				}
 				observedModelIds.push(model.id);

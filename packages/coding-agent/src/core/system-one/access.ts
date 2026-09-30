@@ -1,6 +1,6 @@
 /**
  * The one place System One's provider, model and key are decided. Every System One path (the
- * steering plane, the controller's adapter, model routing, the `typesafe_review` tool) resolves its
+ * steering plane, the controller's adapter, model routing, the `systemone` tool) resolves its
  * access here at the moment it evaluates, so a provider switch in settings applies to the next
  * evaluation, and no path can pair one provider's endpoint with another provider's key.
  */

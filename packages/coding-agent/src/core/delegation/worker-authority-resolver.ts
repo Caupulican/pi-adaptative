@@ -30,6 +30,7 @@ import {
 	type WorkerAccountRouting,
 	type WorkerThinkingPolicy,
 } from "../settings-manager.ts";
+import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import {
 	capabilitySurvivesReadOnly,
 	envelopeHasToolCapability,
@@ -65,7 +66,7 @@ const DEFAULT_TOOL_NAMES = [
 	"artifact_retrieve",
 	"skill",
 	"skill_audit",
-	"typesafe_review",
+	SYSTEM_ONE_TOOL_NAME,
 ] as const;
 const AVAILABLE_TOOL_NAMES: ReadonlySet<string> = new Set(CLASSIFIED_LANE_TOOL_NAMES);
 const DEFAULT_CAPABILITIES: readonly HarnessCapability[] = [

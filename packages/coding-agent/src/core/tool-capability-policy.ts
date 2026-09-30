@@ -3,6 +3,7 @@ import type { HarnessCapability } from "./capability-contract.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
 import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_READ_TOOL_NAME } from "./memory/worker-memory-tools.ts";
 import type { CapabilityEnforcementKind, OrchestrationProfile } from "./orchestration/contracts.ts";
+import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 
 export interface ToolCapabilityPolicy {
 	/** AND across clauses; OR across the capability alternatives inside one clause. */
@@ -53,8 +54,8 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	),
 	...["fetch", "web_search"].map((toolName) => [toolName, NETWORK_POLICY] as const),
 	["webfetch", policy([["network.http"]], "service-proxy")],
-	["typesafe_review", policy([["semantic.judge"]], "service-proxy")],
-	["peer", policy([["semantic.judge"], ["workflow.delegate"]], ["service-proxy", "control-plane"])],
+	[SYSTEM_ONE_TOOL_NAME, policy([["semantic.judge"]], "service-proxy")],
+	["peer", policy([["workflow.delegate"]], ["service-proxy", "control-plane"])],
 	[TOOL_SCHEMA_SEARCH_NAME, TOOL_SCHEMA_SEARCH_POLICY],
 	[
 		"image_generate",
@@ -155,6 +156,20 @@ export function toolCapabilityRequirementClauses(
 	args?: unknown,
 ): readonly (readonly HarnessCapability[])[] {
 	const name = toolName.toLowerCase();
+	if (name === "peer" && args && typeof args === "object" && !Array.isArray(args)) {
+		const record = args as Record<string, unknown>;
+		const review = record.review;
+		if (
+			record.action === "resolve" ||
+			(record.action === "review" &&
+				review &&
+				typeof review === "object" &&
+				"selection" in review &&
+				review.selection === "stronger")
+		) {
+			return [["workflow.delegate"], ["semantic.judge"]];
+		}
+	}
 	if (name === ROOT_MEMORY_TOOL_NAME && args !== undefined) {
 		const record =
 			args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined;

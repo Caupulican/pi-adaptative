@@ -153,7 +153,7 @@ describe("System One task-directory projection", () => {
 		});
 		const harness = await createHarness({
 			cwd: startupRoot,
-			initialActiveToolNames: ["task_directory", "task_steps", "typesafe_review", "peer"],
+			initialActiveToolNames: ["task_directory", "task_steps", "systemone", "peer"],
 			settings: { modelCapability: { mode: "off" } },
 			systemOneController: controller,
 		});
@@ -224,7 +224,7 @@ describe("System One task-directory projection", () => {
 			await harness.session.prompt("Pin the active task and move the selected workspace.");
 			expect(harness.session.taskCwd).toBe(startupRoot);
 			expect(store.getRepo()).toMatchObject({ root: taskRoot, current_revision: taskRevision });
-			const review = harness.session.agent.state.tools.find((candidate) => candidate.name === "typesafe_review")!;
+			const review = harness.session.agent.state.tools.find((candidate) => candidate.name === "systemone")!;
 			const reviewEvidence = async (path: string, id: string) => {
 				const input = {
 					action: "review" as const,
@@ -254,7 +254,7 @@ describe("System One task-directory projection", () => {
 			const outsideTask = await reviewEvidence(join(startupRoot, "README.md"), "outside-task");
 			expect(outsideTask.isError).toBe(true);
 			expect(JSON.stringify(outsideTask)).toContain("outside the task directory");
-			for (const name of ["typesafe_review", "peer"]) {
+			for (const name of ["systemone", "peer"]) {
 				const tool = harness.session.agent.state.tools.find((candidate) => candidate.name === name);
 				expect(tool, `${name} is available in the foreground session`).toBeDefined();
 				const invocation = await tool!.bindInvocation!("scope-check", {});

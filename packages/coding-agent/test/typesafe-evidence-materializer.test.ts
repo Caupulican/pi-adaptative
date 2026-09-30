@@ -7,7 +7,7 @@ import { TypeSafeEvidenceMaterializer } from "../src/core/review/typesafe-eviden
 import { committedRepo } from "./git-fixture.ts";
 import { tempDir } from "./temp-dir.ts";
 
-describe("TypeSafe referenced evidence materialization", () => {
+describe("System One referenced evidence materialization", () => {
 	it("snapshots scoped files with an exact local manifest and redacts known credentials", async () => {
 		const cwd = tempDir("pi-typesafe-files-");
 		const source = join(cwd, "source.ts");

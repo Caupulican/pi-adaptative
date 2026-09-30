@@ -7,7 +7,7 @@ import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
 import { createHarness } from "./harness.ts";
 
 describe("native peer host integration", () => {
-	it("discovers native peer and sends one tool-free peer request at higher effort without switching the lead", async () => {
+	it("discovers native peer and sends an explicitly stronger tool-free review without switching the lead", async () => {
 		const evaluate = vi.fn<JevAdapter["evaluate"]>(async () => ({
 			model: "jev-1.13.0",
 			latency_ms: 1,
@@ -62,6 +62,7 @@ describe("native peer host integration", () => {
 				review: {
 					peer: peer!.ref,
 					thinkingLevel: "high",
+					selection: "stronger",
 					stage: "plan",
 					objective: "Fix resource release",
 					artifact: "Release resources when cancelled",
@@ -102,6 +103,7 @@ describe("native peer host integration", () => {
 				review: {
 					peer: peer!.ref,
 					thinkingLevel: "high",
+					selection: "stronger",
 					stage: "plan",
 					objective: "Fix resource release",
 					artifact: "Release resources when cancelled",
@@ -133,6 +135,7 @@ describe("native peer host integration", () => {
 				review: {
 					peer: peer!.ref,
 					thinkingLevel: "high",
+					selection: "stronger",
 					stage: "delivery",
 					objective: "Check revised release",
 					artifact: "Release resources when cancelled",
@@ -146,15 +149,37 @@ describe("native peer host integration", () => {
 		expect(controller.peekControlDirective()).toBe(pending);
 	});
 
-	it("reports missing System One as unavailable and never consumes a peer response", async () => {
+	it("performs ordinary independent review during a System One outage", async () => {
+		const evaluate = vi.fn<JevAdapter["evaluate"]>(async () => {
+			throw new Error("strength judgment service offline");
+		});
+		const controller = new SystemOneController({
+			store: new ExecutionStore({
+				run_id: "peer-strength-outage",
+				objective: { request: "", normalized_goal: "", acceptance_criteria: [], constraints: [] },
+				repo: { root: "/repo", baseline_revision: "r0" },
+			}),
+			adapter: { evaluate },
+		});
 		const harness = await createHarness({
 			models: [
 				{ id: "lead", reasoning: true },
 				{ id: "peer", reasoning: true },
 			],
+			systemOneController: controller,
+			settings: { modelRouter: { enabled: false } },
 		});
 		harness.session.setThinkingLevel("medium");
-		harness.setResponses([fauxAssistantMessage("must never run")]);
+		harness.setResponses([
+			fauxAssistantMessage(
+				JSON.stringify({
+					verdict: "no_findings",
+					summary: "No candidate in snapshot.",
+					findings: [],
+					limitations: ["No runtime trace supplied."],
+				}),
+			),
+		]);
 		const result = await harness.session.getToolDefinition("peer")!.execute(
 			"offline",
 			{
@@ -172,7 +197,8 @@ describe("native peer host integration", () => {
 			undefined,
 			{} as ExtensionContext,
 		);
-		expect(result).toMatchObject({ isError: true, details: { status: "unavailable" } });
-		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(result).toMatchObject({ isError: false, details: { status: "reviewed", selection: "independent" } });
+		expect(harness.getPendingResponseCount()).toBe(0);
+		expect(evaluate).not.toHaveBeenCalled();
 	});
 });

@@ -285,7 +285,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 					"task_directory",
 					"task_steps",
 					"tool_task",
-					"typesafe_review",
+					"systemone",
 					"update_goal",
 					"write",
 					"webfetch",
@@ -323,7 +323,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// Measured growth over the prior surfaces (goal 330, create_goal 84): 162 tokens. The base
 			// subtotal removes only that measured growth, never the whole allowance.
 			// Peer review now includes durable obligation inspection and proof resolution, measured
-			// at 333 tokens. Its 350-token ceiling budgets those requested verification actions;
+			// at 344 tokens. Its 350-token ceiling budgets those requested verification actions;
 			// subtract its actual cost so unused peer capacity cannot hide unrelated schema growth.
 			const goalChecksAllowance = 162;
 			const peerAllowance = 350;
@@ -343,8 +343,8 @@ describe("AgentSession.getContextCompositionReport", () => {
 			const goalChecksGrowth = toolTokens.get("goal")! - 330 + (toolTokens.get("create_goal")! - 84);
 			expect(toolTokens.get("task_directory")).toBeLessThanOrEqual(350);
 			expect(toolTokens.get("task_automation")).toBeLessThanOrEqual(720);
-			expect(toolTokens.get("typesafe_review")).toBeGreaterThan(0);
-			expect(toolTokens.get("typesafe_review")).toBeLessThanOrEqual(512 + canonicalSchemaAllowance);
+			expect(toolTokens.get("systemone")).toBeGreaterThan(0);
+			expect(toolTokens.get("systemone")).toBeLessThanOrEqual(512 + canonicalSchemaAllowance);
 			expect(toolTokens.get("decision_ledger_read")).toBeGreaterThan(0);
 			expect(toolTokens.get("decision_ledger_read")).toBeLessThanOrEqual(100);
 			expect(toolTokens.get("repo_read")).toBeGreaterThan(0);
@@ -357,7 +357,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 				report.toolSchemaTokens -
 					toolTokens.get("task_directory")! -
 					toolTokens.get("task_automation")! -
-					toolTokens.get("typesafe_review")! -
+					toolTokens.get("systemone")! -
 					toolTokens.get("decision_ledger_read")! -
 					toolTokens.get("repo_read")! -
 					toolTokens.get("self_compact")! -

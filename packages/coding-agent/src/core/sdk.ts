@@ -66,8 +66,10 @@ import { materializeRequestAuth } from "./request-auth.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { parseResourceProfileInput } from "./resource-profile-blocks.ts";
-import { TypeSafeReviewer } from "./review/typesafe-reviewer.ts";
+import { SystemOneReviewer } from "./review/typesafe-reviewer.ts";
 import type { RuntimeUpdateController } from "./runtime-update-controller.ts";
+import type { CredentialExposureBoundary } from "./secrets/credential-exposure-guard.ts";
+import { createCredentialTextRedactor, redactCredentialValues } from "./secrets/credential-manager.ts";
 import { isWorkerSession } from "./session-role.ts";
 import type {
 	ProfileDefinitionInput,
@@ -537,6 +539,28 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
+	const sessionRef: { current?: AgentSession } = {};
+	const systemOneCredentialBoundary: Pick<
+		CredentialExposureBoundary,
+		"redactSensitiveText" | "createSensitiveTextRedactor" | "getSensitiveValues"
+	> = {
+		getSensitiveValues: async () => {
+			const boundary = sessionRef.current?.credentialExposureBoundary;
+			return boundary ? ((await boundary.getSensitiveValues?.()) ?? []) : modelRegistry.getKnownCredentialValues();
+		},
+		redactSensitiveText: (text, additionalValues = []) => {
+			const boundary = sessionRef.current?.credentialExposureBoundary;
+			return boundary
+				? boundary.redactSensitiveText(text, additionalValues)
+				: redactCredentialValues(text, [...modelRegistry.getKnownCredentialValues(), ...additionalValues]);
+		},
+		createSensitiveTextRedactor: (additionalValues = []) => {
+			const boundary = sessionRef.current?.credentialExposureBoundary;
+			if (boundary?.createSensitiveTextRedactor) return boundary.createSensitiveTextRedactor(additionalValues);
+			const knownValues = modelRegistry.getKnownCredentialValues();
+			return createCredentialTextRedactor([...knownValues, ...additionalValues]);
+		},
+	};
 
 	agent = new Agent({
 		initialState: {
@@ -671,8 +695,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// A session without any System One key starts without System One, as before; with one, every
 		// evaluation resolves provider, model and key anew, so a provider switch needs no restart.
 		if ((await access.resolve()).kind === "ready") {
-			const reviewer = new TypeSafeReviewer({
+			const reviewer = new SystemOneReviewer({
 				access,
+				credentialBoundary: systemOneCredentialBoundary,
 				onUsage: (receipt) => {
 					sessionManager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, {
 						reportId: receipt.receiptId,
@@ -833,6 +858,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			adaptiveReadiness ??
 			(steeringPlane || systemOneController ? new AdaptiveRuntimeReadiness({ isUnbound: true }) : undefined),
 	});
+	sessionRef.current = session;
 
 	// Phase B — Adaptive runtime late binding to live session-owned ports
 	if ((steeringPlane || systemOneController) && !options.adaptiveReadiness) {

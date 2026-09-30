@@ -3,8 +3,8 @@
  * about every operation {@link triageOperation} sends to it, caches the verdict for the rest
  * of the turn (a repeated call is not judged twice), and applies it: the operator's standing grant of
  * `operation.irreversible` authorizes; otherwise the root asks the operator at the edge and a worker
- * is refused, since only the root can reach the owner. A worker under the standing grant is not judged
- * at all: the verdict could only authorize, and a System One call per shell command would stall it.
+ * is refused, since only the root can reach the owner. The owner's standing grant is authoritative for
+ * either actor, so a granted operation is not judged by System One.
  */
 
 import { tmpdir } from "node:os";
@@ -50,7 +50,8 @@ export class OperationGate {
 		actor: "root" | "worker",
 		signal?: AbortSignal,
 	): Promise<{ block: true; reason: string } | undefined> {
-		if (actor === "worker" && this.deps.isGranted()) return undefined;
+		signal?.throwIfAborted();
+		if (this.deps.isGranted()) return undefined;
 		// No semantic engine means deterministic gates own the call. Avoid filesystem identity work
 		// on this hot path; System One is an optional quality plane, never an execution dependency.
 		const engine = this.deps.getEngine();

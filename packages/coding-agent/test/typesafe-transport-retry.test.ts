@@ -1,6 +1,6 @@
 // @isolated: uses fake timers to exercise the provider retry deadline and backoff
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TypeSafeReviewer } from "../src/core/review/typesafe-reviewer.ts";
+import { SystemOneReviewer } from "../src/core/review/typesafe-reviewer.ts";
 import { SystemOneJevAdapter, type SystemOneReviewerLike } from "../src/core/system-one/adapter.ts";
 
 const input = { state: "fixture", questions: { q: { type: "noul" as const, instructions: "Check" } } };
@@ -27,7 +27,7 @@ describe("System One transport retry owner", () => {
 					});
 				return answer();
 			});
-			const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+			const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 			const outerSleep = vi.fn(async () => {});
 			const adapter = new SystemOneJevAdapter(reviewer as unknown as SystemOneReviewerLike, undefined, {
 				getApiKey: () => "fixture-key",
@@ -53,7 +53,7 @@ describe("System One transport retry owner", () => {
 					return Response.json({ model: "jev-1.13.0", answers: {}, usage: { input_tokens: 1, output_tokens: 1 } });
 				return answer();
 			});
-			const reviewer = new TypeSafeReviewer({
+			const reviewer = new SystemOneReviewer({
 				getApiKey: async () => "fixture-key",
 				fetch: fetcher,
 				onUsage:
@@ -73,7 +73,7 @@ describe("System One transport retry owner", () => {
 		const fetcher = vi.fn<typeof fetch>(async () => {
 			throw new TypeError("fetch failed");
 		});
-		const reviewer = new TypeSafeReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
+		const reviewer = new SystemOneReviewer({ getApiKey: async () => "fixture-key", fetch: fetcher });
 		let settled = false;
 		const result = reviewer.evaluate(input, abort.signal).then(
 			() => {

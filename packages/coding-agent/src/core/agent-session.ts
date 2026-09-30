@@ -82,6 +82,7 @@ import {
 	type EdgeClass,
 	type EdgeConfirmationHandler,
 	type EdgeGrantView,
+	isEdgeOperationGranted,
 } from "./autonomy/edge-policy.ts";
 import type { ExecutionCharter } from "./autonomy/execution-charter.ts";
 import { buildForegroundEnvelope, formatForegroundEnvelopeObservation } from "./autonomy/foreground-envelope.ts";
@@ -954,6 +955,16 @@ export class AgentSession {
 			providerLimitStore,
 			agentDir,
 			authStorage: config.modelRegistry.authStorage,
+			redactSensitiveText: (text, additionalValues) =>
+				this._runtimeBuilder.credentialExposureBoundary.redactSensitiveText(text, additionalValues),
+			createSensitiveTextRedactor: (additionalValues) => {
+				const boundary = this._runtimeBuilder.credentialExposureBoundary;
+				return (
+					boundary.createSensitiveTextRedactor?.(additionalValues) ??
+					((text: string) => boundary.redactSensitiveText(text, additionalValues))
+				);
+			},
+			getSensitiveValues: () => this._runtimeBuilder.credentialExposureBoundary.getSensitiveValues?.() ?? [],
 			onWait: (event) => this._emit({ type: "provider_admission_wait", ...event }),
 			getRepetitionGuardRepeats: () => this.getCapabilityTierPolicy().repetitionGuardRepeats,
 			getStreamIdleOptionsOverride,
@@ -1161,6 +1172,7 @@ export class AgentSession {
 			getResourceLoader: () => this._resourceLoader,
 			getActiveOrchestrationProfile: () => config.orchestrationProfile,
 			getModelRegistry: () => this._modelRegistry,
+			getCredentialExposureBoundary: () => this._runtimeBuilder.credentialExposureBoundary,
 			// Workers pick only models that can take work: quota left and offered to the owner's account.
 			isModelExhausted: (model) => this._isModelUnusable(model),
 			getModel: () => this.model ?? undefined,
@@ -1170,7 +1182,7 @@ export class AgentSession {
 			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
 			// Live worker supervision: one observation per executed worker tool call, applied through
 			// the root's existing worker-agent control surface.
-			observeWorkerProgress: (observation) => this._workerSupervision.observe(observation),
+			observeWorkerProgress: (observation, signal) => this._workerSupervision.observe(observation, signal),
 			// Worker lanes pass the same cache guard; each worker conversation is its own lane.
 			observeWorkerRequest: (agentId, snapshot, prefixTokens) => {
 				this._guardCacheSurface(snapshot, `${this.sessionId}/worker:${agentId}`);
@@ -2315,6 +2327,11 @@ export class AgentSession {
 		return this._modelRegistry;
 	}
 
+	/** The session's canonical host-only credential source and redactor. */
+	get credentialExposureBoundary(): RuntimeBuilder["credentialExposureBoundary"] {
+		return this._runtimeBuilder.credentialExposureBoundary;
+	}
+
 	/** Reconcile both session-owned model views after an interactive credential change. */
 	async refreshModelsAfterAuthChange(provider: string): Promise<void> {
 		this._modelRegistry.refresh();
@@ -2888,7 +2905,11 @@ export class AgentSession {
 			getScopeCwd: () => this._cwd,
 			getTurnKey: () =>
 				`${this._foregroundRecovery.getCurrentSubmissionEpoch() ?? "idle"}\u0000${this._lastUserRequest}`,
-			isGranted: () => this.getEdgeGrants().some((grant) => grant.class === "operation.irreversible"),
+			isGranted: () =>
+				isEdgeOperationGranted(
+					{ class: "operation.irreversible", operation: "", reason: "" },
+					this.getEdgeGrants(),
+				),
 			askOperator: async (operation, signal) =>
 				enforceSessionEdgeOperation(this._edgeDeps(), operation, "operation", signal),
 			notify: (message) => {

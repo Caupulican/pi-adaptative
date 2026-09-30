@@ -385,7 +385,7 @@ export class AuthDialogsController {
 		await this.session.refreshModelsAfterAuthChange(providerId);
 		if (providerId === TYPESAFE_PROVIDER) {
 			this.ui.showStatus(
-				"TypeSafe review enabled. Jev is available through typesafe_review; authentication is checked on the first review.",
+				"System One is available through systemone; TypeSafe authentication is checked on first use.",
 			);
 			return;
 		}

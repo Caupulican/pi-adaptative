@@ -1,26 +1,26 @@
 ---
-name: typesafe-review
-description: "Use built-in Jev judgments for every applicable semantic task where uncertainty matters, in any domain: classification, detection, ranking, routing, retrieval, extraction, planning, ambiguity, pattern matching, guardrails and verification. Load when TypeSafe is enabled at the start of work, or when asked to use Jev, check confidence, get a second opinion, find bugs or validate claims."
+name: systemone
+description: "Use System One judgments for applicable semantic tasks where uncertainty matters, including classification, routing, retrieval, planning, ambiguity and verification. Load when System One is available or when asked for a judgment, confidence check, second opinion, bug review or claim validation."
 ---
 
-# TypeSafe review
+# System One
 
 ## How to use the skill
 
-Call `typesafe_review` with `action: "status"`. When enabled, it verifies authentication
-against the TypeSafe models endpoint and reports `authenticationVerified: true`. Explicitly use it
+Call `systemone` with `action: "status"`. When enabled, it verifies authentication
+against the configured System One provider and reports `authenticationVerified: true`. Explicitly use it
 for every applicable task where a semantic judgment can reduce meaningful
 uncertainty, throughout the work rather than only at final review. This applies
 to engineering, research, writing, analysis, planning and other domains. When disabled, explain
-that the owner can use `/login typesafe` or set `TYPESAFE_API_KEY`. Never ask
-for the key in conversation or place it in tool arguments. `/logout typesafe`
-removes the stored key; an environment key remains until the owner removes it.
+that the owner should check the configured System One provider. If TypeSafe is selected, `/login typesafe`
+or `TYPESAFE_API_KEY` supplies its credential. Never ask for a key in conversation or place it in tool
+arguments. `/logout typesafe` removes the stored TypeSafe key; an environment key remains until the owner removes it.
 
 Freedom Dial: High Freedom for choosing relevant checks; Low Freedom for
 evidence integrity and approval gates. This skill works with any foreground
-provider and delegated worker model. Ordinary workers inherit Jev automatically;
+provider and delegated worker model. Ordinary workers inherit System One automatically;
 explicit task authority still applies. Workers use the same primitives and confidence
-gates, without a separate Jev quota. Jev is a separate judge, not a foreground coding model.
+gates, without a separate judgment quota. System One is a separate judge, not a foreground coding model.
 
 ## North Star
 
@@ -29,7 +29,7 @@ by inspectable evidence. Inherit the harness's engineering contract: think
 before coding, keep changes simple and surgical, define observable success,
 and prove it before declaring completion. Human-on-the-edge: existing user
 authorization and capability boundaries still govern credentials, destructive
-actions, publication and authority expansion. A Jev verdict grants none of these.
+actions, publication and authority expansion. A System One verdict grants none of these.
 
 ## Core Sections
 
@@ -47,10 +47,10 @@ Use `action: "evaluate"` with an `evaluation` object containing `state` and
 Instructions and all criteria entries accept strings, structured objects or arrays,
 including Noul's true/false descriptions. Instructions and Choice/Noul descriptions
 also accept null. Score levels must be non-null. Prefer an explicit question even
-though the API permits null instructions; question IDs carry no meaning to Jev.
+though the API permits null instructions; question IDs carry no meaning to the judge.
 Choice supports up to 255 options. Keep candidate coverage complete, include
 no-match when appropriate, and copy extracted values from the original source
-after selecting them; Jev does not generate free-form extracted text.
+after selecting them; System One does not generate free-form extracted text.
 
 Use these primitives for model/tool routing, context and memory relevance,
 compression fidelity, requirement coverage, response and tool-call checks,
@@ -77,11 +77,11 @@ and optional `confidence: "high" | "max"`. Each question has `instructions`,
 `criteria` (named descriptions), and the `expected` option required to pass.
 High requires 0.95 confidence; max requires 0.99, for every question.
 
-Use Jev to judge individual completion claims after the relevant evaluations
+Use System One to judge individual completion claims after the relevant evaluations
 and deterministic checks. Ask independent questions together. Only chain calls when
 new answers change the evidence needed for the next judgment.
 
-Jev returns typed judgments and probabilities, not explanations or patches. Supply
+System One returns typed judgments and probabilities, not explanations or patches. Supply
 explicit competing options including insufficient evidence. Put each complete
 question in its instructions: question IDs are not part of inference. Use
 backticked paths to refer to named evidence in structured state.
@@ -154,7 +154,7 @@ new evidence, report the open question and continue other authorized work.
   review as whole-task approval.
 - Treating choice probability as the separate confidence field.
 - Sending the entire transcript by default or including credentials.
-- Using Jev to replace deterministic validation, run tools, or authorize actions.
+- Using System One to replace deterministic validation, run tools, or authorize actions.
 
 ## Examples
 

@@ -105,7 +105,7 @@ describe("worker quota failover", () => {
 			"edit",
 			"python",
 			"bash",
-			"typesafe_review",
+			"systemone",
 		];
 		const claude = {
 			id: "claude-sonnet-4-5",
