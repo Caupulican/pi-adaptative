@@ -46,6 +46,7 @@ failures.push(
 	...validateRequiredSecurityOverrides(
 		JSON.parse(readFileSync("package.json", "utf8")),
 		JSON.parse(readFileSync("package-lock.json", "utf8")),
+		JSON.parse(readFileSync("packages/coding-agent/package.json", "utf8")),
 	),
 );
 

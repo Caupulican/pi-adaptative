@@ -14,6 +14,8 @@
 - Counted unresolved Jev questions in live status instead of appending uncertainty lines, preserving full question identities beyond bounded previews, resolving matching rechecks, isolating worker tasks and restoring state on session reopen.
 - Preserved model-policy uncertainty throughout follow-up judgments and interpreted decisive negative Noul bands using their declared direction.
 
+- Updated the HTTP transport and brace-glob parser to contain malformed WebSocket handshakes and deeply nested patterns without terminating the harness, preserving normal connections and glob behavior.
+
 ## [0.101.2] - 2026-09-30
 
 ### Fixed

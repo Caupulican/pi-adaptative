@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { basename, dirname, relative, sep } from "node:path";
 import { Minimatch, minimatch } from "minimatch";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -140,6 +141,44 @@ describe("matchesResourceProfilePattern parity with the pre-cache functional pat
 });
 
 describe("compiled-pattern cache", () => {
+	it("keeps deeply nested untrusted brace patterns from crashing the minimatch caller", () => {
+		// Bounded PoCs for brace-expansion's nested-brace and comma-part recursion advisories.
+		const source = `
+			const { minimatch } = require("minimatch");
+			const kind = process.argv[1];
+			const pattern = kind === "nested"
+				? "{".repeat(3200) + "a,b" + "}".repeat(3200)
+				: kind === "comma"
+					? "{" + "{a},".repeat(7000) + "b}"
+					: "src/{foo,bar}.ts";
+			try {
+				process.stdout.write(String(minimatch(kind === "valid" ? "src/foo.ts" : "candidate", pattern, { dot: true })));
+			} catch (error) {
+				process.stdout.write(error instanceof RangeError ? "range-error" : "other-error:" + error.name);
+				process.exitCode = 2;
+			}
+		`;
+
+		for (const kind of ["nested", "comma"]) {
+			const result = spawnSync(process.execPath, ["-e", source, kind], {
+				encoding: "utf8",
+				timeout: 5000,
+			});
+
+			expect(result.error).toBeUndefined();
+			expect(result.status, `${kind} brace pattern child output: ${result.stdout}`).toBe(0);
+			expect(result.stdout).toBe("false");
+		}
+
+		const control = spawnSync(process.execPath, ["-e", source, "valid"], {
+			encoding: "utf8",
+			timeout: 5000,
+		});
+		expect(control.error).toBeUndefined();
+		expect(control.status).toBe(0);
+		expect(control.stdout).toBe("true");
+	});
+
 	it("compiles each unique pattern exactly once no matter how many candidates/calls reuse it", () => {
 		const makeSpy = vi.spyOn(Minimatch.prototype, "make");
 

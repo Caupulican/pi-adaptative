@@ -113,7 +113,7 @@
 		"proper-lockfile": "4.1.2",
 		"turndown": "7.2.4",
 		"typebox": "1.3.25",
-		"undici": "8.10.1",
+		"undici": "8.10.2",
 		"yaml": "2.9.0"
 	},
 	"overrides": {
