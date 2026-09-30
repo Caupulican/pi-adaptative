@@ -1,3 +1,4 @@
+// @guards src/core/provider-prompt-contracts.ts
 import { expect, it, vi } from "vitest";
 import type { CollaborationAgent, CollaborationBackend } from "../src/core/collaboration/backend.ts";
 import { decodeCollaborationUsageClaim } from "../src/core/collaboration/launch-profile.ts";

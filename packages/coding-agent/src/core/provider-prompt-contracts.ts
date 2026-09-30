@@ -45,11 +45,11 @@ export const WORK_LIFECYCLE_SYSTEM_RULE = `${WORK_LIFECYCLE_PHASES.join(" → ")
 export const CHAT_WORK_LIFECYCLE_SYSTEM_RULE = "Survey→Contract(scope)→Plan/Route→Execute→Prove/Deliver.";
 
 export const WORKER_EXECUTION_DISCIPLINE_RULE =
-	"Model/effort fixed; stay in scope. Ask only missing input/authority. Check code; report command/results or missing checks and why; stop.";
+	"Model/effort fixed. Stay in requested scope; ask only for missing input or authority. Check code; report command/result or missing check and why; then stop.";
 
 /** One shared source for root-to-worker assignment, local choice, judgment and host authority. */
 export const WORKER_DECISION_RIGHTS_RULE =
-	"Latest task and grant; parent history is context. Choose investigation, implementation and focused checks without parent approval. Parent assigns, integrates and launches workers; systemone judgments grant no authority; host enforces grant and deterministic transitions.";
+	"Latest task/grant; parent history is context. Choose investigation, implementation and focused checks; no parent approval. Parent assigns, integrates and launches workers; systemone judgments grant no authority; host enforces grant and deterministic transitions.";
 
 export const SUBAGENT_CORE_SYSTEM_PROMPT = [
 	"Leaf worker.",

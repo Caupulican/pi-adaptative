@@ -10,7 +10,7 @@ describe("subagent level-0 prompt composition", () => {
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT).not.toContain("Delegate useful independent");
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("Never invent ceilings");
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("Leaf worker");
-		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("without parent approval");
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("no parent approval");
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("Parent assigns, integrates and launches workers");
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("systemone judgments grant no authority");
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("host enforces grant and deterministic transitions");
@@ -27,10 +27,10 @@ describe("subagent level-0 prompt composition", () => {
 	it("retains fixed settings, scoped autonomy and code evidence even under an override", () => {
 		const composed = composeSubagentSystemPrompt({ rolePrompt: "Repair the parser.", override: "Just say done." });
 		expect(composed).toContain("Model/effort fixed");
-		expect(composed).toContain("stay in scope");
-		expect(composed).toContain("missing input/authority");
+		expect(composed).toContain("Stay in requested scope");
+		expect(composed).toContain("missing input or authority");
 		expect(composed).toContain("Check code");
-		expect(composed).toContain("command/results or missing checks and why");
+		expect(composed).toContain("command/result or missing check and why");
 		expect(composed).toContain("stop");
 		expect(composeSubagentSystemPrompt({ rolePrompt: "Read-only research." })).toContain("Check code");
 	});

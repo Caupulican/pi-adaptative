@@ -166,9 +166,9 @@ describe("buildWorkerSystemPrompt", () => {
 	it("keeps root orchestration separate from local worker decisions", () => {
 		const prompt = buildWorkerSystemPrompt({ write: false, process: false });
 		expect(prompt).toContain("Durable worker");
-		expect(prompt).toContain("Latest task and grant");
+		expect(prompt).toContain("Latest task/grant");
 		expect(prompt).toContain("parent history is context");
-		expect(prompt).toContain("investigation, implementation and focused checks without parent approval");
+		expect(prompt).toContain("investigation, implementation and focused checks; no parent approval");
 		expect(prompt).toContain("Parent assigns, integrates and launches workers");
 		expect(prompt).toContain("systemone judgments grant no authority");
 		expect(prompt).toContain("host enforces grant and deterministic transitions");
