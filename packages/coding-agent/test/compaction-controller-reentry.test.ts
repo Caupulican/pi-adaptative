@@ -1429,6 +1429,259 @@ describe("CompactionController provider-request admission", () => {
 		expect(compactWithRetry).toHaveBeenCalledOnce();
 		expect(sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
 	});
+
+	it("keeps an admission compaction frontier on the exact replanned request across continuation", async () => {
+		const model = {
+			...createModel(),
+			id: "priced",
+			contextWindow: 200_000,
+			cost: { input: 5, output: 15, cacheRead: 0.5, cacheWrite: 1 },
+		};
+		const { agent, compactWithRetry, controller, runAutoCompaction, sessionManager } = createFixture({
+			model,
+			settings: { enabled: true, reserveTokens: 50_000, keepRecentTokens: 20_000, triggerPercent: 0.2 },
+			// Deliberately below the early trigger: the full request estimator must carry the frontier
+			// when system/tool context dominates the estimate owned by the message-history meter.
+			measureLiveContextTokens: () => 15_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			cacheEconomics: {
+				retained: { retained: 0, standardError: 0 },
+				remainingRequests: 8,
+				outcome: { afterRatio: 0.125, outputRatio: 0.01 },
+			},
+		});
+
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 80_000, nonCompactableTokens: 10_000, attempt: 0 }),
+		).resolves.toEqual({ action: "replan" });
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 80_000, nonCompactableTokens: 10_000, attempt: 1 }),
+		).resolves.toEqual({ action: "send" });
+		expect(compactWithRetry).toHaveBeenCalledOnce();
+
+		const reply = assistantWithUsage(80_000, Date.now() + 1_000);
+		agent.state.messages = [reply];
+		sessionManager.appendMessage(reply);
+		await controller.check(reply);
+		expect(runAutoCompaction).not.toHaveBeenCalled();
+
+		// A separately scheduled goal continuation starts admission at attempt zero again. The same
+		// compacted history must not buy another optional summary until request context materially grows.
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 80_000, nonCompactableTokens: 10_000, attempt: 0 }),
+		).resolves.toEqual({ action: "send" });
+		expect(compactWithRetry).toHaveBeenCalledOnce();
+		expect(sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+
+		// Material growth crosses the same request-sized frontier and allows a fresh optional summary.
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 90_001, nonCompactableTokens: 10_000, attempt: 0 }),
+		).resolves.toEqual({ action: "replan" });
+		expect(compactWithRetry).toHaveBeenCalledTimes(2);
+	});
+
+	it("uses the pending admission compaction identity when cancellation skips attempt one", async () => {
+		const model = {
+			...createModel(),
+			id: "priced",
+			contextWindow: 200_000,
+			cost: { input: 5, output: 15, cacheRead: 0.5, cacheWrite: 1 },
+		};
+		const { compactWithRetry, controller, sessionManager } = createFixture({
+			model,
+			settings: { enabled: true, reserveTokens: 50_000, keepRecentTokens: 20_000, triggerPercent: 0.2 },
+			measureLiveContextTokens: () => 15_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			cacheEconomics: {
+				retained: { retained: 0, standardError: 0 },
+				remainingRequests: 8,
+				outcome: { afterRatio: 0.125, outputRatio: 0.01 },
+			},
+		});
+
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 80_000, nonCompactableTokens: 10_000, attempt: 0 }),
+		).resolves.toEqual({ action: "replan" });
+		// The owner cancels before the planner's attempt-one replan. The next continuation begins a
+		// fresh admission counter but still sees the same durable compaction entry.
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "resume after cancellation" }],
+			timestamp: Date.now() + 1_000,
+		});
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 80_000, nonCompactableTokens: 10_000, attempt: 0 }),
+		).resolves.toEqual({ action: "send" });
+		expect(compactWithRetry).toHaveBeenCalledOnce();
+		expect(sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+	});
+
+	it("refines a postflight frontier with the next request's full provider token estimate", async () => {
+		const model = {
+			...createModel(),
+			id: "priced",
+			contextWindow: 200_000,
+			cost: { input: 5, output: 15, cacheRead: 0.5, cacheWrite: 1 },
+		};
+		const { agent, compactWithRetry, controller, sessionManager } = createFixture({
+			model,
+			settings: { enabled: true, reserveTokens: 50_000, keepRecentTokens: 20_000, triggerPercent: 0.2 },
+			// Above the 40k history trigger but below the actual 80k provider request, so the history
+			// meter alone would set a retry frontier too low to cover the next accepted request.
+			measureLiveContextTokens: () => 50_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			cacheEconomics: {
+				retained: { retained: 0, standardError: 0 },
+				remainingRequests: 8,
+				outcome: { afterRatio: 0.125, outputRatio: 0.01 },
+			},
+		});
+
+		const reply = assistantWithUsage(80_000, Date.now() + 1_000);
+		agent.state.messages = [reply];
+		sessionManager.appendMessage(reply);
+		await controller.check(reply);
+		expect(compactWithRetry).toHaveBeenCalledOnce();
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "goal continuation" }],
+			timestamp: Date.now() + 2_000,
+		});
+
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 80_000, nonCompactableTokens: 10_000, attempt: 0 }),
+		).resolves.toEqual({ action: "send" });
+		expect(compactWithRetry).toHaveBeenCalledOnce();
+	});
+
+	it("does not carry an admission frontier onto a branch with a different compaction identity", async () => {
+		const model = {
+			...createModel(),
+			id: "priced",
+			contextWindow: 200_000,
+			cost: { input: 5, output: 15, cacheRead: 0.5, cacheWrite: 1 },
+		};
+		const { compactWithRetry, controller, entryIds, sessionManager } = createFixture({
+			model,
+			settings: { enabled: true, reserveTokens: 50_000, keepRecentTokens: 20_000, triggerPercent: 0.2 },
+			measureLiveContextTokens: () => 15_000,
+			createResult: async (attempt, ids) => checkpoint(attempt, ids),
+			cacheEconomics: {
+				retained: { retained: 0, standardError: 0 },
+				remainingRequests: 8,
+				outcome: { afterRatio: 0.125, outputRatio: 0.01 },
+			},
+		});
+
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 80_000, nonCompactableTokens: 10_000, attempt: 0 }),
+		).resolves.toEqual({ action: "replan" });
+		sessionManager.branch(entryIds[0]!);
+		for (let index = 0; index < 6; index++) {
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: `new branch history ${index}` }],
+				timestamp: Date.now() + index + 1,
+			});
+		}
+
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 80_000, nonCompactableTokens: 10_000, attempt: 0 }),
+		).resolves.toEqual({ action: "replan" });
+		expect(compactWithRetry).toHaveBeenCalledTimes(2);
+		expect(sessionManager.getBranch().filter((entry) => entry.type === "compaction")).toHaveLength(1);
+	});
+
+	it("invalidates an admission frontier when its model or compaction settings change", async () => {
+		const model = {
+			...createModel(),
+			id: "priced",
+			contextWindow: 200_000,
+			cost: { input: 5, output: 15, cacheRead: 0.5, cacheWrite: 1 },
+		};
+		const settings = { enabled: true, reserveTokens: 50_000, keepRecentTokens: 20_000, triggerPercent: 0.2 };
+		const { compactWithRetry, controller, sessionManager } = createFixture({
+			model,
+			settings,
+			measureLiveContextTokens: () => 15_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			cacheEconomics: {
+				retained: { retained: 0, standardError: 0 },
+				remainingRequests: 8,
+				outcome: { afterRatio: 0.125, outputRatio: 0.01 },
+			},
+		});
+
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 80_000, nonCompactableTokens: 10_000, attempt: 0 }),
+		).resolves.toEqual({ action: "replan" });
+		settings.triggerPercent = 0.25;
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 80_000, nonCompactableTokens: 10_000, attempt: 1 }),
+		).resolves.toEqual({ action: "send" });
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "continue" }],
+			timestamp: Date.now() + 1_000,
+		});
+
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 80_000, nonCompactableTokens: 10_000, attempt: 0 }),
+		).resolves.toEqual({ action: "replan" });
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 80_000, nonCompactableTokens: 10_000, attempt: 1 }),
+		).resolves.toEqual({ action: "send" });
+
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "new model" }],
+			timestamp: Date.now() + 2_000,
+		});
+		model.id = "new-model";
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 80_000, nonCompactableTokens: 10_000, attempt: 0 }),
+		).resolves.toEqual({ action: "replan" });
+		expect(compactWithRetry).toHaveBeenCalledTimes(3);
+	});
+
+	it("keeps a hard-boundary request actionable after an admission frontier", async () => {
+		const model = {
+			...createModel(),
+			id: "priced",
+			contextWindow: 200_000,
+			cost: { input: 5, output: 15, cacheRead: 0.5, cacheWrite: 1 },
+		};
+		const { compactWithRetry, controller, sessionManager } = createFixture({
+			model,
+			settings: { enabled: true, reserveTokens: 50_000, keepRecentTokens: 20_000, triggerPercent: 0.2 },
+			measureLiveContextTokens: () => 15_000,
+			createResult: async (attempt, entryIds) => checkpoint(attempt, entryIds),
+			cacheEconomics: {
+				retained: { retained: 0, standardError: 0 },
+				remainingRequests: 8,
+				outcome: { afterRatio: 0.125, outputRatio: 0.01 },
+			},
+		});
+
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 80_000, nonCompactableTokens: 10_000, attempt: 0 }),
+		).resolves.toEqual({ action: "replan" });
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 80_000, nonCompactableTokens: 10_000, attempt: 1 }),
+		).resolves.toEqual({ action: "send" });
+		const previousReply = assistantWithUsage(80_000, Date.now() + 1_000);
+		sessionManager.appendMessage(previousReply);
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 160_001, nonCompactableTokens: 10_000, attempt: 0 }),
+		).resolves.toEqual({ action: "replan" });
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 160_001, nonCompactableTokens: 10_000, attempt: 1 }),
+		).resolves.toEqual({ action: "replan" });
+		await expect(
+			controller.admitProviderRequest({ requestTokens: 160_001, nonCompactableTokens: 10_000, attempt: 2 }),
+		).rejects.toThrow("after bounded history compaction");
+		expect(compactWithRetry).toHaveBeenCalledTimes(2);
+	});
 });
 
 describe("CompactionController context-overflow recovery", () => {

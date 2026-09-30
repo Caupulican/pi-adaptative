@@ -105,6 +105,7 @@ const PROVIDER_RECOVERY_CONTINUATION_CUSTOM_TYPE = "provider_recovery_continuati
 const PROVIDER_RECOVERY_CONTINUATION = "Continue the latest owner request from the compacted checkpoint.";
 
 interface IneffectiveThresholdFrontier {
+	compactionEntryId: string | undefined;
 	provider: string;
 	modelId: string;
 	contextWindow: number;
@@ -114,6 +115,21 @@ interface IneffectiveThresholdFrontier {
 	triggerPercent: number | undefined;
 	tokensAfter: number;
 	retryAtTokens: number;
+}
+
+type ThresholdFrontierSettings = Pick<
+	IneffectiveThresholdFrontier,
+	| "provider"
+	| "modelId"
+	| "contextWindow"
+	| "autoCompactionTriggerTokens"
+	| "reserveTokens"
+	| "keepRecentTokens"
+	| "triggerPercent"
+>;
+
+interface PendingRequestFrontier extends ThresholdFrontierSettings {
+	compactionEntryId: string;
 }
 
 interface ActiveCompactionLifecycle {
@@ -338,6 +354,8 @@ export class CompactionController {
 	private overflowRecoveryAttempted = false;
 	private providerRecoveryAttempted = false;
 	private ineffectiveThresholdFrontier: IneffectiveThresholdFrontier | undefined;
+	/** The compaction entry whose exact replanned request has not yet established its frontier. */
+	private pendingRequestFrontier: PendingRequestFrontier | undefined;
 	/** The last early-compaction verdict (`proceed` or its deferral reason), so a deferral is reported once. */
 	private lastEarlyVerdictKey: string | undefined;
 	/** Fires the planned preparation while the session lane idles (see `onLaneIdle`). */
@@ -631,6 +649,27 @@ export class CompactionController {
 		const triggerTokens = model.autoCompactionTriggerTokens;
 		const requestNeed = assessCompactionNeed(input.requestTokens, contextWindow, settings, triggerTokens);
 		const envelopeNeed = assessCompactionNeed(input.nonCompactableTokens, contextWindow, settings, triggerTokens);
+		if (this.pendingRequestFrontier !== undefined) {
+			const latestCompactionId = this.latestCompactionEntryOnBranch()?.id;
+			if (
+				latestCompactionId === this.pendingRequestFrontier.compactionEntryId &&
+				this.frontierSettingsMatch(this.pendingRequestFrontier, model, settings) &&
+				requestNeed === "early"
+			) {
+				// This is the first measured request after the admission compaction. Its token estimate includes
+				// the full provider envelope, unlike measureLiveContextTokens(), which may only see the
+				// compactable message history. Anchor the shared frontier to this exact request
+				// measurement so the post-response usage and the next continuation compare against the
+				// same real request size that was allowed through admission.
+				this.recordThresholdFrontierAt(
+					input.requestTokens,
+					model,
+					settings,
+					Math.max(0, Math.floor(0.01 * contextWindow)),
+				);
+			}
+			this.pendingRequestFrontier = undefined;
+		}
 		if (envelopeNeed === "hard") {
 			throw new ProviderRequestEnvelopeOverflowError(
 				`The non-compactable request envelope needs about ${input.nonCompactableTokens} tokens, beyond the ${contextWindow}-token model's reserved request boundary. Mandatory context was not dropped. Reduce the system/tool/active-skill envelope or select a larger-context model.`,
@@ -646,6 +685,10 @@ export class CompactionController {
 		}
 		// An optional cost trigger caused entirely by fixed context cannot be improved by history compaction.
 		if (requestNeed === "early" && envelopeNeed === "early") return { action: "send" };
+		if (requestNeed === "early" && this.shouldDeferThresholdRetry(input.requestTokens, model, settings)) {
+			this.emitIneffectiveThresholdSkip();
+			return { action: "send" };
+		}
 		// Early compaction is a cost optimization: one paid summary is its complete budget.
 		if (requestNeed === "early" && input.attempt > 0) return { action: "send" };
 		if (requestNeed === "early" && !this.shouldProceedEarlyEconomics(input.requestTokens, model)) {
@@ -664,7 +707,7 @@ export class CompactionController {
 			);
 		}
 
-		const latestBefore = getLatestCompactionEntry(this.deps.sessionManager.getBranch())?.id;
+		const latestBefore = this.latestCompactionEntryOnBranch()?.id;
 		await this.runAuto("threshold", false, {
 			initialTokens: input.requestTokens,
 			singlePass: true,
@@ -672,8 +715,11 @@ export class CompactionController {
 			forceDeterministic: input.attempt > 0,
 			recordThresholdFrontier: false,
 		});
-		const latestAfter = getLatestCompactionEntry(this.deps.sessionManager.getBranch())?.id;
-		if (latestAfter && latestAfter !== latestBefore) return { action: "replan" };
+		const latestAfter = this.latestCompactionEntryOnBranch()?.id;
+		if (latestAfter && latestAfter !== latestBefore) {
+			this.pendingRequestFrontier = this.pendingFrontier(latestAfter, model, settings);
+			return { action: "replan" };
+		}
 		if (requestNeed === "early") return { action: "send" };
 		throw new ProviderRequestEnvelopeOverflowError(
 			`Provider request needs about ${formatRequestTokenBreakdown(input)}, but bounded history compaction made no progress. Reduce retained history or select a larger-context model.`,
@@ -724,6 +770,7 @@ export class CompactionController {
 		const abortController = new AbortController();
 		this.manualAbortController = abortController;
 		this.ineffectiveThresholdFrontier = undefined;
+		this.pendingRequestFrontier = undefined;
 		let result: CompactionResult | undefined;
 		let primaryError: unknown;
 		let cleanupError: unknown;
@@ -1286,7 +1333,13 @@ export class CompactionController {
 			if (!result) throw new Error("Auto-compaction succeeded without a result");
 			if (reason === "threshold" && options.recordThresholdFrontier !== false) {
 				this.recordThresholdFrontier(model, settings, margin);
-			} else this.ineffectiveThresholdFrontier = undefined;
+			} else {
+				this.ineffectiveThresholdFrontier = undefined;
+			}
+			this.pendingRequestFrontier =
+				reason === "threshold"
+					? this.pendingFrontier(this.latestCompactionEntryOnBranch()?.id, model, settings)
+					: undefined;
 			if (willRetry) {
 				this.dropTrailingAssistantErrors();
 				if (reason === "provider_recovery") this.appendProviderRecoveryContinuation();
@@ -1335,13 +1388,8 @@ export class CompactionController {
 		const frontier = this.ineffectiveThresholdFrontier;
 		if (!frontier) return false;
 		if (
-			frontier.provider !== model.provider ||
-			frontier.modelId !== model.id ||
-			frontier.contextWindow !== model.contextWindow ||
-			frontier.autoCompactionTriggerTokens !== model.autoCompactionTriggerTokens ||
-			frontier.reserveTokens !== settings.reserveTokens ||
-			frontier.keepRecentTokens !== settings.keepRecentTokens ||
-			frontier.triggerPercent !== settings.triggerPercent ||
+			frontier.compactionEntryId !== this.latestCompactionEntryOnBranch()?.id ||
+			!this.frontierSettingsMatch(frontier, model, settings) ||
 			liveTokens >= frontier.retryAtTokens
 		) {
 			this.ineffectiveThresholdFrontier = undefined;
@@ -1350,31 +1398,77 @@ export class CompactionController {
 		return true;
 	}
 
+	private frontierSettingsMatch(
+		frontier: ThresholdFrontierSettings,
+		model: Model<Api>,
+		settings: CompactionSettings,
+	): boolean {
+		return (
+			frontier.provider === model.provider &&
+			frontier.modelId === model.id &&
+			frontier.contextWindow === model.contextWindow &&
+			frontier.autoCompactionTriggerTokens === model.autoCompactionTriggerTokens &&
+			frontier.reserveTokens === settings.reserveTokens &&
+			frontier.keepRecentTokens === settings.keepRecentTokens &&
+			frontier.triggerPercent === settings.triggerPercent
+		);
+	}
+
+	private frontierSettings(model: Model<Api>, settings: CompactionSettings): ThresholdFrontierSettings {
+		return {
+			provider: model.provider,
+			modelId: model.id,
+			contextWindow: model.contextWindow,
+			autoCompactionTriggerTokens: model.autoCompactionTriggerTokens,
+			reserveTokens: settings.reserveTokens,
+			keepRecentTokens: settings.keepRecentTokens,
+			triggerPercent: settings.triggerPercent,
+		};
+	}
+
+	private pendingFrontier(
+		compactionEntryId: string | undefined,
+		model: Model<Api>,
+		settings: CompactionSettings,
+	): PendingRequestFrontier | undefined {
+		if (!compactionEntryId) return undefined;
+		return {
+			compactionEntryId,
+			...this.frontierSettings(model, settings),
+		};
+	}
+
 	private recordThresholdFrontier(model: Model<Api>, settings: CompactionSettings, margin: number): void {
+		let tokensAfter: number;
 		try {
-			const tokensAfter = this.deps.measureLiveContextTokens();
-			if (
-				!Number.isFinite(tokensAfter) ||
-				!shouldCompact(tokensAfter + margin, model.contextWindow, settings, model.autoCompactionTriggerTokens)
-			) {
-				this.ineffectiveThresholdFrontier = undefined;
-				return;
-			}
-			const minimumGrowth = Math.max(1, margin, Math.floor(settings.keepRecentTokens / 2));
-			this.ineffectiveThresholdFrontier = {
-				provider: model.provider,
-				modelId: model.id,
-				contextWindow: model.contextWindow,
-				autoCompactionTriggerTokens: model.autoCompactionTriggerTokens,
-				reserveTokens: settings.reserveTokens,
-				keepRecentTokens: settings.keepRecentTokens,
-				triggerPercent: settings.triggerPercent,
-				tokensAfter,
-				retryAtTokens: Math.min(Number.MAX_SAFE_INTEGER, tokensAfter + minimumGrowth),
-			};
+			tokensAfter = this.deps.measureLiveContextTokens();
 		} catch {
 			this.ineffectiveThresholdFrontier = undefined;
+			return;
 		}
+		this.recordThresholdFrontierAt(tokensAfter, model, settings, margin);
+	}
+
+	private recordThresholdFrontierAt(
+		frontierTokens: number,
+		model: Model<Api>,
+		settings: CompactionSettings,
+		margin: number,
+	): void {
+		if (
+			!Number.isFinite(frontierTokens) ||
+			!shouldCompact(frontierTokens + margin, model.contextWindow, settings, model.autoCompactionTriggerTokens)
+		) {
+			this.ineffectiveThresholdFrontier = undefined;
+			return;
+		}
+		const minimumGrowth = Math.max(1, margin, Math.floor(settings.keepRecentTokens / 2));
+		this.ineffectiveThresholdFrontier = {
+			compactionEntryId: this.latestCompactionEntryOnBranch()?.id,
+			...this.frontierSettings(model, settings),
+			tokensAfter: frontierTokens,
+			retryAtTokens: Math.min(Number.MAX_SAFE_INTEGER, frontierTokens + minimumGrowth),
+		};
 	}
 
 	private recordFeedbackTurn(assistantMessage: AssistantMessage): void {
@@ -1714,7 +1808,9 @@ export class CompactionController {
 		const compactionId = randomUUID();
 		this.deps.sessionManager.appendCompactionStart(compactionId, result.firstKeptEntryId, result.tokensBefore);
 		this.activeCompactionLifecycle = { compactionId, endAttempted: false };
-		this.recordAppliedCompaction(await this.applyResult(result, false));
+		const compactionEntryId = await this.applyResult(result, false);
+		this.recordAppliedCompaction(compactionEntryId);
+		this.pendingRequestFrontier = this.pendingFrontier(compactionEntryId, model, this.deps.getAdaptedSettings());
 		this.finishCompactionLifecycle(result.deterministic ? "fallback" : "success", result.deterministic?.cause);
 		this.deps.emit({ type: "compaction_end", reason: "threshold", result, aborted: false, willRetry: false });
 		return true;

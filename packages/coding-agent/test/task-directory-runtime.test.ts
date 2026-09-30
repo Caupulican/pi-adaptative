@@ -184,6 +184,46 @@ describe("native task directory runtime", () => {
 		await runtime.change({ action: "reattach", workspaceId: "session", path: root });
 	});
 
+	it("reuses a live nested lease but re-admits an inherited context after its lease ends", async () => {
+		const other = join(root, "nested-other");
+		mkdirSync(other);
+		await runtime.change({ action: "register", workspaceId: "other", path: other });
+		const releaseDetached = Promise.withResolvers<void>();
+		const detachedResult = Promise.withResolvers<string>();
+		const hostRun = runtime.withContext(async (outer) => {
+			expect(outer.cwd).toBe(root);
+			void (async () => {
+				await releaseDetached.promise;
+				const cwd = await runtime.withContext((nested) => nested.cwd);
+				detachedResult.resolve(cwd);
+			})();
+			await runtime.change({ action: "select", workspaceId: "other" });
+			await runtime.withContext((nested) => expect(nested).toBe(outer));
+		});
+		await hostRun;
+		releaseDetached.resolve();
+		expect(await detachedResult.promise).toBe(other);
+	});
+
+	it("rejects nested work after disposal without entering the inherited callback", async () => {
+		const callback = vi.fn();
+		await runtime.withContext(async () => {
+			await runtime.dispose();
+			await expect(runtime.withContext(callback)).rejects.toThrow("Task directory runtime disposed");
+		});
+		expect(callback).not.toHaveBeenCalled();
+	});
+
+	it("rejects an inherited lease after the session manager changes", async () => {
+		const replacement = SessionManager.inMemory(root);
+		const callback = vi.fn();
+		await runtime.withContext(async () => {
+			session = replacement;
+			await expect(runtime.withContext(callback)).rejects.toThrow("Task directory context is stale");
+		});
+		expect(callback).not.toHaveBeenCalled();
+	});
+
 	it("does not enter a cancelled host callback and permits a subsequent admission", async () => {
 		const callback = vi.fn();
 		await expect(runtime.withContext(callback, AbortSignal.abort(new Error("cancelled")))).rejects.toThrow(

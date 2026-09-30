@@ -55,6 +55,24 @@ describe("requirement checks", () => {
 		expect(requirementCheckViolation({ command: "   " }, cwd)).toBe("A check needs a command.");
 	});
 
+	it("admits Git ancestry checks without admitting a merge or a mutating continuation", () => {
+		for (const command of [
+			"git merge-base --is-ancestor 0501777f HEAD",
+			"git -C /mnt/d/GitHub/mine/GrimDex merge-base --is-ancestor 0501777f HEAD",
+			"bash --noprofile --norc -c 'git merge-base --is-ancestor HEAD HEAD'",
+		]) {
+			expect(requirementCheckViolation({ command }, cwd), command).toBeUndefined();
+		}
+		for (const command of [
+			"git merge feature",
+			"git -C /mnt/d/GitHub/mine/GrimDex merge --ff-only feature",
+			"git merge-base HEAD feature && git merge feature",
+			"merge feature",
+		]) {
+			expect(requirementCheckViolation({ command }, cwd), command).toMatch(/may only observe/u);
+		}
+	});
+
 	it("judges exit code and output expectations in one sentence", () => {
 		expect(judgeRequirementCheck({ command: "x" }, 0, "")).toEqual({
 			passed: true,

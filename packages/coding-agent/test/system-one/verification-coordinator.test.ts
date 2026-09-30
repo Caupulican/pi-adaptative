@@ -1,6 +1,7 @@
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
+import { serializeEvaluation } from "../../src/core/review/typesafe-contract.ts";
 import { wrapToolWithVerification } from "../../src/core/system-one/session-verification-host.ts";
 import { VerificationCoordinator, type VerificationJudge } from "../../src/core/system-one/verification-coordinator.ts";
 import type { SemanticVerificationSnapshot } from "../../src/core/system-one/verification-obligations.ts";
@@ -59,6 +60,41 @@ const accepted = {
 };
 
 describe("mandatory verification coordination", () => {
+	it("omits an absent wrapper receiver from the TypeSafe classification payload", async () => {
+		const judge = vi.fn<VerificationJudge>(async (state) => {
+			serializeEvaluation(state);
+			return accepted;
+		});
+		const { coordinator } = fixture(judge);
+		const parameters = Type.Object({ command: Type.String() });
+		const tool = wrapToolWithVerification(
+			{
+				name: "bash",
+				label: "Bash",
+				description: "Run a command",
+				parameters,
+				execute: async () => ({ content: [{ type: "text", text: "done" }], details: {} }),
+			},
+			() => coordinator,
+			() => "/repo",
+		);
+
+		await expect(tool.execute("call", { command: "check" }, undefined)).resolves.toMatchObject({
+			content: [{ type: "text", text: "done" }],
+		});
+		expect(judge).toHaveBeenCalledOnce();
+		expect(judge.mock.calls[0][0]).toMatchObject({ operation: { tool: "bash", args: { command: "check" } } });
+		expect((judge.mock.calls[0][0] as { operation: Record<string, unknown> }).operation).not.toHaveProperty(
+			"receiverId",
+		);
+	});
+
+	it("keeps the TypeSafe serializer strict for explicitly malformed evidence", () => {
+		expect(() => serializeEvaluation({ operation: { receiverId: undefined } })).toThrow(
+			"TypeSafe evidence must be finite, acyclic JSON",
+		);
+	});
+
 	it("keeps findings during an outage, allows reads, and retries the same proof when the judge recovers", async () => {
 		const judge = vi.fn<VerificationJudge>().mockRejectedValue(new Error("temporary transport outage"));
 		const { coordinator, proof } = fixture(judge);
@@ -81,6 +117,38 @@ describe("mandatory verification coordination", () => {
 		).resolves.toBeUndefined();
 		expect(await coordinator.resolve(request)).toMatchObject({ status: "resolved" });
 		expect(coordinator.status().obligations).toEqual([]);
+	});
+
+	it("forwards bounded proof remediation without sending receipt contents", async () => {
+		const judge = vi.fn<VerificationJudge>().mockResolvedValue(accepted);
+		const { coordinator, proof } = fixture(judge);
+		const reproduction = proof();
+		const callId = coordinator.beginCall("root-lane", "read");
+		coordinator.finishCall({
+			callId,
+			tool: "read",
+			args: { path: "focused-check.log" },
+			output: "bounded check output",
+			succeeded: true,
+		});
+		const recheck = coordinator.status().receipts[1]!;
+		const result = await coordinator.resolve({
+			...reproduction,
+			evidence: [reproduction.evidence[0]!, { receiptId: recheck.id, role: "recheck" }],
+		});
+
+		expect(result).toMatchObject({
+			status: "unresolved",
+			reason: "unexpected_repair_receipts",
+			remediation: {
+				requiredEvidence: { reproduction: "exactly one", repair: "none", recheck: "none" },
+				offendingReceipts: [{ receiptId: recheck.id, role: "recheck", truncated: false }],
+				nextAction: expect.stringContaining("keep only the single reproduction receipt"),
+			},
+		});
+		expect(JSON.stringify(result)).not.toContain("bounded check output");
+		expect(judge).not.toHaveBeenCalled();
+		expect(coordinator.status().obligations).toHaveLength(1);
 	});
 
 	it("refuses same-checkout push independently of a favorable operation judge", async () => {

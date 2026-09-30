@@ -13,6 +13,7 @@ const MAX_SCOPE_LENGTH = 1_000;
 const MAX_RECEIPT_TOOL_LENGTH = 100;
 const MAX_RECEIPT_ARGUMENTS_LENGTH = 8_000;
 const MAX_RECEIPT_OUTPUT_LENGTH = 12_000;
+const MAX_REMEDIATION_RECEIPTS = 16;
 const MIN_RESOLUTION_CONFIDENCE = 0.95;
 
 export type VerificationReceiptRole = "reproduction" | "repair" | "recheck";
@@ -120,6 +121,23 @@ export type PrepareVerificationResolutionInput = {
 	evidence: readonly VerificationEvidenceSelection[];
 };
 
+export type VerificationResolutionRemediation = {
+	requiredEvidence: {
+		reproduction: "exactly one";
+		repair: "none" | "one or more after reproduction, in order";
+		recheck: "none" | "exactly one after the final repair";
+	};
+	offendingReceipts: readonly {
+		receiptId: string;
+		role: VerificationReceiptRole;
+		tool?: string;
+		truncated?: boolean;
+		retainedArgsChars?: number;
+		retainedOutputChars?: number;
+	}[];
+	nextAction: string;
+};
+
 export type PreparedVerificationResolution =
 	| {
 			ready: true;
@@ -127,7 +145,7 @@ export type PreparedVerificationResolution =
 			receipts: readonly PreparedVerificationReceipt[];
 			token: string;
 	  }
-	| { ready: false; reason: string };
+	| { ready: false; reason: string; remediation: VerificationResolutionRemediation };
 
 export type ResolveVerificationInput = PrepareVerificationResolutionInput & {
 	judgment: {
@@ -405,6 +423,52 @@ function canonicalEvidenceSelections(input: PrepareVerificationResolutionInput):
 	return [...input.evidence].sort((left, right) => roleOrder[left.role] - roleOrder[right.role]);
 }
 
+function resolutionRemediation(
+	input: PrepareVerificationResolutionInput,
+	reason: string,
+	selections: readonly VerificationEvidenceSelection[],
+	receipts: readonly SemanticVerificationReceipt[],
+): VerificationResolutionRemediation {
+	const receiptById = new Map(receipts.map((receipt) => [receipt.id, receipt]));
+	const offendingReceipts = selections.slice(0, MAX_REMEDIATION_RECEIPTS).map(({ receiptId, role }) => {
+		const receipt = receiptById.get(receiptId);
+		return {
+			receiptId,
+			role,
+			...(receipt
+				? {
+						tool: receipt.tool,
+						truncated: receipt.truncated,
+						retainedArgsChars: receipt.args.length,
+						retainedOutputChars: receipt.output.length,
+					}
+				: {}),
+		};
+	});
+	const repaired = input.disposition === "repaired";
+	const nextAction =
+		reason === "evidence_receipt_truncated"
+			? "Rerun a focused check with bounded output in this receiving lane, then select its new untruncated receipt ID."
+			: reason === "unexpected_repair_receipts"
+				? "For rejected, keep only the single reproduction receipt; remove repair and recheck selections."
+				: reason === "one_reproduction_receipt_required"
+					? "Select exactly one reproduction receipt from this receiving lane."
+					: reason === "repair_chain_and_one_recheck_required"
+						? "For repaired, select one reproduction, each ordered repair, and one recheck after the final repair."
+						: reason === "evidence_receipt_missing"
+							? "Read peer obligations for current receipt IDs, then select evidence recorded in this receiving lane."
+							: "Correct the listed evidence selection or collect fresh same-lane evidence, then retry resolution.";
+	return {
+		requiredEvidence: {
+			reproduction: "exactly one",
+			repair: repaired ? "one or more after reproduction, in order" : "none",
+			recheck: repaired ? "exactly one after the final repair" : "none",
+		},
+		offendingReceipts,
+		nextAction,
+	};
+}
+
 /**
  * Session-backed owner of explicit semantic verification obligations. This is separate from the
  * deterministic failed-command ledger: candidates are semantic claims, and close only through
@@ -604,52 +668,63 @@ export class SemanticVerificationObligationTracker {
 
 	prepareResolution(input: PrepareVerificationResolutionInput): PreparedVerificationResolution {
 		const { branchKey, snapshot } = this.load();
+		const unresolved = (
+			reason: string,
+			selections: readonly VerificationEvidenceSelection[] = input.evidence,
+		): PreparedVerificationResolution => ({
+			ready: false,
+			reason,
+			remediation: resolutionRemediation(input, reason, selections, snapshot.receipts),
+		});
 		const obligation = snapshot.obligations.find((item) => item.id === input.id);
-		if (obligation?.status !== "active") return { ready: false, reason: "obligation_not_active" };
-		if (input.receiverId !== obligation.receiverId) return { ready: false, reason: "receiving_lane_mismatch" };
-		if (!isBoundedText(input.candidateId, MAX_ID_LENGTH))
-			return { ready: false, reason: "candidate_identity_missing" };
+		if (obligation?.status !== "active") return unresolved("obligation_not_active");
+		if (input.receiverId !== obligation.receiverId) return unresolved("receiving_lane_mismatch");
+		if (!isBoundedText(input.candidateId, MAX_ID_LENGTH)) return unresolved("candidate_identity_missing");
 		if (input.disposition !== "rejected" && input.disposition !== "repaired")
-			return { ready: false, reason: "unknown_disposition" };
+			return unresolved("unknown_disposition");
 
 		const roles = canonicalEvidenceSelections(input);
 		if (roles.some((item) => item.role !== "reproduction" && item.role !== "repair" && item.role !== "recheck"))
-			return { ready: false, reason: "unknown_evidence_role" };
+			return unresolved("unknown_evidence_role", roles);
 		if (new Set(roles.map((item) => item.receiptId)).size !== roles.length)
-			return { ready: false, reason: "duplicate_evidence_receipt" };
+			return unresolved("duplicate_evidence_receipt", roles);
 		const reproductionSelections = roles.filter((item) => item.role === "reproduction");
 		const repairSelections = roles.filter((item) => item.role === "repair");
 		const recheckSelections = roles.filter((item) => item.role === "recheck");
-		if (reproductionSelections.length !== 1) return { ready: false, reason: "one_reproduction_receipt_required" };
+		if (reproductionSelections.length !== 1) return unresolved("one_reproduction_receipt_required", roles);
 		if (input.disposition === "repaired" && (repairSelections.length === 0 || recheckSelections.length !== 1))
-			return { ready: false, reason: "repair_chain_and_one_recheck_required" };
+			return unresolved("repair_chain_and_one_recheck_required", roles);
 		if (input.disposition === "rejected" && (repairSelections.length !== 0 || recheckSelections.length !== 0))
-			return { ready: false, reason: "unexpected_repair_receipts" };
+			return unresolved("unexpected_repair_receipts", [...repairSelections, ...recheckSelections]);
 
 		const selected: PreparedVerificationReceipt[] = [];
 		for (const { role, receiptId } of roles) {
 			const record = snapshot.receipts.find((item) => item.id === receiptId);
-			if (!record) return { ready: false, reason: "evidence_receipt_missing" };
-			if (record.sequence <= obligation.sequence) return { ready: false, reason: "evidence_predates_obligation" };
+			if (!record) return unresolved("evidence_receipt_missing", [{ receiptId, role }]);
+			if (record.sequence <= obligation.sequence)
+				return unresolved("evidence_predates_obligation", [{ receiptId, role }]);
 			if (record.receiverId !== obligation.receiverId)
-				return { ready: false, reason: "evidence_receiving_lane_mismatch" };
-			if (record.truncated) return { ready: false, reason: "evidence_receipt_truncated" };
+				return unresolved("evidence_receiving_lane_mismatch", [{ receiptId, role }]);
+			if (record.truncated) return unresolved("evidence_receipt_truncated", [{ receiptId, role }]);
 			selected.push({ ...record, role });
 		}
 		selected.sort((left, right) => left.sequence - right.sequence);
 		if (selected.some((item, index) => index > 0 && item.sequence <= selected[index - 1].sequence))
-			return { ready: false, reason: "evidence_order_invalid" };
+			return unresolved("evidence_order_invalid", roles);
 		const reproduction = selected.find((item) => item.role === "reproduction");
 		if (!reproduction || reproduction.candidateBefore !== reproduction.candidateAfter)
-			return { ready: false, reason: "reproduction_candidate_mismatch" };
+			return unresolved(
+				"reproduction_candidate_mismatch",
+				roles.filter((item) => item.role === "reproduction"),
+			);
 		if (input.disposition === "rejected") {
 			if (reproduction.candidateAfter !== input.candidateId || !reproduction.succeeded) {
-				return { ready: false, reason: "candidate_rejection_requires_passing_current_reproduction" };
+				return unresolved("candidate_rejection_requires_passing_current_reproduction", reproductionSelections);
 			}
 		} else {
 			const repairs = selected.filter((item) => item.role === "repair");
 			const recheck = selected.find((item) => item.role === "recheck");
-			if (repairs.length === 0 || !recheck) return { ready: false, reason: "repair_chain_and_one_recheck_required" };
+			if (repairs.length === 0 || !recheck) return unresolved("repair_chain_and_one_recheck_required", roles);
 			let expectedBefore = reproduction.candidateAfter;
 			for (const repair of repairs) {
 				if (
@@ -658,7 +733,10 @@ export class SemanticVerificationObligationTracker {
 					!repair.succeeded ||
 					(obligation.candidateKind === "repository" && repair.candidateAfter === expectedBefore)
 				) {
-					return { ready: false, reason: "repair_receipt_does_not_span_candidate" };
+					return unresolved(
+						"repair_receipt_does_not_span_candidate",
+						roles.filter((item) => item.role === "repair"),
+					);
 				}
 				expectedBefore = repair.candidateAfter;
 			}
@@ -667,19 +745,23 @@ export class SemanticVerificationObligationTracker {
 				finalRepair.candidateAfter !== input.candidateId ||
 				(input.candidateId === reproduction.candidateAfter && obligation.candidateKind === "repository")
 			)
-				return { ready: false, reason: "repair_chain_does_not_reach_current_candidate" };
-			if (recheck.sequence <= finalRepair.sequence) return { ready: false, reason: "repair_proof_order_invalid" };
+				return unresolved(
+					"repair_chain_does_not_reach_current_candidate",
+					roles.filter((item) => item.role === "repair"),
+				);
+			if (recheck.sequence <= finalRepair.sequence)
+				return unresolved("repair_proof_order_invalid", recheckSelections);
 			if (
 				recheck.candidateBefore !== input.candidateId ||
 				recheck.candidateAfter !== input.candidateId ||
 				!recheck.succeeded
 			) {
-				return { ready: false, reason: "recheck_does_not_pass_on_current_candidate" };
+				return unresolved("recheck_does_not_pass_on_current_candidate", recheckSelections);
 			}
 		}
 		const proofFingerprint = resolutionProofFingerprint(branchKey, snapshot, input, selected);
 		if (snapshot.judgedTokens.some((item) => item.obligationId === input.id && item.fingerprint === proofFingerprint))
-			return { ready: false, reason: "evidence_already_judged" };
+			return unresolved("evidence_already_judged", roles);
 		const token = resolutionToken(branchKey, snapshot, proofFingerprint);
 		return {
 			ready: true,

@@ -161,8 +161,10 @@ const READ_ONLY_SYSTEMCTL_SUBCOMMANDS = new Set([
 const CURL_MUTATING_OPTION_RE =
 	/(?:^|\s)(?:-[a-zA-Z]*[XdFToO][a-zA-Z]*|--(?:request|data[a-z-]*|form[a-z-]*|upload-file|output|remote-name[a-z-]*|json|post[a-z0-9-]*))(?:[\s=]|$)/u;
 const READ_ONLY_NPM_SUBCOMMANDS = new Set(["info", "list", "ls", "outdated", "view", "whoami"]);
+// A Git subcommand is a whole shell token: the hyphen in `merge-base` is not a
+// mutation boundary. Parsed Git commands still pass the subcommand allowlist below.
 const MUTATING_SHELL_TOKEN_RE =
-	/(^|\s)(>|>>|2>|&>|tee\b|rm\b|mv\b|cp\b|mkdir\b|touch\b|chmod\b|chown\b|install\b|commit\b|push\b|publish\b|deploy\b|apply\b|add\b|checkout\b|switch\b|reset\b|clean\b|stash\b|merge\b|rebase\b|remove-item\b|move-item\b|copy-item\b|new-item\b|rename-item\b|set-content\b|add-content\b|out-file\b|set-item\b|start-process\b|npm\s+(?:i|install|ci|update|publish|run)\b|pnpm\s+(?:i|install|update|publish|run)\b|yarn\s+(?:add|install|upgrade|publish|run)\b)/i;
+	/(^|\s)(>|>>|2>|&>|tee\b|rm\b|mv\b|cp\b|mkdir\b|touch\b|chmod\b|chown\b|install\b|commit\b|push\b|publish\b|deploy\b|apply\b|add\b|checkout\b|switch\b|reset\b|clean\b|stash\b|merge(?=\s|$)|rebase\b|remove-item\b|move-item\b|copy-item\b|new-item\b|rename-item\b|set-content\b|add-content\b|out-file\b|set-item\b|start-process\b|npm\s+(?:i|install|ci|update|publish|run)\b|pnpm\s+(?:i|install|update|publish|run)\b|yarn\s+(?:add|install|upgrade|publish|run)\b)/i;
 const UNSAFE_NESTED_SHELL_EXECUTION_RE =
 	/(`|\$\(|\bfind\b[\s\S]*\s-(?:exec(?:dir)?|ok(?:dir)?|delete|fprint(?:0|f)?|fls)\b|\bxargs\b)/i;
 const MUTATING_TOOL_NAME_RE =

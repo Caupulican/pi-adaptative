@@ -2775,22 +2775,23 @@ export class AgentSession {
 				},
 				waitForRepositoryQuiescence: (objectiveId, signal) =>
 					this._repositoryObserver.waitForQuiescence(objectiveId, signal),
-				proveRequirementChecks: async (signal) => {
-					const goal = this.getGoalStateSnapshot();
-					if (!goal) return undefined;
-					return proveRequirementChecks({
-						state: goal,
-						runCheck: (check, checkSignal) =>
-							runRequirementCheck(check, {
-								cwd: this._runtimeBuilder.taskCwd,
-								...(checkSignal ? { signal: checkSignal } : {}),
-							}),
-						now: () => new Date().toISOString(),
-						save: (state, expected) => this.saveGoalStateSnapshot(state, expected),
-						requireVerifiedEvidenceForCompletion: true,
-						...(signal ? { signal } : {}),
-					});
-				},
+				proveRequirementChecks: (signal) =>
+					this._runtimeBuilder.withTaskDirectoryContext(async () => {
+						const goal = this.getGoalStateSnapshot();
+						if (!goal) return undefined;
+						return proveRequirementChecks({
+							state: goal,
+							runCheck: (check, checkSignal) =>
+								runRequirementCheck(check, {
+									cwd: this._runtimeBuilder.taskCwd,
+									...(checkSignal ? { signal: checkSignal } : {}),
+								}),
+							now: () => new Date().toISOString(),
+							save: (state, expected) => this.saveGoalStateSnapshot(state, expected),
+							requireVerifiedEvidenceForCompletion: true,
+							...(signal ? { signal } : {}),
+						});
+					}, signal),
 				ownedPathDigests: () => this._mutationLedger.ownedDigests(this.objectiveMutationId()),
 				localCommitBranch: () => this._localCommitBranch,
 				ruleAuthority: () => this._ruleAuthority,
@@ -2814,11 +2815,17 @@ export class AgentSession {
 									snapshot: () => systemOneController.store.snapshot(),
 									completionView: () => systemOneController.completionView(),
 									executeCompletionTransaction: (isBugFix, options) =>
-										this._systemOneController!.executeCompletionTransaction(isBugFix, options),
+										this._runtimeBuilder.withTaskDirectoryContext(() =>
+											this._systemOneController!.executeCompletionTransaction(isBugFix, options),
+										),
 									commitTerminalCompletion: (input, options) =>
-										this._systemOneController!.commitTerminalCompletion(input, options),
+										this._runtimeBuilder.withTaskDirectoryContext(() =>
+											this._systemOneController!.commitTerminalCompletion(input, options),
+										),
 									validateObjectivePostflight: (objectiveId) =>
-										this._systemOneController!.validateObjectivePostflight(objectiveId),
+										this._runtimeBuilder.withTaskDirectoryContext(() =>
+											this._systemOneController!.validateObjectivePostflight(objectiveId),
+										),
 									peekControlDirective: () => this._systemOneController!.peekControlDirective(),
 									consumeControlDirective: (directive) =>
 										this._systemOneController!.consumeControlDirective(directive),
@@ -4481,6 +4488,19 @@ export class AgentSession {
 		return this.agent.state.tools.map((t) => t.name);
 	}
 
+	/** Effective cwd inside an admitted task workflow; startup cwd outside one. */
+	get taskCwd(): string {
+		return this._runtimeBuilder.taskCwd;
+	}
+
+	private _noteSystemOneTaskDirectoryUnavailable(error: unknown): void {
+		const reason = (error instanceof Error ? error.message : String(error)).replace(/[\r\n\t]+/gu, " ").slice(0, 240);
+		this._emit({
+			type: "warning",
+			message: `System One verification was deferred because the active task directory is unavailable (${reason}). Repair it with task_directory; no judgment was recorded.`,
+		});
+	}
+
 	/** Build a foreground {@link CapabilityEnvelope} from the live session state (active tools, cwd, cost ceiling). */
 	private _buildForegroundEnvelopeFromState(): CapabilityEnvelope {
 		return buildForegroundEnvelope({
@@ -5560,13 +5580,35 @@ export class AgentSession {
 		this._goals.setStartAuthority(goalToolStartAuthority);
 		try {
 			this._toolProtocol.resetTurnState();
+			let taskDirectoryUnavailableNoted = false;
+			const noteTaskDirectoryUnavailable = (error: unknown): void => {
+				if (taskDirectoryUnavailableNoted) return;
+				taskDirectoryUnavailableNoted = true;
+				this._noteSystemOneTaskDirectoryUnavailable(error);
+			};
 			let requestNote: string | undefined;
 			if (!options?.internalContextType) {
 				this._lastUserRequest = userRequest;
 				if (options?.source !== "extension") {
 					if (this._systemOneController)
-						requestNote = await this._enableCapabilitiesAuthorizedByUser(text, submissionSignal);
+						requestNote = await this._runtimeBuilder.withTaskDirectoryContext(
+							() => this._enableCapabilitiesAuthorizedByUser(text, submissionSignal),
+							submissionSignal,
+							(error) => {
+								noteTaskDirectoryUnavailable(error);
+								return undefined;
+							},
+						);
 					else await this._classifyOwnerRequest(text, "", false, submissionSignal);
+				} else if (this._systemOneController) {
+					requestNote = await this._runtimeBuilder.withTaskDirectoryContext(
+						() => this._enableCapabilitiesAuthorizedByUser(userRequest, submissionSignal, false),
+						submissionSignal,
+						(error) => {
+							noteTaskDirectoryUnavailable(error);
+							return undefined;
+						},
+					);
 				} else requestNote = await this._enableCapabilitiesAuthorizedByUser(userRequest, submissionSignal, false);
 				this._announceOwnerFollowUpsWhenPresent();
 			}
@@ -5579,7 +5621,16 @@ export class AgentSession {
 				await this._runToolkitHit(toolkitHit, messages, submissionSignal);
 				return;
 			}
-			const preflight = await executeSystemOnePreflight(this._systemOneController, this.agent.state.messages.length);
+			const preflight = this._systemOneController
+				? await this._runtimeBuilder.withTaskDirectoryContext(
+						() => executeSystemOnePreflight(this._systemOneController, this.agent.state.messages.length),
+						submissionSignal,
+						(error) => {
+							noteTaskDirectoryUnavailable(error);
+							return executeSystemOnePreflight(undefined, this.agent.state.messages.length);
+						},
+					)
+				: await executeSystemOnePreflight(undefined, this.agent.state.messages.length);
 			if (preflight.proceed) {
 				const turnStart = this.agent.state.messages.length;
 				await this._modelRouter.runRoutedTurn(
@@ -5590,11 +5641,22 @@ export class AgentSession {
 					false,
 					submissionSignal,
 				);
-				await executeSystemOnePostflight(
-					this._systemOneController,
-					this.agent.state.messages.length,
-					submissionSignal?.aborted,
-				);
+				if (this._systemOneController && !submissionSignal?.aborted) {
+					await this._runtimeBuilder.withTaskDirectoryContext(
+						() =>
+							executeSystemOnePostflight(
+								this._systemOneController,
+								this.agent.state.messages.length,
+								submissionSignal?.aborted,
+							),
+						submissionSignal,
+						(error) => {
+							noteTaskDirectoryUnavailable(error);
+						},
+					);
+				} else {
+					await executeSystemOnePostflight(undefined, this.agent.state.messages.length, submissionSignal?.aborted);
+				}
 				// Claims against deliveries: a contradicted claim buys one correction turn, never a loop.
 				if (!submissionSignal?.aborted) {
 					const correction = await this._claimCorrection(turnStart);

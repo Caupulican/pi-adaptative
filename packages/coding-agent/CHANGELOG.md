@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Fixed
+
+- Prevented repeated automatic summaries after ineffective compaction by sharing a request-measured frontier across admission, postflight, and autonomous continuations; context growth and hard limits still trigger recovery.
+- Aligned foreground verification, repository truth, review evidence, and tool receipts with the admitted task directory instead of the session's startup workspace.
+- Bound non-repository outcome identities to their task scope so evidence from another directory cannot resolve a finding.
+- Omitted absent optional receiver identities from evaluator requests, allowing verification and recovery tools to continue without malformed-request failures.
+- Added bounded proof-recovery instructions identifying required evidence and invalid or truncated receipts while retaining same-lane reproduction, repair, and recheck requirements.
+- Accepted observational Git ancestry checks, including `merge-base --is-ancestor`, without admitting mutating Git commands.
+
 ## [0.101.1] - 2026-09-30
 
 ### Added

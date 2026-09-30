@@ -48,7 +48,10 @@ export class VerificationCoordinator {
 	private readonly judge: VerificationJudge;
 	private bound = false;
 	private directiveCache?: { key: string; value: SystemOneControlDirective };
-	private readonly starts = new Map<string, { receiverId: string; candidateBefore: string; fence: () => boolean }>();
+	private readonly starts = new Map<
+		string,
+		{ receiverId: string; candidateBefore: string; cwd?: string; fence: () => boolean }
+	>();
 
 	constructor(host: VerificationHost, judge: VerificationJudge) {
 		this.host = host;
@@ -128,12 +131,18 @@ export class VerificationCoordinator {
 		if (RECOVERY_TOOLS.has(input.tool)) return;
 		const fence = this.host.captureFence();
 		const candidate = this.host.getCandidate(input.cwd);
+		const operation = {
+			tool: input.tool,
+			args: input.args,
+			cwd: input.cwd,
+			...(input.receiverId !== undefined ? { receiverId: input.receiverId } : {}),
+		};
 		if (toolCallPushesGitAtCwd(input.tool, input.args) && active.some((item) => item.scope === candidate.scope))
 			this.assertResolved();
 		let verdict: Awaited<ReturnType<VerificationJudge>>;
 		try {
 			verdict = await this.judge(
-				{ obligations: active, operation: input },
+				{ obligations: active, operation },
 				{
 					verification_operation_safe: {
 						type: "boolean",
@@ -168,16 +177,17 @@ export class VerificationCoordinator {
 			);
 	}
 
-	beginCall(receiverId?: string, tool?: string): string | undefined {
+	beginCall(receiverId?: string, tool?: string, cwd?: string): string | undefined {
 		// Reviews and routing do not create fresh receiving-lane check evidence or a reroll budget.
 		if (tool && ["peer", "typesafe_review", "delegate", "tool_task", "goal"].includes(tool)) return;
 		if (!this.tracker.active().length || this.starts.size >= 64) return;
-		const candidate = this.host.getCandidate();
+		const candidate = this.host.getCandidate(cwd);
 		// Provider tool-call IDs can collide between lanes or turns. Only the host identifies receipts.
 		const callId = randomUUID();
 		this.starts.set(callId, {
 			receiverId: receiverId ?? this.host.getReceiverId(),
 			candidateBefore: candidate.id,
+			...(cwd !== undefined ? { cwd } : {}),
 			fence: this.host.captureFence(),
 		});
 		return callId;
@@ -194,7 +204,7 @@ export class VerificationCoordinator {
 		const start = this.starts.get(input.callId);
 		this.starts.delete(input.callId);
 		if (!start?.fence()) return;
-		const candidate = this.host.getCandidate();
+		const candidate = this.host.getCandidate(start.cwd);
 		this.tracker.recordReceipt({
 			...input,
 			callId: input.callId,
@@ -216,7 +226,8 @@ export class VerificationCoordinator {
 			candidateId: candidate.id,
 		};
 		const prepared = this.tracker.prepareResolution(input);
-		if (!prepared.ready) return { status: "unresolved" as const, reason: prepared.reason };
+		if (!prepared.ready)
+			return { status: "unresolved" as const, reason: prepared.reason, remediation: prepared.remediation };
 		const fence = this.host.captureFence();
 		try {
 			const verdict = await this.judge(

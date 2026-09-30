@@ -40,17 +40,21 @@ function git(cwd: string, args: readonly string[]): string {
 	});
 }
 
+/** Resolve the goal's baseline without materializing its patch on canonical-truth hot paths. */
+export function readWorkDiffBase(cwd: string, startedAt: string): string | undefined {
+	try {
+		return git(cwd, ["rev-list", "-1", `--before=${startedAt}`, "HEAD"]).trim() || undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * The work since `startedAt` in the repository at `cwd`, or undefined when `cwd` is not a git
  * repository with a commit before that time (then there is no base to measure from).
  */
 export function readWorkDiff(cwd: string, startedAt: string): WorkDiff | undefined {
-	let base: string;
-	try {
-		base = git(cwd, ["rev-list", "-1", `--before=${startedAt}`, "HEAD"]).trim();
-	} catch {
-		return undefined;
-	}
+	const base = readWorkDiffBase(cwd, startedAt);
 	if (!base) return undefined;
 	const full = git(cwd, ["diff", "--no-color", "--no-ext-diff", base]);
 	const untracked = git(cwd, ["ls-files", "--others", "--exclude-standard"])

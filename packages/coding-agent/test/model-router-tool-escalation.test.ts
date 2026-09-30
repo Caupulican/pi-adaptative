@@ -63,6 +63,15 @@ describe("model router tool escalation", () => {
 		).toBe(true);
 	});
 
+	it("uses the Git subcommand owner to distinguish merge-base from merge", () => {
+		for (const command of ["git merge-base --is-ancestor HEAD HEAD", "git -C project merge-base HEAD main"]) {
+			expect(shouldEscalateModelRouterTool({ tier: "cheap", toolName: "bash", args: { command } })).toBe(false);
+		}
+		for (const command of ["git merge main", "git merge-base HEAD main; git merge main"]) {
+			expect(shouldEscalateModelRouterTool({ tier: "cheap", toolName: "bash", args: { command } })).toBe(true);
+		}
+	});
+
 	it("escalates mutating shell commands from cheap turns", () => {
 		expect(
 			shouldEscalateModelRouterTool({

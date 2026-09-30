@@ -535,6 +535,15 @@ export class RuntimeBuilder {
 	get taskCwd(): string {
 		return this._taskDirectories.cwd;
 	}
+
+	/** Run a host-owned workflow under the same admitted directory context as a task-bound tool. */
+	withTaskDirectoryContext<T>(
+		operation: () => T | Promise<T>,
+		signal?: AbortSignal,
+		onAdmissionError?: (error: unknown) => T | Promise<T>,
+	): Promise<T> {
+		return this._taskDirectories.withContext(() => operation(), signal, onAdmissionError);
+	}
 	private readonly _taskAutomationAdapter: TaskAutomationRuntimeAdapter;
 
 	private readonly deps: RuntimeBuilderDeps;
@@ -874,7 +883,11 @@ export class RuntimeBuilder {
 			// SDK overrides may own remote or virtual backends. Only their explicit binder can admit them.
 			else if (!this.deps.getBaseToolsOverride()) {
 				const policy = getToolCapabilityPolicy(tool.name);
-				if (!policy || policy.enforcements.some((kind) => kind === "path-scope" || kind === "process-launcher")) {
+				if (
+					!policy ||
+					policy.enforcements.some((kind) => kind === "path-scope" || kind === "process-launcher") ||
+					["typesafe_review", "peer"].includes(tool.name)
+				) {
 					bound = this._taskDirectories.bindTool(tool);
 				}
 			}
@@ -1089,7 +1102,7 @@ export class RuntimeBuilder {
 		this.deps.getSystemOneController?.()?.setVerificationHost(
 			createSessionVerificationHost(
 				() => this.deps.getSessionManager(),
-				() => this.deps.getCwd(),
+				() => this._taskDirectories.cwd,
 			),
 		);
 		const settingsManager = this.deps.getSettingsManager();

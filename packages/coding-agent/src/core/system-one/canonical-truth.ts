@@ -26,6 +26,7 @@ export interface CanonicalTruthInput {
 	verificationObligations?: readonly VerificationObligationView[];
 	lastRoute?: { route: string; objective_id?: string };
 	currentRevision: string;
+	repository?: CanonicalHydration["repository"];
 }
 
 const EMPTY_HYDRATION: Omit<CanonicalHydration, "current_revision"> = {
@@ -90,7 +91,7 @@ export function projectCanonicalTruth(input: CanonicalTruthInput): CanonicalHydr
 	const runtimeObjective = objectiveId ? input.runtime?.objectives[objectiveId] : undefined;
 
 	if (!goal && !runtimeObjective) {
-		return emptyCanonicalHydration(revision);
+		return { ...emptyCanonicalHydration(revision), ...(input.repository ? { repository: input.repository } : {}) };
 	}
 
 	const request = goal?.userGoal ?? runtimeObjective?.objective.title ?? "";
@@ -224,6 +225,7 @@ export function projectCanonicalTruth(input: CanonicalTruthInput): CanonicalHydr
 		constraints,
 		non_goals: [],
 		current_revision: revision,
+		...(input.repository ? { repository: input.repository } : {}),
 		plan_steps,
 		observations,
 		verification,

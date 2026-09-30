@@ -534,7 +534,82 @@ describe("System One semantic verification obligations", () => {
 			disposition: "rejected",
 			evidence: [{ receiptId: large.id, role: "reproduction" as const }],
 		});
-		expect(prepared.ready).toBe(false);
+		expect(prepared).toMatchObject({
+			ready: false,
+			reason: "evidence_receipt_truncated",
+			remediation: {
+				requiredEvidence: {
+					reproduction: "exactly one",
+					repair: "none",
+					recheck: "none",
+				},
+				offendingReceipts: [
+					{
+						receiptId: large.id,
+						role: "reproduction",
+						tool: "bash",
+						truncated: true,
+						retainedOutputChars: 12_000,
+					},
+				],
+				nextAction: expect.stringContaining("focused check with bounded output"),
+			},
+		});
+	});
+
+	it("explains rejected evidence role counts and identifies only the conflicting receipt", () => {
+		const { tracker } = createTracker();
+		const obligation = openCandidate(tracker);
+		receipt(tracker, { callId: "reproduction" });
+		receipt(tracker, { callId: "extra-recheck", tool: "read", output: "bounded output" });
+		const receipts = tracker.readReceipts();
+		const extraRecheck = receipts.find((item) => item.callId === "extra-recheck")!;
+		const prepared = tracker.prepareResolution({
+			id: obligation.id,
+			receiverId: "root-lane",
+			candidateId: "candidate-v1",
+			disposition: "rejected",
+			evidence: [
+				{ receiptId: receipts.find((item) => item.callId === "reproduction")!.id, role: "reproduction" },
+				{ receiptId: extraRecheck.id, role: "recheck" },
+			],
+		});
+
+		expect(prepared).toMatchObject({
+			ready: false,
+			reason: "unexpected_repair_receipts",
+			remediation: {
+				requiredEvidence: {
+					reproduction: "exactly one",
+					repair: "none",
+					recheck: "none",
+				},
+				offendingReceipts: [{ receiptId: extraRecheck.id, role: "recheck", tool: "read", truncated: false }],
+				nextAction: expect.stringContaining("keep only the single reproduction receipt"),
+			},
+		});
+	});
+
+	it("explains when a rejected proof has no reproduction selection", () => {
+		const { tracker } = createTracker();
+		const obligation = openCandidate(tracker);
+		const prepared = tracker.prepareResolution({
+			id: obligation.id,
+			receiverId: "root-lane",
+			candidateId: "candidate-v1",
+			disposition: "rejected",
+			evidence: [],
+		});
+
+		expect(prepared).toMatchObject({
+			ready: false,
+			reason: "one_reproduction_receipt_required",
+			remediation: {
+				requiredEvidence: { reproduction: "exactly one", repair: "none", recheck: "none" },
+				offendingReceipts: [],
+				nextAction: expect.stringContaining("Select exactly one reproduction receipt"),
+			},
+		});
 	});
 
 	it("binds prepared judgments to receipt payloads and snapshot sequence", () => {

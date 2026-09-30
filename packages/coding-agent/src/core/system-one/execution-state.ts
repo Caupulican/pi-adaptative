@@ -73,6 +73,7 @@ export interface CanonicalHydration {
 	constraints: Constraint[];
 	non_goals: string[];
 	current_revision: string;
+	repository?: { root: string; baseline_revision?: string };
 	plan_steps: PlanStep[];
 	observations: Observation[];
 	verification: VerificationRun[];
@@ -235,6 +236,7 @@ export function validateWorkerTurnResult(raw: unknown): WorkerTurnResult {
 
 export class ExecutionStore {
 	private state: ExecutionState;
+	private readonly usesDefaultAllowedPaths: boolean;
 	private observationCounter = 0;
 	private claimCounter = 0;
 	private hypothesisCounter = 0;
@@ -251,6 +253,7 @@ export class ExecutionStore {
 	private failedStrategies: Map<string, { count: number; lastObservationCount: number }> = new Map();
 
 	constructor(options: ExecutionStoreOptions) {
+		this.usesDefaultAllowedPaths = options.repo.allowed_paths === undefined;
 		const now = new Date().toISOString();
 		const criteria: AcceptanceCriterion[] = options.objective.acceptance_criteria.map((c, idx) => ({
 			id: c.id || `AC-${idx + 1}`,
@@ -415,6 +418,11 @@ export class ExecutionStore {
 		};
 		this.state.observations = input.observations;
 		this.state.verification = input.verification;
+		if (input.repository) {
+			this.state.repo.root = input.repository.root;
+			this.state.repo.baseline_revision = input.repository.baseline_revision ?? input.current_revision;
+			if (this.usesDefaultAllowedPaths) this.state.repo.allowed_paths = [input.repository.root];
+		}
 		this.state.repo.current_revision = input.current_revision;
 		this.state.updated_at = new Date().toISOString();
 	}

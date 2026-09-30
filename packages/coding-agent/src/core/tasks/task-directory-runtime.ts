@@ -51,6 +51,8 @@ interface DirectoryScope {
 export class TaskDirectoryRuntime {
 	private readonly options: TaskDirectoryRuntimeOptions;
 	private readonly contextStorage = new AsyncLocalStorage<ExecutionContext>();
+	private readonly activeContextLeases = new WeakMap<ExecutionContext, number>();
+	private readonly contextScopes = new WeakMap<ExecutionContext, DirectoryScope>();
 	private readonly backend = createNativeTaskDirectoryBackend();
 	private readonly shells = new TaskShellSessions(disposeShellExecutionSessionAndWait);
 	private scope: DirectoryScope | undefined;
@@ -119,24 +121,64 @@ export class TaskDirectoryRuntime {
 		}, signal);
 	}
 
-	/** Hold the selected task attachment while a host workflow captures its durable execution plan. */
-	async withContext<T>(operation: (context: ExecutionContext) => T | Promise<T>, signal?: AbortSignal): Promise<T> {
-		const lease = await this.admit(signal);
+	/** Hold one admitted task attachment through nested host workflows; stale inherited contexts re-admit. */
+	async withContext<T>(
+		operation: (context: ExecutionContext) => T | Promise<T>,
+		signal?: AbortSignal,
+		onAdmissionError?: (error: unknown) => T | Promise<T>,
+	): Promise<T> {
+		const inherited = this.executionContext;
+		if (inherited && this.activeContextLeases.has(inherited))
+			return this.runWithContext(inherited, () => operation(inherited), signal);
+		let lease: Awaited<ReturnType<TaskDirectoryRuntime["admit"]>>;
+		try {
+			lease = await this.admit(signal);
+		} catch (error) {
+			signal?.throwIfAborted();
+			if (onAdmissionError) return onAdmissionError(error);
+			throw error;
+		}
 		try {
 			signal?.throwIfAborted();
-			return await this.contextStorage.run(lease.context, () => operation(lease.context));
+			return await this.runWithContext(lease.context, () => operation(lease.context), signal);
 		} finally {
 			lease.release();
 		}
 	}
 
+	private async runWithContext<T>(
+		context: ExecutionContext,
+		operation: () => T | Promise<T>,
+		signal?: AbortSignal,
+	): Promise<T> {
+		signal?.throwIfAborted();
+		const admittedScope = this.contextScopes.get(context);
+		await this.withController((_initialized, currentScope) => {
+			if (admittedScope !== currentScope || context.sessionId !== currentScope.sessionId)
+				throw new Error("Task directory context is stale; admit the current task before retrying");
+		}, signal);
+		signal?.throwIfAborted();
+		this.activeContextLeases.set(context, (this.activeContextLeases.get(context) ?? 0) + 1);
+		try {
+			return await this.contextStorage.run(context, operation);
+		} finally {
+			const remaining = (this.activeContextLeases.get(context) ?? 1) - 1;
+			if (remaining > 0) this.activeContextLeases.set(context, remaining);
+			else this.activeContextLeases.delete(context);
+		}
+	}
+
 	private admit(signal?: AbortSignal) {
 		const taskId = this.activeTaskId;
-		return this.withController(
-			({ controller }, scope) =>
-				controller.admit(taskId, signal ? AbortSignal.any([signal, scope.abort.signal]) : scope.abort.signal, true),
-			signal,
-		);
+		return this.withController(async ({ controller }, scope) => {
+			const lease = await controller.admit(
+				taskId,
+				signal ? AbortSignal.any([signal, scope.abort.signal]) : scope.abort.signal,
+				true,
+			);
+			this.contextScopes.set(lease.context, scope);
+			return lease;
+		}, signal);
 	}
 
 	bindTool<TParameters extends TSchema, TDetails>(
@@ -180,7 +222,7 @@ export class TaskDirectoryRuntime {
 							lease.release();
 						},
 						execute: (id, params, abort, update) =>
-							this.contextStorage.run(context, () => executor.execute(id, params, abort, update)),
+							this.runWithContext(context, () => executor.execute(id, params, abort, update), abort),
 					};
 				} catch (error) {
 					releaseShell?.();

@@ -85,7 +85,7 @@ import { createSystemOneConfig } from "./system-one/config.ts";
 import { SystemOneController } from "./system-one/controller.ts";
 import { ExecutionStore } from "./system-one/execution-state.ts";
 import { IntegrityHookCoordinator } from "./system-one/integrity-hooks.ts";
-import { readWorkDiff } from "./system-one/work-diff.ts";
+import { readWorkDiff, readWorkDiffBase } from "./system-one/work-diff.ts";
 import { time } from "./timings.ts";
 import {
 	createBashTool,
@@ -1111,30 +1111,44 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	if (systemOneController) {
-		systemOneController.setTruthSource(() => {
-			let currentRevision = systemOneController.store.getRepo().current_revision;
+		const readActiveRepository = (startedAt?: string) => {
+			const repositoryRoot = session.taskCwd;
+			let currentRevision = "unversioned";
 			try {
 				currentRevision =
 					execFileSync("git", ["rev-parse", "HEAD"], {
-						cwd,
+						cwd: repositoryRoot,
 						encoding: "utf-8",
 						stdio: ["ignore", "pipe", "ignore"],
 					}).trim() || currentRevision;
 			} catch {
-				// Non-git directory
+				// A non-git task workspace has no repository revision to project.
 			}
+			const baselineRevision = startedAt
+				? (readWorkDiffBase(repositoryRoot, startedAt) ?? currentRevision)
+				: currentRevision;
+			return {
+				repositoryRoot,
+				currentRevision,
+				baselineRevision,
+			};
+		};
+		systemOneController.setTruthSource(() => {
+			const goal = session.getGoalStateSnapshot();
+			const repository = readActiveRepository(goal?.createdAt);
 			return projectCanonicalTruth({
-				goal: session.getGoalStateSnapshot(),
+				goal,
 				runtime: session.backgroundLanes.getTaskRuntimeSnapshot(),
 				verificationObligations: session.getVerificationObligations(),
 				lastRoute: session.objectiveExecutionController?.getLastRoute(),
-				currentRevision,
+				currentRevision: repository.currentRevision,
+				repository: { root: repository.repositoryRoot, baseline_revision: repository.baselineRevision },
 			});
 		});
 		systemOneController.syncCanonicalTruth();
 		systemOneController.setWorkDiffSource(() => {
 			const goal = session.getGoalStateSnapshot();
-			return goal ? readWorkDiff(cwd, goal.createdAt) : undefined;
+			return goal ? readWorkDiff(session.taskCwd, goal.createdAt) : undefined;
 		});
 	}
 	if (executionLoopMode === "objective_primary" && !session.objectiveExecutionController) {

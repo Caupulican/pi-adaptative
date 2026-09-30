@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
@@ -43,7 +44,12 @@ export function createSessionVerificationHost(
 				)
 			) {
 				const parent = dirname(root);
-				if (parent === root) return { id: `outcome:${getManager().getSessionId()}`, scope: cwd, kind: "outcome" };
+				if (parent === root) {
+					const identity = createHash("sha256")
+						.update(JSON.stringify([getManager().getSessionId(), cwd]))
+						.digest("hex");
+					return { id: `outcome:${identity}`, scope: cwd, kind: "outcome" };
+				}
 				root = parent;
 			}
 			return { id: captureCandidateSnapshot(root).digest, scope: root, kind: "repository" };
@@ -77,17 +83,19 @@ export function wrapToolWithVerification<TParameters extends TSchema, TDetails>(
 			const verification = getVerification();
 			if (!verification) return executor.execute(callId, args, signal, onUpdate);
 			const input = structuredClone(args);
+			const invocationCwd = context?.cwd ?? getCwd();
+			const invocationReceiverId = receiverId ?? context?.sessionId;
 			await verification.checkOperation(
 				{
 					tool: tool.name,
 					args: input,
-					cwd: context?.cwd ?? getCwd(),
-					receiverId: receiverId ?? context?.sessionId,
+					cwd: invocationCwd,
+					receiverId: invocationReceiverId,
 				},
 				signal,
 			);
 			signal?.throwIfAborted();
-			const receiptCallId = verification.beginCall(receiverId ?? context?.sessionId, tool.name);
+			const receiptCallId = verification.beginCall(invocationReceiverId, tool.name, invocationCwd);
 			try {
 				const result = await executor.execute(callId, input, signal, onUpdate);
 				verification.finishCall({

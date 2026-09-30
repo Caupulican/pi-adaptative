@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
 import { decideFinalCompletion } from "../../src/core/system-one/policy.ts";
 import { StateProjector } from "../../src/core/system-one/projector.ts";
-import { readWorkDiff } from "../../src/core/system-one/work-diff.ts";
+import { readWorkDiff, readWorkDiffBase } from "../../src/core/system-one/work-diff.ts";
 
 const noul = (value: number) => ({ type: "noul", noul: value });
 const passedGates = [{ id: "G-OBJ", kind: "deterministic" as const, required: true, status: "passed" as const }];
@@ -146,6 +146,7 @@ describe("completion judges the work itself", () => {
 		git("commit", "-qm", "before");
 		const base = git("rev-parse", "HEAD").trim();
 		expect(readWorkDiff(repo, "2025-12-31T00:00:00Z")).toBeUndefined();
+		expect(readWorkDiffBase(repo, "2025-12-31T00:00:00Z")).toBeUndefined();
 
 		writeFileSync(join(repo, "a.txt"), "one\ntwo\n");
 		execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qam", "during"], {
@@ -156,6 +157,8 @@ describe("completion judges the work itself", () => {
 		writeFileSync(join(repo, "new.txt"), "fresh\n");
 
 		const work = readWorkDiff(repo, "2026-01-15T00:00:00Z");
+		expect(readWorkDiffBase(repo, "2026-01-15T00:00:00Z")).toBe(base);
+		expect(readWorkDiffBase(tempDir("pi-work-base-no-git-"), "2026-01-15T00:00:00Z")).toBeUndefined();
 		expect(work?.base).toBe(base);
 		expect(work?.patch).toContain("+two");
 		expect(work?.patch).toContain("+three");

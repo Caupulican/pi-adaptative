@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { projectCanonicalTruth } from "../../src/core/system-one/canonical-truth.ts";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
 
 describe("System One ExecutionState", () => {
@@ -20,6 +21,49 @@ describe("System One ExecutionState", () => {
 			},
 		});
 	}
+
+	it("hydrates repository identity together with canonical revision and moves only default path scope", () => {
+		const store = createStore();
+		const hydration = projectCanonicalTruth({
+			currentRevision: "task-head",
+			repository: { root: "/task", baseline_revision: "task-base" },
+		});
+		expect(hydration.repository).toEqual({ root: "/task", baseline_revision: "task-base" });
+		store.hydrateFromCanonical(hydration);
+		expect(store.getRepo()).toMatchObject({
+			root: "/task",
+			baseline_revision: "task-base",
+			current_revision: "task-head",
+			allowed_paths: ["/task"],
+		});
+		store.hydrateFromCanonical(projectCanonicalTruth({ currentRevision: "task-head-next" }));
+		expect(store.getRepo()).toMatchObject({ root: "/task", baseline_revision: "task-base" });
+	});
+
+	it("preserves explicit repository policy when canonical task scope changes", () => {
+		const store = new ExecutionStore({
+			run_id: "explicit-policy",
+			objective: { request: "", normalized_goal: "", acceptance_criteria: [] },
+			repo: {
+				root: "/workspace",
+				baseline_revision: "startup-head",
+				allowed_paths: ["/workspace", "/task"],
+				protected_paths: ["/task/auth"],
+				languages: ["typescript"],
+			},
+		});
+		store.hydrateFromCanonical(
+			projectCanonicalTruth({ currentRevision: "unversioned", repository: { root: "/task" } }),
+		);
+		expect(store.getRepo()).toMatchObject({
+			root: "/task",
+			baseline_revision: "unversioned",
+			current_revision: "unversioned",
+			allowed_paths: ["/workspace", "/task"],
+			protected_paths: ["/task/auth"],
+			languages: ["typescript"],
+		});
+	});
 
 	it("records observations with immutable locator and sha256 content hash (R-009, R-010)", () => {
 		const store = createStore();
