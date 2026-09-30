@@ -19,7 +19,7 @@
  * regression this feature exists to prevent, in reverse.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -181,12 +181,23 @@ function listArtifactsDefault(repo) {
 	};
 }
 
+export function downloadArtifactArchive(repo, artifactId, zipPath, runGh = execFileSync) {
+	const zipFd = openSync(zipPath, "w");
+	try {
+		runGh("gh", ["api", `repos/${repo}/actions/artifacts/${artifactId}/zip`], {
+			stdio: ["ignore", zipFd, "pipe"],
+		});
+	} finally {
+		closeSync(zipFd);
+	}
+}
+
 function downloadReportDefault(repo) {
 	return (artifactId) => {
 		const dir = mkdtempSync(join(tmpdir(), "ci-carry-forward-"));
 		try {
 			const zipPath = join(dir, "artifact.zip");
-			execFileSync("gh", ["api", `repos/${repo}/actions/artifacts/${artifactId}/zip`, "--output", zipPath]);
+			downloadArtifactArchive(repo, artifactId, zipPath);
 			execFileSync("unzip", ["-o", "-q", zipPath, "-d", dir]);
 			return readdirSync(dir)
 				.filter((name) => name.endsWith(".json"))

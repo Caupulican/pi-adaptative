@@ -8,6 +8,7 @@
 - Omitted absent optional receiver identities from evaluator requests, allowing verification and recovery tools to continue without malformed-request failures.
 - Added bounded proof-recovery instructions identifying required evidence and invalid or truncated receipts while retaining same-lane reproduction, repair, and recheck requirements.
 - Accepted observational Git ancestry checks, including `merge-base --is-ancestor`, without admitting mutating Git commands.
+- Restored CI failure carry-forward artifact downloads through the supported GitHub CLI output path, retaining the full-suite fallback when evidence is unavailable.
 
 ## [0.101.1] - 2026-09-30
 

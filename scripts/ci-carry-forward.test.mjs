@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { fstatSync, mkdtempSync, readFileSync, rmSync, writeSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
 	classifyFailedRunJobs,
 	codingAgentReportArtifactName,
+	downloadArtifactArchive,
 	fetchCarryForward,
 	matchCodingAgentJob,
 	parseFailedTestFiles,
@@ -283,4 +286,45 @@ test("fetchCarryForward propagates a run-list lookup error to the caller (CLI fa
 		),
 		/network error/,
 	);
+});
+
+test("artifact download streams raw gh api bytes to the archive file without unsupported flags", (t) => {
+	const directory = mkdtempSync(join(tmpdir(), "ci-carry-forward-download-"));
+	t.after(() => rmSync(directory, { recursive: true, force: true }));
+	const zipPath = join(directory, "artifact.zip");
+	const expectedArchive = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0xff, 0x81, 0x10]);
+	let invocationCount = 0;
+	const fakeGh = (command, args, options) => {
+		assert.equal(command, "gh");
+		if (args.includes("--output")) throw new Error("unknown flag: --output");
+		assert.deepEqual(args, ["api", "repos/o/r/actions/artifacts/101/zip"]);
+		assert.equal(options.stdio[0], "ignore");
+		assert.equal(typeof options.stdio[1], "number");
+		assert.equal(options.stdio[2], "pipe");
+		writeSync(options.stdio[1], expectedArchive);
+		invocationCount += 1;
+	};
+
+	assert.doesNotThrow(() => downloadArtifactArchive("o/r", 101, zipPath, fakeGh));
+	assert.equal(invocationCount, 1);
+	assert.deepEqual(readFileSync(zipPath), expectedArchive);
+});
+
+test("artifact download closes its output descriptor and preserves gh failures", (t) => {
+	const directory = mkdtempSync(join(tmpdir(), "ci-carry-forward-download-error-"));
+	t.after(() => rmSync(directory, { recursive: true, force: true }));
+	const zipPath = join(directory, "artifact.zip");
+	const expectedError = new Error("gh api failed: HTTP 403");
+	let outputFd;
+	assert.throws(
+		() =>
+			downloadArtifactArchive("o/r", 101, zipPath, (_command, _args, options) => {
+				outputFd = options.stdio[1];
+				writeSync(outputFd, Buffer.from([0x50, 0x4b]));
+				throw expectedError;
+			}),
+		(error) => error === expectedError,
+	);
+	assert.equal(typeof outputFd, "number");
+	assert.throws(() => fstatSync(outputFd), { code: "EBADF" });
 });
