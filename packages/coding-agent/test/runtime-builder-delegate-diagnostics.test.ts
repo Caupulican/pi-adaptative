@@ -9,12 +9,15 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { capabilityTierPolicy } from "../src/core/capability-tier.ts";
 import { ExtensionRunner } from "../src/core/extensions/index.ts";
 import { createExtensionRuntime } from "../src/core/extensions/loader.ts";
+import type { GoalState } from "../src/core/goals/goal-state.ts";
 import type { MemoryManager } from "../src/core/memory/memory-manager.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { RuntimeBuilder, type RuntimeBuilderDeps } from "../src/core/runtime-builder.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { SkillVaultController } from "../src/core/skill-vault.ts";
 import type { Skill } from "../src/core/skills.ts";
+import { SystemOneController } from "../src/core/system-one/controller.ts";
+import { ExecutionStore } from "../src/core/system-one/execution-state.ts";
 import type { LoadExtensionsResult, ResourceLoader } from "../src/index.ts";
 
 /**
@@ -254,6 +257,45 @@ describe("RuntimeBuilder — root-session delegate prompt-guideline bounding dia
 		capturedWarn.fn?.('Provider tool guideline dropped: guidelines budget exhausted: "..."');
 
 		expect(getWarnings()).toEqual(['Provider tool guideline dropped: guidelines budget exhausted: "..."']);
+	});
+
+	it("keeps goal completion blocked by active System One verification obligations", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-active-verification-"));
+		const { deps } = makeDeps(tempDir, buildResourceLoader(), ["goal"]);
+		let goalState: GoalState | undefined;
+		deps.getGoalStateSnapshot = () => goalState;
+		deps.saveGoalStateSnapshot = (state) => {
+			goalState = state;
+			return "goal-revision";
+		};
+		deps.getTaskStepsStateSnapshot = () => undefined;
+		deps.saveTaskStepsStateSnapshot = () => "task-steps-revision";
+		deps.getWorkerLaneRecords = () => [];
+		deps.getWorkerClaimSnapshots = () => [];
+		deps.getActiveVerificationIds = () => [];
+		const systemOne = new SystemOneController({
+			store: new ExecutionStore({
+				run_id: "runtime-builder-verification",
+				objective: { request: "Ship", normalized_goal: "Ship", acceptance_criteria: [] },
+				repo: { root: tempDir, baseline_revision: "base" },
+			}),
+			adapter: { evaluate: async () => ({ model: "fixture", answers: {}, latency_ms: 1 }) },
+		});
+		deps.getSystemOneController = () => systemOne;
+		const runtimeBuilder = new RuntimeBuilder(deps);
+		runtimeBuilder.buildRuntime({ activeToolNames: ["goal"] });
+		systemOne.verification.require("peer_review", ["Review the shipped result."]);
+		const goalTool = runtimeBuilder.getRegisteredTool("goal");
+		const signal = new AbortController().signal;
+
+		await goalTool?.execute("start", { action: "start", goalId: "g1", userGoal: "Ship" }, signal);
+		const result = await goalTool?.execute("complete", { action: "complete" }, signal);
+
+		expect(result).toMatchObject({
+			isError: true,
+			details: { applied: false, error: expect.stringContaining("active verification obligation") },
+		});
+		expect(goalState?.status).toBe("active");
 	});
 
 	it("clears stale warnings on a rebuild that no longer overflows", () => {
