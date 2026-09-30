@@ -679,7 +679,10 @@ because only the root reaches the owner.
 `repo_read` runs git with an argv allow-list: no shell, no hooks, pager or diff
 drivers, only output-shaping options, pathspecs and object paths inside its directory, credential
 files model-blind like `read`. A plain `log` request returns at most the requested number of concise
-one-line commits; explicit log options retain their own formatting. Prose cannot narrow a grant.
+one-line commits; explicit log options retain their own formatting. `diff --check` is an admitted
+observational check scoped to `diff`: clean changes pass, whitespace failures retain Git's nonzero
+exit and error status, and neither changes source bytes. Bounded failure diagnostics retain both
+stdout and stderr so a warning cannot hide the actual failed check. Prose cannot narrow a grant.
 Persistent reuse retains its existing grant.
 Named starts route their complete options, including `readOnly`, through host admission: equivalent
 compiled options may select that specialist, while changed authority is refused before dispatch.
@@ -823,6 +826,13 @@ semantic uncertainty never creates authority or completes unresolved verificatio
 An advisory uncertainty is resolved by the responsible model's evidence-backed decision, recorded
 separately from a judgment. Diagnostic status, retained evidence and advisory management remain
 available during an evaluator outage without clearing mandatory findings or creating proof receipts.
+Mandatory recovery also admits declared read-only tools, parsed observational shell calls, workspace
+inspection/registration, skill inspection, and goal evidence/read/reopen actions. Unknown or effectful
+operations retain semantic recovery judgment; a routing heuristic alone cannot prove their effects.
+Operation refusals distinguish stale ownership/candidates from low or invalid probabilities. Resolution
+reports its confidence and next action; missing or invalid probabilities remain evaluator diagnostics
+and do not consume the same proof's retry. These paths preserve active findings and completion gates.
+Pinned by `packages/coding-agent/test/system-one/verification-coordinator.test.ts`.
 Worker supervision checks the original objective, task and live attempt before delivering control,
 so late judgments cannot affect a persistent worker's next assignment.
 Whenever System One is bound the
@@ -1083,6 +1093,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-30 | Recovery admits observational effects and canonical evidence inspection without clearing mandatory findings; unknown effects retain semantic judgment and invalid probabilities preserve retry. The `repo_read` contract now executes `diff --check` with passing/failing unchanged-file controls and retains both diagnostic streams so a stderr warning cannot conceal stdout failure evidence. |
 | 2026-09-30 | Provider-neutral `systemone` replaces the native tool and skill names; root assignment/integration and worker local autonomy remain explicit. Ordinary peer review admits supported effort without strength judgment; explicit stronger review retains its checks. Standing operation authority avoids redundant evaluator calls, scoped grants remain exact, advisory management remains available during outages, and supervision rejects obsolete or aborted attempt judgments. Existing prompt and schema ceilings remain unchanged. |
 | 2026-09-30 | The root may list and disposition advisory uncertainties in its own journal through `typesafe_review`; this does not prove verification, settle mandatory obligations, or grant permission. The measured canonical schema addition is 104 tokens, raising only the canonical allowance to 574 and the aggregate ceiling to 7,039; the 4,500-token base remains unchanged. |
 | 2026-09-29 | Durable peer obligation inspection and proof resolution increase the peer allowance from 210 to 350 tokens (333 measured), making the aggregate ceiling 6,935. Actual peer cost remains excluded from the unchanged 4,500-token base, so verification actions cannot hide unrelated schema growth. |

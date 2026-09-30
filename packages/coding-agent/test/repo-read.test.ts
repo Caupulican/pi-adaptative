@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -127,6 +127,47 @@ describe("repo_read", () => {
 		expect(text(result)).toMatch(/unknown revision|bad revision|ambiguous argument/i);
 	});
 
+	it("checks whitespace without changing files and preserves a failing check as a negative result", async () => {
+		const configPath = join(outside, "diff-check.gitconfig");
+		writeFileSync(configPath, "[core]\n\tautocrlf = true\n\tsafecrlf = warn\n");
+		const tool = createRepoReadToolDefinition(repo, {
+			environment: () => ({ ...process.env, GIT_CONFIG_GLOBAL: configPath, GIT_CONFIG_NOSYSTEM: "1" }),
+		});
+		const source = join(repo, "src", "a.ts");
+		const original = readFileSync(source);
+		try {
+			const cleanChange = "export const a = 3;\n";
+			writeFileSync(source, cleanChange);
+			const clean = await tool.execute(
+				"clean-check",
+				{ action: "diff", options: ["--check"], paths: ["src/a.ts"] },
+				undefined,
+				undefined,
+				NO_CONTEXT,
+			);
+			expect(clean.isError).not.toBe(true);
+			expect(clean.details?.exitCode).toBe(0);
+			expect(readFileSync(source, "utf8")).toBe(cleanChange);
+
+			const whitespaceChange = "export const a = 3; \n";
+			writeFileSync(source, whitespaceChange);
+			const failing = await tool.execute(
+				"whitespace-check",
+				{ action: "diff", options: ["--check"], paths: ["src/a.ts"] },
+				undefined,
+				undefined,
+				NO_CONTEXT,
+			);
+			expect(failing.isError).toBe(true);
+			expect(failing.details?.exitCode).toBe(2);
+			expect(text(failing)).toContain("trailing whitespace");
+			expect(text(failing)).toContain("LF will be replaced by CRLF");
+			expect(readFileSync(source, "utf8")).toBe(whitespaceChange);
+		} finally {
+			writeFileSync(source, original);
+		}
+	});
+
 	it("refuses options that write, run programs, read outside the repository or are global", () => {
 		for (const [action, options, reason] of [
 			["diff", ["--output=/tmp/x"], "allow-list"],
@@ -151,6 +192,8 @@ describe("repo_read", () => {
 			"--since=2.weeks",
 			"-L10,20",
 		]);
+		expect(compileRepoReadOptions("diff", ["--check"])).toEqual(["--check"]);
+		expect(() => compileRepoReadOptions("log", ["--check"])).toThrow("not accepted for git log");
 		expect(compileRepoReadOptions("log", ["--simplify-by-decoration"])).toEqual(["--simplify-by-decoration"]);
 	});
 

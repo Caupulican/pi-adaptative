@@ -127,6 +127,7 @@ const OPTION_RULES: Readonly<Record<string, OptionRule>> = {
 	"--name-only": { value: "none", actions: DIFF_ACTIONS },
 	"--name-status": { value: "none", actions: DIFF_ACTIONS },
 	"--summary": { value: "none", actions: DIFF_ACTIONS },
+	"--check": { value: "none", actions: ["diff"] },
 	"-p": { value: "none", actions: DIFF_ACTIONS },
 	"--patch": { value: "none", actions: DIFF_ACTIONS },
 	"--no-patch": { value: "none", actions: HISTORY_ACTIONS },
@@ -554,9 +555,11 @@ export function createRepoReadToolDefinition(
 				throw new Error(`git ${action} timed out after ${Math.round((options?.timeoutMs ?? TIMEOUT_MS) / 1000)}s`);
 			}
 			if (run.code !== 0 && !run.capped) {
-				const stderr = run.stderr.trim() || run.stdout.trim() || `git ${action} exited with ${run.code}`;
+				const diagnostic =
+					[run.stdout.trim(), run.stderr.trim()].filter(Boolean).join("\n") ||
+					`git ${action} exited with ${run.code}`;
 				return {
-					content: [{ type: "text" as const, text: stderr.slice(0, 4_096) }],
+					content: [{ type: "text" as const, text: diagnostic.slice(0, 4_096) }],
 					details,
 					isError: true,
 				};

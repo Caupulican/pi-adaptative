@@ -5,7 +5,7 @@ import type { ModelTier } from "../autonomy/contracts.ts";
 import { isLocalExecutionModel } from "../background-lane-controller.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "../models/local-registration.ts";
 import { isPiManagedPrismLlamaCppModel } from "../models/prism-llamacpp-lifecycle.ts";
-import { parseShellCommandSequence } from "../tools/shell-command-parser.ts";
+import { parseShellCommandSequence, parseShellInvocationPrefixes } from "../tools/shell-command-parser.ts";
 
 /**
  * True for a model the capability-gate spine treats as LOCAL/MANAGED — never cloud.
@@ -46,6 +46,20 @@ const READ_ONLY_TOOL_NAMES = new Set([
 ]);
 
 const SHELL_TOOL_NAMES = new Set(["bash", "powershell", "exec", "execute", "run", "run_command", "shell"]);
+const EFFECTFUL_INTERPRETERS = new Set([
+	"awk",
+	"curl",
+	"env",
+	"npm",
+	"pnpm",
+	"powershell",
+	"pwsh",
+	"sed",
+	"ssh",
+	"tsc",
+	"yarn",
+]);
+const SHELL_WRAPPERS = new Set(["bash", "dash", "sh", "zsh"]);
 
 const READ_ONLY_COMMANDS = new Set([
 	"awk",
@@ -439,20 +453,84 @@ function isReadOnlyCommandSegment(segment: string): boolean {
 	return true;
 }
 
-function isReadOnlyShellCommand(command: string, depth = 0, admitTestRuns = false): boolean {
+function readOnlyShellInvocations(command: string, depth = 0, admitTestRuns = false): string[][] | undefined {
 	const commandWithoutStreamRedirections = stripSafeStreamRedirections(command);
 	if (
 		!commandWithoutStreamRedirections ||
 		(!admitTestRuns && MUTATING_SHELL_TOKEN_RE.test(commandWithoutStreamRedirections)) ||
 		UNSAFE_NESTED_SHELL_EXECUTION_RE.test(commandWithoutStreamRedirections)
 	)
-		return false;
+		return undefined;
 	const sequence = parseShellCommandSequence(commandWithoutStreamRedirections);
-	return Boolean(
-		sequence &&
-			sequence.invocations.length > 0 &&
-			sequence.invocations.every((args) => isReadOnlyInvocation(args, depth, admitTestRuns)),
-	);
+	if (
+		!sequence ||
+		sequence.invocations.length === 0 ||
+		!sequence.invocations.every((args) => isReadOnlyInvocation(args, depth, admitTestRuns))
+	)
+		return undefined;
+	return sequence.invocations;
+}
+
+function isReadOnlyShellCommand(command: string, depth = 0, admitTestRuns = false): boolean {
+	return readOnlyShellInvocations(command, depth, admitTestRuns) !== undefined;
+}
+
+function hasProvablyObservationalShellEffects(command: string): boolean {
+	const invocations = readOnlyShellInvocations(command);
+	if (!invocations) return false;
+	return invocations.every((args) => {
+		const prefix = parseShellInvocationPrefixes(args);
+		if (prefix.envExecutable) return false;
+		if (prefix.nonExecutingQuery) return true;
+		const commandArgs = prefix.args;
+		const name = executableName(commandArgs[0] ?? "");
+		// These programs can execute code, invoke other programs, contact remote systems, or write
+		// tool-managed state. Their effects remain available to semantic recovery judgment.
+		if (EFFECTFUL_INTERPRETERS.has(name) || SHELL_WRAPPERS.has(name)) return false;
+		// These read-only command families have flags or operands that can create output or launch code.
+		if (["diff", "git", "sort", "tree"].includes(name)) {
+			if (
+				commandArgs.some(
+					(arg) =>
+						arg === "-o" ||
+						(arg.startsWith("-o") && !arg.startsWith("--")) ||
+						arg.startsWith("--output") ||
+						arg === "--ext-diff" ||
+						arg === "--textconv" ||
+						arg.startsWith("--open-files-in-pager") ||
+						arg.startsWith("--compress-program"),
+				)
+			)
+				return false;
+		}
+		if (
+			name === "date" &&
+			commandArgs.some((arg) => arg === "-s" || arg.startsWith("-s") || arg === "--set" || arg.startsWith("--set="))
+		)
+			return false;
+		if (name === "file" && commandArgs.some((arg) => arg === "-C" || arg === "--compile")) return false;
+		if (name === "rg" && commandArgs.some((arg) => arg === "--pre" || arg.startsWith("--pre="))) return false;
+		if (name === "fd" && commandArgs.some((arg) => arg === "-x" || arg === "-X" || arg.startsWith("--exec")))
+			return false;
+		if (name === "hostname" && commandArgs.length > 1) return false;
+		// GNU uniq's optional second positional operand names an output file.
+		if (name === "uniq" && commandArgs.slice(1).filter((arg) => !arg.startsWith("-")).length > 1) return false;
+		return true;
+	});
+}
+
+/**
+ * True only when the tool contract or parsed invocation proves that the call observes state without
+ * changing it. Unknown and executable commands remain available to the caller's semantic gate.
+ */
+export function isProvablyObservationalToolCall(toolName: string, args?: unknown, declaredReadOnly?: boolean): boolean {
+	if (declaredReadOnly === true) return true;
+	const name = toolName.trim().toLowerCase();
+	if (!name) return false;
+	if (READ_ONLY_TOOL_NAMES.has(name)) return true;
+	if (!SHELL_TOOL_NAMES.has(name)) return false;
+	const command = getShellCommand(args);
+	return command !== undefined && hasProvablyObservationalShellEffects(command);
 }
 
 /** An output redirection and its target: `>`, `>>`, `2>`, `&>`, `&>>`; `2>&1`-style fd duplication is not a file. */

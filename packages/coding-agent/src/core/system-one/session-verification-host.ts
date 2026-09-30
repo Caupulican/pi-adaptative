@@ -90,6 +90,7 @@ export function wrapToolWithVerification<TParameters extends TSchema, TDetails>(
 					tool: tool.name,
 					args: input,
 					cwd: invocationCwd,
+					readOnly: tool.readOnly === true,
 					receiverId: invocationReceiverId,
 				},
 				signal,

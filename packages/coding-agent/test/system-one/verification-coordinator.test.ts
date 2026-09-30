@@ -148,6 +148,198 @@ describe("mandatory verification coordination", () => {
 		expect(coordinator.status().obligations).toEqual([]);
 	});
 
+	it("admits read-only recovery effects and workspace registration without admitting arbitrary shell or lifecycle effects", async () => {
+		const judge = vi.fn<VerificationJudge>().mockResolvedValue({
+			id: "jev-uncertain",
+			answers: { verification_operation_safe: { noul: 0.2 } },
+		});
+		const { coordinator } = fixture(judge);
+		await expect(
+			coordinator.checkOperation({
+				tool: "bash",
+				args: { command: "jq '.messages | length' transcript.json" },
+				cwd: "/repo",
+			}),
+		).resolves.toBeUndefined();
+		await expect(
+			coordinator.checkOperation({
+				tool: "task_directory",
+				args: { action: "register", workspaceId: "grimdex", path: "/work/GrimDex" },
+				cwd: "/repo",
+			}),
+		).resolves.toBeUndefined();
+		await expect(
+			coordinator.checkOperation({ tool: "peer", args: { action: "obligations" }, cwd: "/repo" }),
+		).resolves.toBeUndefined();
+		await expect(
+			coordinator.checkOperation({ tool: "skill", args: { action: "search", query: "GrimDex" }, cwd: "/repo" }),
+		).resolves.toBeUndefined();
+		expect(judge).not.toHaveBeenCalled();
+
+		await expect(
+			coordinator.checkOperation({ tool: "bash", args: { command: "touch output.txt" }, cwd: "/repo" }),
+		).rejects.toThrow("judgment_confidence_below_threshold");
+		await expect(
+			coordinator.checkOperation({ tool: "task_directory", args: { action: "forget", taskId: "1" }, cwd: "/repo" }),
+		).rejects.toThrow("judgment_confidence_below_threshold");
+		await expect(
+			coordinator.checkOperation({ tool: "peer", args: { action: "review" }, cwd: "/repo" }),
+		).rejects.toThrow("judgment_confidence_below_threshold");
+		expect(judge).toHaveBeenCalledTimes(3);
+	});
+
+	it.each([
+		"git diff --output=artifact.patch",
+		"git diff --output artifact.patch",
+		"git diff -o artifact.patch",
+		"awk 'BEGIN {system(\"echo changed>artifact.txt\")}'",
+		"sed '1e echo changed>artifact.txt' input.txt",
+		"LC_ALL=C awk 'BEGIN {system(\"echo changed>artifact.txt\")} '",
+		"sort -oartifact.txt input.txt",
+		"uniq input.txt artifact.txt",
+		"rg --pre ./rewrite-cache pattern .",
+		"tsc --noEmit --incremental",
+		"file -C",
+		"git grep --open-files-in-pager=./rewrite-cache pattern",
+		"fd --exec ./rewrite-cache .",
+		"tree -oartifact.txt .",
+		"sort --compress-program=./rewrite-cache input.txt",
+		"date -s20000101",
+		"hostname new-name",
+	])(
+		"requires semantic recovery judgment for shell effects the parser cannot prove observational: %s",
+		async (command) => {
+			const judge = vi.fn<VerificationJudge>().mockResolvedValue({
+				id: "jev-uncertain",
+				answers: { verification_operation_safe: { noul: 0.2 } },
+			});
+			const { coordinator } = fixture(judge);
+			await expect(coordinator.checkOperation({ tool: "bash", args: { command }, cwd: "/repo" })).rejects.toThrow(
+				"judgment_confidence_below_threshold",
+			);
+			expect(judge).toHaveBeenCalledOnce();
+			expect(coordinator.status().obligations).toHaveLength(1);
+		},
+	);
+
+	it("keeps simple observational shell commands available and holds mutation", async () => {
+		const judge = vi.fn<VerificationJudge>().mockResolvedValue({
+			id: "jev-uncertain",
+			answers: { verification_operation_safe: { noul: 0.2 } },
+		});
+		const { coordinator } = fixture(judge);
+		for (const command of [
+			"git diff --stat",
+			"sort input.txt",
+			"uniq input.txt",
+			"rg pattern .",
+			"file input.txt",
+			"git grep pattern",
+			"fd pattern .",
+			"tree .",
+			"date",
+			"hostname",
+		]) {
+			await expect(
+				coordinator.checkOperation({ tool: "bash", args: { command }, cwd: "/repo" }),
+			).resolves.toBeUndefined();
+		}
+		await expect(
+			coordinator.checkOperation({ tool: "bash", args: { command: "touch artifact.txt" }, cwd: "/repo" }),
+		).rejects.toThrow("judgment_confidence_below_threshold");
+		expect(judge).toHaveBeenCalledOnce();
+		expect(coordinator.status().obligations).toHaveLength(1);
+	});
+
+	it.each(["get", "add_evidence", "satisfy_requirement", "reopen_requirement"])(
+		"keeps canonical goal evidence and requirement recovery available during a judge outage: %s",
+		async (action) => {
+			const judge = vi.fn<VerificationJudge>().mockRejectedValue(new Error("temporary transport outage"));
+			const { coordinator } = fixture(judge);
+			await expect(
+				coordinator.checkOperation({ tool: "goal", args: { action }, cwd: "/repo" }),
+			).resolves.toBeUndefined();
+			expect(judge).not.toHaveBeenCalled();
+			expect(coordinator.status().obligations).toHaveLength(1);
+		},
+	);
+
+	it("keeps the native goal getter available without an optional read-only declaration", async () => {
+		const judge = vi.fn<VerificationJudge>().mockRejectedValue(new Error("temporary transport outage"));
+		const { coordinator } = fixture(judge);
+		await expect(coordinator.checkOperation({ tool: "get_goal", args: {}, cwd: "/repo" })).resolves.toBeUndefined();
+		expect(judge).not.toHaveBeenCalled();
+		expect(coordinator.status().obligations).toHaveLength(1);
+		await expect(
+			coordinator.checkOperation({ tool: "create_goal", args: { objective: "Other work" }, cwd: "/repo" }),
+		).rejects.toThrow("temporary transport outage");
+		expect(judge).toHaveBeenCalledOnce();
+	});
+
+	it("keeps unrelated goal progress behind the semantic recovery judgment", async () => {
+		const judge = vi.fn<VerificationJudge>().mockResolvedValue({
+			id: "jev-uncertain",
+			answers: { verification_operation_safe: { noul: 0.2 } },
+		});
+		const { coordinator } = fixture(judge);
+		await expect(
+			coordinator.checkOperation({ tool: "goal", args: { action: "add_requirement" }, cwd: "/repo" }),
+		).rejects.toThrow("judgment_confidence_below_threshold");
+		expect(judge).toHaveBeenCalledOnce();
+		expect(coordinator.status().obligations).toHaveLength(1);
+	});
+
+	it("honors wrapped tool effect metadata and records only an admitted read-only receipt", async () => {
+		const judge = vi.fn<VerificationJudge>().mockRejectedValue(new Error("temporary transport outage"));
+		const { coordinator } = fixture(judge);
+		const parameters = Type.Object({ value: Type.String() });
+		const readOnlyExecute = vi.fn<AgentTool<typeof parameters>["execute"]>(async () => ({
+			content: [{ type: "text", text: "observed" }],
+			details: {},
+		}));
+		const readOnlyTool = wrapToolWithVerification(
+			{
+				name: "custom_observer",
+				label: "Custom observer",
+				description: "Observe state",
+				parameters,
+				readOnly: true,
+				execute: readOnlyExecute,
+			},
+			() => coordinator,
+			() => "/repo",
+		);
+		await expect(readOnlyTool.execute("read-call", { value: "x" }, undefined)).resolves.toMatchObject({
+			content: [{ type: "text", text: "observed" }],
+		});
+		expect(judge).not.toHaveBeenCalled();
+		expect(readOnlyExecute).toHaveBeenCalledOnce();
+		expect(coordinator.status().receipts).toMatchObject([{ tool: "custom_observer", succeeded: true }]);
+
+		const mutatingExecute = vi.fn<AgentTool<typeof parameters>["execute"]>(async () => ({
+			content: [{ type: "text", text: "mutated" }],
+			details: {},
+		}));
+		const mutatingTool = wrapToolWithVerification(
+			{
+				name: "custom_mutator",
+				label: "Custom mutator",
+				description: "Change state",
+				parameters,
+				readOnly: false,
+				execute: mutatingExecute,
+			},
+			() => coordinator,
+			() => "/repo",
+		);
+		await expect(mutatingTool.execute("write-call", { value: "x" }, undefined)).rejects.toThrow(
+			"temporary transport outage",
+		);
+		expect(mutatingExecute).not.toHaveBeenCalled();
+		expect(judge).toHaveBeenCalledOnce();
+		expect(coordinator.status().receipts).toHaveLength(1);
+	});
+
 	it("forwards bounded proof remediation without sending receipt contents", async () => {
 		const judge = vi.fn<VerificationJudge>().mockResolvedValue(accepted);
 		const { coordinator, proof } = fixture(judge);
@@ -198,17 +390,68 @@ describe("mandatory verification coordination", () => {
 		expect(coordinator.status().obligations).toHaveLength(1);
 	});
 
-	it.each([0.1, 0.94, Number.NaN])(
-		"holds affected progress on an invalid or nonpassing probability %s",
+	it.each([
+		{ noul: 0.1, reason: "judgment_confidence_below_threshold (0.10 < 0.95)" },
+		{ noul: 0.94, reason: "judgment_confidence_below_threshold (0.94 < 0.95)" },
+		{ noul: Number.NaN, reason: "judgment_probability_missing_or_invalid" },
+	])("holds affected progress and explains the operation judgment cause: $reason", async ({ noul, reason }) => {
+		const { coordinator } = fixture(async () => ({
+			id: "jev-doubt",
+			answers: { verification_operation_safe: { noul } },
+		}));
+		await expect(
+			coordinator.checkOperation({ tool: "bash", args: { command: "publish artifact" }, cwd: "/repo" }),
+		).rejects.toThrow(reason);
+		expect(coordinator.status().obligations).toHaveLength(1);
+	});
+
+	it("identifies candidate drift separately from a low or missing judgment", async () => {
+		const { coordinator, setCandidate } = fixture(async () => {
+			setCandidate("candidate-v2");
+			return accepted;
+		});
+		await expect(
+			coordinator.checkOperation({ tool: "bash", args: { command: "publish artifact" }, cwd: "/repo" }),
+		).rejects.toThrow("verification_candidate_changed_during_classification");
+	});
+
+	it("returns the confidence and next proof needed when resolution judgment is inconclusive", async () => {
+		const judge = vi.fn<VerificationJudge>().mockResolvedValue({
+			id: "jev-inconclusive",
+			answers: { verification_resolution_valid: { noul: 0.83 } },
+		});
+		const { coordinator, proof } = fixture(judge);
+		const result = await coordinator.resolve(proof());
+		expect(result).toMatchObject({
+			status: "unresolved",
+			reason: "judgment_confidence_below_threshold",
+			confidence: 0.83,
+			nextAction: expect.stringContaining("distinct, direct evidence"),
+		});
+	});
+
+	it.each([undefined, Number.NaN])(
+		"preserves a missing or invalid resolution judgment cause and retries the same proof: %s",
 		async (noul) => {
-			const { coordinator } = fixture(async () => ({
-				id: "jev-doubt",
-				answers: { verification_operation_safe: { noul } },
-			}));
-			await expect(
-				coordinator.checkOperation({ tool: "bash", args: { command: "publish artifact" }, cwd: "/repo" }),
-			).rejects.toThrow("same_lane_verification_required");
+			const judge = vi
+				.fn<VerificationJudge>()
+				.mockResolvedValueOnce({
+					id: "jev-invalid-resolution",
+					answers: noul === undefined ? {} : { verification_resolution_valid: { noul } },
+				})
+				.mockResolvedValueOnce(accepted);
+			const { coordinator, proof } = fixture(judge);
+			const request = proof();
+			const result = await coordinator.resolve(request);
+			expect(result).toMatchObject({
+				status: "unresolved",
+				reason: "judgment_probability_missing_or_invalid",
+				nextAction: expect.stringContaining("Keep the finding pending"),
+			});
+			expect(result).not.toHaveProperty("confidence");
 			expect(coordinator.status().obligations).toHaveLength(1);
+			expect(await coordinator.resolve(request)).toMatchObject({ status: "resolved" });
+			expect(judge).toHaveBeenCalledTimes(2);
 		},
 	);
 

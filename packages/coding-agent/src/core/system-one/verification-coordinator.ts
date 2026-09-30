@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isNoulProbability } from "../decision/noul.ts";
+import { GOAL_LIFECYCLE_TOOL_NAMES } from "../goals/goal-tool-names.ts";
+import { isProvablyObservationalToolCall } from "../model-router/tool-escalation.ts";
 import { toolCallPushesGitAtCwd } from "../objective-execution/local-commit-delivery.ts";
 import type { QuestionPack } from "./catalog.ts";
 import {
@@ -30,17 +32,28 @@ export type VerificationJudge = (
 	answers: Record<string, unknown>;
 }>;
 
-const RECOVERY_TOOLS = new Set([
-	"peer",
-	"goal",
-	"get_goal",
-	"get_task_steps",
-	"read",
-	"grep",
-	"find",
-	"ls",
-	"repo_read",
-]);
+function isVerificationRecoveryOperation(input: { tool: string; args: unknown; readOnly?: boolean }): boolean {
+	if (input.tool === GOAL_LIFECYCLE_TOOL_NAMES[1]) return true;
+	if (input.tool === "peer" && input.args && typeof input.args === "object") {
+		const action = "action" in input.args ? input.args.action : undefined;
+		return action === "obligations" || action === "resolve";
+	}
+	if (input.tool === "task_directory" && input.args && typeof input.args === "object") {
+		const action = "action" in input.args ? input.args.action : undefined;
+		return action === "status" || action === "register" || action === "reattach" || action === "select";
+	}
+	if (input.tool === "skill" && input.args && typeof input.args === "object") {
+		const action = "action" in input.args ? input.args.action : undefined;
+		if (action === "search" || action === "read") return true;
+	}
+	if (input.tool === "goal" && input.args && typeof input.args === "object") {
+		const action = "action" in input.args ? input.args.action : undefined;
+		// These actions collect/reopen proof or enter the goal's own requirement proof gate. Other
+		// goal mutations remain classified like ordinary affected progress.
+		if (["get", "add_evidence", "satisfy_requirement", "reopen_requirement"].includes(String(action))) return true;
+	}
+	return isProvablyObservationalToolCall(input.tool, input.args, input.readOnly);
+}
 
 /** One mandatory semantic lifecycle. Permissions, routing and tool success cannot discharge it. */
 export class VerificationCoordinator {
@@ -123,13 +136,13 @@ export class VerificationCoordinator {
 
 	/** Runs on the concrete invocation after tool-call hooks, also on workers and direct execution. */
 	async checkOperation(
-		input: { tool: string; args: unknown; cwd: string; receiverId?: string },
+		input: { tool: string; args: unknown; cwd: string; receiverId?: string; readOnly?: boolean },
 		signal?: AbortSignal,
 	): Promise<void> {
 		const active = this.tracker.active();
 		if (!active.length) return;
 		// These calls gather evidence or enter the canonical completion/obligation gate themselves.
-		if (RECOVERY_TOOLS.has(input.tool)) return;
+		if (isVerificationRecoveryOperation(input)) return;
 		if (input.tool === SYSTEM_ONE_TOOL_NAME && input.args && typeof input.args === "object") {
 			const action = "action" in input.args ? input.args.action : undefined;
 			// Diagnostics and owner advisory dispositions cannot discharge mandatory findings.
@@ -170,20 +183,26 @@ export class VerificationCoordinator {
 		}
 		signal?.throwIfAborted();
 		const answer = verdict.answers.verification_operation_safe as { noul?: unknown } | undefined;
-		if (
-			!fence() ||
-			this.host.getCandidate(input.cwd).id !== candidate.id ||
-			!isNoulProbability(answer?.noul) ||
-			answer.noul < 0.95
-		) {
+		if (!fence())
 			throw new Error(
-				"same_lane_verification_required: affected progress is held until the receiving lane resolves its findings. Read evidence, reproduce, repair confirmed failures and recheck; use peer obligations to inspect the required proof.",
+				"same_lane_verification_required: verification_receiving_lane_changed_during_classification. Retry classification in the current receiving lane; the finding remains active.",
 			);
-		}
+		if (this.host.getCandidate(input.cwd).id !== candidate.id)
+			throw new Error(
+				"same_lane_verification_required: verification_candidate_changed_during_classification. Re-read current evidence and retry; the finding remains active.",
+			);
+		if (!isNoulProbability(answer?.noul))
+			throw new Error(
+				"same_lane_verification_required: judgment_probability_missing_or_invalid. Retry the operation judgment when System One can return a valid probability; the finding remains active.",
+			);
+		if (answer.noul < 0.95)
+			throw new Error(
+				`same_lane_verification_required: judgment_confidence_below_threshold (${answer.noul.toFixed(2)} < 0.95). The operation stays held; inspect the finding and retry with evidence that addresses its scope.`,
+			);
 		// An obligation opened during classification has not been judged against this operation.
 		if (JSON.stringify(this.tracker.active()) !== JSON.stringify(active))
 			throw new Error(
-				"Verification state changed during operation classification; retry against the current findings.",
+				"same_lane_verification_required: verification_obligations_changed_during_classification. Retry against the current findings; the operation stays held.",
 			);
 	}
 
@@ -264,11 +283,26 @@ export class VerificationCoordinator {
 						"Candidate or branch changed while resolving verification; rerun the check on the current candidate.",
 				};
 			const answer = verdict.answers.verification_resolution_valid as { noul?: unknown } | undefined;
-			const confidence = isNoulProbability(answer?.noul) ? answer.noul : 0;
+			if (!isNoulProbability(answer?.noul))
+				return {
+					status: "unresolved" as const,
+					reason: "judgment_probability_missing_or_invalid",
+					nextAction:
+						"System One returned no valid probability for this proof. Keep the finding pending and retry resolution when a valid judgment is available; do not treat this as a low-confidence rejection.",
+				};
+			const confidence = answer.noul;
 			const result = this.tracker.resolve({
 				...input,
 				judgment: { id: verdict.id, token: prepared.token, accepted: confidence >= 0.95, confidence },
 			});
+			if (!result.resolved && result.reason === "judgment_confidence_below_threshold")
+				return {
+					status: "unresolved" as const,
+					...result,
+					confidence,
+					nextAction:
+						"System One did not accept this proof at the required 0.95 confidence. Collect distinct, direct evidence from this receiving lane that covers the finding, then retry resolution; the same proof cannot be judged again.",
+				};
 			return { status: result.resolved ? ("resolved" as const) : ("unresolved" as const), ...result };
 		} catch (error) {
 			signal?.throwIfAborted();

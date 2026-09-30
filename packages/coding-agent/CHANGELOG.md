@@ -1,5 +1,12 @@
 ## [Unreleased]
 
+### Fixed
+
+- Admitted read-only `repo_read diff --check` while keeping the option scoped to `diff`.
+- Preserved Git failure diagnostics from both output streams when stderr warnings accompany `repo_read` failures.
+- Let mandatory verification recovery use declared read-only effects, parser-proven observational shell commands, bounded workspace inspection, and goal evidence/read/reopen actions while affected work remains gated.
+- Exposed operation-judgment causes and actionable resolution status without translating missing or invalid probabilities into low-confidence findings.
+
 ## [0.102.0] - 2026-09-30
 
 ### Breaking Changes
