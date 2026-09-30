@@ -68,8 +68,8 @@ describe("session verification tool receipts", () => {
 	});
 
 	it("uses one admitted invocation cwd for classification and both receipt candidates", async () => {
-		const defaultCwd = "/workspace-a";
-		const taskCwd = "/workspace-b";
+		const defaultCwd = tempDir("pi-verify-default-scope-");
+		const taskCwd = tempDir("pi-verify-invocation-scope-");
 		const records = new Map<string, SemanticVerificationSnapshot>();
 		const candidateCwds: string[] = [];
 		const host: VerificationHost = {
