@@ -272,6 +272,10 @@ describe("System One task-directory projection", () => {
 	it("SDK truth source refreshes repository identity after workspace selection changes mid-turn", async () => {
 		const startupRoot = committedRepo("sdk-system-one-startup");
 		const taskRoot = committedRepo("sdk-system-one-task");
+		const taskRepositoryRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+			cwd: taskRoot,
+			encoding: "utf8",
+		}).trim();
 		const startupRevision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: startupRoot, encoding: "utf8" }).trim();
 		const taskRevision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: taskRoot, encoding: "utf8" }).trim();
 		const provider = registerFauxProvider();
@@ -345,7 +349,7 @@ describe("System One task-directory projection", () => {
 			await session.prompt("Select the task workspace during this turn.");
 
 			expect(store.getRepo()).toMatchObject({
-				root: taskRoot,
+				root: taskRepositoryRoot,
 				baseline_revision: taskRevision,
 				current_revision: taskRevision,
 			});
@@ -358,6 +362,14 @@ describe("System One task-directory projection", () => {
 	it("SDK completion attributes only the selected task repository's goal-owned change", async () => {
 		const startupRoot = committedRepo("sdk-work-evidence-startup");
 		const taskRoot = committedRepo("sdk-work-evidence-task");
+		const taskRepositoryRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+			cwd: taskRoot,
+			encoding: "utf8",
+		}).trim();
+		const startupRepositoryRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+			cwd: startupRoot,
+			encoding: "utf8",
+		}).trim();
 		const taskDirectory = join(taskRoot, "nested");
 		mkdirSync(taskDirectory);
 		writeFileSync(join(startupRoot, "README.md"), "startup pre-existing tracked dirt\n");
@@ -497,9 +509,11 @@ describe("System One task-directory projection", () => {
 			expect(finalDiff.patch).toContain("only this goal's change");
 			expect(finalDiff.patch).not.toContain("startup pre-existing");
 			expect(finalDiff.patch).not.toContain("task pre-existing");
-			expect(finalDiff.patch).not.toContain(startupRoot);
-			expect(finalDiff.new_untracked_files).toEqual([`${taskRoot}:nested/new-parent/deeper/goal-owned.txt`]);
-			expect(finalDiff.repositories.map((repository) => repository.root)).toEqual([taskRoot]);
+			expect(finalDiff.patch).not.toContain(startupRepositoryRoot);
+			expect(finalDiff.new_untracked_files).toEqual([
+				`${taskRepositoryRoot}:nested/new-parent/deeper/goal-owned.txt`,
+			]);
+			expect(finalDiff.repositories.map((repository) => repository.root)).toEqual([taskRepositoryRoot]);
 			expect(JSON.stringify(finalDiff)).not.toContain("startup-before-goal.txt");
 			expect(JSON.stringify(finalDiff)).not.toContain("task-before-goal.txt");
 		} finally {

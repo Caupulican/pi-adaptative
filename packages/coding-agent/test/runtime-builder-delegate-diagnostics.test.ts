@@ -1,5 +1,3 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Agent, AgentContext } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -19,6 +17,7 @@ import type { Skill } from "../src/core/skills.ts";
 import { SystemOneController } from "../src/core/system-one/controller.ts";
 import { ExecutionStore } from "../src/core/system-one/execution-state.ts";
 import type { LoadExtensionsResult, ResourceLoader } from "../src/index.ts";
+import { tempDir as createTempDir } from "./temp-dir.ts";
 
 /**
  * The root-session delegate tool's promptGuidelines are bounded through
@@ -170,7 +169,6 @@ describe("RuntimeBuilder — root-session delegate prompt-guideline bounding dia
 	let tempDir: string | undefined;
 
 	afterEach(() => {
-		if (tempDir) rmSync(tempDir, { recursive: true, force: true });
 		tempDir = undefined;
 		capturedWarn.fn = undefined;
 	});
@@ -202,7 +200,7 @@ describe("RuntimeBuilder — root-session delegate prompt-guideline bounding dia
 	}
 
 	it("supplies resource-loader-admitted skills to both built-in audit tools", async () => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-skill-tools-"));
+		tempDir = createTempDir("pi-runtime-builder-skill-tools-");
 		const baseDir = join(tempDir, "skills", "admitted-runtime-skill");
 		const filePath = join(baseDir, "SKILL.md");
 		const admittedSkill: Skill = {
@@ -245,7 +243,7 @@ describe("RuntimeBuilder — root-session delegate prompt-guideline bounding dia
 	});
 
 	it("forwards createDelegateToolDefinition's warn callback to deps.setDelegatePromptGuidelineWarnings", () => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-delegate-diagnostics-"));
+		tempDir = createTempDir("pi-runtime-builder-delegate-diagnostics-");
 		const { deps, getWarnings } = makeDeps(tempDir, buildResourceLoader());
 		const runtimeBuilder = new RuntimeBuilder(deps);
 
@@ -260,7 +258,7 @@ describe("RuntimeBuilder — root-session delegate prompt-guideline bounding dia
 	});
 
 	it("keeps goal completion blocked by active System One verification obligations", async () => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-active-verification-"));
+		tempDir = createTempDir("pi-runtime-builder-active-verification-");
 		const { deps } = makeDeps(tempDir, buildResourceLoader(), ["goal"]);
 		let goalState: GoalState | undefined;
 		deps.getGoalStateSnapshot = () => goalState;
@@ -279,7 +277,13 @@ describe("RuntimeBuilder — root-session delegate prompt-guideline bounding dia
 				objective: { request: "Ship", normalized_goal: "Ship", acceptance_criteria: [] },
 				repo: { root: tempDir, baseline_revision: "base" },
 			}),
-			adapter: { evaluate: async () => ({ model: "fixture", answers: {}, latency_ms: 1 }) },
+			adapter: {
+				evaluate: async () => ({
+					model: "fixture",
+					answers: { verification_operation_safe: { noul: 0.99 } },
+					latency_ms: 1,
+				}),
+			},
 		});
 		deps.getSystemOneController = () => systemOne;
 		const runtimeBuilder = new RuntimeBuilder(deps);
@@ -299,7 +303,7 @@ describe("RuntimeBuilder — root-session delegate prompt-guideline bounding dia
 	});
 
 	it("clears stale warnings on a rebuild that no longer overflows", () => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-delegate-diagnostics-clear-"));
+		tempDir = createTempDir("pi-runtime-builder-delegate-diagnostics-clear-");
 		const { deps, getWarnings } = makeDeps(tempDir, buildResourceLoader());
 		const runtimeBuilder = new RuntimeBuilder(deps);
 

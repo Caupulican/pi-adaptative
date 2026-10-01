@@ -8,7 +8,7 @@ import {
 	readGoalWorkDiff,
 	WORK_EVIDENCE_CUSTOM_TYPE,
 } from "../../src/core/system-one/session-work-diff.ts";
-import { hasRepositoryOutcome } from "../../src/core/system-one/work-diff.ts";
+import { hasRepositoryOutcome, readWorkRepositoryRoot } from "../../src/core/system-one/work-diff.ts";
 import { committedRepo } from "../git-fixture.ts";
 import { tempDir } from "../temp-dir.ts";
 
@@ -22,15 +22,20 @@ it("keeps planning scope empty and excludes pre-existing work from a different l
 	const manager = SessionManager.inMemory(startup);
 	const journal = createSessionWorkEvidenceJournal(() => manager);
 	expect(readGoalWorkDiff(journal.getWorkEvidence("planning"))).toBeUndefined();
-	const { branchAnchor } = await journal.ensureBaseline("implementation", task);
+	const { branchAnchor, repositoryRoot } = await journal.ensureBaseline("implementation", task);
 	expect(readGoalWorkDiff(journal.getWorkEvidence("implementation"))).toBeUndefined();
 	writeFileSync(join(task, "README.md"), "task owner work\ngoal implementation\n");
-	await journal.recordObservedChange("implementation", task, ["README.md"], { ...mutation, branchAnchor });
+	await expect(
+		journal.recordObservedChange("implementation", `${task}/.`, ["README.md"], { ...mutation, branchAnchor }),
+	).rejects.toThrow("no retained baseline");
+	await journal.recordObservedChange("implementation", repositoryRoot, ["README.md"], { ...mutation, branchAnchor });
 	const work = readGoalWorkDiff(journal.getWorkEvidence("implementation"))!;
 	expect(work.patch).toContain("+goal implementation");
 	expect(work.patch).not.toContain("+task owner work");
-	expect(work.patch).not.toContain(startup);
-	expect(work.repositories).toEqual([expect.objectContaining({ root: task })]);
+	const startupRepositoryRoot = readWorkRepositoryRoot(startup);
+	expect(startupRepositoryRoot).toBeDefined();
+	expect(work.patch).not.toContain(startupRepositoryRoot!);
+	expect(work.repositories).toEqual([expect.objectContaining({ root: repositoryRoot })]);
 	expect(journal.getWorkEvidence("planning")).toEqual([]);
 });
 
@@ -39,10 +44,10 @@ it("preserves dirty baselines and partial failed writes across a journal adapter
 	const manager = SessionManager.inMemory(root);
 	let journal = createSessionWorkEvidenceJournal(() => manager);
 	writeFileSync(join(root, "README.md"), "owner baseline\n");
-	const { branchAnchor } = await journal.ensureBaseline("goal", root);
+	const { branchAnchor, repositoryRoot } = await journal.ensureBaseline("goal", root);
 	const tree = journal.getWorkEvidence("goal")[0]!.baseline!.tree;
 	writeFileSync(join(root, "README.md"), "owner baseline\npartial goal write\n");
-	await journal.recordObservedChange("goal", root, ["README.md"], {
+	await journal.recordObservedChange("goal", repositoryRoot, ["README.md"], {
 		...mutation,
 		operationSucceeded: false,
 		branchAnchor,
@@ -64,11 +69,11 @@ it("judges each mutated repository independently and keeps a reverted outcome em
 	const secondAdmission = await stable.ensureBaseline("goal", second);
 	writeFileSync(join(first, "README.md"), "first goal edit\n");
 	writeFileSync(join(second, "README.md"), "second goal edit\n");
-	await stable.recordObservedChange("goal", first, ["README.md"], {
+	await stable.recordObservedChange("goal", firstAdmission.repositoryRoot, ["README.md"], {
 		...mutation,
 		branchAnchor: firstAdmission.branchAnchor,
 	});
-	await stable.recordObservedChange("goal", second, ["README.md"], {
+	await stable.recordObservedChange("goal", secondAdmission.repositoryRoot, ["README.md"], {
 		...mutation,
 		branchAnchor: secondAdmission.branchAnchor,
 	});
@@ -86,9 +91,9 @@ it("does not borrow mutation evidence when the session branch is replaced", asyn
 	const root = committedRepo("branch-work-evidence-");
 	let manager = SessionManager.inMemory(root);
 	const journal = createSessionWorkEvidenceJournal(() => manager);
-	const { branchAnchor } = await journal.ensureBaseline("goal", root);
+	const { branchAnchor, repositoryRoot } = await journal.ensureBaseline("goal", root);
 	writeFileSync(join(root, "README.md"), "first branch write\n");
-	await journal.recordObservedChange("goal", root, ["README.md"], { ...mutation, branchAnchor });
+	await journal.recordObservedChange("goal", repositoryRoot, ["README.md"], { ...mutation, branchAnchor });
 	const prior = manager;
 	manager = SessionManager.inMemory(root);
 	expect(journal.getWorkEvidence("goal")).toEqual([]);
@@ -101,13 +106,13 @@ it("rejects a late mutation handoff after sibling navigation while accepting ord
 	const manager = SessionManager.inMemory(root);
 	const parent = manager.appendCustomEntry("fixture-parent", {});
 	const journal = createSessionWorkEvidenceJournal(() => manager);
-	const { branchAnchor } = await journal.ensureBaseline("goal", root);
+	const { branchAnchor, repositoryRoot } = await journal.ensureBaseline("goal", root);
 	manager.appendCustomEntry("ordinary-child", {});
-	await journal.recordObservedChange("goal", root, ["README.md"], { ...mutation, branchAnchor });
+	await journal.recordObservedChange("goal", repositoryRoot, ["README.md"], { ...mutation, branchAnchor });
 	manager.branch(parent);
 	manager.appendCustomEntry("sibling", {});
 	await expect(
-		journal.recordObservedChange("goal", root, ["README.md"], { ...mutation, branchAnchor }),
+		journal.recordObservedChange("goal", repositoryRoot, ["README.md"], { ...mutation, branchAnchor }),
 	).rejects.toThrow("stale session branch");
 	expect(journal.getWorkEvidence("goal")).toEqual([]);
 	await expect(journal.recordObservedChange("goal", root, [], mutation)).rejects.toThrow("no owning branch anchor");
@@ -160,7 +165,7 @@ it("recovers a snapshot diagnostic against the retained pre-effect baseline", as
 	const admission = await journal.ensureBaseline("goal", root);
 	const baseline = journal.getWorkEvidence("goal")[0]!.baseline;
 	writeFileSync(join(root, "goal.txt"), "actual goal effect\n");
-	await journal.recordObservedChange("goal", root, [], {
+	await journal.recordObservedChange("goal", admission.repositoryRoot, [], {
 		...mutation,
 		branchAnchor: admission.branchAnchor,
 		diagnostic: "repository_fingerprint_unavailable",
@@ -174,7 +179,7 @@ it("recovers a snapshot diagnostic against the retained pre-effect baseline", as
 	expect(work.patch).toContain("+actual goal effect");
 	expect(work.patch).not.toContain("+pre-existing owner bytes");
 	writeFileSync(join(root, "later.txt"), "subsequent goal effect\n");
-	await journal.recordObservedChange("goal", root, ["later.txt"], {
+	await journal.recordObservedChange("goal", recovered.repositoryRoot, ["later.txt"], {
 		...mutation,
 		branchAnchor: recovered.branchAnchor,
 	});
@@ -263,16 +268,16 @@ it("recovers abandoned markers against the original baseline while preserving ac
 	writeFileSync(join(root, "README.md"), "pre-existing owner work\n");
 	const manager = SessionManager.inMemory(root);
 	let journal = createSessionWorkEvidenceJournal(() => manager);
-	const { branchAnchor } = await journal.ensureBaseline("goal", root);
+	const { branchAnchor, repositoryRoot } = await journal.ensureBaseline("goal", root);
 	const baseline = journal.getWorkEvidence("goal")[0]!.baseline;
-	await journal.openObservation("goal", root, "abandoned", { effect: mutation.effect, branchAnchor });
-	await journal.openObservation("goal", root, "live", { effect: mutation.effect, branchAnchor });
+	await journal.openObservation("goal", repositoryRoot, "abandoned", { effect: mutation.effect, branchAnchor });
+	await journal.openObservation("goal", repositoryRoot, "live", { effect: mutation.effect, branchAnchor });
 	writeFileSync(join(root, "goal.txt"), "interrupted goal write\n");
 	journal = createSessionWorkEvidenceJournal(() => manager);
 	expect(readGoalWorkDiff(journal.getWorkEvidence("goal"))!.diagnostic).toBeDefined();
 	await journal.recoverObservations("goal", ["live"]);
 	expect(journal.getWorkEvidence("goal")[0]!.pendingObservationIds).toEqual(["live"]);
-	await journal.closeObservation("goal", root, "live", branchAnchor);
+	await journal.closeObservation("goal", repositoryRoot, "live", branchAnchor);
 	const scope = journal.getWorkEvidence("goal")[0]!;
 	expect(scope.baseline).toEqual(baseline);
 	expect(scope.pathScope).toBe("repository");
@@ -281,7 +286,7 @@ it("recovers abandoned markers against the original baseline while preserving ac
 	expect(work.patch).toContain("+interrupted goal write");
 	expect(work.patch).not.toContain("+pre-existing owner work");
 	const noEffect = await journal.ensureBaseline("no-effect", root);
-	await journal.openObservation("no-effect", root, "cancelled", {
+	await journal.openObservation("no-effect", noEffect.repositoryRoot, "cancelled", {
 		effect: mutation.effect,
 		branchAnchor: noEffect.branchAnchor,
 	});

@@ -9,12 +9,15 @@ import {
 	type RepositoryWorkEvidenceScope,
 	RepositoryWorkEvidenceUnavailableError,
 } from "../../src/core/objective-execution/repository-mutation-observer.ts";
-import { captureWorkBaseline } from "../../src/core/system-one/work-diff.ts";
+import { captureWorkBaseline, readWorkRepositoryRoot } from "../../src/core/system-one/work-diff.ts";
 import { committedRepo } from "../git-fixture.ts";
 import { tempDir } from "../temp-dir.ts";
 
 function repo(): string {
-	return committedRepo("pi-work-evidence-");
+	const root = committedRepo("pi-work-evidence-");
+	const repositoryRoot = readWorkRepositoryRoot(root);
+	if (!repositoryRoot) throw new Error("Expected committed test fixture to have a Git repository root");
+	return repositoryRoot;
 }
 
 function write(path: string, text: string): void {
