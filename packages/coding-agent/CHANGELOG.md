@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Packaged the `pi-chat` peer-agent message mesh as a bundled extension: `list_peers`, `agent_send` and `/pi-chat status|setup|peers|help` over one per-user Unix socket (`~/.pi/pi-chat`, wire-compatible with the user-level extension), with shape-checked bounded frames, untrusted-text framing for incoming messages, metadata-only audit, and a first-peers wait so a call right after startup sees the mesh. Workers and lean, minimal and chat capability classes never receive these tools. TCP/LAN, pairing, relay and daemon modes are not included.
+
 ### Fixed
 
 - Stopped optional extension and credential tools from being blocked when owner-intent classification produced no usable judgment (outage, missing evaluator, uncertain or sub-threshold answer): such a result is now an `unresolved` snapshot that retains the unclassified words, leaves the integrations available and warns, while an in-flight classification and a classified intent that does not name the tool still block. Credential values stay protected by the exposure guard on tool output.

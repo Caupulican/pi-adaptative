@@ -86,6 +86,8 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["decision_ledger_read", policy([["memory.query"]], "memory-broker")],
 	["context_scout", policy([["filesystem.read"]], "path-scope")],
 	["pi_collaboration", policy([["process.exec"], ["workflow.delegate"]], "process-launcher")],
+	["list_peers", policy([["workflow.delegate"]], "control-plane")],
+	["agent_send", policy([["workflow.delegate"]], "control-plane")],
 	["improvement_loop", policy([["process.exec", "tests.execute"]], "process-launcher")],
 	["task_automation", policy([["process.exec", "tests.execute"]], "process-launcher")],
 ]);

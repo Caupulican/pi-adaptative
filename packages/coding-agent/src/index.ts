@@ -77,6 +77,7 @@ export {
 	encodeWorkerSessionAllowedPaths,
 	PI_WORKER_ALLOWED_PATHS_ENV,
 } from "./core/autonomy/worker-session-private-scope.ts";
+export { type ChatExtensionOptions, piChatExtension } from "./core/chat/extension.ts";
 export { type CollaborationExtensionOptions, piCollaborationExtension } from "./core/collaboration/extension.ts";
 export { NativeProviderRegistry, type NativeProviderStrategy } from "./core/collaboration/native-provider.ts";
 export * from "./core/decision/index.ts";

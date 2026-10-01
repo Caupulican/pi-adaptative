@@ -23,6 +23,8 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	"improvement_loop",
 	"model_fitness",
 	"pi_collaboration",
+	"list_peers",
+	"agent_send",
 	"context_scout",
 	"peer",
 	"runtime_update",
