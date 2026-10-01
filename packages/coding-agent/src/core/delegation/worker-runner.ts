@@ -80,6 +80,11 @@ export interface WorkerRunnerOptions {
 	 * The callback is synchronous so late non-cooperative completion callbacks cannot race the claim.
 	 */
 	sealChangedFiles?: () => readonly string[];
+	/**
+	 * Set once the parent halted this run and the loop acted on it: the completion is the worker's own
+	 * report on being stopped, never a finished task, however clean it reads.
+	 */
+	interruptedByParent?: () => { reason: string | undefined } | undefined;
 	signal?: AbortSignal;
 	now?: () => string;
 	/** Enables the WRITE lane: only honored when the request envelope grants "filesystem.write". The
@@ -426,6 +431,12 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 	const costUsd = bounded.completion?.costUsd ?? 0;
 	const liveChangedFilesReport = collectBoundedWorkerClaimChangedFiles(options.sealChangedFiles?.() ?? []);
 	const liveChangedFiles = liveChangedFilesReport.values;
+	// Whatever the stopped run produced, the parent must be able to tell its own stop caused it: a halt
+	// whose closing request failed still surfaces as the failure it is, with this blocker beside it.
+	const halted = options.interruptedByParent?.();
+	const haltBlockers = halted
+		? [halted.reason ? `interrupted by the parent: ${halted.reason}` : "interrupted by the parent"]
+		: [];
 
 	if (bounded.failure) {
 		const isBudgetExhausted =
@@ -438,6 +449,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 				? ["worker changed-file report exceeded the durable claim bound; parent review is required"]
 				: []),
 			...(isBudgetExhausted ? [`budget limit reached: ${bounded.failure.reasonCode}`] : []),
+			...haltBlockers,
 		];
 		const status = isBudgetExhausted ? "partial" : cancelled ? "cancelled" : "failed";
 		const summary = isBudgetExhausted
@@ -501,6 +513,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 				...completionBaseClaim,
 				status: "failed",
 				summary: "Worker model call failed.",
+				...(haltBlockers.length > 0 ? { blockers: haltBlockers } : {}),
 				...(modelErrorEvidence ? { evidence: modelErrorEvidence } : {}),
 			},
 			laneStatus: "failed",
@@ -509,6 +522,25 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		});
 	}
 
+	if (halted) {
+		const reportedSummary = parseWorkerOutput(completion.text)?.summary.trim() || completion.text.trim();
+		return finishOutcome({
+			request: options.request,
+			cwd: options.cwd,
+			claim: {
+				...completionBaseClaim,
+				status: "blocked",
+				summary: clipWorkerClaimSummary(
+					reportedSummary || "The parent interrupted this worker and it produced no report.",
+				),
+				blockers: haltBlockers,
+				parentReviewRequired: true,
+			},
+			laneStatus: "blocked",
+			reasonCode: "worker_interrupted",
+			costUsd,
+		});
+	}
 	const parsed = parseWorkerOutput(completion.text);
 	if (!parsed) {
 		const malformedRecord = extractMalformedWorkerRecord(completion.text);

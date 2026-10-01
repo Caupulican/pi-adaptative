@@ -2,10 +2,14 @@
 
 ### Added
 
+- Made `delegate interrupt` a halt: the worker finishes its current request, is told the parent stopped it (`message` is the reason), spends one tool-free request on its own report, and ends as a `blocked` `worker_interrupted` result whose terminal handoff wakes the parent, with the worker idle and continuable by `follow_up`. A worker that reaches no request boundary within two minutes is cancelled and that is reported instead. The old suspend-and-abort stays internal (System One steering) as `force`. The message is the halt reason, no longer a queued text.
+- Added `lastResult` and `awaitingParent` to worker agent views, a closing `follow_up` instruction on blocked handoffs, and a start-result line naming the idle specialists a fresh start passed over.
+- Showed pi-chat peers as busy while their own turn runs, bounded reply chains at 8 hops, and stopped a process from taking the socket path of a broker that answers.
 - Packaged the `pi-chat` peer-agent message mesh as a bundled extension: `list_peers`, `agent_send` and `/pi-chat status|setup|peers|help` over one per-user Unix socket (`~/.pi/pi-chat`, wire-compatible with the user-level extension), with shape-checked bounded frames, untrusted-text framing for incoming messages, metadata-only audit, and a first-peers wait so a call right after startup sees the mesh. Workers and lean, minimal and chat capability classes never receive these tools. TCP/LAN, pairing, relay and daemon modes are not included.
 
 ### Fixed
 
+- Kept a provider payload's transport signal live through credential redaction: Google-style payloads (Antigravity, Gemini) carry `config.abortSignal`, and the walker's JSON-normalization fallback turned it into a plain object, so Antigravity requests failed with "signals[0] is not of type AbortSignal" and Gemini cancellation was silently lost. An opaque value the caller preserves is now decided before any normalization.
 - Stopped optional extension and credential tools from being blocked when owner-intent classification produced no usable judgment (outage, missing evaluator, uncertain or sub-threshold answer): such a result is now an `unresolved` snapshot that retains the unclassified words, leaves the integrations available and warns, while an in-flight classification and a classified intent that does not name the tool still block. Credential values stay protected by the exposure guard on tool output.
 - Treated a missing, uncertain or sub-threshold per-tool owner-intent judgment as `undecided` (the tool passes) instead of "not requested", and kept a grant held before when a continuation's judgment is below the floor.
 - Kept `secret_store` `status`, `list` and `discover` (metadata only) available regardless of classified intent, gating only `activate` and `migrate`.

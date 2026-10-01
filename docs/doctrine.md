@@ -212,7 +212,7 @@ whose parent surface has `bash` are lent natively (read authority, never `bash` 
 sibling such as `write` that is not on the parent surface still refuses and names the rule. A
 delegate spelling with exactly one reading is absorbed and reported — `task` on `follow_up`/`send`
 is the message, `agentId` on `status`/`review` is that agent's latest lane, `message` on
-`interrupt` is queued for the paused worker, `retire` with undelivered control messages lists them
+`interrupt` is the reason the halted worker is told (never a queued message), `retire` with undelivered control messages lists them
 and takes `force: true` — while a plural on a singular action or two selectors still refuse. An
 invented `sN-<slug>` or `sN-<uuid>` task-step selector names the one step carrying that number; a
 trailing numeric fragment (`s1-2`) still refuses. When an exact `step-N` is absent and not archived, an
@@ -1215,3 +1215,4 @@ measurement gains no new surface.
 | 2026-09-25 | The read-only shell line judges `env` by the command it wraps and admits `node` only for `--version` and `--check`; a requirement check additionally admits a run of the project's tests (named runners, no snapshot-update, fix or watch option), while read-only lanes do not. `satisfy_requirement` with `requirementIds` is all or nothing. The tool-surface budget test declares the sources it measures (`@guards`), so the commit gate runs it whenever a tool definition is staged. |
 | 2026-10-01 | A policy-phase failure record (a block, a denial; never `owner_authorization_required`) names a restriction the model cannot repair, so it resolves after two later executed calls of any tool, not only of the blocked tool; a blocked tool the model rightly never retries no longer rides every later request in the failure ledger. Pinned by `packages/agent/test/tool-failure-memory.test.ts`. |
 | 2026-10-01 | A `worker_specialist_busy` delegate skip tells the orchestrator how to proceed (wait for the running worker, or `parallelWork { independentOf, justification }` for independent work) instead of a bare reason code; no routing invariant moved. Pinned by `packages/coding-agent/test/delegate-exact-input-corrections.test.ts`. |
+| 2026-10-01 | `delegate interrupt` is a halt, not a silent stop: the worker is told the parent stopped it, spends one tool-free request on its own report, and ends as a `blocked` `worker_interrupted` result that requires parent review (never completion) whose terminal handoff wakes the parent; a worker that reaches no request boundary in 120 s is cancelled and that is reported. Superseded: `interrupt` pausing the worker with its `message` queued for `resume`; the suspend-and-abort survives only as the internal `force` for System One steering. |

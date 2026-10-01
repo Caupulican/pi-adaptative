@@ -2653,7 +2653,8 @@ export class AgentSession {
 			},
 			followUpWorkerAgent: (agentId, message) =>
 				this._backgroundLanes.followUpSessionRootWorkerAgent(agentId, message),
-			interruptWorkerAgent: (agentId) => this._backgroundLanes.interruptWorkerAgent(agentId),
+			interruptWorkerAgent: (agentId) =>
+				this._backgroundLanes.interruptWorkerAgent(agentId, undefined, { force: true }),
 			queueWorkerAgentMessage: (agentId, message) => {
 				this._backgroundLanes.sendSessionRootWorkerAgentMessage(agentId, message);
 			},

@@ -659,10 +659,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._getWorkerController().getAgentControl().startWorkerAgentTask(agentId, message, options);
 	}
 
-	interruptWorkerAgent(agentId: string, scope?: WorkerAgentControlScope): { interrupted: boolean; reason?: string } {
+	interruptWorkerAgent(
+		agentId: string,
+		scope?: WorkerAgentControlScope,
+		options?: { message?: string; force?: boolean },
+	): ReturnType<WorkerAgentControlPort["interruptWorkerAgent"]> {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		return this._getWorkerController().getAgentControl().interruptWorkerAgent(agentId, scope);
+		return this._getWorkerController().getAgentControl().interruptWorkerAgent(agentId, scope, options);
 	}
 
 	resumeWorkerAgent(

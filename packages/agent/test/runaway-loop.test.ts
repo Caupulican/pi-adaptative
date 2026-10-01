@@ -962,6 +962,96 @@ describe("runaway-loop backstop", () => {
 		expect(deliveryTurns).toBe(1);
 	});
 
+	it("halts on a host request: lets the batch finish, tells the model, and spends one tool-free request on its report", async () => {
+		let executions = 0;
+		let halted = false;
+		let haltPolls = 0;
+		const toolCounts: number[] = [];
+		const systemPrompts: string[] = [];
+		const lastUserTexts: string[] = [];
+		const events = await drain(
+			agentLoop(
+				[{ role: "user", content: "go", timestamp: 1 }],
+				{ systemPrompt: "", messages: [], tools: [createEchoTool(() => executions++)] },
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					// The host asks for the halt while the first tool batch is running; the loop acts on it
+					// at the next request boundary and never polls again after consuming it.
+					getHaltRequest: () => {
+						haltPolls++;
+						if (!halted) return undefined;
+						halted = false;
+						return {
+							userMessage: "[halt] the parent stopped you",
+							closingPrompt: "HALT CLOSING TURN: report now.",
+						};
+					},
+				},
+				undefined,
+				(
+					_model,
+					providerContext: { systemPrompt?: string; tools?: readonly unknown[]; messages?: readonly unknown[] },
+				) => {
+					toolCounts.push(providerContext.tools?.length ?? -1);
+					systemPrompts.push(providerContext.systemPrompt ?? "");
+					const lastUser = [...(providerContext.messages ?? [])]
+						.reverse()
+						.find((message) => (message as { role?: string }).role === "user") as
+						| { content?: unknown }
+						| undefined;
+					lastUserTexts.push(typeof lastUser?.content === "string" ? lastUser.content : "");
+					const stream = new MockAssistantStream();
+					queueMicrotask(() => {
+						if (providerContext.tools?.length === 0) {
+							stream.push({
+								type: "done",
+								reason: "stop",
+								message: assistantMessage(
+									[{ type: "text", text: "Stopped after one call; here is my report." }],
+									"stop",
+								),
+							});
+							return;
+						}
+						halted = true;
+						stream.push({
+							type: "done",
+							reason: "toolUse",
+							message: assistantMessage(
+								[{ type: "toolCall", id: "echo-1", name: "echo", arguments: { value: "a" } }],
+								"toolUse",
+							),
+						});
+					});
+					return stream;
+				},
+			),
+		);
+
+		// One tool-carrying request (its batch finished), then exactly one tool-free closing request.
+		expect(toolCounts).toEqual([1, 0]);
+		expect(executions).toBe(1);
+		expect(systemPrompts[1]).toContain("HALT CLOSING TURN: report now.");
+		expect(systemPrompts[1]).not.toContain("RUNAWAY STOP CLOSING TURN");
+		// The model was told why before the closing request, as a transcript message.
+		expect(lastUserTexts[1]).toBe("[halt] the parent stopped you");
+		const userMessages = events.flatMap((event) =>
+			event.type === "message_end" && event.message.role === "user" ? [event.message.content] : [],
+		);
+		expect(userMessages).toContain("[halt] the parent stopped you");
+		// The model authored the report; the loop added none, and the run ends there.
+		const assistantTexts = events.flatMap((event) =>
+			event.type === "message_end" && event.message.role === "assistant"
+				? event.message.content.flatMap((block) => (block.type === "text" ? [block.text] : []))
+				: [],
+		);
+		expect(assistantTexts).toEqual(["Stopped after one call; here is my report."]);
+		expect(haltPolls).toBe(2);
+		expect(events.filter((event) => event.type === "agent_end")).toHaveLength(1);
+		expect(events.at(-1)?.type).toBe("agent_end");
+	});
+
 	it("closes a stalled run with exactly one tool-free provider request and no further tool work", async () => {
 		let executions = 0;
 		const stalls: Array<{ reason?: string }> = [];

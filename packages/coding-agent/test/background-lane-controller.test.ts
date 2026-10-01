@@ -695,7 +695,7 @@ describe("worker runtime construction", () => {
 		expect(getWorkerAgentActivity).toHaveBeenCalledWith("child", scope);
 		expect(readWorkerAgentTranscript).toHaveBeenCalledWith("child", { cursor: 2, maxMessages: 3, ...scope });
 		expect(startWorkerAgentTask).toHaveBeenCalledWith("child", "new task", scope);
-		expect(interruptWorkerAgent).toHaveBeenCalledWith("child", scope);
+		expect(interruptWorkerAgent).toHaveBeenCalledWith("child", scope, undefined);
 		expect(resumeWorkerAgent).toHaveBeenCalledWith("child", scope);
 		expect(cancelWorkerAgent).toHaveBeenCalledWith("child", "agent_cancelled", scope);
 		expect(waitForWorkerAgent).toHaveBeenCalledWith("child", 1_000, scope);

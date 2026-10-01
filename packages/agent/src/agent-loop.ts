@@ -560,6 +560,33 @@ async function runLoop(
 				await emitProviderTurnLimitStop(config, continuationState, newMessages, emit);
 				return;
 			}
+			// A host halt: keep what was already dequeued, tell the model why it stopped, and spend one
+			// tool-free request on its own report. Checked before turn_start because the closing turn
+			// opens its own.
+			const haltRequest = config.getHaltRequest?.();
+			if (haltRequest) {
+				await processPendingMessages();
+				const haltMessage: AgentMessage = { role: "user", content: haltRequest.userMessage, timestamp: Date.now() };
+				await emit({ type: "message_start", message: haltMessage });
+				await emit({ type: "message_end", message: haltMessage });
+				currentContext.messages.push(haltMessage);
+				newMessages.push(haltMessage);
+				await streamToollessClosingTurn(
+					currentContext,
+					newMessages,
+					config,
+					continuationState,
+					providerTurnLimit,
+					signal,
+					emit,
+					streamFn,
+					previousAssistantForDegenerateCollapse,
+					verificationObligations,
+					haltRequest.closingPrompt,
+				);
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
 			if (!firstTurn) {
 				await emit({ type: "turn_start" });
 			} else {
@@ -834,6 +861,7 @@ async function streamToollessClosingTurn(
 	streamFn?: StreamFn,
 	previousAssistant?: AssistantMessage,
 	verificationObligations?: VerificationObligationTracker,
+	closingPrompt: string = RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT,
 ): Promise<void> {
 	if (signal?.aborted) return;
 	if (providerTurnLimit > 0 && continuationState.providerTurns >= providerTurnLimit) return;
@@ -845,12 +873,10 @@ async function streamToollessClosingTurn(
 	// last request of the run, so there is no future turn whose cached prefix it could invalidate.
 	const closingContext: AgentContext = {
 		...currentContext,
-		systemPrompt: currentContext.systemPrompt
-			? `${currentContext.systemPrompt}\n\n${RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT}`
-			: RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT,
+		systemPrompt: currentContext.systemPrompt ? `${currentContext.systemPrompt}\n\n${closingPrompt}` : closingPrompt,
 		trailingInstruction: verificationObligations?.requestInstruction(),
 		tools: [],
-		surfaceChange: "the runaway-stop closing request withholds every tool",
+		surfaceChange: "the tool-free closing request withholds every tool",
 	};
 	const response = await streamAssistantResponse(
 		closingContext,

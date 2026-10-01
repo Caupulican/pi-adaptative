@@ -1147,7 +1147,7 @@ describe("delegate logical-agent controls", () => {
 		expect(followUpSessionRootWorkerAgent).toHaveBeenCalledWith("agent-1", "Continue", {
 			idempotencyKey: expect.stringMatching(/^delegate-message-[a-f0-9]{64}$/),
 		});
-		expect(interruptWorkerAgent).toHaveBeenCalledWith("agent-1");
+		expect(interruptWorkerAgent).toHaveBeenCalledWith("agent-1", undefined, {});
 		expect(resumeWorkerAgent).toHaveBeenCalledWith("agent-1");
 		expect(cancelWorkerAgent).toHaveBeenCalledWith("agent-1");
 		expect(cancelled.details).toMatchObject({ action: "cancel", agentId: "agent-1", status: "canceled" });

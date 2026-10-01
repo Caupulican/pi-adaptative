@@ -3879,7 +3879,13 @@ export class WorkerDelegationController {
 				const rawOutcome = executionResult.rawOutcome;
 				// Attempt ladder: a retryable bounded failure suspends and re-enqueues instead of
 				// terminalizing, resuming from the persisted transcript under a fresh fence.
-				if (rawOutcome.laneStatus === "failed" && !this.deps.isDisposed() && !workerSignal.aborted) {
+				// A halted run is the parent's own stop: its report is the outcome, never a failure to retry.
+				if (
+					rawOutcome.laneStatus === "failed" &&
+					!executionResult.haltDelivered &&
+					!this.deps.isDisposed() &&
+					!workerSignal.aborted
+				) {
 					const failover = this.failOverQuotaExhaustion(startedRecord.laneId, rawOutcome, model);
 					const retry = this.recovery.scheduleAttemptRetry({
 						...(failover ? { failover } : {}),
@@ -4140,6 +4146,7 @@ export class WorkerDelegationController {
 				this.yieldedWriteReservations.delete(durableHandle.attemptId);
 				this.inFlightLedgers.delete(startedRecord.laneId);
 				this.laneAbortControllers.delete(startedRecord.laneId);
+				this.agentControl.clearLaneHalt(startedRecord.laneId);
 				let resourcesReleased = false;
 				try {
 					await toolSurface.dispose();

@@ -902,7 +902,11 @@ describe("AgentSession worker delegation", () => {
 							agentId: string,
 							message: string,
 						): { started: boolean; record?: { laneId: string } };
-						interruptWorkerAgent(agentId: string): { interrupted: boolean; reason?: string };
+						interruptWorkerAgent(
+							agentId: string,
+							scope?: object,
+							options?: { force?: boolean },
+						): { interrupted: boolean; mode?: string; reason?: string };
 					};
 				}
 			)._backgroundLanes;
@@ -927,7 +931,10 @@ describe("AgentSession worker delegation", () => {
 				{ timeout: 10_000 },
 			);
 			expect(activeOwner).toMatch(/^pi-worker:\d+:/);
-			expect(controls.interruptWorkerAgent(initial.record.laneId)).toEqual({ interrupted: true });
+			expect(controls.interruptWorkerAgent(initial.record.laneId, undefined, { force: true })).toEqual({
+				interrupted: true,
+				mode: "suspend",
+			});
 
 			releaseFollowUp(fauxAssistantMessage('{"summary":"interrupted turn unwound"}'));
 			await vi.waitFor(
@@ -941,6 +948,100 @@ describe("AgentSession worker delegation", () => {
 				},
 				{ timeout: 10_000 },
 			);
+		} finally {
+			releaseFollowUp(fauxAssistantMessage('{"summary":"cleanup"}'));
+			harness.cleanup();
+		}
+	});
+
+	it("halts a running follow-up turn: the worker is told, reports once without tools, and the parent gets a blocked report", async () => {
+		const harness = await createHarness();
+		let releaseFollowUp!: (message: AssistantMessage) => void;
+		const heldFollowUp = new Promise<AssistantMessage>((resolve) => {
+			releaseFollowUp = resolve;
+		});
+		try {
+			writeFileSync(join(harness.tempDir, "note.txt"), "evidence\n", "utf-8");
+			harness.setResponses([fauxAssistantMessage('{"summary":"initial turn complete"}')]);
+			const initial = await harness.session.runWorkerDelegationOnce({ instructions: "Start a durable worker" });
+			if (!initial.started || !initial.record) throw new Error("Expected the initial worker turn to complete.");
+
+			const closingContexts: Array<{ tools: number; system: string }> = [];
+			let firstRequestSeen = false;
+			setConcurrentResponses(harness, [
+				() => {
+					firstRequestSeen = true;
+					return heldFollowUp;
+				},
+				(context) => {
+					closingContexts.push({ tools: context.tools?.length ?? 0, system: context.systemPrompt ?? "" });
+					return fauxAssistantMessage(
+						'{"summary":"Read one file; stopped before the rest.","status":"completed"}',
+					);
+				},
+			]);
+			const controls = (
+				harness.session as unknown as {
+					_backgroundLanes: {
+						followUpWorkerAgent(
+							agentId: string,
+							message: string,
+						): { started: boolean; record?: { laneId: string } };
+						interruptWorkerAgent(
+							agentId: string,
+							scope?: object,
+							options?: { message?: string; force?: boolean },
+						): { interrupted: boolean; mode?: string; reason?: string };
+					};
+				}
+			)._backgroundLanes;
+			const followUp = controls.followUpWorkerAgent(initial.record.laneId, "Read the note and keep going.");
+			expect(followUp.started).toBe(true);
+			if (!followUp.record) throw new Error("Expected a durable follow-up record.");
+			const lifecycle = () =>
+				new WorkerLifecycle({
+					agentDir: harness.tempDir,
+					sessionId: harness.session.sessionId,
+				}).getTaskRuntimeSnapshot();
+			const latestAttempt = () => {
+				const snapshot = lifecycle();
+				const attemptId = snapshot.tasks[followUp.record!.laneId]?.attemptIds.at(-1);
+				return attemptId ? snapshot.attempts[attemptId] : undefined;
+			};
+			await vi.waitFor(() => expect(latestAttempt()?.status).toBe("running"), { timeout: 10_000 });
+			await vi.waitFor(() => expect(firstRequestSeen).toBe(true), { timeout: 10_000 });
+
+			// The halt asks; it does not stop anything by force. The turn in flight finishes its request.
+			expect(
+				controls.interruptWorkerAgent(initial.record.laneId, undefined, { message: "owner changed plan" }),
+			).toEqual({ interrupted: true, mode: "halt" });
+			expect(latestAttempt()?.status).toBe("running");
+			releaseFollowUp(
+				fauxAssistantMessage([fauxToolCall("read", { path: join(harness.tempDir, "note.txt") })], {
+					stopReason: "toolUse",
+				}),
+			);
+
+			await vi.waitFor(
+				() =>
+					expect(latestAttempt()?.result?.reasonCode, JSON.stringify(latestAttempt()?.result)).toBe(
+						"worker_interrupted",
+					),
+				{
+					timeout: 10_000,
+				},
+			);
+			const result = latestAttempt()?.result;
+			// Parent review, not completion, even though the worker's own envelope said "completed".
+			expect(result).toMatchObject({ status: "blocked", nextAction: "parent_review" });
+			expect(result?.summary).toBe("Read one file; stopped before the rest.");
+			expect(result?.errors.map((error) => error.message)).toContain(
+				"interrupted by the parent: owner changed plan",
+			);
+			// One tool-free closing request, run under the halt prompt.
+			expect(closingContexts).toHaveLength(1);
+			expect(closingContexts[0]?.tools).toBe(0);
+			expect(closingContexts[0]?.system).toContain("HALT CLOSING TURN");
 		} finally {
 			releaseFollowUp(fauxAssistantMessage('{"summary":"cleanup"}'));
 			harness.cleanup();
@@ -1030,7 +1131,11 @@ describe("AgentSession worker delegation", () => {
 				harness.session as unknown as {
 					_backgroundLanes: {
 						getLaneRecords(): unknown[];
-						interruptWorkerAgent(agentId: string): { interrupted: boolean; reason?: string };
+						interruptWorkerAgent(
+							agentId: string,
+							scope?: object,
+							options?: { force?: boolean },
+						): { interrupted: boolean; mode?: string; reason?: string };
 						_workers?: {
 							getAgentControlProcessOwnerId(): string;
 							lifecycle: WorkerLifecycle;
@@ -1078,7 +1183,10 @@ describe("AgentSession worker delegation", () => {
 			);
 			expect(workerController.lifecycle.getActiveAttempt(prepared.record.laneId)?.status).toBe("leased");
 
-			expect(controls.interruptWorkerAgent(agent.agentId)).toEqual({ interrupted: true });
+			expect(controls.interruptWorkerAgent(agent.agentId, undefined, { force: true })).toEqual({
+				interrupted: true,
+				mode: "suspend",
+			});
 			expect(workerController.lifecycle.getActiveAttempt(prepared.record.laneId)?.status).toBe("suspended");
 		} finally {
 			harness.cleanup();

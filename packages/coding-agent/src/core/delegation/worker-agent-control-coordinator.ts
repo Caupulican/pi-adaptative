@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import type { AgentMessage } from "@caupulican/pi-agent-core";
+import type { AgentHaltRequest, AgentMessage } from "@caupulican/pi-agent-core";
 import type { UserMessage } from "@caupulican/pi-ai";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
@@ -59,6 +59,7 @@ import {
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { formatWorkerDispatchWait, type WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
 import { evaluateReusableWorkerTaskAdmission } from "./worker-fleet-limits.ts";
+import { DEFAULT_WORKER_HALT_REPORT_DEADLINE_MS, normalizeWorkerHaltReason, WorkerLaneHalts } from "./worker-halt.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { isWorkerTaskPrompt } from "./worker-runner.ts";
 import { projectWorkerTaskSessionView } from "./worker-task-view.ts";
@@ -110,6 +111,8 @@ export interface WorkerAgentControlCoordinatorOptions {
 	 * `prepareAgentTurn` reports `created: true`, never for a replayed control message returning an
 	 * attempt that may predate the current process. */
 	noteLaneOwnerEpoch?(laneId: string, ownerEpoch: number): void;
+	/** How long an interrupted worker gets to reach a request boundary and report. */
+	haltReportDeadlineMs?: number;
 }
 
 type QueuedPeerMessage = ReturnType<WorkerAgentMailbox["enqueueWithReceipt"]>;
@@ -167,11 +170,17 @@ export function buildWorkerTerminalHandoffContent(args: {
 		...(args.record.reasonCode === "worker_blocked"
 			? [
 					"worker_blocked means the durable claim has blockers; it does not mean worker state or transcript was lost.",
+					`The worker is idle and waiting on you: answer its blocker or redirect it with delegate action="follow_up" agentId="${args.childAgentId}"; it keeps its transcript. list marks it awaitingParent until a newer task starts.`,
 				]
 			: []),
 		...(args.record.status === "budget_exhausted"
 			? [
 					"CAVEMAN MODE - MANDATORY: budget_exhausted means an admitted limit ended work, not harness failure. Terminal reasonCode is authoritative; never replace it with earlier transcript errors. Read evidence, then replan only within remaining authority.",
+				]
+			: []),
+		...(args.record.reasonCode === "worker_interrupted"
+			? [
+					"worker_interrupted means you stopped this worker and the claim above is its own report. Its state and transcript are retained: continue it with delegate follow_up on the same agentId, or retire it.",
 				]
 			: []),
 		...(args.record.reasonCode === "completion_error" ? [WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE] : []),
@@ -210,6 +219,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	private readonly sessionRootAddress: string;
 	private readonly sessionRootReconciliationFailures = new Map<string, string>();
 	private readonly workerReplyReconciliationFailures = new Map<string, string>();
+	private readonly laneHalts = new WorkerLaneHalts();
 
 	constructor(options: WorkerAgentControlCoordinatorOptions) {
 		this.options = options;
@@ -1226,22 +1236,62 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		this.notifyStateListeners();
 	}
 
+	/**
+	 * Stop a running worker and make it report. The default is a halt: the worker finishes the request
+	 * boundary it is at, is told the parent stopped it, and spends one tool-free request on its own
+	 * report, which reaches the parent through the ordinary terminal handoff. A worker that does not
+	 * reach that boundary within the deadline is cancelled, and the cancellation is what the parent is
+	 * told. `force` keeps the old behavior: suspend and abort at once, nothing is reported, and the
+	 * parent resumes the same task.
+	 */
 	interruptWorkerAgent(
 		agentId: string,
 		scope: WorkerAgentControlScope = {},
-	): { interrupted: boolean; reason?: string } {
+		options: { message?: string; force?: boolean } = {},
+	): { interrupted: boolean; mode?: "halt" | "suspend"; reason?: string } {
 		const { agent, attempt } = this.controlledAgentAttempt(agentId, scope);
 		if (!attempt || (attempt.status !== "running" && attempt.status !== "leased")) {
 			return { interrupted: false, reason: "agent_not_running" };
 		}
 		try {
-			this.options.getLifecycle().suspendAgent(attempt.taskId, agent.agentId, this.options.processOwnerId);
-			this.options.abortLane(attempt.taskId, "agent_interrupted");
-			this.signalStateChanged();
-			return { interrupted: true };
+			if (options.force) {
+				this.options.getLifecycle().suspendAgent(attempt.taskId, agent.agentId, this.options.processOwnerId);
+				this.options.abortLane(attempt.taskId, "agent_interrupted");
+				this.signalStateChanged();
+				return { interrupted: true, mode: "suspend" };
+			}
+			const laneId = attempt.taskId;
+			const requested = this.laneHalts.request(
+				laneId,
+				normalizeWorkerHaltReason(options.message),
+				this.options.haltReportDeadlineMs ?? DEFAULT_WORKER_HALT_REPORT_DEADLINE_MS,
+				() => {
+					// The worker is inside something that outlived the deadline. Its state is retained; the
+					// parent hears about the cancellation through the same terminal handoff.
+					this.options.abortLane(laneId, "interrupt_report_deadline");
+					this.options.cancelLane(laneId, "interrupt_report_deadline");
+				},
+			);
+			if (!requested) return { interrupted: true, mode: "halt", reason: "halt_already_requested" };
+			return { interrupted: true, mode: "halt" };
 		} catch (error) {
 			return { interrupted: false, reason: error instanceof Error ? error.message : String(error) };
 		}
+	}
+
+	/** The loop's poll: hands over this lane's halt exactly once. */
+	takeLaneHalt(laneId: string): AgentHaltRequest | undefined {
+		return this.laneHalts.take(laneId);
+	}
+
+	/** Set once the loop has acted on the lane's halt, with the reason the parent gave. */
+	deliveredLaneHalt(laneId: string): { reason: string | undefined } | undefined {
+		return this.laneHalts.deliveredReason(laneId);
+	}
+
+	/** The lane's run is over, however it ended: a halt it never reached is moot. */
+	clearLaneHalt(laneId: string): void {
+		this.laneHalts.clear(laneId);
 	}
 
 	resumeWorkerAgent(
@@ -2298,6 +2348,12 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			activity,
 			...(attempt ? { dispatch: attempt.status } : {}),
 			...(waitState ? { waitReason: formatWorkerDispatchWait(waitState) } : {}),
+			...(attempt?.result
+				? { lastResult: { status: attempt.result.status, reasonCode: attempt.result.reasonCode } }
+				: {}),
+			...(activity === "idle" && agent.status === "registered" && attempt?.result?.nextAction === "parent_review"
+				? { awaitingParent: true as const }
+				: {}),
 			controllable: !callerAgentId || this.agentIsInCallerSubtree(agent, callerAgentId),
 			createdAt: agent.createdAt,
 			updatedAt: agent.updatedAt,

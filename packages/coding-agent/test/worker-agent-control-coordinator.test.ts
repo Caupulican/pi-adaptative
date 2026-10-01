@@ -274,6 +274,78 @@ describe("WorkerAgentControlCoordinator", () => {
 		expect(blockedByCaller).toHaveBeenCalledWith("caller", ["peer"]);
 	});
 
+	it("halts a running worker: it is told once, reports, and a worker that never reaches a boundary is cancelled at the deadline", () => {
+		vi.useFakeTimers();
+		try {
+			const attempt = activeAttempt("running");
+			const agent = registeredAgent({ activeAttemptId: attempt.attemptId, status: "active" });
+			const suspendAgent = vi.fn();
+			const abortLane = vi.fn();
+			const cancelLane = vi.fn();
+			const lifecycle = {
+				getAgent: () => agent,
+				getTaskRuntimeSnapshot: () =>
+					({
+						agents: { [agent.agentId]: agent },
+						attempts: { [attempt.attemptId]: attempt },
+					}) as TaskRuntimeProjection,
+				suspendAgent,
+			} as unknown as WorkerLifecycle;
+			const coordinator = new WorkerAgentControlCoordinator({
+				agentDir: root(),
+				parentSessionId: "parent-1",
+				processOwnerId: "pi-worker:1:owner",
+				isControlAvailable: () => true,
+				getLifecycle: () => lifecycle,
+				recoveredRequest: () => ({ instructions: "recovered" }),
+				run: async () => ({ started: false, skipReason: "unused" }),
+				scheduler: { enqueue: vi.fn(), drain: vi.fn(), track: vi.fn(), dropQueued: vi.fn() },
+				statusChanged: vi.fn(),
+				abortLane,
+				cancelLane,
+				haltReportDeadlineMs: 5_000,
+			});
+
+			// The default stops nothing by force: no suspension, no abort, the loop is simply asked to report.
+			expect(coordinator.interruptWorkerAgent("agent-1", {}, { message: "  owner changed plan  " })).toEqual({
+				interrupted: true,
+				mode: "halt",
+			});
+			expect(suspendAgent).not.toHaveBeenCalled();
+			expect(abortLane).not.toHaveBeenCalled();
+			expect(coordinator.interruptWorkerAgent("agent-1")).toEqual({
+				interrupted: true,
+				mode: "halt",
+				reason: "halt_already_requested",
+			});
+
+			// Nothing is delivered until the loop polls.
+			expect(coordinator.deliveredLaneHalt("worker-1")).toBeUndefined();
+			const request = coordinator.takeLaneHalt("worker-1");
+			expect(request?.userMessage).toContain("The parent stopped your work: owner changed plan");
+			expect(request?.closingPrompt).toContain("No tools are available");
+			// A re-attempted run (transient provider failure) halts again rather than resuming the task.
+			expect(coordinator.takeLaneHalt("worker-1")?.userMessage).toBe(request?.userMessage);
+			expect(coordinator.deliveredLaneHalt("worker-1")).toEqual({ reason: "owner changed plan" });
+
+			// A delivered halt has reached its boundary: the deadline no longer applies.
+			vi.advanceTimersByTime(10_000);
+			expect(cancelLane).not.toHaveBeenCalled();
+			coordinator.clearLaneHalt("worker-1");
+			expect(coordinator.deliveredLaneHalt("worker-1")).toBeUndefined();
+
+			// A worker that never reaches a boundary is cancelled, and the cancellation is what the parent hears.
+			expect(coordinator.interruptWorkerAgent("agent-1")).toEqual({ interrupted: true, mode: "halt" });
+			vi.advanceTimersByTime(4_999);
+			expect(cancelLane).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(1);
+			expect(abortLane).toHaveBeenCalledWith("worker-1", "interrupt_report_deadline");
+			expect(cancelLane).toHaveBeenCalledWith("worker-1", "interrupt_report_deadline");
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("owns follow-up scheduling, event-driven state waits, and cancellation callbacks without controller wrappers", async () => {
 		let agent = registeredAgent();
 		let attempt: AttemptRuntimeState | undefined;
@@ -351,7 +423,10 @@ describe("WorkerAgentControlCoordinator", () => {
 
 		attempt = activeAttempt("running");
 		agent = registeredAgent({ activeAttemptId: attempt.attemptId, status: "active" });
-		expect(coordinator.interruptWorkerAgent("agent-1")).toEqual({ interrupted: true });
+		expect(coordinator.interruptWorkerAgent("agent-1", {}, { force: true })).toEqual({
+			interrupted: true,
+			mode: "suspend",
+		});
 		expect(suspendAgent).toHaveBeenCalledWith("worker-1", "agent-1", "pi-worker:1:owner");
 		expect(abortLane).toHaveBeenCalledWith("worker-1", "agent_interrupted");
 
@@ -3168,7 +3243,10 @@ describe("WorkerAgentControlCoordinator", () => {
 		attempt = { ...activeAttempt("running"), attemptId: "attempt-parent", taskId: runningRecord.laneId };
 		parent = { ...parent, activeAttemptId: attempt.attemptId };
 		expect(coordinator.followUpWorkerAgent("parent", "steer active parent")).toMatchObject({ steering: true });
-		expect(coordinator.interruptWorkerAgent("parent")).toEqual({ interrupted: true });
+		expect(coordinator.interruptWorkerAgent("parent", {}, { force: true })).toEqual({
+			interrupted: true,
+			mode: "suspend",
+		});
 
 		attempt = { ...attempt, status: "suspended" };
 		expect(coordinator.resumeWorkerAgent("parent")).toMatchObject({ started: true, record: runningRecord });

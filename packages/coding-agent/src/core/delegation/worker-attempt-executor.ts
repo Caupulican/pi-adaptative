@@ -66,6 +66,8 @@ export interface WorkerAttemptExecutionLedger {
 
 export interface WorkerAttemptExecutionResult {
 	rawOutcome: WorkerRunOutcome;
+	/** The parent halted this run and its loop acted on it: the outcome is a halt report, not a retryable failure. */
+	haltDelivered: boolean;
 	usage: AttemptUsageSnapshot;
 	changedFiles: readonly string[];
 	outputArtifact?: ArtifactContract;
@@ -198,7 +200,10 @@ export interface WorkerAttemptExecutorOptions {
 	retentionPolicy?: WorkerConversationRetentionPolicy;
 	signal?: AbortSignal;
 	runIsolatedCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
-	agentControl: Pick<WorkerAgentControlCoordinator, "acknowledgeMailboxMessage" | "mailboxMessagesForConversation">;
+	agentControl: Pick<
+		WorkerAgentControlCoordinator,
+		"acknowledgeMailboxMessage" | "mailboxMessagesForConversation" | "takeLaneHalt" | "deliveredLaneHalt"
+	>;
 	applyActions?(actions: readonly WorkerAction[], actionJournal?: WorkerActionJournal): AppliedActionsReport;
 	warn(message: string): void;
 	/**
@@ -726,6 +731,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 					maxWallClockMs: options.grant.budget.maxWallClockMs ?? 0,
 					usageReportId: options.usageReportId,
 					sealChangedFiles,
+					interruptedByParent: () => options.agentControl.deliveredLaneHalt(options.laneId),
 					signal: options.signal,
 					cwd: options.cwd,
 					processCapable: options.processCapable,
@@ -1044,6 +1050,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												throw error;
 											}
 										},
+										// The parent's halt: taken once, at the next request boundary.
+										getHaltRequest: () => options.agentControl.takeLaneHalt(options.laneId),
 										getFollowUpMessages: async (): Promise<AgentMessage[]> => {
 											try {
 												signal.throwIfAborted();
@@ -1211,6 +1219,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 					: undefined;
 				return {
 					rawOutcome,
+					haltDelivered: options.agentControl.deliveredLaneHalt(options.laneId) !== undefined,
 					usage,
 					changedFiles: [...changedFiles],
 					...(outputArtifact ? { outputArtifact } : {}),

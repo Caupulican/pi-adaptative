@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Added `getHaltRequest` to the agent loop config: a host request that injects a message, spends one tool-free provider request on the model's own report, and ends the run, generalizing the runaway-stop closing turn.
+
 ### Fixed
 
 - Resolved a policy-phase tool failure record (except `owner_authorization_required`) after two later executed calls of any tool, so a blocked tool the model rightly never retries no longer rides every later request in the failure ledger.

@@ -229,6 +229,8 @@ function createExecutorHarness(
 		agentControl: {
 			acknowledgeMailboxMessage: () => events.push("ack"),
 			mailboxMessagesForConversation: () => [],
+			takeLaneHalt: () => undefined,
+			deliveredLaneHalt: () => undefined,
 		},
 		warn: (message) => events.push(`warn:${message}`),
 		...(planRequest ? { planRequest } : {}),

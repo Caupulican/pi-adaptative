@@ -314,6 +314,13 @@ export interface WorkerAgentView {
 	dispatch?: AttemptStatus;
 	/** Why a `queued` attempt has not been dispatched by this controller generation. */
 	waitReason?: string;
+	/** How the latest finished task ended, so an idle worker is not mistaken for one that completed cleanly. */
+	lastResult?: { status: string; reasonCode: string };
+	/**
+	 * The latest report asked the parent to review it and no newer task has started: the worker is idle
+	 * because it is waiting on the parent, who answers with `follow_up` on the same agentId.
+	 */
+	awaitingParent?: true;
 	/** True when this caller may start/transcript/cancel the agent. Session-root lists are all true. */
 	controllable: boolean;
 	createdAt: string;
@@ -386,7 +393,15 @@ export interface WorkerAgentControlPort {
 		message: string,
 		options?: WorkerAgentTaskStartOptions,
 	): { started: boolean; steering: false; messageId: string; record?: LaneRecord; skipReason?: string };
-	interruptWorkerAgent(agentId: string, scope?: WorkerAgentControlScope): { interrupted: boolean; reason?: string };
+	/**
+	 * Stop a running worker and make it report (a halt), or with `force` suspend it at once without a
+	 * report. A halt that reaches no request boundary before the deadline cancels the worker instead.
+	 */
+	interruptWorkerAgent(
+		agentId: string,
+		scope?: WorkerAgentControlScope,
+		options?: { message?: string; force?: boolean },
+	): { interrupted: boolean; mode?: "halt" | "suspend"; reason?: string };
 	resumeWorkerAgent(
 		agentId: string,
 		scope?: WorkerAgentControlScope,

@@ -224,7 +224,6 @@ describe("delegate session-root reply routing", () => {
 		});
 		expect(payload.cavemanDirective).toContain("suspended is durable nonterminal state");
 		expect(payload.cavemanDirective).toContain("not missed completion or harness failure");
-		expect(payload.cavemanDirective).toContain("explicitly interrupted");
 		expect(payload.cavemanDirective).toContain("host-owned transient retry resumes automatically");
 		expect(result.details).toMatchObject({
 			started: true,

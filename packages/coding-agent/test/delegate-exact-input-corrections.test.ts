@@ -553,7 +553,72 @@ describe("delegate exact-action input corrections", () => {
 		expect(spies.sendWorkerAgentMessage).not.toHaveBeenCalled();
 	});
 
-	it("interrupts and queues the message as two reported operations instead of dropping the text", async () => {
+	it("names the idle specialists a fresh start passed over, and says nothing when the start was a reuse", async () => {
+		const view = (agentId: string, activity: "idle" | "active", extra = {}) => ({
+			agentId,
+			rootAgentId: agentId,
+			depth: 0,
+			role: "implementer" as const,
+			modelRef: "xai/grok-4.7",
+			status: "registered" as const,
+			activity,
+			controllable: true,
+			createdAt: "T0",
+			updatedAt: "T1",
+			...extra,
+		});
+		let roster = [
+			view("worker-1", "idle", {
+				lastResult: { status: "blocked", reasonCode: "worker_interrupted" },
+				awaitingParent: true as const,
+			}),
+		];
+		const startedAs = (agentId: string) =>
+			vi.fn(() => {
+				// A fresh start registers its own identity; a reuse lands on one that already existed.
+				if (!roster.some((agent) => agent.agentId === agentId)) roster = [...roster, view(agentId, "active")];
+				return {
+					started: true as const,
+					record: { laneId: `${agentId}-lane`, agentId, type: "worker" as const, status: "running" as const },
+				};
+			});
+		const toolFor = (start: ReturnType<typeof startedAs>) =>
+			createDelegateToolDefinition({
+				caller: { kind: "session_root" },
+				resolveMessageReplayScope: fixedReplayScope,
+				startWorkerDelegation: start,
+				runWorkerDelegation: async () => ({ started: false, skipReason: "unused" }),
+				workerAgentControl: workerAgentControl({ listWorkerAgents: () => roster }),
+			});
+
+		const fresh = await toolFor(startedAs("worker-2")).execute(
+			"fresh-start",
+			{ action: "start", instructions: "Do the new thing." },
+			undefined,
+			undefined,
+			context,
+		);
+		const freshText = delegateText(fresh);
+		expect(freshText).toContain(
+			"idle specialists not used: worker-1 (implementer, xai/grok-4.7, last blocked/worker_interrupted, awaiting you)",
+		);
+		expect(freshText).toContain("delegate follow_up with an agentId wakes one");
+		expect(fresh.details).toMatchObject({ started: true, agentId: "worker-2", idleSpecialistIds: ["worker-1"] });
+
+		// worker-2 now exists and is idle again; starting onto worker-1 is a reuse, so nothing was passed over.
+		roster = [roster[0]!, view("worker-2", "idle")];
+		const reuse = await toolFor(startedAs("worker-1")).execute(
+			"reuse-start",
+			{ action: "start", instructions: "Do the next thing." },
+			undefined,
+			undefined,
+			context,
+		);
+		expect(delegateText(reuse)).not.toContain("idle specialists not used");
+		expect(reuse.details).not.toHaveProperty("idleSpecialistIds");
+	});
+
+	it("interrupts as a halt: the message is the reason the worker is told, never a queued message", async () => {
 		const spies = controlSpies();
 		const tool = toolWithSpies(spies);
 
@@ -566,12 +631,15 @@ describe("delegate exact-action input corrections", () => {
 		);
 
 		expect(result.isError).not.toBe(true);
-		expect(spies.interruptWorkerAgent).toHaveBeenCalledWith("worker-10");
-		expect(result.details).toMatchObject({ started: true, action: "interrupt", agentId: "worker-10", queued: true });
+		expect(spies.interruptWorkerAgent).toHaveBeenCalledWith("worker-10", undefined, {
+			message: "stop and read this",
+		});
+		expect(spies.sendWorkerAgentMessage).not.toHaveBeenCalled();
+		expect(result.details).toMatchObject({ started: true, action: "interrupt", agentId: "worker-10" });
 		const text = delegateText(result);
-		expect(text).toContain("interrupted");
-		expect(text).toContain("queued for worker-10");
-		expect(text).toContain("delegate resume");
+		expect(text).toContain("halt requested");
+		expect(text).toContain("terminal handoff wakes you");
+		expect(text).toContain("follow_up");
 	});
 
 	it("resolves status agentId to the agent's latest lane and refuses two selectors", async () => {
@@ -693,7 +761,7 @@ describe("delegate exact-action input corrections", () => {
 		expect(spies.followUpSessionRootWorkerAgent).toHaveBeenCalledWith("worker-1", "continue", {
 			idempotencyKey: expect.stringMatching(/^delegate-message-[a-f0-9]{64}$/),
 		});
-		expect(spies.interruptWorkerAgent).toHaveBeenCalledWith("worker-1");
+		expect(spies.interruptWorkerAgent).toHaveBeenCalledWith("worker-1", undefined, {});
 		for (const result of [cancelled, followedUp, interrupted]) {
 			expect((result.details as DelegateToolDetails).skipReason).not.toBe("action_field_forbidden");
 		}

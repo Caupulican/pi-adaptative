@@ -510,7 +510,7 @@ describe("automatic native specialist reuse", () => {
 			const running = context.harness.session.runWorkerDelegationOnce({ instructions: "Hold the interrupted lane" });
 			await gate.entered;
 			const suspendedAgentId = agentIdOf(context.laneRecords()[0]) ?? "";
-			const interrupted = context.lanes().interruptWorkerAgent(suspendedAgentId);
+			const interrupted = context.lanes().interruptWorkerAgent(suspendedAgentId, undefined, { force: true });
 			expect(interrupted.interrupted).toBe(true);
 			gate.release();
 			await running;

@@ -315,6 +315,8 @@ export interface IsolatedCompletionOptions {
 	getSteeringMessages?: AgentLoopConfig["getSteeringMessages"];
 	/** Durable post-turn follow-up inbox owned by the child conversation. */
 	getFollowUpMessages?: AgentLoopConfig["getFollowUpMessages"];
+	/** Host halt request for the child loop: one tool-free report turn, then the run ends. */
+	getHaltRequest?: AgentLoopConfig["getHaltRequest"];
 	/** Child-owned provider projection, invoked before every request without mutating raw history. */
 	transformContext?: AgentLoopConfig["transformContext"];
 	/**

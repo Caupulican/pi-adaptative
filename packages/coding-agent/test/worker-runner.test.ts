@@ -237,6 +237,51 @@ describe("runWorker", () => {
 		expect(outcome.reasonCode).toBe("worker_blocked");
 	});
 
+	it("turns a halted run into a blocked parent-review report, however clean the worker's own report reads", async () => {
+		const report = JSON.stringify({ summary: "Finished the audit.", status: "completed", findings: [] });
+		const outcome = await runWorker(
+			runnerOptions({
+				complete: async () => completionOf(report),
+				interruptedByParent: () => ({ reason: "owner changed plan" }),
+			}),
+		);
+		expect(outcome.laneStatus).toBe("blocked");
+		expect(outcome.reasonCode).toBe("worker_interrupted");
+		expect(outcome.claim.status).toBe("blocked");
+		expect(outcome.claim.summary).toBe("Finished the audit.");
+		expect(outcome.claim.blockers).toEqual(["interrupted by the parent: owner changed plan"]);
+		expect(outcome.claim.parentReviewRequired).toBe(true);
+		expect(outcome.accepted).toBe(false);
+
+		// Plain prose is the report as written; with no reason the blocker still names the stop.
+		const plain = await runWorker(
+			runnerOptions({
+				complete: async () => completionOf("Stopped midway: two of five files read."),
+				interruptedByParent: () => ({ reason: undefined }),
+			}),
+		);
+		expect(plain.reasonCode).toBe("worker_interrupted");
+		expect(plain.claim.summary).toBe("Stopped midway: two of five files read.");
+		expect(plain.claim.blockers).toEqual(["interrupted by the parent"]);
+
+		// A halt whose closing request failed keeps its real failure and still names the stop.
+		const failed = await runWorker(
+			runnerOptions({
+				complete: async () => completionOf("", 0.01, "error"),
+				interruptedByParent: () => ({ reason: "owner changed plan" }),
+			}),
+		);
+		expect(failed.reasonCode).toBe("model_error");
+		expect(failed.claim.status).toBe("failed");
+		expect(failed.claim.blockers).toEqual(["interrupted by the parent: owner changed plan"]);
+
+		// A run the parent never halted is unchanged.
+		const untouched = await runWorker(
+			runnerOptions({ complete: async () => completionOf(report), interruptedByParent: () => undefined }),
+		);
+		expect(untouched.claim.status).toBe("completed");
+	});
+
 	it("fails closed instead of salvaging malformed structured claim statuses", async () => {
 		for (const text of [
 			'{"summary":"missing status"}',

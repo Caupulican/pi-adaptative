@@ -1529,6 +1529,7 @@ export class ReflectionController {
 				afterToolCall: opts.afterToolCall,
 				getSteeringMessages: opts.getSteeringMessages,
 				getFollowUpMessages: opts.getFollowUpMessages,
+				getHaltRequest: opts.getHaltRequest,
 				transformContext: opts.transformContext,
 				planContext: opts.planContext,
 				requestPreflight: opts.requestPreflight,
