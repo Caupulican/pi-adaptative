@@ -689,7 +689,9 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 				runtime: {
 					reconcileObjective: async () =>
 						({
-							objectives: { "obj-e2e-complete": { objective: { status: "active" } } },
+							objectives: {
+								"obj-e2e-complete": { objective: { status: "active" }, taskIds: [], evidence: [] },
+							},
 							tasks: {},
 							attempts: {},
 						}) as any,
@@ -776,7 +778,9 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 				runtime: {
 					reconcileObjective: async () =>
 						({
-							objectives: { "obj-e2e-no-executor": { objective: { status: "active" } } },
+							objectives: {
+								"obj-e2e-no-executor": { objective: { status: "active" }, taskIds: [], evidence: [] },
+							},
 							tasks: {},
 							attempts: {},
 						}) as any,
@@ -836,7 +840,9 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 				runtime: {
 					reconcileObjective: async () =>
 						({
-							objectives: { "obj-outage-1": { objective: { status: "active" } } },
+							objectives: {
+								"obj-outage-1": { objective: { status: "active" }, taskIds: [], evidence: [] },
+							},
 							tasks: {},
 							attempts: {},
 						}) as any,

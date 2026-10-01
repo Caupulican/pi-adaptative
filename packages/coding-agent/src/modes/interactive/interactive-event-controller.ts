@@ -359,7 +359,7 @@ export async function handleInteractiveEvent(host: InteractiveEventHost, event: 
 			const details = event.result.details;
 			const carriesVerification =
 				!!details && typeof details === "object" && "piVerification" in (details as Record<string, unknown>);
-			if (["task_steps", "goal", "delegate"].includes(event.toolName) || carriesVerification) {
+			if (["task_steps", "goal", "delegate", "peer"].includes(event.toolName) || carriesVerification) {
 				host.refreshActivityLane();
 			}
 			host.workbench?.record(component?.getWorkbenchPreview(host.workbench.attribution()), {

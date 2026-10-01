@@ -14,7 +14,7 @@ const MAX_RECEIPT_TOOL_LENGTH = 100;
 const MAX_RECEIPT_ARGUMENTS_LENGTH = 8_000;
 const MAX_RECEIPT_OUTPUT_LENGTH = 12_000;
 const MAX_REMEDIATION_RECEIPTS = 16;
-const MIN_RESOLUTION_CONFIDENCE = 0.95;
+export const MIN_RESOLUTION_CONFIDENCE = 0.95;
 
 export type VerificationReceiptRole = "reproduction" | "repair" | "recheck";
 export type VerificationDisposition = "rejected" | "repaired";

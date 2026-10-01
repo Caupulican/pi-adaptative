@@ -150,7 +150,7 @@ describe("next-release hardening", () => {
 		const branch = composeDecisionDiagram(model).find((level) => level.kind === "branch");
 		expect(branch && branch.kind === "branch" ? branch.yes.lit : true).toBe(false);
 		expect(renderDecisionDiagram(model, 80).rows.map(stripAnsi).join("\n")).not.toContain("DELIVER");
-		expect(renderDecisionList(model, 80).rows.map(stripAnsi).join("\n")).toMatch(/not closed · 3 open/);
+		expect(renderDecisionList(model, 80).rows.map(stripAnsi).join("\n")).toMatch(/not closed · 3 checks/);
 
 		const hot = priceCompaction(fixture.compaction.hotCache);
 		expect(hot.proceed).toBe(false);
@@ -610,7 +610,7 @@ describe("next-release hardening", () => {
 		});
 		expect(model.goal.branch).toBe("pending");
 		const diagram = renderDecisionDiagram(model, 80).rows.map(stripAnsi).join("\n");
-		expect(diagram).toMatch(/not closed · 3 open/);
+		expect(diagram).toMatch(/not closed · 3 checks/);
 		expect(diagram).not.toMatch(/yes → DELIVER/);
 		expect(diagram).not.toContain("DELIVER");
 		const levels = composeDecisionDiagram(model);
@@ -671,7 +671,7 @@ describe("next-release hardening", () => {
 		expect(renderDecisionDiagram(model, 80).rows.map(stripAnsi).join("\n")).not.toContain("DELIVER");
 		const list = renderDecisionList(model, 80).rows.map(stripAnsi).join("\n");
 		expect(list).not.toMatch(/yes → deliver/i);
-		expect(list).toMatch(/not closed · 3 open/);
+		expect(list).toMatch(/not closed · 3 checks/);
 		const diagram = renderDecisionDiagram(model, 80);
 		expect(diagram.currentRow).toBeGreaterThan(0);
 	});

@@ -11,6 +11,7 @@ import {
 import { openWorkUnit, WORKER_RECEIPTS_CUSTOM_TYPE, workUnitWindow } from "../src/core/work-units.ts";
 
 const yes = { type: "noul", noul: 0.97 };
+const currentTestPass = { choice: "current_success", confidence: 0.99 };
 
 function receiptsOf(manager: SessionManager, turnOnly: readonly AssistantMessage[] = []): ClaimReceipts {
 	const window = workUnitWindow(manager, WORKER_RECEIPTS_CUSTOM_TYPE);
@@ -54,7 +55,7 @@ describe("claims over the work-unit window", () => {
 		manager.appendMessage({ role: "user", content: "status?", timestamp: 1 });
 		const answer = fauxAssistantMessage("All tests pass.");
 		manager.appendMessage(answer);
-		expect(judgeClaims({ states_tests_pass: yes }, receiptsOf(manager, [answer]))).toEqual([
+		expect(judgeClaims({ states_tests_pass: currentTestPass }, receiptsOf(manager, [answer]))).toEqual([
 			expect.objectContaining({ kind: "tests_pass", verdict: "unsupported" }),
 		]);
 	});
@@ -73,6 +74,8 @@ describe("claims over the work-unit window", () => {
 		};
 		manager.appendCustomEntry(WORKER_RECEIPTS_CUSTOM_TYPE, worker);
 		manager.appendMessage(fauxAssistantMessage("The worker ran the tests and they pass."));
-		expect(judgeClaims({ states_tests_pass: yes, states_files_changed: yes }, receiptsOf(manager))).toEqual([]);
+		expect(
+			judgeClaims({ states_tests_pass: currentTestPass, states_files_changed: yes }, receiptsOf(manager)),
+		).toEqual([]);
 	});
 });

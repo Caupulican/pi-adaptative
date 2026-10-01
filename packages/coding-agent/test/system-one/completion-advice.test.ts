@@ -18,6 +18,38 @@ const passingAnswers = {
 };
 
 describe("completion advice lifecycle", () => {
+	it("holds unavailable repository outcome evidence as a recoverable diagnostic, then continues", async () => {
+		const store = new ExecutionStore({
+			run_id: "repository-evidence",
+			objective: {
+				request: "Fix the repository outcome",
+				normalized_goal: "Fix the repository outcome",
+				acceptance_criteria: [{ id: "AC", text: "Outcome verified", required: true }],
+			},
+			repo: { root: "/repo", baseline_revision: "base" },
+		});
+		store.recordVerification({ kind: "unit_test", status: "passed", covers_acceptance_ids: ["AC"] });
+		const controller = new SystemOneController({
+			store,
+			adapter: { evaluate: async () => ({ model: "fixture", answers: passingAnswers, latency_ms: 0 }) },
+		});
+		let diagnostic: string | undefined = "repository_work_baseline_unavailable";
+		controller.setWorkDiffSource(() => ({
+			base: "base",
+			patch: diagnostic ? "" : "diff --git a/owner.ts b/owner.ts\n+fixed\n",
+			omittedChars: 0,
+			untracked: [],
+			...(diagnostic ? { diagnostic } : {}),
+		}));
+		const unavailable = await controller.executeCompletionTransaction();
+		expect(unavailable.verdict).toBe("blocked_external");
+		expect(unavailable.failed_gates[0]?.id).toBe("repository_outcome_evidence_unavailable");
+		expect(controller.verification.status().obligations).toEqual([]);
+		expect(store.phase).not.toBe("complete");
+		diagnostic = undefined;
+		expect((await controller.executeCompletionTransaction()).verdict).toBe("complete");
+	});
+
 	it.each(["primary", "challenge", "both"] as const)(
 		"keeps %s evaluator failures advisory after deterministic proof",
 		async (failure) => {

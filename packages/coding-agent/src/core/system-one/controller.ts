@@ -690,8 +690,21 @@ export class SystemOneController {
 		const { decision, answers, evaluationId } = await this.runStageValidation("claim_delivery", {
 			final_answer: this.projector.redactText(finalAnswer),
 		});
-		// What the ledger keeps: each claim kind with the probability the answer states it.
-		const reasons = Object.entries(answers).map(([id, answer]) => `${id} P=${probabilityText(answer)}`);
+		// What the ledger keeps: the typed claim judgment (including current-vs-historical provenance).
+		const reasons = Object.entries(answers).map(([id, answer]) => {
+			const typed = answer as { choice?: unknown; confidence?: unknown } | undefined;
+			if (typeof typed?.choice === "string") {
+				const confidence =
+					typeof typed.confidence === "number" &&
+					Number.isFinite(typed.confidence) &&
+					typed.confidence >= 0 &&
+					typed.confidence <= 1
+						? typed.confidence.toFixed(2)
+						: "none";
+				return `${id} choice=${typed.choice} confidence=${confidence}`;
+			}
+			return `${id} P=${probabilityText(answer)}`;
+		});
 		this.sealDecision(decision, "evaluated", evaluationId, reasons);
 		return answers;
 	}
@@ -1235,6 +1248,19 @@ export class SystemOneController {
 		// 2. Cold primary completion pack (R-048, R-049). Code-only questions are asked only when the goal
 		// changed the repository; a machine, service or answer outcome is judged on its outcome evidence.
 		const work = this.workDiffSource?.();
+		if (work?.diagnostic) {
+			return {
+				verdict: "blocked_external",
+				failed_gates: [
+					{
+						id: "repository_outcome_evidence_unavailable",
+						reason: work.diagnostic,
+						required_next_proof:
+							"Recover the retained repository baseline and read current outcome evidence before retrying completion. This is a host-evidence diagnostic, not a production defect.",
+					},
+				],
+			};
+		}
 		const repositoryOutcome = hasRepositoryOutcome(work, this.store.snapshot().changes.length);
 		const primaryOmit = [
 			...(repositoryOutcome && isBugFix ? [] : ["root_cause_addressed"]),

@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { TSchema } from "typebox";
+import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { captureCandidateSnapshot } from "./candidate-snapshot.ts";
 import type { VerificationCoordinator, VerificationHost } from "./verification-coordinator.ts";
@@ -59,12 +60,9 @@ export function createSessionVerificationHost(
 			const session = manager.getSessionId();
 			const leaf = manager.getLeafId();
 			return () => {
-				if (getManager() !== manager || manager.getSessionId() !== session) return false;
-				if (leaf === null) return manager.getLeafId() === null;
-				let cursor = manager.getLeafId();
-				// Walk only the appended suffix, not the entire long-session branch on every check.
-				while (cursor && cursor !== leaf) cursor = manager.getEntry(cursor)?.parentId ?? null;
-				return cursor === leaf;
+				return (
+					getManager() === manager && isSessionAppendAnchorCurrent(manager, { sessionId: session, leafId: leaf })
+				);
 			};
 		},
 	};

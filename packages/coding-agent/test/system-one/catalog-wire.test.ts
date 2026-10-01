@@ -33,17 +33,18 @@ describe("system-one catalog wire format", () => {
 		).toBe(true);
 	});
 
-	it("sends the test-claim question with its true and false criteria", () => {
+	it("sends the test-claim question with typed provenance choices", () => {
 		const question = getQuestionPack("claim_delivery").states_tests_pass!;
 		const wire = toTypeSafeEvaluationQuestions(getQuestionPack("claim_delivery"));
 		expect(wire.states_tests_pass).toEqual({
-			type: "noul",
+			type: "choice",
 			instructions: question.instructions,
 			criteria: question.criteria,
 		});
 		expect(wire.states_tests_pass!.criteria).toMatchObject({
-			true: expect.stringContaining("The build completed successfully counts"),
-			false: expect.stringContaining("predicts that a future build should succeed"),
+			current_success: expect.stringContaining("The build completed successfully counts"),
+			historical_only: expect.stringContaining("no verification was run in the current work"),
+			no_current_success: expect.stringContaining("predicts future success"),
 		});
 		expect(Value.Check(evaluationInputSchema, { state: { final_answer: "Lint is clean." }, questions: wire })).toBe(
 			true,

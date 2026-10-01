@@ -8,9 +8,15 @@ import { closeSync, lstatSync, openSync, readlinkSync, readSync } from "node:fs"
 import { isAbsolute, join, relative } from "node:path";
 import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { withoutInheritedGitLocation } from "../exec.ts";
+import { parseRepositoryHeadRecord } from "./repository-head-state.ts";
 
 export type RepoDeliveryFingerprint =
-	| { readonly ok: true; readonly digest: string; readonly entries: ReadonlyMap<string, string> }
+	| {
+			readonly ok: true;
+			readonly repositoryRoot: string;
+			readonly digest: string;
+			readonly entries: ReadonlyMap<string, string>;
+	  }
 	| { readonly ok: false; readonly reason: "repository_fingerprint_unstable" | "repository_fingerprint_unavailable" };
 
 export interface FingerprintHooks {
@@ -149,17 +155,26 @@ function parseStatusRecord(text: string, origPath?: string): StatusRecord {
 	return { text, path: path || undefined, submodule, ...(origPath ? { origPath } : {}) };
 }
 
-function takeStatusRecords(buffer: Buffer): { readonly records: StatusRecord[]; readonly rest: Buffer } {
+function takeStatusRecords(buffer: Buffer): {
+	readonly records: StatusRecord[];
+	readonly headRecords: string[];
+	readonly rest: Buffer;
+} {
 	const records: StatusRecord[] = [];
+	const headRecords: string[] = [];
 	let start = 0;
 	while (start < buffer.length) {
 		const nul = buffer.indexOf(0, start);
 		if (nul < 0) break;
 		const text = buffer.toString("utf8", start, nul);
 		start = nul + 1;
+		if (text.startsWith("# ")) {
+			if (text.startsWith("# branch.oid ")) headRecords.push(text);
+			continue;
+		}
 		if (text.startsWith("2 ")) {
 			const origNul = buffer.indexOf(0, start);
-			if (origNul < 0) return { records, rest: buffer.subarray(start - text.length - 1) };
+			if (origNul < 0) return { records, headRecords, rest: buffer.subarray(start - text.length - 1) };
 			const orig = buffer.toString("utf8", start, origNul);
 			start = origNul + 1;
 			records.push(parseStatusRecord(text, orig));
@@ -167,7 +182,7 @@ function takeStatusRecords(buffer: Buffer): { readonly records: StatusRecord[]; 
 		}
 		if (text.length > 0) records.push(parseStatusRecord(text));
 	}
-	return { records, rest: buffer.subarray(start) };
+	return { records, headRecords, rest: buffer.subarray(start) };
 }
 
 interface Fence {
@@ -178,8 +193,6 @@ interface Fence {
 }
 
 async function readFence(repoRoot: string, hooks?: FingerprintHooks): Promise<Fence | undefined> {
-	const head = await gitText(repoRoot, ["rev-parse", "HEAD"], hooks);
-	if (!head) return undefined;
 	const index = createHash("sha256");
 	const indexOk = await runGit(
 		repoRoot,
@@ -192,19 +205,23 @@ async function readFence(repoRoot: string, hooks?: FingerprintHooks): Promise<Fe
 	if (!indexOk) return undefined;
 	const indexDigest = index.digest("hex");
 	const records: StatusRecord[] = [];
+	const headRecords: string[] = [];
 	let pending = Buffer.alloc(0);
 	const statusOk = await runGit(
 		repoRoot,
-		["status", "--porcelain=v2", "-z", "--untracked-files=all"],
+		["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"],
 		(chunk) => {
 			pending = Buffer.concat([pending, chunk]);
 			const taken = takeStatusRecords(pending);
 			records.push(...taken.records);
+			headRecords.push(...taken.headRecords);
 			pending = Buffer.from(taken.rest);
 		},
 		hooks,
 	);
-	if (!statusOk || pending.length > 0) return undefined;
+	if (!statusOk || pending.length > 0 || headRecords.length !== 1) return undefined;
+	const head = parseRepositoryHeadRecord(headRecords[0]!);
+	if (!head) return undefined;
 	const token = createHash("sha256");
 	token.update(head);
 	token.update("\0");
@@ -276,7 +293,7 @@ export async function captureRepoDeliveryFingerprint(
 			const after = await readFence(repoRoot, hooks);
 			if (!after) return { ok: false, reason: "repository_fingerprint_unavailable" };
 			if (before.token !== after.token) return "retry";
-			return { ok: true, digest: digested.digest, entries: digested.entries };
+			return { ok: true, repositoryRoot: repoRoot, digest: digested.digest, entries: digested.entries };
 		} catch {
 			return { ok: false, reason: "repository_fingerprint_unavailable" };
 		}

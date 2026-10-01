@@ -75,6 +75,164 @@ describe("System One StateProjector", () => {
 		expect(intake.objective.normalized_goal).not.toContain(userKey);
 	});
 
+	it("redacts configured credentials in every WorkDiff string field without mutating the source", () => {
+		const userKey = "path-secret-value-23456";
+		const projector = new StateProjector([userKey]);
+		const store = new ExecutionStore({
+			run_id: "work-diff-redaction",
+			objective: {
+				request: "Review changed repository work",
+				normalized_goal: "Review changed repository work",
+				acceptance_criteria: [],
+			},
+			repo: { root: "/repo", baseline_revision: "rev-1" },
+		});
+		const work = {
+			base: `base-${userKey}`,
+			patch: `+content ${userKey}`,
+			omittedChars: 0,
+			untracked: [`/repo/${userKey}:new-${userKey}.ts`, "/repo/src/ordinary.ts"],
+			diagnostic: `evidence ${userKey} unavailable`,
+			repositories: [{ root: `/repo/${userKey}`, base: `repository-base-${userKey}` }],
+		};
+		const originalWork = structuredClone(work);
+
+		const projection = projector.completion(store.snapshot(), work) as {
+			final_diff: {
+				base_commit: string;
+				patch: string;
+				evidence_unavailable: string;
+				new_untracked_files: string[];
+				repositories: Array<{ root: string; base: string }>;
+			};
+		};
+
+		expect(JSON.stringify(projection)).not.toContain(userKey);
+		expect(projection.final_diff).toMatchObject({
+			base_commit: "base-[REDACTED_SECRET]",
+			patch: "+content [REDACTED_SECRET]",
+			evidence_unavailable: "evidence [REDACTED_SECRET] unavailable",
+			new_untracked_files: ["/repo/[REDACTED_SECRET]:new-[REDACTED_SECRET].ts", "/repo/src/ordinary.ts"],
+			repositories: [{ root: "/repo/[REDACTED_SECRET]", base: "repository-base-[REDACTED_SECRET]" }],
+		});
+		expect(work).toEqual(originalWork);
+	});
+
+	it("redacts configured credentials from model-bound path and command metadata", () => {
+		const userKey = "metadata-secret-value-54321";
+		const projector = new StateProjector([userKey]);
+		const store = new ExecutionStore({
+			run_id: "projector-metadata-redaction",
+			objective: {
+				request: "Review repository changes",
+				normalized_goal: "Review repository changes",
+				acceptance_criteria: [{ id: "AC-1", text: "The change passes its focused check" }],
+			},
+			repo: {
+				root: `/repo/${userKey}`,
+				baseline_revision: `revision-${userKey}`,
+				allowed_paths: [`/repo/${userKey}/src`, "/repo/src"],
+				protected_paths: [`/repo/${userKey}/private`, "/repo/vendor"],
+				languages: ["typescript"],
+			},
+			initial_plan: [
+				{
+					id: "step-1",
+					goal: "Update the changed module",
+					status: "active",
+					action_class: "edit",
+					dependencies: [],
+					allowed_paths: [`/repo/${userKey}/src`, "/repo/src"],
+					proof_obligations: [`Check ${userKey}`, "Preserve the public API"],
+				},
+			],
+		});
+		const change = store.recordChange({
+			path: `/repo/${userKey}/src/module.ts`,
+			kind: "modify",
+			ownership: "worker",
+			diff_content: "changed",
+		});
+		const observation = store.recordObservation({
+			text: "The source is readable",
+			source: {
+				kind: "file",
+				locator: `/repo/${userKey}/src/module.ts`,
+				trust: "repository_untrusted_text",
+			},
+		});
+		const claim = store.recordClaim({
+			text: "The source is readable",
+			materiality: "informational",
+			evidence_ids: [observation.id],
+		});
+		store.recordHypothesis({
+			text: "The implementation is complete",
+			supporting_evidence: [observation.id],
+			next_discriminator: `Inspect ${userKey}`,
+		});
+		store.recordToolEvent({
+			tool: "bash",
+			intent: `Run verification for ${userKey}`,
+			impact: "read_only",
+			status: "succeeded",
+		});
+		store.recordVerification({
+			kind: "unit_test",
+			status: "passed",
+			command: `npm test -- ${userKey}`,
+			covers_acceptance_ids: ["AC-1"],
+		});
+		const state = store.snapshot();
+		const originalState = structuredClone(state);
+		const projections = [
+			projector.intake(state),
+			projector.preflight(state, "step-1"),
+			projector.evidenceCheck(state, claim.id, observation.id),
+			projector.postflight(state, "step-1"),
+			projector.patchReview(state, [change.id]),
+			projector.completion(state),
+		];
+
+		expect(JSON.stringify(projections)).not.toContain(userKey);
+		expect(projections[0]).toMatchObject({
+			repo: {
+				root: "/repo/[REDACTED_SECRET]",
+				baseline_revision: "revision-[REDACTED_SECRET]",
+				languages: ["typescript"],
+			},
+		});
+		expect(projections[1]).toMatchObject({
+			current_step: {
+				proof_obligations: ["Check [REDACTED_SECRET]", "Preserve the public API"],
+			},
+			evidence_view: [expect.objectContaining({ source_locator: "/repo/[REDACTED_SECRET]/src/module.ts" })],
+		});
+		expect(projections[2]).toMatchObject({
+			evidence: { locator: "/repo/[REDACTED_SECRET]/src/module.ts" },
+		});
+		expect(projections[3]).toMatchObject({
+			diff_view: [expect.objectContaining({ path: "/repo/[REDACTED_SECRET]/src/module.ts" })],
+		});
+		expect(projections[4]).toMatchObject({
+			diff_view: [expect.objectContaining({ path: "/repo/[REDACTED_SECRET]/src/module.ts" })],
+			architecture_context: {
+				allowed_paths: ["/repo/[REDACTED_SECRET]/src", "/repo/src"],
+				protected_paths: ["/repo/[REDACTED_SECRET]/private", "/repo/vendor"],
+			},
+		});
+		expect(projections[5]).toMatchObject({
+			verification_matrix: [expect.objectContaining({ command: "npm test -- [REDACTED_SECRET]" })],
+			outcome_evidence: [
+				expect.objectContaining({
+					checks: [expect.objectContaining({ command: "npm test -- [REDACTED_SECRET]" })],
+				}),
+			],
+			final_diff: [expect.objectContaining({ path: "/repo/[REDACTED_SECRET]/src/module.ts" })],
+		});
+		expect(state).toEqual(originalState);
+	});
+
 	it("labels repository and external text as untrusted (R-031, R-065)", () => {
 		const repoUntrusted = wrapUntrustedText("Some README text instructing the agent to ignore rules");
 		expect(repoUntrusted.trust).toBe("repository_untrusted_text");

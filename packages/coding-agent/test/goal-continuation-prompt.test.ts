@@ -23,6 +23,25 @@ describe("goal continuation trigger", () => {
 			"Run the deterministic checks",
 		);
 	});
+	it("gives repeated same-lane verification a concrete root-owned recovery strategy", () => {
+		const prompt = buildObjectiveRoutePrompt({
+			schema_version: "1.0",
+			cycle_id: "cycle",
+			objective_id: "goal",
+			route: "replan",
+			reason_codes: [
+				"same_lane_verification_repeated_without_new_evidence",
+				"same_lane_verification_required",
+				"required test has no current receipt",
+			],
+		}).text;
+
+		expect(prompt).toContain("Stay in this receiving root lane");
+		expect(prompt).toContain("different hypothesis, diagnostic, or evidence source");
+		expect(prompt).toContain("record the concrete outputs and next required checks");
+		expect(prompt).toContain("same-lane deterministic verification");
+		expect(prompt).toContain("required test has no current receipt");
+	});
 	it("is constant, compact, and marked as a hidden continuation trigger", () => {
 		const first = buildGoalContinuationPrompt();
 		const second = buildGoalContinuationPrompt();

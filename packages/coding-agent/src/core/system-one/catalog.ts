@@ -268,12 +268,16 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 	// read from the work's receipts in code (claim-delivery.ts), never judged from the answer's own words.
 	claim_delivery: Object.freeze({
 		states_tests_pass: Object.freeze({
-			type: "boolean",
+			type: "choice",
 			instructions:
-				"Does `final_answer` assert that a verification performed during this work succeeded? This includes tests, type checking, tsc, linting, compiling and building described as passed, succeeded, successful, clean, or without errors. Treat a direct result statement such as Lint is clean or tsc reports no errors as a claim. A quotation or report of what a script or build log printed, such as The build log says: success, without asserting that the agent verified anything, is not a claim. A statement that tests failed or were not run is not a success claim. A prediction, expectation, or plan about a future verification, such as The build should succeed, does not report a completed result.",
+				"Classify only whether `final_answer` asserts that tests or another verification performed during this work passed. Distinguish a current-work result from an explicitly historical run or saved baseline. If both historical and current results are asserted, choose current_success. A quotation or report of what a script or build log printed, without asserting that the agent verified it, is no_current_success. Failures, non-runs and predictions about future verification are no_current_success.",
 			criteria: Object.freeze({
-				true: "The answer directly reports that a test, check, lint, compile, or build performed during this work passed, succeeded, completed successfully, was clean, or had no errors. A concise direct result such as The build completed successfully counts.",
-				false: "The answer only quotes a script or log, says tests failed or were not run, or predicts that a future build should succeed, without asserting a successful verification in this work.",
+				current_success:
+					"The answer directly claims that a test, check, lint, compile, or build performed during this work passed, succeeded, was clean, or had no errors. A concise direct result such as The build completed successfully counts. If historical results are also mentioned, choose this when a current-work pass is claimed.",
+				historical_only:
+					"The answer reports a prior-session run or saved baseline as historical evidence and explicitly distinguishes that no verification was run in the current work. It makes no current-work success claim.",
+				no_current_success:
+					"The answer only quotes a script or log, says checks failed or were not run, predicts future success, or makes no successful verification claim for this work.",
 			}),
 		}),
 		states_committed: Object.freeze({

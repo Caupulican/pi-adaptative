@@ -28,6 +28,8 @@ export interface OperatorPovSource {
 	getSelfCompactionView?(): SelfCompactionView;
 	/** The branch's recorded CI verdict (core/ci-status-view.ts); absent when none is recorded. */
 	getCiStatus?(): CiStatusView | undefined;
+	/** Mandatory peer findings, separate from advisory System One doubts. */
+	getPeerFindingCount?(): number;
 }
 
 export type OperatorPovSegmentId =
@@ -40,6 +42,7 @@ export type OperatorPovSegmentId =
 	| "active"
 	| "route"
 	| "system-one"
+	| "peer-findings"
 	| "cost"
 	| "proof"
 	| "ci"
@@ -215,6 +218,16 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		dropOrder: 0,
 		tone: health.state === "degraded" ? "warning" : undefined,
 	});
+	const peerFindingCount = source.getPeerFindingCount?.();
+	if (peerFindingCount !== undefined) {
+		segments.push({
+			id: "peer-findings",
+			label: "PEER",
+			value: `${peerFindingCount} active`,
+			compact: String(peerFindingCount),
+			dropOrder: 12,
+		});
+	}
 
 	segments.push({
 		id: "cost",

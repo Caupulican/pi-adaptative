@@ -17,6 +17,8 @@ import { createHarness, type Harness } from "../suite/harness.ts";
 
 const yes = { type: "noul", noul: 0.97 };
 const no = { type: "noul", noul: 0.02 };
+const currentTestPass = { choice: "current_success", confidence: 0.99 };
+const noCurrentTestPass = { choice: "no_current_success", confidence: 0.99 };
 
 let callSeq = 0;
 function turn(command: string, isError: boolean): AgentMessage[] {
@@ -47,7 +49,10 @@ describe("claims against deliveries", () => {
 
 	it("contradicts a stated push whose every push failed, and flags a stated commit nothing backs", () => {
 		const receipts = collectClaimReceipts(turn("git push origin main", true));
-		const findings = judgeClaims({ states_pushed: yes, states_committed: yes, states_tests_pass: no }, receipts);
+		const findings = judgeClaims(
+			{ states_pushed: yes, states_committed: yes, states_tests_pass: noCurrentTestPass },
+			receipts,
+		);
 		expect(findings.map((f) => [f.kind, f.verdict])).toEqual([
 			["committed", "unsupported"],
 			["pushed", "contradicted"],
@@ -69,10 +74,12 @@ describe("claims against deliveries", () => {
 			] as AgentMessage[];
 		const passed = collectClaimReceipts(completion("update_goal", { passed: 3, failed: 0 }, false));
 		expect(passed.tests).toEqual({ passed: 3, failed: 0, lastPassed: true });
-		expect(judgeClaims({ states_tests_pass: yes }, passed)).toEqual([]);
+		expect(judgeClaims({ states_tests_pass: currentTestPass }, passed)).toEqual([]);
 
 		const failed = collectClaimReceipts(completion("goal", { passed: 2, failed: 1 }, true));
-		expect(judgeClaims({ states_tests_pass: yes }, failed).map((f) => f.verdict)).toEqual(["contradicted"]);
+		expect(judgeClaims({ states_tests_pass: currentTestPass }, failed).map((f) => f.verdict)).toEqual([
+			"contradicted",
+		]);
 
 		// Only the goal tools report check runs: the same field on another tool is no receipt.
 		const foreign = collectClaimReceipts(completion("some_extension", { passed: 3, failed: 0 }, false));
@@ -132,11 +139,99 @@ describe("claims against deliveries", () => {
 		expect(judgeClaims({ states_pushed: { type: "noul", noul: 0.5 } }, receipts)).toEqual([]);
 	});
 
+	it("does not treat an explicitly historical test result as a current pass claim", async () => {
+		const evaluateAnswerClaims = vi
+			.fn<(answer: string) => Promise<Record<string, unknown>>>()
+			.mockResolvedValueOnce({
+				states_tests_pass: { choice: "historical_only", confidence: 0.99 },
+			})
+			.mockResolvedValueOnce({ states_tests_pass: currentTestPass })
+			.mockResolvedValueOnce({ states_tests_pass: currentTestPass });
+		const checker = new AnswerClaimChecker({
+			getController: () => ({ evaluateAnswerClaims }),
+			warn: () => {},
+		});
+		const historical =
+			"Previous native run passed; the saved debug.68 baseline passed all nine scenarios. No new tests were run during this work.";
+		expect(await checker.findings(historical, [])).toEqual([]);
+
+		const current = "I ran the tests during this work and they passed.";
+		expect(await checker.findings(current, [])).toMatchObject([{ kind: "tests_pass", verdict: "unsupported" }]);
+
+		const mixed =
+			"The saved baseline passed all nine scenarios, and I reran them during this work; they passed again.";
+		expect(await checker.findings(mixed, [])).toMatchObject([{ kind: "tests_pass", verdict: "unsupported" }]);
+		expect(evaluateAnswerClaims).toHaveBeenCalledTimes(3);
+	});
+
+	it("records the typed claim choice and confidence in the decision reason", async () => {
+		const store = new ExecutionStore({
+			run_id: "claim-reason",
+			objective: { request: "", normalized_goal: "", acceptance_criteria: [], constraints: [] },
+			repo: { root: "/repo", baseline_revision: "rev-0" },
+		});
+		const reasons: string[][] = [];
+		const controller = new SystemOneController({
+			store,
+			evaluationObserver: {
+				start: () => "claim-evaluation",
+				settleOk: () => {},
+				settleFailed: () => {},
+				settleCancelled: () => {},
+				noteVerdict: (_id, _verdict, values) => reasons.push([...(values ?? [])]),
+			},
+			adapter: {
+				evaluate: async (request) => ({
+					model: "jev-1.13.0",
+					latency_ms: 1,
+					answers: Object.fromEntries(
+						Object.keys(request.questions).map((id) => [
+							id,
+							id === "states_tests_pass" ? { choice: "historical_only", confidence: 0.99 } : no,
+						]),
+					),
+				}),
+			},
+		});
+
+		await controller.evaluateAnswerClaims("Previous baseline passed; no current tests were run.");
+
+		const reason = reasons.at(-1)?.join(" ");
+		expect(reason).toContain("states_tests_pass choice=historical_only confidence=0.99");
+		expect(reason).not.toContain("states_tests_pass P=none");
+	});
+
+	it.each([
+		{ choice: "current_success", confidence: 0.6 },
+		{ choice: "made_up_choice", confidence: 0.99 },
+	])("does not turn an unsettled or invalid provenance judgment into a current claim: $choice", async (answer) => {
+		const checker = new AnswerClaimChecker({
+			getController: () => ({ evaluateAnswerClaims: async () => ({ states_tests_pass: answer }) }),
+			warn: () => {},
+		});
+		expect(await checker.findings("All tests passed during this work.", [])).toEqual([]);
+	});
+
+	it("reports evaluator outages without manufacturing owner findings", async () => {
+		const warnings: string[] = [];
+		const deliverToOwner = vi.fn();
+		const checker = new AnswerClaimChecker({
+			getController: () => ({
+				evaluateAnswerClaims: async () => Promise.reject(new Error("evaluator unavailable")),
+			}),
+			warn: (message) => warnings.push(message),
+			deliverToOwner,
+		});
+		expect(await checker.check("All tests passed during this work.", [])).toBeUndefined();
+		expect(warnings).toEqual(["Claims in answers are not being checked against tool results: evaluator unavailable"]);
+		expect(deliverToOwner).not.toHaveBeenCalled();
+	});
+
 	it("blocks a worker report its own results contradict, and a verifier's acceptance nothing inspected", async () => {
 		const warnings: string[] = [];
 		const checker = new AnswerClaimChecker({
 			getController: () => ({
-				evaluateAnswerClaims: async () => ({ states_pushed: yes, states_tests_pass: no }),
+				evaluateAnswerClaims: async () => ({ states_pushed: yes, states_tests_pass: noCurrentTestPass }),
 			}),
 			warn: (message) => warnings.push(message),
 		});
@@ -194,7 +289,7 @@ describe("claims against deliveries", () => {
 				getController: () => ({
 					evaluateAnswerClaims: async (finalAnswer: string) => {
 						asked.push(finalAnswer);
-						return { states_tests_pass: finalAnswer === relayed ? no : yes };
+						return { states_tests_pass: finalAnswer === relayed ? noCurrentTestPass : currentTestPass };
 					},
 				}),
 				warn: () => {},
@@ -209,7 +304,7 @@ describe("claims against deliveries", () => {
 	});
 
 	describe("a claim no receipt backs climbs the ladder", () => {
-		const statesTests = async () => ({ states_tests_pass: yes });
+		const statesTests = async () => ({ states_tests_pass: currentTestPass });
 		// A test runner the harness does not recognize leaves no receipt; its output is still evidence.
 		const unrecognizedRun = turn("pytest -q", false);
 
@@ -437,7 +532,7 @@ describe("claims against deliveries", () => {
 						answers: Object.fromEntries(
 							Object.keys(request.questions).map((id) => [
 								id,
-								id.startsWith("shows_") ? unsure : id === "states_tests_pass" ? yes : no,
+								id.startsWith("shows_") ? unsure : id === "states_tests_pass" ? currentTestPass : no,
 							]),
 						),
 					}),

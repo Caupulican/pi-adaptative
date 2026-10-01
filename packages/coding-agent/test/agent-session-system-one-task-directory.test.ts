@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
@@ -349,6 +349,225 @@ describe("System One task-directory projection", () => {
 				baseline_revision: taskRevision,
 				current_revision: taskRevision,
 			});
+		} finally {
+			await session.disposeAndWait();
+			provider.unregister();
+		}
+	});
+
+	it("SDK completion attributes only the selected task repository's goal-owned change", async () => {
+		const startupRoot = committedRepo("sdk-work-evidence-startup");
+		const taskRoot = committedRepo("sdk-work-evidence-task");
+		const taskDirectory = join(taskRoot, "nested");
+		mkdirSync(taskDirectory);
+		writeFileSync(join(startupRoot, "README.md"), "startup pre-existing tracked dirt\n");
+		writeFileSync(join(startupRoot, "startup-before-goal.txt"), "startup pre-existing untracked dirt\n");
+		writeFileSync(join(taskRoot, "README.md"), "task pre-existing tracked dirt\n");
+		writeFileSync(join(taskRoot, "task-before-goal.txt"), "task pre-existing untracked dirt\n");
+		const startupRevision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: startupRoot, encoding: "utf8" }).trim();
+		const provider = registerFauxProvider();
+		const model = provider.getModel();
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(model.provider, "faux-key");
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		modelRegistry.registerProvider(model.provider, {
+			baseUrl: model.baseUrl,
+			apiKey: "faux-key",
+			api: provider.api,
+			models: provider.models.map((registered) => ({
+				id: registered.id,
+				name: registered.name,
+				api: registered.api,
+				reasoning: registered.reasoning,
+				textToolCallProtocol: registered.textToolCallProtocol,
+				input: registered.input,
+				cost: registered.cost,
+				contextWindow: registered.contextWindow,
+				maxTokens: registered.maxTokens,
+				baseUrl: registered.baseUrl,
+				defaultThinkingLevel: registered.defaultThinkingLevel,
+				thinkingLevelMap: registered.thinkingLevelMap,
+			})),
+		});
+		const store = new ExecutionStore({
+			run_id: "sdk-work-evidence-task-directory",
+			objective: {
+				request: "Write one goal-owned file",
+				normalized_goal: "Write one goal-owned file",
+				acceptance_criteria: [],
+			},
+			repo: { root: startupRoot, baseline_revision: startupRevision, current_revision: startupRevision },
+		});
+		const controller = new SystemOneController({
+			store,
+			adapter: { evaluate: async () => ({ model: "jev-test", answers: {}, latency_ms: 0 }) },
+		});
+		const { session } = await createAgentSession({
+			cwd: startupRoot,
+			agentDir: startupRoot,
+			model,
+			authStorage,
+			modelRegistry,
+			settingsManager: SettingsManager.inMemory({ modelCapability: { mode: "off" } }),
+			sessionManager: SessionManager.inMemory(startupRoot),
+			systemOneController: controller,
+			tools: ["task_directory", "task_steps", "write"],
+		});
+		try {
+			provider.setResponses([
+				fauxAssistantMessage(
+					[
+						fauxToolCall("task_steps", {
+							action: "set",
+							steps: [{ content: "Task repo work", status: "in_progress" }],
+						}),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("Task started"),
+			]);
+			await session.prompt("Start the task in its task directory.");
+			provider.setResponses([
+				fauxAssistantMessage(
+					[fauxToolCall("task_directory", { action: "register", workspaceId: "task", path: taskDirectory })],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("Task registered"),
+			]);
+			await session.prompt("Register the task workspace.");
+			provider.setResponses([
+				fauxAssistantMessage([fauxToolCall("task_directory", { action: "select", workspaceId: "task" })], {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("Task selected"),
+			]);
+			await session.prompt("Select the task workspace.");
+			provider.setResponses([
+				fauxAssistantMessage(
+					[
+						fauxToolCall("task_directory", {
+							action: "bind",
+							taskId: "step-1",
+							workspaceId: "task",
+							pinned: true,
+						}),
+					],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("Task workspace bound"),
+			]);
+			await session.prompt("Bind the active task to its workspace.");
+			provider.setResponses([
+				fauxAssistantMessage([fauxToolCall("task_directory", { action: "select", workspaceId: "session" })], {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage([fauxToolCall("task_directory", { action: "select", workspaceId: "task" })], {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("Task workspace reselected"),
+			]);
+			await session.prompt("Reselect the task workspace after visiting the startup workspace.");
+			session.saveGoalStateSnapshot(
+				createGoalState({
+					goalId: "task-repository-work",
+					userGoal: "Write a goal-owned file in the selected task repository",
+					now: "T0",
+				}),
+			);
+			const nestedAbsoluteTarget = join(taskDirectory, "new-parent", "deeper", "goal-owned.txt");
+			provider.setResponses([
+				fauxAssistantMessage(
+					[fauxToolCall("write", { path: nestedAbsoluteTarget, content: "only this goal's change\n" })],
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage("Goal-owned file written"),
+			]);
+			await session.prompt("Write the requested goal-owned file.");
+			expect(existsSync(nestedAbsoluteTarget)).toBe(true);
+			expect(existsSync(join(taskRoot, "new-parent", "deeper", "goal-owned.txt"))).toBe(false);
+			expect(existsSync(join(startupRoot, "new-parent", "deeper", "goal-owned.txt"))).toBe(false);
+
+			const completion = controller.completionView();
+			expect(completion.repositoryOutcome, JSON.stringify(session.getGoalWorkEvidence())).toBe(true);
+			const finalDiff = completion.view.final_diff as {
+				patch: string;
+				new_untracked_files: string[];
+				repositories: { root: string; base: string }[];
+			};
+			expect(finalDiff.patch).toContain("only this goal's change");
+			expect(finalDiff.patch).not.toContain("startup pre-existing");
+			expect(finalDiff.patch).not.toContain("task pre-existing");
+			expect(finalDiff.patch).not.toContain(startupRoot);
+			expect(finalDiff.new_untracked_files).toEqual([`${taskRoot}:nested/new-parent/deeper/goal-owned.txt`]);
+			expect(finalDiff.repositories.map((repository) => repository.root)).toEqual([taskRoot]);
+			expect(JSON.stringify(finalDiff)).not.toContain("startup-before-goal.txt");
+			expect(JSON.stringify(finalDiff)).not.toContain("task-before-goal.txt");
+		} finally {
+			await session.disposeAndWait();
+			provider.unregister();
+		}
+	});
+
+	it("does not treat pre-existing startup dirt as planning-only goal outcome", async () => {
+		const startupRoot = committedRepo("sdk-planning-only-dirty-startup");
+		writeFileSync(join(startupRoot, "README.md"), "unrelated tracked dirt before the goal\n");
+		writeFileSync(join(startupRoot, "before-goal.txt"), "unrelated untracked dirt before the goal\n");
+		const startupRevision = execFileSync("git", ["rev-parse", "HEAD"], { cwd: startupRoot, encoding: "utf8" }).trim();
+		const provider = registerFauxProvider();
+		const model = provider.getModel();
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(model.provider, "faux-key");
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		modelRegistry.registerProvider(model.provider, {
+			baseUrl: model.baseUrl,
+			apiKey: "faux-key",
+			api: provider.api,
+			models: provider.models.map((registered) => ({
+				id: registered.id,
+				name: registered.name,
+				api: registered.api,
+				reasoning: registered.reasoning,
+				textToolCallProtocol: registered.textToolCallProtocol,
+				input: registered.input,
+				cost: registered.cost,
+				contextWindow: registered.contextWindow,
+				maxTokens: registered.maxTokens,
+				baseUrl: registered.baseUrl,
+				defaultThinkingLevel: registered.defaultThinkingLevel,
+				thinkingLevelMap: registered.thinkingLevelMap,
+			})),
+		});
+		const store = new ExecutionStore({
+			run_id: "sdk-planning-only-dirty-startup",
+			objective: { request: "Plan the work", normalized_goal: "Plan the work", acceptance_criteria: [] },
+			repo: { root: startupRoot, baseline_revision: startupRevision, current_revision: startupRevision },
+		});
+		const controller = new SystemOneController({
+			store,
+			adapter: { evaluate: async () => ({ model: "jev-test", answers: {}, latency_ms: 0 }) },
+		});
+		const { session } = await createAgentSession({
+			cwd: startupRoot,
+			agentDir: startupRoot,
+			model,
+			authStorage,
+			modelRegistry,
+			settingsManager: SettingsManager.inMemory({ modelCapability: { mode: "off" } }),
+			sessionManager: SessionManager.inMemory(startupRoot),
+			systemOneController: controller,
+		});
+		try {
+			session.saveGoalStateSnapshot(
+				createGoalState({
+					goalId: "planning-only",
+					userGoal: "Plan a change without modifying the repository",
+					now: "T0",
+				}),
+			);
+			const completion = controller.completionView();
+			expect(completion.repositoryOutcome).toBe(false);
+			expect(JSON.stringify(completion.view)).not.toContain("unrelated tracked dirt");
+			expect(JSON.stringify(completion.view)).not.toContain("before-goal.txt");
 		} finally {
 			await session.disposeAndWait();
 			provider.unregister();

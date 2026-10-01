@@ -9,11 +9,14 @@
  * runs extension `tool_result` handlers and structurally fences output from untrusted-content sources.
  */
 
+import { existsSync, statSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import type { Agent, BeforeToolCallResult } from "@caupulican/pi-agent-core";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
 import { classifyAllEdgeOperations, type EdgeClass } from "./autonomy/edge-policy.ts";
 import { evaluateToolGateAsync } from "./autonomy/gates.ts";
+import { safeRealpathSync } from "./autonomy/path-scope.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
 import { isMutatingToolCall } from "./model-router/tool-escalation.ts";
 import { refuseLocalPush } from "./objective-execution/local-commit-delivery.ts";
@@ -43,6 +46,20 @@ export const CONTROL_PLANE_TOOL_NAMES: ReadonlySet<string> = new Set([
 
 type BeforeToolCall = NonNullable<Agent["beforeToolCall"]>;
 type AfterToolCall = NonNullable<Agent["afterToolCall"]>;
+
+function existingObservationCwd(targetDirectory: string): string {
+	let candidate = safeRealpathSync(targetDirectory);
+	while (true) {
+		try {
+			if (existsSync(candidate) && statSync(candidate).isDirectory()) return safeRealpathSync(candidate);
+		} catch {
+			// Continue to the nearest existing parent; the file operation's own path gate remains authoritative.
+		}
+		const parent = dirname(candidate);
+		if (parent === candidate) return candidate;
+		candidate = parent;
+	}
+}
 
 export interface ToolGateControllerDeps {
 	/**
@@ -160,9 +177,14 @@ export function collectMutatedPaths(toolName: string, args: unknown): string[] {
 	return [...new Set(paths)];
 }
 
+interface AdmittedRepositoryObservation {
+	readonly tokens: readonly RepositoryObservationToken[];
+	readonly declaredOwnedPaths: readonly string[];
+}
+
 export class ToolGateController {
 	private readonly deps: ToolGateControllerDeps;
-	private readonly pendingObservations = new Map<string, RepositoryObservationToken>();
+	private readonly pendingObservations = new Map<string, AdmittedRepositoryObservation>();
 
 	constructor(deps: ToolGateControllerDeps) {
 		this.deps = deps;
@@ -172,7 +194,8 @@ export class ToolGateController {
 		toolCallId: string,
 		toolName: string,
 		args: unknown,
-	): Promise<RepositoryObservationToken | undefined> {
+		invocationCwd: string | undefined,
+	): Promise<AdmittedRepositoryObservation | undefined> {
 		const observer = this.deps.repositoryObserver;
 		if (!observer) return undefined;
 		const effect = repositoryEffectForCall({
@@ -182,29 +205,59 @@ export class ToolGateController {
 			hostEffect: this.deps.hostRepositoryEffect?.(toolName),
 		});
 		if (effect === "none") return undefined;
-		return observer.begin({
-			callId: toolCallId,
-			objectiveId: this.deps.getObjectiveId?.() ?? "",
-			cwd: this.deps.getCwd(),
-			effect,
-		});
+		// Direct typed mutations name their exact targets. Observe each target's parent repository,
+		// including absolute paths admitted by PathAuthority outside the session launch folder.
+		// Shell commands stay rooted at their admitted invocation cwd; parsing commands for `cd`
+		// would confuse intent with the process's actual repository scope.
+		const baseCwd = invocationCwd ?? this.deps.getCwd();
+		const declaredOwnedPaths =
+			effect === "typed_owned_write"
+				? collectMutatedPaths(toolName, args).map((filePath) => safeRealpathSync(resolve(baseCwd, filePath)))
+				: [];
+		const candidates = declaredOwnedPaths.map((filePath) => existingObservationCwd(dirname(filePath)));
+		const cwds = [...new Set(candidates.length ? candidates : [existingObservationCwd(baseCwd)])];
+		const tokens: RepositoryObservationToken[] = [];
+		const observedRoots = new Set<string>();
+		try {
+			for (let index = 0; index < cwds.length; index++) {
+				const token = await observer.begin({
+					callId: cwds.length === 1 ? toolCallId : `${toolCallId}:repo:${index}`,
+					objectiveId: this.deps.getObjectiveId?.() ?? "",
+					cwd: cwds[index]!,
+					effect,
+				});
+				const rootIdentity = token.repositoryRoot ?? token.cwd;
+				if (observedRoots.has(rootIdentity)) {
+					await observer.abort(token);
+					continue;
+				}
+				observedRoots.add(rootIdentity);
+				tokens.push(token);
+			}
+			return { tokens, declaredOwnedPaths };
+		} catch (error) {
+			for (const token of tokens) await observer.abort(token);
+			throw error;
+		}
 	}
 
-	private async finishObservation(
-		toolCallId: string,
-		toolName: string,
-		args: unknown,
-		operationSucceeded: boolean,
-	): Promise<void> {
-		const token = this.pendingObservations.get(toolCallId);
-		if (!token) return;
+	private async finishObservation(toolCallId: string, operationSucceeded: boolean): Promise<void> {
+		const observation = this.pendingObservations.get(toolCallId);
+		if (!observation) return;
 		this.pendingObservations.delete(toolCallId);
-		const declared = token.effect === "typed_owned_write" ? collectMutatedPaths(toolName, args) : [];
-		await this.deps.repositoryObserver?.finish({
-			token,
-			declaredOwnedPaths: declared,
-			operationSucceeded,
-		});
+		const results = await Promise.allSettled(
+			observation.tokens.map((token) =>
+				this.deps.repositoryObserver?.finish({
+					token,
+					declaredOwnedPaths: observation.declaredOwnedPaths,
+					operationSucceeded,
+				}),
+			),
+		);
+		const failures = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+		if (failures.length === 1) throw failures[0];
+		if (failures.length > 1)
+			throw new AggregateError(failures, "Repository observation finalization failed", { cause: failures[0] });
 	}
 
 	readonly beforeToolCall: BeforeToolCall = async (
@@ -261,7 +314,7 @@ export class ToolGateController {
 
 		// 1. Pre-hook capability envelope & path bounds check on raw args
 		let terminalOutcome = await evaluateEnvelope(args);
-		let observationToken: RepositoryObservationToken | undefined;
+		let observation: AdmittedRepositoryObservation | undefined;
 		let observationHandedOff = false;
 		try {
 			const denied = blockedBy(terminalOutcome);
@@ -274,7 +327,6 @@ export class ToolGateController {
 				if (acquisitionBlock) return acquisitionBlock;
 			}
 
-			observationToken = await this.beginObservation(toolCall.id, toolCall.name, args);
 			// 2. Extension tool_call hooks
 			const runner = this.deps.getExtensionRunner();
 			let extensionResult: BeforeToolCallResult | undefined;
@@ -404,17 +456,17 @@ export class ToolGateController {
 				// Advisory ranking/storage reads cannot deny an otherwise authorized operation.
 			}
 			if (releaseObservation) registerCleanup?.(releaseObservation);
-			if (observationToken) {
+			observation = await this.beginObservation(toolCall.id, toolCall.name, args, executionContext?.cwd);
+			if (observation) {
 				observationHandedOff = true;
-				this.pendingObservations.set(toolCall.id, observationToken);
+				this.pendingObservations.set(toolCall.id, observation);
 			}
 			return yolo ? undefined : extensionResult;
 		} finally {
-			if (observationToken && !observationHandedOff) {
-				await this.deps.repositoryObserver?.finish({
-					token: observationToken,
-					operationSucceeded: false,
-				});
+			if (observation && !observationHandedOff) {
+				for (const token of observation.tokens) {
+					await this.deps.repositoryObserver?.finish({ token, operationSucceeded: false });
+				}
 			}
 			// A later abort does not invalidate a decision the envelope already made; the pre-hook
 			// evaluation above either completed (and is published) or threw before this block exists.
@@ -555,7 +607,7 @@ export class ToolGateController {
 			// Result hooks can fail before complete(). A terminal call must retain no pending
 			// observation; a projection failure is not evidence that the tool itself failed.
 			selection?.discard(toolCall.id);
-			await this.finishObservation(toolCall.id, toolCall.name, args, finishSucceeded);
+			await this.finishObservation(toolCall.id, finishSucceeded);
 		}
 	};
 }

@@ -51,6 +51,7 @@ it("counts one invocation once while foreground and background handoff observati
 			getTaskStepsStateSnapshot: () => undefined,
 			getGoalStateSnapshot: () => undefined,
 			getVerificationObligations: () => [],
+			getSemanticVerificationObligations: () => [],
 			getSemanticEvaluations: () => [],
 			onSemanticEvaluation: () => () => {},
 			subscribe: () => () => {},

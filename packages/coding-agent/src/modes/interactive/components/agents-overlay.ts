@@ -4,6 +4,7 @@ import type { EdgeGrantView } from "../../../core/autonomy/edge-policy.ts";
 import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
 import type { GoalState } from "../../../core/goals/goal-state.ts";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
+import type { SemanticVerificationObligationView } from "../../../core/system-one/verification-obligations.ts";
 import type { TaskStepsState } from "../../../core/tasks/task-state.ts";
 import {
 	goalEvidencePanelRow,
@@ -30,6 +31,8 @@ export interface AgentsOverlaySnapshot {
 	items: readonly ActivityLaneItem[];
 	/** Failed verifications still open on the branch; shown so the operator never learns of them from an error. */
 	verification?: readonly VerificationObligationView[];
+	/** Active mandatory peer-review findings from their lifecycle owner. */
+	peerFindings?: readonly SemanticVerificationObligationView[];
 	/** Edge classes granted (instructions, this session, settings); an ungranted class asks once. */
 	edge?: readonly EdgeGrantView[];
 }
@@ -220,17 +223,40 @@ export function buildWorkPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: numb
 	const goal = snapshot.goalState;
 	const task = snapshot.taskState;
 	const activity = projectWorkActivity(snapshot, nowMs);
+	const peerFindings = snapshot.peerFindings ?? [];
 	const satisfied = goal?.requirements.filter((requirement) => requirement.status === "satisfied").length ?? 0;
 	const rows: OrchestrationPanelRow[] = [
 		...(goal?.requirements.map(goalRequirementPanelRow) ?? []),
 		...(goal?.evidence.map(goalEvidencePanelRow) ?? []),
 		...(task?.steps.map((step) => ({ ...taskStepPanelRow(step), section: "Plan" })) ?? []),
+		...peerFindings.slice(0, 3).map((finding) => ({
+			status: "blocked" as const,
+			label: finding.reason,
+			section: "Peer findings",
+			meta: [finding.id],
+			details: [
+				`scope: ${finding.scope}`,
+				`receiver: ${finding.receiverId}`,
+				`candidate: ${finding.candidateKind} ${finding.candidateId}`,
+			],
+		})),
+		...(peerFindings.length > 3
+			? [
+					{
+						status: "info" as const,
+						label: `+${peerFindings.length - 3} more`,
+						section: "Peer findings",
+						meta: [`${peerFindings.length} total`],
+					},
+				]
+			: []),
 		...activity.rows,
 	];
 	const summary = [
 		goal ? `goal ${goal.status.replace("_", " ")}` : undefined,
 		goal ? `${satisfied}/${goal.requirements.length} requirements` : undefined,
 		task ? `${task.steps.length + task.archive.completed + task.archive.cancelled} plan steps` : undefined,
+		`${peerFindings.length} peer finding${peerFindings.length === 1 ? "" : "s"}`,
 		...activity.summary,
 	].filter((value): value is string => value !== undefined);
 	return {

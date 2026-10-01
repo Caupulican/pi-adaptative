@@ -1,4 +1,5 @@
 import type { ObjectiveRoute } from "../objective-execution/objective-route.ts";
+import { SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE } from "../objective-execution/objective-route-policy.ts";
 import { isSameLaneVerificationDirective } from "../system-one/control-directive.ts";
 
 /** Hidden turn trigger. The current goal record is injected ephemerally during context assembly. */
@@ -52,9 +53,13 @@ export function buildObjectiveRoutePrompt(route: ObjectiveRoute): GoalContinuati
 		? ` Target requirements: ${route.target_requirement_ids.join(", ")}.`
 		: "";
 	const why = route.reason_codes.length ? ` (${route.reason_codes.join(", ")})` : "";
-	const brief = isSameLaneVerificationDirective({ objectiveRoute: route.route, reasonCodes: route.reason_codes })
-		? "Verify the finding against current evidence in this lane; revise confirmed failures and recheck before continuing affected work. Record the checks and their receipts."
-		: ROUTE_BRIEFS[route.route];
+	const repeatedSameLaneRecovery =
+		route.reason_codes.includes(SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE) && route.route === "replan";
+	const brief = repeatedSameLaneRecovery
+		? "The same verification finding has repeated without new evidence. Stay in this receiving root lane, keep every finding active, and choose a different hypothesis, diagnostic, or evidence source. Take that recovery step now and record the concrete outputs and next required checks; then return to same-lane deterministic verification when the new evidence is ready."
+		: isSameLaneVerificationDirective({ objectiveRoute: route.route, reasonCodes: route.reason_codes })
+			? "Verify the finding against current evidence in this lane; revise confirmed failures and recheck before continuing affected work. Record the checks and their receipts."
+			: ROUTE_BRIEFS[route.route];
 	return {
 		text: `System One route: ${route.route}${why}.${targets} ${brief}`,
 		truncated: false,

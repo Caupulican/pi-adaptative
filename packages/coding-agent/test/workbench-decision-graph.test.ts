@@ -354,10 +354,10 @@ describe("Decision graph model", () => {
 		const list = stripAnsi(renderDecisionList(model, 96).rows.join("\n"));
 		expect(list).not.toContain("DOUBTS");
 		expect(list).not.toContain("evidence_sufficient: P(yes)=0.55");
-		expect(list).toContain("not closed · 1 open · 1 doubt");
+		expect(list).toContain("not closed · 1 checks · 1 doubt");
 		expect(list).not.toContain("yes → deliver");
 		const diagram = stripAnsi(renderDecisionDiagram(model, 96).rows.join("\n"));
-		expect(diagram).toContain("not closed · 1 open · 1 unsure");
+		expect(diagram).toContain("not closed · 1 checks · 1 unsure");
 		expect(diagram).not.toContain("evidence_sufficient: P(yes)=0.55");
 	});
 

@@ -907,12 +907,14 @@ export class InteractiveMode {
 
 	private activityLaneSnapshot() {
 		const verification = this.session.getVerificationObligations();
+		const peerFindings = this.session.getSemanticVerificationObligations();
 		const edge = this.session.getEdgeGrants();
 		return {
 			goalState: this.session.getGoalStateSnapshot(),
 			taskState: this.session.getTaskStepsStateSnapshot(),
 			laneRecords: this.session.getLaneRecords(),
 			...(verification.length ? { verification } : {}),
+			...(peerFindings.length ? { peerFindings } : {}),
 			...(edge.length ? { edge } : {}),
 		};
 	}

@@ -116,6 +116,8 @@ describe("regression: system-one-steering-runtime-bundle", () => {
 			objectives: {
 				"obj-bundle-test": {
 					objective: { status: "active" },
+					taskIds: [],
+					evidence: [],
 				},
 			},
 			tasks: {},

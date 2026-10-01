@@ -273,7 +273,11 @@ import {
 	type TrustedDeployAdapter,
 	TrustedDeployAdapterRegistry,
 } from "./objective-execution/release-delivery.ts";
-import { RepositoryMutationObserver } from "./objective-execution/repository-mutation-observer.ts";
+import {
+	RepositoryMutationObserver,
+	type RepositoryWorkEvidenceJournal,
+	type RepositoryWorkEvidenceScope,
+} from "./objective-execution/repository-mutation-observer.ts";
 import { mayHoldUnownedWorktreeChanges } from "./objective-execution/worktree-ownership.ts";
 import { type CacheDecisionRow, DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import type { DecisionStageSink } from "./operator-projection/decision-stage-log.ts";
@@ -382,6 +386,7 @@ import {
 	toolResultEvidence,
 	UNSETTLED_ITEM_CONSULT_PROMPT,
 } from "./system-one/unsettled-ladder.ts";
+import type { SemanticVerificationObligationView } from "./system-one/verification-obligations.ts";
 import { createSessionWorkerControl, type SystemOneWorkerControl } from "./system-one/worker-control.ts";
 import { SystemPromptBuilder } from "./system-prompt-builder.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "./tasks/session-task-state.ts";
@@ -3187,6 +3192,26 @@ export class AgentSession {
 	/** Every active verification obligation with what the operator can read about it. */
 	getVerificationObligations(): VerificationObligationView[] {
 		return new VerificationObligationTracker(this.agent.state.messages).getActiveObligations();
+	}
+
+	/** Bind the branch-scoped durable repository outcome journal after session construction. */
+	setWorkEvidenceJournal(journal: RepositoryWorkEvidenceJournal): void {
+		this._repositoryObserver.setWorkEvidenceJournal(journal);
+	}
+
+	/** Replay this objective's pending host journal handoffs before new repository work is admitted. */
+	recoverGoalWorkEvidence(): Promise<void> {
+		return this._repositoryObserver.recoverWorkEvidence(this.objectiveMutationId());
+	}
+
+	/** Repository scope and mutations for the current objective, resolved through its authoritative id. */
+	getGoalWorkEvidence(): readonly RepositoryWorkEvidenceScope[] {
+		return this._repositoryObserver.getWorkEvidence(this.objectiveMutationId());
+	}
+
+	/** Mandatory System One findings for projections that display them separately from advisory doubts. */
+	getSemanticVerificationObligations(): readonly SemanticVerificationObligationView[] {
+		return this._systemOneController?.verification.status().obligations ?? [];
 	}
 
 	/**

@@ -25,7 +25,7 @@ import type { JevAdapter } from "../adapter.ts";
 import { projectCanonicalTruth } from "../canonical-truth.ts";
 import { SystemOneController } from "../controller.ts";
 import { ExecutionStore } from "../execution-state.ts";
-import { readWorkDiff } from "../work-diff.ts";
+import { captureWorkBaseline, readWorkDiff, type WorkBaseline } from "../work-diff.ts";
 
 export type OutcomeKind = "repository" | "machine" | "remote" | "information" | "mixed";
 
@@ -504,7 +504,10 @@ function git(cwd: string, args: string[]): string {
 }
 
 /** A scratch repository whose base commit predates the goal, then the case's changes on top. */
-function scratchRepository(testCase: CompletionEvalCase, goalStartedAt: string): string {
+function scratchRepository(
+	testCase: CompletionEvalCase,
+	goalStartedAt: string,
+): { root: string; baseline: WorkBaseline } {
 	const root = mkdtempSync(join(tmpdir(), "pi-completion-eval-"));
 	const write = (files: Readonly<Record<string, string>> | undefined) => {
 		for (const [path, content] of Object.entries(files ?? {})) {
@@ -533,8 +536,10 @@ function scratchRepository(testCase: CompletionEvalCase, goalStartedAt: string):
 		],
 		{ cwd: root, env: { ...process.env, GIT_AUTHOR_DATE: baseDate, GIT_COMMITTER_DATE: baseDate } },
 	);
+	const baseline = captureWorkBaseline(root);
+	if (!baseline) throw new Error("Completion evaluation could not capture its repository baseline");
 	write(testCase.repositoryChanges);
-	return root;
+	return { root, baseline };
 }
 
 /** The goal as a session builds it: requirements, evidence, each requirement satisfied by its evidence. */
@@ -590,7 +595,7 @@ export async function evaluateCompletionOnce(
 		mkdirSync(dirname(join(machine, path)), { recursive: true });
 		writeFileSync(join(machine, path), content);
 	}
-	const cwd = scratchRepository(testCase, now);
+	const { root: cwd, baseline } = scratchRepository(testCase, now);
 	try {
 		// The goal tool's completion order: rerun every requirement check first; a failed one refuses
 		// completion before System One is asked.
@@ -631,7 +636,7 @@ export async function evaluateCompletionOnce(
 			},
 		});
 		controller.setTruthSource(() => projectCanonicalTruth({ goal, currentRevision: revision }));
-		controller.setWorkDiffSource(() => readWorkDiff(cwd, goal.createdAt));
+		controller.setWorkDiffSource(() => readWorkDiff(cwd, baseline));
 		const verdict = await controller.executeCompletionTransaction(false, { persistTerminal: false });
 		// System One's raw answers for every question it was asked: what calibration is measured on.
 		const answers = Object.assign({}, ...store.snapshot().decisions.map((decision) => decision.answers));

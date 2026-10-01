@@ -87,7 +87,8 @@ import { createSystemOneConfig } from "./system-one/config.ts";
 import { SystemOneController } from "./system-one/controller.ts";
 import { ExecutionStore } from "./system-one/execution-state.ts";
 import { IntegrityHookCoordinator } from "./system-one/integrity-hooks.ts";
-import { readWorkDiff, readWorkDiffBase } from "./system-one/work-diff.ts";
+import { createSessionWorkEvidenceJournal, readGoalWorkDiff } from "./system-one/session-work-diff.ts";
+import { readWorkRepositoryRoot } from "./system-one/work-diff.ts";
 import { time } from "./timings.ts";
 import {
 	createBashTool,
@@ -859,6 +860,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			(steeringPlane || systemOneController ? new AdaptiveRuntimeReadiness({ isUnbound: true }) : undefined),
 	});
 	sessionRef.current = session;
+	session.setWorkEvidenceJournal(createSessionWorkEvidenceJournal(() => session.sessionManager));
+	await session.recoverGoalWorkEvidence();
 
 	// Phase B — Adaptive runtime late binding to live session-owned ports
 	if ((steeringPlane || systemOneController) && !options.adaptiveReadiness) {
@@ -1137,8 +1140,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	if (systemOneController) {
-		const readActiveRepository = (startedAt?: string) => {
-			const repositoryRoot = session.taskCwd;
+		const readActiveRepository = () => {
+			const repositoryRoot = readWorkRepositoryRoot(session.taskCwd) ?? session.taskCwd;
 			let currentRevision = "unversioned";
 			try {
 				currentRevision =
@@ -1150,9 +1153,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			} catch {
 				// A non-git task workspace has no repository revision to project.
 			}
-			const baselineRevision = startedAt
-				? (readWorkDiffBase(repositoryRoot, startedAt) ?? currentRevision)
-				: currentRevision;
+			const baselineRevision =
+				session.getGoalWorkEvidence().find((scope) => scope.baseline?.root === repositoryRoot)?.baseline
+					?.revision ?? currentRevision;
 			return {
 				repositoryRoot,
 				currentRevision,
@@ -1161,7 +1164,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		};
 		systemOneController.setTruthSource(() => {
 			const goal = session.getGoalStateSnapshot();
-			const repository = readActiveRepository(goal?.createdAt);
+			const repository = readActiveRepository();
 			return projectCanonicalTruth({
 				goal,
 				runtime: session.backgroundLanes.getTaskRuntimeSnapshot(),
@@ -1174,7 +1177,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		systemOneController.syncCanonicalTruth();
 		systemOneController.setWorkDiffSource(() => {
 			const goal = session.getGoalStateSnapshot();
-			return goal ? readWorkDiff(session.taskCwd, goal.createdAt) : undefined;
+			return goal ? readGoalWorkDiff(session.getGoalWorkEvidence()) : undefined;
 		});
 	}
 	if (executionLoopMode === "objective_primary" && !session.objectiveExecutionController) {

@@ -124,6 +124,9 @@ function composeDecisionGraph(host: InteractiveLayoutHost, humanInput: HumanInpu
 			: []),
 		...graphChecksFromVerificationObligations(session.getVerificationObligations()),
 	];
+	const peerFindings: NonNullable<DecisionGraphInput["peerFindings"]> = session
+		.getSemanticVerificationObligations()
+		.map(({ id, reason, scope }) => ({ id, reason, scope }));
 	const idlePreparation = session.getIdlePreparationView();
 	return buildDecisionGraphModel({
 		projection,
@@ -134,6 +137,7 @@ function composeDecisionGraph(host: InteractiveLayoutHost, humanInput: HumanInpu
 		lanes: session.getLaneRecords(),
 		plan,
 		checks,
+		peerFindings,
 		receipts: host.workbench?.evidenceCounts() ?? { actions: 0, fileEffects: 0, failures: 0 },
 		humanInput: {
 			...(humanInput.question ? { question: humanInput.question } : {}),
@@ -229,6 +233,7 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		getSessionWorkState: () => host.session.getSessionWorkState(),
 		getSelfCompactionView: () => host.session.getSelfCompactionView(),
 		getCiStatus: () => readCiStatusView(host.session.sessionManager.getCwd()),
+		getPeerFindingCount: () => host.session.getSemanticVerificationObligations().length,
 	});
 	const humanInput = subscribeInteractiveLayout(host);
 	const view = new WorkbenchComponent({

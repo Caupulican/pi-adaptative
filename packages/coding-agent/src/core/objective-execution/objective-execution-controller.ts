@@ -79,6 +79,7 @@ import {
 } from "./delivery-coordinator.ts";
 import { type ApprovedCandidateTree, candidateTreeDigest } from "./delivery-proof.ts";
 import { finalizeDelivery } from "./finalization-coordinator.ts";
+import { evidenceMarkerOf } from "./ledger-route-checkpoints.ts";
 import { applyLocalCommitCharter } from "./local-commit-delivery.ts";
 import { completionFailuresToRepairWork, type RepairWork } from "./objective-repair-work.ts";
 import {
@@ -88,7 +89,11 @@ import {
 	routeToTerminal,
 	validateObjectiveRoute,
 } from "./objective-route.ts";
-import { composeObjectiveRoute, INDEPENDENT_VERIFICATION_REASON_CODE } from "./objective-route-policy.ts";
+import {
+	composeObjectiveRoute,
+	INDEPENDENT_VERIFICATION_REASON_CODE,
+	SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE,
+} from "./objective-route-policy.ts";
 import {
 	projectBoundedCombinedState,
 	type RouteHistoryEntry,
@@ -783,6 +788,15 @@ export class ObjectiveExecutionController {
 			if (pendingDirective) this.deps.systemOne.noteControlDirective(pendingDirective);
 		}
 		const pendingSupervision = requiredWorkerInFlight ? undefined : this.deps.pendingSupervisionRequests?.()[0];
+		const verificationDirective = isSameLaneVerificationDirective(pendingDirective) ? pendingDirective : undefined;
+		const currentEvidenceMarker = evidenceMarkerOf(runtime, objectiveId);
+		const repeatedSameLaneVerification =
+			verificationDirective !== undefined &&
+			history.filter(
+				(entry) =>
+					entry.evidenceMarker === currentEvidenceMarker &&
+					verificationDirective.reasonCodes.every((reasonCode) => entry.reasonCodes.includes(reasonCode)),
+			).length >= 2;
 		const supervisionAction =
 			pendingSupervision?.action === "request_specialist" ||
 			pendingSupervision?.action === "request_capability" ||
@@ -798,6 +812,7 @@ export class ObjectiveExecutionController {
 			requiredWorkerInFlight,
 			ownerRequired: this.deps.ownerRequired?.(objectiveId) ?? false,
 			strategyRepetition: stall.repeatedWithoutNewEvidence,
+			repeatedSameLaneVerification,
 			semantic,
 			...(supervisionAction && pendingSupervision
 				? {
@@ -1943,12 +1958,14 @@ export class ObjectiveExecutionController {
 	): Promise<ObjectiveTerminalResult | undefined> {
 		// The root executes what System One did not hand to an independent worker: a review and an
 		// escalation always go to a worker, so does a verification that must be independent.
+		const sameLaneVerificationRecovery = route.reason_codes.includes(SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE);
 		if (
 			this.deps.rootExecutor &&
 			!escalated &&
-			route.route !== "review" &&
 			!route.reason_codes.includes(INDEPENDENT_VERIFICATION_REASON_CODE) &&
-			(!this.deps.workerDispatcher?.dispatch || (this.deps.chooseExecutor?.(route) ?? "root") === "root")
+			(sameLaneVerificationRecovery ||
+				(route.route !== "review" &&
+					(!this.deps.workerDispatcher?.dispatch || (this.deps.chooseExecutor?.(route) ?? "root") === "root")))
 		) {
 			await this._noteExecutor(route, "root");
 			await this.deps.rootExecutor.execute(route, signal);

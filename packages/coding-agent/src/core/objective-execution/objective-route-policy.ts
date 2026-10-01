@@ -13,6 +13,7 @@ import {
 import type { SemanticRouteJudgments } from "./objective-route-projector.ts";
 
 export const INDEPENDENT_VERIFICATION_REASON_CODE = "independent_verification_required";
+export const SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE = "same_lane_verification_repeated_without_new_evidence";
 
 export interface RouteCompositionInput {
 	readonly cycleId: string;
@@ -25,6 +26,8 @@ export interface RouteCompositionInput {
 	readonly externalBlocker?: boolean;
 	readonly ownerRequired?: boolean;
 	readonly strategyRepetition?: boolean;
+	/** A same-lane verification route has already repeated at this evidence marker. */
+	readonly repeatedSameLaneVerification?: boolean;
 	readonly contextStale?: boolean;
 	readonly semantic?: SemanticRouteJudgments;
 	readonly taskId?: string | null;
@@ -95,6 +98,19 @@ export function composeObjectiveRoute(input: RouteCompositionInput): ObjectiveRo
 			input,
 		);
 	}
+	if (
+		input.repeatedSameLaneVerification &&
+		input.systemOneDirective &&
+		isSameLaneVerificationDirective(input.systemOneDirective)
+	) {
+		return buildRoute(
+			cycleId,
+			objectiveId,
+			"replan",
+			[SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE, ...input.systemOneDirective.reasonCodes],
+			input,
+		);
+	}
 	if (input.systemOneDirective && isSameLaneVerificationDirective(input.systemOneDirective)) {
 		return buildRoute(
 			cycleId,
@@ -131,7 +147,6 @@ export function composeObjectiveRoute(input: RouteCompositionInput): ObjectiveRo
 			input,
 		);
 	}
-
 	if (input.systemOneDirective) {
 		return buildRoute(
 			cycleId,

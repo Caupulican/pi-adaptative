@@ -17,6 +17,7 @@ import {
 	GOAL_MIGRATION_SCHEMA_VERSION,
 	migrateGoalState,
 } from "../../src/core/objective-execution/goal-state-migration.ts";
+import { evidenceMarkerOf } from "../../src/core/objective-execution/ledger-route-checkpoints.ts";
 import {
 	type DisagreementTelemetryEvent,
 	ObjectiveExecutionController,
@@ -37,6 +38,7 @@ import { composeObjectiveRoute } from "../../src/core/objective-execution/object
 import { ObjectiveStallDetector } from "../../src/core/objective-execution/objective-stall-fingerprint.ts";
 import { OrchestrationEventStore } from "../../src/core/orchestration/event-store.ts";
 import { DurableTaskRuntime } from "../../src/core/orchestration/task-runtime.ts";
+import { sameLaneVerificationDirective } from "../../src/core/system-one/control-directive.ts";
 import { SystemOneController } from "../../src/core/system-one/controller.ts";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
 
@@ -318,6 +320,174 @@ describe("Objective Execution Controller & Jev Substrate (OEL-001 to OEL-045)", 
 			semantic: { workRemaining: true, missingWorkClass: "implement", capabilityEscalationRequired: true },
 		});
 		expect(escalateRoute.route).toBe("escalate_capability");
+	});
+
+	it("replans repeated same-lane verification on unchanged evidence without clearing the finding", () => {
+		const directive = sameLaneVerificationDirective(["test evidence is missing"]);
+		const repeated = composeObjectiveRoute({
+			cycleId: "c_same_lane_repeat",
+			objectiveId: "obj_same_lane_repeat",
+			repeatedSameLaneVerification: true,
+			systemOneDirective: {
+				objectiveRoute: directive.objectiveRoute,
+				reasonCodes: directive.reasonCodes,
+			},
+		});
+
+		expect(repeated.route).toBe("replan");
+		expect(repeated.reason_codes).toContain("same_lane_verification_repeated_without_new_evidence");
+		expect(repeated.reason_codes).toContain("same_lane_verification_required");
+
+		const firstAttempt = composeObjectiveRoute({
+			cycleId: "c_same_lane_first",
+			objectiveId: "obj_same_lane_first",
+			systemOneDirective: {
+				objectiveRoute: directive.objectiveRoute,
+				reasonCodes: directive.reasonCodes,
+			},
+		});
+		expect(firstAttempt.route).toBe("deterministic_test");
+
+		const workerWait = composeObjectiveRoute({
+			cycleId: "c_same_lane_wait",
+			objectiveId: "obj_same_lane_wait",
+			requiredWorkerInFlight: true,
+			repeatedSameLaneVerification: true,
+			systemOneDirective: {
+				objectiveRoute: directive.objectiveRoute,
+				reasonCodes: directive.reasonCodes,
+			},
+		});
+		expect(workerWait.route).toBe("wait_for_worker");
+
+		const noSubstituteVerifier = composeObjectiveRoute({
+			cycleId: "c_same_lane_no_substitute",
+			objectiveId: "obj_same_lane_no_substitute",
+			repeatedSameLaneVerification: true,
+			supervisionRequest: { action: "request_verifier", reasonCodes: ["supervision_requested_verifier"] },
+			systemOneDirective: {
+				objectiveRoute: directive.objectiveRoute,
+				reasonCodes: directive.reasonCodes,
+			},
+		});
+		expect(noSubstituteVerifier.route).toBe("replan");
+	});
+
+	it("keeps replanning from bounded same-lane history after original test routes age out", async () => {
+		const { runtime } = createTestRuntime();
+		const directive = sameLaneVerificationDirective(["test evidence is missing"]);
+		const evidenceMarker = evidenceMarkerOf(runtime.getSnapshot(), "obj_same_lane_history");
+		const priorRoutes = Array.from({ length: 6 }, () => ({
+			route: "replan",
+			reasonCodes: ["same_lane_verification_repeated_without_new_evidence", ...directive.reasonCodes],
+			evidenceMarker,
+			executor: "root",
+		}));
+		let directiveConsumed = false;
+		const controller = new ObjectiveExecutionController({
+			runtime: { reconcileObjective: async () => runtime.getSnapshot() },
+			checkpoints: {
+				recordRoute: async () => {},
+				recentRoutes: async () => priorRoutes,
+			},
+			systemOne: {
+				peekControlDirective: () => directive,
+				consumeControlDirective: () => {
+					directiveConsumed = true;
+					return directive;
+				},
+			},
+		});
+
+		const route = await controller.evaluateRouteOnce("obj_same_lane_history");
+
+		expect(route.route).toBe("replan");
+		expect(route.reason_codes).toContain("same_lane_verification_required");
+		expect(directiveConsumed).toBe(false);
+	});
+
+	it("replans on the root, gathers new evidence, then verifies and continues after resolution", async () => {
+		const { runtime } = createTestRuntime();
+		const objectiveId = "obj_same_lane_recovery_sequence";
+		await runtime.createObjective({
+			objectiveId,
+			title: "Recover repeated verification",
+			description: "Find a different diagnostic, then verify it in the receiving lane",
+			riskBudget: { maxCostUsd: 2 },
+		});
+		const directive = sameLaneVerificationDirective(["required test has no current receipt"]);
+		const initialEvidenceMarker = evidenceMarkerOf(runtime.getSnapshot(), objectiveId);
+		const history = Array.from({ length: 2 }, () => ({
+			route: "deterministic_test",
+			reasonCodes: directive.reasonCodes,
+			evidenceMarker: initialEvidenceMarker,
+			executor: "root",
+		}));
+		const rootRoutes: string[] = [];
+		let workerDispatches = 0;
+		let proofReady = false;
+		let pendingDirective: ReturnType<typeof sameLaneVerificationDirective> | undefined = directive;
+		const controller = new ObjectiveExecutionController({
+			runtime: { reconcileObjective: async () => runtime.getSnapshot() },
+			checkpoints: {
+				recordRoute: async (route) => {
+					history.push({
+						route: route.route,
+						reasonCodes: route.reason_codes,
+						evidenceMarker: evidenceMarkerOf(runtime.getSnapshot(), objectiveId),
+						executor: "root",
+					});
+				},
+				recordRouteOutcome: async () => {},
+				recentRoutes: async () => history.slice(-6),
+			},
+			systemOne: {
+				peekControlDirective: () => pendingDirective,
+				consumeControlDirective: (consumed) => {
+					if (proofReady && consumed === pendingDirective) pendingDirective = undefined;
+					return consumed;
+				},
+				evaluateObjectiveRoute: async () => ({ workRemaining: false, missingWorkClass: "none" }),
+				executeCompletionTransaction: async () => ({
+					decision_id: "completion_after_recovery",
+					verdict: "complete",
+					gate_results: {},
+					failed_gates: [],
+				}),
+			},
+			rootExecutor: {
+				execute: async (route) => {
+					rootRoutes.push(route.route);
+					if (route.route === "replan") {
+						runtime.recordObjectiveEvidence(objectiveId, {
+							evidenceId: "recovery-diagnostic",
+							kind: "observation",
+							summary: "A new diagnostic identified the failing path",
+							artifactIds: [],
+							trusted: true,
+							createdAt: new Date().toISOString(),
+						});
+					} else if (route.route === "deterministic_test") {
+						proofReady = true;
+					}
+				},
+			},
+			chooseExecutor: () => "worker",
+			workerDispatcher: {
+				dispatch: async () => {
+					workerDispatches += 1;
+				},
+				continueWorker: async () => {},
+				dispatchEscalated: async () => {},
+			},
+		});
+
+		const terminal = await controller.runCycles(objectiveId, 4);
+
+		expect(rootRoutes).toEqual(["replan", "deterministic_test"]);
+		expect(workerDispatches).toBe(0);
+		expect(pendingDirective).toBeUndefined();
+		expect(terminal?.status).toBe("complete");
 	});
 
 	it("OEL-025, OEL-026: Completion failure creates structured repair work with required_next_proof", () => {

@@ -114,9 +114,9 @@ export class StateProjector {
 				non_goals: state.objective.non_goals.map((ng) => this.redactText(ng)),
 			},
 			repo: {
-				root: state.repo.root,
-				baseline_revision: state.repo.baseline_revision,
-				languages: state.repo.languages,
+				root: this.redactText(state.repo.root),
+				baseline_revision: this.redactText(state.repo.baseline_revision),
+				languages: state.repo.languages?.map((language) => this.redactText(language)),
 			},
 		};
 	}
@@ -139,7 +139,7 @@ export class StateProjector {
 			.map((o) => ({
 				id: o.id,
 				text: this.redactText(o.text),
-				source_locator: o.source.locator,
+				source_locator: this.redactText(o.source.locator),
 				trust: o.source.trust,
 			}));
 
@@ -149,7 +149,7 @@ export class StateProjector {
 				id: h.id,
 				text: this.redactText(h.text),
 				status: h.status,
-				next_discriminator: h.next_discriminator,
+				next_discriminator: h.next_discriminator ? this.redactText(h.next_discriminator) : h.next_discriminator,
 			}));
 
 		return {
@@ -161,7 +161,7 @@ export class StateProjector {
 				id: step.id,
 				goal: this.redactText(step.goal),
 				action_class: step.action_class,
-				proof_obligations: step.proof_obligations,
+				proof_obligations: step.proof_obligations.map((obligation) => this.redactText(obligation)),
 			},
 			evidence_view: freshObservations,
 			hypotheses: activeHypotheses,
@@ -187,7 +187,7 @@ export class StateProjector {
 		return {
 			...(currentStep ? { current_step: currentStep } : {}),
 			tool_request: {
-				tool: toolRequest.tool,
+				tool: this.redactText(toolRequest.tool),
 				intent: this.redactText(toolRequest.intent),
 				impact: toolRequest.impact,
 			},
@@ -219,7 +219,7 @@ export class StateProjector {
 			evidence: {
 				id: obs.id,
 				text: this.redactText(obs.text),
-				locator: obs.source.locator,
+				locator: this.redactText(obs.source.locator),
 				content_hash: obs.source.content_hash,
 				trust: obs.source.trust,
 			},
@@ -248,7 +248,7 @@ export class StateProjector {
 		}));
 
 		const diffSummary = state.changes.slice(-5).map((ch) => ({
-			path: ch.path,
+			path: this.redactText(ch.path),
 			kind: ch.kind,
 			ownership: ch.ownership,
 		}));
@@ -260,7 +260,7 @@ export class StateProjector {
 			},
 			last_action: lastToolEvent
 				? {
-						tool: lastToolEvent.tool,
+						tool: this.redactText(lastToolEvent.tool),
 						intent: this.redactText(lastToolEvent.intent),
 						status: lastToolEvent.status,
 					}
@@ -276,7 +276,7 @@ export class StateProjector {
 	 */
 	driftCheck(state: ExecutionState): Record<string, unknown> {
 		const recentActions = state.tool_events.slice(-8).map((te) => ({
-			tool: te.tool,
+			tool: this.redactText(te.tool),
 			intent: this.redactText(te.intent),
 			status: te.status,
 		}));
@@ -318,13 +318,13 @@ export class StateProjector {
 				goal: this.redactText(activeStep.goal),
 			},
 			diff_view: changes.map((c) => ({
-				path: c.path,
+				path: this.redactText(c.path),
 				kind: c.kind,
 				diff_hash: c.diff_hash,
 			})),
 			architecture_context: {
-				allowed_paths: state.repo.allowed_paths,
-				protected_paths: state.repo.protected_paths,
+				allowed_paths: state.repo.allowed_paths.map((filePath) => this.redactText(filePath)),
+				protected_paths: state.repo.protected_paths.map((filePath) => this.redactText(filePath)),
 			},
 		};
 	}
@@ -358,13 +358,13 @@ export class StateProjector {
 			id: v.id,
 			kind: v.kind,
 			status: v.status,
-			command: v.command,
+			command: v.command === null || v.command === undefined ? v.command : this.redactText(v.command),
 			covers_acceptance_ids: v.covers_acceptance_ids,
 		}));
 
 		const changesManifest = state.changes.map((c) => ({
 			id: c.id,
-			path: c.path,
+			path: this.redactText(c.path),
 			kind: c.kind,
 			ownership: c.ownership,
 			diff_hash: c.diff_hash,
@@ -403,7 +403,7 @@ export class StateProjector {
 				required: criterion.required,
 				status: criterion.status,
 				checks: checks.map((run) => ({
-					command: run.command ?? null,
+					command: run.command ? this.redactText(run.command) : (run.command ?? null),
 					status: run.status,
 					observed: (run.observation_ids ?? []).map(observationView).filter((view) => view !== undefined),
 				})),
@@ -426,10 +426,19 @@ export class StateProjector {
 				? {
 						final_diff: work
 							? {
-									base_commit: work.base,
+									base_commit: this.redactText(work.base),
 									patch: this.redactText(work.patch),
+									...(work.diagnostic ? { evidence_unavailable: this.redactText(work.diagnostic) } : {}),
+									...(work.repositories
+										? {
+												repositories: work.repositories.map((repository) => ({
+													root: this.redactText(repository.root),
+													base: this.redactText(repository.base),
+												})),
+											}
+										: {}),
 									...(work.omittedChars > 0 ? { patch_truncated_chars: work.omittedChars } : {}),
-									new_untracked_files: work.untracked,
+									new_untracked_files: work.untracked.map((filePath) => this.redactText(filePath)),
 									recorded_changes: changesManifest,
 								}
 							: changesManifest,

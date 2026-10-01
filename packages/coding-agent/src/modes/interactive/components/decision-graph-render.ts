@@ -72,11 +72,19 @@ function queuedText(participant: DecisionParticipant): string {
 }
 
 function plainTurnStatus(model: DecisionGraphModel): [string, ThemeColor] {
-	const unsure = model.unresolvedDoubtCount ? ` · ${model.unresolvedDoubtCount} unsure` : "";
-	if (model.turnRunning) return [`turn running${unsure}`, "accent"];
-	if (model.lastTurnOutcome === "failed") return [`turn failed${unsure}`, "error"];
-	if (model.lastTurnOutcome === "cancelled") return [`turn cancelled${unsure}`, "dim"];
-	return [`turn finished${unsure}`, model.unresolvedDoubtCount ? SYSTEM_ONE_TONE : "success"];
+	const open = [
+		model.peerFindings.length
+			? `${model.peerFindings.length} peer finding${model.peerFindings.length === 1 ? "" : "s"}`
+			: "",
+		model.unresolvedDoubtCount ? `${model.unresolvedDoubtCount} unsure` : "",
+	]
+		.filter(Boolean)
+		.join(" · ");
+	const suffix = open ? ` · ${open}` : "";
+	if (model.turnRunning) return [`turn running${suffix}`, "accent"];
+	if (model.lastTurnOutcome === "failed") return [`turn failed${suffix}`, "error"];
+	if (model.lastTurnOutcome === "cancelled") return [`turn cancelled${suffix}`, "dim"];
+	return [`turn finished${suffix}`, open ? SYSTEM_ONE_TONE : "success"];
 }
 
 function planProgress(model: DecisionGraphModel): string {
@@ -132,16 +140,23 @@ export function renderDecisionList(
 			isCurrent,
 		);
 	const arrow = (label = ""): void => push(theme.fg("dim", `  ↓${label ? `  ${label}` : ""}`));
+	const appendPeerFindings = (): void => {
+		if (!model.peerFindings.length) return;
+		head("PEER FINDINGS", theme.fg("warning", `${model.peerFindings.length} active`), "warning");
+		for (const finding of model.peerFindings) item("!", "warning", `${finding.reason} · ${finding.scope}`, "warning");
+	};
 	const now = model.nowMs;
 
 	if (model.stageLogEmpty) {
 		if (!model.plan.length) {
 			push(theme.fg("dim", "No task yet · the graph composes when work starts"));
+			appendPeerFindings();
 			return { rows, stageAt, currentRow, focusKey: graphFocusKey(model) };
 		}
 		head("PLAN", theme.fg("muted", planProgress(model)));
 		for (const step of planItems(model)) item(step.glyph, step.glyphTone, step.text, step.tone);
 		push(theme.fg("dim", NO_RUN_YET));
+		appendPeerFindings();
 		return { rows, stageAt, currentRow, focusKey: graphFocusKey(model) };
 	}
 
@@ -263,6 +278,7 @@ export function renderDecisionList(
 			item(glyph, tone, check.text, check.status === "pending" ? "dim" : "muted");
 		}
 	}
+	appendPeerFindings();
 	if (!model.goal.present) {
 		arrow();
 		const [status, tone] = plainTurnStatus(model);
@@ -273,7 +289,10 @@ export function renderDecisionList(
 	const openChecks = model.checks.filter((check) => check.status !== "satisfied").length;
 	const doubts = model.unresolvedDoubtCount;
 	const openNote = [
-		openChecks > 0 ? `${openChecks} open` : "",
+		openChecks > 0 ? `${openChecks} checks` : "",
+		model.peerFindings.length > 0
+			? `${model.peerFindings.length} mandatory peer finding${model.peerFindings.length === 1 ? "" : "s"}`
+			: "",
 		doubts > 0 ? `${doubts} ${doubts === 1 ? "doubt" : "doubts"}` : "",
 	]
 		.filter(Boolean)
@@ -347,12 +366,13 @@ function graphFocusKey(model: DecisionGraphModel): string {
 	const evalId = model.decider.last?.evaluationId ?? "";
 	const evalCount = model.decider.evaluations;
 	const open = model.checks.filter((check) => check.status !== "satisfied").length;
+	const peerFindings = model.peerFindings.map((finding) => finding.id).join(",");
 	const activeParticipants = model.participants
 		.filter((p) => p.running)
 		.map((p) => `${p.id}:${p.acted}`)
 		.join(",");
 	const proof = `${model.evidence.actions}:${model.evidence.fileEffects}:${model.evidence.failures}`;
-	return `obj:${model.objectiveId}/stage:${model.current?.stage ?? "idle"}/loop:${model.current?.loop ?? model.loop}/branch:${model.goal.branch}/eval:${evaluating}:${evalId}:${evalCount}/proof:${proof}/parts:${activeParticipants}/open:${open}/doubts:${model.unresolvedDoubtCount}/next:${model.next ?? ""}`;
+	return `obj:${model.objectiveId}/stage:${model.current?.stage ?? "idle"}/loop:${model.current?.loop ?? model.loop}/branch:${model.goal.branch}/eval:${evaluating}:${evalId}:${evalCount}/proof:${proof}/parts:${activeParticipants}/open:${open}/peer:${peerFindings}/doubts:${model.unresolvedDoubtCount}/next:${model.next ?? ""}`;
 }
 
 function goalYesNode(
@@ -361,9 +381,10 @@ function goalYesNode(
 ): DiagramNode & { readonly lit: boolean } {
 	const pending = model.checks.filter((check) => check.status !== "satisfied").length;
 	const doubts = model.unresolvedDoubtCount;
-	// An unsettled judgment holds the goal open the same way an unmet check does. Delivering over
-	// one would be the drawing claiming a yes that System One never gave.
-	const open = pending + doubts;
+	const peerFindings = model.peerFindings.length;
+	// Deterministic checks, mandatory peer findings, and advisory doubts remain distinct in the view;
+	// each independently keeps the goal open until its owning lifecycle resolves it.
+	const open = pending + peerFindings + doubts;
 	const delivered = model.goal.branch === "delivered" && open === 0;
 	const delivering = (model.goal.branch === "deliver" || currentStage === "deliver") && open === 0;
 	if (delivered || delivering) {
@@ -375,7 +396,11 @@ function goalYesNode(
 			lit: true,
 		};
 	}
-	const note = [pending > 0 ? `${pending} open` : "", doubts > 0 ? `${doubts} unsure` : ""]
+	const note = [
+		pending > 0 ? `${pending} checks` : "",
+		peerFindings > 0 ? `${peerFindings} peer findings` : "",
+		doubts > 0 ? `${doubts} unsure` : "",
+	]
 		.filter(Boolean)
 		.join(" · ");
 	return {
@@ -393,13 +418,28 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 	const currentStage = cur?.stage;
 	const evaluating = model.decider.evaluating;
 	const levels: DiagramLevel[] = [];
-	if (model.stageLogEmpty)
-		return model.plan.length
+	if (model.stageLogEmpty) {
+		const levels: DiagramLevel[] = model.plan.length
 			? [
 					{ kind: "tree", title: `plan ${planProgress(model)}`, items: planItems(model) },
 					{ kind: "level", nodes: [{ text: NO_RUN_YET, tone: "dim" }] },
 				]
 			: [{ kind: "level", nodes: [{ text: "no task yet", tone: "dim" }] }];
+		const statuses: DiagramNode[] = [];
+		if (model.checks.length) {
+			const openChecks = model.checks.filter((check) => check.status !== "satisfied").length;
+			statuses.push({
+				text: `CHECKS ${model.checks.length - openChecks}/${model.checks.length}`,
+				tone: openChecks ? "warning" : "success",
+			});
+		}
+		if (model.peerFindings.length)
+			statuses.push({ text: `PEER FINDINGS ${model.peerFindings.length} active`, tone: "warning" });
+		if (model.unresolvedDoubtCount)
+			statuses.push({ text: `ADVISORY DOUBTS ${model.unresolvedDoubtCount}`, tone: SYSTEM_ONE_TONE });
+		if (statuses.length) levels.push({ kind: "level", nodes: statuses });
+		return levels;
+	}
 
 	if (model.you.present) {
 		const isCur = currentStage === "clarify";
@@ -496,6 +536,11 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 			stage: "verify",
 		});
 	}
+	if (model.peerFindings.length)
+		evidenceNodes.push({
+			text: `PEER FINDINGS ${model.peerFindings.length} active`,
+			tone: "warning",
+		});
 	levels.push({ kind: "level", nodes: evidenceNodes });
 	if (!evaluating && model.decider.evaluations) {
 		const last = model.decider.last;

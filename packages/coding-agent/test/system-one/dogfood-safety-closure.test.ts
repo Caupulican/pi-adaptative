@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -190,6 +190,34 @@ describe("dogfood safety closure", () => {
 		const untracked = await captureRepoDeliveryFingerprint(root);
 		expect(untracked.ok && committed.ok && untracked.digest !== committed.digest).toBe(true);
 		expect((await captureRepoDeliveryFingerprint(tempDir("pi-df-norepo-"))).ok).toBe(false);
+	});
+
+	it("fingerprints an initialized repository before its first commit", async () => {
+		const root = tempDir("pi-df-unborn-");
+		git(root, ["init"]);
+		git(root, ["config", "user.email", "test@example.com"]);
+		git(root, ["config", "user.name", "test"]);
+
+		const initial = await captureRepoDeliveryFingerprint(root);
+		expect(initial.ok).toBe(true);
+		if (!initial.ok) return;
+		expect(await captureRepoDeliveryFingerprint(root)).toEqual(initial);
+		writeFileSync(join(root, "README.md"), "first working-tree candidate\n");
+		const changed = await captureRepoDeliveryFingerprint(root);
+		expect(changed.ok && changed.digest !== initial.digest).toBe(true);
+	});
+
+	it("does not interpret a Git status failure in a committed repository as an unborn branch", async () => {
+		const root = gitRepo();
+		const fingerprint = await captureRepoDeliveryFingerprint(root, {
+			spawnGit: (command, args, options) =>
+				spawn(
+					command,
+					args[0] === "status" && args.includes("--branch") ? ["pi-test-invalid-command"] : args,
+					options,
+				),
+		});
+		expect(fingerprint).toEqual({ ok: false, reason: "repository_fingerprint_unavailable" });
 	});
 
 	it("marks shell unsafe only when the checkout fingerprint changes or cannot be read", async () => {

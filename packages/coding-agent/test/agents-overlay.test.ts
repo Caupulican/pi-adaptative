@@ -58,6 +58,7 @@ interface AgentsOverlayOwnerProbe {
 			getTaskStepsStateSnapshot: () => TaskStepsState | undefined;
 			getLaneRecords: () => LaneRecord[];
 			getVerificationObligations: () => [];
+			getSemanticVerificationObligations: () => [];
 			getEdgeGrants: () => [];
 		};
 	};
@@ -269,6 +270,7 @@ describe("agents overlay", () => {
 					getGoalStateSnapshot: () => undefined,
 					getTaskStepsStateSnapshot: () => undefined,
 					getVerificationObligations: () => [],
+					getSemanticVerificationObligations: () => [],
 					getEdgeGrants: () => [],
 					getLaneRecords: () => [
 						worker({

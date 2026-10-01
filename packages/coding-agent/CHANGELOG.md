@@ -6,6 +6,14 @@
 - Preserved Git failure diagnostics from both output streams when stderr warnings accompany `repo_read` failures.
 - Let mandatory verification recovery use declared read-only effects, parser-proven observational shell commands, bounded workspace inspection, and goal evidence/read/reopen actions while affected work remains gated.
 - Exposed operation-judgment causes and actionable resolution status without translating missing or invalid probabilities into low-confidence findings.
+- Measured goal repository changes from the actual dirty working tree before the first mutation in each task repository, retaining branch-owned baselines across resumed sessions and excluding pre-existing work from planning-only outcomes.
+- Kept writes to new directories and repositories without a first commit observable, distinguished Git outages from unversioned work, and recovered interrupted observations and transient evidence persistence without admitting stale branch handoffs or closing live sibling observations.
+- Preserved canonical mutation targets from nested invocation directories, attributed overlapping typed writes together without retaining completed-call histories, and finalized every repository observation when a sibling finalization fails. A later successful no-op cannot grant ownership to an earlier failed partial write.
+- Redacted configured credentials from model-facing repository paths, source locators, commands, and work-diff metadata while retaining the original local evidence.
+- Replanned repeated receiving-lane verification attempts that produce no new evidence, preserving mandatory findings until reproduction, revision, and rechecking resolve them.
+- Distinguished historical verification reports from claims that current tests passed, without requiring fresh tests for an explicitly historical report.
+- Reported the selected receipts and unresolved proof conditions when a verification resolution remains uncertain.
+- Displayed live mandatory peer finding counts separately from deterministic checks and advisory doubts, refreshing them on resolution and session changes without accumulating transcript warnings.
 
 ## [0.102.0] - 2026-09-30
 

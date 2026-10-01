@@ -415,19 +415,148 @@ describe("mandatory verification coordination", () => {
 		).rejects.toThrow("verification_candidate_changed_during_classification");
 	});
 
-	it("returns the confidence and next proof needed when resolution judgment is inconclusive", async () => {
-		const judge = vi.fn<VerificationJudge>().mockResolvedValue({
-			id: "jev-inconclusive",
-			answers: { verification_resolution_valid: { noul: 0.83 } },
-		});
+	it("keeps a rejected finding held and gives finding-specific remediation until fresh evidence resolves it", async () => {
+		const judge = vi
+			.fn<VerificationJudge>()
+			.mockResolvedValueOnce({
+				id: "jev-inconclusive",
+				answers: {
+					verification_resolution_valid: { noul: 0.83 },
+					reproduction_addresses_finding: { choice: "addresses", confidence: 0.99 },
+					reproduction_refutes_finding: { choice: "does_not_refute", confidence: 0.99 },
+				},
+			})
+			.mockResolvedValueOnce({
+				...accepted,
+				answers: {
+					...accepted.answers,
+					reproduction_addresses_finding: { choice: "addresses", confidence: 0.99 },
+					reproduction_refutes_finding: { choice: "refutes", confidence: 0.99 },
+				},
+			});
 		const { coordinator, proof } = fixture(judge);
-		const result = await coordinator.resolve(proof());
+		const request = proof();
+		const result = await coordinator.resolve(request);
 		expect(result).toMatchObject({
 			status: "unresolved",
 			reason: "judgment_confidence_below_threshold",
 			confidence: 0.83,
-			nextAction: expect.stringContaining("distinct, direct evidence"),
+			remediation: {
+				finding: {
+					reason: "Suspected input loss; check the original input against the saved output.",
+					scope: "/repo",
+				},
+				currentCandidate: { id: "candidate-v1", scope: "/repo", kind: "repository" },
+				disposition: "rejected",
+				proofNeeded: "direct counter-evidence for this finding on the current candidate",
+				requiredEvidence: { reproduction: "exactly one current-candidate reproduction" },
+				missingProof: [
+					expect.objectContaining({
+						condition: "reproduction_refutes_finding",
+						receiptId: request.evidence[0]!.receiptId,
+						tool: "read",
+						finding: "Suspected input loss; check the original input against the saved output.",
+						judgment: "does_not_refute",
+					}),
+				],
+				nextAction: expect.stringContaining("directly refutes this finding on the current candidate"),
+			},
 		});
+		expect(() => coordinator.assertResolved()).toThrow("same_lane_verification_required");
+
+		const callId = coordinator.beginCall("root-lane", "read");
+		coordinator.finishCall({
+			callId,
+			tool: "read",
+			args: { path: "saved.json" },
+			output: "Fresh comparison: every original input value is present in the saved output.",
+			succeeded: true,
+		});
+		const freshReceipt = coordinator.status().receipts.at(-1)!;
+		expect(
+			await coordinator.resolve({
+				...request,
+				evidence: [{ receiptId: freshReceipt.id, role: "reproduction" }],
+			}),
+		).toMatchObject({ status: "resolved" });
+		expect(() => coordinator.assertResolved()).not.toThrow();
+	});
+
+	it("does not make optional proof diagnostics an additional acceptance gate", async () => {
+		const { coordinator, proof } = fixture(async () => accepted);
+		const result = await coordinator.resolve(proof());
+		expect(result).toMatchObject({ status: "resolved" });
+		expect(coordinator.status().obligations).toEqual([]);
+	});
+
+	it("gives repaired findings a repair-chain and final-recheck remediation", async () => {
+		const judge = vi.fn<VerificationJudge>().mockResolvedValue({
+			id: "jev-inconclusive",
+			answers: {
+				verification_resolution_valid: { noul: 0.83 },
+				reproduction_addresses_finding: { choice: "addresses", confidence: 0.99 },
+				repair_addresses_cause: { choice: "does_not_address_cause", confidence: 0.99 },
+				recheck_covers_required_behavior: { choice: "does_not_cover_required_behavior", confidence: 0.99 },
+			},
+		});
+		const { coordinator, setCandidate } = fixture(judge);
+		const record = (tool: string, output: string, candidateAfter?: string) => {
+			const callId = coordinator.beginCall("root-lane", tool);
+			if (candidateAfter) setCandidate(candidateAfter);
+			coordinator.finishCall({
+				callId,
+				tool,
+				args: { path: "saved.json" },
+				output,
+				succeeded: true,
+			});
+			return coordinator.status().receipts.at(-1)!;
+		};
+		const reproduction = record("read", "Original input is missing the final field in saved output.");
+		const repair = record("write", "Restored the missing field in saved output.", "candidate-v2");
+		const recheck = record("read", "Fresh comparison confirms the final field is present.");
+		const result = await coordinator.resolve({
+			id: coordinator.status().obligations[0]!.id,
+			disposition: "repaired",
+			evidence: [
+				{ receiptId: reproduction.id, role: "reproduction" },
+				{ receiptId: repair.id, role: "repair" },
+				{ receiptId: recheck.id, role: "recheck" },
+			],
+		});
+		expect(result).toMatchObject({
+			status: "unresolved",
+			reason: "judgment_confidence_below_threshold",
+			remediation: {
+				proofNeeded: "reproduction, causal repair, and a successful current-candidate recheck",
+				disposition: "repaired",
+				currentCandidate: { id: "candidate-v2", scope: "/repo", kind: "repository" },
+				requiredEvidence: {
+					reproduction: "exactly one current-candidate reproduction",
+					repair: "one or more causal repairs in order",
+					recheck: "exactly one successful recheck after the final repair",
+				},
+				missingProof: [
+					expect.objectContaining({
+						condition: "repair_addresses_cause",
+						receiptId: repair.id,
+						tool: "write",
+						finding: "Suspected input loss; check the original input against the saved output.",
+						judgment: "does_not_address_cause",
+					}),
+					expect.objectContaining({
+						condition: "recheck_covers_required_behavior",
+						receiptId: recheck.id,
+						tool: "read",
+						finding: "Suspected input loss; check the original input against the saved output.",
+						judgment: "does_not_cover_required_behavior",
+					}),
+				],
+				nextAction: expect.stringContaining("repairs its cause on the candidate"),
+			},
+		});
+		expect(JSON.stringify(result)).not.toContain("Original input is missing");
+		expect(coordinator.status().obligations).toHaveLength(1);
 	});
 
 	it.each([undefined, Number.NaN])(

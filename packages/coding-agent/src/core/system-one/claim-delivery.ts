@@ -15,7 +15,7 @@ import {
 	retainedVerificationDetails,
 } from "@caupulican/pi-agent-core/verification-obligations";
 import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@caupulican/pi-ai";
-import { settledAnswer } from "../decision/noul.ts";
+import { DEFAULT_NOUL_BAND_THRESHOLDS, isNoulProbability, settledAnswer } from "../decision/noul.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import type { LadderOutcome } from "./unsettled-ladder.ts";
 
@@ -158,6 +158,20 @@ export const CLAIM_QUESTION_IDS: Readonly<Record<ClaimKind, string>> = {
 	files_changed: "states_files_changed",
 };
 
+type TestClaimProvenance = "current_success" | "historical_only" | "no_current_success";
+
+function settledTestClaimProvenance(answer: unknown): TestClaimProvenance | undefined {
+	if (!answer || typeof answer !== "object") return undefined;
+	const record = answer as { choice?: unknown; confidence?: unknown };
+	if (!isNoulProbability(record.confidence) || record.confidence < DEFAULT_NOUL_BAND_THRESHOLDS.requiredTrue.softPass)
+		return undefined;
+	return record.choice === "current_success" ||
+		record.choice === "historical_only" ||
+		record.choice === "no_current_success"
+		? record.choice
+		: undefined;
+}
+
 function judgeDelivery(kind: ClaimKind, receipt: DeliveryReceipt, label: string): ClaimFinding | undefined {
 	if (receipt.succeeded > 0) return undefined;
 	if (receipt.failed > 0)
@@ -180,7 +194,7 @@ function judgeDelivery(kind: ClaimKind, receipt: DeliveryReceipt, label: string)
 export function judgeClaims(answers: Record<string, unknown>, receipts: ClaimReceipts): ClaimFinding[] {
 	const findings: ClaimFinding[] = [];
 	const states = (kind: ClaimKind) => settledAnswer(answers[CLAIM_QUESTION_IDS[kind]]) === true;
-	if (states("tests_pass")) {
+	if (settledTestClaimProvenance(answers[CLAIM_QUESTION_IDS.tests_pass]) === "current_success") {
 		if (receipts.tests.lastPassed === false)
 			findings.push({
 				kind: "tests_pass",

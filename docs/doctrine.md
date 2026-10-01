@@ -890,13 +890,62 @@ message may later resolve it. Pinned by `packages/coding-agent/test/human-input-
 and `packages/coding-agent/test/human-input.test.ts`.
 
 **Every answer's claims are checked against the turn's receipts** (`system-one/claim-delivery.ts`), with or
-without a live objective. System One answers one atomic question per claim kind (the answer states tests
-passed, a commit, a push, a publish, changed files); code combines each settled answer with the
+without a live objective. System One classifies test-success claims as current success, historical-only,
+or no current success; only current success requires current receipts. Mixed historical and current
+claims still require current proof. Other claim kinds remain atomic questions about a commit, a push,
+a publish, or changed files. Code combines each settled answer with the
 turn's mechanical receipts. A claim the receipts contradict buys one correction turn; one no receipt
 backs is an unverified-claim warning. An enforced work unit is anchored to the assistant message that
 owns its first mutating call; provider lifecycle records written between that message and tool admission
 cannot cut the call out of the receipt window. Pinned by
 `packages/coding-agent/test/system-one/claim-delivery.test.ts`.
+
+**Repository outcome evidence belongs to the receiving objective and its actual task repositories.**
+The mutation observer captures the dirty working tree before the first effect in each repository,
+including pre-existing untracked files, using a private index and raw diffs that execute no text conversion
+commands. Git's successful branch header proves a repository before its first commit; a failed Git
+command cannot masquerade as that initial state or unversioned machine work. The branch journal retains that tree
+across resume, records observed changes even after partially failed tools, and rejects late handoffs
+after sibling navigation or session replacement. Planning-only and machine-only goals have no repository
+patch. A transient journal write retains the original branch handoff and replays it before further
+mutation. Each admitted effect persists its own host observation identity before execution; terminal
+evidence closes only that identity. Session restart recovers abandoned observations against the
+original baseline while live sibling observations remain open. A missing terminal is a host diagnostic
+until the snapshot recovers; cleanup with no effect leaves no repository outcome. Stale branch handoffs
+cannot contaminate the next branch. Typed writes retain their canonical targets from the admitted
+invocation directory. Overlapping typed writes share repository attribution until quiescence, retaining
+path sets rather than completed-call histories; undeclared mutations remain unowned. Ownership requires
+a delta observed by that successful call; a later no-op cannot validate an earlier failed partial write. Every admitted
+repository receives terminal cleanup even when a sibling's finalization fails. Missing baseline or
+snapshot evidence is an infrastructure diagnostic that requires recovery,
+never an empty patch or a manufactured production finding. Pinned by
+`packages/coding-agent/test/system-one/work-diff.test.ts`,
+`packages/coding-agent/test/system-one/session-work-diff.test.ts`,
+`packages/coding-agent/test/system-one/repository-mutation-work-evidence.test.ts`, and
+`packages/coding-agent/test/agent-session-system-one-task-directory.test.ts` and
+`packages/coding-agent/test/tool-gate-repository-scope.test.ts`.
+
+**Credential redaction applies to model-facing evidence metadata as well as text.** Paths, commands,
+source locators, repository identities, and work-diff diagnostics pass through the projector's existing
+redaction owner before evaluation. Projection does not change the authoritative local evidence or
+credentials used by authorized local operations. The transport's final credential check remains in
+place. Pinned by `packages/coding-agent/test/system-one/projector.test.ts`.
+
+**Mandatory findings remain active while the root changes its verification approach.** Repeated
+receiving-lane verification without new evidence routes to root replanning, retaining the original
+finding and requesting a changed hypothesis, diagnostic, or evidence source. New evidence restores
+the ordinary verification route; no attempt cap or substitute verifier discharges the finding.
+Resolution reports identify selected receipts and uncertain proof conditions in the same judgment;
+diagnostic answers do not create an additional acceptance gate. Pinned by
+`packages/coding-agent/test/objective-execution/objective-execution-controller.test.ts` and
+`packages/coding-agent/test/system-one/verification-coordinator.test.ts`.
+
+**The TUI reads unresolved items from their lifecycle owners.** Deterministic checks, mandatory peer
+findings, and advisory doubts have separate live counts. Resolving or replacing a finding updates
+the existing projection; evaluation history does not create new active rows. Peer tool completion
+and session reload refresh the view. Pinned by
+`packages/coding-agent/test/system-one/peer-finding-ui-projection.test.ts` and
+`packages/coding-agent/test/agent-session-semantic-verification-obligations.test.ts`.
 
 **What no agent could settle climbs a ladder, then reaches the owner** (`system-one/unsettled-ladder.ts`).
 A worker reports findings it could not confirm as `inconclusive`, never rounded up. System One judges
@@ -1093,6 +1142,7 @@ measurement gains no new surface.
 
 | Date | Change |
 |---|---|
+| 2026-09-30 | Goal work evidence uses branch-owned dirty-tree baselines in the actual task repositories; repeated same-lane verification without new proof replans autonomously while preserving findings. Claim tests distinguish historical reports from current success, resolution diagnostics name receipt-specific missing proof, and the TUI reads live mandatory peer counts separately from advisory doubts. |
 | 2026-09-30 | Recovery admits observational effects and canonical evidence inspection without clearing mandatory findings; unknown effects retain semantic judgment and invalid probabilities preserve retry. The `repo_read` contract now executes `diff --check` with passing/failing unchanged-file controls and retains both diagnostic streams so a stderr warning cannot conceal stdout failure evidence. |
 | 2026-09-30 | Provider-neutral `systemone` replaces the native tool and skill names; root assignment/integration and worker local autonomy remain explicit. Ordinary peer review admits supported effort without strength judgment; explicit stronger review retains its checks. Standing operation authority avoids redundant evaluator calls, scoped grants remain exact, advisory management remains available during outages, and supervision rejects obsolete or aborted attempt judgments. Existing prompt and schema ceilings remain unchanged. |
 | 2026-09-30 | The root may list and disposition advisory uncertainties in its own journal through `typesafe_review`; this does not prove verification, settle mandatory obligations, or grant permission. The measured canonical schema addition is 104 tokens, raising only the canonical allowance to 574 and the aggregate ceiling to 7,039; the 4,500-token base remains unchanged. |

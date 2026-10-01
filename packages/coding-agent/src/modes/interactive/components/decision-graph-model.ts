@@ -32,6 +32,8 @@ export interface DecisionGraphInput {
 	readonly plan: readonly { readonly title: string; readonly status: DecisionPlanStepStatus }[];
 	/** The checks the task must pass: acceptance criteria and verification obligations. */
 	readonly checks: readonly { readonly text: string; readonly status: DecisionCheckStatus }[];
+	/** Mandatory semantic findings from peer review; kept separate from deterministic checks and doubts. */
+	readonly peerFindings?: readonly { readonly id: string; readonly reason: string; readonly scope: string }[];
 	readonly receipts: { readonly actions: number; readonly fileEffects: number; readonly failures: number };
 	/** Question to the operator, when one was asked in this objective. */
 	readonly humanInput?: {
@@ -111,6 +113,7 @@ export interface DecisionGraphModel {
 	readonly next?: string;
 	readonly plan: DecisionGraphInput["plan"];
 	readonly checks: DecisionGraphInput["checks"];
+	readonly peerFindings: NonNullable<DecisionGraphInput["peerFindings"]>;
 	readonly participants: readonly DecisionParticipant[];
 	readonly routing: readonly { readonly text: string; readonly live: boolean }[];
 	readonly evidence: DecisionGraphInput["receipts"];
@@ -384,6 +387,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 
 	// Evaluation history explains what happened; only the lifecycle owner decides what remains open.
 	const unresolvedDoubtCount = health.unresolvedDoubts?.length ?? 0;
+	const peerFindings = input.peerFindings ?? [];
 
 	const idle = input.idlePreparation;
 	const hasRunningClock = Boolean(
@@ -405,6 +409,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		...(projection.next_action ? { next: projection.next_action } : {}),
 		plan: input.plan,
 		checks: input.checks,
+		peerFindings,
 		participants,
 		routing,
 		evidence: input.receipts,

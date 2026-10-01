@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
 import { decideFinalCompletion } from "../../src/core/system-one/policy.ts";
 import { StateProjector } from "../../src/core/system-one/projector.ts";
-import { readWorkDiff, readWorkDiffBase } from "../../src/core/system-one/work-diff.ts";
+import { captureWorkBaseline, readWorkDiff } from "../../src/core/system-one/work-diff.ts";
 
 const noul = (value: number) => ({ type: "noul", noul: value });
 const passedGates = [{ id: "G-OBJ", kind: "deterministic" as const, required: true, status: "passed" as const }];
@@ -128,7 +128,7 @@ describe("completion judges the work itself", () => {
 		]);
 	});
 
-	it("reads the work since the goal started: commits made during it, edits and new files", () => {
+	it("reads work from its admitted baseline: commits, edits and new files", () => {
 		const repo = realpathSync.native(tempDir("pi-work-diff-"));
 		const git = (...args: string[]) =>
 			execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", ...args], {
@@ -145,8 +145,8 @@ describe("completion judges the work itself", () => {
 		git("add", "a.txt");
 		git("commit", "-qm", "before");
 		const base = git("rev-parse", "HEAD").trim();
-		expect(readWorkDiff(repo, "2025-12-31T00:00:00Z")).toBeUndefined();
-		expect(readWorkDiffBase(repo, "2025-12-31T00:00:00Z")).toBeUndefined();
+		const baseline = captureWorkBaseline(repo)!;
+		expect(baseline.revision).toBe(base);
 
 		writeFileSync(join(repo, "a.txt"), "one\ntwo\n");
 		execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qam", "during"], {
@@ -156,9 +156,8 @@ describe("completion judges the work itself", () => {
 		writeFileSync(join(repo, "a.txt"), "one\ntwo\nthree\n");
 		writeFileSync(join(repo, "new.txt"), "fresh\n");
 
-		const work = readWorkDiff(repo, "2026-01-15T00:00:00Z");
-		expect(readWorkDiffBase(repo, "2026-01-15T00:00:00Z")).toBe(base);
-		expect(readWorkDiffBase(tempDir("pi-work-base-no-git-"), "2026-01-15T00:00:00Z")).toBeUndefined();
+		const work = readWorkDiff(repo, baseline);
+		expect(captureWorkBaseline(tempDir("pi-work-base-no-git-"))).toBeUndefined();
 		expect(work?.base).toBe(base);
 		expect(work?.patch).toContain("+two");
 		expect(work?.patch).toContain("+three");

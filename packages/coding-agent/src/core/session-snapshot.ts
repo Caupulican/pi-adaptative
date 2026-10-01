@@ -19,6 +19,23 @@ export interface SessionBranchEntrySource {
 	getEntries?: () => readonly SessionEntry[];
 }
 
+export interface SessionAppendAnchor {
+	readonly sessionId: string;
+	readonly leafId: string | null;
+}
+
+/** Appended evidence remains in its owning branch; sibling navigation invalidates the anchor. */
+export function isSessionAppendAnchorCurrent(
+	manager: Pick<SessionManager, "getSessionId" | "getLeafId" | "getEntry">,
+	anchor: SessionAppendAnchor,
+): boolean {
+	if (manager.getSessionId() !== anchor.sessionId) return false;
+	if (anchor.leafId === null) return manager.getLeafId() === null;
+	let cursor = manager.getLeafId();
+	while (cursor && cursor !== anchor.leafId) cursor = manager.getEntry(cursor)?.parentId ?? null;
+	return cursor === anchor.leafId;
+}
+
 type VersionOneSnapshotPayload = Record<string, unknown> & { version: 1 };
 
 /** Active branch when available; linear entry history only for narrow stores that expose no branch API. */

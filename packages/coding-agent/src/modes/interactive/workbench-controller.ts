@@ -727,6 +727,14 @@ export function buildWorkbenchSections(
 		rows.push(`  ${theme.fg("dim", "rerun the same check, or /verify dismiss")}`);
 		sections.push({ title: CHECKS_SECTION, meta: `${checks.length} failing`, body: rows });
 	}
+	const peerFindings = snapshot.peerFindings ?? [];
+	if (peerFindings.length) {
+		const rows = peerFindings
+			.slice(0, 3)
+			.map((finding) => `  ${theme.fg("warning", "!")} ${theme.fg("text", `${finding.id}: ${finding.reason}`)}`);
+		if (peerFindings.length > 3) rows.push(`  ${theme.fg("dim", `+${peerFindings.length - 3} more`)}`);
+		sections.push({ title: "Peer findings", meta: `${peerFindings.length} active`, body: rows });
+	}
 	// Edge grants stay armed in the host; they are not a workbench inspector section.
 	// The team is its specialists, not its task history: a specialist with three finished tasks and
 	// nothing running is one idle agent, and it keeps its section even though it contributes no row.
