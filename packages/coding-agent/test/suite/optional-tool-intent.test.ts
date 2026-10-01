@@ -318,7 +318,7 @@ describe("trusted optional tool task intent", () => {
 		const outcome = await controller.classifyUserRequest("Use secret store for this task.", "", {
 			optionalTools: {
 				candidates: [{ toolName: "secret_store", sourcePath: "builtin", aliases: ["credentials"] }],
-				previous: undefined,
+				previous: { version: 1, status: "classified", taskRequest: "Earlier task.", allowedTools: [] },
 			},
 		});
 		expect(outcome).toMatchObject({
@@ -327,7 +327,31 @@ describe("trusted optional tool task intent", () => {
 		});
 		expect(events).toEqual([
 			"start system-one:intake",
-			"ok optional tools unresolved optional_tool_task: replace @0.910 rejected (floor 0.95) | optional_tool_0: request @0.990 accepted (secret_store) states=true,false",
+			"ok optional tools unresolved optional_tool_task: replace @0.910 rejected (floor 0.93) | optional_tool_0: request @0.990 accepted (secret_store) states=true,false",
+		]);
+	});
+
+	it("asks one atomic question per tool and judges the task relation only against a previous intent", async () => {
+		const asked: string[][] = [];
+		const controller = classificationController(async (input) => {
+			asked.push(Object.keys(input.questions));
+			return {};
+		});
+		const candidates = [
+			{ toolName: "secret_store", sourcePath: "builtin", aliases: ["credentials"] },
+			{ toolName: "trello", sourcePath: "/ext/trello.ts", aliases: ["trello"] },
+		];
+		await controller.classifyUserRequest("Check things.", "", { optionalTools: { candidates, previous: undefined } });
+		await controller.classifyUserRequest("Continue.", "", {
+			optionalTools: {
+				candidates,
+				previous: { version: 1, status: "classified", taskRequest: "Earlier task.", allowedTools: [] },
+			},
+		});
+		const optionalKeys = asked.map((keys) => keys.filter((key) => key.startsWith("optional_tool_")));
+		expect(optionalKeys).toEqual([
+			["optional_tool_0", "optional_tool_1"],
+			["optional_tool_task", "optional_tool_0", "optional_tool_1"],
 		]);
 	});
 

@@ -1,5 +1,6 @@
 import type { BeforeToolCallResult } from "@caupulican/pi-agent-core";
 import type { SourceInfo } from "./source-info.ts";
+import { DEFAULT_SYSTEM_ONE_CONFIG } from "./system-one/config.ts";
 
 export const OPTIONAL_TOOL_INTENT_CUSTOM_TYPE = "optional_tool_intent";
 export const MAX_OPTIONAL_TOOL_INTENT_TOOLS = 32;
@@ -115,19 +116,28 @@ export function readOptionalToolIntent(value: unknown): OptionalToolIntent | und
 	};
 }
 
-const INTENT_CONFIDENCE_FLOOR = 0.95;
+/**
+ * An owner-intent answer counts only at the plane's own hard-gate choice confidence. The controller
+ * passes its configured value; this default is the same number, not a second owner of it.
+ */
+export const DEFAULT_INTENT_CONFIDENCE_FLOOR = DEFAULT_SYSTEM_ONE_CONFIG.thresholds.choice.hard_gate_auto_confidence;
 const TASK_RELATIONS = ["continue", "replace", "end", "uncertain"];
 const TOOL_DECISIONS = ["request", "revoke", "unchanged", "uncertain"];
 
+/** The task relation is judged only against a previous classified intent; with none it is `replace` by definition. */
+export function optionalToolRelationAsked(context: Pick<OptionalToolRequestContext, "previous">): boolean {
+	return context.previous?.status === "classified";
+}
+
 /** Confidence is checked once at this intent owner; malformed choices are not semantic approval. */
-function intentChoice(answer: unknown, allowed: readonly string[]): string | undefined {
+function intentChoice(answer: unknown, allowed: readonly string[], floor: number): string | undefined {
 	if (!answer || typeof answer !== "object" || Array.isArray(answer)) return undefined;
 	const value = answer as { choice?: unknown; confidence?: unknown };
 	return typeof value.choice === "string" &&
 		allowed.includes(value.choice) &&
 		typeof value.confidence === "number" &&
 		Number.isFinite(value.confidence) &&
-		value.confidence >= INTENT_CONFIDENCE_FLOOR &&
+		value.confidence >= floor &&
 		value.confidence <= 1
 		? value.choice
 		: undefined;
@@ -138,6 +148,7 @@ function describeJudgment(
 	question: string,
 	answer: unknown,
 	allowed: readonly string[],
+	floor: number,
 ): {
 	question: string;
 	uncertain: boolean;
@@ -145,10 +156,10 @@ function describeJudgment(
 } {
 	const value =
 		answer && typeof answer === "object" && !Array.isArray(answer) ? (answer as Record<string, unknown>) : {};
-	const accepted = intentChoice(answer, allowed);
+	const accepted = intentChoice(answer, allowed, floor);
 	const confidence = typeof value.confidence === "number" ? value.confidence.toFixed(3) : "missing";
 	const choice = typeof value.choice === "string" ? value.choice : "missing";
-	const verdict = accepted === undefined ? `rejected (floor ${INTENT_CONFIDENCE_FLOOR})` : "accepted";
+	const verdict = accepted === undefined ? `rejected (floor ${floor})` : "accepted";
 	return {
 		question,
 		uncertain: accepted === undefined || accepted === "uncertain",
@@ -158,13 +169,21 @@ function describeJudgment(
 
 /** Raw optional-tool judgments for the semantic evaluation ledger, so a paused verdict can be traced to its cause. */
 export function traceOptionalToolJudgments(
-	context: Pick<OptionalToolRequestContext, "candidates">,
+	context: Pick<OptionalToolRequestContext, "candidates" | "previous">,
 	answers: Readonly<Record<string, unknown>>,
+	floor: number = DEFAULT_INTENT_CONFIDENCE_FLOOR,
 ): { question: string; uncertain: boolean; text: string }[] {
 	return [
-		describeJudgment("optional_tool_task", answers.optional_tool_task, TASK_RELATIONS),
+		...(optionalToolRelationAsked(context)
+			? [describeJudgment("optional_tool_task", answers.optional_tool_task, TASK_RELATIONS, floor)]
+			: []),
 		...context.candidates.map((candidate, index) => {
-			const trace = describeJudgment(`optional_tool_${index}`, answers[`optional_tool_${index}`], TOOL_DECISIONS);
+			const trace = describeJudgment(
+				`optional_tool_${index}`,
+				answers[`optional_tool_${index}`],
+				TOOL_DECISIONS,
+				floor,
+			);
 			return { ...trace, text: `${trace.text} (${candidate.toolName})` };
 		}),
 	];
@@ -174,8 +193,11 @@ export function optionalToolIntentFromAnswers(
 	request: string,
 	context: OptionalToolRequestContext,
 	answers: Readonly<Record<string, unknown>>,
+	floor: number = DEFAULT_INTENT_CONFIDENCE_FLOOR,
 ): OptionalToolIntent {
-	const relation = intentChoice(answers.optional_tool_task, TASK_RELATIONS);
+	const relation = optionalToolRelationAsked(context)
+		? intentChoice(answers.optional_tool_task, TASK_RELATIONS, floor)
+		: "replace";
 	const unresolved: OptionalToolIntent = {
 		version: 1,
 		status: "unresolved",
@@ -195,7 +217,7 @@ export function optionalToolIntentFromAnswers(
 	if (relation !== "end")
 		context.candidates.forEach((candidate, index) => {
 			const identity = { toolName: candidate.toolName, sourcePath: candidate.sourcePath };
-			const decision = intentChoice(answers[`optional_tool_${index}`], TOOL_DECISIONS);
+			const decision = intentChoice(answers[`optional_tool_${index}`], TOOL_DECISIONS, floor);
 			const heldBefore =
 				previous?.allowedTools.some(
 					(tool) => tool.toolName === candidate.toolName && tool.sourcePath === candidate.sourcePath,

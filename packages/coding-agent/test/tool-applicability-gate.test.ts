@@ -3,6 +3,7 @@ import {
 	enforceExplicitOptionalToolRequest,
 	type OptionalToolIntent,
 	optionalToolIntentFromAnswers,
+	optionalToolRelationAsked,
 	optionalToolRequestAliases,
 	readOptionalToolIntent,
 	traceOptionalToolJudgments,
@@ -62,7 +63,7 @@ describe("optional tool applicability gate", () => {
 	});
 
 	it("leaves an unresolved judgment as no owner decision and never revives an older grant", () => {
-		for (const confidence of [NaN, Infinity, 1.1, 0.949]) {
+		for (const confidence of [NaN, Infinity, 1.1, 0.92]) {
 			const intent = optionalToolIntentFromAnswers(
 				"continue",
 				{ candidates, previous: requested() },
@@ -176,16 +177,36 @@ describe("optional tool applicability gate", () => {
 	});
 
 	it("traces each raw judgment with its confidence and acceptance for the evaluation ledger", () => {
-		const trace = traceOptionalToolJudgments(
-			{ candidates },
-			{ optional_tool_task: answer("replace", 0.91), optional_tool_0: answer("request", 0.97) },
-		);
-		expect(trace.map((entry) => entry.text)).toEqual([
-			"optional_tool_task: replace @0.910 rejected (floor 0.95)",
+		const answers = {
+			optional_tool_task: answer("continue", 0.91),
+			optional_tool_0: answer("request", 0.97),
+		};
+		// With no previous classified intent the relation is `replace` by definition and is not judged.
+		const withoutPrevious = traceOptionalToolJudgments({ candidates, previous: undefined }, answers);
+		expect(withoutPrevious.map((entry) => entry.text)).toEqual([
 			"optional_tool_0: request @0.970 accepted (trello)",
-			"optional_tool_1: missing @missing rejected (floor 0.95) (secret_store)",
+			"optional_tool_1: missing @missing rejected (floor 0.93) (secret_store)",
 		]);
-		expect(trace.map((entry) => entry.uncertain)).toEqual([true, false, true]);
+		expect(withoutPrevious.map((entry) => entry.uncertain)).toEqual([false, true]);
+		const withPrevious = traceOptionalToolJudgments({ candidates, previous: requested() }, answers);
+		expect(withPrevious.map((entry) => entry.text)).toEqual([
+			"optional_tool_task: continue @0.910 rejected (floor 0.93)",
+			"optional_tool_0: request @0.970 accepted (trello)",
+			"optional_tool_1: missing @missing rejected (floor 0.93) (secret_store)",
+		]);
+	});
+
+	it("judges the task relation only against a previous classified intent, and uses the given floor", () => {
+		expect(optionalToolRelationAsked({ previous: undefined })).toBe(false);
+		expect(optionalToolRelationAsked({ previous: { ...requested(), status: "unresolved" } })).toBe(false);
+		expect(optionalToolRelationAsked({ previous: requested() })).toBe(true);
+		const answers = { optional_tool_0: answer("request", 0.94), optional_tool_1: answer("unchanged", 0.94) };
+		const atDefault = optionalToolIntentFromAnswers("Use trello.", { candidates, previous: undefined }, answers);
+		expect(atDefault.status).toBe("classified");
+		expect(atDefault.allowedTools).toEqual([{ toolName: "trello", sourcePath: "/extensions/trello.ts" }]);
+		const strict = optionalToolIntentFromAnswers("Use trello.", { candidates, previous: undefined }, answers, 0.95);
+		expect(strict.allowedTools).toEqual([]);
+		expect(strict.undecidedTools).toHaveLength(2);
 	});
 
 	it("gates profile extensions while leaving built-in and bundled tools alone", () => {

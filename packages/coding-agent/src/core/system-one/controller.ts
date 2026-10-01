@@ -442,12 +442,15 @@ export class SystemOneController {
 			}
 			return { status: "unavailable", reason: error instanceof Error ? error.message : String(error) };
 		}
+		const intentFloor = this.config.thresholds.choice.hard_gate_auto_confidence;
 		const optionalToolIntent = optionalTools
-			? optionalToolIntentFromAnswers(userRequest, optionalTools, response.answers)
+			? optionalToolIntentFromAnswers(userRequest, optionalTools, response.answers, intentFloor)
 			: undefined;
 		if (evaluationId !== undefined) {
 			const trace =
-				optionalToolsFit && optionalTools ? traceOptionalToolJudgments(optionalTools, response.answers) : [];
+				optionalToolsFit && optionalTools
+					? traceOptionalToolJudgments(optionalTools, response.answers, intentFloor)
+					: [];
 			this.evaluationObserver?.settleOk(
 				evaluationId,
 				optionalToolIntent ? `optional tools ${optionalToolIntent.status}` : "evaluated",
