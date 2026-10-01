@@ -408,7 +408,7 @@ describe("AgentSession research lane (idle trigger)", () => {
 			await vi.advanceTimersByTimeAsync(10);
 
 			expect(warnings).toEqual([
-				"Optional integrations paused: System One classification is not configured.",
+				"Optional integrations stay available; owner intent for them was not classified: System One classification is not configured.",
 				"Research lane failed: research settings unavailable",
 			]);
 			expect(researchLaneRecords(harness)).toHaveLength(0);

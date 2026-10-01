@@ -537,7 +537,7 @@ describe("AgentSession local runtime readiness — end to end through prompt()",
 				.map((part) => part.text);
 			expect(assistantTexts).toEqual(["answered locally"]);
 			expect(harness.eventsOfType("warning").map((event) => event.message)).toEqual([
-				"Optional integrations paused: System One classification is not configured.",
+				"Optional integrations stay available; owner intent for them was not classified: System One classification is not configured.",
 			]);
 			expect(serveEnv?.OLLAMA_NUM_PARALLEL).toBe("1");
 			expect(serveEnv?.OLLAMA_KEEP_ALIVE).toBe("10m");
