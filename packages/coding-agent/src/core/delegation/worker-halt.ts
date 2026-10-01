@@ -3,9 +3,6 @@ import type { AgentHaltRequest } from "@caupulican/pi-agent-core";
 /** Longest parent reason carried into the worker's transcript and the claim. */
 export const MAX_WORKER_HALT_REASON_CHARS = 1_000;
 
-/** How long a worker gets to reach its next request boundary and report before the host stops it. */
-export const DEFAULT_WORKER_HALT_REPORT_DEADLINE_MS = 120_000;
-
 const HALT_CLOSING_PROMPT = [
 	"HALT CLOSING TURN",
 	"The parent interrupted this worker. No tools are available in this final request.",

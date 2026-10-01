@@ -73,7 +73,14 @@ describe("resolveWorkerAuthority", () => {
 			cwd: "/repo",
 			deniedPaths: [],
 			memoryEnabled: false,
-			settings: { enabled: true, writeEnabled: true, maxUsd: 1, maxWallClockMs: 120_000, maxConcurrent: 4 },
+			settings: {
+				enabled: true,
+				writeEnabled: true,
+				maxUsd: 1,
+				maxWallClockMs: 120_000,
+				haltReportDeadlineMs: 120_000,
+				maxConcurrent: 4,
+			},
 		});
 		expect(plan.writeEnabled).toBe(readOnly !== true);
 		expect(plan.processEnabled).toBe(true);
@@ -144,7 +151,14 @@ describe("resolveWorkerAuthority", () => {
 			cwd: "/repo",
 			deniedPaths: [],
 			memoryEnabled: false,
-			settings: { enabled: true, writeEnabled: false, maxUsd: 1, maxWallClockMs: 120_000, maxConcurrent: 4 },
+			settings: {
+				enabled: true,
+				writeEnabled: false,
+				maxUsd: 1,
+				maxWallClockMs: 120_000,
+				haltReportDeadlineMs: 120_000,
+				maxConcurrent: 4,
+			},
 		});
 		expect(plan.toolManifests.map((entry) => entry.toolName)).toEqual(
 			expect.arrayContaining(["read", "write", "edit", "bash"]),
@@ -176,7 +190,14 @@ describe("resolveWorkerAuthority", () => {
 				cwd: "/repo",
 				deniedPaths: [],
 				memoryEnabled: false,
-				settings: { enabled: true, writeEnabled: true, maxUsd: 1, maxWallClockMs: 120_000, maxConcurrent: 4 },
+				settings: {
+					enabled: true,
+					writeEnabled: true,
+					maxUsd: 1,
+					maxWallClockMs: 120_000,
+					haltReportDeadlineMs: 120_000,
+					maxConcurrent: 4,
+				},
 			});
 			expect(plan.writeEnabled).toBe(false);
 			expect(plan.shellReadOnly).toBe(true);
@@ -852,7 +873,14 @@ describe("resolveWorkerAuthority", () => {
 			cwd: "/repo",
 			deniedPaths: [],
 			memoryEnabled: false,
-			settings: { enabled: true, writeEnabled: true, maxUsd: 1, maxWallClockMs: 120_000, maxConcurrent: 4 },
+			settings: {
+				enabled: true,
+				writeEnabled: true,
+				maxUsd: 1,
+				maxWallClockMs: 120_000,
+				haltReportDeadlineMs: 120_000,
+				maxConcurrent: 4,
+			},
 		});
 		expect(plan.processEnabled).toBe(true);
 		expect(plan.toolManifests.map((entry) => entry.toolName)).toContain("bash");

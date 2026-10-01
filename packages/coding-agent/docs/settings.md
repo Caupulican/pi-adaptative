@@ -285,6 +285,7 @@ Direct `write`/`edit` calls use review-after-apply semantics. The compiled grant
 | `workerDelegation.orchestrationProfile` | string | - | Optional default execution preset; agents may replace its defaults within inherited authority |
 | `workerDelegation.maxUsd` | number | `0` | USD ceiling for one worker task; `0` is unbounded and a positive value explicitly enables the ceiling |
 | `workerDelegation.maxWallClockMs` | number | `0` | Active wall-clock ceiling for one worker task; `0` is unbounded and a positive value explicitly enables the ceiling |
+| `workerDelegation.haltReportDeadlineMs` | number | `120000` | How long an interrupted worker gets to reach a request boundary and report before it is cancelled; up to 2147483647 |
 | `workerDelegation.maxConcurrent` | number | `3` | Global running-agent concurrency inside the fixed fleet and queue bounds; the default is the Codex CLI's per-session limit (4 threads including the root) |
 | `workerDelegation.writeEnabled` | boolean | `true` | Expose direct `write`/`edit`; explicit `false` revokes them for newly admitted work and narrows resumed grants |
 | `workerDelegation.modelPins` | object | - | Optional exact `default` and per-role provider/model/thinking bindings for fresh workers; malformed or unavailable applicable pins fail closed |

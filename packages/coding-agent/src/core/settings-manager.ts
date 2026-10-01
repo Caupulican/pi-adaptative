@@ -445,6 +445,9 @@ export const DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT = 3;
 export const DEFAULT_WORKER_DELEGATION_WRITE_ENABLED = true;
 export const MAX_WORKER_DELEGATION_MAX_USD = Number.MAX_SAFE_INTEGER;
 export const MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = Number.MAX_SAFE_INTEGER;
+export const DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS = 120_000;
+/** The largest delay a timer honors; anything above it fires at once. */
+export const MAX_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS = 2_147_483_647;
 export const MAX_WORKER_DELEGATION_MAX_CONCURRENT = Number.MAX_SAFE_INTEGER;
 /**
  * How a worker's thinking level is derived when nothing pins it: `step_down` runs workers one notch
@@ -480,6 +483,7 @@ export interface WorkerDelegationSettings {
 	maxUsd?: number; // default: 0 (unbounded); a positive value caps spend for one worker task
 	maxWallClockMs?: number; // default: 0 (unbounded); a positive value caps one worker task's cumulative active time
 	writeEnabled?: boolean; // default: true; explicit false revokes direct write/edit tools
+	haltReportDeadlineMs?: number; // default: 120000; how long an interrupted worker gets to reach a request boundary and report before it is cancelled
 	maxConcurrent?: number; // default: 3 (the Codex CLI per-session default); running leaf-worker concurrency; fixed fleet safety ceilings separately bound durable identities and queued dispatches
 	modelPins?: WorkerModelPinsSettings; // optional global/local role pins; absent preserves adaptive routing exactly
 	thinking?: WorkerThinkingPolicy; // default: step_down; worker thinking relative to the foreground when no authority or profile pins it
@@ -1268,6 +1272,22 @@ function normalizeWorkerDelegationLayer(
 	if (Object.hasOwn(value, "writeEnabled")) {
 		if (typeof value.writeEnabled === "boolean") normalized.writeEnabled = value.writeEnabled;
 		else reportInvalidWorkerDelegationField(reportDiagnostic, "writeEnabled", "a boolean");
+	}
+	if (Object.hasOwn(value, "haltReportDeadlineMs")) {
+		if (
+			typeof value.haltReportDeadlineMs === "number" &&
+			Number.isSafeInteger(value.haltReportDeadlineMs) &&
+			value.haltReportDeadlineMs > 0 &&
+			value.haltReportDeadlineMs <= MAX_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS
+		) {
+			normalized.haltReportDeadlineMs = value.haltReportDeadlineMs;
+		} else {
+			reportInvalidWorkerDelegationField(
+				reportDiagnostic,
+				"haltReportDeadlineMs",
+				`a safe integer between 1 and ${MAX_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS}`,
+			);
+		}
 	}
 	if (Object.hasOwn(value, "maxConcurrent")) {
 		if (
@@ -4761,6 +4781,12 @@ export class SettingsManager {
 				typeof configured.writeEnabled === "boolean"
 					? configured.writeEnabled
 					: DEFAULT_WORKER_DELEGATION_WRITE_ENABLED,
+			haltReportDeadlineMs: sanitizeIntegerSetting(
+				configured.haltReportDeadlineMs,
+				DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS,
+				1,
+				MAX_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS,
+			),
 			maxConcurrent: sanitizeIntegerSetting(
 				configured.maxConcurrent,
 				DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT,

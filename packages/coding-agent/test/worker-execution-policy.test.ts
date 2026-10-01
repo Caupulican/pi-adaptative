@@ -17,6 +17,7 @@ function settings(overrides: Partial<ResolvedWorkerDelegationSettings> = {}): Re
 		maxUsd: 1,
 		maxWallClockMs: 120_000,
 		writeEnabled: false,
+		haltReportDeadlineMs: 120_000,
 		maxConcurrent: 1,
 		...overrides,
 	};

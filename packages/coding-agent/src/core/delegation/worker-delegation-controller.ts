@@ -460,6 +460,16 @@ function workerContextModelIdentity(modelRef: string | undefined): { provider: s
 	return { provider: modelRef.slice(0, separator), model: modelRef.slice(separator + 1) };
 }
 
+/** What the host knows about a running worker without asking the worker. */
+type InFlightWorkerLedger = {
+	changedFiles: Set<string>;
+	sealChangedFiles: () => readonly string[];
+	getUsage: () => AttemptUsageSnapshot;
+	request: WorkerRequest;
+	handle: StartedDelegationAttempt;
+	cwd: string;
+};
+
 export class WorkerDelegationController {
 	private readonly deps: WorkerDelegationControllerDeps;
 	private readonly workerAbort = new AbortController();
@@ -497,17 +507,7 @@ export class WorkerDelegationController {
 	private readonly terminalHandoffs: WorkerTerminalHandoffCoordinator;
 	private readonly treeBudgets = new WorkerTreeBudgetCoordinator();
 	private readonly writeReservations: WorkerWriteReservationCoordinator;
-	private readonly inFlightLedgers = new Map<
-		string,
-		{
-			changedFiles: Set<string>;
-			sealChangedFiles: () => readonly string[];
-			getUsage: () => AttemptUsageSnapshot;
-			request: WorkerRequest;
-			handle: StartedDelegationAttempt;
-			cwd: string;
-		}
-	>();
+	private readonly inFlightLedgers = new Map<string, InFlightWorkerLedger>();
 
 	constructor(
 		deps: WorkerDelegationControllerDeps,
@@ -589,6 +589,7 @@ export class WorkerDelegationController {
 				getLatestWorkerClaimSnapshot(getActiveSessionBranchEntries(this.deps.getSessionManager()), laneId),
 			getWorkerResult: (laneId) => this.getWorkerLifecycle().getResult(laneId),
 			abortLane: (laneId, reasonCode) => this.laneAbortControllers.get(laneId)?.abort(reasonCode),
+			haltReportDeadlineMs: () => this.deps.getSettingsManager().getWorkerDelegationSettings().haltReportDeadlineMs,
 			cancelLane: (laneId, reasonCode) => {
 				this.scheduler.dropQueued(laneId);
 				// A running lane keeps its write reservation until its run has actually stopped: the
@@ -596,7 +597,28 @@ export class WorkerDelegationController {
 				// run's own `finally` releases it (fenced to that attempt), and a queued worker waiting on
 				// the same paths is woken by that release.
 				if (!this.scheduler.isRunning(laneId)) this.writeReservations.release(laneId);
-				const terminal = this.getWorkerLifecycle().cancel(laneId, reasonCode);
+				// A worker that was running reports what it changed even though it never got to speak.
+				const inFlight = this.inFlightLedgers.get(laneId);
+				const attemptStatus = inFlight ? this.getWorkerLifecycle().getActiveAttempt(laneId)?.status : undefined;
+				let terminal: LaneRecord | undefined;
+				if (inFlight && (attemptStatus === "running" || attemptStatus === "leased")) {
+					try {
+						inFlight.sealChangedFiles();
+					} catch (error) {
+						this.safeWarn(
+							`Failed to seal worker mutation state ${laneId} on cancel: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+					this.inFlightLedgers.delete(laneId);
+					terminal = this.persistCancelledClaim(
+						laneId,
+						inFlight,
+						`canceled by the parent (${reasonCode}); the worker did not report`,
+						reasonCode,
+					);
+				} else {
+					terminal = this.getWorkerLifecycle().cancel(laneId, reasonCode);
+				}
 				if (terminal) this.publishTerminalRecord(terminal);
 				if (terminal && !this.deps.isDisposed()) this.scheduler.drain();
 				return terminal;
@@ -746,6 +768,45 @@ export class WorkerDelegationController {
 		this.lifecycle.markNotificationsDelivered(notificationIds);
 	}
 
+	/**
+	 * Ends a running lane the host stopped, with what the host itself knows: the files the worker
+	 * changed before it stopped and what it spent. The worker never got to speak, so the summary says
+	 * so and the parent is not left to guess what a cancelled worker touched.
+	 */
+	private persistCancelledClaim(
+		laneId: string,
+		ledger: InFlightWorkerLedger,
+		summary: string,
+		reasonCode: string,
+	): LaneRecord {
+		const usage = ledger.getUsage();
+		const reportedUsage = providerUsageFromAttemptUsage(usage);
+		const claim: WorkerClaim = {
+			requestId: ledger.request.id,
+			status: "cancelled",
+			summary,
+			changedFiles: [...ledger.changedFiles],
+			usageReportId: `worker:${this.deps.getSessionId()}:${laneId}`,
+			createdAt: new Date().toISOString(),
+		};
+		const canceled = finalizeWorkerClaim(this.getWorkerLifecycle(), {
+			handle: ledger.handle,
+			claim,
+			accepted: false,
+			costUsd: usage.costUsd,
+			cwd: ledger.cwd,
+			inputTokens: usage.inputTokens,
+			outputTokens: usage.outputTokens,
+			totalTokens: reportedUsage.totalTokens,
+			wallClockMs: usage.activeWallClockMs,
+			toolCalls: usage.toolCalls,
+			reasonCode,
+		}).record;
+		// The claim describes execution; durable usage receipts own parent charge delivery.
+		this.deps.saveWorkerClaimSnapshot(claim, ledger.request);
+		return canceled;
+	}
+
 	abort(): Promise<void> {
 		this.runTeardownStep("abort worker execution", () => this.workerAbort.abort());
 		// Abort makes further tool admission impossible. Seal every already-admitted mutation before
@@ -805,33 +866,9 @@ export class WorkerDelegationController {
 			}
 			this.inFlightLedgers.delete(record.laneId);
 			try {
-				const usage = ledger.getUsage();
-				const reportedUsage = providerUsageFromAttemptUsage(usage);
-				const reportId = `worker:${this.deps.getSessionId()}:${record.laneId}`;
-				const claim: WorkerClaim = {
-					requestId: ledger.request.id,
-					status: "cancelled",
-					summary: "canceled on session dispose",
-					changedFiles: [...ledger.changedFiles],
-					usageReportId: reportId,
-					createdAt: new Date().toISOString(),
-				};
-				const canceled = finalizeWorkerClaim(this.getWorkerLifecycle(), {
-					handle: ledger.handle,
-					claim,
-					accepted: false,
-					costUsd: usage.costUsd,
-					cwd: ledger.cwd,
-					inputTokens: usage.inputTokens,
-					outputTokens: usage.outputTokens,
-					totalTokens: reportedUsage.totalTokens,
-					wallClockMs: usage.activeWallClockMs,
-					toolCalls: usage.toolCalls,
-					reasonCode: "session_disposed",
-				}).record;
-				this.publishTerminalRecord(canceled);
-				// The claim describes execution; durable usage receipts own parent charge delivery.
-				this.deps.saveWorkerClaimSnapshot(claim, ledger.request);
+				this.publishTerminalRecord(
+					this.persistCancelledClaim(record.laneId, ledger, "canceled on session dispose", "session_disposed"),
+				);
 			} catch (error) {
 				this.safeWarn(
 					`Failed to persist canceled worker claim ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,

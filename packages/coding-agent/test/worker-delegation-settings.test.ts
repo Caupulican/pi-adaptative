@@ -25,6 +25,24 @@ describe("worker delegation settings", () => {
 		expect("writePaths" in resolved).toBe(false);
 	});
 
+	it("resolves the halt report deadline: 120 s by default, any positive timer-safe value, malformed ones refused", () => {
+		expect(SettingsManager.inMemory({}).getWorkerDelegationSettings().haltReportDeadlineMs).toBe(120_000);
+		expect(
+			SettingsManager.inMemory({ workerDelegation: { haltReportDeadlineMs: 600_000 } }).getWorkerDelegationSettings()
+				.haltReportDeadlineMs,
+		).toBe(600_000);
+		// Past 2^31-1 ms a timer fires at once, which would cancel every halted worker immediately.
+		expect(
+			SettingsManager.inMemory({
+				workerDelegation: { haltReportDeadlineMs: 2_147_483_648 },
+			}).getWorkerDelegationSettings().haltReportDeadlineMs,
+		).toBe(120_000);
+		expect(
+			SettingsManager.inMemory({ workerDelegation: { haltReportDeadlineMs: 0 } }).getWorkerDelegationSettings()
+				.haltReportDeadlineMs,
+		).toBe(120_000);
+	});
+
 	it("keeps explicit 0 as the same unbounded policy as the omitted default", () => {
 		const settingsManager = SettingsManager.inMemory({
 			workerDelegation: { maxUsd: 0, maxWallClockMs: 0 },
@@ -131,6 +149,7 @@ describe("worker delegation settings", () => {
 			maxUsd: 2,
 			maxWallClockMs: 240_000,
 			writeEnabled: false,
+			haltReportDeadlineMs: 120_000,
 			maxConcurrent: 2,
 		});
 		const diagnostics = settingsManager.drainErrors();

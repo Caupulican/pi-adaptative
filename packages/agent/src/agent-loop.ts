@@ -566,11 +566,20 @@ async function runLoop(
 			const haltRequest = config.getHaltRequest?.();
 			if (haltRequest) {
 				await processPendingMessages();
-				const haltMessage: AgentMessage = { role: "user", content: haltRequest.userMessage, timestamp: Date.now() };
-				await emit({ type: "message_start", message: haltMessage });
-				await emit({ type: "message_end", message: haltMessage });
-				currentContext.messages.push(haltMessage);
-				newMessages.push(haltMessage);
+				// A host re-attempting this run after a transient failure hands the same request back over a
+				// transcript that already carries it: the model is told once, not once per attempt.
+				const lastUser = currentContext.messages.findLast((message) => message.role === "user");
+				if (lastUser?.content !== haltRequest.userMessage) {
+					const haltMessage: AgentMessage = {
+						role: "user",
+						content: haltRequest.userMessage,
+						timestamp: Date.now(),
+					};
+					await emit({ type: "message_start", message: haltMessage });
+					await emit({ type: "message_end", message: haltMessage });
+					currentContext.messages.push(haltMessage);
+					newMessages.push(haltMessage);
+				}
 				await streamToollessClosingTurn(
 					currentContext,
 					newMessages,

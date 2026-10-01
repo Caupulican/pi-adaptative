@@ -1052,6 +1052,53 @@ describe("runaway-loop backstop", () => {
 		expect(events.at(-1)?.type).toBe("agent_end");
 	});
 
+	it("does not tell the model twice when a re-attempted run already carries the halt message", async () => {
+		const userTexts: string[] = [];
+		const events = await drain(
+			agentLoop(
+				[],
+				{
+					systemPrompt: "",
+					tools: [echoTool],
+					// The first attempt's transcript: the task, then the halt message it persisted before failing.
+					messages: [
+						{ role: "user", content: "go", timestamp: 1 },
+						{ role: "user", content: "[halt] the parent stopped you", timestamp: 2 },
+					],
+				},
+				{
+					model: createModel(),
+					convertToLlm: identityConverter,
+					getHaltRequest: () => ({
+						userMessage: "[halt] the parent stopped you",
+						closingPrompt: "HALT CLOSING TURN",
+					}),
+				},
+				undefined,
+				(_model, providerContext: { messages?: readonly unknown[] }) => {
+					for (const message of providerContext.messages ?? []) {
+						const entry = message as { role?: string; content?: unknown };
+						if (entry.role === "user" && typeof entry.content === "string") userTexts.push(entry.content);
+					}
+					const stream = new MockAssistantStream();
+					queueMicrotask(() =>
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: assistantMessage([{ type: "text", text: "report" }], "stop"),
+						}),
+					);
+					return stream;
+				},
+			),
+		);
+		expect(userTexts.filter((text) => text === "[halt] the parent stopped you")).toHaveLength(1);
+		expect(events.filter((event) => event.type === "message_end" && event.message.role === "user")).toHaveLength(0);
+		expect(events.filter((event) => event.type === "message_end" && event.message.role === "assistant")).toHaveLength(
+			1,
+		);
+	});
+
 	it("closes a stalled run with exactly one tool-free provider request and no further tool work", async () => {
 		let executions = 0;
 		const stalls: Array<{ reason?: string }> = [];

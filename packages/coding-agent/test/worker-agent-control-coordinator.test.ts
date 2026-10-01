@@ -303,7 +303,7 @@ describe("WorkerAgentControlCoordinator", () => {
 				statusChanged: vi.fn(),
 				abortLane,
 				cancelLane,
-				haltReportDeadlineMs: 5_000,
+				haltReportDeadlineMs: () => 5_000,
 			});
 
 			// The default stops nothing by force: no suspension, no abort, the loop is simply asked to report.

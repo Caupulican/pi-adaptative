@@ -1048,6 +1048,65 @@ describe("AgentSession worker delegation", () => {
 		}
 	});
 
+	it("reports what a cancelled worker changed before it stopped, though the worker never spoke", async () => {
+		const harness = await createHarness();
+		let releaseHeld!: (message: AssistantMessage) => void;
+		const held = new Promise<AssistantMessage>((resolve) => {
+			releaseHeld = resolve;
+		});
+		try {
+			const target = join(harness.tempDir, "cancel-evidence.txt");
+			harness.setResponses([fauxAssistantMessage('{"summary":"initial turn complete"}')]);
+			const initial = await harness.session.runWorkerDelegationOnce({ instructions: "Start a durable worker" });
+			if (!initial.started || !initial.record) throw new Error("Expected the initial worker turn to complete.");
+
+			let secondRequestSeen = false;
+			setConcurrentResponses(harness, [
+				() =>
+					fauxAssistantMessage([fauxToolCall("write", { path: target, content: "partial work\n" })], {
+						stopReason: "toolUse",
+					}),
+				() => {
+					secondRequestSeen = true;
+					return held;
+				},
+			]);
+			const controls = (
+				harness.session as unknown as {
+					_backgroundLanes: {
+						followUpWorkerAgent(
+							agentId: string,
+							message: string,
+						): { started: boolean; record?: { laneId: string } };
+						cancelWorkerAgent(agentId: string, reason?: string): unknown;
+					};
+				}
+			)._backgroundLanes;
+			const followUp = controls.followUpWorkerAgent(initial.record.laneId, "Write the file, then keep going.");
+			if (!followUp.record) throw new Error("Expected a durable follow-up record.");
+			// The worker has written and is waiting on its next provider response.
+			await vi.waitFor(() => expect(secondRequestSeen).toBe(true), { timeout: 10_000 });
+
+			controls.cancelWorkerAgent(initial.record.laneId, "owner_cancelled");
+
+			const latest = () => {
+				const snapshot = new WorkerLifecycle({
+					agentDir: harness.tempDir,
+					sessionId: harness.session.sessionId,
+				}).getTaskRuntimeSnapshot();
+				const attemptId = snapshot.tasks[followUp.record!.laneId]?.attemptIds.at(-1);
+				return attemptId ? snapshot.attempts[attemptId] : undefined;
+			};
+			await vi.waitFor(() => expect(latest()?.result).toBeDefined(), { timeout: 10_000 });
+			const result = latest()?.result;
+			expect(JSON.stringify(result), "the cancel result").toContain("canceled by the parent (owner_cancelled)");
+			expect(JSON.stringify(result), "the cancel result").toContain("cancel-evidence.txt");
+		} finally {
+			releaseHeld(fauxAssistantMessage('{"summary":"cleanup"}'));
+			harness.cleanup();
+		}
+	});
+
 	it("persists a worker's conversation across tasks: a reused agent keeps its prior task context", async () => {
 		const harness = await createHarness();
 		let unsubscribe = () => {};

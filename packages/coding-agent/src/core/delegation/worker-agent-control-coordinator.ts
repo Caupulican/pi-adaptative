@@ -15,6 +15,7 @@ import {
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { terminalAttemptStatus } from "../orchestration/task-runtime-state.ts";
+import { DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS } from "../settings-manager.ts";
 import {
 	SessionRootMailbox,
 	type SessionRootReply,
@@ -59,7 +60,7 @@ import {
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { formatWorkerDispatchWait, type WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
 import { evaluateReusableWorkerTaskAdmission } from "./worker-fleet-limits.ts";
-import { DEFAULT_WORKER_HALT_REPORT_DEADLINE_MS, normalizeWorkerHaltReason, WorkerLaneHalts } from "./worker-halt.ts";
+import { normalizeWorkerHaltReason, WorkerLaneHalts } from "./worker-halt.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { isWorkerTaskPrompt } from "./worker-runner.ts";
 import { projectWorkerTaskSessionView } from "./worker-task-view.ts";
@@ -112,7 +113,7 @@ export interface WorkerAgentControlCoordinatorOptions {
 	 * attempt that may predate the current process. */
 	noteLaneOwnerEpoch?(laneId: string, ownerEpoch: number): void;
 	/** How long an interrupted worker gets to reach a request boundary and report. */
-	haltReportDeadlineMs?: number;
+	haltReportDeadlineMs?(): number;
 }
 
 type QueuedPeerMessage = ReturnType<WorkerAgentMailbox["enqueueWithReceipt"]>;
@@ -1264,7 +1265,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			const requested = this.laneHalts.request(
 				laneId,
 				normalizeWorkerHaltReason(options.message),
-				this.options.haltReportDeadlineMs ?? DEFAULT_WORKER_HALT_REPORT_DEADLINE_MS,
+				this.options.haltReportDeadlineMs?.() ?? DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS,
 				() => {
 					// The worker is inside something that outlived the deadline. Its state is retained; the
 					// parent hears about the cancellation through the same terminal handoff.
