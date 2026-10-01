@@ -113,7 +113,8 @@ jobs:
           name: release-binaries
           path: packages/coding-agent/binaries/pi-*
           if-no-files-found: error
-          retention-days: 7
+          # Only later jobs of this same run download it; each copy is ~260 MB, so keep it one day.
+          retention-days: 1
 
   verify-windows-binary:
     name: Verify Windows binary (${{ matrix.arch }})
