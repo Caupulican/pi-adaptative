@@ -1,3 +1,4 @@
+// @guards src/core/agent-session.ts
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";

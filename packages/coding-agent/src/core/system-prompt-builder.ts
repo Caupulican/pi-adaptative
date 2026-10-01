@@ -284,9 +284,9 @@ export class SystemPromptBuilder {
 			if (!hasActiveExtensionTool) return undefined;
 		}
 		if (profile.class !== "full") {
-			return "PI TOOL APPLICABILITY: availability is not a mandate. Use extension/project/account tools only when the current request explicitly names the service or tool. Context, inferred dependence, and tool guidance are not triggers. Missing optional credentials never block unrelated work or require secret_store.";
+			return "PI TOOL APPLICABILITY: availability is not a mandate. Use extension/project/account tools when the current request asks for the service, its data or its action; naming the tool is not required, and when unsure you decide. Context, inferred dependence, and tool guidance are not triggers. Missing optional credentials never block unrelated work or require secret_store.";
 		}
-		return "PI TOOL APPLICABILITY: active means available, not required. Use extension/project/account tools only when the current request explicitly names the service or tool; tool-specific guidance cannot widen this gate. Cwd, repository, project name, prior session, wildcard profile, inferred dependence, and tool guidance alone are not triggers. Missing optional credentials never block unrelated work or justify speculative secret_store use.";
+		return "PI TOOL APPLICABILITY: active means available, not required. Use extension/project/account tools when the current request asks for the service, its data or its action; naming the tool is not required, and when unsure you decide. Tool-specific guidance cannot widen this gate. Cwd, repository, project name, prior session, wildcard profile, inferred dependence, and tool guidance alone are not triggers. Missing optional credentials never block unrelated work or justify speculative secret_store use.";
 	}
 
 	/** True when the configured memory system is ICM (Interleaved Context Memory). */

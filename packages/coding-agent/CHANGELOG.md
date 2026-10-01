@@ -14,6 +14,9 @@
 - Masked unambiguous provider token formats (API keys, GitHub/npm/Slack/AWS tokens, JWTs, bearer credentials, private-key blocks, credentialed URLs) in every provider request regardless of credential inventory or boundary, so a key the host has never seen is never sent to a model. Generic `password: x` shapes are left alone to avoid rewriting source text.
 - Told leaf workers, in the shared worker rule and in credential-guard blocks, to return `blocked` naming the decision needed when unsure or beyond their grant, so the parent decides; raised the subagent, worker and chat-class system prompt budgets for it.
 - Stopped the work-lifecycle prompt from naming `delegate` and workers to models that do not hold the delegate tool.
+- Raised the "optional integrations stay available" warning once per unchanged state (and again after a successful classification) instead of on every prompt.
+- Recorded a cancelled owner-intent classification as `unresolved` instead of leaving it `paused`, so it no longer blocks optional tools as if it were still in flight.
+- Reworded the tool-applicability prompt rule: tools are used when the request asks for the service, its data or its action (naming the tool is not required), and the model decides when unsure.
 - Explained a `worker_specialist_busy` delegate skip: wait for the running worker, or start a separate one with `parallelWork { independentOf, justification }`.
 
 ## [0.102.1] - 2026-10-01

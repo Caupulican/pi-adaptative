@@ -1,3 +1,4 @@
+// @guards src/core/agent-session.ts
 import { fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai";
 import { Container, type Terminal, Text, TUI } from "@caupulican/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";

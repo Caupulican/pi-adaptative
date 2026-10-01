@@ -593,6 +593,8 @@ export class AgentSession {
 	private _disposeCompletion: Promise<void> | undefined;
 	private readonly _reflectionAbort = new AbortController();
 	private _optionalIntentAbort: AbortController | undefined;
+	/** The last "integrations stay available" warning raised, so an unchanged state warns once. */
+	private _lastOptionalIntentWarning: string | undefined;
 	/** Owns the lifetime of the one detached end-of-work reflection turn; see reflection-turn-lifecycle.ts. */
 	private readonly _reflectionTurnLifecycle: ReflectionTurnLifecycle;
 	/** Root-owned version transition state; construction performs no filesystem I/O. */
@@ -3418,9 +3420,11 @@ export class AgentSession {
 			manager.getSessionId() === sessionId &&
 			manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.id === pendingId
 		)
+			// A cancelled classification is no longer in flight and decided nothing: it must not keep
+			// blocking the integrations as if it were.
 			manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, {
 				version: 1,
-				status: "paused",
+				status: "unresolved",
 				taskRequest: "",
 				allowedTools: [],
 			});
@@ -3439,16 +3443,18 @@ export class AgentSession {
 			outcome.status === "classified" && outcome.classification.optionalToolIntent?.status === "classified"
 				? outcome.classification.optionalToolIntent
 				: undefined;
-		if (classifiedIntent) manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, classifiedIntent);
-		else {
+		if (classifiedIntent) {
+			manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, classifiedIntent);
+			this._lastOptionalIntentWarning = undefined;
+		} else {
 			// No usable judgment is not an owner decision: keep the unclassified words for the next
 			// classification, and leave the integrations available.
 			manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, { ...pendingIntent, status: "unresolved" });
-			if (candidates.length)
-				this._emit({
-					type: "warning",
-					message: `Optional integrations stay available; owner intent for them was not classified: ${outcome.status === "unavailable" ? outcome.reason : "the judgment was uncertain"}.`,
-				});
+			const warning = `Optional integrations stay available; owner intent for them was not classified: ${outcome.status === "unavailable" ? outcome.reason : "the judgment was uncertain"}.`;
+			if (candidates.length && warning !== this._lastOptionalIntentWarning) {
+				this._lastOptionalIntentWarning = warning;
+				this._emit({ type: "warning", message: warning });
+			}
 		}
 		return outcome;
 	}

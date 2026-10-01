@@ -1,4 +1,4 @@
-// @guards src/core/tool-applicability-gate.ts src/core/system-one/controller.ts src/core/system-one/catalog.ts
+// @guards src/core/tool-applicability-gate.ts src/core/system-one/controller.ts src/core/system-one/catalog.ts src/core/agent-session.ts
 import type { AgentTool } from "@caupulican/pi-agent-core/types";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
@@ -234,7 +234,8 @@ describe("trusted optional tool task intent", () => {
 		expect(latestIntent(harness)?.status).toBe("paused");
 		await harness.session.abort("test owner cancellation");
 		await pending;
-		expect(latestIntent(harness)?.status).toBe("paused");
+		// A cancelled classification decided nothing and is no longer in flight: it must not keep blocking.
+		expect(latestIntent(harness)).toMatchObject({ status: "unresolved", taskRequest: "", allowedTools: [] });
 		expect(harness.session.getSteeringMessages()).toEqual([]);
 	});
 
@@ -263,6 +264,35 @@ describe("trusted optional tool task intent", () => {
 		expect(latestIntent(harness)?.allowedTools).toEqual([]);
 		expect(seen).toEqual(["Use secret store for this task.", "Continue the task.", "Stop using secret store."]);
 		expect(harness.session.getEdgeGrants()).toEqual([]);
+	});
+
+	it("warns once while integrations stay unclassified and again after a successful classification", async () => {
+		const runs: string[] = [];
+		let unavailable = true;
+		const controller = classificationController(async (input) => {
+			const request = (input.state as { user_request?: string }).user_request;
+			if (request === undefined) return {};
+			if (unavailable) throw new Error("503 temporary outage");
+			return intentAnswers(request);
+		});
+		const harness = await createHarness({
+			systemOneController: controller,
+			baseToolsOverride: [probeTool(runs)],
+			settings: { modelRouter: { enabled: false } },
+		});
+		const warnings = () => harness.eventsOfType("warning").map((event) => event.message);
+		await toolTurn(harness, "First task.");
+		await toolTurn(harness, "Second task.");
+		expect(warnings().filter((message) => message.startsWith("Optional integrations stay available"))).toHaveLength(
+			1,
+		);
+		unavailable = false;
+		await toolTurn(harness, "Use secret store for this task.");
+		unavailable = true;
+		await toolTurn(harness, "Another task.");
+		expect(warnings().filter((message) => message.startsWith("Optional integrations stay available"))).toHaveLength(
+			2,
+		);
 	});
 
 	it("records every raw optional-tool judgment with its confidence on the evaluation ledger", async () => {

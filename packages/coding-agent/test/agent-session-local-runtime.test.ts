@@ -1,3 +1,4 @@
+// @guards src/core/agent-session.ts
 import { join } from "node:path";
 import { fauxAssistantMessage, type Model, registerFauxProvider } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";

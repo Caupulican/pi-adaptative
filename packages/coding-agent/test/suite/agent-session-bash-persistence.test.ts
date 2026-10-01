@@ -1,3 +1,4 @@
+// @guards src/core/agent-session.ts
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import type { AgentTool } from "@caupulican/pi-agent-core";

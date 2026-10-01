@@ -1,3 +1,4 @@
+// @guards src/core/agent-session.ts
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
