@@ -1,9 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { statSync, unlinkSync } from "node:fs";
-import { mkdir, unlink } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
-import { MAX_ENVELOPE_BYTES, MAX_SOCKET_BUFFER_BYTES, RECONNECT_INTERVAL_MS } from "./constants.ts";
+import {
+	BROKER_PROBE_TIMEOUT_MS,
+	MAX_ENVELOPE_BYTES,
+	MAX_SOCKET_BUFFER_BYTES,
+	RECONNECT_INTERVAL_MS,
+} from "./constants.ts";
 import type { RuntimeIdentity } from "./identity.ts";
 import { getChatPlatformInfo } from "./platform.ts";
 import type { PeerRecord } from "./state.ts";
@@ -183,14 +188,6 @@ function unlinkIfSameSocket(socketPath: string, identity?: string): void {
 	}
 }
 
-async function removeStaleSocket(socketPath: string): Promise<void> {
-	try {
-		await unlink(socketPath);
-	} catch (error) {
-		if (!isNodeError(error) || error.code !== "ENOENT") throw error;
-	}
-}
-
 type SelfIdentity = Pick<RuntimeIdentity, "id" | "name">;
 
 function matchesSelf(target: string, self: SelfIdentity): boolean {
@@ -244,6 +241,7 @@ function offlineResult(targets: PeerRecord[], expectReply: boolean): AgentSendRe
  */
 export class ChatMesh {
 	private self: PeerRecord;
+	private busy = false;
 	private readonly socketPath?: string;
 	private readonly onIncoming?: ChatMeshOptions["onIncoming"];
 	private server?: Server;
@@ -289,6 +287,14 @@ export class ChatMesh {
 
 	updateSelf(identity: RuntimeIdentity): void {
 		this.self = this.buildSelf(identity);
+		if (this.client && !this.client.destroyed) writeWire(this.client, this.helloMessage());
+	}
+
+	/** Peers see this agent as busy while its own turn runs; the broker rebroadcasts the change. */
+	setBusy(busy: boolean): void {
+		if (this.busy === busy) return;
+		this.busy = busy;
+		this.self = { ...this.self, busy };
 		if (this.client && !this.client.destroyed) writeWire(this.client, this.helloMessage());
 	}
 
@@ -488,7 +494,7 @@ export class ChatMesh {
 			name: identity.name,
 			address: `local:${identity.id}`,
 			scope: "local",
-			busy: false,
+			busy: this.busy,
 			lastSeen: new Date().toISOString(),
 		};
 	}
@@ -497,26 +503,61 @@ export class ChatMesh {
 		return { type: "hello", peer: { ...this.self, lastSeen: new Date().toISOString() } };
 	}
 
-	private async startBroker(): Promise<void> {
+	/** True when something on the socket path answers (or is too slow to rule out): its path is never taken. */
+	private brokerResponds(socketPath: string): Promise<boolean> {
+		return new Promise<boolean>((resolve) => {
+			const probe = createConnection(socketPath);
+			const done = (live: boolean) => {
+				clearTimeout(timer);
+				probe.destroy();
+				resolve(live);
+			};
+			const timer = setTimeout(() => done(true), BROKER_PROBE_TIMEOUT_MS);
+			timer.unref?.();
+			probe.once("connect", () => done(true));
+			probe.once("error", (error: NodeJS.ErrnoException) =>
+				done(error.code !== "ECONNREFUSED" && error.code !== "ENOENT"),
+			);
+		});
+	}
+
+	/** False when a live broker already owns the path: this process then joins it as a client. */
+	private async startBroker(): Promise<boolean> {
 		const socketPath = this.socketPath;
-		if (!socketPath) return;
-		await removeStaleSocket(socketPath);
+		if (!socketPath) return false;
+		// Only a socket proven dead is removed, and only the exact file that was probed: a broker that
+		// bound the path in the meantime is a different file and is left alone.
+		const observed = socketIdentity(socketPath);
+		if (observed !== undefined) {
+			if (await this.brokerResponds(socketPath)) return false;
+			unlinkIfSameSocket(socketPath, observed);
+		}
 		const server = createServer((socket) => this.handleServerConnection(socket));
 		this.server = server;
-		await new Promise<void>((resolve, reject) => {
-			const onError = (error: Error) => {
-				server.off("listening", onListening);
-				reject(error);
-			};
-			const onListening = () => {
-				server.off("error", onError);
-				this.serverSocketIdentity = socketIdentity(socketPath);
-				resolve();
-			};
-			server.once("error", onError);
-			server.once("listening", onListening);
-			server.listen(socketPath);
-		});
+		try {
+			await new Promise<void>((resolve, reject) => {
+				const onError = (error: Error) => {
+					server.off("listening", onListening);
+					reject(error);
+				};
+				const onListening = () => {
+					server.off("error", onError);
+					this.serverSocketIdentity = socketIdentity(socketPath);
+					resolve();
+				};
+				server.once("error", onError);
+				server.once("listening", onListening);
+				server.listen(socketPath);
+			});
+		} catch (error) {
+			// Another process bound the path first: it is the broker, and this one joins it.
+			if (isNodeError(error) && error.code === "EADDRINUSE") {
+				this.server = undefined;
+				return false;
+			}
+			throw error;
+		}
+		return true;
 	}
 
 	private async connectClient(): Promise<boolean> {

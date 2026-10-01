@@ -7,6 +7,7 @@ import {
 	CHAT_EXTENSION_NAME,
 	defaultChatStateRoot,
 	MAX_PENDING_VISIBLE_CARDS,
+	MAX_REPLY_HOPS,
 } from "./constants.ts";
 import { createRuntimeIdentity, resolveIdentity } from "./identity.ts";
 import { incomingPrompt, incomingSummary, lineCount } from "./incoming.ts";
@@ -19,6 +20,9 @@ export type ChatExtensionOptions = {
 	/** Defaults to `~/.pi/pi-chat`, or `PI_CHAT_STATE_ROOT`. */
 	stateRoot?: string;
 };
+
+/** Peers whose reply chain is remembered at once; the oldest is forgotten first. */
+const MAX_TRACKED_REPLY_CHAINS = 64;
 
 type VisibleCard = { customType: string; content: string; display: boolean; details: Record<string, unknown> };
 
@@ -59,6 +63,15 @@ export function piChatExtension(pi: ExtensionAPI, options: ChatExtensionOptions 
 			from: message.from.id,
 			expectReply: message.expectReply,
 		});
+		const sentHops = message.metadata?.hops;
+		const hops = typeof sentHops === "number" && Number.isInteger(sentHops) && sentHops > 0 ? sentHops : 1;
+		runtime.inboundHops.delete(message.from.id);
+		runtime.inboundHops.set(message.from.id, { hops, at: Date.now() });
+		while (runtime.inboundHops.size > MAX_TRACKED_REPLY_CHAINS) {
+			const oldest = runtime.inboundHops.keys().next().value;
+			if (oldest === undefined) break;
+			runtime.inboundHops.delete(oldest);
+		}
 		const bytes = Buffer.byteLength(message.message, "utf8");
 		const lines = lineCount(message.message);
 		const summary = incomingSummary(message, bytes, lines);
@@ -81,7 +94,10 @@ export function piChatExtension(pi: ExtensionAPI, options: ChatExtensionOptions 
 				summary,
 			},
 		});
-		pi.sendUserMessage(incomingPrompt(message), { deliverAs: "steer", processSlashCommands: false });
+		pi.sendUserMessage(incomingPrompt(message, hops, MAX_REPLY_HOPS), {
+			deliverAs: "steer",
+			processSlashCommands: false,
+		});
 		return "ACK: delivered; queued for immediate Pi turn.";
 	};
 
@@ -89,6 +105,7 @@ export function piChatExtension(pi: ExtensionAPI, options: ChatExtensionOptions 
 		stateRoot,
 		identity,
 		mesh: new ChatMesh({ self: identity, stateRoot, onIncoming: handleIncoming }),
+		inboundHops: new Map(),
 	};
 
 	registerChatCommand(pi, runtime);
@@ -105,9 +122,11 @@ export function piChatExtension(pi: ExtensionAPI, options: ChatExtensionOptions 
 	});
 	pi.on("agent_start", async () => {
 		agentActive = true;
+		runtime.mesh.setBusy(true);
 	});
 	pi.on("agent_end", async () => {
 		agentActive = false;
+		runtime.mesh.setBusy(false);
 		setTimeout(flushPendingCards, 0);
 	});
 	pi.on("session_shutdown", async (event, ctx) => {

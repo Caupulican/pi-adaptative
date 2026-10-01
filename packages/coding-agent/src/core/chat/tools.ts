@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "../extensions/types.ts";
+import { MAX_REPLY_HOPS, REPLY_CHAIN_WINDOW_MS } from "./constants.ts";
 import { type RuntimeIdentity, resolveIdentity } from "./identity.ts";
 import { type AgentSendResult, type ChatMesh, type DeliveryTarget, resolveTargets } from "./mesh.ts";
 import { AgentSendParameters, ListPeersParameters } from "./schemas.ts";
@@ -10,7 +11,23 @@ export type ChatRuntime = {
 	stateRoot: string;
 	identity: RuntimeIdentity;
 	mesh: ChatMesh;
+	/** The reply-chain depth of the latest message each peer sent this agent. */
+	inboundHops: Map<string, { hops: number; at: number }>;
 };
+
+/** The hop count an outgoing message carries: one past the deepest fresh chain among its targets. */
+export function nextReplyHops(
+	runtime: Pick<ChatRuntime, "inboundHops">,
+	targetIds: readonly string[],
+	now = Date.now(),
+): number {
+	let deepest = 0;
+	for (const id of targetIds) {
+		const inbound = runtime.inboundHops.get(id);
+		if (inbound && now - inbound.at <= REPLY_CHAIN_WINDOW_MS) deepest = Math.max(deepest, inbound.hops);
+	}
+	return deepest + 1;
+}
 
 export function currentChatIdentity(runtime: ChatRuntime): RuntimeIdentity {
 	return resolveIdentity(runtime.identity, readChatIdentity(runtime.stateRoot));
@@ -39,8 +56,16 @@ export async function performAgentSend(
 	const broadcastEnabled = readChatConfig(runtime.stateRoot)?.broadcastEnabled ?? false;
 	const peers = knownPeers(runtime);
 	const targets = resolveTargets(input.to, self, peers, broadcastEnabled);
+	const targetIds = targets.map((target) => target.id);
+	// Two agents answering each other forever is a loop nobody asked for: past the limit, the owner decides.
+	const hops = nextReplyHops(runtime, targetIds);
+	if (hops > MAX_REPLY_HOPS) {
+		throw new Error(
+			`pi-chat reply chain reached ${MAX_REPLY_HOPS} hops with ${targetIds.join(", ")}. Stop replying and tell the user what the peers are asking.`,
+		);
+	}
 	const result = await runtime.mesh.send(
-		{ ...input, to: targets.map((target) => target.id) },
+		{ ...input, to: targetIds, metadata: { ...input.metadata, hops } },
 		peers,
 		broadcastEnabled,
 	);

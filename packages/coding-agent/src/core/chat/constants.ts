@@ -13,6 +13,11 @@ export const MAX_SOCKET_BUFFER_BYTES = MAX_ENVELOPE_BYTES * 4;
 export const DEFAULT_TIMEOUT_MS = 15_000;
 export const MAX_TIMEOUT_MS = 120_000;
 export const RECONNECT_INTERVAL_MS = 5_000;
+export const BROKER_PROBE_TIMEOUT_MS = 1_500;
+/** A reply chain between two agents stops here: the next hop needs the owner. */
+export const MAX_REPLY_HOPS = 8;
+/** An inbound message only counts toward a reply chain while it is this fresh. */
+export const REPLY_CHAIN_WINDOW_MS = 10 * 60_000;
 export const MAX_PENDING_VISIBLE_CARDS = 50;
 
 /** The user-global state root shared with every agent that joins the same mesh socket. */
