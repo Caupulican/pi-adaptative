@@ -26,7 +26,11 @@ import {
 import type { ProviderAdmissionLedger } from "./provider-admission/ledger.ts";
 import type { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import { isCredentialSecretKey } from "./secrets/credential-content-mock.ts";
-import { CredentialContentProjectionError, redactCredentialContent } from "./secrets/credential-model-content.ts";
+import {
+	type ContentPath,
+	CredentialContentProjectionError,
+	redactCredentialContent,
+} from "./secrets/credential-model-content.ts";
 import { redactTokenShapes } from "./security/secret-text.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { resolveStreamStallBudget } from "./stream-stall-budget.ts";
@@ -196,12 +200,21 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 				? {
 						...options,
 						onPayload: async (payload: unknown, payloadModel: Parameters<NonNullable<typeof onPayload>>[1]) => {
-							const safePayload = redactCredentialContent(payload, redact, (_path, key) =>
-								isPayloadIdentityKey(key),
+							// A provider payload may carry its transport signal (Google-style `config.abortSignal`):
+							// it holds no text and must reach the transport as the same live object.
+							const preserveSignal = (_path: ContentPath, value: object) => value instanceof AbortSignal;
+							const safePayload = redactCredentialContent(
+								payload,
+								redact,
+								(_path, key) => isPayloadIdentityKey(key),
+								preserveSignal,
 							);
 							const hooked = await onPayload(safePayload, payloadModel);
-							return redactCredentialContent(hooked === undefined ? safePayload : hooked, redact, (_path, key) =>
-								isPayloadIdentityKey(key),
+							return redactCredentialContent(
+								hooked === undefined ? safePayload : hooked,
+								redact,
+								(_path, key) => isPayloadIdentityKey(key),
+								preserveSignal,
 							);
 						},
 					}

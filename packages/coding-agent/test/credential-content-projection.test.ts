@@ -23,6 +23,33 @@ describe("structured credential content projection", () => {
 		expect(unchanged).toEqual({ role: "user", content: "ordinary text" });
 	});
 
+	it("keeps a preserved opaque value live, however exotic its prototype, while redacting everything around it", () => {
+		// A Google-style payload carries its transport signal inside the config. Without an opaque exemption the
+		// non-plain prototype forced a JSON round trip, which replaced the signal with a plain `{}`.
+		const controller = new AbortController();
+		const payload = {
+			model: "fixture-model",
+			contents: [{ parts: [{ text: "prefix registered-secret suffix" }] }],
+			config: { abortSignal: controller.signal, maxOutputTokens: 100 },
+		};
+		const projected = redactCredentialContent(
+			payload,
+			(text) => text.replaceAll("registered-secret", "[REDACTED]"),
+			(_path, key) => key === "model",
+			(_path, value) => value instanceof AbortSignal,
+		);
+		expect(projected.config.abortSignal).toBe(controller.signal);
+		expect(projected.config.abortSignal).toBeInstanceOf(AbortSignal);
+		expect(projected.config.maxOutputTokens).toBe(100);
+		expect(projected.contents[0]?.parts[0]?.text).toBe("prefix [REDACTED] suffix");
+		controller.abort();
+		expect(projected.config.abortSignal.aborted).toBe(true);
+
+		// Without the exemption the same payload is still normalized, so the exemption is what keeps it live.
+		const normalized = redactCredentialContent(payload, (text) => text);
+		expect(normalized.config.abortSignal).not.toBeInstanceOf(AbortSignal);
+	});
+
 	it("fails closed on collisions and cycles while normalizing valid enumerable accessors", () => {
 		const cyclic: { child?: unknown } = {};
 		cyclic.child = cyclic;

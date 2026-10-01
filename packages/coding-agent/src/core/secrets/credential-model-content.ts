@@ -12,7 +12,7 @@ export class CredentialContentProjectionError extends Error {
 
 class CredentialContentNormalizationRequired extends Error {}
 
-type ContentPath = readonly (string | number)[];
+export type ContentPath = readonly (string | number)[];
 
 /** Projects decoded provider content without serializing secrets into quoted or escaped text. */
 export function redactCredentialContent<T>(
@@ -35,6 +35,10 @@ export function redactCredentialContent<T>(
 	const stack: Frame[] = [];
 	const enter = (current: object): Frame | undefined => {
 		if (active.has(current)) throw new CredentialContentProjectionError("cycle");
+		// An opaque value the caller keeps as is (an image, a transport signal) is decided before anything
+		// else: a non-plain prototype would otherwise force the whole value through a JSON round trip,
+		// which turns such an object into a plain one.
+		if (preserveValue?.(path, current)) return undefined;
 		const prototype = Object.getPrototypeOf(current);
 		const array = Array.isArray(current);
 		const typedArray = ArrayBuffer.isView(current);
@@ -61,7 +65,7 @@ export function redactCredentialContent<T>(
 				throw new CredentialContentNormalizationRequired();
 			}
 		}
-		if (typedArray || preserveValue?.(path, current)) return undefined;
+		if (typedArray) return undefined;
 		active.add(current);
 		return { value: current, prototype, ownKeys, index: 0 };
 	};
