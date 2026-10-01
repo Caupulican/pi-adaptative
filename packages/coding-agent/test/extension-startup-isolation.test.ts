@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cliPath = resolve(import.meta.dirname, "../src/cli.ts");
 
@@ -20,14 +20,6 @@ const EXTENSION_STARTUP_TEST_TIMEOUT_MS = 30_000;
  * and the failure reads as a generic vitest timeout with the child's stderr discarded.
  */
 const EXTENSION_STARTUP_CASE_TIMEOUT_MS = EXTENSION_STARTUP_TEST_TIMEOUT_MS + 15_000;
-
-const tempDirs: string[] = [];
-
-afterEach(() => {
-	for (const dir of tempDirs.splice(0)) {
-		rmSync(dir, { recursive: true, force: true });
-	}
-});
 
 async function runCli(
 	args: string[],
@@ -81,8 +73,7 @@ describe("extension startup isolation", () => {
 	it(
 		"reports a throwing extension as a warning instead of a fatal startup diagnostic",
 		async () => {
-			const tempRoot = mkdtempSync(join(tmpdir(), "pi-extension-startup-isolation-"));
-			tempDirs.push(tempRoot);
+			const tempRoot = tempDir("pi-extension-startup-isolation-");
 			const agentDir = join(tempRoot, "agent");
 			const projectDir = join(tempRoot, "project");
 			const extensionPath = join(tempRoot, "throwing-extension.ts");

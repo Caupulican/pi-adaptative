@@ -1,24 +1,11 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cliPath = resolve(import.meta.dirname, "../src/cli.ts");
-const tempDirs: string[] = [];
-
-afterEach(() => {
-	for (const dir of tempDirs.splice(0)) {
-		rmSync(dir, { recursive: true, force: true });
-	}
-});
-
-function createTempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-startup-session-name-"));
-	tempDirs.push(dir);
-	return dir;
-}
 
 interface CliDirs {
 	agentDir: string;
@@ -98,7 +85,7 @@ async function runCli(args: string[], dirs: CliDirs): Promise<CliResult> {
 }
 
 function setup(): CliDirs {
-	const tempRoot = createTempDir();
+	const tempRoot = tempDir("pi-startup-session-name-");
 	const dirs = {
 		agentDir: join(tempRoot, "agent"),
 		projectDir: join(tempRoot, "project"),
