@@ -78,7 +78,7 @@ describe("capability-shaped system prompts", () => {
 		expect(prompt).not.toContain(OVERSIZED_CONTEXT_TAIL);
 		expect(prompt).not.toContain("n-plus-2-architecture");
 		expect(prompt).not.toContain("Current working directory:");
-		expect(prompt.length).toBeLessThanOrEqual(2_048);
+		expect(prompt.length).toBeLessThanOrEqual(2_336);
 	});
 
 	it.each(["full", "lean", "minimal"] as const)(
@@ -88,6 +88,14 @@ describe("capability-shaped system prompts", () => {
 
 			expect(prompt).toContain("secret_store");
 			expect(prompt).toContain("no duplicate confirmation");
+		},
+	);
+
+	it.each(["lean", "minimal", "chat"] as const)(
+		"never mentions delegation or workers to a %s model that has no delegate tool",
+		(capabilityClass) => {
+			const prompt = buildForCapability(capabilityClass);
+			expect(prompt).not.toMatch(/delegat|subagent|sub-agent|worker/i);
 		},
 	);
 

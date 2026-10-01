@@ -14,6 +14,7 @@ import {
 	type OptionalToolIntent,
 	type OptionalToolRequestContext,
 	optionalToolIntentFromAnswers,
+	traceOptionalToolJudgments,
 } from "../tool-applicability-gate.ts";
 import type { JevAdapter } from "./adapter.ts";
 import { AuditStore } from "./audit.ts";
@@ -408,11 +409,17 @@ export class SystemOneController {
 			optionalTools.candidates.length <= MAX_OPTIONAL_TOOL_INTENT_TOOLS;
 		if (optionalToolsFit) Object.assign(asked, optionalToolRequestQuestions(optionalTools));
 		if (Object.keys(asked).length === 0) return { status: "skipped" };
+		const model = this.config.model.production || SYSTEM_ONE_PINNED_MODEL;
+		const evaluationId = this.evaluationObserver?.start({
+			programId: "system-one:intake",
+			consequence: consequenceForImpact("read_only"),
+			model,
+		});
 		let response: Awaited<ReturnType<JevAdapter["evaluate"]>>;
 		try {
 			response = await this.adapter.evaluate(
 				{
-					model: this.config.model.production || SYSTEM_ONE_PINNED_MODEL,
+					model,
 					state: {
 						user_request: userRequest.slice(0, 4_000),
 						written_rules: rules || "(none)",
@@ -429,7 +436,24 @@ export class SystemOneController {
 				{ impact: "read_only", ...(options.signal ? { signal: options.signal } : {}) },
 			);
 		} catch (error) {
+			if (evaluationId !== undefined) {
+				if (options.signal?.aborted) this.evaluationObserver?.settleCancelled(evaluationId);
+				else this.evaluationObserver?.settleFailed(evaluationId, error);
+			}
 			return { status: "unavailable", reason: error instanceof Error ? error.message : String(error) };
+		}
+		const optionalToolIntent = optionalTools
+			? optionalToolIntentFromAnswers(userRequest, optionalTools, response.answers)
+			: undefined;
+		if (evaluationId !== undefined) {
+			const trace =
+				optionalToolsFit && optionalTools ? traceOptionalToolJudgments(optionalTools, response.answers) : [];
+			this.evaluationObserver?.settleOk(
+				evaluationId,
+				optionalToolIntent ? `optional tools ${optionalToolIntent.status}` : "evaluated",
+				trace.map((entry) => entry.text),
+				trace,
+			);
 		}
 		// An unasked question is neutral, not false-by-accident: every id here reads "the user is
 		// imposing or lifting something", so absent means the request did nothing to that axis.
@@ -440,9 +464,7 @@ export class SystemOneController {
 		return {
 			status: "classified",
 			classification: {
-				...(optionalTools
-					? { optionalToolIntent: optionalToolIntentFromAnswers(userRequest, optionalTools, response.answers) }
-					: {}),
+				...(optionalToolIntent ? { optionalToolIntent } : {}),
 				mayChangeModelPools:
 					"changes_model_pools" in asked &&
 					evaluateNoul(

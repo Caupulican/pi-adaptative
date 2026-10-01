@@ -27,7 +27,7 @@ import {
 } from "../src/core/provider-tool-text.ts";
 
 const PROMPT_LIMITS = [
-	["subagent", SUBAGENT_CORE_SYSTEM_PROMPT, 560],
+	["subagent", SUBAGENT_CORE_SYSTEM_PROMPT, 720],
 	["scout", SCOUT_SYSTEM_PROMPT, 650],
 	["curation digest", CURATION_DIGEST_SYSTEM_PROMPT, 340],
 	["curation relevance", CURATION_RELEVANCE_SYSTEM_PROMPT, 420],
@@ -41,7 +41,7 @@ const PROMPT_LIMITS = [
 	["reflection", REFLECTION_SYSTEM_PROMPT, 1_300],
 	["untrusted boundary", UNTRUSTED_BOUNDARY_SYSTEM_RULE, 350],
 	["skill vault", SKILL_VAULT_SYSTEM_RULE, 200],
-	["worker", WORKER_LANE_SYSTEM_PROMPT, 800],
+	["worker", WORKER_LANE_SYSTEM_PROMPT, 940],
 	["work lifecycle", WORK_LIFECYCLE_SYSTEM_RULE, 650],
 ] as const;
 

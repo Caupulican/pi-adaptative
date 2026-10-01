@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Resolved a policy-phase tool failure record (except `owner_authorization_required`) after two later executed calls of any tool, so a blocked tool the model rightly never retries no longer rides every later request in the failure ledger.
+
 ## [0.102.1] - 2026-10-01
 
 ## [0.102.0] - 2026-09-30

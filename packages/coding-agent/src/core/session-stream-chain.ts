@@ -27,6 +27,7 @@ import type { ProviderAdmissionLedger } from "./provider-admission/ledger.ts";
 import type { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import { isCredentialSecretKey } from "./secrets/credential-content-mock.ts";
 import { CredentialContentProjectionError, redactCredentialContent } from "./secrets/credential-model-content.ts";
+import { redactTokenShapes } from "./security/secret-text.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { resolveStreamStallBudget } from "./stream-stall-budget.ts";
 
@@ -177,18 +178,18 @@ function failedRedactionStream(
 export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 	const { baseStreamFn, settingsManager, sessionManager, modelAdaptationStore, providerAdmissionLedger } = input;
 	const redactedBase: StreamFn = async (model, context, options) => {
-		if (!input.redactSensitiveText && !input.createSensitiveTextRedactor) {
-			return baseStreamFn(model, context, options);
-		}
 		let redactedContext = context;
 		let redactedOptions = options;
 		try {
 			const hostValues = (await input.getSensitiveValues?.()) ?? [];
 			options?.signal?.throwIfAborted();
 			const additionalValues = combineCredentialValues(hostValues, requestCredentialValues(options));
-			const redact =
+			const redactKnown =
 				input.createSensitiveTextRedactor?.(additionalValues) ??
-				((text: string) => input.redactSensitiveText!(text, additionalValues));
+				((text: string) => input.redactSensitiveText?.(text, additionalValues) ?? text);
+			// Known values are exact; token shapes are the floor for keys the host has never seen. Both are
+			// unconditional: a session without a credential boundary still never sends a recognizable key.
+			const redact = (text: string) => redactTokenShapes(redactKnown(text));
 			redactedContext = redactRequestContext(context, redact);
 			const onPayload = options?.onPayload;
 			redactedOptions = onPayload

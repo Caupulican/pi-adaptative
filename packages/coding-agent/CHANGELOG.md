@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Fixed
+
+- Stopped optional extension and credential tools from being blocked when owner-intent classification produced no usable judgment (outage, missing evaluator, uncertain or sub-threshold answer): such a result is now an `unresolved` snapshot that retains the unclassified words, leaves the integrations available and warns, while an in-flight classification and a classified intent that does not name the tool still block. Credential values stay protected by the exposure guard on tool output.
+- Treated a missing, uncertain or sub-threshold per-tool owner-intent judgment as `undecided` (the tool passes) instead of "not requested", and kept a grant held before when a continuation's judgment is below the floor.
+- Kept `secret_store` `status`, `list` and `discover` (metadata only) available regardless of classified intent, gating only `activate` and `migrate`.
+- Reworded the optional-tool block so it states that the owner did not request the tool and no longer tells the model not to probe credentials, within the diagnostic bound for any tool name length.
+- Recorded every raw owner-intent judgment with its confidence and acceptance on the semantic evaluation ledger (`system-one:intake`), making a paused or unresolved verdict traceable.
+- Masked unambiguous provider token formats (API keys, GitHub/npm/Slack/AWS tokens, JWTs, bearer credentials, private-key blocks, credentialed URLs) in every provider request regardless of credential inventory or boundary, so a key the host has never seen is never sent to a model. Generic `password: x` shapes are left alone to avoid rewriting source text.
+- Told leaf workers, in the shared worker rule and in credential-guard blocks, to return `blocked` naming the decision needed when unsure or beyond their grant, so the parent decides; raised the subagent, worker and chat-class system prompt budgets for it.
+- Stopped the work-lifecycle prompt from naming `delegate` and workers to models that do not hold the delegate tool.
+- Explained a `worker_specialist_busy` delegate skip: wait for the running worker, or start a separate one with `parallelWork { independentOf, justification }`.
+
 ## [0.102.1] - 2026-10-01
 
 ### Fixed

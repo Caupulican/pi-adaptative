@@ -56,7 +56,7 @@ export const MODEL_CAPABILITY_SYSTEM_PROMPT_MAX_CHARS: Readonly<Record<ModelCapa
 	// path were in place (bug ledger 155), so any guidance change overflowed it.
 	lean: 10_240,
 	minimal: 4_096,
-	chat: 2_048,
+	chat: 2_336,
 };
 
 /**

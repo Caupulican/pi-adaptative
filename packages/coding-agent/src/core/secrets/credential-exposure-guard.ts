@@ -491,6 +491,10 @@ async function runProcessCredentialRiskAsync(
 	return searchCredentialRiskAsync(inspected.searchTool, args, false, paths, false, signal);
 }
 
+/** Deny mode is the leaf-worker contract: the worker cannot decide this, so its parent does. */
+const DENY_MODE_ESCALATION =
+	"If the task cannot proceed without it, finish with status blocked and name what you need in blockers; your parent decides.";
+
 const CREDENTIAL_BLOCK_REASONS = {
 	fileBlind:
 		"Credential file access is model-blind. Use secret_store migrate with this path, or activate an existing profile, without inspecting credential data.",
@@ -855,7 +859,7 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 				);
 				if (assessment.reason && mode === "deny") {
 					throw new AgentToolExecutionError(
-						assessment.reason,
+						`${assessment.reason} ${DENY_MODE_ESCALATION}`,
 						"credential_access_blocked",
 						"credential-access-blocked",
 						"tool_failure",

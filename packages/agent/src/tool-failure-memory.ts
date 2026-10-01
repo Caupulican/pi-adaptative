@@ -1462,6 +1462,16 @@ const LATER_CALLS_THAT_RESOLVE = 2;
  * after one corrected delegate call, because the corrected call never repeats the failed
  * arguments). The occurrence count is remembered so an identical repeat keeps escalating.
  */
+/**
+ * A policy block names a restriction, not an argument or state the model can repair, so the model
+ * "moving on" shows in any later executed call, not only calls of the blocked tool. Without this a
+ * blocked tool the model rightly never retries kept its record in every later request (measured live:
+ * 26 ledger re-appends for two blocked calls). `owner_authorization_required` stays prompt-scoped.
+ */
+function isUncorrectablePolicyBlock(record: ToolFailureMemoryRecord): boolean {
+	return record.phase === "policy" && record.failureCode !== "owner_authorization_required";
+}
+
 function resolveToolFailures(fold: FailureFoldState, identity: ToolOperationIdentity): void {
 	for (const [failureKey, failure] of fold.active) {
 		if (failureKey === identity.failureKey) {
@@ -1469,8 +1479,9 @@ function resolveToolFailures(fold: FailureFoldState, identity: ToolOperationIden
 			continue;
 		}
 		if (
-			failure.record.tool !== identity.tool ||
-			getToolFailureRecordExecutionScope(failure.record) !== identity.executionScope
+			!isUncorrectablePolicyBlock(failure.record) &&
+			(failure.record.tool !== identity.tool ||
+				getToolFailureRecordExecutionScope(failure.record) !== identity.executionScope)
 		)
 			continue;
 		failure.laterCalls += 1;

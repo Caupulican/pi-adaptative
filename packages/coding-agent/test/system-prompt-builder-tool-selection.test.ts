@@ -337,6 +337,11 @@ describe("SystemPromptBuilder — evidence-gated tool-selection hint", () => {
 		expect(root).toContain("publish under active owner grants and release conditions");
 		expect(root).toContain("goal owns outcome/contract, task_steps owns plan, delegate owns workers");
 
+		// A model without the delegate tool is never told about workers.
+		const withoutDelegate = new SystemPromptBuilder(makeDeps()).rebuildSystemPrompt(["goal", "task_steps"]);
+		expect(withoutDelegate).toContain("goal owns outcome/contract, task_steps owns plan, evidence owns acceptance");
+		expect(withoutDelegate).not.toMatch(/delegat|worker/i);
+
 		const splitGoalSurface = new SystemPromptBuilder(makeDeps()).rebuildSystemPrompt([
 			"create_goal",
 			"get_goal",

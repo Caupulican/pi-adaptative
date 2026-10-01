@@ -519,6 +519,8 @@ describe("AgentSessionRuntime characterization", () => {
 					services,
 					sessionManager,
 					sessionStartEvent,
+					// Without a model the prompt below resolves a default local provider and dials a real socket.
+					model: faux.getModel(),
 				})),
 				services,
 				diagnostics: services.diagnostics,

@@ -2218,7 +2218,7 @@ export class AgentSession {
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
 			recordGateOutcome: (outcome) => this._recordGateOutcome(outcome),
 			getExtensionRunner: () => this._extensionRunner,
-			checkToolApplicability: (toolName) => {
+			checkToolApplicability: (toolName, args) => {
 				const source = this._runtimeBuilder.getToolSourceInfo(toolName);
 				const aliases = optionalToolRequestAliases(toolName, source, () => {
 					const verification = this.runtimeUpdates.getExtensionVerificationTarget();
@@ -2233,6 +2233,7 @@ export class AgentSession {
 							intent: readOptionalToolIntent(
 								this.sessionManager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.data,
 							),
+							args,
 						})
 					: undefined;
 			},
@@ -3381,23 +3382,25 @@ export class AgentSession {
 		const snapshot = readOptionalToolIntent(
 			manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.data,
 		);
-		const pendingRequests = snapshot?.status === "paused" ? (snapshot.pendingRequests ?? []) : [];
-		const previous = snapshot?.status === "paused" ? snapshot.resumeIntent : snapshot;
+		const unsettled = snapshot !== undefined && snapshot.status !== "classified";
+		const pendingRequests = unsettled ? (snapshot.pendingRequests ?? []) : [];
+		const previous = unsettled ? snapshot.resumeIntent : snapshot;
 		const candidates: OptionalToolCandidate[] = this.getAllTools().flatMap((tool) => {
 			const source = this._runtimeBuilder.getToolSourceInfo(tool.name);
 			const aliases = optionalToolRequestAliases(tool.name, source);
 			return aliases ? [{ toolName: tool.name, sourcePath: source?.path ?? "", aliases }] : [];
 		});
 		const recoverable = request.length <= MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS && pendingRequests.length < 8;
-		const pendingId = manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, {
-			version: 1,
-			status: "paused",
+		const pendingIntent = {
+			version: 1 as const,
+			status: "paused" as const,
 			taskRequest: request.slice(0, MAX_OPTIONAL_TOOL_REQUEST_CHARACTERS),
 			allowedTools: [],
 			...(recoverable
 				? { ...(previous ? { resumeIntent: previous } : {}), pendingRequests: [...pendingRequests, request] }
 				: {}),
-		});
+		};
+		const pendingId = manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, pendingIntent);
 		const controller = this._systemOneController;
 		const outcome = controller
 			? await controller.classifyUserRequest(request, rules, {
@@ -3432,13 +3435,21 @@ export class AgentSession {
 				superseded: true,
 				reason: "Owner intent classification was cancelled or superseded",
 			};
-		if (outcome.status === "classified" && outcome.classification.optionalToolIntent)
-			manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, outcome.classification.optionalToolIntent);
-		else if (candidates.length)
-			this._emit({
-				type: "warning",
-				message: `Optional integrations paused: ${outcome.status === "unavailable" ? outcome.reason : "owner intent classification unavailable"}.`,
-			});
+		const classifiedIntent =
+			outcome.status === "classified" && outcome.classification.optionalToolIntent?.status === "classified"
+				? outcome.classification.optionalToolIntent
+				: undefined;
+		if (classifiedIntent) manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, classifiedIntent);
+		else {
+			// No usable judgment is not an owner decision: keep the unclassified words for the next
+			// classification, and leave the integrations available.
+			manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, { ...pendingIntent, status: "unresolved" });
+			if (candidates.length)
+				this._emit({
+					type: "warning",
+					message: `Optional integrations stay available; owner intent for them was not classified: ${outcome.status === "unavailable" ? outcome.reason : "the judgment was uncertain"}.`,
+				});
+		}
 		return outcome;
 	}
 

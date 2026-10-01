@@ -76,7 +76,7 @@ function latestIntent(harness: Harness) {
 }
 
 describe("trusted optional tool task intent", () => {
-	it("retains initial explicit input through an outage without an existing intent grant", async () => {
+	it("keeps the tool available through an outage and retains the unclassified words", async () => {
 		const runs: string[] = [];
 		let outage = true;
 		const controller = classificationController(async (input) => {
@@ -95,10 +95,16 @@ describe("trusted optional tool task intent", () => {
 			settings: { modelRouter: { enabled: false } },
 		});
 		await toolTurn(harness, "Use secret store for this task.");
-		expect(runs).toHaveLength(0);
+		expect(runs).toHaveLength(1);
+		expect(latestIntent(harness)).toMatchObject({
+			status: "unresolved",
+			pendingRequests: ["Use secret store for this task."],
+		});
 		outage = false;
 		await toolTurn(harness, "Continue the task.");
-		expect(runs).toHaveLength(1);
+		expect(runs).toHaveLength(2);
+		expect(latestIntent(harness)).toMatchObject({ status: "classified" });
+		expect(latestIntent(harness)?.allowedTools).toHaveLength(1);
 	});
 
 	it("pauses at active trusted ingress before a slow derived input transform", async () => {
@@ -259,7 +265,43 @@ describe("trusted optional tool task intent", () => {
 		expect(harness.session.getEdgeGrants()).toEqual([]);
 	});
 
-	it("pauses during evaluator outage and restores valid continuation only after fresh classification", async () => {
+	it("records every raw optional-tool judgment with its confidence on the evaluation ledger", async () => {
+		const events: string[] = [];
+		const controller = classificationController(async () => ({
+			optional_tool_task: { choice: "replace", confidence: 0.91 },
+			optional_tool_0: { choice: "request", confidence: 0.99 },
+		}));
+		controller.setEvaluationObserver({
+			start: (input) => {
+				events.push(`start ${input.programId}`);
+				return "eval-1";
+			},
+			settleOk: (_id, verdict, reasons, questionStates) => {
+				events.push(
+					`ok ${verdict} ${reasons?.join(" | ")} states=${questionStates?.map((s) => s.uncertain).join(",")}`,
+				);
+			},
+			settleFailed: () => events.push("failed"),
+			settleCancelled: () => events.push("cancelled"),
+			noteVerdict: () => {},
+		});
+		const outcome = await controller.classifyUserRequest("Use secret store for this task.", "", {
+			optionalTools: {
+				candidates: [{ toolName: "secret_store", sourcePath: "builtin", aliases: ["credentials"] }],
+				previous: undefined,
+			},
+		});
+		expect(outcome).toMatchObject({
+			status: "classified",
+			classification: { optionalToolIntent: { status: "unresolved" } },
+		});
+		expect(events).toEqual([
+			"start system-one:intake",
+			"ok optional tools unresolved optional_tool_task: replace @0.910 rejected (floor 0.95) | optional_tool_0: request @0.990 accepted (secret_store) states=true,false",
+		]);
+	});
+
+	it("leaves the tool available during an evaluator outage and honors retained words once classification recovers", async () => {
 		const runs: string[] = [];
 		let unavailable = false;
 		const controller = classificationController(async (input) => {
@@ -275,13 +317,15 @@ describe("trusted optional tool task intent", () => {
 		await toolTurn(harness, "Use secret store for this task.");
 		unavailable = true;
 		await toolTurn(harness, "Continue the task.");
-		expect(runs).toHaveLength(1);
-		expect(latestIntent(harness)?.status).toBe("paused");
+		expect(runs).toHaveLength(2);
+		expect(latestIntent(harness)?.status).toBe("unresolved");
 		unavailable = false;
 		await toolTurn(harness, "Continue the task.");
-		expect(runs).toHaveLength(2);
+		expect(runs).toHaveLength(3);
 		unavailable = true;
+		// No owner decision could be read, so nothing is denied: the integration stays available.
 		await toolTurn(harness, "Stop using secret store.");
+		expect(runs).toHaveLength(4);
 		unavailable = false;
 		const previousJudge = controller.adapter;
 		// The fresh judgment must consume unresolved original owner input before the continuation.
@@ -298,7 +342,8 @@ describe("trusted optional tool task intent", () => {
 			};
 		};
 		await toolTurn(harness, "Continue the task.");
-		expect(runs).toHaveLength(2);
+		expect(runs).toHaveLength(4);
+		expect(latestIntent(harness)?.allowedTools).toEqual([]);
 	});
 
 	it("classifies original owner words, never transformed or extension-authored requests", async () => {

@@ -1050,6 +1050,67 @@ describe("tool failure memory", () => {
 		expect(again.ledger).toContain('"occ":2');
 	});
 
+	it("resolves a policy block once the model moves on with other tools, but keeps owner authorization prompt-scoped", () => {
+		const call = (id: string, name: string, args: Record<string, unknown>): AgentMessage => ({
+			role: "assistant",
+			content: [{ type: "toolCall", id, name, arguments: args }],
+			api: "openai-responses",
+			provider: "openai",
+			model: "mock",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		});
+		const ok = (id: string, name: string): AgentMessage => ({
+			role: "toolResult",
+			toolCallId: id,
+			toolName: name,
+			content: [{ type: "text", text: "ok" }],
+			isError: false,
+			timestamp: 2,
+		});
+		const scenario = (failureCode: string) => {
+			const record = rememberToolFailure(
+				new Map(),
+				"trello",
+				{ action: "resolve_project_scope" },
+				"rejected",
+				failureCode,
+				"Choose an allowed approach.",
+				"Optional tool trello was not requested by the owner.",
+			);
+			const blocked: AgentMessage[] = [
+				call("t-1", "trello", { action: "resolve_project_scope" }),
+				{
+					role: "toolResult",
+					toolCallId: "t-1",
+					toolName: "trello",
+					content: createToolFailureResult(record).content,
+					details: createToolFailureResult(record).details,
+					isError: true,
+					timestamp: 2,
+				},
+			];
+			const oneMore = [...blocked, call("r-1", "read", { path: "a" }), ok("r-1", "read")];
+			const twoMore = [...oneMore, call("b-1", "bash", { command: "ls" }), ok("b-1", "bash")];
+			return { oneMore, twoMore };
+		};
+
+		const blocked = scenario("blocked");
+		expect(sanitizeToolFailureContext(blocked.oneMore, "base").ledger).toContain('"tool":"trello"');
+		expect(sanitizeToolFailureContext(blocked.twoMore, "base").ledger).toBeUndefined();
+
+		const authorization = scenario("owner_authorization_required");
+		expect(sanitizeToolFailureContext(authorization.twoMore, "base").ledger).toContain('"tool":"trello"');
+	});
+
 	it("carries one pointer line instead of the protocol text when the host keeps the protocol in the system prompt", () => {
 		const tracker = new Map();
 		const failed = rememberToolFailure(

@@ -1202,6 +1202,9 @@ function delegateStartSkipText(reason: string): string {
 	if (reason === "worker_agent_session_limit_reached") {
 		return "delegate not started: CAVEMAN MODE - MANDATORY: worker_agent_session_limit_reached is expected policy capacity, not harness instability. Reuse an idle worker returned by delegate list, or return the constraint to the user.";
 	}
+	if (reason === "worker_specialist_busy") {
+		return "delegate not started: a compatible worker is still running this kind of work, and a second copy would duplicate it. Wait for its completion event or use status on it. If this task is independent of the running work, retry with parallelWork { independentOf: [<running worker id>], justification } to start a separate worker.";
+	}
 	if (reason.startsWith("worker_specialist_choice_required")) {
 		const candidates = reason.slice("worker_specialist_choice_required".length).replace(/^:/, "");
 		return `delegate not started: more than one idle worker fits this task${candidates ? ` (${candidates.split(",").join(", ")})` : ""}. You are the orchestrator: choose the recipient. Retry with agentId set to one of them (delegate list shows each one's recent work), or pass parallelWork { independentOf, justification } to start a separate worker.`;

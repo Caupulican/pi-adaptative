@@ -171,6 +171,8 @@ describe("AgentSession bash and persistence characterization", () => {
 			"custom_message",
 			"custom",
 			"custom",
+			// Without a configured evaluator the pending snapshot settles as unresolved (integrations stay available).
+			"custom",
 			"message",
 			"custom",
 			"request_snapshot",
@@ -191,22 +193,27 @@ describe("AgentSession bash and persistence characterization", () => {
 			customType: OPTIONAL_TOOL_INTENT_CUSTOM_TYPE,
 			data: { version: 1, status: "paused", taskRequest: "start", allowedTools: [], pendingRequests: ["start"] },
 		});
-		expect(entries[8]).toMatchObject({
+		expect(entries[3]).toMatchObject({
+			type: "custom",
+			customType: OPTIONAL_TOOL_INTENT_CUSTOM_TYPE,
+			data: { version: 1, status: "unresolved", taskRequest: "start", allowedTools: [], pendingRequests: ["start"] },
+		});
+		expect(entries[9]).toMatchObject({
 			type: "custom",
 			customType: WORK_UNIT_CUSTOM_TYPE,
-			data: { kind: "enforced", startEntryId: entries[6]?.id },
+			data: { kind: "enforced", startEntryId: entries[7]?.id },
 		});
 		expect(entries.filter((entry) => entry.type === "provider_request_terminal")).toEqual([
-			expect.objectContaining({ outcome: "completed", assistantMessageEntryId: entries[6]?.id }),
-			expect.objectContaining({ outcome: "completed", assistantMessageEntryId: entries[13]?.id }),
+			expect.objectContaining({ outcome: "completed", assistantMessageEntryId: entries[7]?.id }),
+			expect.objectContaining({ outcome: "completed", assistantMessageEntryId: entries[14]?.id }),
 		]);
-		// The owner's prompt is persisted (entry 3) and immediately followed by its owner-evidence
-		// record (entry 4): the session marks the message as operator input and the reflection
+		// The owner's prompt is persisted (entry 4) and immediately followed by its owner-evidence
+		// record (entry 5): the session marks the message as operator input and the reflection
 		// controller records the original words at persistence, bound to that message's entry id.
-		const ownerMessage = entries[3];
-		const ownerEvidence = entries[4];
+		const ownerMessage = entries[4];
+		const ownerEvidence = entries[5];
 		if (ownerMessage?.type !== "message" || ownerMessage.message.role !== "user") {
-			throw new Error("expected the persisted owner prompt at entry 3");
+			throw new Error("expected the persisted owner prompt at entry 4");
 		}
 		expect(ownerEvidence).toMatchObject({ type: "custom", customType: OWNER_EVIDENCE_CUSTOM_TYPE });
 		const [evidence, ...moreEvidence] = getOwnerEvidenceSnapshots(entries);

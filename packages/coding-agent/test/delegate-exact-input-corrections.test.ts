@@ -256,6 +256,22 @@ describe("delegate exact-action input corrections", () => {
 		expect(text).toContain("choose the recipient");
 		expect(text).toContain("agentId");
 	});
+	it("tells the orchestrator how to proceed when a compatible worker is still running", async () => {
+		const start = vi.fn(() => ({ started: false, skipReason: "worker_specialist_busy" }));
+		const tool = toolWithSpies(controlSpies(), start);
+		const result = await tool.execute(
+			"busy",
+			{ action: "start", instructions: "Review the release." },
+			undefined,
+			undefined,
+			context,
+		);
+		const text = delegateText(result);
+		expect(text).toContain("still running");
+		expect(text).toContain("parallelWork");
+		expect(text).toContain("independentOf");
+		expect(text).not.toBe("delegate skipped: worker_specialist_busy");
+	});
 	it.each([true, false])(
 		"forwards readOnly=%s reuse validation and reports the host's incompatibility",
 		async (readOnly) => {

@@ -49,7 +49,7 @@ export const WORKER_EXECUTION_DISCIPLINE_RULE =
 
 /** One shared source for root-to-worker assignment, local choice, judgment and host authority. */
 export const WORKER_DECISION_RIGHTS_RULE =
-	"Latest task/grant; parent history is context. Choose investigation, implementation and focused checks; no parent approval. Parent assigns, integrates and launches workers; systemone judgments grant no authority; host enforces grant and deterministic transitions.";
+	"Latest task/grant; parent history is context. Choose investigation, implementation and focused checks; no parent approval. Parent assigns, integrates and launches workers; systemone judgments grant no authority; host enforces grant and deterministic transitions. Unsure or outside the grant: never guess or work around; return status blocked with the decision needed in blockers, and the parent decides and follows up.";
 
 export const SUBAGENT_CORE_SYSTEM_PROMPT = [
 	"Leaf worker.",

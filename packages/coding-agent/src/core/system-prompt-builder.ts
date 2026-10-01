@@ -348,8 +348,10 @@ export class SystemPromptBuilder {
 				name === "update_goal" ||
 				name === "task_steps",
 		);
+		// Only a model that holds the delegate tool is told about workers.
+		const workersOwner = toolNames.includes("delegate") ? " delegate owns workers," : "";
 		const ownerRule = hasWorkPlanningTool
-			? "\n- One owner per invariant: goal owns outcome/contract, task_steps owns plan, delegate owns workers, evidence owns acceptance. Never create parallel workflow state."
+			? `\n- One owner per invariant: goal owns outcome/contract, task_steps owns plan,${workersOwner} evidence owns acceptance. Never create parallel workflow state.`
 			: "";
 		return `PI WORK LIFECYCLE
 - ${WORK_LIFECYCLE_SYSTEM_RULE}${ownerRule}`;
