@@ -185,7 +185,9 @@ describe("Tool Gate Friction Remediations", () => {
 		// No per-call System One evaluation; the call is recorded with an intent built from its arguments.
 		expect(semanticGateCalled).toBe(false);
 		const event = store.snapshot().tool_events.at(-1);
-		expect(event).toMatchObject({ tool: "edit", status: "allowed", call_id: "call-3" });
+		expect(event).toMatchObject({ tool: "edit", status: "allowed" });
+		expect(event?.call_id).toEqual(expect.stringMatching(/\S/));
+		expect(event?.call_id).not.toBe("call-3");
 		expect(event?.intent).toBe("edit path=src/index.ts");
 	});
 });

@@ -711,20 +711,28 @@ describe("System One recovery WO-09 production paths", () => {
 			getExtensionRunner: () => ({ hasHandlers: () => false }) as never,
 			getSystemOneController: () => systemOne,
 		});
+		const toolCall = { id: "provider-call-term", name: "read" };
+		const assistantMessage = { provider: "test", model: "test" };
+		const args = { path: "src/index.ts" };
 		const before = await gate.beforeToolCall({
-			toolCall: { id: "call-term", name: "read" } as never,
-			args: { path: "src/index.ts" },
-			assistantMessage: { provider: "test", model: "test" } as never,
+			toolCall: toolCall as never,
+			args,
+			assistantMessage: assistantMessage as never,
 			context: { messages: [] } as never,
 		});
 		expect(before?.block).toBeFalsy();
+		const admittedEvent = store.snapshot().tool_events.at(-1);
+		expect(admittedEvent).toMatchObject({ tool: "read", status: "allowed" });
+		const hostCallId = admittedEvent?.call_id;
+		expect(hostCallId).toEqual(expect.any(String));
+		expect(hostCallId).not.toBe(toolCall.id);
 		await gate.afterToolCall({
-			toolCall: { id: "call-term", name: "read" } as never,
-			args: { path: "src/index.ts" },
+			toolCall: toolCall as never,
+			args,
 			result: { content: [{ type: "text", text: "ok" }], details: undefined, isError: false },
 			isError: false,
 			executionContext: {} as never,
 		} as never);
-		expect(store.snapshot().tool_events.find((event) => event.call_id === "call-term")?.status).toBe("succeeded");
+		expect(store.snapshot().tool_events.find((event) => event.call_id === hostCallId)?.status).toBe("succeeded");
 	});
 });

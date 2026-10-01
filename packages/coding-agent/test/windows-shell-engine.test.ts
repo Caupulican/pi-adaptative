@@ -932,6 +932,146 @@ describe("windows shell engine operations", () => {
 		);
 	});
 
+	it("does not hold engine-lane disposal on a shared runtime preflight", async () => {
+		let resolveRuntime!: (value: typeof READY_RUNTIME) => void;
+		let runtimeRequested!: () => void;
+		const requested = new Promise<void>((resolve) => {
+			runtimeRequested = resolve;
+		});
+		const runtime = new Promise<typeof READY_RUNTIME>((resolve) => {
+			resolveRuntime = resolve;
+		});
+		let spawnCount = 0;
+		const ops = createWindowsShellEngineOperations("engine-prewarm-dispose-pending-runtime", {
+			resolveRuntime: async () => {
+				runtimeRequested();
+				return runtime;
+			},
+			engineScriptPath: "/fake/main.py",
+			spawn: () => {
+				spawnCount += 1;
+				return fakeSpawn(() => {})();
+			},
+		});
+
+		const prewarm = ops.prewarm();
+		await requested;
+		let disposed = false;
+		const disposal = disposeWindowsShellEngineSession("engine-prewarm-dispose-pending-runtime").then(() => {
+			disposed = true;
+		});
+		await Promise.race([disposal, new Promise((resolve) => setTimeout(resolve, 25))]);
+
+		expect(disposed, "session teardown detaches from the unresolved shared runtime probe").toBe(true);
+		resolveRuntime(READY_RUNTIME);
+		await Promise.all([prewarm, disposal]);
+		expect(spawnCount, "a disposed lane never starts a late coordinator").toBe(0);
+	});
+
+	it("does not hold engine-lane disposal while a command resolves its runtime", async () => {
+		let resolveRuntime!: (value: typeof READY_RUNTIME) => void;
+		let runtimeRequested!: () => void;
+		const requested = new Promise<void>((resolve) => {
+			runtimeRequested = resolve;
+		});
+		const runtime = new Promise<typeof READY_RUNTIME>((resolve) => {
+			resolveRuntime = resolve;
+		});
+		let spawnCount = 0;
+		const ops = createWindowsShellEngineOperations("engine-exec-dispose-pending-runtime", {
+			resolveRuntime: async () => {
+				runtimeRequested();
+				return runtime;
+			},
+			engineScriptPath: "/fake/main.py",
+			spawn: () => {
+				spawnCount += 1;
+				return fakeSpawn(() => {})();
+			},
+		});
+
+		const execution = ops.exec("echo hi", "/old/dir", { onData: () => {} });
+		await requested;
+		let disposed = false;
+		const disposal = disposeWindowsShellEngineSession("engine-exec-dispose-pending-runtime").then(() => {
+			disposed = true;
+		});
+		await Promise.race([disposal, new Promise((resolve) => setTimeout(resolve, 25))]);
+		const disposedBeforeRuntime = disposed;
+		resolveRuntime(READY_RUNTIME);
+		const executionResult = await Promise.allSettled([execution]);
+		await disposal;
+		expect(disposedBeforeRuntime, "session teardown cancels the command's runtime wait").toBe(true);
+		expect(executionResult[0]).toMatchObject({ status: "rejected" });
+		expect(spawnCount, "a disposed command never starts a late coordinator").toBe(0);
+	});
+
+	it("honors command cancellation while the shared runtime preflight is pending", async () => {
+		let resolveRuntime!: (value: typeof READY_RUNTIME) => void;
+		let runtimeRequested!: () => void;
+		const requested = new Promise<void>((resolve) => {
+			runtimeRequested = resolve;
+		});
+		const runtime = new Promise<typeof READY_RUNTIME>((resolve) => {
+			resolveRuntime = resolve;
+		});
+		let spawnCount = 0;
+		let child: ChildProcess | undefined;
+		const ops = createWindowsShellEngineOperations("engine-exec-cancel-pending-runtime", {
+			resolveRuntime: async () => {
+				runtimeRequested();
+				return runtime;
+			},
+			engineScriptPath: "/fake/main.py",
+			spawn: () => {
+				spawnCount += 1;
+				child = fakeSpawn(() => {})();
+				return child;
+			},
+		});
+		const controller = new AbortController();
+
+		const execution = ops.exec("echo hi", "/old/dir", { onData: () => {}, signal: controller.signal });
+		await requested;
+		controller.abort(new Error("aborted"));
+		const cancelledBeforeRuntime = await Promise.race([
+			execution.then(
+				() => false,
+				() => true,
+			),
+			new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 25)),
+		]);
+		resolveRuntime(READY_RUNTIME);
+		await Promise.allSettled([execution]);
+		child?.emit("close", null);
+		await disposeWindowsShellEngineSession("engine-exec-cancel-pending-runtime");
+		expect(cancelledBeforeRuntime, "caller cancellation returns before runtime discovery completes").toBe(true);
+		expect(spawnCount, "a cancelled command never starts a late coordinator").toBe(0);
+	});
+
+	it("still waits for an engine child close event during disposal", async () => {
+		let child!: ChildProcess;
+		const ops = createWindowsShellEngineOperations("engine-prewarm-dispose-child-close", {
+			resolveRuntime: async () => READY_RUNTIME,
+			engineScriptPath: "/fake/main.py",
+			spawn: () => {
+				child = fakeSpawn(() => {})();
+				return child;
+			},
+		});
+		await ops.prewarm();
+
+		let disposed = false;
+		const disposal = disposeWindowsShellEngineSession("engine-prewarm-dispose-child-close").then(() => {
+			disposed = true;
+		});
+		await Promise.resolve();
+		expect(disposed, "the process handle remains owned until its terminal event").toBe(false);
+		child.emit("close", 0);
+		await disposal;
+		expect(disposed).toBe(true);
+	});
+
 	it("carries the GNU tools directory in every request frame, resolved once per session", async () => {
 		const requests: Array<{ gnuToolsDir?: string }> = [];
 		let resolutions = 0;

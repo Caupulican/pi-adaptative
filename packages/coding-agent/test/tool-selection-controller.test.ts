@@ -384,9 +384,13 @@ describe("ToolGateController selector integration", () => {
 	});
 
 	it.each([false, true])("observes an extension-rewritten call only when allowed (blocked=%s)", async (blocked) => {
-		const begin = vi.fn();
+		const started: string[] = [];
+		const completed: string[] = [];
+		const discarded: string[] = [];
+		const begin = vi.fn((id: string) => started.push(id));
 		const rewritten = { block: blocked };
 		const args = { path: "initial.txt" };
+		const toolCall = { id: "rewritten", name: "read" };
 		const gate = new ToolGateController({
 			maybeEscalateToolCall: () => undefined,
 			getCwd: () => process.cwd(),
@@ -394,27 +398,45 @@ describe("ToolGateController selector integration", () => {
 			recordGateOutcome: () => undefined,
 			getExtensionRunner: () =>
 				({
-					hasHandlers: () => true,
+					hasHandlers: (event: string) => event === "tool_call",
 					emitToolCall: async (event: ToolCallEvent) => {
 						Object.assign(event.input, { path: "rewritten.txt" });
 						return rewritten;
 					},
 				}) as unknown as ExtensionRunner,
-			getToolSelectionController: () => ({ begin }) as unknown as ToolSelectionController,
+			getToolSelectionController: () =>
+				({
+					begin,
+					complete: (id: string) => completed.push(id),
+					discard: (id: string) => discarded.push(id),
+				}) as unknown as ToolSelectionController,
 		});
-		const result = await gate.beforeToolCall({
+		const call = {
 			assistantMessage: { provider: "faux", model: "model" },
-			toolCall: { id: "rewritten", name: "read" },
+			toolCall,
 			args,
-		} as never);
+		};
+		const result = await gate.beforeToolCall(call as never);
 		expect(result).toBe(rewritten);
 		expect(args.path).toBe("rewritten.txt");
-		if (blocked) expect(begin).not.toHaveBeenCalled();
-		else
-			expect(begin).toHaveBeenCalledWith("rewritten", "read", args, {
+		if (blocked) {
+			expect(started).toEqual([]);
+		} else {
+			expect(started).toHaveLength(1);
+			expect(started[0]).not.toBe(toolCall.id);
+			expect(begin).toHaveBeenCalledWith(expect.any(String), "read", args, {
 				modelRef: "faux/model",
 				requestId: undefined,
 			});
+			await gate.afterToolCall({
+				...call,
+				result: { content: [{ type: "text", text: "ok" }] },
+				isError: false,
+			} as never);
+			expect(completed).toEqual(started);
+			expect(discarded).toEqual(started);
+		}
+		expect(toolCall.id, "the provider-facing call identity remains unchanged").toBe("rewritten");
 	});
 
 	it("observes only calls that survive router, autonomy, and extension gates", async () => {
@@ -437,6 +459,8 @@ describe("ToolGateController selector integration", () => {
 					discard: (id: string) => retired.push(id),
 				}) as unknown as ToolSelectionController,
 		});
+		const allowedCall = { toolCall: { id: "allowed", name: "read" }, args: {} };
+		const blockedCall = { toolCall: { id: "blocked", name: "blocked" }, args: {} };
 		const runBefore = (input: { toolCall: { id: string; name: string }; args: unknown }) =>
 			gate.beforeToolCall({ ...input, assistantMessage: { provider: "faux", model: "model" } } as never);
 		const runAfter = (input: {
@@ -446,19 +470,18 @@ describe("ToolGateController selector integration", () => {
 			isError: boolean;
 		}) => gate.afterToolCall(input as never);
 
-		expect(await runBefore({ toolCall: { id: "allowed", name: "read" }, args: {} })).toBeUndefined();
-		expect(await runBefore({ toolCall: { id: "blocked", name: "blocked" }, args: {} })).toMatchObject({
-			block: true,
-		});
+		expect(await runBefore(allowedCall)).toBeUndefined();
+		expect(await runBefore(blockedCall)).toMatchObject({ block: true });
 		await runAfter({
-			toolCall: { id: "allowed", name: "read" },
-			args: {},
+			...allowedCall,
 			result: { content: [{ type: "text", text: "ok" }] },
 			isError: false,
 		});
-		expect(started).toEqual(["allowed"]);
-		expect(completed).toEqual([{ id: "allowed", success: true }]);
-		expect(retired).toEqual(["allowed"]);
+		expect(started).toHaveLength(1);
+		expect(started[0]).not.toBe(allowedCall.toolCall.id);
+		expect(completed).toEqual([{ id: started[0], success: true }]);
+		expect(retired).toEqual(started);
+		expect(allowedCall.toolCall.id, "the provider-facing call identity remains unchanged").toBe("allowed");
 	});
 
 	it("maps failed tools to recovery tools and never write after a read miss", () => {

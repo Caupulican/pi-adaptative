@@ -14,6 +14,8 @@
 - Distinguished historical verification reports from claims that current tests passed, without requiring fresh tests for an explicitly historical report.
 - Reported the selected receipts and unresolved proof conditions when a verification resolution remains uncertain.
 - Displayed live mandatory peer finding counts separately from deterministic checks and advisory doubts, refreshing them on resolution and session changes without accumulating transcript warnings.
+- Correlated repository observations, System One tool events, and tool-selection feedback with host-owned invocation identities, so reused provider call IDs cannot let an earlier background completion consume a later call's evidence. Cancelled preparation releases its own observation without discharging live sibling work.
+- Cancelled Windows shell runtime waits when their session is disposed or their command is aborted, preventing shutdown stalls and late process starts while retaining shared provisioning and child-process close barriers.
 
 ## [0.102.0] - 2026-09-30
 

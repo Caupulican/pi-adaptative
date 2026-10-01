@@ -115,7 +115,16 @@ describe("System One Live Integration", () => {
 
 		expect(result).toBeUndefined();
 		expect(systemOne.validateToolGate).not.toHaveBeenCalled();
-		expect(systemOne.store.snapshot().tool_events.at(-1)).toMatchObject({ tool: "read", call_id: "call-2" });
+		const event = systemOne.store.snapshot().tool_events.at(-1);
+		expect(event).toMatchObject({
+			tool: "read",
+			intent: "read path=safe.ts",
+			impact: "read_only",
+			status: "allowed",
+		});
+		expect(event?.input_hash).toMatch(/^[0-9a-f]{64}$/i);
+		expect(event?.call_id).toMatch(/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i);
+		expect(event?.call_id).not.toBe("call-2");
 	});
 
 	it("gates goal completion on System One evaluation", async () => {

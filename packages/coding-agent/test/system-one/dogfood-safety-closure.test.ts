@@ -1,6 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Agent } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -20,40 +19,26 @@ import { SettingsManager } from "../../src/core/settings-manager.ts";
 import { SystemOneController } from "../../src/core/system-one/controller.ts";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
 import { ToolGateController } from "../../src/core/tool-gate-controller.ts";
+import { committedRepo } from "../git-fixture.ts";
+import { tempDir } from "../temp-dir.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 
 for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"]) {
 	delete process.env[key];
 }
 
-const cleanups: string[] = [];
 const providerCleanups: Array<() => void> = [];
 
 afterEach(() => {
 	while (providerCleanups.length > 0) providerCleanups.pop()?.();
-	while (cleanups.length > 0) {
-		const path = cleanups.pop();
-		if (path) rmSync(path, { recursive: true, force: true });
-	}
 });
-
-function tempDir(prefix: string): string {
-	const path = mkdtempSync(join(realpathSync.native(tmpdir()), prefix));
-	cleanups.push(path);
-	return path;
-}
 
 function git(root: string, args: readonly string[]): string {
 	return execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
 }
 
 function gitRepo(): string {
-	const root = tempDir("pi-df-");
-	git(root, ["init"]);
-	git(root, ["config", "user.email", "test@example.com"]);
-	git(root, ["config", "user.name", "test"]);
-	git(root, ["config", "commit.gpgsign", "false"]);
-	git(root, ["config", "tag.gpgsign", "false"]);
+	const root = committedRepo("pi-df-");
 	writeFileSync(join(root, ".gitignore"), "*.log\n");
 	writeFileSync(join(root, "README.md"), "one\n");
 	git(root, ["add", ".gitignore", "README.md"]);
@@ -136,19 +121,24 @@ function gateFor(cwd: string): { gate: ToolGateController; observer: RepositoryM
 }
 
 async function settle(
-	gate: ToolGateController,
+	gate: Pick<ToolGateController, "beforeToolCall" | "afterToolCall">,
 	id: string,
 	name: string,
 	args: Record<string, unknown>,
 	between: () => void,
+	assistantMessage: AssistantMessage = fauxAssistantMessage(""),
 ): Promise<void> {
 	const context = {
 		toolCall: { type: "toolCall" as const, id, name, arguments: args },
 		args,
-		assistantMessage: { provider: "test", model: "test" } as never,
+		assistantMessage,
 		context: {} as never,
 	};
-	await gate.beforeToolCall(context as Parameters<ToolGateController["beforeToolCall"]>[0], undefined);
+	const admitted = await gate.beforeToolCall(
+		context as Parameters<ToolGateController["beforeToolCall"]>[0],
+		undefined,
+	);
+	expect(admitted?.block).toBeUndefined();
 	between();
 	await gate.afterToolCall({
 		...context,
@@ -352,67 +342,35 @@ describe("dogfood safety closure", () => {
 		const beforeToolCall = session.agent.beforeToolCall;
 		const afterToolCall = session.agent.afterToolCall;
 		if (!beforeToolCall || !afterToolCall) throw new Error("session tool gate is not installed");
+		const hooks = { beforeToolCall, afterToolCall };
 		const gitCommit = "git commit -m x -- README.md";
-		const admittedGit = await beforeToolCall(
-			{
-				toolCall: {
-					type: "toolCall",
-					id: "git1",
-					name: "bash",
-					arguments: { command: gitCommit },
-				},
-				args: { command: gitCommit },
-				assistantMessage: ownerAssistantMessage,
-				context: {} as never,
-			} as Parameters<typeof beforeToolCall>[0],
-			undefined,
-		);
-		expect(admittedGit?.block).toBeUndefined();
-		await afterToolCall({
-			toolCall: { type: "toolCall", id: "git1", name: "bash", arguments: { command: gitCommit } },
-			args: { command: gitCommit },
-			result: { content: [{ type: "text", text: "ok" }], details: {} },
-			isError: false,
-			assistantMessage: {} as never,
-			context: {} as never,
-		});
+		await settle(hooks, "git1", "bash", { command: gitCommit }, () => undefined, ownerAssistantMessage);
 		expect(git(root, ["rev-parse", "HEAD"])).toBe(admitted);
 
-		writeFileSync(join(root, "README.md"), "fixed\n");
-		await afterToolCall({
-			toolCall: { type: "toolCall", id: "w1", name: "write", arguments: { path: "README.md" } },
-			args: { path: "README.md" },
-			result: { content: [{ type: "text", text: "wrote" }], details: {} },
-			isError: false,
-			assistantMessage: {} as never,
-			context: {} as never,
-		});
+		await settle(
+			hooks,
+			"w1",
+			"write",
+			{ path: "README.md" },
+			() => writeFileSync(join(root, "README.md"), "fixed\n"),
+			ownerAssistantMessage,
+		);
 		const testCommand =
 			"node -e \"process.exit(require('node:fs').readFileSync('README.md','utf8')==='fixed\\n'?0:1)\"";
-		await beforeToolCall(
-			{
-				toolCall: { type: "toolCall", id: "t1", name: "bash", arguments: { command: testCommand } },
-				args: { command: testCommand },
-				assistantMessage: ownerAssistantMessage,
-				context: {} as never,
-			} as Parameters<typeof beforeToolCall>[0],
-			undefined,
-		);
-		execFileSync(
-			"node",
-			["-e", "process.exit(require('node:fs').readFileSync('README.md','utf8')==='fixed\\n'?0:1)"],
-			{
-				cwd: root,
+		await settle(
+			hooks,
+			"t1",
+			"bash",
+			{ command: testCommand },
+			() => {
+				execFileSync(
+					"node",
+					["-e", "process.exit(require('node:fs').readFileSync('README.md','utf8')==='fixed\\n'?0:1)"],
+					{ cwd: root },
+				);
 			},
+			ownerAssistantMessage,
 		);
-		await afterToolCall({
-			toolCall: { type: "toolCall", id: "t1", name: "bash", arguments: { command: testCommand } },
-			args: { command: testCommand },
-			result: { content: [{ type: "text", text: "passed" }], details: {} },
-			isError: false,
-			assistantMessage: {} as never,
-			context: {} as never,
-		});
 		const result = await controller.run(objectiveId);
 		expect(result.status).toBe("complete");
 		expect(seen.indexOf("JEV-024")).toBeGreaterThanOrEqual(0);
@@ -471,34 +429,26 @@ describe("dogfood safety closure", () => {
 		const dirtyBefore = dirtySession.agent.beforeToolCall;
 		const dirtyAfter = dirtySession.agent.afterToolCall;
 		if (!dirtyBefore || !dirtyAfter) throw new Error("session tool gate is not installed");
-		writeFileSync(join(dirtyRoot, "README.md"), "fixed\n");
-		await dirtyAfter({
-			toolCall: { type: "toolCall", id: "w2", name: "write", arguments: { path: "README.md" } },
-			args: { path: "README.md" },
-			result: { content: [{ type: "text", text: "wrote" }], details: {} },
-			isError: false,
-			assistantMessage: {} as never,
-			context: {} as never,
-		});
-		const mutate = "printf x > other.txt";
-		await dirtyBefore(
-			{
-				toolCall: { type: "toolCall", id: "b2", name: "bash", arguments: { command: mutate } },
-				args: { command: mutate },
-				assistantMessage: dirtyOwnerAssistantMessage,
-				context: {} as never,
-			} as Parameters<typeof dirtyBefore>[0],
-			undefined,
+		const dirtyHooks = { beforeToolCall: dirtyBefore, afterToolCall: dirtyAfter };
+		await settle(
+			dirtyHooks,
+			"w2",
+			"write",
+			{ path: "README.md" },
+			() => writeFileSync(join(dirtyRoot, "README.md"), "fixed\n"),
+			dirtyOwnerAssistantMessage,
 		);
-		execFileSync("bash", ["-lc", mutate], { cwd: dirtyRoot });
-		await dirtyAfter({
-			toolCall: { type: "toolCall", id: "b2", name: "bash", arguments: { command: mutate } },
-			args: { command: mutate },
-			result: { content: [{ type: "text", text: "wrote" }], details: {} },
-			isError: false,
-			assistantMessage: {} as never,
-			context: {} as never,
-		});
+		const mutate = "printf x > other.txt";
+		await settle(
+			dirtyHooks,
+			"b2",
+			"bash",
+			{ command: mutate },
+			() => {
+				execFileSync("bash", ["-lc", mutate], { cwd: dirtyRoot });
+			},
+			dirtyOwnerAssistantMessage,
+		);
 		const refusedDelivery = await dirtyController.run(dirtyObjective);
 		expect(refusedDelivery.status).toBe("unrecoverable");
 		expect(refusedDelivery.reasonCodes).toContain("shell_mutation_unattributed");

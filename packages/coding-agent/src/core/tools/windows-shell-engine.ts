@@ -23,6 +23,7 @@ import {
 	missingWorkingDirectoryMessage,
 	resolveGnuToolsDir,
 } from "../../utils/shell.ts";
+import { awaitPreflight } from "../preflight.ts";
 import { ensurePythonRuntime, type PythonRuntimeOutcome } from "../python-runtime.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import type { BashOperations } from "./bash.ts";
@@ -212,6 +213,7 @@ class PersistentWindowsShellEngineSession {
 	// Discovered once per session on the first request (a `where git` probe); `undefined` = not yet.
 	private gnuToolsDir: string | null | undefined;
 	private readonly coordinator = new PersistentProcessCoordinator();
+	private readonly lifetimeController = new AbortController();
 	private activeExec: ActiveEngineExec | null = null;
 	private disposed = false;
 
@@ -265,6 +267,7 @@ class PersistentWindowsShellEngineSession {
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
+		this.lifetimeController.abort(new Error(`Windows shell engine session "${this.key}" is disposed`));
 		const active = this.activeExec;
 		active?.fail(new Error(`Windows shell engine session "${this.key}" is disposed`));
 		this.coordinator.dispose();
@@ -282,7 +285,7 @@ class PersistentWindowsShellEngineSession {
 		const effectiveCwd = resolveEffectiveCwd(state, cwd, forceCwd);
 		const effectiveEnv = mergeEffectiveEnv(state, env ?? getShellEnv());
 		if (this.gnuToolsDir === undefined) this.gnuToolsDir = this.resolveGnuToolsDir();
-		const child = await this.ensureChild(effectiveEnv);
+		const child = await this.ensureChild(effectiveEnv, true, signal);
 		if (this.disposed) {
 			this.killChild();
 			throw new Error(`Windows shell engine session "${this.key}" is disposed`);
@@ -472,11 +475,23 @@ class PersistentWindowsShellEngineSession {
 		}
 	}
 
-	private async ensureChild(env: NodeJS.ProcessEnv, acquire = true): Promise<ChildProcess> {
+	private async ensureChild(env: NodeJS.ProcessEnv, acquire = true, signal?: AbortSignal): Promise<ChildProcess> {
 		if (this.coordinator.child) return this.coordinator.child;
-		const runtime = await this.resolveRuntime({ acquire });
+		const runtimeSignal = signal
+			? AbortSignal.any([this.lifetimeController.signal, signal])
+			: this.lifetimeController.signal;
+		let runtime: PythonRuntimeOutcome;
+		try {
+			// Runtime provisioning is shared; cancel only this lane's wait, never its underlying owner.
+			runtime = await awaitPreflight(() => this.resolveRuntime({ acquire }), runtimeSignal);
+		} catch (error) {
+			if (this.disposed) throw new Error(`Windows shell engine session "${this.key}" is disposed`);
+			if (signal?.aborted) throw new Error("aborted");
+			throw error;
+		}
 		if (runtime.status !== "ready") throw degradationError(runtime);
 		if (this.disposed) throw new Error(`Windows shell engine session "${this.key}" is disposed`);
+		if (signal?.aborted) throw new Error("aborted");
 
 		const child = this.spawn(runtime.pythonPath, ["-B", this.engineScriptPath, "--server"], {
 			cwd: dirname(this.engineScriptPath),

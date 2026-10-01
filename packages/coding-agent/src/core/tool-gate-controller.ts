@@ -9,9 +9,10 @@
  * runs extension `tool_result` handlers and structurally fences output from untrusted-content sources.
  */
 
+import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import type { Agent, BeforeToolCallResult } from "@caupulican/pi-agent-core";
+import type { Agent, AgentToolCall, BeforeToolCallResult } from "@caupulican/pi-agent-core";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
 import { classifyAllEdgeOperations, type EdgeClass } from "./autonomy/edge-policy.ts";
@@ -182,9 +183,18 @@ interface AdmittedRepositoryObservation {
 	readonly declaredOwnedPaths: readonly string[];
 }
 
+interface AdmittedToolInvocation {
+	readonly id: string;
+	readonly systemOne?: SystemOneController;
+	selection?: ToolSelectionController;
+	repositoryObservation?: AdmittedRepositoryObservation;
+}
+
 export class ToolGateController {
 	private readonly deps: ToolGateControllerDeps;
-	private readonly pendingObservations = new Map<string, AdmittedRepositoryObservation>();
+	// Agent core retains this exact call object from admission through detached finalization.
+	// Provider IDs can repeat on later requests while an earlier background call remains live.
+	private readonly admittedInvocations = new WeakMap<AgentToolCall, AdmittedToolInvocation>();
 
 	constructor(deps: ToolGateControllerDeps) {
 		this.deps = deps;
@@ -241,10 +251,11 @@ export class ToolGateController {
 		}
 	}
 
-	private async finishObservation(toolCallId: string, operationSucceeded: boolean): Promise<void> {
-		const observation = this.pendingObservations.get(toolCallId);
+	private async finishObservation(
+		observation: AdmittedRepositoryObservation | undefined,
+		operationSucceeded: boolean,
+	): Promise<void> {
 		if (!observation) return;
-		this.pendingObservations.delete(toolCallId);
 		const results = await Promise.allSettled(
 			observation.tokens.map((token) =>
 				this.deps.repositoryObserver?.finish({
@@ -435,31 +446,46 @@ export class ToolGateController {
 					}
 				}
 			}
+			const invocation: AdmittedToolInvocation = {
+				id: randomUUID(),
+				...(systemOne && !isControlPlaneTool ? { systemOne } : {}),
+			};
+			this.admittedInvocations.set(toolCall, invocation);
+			registerCleanup?.(() => {
+				if (this.admittedInvocations.get(toolCall) !== invocation) return;
+				this.admittedInvocations.delete(toolCall);
+				invocation.selection?.discard(invocation.id);
+				invocation.systemOne?.recordToolTerminal({ call_id: invocation.id, succeeded: false, aborted: true });
+				// Cancellation after awaited admission has no execution terminal hook. The observer
+				// retains activity until its async journal close ends; no child has run at this point.
+				void Promise.allSettled(
+					(invocation.repositoryObservation?.tokens ?? []).map((token) =>
+						this.deps.repositoryObserver?.abort(token),
+					),
+				);
+			});
 			// Recorded, not judged: the call's relevance and scope are judged once per step in postflight,
 			// where the step and its evidence are known. Edge operations are recorded too.
 			if (systemOne && !isControlPlaneTool) {
-				systemOne.recordToolCall({ tool: toolCall.name, args, impact, call_id: toolCall.id });
+				systemOne.recordToolCall({ tool: toolCall.name, args, impact, call_id: invocation.id });
 			}
 			// Admitted: a call that may change the world opens the work boundary when no work is declared.
 			if (!isControlPlaneTool && isMutatingToolCall(toolCall.name, args, this.deps.isToolReadOnly?.(toolCall.name)))
 				this.deps.noteMutatingCall?.(toolCall.name, assistantMessage);
 
-			let releaseObservation: (() => void) | undefined;
 			try {
 				const selection = this.deps.getToolSelectionController?.();
 				if (selection) {
-					const callId = toolCall.id;
-					const observation = selection.begin(callId, toolCall.name, args, { modelRef, requestId });
-					releaseObservation = () => selection.discard(callId, observation);
+					invocation.selection = selection;
+					selection.begin(invocation.id, toolCall.name, args, { modelRef, requestId });
 				}
 			} catch {
 				// Advisory ranking/storage reads cannot deny an otherwise authorized operation.
 			}
-			if (releaseObservation) registerCleanup?.(releaseObservation);
-			observation = await this.beginObservation(toolCall.id, toolCall.name, args, executionContext?.cwd);
+			observation = await this.beginObservation(invocation.id, toolCall.name, args, executionContext?.cwd);
 			if (observation) {
 				observationHandedOff = true;
-				this.pendingObservations.set(toolCall.id, observation);
+				invocation.repositoryObservation = observation;
 			}
 			return yolo ? undefined : extensionResult;
 		} finally {
@@ -480,7 +506,9 @@ export class ToolGateController {
 		// Retired first and synchronously, before any hook here can throw -- a write rejected by its own
 		// preflight would otherwise park a later bash in the same batch for the rest of the turn.
 		retireToolCall(toolCall.id, this.deps.getMutationScope?.(), this.deps.getMutationAnnouncer?.());
-		const selection = this.deps.getToolSelectionController?.();
+		const invocation = this.admittedInvocations.get(toolCall);
+		this.admittedInvocations.delete(toolCall);
+		const selection = invocation?.selection;
 		let finishSucceeded = !isError;
 		try {
 			const runner = this.deps.getExtensionRunner();
@@ -524,11 +552,11 @@ export class ToolGateController {
 				content = wrapped;
 			}
 
-			selection?.complete(toolCall.id, !resolvedIsError, content);
+			if (invocation) selection?.complete(invocation.id, !resolvedIsError, content);
 
 			const systemOne = this.deps.getSystemOneController?.();
-			systemOne?.recordToolTerminal({
-				call_id: toolCall.id,
+			invocation?.systemOne?.recordToolTerminal({
+				call_id: invocation.id,
 				succeeded: !resolvedIsError,
 				output: content,
 			});
@@ -606,8 +634,8 @@ export class ToolGateController {
 		} finally {
 			// Result hooks can fail before complete(). A terminal call must retain no pending
 			// observation; a projection failure is not evidence that the tool itself failed.
-			selection?.discard(toolCall.id);
-			await this.finishObservation(toolCall.id, finishSucceeded);
+			if (invocation) selection?.discard(invocation.id);
+			await this.finishObservation(invocation?.repositoryObservation, finishSucceeded);
 		}
 	};
 }
