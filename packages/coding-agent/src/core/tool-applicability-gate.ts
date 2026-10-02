@@ -24,12 +24,13 @@ export interface OptionalToolIntent {
 	 */
 	readonly status: "paused" | "unresolved" | "classified";
 	readonly taskRequest: string;
+	/** The tools the owner asked for by name or by what they provide; a record, not a permission. */
 	readonly allowedTools: readonly OptionalToolIdentity[];
 	/**
-	 * Classified intents only: tools whose own judgment was missing, uncertain or below the confidence
-	 * floor. No owner decision exists for them, so the gate denies them nothing.
+	 * Classified intents only: tools the owner forbade or withdrew. The only tools the gate blocks: the
+	 * owner cannot list the tools a task will need, so a tool they neither asked for nor forbade runs.
 	 */
-	readonly undecidedTools?: readonly OptionalToolIdentity[];
+	readonly revokedTools?: readonly OptionalToolIdentity[];
 	readonly pendingRequests?: readonly string[];
 	readonly resumeIntent?: OptionalToolIntent;
 }
@@ -74,11 +75,11 @@ export function readOptionalToolIntent(value: unknown): OptionalToolIntent | und
 		return undefined;
 	const allowedTools = readToolIdentities(record.allowedTools);
 	if (!allowedTools) return undefined;
-	let undecidedTools: OptionalToolIdentity[] | undefined;
-	if (record.undecidedTools !== undefined) {
+	let revokedTools: OptionalToolIdentity[] | undefined;
+	if (record.revokedTools !== undefined) {
 		if (record.status !== "classified") return undefined;
-		undecidedTools = readToolIdentities(record.undecidedTools);
-		if (!undecidedTools) return undefined;
+		revokedTools = readToolIdentities(record.revokedTools);
+		if (!revokedTools) return undefined;
 	}
 	if (record.pendingRequests !== undefined) {
 		if (
@@ -110,7 +111,7 @@ export function readOptionalToolIntent(value: unknown): OptionalToolIntent | und
 		status: record.status,
 		taskRequest: record.taskRequest,
 		allowedTools: record.status === "classified" ? allowedTools : [],
-		...(undecidedTools?.length ? { undecidedTools } : {}),
+		...(revokedTools?.length ? { revokedTools } : {}),
 		...(resumeIntent ? { resumeIntent } : {}),
 		...(Array.isArray(record.pendingRequests) ? { pendingRequests: [...record.pendingRequests] as string[] } : {}),
 	};
@@ -212,28 +213,28 @@ export function optionalToolIntentFromAnswers(
 	)
 		return unresolved;
 	const previous = relation === "continue" && context.previous?.status === "classified" ? context.previous : undefined;
+	const sameTool = (tool: OptionalToolIdentity, identity: OptionalToolIdentity) =>
+		tool.toolName === identity.toolName && tool.sourcePath === identity.sourcePath;
 	const allowedTools: OptionalToolIdentity[] = [];
-	const undecidedTools: OptionalToolIdentity[] = [];
+	const revokedTools: OptionalToolIdentity[] = [];
 	if (relation !== "end")
 		context.candidates.forEach((candidate, index) => {
 			const identity = { toolName: candidate.toolName, sourcePath: candidate.sourcePath };
 			const decision = intentChoice(answers[`optional_tool_${index}`], TOOL_DECISIONS, floor);
-			const heldBefore =
-				previous?.allowedTools.some(
-					(tool) => tool.toolName === candidate.toolName && tool.sourcePath === candidate.sourcePath,
-				) ?? false;
-			// A judgment that is missing, uncertain or below the floor is no owner decision: a grant held
-			// before stands, and otherwise the tool stays undecided rather than "not requested".
-			if (decision === "request" || (heldBefore && (decision === "unchanged" || decision === undefined)))
-				allowedTools.push(identity);
-			else if (decision === undefined || decision === "uncertain") undecidedTools.push(identity);
+			const askedBefore = previous?.allowedTools.some((tool) => sameTool(tool, identity)) ?? false;
+			const forbiddenBefore = previous?.revokedTools?.some((tool) => sameTool(tool, identity)) ?? false;
+			// Only the owner's own words change a tool's standing: a missing, uncertain, below-the-floor or
+			// silent judgment leaves what the task already had, and a tool never forbidden runs.
+			if (decision === "request") allowedTools.push(identity);
+			else if (decision === "revoke" || forbiddenBefore) revokedTools.push(identity);
+			else if (askedBefore) allowedTools.push(identity);
 		});
 	return {
 		version: 1,
 		status: "classified",
 		taskRequest: previous?.taskRequest ?? request,
 		allowedTools,
-		...(undecidedTools.length ? { undecidedTools } : {}),
+		...(revokedTools.length ? { revokedTools } : {}),
 	};
 }
 
@@ -263,11 +264,12 @@ export function optionalToolRequestAliases(
 const SECRET_STORE_METADATA_ACTIONS: ReadonlySet<unknown> = new Set(["status", "list", "discover"]);
 
 /**
- * Optional tools follow the owner's classified intent, never the host's inability to classify it: only a
- * `paused` snapshot (classification in flight) or a `classified` one that decided against this tool
- * blocks. An `unresolved` or absent snapshot, or a tool left `undecided`, is no owner decision, so it
- * denies nothing. Credential values are protected by the exposure guard on the tool's output, not by
- * availability.
+ * An optional tool runs unless the owner forbade it: the owner cannot list the tools a task will need, so
+ * a tool they neither asked for nor forbade is theirs to use, as every other command is once they direct
+ * the work. Only a classified intent that records a forbidding blocks the tool; while the owner's latest
+ * words are being classified, the forbiddings of the intent they continue still stand. An unresolved or
+ * absent snapshot is no owner decision and denies nothing. Credential values are protected by the
+ * exposure guard on the tool's output, not by availability.
  */
 export function enforceExplicitOptionalToolRequest(input: {
 	toolName: string;
@@ -281,15 +283,13 @@ export function enforceExplicitOptionalToolRequest(input: {
 		const action = (input.args as { action?: unknown } | undefined)?.action;
 		if (SECRET_STORE_METADATA_ACTIONS.has(action)) return undefined;
 	}
-	if (intent.status === "paused")
-		return {
-			block: true,
-			reason: `Optional tool ${toolName} waits for the owner's latest request to be classified. Retry after it settles.`,
-		};
-	const named = (tool: OptionalToolIdentity) => tool.toolName === toolName && tool.sourcePath === input.sourcePath;
-	if (intent.allowedTools.some(named) || intent.undecidedTools?.some(named)) return undefined;
+	const standing = intent.status === "classified" ? intent : intent.resumeIntent;
+	const forbidden = standing?.revokedTools?.some(
+		(tool) => tool.toolName === toolName && tool.sourcePath === input.sourcePath,
+	);
+	if (!forbidden) return undefined;
 	return {
 		block: true,
-		reason: `Optional tool ${toolName} was not requested by the owner. Use it only if the owner asks; otherwise continue without it.`,
+		reason: `Optional tool ${toolName} was forbidden by the owner. Continue without it unless the owner asks for it again.`,
 	};
 }

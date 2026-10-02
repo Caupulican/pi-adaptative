@@ -45,20 +45,48 @@ describe("optional tool applicability gate", () => {
 		expect(gate(revoked)?.block).toBe(true);
 	});
 
-	it("does not grant credentials, another tool source, or tools in a replacement task", () => {
-		const previous = requested();
-		expect(gate(previous, candidates[1]!)?.block).toBe(true);
-		expect(gate(previous, { ...candidates[0]!, sourcePath: "/evil/trello.ts" })?.block).toBe(true);
+	it("blocks only the tool the owner forbade, at its own source, and only for the task that forbade it", () => {
+		const forbidden = optionalToolIntentFromAnswers(
+			"Stop using Trello.",
+			{ candidates, previous: undefined },
+			{
+				optional_tool_task: answer("replace"),
+				optional_tool_0: answer("revoke"),
+				optional_tool_1: answer("unchanged"),
+			},
+		);
+		expect(forbidden.revokedTools).toEqual([{ toolName: "trello", sourcePath: "/extensions/trello.ts" }]);
+		expect(gate(forbidden)?.block).toBe(true);
+		expect(gate(forbidden)?.reason).toContain("was forbidden by the owner");
+		// Another tool, and another source of the same name, are not the forbidden tool.
+		expect(gate(forbidden, candidates[1]!)).toBeUndefined();
+		expect(gate(forbidden, { ...candidates[0]!, sourcePath: "/other/trello.ts" })).toBeUndefined();
+		// The forbidding outlives later words that neither ask for nor forbid the tool, however clearly
+		// or unclearly they were judged, and ends when the owner asks for it again or the task ends.
+		for (const decision of [answer("unchanged"), answer("uncertain"), answer("unchanged", 0.5)]) {
+			const continued = optionalToolIntentFromAnswers(
+				"Keep going.",
+				{ candidates, previous: forbidden },
+				{ optional_tool_task: answer("continue"), optional_tool_0: decision },
+			);
+			expect(gate(continued)?.block).toBe(true);
+		}
+		const asked = optionalToolIntentFromAnswers(
+			"Use Trello again.",
+			{ candidates, previous: forbidden },
+			{ optional_tool_task: answer("continue"), optional_tool_0: answer("request") },
+		);
+		expect(gate(asked)).toBeUndefined();
 		for (const relation of ["replace", "end"]) {
 			expect(
 				gate(
 					optionalToolIntentFromAnswers(
 						"New local task.",
-						{ candidates, previous },
+						{ candidates, previous: forbidden },
 						{ optional_tool_task: answer(relation), optional_tool_0: answer("unchanged") },
 					),
-				)?.block,
-			).toBe(true);
+				),
+			).toBeUndefined();
 		}
 	});
 
@@ -96,54 +124,74 @@ describe("optional tool applicability gate", () => {
 		expect(gate(unresolved)).toBeUndefined();
 	});
 
-	it("blocks while classification is in flight and when a classified intent does not name the tool", () => {
-		const inFlight = readOptionalToolIntent({ version: 1, status: "paused", taskRequest: "x", allowedTools: [] });
-		expect(gate(inFlight)?.block).toBe(true);
-		const notRequested = optionalToolIntentFromAnswers(
+	it("runs a tool the owner neither asked for nor forbade, and keeps standing forbiddings while words are classified", () => {
+		const notMentioned = optionalToolIntentFromAnswers(
 			"Explain this function.",
 			{ candidates, previous: undefined },
-			{ optional_tool_task: answer("replace"), optional_tool_0: answer("unchanged") },
+			{
+				optional_tool_task: answer("replace"),
+				optional_tool_0: answer("unchanged"),
+				optional_tool_1: answer("unchanged"),
+			},
 		);
-		const blocked = gate(notRequested);
-		expect(blocked?.block).toBe(true);
-		expect(blocked?.reason).toContain("was not requested by the owner");
-		expect(blocked?.reason).not.toMatch(/probe|credential/i);
+		expect(notMentioned.revokedTools).toBeUndefined();
+		expect(gate(notMentioned)).toBeUndefined();
+		expect(gate(notMentioned, candidates[1]!)).toBeUndefined();
 		const longName = "t".repeat(128);
-		expect(gate(notRequested, { toolName: longName, sourcePath: "/x.ts", aliases: [] })?.reason?.length).toBeLessThan(
-			240,
+		expect(gate(notMentioned, { toolName: longName, sourcePath: "/x.ts", aliases: [] })).toBeUndefined();
+
+		// Classification in flight blocks nothing by itself.
+		const inFlight = readOptionalToolIntent({ version: 1, status: "paused", taskRequest: "x", allowedTools: [] });
+		expect(gate(inFlight)).toBeUndefined();
+		// What the owner already forbade still stands until their new words are classified.
+		const forbidden = optionalToolIntentFromAnswers(
+			"Stop using Trello.",
+			{ candidates, previous: undefined },
+			{ optional_tool_task: answer("replace"), optional_tool_0: answer("revoke") },
 		);
+		const pausedAfterForbidding = readOptionalToolIntent({
+			version: 1,
+			status: "paused",
+			taskRequest: "go on",
+			allowedTools: [],
+			pendingRequests: ["go on"],
+			resumeIntent: forbidden,
+		});
+		const blocked = gate(pausedAfterForbidding);
+		expect(blocked?.block).toBe(true);
+		expect(blocked?.reason).not.toMatch(/probe|credential/i);
+		expect(blocked?.reason?.length).toBeLessThan(240);
+		expect(gate(pausedAfterForbidding, candidates[1]!)).toBeUndefined();
 	});
 
-	it("treats a sub-threshold or uncertain per-tool judgment as undecided, never as not requested", () => {
+	it("never reads a sub-threshold or uncertain per-tool judgment as a forbidding", () => {
 		const intent = optionalToolIntentFromAnswers(
 			"Use trello and check the credentials.",
 			{ candidates, previous: undefined },
 			{
 				optional_tool_task: answer("replace", 0.99),
 				optional_tool_0: answer("request", 0.74),
-				optional_tool_1: answer("unchanged", 0.99),
+				optional_tool_1: answer("revoke", 0.74),
 			},
 		);
 		expect(intent.status).toBe("classified");
 		expect(intent.allowedTools).toEqual([]);
-		expect(intent.undecidedTools).toEqual([{ toolName: "trello", sourcePath: "/extensions/trello.ts" }]);
-		// The undecided tool passes; a tool the evaluator decided against with confidence still blocks.
+		expect(intent.revokedTools).toBeUndefined();
 		expect(gate(intent)).toBeUndefined();
-		const decided = gate(intent, candidates[1]!);
-		expect(decided?.block).toBe(true);
-		expect(decided?.reason).toContain("was not requested by the owner");
-		// Uncertain is undecided too, and the persisted shape survives a round trip.
+		expect(gate(intent, candidates[1]!)).toBeUndefined();
 		const uncertain = optionalToolIntentFromAnswers(
 			"Check things.",
 			{ candidates, previous: undefined },
 			{
 				optional_tool_task: answer("replace"),
 				optional_tool_0: answer("uncertain"),
-				optional_tool_1: answer("request"),
+				optional_tool_1: answer("revoke"),
 			},
 		);
-		expect(readOptionalToolIntent(JSON.parse(JSON.stringify(uncertain)))).toEqual(uncertain);
 		expect(gate(uncertain)).toBeUndefined();
+		expect(gate(uncertain, candidates[1]!)?.block).toBe(true);
+		// The persisted shape survives a round trip; a forbidding only exists on a classified snapshot.
+		expect(readOptionalToolIntent(JSON.parse(JSON.stringify(uncertain)))).toEqual(uncertain);
 		expect(readOptionalToolIntent({ ...uncertain, status: "paused" })).toBeUndefined();
 	});
 
@@ -158,9 +206,9 @@ describe("optional tool applicability gate", () => {
 		expect(gate(continued)).toBeUndefined();
 	});
 
-	it("keeps secret_store metadata actions available and gates only activation and migration", () => {
+	it("keeps secret_store metadata actions available even after the owner forbade credentials", () => {
 		const secretStore = candidates[1]!;
-		const notRequested = optionalToolIntentFromAnswers(
+		const notMentioned = optionalToolIntentFromAnswers(
 			"Explain this function.",
 			{ candidates, previous: undefined },
 			{
@@ -169,11 +217,22 @@ describe("optional tool applicability gate", () => {
 				optional_tool_1: answer("unchanged"),
 			},
 		);
-		const gateWith = (action: string) =>
-			enforceExplicitOptionalToolRequest({ ...secretStore, intent: notRequested, args: { action } });
-		for (const action of ["status", "list", "discover"]) expect(gateWith(action)).toBeUndefined();
-		for (const action of ["activate", "migrate"]) expect(gateWith(action)?.block).toBe(true);
-		expect(gate(notRequested, secretStore)?.block).toBe(true);
+		const forbidden = optionalToolIntentFromAnswers(
+			"Continue without credentials.",
+			{ candidates, previous: undefined },
+			{
+				optional_tool_task: answer("replace"),
+				optional_tool_0: answer("unchanged"),
+				optional_tool_1: answer("revoke"),
+			},
+		);
+		const gateWith = (intent: OptionalToolIntent, action: string) =>
+			enforceExplicitOptionalToolRequest({ ...secretStore, intent, args: { action } });
+		for (const action of ["status", "list", "discover", "activate", "migrate"])
+			expect(gateWith(notMentioned, action)).toBeUndefined();
+		for (const action of ["status", "list", "discover"]) expect(gateWith(forbidden, action)).toBeUndefined();
+		for (const action of ["activate", "migrate"]) expect(gateWith(forbidden, action)?.block).toBe(true);
+		expect(gate(forbidden, secretStore)?.block).toBe(true);
 	});
 
 	it("traces each raw judgment with its confidence and acceptance for the evaluation ledger", () => {
@@ -206,7 +265,7 @@ describe("optional tool applicability gate", () => {
 		expect(atDefault.allowedTools).toEqual([{ toolName: "trello", sourcePath: "/extensions/trello.ts" }]);
 		const strict = optionalToolIntentFromAnswers("Use trello.", { candidates, previous: undefined }, answers, 0.95);
 		expect(strict.allowedTools).toEqual([]);
-		expect(strict.undecidedTools).toHaveLength(2);
+		expect(strict.revokedTools).toBeUndefined();
 	});
 
 	it("gates profile extensions while leaving built-in and bundled tools alone", () => {

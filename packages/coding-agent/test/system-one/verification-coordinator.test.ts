@@ -89,6 +89,22 @@ describe("mandatory verification coordination", () => {
 		},
 	);
 
+	it.each(["ask_question", "self_compact", "typesafe_review"])(
+		"does not hold a tool that neither changes the candidate nor advances the work, even in an outage: %s",
+		async (tool) => {
+			const judge = vi.fn<VerificationJudge>().mockRejectedValue(new Error("temporary transport outage"));
+			const { coordinator } = fixture(judge);
+			await expect(coordinator.checkOperation({ tool, args: {}, cwd: "/repo" })).resolves.toBeUndefined();
+			expect(judge).not.toHaveBeenCalled();
+			// Negative control: the same outage still holds work that can advance the candidate.
+			for (const advancing of ["edit", "write", "bash", "delegate"])
+				await expect(coordinator.checkOperation({ tool: advancing, args: {}, cwd: "/repo" })).rejects.toThrow(
+					"temporary transport outage",
+				);
+			expect(() => coordinator.assertResolved()).toThrow("same_lane_verification_required");
+		},
+	);
+
 	it("omits an absent wrapper receiver from the System One classification payload", async () => {
 		const judge = vi.fn<VerificationJudge>(async (state) => {
 			serializeEvaluation(state);

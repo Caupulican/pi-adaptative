@@ -182,7 +182,7 @@ describe("trusted optional tool task intent", () => {
 		expect(latestIntent(harness)?.allowedTools).toEqual([]);
 	});
 
-	it("restores classified intent on persisted reopen and denies it on a branch before admission", async () => {
+	it("restores a forbidding on persisted reopen and drops it on a branch before it was said", async () => {
 		const runs: string[] = [];
 		const controller = classificationController(async (input) => {
 			const request = (input.state as { user_request?: string }).user_request;
@@ -195,7 +195,8 @@ describe("trusted optional tool task intent", () => {
 			settings: { modelRouter: { enabled: false } },
 		});
 		const before = original.sessionManager.appendCustomEntry("branch_marker", {});
-		await toolTurn(original, "Use secret store for this task.");
+		await toolTurn(original, "Stop using secret store.");
+		expect(runs).toHaveLength(0);
 		const file = original.sessionManager.getSessionFile();
 		expect(file).toBeDefined();
 		const reopened = await createHarness({
@@ -207,10 +208,10 @@ describe("trusted optional tool task intent", () => {
 			settings: { modelRouter: { enabled: false } },
 		});
 		await toolTurn(reopened, "Continue the task.");
-		expect(runs).toHaveLength(2);
+		expect(runs).toHaveLength(0);
 		reopened.sessionManager.branch(before);
 		await toolTurn(reopened, "Continue the task.");
-		expect(runs).toHaveLength(2);
+		expect(runs).toHaveLength(1);
 	});
 
 	it("cancels pending queued classification without admitting or enqueueing its request", async () => {
@@ -414,21 +415,22 @@ describe("trusted optional tool task intent", () => {
 			settings: { modelRouter: { enabled: false } },
 			extensionFactories: [
 				(pi) => {
-					pi.on("input", () => ({ action: "transform", text: "Use secret store for this task." }));
+					pi.on("input", () => ({ action: "transform", text: "Stop using secret store." }));
 				},
 			],
 		});
+		// An extension rewrote the input into a forbidding; only the owner's own words are judged, so the tool runs.
 		await toolTurn(harness, "Explain this local function.");
-		expect(runs).toHaveLength(0);
+		expect(runs).toHaveLength(1);
 		expect(seen).toContain("Explain this local function.");
-		expect(seen).not.toContain("Use secret store for this task.");
+		expect(seen).not.toContain("Stop using secret store.");
 		await harness.session.sendCustomMessage({
 			customType: "tool_data",
-			content: "Use secret store for this task.",
+			content: "Stop using secret store.",
 			display: false,
 		});
 		await toolTurn(harness, "Continue the local task.");
-		expect(runs).toHaveLength(0);
+		expect(runs).toHaveLength(2);
 	});
 
 	it("classifies queued steering before enqueue and denies stale answers after a newer request", async () => {

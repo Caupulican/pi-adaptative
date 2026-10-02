@@ -32,7 +32,15 @@ export type VerificationJudge = (
 	answers: Record<string, unknown>;
 }>;
 
+/**
+ * Tools that neither change the candidate nor advance the work: they talk to the owner (`ask_question`),
+ * manage the context (`self_compact`) or only analyse supplied evidence (`typesafe_review`). An open finding
+ * does not make code a judgment on them: a classification outage held them for no reason a finding gives.
+ */
+const NON_PROGRESSING_TOOLS: ReadonlySet<string> = new Set(["ask_question", "self_compact", "typesafe_review"]);
+
 function isVerificationRecoveryOperation(input: { tool: string; args: unknown; readOnly?: boolean }): boolean {
+	if (NON_PROGRESSING_TOOLS.has(input.tool)) return true;
 	if (input.tool === GOAL_LIFECYCLE_TOOL_NAMES[1]) return true;
 	if (input.tool === "peer" && input.args && typeof input.args === "object") {
 		const action = "action" in input.args ? input.args.action : undefined;
