@@ -44,11 +44,15 @@ export interface DecisionEngineProgram {
 }
 
 export interface DecisionEngine {
+	/** The model behind the engine, when it is known. */
+	readonly model?: string;
 	evaluate(
 		program: DecisionEngineProgram,
 		state?: Record<string, unknown>,
 		options?: { consequence?: string; signal?: AbortSignal },
 	): Promise<{
+		/** The model that answered, when the engine reports it. */
+		model?: string;
 		answers?: Record<string, { type?: string; boolean?: boolean; choice?: string; value?: boolean | number }>;
 		results?: Record<string, { kind?: string; confidence?: { value?: number }; selected?: unknown }>;
 	}>;

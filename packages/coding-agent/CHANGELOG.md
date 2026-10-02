@@ -9,6 +9,16 @@
 - Added `lastResult` and `awaitingParent` to worker agent views, a closing `follow_up` instruction on blocked handoffs, and a start-result line naming the idle specialists a fresh start passed over.
 - Showed pi-chat peers as busy while their own turn runs, bounded reply chains at 8 hops, and stopped a process from taking the socket path of a broker that answers.
 - Packaged the `pi-chat` peer-agent message mesh as a bundled extension: `list_peers`, `agent_send` and `/pi-chat status|setup|peers|help` over one per-user Unix socket (`~/.pi/pi-chat`, wire-compatible with the user-level extension), with shape-checked bounded frames, untrusted-text framing for incoming messages, metadata-only audit, and a first-peers wait so a call right after startup sees the mesh. Workers and lean, minimal and chat capability classes never receive these tools. TCP/LAN, pairing, relay and daemon modes are not included.
+- Made the shell-command gate remember what an operation does: the four effect readings (leaves the machine, cannot be undone, touches files outside the task, acquires external code) are kept in the decision ledger keyed by the operation's identity, the model that answered and the questions themselves, so a command with no effect costs no System One call after its first and the owner's request is asked fresh only when an effect is remembered. The calls of one assistant message are judged together in one request as soon as their arguments are final.
+- Recorded every shell-gate decision (source, verdict, time waited, identity digest) in the decision ledger's `operation_gate_decisions` table, so a cache or a deterministic table can be judged by measured hit rate.
+
+### Changed
+
+- Raised the default `workerDelegation.maxConcurrent` from 3 to 5 running workers.
+- Changed what an unanswered shell-command judgment does: a System One that is down, or a call still waiting after two seconds (was eight), lets the command run with the doubt shown, for the root and for a worker, because every edge class is decided by code before System One is asked. An established effect the request does not ask for is still refused and an unsettled one still goes to the operator; a remembered effect whose request question cannot be answered still goes to the operator.
+- Asked the route category's follow-up between the two leading categories in the same System One request as the first pass, so an ambiguous first pass no longer costs a second round trip.
+- Let the answer's claim check and the objective's postflight wait on System One together instead of one after the other.
+- Bounded every System One stage evaluation and intake classification at five seconds, retries included (it was the transport's 50 seconds per attempt, retried), so a stuck call is an outage its consumer already handles instead of a held turn.
 
 ### Fixed
 

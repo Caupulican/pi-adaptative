@@ -59,7 +59,10 @@ describe("plan review", () => {
 		const semantic = {
 			evaluate: async (program: unknown) => {
 				sent = program;
-				return { results: {} };
+				return {
+					results: {},
+					engine: { id: "fixture", model: "fixture-1", confidence_provenance: "native_calibrated" },
+				};
 			},
 		} as unknown as SemanticDecisionEngine;
 		await createRetentionDecisionEngine(semantic).evaluate(PLAN_REVIEW_PROGRAM, {}, {});

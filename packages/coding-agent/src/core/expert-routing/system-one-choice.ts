@@ -22,6 +22,17 @@ export interface RouteChoiceJudge {
 		input: { readonly request: string; readonly options: readonly { id: string; description: string }[] },
 		signal?: AbortSignal,
 	): Promise<Record<string, unknown>>;
+	/**
+	 * The same question over several option sets in one request, answered per set in the shape of
+	 * `evaluateRouteChoice`. Optional: a judge without it is asked one set at a time.
+	 */
+	evaluateRouteChoiceSet?(
+		input: {
+			readonly request: string;
+			readonly optionSets: readonly (readonly { id: string; description: string }[])[];
+		},
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>[]>;
 	/** Per model, whether a later version of the same model is among `models`: one Noul each, one request. */
 	evaluateSupersededModels?(
 		input: { readonly models: readonly { id: string; description: string }[] },
@@ -208,19 +219,33 @@ export async function chooseRouteCategory(
 	if (available.length === 1)
 		return { kind: "chosen", category: available[0]!, confidence: 1, stage: "decided", reasons: ["only category"] };
 	if (!judge) return { kind: "fallback", reason: "System One is not bound" };
+	const request = `Select the lightest model category adequate for this task.\n${input.request}`;
+	const describe = (subset: readonly RouteCategory[]) =>
+		subset.map((category) => ({ id: category, description: ROUTE_CATEGORIES[category] }));
+	// The follow-up between the two leaders is one of a handful of pairs, so with a judge that can answer
+	// several option sets at once they are asked together with the first pass and the follow-up costs no
+	// second round trip. The wording of every question is the one a separate follow-up would have used.
+	const setKey = (subset: readonly RouteCategory[]) => [...subset].sort().join("|");
+	const speculative =
+		available.length > 2 && judge.evaluateRouteChoiceSet
+			? [available, ...available.flatMap((first, i) => available.slice(i + 1).map((second) => [first, second]))]
+			: undefined;
+	let answered: Promise<Map<string, Record<string, unknown>>> | undefined;
 	const decision = await decideChoice(
 		available,
-		async (subset) =>
-			asChoice(
-				await judge.evaluateRouteChoice(
-					{
-						request: `Select the lightest model category adequate for this task.\n${input.request}`,
-						options: subset.map((category) => ({ id: category, description: ROUTE_CATEGORIES[category] })),
-					},
-					input.signal,
-				),
+		async (subset) => {
+			if (speculative && judge.evaluateRouteChoiceSet) {
+				answered ??= judge
+					.evaluateRouteChoiceSet({ request, optionSets: speculative.map((set) => describe(set)) }, input.signal)
+					.then((results) => new Map(speculative.map((set, index) => [setKey(set), results[index] ?? {}])));
+				const known = (await answered).get(setKey(subset));
+				if (known) return asChoice(known, ROUTE_CHOICE_QUESTION_ID);
+			}
+			return asChoice(
+				await judge.evaluateRouteChoice({ request, options: describe(subset) }, input.signal),
 				ROUTE_CHOICE_QUESTION_ID,
-			),
+			);
+		},
 		true,
 	);
 	if ("fallback" in decision) return { kind: "fallback", reason: decision.fallback };

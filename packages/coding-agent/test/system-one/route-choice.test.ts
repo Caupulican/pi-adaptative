@@ -4,7 +4,7 @@ import {
 	ROUTE_CHOICE_QUESTION_ID,
 } from "../../src/core/expert-routing/system-one-choice.ts";
 import type { JevEvaluationRequest } from "../../src/core/system-one/adapter.ts";
-import { SystemOneController } from "../../src/core/system-one/controller.ts";
+import { SYSTEM_ONE_STAGE_DEADLINE_MS, SystemOneController } from "../../src/core/system-one/controller.ts";
 import { ExecutionStore } from "../../src/core/system-one/execution-state.ts";
 
 const options = [
@@ -13,7 +13,11 @@ const options = [
 ];
 
 function fixture(answers: Record<string, unknown>) {
-	const evaluate = vi.fn(async (_input: JevEvaluationRequest) => ({ model: "fixture", answers, latency_ms: 1 }));
+	const evaluate = vi.fn(async (_input: JevEvaluationRequest, _options?: { timeoutMs?: number }) => ({
+		model: "fixture",
+		answers,
+		latency_ms: 1,
+	}));
 	const store = new ExecutionStore({
 		run_id: "route-choice",
 		objective: {
@@ -54,5 +58,16 @@ describe("host route choice question", () => {
 		const { controller, evaluate } = fixture({ [ROUTE_CHOICE_QUESTION_ID]: { choice: "light", confidence: 0.98 } });
 		await controller.evaluateRouteChoice({ request: "x".repeat(MAX_ROUTE_CHOICE_REQUEST_CHARACTERS + 1), options });
 		expect(evaluate.mock.calls[0][0].state).toEqual({ request: "x".repeat(MAX_ROUTE_CHOICE_REQUEST_CHARACTERS) });
+	});
+});
+
+describe("System One stage deadline", () => {
+	it("bounds a stage evaluation and an intake classification, which no longer wait out the transport's own limit", async () => {
+		const { controller, evaluate } = fixture({ [ROUTE_CHOICE_QUESTION_ID]: { choice: "light", confidence: 0.98 } });
+		await controller.evaluateRouteChoice({ request: "pick", options });
+		expect(evaluate.mock.calls[0]?.[1]).toMatchObject({ timeoutMs: SYSTEM_ONE_STAGE_DEADLINE_MS });
+		await controller.classifyUserRequest("Please fix the parser.");
+		expect(evaluate.mock.calls[1]?.[1]).toMatchObject({ timeoutMs: SYSTEM_ONE_STAGE_DEADLINE_MS });
+		expect(SYSTEM_ONE_STAGE_DEADLINE_MS).toBe(5_000);
 	});
 });

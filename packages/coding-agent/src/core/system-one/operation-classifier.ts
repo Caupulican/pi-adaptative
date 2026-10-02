@@ -277,6 +277,8 @@ export const OPERATION_EFFECT_PROGRAM = {
 
 /** The session's batched-question engine, as the retention planner and the acquisition gate use it. */
 export interface OperationEffectEngine {
+	/** The engine's model id; a reading is cached only when the model that produced it is known. */
+	readonly model?: string;
 	evaluate(
 		program: {
 			readonly schema_version: "2.0";
@@ -286,7 +288,7 @@ export interface OperationEffectEngine {
 		},
 		state?: Record<string, unknown>,
 		options?: { consequence?: string; signal?: AbortSignal },
-	): Promise<{ answers?: Record<string, unknown> }>;
+	): Promise<{ answers?: Record<string, unknown>; model?: string }>;
 }
 
 export interface OperationVerdict {
@@ -309,10 +311,10 @@ const EFFECT_WORDS: Readonly<Record<string, string>> = {
 	acquires_external_code: "acquires external code",
 };
 
-/** The authority line's irreversible row, as an operation verdict. */
-function irreversibleAction(reading: JudgmentReading, actor: "root" | "worker"): OperationVerdict["action"] {
-	const decision = decideByAuthority("irreversible", reading, 0, actor);
-	if (decision.action === "proceed") return "proceed";
+/** The authority line's `operation` row, as an operation verdict. */
+function operationAction(reading: JudgmentReading, actor: "root" | "worker"): OperationVerdict["action"] {
+	const decision = decideByAuthority("operation", reading, 0, actor);
+	if (decision.action === "proceed" || decision.action === "proceed_with_doubt") return "proceed";
 	return decision.action === "ask_operator" ? "confirm" : "refuse";
 }
 
@@ -334,12 +336,173 @@ function probability(answer: unknown): number | undefined {
 	return typeof noul === "number" && Number.isFinite(noul) && noul >= 0 && noul <= 1 ? noul : undefined;
 }
 
+/** The four effect questions: what the operation does, whatever the owner asked for. */
+export const OPERATION_EFFECT_IDS = [
+	"leaves_machine",
+	"cannot_be_undone",
+	"touches_outside_task",
+	"acquires_external_code",
+] as const;
+export type OperationEffectId = (typeof OPERATION_EFFECT_IDS)[number];
+export const OPERATION_REQUEST_ID = "request_authorizes";
+
+/** P(yes) per effect; absent when the answer was missing or malformed. */
+export type OperationEffectReading = Readonly<Record<OperationEffectId, number | undefined>>;
+
+/**
+ * The state every operation question sees. The four effect questions read only `operation.*`; only
+ * `request_authorizes` reads `request`, which is what lets an effect reading be reused across turns.
+ */
+function operationState(triage: Extract<OperationTriage, { kind: "judged" }>, toolName: string, request: string) {
+	return {
+		operation: {
+			tool: toolName,
+			command: triage.operation,
+			kind: triage.operationKind,
+			...triage.identity,
+		},
+		request: request || "(no request recorded)",
+	};
+}
+
+/** The answers to the named questions of the operation program, in one System One request. */
+export async function askOperation(
+	engine: OperationEffectEngine,
+	input: {
+		readonly triage: Extract<OperationTriage, { kind: "judged" }>;
+		readonly toolName: string;
+		readonly request: string;
+		readonly questions: readonly (OperationEffectId | typeof OPERATION_REQUEST_ID)[];
+		readonly signal?: AbortSignal;
+		/** Told the model that answered, whenever the engine reports it. */
+		readonly onModel?: (model: string) => void;
+		/** Bound on the System One call; running out counts as System One unavailable. */
+		readonly timeoutMs?: number;
+	},
+): Promise<Record<string, unknown>> {
+	const bounded = [input.signal, input.timeoutMs ? AbortSignal.timeout(input.timeoutMs) : undefined].filter(
+		(signal): signal is AbortSignal => signal !== undefined,
+	);
+	const program = {
+		...OPERATION_EFFECT_PROGRAM,
+		decisions: OPERATION_EFFECT_PROGRAM.decisions.filter((decision) =>
+			(input.questions as readonly string[]).includes(decision.id),
+		),
+	};
+	const evaluation = await engine.evaluate(program, operationState(input.triage, input.toolName, input.request), {
+		consequence: "high",
+		signal: bounded.length > 0 ? AbortSignal.any(bounded) : undefined,
+	});
+	if (evaluation.model) input.onModel?.(evaluation.model);
+	return evaluation.answers ?? {};
+}
+
+/**
+ * The same questions for several operations in one request (the calls of one assistant message): each
+ * operation gets its own copy of the program, its answers keyed `c<index>_<question>` and its
+ * instructions pointing at `operations[<index>]`. Returned per operation under the plain question ids.
+ */
+export async function askOperationBatch(
+	engine: OperationEffectEngine,
+	input: {
+		readonly entries: readonly {
+			readonly triage: Extract<OperationTriage, { kind: "judged" }>;
+			readonly toolName: string;
+		}[];
+		readonly request: string;
+		readonly signal?: AbortSignal;
+		readonly timeoutMs?: number;
+		/** Told the model that answered, whenever the engine reports it. */
+		readonly onModel?: (model: string) => void;
+	},
+): Promise<Record<string, unknown>[]> {
+	const bounded = [input.signal, input.timeoutMs ? AbortSignal.timeout(input.timeoutMs) : undefined].filter(
+		(signal): signal is AbortSignal => signal !== undefined,
+	);
+	const decisions = input.entries.flatMap((_entry, index) =>
+		OPERATION_EFFECT_PROGRAM.decisions.map((decision) => ({
+			id: `c${index}_${decision.id}`,
+			instruction: decision.instruction.replaceAll("`operation.", `\`operations[${index}].`),
+		})),
+	);
+	const state = {
+		operations: input.entries.map((entry) => operationState(entry.triage, entry.toolName, input.request).operation),
+		request: input.request || "(no request recorded)",
+	};
+	const evaluation = await engine.evaluate({ ...OPERATION_EFFECT_PROGRAM, decisions }, state, {
+		consequence: "high",
+		signal: bounded.length > 0 ? AbortSignal.any(bounded) : undefined,
+	});
+	if (evaluation.model) input.onModel?.(evaluation.model);
+	const answers = evaluation.answers ?? {};
+	return input.entries.map((_entry, index) =>
+		Object.fromEntries([...OPERATION_EFFECT_IDS, OPERATION_REQUEST_ID].map((id) => [id, answers[`c${index}_${id}`]])),
+	);
+}
+
+export function readOperationEffects(answers: Record<string, unknown>): OperationEffectReading {
+	return Object.fromEntries(
+		OPERATION_EFFECT_IDS.map((id) => [id, probability(answers[id])]),
+	) as OperationEffectReading;
+}
+
+export function readOperationRequest(answers: Record<string, unknown>): number | undefined {
+	return probability(answers[OPERATION_REQUEST_ID]);
+}
+
+/** Whether the effect reading alone settles the operation: no effect established or unsettled. */
+export function operationHasNoEffect(effects: OperationEffectReading): boolean {
+	return OPERATION_EFFECT_IDS.every((id) => {
+		const value = effects[id];
+		return value !== undefined && value <= EFFECT_UNSETTLED_ABOVE;
+	});
+}
+
+/** An operation System One could not judge (error, outage, deadline): the authority line decides what that costs. */
+export function unavailableOperationVerdict(error: unknown, actor: "root" | "worker"): OperationVerdict {
+	return {
+		action: operationAction("unavailable", actor),
+		finding: `System One could not judge it (${error instanceof Error ? error.message : String(error)})`,
+		notable: true,
+	};
+}
+
+/** The effect reading and the owner's request, read through the authority line. */
+export function verdictFromReadings(
+	effects: OperationEffectReading,
+	asked: number | undefined,
+	actor: "root" | "worker",
+): OperationVerdict {
+	const established = OPERATION_EFFECT_IDS.filter((id) => (effects[id] ?? 0) >= EFFECT_ESTABLISHED);
+	const unsettled = OPERATION_EFFECT_IDS.filter((id) => {
+		const value = effects[id];
+		return value === undefined || (value > EFFECT_UNSETTLED_ABOVE && value < EFFECT_ESTABLISHED);
+	});
+	if (established.length === 0 && unsettled.length === 0) {
+		return { action: "proceed", finding: "System One found no effect beyond the task", notable: false };
+	}
+	const described =
+		established.length > 0
+			? established.map((id) => EFFECT_WORDS[id]).join(", ")
+			: `possibly ${unsettled.map((id) => EFFECT_WORDS[id]).join(", possibly ")}`;
+	if (asked !== undefined && asked >= REQUEST_ASKS) {
+		return { action: "proceed", finding: `${described}; the owner's request asks for it`, notable: true };
+	}
+	const clearlyNot = asked !== undefined && asked <= REQUEST_DOES_NOT_ASK;
+	const reading: JudgmentReading = established.length > 0 && clearlyNot ? "fail" : "ambiguous";
+	return {
+		action: operationAction(reading, actor),
+		finding: `${described}; ${clearlyNot ? "the owner's request does not ask for it" : "the owner's request does not settle it"}`,
+		notable: true,
+	};
+}
+
 /**
  * One batched System One request, read through the authority line: an operation with no likely effect
  * runs silently; one with an established effect runs when the owner's request asks for it, is refused
  * when the request clearly does not, and goes to the operator otherwise; an unsettled effect goes to
- * the operator unless the request asks for it; an unanswered request goes to the operator (a worker
- * is refused).
+ * the operator unless the request asks for it. A System One that cannot answer leaves the operation to
+ * run with the doubt shown: code already decided every edge class before the call got here.
  */
 export async function judgeOperation(
 	engine: OperationEffectEngine,
@@ -354,58 +517,19 @@ export async function judgeOperation(
 		readonly timeoutMs?: number;
 	},
 ): Promise<OperationVerdict> {
-	const bounded = [input.signal, input.timeoutMs ? AbortSignal.timeout(input.timeoutMs) : undefined].filter(
-		(signal): signal is AbortSignal => signal !== undefined,
-	);
 	let answers: Record<string, unknown>;
 	try {
-		answers =
-			(
-				await engine.evaluate(
-					OPERATION_EFFECT_PROGRAM,
-					{
-						operation: {
-							tool: input.toolName,
-							command: input.triage.operation,
-							kind: input.triage.operationKind,
-							...input.triage.identity,
-						},
-						request: input.request || "(no request recorded)",
-					},
-					{ consequence: "high", signal: bounded.length > 0 ? AbortSignal.any(bounded) : undefined },
-				)
-			).answers ?? {};
+		answers = await askOperation(engine, {
+			triage: input.triage,
+			toolName: input.toolName,
+			request: input.request,
+			questions: [...OPERATION_EFFECT_IDS, OPERATION_REQUEST_ID],
+			signal: input.signal,
+			timeoutMs: input.timeoutMs,
+		});
 	} catch (error) {
 		input.signal?.throwIfAborted();
-		return {
-			action: irreversibleAction("unavailable", input.actor),
-			finding: `System One could not judge it (${error instanceof Error ? error.message : String(error)})`,
-			notable: true,
-		};
+		return unavailableOperationVerdict(error, input.actor);
 	}
-	const effectIds = Object.keys(EFFECT_WORDS);
-	const read = (id: string) => probability(answers[id]);
-	const established = effectIds.filter((id) => (read(id) ?? 0) >= EFFECT_ESTABLISHED);
-	const unsettled = effectIds.filter((id) => {
-		const value = read(id);
-		return value === undefined || (value > EFFECT_UNSETTLED_ABOVE && value < EFFECT_ESTABLISHED);
-	});
-	if (established.length === 0 && unsettled.length === 0) {
-		return { action: "proceed", finding: "System One found no effect beyond the task", notable: false };
-	}
-	const described =
-		established.length > 0
-			? established.map((id) => EFFECT_WORDS[id]).join(", ")
-			: `possibly ${unsettled.map((id) => EFFECT_WORDS[id]).join(", possibly ")}`;
-	const asked = read("request_authorizes");
-	if (asked !== undefined && asked >= REQUEST_ASKS) {
-		return { action: "proceed", finding: `${described}; the owner's request asks for it`, notable: true };
-	}
-	const clearlyNot = asked !== undefined && asked <= REQUEST_DOES_NOT_ASK;
-	const reading: JudgmentReading = established.length > 0 && clearlyNot ? "fail" : "ambiguous";
-	return {
-		action: irreversibleAction(reading, input.actor),
-		finding: `${described}; ${clearlyNot ? "the owner's request does not ask for it" : "the owner's request does not settle it"}`,
-		notable: true,
-	};
+	return verdictFromReadings(readOperationEffects(answers), readOperationRequest(answers), input.actor);
 }

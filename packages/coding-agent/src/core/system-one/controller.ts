@@ -181,6 +181,23 @@ function consequenceForImpact(impact: ToolImpact): Consequence {
  * SystemOneController: Top-level orchestrator for System One validation.
  * Enforces the full lifecycle: intake -> preflight -> tool-gate -> postflight -> drift -> completion transaction.
  */
+/**
+ * The longest a stage or an intake classification waits for System One, retries and backoff included: p99 of
+ * the recorded stage calls is under 3 s. Past it the call is an outage, which each consumer already handles,
+ * instead of holding a turn for the transport's own limit (50 s per attempt, retried).
+ */
+export const SYSTEM_ONE_STAGE_DEADLINE_MS = 5_000;
+
+/** The one question every route choice asks; a set of option sets asks it once per set. */
+function routeChoiceQuestion(options: readonly { id: string; description: string }[]): QuestionDefinition {
+	return {
+		type: "choice",
+		instructions:
+			"Which host-approved option best satisfies the selection criteria in `request`? Choose only from the supplied options and follow the request's priorities. Preserve uncertainty when the evidence does not distinguish the options; do not invent confidence.",
+		criteria: Object.fromEntries(options.map((option) => [option.id, option.description])),
+	};
+}
+
 export class SystemOneController {
 	readonly store: ExecutionStore;
 	readonly adapter: JevAdapter;
@@ -345,7 +362,7 @@ export class SystemOneController {
 						state: stateView,
 						questions: toTypeSafeEvaluationQuestions(questions),
 					},
-					{ impact, ...(signal ? { signal } : {}) },
+					{ impact, timeoutMs: SYSTEM_ONE_STAGE_DEADLINE_MS, ...(signal ? { signal } : {}) },
 				);
 			} catch (error) {
 				if (evaluationId !== undefined) this.evaluationObserver?.settleFailed(evaluationId, error);
@@ -433,7 +450,11 @@ export class SystemOneController {
 					},
 					questions: toTypeSafeEvaluationQuestions(asked as typeof USER_AUTHORIZATION_QUESTIONS),
 				},
-				{ impact: "read_only", ...(options.signal ? { signal: options.signal } : {}) },
+				{
+					impact: "read_only",
+					timeoutMs: SYSTEM_ONE_STAGE_DEADLINE_MS,
+					...(options.signal ? { signal: options.signal } : {}),
+				},
 			);
 		} catch (error) {
 			if (evaluationId !== undefined) {
@@ -885,26 +906,54 @@ export class SystemOneController {
 		input: { readonly request: string; readonly options: readonly { id: string; description: string }[] },
 		signal?: AbortSignal,
 	): Promise<Record<string, unknown>> {
-		const questions: QuestionPack = {
-			[ROUTE_CHOICE_QUESTION_ID]: {
-				type: "choice",
-				instructions:
-					"Which host-approved option best satisfies the selection criteria in `request`? Choose only from the supplied options and follow the request's priorities. Preserve uncertainty when the evidence does not distinguish the options; do not invent confidence.",
-				criteria: Object.fromEntries(input.options.map((option) => [option.id, option.description])),
-			},
-		};
+		return this.runRouteChoice(
+			input.request,
+			{ [ROUTE_CHOICE_QUESTION_ID]: routeChoiceQuestion(input.options) },
+			input.options,
+			signal,
+		);
+	}
+
+	/**
+	 * One Choice per option set over the same request, in ONE request: System One evaluates the questions in
+	 * parallel, so the first pass and every narrower follow-up cost one round trip. Each result is shaped as a
+	 * single route choice's answers, so a caller reads it exactly as it would read `evaluateRouteChoice`.
+	 */
+	async evaluateRouteChoiceSet(
+		input: {
+			readonly request: string;
+			readonly optionSets: readonly (readonly { id: string; description: string }[])[];
+		},
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>[]> {
+		const questionId = (index: number) =>
+			index === 0 ? ROUTE_CHOICE_QUESTION_ID : `${ROUTE_CHOICE_QUESTION_ID}_set_${index}`;
+		const questions: QuestionPack = Object.fromEntries(
+			input.optionSets.map((options, index) => [questionId(index), routeChoiceQuestion(options)]),
+		);
+		const answers = await this.runRouteChoice(input.request, questions, input.optionSets[0] ?? [], signal);
+		return input.optionSets.map((_options, index) => ({ [ROUTE_CHOICE_QUESTION_ID]: answers[questionId(index)] }));
+	}
+
+	/** The route-choice stage: one request, sealed with what the first question chose among `firstOptions`. */
+	private async runRouteChoice(
+		request: string,
+		questions: QuestionPack,
+		firstOptions: readonly { id: string; description: string }[],
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>> {
 		const { decision, answers, evaluationId } = await this.runStageValidation(
 			"route_choice",
-			{ request: this.projector.redactText(input.request.slice(0, MAX_ROUTE_CHOICE_REQUEST_CHARACTERS)) },
+			{ request: this.projector.redactText(request.slice(0, MAX_ROUTE_CHOICE_REQUEST_CHARACTERS)) },
 			"read_only",
 			[],
 			questions,
 			signal,
 		);
-		const answer = answers[ROUTE_CHOICE_QUESTION_ID] as { choice?: unknown; confidence?: unknown } | undefined;
-		const chosen = input.options.find((option) => option.id === answer?.choice);
+		const first = answers[ROUTE_CHOICE_QUESTION_ID] as { choice?: unknown; confidence?: unknown } | undefined;
+		const chosen = firstOptions.find((option) => option.id === first?.choice);
 		this.sealDecision(decision, "evaluated", evaluationId, [
-			`chose ${chosen?.description.split(";")[0] ?? String(answer?.choice)} at confidence ${String(answer?.confidence)} of ${input.options.length} options`,
+			`chose ${chosen?.description.split(";")[0] ?? String(first?.choice)} at confidence ${String(first?.confidence)} of ${firstOptions.length} options`,
 		]);
 		return answers;
 	}

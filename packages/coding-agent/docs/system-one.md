@@ -57,21 +57,24 @@ event:
   is idle; a worker's attempt is interrupted, the directive queued on its mailbox, and the attempt
   resumed.
 
-Ordinary tool admission does not ask System One about a single call. Each admitted call is recorded with an intent
-built from its own arguments (`bash command=…`, `edit path=…`) and its terminal (`succeeded` or
-`failed`) is written on the same `call_id`, so postflight judges the step's relevance and scope over
-real events. Preflight and postflight System One packs run only with a live objective; the claim check and
-the duplicate review run in every session.
+Ordinary tool admission asks System One about a call only when code cannot decide it: a shell or code call, or a
+write outside the task (see [The shell-command gate](#the-shell-command-gate)). Every admitted call is also
+recorded with an intent built from its own arguments (`bash command=…`, `edit path=…`) and its terminal
+(`succeeded` or `failed`) is written on the same `call_id`, so postflight judges the step's relevance and scope
+over real events. Preflight and postflight System One packs run only with a live objective; the claim check and
+the duplicate review run in every session. After a turn, the answer's claim check and the objective's postflight
+wait on System One together.
 Inside the objective loop a System One cancel of the root's own turn is a re-route (the next cycle
 routes again); only the operator's interruption stops the loop. The worker supervisor redirects a
 worker judged off the mission now, steers a stalled one at its next turn, and reroutes a repeated
 stall. A delayed result must still name the observed objective, task and live attempt when applied;
 a terminal attempt cannot steer or cancel a newer task on the same persistent worker.
 
-Preflight outcomes other than `allow` skip the current root turn and become the next
-`composeObjectiveRoute` input (`retrieve`, `replan`, `deterministic_test`, `escalate_capability`,
-`blocked_external`). Postflight outcomes similarly select the next route (`verify`, `retrieve`,
-`replan`, `completion_candidate`, `blocked_external`); they are not discarded.
+Preflight never skips the owner's turn. Its outcomes other than `allow` are recorded as a control directive
+and become the next `composeObjectiveRoute` input (`retrieve`, `replan`, `deterministic_test`,
+`escalate_capability`, `blocked_external`); a preflight failure leaves the turn running. Postflight outcomes
+similarly select the next route (`verify`, `retrieve`, `replan`, `completion_candidate`, `blocked_external`);
+they are not discarded.
 
 `objective_primary` without a live `ObjectiveExecutionController` fails closed and names that
 binding; it never continues on the legacy loop. Under `system_one_required`, a required steering
@@ -93,6 +96,40 @@ recheck before continuing affected work. Failed requirement checks and unresolve
 completion. Evaluator outages retain their actual diagnostics without inventing a defect.
 Other `SystemOneController` stage packs for intake, claim check, duplicate
 logic, patch review and drift remain callable for tests/hooks.
+
+## The shell-command gate
+
+Code decides everything it can before System One is asked: the capability envelope, path bounds, the edge
+classes and the external-acquisition screen. What remains is a shell or code call, or a write outside the task,
+and System One answers two things about it: what the operation does, and whether the owner's request asks for it.
+
+- **What it does** is four questions (leaves the machine, cannot be undone, touches files outside the task,
+  acquires external code) that read only the operation: its command, resolved executable, script content, and the
+  execution and task directories. That reading is remembered across turns and sessions, keyed by those facts, the
+  System One model id and a digest of the questions themselves, so a new model or a reworded question never reads
+  an older answer. An operation with no effect costs no System One call after its first.
+- **Whether the request asks for it** is asked fresh, and only when the remembered effects are not nil.
+  A System One that cannot answer it leaves an operation that has an effect to the operator.
+- The calls of one assistant message are judged together, in one request, as soon as their arguments are final;
+  a call the pre-warm did not cover is judged when its turn comes.
+- A call still unanswered after two seconds, or a System One that is down, lets the operation run with the doubt
+  shown: for a root and for a worker alike, because the edge classes were already decided by code. An established
+  effect the request does not ask for is refused; an unsettled one goes to the operator (a worker is refused).
+- Every decision is recorded in the decision ledger (`operation_gate_decisions`: where the answer came from,
+  the verdict and the time waited), with a digest of the operation identity and never the command. The effect
+  readings live in `operation_effects`.
+
+## Deadline
+
+A System One stage evaluation, an intake classification and the answer's claim check wait at most five seconds,
+retries included. A call past that is an outage, which its consumer already handles by the authority line below.
+
+## Route choice
+
+A model-category choice asks its first pass and every narrower follow-up between two leading categories in one System One
+request (the first pass over all offered categories, then each pair), so an ambiguous first pass costs no second round trip.
+The questions are the ones a separate follow-up would ask; a judge that cannot answer several option sets at once is asked one
+set at a time.
 
 ## Native worker model and effort
 
@@ -244,14 +281,14 @@ the [worker control tests](../test/system-one-worker-control.test.ts) and the
 
 ## Where a judgment may stop work
 
-`system-one/authority-line.ts` is the one table. Reversible work proceeds past a doubt or an outage
+`system-one/authority-line.ts` is the one table. Reversible work, and an operation code could not classify, proceeds past a doubt or an outage
 with the doubt visible; an ambiguous judgment asks for evidence at most `GATHER_MORE_LIMIT` (2) times
 per evidence revision. Received nonpassing JEV-024..028 judgments require verification in the
 receiving lane in both policy modes. They keep completion open without dispatching a substitute
 verifier or opening an owner-question latch. `system_one_optional` records evaluator outages as
 diagnostics after deterministic proof; `system_one_required` retains its availability gate.
 An irreversible or outward operation goes to the
-operator, or is refused for a worker. Only Choice and Score answers are gated on confidence; a
+operator, or is refused for a worker; an established outward effect the request does not ask for is refused. Only Choice and Score answers are gated on confidence; a
 Noul's probability is its certainty.
 
 Project-rule candidates across mutation, postflight and completion require the receiving agent to

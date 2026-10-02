@@ -360,6 +360,7 @@ import { sameLaneVerificationDirective } from "./system-one/control-directive.ts
 import { type SystemOneController, USER_REQUEST_RULE_BUDGET } from "./system-one/controller.ts";
 import { createSessionForegroundControl, type SystemOneForegroundControl } from "./system-one/foreground-control.ts";
 import { OperationGate } from "./system-one/operation-gate.ts";
+import { operationGateLedgerBindings, prewarmOperationGate } from "./system-one/operation-gate-wiring.ts";
 import {
 	appendOwnerFollowUp,
 	consultMessage,
@@ -1821,6 +1822,10 @@ export class AgentSession {
 					context.systemPrompt ?? "",
 				);
 			},
+			(calls, signal) =>
+				this.settingsManager.getEdgeSettings().mode === "yolo"
+					? undefined
+					: prewarmOperationGate(this._operationGate, calls, this._cwd, signal),
 		);
 		this._foregroundLifecycle.start();
 		this._reflection = new ReflectionController({
@@ -2924,6 +2929,11 @@ export class AgentSession {
 			notify: (message) => {
 				if (!this._handoff) this._emit({ type: "warning", message });
 			},
+			...operationGateLedgerBindings({
+				getLedger: () => this.getDecisionLedger(),
+				getSessionId: () => this.sessionManager.getSessionId(),
+				getCwd: () => this._cwd,
+			}),
 		});
 		return this._operationGateInstance;
 	}
@@ -5742,6 +5752,12 @@ export class AgentSession {
 					false,
 					submissionSignal,
 				);
+				// The answer's claims and the objective's postflight read different facts and write nothing
+				// the other reads, so they wait on System One together, not one after the other.
+				const claimCheck = submissionSignal?.aborted ? undefined : this._claimCorrection(turnStart);
+				// If the postflight below throws first, this check is abandoned: its own failure must not
+				// surface as an unhandled rejection. The await further down still sees it when it is used.
+				claimCheck?.catch(() => undefined);
 				if (this._systemOneController && !submissionSignal?.aborted) {
 					await this._runtimeBuilder.withTaskDirectoryContext(
 						() =>
@@ -5759,8 +5775,8 @@ export class AgentSession {
 					await executeSystemOnePostflight(undefined, this.agent.state.messages.length, submissionSignal?.aborted);
 				}
 				// Claims against deliveries: a contradicted claim buys one correction turn, never a loop.
-				if (!submissionSignal?.aborted) {
-					const correction = await this._claimCorrection(turnStart);
+				if (claimCheck && !submissionSignal?.aborted) {
+					const correction = await claimCheck;
 					if (correction && !submissionSignal?.aborted) {
 						await this._modelRouter.runRoutedTurn(
 							[createCustomMessage("claim_delivery", correction, true, undefined, new Date().toISOString())],

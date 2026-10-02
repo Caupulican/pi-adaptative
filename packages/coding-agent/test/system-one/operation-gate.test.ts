@@ -115,7 +115,7 @@ describe("operation judgment", () => {
 		});
 	});
 
-	it("sends an unsettled effect, or a System One that cannot answer, to the operator", async () => {
+	it("sends an unsettled effect to the operator", async () => {
 		expect(await judge({ ...OUTWARD, request_authorizes: 0.5 })).toMatchObject({ action: "confirm" });
 		expect(await judge({ ...OUTWARD, request_authorizes: 0.5 }, "worker")).toMatchObject({ action: "refuse" });
 		expect(
@@ -127,23 +127,29 @@ describe("operation judgment", () => {
 				request_authorizes: 0.5,
 			}),
 		).toMatchObject({ action: "confirm", finding: expect.stringContaining("possibly leaves the machine") });
+	});
+
+	it("lets a command run with the doubt shown when System One cannot answer, for the root and a worker alike", async () => {
 		const failing: OperationEffectEngine = {
 			evaluate: async () => {
 				throw new Error("engine down");
 			},
 		};
-		expect(
-			await judgeOperation(failing, {
-				triage: undecidable,
-				toolName: "bash",
-				scopeCwd: scope,
-				request: "",
-				actor: "root",
-			}),
-		).toMatchObject({
-			action: "confirm",
-			finding: expect.stringContaining("System One could not judge it (engine down)"),
-		});
+		for (const actor of ["root", "worker"] as const) {
+			expect(
+				await judgeOperation(failing, {
+					triage: undecidable,
+					toolName: "bash",
+					scopeCwd: scope,
+					request: "",
+					actor,
+				}),
+			).toMatchObject({
+				action: "proceed",
+				notable: true,
+				finding: expect.stringContaining("System One could not judge it (engine down)"),
+			});
+		}
 	});
 
 	it("treats a missing answer as unsettled, never as established or absent", async () => {
@@ -153,7 +159,7 @@ describe("operation judgment", () => {
 		});
 	});
 
-	it("counts a System One that runs out of time as unavailable", async () => {
+	it("counts a System One that runs out of time as unavailable, which runs with the doubt shown", async () => {
 		const slow: OperationEffectEngine = {
 			evaluate: (_program, _state, options) =>
 				new Promise((_resolve, reject) => {
@@ -168,7 +174,11 @@ describe("operation judgment", () => {
 			actor: "root",
 			timeoutMs: 20,
 		});
-		expect(verdict).toMatchObject({ action: "confirm", finding: expect.stringContaining("timed out") });
+		expect(verdict).toMatchObject({
+			action: "proceed",
+			notable: true,
+			finding: expect.stringContaining("timed out"),
+		});
 	});
 });
 
@@ -380,31 +390,30 @@ describe("operation gate", () => {
 		expect(scriptHashes[2]).not.toBe(scriptHashes[0]);
 	});
 
-	it("keeps a root call blocked when System One is unavailable and no grant exists", async () => {
-		const notices: string[] = [];
-		const askOperator = vi.fn(async () => ({ authorized: false, reason: "operator still decides" }));
-		const operationGate = new OperationGate({
-			getEngine: () => ({
-				evaluate: async () => {
-					throw new Error("engine down");
-				},
-			}),
-			getRequest: () => "Run autonomously.",
-			getScopeCwd: () => scope,
-			getTurnKey: () => "turn-1",
-			isGranted: () => false,
-			askOperator,
-			notify: (message) => notices.push(message),
-		});
+	it("runs a call with the doubt shown when System One is unavailable, and never parks it on the operator", async () => {
+		for (const actor of ["root", "worker"] as const) {
+			const notices: string[] = [];
+			const askOperator = vi.fn(async () => ({ authorized: false, reason: "operator would decide" }));
+			const decisions: { source: string; action: string }[] = [];
+			const operationGate = new OperationGate({
+				getEngine: () => ({
+					evaluate: async () => {
+						throw new Error("engine down");
+					},
+				}),
+				getRequest: () => "Run autonomously.",
+				getScopeCwd: () => scope,
+				getTurnKey: () => "turn-1",
+				isGranted: () => false,
+				askOperator,
+				notify: (message) => notices.push(message),
+				recordDecision: (decision) => decisions.push(decision),
+			});
 
-		expect(await operationGate.check("bash", command, scope, "root")).toMatchObject({
-			block: true,
-			reason: "operator still decides",
-		});
-		expect(askOperator).toHaveBeenCalledWith(
-			expect.objectContaining({ reason: expect.stringContaining("System One could not judge it (engine down)") }),
-			undefined,
-		);
-		expect(notices).toEqual([]);
+			expect(await operationGate.check("bash", command, scope, actor)).toBeUndefined();
+			expect(askOperator).not.toHaveBeenCalled();
+			expect(notices).toEqual([expect.stringContaining("System One could not judge it (engine down)")]);
+			expect(decisions).toEqual([expect.objectContaining({ source: "outage", action: "proceed" })]);
+		}
 	});
 });

@@ -132,6 +132,25 @@ export interface RouteDecisionRow {
 	readonly executor?: string;
 }
 
+/**
+ * One shell-gate decision: where its answer came from (`jev` asked System One, `cache` reused an effect
+ * reading, `outage` System One could not answer), what was decided and how long the call waited. The
+ * measurement a cache or a deterministic table is judged by.
+ */
+export interface OperationGateDecisionRow {
+	readonly sessionId: string;
+	readonly cwd: string;
+	readonly decidedAt: number;
+	readonly tool: string;
+	/** A digest of the canonical operation identity; the command itself is never stored. */
+	readonly identityHash: string;
+	readonly source: "jev" | "cache" | "outage";
+	readonly action: "proceed" | "confirm" | "refuse";
+	readonly notable: boolean;
+	readonly finding: string;
+	readonly durationMs: number;
+}
+
 export interface DecisionLedgerStoreOptions {
 	readonly databasePath: string;
 	readonly busyTimeoutMs?: number;
@@ -277,6 +296,26 @@ export class DecisionLedgerStore {
 				prefix_tokens INTEGER NOT NULL
 			);
 			CREATE INDEX IF NOT EXISTS worker_prefixes_observed ON worker_prefixes (observed_at);
+			CREATE TABLE IF NOT EXISTS operation_effects (
+				cache_key TEXT PRIMARY KEY,
+				model TEXT NOT NULL,
+				readings TEXT NOT NULL,
+				updated_at INTEGER NOT NULL
+			);
+			CREATE TABLE IF NOT EXISTS operation_gate_decisions (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				session_id TEXT NOT NULL,
+				cwd TEXT NOT NULL,
+				decided_at INTEGER NOT NULL,
+				tool TEXT NOT NULL,
+				identity_hash TEXT NOT NULL,
+				source TEXT NOT NULL,
+				action TEXT NOT NULL,
+				notable INTEGER NOT NULL,
+				finding TEXT NOT NULL,
+				duration_ms INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS operation_gate_decisions_session ON operation_gate_decisions (session_id, decided_at);
 		`);
 		// Ledgers created before observations carried these columns gain them; their rows stay unassigned.
 		const columns = new Set(
@@ -571,6 +610,52 @@ export class DecisionLedgerStore {
 			});
 		}
 		return out;
+	}
+
+	/** An effect reading kept for `cacheKey`, or undefined when absent or older than `notBefore`. */
+	readOperationEffects(cacheKey: string, notBefore: number): Record<string, number | null> | undefined {
+		const row = this.database
+			.prepare("SELECT readings FROM operation_effects WHERE cache_key = ? AND updated_at >= ?")
+			.all(cacheKey, notBefore)[0];
+		const text = asText(row?.readings);
+		if (text === undefined) return undefined;
+		try {
+			const parsed: unknown = JSON.parse(text);
+			return parsed !== null && typeof parsed === "object" ? (parsed as Record<string, number | null>) : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	writeOperationEffects(cacheKey: string, model: string, readings: Record<string, number | null>, now: number): void {
+		this.database
+			.prepare(
+				`INSERT INTO operation_effects (cache_key, model, readings, updated_at) VALUES (?, ?, ?, ?)
+				 ON CONFLICT(cache_key) DO UPDATE SET model = excluded.model, readings = excluded.readings, updated_at = excluded.updated_at`,
+			)
+			.run(cacheKey, model, JSON.stringify(readings), now);
+	}
+
+	/** Records one shell-gate decision (see {@link OperationGateDecisionRow}). */
+	recordOperationGateDecision(row: OperationGateDecisionRow): void {
+		this.database
+			.prepare(
+				`INSERT INTO operation_gate_decisions
+				 (session_id, cwd, decided_at, tool, identity_hash, source, action, notable, finding, duration_ms)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				row.sessionId,
+				row.cwd,
+				row.decidedAt,
+				row.tool,
+				row.identityHash,
+				row.source,
+				row.action,
+				row.notable ? 1 : 0,
+				row.finding.slice(0, 240),
+				Math.round(row.durationMs),
+			);
 	}
 
 	/** Records one applied compaction's measured effect (see {@link CompactionOutcomeRow}). */

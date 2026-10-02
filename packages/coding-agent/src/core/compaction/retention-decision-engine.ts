@@ -20,6 +20,7 @@ interface RetentionQuestion {
 
 export function createRetentionDecisionEngine(engine: SemanticDecisionEngine): DecisionEngine {
 	return {
+		model: engine.model,
 		async evaluate(program: DecisionEngineProgram, state, options) {
 			const decisions = (program.decisions as readonly RetentionQuestion[])
 				.filter((decision): decision is RetentionQuestion & { id: string; instruction: string } =>
@@ -47,7 +48,7 @@ export function createRetentionDecisionEngine(engine: SemanticDecisionEngine): D
 				if (result.kind !== "boolean") continue;
 				answers[id] = { type: "noul", noul: result.probabilityTrue };
 			}
-			return { answers };
+			return { answers, model: evaluation.engine.model };
 		},
 	};
 }

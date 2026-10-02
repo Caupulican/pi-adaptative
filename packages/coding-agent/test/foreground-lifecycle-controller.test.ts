@@ -1,5 +1,6 @@
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { ToolCallStartContext } from "@caupulican/pi-agent-core/types";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
@@ -475,6 +476,39 @@ describe("foreground lifecycle controller", () => {
 			],
 		};
 		expect(() => controller.recordTransportTelemetry(message)).not.toThrow();
+	});
+
+	it("reports a failing pre-warm hook and still goes on to reserve the wave", async () => {
+		const warnings: string[] = [];
+		const prewarmToolCalls = vi.fn(() => {
+			throw new Error("boom");
+		});
+		const agent: ForegroundLifecycleAgentDependency = {
+			state: { messages: [] },
+			resetSanitizerPrefixHorizon: () => {},
+		};
+		const controller = new ForegroundLifecycleController({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			modelRouter: { commitSessionBuffer: () => new Map() } as unknown as ModelRouterController,
+			emitWarning: (message) => warnings.push(message),
+			prewarmToolCalls,
+		});
+		controller.install();
+		const call = {
+			requestId: "request-1",
+			callId: "call-1",
+			toolName: "bash",
+			index: 0,
+			mutation: false,
+			args: { command: "ls" },
+			assistantMessage: fauxAssistantMessage("running"),
+		} as unknown as ToolCallStartContext;
+
+		// The wave is rejected by the durable-reservation check that comes after the hook, not by the hook.
+		await expect(agent.onToolCallStart?.([call])).rejects.toThrow(/not canonically persisted/);
+		expect(prewarmToolCalls).toHaveBeenCalledTimes(1);
+		expect(warnings).toEqual([expect.stringContaining("Tool pre-warm failed (boom)")]);
 	});
 
 	it("does not write a terminal for an immediate tool result with no durable start", async () => {

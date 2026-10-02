@@ -61,6 +61,8 @@ interface ForegroundLifecycleControllerDeps {
 	modelRouter: ModelRouterController;
 	emitWarning(message: string): void;
 	observeProviderRequest?(context: ProviderRequestSnapshotContext): void;
+	/** Told of a wave of calls before any of them is reserved. Advisory: a throw is reported and the wave proceeds. */
+	prewarmToolCalls?(calls: readonly ToolCallStartContext[], signal?: AbortSignal): void;
 	/**
 	 * Session identity of the group lock these announcements order (see file-mutation-queue.ts).
 	 * Omitted announces into the process-wide default scope, which is what a single-session host had.
@@ -247,6 +249,14 @@ export class ForegroundLifecycleController {
 		const requestId = calls[0]!.requestId;
 		if (calls.some((call) => call.requestId !== requestId)) {
 			throw new Error("Tool reservation wave contains multiple provider request identities");
+		}
+		// Advisory only: the durable reservation below never depends on it.
+		try {
+			this.deps.prewarmToolCalls?.(calls, signal);
+		} catch (error) {
+			this.deps.emitWarning(
+				`Tool pre-warm failed (${error instanceof Error ? error.message : String(error)}); the calls run without it.`,
+			);
 		}
 
 		const flushed = this.deps.modelRouter.commitSessionBuffer();

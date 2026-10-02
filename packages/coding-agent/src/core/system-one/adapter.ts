@@ -102,7 +102,10 @@ export interface SystemOneJevAdapterDeps {
  * R-006: Pin Jev to jev-1.13.0 in production.
  * R-007: Log the concrete model version and reject unexpected model drift.
  * R-032: Secrets, tokens, credentials, private keys, and user keys MUST NOT be leaked.
- * R-066: If Jev is unavailable, repo mutation and high-impact actions MUST fail closed.
+ * R-066: The adapter never invents an answer when Jev is unavailable: it throws, and the consumer applies the
+ * authority line (authority-line.ts). Objective transitions hold, delivery and edge classes stay with the
+ * operator through the deterministic gates, and the shell gate's advisory judgment lets the call run with the
+ * doubt shown, because code already decided every edge class before System One was asked.
  * R-067: Rate-limit retries MUST use bounded backoff.
  */
 export class SystemOneJevAdapter implements JevAdapter {
