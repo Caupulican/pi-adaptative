@@ -1,5 +1,5 @@
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
-import { clampThinkingLevel } from "../models.ts";
+import { clampThinkingLevel, getModel } from "../models.ts";
 import type {
 	CacheRetention,
 	Context,
@@ -35,6 +35,7 @@ import {
 	terminateAssistantStreamWithError,
 } from "./provider-runtime.ts";
 import { buildBaseOptions } from "./simple-options.ts";
+import { resolveXaiBuildModelId } from "./xai-responses-policy.ts";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode", "fugu"]);
 const FUGU_DEFAULT_TIMEOUT_MS = 7_200_000;
@@ -80,12 +81,30 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 	options?: OpenAIResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const buildModelId = resolveXaiBuildModelId(model, options?.serviceTier);
+	if (buildModelId) {
+		const catalogModel = getModel("xai", buildModelId);
+		model = {
+			...model,
+			id: catalogModel.id,
+			name: catalogModel.name,
+			cost: catalogModel.cost,
+		};
+		options = { ...options, serviceTier: undefined };
+	}
 
 	// Start async processing
 	(async () => {
 		const output = createAssistantMessage(model);
 
 		try {
+			if (buildModelId) {
+				const headers = new Headers({ ...model.headers, ...options?.headers });
+				headers.set("x-grok-model-override", buildModelId);
+				const requestHeaders = Object.fromEntries(headers);
+				model = { ...model, headers: requestHeaders };
+				options = { ...options, headers: requestHeaders };
+			}
 			// Create OpenAI client
 			let apiKey = options?.apiKey;
 			if (!apiKey) {
@@ -136,7 +155,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 				toolNameMap,
 				serviceTier: options?.serviceTier,
 				applyServiceTierPricing:
-					model.provider === "fugu"
+					model.provider === "fugu" || buildModelId
 						? undefined
 						: (usage, serviceTier) => applyOpenAIServiceTierPricing(usage, serviceTier, model),
 			});

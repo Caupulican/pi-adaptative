@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { getModel, getModels } from "../src/models.ts";
+import { calculateCost, getModel, getModels } from "../src/models.ts";
 import { streamOpenAIResponses } from "../src/providers/openai-responses.ts";
 import type { AssistantMessage, Context, Model, ToolResultMessage, Usage } from "../src/types.ts";
 import { xaiOAuthProvider } from "../src/utils/oauth/xai.ts";
@@ -23,13 +23,14 @@ const usage: Usage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-function completedResponsesSse(): Response {
+function completedResponsesSse(serviceTier?: string): Response {
 	return new Response(
 		`data: ${JSON.stringify({
 			type: "response.completed",
 			response: {
 				id: "resp_xai_test",
 				status: "completed",
+				service_tier: serviceTier,
 				usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
 				output: [
 					{
@@ -52,9 +53,10 @@ async function captureResponsesRequest(
 	options: Parameters<typeof streamOpenAIResponses>[2],
 	requestContext: Context = context,
 	modelOverride?: Model<"openai-responses">,
-): Promise<{ url: string; headers: Headers; body: Record<string, unknown> }> {
+): Promise<{ url: string; headers: Headers; body: Record<string, unknown>; result: AssistantMessage }> {
 	let capturedUrl: string | undefined;
 	let capturedInit: RequestInit | undefined;
+	let result: AssistantMessage;
 	const originalFetch = globalThis.fetch;
 	globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
 		capturedUrl = String(input);
@@ -64,13 +66,15 @@ async function captureResponsesRequest(
 
 	try {
 		const model = modelOverride ?? getModel("xai", modelId);
-		await streamOpenAIResponses(model, requestContext, options).result();
+		result = await streamOpenAIResponses(model, requestContext, options).result();
+		expect(result.stopReason, result.errorMessage).toBe("stop");
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
 
 	if (!capturedUrl || !capturedInit) throw new Error("Request was not captured");
 	return {
+		result,
 		url: capturedUrl,
 		headers: new Headers(capturedInit.headers),
 		body: JSON.parse(String(capturedInit.body)) as Record<string, unknown>,
@@ -191,6 +195,117 @@ describe.each(["grok-4.6", "grok-4.7", "grok-4.7-build-fast"] as const)("xAI Res
 });
 
 describe("xAI Grok CLI subscription schema", () => {
+	it.each([false, true])("returns an error terminal for malformed headers (subscription=%s)", async (subscription) => {
+		const catalogModel = getModel("xai", "grok-4.7");
+		const model = subscription
+			? (xaiOAuthProvider.modifyModels?.([catalogModel], {
+					access: "access",
+					refresh: "refresh",
+					expires: Date.now() + 60_000,
+				})?.[0] as Model<"openai-responses">)
+			: catalogModel;
+		const result = await streamOpenAIResponses(model, context, {
+			apiKey: "access",
+			serviceTier: "priority",
+			headers: { "x-userid": "invalid\nheader" },
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/header/i);
+	});
+	it("uses model pricing even if the Build response reports priority", async () => {
+		const model = xaiOAuthProvider.modifyModels?.([getModel("xai", "grok-4.7")], {
+			access: "access",
+			refresh: "refresh",
+			expires: Date.now() + 60_000,
+		})?.[0] as Model<"openai-responses">;
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = (async () => completedResponsesSse("priority")) as typeof fetch;
+		try {
+			const result = await streamOpenAIResponses(model, context, {
+				apiKey: "access",
+				serviceTier: "priority",
+			}).result();
+			expect(result.stopReason).toBe("stop");
+			expect(result.usage.cost.total).toBeCloseTo(0.000016, 9);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+	it.each(["x-grok-model-override", "X-Grok-Model-Override"])(
+		"owns routing despite stale %s across auth recovery",
+		async (header) => {
+			const model = xaiOAuthProvider.modifyModels?.([getModel("xai", "grok-4.7")], {
+				access: "access",
+				refresh: "refresh",
+				expires: Date.now() + 60_000,
+			})?.[0] as Model<"openai-responses">;
+			const originalFetch = globalThis.fetch;
+			const requests: { headers: Headers; body: Record<string, unknown> }[] = [];
+			globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+				requests.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) });
+				return requests.length === 1 ? new Response("{}", { status: 401 }) : completedResponsesSse();
+			}) as typeof fetch;
+			try {
+				const result = await streamOpenAIResponses(model, context, {
+					apiKey: "access",
+					serviceTier: "priority",
+					headers: { ...model.headers, [header]: "grok-4.7" },
+					onAuthRejection: async () => "replacement",
+				}).result();
+				expect(result.stopReason, result.errorMessage).toBe("stop");
+				expect(requests).toHaveLength(2);
+				for (const request of requests) {
+					expect(request.headers.get("x-grok-model-override")).toBe("grok-4.7-build-fast");
+					expect(request.body.model).toBe("grok-4.7-build-fast");
+				}
+				expect(requests[1].headers.get("authorization")).toBe("Bearer replacement");
+			} finally {
+				globalThis.fetch = originalFetch;
+			}
+		},
+	);
+	it.each([
+		["grok-4.7", "priority", "grok-4.7-build-fast"],
+		["grok-4.7", "default", "grok-4.7"],
+		["grok-4.7-build-fast", undefined, "grok-4.7-build-fast"],
+		["grok-4.7-build-fast", "priority", "grok-4.7-build-fast"],
+		["grok-4.7-build-fast", "default", "grok-4.7"],
+		["grok-4.7-build-fast", null, "grok-4.7-build-fast"],
+	] as const)("routes %s with tier %s to %s at one premium", async (selected, tier, expected) => {
+		const model = xaiOAuthProvider.modifyModels?.([getModel("xai", selected)], {
+			access: "access",
+			refresh: "refresh",
+			expires: Date.now() + 60_000,
+		})?.[0] as Model<"openai-responses">;
+		const { headers, body, result } = await captureResponsesRequest(
+			selected,
+			{
+				apiKey: "access",
+				serviceTier: tier,
+				reasoningEffort: "xhigh",
+			},
+			context,
+			model,
+		);
+		expect(headers.get("x-grok-model-override")).toBe(expected);
+		expect(body.model).toBe(expected);
+		expect(body.service_tier).toBeUndefined();
+		expect(body.reasoning).toMatchObject({ effort: "xhigh" });
+		expect(result.model).toBe(expected);
+		expect(result.usage.cost.total).toBeCloseTo(expected.endsWith("-fast") ? 0.000016 : 0.000008, 9);
+		expect(model.id).toBe(selected);
+		expect(model.headers?.["x-grok-model-override"]).toBe(selected);
+	});
+
+	it("keeps public API priority routing on the selected model", async () => {
+		const { body, headers } = await captureResponsesRequest("grok-4.7", {
+			apiKey: "api-key",
+			serviceTier: "priority",
+		});
+		expect(body.model).toBe("grok-4.7");
+		expect(body.service_tier).toBe("priority");
+		expect(headers.get("x-grok-model-override")).toBeNull();
+	});
 	it("adds account headers only when the stored token identity is present", () => {
 		const modified = xaiOAuthProvider.modifyModels?.([getModel("xai", "grok-4.6")], {
 			access: "oauth-access",
@@ -219,7 +334,7 @@ describe("xAI Grok CLI subscription schema", () => {
 			headers: {
 				"X-XAI-Token-Auth": "xai-grok-cli",
 				"x-authenticateresponse": "authenticate-response",
-				"x-grok-client-version": "1.0.40",
+				"x-grok-client-version": "1.0.46",
 				"x-grok-client-identifier": "grok-shell",
 				"x-grok-client-mode": "interactive",
 				"x-grok-model-override": "grok-4.6",
@@ -322,7 +437,7 @@ describe("xAI Grok CLI subscription schema", () => {
 		expect(headers.get("authorization")).toBe("Bearer oauth-access");
 		expect(headers.get("x-xai-token-auth")).toBe("xai-grok-cli");
 		expect(headers.get("x-authenticateresponse")).toBe("authenticate-response");
-		expect(headers.get("x-grok-client-version")).toBe("1.0.40");
+		expect(headers.get("x-grok-client-version")).toBe("1.0.46");
 		expect(headers.get("x-grok-client-surface")).toBeNull();
 		expect(headers.get("x-grok-client-identifier")).toBe("grok-shell");
 		expect(headers.get("x-grok-client-mode")).toBe("interactive");
@@ -375,6 +490,16 @@ describe("xAI Grok CLI subscription schema", () => {
 });
 
 describe("xAI built-in catalog", () => {
+	it.each([200_000, 200_001])("prices Fast at the published context premium for %s input tokens", (tokens) => {
+		const ordinary: Usage = { ...usage, input: tokens - 1000, cacheRead: 1000, output: 100, cost: { ...usage.cost } };
+		const fast: Usage = { ...ordinary, cost: { ...usage.cost } };
+		calculateCost(getModel("xai", "grok-4.7"), ordinary);
+		calculateCost(getModel("xai", "grok-4.7-build-fast"), fast);
+		const premium = tokens > 200_000 ? 1.5 : 2;
+		for (const field of ["input", "output", "cacheRead", "total"] as const) {
+			expect(fast.cost[field]).toBeCloseTo(ordinary.cost[field] * premium, 9);
+		}
+	});
 	it("keeps the current Grok Responses models", () => {
 		expect(
 			getModels("xai")

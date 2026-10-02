@@ -125,7 +125,7 @@ describe("subscription OAuth providers", () => {
 				referrer: "grok-build",
 			});
 			for (const request of requests) {
-				expect(request.headers.get("x-grok-client-version")).toBe("1.0.40");
+				expect(request.headers.get("x-grok-client-version")).toBe("1.0.46");
 				expect(request.headers.get("x-grok-client-surface")).toBe("cli");
 				expect(request.headers.get("content-type")).toBe("application/x-www-form-urlencoded");
 				expect(request.headers.get("x-xai-token-auth")).toBeNull();

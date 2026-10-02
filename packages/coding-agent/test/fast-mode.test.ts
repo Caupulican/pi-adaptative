@@ -1,5 +1,6 @@
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import { getModel, type ModelServiceTier } from "@caupulican/pi-ai";
+import { xaiOAuthProvider } from "@caupulican/pi-ai/oauth";
 import { describe, expect, it, vi } from "vitest";
 import { getFastModeStatus, resolveFastModeServiceTier, setFastMode, toggleFastMode } from "../src/core/fast-mode.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -88,6 +89,25 @@ describe("provider-owned fast mode", () => {
 });
 
 describe("interactive /fast command", () => {
+	it.each(["grok-4.7", "grok-4.7-build-fast"] as const)("reports model routing and repeated toggles for %s", (id) => {
+		const harness = createFastModeHarness("xai");
+		const model = xaiOAuthProvider.modifyModels?.([getModel("xai", id)], {
+			access: "access",
+			refresh: "refresh",
+			expires: Date.now() + 60_000,
+		})?.[0];
+		if (!model) throw new Error("Missing subscription model");
+		const session = { ...harness.session, model };
+		const showStatus = vi.fn();
+		expect(getFastModeStatus(session).enabled).toBe(id.endsWith("-fast"));
+		for (const action of ["on", "off", "on", "on", "off"] as const) {
+			handleFastModeCommand({ session, showStatus }, `/fast ${action}`);
+			expect(getFastModeStatus(session)).toMatchObject({ kind: "model", enabled: action === "on" });
+			expect(showStatus.mock.lastCall?.[0]).toContain(action === "on" ? "Grok 4.7 Fast" : "Grok 4.7 standard");
+			expect(session.model.id).toBe(id);
+			expect(session.setThinkingLevel).not.toHaveBeenCalled();
+		}
+	});
 	it("is discoverable and reports the provider-specific behavior", () => {
 		expect(BUILTIN_SLASH_COMMANDS.some((command) => command.name === "fast")).toBe(true);
 		const harness = createFastModeHarness("xai");

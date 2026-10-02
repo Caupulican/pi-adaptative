@@ -1655,8 +1655,8 @@ async function generateModels() {
 			maxTokens: 256000,
 		});
 	}
-	// Grok CLI's live catalog names this variant and says it costs twice Grok 4.7.
-	// models.dev and OpenRouter do not publish it, so the price is that multiple of the 4.7 entry.
+	// Grok Build Fast costs 2x standard rates, or 1.5x the long-context rate.
+	// https://docs.x.ai/developers/release-notes (Grok 4.7)
 	const grok47 = allModels.find((model) => model.provider === "xai" && model.id === "grok-4.7");
 	if (grok47 && !allModels.some((model) => model.provider === "xai" && model.id === "grok-4.7-build-fast")) {
 		const double = (value: number) => roundCost(value * 2);
@@ -1673,10 +1673,10 @@ async function generateModels() {
 					? {
 							tiers: grok47.cost.tiers.map((tier) => ({
 								...tier,
-								input: double(tier.input),
-								output: double(tier.output),
-								cacheRead: double(tier.cacheRead),
-								cacheWrite: double(tier.cacheWrite),
+								input: roundCost(tier.input * 1.5),
+								output: roundCost(tier.output * 1.5),
+								cacheRead: roundCost(tier.cacheRead * 1.5),
+								cacheWrite: roundCost(tier.cacheWrite * 1.5),
 							})),
 						}
 					: {}),

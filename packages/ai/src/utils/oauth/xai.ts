@@ -1,5 +1,6 @@
 /** xAI OAuth device-code flow. */
 
+import { XAI_CLIENT_CONFIG } from "../../providers/xai-client-config.generated.ts";
 import type { Api, Model } from "../../types.ts";
 import { pollOAuthDeviceCodeFlow } from "./device-code.ts";
 import { parseOAuthTokenCredentials } from "./token-credentials.ts";
@@ -12,7 +13,7 @@ const XAI_DEVICE_CODE_URL = "https://auth.x.ai/oauth2/device/code";
 const XAI_TOKEN_URL = "https://auth.x.ai/oauth2/token";
 const DEFAULT_TOKEN_LIFETIME_SECONDS = 3600;
 const XAI_CLI_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
-const XAI_CLI_VERSION_HEADERS = { "x-grok-client-version": "1.0.40" } as const;
+const XAI_CLI_VERSION_HEADERS = { "x-grok-client-version": XAI_CLIENT_CONFIG.version } as const;
 const XAI_DEVICE_FLOW_HEADERS = {
 	...XAI_CLI_VERSION_HEADERS,
 	"x-grok-client-surface": "cli",

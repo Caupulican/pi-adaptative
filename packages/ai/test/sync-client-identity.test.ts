@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const agyScript = fileURLToPath(new URL("../scripts/sync-agy-identity.mjs", import.meta.url));
 const claudeScript = fileURLToPath(new URL("../scripts/sync-claude-identity.mjs", import.meta.url));
+const grokScript = fileURLToPath(new URL("../scripts/sync-grok-identity.mjs", import.meta.url));
 
 function versionExecutable(root: string, name: string, versionLine: string): string {
 	const executable = join(root, name);
@@ -40,11 +41,13 @@ describe("client identity sync scripts on the host platform", () => {
 		const agy = join(root, `agy${suffix}`);
 		copyFileSync(process.execPath, agy);
 		linkSync(agy, join(root, `claude${suffix}`));
+		linkSync(agy, join(root, `grok${suffix}`));
 		const output = join(root, "identity.generated.ts");
 		writeFileSync(output, "existing\n");
 		for (const [script, label] of [
 			[agyScript, "AGY"],
 			[claudeScript, "Claude"],
+			[grokScript, "Grok"],
 		]) {
 			const run = syncFromPath(script, root, output);
 			expect(run.status).not.toBe(0);
@@ -59,6 +62,7 @@ describe("client identity sync scripts on the host platform", () => {
 		for (const [script, label] of [
 			[agyScript, "AGY"],
 			[claudeScript, "Claude"],
+			[grokScript, "Grok"],
 		]) {
 			const run = syncFromPath(script, root, output);
 			expect(run.status).not.toBe(0);
@@ -93,6 +97,24 @@ describe.skipIf(process.platform === "win32")("client identity sync scripts with
 		versionExecutable(root, "agy", "bad-version");
 		expect(sync(agyScript, executable, output).status).not.toBe(0);
 		expect(readFileSync(output, "utf8")).toBe(generated);
+	});
+
+	it("updates Grok identity idempotently and preserves it for malformed versions", () => {
+		const executable = versionExecutable(root, "grok", "grok 1.0.46 (2765805b9442)");
+		const output = join(root, "identity.generated.ts");
+		const run = sync(grokScript, executable, output);
+		expect(run.status, run.stderr).toBe(0);
+		const generated = readFileSync(output, "utf8");
+		expect(generated).toContain('version: "1.0.46"');
+		expect(sync(grokScript, executable, output).status).toBe(0);
+		expect(readFileSync(output, "utf8")).toBe(generated);
+		versionExecutable(root, "grok", "grok 1.0.47 (abc123)");
+		expect(sync(grokScript, executable, output).status).toBe(0);
+		const updated = readFileSync(output, "utf8");
+		expect(updated).toContain('version: "1.0.47"');
+		versionExecutable(root, "grok", "grok unknown (abc123)");
+		expect(sync(grokScript, executable, output).status).not.toBe(0);
+		expect(readFileSync(output, "utf8")).toBe(updated);
 	});
 
 	it("generates the two verified OAuth request identities from the local Claude CLI", () => {

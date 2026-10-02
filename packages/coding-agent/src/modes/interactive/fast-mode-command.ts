@@ -16,6 +16,9 @@ const FAST_MODE_USAGE = "Usage: /fast [on|off|priority|ultrafast|status]";
 function describeFastMode(status: FastModeStatus, statusOnly: boolean, provider: string | undefined): string {
 	const state = status.enabled ? "on" : "off";
 	const prefix = statusOnly ? `Fast mode is ${state}` : `Fast mode ${state}`;
+	if (status.kind === "model") {
+		return `${prefix}: Grok requests ${status.enabled ? "Grok 4.7 Fast" : "Grok 4.7 standard"}.`;
+	}
 	const providerName = provider === "xai" ? "Grok" : "Codex";
 	return `${prefix}: ${providerName} requests ${status.tier ?? "default"} processing.${
 		status.tier === "ultrafast"

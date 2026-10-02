@@ -6,6 +6,7 @@ import { resolveProviderRequestAuthOptions } from "@caupulican/pi-agent-core/pro
 import {
 	type Api,
 	type AssistantMessage,
+	type Context,
 	createAssistantMessageEventStream,
 	type Model,
 	type SimpleStreamOptions,
@@ -15,6 +16,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { type CreateAgentSessionOptions, createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { handleFastModeCommand } from "../src/modes/interactive/fast-mode-command.ts";
 import { tempDir as createTempDir } from "./temp-dir.ts";
 
 describe("createAgentSession stream options", () => {
@@ -385,6 +387,110 @@ describe("createAgentSession stream options", () => {
 
 		expect(options?.serviceTier).toBe("priority");
 	});
+
+	it.each(["grok-4.7", "grok-4.7-build-fast"])(
+		"routes /fast through SDK authentication and replays successive turns from %s",
+		async (selected) => {
+			const authStorage = AuthStorage.inMemory({
+				xai: {
+					type: "oauth",
+					access: "fixture-access",
+					refresh: "fixture-refresh",
+					expires: Date.now() + 3_600_000,
+				},
+			});
+			const modelRegistry = ModelRegistry.create(authStorage, join(agentDir, "models.json"));
+			const model = modelRegistry.find("xai", selected);
+			if (!model) throw new Error("Missing Grok fixture model");
+			const { session } = await createAgentSession({
+				cwd,
+				agentDir,
+				model,
+				authStorage,
+				modelRegistry,
+				settingsManager: SettingsManager.inMemory({}),
+				sessionManager: SessionManager.inMemory(cwd),
+			});
+			const requests: { headers: Headers; body: Record<string, unknown> }[] = [];
+			const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
+				const index = requests.length;
+				requests.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) });
+				return new Response(
+					`data: ${JSON.stringify({
+						type: "response.completed",
+						response: {
+							id: `response-${index}`,
+							status: "completed",
+							service_tier: "priority",
+							usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+							output: [
+								{ type: "reasoning", id: `rs-${index}`, summary: [], encrypted_content: `encrypted-${index}` },
+								{
+									type: "function_call",
+									id: `fc-${index}`,
+									call_id: `call-${index}`,
+									name: "echo",
+									arguments: "{}",
+								},
+							],
+						},
+					})}\n\n`,
+					{ headers: { "content-type": "text/event-stream" } },
+				);
+			});
+			const context: Context = { messages: [{ role: "user", content: "hello", timestamp: 1 }] };
+			try {
+				for (const [index, action] of ["on", "on", "off", "on"].entries()) {
+					handleFastModeCommand({ session, showStatus: () => {} }, `/fast ${action}`);
+					const requestAuth = await resolveProviderRequestAuthOptions({
+						model,
+						getApiKey: session.agent.getApiKey,
+						resolveProviderRequestAuth: session.agent.resolveProviderRequestAuth,
+					});
+					const stream = await session.agent.streamFn(model, context, { ...requestAuth, reasoning: "xhigh" });
+					const result = await stream.result();
+					expect(result.stopReason, result.errorMessage).toBe("toolUse");
+					const expected = action === "on" ? "grok-4.7-build-fast" : "grok-4.7";
+					const request = requests[index];
+					expect(request.headers.get("x-grok-model-override")).toBe(expected);
+					expect(request.body.model).toBe(expected);
+					expect(request.body.service_tier).toBeUndefined();
+					expect(request.body.reasoning).toMatchObject({ effort: "xhigh" });
+					expect(result.model).toBe(expected);
+					expect(result.usage.cost.total).toBeCloseTo(action === "on" ? 0.000016 : 0.000008, 9);
+					const input = request.body.input as Array<Record<string, unknown>>;
+					if (index > 0) {
+						const outputs = input.filter((item) => item.type === "function_call_output");
+						expect(outputs).toHaveLength(index);
+						for (const output of outputs) {
+							expect(output.output).toBe("ok");
+							expect(input).toContainEqual(
+								expect.objectContaining({ type: "function_call", call_id: output.call_id, name: "echo" }),
+							);
+						}
+						if (index === 1)
+							expect(input).toContainEqual(
+								expect.objectContaining({ type: "reasoning", encrypted_content: "encrypted-0" }),
+							);
+						// Cross-model replay removes opaque reasoning and remaps paired call/output IDs.
+						if (index === 2) expect(input.some((item) => item.type === "reasoning")).toBe(false);
+					}
+					context.messages.push(result, {
+						role: "toolResult",
+						toolCallId: `call-${index}|fc-${index}`,
+						toolName: "echo",
+						content: [{ type: "text", text: "ok" }],
+						isError: false,
+						timestamp: index + 2,
+					});
+				}
+				expect(session.model?.id).toBe(selected);
+			} finally {
+				fetch.mockRestore();
+				await session.disposeAndWait();
+			}
+		},
+	);
 
 	it("keeps Grok reasoning effort independent from a saved fast preference", async () => {
 		const model = createModel("openai-responses", "xai");

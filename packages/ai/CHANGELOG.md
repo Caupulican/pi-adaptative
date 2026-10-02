@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Added
+
+- Added `sync:grok-identity` to refresh the Grok OAuth request version from the installed CLI.
+
+### Fixed
+
+- Matched Grok CLI 1.0.46 OAuth request identity and routed subscription Grok 4.7 Fast preferences through the model override header, including authentication retries and response identity.
+- Applied the Grok 4.7 Fast premium once, using the published 1.5x long-context rates.
+
 ## [0.102.1] - 2026-10-01
 
 ## [0.102.0] - 2026-09-30

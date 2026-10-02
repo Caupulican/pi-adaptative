@@ -25668,7 +25668,7 @@ export const MODELS = {
 				output: 12,
 				cacheRead: 1,
 				cacheWrite: 0,
-				tiers: [{"inputTokensAbove":200000,"input":8,"output":24,"cacheRead":2,"cacheWrite":0}],
+				tiers: [{"inputTokensAbove":200000,"input":6,"output":18,"cacheRead":1.5,"cacheWrite":0}],
 			},
 			contextWindow: 500000,
 			maxTokens: 500000,

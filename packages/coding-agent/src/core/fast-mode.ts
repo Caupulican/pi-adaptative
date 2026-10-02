@@ -3,10 +3,11 @@ import {
 	isModelServiceTierAdvertised,
 	type Model,
 	type ModelServiceTier,
+	resolveXaiBuildModelId,
 	type ServiceTier,
 } from "@caupulican/pi-ai";
 
-export type FastModeKind = "service-tier";
+export type FastModeKind = "service-tier" | "model";
 export type FastModePreference = boolean | "ultrafast";
 export type FastModeTier = "priority" | "ultrafast";
 
@@ -44,11 +45,12 @@ export function getFastModeStatus(session: FastModeSession): FastModeStatus {
 		preference,
 		session.getFastModeServiceTiers?.(session.model) ?? session.model.serviceTiers,
 	);
+	const buildModelId = resolveXaiBuildModelId(session.model, tier);
 	return {
 		available: true,
 		changed: false,
-		enabled: tier === "priority" || tier === "ultrafast",
-		kind: "service-tier",
+		enabled: buildModelId ? buildModelId === "grok-4.7-build-fast" : tier === "priority" || tier === "ultrafast",
+		kind: buildModelId ? "model" : "service-tier",
 		tier: tier === "priority" || tier === "ultrafast" ? tier : "default",
 		...(preference && tier === undefined
 			? {

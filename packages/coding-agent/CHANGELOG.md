@@ -26,6 +26,7 @@
 
 ### Fixed
 
+- Made `/fast` status and toggles reflect Grok 4.7 subscription model routing, including direct Fast model selection.
 - Kept a provider payload's transport signal live through credential redaction: Google-style payloads (Antigravity, Gemini) carry `config.abortSignal`, and the walker's JSON-normalization fallback turned it into a plain object, so Antigravity requests failed with "signals[0] is not of type AbortSignal" and Gemini cancellation was silently lost. An opaque value the caller preserves is now decided before any normalization.
 - Stopped optional extension and credential tools from being blocked when owner-intent classification produced no usable judgment (outage, missing evaluator, uncertain or sub-threshold answer): such a result is now an `unresolved` snapshot that retains the unclassified words, leaves the integrations available and warns, while an in-flight classification and a classified intent that does not name the tool still block. Credential values stay protected by the exposure guard on tool output.
 - Treated a missing, uncertain or sub-threshold per-tool owner-intent judgment as `undecided` (the tool passes) instead of "not requested", and kept a grant held before when a continuation's judgment is below the floor.
