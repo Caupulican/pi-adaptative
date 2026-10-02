@@ -27,7 +27,10 @@ describe("native peer host integration", () => {
 				{ id: "peer", reasoning: true },
 			],
 			systemOneController: controller,
-			settings: { modelRouter: { enabled: false } },
+			settings: {
+				modelRouter: { enabled: false },
+				modelFavorites: [{ provider: "faux", modelId: "peer" }],
+			},
 		});
 		harness.session.setThinkingLevel("medium");
 		expect(harness.session.getActiveToolNames()).toContain("peer");
@@ -167,7 +170,10 @@ describe("native peer host integration", () => {
 				{ id: "peer", reasoning: true },
 			],
 			systemOneController: controller,
-			settings: { modelRouter: { enabled: false } },
+			settings: {
+				modelRouter: { enabled: false },
+				modelFavorites: [{ provider: "faux", modelId: "peer" }],
+			},
 		});
 		harness.session.setThinkingLevel("medium");
 		harness.setResponses([

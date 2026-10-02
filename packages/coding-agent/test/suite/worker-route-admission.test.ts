@@ -196,6 +196,50 @@ describe("native fresh worker route admission", () => {
 		expect(judge).toHaveBeenCalledTimes(1);
 	});
 
+	it.each([false, true])(
+		"rechecks compiled-profile reuse after namespace admission (favorite removed: %s)",
+		async (removeFavorite) => {
+			const { context, judge } = await fixture();
+			const request = { profileId: "test-worker", authority: { thinkingLevel: "medium" as const, readOnly: true } };
+			const first = await context.harness.session.runWorkerDelegationOnce({
+				instructions: "First task",
+				...request,
+			});
+			expect(first.started).toBe(true);
+			const attempt = context.attempts()[0];
+			expect(attempt?.dispatch.executionContract?.worker.profile.profileId).not.toBe(request.profileId);
+			expect(attempt?.agentId).toBeDefined();
+			const namespaceKey = WorkerDirectoryAdmission.prototype.namespaceKey;
+			const namespace = vi
+				.spyOn(WorkerDirectoryAdmission.prototype, "namespaceKey")
+				.mockImplementation(async function (this: WorkerDirectoryAdmission, ...args) {
+					const key = await namespaceKey.apply(this, args);
+					if (removeFavorite) context.harness.settingsManager.toggleModelFavorite("faux", "reasoning-worker");
+					return key;
+				});
+			try {
+				const result = await context.lanes().startWorkerDelegation({
+					instructions: "Follow-up task",
+					reuseAgentId: attempt!.agentId,
+					...request,
+				});
+				expect(namespace).toHaveBeenCalledTimes(1);
+				if (removeFavorite) {
+					expect(result).toEqual({ started: false, skipReason: "worker_model_disallowed" });
+					expect(context.attempts()).toHaveLength(1);
+				} else {
+					expect(result.started).toBe(true);
+					await context.settleLanes();
+					expect(context.attempts()).toHaveLength(2);
+					expect(context.attempts()[1]?.agentId).toBe(attempt!.agentId);
+				}
+				expect(judge).not.toHaveBeenCalled();
+			} finally {
+				namespace.mockRestore();
+			}
+		},
+	);
+
 	it("keeps owner model pins ahead of the judge", async () => {
 		const { context, judge } = await fixture();
 		context.harness.settingsManager.setWorkerDelegationSettings({

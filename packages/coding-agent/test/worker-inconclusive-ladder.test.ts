@@ -59,7 +59,11 @@ describe("a worker's inconclusive findings climb the ladder", () => {
 		const { controller, seen } = systemOne((statement, evidence) =>
 			evidence.includes("retries=3") && statement.includes("three retries") ? [yes, no] : [unsure, unsure],
 		);
-		harness = await createHarness({ systemOneController: controller, workerOrchestrationProfile: workerProfile() });
+		harness = await createHarness({
+			systemOneController: controller,
+			workerOrchestrationProfile: workerProfile(),
+			settings: { modelFavorites: [{ provider: "faux", modelId: "faux-1" }] },
+		});
 		writeFileSync(join(harness.tempDir, "config.txt"), "retries=3\n");
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("read", { path: "config.txt" })], { stopReason: "toolUse" }),
@@ -77,7 +81,11 @@ describe("a worker's inconclusive findings climb the ladder", () => {
 
 	it("an item nothing settles stays open, named with what is missing, and holds the claim for review", async () => {
 		const { controller } = systemOne(() => [unsure, unsure]);
-		harness = await createHarness({ systemOneController: controller, workerOrchestrationProfile: workerProfile() });
+		harness = await createHarness({
+			systemOneController: controller,
+			workerOrchestrationProfile: workerProfile(),
+			settings: { modelFavorites: [{ provider: "faux", modelId: "faux-1" }] },
+		});
 		writeFileSync(join(harness.tempDir, "config.txt"), "retries=3\n");
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("read", { path: "config.txt" })], { stopReason: "toolUse" }),
@@ -98,7 +106,11 @@ describe("a worker's inconclusive findings climb the ladder", () => {
 		const { controller } = systemOne((_, evidence) =>
 			evidence.includes("retries=0") ? [no, yes] : [unsure, unsure],
 		);
-		harness = await createHarness({ systemOneController: controller, workerOrchestrationProfile: workerProfile() });
+		harness = await createHarness({
+			systemOneController: controller,
+			workerOrchestrationProfile: workerProfile(),
+			settings: { modelFavorites: [{ provider: "faux", modelId: "faux-1" }] },
+		});
 		writeFileSync(join(harness.tempDir, "config.txt"), "retries=0\n");
 		harness.setResponses([
 			fauxAssistantMessage([fauxToolCall("read", { path: "config.txt" })], { stopReason: "toolUse" }),

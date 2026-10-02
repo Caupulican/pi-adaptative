@@ -3087,7 +3087,10 @@ export class WorkerDelegationController {
 		}
 		if (reuse.outcome === "unavailable") return { kind: "refused", skipReason: reuse.skipReason };
 		if (reuse.outcome === "reuse") {
-			const current = this.resolveWorkerAdmission(request, shared.executionContract);
+			const current = this.resolveWorkerAdmission(
+				{ ...request, profileId: shared.executionContract.worker.profile.profileId },
+				shared.executionContract,
+			);
 			if (!current.ok) return { kind: "refused", skipReason: current.skipReason };
 			const accepted = this.startReusedSpecialistTask(reuse.agentId, request, shared.executionContract);
 			return accepted.started

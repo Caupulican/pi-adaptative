@@ -6,6 +6,7 @@ import { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { getModel } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { RouteDecision } from "../src/core/autonomy/contracts.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
@@ -61,12 +62,16 @@ describe("profile-set session thinking composes with per-tier router thinking", 
 
 		const cheapModel = getModel("anthropic", "claude-haiku-4-5")!;
 		const expensiveModel = getModel("anthropic", "claude-sonnet-4-5")!;
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		settingsManager.toggleModelFavorite("anthropic", cheapModel.id);
 
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir,
 			model: expensiveModel,
 			isExplicitModel: true,
+			authStorage,
 			settingsManager,
 			sessionManager: SessionManager.inMemory(),
 			resourceLoader,

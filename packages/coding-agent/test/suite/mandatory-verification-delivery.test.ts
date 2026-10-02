@@ -84,7 +84,7 @@ describe("rank 2 composed binding probe", () => {
 					{ id: "peer", reasoning: true },
 				],
 				systemOneController: semantic,
-				settings: { modelRouter: { enabled: false } },
+				settings: { modelFavorites: [{ provider: "faux", modelId: "peer" }], modelRouter: { enabled: false } },
 			});
 			h.session.setThinkingLevel("medium");
 			h.setResponses([
@@ -217,7 +217,7 @@ describe("rank 2 composed binding probe", () => {
 				{ id: "lead", reasoning: true },
 				{ id: "peer", reasoning: true },
 			],
-			settings: { modelRouter: { enabled: false } },
+			settings: { modelFavorites: [{ provider: "faux", modelId: "peer" }], modelRouter: { enabled: false } },
 		});
 		semantic.noteControlDirective({
 			source: "postflight",
@@ -326,7 +326,11 @@ describe("rank 2 composed binding probe", () => {
 					{ id: "peer", reasoning: true },
 				],
 				systemOneController: semantic,
-				settings: { modelRouter: { enabled: false }, edge: { mode, allow: ["publish"] } },
+				settings: {
+					modelFavorites: [{ provider: "faux", modelId: "peer" }],
+					modelRouter: { enabled: false },
+					edge: { mode, allow: ["publish"] },
+				},
 			});
 			h.session.setThinkingLevel("medium");
 			const peerRequest = {
@@ -389,7 +393,11 @@ describe("rank 2 composed binding probe", () => {
 				{ id: "peer", reasoning: true },
 			],
 			systemOneController: semantic,
-			settings: { modelRouter: { enabled: false }, edge: { allow: ["publish"] } },
+			settings: {
+				modelFavorites: [{ provider: "faux", modelId: "peer" }],
+				modelRouter: { enabled: false },
+				edge: { allow: ["publish"] },
+			},
 		});
 		h.session.setThinkingLevel("medium");
 		h.setResponses([
@@ -402,7 +410,7 @@ describe("rank 2 composed binding probe", () => {
 				}),
 			),
 		]);
-		await h.session.getToolDefinition("peer")!.execute(
+		const review = await h.session.getToolDefinition("peer")!.execute(
 			"peer-clean",
 			{
 				action: "review",
@@ -419,6 +427,7 @@ describe("rank 2 composed binding probe", () => {
 			undefined,
 			{} as ExtensionContext,
 		);
+		expect(review).toMatchObject({ isError: false, details: { status: "reviewed" } });
 		expect(semantic.peekControlDirective()).toBeUndefined();
 		h.setResponses([
 			fauxAssistantMessage(
@@ -446,7 +455,7 @@ describe("rank 2 composed binding probe", () => {
 				{ id: "peer", reasoning: true },
 			],
 			systemOneController: semantic,
-			settings: { modelRouter: { enabled: false } },
+			settings: { modelFavorites: [{ provider: "faux", modelId: "peer" }], modelRouter: { enabled: false } },
 			extensionFactories: [
 				(pi) =>
 					pi.registerTool({
