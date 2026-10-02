@@ -394,7 +394,8 @@ async function createSessionManager(
 	return createSession(cwd, sessionDir, { id: parsed.sessionId });
 }
 
-function buildSessionOptions(
+/** @internal CLI session construction, exported for boundary regressions. */
+export function buildSessionOptions(
 	parsed: Args,
 	scopedModels: ScopedModel[],
 	hasExistingSession: boolean,
@@ -505,15 +506,16 @@ function buildSessionOptions(
 	// Scoped models for Ctrl+P cycling
 	// Keep thinking level undefined when not explicitly set in the model pattern.
 	// Undefined means "inherit current session thinking level" during cycling.
-	if (scopedModels.length > 0) {
+	if (scopedModels.length > 0 || (parsed.models ?? settingsManager.getEnabledModels()) !== undefined) {
 		options.scopedModels = scopedModels.map((sm) => ({
 			model: sm.model,
 			thinkingLevel: sm.thinkingLevel,
 		}));
 		// The same configured scope is the router's candidate pool, recorded with its provenance so a
-		// later orchestration override can pin the cycling list without narrowing the pool.
+		// later orchestration override can pin the cycling list without narrowing the pool. Preserve
+		// explicit empty and unmatched scopes: losing them would expand eligibility to all favorites.
 		options.routerPool = {
-			source: parsed.models && parsed.models.length > 0 ? "cli_models" : "enabled_models",
+			source: parsed.models !== undefined ? "cli_models" : "enabled_models",
 			models: options.scopedModels.map((sm) => ({ model: sm.model, thinkingLevel: sm.thinkingLevel })),
 		};
 	}

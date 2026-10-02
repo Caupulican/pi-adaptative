@@ -485,7 +485,7 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 			provenance: "production-live",
 		});
 		const expertService = new ExpertSelectionService(
-			new ExpertCatalog({ modelRegistry, fitnessStore, adaptationStore }),
+			new ExpertCatalog({ modelRegistry, getCandidateModels: () => [testModel], fitnessStore, adaptationStore }),
 			new ExpertAdmissionPolicy(),
 			new ExpertFeatureBuilder(),
 			new ExpertRankingPolicy(),
@@ -725,6 +725,10 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 			const deps = createStandardLiveDependencies();
 			const catalog = new ExpertCatalog({
 				modelRegistry: deps.modelRegistry,
+				getCandidateModels: () =>
+					deps.modelRegistry
+						.getAvailable()
+						.filter((model) => model.provider === "anthropic" && model.id === "claude-3-7-sonnet"),
 				fitnessStore: deps.fitnessStore,
 				adaptationStore: deps.adaptationStore,
 			});
@@ -758,6 +762,10 @@ describe("Production Reality Closure v1.5 Regressions (PRC-001..PRC-070)", () =>
 			const expertOutcomeStore = new ExpertOutcomeStore();
 			const expertCatalog = new ExpertCatalog({
 				modelRegistry: deps.modelRegistry,
+				getCandidateModels: () =>
+					deps.modelRegistry
+						.getAvailable()
+						.filter((model) => model.provider === "anthropic" && model.id === "claude-3-7-sonnet"),
 				fitnessStore: deps.fitnessStore,
 				adaptationStore: deps.adaptationStore,
 			});

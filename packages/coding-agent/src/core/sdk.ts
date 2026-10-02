@@ -1093,6 +1093,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			persistentPath,
 			steeringPlane: steeringPlane ?? undefined,
 			modelRegistry,
+			getCandidateModels: () =>
+				session.getRouterCandidatePool().models.filter((candidate) => session.isModelAllowed(candidate)),
 			fitnessStore,
 			adaptationStore,
 			...(systemOneController ? { getSelectionJudge: () => systemOneController } : {}),

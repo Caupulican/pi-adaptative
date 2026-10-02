@@ -2,15 +2,12 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 
 /**
- * Where a customized candidate pool came from. The pool is the operator's Models configuration and
- * nothing else; every customized source is an explicit operator act (settings `enabledModels`, the
- * `--models` flag, an SDK caller's scope, or a live edit in the Models selector). An orchestration
- * profile pins the session's root model for cycling — it is never a pool source, so a profiled
- * session still routes across everything the operator enabled.
+ * Favorites define router eligibility. An explicit Models configuration, CLI/SDK scope or selector
+ * edit narrows those favorites; an orchestration profile only pins the session's cycling model.
  */
-export type RouterPoolSource = "all_enabled" | "enabled_models" | "cli_models" | "sdk_models" | "models_selector";
+export type RouterPoolSource = "favorites" | "enabled_models" | "cli_models" | "sdk_models" | "models_selector";
 
-export type CustomizedRouterPoolSource = Exclude<RouterPoolSource, "all_enabled">;
+export type CustomizedRouterPoolSource = Exclude<RouterPoolSource, "favorites">;
 
 /** Session-held pool provenance: the operator's explicit model list and where it came from. */
 export interface RouterPoolState {
@@ -36,7 +33,10 @@ const ROUTER_POOL_SOURCE_LABELS: Record<CustomizedRouterPoolSource, string> = {
 export function resolveRouterCandidatePool(
 	pool: RouterPoolState | undefined,
 	registry: { getAvailable(): Model<Api>[] },
-	options?: { isRuntimeDisabled?: (runtime: "ollama" | "llamacpp" | "transformers") => boolean },
+	options: {
+		favorites: readonly { provider: string; modelId: string }[];
+		isRuntimeDisabled?: (runtime: "ollama" | "llamacpp" | "transformers") => boolean;
+	},
 ): RouterCandidatePool {
 	const filterDisabled = (models: readonly Model<Api>[]): Model<Api>[] => {
 		if (!options?.isRuntimeDisabled) return [...models];
@@ -53,10 +53,12 @@ export function resolveRouterCandidatePool(
 		});
 	};
 
-	if (pool && pool.models.length > 0) {
-		return { customized: true, source: pool.source, models: filterDisabled(pool.models) };
-	}
-	return { customized: false, source: "all_enabled", models: filterDisabled(registry.getAvailable()) };
+	const models = filterDisabled(registry.getAvailable()).filter(
+		(model) =>
+			options.favorites.some((favorite) => favorite.provider === model.provider && favorite.modelId === model.id) &&
+			(!pool || pool.models.some((scoped) => modelsAreEqual(scoped, model))),
+	);
+	return { customized: pool !== undefined, source: pool?.source ?? "favorites", models };
 }
 
 export function isModelInRouterPool(pool: RouterCandidatePool, model: Model<Api>): boolean {
@@ -69,11 +71,11 @@ export function routerPoolModelRefs(pool: RouterCandidatePool): string[] {
 }
 
 export function formatRouterPoolSourceLabel(source: RouterPoolSource): string {
-	return source === "all_enabled" ? "all enabled" : ROUTER_POOL_SOURCE_LABELS[source];
+	return source === "favorites" ? "favorites" : ROUTER_POOL_SOURCE_LABELS[source];
 }
 
 export function formatRouterPoolSummary(pool: RouterCandidatePool): string {
 	return pool.customized
 		? `${pool.models.length} selected model${pool.models.length === 1 ? "" : "s"} (${formatRouterPoolSourceLabel(pool.source)})`
-		: `all enabled models (${pool.models.length})`;
+		: `${pool.models.length} favorite model${pool.models.length === 1 ? "" : "s"}`;
 }

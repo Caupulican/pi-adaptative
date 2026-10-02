@@ -400,6 +400,17 @@ describe("Router Setup settings screen (F001-060..065)", () => {
 			"global",
 		);
 	});
+	it("marks a nonfavorite tier setting as outside the pool even without a custom scope", () => {
+		const selector = new SettingsSelectorComponent(
+			makeConfig({ modelRouterPool: poolView({ customized: false, summary: "2 favorite models" }) }),
+			makeCallbacks(),
+		);
+		openRouter(selector);
+		pressDownUntilCursorRowContains(selector, "Cheap model");
+		selector.getSettingsList().handleInput("\r");
+		const output = stripAnsi(selector.render(200).join("\n"));
+		expect(output).toContain("outside pool");
+	});
 
 	it("F001-061: Configure models hands off to the existing Models UI through the action callback", () => {
 		const onModelRouterAction = vi.fn();
@@ -596,7 +607,7 @@ describe("buildModelRouterPoolView (F001-070)", () => {
 		const runModelFitness = vi.fn();
 		const view = buildModelRouterPoolView({
 			session: {
-				getRouterCandidatePool: () => ({ customized: false, source: "all_enabled", models: [subModel, apiModel] }),
+				getRouterCandidatePool: () => ({ customized: false, source: "favorites", models: [subModel, apiModel] }),
 				getStoredFitnessReports: () => [],
 				getToolProbeRecord: () => undefined,
 				modelRegistry: { isUsingSubscription: (model: unknown) => model === subModel },
@@ -607,7 +618,7 @@ describe("buildModelRouterPoolView (F001-070)", () => {
 		expect(runModelFitness).not.toHaveBeenCalled();
 		expect(view).toMatchObject({
 			customized: false,
-			summary: "all enabled models (2)",
+			summary: "2 favorite models",
 			refs: ["sub/sub-max", "api/api-mini"],
 			subscriptionRefs: ["sub/sub-max"],
 			favoriteRefs: ["api/api-mini"],

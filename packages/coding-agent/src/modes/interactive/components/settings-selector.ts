@@ -237,7 +237,7 @@ function contextMemoryRetrievalSummary(settings: MemoryRetrievalSettings): strin
 
 /**
  * The router's candidate pool as the settings screen shows it: derived by the flow from the
- * session's live Models configuration, favorites (ordering only) and existing fitness evidence.
+ * session's available favorites, optional Models scope and existing fitness evidence.
  */
 export interface ModelRouterPoolView {
 	customized: boolean;
@@ -347,8 +347,7 @@ function buildModelRouterRoleModelOptions(options: {
 		seen.add(MODEL_ROUTER_UNSET_MODEL_VALUE);
 	}
 
-	// Favorites first (presentation only), then the candidate pool, then everything else marked
-	// as outside the pool: selectable as a manual pin, never an automatic route.
+	// Show favorites and eligible models first; an excluded setting cannot authorize a route.
 	const configured = options.configuredModelOptions ?? [];
 	const pool = options.pool;
 	const favorites = new Set(pool?.favoriteRefs ?? []);
@@ -364,7 +363,7 @@ function buildModelRouterRoleModelOptions(options: {
 		if (seen.has(option.value)) continue;
 		const marks = [
 			...(favorites.has(option.value) ? ["favorite"] : []),
-			...(pool?.customized && !inPool.has(option.value) ? ["outside pool"] : []),
+			...(pool && !inPool.has(option.value) ? ["outside pool · favorite and include in scope to route"] : []),
 		];
 		modelOptions.push(
 			marks.length > 0 ? { ...option, description: `${option.description} · ${marks.join(" · ")}` } : option,
@@ -1963,7 +1962,7 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 				id: "model-router-pool",
 				label: "Candidate pool",
 				description:
-					"The existing Models configuration (Configure models); editing it brings Router Setup back on the edited pool. A customized list is a hard boundary for automatic routing; favorites only order pickers.",
+					"Only available favorites can be routed. Configure models narrows that list; favorite models in /model. An empty favorite list leaves no routing candidates.",
 				currentValue: modelRouterPoolSummary(pool),
 				submenu: (_currentValue, done) => {
 					const options: SelectItem[] = [
@@ -2779,7 +2778,7 @@ export class SettingsSelectorComponent extends Container {
 				id: "model-router",
 				label: "Model Router",
 				description:
-					"Router Setup: selection mode (manual/auto/hybrid), candidate pool from your Models configuration, subscription-first preference, tier pins, calibration, route preview and diagnostics",
+					"Router Setup: selection mode (manual/auto/hybrid), favorite candidate models, subscription-first preference, tier pins, calibration, route preview and diagnostics",
 				currentValue: modelRouterSummary(currentModelRouter, config.modelRouterPool),
 				submenu: (_currentValue, done) =>
 					new ModelRouterSettingsSubmenu(

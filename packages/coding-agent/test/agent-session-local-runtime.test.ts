@@ -349,7 +349,10 @@ describe("AgentSession local (Ollama) runtime readiness", () => {
 			const mediumFaux = cloudModel({ provider: "faux", id: "medium-cloud" });
 			const harness = await createHarness({
 				models: [{ id: "medium-cloud" }],
-				settings: { modelRouter: { enabled: true, mediumModel: "faux/medium-cloud" } },
+				settings: {
+					modelFavorites: [{ provider: "faux", modelId: "medium-cloud" }],
+					modelRouter: { enabled: true, mediumModel: "faux/medium-cloud" },
+				},
 				localRuntimeDeps: binaryMissingDeps(),
 			});
 			try {
@@ -376,7 +379,10 @@ describe("AgentSession local (Ollama) runtime readiness", () => {
 		it("hints to check ollama is running when the server is unreachable for a reason other than a missing binary", async () => {
 			const harness = await createHarness({
 				models: [{ id: "medium-cloud" }],
-				settings: { modelRouter: { enabled: true, mediumModel: "faux/medium-cloud" } },
+				settings: {
+					modelFavorites: [{ provider: "faux", modelId: "medium-cloud" }],
+					modelRouter: { enabled: true, mediumModel: "faux/medium-cloud" },
+				},
 				// Binary IS found, but the boot attempt itself never comes up (health_check_timeout) —
 				// distinct from binary_missing, so the warning's wording must differ too.
 				localRuntimeDeps: {
@@ -402,7 +408,10 @@ describe("AgentSession local (Ollama) runtime readiness", () => {
 		it("escalates all the way to expensive when medium is not configured", async () => {
 			const harness = await createHarness({
 				models: [{ id: "expensive-cloud" }],
-				settings: { modelRouter: { enabled: true, expensiveModel: "faux/expensive-cloud" } },
+				settings: {
+					modelFavorites: [{ provider: "faux", modelId: "expensive-cloud" }],
+					modelRouter: { enabled: true, expensiveModel: "faux/expensive-cloud" },
+				},
 				localRuntimeDeps: binaryMissingDeps(),
 			});
 			try {
@@ -430,7 +439,10 @@ describe("AgentSession local (Ollama) runtime readiness", () => {
 		it("covers the executor lane: an executor-routed local model that can't be reached also degrades gracefully", async () => {
 			const harness = await createHarness({
 				models: [{ id: "medium-cloud" }],
-				settings: { modelRouter: { enabled: true, mediumModel: "faux/medium-cloud" } },
+				settings: {
+					modelFavorites: [{ provider: "faux", modelId: "medium-cloud" }],
+					modelRouter: { enabled: true, mediumModel: "faux/medium-cloud" },
+				},
 				localRuntimeDeps: binaryMissingDeps(),
 			});
 			try {
@@ -789,7 +801,10 @@ describe("AgentSession local runtime readiness — #31 managed-install consent f
 	it("does not prompt when there is no interactive UI context (headless) — falls straight through to the existing guide-mode fallback", async () => {
 		const harness = await createHarness({
 			models: [{ id: "medium-cloud" }],
-			settings: { modelRouter: { enabled: true, mediumModel: "faux/medium-cloud" } },
+			settings: {
+				modelFavorites: [{ provider: "faux", modelId: "medium-cloud" }],
+				modelRouter: { enabled: true, mediumModel: "faux/medium-cloud" },
+			},
 			localRuntimeDeps: binaryMissingDeps(),
 		});
 		// No setUIContext call — _extensionUIContext stays undefined, matching a headless/RPC session.
@@ -807,7 +822,10 @@ describe("AgentSession local runtime readiness — #31 managed-install consent f
 		const { deps, extractCalls } = installableThenBootableDeps();
 		const harness = await createHarness({
 			models: [{ id: "medium-cloud" }],
-			settings: { modelRouter: { enabled: true, mediumModel: "faux/medium-cloud" } },
+			settings: {
+				modelFavorites: [{ provider: "faux", modelId: "medium-cloud" }],
+				modelRouter: { enabled: true, mediumModel: "faux/medium-cloud" },
+			},
 			localRuntimeDeps: deps,
 		});
 		const { ui, confirmCalls } = fakeUIContext(false);
@@ -828,7 +846,10 @@ describe("AgentSession local runtime readiness — #31 managed-install consent f
 		const { deps } = installableThenBootableDeps();
 		const harness = await createHarness({
 			models: [{ id: "medium-cloud" }],
-			settings: { modelRouter: { enabled: true, mediumModel: "faux/medium-cloud" } },
+			settings: {
+				modelFavorites: [{ provider: "faux", modelId: "medium-cloud" }],
+				modelRouter: { enabled: true, mediumModel: "faux/medium-cloud" },
+			},
 			localRuntimeDeps: {
 				...deps,
 				extractArchive: async () => ({ ok: false, error: "extract-fail: tar exited with code 1" }),

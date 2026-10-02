@@ -1360,6 +1360,9 @@ export class WorkerDelegationController {
 			};
 		}
 		let shipment = adaptive.shipment;
+		if (this.deps.isModelAllowed?.(shipment.model) === false) {
+			return { ok: false, skipReason: "worker_model_disallowed" };
+		}
 		if (parentContract) {
 			const narrowed = this.narrowWorkerShipmentContext(shipment, parentContract.worker);
 			if (!narrowed.ok) return narrowed;
@@ -1394,6 +1397,9 @@ export class WorkerDelegationController {
 			const narrowed = this.narrowWorkerShipmentContext(verifierShipment, verifierBoundary);
 			if (!narrowed.ok) return narrowed;
 			verifierShipment = narrowed.shipment;
+		}
+		if (verifierShipment && this.deps.isModelAllowed?.(verifierShipment.model) === false) {
+			return { ok: false, skipReason: "independent_verifier_unavailable:worker_model_disallowed" };
 		}
 		if (!this.laneCapabilityProfile(shipment.model).backgroundLanesEnabled) {
 			return { ok: false, skipReason: "model_delegation_unsupported" };
@@ -2894,6 +2900,7 @@ export class WorkerDelegationController {
 		const modelPinPolicy = settingsManager.getWorkerModelPinPolicy();
 		if (
 			!judge ||
+			!settingsManager.getModelRouterSettings().enabled ||
 			request.authority?.model !== undefined ||
 			request.authority?.thinkingLevel !== undefined ||
 			request.profileId !== undefined ||
@@ -2904,6 +2911,8 @@ export class WorkerDelegationController {
 			(modelPinPolicy.status === "active" && resolveWorkerModelPin(modelPinPolicy, admission.shipment.profile.role))
 		)
 			return admission;
+		if (!this.isWorkerRouteModelAvailable(admission.shipment.model))
+			return { ok: false, skipReason: "worker_model_disallowed" };
 		const liveState = () => ({
 			sessionId: this.deps.getSessionId(),
 			cwd: this.deps.getCwd(),
@@ -2913,6 +2922,7 @@ export class WorkerDelegationController {
 			routing: settingsManager.getWorkerAccountRouting(),
 			thinkingPolicy: settingsManager.getWorkerThinkingPolicy(),
 			settings: settingsManager.getWorkerDelegationSettings(),
+			favorites: settingsManager.getModelFavorites(),
 			edge: settingsManager.getEdgeSettings(),
 			tools: this.deps.getForegroundToolNames?.(),
 			envelope: this.deps.getCapabilityEnvelope(),
@@ -3077,6 +3087,8 @@ export class WorkerDelegationController {
 		}
 		if (reuse.outcome === "unavailable") return { kind: "refused", skipReason: reuse.skipReason };
 		if (reuse.outcome === "reuse") {
+			const current = this.resolveWorkerAdmission(request, shared.executionContract);
+			if (!current.ok) return { kind: "refused", skipReason: current.skipReason };
 			const accepted = this.startReusedSpecialistTask(reuse.agentId, request, shared.executionContract);
 			return accepted.started
 				? { kind: "existing", record: accepted.record, replayed: false }

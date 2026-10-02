@@ -40,6 +40,7 @@ describe("CLI orchestration-profile session construction", () => {
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
+		settingsManager.toggleModelFavorite("anthropic", "claude-haiku-4-5");
 		return createAgentSessionServices({ cwd: tempDir, agentDir, authStorage, settingsManager });
 	}
 
@@ -56,11 +57,18 @@ describe("CLI orchestration-profile session construction", () => {
 		});
 		try {
 			expect(session.model?.id).toBe("claude-sonnet-4-5");
-			// Cycling is pinned to the profile's root model; the pool stays everything enabled.
+			// Cycling is pinned to the profile's root model; the router considers favorites separately.
 			expect(session.scopedModels.map((scoped) => scoped.model.id)).toEqual(["claude-sonnet-4-5"]);
 			const pool = session.getRouterCandidatePool();
 			expect(pool.customized).toBe(false);
-			expect(pool.source).toBe("all_enabled");
+			expect(pool.source).toBe("favorites");
+			expect(pool.models.map((model) => model.id)).toEqual(["claude-haiku-4-5"]);
+			built.settingsManager.toggleModelFavorite("anthropic", "claude-haiku-4-5");
+			expect(session.getRouterCandidatePool().models).toEqual([]);
+			await session.setModel(built.modelRegistry.find("anthropic", "claude-sonnet-4-5")!);
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+			built.settingsManager.toggleModelFavorite("anthropic", "claude-haiku-4-5");
+			expect(session.getRouterCandidatePool().models.map((model) => model.id)).toEqual(["claude-haiku-4-5"]);
 		} finally {
 			await session.disposeAndWait();
 		}

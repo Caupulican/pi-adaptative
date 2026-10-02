@@ -57,7 +57,7 @@ export interface SettingsSelectorHost {
 
 /**
  * The router's pool as the settings screen shows it: the session's live candidate pool, favorites
- * for ordering only, subscription ownership from the registry, and existing fitness/tool-probe
+ * as eligibility, subscription ownership from the registry, and existing fitness/tool-probe
  * evidence per router surface. Reading it never runs a probe.
  */
 export function buildModelRouterPoolView(

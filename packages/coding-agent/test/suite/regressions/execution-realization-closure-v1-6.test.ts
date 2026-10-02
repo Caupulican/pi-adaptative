@@ -457,7 +457,12 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 		// The same live H-MoE plane the production factory assembles; the builder's model binding
 		// has to be this selection's binding, so the tests select through it rather than around it.
 		const expertService = new ExpertSelectionService(
-			new ExpertCatalog({ modelRegistry, fitnessStore, adaptationStore }),
+			new ExpertCatalog({
+				modelRegistry,
+				getCandidateModels: () => modelRegistry.getAvailable(),
+				fitnessStore,
+				adaptationStore,
+			}),
 			new ExpertAdmissionPolicy(),
 			new ExpertFeatureBuilder(),
 			new ExpertRankingPolicy(),
@@ -466,6 +471,7 @@ describe("Execution Realization Closure v1.6 Regressions (ERC-001..ERC-080)", ()
 
 		return {
 			expertService,
+			getCandidateModels: () => modelRegistry.getAvailable(),
 			steeringPlane,
 			modelRegistry,
 			fitnessStore,

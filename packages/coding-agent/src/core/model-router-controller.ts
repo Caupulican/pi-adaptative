@@ -204,7 +204,7 @@ export interface ModelRouterControllerDeps {
 	 * when never probed. Tier-resolution's consultation reads this ONLY for local/managed models
 	 * ({@link isLocalOrManagedRouterModel}); cloud models never call it. */
 	getToolProbeVerdict(model: Model<Api>): ModelToolProbeVerdict | undefined;
-	/** The router's candidate pool: the operator's Models configuration, or every authed model. */
+	/** Available favorites, narrowed by the operator's explicit Models configuration or scope. */
 	getCandidatePool(): RouterCandidatePool;
 	/**
 	 * The owner's live model policy (model-router/owner-model-policy.ts). A model it disallows is never
@@ -310,30 +310,27 @@ export class ModelRouterController {
 		return false;
 	}
 
-	/** A pin to a model the owner's policy disallows: its tier is allocated from the pool instead. */
+	/** A pin outside live router eligibility is reallocated from the pool. */
 	private _pinDisallowed(pattern: string): boolean {
-		if (!this.deps.isModelAllowed) return false;
 		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this.deps.getModelRegistry() });
-		return resolved.model !== undefined && !this.deps.isModelAllowed(resolved.model);
+		return (
+			resolved.model !== undefined &&
+			(!isModelInRouterPool(this.deps.getCandidatePool(), resolved.model) ||
+				this.deps.isModelAllowed?.(resolved.model) === false)
+		);
 	}
 
-	/**
-	 * Manual tier pins that resolve to a model outside a customized candidate pool. The pin still
-	 * wins — it is the operator's own choice — but a silent route outside the pool reads as the pool
-	 * having failed, so status names it.
-	 */
+	/** Tier pins excluded by live eligibility, reported with their automatic reallocation. */
 	private _pinsOutsideCandidatePool(): string[] {
 		const pool = this.deps.getCandidatePool();
-		if (!pool.customized) return [];
 		const notices: string[] = [];
 		for (const tier of ["cheap", "medium", "expensive"] as const) {
-			if (this.isTierAutoSelected(tier)) continue;
 			const pattern = this._tierPattern(tier);
 			if (!pattern) continue;
 			const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this.deps.getModelRegistry() });
 			if (!resolved.model || isModelInRouterPool(pool, resolved.model)) continue;
 			notices.push(
-				`${tier} pin ${formatModelRouterModel(resolved.model)} is outside the candidate pool (${formatRouterPoolSummary(pool)}); the pin wins, so this tier routes outside the pool.`,
+				`${tier} pin ${formatModelRouterModel(resolved.model)} is outside the candidate pool (${formatRouterPoolSummary(pool)}); this tier selects an eligible favorite instead.`,
 			);
 		}
 		return notices;
@@ -857,7 +854,7 @@ export class ModelRouterController {
 				const model = this.deps.getModelRegistry().find(chosen.provider, chosen.model_id);
 				if (
 					model &&
-					isModelInRouterPool(pool, model) &&
+					isModelInRouterPool(this.deps.getCandidatePool(), model) &&
 					this._hasAccess(model) &&
 					!this.deps.isModelExhausted(model)
 				) {
@@ -1009,7 +1006,8 @@ export class ModelRouterController {
 		}
 		// The tier's automatic pick, bound by the same facts as a pin: the baseline's own pick is replaced
 		// when the tier changed or when it cannot take this turn (a text-only model for an image).
-		const baselineFits = fitsTurnFacts(baseline.model, facts);
+		const baselineFits =
+			fitsTurnFacts(baseline.model, facts) && isModelInRouterPool(this.deps.getCandidatePool(), baseline.model);
 		if ((tier !== baselineTier || !baselineFits) && (this.isTierAutoSelected(tier) || !baselineFits)) {
 			const auto = this.selectAutoTierModel(tier).candidates.find(
 				(candidate) => candidate.admitted && fitsTurnFacts(candidate.model, facts),
@@ -1033,7 +1031,7 @@ export class ModelRouterController {
 
 	/**
 	 * Once per session and pin, off the turn's path: when System One judges that a later version of the
-	 * pinned model is among the owner's authenticated models, the owner is told. The pin keeps ruling;
+	 * pinned model is among the owner's eligible favorites, the owner is told. The pin keeps ruling;
 	 * only the owner repins. Asked once per session and pin: an outage and "nothing superseded" look the
 	 * same from here, and re-asking on every routed turn would spend System One on a settled question.
 	 */
@@ -1042,13 +1040,7 @@ export class ModelRouterController {
 		const judge = this.deps.getRouteJudge?.();
 		if (!judge || this._pinVersionChecked.has(ref)) return;
 		this._pinVersionChecked.add(ref);
-		const models = [
-			pin,
-			...this.deps
-				.getModelRegistry()
-				.getAvailable()
-				.filter((model) => model !== pin),
-		].map((model) => ({
+		const models = this.deps.getCandidatePool().models.map((model) => ({
 			id: formatModelRouterModel(model),
 			description: model.name,
 		}));
@@ -1056,7 +1048,7 @@ export class ModelRouterController {
 			if (superseded.has(ref)) {
 				this.deps.emit({
 					type: "warning",
-					message: `Your ${tier} pin ${ref} has a later version among your authenticated models, as System One judges it. The pin still rules; repin the tier in /settings > Model Router to use the newer one.`,
+					message: `Your ${tier} pin ${ref} has a later version among your eligible favorites, as System One judges it. The pin still rules; repin the tier in /settings > Model Router to use the newer one.`,
 				});
 			}
 		});
@@ -1065,7 +1057,7 @@ export class ModelRouterController {
 	/**
 	 * The owner's pin for a tier when it can take this turn, or why not. A pin is the owner's choice
 	 * and wins over any automatic pick; it yields only to facts: missing auth, the owner's model
-	 * policy, quota, no working tool path, a text-only model for an image, a window too small.
+	 * policy, favorite candidate pool, quota, no working tool path, a text-only model for an image, a window too small.
 	 */
 	private _usablePin(
 		tier: AutoSelectionTier,
@@ -1076,6 +1068,8 @@ export class ModelRouterController {
 		const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this.deps.getModelRegistry() }).model;
 		if (!resolved) return { reason: `${pattern} does not resolve` };
 		const ref = formatModelRouterModel(resolved);
+		if (!isModelInRouterPool(this.deps.getCandidatePool(), resolved))
+			return { reason: `${ref} is outside the favorite candidate pool` };
 		const accessProblem = this._accessProblem(resolved);
 		if (accessProblem) return { reason: `${ref} ${accessProblem}` };
 		if (this.deps.isModelAllowed?.(resolved) === false)
@@ -1110,9 +1104,7 @@ export class ModelRouterController {
 		const manualPinModel = manualPin
 			? resolveCliModel({ cliModel: manualPin, modelRegistry: registry }).model
 			: undefined;
-		const manualPinOutsidePool = Boolean(
-			manualPinModel && pool.customized && !isModelInRouterPool(pool, manualPinModel),
-		);
+		const manualPinOutsidePool = Boolean(manualPinModel && !isModelInRouterPool(pool, manualPinModel));
 		const subscriptionCandidates = pool.models.filter(
 			(model) => this._hasAccess(model) && this.deps.isUsingSubscription(model),
 		).length;
@@ -1281,7 +1273,10 @@ export class ModelRouterController {
 		if (!active || !modelsAreEqual(active.routedModel, refused)) return undefined;
 		const tier = active.decision.tier;
 		const usable = (candidate: Model<Api> | undefined): candidate is Model<Api> =>
-			candidate !== undefined && !modelsAreEqual(candidate, refused) && this._hasAccess(candidate);
+			candidate !== undefined &&
+			isModelInRouterPool(this.deps.getCandidatePool(), candidate) &&
+			!modelsAreEqual(candidate, refused) &&
+			this._hasAccess(candidate);
 		const next =
 			tier === "cheap" || tier === "medium" || tier === "expensive"
 				? this.resolveConfiguredTierModel(tier)
@@ -1313,6 +1308,11 @@ export class ModelRouterController {
 			if (continueFromCanonicalHistory) await this.deps.runAgentContinuation(signal);
 			else await this.deps.runAgentPrompt(messages, signal);
 			return;
+		}
+		if (!isModelInRouterPool(this.deps.getCandidatePool(), routedModel)) {
+			throw new Error(
+				`Routed model ${formatModelRouterModel(routedModel)} is outside the current favorite candidate pool.`,
+			);
 		}
 
 		const agent = this.deps.getAgent();

@@ -816,6 +816,18 @@ stale failure diagnostics. Pinned by
 
 ## System One
 
+**Model routing is confined to the user's live favorites.** Available favorites are the shared candidate
+owner; Models configuration, CLI/SDK scopes and selector edits only narrow that set. An empty favorite
+list or explicit empty scope never restores the whole catalog. Classification, version comparisons,
+ranking, tier pins and automatic worker admission cannot leave it. Worker and verifier bindings are
+rechecked at queued/recovered dispatch and after asynchronous selection; a stale selection releases
+only its own capacity leases. Manual root selection remains available, and disabling routing disables
+automatic worker profile judgment while preserving explicit manual configuration. This replaces the
+previous all-authenticated default and outside-pool pin exception.
+Pinned by `packages/coding-agent/test/model-router-selection-modes.test.ts`,
+`packages/coding-agent/test/suite/worker-route-admission.test.ts` and
+`packages/coding-agent/test/expert-routing/system-one-allocation.test.ts`.
+
 **Model classification publishes only complete, bounded evaluations.** Independent lightweight
 questions carry only their targets' full facts, with stable global answer identities across batches.
 Every superseded-version question retains the entire comparison universe, stored once per request;

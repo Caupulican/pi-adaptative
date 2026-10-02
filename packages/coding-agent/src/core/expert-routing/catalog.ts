@@ -25,6 +25,8 @@ import { defaultModelFamilyResolver } from "./independence.ts";
 
 export interface ExpertCatalogDeps {
 	modelRegistry?: ModelRegistry;
+	/** Live router eligibility, already intersected with the owner's favorites and configured scopes. */
+	getCandidateModels?: () => readonly Model<Api>[];
 	fitnessStore?: FitnessStore;
 	adaptationStore?: ModelAdaptationStore;
 	modelPinPolicy?: WorkerModelPinPolicy;
@@ -47,7 +49,7 @@ export class ExpertCatalog {
 	 * Dynamically generates candidates without Cartesian explosion.
 	 */
 	async materializeCandidates(request: WorkerCapabilityRequest): Promise<readonly ExpertCandidate[]> {
-		const allModels = this.deps.modelRegistry ? this.deps.modelRegistry.getAll() : [];
+		const allModels = this.deps.getCandidateModels?.() ?? [];
 		const candidates: ExpertCandidate[] = [];
 		// The operator's pool is a hard boundary applied at generation, so ranking is bounded early
 		// rather than picking broadly and rejecting afterwards.

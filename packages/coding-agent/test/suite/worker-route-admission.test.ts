@@ -38,13 +38,68 @@ async function fixture(answer: "high" | "uncertain" | "forged" | "outage" = "hig
 	const context = await createReuseHarness({
 		models: [{ id: "reasoning-worker", reasoning: true, contextWindow: 200_000, maxTokens: 32_000 }],
 		systemOneController: controller,
-		settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
+		settings: {
+			modelFavorites: [{ provider: "faux", modelId: "reasoning-worker" }],
+			workerDelegation: { enabled: true, orchestrationProfile: undefined },
+		},
 	});
 	context.harness.session.setThinkingLevel("medium");
 	return { context, judge, originalJudge };
 }
 
 describe("native fresh worker route admission", () => {
+	it("refuses an empty favorite pool before judgment even with an owner model pin", async () => {
+		const { context, judge } = await fixture();
+		context.harness.settingsManager.toggleModelFavorite("faux", "reasoning-worker");
+		context.harness.settingsManager.setWorkerDelegationSettings({
+			modelPins: { default: { provider: "faux", modelId: "reasoning-worker", thinkingLevel: "medium" } },
+		});
+		const result = await context.lanes().startWorkerDelegation({ instructions: "Pinned work" });
+		expect(result.started).toBe(false);
+		expect(context.attempts()).toHaveLength(0);
+		expect(judge).not.toHaveBeenCalled();
+	});
+
+	it("rejects a favorite removed while the worker judgment is pending", async () => {
+		const { context, judge, originalJudge } = await fixture();
+		judge.mockImplementation(async (...args) => {
+			const answer = await originalJudge(...args);
+			context.harness.settingsManager.toggleModelFavorite("faux", "reasoning-worker");
+			return answer;
+		});
+		const result = await context.lanes().startWorkerDelegation({ instructions: "Complex reasoning." });
+		expect(result.started).toBe(false);
+		expect(context.attempts()).toHaveLength(0);
+	});
+
+	it("cancels a queued contract when its model is no longer a favorite", async () => {
+		const { context } = await fixture();
+		const result = await context.lanes().startWorkerDelegation({ instructions: "Queued reasoning." });
+		expect(result.started).toBe(true);
+		context.harness.settingsManager.toggleModelFavorite("faux", "reasoning-worker");
+		context.lanes().drainQueuedWorkerDelegations();
+		expect(context.attempts()[0]?.status).toBe("cancelled");
+	});
+
+	it("preserves explicit worker configuration when automatic model routing is disabled", async () => {
+		const { context, judge } = await fixture();
+		context.harness.settingsManager.setModelRouterSettings({ enabled: false });
+		context.harness.settingsManager.toggleModelFavorite("faux", "reasoning-worker");
+		const result = await context
+			.lanes()
+			.startWorkerDelegation({ instructions: "Manual worker", authority: { thinkingLevel: "medium" } });
+		expect(result.started).toBe(true);
+		expect(judge).not.toHaveBeenCalled();
+	});
+	it("does not judge an unpinned worker when automatic model routing is disabled", async () => {
+		const { context, judge } = await fixture();
+		context.harness.settingsManager.setModelRouterSettings({ enabled: false });
+		context.harness.settingsManager.toggleModelFavorite("faux", "reasoning-worker");
+		const result = await context.lanes().startWorkerDelegation({ instructions: "Unpinned manual worker" });
+		expect(result.started).toBe(true);
+		expect(judge).not.toHaveBeenCalled();
+	});
+
 	it("asks the host judge once and persists its approved model and effort before start", async () => {
 		const { context, judge } = await fixture();
 		const result = await context

@@ -16,9 +16,9 @@ choice. Nothing on this screen runs a provider call by being opened.
 
 | Mode | Tier model |
 | --- | --- |
-| `manual` (default for existing installs) | the operator's pin for each tier; an unset tier stays unset, exactly as before |
+| `manual` (default for existing installs) | the operator's eligible favorite pin for each tier; an unset tier stays unset |
 | `auto` | the router decides the tier (regex floor, optional System One judge), then selects the exact model from the candidate pool |
-| `hybrid` | a pinned tier wins; an unpinned tier selects automatically |
+| `hybrid` | an eligible favorite pin wins; an unpinned tier selects automatically |
 
 Tier pickers show `(AUTO)` for a tier the router selects and `(unset)` in manual mode. Existing
 `modelRouter` settings load unchanged: `selectionMode` defaults to `manual` and `poolPreference` to
@@ -26,16 +26,18 @@ Tier pickers show `(AUTO)` for a tier the router selects and `(unset)` in manual
 
 ## Candidate pool
 
-The pool is the existing **Models** configuration and nothing else, and it carries its provenance:
-`enabledModels` in settings (`Models config`), the `--models` flag (`--models`), an SDK caller's scope
-(`SDK scope`) or a live edit in the Models selector (`Models selector`). An uncustomized configuration
-means every model with configured auth (`all enabled models (N)`); a customized list is a hard boundary
-(`N selected models (Models config)`) that no automatic selection — router or H-MoE — can leave. The pool is
-separate from the model-cycling list: an orchestration profile pins cycling to its root model but is
-never a pool source, so a profiled session still routes across everything you enabled. Favorites order
-pickers only; they never enter the pool or weigh a route. A model outside a customized pool can still
-be pinned manually (the picker marks it `outside pool`, and Diagnostics and the route preview name the
-exception), but it is never selected automatically.
+Only models pinned as **favorites** by the user are routing candidates. Favorite a model in `/model`;
+the router reads that list live and includes only available models with configured auth and enabled
+runtimes. An empty favorite list means no routing candidates; it never expands to the full catalog.
+
+The **Models** configuration narrows those favorites: `enabledModels` (`Models config`), `--models`,
+an SDK scope or a live Models-selector edit. A configured scope, including an empty scope, cannot add
+nonfavorites. An orchestration profile pins model cycling separately and does not broaden this pool.
+Tier pins outside the pool are excluded and reallocated to an eligible favorite when one is available.
+Classification, comparisons, H-MoE ranking and automatic worker allocation use the same candidate boundary.
+Worker pins, verifier bindings and queued contracts must remain eligible while the router is enabled.
+Removing a favorite during a pending selection prevents its dispatch. With routing disabled, explicit
+manual worker configuration remains available; `/model` still controls the root model directly.
 
 **Configure models** opens the Models selector (the same multi-select editor as `/models`); when it
 closes, Router Setup comes back on the edited pool, so the summary, calibration rows, tier pickers and
@@ -117,7 +119,7 @@ same ROOT. Billing failover inside a routed turn replaces that turn's model and 
 
 When a subscription runs out of quota (a usage limit, an exhausted balance, HTTP 402), the work moves
 on and the failed request continues at once on the new model (`Continuing on <model>`). A provider's own
-backup comes first when it has a usable one (Codex's default model); otherwise the router picks, trying
+backup comes first when it is an eligible favorite (Codex's default model); otherwise the router picks, trying
 the tiers from strongest to cheapest with the same checks a routed turn uses: your pin for the tier in
 any selection mode, then the tier's automatic pick from the pool, never an exhausted model, one outside
 your model policy, one without auth or a working tool path, or one too small for the context. A metered
@@ -139,7 +141,7 @@ allocate is refused with the reason and the previous policy stays. System One it
 For an explicitly evaluated router route, System One judges which kind of
 model and thinking the work needs (one Choice over flash-light, flash-deep, strong-medium, strong-deep),
 and each category names a tier. The owner's pin for that tier runs it, in any selection mode, whenever
-the pin has auth, is allowed by the model policy, is not exhausted, has a working tool path and can take
+the pin is an eligible favorite, has auth, is allowed by the model policy, is not exhausted, has a working tool path and can take
 the turn (reads images when there is one, fits the context). Otherwise H-MoE picks inside the category
 from facts: a model the probes graded unfit sorts last; System One judges which models are lightweight
 speed variants and which are superseded by a later version of the same model; flash models are ordered

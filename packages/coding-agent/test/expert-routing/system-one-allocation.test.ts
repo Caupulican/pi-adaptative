@@ -62,6 +62,107 @@ function judge(...answers: { choice: string; confidence: number; probabilities?:
 }
 
 describe("System One allocation", () => {
+	it("worker classification and ranking see only live router candidates even without a request allowlist", async () => {
+		let favorites = [strong];
+		const systemOne: RouteChoiceJudge = {
+			evaluateRouteChoice: async () => ({
+				route_choice: { type: "choice", choice: "strong_medium", confidence: 0.99 },
+			}),
+			evaluateLightweightModels: vi.fn(async () => {
+				return { lightweight_0: { noul: 0.03 } };
+			}),
+		};
+		const catalog = new ExpertCatalog({
+			modelRegistry: { getAll: () => [flashA, strong], hasConfiguredAuth: () => true } as never,
+			getCandidateModels: () => favorites,
+		});
+		const capacity = new ExpertCapacityService();
+		const reserve = vi.spyOn(capacity, "reserve");
+		const service = new ExpertSelectionService(
+			catalog,
+			new ExpertAdmissionPolicy(),
+			new ExpertFeatureBuilder(),
+			new ExpertRankingPolicy(),
+			capacity,
+			undefined,
+			() => systemOne,
+		);
+		const request = buildWorkerCapabilityRequest({ objectiveId: "o", taskId: "t", workClass: "implement" });
+		const plan = await service.select(request, { requestText: "work" });
+		expect(plan.primary.model_id).toBe("strong");
+		expect(vi.mocked(systemOne.evaluateLightweightModels!).mock.calls[0][0].models.map((m) => m.id)).toEqual([
+			"p/strong",
+		]);
+		service.release(plan);
+		reserve.mockClear();
+		favorites = [];
+		await expect(service.select(request)).rejects.toThrow("No eligible");
+		expect(reserve).not.toHaveBeenCalled();
+		expect(systemOne.evaluateLightweightModels).toHaveBeenCalledOnce();
+	});
+	it.each(["removal", "cancellation"] as const)("rolls back only its own lease after late %s", async (change) => {
+		let favorites = [strong];
+		const catalog = new ExpertCatalog({
+			modelRegistry: { hasConfiguredAuth: () => true } as never,
+			getCandidateModels: () => favorites,
+		});
+		const capacity = new ExpertCapacityService();
+		const service = new ExpertSelectionService(
+			catalog,
+			new ExpertAdmissionPolicy(),
+			new ExpertFeatureBuilder(),
+			new ExpertRankingPolicy(),
+			capacity,
+		);
+		const request = buildWorkerCapabilityRequest({ objectiveId: "o", taskId: "t", workClass: "implement" });
+		await service.select(request);
+		const existing = capacity.getAllActiveLeases();
+		expect(existing).toHaveLength(1);
+		const abort = new AbortController();
+		const reserve = capacity.reserve.bind(capacity);
+		vi.spyOn(capacity, "reserve").mockImplementation(async (...args) => {
+			const leases = await reserve(...args);
+			if (change === "removal") favorites = [];
+			else abort.abort(new Error("cancelled after reservation"));
+			return leases;
+		});
+		await expect(service.select(request, { signal: abort.signal })).rejects.toThrow(
+			change === "removal" ? "No eligible" : "cancelled after reservation",
+		);
+		expect(capacity.getAllActiveLeases()).toEqual(existing);
+		capacity.release(existing);
+		expect(capacity.getAllActiveLeases()).toEqual([]);
+	});
+
+	it("a favorite removed during judgment cannot acquire a worker reservation", async () => {
+		let favorites = [strong];
+		const catalog = new ExpertCatalog({
+			modelRegistry: { getAll: () => [strong], hasConfiguredAuth: () => true } as never,
+			getCandidateModels: () => favorites,
+		});
+		const capacity = new ExpertCapacityService();
+		const reserve = vi.spyOn(capacity, "reserve");
+		const service = new ExpertSelectionService(
+			catalog,
+			new ExpertAdmissionPolicy(),
+			new ExpertFeatureBuilder(),
+			new ExpertRankingPolicy(),
+			capacity,
+			undefined,
+			() => ({
+				evaluateRouteChoice: async () => {
+					favorites = [];
+					return { route_choice: { type: "choice", choice: "strong_medium", confidence: 0.99 } };
+				},
+			}),
+		);
+		await expect(
+			service.select(buildWorkerCapabilityRequest({ objectiveId: "o", taskId: "t", workClass: "implement" }), {
+				requestText: "work",
+			}),
+		).rejects.toThrow("No eligible");
+		expect(reserve).not.toHaveBeenCalled();
+	});
 	it("selects an approved model and effort profile with exactly one judgment, or keeps the host default", async () => {
 		const options = [
 			{ id: "ordinary", description: "Host model A at medium effort" },
@@ -171,7 +272,11 @@ describe("System One allocation", () => {
 		const select = async (choice: string, required?: string[]) => {
 			const { judge: systemOne } = judge({ choice, confidence: 0.97 });
 			const service = new ExpertSelectionService(
-				new ExpertCatalog({ modelRegistry: registry as never, adaptationStore: adaptationStore as never }),
+				new ExpertCatalog({
+					modelRegistry: registry as never,
+					getCandidateModels: registry.getAll,
+					adaptationStore: adaptationStore as never,
+				}),
 				new ExpertAdmissionPolicy(),
 				new ExpertFeatureBuilder(),
 				new ExpertRankingPolicy(),

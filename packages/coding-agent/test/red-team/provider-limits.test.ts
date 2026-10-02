@@ -7,6 +7,7 @@ import { BillingFailoverController, ExhaustedProviderRegistry } from "../../src/
 import { runCompactionWithRetry } from "../../src/core/compaction-controller.ts";
 import { CompactionSupport } from "../../src/core/compaction-support.ts";
 import type { ModelRegistry } from "../../src/core/model-registry.ts";
+import type { RouterCandidatePool } from "../../src/core/model-router/candidate-pool.ts";
 import { ModelRouterController } from "../../src/core/model-router-controller.ts";
 import { FitnessStore } from "../../src/core/models/fitness-store.ts";
 import type { LaneFitnessScore, ModelFitnessReport } from "../../src/core/research/model-fitness.ts";
@@ -128,6 +129,7 @@ type RouterHarness = {
 		getSessionManager: () => { getEntries: () => [] };
 		getAgentDir: () => string;
 		getModelRegistry: () => ModelRegistry;
+		getCandidatePool: () => RouterCandidatePool;
 		isModelExhausted: (model: Model<Api>) => boolean;
 		getFailoverStatus: () => { exhausted: string[]; lastNotice?: string };
 	};
@@ -278,6 +280,7 @@ describe("provider limit red-team matrix", () => {
 				getSessionManager: () => ({ getEntries: () => [] }),
 				getAgentDir: () => "/tmp/pi-red-team-router",
 				getModelRegistry: () => registry(true),
+				getCandidatePool: () => ({ customized: false, source: "favorites", models: [codexSpark, codexDefault] }),
 				isModelExhausted: (candidate) => exhausted.isExhausted(`${candidate.provider}/${candidate.id}`),
 				getFailoverStatus: () => ({ exhausted: exhausted.snapshot() }),
 			},
@@ -327,6 +330,7 @@ describe("provider limit red-team matrix", () => {
 				getSessionManager: () => ({ getEntries: () => [] }),
 				getAgentDir: () => agentDir,
 				getModelRegistry: () => registry(true),
+				getCandidatePool: () => ({ customized: false, source: "favorites", models: [codexSpark, codexDefault] }),
 				isModelExhausted: () => false,
 				getFailoverStatus: () => ({ exhausted: [] }),
 			},

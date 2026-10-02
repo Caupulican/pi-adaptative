@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { RouteDecision } from "../src/core/autonomy/contracts.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
+import type { RouterCandidatePool } from "../src/core/model-router/candidate-pool.ts";
 import { isLocalOrManagedRouterModel } from "../src/core/model-router/tool-escalation.ts";
 import { ModelRouterController } from "../src/core/model-router-controller.ts";
 import { ModelAdaptationStore, type ModelToolProbeVerdict } from "../src/core/models/adaptation-store.ts";
@@ -458,6 +459,7 @@ describe("model-router tier resolution honors the tool-probe verdict", () => {
 			isModelExhausted: (model: TestModel) => boolean;
 			getFailoverStatus: () => { exhausted: string[]; lastNotice?: string };
 			getToolProbeVerdict: (model: TestModel) => ModelToolProbeVerdict | undefined;
+			getCandidatePool: () => RouterCandidatePool;
 		};
 	};
 
@@ -489,6 +491,7 @@ describe("model-router tier resolution honors the tool-probe verdict", () => {
 				isModelExhausted: () => false,
 				getFailoverStatus: () => ({ exhausted: [] }),
 				getToolProbeVerdict,
+				getCandidatePool: () => ({ customized: false, source: "favorites", models }),
 			},
 		});
 	}

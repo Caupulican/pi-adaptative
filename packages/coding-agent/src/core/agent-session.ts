@@ -230,6 +230,7 @@ import {
 import type { ModelRegistry } from "./model-registry.ts";
 import { AccountModelCatalog } from "./model-router/account-models.ts";
 import {
+	isModelInRouterPool,
 	type RouterCandidatePool,
 	type RouterPoolState,
 	resolveRouterCandidatePool,
@@ -475,7 +476,7 @@ export class AgentSession {
 	private _edgeConfirmation?: EdgeConfirmationHandler;
 
 	private _scopedModels: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }>;
-	/** The router's candidate pool and its provenance; undefined means "every enabled model". */
+	/** The router's configured scope; undefined leaves available favorites unrestricted by a scope. */
 	private _routerPool: RouterPoolState | undefined;
 
 	// Event subscription state
@@ -1013,11 +1014,11 @@ export class AgentSession {
 			: (config.scopedModels ?? []);
 		// The router pool is separate state from the cycling list: an orchestration profile pins the
 		// root model for cycling but never narrows the pool, so a profiled session still routes
-		// across the operator's whole Models configuration. An SDK caller that passes a scope
+		// across the operator's available favorites. An SDK caller that passes a scope
 		// without an explicit pool means that scope as the pool.
 		this._routerPool = config.routerPool
 			? { source: config.routerPool.source, models: config.routerPool.models.map((scoped) => scoped.model) }
-			: !config.orchestrationProfile && config.scopedModels && config.scopedModels.length > 0
+			: !config.orchestrationProfile && config.scopedModels
 				? { source: "sdk_models", models: config.scopedModels.map((scoped) => scoped.model) }
 				: undefined;
 		this._resourceLoader = config.resourceLoader;
@@ -1355,7 +1356,10 @@ export class AgentSession {
 				return blockers;
 			},
 			settleInconclusive: (input) => this._settleWorkerInconclusive(input),
-			isModelAllowed: (model) => this._modelPolicy.allows(model),
+			isModelAllowed: (model) =>
+				this._modelPolicy.allows(model) &&
+				(!this.settingsManager.getModelRouterSettings().enabled ||
+					isModelInRouterPool(this.getRouterCandidatePool(), model)),
 			// Allocated from the policy-filtered pool, the same way a routed turn picks.
 			allocateAllowedModel: () =>
 				this._modelRouter.selectAutoTierModel("medium").chosen?.model ??
@@ -1793,8 +1797,7 @@ export class AgentSession {
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			resolveLaneModel: (pattern) => this._backgroundLanes.resolveLaneModel(pattern),
 			getToolProbeVerdict: (model) => this._toolProtocol.getToolProbeVerdict(model),
-			// The pool is the operator's Models configuration (startup enabledModels / --models, an
-			// SDK scope, or a live Models-selector edit), or every authed model when uncustomized.
+			// Live available favorites, narrowed by any Models configuration, CLI/SDK scope or selector edit.
 			getCandidatePool: () => {
 				const pool = this.getRouterCandidatePool();
 				return { ...pool, models: this._modelPolicy.allowed(pool.models) };
@@ -2566,6 +2569,7 @@ export class AgentSession {
 	/** The router's candidate pool as the operator configured it, with its provenance. */
 	getRouterCandidatePool(): RouterCandidatePool {
 		return resolveRouterCandidatePool(this._routerPool, this._modelRegistry, {
+			favorites: this.settingsManager.getModelFavorites(),
 			isRuntimeDisabled: (r) => !this.settingsManager.isLocalRuntimeEnabled(r),
 		});
 	}
@@ -4852,7 +4856,7 @@ export class AgentSession {
 		this._scopedModels = scopedModels;
 	}
 
-	/** Replace the router's candidate pool; undefined restores "every enabled model". */
+	/** Replace the router's scope; undefined restores all available favorites. */
 	setRouterPool(pool: RouterPoolState | undefined): void {
 		this._routerPool = pool;
 	}

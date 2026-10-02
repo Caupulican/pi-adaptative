@@ -12,6 +12,9 @@
 
 ### Fixed
 
+- Confined model routing and classification to available user favorites, including tier pins, worker admission and pending selections; explicit model scopes only narrow favorites.
+- Preserved other workers' capacity leases when a pending expert selection is cancelled or becomes ineligible.
+
 - Bounded repeated same-lane verification recovery when findings and evidence remain unchanged, preserving unresolved findings and allowing continuation after new evidence or explicit owner resume.
 - Kept thinking-block spacing and all separated thinking blocks synchronized during repeated visibility toggles.
 - Repainted Execution previews after theme changes and preserved multiline syntax state separately for removed and added source.

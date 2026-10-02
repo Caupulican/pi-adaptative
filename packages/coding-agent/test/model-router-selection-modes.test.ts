@@ -57,6 +57,25 @@ const ALL = [subCheap, subBig, apiCheap, apiBig, outsider];
 
 const isSubscription = (m: TestModel): boolean => m.provider === "sub-provider";
 
+describe("routed dispatch eligibility", () => {
+	it("rejects a stale nonfavorite before provider execution and still runs an eligible favorite", async () => {
+		const fixture = createController({ favorites: [subCheap] });
+		const decision: RouteDecision = {
+			tier: "cheap",
+			risk: "read-only",
+			confidence: 1,
+			reasonCode: "research",
+			reasons: [],
+		};
+		await expect(fixture.controller.runRoutedTurn([], outsider, decision)).rejects.toThrow("favorite");
+		expect(fixture.runAgentPrompt).not.toHaveBeenCalled();
+		expect(fixture.agent.state.model).toBe(apiCheap);
+		await fixture.controller.runRoutedTurn([], subCheap, decision);
+		expect(fixture.runAgentPrompt).toHaveBeenCalledOnce();
+		expect(fixture.agent.state.model).toBe(apiCheap);
+	});
+});
+
 function fitnessReport(overrides: Partial<ModelFitnessReport> = {}): ModelFitnessReport {
 	const lane = { succeeded: 3, total: 3, outcomes: [], meanMs: 10 };
 	return {
@@ -101,11 +120,13 @@ interface ControllerFixture {
 	supersededAsks(): number;
 	setSettings(next: Partial<RouterSettings>): void;
 	setPool(models: TestModel[] | undefined): void;
+	setFavorites(models: TestModel[]): void;
 }
 
 function createController(options: {
 	settings?: Partial<RouterSettings>;
 	pool?: TestModel[];
+	favorites?: TestModel[];
 	authed?: TestModel[];
 	exhausted?: TestModel[];
 	expertPick?: TestModel;
@@ -124,11 +145,12 @@ function createController(options: {
 	const agentDir = tempDir("pi-router-modes-");
 	let current = settings(options.settings);
 	let scoped: TestModel[] | undefined = options.pool;
+	let favorites = options.favorites ?? options.authed ?? ALL;
 	const authed = options.authed ?? ALL;
 	const exhausted = options.exhausted ?? [];
 	const registry = {
 		getAll: () => ALL,
-		getAvailable: () => ALL.filter((m) => authed.includes(m)),
+		getAvailable: () => authed,
 		hasConfiguredAuth: (m: TestModel) => authed.includes(m),
 		find: (provider: string, id: string) => ALL.find((m) => m.provider === provider && m.id === id),
 		isUsingSubscription: isSubscription,
@@ -199,6 +221,7 @@ function createController(options: {
 			const pool = resolveRouterCandidatePool(
 				scoped ? { source: "enabled_models", models: scoped } : undefined,
 				registry,
+				{ favorites: favorites.map((m) => ({ provider: m.provider, modelId: m.id })) },
 			);
 			return options.policy ? { ...pool, models: options.policy.allowed(pool.models) } : pool;
 		},
@@ -247,6 +270,9 @@ function createController(options: {
 		},
 		setPool: (models) => {
 			scoped = models;
+		},
+		setFavorites: (models) => {
+			favorites = models;
 		},
 	};
 }
@@ -424,13 +450,32 @@ describe("The owner's model policy reallocates, never refuses", () => {
 	});
 });
 
-describe("Router candidate pool (F001-030..034)", () => {
-	it("F001-031: an uncustomized Models configuration means every authed model", () => {
-		const pool = resolveRouterCandidatePool(undefined, { getAvailable: () => [subCheap, apiCheap] });
+describe("Router candidate pool", () => {
+	it("a favorite authorizes its exact provider and model pair despite slash-containing identities", () => {
+		const favorite = model("a/b", "c");
+		const collision = model("a", "b/c");
+		const pool = resolveRouterCandidatePool(
+			undefined,
+			{ getAvailable: () => [favorite, collision] },
+			{ favorites: [{ provider: "a/b", modelId: "c" }] },
+		);
+		expect(pool.models).toEqual([favorite]);
+	});
+	it("without a configured scope only available favorites are eligible", () => {
+		const pool = resolveRouterCandidatePool(
+			undefined,
+			{ getAvailable: () => [subCheap, apiCheap] },
+			{
+				favorites: [
+					{ provider: subCheap.provider, modelId: subCheap.id },
+					{ provider: apiBig.provider, modelId: apiBig.id },
+				],
+			},
+		);
 		expect(pool.customized).toBe(false);
-		expect(pool.source).toBe("all_enabled");
-		expect(routerPoolModelRefs(pool)).toEqual(["sub-provider/sub-mini", "api-provider/api-mini"]);
-		expect(formatRouterPoolSummary(pool)).toBe("all enabled models (2)");
+		expect(pool.source).toBe("favorites");
+		expect(routerPoolModelRefs(pool)).toEqual(["sub-provider/sub-mini"]);
+		expect(formatRouterPoolSummary(pool)).toBe("1 favorite model");
 	});
 
 	it("F001-030: a customized Models configuration is the hard pool and names its source", () => {
@@ -439,6 +484,7 @@ describe("Router candidate pool (F001-030..034)", () => {
 			{
 				getAvailable: () => ALL,
 			},
+			{ favorites: ALL.map((m) => ({ provider: m.provider, modelId: m.id })) },
 		);
 		expect(pool.customized).toBe(true);
 		expect(pool.source).toBe("models_selector");
@@ -446,16 +492,52 @@ describe("Router candidate pool (F001-030..034)", () => {
 		expect(formatRouterPoolSummary(pool)).toBe("1 selected model (Models selector)");
 		expect(
 			formatRouterPoolSummary(
-				resolveRouterCandidatePool({ source: "cli_models", models: [subBig, apiBig] }, { getAvailable: () => ALL }),
+				resolveRouterCandidatePool(
+					{ source: "cli_models", models: [subBig, apiBig] },
+					{ getAvailable: () => ALL },
+					{ favorites: ALL.map((m) => ({ provider: m.provider, modelId: m.id })) },
+				),
 			),
 		).toBe("2 selected models (--models)");
 	});
 
-	it("CONFIRMED-001: an empty pool state is uncustomized, so a pinned root model cannot shrink the pool", () => {
-		const pool = resolveRouterCandidatePool({ source: "enabled_models", models: [] }, { getAvailable: () => ALL });
-		expect(pool.customized).toBe(false);
-		expect(pool.source).toBe("all_enabled");
-		expect(pool.models).toEqual(ALL);
+	it("an explicit empty scope stays empty even with favorites", () => {
+		const pool = resolveRouterCandidatePool(
+			{ source: "enabled_models", models: [] },
+			{ getAvailable: () => ALL },
+			{ favorites: [{ provider: subCheap.provider, modelId: subCheap.id }] },
+		);
+		expect(pool.customized).toBe(true);
+		expect(pool.source).toBe("enabled_models");
+		expect(pool.models).toEqual([]);
+	});
+
+	it("an explicit scope cannot admit a non-favorite and clearing favorites cannot broaden it", () => {
+		const fixture = createController({ settings: { selectionMode: "auto" }, pool: ALL, favorites: [apiBig] });
+		expect(resolve(fixture.controller, RESEARCH_PROMPT)?.model).toBe(apiBig);
+		fixture.setFavorites([]);
+		expect(resolve(fixture.controller, RESEARCH_PROMPT)).toBeUndefined();
+	});
+
+	it("a non-favorite tier pin cannot bypass deterministic or judged selection", async () => {
+		const fixture = createController({ settings: { cheapModel: "api-provider/outsider" }, favorites: [apiBig] });
+		expect(resolve(fixture.controller, RESEARCH_PROMPT)?.model).toBe(apiBig);
+		expect((await fixture.controller.resolveTurnRouteJudged(RESEARCH_PROMPT))?.model).toBe(apiBig);
+		expect(fixture.controller.resolveConfiguredTierModel("cheap")).toBe(apiBig);
+	});
+
+	it("removing a favorite while expert selection waits rejects both the result and stale baseline", async () => {
+		const fixture = createController({
+			settings: { selectionMode: "auto" },
+			favorites: [subBig],
+			withExpertSelector: true,
+		});
+		fixture.expertSelect.mockImplementationOnce(async () => {
+			fixture.setFavorites([]);
+			return { primary: { provider: subBig.provider, model_id: subBig.id, thinking_level: "off" }, bindings: [] };
+		});
+		expect(await fixture.controller.resolveTurnRouteJudged(RESEARCH_PROMPT)).toBeUndefined();
+		expect(fixture.expertRelease).toHaveBeenCalledOnce();
 	});
 });
 
@@ -638,7 +720,7 @@ describe("Router selection modes (F001-040..044)", () => {
 		const fixture = createController({ settings: { selectionMode: "auto" }, pool: [subCheap], authed: [] });
 		expect(resolve(fixture.controller, RESEARCH_PROMPT)).toBeUndefined();
 		const status = fixture.controller.getStatus();
-		expect(status).toContain("cheap tier auto-selection: no admitted candidate (auth_missing)");
+		expect(status).toContain("cheap tier auto-selection: candidate pool is empty");
 	});
 });
 
@@ -720,6 +802,7 @@ describe("H-MoE bounded to the pool (F001-033, F001-056, F001-092)", () => {
 
 	it("catalog generation and admission both enforce allowed_model_refs; ranking orders subscription first", async () => {
 		const catalog = new ExpertCatalog({
+			getCandidateModels: () => ALL,
 			modelRegistry: {
 				getAll: () => ALL,
 				hasConfiguredAuth: () => true,
@@ -773,6 +856,7 @@ describe("H-MoE bounded to the pool (F001-033, F001-056, F001-092)", () => {
 
 	it("CONFIRMED-002: adequacy outranks the subscription preference in H-MoE ranking", async () => {
 		const catalog = new ExpertCatalog({
+			getCandidateModels: () => ALL,
 			modelRegistry: {
 				getAll: () => ALL,
 				hasConfiguredAuth: () => true,

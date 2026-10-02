@@ -110,7 +110,7 @@ function makeProbe(throwAfterCommit: boolean): RouterProbe {
 		getFailoverStatus: () => ({ exhausted: [] }),
 		getCandidatePool: () => ({
 			customized: false,
-			source: "all_enabled" as const,
+			source: "favorites" as const,
 			models: [cheapModel, expensiveModel],
 		}),
 		isUsingSubscription: () => false,

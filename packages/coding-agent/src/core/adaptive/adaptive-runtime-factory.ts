@@ -92,6 +92,7 @@ export interface CreateAdaptiveRuntimeStackOptions {
 	readonly completionProfile?: ObjectiveExecutionControllerDeps["completionProfile"];
 	readonly customTools?: readonly unknown[];
 	readonly modelRegistry?: ModelRegistry;
+	readonly getCandidateModels?: () => readonly Model<Api>[];
 	readonly fitnessStore?: FitnessStore;
 	readonly adaptationStore?: ModelAdaptationStore;
 	/** System One, when bound: H-MoE's selection asks it to choose the primary expert. */
@@ -316,6 +317,7 @@ function assembleAdaptiveRuntimeStack(
 
 	// 2. H-MoE expert selection plane (PRC-020..PRC-025)
 	const expertCatalog = new ExpertCatalog({
+		getCandidateModels: options.getCandidateModels,
 		modelRegistry: options.modelRegistry,
 		fitnessStore: options.fitnessStore,
 		adaptationStore: options.adaptationStore,

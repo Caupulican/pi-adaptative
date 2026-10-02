@@ -68,6 +68,7 @@ type RoutedRunContext = {
 	};
 	deps: {
 		getModel: () => TestModel | undefined;
+		getCandidatePool: () => { customized: boolean; models: TestModel[] };
 		getAgent: () => RoutedRunContext["agent"];
 		getSettingsManager: () => {
 			getModelCapabilitySettings: () => { mode?: string };
@@ -123,6 +124,11 @@ function testModel(id: string): TestModel {
 		maxTokens: 8192,
 	} as TestModel;
 }
+
+const routerFavorites = ["root", "cheap", "medium", "expensive", "root-model", "peer-model"].map((modelId) => ({
+	provider: "faux",
+	modelId,
+}));
 
 const cheapModel = testModel("claude-haiku-4-5");
 const mediumModel = testModel("claude-3-5-sonnet-20241022");
@@ -197,7 +203,7 @@ function createContext(
 				exhaustedModels.some((candidate) => candidate.provider === model.provider && candidate.id === model.id),
 			getFailoverStatus: () => ({ exhausted: [] }),
 			// Uncustomized pool: every authed model, as the session resolves it.
-			getCandidatePool: () => ({ customized: false, models: [...authenticatedModels] }),
+			getCandidatePool: () => ({ customized: false, models: [cheapModel, mediumModel, expensiveModel] }),
 			isUsingSubscription: () => false,
 			getToolProbeVerdict: () => undefined,
 		},
@@ -210,6 +216,7 @@ describe("AgentSession model router turn selection", () => {
 			models: [{ id: "expensive" }, { id: "cheap" }],
 			baseToolsOverride: [bashTool],
 			settings: {
+				modelFavorites: routerFavorites,
 				modelRouter: {
 					enabled: true,
 					cheapModel: "faux/cheap",
@@ -253,6 +260,7 @@ describe("AgentSession model router turn selection", () => {
 			baseToolsOverride: [makeLifecycleReadTool(calls)],
 			initialActiveToolNames: ["read_probe"],
 			settings: {
+				modelFavorites: routerFavorites,
 				modelRouter: {
 					enabled: true,
 					cheapModel: "faux/cheap",
@@ -304,6 +312,7 @@ describe("AgentSession model router turn selection", () => {
 			],
 			fauxProvider: { onRequest: (event) => requests.push(event) },
 			settings: {
+				modelFavorites: routerFavorites,
 				modelRouter: {
 					enabled: true,
 					selectionMode: "manual",
@@ -457,6 +466,7 @@ describe("AgentSession model router turn selection", () => {
 		const harness = await createHarness({
 			models: [{ id: "cheap" }, { id: "expensive" }],
 			settings: {
+				modelFavorites: routerFavorites,
 				modelRouter: { enabled: true, cheapModel: "faux/cheap", expensiveModel: "faux/expensive" },
 			},
 		});
@@ -478,6 +488,7 @@ describe("AgentSession model router turn selection", () => {
 		const harness = await createHarness({
 			models: [{ id: "cheap" }, { id: "expensive" }],
 			settings: {
+				modelFavorites: routerFavorites,
 				modelRouter: {
 					enabled: true,
 					fitnessGate: true,
@@ -507,6 +518,7 @@ describe("AgentSession model router turn selection", () => {
 		const harness = await createHarness({
 			models: [{ id: "cheap" }, { id: "medium" }, { id: "expensive" }],
 			settings: {
+				modelFavorites: routerFavorites,
 				modelRouter: {
 					enabled: true,
 					fitnessGate: true,
@@ -536,6 +548,7 @@ describe("AgentSession model router turn selection", () => {
 		const harness = await createHarness({
 			models: [{ id: "cheap" }, { id: "expensive" }],
 			settings: {
+				modelFavorites: routerFavorites,
 				modelRouter: {
 					enabled: true,
 					fitnessGate: true,
@@ -654,6 +667,7 @@ describe("AgentSession model router turn selection", () => {
 			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [] } },
 			deps: {
 				getModel: () => expensiveModel,
+				getCandidatePool: () => ({ customized: false, models: [cheapModel, mediumModel, expensiveModel] }),
 				getAgent: () => context.agent,
 				getSettingsManager: () => ({ getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) }),
 				getSessionManager: () => ({
@@ -700,6 +714,7 @@ describe("AgentSession model router turn selection", () => {
 			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [] } },
 			deps: {
 				getModel: () => expensiveModel,
+				getCandidatePool: () => ({ customized: false, models: [cheapModel, mediumModel, expensiveModel] }),
 				getAgent: () => context.agent,
 				getSettingsManager: () => ({ getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) }),
 				getSessionManager: () => ({
@@ -740,6 +755,7 @@ describe("AgentSession model router turn selection", () => {
 			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [] } },
 			deps: {
 				getModel: () => expensiveModel,
+				getCandidatePool: () => ({ customized: false, models: [cheapModel, mediumModel, expensiveModel] }),
 				getAgent: () => context.agent,
 				getSettingsManager: () => ({
 					getModelCapabilitySettings: () => ({}),
@@ -782,6 +798,7 @@ describe("AgentSession model router turn selection", () => {
 			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [] } },
 			deps: {
 				getModel: () => expensiveModel,
+				getCandidatePool: () => ({ customized: false, models: [cheapModel, mediumModel, expensiveModel] }),
 				getAgent: () => context.agent,
 				getSettingsManager: () => ({
 					getModelCapabilitySettings: () => ({}),
@@ -828,6 +845,7 @@ describe("AgentSession model router turn selection", () => {
 			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [], tools: [] } },
 			deps: {
 				getModel: () => expensiveModel,
+				getCandidatePool: () => ({ customized: false, models: [cheapModel, mediumModel, expensiveModel] }),
 				getAgent: () => context.agent,
 				getSettingsManager: () => ({ getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) }),
 				getSessionManager: () => ({
@@ -910,6 +928,7 @@ describe("AgentSession model router turn selection", () => {
 			agent: { state: { model: expensiveModel, thinkingLevel: "high", messages: [priorMessage], tools: [] } },
 			deps: {
 				getModel: () => expensiveModel,
+				getCandidatePool: () => ({ customized: false, models: [cheapModel, mediumModel, expensiveModel] }),
 				getAgent: () => context.agent,
 				getSettingsManager: () => ({ getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) }),
 				getSessionManager: () => ({
@@ -998,6 +1017,7 @@ describe("routed-turn capability tool filtering", () => {
 			},
 			deps: {
 				getModel: () => expensiveModel,
+				getCandidatePool: () => ({ customized: false, models: [cheapModel, mediumModel, expensiveModel] }),
 				getAgent: () => context.agent,
 				getSettingsManager: () => ({ getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) }),
 				getSessionManager: () => ({
@@ -1056,6 +1076,7 @@ describe("routed-turn capability tool filtering", () => {
 			},
 			deps: {
 				getModel: () => expensiveModel,
+				getCandidatePool: () => ({ customized: false, models: [cheapModel, mediumModel, expensiveModel] }),
 				getAgent: () => context.agent,
 				getSettingsManager: () => ({ getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) }),
 				getSessionManager: () => ({
@@ -1114,6 +1135,7 @@ describe("routed-turn capability tool filtering", () => {
 			},
 			deps: {
 				getModel: () => expensiveModel,
+				getCandidatePool: () => ({ customized: false, models: [cheapModel, mediumModel, expensiveModel] }),
 				getAgent: () => context.agent,
 				getSettingsManager: () => ({ getModelCapabilitySettings: () => ({}), getModelRouterSettings: () => ({}) }),
 				getSessionManager: () => ({
@@ -1172,24 +1194,30 @@ describe("Router candidate pool provenance (CONFIRMED-001, FC-016)", () => {
 						}),
 					}
 				: {}),
-			settings: { modelCapability: { mode: "off" }, modelRouter: { enabled: true, ...routerSettings } },
+			settings: {
+				modelFavorites: routerFavorites,
+				modelCapability: { mode: "off" },
+				modelRouter: { enabled: true, ...routerSettings },
+			},
 		});
 
 	it("an orchestration profile pins cycling to its root model and never narrows the pool", async () => {
 		const harness = await poolHarness({ selectionMode: "auto" }, true);
 		try {
 			expect(harness.session.scopedModels.map((scoped) => scoped.model.id)).toEqual(["root-model"]);
-			const available = harness.session.modelRegistry.getAvailable();
+			const available = harness.session.modelRegistry
+				.getAvailable()
+				.filter((model) => harness.session.settingsManager.isModelFavorite(model.provider, model.id));
 			const pool = harness.session.getRouterCandidatePool();
 			expect(pool.customized).toBe(false);
-			expect(pool.source).toBe("all_enabled");
+			expect(pool.source).toBe("favorites");
 			expect(pool.models.map((model) => model.id)).toEqual(available.map((model) => model.id));
 			expect(pool.models.map((model) => model.id)).toContain("peer-model");
 			expect(pool.models.map((model) => model.id)).toContain("root-model");
 
 			// AUTO can therefore still route away from the profile's root model.
 			const preview = harness.session.previewRoute(RESEARCH_PROMPT);
-			expect(preview.pool).toEqual({ customized: false, count: available.length, source: "all_enabled" });
+			expect(preview.pool).toEqual({ customized: false, count: available.length, source: "favorites" });
 			expect(preview.selection).toBe("auto");
 			// The profile's root model is not the automatic choice: the pool is still the whole
 			// Models configuration, so AUTO ranks across it.
@@ -1200,7 +1228,7 @@ describe("Router candidate pool provenance (CONFIRMED-001, FC-016)", () => {
 		}
 	});
 
-	it("a Models-selector edit becomes the pool immediately, and clearing it restores all enabled", async () => {
+	it("a Models-selector edit becomes the pool immediately, and clearing it restores available favorites", async () => {
 		const harness = await poolHarness({ selectionMode: "auto" }, true);
 		try {
 			const peer = harness.session.modelRegistry.getAvailable().find((model) => model.id === "peer-model")!;
@@ -1216,9 +1244,7 @@ describe("Router candidate pool provenance (CONFIRMED-001, FC-016)", () => {
 
 			harness.session.setRouterPool(undefined);
 			expect(harness.session.getRouterCandidatePool().customized).toBe(false);
-			expect(harness.session.previewRoute(RESEARCH_PROMPT).pool.count).toBe(
-				harness.session.modelRegistry.getAvailable().length,
-			);
+			expect(harness.session.previewRoute(RESEARCH_PROMPT).pool.count).toBe(2);
 		} finally {
 			await harness.cleanup();
 		}
@@ -1231,7 +1257,11 @@ describe("Router candidate pool provenance (CONFIRMED-001, FC-016)", () => {
 				{ id: "peer-model", contextWindow: 128_000 },
 			],
 			scopedModelIds: ["peer-model"],
-			settings: { modelCapability: { mode: "off" }, modelRouter: { enabled: true, selectionMode: "auto" } },
+			settings: {
+				modelFavorites: routerFavorites,
+				modelCapability: { mode: "off" },
+				modelRouter: { enabled: true, selectionMode: "auto" },
+			},
 		});
 		try {
 			const pool = harness.session.getRouterCandidatePool();
@@ -1264,16 +1294,16 @@ describe("Router candidate pool provenance (CONFIRMED-001, FC-016)", () => {
 		).rejects.toThrow(/remove conflicting SDK options: scopedModels/);
 	});
 
-	it("FC-016: a manual pin outside a customized pool still wins and is reported explicitly", async () => {
+	it("FC-016: a manual pin outside the scope is excluded and reallocated to an eligible favorite", async () => {
 		const harness = await poolHarness({ selectionMode: "manual", cheapModel: "faux/peer-model" }, false);
 		try {
 			const root = harness.session.modelRegistry.getAvailable().find((model) => model.id === "root-model")!;
 			harness.session.setRouterPool({ source: "models_selector", models: [root] });
 
 			const preview = harness.session.previewRoute(RESEARCH_PROMPT);
-			expect(preview.manualPin).toBe("faux/peer-model");
-			expect(preview.manualPinOutsidePool).toBe(true);
-			expect(preview.chosenModel).toBe("faux/peer-model");
+			expect(preview.manualPin).toBeUndefined();
+			expect(preview.manualPinOutsidePool).toBeUndefined();
+			expect(preview.chosenModel).toBe("faux/root-model");
 
 			const status = harness.session.getModelRouterStatus();
 			expect(status).toContain("Pool exceptions:");
@@ -1291,6 +1321,7 @@ describe("conversation stage routing", () => {
 			models: [{ id: "root" }, { id: "cheap" }, { id: "medium" }],
 			fauxProvider: { onRequest: (event) => requests.push(event) },
 			settings: {
+				modelFavorites: routerFavorites,
 				modelRouter: {
 					enabled: true,
 					cheapModel: "faux/cheap",

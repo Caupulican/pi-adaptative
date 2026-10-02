@@ -119,9 +119,16 @@ export class ExpertSelectionService {
 		const mode = options?.mode ?? "single";
 		const ranked = this.ranking.select(request, scored, mode);
 		const plan = await this.chooseWithSystemOne(request, scored, ranked, options);
+		await this.validateSelection(request, plan, options?.signal);
 
 		// 6. Capacity reservation
-		await this.capacity.reserve(plan.bindings, request);
+		const leases = await this.capacity.reserve(plan.bindings, request);
+		try {
+			await this.validateSelection(request, plan, options?.signal);
+		} catch (error) {
+			this.capacity.release(leases);
+			throw error;
+		}
 
 		// 7. Selection trace building
 		const trace = buildSelectionTrace(request, candidates, rejected, scored, plan, this.ranking.version);
@@ -130,6 +137,29 @@ export class ExpertSelectionService {
 			...plan,
 			trace,
 		};
+	}
+
+	/** Recheck live eligibility after judgment and reservation; a stale binding is never published. */
+	private async validateSelection(
+		request: WorkerCapabilityRequest,
+		plan: ExpertSelectionPlan,
+		signal?: AbortSignal,
+	): Promise<void> {
+		signal?.throwIfAborted();
+		const current = await this.catalog.materializeCandidates(request);
+		if (
+			plan.bindings.some(
+				(binding) =>
+					!current.some(
+						(candidate) =>
+							candidate.descriptor.expert_id === binding.expert_id &&
+							this.admission.evaluate(request, candidate).allowed,
+					),
+			)
+		) {
+			throw new NoEligibleExpertError(request, []);
+		}
+		signal?.throwIfAborted();
 	}
 
 	/**

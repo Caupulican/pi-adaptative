@@ -230,7 +230,10 @@ describe("H-MoE Finalization & Review Remediation (HM11-001..HM11-087)", () => {
 				hasConfiguredAuth: () => true,
 			};
 
-			const catalog = new ExpertCatalog({ modelRegistry: mockRegistry as any });
+			const catalog = new ExpertCatalog({
+				modelRegistry: mockRegistry as never,
+				getCandidateModels: () => mockRegistry.getAll() as never,
+			});
 			const request = buildWorkerCapabilityRequest({
 				objectiveId: "obj-tool-test",
 				taskId: "task-tool-test",
