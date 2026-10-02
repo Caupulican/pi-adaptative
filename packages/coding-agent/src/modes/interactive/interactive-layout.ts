@@ -157,6 +157,14 @@ function composeDecisionGraph(host: InteractiveLayoutHost, humanInput: HumanInpu
 	});
 }
 
+function restoreSemanticViews(host: InteractiveLayoutHost): void {
+	if (!host.workbench) return;
+	for (const record of host.session.getSemanticEvaluations()) {
+		host.workbench.recordSystemOneEvaluation(record);
+		host.flowTrace?.observeEvaluation(record);
+	}
+}
+
 /**
  * The layout's session listeners: projection publishes, stage-log transitions, settled System One
  * evaluations and questions to the operator. Bound to `host.session` as it is now, so the mode
@@ -185,6 +193,7 @@ export function subscribeInteractiveLayout(host: InteractiveLayoutHost): HumanIn
 		flow.observeEvaluation(record);
 		host.ui.requestRender();
 	});
+	restoreSemanticViews(host);
 	const humanInput: HumanInputTally = host.humanInputTally ?? { asked: 0, answered: 0 };
 	host.humanInputTally = humanInput;
 	const unsubscribeHumanInput = subscribeHumanInputActivity(session.sessionManager, (activity) => {
@@ -278,6 +287,7 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 		copy: copyToClipboard,
 		notice: (text, error) => host.activityLane?.announce(text, error ? "failure" : "neutral"),
 		previewLimit: () => host.session.settingsManager.getWorkbenchSettings().previews,
+		semanticEvaluations: () => host.session.getSemanticEvaluations(),
 		activeForegroundCount: () => {
 			const handedOff = new Set(
 				host.activityLane
@@ -333,6 +343,7 @@ export function mountInteractiveLayout(host: InteractiveLayoutHost): void {
 			host.ui.requestRender();
 		},
 	});
+	restoreSemanticViews(host);
 	const stored = host.settingsManager.getWorkbenchSettings();
 	view.setMouseMode(stored.mouse === "on");
 	view.applyGeometry(stored);

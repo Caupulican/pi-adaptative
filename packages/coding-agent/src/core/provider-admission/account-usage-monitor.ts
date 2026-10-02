@@ -3,8 +3,10 @@ import {
 	getAnthropicOAuthUsage,
 	getOpenAICodexUsage,
 	getOpenRouterAccountUsage,
+	getXaiAccountUsage,
 	OpenAICodexAccountError,
 	OpenRouterAccountError,
+	XaiAccountError,
 } from "@caupulican/pi-ai";
 import {
 	type AccountUsageAdapter,
@@ -20,6 +22,8 @@ import {
 	openAICodexCredentialHeaders,
 	openRouterUsageSnapshot,
 	type UsageOverviewRegistry,
+	XAI_PROVIDER,
+	xaiUsageSnapshot,
 } from "./usage-overview.ts";
 
 export const ACCOUNT_USAGE_TIMEOUT_MS = 10_000;
@@ -110,13 +114,44 @@ export function createOpenRouterUsageAdapter(fetchImpl?: typeof fetch): AccountU
 	};
 }
 
+export function createXaiUsageAdapter(fetchImpl?: typeof fetch): AccountUsageAdapter {
+	return {
+		provider: XAI_PROVIDER,
+		request(account, registry) {
+			if (!isSubscriptionLogin(account)) return undefined;
+			return {
+				account,
+				run: async (signal, isCurrent) => {
+					const accessToken = await registry.getApiKeyForProvider(XAI_PROVIDER);
+					if (!isCurrent()) return undefined;
+					const credential = registry.authStorage.get(XAI_PROVIDER);
+					// Resolution may refresh OAuth or yield a runtime API key. Bind identity to the resolved credential.
+					if (!accessToken || credential?.type !== "oauth" || credential.access !== accessToken) {
+						throw new AccountCredentialsUnavailableError();
+					}
+					const userId = typeof credential.userId === "string" ? credential.userId.trim() : undefined;
+					return xaiUsageSnapshot(
+						await getXaiAccountUsage({
+							accessToken,
+							...(userId ? { userId } : {}),
+							signal,
+							...(fetchImpl ? { fetch: fetchImpl } : {}),
+						}),
+					);
+				},
+			};
+		},
+	};
+}
+
 export function describeAccountFailure(error: unknown): string {
 	if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) return "timed out";
 	if (error instanceof AccountCredentialsUnavailableError) return "credentials unavailable (run /login)";
 	if (
 		error instanceof OpenAICodexAccountError ||
 		error instanceof AnthropicAccountError ||
-		error instanceof OpenRouterAccountError
+		error instanceof OpenRouterAccountError ||
+		error instanceof XaiAccountError
 	) {
 		const status = error.status;
 		if (status === undefined || status < 400) return "unreadable response";
@@ -146,7 +181,8 @@ function retryAfterOf(error: unknown): number | undefined {
 	const isAccountError =
 		error instanceof OpenAICodexAccountError ||
 		error instanceof AnthropicAccountError ||
-		error instanceof OpenRouterAccountError;
+		error instanceof OpenRouterAccountError ||
+		error instanceof XaiAccountError;
 	return isAccountError && typeof error.retryAfterMs === "number" && error.retryAfterMs > 0
 		? error.retryAfterMs
 		: undefined;
@@ -170,6 +206,7 @@ export class AccountUsageMonitor {
 			createOpenAICodexUsageAdapter(),
 			createAnthropicUsageAdapter(),
 			createOpenRouterUsageAdapter(),
+			createXaiUsageAdapter(),
 		];
 		this.now = options.now ?? Date.now;
 		this.timeoutMs = options.timeoutMs ?? ACCOUNT_USAGE_TIMEOUT_MS;

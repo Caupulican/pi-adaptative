@@ -1,5 +1,5 @@
 import type { AssistantMessage } from "@caupulican/pi-ai";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -29,6 +29,46 @@ function createAssistantMessage(content: AssistantMessage["content"]): Assistant
 }
 
 describe("AssistantMessageComponent", () => {
+	test("thinking-only toggles update spacing and visible output without rebuilding content", () => {
+		initTheme("dark");
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([{ type: "thinking", thinking: "reasoning" }]),
+			true,
+		);
+		const rebuild = vi.spyOn(component, "updateContent");
+		expect(component.render(80)).toEqual([]);
+		for (let i = 0; i < 3; i++) {
+			component.setHideThinkingBlock(false);
+			expect(stripAnsi(component.render(80)[0])).toBe("");
+			expect(component.hasVisibleOutput()).toBe(true);
+			component.setHideThinkingBlock(true);
+			expect(component.render(80)).toEqual([]);
+			expect(component.hasVisibleOutput()).toBe(false);
+		}
+		expect(rebuild).not.toHaveBeenCalled();
+	});
+
+	test("toggling hides every separated thinking section while preserving visible prose", () => {
+		initTheme("dark");
+		const component = new AssistantMessageComponent(
+			createAssistantMessage([
+				{ type: "thinking", thinking: "first thought" },
+				{ type: "text", text: "partial answer" },
+				{ type: "thinking", thinking: "second thought" },
+			]),
+			false,
+		);
+		const before = component.render(80);
+		component.setHideThinkingBlock(true);
+		const hidden = stripAnsi(component.render(80).join("\n"));
+		expect(hidden).not.toContain("first thought");
+		expect(hidden).not.toContain("second thought");
+		expect(hidden).toContain("partial answer");
+		expect(component.hasVisibleOutput()).toBe(true);
+		component.setHideThinkingBlock(false);
+		expect(component.render(80)).toEqual(before);
+	});
+
 	test("Workbench shows prose commentary while filtering control payloads and invalidates streamed rows", () => {
 		initTheme("dark");
 		const message = createAssistantMessage([

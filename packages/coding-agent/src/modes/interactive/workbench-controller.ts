@@ -65,6 +65,8 @@ interface WorkbenchPorts {
 	paste?: () => Promise<void>;
 	/** Previews retained per cycle (`workbench.previews`); the default keeps a long cycle readable. */
 	previewLimit?: () => number;
+	/** Session evidence restored after canonical conversation replacement. */
+	semanticEvaluations?: () => readonly SemanticEvaluationRecord[];
 	activeForegroundCount?: () => number;
 	activeBackgroundCount?: () => number;
 	/** Composes the Decision graph's model from live state; absent, the conversation zone is chat only. */
@@ -163,6 +165,8 @@ export class WorkbenchController {
 		this.view.setInspector([]);
 		this.geometryDrag = undefined;
 		this.publishHeadline();
+		if (!this.disposed)
+			for (const record of this.ports.semanticEvaluations?.() ?? []) this.recordSystemOneEvaluation(record);
 	}
 
 	dispose(): void {

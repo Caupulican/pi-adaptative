@@ -237,6 +237,62 @@ describe("parseModelPattern", () => {
 });
 
 describe("resolveCliModel", () => {
+	test("rejects an unknown Antigravity id instead of cloning a custom model", () => {
+		const advertised = {
+			id: "gemini-3.8-flash-high",
+			name: "Gemini 3.8 Flash (High)",
+			api: "google-antigravity",
+			provider: "google-antigravity",
+			baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000000,
+			maxTokens: 8192,
+		} as Model<"google-antigravity">;
+		const registry = {
+			getAll: () => [advertised, ...mockModels],
+		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+
+		const rejected = resolveCliModel({
+			cliProvider: "google-antigravity",
+			cliModel: "gemini-3.1-pro-low",
+			modelRegistry: registry,
+		});
+		expect(rejected.model).toBeUndefined();
+		expect(rejected.error).toContain("not found");
+		expect(rejected.warning ?? "").not.toContain("custom model");
+		for (const cliModel of ["gemini-3.1-pro-low", "gemini-3.1-pro-low:high"]) {
+			const qualified = resolveCliModel({
+				cliModel: `google-antigravity/${cliModel}`,
+				modelRegistry: registry,
+			});
+			expect(qualified.model).toBeUndefined();
+			expect(qualified.error).toContain("not found");
+		}
+
+		// The id itself is not banned: when the account advertises it, it resolves normally.
+		const discovered = { ...advertised, id: "gemini-3.1-pro-low", name: "Advertised Pro" };
+		const discoveredRegistry = {
+			getAll: () => [discovered, ...mockModels],
+		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+		const accepted = resolveCliModel({
+			cliModel: "google-antigravity/gemini-3.1-pro-low:high",
+			modelRegistry: discoveredRegistry,
+		});
+		expect(accepted.model).toBe(discovered);
+		expect(accepted.thinkingLevel).toBe("high");
+		expect(accepted.error).toBeUndefined();
+
+		const custom = resolveCliModel({
+			cliProvider: "openai",
+			cliModel: "not-a-real-model",
+			modelRegistry: registry,
+		});
+		expect(custom.model?.id).toBe("not-a-real-model");
+		expect(custom.warning).toContain("custom model");
+	});
+
 	test("resolves --model provider/id without --provider", () => {
 		const registry = {
 			getAll: () => allModels,

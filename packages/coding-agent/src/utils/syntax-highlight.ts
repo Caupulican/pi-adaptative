@@ -89,7 +89,8 @@ export function renderHighlightedHtml(html: string, theme: HighlightTheme = {}):
 		if (textParts.length === 0) return;
 		const text = textParts.length === 1 ? textParts[0] : textParts.join("");
 		const formatter = getActiveFormatter(scopes, theme);
-		outputParts.push(formatter ? formatter(text) : text);
+		// Each terminal row must restore its scope after a diff marker or row painter resets color.
+		outputParts.push(formatter ? text.split("\n").map(formatter).join("\n") : text);
 		textParts = [];
 	};
 

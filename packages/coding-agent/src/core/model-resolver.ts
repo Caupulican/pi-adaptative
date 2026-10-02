@@ -564,7 +564,8 @@ export function resolveCliModel(options: {
 		}
 	}
 
-	if (provider) {
+	// Antigravity only accepts ids discovery returned. A cloned custom id is sent to Google as if it were real.
+	if (provider && provider !== "google-antigravity") {
 		const fallbackModel = buildFallbackModel(provider, pattern, availableModels);
 		if (fallbackModel) {
 			const fallbackWarning = warning

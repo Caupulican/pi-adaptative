@@ -12,7 +12,11 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { openSqliteDatabase, type SqliteDatabase } from "../context/sqlite-database.ts";
 import type { SemanticDoubtDecision } from "../system-one/semantic-doubts.ts";
-import type { SemanticEvaluationScope, SemanticQuestionState } from "../system-one/semantic-evaluation-ledger.ts";
+import type {
+	SemanticEvaluationOutcome,
+	SemanticEvaluationScope,
+	SemanticQuestionState,
+} from "../system-one/semantic-evaluation-ledger.ts";
 import type {
 	DecisionStage,
 	DecisionStageSink,
@@ -945,12 +949,16 @@ export class DecisionLedgerStore {
 	}
 
 	/** Recent evaluations of a session, newest first, bounded. */
-	recentSemanticEvaluations(sessionId: string, limit: number): SemanticEvaluationLedgerRow[] {
+	recentSemanticEvaluations(
+		sessionId: string,
+		limit: number,
+		outcome?: SemanticEvaluationOutcome,
+	): SemanticEvaluationLedgerRow[] {
 		const rows = this.database
 			.prepare(
-				"SELECT * FROM semantic_evaluations WHERE session_id = ? ORDER BY started_at DESC, rowid DESC LIMIT ?",
+				"SELECT * FROM semantic_evaluations WHERE session_id = ? AND (? IS NULL OR outcome = ?) ORDER BY started_at DESC, rowid DESC LIMIT ?",
 			)
-			.all(sessionId, Math.max(1, Math.floor(limit)));
+			.all(sessionId, outcome ?? null, outcome ?? null, Math.max(1, Math.floor(limit)));
 		return this.semanticEvaluationRows(rows, sessionId);
 	}
 

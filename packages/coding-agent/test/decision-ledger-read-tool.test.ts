@@ -9,6 +9,7 @@ import {
 	DECISION_LEDGER_READ_TOOL_NAME,
 } from "../src/core/tools/decision-ledger-read.ts";
 import { WORKER_FORBIDDEN_TOOLS } from "../src/core/worker-tool-ceiling.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function text(result: unknown): string {
 	const part = (result as { content: { type: string; text?: string }[] }).content.find((c) => c.type === "text");
@@ -24,6 +25,44 @@ describe("decision_ledger_read", () => {
 	it("is the root's tool: active by default, never a worker's", () => {
 		expect(getDefaultActiveToolNames()).toContain(DECISION_LEDGER_READ_TOOL_NAME);
 		expect(WORKER_FORBIDDEN_TOOLS.has(DECISION_LEDGER_READ_TOOL_NAME)).toBe(true);
+	});
+
+	it("finds historical failures past recent successes with session isolation and a bounded result", async () => {
+		const ledger = new DecisionLedgerStore({ databasePath: join(tempDir("pi-ledger-failures-"), "ledger.sqlite") });
+		try {
+			for (let index = 0; index < 65; index++) {
+				const evaluationId = `evaluation-${index}`;
+				ledger.startSemanticEvaluation({
+					evaluationId,
+					sessionId: index === 64 ? "other" : "session",
+					cwd: "/project",
+					programId: "system-one:route_choice",
+					label: "model routing",
+					startedAt: index,
+				});
+				ledger.settleSemanticEvaluation(evaluationId, {
+					endedAt: index + 1,
+					outcome: index < 4 || index === 64 ? "failed" : "ok",
+					reasons: index < 4 ? ["HTTP 400"] : [],
+				});
+			}
+			const tool = createDecisionLedgerReadTool("/project", {
+				getLedger: () => ledger,
+				getSessionId: () => "session",
+			});
+			expect(text(await tool.execute("recent", { action: "evaluations" }, undefined as never))).not.toContain(
+				"HTTP 400",
+			);
+			const failures = await tool.execute("failures", { action: "failures" }, undefined as never);
+			expect(failures.details).toMatchObject({ rows: 4 });
+			expect(text(failures)).toContain("HTTP 400");
+			expect(text(failures)).not.toMatch(/\] ok|stages \(/);
+			expect(
+				(await tool.execute("bounded", { action: "failures", limit: 2 }, undefined as never)).details,
+			).toMatchObject({ rows: 2 });
+		} finally {
+			ledger.close();
+		}
 	});
 
 	it("lists recorded sessions of a directory and replays a session's stages and evaluations from the ledger", async () => {

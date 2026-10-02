@@ -935,9 +935,16 @@ place. Pinned by `packages/coding-agent/test/system-one/projector.test.ts`.
 receiving-lane verification without new evidence routes to root replanning, retaining the original
 finding and requesting a changed hypothesis, diagnostic, or evidence source. New evidence restores
 the ordinary verification route; no attempt cap or substitute verifier discharges the finding.
+Completed same-lane recovery over unchanged semantic evidence is bounded. Exhaustion persists a
+blocked goal with the findings and directive intact; automatic continuation cannot resume it.
+Hydration timestamps and projection revisions do not count as new evidence. New receipts or an
+explicit owner resume permit another bounded attempt; cancellation and System One rerouting do
+not consume completed recovery. This bounds repeated replanning without inventing verification.
 Resolution reports identify selected receipts and uncertain proof conditions in the same judgment;
 diagnostic answers do not create an additional acceptance gate. Pinned by
 `packages/coding-agent/test/objective-execution/objective-execution-controller.test.ts` and
+`packages/coding-agent/test/objective-execution/same-lane-recovery-bound.test.ts`,
+`packages/coding-agent/test/goal-session-primary-loop.test.ts`, and
 `packages/coding-agent/test/system-one/verification-coordinator.test.ts`.
 
 **The TUI reads unresolved items from their lifecycle owners.** Deterministic checks, mandatory peer

@@ -15,6 +15,7 @@
 import { randomUUID } from "node:crypto";
 import type { Consequence } from "../decision/primitives.ts";
 import { IndependentObserverSet } from "../observer-dispatch.ts";
+import { systemOneFailureReasons } from "../review/system-one-failure-diagnostics.ts";
 import {
 	type ResolveSemanticDoubtInput,
 	type ResolveSemanticDoubtResult,
@@ -148,7 +149,8 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 	settleFailed(evaluationId: string, error: unknown): void {
 		const start = this.take(evaluationId);
 		if (!start) return;
-		const failure = error instanceof Error ? error.message : String(error);
+		const reasons = systemOneFailureReasons(error);
+		const failure = reasons[0];
 		if (this.evaluationSessions.get(evaluationId) === this.sessionId) {
 			this.observed = true;
 			this.lastOutcomeAt = new Date(this.now()).toISOString();
@@ -157,7 +159,7 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 			const kind = (error as { kind?: unknown } | undefined)?.kind;
 			this.lastFailureKind = typeof kind === "string" ? kind : undefined;
 		}
-		this.push(start, "failed", undefined, [failure]);
+		this.push(start, "failed", undefined, reasons);
 	}
 
 	/**
@@ -278,6 +280,8 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 		if (!sessionId || this.hydratedSessionId === sessionId || !sink?.readEvaluations) return;
 		try {
 			const restored = new SemanticDoubtTracker();
+			const recent = [...this.recent];
+			let lastOutcome = recent.findLast((record) => record.outcome !== "cancelled");
 			for (const persisted of sink.readEvaluations()) {
 				const record = {
 					...persisted,
@@ -285,10 +289,31 @@ export class SemanticPlaneHealthRecorder implements SemanticEvaluationObserver, 
 				};
 				restored.start(record.evaluationId, record.programId, record.evaluationScope, record.questionNamespace);
 				restored.observe(record);
-				restored.forgetRecent(record.evaluationId);
+				if (record.outcome !== "cancelled" && (!lastOutcome || record.endedAt >= lastOutcome.endedAt))
+					lastOutcome = record;
+				if (!recent.some((item) => item.evaluationId === record.evaluationId)) recent.push(record);
+				recent.sort((left, right) => left.endedAt - right.endedAt || left.startedAt - right.startedAt);
+				if (recent.length > MAX_RECENT_EVALUATIONS) {
+					const removed = recent.shift();
+					if (removed) restored.forgetRecent(removed.evaluationId);
+				}
 			}
 			for (const decision of sink.readDoubtDecisions?.() ?? []) restored.resolveCurrent(decision);
 			this.doubts = restored;
+			this.recent.splice(0, this.recent.length, ...recent);
+			if (lastOutcome) {
+				this.observed = true;
+				this.lastOutcomeAt = new Date(lastOutcome.endedAt).toISOString();
+				this.lastFailure =
+					lastOutcome.outcome === "failed" ? (lastOutcome.reasons?.[0] ?? "Evaluation failed") : undefined;
+				this.lastFailedLabel = lastOutcome.outcome === "failed" ? lastOutcome.label : undefined;
+				this.lastFailureKind =
+					lastOutcome.outcome === "failed"
+						? lastOutcome.reasons
+								?.find((line) => line.startsWith("failure kind="))
+								?.match(/^failure kind=(\w+)/)?.[1]
+						: undefined;
+			}
 			this.hydratedSessionId = sessionId;
 		} catch (error) {
 			this.durableFailure = error instanceof Error ? error.message : String(error);

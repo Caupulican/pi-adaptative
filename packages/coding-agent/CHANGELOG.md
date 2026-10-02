@@ -1,5 +1,24 @@
 ## [Unreleased]
 
+### Added
+
+- Added Grok subscription account usage, reset times, prepaid credit, and on-demand amounts to `/usage`.
+- Added a failures-only decision ledger read to find earlier failed evaluations beyond recent successes.
+
+### Changed
+
+- Combined session costs, daily costs, machine status, context usage, and provider account limits in `/usage`.
+- Rendered plain Execution output with the text theme color and source edits with syntax theme colors.
+
+### Fixed
+
+- Bounded repeated same-lane verification recovery when findings and evidence remain unchanged, preserving unresolved findings and allowing continuation after new evidence or explicit owner resume.
+- Kept thinking-block spacing and all separated thinking blocks synchronized during repeated visibility toggles.
+- Repainted Execution previews after theme changes and preserved multiline syntax state separately for removed and added source.
+- Rejected synthesized Google Antigravity model selections absent from the available catalog.
+- Classified rejected System One requests separately from outages and rate limits, retaining sanitized failure receipts without repeating exhausted transport attempts.
+- Retained bounded System One rejection diagnostics in the decision ledger and restored evaluation health and Execution previews when reopening a session.
+
 ## [0.102.2] - 2026-10-02
 
 ### Added

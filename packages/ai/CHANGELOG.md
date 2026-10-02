@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Added
+
+- Added Grok subscription account usage with bounded responses and validated usage percentages, billing periods, and credit amounts.
+
+### Changed
+
+- Updated the packaged Antigravity CLI identity to version 1.2.14.
+
 ## [0.102.2] - 2026-10-02
 
 ### Added

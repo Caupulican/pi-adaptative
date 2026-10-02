@@ -87,6 +87,14 @@ export const reviewInputSchema = Type.Object(
 );
 export type ReviewInput = Static<typeof reviewInputSchema>;
 
+/** A local request violates the evaluation contract; provider availability is unrelated. */
+export class TypeSafeInputError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "TypeSafeInputError";
+	}
+}
+
 /** Canonical input validation with bounded diagnostics; evidence values are never echoed. */
 export function validateTypeSafeInput(kind: "review" | "evaluation", value: unknown): void {
 	const schema = kind === "review" ? reviewInputSchema : evaluationInputSchema;
@@ -119,12 +127,13 @@ export function validateTypeSafeInput(kind: "review" | "evaluation", value: unkn
 		}
 	}
 	if (!Value.Check(schema, value) && diagnostics.length === 0) addErrors(schema, value);
-	if (diagnostics.length) throw new Error(`Invalid TypeSafe ${kind} input: ${diagnostics.slice(0, 6).join("; ")}`);
+	if (diagnostics.length)
+		throw new TypeSafeInputError(`Invalid TypeSafe ${kind} input: ${diagnostics.slice(0, 6).join("; ")}`);
 	if (kind === "review") {
 		const input = value as ReviewInput;
 		for (const [id, question] of Object.entries(input.questions)) {
 			if (!Object.hasOwn(question.criteria, question.expected))
-				throw new Error(
+				throw new TypeSafeInputError(
 					`Expected verdict must be a declared option at ${diagnosticPath(`/questions/${id.replace(/~/g, "~0").replace(/\//g, "~1")}/expected`)}; expected a criteria key; received undeclared string`,
 				);
 		}

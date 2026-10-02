@@ -17,7 +17,8 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import { GoalLoopController } from "../goal-loop-controller.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "../objective-execution/index.ts";
-import type { ObjectiveRoute, ObjectiveTerminalResult } from "../objective-execution/objective-route.ts";
+import type { ObjectiveExecutionControllerDeps } from "../objective-execution/objective-execution-controller.ts";
+import type { ObjectiveTerminalResult } from "../objective-execution/objective-route.ts";
 import { budgetedTokens } from "../orchestration/capability-gateway.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
@@ -343,6 +344,9 @@ export class GoalSessionController {
 		const resumed = resumeGoal(current, now, source);
 		if (!resumed.ok) return undefined;
 		this.saveState(resumed.state, getGoalStateRevision(current));
+		if (source === "owner") {
+			this.deps.getObjectiveExecutionController?.()?.resetVerificationRecovery(goalObjectiveId(current.goalId));
+		}
 		return resumed.state.goalId;
 	}
 
@@ -794,7 +798,7 @@ export class GoalSessionController {
 	 * interruption and a provider failure are thrown so the objective loop stops instead of routing
 	 * again over a turn that did not happen.
 	 */
-	objectiveRootExecutor(): { execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void> } {
+	objectiveRootExecutor(): NonNullable<ObjectiveExecutionControllerDeps["rootExecutor"]> {
 		return {
 			execute: async (route, signal) => {
 				signal?.throwIfAborted();
@@ -812,7 +816,7 @@ export class GoalSessionController {
 				if (outcome.outcome === "rerouted") {
 					// The route ran until System One cancelled it; the next cycle routes on the ledger.
 					this.deps.emitWarning(`System One re-routed the root turn: ${outcome.errorMessage ?? "cancelled"}`);
-					return;
+					return { outcome: "rerouted" };
 				}
 				if (outcome.outcome === "errored")
 					throw new ObjectiveRootTurnErroredError(outcome.errorMessage ?? "provider error");

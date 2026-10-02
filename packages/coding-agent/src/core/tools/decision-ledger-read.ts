@@ -22,10 +22,16 @@ const MAX_SESSIONS = 20;
 
 const decisionLedgerReadSchema = Type.Object({
 	action: Type.Union(
-		[Type.Literal("sessions"), Type.Literal("stages"), Type.Literal("evaluations"), Type.Literal("replay")],
+		[
+			Type.Literal("sessions"),
+			Type.Literal("stages"),
+			Type.Literal("evaluations"),
+			Type.Literal("failures"),
+			Type.Literal("replay"),
+		],
 		{
 			description:
-				"'sessions': recorded sessions in this working directory, newest first. 'stages': the stage transitions of a session (this one by default). 'evaluations': recent Jev evaluations of a session with verdicts and reasons. 'replay': stages and evaluations of a session together, the graph as recorded.",
+				"'sessions': recorded sessions in this working directory, newest first. 'stages': the stage transitions of a session (this one by default). 'evaluations': recent Jev evaluations of a session with verdicts and reasons. 'failures': failed evaluations even when newer successes fill the recent results. 'replay': stages and evaluations of a session together, the graph as recorded.",
 		},
 	),
 	sessionId: Type.Optional(
@@ -33,7 +39,7 @@ const decisionLedgerReadSchema = Type.Object({
 	),
 	limit: Type.Optional(
 		Type.Number({
-			description: `Evaluations to return for 'evaluations'/'replay' (default ${DEFAULT_EVALUATIONS}, max ${MAX_EVALUATIONS}).`,
+			description: `Evaluations to return for 'evaluations'/'failures'/'replay' (default ${DEFAULT_EVALUATIONS}, max ${MAX_EVALUATIONS}).`,
 		}),
 	),
 });
@@ -106,7 +112,7 @@ export function createDecisionLedgerReadToolDefinition(
 		label: DECISION_LEDGER_READ_TOOL_NAME,
 		readOnly: true,
 		description:
-			"Read the decision ledger: the stage transitions (understand, plan, build, dispatch, observe, verify, clarify, repair, deliver, done) with their times and loops, and the Jev evaluations with their verdicts and reasons, for this session or a recorded one. Use it to find where a run went wrong, what looped, and which judgments were made; 'replay' returns a past session's graph as recorded.",
+			"Read the decision ledger: the stage transitions (understand, plan, build, dispatch, observe, verify, clarify, repair, deliver, done) with their times and loops, and the Jev evaluations with their verdicts and reasons, for this session or a recorded one. Use 'failures' to find rejected or unavailable evaluations beyond recent successes; 'replay' returns a past session's graph as recorded.",
 		promptSnippet: "Read the decision ledger: stage transitions and Jev verdicts of this or a recorded session",
 		parameters: decisionLedgerReadSchema,
 		async execute(_toolCallId, { action, sessionId, limit }: DecisionLedgerReadToolInput) {
@@ -144,10 +150,16 @@ export function createDecisionLedgerReadToolDefinition(
 					details: { action, rows: 0, available: true },
 				};
 			}
-			const stages = action === "evaluations" ? [] : ledger.loadStages(target);
-			const evaluations = action === "stages" ? [] : ledger.recentSemanticEvaluations(target, bounded).reverse();
+			const evaluationsOnly = action === "evaluations" || action === "failures";
+			const stages = evaluationsOnly ? [] : ledger.loadStages(target);
+			const evaluations =
+				action === "stages"
+					? []
+					: ledger
+							.recentSemanticEvaluations(target, bounded, action === "failures" ? "failed" : undefined)
+							.reverse();
 			const sections: string[] = [];
-			if (action !== "evaluations") sections.push(`stages (${stages.length})\n${formatStageRows(stages, nowMs)}`);
+			if (!evaluationsOnly) sections.push(`stages (${stages.length})\n${formatStageRows(stages, nowMs)}`);
 			if (action !== "stages")
 				sections.push(`evaluations (${evaluations.length})\n${formatEvaluationRows(evaluations)}`);
 			return {

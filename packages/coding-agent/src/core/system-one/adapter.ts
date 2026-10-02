@@ -1,7 +1,7 @@
 import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import { abortableSleep } from "@caupulican/pi-ai/abort-signals";
 import { SystemOneReviewError } from "../review/system-one-review-port.ts";
-import { TypeSafeEvidenceError } from "../review/typesafe-contract.ts";
+import { TypeSafeEvidenceError, TypeSafeInputError } from "../review/typesafe-contract.ts";
 import type { SystemOneAccessResolver } from "./access.ts";
 import { SYSTEM_ONE_PINNED_MODEL } from "./catalog.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
@@ -66,8 +66,8 @@ export class JevAdapterFailure extends Error {
 	readonly kind: JevFailureKind;
 	readonly originalMessage: string;
 
-	constructor(kind: JevFailureKind, originalMessage: string, impact: string) {
-		super(`Jev System One ${kind} for impact '${impact}': ${originalMessage}`);
+	constructor(kind: JevFailureKind, originalMessage: string, impact: string, cause?: unknown) {
+		super(`Jev System One ${kind} for impact '${impact}': ${originalMessage}`, { cause });
 		this.name = "JevAdapterFailure";
 		this.kind = kind;
 		this.originalMessage = originalMessage;
@@ -76,11 +76,19 @@ export class JevAdapterFailure extends Error {
 
 export function classifyJevFailure(error: unknown, aborted: boolean): JevFailureKind {
 	if (aborted) return "cancelled";
-	if (error instanceof TypeSafeEvidenceError) return "invalid_request";
+	if (error instanceof TypeSafeEvidenceError || error instanceof TypeSafeInputError) return "invalid_request";
+	if (error instanceof SystemOneReviewError) {
+		if (error.failureKind === "usage_recording") return "unavailable";
+		const status = error.transportAttempts.at(-1)?.status;
+		if (status === 400 || status === 422) return "invalid_request";
+		if (status === 429) return "rate_limit";
+		if (status !== undefined && status >= 400) return "unavailable";
+	}
 	const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
 	if (/Model drift detected/i.test(text)) return "model_drift";
 	if (/AbortError|aborted/i.test(text)) return "cancelled";
 	if (/timeout|ETIMEDOUT/i.test(text)) return "timeout";
+	if (/\bHTTP\s+(?:400|422)\b/i.test(text)) return "invalid_request";
 	if (/\b429\b|rate limit/i.test(text)) return "rate_limit";
 	if (/\b401\b|\b403\b|\b503\b|ECONNREFUSED|unavailable|ENOTFOUND/i.test(text)) return "unavailable";
 	if (/Missing answer|Invalid noul|Invalid choice|question coverage|incomplete/i.test(text)) return "invalid_response";
@@ -248,12 +256,12 @@ export class SystemOneJevAdapter implements JevAdapter {
 				if (deadline?.aborted && !options?.signal?.aborted) throw timedOut();
 				if (options?.signal?.aborted) throw error;
 				// The reviewer already exhausted its provider retry budget. Never multiply it here.
-				if (error instanceof SystemOneReviewError) {
-					throw new JevAdapterFailure("unavailable", error.message, impact);
-				}
-				// The request we built is not JSON: retrying sends the same defect again.
-				if (error instanceof TypeSafeEvidenceError) {
-					throw new JevAdapterFailure("invalid_request", error.message, impact);
+				if (
+					error instanceof SystemOneReviewError ||
+					error instanceof TypeSafeEvidenceError ||
+					error instanceof TypeSafeInputError
+				) {
+					throw new JevAdapterFailure(classifyJevFailure(error, false), error.message, impact, error);
 				}
 				// If model drift was detected, do not retry
 				if (error instanceof Error && error.message.includes("Model drift detected")) {
@@ -275,6 +283,6 @@ export class SystemOneJevAdapter implements JevAdapter {
 		const kind = classifyJevFailure(lastError, Boolean(options?.signal?.aborted));
 		// Never turn an invalid/incomplete typed response into empty successful answers.
 		// Advisory callers catch JevAdapterFailure and continue without a fake evaluation.
-		throw new JevAdapterFailure(kind, original, impact);
+		throw new JevAdapterFailure(kind, original, impact, lastError);
 	}
 }

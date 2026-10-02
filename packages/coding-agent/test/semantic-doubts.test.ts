@@ -228,6 +228,9 @@ describe("live semantic doubts", () => {
 
 		const doubt = recorder.listOwnSession()[0];
 		expect(doubt?.evaluationScope).toEqual(record.evaluationScope);
+		// Reopening restores real evaluation history and health; disposition must not add or rewrite it.
+		expect(recorder.getRecentEvaluations()).toEqual([{ ...record, questionNamespace: "worker-supervision" }]);
+		expect(recorder.getHealth(true).state).toBe("ok");
 		expect(
 			recorder.resolveOwnSession({
 				evaluationId: record.evaluationId,
@@ -239,8 +242,8 @@ describe("live semantic doubts", () => {
 		).toEqual({ resolved: true });
 		expect(recorder.listOwnSession()).toHaveLength(0);
 		expect(decisions).toHaveLength(1);
-		expect(recorder.getRecentEvaluations()).toEqual([]);
-		expect(recorder.getHealth(true).state).toBe("unknown");
+		expect(recorder.getRecentEvaluations()).toEqual([{ ...record, questionNamespace: "worker-supervision" }]);
+		expect(recorder.getHealth(true).state).toBe("ok");
 		expect(record.verdict).toBe("evaluated");
 		expect(record.reasons).toEqual([doubtReason("progress: unsure")]);
 	});

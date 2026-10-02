@@ -4,7 +4,7 @@
  * Conforms to ROUTING_PROGRAM.md, COMPLETION_COORDINATOR.md, HUMAN_EDGE.md, and FINAL_PATCH_SPEC v2.1.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
 	AdaptiveCapabilityController,
 	AdaptiveResolutionController,
@@ -204,7 +204,10 @@ export interface ObjectiveExecutionControllerDeps {
 	 * routes System One does not hand to an independent worker (implement, investigate, replan,
 	 * retrieval and non-independent verification); review and escalations stay with workers.
 	 */
-	rootExecutor?: { execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void> };
+	rootExecutor?: {
+		// biome-ignore lint/suspicious/noConfusingVoidType: Executor callbacks may return no value; reroutes must report that they did not finish.
+		execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void | { readonly outcome: "rerouted" }>;
+	};
 	/**
 	 * Who executes a route the root may take: the root (the talker, on its warm cache) or a worker given
 	 * the route's brief, by what each costs (`priceExecutor`). Absent, the root takes it.
@@ -442,10 +445,12 @@ export class ObjectiveExecutionController {
 	private readonly admissionCerts = new Map<string, string[]>();
 	private readonly alternativesTried = new Set<string>();
 	private readonly routeAcknowledgments = new WeakMap<ObjectiveRoute, RouteAcknowledgment>();
+	private readonly completedVerificationRecoveries = new Map<string, string>();
 	private cycleCounter = 0;
 	private _lastBinding?: ExpertBinding;
 	private _lastRoute?: ObjectiveRoute;
 	private _lastExecutor?: string;
+	private rootExecutionRerouted = false;
 
 	/**
 	 * Record who executes a route the moment it is decided, before the route runs: how many requests a
@@ -473,6 +478,48 @@ export class ObjectiveExecutionController {
 	/** The route the last run cycle evaluated; the session's loop reads it to name a wait or a stop. */
 	getLastRoute(): ObjectiveRoute | undefined {
 		return this._lastRoute;
+	}
+
+	/** Explicit owner resumption grants another recovery attempt without resolving its findings. */
+	resetVerificationRecovery(objectiveId: string): void {
+		this.completedVerificationRecoveries.delete(objectiveId);
+	}
+
+	private verificationRecoveryFingerprint(objectiveId: string, runtime: TaskRuntimeProjection): string {
+		const state = this.deps.systemOne?.snapshot?.();
+		const objective = runtime.objectives[objectiveId];
+		return createHash("sha256")
+			.update(
+				JSON.stringify({
+					objective: objective?.objective.description,
+					evidence: objective?.evidence,
+					findings: this.deps.systemOne?.peekControlDirective?.()?.reasonCodes,
+					// Canonical hydration stamps observations with the projection revision and open
+					// obligations with "now". Neither is an executed diagnostic/check receipt.
+					observations: state?.observations.map((observation) => ({
+						...observation,
+						source: {
+							kind: observation.source.kind,
+							locator: observation.source.locator,
+							content_hash: observation.source.content_hash,
+							line_start: observation.source.line_start,
+							line_end: observation.source.line_end,
+							trust: observation.source.trust,
+						},
+					})),
+					verification: state?.verification.map((verification) => ({
+						id: verification.id,
+						kind: verification.kind,
+						status: verification.status,
+						command: verification.command,
+						artifact_ref: verification.artifact_ref,
+						covers_acceptance_ids: verification.covers_acceptance_ids,
+						observation_ids: verification.observation_ids,
+					})),
+					changes: state?.changes,
+				}),
+			)
+			.digest("hex");
 	}
 
 	/**
@@ -1063,6 +1110,20 @@ export class ObjectiveExecutionController {
 			const route = await this.evaluateRouteOnce(objectiveId, { signal });
 			this._lastRoute = route;
 			this._lastExecutor = undefined;
+			this.rootExecutionRerouted = false;
+			const verificationRecovery = route.reason_codes.includes(SAME_LANE_VERIFICATION_RECOVERY_REASON_CODE);
+			const recoveryFingerprint = verificationRecovery
+				? this.verificationRecoveryFingerprint(objectiveId, await this.deps.runtime.reconcileObjective(objectiveId))
+				: undefined;
+			if (recoveryFingerprint && this.completedVerificationRecoveries.get(objectiveId) === recoveryFingerprint) {
+				const reasonCodes = ["same_lane_verification_recovery_exhausted", ...route.reason_codes];
+				return {
+					status: "blocked",
+					reasonCodes,
+					cycleCount: this.cycleCounter,
+					deliveryBundle: await this.buildBundle(objectiveId, "incomplete", runtime, { reasonCodes }),
+				};
+			}
 
 			// 4. Authority Envelope / Execution Charter gate (FIN-070..FIN-074, ZH-001..ZH-012)
 			const proposedAction = this.deps.getRouteProposedAction
@@ -1901,6 +1962,10 @@ export class ObjectiveExecutionController {
 			// 6. Ingest evidence & validate postflight
 			await this.deps.evidence?.ingestLatest?.(objectiveId);
 			await this.deps.systemOne?.validateObjectivePostflight?.(objectiveId);
+			// A returned root recovery, unlike a decided route or interrupted executor, spent this
+			// evidence's recovery allowance. New diagnostic/check evidence changes the fingerprint.
+			if (recoveryFingerprint && !this.rootExecutionRerouted)
+				this.completedVerificationRecoveries.set(objectiveId, recoveryFingerprint);
 
 			// RCG-042: task postflight project rules. A blocking violation queues repair work and
 			// stops this cycle rather than letting the objective advance past it.
@@ -1971,7 +2036,8 @@ export class ObjectiveExecutionController {
 					(!this.deps.workerDispatcher?.dispatch || (this.deps.chooseExecutor?.(route) ?? "root") === "root")))
 		) {
 			await this._noteExecutor(route, "root");
-			await this.deps.rootExecutor.execute(route, signal);
+			const outcome = await this.deps.rootExecutor.execute(route, signal);
+			this.rootExecutionRerouted = outcome?.outcome === "rerouted";
 			return undefined;
 		}
 		await this._noteExecutor(route, escalated ? "worker:escalated" : "worker");

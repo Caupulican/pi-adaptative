@@ -22,6 +22,7 @@ function scriptedController(
 	let rootExecutor: { execute(route: ObjectiveRoute, signal?: AbortSignal): Promise<void> } | undefined;
 	let lastRoute: ObjectiveRoute | undefined;
 	const routed: string[] = [];
+	const resetVerificationRecovery = vi.fn();
 	const route = (name: ObjectiveRoute["route"]): ObjectiveRoute => ({
 		schema_version: "1.0",
 		cycle_id: `c${index}`,
@@ -31,6 +32,7 @@ function scriptedController(
 		target_requirement_ids: ["r1"],
 	});
 	const controller = {
+		resetVerificationRecovery,
 		getMode: () => "objective_primary" as const,
 		bindSessionExecutors: (executors: { rootExecutor?: typeof rootExecutor }) => {
 			rootExecutor = executors.rootExecutor ?? rootExecutor;
@@ -47,7 +49,7 @@ function scriptedController(
 			return undefined;
 		},
 	};
-	return { controller: controller as unknown as ObjectiveExecutionController, routed };
+	return { controller: controller as unknown as ObjectiveExecutionController, routed, resetVerificationRecovery };
 }
 
 /** An assistant turn as the session records it after a prompt; `errorMessage` names an abort. */
@@ -125,6 +127,29 @@ function session(
 }
 
 describe("System One primary loop", () => {
+	it("persists an exhausted verification recovery without auto-retry, and owner resume grants a fresh attempt", async () => {
+		const autoContinues: string[] = [];
+		const scripted = scriptedController([
+			{
+				kind: "terminal",
+				terminal: {
+					status: "blocked",
+					reasonCodes: ["same_lane_verification_recovery_exhausted", "unresolved evidence"],
+				},
+			},
+		]);
+		const goals = session(scripted.controller, [], { autoContinues });
+		await goals.continueOnce({ maxStallTurns: 3 });
+		expect(goals.getState()?.status).toBe("blocked");
+		expect(goals.getState()?.blockedReason).toContain("same_lane_verification_recovery_exhausted");
+		expect(autoContinues).toEqual([]);
+		expect(goals.resumeSystemBlockedGoal(undefined, "system")).toBeUndefined();
+		expect(scripted.resetVerificationRecovery).not.toHaveBeenCalled();
+		expect(goals.resumeSystemBlockedGoal(undefined, "owner")).toBe("g1");
+		expect(scripted.resetVerificationRecovery).toHaveBeenCalledWith("goal:g1");
+		expect(goals.getState()?.status).toBe("active");
+	});
+
 	it("keeps the goal active when foreground admission races with an automatic continuation", async () => {
 		const { controller } = scriptedController([
 			{ kind: "error", error: new AgentBusyError("Agent is already processing.") },

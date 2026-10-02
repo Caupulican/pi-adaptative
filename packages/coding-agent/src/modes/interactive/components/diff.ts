@@ -16,8 +16,8 @@ function parseDiffLine(line: string): { prefix: string; lineNum: string; content
  * On palettes where added-green sits on a green-tinted panel, the foreground alone reads as grey;
  * the wash is what makes the change land.
  */
-function paintDiffLine(kind: "added" | "removed", text: string): string {
-	const painted = theme.fg(kind === "added" ? "toolDiffAdded" : "toolDiffRemoved", text);
+function paintDiffLine(kind: "added" | "removed", text: string, highlightedSuffix = ""): string {
+	const painted = theme.fg(kind === "added" ? "toolDiffAdded" : "toolDiffRemoved", text) + highlightedSuffix;
 	const surface = kind === "added" ? "toolDiffAddedBg" : "toolDiffRemovedBg";
 	return theme.hasBg(surface) ? theme.bg(surface, painted) : painted;
 }
@@ -31,54 +31,59 @@ function replaceTabs(text: string): string {
 
 /**
  * Compute word-level diff and render with inverse on changed parts.
- * Uses diffWords which groups whitespace with adjacent words for cleaner highlighting.
+ * Retains whitespace so the change offsets match the source and its syntax colors exactly.
  * Strips leading whitespace from inverse to avoid highlighting indentation.
  */
-function renderIntraLineDiff(oldContent: string, newContent: string): { removedLine: string; addedLine: string } {
-	const wordDiff = Diff.diffWords(oldContent, newContent);
-
-	let removedLine = "";
-	let addedLine = "";
-	let isFirstRemoved = true;
-	let isFirstAdded = true;
-
-	for (const part of wordDiff) {
-		if (part.removed) {
-			let value = part.value;
-			// Strip leading whitespace from the first removed part
-			if (isFirstRemoved) {
-				const leadingWs = value.match(/^(\s*)/)?.[1] || "";
-				value = value.slice(leadingWs.length);
-				removedLine += leadingWs;
-				isFirstRemoved = false;
+function renderIntraLineDiff(
+	oldContent: string,
+	newContent: string,
+	painted = { removedLine: oldContent, addedLine: newContent },
+): { removedLine: string; addedLine: string } {
+	const wordDiff = Diff.diffWordsWithSpace(oldContent, newContent);
+	const emphasize = (rendered: string, kind: "removed" | "added") => {
+		const ranges: { start: number; end: number }[] = [];
+		let offset = 0;
+		let firstChanged = true;
+		for (const part of wordDiff) {
+			if (part[kind === "removed" ? "added" : "removed"]) continue;
+			if (part[kind]) {
+				const start = offset + (firstChanged ? (part.value.match(/^\s*/)?.[0].length ?? 0) : 0);
+				firstChanged = false;
+				if (start < offset + part.value.length) ranges.push({ start, end: offset + part.value.length });
 			}
-			if (value) {
-				removedLine += theme.inverse(value);
-			}
-		} else if (part.added) {
-			let value = part.value;
-			// Strip leading whitespace from the first added part
-			if (isFirstAdded) {
-				const leadingWs = value.match(/^(\s*)/)?.[1] || "";
-				value = value.slice(leadingWs.length);
-				addedLine += leadingWs;
-				isFirstAdded = false;
-			}
-			if (value) {
-				addedLine += theme.inverse(value);
-			}
-		} else {
-			removedLine += part.value;
-			addedLine += part.value;
+			offset += part.value.length;
 		}
-	}
-
-	return { removedLine, addedLine };
+		offset = 0;
+		let rangeIndex = 0;
+		// Only the highlighter's SGR attributes pass through here; source was sanitized upstream.
+		return rendered.replace(/\x1b\[[\d;]*m|[^\x1b]+/g, (run) => {
+			if (run.startsWith("\x1b")) return run;
+			let output = "";
+			let index = 0;
+			while (index < run.length) {
+				while (ranges[rangeIndex]?.end <= offset) rangeIndex++;
+				const range = ranges[rangeIndex];
+				const changed = range && offset >= range.start;
+				const length = Math.min(
+					run.length - index,
+					range ? (changed ? range.end : range.start) - offset : run.length,
+				);
+				const text = run.slice(index, index + length);
+				output += changed ? theme.inverse(text) : text;
+				index += length;
+				offset += length;
+			}
+			return output;
+		});
+	};
+	return { removedLine: emphasize(painted.removedLine, "removed"), addedLine: emphasize(painted.addedLine, "added") };
 }
 
 export interface RenderDiffOptions {
 	/** File path (unused, kept for API compatibility) */
 	filePath?: string;
+	/** Paint multiline source separately from diff markers and changed-word emphasis. */
+	highlightContent?: (content: string) => string;
 }
 
 /**
@@ -87,7 +92,58 @@ export interface RenderDiffOptions {
  * - Removed lines: red, with inverse on changed tokens
  * - Added lines: green, with inverse on changed tokens
  */
-export function renderDiff(diffText: string, _options: RenderDiffOptions = {}): string {
+export function renderDiff(diffText: string, options: RenderDiffOptions = {}): string {
+	if (options.highlightContent) {
+		const paint = options.highlightContent;
+		const rows = diffText.split("\n").map((line) => ({ line, parsed: parseDiffLine(line) }));
+		// Removed and added versions have independent lexer state; context participates in both.
+		const versions = ["+", "-"].map((excluded) =>
+			paint(
+				rows
+					.filter(({ parsed }) => parsed?.prefix !== excluded)
+					.map(({ parsed }) => replaceTabs(parsed?.content ?? ""))
+					.join("\n"),
+			).split("\n"),
+		);
+		let removedIndex = 0;
+		let addedIndex = 0;
+		const paintedRows = rows.map(({ parsed }) => {
+			const removed = parsed?.prefix !== "+" ? versions[0][removedIndex++] : "";
+			const added = parsed?.prefix !== "-" ? versions[1][addedIndex++] : "";
+			return parsed?.prefix === "-" ? removed : added;
+		});
+		for (let index = 0; index < rows.length - 1; index++) {
+			const removed = rows[index].parsed;
+			const added = rows[index + 1].parsed;
+			if (
+				removed?.prefix !== "-" ||
+				added?.prefix !== "+" ||
+				rows[index - 1]?.parsed?.prefix === "-" ||
+				rows[index + 2]?.parsed?.prefix === "+"
+			)
+				continue;
+			const emphasized = renderIntraLineDiff(replaceTabs(removed.content), replaceTabs(added.content), {
+				removedLine: paintedRows[index],
+				addedLine: paintedRows[index + 1],
+			});
+			paintedRows[index] = emphasized.removedLine;
+			paintedRows[index + 1] = emphasized.addedLine;
+		}
+		return rows
+			.map(({ line, parsed }, index) => {
+				if (!parsed) return theme.fg("text", line);
+				const content = paintedRows[index];
+				if (parsed.prefix === "+" || parsed.prefix === "-") {
+					return paintDiffLine(
+						parsed.prefix === "+" ? "added" : "removed",
+						parsed.prefix,
+						theme.fg("text", parsed.lineNum) + theme.fg("text", " ") + content,
+					);
+				}
+				return theme.fg("text", ` ${parsed.lineNum} `) + content;
+			})
+			.join("\n");
+	}
 	const lines = diffText.split("\n");
 	const result: string[] = [];
 

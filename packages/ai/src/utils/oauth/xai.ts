@@ -1,6 +1,6 @@
 /** xAI OAuth device-code flow. */
 
-import { XAI_CLIENT_CONFIG } from "../../providers/xai-client-config.generated.ts";
+import { XAI_CLI_PROXY_BASE_URL, XAI_CLI_VERSION_HEADERS, xaiCliHeaders } from "../../providers/xai-cli-identity.ts";
 import type { Api, Model } from "../../types.ts";
 import { pollOAuthDeviceCodeFlow } from "./device-code.ts";
 import { parseOAuthTokenCredentials } from "./token-credentials.ts";
@@ -12,18 +12,13 @@ const XAI_SCOPE =
 const XAI_DEVICE_CODE_URL = "https://auth.x.ai/oauth2/device/code";
 const XAI_TOKEN_URL = "https://auth.x.ai/oauth2/token";
 const DEFAULT_TOKEN_LIFETIME_SECONDS = 3600;
-const XAI_CLI_PROXY_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
-const XAI_CLI_VERSION_HEADERS = { "x-grok-client-version": XAI_CLIENT_CONFIG.version } as const;
 const XAI_DEVICE_FLOW_HEADERS = {
 	...XAI_CLI_VERSION_HEADERS,
 	"x-grok-client-surface": "cli",
 } as const;
 const XAI_CLI_PROXY_HEADERS = {
-	...XAI_CLI_VERSION_HEADERS,
-	"X-XAI-Token-Auth": "xai-grok-cli",
 	"x-authenticateresponse": "authenticate-response",
 	"x-grok-client-identifier": "grok-shell",
-	"x-grok-client-mode": "interactive",
 } as const;
 
 type JsonObject = Record<string, unknown>;
@@ -280,9 +275,9 @@ export const xaiOAuthProvider: OAuthProviderInterface = {
 				baseUrl: XAI_CLI_PROXY_BASE_URL,
 				headers: {
 					...model.headers,
+					...xaiCliHeaders(userId),
 					...XAI_CLI_PROXY_HEADERS,
 					"x-grok-model-override": model.id,
-					...(userId ? { "x-userid": userId } : {}),
 					...(email ? { "x-email": email } : {}),
 				},
 				compat: {

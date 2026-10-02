@@ -5,6 +5,7 @@ import type {
 	OpenAICodexLimitReachedType,
 	OpenAICodexUsage,
 	OpenRouterAccountUsage,
+	XaiAccountUsage,
 } from "@caupulican/pi-ai";
 import type { AuthCredential } from "../auth-storage.ts";
 import type { SessionCostSummary } from "../cost/cost-summary.ts";
@@ -112,6 +113,7 @@ export function openAICodexCredentialHeaders(
 }
 export const ANTHROPIC_PROVIDER = "anthropic";
 export const OPENROUTER_PROVIDER = "openrouter";
+export const XAI_PROVIDER = "xai";
 
 function authKind(registry: UsageOverviewRegistry, provider: string): AccountAuthKind {
 	let credential: AuthCredential | undefined;
@@ -316,6 +318,32 @@ export function anthropicUsageSnapshot(
 
 function usd(value: number): string {
 	return `$${value.toFixed(2)}`;
+}
+
+export function xaiUsageSnapshot(usage: XaiAccountUsage): Omit<AccountUsageSnapshot, "observedAt" | "source"> {
+	const label = usage.periodType === "WEEKLY" ? "weekly" : usage.periodType === "MONTHLY" ? "monthly" : "usage";
+	const details: string[] = [];
+	if (usage.onDemandEnabled !== undefined) details.push(`on-demand ${usage.onDemandEnabled ? "enabled" : "disabled"}`);
+	if (usage.onDemandUsedCents !== undefined) details.push(`on-demand ${usd(usage.onDemandUsedCents / 100)} used`);
+	if (usage.onDemandCapCents !== undefined) details.push(`on-demand cap ${usd(usage.onDemandCapCents / 100)}`);
+	if (usage.monthlyLimitCents !== undefined)
+		details.push(`monthly credit limit ${usd(usage.monthlyLimitCents / 100)}`);
+	return {
+		windows:
+			usage.usedPercent === undefined
+				? []
+				: [
+						{
+							label,
+							usedPercent: usage.usedPercent,
+							...(usage.resetsAt !== undefined ? { resetsAt: usage.resetsAt } : {}),
+						},
+					],
+		...(usage.prepaidBalanceCents !== undefined
+			? { balance: `${usd(usage.prepaidBalanceCents / 100)} prepaid credit` }
+			: {}),
+		...(details.length > 0 ? { details } : {}),
+	};
 }
 
 export function openRouterUsageSnapshot(

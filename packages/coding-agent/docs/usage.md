@@ -17,10 +17,11 @@ The interface has four main areas:
 
 `/usage` opens one overview at once:
 
-- **Session**: cost, tokens and context.
+- **Session**: cost and tokens.
 - **Today**: cost for the host's local day.
-- **Machine**: provider requests in flight across every pi process, work on other accounts, and the emergency stop.
-- **Accounts**: every provider this session holds credentials for (`/login`, environment keys, `models.json` keys or auth headers), with its in-flight requests, any recorded limit, its usage windows with reset times, and its credit balance when the provider reports one.
+- **Status**: provider requests in flight across every pi process, work on other accounts, and the emergency stop.
+- **Context**: used tokens and percentage of the current model's context window.
+- **Accounts**: every provider this session holds credentials for (`/login`, environment keys, `models.json` keys or auth headers), with its plan, in-flight requests, any recorded limit, usage windows with reset times, and credit balance when the provider reports them.
 
 Local runtimes that need no credential are not listed, and neither are other accounts' records.
 
@@ -35,6 +36,7 @@ Every value says when it was fetched or seen in responses. Data older than 15 mi
 |---|---|
 | OpenAI Codex (ChatGPT login) | Usage windows, monthly credit limit, credit balance, earned resets (`/wham/usage`) |
 | Anthropic (Claude login) | Usage windows, extra-usage amounts when enabled (`/api/oauth/usage`) |
+| xAI (Grok subscription login) | Reported usage percentage, billing period reset, prepaid credit and on-demand amounts (`/billing?format=credits`) |
 | OpenRouter (API key) | Remaining credit, key limit and key spend (`/credits`, `/key`) |
 | Others | Admission state and windows seen in responses only |
 

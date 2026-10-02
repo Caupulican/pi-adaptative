@@ -1152,38 +1152,38 @@ function getCliHighlightTheme(t: Theme): CliHighlightTheme {
  * Highlight code with syntax coloring based on file extension or language.
  * Returns array of highlighted lines.
  */
-export function highlightCode(code: string, lang?: string): string[] {
-	return highlightCodeLines(code, lang, "plain");
+export function highlightCode(code: string, lang?: string, options: { plainColor?: ThemeColor } = {}): string[] {
+	return highlightCodeLines(code, lang, "plain", options.plainColor);
 }
 
 type HighlightFailureFallback = "plain" | "themed";
-
-function themedCodeLines(code: string): string[] {
-	return code.split("\n").map((line) => theme.fg("mdCodeBlock", line));
-}
 
 function highlightCodeLines(
 	code: string,
 	lang: string | undefined,
 	failureFallback: HighlightFailureFallback,
+	plainColor?: ThemeColor,
 ): string[] {
+	const plainLines = () => code.split("\n").map((line) => theme.fg(plainColor ?? "mdCodeBlock", line));
 	// Validate language before highlighting to avoid stderr spam from cli-highlight
 	const validLang = lang && supportsLanguage(lang) ? lang : undefined;
 	// Skip highlighting when no valid language is specified. cli-highlight's
 	// auto-detection is unreliable and can misidentify prose as AppleScript,
 	// LiveCodeServer, etc., coloring random English words as keywords.
 	if (!validLang) {
-		return themedCodeLines(code);
+		return plainLines();
 	}
 	const opts = {
 		language: validLang,
 		ignoreIllegals: true,
-		theme: getCliHighlightTheme(theme),
+		theme: plainColor
+			? { ...getCliHighlightTheme(theme), default: (s: string) => theme.fg(plainColor, s) }
+			: getCliHighlightTheme(theme),
 	};
 	try {
 		return highlight(code, opts).split("\n");
 	} catch {
-		return failureFallback === "themed" ? themedCodeLines(code) : code.split("\n");
+		return plainColor || failureFallback === "themed" ? plainLines() : code.split("\n");
 	}
 }
 

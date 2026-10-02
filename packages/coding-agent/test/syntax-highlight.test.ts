@@ -12,6 +12,13 @@ describe("syntax highlight renderer", () => {
 		});
 		expect(rendered).toBe("[keyword:const] value");
 	});
+	it("formats each line of a multiline scope independently", () => {
+		const rendered = renderHighlightedHtml('<span class="hljs-comment">/*\nconst text = 1\n*/</span>', {
+			comment: (text) => `[comment:${text}]`,
+		});
+		expect(rendered.split("\n")).toEqual(["[comment:/*]", "[comment:const text = 1]", "[comment:*/]"]);
+		expect(renderHighlightedHtml("first\nsecond")).toBe("first\nsecond");
+	});
 
 	it("decodes HTML entities emitted by highlight.js", () => {
 		const rendered = renderHighlightedHtml("&lt;tag attr=&quot;value&quot;&gt;&amp;#x41;&#65;&lt;/tag&gt;");

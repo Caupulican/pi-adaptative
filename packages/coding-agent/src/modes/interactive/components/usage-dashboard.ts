@@ -58,7 +58,7 @@ function dollars(value: number): string {
 function percentTone(percent: number): (text: string) => string {
 	if (percent >= 100) return (text) => theme.fg("error", text);
 	if (percent >= 80) return (text) => theme.fg("warning", text);
-	return (text) => text;
+	return (text) => theme.fg("text", text);
 }
 
 function observed(snapshot: AccountUsageSnapshot, now: number): string {
@@ -75,7 +75,7 @@ function windowLine(window: UsageWindow, now: number, labelWidth: number): strin
 			? ""
 			: theme.fg("dim", `  resets ${clock(window.resetsAt)} (in ${span(window.resetsAt - now)})`);
 	const detail = window.detail ? theme.fg("dim", `  ${window.detail}`) : "";
-	return `    ${window.label.padEnd(labelWidth)} ${percentTone(window.usedPercent)(percent)}${reset}${detail}`;
+	return `    ${theme.fg("text", window.label.padEnd(labelWidth))} ${percentTone(window.usedPercent)(percent)}${reset}${detail}`;
 }
 
 function fetchLine(account: AccountOverview): { line?: string; snapshot?: AccountUsageSnapshot } {
@@ -148,28 +148,32 @@ export function formatUsageOverviewLines(overview: UsageOverview, width: number,
 	const context = session.context
 		? session.context.percent === null
 			? `context ?/${tokens(session.context.window)}`
-			: `context ${Math.round(session.context.percent)}% of ${tokens(session.context.window)}`
+			: `context ${Math.round(session.context.percent)}% of ${tokens(session.context.window)}${session.context.tokens === null ? "" : ` (${tokens(session.context.tokens)} used)`}`
 		: undefined;
+	const text = (value: string) => theme.fg("text", value);
+	const join = (parts: Array<string | undefined>) => parts.filter(Boolean).join(text(" · "));
 	const sessionParts = [
-		`${dollars(session.costUsd)}${session.subscription ? " (sub)" : ""}${session.subagentCostUsd > 0 ? theme.fg("dim", ` incl. subagents ${dollars(session.subagentCostUsd)}`) : ""}`,
-		`in ${tokens(session.tokens.input)} out ${tokens(session.tokens.output)} cache ${tokens(session.tokens.cacheRead)}/${tokens(session.tokens.cacheWrite)}`,
-		context,
-	].filter(Boolean);
+		`${text(`${dollars(session.costUsd)}${session.subscription ? " (sub)" : ""}`)}${session.subagentCostUsd > 0 ? theme.fg("dim", ` incl. subagents ${dollars(session.subagentCostUsd)}`) : ""}`,
+		text(
+			`in ${tokens(session.tokens.input)} out ${tokens(session.tokens.output)} cache ${tokens(session.tokens.cacheRead)}/${tokens(session.tokens.cacheWrite)}`,
+		),
+	];
 	const machine = overview.machine;
 	const machineParts = [
-		`${machine.inflight} in flight`,
-		machine.otherAccountsInflight > 0 ? `${machine.otherAccountsInflight} on other accounts` : undefined,
-		machine.otherAccountLimits > 0 ? `${machine.otherAccountLimits} limits on other accounts` : undefined,
+		text(machine.inflight > 0 ? `${machine.inflight} in flight` : "idle · 0 in flight"),
+		machine.otherAccountsInflight > 0 ? text(`${machine.otherAccountsInflight} on other accounts`) : undefined,
+		machine.otherAccountLimits > 0 ? text(`${machine.otherAccountLimits} limits on other accounts`) : undefined,
 		machine.emergencyStop.engaged
 			? theme.fg("error", `estop ENGAGED${machine.emergencyStop.reason ? ` (${machine.emergencyStop.reason})` : ""}`)
-			: "estop off",
-	].filter(Boolean);
+			: text("estop off"),
+	];
 	const label = (text: string) => theme.fg("dim", text.padEnd(9));
 	const lines = [
 		`${theme.bold("Usage & limits")}${theme.fg("dim", `  as of ${clock(now)}`)}`,
-		`${label("Session")}${sessionParts.join(" · ")}`,
-		`${label("Today")}${dollars(overview.today.costUsd)}${overview.today.subagentCostUsd > 0 ? theme.fg("dim", ` incl. subagents ${dollars(overview.today.subagentCostUsd)}`) : ""}`,
-		`${label("Machine")}${machineParts.join(" · ")}`,
+		`${label("Session")}${join(sessionParts)}`,
+		`${label("Today")}${text(dollars(overview.today.costUsd))}${overview.today.subagentCostUsd > 0 ? theme.fg("dim", ` incl. subagents ${dollars(overview.today.subagentCostUsd)}`) : ""}`,
+		`${label("Status")}${join(machineParts)}`,
+		`${label("Context")}${text(context ?? "context unavailable")}`,
 		"",
 	];
 	if (overview.accounts.length === 0) lines.push(theme.fg("dim", "  No provider has credentials in this session."));
@@ -180,7 +184,7 @@ export function formatUsageOverviewLines(overview: UsageOverview, width: number,
 	return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
 }
 
-export const USAGE_OVERVIEW_HEADER_LINES = 5;
+export const USAGE_OVERVIEW_HEADER_LINES = 6;
 
 class UsageOverviewBody implements Component {
 	overview: UsageOverview;

@@ -40,13 +40,15 @@ export class AssistantMessageComponent extends Container {
 	private markdownTheme: MarkdownTheme;
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
-	private visibleOutput = false;
+	private hasVisibleText = false;
+	private visibleNonThinkingOutput = false;
 	private isStreaming: boolean;
 	private transformMarkdown?: MarkdownTransformFn;
 	private readonly byline?: ReplyByline;
 	private markdownSlots: MarkdownTransformSlot[] = [];
-	/** Wraps the thinking block (+ its own trailing spacer) so toggling never rebuilds content. */
-	private thinkingContainer?: VisibilityContainer;
+	/** Thinking sections retain their contents and spacing across visibility toggles. */
+	private thinkingContainers: VisibilityContainer[] = [];
+	private leadingSpacer?: VisibilityContainer;
 
 	constructor(
 		message?: AssistantMessage,
@@ -91,20 +93,20 @@ export class AssistantMessageComponent extends Container {
 	 * when one was built) live inside a VisibilityContainer built once in updateContent(), so a
 	 * toggle is just a visibility flip plus a cache invalidation on that one subtree.
 	 *
-	 * Known cosmetic limitation: the single leading spacer before all message content is decided
-	 * once, in updateContent(), from the thinking-visibility at that time. For a thinking-only
-	 * message (no text, no tool-call error text) toggled after the fact, the leading spacer does
-	 * not react. This never loses or corrupts content -- only that one blank line can be stale
-	 * until the next real content update.
+	 * The leading spacer follows visible text, thinking, and the byline independently of the
+	 * content tree, so thinking-only replies do not leave an empty row behind when hidden.
 	 */
 	setHideThinkingBlock(hide: boolean): void {
 		this.contentRevision++;
 		this.hideThinkingBlock = hide;
-		this.thinkingContainer?.setVisible(!hide);
+		for (const container of this.thinkingContainers) container.setVisible(!hide);
+		this.leadingSpacer?.setVisible(
+			this.hasVisibleText || Boolean(this.byline) || (!hide && this.thinkingContainers.length > 0),
+		);
 	}
 
 	hasVisibleOutput(): boolean {
-		return this.visibleOutput;
+		return this.visibleNonThinkingOutput || this.thinkingContainers.some((container) => container.isVisible());
 	}
 
 	override render(width: number): string[] {
@@ -151,7 +153,8 @@ export class AssistantMessageComponent extends Container {
 		// Clear content container
 		this.contentContainer.clear();
 		this.markdownSlots = [];
-		this.thinkingContainer = undefined;
+		this.thinkingContainers = [];
+		this.leadingSpacer = undefined;
 
 		const hasVisibleContent = message.content.some(
 			(c) => this.isReadable(c) && (c.type !== "thinking" || !this.hideThinkingBlock),
@@ -160,16 +163,17 @@ export class AssistantMessageComponent extends Container {
 		// content the operator can reveal, so it must not read as an empty turn.
 		const hasReadableContent = message.content.some((c) => this.isReadable(c));
 		const hasToolCalls = message.content.some((c) => c.type === "toolCall");
-		this.visibleOutput =
-			hasVisibleContent ||
+		this.hasVisibleText = message.content.some((c) => c.type === "text" && this.isReadable(c));
+		this.visibleNonThinkingOutput =
+			this.hasVisibleText ||
 			(!hasToolCalls &&
 				(message.stopReason === "aborted" ||
 					message.stopReason === "error" ||
 					(!this.isStreaming && !hasReadableContent)));
 
-		if (hasVisibleContent || this.byline) {
-			this.contentContainer.addChild(new Spacer(1));
-		}
+		this.leadingSpacer = new VisibilityContainer(hasVisibleContent || Boolean(this.byline));
+		this.leadingSpacer.addChild(new Spacer(1));
+		this.contentContainer.addChild(this.leadingSpacer);
 		if (this.byline) {
 			this.contentContainer.addChild(
 				// One row: at narrow widths the route and model shorten from the end, the actor always stays.
@@ -220,7 +224,7 @@ export class AssistantMessageComponent extends Container {
 				if (hasVisibleContentAfter) {
 					thinkingContainer.addChild(new Spacer(1));
 				}
-				this.thinkingContainer = thinkingContainer;
+				this.thinkingContainers.push(thinkingContainer);
 				this.contentContainer.addChild(thinkingContainer);
 			}
 		}

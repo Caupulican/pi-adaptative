@@ -107,6 +107,43 @@ function adapter(
 	return { provider, request: (account) => ({ account, run: (signal) => run(account, signal) }) };
 }
 
+describe("merged usage screen", () => {
+	beforeAll(() => initTheme("dark"));
+
+	it("keeps status, context, costs and account windows in one overview", () => {
+		const registry = fakeRegistry({ "openai-codex": { oauth: true } });
+		const overview = overviewFor(registry, new AccountUsageMonitor({ adapters: [] }));
+		overview.machine.inflight = 2;
+		overview.accounts[0].fetch = {
+			kind: "fetched",
+			snapshot: {
+				source: "account_api",
+				observedAt: NOW,
+				plan: "Plus",
+				windows: [{ label: "5h", usedPercent: 37, resetsAt: NOW + 600_000 }],
+			},
+		};
+		const text = plain(formatUsageOverviewLines(overview, 80, NOW));
+		expect(text).toContain("Status   2 in flight");
+		expect(text).toContain("context 42% of 200k (84k used)");
+		expect(text).toContain("$0.4213");
+		expect(text).toContain("Today    $3.12");
+		expect(text).toContain("37%");
+		expect(text).toContain("5h");
+		expect(text).toContain("resets");
+		expect(text).toContain("Plus");
+	});
+
+	it("renders an account without inventing quota when no snapshot exists", () => {
+		const registry = fakeRegistry({ openrouter: {} });
+		const overview = overviewFor(registry, new AccountUsageMonitor({ adapters: [] }));
+		const text = plain(formatUsageOverviewLines(overview, 180, NOW));
+		expect(text).toContain("openrouter");
+		expect(text).toContain("Status   idle");
+		expect(text.match(/\d+%/g)).toEqual(["42%"]);
+	});
+});
+
 describe("usage overview membership", () => {
 	it("lists only providers this registry holds credentials for, never a no-auth local runtime", () => {
 		const auth = AuthStorage.inMemory({ openrouter: { type: "api_key", key: SECRET_TOKEN } });
