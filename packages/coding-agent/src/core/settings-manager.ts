@@ -437,11 +437,11 @@ export const DEFAULT_WORKER_DELEGATION_ENABLED = true;
 export const DEFAULT_WORKER_DELEGATION_MAX_USD = 0;
 export const DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = 0;
 /**
- * The Codex CLI default: `multi_agent_v2.max_concurrent_threads_per_session` is 4 threads per
- * session including the root, so three concurrently running subagents. Adopted verbatim rather
- * than measured here; raise it in settings when the account and the box can take more.
+ * Five concurrently running subagents. The Codex CLI's own per-session default is 4 threads
+ * including the root (three subagents); this is an owner-chosen raise above it, not a measured
+ * optimum. Lower it in settings when the account or the box cannot take it.
  */
-export const DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT = 3;
+export const DEFAULT_WORKER_DELEGATION_MAX_CONCURRENT = 5;
 export const DEFAULT_WORKER_DELEGATION_WRITE_ENABLED = true;
 export const MAX_WORKER_DELEGATION_MAX_USD = Number.MAX_SAFE_INTEGER;
 export const MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS = Number.MAX_SAFE_INTEGER;
@@ -484,7 +484,7 @@ export interface WorkerDelegationSettings {
 	maxWallClockMs?: number; // default: 0 (unbounded); a positive value caps one worker task's cumulative active time
 	writeEnabled?: boolean; // default: true; explicit false revokes direct write/edit tools
 	haltReportDeadlineMs?: number; // default: 120000; how long an interrupted worker gets to reach a request boundary and report before it is cancelled
-	maxConcurrent?: number; // default: 3 (the Codex CLI per-session default); running leaf-worker concurrency; fixed fleet safety ceilings separately bound durable identities and queued dispatches
+	maxConcurrent?: number; // default: 5 (above the Codex CLI per-session default of 3); running leaf-worker concurrency; fixed fleet safety ceilings separately bound durable identities and queued dispatches
 	modelPins?: WorkerModelPinsSettings; // optional global/local role pins; absent preserves adaptive routing exactly
 	thinking?: WorkerThinkingPolicy; // default: step_down; worker thinking relative to the foreground when no authority or profile pins it
 	account?: WorkerAccountPolicy; // default: other; fresh workers run on a provider the foreground is not using when one is authenticated
