@@ -12,6 +12,7 @@
 
 ### Changed
 
+- Refreshed Anthropic OAuth request identity to the inspected Claude Code 2.1.287 installation.
 - Refreshed the OpenRouter model catalog, including current prices, token limits, and reasoning metadata.
 
 ## [0.102.1] - 2026-10-01
