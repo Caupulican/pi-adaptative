@@ -515,21 +515,17 @@ function completionCheckHolds(answer: unknown, direction: NoulDirection, thresho
 /**
  * One completion question pack's failures under the measured completion thresholds. The goal
  * tool's completion transaction and the objective loop's JEV-025/JEV-026 both judge through this,
- * so one set of questions has one set of bounds, one applicability rule and one set of reasons. The
- * code-only questions (root cause, scope of the diff, duplicated responsibility, untested regression
- * paths) apply only when the goal changed the repository; an unasked question is not a failure.
+ * so one set of questions has one set of bounds and one set of reasons. These are the questions an
+ * evidence matrix settles (is each required outcome shown, is each claim supported); what needs
+ * reasoning about the change is the model's account, which `completion-account.ts` checks.
  */
 export function completionPackFailures(
 	stage: "completion" | "completion_challenge",
 	answers: Record<string, unknown>,
-	options: { isBugFix: boolean; repositoryOutcome?: boolean; config?: SystemOneConfig },
+	options: { config?: SystemOneConfig } = {},
 ): CompletionRejectionDetail[] {
-	// 2. Primary completion pack checks. The code-only questions (root cause, scope of the diff,
-	// duplicated responsibility, untested regression paths) apply only when the goal changed the
-	// repository; the controller does not ask them otherwise, and an unasked question is not a failure.
 	const failedGates: CompletionRejectionDetail[] = [];
 	const config = options.config ?? DEFAULT_SYSTEM_ONE_CONFIG;
-	const repositoryOutcome = options.repositoryOutcome ?? true;
 	const primaryAnswers = stage === "completion" ? answers : {};
 	const challengeAnswers = stage === "completion_challenge" ? answers : {};
 	const check = (
@@ -564,15 +560,6 @@ export function completionPackFailures(
 			"The evidence does not show every required outcome achieved",
 			"Achieve the missing outcome, or record the check or evidence that shows it.",
 		);
-		if (options.isBugFix && repositoryOutcome) {
-			check(
-				primaryAnswers.root_cause_addressed,
-				"required_true",
-				"JEV-root_cause_addressed",
-				"The fix does not address the evidenced cause",
-				"Address the causal mechanism rather than its symptom.",
-			);
-		}
 		check(
 			primaryAnswers.required_behavior_unverified,
 			"required_false",
@@ -587,56 +574,6 @@ export function completionPackFailures(
 			"A material claim is unsupported or rests on stale evidence",
 			"Support the claim with fresh evidence, or drop it.",
 		);
-		if (repositoryOutcome) {
-			check(
-				primaryAnswers.out_of_scope_change_present,
-				"required_false",
-				"JEV-out_of_scope_change_present",
-				"The repository change goes beyond the requested scope",
-				"Revert the out-of-scope change or record why it is required.",
-			);
-			check(
-				primaryAnswers.duplicate_responsibility_introduced,
-				"required_false",
-				"JEV-duplicate_responsibility_introduced",
-				"The repository change duplicates a responsibility that already has an owner",
-				"Reuse or extract the existing owner.",
-			);
-		}
-
-		// completion_verdict (choice: complete with hard confidence and margin)
-		const verdictAns = primaryAnswers.completion_verdict as
-			| {
-					choice: string;
-					confidence: number;
-					probabilities: Record<string, number>;
-			  }
-			| undefined;
-		if (verdictAns) {
-			// The verdict's choice separates done from undone work; its confidence bar is the measured one.
-			const evalVerdict = evaluateChoice(verdictAns, "normal", {
-				...config.thresholds,
-				choice: {
-					...config.thresholds.choice,
-					normal_auto_confidence: config.thresholds.completion.verdict_min_confidence,
-					min_top2_margin_normal: config.thresholds.completion.verdict_min_margin,
-				},
-			});
-			if (!evalVerdict.accepted || evalVerdict.choice !== "complete") {
-				const shortfall = evalVerdict.choice === "complete" ? `; ${(evalVerdict.reasons ?? []).join("; ")}` : "";
-				failedGates.push({
-					id: "JEV-completion_verdict",
-					reason: `System One's completion verdict is '${evalVerdict.choice}' at confidence ${evalVerdict.confidence.toFixed(2)}${shortfall}.`,
-					required_next_proof: "Address outstanding completion issues before re-submitting.",
-				});
-			}
-		} else {
-			failedGates.push({
-				id: "JEV-completion_verdict",
-				reason: "System One gave no completion verdict.",
-				required_next_proof: "Provide completion_verdict evaluation.",
-			});
-		}
 	}
 	if (stage === "completion_challenge") {
 		// 3. Challenge pack checks (R-058)
@@ -646,29 +583,6 @@ export function completionPackFailures(
 			"JEV-CHALLENGE-missing_requirement",
 			"A required outcome or constraint is missing from the evidence",
 			"Satisfy every required acceptance criterion.",
-		);
-		check(
-			challengeAnswers.hidden_assumption,
-			"required_false",
-			"JEV-CHALLENGE-hidden_assumption",
-			"Completion rests on an assumption the evidence does not establish",
-			"Establish the assumption with a check or observation.",
-		);
-		if (repositoryOutcome) {
-			check(
-				challengeAnswers.plausible_regression_not_tested,
-				"required_false",
-				"JEV-CHALLENGE-plausible_regression_not_tested",
-				"The repository change has a plausible regression path no recorded verification covers",
-				"Add a test or check that covers the path.",
-			);
-		}
-		check(
-			challengeAnswers.conclusion_overstates_evidence,
-			"required_false",
-			"JEV-CHALLENGE-conclusion_overstates_evidence",
-			"The conclusion claims more than the evidence shows",
-			"Bound the conclusion to what the evidence shows.",
 		);
 	}
 	return failedGates;
@@ -683,9 +597,8 @@ export function decideFinalCompletion(input: {
 	deterministicGates: CompletionGate[];
 	primaryAnswers: Record<string, unknown> | undefined;
 	challengeAnswers: Record<string, unknown> | undefined;
-	isBugFix: boolean;
-	/** Whether the goal changed the repository (see hasRepositoryOutcome). Default true. */
-	repositoryOutcome?: boolean;
+	/** What the model's account failed to show, decided by code and by System One against the cited evidence. */
+	accountFailures?: readonly CompletionRejectionDetail[];
 	config?: SystemOneConfig;
 }): FinalCompletionVerdict {
 	const failedGates: CompletionRejectionDetail[] = [];
@@ -708,5 +621,6 @@ export function decideFinalCompletion(input: {
 		failedGates.push(...completionPackFailures("completion", input.primaryAnswers, input));
 	if (input.challengeAnswers !== undefined)
 		failedGates.push(...completionPackFailures("completion_challenge", input.challengeAnswers, input));
+	failedGates.push(...(input.accountFailures ?? []));
 	return { verdict: failedGates.length > 0 ? "verify_more" : "complete", failed_gates: failedGates };
 }

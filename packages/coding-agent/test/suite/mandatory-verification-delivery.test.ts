@@ -278,13 +278,7 @@ describe("rank 2 composed binding probe", () => {
 						outcomes_achieved: true,
 						required_behavior_unverified: false,
 						material_claim_unsupported: false,
-						out_of_scope_change_present: false,
-						duplicate_responsibility_introduced: false,
-						completion_verdict: { choice: "complete", confidence: 0.99, probabilities: { complete: 0.99 } },
-						missing_requirement: false,
-						hidden_assumption: true,
-						plausible_regression_not_tested: false,
-						conclusion_overstates_evidence: false,
+						missing_requirement: true,
 					},
 				}),
 			},
@@ -309,7 +303,7 @@ describe("rank 2 composed binding probe", () => {
 		await h.session.prompt("Complete and publish README only after resolving required verification.");
 		const completion = h.session.messages.find((m) => m.role === "toolResult" && m.toolName === "goal");
 		expect(completion).toMatchObject({ isError: true });
-		expect(JSON.stringify(completion)).toContain("JEV-CHALLENGE-hidden_assumption");
+		expect(JSON.stringify(completion)).toContain("JEV-CHALLENGE-missing_requirement");
 		expect(semantic.peekControlDirective()?.reasonCodes).toContain("same_lane_verification_required");
 		expect(h.session.getGoalStateSnapshot()?.status).not.toBe("completed");
 		const refs = execFileSync("git", ["--git-dir", remote, "for-each-ref", "--format=%(refname)"], {

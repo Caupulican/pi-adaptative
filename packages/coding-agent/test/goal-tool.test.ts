@@ -1121,6 +1121,7 @@ describe("goal requirement checks", () => {
 			verdict: systemOneVerdict ?? "complete",
 			failed_gates: [],
 		}));
+		const noteCompletionAccount = vi.fn();
 		const tool = createGoalToolDefinition({
 			getGoalState: () => state,
 			saveGoalState: (next) => {
@@ -1145,6 +1146,7 @@ describe("goal requirement checks", () => {
 						getSystemOneController: () =>
 							({
 								executeCompletionTransaction: evaluateCompletion,
+								noteCompletionAccount,
 								completionView: () => ({ view: { outcome_evidence: [] }, repositoryOutcome: false }),
 							}) as never,
 					}
@@ -1158,8 +1160,77 @@ describe("goal requirement checks", () => {
 				checkRuns: (result.details as GoalToolDetails | undefined)?.piReceipts?.requirementChecks,
 			};
 		};
-		return { tool, run, ran, evaluateCompletion, getState: () => state };
+		return { tool, run, ran, evaluateCompletion, noteCompletionAccount, getState: () => state };
 	}
+
+	it("hands the account in a complete call to completion, and does not clear it when a later call has none", async () => {
+		const { run, evaluateCompletion, noteCompletionAccount } = checkedHarness(
+			{ "test ! -e ~/.ollama": true },
+			"complete",
+		);
+		await run({ action: "start", goalId: "g1", userGoal: "Remove the model server" });
+		await run({
+			action: "add_requirement",
+			requirementId: "r1",
+			text: "Models are gone",
+			check: { command: "test ! -e ~/.ollama" },
+		});
+		const account = {
+			changes: [{ path: "src/a.ts", reason: "It removes the server.", serves: ["r1"] }],
+			assumptions: [],
+			regressions: [],
+		};
+		await run({ action: "complete", account });
+		expect(noteCompletionAccount).toHaveBeenCalledExactlyOnceWith(account);
+		expect(evaluateCompletion).toHaveBeenCalledOnce();
+	});
+
+	it("refuses a malformed account with the first thing wrong, without handing it to completion", async () => {
+		const { run, evaluateCompletion, noteCompletionAccount } = checkedHarness(
+			{ "test ! -e ~/.ollama": true },
+			"complete",
+		);
+		await run({ action: "start", goalId: "g1", userGoal: "Remove the model server" });
+		await run({
+			action: "add_requirement",
+			requirementId: "r1",
+			text: "Models are gone",
+			check: { command: "test ! -e ~/.ollama" },
+		});
+		const refused = await run({
+			action: "complete",
+			account: {
+				changes: [{ path: "src/a.ts", reason: "It removes the server." }],
+				assumptions: [],
+				regressions: [],
+			},
+		});
+		expect(refused.isError).toBe(true);
+		expect(refused.text).toContain("The completion account is malformed");
+		expect(refused.text).toContain("serves");
+		expect(noteCompletionAccount).not.toHaveBeenCalled();
+		expect(evaluateCompletion).not.toHaveBeenCalled();
+	});
+
+	it("hands the account in an update_goal complete call to completion too", async () => {
+		const { tool, run, noteCompletionAccount } = checkedHarness({ "test ! -e ~/.ollama": true }, "complete");
+		await run({ action: "start", goalId: "g1", userGoal: "Remove the model server" });
+		await run({
+			action: "add_requirement",
+			requirementId: "r1",
+			text: "Models are gone",
+			check: { command: "test ! -e ~/.ollama" },
+		});
+		const account = {
+			changes: [{ path: "src/a.ts", reason: "It removes the server.", serves: ["r1"] }],
+			assumptions: [],
+			regressions: [],
+		};
+		const update = createGoalLifecycleToolDefinitions(tool)[2];
+		const completed = await update.execute("call-update", { status: "complete", account }, undefined, undefined, ctx);
+		expect(completed.isError).not.toBe(true);
+		expect(noteCompletionAccount).toHaveBeenCalledExactlyOnceWith(account);
+	});
 
 	it("refuses a check that would change something when the requirement is added", async () => {
 		const { run, getState } = checkedHarness({});

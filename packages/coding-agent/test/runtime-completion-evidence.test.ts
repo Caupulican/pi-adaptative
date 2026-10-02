@@ -30,6 +30,7 @@ describe("native completion evidence wiring", () => {
 				setVerificationHost: () => {},
 				verification: { status: () => ({ obligations: [] }) },
 				setEvaluationObserver: () => {},
+				setAccountPassStore: () => {},
 				setEvaluationIdleListener: () => {},
 				completionView: () => ({ view: { candidate: "current" }, repositoryOutcome: true }),
 				executeCompletionTransaction: async () => decision,

@@ -348,6 +348,7 @@ import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-v
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import { WorkerSemanticSupervisor } from "./supervision/worker-semantic-supervisor.ts";
 import { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
+import { accountPassBindings } from "./system-one/account-pass-wiring.ts";
 import {
 	AnswerClaimChecker,
 	assistantAnswerText,
@@ -757,6 +758,12 @@ export class AgentSession {
 		// System One's stage controller; the recorder forwards to the durable ledger.
 		this._bindSemanticObserver(this._steeringPlane);
 		this._systemOneController?.setEvaluationObserver(this._semanticPlaneHealth);
+		this._systemOneController?.setAccountPassStore(
+			accountPassBindings({
+				getLedger: () => this.getDecisionLedger(),
+				getSessionId: () => this.sessionManager.getSessionId(),
+			}),
+		);
 		this._semanticPlaneHealth.bindDurable(
 			() => this._semanticLedgerSink(),
 			() => this.sessionManager.getSessionId(),

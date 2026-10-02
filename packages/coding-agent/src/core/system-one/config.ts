@@ -53,10 +53,12 @@ export interface SystemOneCompletionThresholds {
 	readonly outcome_min: number;
 	/** A defect holds (is judged absent) at or below this: it fails when more likely present than not. */
 	readonly defect_max: number;
-	/** The completion verdict must choose `complete` with at least this confidence ... */
-	readonly verdict_min_confidence: number;
-	/** ... and at least this margin over its runner-up. */
-	readonly verdict_min_margin: number;
+	/**
+	 * A claim in the model's account holds when System One reads the cited evidence as showing it at or above this
+	 * (and not as contradicting it). Measured live: claims about a diff or about cited evidence that held read
+	 * 0.63-0.96; vague or irrelevant evidence 0.14-0.27; a contradicted claim at most 0.03.
+	 */
+	readonly claim_supported_min: number;
 }
 
 export interface SystemOneThresholds {
@@ -164,8 +166,7 @@ export const DEFAULT_SYSTEM_ONE_CONFIG: SystemOneConfig = Object.freeze({
 		completion: Object.freeze({
 			outcome_min: 0.7,
 			defect_max: 0.5,
-			verdict_min_confidence: 0.7,
-			verdict_min_margin: 0.15,
+			claim_supported_min: 0.5,
 		}),
 	}),
 

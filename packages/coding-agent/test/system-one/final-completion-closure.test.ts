@@ -947,12 +947,8 @@ describe("completion catalog thresholds and release binding", () => {
 	const plane = new SystemOneSteeringPlane();
 	const strong = {
 		outcomes_achieved: { noul: 0.96 },
-		root_cause_addressed: { noul: 0.5 },
 		required_behavior_unverified: { noul: 0.05 },
 		material_claim_unsupported: { noul: 0.05 },
-		out_of_scope_change_present: { noul: 0.05 },
-		duplicate_responsibility_introduced: { noul: 0.05 },
-		completion_verdict: { choice: "complete", confidence: 0.96, probabilities: { complete: 0.96, rework: 0.04 } },
 	};
 
 	it("a bug-fix objective passes isBugFix into the inner completion transaction", async () => {
@@ -970,32 +966,20 @@ describe("completion catalog thresholds and release binding", () => {
 		expect(weak.semantic_outcome).toBe("repair");
 		expect(weak.failed_semantic_predicates).toContain("outcomes_achieved");
 		expect(plane.evaluateSemanticOutcome("JEV-025", strong, directive).semantic_outcome).toBe("pass");
-		const bug = plane.evaluateSemanticOutcome("JEV-025", strong, directive, { bugFix: true });
-		expect(bug.failed_semantic_predicates).toContain("root_cause_addressed");
+		// What needs reasoning about the change (cause, scope, assumptions, regression paths) is the model's account,
+		// checked by the completion transaction; the matrix questions are all this checkpoint asks.
+		const unsupported = plane.evaluateSemanticOutcome(
+			"JEV-025",
+			{ ...strong, material_claim_unsupported: { noul: 0.8 } },
+			directive,
+		);
+		expect(unsupported.failed_semantic_predicates).toContain("material_claim_unsupported");
 	});
 
 	it("JEV-026 fails a challenge System One judges more likely present than not", () => {
-		const passed = plane.evaluateSemanticOutcome(
-			"JEV-026",
-			{
-				missing_requirement: { noul: 0.05 },
-				hidden_assumption: { noul: 0.05 },
-				plausible_regression_not_tested: { noul: 0.05 },
-				conclusion_overstates_evidence: { noul: 0.05 },
-			},
-			directive,
-		);
+		const passed = plane.evaluateSemanticOutcome("JEV-026", { missing_requirement: { noul: 0.05 } }, directive);
 		expect(passed.semantic_outcome).toBe("pass");
-		const challenged = plane.evaluateSemanticOutcome(
-			"JEV-026",
-			{
-				missing_requirement: { noul: 0.6 },
-				hidden_assumption: { noul: 0.05 },
-				plausible_regression_not_tested: { noul: 0.05 },
-				conclusion_overstates_evidence: { noul: 0.05 },
-			},
-			directive,
-		);
+		const challenged = plane.evaluateSemanticOutcome("JEV-026", { missing_requirement: { noul: 0.6 } }, directive);
 		expect(challenged.failed_semantic_predicates).toContain("missing_requirement");
 	});
 

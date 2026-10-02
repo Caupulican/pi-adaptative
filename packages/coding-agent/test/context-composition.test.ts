@@ -326,6 +326,10 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// at 344 tokens. Its 350-token ceiling budgets those requested verification actions;
 			// subtract its actual cost so unused peer capacity cannot hide unrelated schema growth.
 			const goalChecksAllowance = 162;
+			// The completion account is one optional object on goal and on update_goal, advertised as a bare
+			// object (its shape is taught in the goal guidelines and checked when used). Measured: 18 tokens on
+			// goal. Added to the goal ceiling and removed from the base subtotal by its actual cost.
+			const completionAccountAllowance = 18;
 			const peerAllowance = 350;
 			// Same live runtime framing: HEAD compact schema 358, canonical schema 828. The canonical
 			// owner-uncertainty actions and their validated disposition object add 104 measured tokens
@@ -338,9 +342,10 @@ describe("AgentSession.getContextCompositionReport", () => {
 				4_500 + 350 + 720 + 100 + 143 + 140 + goalChecksAllowance + peerAllowance + canonicalSchemaAllowance,
 			);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
-			expect(toolTokens.get("goal")).toBeLessThanOrEqual(399);
+			expect(toolTokens.get("goal")).toBeLessThanOrEqual(399 + completionAccountAllowance);
 			expect(toolTokens.get("create_goal")).toBeLessThanOrEqual(177);
-			const goalChecksGrowth = toolTokens.get("goal")! - 330 + (toolTokens.get("create_goal")! - 84);
+			const goalChecksGrowth =
+				toolTokens.get("goal")! - 330 - completionAccountAllowance + (toolTokens.get("create_goal")! - 84);
 			expect(toolTokens.get("task_directory")).toBeLessThanOrEqual(350);
 			expect(toolTokens.get("task_automation")).toBeLessThanOrEqual(720);
 			expect(toolTokens.get("systemone")).toBeGreaterThan(0);

@@ -119,6 +119,43 @@ and System One answers two things about it: what the operation does, and whether
   the verdict and the time waited), with a digest of the operation identity and never the command. The effect
   readings live in `operation_effects`.
 
+## The completion account
+
+What needs reasoning about a change belongs to the model that made it. When a goal changed the repository,
+`goal complete` (and `update_goal` with `status: "complete"`) carries `account`:
+
+- `changes`: every changed file, what the change does, and which requirement ids (or which other changed file)
+  it serves, with `evidenceIds` when its diff alone does not show it achieves them;
+- `assumptions` and `regressions`: each assumption the change relied on, and each behavior it could break, with
+  the evidence ids (from `get`) that establish it or the checks that exercise it; empty when there are none;
+- `cause`, for a bug fix: the defect's cause and how the change removes it, with evidence ids.
+
+Code checks everything it can: that the account exists, that every changed path is explained, that every
+requirement or file a change serves exists, that every cited id exists, that each claim rests on at least one
+verified piece of evidence, and that a bug fix states its cause. System One then decides each stated claim
+against the diff or the cited evidence with the same fixed pair of questions the unsettled ladder asks (does the
+evidence show it, does it contradict it), all in one request beside the evidence-matrix questions: it never guesses
+what a diff means, and the model never authors a question. A contradicted claim refuses completion and names the
+claim; a claim the evidence does not settle asks for better evidence, twice for the same claim over the same
+evidence, after which it stands as a recorded doubt. A failure in the account opens no verification obligation: it
+is answered with evidence, not with a hold on every other operation. An account missing or incomplete is one
+refusal that lists what is missing and the evidence ids the model can cite.
+
+The count of unsettled claims is kept in the decision ledger per session, so a resumed session continues it. The completion's
+evidence-matrix stages and the account's claims wait on System One together, in one round trip's time.
+
+The account is held for the session: the objective loop's completion reads the latest one, and a changed path it
+does not explain asks for an update. The evidence-matrix questions (is each required outcome shown, is each
+claim supported, is a requirement missing) are unchanged and still judged through the measured completion bounds.
+
+## Optional tools
+
+A tool that is not built in or bundled (an extension or an integration) runs unless the owner forbade it. Each owner message
+is classified once per such tool as asking for it, forbidding it, or saying nothing about it; only a forbidding blocks, and it
+stands for the task until the owner asks for the tool again or the task ends. A classification in flight, an outage and an
+uncertain judgment block nothing, and the forbiddings of the task being continued stay in force while new words are classified.
+`secret_store` status, list and discover stay available after a forbidding; activation and migration do not.
+
 ## Deadline
 
 A System One stage evaluation, an intake classification and the answer's claim check wait at most five seconds,
@@ -226,8 +263,9 @@ While findings remain open, the concrete root and worker tool executors gate aff
 including YOLO calls. A same-checkout Git push is refused directly. Other operations require a
 decisive judgment that they investigate, reproduce, repair or recheck in the receiving lane, or
 are unrelated to the finding's scope. Native evidence reads and obligation inspection remain
-available during evaluator outages, as do `systemone` status, retained evidence inspection, and
-owner advisory uncertainty dispositions. These actions never clear mandatory findings or create
+available during evaluator outages, as do `systemone` status, retained evidence inspection,
+owner advisory uncertainty dispositions, and the tools that neither change the candidate nor advance
+the work (`ask_question`, `self_compact`, `typesafe_review`). These actions never clear mandatory findings or create
 verification receipts. Classification can retry on the next operation; resolution
 can retry the same proof after an outage. Outages retain their actual cause and never resolve a
 finding. Typed delivery rechecks obligations immediately before each external effect.

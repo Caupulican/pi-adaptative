@@ -316,6 +316,13 @@ export class DecisionLedgerStore {
 				duration_ms INTEGER NOT NULL
 			);
 			CREATE INDEX IF NOT EXISTS operation_gate_decisions_session ON operation_gate_decisions (session_id, decided_at);
+			CREATE TABLE IF NOT EXISTS account_claim_passes (
+				session_id TEXT NOT NULL,
+				fingerprint TEXT NOT NULL,
+				passes INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				PRIMARY KEY (session_id, fingerprint)
+			);
 		`);
 		// Ledgers created before observations carried these columns gain them; their rows stay unassigned.
 		const columns = new Set(
@@ -634,6 +641,29 @@ export class DecisionLedgerStore {
 				 ON CONFLICT(cache_key) DO UPDATE SET model = excluded.model, readings = excluded.readings, updated_at = excluded.updated_at`,
 			)
 			.run(cacheKey, model, JSON.stringify(readings), now);
+	}
+
+	/** How many times each completion-account claim was left unsettled in a session, by claim fingerprint. */
+	readAccountClaimPasses(sessionId: string): Record<string, number> {
+		const rows = this.database
+			.prepare("SELECT fingerprint, passes FROM account_claim_passes WHERE session_id = ?")
+			.all(sessionId);
+		const passes: Record<string, number> = {};
+		for (const row of rows) {
+			const fingerprint = asText(row.fingerprint);
+			const count = asInteger(row.passes);
+			if (fingerprint !== undefined && count !== undefined) passes[fingerprint] = count;
+		}
+		return passes;
+	}
+
+	writeAccountClaimPasses(sessionId: string, fingerprint: string, passes: number, now: number): void {
+		this.database
+			.prepare(
+				`INSERT INTO account_claim_passes (session_id, fingerprint, passes, updated_at) VALUES (?, ?, ?, ?)
+				 ON CONFLICT(session_id, fingerprint) DO UPDATE SET passes = excluded.passes, updated_at = excluded.updated_at`,
+			)
+			.run(sessionId, fingerprint, passes, now);
 	}
 
 	/** Records one shell-gate decision (see {@link OperationGateDecisionRow}). */

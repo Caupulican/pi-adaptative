@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { type OptionalToolRequestContext, optionalToolRelationAsked } from "../tool-applicability-gate.ts";
 import type { ValidationStage } from "./types.ts";
 
-export const SYSTEM_ONE_CATALOG_VERSION = "1.2.1";
+export const SYSTEM_ONE_CATALOG_VERSION = "1.3.0";
 export const SYSTEM_ONE_PINNED_MODEL = "jev-1.13.0";
 export const SYSTEM_ONE_PREVIEW_MODEL = "jev-preview";
 
@@ -427,11 +427,6 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 			instructions:
 				"Does `outcome_evidence` show every required outcome in `acceptance_matrix` achieved, as `objective.normalized_goal` asks?",
 		}),
-		root_cause_addressed: Object.freeze({
-			type: "boolean",
-			instructions:
-				"For a bug-fix task, does `final_diff` address the evidence-backed causal mechanism rather than only hiding its observable symptom?",
-		}),
 		required_behavior_unverified: Object.freeze({
 			type: "boolean",
 			instructions:
@@ -442,28 +437,6 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 			instructions:
 				"Is any completion-critical claim in `claim_matrix` unsupported, only partially supported, contradicted, stale, or missing evidence?",
 		}),
-		out_of_scope_change_present: Object.freeze({
-			type: "boolean",
-			instructions:
-				"Does `final_diff` contain a material behavior change not required by the objective or a documented dependency?",
-		}),
-		duplicate_responsibility_introduced: Object.freeze({
-			type: "boolean",
-			instructions:
-				"Does `final_diff` introduce a second implementation of a responsibility that the repository evidence shows already has an owner?",
-		}),
-		completion_verdict: Object.freeze({
-			type: "choice",
-			instructions: "Given only the evidence-backed completion state, what should the harness do?",
-			criteria: Object.freeze({
-				complete: "Every required outcome is achieved and shown by evidence; nothing material remains.",
-				retrieve_more: "The outcomes may be achieved, but the evidence does not show it yet.",
-				verify_more: "A required outcome still needs a check, test or observation that has not been run.",
-				rework: "A required outcome is missing, wrong, or out of the requested scope.",
-				blocked_external:
-					"A required proof or outcome depends on unavailable external access, information, or authorization.",
-			}),
-		}),
 	}),
 
 	completion_challenge: Object.freeze({
@@ -471,20 +444,6 @@ const QUESTION_CATALOG: Readonly<Record<ValidationStage, Readonly<QuestionPack>>
 			type: "boolean",
 			instructions:
 				"Does the final evidence package omit or fail any required acceptance criterion or hard constraint?",
-		}),
-		hidden_assumption: Object.freeze({
-			type: "boolean",
-			instructions:
-				"Does the claimed completion depend on a material assumption that `outcome_evidence` does not establish?",
-		}),
-		plausible_regression_not_tested: Object.freeze({
-			type: "boolean",
-			instructions:
-				"Does the diff create a plausible regression path that the recorded verification does not exercise or otherwise constrain?",
-		}),
-		conclusion_overstates_evidence: Object.freeze({
-			type: "boolean",
-			instructions: "Does the worker's proposed final conclusion claim more than the evidence package establishes?",
 		}),
 	}),
 });

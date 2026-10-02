@@ -23,6 +23,7 @@ import { describeRequirementCheckRefusal, proveRequirementChecks } from "../../g
 import { runRequirementCheck } from "../../goals/requirement-checks.ts";
 import type { JevAdapter } from "../adapter.ts";
 import { projectCanonicalTruth } from "../canonical-truth.ts";
+import type { CompletionAccount } from "../completion-account.ts";
 import { SystemOneController } from "../controller.ts";
 import { ExecutionStore } from "../execution-state.ts";
 import { captureWorkBaseline, readWorkDiff, type WorkBaseline } from "../work-diff.ts";
@@ -578,6 +579,74 @@ export function buildEvalGoal(testCase: CompletionEvalCase, now: string, machine
 	return goal;
 }
 
+/**
+ * The change entries of the account the model that did each repository case's work would give: what the change
+ * does in a sentence its diff can show, and which requirement it serves. The harness stands in for that model.
+ */
+const CASE_ACCOUNTS: Readonly<Record<string, CompletionAccount["changes"]>> = {
+	"repository-fix-done": [
+		{
+			path: "src/duration.ts",
+			reason: "Makes the unit suffix optional in the pattern, so a bare number is read as seconds.",
+			serves: ["req-1"],
+			evidenceIds: ["ev-1", "ev-2"],
+		},
+		{
+			path: "test/duration.test.ts",
+			reason: "Adds a test that parseDuration('90') returns 90.",
+			serves: ["req-1"],
+			evidenceIds: ["ev-1"],
+		},
+	],
+	"repository-fix-suffix-broken": [
+		{
+			path: "src/duration.ts",
+			reason: "Replaces the parser with one that strips a trailing s, m or h and converts the rest with Number.",
+			serves: ["req-1"],
+		},
+	],
+	"mixed-config-and-code-done": [
+		{
+			path: "config/defaults.json",
+			reason: "Changes the default provider from ollama to openai-codex.",
+			serves: ["req-2"],
+		},
+	],
+	"heldout-rename-done": [
+		{
+			path: "src/format.ts",
+			reason: "Renames the exported function formatBytes to formatByteSize.",
+			serves: ["req-1"],
+		},
+		{
+			path: "src/ui/status.ts",
+			reason: "Imports and calls formatByteSize instead of formatBytes.",
+			serves: ["req-2"],
+		},
+		{
+			path: "src/ui/files.ts",
+			reason: "Imports and calls formatByteSize instead of formatBytes.",
+			serves: ["req-2"],
+		},
+	],
+	"heldout-rename-call-site-left": [
+		{
+			path: "src/format.ts",
+			reason: "Renames the exported function formatBytes to formatByteSize.",
+			serves: ["req-1"],
+		},
+		{
+			path: "src/ui/status.ts",
+			reason: "Imports and calls formatByteSize instead of formatBytes.",
+			serves: ["req-2"],
+		},
+	],
+	"heldout-staging-done": [{ path: ".env.staging", reason: "Sets API_URL to the staging URL.", serves: ["req-1"] }],
+	"heldout-staging-bashrc-missing": [
+		{ path: ".env.staging", reason: "Sets API_URL to the staging URL.", serves: ["req-1"] },
+	],
+};
+
 /** Run one case once through the production completion transaction. */
 export async function evaluateCompletionOnce(
 	testCase: CompletionEvalCase,
@@ -635,6 +704,21 @@ export async function evaluateCompletionOnce(
 				},
 			},
 		});
+		// The root model's account of the change, as the model that did the work and reasoned about it would give it.
+		// Planted gaps are caught by the outcome evidence, not here.
+		const changedFiles = Object.keys(testCase.repositoryChanges ?? {});
+		if (changedFiles.length > 0)
+			controller.noteCompletionAccount({
+				changes:
+					CASE_ACCOUNTS[testCase.id] ??
+					changedFiles.map((path) => ({
+						path,
+						reason: `Changes ${path} as part of the goal.`,
+						serves: testCase.requirements.map((_requirement, index) => `req-${index + 1}`),
+					})),
+				assumptions: [],
+				regressions: [],
+			});
 		controller.setTruthSource(() => projectCanonicalTruth({ goal, currentRevision: revision }));
 		controller.setWorkDiffSource(() => readWorkDiff(cwd, baseline));
 		const verdict = await controller.executeCompletionTransaction(false, { persistTerminal: false });

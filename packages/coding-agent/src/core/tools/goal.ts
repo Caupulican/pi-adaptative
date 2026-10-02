@@ -36,6 +36,7 @@ import { type RequirementCheckResult, requirementCheckViolation } from "../goals
 import { awaitPreflight } from "../preflight.ts";
 import { TYPESAFE_API_CREDENTIAL } from "../review/typesafe-contract.ts";
 import { requestsBugFix } from "../system-one/bug-fix.ts";
+import { completionAccountInputSchema, parseCompletionAccount } from "../system-one/completion-account.ts";
 import type { SystemOneController } from "../system-one/controller.ts";
 import type { FinalCompletionVerdict } from "../system-one/policy.ts";
 import {
@@ -170,16 +171,16 @@ const goalSchema = Type.Object(
 		uri: Type.Optional(
 			Type.String({
 				description:
-					"Evidence locator: file -> path; tool or test -> producing toolCallId or exact command; worker -> laneId; user -> user-message entry id and summary quoting its complete text. Only host-verified evidence can satisfy a requirement; finding never verifies.",
+					"Evidence locator: file path; tool/test toolCallId or exact command; worker laneId; user message entry id (summary quotes its full text). Only host-verified evidence satisfies a requirement; finding never does.",
 			}),
 		),
 		reason: Type.Optional(Type.String({ description: "Reason for block_requirement or block_goal." })),
 		dispatchTarget: Type.Optional(
 			Type.Union([Type.Literal("in_process"), Type.Literal("collaboration")], {
-				description:
-					"Native is default; use collaboration when the task benefits from a persistent interactive session.",
+				description: "Native by default; collaboration for a persistent interactive session.",
 			}),
 		),
+		account: Type.Optional(completionAccountInputSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -225,6 +226,7 @@ const updateGoalSchema = Type.Object(
 		reason: Type.Optional(
 			Type.String({ minLength: 1, description: "Required for blocked: the recurring external blocker." }),
 		),
+		account: Type.Optional(completionAccountInputSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -377,7 +379,8 @@ export interface GoalToolDependencies {
 	grantEdge?: (grant: { class: EdgeClass; quote: string; messageEntryId: string; scopeKey?: string }) => void;
 	/** System One semantic evaluator for goal completion. */
 	getSystemOneController?: () =>
-		| Pick<SystemOneController, "completionView" | "executeCompletionTransaction">
+		| (Pick<SystemOneController, "completionView" | "executeCompletionTransaction"> &
+				Partial<Pick<SystemOneController, "noteCompletionAccount">>)
 		| undefined;
 	/** Where requirement checks run and are validated: the session's task directory. */
 	getCwd?: () => string;
@@ -847,6 +850,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			"When a command can observe a requirement's outcome, give it a check (add_requirement or set_requirement_check): the harness reruns it at completion, so the outcome is proven, not asserted.",
 			"amend_goal extends this objective only: quote the owner's full message, keep the current objective text in userGoal, then append its change and requirements. For unrelated work, leave this goal and its workers unchanged.",
 			"grant_edge: record a grant only when the operator's words authorize deleting the repository, the home directory, a filesystem root, a disk, or a toolkit script. Git, publishing, installing, and settings edits run without a grant. A granted class never asks; an ungranted destructive.fs or toolkit.script asks once. When the operator authorized one concrete toolkit script and arguments, specify toolkitScript and toolkitArgs; omit them for a broad class grant only when their instruction covers the class.",
+			"complete for work that changed the repository needs `account`: { changes: [{ path, reason, serves: [requirement ids or the changed file it supports], evidenceIds? }] for every changed file, assumptions: [{ claim, evidenceIds }], regressions: [{ path, evidenceIds }] (empty when none), cause: { claim, evidenceIds } for a bug fix }. Cite ids from get. System One decides each claim against the diff or the evidence you cite; it does not guess what the diff means.",
 			"complete needs current authoritative evidence, no remaining work, no active goal-owned lanes, no open task_steps, no goal-owned or cited running tool_task, and no active pipeline. Failed or canceled tool_task results are terminal and stop blocking liveness, but never become verified evidence automatically. block_requirement/block_goal only when the same verified owner/approval boundary or capability impossibility persists for 3 consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress is possible without owner input or external change; otherwise keep working.",
 		],
 		parameters: goalSchema,
@@ -1163,6 +1167,19 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					}
 					const systemOne = deps.getSystemOneController?.();
 					if (systemOne && current) {
+						// The model's account of the change, which completion reads whoever asks for it.
+						if (input.account) {
+							const parsed = parseCompletionAccount(input.account);
+							if ("error" in parsed)
+								return withCheckRuns(
+									goalCompletionRefusal(
+										input.action,
+										`The completion account is malformed: ${parsed.error}.`,
+										current,
+									),
+								);
+							systemOne.noteCompletionAccount?.(parsed.account);
+						}
 						const fingerprint = createHash("sha256")
 							.update(JSON.stringify(systemOne.completionView().view))
 							.digest("hex")
@@ -1381,7 +1398,7 @@ export function createGoalLifecycleToolDefinitions(
 					: isGoalExecutionActive(requestedGoalStatus)
 						? { action: "progress" }
 						: input.status === "complete"
-							? { action: "complete" }
+							? { action: "complete", ...(input.account ? { account: input.account } : {}) }
 							: { action: "block_goal", reason: input.reason ?? "" };
 			return goalTool.execute(toolCallId, action, signal, onUpdate, context);
 		},

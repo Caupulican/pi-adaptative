@@ -50,6 +50,7 @@ import {
 	captureCandidateSnapshot,
 } from "../system-one/candidate-snapshot.ts";
 import {
+	accountRequestDirective,
 	assertVerificationResolved,
 	isSameLaneVerificationDirective,
 	type SystemOneControlDirective,
@@ -934,8 +935,13 @@ export class ObjectiveExecutionController {
 		objectiveId: string,
 		runtime: TaskRuntimeProjection,
 		reasonCodes: string[],
+		/** The reasons that are requests for the model's account: answered with an account, never held as findings. */
+		accountRequests: readonly string[] = [],
 	): Promise<ObjectiveTerminalResult> {
-		this.deps.systemOne?.noteControlDirective?.(sameLaneVerificationDirective(reasonCodes));
+		const findings = reasonCodes.filter((reason) => !accountRequests.includes(reason));
+		if (findings.length > 0) this.deps.systemOne?.noteControlDirective?.(sameLaneVerificationDirective(findings));
+		else if (accountRequests.length > 0)
+			this.deps.systemOne?.noteControlDirective?.(accountRequestDirective(accountRequests));
 		return {
 			status: "incomplete",
 			reasonCodes,
@@ -1537,12 +1543,15 @@ export class ObjectiveExecutionController {
 					});
 					this.acknowledgeRouteRequests(route);
 					if (completionFinding?.verdict === "verify_more") {
+						const describe = (finding: { id: string; reason: string; required_next_proof: string }) =>
+							`${finding.id}: ${finding.reason}. ${finding.required_next_proof}`;
 						return this.rejectedCompletion(
 							objectiveId,
 							runtime,
-							completionFinding.failed_gates.map(
-								(finding) => `${finding.id}: ${finding.reason}. ${finding.required_next_proof}`,
-							),
+							completionFinding.failed_gates.map(describe),
+							completionFinding.failed_gates
+								.filter((finding) => finding.id.startsWith("account_"))
+								.map(describe),
 						);
 					}
 
@@ -1600,13 +1609,7 @@ export class ObjectiveExecutionController {
 							if (j26.kind === "held") return this.heldCompletion(objectiveId, runtime, j26.reasonCodes);
 							const adverseChallengeIds =
 								j26.kind === "judged"
-									? [
-											"hidden_regressions",
-											"plausible_regression_not_tested",
-											"missing_requirement",
-											"hidden_assumption",
-											"conclusion_overstates_evidence",
-										].filter(
+									? ["missing_requirement"].filter(
 											(id) =>
 												(j26.certificate.answers[id] as { value?: boolean } | undefined)?.value === true,
 										)

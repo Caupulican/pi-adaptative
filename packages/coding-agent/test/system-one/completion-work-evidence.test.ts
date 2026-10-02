@@ -23,32 +23,16 @@ const MEASURED = {
 			outcomes_achieved: noul(0.87),
 			required_behavior_unverified: noul(0.08),
 			material_claim_unsupported: noul(0.09),
-			out_of_scope_change_present: noul(0.2),
-			duplicate_responsibility_introduced: noul(0.11),
-			completion_verdict: { choice: "complete", confidence: 0.99, probabilities: { complete: 1 } },
 		},
-		challenge: {
-			missing_requirement: noul(0.07),
-			hidden_assumption: noul(0.25),
-			plausible_regression_not_tested: noul(0.28),
-			conclusion_overstates_evidence: noul(0.16),
-		},
+		challenge: { missing_requirement: noul(0.07) },
 	},
 	broken: {
 		primary: {
 			outcomes_achieved: noul(0.33),
 			required_behavior_unverified: noul(0.23),
 			material_claim_unsupported: noul(0.09),
-			out_of_scope_change_present: noul(0.44),
-			duplicate_responsibility_introduced: noul(0.17),
-			completion_verdict: { choice: "complete", confidence: 0.64, probabilities: { complete: 0.64, rework: 0.36 } },
 		},
-		challenge: {
-			missing_requirement: noul(0.21),
-			hidden_assumption: noul(0.66),
-			plausible_regression_not_tested: noul(0.48),
-			conclusion_overstates_evidence: noul(0.31),
-		},
+		challenge: { missing_requirement: noul(0.81) },
 	},
 };
 
@@ -59,24 +43,21 @@ describe("completion judges the work itself", () => {
 				deterministicGates: passedGates,
 				primaryAnswers: answers.primary,
 				challengeAnswers: answers.challenge,
-				isBugFix: false,
 			});
 		expect(decide(MEASURED.finished)).toEqual({ verdict: "complete", failed_gates: [] });
 		const broken = decide(MEASURED.broken);
 		expect(broken.verdict).toBe("verify_more");
 		expect(broken.failed_gates.map((gate) => gate.id)).toEqual(
-			expect.arrayContaining(["JEV-outcomes_achieved", "JEV-CHALLENGE-hidden_assumption"]),
+			expect.arrayContaining(["JEV-outcomes_achieved", "JEV-CHALLENGE-missing_requirement"]),
 		);
 		// A successful but incomplete assessment must still be verified.
-		const { hidden_assumption: _missing, ...withoutAssumption } = MEASURED.finished.challenge;
 		expect(
 			decideFinalCompletion({
 				deterministicGates: passedGates,
 				primaryAnswers: MEASURED.finished.primary,
-				challengeAnswers: withoutAssumption,
-				isBugFix: false,
+				challengeAnswers: {},
 			}).failed_gates,
-		).toEqual(expect.arrayContaining([expect.objectContaining({ id: "JEV-CHALLENGE-hidden_assumption" })]));
+		).toEqual(expect.arrayContaining([expect.objectContaining({ id: "JEV-CHALLENGE-missing_requirement" })]));
 	});
 
 	it("gives System One the patch and the evidence the acceptance matrix cites", () => {

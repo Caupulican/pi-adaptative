@@ -7,14 +7,13 @@ const passingAnswers = {
 	outcomes_achieved: true,
 	required_behavior_unverified: false,
 	material_claim_unsupported: false,
-	out_of_scope_change_present: false,
-	duplicate_responsibility_introduced: false,
-	completion_verdict: { choice: "complete", confidence: 0.99, probabilities: { complete: 0.99 } },
 	missing_requirement: false,
-	hidden_assumption: false,
-	plausible_regression_not_tested: false,
-	conclusion_overstates_evidence: false,
 	verification_resolution_valid: { noul: 0.99 },
+	// The account's claims, read against their cited evidence by the same fixed pair of questions.
+	shows_true_0: { noul: 0.97 },
+	shows_false_0: { noul: 0.02 },
+	shows_true_1: { noul: 0.97 },
+	shows_false_1: { noul: 0.02 },
 };
 
 describe("completion advice lifecycle", () => {
@@ -32,6 +31,11 @@ describe("completion advice lifecycle", () => {
 		const controller = new SystemOneController({
 			store,
 			adapter: { evaluate: async () => ({ model: "fixture", answers: passingAnswers, latency_ms: 0 }) },
+		});
+		controller.noteCompletionAccount({
+			changes: [{ path: "owner.ts", reason: "It fixes the repository outcome.", serves: ["AC"] }],
+			assumptions: [],
+			regressions: [],
 		});
 		let diagnostic: string | undefined = "repository_work_baseline_unavailable";
 		controller.setWorkDiffSource(() => ({
@@ -101,7 +105,7 @@ describe("completion advice lifecycle", () => {
 			adapter: {
 				evaluate: async () => ({
 					model: "fixture",
-					answers: { ...passingAnswers, hidden_assumption: !revised },
+					answers: { ...passingAnswers, missing_requirement: !revised },
 					latency_ms: 1,
 				}),
 			},
@@ -123,7 +127,7 @@ describe("completion advice lifecycle", () => {
 		const rejected = await controller.executeCompletionTransaction();
 		expect(rejected.verdict).toBe("verify_more");
 		expect(rejected.failed_gates).toEqual(
-			expect.arrayContaining([expect.objectContaining({ id: "JEV-CHALLENGE-hidden_assumption" })]),
+			expect.arrayContaining([expect.objectContaining({ id: "JEV-CHALLENGE-missing_requirement" })]),
 		);
 		expect(store.phase).not.toBe("complete");
 		const priority = controller.peekControlDirective();
@@ -216,7 +220,8 @@ describe("completion advice lifecycle", () => {
 			await expect(controller.executeCompletionTransaction(false, { signal: abort.signal })).rejects.toBe(cancelled);
 			expect(store.phase).not.toBe("complete");
 			expect(controller.isEvaluating).toBe(false);
-			expect(evaluate).toHaveBeenCalledTimes(at === "before" ? 0 : at === "primary" ? 1 : 2);
+			// Both stages start together, so a cancellation after the start has already reached both.
+			expect(evaluate).toHaveBeenCalledTimes(at === "before" ? 0 : 2);
 		},
 	);
 });

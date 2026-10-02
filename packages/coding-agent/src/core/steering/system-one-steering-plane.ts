@@ -400,7 +400,6 @@ export class SystemOneSteeringPlane {
 		checkpointId: string,
 		answers: Record<string, unknown>,
 		directive: SteeringDirective,
-		state?: unknown,
 	): {
 		semantic_outcome: SteeringSemanticOutcome;
 		failed_semantic_predicates: readonly string[];
@@ -628,15 +627,8 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-025": {
-				// The same questions, bounds and applicability the goal tool's completion judges with.
-				const record = state && typeof state === "object" ? (state as Record<string, unknown>) : {};
-				const bugFix = record.bugFix === true || record.isBugFix === true;
-				failed.push(
-					...completionPackFailures("completion", answers, {
-						isBugFix: bugFix,
-						repositoryOutcome: record.repository_outcome !== false,
-					}).map((gate) => completionPredicate(gate.id)),
-				);
+				// The same questions and bounds the goal tool's completion judges with.
+				failed.push(...completionPackFailures("completion", answers).map((gate) => completionPredicate(gate.id)));
 				if (
 					answers.acceptance_satisfied !== undefined &&
 					!this.hardPass(answers.acceptance_satisfied, "required_true")
@@ -660,12 +652,8 @@ export class SystemOneSteeringPlane {
 			}
 
 			case "JEV-026": {
-				const challengeRecord = state && typeof state === "object" ? (state as Record<string, unknown>) : {};
 				failed.push(
-					...completionPackFailures("completion_challenge", answers, {
-						isBugFix: false,
-						repositoryOutcome: challengeRecord.repository_outcome !== false,
-					}).map((gate) => completionPredicate(gate.id)),
+					...completionPackFailures("completion_challenge", answers).map((gate) => completionPredicate(gate.id)),
 				);
 				if (
 					answers.unhandled_edge_cases !== undefined &&
@@ -1088,7 +1076,7 @@ export class SystemOneSteeringPlane {
 		const actionConfidence = confidences.length > 0 ? Math.min(...confidences) : 1;
 
 		const directive = this.composeDirective(request.checkpointId, answers, program);
-		const judged = this.evaluateSemanticOutcome(request.checkpointId, answers, directive, request.state);
+		const judged = this.evaluateSemanticOutcome(request.checkpointId, answers, directive);
 		const failed_semantic_predicates = judged.failed_semantic_predicates;
 		const unsure_semantic_predicates = [
 			...judged.unsure_semantic_predicates,

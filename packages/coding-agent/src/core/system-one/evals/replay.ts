@@ -73,13 +73,7 @@ export class SystemOneReplayRunner {
 				const verdict = decideFinalCompletion({
 					deterministicGates: [],
 					primaryAnswers: response.answers,
-					challengeAnswers: {
-						missing_requirement: { noul: 0.01 },
-						hidden_assumption: { noul: 0.01 },
-						plausible_regression_not_tested: { noul: 0.01 },
-						conclusion_overstates_evidence: { noul: 0.01 },
-					},
-					isBugFix: testCase.isBugFix ?? false,
+					challengeAnswers: { missing_requirement: { noul: 0.01 } },
 					config: this.config,
 				});
 				outcome = verdict.verdict;

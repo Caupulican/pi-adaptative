@@ -511,24 +511,15 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 			break;
 		}
 
-		// Completion asks what the goal promised: the code-only questions only when it changed the
-		// repository (`repository_outcome`, from SystemOneController.completionView), root cause only for a fix.
+		// Completion asks what the goal promised: the questions an evidence matrix settles. What needs reasoning
+		// about the change is the model's account, checked by the completion transaction.
 		case "JEV-025": {
-			const repository = s.repository_outcome !== false;
-			const bugFix = s.bugFix === true || s.isBugFix === true;
-			buildDecisionsFromPack("completion", decisions, [
-				...(repository && bugFix ? [] : ["root_cause_addressed"]),
-				...(repository ? [] : ["out_of_scope_change_present", "duplicate_responsibility_introduced"]),
-			]);
+			buildDecisionsFromPack("completion", decisions, []);
 			break;
 		}
 
 		case "JEV-026": {
-			buildDecisionsFromPack(
-				"completion_challenge",
-				decisions,
-				s.repository_outcome === false ? ["plausible_regression_not_tested"] : [],
-			);
+			buildDecisionsFromPack("completion_challenge", decisions, []);
 			break;
 		}
 

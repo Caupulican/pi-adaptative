@@ -137,30 +137,16 @@ describe("semantic judgments require autonomous verification", () => {
 			deterministicGates: [{ id: "G-TEST", kind: "deterministic", required: true, status: "passed" }],
 			primaryAnswers: {
 				outcomes_achieved: true,
-				root_cause_addressed: 0.64,
 				required_behavior_unverified: 0.56,
 				material_claim_unsupported: false,
-				out_of_scope_change_present: 0.77,
-				duplicate_responsibility_introduced: false,
-				completion_verdict: {
-					choice: "complete",
-					confidence: 0.58,
-					probabilities: { complete: 0.58, verify_more: 0.42 },
-				},
 			},
-			challengeAnswers: {
-				missing_requirement: false,
-				hidden_assumption: 0.62,
-				plausible_regression_not_tested: 0.55,
-				conclusion_overstates_evidence: false,
-			},
-			isBugFix: true,
+			challengeAnswers: { missing_requirement: 0.62 },
 		});
 		expect(verdict.verdict).toBe("verify_more");
 		expect(verdict).toMatchObject({
 			failed_gates: expect.arrayContaining([
-				expect.objectContaining({ id: "JEV-out_of_scope_change_present" }),
-				expect.objectContaining({ id: "JEV-CHALLENGE-hidden_assumption" }),
+				expect.objectContaining({ id: "JEV-required_behavior_unverified" }),
+				expect.objectContaining({ id: "JEV-CHALLENGE-missing_requirement" }),
 			]),
 		});
 	});
@@ -188,7 +174,6 @@ describe("semantic judgments require autonomous verification", () => {
 			],
 			primaryAnswers: {},
 			challengeAnswers: {},
-			isBugFix: false,
 		});
 		expect(verdict).toMatchObject({
 			verdict: "rework",

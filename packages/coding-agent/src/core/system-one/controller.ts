@@ -33,6 +33,15 @@ import {
 	USER_AUTHORIZATION_QUESTIONS,
 } from "./catalog.ts";
 import { type CodeUnit, duplicateQuestionId } from "./code-duplicates.ts";
+import {
+	type AccountClaim,
+	type AccountPassStore,
+	accountOutcome,
+	type CompletionAccount,
+	checkCompletionAccount,
+	judgeAccountClaims,
+	patchPaths,
+} from "./completion-account.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import {
 	directiveFromPostflight,
@@ -319,6 +328,24 @@ export class SystemOneController {
 		this.audit.recordDecision(this.store.runId, sealed);
 		if (evaluationId !== undefined)
 			this.evaluationObserver?.noteVerdict(evaluationId, policyResult, reasons, questionStates);
+	}
+
+	/** The model's latest account of its work; the completion transaction reads it, whoever asks. */
+	private completionAccount: CompletionAccount | undefined;
+	/** Times a claim over the same evidence was left unsettled: the model is asked for evidence twice, then the doubt stands. */
+	private readonly accountPasses = new Map<string, number>();
+	private accountPassStore: AccountPassStore | undefined;
+	private accountPassesRead = false;
+	private accountPassFailure: string | undefined;
+
+	/** Binds where the unsettled-claim counts live; late-bound like the evaluation observer. */
+	setAccountPassStore(store: AccountPassStore | undefined): void {
+		this.accountPassStore = store;
+		this.accountPassesRead = false;
+	}
+
+	noteCompletionAccount(account: CompletionAccount | undefined): void {
+		this.completionAccount = account;
 	}
 
 	private activeEvaluations = 0;
@@ -1285,6 +1312,27 @@ export class SystemOneController {
 		};
 	}
 
+	private readAccountPasses(): void {
+		if (this.accountPassesRead || !this.accountPassStore) return;
+		this.accountPassesRead = true;
+		try {
+			for (const [fingerprint, passes] of Object.entries(this.accountPassStore.read()))
+				this.accountPasses.set(fingerprint, Math.max(passes, this.accountPasses.get(fingerprint) ?? 0));
+		} catch (error) {
+			this.accountPassFailure = error instanceof Error ? error.message : String(error);
+		}
+	}
+
+	private writeAccountPasses(unsettled: readonly AccountClaim[]): void {
+		if (!this.accountPassStore) return;
+		try {
+			for (const claim of unsettled)
+				this.accountPassStore.write(claim.fingerprint, this.accountPasses.get(claim.fingerprint) ?? 0);
+		} catch (error) {
+			this.accountPassFailure = error instanceof Error ? error.message : String(error);
+		}
+	}
+
 	async executeCompletionTransaction(
 		isBugFix = false,
 		options?: {
@@ -1335,26 +1383,65 @@ export class SystemOneController {
 				],
 			};
 		}
-		const repositoryOutcome = hasRepositoryOutcome(work, this.store.snapshot().changes.length);
-		const primaryOmit = [
-			...(repositoryOutcome && isBugFix ? [] : ["root_cause_addressed"]),
-			...(repositoryOutcome ? [] : ["out_of_scope_change_present", "duplicate_responsibility_introduced"]),
-		];
+		const snapshot = this.store.snapshot();
+		const repositoryOutcome = hasRepositoryOutcome(work, snapshot.changes.length);
+		// What needs reasoning about the change is the model's account of it; code checks that it is complete,
+		// that its evidence exists and is verified, and System One decides each claim against that evidence.
+		const checkedAccount = checkCompletionAccount(
+			this.completionAccount,
+			{
+				objective: snapshot.objective.normalized_goal || snapshot.objective.request,
+				acceptance: snapshot.objective.acceptance_criteria.map((criterion) => ({
+					id: criterion.id,
+					text: criterion.text,
+				})),
+				changedPaths: [
+					...new Set([
+						...patchPaths(work?.patch ?? ""),
+						...(work?.untracked ?? []),
+						...snapshot.changes.map((change) => change.path),
+					]),
+				],
+				patch: work?.patch ?? "",
+				state: snapshot,
+			},
+			{ repositoryOutcome, isBugFix },
+		);
+		if (checkedAccount.failures.length > 0) return { verdict: "verify_more", failed_gates: checkedAccount.failures };
+		const primaryOmit: string[] = [];
 		const primaryProjection = this.projector.completion(this.store.snapshot(), work);
 		const challengeProjection = this.projector.completionChallenge(this.store.snapshot(), work);
 		const stages = new Map<ValidationStage, StageValidation>();
 		const unavailable: CompletionRejectionDetail[] = [];
-		// Each judgment remains useful if its peer fails. Cancellation is never converted to advice.
-		for (const [stage, projection, omitted] of [
-			["completion", primaryProjection, primaryOmit],
-			["completion_challenge", challengeProjection, repositoryOutcome ? [] : ["plausible_regression_not_tested"]],
-		] as const) {
-			options?.signal?.throwIfAborted();
+		// The account's claims are judged beside the stages, in the same round trip's time. Started here and
+		// awaited below; an abandoned wait must not surface as an unhandled rejection.
+		const judgingAccount: Promise<{ refuted: AccountClaim[]; unsettled: AccountClaim[] }> | undefined =
+			checkedAccount.claims.length > 0
+				? judgeAccountClaims(
+						{ evaluateUnsettledItems: (checks, signal) => this.evaluateUnsettledItems(checks, signal) },
+						checkedAccount.claims,
+						options?.signal,
+						this.config,
+					)
+				: undefined;
+		judgingAccount?.catch(() => undefined);
+		// Each judgment remains useful if its peer fails. Cancellation is never converted to advice. The stages read
+		// the same state and cannot see one another's answers, so they wait on System One together; an abandoned
+		// wait must not surface as an unhandled rejection.
+		options?.signal?.throwIfAborted();
+		const started = (
+			[
+				["completion", primaryProjection, primaryOmit],
+				["completion_challenge", challengeProjection, []],
+			] as const
+		).map(([stage, projection, omitted]) => {
+			const run = this.runStageValidation(stage, projection, "read_only", omitted, undefined, options?.signal);
+			run.catch(() => undefined);
+			return { stage, run };
+		});
+		for (const { stage, run } of started) {
 			try {
-				stages.set(
-					stage,
-					await this.runStageValidation(stage, projection, "read_only", omitted, undefined, options?.signal),
-				);
+				stages.set(stage, await run);
 			} catch (error) {
 				options?.signal?.throwIfAborted();
 				unavailable.push({
@@ -1365,24 +1452,48 @@ export class SystemOneController {
 			}
 		}
 		options?.signal?.throwIfAborted();
+		let accountFailures: CompletionRejectionDetail[] = [];
+		let accountAdvisories: CompletionRejectionDetail[] = [];
+		if (judgingAccount) {
+			try {
+				const judged = await judgingAccount;
+				this.readAccountPasses();
+				({ failures: accountFailures, advisories: accountAdvisories } = accountOutcome(judged, this.accountPasses));
+				this.writeAccountPasses(judged.unsettled);
+				if (this.accountPassFailure)
+					accountAdvisories.push({
+						id: "account_passes_not_kept",
+						reason: `The count of unsettled claims could not be kept (${this.accountPassFailure}); it lasts for this session only.`,
+						required_next_proof: "None required.",
+					});
+			} catch (error) {
+				options?.signal?.throwIfAborted();
+				unavailable.push({
+					id: "JEV-account-unavailable",
+					reason: `account advice unavailable: ${String(error instanceof Error ? error.message : error).slice(0, 500)}`,
+					required_next_proof: "Inspect the recorded outcome evidence and evaluator diagnostic.",
+				});
+			}
+		}
 
 		// 4. Policy engine final verdict
 		const finalVerdict = decideFinalCompletion({
 			deterministicGates: detResult.gates,
 			primaryAnswers: stages.get("completion")?.answers,
 			challengeAnswers: stages.get("completion_challenge")?.answers,
-			isBugFix,
-			repositoryOutcome,
+			accountFailures,
 			config: this.config,
 		});
 
-		if (unavailable.length > 0) finalVerdict.advisories = [...unavailable, ...(finalVerdict.advisories ?? [])];
-		if (finalVerdict.verdict === "verify_more") {
+		if (unavailable.length > 0 || accountAdvisories.length > 0)
+			finalVerdict.advisories = [...unavailable, ...accountAdvisories, ...(finalVerdict.advisories ?? [])];
+		// A claim in the model's own account is answered with better evidence, not with a verification obligation
+		// that holds every other operation until it is resolved.
+		const verifiable = finalVerdict.failed_gates.filter((finding) => !finding.id.startsWith("account_"));
+		if (finalVerdict.verdict === "verify_more" && verifiable.length > 0) {
 			this.noteControlDirective(
 				sameLaneVerificationDirective(
-					finalVerdict.failed_gates.map(
-						(finding) => `${finding.id}: ${finding.reason}. ${finding.required_next_proof}`,
-					),
+					verifiable.map((finding) => `${finding.id}: ${finding.reason}. ${finding.required_next_proof}`),
 				),
 			);
 		}

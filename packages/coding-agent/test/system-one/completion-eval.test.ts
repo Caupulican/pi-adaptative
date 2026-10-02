@@ -9,17 +9,23 @@ import {
 
 const POSITIVE = {
 	outcomes_achieved: { noul: 0.97 },
-	root_cause_addressed: { noul: 0.97 },
 	required_behavior_unverified: { noul: 0.02 },
 	material_claim_unsupported: { noul: 0.02 },
-	out_of_scope_change_present: { noul: 0.02 },
-	duplicate_responsibility_introduced: { noul: 0.02 },
-	completion_verdict: { choice: "complete", confidence: 0.97, probabilities: { complete: 0.97 } },
 	missing_requirement: { noul: 0.02 },
-	hidden_assumption: { noul: 0.02 },
-	plausible_regression_not_tested: { noul: 0.02 },
-	conclusion_overstates_evidence: { noul: 0.02 },
 };
+
+/** The fixed pair System One answers for each claim in the model's account: shown true, not contradicted. */
+function claimAnswers(questions: Record<string, unknown>): Record<string, unknown> {
+	return Object.fromEntries(
+		Object.keys(questions).flatMap((id) =>
+			id.startsWith("shows_true_")
+				? [[id, { noul: 0.97 }]]
+				: id.startsWith("shows_false_")
+					? [[id, { noul: 0.02 }]]
+					: [],
+		),
+	);
+}
 
 /** A stand-in judge: rejects when the evidence it is shown admits a gap. */
 function judgingAdapter(seen: Array<Record<string, unknown>>): JevAdapter {
@@ -30,13 +36,10 @@ function judgingAdapter(seen: Array<Record<string, unknown>>): JevAdapter {
 			const gap = /still reports|still shows|still returns|case fails|probably|Likely/u.test(text);
 			return {
 				model: "fixture",
-				answers: gap
-					? {
-							...POSITIVE,
-							outcomes_achieved: { noul: 0.1 },
-							completion_verdict: { choice: "rework", confidence: 0.9, probabilities: { rework: 0.9 } },
-						}
-					: POSITIVE,
+				answers: {
+					...claimAnswers(input.questions),
+					...(gap ? { ...POSITIVE, outcomes_achieved: { noul: 0.1 } } : POSITIVE),
+				},
 				latency_ms: 1,
 			} as never;
 		},
@@ -49,15 +52,18 @@ describe("completion reliability evaluation harness", () => {
 		const repository = COMPLETION_EVAL_CASES.find((testCase) => testCase.id === "repository-fix-done")!;
 		const machine = COMPLETION_EVAL_CASES.find((testCase) => testCase.id === "machine-uninstall-done")!;
 		await evaluateCompletionOnce(repository, judgingAdapter(seen));
-		const repositoryDiff = seen[0]?.final_diff as { patch?: string };
+		// The completion projection, not the account's claims, which are sent as their own request.
+		const projection = (states: Array<Record<string, unknown>>) =>
+			states.find((state) => Object.hasOwn(state, "outcome_evidence"));
+		const repositoryDiff = projection(seen)?.final_diff as { patch?: string };
 		expect(repositoryDiff.patch).toContain("parseDuration");
 		seen.length = 0;
 		await evaluateCompletionOnce(machine, judgingAdapter(seen));
 		// A machine outcome has no diff to judge; its outcome evidence carries the harness's own checks.
-		expect(seen[0]).not.toHaveProperty("final_diff");
-		const outcomes = seen[0]?.outcome_evidence as Array<{ text: string; checks: Array<{ status: string }> }>;
+		expect(projection(seen)).not.toHaveProperty("final_diff");
+		const outcomes = projection(seen)?.outcome_evidence as Array<{ text: string; checks: Array<{ status: string }> }>;
 		expect(outcomes.map((outcome) => outcome.checks.map((check) => check.status))).toEqual([["passed"], ["passed"]]);
-		expect(JSON.stringify(seen[0])).toContain("Downloaded Ollama models under ~/.ollama are deleted");
+		expect(JSON.stringify(projection(seen))).toContain("Downloaded Ollama models under ~/.ollama are deleted");
 	});
 
 	it("measures rejection of planted gaps independently from diagnostic notices", async () => {

@@ -35,6 +35,18 @@ export function sameLaneVerificationDirective(reasonCodes: readonly string[]): S
 	};
 }
 
+/**
+ * A request for the model's own account of its work. It routes one root turn carrying the request and opens no
+ * verification obligation: the answer is an account, which a held obligation would make impossible to give.
+ */
+export function accountRequestDirective(requests: readonly string[]): SystemOneControlDirective {
+	return {
+		source: "postflight",
+		objectiveRoute: "implement",
+		reasonCodes: ["completion_account_requested", ...requests.slice(0, 12).map((request) => request.slice(0, 500))],
+	};
+}
+
 export function isSameLaneVerificationDirective(
 	directive:
 		| {

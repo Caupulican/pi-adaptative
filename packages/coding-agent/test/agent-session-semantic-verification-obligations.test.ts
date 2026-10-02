@@ -35,6 +35,7 @@ describe("AgentSession semantic verification obligation projection", () => {
 		const systemOneController = {
 			verification: { status: () => ({ status: "obligations" as const, obligations: [obligation], receipts: [] }) },
 			setEvaluationObserver: () => {},
+			setAccountPassStore: () => {},
 			setEvaluationIdleListener: () => {},
 			setVerificationHost: () => {},
 		} as unknown as SystemOneController;
