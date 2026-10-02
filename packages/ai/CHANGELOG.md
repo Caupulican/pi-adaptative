@@ -6,8 +6,13 @@
 
 ### Fixed
 
+- Prevented OpenRouter router pricing sentinels from becoming negative cost estimates and classified decision models by advertised output modality.
 - Matched Grok CLI 1.0.46 OAuth request identity and routed subscription Grok 4.7 Fast preferences through the model override header, including authentication retries and response identity.
 - Applied the Grok 4.7 Fast premium once, using the published 1.5x long-context rates.
+
+### Changed
+
+- Refreshed the OpenRouter model catalog, including current prices, token limits, and reasoning metadata.
 
 ## [0.102.1] - 2026-10-01
 

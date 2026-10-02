@@ -1,4 +1,4 @@
-import type { ThinkingLevel, ThinkingLevelMap } from "../src/types.ts";
+import type { Model, ThinkingLevel, ThinkingLevelMap } from "../src/types.ts";
 
 // OpenRouter's wire effort vocabulary; "off" is represented by "none", and
 // "ultra" is a harness orchestration level rather than a provider effort.
@@ -9,6 +9,25 @@ export interface OpenRouterCatalogMetadata {
 	targetId?: string;
 	thinkingLevelMap?: ThinkingLevelMap;
 	defaultThinkingLevel?: ThinkingLevel;
+}
+
+/** Negative router rates mean unavailable local pricing; positive reported usage.cost remains authoritative. */
+export function parseOpenRouterCatalogCost(value: unknown): Model<"openai-completions">["cost"] {
+	if (value != null && !isRecord(value)) throw new Error("Invalid OpenRouter price object");
+	const pricing = isRecord(value) ? value : {};
+	const rate = (field: string): number => {
+		const raw = pricing[field];
+		if (raw == null) return 0;
+		if ((typeof raw !== "number" && typeof raw !== "string") || (typeof raw === "string" && !raw.trim())) {
+			throw new Error(`Invalid OpenRouter ${field} price`);
+		}
+		const price = Number(raw);
+		const scaled = price * 1_000_000;
+		if (!Number.isFinite(price) || !Number.isFinite(scaled)) throw new Error(`Invalid OpenRouter ${field} price`);
+		// Zero is the existing unavailable-price fallback, not a claim of free routing.
+		return Math.max(0, scaled);
+	};
+	return { input: rate("prompt"), output: rate("completion"), cacheRead: rate("input_cache_read"), cacheWrite: rate("input_cache_write") };
 }
 
 export function parseOpenRouterCatalogMetadata(value: unknown): OpenRouterCatalogMetadata {

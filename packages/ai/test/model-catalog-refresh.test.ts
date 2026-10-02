@@ -44,6 +44,15 @@ function modelBlock(output: string, id: string): string {
 }
 
 describe("model catalog refresh publication", () => {
+	it("retains text routers separately from decision models and avoids sentinel dollar estimates", () => {
+		const { result, output } = generate();
+		expect(result.status, result.stderr).toBe(0);
+		const router = modelBlock(output, "typesafe/jev-router");
+		expect(router).toContain("input: 0,");
+		expect(router).toContain("output: 0,");
+		expect(router).not.toContain('kind: "judge"');
+		expect(modelBlock(output, "~typesafe/jev-latest")).toContain('kind: "judge"');
+	});
 	it.each(sources)("preserves the existing catalog when %s fails", (source) => {
 		for (const failure of ["network", "http", "json", "empty"]) {
 			const { result, original, output } = generate(source, failure);

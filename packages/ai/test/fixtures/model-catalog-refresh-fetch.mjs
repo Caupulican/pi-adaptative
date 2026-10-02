@@ -21,6 +21,8 @@ const catalogs = new Map([
 		"https://openrouter.ai/api/v1/models",
 		{
 			data: [
+				{ id: "typesafe/jev-router", name: "Jev Router", supported_parameters: ["tools", "reasoning"], architecture: { output_modalities: ["text"] }, pricing: { prompt: "-1", completion: "-1" } },
+				{ id: "~typesafe/jev-latest", name: "Jev Latest", supported_parameters: [], architecture: { output_modalities: ["decisions"] }, pricing: { prompt: "0.000000042", completion: "0" } },
 				{
 					id: "fixture/router",
 					name: "Fixture Router",

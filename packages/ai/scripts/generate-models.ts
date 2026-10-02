@@ -23,7 +23,7 @@ import type {
 } from "../src/types.ts";
 import { runModelCatalogGeneration } from "./model-catalog-generation-policy.ts";
 import { replaceModelCatalogProvider } from "./model-catalog-provider-update.ts";
-import { parseOpenRouterCatalogMetadata, type OpenRouterCatalogMetadata } from "./openrouter-catalog-metadata.ts";
+import { parseOpenRouterCatalogCost, parseOpenRouterCatalogMetadata, type OpenRouterCatalogMetadata } from "./openrouter-catalog-metadata.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -728,26 +728,16 @@ async function fetchOpenRouterModels(): Promise<{
 				input.push("image");
 			}
 
-			// Convert pricing from $/token to $/million tokens
-			const inputCost = parseFloat(model.pricing?.prompt || "0") * 1_000_000;
-			const outputCost = parseFloat(model.pricing?.completion || "0") * 1_000_000;
-			const cacheReadCost = parseFloat(model.pricing?.input_cache_read || "0") * 1_000_000;
-			const cacheWriteCost = parseFloat(model.pricing?.input_cache_write || "0") * 1_000_000;
-
 			const normalizedModel: Model<"openai-completions"> = {
 				id: modelKey,
 				name: model.name,
 				api: "openai-completions",
 				baseUrl: "https://openrouter.ai/api/v1",
 				provider,
+				...(isDecisionModel ? { kind: "judge" as const } : {}),
 				reasoning: model.supported_parameters?.includes("reasoning") || false,
 				input,
-				cost: {
-					input: inputCost,
-					output: outputCost,
-					cacheRead: cacheReadCost,
-					cacheWrite: cacheWriteCost,
-				},
+				cost: parseOpenRouterCatalogCost(model.pricing),
 				contextWindow: model.context_length || 4096,
 				maxTokens: model.top_provider?.max_completion_tokens || 4096,
 			};
@@ -2352,10 +2342,9 @@ async function generateModels() {
 		}
 	}
 
-	// Gateways list TypeSafe's System One engines beside chat models (OpenRouter also as a `~` alias);
-	// they answer typed questions and are never allocated to a conversation.
+	// Other gateways lack OpenRouter's explicit decisions modality for TypeSafe's System One engines.
 	for (const model of allModels) {
-		if (/^~?typesafe\//.test(model.id)) model.kind = "judge";
+		if (model.provider !== "openrouter" && /^~?typesafe\//.test(model.id)) model.kind = "judge";
 	}
 
 	const VERTEX_BASE_URL = "https://{location}-aiplatform.googleapis.com";
