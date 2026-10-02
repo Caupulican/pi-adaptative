@@ -18,6 +18,8 @@
 - Rejected synthesized Google Antigravity model selections absent from the available catalog.
 - Classified rejected System One requests separately from outages and rate limits, retaining sanitized failure receipts without repeating exhausted transport attempts.
 - Retained bounded System One rejection diagnostics in the decision ledger and restored evaluation health and Execution previews when reopening a session.
+- Bounded model-classification requests without duplicating model evidence, preserved complete superseded-version comparisons, and reported oversized evidence before transport.
+- Included structured provider rejection codes such as `max_tokens_exceeded` in sanitized System One diagnostics.
 
 ## [0.102.2] - 2026-10-02
 

@@ -33,12 +33,12 @@ export interface RouteChoiceJudge {
 		},
 		signal?: AbortSignal,
 	): Promise<Record<string, unknown>[]>;
-	/** Per model, whether a later version of the same model is among `models`: one Noul each, one request. */
+	/** One Noul per model; every request preserves the full comparison universe. */
 	evaluateSupersededModels?(
 		input: { readonly models: readonly { id: string; description: string }[] },
 		signal?: AbortSignal,
 	): Promise<Record<string, unknown>>;
-	/** Per model, whether it is a lightweight variant built for speed and low cost: one Noul each, one request. */
+	/** One Noul per model, in bounded batches of independent evidence. */
 	evaluateLightweightModels?(
 		input: { readonly models: readonly { id: string; description: string }[] },
 		signal?: AbortSignal,

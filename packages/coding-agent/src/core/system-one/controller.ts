@@ -54,6 +54,7 @@ import {
 } from "./control-directive.ts";
 import type { CanonicalHydration, ExecutionStore } from "./execution-state.ts";
 import type { IntegrityHookCoordinator } from "./integrity-hooks.ts";
+import { planModelEvaluations } from "./model-evaluation-batches.ts";
 import {
 	type CompletionRejectionDetail,
 	decideFinalCompletion,
@@ -985,25 +986,25 @@ export class SystemOneController {
 		return answers;
 	}
 
-	/** Per model, whether it is a lightweight variant built for speed and low cost: one Noul each, one request. */
+	/** One Noul per model, with independent evidence grouped into bounded requests. */
 	evaluateLightweightModels(
 		input: { readonly models: readonly { id: string; description: string }[] },
 		signal?: AbortSignal,
 	): Promise<Record<string, unknown>> {
 		return this.evaluatePerModel(input.models, lightweightQuestionId, "lightweight", signal, (index) => ({
 			type: "boolean",
-			instructions: `Is \`m${index}\` a lightweight variant built for speed and low cost (a flash, mini, lite, fast or spark variant) rather than a full-size model?`,
+			instructions: `Is \`models.m${index}\` a lightweight variant built for speed and low cost (a flash, mini, lite, fast or spark variant) rather than a full-size model?`,
 		}));
 	}
 
-	/** Per model, whether a later version of the same model is among the others: one Noul each, one request. */
+	/** One Noul per model; every bounded question batch retains the entire comparison universe. */
 	evaluateSupersededModels(
 		input: { readonly models: readonly { id: string; description: string }[] },
 		signal?: AbortSignal,
 	): Promise<Record<string, unknown>> {
 		return this.evaluatePerModel(input.models, supersededQuestionId, "superseded", signal, (index) => ({
 			type: "boolean",
-			instructions: `Is a later version of the same model as \`m${index}\` among \`models\`?`,
+			instructions: `Is a later version of the same model as \`models.m${index}\` among \`models\`?`,
 			criteria: {
 				true: "The same model family and tier with a higher version number, such as Flash 3.8 for Flash 3.6",
 				false: "No higher version of this same model; a different family, or another effort preset of the same version, does not count",
@@ -1011,35 +1012,51 @@ export class SystemOneController {
 		}));
 	}
 
-	/** One Noul per model over the models' facts (`m<i>`, and `models` for the whole list), in one request. */
+	/** One classification owner: admit complete batches, record every evaluation, publish only after all finish. */
 	private async evaluatePerModel(
 		models: readonly { id: string; description: string }[],
 		questionId: (index: number) => string,
-		label: string,
+		label: "lightweight" | "superseded",
 		signal: AbortSignal | undefined,
 		question: (index: number) => QuestionDefinition,
 	): Promise<Record<string, unknown>> {
-		const state: Record<string, unknown> = { models: models.map((model) => model.description) };
-		const questions: QuestionPack = {};
-		models.forEach((model, index) => {
-			state[`m${index}`] = model.description;
-			questions[questionId(index)] = question(index);
-		});
-		const { decision, answers, evaluationId } = await this.runStageValidation(
-			"route_choice",
-			state,
-			"read_only",
-			[],
-			questions,
-			signal,
-		);
-		this.sealDecision(
-			decision,
-			"evaluated",
-			evaluationId,
-			models.map((model, index) => `${model.id} P(${label})=${probabilityText(answers[questionId(index)])}`),
-		);
-		return answers;
+		signal?.throwIfAborted();
+		const pinnedModel = this.config.model.production || SYSTEM_ONE_PINNED_MODEL;
+		let batches: ReturnType<typeof planModelEvaluations>;
+		try {
+			batches = planModelEvaluations(models, pinnedModel, label === "superseded", questionId, question);
+		} catch (error) {
+			const id = this.evaluationObserver?.start({
+				programId: "system-one:route_choice",
+				consequence: "low",
+				model: pinnedModel,
+			});
+			if (id !== undefined) this.evaluationObserver?.settleFailed(id, error);
+			throw error;
+		}
+		const combined: Record<string, unknown> = {};
+		for (const batch of batches) {
+			signal?.throwIfAborted();
+			const { decision, answers, evaluationId } = await this.runStageValidation(
+				"route_choice",
+				batch.state,
+				"read_only",
+				[],
+				batch.questions,
+				signal,
+			);
+			this.sealDecision(
+				decision,
+				"evaluated",
+				evaluationId,
+				batch.indexes.map(
+					(index) => `${models[index].id} P(${label})=${probabilityText(answers[questionId(index)])}`,
+				),
+			);
+			signal?.throwIfAborted();
+			for (const index of batch.indexes) combined[questionId(index)] = answers[questionId(index)];
+		}
+		return combined;
 	}
 
 	/** Record the real terminal after the call ran. No-op when the gate never admitted this call_id. */

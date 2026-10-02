@@ -25,6 +25,7 @@ const VALIDATION_CODES = new Set([
 	"invalid_request_error",
 	"bad_request",
 	"context_length_exceeded",
+	"max_tokens_exceeded",
 	"invalid_api_key",
 	"rate_limit_exceeded",
 	"insufficient_quota",
@@ -90,17 +91,19 @@ export function systemOneFailureReasons(error: unknown): readonly string[] {
 		const entries = isPlainRecord(body)
 			? Array.isArray(body.detail)
 				? body.detail
-				: Array.isArray(body.errors)
-					? body.errors
-					: isPlainRecord(body.error)
-						? [body.error]
-						: []
+				: isPlainRecord(body.detail)
+					? [body.detail]
+					: Array.isArray(body.errors)
+						? body.errors
+						: isPlainRecord(body.error)
+							? [body.error]
+							: []
 			: [];
 		if (entries.length === 0) reasons.push("provider validation diagnostics unavailable");
 		else {
 			const available = 6 - reasons.length;
 			for (const entry of entries.slice(0, available)) {
-				const code = isPlainRecord(entry) ? (entry.type ?? entry.code) : undefined;
+				const code = isPlainRecord(entry) ? (entry.type ?? entry.code ?? entry.error_type) : undefined;
 				const safeCode = typeof code === "string" && VALIDATION_CODES.has(code) ? code : "unknown validation code";
 				reasons.push(
 					`validation (${Math.min(entries.length, available)}/${entries.length}): ${safeCode} at ${validationLocation(isPlainRecord(entry) ? entry.loc : undefined)}`,

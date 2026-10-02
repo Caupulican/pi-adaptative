@@ -11,6 +11,27 @@ import { formatEvaluationRows } from "../src/core/tools/decision-ledger-read.ts"
 import { tempDir } from "./temp-dir.ts";
 
 describe("System One failure observability", () => {
+	it("reports allowlisted structured rejection codes without exposing provider detail values", () => {
+		const request = {
+			model: "jev-1.13.0",
+			state: {},
+			questions: { check: { type: "noul" as const, instructions: "Check" } },
+		};
+		for (const code of ["max_tokens_exceeded", "private-code apikey_private_fixture"]) {
+			const reasons = systemOneFailureReasons(
+				new SystemOneReviewError(
+					"TypeSafe HTTP 400",
+					"a".repeat(64),
+					request,
+					{ detail: { error_type: code, message: "private-message", input: "private-state" } },
+					[{ attempt: 1, status: 400 }],
+				),
+			);
+			expect(reasons.join("\n")).toContain(code === "max_tokens_exceeded" ? code : "unknown validation code");
+			expect(reasons.join("\n")).not.toMatch(/private-|apikey_/);
+		}
+	});
+
 	it("accepts later verdicts for restored previews and ignores records outside the retained bound", () => {
 		const records: SemanticEvaluationRecord[] = Array.from({ length: 40 }, (_, index) => ({
 			evaluationId: String(index),

@@ -816,6 +816,17 @@ stale failure diagnostics. Pinned by
 
 ## System One
 
+**Model classification publishes only complete, bounded evaluations.** Independent lightweight
+questions carry only their targets' full facts, with stable global answer identities across batches.
+Every superseded-version question retains the entire comparison universe, stored once per request;
+question batching never partitions that evidence. Serialized-byte admission has conservative headroom
+and does not claim to measure provider tokens. An oversized individual or comparison universe refuses
+before transport and records a diagnostic. Cancellation or a failed batch publishes no partial pool;
+every actual request retains its own evaluation and usage. Structured provider rejection codes enter
+default diagnostics only through the allowlist; arbitrary provider detail values remain concealed.
+Pinned by `packages/coding-agent/test/system-one/model-evaluation-batches.test.ts` and
+`packages/coding-agent/test/system-one-failure-observability.test.ts`.
+
 **The host routes the loop from System One judgments; the root owns execution.** System One is the
 provider-neutral judgment contract, exposed through `systemone`; TypeSafe is a provider adapter.
 The root owns assignment and integration. Workers choose local methods and focused checks within
