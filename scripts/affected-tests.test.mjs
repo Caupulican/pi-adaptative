@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
 	createPackageResolver,
@@ -9,21 +8,6 @@ import {
 	relativeImportSpecifiers,
 	selectCommitTests,
 } from "./affected-tests.mjs";
-
-test("native tool surface changes select session, disabled-tool, and exclusion contract tests", () => {
-	const root = fileURLToPath(new URL("../", import.meta.url));
-	const contracts = [
-		"packages/coding-agent/test/suite/agent-session-prompt.test.ts",
-		"packages/coding-agent/test/suite/regressions/3592-no-builtin-tools-keeps-extension-tools.test.ts",
-		"packages/coding-agent/test/suite/regressions/5109-exclude-tools.test.ts",
-	];
-	for (const owner of ["default-tool-surface", "runtime-builder", "tool-capability-policy"]) {
-		const selected = findCommitTests(root, "packages/coding-agent", [`packages/coding-agent/src/core/${owner}.ts`]);
-		for (const contract of contracts) assert.ok(selected.includes(contract), `${owner} must select ${contract}`);
-	}
-	const unrelated = findCommitTests(root, "packages/coding-agent", ["packages/coding-agent/src/core/fast-mode.ts"]);
-	for (const contract of contracts) assert.ok(!unrelated.includes(contract), `unrelated fast-mode must not select ${contract}`);
-});
 
 const sources = {
 	"packages/x/test/a.test.ts": 'import { a } from "../src/core/a.ts";\nvi.mock("../src/core/b.js");',

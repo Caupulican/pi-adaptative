@@ -1,8 +1,9 @@
 name: CI
 
-# Push/PR run only the tests that commit actually touched. The complete
-# Linux/Windows matrix is the release tag (build-binaries.yml quality-gate)
-# and manual dispatch.
+# Build and check on Linux and Windows. The test suite was removed on 2026-10-04 and is rebuilt by
+# area from git history, so there is no test planning, sharding or carry-forward here; the
+# release tag runs the same jobs (build-binaries.yml quality-gate) and release-ci-proof.mjs
+# requires them by name.
 on:
   push:
     branches: [main]
@@ -16,7 +17,7 @@ on:
         required: false
         type: string
       full_suite:
-        description: Run the complete Linux/Windows matrix
+        description: Kept for callers; build and check always run in full
         required: false
         type: boolean
         default: false
@@ -26,80 +27,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  plan:
-    name: Plan affected tests
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
-    outputs:
-      quality_job: ${{ steps.plan.outputs.quality_job }}
-      check: ${{ steps.plan.outputs.check }}
-      coding_agent: ${{ steps.plan.outputs.coding_agent }}
-      os: ${{ steps.plan.outputs.os }}
-      non_coding_agent_workspaces: ${{ steps.plan.outputs.non_coding_agent_workspaces }}
-      coverage: ${{ steps.plan.outputs.coverage }}
-      long_session: ${{ steps.plan.outputs.long_session }}
-      native_process: ${{ steps.plan.outputs.native_process }}
-      windows_incident: ${{ steps.plan.outputs.windows_incident }}
-      coding_agent_narrow: ${{ steps.plan.outputs.coding_agent_narrow }}
-      coding_agent_related_files: ${{ steps.plan.outputs.coding_agent_related_files }}
-      coding_agent_shards: ${{ steps.plan.outputs.coding_agent_shards }}
-      coding_agent_shard_count: ${{ steps.plan.outputs.coding_agent_shard_count }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      # Reads the previous push-to-main run's OWN uploaded test-report artifacts (never a guess)
-      # to find which coding-agent tests it left failing. Scoped to push-to-main, since that is
-      # the exact "fix one bug, don't rerun everything" sequence ci-affected.mjs is asked to
-      # shrink. `gh run list --status completed` only ever considers the latest COMPLETED run on
-      # main: a run still in progress is not "previous" yet, so an in-flight run is invisible here
-      # and the completed run before it (if any) is used instead — deliberate, not a race.
-      # ci-carry-forward.mjs fails CLOSED: any lookup failure, or any evidence that a failure isn't
-      # fully explained by named coding-agent test files, comes back as `{"full":true,"reason":
-      # "..."}`, and ci-affected.mjs must then run the complete suite, not just skip narrowing.
-      - name: Failure carry-forward
-        id: carry_forward
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
-        run: |
-          result=$(node scripts/ci-carry-forward.mjs)
-          echo "result=${result}" >> "$GITHUB_OUTPUT"
-
-      - name: Plan
-        id: plan
-        env:
-          # A reusable workflow keeps the caller's event name. A tag push is `push`,
-          # so the caller passes full_suite instead of hoping event_name is workflow_call.
-          CI_FULL_SUITE: ${{ inputs.full_suite || github.event_name == 'workflow_dispatch' }}
-          CI_EVENT_NAME: ${{ github.event_name }}
-          CI_BEFORE: ${{ github.event.before }}
-          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          CI_COMMIT_SUBJECT: ${{ github.event.head_commit.message || github.event.pull_request.title }}
-          # Empty when the step above didn't run (not a push to main) — parseCarriedFiles in
-          # ci-affected.mjs treats that as "nothing to carry", not as a carry-forward failure.
-          CI_CARRIED_FILES: ${{ steps.carry_forward.outputs.result }}
-        run: node scripts/ci-affected.mjs
-
-  build-check-test:
-    name: Build, check, test (${{ matrix.os }})
-    needs: plan
-    if: needs.plan.outputs.quality_job == 'true'
+  build-check:
+    name: Build, check (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(needs.plan.outputs.os) }}
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    # Includes hosted-runner package-manager variance plus bounded execution; tests remain separately sharded below.
-    timeout-minutes: 20
+    permissions:
+      contents: read
+    timeout-minutes: 25
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -117,57 +54,25 @@ jobs:
         if: runner.os == 'Linux'
         run: ./scripts/install-linux-ci-deps.sh
 
-      - name: Install Windows system dependencies
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # Chocolatey's community feed is the first source; when it is unreachable (it was, on
-          # 2026-09-10, for every Windows job of one run) the pinned release archive from GitHub is
-          # the second, so a feed outage never decides a CI result.
-          $version = "10.4.2"
-          $installed = $false
-          try {
-            choco install fd --version=$version --yes --no-progress
-            $installed = ($LASTEXITCODE -eq 0)
-          } catch { $installed = $false }
-          if (-not $installed) {
-            Write-Host "choco install fd failed; installing fd $version from the GitHub release archive"
-            $dir = Join-Path $env:RUNNER_TEMP "fd-$version"
-            New-Item -ItemType Directory -Force -Path $dir | Out-Null
-            $archive = Join-Path $dir "fd.zip"
-            Invoke-WebRequest -Uri "https://github.com/sharkdp/fd/releases/download/v$version/fd-v$version-x86_64-pc-windows-msvc.zip" -OutFile $archive
-            Expand-Archive -Path $archive -DestinationPath $dir -Force
-            $exe = Get-ChildItem -Path $dir -Recurse -Filter fd.exe | Select-Object -First 1
-            if (-not $exe) { throw "fd.exe not found in the release archive" }
-            Add-Content -Path $env:GITHUB_PATH -Value $exe.DirectoryName
-            $env:PATH = "$($exe.DirectoryName);$env:PATH"
-          }
-          fd --version
-
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
-      - name: Verify native TypeScript test toolchain
+      - name: Verify native TypeScript toolchain
         run: |
           npm ls vite@8.2.2 vitest@5.0.1 --depth=0
           node node_modules/vitest/vitest.mjs --version
           node node_modules/vite/bin/vite.js --version
 
+      # Deterministic CI: builds are hermetic by default (see
+      # packages/ai/scripts/model-catalog-generation-policy.ts) and use the COMMITTED model
+      # catalogs instead of refetching live pricing that can drift between the release commit
+      # and this run (drift fails the artifact verification and aborts the release). Live
+      # refresh only happens when PI_FETCH_MODELS=1 is explicitly set, which this job never does.
       - name: Build
-        if: >
-          needs.plan.outputs.non_coding_agent_workspaces != '[]' ||
-          needs.plan.outputs.coding_agent == 'true'
-        # Deterministic CI: builds are hermetic by default (see
-        # packages/ai/scripts/model-catalog-generation-policy.ts) and use the COMMITTED model
-        # catalogs instead of refetching live pricing that can drift between the release commit
-        # and this run (drift fails the artifact verification and aborts the release). Live
-        # refresh only happens when PI_FETCH_MODELS=1 is explicitly set, which this job never does.
         run: npm run build
 
       - name: Check
-        if: >
-          runner.os == 'Linux' &&
-          needs.plan.outputs.check == 'true'
+        if: runner.os == 'Linux'
         run: npm run check
 
       # A contract test may change only alongside docs/doctrine.md (see contracts.json). The
@@ -187,180 +92,3 @@ jobs:
           fi
           git fetch --no-tags --deepen=1 origin
           node scripts/check-contract-doctrine.mjs --range "HEAD~1..HEAD"
-
-      - name: Verification-harness coverage gate
-        if: >
-          runner.os == 'Linux' &&
-          needs.plan.outputs.coverage == 'true'
-        run: npm run coverage:verification-harness
-
-      # Contract gate: a short goal session must stay append-only (reuse p50 >= 0.98, appends >= 95%)
-      # with flat per-request host work. Two seconds; the full Profile workflow stays on demand.
-      - name: Long-session contract gate
-        if: needs.plan.outputs.long_session == 'true'
-        working-directory: packages/coding-agent
-        env:
-          PI_PROFILE_LONG_SESSION: '1'
-          PI_PROFILE_SCENARIO: goal
-          PI_PROFILE_TURNS: '300'
-          PI_PROFILE_GATE: '1'
-          PI_PROFILE_DIR: ${{ runner.temp }}/profile-gate
-        run: npx vitest run test/profiling/host-long-session.profile.test.ts --pool=forks
-
-      - name: Test non-coding-agent workspaces
-        if: needs.plan.outputs.non_coding_agent_workspaces != '[]'
-        env:
-          NODE_OPTIONS: --conditions=pi-source
-          PI_VITEST_ISOLATE_NATIVE_PROCESS: "1"
-        run: npm test -- ${{ join(fromJSON(needs.plan.outputs.non_coding_agent_workspaces), ' ') }}
-
-      # This is native OS success control, not a resource-contention test. Keep the same assertions
-      # on both platforms after parallel CPU/memory benchmarks; timeout refusal remains unit-tested.
-      - name: Test native process-tree control alone
-        if: needs.plan.outputs.native_process == 'true'
-        working-directory: packages/agent
-        env:
-          NODE_OPTIONS: --conditions=pi-source
-        run: node ../../node_modules/vitest/dist/cli.js --run --bail=0 test/reliability/process-tree-native-tree.test.ts
-
-      - name: Test native incident collector with Windows PowerShell 5.1
-        if: >
-          runner.os == 'Windows' &&
-          needs.plan.outputs.windows_incident == 'true'
-        shell: pwsh
-        working-directory: packages/coding-agent
-        env:
-          NODE_OPTIONS: --conditions=pi-source
-        run: |
-          $env:PI_TEST_POWERSHELL = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
-          node ../../node_modules/vitest/dist/cli.js --run test/windows-incident-collector.test.ts
-
-  coding-agent-test:
-    # coding_agent_shard_count is 4 (today's full sharded suite) unless ci-affected.mjs proved
-    # every changed file in this workspace is plain TypeScript source/tests with no global test
-    # infra touched (see codingAgentRelatedFiles) — then it is 1: vitest related resolves the
-    # affected set itself instead of it being pre-partitioned, so one job per OS is the whole run.
-    name: Coding-agent test (${{ matrix.os }}, shard ${{ matrix.shard }}/${{ needs.plan.outputs.coding_agent_shard_count }})
-    needs: plan
-    if: needs.plan.outputs.coding_agent == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        shard: ${{ fromJSON(needs.plan.outputs.coding_agent_shards) }}
-    runs-on: ${{ matrix.os }}
-    # Includes hosted-runner package-manager variance plus bounded execution.
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-          persist-credentials: false
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: '.nvmrc'
-          cache: npm
-
-      - name: Install Linux system dependencies
-        if: runner.os == 'Linux'
-        run: ./scripts/install-linux-ci-deps.sh
-
-      - name: Install Windows system dependencies
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # Chocolatey's community feed is the first source; when it is unreachable (it was, on
-          # 2026-09-10, for every Windows job of one run) the pinned release archive from GitHub is
-          # the second, so a feed outage never decides a CI result.
-          $version = "10.4.2"
-          $installed = $false
-          try {
-            choco install fd --version=$version --yes --no-progress
-            $installed = ($LASTEXITCODE -eq 0)
-          } catch { $installed = $false }
-          if (-not $installed) {
-            Write-Host "choco install fd failed; installing fd $version from the GitHub release archive"
-            $dir = Join-Path $env:RUNNER_TEMP "fd-$version"
-            New-Item -ItemType Directory -Force -Path $dir | Out-Null
-            $archive = Join-Path $dir "fd.zip"
-            Invoke-WebRequest -Uri "https://github.com/sharkdp/fd/releases/download/v$version/fd-v$version-x86_64-pc-windows-msvc.zip" -OutFile $archive
-            Expand-Archive -Path $archive -DestinationPath $dir -Force
-            $exe = Get-ChildItem -Path $dir -Recurse -Filter fd.exe | Select-Object -First 1
-            if (-not $exe) { throw "fd.exe not found in the release archive" }
-            Add-Content -Path $env:GITHUB_PATH -Value $exe.DirectoryName
-            $env:PATH = "$($exe.DirectoryName);$env:PATH"
-          }
-          fd --version
-
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Verify native TypeScript test toolchain
-        run: |
-          npm ls vite@8.2.2 vitest@5.0.1 --depth=0
-          node node_modules/vitest/vitest.mjs --version
-          node node_modules/vite/bin/vite.js --version
-
-      - name: Build
-        run: npm run build
-
-      # The Windows shell corpus wall runs for over a minute on Windows and shares a shard with
-      # tests holding second-scale budgets; three of those failed on time alone while it ran
-      # beside them (2026-09-12). It is excluded from every shard/related run and run by itself,
-      # after shard 1's own tests have finished, so no budgeted test ever competes with it for the
-      # runner. That "shard == 1" gate fires exactly once regardless of shard count (1 or 4), so
-      # narrowed runs keep this coverage unchanged.
-      # Test temp churn on a Dev Drive (scripts/ci-windows-dev-drive.ps1): faster file operations and
-      # off the system volume the runner's background services saturate.
-      - name: Put TEMP on a Dev Drive
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./scripts/ci-windows-dev-drive.ps1
-
-      - name: Test coding-agent shard
-        if: needs.plan.outputs.coding_agent_narrow != 'true'
-        working-directory: packages/coding-agent
-        env:
-          NODE_OPTIONS: --conditions=pi-source
-          PI_VITEST_ISOLATE_CORPUS: "1"
-          PI_CI_HANG_DIAGNOSTICS: ${{ runner.os == 'Windows' && '1' || '' }}
-        # --bail=0 on the shard: every failure in the shard is reported in one run. With --bail=1
-        # each red shard showed exactly one failure and the next push found the next one
-        # (2026-09-12: two candidates, nine red jobs each, seven distinct causes). The local
-        # inner loop keeps its own defaults (package.json `test` still bails).
-        # The json reporter feeds failure carry-forward (scripts/ci-carry-forward.mjs) on the next
-        # push; it is uploaded only when this step fails, so a green run buys no extra artifact.
-        run: node ../../node_modules/vitest/dist/cli.js --run --bail=0 --shard=${{ matrix.shard }}/4 --reporter=default --reporter=json --outputFile.json=test-report.json
-
-      # Narrowed mode: every changed file in this push is plain TypeScript source/tests, so
-      # `vitest related` resolves the exact affected test files itself instead of the workspace
-      # being pre-sharded (see codingAgentRelatedFiles in ci-affected.mjs). One job per OS is the
-      # whole run.
-      - name: Test coding-agent related files
-        if: needs.plan.outputs.coding_agent_narrow == 'true'
-        working-directory: packages/coding-agent
-        env:
-          NODE_OPTIONS: --conditions=pi-source
-          PI_VITEST_ISOLATE_CORPUS: "1"
-          PI_CI_HANG_DIAGNOSTICS: ${{ runner.os == 'Windows' && '1' || '' }}
-          PI_CI_RELATED_FILES: ${{ needs.plan.outputs.coding_agent_related_files }}
-        run: node ../../scripts/run-coding-agent-related.mjs --bail=0 --reporter=default --reporter=json --outputFile.json=test-report.json
-
-      - name: Upload coding-agent test report for failure carry-forward
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: test-report-coding-agent-${{ matrix.os }}-${{ matrix.shard }}
-          path: packages/coding-agent/test-report.json
-          if-no-files-found: ignore
-          retention-days: 3
-
-      - name: Test the Windows shell corpus wall alone
-        if: matrix.shard == 1
-        working-directory: packages/coding-agent
-        env:
-          NODE_OPTIONS: --conditions=pi-source
-        run: node ../../node_modules/vitest/dist/cli.js --run --bail=1 test/windows-shell-corpus.test.ts

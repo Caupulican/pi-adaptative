@@ -9,23 +9,23 @@ session module under `packages/coding-agent/src/core`. Regenerate after adding o
 |---|---|---|
 | `agent-session-background-tasks.ts` | no | Construction of the session's background tool-task controller, extracted from the session coordinator (decomposition ratchet: the coordinator only wires, its line ceiling only moves down). |
 | `agent-session-contracts.ts` | no | (no header comment) |
-| `agent-session-edge.ts` | yes | The edge, bound to one session: grants live on the branch, the confirmation handler belongs to the interactive host, and a child session never asks. |
+| `agent-session-edge.ts` | no | The edge, bound to one session: grants live on the branch, the confirmation handler belongs to the interactive host, and a child session never asks. |
 | `agent-session-guards.ts` | no | Guard handlers the agent loop fires into the session: a runaway stop (a bounded harness guard ended a run) and a tool-validation escalation (repeated identical validation failures). |
-| `agent-session-runtime.ts` | yes | (no header comment) |
+| `agent-session-runtime.ts` | no | (no header comment) |
 | `agent-session-services.ts` | no | (no header comment) |
 | `agent-session.ts` | no | (no header comment) |
-| `background-lane-controller.ts` | yes | Execution-plane coordinator for goal continuation, research, managed lanes, worker delegation, and model fitness. |
-| `background-tool-task-controller.ts` | yes | (no header comment) |
-| `bash-execution-controller.ts` | yes | Standalone bash-command execution (the `/bash` path + extension-driven bash). |
-| `billing-failover-controller.ts` | yes | (no header comment) |
-| `capability-tier.ts` | yes | Capability tier: which features a model earns, decided by evidence. |
+| `background-lane-controller.ts` | no | Execution-plane coordinator for goal continuation, research, managed lanes, worker delegation, and model fitness. |
+| `background-tool-task-controller.ts` | no | (no header comment) |
+| `bash-execution-controller.ts` | no | Standalone bash-command execution (the `/bash` path + extension-driven bash). |
+| `billing-failover-controller.ts` | no | (no header comment) |
+| `capability-tier.ts` | no | Capability tier: which features a model earns, decided by evidence. |
 | `compaction-controller.ts` | no | (no header comment) |
-| `cost-guard-controller.ts` | yes | Stateful foreground cost-guard owner. |
-| `durable-custom-message-turn-controller.ts` | yes | (no header comment) |
+| `cost-guard-controller.ts` | no | Stateful foreground cost-guard owner. |
+| `durable-custom-message-turn-controller.ts` | no | (no header comment) |
 | `extension-binding-controller.ts` | no | Extension runtime binding: the boundary between {@link AgentSession} and the {@link ExtensionRunner} it hosts. |
-| `foreground-lifecycle-controller.ts` | yes | (no header comment) |
-| `foreground-recovery-controller.ts` | yes | (no header comment) |
-| `foreground-terminal-handoff-controller.ts` | yes | (no header comment) |
+| `foreground-lifecycle-controller.ts` | no | (no header comment) |
+| `foreground-recovery-controller.ts` | no | (no header comment) |
+| `foreground-terminal-handoff-controller.ts` | no | (no header comment) |
 | `goal-loop-controller.ts` | no | Goal auto-continuation loop. |
 | `human-input-controller.ts` | no | (no header comment) |
 | `local-prefix-warm-controller.ts` | no | (no header comment) |
@@ -33,15 +33,15 @@ session module under `packages/coding-agent/src/core`. Regenerate after adding o
 | `memory-controller.ts` | no | Memory controller: the session's plug-and-play memory subsystem — the read-only OKF retrieval provider, the bounded prompt-evidence surfacing pilot, cross-session recall effectiveness, and the live {@link MemoryManager} (bundled file-store + transcript-recall providers plus any extension contributions). |
 | `model-router-controller.ts` | no | Model-router turn routing: the session's model-selection subsystem — the conversation stages (the opening judged once into the talker, small messages on a brief side trip, exact toolkit hits run with no model), the regex route resolver, the optional System One routing judge, the per-tier thinking/tool-surface swap arou |
 | `model-selection-controller.ts` | no | User-facing model + thinking-level selection. |
-| `pending-input-queue-controller.ts` | yes | (no header comment) |
+| `pending-input-queue-controller.ts` | no | (no header comment) |
 | `profile-filter-controller.ts` | no | Resource-profile tool/extension gating + reload-time profile model re-application. |
-| `provider-request-context-controller.ts` | yes | (no header comment) |
+| `provider-request-context-controller.ts` | no | (no header comment) |
 | `provider-request-runtime-controller.ts` | no | (no header comment) |
 | `reflection-controller.ts` | no | Root-session reflection cue + explicit learning-write controller. |
-| `runtime-update-controller.ts` | yes | (no header comment) |
-| `scout-controller.ts` | yes | (no header comment) |
+| `runtime-update-controller.ts` | no | (no header comment) |
+| `scout-controller.ts` | no | (no header comment) |
 | `tool-gate-controller.ts` | no | Agent tool-call gate: model-router escalation, autonomy gating, extension tool hooks, and the untrusted-content output boundary. |
 | `tool-protocol-controller.ts` | no | (no header comment) |
 
-35 modules, 16 with a test file of the same name.
+35 modules, 0 with a test file of the same name.
 

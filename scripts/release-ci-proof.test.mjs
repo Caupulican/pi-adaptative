@@ -14,23 +14,7 @@ test("full matrix proof rejects each missing, duplicate, pending or skipped job 
 			assert.equal(hasCompleteCiMatrix(complete.map((job, i) => i === index ? { ...job, ...patch } : job)), false);
 		}
 	}
-	assert.equal(hasCompleteCiMatrix(Array.from({ length: 8 }, () => complete[2])), false);
-});
-
-test("release proof rejects omitted or unsuccessful native process controls on either operating system", () => {
-	const stepName = "Test native process-tree control alone";
-	const complete = completeCiJobs().map((job) => job.name.startsWith("Build, check, test")
-		? { ...job, steps: [...job.steps.filter((step) => step.name !== stepName), { name: stepName, conclusion: "success" }] }
-		: job);
-	assert.equal(hasCompleteCiMatrix(complete), true);
-	for (const os of ["ubuntu-latest", "windows-latest"]) {
-		for (const conclusion of [undefined, "skipped", "failure", "cancelled"]) {
-			const jobs = complete.map((job) => job.name === `Build, check, test (${os})`
-				? { ...job, steps: job.steps.flatMap((step) => step.name !== stepName ? [step] : conclusion ? [{ ...step, conclusion }] : []) }
-				: job);
-			assert.equal(hasCompleteCiMatrix(jobs), false, `${os} native control ${conclusion ?? "omitted"}`);
-		}
-	}
+	assert.equal(hasCompleteCiMatrix(Array.from({ length: 2 }, () => complete[0])), false);
 });
 
 test("proof binds successful runs to the requested SHA and examines the complete jobs from one run", () => {
@@ -40,7 +24,7 @@ test("proof binds successful runs to the requested SHA and examines the complete
 	const calls = [];
 	const read = (command, args) => {
 		calls.push([command, args]);
-		return JSON.stringify(args[1] === "list" ? [{ ...run, databaseId: 2 }, run] : { jobs: args[2] === "1" ? complete : complete.slice(0, 2) });
+		return JSON.stringify(args[1] === "list" ? [{ ...run, databaseId: 2 }, run] : { jobs: args[2] === "1" ? complete : complete.slice(0, 1) });
 	};
 	assert.equal(requireCiProof(sha, "owner/repo", read), 1);
 	assert.equal(calls.length, 3);

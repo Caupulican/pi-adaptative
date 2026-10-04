@@ -17,7 +17,7 @@
 	"scripts": {
 		"clean": "shx rm -rf dist",
 		"build": "node ../../scripts/run-tsc.mjs -p tsconfig.build.json",
-		"test": "node --test test/*.test.ts"
+		"test": "node --test \"test/**/*.test.ts\""
 	},
 	"files": [
 		"dist/**/*",
