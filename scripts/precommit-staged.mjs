@@ -10,11 +10,15 @@
  * (per-file type checking is unsound: an importer of the changed file can break). Everything else in
  * `npm run check` stays a CI and release gate.
  *
- * Two test sets join the staged test files. The tests that import a staged source file directly
- * (see affected-tests.mjs; hub modules narrow to their named tests) run in one batch per workspace:
- * the transitive set is most of the suite and stays CI's. And when the branch's last recorded CI
- * verdict is red (see ci-status.mjs), its failing test files are carried into every commit on top
- * of it: the commit is refused until they pass, so a red main is fixed before new work lands on it.
+ * Tests belong to CI. A commit used to run the staged test files and every test that imports a staged
+ * source, which made most of a working day test time. CI already runs exactly that set per pushed
+ * commit (see ci-affected.mjs), on Linux and Windows, so the hook runs it only on request:
+ * `PI_PRECOMMIT_TESTS=1` or `--with-tests` restores the staged and importing-test batches
+ * (see affected-tests.mjs; hub modules narrow to their named tests). One test obligation stays
+ * unconditional, because it is the fix loop and not a speculative run: when the branch's last
+ * recorded CI verdict is red (see ci-status.mjs), its failing test files are carried into every commit
+ * on top of it and the commit is refused until they pass, so a red main is fixed before new work
+ * lands on it.
  *
  * `--dry-run` prints the plan for the current staged set without running anything.
  */
@@ -260,6 +264,11 @@ function runCarriedObligation() {
 	}
 }
 
+/** Whether this commit runs the staged and importing tests itself instead of leaving them to CI. */
+export function withTests(argv = [], env = process.env) {
+	return argv.includes("--with-tests") || env.PI_PRECOMMIT_TESTS === "1";
+}
+
 export function main(argv = process.argv.slice(2)) {
 	const staged = stagedFiles();
 	const plan = planStagedGates(staged, {
@@ -323,13 +332,18 @@ export function main(argv = process.argv.slice(2)) {
 	}
 	run("contract-doctrine gate", process.execPath, [join(scriptsDir, "check-contract-doctrine.mjs")]);
 	if (plan.browserSmoke) run("browser smoke check", "npm", ["run", "check:browser-smoke"]);
-	for (const entry of plan.tests) {
-		const [command, args] = testCommand(entry);
-		run(`${entry.runner} ${entry.cwd}/${entry.file}`, command, args, entry.cwd, withoutHookGitLocation());
-	}
-	for (const entry of plan.relatedTests) {
-		const [command, args] = testCommand(entry);
-		run(`tests importing staged source (${entry.files.length} file(s) in ${entry.cwd})`, command, args, entry.cwd, withoutHookGitLocation());
+	if (withTests(argv)) {
+		for (const entry of plan.tests) {
+			const [command, args] = testCommand(entry);
+			run(`${entry.runner} ${entry.cwd}/${entry.file}`, command, args, entry.cwd, withoutHookGitLocation());
+		}
+		for (const entry of plan.relatedTests) {
+			const [command, args] = testCommand(entry);
+			run(`tests importing staged source (${entry.files.length} file(s) in ${entry.cwd})`, command, args, entry.cwd, withoutHookGitLocation());
+		}
+	} else if (plan.tests.length + plan.relatedTests.length > 0) {
+		const count = plan.tests.length + plan.relatedTests.reduce((sum, entry) => sum + entry.files.length, 0);
+		process.stdout.write(`precommit: ${count} affected test file(s) left to CI (PI_PRECOMMIT_TESTS=1 runs them here)\n`);
 	}
 	runCarriedObligation();
 	if (plan.typecheck) run("project type check (staged TypeScript source)", process.execPath, [join(scriptsDir, "run-tsc.mjs"), "--noEmit"]);
