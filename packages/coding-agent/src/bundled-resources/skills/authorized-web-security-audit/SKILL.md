@@ -25,8 +25,8 @@ Choose one mode:
   policy.
 
 Before any active work, read
-[references/assessment-contract.md](references/assessment-contract.md). Pair
-confirmed code defects with `evidence-gated-tdd`.
+[references/assessment-contract.md](references/assessment-contract.md). Fix
+confirmed code defects and prove them live; use `evidence-gated-tdd` only when the user asks for tests.
 
 ## North Star
 

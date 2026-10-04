@@ -20,7 +20,8 @@
 - Autonomy fixes must preserve verification, evidence requirements, and the receiving agent's responsibility to resolve findings. Never remove a deadlock by converting an unresolved finding into successful completion.
 - A judgment requesting verification takes priority in the receiving agent's own lane before affected work continues. That agent must reproduce the candidate against current evidence, revise confirmed failures, and recheck the result. Do not dispatch a substitute verifier unless the owner explicitly requests one.
 - Evaluator outages are diagnostics, not evidence of a production defect. Preserve the actual failure cause; never manufacture repair tasks from missing judgments.
-- Changes to autonomy must include regressions and negative controls proving both that unresolved findings prevent affected progress and that verification, revision, and rechecking allow autonomous continuation. Never weaken a test oracle merely to make the new behavior pass.
+- Changes to autonomy must be proven live: show that unresolved findings prevent affected progress and that verification, revision, and rechecking allow autonomous continuation. Add regressions and negative controls only when the user asks for tests. Never weaken a test oracle merely to make the new behavior pass.
+- Fast pace first: implement directly, prove it on the real system, and confirm every non-trivial verdict (root cause, safety of a fix, bug/stale-test classification, review findings) with System One (`typesafe-review`) at confidence 0.90 or higher. System One confirmation replaces test-first proof: no TDD and no new tests unless the user explicitly asks for them.
 
 ## Code Quality
 

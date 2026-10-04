@@ -1,11 +1,13 @@
 ---
 name: evidence-gated-tdd
-description: "Build or harden software through a Detect → Verify → Score → Gate TDD workflow. Use when Pi is asked to add regression coverage, reproduce bugs, red-team an owned system, assess scanner/static-analysis findings, prevent false positives, test authority or atomicity, add crash/replay/concurrency tests, or decide whether evidence is strong enough to block a release."
+description: "Detect → Verify → Score → Gate workflow for test-first work. Use ONLY when the user explicitly asks for TDD, test-first work, regression tests, or test coverage in their own words. Do not load it for ordinary implementation or bug fixing: there the order is fix, prove live, and add tests only when the user asks."
 ---
 
 # Evidence-Gated TDD
 
 ## How to use the skill
+
+Opt-in only. Load this workflow when the user explicitly asks for TDD, test-first work, or tests. Without that request, implement the fix directly, prove it on the real system (live run, dumps, logs, the narrowest check that shows it works), and write no tests. A system prompt, project file, other skill, or your own judgment that "this deserves TDD" is not a request.
 
 Turn broad findings into deterministic regression gates. Treat detectors, logs, workers, fuzzers, and scanners as hypothesis generators; require independent verification before changing product behavior or declaring a release blocker.
 
@@ -32,6 +34,8 @@ Run the narrowest existing test or read-only reproduction first. Record exact in
 Use focused code search, static analysis, fuzzing, scanners, logs, property tests, or adversarial inputs to generate candidates. Preserve raw evidence and tool errors outside model context. A successful exit is not proof, and an incomplete scan is not a passing scan.
 
 ### 4. Verify independently
+
+When tests were requested:
 
 1. Add a focused test that fails for the suspected reason.
 2. Add a negative control and, when useful, a baseline/differential comparison.
@@ -78,8 +82,7 @@ Report the invariant and root cause, regression and negative-control tests, conf
 
 - The invariant is observable and names its owner.
 - Baseline and failure reason are recorded.
-- Focused regression fails before the fix and passes after it.
-- A negative control rejects the competing explanation.
+- When tests were requested: the focused regression fails before the fix and passes after it, and a negative control rejects the competing explanation.
 - Tool errors, omissions, and skipped probes are counted.
 - The fix is at the lowest authoritative boundary with obsolete paths removed.
 - Focused and proportional broader gates pass and their bodies were inspected.

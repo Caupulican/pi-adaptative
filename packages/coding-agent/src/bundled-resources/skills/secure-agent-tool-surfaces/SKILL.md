@@ -8,7 +8,7 @@ description: "Threat-model, build, review, and red-team AI-agent tools, MCP serv
 ## How to use the skill
 
 Use this skill for agent-facing execution and data boundaries. It is not an
-offensive-testing grant. Pair implementation with `evidence-gated-tdd` and use
+offensive-testing grant. Prove implementation live (tests via `evidence-gated-tdd` only when the user asks) and use
 `authorized-web-security-audit` before active network probing.
 
 **Freedom Dial: High Freedom.** Threat modeling and boundary selection require

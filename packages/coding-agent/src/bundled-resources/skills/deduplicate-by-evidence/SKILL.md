@@ -16,7 +16,7 @@ Select the strongest mode authorized by the request:
 - **Remediate**: enforce, centralize one bounded clone family, and verify behavior.
 - **Continuous**: repeat bounded green slices until owned production code reaches the agreed zero-clone gate.
 
-Pair production changes with `evidence-gated-tdd`. Preserve provider neutrality: this workflow is Markdown guidance for any Pi agent/model and has no provider-specific metadata or tool assumptions.
+Prove production changes live; add tests (via `evidence-gated-tdd`) only when the user asks for them. Preserve provider neutrality: this workflow is Markdown guidance for any Pi agent/model and has no provider-specific metadata or tool assumptions.
 
 ## North Star
 
@@ -83,12 +83,12 @@ Avoid generic utility dumping grounds and parameter-heavy abstractions.
 
 Score verified families 0–3 for divergence likelihood, blast radius, boundary harm, and change confidence. Fix the highest-risk family first, using confidence to bound slice size.
 
-Use evidence-gated TDD:
+Work order (regression tests only when the user asks for them):
 
-1. **Red**: preserve the hardened scan and add behavioral/configuration regressions.
-2. **Green**: move the invariant to the lowest authoritative owner and route all callers through it.
+1. **Scan**: preserve the hardened scan as the gate.
+2. **Centralize**: move the invariant to the lowest authoritative owner and route all callers through it.
 3. **Refactor**: remove replaced paths, aliases, fallbacks, and duplicate transitions in the same migration.
-4. **Focused gate**: run affected tests, type/build checks required by the repository, and the clone scan.
+4. **Focused gate**: prove the behavior live, run affected existing tests, type/build checks required by the repository, and the clone scan.
 5. **Release gate**: run the declared broader suite and inspect the report body, diff, and worktree scope.
 
 ### 6. Gate and hand off
