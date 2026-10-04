@@ -76,6 +76,38 @@ export type CleanupAction = "adopt" | "cleanup" | "leave";
  */
 export type WorkerDirective = { code: "adopt"; parentPid: number } | { code: "user_cleanup" } | { code: "none" };
 
+/**
+ * Why a worker cannot treat its recorded parent as supervising it. Branch on `code`, never on text.
+ * - `no_parent_session`: the launch recorded no parent session, so pid liveness cannot be bound to an identity.
+ * - `process_gone`: the parent pid is not alive.
+ * - `session_entry_missing`: the parent session has no master entry (pruned, or never registered).
+ * - `session_entry_not_running`: the parent session's master entry is closed or otherwise not `running`.
+ * - `process_identity_mismatch`: the master entry names another pid or session than the recorded parent.
+ * - `heartbeat_stale`: the parent pid and entry look right, but its heartbeat is older than the bound
+ *   (a long event-loop stall or a suspended host: the parent may resume).
+ */
+export type ParentLossCode =
+	| "no_parent_session"
+	| "process_gone"
+	| "session_entry_missing"
+	| "session_entry_not_running"
+	| "process_identity_mismatch"
+	| "heartbeat_stale";
+
+export type ParentLiveness = { alive: true } | { alive: false; code: ParentLossCode };
+
+/** One live orphan shown to the owner before any cleanup directive is written. */
+export interface OrphanCleanupRequest {
+	entryId: string;
+	pid: number;
+	parentPid?: number;
+	taskRef?: string;
+	taskSummary?: string;
+}
+
+/** `approved` only for an explicit yes; a refusal, a timeout, an unavailable owner or an abort is never approval. */
+export type OwnerCleanupDecision = "approved" | "declined" | "unanswered";
+
 /** Outcome of a `reconcileMatrix` pass: which entries survive and which were pruned, and why. */
 export interface ReconcileMatrixResult {
 	code: "reconciled";

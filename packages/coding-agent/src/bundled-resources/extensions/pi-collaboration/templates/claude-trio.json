@@ -13,7 +13,7 @@
     {
       "provider": "pi",
       "name": "sonnet",
-      "task": "Own implementation edits and focused regression tests. Resolve evidence-backed peer findings.",
+      "task": "Own implementation edits; write or run no tests unless the owner explicitly asked. Resolve evidence-backed peer findings.",
       "command": "PI_WORKER=1 pi-sonnet",
       "tools": ["read", "bash", "edit", "write", "rg", "task_steps", "python"]
     },

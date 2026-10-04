@@ -4,7 +4,7 @@ import type { AgentSessionRuntimeResource } from "./agent-session-runtime.ts";
 import { createCollaborationPeerContext } from "./collaboration/peer-context.ts";
 import { isGoalExecutionActive } from "./goals/goal-state.ts";
 import { createAgentIdentity } from "./orchestration/agent-resume.ts";
-import type { ResumablePayload } from "./process-matrix/codes.ts";
+import type { OrphanCleanupRequest, OwnerCleanupDecision, ResumablePayload } from "./process-matrix/codes.ts";
 import {
 	CLOCK_JUMP_CUSTOM_TYPE,
 	getOrchestrationAgentId,
@@ -16,6 +16,28 @@ import {
 import { getBoundWorktreeLaneKey } from "./worktree-sync/lane-binding.ts";
 import type { WorktreeSyncRuntimeHandle } from "./worktree-sync/runtime.ts";
 import { startWorktreeSyncRuntime } from "./worktree-sync/runtime.ts";
+
+/** How long an unanswered cleanup question stays open; expiry is "not approved", never consent. */
+const OWNER_CLEANUP_DIALOG_TIMEOUT_MS = 120_000;
+const OWNER_QUESTION_TEXT_LIMIT = 300;
+
+/** Matrix fields came from another process's file: no control characters may reach the terminal. */
+function printableMatrixText(value: string): string {
+	return value
+		.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+		.trim()
+		.slice(0, OWNER_QUESTION_TEXT_LIMIT);
+}
+
+function formatOrphanCleanupQuestion(request: OrphanCleanupRequest): string {
+	const task = printableMatrixText(request.taskSummary ?? request.taskRef ?? "") || "unknown";
+	const parent = request.parentPid !== undefined ? ` (pid ${request.parentPid})` : "";
+	return [
+		`Pi worker ${printableMatrixText(request.entryId)} (pid ${request.pid}) is still running, but its parent process${parent} is gone.`,
+		`Task: ${task}`,
+		"Ask it to wind down? It exits on its own and nothing is killed. No answer leaves it running.",
+	].join("\n");
+}
 
 function rejectionReasons(results: readonly PromiseSettledResult<unknown>[]): unknown[] {
 	return results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
@@ -121,6 +143,7 @@ export class SessionSupervisionRuntime implements AgentSessionRuntimeResource {
 					recordClockJump: (record) => void sessionManager.appendCustomEntry(CLOCK_JUMP_CUSTOM_TYPE, record),
 					onDiagnostic: this.options.onDiagnostic,
 					requestExit: this.options.requestExit,
+					requestOwnerCleanupDecision: (request, signal) => this.askOwnerAboutOrphan(session, request, signal),
 				}),
 			),
 		]);
@@ -162,6 +185,39 @@ export class SessionSupervisionRuntime implements AgentSessionRuntimeResource {
 		this.worktreeSync = undefined;
 		this.processMatrix = undefined;
 		await stopSupervisionHandles(worktreeSync, processMatrix);
+	}
+
+	/**
+	 * Put a live orphan to the owner through the session's UI. Supervision starts before the mode binds
+	 * its UI, so the question waits for the bind event; a headless mode never binds one and the
+	 * question stays unasked (the runtime has already reported the orphan as a pending decision).
+	 */
+	private async askOwnerAboutOrphan(
+		session: AgentSession,
+		request: OrphanCleanupRequest,
+		signal: AbortSignal,
+	): Promise<OwnerCleanupDecision> {
+		if (!session.extensionRunner.hasUI()) {
+			await new Promise<void>((resolve) => {
+				const done = (): void => {
+					unsubscribe();
+					signal.removeEventListener("abort", done);
+					resolve();
+				};
+				const unsubscribe = session.extensionRunner.onUIContextBound(done);
+				signal.addEventListener("abort", done, { once: true });
+				if (signal.aborted) done();
+			});
+		}
+		const runner = session.extensionRunner;
+		if (signal.aborted || !runner.hasUI()) return "unanswered";
+		const startedAt = Date.now();
+		const approved = await runner.getUIContext().confirm("Orphaned Pi worker", formatOrphanCleanupQuestion(request), {
+			timeout: OWNER_CLEANUP_DIALOG_TIMEOUT_MS,
+			signal,
+		});
+		if (approved) return "approved";
+		return signal.aborted || Date.now() - startedAt >= OWNER_CLEANUP_DIALOG_TIMEOUT_MS ? "unanswered" : "declined";
 	}
 
 	private async notify(session: AgentSession, customType: string, text: string): Promise<void> {

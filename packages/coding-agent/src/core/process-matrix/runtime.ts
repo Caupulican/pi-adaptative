@@ -12,15 +12,18 @@
  *   parent injects no further follow-ups, so the worker simply runs out of work to do.
  * - A MASTER is everything else (no known parent). On startup it scans the matrix for orphaned
  *   workers (workers whose recorded parent is dead). Workers tied to this master's exact resumed
- *   session and goal identity recover automatically. Every non-matching worker is report-only:
- *   dead workers are never resume-prompted and still-live workers are never adopt/cleanup-prompted.
+ *   session and goal identity recover automatically. Every non-matching worker is report-only until
+ *   the owner decides: dead workers are never resume-prompted, and a still-live foreign worker is
+ *   offered to the owner through `requestOwnerCleanupDecision` -- an explicit yes writes a
+ *   cooperative `user_cleanup` directive, anything else (no, timeout, no owner, abort) leaves the
+ *   entry untouched.
  *
- * Sanctioned exception to "a worker's entry is written only by that worker": an exact resumed
- * parent may restore its recorded ownership. The worker later confirms/applies the directive via
- * `pollWorkerDirective` and re-writes its own entry -- see `docs/process-matrix.md`. Outside this
- * identity-fenced handshake, the orphan claim scan NEVER writes another session's entry; bounded
- * reconciliation may still perform generation-fenced lifecycle/TTL maintenance, and nothing here
- * ever kills a process directly.
+ * Sanctioned exceptions to "a worker's entry is written only by that worker": (1) an exact resumed
+ * parent may restore its recorded ownership; (2) the owner-approved `user_cleanup` directive. The
+ * worker later confirms/applies the directive via `pollWorkerDirective` and re-writes its own entry
+ * -- see `docs/process-matrix.md`. Both are identity-fenced compare-and-swap writes. Outside these
+ * handshakes, the orphan scan NEVER writes another session's entry; bounded reconciliation may still
+ * perform generation-fenced lifecycle/TTL maintenance, and nothing here ever kills a process directly.
  */
 
 import { hostname as osHostname } from "node:os";
@@ -31,7 +34,15 @@ import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import { getParentPid, getParentSessionId, getProcessTaskRef } from "../process-identity.ts";
 import type { ResolvedProcessMatrixSettings } from "../settings-manager.ts";
 import { getBoundWorktreeLaneKey } from "../worktree-sync/lane-binding.ts";
-import type { ProcessMatrixEntry, ResumablePayload } from "./codes.ts";
+import type {
+	OrphanCleanupRequest,
+	OwnerCleanupDecision,
+	ParentLiveness,
+	ParentLossCode,
+	ProcessMatrixEntry,
+	ResumablePayload,
+} from "./codes.ts";
+import { type PresenceWatch, startPresenceBeacon, watchPresence } from "./presence.ts";
 import {
 	buildEntryId,
 	listEntries,
@@ -47,6 +58,7 @@ import {
 	beginWindDown,
 	buildMasterEntry,
 	buildWorkerEntry,
+	classifyParentLiveness,
 	detectOrphanedWorkers,
 	markClosed,
 	markResumable,
@@ -126,6 +138,13 @@ export interface ProcessMatrixRuntimeConfig {
 	resumeWorker?: (payload: ResumablePayload) => Promise<ResumeWorkerLaunchOutcome>;
 	/** Injectable only at the storage boundary; defaults to the atomic local filesystem adapter. */
 	store?: ProcessMatrixStorePort;
+	/**
+	 * Master only. Ask the owner whether a still-live orphan of another session may be asked to wind
+	 * down. Resolve `approved` only for an explicit yes; the runtime treats every other outcome --
+	 * including a rejection -- as "leave it untouched". The signal aborts when the runtime stops.
+	 * Absent (headless): the orphan is only reported as a pending decision.
+	 */
+	requestOwnerCleanupDecision?: (request: OrphanCleanupRequest, signal: AbortSignal) => Promise<OwnerCleanupDecision>;
 }
 
 export type ResumeWorkerLaunchOutcome =
@@ -137,13 +156,45 @@ export type ResumeWorkerLaunchOutcome =
 	  }
 	| { started: false; reason: string };
 
-export interface ProcessMatrixRuntimeHandle {
-	stop(): Promise<void> | void;
-	/** Resolve after every watcher task that is active at the call boundary has settled. */
-	waitForIdle(): Promise<void>;
+/** `idle`: every task active at the call boundary settled. `timed_out`: the bound elapsed first; nothing was cancelled. */
+export type ProcessMatrixIdleResult = "idle" | "timed_out";
+
+export interface ProcessMatrixIdleOptions {
+	/** Upper bound on the wait. Defaults to {@link PROCESS_MATRIX_IDLE_WAIT_DEFAULT_MS}. */
+	timeoutMs?: number;
 }
 
-const NOOP_HANDLE: ProcessMatrixRuntimeHandle = { stop: () => {}, waitForIdle: async () => {} };
+export interface ProcessMatrixRuntimeHandle {
+	stop(): Promise<void> | void;
+	/**
+	 * Resolve `idle` after every watcher task that is active at the call boundary has settled, or
+	 * `timed_out` once the bound elapses. The master's tasks include a human-paced owner decision, so
+	 * a headless session with an owner hook must never wait on it unboundedly. A timeout abandons only
+	 * this wait: the tasks keep running and `stop()` still aborts them.
+	 */
+	waitForIdle(options?: ProcessMatrixIdleOptions): Promise<ProcessMatrixIdleResult>;
+}
+
+export const PROCESS_MATRIX_IDLE_WAIT_DEFAULT_MS = 30_000;
+
+const NOOP_HANDLE: ProcessMatrixRuntimeHandle = { stop: () => {}, waitForIdle: async () => "idle" };
+
+async function settleWithin(
+	work: () => Promise<void>,
+	options: ProcessMatrixIdleOptions = {},
+): Promise<ProcessMatrixIdleResult> {
+	const timeoutMs = options.timeoutMs ?? PROCESS_MATRIX_IDLE_WAIT_DEFAULT_MS;
+	let timer: NodeJS.Timeout | undefined;
+	const bound = new Promise<"timed_out">((resolve) => {
+		timer = setTimeout(() => resolve("timed_out"), Math.max(0, timeoutMs));
+		timer.unref?.();
+	});
+	try {
+		return await Promise.race([work().then((): "idle" => "idle"), bound]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
 export const PROCESS_MATRIX_RESUMABLE_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
 function resolveProcessMatrixStore(config: ProcessMatrixRuntimeConfig): ProcessMatrixStorePort {
@@ -244,6 +295,8 @@ async function startMasterBranch(
 	} catch (error) {
 		config.onDiagnostic?.(`process-matrix: failed to register master entry: ${describeError(error)}`);
 	}
+	// Workers learn this master died from the kernel closing their connection, not from a timer.
+	const presence = await startPresenceBeacon(config.agent.resumeContext.sessionId, config.onDiagnostic);
 
 	let stopped = false;
 	let ownsEntry = true;
@@ -304,12 +357,22 @@ async function startMasterBranch(
 
 	const maintenance = reconcileAndRunOrphanScan(config, now, lifetime.signal).catch((error: unknown) => {
 		config.onDiagnostic?.(`process-matrix: maintenance failed: ${describeError(error)}`);
+		return [] as ProcessMatrixEntry[];
 	});
+	// The owner's answer is human-paced: it never gates maintenance, and stop() aborts it.
+	const ownerDecisions = maintenance
+		.then((pending) => askOwnerAboutOrphans(config, pending, now, lifetime.signal))
+		.catch((error: unknown) => {
+			config.onDiagnostic?.(`process-matrix: owner decision failed: ${describeError(error)}`);
+		});
 
 	return {
-		async waitForIdle() {
-			await maintenance;
-			await heartbeatTask;
+		waitForIdle(options) {
+			return settleWithin(async () => {
+				await maintenance;
+				await ownerDecisions;
+				await heartbeatTask;
+			}, options);
 		},
 		async stop() {
 			if (stopped) return;
@@ -322,25 +385,29 @@ async function startMasterBranch(
 				const closed = markClosed(entry, nowIso(now));
 				if (await store.writeEntryIfUnchanged(config.agentDir, entry.entryId, entry, closed)) entry = closed;
 			}
+			// After the entry is closed: a worker woken by this disconnect must read `closed`, not `running`.
+			await presence.stop();
 			await maintenance;
+			await ownerDecisions;
 		},
 	};
 }
 
+/** Returns the live foreign orphans still awaiting an owner decision. */
 async function reconcileAndRunOrphanScan(
 	config: ProcessMatrixRuntimeConfig,
 	now: () => number,
 	signal: AbortSignal,
-): Promise<void> {
+): Promise<ProcessMatrixEntry[]> {
 	const store = resolveProcessMatrixStore(config);
 	let entries: ProcessMatrixEntry[];
 	try {
 		entries = await store.listEntries(config.agentDir);
 	} catch (error) {
 		config.onDiagnostic?.(`process-matrix: reconciliation failed to list entries: ${describeError(error)}`);
-		return;
+		return [];
 	}
-	if (signal.aborted) return;
+	if (signal.aborted) return [];
 	const reconciled = reconcileMatrix(entries, {
 		observeProcess: (pid) => (pid === process.pid ? "alive" : config.observeProcess(pid)),
 		now: now(),
@@ -371,7 +438,7 @@ async function reconcileAndRunOrphanScan(
 	const recoveredOutcomes = mutationResults
 		.slice(pruneActions.length)
 		.map((result) => (result.status === "fulfilled" ? result.value : false));
-	if (signal.aborted) return;
+	if (signal.aborted) return [];
 	const recoveredCount = recoveredOutcomes.filter(Boolean).length;
 	if (recoveredCount > 0) {
 		config.onDiagnostic?.(
@@ -380,8 +447,8 @@ async function reconcileAndRunOrphanScan(
 	}
 	const currentEntries = await store.listEntries(config.agentDir);
 	await deliverTerminalNotifications(config, currentEntries, now, signal);
-	if (signal.aborted) return;
-	await runOrphanScan(config, currentEntries, signal);
+	if (signal.aborted) return [];
+	return runOrphanScan(config, currentEntries, signal);
 }
 
 async function deliverTerminalNotifications(
@@ -433,28 +500,31 @@ async function runOrphanScan(
 	config: ProcessMatrixRuntimeConfig,
 	entries: ProcessMatrixEntry[],
 	signal: AbortSignal,
-): Promise<void> {
+): Promise<ProcessMatrixEntry[]> {
 	const orphans = detectOrphanedWorkers(entries, {
 		observeProcess: config.observeProcess,
 		ownSessionId: config.agent.resumeContext.sessionId,
 	});
-	if (orphans.length === 0) return;
+	const awaitingOwner: ProcessMatrixEntry[] = [];
 
 	for (const orphan of orphans) {
-		if (signal.aborted) return;
+		if (signal.aborted) return awaitingOwner;
 		const recoveryBoundary = getAutomaticRecoveryBoundary(config, orphan);
 		const exactResumedParent = recoveryBoundary === undefined;
 		if (!exactResumedParent) {
-			// Foreign workers are never claimed or cleaned up implicitly. This applies equally to
-			// dead workers (no resume prompt) and still-live workers (no adopt/cleanup prompt).
-			// Only a still-live foreign worker is worth a loud, repeated warning -- it's a
-			// potentially resource-consuming rogue process the user could still act on. A foreign
+			// Foreign workers are never claimed or cleaned up implicitly. A dead one gets no resume
+			// prompt; a still-live one is put to the owner (askOwnerAboutOrphans) and only an explicit
+			// yes asks it to wind down. Only a still-live foreign worker is worth a loud, repeated
+			// warning -- it's a potentially resource-consuming rogue process the user can act on. A foreign
 			// worker whose own process has already died is inert data with zero possible action;
 			// bounded reconciliation (see reconcileAndRunOrphanScan) already ages it out over
 			// PROCESS_MATRIX_RESUMABLE_RETENTION_MS without help from this diagnostic, so
 			// repeating the warning on every startup until that TTL elapses is pure noise.
 			const observation = config.observeProcess(orphan.pid);
-			if (observation === "alive") reportUnrecoveredOrphan(config, orphan, recoveryBoundary);
+			if (observation === "alive") {
+				reportUnrecoveredOrphan(config, orphan, recoveryBoundary);
+				awaitingOwner.push(orphan);
+			}
 			continue;
 		}
 		const observation = config.observeProcess(orphan.pid);
@@ -466,6 +536,7 @@ async function runOrphanScan(
 			await adoptLiveOrphan(config, orphan, signal);
 		}
 	}
+	return awaitingOwner;
 }
 
 function getAutomaticRecoveryBoundary(
@@ -485,8 +556,116 @@ function getAutomaticRecoveryBoundary(
 
 function reportUnrecoveredOrphan(config: ProcessMatrixRuntimeConfig, orphan: ProcessMatrixEntry, reason: string): void {
 	config.onDiagnostic?.(
-		`process-matrix: found unrecovered orphan ${orphan.entryId} (${reason}; report-only; nothing written, nothing killed)`,
+		`process-matrix: found unrecovered orphan ${orphan.entryId} (pid ${orphan.pid}; ${reason}; report-only; pending owner decision; nothing written, nothing killed)`,
 	);
+}
+
+/** Same worker process generation under the same recorded ownership; only its lifecycle state may differ. */
+function isSameWorkerGeneration(shown: ProcessMatrixEntry, current: ProcessMatrixEntry): boolean {
+	return (
+		current.role === "worker" &&
+		current.status !== "closed" &&
+		current.pid === shown.pid &&
+		current.startedAt === shown.startedAt &&
+		current.parentPid === shown.parentPid &&
+		current.parentSessionId === shown.parentSessionId &&
+		current.taskRef === shown.taskRef
+	);
+}
+
+/** Bound on dialogs per scan; the rest stay reported. */
+const MAX_OWNER_CLEANUP_PROMPTS = 5;
+
+/**
+ * Put each live foreign orphan to the owner. Silence is never approval: only `approved` writes, and
+ * the write is the existing worker-side `user_cleanup` directive -- the worker winds itself down.
+ * Nothing here signals or kills a process.
+ */
+async function askOwnerAboutOrphans(
+	config: ProcessMatrixRuntimeConfig,
+	orphans: ProcessMatrixEntry[],
+	now: () => number,
+	signal: AbortSignal,
+): Promise<void> {
+	const ask = config.requestOwnerCleanupDecision;
+	if (!ask || orphans.length === 0) return;
+	for (const orphan of orphans.slice(0, MAX_OWNER_CLEANUP_PROMPTS)) {
+		if (signal.aborted) return;
+		let decision: OwnerCleanupDecision = "unanswered";
+		try {
+			decision = await ask(
+				{
+					entryId: orphan.entryId,
+					pid: orphan.pid,
+					...(orphan.parentPid !== undefined ? { parentPid: orphan.parentPid } : {}),
+					...(orphan.taskRef !== undefined ? { taskRef: orphan.taskRef } : {}),
+					...(orphan.taskSummary !== undefined ? { taskSummary: orphan.taskSummary } : {}),
+				},
+				signal,
+			);
+		} catch (error) {
+			config.onDiagnostic?.(`process-matrix: owner question for ${orphan.entryId} failed: ${describeError(error)}`);
+		}
+		if (signal.aborted) return;
+		if (decision !== "approved") {
+			config.onDiagnostic?.(
+				`process-matrix: orphan ${orphan.entryId} left untouched (owner ${decision === "declined" ? "declined" : "did not answer"})`,
+			);
+			continue;
+		}
+		await requestWorkerCleanup(config, orphan, now);
+	}
+	if (orphans.length > MAX_OWNER_CLEANUP_PROMPTS) {
+		config.onDiagnostic?.(
+			`process-matrix: ${orphans.length - MAX_OWNER_CLEANUP_PROMPTS} more orphan(s) left report-only (prompt limit)`,
+		);
+	}
+}
+
+async function requestWorkerCleanup(
+	config: ProcessMatrixRuntimeConfig,
+	shown: ProcessMatrixEntry,
+	now: () => number,
+): Promise<void> {
+	const store = resolveProcessMatrixStore(config);
+	let expected = shown;
+	try {
+		// The worker may legitimately advance its own lifecycle (running -> winding_down -> resumable)
+		// while the owner reads the question; the fence is the process generation the owner was shown.
+		for (let attempt = 0; attempt < 3; attempt++) {
+			if (config.observeProcess(expected.pid) !== "alive") {
+				config.onDiagnostic?.(
+					`process-matrix: orphan ${shown.entryId} exited before cleanup was requested; nothing written`,
+				);
+				return;
+			}
+			if (
+				await store.writeEntryIfUnchanged(
+					config.agentDir,
+					shown.entryId,
+					expected,
+					beginWindDown(expected, "user_cleanup", nowIso(now)),
+				)
+			) {
+				config.onDiagnostic?.(
+					`process-matrix: cleanup requested for orphan ${shown.entryId} (pid ${shown.pid}); the worker winds itself down, nothing is killed`,
+				);
+				return;
+			}
+			const current = await store.readEntry(config.agentDir, shown.entryId);
+			if (current?.windDownReason === "user_cleanup" && current.status !== "closed") return;
+			if (!current || !isSameWorkerGeneration(shown, current)) {
+				config.onDiagnostic?.(
+					`process-matrix: orphan ${shown.entryId} changed identity after it was shown to the owner; nothing written`,
+				);
+				return;
+			}
+			expected = current;
+		}
+		config.onDiagnostic?.(`process-matrix: orphan ${shown.entryId} kept changing; cleanup not requested`);
+	} catch (error) {
+		config.onDiagnostic?.(`process-matrix: failed to request cleanup for ${shown.entryId}: ${describeError(error)}`);
+	}
 }
 
 async function adoptLiveOrphan(
@@ -700,6 +879,14 @@ async function startWorkerBranch(
 	let ownershipGeneration = 0;
 	let ownershipPending = false;
 	let unsubscribeOwnership: (() => void) | undefined;
+	let presenceWatch: PresenceWatch | undefined;
+	let presenceSessionId: string | undefined;
+	let presenceCheckPending = false;
+	// Wall-clock observation between watcher ticks. A gap far beyond the cadence is a suspended or
+	// stalled host, in which the parent's heartbeat is stale for the same reason this worker's tick is late.
+	let previousWatchTickMs = now();
+	let heartbeatForgivenUntil = 0;
+	const heartbeatAgeBoundMs = config.settings.heartbeatMs * 2 + config.settings.watcherPollMs;
 	const reportOwnershipError = (error: unknown): void => {
 		try {
 			config.onDiagnostic?.(`process-matrix: parent ownership observation failed: ${describeError(error)}`);
@@ -715,6 +902,12 @@ async function startWorkerBranch(
 		} catch (error) {
 			reportOwnershipError(error);
 		}
+	};
+	const detachPresence = (): void => {
+		const watch = presenceWatch;
+		presenceWatch = undefined;
+		presenceSessionId = undefined;
+		watch?.dispose();
 	};
 	const generationStartedAt = entry.startedAt;
 	const closeOnExit = (code: number | null = null): void => {
@@ -732,6 +925,7 @@ async function startWorkerBranch(
 		if (stopped) return;
 		stopped = true;
 		stopOwnershipObserver();
+		detachPresence();
 		if (timer) clearInterval(timer);
 		timer = undefined;
 		if (!preserveResumableOnExit) {
@@ -804,6 +998,7 @@ async function startWorkerBranch(
 		if (stopped) return;
 		stopped = true;
 		stopOwnershipObserver();
+		detachPresence();
 		if (timer) clearInterval(timer);
 		timer = undefined;
 		process.off("exit", closeOnExit);
@@ -886,32 +1081,98 @@ async function startWorkerBranch(
 		const task = tick().finally(() => {
 			if (watchTask === task) watchTask = undefined;
 			if (ownershipPending && !stopped) scheduleOwnershipRefresh();
+			if (presenceCheckPending && !stopped) schedulePresenceCheck();
 		});
 		watchTask = task;
 		return task;
 	};
 
-	const waitForIdle = async (): Promise<void> => {
-		while (watchTask) await watchTask;
-	};
+	const waitForIdle = (options?: ProcessMatrixIdleOptions): Promise<ProcessMatrixIdleResult> =>
+		settleWithin(async () => {
+			while (watchTask) await watchTask;
+		}, options);
 
 	const startHealthyWatch = (): void => {
 		if (stopped) return;
 		timer = setInterval(() => runWatchTick(healthyTick), config.settings.watcherPollMs);
 		timer.unref?.();
+		attachPresence();
 	};
 
-	const parentIsAlive = async (pid: number, sessionId: string | undefined): Promise<boolean> => {
-		// PID liveness alone is not process identity: a reused PID could otherwise keep a worker
-		// attached to an unrelated process forever. The parent session's own fresh master entry binds
-		// PID to a durable identity and proves that that exact session is still heartbeating.
-		if (!sessionId || config.observeProcess(pid) !== "alive") return false;
-		const parent = await store.readEntry(config.agentDir, buildEntryId("master", sessionId));
-		if (parent?.role !== "master" || parent.agent.resumeContext.sessionId !== sessionId) return false;
-		if (parent.pid !== pid || parent.status !== "running") return false;
-		const heartbeatAt = Date.parse(parent.heartbeatAt);
-		const maxAge = config.settings.heartbeatMs * 2 + config.settings.watcherPollMs;
-		return Number.isFinite(heartbeatAt) && now() - heartbeatAt <= maxAge;
+	/**
+	 * Event source for parent death: the parent session's presence connection closing. It only wakes
+	 * the verdict -- the master entry and pid still decide -- and a watch that never connected leaves
+	 * the interval poll as the sole detector until the next healthy tick attaches again.
+	 */
+	const attachPresence = (): void => {
+		const sessionId = currentParentSessionId;
+		if (stopped || !sessionId || (presenceWatch && presenceSessionId === sessionId)) return;
+		detachPresence();
+		const watch: PresenceWatch = watchPresence(sessionId, (wasConnected) => {
+			if (presenceWatch !== watch) return;
+			presenceWatch = undefined;
+			presenceSessionId = undefined;
+			if (wasConnected) schedulePresenceCheck();
+		});
+		presenceWatch = watch;
+		presenceSessionId = sessionId;
+	};
+
+	const schedulePresenceCheck = (): void => {
+		if (stopped) return;
+		presenceCheckPending = true;
+		if (watchTask) return;
+		void runWatchTick(async () => {
+			while (presenceCheckPending && !stopped) {
+				presenceCheckPending = false;
+				await confirmParentLoss();
+			}
+		}).catch(reportOwnershipError);
+	};
+
+	/** A dying master closes its descriptors before it is reaped, so for a moment its pid still answers. */
+	const PRESENCE_CONFIRM_DELAYS_MS = [0, 50, 100, 200, 400, 800] as const;
+	const confirmParentLoss = async (): Promise<void> => {
+		for (const delayMs of PRESENCE_CONFIRM_DELAYS_MS) {
+			if (delayMs > 0) {
+				await new Promise<void>((resolve) => setTimeout(resolve, delayMs).unref?.());
+			}
+			if (stopped || preserveResumableOnExit) return;
+			const verdict = await parentLiveness(currentParentPid, currentParentSessionId);
+			if (stopped || preserveResumableOnExit) return;
+			if (!verdict.alive) {
+				await enterWindDown(verdict.code);
+				return;
+			}
+		}
+	};
+
+	const parentLiveness = async (pid: number, sessionId: string | undefined): Promise<ParentLiveness> => {
+		const observation = sessionId ? config.observeProcess(pid) : "unknown";
+		const parentEntry =
+			sessionId && observation === "alive"
+				? await store.readEntry(config.agentDir, buildEntryId("master", sessionId))
+				: undefined;
+		return classifyParentLiveness({
+			parentPid: pid,
+			parentSessionId: sessionId,
+			observation,
+			parentEntry,
+			nowMs: now(),
+			maxHeartbeatAgeMs: heartbeatAgeBoundMs,
+			observerSuspended: now() < heartbeatForgivenUntil,
+		});
+	};
+
+	const parentIsAlive = async (pid: number, sessionId: string | undefined): Promise<boolean> =>
+		(await parentLiveness(pid, sessionId)).alive;
+
+	/** Record a tick's wall-clock gap; a suspension forgives a stale parent heartbeat for one heartbeat bound. */
+	const noteTickGap = (): void => {
+		const tickMs = now();
+		const jump = detectClockJump(previousWatchTickMs, tickMs, config.settings.watcherPollMs);
+		previousWatchTickMs = tickMs;
+		if (jump) heartbeatForgivenUntil = tickMs + heartbeatAgeBoundMs;
 	};
 
 	const refreshParentOwnership = async (): Promise<void> => {
@@ -945,6 +1206,7 @@ async function startWorkerBranch(
 			currentParentPid = owner.parentPid;
 			currentParentSessionId = owner.parentSessionId;
 			ownershipGeneration = owner.generation;
+			attachPresence();
 			if (preserveResumableOnExit) {
 				preserveResumableOnExit = false;
 				if (timer) clearInterval(timer);
@@ -970,27 +1232,34 @@ async function startWorkerBranch(
 
 	const healthyTick = async (): Promise<void> => {
 		if (stopped) return;
+		noteTickGap();
 		await refreshParentOwnership();
 		if (stopped) return;
-		const alive = await parentIsAlive(currentParentPid, currentParentSessionId);
-		// The liveness read is asynchronous; `stop()` may have completed while it was outstanding, and
-		// its verdict describes a lifecycle this tick no longer owns.
-		if (stopped) return;
-		if (!alive) {
-			await enterWindDown();
-			return;
-		}
-		// Still healthy: also poll for a master-initiated cooperative-cleanup directive.
+		// The owner-approved cleanup directive comes first: a worker whose parent is also gone must
+		// still honour it rather than overwrite it with a parent-lost wind-down.
 		const fresh = await store.readEntry(config.agentDir, entry.entryId);
 		if (stopped) return;
 		const owned = acceptOwnedRecord(fresh);
-		if (stopped || !owned) return;
-		const directive = pollWorkerDirective(owned, currentParentPid, { observeProcess: config.observeProcess });
-		if (directive.code !== "user_cleanup") return;
-		await completeCooperativeCleanup(owned);
+		if (stopped) return;
+		if (
+			owned &&
+			pollWorkerDirective(owned, currentParentPid, { observeProcess: config.observeProcess }).code === "user_cleanup"
+		) {
+			await completeCooperativeCleanup(owned);
+			return;
+		}
+		const verdict = await parentLiveness(currentParentPid, currentParentSessionId);
+		// The liveness read is asynchronous; `stop()` may have completed while it was outstanding, and
+		// its verdict describes a lifecycle this tick no longer owns.
+		if (stopped) return;
+		if (!verdict.alive) {
+			await enterWindDown(verdict.code);
+			return;
+		}
+		attachPresence();
 	};
 
-	const enterWindDown = async (): Promise<void> => {
+	const enterWindDown = async (cause: ParentLossCode): Promise<void> => {
 		if (stopped) return;
 		const windDownAt = nowIso(now);
 		const expected = entry;
@@ -1002,9 +1271,10 @@ async function startWorkerBranch(
 		if (timer) clearInterval(timer);
 		timer = undefined;
 		preserveResumableOnExit = true;
+		detachPresence();
 		emitRuntimeNotice(
 			config,
-			`process-matrix: parent process (pid ${currentParentPid}) is gone. Winding down gracefully; this task is resumable.`,
+			`process-matrix: parent process (pid ${currentParentPid}) is no longer supervising this worker (${cause}). Winding down gracefully; this task is resumable, and this worker stays attached if that parent resumes or another adopts it within the grace window.`,
 		);
 		startGraceWatch();
 	};
@@ -1018,6 +1288,8 @@ async function startWorkerBranch(
 
 	const graceTick = async (graceDeadline: number): Promise<void> => {
 		if (stopped) return;
+		// A suspension observed here forgives a stale parent heartbeat in the re-attach check below.
+		noteTickGap();
 		await refreshParentOwnership();
 		if (stopped || !preserveResumableOnExit) return;
 		const fresh = await store.readEntry(config.agentDir, entry.entryId);
@@ -1057,6 +1329,34 @@ async function startWorkerBranch(
 			}
 			if (directive.code === "user_cleanup") {
 				await completeCooperativeCleanup(owned);
+				return;
+			}
+			// The same parent process and session heartbeating again (a stall or suspension, not a
+			// death): re-attach instead of exiting. A restarted master is a different pid and arrives
+			// as an adoption directive above.
+			if (owned.status !== "closed" && (await parentLiveness(currentParentPid, currentParentSessionId)).alive) {
+				if (stopped) return;
+				if (
+					!(await persist(
+						owned,
+						applyAdoption(owned, {
+							parentPid: currentParentPid,
+							...(currentParentSessionId !== undefined ? { parentSessionId: currentParentSessionId } : {}),
+						}),
+						"failed to write worker re-attachment",
+					))
+				)
+					return;
+				preserveResumableOnExit = false;
+				if (timer) {
+					clearInterval(timer);
+					timer = undefined;
+				}
+				startHealthyWatch();
+				emitRuntimeNotice(
+					config,
+					`process-matrix: parent process (pid ${currentParentPid}) is supervising again. Staying attached.`,
+				);
 				return;
 			}
 		}

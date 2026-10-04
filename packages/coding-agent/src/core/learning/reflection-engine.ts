@@ -213,6 +213,47 @@ function parseStructuredReflectionWrite(value: unknown, existingMemory: string):
 }
 
 /**
+ * The one bounded validator for model-authored durable writes. Both the isolated reflection
+ * completion and a background learner's returned proposals pass through it, so an untrusted entry is
+ * accepted only when it matches a known kind and every field is inside the same caps.
+ */
+export function parseReflectionWrites(rawWrites: unknown, existingMemory: string): ReflectionWrite[] {
+	const writes: ReflectionWrite[] = [];
+	if (!Array.isArray(rawWrites)) return writes;
+	const scanCount = Math.min(rawWrites.length, MAX_REFLECTION_SCAN_ENTRIES);
+	for (let index = 0; index < scanCount && writes.length < MAX_REFLECTION_WRITES; index++) {
+		const w = rawWrites[index];
+		if (!w || typeof w !== "object") continue;
+		const structuredWrite = parseStructuredReflectionWrite(w, existingMemory);
+		if (
+			w.kind === "memory_add" &&
+			(w.section === "MEMORY" || w.section === "USER") &&
+			boundedText(w.text, OKF_MEMORY_LIMITS.bodyChars)
+		) {
+			writes.push({ kind: "memory_add", section: w.section, text: w.text });
+		} else if (structuredWrite) {
+			writes.push(structuredWrite);
+		} else if (
+			w.kind === "memory_replace" &&
+			boundedText(w.target, OKF_MEMORY_LIMITS.bodyChars) &&
+			boundedText(w.text, OKF_MEMORY_LIMITS.bodyChars)
+		) {
+			writes.push({ kind: "memory_replace", target: w.target, text: w.text });
+		} else if (w.kind === "memory_remove" && boundedText(w.target, OKF_MEMORY_LIMITS.bodyChars)) {
+			writes.push({ kind: "memory_remove", target: w.target });
+		} else if (
+			w.kind === "promote_skill" &&
+			boundedText(w.name, MAX_SKILL_NAME_LENGTH) &&
+			boundedText(w.description, MAX_SKILL_DESCRIPTION_LENGTH) &&
+			boundedSkillBody(w.body)
+		) {
+			writes.push({ kind: "promote_skill", name: w.name, description: w.description, body: w.body });
+		}
+	}
+	return writes;
+}
+
+/**
  * STATIC reflection system prompt (Hermes-parity #33). It is byte-identical across every reflection
  * pass — the variable parts (existing memory snapshot + the turn transcript) live in the USER prompt —
  * so the provider prompt-cache reuses this prefix instead of re-billing it each pass (cost guard).
@@ -253,41 +294,7 @@ Return JSON updates.`;
 
 			const parsed = JSON.parse(jsonMatch[1] || jsonMatch[0]);
 			const rationale = parsed.rationale || "";
-			const writes: ReflectionWrite[] = [];
-
-			if (Array.isArray(parsed.writes)) {
-				const scanCount = Math.min(parsed.writes.length, MAX_REFLECTION_SCAN_ENTRIES);
-				for (let index = 0; index < scanCount && writes.length < MAX_REFLECTION_WRITES; index++) {
-					const w = parsed.writes[index];
-					if (w && typeof w === "object") {
-						const structuredWrite = parseStructuredReflectionWrite(w, input.existingMemory);
-						if (
-							w.kind === "memory_add" &&
-							(w.section === "MEMORY" || w.section === "USER") &&
-							boundedText(w.text, OKF_MEMORY_LIMITS.bodyChars)
-						) {
-							writes.push({ kind: "memory_add", section: w.section, text: w.text });
-						} else if (structuredWrite) {
-							writes.push(structuredWrite);
-						} else if (
-							w.kind === "memory_replace" &&
-							boundedText(w.target, OKF_MEMORY_LIMITS.bodyChars) &&
-							boundedText(w.text, OKF_MEMORY_LIMITS.bodyChars)
-						) {
-							writes.push({ kind: "memory_replace", target: w.target, text: w.text });
-						} else if (w.kind === "memory_remove" && boundedText(w.target, OKF_MEMORY_LIMITS.bodyChars)) {
-							writes.push({ kind: "memory_remove", target: w.target });
-						} else if (
-							w.kind === "promote_skill" &&
-							boundedText(w.name, MAX_SKILL_NAME_LENGTH) &&
-							boundedText(w.description, MAX_SKILL_DESCRIPTION_LENGTH) &&
-							boundedSkillBody(w.body)
-						) {
-							writes.push({ kind: "promote_skill", name: w.name, description: w.description, body: w.body });
-						}
-					}
-				}
-			}
+			const writes = parseReflectionWrites(parsed.writes, input.existingMemory);
 
 			return {
 				writes,

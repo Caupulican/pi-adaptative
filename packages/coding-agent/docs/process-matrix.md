@@ -42,10 +42,19 @@ so it never kills anything. Recovery is identity-fenced:
   same logical agent. Terminal or still-blocked goals disable automatic recovery. This works in
   interactive, print, and RPC modes and is the process-level counterpart to `/resume` restoring the
   goal before supervisors start.
-- Every foreign orphan is report-only. Interactive mode never offers resume, adopt, or cleanup
-  prompts: `taskRef` is a caller-supplied correlation value rather than a session-scoped ownership
-  proof, and a shared cwd cannot establish ownership. The scan writes nothing, launches nothing,
-  and kills nothing for foreign workers.
+- Every foreign orphan is report-only until the owner decides. `taskRef` is a caller-supplied
+  correlation value rather than a session-scoped ownership proof, and a shared cwd cannot establish
+  ownership, so the scan never adopts, resumes, or relaunches a foreign worker. A still-live
+  foreign orphan is reported as a pending decision and, where the session has an owner UI
+  (interactive and RPC), put to the owner as a confirmation naming its entry id, pid, and task.
+  An explicit yes writes the worker's cooperative `user_cleanup` directive (an identity-fenced
+  compare-and-swap against the process generation the owner was shown); the worker then winds
+  itself down. A no, a timeout, an unavailable owner, or a session that stops first writes
+  nothing: silence is never approval. Headless modes (print) have no owner to ask, so the orphan
+  stays reported and untouched. Nothing is ever signalled or killed by the master. The owner's
+  answer is human-paced, so `ProcessMatrixRuntimeHandle.waitForIdle` is bounded: it resolves
+  `idle`, or `timed_out` after `timeoutMs` (default 30 s). A timeout abandons only that wait; the
+  question stays open and `stop()` still aborts it.
 
 When an exact-session worker's own process is dead and its resumable payload contains a Pi session
 context, the scan launches the exact persisted session file with its agent ID, cwd, worktree,
@@ -65,8 +74,8 @@ generation-fenced lifecycle maintenance, such as converting dead running Pi-work
 resumable so TTL can prune them and pruning terminal or expired records; it does not change their
 parent/session identity or launch, adopt, or clean them up.
 
-This behavior is identical in interactive, print, and RPC modes: the foreign-orphan claim/recovery
-scan never prompts, writes, launches, or kills. Neutral reconciliation may still perform the bounded
+The foreign-orphan scan never launches, adopts, or kills in any mode; its only write is the
+owner-approved `user_cleanup` directive above. Neutral reconciliation may still perform the bounded
 lifecycle maintenance described above. Exact-session recovery remains active because it restores an
 already-recorded authority relationship rather than claiming another session's worker.
 
@@ -79,19 +88,42 @@ startup in the meantime.
 
 ### A worker on parent death: wind down, never vanish
 
-A worker polls its parent's pid on `watcherPollMs`. The moment that pid is no longer alive, it:
+A worker learns its parent is gone from an event and verifies it against the record. Each master
+holds one local presence endpoint open for its session (a Unix socket under a per-user `0700`
+directory, a named pipe on Windows), never writing to it; a worker connects once. When the master
+exits for any reason, SIGKILL included, the kernel closes the connection and that close wakes the
+worker immediately. Because a dying process closes its descriptors before it is reaped, the wake
+re-checks the verdict over a bounded sub-two-second window rather than trusting a pid that still
+answers. The poll on `watcherPollMs` remains as the watchdog for a worker that never connected (a
+master that predates the channel, or an endpoint that could not be bound).
+
+A parent counts as supervising only when its pid is alive, its session's master entry names that
+exact pid and session, the entry is `running`, and its heartbeat is fresh. When that stops being
+true the worker:
 
 1. Marks its own entry `winding_down` (reason `parent_lost`), then `resumable` with a payload
    containing one clone of its logical-agent identity (exact Pi session/cwd/profile/lane context),
    its stable task reference, and a bounded task summary.
-2. Emits one steer notice into its own session.
+2. Emits one steer notice into its own session. The notice carries the structured cause
+   (`process_gone`, `session_entry_missing`, `session_entry_not_running`,
+   `process_identity_mismatch`, `heartbeat_stale`, or `no_parent_session`) rather than claiming
+   the process is dead.
 3. Starts a bounded grace window (`adoptionGraceMs`), polling its own entry every
    `watcherPollMs` for a directive a new master may have written (see above):
    - **Adopted** (entry's `parentPid` changed to a new, live pid): re-parents to the new master
      and resumes normal watching -- no task loss.
+   - **Re-attached** (the same parent pid and session shows a fresh heartbeat again, e.g. after a
+     long event-loop stall): the worker returns to `running` under that parent. It does not
+     exit.
    - **Cooperative cleanup requested**: exits immediately.
    - **Grace window expires** with no directive: exits, leaving the entry `resumable` for a future
      session to notice.
+
+A worker whose own watcher tick arrives later than five poll intervals treats that as a suspended
+host, not a lost parent: for one heartbeat bound a stale parent heartbeat is forgiven, because it
+is stale for the same reason the worker's tick is late. A parent whose pid is gone or whose entry
+is not `running` is never forgiven. An owner-approved `user_cleanup` directive is honoured before
+any parent-loss verdict, so a worker that also lost its parent still acts on it.
 
 "No new turns" after a parent is lost is automatic and requires no separate mechanism: a dead
 parent injects no further follow-ups, so the worker simply runs out of work on its own.
@@ -106,7 +138,20 @@ Cross-process, like `PI_WORKTREE_LANE`/`--worktree-lane`:
 | `PI_PARENT_SESSION` | `--parent-session <id>` | The parent's sessionId, recorded alongside the pid for diagnostics/adoption. |
 | `PI_ORCHESTRATION_AGENT_ID` | launch-only | Pins the logical agent identity across the initial process and exact-session resumes. |
 | `PI_TASK_REF` | `--task-ref <id>` | Pins the goal/task identity used to fence automatic recovery across process generations. |
-| `PI_WORKER_ALLOWED_PATHS` | launch-only | JSON array of absolute paths compiled once into a worker session's structural filesystem envelope. `[]` preserves full-machine scope; malformed or relative entries fail startup. Process tools remain an explicit host-trust boundary. |
+| `PI_WORKER_ALLOWED_PATHS` | launch-only | JSON array of absolute paths compiled once into a worker session's structural filesystem envelope. `[]` keeps host-wide reads but confines writes to the worker's own working directory (a wider write root is an explicit grant through the dispatch's `writePaths`); malformed or relative entries fail startup. Process tools remain an explicit host-trust boundary. |
+
+When a managed in-process worker ends with processes still running, they are stopped and the owner is
+warned; the same bounded, worker-attributed notice (first five processes, then a count) is steered to the
+parent model as a `process-matrix-notice`, so a stopped worker process is never visible to the UI only.
+
+`PI_WORKER_EXTENSION_TOOLS` (launch-only) is a JSON array of `{ tool, extensionPath }` grants the launch
+profile compiled for a worker process: the worker loads exactly those extension files, tool-only (only the
+granted tool registers and its `execute` gets a restricted context; see `worktree-sync.md`), classifies those
+tool names for the path envelopes at startup, and admits exactly those tool names. A malformed value
+fails the session start like `PI_WORKER_ALLOWED_PATHS`. `PI_WORKER_EXTENSION_TOOLS`, `PI_WORKER_ALLOWED_PATHS`
+and `PI_WORKER_READABLE_FILES` are deliberately inherited by tool commands (like `PI_SESSION_ROLE`): a nested
+`pi` started from a worker's shell keeps the same confinement, and none of them holds a secret or is read by
+any other program.
 
 `pi_collaboration`'s `fire_task` sets the parent pid/session and logical agent ID automatically on
 every `pi`-provider child it launches and always sets the worker path channel from the immutable
@@ -128,15 +173,18 @@ same way lane-first dispatch threads `--worktree-lane` -- see `launch-profile.ts
 ## The zero-footprint sanction
 
 A worker session otherwise carries a strict UAC ceiling and a zero-footprint guarantee -- see
-`docs/worktree-sync.md`'s "Identity, UAC, and zero footprint". A worker's writes to its **own**
-process-matrix entry are a sanctioned artifact, exactly like its own session transcript: the role
-ceiling is untouched, and this is not a new escalation surface. A worker never writes any *other*
-session's entry.
+`docs/worktree-sync.md`'s "Identity, UAC, and zero footprint". A process declares itself a worker
+through a valid `PI_PARENT_PID` (this document's env contract), `PI_SESSION_ROLE=worker`, or a bound
+worktree lane. A worker's writes to its **own** process-matrix entry are a sanctioned artifact,
+exactly like its own session transcript and its attributed decision-ledger rows: the role ceiling is
+untouched, and this is not a new escalation surface. A worker never writes any *other* session's
+entry, and it never runs the worktree-sync startup reconcile, so it never rewrites another lane's
+registration or appends the shared worktree-sync audit log.
 
-The narrow exception in the orphan claim scan is identity-fenced exact-session recovery. Exact
-recovery may restore the same recorded parent session without another prompt. Foreign orphans are
-report-only and remain untouched by that scan; bounded reconciliation may still perform the
-generation-fenced lifecycle/TTL maintenance described above.
+The narrow exceptions in the master's orphan scan are identity-fenced exact-session recovery and
+the owner-approved `user_cleanup` directive. Exact recovery may restore the same recorded parent
+session without another prompt. A foreign orphan is otherwise untouched by that scan; bounded
+reconciliation may still perform the generation-fenced lifecycle/TTL maintenance described above.
 
 ## Foreign-CLI limitation
 
@@ -148,7 +196,11 @@ rejected rather than represented as enforced across a boundary the host cannot s
 
 ## What this does not do
 
-- It never kills a process. Every termination is the process's own cooperative self-exit.
+- It never kills a process. Every termination is the process's own cooperative self-exit, and a
+  cleanup of another session's worker is requested only after an explicit owner yes.
+- It does not detect a parent that died but has not yet been reaped by its own parent (a zombie
+  still answers a pid probe): the presence disconnect wakes the worker, the verdict stays
+  "alive", and the poll watchdog resolves it once the master's heartbeat goes stale.
 - It does not re-attach a terminal pane or re-dispatch a lane when a foreign worker is found. Relaunch
   is reserved for a dead worker with a complete persisted Pi resume context and exact session+task
   identity. Mismatched and foreign identities remain report-only.

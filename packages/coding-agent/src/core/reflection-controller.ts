@@ -56,6 +56,7 @@ import {
 	appendLearningAuditSnapshot,
 	contradictionsForReflectionWrite,
 	getLearningAuditSnapshots,
+	type LearningAuditAction,
 	type LearningAuditRecord,
 	proposalFromReflectionWrite,
 	rollbackPlanForReflectionWrite,
@@ -65,6 +66,7 @@ import { type EvidenceReceipt, ObservationStore, observationKey } from "./learni
 import {
 	type DemandSignals,
 	decideDemand,
+	parseReflectionWrites,
 	ReflectionEngine,
 	type ReflectionResult,
 	type ReflectionWrite,
@@ -169,6 +171,16 @@ export interface ReflectionControllerDeps {
 	getMemoryPolicyVersion?(): string | undefined;
 	/** Bounded host warning sink for fail-safe state degradation. */
 	warn?(message: string): void;
+}
+
+/** Per-write result of the shared gate-and-audit path (`action` mirrors the audit record's action). */
+export interface GatedWriteOutcome {
+	proposalId: string;
+	kind: ReflectionWrite["kind"];
+	layer: DurableChangeLayer;
+	action: LearningAuditAction | "no_op";
+	reasonCode: string;
+	summary: string;
 }
 
 // reasonCode when an automatic skill promotion is blocked by an overlap with an existing skill
@@ -1790,6 +1802,31 @@ export class ReflectionController {
 		// or skills against the dead session.
 		if (this.deps.isDisposed()) return result;
 
+		await this._applyGatedWrites(result.writes, {
+			reportId: input.reportId,
+			explicitUserMemoryInstruction: input.explicitUserMemoryInstruction === true,
+			signal,
+		});
+
+		// Account the reflection's spend so it surfaces in the footer roll-up (net-token visibility).
+		// Idempotent on reportId so a retried/duplicated pass cannot double-count.
+		if (result.usage.cost.total > 0 || result.usage.totalTokens > 0) {
+			this.deps.addSpawnedUsage(result.usage, { label: "reflection", reportId: input.reportId });
+		}
+		return result;
+	}
+
+	/**
+	 * The single gate-and-audit path for every model-proposed durable write: reflection completions
+	 * and a background learner's returned proposals both land here, so a write is decided by the
+	 * learning gate, held by the skill-overlap audit when it duplicates, applied through the same
+	 * owner paths, and audited with a rollback plan regardless of who proposed it. Returns one
+	 * outcome per supplied write, in order.
+	 */
+	private async _applyGatedWrites(
+		writes: readonly ReflectionWrite[],
+		context: { reportId?: string; explicitUserMemoryInstruction: boolean; signal?: AbortSignal },
+	): Promise<GatedWriteOutcome[]> {
 		// Learning apply policy: every durable write is converted to a proposal, decided by the
 		// learning gate, and audited with a rollback plan. When the policy is explicitly disabled,
 		// legacy direct-apply behavior is preserved — but now leaves audit records with rollback info.
@@ -1802,10 +1839,11 @@ export class ReflectionController {
 		// so the gate can distinguish a one-off cue from a repeatedly-confirmed lesson. Built once per
 		// pass; every increment is best-effort (store IO must never break reflection).
 		const observationStore = ObservationStore.forAgentDir(this.deps.getAgentDir());
+		const outcomes: GatedWriteOutcome[] = [];
 		let writeIndex = 0;
-		for (const write of result.writes) {
+		for (const write of writes) {
 			writeIndex += 1;
-			const proposalId = `${input.reportId ?? "reflection"}-w${writeIndex}`;
+			const proposalId = `${context.reportId ?? "reflection"}-w${writeIndex}`;
 			const proposal = proposalFromReflectionWrite(write, proposalId);
 			const plannedRollback = rollbackPlanForReflectionWrite(write);
 			let observations = 1;
@@ -1819,7 +1857,7 @@ export class ReflectionController {
 				}
 			}
 			const explicitUserMemoryWrite =
-				input.explicitUserMemoryInstruction === true &&
+				context.explicitUserMemoryInstruction &&
 				(write.kind === "memory_add" || write.kind === "memory_replace" || write.kind === "memory_remove");
 			// Additive skill promotion is the skill counterpart of a memory fact: a repeatable
 			// procedure should land as a loadable SKILL.md (overlap audit still holds the write).
@@ -1904,28 +1942,30 @@ export class ReflectionController {
 			// not-found (or, worse, misfires against whatever now occupies that text).
 			const applyResult =
 				decision.kind === "apply" && !skillPromotionBlock
-					? await this._applyReflectionWrite(write, signal, input.explicitUserMemoryInstruction === true)
+					? await this._applyReflectionWrite(write, context.signal, context.explicitUserMemoryInstruction)
 					: { applied: false };
 			const writeFailed = decision.kind === "apply" && !skillPromotionBlock && !applyResult.applied;
+			const storedAction: LearningAuditAction = skillPromotionBlock
+				? "propose"
+				: writeFailed
+					? "apply_failed"
+					: decision.kind === "apply"
+						? "apply"
+						: "propose";
+			const storedReasonCode = skillPromotionBlock
+				? skillPromotionBlock.reasonCode
+				: writeFailed
+					? APPLY_WRITE_REFUSED_REASON_CODE
+					: decision.reasonCode;
 			if (decision.kind !== "no-op") {
 				auditSequence += 1;
 				appendLearningAuditSnapshot(this.deps.getSessionManager(), {
 					id: `audit-${auditSequence}`,
 					proposalId,
 					layer: proposal.layer,
-					action: skillPromotionBlock
-						? "propose"
-						: writeFailed
-							? "apply_failed"
-							: decision.kind === "apply"
-								? "apply"
-								: "propose",
+					action: storedAction,
 					summary: skillPromotionBlock ? `${proposal.summary} — ${skillPromotionBlock.note}` : proposal.summary,
-					reasonCode: skillPromotionBlock
-						? skillPromotionBlock.reasonCode
-						: writeFailed
-							? APPLY_WRITE_REFUSED_REASON_CODE
-							: decision.reasonCode,
+					reasonCode: storedReasonCode,
 					decision: skillPromotionBlock
 						? {
 								...decision,
@@ -1944,14 +1984,61 @@ export class ReflectionController {
 					createdAt: new Date().toISOString(),
 				});
 			}
+			outcomes.push({
+				proposalId,
+				kind: write.kind,
+				layer: proposal.layer,
+				action: decision.kind === "no-op" ? "no_op" : storedAction,
+				reasonCode: storedReasonCode,
+				summary: proposal.summary,
+			});
 		}
+		return outcomes;
+	}
 
-		// Account the reflection's spend so it surfaces in the footer roll-up (net-token visibility).
-		// Idempotent on reportId so a retried/duplicated pass cannot double-count.
-		if (result.usage.cost.total > 0 || result.usage.totalTokens > 0) {
-			this.deps.addSpawnedUsage(result.usage, { label: "reflection", reportId: input.reportId });
+	/**
+	 * Apply a background learner's returned durable-write proposals. The learner process is a
+	 * read-only worker; its output is untrusted, so each entry is re-validated by the same bounded
+	 * parser reflection uses, then decided and audited by the same gate under `auto-learn-<runId>`
+	 * attribution. An entry without an `outcome` was refused by the validator and is reported, never
+	 * silently dropped.
+	 */
+	async applyLearnerWrites(
+		rawWrites: readonly unknown[],
+		options: { runId: string },
+	): Promise<
+		| { applied: true; entries: Array<{ index: number; outcome?: GatedWriteOutcome }> }
+		| { applied: false; reason: "icm_memory_offline" | "child_session" | "session_disposed" }
+	> {
+		if (this.isIcmMode()) return { applied: false, reason: "icm_memory_offline" };
+		if (this.deps.isChildSession()) return { applied: false, reason: "child_session" };
+		if (this.deps.isDisposed()) return { applied: false, reason: "session_disposed" };
+		const existingMemory = [
+			this.deps.getMemoryManager().buildSystemPromptBlockFresh(),
+			this.deps.getFreshOkfMemoryForReflection(),
+		]
+			.filter((block) => block.trim().length > 0)
+			.join("\n\n");
+		const accepted: Array<{ index: number; write: ReflectionWrite }> = [];
+		const entries: Array<{ index: number; outcome?: GatedWriteOutcome }> = [];
+		rawWrites.forEach((raw, index) => {
+			const [write] = parseReflectionWrites([raw], existingMemory);
+			if (write) accepted.push({ index, write });
+			else entries.push({ index });
+		});
+		const outcomes = await this._applyGatedWrites(
+			accepted.map((entry) => entry.write),
+			{
+				reportId: `auto-learn-${options.runId}`,
+				explicitUserMemoryInstruction: false,
+				signal: this.deps.getReflectionSignal(),
+			},
+		);
+		for (const [position, entry] of accepted.entries()) {
+			entries.push({ index: entry.index, outcome: outcomes[position] });
 		}
-		return result;
+		entries.sort((a, b) => a.index - b.index);
+		return { applied: true, entries };
 	}
 
 	getLearningAuditRecords(): LearningAuditRecord[] {

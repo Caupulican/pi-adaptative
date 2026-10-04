@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { WorkerDirectoryAdmission } from "../delegation/worker-directory-admission.ts";
 import type { ManagedLaneEvent } from "../extensions/types.ts";
+import { WORKER_CAPABILITY_INSUFFICIENT_SKIP_REASON } from "../model-capability.ts";
 import { type CollaborationBackend, CollaborationBackendError, type CollaborationPane } from "./backend.ts";
 import {
 	boundCollaborationEvidence,
@@ -229,6 +230,7 @@ export class CollaborationCoordinator {
 			phase: "dispatch",
 			goalId: agent.taskCorrelation?.goalId,
 			worktreeLaneKey: agent.profile.worktreeLane,
+			...(agent.profile.worktreeLane ? { worktreeLanePath: agent.cwd } : {}),
 			dispatch: {
 				sequence: agent.turn,
 				instructions: agent.prompt,
@@ -236,7 +238,11 @@ export class CollaborationCoordinator {
 				provider: agent.provider,
 				authorizationId: agent.profile.identity,
 				authorizationKind: "profile-derived",
-				allowedTools: agent.profile.allowedTools,
+				// The host's capability grant compiles catalogued tools only. A granted extension tool carries no
+				// capability classification; its grant lives in the job's immutable profile (extensionToolGrants).
+				allowedTools: agent.profile.allowedTools.filter(
+					(tool) => !agent.profile.extensionToolGrants?.some((grant) => grant.tool === tool),
+				),
 				writePaths: agent.profile.writePaths,
 				leaseTtlMs: job.deadlineSeconds * 1000,
 			},
@@ -835,7 +841,11 @@ export class CollaborationCoordinator {
 			dispatchSequence: agent.turn,
 			summary: boundCollaborationEvidence(agent.evidence),
 			usage: agent.usage,
-			reasonCode: agent.status === "blocked" ? "collaboration_question_or_blocker" : "collaboration_terminal",
+			reasonCode: agent.workerRefusal
+				? WORKER_CAPABILITY_INSUFFICIENT_SKIP_REASON
+				: agent.status === "blocked"
+					? "collaboration_question_or_blocker"
+					: "collaboration_terminal",
 		});
 		// The host persisted its terminal/outbox before returning. This is only duplicate suppression.
 		store.update(job.id, (current) => {

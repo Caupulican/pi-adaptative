@@ -2,7 +2,7 @@ import { watch } from "node:fs";
 import { basename, isAbsolute } from "node:path";
 import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
 import type { ProcessParentOwnershipSource } from "../process-matrix/runtime.ts";
-import { CollaborationJobStore } from "./job-store.ts";
+import { CollaborationJobStore, type CollaborationWorkerRefusal } from "./job-store.ts";
 import type { CollaborationQuestionReceipt } from "./result-claim.ts";
 
 export type { CollaborationQuestionReceipt } from "./result-claim.ts";
@@ -47,6 +47,8 @@ export function createCollaborationPeerContext(env: NodeJS.ProcessEnv = process.
 		send: (recipientId: string, messageId: string, text: string) =>
 			store.enqueuePeerMessage(jobId, { senderId, token, recipientId, messageId, text }),
 		report: (claim: unknown) => store.reportTurn(jobId, { senderId, token, claim }),
+		refuse: (refusal: CollaborationWorkerRefusal) => store.recordPeerRefusal(jobId, { senderId, token, refusal }),
+		notice: (notice: string) => store.recordPeerNotice(jobId, { senderId, token, notice }),
 		waiting: (requestId: string, evidence: string) =>
 			store.beginPeerQuestion(jobId, { senderId, token, requestId, evidence }),
 		settled: (receipt: CollaborationQuestionReceipt) => store.clearPeerQuestion(jobId, { senderId, token, receipt }),

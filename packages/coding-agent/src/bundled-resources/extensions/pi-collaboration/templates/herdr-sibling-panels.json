@@ -6,7 +6,7 @@
     {
       "provider": "agy",
       "name": "gemini-builder",
-      "task": "Own implementation edits and focused regression tests. Produce concrete diffs and verified test results.",
+      "task": "Own implementation edits; write or run no tests unless the owner explicitly asked. Produce concrete diffs and verified build/check results.",
       "direction": "right",
       "model": "gemini-3.8-flash-high",
       "args": ["--effort", "high"]

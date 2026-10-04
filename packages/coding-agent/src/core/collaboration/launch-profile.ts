@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { Usage } from "@caupulican/pi-ai";
 import { type Static, Type } from "typebox";
@@ -6,33 +7,53 @@ import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool
 import { ORCHESTRATION_THINKING_LEVEL_SCHEMA } from "../orchestration/thinking-level-schema.ts";
 import { POLICY_OWNED_RUNTIME_TOOL_NAMES } from "../tool-capability-policy.ts";
 import { isRecordObject as isPlainRecord } from "../util/value-guards.ts";
-import { WORKER_FORBIDDEN_TOOLS } from "../worker-tool-ceiling.ts";
+import { MAX_WORKER_EXTENSION_TOOL_GRANTS } from "../worker-extension-grants.ts";
+import { isExtensionToolGrantable, isWorkerProcessToolAllowed } from "../worker-tool-ceiling.ts";
 
 export type Provider = "pi" | "codex" | "agy" | "claude" | "opencode" | "custom";
 
-const MANAGED_WORKER_TOOL_NAMES = POLICY_OWNED_RUNTIME_TOOL_NAMES.filter((tool) => !WORKER_FORBIDDEN_TOOLS.has(tool));
+const MANAGED_WORKER_TOOL_NAMES = POLICY_OWNED_RUNTIME_TOOL_NAMES.filter((tool) => isWorkerProcessToolAllowed(tool));
 const MANAGED_WORKER_TOOL_NAME_SET: ReadonlySet<string> = new Set(MANAGED_WORKER_TOOL_NAMES);
 
-/** Full host-auditable Pi worker surface after the shared worker ceiling removes agent launchers
- * and root-owned durable mutation controls. */
+/** The host-auditable managed Pi worker surface: the worker process allow-list
+ * (`WORKER_PROCESS_ALLOWED_TOOLS`) restricted to tools the capability catalogue classifies. */
 export const DEFAULT_MANAGED_WORKER_TOOLS: readonly string[] = Object.freeze([...MANAGED_WORKER_TOOL_NAMES]);
 
 export class WorkerLaunchProfileError extends Error {
 	readonly code = "worker_profile_tools_rejected" as const;
 	readonly rejectedTools: readonly string[];
+	/** Actionable reason per rejected tool (only where the rejection has a specific, fixable cause). */
+	readonly reasons: Readonly<Record<string, string>>;
 
-	constructor(rejectedTools: readonly string[]) {
+	constructor(rejectedTools: readonly string[], reasons: Readonly<Record<string, string>> = {}) {
 		const displayNames = rejectedTools.map((tool) => (tool ? `'${tool}'` : "<empty>"));
-		super(`Worker profile requested unavailable or forbidden tools: ${displayNames.join(", ")}.`);
+		const detail = rejectedTools
+			.filter((tool) => reasons[tool] !== undefined)
+			.map((tool) => ` ${tool ? `'${tool}'` : "<empty>"}: ${reasons[tool]}`)
+			.join("");
+		super(`Worker profile requested unavailable or forbidden tools: ${displayNames.join(", ")}.${detail}`);
 		this.name = "WorkerLaunchProfileError";
 		this.rejectedTools = Object.freeze([...rejectedTools]);
+		this.reasons = Object.freeze({ ...reasons });
 	}
+}
+
+/** One extension-provided tool known to the launching session: its name and the file that registers it. */
+export interface ExtensionToolSource {
+	readonly name: string;
+	readonly extensionPath: string;
 }
 
 export interface WorkerLaunchProfileInput {
 	identity: string;
 	inheritedTools?: readonly string[];
 	allowedTools?: readonly string[];
+	/**
+	 * Extension-provided tools of the launching session. A name in `allowedTools` that is not a worker
+	 * builtin is granted only when it resolves here (and is on the launcher's own active surface); the worker
+	 * process then loads that one extension and admits that one tool. Never granted by default.
+	 */
+	extensionTools?: readonly ExtensionToolSource[];
 	resourceProfile?: string;
 	resourceProfileJson?: string;
 	writePaths?: readonly string[];
@@ -50,6 +71,15 @@ export const workerLaunchProfileSchema = Type.Object(
 	{
 		identity: Type.String({ minLength: 1, maxLength: 4096 }),
 		allowedTools: Type.Array(profileText, { maxItems: 128 }),
+		extensionToolGrants: Type.Optional(
+			Type.Array(
+				Type.Object(
+					{ tool: Type.String({ minLength: 1, maxLength: 256 }), extensionPath: profileText },
+					{ additionalProperties: false },
+				),
+				{ maxItems: MAX_WORKER_EXTENSION_TOOL_GRANTS },
+			),
+		),
 		writePaths: Type.Array(profileText, { maxItems: 128 }),
 		resourceProfile: Type.Optional(profileText),
 		resourceProfileJson: Type.Optional(Type.String({ maxLength: 32768 })),
@@ -62,10 +92,11 @@ export const workerLaunchProfileSchema = Type.Object(
 	{ additionalProperties: false },
 );
 export type WorkerLaunchProfile = Readonly<
-	Omit<Static<typeof workerLaunchProfileSchema>, "allowedTools" | "writePaths">
+	Omit<Static<typeof workerLaunchProfileSchema>, "allowedTools" | "writePaths" | "extensionToolGrants">
 > & {
 	readonly allowedTools: readonly string[];
 	readonly writePaths: readonly string[];
+	readonly extensionToolGrants?: readonly { readonly tool: string; readonly extensionPath: string }[];
 };
 
 /** Native result reporting cannot silently add process authority to a read-only Pi profile. */
@@ -85,23 +116,92 @@ function uniqueClassifiedTools(tools: readonly string[]): string[] {
 	return MANAGED_WORKER_TOOL_NAMES.filter((tool) => selected.has(tool));
 }
 
+function extensionToolRejection(
+	requested: string,
+	extensionTools: readonly ExtensionToolSource[],
+	inheritedToolNames: ReadonlySet<string> | undefined,
+): { grant: ExtensionToolSource } | { reason: string } {
+	const source =
+		extensionTools.find((entry) => entry.name === requested) ??
+		extensionTools.find((entry) => entry.name.toLowerCase() === requested.toLowerCase());
+	if (!source) {
+		if (!isExtensionToolGrantable(requested.toLowerCase())) {
+			return {
+				reason:
+					"a harness-owned tool that is not part of the worker-process surface (forbidden for workers, or not allow-listed); an extension tool grant can never carry that authority.",
+			};
+		}
+		return {
+			reason:
+				"not a worker-process builtin tool and not provided by any extension loaded in the launching session; load the extension that provides it there, or remove the tool from the profile.",
+		};
+	}
+	if (!isExtensionToolGrantable(source.name)) {
+		return {
+			reason:
+				"names a harness-owned tool (forbidden for workers, or a capability-catalogued builtin); an extension tool grant can never carry that authority.",
+		};
+	}
+	if (!path.isAbsolute(source.extensionPath) && !path.win32.isAbsolute(source.extensionPath)) {
+		return {
+			reason: `provided by '${source.extensionPath}', which is not an extension file a worker process can load; grant tools only from extensions loaded from a file.`,
+		};
+	}
+	if (inheritedToolNames && !inheritedToolNames.has(source.name)) {
+		return {
+			reason:
+				"not active in the launching session; a profile cannot grant a worker a tool its launcher does not hold.",
+		};
+	}
+	return { grant: source };
+}
+
 export function deriveWorkerLaunchProfile(input: WorkerLaunchProfileInput): WorkerLaunchProfile {
+	const extensionGrants = new Map<string, ExtensionToolSource>();
+	let builtinRequests: readonly string[] | undefined;
 	if (input.allowedTools !== undefined) {
 		const inheritedToolSet =
 			input.inheritedTools === undefined
 				? MANAGED_WORKER_TOOL_NAME_SET
 				: new Set(uniqueClassifiedTools(input.inheritedTools));
-		const rejectedTools = [
-			...new Set(
-				normalizeToolNames(input.allowedTools).filter(
-					(tool) => !MANAGED_WORKER_TOOL_NAME_SET.has(tool) || !inheritedToolSet.has(tool),
-				),
-			),
-		];
-		if (rejectedTools.length > 0) throw new WorkerLaunchProfileError(rejectedTools);
+		const inheritedExtensionToolNames =
+			input.inheritedTools === undefined ? undefined : new Set(input.inheritedTools.map((tool) => tool.trim()));
+		const rejectedTools = new Set<string>();
+		const reasons: Record<string, string> = {};
+		const builtin: string[] = [];
+		for (const requested of input.allowedTools) {
+			const normalized = normalizeToolNames([requested])[0] ?? "";
+			if (MANAGED_WORKER_TOOL_NAME_SET.has(normalized)) {
+				if (inheritedToolSet.has(normalized)) builtin.push(normalized);
+				else rejectedTools.add(normalized);
+				continue;
+			}
+			const trimmed = requested.trim();
+			if (trimmed.length === 0 || !input.extensionTools) {
+				rejectedTools.add(normalized);
+				continue;
+			}
+			const outcome = extensionToolRejection(trimmed, input.extensionTools, inheritedExtensionToolNames);
+			if ("grant" in outcome) extensionGrants.set(outcome.grant.name, outcome.grant);
+			else {
+				rejectedTools.add(normalized);
+				reasons[normalized] = outcome.reason;
+			}
+		}
+		if (rejectedTools.size > 0) throw new WorkerLaunchProfileError([...rejectedTools], reasons);
+		builtinRequests = builtin;
 	}
-	const sourceTools = input.allowedTools ?? input.inheritedTools ?? DEFAULT_MANAGED_WORKER_TOOLS;
-	const allowedTools = Object.freeze(uniqueClassifiedTools(sourceTools));
+	if (extensionGrants.size > MAX_WORKER_EXTENSION_TOOL_GRANTS) {
+		throw new Error(`A worker profile may grant at most ${MAX_WORKER_EXTENSION_TOOL_GRANTS} extension tools.`);
+	}
+	const sourceTools = builtinRequests ?? input.inheritedTools ?? DEFAULT_MANAGED_WORKER_TOOLS;
+	const extensionToolGrants = [...extensionGrants.values()].map((entry) =>
+		Object.freeze({ tool: entry.name, extensionPath: entry.extensionPath }),
+	);
+	const allowedTools = Object.freeze([
+		...uniqueClassifiedTools(sourceTools),
+		...extensionToolGrants.map((grant) => grant.tool),
+	]);
 	const writePaths = Object.freeze([
 		...new Set(input.writePaths?.map((entry) => entry.trim()).filter((entry) => entry.length > 0) ?? []),
 	]);
@@ -109,6 +209,7 @@ export function deriveWorkerLaunchProfile(input: WorkerLaunchProfileInput): Work
 		identity: input.identity,
 		allowedTools,
 		writePaths,
+		...(extensionToolGrants.length > 0 ? { extensionToolGrants: Object.freeze(extensionToolGrants) } : {}),
 		...(input.resourceProfile ? { resourceProfile: input.resourceProfile } : {}),
 		...(input.resourceProfileJson ? { resourceProfileJson: input.resourceProfileJson } : {}),
 		...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),
@@ -148,7 +249,7 @@ export function buildLaunchProfileFlags(profile: WorkerLaunchProfile): LaunchPro
 export function buildScopedSystemPrompt(profile: WorkerLaunchProfile): string {
 	const scope = profile.writePaths.length
 		? `Structural filesystem tools are limited to: ${profile.writePaths.join(", ")}. Process tools retain host access and must honor this assigned scope.`
-		: "Filesystem authority inherits the host's full-machine worker scope except private harness paths.";
+		: "Structural filesystem tools read anywhere on the host and write inside your working directory; harness and private paths stay denied. A wider write root is an explicit grant from the dispatch.";
 	const sentences = [
 		`You are a persistent collaboration worker running under immutable profile ${profile.identity}.`,
 		scope,

@@ -78,11 +78,12 @@ it("claims an uncertain prompt only once across independent store instances", as
 	expect(other.load("job-one").agents[0].helperPid).toBe(10);
 });
 
-it("surfaces corrupt records rather than hiding them as foreign jobs", async () => {
+it("surfaces corrupt records through a bounded diagnostic instead of failing every listing", async () => {
 	const { store } = await fixture();
 	const job = store.load("job-one");
 	await writeFile(store.path("job-one"), JSON.stringify({ ...job, deadlineSeconds: -1 }));
-	expect(() => store.list()).toThrow("Invalid collaboration job");
+	expect(store.list().some((listed) => listed.id === "job-one")).toBe(false);
+	expect(store.skippedRecords().some((record) => record.file.includes("job-one"))).toBe(true);
 });
 
 it("rejects mutations of immutable job and launch-profile ownership atomically", async () => {

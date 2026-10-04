@@ -88,10 +88,16 @@ describe("profile-derived persistent native dispatch", () => {
 		expect(f.report).not.toHaveBeenCalled();
 		await f.execute({ action: "fire_task", launchKey: "inherited", task: "work", agents: [{ provider: "pi" }] });
 		const tools = f.store.load("inherited").agents[0].profile.allowedTools;
-		expect(tools).toEqual(
-			expect.arrayContaining(["pipeline", "ask_question", "skill", "tool_task", "worktree_sync"]),
-		);
-		for (const denied of ["delegate", "pi_collaboration", "memory", "unknown-extension"])
+		expect(tools).toEqual(expect.arrayContaining(["skill", "worktree_sync"]));
+		for (const denied of [
+			"delegate",
+			"pi_collaboration",
+			"memory",
+			"unknown-extension",
+			"pipeline",
+			"ask_question",
+			"tool_task",
+		])
 			expect(tools).not.toContain(denied);
 	});
 	it("inherits an effective resource snapshot unless an explicit profile replaces it", async () => {
@@ -213,25 +219,26 @@ describe("collaboration launch-profile pure logic", () => {
 			],
 		});
 		expect(profile.allowedTools).toEqual(
-			expect.arrayContaining([
-				"read",
-				"write",
-				"python",
-				"bash",
-				"run_toolkit_script",
-				"skill",
-				"create_goal",
-				"get_goal",
-				"update_goal",
-				"pipeline",
-				"tool_task",
-				"worktree_sync",
-				"ask_question",
-			]),
+			expect.arrayContaining(["read", "write", "python", "bash", "skill", "worktree_sync"]),
 		);
-		expect(profile.allowedTools).not.toEqual(expect.arrayContaining(["memory", "delegate", "pi_collaboration"]));
+		// A worker process holds only the allow-listed surface: goal and task lifecycle, pipeline, tool_task,
+		// ask_question, run_toolkit_script and the spawn controls are never inherited.
+		for (const forbidden of [
+			"memory",
+			"delegate",
+			"pi_collaboration",
+			"create_goal",
+			"get_goal",
+			"update_goal",
+			"pipeline",
+			"tool_task",
+			"ask_question",
+			"run_toolkit_script",
+		]) {
+			expect(profile.allowedTools).not.toContain(forbidden);
+		}
 		expect(DEFAULT_MANAGED_WORKER_TOOLS).toContain("python");
-		expect(DEFAULT_MANAGED_WORKER_TOOLS).toContain("pipeline");
+		expect(DEFAULT_MANAGED_WORKER_TOOLS).not.toContain("pipeline");
 		expect(DEFAULT_MANAGED_WORKER_TOOLS).not.toContain("memory");
 		expect(profile.writePaths).toEqual([]);
 		expect(Object.isFrozen(profile)).toBe(true);

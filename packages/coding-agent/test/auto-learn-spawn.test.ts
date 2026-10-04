@@ -201,6 +201,8 @@ describe("Auto Learn spawn args", () => {
 			"openai/gpt-5.5",
 			"--thinking",
 			"xhigh",
+			"--tools",
+			"read,grep,find,ls",
 			"--session-dir",
 			"/tmp/pi auto learn/sessions",
 			"--session-id",

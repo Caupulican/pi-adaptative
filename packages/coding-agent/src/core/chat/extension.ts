@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { getBundledResourcesDir } from "../../config.ts";
 import type { ExtensionAPI, ExtensionUIContext } from "../extensions/types.ts";
+import { isWorkerSession } from "../session-role.ts";
 import { registerChatCommand } from "./commands.ts";
 import {
 	CHAT_CUSTOM_MESSAGE_TYPE,
@@ -36,6 +37,10 @@ function readStoredIdentity(stateRoot: string): ChatIdentity | undefined {
 }
 
 export function piChatExtension(pi: ExtensionAPI, options: ChatExtensionOptions = {}): void {
+	// `list_peers`/`agent_send` are already outside a worker's tool ceiling; joining the mesh would still make
+	// the worker an addressable peer whose transcript any local process can steer. Workers report to their
+	// parent only, so a worker session registers nothing and opens no socket.
+	if (isWorkerSession()) return;
 	const stateRoot = options.stateRoot ?? defaultChatStateRoot();
 	const platform = getChatPlatformInfo(stateRoot);
 	const identity = resolveIdentity(createRuntimeIdentity(), readStoredIdentity(stateRoot));
@@ -61,6 +66,7 @@ export function piChatExtension(pi: ExtensionAPI, options: ChatExtensionOptions 
 			kind: "agent_receive",
 			id: message.id,
 			from: message.from.id,
+			verified: message.from.verified === true,
 			expectReply: message.expectReply,
 		});
 		const sentHops = message.metadata?.hops;
@@ -94,10 +100,24 @@ export function piChatExtension(pi: ExtensionAPI, options: ChatExtensionOptions 
 				summary,
 			},
 		});
-		pi.sendUserMessage(incomingPrompt(message, hops, MAX_REPLY_HOPS), {
-			deliverAs: "steer",
-			processSlashCommands: false,
+		// The sender is acknowledged only once the session holds the message: queued behind the running turn
+		// in its recoverable pending queue, or starting as its own turn. A message the session refused or
+		// that was taken back before that is reported as undelivered, never acknowledged.
+		const accepted = await new Promise<boolean>((resolve) => {
+			pi.sendUserMessage(incomingPrompt(message, hops, MAX_REPLY_HOPS), {
+				deliverAs: "steer",
+				processSlashCommands: false,
+				// The queue, the durable record and the editor show the peer's words under their sender, not the frame.
+				origin: {
+					channel: CHAT_EXTENSION_NAME,
+					sender: message.from.name,
+					verified: message.from.verified === true,
+					text: message.message,
+				},
+				onAccepted: resolve,
+			});
 		});
+		if (!accepted) throw new Error("NOT DELIVERED: the session did not accept the message.");
 		return "ACK: delivered; queued for immediate Pi turn.";
 	};
 

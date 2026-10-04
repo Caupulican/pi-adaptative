@@ -127,6 +127,11 @@ export async function runCollaborationWorker(args: readonly string[]): Promise<v
 			const current = store.load(jobId).agents.find((member) => member.id === agentId);
 			const isSuperseded = current?.turnId !== turnId || current?.status !== "running" || Boolean(current?.steering);
 			if (!isSuperseded) {
+				// A launched worker that refused its own model before running recorded why; the turn is
+				// blocked with that reason, never the bare pane exit. Closing the dead pane below keeps
+				// the blocked status (it only settles still-active turns).
+				if (current?.workerRefusal)
+					store.finishTurn(jobId, agentId, turnId, "blocked", current.workerRefusal.message);
 				try {
 					await stopCollaborationAgent(
 						store,

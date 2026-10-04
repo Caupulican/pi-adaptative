@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import {
 	appendFileSync,
 	chmodSync,
@@ -8,9 +9,11 @@ import {
 	openSync,
 	readFileSync,
 	renameSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { isWorkerSession } from "../session-role.ts";
 import { CHAT_CONFIG_VERSION } from "./constants.ts";
 
 export type ChatConfig = {
@@ -35,6 +38,8 @@ export type PeerRecord = {
 	name: string;
 	address: string;
 	scope: "local" | "network" | "relay";
+	/** Set only by the broker: the peer proved it holds this machine's pi session secret. Never self-declared. */
+	verified?: boolean;
 	busy?: boolean;
 	lastSeen?: string;
 };
@@ -118,6 +123,35 @@ export function createDefaultChatConfig(now = new Date()): ChatConfig {
 		updatedAt: timestamp,
 		broadcastEnabled: false,
 	};
+}
+
+/**
+ * The machine's pi session secret (`session.key`, mode 0600, created by the first session that needs it). A
+ * session proves it is a real pi session by keying its hello with it; the broker never accepts a claim of
+ * that. A worker-role process never reads it, and a file readable by group or others is not trusted.
+ */
+export function readChatSessionSecret(root: string): string | undefined {
+	if (isWorkerSession()) return undefined;
+	ensureChatStateDirs(root);
+	const file = join(root, "session.key");
+	const readSecret = (): string | undefined => {
+		if ((statSync(file).mode & 0o077) !== 0) return undefined;
+		const secret = readFileSync(file, "utf8").trim();
+		return /^[0-9a-f]{64}$/.test(secret) ? secret : undefined;
+	};
+	try {
+		return readSecret();
+	} catch (error: unknown) {
+		if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+	}
+	const created = randomBytes(32).toString("hex");
+	try {
+		writeFileSync(file, `${created}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+		return created;
+	} catch (error: unknown) {
+		if (!isNodeError(error) || error.code !== "EEXIST") throw error;
+		return readSecret();
+	}
 }
 
 export function readChatConfig(root: string): ChatConfig | undefined {

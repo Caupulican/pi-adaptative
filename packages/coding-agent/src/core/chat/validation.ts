@@ -2,8 +2,10 @@ import {
 	DEFAULT_TIMEOUT_MS,
 	MAX_ENVELOPE_BYTES,
 	MAX_MESSAGE_BYTES,
+	MAX_MESSAGE_ID_CHARS,
 	MAX_METADATA_BYTES,
 	MAX_TIMEOUT_MS,
+	MESSAGE_ID_PATTERN,
 } from "./constants.ts";
 
 export type AgentSendInput = {
@@ -12,9 +14,11 @@ export type AgentSendInput = {
 	expectReply: boolean;
 	timeoutMs: number;
 	metadata?: Record<string, unknown>;
+	/** Stable id of this send; a retry carries the same id so the receiver delivers it once. */
+	messageId?: string;
 };
 
-const AGENT_SEND_KEYS = new Set(["to", "message", "expectReply", "timeoutMs", "metadata"]);
+const AGENT_SEND_KEYS = new Set(["to", "message", "expectReply", "timeoutMs", "metadata", "messageId"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -49,7 +53,16 @@ export function normalizeAgentSendInput(input: unknown): AgentSendInput {
 			throw new Error(`agent_send.metadata is too large; max ${MAX_METADATA_BYTES} bytes.`);
 		}
 	}
-	const normalized = { to, message, expectReply, timeoutMs, metadata };
+	const messageId = input.messageId;
+	if (
+		messageId !== undefined &&
+		(typeof messageId !== "string" || messageId.length > MAX_MESSAGE_ID_CHARS || !MESSAGE_ID_PATTERN.test(messageId))
+	) {
+		throw new Error(
+			`agent_send.messageId must be 1-${MAX_MESSAGE_ID_CHARS} letters, digits, '.', '_', ':' or '-' when provided.`,
+		);
+	}
+	const normalized = { to, message, expectReply, timeoutMs, metadata, messageId };
 	if (Buffer.byteLength(JSON.stringify(normalized), "utf8") > MAX_ENVELOPE_BYTES) {
 		throw new Error(`agent_send envelope is too large; max ${MAX_ENVELOPE_BYTES} bytes.`);
 	}

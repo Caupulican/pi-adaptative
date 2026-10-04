@@ -5,7 +5,7 @@ export const piConfig = { tools: ["list_peers", "agent_send"] };
 
 type IncomingDetails = {
 	kind?: string;
-	from?: { id?: string; name?: string; address?: string };
+	from?: { id?: string; name?: string; address?: string; verified?: boolean };
 	expectReply?: boolean;
 	metadata?: Record<string, unknown>;
 	message?: string;
@@ -30,7 +30,7 @@ export default function chat(pi: ExtensionAPI): void {
 		const lines = details.messageLines ?? (details.message ? details.message.split(/\r?\n/).length : 0);
 		let text = renderTitleBadge(theme, {
 			label: "pi-chat",
-			action: `message from ${fromName}`,
+			action: `message from ${fromName} [${details.from?.verified === true ? "verified pi session" : "UNVERIFIED peer"}]`,
 			details: [
 				`${lines} line${lines === 1 ? "" : "s"}`,
 				`${bytes} byte${bytes === 1 ? "" : "s"}`,
@@ -40,7 +40,7 @@ export default function chat(pi: ExtensionAPI): void {
 		});
 		if (details.expectReply) text += theme.fg("warning", " · reply requested");
 		if (options.expanded) {
-			text += `\n${theme.fg("dim", `from: ${fromName} (${details.from?.id ?? "unknown-id"})${details.from?.address ? ` ${details.from.address}` : ""}`)}`;
+			text += `\n${theme.fg("dim", `from id: ${details.from?.id ?? "unknown-id"}, label: ${fromName} (self-declared)${details.from?.address ? ` ${details.from.address}` : ""}`)}`;
 			if (details.receivedAt) text += `\n${theme.fg("dim", `received: ${details.receivedAt}`)}`;
 			text += `\n\n${details.message ?? ""}`;
 			if (details.metadata && Object.keys(details.metadata).length > 0) {

@@ -13,8 +13,10 @@ import {
 import type { ExtensionAPI, ExtensionContext } from "../extensions/types.ts";
 import { orchestrationThinkingLevelSchema } from "../orchestration/thinking-level-schema.ts";
 import { PI_ORCHESTRATION_AGENT_ID_ENV } from "../process-identity.ts";
+import { isWorkerSession } from "../session-role.ts";
 import { isComplexShellCommand, parseCommandPrefixes } from "../tools/shell-command-parser.ts";
 import { readBoundedDirectoryNamesSync, readBoundedTextFileSync } from "../util/bounded-file.ts";
+import { encodeWorkerExtensionToolGrants, PI_WORKER_EXTENSION_TOOLS_ENV } from "../worker-extension-grants.ts";
 import type { CollaborationBackend } from "./backend.ts";
 import { detectHerdrCallerContext, resolveCollaborationBackend } from "./backend-resolver.ts";
 import { CollaborationControlHandoffs } from "./control-handoffs.ts";
@@ -159,6 +161,10 @@ function templates(): Static<typeof templateSchema>[] {
 
 /** Packaged root adapter. Provider I/O and durable transitions live outside the extension entry. */
 export function piCollaborationExtension(pi: ExtensionAPI, options: CollaborationExtensionOptions = {}): void {
+	// A worker never starts, watches or recovers collaboration jobs (`pi_collaboration` is in its forbidden
+	// tool set); its peer traffic goes through the finite `--collaboration-peer` CLI. Binding here would only
+	// leave a job directory, lease and file watcher behind.
+	if (isWorkerSession()) return;
 	const providers = options.providers ?? new NativeProviderRegistry();
 	let binding:
 		| {
@@ -337,12 +343,12 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				{
 					provider: "pi",
 					name: "builder",
-					task: "Implement the scoped task with focused regression tests. Own implementation edits; request independent review and validation from peers.",
+					task: "Implement the scoped task; write or run no tests unless the owner explicitly asked. Own implementation edits; request independent review and validation from peers.",
 				},
 				{
 					provider: "agy",
 					name: "validator",
-					task: "Validate the scoped task independently. Do not edit production code. Run relevant focused checks and send reproducible failures to the builder.",
+					task: "Validate the scoped task independently. Do not edit production code. Run relevant focused checks (no test runs unless the owner explicitly asked) and send reproducible failures to the builder.",
 				},
 				{
 					provider: "codex",
@@ -436,6 +442,10 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				identity: `collaboration-profile:${id}:${agentId}`,
 				inheritedTools: provider === "pi" ? pi.getActiveTools() : undefined,
 				allowedTools: provider === "pi" ? spec.tools : ["bash"],
+				extensionTools:
+					provider === "pi" && spec.tools
+						? pi.getAllTools().map((tool) => ({ name: tool.name, extensionPath: tool.sourceInfo.path }))
+						: undefined,
 				writePaths: provider === "pi" && (spec.path || spec.worktreeLane) ? [agentCwd] : [],
 				thinkingLevel: provider === "pi" ? (spec.thinkingLevel ?? pi.getThinkingLevel()) : undefined,
 				resourceProfile: provider === "pi" ? (spec.resourceProfile ?? resourceName) : undefined,
@@ -464,6 +474,8 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 				}
 				env[PI_ORCHESTRATION_AGENT_ID_ENV] = collaborationLaneId(id, agentId);
 				env[PI_WORKER_ALLOWED_PATHS_ENV] = encodeWorkerSessionAllowedPaths(profile.writePaths);
+				if (profile.extensionToolGrants?.length)
+					env[PI_WORKER_EXTENSION_TOOLS_ENV] = encodeWorkerExtensionToolGrants(profile.extensionToolGrants);
 			}
 			result.agents.push({
 				id: agentId,
@@ -508,6 +520,9 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 					backend: "herdr",
 					providers: await providers.list(),
 					jobs: store.list(),
+					// Job files the listing skipped (corrupt or unreadable): bounded and content-free, so a bad
+					// record is visible here instead of silently missing.
+					skippedRecords: store.skippedRecords(),
 					permissionMode: "native-cli-unrestricted",
 					help: "Use fire_task to start a persistent interactive team. Missing Herdr is installed on demand. Questions use answer_question; ordinary follow-ups use send_followup.",
 				};

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "../extensions/types.ts";
 import { MAX_REPLY_HOPS, REPLY_CHAIN_WINDOW_MS } from "./constants.ts";
 import { type RuntimeIdentity, resolveIdentity } from "./identity.ts";
+import { peerStanding } from "./incoming.ts";
 import { type AgentSendResult, type ChatMesh, type DeliveryTarget, resolveTargets } from "./mesh.ts";
 import { AgentSendParameters, ListPeersParameters } from "./schemas.ts";
 import { appendChatAudit, type PeerRecord, readChatConfig, readChatIdentity, readChatPeers } from "./state.ts";
@@ -115,10 +116,10 @@ export function registerChatTools(pi: ExtensionAPI, runtime: ChatRuntime): void 
 					status.endpoint ? `endpoint: ${status.endpoint}` : undefined,
 				].filter((line): line is string => line !== undefined);
 				if (peers.length > 0) {
-					lines.push("", "id | name | state | last seen");
+					lines.push("", "id | name (self-declared label) | standing | state | last seen");
 					for (const peer of peers) {
 						lines.push(
-							`${peer.id} | ${peer.name} | ${peer.busy ? "busy" : "idle/unknown"} | ${peer.lastSeen ?? "unknown"}`,
+							`${peer.id} | ${peer.name} | ${peerStanding(peer)} | ${peer.busy ? "busy" : "idle/unknown"} | ${peer.lastSeen ?? "unknown"}`,
 						);
 					}
 				} else {

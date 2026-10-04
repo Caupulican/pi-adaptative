@@ -18,6 +18,15 @@ export const AgentSendParameters = Type.Object(
 		timeoutMs: Type.Optional(
 			Type.Number({ maximum: 120_000, minimum: 1, description: "Acknowledgement wait timeout in milliseconds." }),
 		),
+		messageId: Type.Optional(
+			Type.String({
+				minLength: 1,
+				maxLength: 128,
+				pattern: "^[A-Za-z0-9._:-]+$",
+				description:
+					"Stable id for this send. Reuse the same id when retrying after a timeout so the peer receives it once.",
+			}),
+		),
 		metadata: Type.Optional(
 			Type.Record(Type.String(), Type.Unknown(), { description: "Optional small JSON object." }),
 		),

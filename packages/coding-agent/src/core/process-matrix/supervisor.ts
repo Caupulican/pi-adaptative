@@ -9,6 +9,7 @@
 import type { ProcessObservation } from "@caupulican/pi-agent-core/process-tree";
 import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import type {
+	ParentLiveness,
 	ProcessMatrixEntry,
 	ProcessTerminalHandoff,
 	ReconcileMatrixResult,
@@ -137,6 +138,43 @@ export function applyAdoption(entry: ProcessMatrixEntry, adoption: AdoptionFacts
 	delete next.windDownReason;
 	if (adoption.parentSessionId !== undefined) next.parentSessionId = adoption.parentSessionId;
 	return next;
+}
+
+export interface ParentLivenessFacts {
+	parentPid: number;
+	parentSessionId: string | undefined;
+	observation: ProcessObservation;
+	/** The parent session's master entry as currently stored, or undefined when absent. */
+	parentEntry: ProcessMatrixEntry | undefined;
+	nowMs: number;
+	maxHeartbeatAgeMs: number;
+	/** True when the observer itself was suspended or stalled since its last tick: a stale parent
+	 * heartbeat is then explained by the same stall and proves nothing about the parent. */
+	observerSuspended: boolean;
+}
+
+/**
+ * PID liveness alone is not process identity: a reused PID could keep a worker attached to an
+ * unrelated process forever. The parent session's own master entry binds PID to a durable identity
+ * and its heartbeat proves that exact session is still running. Pure: every fact is an argument.
+ */
+export function classifyParentLiveness(facts: ParentLivenessFacts): ParentLiveness {
+	if (!facts.parentSessionId) return { alive: false, code: "no_parent_session" };
+	if (facts.observation !== "alive") return { alive: false, code: "process_gone" };
+	const parent = facts.parentEntry;
+	if (!parent) return { alive: false, code: "session_entry_missing" };
+	if (
+		parent.role !== "master" ||
+		parent.agent.resumeContext.sessionId !== facts.parentSessionId ||
+		parent.pid !== facts.parentPid
+	)
+		return { alive: false, code: "process_identity_mismatch" };
+	if (parent.status !== "running") return { alive: false, code: "session_entry_not_running" };
+	if (facts.observerSuspended) return { alive: true };
+	const heartbeatAt = Date.parse(parent.heartbeatAt);
+	if (!Number.isFinite(heartbeatAt) || facts.nowMs - heartbeatAt > facts.maxHeartbeatAgeMs)
+		return { alive: false, code: "heartbeat_stale" };
+	return { alive: true };
 }
 
 export interface PollWorkerDirectiveDeps {

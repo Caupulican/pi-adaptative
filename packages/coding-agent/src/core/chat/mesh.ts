@@ -1,21 +1,31 @@
-import { randomUUID } from "node:crypto";
-import { statSync, unlinkSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { chmodSync, statSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { dirname } from "node:path";
 import {
 	BROKER_PROBE_TIMEOUT_MS,
+	CHAT_CREDENTIAL_ENV,
+	CHAT_SESSION_ID_ENV,
+	MAX_BROKER_CHAINS,
+	MAX_BROKER_CREDENTIALS,
 	MAX_ENVELOPE_BYTES,
+	MAX_MESSAGE_ID_CHARS,
+	MAX_PEER_FIELD_CHARS,
+	MAX_REMEMBERED_MESSAGES,
+	MAX_REPLY_HOPS,
 	MAX_SOCKET_BUFFER_BYTES,
+	MAX_TIMEOUT_MS,
+	MESSAGE_ID_PATTERN,
 	RECONNECT_INTERVAL_MS,
+	REPLY_CHAIN_WINDOW_MS,
 } from "./constants.ts";
 import type { RuntimeIdentity } from "./identity.ts";
 import { getChatPlatformInfo } from "./platform.ts";
-import type { PeerRecord } from "./state.ts";
+import { ensureChatStateDirs, type PeerRecord, readChatSessionSecret } from "./state.ts";
 import type { AgentSendInput } from "./validation.ts";
 
 export type DeliveryStatus =
 	| "received"
+	| "failed"
 	| "sent"
 	| "busy"
 	| "denied"
@@ -23,6 +33,9 @@ export type DeliveryStatus =
 	| "offline"
 	| "not_authorized"
 	| "bad_envelope";
+
+/** What the receiving session did with one incoming message: it took it (with an optional reply) or failed. */
+type IncomingOutcome = { failed: boolean; reply?: string };
 
 export type DeliveryTarget = {
 	target: string;
@@ -52,10 +65,12 @@ export type ChatMeshStatus = {
 };
 
 type WireMessage =
-	| { type: "hello"; peer: PeerRecord }
+	| { type: "hello"; peer: PeerRecord; protocol?: number; credential?: string; proof?: string }
+	| { type: "registered"; credential: string }
 	| { type: "peers"; peers: PeerRecord[] }
 	| {
 			type: "send";
+			credential?: string;
 			id: string;
 			to: string[];
 			message: string;
@@ -72,13 +87,39 @@ type WireMessage =
 			expectReply: boolean;
 			metadata?: Record<string, unknown>;
 	  }
-	| { type: "delivery_ack"; id: string; target: string; status: DeliveryStatus; reply?: string }
+	| {
+			type: "delivery_ack";
+			credential?: string;
+			id: string;
+			target: string;
+			status: DeliveryStatus;
+			reply?: string;
+	  }
 	| { type: "send_result"; id: string; targets: DeliveryTarget[] }
 	| { type: "error"; id?: string; message: string };
 
-type ServerPeerConnection = { socket: Socket; peer?: PeerRecord };
+/** What the broker holds for one connection: the claim it accepted, the credential bound to it and its rank. */
+type ServerPeerConnection = {
+	socket: Socket;
+	peer?: PeerRecord;
+	credential?: string;
+	/**
+	 * A peer whose hello does not announce the credential protocol (an older pi-chat client or extension).
+	 * It is registered as an unverified peer with no credential: its frames are never refused for lacking one,
+	 * and the broker never marks it verified.
+	 */
+	legacy?: boolean;
+	/** The id a legacy peer announced when the broker had to assign it another (see {@link ChatMesh.handleHello}). */
+	legacyClaim?: string;
+	/** Registration order: the earliest holder of a name keeps it. */
+	seq: number;
+};
+
+/** The hello protocol that carries the credential handshake; a hello without it is a legacy peer. */
+const CREDENTIAL_PROTOCOL = 2;
 
 type PendingServerSend = {
+	messageId: string;
 	sender: Socket;
 	results: DeliveryTarget[];
 	waiting: Set<string>;
@@ -86,7 +127,7 @@ type PendingServerSend = {
 };
 
 type PendingClientSend = {
-	resolve: (result: AgentSendResult) => void;
+	resolvers: Array<(result: AgentSendResult) => void>;
 	timer: ReturnType<typeof setTimeout>;
 };
 
@@ -101,13 +142,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** Peer identity text reaches prompts and the UI, so it is bounded and carries no control or line-break characters. */
+function isPeerText(value: unknown): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= MAX_PEER_FIELD_CHARS &&
+		!/[\p{Cc}\p{Zl}\p{Zp}]/u.test(value)
+	);
+}
+
 function isPeerRecord(value: unknown): value is PeerRecord {
 	return (
 		isRecord(value) &&
-		typeof value.id === "string" &&
-		typeof value.name === "string" &&
-		typeof value.address === "string"
+		isPeerText(value.id) &&
+		isPeerText(value.name) &&
+		isPeerText(value.address) &&
+		(value.scope === "local" || value.scope === "network" || value.scope === "relay") &&
+		(value.busy === undefined || typeof value.busy === "boolean") &&
+		(value.verified === undefined || typeof value.verified === "boolean") &&
+		(value.lastSeen === undefined || isPeerText(value.lastSeen))
 	);
+}
+
+const SECRET_HEX = /^[0-9a-f]{64}$/;
+
+function isMessageId(value: unknown): value is string {
+	return typeof value === "string" && value.length <= MAX_MESSAGE_ID_CHARS && MESSAGE_ID_PATTERN.test(value);
+}
+
+function isOptionalSecret(value: unknown): boolean {
+	return value === undefined || (typeof value === "string" && SECRET_HEX.test(value));
+}
+
+/** A session proves it is a pi session by keying its id with the machine's session secret. */
+function sessionProof(secret: string, peerId: string): string {
+	return createHmac("sha256", secret).update(`pi-chat-session-v1:${peerId}`).digest("hex");
+}
+
+function secretsEqual(expected: string | undefined, presented: string | undefined): boolean {
+	if (expected === undefined || presented === undefined) return false;
+	const left = createHmac("sha256", "pi-chat-compare").update(expected).digest();
+	const right = createHmac("sha256", "pi-chat-compare").update(presented).digest();
+	return timingSafeEqual(left, right);
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
@@ -126,11 +203,23 @@ function parseWire(line: string): WireMessage | undefined {
 	if (!isRecord(value) || typeof value.type !== "string") return undefined;
 	switch (value.type) {
 		case "hello":
-			return isPeerRecord(value.peer) ? (value as WireMessage) : undefined;
+			// The broker assigns the scope, so a hello that omits it (older peers) is still a valid claim.
+			return isRecord(value.peer) &&
+				isPeerRecord({ scope: "local", ...value.peer }) &&
+				(value.protocol === undefined || typeof value.protocol === "number") &&
+				isOptionalSecret(value.credential) &&
+				isOptionalSecret(value.proof)
+				? (value as WireMessage)
+				: undefined;
+		case "registered":
+			return typeof value.credential === "string" && SECRET_HEX.test(value.credential)
+				? (value as WireMessage)
+				: undefined;
 		case "peers":
 			return Array.isArray(value.peers) && value.peers.every(isPeerRecord) ? (value as WireMessage) : undefined;
 		case "send":
-			return typeof value.id === "string" &&
+			return isMessageId(value.id) &&
+				isOptionalSecret(value.credential) &&
 				Array.isArray(value.to) &&
 				value.to.every((target) => typeof target === "string") &&
 				typeof value.message === "string" &&
@@ -147,7 +236,10 @@ function parseWire(line: string): WireMessage | undefined {
 				? (value as WireMessage)
 				: undefined;
 		case "delivery_ack":
-			return typeof value.id === "string" && typeof value.target === "string" && typeof value.status === "string"
+			return typeof value.id === "string" &&
+				isOptionalSecret(value.credential) &&
+				typeof value.target === "string" &&
+				typeof value.status === "string"
 				? (value as WireMessage)
 				: undefined;
 		case "send_result":
@@ -214,10 +306,18 @@ export function resolveTargets(
 		const trimmed = target.trim();
 		if (trimmed.length === 0) throw new Error("agent_send target must not be empty.");
 		if (matchesSelf(trimmed, self)) throw new Error("agent_send refuses to send messages to the current Pi agent.");
-		const peer = peers.find(
-			(candidate) => candidate.id === trimmed || candidate.name === trimmed || candidate.address === trimmed,
-		);
-		if (!peer) throw new Error(`Unknown pi-chat peer target: ${trimmed}`);
+		// An id is unique; a name or address is not. Two peers answering to one name never resolve to the first.
+		const byId = peers.find((candidate) => candidate.id === trimmed);
+		const matches = byId
+			? [byId]
+			: peers.filter((candidate) => candidate.name === trimmed || candidate.address === trimmed);
+		if (matches.length === 0) throw new Error(`Unknown pi-chat peer target: ${trimmed}`);
+		if (matches.length > 1) {
+			throw new Error(
+				`pi-chat target ${JSON.stringify(trimmed)} is ambiguous (${matches.map((match) => match.id).join(", ")}); address one peer by id.`,
+			);
+		}
+		const peer = matches[0];
 		if (!resolved.some((existing) => existing.id === peer.id)) resolved.push(peer);
 	}
 	return resolved;
@@ -242,7 +342,21 @@ function offlineResult(targets: PeerRecord[], expectReply: boolean): AgentSendRe
 export class ChatMesh {
 	private self: PeerRecord;
 	private busy = false;
+	private readonly stateRoot: string;
 	private readonly socketPath?: string;
+	/** The machine's session secret, when this process may hold it; without it the peer joins unverified. */
+	private readonly sessionSecret?: string;
+	/** The credential the broker issued this session; presented on every frame after hello. */
+	private credential?: string;
+	/** Broker side: the credential bound to each peer id, so the id cannot be re-claimed without it. */
+	private readonly issuedCredentials = new Map<string, string>();
+	/** Broker side: the freshest message each ordered peer pair exchanged, owning the reply-chain depth. */
+	private readonly replyChains = new Map<string, { hops: number; at: number }>();
+	private serverSeq = 0;
+	/** Client side: a change to this peer's record is waiting for the registration reply before it is sent. */
+	private helloDirty = false;
+	/** Receiver side: messages already delivered, per sender and id, so a retried send is delivered once. */
+	private readonly receivedMessages = new Map<string, Promise<IncomingOutcome>>();
 	private readonly onIncoming?: ChatMeshOptions["onIncoming"];
 	private server?: Server;
 	private client?: Socket;
@@ -264,7 +378,9 @@ export class ChatMesh {
 
 	constructor(options: ChatMeshOptions) {
 		this.onIncoming = options.onIncoming;
+		this.stateRoot = options.stateRoot;
 		this.socketPath = getChatPlatformInfo(options.stateRoot).socketPath;
+		this.sessionSecret = this.socketPath ? readChatSessionSecret(options.stateRoot) : undefined;
 		this.self = this.buildSelf(options.self);
 	}
 
@@ -287,7 +403,22 @@ export class ChatMesh {
 
 	updateSelf(identity: RuntimeIdentity): void {
 		this.self = this.buildSelf(identity);
-		if (this.client && !this.client.destroyed) writeWire(this.client, this.helloMessage());
+		this.pushHello();
+	}
+
+	/**
+	 * A re-hello must carry the credential the broker issues on registration, so it waits until that frame (or,
+	 * from a broker that never issues one, the first peers frame) arrived; the change is sent then.
+	 */
+	private pushHello(): void {
+		const client = this.client;
+		if (!client || client.destroyed) return;
+		if (this.credential === undefined && !this.peersFrameSeen) {
+			this.helloDirty = true;
+			return;
+		}
+		this.helloDirty = false;
+		writeWire(client, this.helloMessage());
 	}
 
 	/** Peers see this agent as busy while its own turn runs; the broker rebroadcasts the change. */
@@ -295,7 +426,7 @@ export class ChatMesh {
 		if (this.busy === busy) return;
 		this.busy = busy;
 		this.self = { ...this.self, busy };
-		if (this.client && !this.client.destroyed) writeWire(this.client, this.helloMessage());
+		this.pushHello();
 	}
 
 	async start(): Promise<void> {
@@ -317,7 +448,7 @@ export class ChatMesh {
 		}
 		if (this.started && (!this.client || this.client.destroyed)) this.started = false;
 		this.stopReconnectTimer();
-		await mkdir(dirname(this.socketPath), { recursive: true, mode: 0o700 });
+		ensureChatStateDirs(this.stateRoot);
 		let connected = await this.connectClient();
 		if (this.stopping) return;
 		if (!connected) {
@@ -345,12 +476,13 @@ export class ChatMesh {
 		}
 		for (const [id, pending] of this.pendingClientSends) {
 			clearTimeout(pending.timer);
-			pending.resolve({
+			const stopped: AgentSendResult = {
 				id,
 				targets: [
 					{ target: "pi-chat", status: "offline", reply: "pi-chat mesh stopped before delivery completed." },
 				],
-			});
+			};
+			for (const resolve of pending.resolvers) resolve(stopped);
 		}
 		this.pendingClientSends.clear();
 		for (const [id, pending] of this.pendingServerSends) {
@@ -365,6 +497,7 @@ export class ChatMesh {
 		this.client = undefined;
 		this.clientSocketIdentity = undefined;
 		this.connectPromise = undefined;
+		this.withdrawCredential();
 		await this.closeServer(true);
 		this.stopping = false;
 	}
@@ -449,16 +582,28 @@ export class ChatMesh {
 		const targets = resolveTargets(input.to, this.self, [...peersById.values()], broadcastEnabled);
 		const client = this.client;
 		if (!client || client.destroyed) return offlineResult(targets, true);
-		const id = randomUUID();
+		// A sender-supplied id makes a retry the same send: the receiver delivers it once.
+		const id = input.messageId ?? randomUUID();
 		const targetIds = targets.map((target) => target.id);
 		return new Promise<AgentSendResult>((resolve) => {
+			const inFlight = this.pendingClientSends.get(id);
+			if (inFlight) {
+				inFlight.resolvers.push(resolve);
+				return;
+			}
 			const timer = setTimeout(() => {
+				const pending = this.pendingClientSends.get(id);
 				this.pendingClientSends.delete(id);
-				resolve({ id, targets: targetIds.map((target) => ({ target, status: "timeout" })) });
+				const timedOut: AgentSendResult = {
+					id,
+					targets: targetIds.map((target) => ({ target, status: "timeout" })),
+				};
+				for (const settle of pending?.resolvers ?? [resolve]) settle(timedOut);
 			}, input.timeoutMs);
-			this.pendingClientSends.set(id, { resolve, timer });
+			this.pendingClientSends.set(id, { resolvers: [resolve], timer });
 			writeWire(client, {
 				type: "send",
+				credential: this.credential,
 				id,
 				to: targetIds,
 				message: input.message,
@@ -500,7 +645,28 @@ export class ChatMesh {
 	}
 
 	private helloMessage(): Extract<WireMessage, { type: "hello" }> {
-		return { type: "hello", peer: { ...this.self, lastSeen: new Date().toISOString() } };
+		return {
+			type: "hello",
+			peer: { ...this.self, lastSeen: new Date().toISOString() },
+			protocol: CREDENTIAL_PROTOCOL,
+			credential: this.credential,
+			proof: this.sessionSecret ? sessionProof(this.sessionSecret, this.self.id) : undefined,
+		};
+	}
+
+	/** The credential reaches pi's own child processes through the environment; tool commands never inherit it. */
+	private adoptCredential(credential: string): void {
+		this.credential = credential;
+		process.env[CHAT_CREDENTIAL_ENV] = credential;
+		process.env[CHAT_SESSION_ID_ENV] = this.self.id;
+	}
+
+	private withdrawCredential(): void {
+		if (this.credential !== undefined && process.env[CHAT_CREDENTIAL_ENV] === this.credential) {
+			delete process.env[CHAT_CREDENTIAL_ENV];
+			delete process.env[CHAT_SESSION_ID_ENV];
+		}
+		this.credential = undefined;
 	}
 
 	/** True when something on the socket path answers (or is too slow to rule out): its path is never taken. */
@@ -543,6 +709,12 @@ export class ChatMesh {
 				const onListening = () => {
 					server.off("error", onError);
 					this.serverSocketIdentity = socketIdentity(socketPath);
+					// The state directory is 0700, which is the boundary; the socket itself is owner-only too.
+					try {
+						chmodSync(socketPath, 0o600);
+					} catch {
+						// Some filesystems have no socket modes.
+					}
 					resolve();
 				};
 				server.once("error", onError);
@@ -598,6 +770,7 @@ export class ChatMesh {
 				this.client = socket;
 				this.clientBuffer = "";
 				this.peersFrameSeen = false;
+				this.helloDirty = false;
 				socket.setEncoding("utf8");
 				this.clientSocketIdentity = socketIdentity(socketPath);
 				socket.on("data", (chunk) => this.handleClientData(String(chunk)));
@@ -619,7 +792,7 @@ export class ChatMesh {
 
 	private handleServerConnection(socket: Socket): void {
 		socket.setEncoding("utf8");
-		this.serverConnections.set(socket, { socket });
+		this.serverConnections.set(socket, { socket, seq: this.serverSeq++ });
 		let buffer = "";
 		socket.on("data", (chunk) => {
 			buffer += String(chunk);
@@ -639,37 +812,162 @@ export class ChatMesh {
 		socket.on("error", gone);
 	}
 
+	private refuse(socket: Socket, message: string): void {
+		writeWire(socket, { type: "error", message });
+		socket.end();
+	}
+
 	private handleServerMessage(socket: Socket, line: string): void {
 		const message = parseWire(line);
 		const connection = this.serverConnections.get(socket);
 		if (!message || !connection) return;
 		if (message.type === "hello") {
-			connection.peer = { ...message.peer, scope: "local", lastSeen: new Date().toISOString() };
-			this.broadcastPeerList();
+			this.handleHello(socket, connection, message);
+			return;
+		}
+		if (message.type !== "send" && message.type !== "delivery_ack") return;
+		if (!connection.peer) {
+			if (message.type === "send") {
+				writeWire(socket, {
+					type: "error",
+					id: message.id,
+					message: "Sender is not registered with the pi-chat broker.",
+				});
+			}
+			return;
+		}
+		// Every frame after hello proves the session: the credential the broker issued for this id. A legacy peer
+		// holds none; it stays an unverified peer rather than being refused.
+		if (!connection.legacy && !secretsEqual(connection.credential, message.credential)) {
+			this.refuse(socket, "pi-chat credential rejected.");
 			return;
 		}
 		if (message.type === "send") this.handleServerSend(socket, message);
-		else if (message.type === "delivery_ack") this.handleDeliveryAck(message);
+		else this.handleDeliveryAck(socket, message);
+	}
+
+	/**
+	 * The broker is the identity authority. A peer id is bound to the credential the broker issued for it: a
+	 * live id is never reassigned, and a known id is only re-claimed with its credential. `verified` is the
+	 * broker's own finding (a valid session proof), never the peer's claim, and the address is assigned here.
+	 */
+	private handleHello(
+		socket: Socket,
+		connection: ServerPeerConnection,
+		message: Extract<WireMessage, { type: "hello" }>,
+	) {
+		const claimed = message.peer.id;
+		const registering = connection.peer === undefined;
+		const isHeldElsewhere = (id: string): boolean =>
+			this.connectedPeers().some((entry) => entry.peer.id === id && entry.socket !== socket);
+		if (registering) connection.legacy = (message.protocol ?? 0) < CREDENTIAL_PROTOCOL;
+		// What the peer calls itself: a legacy peer keeps announcing its own id even when the broker had to give
+		// it another one, so its later frames are matched against the claim, not the assigned id.
+		const announced = connection.legacyClaim ?? connection.peer?.id;
+		if (!registering && announced !== claimed) {
+			this.refuse(socket, "pi-chat peer id is already in use on this broker.");
+			return;
+		}
+		let peerId = connection.peer?.id ?? claimed;
+		// An id the broker issued a credential for, whether or not its holder is connected now: only that
+		// holder's credential re-claims it. A legacy peer has none.
+		const isCredentialBound = (id: string): boolean => this.issuedCredentials.has(id);
+		if (registering && !connection.legacy && isHeldElsewhere(claimed)) {
+			this.refuse(socket, "pi-chat peer id is already in use on this broker.");
+			return;
+		}
+		if (registering && connection.legacy && (isHeldElsewhere(claimed) || isCredentialBound(claimed))) {
+			// Older clients (and the user-level extension) share one stored id across every session on the
+			// machine. Each is still a distinct, unverified peer: the broker assigns the id it routes by, and the
+			// connection, not the id a legacy peer announces, identifies it. This holds for an id another live
+			// peer holds and for one bound to a credential whose holder is disconnected: the legacy peer is
+			// routed under a suffix instead of being refused or taking over the verified identity.
+			for (let n = 2; ; n++) {
+				const suffix = `~${n}`;
+				const candidate = `${claimed.slice(0, MAX_PEER_FIELD_CHARS - suffix.length)}${suffix}`;
+				if (!isHeldElsewhere(candidate) && !isCredentialBound(candidate)) {
+					peerId = candidate;
+					connection.legacyClaim = claimed;
+					break;
+				}
+			}
+		}
+		const known = this.issuedCredentials.get(peerId);
+		if (registering) {
+			// A known id is re-claimed only with its credential (a legacy peer has none and was routed under a
+			// suffix above, never reaching this refusal); an unknown id is issued one, or adopts the one a
+			// session presents after a broker restart (the broker that issued it is gone). A legacy peer is
+			// registered without a credential, as an unverified peer.
+			if (known !== undefined && !secretsEqual(known, message.credential)) {
+				this.refuse(socket, "pi-chat peer id is bound to another credential.");
+				return;
+			}
+			if (!connection.legacy) {
+				connection.credential = known ?? message.credential ?? randomBytes(32).toString("hex");
+				this.issuedCredentials.delete(peerId);
+				this.issuedCredentials.set(peerId, connection.credential);
+				while (this.issuedCredentials.size > MAX_BROKER_CREDENTIALS) {
+					const oldest = this.issuedCredentials.keys().next().value;
+					if (oldest === undefined) break;
+					this.issuedCredentials.delete(oldest);
+				}
+			}
+		} else if (!connection.legacy && !secretsEqual(connection.credential, message.credential)) {
+			this.refuse(socket, "pi-chat credential rejected.");
+			return;
+		}
+		const secret = this.sessionSecret;
+		connection.peer = {
+			id: peerId,
+			name: message.peer.name,
+			address: `local:${peerId}`,
+			scope: "local",
+			verified:
+				!connection.legacy && secret !== undefined && secretsEqual(sessionProof(secret, peerId), message.proof),
+			busy: message.peer.busy === true,
+			lastSeen: new Date().toISOString(),
+		};
+		if (registering && connection.credential)
+			writeWire(socket, { type: "registered", credential: connection.credential });
+		this.broadcastPeerList();
 	}
 
 	private handleServerSend(senderSocket: Socket, message: Extract<WireMessage, { type: "send" }>): void {
-		const sender = this.serverConnections.get(senderSocket)?.peer;
-		if (!sender) {
-			writeWire(senderSocket, {
-				type: "error",
-				id: message.id,
-				message: "Sender is not registered with the pi-chat broker.",
-			});
-			return;
-		}
-		const results: DeliveryTarget[] = [];
-		const waiting = new Set<string>();
 		const connected = this.connectedPeers();
+		const sender = connected.find((entry) => entry.socket === senderSocket)?.peer;
+		if (!sender) return;
+		const now = Date.now();
+		const key = `${sender.id}\0${message.id}`;
+		// A retried send (same sender, same id) joins the one in flight instead of replacing it.
+		const inFlight = this.pendingServerSends.get(key);
+		const results: DeliveryTarget[] = inFlight?.results ?? [];
+		const waiting = inFlight?.waiting ?? new Set<string>();
 		for (const targetId of message.to) {
+			if (inFlight && !waiting.has(targetId)) continue;
 			const target = connected.find((entry) => entry.peer.id === targetId);
 			if (!target) {
 				results.push({ target: targetId, status: "offline" });
 				continue;
+			}
+			// The broker owns the reply-chain depth: one past the freshest chain the target started toward the
+			// sender, whatever the sender claims in its metadata.
+			const inbound = this.replyChains.get(`${targetId}>${sender.id}`);
+			const hops = inbound && now - inbound.at <= REPLY_CHAIN_WINDOW_MS ? inbound.hops + 1 : 1;
+			if (hops > MAX_REPLY_HOPS) {
+				results.push({
+					target: targetId,
+					status: "denied",
+					reply: `pi-chat reply chain reached ${MAX_REPLY_HOPS} hops; the owner must continue it.`,
+				});
+				continue;
+			}
+			const chainKey = `${sender.id}>${targetId}`;
+			this.replyChains.delete(chainKey);
+			this.replyChains.set(chainKey, { hops, at: now });
+			while (this.replyChains.size > MAX_BROKER_CHAINS) {
+				const oldest = this.replyChains.keys().next().value;
+				if (oldest === undefined) break;
+				this.replyChains.delete(oldest);
 			}
 			waiting.add(targetId);
 			writeWire(target.socket, {
@@ -679,35 +977,55 @@ export class ChatMesh {
 				to: targetId,
 				message: message.message,
 				expectReply: message.expectReply,
-				metadata: message.metadata,
+				metadata: { ...message.metadata, hops },
 			});
 		}
+		if (inFlight) {
+			clearTimeout(inFlight.timer);
+			inFlight.sender = senderSocket;
+		}
 		if (waiting.size === 0) {
+			this.pendingServerSends.delete(key);
 			writeWire(senderSocket, { type: "send_result", id: message.id, targets: results });
 			return;
 		}
 		const timer = setTimeout(
 			() => {
-				const pending = this.pendingServerSends.get(message.id);
+				const pending = this.pendingServerSends.get(key);
 				if (!pending) return;
 				for (const target of pending.waiting) pending.results.push({ target, status: "timeout" });
-				this.pendingServerSends.delete(message.id);
+				this.pendingServerSends.delete(key);
 				writeWire(pending.sender, { type: "send_result", id: message.id, targets: pending.results });
 			},
-			Math.max(1, message.timeoutMs),
+			Math.min(MAX_TIMEOUT_MS, Math.max(1, message.timeoutMs)),
 		);
-		this.pendingServerSends.set(message.id, { sender: senderSocket, results, waiting, timer });
+		if (inFlight) inFlight.timer = timer;
+		else
+			this.pendingServerSends.set(key, {
+				messageId: message.id,
+				sender: senderSocket,
+				results,
+				waiting,
+				timer,
+			});
 	}
 
-	private handleDeliveryAck(message: Extract<WireMessage, { type: "delivery_ack" }>): void {
-		const pending = this.pendingServerSends.get(message.id);
-		if (!pending?.waiting.has(message.target)) return;
-		pending.waiting.delete(message.target);
-		pending.results.push({ target: message.target, status: message.status, reply: message.reply });
-		if (pending.waiting.size === 0) {
-			clearTimeout(pending.timer);
-			this.pendingServerSends.delete(message.id);
-			writeWire(pending.sender, { type: "send_result", id: message.id, targets: pending.results });
+	private handleDeliveryAck(socket: Socket, message: Extract<WireMessage, { type: "delivery_ack" }>): void {
+		// An acknowledgement is only the acknowledging peer's own: the broker never takes another's word for it.
+		const ackerConnection = this.serverConnections.get(socket);
+		const acker = ackerConnection?.peer;
+		// A legacy peer acknowledges with the id it announced, which may differ from the id assigned to it.
+		if (!acker || message.target !== (ackerConnection?.legacyClaim ?? acker.id)) return;
+		for (const [key, pending] of this.pendingServerSends) {
+			if (pending.messageId !== message.id || !pending.waiting.has(acker.id)) continue;
+			pending.waiting.delete(acker.id);
+			pending.results.push({ target: acker.id, status: message.status, reply: message.reply });
+			if (pending.waiting.size === 0) {
+				clearTimeout(pending.timer);
+				this.pendingServerSends.delete(key);
+				writeWire(pending.sender, { type: "send_result", id: message.id, targets: pending.results });
+			}
+			return;
 		}
 	}
 
@@ -717,13 +1035,43 @@ export class ChatMesh {
 		for (const entry of connected) writeWire(entry.socket, { type: "peers", peers });
 	}
 
+	/**
+	 * Registered peers with the names peers see. A name two peers declare is held by its earliest verified
+	 * holder (else its earliest holder); every other peer gets a short id suffix. Derived from the current
+	 * registrations each time, so a repeated hello never changes a name by itself.
+	 */
 	private connectedPeers(): Array<{ socket: Socket; peer: PeerRecord }> {
-		const result: Array<{ socket: Socket; peer: PeerRecord }> = [];
+		const live: Array<{ connection: ServerPeerConnection; peer: PeerRecord }> = [];
 		for (const connection of this.serverConnections.values()) {
-			if (connection.peer && !connection.socket.destroyed)
-				result.push({ socket: connection.socket, peer: connection.peer });
+			if (connection.peer && !connection.socket.destroyed) live.push({ connection, peer: connection.peer });
 		}
-		return result;
+		const byName = new Map<string, typeof live>();
+		for (const entry of live) byName.set(entry.peer.name, [...(byName.get(entry.peer.name) ?? []), entry]);
+		const taken = new Set(byName.keys());
+		const names = new Map<string, string>();
+		for (const [name, holders] of byName) {
+			const ranked = [...holders].sort(
+				(a, b) =>
+					Number(b.peer.verified === true) - Number(a.peer.verified === true) ||
+					a.connection.seq - b.connection.seq,
+			);
+			for (const entry of ranked.slice(1)) {
+				const alnum = entry.peer.id.replace(/[^0-9A-Za-z]/g, "");
+				for (let tail = 4; ; tail += 4) {
+					const suffix = `-${alnum.slice(-tail)}`;
+					const candidate = `${name.slice(0, MAX_PEER_FIELD_CHARS - suffix.length)}${suffix}`;
+					if (!taken.has(candidate) || tail >= alnum.length) {
+						taken.add(candidate);
+						names.set(entry.peer.id, candidate);
+						break;
+					}
+				}
+			}
+		}
+		return live.map(({ connection, peer }) => ({
+			socket: connection.socket,
+			peer: { ...peer, name: names.get(peer.id) ?? peer.name },
+		}));
 	}
 
 	private handleClientData(chunk: string): void {
@@ -748,29 +1096,58 @@ export class ChatMesh {
 		if (message.type === "peers") {
 			this.peers = new Map(message.peers.map((peer) => [peer.id, peer]));
 			this.noteFirstPeersFrame();
+			if (this.helloDirty) this.pushHello();
+			return;
+		}
+		if (message.type === "registered") {
+			this.adoptCredential(message.credential);
+			if (this.helloDirty) this.pushHello();
 			return;
 		}
 		if (message.type === "incoming") {
-			let reply: string | undefined;
-			try {
-				reply = await this.onIncoming?.({
-					id: message.id,
-					from: message.from,
-					to: message.to,
-					message: message.message,
-					expectReply: message.expectReply,
-					metadata: message.metadata,
-				});
-			} catch (error) {
-				reply = error instanceof Error ? error.message : String(error);
+			// A retried send carries the same sender and id: it is delivered once, and every copy is acknowledged.
+			const key = `${message.from.id}\0${message.id}`;
+			let delivery = this.receivedMessages.get(key);
+			if (delivery) {
+				this.receivedMessages.delete(key);
+			} else {
+				delivery = Promise.resolve(
+					this.onIncoming?.({
+						id: message.id,
+						from: message.from,
+						to: message.to,
+						message: message.message,
+						expectReply: message.expectReply,
+						metadata: message.metadata,
+					}),
+				).then(
+					(reply): IncomingOutcome => ({ failed: false, reply }),
+					(error: unknown): IncomingOutcome => ({
+						failed: true,
+						reply: error instanceof Error ? error.message : String(error),
+					}),
+				);
 			}
+			this.receivedMessages.set(key, delivery);
+			while (this.receivedMessages.size > MAX_REMEMBERED_MESSAGES) {
+				const oldest = this.receivedMessages.keys().next().value;
+				if (oldest === undefined) break;
+				this.receivedMessages.delete(oldest);
+			}
+			const outcome = await delivery;
 			if (this.client && !this.client.destroyed) {
 				writeWire(this.client, {
 					type: "delivery_ack",
+					credential: this.credential,
 					id: message.id,
 					target: this.self.id,
-					status: "received",
-					reply: message.expectReply ? reply || `ACK: received by ${this.self.name}` : undefined,
+					// A message the session could not accept is reported as failed, never as received.
+					status: outcome.failed ? "failed" : "received",
+					reply: outcome.failed
+						? outcome.reply
+						: message.expectReply
+							? outcome.reply || `ACK: received by ${this.self.name}`
+							: undefined,
 				});
 			}
 			return;
@@ -780,7 +1157,7 @@ export class ChatMesh {
 			if (!pending) return;
 			clearTimeout(pending.timer);
 			this.pendingClientSends.delete(message.id);
-			pending.resolve({ id: message.id, targets: message.targets });
+			for (const resolve of pending.resolvers) resolve({ id: message.id, targets: message.targets });
 		}
 	}
 }

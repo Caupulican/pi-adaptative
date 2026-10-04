@@ -138,6 +138,7 @@ export async function collaborationFixture(options: CollaborationFixtureOptions 
 			"pi_collaboration",
 		],
 		getThinkingLevel: () => "high",
+		getAllTools: () => [],
 		getEffectiveResourceProfile: () => ({}),
 		reportManagedLane: report,
 		reportSpawnedUsage,
