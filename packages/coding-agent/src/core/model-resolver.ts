@@ -2,15 +2,22 @@
  * Model resolution, scoping, and initial selection
  */
 
-import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import { modelsAreEqual, resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import type { Api, KnownProvider, Model } from "@caupulican/pi-ai/types";
 import chalk from "chalk";
 import { minimatch } from "minimatch";
-import { isValidThinkingLevel } from "../cli/args.ts";
+import type { ThinkingLevel } from "../kernel/index.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
-import type { ModelRegistry } from "./model-registry.ts";
 import type { ProfileRegistry } from "./profile-registry.ts";
+import { isValidThinkingLevel } from "./thinking-level.ts";
+
+/** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
+export interface ModelResolverModelSource {
+	find(provider: string, modelId: string): Model<Api> | undefined;
+	getAll(): Model<Api>[];
+	getAvailable(): Model<Api>[];
+	hasConfiguredAuth(model: Model<Api>): boolean;
+}
 
 /** Default model IDs for each known provider */
 export const defaultModelPerProvider: Record<KnownProvider, string> = {
@@ -388,7 +395,7 @@ export async function resolveModelScopeWithDiagnostics(
 
 export async function resolveModelScope(
 	patterns: string[],
-	modelSource: ModelRegistry | ModelAvailabilitySource,
+	modelSource: ModelResolverModelSource | ModelAvailabilitySource,
 ): Promise<ScopedModel[]> {
 	const { scopedModels, diagnostics } = await resolveModelScopeWithDiagnostics(patterns, modelSource);
 	for (const diagnostic of diagnostics) {
@@ -427,7 +434,7 @@ function formatAmbiguousModelReferenceError(modelReference: string, matches: Mod
 export function resolveCliModel(options: {
 	cliProvider?: string;
 	cliModel?: string;
-	modelRegistry: ModelRegistry;
+	modelRegistry: ModelResolverModelSource;
 }): ResolveCliModelResult {
 	const { cliProvider, cliModel, modelRegistry } = options;
 
@@ -586,7 +593,7 @@ export function resolveCliModel(options: {
 
 export function resolveCliProviderDefault(options: {
 	cliProvider?: string;
-	modelRegistry: ModelRegistry;
+	modelRegistry: ModelResolverModelSource;
 }): ResolveCliModelResult {
 	const { cliProvider, modelRegistry } = options;
 	if (!cliProvider) {
@@ -654,7 +661,7 @@ export async function findInitialModel(options: {
 	defaultProvider?: string;
 	defaultModelId?: string;
 	defaultThinkingLevel?: ThinkingLevel;
-	modelRegistry: ModelRegistry;
+	modelRegistry: ModelResolverModelSource;
 }): Promise<InitialModelResult> {
 	const {
 		cliProvider,
@@ -767,7 +774,7 @@ export async function resolveLaunchedChildModel(options: {
 	enabledModels?: string[];
 	defaultProvider?: string;
 	defaultModelId?: string;
-	modelRegistry: ModelRegistry;
+	modelRegistry: ModelResolverModelSource;
 }): Promise<Model<Api> | undefined> {
 	const { cliProvider, cliModel, enabledModels, defaultProvider, defaultModelId, modelRegistry } = options;
 	if (cliProvider || cliModel) {
@@ -799,7 +806,7 @@ export async function restoreModelFromSession(
 	savedModelId: string,
 	currentModel: Model<Api> | undefined,
 	shouldPrintMessages: boolean,
-	modelRegistry: ModelRegistry,
+	modelRegistry: ModelResolverModelSource,
 ): Promise<{ model: Model<Api> | undefined; fallbackMessage: string | undefined }> {
 	const restoredModel = modelRegistry.find(savedProvider, savedModelId);
 
@@ -875,7 +882,7 @@ export interface ResolvedProfileModelSettings {
 export function resolveProfileModelSettings(options: {
 	activeProfileNames: string[];
 	registry: ProfileRegistry;
-	modelRegistry: ModelRegistry;
+	modelRegistry: ModelResolverModelSource;
 	cwd: string;
 }): ResolvedProfileModelSettings {
 	const { activeProfileNames, registry, modelRegistry, cwd } = options;

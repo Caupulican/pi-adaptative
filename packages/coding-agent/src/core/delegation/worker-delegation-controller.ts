@@ -1,17 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
+import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
+import { assessCompactionNeed, hardCompactionTriggerTokens } from "../../kernel/compaction/compaction.ts";
 import {
 	type AgentContextPlan,
 	type AgentMessage,
 	type AgentTool,
 	decodeExecutionContext,
-} from "@caupulican/pi-agent-core";
-import { assessCompactionNeed, hardCompactionTriggerTokens } from "@caupulican/pi-agent-core/compaction/compaction";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
-import type { SessionRequestSnapshotInput } from "@caupulican/pi-agent-core/session";
-import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
-import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
+} from "../../kernel/index.ts";
+import type { SessionManager } from "../../kernel/node.ts";
+import { classifyFailure } from "../../kernel/reliability/index.ts";
+import type { SessionRequestSnapshotInput } from "../../kernel/session/session-manager.ts";
 import { getProcessWorkRun } from "../agent-paths.ts";
 import type {
 	AgentSessionEvent,
@@ -47,10 +47,17 @@ import {
 	MAX_ROUTE_CHOICE_REQUEST_CHARACTERS,
 	type RouteChoiceJudge,
 } from "../expert-routing/system-one-choice.ts";
+import type {
+	HmoeIndependence,
+	HmoePreference,
+	HmoePreset,
+	HmoeTeamStrategy,
+	HmoeWeights,
+} from "../expert-routing/vocabulary.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import { isLoopbackModelEndpoint } from "../models/model-endpoint.ts";
+import { isLocalExecutionModel } from "../models/model-endpoint.ts";
 import { refuseLocalPush } from "../objective-execution/local-commit-delivery.ts";
 import { sharesRepository } from "../objective-execution/repo-delivery-fingerprint.ts";
 import type { RepositoryMutationObserver } from "../objective-execution/repository-mutation-observer.ts";
@@ -87,6 +94,7 @@ import {
 	verifierWorkerExecutionContract,
 } from "../orchestration/worker-execution-contract.ts";
 import { resolveWorkerModelPin, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
+import type { ProfileRegistry } from "../profile-registry.ts";
 import { resolveProviderAccountKey } from "../provider-admission/account-key.ts";
 import { emergencyStopPath, isEmergencyStopEngaged } from "../provider-admission/emergency-stop.ts";
 import { ProviderLimitStore } from "../provider-admission/limit-state.ts";
@@ -95,10 +103,23 @@ import type { ResourceLoader } from "../resource-loader.ts";
 import { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
 import type { CredentialExposureBoundary } from "../secrets/credential-exposure-guard.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
-import type { ResolvedWorkerDelegationSettings, SettingsManager } from "../settings-manager.ts";
+import type {
+	ModelCapabilitySettings,
+	ModelFavorite,
+	ModelRouterPoolPreference,
+	ModelRouterSelectionMode,
+	ResolvedEdgeSettings,
+	ResolvedWorkerDelegationSettings,
+	SystemOneSettings,
+	ThinkingLevel,
+	WorkerAccountRouting,
+	WorkerThinkingPolicy,
+} from "../settings/settings-schema.ts";
 import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
+import type { SystemOneProviderChoice } from "../system-one/access.ts";
 import { systemOneAccessFromSession } from "../system-one/access.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
+import type { ToolkitScript } from "../toolkit/script-registry.ts";
 import { executeToolkitScript } from "../toolkit/script-runner.ts";
 import { disposeShellExecutionSessionAndWait } from "../tools/shell-execution-session.ts";
 import type { ReadOnlySkillBroker } from "../tools/skill.ts";
@@ -214,16 +235,62 @@ import {
 	type WorkerWriteReservationWaitYield,
 } from "./worker-write-reservation-coordinator.ts";
 
-export function isLocalExecutionModel(model: Pick<Model<Api>, "provider" | "baseUrl">): boolean {
-	if (model.provider === "ollama" || model.provider === "transformers" || model.provider === "llama-cpp") {
-		return true;
-	}
-	return isLoopbackModelEndpoint(model.baseUrl);
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface WorkerDelegationControllerSettingsSource {
+	getCompactionSettings(): {
+		enabled: boolean;
+		reserveTokens: number;
+		keepRecentTokens: number;
+		triggerPercent: number;
+	};
+	getEdgeSettings(): ResolvedEdgeSettings;
+	getMemoryRetrievalSettings(): {
+		enabled: boolean;
+		maxResults: number;
+		includeInPrompt: boolean;
+		allowExternalEgress: boolean;
+	};
+	getModelCapabilitySettings(): Required<ModelCapabilitySettings>;
+	getModelFavorites(): ModelFavorite[];
+	getModelRouterSettings(): {
+		enabled: boolean;
+		selectionMode: ModelRouterSelectionMode;
+		poolPreference: ModelRouterPoolPreference;
+		cheapModel?: string;
+		mediumModel?: string;
+		expensiveModel?: string;
+		learningModel?: string;
+		executorModel?: string;
+		fitnessGate: boolean;
+		cheapThinking?: ThinkingLevel;
+		mediumThinking?: ThinkingLevel;
+		expensiveThinking?: ThinkingLevel;
+		executorThinking?: ThinkingLevel;
+		hmoePreset?: HmoePreset;
+		hmoeTeamStrategy?: HmoeTeamStrategy;
+		hmoeIndependence?: HmoeIndependence;
+		hmoePreference?: HmoePreference;
+		hmoeWeights?: HmoeWeights;
+	};
+	getProfileRegistry(): ProfileRegistry;
+	getProjectContextFiles(): "on-demand" | "off";
+	getSystemOneSettings(): {
+		enabled: boolean;
+		provider: SystemOneProviderChoice;
+		loopMode?: SystemOneSettings["loopMode"];
+		completionProfile?: SystemOneSettings["completionProfile"];
+	};
+	getToolkitScripts(): ToolkitScript[];
+	getWorkerAccountRouting(): WorkerAccountRouting;
+	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings;
+	getWorkerModelPinPolicy(): WorkerModelPinPolicy;
+	getWorkerThinkingPolicy(): WorkerThinkingPolicy;
+	isProjectTrusted(): boolean;
 }
 
 function workerConversationRetentionPolicy(
 	model: Model<Api>,
-	settingsManager: SettingsManager,
+	settingsManager: WorkerDelegationControllerSettingsSource,
 	admitEarly?: (contextTokens: number, messages: readonly AgentMessage[]) => boolean,
 ): WorkerConversationRetentionPolicy | undefined {
 	const settings = settingsManager.getCompactionSettings();
@@ -285,7 +352,7 @@ export interface WorkerDelegationControllerDeps {
 	getCwd(): string;
 	getAgentDir(): string;
 	getSessionManager(): SessionManager;
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): WorkerDelegationControllerSettingsSource;
 	getResourceLoader(): ResourceLoader;
 	getActiveOrchestrationProfile?(): OrchestrationProfile | undefined;
 	getModelRegistry(): ModelRegistry;

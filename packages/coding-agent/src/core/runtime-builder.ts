@@ -35,9 +35,9 @@
 
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import type { Agent, AgentContext, AgentMessage, AgentTool, ThinkingLevel } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
+import type { Agent, AgentContext, AgentMessage, AgentTool, ThinkingLevel } from "../kernel/index.ts";
+import type { SessionManager } from "../kernel/node.ts";
 import { getShellEnv } from "../utils/shell.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import {
@@ -120,6 +120,7 @@ import { FitnessStore } from "./models/fitness-store.ts";
 import type { DecisionLedgerStore } from "./operator-projection/decision-ledger-store.ts";
 import type { OrchestrationProfile, WorkerResultContract } from "./orchestration/contracts.ts";
 import type { TaskProfileWriterPort } from "./orchestration/task-profile-writer.ts";
+import type { WorkerModelPinPolicy } from "./orchestration/worker-model-pins.ts";
 import { resolvePipelineDefinitionForRun } from "./pipelines/discover.ts";
 import { resolveCurrentProjectPipelineRun } from "./pipelines/run-state.ts";
 import { isPipelineRunActive, type PipelineRun } from "./pipelines/types.ts";
@@ -147,14 +148,24 @@ import { resolveCredentialProject } from "./secrets/credential-project.ts";
 import { discoverCredentialMigrationSources } from "./secrets/credential-source-discovery.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 import { getSessionRole, isWorkerSession } from "./session-role.ts";
-import {
-	matchesResourceProfilePattern,
-	type ResourceProfileFilterSettings,
-	type SettingsManager,
-} from "./settings-manager.ts";
+import { matchesResourceProfilePattern } from "./settings/settings-rules.ts";
+import type {
+	AutoLearnSettings,
+	AutonomySettings,
+	MemorySystem,
+	ResolvedEdgeSettings,
+	ResolvedToolOutputSettings,
+	ResolvedWindowsShellSettings,
+	ResolvedWorktreeSyncSettings,
+	ResourceProfileFilterSettings,
+	Settings,
+	SettingsReloadSnapshot,
+	SystemOneSettings,
+} from "./settings/settings-schema.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
+import type { SystemOneProviderChoice } from "./system-one/access.ts";
 import { systemOneAccessFromSession } from "./system-one/access.ts";
 import type { ClarificationDecisionEngine } from "./system-one/clarification.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
@@ -167,11 +178,13 @@ import type { TaskStepsState } from "./tasks/task-state.ts";
 import { getToolCapabilityPolicy } from "./tool-capability-policy.ts";
 import { resolveCurrentToolRepairSettings } from "./tool-repair-settings.ts";
 import { runReflexInterpreterCompletion } from "./toolkit/reflex-interpreter.ts";
+import type { ToolkitScript } from "./toolkit/script-registry.ts";
 import { type AskQuestionToolOptions, createAskQuestionToolDefinition } from "./tools/ask-question.ts";
 import { buildShellSessionContext } from "./tools/bash.ts";
 import { dispatchCollaborationWorker } from "./tools/collaboration-dispatch.ts";
 import { createContextScoutToolDefinition } from "./tools/context-scout.ts";
 import { createDelegateToolDefinition } from "./tools/delegate.ts";
+import type { FileEncodingRule } from "./tools/file-encoding-metadata.ts";
 import { FileMutationIntentController } from "./tools/file-mutation-intent.ts";
 import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
 import { createFindTool } from "./tools/find.ts";
@@ -209,6 +222,35 @@ import { createLane, releaseLane } from "./worktree-sync/git-engine.ts";
 import { getBoundWorktreeLaneKey } from "./worktree-sync/lane-binding.ts";
 import { WorktreeLaneGate } from "./worktree-sync/lane-gate.ts";
 import { buildWorktreeSyncEngineDeps } from "./worktree-sync/runtime.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface RuntimeBuilderSettingsSource {
+	createReloadSnapshot(): SettingsReloadSnapshot;
+	getAutoLearnSettings(): AutoLearnSettings;
+	getAutonomySettings(): Required<AutonomySettings>;
+	getEdgeSettings(): ResolvedEdgeSettings;
+	getExposeSessionEnvironment(): boolean;
+	getFileEncodings(): FileEncodingRule[];
+	getImageAutoResize(): boolean;
+	getMemorySystem(): MemorySystem;
+	getScoutSettings(): { enabled: boolean; model: string };
+	getShellCommandPrefix(): string | undefined;
+	getShellPath(): string | undefined;
+	getSystemOneSettings(): {
+		enabled: boolean;
+		provider: SystemOneProviderChoice;
+		loopMode?: SystemOneSettings["loopMode"];
+		completionProfile?: SystemOneSettings["completionProfile"];
+	};
+	getToolOutputSettings(): ResolvedToolOutputSettings;
+	getToolkitScripts(): ToolkitScript[];
+	getWindowsShellSettings(): ResolvedWindowsShellSettings;
+	getWorkerModelPinPolicy(): WorkerModelPinPolicy;
+	getWorktreeSyncSettings(): ResolvedWorktreeSyncSettings;
+	reload(): Promise<void>;
+	restoreReloadSnapshot(snapshot: SettingsReloadSnapshot): void;
+	settings: Settings;
+}
 
 interface ToolDefinitionEntry {
 	definition: ToolDefinition;
@@ -248,7 +290,7 @@ export function createGoalWorkerDelegationRequest(args: {
 
 interface ReloadRuntimeSnapshot {
 	extensionRunner: ExtensionRunner;
-	settings: ReturnType<SettingsManager["createReloadSnapshot"]>;
+	settings: ReturnType<RuntimeBuilderSettingsSource["createReloadSnapshot"]>;
 	modelRegistry: ReturnType<ModelRegistry["createReloadSnapshot"]>;
 	model: Model<Api>;
 	thinkingLevel: ThinkingLevel;
@@ -282,7 +324,7 @@ export interface RuntimeBuilderDeps {
 	/** Session log, passed to the extension runner. */
 	getSessionManager(): SessionManager;
 	/** Tool/shell/toolkit/resource settings + reload target (settingsManager.reload()). */
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): RuntimeBuilderSettingsSource;
 	/** Branch System One bound this task to. Worktree sync rebases and lands onto it. */
 	integrationBranch?(): string | undefined;
 	/** Model registry, passed to the extension runner and profile model re-resolution. */

@@ -1,6 +1,6 @@
 import type { ChildProcess } from "node:child_process";
-import type { AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
+import type { AgentTool } from "../../kernel/index.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
 import { waitForOwnedProcessTreeWithTermination } from "../../utils/process-group-wait.ts";
 import type { ToolDefinition } from "../extensions/types.ts";

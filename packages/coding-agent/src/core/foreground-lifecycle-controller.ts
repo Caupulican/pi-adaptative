@@ -1,12 +1,14 @@
-import type { Agent, AgentMessage, AgentMessageOrigin } from "@caupulican/pi-agent-core";
-import type { SessionLifecycleInspection, SessionManager } from "@caupulican/pi-agent-core/session";
-import { sessionLifecycleToolIdentityKey } from "@caupulican/pi-agent-core/session";
+import type { AssistantMessage, Message, ToolResultMessage } from "@caupulican/pi-ai";
 import type {
+	Agent,
+	AgentMessage,
+	AgentMessageOrigin,
 	ProviderRequestSnapshotContext,
 	ToolCallStartContext,
 	ToolCallStartReservation,
-} from "@caupulican/pi-agent-core/types";
-import type { AssistantMessage, Message, ToolResultMessage } from "@caupulican/pi-ai";
+} from "../kernel/index.ts";
+import type { SessionLifecycleInspection, SessionManager } from "../kernel/session/session-manager.ts";
+import { sessionLifecycleToolIdentityKey } from "../kernel/session/session-manager.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
 import { dumpProviderRequest } from "./request-dump.ts";
 import { buildRequestSnapshotInput } from "./request-snapshot-fingerprints.ts";

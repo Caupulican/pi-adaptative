@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import { type AssistantMessage, getProviderRetryDirective } from "@caupulican/pi-ai";
+import { classifyFailure } from "../../kernel/reliability/index.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { describeProviderAccountKey, splitProviderAccountKey } from "./account-key.ts";

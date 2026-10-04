@@ -7,12 +7,19 @@
  * or hide project ones.
  */
 
-import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager } from "@caupulican/pi-adaptative";
+import {
+	createAgentSession,
+	DefaultResourceLoader,
+	getAgentDir,
+	SessionManager,
+	SettingsManager,
+} from "@caupulican/pi-adaptative";
 
 // Override the discovered list (global files plus on-demand project paths).
 const loader = new DefaultResourceLoader({
 	cwd: process.cwd(),
 	agentDir: getAgentDir(),
+	settingsManager: SettingsManager.create(process.cwd(), getAgentDir()),
 	agentsFilesOverride: (current) => ({
 		agentsFiles: [...current.agentsFiles, { path: "/virtual/AGENTS.md", content: "Virtual project instructions" }],
 	}),

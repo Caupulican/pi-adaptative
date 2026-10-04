@@ -10,7 +10,7 @@
  * packing is opt-in per call site, not a global switch.
  */
 
-import { type TruncationOptions, type TruncationResult, truncateMiddle } from "@caupulican/pi-agent-core/truncate";
+import { type TruncationOptions, type TruncationResult, truncateMiddle } from "../../kernel/utils/truncate.ts";
 import type { ArtifactStore } from "./context-artifacts.ts";
 
 /** Built-ins whose pack-time holder is the tool call id; shared activation and GC lifecycle. */

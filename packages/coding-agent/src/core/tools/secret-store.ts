@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import { type Static, Type } from "typebox";
 import { expandTildePath } from "../../config.ts";
-import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type { Theme } from "../../presentation/theme-model.ts";
 import { defineTool } from "../extensions/types.ts";
 import {
 	type CredentialManager,

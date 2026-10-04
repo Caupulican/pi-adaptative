@@ -1,5 +1,5 @@
-import type { AgentTool, BeforeToolCallResult } from "@caupulican/pi-agent-core";
 import type { TSchema } from "typebox";
+import type { AgentTool, BeforeToolCallResult } from "../../kernel/index.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { evaluateToolGateAsync } from "./gates.ts";

@@ -1,9 +1,17 @@
 import type { Model } from "@caupulican/pi-ai";
-import type { ModelRegistry } from "../model-registry.ts";
+import type { Api } from "@caupulican/pi-ai/types";
 import { resolveCliModel } from "../model-resolver.ts";
 import { FitnessStore } from "../models/fitness-store.ts";
 import { evaluateSurfaceFitness, type FitnessGatedSurface } from "./fitness-gate.ts";
 import type { ModelRouterStatusSettings } from "./status.ts";
+
+/** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
+export interface ConfigDiagnosticsModelSource {
+	find(provider: string, modelId: string): Model<Api> | undefined;
+	getAll(): Model<Api>[];
+	getAvailable(): Model<Api>[];
+	hasConfiguredAuth(model: Model<Api>): boolean;
+}
 
 function formatModel(model: Model<any>): string {
 	return `${model.provider}/${model.id}`;
@@ -13,7 +21,7 @@ function collectModelRouterModelDiagnostics(
 	label: "cheap model" | "medium model" | "expensive model",
 	settingKey: "modelRouter.cheapModel" | "modelRouter.mediumModel" | "modelRouter.expensiveModel",
 	modelPattern: string | undefined,
-	modelRegistry: ModelRegistry,
+	modelRegistry: ConfigDiagnosticsModelSource,
 ): string[] {
 	if (!modelPattern) {
 		return [`Model router ${label} is unset; configure ${settingKey} or disable modelRouter.enabled.`];
@@ -32,7 +40,7 @@ function collectFitnessGateDiagnostic(
 	label: "cheap model" | "medium model" | "expensive model",
 	surface: FitnessGatedSurface,
 	modelPattern: string | undefined,
-	modelRegistry: ModelRegistry,
+	modelRegistry: ConfigDiagnosticsModelSource,
 	agentDir: string | undefined,
 ): string[] {
 	if (!agentDir || !modelPattern) return [];
@@ -52,7 +60,7 @@ function collectFitnessGateDiagnostic(
 
 export function collectModelRouterConfigDiagnostics(
 	settings: ModelRouterStatusSettings,
-	modelRegistry: ModelRegistry,
+	modelRegistry: ConfigDiagnosticsModelSource,
 	agentDir?: string,
 ): string[] {
 	if (!settings.enabled) return [];

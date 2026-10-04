@@ -1,9 +1,8 @@
 import { readdir as fsReaddir, stat as fsStat } from "node:fs/promises";
-import type { AgentTool } from "@caupulican/pi-agent-core";
-import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "@caupulican/pi-agent-core/truncate";
 import nodePath from "path";
-import { type Static, Type } from "typebox";
-import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type { AgentTool } from "../../kernel/index.ts";
+import { DEFAULT_MAX_BYTES, formatSize, truncateHead } from "../../kernel/utils/truncate.ts";
+import type { Theme } from "../../presentation/theme-model.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import {
 	FILE_EXISTS_RECOVERY_TARGET_KIND,
@@ -18,41 +17,10 @@ import {
 	str,
 	toolTextResult,
 } from "./render-utils.ts";
+import { type LsOperations, type LsToolDetails, lsSchema } from "./schemas/ls.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
-const lsSchema = Type.Object({
-	path: Type.Optional(Type.String({ description: "Directory to list (default: current directory)" })),
-	limit: Type.Optional(Type.Number({ description: "Maximum number of entries to return (default: 500)" })),
-	metadata: Type.Optional(Type.Boolean({ description: "Include file size and permission metadata (default: false)" })),
-});
-
-export type LsToolInput = Static<typeof lsSchema>;
-
 const DEFAULT_LIMIT = 500;
-
-export interface LsToolDetails {
-	truncation?: TruncationResult;
-	entryLimitReached?: number;
-}
-
-/**
- * Pluggable operations for the ls tool.
- * Override these to delegate directory listing to remote systems (for example SSH).
- */
-export interface LsEntryStats {
-	isDirectory: () => boolean;
-	size?: number;
-	mode?: number;
-}
-
-export interface LsOperations {
-	/** Check if path exists */
-	exists: (absolutePath: string) => Promise<boolean> | boolean;
-	/** Get file or directory stats. Throws if not found. */
-	stat: (absolutePath: string) => Promise<LsEntryStats> | LsEntryStats;
-	/** Read directory entries */
-	readdir: (absolutePath: string) => Promise<string[]> | string[];
-}
 
 const defaultLsOperations: LsOperations = {
 	exists: pathExists,

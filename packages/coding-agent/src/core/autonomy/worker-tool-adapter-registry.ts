@@ -1,6 +1,6 @@
-import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { Usage } from "@caupulican/pi-ai";
 import type { TSchema } from "typebox";
+import type { AgentTool } from "../../kernel/index.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import { TypeSafeEvidenceMaterializer } from "../review/typesafe-evidence-materializer.ts";
 import type { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";

@@ -1,8 +1,8 @@
 import { watch } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
-import { killTree } from "@caupulican/pi-agent-core/process-tree";
 import { getAgentDir } from "../../config.ts";
+import { killTree } from "../../kernel/reliability/process-tree.ts";
 import { spawnProcess, waitForChildProcess } from "../../utils/child-process.ts";
 import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
 import { getToolPath } from "../../utils/tools-manager.ts";

@@ -1,6 +1,6 @@
-import type { AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
 import { getAgentDir } from "../../config.ts";
+import type { AgentTool } from "../../kernel/index.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { loadSkills, type Skill } from "../skills.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";

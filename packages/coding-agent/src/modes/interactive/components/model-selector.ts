@@ -1,4 +1,5 @@
 import { type Model, modelsAreEqual } from "@caupulican/pi-ai";
+import type { Api } from "@caupulican/pi-ai/types";
 import {
 	Container,
 	type Focusable,
@@ -9,12 +10,11 @@ import {
 	type TUI,
 	visibleWidth,
 } from "@caupulican/pi-tui";
-import type { ModelRegistry } from "../../../core/model-registry.ts";
 import { ANTIGRAVITY_EFFORT_ORDER, antigravityGeminiEffortFamily } from "../../../core/models/antigravity-effort.ts";
-import type { SettingsManager } from "../../../core/settings-manager.ts";
-import { theme } from "../theme/theme.ts";
+import type { ModelFavorite } from "../../../core/settings/settings-schema.ts";
+import { formatSelectorActionHints, keyHint, keyText } from "../../../presentation/keybinding-hints.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { formatSelectorActionHints, keyHint, keyText } from "./keybinding-hints.ts";
 import {
 	advanceSelectorIndex,
 	filterSelectorItems,
@@ -22,6 +22,20 @@ import {
 	getSelectorScrollText,
 	SearchableListSurface,
 } from "./selector-list.ts";
+
+/** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
+export interface ModelSelectorModelSource {
+	find(provider: string, modelId: string): Model<Api> | undefined;
+	getAvailable(): Model<Api>[];
+	getError(): string | undefined;
+	refresh(): void;
+}
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ModelSelectorSettingsSource {
+	getModelFavorites(): ModelFavorite[];
+	toggleModelFavorite(provider: string, modelId: string): void;
+}
 
 interface ModelItem {
 	provider: string;
@@ -99,8 +113,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private filteredModels: ModelItem[] = [];
 	private selectedIndex: number = 0;
 	private currentModel?: Model<any>;
-	private modelRegistry: ModelRegistry;
-	private settingsManager: SettingsManager;
+	private modelRegistry: ModelSelectorModelSource;
+	private settingsManager: ModelSelectorSettingsSource;
 	private favoriteKeys = new Set<string>();
 	private onSelectCallback: (model: Model<any>) => void;
 	private onSelectAsDefaultCallback?: (model: Model<any>) => void;
@@ -115,8 +129,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	constructor(
 		tui: TUI,
 		currentModel: Model<any> | undefined,
-		settingsManager: SettingsManager,
-		modelRegistry: ModelRegistry,
+		settingsManager: ModelSelectorSettingsSource,
+		modelRegistry: ModelSelectorModelSource,
 		scopedModels: ReadonlyArray<ScopedModelItem>,
 		onSelect: (model: Model<any>) => void,
 		onCancel: () => void,

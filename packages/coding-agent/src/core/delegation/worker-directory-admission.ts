@@ -1,5 +1,5 @@
-import type { AgentTool } from "@caupulican/pi-agent-core";
-import { createExecutionContext, type ExecutionContext } from "@caupulican/pi-agent-core/paths";
+import type { AgentTool } from "../../kernel/index.ts";
+import { createExecutionContext, type ExecutionContext } from "../../kernel/utils/paths.ts";
 import type { WorkerExecutionContract, WorkerProfileExecutionContract } from "../orchestration/contracts.ts";
 import { parseWorkerExecutionContract } from "../orchestration/worker-execution-contract.ts";
 import { awaitPreflight } from "../preflight.ts";

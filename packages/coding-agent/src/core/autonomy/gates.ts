@@ -1,4 +1,4 @@
-import type { ExecutionPathAuthority } from "@caupulican/pi-agent-core";
+import type { ExecutionPathAuthority } from "../../kernel/index.ts";
 import {
 	resolveToolCallCapabilities,
 	resolveToolCallPathAccess,

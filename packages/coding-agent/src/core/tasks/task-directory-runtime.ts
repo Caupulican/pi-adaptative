@@ -1,13 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
-import type { AgentTool } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import {
-	createExecutionContext,
-	type ExecutionAttachment,
-	type ExecutionContext,
-} from "@caupulican/pi-agent-core/paths";
 import type { TSchema } from "typebox";
+import type { AgentTool } from "../../kernel/index.ts";
+import type { SessionManager } from "../../kernel/node.ts";
+import { createExecutionContext, type ExecutionAttachment, type ExecutionContext } from "../../kernel/utils/paths.ts";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { isPathWithinEnvelope } from "../autonomy/envelope-enforcement.ts";
 import { awaitPreflight } from "../preflight.ts";

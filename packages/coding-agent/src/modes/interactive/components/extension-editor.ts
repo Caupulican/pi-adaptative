@@ -14,10 +14,10 @@ import {
 	type TUI,
 } from "@caupulican/pi-tui";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
+import { keyHint } from "../../../presentation/keybinding-hints.ts";
+import { getEditorTheme, theme } from "../../../presentation/theme-model.ts";
 import { editInExternalEditor } from "../external-editor.ts";
-import { getEditorTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint } from "./keybinding-hints.ts";
 
 export interface ExtensionEditorOptions extends EditorOptions {
 	/** Visible owner-only content that must not enter editor history, autocomplete, or external files. */

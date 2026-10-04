@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { Value } from "typebox/value";
+import type { SessionManager } from "../../kernel/node.ts";
 import type { ToolkitScript } from "../toolkit/script-registry.ts";
 import { executeToolkitScript, type ScriptExecution, type ScriptExecutor } from "../toolkit/script-runner.ts";
 import type { ToolkitScriptAuthorizer } from "../tools/run-toolkit-script.ts";

@@ -1,4 +1,3 @@
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import {
 	type Component,
 	CURSOR_MARKER,
@@ -9,14 +8,15 @@ import {
 	wrapTextWithAnsi,
 } from "@caupulican/pi-tui";
 import { type Static, Type } from "typebox";
+import type { SessionManager } from "../../kernel/node.ts";
 import {
 	bindClipboardQueue,
 	type ClipboardInputHost,
 	type ClipboardQueueState,
 	type PendingClipboardImage,
-} from "../../modes/interactive/clipboard-input.ts";
-import { formatKeyText } from "../../modes/interactive/components/keybinding-hints.ts";
-import type { Theme } from "../../modes/interactive/theme/theme.ts";
+} from "../../presentation/clipboard-input.ts";
+import { formatKeyText } from "../../presentation/keybinding-hints.ts";
+import type { Theme } from "../../presentation/theme-model.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import { defineTool } from "../extensions/types.ts";
 import {
@@ -33,12 +33,12 @@ import {
 	type HumanInputAnswer,
 	type HumanInputAnswerImage,
 	type HumanInputPresentationResult,
-	type HumanInputQuestion,
 	type HumanInputStopReason,
 	OWNER_UNAVAILABLE_REASON,
 	resolveHumanInput,
 	unansweredOwnerQuestionText,
 } from "../human-input.ts";
+import type { HumanInputQuestion } from "../human-input-request.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
 import type { SessionImageStore } from "../session-image-store.ts";
 import {

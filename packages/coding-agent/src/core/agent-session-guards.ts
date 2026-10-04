@@ -7,8 +7,8 @@
  */
 
 import { execFileSync } from "node:child_process";
-import type { AgentRunawayStopInfo, ToolValidationEscalationEvent } from "@caupulican/pi-agent-core";
 import type { Api, Model } from "@caupulican/pi-ai";
+import type { AgentRunawayStopInfo, ToolValidationEscalationEvent } from "../kernel/index.ts";
 import {
 	RUNAWAY_STOP_CUSTOM_TYPE,
 	type RunawayStopRecord,

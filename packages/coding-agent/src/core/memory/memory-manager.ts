@@ -4,9 +4,9 @@ import {
 	hasSecretLikeMemoryText,
 	type MemoryEgressPolicy,
 } from "../context/memory-provider-contract.ts";
-import type { ToolDefinition } from "../extensions/types.ts";
+import type { MemoryProvider, ToolDefinition } from "../extensions/types.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
-import type { MemoryLifecycleContext, MemoryProvider } from "./memory-provider.ts";
+import type { MemoryLifecycleContext } from "./memory-provider.ts";
 
 export interface MemoryPrefetchOptions {
 	externalEgressPolicy?: MemoryEgressPolicy;

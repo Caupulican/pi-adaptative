@@ -1,5 +1,5 @@
-import type { ThinkingLevel } from "@caupulican/pi-agent-core";
-import type { SessionEntry } from "@caupulican/pi-agent-core/node";
+import type { ThinkingLevel } from "../../kernel/index.ts";
+import type { SessionEntry } from "../../kernel/node.ts";
 import type { ModelTier, RouteDecision, RouteRisk } from "../autonomy/contracts.ts";
 import type { ModelRouterIntent } from "./intent-classifier.ts";
 

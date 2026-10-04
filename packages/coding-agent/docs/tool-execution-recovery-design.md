@@ -36,9 +36,9 @@ Counts are `isError` toolResults in that session. Unlisted = rejected, not execu
 
 1. Shape repair: `validateToolArguments` → `packages/ai/src/utils/tool-repair/`.
 2. Execution error catalogue: `getToolExecutionErrorPolicy` in `packages/ai/src/utils/tool-repair/registry.ts`.
-3. Failure memory + MUST protocol: `packages/agent/src/tool-failure-memory.ts`, `tool-failure-recovery-protocol.ts`.
-4. Admission + loaded actions: `packages/agent/src/tool-failure-recovery-gate.ts`.
-5. ErrorKind: `AgentToolErrorKind` in `packages/agent/src/types.ts` (`tool_failure` vs `operation_outcome`).
+3. Failure memory + MUST protocol: `packages/coding-agent/src/kernel/tool-failure-memory.ts`, `tool-failure-recovery-protocol.ts`.
+4. Admission + loaded actions: `packages/coding-agent/src/kernel/tool-failure-recovery-gate.ts`.
+5. ErrorKind: `AgentToolErrorKind` in `packages/coding-agent/src/kernel/types.ts` (`tool_failure` vs `operation_outcome`).
 6. Tool-owned recovery contracts: `failureRecovery` on `AgentTool`.
 7. File cooperation kinds: `packages/coding-agent/src/core/tools/file-failure-recovery.ts`.
 8. Intent promotion (not recovery): `packages/coding-agent/src/core/tool-selection/`.
@@ -120,7 +120,7 @@ prepareArguments (path aliases)
   → tool-selection records outcome; optional recovery-intent hint
 ```
 
-### L1. Classification (`packages/agent/src/agent-loop.ts` + tool boundary)
+### L1. Classification (`packages/coding-agent/src/kernel/agent-loop.ts` + tool boundary)
 
 - Add `readToolExecutionError(error: unknown)` that accepts duck-typed `AgentToolExecutionError` (name + failureCode + errorKind + outputSignature). Use it instead of `instanceof`.
 - Type/test: returned `{ isError: true }` without `errorKind` fails a focused coding-agent test for bash, tool_task, goal, task_steps, skill, memory.

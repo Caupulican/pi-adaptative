@@ -1,4 +1,4 @@
-import type { ThinkingLevel } from "@caupulican/pi-agent-core";
+import type { ThinkingLevel } from "../../kernel/index.ts";
 
 /** Provider-neutral labels shared by every interactive thinking-level selector. */
 export const THINKING_LEVEL_DESCRIPTIONS: Readonly<Record<ThinkingLevel, string>> = {

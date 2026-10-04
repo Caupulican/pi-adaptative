@@ -4,7 +4,7 @@
  */
 
 import { Container, getKeybindings, Spacer, Text, type TUI } from "@caupulican/pi-tui";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { advanceSelectorIndex, SelectorNavigationFooter } from "./selector-list.ts";

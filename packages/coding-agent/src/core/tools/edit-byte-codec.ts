@@ -1,5 +1,4 @@
 import { splitBom } from "../../utils/text.ts";
-import type { EditSourceSplice } from "./edit-diff.ts";
 import { createFileCodecRunner } from "./file-codec-runner.ts";
 import { decodeUtf8ForEdit } from "./file-encoding-policy.ts";
 
@@ -59,3 +58,9 @@ export const pythonEditByteCodec: EditByteCodec = {
 		};
 	},
 };
+
+export interface EditSourceSplice {
+	start: number;
+	end: number;
+	replacement: string;
+}

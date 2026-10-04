@@ -2,7 +2,7 @@ import type {
 	ResourceProfileFilterSettings,
 	ResourceProfileKind,
 	ResourceProfileSettings,
-} from "./settings-manager.ts";
+} from "./settings/settings-schema.ts";
 
 const RESOURCE_PROFILE_TAG_RE = /<resource-profile\b([^>]*)>([\s\S]*?)<\/resource-profile>/gi;
 const RESOURCE_PROFILE_NAME_RE = /\bname\s*=\s*(?:"([^"]+)"|'([^']+)')/i;

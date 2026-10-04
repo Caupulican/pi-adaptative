@@ -11,26 +11,163 @@
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai";
 import type { Component, Container, EditorComponent, SelectItem, TUI } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
+import type { CostGuardSettings } from "../../core/cost-guard.ts";
+import type {
+	HmoeIndependence,
+	HmoePreference,
+	HmoePreset,
+	HmoeTeamStrategy,
+	HmoeWeights,
+} from "../../core/expert-routing/vocabulary.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
+import type { ModelRegistry } from "../../core/model-registry.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
 import { describeRouterCalibration, formatRouterCalibrationRow } from "../../core/model-router/calibration.ts";
 import { formatRouterPoolSummary } from "../../core/model-router/candidate-pool.ts";
+import type { ProfileRegistry } from "../../core/profile-registry.ts";
 import type {
+	AutoLearnSettings,
 	AutonomyMode,
+	AutonomySettings,
+	ContextCurationSettings,
+	ContextPromptEnforcementSettings,
+	LearningPolicySettings,
+	MemoryRetrievalSettings,
+	ModelCapabilitySettings,
+	ModelFavorite,
+	ModelRouterPoolPreference,
+	ModelRouterSelectionMode,
+	ModelRouterSettings,
+	ResearchLaneSettings,
+	ResolvedLearningPolicySettings,
+	ResolvedResearchLaneSettings,
+	ResolvedWorkerDelegationSettings,
+	ResourceProfileKind,
 	SelfModificationSettings,
-	SettingsManager,
+	Settings,
 	SettingsScope,
-} from "../../core/settings-manager.ts";
+	SystemOneSettings,
+	ThinkingLevel,
+	TransportSetting,
+	WarningSettings,
+	WorkerDelegationSettings,
+} from "../../core/settings/settings-schema.ts";
+import type { SystemOneProviderChoice } from "../../core/system-one/access.ts";
 import { describeSystemOneAccess } from "../../core/system-one/access.ts";
+import { getAvailableThemes, setTheme } from "../../presentation/theme/theme.ts";
 import { ActionTranscriptComponent } from "./components/action-transcript.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
 import type { FooterComponent } from "./components/footer.ts";
 import { type ModelRouterPoolView, SettingsSelectorComponent } from "./components/settings-selector.ts";
-import { getAvailableThemes, setTheme } from "./theme/theme.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface SettingsSelectorFlowSettingsSource {
+	getActiveResourceProfileNames(): string[];
+	getAutoLearnSettings(): AutoLearnSettings;
+	getAutocompleteMaxVisible(): number;
+	getAutonomySettings(): Required<AutonomySettings>;
+	getBlockImages(): boolean;
+	getClearOnShrink(): boolean;
+	getCollapseChangelog(): boolean;
+	getContextCurationSettings(): { enabled: boolean; model?: string; maxJobsPerTurn: number };
+	getContextPromptEnforcementSettings(): { enabled: boolean; preserveRecentMessages: number; minChars: number };
+	getCostGuardSettings(): CostGuardSettings;
+	getDoubleEscapeAction(): "fork" | "tree" | "none";
+	getEditorPaddingX(): number;
+	getEnableSkillCommands(): boolean;
+	getExternalResourceRoots(): string[];
+	getHttpIdleTimeoutMs(): number;
+	getImageAutoResize(): boolean;
+	getImageWidthCells(): number;
+	getLearningPolicySettings(): ResolvedLearningPolicySettings;
+	getMemoryRetrievalSettings(): {
+		enabled: boolean;
+		maxResults: number;
+		includeInPrompt: boolean;
+		allowExternalEgress: boolean;
+	};
+	getModelCapabilitySettings(): Required<ModelCapabilitySettings>;
+	getModelFavorites(): ModelFavorite[];
+	getModelRouterSettings(): {
+		enabled: boolean;
+		selectionMode: ModelRouterSelectionMode;
+		poolPreference: ModelRouterPoolPreference;
+		cheapModel?: string;
+		mediumModel?: string;
+		expensiveModel?: string;
+		learningModel?: string;
+		executorModel?: string;
+		fitnessGate: boolean;
+		cheapThinking?: ThinkingLevel;
+		mediumThinking?: ThinkingLevel;
+		expensiveThinking?: ThinkingLevel;
+		executorThinking?: ThinkingLevel;
+		hmoePreset?: HmoePreset;
+		hmoeTeamStrategy?: HmoeTeamStrategy;
+		hmoeIndependence?: HmoeIndependence;
+		hmoePreference?: HmoePreference;
+		hmoeWeights?: HmoeWeights;
+	};
+	getProfileRegistry(): ProfileRegistry;
+	getProjectContextFiles(): "on-demand" | "off";
+	getProjectContextFilesScope(): SettingsScope | undefined;
+	getProjectSettings(): Settings;
+	getQuietStartup(): boolean;
+	getResearchLaneSettings(): ResolvedResearchLaneSettings;
+	getSelfModificationSettings(): { enabled: boolean; sourcePath?: string; sourcePaths?: string[] };
+	getShowHardwareCursor(): boolean;
+	getShowImages(): boolean;
+	getShowTerminalProgress(): boolean;
+	getSystemOneSettings(): {
+		enabled: boolean;
+		provider: SystemOneProviderChoice;
+		loopMode?: SystemOneSettings["loopMode"];
+		completionProfile?: SystemOneSettings["completionProfile"];
+	};
+	getTheme(): string | undefined;
+	getTransport(): TransportSetting;
+	getTreeFilterMode(): "default" | "no-tools" | "user-only" | "labeled-only" | "all";
+	getTrustedResourceRoots(): string[];
+	getWarnings(): WarningSettings;
+	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings;
+	isResourceAllowedByProfile(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
+	setAutoLearnSettings(settings: AutoLearnSettings, scope?: SettingsScope): void;
+	setAutocompleteMaxVisible(maxVisible: number): void;
+	setBlockImages(blocked: boolean): void;
+	setClearOnShrink(enabled: boolean): void;
+	setCollapseChangelog(collapse: boolean): void;
+	setContextCurationSettings(settings: ContextCurationSettings, scope?: SettingsScope): void;
+	setContextPromptEnforcementSettings(settings: ContextPromptEnforcementSettings, scope?: SettingsScope): void;
+	setDoubleEscapeAction(action: "fork" | "tree" | "none"): void;
+	setEditorPaddingX(padding: number): void;
+	setEnableSkillCommands(enabled: boolean): void;
+	setHideThinkingBlock(hide: boolean): void;
+	setHttpIdleTimeoutMs(timeoutMs: number): void;
+	setImageAutoResize(enabled: boolean): void;
+	setImageWidthCells(width: number): void;
+	setLearningPolicySettings(settings: LearningPolicySettings, scope?: SettingsScope): void;
+	setMemoryRetrievalSettings(settings: MemoryRetrievalSettings, scope?: SettingsScope): void;
+	setModelCapabilitySettings(settings: ModelCapabilitySettings, scope?: SettingsScope): void;
+	setModelRouterSettings(settings: ModelRouterSettings, scope?: SettingsScope): void;
+	setProjectContextFiles(mode: "on-demand" | "off", scope?: SettingsScope): void;
+	setQuietStartup(quiet: boolean): void;
+	setResearchLaneSettings(settings: ResearchLaneSettings, scope?: SettingsScope): void;
+	setSelfModificationSettings(settings: SelfModificationSettings, scope?: SettingsScope): void;
+	setShowHardwareCursor(enabled: boolean): void;
+	setShowImages(show: boolean): void;
+	setShowTerminalProgress(enabled: boolean): void;
+	setSystemOneProvider(provider: SystemOneProviderChoice): void;
+	setTheme(theme: string): void;
+	setTransport(transport: TransportSetting): void;
+	setTreeFilterMode(mode: "default" | "no-tools" | "user-only" | "labeled-only" | "all"): void;
+	setWarnings(warnings: WarningSettings): void;
+	setWorkerDelegationSettings(settings: WorkerDelegationSettings, scope?: SettingsScope): void;
+}
 
 export interface SettingsSelectorHost {
 	readonly session: AgentSession;
-	readonly settingsManager: SettingsManager;
+	readonly settingsManager: SettingsSelectorFlowSettingsSource;
+	readonly modelRegistry: ModelRegistry;
 	readonly footer: FooterComponent;
 	readonly chatContainer: Container;
 	readonly ui: TUI;
@@ -61,10 +198,10 @@ export interface SettingsSelectorHost {
  * evidence per router surface. Reading it never runs a probe.
  */
 export function buildModelRouterPoolView(
-	host: Pick<SettingsSelectorHost, "session" | "settingsManager">,
+	host: Pick<SettingsSelectorHost, "session" | "settingsManager" | "modelRegistry">,
 ): ModelRouterPoolView {
 	const pool = host.session.getRouterCandidatePool();
-	const registry = host.session.modelRegistry;
+	const registry = host.modelRegistry;
 	const rows = describeRouterCalibration(pool.models, {
 		fitnessReports: host.session.getStoredFitnessReports(),
 		toolProbe: (model) => host.session.getToolProbeRecord(model),
@@ -160,7 +297,7 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 				modelRouter: host.settingsManager.getModelRouterSettings(),
 				systemOneProvider: host.settingsManager.getSystemOneSettings().provider,
 				describeSystemOneAccess: (choice) =>
-					describeSystemOneAccess(choice, (provider) => host.session.modelRegistry.authStorage.hasAuth(provider)),
+					describeSystemOneAccess(choice, (provider) => host.modelRegistry.authStorage.hasAuth(provider)),
 				modelRouterScope: projectSettings.modelRouter ? "project" : "global",
 				modelRouterPool: buildModelRouterPoolView(host),
 				autoLearn: host.settingsManager.getAutoLearnSettings(),
@@ -168,7 +305,7 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 				autoLearnModelOptions: host.getAutoLearnModelOptions(),
 				resolveModelThinkingLevels: (modelPattern) => {
 					if (!modelPattern) return host.session.getAvailableThinkingLevels();
-					const resolved = resolveCliModel({ cliModel: modelPattern, modelRegistry: host.session.modelRegistry });
+					const resolved = resolveCliModel({ cliModel: modelPattern, modelRegistry: host.modelRegistry });
 					return resolved.model ? getSupportedThinkingLevels(resolved.model) : undefined;
 				},
 				contextPolicyEnforcement: host.settingsManager.getContextPromptEnforcementSettings(),

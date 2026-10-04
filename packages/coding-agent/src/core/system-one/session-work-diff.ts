@@ -1,4 +1,4 @@
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { SessionManager } from "../../kernel/node.ts";
 import type {
 	RepositoryWorkEvidenceJournal,
 	RepositoryWorkEvidenceScope,

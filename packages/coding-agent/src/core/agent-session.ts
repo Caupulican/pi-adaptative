@@ -1,34 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import { basename, join, resolve } from "node:path";
-import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
-import {
-	type CompactionResult,
-	type CompactionSettings,
-	estimateTokens,
-	hardCompactionTriggerTokens,
-} from "@caupulican/pi-agent-core/compaction/compaction";
-import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
-import { type CustomMessage, createCustomMessage } from "@caupulican/pi-agent-core/messages";
-import type {
-	BranchSummaryEntry,
-	SessionManager,
-	SessionRequestSnapshotInput,
-} from "@caupulican/pi-agent-core/session";
-import { NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR } from "@caupulican/pi-agent-core/tool-protocol-residue";
-import type {
-	AgentContext,
-	AgentEvent,
-	AgentMessage,
-	AgentState,
-	AgentTool,
-	ThinkingLevel,
-} from "@caupulican/pi-agent-core/types";
-import {
-	createVerificationDismissalDetails,
-	VERIFICATION_DISMISSAL_CUSTOM_TYPE,
-	VerificationObligationTracker,
-	type VerificationObligationView,
-} from "@caupulican/pi-agent-core/verification-obligations";
 import {
 	type Api,
 	type AssistantMessage,
@@ -43,6 +14,26 @@ import {
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
 import { getAgentDir, VERSION, VERSION_SOURCE_AVAILABLE } from "../config.ts";
+import { type Agent, AgentBusyError } from "../kernel/agent.ts";
+import {
+	type CompactionResult,
+	type CompactionSettings,
+	estimateTokens,
+	hardCompactionTriggerTokens,
+} from "../kernel/compaction/compaction.ts";
+import type { AgentContext } from "../kernel/index.ts";
+import { type CustomMessage, createCustomMessage } from "../kernel/messages.ts";
+import { compactToolResultDetailsForRetention } from "../kernel/session/message-retention.ts";
+import type { BranchSummaryEntry } from "../kernel/session/session-entries.ts";
+import type { SessionManager, SessionRequestSnapshotInput } from "../kernel/session/session-manager.ts";
+import { NATIVE_TOOL_PROTOCOL_RESIDUE_ERROR } from "../kernel/tool-protocol-residue.ts";
+import type { AgentEvent, AgentMessage, AgentState, AgentTool, ThinkingLevel } from "../kernel/types.ts";
+import {
+	createVerificationDismissalDetails,
+	VERIFICATION_DISMISSAL_CUSTOM_TYPE,
+	VerificationObligationTracker,
+	type VerificationObligationView,
+} from "../kernel/verification-obligations.ts";
 import { screenAcquisition } from "./acquisition/acquisition-boundary.ts";
 import { ExternalCapabilityAcquisitionGate } from "./acquisition/external-capability-acquisition-gate.ts";
 import type { AdaptiveCapabilityController } from "./adaptive/adaptive-capability-controller.ts";
@@ -94,7 +85,6 @@ import { AutonomyTelemetry } from "./autonomy-telemetry.ts";
 import { BackgroundLaneController } from "./background-lane-controller.ts";
 import type { BackgroundToolTaskController } from "./background-tool-task-controller.ts";
 import { BashExecutionController } from "./bash-execution-controller.ts";
-import type { BashResult } from "./bash-executor.ts";
 import { type CapabilityTierPolicy, capabilityTierPolicy, resolveCapabilityTier } from "./capability-tier.ts";
 import type { NativePiActivityPort } from "./collaboration/native-pi-activity.ts";
 import {
@@ -180,6 +170,7 @@ import type {
 	ToolDefinition,
 	ToolInfo,
 } from "./extensions/index.ts";
+import type { MemoryProvider } from "./extensions/types.ts";
 import { FailureCorpusRecorder } from "./failure-corpus.ts";
 import { ForegroundLifecycleAdapter } from "./foreground-lifecycle-adapter.ts";
 import { ForegroundRecoveryController, type ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
@@ -218,7 +209,6 @@ import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./
 import { type CurationProposals, SkillCurator } from "./learning/skill-curator.ts";
 import { LocalPrefixWarmController } from "./local-prefix-warm-controller.ts";
 import { LocalRuntimeController } from "./local-runtime-controller.ts";
-import type { MemoryProvider } from "./memory/memory-provider.ts";
 import type { ManagedMemoryDriftEntry, ManagedMemoryTarget } from "./memory/providers/file-store.ts";
 import { MemoryController } from "./memory-controller.ts";
 import {
@@ -355,12 +345,8 @@ import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { buildSessionStreamFn, isRawStreamSimpleFn } from "./session-stream-chain.ts";
 import { SessionTreeNavigator } from "./session-tree-navigator.ts";
 import { deriveSessionWorkState, type SessionWorkState } from "./session-work-state.ts";
-import type {
-	MemorySystem,
-	ResourceProfileFilterSettings,
-	SettingsManager,
-	SettingsScope,
-} from "./settings-manager.ts";
+import type { MemorySystem, ResourceProfileFilterSettings, SettingsScope } from "./settings/settings-schema.ts";
+import type { SettingsManager } from "./settings-manager.ts";
 import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
 import { skillWorkPathsFromToolCall } from "./skill-work-paths.ts";
 import { skillsForSessionRole, workerEligibleSkills } from "./skills.ts";
@@ -428,9 +414,9 @@ import { ToolRecoveryLogger } from "./tool-recovery-logger.ts";
 import { formatToolSelectionHints } from "./tool-selection/promotion.ts";
 import { ToolPerformanceStore } from "./tool-selection/tool-performance-store.ts";
 import { formatToolSelectionReport, ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
-import type { BashOperations } from "./tools/bash.ts";
 import { MAX_DELEGATE_STATUS_OUTPUT_BYTES } from "./tools/delegate-status.ts";
 import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
+import type { BashOperations, BashResult } from "./tools/schemas/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
 import { shareTextBudget } from "./util/text-budget.ts";
 import { currentWorkUnit, openWorkUnit, WORKER_RECEIPTS_CUSTOM_TYPE, workUnitWindow } from "./work-units.ts";
@@ -458,9 +444,9 @@ import {
 	type PromptOptions,
 	type ResearchLaneRunOutcome,
 	type SessionStats,
-	type SpawnedUsageTotals,
 	type WorkerDelegationRunOutcome,
 } from "./agent-session-contracts.ts";
+import type { SpawnedUsageTotals } from "./cost/usage-records.ts";
 
 export type { ToolProbeReport, ToolProbeResult, ToolProbeVerdict } from "./tool-protocol-controller.ts";
 
@@ -494,8 +480,8 @@ class SubmissionPreflightAborted extends Error {
 
 export class AgentSession {
 	readonly agent: Agent;
-	readonly sessionManager: SessionManager;
-	readonly settingsManager: SettingsManager;
+	private readonly sessionManager: SessionManager;
+	private readonly settingsManager: SettingsManager;
 	public capabilityEnvelope?: CapabilityEnvelope;
 	/** Set by an interactive host; without it an ungranted edge operation is blocked, never asked. */
 	private _edgeConfirmation?: EdgeConfirmationHandler;
@@ -2418,11 +2404,6 @@ export class AgentSession {
 			this._refreshBaseSystemPrompt();
 		});
 		this._localPrefixWarm.schedule(this.agent.state.model);
-	}
-
-	/** Model registry for API key resolution and model discovery */
-	get modelRegistry(): ModelRegistry {
-		return this._modelRegistry;
 	}
 
 	/** The session's canonical host-only credential source and redactor. */
@@ -7543,13 +7524,6 @@ export class AgentSession {
 	 */
 	hasExtensionHandlers(eventType: string): boolean {
 		return this._extensionRunner.hasHandlers(eventType);
-	}
-
-	/**
-	 * Get the extension runner (for setting UI context and error handlers).
-	 */
-	get extensionRunner(): ExtensionRunner {
-		return this._extensionRunner;
 	}
 
 	/** Owner control-plane access for the native /secrets TUI. Never exposed as an agent tool. */

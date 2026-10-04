@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants, existsSync, rmSync } from "node:fs";
 import { access, copyFile, lstat, open, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { assertExecutionAbsolutePath, executionPathApi, type PathInputOptions } from "@caupulican/pi-agent-core/paths";
+import { assertExecutionAbsolutePath, executionPathApi, type PathInputOptions } from "../../kernel/utils/paths.ts";
 import { createProcessScratchDirectory } from "../process-scratch.ts";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
 import {

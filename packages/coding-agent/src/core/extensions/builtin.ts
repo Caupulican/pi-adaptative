@@ -1,12 +1,12 @@
-import { estimateStringTokens, estimateTokens } from "@caupulican/pi-agent-core/compaction/compaction";
+import { Type } from "typebox";
+import { estimateStringTokens, estimateTokens } from "../../kernel/compaction/compaction.ts";
 import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
-} from "@caupulican/pi-agent-core/messages";
-import type { CompactionEntry, SessionEntry } from "@caupulican/pi-agent-core/session";
-import type { AgentMessage } from "@caupulican/pi-agent-core/types";
-import { Type } from "typebox";
+} from "../../kernel/messages.ts";
+import type { CompactionEntry, SessionEntry } from "../../kernel/session/session-entries.ts";
+import type { AgentMessage } from "../../kernel/types.ts";
 import type { SelfCompactionView } from "../compaction/self-compaction-controller.ts";
 import type { MemoryPromptInclusionReport, MemoryRetrievalDiagnostics } from "../context/memory-diagnostics.ts";
 import type { ContextGcReport } from "../context-gc.ts";

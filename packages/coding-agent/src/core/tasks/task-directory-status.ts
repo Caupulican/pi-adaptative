@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ExecutionAttachment, ExecutionContext } from "@caupulican/pi-agent-core/paths";
+import type { ExecutionAttachment, ExecutionContext } from "../../kernel/utils/paths.ts";
 import type { TaskDirectoryBinding, TaskDirectoryState } from "./task-directory-state.ts";
 
 // A valid 4096-character root plus relative path can expand sixfold in JSON. Keep enough

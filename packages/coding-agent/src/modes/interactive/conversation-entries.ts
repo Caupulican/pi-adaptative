@@ -1,4 +1,4 @@
-import type { SessionEntry } from "@caupulican/pi-agent-core/node";
+import type { SessionEntry } from "../../kernel/node.ts";
 import { isConversationMessage } from "./components/question-conversation.ts";
 
 /**

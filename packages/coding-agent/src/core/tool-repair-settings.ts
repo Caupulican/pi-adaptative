@@ -1,4 +1,4 @@
-import type { Settings } from "./settings-manager.ts";
+import type { Settings } from "./settings/settings-schema.ts";
 
 export interface ResolvedToolRepairSettings {
 	repair: boolean;

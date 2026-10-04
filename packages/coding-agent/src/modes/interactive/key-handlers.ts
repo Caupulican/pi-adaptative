@@ -10,8 +10,12 @@
 
 import type { EditorComponent, TUI } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
-import type { SettingsManager } from "../../core/settings-manager.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface KeyHandlersSettingsSource {
+	getDoubleEscapeAction(): "fork" | "tree" | "none";
+}
 
 export interface KeyHandlersHost {
 	readonly defaultEditor: CustomEditor;
@@ -21,7 +25,7 @@ export interface KeyHandlersHost {
 		AgentSession,
 		"isStreaming" | "isPreparingSubmission" | "abort" | "isBashRunning" | "abortBash" | "backgroundRunningToolCalls"
 	>;
-	readonly settingsManager: Pick<SettingsManager, "getDoubleEscapeAction">;
+	readonly settingsManager: Pick<KeyHandlersSettingsSource, "getDoubleEscapeAction">;
 	isBashMode: boolean;
 	lastEscapeTime: number;
 	restoreQueuedMessagesToEditor(options?: { abort?: boolean; currentText?: string }): number;

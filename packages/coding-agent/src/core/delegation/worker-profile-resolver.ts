@@ -13,9 +13,17 @@ import {
 } from "../orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "../orchestration/profile-store.ts";
 import type { SessionTaskProfileStore } from "../orchestration/session-task-profile-store.ts";
-import type { SettingsManager } from "../settings-manager.ts";
+import type { ProfileRegistry } from "../profile-registry.ts";
+import type { ModelCapabilitySettings } from "../settings/settings-schema.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { catalogWorkerResourcePointers, type WorkerResourceCatalogResourceLoader } from "./worker-resource-catalog.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface WorkerProfileResolverSettingsSource {
+	getModelCapabilitySettings(): Required<ModelCapabilitySettings>;
+	getProfileRegistry(): ProfileRegistry;
+	isProjectTrusted(): boolean;
+}
 
 export interface ResolvedWorkerProfile {
 	model: Model<Api>;
@@ -36,7 +44,7 @@ export interface ResolvedWorkerProfilePreset {
 export interface WorkerProfileResolverOptions {
 	agentDir: string;
 	cwd: string;
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): WorkerProfileResolverSettingsSource;
 	getResourceLoader(): WorkerResourceCatalogResourceLoader;
 	getModelRegistry(): ModelRegistry;
 	isModelExhausted(model: Model<Api>): boolean;

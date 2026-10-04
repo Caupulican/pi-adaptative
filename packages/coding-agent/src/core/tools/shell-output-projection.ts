@@ -1,5 +1,5 @@
 import { stripAnsi } from "../../utils/ansi.ts";
-import type { OutputReductionDetails } from "./output-reduction.ts";
+import type { OutputReductionDetails } from "./output-reduction-types.ts";
 import { isProjectableTestCommand } from "./shell-test-command.ts";
 
 const MIN_PROJECTABLE_LINES = 24;

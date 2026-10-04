@@ -17,7 +17,7 @@ import {
 	type FlowKind,
 	type FlowOutcome,
 } from "../../../core/operator-projection/flow-trace.ts";
-import { type ThemeColor, theme } from "../theme/theme.ts";
+import { type ThemeColor, theme } from "../../../presentation/theme-model.ts";
 import { type DecisionGraphRows, formatGraphDuration, SYSTEM_ONE_TONE } from "./decision-graph-render.ts";
 
 const LANE_TITLE: Readonly<Record<FlowActor, string>> = {

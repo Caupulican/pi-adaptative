@@ -1,5 +1,5 @@
-import type { AgentToolResult } from "@caupulican/pi-agent-core";
 import type { Usage } from "@caupulican/pi-ai";
+import type { AgentToolResult } from "../../kernel/index.ts";
 import { EMPTY_ATTEMPT_USAGE, usageDeltaFromProviderUsage } from "../orchestration/attempt-usage.ts";
 
 type BilledUsage = ReturnType<typeof usageDeltaFromProviderUsage>;

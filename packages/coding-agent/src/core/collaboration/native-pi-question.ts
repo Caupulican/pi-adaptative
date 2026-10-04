@@ -1,5 +1,5 @@
-import { MAX_MANAGED_LANE_SUMMARY_BYTES } from "../extensions/types.ts";
-import type { HumanInputRequest } from "../human-input.ts";
+import { MAX_MANAGED_LANE_SUMMARY_BYTES } from "../extensions/managed-lane-records.ts";
+import type { HumanInputRequest } from "../human-input-request.ts";
 import { boundCollaborationEvidence } from "./job-store.ts";
 import { type CollaborationQuestionReceipt, createCollaborationPeerContext } from "./peer-context.ts";
 

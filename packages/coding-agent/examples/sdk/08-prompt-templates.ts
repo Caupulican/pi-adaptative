@@ -11,6 +11,7 @@ import {
 	getAgentDir,
 	type PromptTemplate,
 	SessionManager,
+	SettingsManager,
 } from "@caupulican/pi-adaptative";
 
 // Define custom templates
@@ -29,6 +30,7 @@ const deployTemplate: PromptTemplate = {
 const loader = new DefaultResourceLoader({
 	cwd: process.cwd(),
 	agentDir: getAgentDir(),
+	settingsManager: SettingsManager.create(process.cwd(), getAgentDir()),
 	promptsOverride: (current) => ({
 		prompts: [...current.prompts, deployTemplate],
 		diagnostics: current.diagnostics,

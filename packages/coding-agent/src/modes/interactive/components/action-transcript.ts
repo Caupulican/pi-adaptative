@@ -1,6 +1,6 @@
 import { type Component, truncateToWidth } from "@caupulican/pi-tui";
-import { theme } from "../theme/theme.ts";
-import { keyText } from "./keybinding-hints.ts";
+import { keyText } from "../../../presentation/keybinding-hints.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 // A pathological tool-only turn must not turn one top-level TUI component into

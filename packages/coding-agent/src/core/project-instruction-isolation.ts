@@ -1,4 +1,4 @@
-import type { ModelCapabilityClass } from "./model-capability.ts";
+import type { ModelCapabilityClass } from "./capability-tier.ts";
 
 export type ProjectContextFilesMode = "on-demand" | "off";
 

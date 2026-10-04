@@ -14,12 +14,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-	DEFAULT_MAX_BYTES,
-	type TruncationResult,
-	truncateHead,
-	truncateTail,
-} from "@caupulican/pi-agent-core/truncate";
+import { DEFAULT_MAX_BYTES, type TruncationResult, truncateHead, truncateTail } from "../../kernel/utils/truncate.ts";
 import type { ArtifactStore } from "./context-artifacts.ts";
 import { isMissingArtifactMarker, type MissingArtifactReason } from "./context-artifacts.ts";
 import type { ContextArtifactRef } from "./context-item.ts";

@@ -1,4 +1,4 @@
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { SessionManager } from "../../kernel/node.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { ExtensionUIContext } from "../extensions/types.ts";
 import {

@@ -106,7 +106,7 @@ function getAliases(): Record<string, string> {
 	};
 
 	const piCodingAgentEntry = packageIndex;
-	const piAgentCoreEntry = resolveWorkspaceOrImport("agent/src/index.ts", "@caupulican/pi-agent-core");
+	const piAgentCoreEntry = resolveWorkspaceOrImport("coding-agent/src/kernel/index.ts", "@caupulican/pi-agent-core");
 	const piAgentCoreSubpathEntries = Object.fromEntries(
 		Object.entries(PI_AGENT_CORE_EXTENSION_SUBPATHS).map(([subpath, workspacePath]) => [
 			subpath,
@@ -159,8 +159,9 @@ function getAliases(): Record<string, string> {
 /**
  * How host packages resolve for an extension. Inside a session they are the running program's own
  * modules: the extension shares its singletons, and loading it evaluates only the extension's files.
- * A process that never built a session (a focused test of the loader) has no program to share, so the
- * packages resolve to their workspace source; the Bun binary always registers its modules.
+ * A process whose entry did not register them (a focused loader test, or a program embedding the SDK)
+ * has no program to share, so the packages resolve to their workspace source; the Bun binary always
+ * registers its modules.
  */
 function hostModuleOptions():
 	| { virtualModules: Readonly<Record<string, unknown>>; tryNative?: boolean }

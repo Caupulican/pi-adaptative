@@ -1,4 +1,4 @@
-import type { ResourceProfileKind, ResourceProfileSettings } from "./settings-manager.ts";
+import type { ResourceProfileKind, ResourceProfileSettings } from "./settings/settings-schema.ts";
 
 const RESOURCE_PROFILE_KINDS: ResourceProfileKind[] = ["extensions", "skills", "prompts", "themes", "agents", "tools"];
 

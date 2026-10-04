@@ -1,4 +1,4 @@
-import type { FitnessRole } from "../../modes/interactive/components/fitness-role-selector.ts";
+import type { FitnessRole } from "./fitness-role.ts";
 import { ORNITH_9B_OLLAMA_REF } from "./managed-ollama-model.ts";
 
 /**

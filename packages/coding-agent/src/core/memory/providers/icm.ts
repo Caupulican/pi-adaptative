@@ -10,7 +10,8 @@
 import { join } from "node:path";
 import { resourceDir } from "../../agent-paths.ts";
 import { type MemoryPromptBudget, memoryTextFitsBudget } from "../../context/memory-prompt-budget.ts";
-import type { MemoryCapabilities, MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
+import type { MemoryProvider } from "../../extensions/types.ts";
+import type { MemoryCapabilities, MemoryLifecycleContext } from "../memory-provider.ts";
 
 export const PI_ICM_PROVIDER_ID = "icm";
 

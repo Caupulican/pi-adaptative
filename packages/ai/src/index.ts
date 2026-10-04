@@ -37,6 +37,8 @@ export * from "./types.ts";
 export * from "./usage.ts";
 export * from "./utils/diagnostics.ts";
 export * from "./utils/event-stream.ts";
+// `types.ts` declares a structurally identical type alias of the same name; the class (value and type) wins here.
+export { AssistantMessageEventStream } from "./utils/event-stream.ts";
 export * from "./utils/json-parse.ts";
 export type {
 	OAuthAuthInfo,

@@ -3,7 +3,7 @@ import { arch as osArch, platform as osPlatform } from "node:os";
 import { dirname, join, relative } from "node:path";
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import type { OwnedProcessHandle } from "@caupulican/pi-agent-core/process-tree";
+import type { OwnedProcessHandle } from "../../kernel/reliability/process-tree.ts";
 import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { killProcessTree, trackDetachedChild, untrackDetachedChild } from "../../utils/shell.ts";
 import { modelsDir as agentModelsDir, runtimesDir as agentRuntimesDir } from "../agent-paths.ts";

@@ -9,9 +9,9 @@ import {
 	Spacer,
 	Text,
 } from "@caupulican/pi-tui";
-import { theme } from "../theme/theme.ts";
+import { keyText } from "../../../presentation/keybinding-hints.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyText } from "./keybinding-hints.ts";
 import {
 	clearSelectorSearchOrCancel,
 	formatDirtySelectorFooter,

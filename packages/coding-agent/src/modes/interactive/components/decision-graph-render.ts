@@ -9,7 +9,7 @@
 import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
 import { evaluationResultText } from "../../../core/system-one/semantic-evaluation-ledger.ts";
-import { type ThemeColor, theme } from "../theme/theme.ts";
+import { type ThemeColor, theme } from "../../../presentation/theme-model.ts";
 import type { DecisionGraphModel, DecisionParticipant } from "./decision-graph-model.ts";
 
 export interface DecisionGraphRows {

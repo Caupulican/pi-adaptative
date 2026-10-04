@@ -1,0 +1,76 @@
+import type { FailureReason } from "./failure-reason.ts";
+
+export interface ProviderSignature {
+	reason: FailureReason;
+	pattern: RegExp;
+	/** Route the matched provider failure through history compaction as an independent recovery action. */
+	shouldCompact?: boolean;
+	/** Evidence citation: sdk package+version+file, corpus capture, or adapter file:line. */
+	source: string;
+	/** True when the SDK-rendered fixture uses a vendor body shape that still awaits corpus confirmation. */
+	provisional?: boolean;
+}
+
+/** Provider-thrown-message signatures checked before the generic ladder. */
+export const PROVIDER_FAILURE_SIGNATURES: Record<string, readonly ProviderSignature[]> = {
+	"amazon-bedrock": [
+		{
+			reason: "rate_limit",
+			pattern: /^Throttling error:/i,
+			source: "packages/ai/src/providers/amazon-bedrock.ts:319",
+		},
+	],
+	anthropic: [
+		{
+			reason: "billing_or_quota",
+			pattern: /credit balance is too low/i,
+			source: "sdk:@anthropic-ai/sdk@0.91.1 node_modules/@anthropic-ai/sdk/core/error.js",
+		},
+	],
+	mistral: [
+		{
+			reason: "billing_or_quota",
+			pattern: /insufficient credits/i,
+			source: "sdk:@mistralai/mistralai@2.2.1 node_modules/@mistralai/mistralai/esm/models/errors/sdkerror.js",
+			provisional: true,
+		},
+	],
+	openrouter: [
+		{
+			reason: "billing_or_quota",
+			pattern: /model is unavailable for free\.\s*the paid version is available now/i,
+			source: "corpus:openrouter/inclusionai/ling-3.0-flash-fin:free session 01a0e9d6-2c57-75c1-bcd8-845dbfffe81e",
+		},
+		{
+			reason: "billing_or_quota",
+			pattern: /insufficient credits/i,
+			source: "sdk:openai@6.26.0 node_modules/openai/core/error.js",
+			provisional: true,
+		},
+	],
+	xai: [
+		{
+			reason: "overloaded",
+			pattern: /the model is currently at capacity due to high demand/i,
+			source: "corpus:xai/grok-4.6 openai-responses code:null capacity response",
+		},
+		{
+			reason: "server_error",
+			pattern: /Error Code null:\s*Internal error during token generation/i,
+			shouldCompact: true,
+			source: "corpus:xai/grok-4.6 retained-history session 01a02019-06fb-716f-a921-a653315d9354",
+		},
+	],
+	"openai-codex": [
+		{
+			reason: "billing_or_quota",
+			pattern: /You have hit your ChatGPT usage limit/i,
+			source: "packages/ai/src/providers/openai-codex-responses.ts:1402",
+		},
+		{
+			reason: "model_unsupported",
+			pattern: /model is not supported when using Codex with a ChatGPT account/i,
+			source: "corpus:openai-codex status 400 for gpt-5.3-codex-spark and gpt-5.4 on a ChatGPT account",
+		},
+	],
+};

@@ -4,7 +4,7 @@ import {
 	type ExecutionContext,
 	executionPathApi,
 	resolveExecutionResource,
-} from "@caupulican/pi-agent-core/paths";
+} from "../../kernel/utils/paths.ts";
 import { isPathWithinScopeWithDialect } from "../autonomy/path-scope.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 

@@ -1,6 +1,6 @@
 import { Container, getKeybindings, Spacer, Text } from "@caupulican/pi-tui";
 import type { ProjectTrustDecision } from "../../../core/trust-manager.ts";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { advanceSelectorIndex, SelectorNavigationFooter } from "./selector-list.ts";
 

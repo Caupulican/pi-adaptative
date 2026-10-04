@@ -1,12 +1,4 @@
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from "node:path";
-import {
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
-	formatSize,
-	type TruncationResult,
-	truncateHead,
-} from "@caupulican/pi-agent-core/truncate";
-import type { AgentTool } from "@caupulican/pi-agent-core/types";
 import type { Api, ImageContent, Model, TextContent } from "@caupulican/pi-ai";
 import { StreamingLineDecoder, type StreamingLineRecord } from "@caupulican/pi-ai/streaming-lines";
 import { Text } from "@caupulican/pi-tui";
@@ -19,10 +11,11 @@ import {
 	readFile as fsReadFile,
 	stat as fsStat,
 } from "fs/promises";
-import { type Static, Type } from "typebox";
 import { getAgentDir, getReadmePath } from "../../config.ts";
-import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.ts";
-import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
+import type { AgentTool } from "../../kernel/types.ts";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, truncateHead } from "../../kernel/utils/truncate.ts";
+import { keyHint, keyText } from "../../presentation/keybinding-hints.ts";
+import { getLanguageFromPath, highlightCode, type Theme } from "../../presentation/theme-model.ts";
 import { formatDimensionNote, resizeImage } from "../../utils/image-resize.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
 import type { PathInputOptions } from "../../utils/paths.ts";
@@ -48,55 +41,11 @@ import {
 } from "./file-failure-recovery.ts";
 import { decodeReadText, decodeTextChunks } from "./file-text-decoder.ts";
 import { formatMissingPathLocateEvidence, resolveReadPathAsync, resolveToCwd } from "./path-utils.ts";
-import { type ReadLine, type ReadLineWindowDetails, readLineWindow } from "./read-line-window.ts";
+import { type ReadLine, readLineWindow } from "./read-line-window.ts";
 import { getTextOutput, renderToolPath, replaceTabs, str } from "./render-utils.ts";
+import { type ReadToolDetails, readSchema } from "./schemas/read.ts";
 import { isPiSessionJsonlPath, projectPiSessionJsonlLine } from "./session-transcript-read.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-
-const readSchema = Type.Object({
-	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
-	encoding: Type.Optional(
-		Type.String({
-			description:
-				"Override for the source encoding. The harness resolves it on its own (project declarations, BOM, UTF-8, then a managed Python codec that detects legacy and BOM-less text), so pass this only when you know the file's codec and that resolution is wrong.",
-		}),
-	),
-	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
-	column: Type.Optional(
-		Type.Integer({
-			minimum: 1,
-			description:
-				"Read a character window of one line, starting at this 1-based UTF-16 position. Use the returned nextColumn to continue; surrogate pairs stay intact. Use with offset, not tail, outline, or multiple-line limits.",
-		}),
-	),
-	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
-	lineNumbers: Type.Optional(Type.Boolean({ description: "Include line numbers in the output" })),
-	tail: Type.Optional(Type.Number({ description: "Number of lines to read from the end of the file" })),
-	mode: Type.Optional(
-		Type.Literal("outline", {
-			description:
-				"Return the file's outline instead of its text: one `line: declaration` row per function, class, type, method, heading (TypeScript/JavaScript, Python, Rust, Go, C#, PowerShell, shell, Markdown). Use it first on files over ~300 lines, then read the range you need with offset/limit.",
-		}),
-	),
-	filter: Type.Optional(
-		Type.Union([Type.Literal("none"), Type.Literal("minimal"), Type.Literal("aggressive")], {
-			description: "Safe text filtering level (none, minimal, aggressive)",
-		}),
-	),
-});
-
-export type ReadToolInput = Static<typeof readSchema>;
-
-export interface ReadToolDetails {
-	lineWindow?: ReadLineWindowDetails;
-	truncation?: TruncationResult;
-	/** Present for `mode: "outline"`. */
-	outline?: { language: string; entries: number; totalLines: number; headFallback: boolean };
-	/** Present when the path was a directory and a bounded listing was returned instead of bytes. */
-	directory?: { entries: number; shown: number };
-	/** Present when the charset came from metadata, settings, or codec detection instead of the call. */
-	encoding?: { name: string; source: string };
-}
 
 /** One directory member as the read tool lists it. */
 export interface ReadDirectoryEntry {

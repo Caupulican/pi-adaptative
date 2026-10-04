@@ -7,7 +7,7 @@
  */
 import type { ManagedMemoryDriftEntry, ManagedMemoryTarget } from "../../core/memory/providers/file-store.ts";
 
-import type { MemorySystem } from "../../core/settings-manager.ts";
+import type { MemorySystem } from "../../core/settings/settings-schema.ts";
 
 export interface MemoryCommandHost {
 	memoryDriftReport(): Promise<ManagedMemoryDriftEntry[]>;

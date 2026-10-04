@@ -17,20 +17,10 @@ import type {
 	WorkerProjectContextReference,
 } from "./worker-conversation-store.ts";
 import { WorkerProjectSetupRecovery } from "./worker-project-setup-recovery.ts";
+import type { WorkerProjectAllocation, WorkerProjectPreparation } from "./worker-project-types.ts";
 
 const MAX_DIRECTORY_BYTES = 4 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES = 128;
-
-export interface WorkerProjectAllocation {
-	specializationKey: string;
-	allocationId: string;
-	owner: SpecialistContextOwner;
-}
-
-export interface WorkerProjectPreparation {
-	logicalAgentId: string;
-	controlMessageId: string;
-}
 
 interface DirectoryEntry {
 	allocationId: string;

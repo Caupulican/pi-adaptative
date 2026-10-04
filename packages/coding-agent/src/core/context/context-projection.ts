@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { AgentMessage } from "@caupulican/pi-agent-core";
+import type { AgentMessage } from "../../kernel/index.ts";
 import type { ContextItemKind, ContextSource } from "./context-item.ts";
 
 export const CONTEXT_PROJECTION_SCHEMA_VERSION = 1 as const;

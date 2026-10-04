@@ -39,15 +39,33 @@ import { isStdoutTakenOver } from "./output-guard.ts";
 import { createResourceIgnoreMatcher, toPosixResourcePath } from "./resource-ignore.ts";
 import { mergeResourceProfileMap, parseResourceProfileBlocks } from "./resource-profile-blocks.ts";
 import { collectResourceFilesRecursively, readResourceDirectory } from "./resource-traversal.ts";
-import {
-	isResourceEnabledByTopLevelOverrides,
-	type PackageSource,
-	type ResourceProfileSettings,
-	type Settings,
-	type SettingsManager,
-} from "./settings-manager.ts";
+import { isResourceEnabledByTopLevelOverrides } from "./settings/settings-rules.ts";
+import type {
+	PackageSource,
+	ResourceProfileFilterSettings,
+	ResourceProfileKind,
+	ResourceProfileSettings,
+	Settings,
+} from "./settings/settings-schema.ts";
 import { discoverSkillFiles, type SkillDiscoveryMode } from "./skill-discovery.ts";
+import type { PathMetadata } from "./source-info.ts";
 import { matchesCompiledPattern } from "./util/minimatch-cache.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface PackageManagerSettingsSource {
+	areProjectInstructionsEnabled(): boolean;
+	getActiveResourceProfileNames(): string[];
+	getGlobalSettings(): Settings;
+	getNpmCommand(): string[] | undefined;
+	getProjectSettings(): Settings;
+	getResourceProfileFilter(kind: ResourceProfileKind): Required<ResourceProfileFilterSettings>;
+	isProjectTrusted(): boolean;
+	isResourceAllowedByProfile(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
+	isResourceExplicitlyDisabled(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
+	replaceDiscoveredResourceProfileDefinitions(profiles: Record<string, ResourceProfileSettings>): void;
+	setPackages(packages: PackageSource[]): void;
+	setProjectPackages(packages: PackageSource[]): void;
+}
 
 const NETWORK_TIMEOUT_MS = 10000;
 const PACKAGE_CAPTURE_TIMEOUT_MS = 30_000;
@@ -56,13 +74,6 @@ const PACKAGE_COMMAND_KILL_GRACE_MS = 2_000;
 const UPDATE_CHECK_CONCURRENCY = 4;
 const GIT_UPDATE_CONCURRENCY = 4;
 const MAX_RESOURCE_PROFILE_SCAN_BYTES = 2 * 1024 * 1024;
-
-export interface PathMetadata {
-	source: string;
-	scope: SourceScope;
-	origin: "package" | "top-level";
-	baseDir?: string;
-}
 
 export interface ResolvedResource {
 	path: string;
@@ -123,7 +134,7 @@ export interface PackageManager {
 interface PackageManagerOptions {
 	cwd: string;
 	agentDir: string;
-	settingsManager: SettingsManager;
+	settingsManager: PackageManagerSettingsSource;
 }
 
 type SourceScope = "user" | "project" | "temporary";
@@ -517,7 +528,7 @@ function applyPatterns(allPaths: string[], patterns: string[], baseDir: string):
 export class DefaultPackageManager implements PackageManager {
 	private cwd: string;
 	private agentDir: string;
-	private settingsManager: SettingsManager;
+	private settingsManager: PackageManagerSettingsSource;
 	private globalNpmRoot: string | undefined;
 	private globalNpmRootCommandKey: string | undefined;
 	private progressCallback: ProgressCallback | undefined;
@@ -1994,8 +2005,8 @@ export class DefaultPackageManager implements PackageManager {
 
 	private addAutoDiscoveredResources(
 		accumulator: ResourceAccumulator,
-		globalSettings: ReturnType<SettingsManager["getGlobalSettings"]>,
-		projectSettings: ReturnType<SettingsManager["getProjectSettings"]>,
+		globalSettings: ReturnType<PackageManagerSettingsSource["getGlobalSettings"]>,
+		projectSettings: ReturnType<PackageManagerSettingsSource["getProjectSettings"]>,
 		globalBaseDir: string,
 		projectBaseDir: string,
 	): void {

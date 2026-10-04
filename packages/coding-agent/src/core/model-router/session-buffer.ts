@@ -1,5 +1,5 @@
-import type { AgentMessage, AgentMessageOrigin } from "@caupulican/pi-agent-core";
 import type { Message } from "@caupulican/pi-ai";
+import type { AgentMessage, AgentMessageOrigin } from "../../kernel/index.ts";
 
 export type ModelRouterBufferedSessionMessage =
 	| {

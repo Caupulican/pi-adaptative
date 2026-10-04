@@ -1,4 +1,4 @@
-import type { ResourceProfileFilterSettings } from "./settings-manager.ts";
+import type { ResourceProfileFilterSettings } from "./settings/settings-schema.ts";
 
 /**
  * Decode a stored allow/block filter into the set of enabled resource ids,

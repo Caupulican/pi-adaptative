@@ -3,10 +3,10 @@
  */
 
 import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@caupulican/pi-tui";
-import { theme } from "../theme/theme.ts";
+import { keyHint } from "../../../presentation/keybinding-hints.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint } from "./keybinding-hints.ts";
 
 export interface ExtensionInputOptions {
 	tui?: TUI;

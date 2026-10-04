@@ -11,8 +11,8 @@
 	],
 	"scripts": {
 		"clean": "npm run clean --workspaces",
-		"build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../agent && npm run build && cd ../coding-agent && npm run build",
-		"check": "biome check --error-on-warnings . && npm run check:biome-semantic-safety && npm run check:release-binary-benchmark && npm run check:pinned-deps && npm run check:typescript-toolchain && npm run check:ts-imports && npm run check:coordinator-boundaries && npm run check:multi-tenancy-census && npm run check:clone-config && npm run check:clones && npm run check:contract-doctrine && npm run check:precommit-gate && npm run check:architecture-map && npm run check:output-reduction && node scripts/run-tsc.mjs --noEmit && npm run check:browser-smoke",
+		"build": "cd packages/tui && npm run build && cd ../ai && npm run build && cd ../coding-agent && npm run build",
+		"check": "biome check --error-on-warnings . && npm run check:biome-semantic-safety && npm run check:release-binary-benchmark && npm run check:pinned-deps && npm run check:typescript-toolchain && npm run check:ts-imports && npm run check:coordinator-boundaries && npm run check:kernel-layer && npm run check:multi-tenancy-census && npm run check:clone-config && npm run check:clones && npm run check:contract-doctrine && npm run check:precommit-gate && npm run check:architecture-map && npm run check:output-reduction && node scripts/run-tsc.mjs --noEmit && npm run check:browser-smoke",
 		"format": "biome format --write .",
 		"check:biome-semantic-safety": "node --test scripts/biome-semantic-safety.test.mjs",
 		"check:browser-smoke": "node --test scripts/browser-smoke-node-import-policy.test.mjs && node scripts/check-browser-smoke.mjs",
@@ -29,6 +29,7 @@
 		"probe:system-one-claim": "node --conditions=pi-source scripts/system-one-claim-probe.mjs",
 		"probe:system-one-ladder": "node --conditions=pi-source scripts/system-one-ladder-probe.mjs",
 		"probe:system-one-route": "node --conditions=pi-source scripts/system-one-route-probe.mjs",
+		"check:kernel-layer": "node scripts/check-kernel-layer.mjs",
 		"check:coordinator-boundaries": "node --test scripts/check-coordinator-boundaries.test.mjs && node scripts/check-coordinator-boundaries.mjs",
 		"check:multi-tenancy-census": "node --test scripts/multi-tenancy-census.test.mjs",
 		"check:model-catalog": "node packages/ai/scripts/check-model-catalog.mjs",

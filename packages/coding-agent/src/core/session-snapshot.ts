@@ -1,4 +1,4 @@
-import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
+import type { SessionEntry, SessionManager } from "../kernel/node.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
 
 export type SessionSnapshotPayload<ValueKey extends string, Value extends object> = {

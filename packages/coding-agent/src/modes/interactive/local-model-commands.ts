@@ -14,8 +14,8 @@
 import { existsSync, rmSync, statSync } from "node:fs";
 import { totalmem } from "node:os";
 import { join } from "node:path";
-import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai";
+import type { Api, Model } from "@caupulican/pi-ai/types";
 import {
 	type Component,
 	Container,
@@ -26,11 +26,19 @@ import {
 } from "@caupulican/pi-tui";
 import { getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
+import type {
+	HmoeIndependence,
+	HmoePreference,
+	HmoePreset,
+	HmoeTeamStrategy,
+	HmoeWeights,
+} from "../../core/expert-routing/vocabulary.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
 import { evaluateSurfaceFitness } from "../../core/model-router/fitness-gate.ts";
 import { deriveLocalContextSizing } from "../../core/models/context-sizing.ts";
 import { DEFAULT_MODEL_SUGGESTIONS } from "../../core/models/default-model-suggestions.ts";
+import type { FitnessRole } from "../../core/models/fitness-role.ts";
 import { FitnessStore } from "../../core/models/fitness-store.ts";
 import { PrismLlamaCppRuntime, type PrismModelDescriptor } from "../../core/models/llamacpp-runtime.ts";
 import {
@@ -55,15 +63,68 @@ import {
 	PRISM_LLAMACPP_SERVE_PORT,
 } from "../../core/models/prism-llamacpp-lifecycle.ts";
 import { isProbeAllFailed } from "../../core/research/model-fitness.ts";
-import type { SettingsManager } from "../../core/settings-manager.ts";
+import type {
+	ContextCurationSettings,
+	ModelFavorite,
+	ModelRouterPoolPreference,
+	ModelRouterSelectionMode,
+	ModelRouterSettings,
+	ScoutSettings,
+	SettingsScope,
+} from "../../core/settings/settings-schema.ts";
 import type { ToolProbeResult } from "../../core/tool-protocol-controller.ts";
+import type { ThinkingLevel } from "../../kernel/index.ts";
+import { getSelectListTheme } from "../../presentation/theme-model.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
-import { type FitnessRole, FitnessRoleSelectorComponent } from "./components/fitness-role-selector.ts";
+import { FitnessRoleSelectorComponent } from "./components/fitness-role-selector.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { ModelSuggestionSelectorComponent } from "./components/model-suggestion-selector.ts";
 import { presentModelFitnessOutcome } from "./model-fitness-presentation.ts";
-import { getSelectListTheme } from "./theme/theme.ts";
 import { THINKING_LEVEL_DESCRIPTIONS } from "./thinking-level-descriptions.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface LocalModelCommandsSettingsSource {
+	getContextCurationSettings(): { enabled: boolean; model?: string; maxJobsPerTurn: number };
+	getModelFavorites(): ModelFavorite[];
+	getModelRouterSettings(): {
+		enabled: boolean;
+		selectionMode: ModelRouterSelectionMode;
+		poolPreference: ModelRouterPoolPreference;
+		cheapModel?: string;
+		mediumModel?: string;
+		expensiveModel?: string;
+		learningModel?: string;
+		executorModel?: string;
+		fitnessGate: boolean;
+		cheapThinking?: ThinkingLevel;
+		mediumThinking?: ThinkingLevel;
+		expensiveThinking?: ThinkingLevel;
+		executorThinking?: ThinkingLevel;
+		hmoePreset?: HmoePreset;
+		hmoeTeamStrategy?: HmoeTeamStrategy;
+		hmoeIndependence?: HmoeIndependence;
+		hmoePreference?: HmoePreference;
+		hmoeWeights?: HmoeWeights;
+	};
+	setContextCurationSettings(settings: ContextCurationSettings, scope?: SettingsScope): void;
+	setLocalRuntimeEnabled(
+		runtime: "ollama" | "llamacpp" | "transformers",
+		enabled: boolean,
+		scope?: SettingsScope,
+	): void;
+	setModelRouterSettings(settings: ModelRouterSettings, scope?: SettingsScope): void;
+	setScoutSettings(settings: ScoutSettings, scope?: SettingsScope): void;
+	toggleModelFavorite(provider: string, modelId: string): void;
+}
+
+/** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
+export interface LocalModelCommandsModelSource {
+	find(provider: string, modelId: string): Model<Api> | undefined;
+	getAll(): Model<Api>[];
+	getAvailable(): Model<Api>[];
+	hasConfiguredAuth(model: Model<Api>): boolean;
+	refresh(): void;
+}
 
 type SelectorFactory = (done: () => void) => { component: Component; focus: Component };
 
@@ -89,14 +150,15 @@ type ModelRouterThinkingField = "cheapThinking" | "mediumThinking" | "expensiveT
 
 /** Narrow seam for persisting a probed model's role — matches the fitness-role test. */
 export interface AssignRoleHost {
-	readonly settingsManager: SettingsManager;
+	readonly settingsManager: LocalModelCommandsSettingsSource;
 	showStatus(message: string): void;
 }
 
 /** Seam for the fitness probe + role-selector flow — matches the fitness-probe-gate test. */
 export interface RunFitnessHost {
-	readonly session: Pick<AgentSession, "probeToolCalling" | "runModelFitness"> & { modelRegistry?: ModelRegistry };
-	readonly settingsManager: SettingsManager;
+	readonly session: Pick<AgentSession, "probeToolCalling" | "runModelFitness">;
+	readonly modelRegistry?: LocalModelCommandsModelSource;
+	readonly settingsManager: LocalModelCommandsSettingsSource;
 	readonly chatContainer: Container;
 	readonly ui: TUI;
 	showStatus(message: string): void;
@@ -108,7 +170,8 @@ export interface RunFitnessHost {
 export interface LocalModelHost {
 	readonly localRuntime: OllamaRuntime;
 	readonly session: AgentSession;
-	readonly settingsManager: SettingsManager;
+	readonly modelRegistry: ModelRegistry;
+	readonly settingsManager: LocalModelCommandsSettingsSource;
 	readonly ui: TUI;
 	readonly chatContainer: Container;
 	getTransformersRuntime(modelId: string, baseUrl?: string): TransformersRuntime;
@@ -223,7 +286,7 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 		if (action === "stop") {
 			const stopped = host.localRuntime.stop();
 			let stoppedTransformers = 0;
-			for (const model of host.session.modelRegistry
+			for (const model of host.modelRegistry
 				.getAll()
 				.filter((entry) => entry.provider === HF_TRANSFORMERS_PROVIDER)) {
 				const serverUrl = model.baseUrl.replace(/\/v1\/?$/, "");
@@ -233,7 +296,7 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 			// never construct/stop it on a session that never used one. isPiManagedPrismLlamaCppModel
 			// is the SAME discriminator the readiness gate uses, so this never reaches for a user's own
 			// hand-configured llama-cpp entry (e.g. the built-in llama-cpp/local catalog model).
-			const hasPiManagedPrismModel = host.session.modelRegistry
+			const hasPiManagedPrismModel = host.modelRegistry
 				.getAll()
 				.some((entry) => isPiManagedPrismLlamaCppModel(entry));
 			const stoppedPrism = hasPiManagedPrismModel && getPrismLlamaCppRuntime(host).stop().stopped;
@@ -390,7 +453,7 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 				host.showStatus(`Usage: /models ${action} <ollama | llamacpp | transformers>`);
 				return;
 			}
-			host.session.settingsManager.setLocalRuntimeEnabled(runtime, action === "enable");
+			host.settingsManager.setLocalRuntimeEnabled(runtime, action === "enable");
 			host.showStatus(`Local runtime ${runtime} is now ${action}d.`);
 			return;
 		}
@@ -451,7 +514,7 @@ export async function listLocalModels(host: LocalModelHost): Promise<void> {
 					: host.localRuntime.installGuide().map((line) => `  ${line}`)),
 			];
 	const fitness = FitnessStore.forAgentDir(getAgentDir()).getForHost();
-	const transformersModels = host.session.modelRegistry
+	const transformersModels = host.modelRegistry
 		.getAll()
 		.filter((model) => model.provider === HF_TRANSFORMERS_PROVIDER);
 	const transformersLines = await Promise.all(
@@ -544,7 +607,7 @@ export async function addLocalModel(host: LocalModelHost, pullRef: string, prese
 		}
 		return;
 	}
-	host.session.modelRegistry.refresh();
+	host.modelRegistry.refresh();
 	host.showStatus(`${pullRef} installed and registered as ollama/${registeredRef}. Probing fitness…`);
 	await runFitnessAndAssign(host, `ollama/${registeredRef}`, preselectRole);
 }
@@ -594,7 +657,7 @@ export async function addTransformersModel(
 		}
 		return;
 	}
-	host.session.modelRegistry.refresh();
+	host.modelRegistry.refresh();
 	host.showStatus(
 		`${modelId} installed in pi-managed Transformers and registered as ${HF_TRANSFORMERS_PROVIDER}/${modelId}. Probing fitness…`,
 	);
@@ -664,7 +727,7 @@ export async function addPrismLlamaCppModel(
 		}
 		return;
 	}
-	host.session.modelRegistry.refresh();
+	host.modelRegistry.refresh();
 	host.showStatus(
 		`${descriptor.displayName} installed and registered as ${PRISM_LLAMACPP_PROVIDER}/${modelId}. Probing fitness…`,
 	);
@@ -706,7 +769,7 @@ export async function removeLocalModel(host: LocalModelHost, ref: string, confir
 	}
 	unregisterLocalModel({ agentDir: getAgentDir(), ref });
 	FitnessStore.forAgentDir(getAgentDir()).remove(`ollama/${ref}`);
-	host.session.modelRegistry.refresh();
+	host.modelRegistry.refresh();
 	host.showStatus(`${ref} removed: weights deleted, registration and fitness report dropped.`);
 }
 
@@ -723,7 +786,7 @@ async function performRegistrationDrop(
 		return;
 	}
 	FitnessStore.forAgentDir(getAgentDir()).remove(`${provider}/${modelId}`);
-	host.session.modelRegistry.refresh();
+	host.modelRegistry.refresh();
 	host.showStatus(successMessage);
 }
 
@@ -885,7 +948,7 @@ async function uninstallPrismLlamaCppModel(host: LocalModelHost, modelId: string
 		return;
 	}
 	FitnessStore.forAgentDir(getAgentDir()).remove(`${PRISM_LLAMACPP_PROVIDER}/${modelId}`);
-	host.session.modelRegistry.refresh();
+	host.modelRegistry.refresh();
 	host.showStatus(
 		`${modelId} uninstalled: GGUF weights deleted (${gb} GB), registration and fitness dropped.` +
 			(stopped.stopped ? " Its llama-server was stopped." : ""),
@@ -1114,7 +1177,7 @@ export function showFitnessModelSelector(host: LocalModelHost): void {
 			host.ui,
 			host.session.model,
 			host.settingsManager,
-			host.session.modelRegistry,
+			host.modelRegistry,
 			host.session.scopedModels,
 			async (model) => {
 				done();
@@ -1130,7 +1193,10 @@ export function showFitnessModelSelector(host: LocalModelHost): void {
 }
 
 /** Resolve the routed model's supported thinking levels for a fitness-assignment flow, with a safe fallback. */
-function getModelThinkingLevels(modelRegistry: ModelRegistry | undefined, modelRef: string): ThinkingLevel[] {
+function getModelThinkingLevels(
+	modelRegistry: LocalModelCommandsModelSource | undefined,
+	modelRef: string,
+): ThinkingLevel[] {
 	if (!modelRegistry) {
 		return [...MODEL_ROUTER_THINKING_FALLBACK_LEVELS];
 	}
@@ -1163,7 +1229,7 @@ function promptForModelRouterThinking(host: RunFitnessHost, modelRef: string, ro
 		return;
 	}
 
-	const modelRegistry = host.session.modelRegistry;
+	const modelRegistry = host.modelRegistry;
 	const availableLevels = getModelThinkingLevels(modelRegistry, modelRef);
 	const settings = host.settingsManager.getModelRouterSettings();
 	const configuredThinking = settings[thinkingField];

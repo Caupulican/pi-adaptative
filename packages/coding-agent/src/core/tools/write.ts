@@ -1,9 +1,8 @@
 import { mkdir as fsMkdir, writeFile as fsWriteFile } from "node:fs/promises";
-import { type AgentTool, createAgentToolFailureRecoveryAuthority } from "@caupulican/pi-agent-core/types";
 import { Container, Text } from "@caupulican/pi-tui";
-import { type Static, Type } from "typebox";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
-import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
+import { type AgentTool, createAgentToolFailureRecoveryAuthority } from "../../kernel/types.ts";
+import { keyHint } from "../../presentation/keybinding-hints.ts";
+import { getLanguageFromPath, highlightCode, type Theme } from "../../presentation/theme-model.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import {
 	FILE_MISSING_CREATE_RECOVERY_TARGET_KIND,
@@ -20,46 +19,9 @@ import {
 } from "./file-mutation-intent.ts";
 import { trimTrailingEmptyLines } from "./read.ts";
 import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render-utils.ts";
+import { type WriteOperations, type WriteToolDetails, type WriteToolInput, writeSchema } from "./schemas/write.ts";
 import { assertNoNulInWriteContent } from "./text-nul-guard.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
-
-const writePathSchema = Type.String({ minLength: 1 });
-const writeSchema = Type.Union([
-	Type.Object(
-		{
-			path: writePathSchema,
-			content: Type.String(),
-		},
-		{ additionalProperties: false },
-	),
-	Type.Object(
-		{
-			path: writePathSchema,
-			contentRef: Type.String({ minLength: 1 }),
-		},
-		{ additionalProperties: false },
-	),
-	Type.Object(
-		{
-			path: writePathSchema,
-			payloadRef: Type.String({ minLength: 1 }),
-		},
-		{ additionalProperties: false },
-	),
-]);
-
-export type WriteToolInput = Static<typeof writeSchema>;
-
-/**
- * Pluggable operations for the write tool.
- * Override these to delegate file writing to remote systems (for example SSH).
- */
-export interface WriteOperations {
-	/** Atomically create a new file and fail if any entry already occupies the path. */
-	createFile: (absolutePath: string, content: string) => Promise<void>;
-	/** Create directory recursively */
-	mkdir: (dir: string) => Promise<void>;
-}
 
 const defaultWriteOperations: WriteOperations = {
 	createFile: (path, content) => fsWriteFile(path, content, { encoding: "utf-8", flag: "wx" }),
@@ -73,12 +35,6 @@ export interface WriteToolOptions {
 	failureRecoveryAuthority?: FileFailureRecoveryAuthority;
 	/** Session-owned harness preflight and exact-content-reference authority. */
 	intentController?: FileMutationIntentController;
-}
-
-export interface WriteToolDetails {
-	phase: "written";
-	contentRef?: string;
-	byteCount?: number;
 }
 
 type WriteHighlightCache = {

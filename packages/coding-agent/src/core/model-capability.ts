@@ -16,11 +16,10 @@ import {
 	supportsToolSchemaDisclosure,
 	TOOL_SCHEMA_SEARCH_NAME,
 } from "@caupulican/pi-ai";
+import type { ModelCapabilityClass } from "./capability-tier.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
 import type { ModelToolProtocolResolution } from "./model-tool-protocol.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
-
-export type ModelCapabilityClass = "full" | "lean" | "minimal" | "chat";
 
 export type ModelCapabilityMode = "auto" | "off" | ModelCapabilityClass;
 

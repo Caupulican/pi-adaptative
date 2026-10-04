@@ -3,7 +3,7 @@
  * ExecutionStore is not a second authority: hydrate it from this before every System One stage.
  */
 
-import type { VerificationObligationView } from "@caupulican/pi-agent-core/verification-obligations";
+import type { VerificationObligationView } from "../../kernel/verification-obligations.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";

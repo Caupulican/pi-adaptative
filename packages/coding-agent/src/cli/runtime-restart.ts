@@ -107,6 +107,6 @@ export async function bindInteractiveRuntimeRestart(runtime: AgentSessionRuntime
 		stop() {},
 	};
 	runtime.registerSessionResource(resource);
-	await resource.start(runtime.session);
+	await resource.start(runtime.session, runtime);
 	await channel.send({ type: "ready" });
 }

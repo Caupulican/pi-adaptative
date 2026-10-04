@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { AgentTool } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { TSchema } from "typebox";
+import type { AgentTool } from "../../kernel/index.ts";
+import type { SessionManager } from "../../kernel/node.ts";
 import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { captureCandidateSnapshot } from "./candidate-snapshot.ts";

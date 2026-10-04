@@ -1,5 +1,5 @@
 import { fitToWidth, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 
 const FULL_RESET = "\x1b[0m";
 const BG_RESET = "\x1b[49m";

@@ -1,6 +1,6 @@
 import { accessSync, constants, mkdirSync, statSync } from "node:fs";
-import { assertExecutionAbsolutePath } from "@caupulican/pi-agent-core/paths";
 import { getAgentDir } from "../config.ts";
+import { assertExecutionAbsolutePath } from "../kernel/utils/paths.ts";
 import { ensureTool, getToolPath } from "../utils/tools-manager.ts";
 import { cacheFile, runtimesDir } from "./agent-paths.ts";
 import { execCommand } from "./exec.ts";

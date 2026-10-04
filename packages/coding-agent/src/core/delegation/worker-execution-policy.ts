@@ -17,7 +17,7 @@ import type {
 import { buildLaneToolManifests } from "../orchestration/lane-tool-manifests.ts";
 import { ExecutionPolicyCompiler } from "../orchestration/policy-compiler.ts";
 import { intersectRiskBudgets } from "../orchestration/risk-budget.ts";
-import type { ResolvedWorkerDelegationSettings } from "../settings-manager.ts";
+import type { ResolvedWorkerDelegationSettings } from "../settings/settings-schema.ts";
 import {
 	getToolCapabilityPolicy,
 	requiredEnvelopeCapabilities,

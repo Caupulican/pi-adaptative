@@ -1,7 +1,7 @@
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { checkSkillEvolutionEligibility } from "../session-skill-policy.ts";
-import type { SettingsManager } from "../settings-manager.ts";
+import type { AutoLearnSettings, AutonomySettings } from "../settings/settings-schema.ts";
 import {
 	MAX_LOADED_SKILLS,
 	MAX_PINNED_SKILLS,
@@ -14,6 +14,12 @@ import {
 	type SkillVaultController,
 	type SkillVaultStatus,
 } from "../skill-vault.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface SkillSettingsSource {
+	getAutoLearnSettings(): AutoLearnSettings;
+	getAutonomySettings(): Required<AutonomySettings>;
+}
 
 const skillLifecycleActions = [
 	Type.Literal("search"),
@@ -208,7 +214,7 @@ function statusText(result: SkillVaultStatus): string {
 }
 
 export interface SkillVaultToolOptions {
-	getSettingsManager?: () => SettingsManager | undefined;
+	getSettingsManager?: () => SkillSettingsSource | undefined;
 }
 
 /** One compact agent surface over the host-owned skill lifecycle. */

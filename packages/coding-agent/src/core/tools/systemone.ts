@@ -1,6 +1,6 @@
-import { compactRetainedDetails } from "@caupulican/pi-agent-core/message-retention";
 import type { Usage } from "@caupulican/pi-ai";
 import { type Static, Type } from "typebox";
+import { compactRetainedDetails } from "../../kernel/session/message-retention.ts";
 import { SYSTEM_ONE_VALIDATION_RULE } from "../provider-prompt-contracts.ts";
 import {
 	SystemOneReviewError,

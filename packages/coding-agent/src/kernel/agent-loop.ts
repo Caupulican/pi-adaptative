@@ -1,0 +1,2918 @@
+/**
+ * Agent loop that works with AgentMessage throughout.
+ * Transforms to Message[] only at the LLM call boundary.
+ */
+
+import { EventStream, isFirstTokenEvent } from "@caupulican/pi-ai/event-stream";
+import {
+	formatToolRepairStandingRule,
+	REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE,
+	type ToolFailurePhase,
+} from "@caupulican/pi-ai/tool-repair-registry";
+import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/types";
+import {
+	formatToolValidationEnrichment,
+	type ToolArgumentExecutionOutcome,
+	type ToolArgumentValidationTelemetryEvent,
+	validateToolArguments,
+} from "@caupulican/pi-ai/validation";
+import {
+	assistantMessageText,
+	collapseDegenerateAssistantMessage,
+	shouldAbortDegenerateStream,
+} from "./degenerate-assistant-text.ts";
+import type {
+	AgentContext,
+	AgentLoopConfig,
+	ProviderRequestPrefixState,
+	StreamFn,
+	ToolCallStartContext,
+	ToolCallStartReservation,
+} from "./loop-config.ts";
+import {
+	startPlannedAgentProviderRequest,
+	startPlannedAgentProviderRequestWithId,
+} from "./provider-request-planner.ts";
+import { boundedFailureCode } from "./tool-failure-code.ts";
+import {
+	assessToolFailure,
+	beginToolFailureBatch,
+	clearToolFailure,
+	createRepeatedToolFailureResult,
+	createToolFailureContextMemory,
+	createToolFailureMemoryTracker,
+	createToolFailureResult,
+	describeOperationOutcome,
+	getUnresolvedToolFailure,
+	normalizeToolSignature,
+	noteToolFailureInBatch,
+	readToolFailureOccurrence,
+	rememberToolFailure,
+	type ToolFailureContextMemory,
+	type ToolFailureMemoryTracker,
+	toolFailureCorrection,
+} from "./tool-failure-memory.ts";
+import {
+	ToolFailureRecoveryGate,
+	type ToolFailureRecoveryGateEffect,
+	type ToolFailureRecoveryReservation,
+} from "./tool-failure-recovery-gate.ts";
+import { readToolFailureTimeoutMs } from "./tool-failure-timeout.ts";
+import { type BoundToolInvocation, bindToolInvocation } from "./tool-invocation-binding.ts";
+import { retainedToolInvocation, stampToolInvocation } from "./tool-invocation-receipt.ts";
+import { ToolProgressDelivery } from "./tool-progress-delivery.ts";
+import { rejectNativeToolProtocolResidue, rejectToolCallsFromToolFreeResponse } from "./tool-protocol-residue.ts";
+import { ToolResultProgressTracker, toolResultBatchSignature } from "./tool-result-progress.ts";
+import type {
+	AgentEvent,
+	AgentMessage,
+	AgentRequestId,
+	AgentTool,
+	AgentToolCall,
+	AgentToolErrorKind,
+	AgentToolResult,
+	ToolCallRepairInfo,
+} from "./types.ts";
+import {
+	DEFAULT_MAX_PROVIDER_TURNS,
+	DEFAULT_MAX_REPEATED_FAILURES,
+	DEFAULT_MAX_STALL_TURNS,
+	describeThrownToolError,
+	safeErrorMessage,
+} from "./types.ts";
+import { createEmptyUsage } from "./usage.ts";
+import { sanitizeBinaryOutput } from "./utils/shell-output.ts";
+import { retainedVerificationDetails, VerificationObligationTracker } from "./verification-obligations.ts";
+
+export {
+	composeRequestSystemPrompt,
+	narrowRequestMaxTokens,
+	resolveRequestPreflightMaxTokens,
+} from "./provider-request-planner.ts";
+
+export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
+
+/** Bound simultaneous tool starts without imposing a failure-count or operation-count stop. */
+const DEFAULT_TOOL_CONCURRENCY = 4;
+const MIN_TOOL_CONCURRENCY = 1;
+const MAX_TOOL_CONCURRENCY = 16;
+
+/** Bounded no-progress state retained across host-owned continuations of one logical prompt. */
+export interface AgentLoopContinuationState {
+	providerTurns: number;
+	stallWindow: string[];
+	/** Optional for compatibility with continuation snapshots created before result-aware cycle detection. */
+	stagnantResultWindow?: string[];
+	toolResultProgress?: ToolResultProgressTracker;
+	toolFailureRecoveryGate: ToolFailureRecoveryGate;
+	/**
+	 * Shared holder for the two provider-request prefix high-water marks (see
+	 * {@link ProviderRequestPrefixState} and `provider-request-planner.ts` - do not collapse the two
+	 * marks it carries into one). Optional for compatibility with continuation snapshots created
+	 * before this field existed; `runLoop` creates one on first use and persists it back onto this
+	 * object, so a legacy snapshot degrades to "nothing sent yet" instead of throwing, and every
+	 * later turn on the SAME continuation state (including a host-driven `runAgentLoopContinue`
+	 * reusing it) keeps sharing the one holder.
+	 *
+	 * A fresh `AgentLoopContinuationState` is exactly the run boundary `sentPrefixCount` (the
+	 * pack-freeze mark) is scoped to - `createAgentLoopContinuationState` correctly zeroes it below.
+	 * `sanitizerSentPrefixCount` (the sanitizer mark) is scoped to something LONGER-LIVED than one
+	 * continuation state - see `initialSanitizerSentPrefixCount` below and `Agent.runPromptMessages`,
+	 * which is the only correct place to seed it from a persistent value instead of zero.
+	 */
+	providerRequestPrefixState?: ProviderRequestPrefixState;
+}
+
+/**
+ * @param initialSanitizerSentPrefixCount Starting value for the SESSION-scoped sanitizer mark (see
+ * `ProviderRequestPrefixState` in types.ts). Defaults to 0, correct for any caller with no session
+ * longer-lived than this one continuation state (direct `runAgentLoop`/`runAgentLoopContinue`
+ * callers, tests). `Agent` is the one caller that owns a longer-lived session and must pass its own
+ * persisted value here instead of accepting the default - see `Agent.runPromptMessages`.
+ */
+/**
+ * A run always carries one tool-failure fold memory: the sanitizer resumes it on every request and
+ * the loop's tracker seeds from it, so within a run each request folds only the messages appended
+ * since the previous one. Without it, every request of a raw `agentLoop` run re-folded the whole
+ * history -- a third of the per-turn profile at 600 turns. A host that keeps its continuation
+ * state across runs (`Agent`) passes its own memory and resumes across them as well.
+ */
+export function createAgentLoopContinuationState(
+	initialSanitizerSentPrefixCount = 0,
+	sanitizerMemory: ToolFailureContextMemory = createToolFailureContextMemory(),
+	initialSentPrefixCount = 0,
+): AgentLoopContinuationState {
+	return {
+		providerTurns: 0,
+		stallWindow: [],
+		stagnantResultWindow: [],
+		toolResultProgress: new ToolResultProgressTracker(),
+		toolFailureRecoveryGate: new ToolFailureRecoveryGate(),
+		providerRequestPrefixState: {
+			// Seeded from the previous run: a run that starts at zero lets the context GC repack
+			// everything already sent, which was measured live as the prompt halving and the prefix
+			// cache missing at the head on every user, reflection and continuation turn.
+			sentPrefixCount: initialSentPrefixCount,
+			sanitizerSentPrefixCount: initialSanitizerSentPrefixCount,
+			sanitizerMemory,
+		},
+	};
+}
+
+/**
+ * Start an agent loop with a new prompt message.
+ * The prompt is added to the context and events are emitted for it.
+ */
+export function agentLoop(
+	prompts: AgentMessage[],
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal?: AbortSignal,
+	streamFn?: StreamFn,
+): EventStream<AgentEvent, AgentMessage[]> {
+	return streamAgentLoop(config, signal, (emit) => runAgentLoop(prompts, context, config, emit, signal, streamFn));
+}
+
+/**
+ * Continue an agent loop from the current context without adding a new message.
+ * Used for retries - context already has user message or tool results.
+ *
+ * **Important:** The last message in context must convert to a `user` or `toolResult` message
+ * via `convertToLlm`. If it doesn't, the LLM provider will reject the request.
+ * This cannot be validated here since `convertToLlm` is only called once per turn.
+ */
+export function agentLoopContinue(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal?: AbortSignal,
+	streamFn?: StreamFn,
+): EventStream<AgentEvent, AgentMessage[]> {
+	assertContinuableContext(context);
+
+	return streamAgentLoop(config, signal, (emit) => runAgentLoopContinue(context, config, emit, signal, streamFn));
+}
+
+function streamAgentLoop(
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	run: (emit: AgentEventSink) => Promise<AgentMessage[]>,
+): EventStream<AgentEvent, AgentMessage[]> {
+	const stream = createAgentStream();
+	void run(async (event) => {
+		stream.push(event);
+	})
+		.catch(async (error) => {
+			const messages = [createLoopFailureMessage(error, config, signal?.aborted ?? false, signal?.reason)];
+			stream.push({ type: "agent_end", messages });
+			return messages;
+		})
+		.then((messages) => {
+			stream.end(messages);
+		});
+
+	return stream;
+}
+
+export async function runAgentLoop(
+	prompts: AgentMessage[],
+	context: AgentContext,
+	config: AgentLoopConfig,
+	emit: AgentEventSink,
+	signal?: AbortSignal,
+	streamFn?: StreamFn,
+	continuationState: AgentLoopContinuationState = createAgentLoopContinuationState(),
+): Promise<AgentMessage[]> {
+	const newMessages: AgentMessage[] = [...prompts];
+	const currentContext: AgentContext = {
+		...context,
+		messages: [...context.messages, ...prompts],
+	};
+
+	await emit({ type: "agent_start" });
+	if (providerTurnLimitReached(config, continuationState)) {
+		for (const prompt of prompts) {
+			await emit({ type: "message_start", message: prompt });
+			await emit({ type: "message_end", message: prompt });
+		}
+		await emitProviderTurnLimitStop(config, continuationState, newMessages, emit);
+		return newMessages;
+	}
+	await emit({ type: "turn_start" });
+	for (const prompt of prompts) {
+		await emit({ type: "message_start", message: prompt });
+		await emit({ type: "message_end", message: prompt });
+	}
+
+	await runLoop(currentContext, newMessages, config, signal, emit, streamFn, continuationState);
+	return newMessages;
+}
+
+export async function runAgentLoopContinue(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	emit: AgentEventSink,
+	signal?: AbortSignal,
+	streamFn?: StreamFn,
+	continuationState: AgentLoopContinuationState = createAgentLoopContinuationState(),
+): Promise<AgentMessage[]> {
+	assertContinuableContext(context);
+
+	const newMessages: AgentMessage[] = [];
+	const currentContext: AgentContext = { ...context, messages: [...context.messages] };
+
+	await emit({ type: "agent_start" });
+	if (providerTurnLimitReached(config, continuationState)) {
+		await emitProviderTurnLimitStop(config, continuationState, newMessages, emit);
+		return newMessages;
+	}
+	await emit({ type: "turn_start" });
+
+	await runLoop(currentContext, newMessages, config, signal, emit, streamFn, continuationState);
+	return newMessages;
+}
+
+function assertContinuableContext(context: AgentContext): void {
+	if (context.messages.length === 0) {
+		throw new Error("Cannot continue: no messages in context");
+	}
+
+	if (context.messages[context.messages.length - 1].role === "assistant") {
+		throw new Error("Cannot continue from message role: assistant");
+	}
+}
+
+/**
+ * A named abort (`agent.abort("send now")`) keeps its name in the aborted message so a transcript
+ * can tell it from Escape. Unnamed aborts and non-abort failures keep their message as is.
+ */
+export function abortedErrorMessage(
+	base: string | undefined,
+	aborted: boolean,
+	abortReason: unknown,
+): string | undefined {
+	if (!aborted || typeof abortReason !== "string" || abortReason.length === 0) return base;
+	const text = base ?? "Operation aborted";
+	return text === abortReason ? `Operation aborted (${abortReason})` : `${text} (${abortReason})`;
+}
+
+function createLoopFailureMessage(
+	error: unknown,
+	config: AgentLoopConfig,
+	aborted: boolean,
+	abortReason?: unknown,
+): AssistantMessage {
+	const errorMessage = abortedErrorMessage(describeThrownToolError(error).message, aborted, abortReason);
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "" }],
+		api: config.model.api,
+		provider: config.model.provider,
+		model: config.model.id,
+		usage: createEmptyUsage(),
+		stopReason: aborted ? "aborted" : "error",
+		errorMessage,
+		timestamp: Date.now(),
+	};
+}
+
+function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
+	return new EventStream<AgentEvent, AgentMessage[]>(
+		(event: AgentEvent) => event.type === "agent_end",
+		(event: AgentEvent) => (event.type === "agent_end" ? event.messages : []),
+	);
+}
+
+function providerTurnLimitReached(config: AgentLoopConfig, continuationState: AgentLoopContinuationState): boolean {
+	const limit = config.maxProviderTurns ?? DEFAULT_MAX_PROVIDER_TURNS;
+	return limit > 0 && continuationState.providerTurns >= limit;
+}
+
+async function emitProviderTurnLimitStop(
+	config: AgentLoopConfig,
+	continuationState: AgentLoopContinuationState,
+	newMessages: AgentMessage[],
+	emit: AgentEventSink,
+): Promise<void> {
+	config.onRunawayStop?.({
+		reason: "provider_turn_limit",
+		signature: "provider_turn_limit",
+		repeats: continuationState.providerTurns,
+	});
+	await emit({ type: "agent_end", messages: newMessages });
+}
+
+/**
+ * Maximum exact cycle width inspected by the runaway-loop backstop. Detection requires the complete
+ * suffix pattern to repeat `stallLimit` times; recurring housekeeping calls among distinct productive
+ * operations therefore never look like a loop merely because one signature is frequent.
+ */
+const STALL_WINDOW_PERIODS = 4;
+
+/** Identical observable results make a repeated cycle conclusive well before the coarse call-only fuse. */
+const STAGNANT_RESULT_REPEAT_LIMIT = 3;
+
+function repeatsToolCallPattern(stallWindow: readonly string[], stallLimit: number): boolean {
+	if (stallLimit <= 0) return false;
+	const maxPeriod = Math.min(STALL_WINDOW_PERIODS, Math.floor(stallWindow.length / stallLimit));
+	for (let period = 1; period <= maxPeriod; period++) {
+		const requiredTurns = period * stallLimit;
+		const start = stallWindow.length - requiredTurns;
+		let matches = true;
+		for (let offset = period; offset < requiredTurns; offset++) {
+			if (stallWindow[start + offset] !== stallWindow[start + (offset % period)]) {
+				matches = false;
+				break;
+			}
+		}
+		if (matches) return true;
+	}
+	return false;
+}
+
+function textProtocolOperationArguments(toolCall: AgentToolCall): unknown {
+	const args: unknown = toolCall.arguments;
+	if (!args || typeof args !== "object" || Array.isArray(args)) return args ?? null;
+	const record = args as Record<string, unknown>;
+	if ((toolCall.name === "write" || toolCall.name === "edit") && typeof record.path === "string") {
+		return { path: record.path };
+	}
+	return args;
+}
+
+function textProtocolBatchSignature(toolCalls: readonly AgentToolCall[]): string {
+	return normalizeToolSignature(
+		toolCalls.map((toolCall) => [toolCall.name, textProtocolOperationArguments(toolCall)]),
+	);
+}
+
+/** The most-repeated failure key among this turn's results, as the ledger counted it. */
+function mostRepeatedToolFailure(
+	toolResults: readonly ToolResultMessage[],
+): { failureKey: string; occurrence: number; diagnostic?: string } | undefined {
+	let worst: { failureKey: string; occurrence: number; diagnostic?: string } | undefined;
+	for (const result of toolResults) {
+		if (result.isError !== true) continue;
+		const occurrence = readToolFailureOccurrence(result.details);
+		if (occurrence && (!worst || occurrence.occurrence > worst.occurrence)) worst = occurrence;
+	}
+	return worst;
+}
+
+function toolCallRecord(toolCall: AgentToolCall): Record<string, unknown> | undefined {
+	const args: unknown = toolCall.arguments;
+	return args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined;
+}
+
+function toolResultPhase(result: ToolResultMessage): string | undefined {
+	if (!result.details || typeof result.details !== "object" || Array.isArray(result.details)) return undefined;
+	const phase = (result.details as Record<string, unknown>).phase;
+	return typeof phase === "string" ? phase : undefined;
+}
+
+function repeatsSuccessfulTextProtocolBatch(
+	incomingSignature: string,
+	toolCalls: readonly AgentToolCall[],
+	previous: SuccessfulTextProtocolBatch | undefined,
+): boolean {
+	if (!previous) return false;
+	if (incomingSignature === previous.signature) return true;
+	if (toolCalls.length !== previous.calls.length || toolCalls.length !== previous.messages.length) return false;
+	return toolCalls.every((toolCall, index) => {
+		const previousCall = previous.calls[index];
+		const previousResult = previous.messages[index];
+		if (!previousCall || !previousResult) return false;
+		const currentArgs = toolCallRecord(toolCall);
+		const previousArgs = toolCallRecord(previousCall);
+		if (currentArgs?.path !== previousArgs?.path) return false;
+		const phase = toolResultPhase(previousResult);
+		if (phase === "written") return toolCall.name === "write" && previousCall.name === "write";
+		return phase === "edited" && toolCall.name === "edit" && previousCall.name === "edit";
+	});
+}
+
+/**
+ * Main loop logic shared by agentLoop and agentLoopContinue.
+ */
+async function runLoop(
+	initialContext: AgentContext,
+	newMessages: AgentMessage[],
+	initialConfig: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	streamFn?: StreamFn,
+	continuationState: AgentLoopContinuationState = createAgentLoopContinuationState(),
+): Promise<void> {
+	let currentContext = initialContext;
+	let config = initialConfig;
+	let firstTurn = true;
+	// Runaway-loop backstop state: a sliding window of recent NORMALIZED tool-call signatures. A model
+	// wedged repeating the same action makes no progress but keeps spending tokens; if one signature
+	// recurs `stallLimit` times within the window we stop gracefully. Signatures are normalized so
+	// volatile args (timestamps/UUIDs/nonces that change every call) can't disguise an otherwise-
+	// identical call (bug #28). The window spans `stallLimit * STALL_WINDOW_PERIODS` turns so periodic
+	// oscillation is caught too, not just back-to-back repeats: a cycle of period P repeats each
+	// signature ~window/P times, so any P up to STALL_WINDOW_PERIODS reaches the threshold before the
+	// window slides past it. Counts only turns that issued tool calls, so varied/long work never trips
+	// it. `0` disables.
+	const stallLimit = config.maxStallTurns ?? DEFAULT_MAX_STALL_TURNS;
+	const providerTurnLimit = config.maxProviderTurns ?? DEFAULT_MAX_PROVIDER_TURNS;
+	const stallWindow = continuationState.stallWindow;
+	continuationState.toolResultProgress ??= new ToolResultProgressTracker();
+	const toolResultProgress = continuationState.toolResultProgress;
+	let stagnantResultWindow = continuationState.stagnantResultWindow;
+	if (stagnantResultWindow === undefined) {
+		stagnantResultWindow = [];
+		continuationState.stagnantResultWindow = stagnantResultWindow;
+	}
+	let providerRequestPrefixState = continuationState.providerRequestPrefixState;
+	if (providerRequestPrefixState === undefined) {
+		providerRequestPrefixState = {
+			sentPrefixCount: 0,
+			sanitizerSentPrefixCount: 0,
+			sanitizerMemory: createToolFailureContextMemory(),
+		};
+		continuationState.providerRequestPrefixState = providerRequestPrefixState;
+	}
+	// Announce a transient record `provider-request-planner.ts` just committed to durable history, on
+	// THIS run's own `emit` - the same `message_start`/`message_end` pairing `pendingMessages` below
+	// uses, so a host's existing message persistence (whatever already keeps its transcript in sync
+	// with `message_end`) picks a committed record up without new host-side code. See
+	// `onTransientRecordsCommitted`'s doc comment in types.ts for why this needs to exist at all: a
+	// record folded only into `sourceContext.messages` survives THIS run but is invisible to a host
+	// that rebuilds its own snapshot from its own persisted transcript between turns.
+	//
+	// Also pushes onto `newMessages` (this run's own "what did I add" record, returned from
+	// `agentLoop`/`agentLoopContinue` and used to seed the next turn - see its declaration in the
+	// caller) - not just `currentContext.messages`, which `provider-request-planner.ts`'s
+	// `adoptReplannedMessages` already keeps in sync via `sourceContext`, so pushing there too would
+	// duplicate the entry. Before this, `newMessages` silently disagreed with this run's OWN event
+	// stream about what was added: anything committed only into `sourceContext.messages` (every
+	// transient record) was invisible to `newMessages` while fully visible via `message_end`. Harmless
+	// while nothing distinguished the two views; a real defect once something did - a consumer that
+	// builds its own transcript by listening to `message_end` (as a worker's completion-callback
+	// evidence check does) legitimately expects it to match what this same run officially returned as
+	// new, and a mismatch there is this run's own inconsistency, not that consumer's to special-case
+	// around.
+	const emitCommittedTransientRecords = async (records: AgentMessage[]): Promise<void> => {
+		for (const message of records) {
+			await emit({ type: "message_start", message });
+			await emit({ type: "message_end", message });
+			newMessages.push(message);
+		}
+	};
+	// Inject once, before the first request: every later `config = {...config, ...}` clone below
+	// (the `prepareNextTurn` model/reasoning swap) copies both references forward unchanged, so the
+	// "already sent" mark in provider-request-planner.ts survives a config clone instead of resetting
+	// to 0 on every turn a host's `prepareNextTurn` touches (see `ProviderRequestPrefixState`), and the
+	// commit-announcement hook stays bound to THIS run's `emit` rather than reverting to whatever (if
+	// anything) `initialConfig` held.
+	config = {
+		...config,
+		providerRequestPrefixState,
+		onTransientRecordsCommitted: emitCommittedTransientRecords,
+		toolArgumentRepairEnabled: !isToolArgumentRepairEmergencyDisabled(),
+	};
+	const validationFailureTracker: ToolValidationFailureTracker = new Map();
+	const repairTeachTracker: ToolRepairTeachTracker = new Map();
+	let toolFailureMemory = createToolFailureMemoryTracker(
+		currentContext.messages,
+		providerRequestPrefixState.sanitizerMemory,
+		providerRequestPrefixState.sanitizerSentPrefixCount,
+	);
+	const verificationObligations = new VerificationObligationTracker(currentContext.messages);
+	const toolFailureRecoveryGate = continuationState.toolFailureRecoveryGate;
+	toolFailureRecoveryGate.restoreFromMessages(currentContext.messages, currentContext.tools);
+	let lastSuccessfulTextProtocolBatch: SuccessfulTextProtocolBatch | undefined;
+	let previousAssistantForDegenerateCollapse: AssistantMessage | undefined;
+	// Check for steering messages at start (user may have typed while waiting)
+	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
+	const processPendingMessages = async (): Promise<void> => {
+		if (pendingMessages.length === 0) return;
+		lastSuccessfulTextProtocolBatch = undefined;
+		// Only an owner/user turn can change authority or intent. Internal custom steering and
+		// follow-up messages must not re-admit a known-bad unchanged operation. Count every owner
+		// message so live admission stays byte-for-byte aligned with transcript restoration.
+		for (const message of pendingMessages) {
+			if (message.role === "user") {
+				toolFailureRecoveryGate.noteWorldAdvance();
+				// An owner turn mid-run is a new subject: earlier failures stay active but stop
+				// marking this subject's answer as unresolved (see beginSubject).
+				verificationObligations.beginSubject();
+			}
+			await emit({ type: "message_start", message });
+			await emit({ type: "message_end", message });
+			currentContext.messages.push(message);
+			newMessages.push(message);
+			verificationObligations.record([message]);
+		}
+		previousAssistantForDegenerateCollapse = undefined;
+		pendingMessages = [];
+	};
+
+	// Outer loop: continues when queued follow-up messages arrive after agent would stop
+	while (true) {
+		let hasMoreToolCalls = true;
+
+		// Inner loop: process tool calls and steering messages
+		while (hasMoreToolCalls || pendingMessages.length > 0) {
+			if (providerTurnLimit > 0 && continuationState.providerTurns >= providerTurnLimit) {
+				// Preserve already-dequeued steering, but do not announce an assistant turn that will
+				// never start. A turn is one provider response plus its tools/results.
+				await processPendingMessages();
+				await emitProviderTurnLimitStop(config, continuationState, newMessages, emit);
+				return;
+			}
+			// A host halt: keep what was already dequeued, tell the model why it stopped, and spend one
+			// tool-free request on its own report. Checked before turn_start because the closing turn
+			// opens its own.
+			const haltRequest = config.getHaltRequest?.();
+			if (haltRequest) {
+				await processPendingMessages();
+				// A host re-attempting this run after a transient failure hands the same request back over a
+				// transcript that already carries it: the model is told once, not once per attempt.
+				const lastUser = currentContext.messages.findLast((message) => message.role === "user");
+				if (lastUser?.content !== haltRequest.userMessage) {
+					const haltMessage: AgentMessage = {
+						role: "user",
+						content: haltRequest.userMessage,
+						timestamp: Date.now(),
+					};
+					await emit({ type: "message_start", message: haltMessage });
+					await emit({ type: "message_end", message: haltMessage });
+					currentContext.messages.push(haltMessage);
+					newMessages.push(haltMessage);
+				}
+				await streamToollessClosingTurn(
+					currentContext,
+					newMessages,
+					config,
+					continuationState,
+					providerTurnLimit,
+					signal,
+					emit,
+					streamFn,
+					previousAssistantForDegenerateCollapse,
+					verificationObligations,
+					haltRequest.closingPrompt,
+					true,
+				);
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
+			if (!firstTurn) {
+				await emit({ type: "turn_start" });
+			} else {
+				firstTurn = false;
+			}
+
+			// Process pending messages (inject before next assistant response).
+			await processPendingMessages();
+			continuationState.providerTurns++;
+			// Obligation instructions ride the trailing region (see `AgentContext.trailingInstruction`
+			// and `provider-request-planner.ts`), never `systemPrompt`: that set changes as obligations
+			// appear and resolve, and systemPrompt sits at byte zero of the request, where a change
+			// invalidates the provider's cached prefix for the whole conversation.
+			const requestContext: AgentContext = {
+				...currentContext,
+				trailingInstruction: verificationObligations.requestInstruction(),
+			};
+			const response = await streamAssistantResponse(
+				requestContext,
+				config,
+				signal,
+				emit,
+				streamFn,
+				{
+					verificationObligations,
+				},
+				previousAssistantForDegenerateCollapse,
+			);
+			const message = response.message;
+			previousAssistantForDegenerateCollapse = response.comparisonMessage;
+			newMessages.push(message);
+
+			if (message.stopReason === "error" || message.stopReason === "aborted") {
+				await emit({ type: "turn_end", message, toolResults: [] });
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
+
+			// Check for tool calls
+			const toolCalls = message.content.filter((c) => c.type === "toolCall");
+
+			const toolResults: ToolResultMessage[] = [];
+			hasMoreToolCalls = false;
+			if (toolCalls.length > 0) {
+				const textProtocolBatch = toolCalls.every((toolCall) => toolCall.source === "text-protocol");
+				const incomingBatchSignature = textProtocolBatchSignature(toolCalls);
+				const previousSuccessfulTextProtocolResults =
+					textProtocolBatch &&
+					repeatsSuccessfulTextProtocolBatch(incomingBatchSignature, toolCalls, lastSuccessfulTextProtocolBatch)
+						? lastSuccessfulTextProtocolBatch?.messages
+						: undefined;
+				const executedToolBatch = await executeToolCalls(
+					currentContext,
+					message,
+					response.requestId,
+					config,
+					validationFailureTracker,
+					repairTeachTracker,
+					toolFailureMemory,
+					toolFailureRecoveryGate,
+					previousSuccessfulTextProtocolResults,
+					signal,
+					emit,
+				);
+				toolResults.push(...executedToolBatch.messages);
+				hasMoreToolCalls = !executedToolBatch.terminate;
+
+				for (const result of toolResults) {
+					currentContext.messages.push(result);
+					newMessages.push(result);
+				}
+				verificationObligations.record(toolResults);
+				if (executedToolBatch.failure || signal?.aborted) {
+					const failure = createLoopFailureMessage(
+						executedToolBatch.failure?.cause ?? signal?.reason,
+						config,
+						signal?.aborted ?? false,
+						signal?.reason,
+					);
+					await emit({ type: "message_start", message: failure, origin: "local" });
+					await emit({ type: "message_end", message: failure, origin: "local" });
+					newMessages.push(failure);
+					await emit({ type: "turn_end", message: failure, toolResults });
+					await emit({ type: "agent_end", messages: newMessages });
+					return;
+				}
+				if (!previousSuccessfulTextProtocolResults || toolResults.every((result) => !result.isError)) {
+					lastSuccessfulTextProtocolBatch =
+						textProtocolBatch &&
+						toolResults.length === toolCalls.length &&
+						toolResults.every((result) => !result.isError)
+							? {
+									signature: textProtocolBatchSignature(toolCalls),
+									messages: toolResults,
+									calls: toolCalls,
+								}
+							: undefined;
+				}
+			} else {
+				lastSuccessfulTextProtocolBatch = undefined;
+			}
+			// A verification THIS run failed must end in a readable handoff, not a silent terminal
+			// batch; obligations inherited from earlier runs stay listed and block goal completion only.
+			const verificationBlocksCompletion = verificationObligations.getIdsOpenedThisRun().length > 0;
+			if (verificationBlocksCompletion) hasMoreToolCalls = true;
+
+			await emit({ type: "turn_end", message, toolResults });
+
+			// One call failing identically N times ends the run, whatever else rode in its batches:
+			// keyed on the ledger's own count, not on batch or result-text repetition.
+			const repeatLimit = config.maxRepeatedFailures ?? DEFAULT_MAX_REPEATED_FAILURES;
+			const repeated = repeatLimit > 0 && toolCalls.length > 0 ? mostRepeatedToolFailure(toolResults) : undefined;
+			if (repeated && repeated.occurrence >= repeatLimit) {
+				config.onRunawayStop?.({
+					reason: "repeated_tool_call",
+					signature: repeated.failureKey,
+					repeats: repeated.occurrence,
+					...(repeated.diagnostic ? { detail: repeated.diagnostic } : {}),
+				});
+				await streamToollessClosingTurn(
+					currentContext,
+					newMessages,
+					config,
+					continuationState,
+					providerTurnLimit,
+					signal,
+					emit,
+					streamFn,
+					previousAssistantForDegenerateCollapse,
+					verificationObligations,
+				);
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
+
+			// Runaway-loop backstop (cost guard): detect only a repeated suffix cycle. Counting
+			// signatures anywhere in the window falsely stopped progressing workflows whose status
+			// checks recurred among distinct edits, reads, and verification operations.
+			if (stallLimit > 0 && toolCalls.length > 0) {
+				const signature = normalizeToolSignature(toolCalls.map((c) => [c.name, c.arguments ?? null]));
+				const stagnantSignature = `${signature}:${toolResultBatchSignature(toolResults)}`;
+				stagnantResultWindow.push(stagnantSignature);
+				if (stagnantResultWindow.length > STAGNANT_RESULT_REPEAT_LIMIT * STALL_WINDOW_PERIODS) {
+					stagnantResultWindow.shift();
+				}
+				const unchangedBatches = toolResultProgress.observe(toolCalls, toolResults);
+				if (
+					repeatsToolCallPattern(stagnantResultWindow, STAGNANT_RESULT_REPEAT_LIMIT) ||
+					unchangedBatches >= STAGNANT_RESULT_REPEAT_LIMIT
+				) {
+					config.onRunawayStop?.({
+						reason: "stagnant_tool_cycle",
+						signature,
+						repeats: STAGNANT_RESULT_REPEAT_LIMIT,
+					});
+					await streamToollessClosingTurn(
+						currentContext,
+						newMessages,
+						config,
+						continuationState,
+						providerTurnLimit,
+						signal,
+						emit,
+						streamFn,
+						previousAssistantForDegenerateCollapse,
+						verificationObligations,
+					);
+					await emit({ type: "agent_end", messages: newMessages });
+					return;
+				}
+
+				stallWindow.push(signature);
+				if (stallWindow.length > stallLimit * STALL_WINDOW_PERIODS) stallWindow.shift();
+				if (repeatsToolCallPattern(stallWindow, stallLimit)) {
+					config.onRunawayStop?.({ reason: "repeated_tool_call", signature, repeats: stallLimit });
+					await streamToollessClosingTurn(
+						currentContext,
+						newMessages,
+						config,
+						continuationState,
+						providerTurnLimit,
+						signal,
+						emit,
+						streamFn,
+						previousAssistantForDegenerateCollapse,
+						verificationObligations,
+					);
+					await emit({ type: "agent_end", messages: newMessages });
+					return;
+				}
+			}
+
+			const nextTurnContext = {
+				message,
+				toolResults,
+				context: currentContext,
+				newMessages,
+			};
+			const nextTurnSnapshot = await config.prepareNextTurn?.(nextTurnContext);
+			if (nextTurnSnapshot) {
+				currentContext = nextTurnSnapshot.context ?? currentContext;
+				if (nextTurnSnapshot.context) {
+					toolFailureMemory = createToolFailureMemoryTracker(
+						currentContext.messages,
+						providerRequestPrefixState.sanitizerMemory,
+						providerRequestPrefixState.sanitizerSentPrefixCount,
+					);
+					verificationObligations.restore(currentContext.messages);
+				}
+				config = {
+					...config,
+					model: nextTurnSnapshot.model ?? config.model,
+					reasoning: nextTurnSnapshot.thinkingLevel ?? config.reasoning,
+				};
+			}
+
+			if (
+				!verificationBlocksCompletion &&
+				(await config.shouldStopAfterTurn?.({
+					message,
+					toolResults,
+					context: currentContext,
+					newMessages,
+				}))
+			) {
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
+
+			pendingMessages = (await config.getSteeringMessages?.()) || [];
+		}
+
+		// Agent would stop here. Check for follow-up messages.
+		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
+		if (followUpMessages.length > 0) {
+			// Set as pending so inner loop processes them
+			pendingMessages = followUpMessages;
+			continue;
+		}
+
+		// No more messages, exit
+		break;
+	}
+
+	await emit({ type: "agent_end", messages: newMessages });
+}
+
+const RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT = [
+	"RUNAWAY STOP CLOSING TURN",
+	"The host stopped a repeated tool-call loop. No tools are available in this final request.",
+	"Write one concise factual closing message for the user: completed work, the unresolved operation or blocker, and the safest next action.",
+	"Do not claim unperformed work. Do not emit a tool call or tool-call markup.",
+].join("\n");
+
+/**
+ * Spend one final provider request, with no tools, so a stopped run closes in the model's own words.
+ *
+ * The harness never writes that message itself. Tools are removed from the request, so this request
+ * cannot open another tool batch and cannot re-enter the loop; it runs through the same planned
+ * provider boundary as every other request. If the run is aborted, or the configured provider-turn
+ * limit leaves no budget, the run ends with no closing message rather than a fabricated one — and a
+ * provider error keeps its own error message for the same reason.
+ */
+async function streamToollessClosingTurn(
+	currentContext: AgentContext,
+	newMessages: AgentMessage[],
+	config: AgentLoopConfig,
+	continuationState: AgentLoopContinuationState,
+	providerTurnLimit: number,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	streamFn?: StreamFn,
+	previousAssistant?: AssistantMessage,
+	verificationObligations?: VerificationObligationTracker,
+	closingPrompt: string = RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT,
+	instructionTail = false,
+): Promise<void> {
+	if (signal?.aborted) return;
+	if (providerTurnLimit > 0 && continuationState.providerTurns >= providerTurnLimit) return;
+	continuationState.providerTurns++;
+	await emit({ type: "turn_start" });
+	// Same relocation as the main turn loop above: obligation text (if any) goes to
+	// `trailingInstruction`, never appended into `systemPrompt`. RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT
+	// itself stays in the system prompt - it is host-authored, stable text, and this is always the
+	// last request of the run, so there is no future turn whose cached prefix it could invalidate.
+	const closingContext: AgentContext = {
+		...currentContext,
+		systemPrompt: currentContext.systemPrompt ? `${currentContext.systemPrompt}\n\n${closingPrompt}` : closingPrompt,
+		trailingInstruction: verificationObligations?.requestInstruction(),
+		tools: [],
+		surfaceChange: "the tool-free closing request withholds every tool",
+		...(instructionTail ? { instructionTail } : {}),
+	};
+	const response = await streamAssistantResponse(
+		closingContext,
+		config,
+		signal,
+		emit,
+		streamFn,
+		{
+			rejectToolCalls: true,
+			withheldTools: currentContext.tools ?? [],
+			verificationObligations,
+		},
+		previousAssistant,
+		{ allowToolFreeComparison: true },
+	);
+	const message = response.message;
+	newMessages.push(message);
+	await emit({ type: "turn_end", message, toolResults: [] });
+}
+
+/**
+ * Start one provider request through the canonical agent-loop boundary.
+ *
+ * All callers, including host-owned tool-free finalization, receive the same failure-context
+ * sanitization, context transformation/conversion, dynamic authentication, request-local reasoning,
+ * and request preflight immediately before transport.
+ */
+export async function startAgentProviderRequest(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	streamFn?: StreamFn,
+): Promise<Awaited<ReturnType<StreamFn>>> {
+	return startPlannedAgentProviderRequest(context, config, signal, streamFn);
+}
+
+type StartedAssistantResponse = {
+	message: AssistantMessage;
+	/** Provider output before degeneration collapse, retained for the next turn comparison. */
+	comparisonMessage: AssistantMessage;
+	requestId: AgentRequestId;
+};
+
+type AssistantResponsePolicy = {
+	rejectToolCalls?: boolean;
+	/** The run's tools a tool-free request withheld: a text-written call of one is still a tool call. */
+	withheldTools?: readonly AgentTool[];
+	verificationObligations?: VerificationObligationTracker;
+};
+
+/**
+ * Stream an assistant response from the LLM.
+ * This is where AgentMessage[] gets transformed to Message[] for the LLM.
+ */
+async function streamAssistantResponse(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	streamFn?: StreamFn,
+	policy?: AssistantResponsePolicy,
+	previousAssistant?: AssistantMessage,
+	collapseOptions?: { allowToolFreeComparison?: boolean },
+): Promise<StartedAssistantResponse> {
+	const degenerationAbort = new AbortController();
+	const onOuterAbort = (): void => degenerationAbort.abort();
+	if (signal?.aborted) degenerationAbort.abort();
+	else signal?.addEventListener("abort", onOuterAbort, { once: true });
+	const response = await startPlannedAgentProviderRequestWithId(context, config, degenerationAbort.signal, streamFn);
+
+	let partialMessage: AssistantMessage | null = null;
+	let addedPartial = false;
+	let abortedForDegeneration = false;
+	/**
+	 * D1 observability (see AssistantMessage.firstTokenAt in types.ts): stamped on the first event
+	 * that carries actual generated content (`isFirstTokenEvent`: a non-empty `_delta`, never a
+	 * `_start`/`_end` framing event) and left `undefined` if the stream errors or aborts before one
+	 * ever arrives. The perf profile and the interactive live row read the same predicate.
+	 */
+	let firstTokenAt: number | undefined;
+
+	responseEvents: for await (const event of response.stream) {
+		switch (event.type) {
+			case "start":
+				partialMessage = event.partial;
+				context.messages.push(partialMessage);
+				addedPartial = true;
+				await emit({ type: "message_start", message: { ...partialMessage } });
+				break;
+
+			case "text_start":
+			case "text_delta":
+			case "text_end":
+			case "thinking_start":
+			case "thinking_delta":
+			case "thinking_end":
+			case "toolcall_start":
+			case "toolcall_delta":
+			case "toolcall_end":
+				if (firstTokenAt === undefined && isFirstTokenEvent(event)) firstTokenAt = Date.now();
+				if (partialMessage) {
+					partialMessage = event.partial;
+					context.messages[context.messages.length - 1] = partialMessage;
+					await emit({
+						type: "message_update",
+						assistantMessageEvent: event,
+						message: { ...partialMessage },
+					});
+					if (
+						!abortedForDegeneration &&
+						!signal?.aborted &&
+						!partialMessage.content.some((block) => block.type === "toolCall") &&
+						shouldAbortDegenerateStream(assistantMessageText(partialMessage))
+					) {
+						abortedForDegeneration = true;
+						degenerationAbort.abort();
+					}
+				}
+				break;
+
+			case "done":
+			case "error":
+				break responseEvents;
+		}
+	}
+	// D1 observability (see AssistantMessage.streamEndAt in types.ts): the stream is exhausted the
+	// instant its terminal `done`/`error` event was observed above, not when the message is later
+	// transformed or persisted. Unconditional: every path that reaches here saw a real terminal
+	// event, so this is never fabricated the way a value would be if set before the loop.
+	const streamEndAt = Date.now();
+
+	signal?.removeEventListener("abort", onOuterAbort);
+	const providerMessage = await response.stream.result();
+	let finalMessage = policy?.rejectToolCalls
+		? rejectToolCallsFromToolFreeResponse(providerMessage, policy.withheldTools)
+		: rejectNativeToolProtocolResidue(providerMessage, context.tools ?? [], Boolean(config.textToolCallProtocol));
+	if (abortedForDegeneration && !signal?.aborted && finalMessage.stopReason === "aborted") {
+		finalMessage = { ...finalMessage, stopReason: "stop" };
+		delete finalMessage.errorMessage;
+	}
+	if (policy?.verificationObligations) {
+		finalMessage = policy.verificationObligations.enforceTerminalMessage(finalMessage);
+	}
+	const comparisonMessage = finalMessage;
+	finalMessage = collapseDegenerateAssistantMessage(finalMessage, previousAssistant, collapseOptions);
+	// Attached last, after every transform above, so these are never silently dropped by a transform
+	// that constructs a new object without spreading its input (see AssistantMessage.firstTokenAt /
+	// streamEndAt in types.ts).
+	finalMessage = {
+		...finalMessage,
+		...(firstTokenAt !== undefined ? { firstTokenAt } : {}),
+		streamEndAt,
+	};
+	// The provider stream built an aborted message without knowing why; name it here, before
+	// `message_end`, because that event is what the session log persists.
+	if (finalMessage.stopReason === "aborted") {
+		finalMessage = {
+			...finalMessage,
+			errorMessage: abortedErrorMessage(finalMessage.errorMessage, true, signal?.reason),
+		};
+	}
+	if (addedPartial) {
+		context.messages[context.messages.length - 1] = finalMessage;
+	} else {
+		context.messages.push(finalMessage);
+		await emit({ type: "message_start", message: { ...finalMessage } });
+	}
+	await emit({ type: "message_end", message: finalMessage });
+	return { message: finalMessage, comparisonMessage, requestId: response.requestId };
+}
+
+interface ToolExecutionContext {
+	/** Prepared leases not yet transferred to their real execution's completion. */
+	pendingPreparations: Set<() => void>;
+	/** Results published by this batch survive a later admission or scheduling failure. */
+	messages: ToolResultMessage[];
+	context: AgentContext;
+	assistantMessage: AssistantMessage;
+	requestId: AgentRequestId;
+	config: AgentLoopConfig;
+	validationFailureTracker: ToolValidationFailureTracker;
+	repairTeachTracker: ToolRepairTeachTracker;
+	toolFailureMemory: ToolFailureMemoryTracker;
+	toolFailureRecoveryGate: ToolFailureRecoveryGate;
+	/** Set while preparing a batch; only an entirely clean tool turn closes validation episodes. */
+	validationBounced: boolean;
+	previousSuccessfulResults?: readonly ToolResultMessage[];
+	signal?: AbortSignal;
+	emit: AgentEventSink;
+}
+
+/**
+ * Execute tool calls from an assistant message.
+ */
+async function executeToolCalls(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	requestId: AgentRequestId,
+	config: AgentLoopConfig,
+	validationFailureTracker: ToolValidationFailureTracker,
+	repairTeachTracker: ToolRepairTeachTracker,
+	toolFailureMemory: ToolFailureMemoryTracker,
+	toolFailureRecoveryGate: ToolFailureRecoveryGate,
+	previousSuccessfulTextProtocolResults: readonly ToolResultMessage[] | undefined,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+): Promise<ExecutedToolCallBatch> {
+	const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
+	beginToolFailureBatch(toolFailureMemory);
+	const execCtx: ToolExecutionContext = {
+		pendingPreparations: new Set(),
+		messages: [],
+		context: currentContext,
+		assistantMessage,
+		requestId,
+		config,
+		validationFailureTracker,
+		repairTeachTracker,
+		toolFailureMemory,
+		toolFailureRecoveryGate,
+		validationBounced: false,
+		previousSuccessfulResults: previousSuccessfulTextProtocolResults,
+		signal,
+		emit,
+	};
+	let batch: ExecutedToolCallBatch;
+	try {
+		batch =
+			config.toolExecution === "sequential" || isToolParallelismDisabled()
+				? await executeToolCallsSequential(execCtx, toolCalls)
+				: await executeToolCallsPartitioned(execCtx, toolCalls);
+		if (!execCtx.validationBounced) resetValidationFailureTracker(validationFailureTracker);
+	} catch (cause) {
+		batch = { messages: execCtx.messages, terminate: true, failure: { cause } };
+	}
+	const releaseErrors = releasePendingPreparations(execCtx);
+	if (releaseErrors.length > 0) {
+		// Cleanup cannot replace a returned batch: the parent still needs its completed messages.
+		// Test the failure envelope, not its cause, because throwing undefined is still a failure.
+		const causes = batch.failure ? [batch.failure.cause, ...releaseErrors] : releaseErrors;
+		batch = {
+			...batch,
+			terminate: true,
+			failure: { cause: new AggregateError(causes, "Prepared tool cleanup failed") },
+		};
+	}
+	return batch;
+}
+
+function releasePendingPreparations(execCtx: ToolExecutionContext): unknown[] {
+	const errors: unknown[] = [];
+	for (const release of execCtx.pendingPreparations) {
+		execCtx.pendingPreparations.delete(release);
+		try {
+			release();
+		} catch (error) {
+			errors.push(error);
+		}
+	}
+	return errors;
+}
+
+type ExecutedToolCallBatch = {
+	messages: ToolResultMessage[];
+	terminate: boolean;
+	failure?: { cause: unknown };
+};
+
+type SuccessfulTextProtocolBatch = {
+	signature: string;
+	messages: readonly ToolResultMessage[];
+	calls: readonly AgentToolCall[];
+};
+
+type StartedToolCall =
+	| { kind: "finalized"; finalized: FinalizedToolCallOutcome }
+	| { kind: "prepared"; preparation: PreparedToolCall };
+
+async function prepareAndStartToolCall(
+	execCtx: ToolExecutionContext,
+	toolCall: AgentToolCall,
+	index: number,
+): Promise<StartedToolCall> {
+	const preparation =
+		execCtx.previousSuccessfulResults &&
+		!execCtx.context.tools?.find((tool) => tool.name === toolCall.name)?.bindInvocation
+			? createRepeatedSuccessfulToolCallOutcome(execCtx.previousSuccessfulResults[index])
+			: await prepareToolCall(
+					execCtx.context,
+					execCtx.assistantMessage,
+					toolCall,
+					execCtx.config,
+					execCtx.validationFailureTracker,
+					execCtx.toolFailureMemory,
+					execCtx.toolFailureRecoveryGate,
+					execCtx.signal,
+					execCtx.requestId,
+					execCtx.previousSuccessfulResults?.[index],
+				);
+	if (preparation.kind === "immediate") {
+		if (preparation.validationEvent?.outcome === "bounced") execCtx.validationBounced = true;
+		await emitToolExecutionStart(toolCall, execCtx.emit);
+		emitToolArgumentValidationTelemetry(execCtx.config, preparation.validationEvent, "not_run", "none");
+		const finalized = finalizeRejectedToolCall(
+			toolCall,
+			execCtx.context.tools?.find((tool) => tool.name === toolCall.name),
+			preparation,
+			execCtx.toolFailureMemory,
+		);
+		finalized.result = {
+			...finalized.result,
+			details: stampToolInvocation(finalized.result.details, {
+				version: 1,
+				requestId: execCtx.requestId,
+				...(preparation.executionScope ? { executionScope: preparation.executionScope } : {}),
+				execution: "not_started",
+				...(preparation.phase === "cancelled" ? { failureCode: "aborted" as const } : {}),
+				postprocessingFailures: [],
+			}),
+		};
+		return {
+			kind: "finalized",
+			finalized,
+		};
+	}
+	execCtx.pendingPreparations.add(preparation.release);
+	return { kind: "prepared", preparation };
+}
+
+async function finalizeStartedToolCall(
+	execCtx: ToolExecutionContext,
+	started: StartedToolCall,
+): Promise<FinalizedToolCallOutcome> {
+	if (started.kind === "finalized") return started.finalized;
+	try {
+		return await executeAndFinalizePreparedToolCall(
+			execCtx.context,
+			execCtx.assistantMessage,
+			started.preparation,
+			execCtx.requestId,
+			execCtx.config,
+			execCtx.repairTeachTracker,
+			execCtx.toolFailureMemory,
+			execCtx.toolFailureRecoveryGate,
+			execCtx.signal,
+			execCtx.emit,
+			() => {
+				execCtx.pendingPreparations.delete(started.preparation.release);
+			},
+		);
+	} catch (cause) {
+		// Release startup failures before the pool drains siblings: one may be waiting on this
+		// call's host reservation. A running or handed-off call owns its own completion cleanup.
+		if (execCtx.pendingPreparations.has(started.preparation.release)) {
+			return finalizeAbandonedPreparedToolCall(execCtx, started.preparation, cause);
+		}
+		throw cause;
+	}
+}
+
+/** Release before any event delivery or sibling drain, then publish through normal settlement. */
+function finalizeAbandonedPreparedToolCall(
+	execCtx: ToolExecutionContext,
+	prepared: PreparedToolCall,
+	cause: unknown,
+): FinalizedToolCallOutcome {
+	execCtx.pendingPreparations.delete(prepared.release);
+	try {
+		prepared.release();
+	} catch (cleanup) {
+		cause = new AggregateError([cause, cleanup], "Tool startup and cleanup failed");
+	}
+	const result = createErrorToolResult(abortedToolCallText(execCtx.signal?.reason, "Tool execution never started."));
+	return {
+		toolCall: prepared.toolCall,
+		result: {
+			...result,
+			details: stampToolInvocation(result.details, {
+				version: 1,
+				requestId: execCtx.requestId,
+				...(prepared.binding ? { executionScope: prepared.binding.executionScope } : {}),
+				execution: "not_started",
+				failureCode: "aborted",
+				postprocessingFailures: [],
+			}),
+		},
+		isError: true,
+		// No executor outcome, after-hook, failure-memory observation or recovery-gate effect.
+		batchFailure: { cause },
+	};
+}
+
+async function reservePreparedToolCalls(
+	execCtx: ToolExecutionContext,
+	preparedCalls: readonly { preparation: PreparedToolCall; index: number }[],
+): Promise<void> {
+	if (preparedCalls.length === 0) return;
+	execCtx.signal?.throwIfAborted();
+	if (execCtx.config.onToolCallStart) {
+		const calls: ToolCallStartContext[] = preparedCalls.map(({ preparation: prepared, index }) => ({
+			requestId: execCtx.requestId,
+			callId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			// Emission position and declared mutation intent travel with the reservation so a host can
+			// sequence this wave's side effects before any body starts, without a registry lookup.
+			index,
+			mutation: prepared.tool.mutationTarget?.(prepared.args) !== undefined,
+			assistantMessage: execCtx.assistantMessage,
+			toolCall: prepared.toolCall,
+			args: prepared.args,
+			context: execCtx.context,
+			executionContext: prepared.binding?.executionContext,
+		}));
+		const reservedCallIds = calls.map((call) => call.callId);
+		const reservation = await execCtx.config.onToolCallStart(calls, execCtx.signal);
+		if (reservation) {
+			for (const [index, { preparation }] of preparedCalls.entries()) {
+				preparation.attachStartReservation(reservation, reservedCallIds[index]);
+			}
+		}
+	}
+	execCtx.signal?.throwIfAborted();
+	for (const { preparation: prepared } of preparedCalls) {
+		await emitToolExecutionStart(prepared.toolCall, execCtx.emit);
+	}
+}
+
+/**
+ * Run exactly one call the way the legacy sequential branch runs each of its calls: prepare,
+ * reserve as a singleton array, execute, finalize, apply the recovery-gate effect, emit
+ * `tool_execution_end`, then the result-message artifact. Shared by the legacy sequential branch
+ * (`executeToolCallsSequential`) and by S2's partition scheduling, where a lone
+ * `executionMode: "sequential"` call becomes its own barrier group and runs through this exact
+ * same path - this is a structural extraction, not a behavior change: every await happens at the
+ * same point in the timeline it did when this was inlined in the sequential loop.
+ */
+async function executeBarrierToolCall(
+	execCtx: ToolExecutionContext,
+	toolCall: AgentToolCall,
+	index: number,
+): Promise<{ finalized: FinalizedToolCallOutcome; toolResultMessage: ToolResultMessage }> {
+	let started = await prepareAndStartToolCall(execCtx, toolCall, index);
+	if (started.kind === "prepared") {
+		try {
+			await reservePreparedToolCalls(execCtx, [{ preparation: started.preparation, index }]);
+		} catch (cause) {
+			started = {
+				kind: "finalized",
+				finalized: finalizeAbandonedPreparedToolCall(execCtx, started.preparation, cause),
+			};
+		}
+	}
+	const finalized = await finalizeStartedToolCall(execCtx, started);
+	execCtx.toolFailureRecoveryGate.apply(finalized.executionGateEffect);
+
+	await emitToolExecutionEnd(finalized, execCtx.emit);
+	const toolResultMessage = createToolResultMessage(finalized);
+	await emitToolResultMessage(toolResultMessage, execCtx.emit);
+	// A handoff may publish a foreground placeholder, but a barrier call still owns the execution
+	// ordering contract. Do not let the caller continue until the detached execution has reached
+	// its normal policy-finalized terminal state.
+	if (finalized.backgroundCompletion) await finalized.backgroundCompletion.catch(() => undefined);
+	return { finalized, toolResultMessage };
+}
+
+async function executeToolCallsSequential(
+	execCtx: ToolExecutionContext,
+	toolCalls: AgentToolCall[],
+): Promise<ExecutedToolCallBatch> {
+	const finalizedCalls: FinalizedToolCallOutcome[] = [];
+	const messages = execCtx.messages;
+
+	for (const [index, toolCall] of toolCalls.entries()) {
+		const { finalized, toolResultMessage } = await executeBarrierToolCall(execCtx, toolCall, index);
+		finalizedCalls.push(finalized);
+		messages.push(toolResultMessage);
+		if (finalized.batchFailure) throw finalized.batchFailure.cause;
+		if (finalized.deliveryFailure) throw finalized.deliveryFailure;
+
+		if (execCtx.signal?.aborted) {
+			break;
+		}
+	}
+
+	return { messages, terminate: shouldTerminateToolBatch(finalizedCalls) };
+}
+
+type ToolExecutionGroup =
+	| { kind: "barrier"; call: AgentToolCall; index: number }
+	| { kind: "parallel"; entries: { call: AgentToolCall; index: number }[] };
+
+/**
+ * S2 - order-preserving partition (replaces whole-batch `hasSequentialToolCall` poisoning). Walk
+ * `toolCalls` in emission order; a tool whose `executionMode === "sequential"` closes the
+ * currently open parallel group (if any) and becomes its own barrier group; every other call
+ * (including an unknown tool - preflight still rejects it during preparation) accumulates into
+ * the open parallel group, opening a fresh one if none is open. Every call appears in exactly one
+ * group, in original relative order; concatenating the groups' outputs back together (as
+ * `executeToolCallsPartitioned` does) reproduces the original emission order.
+ *
+ * A second rule keeps emission order MEANINGFUL inside one message: a call whose arguments name a
+ * file an earlier sibling of the open group declared it would mutate (`mutationTarget`) closes that
+ * group and opens a new one. Live, `[write checkout_status.txt, goal add_evidence(file: that path)]`
+ * ran concurrently and the second call's stat hit ENOENT a second before the file appeared. The
+ * dependent call is NOT a barrier of its own: it starts a fresh parallel group and ordinary
+ * parallel semantics continue after it. Alias-spelled paths (`p/...`) are not expanded here -
+ * preparation expands them later - so each target is matched by its full spelling AND by its
+ * basename, which the alias and the real path share.
+ */
+function partitionToolCalls(
+	toolCalls: readonly AgentToolCall[],
+	tools: readonly AgentTool<any>[] | undefined,
+): ToolExecutionGroup[] {
+	const groups: ToolExecutionGroup[] = [];
+	let openGroup: { kind: "parallel"; entries: { call: AgentToolCall; index: number }[] } | undefined;
+	/** Mutation targets declared by earlier calls of the currently open group, plus their basenames. */
+	let openGroupMutationTargets = new Set<string>();
+	for (const [index, call] of toolCalls.entries()) {
+		const tool = tools?.find((candidate) => candidate.name === call.name);
+		if (tool?.executionMode === "sequential") {
+			openGroup = undefined;
+			openGroupMutationTargets = new Set();
+			groups.push({ kind: "barrier", call, index });
+			continue;
+		}
+		if (openGroup && referencesMutationTarget(call, openGroupMutationTargets)) {
+			// Everything in the open group is fully settled before the next group starts, so the
+			// mutation this call depends on has landed by the time it runs.
+			openGroup = undefined;
+			openGroupMutationTargets = new Set();
+		}
+		if (!openGroup) {
+			openGroup = { kind: "parallel", entries: [] };
+			groups.push(openGroup);
+		}
+		openGroup.entries.push({ call, index });
+		const target = tool?.mutationTarget?.(call.arguments);
+		if (target === undefined) continue;
+		openGroupMutationTargets.add(target);
+		const base = target.split(/[\\/]/).pop();
+		if (base !== undefined && base.length > 0) openGroupMutationTargets.add(base);
+	}
+	return groups;
+}
+
+/** True when this call's raw arguments mention any file an earlier sibling declared it will mutate. */
+function referencesMutationTarget(call: AgentToolCall, mutationTargets: ReadonlySet<string>): boolean {
+	if (mutationTargets.size === 0) return false;
+	const serializedArguments = JSON.stringify(call.arguments ?? {});
+	for (const target of mutationTargets) {
+		if (serializedArguments.includes(target)) return true;
+	}
+	return false;
+}
+
+/**
+ * S3 - refill-batch pool (replaces the fixed-size wave barrier). Slots are refilled in batches:
+ * whenever k slots are free, prepare those k calls serially (preflight stays serial - never
+ * parallelized), reserve them as ONE array through the unchanged `reservePreparedToolCalls` (a
+ * host can still atomically persist the whole refill's reservation before any of its bodies
+ * start), then dispatch them. A slot frees and is immediately eligible for refill as soon as ITS
+ * call finishes, instead of waiting for the rest of a fixed-size wave to settle - that removes the
+ * wave barrier while keeping preparation incremental, so `beforeToolCall` policy and
+ * `toolFailureRecoveryGate.admit()` keep observing in-turn state that earlier completions changed.
+ * `tool_execution_end` fires at each call's actual completion (S4), not replayed once a whole wave
+ * settles - that reordering is audited safe (agent-loop.test.ts:3108) because nothing downstream
+ * is order-sensitive. The recovery gate is a DIFFERENT story: `apply()` stamps a failure with the
+ * gate's shared world-cursor, and a sibling's success bumps that same cursor, so which one lands
+ * first changes whether a later retry is admitted. The old code applied one whole wave's effects
+ * together, synchronously, in emission order after `Promise.all`; gate effects here therefore
+ * still apply in strict emission order via `nextToApply`, catching up as soon as the next slot in
+ * line is ready, decoupled from actual completion order (which only governs telemetry and pool
+ * width accounting).
+ */
+async function pooledExecuteToolCalls(
+	execCtx: ToolExecutionContext,
+	entries: readonly { call: AgentToolCall; index: number }[],
+	width: number,
+): Promise<{ finalized: FinalizedToolCallOutcome[]; failure?: { cause: unknown } }> {
+	const results: (FinalizedToolCallOutcome | undefined)[] = new Array(entries.length);
+	const inFlight = new Map<number, Promise<void>>();
+	const undispatched = new Map<number, PreparedToolCall>();
+	let failure: { cause: unknown } | undefined;
+	let nextToApply = 0;
+	const drainGateApply = (): void => {
+		while (nextToApply < results.length) {
+			const finalized = results[nextToApply];
+			if (!finalized) break;
+			execCtx.toolFailureRecoveryGate.apply(finalized.executionGateEffect);
+			nextToApply++;
+		}
+	};
+	const settle = async (slot: number, finalized: FinalizedToolCallOutcome): Promise<void> => {
+		results[slot] = finalized;
+		if (finalized.batchFailure) {
+			failure =
+				failure && failure.cause !== finalized.batchFailure.cause
+					? {
+							cause: new AggregateError(
+								[failure.cause, finalized.batchFailure.cause],
+								"Tool batch startup failed",
+							),
+						}
+					: finalized.batchFailure;
+		}
+		drainGateApply();
+		await emitToolExecutionEnd(finalized, execCtx.emit);
+		if (finalized.deliveryFailure) throw finalized.deliveryFailure;
+	};
+
+	let next = 0;
+	try {
+		while (next < entries.length && !execCtx.signal?.aborted && !failure) {
+			const free = width - inFlight.size;
+			if (free <= 0) {
+				await Promise.race(inFlight.values());
+				continue;
+			}
+			const refillWave: { preparation: PreparedToolCall; index: number }[] = [];
+			const refillSlots: { slot: number; started: StartedToolCall }[] = [];
+			while (refillWave.length < free && next < entries.length && !execCtx.signal?.aborted && !failure) {
+				const entry = entries[next];
+				const slot = next;
+				next++;
+				const started = await prepareAndStartToolCall(execCtx, entry.call, entry.index);
+				if (started.kind === "finalized") {
+					// Immediate validation/policy/replay outcomes are never reserved (test :3622).
+					await settle(slot, started.finalized);
+					continue;
+				}
+				refillWave.push({ preparation: started.preparation, index: entry.index });
+				undispatched.set(slot, started.preparation);
+				refillSlots.push({ slot, started });
+			}
+			if (refillSlots.length === 0) continue;
+			await reservePreparedToolCalls(execCtx, refillWave);
+			if (failure) break;
+			for (const { slot, started } of refillSlots) {
+				undispatched.delete(slot);
+				const running = finalizeStartedToolCall(execCtx, started)
+					.then((finalized) => settle(slot, finalized))
+					.catch((cause: unknown) => {
+						failure ??= { cause };
+					})
+					.finally(() => {
+						inFlight.delete(slot);
+					});
+				inFlight.set(slot, running);
+			}
+		}
+	} catch (cause) {
+		failure ??= { cause };
+	} finally {
+		// Release EVERY undispatched dependency before awaiting event delivery or running siblings.
+		// Dispatched startup failures settle in finalizeStartedToolCall; real executions retain
+		// their own completion cleanup, including detached background work.
+		const abandoned = [...undispatched].map(([slot, prepared]) => ({
+			slot,
+			finalized: finalizeAbandonedPreparedToolCall(
+				execCtx,
+				prepared,
+				failure ? failure.cause : execCtx.signal?.reason,
+			),
+		}));
+		undispatched.clear();
+		for (const { slot, finalized } of abandoned) {
+			try {
+				await settle(slot, finalized);
+			} catch (cause) {
+				failure ??= { cause };
+			}
+		}
+		// Admission failure is not cancellation of siblings that already own effects. Drain every
+		// dispatched call before publishing results or allowing the parent loop to terminal.
+		await Promise.all(inFlight.values());
+	}
+	// A call that never reached preparation (the abort path stopped refill-batch formation before
+	// reaching it) is simply absent from the result, not a placeholder.
+	return { finalized: results.filter((entry): entry is FinalizedToolCallOutcome => entry !== undefined), failure };
+}
+
+async function executeToolCallsPartitioned(
+	execCtx: ToolExecutionContext,
+	toolCalls: AgentToolCall[],
+): Promise<ExecutedToolCallBatch> {
+	const groups = partitionToolCalls(toolCalls, execCtx.context.tools);
+	const width = resolveToolConcurrency(execCtx.config);
+	const orderedFinalizedCalls: FinalizedToolCallOutcome[] = [];
+	const messages = execCtx.messages;
+
+	for (const group of groups) {
+		if (execCtx.signal?.aborted) break;
+		if (group.kind === "barrier") {
+			const { finalized, toolResultMessage } = await executeBarrierToolCall(execCtx, group.call, group.index);
+			orderedFinalizedCalls.push(finalized);
+			messages.push(toolResultMessage);
+			if (finalized.batchFailure) throw finalized.batchFailure.cause;
+			if (finalized.deliveryFailure) throw finalized.deliveryFailure;
+			continue;
+		}
+		// Result-message artifacts for this group are only emitted once the whole group settles, in
+		// original emission order - matching the pinned "ends in completion order, results persist
+		// in source order" contract (agent-loop.test.ts:3108). Groups themselves already run
+		// strictly in order (never overlapping), so deferring per-group instead of to the very end
+		// of the whole batch produces an identical observable event stream.
+		const settled = await pooledExecuteToolCalls(execCtx, group.entries, width);
+		for (const finalized of settled.finalized) {
+			const toolResultMessage = createToolResultMessage(finalized);
+			await emitToolResultMessage(toolResultMessage, execCtx.emit);
+			orderedFinalizedCalls.push(finalized);
+			messages.push(toolResultMessage);
+		}
+		if (settled.failure) throw settled.failure.cause;
+	}
+
+	return { messages, terminate: shouldTerminateToolBatch(orderedFinalizedCalls) };
+}
+
+type PreparedToolCall = {
+	binding?: BoundToolInvocation;
+	recoveryReservation: ToolFailureRecoveryReservation;
+	attachStartReservation(reservation: ToolCallStartReservation, callId: string): void;
+	/** Refund unstarted admission and release the binding through one idempotent owner. */
+	release(): void;
+	kind: "prepared";
+	toolCall: AgentToolCall;
+	tool: AgentTool<any>;
+	args: unknown;
+	validationEvent?: ToolArgumentValidationTelemetryEvent;
+};
+
+type ImmediateToolCallOutcome = {
+	executionScope?: string;
+	kind: "immediate";
+	result: AgentToolResult<any>;
+	isError: boolean;
+	phase: ToolFailurePhase;
+	failureCode: string;
+	correction: string;
+	diagnostic?: string;
+	/** Bounded current-turn instruction that supplements, but never replaces, the durable failure ledger. */
+	providerFeedback?: string;
+	repeatedSuccessfulCall?: { previousToolCallId: string };
+	repeatedToolFailure?: boolean;
+	validationEvent?: ToolArgumentValidationTelemetryEvent;
+};
+
+type ExecutedToolCallOutcome = {
+	result: AgentToolResult<any>;
+	operationCompleted: boolean;
+	progressDeliveryFailed?: boolean;
+	isError: boolean;
+	errorClass?: string;
+	failureMessage?: string;
+	failureCode?: string;
+	outputSignature?: string;
+	errorKind?: AgentToolErrorKind;
+	timeoutMs?: number | null;
+};
+
+type FinalizedToolCallOutcome = {
+	toolCall: AgentToolCall;
+	result: AgentToolResult<any>;
+	isError: boolean;
+	/** Startup failed before execution; terminal the call before ending its batch. */
+	batchFailure?: { cause: unknown };
+	deliveryFailure?: Error;
+	executionGateEffect?: ToolFailureRecoveryGateEffect;
+	/** Present only for an accepted handoff; sequential batches await it before their next body. */
+	backgroundCompletion?: Promise<FinalizedToolCallOutcome>;
+};
+
+type ToolValidationFailureEpisode = {
+	repeats: number;
+	escalated: boolean;
+};
+
+/** Bounded LRU episodes keyed by tool + deterministic validator/provider failure signature. */
+type ToolValidationFailureTracker = Map<string, ToolValidationFailureEpisode>;
+
+type ValidationFailureHandling = {
+	message: string;
+	providerFeedback?: string;
+};
+
+type ToolRepairTeachTracker = Map<string, number>;
+
+const DEFAULT_TOOL_VALIDATION_ESCALATION_THRESHOLD = 3;
+const TOOL_REPAIR_TEACH_EVERY = 5;
+const REPEATED_SUCCESS_RESULT_MAX_CHARS = 2_048;
+const MAX_PROVIDER_PARSE_DIAGNOSTIC_CHARS = 480;
+const MAX_TRACKED_VALIDATION_FAILURE_EPISODES = 8;
+
+function createRepeatedSuccessfulToolCallOutcome(
+	previousResult: ToolResultMessage | undefined,
+): ImmediateToolCallOutcome {
+	const previousText = previousResult?.content
+		.filter((block) => block.type === "text")
+		.map((block) => block.text)
+		.join("\n")
+		.slice(0, REPEATED_SUCCESS_RESULT_MAX_CHARS);
+	const diagnostic = previousText
+		? `${REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.diagnostic} Previous successful result: ${previousText}`
+		: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.diagnostic;
+	return {
+		kind: "immediate",
+		result: createErrorToolResult(diagnostic),
+		isError: true,
+		phase: "execution",
+		failureCode: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.failureCode,
+		correction: REPEATED_SUCCESSFUL_TOOL_CALL_FAILURE.guidance,
+		diagnostic,
+		...(previousResult ? { repeatedSuccessfulCall: { previousToolCallId: previousResult.toolCallId } } : {}),
+	};
+}
+
+/**
+ * One wording for a cancellation, whether the call was stopped before it started or threw mid-flight.
+ * A named abort (`agent.abort("send now")`) keeps its name so the transcript can tell an operator
+ * stop from a crash; the tool's own message follows it when it says something else.
+ */
+function abortedToolCallText(abortReason?: unknown, toolMessage?: string): string {
+	const reason =
+		typeof abortReason === "string" && abortReason.length > 0
+			? abortReason
+			: abortReason === undefined || abortReason === null
+				? undefined
+				: (() => {
+						const message = safeErrorMessage(abortReason, "");
+						return message.length > 0 ? message : undefined;
+					})();
+	const headline = reason ? `Operation aborted (${reason})` : "Operation aborted";
+	const detail = toolMessage?.trim();
+	// A tool that rethrew the abort reason itself has nothing to add: only a message that says
+	// something else (partial output, the command's own status line) earns a second line.
+	return detail && detail !== headline && detail !== reason ? `${headline}\n${detail}` : headline;
+}
+
+function createAbortedToolCallOutcome(
+	validationEvent: ToolArgumentValidationTelemetryEvent | undefined,
+): ImmediateToolCallOutcome {
+	return {
+		kind: "immediate",
+		result: createErrorToolResult(abortedToolCallText()),
+		isError: true,
+		phase: "cancelled",
+		failureCode: "aborted",
+		correction: "Retry only if the operation is still required.",
+		validationEvent,
+	};
+}
+
+function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
+	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
+}
+
+function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {
+	if (!tool.prepareArguments) {
+		return toolCall;
+	}
+	const preparedArguments = tool.prepareArguments(toolCall.arguments);
+	if (preparedArguments === toolCall.arguments) {
+		return toolCall;
+	}
+	return {
+		...toolCall,
+		arguments: preparedArguments as Record<string, any>,
+	};
+}
+
+function createValidationBounceTelemetry(
+	config: AgentLoopConfig,
+	toolCall: AgentToolCall,
+	errorKeyword: string,
+): ToolArgumentValidationTelemetryEvent {
+	return {
+		outcome: "bounced",
+		provider: config.model.provider,
+		model: config.model.id,
+		tool: toolCall.name,
+		source: toolCall.source,
+		failureModes: ["other"],
+		repairsApplied: [],
+		errorKeywords: [errorKeyword],
+		taught: "none",
+		executionOutcome: "not_run",
+	};
+}
+
+function validationFailureCorrection(
+	event: ToolArgumentValidationTelemetryEvent | undefined,
+	toolName: string,
+): string {
+	const shape = event?.failureShape
+		?.slice(0, 3)
+		.map((entry) =>
+			// A constraint failure on a well-typed value is only actionable with the constraint itself;
+			// "expected string, received string" is what a length cap used to print.
+			entry.constraint
+				? `${entry.path}: ${entry.keyword ?? "constraint"} ${entry.constraint}`
+				: `${entry.path}: expected ${entry.expectedType}, received ${entry.receivedType}`,
+		)
+		.join("; ");
+	const rules = [
+		...new Set(
+			(event?.failureModes ?? [])
+				.filter((mode) => mode !== "other")
+				.map((mode) => formatToolRepairStandingRule(mode)),
+		),
+	];
+	return [`Match ${toolName} arguments to its current schema.`, shape ? `Fix ${shape}.` : undefined, ...rules]
+		.filter((part): part is string => part !== undefined)
+		.join(" ");
+}
+
+function resetValidationFailureTracker(tracker: ToolValidationFailureTracker): void {
+	tracker.clear();
+}
+
+function emitToolArgumentValidationTelemetry(
+	config: AgentLoopConfig,
+	event: ToolArgumentValidationTelemetryEvent | undefined,
+	executionOutcome: ToolArgumentExecutionOutcome,
+	taught: ToolArgumentValidationTelemetryEvent["taught"],
+): void {
+	if (!event) return;
+	config.onToolArgumentValidation?.({ ...event, executionOutcome, taught });
+}
+
+function toolValidationEscalationThreshold(config: AgentLoopConfig): number {
+	return config.toolValidationEscalationThreshold ?? DEFAULT_TOOL_VALIDATION_ESCALATION_THRESHOLD;
+}
+
+function isToolArgumentRepairEmergencyDisabled(): boolean {
+	const env = typeof process === "object" && process ? process.env : undefined;
+	const value = env?.PI_TOOL_REPAIR_DISABLED;
+	if (!value) return false;
+	return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+/**
+ * S1 emergency switch. Bypasses partition scheduling and the pool entirely: every batch runs
+ * through the legacy `executeToolCallsSequential` branch, same as `config.toolExecution ===
+ * "sequential"`. Parsed exactly like `isToolArgumentRepairEmergencyDisabled` above (house pattern).
+ * Takes precedence over `PI_TOOL_CONCURRENCY` and `AgentOptions.toolConcurrency`.
+ */
+function isToolParallelismDisabled(): boolean {
+	const env = typeof process === "object" && process ? process.env : undefined;
+	const value = env?.PI_TOOL_PARALLELISM_DISABLED;
+	if (!value) return false;
+	return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+function isValidToolConcurrency(value: number): boolean {
+	return Number.isInteger(value) && value >= MIN_TOOL_CONCURRENCY && value <= MAX_TOOL_CONCURRENCY;
+}
+
+/** Complete trimmed decimal integer in the supported range 1-16; anything else is ignored. */
+function parseToolConcurrencyEnv(value: string | undefined): number | undefined {
+	if (!value) return undefined;
+	const trimmed = value.trim();
+	if (!/^\d+$/.test(trimmed)) return undefined;
+	const parsed = Number(trimmed);
+	return Number.isSafeInteger(parsed) && isValidToolConcurrency(parsed) ? parsed : undefined;
+}
+
+/**
+ * S1 pool-width resolution. Precedence: `PI_TOOL_CONCURRENCY` env > `config.toolConcurrency` >
+ * `DEFAULT_TOOL_CONCURRENCY`. Callers must check `isToolParallelismDisabled()` first - that switch
+ * bypasses this function entirely, it is not folded in here.
+ */
+function resolveToolConcurrency(config: AgentLoopConfig): number {
+	const env = typeof process === "object" && process ? process.env : undefined;
+	const envConcurrency = parseToolConcurrencyEnv(env?.PI_TOOL_CONCURRENCY);
+	if (envConcurrency !== undefined) return envConcurrency;
+	if (config.toolConcurrency !== undefined && isValidToolConcurrency(config.toolConcurrency)) {
+		return config.toolConcurrency;
+	}
+	return DEFAULT_TOOL_CONCURRENCY;
+}
+
+function readToolArgumentValidationError(error: unknown):
+	| {
+			message: string;
+			toolName: string;
+			signature: string;
+			enrichment: string;
+	  }
+	| undefined {
+	if (error === null || (typeof error !== "object" && typeof error !== "function")) return undefined;
+	try {
+		if (Reflect.get(error, "name") !== "ToolArgumentValidationError") return undefined;
+		const message = Reflect.get(error, "message");
+		const toolName = Reflect.get(error, "toolName");
+		const signature = Reflect.get(error, "signature");
+		const enrichment = Reflect.get(error, "enrichment");
+		if (typeof message !== "string" || message.length === 0) return undefined;
+		if (typeof toolName !== "string" || typeof signature !== "string" || typeof enrichment !== "string") {
+			return undefined;
+		}
+		return { message, toolName, signature, enrichment };
+	} catch {
+		return undefined;
+	}
+}
+
+function recordValidationBounce(
+	signature: string,
+	toolName: string,
+	enrichment: string,
+	config: AgentLoopConfig,
+	tracker: ToolValidationFailureTracker,
+): ValidationFailureHandling {
+	const episodeKey = `${toolName}\0${signature}`;
+	const previous = tracker.get(episodeKey);
+	const episode: ToolValidationFailureEpisode = {
+		repeats: (previous?.repeats ?? 0) + 1,
+		escalated: previous?.escalated ?? false,
+	};
+	tracker.delete(episodeKey);
+	tracker.set(episodeKey, episode);
+	while (tracker.size > MAX_TRACKED_VALIDATION_FAILURE_EPISODES) {
+		const oldest = tracker.keys().next().value;
+		if (oldest === undefined) break;
+		tracker.delete(oldest);
+	}
+
+	const threshold = toolValidationEscalationThreshold(config);
+	if (threshold <= 0 || episode.repeats < threshold || episode.escalated) {
+		return { message: "" };
+	}
+
+	episode.escalated = true;
+	config.onToolValidationEscalation?.({
+		tool: toolName,
+		signature,
+		repeats: episode.repeats,
+		model: config.model.id,
+		provider: config.model.provider,
+	});
+	return {
+		message: `Repeated validation failure (${episode.repeats} identical attempts).`,
+		providerFeedback: enrichment,
+	};
+}
+
+function handleValidationFailure(
+	error: { message: string; toolName: string; signature: string; enrichment: string },
+	config: AgentLoopConfig,
+	tracker: ToolValidationFailureTracker,
+	parserDiagnostic?: string,
+): ValidationFailureHandling {
+	const enrichment = parserDiagnostic ? `${parserDiagnostic}\n\n${error.enrichment}` : error.enrichment;
+	const handling = recordValidationBounce(error.signature, error.toolName, enrichment, config, tracker);
+	return {
+		message: handling.providerFeedback
+			? `${error.message}\n\n${handling.message} Use this full schema and example before retrying:\n${handling.providerFeedback}`
+			: error.message,
+		...(handling.providerFeedback ? { providerFeedback: handling.providerFeedback } : {}),
+	};
+}
+
+function truncateProviderValidationFeedback(value: string, maxChars: number): string {
+	const sanitized = sanitizeBinaryOutput(value).trim();
+	if (sanitized.length <= maxChars) return sanitized;
+	let end = maxChars - 1;
+	const code = sanitized.charCodeAt(end - 1);
+	if (code >= 0xd800 && code <= 0xdbff) end--;
+	return `${sanitized.slice(0, end)}…`;
+}
+
+function parserDiagnosticFromRawArguments(toolCall: AgentToolCall): string | undefined {
+	const rawArguments = toolCall.rawArguments;
+	if (!rawArguments || typeof rawArguments !== "object" || Array.isArray(rawArguments)) return undefined;
+	const candidate = rawArguments.parseDiagnostic;
+	if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
+	const detail = candidate as Record<string, unknown>;
+	const kind = typeof detail.kind === "string" ? detail.kind : "malformed call";
+	const offset =
+		typeof detail.offset === "number" && Number.isFinite(detail.offset) ? ` at offset ${detail.offset}` : "";
+	const context = typeof detail.context === "string" ? `: ${detail.context}` : "";
+	return truncateProviderValidationFeedback(
+		`Provider parse diagnostic (${kind}${offset})${context}`,
+		MAX_PROVIDER_PARSE_DIAGNOSTIC_CHARS,
+	);
+}
+
+function providerMalformedCallEnrichment(tool: AgentTool, parserDetail: string): string {
+	return `${parserDetail}\n\n${formatToolValidationEnrichment(tool)}`;
+}
+
+const MAX_UNKNOWN_TOOL_PREVIEW = 8;
+
+/**
+ * An invented name usually starts with the tool the model meant (`task_steps vis-à-vis …`,
+ * `write_path_D_/…`): name that tool first, then preview the closest declared names rather than
+ * the first few in registration order. The name is never used to infer an executable command.
+ */
+function unknownToolCorrection(attempted: string, tools: readonly AgentTool[]): string {
+	const intended = tools
+		.filter((candidate) => {
+			if (!attempted.startsWith(candidate.name)) return false;
+			const next = attempted[candidate.name.length];
+			return next === undefined || !/[A-Za-z0-9]/u.test(next);
+		})
+		.sort((left, right) => right.name.length - left.name.length)[0];
+	const lowered = attempted.toLowerCase();
+	const ranked = [...tools].sort((left, right) => {
+		const score = (name: string): number => {
+			const candidate = name.toLowerCase();
+			if (lowered.startsWith(candidate)) return 3;
+			if (lowered.includes(candidate)) return 2;
+			return candidate.slice(0, 3) === lowered.slice(0, 3) ? 1 : 0;
+		};
+		return score(right.name) - score(left.name);
+	});
+	const available = truncateProviderValidationFeedback(
+		ranked
+			.slice(0, MAX_UNKNOWN_TOOL_PREVIEW)
+			.map((candidate) => JSON.stringify(candidate.name))
+			.join(", "),
+		240,
+	);
+	const lead = intended
+		? `The name begins with ${JSON.stringify(intended.name)}: call ${intended.name} exactly and put every parameter in its JSON arguments object, never in the name.`
+		: "Choose an exact name from the currently available tool list; put instructions and parameters in its JSON arguments object.";
+	return `${lead} Available tools (preview): ${available || "none"}.`;
+}
+
+async function prepareToolCall(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	toolCall: AgentToolCall,
+	config: AgentLoopConfig,
+	validationFailureTracker: ToolValidationFailureTracker,
+	toolFailureMemory: ToolFailureMemoryTracker,
+	toolFailureRecoveryGate: ToolFailureRecoveryGate,
+	signal: AbortSignal | undefined,
+	requestId: AgentRequestId,
+	previousSuccessfulResult?: ToolResultMessage,
+): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
+	let tool = currentContext.tools?.find((candidate) => candidate.name === toolCall.name);
+	if (!tool) {
+		const correction = unknownToolCorrection(toolCall.name, currentContext.tools ?? []);
+		// Invented names vary on every retry; they are one protocol failure class, not independent
+		// tool-schema episodes. Use the existing escalation owner so changing the bad name cannot
+		// bypass recovery. Never infer an executable command from prose embedded in a tool name.
+		const handling = recordValidationBounce(
+			"unknown_tool",
+			"unknown_tool",
+			correction,
+			config,
+			validationFailureTracker,
+		);
+		return {
+			kind: "immediate",
+			result: createErrorToolResult(`Tool ${toolCall.name} not found`),
+			isError: true,
+			phase: "validation",
+			failureCode: "unknown_tool",
+			correction,
+			...(handling.providerFeedback ? { providerFeedback: handling.providerFeedback } : {}),
+			validationEvent: createValidationBounceTelemetry(config, toolCall, "unknown_tool"),
+		};
+	}
+
+	if (toolCall.errorMessage) {
+		const parserDetail = truncateProviderValidationFeedback(
+			toolCall.errorMessage,
+			MAX_PROVIDER_PARSE_DIAGNOSTIC_CHARS,
+		);
+		const handling = recordValidationBounce(
+			`malformed_call:${tool.name}:${parserDetail}`,
+			tool.name,
+			providerMalformedCallEnrichment(tool, parserDetail),
+			config,
+			validationFailureTracker,
+		);
+		return {
+			kind: "immediate",
+			result: createErrorToolResult(parserDetail),
+			isError: true,
+			phase: "validation",
+			failureCode: "malformed_call",
+			correction: "Resend one complete JSON argument object matching the current tool schema.",
+			diagnostic: parserDetail,
+			...(handling.providerFeedback ? { providerFeedback: handling.providerFeedback } : {}),
+			validationEvent: createValidationBounceTelemetry(config, toolCall, "malformed_call"),
+		};
+	}
+
+	let validationEvent: ToolArgumentValidationTelemetryEvent | undefined;
+	let binding: BoundToolInvocation | undefined;
+	let recoveryReservation: ToolFailureRecoveryReservation | undefined;
+	let startReservation: { lease: ToolCallStartReservation; callId: string } | undefined;
+	const preparationCleanups = new Set<() => void>();
+	let released = false;
+	const release = () => {
+		if (released) return;
+		released = true;
+		const errors: unknown[] = [];
+		const attemptRelease = (cleanup: () => void) => {
+			try {
+				cleanup();
+			} catch (error) {
+				errors.push(error);
+			}
+		};
+		attemptRelease(() => recoveryReservation?.cancel());
+		for (const cleanup of preparationCleanups) {
+			attemptRelease(cleanup);
+		}
+		preparationCleanups.clear();
+		attemptRelease(() => startReservation?.lease.release(startReservation.callId));
+		attemptRelease(() => binding?.release());
+		if (errors.length > 0) throw new AggregateError(errors, "Tool preparation cleanup failed");
+	};
+	let admitted = false;
+	try {
+		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
+		const validatedArgs = validateToolArguments(tool, preparedToolCall, {
+			model: config.model.id,
+			provider: config.model.provider,
+			repairEnabled: config.toolArgumentRepairEnabled ?? !isToolArgumentRepairEmergencyDisabled(),
+			telemetry: (event) => {
+				validationEvent = event;
+			},
+		});
+		if (preparedToolCall.repairNotes) {
+			toolCall.repairNotes = preparedToolCall.repairNotes;
+		}
+		if (validatedArgs !== toolCall.arguments) {
+			toolCall.rawArguments ??= toolCall.arguments;
+			toolCall.arguments = validatedArgs;
+		}
+		if (tool.bindInvocation) binding = await bindToolInvocation(tool, toolCall.id, validatedArgs, signal);
+		if (binding) tool = binding.tool;
+		if (
+			binding &&
+			previousSuccessfulResult &&
+			retainedToolInvocation(previousSuccessfulResult.details)?.executionScope === binding.executionScope
+		) {
+			return {
+				...createRepeatedSuccessfulToolCallOutcome(previousSuccessfulResult),
+				executionScope: binding.executionScope,
+			};
+		}
+		const unresolvedRecord = getUnresolvedToolFailure(
+			toolFailureMemory,
+			toolCall.name,
+			validatedArgs,
+			binding?.executionScope,
+		);
+		const admission = toolFailureRecoveryGate.reserve(
+			tool,
+			validatedArgs,
+			unresolvedRecord,
+			currentContext.messages,
+			binding?.executionScope,
+		);
+		if (admission.kind === "blocked") {
+			const result = createRepeatedToolFailureResult(
+				admission.record,
+				admission.envelopeOnlyChange,
+				noteToolFailureInBatch(toolFailureMemory, admission.record.failureKey),
+			);
+			const memoryRecord = result.details.piToolFailureMemory;
+			toolFailureMemory.set(admission.record.failureKey, memoryRecord);
+			return {
+				kind: "immediate",
+				result,
+				isError: true,
+				phase: admission.record.phase,
+				failureCode: "repeated_failed_operation",
+				correction: memoryRecord.correction,
+				diagnostic: memoryRecord.diagnostic,
+				repeatedToolFailure: true,
+				executionScope: binding?.executionScope,
+				validationEvent: createValidationBounceTelemetry(config, toolCall, "repeated_failed_operation"),
+			};
+		}
+		recoveryReservation = admission.reservation;
+		if (config.beforeToolCall) {
+			const beforeResult = await config.beforeToolCall(
+				{
+					registerCleanup(cleanup) {
+						if (released) cleanup();
+						else preparationCleanups.add(cleanup);
+					},
+					requestId,
+					assistantMessage,
+					toolCall,
+					args: validatedArgs,
+					context: currentContext,
+					executionContext: binding?.executionContext,
+					pathAuthority: binding?.pathAuthority,
+				},
+				signal,
+			);
+			if (signal?.aborted) {
+				return { ...createAbortedToolCallOutcome(validationEvent), executionScope: binding?.executionScope };
+			}
+			if (beforeResult?.block) {
+				const reason = beforeResult.reason || "Tool execution was blocked";
+				return {
+					kind: "immediate",
+					result: {
+						...createErrorToolResult(reason),
+						...(beforeResult.terminate !== undefined ? { terminate: beforeResult.terminate } : {}),
+					},
+					isError: true,
+					phase: "policy",
+					failureCode: "blocked",
+					executionScope: binding?.executionScope,
+					correction: "Choose an allowed approach or request the required authority before retrying.",
+					diagnostic: reason,
+					validationEvent,
+				};
+			}
+		}
+		if (signal?.aborted) {
+			return { ...createAbortedToolCallOutcome(validationEvent), executionScope: binding?.executionScope };
+		}
+		admitted = true;
+		return {
+			kind: "prepared",
+			binding,
+			recoveryReservation,
+			attachStartReservation(reservation, callId) {
+				if (startReservation) throw new Error("Tool start reservation already attached");
+				startReservation = { lease: reservation, callId };
+			},
+			release,
+			toolCall,
+			tool,
+			args: validatedArgs,
+			validationEvent,
+		};
+	} catch (error) {
+		const parserDiagnostic = parserDiagnosticFromRawArguments(toolCall);
+		const validationError = readToolArgumentValidationError(error);
+		const validationFailure = validationError
+			? handleValidationFailure(validationError, config, validationFailureTracker, parserDiagnostic)
+			: undefined;
+		const message = validationFailure?.message ?? describeThrownToolError(error).message;
+		return {
+			kind: "immediate",
+			result: createErrorToolResult(message),
+			isError: true,
+			phase: validationError ? "validation" : "preflight",
+			failureCode: validationError ? "invalid_arguments" : "preflight_error",
+			executionScope: binding?.executionScope,
+			correction: validationError
+				? [validationFailureCorrection(validationEvent, toolCall.name), parserDiagnostic]
+						.filter((part): part is string => part !== undefined)
+						.join(" ")
+				: toolFailureCorrection(message, "rejected", "preflight"),
+			diagnostic: validationError ? undefined : message,
+			...(validationFailure?.providerFeedback ? { providerFeedback: validationFailure.providerFeedback } : {}),
+			validationEvent,
+		};
+	} finally {
+		if (!admitted) release();
+	}
+}
+
+function finalizeRejectedToolCall(
+	toolCall: AgentToolCall,
+	tool: AgentTool<any> | undefined,
+	outcome: ImmediateToolCallOutcome,
+	tracker: ToolFailureMemoryTracker,
+): FinalizedToolCallOutcome {
+	// A pre-execution cancellation is neither a failed attempt nor corrective progress. Keep its
+	// terminal result, but do not create failure memory or an unproductive recovery-gate effect.
+	if (outcome.repeatedToolFailure || outcome.phase === "cancelled") {
+		return {
+			toolCall,
+			result: outcome.result,
+			isError: true,
+		};
+	}
+	const record = rememberToolFailure(
+		tracker,
+		toolCall.name,
+		toolCall.arguments,
+		"rejected",
+		outcome.failureCode,
+		outcome.correction,
+		outcome.diagnostic,
+		outcome.phase,
+		undefined,
+		{
+			output: outcome.result.content
+				.filter((block) => block.type === "text")
+				.map((block) => block.text)
+				.join("\n"),
+		},
+		outcome.executionScope,
+	);
+	const failureResult = createToolFailureResult(record, outcome.result.terminate);
+	const result = outcome.providerFeedback
+		? {
+				...failureResult,
+				content: [...failureResult.content, { type: "text" as const, text: outcome.providerFeedback }],
+			}
+		: failureResult;
+	return {
+		toolCall,
+		result: outcome.repeatedSuccessfulCall
+			? {
+					...result,
+					details: {
+						...result.details,
+						piRepeatedSuccessfulCall: outcome.repeatedSuccessfulCall,
+					},
+				}
+			: result,
+		isError: true,
+		executionGateEffect: {
+			kind: "unproductive",
+			...(tool ? { tool } : {}),
+			record,
+			args: toolCall.arguments,
+		},
+	};
+}
+
+type LinkedToolAbort = {
+	signal: AbortSignal;
+	detachForeground(): void;
+	cancel(): void;
+};
+
+function createLinkedToolAbort(foregroundSignal: AbortSignal | undefined): LinkedToolAbort {
+	const controller = new AbortController();
+	const abortFromForeground = (): void => controller.abort(foregroundSignal?.reason);
+	let linked = false;
+	if (foregroundSignal?.aborted) {
+		abortFromForeground();
+	} else if (foregroundSignal) {
+		foregroundSignal.addEventListener("abort", abortFromForeground, { once: true });
+		linked = true;
+	}
+	return {
+		signal: controller.signal,
+		detachForeground: () => {
+			if (!linked || !foregroundSignal) return;
+			foregroundSignal.removeEventListener("abort", abortFromForeground);
+			linked = false;
+		},
+		cancel: () => controller.abort(),
+	};
+}
+
+function getBackgroundToolCallDelay(config: AgentLoopConfig): number | undefined {
+	const delay = config.backgroundToolCallAfterMs;
+	if (delay === undefined || !Number.isFinite(delay) || delay <= 0) return undefined;
+	return delay;
+}
+
+/** Cleanup faults describe harness delivery, never a reason to repeat the completed operation. */
+function retainToolCleanupFailure(finalized: FinalizedToolCallOutcome): FinalizedToolCallOutcome {
+	const receipt = retainedToolInvocation(finalized.result.details);
+	if (!receipt || (receipt.execution !== "completed" && receipt.execution !== "unknown")) {
+		throw new Error("Missing finalized tool invocation receipt");
+	}
+	if (receipt.postprocessingFailures.includes("cleanup")) return finalized;
+	return {
+		...finalized,
+		result: {
+			...finalized.result,
+			content: [
+				...finalized.result.content,
+				{
+					type: "text",
+					text: "[harness] Tool cleanup failed. The operation result is retained; inspect it rather than rerunning the operation to recover cleanup.",
+				},
+			],
+			details: stampToolInvocation(finalized.result.details, {
+				...receipt,
+				postprocessingFailures: [...receipt.postprocessingFailures, "cleanup"],
+			}),
+		},
+		deliveryFailure: finalized.deliveryFailure ?? new Error("tool_cleanup_failed"),
+	};
+}
+
+async function executeAndFinalizePreparedToolCall(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	prepared: PreparedToolCall,
+	requestId: AgentRequestId,
+	config: AgentLoopConfig,
+	repairTeachTracker: ToolRepairTeachTracker,
+	toolFailureMemory: ToolFailureMemoryTracker,
+	toolFailureRecoveryGate: ToolFailureRecoveryGate,
+	foregroundSignal: AbortSignal | undefined,
+	emit: AgentEventSink,
+	onExecutionOwnership: () => void,
+): Promise<FinalizedToolCallOutcome> {
+	// The model can ask for a background task up front; otherwise only the operator's clock (off by
+	// default) or a manual host request moves a foreground call to the background.
+	const backgroundRequested =
+		config.isBackgroundRequested?.(prepared.toolCall.name, prepared.toolCall.arguments) === true;
+	const backgroundDelay = backgroundRequested ? 0 : getBackgroundToolCallDelay(config);
+	const canHandoff =
+		config.handoffToolCall && (backgroundDelay !== undefined || config.subscribeToolCallHandoffRequest !== undefined);
+	const executionAbort = canHandoff ? createLinkedToolAbort(foregroundSignal) : undefined;
+	const executionSignal = executionAbort?.signal ?? foregroundSignal;
+	const startedAt = Date.now();
+	let emitForegroundUpdates = true;
+	const completion = (async (): Promise<FinalizedToolCallOutcome> => {
+		let settled: { value: FinalizedToolCallOutcome } | { failure: unknown };
+		try {
+			// Until this completion owns cleanup, the batch still owns preparation. A throwing background
+			// selector must not strand a binding or spend a retry for a body that never started.
+			onExecutionOwnership();
+			const executed = await executePreparedToolCall(prepared, executionSignal, (event) => {
+				if (emitForegroundUpdates) return emit(event);
+			});
+			const value = await finalizeExecutedToolCall(
+				currentContext,
+				assistantMessage,
+				prepared,
+				requestId,
+				executed,
+				config,
+				repairTeachTracker,
+				toolFailureMemory,
+				toolFailureRecoveryGate,
+				executionSignal,
+			);
+			settled = { value };
+		} catch (failure) {
+			settled = { failure };
+		}
+		const cleanupErrors: unknown[] = [];
+		try {
+			prepared.release();
+		} catch (error) {
+			cleanupErrors.push(error);
+		}
+		try {
+			executionAbort?.detachForeground();
+		} catch (error) {
+			cleanupErrors.push(error);
+		}
+		if ("failure" in settled) {
+			if (cleanupErrors.length > 0)
+				throw new AggregateError([settled.failure, ...cleanupErrors], "Tool finalization and cleanup failed");
+			throw settled.failure;
+		}
+		return cleanupErrors.length > 0 ? retainToolCleanupFailure(settled.value) : settled.value;
+	})();
+	if (!executionAbort || !config.handoffToolCall) return completion;
+
+	let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+	const triggers: Array<Promise<{ kind: "deadline" | "manual" }>> = [];
+	if (backgroundDelay !== undefined) {
+		triggers.push(
+			new Promise<{ kind: "deadline" }>((resolve) => {
+				deadlineTimer = setTimeout(() => resolve({ kind: "deadline" }), backgroundDelay);
+				(deadlineTimer as { unref?: () => void }).unref?.();
+			}),
+		);
+	}
+	let unsubscribeHandoffRequest: (() => void) | undefined;
+	if (config.subscribeToolCallHandoffRequest) {
+		const manual = new Promise<{ kind: "manual" }>((resolve) => {
+			try {
+				unsubscribeHandoffRequest = config.subscribeToolCallHandoffRequest?.(prepared.toolCall.id, () =>
+					resolve({ kind: "manual" }),
+				);
+			} catch {
+				unsubscribeHandoffRequest = undefined;
+			}
+		});
+		triggers.push(manual);
+	}
+	let outcome: { kind: "completed"; value: FinalizedToolCallOutcome } | { kind: "deadline" | "manual" };
+	let unsubscribeFailed = false;
+	try {
+		outcome = await Promise.race([completion.then((value) => ({ kind: "completed" as const, value })), ...triggers]);
+	} finally {
+		if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+		try {
+			unsubscribeHandoffRequest?.();
+		} catch {
+			unsubscribeFailed = true;
+		}
+	}
+	// Failed subscription teardown cannot discard the running body or admit a new handoff. Keep
+	// foreground ownership until its actual completion and publish that outcome before ending.
+	if (unsubscribeFailed) return retainToolCleanupFailure(await completion);
+	if (outcome.kind === "completed") return outcome.value;
+	if (executionAbort.signal.aborted) return completion;
+
+	let handoffAccepted = false;
+	// A handed-off call leaves the batch, so the batch never applies its effect: the background
+	// completion is the only place left that can tell the governor what this operation did.
+	const handedOffCompletion = completion.then((finalized) => {
+		if (handoffAccepted) toolFailureRecoveryGate.apply(finalized.executionGateEffect);
+		return finalized;
+	});
+	void handedOffCompletion.catch(() => undefined);
+	let handoff: ReturnType<NonNullable<AgentLoopConfig["handoffToolCall"]>>;
+	try {
+		handoff = config.handoffToolCall({
+			requestId,
+			assistantMessage,
+			toolCall: prepared.toolCall,
+			args: prepared.args,
+			context: currentContext,
+			executionContext: prepared.binding?.executionContext,
+			trigger: outcome.kind === "manual" ? "manual" : backgroundRequested ? "requested" : "clock",
+			elapsedMs: Math.max(0, Date.now() - startedAt),
+			completion: handedOffCompletion,
+			cancel: executionAbort.cancel,
+		});
+	} catch {
+		return completion;
+	}
+	handoffAccepted = handoff !== undefined;
+	if (!handoff) return completion;
+
+	emitForegroundUpdates = false;
+	executionAbort.detachForeground();
+	return {
+		toolCall: prepared.toolCall,
+		result: {
+			...handoff.result,
+			details: stampToolInvocation(detailsWithoutVerification(handoff.result.details), {
+				version: 1,
+				requestId,
+				execution: "running",
+				...(prepared.binding ? { executionScope: prepared.binding.executionScope } : {}),
+				postprocessingFailures: [],
+			}),
+		},
+		isError: handoff.isError ?? handoff.result.isError === true,
+		backgroundCompletion: handedOffCompletion,
+	};
+}
+
+async function executePreparedToolCall(
+	prepared: PreparedToolCall,
+	signal: AbortSignal | undefined,
+	emit: AgentEventSink,
+): Promise<ExecutedToolCallOutcome> {
+	const timeoutMs = readToolFailureTimeoutMs(prepared.args, prepared.tool);
+	const progress = new ToolProgressDelivery<AgentToolResult<unknown>>((partialResult) =>
+		emit({
+			type: "tool_execution_update",
+			toolCallId: prepared.toolCall.id,
+			toolName: prepared.toolCall.name,
+			args: prepared.toolCall.arguments,
+			partialResult,
+		}),
+	);
+	let executed: ExecutedToolCallOutcome;
+	try {
+		prepared.recoveryReservation.commit();
+		const result = await prepared.tool.execute(
+			prepared.toolCall.id,
+			prepared.args as never,
+			signal,
+			(partialResult) => progress.publish(partialResult),
+		);
+		executed = {
+			result,
+			operationCompleted: true,
+			// Tool definitions can report an expected operation failure without
+			// throwing. Keep the returned result intact through afterToolCall so
+			// policy hooks can inspect its bounded diagnostics and metadata.
+			isError: result.isError === true,
+			...(result.isError === true
+				? { errorClass: "tool_result_error", errorKind: result.errorKind ?? "tool_failure" }
+				: {}),
+		};
+	} catch (error) {
+		const described = describeThrownToolError(error);
+		const toolFailure = described.structured;
+		const message = described.message;
+		// The run was stopped: whatever the tool threw on its way out is the shape of a cancellation,
+		// not a mistake the model made. Classifying it as one cost a ledger entry, a kind-mistake count
+		// and a correction the model could not act on, for an operation nobody asked it to finish.
+		const cancelled = signal?.aborted === true || (signal?.reason !== undefined && error === signal.reason);
+		if (cancelled) {
+			const cancellationText = abortedToolCallText(signal?.reason, message);
+			executed = {
+				result: createErrorToolResult(cancellationText),
+				operationCompleted: false,
+				isError: true,
+				errorClass: described.errorClass,
+				failureMessage: cancellationText,
+				failureCode: "aborted",
+				errorKind: "tool_failure",
+			};
+		} else {
+			executed = {
+				result: createErrorToolResult(message),
+				operationCompleted: toolFailure?.errorKind === "operation_outcome",
+				isError: true,
+				errorClass: described.errorClass,
+				failureMessage: message,
+				errorKind: toolFailure?.errorKind ?? "tool_failure",
+				...(toolFailure
+					? { failureCode: toolFailure.failureCode, outputSignature: toolFailure.outputSignature }
+					: {}),
+			};
+		}
+	}
+	return {
+		...executed,
+		...(timeoutMs === undefined ? {} : { timeoutMs }),
+		progressDeliveryFailed: await progress.finish(),
+	};
+}
+
+function repairTeachKey(toolName: string, note: string): string {
+	const repairName = /^\[harness\] ([^:]+):/.exec(note)?.[1] ?? note;
+	return `${toolName}\0${repairName}`;
+}
+
+function shouldEmitRepairTeachNote(toolName: string, note: string, tracker: ToolRepairTeachTracker): boolean {
+	const key = repairTeachKey(toolName, note);
+	const count = (tracker.get(key) ?? 0) + 1;
+	tracker.set(key, count);
+	return count === 1 || count % TOOL_REPAIR_TEACH_EVERY === 0;
+}
+
+function appendRepairTeachNotes(
+	result: AgentToolResult<any>,
+	toolCall: AgentToolCall,
+	tracker: ToolRepairTeachTracker,
+	config: AgentLoopConfig,
+): { result: AgentToolResult<any>; taught: boolean } {
+	if (config.toolArgumentTeachEnabled === false) return { result, taught: false };
+	const notes = (toolCall.repairNotes ?? []).filter((note) => shouldEmitRepairTeachNote(toolCall.name, note, tracker));
+	if (notes.length === 0) return { result, taught: false };
+	return {
+		result: {
+			...result,
+			content: [...result.content, { type: "text", text: notes.join("\n") }],
+		},
+		taught: true,
+	};
+}
+
+async function finalizeExecutedToolCall(
+	currentContext: AgentContext,
+	assistantMessage: AssistantMessage,
+	prepared: PreparedToolCall,
+	requestId: AgentRequestId,
+	executed: ExecutedToolCallOutcome,
+	config: AgentLoopConfig,
+	repairTeachTracker: ToolRepairTeachTracker,
+	toolFailureMemory: ToolFailureMemoryTracker,
+	toolFailureRecoveryGate: ToolFailureRecoveryGate,
+	signal: AbortSignal | undefined,
+): Promise<FinalizedToolCallOutcome> {
+	let result = executed.result;
+	// Capture the executor's validated receipt before a hook can mutate or replace its details.
+	// Presentation/policy failures must not erase a completed check or invent a different pass.
+	const verificationDetails = retainedVerificationDetails(result.details);
+	let isError = executed.isError;
+	const failureMessage = executed.failureMessage ?? "";
+	const errorClass = executed.errorClass;
+	const failureCode = executed.failureCode;
+	const outputSignature = executed.outputSignature;
+	const errorKind = executed.errorKind;
+	let afterHookFailed = false;
+	let executionGateEffect: ToolFailureRecoveryGateEffect | undefined;
+
+	if (config.afterToolCall) {
+		try {
+			const afterResult = await config.afterToolCall(
+				{
+					requestId,
+					assistantMessage,
+					toolCall: prepared.toolCall,
+					args: prepared.args,
+					result,
+					isError,
+					context: currentContext,
+					executionContext: prepared.binding?.executionContext,
+				},
+				signal,
+			);
+			if (afterResult) {
+				result = {
+					content: afterResult.content ?? result.content,
+					details: afterResult.details ?? result.details,
+					usage: afterResult.usage ?? result.usage,
+					terminate: afterResult.terminate ?? result.terminate,
+				};
+				isError = afterResult.isError ?? isError;
+			}
+		} catch {
+			// A failed projection is not a new operation outcome. Keep the executor's content,
+			// failure identity, usage and verification; disclose the hook failure separately below.
+			afterHookFailed = true;
+			result = executed.result;
+			isError = true;
+		}
+	}
+
+	if (afterHookFailed ? executed.isError : isError) {
+		const usage = result.usage;
+		const failureOutput =
+			failureMessage ||
+			result.content
+				.filter((block) => block.type === "text")
+				.map((block) => block.text)
+				.join("\n") ||
+			"Tool execution failed";
+		const effectiveFailureMessage =
+			failureMessage || result.content.find((block) => block.type === "text")?.text || "Tool execution failed";
+		const assessment = assessToolFailure(effectiveFailureMessage, "failed", errorClass);
+		const effectiveFailureCode = failureCode ?? assessment.failureCode;
+		if (effectiveFailureCode === "aborted") {
+			// A cancellation is not an operation outcome and not a mistake. It leaves no failure record
+			// (the recovery gate builds a blocking state from any record for this operation, which would
+			// refuse the model's own re-issue of the interrupted command) and no gate effect (an
+			// "unproductive" observation would spend the identical-retry allowance on a call nobody let
+			// finish). The cancellation text, already naming the abort, stands as the result; the ledger
+			// fold recognizes it by its text and never counts it.
+			clearToolFailure(toolFailureMemory, prepared.toolCall.name, prepared.args, prepared.binding?.executionScope);
+			result = { ...result, usage };
+		} else if (errorKind === "operation_outcome") {
+			// The tool ran the operation to completion; the non-zero status is the observation the
+			// agent asked for. Nothing here is a mistake, so no failure record is remembered and the
+			// tool's own output stands exactly as written. The governor still notes that repeating
+			// this identical operation cannot say anything new until something else changes.
+			clearToolFailure(toolFailureMemory, prepared.toolCall.name, prepared.args, prepared.binding?.executionScope);
+			result = { ...result, errorKind: "operation_outcome", usage };
+			executionGateEffect = {
+				kind: "unproductive",
+				tool: prepared.tool,
+				...(executed.timeoutMs === undefined ? {} : { timeoutMs: executed.timeoutMs }),
+				record: describeOperationOutcome(
+					prepared.toolCall.name,
+					prepared.args,
+					effectiveFailureCode,
+					assessment.diagnostic,
+					prepared.binding?.executionScope,
+				),
+				args: prepared.args,
+			};
+		} else {
+			const recoveryPlan = toolFailureRecoveryGate.planFailure(
+				prepared.tool,
+				prepared.args,
+				{ failureCode: effectiveFailureCode, message: effectiveFailureMessage },
+				currentContext.tools ?? [],
+				prepared.binding?.executionScope,
+			);
+			const correction =
+				recoveryPlan.correction ??
+				(assessment.policyGuidance
+					? `${assessment.policyGuidance} ${recoveryPlan.guidance}`
+					: recoveryPlan.guidance);
+			const record = rememberToolFailure(
+				toolFailureMemory,
+				prepared.toolCall.name,
+				prepared.args,
+				"failed",
+				effectiveFailureCode,
+				correction,
+				assessment.diagnostic,
+				assessment.phase,
+				recoveryPlan.evidence ?? assessment.evidence,
+				{ output: failureOutput, outputSignature },
+				prepared.binding?.executionScope,
+			);
+			executionGateEffect = {
+				kind: "unproductive",
+				tool: prepared.tool,
+				...(executed.timeoutMs === undefined ? {} : { timeoutMs: executed.timeoutMs }),
+				record,
+				args: prepared.args,
+			};
+			result = { ...createToolFailureResult(record, result.terminate), usage };
+		}
+	} else {
+		clearToolFailure(toolFailureMemory, prepared.toolCall.name, prepared.args, prepared.binding?.executionScope);
+		if (!executed.isError) {
+			executionGateEffect = {
+				kind: "success",
+				executionScope: prepared.binding?.executionScope,
+				tool: prepared.tool,
+				args: prepared.args,
+			};
+		}
+	}
+
+	const repaired = appendRepairTeachNotes(result, prepared.toolCall, repairTeachTracker, config);
+	const projectedDetails = detailsWithoutVerification(repaired.result.details);
+	const executorFailureIdentity =
+		executed.failureCode === undefined ? {} : { failureCode: boundedFailureCode(executed.failureCode) };
+	const invocationDetails = stampToolInvocation(projectedDetails, {
+		version: 1,
+		requestId,
+		...(executed.timeoutMs === undefined ? {} : { timeoutMs: executed.timeoutMs }),
+		...(prepared.binding ? { executionScope: prepared.binding.executionScope } : {}),
+		...(executed.operationCompleted
+			? executed.isError
+				? { execution: "completed", operationStatus: "error", ...executorFailureIdentity }
+				: { execution: "completed", operationStatus: "success" }
+			: { execution: "unknown", ...executorFailureIdentity }),
+		postprocessingFailures: [
+			...(executed.progressDeliveryFailed ? ["progress" as const] : []),
+			...(afterHookFailed ? ["after_hook" as const] : []),
+		],
+	});
+	if (verificationDetails) {
+		Object.defineProperty(invocationDetails, "piVerification", {
+			value: verificationDetails.piVerification,
+			enumerable: true,
+			writable: false,
+			configurable: false,
+		});
+	}
+	const resultWithVerification = {
+		...repaired.result,
+		details: invocationDetails,
+	};
+	if (afterHookFailed) {
+		resultWithVerification.content = [
+			...resultWithVerification.content,
+			{
+				type: "text",
+				text: "[harness] After-tool hook failed. The operation result is retained; do not rerun the operation to recover its presentation.",
+			},
+		];
+	}
+	if (executed.progressDeliveryFailed) {
+		resultWithVerification.content = [
+			...resultWithVerification.content,
+			{
+				type: "text",
+				text: "[harness] Progress delivery failed. The operation result is retained; inspect it rather than rerunning the operation to recover progress updates.",
+			},
+		];
+	}
+	emitToolArgumentValidationTelemetry(
+		config,
+		prepared.validationEvent,
+		isError ? "failed" : "succeeded",
+		repaired.taught ? "note" : "none",
+	);
+
+	return {
+		toolCall: prepared.toolCall,
+		result: resultWithVerification,
+		isError,
+		...(executed.progressDeliveryFailed ? { deliveryFailure: new Error("tool_progress_delivery_failed") } : {}),
+		executionGateEffect,
+	};
+}
+
+function detailsWithoutVerification(details: unknown): unknown {
+	if (!details || typeof details !== "object" || !("piVerification" in details)) return details;
+	const descriptors: PropertyDescriptorMap = Object.getOwnPropertyDescriptors(details);
+	delete descriptors.piVerification;
+	return Object.defineProperties({}, descriptors);
+}
+
+function createErrorToolResult(message: string): AgentToolResult<any> {
+	return {
+		content: [{ type: "text", text: message }],
+		details: {},
+	};
+}
+
+async function emitToolExecutionStart(toolCall: AgentToolCall, emit: AgentEventSink): Promise<void> {
+	await emit({
+		type: "tool_execution_start",
+		toolCallId: toolCall.id,
+		toolName: toolCall.name,
+		args: toolCall.arguments,
+		repair: getToolCallRepairInfo(toolCall),
+	});
+}
+
+export function getToolCallRepairInfo(toolCall: AgentToolCall): ToolCallRepairInfo | undefined {
+	if (!toolCall.rawArguments && !toolCall.repairNotes?.length) return undefined;
+	return {
+		repaired: true,
+		...(toolCall.rawArguments ? { rawArguments: toolCall.rawArguments } : {}),
+		...(toolCall.repairNotes?.length ? { notes: toolCall.repairNotes } : {}),
+	};
+}
+
+async function emitToolExecutionEnd(finalized: FinalizedToolCallOutcome, emit: AgentEventSink): Promise<void> {
+	await emit({
+		type: "tool_execution_end",
+		toolCallId: finalized.toolCall.id,
+		toolName: finalized.toolCall.name,
+		result: finalized.result,
+		isError: finalized.isError,
+		repair: getToolCallRepairInfo(finalized.toolCall),
+	});
+}
+
+function createToolResultMessage(finalized: FinalizedToolCallOutcome): ToolResultMessage {
+	return {
+		role: "toolResult",
+		toolCallId: finalized.toolCall.id,
+		toolName: finalized.toolCall.name,
+		content: finalized.result.content,
+		details: finalized.result.details,
+		usage: finalized.result.usage,
+		isError: finalized.isError,
+		// Persisted so a reloaded transcript still separates a completed operation's own status from a
+		// tool that could not run at all.
+		...(finalized.isError && finalized.result.errorKind ? { errorKind: finalized.result.errorKind } : {}),
+		timestamp: Date.now(),
+	};
+}
+
+async function emitToolResultMessage(toolResultMessage: ToolResultMessage, emit: AgentEventSink): Promise<void> {
+	await emit({ type: "message_start", message: toolResultMessage });
+	await emit({ type: "message_end", message: toolResultMessage });
+}

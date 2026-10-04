@@ -1,4 +1,3 @@
-import type { CustomMessage } from "@caupulican/pi-agent-core";
 import type { TextContent } from "@caupulican/pi-ai";
 import {
 	Box,
@@ -18,8 +17,9 @@ import {
 	isBackgroundActivitySummaryContract,
 } from "../../../core/foreground-terminal-handoff-controller.ts";
 import { isPlainRecord } from "../../../core/util/value-guards.ts";
-import { getMarkdownTheme, theme } from "../theme/theme.ts";
-import { renderTitleBadge } from "./tool-title.ts";
+import type { CustomMessage } from "../../../kernel/index.ts";
+import { getMarkdownTheme, theme } from "../../../presentation/theme-model.ts";
+import { renderTitleBadge } from "../../../presentation/tool-title.ts";
 
 /**
  * Component that renders a custom message entry from extensions.

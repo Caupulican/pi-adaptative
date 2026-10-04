@@ -5,9 +5,6 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { getToolCallRepairInfo } from "@caupulican/pi-agent-core/agent-loop";
-import type { SessionContext, SessionManager, TruncationResult } from "@caupulican/pi-agent-core/node";
-import type { AgentMessage, ToolCallRepairInfo } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage, ImageContent, Message, Model } from "@caupulican/pi-ai";
 import type { AutocompleteProvider, EditorComponent, Keybinding, MarkdownTheme, SelectItem } from "@caupulican/pi-tui";
 import {
@@ -32,11 +29,7 @@ import {
 	detectCacheMissNotice,
 	observeCacheStateFromMessages,
 } from "../../core/cache-miss-notice.ts";
-import {
-	expandArgumentsForDisplay,
-	expandMessageForDisplay,
-	expandMessageTextForDisplay,
-} from "../../core/context/path-alias-display.ts";
+import { expandArgumentsForDisplay, expandMessageForDisplay } from "../../core/context/path-alias-display.ts";
 import type { AutocompleteProviderFactory, ExtensionCommandContext } from "../../core/extensions/index.ts";
 import { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import {
@@ -52,6 +45,7 @@ import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts"
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import type { ManagedMemoryTarget } from "../../core/memory/providers/file-store.ts";
 import type { ForegroundRouteSnapshot } from "../../core/model-router-controller.ts";
+import type { FitnessRole } from "../../core/models/fitness-role.ts";
 import type { PrismLlamaCppRuntime } from "../../core/models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
 import { AccountUsageMonitor } from "../../core/provider-admission/account-usage-monitor.ts";
@@ -65,9 +59,21 @@ import type {
 	MemorySystem,
 	SelfModificationSettings,
 	SettingsScope,
-} from "../../core/settings-manager.ts";
+} from "../../core/settings/settings-schema.ts";
 import { collectSelfModificationSourceCandidates } from "../../core/system-prompt-builder.ts";
 import { isRecordObject } from "../../core/util/value-guards.ts";
+import type { SessionContext, SessionManager, TruncationResult } from "../../kernel/node.ts";
+import type { AgentMessage, ToolCallRepairInfo } from "../../kernel/types.ts";
+import * as clipboardInput from "../../presentation/clipboard-input.ts";
+import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "../../presentation/keybinding-hints.ts";
+import {
+	initTheme,
+	onThemeChange,
+	setRegisteredThemes,
+	setTheme,
+	stopThemeWatcher,
+} from "../../presentation/theme/theme.ts";
+import { getEditorTheme, getMarkdownTheme, theme } from "../../presentation/theme-model.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
@@ -75,7 +81,6 @@ import { AuthDialogsController } from "./auth-dialogs-controller.ts";
 import { AutoLearnController, type AutoLearnState } from "./auto-learn-controller.ts";
 import * as autocompleteProvider from "./autocomplete-provider.ts";
 import * as autonomyCommands from "./autonomy-commands.ts";
-import * as clipboardInput from "./clipboard-input.ts";
 import * as compactionQueue from "./compaction-queue.ts";
 import { ActionTranscriptComponent } from "./components/action-transcript.ts";
 import { ActiveToolCallRegistry } from "./components/active-tool-call-registry.ts";
@@ -85,14 +90,11 @@ import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
-import type { CountdownTimer } from "./components/countdown-timer.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomMessageComponent } from "./components/custom-message.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { ExpandableText, isExpandable } from "./components/expandable-text.ts";
-import type { FitnessRole } from "./components/fitness-role-selector.ts";
-import { FooterComponent } from "./components/footer.ts";
-import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
+import { FooterComponent, type FooterServices } from "./components/footer.ts";
 import type { MarkdownTransformFn } from "./components/markdown-transform.ts";
 import { ReplyBylineTracker, replyByline, replyModelRef } from "./components/reply-byline.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
@@ -108,13 +110,8 @@ import { ExtensionUiHost } from "./extension-ui-host.ts";
 import { openEditorForPath, openExternalEditor } from "./external-editor.ts";
 import { handleFastModeCommand } from "./fast-mode-command.ts";
 import * as historyReloadMath from "./history-reload-math.ts";
-import { handleInteractiveEvent, type InteractiveEventHost } from "./interactive-event-controller.ts";
-import {
-	type HumanInputTally,
-	type InteractiveLayoutHost,
-	mountInteractiveLayout,
-	subscribeInteractiveLayout,
-} from "./interactive-layout.ts";
+import { InteractiveEventController } from "./interactive-event-controller.ts";
+import { InteractiveLayout } from "./interactive-layout.ts";
 import * as keyHandlers from "./key-handlers.ts";
 import { handleEstopCommand, handleLoadCommand } from "./load-commands.ts";
 import { type LoadedResourcesViewOptions, renderLoadedResources } from "./loaded-resources-view.ts";
@@ -134,24 +131,12 @@ import * as settingsSelectorFlow from "./settings-selector-flow.ts";
 import * as signalLifecycle from "./signal-lifecycle.ts";
 import * as startupChecks from "./startup-checks.ts";
 import { terminalCapabilityOverridesFromSettings } from "./terminal-capability-settings.ts";
-import {
-	getEditorTheme,
-	getMarkdownTheme,
-	initTheme,
-	onThemeChange,
-	setRegisteredThemes,
-	setTheme,
-	stopThemeWatcher,
-	theme,
-} from "./theme/theme.ts";
 import * as usageCommands from "./usage-commands.ts";
 import { handleVerifyCommand } from "./verify-commands.ts";
-import type { WorkbenchController } from "./workbench-controller.ts";
 
 const TUI_HISTORY_RELOAD_CHUNK_SIZE = 20;
 const TUI_LIVE_HISTORY_MAX_COMPONENTS = 260;
 const TUI_LIVE_HISTORY_TRIM_TO_COMPONENTS = 220;
-const STREAMING_UI_UPDATE_INTERVAL_MS = 80;
 
 type UserInputSubmission = {
 	text: string;
@@ -262,14 +247,8 @@ export class InteractiveMode {
 	private tuiHistoryLoaded = false;
 	private tuiHistoryLoadInProgress = false;
 
-	// Streaming message tracking
-	private streamingComponent: AssistantMessageComponent | undefined = undefined;
-	private streamingMessage: AssistantMessage | undefined = undefined;
-	private streamingUiUpdateTimer: ReturnType<typeof setTimeout> | undefined = undefined;
-	private lastStreamingUiUpdateAt = 0;
-
 	// Active execution identity. Completed actions are owned by the transcript.
-	private activeToolCalls = new ActiveToolCallRegistry(() => this.workbench?.refreshExecution());
+	private activeToolCalls = new ActiveToolCallRegistry(() => this.layout.workbench?.refreshExecution());
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -288,13 +267,15 @@ export class InteractiveMode {
 	// Agent subscription unsubscribe function
 	private unsubscribe?: () => void;
 	private unsubscribeForegroundActivity?: () => void;
-	/** The Workbench layout's session listeners (set by the layout; rebound with the session, disposed on stop). */
-	disposeOperatorProjection?: () => void;
-	humanInputTally?: HumanInputTally;
 	private unsubscribeHumanInputActivity?: () => void;
 	private subscriptionGeneration = 0;
 	private unsubscribeExtensionsChanged?: () => void;
-	private signalCleanupHandlers: Array<() => void> = [];
+	/** Owns shutdown state and the process listeners it registered; see signal-lifecycle.ts. */
+	private readonly signals: signalLifecycle.SignalLifecycle;
+	/** Owns the mounted Workbench and its session listeners; see interactive-layout.ts. */
+	private readonly layout: InteractiveLayout;
+	/** Owns the streaming reply and the retry/compaction escape handlers; see interactive-event-controller.ts. */
+	private readonly events: InteractiveEventController;
 
 	// Track if editor is in bash mode (text starts with !)
 	private isBashMode = false;
@@ -304,13 +285,6 @@ export class InteractiveMode {
 
 	// Track pending bash components (shown in pending area, moved to chat on submit)
 	private pendingBashComponents: BashExecutionComponent[] = [];
-
-	// Auto-compaction state
-	public autoCompactionEscapeHandler?: () => void;
-
-	// Auto-retry state
-	public retryCountdown: CountdownTimer | undefined = undefined;
-	public retryEscapeHandler?: () => void;
 
 	// Messages queued while compaction is running
 	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
@@ -322,8 +296,6 @@ export class InteractiveMode {
 	private widgetContainerAbove!: Container;
 	private widgetContainerBelow!: Container;
 	private activityLane: ActivityLaneComponent | undefined;
-	private workbench?: WorkbenchController;
-	private workbenchInputCleanup?: () => void;
 	private readonly hasHumanAudience: boolean;
 	private usageMonitor: AccountUsageMonitor | undefined;
 
@@ -342,11 +314,19 @@ export class InteractiveMode {
 	private get agent() {
 		return this.session.agent;
 	}
+	// The runtime host builds the session and its services together and replaces them as a unit, so
+	// these read the current ones per use; the session itself no longer exposes them.
 	private get sessionManager() {
-		return this.session.sessionManager;
+		return this.runtimeHost.sessionManager;
 	}
 	private get settingsManager() {
-		return this.session.settingsManager;
+		return this.runtimeHost.services.settingsManager;
+	}
+	private get modelRegistry() {
+		return this.runtimeHost.services.modelRegistry;
+	}
+	private get extensionRunner() {
+		return this.runtimeHost.extensionRunner;
 	}
 
 	private get loadingAnimation(): Loader | undefined {
@@ -396,6 +376,15 @@ export class InteractiveMode {
 				: new InputOnlyTerminal(),
 			this.settingsManager.getShowHardwareCursor(),
 		);
+		this.signals = new signalLifecycle.SignalLifecycle({
+			runtimeHost: this.runtimeHost,
+			ui: this.ui,
+			isShutdownRequested: () => this.shutdownRequested,
+			stop: () => this.stop(),
+			formatResumeCommand: () => formatResumeCommand(this.sessionManager),
+			showStatus: (message) => this.showStatus(message),
+			showError: (message) => this.showError(message),
+		});
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
 		this.chatContainer = new Container();
@@ -429,9 +418,12 @@ export class InteractiveMode {
 		this.footerDataProvider = new FooterDataProvider(this.sessionManager.getCwd(), {
 			watchGit: this.hasHumanAudience,
 		});
-		this.footer = new FooterComponent(this.session, this.footerDataProvider);
+		this.footer = new FooterComponent(this.session, this.footerServices(), this.footerDataProvider);
 		this.autoLearnController = new AutoLearnController({
 			getSession: () => this.runtimeHost.session,
+			getSessionManager: () => this.sessionManager,
+			getSettingsManager: () => this.settingsManager,
+			getModelRegistry: () => this.modelRegistry,
 			resolveSelfModificationSource: (settings) => this.resolveSelfModificationSource(settings),
 			ui: {
 				showStatus: (message) => this.showStatus(message),
@@ -449,6 +441,9 @@ export class InteractiveMode {
 		};
 		this.profileMenu = new ProfileMenuController({
 			getSession: () => this.runtimeHost.session,
+			getSessionManager: () => this.sessionManager,
+			getSettingsManager: () => this.settingsManager,
+			getModelRegistry: () => this.modelRegistry,
 			ui: {
 				...sharedControllerUi,
 				showWarning: (message) => this.showWarning(message),
@@ -466,6 +461,8 @@ export class InteractiveMode {
 		});
 		this.authDialogs = new AuthDialogsController({
 			getSession: () => this.runtimeHost.session,
+			getSettingsManager: () => this.settingsManager,
+			getModelRegistry: () => this.modelRegistry,
 			ui: {
 				...sharedControllerUi,
 				overlayHost: this.overlayHost,
@@ -480,6 +477,9 @@ export class InteractiveMode {
 		});
 		this.extensionUiHost = new ExtensionUiHost({
 			getSession: () => this.runtimeHost.session,
+			getSessionManager: () => this.sessionManager,
+			getSettingsManager: () => this.settingsManager,
+			getModelRegistry: () => this.modelRegistry,
 			ui: {
 				tui: this.ui,
 				overlayHost: this.overlayHost,
@@ -492,7 +492,7 @@ export class InteractiveMode {
 				widgetContainerAbove: this.widgetContainerAbove,
 				widgetContainerBelow: this.widgetContainerBelow,
 				getEditor: () => this.editor,
-				getWorkbenchView: () => this.workbench?.view,
+				getWorkbenchView: () => this.layout.workbench?.view,
 				setEditor: (editor) => {
 					const previousEditor = this.editor;
 					this.editor = editor;
@@ -532,6 +532,71 @@ export class InteractiveMode {
 				showError: (message) => this.showError(message),
 			},
 		});
+		this.events = new InteractiveEventController({
+			hasHumanAudience: this.hasHumanAudience,
+			ui: this.ui,
+			footer: this.footer,
+			footerDataProvider: this.footerDataProvider,
+			defaultEditor: this.defaultEditor,
+			statusContainer: this.statusContainer,
+			chatContainer: this.chatContainer,
+			activityLane: this.activityLane,
+			runtimeStatus: this.runtimeStatus,
+			replyBylines: this.replyBylines,
+			activeToolCalls: this.activeToolCalls,
+			transformMarkdownForDisplay: this.transformMarkdownForDisplay,
+			getSession: () => this.session,
+			getSessionManager: () => this.sessionManager,
+			getSettings: () => this.settingsManager,
+			getWorkbench: () => this.layout.workbench,
+			isInitialized: () => this.isInitialized,
+			isThinkingHidden: () => this.hideThinkingBlock,
+			init: () => this.init(),
+			clearActiveToolCalls: () => this.clearActiveToolCalls(),
+			updatePendingMessagesDisplay: () => this.updatePendingMessagesDisplay(),
+			updateTerminalTitle: () => this.updateTerminalTitle(),
+			refreshActivityLane: () => this.refreshActivityLane(),
+			updateEditorBorderColor: () => this.updateEditorBorderColor(),
+			showError: (message) => this.showError(message),
+			addMessageToChat: (message) => this.addMessageToChat(message),
+			getMarkdownThemeWithSettings: () => this.getMarkdownThemeWithSettings(),
+			trimLiveTuiHistory: () => this.trimLiveTuiHistory(),
+			attachToolExecutionComponent: (toolName, toolCallId, args, repair) =>
+				this.attachToolExecutionComponent(toolName, toolCallId, args, repair),
+			toolActivityKind: (toolName) => this.toolActivityKind(toolName),
+			toolActivityLabel: (toolName) => this.toolActivityLabel(toolName),
+			toolActivityTerminalStatus: (isError, details) => this.toolActivityTerminalStatus(isError, details),
+			isNativeReflectionEnabled: () => this.isNativeReflectionEnabled(),
+			maybeRunNativeReflection: (messages) => this.maybeRunNativeReflection(messages),
+			maybeStartAutoLearn: () => this.maybeStartAutoLearn(),
+			maybeStartAutonomyReview: (messages) => this.maybeStartAutonomyReview(messages),
+			offerMisalignmentContinuation: (block) => this.offerMisalignmentContinuation(block),
+			checkShutdownRequested: () => this.checkShutdownRequested(),
+			rebuildChatFromMessages: () => this.rebuildChatFromMessages(),
+			flushCompactionQueue: (options) => this.flushCompactionQueue(options),
+		});
+		this.layout = new InteractiveLayout({
+			hasHumanAudience: this.hasHumanAudience,
+			ui: this.ui,
+			headerContainer: this.headerContainer,
+			chatContainer: this.chatContainer,
+			editorContainer: this.editorContainer,
+			pendingMessagesContainer: this.pendingMessagesContainer,
+			statusContainer: this.statusContainer,
+			widgetContainerAbove: this.widgetContainerAbove,
+			widgetContainerBelow: this.widgetContainerBelow,
+			footer: this.footer,
+			footerDataProvider: this.footerDataProvider,
+			activityLane: this.activityLane,
+			keybindings: this.keybindings,
+			extensionUiHost: this.extensionUiHost,
+			activeToolCalls: this.activeToolCalls,
+			getSession: () => this.session,
+			getSessionManager: () => this.sessionManager,
+			getEditor: () => this.editor,
+			getSettings: () => this.settingsManager,
+			getStreamingMessage: () => this.events.getStreamingMessage(),
+		});
 		// The edge asks here, once, with one key: an ungranted operation waits for the answer in the
 		// workbench instead of failing the model's call. Escape declines.
 		this.session.setEdgeConfirmation(async (request, signal) => {
@@ -562,6 +627,8 @@ export class InteractiveMode {
 			session: this.session,
 			settingsManager: this.settingsManager,
 			sessionManager: this.sessionManager,
+			modelRegistry: this.modelRegistry,
+			extensionRunner: this.extensionRunner,
 			fdPath: this.fdPath,
 			skillCommands: this.skillCommands,
 		});
@@ -606,18 +673,26 @@ export class InteractiveMode {
 		startupChecks.showStartupNoticesIfNeeded(this.startupChecksHost());
 	}
 
+	/**
+	 * Mounts the layout, wires input, and starts the UI. It runs before extensions initialize so
+	 * session_start handlers can use interactive dialogs.
+	 */
+	private startInteractiveSurface(): void {
+		this.layout.mount();
+		this.ui.setFocus(this.editor);
+		this.setupKeyHandlers();
+		this.setupEditorSubmitHandler();
+		this.ui.start();
+		this.isInitialized = true;
+	}
+
 	async init(): Promise<void> {
 		if (this.isInitialized) return;
 
 		this.registerSignalHandlers();
 		if (!this.hasHumanAudience) {
 			this.builtInHeader = new Text("", 0, 0);
-			mountInteractiveLayout(this as unknown as InteractiveLayoutHost);
-			this.ui.setFocus(this.editor);
-			this.setupKeyHandlers();
-			this.setupEditorSubmitHandler();
-			this.ui.start();
-			this.isInitialized = true;
+			this.startInteractiveSurface();
 			await this.rebindCurrentSession();
 			return;
 		}
@@ -719,15 +794,7 @@ export class InteractiveMode {
 			this.headerContainer.addChild(this.builtInHeader);
 		}
 
-		mountInteractiveLayout(this as unknown as InteractiveLayoutHost);
-		this.ui.setFocus(this.editor);
-
-		this.setupKeyHandlers();
-		this.setupEditorSubmitHandler();
-
-		// Start the UI before initializing extensions so session_start handlers can use interactive dialogs
-		this.ui.start();
-		this.isInitialized = true;
+		this.startInteractiveSurface();
 
 		// Initialize extensions first so resources are shown before messages
 		await this.rebindCurrentSession();
@@ -871,7 +938,7 @@ export class InteractiveMode {
 			this.showWarning(`Migrated credentials to auth.json: ${migratedProviders.join(", ")}`);
 		}
 
-		const modelsJsonError = this.session.modelRegistry.getError();
+		const modelsJsonError = this.modelRegistry.getError();
 		if (modelsJsonError) {
 			this.showError(`models.json error: ${modelsJsonError}`);
 		}
@@ -898,7 +965,7 @@ export class InteractiveMode {
 		if (!this.hasHumanAudience) return;
 		const current = observeCacheStateFromMessages(this.session.messages);
 		if (!current) return;
-		if (this.session.settingsManager.getShowCacheMissNotices()) {
+		if (this.settingsManager.getShowCacheMissNotices()) {
 			const notice = detectCacheMissNotice(current, this.lastCacheObservation);
 			if (notice) this.showWarning(notice.message);
 		}
@@ -925,11 +992,11 @@ export class InteractiveMode {
 		const snapshot = this.activityLaneSnapshot();
 		if (options.replace) {
 			this.activityLane.replaceCanonical(sessionKey, snapshot);
-			this.workbench?.reset();
+			this.layout.workbench?.reset();
 		} else {
 			this.activityLane.updateCanonical(sessionKey, snapshot);
 		}
-		this.workbench?.refresh({ ...snapshot, items: this.activityLane.getItems() });
+		this.layout.workbench?.refresh({ ...snapshot, items: this.activityLane.getItems() });
 	}
 
 	public toolActivityKind(toolName: string): ActivityLaneKind {
@@ -983,7 +1050,7 @@ export class InteractiveMode {
 	 * method, not auto-bound).
 	 */
 	private readonly transformMarkdownForDisplay: MarkdownTransformFn = (markdown, context) =>
-		this.session.extensionRunner.transformMarkdown(markdown, context);
+		this.extensionRunner.transformMarkdown(markdown, context);
 
 	// =========================================================================
 	// Extension System
@@ -997,6 +1064,9 @@ export class InteractiveMode {
 		renderLoadedResources(
 			{
 				session: this.session,
+				sessionManager: this.sessionManager,
+				settingsManager: this.settingsManager,
+				extensionRunner: this.extensionRunner,
 				chatContainer: this.chatContainer,
 				verbose: this.options.verbose ?? false,
 				expanded: this.getStartupExpansionState(),
@@ -1088,7 +1158,7 @@ export class InteractiveMode {
 			},
 		});
 
-		const extensionRunner = this.session.extensionRunner;
+		const extensionRunner = this.extensionRunner;
 		this.extensionUiHost.setupExtensionShortcuts(extensionRunner);
 		if (!this.hasHumanAudience) return;
 		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
@@ -1097,9 +1167,17 @@ export class InteractiveMode {
 		this.showStartupNoticesIfNeeded();
 	}
 
+	private footerServices(): FooterServices {
+		return {
+			sessionManager: this.sessionManager,
+			settingsManager: this.settingsManager,
+			modelRegistry: this.modelRegistry,
+		};
+	}
+
 	private applyRuntimeSettings(): void {
 		configureHttpDispatcher(this.settingsManager.getHttpIdleTimeoutMs());
-		this.footer.setSession(this.session);
+		this.footer.setSession(this.session, this.footerServices());
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerDataProvider.setCwd(this.sessionManager.getCwd());
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -1159,7 +1237,7 @@ export class InteractiveMode {
 		this.subscribeToAgent();
 		if (this.hasHumanAudience) {
 			// The Workbench's own listeners (projection, stage log, System One ledger, questions) follow the session too.
-			if (this.workbench) subscribeInteractiveLayout(this as unknown as InteractiveLayoutHost);
+			this.layout.rebindSession();
 			this.subscribeToExtensionsChanged();
 			await this.updateAvailableProviderCount();
 			this.updateEditorBorderColor();
@@ -1216,8 +1294,7 @@ export class InteractiveMode {
 	private renderCurrentSessionState(): void {
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
-		this.streamingComponent = undefined;
-		this.streamingMessage = undefined;
+		this.events.discardStreaming();
 		this.clearActiveToolCallState();
 		void this.renderInitialMessages();
 	}
@@ -1309,7 +1386,8 @@ export class InteractiveMode {
 
 	private setHiddenThinkingLabel(label?: string): void {
 		this.runtimeStatus.setHiddenThinkingLabel(label);
-		if (this.streamingMessage) this.updateRuntimeStatus(this.streamingMessage);
+		const streamingMessage = this.events.getStreamingMessage();
+		if (streamingMessage) this.updateRuntimeStatus(streamingMessage);
 	}
 
 	public updateRuntimeStatus(message?: AssistantMessage): void {
@@ -1320,7 +1398,7 @@ export class InteractiveMode {
 	 * Set the extension-provided working-loader message (undefined restores the default).
 	 */
 	private setWorkingMessage(message: string | undefined): void {
-		this.runtimeStatus.setWorkingMessage(message, this.streamingMessage);
+		this.runtimeStatus.setWorkingMessage(message, this.events.getStreamingMessage());
 	}
 
 	/**
@@ -1328,7 +1406,8 @@ export class InteractiveMode {
 	 */
 	private resetWorkingIndicators(): void {
 		this.runtimeStatus.resetWorkingIndicators();
-		if (this.streamingMessage) this.updateRuntimeStatus(this.streamingMessage);
+		const streamingMessage = this.events.getStreamingMessage();
+		if (streamingMessage) this.updateRuntimeStatus(streamingMessage);
 	}
 
 	private async promptForMissingSessionCwd(error: MissingSessionCwdError): Promise<string | undefined> {
@@ -1625,7 +1704,17 @@ export class InteractiveMode {
 				return;
 			}
 			if (text === "/fast" || text.startsWith("/fast ")) {
-				handleFastModeCommand({ session: this.session, showStatus: (message) => this.showStatus(message) }, text);
+				handleFastModeCommand(
+					{
+						session: {
+							model: this.session.model,
+							settingsManager: this.settingsManager,
+							getFastModeServiceTiers: (model) => this.session.getFastModeServiceTiers(model),
+						},
+						showStatus: (message) => this.showStatus(message),
+					},
+					text,
+				);
 				this.editor.setText("");
 				this.footer.invalidate();
 				return;
@@ -1865,7 +1954,7 @@ export class InteractiveMode {
 		});
 		this.syncForegroundActivity();
 		this.unsubscribeHumanInputActivity?.();
-		this.unsubscribeHumanInputActivity = subscribeHumanInputActivity(session.sessionManager, (activity) => {
+		this.unsubscribeHumanInputActivity = subscribeHumanInputActivity(this.sessionManager, (activity) => {
 			if (generation !== this.subscriptionGeneration || session !== this.session) return;
 			this.activityLane?.syncHumanInputActivity({
 				requestId: activity.request.requestId,
@@ -1884,7 +1973,7 @@ export class InteractiveMode {
 	private syncForegroundActivity(): void {
 		const activity = this.session.getSessionWorkState();
 		if (activity.busy && activity.epoch !== undefined) {
-			this.workbench?.beginCycle(this.session.sessionManager.getCwd(), activity.epoch);
+			this.layout.workbench?.beginCycle(this.sessionManager.getCwd(), activity.epoch);
 		}
 		this.activityLane?.setParentVisible(this.workingVisible && !this.workingIndicatorOptions);
 		this.activityLane?.syncForegroundActivity({ ...activity, sessionId: activity.sessionId ?? "unknown" });
@@ -1897,7 +1986,7 @@ export class InteractiveMode {
 	}
 
 	private handleEvent(event: AgentSessionEvent): Promise<void> {
-		return handleInteractiveEvent(this as unknown as InteractiveEventHost, event);
+		return this.events.handle(event);
 	}
 
 	private async handleUnattendedEvent(event: AgentSessionEvent): Promise<void> {
@@ -1943,12 +2032,6 @@ export class InteractiveMode {
 	private resetLiveTuiHistoryTrim(): void {
 		this.liveHistoryHiddenNotice = undefined;
 		this.liveHistoryHiddenComponents = 0;
-	}
-
-	private clearPendingStreamingUiUpdate(): void {
-		if (!this.streamingUiUpdateTimer) return;
-		clearTimeout(this.streamingUiUpdateTimer);
-		this.streamingUiUpdateTimer = undefined;
 	}
 
 	/**
@@ -2068,74 +2151,6 @@ export class InteractiveMode {
 		});
 	}
 
-	/**
-	 * @param argumentsComplete whether the tool call's arguments have finished streaming. Alias
-	 * expansion walks the whole argument payload, and this runs once per streamed chunk (a tool call
-	 * bypasses the UI update throttle), so expanding mid-stream is O(chunks x payload) — a 1MB write
-	 * cost 2.2s of UI work. Partial arguments are also mid-token, so expanding them is meaningless:
-	 * the value is only final, and only worth expanding, once the message ends.
-	 */
-	private attachStreamingToolActions(message: AssistantMessage, argumentsComplete: boolean): void {
-		for (const content of message.content) {
-			if (content.type !== "toolCall") continue;
-			const repair = getToolCallRepairInfo(content);
-			const args = argumentsComplete
-				? expandArgumentsForDisplay(this.session.peekPathAliasTable(), content.arguments)
-				: content.arguments;
-			if (!this.activeToolCalls.hasActive(content.id)) {
-				this.attachToolExecutionComponent(content.name, content.id, args, repair);
-			} else {
-				const component = this.activeToolCalls.getActive(content.id);
-				if (component) {
-					component.updateArgs(args, repair);
-				}
-			}
-		}
-	}
-
-	public applyStreamingMessageUpdate(message: AssistantMessage, options: { force?: boolean } = {}): void {
-		this.streamingMessage = message;
-		this.updateRuntimeStatus(message);
-		if (!this.streamingComponent) return;
-
-		const now = performance.now();
-		const elapsed = now - this.lastStreamingUiUpdateAt;
-		const hasToolCall = message.content.some((content) => content.type === "toolCall");
-		const shouldUpdateNow = options.force || hasToolCall || elapsed >= STREAMING_UI_UPDATE_INTERVAL_MS;
-
-		// `force` marks the message_start and message_end updates; only at message_end are a tool
-		// call's arguments complete. Every other update is a mid-stream chunk.
-		const argumentsComplete = options.force === true;
-		const update = () => {
-			if (!this.streamingComponent || !this.streamingMessage) return;
-			// Recomputed from the raw accumulated message on every call, never cached or expanded
-			// incrementally: an alias split across chunk boundaries renders literally for one update
-			// and self-heals on the next. `this.streamingMessage` is never reassigned here — at
-			// message_end it is the live history object (session state must keep raw aliases
-			// forever), so only this local, freshly-built copy is ever handed to rendering.
-			const displayMessage = expandMessageTextForDisplay(this.session.peekPathAliasTable(), this.streamingMessage);
-			this.streamingComponent.updateContent(displayMessage);
-			this.attachStreamingToolActions(displayMessage, argumentsComplete);
-			this.lastStreamingUiUpdateAt = performance.now();
-			this.ui.requestRender();
-		};
-
-		if (shouldUpdateNow) {
-			this.clearPendingStreamingUiUpdate();
-			update();
-			return;
-		}
-
-		if (this.streamingUiUpdateTimer) return;
-		this.streamingUiUpdateTimer = setTimeout(
-			() => {
-				this.streamingUiUpdateTimer = undefined;
-				update();
-			},
-			Math.max(0, STREAMING_UI_UPDATE_INTERVAL_MS - elapsed),
-		);
-	}
-
 	private trimLiveTuiHistory(): void {
 		const children = this.chatContainer.children;
 		if (children.length <= TUI_LIVE_HISTORY_MAX_COMPONENTS) return;
@@ -2147,7 +2162,7 @@ export class InteractiveMode {
 			if (index !== -1 && index < protectedStart) protectedStart = index;
 		};
 
-		protect(this.streamingComponent);
+		protect(this.events.getStreamingComponent());
 		protect(this.lastStatusSpacer);
 		protect(this.lastStatusText);
 		for (const [, action] of this.activeToolCalls.activeEntries()) {
@@ -2233,7 +2248,7 @@ export class InteractiveMode {
 			}
 			case "custom": {
 				if (message.display) {
-					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
+					const renderer = this.extensionRunner.getMessageRenderer(message.customType);
 					// 1 matches the paddingX every other top-level transcript component uses (assistant
 					// text, bash output, ...), so a custom renderer that honors MessageRenderOptions.outputPad
 					// aligns with its neighbors instead of silently seeing the unplumbed default of 0.
@@ -2379,7 +2394,7 @@ export class InteractiveMode {
 
 				this.replyBylines.reset();
 				this.replyRoutes = new Map();
-				for (const entry of this.session.sessionManager.getEntries()) {
+				for (const entry of this.sessionManager.getEntries()) {
 					if (entry.type !== "custom" || entry.customType !== REPLY_ROUTE_CUSTOM_TYPE) continue;
 					const record = entry.data as ReplyRouteRecord | undefined;
 					if (record && typeof record.timestamp === "number") this.replyRoutes.set(record.timestamp, record.route);
@@ -2549,60 +2564,28 @@ export class InteractiveMode {
 	 * Stops the TUI before emitting shutdown events so extension UI cleanup cannot
 	 * repaint the final frame while the process is exiting.
 	 */
-	private isShuttingDown = false;
-
 	private shutdown(options?: { fromSignal?: boolean }): Promise<void> {
-		const self = this;
-		return signalLifecycle.shutdown(
-			{
-				get isShuttingDown() {
-					return self.isShuttingDown;
-				},
-				set isShuttingDown(value) {
-					self.isShuttingDown = value;
-				},
-				get signalCleanupHandlers() {
-					return self.signalCleanupHandlers;
-				},
-				set signalCleanupHandlers(value) {
-					self.signalCleanupHandlers = value;
-				},
-				get shutdownRequested() {
-					return self.shutdownRequested;
-				},
-				runtimeHost: this.runtimeHost,
-				ui: this.ui,
-				stop: () => this.stop(),
-				formatResumeCommand: () => formatResumeCommand(this.sessionManager),
-				showStatus: (message) => this.showStatus(message),
-				showError: (message) => this.showError(message),
-				shutdown: (opts) => this.shutdown(opts),
-				unregisterSignalHandlers: () => this.unregisterSignalHandlers(),
-				emergencyTerminalExit: () => this.emergencyTerminalExit(),
-				uncaughtCrash: (error) => this.uncaughtCrash(error),
-			},
-			options,
-		);
+		return this.signals.shutdown(options);
 	}
 
 	private emergencyTerminalExit(): never {
-		return signalLifecycle.emergencyTerminalExit(this as unknown as signalLifecycle.SignalLifecycleHost);
+		return this.signals.emergencyTerminalExit();
 	}
 
 	private uncaughtCrash(error: Error): never {
-		return signalLifecycle.uncaughtCrash(this as unknown as signalLifecycle.SignalLifecycleHost, error);
+		return this.signals.uncaughtCrash(error);
 	}
 
 	private checkShutdownRequested(): Promise<void> {
-		return signalLifecycle.checkShutdownRequested(this as unknown as signalLifecycle.SignalLifecycleHost);
+		return this.signals.checkShutdownRequested();
 	}
 
 	private registerSignalHandlers(): void {
-		signalLifecycle.registerSignalHandlers(this as unknown as signalLifecycle.SignalLifecycleHost);
+		this.signals.registerSignalHandlers();
 	}
 
 	private unregisterSignalHandlers(): void {
-		signalLifecycle.unregisterSignalHandlers(this as unknown as signalLifecycle.SignalLifecycleHost);
+		this.signals.unregisterSignalHandlers();
 	}
 
 	private handleCtrlZ(): void {
@@ -2744,8 +2727,9 @@ export class InteractiveMode {
 				child.setHideThinkingBlock(this.hideThinkingBlock);
 			}
 		}
-		if (this.streamingComponent && !this.chatContainer.children.includes(this.streamingComponent)) {
-			this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
+		const streamingComponent = this.events.getStreamingComponent();
+		if (streamingComponent && !this.chatContainer.children.includes(streamingComponent)) {
+			streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
 		}
 		this.ui.requestRender();
 	}
@@ -2960,7 +2944,7 @@ export class InteractiveMode {
 	private isExtensionCommand(text: string): boolean {
 		if (!text.startsWith("/")) return false;
 
-		const extensionRunner = this.session.extensionRunner;
+		const extensionRunner = this.extensionRunner;
 
 		const spaceIndex = text.indexOf(" ");
 		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
@@ -3021,6 +3005,8 @@ export class InteractiveMode {
 			session: this.session,
 			sessionManager: this.sessionManager,
 			settingsManager: this.settingsManager,
+			modelRegistry: this.modelRegistry,
+			extensionRunner: this.extensionRunner,
 			runtimeHost: this.runtimeHost,
 			ui: this.ui,
 			chatContainer: this.chatContainer,
@@ -3094,7 +3080,7 @@ export class InteractiveMode {
 	}
 
 	private getCurrentCwdForSettings(): string {
-		return this.runtimeHost?.session?.sessionManager?.getCwd?.() || process.cwd();
+		return this.runtimeHost?.sessionManager?.getCwd?.() || process.cwd();
 	}
 
 	private resolveSelfModificationSource(settings: {
@@ -3211,6 +3197,7 @@ export class InteractiveMode {
 		return {
 			localRuntime: this.localRuntime,
 			session: this.session,
+			modelRegistry: this.modelRegistry,
 			settingsManager: this.settingsManager,
 			ui: this.ui,
 			chatContainer: this.chatContainer,
@@ -3347,6 +3334,7 @@ export class InteractiveMode {
 		return {
 			session: this.session,
 			settingsManager: this.settingsManager,
+			modelRegistry: this.modelRegistry,
 			footer: this.footer,
 			chatContainer: this.chatContainer,
 			ui: this.ui,
@@ -3383,6 +3371,7 @@ export class InteractiveMode {
 		return modelRouterSetupCommands.handleModelRouterAction(
 			{
 				session: this.session,
+				modelRegistry: this.modelRegistry,
 				settingsManager: this.settingsManager,
 				showStatus: (message) => this.showStatus(message),
 				showWarning: (message) => this.showWarning(message),
@@ -3441,9 +3430,9 @@ export class InteractiveMode {
 			return this.session.scopedModels.map((scoped) => scoped.model);
 		}
 
-		this.session.modelRegistry.refresh();
+		this.modelRegistry.refresh();
 		try {
-			return await this.session.modelRegistry.getAvailable();
+			return await this.modelRegistry.getAvailable();
 		} catch {
 			return [];
 		}
@@ -3469,7 +3458,7 @@ export class InteractiveMode {
 			return;
 		}
 
-		const storedCredential = this.session.modelRegistry.authStorage.get("anthropic");
+		const storedCredential = this.modelRegistry.authStorage.get("anthropic");
 		if (storedCredential?.type === "oauth") {
 			this.anthropicSubscriptionWarningShown = true;
 			this.showWarning(ANTHROPIC_SUBSCRIPTION_AUTH_WARNING);
@@ -3477,7 +3466,7 @@ export class InteractiveMode {
 		}
 
 		try {
-			const apiKey = await this.session.modelRegistry.getApiKeyForProvider(model.provider);
+			const apiKey = await this.modelRegistry.getApiKeyForProvider(model.provider);
 			if (!isAnthropicSubscriptionAuthKey(apiKey)) {
 				return;
 			}
@@ -3617,7 +3606,7 @@ export class InteractiveMode {
 			this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 			this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 			this.setupAutocompleteProvider();
-			const runner = this.session.extensionRunner;
+			const runner = this.extensionRunner;
 			this.extensionUiHost.setupExtensionShortcuts(runner);
 			await this.rebuildChatFromMessages();
 			dismissReloadBox(this.editor as Component);
@@ -3625,7 +3614,7 @@ export class InteractiveMode {
 				force: false,
 				showDiagnosticsWhenQuiet: true,
 			});
-			const modelsJsonError = this.session.modelRegistry.getError();
+			const modelsJsonError = this.modelRegistry.getError();
 			if (modelsJsonError) {
 				this.showError(`models.json error: ${modelsJsonError}`);
 			}
@@ -3651,7 +3640,7 @@ export class InteractiveMode {
 			this.refreshExtensionPresentation();
 
 			// Refresh extension shortcuts
-			const runner = this.session.extensionRunner;
+			const runner = this.extensionRunner;
 			this.extensionUiHost.setupExtensionShortcuts(runner);
 
 			// Refresh chat and UI
@@ -3749,7 +3738,7 @@ export class InteractiveMode {
 				return activeOverlay instanceof TreeSelectorComponent
 					? activeOverlay.getSelectedCopyText()
 					: activeOverlay === this.editor
-						? this.workbench?.view.conversation.selectionText()
+						? this.layout.workbench?.view.conversation.selectionText()
 						: undefined;
 			},
 		});
@@ -3890,6 +3879,8 @@ export class InteractiveMode {
 	private handleUsageCommand(): void {
 		reportCommands.handleUsageCommand({
 			session: this.session,
+			settingsManager: this.settingsManager,
+			modelRegistry: this.modelRegistry,
 			chatContainer: this.chatContainer,
 			ui: this.ui,
 			getCurrentAutoLearnSettings: () => this.getCurrentAutoLearnSettings(),
@@ -3900,6 +3891,7 @@ export class InteractiveMode {
 		this.usageMonitor ??= new AccountUsageMonitor();
 		usageCommands.handleUsageMenuCommand(
 			{
+				modelRegistry: this.modelRegistry,
 				session: this.session,
 				usageMonitor: this.usageMonitor,
 				showSelector: (create) => this.showSelector(create),
@@ -3936,7 +3928,7 @@ export class InteractiveMode {
 
 	private handleHotkeysCommand(): void {
 		reportCommands.handleHotkeysCommand({
-			session: this.session,
+			extensionRunner: this.extensionRunner,
 			keybindings: this.keybindings,
 			chatContainer: this.chatContainer,
 			ui: this.ui,
@@ -4079,6 +4071,7 @@ export class InteractiveMode {
 		return resourceShellCommands.handleBashCommand(
 			{
 				session: this.session,
+				extensionRunner: this.extensionRunner,
 				sessionManager: this.sessionManager,
 				ui: this.ui,
 				chatContainer: this.chatContainer,
@@ -4112,10 +4105,7 @@ export class InteractiveMode {
 		this.subscriptionGeneration++;
 		this.unsubscribeHumanInputActivity?.();
 		this.unsubscribeHumanInputActivity = undefined;
-		this.disposeOperatorProjection?.();
-		this.workbenchInputCleanup?.();
-		this.workbenchInputCleanup = undefined;
-		this.workbench?.dispose();
+		this.layout.dispose();
 		this.unregisterSignalHandlers();
 		this.closeAgentsOverlay();
 		if (this.settingsManager.getShowTerminalProgress()) {

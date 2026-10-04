@@ -28,11 +28,11 @@
 
 import { hostname as osHostname } from "node:os";
 import { isDeepStrictEqual } from "node:util";
-import type { ProcessObservation } from "@caupulican/pi-agent-core/process-tree";
+import type { ProcessObservation } from "../../kernel/reliability/process-tree.ts";
 import { isAgentIdentity } from "../orchestration/agent-resume.ts";
 import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import { getParentPid, getParentSessionId, getProcessTaskRef } from "../process-identity.ts";
-import type { ResolvedProcessMatrixSettings } from "../settings-manager.ts";
+import type { ResolvedProcessMatrixSettings } from "../settings/settings-schema.ts";
 import { getBoundWorktreeLaneKey } from "../worktree-sync/lane-binding.ts";
 import type {
 	OrphanCleanupRequest,

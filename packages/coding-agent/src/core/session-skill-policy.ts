@@ -1,6 +1,6 @@
-import type { SessionEntry } from "@caupulican/pi-agent-core/node";
+import type { SessionEntry } from "../kernel/node.ts";
 import { resolveAutoLearnSettings } from "./learning/auto-learn-settings.ts";
-import type { AutoLearnSettings, AutonomyMode } from "./settings-manager.ts";
+import type { AutoLearnSettings, AutonomyMode } from "./settings/settings-schema.ts";
 import { utf8PrefixByBytes } from "./util/bounded-value.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
 

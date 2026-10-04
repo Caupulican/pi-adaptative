@@ -18,7 +18,7 @@
 import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { killTreeNow } from "@caupulican/pi-agent-core/process-tree";
+import { killTreeNow } from "../../kernel/reliability/process-tree.ts";
 import { PI_PARENT_PID_ENV } from "../process-identity.ts";
 import { createProcessScratchDirectory, removeProcessScratchDirectory } from "../process-scratch.ts";
 import { PI_SESSION_ROLE_ENV } from "../session-role.ts";

@@ -10,18 +10,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Agent } from "@caupulican/pi-agent-core/agent";
-import {
-	createAgentLoopContinuationState,
-	runAgentLoop,
-	startAgentProviderRequest,
-} from "@caupulican/pi-agent-core/agent-loop";
-import {
-	resolveProviderRequestAuthOptions,
-	resolveRequestPreflightMaxTokens,
-} from "@caupulican/pi-agent-core/provider-request-planner";
-import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/session";
-import type { AgentContext, AgentLoopConfig, AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import { streamSimple } from "@caupulican/pi-ai/stream";
 import type {
@@ -33,6 +21,16 @@ import type {
 	TextContent,
 	Usage,
 } from "@caupulican/pi-ai/types";
+import type { Agent } from "../kernel/agent.ts";
+import { createAgentLoopContinuationState, runAgentLoop, startAgentProviderRequest } from "../kernel/agent-loop.ts";
+import type { AgentContext, AgentLoopConfig } from "../kernel/index.ts";
+import {
+	resolveProviderRequestAuthOptions,
+	resolveRequestPreflightMaxTokens,
+} from "../kernel/provider-request-planner.ts";
+import type { SessionEntry } from "../kernel/session/session-entries.ts";
+import type { SessionManager } from "../kernel/session/session-manager.ts";
+import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
 import {
 	computeLaneAffinityKey,
 	DEFAULT_ISOLATED_LANE_KIND,
@@ -101,9 +99,23 @@ import {
 	getSessionSnapshots,
 	type SessionSnapshotCodec,
 } from "./session-snapshot.ts";
-import type { SettingsManager } from "./settings-manager.ts";
+import type {
+	AutoLearnSettings,
+	AutonomySettings,
+	MemorySystem,
+	ResolvedLearningPolicySettings,
+} from "./settings/settings-schema.ts";
 import type { Skill } from "./skills.ts";
 import { DEFAULT_BOUNDED_SKILL_AUDIT_LIMITS, runSkillAudit } from "./tools/skill-audit.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ReflectionControllerSettingsSource {
+	getAutoLearnSettings(): AutoLearnSettings;
+	getAutonomySettings(): Required<AutonomySettings>;
+	getLearningPolicySettings(): ResolvedLearningPolicySettings;
+	getMemorySystem(): MemorySystem;
+	subscribeChanges(listener: () => void): () => void;
+}
 
 export interface ReflectionControllerDeps {
 	/** Current session model (fallback for an isolated call that omits its own model). */
@@ -126,7 +138,7 @@ export interface ReflectionControllerDeps {
 	/** Main-orchestrator-only inverse for an audited structured write. */
 	rollbackStructuredReflectionWrite(rollback: StructuredReflectionRollback, signal?: AbortSignal): Promise<boolean>;
 	/** Settings — the learning-apply policy (gate thresholds, auto-apply layers) is read here. */
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): ReflectionControllerSettingsSource;
 	/** Session log — audit snapshots and learning-audit reads go through this. */
 	getSessionManager(): SessionManager;
 	/** Agent dir — reflection-promoted skills are written under `<agentDir>/skills/`. */
@@ -874,7 +886,7 @@ export class ReflectionController {
 			role: "custom",
 			customType: CURRENT_TURN_REFLECTION_CUSTOM_TYPE,
 			// Array (block) content, not a bare string, and that difference is load-bearing.
-			// `adaptHostTransients` (packages/agent/src/transient-records.ts, read-only reference from
+			// `adaptHostTransients` (packages/coding-agent/src/kernel/transient-records.ts, read-only reference from
 			// here) turns every host transient shaped as a `custom` message with STRING content into an
 			// append-on-change DURABLE record, and gives host-owned kinds no `clearedText`. That is right
 			// for reference material whose staleness is harmless — the path-alias legend is a lookup table
@@ -1571,7 +1583,7 @@ export class ReflectionController {
 					childContext,
 					loopConfig,
 					async (event) => {
-						// KNOWN TYPE GAP, not an oversight: `event.message` is `AgentMessage` (packages/agent),
+						// KNOWN TYPE GAP, not an oversight: `event.message` is `AgentMessage` (the kernel),
 						// which - since the turn-economics step-3 host-gap hook - can genuinely be a durable
 						// custom transient record (a committed tool-failure ledger or verification obligation),
 						// not only `Message`'s narrower {user, assistant, toolResult}. `onMessage`'s parameter
@@ -1661,7 +1673,7 @@ export class ReflectionController {
 				// KNOWN TYPE GAP, not an oversight (see the matching note on the emit callback above): this
 				// was once true - "the loop only adds assistant/tool-result messages" - and is not anymore.
 				// Since the turn-economics step-3 host-gap hook, `messages` (this run's own `newMessages`,
-				// packages/agent's agent-loop.ts) can genuinely include a durable custom transient record.
+				// the kernel's agent-loop.ts) can genuinely include a durable custom transient record.
 				// `IsolatedCompletionResult.messages` is declared `Message[]` (agent-session-contracts.ts);
 				// making that field, and `IsolatedCompletionOptions.onMessage`'s parameter, honestly wider
 				// would touch every `runIsolatedCompletion` caller (research/fitness/judge lanes too, not

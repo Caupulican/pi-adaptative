@@ -1,4 +1,4 @@
-import type { AutoLearnSettings, AutonomyMode } from "../settings-manager.ts";
+import type { AutoLearnSettings, AutonomyMode } from "../settings/settings-schema.ts";
 
 /** The authoritative Auto Learn defaults used by runtime resolution and settings UI. */
 export const DEFAULT_AUTO_LEARN_SETTINGS = {

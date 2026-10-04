@@ -1,6 +1,6 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { decodeExecutionContext, type ExecutionContext } from "@caupulican/pi-agent-core";
+import { decodeExecutionContext, type ExecutionContext } from "../../kernel/index.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import { parseBoundedStringArray } from "./bounded-string-array.ts";
 import {

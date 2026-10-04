@@ -6,7 +6,6 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import type { PublicWebOperations } from "./public-web-client.ts";
 
 /** A scoped Effect HTTP service: one pinned native connection on both Node and Bun. */
 export const requestPublicWeb: PublicWebOperations["request"] = async ({ url, address, headers, signal }) => {
@@ -78,3 +77,20 @@ export const requestPublicWeb: PublicWebOperations["request"] = async ({ url, ad
 		throw error;
 	}
 };
+
+export interface PublicWebOperations {
+	lookup(hostname: string): Promise<readonly { address: string; family: number }[]>;
+	/** Connect only to address, preserving the URL hostname for Host and TLS verification. */
+	request(input: {
+		url: URL;
+		address: { address: string; family: number };
+		headers: Record<string, string>;
+		signal: AbortSignal;
+	}): Promise<{ response: WebResponse; close(): Promise<void> }>;
+}
+
+export interface WebResponse {
+	status: number;
+	headers: { get(name: string): string | null };
+	body: ReadableStream<Uint8Array> | null;
+}

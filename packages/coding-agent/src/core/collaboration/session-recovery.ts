@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
 import { settleIndependentLifecycle } from "../lifecycle-settlement.ts";
 import type { CollaborationBackend, CollaborationAgent as NativeAgent } from "./backend.ts";
-import type { CollaborationCoordinatorDeps } from "./coordinator.ts";
-import type { CollaborationAgent, CollaborationJob, CollaborationJobStore } from "./job-store.ts";
+import type { CollaborationAgent, CollaborationJob } from "./job-record.ts";
+import type { CollaborationJobStore } from "./job-store.ts";
+
+/** Opens (or, for an already-admitted new job, creates) the native backend that hosts a job. */
+export type CollaborationBackendFactory = (job: CollaborationJob, create?: boolean) => Promise<CollaborationBackend>;
 
 /** One identity predicate for startup restoration and new-task reuse. */
 export function assertCollaborationNativeIdentity(expected: CollaborationAgent, actual: NativeAgent | undefined): void {
@@ -143,7 +146,7 @@ async function resolveStrandedMember(
  */
 export async function reconcileCollaborationSessions(
 	store: CollaborationJobStore,
-	backend: CollaborationCoordinatorDeps["backend"],
+	backend: CollaborationBackendFactory,
 	publish: (jobId: string, identity: string, error?: string) => void,
 	isCurrent: () => boolean,
 ): Promise<void> {

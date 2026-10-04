@@ -1,15 +1,14 @@
 import { Worker } from "node:worker_threads";
-import { readToolFailureTelemetry } from "@caupulican/pi-agent-core/tool-failure-memory";
 import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai";
 import type { ToolFailurePhase } from "@caupulican/pi-ai/tool-repair-registry";
+import { readToolFailureTelemetry } from "../kernel/tool-failure-memory.ts";
 import { isWorkerSession } from "./session-role.ts";
 import {
 	createToolArgumentValidationLogRecord,
 	createToolExecutionFailureLogRecord,
-	type ToolArgumentValidationLogRecord,
-	type ToolExecutionFailureLogRecord,
 	type ToolRecoveryLogWorkerRecord,
 } from "./tool-recovery-log-records.ts";
+import type { ToolArgumentValidationLogRecord, ToolExecutionFailureLogRecord } from "./tool-recovery-records.ts";
 
 interface ToolRecoveryLogAckMessage {
 	type: "ack";

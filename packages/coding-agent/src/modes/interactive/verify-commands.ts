@@ -6,7 +6,7 @@
  * machine). The dismissal is a user-plane record: the model has no tool for it, and it is never a
  * passing test.
  */
-import type { VerificationObligationView } from "@caupulican/pi-agent-core/verification-obligations";
+import type { VerificationObligationView } from "../../kernel/verification-obligations.ts";
 
 export interface VerifyHost {
 	getVerificationObligations(): VerificationObligationView[];

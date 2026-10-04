@@ -1,5 +1,5 @@
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Usage } from "@caupulican/pi-ai";
+import type { SessionManager } from "../../kernel/node.ts";
 import type { CapabilityEnvelope, WorkerClaim, WorkerClaimStatus, WorkerRequest } from "../autonomy/contracts.ts";
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
 import { isLaneTerminalStatus, type LaneRecord, type LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
@@ -9,7 +9,7 @@ import {
 	MAX_MANAGED_LANE_SUMMARY_BYTES,
 	type ManagedLaneDispatch,
 	type ManagedLaneEvent,
-} from "../extensions/types.ts";
+} from "../extensions/managed-lane-records.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { validateProviderUsage } from "../orchestration/attempt-usage.ts";
 import type { ExecutionGrant } from "../orchestration/contracts.ts";

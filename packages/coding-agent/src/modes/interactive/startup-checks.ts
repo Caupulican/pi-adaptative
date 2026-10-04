@@ -9,23 +9,48 @@
  * interactive-mode keeps thin delegating wrappers.
  */
 
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Container, MarkdownTheme, TUI } from "@caupulican/pi-tui";
 import { getCapabilities, hyperlink, Markdown, Spacer, Text } from "@caupulican/pi-tui";
 import { APP_NAME, getAgentDir, VERSION } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
-import type { SettingsManager } from "../../core/settings-manager.ts";
+import type {
+	PackageSource,
+	ResourceProfileFilterSettings,
+	ResourceProfileKind,
+	ResourceProfileSettings,
+	Settings,
+} from "../../core/settings/settings-schema.ts";
 import { hasProjectTrustInputs } from "../../core/trust-manager.ts";
+import type { SessionManager } from "../../kernel/node.ts";
+import { theme } from "../../presentation/theme-model.ts";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
 import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import type { LatestPiRelease } from "../../utils/version-check.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
-import { theme } from "./theme/theme.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface StartupChecksSettingsSource {
+	areProjectInstructionsEnabled(): boolean;
+	getActiveResourceProfileNames(): string[];
+	getCollapseChangelog(): boolean;
+	getGlobalSettings(): Settings;
+	getLastChangelogVersion(): string | undefined;
+	getNpmCommand(): string[] | undefined;
+	getProjectSettings(): Settings;
+	getResourceProfileFilter(kind: ResourceProfileKind): Required<ResourceProfileFilterSettings>;
+	isProjectTrusted(): boolean;
+	isResourceAllowedByProfile(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
+	isResourceExplicitlyDisabled(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
+	replaceDiscoveredResourceProfileDefinitions(profiles: Record<string, ResourceProfileSettings>): void;
+	setLastChangelogVersion(version: string): void;
+	setPackages(packages: PackageSource[]): void;
+	setProjectPackages(packages: PackageSource[]): void;
+}
 
 export interface StartupChecksHost {
 	readonly sessionManager: Pick<SessionManager, "getCwd">;
-	readonly settingsManager: SettingsManager;
+	readonly settingsManager: StartupChecksSettingsSource;
 	readonly session: Pick<AgentSession, "state">;
 	readonly chatContainer: Container;
 	readonly ui: Pick<TUI, "requestRender">;

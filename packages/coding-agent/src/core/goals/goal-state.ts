@@ -1,5 +1,4 @@
 import { isPlainRecord } from "../util/value-guards.ts";
-import { isTrustedGoalEvidence } from "./goal-acceptance.ts";
 
 export type GoalStatus =
 	| "active"
@@ -1141,4 +1140,8 @@ export function parseGoalState(text: string): GoalState | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+export function isTrustedGoalEvidence(evidence: GoalEvidenceRef): boolean {
+	return evidence.verified === true && (evidence.kind !== "test" || evidence.outcome === "succeeded");
 }

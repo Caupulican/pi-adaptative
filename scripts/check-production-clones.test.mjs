@@ -104,7 +104,6 @@ test("production clone scope covers every owned runtime language without broad e
 	const paths = new Set(productionCandidates.map((candidate) => candidate.path));
 
 	assert.deepEqual(CLONE_SOURCE_ROOTS, [
-		"packages/agent/src",
 		"packages/ai/src",
 		"packages/coding-agent/src",
 		"packages/tui/src",
@@ -300,13 +299,13 @@ test("temporary jscpd evidence retention enforces a total byte budget", (context
 test("incremental line decoding has one package-level implementation owner", () => {
 	const canonicalPath = join(repositoryRoot, "packages/ai/src/utils/streaming-lines.ts");
 	assert.equal(existsSync(canonicalPath), true);
-	assert.equal(existsSync(join(repositoryRoot, "packages/agent/src/utils/streaming-lines.ts")), false);
+	assert.equal(existsSync(join(repositoryRoot, "packages/coding-agent/src/kernel/utils/streaming-lines.ts")), false);
 	assert.equal(existsSync(join(repositoryRoot, "packages/coding-agent/src/utils/streaming-lines.ts")), false);
 
 	const publicApi = readFileSync(join(repositoryRoot, "packages/ai/src/index.ts"), "utf8");
 	assert.match(publicApi, /export \* from "\.\/utils\/streaming-lines\.ts"/);
 	for (const consumer of [
-		"packages/agent/src/session/session-manager.ts",
+		"packages/coding-agent/src/kernel/session/session-manager.ts",
 		"packages/coding-agent/src/core/tools/read.ts",
 		"packages/coding-agent/src/core/models/local-runtime.ts",
 		"packages/coding-agent/src/modes/rpc/jsonl.ts",
@@ -318,7 +317,7 @@ test("incremental line decoding has one package-level implementation owner", () 
 		);
 	}
 	assert.match(
-		readFileSync(join(repositoryRoot, "packages/agent/src/proxy.ts"), "utf8"),
+		readFileSync(join(repositoryRoot, "packages/coding-agent/src/kernel/proxy.ts"), "utf8"),
 		/from "@caupulican\/pi-ai\/streaming-lines"/,
 	);
 });

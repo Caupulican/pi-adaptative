@@ -1,6 +1,6 @@
-import type { SessionEntry } from "@caupulican/pi-agent-core/session";
-import type { AgentToolCall } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage } from "@caupulican/pi-ai";
+import type { SessionEntry } from "../../kernel/session/session-entries.ts";
+import type { AgentToolCall } from "../../kernel/types.ts";
 import type { SessionEntryIndex } from "../session-entry-index.ts";
 
 export const SELF_COMPACT_TOOL_NAME = "self_compact";

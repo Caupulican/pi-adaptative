@@ -22,10 +22,10 @@
  */
 
 import { basename, dirname } from "node:path";
-import type { Agent, ThinkingLevel } from "@caupulican/pi-agent-core";
-import type { CustomMessage } from "@caupulican/pi-agent-core/messages";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, ImageContent, Model, TextContent, Usage } from "@caupulican/pi-ai";
+import type { Agent, ThinkingLevel } from "../kernel/index.ts";
+import type { CustomMessage } from "../kernel/messages.ts";
+import type { SessionManager } from "../kernel/node.ts";
 import type { ExtensionBindings } from "./agent-session-contracts.ts";
 import type { MemoryProvider as ContextMemoryProvider } from "./context/memory-provider-contract.ts";
 import type {
@@ -41,16 +41,26 @@ import type {
 	ShutdownHandler,
 	ToolInfo,
 } from "./extensions/index.ts";
-import type { ManagedLaneEvent } from "./extensions/types.ts";
-import type { MemoryProvider } from "./memory/memory-provider.ts";
+import type { ManagedLaneEvent } from "./extensions/managed-lane-records.ts";
+import type { MemoryProvider } from "./extensions/types.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { QUEUED_INPUT_CUSTOM_TYPE } from "./queued-input-record.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
-import type { ResourceProfileSettings, SettingsManager } from "./settings-manager.ts";
+import type {
+	ResourceProfileFilterSettings,
+	ResourceProfileKind,
+	ResourceProfileSettings,
+} from "./settings/settings-schema.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { VERIFICATION_OBLIGATIONS_CUSTOM_TYPE } from "./system-one/verification-obligations.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE } from "./tool-applicability-gate.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ExtensionBindingControllerSettingsSource {
+	getEffectiveExternalResourceRoots(): string[];
+	getResourceProfileFilter(kind: ResourceProfileKind): Required<ResourceProfileFilterSettings>;
+}
 
 export interface ExtensionBindingControllerDeps {
 	getAgent(): Agent;
@@ -59,7 +69,7 @@ export interface ExtensionBindingControllerDeps {
 	getCwd(): string;
 	getResourceLoader(): ResourceLoader;
 	getSessionManager(): SessionManager;
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): ExtensionBindingControllerSettingsSource;
 	getModelRegistry(): ModelRegistry;
 	getModel(): Model<Api> | undefined;
 	getActiveToolNames(): string[];
@@ -114,7 +124,7 @@ export interface ExtensionBindingControllerDeps {
  * Empty allows become explicit wildcards so activating this snapshot in a child preserves the
  * parent's unrestricted kinds instead of triggering strict-profile deny-all semantics. */
 export function compileEffectiveResourceProfileSnapshot(
-	settingsManager: Pick<SettingsManager, "getResourceProfileFilter">,
+	settingsManager: Pick<ExtensionBindingControllerSettingsSource, "getResourceProfileFilter">,
 ): ResourceProfileSettings {
 	const snapshot: ResourceProfileSettings = {};
 	for (const kind of ["extensions", "skills", "prompts", "themes", "agents", "tools"] as const) {

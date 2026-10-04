@@ -1,7 +1,7 @@
-import type { AgentMessage } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/session";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import type { AgentMessage } from "../kernel/index.ts";
+import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { ToolDefinition } from "./extensions/types.ts";
 
 const UPDATE_ENTRY = "runtime-update";

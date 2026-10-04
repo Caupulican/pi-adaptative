@@ -1,4 +1,3 @@
-import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { Transport } from "@caupulican/pi-ai";
 import {
 	Container,
@@ -14,31 +13,15 @@ import {
 } from "@caupulican/pi-tui";
 import { type CostGuardSettings, DEFAULT_ENABLED_COST_GUARD_MAX_TURN_USD } from "../../../core/cost-guard.ts";
 import { DEFAULT_WORKER_FLEET_LIMITS } from "../../../core/delegation/worker-fleet-limits.ts";
-import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
-import { DEFAULT_AUTO_LEARN_SETTINGS, resolveAutoLearnSettings } from "../../../core/learning/auto-learn-settings.ts";
-import { describeRouterCalibrationScope } from "../../../core/model-router/calibration.ts";
 import type {
-	AutoLearnSettings,
-	AutonomyMode,
-	AutonomySettings,
-	ContextCurationSettings,
-	ContextPromptEnforcementSettings,
 	HmoeIndependence,
 	HmoePreference,
 	HmoePreset,
 	HmoeTeamStrategy,
-	LearningPolicySettings,
-	MemoryRetrievalSettings,
-	ModelCapabilitySettings,
-	ModelRouterPoolPreference,
-	ModelRouterSelectionMode,
-	ModelRouterSettings,
-	ResearchLaneSettings,
-	SelfModificationSettings,
-	SettingsScope,
-	WarningSettings,
-	WorkerDelegationSettings,
-} from "../../../core/settings-manager.ts";
+} from "../../../core/expert-routing/vocabulary.ts";
+import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
+import { DEFAULT_AUTO_LEARN_SETTINGS, resolveAutoLearnSettings } from "../../../core/learning/auto-learn-settings.ts";
+import { describeRouterCalibrationScope } from "../../../core/model-router/calibration.ts";
 import {
 	DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE,
 	DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS,
@@ -65,12 +48,31 @@ import {
 	HMOE_PRESETS,
 	HMOE_TEAM_STRATEGIES,
 	MAX_WORKER_DELEGATION_MAX_USD,
-} from "../../../core/settings-manager.ts";
+} from "../../../core/settings/settings-rules.ts";
+import type {
+	AutoLearnSettings,
+	AutonomyMode,
+	AutonomySettings,
+	ContextCurationSettings,
+	ContextPromptEnforcementSettings,
+	LearningPolicySettings,
+	MemoryRetrievalSettings,
+	ModelCapabilitySettings,
+	ModelRouterPoolPreference,
+	ModelRouterSelectionMode,
+	ModelRouterSettings,
+	ResearchLaneSettings,
+	SelfModificationSettings,
+	SettingsScope,
+	WarningSettings,
+	WorkerDelegationSettings,
+} from "../../../core/settings/settings-schema.ts";
 import { SYSTEM_ONE_PROVIDER_CHOICES, type SystemOneProviderChoice } from "../../../core/system-one/access.ts";
-import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.ts";
+import type { ThinkingLevel } from "../../../kernel/index.ts";
+import { keyDisplayText } from "../../../presentation/keybinding-hints.ts";
+import { getSelectListTheme, getSettingsListTheme, theme } from "../../../presentation/theme-model.ts";
 import { THINKING_LEVEL_DESCRIPTIONS } from "../thinking-level-descriptions.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyDisplayText } from "./keybinding-hints.ts";
 import { COMPACT_SELECTOR_LIST_LAYOUT, SelectorHeading } from "./selector-list.ts";
 
 const AUTO_LEARN_CUSTOM_MODEL_VALUE = "__custom_auto_learn_model__";

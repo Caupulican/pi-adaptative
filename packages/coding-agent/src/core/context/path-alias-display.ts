@@ -13,7 +13,7 @@
  * happen where those are rendered rather than where they are stored.
  */
 
-import type { AgentMessage } from "@caupulican/pi-agent-core/types";
+import type { AgentMessage } from "../../kernel/types.ts";
 import { expandParams, expandText, type PathAliasTable, rewriteAgentMessagesWith } from "./path-alias-table.ts";
 
 /**

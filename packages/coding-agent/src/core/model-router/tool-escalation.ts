@@ -2,8 +2,8 @@ import { existsSync } from "node:fs";
 import * as nodePath from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { ModelTier } from "../autonomy/contracts.ts";
-import { isLocalExecutionModel } from "../background-lane-controller.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "../models/local-registration.ts";
+import { isLocalExecutionModel } from "../models/model-endpoint.ts";
 import { isPiManagedPrismLlamaCppModel } from "../models/prism-llamacpp-lifecycle.ts";
 import { parseShellCommandSequence, parseShellInvocationPrefixes } from "../tools/shell-command-parser.ts";
 

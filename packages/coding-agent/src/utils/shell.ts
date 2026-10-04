@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
 import { basename, delimiter, dirname, join } from "node:path";
-import { killTreeNow, type OwnedProcessHandle } from "@caupulican/pi-agent-core/process-tree";
 import { spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
 import { withoutHarnessLaunchEnv } from "../core/harness-environment.ts";
+import { killTreeNow, type OwnedProcessHandle } from "../kernel/reliability/process-tree.ts";
 import { ensureManagedJscpd } from "./bundled-jscpd.ts";
 import { normalizePath } from "./paths.ts";
 import {

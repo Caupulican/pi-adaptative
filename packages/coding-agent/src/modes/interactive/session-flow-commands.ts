@@ -12,8 +12,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { ThinkingLevel } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { EditorComponent } from "@caupulican/pi-tui";
 import { type Component, type Container, Loader, Spacer, Text, type TUI } from "@caupulican/pi-tui";
@@ -24,7 +22,7 @@ import type {
 } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import { hasCostSummarySignal } from "../../core/cost/cost-summary.ts";
-import type { ExtensionCommandContext } from "../../core/extensions/index.ts";
+import type { ExtensionCommandContext, ExtensionRunner } from "../../core/extensions/index.ts";
 import {
 	cancelPersistedGoal,
 	clearPersistedGoal,
@@ -40,6 +38,7 @@ import {
 import { type GoalState, isGoalExecutionActive } from "../../core/goals/goal-state.ts";
 import { applyGoalAction, completeGoalManually } from "../../core/goals/goal-tool-core.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
+import type { ModelRegistry } from "../../core/model-registry.ts";
 import {
 	findExactModelReferenceMatch,
 	resolveModelScope,
@@ -48,7 +47,7 @@ import {
 import { routerPoolModelRefs } from "../../core/model-router/candidate-pool.ts";
 import { MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { listAllSessions, listSessions, openSession } from "../../core/session-manager-factory.ts";
-import type { SettingsManager } from "../../core/settings-manager.ts";
+import type { ModelFavorite } from "../../core/settings/settings-schema.ts";
 import { parseTaskCommand } from "../../core/tasks/task-command.ts";
 import {
 	addTaskStep,
@@ -60,9 +59,12 @@ import {
 	updateTaskStep,
 } from "../../core/tasks/task-state.ts";
 import { ProjectTrustStore } from "../../core/trust-manager.ts";
+import type { ThinkingLevel } from "../../kernel/index.ts";
+import type { SessionManager } from "../../kernel/node.ts";
+import { keyText } from "../../presentation/keybinding-hints.ts";
+import { theme } from "../../presentation/theme-model.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
 import type { FooterComponent } from "./components/footer.ts";
-import { keyText } from "./components/keybinding-hints.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
@@ -73,13 +75,27 @@ import { UserMessageSelectorComponent } from "./components/user-message-selector
 import type { ExtensionUiHost } from "./extension-ui-host.ts";
 import { formatCostReport } from "./report-commands.ts";
 import { handleNonFatalSessionReplacementError } from "./session-replacement-errors.ts";
-import { theme } from "./theme/theme.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface SessionFlowCommandsSettingsSource {
+	getBranchSummarySkipPrompt(): boolean;
+	getEnabledModels(): string[] | undefined;
+	getModelFavorites(): ModelFavorite[];
+	getTreeFilterMode(): "default" | "no-tools" | "user-only" | "labeled-only" | "all";
+	isProjectTrusted(): boolean;
+	setDefaultModelAndProvider(provider: string, modelId: string): void;
+	setDefaultThinkingLevel(level: ThinkingLevel): void;
+	setEnabledModels(patterns: string[] | undefined): void;
+	toggleModelFavorite(provider: string, modelId: string): void;
+}
 
 /** Shared seam for the interdependent selector/navigation flows. */
 export interface SessionFlowHost {
 	readonly session: AgentSession;
 	readonly sessionManager: SessionManager;
-	readonly settingsManager: SettingsManager;
+	readonly settingsManager: SessionFlowCommandsSettingsSource;
+	readonly modelRegistry: ModelRegistry;
+	readonly extensionRunner: ExtensionRunner;
 	readonly runtimeHost: AgentSessionRuntime;
 	readonly ui: TUI;
 	readonly chatContainer: Container;
@@ -119,7 +135,7 @@ function finishSelectorError(host: Pick<SessionFlowHost, "showError">, done: () 
 
 export async function showModelSelector(host: SessionFlowHost, initialSearchInput?: string): Promise<void> {
 	try {
-		await host.session.extensionRunner.emit({
+		await host.extensionRunner.emit({
 			type: "model_selector_open",
 			currentModel: host.session.model,
 			scopedModels: host.session.scopedModels,
@@ -135,7 +151,7 @@ export async function showModelSelector(host: SessionFlowHost, initialSearchInpu
 			host.ui,
 			host.session.model,
 			host.settingsManager,
-			host.session.modelRegistry,
+			host.modelRegistry,
 			host.session.scopedModels,
 			async (model) => {
 				try {
@@ -175,8 +191,8 @@ export async function showModelSelector(host: SessionFlowHost, initialSearchInpu
 
 export async function showModelsSelector(host: SessionFlowHost): Promise<void> {
 	// Get all available models
-	host.session.modelRegistry.refresh();
-	const allModels = host.session.modelRegistry.getAvailable();
+	host.modelRegistry.refresh();
+	const allModels = host.modelRegistry.getAvailable();
 	const allModelIds = new Set(allModels.map((model) => `${model.provider}/${model.id}`));
 	const configuredPatterns = host.settingsManager.getEnabledModels();
 	// The selector edits the router's candidate pool, not the cycling list: an orchestration
@@ -188,7 +204,7 @@ export async function showModelsSelector(host: SessionFlowHost): Promise<void> {
 		return;
 	}
 	const configuredScope = configuredPatterns?.length
-		? await resolveModelScopeWithDiagnostics(configuredPatterns, host.session.modelRegistry)
+		? await resolveModelScopeWithDiagnostics(configuredPatterns, host.modelRegistry)
 		: undefined;
 
 	// Build enabled model IDs from the live router pool (session-only edits or CLI --models) or settings
@@ -212,7 +228,7 @@ export async function showModelsSelector(host: SessionFlowHost): Promise<void> {
 		const hasEnabledAvailableModel = enabledIds?.some((id) => allModelIds.has(id)) ?? false;
 		const allAvailableModelsEnabled = enabledIds !== null && [...allModelIds].every((id) => enabledIds.includes(id));
 		if (enabledIds && hasEnabledAvailableModel && !allAvailableModelsEnabled) {
-			const newScopedModels = await resolveModelScope(enabledIds, host.session.modelRegistry);
+			const newScopedModels = await resolveModelScope(enabledIds, host.modelRegistry);
 			host.session.setScopedModels(
 				newScopedModels.map((sm) => ({
 					model: sm.model,

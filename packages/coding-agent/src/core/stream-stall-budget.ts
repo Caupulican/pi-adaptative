@@ -1,11 +1,7 @@
-import {
-	DEFAULT_CLOUD_STREAM_IDLE,
-	DEFAULT_STREAM_IDLE,
-	type StreamIdleOptions,
-} from "@caupulican/pi-agent-core/reliability";
 import type { Api, Model } from "@caupulican/pi-ai";
+import { DEFAULT_CLOUD_STREAM_IDLE, DEFAULT_STREAM_IDLE, type StreamIdleOptions } from "../kernel/reliability/index.ts";
 import { isLocalOrManagedRouterModel } from "./model-router/tool-escalation.ts";
-import type { StreamStallModelClass, StreamStallSettings } from "./settings-manager.ts";
+import type { StreamStallModelClass, StreamStallSettings } from "./settings/settings-schema.ts";
 
 /** The settings surface the stall resolver needs; the session passes its SettingsManager. */
 export interface StreamStallSettingsSource {

@@ -1,8 +1,8 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
 import { getAgentDir } from "../../config.ts";
+import type { AgentTool } from "../../kernel/index.ts";
 import { acquireWorkRun, type WorkRunLease } from "../../utils/work-directory.ts";
 import type { Extension, ToolDefinition } from "../extensions/types.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";

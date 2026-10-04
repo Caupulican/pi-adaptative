@@ -34,8 +34,8 @@ type UsageSessionModelRegistry = UsageOverviewRegistry & {
 };
 
 export interface UsageCommandHost {
+	readonly modelRegistry: UsageSessionModelRegistry;
 	readonly session: {
-		readonly modelRegistry: UsageSessionModelRegistry;
 		readonly model: Model<Api> | undefined;
 		/** A redeemed reset: the provider's recorded limits no longer hold, so it is routed to again. */
 		noteSubscriptionUsageReset(provider: string): void;
@@ -151,7 +151,7 @@ export function resetCreditOptions(summary: OpenAICodexRateLimitResetCredits): R
  * ChatGPT account, which routing, workers or the session may be using.
  */
 function codexSubscriptionModel(host: UsageCommandHost): Model<Api> | undefined {
-	const registry = host.session.modelRegistry;
+	const registry = host.modelRegistry;
 	return registry.getAll().find((model) => model.provider === "openai-codex" && registry.isUsingOAuth(model));
 }
 
@@ -161,7 +161,7 @@ function canRedeemReset(account: AuthenticatedAccount): boolean {
 
 function buildOverview(host: UsageCommandHost, accounts: readonly AuthenticatedAccount[]): UsageOverview {
 	const session = host.session;
-	const registry = session.modelRegistry;
+	const registry = host.modelRegistry;
 	const model = session.model;
 	const context = session.getContextUsage();
 	return buildUsageOverview({
@@ -178,7 +178,7 @@ function buildOverview(host: UsageCommandHost, accounts: readonly AuthenticatedA
 }
 
 function openUsageDashboard(host: UsageCommandHost, client: OpenAICodexUsageResetClient): void {
-	const registry = host.session.modelRegistry;
+	const registry = host.modelRegistry;
 	const currentAccountKey = (provider: string) => resolveProviderAccountKey(registry.authStorage, provider);
 	host.showSelector((done) => {
 		let open = true;
@@ -225,12 +225,12 @@ async function loadResetCredits(host: UsageCommandHost, client: OpenAICodexUsage
 
 	host.showStatus("Checking available usage limit resets...");
 	try {
-		const accessToken = await host.session.modelRegistry.getApiKeyForProvider(model.provider);
+		const accessToken = await host.modelRegistry.getApiKeyForProvider(model.provider);
 		if (!accessToken) throw new Error("OpenAI Codex subscription credentials are unavailable. Run /login.");
 		const auth = {
 			accessToken,
 			baseUrl: model.baseUrl,
-			credentialHeaders: openAICodexCredentialHeaders(host.session.modelRegistry, accessToken),
+			credentialHeaders: openAICodexCredentialHeaders(host.modelRegistry, accessToken),
 		};
 		const summary = await client.list(accountRequestOptions(auth));
 		const options = resetCreditOptions(summary);

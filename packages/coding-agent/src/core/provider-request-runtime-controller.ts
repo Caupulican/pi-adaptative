@@ -1,9 +1,9 @@
-import type { Agent } from "@caupulican/pi-agent-core/agent";
-import { createApplicableAssistantUsageFinder } from "@caupulican/pi-agent-core/compaction/compaction";
-import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
-import { composeRequestSystemPrompt, narrowRequestMaxTokens } from "@caupulican/pi-agent-core/provider-request-planner";
-import type { AgentContext, ProviderRequestAdmissionContext } from "@caupulican/pi-agent-core/types";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
+import type { Agent } from "../kernel/agent.ts";
+import { createApplicableAssistantUsageFinder } from "../kernel/compaction/compaction.ts";
+import type { AgentContext, ProviderRequestAdmissionContext } from "../kernel/index.ts";
+import { estimateProviderRequestTokens } from "../kernel/provider-request-estimator.ts";
+import { composeRequestSystemPrompt, narrowRequestMaxTokens } from "../kernel/provider-request-planner.ts";
 import type { CompactionController } from "./compaction-controller.ts";
 import type { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 

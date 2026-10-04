@@ -1,7 +1,7 @@
 import { join } from "node:path";
-import type { AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
 import { getAgentDir } from "../../config.ts";
+import type { AgentTool } from "../../kernel/index.ts";
 import { resourceDir } from "../agent-paths.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { MAX_ACTIVE_SKILL_BODY_BYTES } from "../skill-vault.ts";

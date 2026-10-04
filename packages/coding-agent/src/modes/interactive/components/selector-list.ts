@@ -12,9 +12,9 @@ import {
 	Spacer,
 	Text,
 } from "@caupulican/pi-tui";
-import { getSelectListTheme, theme } from "../theme/theme.ts";
+import { keyHint, rawKeyHint } from "../../../presentation/keybinding-hints.ts";
+import { getSelectListTheme, theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint, rawKeyHint } from "./keybinding-hints.ts";
 
 export const COMPACT_SELECTOR_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,

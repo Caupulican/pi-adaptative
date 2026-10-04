@@ -10,9 +10,9 @@
  * records, charter provenance, checkpoints — passes through untouched, which is what pins them.
  */
 
-import type { SessionEntry } from "@caupulican/pi-agent-core/session";
-import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "@caupulican/pi-ai";
+import type { SessionEntry } from "../../kernel/session/session-entries.ts";
+import type { AgentMessage } from "../../kernel/types.ts";
 import type {
 	EvidenceRetentionDecision,
 	RetentionDisposition,

@@ -1,9 +1,9 @@
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { type Container, Loader, type LoaderIndicatorOptions, type TUI } from "@caupulican/pi-tui";
+import { keyText } from "../../presentation/keybinding-hints.ts";
+import { theme } from "../../presentation/theme-model.ts";
 import type { ActivityLaneComponent } from "./components/activity-lane.ts";
-import { keyText } from "./components/keybinding-hints.ts";
 import { applyRuntimeStatusLabel, resolveHiddenThinkingStatus } from "./runtime-status.ts";
-import { theme } from "./theme/theme.ts";
 
 export interface RuntimeStatusControllerHost {
 	readonly ui: TUI;

@@ -4,7 +4,7 @@ import {
 	type ExecutionPathFlavor,
 	executionPathApi,
 	resolveExecutionPath,
-} from "@caupulican/pi-agent-core/paths";
+} from "../../kernel/utils/paths.ts";
 import {
 	isChangeDirectoryInvocation,
 	parseShellCommandSequence,

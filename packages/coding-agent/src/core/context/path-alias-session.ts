@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { AgentMessage } from "@caupulican/pi-agent-core/types";
+import type { AgentMessage } from "../../kernel/types.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import {
 	collectActiveAliasIds,

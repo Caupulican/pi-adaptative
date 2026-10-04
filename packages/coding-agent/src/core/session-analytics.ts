@@ -9,27 +9,21 @@
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { calculateContextTokens, estimateContextTokens } from "@caupulican/pi-agent-core/compaction/compaction";
+import type { Model, Usage } from "@caupulican/pi-ai";
+import { getSessionsDir } from "../config.ts";
+import { calculateContextTokens, estimateContextTokens } from "../kernel/compaction/compaction.ts";
+import type { SessionEntry } from "../kernel/session/session-entries.ts";
 import {
 	CURRENT_SESSION_VERSION,
 	getLatestCompactionEntry,
-	type SessionEntry,
 	type SessionHeader,
 	type SessionManager,
-} from "@caupulican/pi-agent-core/session";
-import type { AgentMessage, AgentState } from "@caupulican/pi-agent-core/types";
-import { addUsage, createEmptyUsage, getSessionEntryUsage } from "@caupulican/pi-agent-core/usage";
-import type { Model, Usage } from "@caupulican/pi-ai";
-import { getSessionsDir } from "../config.ts";
-import { theme } from "../modes/interactive/theme/theme.ts";
+} from "../kernel/session/session-manager.ts";
+import type { AgentMessage, AgentState } from "../kernel/types.ts";
+import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../kernel/usage.ts";
+import { theme } from "../presentation/theme-model.ts";
 import { resolvePath } from "../utils/paths.ts";
-import {
-	type CompactionGateCheckStats,
-	type SessionStats,
-	SPAWNED_USAGE_CUSTOM_TYPE,
-	type SpawnedUsageReport,
-	type SpawnedUsageTotals,
-} from "./agent-session-contracts.ts";
+import type { CompactionGateCheckStats, SessionStats } from "./agent-session-contracts.ts";
 import { latestAssistantText } from "./context/message-text.ts";
 import {
 	accumulateCurrentSessionCostsFromEntries,
@@ -51,16 +45,13 @@ import {
 	type SpawnedUsageReceiptDisposition,
 	type SpawnedUsageReceiptOptions,
 } from "./cost/spawned-usage-receipt.ts";
+import { SPAWNED_USAGE_CUSTOM_TYPE, type SpawnedUsageReport, type SpawnedUsageTotals } from "./cost/usage-records.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import type { ContextUsage, ToolDefinition } from "./extensions/index.ts";
 import { resolveSessionEntryIndex } from "./session-entry-index.ts";
 import { writeJsonLinesSync } from "./session-jsonl-writer.ts";
-import type { SettingsManager } from "./settings-manager.ts";
-import {
-	isToolArgumentValidationLogRecord,
-	type ToolArgumentValidationLogRecord,
-} from "./tool-recovery-log-records.ts";
+import { isToolArgumentValidationLogRecord, type ToolArgumentValidationLogRecord } from "./tool-recovery-records.ts";
 import {
 	consumeToolArgumentValidationRecord,
 	createEmptyToolArgumentValidationStats,
@@ -69,6 +60,11 @@ import {
 	type ToolArgumentValidationRecord,
 	type ToolArgumentValidationStats,
 } from "./tool-recovery-stats.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface SessionAnalyticsSettingsSource {
+	getTheme(): string | undefined;
+}
 
 export const TOOL_ARGUMENT_VALIDATION_CUSTOM_TYPE = "tool_argument_validation";
 
@@ -82,7 +78,7 @@ export interface SessionAnalyticsDeps {
 	/** Session log — entries feed spawned-usage roll-up, daily totals, branch export. */
 	getSessionManager(): SessionManager;
 	/** Settings — the export theme is read here. */
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): SessionAnalyticsSettingsSource;
 	/** Resolve a tool definition for the HTML export's custom-tool renderer. */
 	getToolDefinition(name: string): ToolDefinition | undefined;
 	/** Sidecar recovery telemetry log; read on demand so turn handling never writes session custom entries. */

@@ -23,12 +23,8 @@ import { CollaborationControlHandoffs } from "./control-handoffs.ts";
 import { CollaborationCoordinator } from "./coordinator.ts";
 import { CollaborationDeadlines, reserveCollaborationCleanupAttempt } from "./deadlines.ts";
 import { provisionHerdr } from "./herdr-provision.ts";
-import {
-	type CollaborationJob,
-	CollaborationJobStore,
-	collaborationLaneId,
-	type NewCollaborationJob,
-} from "./job-store.ts";
+import { type CollaborationJob, collaborationLaneId, type NewCollaborationJob } from "./job-record.ts";
+import { CollaborationJobStore } from "./job-store.ts";
 import { buildLaunchProfileFlags, deriveWorkerLaunchProfile } from "./launch-profile.ts";
 import { NativeProviderRegistry, nativeCollaborationLaunchArgs } from "./native-provider.ts";
 import { normalizeNativeProviderSelection } from "./native-selection.ts";

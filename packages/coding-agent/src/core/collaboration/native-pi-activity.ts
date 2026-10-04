@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { SessionManager } from "../../kernel/node.ts";
 import type { AgentSessionEventListener } from "../agent-session-contracts.ts";
 import type { ForegroundRecoveryController } from "../foreground-recovery-controller.ts";
-import type { HumanInputRequest } from "../human-input.ts";
 import { subscribeHumanInputActivity } from "../human-input-activity.ts";
+import type { HumanInputRequest } from "../human-input-request.ts";
 import { connectHerdrChannel, type HerdrEventChannel } from "./herdr-channel.ts";
 import { herdrTarget } from "./herdr-codec.ts";
 import { NATIVE_PI_SOURCE_PREFIX } from "./native-pi-protocol.ts";

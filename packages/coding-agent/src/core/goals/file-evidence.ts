@@ -1,5 +1,5 @@
 import { readdir, stat } from "node:fs/promises";
-import { resolvePath } from "@caupulican/pi-agent-core/paths";
+import { resolvePath } from "../../kernel/utils/paths.ts";
 import { resolveReadPathAsync } from "../tools/path-utils.ts";
 
 export interface GoalFileEvidenceResolution {

@@ -19,7 +19,8 @@
  * raw output so any frame is one read away.
  */
 import type { CommandFamilyClassification } from "./command-family.ts";
-import type { OutputReducer, OutputReductionLevel, OutputReductionRequest } from "./output-reduction.ts";
+import type { OutputReducer, OutputReductionRequest } from "./output-reduction.ts";
+import type { OutputReductionLevel } from "./output-reduction-types.ts";
 
 /**
  * Frames are kept for errors, but not for every repeat of the same error: measured on a live

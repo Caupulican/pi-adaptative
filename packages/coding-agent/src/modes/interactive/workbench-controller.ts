@@ -1,5 +1,3 @@
-import { type AgentMessage, type ToolInvocationObservation, ToolInvocationReport } from "@caupulican/pi-agent-core";
-import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core/shell-output";
 import {
 	type Component,
 	isMouseSequence,
@@ -19,6 +17,9 @@ import {
 } from "../../core/system-one/semantic-evaluation-ledger.ts";
 import type { SemanticPlaneHealth } from "../../core/system-one/semantic-plane-health.ts";
 import { type OrchestrationPanelModel, renderOrchestrationPanelRows } from "../../core/tools/orchestration-panel.ts";
+import { type AgentMessage, type ToolInvocationObservation, ToolInvocationReport } from "../../kernel/index.ts";
+import { sanitizeBinaryOutput } from "../../kernel/utils/shell-output.ts";
+import { theme } from "../../presentation/theme-model.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
 import type { ActivityLaneItem } from "./components/activity-lane.ts";
 import {
@@ -47,7 +48,6 @@ import {
 	createSystemOneSummaryPreview,
 	type PreviewAttribution,
 } from "./components/workbench-tool-preview.ts";
-import { theme } from "./theme/theme.ts";
 import { WorkspaceObservation } from "./workbench-workspace.ts";
 
 interface WorkbenchPorts {

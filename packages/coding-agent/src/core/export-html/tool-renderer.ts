@@ -7,7 +7,7 @@
 
 import type { ImageContent, TextContent } from "@caupulican/pi-ai";
 import type { Component } from "@caupulican/pi-tui";
-import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type { Theme } from "../../presentation/theme-model.ts";
 import type { ToolDefinition, ToolRenderContext } from "../extensions/types.ts";
 import { ansiLinesToHtml } from "./ansi-to-html.ts";
 

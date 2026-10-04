@@ -1,5 +1,5 @@
-import { addUsage, createEmptyUsage } from "@caupulican/pi-agent-core/usage";
 import type { Usage } from "@caupulican/pi-ai";
+import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session.ts";
 import { runIsolatedTextCompletion } from "../isolated-text-completion.ts";
 import { FitnessStore, type StoredFitnessReport } from "../models/fitness-store.ts";

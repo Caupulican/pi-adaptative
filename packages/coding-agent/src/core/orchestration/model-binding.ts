@@ -1,7 +1,12 @@
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import type { Api, Model } from "@caupulican/pi-ai/types";
-import type { ModelRegistry } from "../model-registry.ts";
 import type { OrchestrationModelBinding, OrchestrationProfile } from "./contracts.ts";
+
+/** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
+export interface ModelBindingModelSource {
+	find(provider: string, modelId: string): Model<Api> | undefined;
+	hasConfiguredAuth(model: Model<Api>): boolean;
+}
 
 export interface ResolvedOrchestrationModel {
 	model: Model<Api>;
@@ -10,7 +15,7 @@ export interface ResolvedOrchestrationModel {
 
 export function resolvePinnedOrchestrationModel(
 	binding: OrchestrationModelBinding,
-	modelRegistry: ModelRegistry,
+	modelRegistry: ModelBindingModelSource,
 	isUnavailable: (model: Model<Api>) => boolean = () => false,
 ): ResolvedOrchestrationModel | undefined {
 	const model = modelRegistry.find(binding.provider, binding.modelId);
@@ -32,7 +37,7 @@ export function resolvePinnedOrchestrationModel(
  */
 export function resolveConfiguredOrchestrationModel(
 	profile: OrchestrationProfile,
-	modelRegistry: ModelRegistry,
+	modelRegistry: ModelBindingModelSource,
 	isUnavailable: (model: Model<Api>) => boolean = () => false,
 ): ResolvedOrchestrationModel | undefined {
 	for (const binding of profile.modelPolicy.candidates) {

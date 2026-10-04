@@ -11,8 +11,8 @@ import {
 	type StdioPipe,
 } from "node:child_process";
 import type { Readable } from "node:stream";
-import { isPositiveSafePid, killTree } from "@caupulican/pi-agent-core/process-tree";
 import crossSpawn from "cross-spawn";
+import { isPositiveSafePid, killTree } from "../kernel/reliability/process-tree.ts";
 
 const EXIT_STDIO_GRACE_MS = 100;
 

@@ -13,35 +13,21 @@ const modelRegistry: Map<string, Map<string, Model<Api>>> = new Map();
 
 // Initialize registry from MODELS on module load
 for (const [provider, models] of Object.entries(MODELS)) {
-	const providerModels = new Map<string, Model<Api>>();
-	for (const [id, model] of Object.entries(models)) {
-		providerModels.set(id, model as Model<Api>);
-	}
-	modelRegistry.set(provider, providerModels);
+	modelRegistry.set(provider, new Map(Object.entries(models)));
 }
 
-type ModelApi<
-	TProvider extends KnownProvider,
-	TModelId extends keyof (typeof MODELS)[TProvider],
-> = (typeof MODELS)[TProvider][TModelId] extends { api: infer TApi } ? (TApi extends Api ? TApi : never) : never;
-
-export function getModel<TProvider extends KnownProvider, TModelId extends keyof (typeof MODELS)[TProvider]>(
-	provider: TProvider,
-	modelId: TModelId,
-): Model<ModelApi<TProvider, TModelId>> {
-	const providerModels = modelRegistry.get(provider);
-	return providerModels?.get(modelId as string) as Model<ModelApi<TProvider, TModelId>>;
+/** The catalog model, or undefined when the provider does not list that id. */
+export function getModel(provider: KnownProvider, modelId: string): Model<Api> | undefined {
+	return modelRegistry.get(provider)?.get(modelId);
 }
 
 export function getProviders(): KnownProvider[] {
 	return Array.from(modelRegistry.keys()) as KnownProvider[];
 }
 
-export function getModels<TProvider extends KnownProvider>(
-	provider: TProvider,
-): Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[] {
+export function getModels(provider: KnownProvider): Model<Api>[] {
 	const models = modelRegistry.get(provider);
-	return models ? (Array.from(models.values()) as Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[]) : [];
+	return models ? Array.from(models.values()) : [];
 }
 
 /**

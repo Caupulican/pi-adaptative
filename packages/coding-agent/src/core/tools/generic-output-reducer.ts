@@ -14,7 +14,7 @@
  * `edit` anchored on a printed line still matches.
  */
 import { stripAnsi } from "../../utils/ansi.ts";
-import type { OutputReductionLevel } from "./output-reduction.ts";
+import type { OutputReductionLevel } from "./output-reduction-types.ts";
 
 export interface GenericReduction {
 	text: string;

@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, join } from "node:path";
-import { TRANSIENT_RECORD_SUPERSEDING_NOTE } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
+import { TRANSIENT_RECORD_SUPERSEDING_NOTE } from "../../../kernel/index.ts";
 import {
 	configFile,
 	managedMemoryStateFile,
@@ -18,7 +18,7 @@ import {
 	type PiOkfType,
 	validateOkfMemoryDocumentInput,
 } from "../../context/okf-memory.ts";
-import type { AgentToolResult, ToolDefinition } from "../../extensions/types.ts";
+import type { AgentToolResult, MemoryProvider, ToolDefinition } from "../../extensions/types.ts";
 import { settleIndependentLifecycle } from "../../lifecycle-settlement.ts";
 import { PERSONA_PROJECTION_RULE } from "../../provider-prompt-contracts.ts";
 import {
@@ -26,10 +26,10 @@ import {
 	scanContextFileThreats,
 	stripInvisibleUnicode,
 } from "../../security/context-threat-scanner.ts";
-import { getDirectoryResourceProfileInfo } from "../../settings-manager.ts";
+import { getDirectoryResourceProfileInfo } from "../../settings/settings-rules.ts";
 import { jaccard, tokenize } from "../../tools/skill-audit.ts";
 import { isMissingFileError, withFileLock, writeFileAtomic } from "../../util/atomic-file.ts";
-import type { MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
+import type { MemoryLifecycleContext } from "../memory-provider.ts";
 import { OkfProjectMemoryStore } from "../okf-project-memory-store.ts";
 import {
 	collectUserPreferenceEntries,

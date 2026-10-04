@@ -9,7 +9,7 @@
  * process tree the check started (by handle, never by pid).
  */
 import type { ChildProcess } from "node:child_process";
-import { type KillTreeOutcome, killTree } from "@caupulican/pi-agent-core/process-tree";
+import { type KillTreeOutcome, killTree } from "../../kernel/reliability/process-tree.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
 import { getShellConfig } from "../../utils/shell.ts";
 import { withoutHarnessLaunchEnv } from "../harness-environment.ts";

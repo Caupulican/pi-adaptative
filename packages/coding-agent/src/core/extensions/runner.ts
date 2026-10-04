@@ -2,18 +2,17 @@
  * Extension runner - executes extensions and manages their lifecycle.
  */
 
-import type { ExecutionContext } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import { measureJsonLength } from "@caupulican/pi-agent-core/provider-request-estimator";
-import { type AgentMessage, safeErrorMessage } from "@caupulican/pi-agent-core/types";
-import { combineUsage } from "@caupulican/pi-agent-core/usage";
 import type { ImageContent, Model, Usage } from "@caupulican/pi-ai";
 import type { KeyId } from "@caupulican/pi-tui";
-import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
+import type { ExecutionContext } from "../../kernel/index.ts";
+import type { SessionManager } from "../../kernel/node.ts";
+import { measureJsonLength } from "../../kernel/provider-request-estimator.ts";
+import { type AgentMessage, safeErrorMessage } from "../../kernel/types.ts";
+import { combineUsage } from "../../kernel/usage.ts";
+import { type Theme, theme } from "../../presentation/theme-model.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import { DEFAULT_STALE_EXTENSION_CONTEXT_MESSAGE } from "./stale-context.ts";
 import { createToolOnlyExtensionContext } from "./tool-only-api.ts";
 import { snapshotToolResultData } from "./tool-result-snapshot.ts";
@@ -21,6 +20,7 @@ import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
 	BeforeProviderRequestEvent,
+	BuildSystemPromptOptions,
 	CompactOptions,
 	ContextEvent,
 	ContextEventResult,

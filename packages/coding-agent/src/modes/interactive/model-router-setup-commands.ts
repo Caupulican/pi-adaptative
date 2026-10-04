@@ -5,9 +5,9 @@
  * operator choice made here, never by opening settings.
  */
 
+import type { Api, Model } from "@caupulican/pi-ai/types";
 import type { Component, SelectItem } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
-import type { ModelRegistry } from "../../core/model-registry.ts";
 import {
 	describeRouterCalibration,
 	describeRouterCalibrationScope,
@@ -18,6 +18,11 @@ import {
 import { formatLiveRoutePreview, formatRoutePreview } from "../../core/model-router/route-preview.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
 import { SelectSubmenu } from "./components/settings-selector.ts";
+
+/** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
+export interface ModelRouterSetupCommandsModelSource {
+	isUsingSubscription(model: Model<Api>): boolean;
+}
 
 type SelectorFactory = (done: () => void) => { component: Component; focus: Component };
 
@@ -32,7 +37,8 @@ export interface ModelRouterSetupHost {
 		| "getModelRouterStatus"
 		| "previewRoute"
 		| "previewRouteLive"
-	> & { modelRegistry: ModelRegistry };
+	>;
+	readonly modelRegistry: ModelRouterSetupCommandsModelSource;
 	readonly settingsManager: SettingsManager;
 	showStatus(message: string): void;
 	showWarning(message: string): void;
@@ -58,7 +64,7 @@ function calibrationRows(host: ModelRouterSetupHost): RouterCalibrationRow[] {
 	return describeRouterCalibration(pool.models, {
 		fitnessReports: host.session.getStoredFitnessReports(),
 		toolProbe: (model) => host.session.getToolProbeRecord(model),
-		isSubscription: (model) => host.session.modelRegistry.isUsingSubscription(model),
+		isSubscription: (model) => host.modelRegistry.isUsingSubscription(model),
 	});
 }
 

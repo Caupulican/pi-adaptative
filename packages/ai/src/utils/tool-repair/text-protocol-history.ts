@@ -1,6 +1,6 @@
 import { joinTextContent } from "../../providers/transform-messages.ts";
-import type { ToolCall, ToolResultMessage } from "../../types.ts";
-import { formatVariantEnvelope, type TextToolProtocolVariant } from "./text-protocol.ts";
+import type { TextToolProtocolVariant, ToolCall, ToolResultMessage } from "../../types.ts";
+import { formatVariantEnvelope } from "./text-protocol.ts";
 
 /**
  * Renders a prior text-protocol tool call as the assistant-visible history text, in the exact

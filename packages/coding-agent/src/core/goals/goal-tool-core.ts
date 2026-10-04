@@ -4,7 +4,6 @@ import {
 	formatRequirementsLedgerLine,
 	getTrustedRequirementEvidence,
 	getUnprovenGoalRequirementIds,
-	isTrustedGoalEvidence,
 } from "./goal-acceptance.ts";
 import { formatGoalRecord, projectGoalRecord } from "./goal-record.ts";
 import {
@@ -16,6 +15,7 @@ import {
 	type GoalState,
 	isGoalExecutionActive,
 	isGoalUnfinishedStatus,
+	isTrustedGoalEvidence,
 	MAX_GOAL_OBJECTIVE_LENGTH,
 	type RequirementCheck,
 } from "./goal-state.ts";

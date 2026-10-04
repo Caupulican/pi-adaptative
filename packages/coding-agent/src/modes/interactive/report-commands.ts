@@ -15,17 +15,20 @@ import { Markdown, Spacer, Text, visibleWidth } from "@caupulican/pi-tui";
 import { getDebugLogPath } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { hasSubagentCostSignal, type SessionCostSummary } from "../../core/cost/cost-summary.ts";
+import type { ExtensionRunner } from "../../core/extensions/index.ts";
 import type { AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
-import type { AutoLearnSettings } from "../../core/settings-manager.ts";
+import type { ModelRegistry } from "../../core/model-registry.ts";
+import type { AutoLearnSettings } from "../../core/settings/settings-schema.ts";
+import type { SettingsManager } from "../../core/settings-manager.ts";
+import { formatKeyText } from "../../presentation/keybinding-hints.ts";
+import { theme } from "../../presentation/theme-model.ts";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.ts";
 import { getProcessMemoryMb } from "../../utils/process-memory.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { DaxnutsComponent } from "./components/daxnuts.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { EarendilAnnouncementComponent } from "./components/earendil-announcement.ts";
-import { formatKeyText } from "./components/keybinding-hints.ts";
 import { selfCompactionGauge } from "./components/self-compaction-gauge.ts";
-import { theme } from "./theme/theme.ts";
 
 export interface ReportRenderHost {
 	readonly chatContainer: Container;
@@ -34,6 +37,8 @@ export interface ReportRenderHost {
 
 export interface UsageReportHost extends ReportRenderHost {
 	readonly session: AgentSession;
+	readonly settingsManager: Pick<SettingsManager, "getCostGuardSettings">;
+	readonly modelRegistry: Pick<ModelRegistry, "isUsingSubscription">;
 	getCurrentAutoLearnSettings(): Required<AutoLearnSettings>;
 }
 
@@ -42,7 +47,7 @@ export interface ChangelogReportHost extends ReportRenderHost {
 }
 
 export interface HotkeysReportHost extends ReportRenderHost {
-	readonly session: AgentSession;
+	readonly extensionRunner: Pick<ExtensionRunner, "getShortcuts">;
 	readonly keybindings: KeybindingsManager;
 	getMarkdownThemeWithSettings(): MarkdownTheme;
 	getAppKeyDisplay(action: AppKeybinding): string;
@@ -132,9 +137,9 @@ export function handleUsageCommand(host: UsageReportHost): void {
 	const context = host.session.getContextUsage();
 	const autoLearn = host.getCurrentAutoLearnSettings();
 	const costGuard = host.session.getLastCostGuardDecision();
-	const costGuardSettings = host.session.settingsManager.getCostGuardSettings();
+	const costGuardSettings = host.settingsManager.getCostGuardSettings();
 	const activeModel = host.session.model;
-	const usingSubscription = activeModel ? host.session.modelRegistry.isUsingSubscription(activeModel) : false;
+	const usingSubscription = activeModel ? host.modelRegistry.isUsingSubscription(activeModel) : false;
 	const isChatGptSubscription = usingSubscription && activeModel?.provider === "openai-codex";
 
 	let info = `${theme.bold("Usage & Optimization")}\n\n`;
@@ -351,7 +356,7 @@ export function handleHotkeysCommand(host: HotkeysReportHost): void {
 `;
 
 	// Add extension-registered shortcuts
-	const extensionRunner = host.session.extensionRunner;
+	const extensionRunner = host.extensionRunner;
 	const shortcuts = extensionRunner.getShortcuts(host.keybindings.getEffectiveConfig());
 	if (shortcuts.size > 0) {
 		hotkeys += `

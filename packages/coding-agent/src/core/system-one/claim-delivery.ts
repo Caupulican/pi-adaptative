@@ -9,12 +9,9 @@
  * the turn ends; a claim no receipt backs stays visible as a doubt.
  */
 
-import type { AgentMessage } from "@caupulican/pi-agent-core";
-import {
-	isPassingTestVerification,
-	retainedVerificationDetails,
-} from "@caupulican/pi-agent-core/verification-obligations";
 import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@caupulican/pi-ai";
+import type { AgentMessage } from "../../kernel/index.ts";
+import { isPassingTestVerification, retainedVerificationDetails } from "../../kernel/verification-obligations.ts";
 import { DEFAULT_NOUL_BAND_THRESHOLDS, isNoulProbability, settledAnswer } from "../decision/noul.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import type { LadderOutcome } from "./unsettled-ladder.ts";

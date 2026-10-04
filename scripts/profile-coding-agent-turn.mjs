@@ -4,7 +4,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
-import { agentLoop } from "../packages/agent/src/agent-loop.ts";
+import { agentLoop } from "../packages/coding-agent/src/kernel/agent-loop.ts";
 import { createAssistantMessageEventStream } from "../packages/ai/src/utils/event-stream.ts";
 import { createEmptyUsage } from "../packages/ai/src/usage.ts";
 import { parseIntegerFlag, tryConsumeHelpFlag } from "./lib/cli-flags.mjs";
@@ -19,7 +19,7 @@ function printHelp() {
 
 Profiles the agent-core loop's PER-TURN host work (remediation item D2), not process startup -
 that is what scripts/profile-coding-agent-node.mjs already covers. This script drives
-packages/agent's agentLoop directly against a STUB/SCRIPTED provider stream (no network, no real
+the kernel's agentLoop directly against a STUB/SCRIPTED provider stream (no network, no real
 provider, no packages/coding-agent session) through a scripted sequence of tool calls, over as many
 turns as you ask for, and profiles ONLY that loop.
 

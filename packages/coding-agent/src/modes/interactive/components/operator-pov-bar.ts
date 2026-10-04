@@ -11,7 +11,7 @@ import {
 	SYSTEM_ONE_BAR_LABEL,
 	semanticPlaneHealthValue,
 } from "../../../core/system-one/semantic-plane-health.ts";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import { selfCompactionGauge } from "./self-compaction-gauge.ts";
 
 /**

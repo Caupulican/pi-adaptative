@@ -3,7 +3,7 @@ import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
 import { type GoalState, isGoalExecutionActive, isGoalUnfinishedStatus } from "../../../core/goals/goal-state.ts";
 import type { TaskStep, TaskStepsState } from "../../../core/tasks/task-state.ts";
-import type { Theme, ThemeColor } from "../theme/theme.ts";
+import type { Theme, ThemeColor } from "../../../presentation/theme-model.ts";
 
 export type ActivityLaneKind = "runtime" | "tool" | "task" | "worker" | "goal" | "queue" | "notice";
 export type ActivityLaneStatus = "active" | "waiting" | "success" | "warning" | "failure" | "neutral";

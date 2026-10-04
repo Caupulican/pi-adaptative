@@ -1,5 +1,8 @@
 import { randomUUID } from "node:crypto";
-import type { Agent } from "@caupulican/pi-agent-core/agent";
+import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
+import { isContextOverflow } from "@caupulican/pi-ai/overflow";
+import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
+import type { Agent } from "../kernel/agent.ts";
 import {
 	assessCompactionNeed,
 	type CompactionExecutionOptions,
@@ -12,34 +15,26 @@ import {
 	estimateContextTokens,
 	prepareCompaction,
 	shouldCompact,
-} from "@caupulican/pi-agent-core/compaction/compaction";
-import { runCompactionLoop } from "@caupulican/pi-agent-core/compaction/loop";
-import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
-import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
-import { projectToolsForProvider } from "@caupulican/pi-agent-core/provider-tool-projection";
+} from "../kernel/compaction/compaction.ts";
+import { runCompactionLoop } from "../kernel/compaction/loop.ts";
+import type { ResolvedProviderRequestAuth, StreamFn } from "../kernel/index.ts";
+import { createCustomMessage } from "../kernel/messages.ts";
+import { estimateProviderRequestTokens } from "../kernel/provider-request-estimator.ts";
+import { projectToolsForProvider } from "../kernel/provider-tool-projection.ts";
 import {
 	classifyFailure,
 	computeRetryDelayMs,
 	DEFAULT_RETRY_POLICY,
 	type RetryPolicy,
 	sleepAbortable,
-} from "@caupulican/pi-agent-core/reliability";
+} from "../kernel/reliability/index.ts";
+import type { CompactionEntry, SessionEntry } from "../kernel/session/session-entries.ts";
 import {
-	type CompactionEntry,
 	getLatestCompactionEntry,
 	isSessionLifecycleEntry,
-	type SessionEntry,
 	type SessionManager,
-} from "@caupulican/pi-agent-core/session";
-import type {
-	AgentMessage,
-	ResolvedProviderRequestAuth,
-	StreamFn,
-	ThinkingLevel,
-} from "@caupulican/pi-agent-core/types";
-import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
-import { isContextOverflow } from "@caupulican/pi-ai/overflow";
-import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
+} from "../kernel/session/session-manager.ts";
+import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
 import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
 import {
 	type CompactionEconomicsInput,
@@ -72,7 +67,11 @@ import type { FailureCorpusRecorder } from "./failure-corpus.ts";
 import type { RequestAuth } from "./request-auth.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { LatestCompactionEntryScan, resolveSessionEntryIndex } from "./session-entry-index.ts";
-import type { SettingsManager } from "./settings-manager.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface CompactionControllerSettingsSource {
+	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number };
+}
 
 export type AutoCompactionReason = "overflow" | "provider_recovery" | "threshold";
 
@@ -194,7 +193,7 @@ type CompactionControllerEvent =
 export interface CompactionControllerDeps {
 	agent: Agent;
 	sessionManager: SessionManager;
-	settingsManager: SettingsManager;
+	settingsManager: CompactionControllerSettingsSource;
 	getModel(): Model<Api> | undefined;
 	getAdaptedSettings(): CompactionSettings;
 	getCompactionModelSetting(): string;

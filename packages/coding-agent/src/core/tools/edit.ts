@@ -1,9 +1,8 @@
-import { type AgentTool, createAgentToolFailureRecoveryAuthority } from "@caupulican/pi-agent-core/types";
 import { Box, Container, Spacer, Text } from "@caupulican/pi-tui";
 import { type FileHandle, open as fsOpen, readFile as fsReadFile, stat as fsStat } from "fs/promises";
-import { type Static, Type } from "typebox";
-import { renderDiff } from "../../modes/interactive/components/diff.ts";
-import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import { type AgentTool, createAgentToolFailureRecoveryAuthority } from "../../kernel/types.ts";
+import { renderDiff } from "../../presentation/diff.ts";
+import type { Theme } from "../../presentation/theme-model.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { decodeEditDocument } from "./edit-byte-codec.ts";
 import {
@@ -46,6 +45,13 @@ import {
 	resolveMutationPathTarget,
 } from "./file-mutation-intent.ts";
 import { renderToolPath, str } from "./render-utils.ts";
+import {
+	type EditOperations,
+	type EditToolDetails,
+	type EditToolInput,
+	editSchema,
+	type OpenEditFile,
+} from "./schemas/edit.ts";
 import { assertNoNulInEditReplacements } from "./text-nul-guard.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -62,54 +68,6 @@ type EditRenderState = {
 	callComponent?: EditCallRenderComponent;
 };
 
-const replaceEditSchema = Type.Object(
-	{
-		oldText: Type.String({ minLength: 1 }),
-		newText: Type.String(),
-		range: Type.Optional(
-			Type.Object(
-				{
-					startLine: Type.Integer({ minimum: 1 }),
-					endLine: Type.Integer({ minimum: 1 }),
-				},
-				{ additionalProperties: false },
-			),
-		),
-	},
-	{ additionalProperties: false },
-);
-
-const editPathSchema = Type.String({ minLength: 1 });
-const editEncodingSchema = Type.Optional(
-	Type.String({
-		minLength: 1,
-		maxLength: 80,
-		description:
-			"Override for the source codec, e.g. cp1252 or utf-16-le. The harness resolves the encoding itself (project declarations, BOM, UTF-8, then a managed Python codec that detects legacy and BOM-less text) and preserves it, so pass this only when you know that resolution is wrong.",
-	}),
-);
-const editSchema = Type.Union([
-	Type.Object(
-		{
-			path: editPathSchema,
-			encoding: editEncodingSchema,
-			edits: Type.Array(replaceEditSchema, {
-				minItems: 1,
-			}),
-		},
-		{ additionalProperties: false },
-	),
-	Type.Object(
-		{
-			path: editPathSchema,
-			encoding: editEncodingSchema,
-			payloadRef: Type.String({ minLength: 1 }),
-		},
-		{ additionalProperties: false },
-	),
-]);
-
-export type EditToolInput = Static<typeof editSchema>;
 type LegacyEditToolInput = {
 	path?: unknown;
 	edits?: unknown;
@@ -117,38 +75,6 @@ type LegacyEditToolInput = {
 	oldText?: unknown;
 	newText?: unknown;
 };
-
-export interface EditToolDetails {
-	phase: "edited";
-	encodingRecovery?: { codec: "python"; encoding: string; verified: true; source: string };
-	contentRef?: string;
-	/** Display-oriented diff of the changes made */
-	diff?: string;
-	/** Standard unified patch of the changes made */
-	patch?: string;
-	/** Line number of the first change in the new file (for editor navigation) */
-	firstChangedLine?: number;
-	/** True when execution reused the match plan already validated for the call preview. */
-	matchPlanReused?: boolean;
-}
-
-/**
- * Pluggable operations for the edit tool.
- * Override these to delegate file editing to remote systems (for example SSH).
- */
-export interface EditOperations {
-	/** Read file contents for non-mutating previews. */
-	readFile: (absolutePath: string) => Promise<Buffer>;
-	/** Open one stable resource for the execution read, write, and identity checks. */
-	openFile: (absolutePath: string) => Promise<OpenEditFile>;
-}
-
-export interface OpenEditFile {
-	readFile: () => Promise<Buffer>;
-	writeFile: (content: string | Buffer) => Promise<void>;
-	inspect: () => Promise<OpenEditFileInspection>;
-	close: () => Promise<void>;
-}
 
 async function readOpenFile(handle: FileHandle): Promise<Buffer> {
 	const { size } = await handle.stat({ bigint: true });

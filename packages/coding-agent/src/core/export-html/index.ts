@@ -1,9 +1,9 @@
-import type { AgentState } from "@caupulican/pi-agent-core";
-import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { basename, join } from "path";
 import { APP_NAME, getAgentDir, getExportTemplateDir } from "../../config.ts";
-import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.ts";
+import type { AgentState } from "../../kernel/index.ts";
+import type { SessionEntry, SessionManager } from "../../kernel/node.ts";
+import { getResolvedThemeColors, getThemeExportColors } from "../../presentation/theme/theme.ts";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
 import { getContextStoreDir } from "../context/context-store-retention.ts";
 import { expandMessageForDisplay } from "../context/path-alias-display.ts";

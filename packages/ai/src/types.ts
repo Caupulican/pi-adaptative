@@ -1,12 +1,20 @@
 import type { AssistantMessageDiagnostic } from "./utils/diagnostics.ts";
-import type { AssistantMessageEventStream } from "./utils/event-stream.ts";
-import type {
-	TextToolProtocolOptions,
-	TextToolProtocolParseFailure,
-	TextToolProtocolVariant,
-} from "./utils/tool-repair/text-protocol.ts";
+import type { EventStream } from "./utils/generic-event-stream.ts";
 
-export type { AssistantMessageEventStream } from "./utils/event-stream.ts";
+/**
+ * The stream every provider returns. Declared here, against the dependency-free generic
+ * `EventStream`, so the vocabulary does not import the `AssistantMessageEventStream` class; that
+ * class adds no members, so the two are mutually assignable.
+ */
+export type AssistantMessageEventStream = EventStream<AssistantMessageEvent, AssistantMessage>;
+
+export type TextToolProtocolParseFailure = "overlap" | "unrecognized" | "unknown-tool" | "validation-failed";
+
+export type TextToolProtocolVariant = "tool-tag" | "tool-call" | "fenced-json" | "function-xml";
+
+export interface TextToolProtocolOptions {
+	variant?: TextToolProtocolVariant;
+}
 
 export type KnownApi =
 	| "openai-completions"

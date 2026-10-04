@@ -1,6 +1,6 @@
-import type { AgentMessage } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, ImageContent, Model, ToolResultMessage } from "@caupulican/pi-ai";
+import type { AgentMessage } from "../kernel/index.ts";
+import type { SessionManager } from "../kernel/node.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { ExtensionUIContext } from "./extensions/index.ts";
 import { clarificationAnsweredEvent, type GoalClarificationEvent } from "./goals/goal-clarification-log.ts";
@@ -8,11 +8,11 @@ import {
 	DEFAULT_OWNER_WAIT_TIMEOUT_MS,
 	formatHumanInputAnswerText,
 	getResumableHumanInputSnapshot,
-	type HumanInputRequest,
 	OWNER_UNAVAILABLE_REASON,
 	resolveHumanInput,
 	unansweredOwnerQuestionText,
 } from "./human-input.ts";
+import type { HumanInputRequest } from "./human-input-request.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 
 interface HumanInputControllerDeps {

@@ -1,6 +1,6 @@
-import type { AgentMessage } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import { VerificationObligationTracker } from "@caupulican/pi-agent-core/verification-obligations";
+import type { AgentMessage } from "../../kernel/index.ts";
+import type { SessionManager } from "../../kernel/node.ts";
+import { VerificationObligationTracker } from "../../kernel/verification-obligations.ts";
 import type { EvidenceBundle, LearningDecision, WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";

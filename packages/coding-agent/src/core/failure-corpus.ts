@@ -1,5 +1,5 @@
-import type { ClassifiedError } from "@caupulican/pi-agent-core";
 import type { ToolFailurePhase } from "@caupulican/pi-ai/tool-repair-registry";
+import type { ClassifiedError } from "../kernel/index.ts";
 import { redactKnownSecrets } from "./security/secret-text.ts";
 import { isWorkerSession } from "./session-role.ts";
 import { appendBoundedJsonLineSync, type BoundedJsonlLimits } from "./util/bounded-jsonl.ts";

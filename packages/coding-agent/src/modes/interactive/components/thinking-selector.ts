@@ -1,4 +1,3 @@
-import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import {
 	Container,
 	type Focusable,
@@ -8,10 +7,11 @@ import {
 	Spacer,
 	Text,
 } from "@caupulican/pi-tui";
-import { getSelectListTheme } from "../theme/theme.ts";
+import type { ThinkingLevel } from "../../../kernel/index.ts";
+import { formatSelectorActionHints } from "../../../presentation/keybinding-hints.ts";
+import { getSelectListTheme } from "../../../presentation/theme-model.ts";
 import { THINKING_LEVEL_DESCRIPTIONS } from "../thinking-level-descriptions.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { formatSelectorActionHints } from "./keybinding-hints.ts";
 
 /**
  * Component that renders a thinking level selector with borders and default-setting support

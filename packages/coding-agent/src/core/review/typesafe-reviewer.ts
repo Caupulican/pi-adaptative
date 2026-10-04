@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import { combineAbortSignals } from "@caupulican/pi-ai/abort-signals";
 import { retryProviderRequest } from "@caupulican/pi-ai/provider-retry";
+import { classifyFailure } from "../../kernel/reliability/index.ts";
 import type { CredentialExposureBoundary } from "../secrets/credential-exposure-guard.ts";
 import { redactCredentialContent } from "../secrets/credential-model-content.ts";
 import type { SystemOneAccessResolver } from "../system-one/access.ts";

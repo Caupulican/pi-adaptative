@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
-import { DEFAULT_MAX_BYTES } from "@caupulican/pi-agent-core/truncate";
+import { DEFAULT_MAX_BYTES } from "../../kernel/utils/truncate.ts";
 import { workerTerminalOutputArtifactFile } from "../agent-paths.ts";
 import type { ArtifactContract, WorkerResultContract } from "../orchestration/contracts.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";

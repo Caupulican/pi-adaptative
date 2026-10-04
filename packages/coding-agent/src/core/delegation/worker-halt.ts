@@ -1,4 +1,4 @@
-import type { AgentHaltRequest } from "@caupulican/pi-agent-core";
+import type { AgentHaltRequest } from "../../kernel/index.ts";
 
 /** Longest parent reason carried into the worker's transcript and the claim. */
 export const MAX_WORKER_HALT_REASON_CHARS = 1_000;

@@ -1,6 +1,6 @@
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
-import { MAX_MANAGED_LANE_SUMMARY_BYTES } from "../extensions/types.ts";
+import { MAX_MANAGED_LANE_SUMMARY_BYTES } from "../extensions/managed-lane-records.ts";
 import { collaborationUsageSchema } from "./launch-profile.ts";
 
 const turnId = Type.String({ minLength: 1, maxLength: 128 });

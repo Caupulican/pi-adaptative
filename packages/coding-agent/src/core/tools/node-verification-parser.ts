@@ -1,6 +1,6 @@
-import type { VerificationRecord } from "@caupulican/pi-agent-core/verification-obligations";
+import type { VerificationRecord } from "../../kernel/verification-obligations.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
-import type { TestVerificationOutcome, VerificationOutputParser } from "./test-verification-output.ts";
+import type { TestVerificationOutcome, VerificationOutputParser } from "./test-verification-types.ts";
 
 const COUNT_NAMES = ["tests", "suites", "pass", "fail", "cancelled", "skipped", "todo"] as const;
 

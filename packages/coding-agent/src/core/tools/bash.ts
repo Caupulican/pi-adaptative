@@ -1,28 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
-import type { Agent } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import type { ExecutionPathFlavor } from "@caupulican/pi-agent-core/paths";
-import { createSilenceWatchdog } from "@caupulican/pi-agent-core/reliability";
-import {
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
-	formatSize,
-	type TruncationResult,
-} from "@caupulican/pi-agent-core/truncate";
-import { type AgentTool, AgentToolExecutionError } from "@caupulican/pi-agent-core/types";
-import {
-	MAX_VERIFICATION_ID_LENGTH,
-	VERIFICATION_ID_PATTERN,
-	type VerificationRecord,
-} from "@caupulican/pi-agent-core/verification-obligations";
 import { Container, Text, truncateToWidth } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
-import { type Static, Type } from "typebox";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
-import { truncateToVisualLines } from "../../modes/interactive/components/visual-truncate.ts";
-import { theme } from "../../modes/interactive/theme/theme.ts";
+import type { Agent } from "../../kernel/index.ts";
+import type { SessionManager } from "../../kernel/node.ts";
+import { createSilenceWatchdog } from "../../kernel/reliability/index.ts";
+import { type AgentTool, AgentToolExecutionError } from "../../kernel/types.ts";
+import type { ExecutionPathFlavor } from "../../kernel/utils/paths.ts";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "../../kernel/utils/truncate.ts";
+import { keyHint } from "../../presentation/keybinding-hints.ts";
+import { theme } from "../../presentation/theme-model.ts";
+import { truncateToVisualLines } from "../../presentation/visual-truncate.ts";
 import { createPowerShellHostEnvironment, POWERSHELL_7_GUARD } from "../../utils/powershell-session-protocol.ts";
 import { waitForOwnedProcessTreeWithTermination } from "../../utils/process-group-wait.ts";
 import {
@@ -52,12 +41,19 @@ import { OutputAccumulator } from "./output-accumulator.ts";
 import {
 	createReductionProjector,
 	formatOutputReductionNotice,
-	type OutputReductionDetails,
 	type OutputReductionToolOptions,
 	type ReduceToolOutputOptions,
 	resolveOutputReductionLevel,
 } from "./output-reduction.ts";
 import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
+import {
+	type BashOperations,
+	type BashToolDetails,
+	type BashToolInput,
+	bashSchema,
+	DEFAULT_COMMAND_TIMEOUT_SECONDS,
+	MAX_COMMAND_TIMEOUT_SECONDS,
+} from "./schemas/bash.ts";
 import {
 	assessShellSearchScope,
 	BROAD_SEARCH_OUTPUT_ROUTE,
@@ -73,7 +69,6 @@ import { acquireShellSessionLanes } from "./shell-lane-pool.ts";
 import {
 	createShellOutputProjector,
 	type ShellOutputProjection,
-	type ShellOutputProjectionDetails,
 	type ShellOutputProjectorLike,
 } from "./shell-output-projection.ts";
 import { acquirePersistentShellSession, buildBashOneShotWire } from "./shell-session.ts";
@@ -89,9 +84,6 @@ import { getOrCreateWindowsShellState, mergeEffectiveEnv, resolveEffectiveCwd } 
 
 /** Low-level silence bound retained for direct shell-operation consumers. Agent tool calls always pass a wall-clock bound. */
 const DEFAULT_COMMAND_SILENCE_MS = 600_000;
-/** Agent-facing wall-clock bound: continuously producing output must not make a command immortal. */
-export const DEFAULT_COMMAND_TIMEOUT_SECONDS = 120;
-export const MAX_COMMAND_TIMEOUT_SECONDS = 3600;
 const MIN_COMMAND_TIMEOUT_SECONDS = 0.1;
 let commandSilenceMsOverride: number | undefined;
 let commandTimeoutMsOverride: number | undefined;
@@ -117,93 +109,6 @@ export function resolveCommandTimeoutSeconds(timeout: number | undefined, backgr
 		return (commandTimeoutMsOverride ?? DEFAULT_COMMAND_TIMEOUT_SECONDS * 1000) / 1000;
 	}
 	return Math.max(MIN_COMMAND_TIMEOUT_SECONDS, Math.min(timeout, MAX_COMMAND_TIMEOUT_SECONDS));
-}
-
-const bashSchema = Type.Object({
-	command: Type.String({ description: "Shell command to execute" }),
-	repairOf: Type.Optional(
-		Type.String({
-			maxLength: MAX_VERIFICATION_ID_LENGTH,
-			pattern: VERIFICATION_ID_PATTERN.source,
-			description:
-				"Active verification id whose empty-test setup error this corrected invocation repairs. The host requires matching test arguments within this workspace and an executed pass; actual test failures cannot be replaced this way.",
-		}),
-	),
-	timeout: Type.Optional(
-		Type.Number({
-			maximum: MAX_COMMAND_TIMEOUT_SECONDS,
-			description: `Wall-clock timeout in SECONDS, not milliseconds. Defaults to ${DEFAULT_COMMAND_TIMEOUT_SECONDS} (${MAX_COMMAND_TIMEOUT_SECONDS} for a background run); positive overrides are capped at ${MAX_COMMAND_TIMEOUT_SECONDS}. Zero or negative values use the default.`,
-		}),
-	),
-	background: Type.Optional(
-		Type.Boolean({
-			description:
-				"Run as a session task at once and return its task id instead of waiting. It runs in its own shell started from the session's current directory (its cd and exports do not persist), waits only for file writes emitted before it in this message, and never blocks other commands. Use only when you will do other work before you need the result; a background start followed immediately by tool_task wait costs an extra request and is slower than a foreground call with a timeout. Its result arrives in the completion wake-up; tool_task wait is only for an omitted output (needs the tool_task tool; without it the command runs in the foreground). Omit to wait for the command (default, bounded by timeout).",
-		}),
-	),
-	broadSearch: Type.Optional(
-		Type.Literal(BROAD_SEARCH_OUTPUT_ROUTE, {
-			description:
-				"Explicit override for a broad rg/grep/find/fd scan that cannot be narrowed. The command runs, but its complete output is routed to a file and excluded from model context.",
-		}),
-	),
-	fullOutput: Type.Optional(
-		Type.Boolean({
-			description:
-				"Return the complete raw output for this call: no output filters (test projection, family reducers, generic cleaning). Use only when the filtered notice says lines were omitted and you need them verbatim; the persisted full output named in the notice is usually enough.",
-		}),
-	),
-});
-
-export type BashToolInput = Static<typeof bashSchema>;
-
-export interface BashToolDetails {
-	truncation?: TruncationResult;
-	fullOutputPath?: string;
-	fullOutputError?: string;
-	persistedOutputTruncated?: boolean;
-	persistedOutputBytes?: number;
-	preview?: {
-		content: string;
-		skippedLines: number;
-	};
-	outputProjection?: ShellOutputProjectionDetails;
-	/** Present when a family reducer produced the text; `rawPath` names the persisted raw output. */
-	outputReduction?: OutputReductionDetails;
-	piVerification?: VerificationRecord;
-}
-
-/**
- * Pluggable operations for the bash tool.
- * Override these to delegate command execution to remote systems (for example SSH).
- */
-export interface BashOperations {
-	/**
-	 * Execute a command and stream output.
-	 * @param command The command to execute
-	 * @param cwd Working directory
-	 * @param options Execution options
-	 * @returns Promise resolving to exit code (null if killed) plus, when the backend tracks it,
-	 * the shell-reported working directory after the command ran. Stateful adapters must include
-	 * initialCwd (explicitly undefined when unavailable); other adapters execute in the supplied cwd.
-	 */
-	exec: (
-		command: string,
-		cwd: string,
-		options: {
-			onData: (data: Buffer) => void;
-			signal?: AbortSignal;
-			timeout?: number;
-			env?: NodeJS.ProcessEnv;
-			/** Host-owned directory pin; stateful backends must re-enter cwd under their execution lock. */
-			forceCwd?: boolean;
-			/**
-			 * Run outside the agent's persistent shell session: the command starts in `cwd` with `env`,
-			 * its cd and exports do not persist, and it never queues behind or blocks other commands.
-			 */
-			detached?: boolean;
-		},
-	) => Promise<{ exitCode: number | null; cwd?: string; initialCwd?: string }>;
 }
 
 function createLocalShellOperations(

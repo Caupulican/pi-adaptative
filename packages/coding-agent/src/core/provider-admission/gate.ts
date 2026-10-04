@@ -1,4 +1,4 @@
-import type { StreamFn } from "@caupulican/pi-agent-core";
+import type { StreamFn } from "../../kernel/index.ts";
 import { splitProviderAccountKey } from "./account-key.ts";
 import { currentProviderLane, type ProviderRequestLane } from "./lane-context.ts";
 import type { ProviderAdmissionHold, ProviderAdmissionLedger } from "./ledger.ts";

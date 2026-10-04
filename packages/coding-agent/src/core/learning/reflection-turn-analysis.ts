@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { AgentMessage } from "@caupulican/pi-agent-core";
+import type { AgentMessage } from "../../kernel/index.ts";
 import type { DemandSignals } from "./reflection-engine.ts";
 
 const REFLECTION_TURN_MAX_CHARS = 12_000;

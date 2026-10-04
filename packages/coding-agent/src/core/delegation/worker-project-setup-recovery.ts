@@ -5,7 +5,7 @@ import { WorkerAgentMailbox } from "./worker-agent-control.ts";
 import type { WorkerConversationStore, WorkerProjectContextReference } from "./worker-conversation-store.ts";
 import { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { isLocalProcessAlive, isLocalWorkerProcessOwnerProvenDead } from "./worker-process-owner.ts";
-import type { WorkerProjectAllocation, WorkerProjectPreparation } from "./worker-project-directory.ts";
+import type { WorkerProjectAllocation, WorkerProjectPreparation } from "./worker-project-types.ts";
 
 interface PreparedSetup {
 	lifecycle: WorkerLifecycle;

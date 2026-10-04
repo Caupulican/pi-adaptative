@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { Api, CacheRetention, Context, ImageContent, Message, Model, StopReason, Usage } from "@caupulican/pi-ai";
 import type {
 	Agent,
 	AgentEvent,
@@ -10,9 +11,8 @@ import type {
 	ProviderRequestPrefixState,
 	StreamIdleOptions,
 	ThinkingLevel,
-} from "@caupulican/pi-agent-core";
-import type { CompactionResult, SessionManager } from "@caupulican/pi-agent-core/node";
-import type { Api, CacheRetention, Context, ImageContent, Message, Model, StopReason, Usage } from "@caupulican/pi-ai";
+} from "../kernel/index.ts";
+import type { CompactionResult, SessionManager } from "../kernel/node.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import type { LaneRecord, LaneTerminalStatus } from "./autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskLiveView } from "./background-tool-task-controller.ts";
@@ -42,7 +42,8 @@ import type { ProviderAdmissionWaitEvent } from "./provider-admission/gate.ts";
 import type { ResearchRunResult } from "./research/research-runner.ts";
 import type { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
-import type { ResourceProfileFilterSettings, SettingsManager } from "./settings-manager.ts";
+import type { ResourceProfileFilterSettings } from "./settings/settings-schema.ts";
+import type { SettingsManager } from "./settings-manager.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import type { ToolArgumentValidationStats } from "./tool-recovery-stats.ts";
@@ -241,8 +242,6 @@ export interface SessionStats {
 	compactionGates: CompactionGateStats;
 }
 
-export const SPAWNED_USAGE_CUSTOM_TYPE = "spawned_usage";
-export const SEMANTIC_USAGE_CUSTOM_TYPE = "semantic_usage";
 export const RUNAWAY_STOP_CUSTOM_TYPE = "runaway_stop";
 export const TOOL_VALIDATION_ESCALATION_CUSTOM_TYPE = "tool_validation_escalation";
 
@@ -262,31 +261,6 @@ export interface ToolValidationEscalationRecord {
 	model: string;
 	provider: string;
 	at: string;
-}
-
-export interface SpawnedUsageReport {
-	/** Cumulative child usage, including that child's already-rolled-up descendants. */
-	usage: Usage;
-	label?: string;
-	sourceSessionId?: string;
-	/** Stable idempotency identity for retry-safe ingestion. */
-	reportId?: string;
-}
-
-export interface SemanticUsageReport {
-	/** One provider response, including a retry response, priced against its exact catalog identity. */
-	usage: Usage;
-	provider: string;
-	model: string;
-	attempt: number;
-	/** Stable idempotency identity for retry-safe aggregation. */
-	reportId: string;
-	costStatus?: "catalog_priced" | "unpriced";
-}
-
-export interface SpawnedUsageTotals {
-	cost: number;
-	reports: number;
 }
 
 export interface IsolatedCompletionOptions {

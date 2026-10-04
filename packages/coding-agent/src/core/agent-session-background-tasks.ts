@@ -5,8 +5,8 @@
  * owns the shape of that wiring and its own test.
  */
 
-import type { SessionManager } from "@caupulican/pi-agent-core/session";
 import type { Usage } from "@caupulican/pi-ai";
+import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentSessionEvent } from "./agent-session-contracts.ts";
 import {
 	BACKGROUND_TOOL_TASK_CUSTOM_TYPE,

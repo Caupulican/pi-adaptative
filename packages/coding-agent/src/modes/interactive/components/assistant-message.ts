@@ -1,4 +1,3 @@
-import { VERIFICATION_HANDOFF_REQUIRED_ERROR } from "@caupulican/pi-agent-core";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import {
 	Container,
@@ -10,7 +9,8 @@ import {
 	VisibilityContainer,
 } from "@caupulican/pi-tui";
 import { isAssistantDisplayText } from "../../../core/message-phase.ts";
-import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { VERIFICATION_HANDOFF_REQUIRED_ERROR } from "../../../kernel/index.ts";
+import { getMarkdownTheme, theme } from "../../../presentation/theme-model.ts";
 import { applyMarkdownTransform, type MarkdownTransformFn, type MarkdownTransformSlot } from "./markdown-transform.ts";
 import type { ReplyByline } from "./reply-byline.ts";
 

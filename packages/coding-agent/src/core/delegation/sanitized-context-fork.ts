@@ -1,5 +1,5 @@
-import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { AssistantMessage, TextContent, UserMessage } from "@caupulican/pi-ai";
+import type { AgentMessage } from "../../kernel/index.ts";
 import { isAssistantCommentary } from "../message-phase.ts";
 import {
 	MAX_WORKER_CONTEXT_FORK_BYTES,

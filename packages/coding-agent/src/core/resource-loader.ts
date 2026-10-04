@@ -2,7 +2,8 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import chalk from "chalk";
 import { CONFIG_DIR_NAME, getBundledExtensionsDir, getBundledPromptsDir, getBundledSkillsDir } from "../config.ts";
-import { loadThemeFromPath, type Theme } from "../modes/interactive/theme/theme.ts";
+import { loadThemeFromPath } from "../presentation/theme/theme.ts";
+import type { Theme } from "../presentation/theme-model.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
 
 export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.ts";
@@ -25,7 +26,7 @@ import {
 	loadExtensions,
 } from "./extensions/loader.ts";
 import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResult } from "./extensions/types.ts";
-import { DefaultPackageManager, type PathMetadata } from "./package-manager.ts";
+import { DefaultPackageManager } from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates } from "./prompt-templates.ts";
 import {
@@ -36,16 +37,38 @@ import {
 import { collectResourceFilesRecursively, isResourcePathWithin, readResourceDirectory } from "./resource-traversal.ts";
 import { scanContextFileThreats, stripInvisibleUnicode } from "./security/context-threat-scanner.ts";
 import { isWorkerSession } from "./session-role.ts";
-import {
-	matchesResourceProfilePattern,
-	type ResourceProfileKind,
-	type ResourceProfileSettings,
-	SettingsManager,
-} from "./settings-manager.ts";
+import { matchesResourceProfilePattern } from "./settings/settings-rules.ts";
+import type {
+	PackageSource,
+	ResourceProfileFilterSettings,
+	ResourceProfileKind,
+	ResourceProfileSettings,
+	Settings,
+} from "./settings/settings-schema.ts";
 import type { Skill } from "./skills.ts";
 import { loadSkills } from "./skills.ts";
-import { createSourceInfo, type SourceInfo } from "./source-info.ts";
+import { createSourceInfo, type PathMetadata, type SourceInfo } from "./source-info.ts";
 import { readWorkerExtensionToolGrants } from "./worker-extension-grants.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ResourceLoaderSettingsSource {
+	addDiscoveredResourceProfileDefinitions(profiles: Record<string, ResourceProfileSettings>): void;
+	areProjectInstructionsEnabled(): boolean;
+	getActiveResourceProfileNames(): string[];
+	getEffectiveExternalResourceRoots(): string[];
+	getGlobalSettings(): Settings;
+	getNpmCommand(): string[] | undefined;
+	getProjectContextFiles(): "on-demand" | "off";
+	getProjectSettings(): Settings;
+	getResourceProfileFilter(kind: ResourceProfileKind): Required<ResourceProfileFilterSettings>;
+	isProjectTrusted(): boolean;
+	isResourceAllowedByProfile(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
+	isResourceExplicitlyDisabled(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
+	reload(): Promise<void>;
+	replaceDiscoveredResourceProfileDefinitions(profiles: Record<string, ResourceProfileSettings>): void;
+	setPackages(packages: PackageSource[]): void;
+	setProjectPackages(packages: PackageSource[]): void;
+}
 
 export {
 	hasInvisibleUnicode,
@@ -368,7 +391,7 @@ export function loadProjectContextFiles(options: {
 export interface DefaultResourceLoaderOptions {
 	cwd: string;
 	agentDir: string;
-	settingsManager?: SettingsManager;
+	settingsManager: ResourceLoaderSettingsSource;
 	eventBus?: EventBus;
 	additionalExtensionPaths?: string[];
 	additionalSkillPaths?: string[];
@@ -405,7 +428,7 @@ export interface DefaultResourceLoaderOptions {
 export class DefaultResourceLoader implements ResourceLoader {
 	private cwd: string;
 	private agentDir: string;
-	private settingsManager: SettingsManager;
+	private settingsManager: ResourceLoaderSettingsSource;
 	private eventBus: EventBus;
 	private packageManager: DefaultPackageManager;
 	private additionalExtensionPaths: string[];
@@ -466,7 +489,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	constructor(options: DefaultResourceLoaderOptions) {
 		this.cwd = resolvePath(options.cwd);
 		this.agentDir = resolvePath(options.agentDir);
-		this.settingsManager = options.settingsManager ?? SettingsManager.create(this.cwd, this.agentDir);
+		this.settingsManager = options.settingsManager;
 		this.eventBus = options.eventBus ?? createEventBus();
 		this.projectInstructionRoots = Array.from(
 			new Set([

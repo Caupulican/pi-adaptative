@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import { Container, Image, Spacer, Text } from "@caupulican/pi-tui";
 import { getBundledInteractiveAssetPath } from "../../../config.ts";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 
 const BLOG_URL = "https://mariozechner.at/posts/2026-04-08-ive-sold-out/";

@@ -1,10 +1,10 @@
-import type { StreamFn } from "@caupulican/pi-agent-core";
-import { type StreamIdleOptions, withStreamIdleWatchdog } from "@caupulican/pi-agent-core/reliability";
-import type { SessionManager } from "@caupulican/pi-agent-core/session";
 import type { AssistantMessage, Context } from "@caupulican/pi-ai";
 import { createAssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
 import { streamSimple } from "@caupulican/pi-ai/stream";
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
+import type { StreamFn } from "../kernel/index.ts";
+import { type StreamIdleOptions, withStreamIdleWatchdog } from "../kernel/reliability/index.ts";
+import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AuthCredential } from "./auth-storage.ts";
 import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
 import { isWarmableLocalModel } from "./local-prefix-warm-controller.ts";
@@ -37,8 +37,19 @@ import {
 	redactCredentialContent,
 } from "./secrets/credential-model-content.ts";
 import { redactTokenShapes } from "./security/secret-text.ts";
-import type { SettingsManager } from "./settings-manager.ts";
+import type {
+	ResolvedProviderAdmissionSettings,
+	StreamStallModelClass,
+	StreamStallSettings,
+} from "./settings/settings-schema.ts";
 import { resolveStreamStallBudget } from "./stream-stall-budget.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface SessionStreamChainSettingsSource {
+	getHttpIdleTimeoutMs(): number;
+	getProviderAdmissionSettings(): ResolvedProviderAdmissionSettings;
+	getStreamStallSettings(modelClass: StreamStallModelClass): StreamStallSettings;
+}
 
 /**
  * The session's provider stream chain, innermost first:
@@ -69,7 +80,7 @@ export function isRawStreamSimpleFn(fn: StreamFn): boolean {
 
 export interface SessionStreamChainInput {
 	baseStreamFn: StreamFn;
-	settingsManager: SettingsManager;
+	settingsManager: SessionStreamChainSettingsSource;
 	sessionManager: SessionManager;
 	modelAdaptationStore: ModelAdaptationStore;
 	providerAdmissionLedger: ProviderAdmissionLedger;

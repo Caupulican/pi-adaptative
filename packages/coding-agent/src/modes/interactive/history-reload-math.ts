@@ -7,8 +7,8 @@
  * state, so they live outside interactive-mode and are unit-testable in isolation.
  */
 
-import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { Message } from "@caupulican/pi-ai";
+import type { AgentMessage } from "../../kernel/index.ts";
 
 export const TUI_HISTORY_RELOAD_MAX_LINES = 1000;
 export const TUI_HISTORY_RELOAD_WRAP_WIDTH = 100;

@@ -2,14 +2,20 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { resolveCliModel } from "../model-resolver.ts";
-import type { NormalizedProfile } from "../profile-registry.ts";
-import type { SettingsManager } from "../settings-manager.ts";
+import type { NormalizedProfile, ProfileRegistry } from "../profile-registry.ts";
+import type { ModelCapabilitySettings } from "../settings/settings-schema.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface LaneModelResolverSettingsSource {
+	getModelCapabilitySettings(): Required<ModelCapabilitySettings>;
+	getProfileRegistry(): ProfileRegistry;
+}
 
 export interface LaneModelResolverDeps {
 	getCwd(): string;
 	getModel(): Model<Api> | undefined;
 	getModelRegistry(): ModelRegistry;
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): LaneModelResolverSettingsSource;
 	isModelExhausted(model: Model<Api>): boolean;
 	/** The owner's live model policy; a lane model it disallows is reallocated. */
 	isModelAllowed?(model: Model<Api>): boolean;

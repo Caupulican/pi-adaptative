@@ -1,11 +1,11 @@
 import * as os from "node:os";
 import { relative, sep } from "node:path";
 import { pathToFileURL } from "node:url";
-import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core/shell-output";
 import type { ImageContent, TextContent } from "@caupulican/pi-ai";
 import { getCapabilities, getImageDimensions, hyperlink, imageFallback, Text } from "@caupulican/pi-tui";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
-import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import { sanitizeBinaryOutput } from "../../kernel/utils/shell-output.ts";
+import { keyHint } from "../../presentation/keybinding-hints.ts";
+import type { Theme } from "../../presentation/theme-model.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import type { ToolRenderResultOptions } from "../extensions/types.ts";

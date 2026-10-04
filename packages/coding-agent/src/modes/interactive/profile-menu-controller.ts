@@ -15,13 +15,13 @@ import * as path from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { Component, SelectItem, TUI } from "@caupulican/pi-tui";
 import { getAgentDir, getProfilesDir } from "../../config.ts";
-import type { AgentSession } from "../../core/agent-session.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
 import type { NormalizedProfile } from "../../core/profile-registry.ts";
 import { resourceProfileSettingsChangedKinds } from "../../core/resource-profile-equality.ts";
-import type { ResourceProfileKind, SettingsReloadSnapshot } from "../../core/settings-manager.ts";
+import type { ResourceProfileKind, SettingsReloadSnapshot } from "../../core/settings/settings-schema.ts";
 import { validateSkillName } from "../../core/skills.ts";
 import { allToolNames } from "../../core/tools/index.ts";
+import { getAvailableThemesWithPaths } from "../../presentation/theme/theme.ts";
 import { parseFrontmatter } from "../../utils/frontmatter.ts";
 import {
 	ProfileResourceEditorComponent,
@@ -32,7 +32,7 @@ import { ProfileSelectorComponent } from "./components/profile-selector.ts";
 import { SelectSubmenu } from "./components/settings-selector.ts";
 import { captureProfileFiles, restoreProfileFiles } from "./config-backup.ts";
 import { confirmExternalResourceTrust, promptForTextInput } from "./interactive-selection-prompts.ts";
-import { getAvailableThemesWithPaths } from "./theme/theme.ts";
+import type { LiveSessionServices } from "./live-session.ts";
 
 type WritableProfileScope = "session" | "directory" | "project" | "global" | "reusable-file";
 
@@ -110,8 +110,7 @@ export interface ProfileMenuControllerUi {
 	getAutoLearnModelOptions(): SelectItem[];
 }
 
-export interface ProfileMenuControllerDeps {
-	getSession(): AgentSession;
+export interface ProfileMenuControllerDeps extends LiveSessionServices {
 	ui: ProfileMenuControllerUi;
 }
 
@@ -135,15 +134,6 @@ export class ProfileMenuController {
 		this.deps = deps;
 	}
 
-	private get session(): AgentSession {
-		return this.deps.getSession();
-	}
-	private get sessionManager() {
-		return this.deps.getSession().sessionManager;
-	}
-	private get settingsManager() {
-		return this.deps.getSession().settingsManager;
-	}
 	private get ui(): ProfileMenuControllerUi {
 		return this.deps.ui;
 	}
@@ -171,9 +161,9 @@ export class ProfileMenuController {
 	}
 
 	private async openActiveProfileSelector(): Promise<void> {
-		const registry = this.settingsManager.getProfileRegistry();
+		const registry = this.deps.getSettingsManager().getProfileRegistry();
 		const profiles = registry.listProfiles();
-		const activeNames = this.settingsManager.getActiveResourceProfileNames();
+		const activeNames = this.deps.getSettingsManager().getActiveResourceProfileNames();
 
 		const options = [
 			{ value: "(none)", label: "(none)", description: NO_ACTIVE_PROFILE_DESCRIPTION },
@@ -202,7 +192,7 @@ export class ProfileMenuController {
 	}
 
 	private async openManageProfilesFlow(): Promise<void> {
-		const registry = this.settingsManager.getProfileRegistry();
+		const registry = this.deps.getSettingsManager().getProfileRegistry();
 		const profiles = registry.listProfiles();
 		const editableProfiles = profileSelectionItems(profiles);
 
@@ -222,7 +212,7 @@ export class ProfileMenuController {
 			});
 		}
 
-		if (this.settingsManager.getActiveResourceProfileNames().length > 0) {
+		if (this.deps.getSettingsManager().getActiveResourceProfileNames().length > 0) {
 			options.push({
 				value: "persist",
 				label: "Persist active profile / situation to...",
@@ -268,7 +258,8 @@ export class ProfileMenuController {
 	}
 
 	private openEditProfileModelSelector(): void {
-		const profiles = this.settingsManager
+		const profiles = this.deps
+			.getSettingsManager()
 			.getProfileRegistry()
 			.listProfiles()
 			.filter((profile) => deletionScopeForProfile(profile) !== undefined);
@@ -276,7 +267,7 @@ export class ProfileMenuController {
 			this.ui.showStatus("No writable profiles available. External and embedded profiles are read-only.");
 			return;
 		}
-		const activeNames = this.settingsManager.getActiveResourceProfileNames();
+		const activeNames = this.deps.getSettingsManager().getActiveResourceProfileNames();
 		const initialValue = profiles.find((profile) => activeNames.includes(profile.name))?.name ?? profiles[0].name;
 		const items = profiles.map((profile) => ({
 			value: profile.name,
@@ -304,7 +295,7 @@ export class ProfileMenuController {
 	}
 
 	private async editProfileModel(profileName: string): Promise<void> {
-		const profile = this.settingsManager.getProfileRegistry().getProfile(profileName);
+		const profile = this.deps.getSettingsManager().getProfileRegistry().getProfile(profileName);
 		if (!profile) {
 			this.ui.showError(`Profile "${profileName}" is no longer available.`);
 			return;
@@ -329,7 +320,7 @@ export class ProfileMenuController {
 			profile.resources,
 			profile.resources,
 			scope,
-			this.settingsManager.getActiveResourceProfileNames().includes(profile.name),
+			this.deps.getSettingsManager().getActiveResourceProfileNames().includes(profile.name),
 			true,
 		);
 	}
@@ -356,7 +347,7 @@ export class ProfileMenuController {
 	}
 
 	private async openDeleteProfileSelector(): Promise<void> {
-		const registry = this.settingsManager.getProfileRegistry();
+		const registry = this.deps.getSettingsManager().getProfileRegistry();
 		const editableProfiles = profileSelectionItems(registry.listProfiles());
 
 		this.ui.showSelector((done) => {
@@ -381,8 +372,8 @@ export class ProfileMenuController {
 	}
 
 	private async openSourcesManagerFlow(): Promise<void> {
-		const externalRoots = this.settingsManager.getExternalResourceRoots();
-		const trustedRoots = this.settingsManager.getTrustedResourceRoots();
+		const externalRoots = this.deps.getSettingsManager().getExternalResourceRoots();
+		const trustedRoots = this.deps.getSettingsManager().getTrustedResourceRoots();
 
 		const options = [
 			{
@@ -430,7 +421,7 @@ export class ProfileMenuController {
 	}
 
 	private async openLibraryManagerFlow(): Promise<void> {
-		const activeNames = this.settingsManager.getActiveResourceProfileNames();
+		const activeNames = this.deps.getSettingsManager().getActiveResourceProfileNames();
 		const activeName = activeNames[0];
 
 		if (!activeName || activeName === "(none)") {
@@ -469,7 +460,7 @@ export class ProfileMenuController {
 			return;
 		}
 
-		const registry = this.settingsManager.getProfileRegistry();
+		const registry = this.deps.getSettingsManager().getProfileRegistry();
 		const profile = registry.getProfile(activeName);
 		if (!profile) {
 			this.ui.showError(`Active profile/situation "${activeName}" not found in registry.`);
@@ -500,7 +491,7 @@ export class ProfileMenuController {
 				void this.openLibraryManagerFlow();
 				return;
 			}
-			this.settingsManager.setProfileDefinition(
+			this.deps.getSettingsManager().setProfileDefinition(
 				trimmed,
 				{
 					name: trimmed,
@@ -518,7 +509,7 @@ export class ProfileMenuController {
 	}
 
 	private async selectProfileAndOpenLibraryFlow(): Promise<void> {
-		const registry = this.settingsManager.getProfileRegistry();
+		const registry = this.deps.getSettingsManager().getProfileRegistry();
 		const profiles = registry.listProfiles();
 		const editableProfiles = profileSelectionItems(profiles);
 
@@ -552,7 +543,7 @@ export class ProfileMenuController {
 	}
 
 	private async getProfileResourceKinds(): Promise<ProfileResourceEditorKind[]> {
-		const loader = this.session.resourceLoader;
+		const loader = this.deps.getSession().resourceLoader;
 		const base = portableBasename;
 		const allDiscoverableExtensions = await loader.getDiscoverableExtensionPaths();
 		// Defined BEFORE the skills/prompts arrays below that call it (const = TDZ: defining it
@@ -650,9 +641,15 @@ export class ProfileMenuController {
 				label: "Tools",
 				// Built-ins plus every currently registered tool (extension tools included), so
 				// an extension tool can be granted by name without hand-editing settings JSON.
-				items: [...new Set([...allToolNames, ...this.session.getAllTools().map((tool) => tool.name)])].map(
-					(name: string) => ({ id: name }),
-				),
+				items: [
+					...new Set([
+						...allToolNames,
+						...this.deps
+							.getSession()
+							.getAllTools()
+							.map((tool) => tool.name),
+					]),
+				].map((name: string) => ({ id: name })),
 			},
 			{
 				kind: "skills",
@@ -724,7 +721,7 @@ export class ProfileMenuController {
 		initialScope: "session" | "directory" | "project" | "global" | "reusable-file",
 	): Promise<void> {
 		const currentScope = initialScope;
-		const registry = this.settingsManager.getProfileRegistry();
+		const registry = this.deps.getSettingsManager().getProfileRegistry();
 		const profile = registry.getProfile(profileName);
 		if (!profile) {
 			this.ui.showError(`Profile not found: ${profileName}`);
@@ -733,7 +730,7 @@ export class ProfileMenuController {
 
 		const kinds = await this.getProfileResourceKinds();
 		const originalResources = profile.resources;
-		const isActiveProfile = this.settingsManager.getActiveResourceProfileNames().includes(profile.name);
+		const isActiveProfile = this.deps.getSettingsManager().getActiveResourceProfileNames().includes(profile.name);
 
 		this.ui.showSelector((done) => {
 			const editor = new ProfileResourceEditorComponent({
@@ -741,9 +738,9 @@ export class ProfileMenuController {
 				profileScope: currentScope,
 				initialResources: profile!.resources,
 				kinds,
-				cwd: this.sessionManager.getCwd(),
+				cwd: this.deps.getSessionManager().getCwd(),
 				agentDir: getAgentDir(),
-				externalResourceRoots: this.settingsManager.getExternalResourceRoots(),
+				externalResourceRoots: this.deps.getSettingsManager().getExternalResourceRoots(),
 				onSave: (resources) => {
 					done();
 					void this.saveProfileResources(profile, originalResources, resources, currentScope, isActiveProfile);
@@ -788,7 +785,7 @@ export class ProfileMenuController {
 		const changedKinds = resourceProfileSettingsChangedKinds(originalResources, resources);
 		if (!isActiveProfile || (changedKinds.size === 0 && !runtimeMetadataChanged)) {
 			try {
-				this.settingsManager.setProfileDefinition(profile.name, definition, scope);
+				this.deps.getSettingsManager().setProfileDefinition(profile.name, definition, scope);
 				this.ui.showStatus(`Saved profile "${profile.name}" to ${scope}.`);
 				this.ui.requestRender();
 			} catch (error) {
@@ -797,30 +794,30 @@ export class ProfileMenuController {
 			return;
 		}
 
-		const settingsSnapshot = this.settingsManager.createReloadSnapshot();
+		const settingsSnapshot = this.deps.getSettingsManager().createReloadSnapshot();
 		const profilesDir = getProfilesDir();
 		const profileFilesSnapshot = scope === "reusable-file" ? captureProfileFiles(profilesDir) : undefined;
 		let stagedRuntimeApplied = false;
 		try {
 			// Validate the edited authority surface as a session overlay first. Persistent scopes are
 			// written only after the complete runtime generation passes its reload doctor.
-			this.settingsManager.setProfileDefinition(profile.name, definition, "session");
+			this.deps.getSettingsManager().setProfileDefinition(profile.name, definition, "session");
 			if (!(await this.ui.handleReloadCommand())) {
-				this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+				this.deps.getSettingsManager().restoreReloadSnapshot(settingsSnapshot);
 				return;
 			}
 			stagedRuntimeApplied = true;
 
 			if (scope !== "session") {
-				this.settingsManager.setProfileDefinition(profile.name, definition, scope);
-				await this.settingsManager.flush();
+				this.deps.getSettingsManager().setProfileDefinition(profile.name, definition, scope);
+				await this.deps.getSettingsManager().flush();
 				// Drop the validation-only inline winner, then refresh the registry from the now-validated
 				// persistent definition. The live runtime already represents the same profile definition.
-				this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
-				await this.settingsManager.reload();
+				this.deps.getSettingsManager().restoreReloadSnapshot(settingsSnapshot);
+				await this.deps.getSettingsManager().reload();
 			}
 
-			const active = this.settingsManager.getActiveResourceProfileNames()[0] ?? "(none)";
+			const active = this.deps.getSettingsManager().getActiveResourceProfileNames()[0] ?? "(none)";
 			this.ui.footerDataProvider.setExtensionStatus("profile", active);
 			this.ui.invalidateFooter();
 			this.ui.updateEditorBorderColor();
@@ -843,25 +840,23 @@ export class ProfileMenuController {
 			if (definition?.scope === "reusable-file") {
 				restoreProfileFiles(getProfilesDir(), definition.profileFilesSnapshot!);
 			} else if (definition && definition.scope !== "session") {
-				this.settingsManager.restoreProfileDefinitionFromReloadSnapshot(
-					definition.profileName,
-					definition.scope,
-					settingsSnapshot,
-				);
+				this.deps
+					.getSettingsManager()
+					.restoreProfileDefinitionFromReloadSnapshot(definition.profileName, definition.scope, settingsSnapshot);
 			}
 			const global = settingsSnapshot.globalSettings;
-			this.settingsManager.replaceGlobalResourceProfileConfiguration({
+			this.deps.getSettingsManager().replaceGlobalResourceProfileConfiguration({
 				resourceProfiles: global.resourceProfiles,
 				activeResourceProfile: global.activeResourceProfile,
 				activeResourceProfiles: global.activeResourceProfiles,
 				externalResourceRoots: global.externalResourceRoots,
 				trustedResourceRoots: global.trustedResourceRoots,
 			});
-			await this.settingsManager.flush();
+			await this.deps.getSettingsManager().flush();
 		} catch (error) {
 			errors.push(`persistence: ${error instanceof Error ? error.message : String(error)}`);
 		}
-		this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+		this.deps.getSettingsManager().restoreReloadSnapshot(settingsSnapshot);
 		try {
 			if (!(await this.ui.handleReloadCommand())) {
 				errors.push("runtime: the previous profile runtime could not be restored");
@@ -882,7 +877,7 @@ export class ProfileMenuController {
 		const rollbackError = runtimeWasApplied
 			? await this.rollbackValidatedProfileMutation(settingsSnapshot, definition)
 			: undefined;
-		if (!runtimeWasApplied) this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+		if (!runtimeWasApplied) this.deps.getSettingsManager().restoreReloadSnapshot(settingsSnapshot);
 		restoreAdditional?.();
 		const message = error instanceof Error ? error.message : String(error);
 		this.ui.showError(
@@ -921,7 +916,7 @@ export class ProfileMenuController {
 			return;
 		}
 
-		const registry = this.settingsManager.getProfileRegistry();
+		const registry = this.deps.getSettingsManager().getProfileRegistry();
 		const profiles = registry.listProfiles();
 		if (profiles.length === 0) {
 			this.ui.showWarning(
@@ -933,7 +928,7 @@ export class ProfileMenuController {
 		this.ui.showSelector((done) => {
 			const selector = new ProfileSelectorComponent(
 				profiles,
-				this.settingsManager.getActiveResourceProfileNames(),
+				this.deps.getSettingsManager().getActiveResourceProfileNames(),
 				(profile) => {
 					done();
 					void this.applyProfile(profile);
@@ -951,22 +946,22 @@ export class ProfileMenuController {
 		const normalizedName = profileName.trim();
 		const normalizedLower = normalizedName.toLowerCase();
 		if (normalizedName.length === 0 || normalizedLower === "none" || normalizedLower === "(none)") {
-			const settingsSnapshot = this.settingsManager.createReloadSnapshot();
+			const settingsSnapshot = this.deps.getSettingsManager().createReloadSnapshot();
 			let stagedRuntimeApplied = false;
 			try {
-				this.settingsManager.setRuntimeResourceProfiles([]);
+				this.deps.getSettingsManager().setRuntimeResourceProfiles([]);
 				if (!(await this.ui.handleReloadCommand())) {
-					this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+					this.deps.getSettingsManager().restoreReloadSnapshot(settingsSnapshot);
 					return;
 				}
 				stagedRuntimeApplied = true;
 				// Persist only after the new runtime generation passes its reload doctor.
-				this.settingsManager.setActiveProfile(undefined, "global");
-				await this.settingsManager.flush();
-				this.session.sessionManager.appendCustomEntry("pi.activeResourceProfiles", {
+				this.deps.getSettingsManager().setActiveProfile(undefined, "global");
+				await this.deps.getSettingsManager().flush();
+				this.deps.getSessionManager().appendCustomEntry("pi.activeResourceProfiles", {
 					profiles: [],
 				});
-				const activeProfileName = this.settingsManager.getActiveResourceProfileNames()[0] ?? "(none)";
+				const activeProfileName = this.deps.getSettingsManager().getActiveResourceProfileNames()[0] ?? "(none)";
 				this.ui.footerDataProvider.setExtensionStatus("profile", activeProfileName);
 				this.ui.invalidateFooter();
 				this.ui.updateEditorBorderColor();
@@ -977,26 +972,26 @@ export class ProfileMenuController {
 			return;
 		}
 
-		const registry = this.settingsManager.getProfileRegistry();
+		const registry = this.deps.getSettingsManager().getProfileRegistry();
 		const profile =
 			normalizedName.startsWith("./") || normalizedName.startsWith("../")
-				? registry.resolveProfileRef(normalizedName, this.sessionManager.getCwd())
+				? registry.resolveProfileRef(normalizedName, this.deps.getSessionManager().getCwd())
 				: registry.getProfile(normalizedName);
 		if (!profile) {
 			this.ui.showError(`Profile not found: ${profileName}`);
 			return;
 		}
 
-		const settingsSnapshot = this.settingsManager.createReloadSnapshot();
-		const modelRegistrySnapshot = profile.model ? this.session.modelRegistry.createReloadSnapshot() : undefined;
+		const settingsSnapshot = this.deps.getSettingsManager().createReloadSnapshot();
+		const modelRegistrySnapshot = profile.model ? this.deps.getModelRegistry().createReloadSnapshot() : undefined;
 		let stagedRuntimeApplied = false;
 		try {
 			const activeProfileRef =
 				normalizedName.startsWith("./") || normalizedName.startsWith("../") ? normalizedName : profile.name;
 			let requestedModel: Model<Api> | undefined;
 			if (profile.model) {
-				this.session.modelRegistry.refresh();
-				const resolved = resolveCliModel({ cliModel: profile.model, modelRegistry: this.session.modelRegistry });
+				this.deps.getModelRegistry().refresh();
+				const resolved = resolveCliModel({ cliModel: profile.model, modelRegistry: this.deps.getModelRegistry() });
 				// The profile may grant an extension that contributes this model. The current generation
 				// cannot validate that case; the atomic reload binds new providers before authoritative
 				// profile resolution and rolls back if the model is still unresolved.
@@ -1008,35 +1003,36 @@ export class ProfileMenuController {
 
 			// Stage the complete situation in memory. Runtime reload applies model/thinking, resource
 			// grants, extensions, skills, prompts, and soul together; explicit launch overrides still win.
-			this.settingsManager.setRuntimeResourceProfiles([activeProfileRef]);
+			this.deps.getSettingsManager().setRuntimeResourceProfiles([activeProfileRef]);
 			if (!(await this.ui.handleReloadCommand())) {
-				this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
-				if (modelRegistrySnapshot) this.session.modelRegistry.restoreReloadSnapshot(modelRegistrySnapshot);
+				this.deps.getSettingsManager().restoreReloadSnapshot(settingsSnapshot);
+				if (modelRegistrySnapshot) this.deps.getModelRegistry().restoreReloadSnapshot(modelRegistrySnapshot);
 				return;
 			}
 			stagedRuntimeApplied = true;
 
 			// Selection survives restarts only after the new runtime generation passes its reload doctor.
-			this.settingsManager.setActiveProfile(activeProfileRef, "global");
-			await this.settingsManager.flush();
-			this.session.sessionManager.appendCustomEntry("pi.activeResourceProfiles", {
+			this.deps.getSettingsManager().setActiveProfile(activeProfileRef, "global");
+			await this.deps.getSettingsManager().flush();
+			this.deps.getSessionManager().appendCustomEntry("pi.activeResourceProfiles", {
 				profiles: [activeProfileRef],
 			});
 			this.ui.footerDataProvider.setExtensionStatus("profile", profile.name);
 			this.ui.invalidateFooter();
 			this.ui.updateEditorBorderColor();
 			this.ui.showStatus(`Profile: ${profile.name}`);
+			const currentModel = this.deps.getSession().model;
 			if (
 				requestedModel &&
-				this.session.model?.provider === requestedModel.provider &&
-				this.session.model.id === requestedModel.id
+				currentModel?.provider === requestedModel.provider &&
+				currentModel.id === requestedModel.id
 			) {
 				void this.ui.maybeWarnAboutAnthropicSubscriptionAuth(requestedModel);
 				this.ui.checkDaxnutsEasterEgg(requestedModel);
 			}
 		} catch (error) {
 			await this.reportProfileMutationFailure(error, settingsSnapshot, stagedRuntimeApplied, undefined, () => {
-				if (modelRegistrySnapshot) this.session.modelRegistry.restoreReloadSnapshot(modelRegistrySnapshot);
+				if (modelRegistrySnapshot) this.deps.getModelRegistry().restoreReloadSnapshot(modelRegistrySnapshot);
 			});
 		}
 	}
@@ -1059,9 +1055,9 @@ export class ProfileMenuController {
 	}
 
 	async refreshAfterProfileMutation(profileName: string): Promise<void> {
-		if (this.settingsManager.getActiveResourceProfileNames().includes(profileName)) {
+		if (this.deps.getSettingsManager().getActiveResourceProfileNames().includes(profileName)) {
 			if (!(await this.ui.handleReloadCommand())) return;
-			const active = this.settingsManager.getActiveResourceProfileNames()[0] ?? "(none)";
+			const active = this.deps.getSettingsManager().getActiveResourceProfileNames()[0] ?? "(none)";
 			this.ui.footerDataProvider.setExtensionStatus("profile", active);
 			this.ui.invalidateFooter();
 			this.ui.updateEditorBorderColor();
@@ -1090,7 +1086,7 @@ export class ProfileMenuController {
 		}
 
 		// Collision check
-		const existing = this.settingsManager.getProfileRegistry().getProfile(trimmed);
+		const existing = this.deps.getSettingsManager().getProfileRegistry().getProfile(trimmed);
 		if (existing) {
 			this.ui.showError(`Profile/situation "${trimmed}" already exists`);
 			return this.createProfileFlow();
@@ -1159,13 +1155,13 @@ export class ProfileMenuController {
 				profileScope: scope,
 				initialResources: {},
 				kinds,
-				cwd: this.sessionManager.getCwd(),
+				cwd: this.deps.getSessionManager().getCwd(),
 				agentDir: getAgentDir(),
-				externalResourceRoots: this.settingsManager.getExternalResourceRoots(),
+				externalResourceRoots: this.deps.getSettingsManager().getExternalResourceRoots(),
 				onSave: (resources) => {
 					done();
 					try {
-						this.settingsManager.setProfileDefinition(
+						this.deps.getSettingsManager().setProfileDefinition(
 							profileName,
 							{
 								name: profileName,
@@ -1196,16 +1192,16 @@ export class ProfileMenuController {
 	}
 
 	private persistActiveProfile(scope: "session" | "directory" | "project" | "global"): void {
-		const active = this.settingsManager.getActiveResourceProfileNames()[0];
+		const active = this.deps.getSettingsManager().getActiveResourceProfileNames()[0];
 		if (!active) {
 			this.ui.showError("No active profile to persist. Select one with /profiles first.");
 			return;
 		}
 		try {
 			if (scope === "session") {
-				this.settingsManager.setRuntimeResourceProfiles([active]);
+				this.deps.getSettingsManager().setRuntimeResourceProfiles([active]);
 			} else {
-				this.settingsManager.setActiveProfile(active, scope);
+				this.deps.getSettingsManager().setActiveProfile(active, scope);
 			}
 			this.ui.showStatus(`Active profile "${active}" persisted to ${scope}.`);
 		} catch (error) {
@@ -1214,7 +1210,7 @@ export class ProfileMenuController {
 	}
 
 	private async deleteProfileFromSource(profileName: string): Promise<void> {
-		const registry = this.settingsManager.getProfileRegistry();
+		const registry = this.deps.getSettingsManager().getProfileRegistry();
 		const profile = registry.getProfile(profileName);
 		if (!profile) {
 			this.ui.showError(`Profile not found: ${profileName}`);
@@ -1228,17 +1224,20 @@ export class ProfileMenuController {
 			);
 			return;
 		}
-		const wasActive = this.settingsManager.getActiveResourceProfileNames().some((profileRef) => {
-			if (profileRef === profileName || profileRef === profile.name) return true;
-			const activeProfile =
-				profileRef.startsWith("./") || profileRef.startsWith("../")
-					? registry.resolveProfileRef(profileRef, this.sessionManager.getCwd())
-					: registry.getProfile(profileRef);
-			return Boolean(
-				activeProfile && activeProfile.name === profile.name && activeProfile.sourcePath === profile.sourcePath,
-			);
-		});
-		const settingsSnapshot = this.settingsManager.createReloadSnapshot();
+		const wasActive = this.deps
+			.getSettingsManager()
+			.getActiveResourceProfileNames()
+			.some((profileRef) => {
+				if (profileRef === profileName || profileRef === profile.name) return true;
+				const activeProfile =
+					profileRef.startsWith("./") || profileRef.startsWith("../")
+						? registry.resolveProfileRef(profileRef, this.deps.getSessionManager().getCwd())
+						: registry.getProfile(profileRef);
+				return Boolean(
+					activeProfile && activeProfile.name === profile.name && activeProfile.sourcePath === profile.sourcePath,
+				);
+			});
+		const settingsSnapshot = this.deps.getSettingsManager().createReloadSnapshot();
 		const profileFilesSnapshot = scope === "reusable-file" ? captureProfileFiles(getProfilesDir()) : undefined;
 		let switchedToNone = false;
 		try {
@@ -1247,23 +1246,23 @@ export class ProfileMenuController {
 				// full reload can now remove the profile's extensions, tools, providers, model, and
 				// memory generation atomically. Persisting the deletion is deliberately deferred until
 				// that generation passes its doctor, so a failed reload has no on-disk deletion to undo.
-				this.settingsManager.setRuntimeResourceProfiles([]);
+				this.deps.getSettingsManager().setRuntimeResourceProfiles([]);
 				if (!(await this.ui.handleReloadCommand())) {
-					this.settingsManager.restoreReloadSnapshot(settingsSnapshot);
+					this.deps.getSettingsManager().restoreReloadSnapshot(settingsSnapshot);
 					return;
 				}
 				switchedToNone = true;
 			}
 
-			this.settingsManager.deleteProfile(profileName, scope);
-			const remaining = this.settingsManager.getProfileRegistry().getProfile(profileName);
+			this.deps.getSettingsManager().deleteProfile(profileName, scope);
+			const remaining = this.deps.getSettingsManager().getProfileRegistry().getProfile(profileName);
 			if (remaining && remaining.source === profile.source && remaining.sourcePath === profile.sourcePath) {
 				throw new Error(`Profile "${profileName}" was not removed from ${profile.source}.`);
 			}
 			if (wasActive) {
-				this.settingsManager.setActiveProfile(undefined, "global");
-				await this.settingsManager.flush();
-				this.session.sessionManager.appendCustomEntry("pi.activeResourceProfiles", { profiles: [] });
+				this.deps.getSettingsManager().setActiveProfile(undefined, "global");
+				await this.deps.getSettingsManager().flush();
+				this.deps.getSessionManager().appendCustomEntry("pi.activeResourceProfiles", { profiles: [] });
 				this.ui.footerDataProvider.setExtensionStatus("profile", "(none)");
 				this.ui.invalidateFooter();
 				this.ui.updateEditorBorderColor();
@@ -1292,7 +1291,7 @@ export class ProfileMenuController {
 			return;
 		}
 
-		const canonical = this.settingsManager.canonicalizePath(trimmed);
+		const canonical = this.deps.getSettingsManager().canonicalizePath(trimmed);
 		if (!canonical) {
 			this.ui.showError(`Invalid path: ${trimmed}`);
 			return;
@@ -1311,11 +1310,11 @@ export class ProfileMenuController {
 		}
 
 		try {
-			const currentRoots = this.settingsManager.getExternalResourceRoots();
+			const currentRoots = this.deps.getSettingsManager().getExternalResourceRoots();
 			if (!currentRoots.includes(canonical)) {
-				this.settingsManager.setExternalResourceRoots([...currentRoots, canonical], "global");
+				this.deps.getSettingsManager().setExternalResourceRoots([...currentRoots, canonical], "global");
 			}
-			this.settingsManager.addTrustedResourceRoot(canonical, "global");
+			this.deps.getSettingsManager().addTrustedResourceRoot(canonical, "global");
 			this.ui.showStatus(`Added trusted external root: ${canonical}`);
 			await this.ui.handleReloadCommand();
 		} catch (error) {
@@ -1325,14 +1324,14 @@ export class ProfileMenuController {
 
 	private async removeExternalResourceRootFlow(root: string): Promise<void> {
 		try {
-			const currentRoots = this.settingsManager.getExternalResourceRoots();
-			const currentTrusted = this.settingsManager.getTrustedResourceRoots();
+			const currentRoots = this.deps.getSettingsManager().getExternalResourceRoots();
+			const currentTrusted = this.deps.getSettingsManager().getTrustedResourceRoots();
 
 			const newRoots = currentRoots.filter((r) => r !== root);
 			const newTrusted = currentTrusted.filter((r) => r !== root);
 
-			this.settingsManager.setExternalResourceRoots(newRoots, "global");
-			this.settingsManager.setTrustedResourceRoots(newTrusted, "global");
+			this.deps.getSettingsManager().setExternalResourceRoots(newRoots, "global");
+			this.deps.getSettingsManager().setTrustedResourceRoots(newTrusted, "global");
 
 			this.ui.showStatus(`Removed external root: ${root}`);
 			await this.ui.handleReloadCommand();

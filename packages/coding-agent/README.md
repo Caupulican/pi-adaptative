@@ -680,4 +680,4 @@ MIT
 
 ## Repository packages
 
-The core implementation is maintained in this repository under `packages/ai`, `packages/agent`, and `packages/tui`. These workspace packages are private implementation dependencies of the standalone release.
+The core implementation is maintained in this repository under `packages/ai`, `packages/tui`, and the kernel in `packages/coding-agent/src/kernel`. These workspace packages are private implementation dependencies of the standalone release.

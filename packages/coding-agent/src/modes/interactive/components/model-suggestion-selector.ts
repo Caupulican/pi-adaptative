@@ -1,6 +1,6 @@
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions, Text } from "@caupulican/pi-tui";
 import type { ModelSuggestion } from "../../../core/models/default-model-suggestions.ts";
-import { getSelectListTheme } from "../theme/theme.ts";
+import { getSelectListTheme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 
 const MODEL_SUGGESTION_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {

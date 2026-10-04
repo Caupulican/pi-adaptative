@@ -20,7 +20,7 @@
 
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { type AgentMessage, createCustomMessage, HOST_TRANSIENT_CLEARED_DETAILS } from "@caupulican/pi-agent-core";
+import { type AgentMessage, createCustomMessage, HOST_TRANSIENT_CLEARED_DETAILS } from "../kernel/index.ts";
 import { configFile, okfMemoryDir, projectMemoryDir } from "./agent-paths.ts";
 import { collectCurrentWorkMemory } from "./context/current-work-memory.ts";
 import { createFileStoreMemoryProvider } from "./context/file-store-memory-provider.ts";
@@ -41,10 +41,10 @@ import {
 import { type MemoryRetrievalReport, retrieveMemoryForContext } from "./context/memory-retrieval.ts";
 import { composeTieredMemoryPromptBlock, type MemoryTierCandidate } from "./context/memory-tier-composer.ts";
 import { createOkfMemoryProvider, loadOkfMemoryBundle } from "./context/okf-memory-provider.ts";
+import type { MemoryProvider } from "./extensions/types.ts";
 import type { GoalState } from "./goals/goal-state.ts";
 import { EffectivenessTracker } from "./memory/effectiveness-tracker.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
-import type { MemoryProvider } from "./memory/memory-provider.ts";
 import {
 	FILE_STORE_MEMORY_SYSTEM_NOTE,
 	FileStoreProvider,
@@ -62,12 +62,22 @@ import type {
 	UserPreferenceAdmissionResult,
 } from "./memory/user-preference-metadata.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
-import {
-	getDirectoryResourceProfileInfo,
-	isValidMemorySystem,
-	type MemorySystem,
-	type SettingsManager,
-} from "./settings-manager.ts";
+import { getDirectoryResourceProfileInfo, isValidMemorySystem } from "./settings/settings-rules.ts";
+import type { MemorySystem, SettingsError, SettingsScope } from "./settings/settings-schema.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface MemoryControllerSettingsSource {
+	drainErrors(): SettingsError[];
+	flush(): Promise<void>;
+	getMemoryRetrievalSettings(): {
+		enabled: boolean;
+		maxResults: number;
+		includeInPrompt: boolean;
+		allowExternalEgress: boolean;
+	};
+	getMemorySystem(): MemorySystem;
+	setMemorySystem(system: MemorySystem, scope?: SettingsScope): void;
+}
 
 /**
  * Text of the most recent user message, or "" if there is none (e.g. goal-continuation
@@ -120,7 +130,7 @@ function boundPreCompressMemory(text: string): string {
 
 export interface MemoryControllerDeps {
 	/** Memory-retrieval + prompt-inclusion settings (default-on gates for retrieval and surfacing). */
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): MemoryControllerSettingsSource;
 	/** Current turn index, stamped into a retrieval request's `createdAtTurn`. */
 	getTurnIndex(): number;
 	/** Agent root — the durable OKF memory docs live under `<agentDir>/okf-memory`. */

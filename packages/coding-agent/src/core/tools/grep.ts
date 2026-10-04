@@ -1,17 +1,10 @@
 import { readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import {
-	DEFAULT_MAX_BYTES,
-	formatSize,
-	GREP_MAX_LINE_LENGTH,
-	type TruncationResult,
-	truncateLine,
-} from "@caupulican/pi-agent-core/truncate";
-import type { AgentTool } from "@caupulican/pi-agent-core/types";
 import { spawn } from "child_process";
 import path from "path";
-import { type Static, Type } from "typebox";
-import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type { AgentTool } from "../../kernel/types.ts";
+import { DEFAULT_MAX_BYTES, formatSize, GREP_MAX_LINE_LENGTH, truncateLine } from "../../kernel/utils/truncate.ts";
+import type { Theme } from "../../presentation/theme-model.ts";
 import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import {
@@ -39,49 +32,14 @@ import {
 	str,
 	toolTextResult,
 } from "./render-utils.ts";
+import { type GrepOperations, type GrepToolDetails, grepSchema } from "./schemas/grep.ts";
 import type { SearchRouter } from "./search-router.ts";
 import { resolveSearchToolRuntime } from "./search-tool-runtime.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
-const grepSchema = Type.Object({
-	pattern: Type.String({ description: "Search pattern (regex or literal string)" }),
-	path: Type.Optional(Type.String({ description: "Directory or file to search (default: current directory)" })),
-	glob: Type.Optional(Type.String({ description: "Filter files by glob pattern, e.g. '*.ts' or '**/*.spec.ts'" })),
-	ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive search (default: false)" })),
-	literal: Type.Optional(
-		Type.Boolean({ description: "Treat pattern as literal string instead of regex (default: false)" }),
-	),
-	context: Type.Optional(
-		Type.Number({ description: "Number of lines to show before and after each match (default: 0)" }),
-	),
-	limit: Type.Optional(Type.Number({ description: "Maximum number of matches to return (default: 100)" })),
-});
-
-export type GrepToolInput = Static<typeof grepSchema>;
 const DEFAULT_LIMIT = 100;
 const GREP_PROCESS_TIMEOUT_MS = 5 * 60_000;
 const GREP_PROCESS_KILL_GRACE_MS = 1_000;
-
-export interface GrepToolDetails {
-	truncation?: TruncationResult;
-	matchLimitReached?: number;
-	linesTruncated?: boolean;
-	/** Set only when output was packed to an artifact; see tool-output-packer.ts. */
-	artifactId?: string;
-	/** Set when this exact query has repeatedly produced broad/truncated results. */
-	invalidationCandidate?: boolean;
-}
-
-/**
- * Pluggable operations for the grep tool.
- * Override these to delegate search to remote systems (for example SSH).
- */
-export interface GrepOperations {
-	/** Check if path is a directory. Throws if path does not exist. */
-	isDirectory: (absolutePath: string) => Promise<boolean> | boolean;
-	/** Read file contents for context lines */
-	readFile: (absolutePath: string) => Promise<string> | string;
-}
 
 const defaultGrepOperations: GrepOperations = {
 	isDirectory: async (p) => (await fsStat(p)).isDirectory(),

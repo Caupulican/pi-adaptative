@@ -1,4 +1,4 @@
-import type { BeforeToolCallResult } from "@caupulican/pi-agent-core";
+import type { BeforeToolCallResult } from "../kernel/index.ts";
 import type { SourceInfo } from "./source-info.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG } from "./system-one/config.ts";
 

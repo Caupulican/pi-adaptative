@@ -1,11 +1,10 @@
 import { createInterface } from "node:readline";
-import type { AgentTool } from "@caupulican/pi-agent-core";
-import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult } from "@caupulican/pi-agent-core/truncate";
 import { spawn } from "child_process";
 import { minimatch } from "minimatch";
 import path from "path";
-import { type Static, Type } from "typebox";
-import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type { AgentTool } from "../../kernel/index.ts";
+import { DEFAULT_MAX_BYTES, formatSize } from "../../kernel/utils/truncate.ts";
+import type { Theme } from "../../presentation/theme-model.ts";
 import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import {
@@ -32,6 +31,7 @@ import {
 	str,
 	toolTextResult,
 } from "./render-utils.ts";
+import { type FindOperations, type FindToolDetails, findSchema } from "./schemas/find.ts";
 import type { SearchRouter } from "./search-router.ts";
 import { resolveSearchToolRuntime } from "./search-tool-runtime.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -40,41 +40,9 @@ function toPosixPath(value: string): string {
 	return value.replaceAll("\\", "/");
 }
 
-const findSchema = Type.Object({
-	pattern: Type.String({
-		description:
-			"Glob pattern to match files, e.g. '*.ts', '**/*.json', or 'src/**/*.spec.ts'. Use '.' to match all files.",
-	}),
-	path: Type.Optional(Type.String({ description: "Directory to search in (default: current directory)" })),
-	limit: Type.Optional(Type.Number({ description: "Maximum number of results (default: 1000)" })),
-	ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive matching (default: false)" })),
-});
-
-export type FindToolInput = Static<typeof findSchema>;
-
 const DEFAULT_LIMIT = 1000;
 const FIND_PROCESS_TIMEOUT_MS = 5 * 60_000;
 const FIND_PROCESS_KILL_GRACE_MS = 1_000;
-
-export interface FindToolDetails {
-	truncation?: TruncationResult;
-	resultLimitReached?: number;
-	/** Set only when output was packed to an artifact; see tool-output-packer.ts. */
-	artifactId?: string;
-	/** Set when this exact query has repeatedly produced broad/truncated results. */
-	invalidationCandidate?: boolean;
-}
-
-/**
- * Pluggable operations for the find tool.
- * Override these to delegate file search to remote systems (for example SSH).
- */
-export interface FindOperations {
-	/** Check if path exists */
-	exists: (absolutePath: string) => Promise<boolean> | boolean;
-	/** Find files matching glob pattern. Returns relative or absolute paths. */
-	glob: (pattern: string, cwd: string, options: { ignore: string[]; limit: number }) => Promise<string[]> | string[];
-}
 
 const defaultFindOperations: FindOperations = {
 	exists: pathExists,

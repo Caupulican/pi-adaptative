@@ -1,5 +1,5 @@
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { ImageContent } from "@caupulican/pi-ai";
+import type { SessionManager } from "../kernel/node.ts";
 import type { SendUserMessageOrigin } from "./extensions/types.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 import { isPlainRecord } from "./util/value-guards.ts";

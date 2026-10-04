@@ -9,7 +9,6 @@ import type { DecisionStage } from "../../../core/operator-projection/decision-s
 import type { DecisionGraphModel } from "./decision-graph-model.ts";
 import { renderDecisionDiagram, renderDecisionList } from "./decision-graph-render.ts";
 import { renderFlowLanes } from "./flow-lanes-render.ts";
-import type { WorkbenchGraphView } from "./workbench.ts";
 import { WorkbenchPane, type WorkbenchPaneTitleButton } from "./workbench-pane.ts";
 
 export const GRAPH_PANE_TITLE = "Decision graph";
@@ -70,3 +69,6 @@ export class DecisionGraphPane extends WorkbenchPane {
 		);
 	}
 }
+
+/** How the Decision graph draws the loop. */
+export type WorkbenchGraphView = "list" | "diagram" | "lanes";

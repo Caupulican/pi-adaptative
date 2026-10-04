@@ -4,7 +4,13 @@
  * Shows how to replace or modify the default system prompt.
  */
 
-import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager } from "@caupulican/pi-adaptative";
+import {
+	createAgentSession,
+	DefaultResourceLoader,
+	getAgentDir,
+	SessionManager,
+	SettingsManager,
+} from "@caupulican/pi-adaptative";
 
 const cwd = process.cwd();
 const agentDir = getAgentDir();
@@ -13,6 +19,7 @@ const agentDir = getAgentDir();
 const loader1 = new DefaultResourceLoader({
 	cwd,
 	agentDir,
+	settingsManager: SettingsManager.create(cwd, agentDir),
 	systemPromptOverride: () => `You are a helpful assistant that speaks like a pirate.
 Always end responses with "Arrr!"`,
 	// Needed to avoid DefaultResourceLoader appending APPEND_SYSTEM.md from ~/.pi/agent or <cwd>/.pi.
@@ -43,6 +50,7 @@ try {
 const loader2 = new DefaultResourceLoader({
 	cwd,
 	agentDir,
+	settingsManager: SettingsManager.create(cwd, agentDir),
 	appendSystemPromptOverride: (base) => [
 		...base,
 		"## Additional Instructions\n- Always be concise\n- Use bullet points when listing things",

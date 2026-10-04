@@ -1,7 +1,13 @@
-import type { Tool, ToolCall } from "../../types.ts";
+import type {
+	TextToolProtocolOptions,
+	TextToolProtocolParseFailure,
+	TextToolProtocolVariant,
+	Tool,
+	ToolCall,
+} from "../../types.ts";
 import { isRecord } from "../value-guards.ts";
 
-export type TextToolProtocolParseFailure = "overlap" | "unrecognized" | "unknown-tool" | "validation-failed";
+export type { TextToolProtocolOptions, TextToolProtocolParseFailure, TextToolProtocolVariant };
 
 export interface ParsedTextToolCalls {
 	calls: ToolCall[];
@@ -9,8 +15,6 @@ export interface ParsedTextToolCalls {
 	attempted: boolean;
 	failure?: TextToolProtocolParseFailure;
 }
-
-export type TextToolProtocolVariant = "tool-tag" | "tool-call" | "fenced-json" | "function-xml";
 
 /** Ordered dialects used by protocol calibration, from most compact/native-like to broadest fallback. */
 export const TEXT_TOOL_PROTOCOL_VARIANTS: readonly TextToolProtocolVariant[] = [
@@ -40,10 +44,6 @@ export const TEXT_TOOL_PROTOCOL_ENVELOPE_DELIMITERS: readonly TextToolProtocolEn
 
 export function isTextToolProtocolVariant(value: unknown): value is TextToolProtocolVariant {
 	return typeof value === "string" && TEXT_TOOL_PROTOCOL_VARIANTS.includes(value as TextToolProtocolVariant);
-}
-
-export interface TextToolProtocolOptions {
-	variant?: TextToolProtocolVariant;
 }
 
 export interface TextToolProtocolParseOptions {

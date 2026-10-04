@@ -1,9 +1,6 @@
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
-import {
-	isPassingTestVerification,
-	retainedVerificationDetails,
-} from "@caupulican/pi-agent-core/verification-obligations";
 import type { ToolCall } from "@caupulican/pi-ai";
+import type { SessionManager } from "../../kernel/node.ts";
+import { isPassingTestVerification, retainedVerificationDetails } from "../../kernel/verification-obligations.ts";
 import { type BackgroundToolTaskRecord, findBackgroundToolTask } from "../background-tool-task-controller.ts";
 import type { GoalToolEvidenceResolution, GoalUserEvidenceResolution } from "../tools/goal.ts";
 

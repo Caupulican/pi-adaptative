@@ -10,7 +10,8 @@ import {
 import type { NormalizedProfile } from "../profile-registry.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import { mergeResourceProfileSettings } from "../resource-profile-blocks.ts";
-import { matchesResourceProfilePattern, type ResourceProfileSettings } from "../settings-manager.ts";
+import { matchesResourceProfilePattern } from "../settings/settings-rules.ts";
+import type { ResourceProfileSettings } from "../settings/settings-schema.ts";
 
 export interface WorkerResourceCatalogLoader {
 	getDiscoverableSkillPaths(): string[];

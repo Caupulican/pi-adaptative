@@ -3,7 +3,7 @@
  * readings and every gate decision. Kept out of the session class; the gate itself knows no ledger.
  */
 
-import type { ToolCallStartContext } from "@caupulican/pi-agent-core/types";
+import type { ToolCallStartContext } from "../../kernel/index.ts";
 import type { DecisionLedgerStore } from "../operator-projection/decision-ledger-store.ts";
 import type { OperationEffectDurableStore } from "./operation-effect-cache.ts";
 import type { OperationGate, OperationGateDecisionRecord } from "./operation-gate.ts";

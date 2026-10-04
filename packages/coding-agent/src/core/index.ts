@@ -2,7 +2,7 @@
  * Core modules shared between all run modes.
  */
 
-export type { CompactionResult } from "@caupulican/pi-agent-core/compaction/compaction";
+export type { CompactionResult } from "../kernel/compaction/compaction.ts";
 export * from "./adaptive/index.ts";
 export {
 	AgentSession,
@@ -14,6 +14,7 @@ export {
 	type SessionStats,
 } from "./agent-session.ts";
 export {
+	type ActiveSessionContext,
 	AgentSessionRuntime,
 	type AgentSessionRuntimeResource,
 	type AgentSessionSwitchOptions,
@@ -34,7 +35,7 @@ export {
 export * from "./autonomy/authority-envelope.ts";
 export * from "./autonomy/execution-charter.ts";
 export * from "./autonomy/human-edge.ts";
-export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+export { type BashExecutorOptions, executeBashWithOperations } from "./bash-executor.ts";
 export * from "./dedup/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.ts";
 // Extensions system
@@ -136,3 +137,4 @@ export {
 	SystemOneReplayRunner,
 	wrapUntrustedText,
 } from "./system-one/index.ts";
+export type { BashResult } from "./tools/schemas/bash.ts";

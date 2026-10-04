@@ -2,7 +2,8 @@ import { watch } from "node:fs";
 import { basename, isAbsolute } from "node:path";
 import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
 import type { ProcessParentOwnershipSource } from "../process-matrix/runtime.ts";
-import { CollaborationJobStore, type CollaborationWorkerRefusal } from "./job-store.ts";
+import type { CollaborationWorkerRefusal } from "./job-record.ts";
+import { CollaborationJobStore } from "./job-store.ts";
 import type { CollaborationQuestionReceipt } from "./result-claim.ts";
 
 export type { CollaborationQuestionReceipt } from "./result-claim.ts";

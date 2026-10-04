@@ -1,7 +1,7 @@
-import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import { closeSync, existsSync, fstatSync, openSync, readSync, statSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
+import type { ThinkingLevel } from "../kernel/index.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";

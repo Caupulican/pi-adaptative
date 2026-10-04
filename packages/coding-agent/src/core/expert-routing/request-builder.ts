@@ -10,13 +10,10 @@ import type { AttemptRuntimeState } from "../orchestration/task-runtime-state.ts
 import {
 	EXPERT_ROUTING_SCHEMA_VERSION,
 	type ExpertConsequence,
-	type ExpertIndependenceLevel,
 	type ExpertWorkClass,
-	type HmoePreset,
-	type HmoeTeamStrategy,
-	type HmoeWeights,
 	type WorkerCapabilityRequest,
 } from "./contracts.ts";
+import type { ExpertIndependenceLevel, HmoePreset, HmoeTeamStrategy, HmoeWeights } from "./vocabulary.ts";
 
 export interface DecisionSignalsInput {
 	independentWorkerRequired?: boolean;

@@ -9,27 +9,6 @@
  */
 
 import type {
-	AgentMessage,
-	AgentToolFailureRecoveryContract,
-	AgentToolInvocation,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	CustomMessage,
-	ExecutionContext,
-	ThinkingLevel,
-	ToolCallRepairInfo,
-	ToolExecutionMode,
-} from "@caupulican/pi-agent-core";
-import type {
-	BranchSummaryEntry,
-	CompactionEntry,
-	CompactionPreparation,
-	CompactionResult,
-	ReadonlySessionManager,
-	SessionEntry,
-	SessionManager,
-} from "@caupulican/pi-agent-core/node";
-import type {
 	Api,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
@@ -55,43 +34,55 @@ import type {
 	TUI,
 } from "@caupulican/pi-tui";
 import type { Static, TSchema } from "typebox";
-import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type {
+	AgentMessage,
+	AgentToolFailureRecoveryContract,
+	AgentToolInvocation,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	CustomMessage,
+	ExecutionContext,
+	ThinkingLevel,
+	ToolCallRepairInfo,
+	ToolExecutionMode,
+} from "../../kernel/index.ts";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	CompactionPreparation,
+	CompactionResult,
+	ReadonlySessionManager,
+	SessionEntry,
+	SessionManager,
+} from "../../kernel/node.ts";
+import type { Theme } from "../../presentation/theme-model.ts";
 import type { WorkRetentionOptions, WorkRunLease } from "../../utils/work-directory.ts";
-import type { BashResult } from "../bash-executor.ts";
+import type { MemoryPromptBudget } from "../context/memory-prompt-budget.ts";
 import type { MemoryProvider as ContextMemoryProvider } from "../context/memory-provider-contract.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
-import type { ReadonlyFooterDataProvider } from "../footer-data-provider.ts";
+import type { ReadonlyFooterDataProvider } from "../footer-data-contract.ts";
 import type { HumanInputPresentationRequest, HumanInputPresentationResult } from "../human-input.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
-import type { MemoryProvider } from "../memory/memory-provider.ts";
-import type { ModelRegistry } from "../model-registry.ts";
-import type { ResourceProfileSettings } from "../settings-manager.ts";
+import type { MemoryCapabilities, MemoryLifecycleContext, MemoryProviderEgress } from "../memory/memory-provider.ts";
+import type { ModelCapabilityProfile } from "../model-capability.ts";
+import type { ModelRegistryContract } from "../model-registry-contract.ts";
+import type { ResourceProfileSettings } from "../settings/settings-schema.ts";
+import type { Skill } from "../skills.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
-import type { BuildSystemPromptOptions } from "../system-prompt.ts";
-import type { BashOperations } from "../tools/bash.ts";
-import type { EditToolDetails } from "../tools/edit.ts";
-import type {
-	BashToolDetails,
-	BashToolInput,
-	EditToolInput,
-	FindToolDetails,
-	FindToolInput,
-	GrepToolDetails,
-	GrepToolInput,
-	LsToolDetails,
-	LsToolInput,
-	PythonToolDetails,
-	PythonToolInput,
-	ReadToolDetails,
-	ReadToolInput,
-	WriteToolInput,
-} from "../tools/index.ts";
+import type { BashOperations, BashResult, BashToolDetails, BashToolInput } from "../tools/schemas/bash.ts";
+import type { EditToolDetails, EditToolInput } from "../tools/schemas/edit.ts";
+import type { FindToolDetails, FindToolInput } from "../tools/schemas/find.ts";
+import type { GrepToolDetails, GrepToolInput } from "../tools/schemas/grep.ts";
+import type { LsToolDetails, LsToolInput } from "../tools/schemas/ls.ts";
+import type { PythonToolDetails, PythonToolInput } from "../tools/schemas/python.ts";
+import type { ReadToolDetails, ReadToolInput } from "../tools/schemas/read.ts";
+import type { WriteToolInput } from "../tools/schemas/write.ts";
+import type { ManagedLaneEvent } from "./managed-lane-records.ts";
 
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { AppKeybinding, KeybindingsManager } from "../keybindings.ts";
-export type { BuildSystemPromptOptions } from "../system-prompt.ts";
 export type { AgentToolResult, AgentToolUpdateCallback, ToolExecutionMode };
 
 // ============================================================================
@@ -330,7 +321,7 @@ export interface ExtensionContext {
 	/** Session manager (read-only) */
 	sessionManager: ReadonlySessionManager;
 	/** Model registry for API key resolution */
-	modelRegistry: ModelRegistry;
+	modelRegistry: ModelRegistryContract;
 	/** Current model (may be undefined) */
 	model: Model<any> | undefined;
 	/** Whether the agent is idle (not streaming) */
@@ -1266,99 +1257,6 @@ export interface ExtensionStorage {
 }
 
 /**
- * Report for an out-of-process managed lane (e.g. a tmux worker) at dispatch or terminal. `laneId` is
- * a stable identifier the CALLER chooses (e.g. a tmux job id or slug) and reuses unchanged across both
- * reports of the same lane. The host preserves it as the canonical durable lane identity so goal
- * bindings and terminal reports remain correlated across controller reloads.
- *
- * External status, changed files, usage, and provider execution remain caller claims. Dispatch authority
- * is different: the host compiles the claimed tool/path/budget scope into a typed execution grant and
- * persists it before the extension may start the process. This proves the host authorization boundary,
- * not that a third-party child CLI enforces the same scope internally.
- */
-export interface ManagedLaneDispatch {
-	/** Monotonic turn number for this logical lane. */
-	sequence: number;
-	/** Exact task instruction dispatched to the external worker. */
-	instructions: string;
-	/** Owner-selected immutable execution profile identity. */
-	profileId: string;
-	/** Provider/launcher identity used by the external process. */
-	provider: string;
-	/** Immutable host-derived profile identity covering this launch or follow-up. */
-	authorizationId: string;
-	/** How the worker authority was materialized. */
-	authorizationKind: "profile-derived" | "legacy-recovery";
-	/** Exact child tool surface requested at launch. */
-	allowedTools: readonly string[];
-	/** Exact write path claims requested at launch. */
-	writePaths: readonly string[];
-	/** Advisory cross-process cost ceiling when supplied by the immutable profile. */
-	maxCostUsd?: number;
-	/** Lease duration for this externally supervised turn. */
-	leaseTtlMs: number;
-}
-
-interface ManagedLaneEventBase {
-	laneId: string;
-	/** Goal this managed lane's work is bound to, if any — tags the tracked lane for goal orchestration. */
-	goalId?: string;
-	/**
-	 * Worktree-sync lane key this managed lane was dispatched into. A caller claim like every other
-	 * field here, so it is never verified authority by itself: the managed-lane ledger binds it to the lane
-	 * at dispatch and a closure releases a lane only when that binding matches (`expectBoundLaneId`), so the
-	 * claim can never release another lane.
-	 */
-	worktreeLaneKey?: string;
-	/**
-	 * The lane's own worktree path, reported with the lane key. It only tells the host which repository the lane
-	 * belongs to (a task directory can sit in another repository than the session's), so the lane is bound and
-	 * released there. A caller claim like the key: a wrong path can never release a lane, because release still
-	 * requires the lane registered in that repository to be bound to this exact worker.
-	 */
-	worktreeLanePath?: string;
-}
-
-export const MAX_MANAGED_LANE_SUMMARY_BYTES = 8 * 1024;
-/** A managed lane's report marks each finding it could not settle on its own summary line. */
-export const INCONCLUSIVE_LINE_PREFIX = "INCONCLUSIVE:";
-
-export type ManagedLaneEvent =
-	| (ManagedLaneEventBase & {
-			phase: "dispatch";
-			dispatch: ManagedLaneDispatch;
-	  })
-	| (ManagedLaneEventBase & {
-			phase: "terminal";
-			/** Exact dispatch turn for persistent agents; stale terminal reports are rejected before mutation. */
-			dispatchSequence?: number;
-			status?: string;
-			/** Untrusted terminal evidence or question; must fit MAX_MANAGED_LANE_SUMMARY_BYTES UTF-8 bytes. */
-			summary?: string;
-			reasonCode?: string;
-			changedFiles?: readonly string[];
-			/**
-			 * Terminal-only usage claim for this managed lane's out-of-process work (e.g. a tmux worker's own
-			 * usage report). ADVISORY, same trust level as every other field on this event — the host attributes
-			 * `usage.cost.total` onto the completed lane's `costUsd` verbatim, with NO re-pricing (the caller's
-			 * model is unknown to the host, so re-pricing is both impossible and unnecessary). Ignored on
-			 * `phase: "dispatch"`.
-			 */
-			usage?: Usage;
-	  })
-	| (ManagedLaneEventBase & {
-			/**
-			 * Lifetime of the external process itself, which is a different fact from the lifetime of the
-			 * work it ran: a turn can reach terminal on a process that stays open, and a process can close
-			 * long after its last turn settled. Reported separately so a closure never re-finishes a task.
-			 */
-			phase: "lifecycle";
-			/** Dispatch turn this statement was observed against; a stale generation is rejected. */
-			dispatchSequence?: number;
-			agentLifecycle: "retained" | "retired";
-	  });
-
-/**
  * ExtensionAPI passed to extension factory functions.
  */
 export interface ExtensionAPI {
@@ -1933,6 +1831,60 @@ export interface ExtensionCommandContextActions {
  * Created by loader with throwing action stubs, completed by runner.initialize().
  */
 export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionActions {}
+
+export interface BuildSystemPromptOptions {
+	/** Capability profile that selects the stable prompt shape. Missing means full/legacy behavior. */
+	modelCapability?: Pick<ModelCapabilityProfile, "class" | "contextWindow" | "reasonCode" | "systemPromptMaxChars">;
+	/** Custom system prompt (replaces default). */
+	customPrompt?: string;
+	/** Tools to include in the prompt. Defaults come from the shared active-tool surface. */
+	selectedTools?: string[];
+	/** Optional one-line tool snippets keyed by tool name. */
+	toolSnippets?: Record<string, string>;
+	/** Additional guideline bullets appended to the default system prompt guidelines. */
+	promptGuidelines?: string[];
+	/** Text to append to system prompt. */
+	appendSystemPrompt?: string;
+	/** Working directory. */
+	cwd: string;
+	/** Global instruction files (with content) plus on-demand project paths (path only). */
+	contextFiles?: Array<{ path: string; content?: string }>;
+	/** Discovered skills remain host-side; retained for extension/API construction compatibility. */
+	skills?: Skill[];
+	/** Discovered extensions currently active. */
+	extensions?: Extension[];
+	/**
+	 * The Y-M-D date the prompt states; today when omitted. A session pins it (SystemPromptBuilder) and
+	 * advances it only at a cold moment, so a day rollover never breaks a warm cache on its own.
+	 */
+	date?: string;
+	/** ASD-STE100 explanation strictness, 0 (off) to 10; invalid or missing means the default 9. */
+	steStrictness?: number;
+}
+
+export interface MemoryProvider {
+	readonly name: string;
+	readonly egress?: MemoryProviderEgress;
+	isAvailable(): boolean | Promise<boolean>;
+	getCapabilities(): MemoryCapabilities;
+	initialize(sessionId: string, ctx: MemoryLifecycleContext): Promise<void>;
+	shutdown(): Promise<void>;
+	// context surface:
+	systemPromptBlock?(budget?: MemoryPromptBudget): string;
+	prefetch?(query: string): Promise<string>;
+	syncTurn?(user: string, assistant: string): Promise<void>;
+	onPreCompress?(): Promise<string>;
+	onSessionEnd?(): Promise<void>;
+	getToolDefinitions?(): ToolDefinition[];
+	getContextMarkers?(): string[];
+	/**
+	 * Called each time the memory manager freezes the static system-prompt block for installation
+	 * into the system prompt, with the block text as installed (after budget fitting). Lets a
+	 * provider remember what the frozen prefix actually renders so later mutations can be delivered
+	 * as records instead of prefix churn. Cached reads and fresh composes never call it.
+	 */
+	onSystemPromptBlockFrozen?(renderedBlock: string): void;
+}
 
 /** Loaded extension with all registered items. */
 export interface Extension {

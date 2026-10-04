@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
-import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
-import { MAX_SESSION_ENTRY_VISIT_COUNT, type SessionManager } from "@caupulican/pi-agent-core/session";
-import type { AgentMessage, AgentRunawayStopInfo } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage } from "@caupulican/pi-ai";
+import { AgentBusyError } from "../../kernel/agent.ts";
+import type { AgentRunawayStopInfo } from "../../kernel/index.ts";
+import { classifyFailure } from "../../kernel/reliability/index.ts";
+import { MAX_SESSION_ENTRY_VISIT_COUNT, type SessionManager } from "../../kernel/session/session-manager.ts";
+import type { AgentMessage } from "../../kernel/types.ts";
 import {
 	type GoalContinuationLoopOptions,
 	type GoalContinuationLoopResult,

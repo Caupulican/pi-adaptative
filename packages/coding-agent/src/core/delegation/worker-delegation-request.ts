@@ -1,4 +1,4 @@
-import type { ExecutionContext } from "@caupulican/pi-agent-core";
+import type { ExecutionContext } from "../../kernel/index.ts";
 import { parseBoundedStringArray } from "../orchestration/bounded-string-array.ts";
 import {
 	type HarnessCapability,

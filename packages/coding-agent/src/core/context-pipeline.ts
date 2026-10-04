@@ -24,22 +24,18 @@
  */
 
 import { join } from "node:path";
+import type { Api, AssistantMessage, Model, Usage } from "@caupulican/pi-ai";
 import {
 	calculateContextTokens,
 	createApplicableAssistantUsageFinder,
 	estimateTokens,
 	getApplicableAssistantUsageInfo,
-} from "@caupulican/pi-agent-core/compaction/compaction";
-import { TokenBudget } from "@caupulican/pi-agent-core/compaction/token-budget";
-import {
-	type CompactionEntry,
-	getLatestCompactionEntry,
-	type SessionEntry,
-	type SessionManager,
-} from "@caupulican/pi-agent-core/session";
-import type { AgentMessage } from "@caupulican/pi-agent-core/types";
-import { addUsage, createEmptyUsage } from "@caupulican/pi-agent-core/usage";
-import type { Api, AssistantMessage, Model, Usage } from "@caupulican/pi-ai";
+} from "../kernel/compaction/compaction.ts";
+import { TokenBudget } from "../kernel/compaction/token-budget.ts";
+import type { CompactionEntry, SessionEntry } from "../kernel/session/session-entries.ts";
+import { getLatestCompactionEntry, type SessionManager } from "../kernel/session/session-manager.ts";
+import type { AgentMessage } from "../kernel/types.ts";
+import { addUsage, createEmptyUsage } from "../kernel/usage.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session-contracts.ts";
 import {
 	priceSentPrefixRewrite,
@@ -110,8 +106,26 @@ import type { CacheDecisionRow } from "./operator-projection/decision-ledger-sto
 import { createProcessScratchDirectory, removeProcessScratchDirectory } from "./process-scratch.ts";
 import { LatestCompactionEntryScan, resolveSessionEntryIndex } from "./session-entry-index.ts";
 import { isWorkerSession } from "./session-role.ts";
-import type { SettingsManager } from "./settings-manager.ts";
 import { reportSpawnedUsage } from "./spawned-usage.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ContextPipelineSettingsSource {
+	getContextCurationSettings(): { enabled: boolean; model?: string; maxJobsPerTurn: number };
+	getContextGcSettings(): {
+		enabled: boolean;
+		preserveRecentMessages: number;
+		packStrideMessages: number;
+		minToolResultChars: number;
+		tools: string[];
+		semanticMemory: {
+			enabled: boolean;
+			preserveRecentPages: number;
+			minChars: number;
+			markers: string[];
+		};
+	};
+	getContextPromptEnforcementSettings(): { enabled: boolean; preserveRecentMessages: number; minChars: number };
+}
 
 /** Read a packed artifact-producing tool result's `details.artifactId`, if present, without `any`. */
 function extractArtifactId(message: AgentMessage | undefined): string | undefined {
@@ -226,7 +240,7 @@ export interface ContextPipelineDeps {
 	/** Session log: audit lookup, gc/artifact storage dirs, curation entries, token-estimate compaction anchor. */
 	getSessionManager(): SessionManager;
 	/** Context-gc / prompt-enforcement / curation settings (all opt-in gates). */
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): ContextPipelineSettingsSource;
 	/** Resolves a configured curation model pattern against configured auth. */
 	getModelRegistry(): ModelRegistry;
 	/** Foreground model currently executing the transformed request. */

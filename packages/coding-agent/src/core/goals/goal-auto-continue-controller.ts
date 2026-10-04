@@ -1,18 +1,24 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
+import { AgentBusyError } from "../../kernel/agent.ts";
 import type {
 	AgentSessionEvent,
 	GoalContinuationLoopOptions,
 	GoalContinuationLoopResult,
 	PromptOptions,
 } from "../agent-session.ts";
-import type { SettingsManager } from "../settings-manager.ts";
+import type { AutonomySettings } from "../settings/settings-schema.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goal-runtime-snapshot.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface GoalAutoContinueControllerSettingsSource {
+	getAutonomySettings(): Required<AutonomySettings>;
+	subscribeChanges(listener: () => void): () => void;
+}
 
 export interface GoalAutoContinueControllerDeps {
 	isDisposed(): boolean;
 	isGoalToolActive(): boolean;
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): GoalAutoContinueControllerSettingsSource;
 	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot;
 	hasInFlightLaneForGoal(goalId: string): boolean;
 	continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult>;
@@ -24,7 +30,7 @@ export interface GoalAutoContinueControllerDeps {
 }
 
 type GoalAutoContinueScheduleSettings = Pick<
-	ReturnType<SettingsManager["getAutonomySettings"]>,
+	ReturnType<GoalAutoContinueControllerSettingsSource["getAutonomySettings"]>,
 	"goalAutoContinue" | "goalAutoContinueDelayMs" | "maxStallTurns"
 >;
 
@@ -140,7 +146,9 @@ export class GoalAutoContinueController {
 		return true;
 	}
 
-	private planTimer(settings: ReturnType<SettingsManager["getAutonomySettings"]>): GoalAutoContinueTimerPlan {
+	private planTimer(
+		settings: ReturnType<GoalAutoContinueControllerSettingsSource["getAutonomySettings"]>,
+	): GoalAutoContinueTimerPlan {
 		const { maxStallTurns, goalAutoContinue, goalAutoContinueDelayMs } = settings;
 		if (!goalAutoContinue) return { action: "clear" };
 		const snapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
@@ -306,8 +314,8 @@ export class GoalAutoContinueController {
 	}
 
 	private ensureSettingsSubscription(
-		settingsManager: SettingsManager,
-		settings: ReturnType<SettingsManager["getAutonomySettings"]>,
+		settingsManager: GoalAutoContinueControllerSettingsSource,
+		settings: ReturnType<GoalAutoContinueControllerSettingsSource["getAutonomySettings"]>,
 	): void {
 		this._schedulerSettings = this.schedulerSettings(settings);
 		if (
@@ -359,7 +367,7 @@ export class GoalAutoContinueController {
 	}
 
 	private schedulerSettings(
-		settings: ReturnType<SettingsManager["getAutonomySettings"]>,
+		settings: ReturnType<GoalAutoContinueControllerSettingsSource["getAutonomySettings"]>,
 	): GoalAutoContinueScheduleSettings {
 		return {
 			goalAutoContinue: settings.goalAutoContinue,

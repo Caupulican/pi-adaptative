@@ -19,7 +19,7 @@ compounding saving is the feature.
 
 1. **One choke point, and it is CODE.** All argument repair lives behind
    `validateToolArguments` (`packages/ai/src/utils/validation.ts`), which
-   every tool call already passes through (`packages/agent/src/agent-loop.ts`
+   every tool call already passes through (`packages/coding-agent/src/kernel/agent-loop.ts`
    prepareToolCall). The layer itself is a dedicated module of pure
    deterministic functions - `utils/tool-repair/`: `registry.ts` (named
    entries), `analyzer.ts` (validator errors -> classified modes),

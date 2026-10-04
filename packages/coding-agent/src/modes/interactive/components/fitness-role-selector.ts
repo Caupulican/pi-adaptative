@@ -1,22 +1,12 @@
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions, Text } from "@caupulican/pi-tui";
-import { getSelectListTheme } from "../theme/theme.ts";
+import type { FitnessRole } from "../../../core/models/fitness-role.ts";
+import { getSelectListTheme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 
 const FITNESS_ROLE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 18,
 	maxPrimaryColumnWidth: 34,
 };
-
-/** Roles a freshly probed model can be assigned to, mapped to their settings by the caller. */
-export type FitnessRole =
-	| "curator"
-	| "executor"
-	| "scout"
-	| "router-cheap"
-	| "router-medium"
-	| "router-expensive"
-	| "learning"
-	| "none";
 
 /** The role options in presentation order — one source of truth for the list AND pre-selection. */
 const FITNESS_ROLE_ITEMS: readonly SelectItem[] = [

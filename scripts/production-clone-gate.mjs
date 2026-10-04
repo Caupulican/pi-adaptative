@@ -2,7 +2,6 @@ import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { extname, join, relative, resolve, sep } from "node:path";
 
 export const CLONE_SOURCE_ROOTS = [
-	"packages/agent/src",
 	"packages/ai/src",
 	"packages/coding-agent/src",
 	"packages/tui/src",

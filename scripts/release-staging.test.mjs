@@ -36,7 +36,7 @@ test("lockstep workspace package files are on the release allowlist", () => {
 	const allowlist = computeReleaseAllowlist(repoRoot);
 	const expected = [
 		"package-lock.json",
-		"packages/agent/CHANGELOG.md",
+		"packages/ai/CHANGELOG.md",
 		"packages/coding-agent/examples/extensions/custom-provider-anthropic/package-lock.json",
 		"packages/coding-agent/examples/extensions/custom-provider-anthropic/package.json",
 		"packages/coding-agent/examples/extensions/custom-provider-gitlab-duo/package.json",
@@ -59,8 +59,6 @@ test("release provenance delegates metadata paths to the release-staging owner",
 
 	const releasePaths = [
 		"package-lock.json",
-		"packages/agent/CHANGELOG.md",
-		"packages/agent/package.json",
 		"packages/ai/CHANGELOG.md",
 		"packages/ai/package.json",
 		"packages/coding-agent/CHANGELOG.md",
@@ -83,8 +81,8 @@ test("release provenance delegates metadata paths to the release-staging owner",
 test("partitionReleaseChanges accepts a typical unstaged version-bump tree", () => {
 	const status = [
 		" M package-lock.json",
-		" M packages/agent/CHANGELOG.md",
-		" M packages/agent/package.json",
+		" M packages/ai/CHANGELOG.md",
+		" M packages/ai/package.json",
 		" M packages/coding-agent/examples/extensions/sandbox/package.json",
 	].join("\n");
 	const { allowed, unexpected } = partitionReleaseChanges(status, repoRoot);

@@ -1,8 +1,8 @@
 import * as path from "node:path";
-import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { Usage } from "@caupulican/pi-ai";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import type { ThinkingLevel } from "../../kernel/index.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { ORCHESTRATION_THINKING_LEVEL_SCHEMA } from "../orchestration/thinking-level-schema.ts";
 import { POLICY_OWNED_RUNTIME_TOOL_NAMES } from "../tool-capability-policy.ts";

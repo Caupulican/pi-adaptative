@@ -2,12 +2,13 @@
  * CLI argument parsing and help display
  */
 
-import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { ServiceTier } from "@caupulican/pi-ai";
 import chalk from "chalk";
 import { APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR } from "../config.ts";
 import type { ExtensionFlag } from "../core/extensions/types.ts";
 import { isTerminalSessionMode, type TerminalSessionMode } from "../core/session-role.ts";
+import { isValidThinkingLevel, VALID_THINKING_LEVELS } from "../core/thinking-level.ts";
+import type { ThinkingLevel } from "../kernel/index.ts";
 
 export type Mode = "text" | "json" | "rpc";
 
@@ -76,12 +77,7 @@ export interface Args {
 	diagnostics: Array<{ type: "warning" | "error"; message: string }>;
 }
 
-const VALID_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
 const VALID_SERVICE_TIERS = ["auto", "default", "fast", "flex", "scale", "priority"] as const;
-
-export function isValidThinkingLevel(level: string): level is ThinkingLevel {
-	return VALID_THINKING_LEVELS.includes(level as ThinkingLevel);
-}
 
 function isValidServiceTier(tier: string): tier is (typeof VALID_SERVICE_TIERS)[number] {
 	return (VALID_SERVICE_TIERS as readonly string[]).includes(tier);

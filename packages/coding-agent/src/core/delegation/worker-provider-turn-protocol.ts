@@ -1,5 +1,5 @@
-import { addUsage, createEmptyUsage } from "@caupulican/pi-agent-core/usage";
 import type { Usage } from "@caupulican/pi-ai";
+import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
 import { usageDeltaFromProviderUsage } from "../orchestration/attempt-usage.ts";
 import type { GatewayUsageDelta, ProviderBudgetReservation } from "../orchestration/capability-gateway.ts";
 

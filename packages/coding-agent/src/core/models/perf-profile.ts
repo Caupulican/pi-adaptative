@@ -1,6 +1,3 @@
-import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
-import { isStreamStallError, type StreamIdleOptions } from "@caupulican/pi-agent-core/reliability";
-import type { StreamFn } from "@caupulican/pi-agent-core/types";
 import { assistantMessageFromEvent } from "@caupulican/pi-ai";
 import { createAssistantMessageEventStream, isFirstTokenEvent } from "@caupulican/pi-ai/event-stream";
 import type {
@@ -12,6 +9,9 @@ import type {
 	ProviderResponse,
 } from "@caupulican/pi-ai/types";
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
+import type { StreamFn } from "../../kernel/index.ts";
+import { estimateProviderRequestTokens } from "../../kernel/provider-request-estimator.ts";
+import { isStreamStallError, type StreamIdleOptions } from "../../kernel/reliability/index.ts";
 
 const PERF_EWMA_ALPHA = 0.3;
 const DEFERRED_HEADERS_MAX_GAP_MS = 100;

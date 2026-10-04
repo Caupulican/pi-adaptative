@@ -1,4 +1,3 @@
-import type { VerificationObligationView } from "@caupulican/pi-agent-core/verification-obligations";
 import { type Component, truncateToWidth } from "@caupulican/pi-tui";
 import type { EdgeGrantView } from "../../../core/autonomy/edge-policy.ts";
 import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
@@ -14,9 +13,10 @@ import {
 	renderOrchestrationPanelLines,
 	taskStepPanelRow,
 } from "../../../core/tools/orchestration-panel.ts";
-import { theme } from "../theme/theme.ts";
+import type { VerificationObligationView } from "../../../kernel/verification-obligations.ts";
+import { formatKeyText } from "../../../presentation/keybinding-hints.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import { type ActivityLaneItem, isBackgroundToolActivityItem } from "./activity-lane.ts";
-import { formatKeyText } from "./keybinding-hints.ts";
 
 /**
  * On-demand work inspector behind the compact activity lane. One canonical snapshot

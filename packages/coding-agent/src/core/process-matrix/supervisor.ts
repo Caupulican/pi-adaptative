@@ -6,7 +6,7 @@
  * real processes. `runtime.ts` is the only caller that supplies real deps and real I/O.
  */
 
-import type { ProcessObservation } from "@caupulican/pi-agent-core/process-tree";
+import type { ProcessObservation } from "../../kernel/reliability/process-tree.ts";
 import type { AgentIdentityContract } from "../orchestration/contracts.ts";
 import type {
 	ParentLiveness,

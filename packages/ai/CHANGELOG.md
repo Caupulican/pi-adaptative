@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- Built-in API providers are no longer registered as a side effect of importing `stream.ts`/`register-builtins.ts`. Call `registerBuiltInApiProviders()` at the program root (the coding-agent CLI and `createAgentSession` do). A stream for an unregistered api still throws.
+- `getModel(provider, id)` returns `Model<Api> | undefined` and `getModels(provider)` returns `Model<Api>[]`; the generated catalog is typed as data, so catalog regenerations no longer change the API's types and literal model ids are no longer checked at compile time.
+
+### Fixed
+
+- An xAI build-tier request whose build model is missing from the catalog now fails through the stream error path instead of throwing out of the stream function.
+
 ## [0.102.3] - 2026-10-04
 
 ### Added

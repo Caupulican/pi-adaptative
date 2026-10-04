@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { estimateStringTokens } from "@caupulican/pi-agent-core/node";
+import { estimateStringTokens } from "../packages/coding-agent/src/kernel/node.ts";
 import { getAgentDir } from "../packages/coding-agent/src/config.ts";
 import { getProcessWorkRun } from "../packages/coding-agent/src/utils/work-directory.ts";
 

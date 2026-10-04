@@ -1,7 +1,8 @@
 import type { Api, Model } from "@caupulican/pi-ai";
-import { deriveModelCapabilityProfile, type ModelCapabilityClass } from "../model-capability.ts";
+import type { ModelCapabilityClass } from "../capability-tier.ts";
+import { deriveModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelToolProbeVerdict } from "../models/adaptation-store.ts";
-import type { ModelRouterPoolPreference } from "../settings-manager.ts";
+import type { ModelRouterPoolPreference } from "../settings/settings-schema.ts";
 import type { FitnessGatedSurface, FitnessGateVerdict } from "./fitness-gate.ts";
 import { isLocalOrManagedRouterModel } from "./tool-escalation.ts";
 

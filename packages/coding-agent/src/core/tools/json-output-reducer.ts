@@ -15,7 +15,8 @@
 
 import { isRecordObject as isObjectRecord } from "../util/value-guards.ts";
 import type { CommandFamilyClassification } from "./command-family.ts";
-import type { OutputReducer, OutputReductionLevel, OutputReductionRequest } from "./output-reduction.ts";
+import type { OutputReducer, OutputReductionRequest } from "./output-reduction.ts";
+import type { OutputReductionLevel } from "./output-reduction-types.ts";
 
 /** Below this size a document is cheaper to send than to describe. */
 const MIN_JSON_BYTES = 2 * 1024;

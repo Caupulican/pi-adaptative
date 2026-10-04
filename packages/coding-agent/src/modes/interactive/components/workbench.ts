@@ -1,12 +1,13 @@
 import { type Component, Container, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
-import { getSelectionStyle, theme } from "../theme/theme.ts";
+import { keyText } from "../../../presentation/keybinding-hints.ts";
+import { getSelectionStyle, theme } from "../../../presentation/theme-model.ts";
 import { ActionTranscriptComponent } from "./action-transcript.ts";
 import { BashExecutionComponent } from "./bash-execution.ts";
 import { ConversationWindow } from "./conversation-window.ts";
 import type { DecisionGraphModel } from "./decision-graph-model.ts";
+import type { WorkbenchGraphView } from "./decision-graph-pane.ts";
 import { DecisionGraphPane, GRAPH_PANE_TITLE } from "./decision-graph-pane.ts";
-import { keyText } from "./keybinding-hints.ts";
 import {
 	fitRow,
 	labelRow,
@@ -79,9 +80,6 @@ export const MIN_CHAT_WIDTH = 40;
 export const DEFAULT_GRAPH_FRACTION = 0.32;
 export const MIN_GRAPH_FRACTION = 0.25;
 export const MAX_GRAPH_FRACTION = 0.5;
-
-/** How the Decision graph draws the loop. */
-export type WorkbenchGraphView = "list" | "diagram" | "lanes";
 
 /** Explicit rows the operator chose, or "half": an even split that follows the terminal's height. */
 export type WorkAreaRows = number | "half";

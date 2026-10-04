@@ -15,10 +15,7 @@ import type {
 	ToolArgumentTeachState,
 	ToolArgumentValidationTelemetryEvent,
 } from "@caupulican/pi-ai";
-import {
-	isToolArgumentValidationLogRecord,
-	type ToolArgumentValidationLogRecord,
-} from "./tool-recovery-log-records.ts";
+import { isToolArgumentValidationLogRecord, type ToolArgumentValidationLogRecord } from "./tool-recovery-records.ts";
 
 const MAX_DETAIL_KEYS = 1_000;
 const MAX_STATS_FILES = 1_000;

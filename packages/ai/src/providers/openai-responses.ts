@@ -82,14 +82,21 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
 	const buildModelId = resolveXaiBuildModelId(model, options?.serviceTier);
+	// A build id the catalog does not list is a catalog/policy mismatch; it fails this request through
+	// the stream's own error path below instead of throwing out of a stream function.
+	let missingCatalogModelId: string | undefined;
 	if (buildModelId) {
 		const catalogModel = getModel("xai", buildModelId);
-		model = {
-			...model,
-			id: catalogModel.id,
-			name: catalogModel.name,
-			cost: catalogModel.cost,
-		};
+		if (catalogModel) {
+			model = {
+				...model,
+				id: catalogModel.id,
+				name: catalogModel.name,
+				cost: catalogModel.cost,
+			};
+		} else {
+			missingCatalogModelId = buildModelId;
+		}
 		options = { ...options, serviceTier: undefined };
 	}
 
@@ -98,6 +105,9 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 		const output = createAssistantMessage(model);
 
 		try {
+			if (missingCatalogModelId) {
+				throw new Error(`The model catalog has no xai model "${missingCatalogModelId}" for this service tier`);
+			}
 			if (buildModelId) {
 				const headers = new Headers({ ...model.headers, ...options?.headers });
 				headers.set("x-grok-model-override", buildModelId);

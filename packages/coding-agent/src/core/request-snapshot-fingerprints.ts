@@ -1,11 +1,8 @@
 import { createHash } from "node:crypto";
-import type {
-	RequestSnapshotEntry,
-	SessionManager,
-	SessionRequestSnapshotInput,
-} from "@caupulican/pi-agent-core/session";
-import type { ProviderRequestSnapshotContext } from "@caupulican/pi-agent-core/types";
 import type { Api, Model } from "@caupulican/pi-ai";
+import type { ProviderRequestSnapshotContext } from "../kernel/index.ts";
+import type { RequestSnapshotEntry } from "../kernel/session/session-entries.ts";
+import type { SessionManager, SessionRequestSnapshotInput } from "../kernel/session/session-manager.ts";
 import { cacheLaneKey } from "./context/cache-observation-recorder.ts";
 
 /**

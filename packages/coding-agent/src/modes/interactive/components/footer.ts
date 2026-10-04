@@ -3,9 +3,12 @@ import { type Component, truncateToWidth, visibleWidth } from "@caupulican/pi-tu
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { formatFooterCostParts } from "../../../core/cost/cost-summary.ts";
 import { getFastModeStatus } from "../../../core/fast-mode.ts";
-import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
+import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-contract.ts";
+import type { ModelRegistry } from "../../../core/model-registry.ts";
+import type { SettingsManager } from "../../../core/settings-manager.ts";
+import type { SessionManager } from "../../../kernel/node.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import { stripAnsi, stripAnsiExceptSgr } from "../../../utils/ansi.ts";
-import { theme } from "../theme/theme.ts";
 import { type SelfCompactionGauge, selfCompactionGauge } from "./self-compaction-gauge.ts";
 
 const FAST_MODE_BADGE = "[fast]";
@@ -102,6 +105,13 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
 	return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
 }
 
+/** The session-scoped services the footer reads; the host that built the session supplies them. */
+export interface FooterServices {
+	readonly sessionManager: SessionManager;
+	readonly settingsManager: SettingsManager;
+	readonly modelRegistry: Pick<ModelRegistry, "isUsingSubscription">;
+}
+
 /**
  * Footer component that shows pwd, token stats, and context usage.
  * Computes token/context stats from session, gets git branch and extension statuses from provider.
@@ -124,17 +134,20 @@ export class FooterComponent implements Component {
 	private operatorFooter = false;
 	private diagnosticsMode = false;
 	private session: AgentSession;
+	private services: FooterServices;
 	private footerData: ReadonlyFooterDataProvider;
 	private usageSnapshot?: FooterUsageSnapshot;
 	private cumulativeUsage?: Omit<FooterUsageSnapshot, "messageCount" | "contextUsage" | "gauge">;
 
-	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
+	constructor(session: AgentSession, services: FooterServices, footerData: ReadonlyFooterDataProvider) {
 		this.session = session;
+		this.services = services;
 		this.footerData = footerData;
 	}
 
-	setSession(session: AgentSession): void {
+	setSession(session: AgentSession, services: FooterServices): void {
 		this.session = session;
+		this.services = services;
 		this.usageSnapshot = undefined;
 		this.cumulativeUsage = undefined;
 	}
@@ -175,7 +188,7 @@ export class FooterComponent implements Component {
 	}
 
 	private getUsageSnapshot(messageCount: number): FooterUsageSnapshot {
-		const sessionManager = this.session.sessionManager as AgentSession["sessionManager"] & {
+		const sessionManager = this.services.sessionManager as SessionManager & {
 			getEntryCount?: () => number;
 		};
 		const entryCount = sessionManager.getEntryCount?.() ?? sessionManager.getEntries().length;
@@ -199,7 +212,7 @@ export class FooterComponent implements Component {
 		const entries =
 			canExtend && incrementalSessionManager.getEntriesSince
 				? incrementalSessionManager.getEntriesSince(previous.entryCount)
-				: this.session.sessionManager.getEntries();
+				: this.services.sessionManager.getEntries();
 		for (let i = 0; i < entries.length; i++) {
 			const entry = entries[i];
 			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
@@ -246,7 +259,7 @@ export class FooterComponent implements Component {
 		}
 
 		// Replace home directory with ~
-		let pwd = formatCwdForFooter(this.session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
+		let pwd = formatCwdForFooter(this.services.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
 
 		// Add git branch if available
 		const branch = this.footerData.getGitBranch();
@@ -255,7 +268,7 @@ export class FooterComponent implements Component {
 		}
 
 		// Add session name if set
-		const sessionName = this.session.sessionManager.getSessionName();
+		const sessionName = this.services.sessionManager.getSessionName();
 		if (sessionName) {
 			pwd = `${pwd} • ${sessionName}`;
 		}
@@ -278,7 +291,7 @@ export class FooterComponent implements Component {
 			}
 		}
 		if (!lastAssistantUsage) {
-			const entries = this.session.sessionManager.getEntries();
+			const entries = this.services.sessionManager.getEntries();
 			for (let i = entries.length - 1; i >= 0; i--) {
 				const e = entries[i];
 				if (e.type === "message" && e.message.role === "assistant" && e.message.usage) {
@@ -296,13 +309,13 @@ export class FooterComponent implements Component {
 			}
 		}
 
-		const usingSubscription = state.model ? this.session.modelRegistry.isUsingSubscription(state.model) : false;
+		const usingSubscription = state.model ? this.services.modelRegistry.isUsingSubscription(state.model) : false;
 		statsParts.push(...formatFooterCostParts(costSummary, 3, { subscription: usingSubscription }));
 
 		// Keep the warning-only guard proactive without duplicating the authoritative
 		// CURRENT/TODAY/SUBAGENTS totals rendered above.
 		const costGuard = this.session.getLastCostGuardDecision?.();
-		if (this.session.settingsManager.getCostGuardSettings().enabled && costGuard?.over) {
+		if (this.services.settingsManager.getCostGuardSettings().enabled && costGuard?.over) {
 			statsParts.push(theme.fg("warning", `GUARD:$${costGuard.estUsd.toFixed(2)}/turn`));
 		}
 
@@ -332,7 +345,11 @@ export class FooterComponent implements Component {
 
 		// Add model display name on the right side, plus thinking level if model supports it
 		const modelName = state.model?.name || state.model?.id || "no-model";
-		const fastModeEnabled = getFastModeStatus(this.session).enabled;
+		const fastModeEnabled = getFastModeStatus({
+			model: this.session.model,
+			settingsManager: this.services.settingsManager,
+			getFastModeServiceTiers: (model) => this.session.getFastModeServiceTiers(model),
+		}).enabled;
 		const modelDisplayName = fastModeEnabled ? `${modelName} ${FAST_MODE_BADGE}` : modelName;
 
 		// Calculate available space for padding (minimum 2 spaces between stats and model)

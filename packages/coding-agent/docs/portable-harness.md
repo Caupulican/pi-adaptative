@@ -6,10 +6,10 @@ machine's filesystem spelling are not execution authority.
 
 ## Ownership
 
-- `packages/agent/src/execution-paths.ts` owns explicit lexical path semantics, immutable execution
+- `packages/coding-agent/src/kernel/execution-paths.ts` owns explicit lexical path semantics, immutable execution
   contexts, workspace attachments, and resource references. It never reads the filesystem,
   process working directory, home directory, or platform.
-- `packages/agent/src/utils/paths.ts` is the native path-input adapter. Existing native callers
+- `packages/coding-agent/src/kernel/utils/paths.ts` is the native path-input adapter. Existing native callers
   retain their CLI defaults; backend callers can supply a dialect and home directory explicitly.
   Lexical resolution always uses the execution-path owner.
 - Filesystem adapters own actual resource resolution and authorization, including symlinks,

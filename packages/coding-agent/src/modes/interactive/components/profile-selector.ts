@@ -1,6 +1,6 @@
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions, Text } from "@caupulican/pi-tui";
 import type { NormalizedProfile } from "../../../core/profile-registry.ts";
-import { getSelectListTheme, theme } from "../theme/theme.ts";
+import { getSelectListTheme, theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 
 const PROFILE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {

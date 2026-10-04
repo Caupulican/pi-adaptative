@@ -62,7 +62,7 @@ import { projectWorkerAttemptLaneRecord } from "./delegation/worker-lane-project
 import { WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
 import { WorkerUsageReceiptDelivery } from "./delegation/worker-usage-receipt-delivery.ts";
-import type { ManagedLaneEvent } from "./extensions/types.ts";
+import type { ManagedLaneEvent } from "./extensions/managed-lane-records.ts";
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
@@ -82,11 +82,11 @@ import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
 import { ResearchLaneController, type ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
+import type { SettingsManager } from "./settings-manager.ts";
 import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneLifecycle } from "./worktree-sync/lane-lifecycle.ts";
 import { buildWorktreeSyncEngineDeps } from "./worktree-sync/runtime.ts";
 
-export { isLocalExecutionModel } from "./delegation/worker-delegation-controller.ts";
 export { clampLaneMaxUsd } from "./research/lane-model-resolver.ts";
 
 export interface BackgroundLaneControllerDeps
@@ -95,6 +95,8 @@ export interface BackgroundLaneControllerDeps
 		ModelFitnessControllerDeps,
 		LaneModelResolverDeps,
 		Pick<ManagedLaneControllerDeps, "recordUnsettledForOwner"> {
+	/** The full settings manager: this coordinator hands it to every lane, each of which reads only its own port. */
+	getSettingsManager(): SettingsManager;
 	/** True iff the active surface can terminalize a goal through `goal` or `update_goal`.
 	 * Explicit tool/profile exclusion and the worker-role ceiling still disable continuation. */
 	isGoalToolActive(): boolean;

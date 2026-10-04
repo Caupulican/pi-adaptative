@@ -7,7 +7,6 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import { resolveCapabilityTier } from "../capability-tier.ts";
 import { deriveModelCapabilityProfile } from "../model-capability.ts";
-import type { ModelRegistry } from "../model-registry.ts";
 import type { ModelAdaptationStore } from "../models/adaptation-store.ts";
 import type { FitnessStore } from "../models/fitness-store.ts";
 import type { ModelPerfProfile } from "../models/perf-profile.ts";
@@ -23,8 +22,14 @@ import type {
 import { materializeExpertDescriptor } from "./expert-identity.ts";
 import { defaultModelFamilyResolver } from "./independence.ts";
 
+/** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
+export interface CatalogModelSource {
+	hasConfiguredAuth(model: Model<Api>): boolean;
+	isUsingSubscription(model: Model<Api>): boolean;
+}
+
 export interface ExpertCatalogDeps {
-	modelRegistry?: ModelRegistry;
+	modelRegistry?: CatalogModelSource;
 	/** Live router eligibility, already intersected with the owner's favorites and configured scopes. */
 	getCandidateModels?: () => readonly Model<Api>[];
 	fitnessStore?: FitnessStore;

@@ -5,7 +5,6 @@ import { PACKED_TOOL_OUTPUT_TOOLS } from "../context/tool-output-packer.ts";
 import { LEAF_WORKER_DELEGATION_LIMITS } from "../delegation/worker-fleet-limits.ts";
 import { resolveWorkerWorkspacePath } from "../delegation/worker-machine-scope.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import type { SettingsManager } from "../settings-manager.ts";
 import type {
 	OrchestrationModelBinding,
 	OrchestrationModelPolicy,
@@ -17,6 +16,11 @@ import { resolvePinnedOrchestrationModel } from "./model-binding.ts";
 import { validateOrchestrationProfile } from "./profile-registry.ts";
 import { OrchestrationProfileStore } from "./profile-store.ts";
 import type { SessionTaskProfileStore } from "./session-task-profile-store.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface TaskProfileWriterSettingsSource {
+	isProjectTrusted(): boolean;
+}
 
 export interface TaskProfileModelSelection {
 	provider: string;
@@ -62,7 +66,7 @@ export interface TaskProfileWriterOptions {
 	agentDir: string;
 	cwd: string;
 	store: SessionTaskProfileStore;
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): TaskProfileWriterSettingsSource;
 	getModelRegistry(): ModelRegistry;
 	isModelExhausted(provider: string, modelId: string): boolean;
 	getActiveOrchestrationProfile(): OrchestrationProfile | undefined;

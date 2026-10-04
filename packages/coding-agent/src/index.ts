@@ -1,50 +1,5 @@
 // Core session management
 
-export { convertToLlm } from "@caupulican/pi-agent-core";
-// Compaction
-export {
-	type BranchPreparation,
-	type BranchSummaryEntry,
-	type BranchSummaryResult,
-	buildSessionContext,
-	type CollectEntriesResult,
-	type CompactionEntry,
-	type CompactionResult,
-	CURRENT_SESSION_VERSION,
-	type CustomEntry,
-	type CustomMessageEntry,
-	type CutPointResult,
-	calculateContextTokens,
-	collectEntriesForBranchSummary,
-	compact,
-	DEFAULT_COMPACTION_SETTINGS,
-	estimateTokens,
-	type FileEntry,
-	type FileOperations,
-	findCutPoint,
-	findTurnStartIndex,
-	type GenerateBranchSummaryOptions,
-	generateBranchSummary,
-	generateSummary,
-	getLastAssistantUsage,
-	getLatestCompactionEntry,
-	type ModelChangeEntry,
-	migrateSessionEntries,
-	type NewSessionOptions,
-	parseSessionEntries,
-	prepareBranchEntries,
-	type SessionContext,
-	type SessionEntry,
-	type SessionEntryBase,
-	type SessionHeader,
-	type SessionInfo,
-	type SessionInfoEntry,
-	SessionManager,
-	type SessionMessageEntry,
-	serializeConversation,
-	shouldCompact,
-	type ThinkingLevelChangeEntry,
-} from "@caupulican/pi-agent-core/node";
 export { type Args, parseArgs } from "./cli/args.ts";
 // Config paths
 export { getAgentDir, VERSION } from "./config.ts";
@@ -59,6 +14,25 @@ export {
 	parseSkillBlock,
 	type SessionStats,
 } from "./core/agent-session.ts";
+export {
+	type ActiveSessionContext,
+	AgentSessionRuntime,
+	type AgentSessionRuntimeResource,
+	type AgentSessionSwitchOptions,
+	type CreateAgentSessionRuntimeFactory,
+	type CreateAgentSessionRuntimeResult,
+	createAgentSessionRuntime,
+	SessionReplacementCallbackError,
+	SessionReplacementRuntimeError,
+} from "./core/agent-session-runtime.ts";
+export {
+	type AgentSessionRuntimeDiagnostic,
+	type AgentSessionServices,
+	type CreateAgentSessionFromServicesOptions,
+	type CreateAgentSessionServicesOptions,
+	createAgentSessionFromServices,
+	createAgentSessionServices,
+} from "./core/agent-session-services.ts";
 // Auth and model registry
 export {
 	type ApiKeyCredential,
@@ -191,7 +165,7 @@ export {
 } from "./core/extensions/index.ts";
 export { createExtensionRuntime, discoverAndLoadExtensions } from "./core/extensions/loader.ts";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
-export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.ts";
+export type { ReadonlyFooterDataProvider } from "./core/footer-data-contract.ts";
 // Public Execution-Integrity Substrate SDK
 export {
 	canonicalJsonStringify,
@@ -327,7 +301,6 @@ export * from "./core/orchestration/task-runtime.ts";
 export { orchestrationThinkingLevelSchema } from "./core/orchestration/thinking-level-schema.ts";
 export type {
 	PackageManager,
-	PathMetadata,
 	ProgressCallback,
 	ProgressEvent,
 	ResolvedPaths,
@@ -358,24 +331,10 @@ export {
 } from "./core/resource-profile-blocks.ts";
 // SDK for programmatic usage
 export {
-	AgentSessionRuntime,
-	type AgentSessionRuntimeDiagnostic,
-	type AgentSessionRuntimeResource,
-	type AgentSessionServices,
-	type AgentSessionSwitchOptions,
-	type CreateAgentSessionFromServicesOptions,
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
-	type CreateAgentSessionRuntimeFactory,
-	type CreateAgentSessionRuntimeResult,
-	type CreateAgentSessionServicesOptions,
-	// Factory
 	createAgentSession,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
 	createBashTool,
-	// Tool factories (for custom cwd)
 	createCodingTools,
 	createEditTool,
 	createFindTool,
@@ -385,8 +344,6 @@ export {
 	createReadTool,
 	createWriteTool,
 	type PromptTemplate,
-	SessionReplacementCallbackError,
-	SessionReplacementRuntimeError,
 } from "./core/sdk.ts";
 export {
 	BitwardenCredentialStorage,
@@ -434,21 +391,19 @@ export {
 	resolveCredentialMigrationSources,
 } from "./core/secrets/credential-migration-source.ts";
 export { createPortableGitProjectKey, resolveCredentialProject } from "./core/secrets/credential-project.ts";
-export {
-	type CompactionSettings,
-	type DirectoryResourceProfileInfo,
-	getDirectoryResourceProfileInfo,
-	type ImageSettings,
-	type MemorySystem,
-	matchesResourceProfilePattern,
-	type PackageSource,
-	type ResourceProfileFilterSettings,
-	type ResourceProfileKind,
-	type ResourceProfileSettings,
-	type RetrySettings,
-	SettingsManager,
-	type SettingsManagerCreateOptions,
-} from "./core/settings-manager.ts";
+export { getDirectoryResourceProfileInfo, matchesResourceProfilePattern } from "./core/settings/settings-rules.ts";
+export type {
+	CompactionSettings,
+	DirectoryResourceProfileInfo,
+	ImageSettings,
+	MemorySystem,
+	PackageSource,
+	ResourceProfileFilterSettings,
+	ResourceProfileKind,
+	ResourceProfileSettings,
+	RetrySettings,
+} from "./core/settings/settings-schema.ts";
+export { SettingsManager, type SettingsManagerCreateOptions } from "./core/settings-manager.ts";
 export {
 	DEFAULT_SKILL_IDLE_TIMEOUT_MS,
 	MAX_ACTIVE_SKILL_BODY_BYTES,
@@ -474,7 +429,7 @@ export {
 	type Skill,
 	type SkillFrontmatter,
 } from "./core/skills.ts";
-export { createSyntheticSourceInfo } from "./core/source-info.ts";
+export { createSyntheticSourceInfo, type PathMetadata } from "./core/source-info.ts";
 export {
 	type HookExecutionOptions,
 	IntegrityHookCoordinator,
@@ -593,6 +548,51 @@ export {
 } from "./core/tools/skill-audit.ts";
 export { hasProjectTrustInputs, type ProjectTrustDecision, ProjectTrustStore } from "./core/trust-manager.ts";
 export { WORKER_FORBIDDEN_TOOLS } from "./core/worker-tool-ceiling.ts";
+export { convertToLlm } from "./kernel/index.ts";
+// Compaction
+export {
+	type BranchPreparation,
+	type BranchSummaryEntry,
+	type BranchSummaryResult,
+	buildSessionContext,
+	type CollectEntriesResult,
+	type CompactionEntry,
+	type CompactionResult,
+	CURRENT_SESSION_VERSION,
+	type CustomEntry,
+	type CustomMessageEntry,
+	type CutPointResult,
+	calculateContextTokens,
+	collectEntriesForBranchSummary,
+	compact,
+	DEFAULT_COMPACTION_SETTINGS,
+	estimateTokens,
+	type FileEntry,
+	type FileOperations,
+	findCutPoint,
+	findTurnStartIndex,
+	type GenerateBranchSummaryOptions,
+	generateBranchSummary,
+	generateSummary,
+	getLastAssistantUsage,
+	getLatestCompactionEntry,
+	type ModelChangeEntry,
+	migrateSessionEntries,
+	type NewSessionOptions,
+	parseSessionEntries,
+	prepareBranchEntries,
+	type SessionContext,
+	type SessionEntry,
+	type SessionEntryBase,
+	type SessionHeader,
+	type SessionInfo,
+	type SessionInfoEntry,
+	SessionManager,
+	type SessionMessageEntry,
+	serializeConversation,
+	shouldCompact,
+	type ThinkingLevelChangeEntry,
+} from "./kernel/node.ts";
 // Main entry point
 export { type MainOptions, main } from "./main.ts";
 // Run modes for programmatic SDK usage
@@ -662,16 +662,16 @@ export {
 	type VisualTruncateResult,
 } from "./modes/interactive/components/index.ts";
 // Theme utilities for custom tools and extensions
+export { initTheme } from "./presentation/theme/theme.ts";
 export {
 	getLanguageFromPath,
 	getMarkdownTheme,
 	getSelectListTheme,
 	getSettingsListTheme,
 	highlightCode,
-	initTheme,
 	Theme,
 	type ThemeColor,
-} from "./modes/interactive/theme/theme.ts";
+} from "./presentation/theme-model.ts";
 // Clipboard utilities
 export { copyToClipboard } from "./utils/clipboard.ts";
 export { parseFrontmatter, stripFrontmatter } from "./utils/frontmatter.ts";

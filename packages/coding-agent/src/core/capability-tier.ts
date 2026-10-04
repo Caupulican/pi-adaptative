@@ -21,7 +21,6 @@
  * session, and expires with the same thirty-day recency the store applies to teach rules: a model
  * earns its way back by not repeating the evidence, never by a list edit.
  */
-import type { ModelCapabilityClass } from "./model-capability.ts";
 
 export type CapabilityTier = "frontier" | "strong" | "constrained";
 
@@ -105,3 +104,5 @@ export function isCapabilityTierDemotion(value: unknown): value is CapabilityTie
 	const record = value as Record<string, unknown>;
 	return record.tier === "strong" && typeof record.reason === "string" && typeof record.at === "string";
 }
+
+export type ModelCapabilityClass = "full" | "lean" | "minimal" | "chat";

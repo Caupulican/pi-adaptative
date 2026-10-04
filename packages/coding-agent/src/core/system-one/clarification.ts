@@ -13,7 +13,7 @@
  */
 
 import type { GoalClarification, GoalClarificationCategory } from "../goals/goal-state.ts";
-import type { HumanInputQuestion } from "../human-input.ts";
+import type { HumanInputQuestion } from "../human-input-request.ts";
 import { compileDecisionProgramForCheckpoint } from "../steering/programs.ts";
 import { settledNoul } from "./policy.ts";
 

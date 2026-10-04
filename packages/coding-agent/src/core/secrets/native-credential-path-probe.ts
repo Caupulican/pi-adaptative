@@ -1,7 +1,7 @@
 import { realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import type { ExecutionContext, ExecutionPathAuthority } from "@caupulican/pi-agent-core";
+import type { ExecutionContext, ExecutionPathAuthority } from "../../kernel/index.ts";
 import { getWorkTenantDir } from "../agent-paths.ts";
 import {
 	CredentialPathPolicy,

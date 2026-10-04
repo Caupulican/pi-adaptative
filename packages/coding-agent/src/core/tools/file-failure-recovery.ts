@@ -4,7 +4,7 @@ import {
 	type AgentToolFailureRecoveryAuthority,
 	type AgentToolFailureRecoveryTarget,
 	createAgentToolFailureRecoveryAuthority,
-} from "@caupulican/pi-agent-core/types";
+} from "../../kernel/types.ts";
 import type { PathInputOptions } from "../../utils/paths.ts";
 import { resolveToCwd } from "./path-utils.ts";
 

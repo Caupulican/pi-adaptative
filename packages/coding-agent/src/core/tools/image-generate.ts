@@ -1,6 +1,6 @@
-import type { AgentTool } from "@caupulican/pi-agent-core";
 import { MAX_CODEX_EDIT_IMAGES, MAX_CODEX_IMAGE_PROMPT_BYTES } from "@caupulican/pi-ai";
 import { Type } from "typebox";
+import type { AgentTool } from "../../kernel/index.ts";
 import { defineTool } from "../extensions/types.ts";
 import {
 	ImageGenerationController,

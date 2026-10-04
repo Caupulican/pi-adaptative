@@ -11,7 +11,7 @@
 import type { GatedWriteOutcome } from "../reflection-controller.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { checkSkillEvolutionEligibility, isValidSkillName } from "../session-skill-policy.ts";
-import type { AutoLearnSettings, AutonomyMode } from "../settings-manager.ts";
+import type { AutoLearnSettings, AutonomyMode } from "../settings/settings-schema.ts";
 import type { SkillRepairInput, SkillRepairResult } from "../skill-repair.ts";
 import { MAX_ACTIVE_SKILL_BODY_BYTES } from "../skill-vault.ts";
 import { MAX_SKILL_DESCRIPTION_LENGTH, MAX_SKILL_NAME_LENGTH } from "../skills.ts";

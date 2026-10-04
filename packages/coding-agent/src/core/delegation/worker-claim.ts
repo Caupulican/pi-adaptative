@@ -1,9 +1,9 @@
 import path from "node:path";
-import { DEFAULT_MAX_BYTES } from "@caupulican/pi-agent-core/truncate";
+import { DEFAULT_MAX_BYTES } from "../../kernel/utils/truncate.ts";
 import type { CapabilityEnvelope, GateOutcome, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
 import { HOST_FINDING_BLOCKER_PREFIXES } from "../autonomy/host-finding-prefixes.ts";
 import { checkPathScope } from "../autonomy/path-scope.ts";
-import { INCONCLUSIVE_LINE_PREFIX } from "../extensions/types.ts";
+import { INCONCLUSIVE_LINE_PREFIX } from "../extensions/managed-lane-records.ts";
 import { normalizeEvidenceBundleForStorage } from "../research/evidence-bundle.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { utf8PrefixByBytes } from "../util/bounded-value.ts";

@@ -1,4 +1,4 @@
-import type { HumanInputRequest } from "./human-input.ts";
+import type { HumanInputRequest } from "./human-input-request.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
 
 export interface HumanInputActivity {

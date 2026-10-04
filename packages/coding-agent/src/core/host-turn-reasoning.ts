@@ -11,11 +11,11 @@
  * The resolution is a pure function so the ladder arithmetic is testable without a provider.
  */
 
-import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { Api, Model, ModelThinkingLevel } from "@caupulican/pi-ai";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
+import type { AgentMessage } from "../kernel/index.ts";
 import { REASONING_LADDER, type ReasoningEffortMap, type ReasoningLevel } from "./cost-guard.ts";
-import type { ThinkingLevel } from "./settings-manager.ts";
+import type { ThinkingLevel } from "./settings/settings-schema.ts";
 
 /**
  * The completion messages the host delivers on its own initiative. Both carry a finished result the

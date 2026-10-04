@@ -1,14 +1,15 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { loadEntriesFromFile, type SessionEntry } from "@caupulican/pi-agent-core/session";
-import { getSessionEntryUsage } from "@caupulican/pi-agent-core/usage";
 import type { Usage } from "@caupulican/pi-ai";
+import type { SessionEntry } from "../../kernel/session/session-entries.ts";
+import { loadEntriesFromFile } from "../../kernel/session/session-manager.ts";
+import { getSessionEntryUsage } from "../../kernel/usage.ts";
 import {
 	SEMANTIC_USAGE_CUSTOM_TYPE,
 	type SemanticUsageReport,
 	SPAWNED_USAGE_CUSTOM_TYPE,
 	type SpawnedUsageReport,
-} from "../agent-session-contracts.ts";
+} from "./usage-records.ts";
 
 export type DailyUsageWindow = {
 	startMs: number;

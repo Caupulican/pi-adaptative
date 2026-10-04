@@ -1,5 +1,5 @@
 import type { RouteSelectionSource } from "../autonomy/contracts.ts";
-import type { ModelRouterPoolPreference, ModelRouterSelectionMode } from "../settings-manager.ts";
+import type { ModelRouterPoolPreference, ModelRouterSelectionMode } from "../settings/settings-schema.ts";
 import { formatRouterPoolSourceLabel, type RouterPoolSource } from "./candidate-pool.ts";
 import type { ModelRouterIntent } from "./intent-classifier.ts";
 

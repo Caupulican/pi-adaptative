@@ -1,5 +1,5 @@
 import { Box, Container, Markdown, type MarkdownTheme } from "@caupulican/pi-tui";
-import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { getMarkdownTheme, theme } from "../../../presentation/theme-model.ts";
 import { applyMarkdownTransform, type MarkdownTransformFn, type MarkdownTransformSlot } from "./markdown-transform.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";

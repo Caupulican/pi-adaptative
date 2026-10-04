@@ -454,7 +454,7 @@ const simpleRegistry = ModelRegistry.inMemory(authStorage);
 
 ### System Prompt
 
-Use a `ResourceLoader` to override the system prompt:
+Use a `ResourceLoader` to override the system prompt. `DefaultResourceLoader` always takes `cwd`, `agentDir` and the session's `settingsManager`; the snippets in this guide show only the option they explain.
 
 ```typescript
 import { createAgentSession, DefaultResourceLoader } from "@caupulican/pi-adaptative";
@@ -849,11 +849,13 @@ Use `DefaultResourceLoader` to discover extensions, skills, prompts, themes, and
 import {
   DefaultResourceLoader,
   getAgentDir,
+  SettingsManager,
 } from "@caupulican/pi-adaptative";
 
 const loader = new DefaultResourceLoader({
   cwd,
   agentDir: getAgentDir(),
+  settingsManager: SettingsManager.create(cwd, getAgentDir()),
 });
 await loader.reload();
 
@@ -872,7 +874,13 @@ const contextFiles = loader.getAgentsFiles().agentsFiles;
 interface CreateAgentSessionResult {
   // The session
   session: AgentSession;
-  
+
+  // The session's manager; the session does not expose it
+  sessionManager: SessionManager;
+
+  // The current extension runner; a reload replaces it, so call this per use
+  getExtensionRunner(): ExtensionRunner;
+
   // Extensions result (for runner setup)
   extensionsResult: LoadExtensionsResult;
   

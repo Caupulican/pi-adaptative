@@ -10,7 +10,7 @@
 
 import { worktreesDir } from "../agent-paths.ts";
 import { isWorkerSession } from "../session-role.ts";
-import type { SettingsManager } from "../settings-manager.ts";
+import type { ResolvedWorktreeSyncSettings } from "../settings/settings-schema.ts";
 import {
 	createDefaultWorktreeSyncExec,
 	reconcile,
@@ -20,10 +20,15 @@ import {
 import { getBoundWorktreeLaneKey } from "./lane-binding.ts";
 import { type EpochWatcherHandle, startEpochWatcher } from "./watcher.ts";
 
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface RuntimeSettingsSource {
+	getWorktreeSyncSettings(): ResolvedWorktreeSyncSettings;
+}
+
 export interface WorktreeSyncEngineConfig {
 	cwd: string;
 	agentDir: string;
-	settingsManager: SettingsManager;
+	settingsManager: RuntimeSettingsSource;
 	sessionId?: string;
 	signal?: AbortSignal;
 	/** When System One bound this task to local commits, land and rebase onto this branch. */

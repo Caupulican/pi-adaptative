@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { PI_ORCHESTRATION_AGENT_ID_ENV } from "../process-identity.ts";
-import { type CollaborationJob, collaborationLaneId, type NewCollaborationJob } from "./job-store.ts";
+import { type CollaborationJob, collaborationLaneId, type NewCollaborationJob } from "./job-record.ts";
 import { buildLaunchProfileFlags } from "./launch-profile.ts";
 
 function digest(value: unknown): string {

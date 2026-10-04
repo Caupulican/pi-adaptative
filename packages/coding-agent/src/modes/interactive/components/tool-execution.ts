@@ -1,9 +1,3 @@
-import {
-	compactRetainedDetails,
-	MAX_TUI_RETAINED_DETAILS_BYTES,
-	type ToolCallRepairInfo,
-} from "@caupulican/pi-agent-core";
-import { truncateHead } from "@caupulican/pi-agent-core/truncate";
 import type { ImageContent, TextContent } from "@caupulican/pi-ai";
 import {
 	Box,
@@ -22,11 +16,17 @@ import {
 	formatCollapsedToolOutputHint,
 	getTextOutput as getRenderedTextOutput,
 } from "../../../core/tools/render-utils.ts";
+import {
+	compactRetainedDetails,
+	MAX_TUI_RETAINED_DETAILS_BYTES,
+	type ToolCallRepairInfo,
+} from "../../../kernel/index.ts";
+import { truncateHead } from "../../../kernel/utils/truncate.ts";
+import { type ThemeBg, theme } from "../../../presentation/theme-model.ts";
+import { renderTitleBadge, titleBadge } from "../../../presentation/tool-title.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
-import { type ThemeBg, theme } from "../theme/theme.ts";
 import { questionConversationText } from "./question-conversation.ts";
-import { renderTitleBadge, titleBadge } from "./tool-title.ts";
 import { createWorkbenchToolPreview, type PreviewAttribution } from "./workbench-tool-preview.ts";
 
 export interface ToolExecutionOptions {

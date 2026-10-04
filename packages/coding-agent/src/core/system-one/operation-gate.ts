@@ -13,7 +13,7 @@
  */
 
 import { tmpdir } from "node:os";
-import { getToolExecutionKey } from "@caupulican/pi-agent-core/tool-failure-memory";
+import { getToolExecutionKey } from "../../kernel/tool-failure-memory.ts";
 import type { EdgeOperation } from "../autonomy/edge-policy.ts";
 import {
 	askOperation,

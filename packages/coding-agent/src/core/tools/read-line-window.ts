@@ -1,5 +1,5 @@
-import { DEFAULT_MAX_BYTES } from "@caupulican/pi-agent-core/truncate";
 import { StreamingLineDecoder } from "@caupulican/pi-ai/streaming-lines";
+import { DEFAULT_MAX_BYTES } from "../../kernel/utils/truncate.ts";
 
 export interface ReadLine {
 	text: string;

@@ -37,8 +37,8 @@
 
 import { randomBytes } from "node:crypto";
 import { basename } from "node:path";
-import { createSilenceWatchdog } from "@caupulican/pi-agent-core/reliability";
 import { type ChildProcess, type SpawnOptions, spawn } from "child_process";
+import { createSilenceWatchdog } from "../../kernel/reliability/index.ts";
 import {
 	createPowerShellHostEnvironment,
 	POWERSHELL_ARGS,

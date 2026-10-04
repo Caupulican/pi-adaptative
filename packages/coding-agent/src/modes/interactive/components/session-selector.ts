@@ -1,5 +1,4 @@
 import * as os from "node:os";
-import type { SessionInfo, SessionListProgress } from "@caupulican/pi-agent-core/node";
 import {
 	type Component,
 	Container,
@@ -14,10 +13,11 @@ import {
 import { getAgentDir } from "../../../config.ts";
 import { KeybindingsManager } from "../../../core/keybindings.ts";
 import { deleteForegroundSessionBundle } from "../../../core/session-artifact-bundle.ts";
+import type { SessionInfo, SessionListProgress } from "../../../kernel/node.ts";
+import { keyHint, keyText } from "../../../presentation/keybinding-hints.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import { canonicalizePath as _canonicalizePath } from "../../../utils/paths.ts";
-import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint, keyText } from "./keybinding-hints.ts";
 import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.ts";
 
 type SessionScope = "current" | "all";

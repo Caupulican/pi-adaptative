@@ -1,6 +1,6 @@
 import type { Tool } from "../../types.ts";
 import { escapeRegExp } from "../regexp.ts";
-import { getValidator } from "../validation.ts";
+import { getValidator } from "../validator-cache.ts";
 import { isRecord } from "../value-guards.ts";
 import {
 	analyzeToolArgumentErrors,

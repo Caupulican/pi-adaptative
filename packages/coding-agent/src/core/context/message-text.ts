@@ -1,5 +1,5 @@
-import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { AssistantMessage } from "@caupulican/pi-ai";
+import type { AgentMessage } from "../../kernel/index.ts";
 
 export function textContentPrefix(content: readonly unknown[], maxChars = Number.POSITIVE_INFINITY): string {
 	const chunks: string[] = [];

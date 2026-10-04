@@ -1,5 +1,5 @@
-import type { SessionManager } from "@caupulican/pi-agent-core/session";
-import type { AgentMessage } from "@caupulican/pi-agent-core/types";
+import type { SessionManager } from "../kernel/session/session-manager.ts";
+import type { AgentMessage } from "../kernel/types.ts";
 
 /**
  * Session custom entry marking where a unit of work began (conversation-continuity stage 2, the

@@ -13,7 +13,7 @@ import type {
 	UsageOverview,
 	UsageWindow,
 } from "../../../core/provider-admission/usage-overview.ts";
-import { getSelectListTheme, theme } from "../theme/theme.ts";
+import { getSelectListTheme, theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { SelectorNavigationFooter } from "./selector-list.ts";
 

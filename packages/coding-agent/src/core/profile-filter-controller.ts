@@ -8,8 +8,8 @@
  * inert-extension warnings and profile-denied-extension count; everything else is read through deps.
  */
 
-import type { Agent, ThinkingLevel } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { Agent, ThinkingLevel } from "../kernel/index.ts";
+import type { SessionManager } from "../kernel/node.ts";
 import {
 	type ExtensionImportAuthority,
 	isDefaultOnBundledExtension,
@@ -18,15 +18,27 @@ import {
 import type { Extension } from "./extensions/index.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel, resolveProfileModelSettings } from "./model-resolver.ts";
+import type { ProfileRegistry } from "./profile-registry.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
-import {
-	matchesResourceProfilePattern,
-	type ResourceProfileFilterSettings,
-	type SettingsManager,
-} from "./settings-manager.ts";
+import { matchesResourceProfilePattern } from "./settings/settings-rules.ts";
+import type { ResourceProfileFilterSettings, ResourceProfileKind } from "./settings/settings-schema.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ProfileFilterControllerSettingsSource {
+	getActiveResourceProfileNames(): string[];
+	getDefaultModel(): string | undefined;
+	getDefaultProvider(): string | undefined;
+	getDefaultThinkingLevel(): ThinkingLevel | undefined;
+	getProfileRegistry(): ProfileRegistry;
+	getResourceProfileFilter(kind: ResourceProfileKind): Required<ResourceProfileFilterSettings>;
+	hasExplicitActiveResourceProfileSelection(): boolean;
+	isResourceAllowedByProfile(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
+	isResourceDeniedByActiveProfile(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
+	isResourceExplicitlyDisabled(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
+}
 
 export interface ProfileFilterControllerDeps {
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): ProfileFilterControllerSettingsSource;
 	getResourceLoader(): ResourceLoader;
 	getModelRegistry(): ModelRegistry;
 	getCwd(): string;

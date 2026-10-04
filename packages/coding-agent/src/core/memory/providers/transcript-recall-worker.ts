@@ -6,7 +6,7 @@ import {
 	getDefaultSessionDir,
 	isAutoLearnSessionId,
 	loadEntriesFromFile,
-} from "@caupulican/pi-agent-core/node";
+} from "../../../kernel/node.ts";
 import { type TranscriptDoc, TranscriptIndex } from "../transcript-index.ts";
 import {
 	isTranscriptRecallWorkerRequest,

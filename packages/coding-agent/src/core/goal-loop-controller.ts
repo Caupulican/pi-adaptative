@@ -13,7 +13,7 @@
  * a different recovery approach even when a model omits a voluntary `no_progress` call.
  */
 
-import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
+import { AgentBusyError } from "../kernel/agent.ts";
 import type {
 	GoalContinuationLoopOptions,
 	GoalContinuationLoopResult,

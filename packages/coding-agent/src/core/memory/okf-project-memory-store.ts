@@ -10,7 +10,7 @@ import {
 	validateOkfMemoryDocumentInput,
 } from "../context/okf-memory.ts";
 import { loadOkfMemoryBundle } from "../context/okf-memory-provider.ts";
-import { getDirectoryResourceProfileInfo } from "../settings-manager.ts";
+import { getDirectoryResourceProfileInfo } from "../settings/settings-rules.ts";
 import { isMissingFileError, withFileLock, writeFileAtomic } from "../util/atomic-file.ts";
 import { readBoundedTextFile } from "../util/bounded-file.ts";
 

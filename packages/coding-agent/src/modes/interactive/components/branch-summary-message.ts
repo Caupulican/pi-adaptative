@@ -1,8 +1,8 @@
-import type { BranchSummaryMessage } from "@caupulican/pi-agent-core";
 import type { MarkdownTheme } from "@caupulican/pi-tui";
-import { getMarkdownTheme } from "../theme/theme.ts";
+import type { BranchSummaryMessage } from "../../../kernel/index.ts";
+import { keyText } from "../../../presentation/keybinding-hints.ts";
+import { getMarkdownTheme } from "../../../presentation/theme-model.ts";
 import { ExpandableMarkdownMessageComponent } from "./expandable-markdown-message.ts";
-import { keyText } from "./keybinding-hints.ts";
 
 /**
  * Component that renders a branch summary message with collapsed/expanded state.

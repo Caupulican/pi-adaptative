@@ -1,7 +1,7 @@
 import path from "node:path";
-import type { AgentLoopConfig, AgentTool, BeforeToolCallResult } from "@caupulican/pi-agent-core";
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { type Static, Type } from "typebox";
+import type { AgentLoopConfig, AgentTool, BeforeToolCallResult } from "../../kernel/index.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../context/path-alias-tool-wrap.ts";
@@ -25,7 +25,7 @@ import {
 	wrapToolWithCredentialExposureGuard,
 } from "../secrets/credential-exposure-guard.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
-import { matchesResourceProfilePattern } from "../settings-manager.ts";
+import { matchesResourceProfilePattern } from "../settings/settings-rules.ts";
 import { wrapToolWithVerification } from "../system-one/session-verification-host.ts";
 import type { VerificationCoordinator } from "../system-one/verification-coordinator.ts";
 import { READ_ONLY_SHELL_TOOL_NAMES, toolSurvivesReadOnly } from "../tool-capability-policy.ts";

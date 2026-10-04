@@ -1,4 +1,4 @@
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { SessionManager } from "../../kernel/node.ts";
 import { createSessionTaskDirectoryStore, TASK_DIRECTORY_STATE_CUSTOM_TYPE } from "./session-task-directory-store.ts";
 import { getLatestTaskStepsStateSnapshot, TASK_STEPS_STATE_CUSTOM_TYPE } from "./session-task-state.ts";
 import { resolveTaskDirectoryContext, type TaskDirectoryState } from "./task-directory-state.ts";

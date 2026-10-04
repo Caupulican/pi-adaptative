@@ -1,7 +1,7 @@
 import { type Stats, statSync } from "node:fs";
 import { performance } from "node:perf_hooks";
-import { composeRequestSystemPrompt } from "@caupulican/pi-agent-core/provider-request-planner";
 import { minimatch } from "minimatch";
+import { composeRequestSystemPrompt } from "../kernel/provider-request-planner.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { OWNER_PRECEDENCE_POLICY } from "./provider-prompt-contracts.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";

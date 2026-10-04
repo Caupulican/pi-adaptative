@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { HOST_TRANSIENT_CLEARED_DETAILS } from "@caupulican/pi-agent-core";
-import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
-import type { AgentContextPlan, AgentMessage } from "@caupulican/pi-agent-core/types";
+import type { AgentContextPlan } from "../kernel/index.ts";
+import { HOST_TRANSIENT_CLEARED_DETAILS } from "../kernel/index.ts";
+import { createCustomMessage } from "../kernel/messages.ts";
+import type { AgentMessage } from "../kernel/types.ts";
 import {
 	TASK_AUTOMATION_CONTEXT_CLEARED,
 	TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE,

@@ -1,21 +1,24 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { WorkerDirectoryAdmission } from "../delegation/worker-directory-admission.ts";
-import type { ManagedLaneEvent } from "../extensions/types.ts";
+import type { ManagedLaneEvent } from "../extensions/managed-lane-records.ts";
 import { WORKER_CAPABILITY_INSUFFICIENT_SKIP_REASON } from "../model-capability.ts";
 import { type CollaborationBackend, CollaborationBackendError, type CollaborationPane } from "./backend.ts";
 import {
-	boundCollaborationEvidence,
 	type CollaborationAgent,
 	type CollaborationJob,
-	type CollaborationJobStore,
 	type CollaborationTaskCorrelation,
 	collaborationLaneId,
 	type NewCollaborationJob,
-} from "./job-store.ts";
+} from "./job-record.ts";
+import { boundCollaborationEvidence, type CollaborationJobStore } from "./job-store.ts";
 import { assertCollaborationReportCapability } from "./launch-profile.ts";
 import { bootstrapCollaborationPeers } from "./peer-bootstrap.ts";
-import { assertCollaborationNativeIdentity, classifyPaneOwnership } from "./session-recovery.ts";
+import {
+	assertCollaborationNativeIdentity,
+	type CollaborationBackendFactory,
+	classifyPaneOwnership,
+} from "./session-recovery.ts";
 import { type CollaborationStartIntent, collaborationSpecializationKey } from "./specialist-selection.ts";
 import { waitForSteeringSettlement } from "./turn-settlement.ts";
 
@@ -34,7 +37,7 @@ const MEMBER_LAUNCH_RETRY_LIMIT = 1;
 export interface CollaborationCoordinatorDeps {
 	store: CollaborationJobStore;
 	/** Creation is allowed only for an already-admitted new job, never recovery or cleanup. */
-	backend(job: CollaborationJob, create?: boolean): Promise<CollaborationBackend>;
+	backend: CollaborationBackendFactory;
 	launchTurn(job: CollaborationJob, agent: CollaborationAgent, answer?: CollaborationAnswer): Promise<void>;
 	report(event: ManagedLaneEvent): void;
 }

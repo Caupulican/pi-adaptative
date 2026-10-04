@@ -1,4 +1,4 @@
-import type { CompactionEntry, SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
+import type { CompactionEntry, SessionEntry, SessionManager } from "../kernel/node.ts";
 
 export interface SessionEntryIndex {
 	leafId: string | null;

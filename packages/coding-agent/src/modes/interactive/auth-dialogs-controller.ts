@@ -4,7 +4,7 @@
  * Extracted verbatim from interactive-mode.ts (god-file decomposition). Owns the /login and /logout
  * command flows: provider selection, subscription (OAuth) login dialogs, API-key login dialogs, the
  * Amazon Bedrock setup notice, the OAuth in-dialog select prompt, and post-login model adoption. It
- * holds NO state of its own — every credential/provider fact lives in session.modelRegistry.authStorage
+ * holds NO state of its own — every credential/provider fact lives in the model registry's authStorage
  * — so it takes narrow deps (a live session accessor plus a UI callback surface, including the
  * editor-overlay-backed showSelector and the shared EditorOverlayHost for dialog swaps) rather than
  * the whole InteractiveMode instance.
@@ -22,14 +22,16 @@ import {
 	verifyBedrockScope,
 } from "../../core/bedrock-scope.ts";
 import { type BedrockSsoLoginOptions, loginBedrockSsoProfile } from "../../core/bedrock-sso-login.ts";
+import type { ModelRegistry } from "../../core/model-registry.ts";
 import { cliProviderAliases, defaultModelPerProvider } from "../../core/model-resolver.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import { TYPESAFE_PROVIDER } from "../../core/review/typesafe-contract.ts";
+import type { SettingsManager } from "../../core/settings-manager.ts";
+import { theme } from "../../presentation/theme-model.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
 import type { EditorOverlayHost } from "./editor-overlay-host.ts";
-import { theme } from "./theme/theme.ts";
 
 function isUnknownModel(model: Model<any> | undefined): boolean {
 	return !!model && model.provider === "unknown" && model.id === "unknown" && model.api === "unknown";
@@ -75,6 +77,8 @@ export interface AuthDialogsControllerUi {
 
 export interface AuthDialogsControllerDeps {
 	getSession(): AgentSession;
+	getSettingsManager(): SettingsManager;
+	getModelRegistry(): ModelRegistry;
 	ui: AuthDialogsControllerUi;
 	loginBedrockSso?: (profile: string, options?: BedrockSsoLoginOptions) => Promise<void>;
 	verifyBedrockScope?: typeof verifyBedrockScope;
@@ -93,6 +97,12 @@ export class AuthDialogsController {
 
 	private get session(): AgentSession {
 		return this.deps.getSession();
+	}
+	private get settingsManager(): SettingsManager {
+		return this.deps.getSettingsManager();
+	}
+	private get modelRegistry(): ModelRegistry {
+		return this.deps.getModelRegistry();
 	}
 	private get ui(): AuthDialogsControllerUi {
 		return this.deps.ui;
@@ -167,7 +177,7 @@ export class AuthDialogsController {
 	}
 
 	private getLoginProviderOptions(authType?: "oauth" | "api_key"): AuthSelectorProvider[] {
-		const authStorage = this.session.modelRegistry.authStorage;
+		const authStorage = this.modelRegistry.authStorage;
 		const oauthProviders = authStorage.getOAuthProviders();
 		const oauthProviderIds = new Set(oauthProviders.map((provider) => provider.id));
 		const options: AuthSelectorProvider[] = oauthProviders.map((provider) => ({
@@ -177,14 +187,14 @@ export class AuthDialogsController {
 			loginLabel: provider.loginLabel,
 		}));
 
-		const modelProviders = new Set(this.session.modelRegistry.getAll().map((model) => model.provider));
+		const modelProviders = new Set(this.modelRegistry.getAll().map((model) => model.provider));
 		for (const providerId of modelProviders) {
 			if (!isApiKeyLoginProvider(providerId, oauthProviderIds)) {
 				continue;
 			}
 			options.push({
 				id: providerId,
-				name: this.session.modelRegistry.getProviderDisplayName(providerId),
+				name: this.modelRegistry.getProviderDisplayName(providerId),
 				authType: "api_key",
 			});
 		}
@@ -197,7 +207,7 @@ export class AuthDialogsController {
 	}
 
 	private getLogoutProviderOptions(): AuthSelectorProvider[] {
-		const authStorage = this.session.modelRegistry.authStorage;
+		const authStorage = this.modelRegistry.authStorage;
 		const options: AuthSelectorProvider[] = [];
 
 		for (const providerId of authStorage.list()) {
@@ -207,7 +217,7 @@ export class AuthDialogsController {
 			}
 			options.push({
 				id: providerId,
-				name: this.session.modelRegistry.getProviderDisplayName(providerId),
+				name: this.modelRegistry.getProviderDisplayName(providerId),
 				authType: credential.type,
 			});
 		}
@@ -247,7 +257,7 @@ export class AuthDialogsController {
 
 	private async logoutProvider(providerOption: AuthSelectorProvider): Promise<void> {
 		try {
-			this.session.modelRegistry.authStorage.logout(providerOption.id);
+			this.modelRegistry.authStorage.logout(providerOption.id);
 			await this.session.refreshModelsAfterAuthChange(providerOption.id);
 			await this.ui.updateAvailableProviderCount();
 			const message =
@@ -314,7 +324,7 @@ export class AuthDialogsController {
 			};
 			const selector = new OAuthSelectorComponent(
 				mode,
-				this.session.modelRegistry.authStorage,
+				this.modelRegistry.authStorage,
 				providerOptions,
 				async (providerId: string) => {
 					if (!finish()) return;
@@ -324,7 +334,7 @@ export class AuthDialogsController {
 				() => {
 					if (finish()) onCancel();
 				},
-				mode === "login" ? (providerId) => this.session.modelRegistry.getProviderAuthStatus(providerId) : undefined,
+				mode === "login" ? (providerId) => this.modelRegistry.getProviderAuthStatus(providerId) : undefined,
 			);
 			return { component: selector, focus: selector };
 		});
@@ -395,7 +405,7 @@ export class AuthDialogsController {
 		let selectedModel: Model<any> | undefined;
 		let selectionError: string | undefined;
 		if (isUnknownModel(previousModel)) {
-			const availableModels = this.session.modelRegistry.getAvailable();
+			const availableModels = this.modelRegistry.getAvailable();
 			const providerModels = availableModels.filter((model) => model.provider === providerId);
 			if (!hasDefaultModelProvider(providerId)) {
 				selectionError = `${actionLabel}, but no default model is configured for provider "${providerId}". Use /model to select a model.`;
@@ -460,13 +470,13 @@ export class AuthDialogsController {
 	}
 
 	private getConfiguredBedrockProfile(): string | undefined {
-		return process.env.AWS_PROFILE?.trim() || this.session.settingsManager.getBedrockScopeSettings()?.profile;
+		return process.env.AWS_PROFILE?.trim() || this.settingsManager.getBedrockScopeSettings()?.profile;
 	}
 
 	private getConfiguredBedrockRegion(): string {
 		return (
 			process.env.AWS_REGION?.trim() ||
-			this.session.settingsManager.getBedrockScopeSettings()?.region ||
+			this.settingsManager.getBedrockScopeSettings()?.region ||
 			process.env.AWS_DEFAULT_REGION?.trim() ||
 			"us-east-1"
 		);
@@ -475,8 +485,8 @@ export class AuthDialogsController {
 	private async verifyAndActivateBedrockScope(
 		request: BedrockScopeVerificationRequest,
 	): Promise<Awaited<ReturnType<typeof verifyBedrockScope>>> {
-		const scope = await (this.deps.verifyBedrockScope ?? verifyBedrockScope)(request, this.session.modelRegistry);
-		activateVerifiedBedrockScope(this.session.settingsManager, this.session.modelRegistry, scope);
+		const scope = await (this.deps.verifyBedrockScope ?? verifyBedrockScope)(request, this.modelRegistry);
+		activateVerifiedBedrockScope(this.settingsManager, this.modelRegistry, scope);
 		return scope;
 	}
 
@@ -484,7 +494,7 @@ export class AuthDialogsController {
 		scope: Awaited<ReturnType<typeof verifyBedrockScope>>,
 		message: string,
 	): Promise<void> {
-		this.session.modelRegistry.refresh();
+		this.modelRegistry.refresh();
 		await this.ui.updateAvailableProviderCount();
 		this.ui.invalidateFooter();
 		this.ui.updateEditorBorderColor();
@@ -609,7 +619,7 @@ export class AuthDialogsController {
 			async () => {
 				const apiKey = (await dialog.showPrompt("Enter API key:")).trim();
 				if (!apiKey) throw new Error("API key cannot be empty.");
-				const saved = this.session.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
+				const saved = this.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
 				if (saved === false)
 					throw new Error(
 						"API key was not saved; it is available only in this session. Check credential storage permissions and retry.",
@@ -653,7 +663,7 @@ export class AuthDialogsController {
 
 	private async showLoginDialog(providerId: string, providerName: string): Promise<void> {
 		this.cancelActiveDialog();
-		const providerInfo = this.session.modelRegistry.authStorage
+		const providerInfo = this.modelRegistry.authStorage
 			.getOAuthProviders()
 			.find((provider) => provider.id === providerId);
 		const previousModel = this.session.model;
@@ -685,7 +695,7 @@ export class AuthDialogsController {
 		await this.runMountedLoginDialog(
 			dialog,
 			() =>
-				this.session.modelRegistry.authStorage.login(providerId as OAuthProviderId, {
+				this.modelRegistry.authStorage.login(providerId as OAuthProviderId, {
 					onAuth: (info: { url: string; instructions?: string }) => {
 						dialog.showAuth(info.url, info.instructions);
 

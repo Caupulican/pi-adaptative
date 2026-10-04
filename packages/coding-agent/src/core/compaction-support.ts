@@ -6,22 +6,63 @@
  * persistence, notification, and cancellation; AgentSession keeps compatibility delegations at
  * established regression seams.
  */
+
+import type { Api, Context, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
+import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
 import {
 	type CompactionSettings,
 	type StructuredCompactionRequest,
 	summarizerCanIngest,
-} from "@caupulican/pi-agent-core/compaction/compaction";
-import { convertToLlm } from "@caupulican/pi-agent-core/messages";
-import type { AgentMessage, ResolvedProviderRequestAuth, ThinkingLevel } from "@caupulican/pi-agent-core/types";
-import type { Api, Context, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
-import { materializeProviderRequest } from "@caupulican/pi-ai/stream";
+} from "../kernel/compaction/compaction.ts";
+import type { ResolvedProviderRequestAuth } from "../kernel/index.ts";
+import { convertToLlm } from "../kernel/messages.ts";
+import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
+import type {
+	HmoeIndependence,
+	HmoePreference,
+	HmoePreset,
+	HmoeTeamStrategy,
+	HmoeWeights,
+} from "./expert-routing/vocabulary.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
 import { resolveProviderAccountKey } from "./provider-admission/account-key.ts";
 import { materializeRequestAuth, type RequestAuth } from "./request-auth.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
-import type { SettingsManager } from "./settings-manager.ts";
+import type { ModelRouterPoolPreference, ModelRouterSelectionMode } from "./settings/settings-schema.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface CompactionSupportSettingsSource {
+	getCompactionModel(): string;
+	getCompactionSettings(): {
+		enabled: boolean;
+		reserveTokens: number;
+		keepRecentTokens: number;
+		triggerPercent: number;
+	};
+	getModelRouterSettings(): {
+		enabled: boolean;
+		selectionMode: ModelRouterSelectionMode;
+		poolPreference: ModelRouterPoolPreference;
+		cheapModel?: string;
+		mediumModel?: string;
+		expensiveModel?: string;
+		learningModel?: string;
+		executorModel?: string;
+		fitnessGate: boolean;
+		cheapThinking?: ThinkingLevel;
+		mediumThinking?: ThinkingLevel;
+		expensiveThinking?: ThinkingLevel;
+		executorThinking?: ThinkingLevel;
+		hmoePreset?: HmoePreset;
+		hmoeTeamStrategy?: HmoeTeamStrategy;
+		hmoeIndependence?: HmoeIndependence;
+		hmoePreference?: HmoePreference;
+		hmoeWeights?: HmoeWeights;
+	};
+	hasExplicitCompactionTriggerPercent(): boolean;
+}
 
 const XAI_SUBSCRIPTION_COMPACTION_TRIGGER_PERCENT = 0.8;
 
@@ -35,7 +76,7 @@ function tierAwareCompactionTriggerPercent(
 	model: Model<Api>,
 	contextWindow: number,
 	triggerPercent: number | undefined,
-	settingsManager: SettingsManager,
+	settingsManager: CompactionSupportSettingsSource,
 ): number | undefined {
 	if (settingsManager.hasExplicitCompactionTriggerPercent()) return undefined;
 	if (triggerPercent === undefined || triggerPercent <= 0 || triggerPercent >= 1) return undefined;
@@ -124,7 +165,7 @@ function extendSentContext(
 
 export interface CompactionSupportDeps {
 	getModel(): Model<Api> | undefined;
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): CompactionSupportSettingsSource;
 	getModelRegistry(): ModelRegistry;
 	/** True when the agent's streamFn is (or wraps) the raw streamSimple — auth must be explicit then. */
 	isRawStream(): boolean;

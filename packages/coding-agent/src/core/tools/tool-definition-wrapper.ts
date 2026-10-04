@@ -1,5 +1,5 @@
-import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { TSchema } from "typebox";
+import type { AgentTool } from "../../kernel/index.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 
 /** Wrap a ToolDefinition into an AgentTool for the core runtime. */

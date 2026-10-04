@@ -1,10 +1,15 @@
 import { copyFileSync, existsSync, constants as fsConstants, mkdirSync, unlinkSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { SessionManager } from "@caupulican/pi-agent-core/session";
+import { SessionManager } from "../kernel/session/session-manager.ts";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
-import type { ReplacedSessionContext, SessionShutdownEvent, SessionStartEvent } from "./extensions/index.ts";
+import type {
+	ExtensionRunner,
+	ReplacedSessionContext,
+	SessionShutdownEvent,
+	SessionStartEvent,
+} from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
@@ -22,6 +27,8 @@ export interface CreateAgentSessionRuntimeResult extends CreateAgentSessionResul
 
 interface AgentSessionRuntimeState {
 	session: AgentSession;
+	sessionManager: SessionManager;
+	getExtensionRunner(): ExtensionRunner;
 	services: AgentSessionServices;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
 	modelFallbackMessage?: string;
@@ -34,11 +41,22 @@ interface RuntimeShutdownProgress {
 	sessionDisposed: boolean;
 }
 
+/** What a session resource may read about the active session; the runtime that built the session supplies it. */
+export interface ActiveSessionContext {
+	readonly sessionManager: SessionManager;
+	readonly services: AgentSessionServices;
+	/** Live: a reload replaces the session's runner, so read this per use. */
+	readonly extensionRunner: ExtensionRunner;
+}
+
 /** Session-owned background runtime that must not survive a session replacement. */
 export interface AgentSessionRuntimeResource {
-	start(session: AgentSession): Promise<void>;
+	start(session: AgentSession, active: ActiveSessionContext): Promise<void>;
 	stop(): Promise<void> | void;
 }
+
+/** A session together with the live accessor for its extension runner, as shutdown needs both. */
+type RuntimeShutdownTarget = Pick<AgentSessionRuntimeState, "session" | "getExtensionRunner">;
 
 /** Internal activation hooks used by the interactive session-resume flow. */
 export interface AgentSessionSwitchOptions {
@@ -140,10 +158,12 @@ function extractUserMessageText(content: string | Array<{ type: string; text?: s
  * Session replacement methods construct the candidate runtime before retiring
  * the current one. If preparation fails, the working session remains active.
  */
-export class AgentSessionRuntime {
+export class AgentSessionRuntime implements ActiveSessionContext {
 	private rebindSession?: (session: AgentSession) => Promise<void>;
 	private beforeSessionInvalidate?: () => void;
 	private _session: AgentSession;
+	private _sessionManager: SessionManager;
+	private _getExtensionRunner: () => ExtensionRunner;
 	private _services: AgentSessionServices;
 	private readonly createRuntime: CreateAgentSessionRuntimeFactory;
 	private _diagnostics: AgentSessionRuntimeDiagnostic[];
@@ -160,18 +180,14 @@ export class AgentSessionRuntime {
 	};
 	private readonly sessionResources: AgentSessionRuntimeResource[] = [];
 
-	constructor(
-		_session: AgentSession,
-		_services: AgentSessionServices,
-		createRuntime: CreateAgentSessionRuntimeFactory,
-		_diagnostics: AgentSessionRuntimeDiagnostic[] = [],
-		_modelFallbackMessage?: string,
-	) {
-		this._session = _session;
-		this._services = _services;
+	constructor(initial: CreateAgentSessionRuntimeResult, createRuntime: CreateAgentSessionRuntimeFactory) {
+		this._session = initial.session;
+		this._sessionManager = initial.sessionManager;
+		this._getExtensionRunner = initial.getExtensionRunner;
+		this._services = initial.services;
 		this.createRuntime = createRuntime;
-		this._diagnostics = _diagnostics;
-		this._modelFallbackMessage = _modelFallbackMessage;
+		this._diagnostics = initial.diagnostics;
+		this._modelFallbackMessage = initial.modelFallbackMessage;
 	}
 
 	get services(): AgentSessionServices {
@@ -180,6 +196,16 @@ export class AgentSessionRuntime {
 
 	get session(): AgentSession {
 		return this._session;
+	}
+
+	/** The current session's manager; replaced together with the session. */
+	get sessionManager(): SessionManager {
+		return this._sessionManager;
+	}
+
+	/** The current session's extension runner; a reload swaps it, so read it per use. */
+	get extensionRunner(): ExtensionRunner {
+		return this._getExtensionRunner();
 	}
 
 	get cwd(): string {
@@ -225,7 +251,7 @@ export class AgentSessionRuntime {
 		reason: "new" | "resume",
 		targetSessionFile?: string,
 	): Promise<{ cancelled: boolean }> {
-		const runner = this.session.extensionRunner;
+		const runner = this.extensionRunner;
 		if (!runner.hasHandlers("session_before_switch")) {
 			return { cancelled: false };
 		}
@@ -242,7 +268,7 @@ export class AgentSessionRuntime {
 		entryId: string,
 		options: { position: "before" | "at" },
 	): Promise<{ cancelled: boolean }> {
-		const runner = this.session.extensionRunner;
+		const runner = this.extensionRunner;
 		if (!runner.hasHandlers("session_before_fork")) {
 			return { cancelled: false };
 		}
@@ -256,7 +282,7 @@ export class AgentSessionRuntime {
 	}
 
 	private async teardownCurrent(reason: SessionShutdownEvent["reason"], targetSessionFile?: string): Promise<void> {
-		const errors = await this.shutdownRuntime(this.session, reason, targetSessionFile, {
+		const errors = await this.shutdownRuntime(this.currentTarget(), reason, targetSessionFile, {
 			stopResources: true,
 			invalidateHost: true,
 		});
@@ -326,9 +352,15 @@ export class AgentSessionRuntime {
 		}
 	}
 
+	private currentTarget(): RuntimeShutdownTarget {
+		return { session: this._session, getExtensionRunner: this._getExtensionRunner };
+	}
+
 	private snapshot(): AgentSessionRuntimeState {
 		return {
 			session: this._session,
+			sessionManager: this._sessionManager,
+			getExtensionRunner: this._getExtensionRunner,
 			services: this._services,
 			diagnostics: [...this._diagnostics],
 			...(this._modelFallbackMessage !== undefined ? { modelFallbackMessage: this._modelFallbackMessage } : {}),
@@ -337,6 +369,8 @@ export class AgentSessionRuntime {
 
 	private apply(result: AgentSessionRuntimeState): void {
 		this._session = result.session;
+		this._sessionManager = result.sessionManager;
+		this._getExtensionRunner = result.getExtensionRunner;
 		this._services = result.services;
 		this._diagnostics = result.diagnostics;
 		this._modelFallbackMessage = result.modelFallbackMessage;
@@ -347,7 +381,7 @@ export class AgentSessionRuntime {
 			await this.rebindSession(this.session);
 		}
 		await options.beforeSessionResourcesStart?.(this.session);
-		for (const resource of this.sessionResources) await resource.start(this.session);
+		for (const resource of this.sessionResources) await resource.start(this.session, this);
 	}
 
 	private async restorePreviousAfterRuntimeFailure(
@@ -356,7 +390,7 @@ export class AgentSessionRuntime {
 		options: SessionReplacementCommitOptions,
 		candidateActivated: boolean,
 	): Promise<unknown | undefined> {
-		const cleanupErrors = await this.shutdownRuntime(failed.session, options.reason, previous.session.sessionFile, {
+		const cleanupErrors = await this.shutdownRuntime(failed, options.reason, previous.session.sessionFile, {
 			stopResources: candidateActivated,
 			invalidateHost: candidateActivated,
 		});
@@ -375,7 +409,7 @@ export class AgentSessionRuntime {
 			restored = await this.createRuntime({
 				cwd: previous.services.cwd,
 				agentDir: previous.services.agentDir,
-				sessionManager: previous.session.sessionManager,
+				sessionManager: previous.sessionManager,
 				sessionStartEvent: {
 					type: "session_start",
 					reason: "resume",
@@ -384,11 +418,11 @@ export class AgentSessionRuntime {
 			});
 			this.apply(restored);
 			if (this.rebindSession) await this.rebindSession(this.session);
-			for (const resource of this.sessionResources) await resource.start(this.session);
+			for (const resource of this.sessionResources) await resource.start(this.session, this);
 		} catch (recoveryError: unknown) {
 			if (restored) {
 				cleanupErrors.push(
-					...(await this.shutdownRuntime(restored.session, "resume", failed.session.sessionFile, {
+					...(await this.shutdownRuntime(restored, "resume", failed.session.sessionFile, {
 						stopResources: true,
 						invalidateHost: true,
 					})),
@@ -409,7 +443,7 @@ export class AgentSessionRuntime {
 	}
 
 	private async shutdownRuntime(
-		session: AgentSession,
+		target: RuntimeShutdownTarget,
 		reason: SessionShutdownEvent["reason"],
 		targetSessionFile: string | undefined,
 		options: { stopResources: boolean; invalidateHost: boolean; progress?: RuntimeShutdownProgress },
@@ -425,7 +459,7 @@ export class AgentSessionRuntime {
 			} satisfies RuntimeShutdownProgress);
 		if (!progress.shutdownEventEmitted) {
 			try {
-				await emitSessionShutdownEvent(session.extensionRunner, {
+				await emitSessionShutdownEvent(target.getExtensionRunner(), {
 					type: "session_shutdown",
 					reason,
 					targetSessionFile,
@@ -456,7 +490,7 @@ export class AgentSessionRuntime {
 		}
 		if (!progress.sessionDisposed) {
 			try {
-				await session.disposeAndWait();
+				await target.session.disposeAndWait();
 				progress.sessionDisposed = true;
 			} catch (error: unknown) {
 				errors.push(error);
@@ -528,7 +562,7 @@ export class AgentSessionRuntime {
 		}
 
 		const previousSessionFile = this.session.sessionFile;
-		const sessionDir = this.session.sessionManager.getSessionDir();
+		const sessionDir = this.sessionManager.getSessionDir();
 		const sessionManager = SessionManager.create(this.cwd, this.services.agentDir, sessionDir);
 		if (options?.parentSession) {
 			sessionManager.newSession({ parentSession: options.parentSession });
@@ -547,8 +581,8 @@ export class AgentSessionRuntime {
 		}
 		if (options?.setup) {
 			try {
-				await options.setup(prepared.session.sessionManager);
-				prepared.session.agent.state.messages = prepared.session.sessionManager.buildSessionContext().messages;
+				await options.setup(prepared.sessionManager);
+				prepared.session.agent.state.messages = prepared.sessionManager.buildSessionContext().messages;
 				// New/replacement session (see "session_start" above): a fresh lineage, never the one
 				// any pre-existing sanitizer mark was tracking.
 				prepared.session.agent.resetSanitizerPrefixHorizon();
@@ -586,7 +620,7 @@ export class AgentSessionRuntime {
 		let targetLeafId: string | null;
 		let selectedText: string | undefined;
 
-		const selectedEntry = this.session.sessionManager.getEntry(entryId);
+		const selectedEntry = this.sessionManager.getEntry(entryId);
 		if (!selectedEntry) {
 			throw new Error("Invalid entry ID for forking");
 		}
@@ -602,12 +636,12 @@ export class AgentSessionRuntime {
 		}
 
 		const previousSessionFile = this.session.sessionFile;
-		if (this.session.sessionManager.isPersisted()) {
+		if (this.sessionManager.isPersisted()) {
 			const currentSessionFile = this.session.sessionFile;
 			if (!currentSessionFile) {
 				throw new Error("Persisted session is missing a session file");
 			}
-			const sessionDir = this.session.sessionManager.getSessionDir();
+			const sessionDir = this.sessionManager.getSessionDir();
 			if (!targetLeafId) {
 				const sessionManager = SessionManager.create(this.cwd, this.services.agentDir, sessionDir);
 				sessionManager.newSession({ parentSession: currentSessionFile });
@@ -667,7 +701,7 @@ export class AgentSessionRuntime {
 			sessionManager = SessionManager.inMemory(this.cwd);
 			sessionManager.newSession({ parentSession: this.session.sessionFile });
 		} else {
-			sessionManager = this.session.sessionManager.createBranchedSessionManager(targetLeafId);
+			sessionManager = this.sessionManager.createBranchedSessionManager(targetLeafId);
 		}
 		const prepared = await this.prepareReplacement(sessionManager, {
 			type: "session_start",
@@ -699,7 +733,7 @@ export class AgentSessionRuntime {
 			throw new SessionImportFileNotFoundError(resolvedPath);
 		}
 
-		const sessionDir = this.session.sessionManager.getSessionDir();
+		const sessionDir = this.sessionManager.getSessionDir();
 		const destinationPath = join(sessionDir, basename(resolvedPath));
 		const beforeResult = await this.emitBeforeSwitch("resume", destinationPath);
 		if (beforeResult.cancelled) {
@@ -749,7 +783,7 @@ export class AgentSessionRuntime {
 					// Replacement already reports its own error; dispose whichever runtime it left active.
 				}
 			}
-			const errors = await this.shutdownRuntime(this.session, "quit", undefined, {
+			const errors = await this.shutdownRuntime(this.currentTarget(), "quit", undefined, {
 				stopResources: true,
 				invalidateHost: true,
 				progress: this.disposeProgress,
@@ -784,20 +818,5 @@ export async function createAgentSessionRuntime(
 ): Promise<AgentSessionRuntime> {
 	assertSessionCwdExists(options.sessionManager, options.cwd);
 	const result = await createRuntime(options);
-	return new AgentSessionRuntime(
-		result.session,
-		result.services,
-		createRuntime,
-		result.diagnostics,
-		result.modelFallbackMessage,
-	);
+	return new AgentSessionRuntime(result, createRuntime);
 }
-
-export {
-	type AgentSessionRuntimeDiagnostic,
-	type AgentSessionServices,
-	type CreateAgentSessionFromServicesOptions,
-	type CreateAgentSessionServicesOptions,
-	createAgentSessionFromServices,
-	createAgentSessionServices,
-} from "./agent-session-services.ts";

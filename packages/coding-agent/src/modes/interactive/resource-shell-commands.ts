@@ -12,17 +12,25 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { SessionManager, TruncationResult } from "@caupulican/pi-agent-core/node";
 import type { Component, Container, TUI } from "@caupulican/pi-tui";
 import { getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
-import type { SettingsManager } from "../../core/settings-manager.ts";
+import type { ExtensionRunner } from "../../core/extensions/index.ts";
+import type { SettingsScope } from "../../core/settings/settings-schema.ts";
+import type { SessionManager, TruncationResult } from "../../kernel/node.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { confirmExternalResourceTrust } from "./interactive-selection-prompts.ts";
 
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ResourceShellCommandsSettingsSource {
+	addTrustedResourceRoot(path: string, scope?: SettingsScope): void;
+	canonicalizePath(p: string): string | null;
+	getTrustedResourceRoots(): string[];
+}
+
 export interface InstallResourcesHost {
 	readonly settingsManager: Pick<
-		SettingsManager,
+		ResourceShellCommandsSettingsSource,
 		"canonicalizePath" | "getTrustedResourceRoots" | "addTrustedResourceRoot"
 	>;
 	showError(message: string): void;
@@ -49,7 +57,8 @@ export interface CurateCommandHost {
 }
 
 export interface BashCommandHost {
-	readonly session: Pick<AgentSession, "extensionRunner" | "isStreaming" | "recordBashResult" | "executeBash">;
+	readonly session: Pick<AgentSession, "isStreaming" | "recordBashResult" | "executeBash">;
+	readonly extensionRunner: Pick<ExtensionRunner, "emitUserBash">;
 	readonly sessionManager: Pick<SessionManager, "getCwd">;
 	readonly ui: TUI;
 	readonly chatContainer: Container;
@@ -172,7 +181,7 @@ export async function handleBashCommand(
 	command: string,
 	excludeFromContext = false,
 ): Promise<void> {
-	const extensionRunner = host.session.extensionRunner;
+	const extensionRunner = host.extensionRunner;
 
 	// Emit user_bash event to let extensions intercept
 	const eventResult = await extensionRunner.emitUserBash({

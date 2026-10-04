@@ -12,7 +12,7 @@
 import { promises as fsPromises, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { isPositiveSafePid } from "@caupulican/pi-agent-core/process-tree";
+import { isPositiveSafePid } from "../../kernel/reliability/process-tree.ts";
 import { stateFile } from "../agent-paths.ts";
 import { isAgentIdentity } from "../orchestration/agent-resume.ts";
 import { withFileLock, withFileLockSync, writeFileAtomic, writeFileAtomicSync } from "../util/atomic-file.ts";

@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { BeforeToolCallResult } from "@caupulican/pi-agent-core";
-import { AgentBusyError } from "@caupulican/pi-agent-core/agent";
-import type { SessionManager } from "@caupulican/pi-agent-core/session";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { Type } from "typebox";
+import { AgentBusyError } from "../../kernel/agent.ts";
+import type { BeforeToolCallResult } from "../../kernel/index.ts";
+import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { ContextUsage, ToolDefinition } from "../extensions/types.ts";
 import { IndependentObserverSet } from "../observer-dispatch.ts";
 import { resolveSessionEntryIndex } from "../session-entry-index.ts";

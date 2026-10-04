@@ -1,9 +1,9 @@
 import { isDeepStrictEqual } from "node:util";
-import type { SessionManager } from "@caupulican/pi-agent-core/session";
 import type { Usage } from "@caupulican/pi-ai";
-import { SPAWNED_USAGE_CUSTOM_TYPE } from "../agent-session-contracts.ts";
+import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { SpawnedUsageReporter } from "../spawned-usage.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { SPAWNED_USAGE_CUSTOM_TYPE } from "./usage-records.ts";
 
 export interface SpawnedUsageReceiptOptions {
 	parentSessionId: string;

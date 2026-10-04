@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type ExecutionPathFlavor, executionPathApi } from "@caupulican/pi-agent-core/paths";
+import { type ExecutionPathFlavor, executionPathApi } from "../../kernel/utils/paths.ts";
 import type { PathScope, PathScopeDecision } from "./contracts.ts";
 
 // Bounds the symlink-following recursion in resolveSafely: a chain of dangling links is finite

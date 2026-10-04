@@ -1,4 +1,4 @@
-import { probeProcessLiveness } from "@caupulican/pi-agent-core/process-tree";
+import { probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
 
 const MAX_OWNER_ID_CHARS = 256;
 const LOCAL_WORKER_OWNER_PATTERN =

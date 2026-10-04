@@ -1,5 +1,5 @@
 import { type Component, visibleWidth } from "@caupulican/pi-tui";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 
 /**
  * Dynamic border component that adjusts to viewport width.

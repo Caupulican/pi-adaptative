@@ -10,8 +10,8 @@
  * can never reach a granted extension by default.
  */
 
-import type { ExecutionContext } from "@caupulican/pi-agent-core";
-import type { ReadonlySessionManager } from "@caupulican/pi-agent-core/node";
+import type { ExecutionContext } from "../../kernel/index.ts";
+import type { ReadonlySessionManager } from "../../kernel/node.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { Extension, ExtensionAPI, ExtensionContext, ExtensionToolOnlyView, ExtensionUIContext } from "./types.ts";
 

@@ -1,23 +1,19 @@
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { compact } from "@caupulican/pi-agent-core/compaction/compaction";
-import { estimateProviderRequestTokens } from "@caupulican/pi-agent-core/provider-request-estimator";
+import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
+import { compact } from "../../kernel/compaction/compaction.ts";
+import type { AgentContextPlan, AgentContextPlanRequest } from "../../kernel/index.ts";
+import { estimateProviderRequestTokens } from "../../kernel/provider-request-estimator.ts";
 import {
 	classifyFailure,
 	computeRetryDelayMs,
 	type RetryPolicy,
 	sleepAbortable,
-} from "@caupulican/pi-agent-core/reliability";
-import type { SessionRequestSnapshotInput } from "@caupulican/pi-agent-core/session";
-import { sanitizeToolFailureContext } from "@caupulican/pi-agent-core/tool-failure-memory";
-import type {
-	AgentContextPlan,
-	AgentContextPlanRequest,
-	AgentMessage,
-	ThinkingLevel,
-} from "@caupulican/pi-agent-core/types";
-import { addUsage, createEmptyUsage } from "@caupulican/pi-agent-core/usage";
-import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
+} from "../../kernel/reliability/index.ts";
+import type { SessionRequestSnapshotInput } from "../../kernel/session/session-manager.ts";
+import { sanitizeToolFailureContext } from "../../kernel/tool-failure-memory.ts";
+import type { AgentMessage, ThinkingLevel } from "../../kernel/types.ts";
+import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
 import type { WorkerRequest } from "../autonomy/contracts.ts";
@@ -271,7 +267,7 @@ function callbackEvidencedCompletion(
 		);
 	}
 	// `result.messages` is declared `Message[]` (IsolatedCompletionResult, agent-session-contracts.ts)
-	// but a child loop that committed a transient record (packages/agent's step-3 host-gap hook) makes
+	// but a child loop that committed a transient record (the kernel's step-3 host-gap hook) makes
 	// it genuinely WorkerTranscriptMessage[] at runtime - widening here, not narrowing, so this
 	// assignment needs no cast; only reflection-controller.ts's construction of `result.messages`
 	// itself still does, where a wide value is forced into that narrower declared field. See this

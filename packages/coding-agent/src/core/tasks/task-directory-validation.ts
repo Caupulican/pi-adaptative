@@ -3,7 +3,7 @@ import {
 	type ExecutionContext,
 	type ExecutionPathFlavor,
 	resolveExecutionResource,
-} from "@caupulican/pi-agent-core/paths";
+} from "../../kernel/utils/paths.ts";
 
 export interface TaskDirectoryBackend {
 	readonly flavor: ExecutionPathFlavor;

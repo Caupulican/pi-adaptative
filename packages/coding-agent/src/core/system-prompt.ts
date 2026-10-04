@@ -3,11 +3,11 @@
  */
 
 import { dirname } from "node:path";
-import { TOOL_FAILURE_RETRY_MODEL_RULE } from "@caupulican/pi-agent-core";
 import { getReadmePath } from "../config.ts";
+import { TOOL_FAILURE_RETRY_MODEL_RULE } from "../kernel/index.ts";
 import { getExtensionDescription, getExtensionDisplayName } from "./extension-metadata.ts";
-import type { Extension } from "./extensions/types.ts";
-import { enforceModelCapabilitySystemPromptBudget, type ModelCapabilityProfile } from "./model-capability.ts";
+import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts";
+import { enforceModelCapabilitySystemPromptBudget } from "./model-capability.ts";
 import {
 	ENGINEERING_SKILL_ROUTING_RULE,
 	normalizeSteStrictness,
@@ -17,39 +17,8 @@ import {
 	renderExplanationStyleRule,
 	SKILL_VAULT_SYSTEM_RULE,
 } from "./provider-prompt-contracts.ts";
-import type { Skill } from "./skills.ts";
 
 export { OWNER_AUTHORIZATION_RULE };
-
-export interface BuildSystemPromptOptions {
-	/** Capability profile that selects the stable prompt shape. Missing means full/legacy behavior. */
-	modelCapability?: Pick<ModelCapabilityProfile, "class" | "contextWindow" | "reasonCode" | "systemPromptMaxChars">;
-	/** Custom system prompt (replaces default). */
-	customPrompt?: string;
-	/** Tools to include in the prompt. Defaults come from the shared active-tool surface. */
-	selectedTools?: string[];
-	/** Optional one-line tool snippets keyed by tool name. */
-	toolSnippets?: Record<string, string>;
-	/** Additional guideline bullets appended to the default system prompt guidelines. */
-	promptGuidelines?: string[];
-	/** Text to append to system prompt. */
-	appendSystemPrompt?: string;
-	/** Working directory. */
-	cwd: string;
-	/** Global instruction files (with content) plus on-demand project paths (path only). */
-	contextFiles?: Array<{ path: string; content?: string }>;
-	/** Discovered skills remain host-side; retained for extension/API construction compatibility. */
-	skills?: Skill[];
-	/** Discovered extensions currently active. */
-	extensions?: Extension[];
-	/**
-	 * The Y-M-D date the prompt states; today when omitted. A session pins it (SystemPromptBuilder) and
-	 * advances it only at a cold moment, so a day rollover never breaks a warm cache on its own.
-	 */
-	date?: string;
-	/** ASD-STE100 explanation strictness, 0 (off) to 10; invalid or missing means the default 9. */
-	steStrictness?: number;
-}
 
 const MODEL_BLIND_CREDENTIAL_AUTHORITY =
 	"Active secret_store: host gate authorizes model-blind activation/migration from named sources; no duplicate confirmation.";

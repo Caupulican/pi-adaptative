@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { closeSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { CURRENT_SESSION_VERSION } from "@caupulican/pi-agent-core/session";
+import { CURRENT_SESSION_VERSION } from "../../kernel/session/session-manager.ts";
 
 const MAX_WORKER_SESSION_HEADER_BYTES = 64 * 1024;
 const WORKER_SESSION_ENTRY_DIGEST_SEED = createHash("sha256").update("pi-worker-session-entry-chain-v1").digest("hex");

@@ -1,8 +1,9 @@
 import type { Usage } from "@caupulican/pi-ai";
-import { INCONCLUSIVE_LINE_PREFIX, MAX_MANAGED_LANE_SUMMARY_BYTES } from "../extensions/types.ts";
+import { INCONCLUSIVE_LINE_PREFIX, MAX_MANAGED_LANE_SUMMARY_BYTES } from "../extensions/managed-lane-records.ts";
 import { WORKER_EXECUTION_DISCIPLINE_RULE } from "../provider-prompt-contracts.ts";
 import type { CollaborationBackend, CollaborationQuestionAnswer } from "./backend.ts";
-import { boundCollaborationEvidence, type CollaborationTerminal } from "./job-store.ts";
+import type { CollaborationTerminal } from "./job-record.ts";
+import { boundCollaborationEvidence } from "./job-store.ts";
 import type { CollaborationPendingQuestion, CollaborationResultClaim } from "./result-claim.ts";
 import { waitForTurnSettlement } from "./turn-settlement.ts";
 

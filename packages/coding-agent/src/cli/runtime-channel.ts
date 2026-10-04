@@ -1,6 +1,7 @@
 import { isAbsolute } from "node:path";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import { RUNTIME_SUPERVISOR_ENV } from "../core/harness-environment.ts";
 import {
 	bindSupervisedSelfLaunchTarget,
 	normalizeSelfLaunchTarget,
@@ -11,7 +12,6 @@ import type {
 	RuntimeSupervisorReply,
 } from "../core/runtime-supervisor.ts";
 
-export const RUNTIME_SUPERVISOR_ENV = "PI_RUNTIME_SUPERVISOR";
 const identity = Type.String({ minLength: 1, maxLength: 256 });
 const restart = Type.Object({
 	id: identity,

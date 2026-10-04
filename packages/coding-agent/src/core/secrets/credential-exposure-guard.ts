@@ -1,3 +1,4 @@
+import type { TSchema } from "typebox";
 import {
 	type AgentTool,
 	AgentToolExecutionError,
@@ -5,8 +6,7 @@ import {
 	type ExecutionContext,
 	type ExecutionPathAuthority,
 	readAgentToolExecutionError,
-} from "@caupulican/pi-agent-core";
-import type { TSchema } from "typebox";
+} from "../../kernel/index.ts";
 import { extractToolPathArguments } from "../autonomy/envelope-enforcement.ts";
 import { parseShellSearchInvocationScope, type ShellContentSearchTool } from "../tools/search-command-guard.ts";
 import { type ShellToken, tokenizeShellCommand } from "../tools/shell-command-parser.ts";

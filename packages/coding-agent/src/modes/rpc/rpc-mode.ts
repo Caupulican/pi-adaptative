@@ -26,7 +26,7 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
-import { type Theme, theme } from "../interactive/theme/theme.ts";
+import { type Theme, theme } from "../../presentation/theme-model.ts";
 import { projectSessionEventForJson } from "../json-event-projection.ts";
 import { registerTerminationSignalHandlers } from "../termination-signals.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
@@ -501,7 +501,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "set_model": {
-				const models = await session.modelRegistry.getAvailable();
+				const models = await runtimeHost.services.modelRegistry.getAvailable();
 				const model = models.find((m) => m.provider === command.provider && m.id === command.modelId);
 				if (!model) {
 					return error(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
@@ -519,7 +519,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "get_available_models": {
-				const models = await session.modelRegistry.getAvailable();
+				const models = await runtimeHost.services.modelRegistry.getAvailable();
 				return success(id, "get_available_models", { models });
 			}
 
@@ -665,7 +665,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				if (activePromptRuns.size > 0) {
 					return error(id, "clone", "Cannot replace the session while a prompt is in progress.");
 				}
-				const leafId = session.sessionManager.getLeafId();
+				const leafId = runtimeHost.sessionManager.getLeafId();
 				if (!leafId) {
 					return error(id, "clone", "Cannot clone session: no current entry selected");
 				}
@@ -707,7 +707,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "get_commands": {
 				const commands: RpcSlashCommand[] = [];
 
-				for (const command of session.extensionRunner.getRegisteredCommands()) {
+				for (const command of runtimeHost.extensionRunner.getRegisteredCommands()) {
 					commands.push({
 						name: command.invocationName,
 						description: command.description,

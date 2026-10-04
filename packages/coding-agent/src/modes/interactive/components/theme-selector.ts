@@ -1,5 +1,5 @@
 import type { SelectItem } from "@caupulican/pi-tui";
-import { getAvailableThemes } from "../theme/theme.ts";
+import { getAvailableThemes } from "../../../presentation/theme/theme.ts";
 import { BorderedSelectListComponent } from "./selector-list.ts";
 
 /**

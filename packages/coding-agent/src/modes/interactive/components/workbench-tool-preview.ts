@@ -1,14 +1,14 @@
-import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core/shell-output";
 import { type Component, Text, visibleWidth } from "@caupulican/pi-tui";
 import {
 	evaluationResultText,
 	type SemanticEvaluationRecord,
 } from "../../../core/system-one/semantic-evaluation-ledger.ts";
 import { isRecordObject } from "../../../core/util/value-guards.ts";
+import { sanitizeBinaryOutput } from "../../../kernel/utils/shell-output.ts";
+import { renderDiff } from "../../../presentation/diff.ts";
+import { getLanguageFromPath, highlightCode, theme } from "../../../presentation/theme-model.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
-import { getLanguageFromPath, highlightCode, theme } from "../theme/theme.ts";
 import { formatGraphDuration, SYSTEM_ONE_TONE } from "./decision-graph-render.ts";
-import { renderDiff } from "./diff.ts";
 import { shortModelName } from "./operator-pov-bar.ts";
 import { metaRow } from "./workbench-pane.ts";
 

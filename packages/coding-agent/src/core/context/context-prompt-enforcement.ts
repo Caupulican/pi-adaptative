@@ -29,7 +29,7 @@
  * strictly worse than leaving the raw content in place.
  */
 
-import type { AgentMessage } from "@caupulican/pi-agent-core";
+import type { AgentMessage } from "../../kernel/index.ts";
 import type { ContextGcReport } from "../context-gc.ts";
 import {
 	type ContextRelevanceScope,

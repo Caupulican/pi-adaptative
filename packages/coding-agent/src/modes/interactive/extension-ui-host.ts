@@ -14,7 +14,6 @@
  * autocomplete rebuild) stay host-side and are invoked here as delegations.
  */
 
-import { safeErrorMessage } from "@caupulican/pi-agent-core/types";
 import type {
 	AutocompleteProvider,
 	Component,
@@ -34,7 +33,6 @@ import {
 	Text,
 	type TUI,
 } from "@caupulican/pi-tui";
-import type { AgentSession } from "../../core/agent-session.ts";
 import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
@@ -44,12 +42,21 @@ import type {
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 } from "../../core/extensions/index.ts";
-import type { FooterDataProvider, ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
+import type { ReadonlyFooterDataProvider } from "../../core/footer-data-contract.ts";
+import type { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import type { HumanInputPresentationRequest, HumanInputPresentationResult } from "../../core/human-input.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import type { SessionImageStore } from "../../core/session-image-store.ts";
 import { AskQuestionDialog } from "../../core/tools/ask-question.ts";
-import { handleClipboardImagePaste } from "./clipboard-input.ts";
+import { safeErrorMessage } from "../../kernel/types.ts";
+import { handleClipboardImagePaste } from "../../presentation/clipboard-input.ts";
+import {
+	getAvailableThemesWithPaths,
+	getThemeByName,
+	setTheme,
+	setThemeInstance,
+} from "../../presentation/theme/theme.ts";
+import { getEditorTheme, Theme, theme } from "../../presentation/theme-model.ts";
 import type { CustomEditor } from "./components/custom-editor.ts";
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
@@ -57,15 +64,7 @@ import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import type { FooterComponent } from "./components/footer.ts";
 import type { WorkbenchComponent } from "./components/workbench.ts";
 import type { EditorOverlayHost } from "./editor-overlay-host.ts";
-import {
-	getAvailableThemesWithPaths,
-	getEditorTheme,
-	getThemeByName,
-	setTheme,
-	setThemeInstance,
-	Theme,
-	theme,
-} from "./theme/theme.ts";
+import type { LiveSessionServices } from "./live-session.ts";
 
 /** Components that can be expanded/collapsed (custom headers may opt in). */
 interface Expandable {
@@ -121,8 +120,7 @@ export interface ExtensionUiHostUi {
 	showError(message: string): void;
 }
 
-export interface ExtensionUiHostDeps {
-	getSession(): AgentSession;
+export interface ExtensionUiHostDeps extends LiveSessionServices {
 	ui: ExtensionUiHostUi;
 }
 
@@ -160,9 +158,6 @@ export class ExtensionUiHost {
 		this.deps = deps;
 	}
 
-	private get session(): AgentSession {
-		return this.deps.getSession();
-	}
 	private get ui(): ExtensionUiHostUi {
 		return this.deps.ui;
 	}
@@ -184,25 +179,25 @@ export class ExtensionUiHost {
 			ui: this.createExtensionUIContext(),
 			hasUI: true,
 			mode: "tui",
-			cwd: this.session.sessionManager.getCwd(),
-			sessionManager: this.session.sessionManager,
-			modelRegistry: this.session.modelRegistry,
-			model: this.session.model,
-			isIdle: () => !this.session.isStreaming,
-			signal: this.session.agent.signal,
+			cwd: this.deps.getSessionManager().getCwd(),
+			sessionManager: this.deps.getSessionManager(),
+			modelRegistry: this.deps.getModelRegistry(),
+			model: this.deps.getSession().model,
+			isIdle: () => !this.deps.getSession().isStreaming,
+			signal: this.deps.getSession().agent.signal,
 			abort: () => {
 				this.ui.abort();
 			},
-			hasPendingMessages: () => this.session.deliverablePendingMessageCount > 0,
+			hasPendingMessages: () => this.deps.getSession().deliverablePendingMessageCount > 0,
 			shutdown: () => {
 				this.ui.markShutdownRequested();
 			},
-			getContextUsage: () => this.session.getContextUsage(),
-			compact: (options) => this.session.compactForExtension(options),
+			getContextUsage: () => this.deps.getSession().getContextUsage(),
+			compact: (options) => this.deps.getSession().compactForExtension(options),
 			reload: async () => {
 				await this.ui.reload();
 			},
-			getSystemPrompt: () => this.session.systemPrompt,
+			getSystemPrompt: () => this.deps.getSession().systemPrompt,
 		});
 
 		// Set up the extension shortcut handler on the default editor
@@ -525,8 +520,8 @@ export class ExtensionUiHost {
 				}
 				const result = setTheme(themeOrName, true);
 				if (result.success) {
-					if (this.session.settingsManager.getTheme() !== themeOrName) {
-						this.session.settingsManager.setTheme(themeOrName);
+					if (this.deps.getSettingsManager().getTheme() !== themeOrName) {
+						this.deps.getSettingsManager().setTheme(themeOrName);
 					}
 					this.ui.tui.requestRender();
 				}
@@ -550,7 +545,7 @@ export class ExtensionUiHost {
 				if (onAbort) opts?.signal?.removeEventListener("abort", onAbort);
 				done(result);
 			};
-			const settings = this.session.settingsManager;
+			const settings = this.deps.getSettingsManager();
 			const modelCannotSeeImages = !request.acceptsImages;
 			const dialog = new AskQuestionDialog({
 				questions: request.questions,

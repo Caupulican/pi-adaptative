@@ -2,7 +2,7 @@ import { isAbsolute, relative } from "node:path";
 import { type Static, Type } from "typebox";
 import { workerAuthorIdentity } from "../autonomy/worker-git-identity.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import type { ResolvedWorktreeSyncSettings } from "../settings-manager.ts";
+import type { ResolvedWorktreeSyncSettings } from "../settings/settings-schema.ts";
 import type { ConflictWorklist, SyncStatus } from "../worktree-sync/codes.ts";
 import {
 	abortSync,

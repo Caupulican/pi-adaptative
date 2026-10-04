@@ -1,6 +1,6 @@
-import type { Agent } from "@caupulican/pi-agent-core/agent";
-import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { ImageContent, TextContent } from "@caupulican/pi-ai";
+import type { Agent } from "../kernel/agent.ts";
+import type { AgentMessage } from "../kernel/types.ts";
 import type { ExtensionRunner, SendUserMessageOrigin } from "./extensions/index.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import type { ExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";

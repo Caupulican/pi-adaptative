@@ -1,8 +1,9 @@
 /** Best-effort, preemptible standing-prefix warmup for loopback OpenAI-compatible models. */
 
-import { projectToolsForProvider } from "@caupulican/pi-agent-core/provider-tool-projection";
-import type { AgentTool, StreamFn } from "@caupulican/pi-agent-core/types";
 import type { Api, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
+import type { StreamFn } from "../kernel/index.ts";
+import { projectToolsForProvider } from "../kernel/provider-tool-projection.ts";
+import type { AgentTool } from "../kernel/types.ts";
 import { formatModelRouterModel } from "./model-router-controller.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import { isLoopbackModelEndpoint } from "./models/model-endpoint.ts";

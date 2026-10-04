@@ -1,6 +1,7 @@
-import { Agent } from "@caupulican/pi-agent-core/agent";
-import type { AgentTool, ResolvedProviderRequestAuth, StreamFn } from "@caupulican/pi-agent-core/types";
 import type { Api, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
+import { Agent } from "../kernel/agent.ts";
+import type { ResolvedProviderRequestAuth, StreamFn } from "../kernel/index.ts";
+import type { AgentTool } from "../kernel/types.ts";
 import { SCOUT_SYSTEM_PROMPT } from "./provider-prompt-contracts.ts";
 import { registerInFlightWork } from "./reload-blockers.ts";
 

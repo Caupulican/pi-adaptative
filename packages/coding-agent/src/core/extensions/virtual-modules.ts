@@ -1,29 +1,29 @@
 export const PI_AGENT_CORE_EXTENSION_SUBPATHS = {
-	agent: "agent/src/agent.ts",
-	"agent-loop": "agent/src/agent-loop.ts",
-	"verification-obligations": "agent/src/verification-obligations.ts",
-	compaction: "agent/src/compaction/index.ts",
-	"compaction/branch-summarization": "agent/src/compaction/branch-summarization.ts",
-	"compaction/compaction": "agent/src/compaction/compaction.ts",
-	"compaction/loop": "agent/src/compaction/loop.ts",
-	"compaction/token-budget": "agent/src/compaction/token-budget.ts",
-	"message-retention": "agent/src/session/message-retention.ts",
-	messages: "agent/src/messages.ts",
-	node: "agent/src/node.ts",
-	paths: "agent/src/utils/paths.ts",
-	"process-tree": "agent/src/reliability/process-tree.ts",
-	"provider-request-estimator": "agent/src/provider-request-estimator.ts",
-	"provider-request-image-budget": "agent/src/provider-request-image-budget.ts",
-	"provider-request-planner": "agent/src/provider-request-planner.ts",
-	"provider-tool-projection": "agent/src/provider-tool-projection.ts",
-	reliability: "agent/src/reliability/index.ts",
-	session: "agent/src/session/session-manager.ts",
-	"shell-output": "agent/src/utils/shell-output.ts",
-	"tool-failure-memory": "agent/src/tool-failure-memory.ts",
-	"tool-protocol-residue": "agent/src/tool-protocol-residue.ts",
-	truncate: "agent/src/utils/truncate.ts",
-	types: "agent/src/types.ts",
-	usage: "agent/src/usage.ts",
+	agent: "coding-agent/src/kernel/agent.ts",
+	"agent-loop": "coding-agent/src/kernel/agent-loop.ts",
+	"verification-obligations": "coding-agent/src/kernel/verification-obligations.ts",
+	compaction: "coding-agent/src/kernel/compaction/index.ts",
+	"compaction/branch-summarization": "coding-agent/src/kernel/compaction/branch-summarization.ts",
+	"compaction/compaction": "coding-agent/src/kernel/compaction/compaction.ts",
+	"compaction/loop": "coding-agent/src/kernel/compaction/loop.ts",
+	"compaction/token-budget": "coding-agent/src/kernel/compaction/token-budget.ts",
+	"message-retention": "coding-agent/src/kernel/session/message-retention.ts",
+	messages: "coding-agent/src/kernel/messages.ts",
+	node: "coding-agent/src/kernel/node.ts",
+	paths: "coding-agent/src/kernel/utils/paths.ts",
+	"process-tree": "coding-agent/src/kernel/reliability/process-tree.ts",
+	"provider-request-estimator": "coding-agent/src/kernel/provider-request-estimator.ts",
+	"provider-request-image-budget": "coding-agent/src/kernel/provider-request-image-budget.ts",
+	"provider-request-planner": "coding-agent/src/kernel/provider-request-planner.ts",
+	"provider-tool-projection": "coding-agent/src/kernel/provider-tool-projection.ts",
+	reliability: "coding-agent/src/kernel/reliability/index.ts",
+	session: "coding-agent/src/kernel/session/session-manager.ts",
+	"shell-output": "coding-agent/src/kernel/utils/shell-output.ts",
+	"tool-failure-memory": "coding-agent/src/kernel/tool-failure-memory.ts",
+	"tool-protocol-residue": "coding-agent/src/kernel/tool-protocol-residue.ts",
+	truncate: "coding-agent/src/kernel/utils/truncate.ts",
+	types: "coding-agent/src/kernel/types.ts",
+	usage: "coding-agent/src/kernel/usage.ts",
 } as const;
 
 export type PiAgentCoreExtensionSubpath = keyof typeof PI_AGENT_CORE_EXTENSION_SUBPATHS;
@@ -60,7 +60,7 @@ export type PiAiExtensionSubpath = keyof typeof PI_AI_EXTENSION_SUBPATHS;
  * The host program's own module instances, by the specifiers extensions import them under. Extensions
  * bind to these live modules instead of loading a private copy of the program: one instance of every
  * module-level singleton, and no re-evaluation of the host on each extension load. Registered once, by
- * `host-extension-modules.ts`, which the session builder imports.
+ * `host-extension-modules.ts`, which the process entries import.
  */
 let hostExtensionModules: Readonly<Record<string, unknown>> | undefined;
 
@@ -70,9 +70,9 @@ export function registerHostExtensionModules(modules: Record<string, unknown>): 
 }
 
 /**
- * The registered host modules, or undefined in a process that never built a session (a focused test
- * of the loader): there is no running program to share, and extensions resolve packages from disk.
- * Every session registers them first, through the session builder's static import.
+ * The registered host modules, or undefined in a process whose entry did not register them (a focused
+ * test of the loader, or a program embedding the SDK without the CLI entry): extensions then resolve
+ * packages from disk. Both CLI entries register them before the session program loads.
  */
 export function getHostExtensionModules(): Readonly<Record<string, unknown>> | undefined {
 	return hostExtensionModules;

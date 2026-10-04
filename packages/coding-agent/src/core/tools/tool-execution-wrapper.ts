@@ -1,4 +1,4 @@
-import { captureExecutionContext, type ExecutionContext, type ExecutionPathAuthority } from "@caupulican/pi-agent-core";
+import { captureExecutionContext, type ExecutionContext, type ExecutionPathAuthority } from "../../kernel/index.ts";
 
 interface ExecutableTool {
 	execute: (...args: never[]) => unknown;

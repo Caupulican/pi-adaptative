@@ -1,4 +1,3 @@
-import { isSessionLifecycleEntry, type SessionTreeNode } from "@caupulican/pi-agent-core/node";
 import {
 	type Component,
 	Container,
@@ -20,10 +19,11 @@ import {
 	hasTextContent,
 	recalculateVisibleTreeLayout,
 } from "../../../core/export-html/session-tree-foundations.mjs";
-import { theme } from "../theme/theme.ts";
+import { isSessionLifecycleEntry, type SessionTreeNode } from "../../../kernel/node.ts";
+import { keyHint, keyText } from "../../../presentation/keybinding-hints.ts";
+import { theme } from "../../../presentation/theme-model.ts";
+import { renderTitleBadge } from "../../../presentation/tool-title.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint, keyText } from "./keybinding-hints.ts";
-import { renderTitleBadge } from "./tool-title.ts";
 
 type FlatNode = FlatSessionTreeNode<SessionTreeNode>;
 

@@ -1,9 +1,10 @@
 import { complete, createAssistantMessageEventStream, getEnvApiKey, getModel, getProviders, Type } from "@caupulican/pi-ai";
-import { Agent, streamProxy } from "@caupulican/pi-agent-core";
+import { Agent, streamProxy } from "../packages/coding-agent/src/kernel/index.ts";
 
 // Keep this entry browser-safe. It is bundled by scripts/check-browser-smoke.mjs
 // to catch accidental Node-only runtime imports in browser-facing package exports.
 const model = getModel("google", "gemini-2.5-flash");
+if (!model) throw new Error("The model catalog has no google/gemini-2.5-flash");
 const schema = Type.Object({ prompt: Type.String() });
 const stream = createAssistantMessageEventStream();
 

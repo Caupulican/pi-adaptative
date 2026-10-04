@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Api, KnownProvider, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
+import type { AuthStorage } from "../auth-storage.ts";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "../context/tool-output-packer.ts";
 import { lendableToolSurface, mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
@@ -11,7 +12,6 @@ import {
 	WORKER_ROOT_MEMORY_TOOL_NAMES,
 } from "../memory/worker-memory-tools.ts";
 import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "../model-capability.ts";
-import type { ModelRegistry } from "../model-registry.ts";
 import { defaultModelPerProvider } from "../model-resolver.ts";
 import {
 	type HarnessCapability,
@@ -24,12 +24,8 @@ import {
 } from "../orchestration/contracts.ts";
 import { CLASSIFIED_LANE_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
 import { resolvePinnedOrchestrationModel } from "../orchestration/model-binding.ts";
-import {
-	DEFAULT_WORKER_DELEGATION_ACCOUNT,
-	DEFAULT_WORKER_DELEGATION_THINKING,
-	type WorkerAccountRouting,
-	type WorkerThinkingPolicy,
-} from "../settings-manager.ts";
+import { DEFAULT_WORKER_DELEGATION_ACCOUNT, DEFAULT_WORKER_DELEGATION_THINKING } from "../settings/settings-rules.ts";
+import type { WorkerAccountRouting, WorkerThinkingPolicy } from "../settings/settings-schema.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import {
 	capabilitySurvivesReadOnly,
@@ -42,6 +38,14 @@ import { YOLO_WORKER_CAPABILITIES } from "./worker-execution-policy.ts";
 import { LEAF_WORKER_DELEGATION_LIMITS } from "./worker-fleet-limits.ts";
 import { resolveWorkerWorkspacePath } from "./worker-machine-scope.ts";
 import type { ResolvedWorkerProfile } from "./worker-profile-resolver.ts";
+
+/** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
+export interface WorkerAuthorityResolverModelSource {
+	readonly authStorage: AuthStorage;
+	find(provider: string, modelId: string): Model<Api> | undefined;
+	getAvailable(): Model<Api>[];
+	hasConfiguredAuth(model: Model<Api>): boolean;
+}
 
 /**
  * Smallest token grant a worker can survive on. A worker's first response pays the full
@@ -103,7 +107,7 @@ export interface WorkerAuthorityResolutionInput {
 	cwd?: string;
 	/** Caller task cwd for explicit relative path intent; preset paths remain anchored to cwd. */
 	executionCwd?: string;
-	modelRegistry: ModelRegistry;
+	modelRegistry: WorkerAuthorityResolverModelSource;
 	isModelExhausted(model: Model<Api>): boolean;
 	/** True while the model's account has a live machine-wide limit (see provider-admission/limit-state.ts). */
 	isModelLimited?(model: Model<Api>): boolean;
@@ -180,7 +184,7 @@ export function previewWorkerModel(input: {
 	pin: OrchestrationModelBinding | undefined;
 	routing: WorkerAccountRouting;
 	role: string;
-	modelRegistry: ModelRegistry;
+	modelRegistry: WorkerAuthorityResolverModelSource;
 	isModelExhausted: (model: Model<Api>) => boolean;
 	isModelLimited?: (model: Model<Api>) => boolean;
 }): Model<Api> {
@@ -207,7 +211,7 @@ export function selectRoutedWorkerModel(input: {
 	routing: WorkerAccountRouting;
 	/** The worker's role; a `routeProvidersByRole` list for it replaces `routeProviders`. */
 	role?: string;
-	modelRegistry: ModelRegistry;
+	modelRegistry: WorkerAuthorityResolverModelSource;
 	isModelExhausted: (model: Model<Api>) => boolean;
 	isModelLimited?: (model: Model<Api>) => boolean;
 }): Model<Api> | undefined {
@@ -219,7 +223,7 @@ function collectRoutedWorkerModels(
 		foregroundModel: Model<Api>;
 		routing: WorkerAccountRouting;
 		role?: string;
-		modelRegistry: ModelRegistry;
+		modelRegistry: WorkerAuthorityResolverModelSource;
 		isModelExhausted: (model: Model<Api>) => boolean;
 		isModelLimited?: (model: Model<Api>) => boolean;
 	},
@@ -277,7 +281,7 @@ function selectModelBinding(
 	foregroundModel: Model<Api> | undefined,
 	foregroundThinkingLevel: OrchestrationThinkingLevel | undefined,
 	foregroundThinkingPolicy: WorkerThinkingPolicy,
-	modelRegistry: ModelRegistry,
+	modelRegistry: WorkerAuthorityResolverModelSource,
 	accountRouting: WorkerAccountRouting,
 	isModelExhausted: (model: Model<Api>) => boolean,
 	isModelLimited: ((model: Model<Api>) => boolean) | undefined,

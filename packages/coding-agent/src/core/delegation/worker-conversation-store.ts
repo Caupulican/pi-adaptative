@@ -2,21 +2,23 @@ import { createHash } from "node:crypto";
 import { existsSync, opendirSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import type { AssistantMessageDiagnostic, Message, Usage } from "@caupulican/pi-ai";
 import {
 	type CompactionPreparation,
 	type CompactionResult,
 	createDeterministicCompaction,
 	estimateContextTokens,
 	prepareCompaction,
-} from "@caupulican/pi-agent-core/compaction/compaction";
-import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
+} from "../../kernel/compaction/compaction.ts";
+import type { ProviderRequestPrefixState, ProviderRequestSnapshotContext } from "../../kernel/index.ts";
 import {
 	type CustomMessage,
 	convertToLlm,
 	isCoreConversationMessageRole,
 	isWireNativeAgentMessageRole,
-} from "@caupulican/pi-agent-core/messages";
-import { measureJsonStringUtf8Bytes } from "@caupulican/pi-agent-core/provider-request-estimator";
+} from "../../kernel/messages.ts";
+import { measureJsonStringUtf8Bytes } from "../../kernel/provider-request-estimator.ts";
+import { compactToolResultDetailsForRetention } from "../../kernel/session/message-retention.ts";
 import {
 	assertValidSessionId,
 	loadEntriesFromFile,
@@ -24,16 +26,10 @@ import {
 	type SessionContext,
 	SessionManager,
 	type SessionRequestSnapshotInput,
-} from "@caupulican/pi-agent-core/session";
-import { createToolFailureContextMemory } from "@caupulican/pi-agent-core/tool-failure-memory";
-import type {
-	AgentMessage,
-	AgentMessageOrigin,
-	ProviderRequestPrefixState,
-	ProviderRequestSnapshotContext,
-} from "@caupulican/pi-agent-core/types";
-import { addUsage, createEmptyUsage, getSessionEntryUsage } from "@caupulican/pi-agent-core/usage";
-import type { AssistantMessageDiagnostic, Message, Usage } from "@caupulican/pi-ai";
+} from "../../kernel/session/session-manager.ts";
+import { createToolFailureContextMemory } from "../../kernel/tool-failure-memory.ts";
+import type { AgentMessage, AgentMessageOrigin } from "../../kernel/types.ts";
+import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../../kernel/usage.ts";
 import { orchestrationSessionsDir, workerConversationSessionsDir } from "../agent-paths.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
 import {
@@ -274,10 +270,10 @@ type WorkerSessionMessage = Extract<WorkerSessionEntry, { type: "message" }>["me
 
 /**
  * A worker transcript entry that is genuine conversation content: either an already wire-native
- * `Message`, or a durable custom transient record (packages/agent's transient-records.ts - the
+ * `Message`, or a durable custom transient record (the kernel's transient-records.ts - the
  * tool-failure ledger, a verification obligation) that still needs `convertToLlm`'s conversion
  * before it can reach a provider but is nonetheless real, persisted conversation history. See
- * `isCoreConversationMessageRole`'s doc comment (packages/agent/src/messages.ts) for the full
+ * `isCoreConversationMessageRole`'s doc comment (packages/coding-agent/src/kernel/messages.ts) for the full
  * reasoning on why these, and only these, are the roles a worker transcript can legitimately hold.
  */
 export type WorkerTranscriptMessage = Message | CustomMessage;
@@ -291,7 +287,7 @@ function rawWorkerTranscriptMessage(entry: Readonly<WorkerSessionEntry>): Worker
 	return entry.message;
 }
 
-/** Object-level wrapper around `isWireNativeAgentMessageRole` (packages/agent) so a role check on
+/** Object-level wrapper around `isWireNativeAgentMessageRole` (the kernel) so a role check on
  * `message.role` narrows `message` itself - a role-only predicate applied to a property access does
  * not automatically narrow its parent object. Delegates to the same canonical, exhaustively-checked
  * logic; adds no role list of its own. */

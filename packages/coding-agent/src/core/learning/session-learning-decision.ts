@@ -1,4 +1,4 @@
-import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
+import type { SessionEntry, SessionManager } from "../../kernel/node.ts";
 import type { LearningDecision } from "../autonomy/contracts.ts";
 import {
 	appendSessionSnapshot,

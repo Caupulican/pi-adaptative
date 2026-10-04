@@ -8,7 +8,7 @@
  * rather than the whole AgentSession — they never mutate anything but the owned gate-outcome fields.
  */
 
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { SessionManager } from "../kernel/node.ts";
 import { getProcessMemoryMb } from "../utils/process-memory.ts";
 import type { EvidenceBundle, GateOutcome, LearningDecision, WorkerClaim } from "./autonomy/contracts.ts";
 import { getLaneRecordSnapshots } from "./autonomy/session-lane-record.ts";

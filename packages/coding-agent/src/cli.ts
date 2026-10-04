@@ -69,6 +69,11 @@ if ((cliArgs.includes("--help") || cliArgs.includes("-h")) && !packageCommands.h
 
 const supervised = launchArgs !== undefined && (await superviseBeforeLoading(launchArgs));
 if (!supervised) {
+	// Extensions this process loads bind to its live modules; see host-extension-modules.ts.
+	await import("./core/extensions/host-extension-modules.ts");
+	// The built-in model providers are registered once, here, by the process root.
+	const { registerBuiltInApiProviders } = await import("@caupulican/pi-ai/register-builtins");
+	registerBuiltInApiProviders();
 	const { main } = await import("./main.ts");
 	await main(cliArgs);
 }

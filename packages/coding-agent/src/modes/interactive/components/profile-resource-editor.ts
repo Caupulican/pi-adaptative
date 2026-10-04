@@ -18,15 +18,15 @@ import {
 	type ResourceFraming,
 	remapResourceSelectionFilter,
 } from "../../../core/profile-resource-selection.ts";
-import {
-	matchesResourceProfilePattern,
-	type ResourceProfileFilterSettings,
-	type ResourceProfileKind,
-	type ResourceProfileSettings,
-} from "../../../core/settings-manager.ts";
-import { theme } from "../theme/theme.ts";
+import { matchesResourceProfilePattern } from "../../../core/settings/settings-rules.ts";
+import type {
+	ResourceProfileFilterSettings,
+	ResourceProfileKind,
+	ResourceProfileSettings,
+} from "../../../core/settings/settings-schema.ts";
+import { keyText } from "../../../presentation/keybinding-hints.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyText } from "./keybinding-hints.ts";
 import {
 	clearSelectorSearchOrCancel,
 	formatDirtySelectorFooter,

@@ -26,8 +26,8 @@ import {
 import { awaitPreflight } from "../preflight.ts";
 import { ensurePythonRuntime, type PythonRuntimeOutcome } from "../python-runtime.ts";
 import { isRecordObject } from "../util/value-guards.ts";
-import type { BashOperations } from "./bash.ts";
 import { PersistentProcessCoordinator } from "./persistent-process-coordinator.ts";
+import type { BashOperations } from "./schemas/bash.ts";
 import { tokenizeShellCommand } from "./shell-command-parser.ts";
 import { ShellLanePool } from "./shell-lane-pool.ts";
 import {

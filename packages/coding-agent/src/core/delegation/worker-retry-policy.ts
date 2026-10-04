@@ -3,7 +3,7 @@ import {
 	computeRetryDelayMs,
 	RetryDelayExceededError,
 	type RetryPolicy,
-} from "@caupulican/pi-agent-core/reliability";
+} from "../../kernel/reliability/index.ts";
 
 /**
  * Restart-durable, host-owned attempt ladder policy for delegated workers.

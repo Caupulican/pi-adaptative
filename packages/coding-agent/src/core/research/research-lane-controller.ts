@@ -1,6 +1,6 @@
-import type { SessionManager } from "@caupulican/pi-agent-core/session";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import type { Usage } from "@caupulican/pi-ai/types";
+import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type {
 	AgentSessionEvent,
 	IsolatedCompletionOptions,
@@ -18,10 +18,22 @@ import type { PathAliasTable } from "../context/path-alias-table.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import type { NormalizedProfile } from "../profile-registry.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
-import type { SettingsManager } from "../settings-manager.ts";
+import type {
+	AutonomySettings,
+	ResolvedEdgeSettings,
+	ResolvedResearchLaneSettings,
+} from "../settings/settings-schema.ts";
 import { clampLaneMaxUsd, type LaneModelResolver } from "./lane-model-resolver.ts";
 import { runResearch } from "./research-runner.ts";
 import type { collectWorkspaceSources } from "./workspace-collector.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ResearchLaneControllerSettingsSource {
+	getAutonomySettings(): Required<AutonomySettings>;
+	getEdgeSettings(): ResolvedEdgeSettings;
+	getResearchLaneSettings(): ResolvedResearchLaneSettings;
+	subscribeChanges(listener: () => void): () => void;
+}
 
 export interface ResearchLaneControllerDeps {
 	isDisposed(): boolean;
@@ -30,7 +42,7 @@ export interface ResearchLaneControllerDeps {
 	getCwd(): string;
 	getAgentDir(): string;
 	getSessionManager(): SessionManager;
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): ResearchLaneControllerSettingsSource;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	emit(event: AgentSessionEvent): void;
 	onContinuationActivity?(): void;
@@ -49,9 +61,9 @@ export interface ResearchLaneControllerDeps {
 }
 
 type ResearchLaneScheduleSettings = Pick<
-	ReturnType<SettingsManager["getResearchLaneSettings"]>,
+	ReturnType<ResearchLaneControllerSettingsSource["getResearchLaneSettings"]>,
 	"enabled" | "idleDelayMs" | "maxRunsPerSession" | "model" | "profile"
-> & { autonomyMode: ReturnType<SettingsManager["getAutonomySettings"]>["mode"] };
+> & { autonomyMode: ReturnType<ResearchLaneControllerSettingsSource["getAutonomySettings"]>["mode"] };
 
 /** Owns autonomous research demand, scheduling, execution, persistence, and cancellation. */
 export class ResearchLaneController {
@@ -349,9 +361,9 @@ export class ResearchLaneController {
 	}
 
 	private ensureSettingsSubscription(
-		settingsManager: SettingsManager,
-		research: ReturnType<SettingsManager["getResearchLaneSettings"]>,
-		autonomyMode: ReturnType<SettingsManager["getAutonomySettings"]>["mode"],
+		settingsManager: ResearchLaneControllerSettingsSource,
+		research: ReturnType<ResearchLaneControllerSettingsSource["getResearchLaneSettings"]>,
+		autonomyMode: ReturnType<ResearchLaneControllerSettingsSource["getAutonomySettings"]>["mode"],
 	): void {
 		this._scheduleSettings = this.scheduleSettings(research, autonomyMode);
 		if (
@@ -387,8 +399,8 @@ export class ResearchLaneController {
 	}
 
 	private scheduleSettings(
-		research: ReturnType<SettingsManager["getResearchLaneSettings"]>,
-		autonomyMode: ReturnType<SettingsManager["getAutonomySettings"]>["mode"],
+		research: ReturnType<ResearchLaneControllerSettingsSource["getResearchLaneSettings"]>,
+		autonomyMode: ReturnType<ResearchLaneControllerSettingsSource["getAutonomySettings"]>["mode"],
 	): ResearchLaneScheduleSettings {
 		return {
 			enabled: research.enabled,

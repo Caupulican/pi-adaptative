@@ -11,6 +11,7 @@ import {
 	DefaultResourceLoader,
 	getAgentDir,
 	SessionManager,
+	SettingsManager,
 	type Skill,
 } from "@caupulican/pi-adaptative";
 
@@ -27,6 +28,7 @@ const customSkill: Skill = {
 const loader = new DefaultResourceLoader({
 	cwd: process.cwd(),
 	agentDir: getAgentDir(),
+	settingsManager: SettingsManager.create(process.cwd(), getAgentDir()),
 	skillsOverride: (current) => {
 		const filteredSkills = current.skills.filter((s) => s.name.includes("browser") || s.name.includes("search"));
 		return {

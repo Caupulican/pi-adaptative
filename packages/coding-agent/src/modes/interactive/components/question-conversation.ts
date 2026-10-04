@@ -1,7 +1,7 @@
-import type { AgentMessage } from "@caupulican/pi-agent-core";
-import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core/shell-output";
 import { isAssistantDisplayText } from "../../../core/message-phase.ts";
 import { isRecordObject } from "../../../core/util/value-guards.ts";
+import type { AgentMessage } from "../../../kernel/index.ts";
+import { sanitizeBinaryOutput } from "../../../kernel/utils/shell-output.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 
 /** A human question/answer is conversation even though its wire representation is a tool result. */

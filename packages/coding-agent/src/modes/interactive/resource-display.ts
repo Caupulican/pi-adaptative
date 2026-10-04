@@ -11,8 +11,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
+import { theme } from "../../presentation/theme-model.ts";
 import { parseGitUrl } from "../../utils/git.ts";
-import { theme } from "./theme/theme.ts";
 
 export function formatDisplayPath(p: string): string {
 	const home = os.homedir();

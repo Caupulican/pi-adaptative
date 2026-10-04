@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import nodePath from "node:path";
-import type { SessionEntry } from "@caupulican/pi-agent-core/node";
+import type { SessionEntry } from "../../kernel/node.ts";
 import { matchToolkitScript, type ToolkitScript } from "../toolkit/script-registry.ts";
 import { expandPath } from "../tools/path-utils.ts";
 import { parseShellCommandSequence, stripShellInvocationPrefixes } from "../tools/shell-command-parser.ts";

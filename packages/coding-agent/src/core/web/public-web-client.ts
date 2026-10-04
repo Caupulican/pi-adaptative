@@ -2,6 +2,7 @@ import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import * as Effect from "effect/Effect";
 import ipaddr from "ipaddr.js";
+import type { PublicWebOperations, WebResponse } from "./public-web-http.ts";
 import { requestPublicWeb } from "./public-web-http.ts";
 
 export const MAX_WEB_RESPONSE_BYTES = 5 * 1024 * 1024;
@@ -21,23 +22,6 @@ export class PublicWebHttpError extends Error {
 		this.status = status;
 		this.url = url;
 	}
-}
-
-export interface WebResponse {
-	status: number;
-	headers: { get(name: string): string | null };
-	body: ReadableStream<Uint8Array> | null;
-}
-
-export interface PublicWebOperations {
-	lookup(hostname: string): Promise<readonly { address: string; family: number }[]>;
-	/** Connect only to address, preserving the URL hostname for Host and TLS verification. */
-	request(input: {
-		url: URL;
-		address: { address: string; family: number };
-		headers: Record<string, string>;
-		signal: AbortSignal;
-	}): Promise<{ response: WebResponse; close(): Promise<void> }>;
 }
 
 export const nativeOperations: PublicWebOperations = {

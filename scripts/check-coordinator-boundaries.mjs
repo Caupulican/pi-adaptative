@@ -31,7 +31,7 @@ export const boundaries = [
 		required: [
 			'from "./interactive-event-controller.ts"',
 			'from "./loaded-resources-view.ts"',
-			"handleInteractiveEvent(",
+			"this.events.handle(",
 			"renderLoadedResources(",
 		],
 		forbidden: [

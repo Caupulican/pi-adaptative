@@ -6,7 +6,12 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import { fuzzyFilter } from "@caupulican/pi-tui";
 import chalk from "chalk";
 import { formatNoModelsAvailableMessage } from "../core/auth-guidance.ts";
-import type { ModelRegistry } from "../core/model-registry.ts";
+
+/** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
+export interface ListModelsModelSource {
+	getAvailable(): Model<Api>[];
+	getError(): string | undefined;
+}
 
 /**
  * Format a number as human-readable (e.g., 200000 -> "200K", 1000000 -> "1M")
@@ -26,7 +31,7 @@ function formatTokenCount(count: number): string {
 /**
  * List available models, optionally filtered by search pattern
  */
-export async function listModels(modelRegistry: ModelRegistry, searchPattern?: string): Promise<void> {
+export async function listModels(modelRegistry: ListModelsModelSource, searchPattern?: string): Promise<void> {
 	const loadError = modelRegistry.getError();
 	if (loadError) {
 		console.error(chalk.yellow(`Warning: errors loading models.json:\n${loadError}`));

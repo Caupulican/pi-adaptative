@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { getAgentDir, getPackageDir, isBunBinary } from "../config.ts";
+import { RUNTIME_SUPERVISOR_ENV } from "../core/harness-environment.ts";
 import {
 	getSelfLaunchTarget,
 	normalizeSelfLaunchTarget,
@@ -11,7 +12,7 @@ import { type RuntimeChild, RuntimeSupervisor } from "../core/runtime-supervisor
 import { writeFileAtomicSync } from "../core/util/atomic-file.ts";
 import { acquireWorkRun, getWorkTenantDir, pruneWorkTenant } from "../utils/work-directory.ts";
 import { RuntimeArtifactStore, type RuntimeOrigin } from "./runtime-artifact-store.ts";
-import { getRuntimeChildChannel, RUNTIME_SUPERVISOR_ENV } from "./runtime-channel.ts";
+import { getRuntimeChildChannel } from "./runtime-channel.ts";
 import { launchRuntimeChild } from "./runtime-child-process.ts";
 import { createStandaloneRuntimeOrigin } from "./runtime-origin.ts";
 

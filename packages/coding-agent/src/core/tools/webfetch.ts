@@ -1,5 +1,5 @@
-import type { AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
+import type { AgentTool } from "../../kernel/index.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import { formatArtifactNotice, packToolOutput } from "../context/tool-output-packer.ts";
 import type { ToolDefinition } from "../extensions/types.ts";

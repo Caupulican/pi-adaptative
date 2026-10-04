@@ -13,11 +13,11 @@
  */
 
 import { existsSync } from "node:fs";
-import { MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT } from "@caupulican/pi-agent-core";
+import { MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT } from "../kernel/index.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { estimateTokensFromChars } from "./context/context-item.ts";
 import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
-import type { Extension } from "./extensions/types.ts";
+import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts";
 import { isCurrentSessionReflectionEnabled, resolveAutoLearnSettings } from "./learning/auto-learn-settings.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import { ICM_MEMORY_GUIDANCE } from "./memory/providers/icm.ts";
@@ -38,15 +38,32 @@ import {
 import { normalizeProviderPromptGuidelines, normalizeProviderPromptSnippet } from "./provider-tool-text.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { UNTRUSTED_BOUNDARY_SYSTEM_RULE } from "./security/untrusted-boundary.ts";
-import type { SettingsManager } from "./settings-manager.ts";
-import { type BuildSystemPromptOptions, buildSystemPrompt, promptDate } from "./system-prompt.ts";
+import type {
+	AutoLearnSettings,
+	AutonomySettings,
+	MemorySystem,
+	ResolvedWorkerDelegationSettings,
+} from "./settings/settings-schema.ts";
+import { buildSystemPrompt, promptDate } from "./system-prompt.ts";
 import { formatToolSelectionHints, type ToolSelectionHint } from "./tool-selection/promotion.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface SystemPromptBuilderSettingsSource {
+	getActiveProfileSoul(): string | undefined;
+	getAutoLearnSettings(): AutoLearnSettings;
+	getAutonomySettings(): Required<AutonomySettings>;
+	getMemorySystem(): MemorySystem;
+	getProjectContextFiles(): "on-demand" | "off";
+	getSelfModificationSettings(): { enabled: boolean; sourcePath?: string; sourcePaths?: string[] };
+	getSteStrictness(): number;
+	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings;
+}
 
 export interface SystemPromptBuilderDeps {
 	/** The session's working directory (read fresh; base for self-modification source resolution). */
 	getCwd(): string;
 	/** The session's settings manager — soul, self-modification, autonomy, and auto-learn settings. */
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): SystemPromptBuilderSettingsSource;
 	/** The session's resource loader — custom/append system prompts and agents files. */
 	getResourceLoader(): ResourceLoader;
 	/** The session's memory manager — the static, frozen-per-session memory system-prompt block. */

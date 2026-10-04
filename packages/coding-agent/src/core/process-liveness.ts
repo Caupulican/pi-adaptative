@@ -1,4 +1,4 @@
-import { isPositiveSafePid, type ProcessKillProbe, probeProcessLiveness } from "@caupulican/pi-agent-core/process-tree";
+import { isPositiveSafePid, type ProcessKillProbe, probeProcessLiveness } from "../kernel/reliability/process-tree.ts";
 
 export type ProcessLivenessProbe = ProcessKillProbe;
 

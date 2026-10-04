@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import type { AgentTool } from "@caupulican/pi-agent-core";
+import type { AgentTool } from "../../kernel/index.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { collectUnknownAliasTokensInPathParams, expandParams, type PathAliasTable } from "./path-alias-table.ts";
 

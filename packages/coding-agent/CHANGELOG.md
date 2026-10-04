@@ -1,5 +1,19 @@
 ## [Unreleased]
 
+### Breaking Changes
+
+- The `@caupulican/pi-agent-core` package is merged into coding-agent as `src/kernel/`. Extensions keep importing `@caupulican/pi-agent-core[/subpath]`: the CLI entries register the live kernel modules under those specifiers and the source-mode loader maps them to kernel files. `check:kernel-layer` keeps the kernel from importing the rest of coding-agent.
+- `DefaultResourceLoader` requires `settingsManager`; it no longer creates a second `SettingsManager` when none is passed.
+- `AgentSession` no longer exposes `sessionManager`, `settingsManager`, `modelRegistry` or `extensionRunner`. `createAgentSession` returns `sessionManager` and a live `getExtensionRunner()`; `AgentSessionRuntime` exposes the active `sessionManager`, `services` and `extensionRunner` (`ActiveSessionContext`), and `AgentSessionRuntimeResource.start` receives it as `start(session, active)`.
+
+### Changed
+
+- Import structure reworked for change freedom: the 172-file import cycle is gone, and mean transitive dependents per file dropped from 284 to about 110. Tool input/details schemas live in `core/tools/schemas/`, settings types and rules in `core/settings/`, the theme model in `src/presentation/theme-model.ts`, and loop-config types in `kernel/loop-config.ts`; consumers of `SettingsManager` and `ModelRegistry` declare narrow ports, and the extension API sees `ModelRegistryContract`, which `ModelRegistry` implements.
+- Host extension modules are registered by the process entries instead of the session builder, which removes a runtime import cycle through the program entry.
+- Interactive-mode state has single owners: `SignalLifecycle` (shutdown and process listeners), `InteractiveLayout` (workbench) and `InteractiveEventController` (streaming view); the `this as unknown as Host` casts are gone.
+- Rendering building blocks that core used from the interactive mode (theme, keybinding hints, visual truncation, tool titles, diff, clipboard input) live in `src/presentation/`; core no longer imports `modes/`.
+- The codebase has no import cycles left.
+
 ## [0.102.3] - 2026-10-04
 
 ### Added

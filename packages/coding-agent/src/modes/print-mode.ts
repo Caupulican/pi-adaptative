@@ -113,7 +113,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 	try {
 		if (mode === "json") {
-			const header = session.sessionManager.getHeader();
+			const header = runtimeHost.sessionManager.getHeader();
 			if (header) {
 				writeRawStdout(`${JSON.stringify(header)}\n`);
 			}

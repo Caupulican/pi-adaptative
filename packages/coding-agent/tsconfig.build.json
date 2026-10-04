@@ -3,8 +3,6 @@
 	"compilerOptions": {
 		"outDir": "./dist",
 		"paths": {
-			"@caupulican/pi-agent-core": ["../agent/dist/index.d.ts"],
-			"@caupulican/pi-agent-core/*": ["../agent/dist/*.d.ts"],
 			"@caupulican/pi-ai": ["../ai/dist/index.d.ts"],
 			"@caupulican/pi-ai/*": ["../ai/dist/*.d.ts", "../ai/dist/providers/*.d.ts"],
 			"@caupulican/pi-tui": ["../tui/dist/index.d.ts"],

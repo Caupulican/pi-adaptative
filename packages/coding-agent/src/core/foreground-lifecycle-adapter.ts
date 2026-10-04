@@ -1,7 +1,11 @@
-import type { Agent, AgentMessageOrigin } from "@caupulican/pi-agent-core";
-import type { SessionManager, SessionMessageBatchEntry } from "@caupulican/pi-agent-core/session";
-import type { ProviderRequestSnapshotContext, ToolCallStartContext } from "@caupulican/pi-agent-core/types";
 import type { AssistantMessage, Message } from "@caupulican/pi-ai";
+import type {
+	Agent,
+	AgentMessageOrigin,
+	ProviderRequestSnapshotContext,
+	ToolCallStartContext,
+} from "../kernel/index.ts";
+import type { SessionManager, SessionMessageBatchEntry } from "../kernel/session/session-manager.ts";
 import { ForegroundLifecycleController, type ProviderRetryLifecycleEvent } from "./foreground-lifecycle-controller.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
 import { type ProviderLimitStore, providerLimitFromFailure } from "./provider-admission/limit-state.ts";

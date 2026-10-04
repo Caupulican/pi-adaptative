@@ -1,4 +1,3 @@
-import type { AgentMessage, AgentToolResult } from "@caupulican/pi-agent-core";
 import {
 	type Api,
 	generateImages,
@@ -11,6 +10,7 @@ import {
 	OPENAI_CODEX_IMAGE_MODEL,
 	validateCodexImageContent,
 } from "@caupulican/pi-ai";
+import type { AgentMessage, AgentToolResult } from "../kernel/index.ts";
 import { detectSupportedImageMimeType } from "../utils/mime.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";

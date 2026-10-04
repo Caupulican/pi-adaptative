@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { getStableSelfLaunchTarget } from "../process-matrix/self-launch-target.ts";
 import { herdrCommand } from "./herdr-command.ts";
-import type { NewCollaborationJob } from "./job-store.ts";
+import type { NewCollaborationJob } from "./job-record.ts";
 
 export function bootstrapCollaborationPeers(
 	input: NewCollaborationJob,

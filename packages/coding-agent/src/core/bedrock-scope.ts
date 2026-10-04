@@ -4,8 +4,19 @@ import {
 	discoverBedrockInferenceProfiles,
 	probeBedrockModelAccess,
 } from "@caupulican/pi-ai/bedrock-provider";
-import type { ModelRegistry } from "./model-registry.ts";
-import type { BedrockScopeSettings, SettingsManager } from "./settings-manager.ts";
+import type { BedrockScopeSettings } from "./settings/settings-schema.ts";
+
+/** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
+export interface BedrockScopeModelSource {
+	getAll(): Model<Api>[];
+	setProviderModelScope(provider: string, modelIds: Iterable<string> | undefined): void;
+}
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface BedrockScopeSettingsSource {
+	getBedrockScopeSettings(): BedrockScopeSettings | undefined;
+	setBedrockScopeSettings(scope: BedrockScopeSettings): void;
+}
 
 export const BEDROCK_PROVIDER_ID = "amazon-bedrock";
 const BEDROCK_MODEL_FAMILIES = ["sonnet", "opus", "haiku", "fable"] as const;
@@ -129,7 +140,7 @@ function noVerifiedModelsError(result: BedrockModelProbeResult): Error {
 
 export async function verifyBedrockScope(
 	request: BedrockScopeVerificationRequest,
-	modelRegistry: ModelRegistry,
+	modelRegistry: BedrockScopeModelSource,
 	dependencies: BedrockScopeVerificationDependencies = {},
 ): Promise<BedrockScopeSettings> {
 	const normalized = connection(request);
@@ -176,7 +187,7 @@ function scopeMatchesEnvironment(scope: BedrockScopeSettings, env: NodeJS.Proces
 	return environmentProfile === undefined || environmentProfile === scope.profile;
 }
 
-function scopedModelIds(scope: BedrockScopeSettings, modelRegistry: ModelRegistry): string[] {
+function scopedModelIds(scope: BedrockScopeSettings, modelRegistry: BedrockScopeModelSource): string[] {
 	const modelIds = new Set(scope.modelIds);
 	for (const model of modelRegistry.getAll()) {
 		if (model.provider !== BEDROCK_PROVIDER_ID) continue;
@@ -187,7 +198,7 @@ function scopedModelIds(scope: BedrockScopeSettings, modelRegistry: ModelRegistr
 }
 
 export function getActiveBedrockScope(
-	settingsManager: SettingsManager,
+	settingsManager: BedrockScopeSettingsSource,
 	env: NodeJS.ProcessEnv = process.env,
 ): BedrockScopeSettings | undefined {
 	const scope = settingsManager.getBedrockScopeSettings();
@@ -196,8 +207,8 @@ export function getActiveBedrockScope(
 
 /** Bind persisted evidence to both provider visibility and the SDK's exact request environment. */
 export function bindSavedBedrockScope(
-	settingsManager: SettingsManager,
-	modelRegistry: ModelRegistry,
+	settingsManager: BedrockScopeSettingsSource,
+	modelRegistry: BedrockScopeModelSource,
 	env: NodeJS.ProcessEnv = process.env,
 ): BedrockScopeSettings | undefined {
 	if (isUnscopedBedrockProxy(env)) {
@@ -216,8 +227,8 @@ export function bindSavedBedrockScope(
 }
 
 export function activateVerifiedBedrockScope(
-	settingsManager: SettingsManager,
-	modelRegistry: ModelRegistry,
+	settingsManager: BedrockScopeSettingsSource,
+	modelRegistry: BedrockScopeModelSource,
 	scope: BedrockScopeSettings,
 	env: NodeJS.ProcessEnv = process.env,
 ): void {

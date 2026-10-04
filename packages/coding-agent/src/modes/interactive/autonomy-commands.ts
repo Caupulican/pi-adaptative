@@ -13,13 +13,23 @@ import type { Container, TUI } from "@caupulican/pi-tui";
 import { Spacer, Text } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { formatAutonomyDiagnostics } from "../../core/autonomy/status.ts";
-import type { AutoLearnSettings, AutonomyMode, SettingsManager, SettingsScope } from "../../core/settings-manager.ts";
+import type {
+	AutoLearnSettings,
+	AutonomyMode,
+	AutonomySettings,
+	SettingsScope,
+} from "../../core/settings/settings-schema.ts";
 import { AUTONOMY_MODES, type AutoLearnState } from "./auto-learn-controller.ts";
 import { presentModelFitnessOutcome } from "./model-fitness-presentation.ts";
 
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface AutonomyCommandsSettingsSource {
+	getAutonomySettings(): Required<AutonomySettings>;
+}
+
 export interface AutonomyHost {
 	readonly session: AgentSession;
-	readonly settingsManager: SettingsManager;
+	readonly settingsManager: AutonomyCommandsSettingsSource;
 	readonly chatContainer: Container;
 	readonly ui: TUI;
 	showStatus(message: string): void;

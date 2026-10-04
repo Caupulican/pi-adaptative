@@ -1,12 +1,18 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import type { Agent } from "@caupulican/pi-agent-core/agent";
-import { type ClassifiedError, classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
+import type { Agent } from "../kernel/agent.ts";
+import { type ClassifiedError, classifyFailure } from "../kernel/reliability/index.ts";
 import { decideBillingFailover } from "./billing-failover.ts";
-import type { ModelRegistry } from "./model-registry.ts";
 import type { ModelRouterFailoverStatus } from "./model-router/status.ts";
 import { writeFileAtomicSync } from "./util/atomic-file.ts";
+
+/** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
+export interface BillingFailoverControllerModelSource {
+	find(provider: string, modelId: string): Model<Api> | undefined;
+	hasConfiguredAuth(model: Model<Api>): boolean;
+	isUsingSubscription(model: Model<Api>): boolean;
+}
 
 const DEFAULT_MODEL_PER_PROVIDER: Record<string, string> = {
 	"openai-codex": "gpt-5.6-sol",
@@ -131,7 +137,7 @@ export interface BillingFailoverControllerDeps {
 	applyFailoverModel(failed: Model<Api>, hop: Model<Api>): Model<Api> | undefined;
 	/** The router's usable model for the work when there is no same-provider hop (see `BillingFailoverInput.fallback`). */
 	resolveFallbackModel?(failed: Model<Api>): Model<Api> | undefined;
-	modelRegistry: ModelRegistry;
+	modelRegistry: BillingFailoverControllerModelSource;
 	emit(event: { type: "warning"; message: string }): void;
 	exhausted: ExhaustedProviderRegistry;
 	subscriptionHop?: boolean;

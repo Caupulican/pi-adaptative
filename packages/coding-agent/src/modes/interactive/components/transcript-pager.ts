@@ -1,7 +1,7 @@
 import { type Component, truncateToWidth } from "@caupulican/pi-tui";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
-import { theme } from "../theme/theme.ts";
-import { formatKeyText } from "./keybinding-hints.ts";
+import { formatKeyText } from "../../../presentation/keybinding-hints.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 
 export interface TranscriptPagerOptions {
 	source: Component;

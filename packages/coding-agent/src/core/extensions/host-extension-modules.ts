@@ -1,35 +1,10 @@
 /**
  * Registers the host program's own module instances for extensions (see `registerHostExtensionModules`).
- * Imported for its effect by the session builder in every runtime, and first thing by the Bun entry,
- * whose bundler needs these imports static. The extension loader never imports this module, so a
- * focused test of the loader does not load the program.
+ * Imported for its effect by the process entries only (`cli.ts` before it loads `main.ts`, and first
+ * thing by the Bun entry, whose bundler needs these imports static). Nothing inside the program imports
+ * it, so it never closes an import cycle through the program entry it namespace-imports.
  */
-import * as bundledPiAgentCore from "@caupulican/pi-agent-core";
-import * as bundledPiAgentCoreAgent from "@caupulican/pi-agent-core/agent";
-import * as bundledPiAgentCoreAgentLoop from "@caupulican/pi-agent-core/agent-loop";
-import * as bundledPiAgentCoreCompaction from "@caupulican/pi-agent-core/compaction";
-import * as bundledPiAgentCoreBranchSummarization from "@caupulican/pi-agent-core/compaction/branch-summarization";
-import * as bundledPiAgentCoreCompactionCore from "@caupulican/pi-agent-core/compaction/compaction";
-import * as bundledPiAgentCoreCompactionLoop from "@caupulican/pi-agent-core/compaction/loop";
-import * as bundledPiAgentCoreTokenBudget from "@caupulican/pi-agent-core/compaction/token-budget";
-import * as bundledPiAgentCoreMessageRetention from "@caupulican/pi-agent-core/message-retention";
-import * as bundledPiAgentCoreMessages from "@caupulican/pi-agent-core/messages";
-import * as bundledPiAgentCoreNode from "@caupulican/pi-agent-core/node";
-import * as bundledPiAgentCorePaths from "@caupulican/pi-agent-core/paths";
-import * as bundledPiAgentCoreProcessTree from "@caupulican/pi-agent-core/process-tree";
-import * as bundledPiAgentCoreProviderRequestEstimator from "@caupulican/pi-agent-core/provider-request-estimator";
-import * as bundledPiAgentCoreProviderRequestImageBudget from "@caupulican/pi-agent-core/provider-request-image-budget";
-import * as bundledPiAgentCoreProviderRequestPlanner from "@caupulican/pi-agent-core/provider-request-planner";
-import * as bundledPiAgentCoreProviderToolProjection from "@caupulican/pi-agent-core/provider-tool-projection";
-import * as bundledPiAgentCoreReliability from "@caupulican/pi-agent-core/reliability";
-import * as bundledPiAgentCoreSession from "@caupulican/pi-agent-core/session";
-import * as bundledPiAgentCoreShellOutput from "@caupulican/pi-agent-core/shell-output";
-import * as bundledPiAgentCoreToolFailureMemory from "@caupulican/pi-agent-core/tool-failure-memory";
-import * as bundledPiAgentCoreToolProtocolResidue from "@caupulican/pi-agent-core/tool-protocol-residue";
-import * as bundledPiAgentCoreTruncate from "@caupulican/pi-agent-core/truncate";
-import * as bundledPiAgentCoreTypes from "@caupulican/pi-agent-core/types";
-import * as bundledPiAgentCoreUsage from "@caupulican/pi-agent-core/usage";
-import * as bundledPiAgentCoreVerificationObligations from "@caupulican/pi-agent-core/verification-obligations";
+
 import * as bundledPiAi from "@caupulican/pi-ai";
 import * as bundledPiAiAbortSignals from "@caupulican/pi-ai/abort-signals";
 import * as bundledPiAiApiRegistry from "@caupulican/pi-ai/api-registry";
@@ -59,6 +34,32 @@ import * as bundledTypebox from "typebox";
 import * as bundledTypeboxCompile from "typebox/compile";
 import * as bundledTypeboxValue from "typebox/value";
 import * as bundledPiCodingAgent from "../../index.ts";
+import * as bundledPiAgentCoreAgent from "../../kernel/agent.ts";
+import * as bundledPiAgentCoreAgentLoop from "../../kernel/agent-loop.ts";
+import * as bundledPiAgentCoreBranchSummarization from "../../kernel/compaction/branch-summarization.ts";
+import * as bundledPiAgentCoreCompactionCore from "../../kernel/compaction/compaction.ts";
+import * as bundledPiAgentCoreCompaction from "../../kernel/compaction/index.ts";
+import * as bundledPiAgentCoreCompactionLoop from "../../kernel/compaction/loop.ts";
+import * as bundledPiAgentCoreTokenBudget from "../../kernel/compaction/token-budget.ts";
+import * as bundledPiAgentCore from "../../kernel/index.ts";
+import * as bundledPiAgentCoreMessages from "../../kernel/messages.ts";
+import * as bundledPiAgentCoreNode from "../../kernel/node.ts";
+import * as bundledPiAgentCoreProviderRequestEstimator from "../../kernel/provider-request-estimator.ts";
+import * as bundledPiAgentCoreProviderRequestImageBudget from "../../kernel/provider-request-image-budget.ts";
+import * as bundledPiAgentCoreProviderRequestPlanner from "../../kernel/provider-request-planner.ts";
+import * as bundledPiAgentCoreProviderToolProjection from "../../kernel/provider-tool-projection.ts";
+import * as bundledPiAgentCoreReliability from "../../kernel/reliability/index.ts";
+import * as bundledPiAgentCoreProcessTree from "../../kernel/reliability/process-tree.ts";
+import * as bundledPiAgentCoreMessageRetention from "../../kernel/session/message-retention.ts";
+import * as bundledPiAgentCoreSession from "../../kernel/session/session-manager.ts";
+import * as bundledPiAgentCoreToolFailureMemory from "../../kernel/tool-failure-memory.ts";
+import * as bundledPiAgentCoreToolProtocolResidue from "../../kernel/tool-protocol-residue.ts";
+import * as bundledPiAgentCoreTypes from "../../kernel/types.ts";
+import * as bundledPiAgentCoreUsage from "../../kernel/usage.ts";
+import * as bundledPiAgentCorePaths from "../../kernel/utils/paths.ts";
+import * as bundledPiAgentCoreShellOutput from "../../kernel/utils/shell-output.ts";
+import * as bundledPiAgentCoreTruncate from "../../kernel/utils/truncate.ts";
+import * as bundledPiAgentCoreVerificationObligations from "../../kernel/verification-obligations.ts";
 import {
 	type PiAgentCoreExtensionSubpath,
 	type PiAiExtensionSubpath,

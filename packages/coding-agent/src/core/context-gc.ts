@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import type { AgentMessage } from "@caupulican/pi-agent-core";
-import { PrefixFold } from "@caupulican/pi-agent-core";
-import { estimateTokens } from "@caupulican/pi-agent-core/compaction/compaction";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
+import { estimateTokens } from "../kernel/compaction/compaction.ts";
+import type { AgentMessage } from "../kernel/index.ts";
+import { PrefixFold } from "../kernel/index.ts";
 import { normalizePath } from "../utils/paths.ts";
 import type { SentPrefixRewriteVerdict } from "./compaction/early-compaction-economics.ts";
 import { CONTEXT_ORIGINAL_KEY, type ContextOriginalMetadata } from "./context/artifact-retrieval.ts";

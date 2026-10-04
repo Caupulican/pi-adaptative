@@ -1,5 +1,5 @@
-import type { ExecutionContext } from "@caupulican/pi-agent-core/paths";
-import { DEFAULT_MAX_BYTES } from "@caupulican/pi-agent-core/truncate";
+import type { ExecutionContext } from "../../kernel/utils/paths.ts";
+import { DEFAULT_MAX_BYTES } from "../../kernel/utils/truncate.ts";
 import type { JsonObject, JsonValue } from "../autonomy/contracts.ts";
 import { HARNESS_CAPABILITIES, type HarnessCapability } from "../capability-contract.ts";
 import { isPlainRecord } from "../util/value-guards.ts";

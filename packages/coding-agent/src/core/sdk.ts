@@ -1,9 +1,5 @@
 import { execFileSync } from "node:child_process";
 import { basename } from "node:path";
-import { Agent } from "@caupulican/pi-agent-core/agent";
-import { convertToLlm } from "@caupulican/pi-agent-core/messages";
-import { getDefaultSessionDir, SessionManager } from "@caupulican/pi-agent-core/session";
-import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core/types";
 import {
 	type Api,
 	type Message,
@@ -13,7 +9,12 @@ import {
 	streamSimple,
 } from "@caupulican/pi-ai";
 import { getOAuthProvider } from "@caupulican/pi-ai/oauth";
+import { registerBuiltInApiProviders } from "@caupulican/pi-ai/register-builtins";
 import { getAgentDir } from "../config.ts";
+import { Agent } from "../kernel/agent.ts";
+import { convertToLlm } from "../kernel/messages.ts";
+import { getDefaultSessionDir, SessionManager } from "../kernel/session/session-manager.ts";
+import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { createProductionAdaptiveRuntimeStack } from "./adaptive/adaptive-runtime-factory.ts";
 import { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
@@ -26,7 +27,6 @@ import {
 } from "./adaptive/index.ts";
 import { capabilityArtifactsDir, configFile, steeringCertificatesFile } from "./agent-paths.ts";
 import { AgentSession } from "./agent-session.ts";
-import { SEMANTIC_USAGE_CUSTOM_TYPE } from "./agent-session-contracts.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { compileExecutionCharter, type ExecutionCharter } from "./autonomy/execution-charter.ts";
@@ -37,11 +37,10 @@ import {
 	isUnscopedBedrockProxy,
 } from "./bedrock-scope.ts";
 import { recoverBedrockSsoAuthentication } from "./bedrock-sso-login.ts";
+import { SEMANTIC_USAGE_CUSTOM_TYPE } from "./cost/usage-records.ts";
 import { resolveEffectiveCompletionProfile } from "./decision/completion-profile.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
-// Extensions a session loads bind to this program's live modules; see host-extension-modules.ts.
-import "./extensions/host-extension-modules.ts";
 import { resolveFastModeServiceTier } from "./fast-mode.ts";
 import { ObjectivePrimaryBindingError } from "./goals/goal-session-controller.ts";
 import type { IntegrityExtension } from "./hooks/index.ts";
@@ -75,7 +74,7 @@ import type {
 	ProfileDefinitionInput,
 	ResourceProfileFilterSettings,
 	ResourceProfileSettings,
-} from "./settings-manager.ts";
+} from "./settings/settings-schema.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { SteeringCertificateStore } from "./steering/certificate-store.ts";
 import { DEFAULT_STEERING_POLICY } from "./steering/policy.ts";
@@ -215,6 +214,10 @@ export interface CreateAgentSessionOptions {
 export interface CreateAgentSessionResult {
 	/** The created session */
 	session: AgentSession;
+	/** The session's own manager, handed to the host that builds the session rather than read back through it. */
+	sessionManager: SessionManager;
+	/** The session's current extension runner. A reload replaces the runner, so hold this function, never its result. */
+	getExtensionRunner(): ExtensionRunner;
 	/** Extensions result (for UI context setup in interactive mode) */
 	extensionsResult: LoadExtensionsResult;
 	/** Warning if session was restored with a different model than saved */
@@ -223,7 +226,6 @@ export interface CreateAgentSessionResult {
 
 // Re-exports
 
-export * from "./agent-session-runtime.ts";
 export type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -323,6 +325,8 @@ function getAttributionHeaders(model: Model<Api>, sessionId?: string): Record<st
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
+	// The SDK root: a session is the program for an embedder, so it owns built-in provider registration.
+	registerBuiltInApiProviders();
 	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getDefaultAgentDir();
 	let resourceLoader = options.resourceLoader;
@@ -860,7 +864,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			(steeringPlane || systemOneController ? new AdaptiveRuntimeReadiness({ isUnbound: true }) : undefined),
 	});
 	sessionRef.current = session;
-	session.setWorkEvidenceJournal(createSessionWorkEvidenceJournal(() => session.sessionManager));
+	// The AgentSession constructor builds the first runner; a reload swaps it through the same ref.
+	const getExtensionRunner = (): ExtensionRunner => {
+		const runner = extensionRunnerRef.current;
+		if (!runner) throw new Error("The session's extension runner is built by its constructor and must exist here.");
+		return runner;
+	};
+	session.setWorkEvidenceJournal(createSessionWorkEvidenceJournal(() => sessionManager));
 	await session.recoverGoalWorkEvidence();
 
 	// Phase B — Adaptive runtime late binding to live session-owned ports
@@ -1059,7 +1069,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const mechanicalVerifier = new RealMechanicalVerifier({
 			proofRunner,
 			scriptRegistry,
-			extensionRunner: session.extensionRunner,
+			extensionRunner: getExtensionRunner(),
 			skillVault: session.getSkillVault(),
 			cwd,
 			provenance: "production-live",
@@ -1114,7 +1124,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			mechanicalVerifier,
 			scriptRegistry,
 			skillVault: session.getSkillVault(),
-			extensionRunner: session.extensionRunner,
+			extensionRunner: getExtensionRunner(),
 			charter,
 			cwd,
 			capabilityArtifactRoot,
@@ -1129,7 +1139,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			extensionRuntime: {
 				reload: (extensionPath) => session.reloadExtension(extensionPath),
 				listActive: () =>
-					session.extensionRunner.activeExtensions.map((extension) => ({
+					getExtensionRunner().activeExtensions.map((extension) => ({
 						// `resolvedPath` is what the runtime actually loaded, which is what an
 						// activation lookup has to match against the artifact it was given.
 						name: basename(extension.path),
@@ -1207,6 +1217,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	return {
 		session,
+		sessionManager,
+		getExtensionRunner,
 		extensionsResult,
 		modelFallbackMessage,
 	};

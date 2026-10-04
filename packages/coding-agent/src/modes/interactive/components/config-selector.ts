@@ -16,12 +16,29 @@ import {
 	visibleWidth,
 } from "@caupulican/pi-tui";
 import { CONFIG_DIR_NAME } from "../../../config.ts";
-import type { PathMetadata, ResolvedPaths, ResolvedResource } from "../../../core/package-manager.ts";
-import type { PackageSource, SettingsManager } from "../../../core/settings-manager.ts";
-import { theme } from "../theme/theme.ts";
+import type { ResolvedPaths, ResolvedResource } from "../../../core/package-manager.ts";
+import type { PackageSource, Settings } from "../../../core/settings/settings-schema.ts";
+import type { PathMetadata } from "../../../core/source-info.ts";
+import { rawKeyHint } from "../../../presentation/keybinding-hints.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { rawKeyHint } from "./keybinding-hints.ts";
 import { getCenteredVisibleRange } from "./selector-list.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ConfigSelectorSettingsSource {
+	getGlobalSettings(): Settings;
+	getProjectSettings(): Settings;
+	setExtensionPaths(paths: string[]): void;
+	setPackages(packages: PackageSource[]): void;
+	setProjectExtensionPaths(paths: string[]): void;
+	setProjectPackages(packages: PackageSource[]): void;
+	setProjectPromptTemplatePaths(paths: string[]): void;
+	setProjectSkillPaths(paths: string[]): void;
+	setProjectThemePaths(paths: string[]): void;
+	setPromptTemplatePaths(paths: string[]): void;
+	setSkillPaths(paths: string[]): void;
+	setThemePaths(paths: string[]): void;
+}
 
 type ResourceType = "extensions" | "skills" | "prompts" | "themes";
 
@@ -214,7 +231,7 @@ class ResourceList implements Component, Focusable {
 	private selectedIndex = 0;
 	private searchInput: Input;
 	private maxVisible: number;
-	private settingsManager: SettingsManager;
+	private settingsManager: ConfigSelectorSettingsSource;
 	private cwd: string;
 	private agentDir: string;
 
@@ -233,7 +250,7 @@ class ResourceList implements Component, Focusable {
 
 	constructor(
 		groups: ResourceGroup[],
-		settingsManager: SettingsManager,
+		settingsManager: ConfigSelectorSettingsSource,
 		cwd: string,
 		agentDir: string,
 		terminalHeight?: number,
@@ -577,7 +594,7 @@ export class ConfigSelectorComponent extends Container implements Focusable {
 
 	constructor(
 		resolvedPaths: ResolvedPaths,
-		settingsManager: SettingsManager,
+		settingsManager: ConfigSelectorSettingsSource,
 		cwd: string,
 		agentDir: string,
 		onClose: () => void,

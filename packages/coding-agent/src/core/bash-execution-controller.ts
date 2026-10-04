@@ -8,27 +8,36 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { Agent, BashExecutionMessage } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { Agent, BashExecutionMessage } from "../kernel/index.ts";
+import type { SessionManager } from "../kernel/node.ts";
 import { getShellEnv } from "../utils/shell.ts";
 import type { ManagedToolResolver } from "../utils/tools-manager.ts";
 import { classifyYoloBoundary } from "./autonomy/edge-policy.ts";
-import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
+import { executeBashWithOperations } from "./bash-executor.ts";
 import { withoutHarnessLaunchEnv } from "./harness-environment.ts";
-import type { SettingsManager } from "./settings-manager.ts";
+import type { ResolvedEdgeSettings, ResolvedWindowsShellSettings } from "./settings/settings-schema.ts";
 import {
-	type BashOperations,
 	buildShellSessionContext,
 	createLocalPlatformShellOperations,
 	resolveCommandTimeoutSeconds,
 } from "./tools/bash.ts";
 import { prepareManagedShellEnvironment } from "./tools/managed-shell-preparation.ts";
+import type { BashOperations, BashResult } from "./tools/schemas/bash.ts";
 import { createWindowsShellEngineOperations } from "./tools/windows-shell-engine.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface BashExecutionControllerSettingsSource {
+	getEdgeSettings(): ResolvedEdgeSettings;
+	getExposeSessionEnvironment(): boolean;
+	getShellCommandPrefix(): string | undefined;
+	getShellPath(): string | undefined;
+	getWindowsShellSettings(): ResolvedWindowsShellSettings;
+}
 
 export interface BashExecutionControllerDeps {
 	getAgent(): Agent;
 	getSessionManager(): SessionManager;
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): BashExecutionControllerSettingsSource;
 	/** Whether the agent is currently streaming — defers appending a bash result if so. */
 	isStreaming(): boolean;
 	/** Per-agent persistent shell session key — user `!` commands share the agent's shell state. */

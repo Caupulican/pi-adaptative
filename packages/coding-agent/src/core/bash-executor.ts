@@ -7,14 +7,14 @@
  */
 
 import { resolve as resolvePath } from "node:path";
-import { sanitizeBinaryOutput } from "@caupulican/pi-agent-core/shell-output";
-import { DEFAULT_MAX_BYTES } from "@caupulican/pi-agent-core/truncate";
 import { getAgentDir } from "../config.ts";
+import { sanitizeBinaryOutput } from "../kernel/utils/shell-output.ts";
+import { DEFAULT_MAX_BYTES } from "../kernel/utils/truncate.ts";
 import { stripAnsi } from "../utils/ansi.ts";
 import { getProcessWorkRun } from "../utils/work-directory.ts";
-import type { BashOperations } from "./tools/bash.ts";
 import { applyGitTailStage, classifyGitCommand, executeFilteredGit } from "./tools/git-filter.ts";
 import { OutputAccumulator, type OutputSnapshot } from "./tools/output-accumulator.ts";
+import type { BashOperations, BashResult } from "./tools/schemas/bash.ts";
 import { createShellOutputDecoder } from "./tools/shell-output-decoder.ts";
 
 // ============================================================================
@@ -34,19 +34,6 @@ export interface BashExecutorOptions {
 	environment?: NodeJS.ProcessEnv;
 	/** Decode valid UTF-8 plus isolated Windows-1252 bytes from native Windows programs. */
 	windowsCompatibleEncoding?: boolean;
-}
-
-export interface BashResult {
-	/** Combined stdout + stderr output (sanitized, possibly truncated) */
-	output: string;
-	/** Process exit code (undefined if killed/cancelled) */
-	exitCode: number | undefined;
-	/** Whether the command was cancelled via signal */
-	cancelled: boolean;
-	/** Whether the output was truncated */
-	truncated: boolean;
-	/** Path to temp file containing full output (if output exceeded truncation threshold) */
-	fullOutputPath?: string;
 }
 
 // ============================================================================

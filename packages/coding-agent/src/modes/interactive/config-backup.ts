@@ -20,13 +20,23 @@ import type {
 	ProfileDefinitionInput,
 	ResourceProfileSettings,
 	Settings,
-	SettingsManager,
+	SettingsReloadSnapshot,
 	ThinkingLevel,
-} from "../../core/settings-manager.ts";
+} from "../../core/settings/settings-schema.ts";
 import { SelectSubmenu } from "./components/settings-selector.ts";
 
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ConfigBackupSettingsSource {
+	canonicalizePath(p: string): string | null;
+	createReloadSnapshot(): SettingsReloadSnapshot;
+	flush(): Promise<void>;
+	getGlobalSettings(): Settings;
+	replaceGlobalResourceProfileConfiguration(configuration: GlobalResourceProfileConfiguration): void;
+	restoreReloadSnapshot(snapshot: SettingsReloadSnapshot): void;
+}
+
 export interface ConfigBackupHost {
-	readonly settingsManager: SettingsManager;
+	readonly settingsManager: ConfigBackupSettingsSource;
 	showStatus(message: string): void;
 	showError(errorMessage: string): void;
 }

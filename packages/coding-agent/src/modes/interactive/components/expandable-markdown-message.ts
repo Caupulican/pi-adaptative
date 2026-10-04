@@ -1,6 +1,6 @@
 import { Box, Markdown, type MarkdownTheme, Spacer, Text } from "@caupulican/pi-tui";
-import { theme } from "../theme/theme.ts";
-import { renderTitleBadge, type TitleBadgeSegment } from "./tool-title.ts";
+import { theme } from "../../../presentation/theme-model.ts";
+import { renderTitleBadge, type TitleBadgeSegment } from "../../../presentation/tool-title.ts";
 
 export interface ExpandableMarkdownMessageOptions {
 	label: string;

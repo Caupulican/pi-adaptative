@@ -8,7 +8,7 @@
  * new event type does not compile until someone decides where it belongs in the flow.
  */
 
-import type { AgentMessage } from "@caupulican/pi-agent-core";
+import type { AgentMessage } from "../../kernel/index.ts";
 import type { AgentSessionEvent } from "../agent-session-contracts.ts";
 import type { LaneRecord, LaneStatus } from "../autonomy/lane-tracker.ts";
 import type { HumanInputActivity } from "../human-input-activity.ts";

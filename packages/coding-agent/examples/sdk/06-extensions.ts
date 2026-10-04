@@ -13,7 +13,13 @@
  *   export default function (pi: ExtensionAPI) { ... }
  */
 
-import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager } from "@caupulican/pi-adaptative";
+import {
+	createAgentSession,
+	DefaultResourceLoader,
+	getAgentDir,
+	SessionManager,
+	SettingsManager,
+} from "@caupulican/pi-adaptative";
 
 // Extensions are discovered automatically from standard locations.
 // You can also add paths via settings.json or DefaultResourceLoader options.
@@ -21,6 +27,7 @@ import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager 
 const resourceLoader = new DefaultResourceLoader({
 	cwd: process.cwd(),
 	agentDir: getAgentDir(),
+	settingsManager: SettingsManager.create(process.cwd(), getAgentDir()),
 	additionalExtensionPaths: ["./my-logging-extension.ts", "./my-safety-extension.ts"],
 	extensionFactories: [
 		(pi) => {

@@ -10,7 +10,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import type { VerificationObligationView } from "@caupulican/pi-agent-core/verification-obligations";
+import type { VerificationObligationView } from "../../kernel/verification-obligations.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";

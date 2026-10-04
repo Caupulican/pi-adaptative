@@ -1,6 +1,6 @@
-import type { ProcessObservation } from "@caupulican/pi-agent-core/process-tree";
+import type { ProcessObservation } from "../kernel/reliability/process-tree.ts";
 import type { AgentSession } from "./agent-session.ts";
-import type { AgentSessionRuntimeResource } from "./agent-session-runtime.ts";
+import type { ActiveSessionContext, AgentSessionRuntimeResource } from "./agent-session-runtime.ts";
 import { createCollaborationPeerContext } from "./collaboration/peer-context.ts";
 import { isGoalExecutionActive } from "./goals/goal-state.ts";
 import { createAgentIdentity } from "./orchestration/agent-resume.ts";
@@ -84,20 +84,25 @@ export class SessionSupervisionRuntime implements AgentSessionRuntimeResource {
 		this.options = options;
 	}
 
-	start(session: AgentSession): Promise<void> {
+	start(session: AgentSession, active: ActiveSessionContext): Promise<void> {
 		const generation = ++this.generation;
-		return this.enqueueLifecycle(() => this.startGeneration(session, generation));
+		return this.enqueueLifecycle(() => this.startGeneration(session, active, generation));
 	}
 
-	private async startGeneration(session: AgentSession, generation: number): Promise<void> {
+	private async startGeneration(
+		session: AgentSession,
+		active: ActiveSessionContext,
+		generation: number,
+	): Promise<void> {
 		await this.stopHandles();
-		const sessionManager = session.sessionManager;
+		const sessionManager = active.sessionManager;
+		const settingsManager = active.services.settingsManager;
 		const sessionId = sessionManager.getSessionId();
 		const boundWorktreeLaneKey = getBoundWorktreeLaneKey();
 		const orchestrationProfileId =
 			this.options.orchestrationProfileId ??
 			session.capabilityEnvelope?.profileId ??
-			session.settingsManager.getActiveOrchestrationProfile();
+			settingsManager.getActiveOrchestrationProfile();
 		const sessionFile = sessionManager.getSessionFile();
 		const goal = session.getGoalStateSnapshot();
 		const taskRef = getProcessTaskRef() ?? goal?.goalId;
@@ -109,7 +114,7 @@ export class SessionSupervisionRuntime implements AgentSessionRuntimeResource {
 			cwd: sessionManager.getCwd(),
 			...(boundWorktreeLaneKey ? { worktreeLaneKey: boundWorktreeLaneKey } : {}),
 			...(orchestrationProfileId ? { orchestrationProfileId } : {}),
-			resourceProfileNames: session.settingsManager.getActiveResourceProfileNames(),
+			resourceProfileNames: settingsManager.getActiveResourceProfileNames(),
 			...(session.model ? { modelRef: `${session.model.provider}/${session.model.id}` } : {}),
 			contextPointers: [],
 		});
@@ -119,7 +124,7 @@ export class SessionSupervisionRuntime implements AgentSessionRuntimeResource {
 				startWorktreeSyncRuntime({
 					cwd: sessionManager.getCwd(),
 					agentDir: this.options.agentDir,
-					settingsManager: session.settingsManager,
+					settingsManager: settingsManager,
 					sessionId,
 					integrationBranch: () => session.localCommitBranch() || undefined,
 					notify: (text) => {
@@ -137,13 +142,13 @@ export class SessionSupervisionRuntime implements AgentSessionRuntimeResource {
 					taskSummary: goal?.userGoal,
 					allowAutomaticRecovery: goal === undefined || isGoalExecutionActive(goal.status),
 					resumeWorker: (payload) => this.options.resumeWorker(payload, sessionId),
-					settings: session.settingsManager.getProcessMatrixSettings(),
+					settings: settingsManager.getProcessMatrixSettings(),
 					observeProcess: this.options.observeProcess,
 					notify: (text) => this.notify(session, "process-matrix-notice", text),
 					recordClockJump: (record) => void sessionManager.appendCustomEntry(CLOCK_JUMP_CUSTOM_TYPE, record),
 					onDiagnostic: this.options.onDiagnostic,
 					requestExit: this.options.requestExit,
-					requestOwnerCleanupDecision: (request, signal) => this.askOwnerAboutOrphan(session, request, signal),
+					requestOwnerCleanupDecision: (request, signal) => this.askOwnerAboutOrphan(active, request, signal),
 				}),
 			),
 		]);
@@ -193,23 +198,23 @@ export class SessionSupervisionRuntime implements AgentSessionRuntimeResource {
 	 * question stays unasked (the runtime has already reported the orphan as a pending decision).
 	 */
 	private async askOwnerAboutOrphan(
-		session: AgentSession,
+		active: ActiveSessionContext,
 		request: OrphanCleanupRequest,
 		signal: AbortSignal,
 	): Promise<OwnerCleanupDecision> {
-		if (!session.extensionRunner.hasUI()) {
+		if (!active.extensionRunner.hasUI()) {
 			await new Promise<void>((resolve) => {
 				const done = (): void => {
 					unsubscribe();
 					signal.removeEventListener("abort", done);
 					resolve();
 				};
-				const unsubscribe = session.extensionRunner.onUIContextBound(done);
+				const unsubscribe = active.extensionRunner.onUIContextBound(done);
 				signal.addEventListener("abort", done, { once: true });
 				if (signal.aborted) done();
 			});
 		}
-		const runner = session.extensionRunner;
+		const runner = active.extensionRunner;
 		if (signal.aborted || !runner.hasUI()) return "unanswered";
 		const startedAt = Date.now();
 		const approved = await runner.getUIContext().confirm("Orphaned Pi worker", formatOrphanCleanupQuestion(request), {

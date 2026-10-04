@@ -1,10 +1,10 @@
 import { getOAuthProviders, type OAuthDeviceCodeInfo } from "@caupulican/pi-ai/oauth";
 import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@caupulican/pi-tui";
+import { keyHint } from "../../../presentation/keybinding-hints.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import { readClipboardText } from "../../../utils/clipboard.ts";
 import { openBrowser } from "../../../utils/open-browser.ts";
-import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint } from "./keybinding-hints.ts";
 
 /**
  * Login dialog component - replaces editor during OAuth login flow

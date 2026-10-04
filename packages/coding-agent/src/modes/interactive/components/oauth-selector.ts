@@ -1,6 +1,6 @@
 import { Container, type Focusable, getKeybindings, type Input, Spacer, TruncatedText } from "@caupulican/pi-tui";
 import type { AuthStatus, AuthStorage } from "../../../core/auth-storage.ts";
-import { theme } from "../theme/theme.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import {
 	advanceSelectorIndex,

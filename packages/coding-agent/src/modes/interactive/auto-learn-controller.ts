@@ -11,14 +11,11 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentMessage } from "@caupulican/pi-agent-core";
-import { isAutoLearnSessionId } from "@caupulican/pi-agent-core/session";
 import type { Model } from "@caupulican/pi-ai";
 import type { SelectItem } from "@caupulican/pi-tui";
 import { spawn } from "child_process";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../../config.ts";
-import type { AgentSession } from "../../core/agent-session.ts";
 import { PI_WORKER_READABLE_FILES_ENV } from "../../core/autonomy/worker-session-private-scope.ts";
 import { PI_OKF_TYPES } from "../../core/context/okf-memory.ts";
 import { readAutoLearnSessionIdFromFile, reportCompletedAutoLearnUsageHelper } from "../../core/cost/session-usage.ts";
@@ -47,14 +44,17 @@ import {
 	getPendingReloadBlockers,
 } from "../../core/reload-blockers.ts";
 import { isWorkerSession, PI_SESSION_ROLE_ENV } from "../../core/session-role.ts";
-import type { AutoLearnSettings, AutonomyMode } from "../../core/settings-manager.ts";
+import type { AutoLearnSettings, AutonomyMode } from "../../core/settings/settings-schema.ts";
 import {
 	checkTaskStepsContract,
 	INITIAL_TASK_CONTRACT_STREAK,
 	type TaskContractStreak,
 } from "../../core/tasks/task-contract-monitor.ts";
+import type { AgentMessage } from "../../kernel/index.ts";
+import { isAutoLearnSessionId } from "../../kernel/session/session-manager.ts";
+import { theme } from "../../presentation/theme-model.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
-import { theme } from "./theme/theme.ts";
+import type { LiveSessionServices } from "./live-session.ts";
 
 export const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"];
 const AUTO_LEARN_RESERVATION_MS = 2 * 60 * 1000;
@@ -314,8 +314,7 @@ export interface AutoLearnControllerUi {
 	requestRender(): void;
 }
 
-export interface AutoLearnControllerDeps {
-	getSession(): AgentSession;
+export interface AutoLearnControllerDeps extends LiveSessionServices {
 	resolveSelfModificationSource(settings: { sourcePath?: string; sourcePaths?: string[] }): string | undefined;
 	ui: AutoLearnControllerUi;
 }
@@ -333,20 +332,17 @@ export class AutoLearnController {
 		this.deps = deps;
 	}
 
-	private get session(): AgentSession {
-		return this.deps.getSession();
-	}
-
 	private getAutoLearnModelAuthPriority(model: Model<any>): number {
-		if (this.session.model && model.provider === this.session.model.provider && model.id === this.session.model.id) {
+		const current = this.deps.getSession().model;
+		if (current && model.provider === current.provider && model.id === current.id) {
 			return 0;
 		}
 
-		const credential = this.session.modelRegistry.authStorage.get(model.provider);
+		const credential = this.deps.getModelRegistry().authStorage.get(model.provider);
 		if (credential?.type === "oauth") return 1;
 		if (credential?.type === "api_key") return 2;
 
-		const authStatus = this.session.modelRegistry.getProviderAuthStatus(model.provider);
+		const authStatus = this.deps.getModelRegistry().getProviderAuthStatus(model.provider);
 		switch (authStatus.source) {
 			case "runtime":
 				return 3;
@@ -362,11 +358,11 @@ export class AutoLearnController {
 	}
 
 	private getAutoLearnModelAuthLabel(model: Model<any>): string {
-		const credential = this.session.modelRegistry.authStorage.get(model.provider);
+		const credential = this.deps.getModelRegistry().authStorage.get(model.provider);
 		if (credential?.type === "oauth") return "subscription";
 		if (credential?.type === "api_key") return "API key";
 
-		const authStatus = this.session.modelRegistry.getProviderAuthStatus(model.provider);
+		const authStatus = this.deps.getModelRegistry().getProviderAuthStatus(model.provider);
 		switch (authStatus.source) {
 			case "runtime":
 				return authStatus.label ? `runtime ${authStatus.label}` : "runtime API key";
@@ -384,24 +380,26 @@ export class AutoLearnController {
 	}
 
 	getAutoLearnModelOptions(): SelectItem[] {
-		this.session.modelRegistry.refresh();
-		const availableModels = this.session.modelRegistry.getAvailable();
+		this.deps.getModelRegistry().refresh();
+		const availableModels = this.deps.getModelRegistry().getAvailable();
 		const sortedModels = [...availableModels].sort((a, b) => {
 			const priorityDelta = this.getAutoLearnModelAuthPriority(a) - this.getAutoLearnModelAuthPriority(b);
 			if (priorityDelta !== 0) return priorityDelta;
-			const providerDelta = this.session.modelRegistry
+			const providerDelta = this.deps
+				.getModelRegistry()
 				.getProviderDisplayName(a.provider)
-				.localeCompare(this.session.modelRegistry.getProviderDisplayName(b.provider));
+				.localeCompare(this.deps.getModelRegistry().getProviderDisplayName(b.provider));
 			if (providerDelta !== 0) return providerDelta;
 			return a.id.localeCompare(b.id);
 		});
 
+		const currentModel = this.deps.getSession().model;
 		return sortedModels.map((model) => {
-			const providerName = this.session.modelRegistry.getProviderDisplayName(model.provider);
+			const providerName = this.deps.getModelRegistry().getProviderDisplayName(model.provider);
 			const authLabel = this.getAutoLearnModelAuthLabel(model);
 			const modelPattern = `${model.provider}/${model.id}`;
 			const currentLabel =
-				this.session.model && model.provider === this.session.model.provider && model.id === this.session.model.id
+				currentModel && model.provider === currentModel.provider && model.id === currentModel.id
 					? " · current"
 					: "";
 			const displayName = model.name && model.name !== model.id ? ` · ${model.name}` : "";
@@ -537,8 +535,8 @@ export class AutoLearnController {
 	}
 
 	getEffectiveAutoLearnSettings(): Required<AutoLearnSettings> {
-		const settings = this.session.settingsManager.getAutoLearnSettings();
-		return resolveAutoLearnSettings(this.session.settingsManager.getAutonomySettings().mode, settings);
+		const settings = this.deps.getSettingsManager().getAutoLearnSettings();
+		return resolveAutoLearnSettings(this.deps.getSettingsManager().getAutonomySettings().mode, settings);
 	}
 
 	getCurrentAutoLearnSettings(): Required<AutoLearnSettings> {
@@ -546,16 +544,16 @@ export class AutoLearnController {
 	}
 
 	getAutoLearnTenantKey(): string {
-		return `${this.session.sessionManager.getCwd()}::${this.session.sessionId}`;
+		return `${this.deps.getSessionManager().getCwd()}::${this.deps.getSession().sessionId}`;
 	}
 
 	private getAutoLearnTenantId(): string {
 		const cwdHash = crypto
 			.createHash("sha256")
-			.update(this.session.sessionManager.getCwd())
+			.update(this.deps.getSessionManager().getCwd())
 			.digest("hex")
 			.slice(0, 8);
-		const sessionPart = sanitizeAutoLearnPathPart(this.session.sessionId, "session");
+		const sessionPart = sanitizeAutoLearnPathPart(this.deps.getSession().sessionId, "session");
 		return `${sessionPart}-${cwdHash}`;
 	}
 
@@ -564,7 +562,10 @@ export class AutoLearnController {
 	}
 
 	private getAutoLearnMessageCount(): number {
-		return this.session.sessionManager.getBranch().filter((entry) => entry.type === "message").length;
+		return this.deps
+			.getSessionManager()
+			.getBranch()
+			.filter((entry) => entry.type === "message").length;
 	}
 
 	private buildAutoLearnDecisionFromState(
@@ -579,7 +580,7 @@ export class AutoLearnController {
 		const cooldownMs = settings.cooldownMinutes * 60 * 1000;
 		const cooldownRemainingMs = Math.max(0, lastLaunch + cooldownMs - now);
 		const messageCount = this.getAutoLearnMessageCount();
-		const contextPercent = this.session.getContextUsage()?.percent ?? null;
+		const contextPercent = this.deps.getSession().getContextUsage()?.percent ?? null;
 
 		if (!settings.enabled && !force) {
 			return {
@@ -655,7 +656,8 @@ export class AutoLearnController {
 
 	private resolveAutoLearnModelPattern(settings: Required<AutoLearnSettings>): string | undefined {
 		if (settings.model === "active") {
-			return this.session.model ? `${this.session.model.provider}/${this.session.model.id}` : undefined;
+			const current = this.deps.getSession().model;
+			return current ? `${current.provider}/${current.id}` : undefined;
 		}
 		return settings.model;
 	}
@@ -683,7 +685,7 @@ export class AutoLearnController {
 	validateAutoLearnModelValue(value: string | undefined): string | undefined {
 		const modelValue = value?.trim();
 		if (!modelValue || modelValue === "active") return undefined;
-		const available = this.session.modelRegistry.getAvailable();
+		const available = this.deps.getModelRegistry().getAvailable();
 		if (modelValue.includes("/")) {
 			const [provider, modelId] = modelValue.split("/", 2);
 			if (available.some((model) => model.provider === provider && model.id === modelId)) return undefined;
@@ -699,8 +701,8 @@ export class AutoLearnController {
 	 * tells it how the main session will treat them; main alone decides and applies.
 	 */
 	private buildAutonomyAuthorityPrompt(): string {
-		const autonomy = this.session.settingsManager.getAutonomySettings();
-		const selfModification = this.session.settingsManager.getSelfModificationSettings();
+		const autonomy = this.deps.getSettingsManager().getAutonomySettings();
+		const selfModification = this.deps.getSettingsManager().getSelfModificationSettings();
 		const readOnlyBlock = [
 			`Authority: READ-ONLY. Your tools are ${AUTO_LEARN_LEARNER_TOOLS.join(", ")}. You have no bash, write, edit, memory, skill, settings or extension tools, and you must not try to change memory, skills, extensions, settings, source or any other file.`,
 			"Your only product is the proposal block described below. The main Pi session treats it as untrusted evidence, validates every proposal, and applies it under its own autonomy mode and autoLearn eligibility or records it as a finding. You never apply anything yourself.",
@@ -791,15 +793,15 @@ export class AutoLearnController {
 				reason: params.reason,
 				startedAt: now,
 				expiresAt: now + AUTO_LEARN_RESERVATION_MS,
-				cwd: this.session.sessionManager.getCwd(),
+				cwd: this.deps.getSessionManager().getCwd(),
 				logPath: params.logPath,
 				sessionDir: params.sessionDir,
 				sessionId: params.sessionId,
 				promptPath: params.promptPath,
 				kind: params.kind,
-				autonomyMode: this.session.settingsManager.getAutonomySettings().mode,
+				autonomyMode: this.deps.getSettingsManager().getAutonomySettings().mode,
 				authority:
-					this.session.settingsManager.getAutonomySettings().mode === "full"
+					this.deps.getSettingsManager().getAutonomySettings().mode === "full"
 						? "read-only-proposals (main applies under full autonomy)"
 						: "read-only-proposals (main proposal-gated)",
 				status: "reserved",
@@ -842,7 +844,7 @@ export class AutoLearnController {
 				sessionDir,
 				sessionId,
 				logPath,
-				parentSession: this.session,
+				parentSession: this.deps.getSession(),
 				appendLog: (p, msg) => this.appendAutoLearnLog(p, msg),
 			});
 		} catch (error: unknown) {
@@ -1000,14 +1002,14 @@ export class AutoLearnController {
 					record.status = "learner_not_pass";
 					record.detail = `learner reported ${set.verdict}; its proposals were not applied`;
 					retainRaw();
-				} else if (this.session.sessionId !== run.launchSessionId) {
+				} else if (this.deps.getSession().sessionId !== run.launchSessionId) {
 					record.status = "parent_session_changed";
 					record.detail = `launching session ${run.launchSessionId} is no longer the active session; proposals were not applied and are retained for the next main session's startup`;
 					// The whole validated block: a later session re-offers it (auto-learn-reoffer.ts).
 					retainRaw(true);
 				} else {
 					try {
-						record.entries = await this.session.applyAutoLearnProposals(set, run.runId);
+						record.entries = await this.deps.getSession().applyAutoLearnProposals(set, run.runId);
 						record.status = "reported";
 					} catch (error: unknown) {
 						record.status = "apply_failed";
@@ -1022,7 +1024,8 @@ export class AutoLearnController {
 		if (!persisted) this.appendAutoLearnLog(run.logPath, "Auto Learn handoff record could not be persisted.");
 
 		const note = formatAutoLearnHandoffNote(record);
-		void this.session
+		void this.deps
+			.getSession()
 			.sendCustomMessage(
 				{ customType: "auto_learn_handoff", content: note, display: false, details: { runId: run.runId } },
 				{ deliverAs: "nextTurn" },
@@ -1059,17 +1062,18 @@ export class AutoLearnController {
 		const result = await reofferAutoLearnProposals({
 			tenantsDir: path.join(this.getAutoLearnDataDir(), "tenants"),
 			handoffDirName: AUTO_LEARN_HANDOFF_DIR,
-			cwdHash: crypto.createHash("sha256").update(this.session.sessionManager.getCwd()).digest("hex").slice(0, 8),
-			sessionId: this.session.sessionId,
+			cwdHash: crypto.createHash("sha256").update(this.deps.getSessionManager().getCwd()).digest("hex").slice(0, 8),
+			sessionId: this.deps.getSession().sessionId,
 			eligible: settings.enabled,
 			// The handoff retention discards a held record unapplied; warn a day before it does.
 			expiringAfterMs: AUTO_LEARN_HISTORY_RETENTION_MS - 24 * 60 * 60 * 1000,
-			applyProposals: (set, runId) => this.session.applyAutoLearnProposals(set, runId),
+			applyProposals: (set, runId) => this.deps.getSession().applyAutoLearnProposals(set, runId),
 			persist: (handoffDir, record) => this.persistAutoLearnHandoff(handoffDir, record),
 		});
 		for (const record of result.finalized) {
 			const applied = record.entries.filter((entry) => entry.outcome === "applied").length;
-			void this.session
+			void this.deps
+				.getSession()
 				.sendCustomMessage(
 					{
 						customType: "auto_learn_handoff",
@@ -1129,8 +1133,8 @@ export class AutoLearnController {
 		const sessionDir = path.join(dir, "sessions", runId);
 		const sessionId = `auto-learn-${kind}-${this.getAutoLearnTenantId()}-${runId}`;
 		fs.mkdirSync(sessionDir, { recursive: true });
-		const sourceSessionFile = this.session.sessionManager.getSessionFile();
-		const launchSessionId = this.session.sessionId;
+		const sourceSessionFile = this.deps.getSessionManager().getSessionFile();
+		const launchSessionId = this.deps.getSession().sessionId;
 		const prompt = this.buildAutoLearnPrompt(reason, settings, {
 			kind,
 			turnDigest: options.turnDigest,
@@ -1186,7 +1190,7 @@ export class AutoLearnController {
 		try {
 			outFd = fs.openSync(logPath, "a");
 			child = spawn(spawnTarget.command, args, {
-				cwd: this.session.sessionManager.getCwd(),
+				cwd: this.deps.getSessionManager().getCwd(),
 				detached: true,
 				stdio: ["ignore", outFd, outFd],
 				env: {
@@ -1275,11 +1279,12 @@ export class AutoLearnController {
 	 * current-session reflection setting without adding another provider turn.
 	 */
 	private checkTaskStepsContractNudge(): void {
-		const state = this.session.getTaskStepsStateSnapshot();
+		const state = this.deps.getSession().getTaskStepsStateSnapshot();
 		const outcome = checkTaskStepsContract(state, this._taskContractStreak);
 		this._taskContractStreak = outcome.streak;
 		if (!outcome.note) return;
-		void this.session
+		void this.deps
+			.getSession()
 			.sendCustomMessage(
 				{ customType: "task_contract_nudge", content: outcome.note, display: false },
 				{ deliverAs: "nextTurn" },
@@ -1305,7 +1310,7 @@ export class AutoLearnController {
 	}
 
 	maybeStartAutonomyReview(messages: AgentMessage[]): boolean {
-		// Compatibility hook for InteractiveEventHost. Completed-turn reflection is deterministic and
+		// Compatibility hook for InteractiveEventPort. Completed-turn reflection is deterministic and
 		// session-owned; it never creates a background process or a second provider turn.
 		void messages;
 		return false;
@@ -1356,8 +1361,8 @@ export class AutoLearnController {
 			: "- none";
 		const reloadBlockers = getPendingReloadBlockers({
 			ownPid: process.pid,
-			ownSessionId: this.session.sessionManager.getSessionId(),
-			ownSessionFile: this.session.sessionManager.getSessionFile(),
+			ownSessionId: this.deps.getSessionManager().getSessionId(),
+			ownSessionFile: this.deps.getSessionManager().getSessionFile(),
 		});
 		const reloadBlockerLines = reloadBlockers.pending
 			? reloadBlockers.descriptions.map((description) => `- ${description}`).join("\n")

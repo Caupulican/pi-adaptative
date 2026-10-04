@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import * as Diff from "diff";
 import { constants } from "fs";
 import { access, readFile } from "fs/promises";
+import type { EditSourceSplice } from "./edit-byte-codec.ts";
 import { decodeEditDocument } from "./edit-byte-codec.ts";
 import { resolveToCwd } from "./path-utils.ts";
 
@@ -104,12 +105,6 @@ export interface EditMatchPlan {
 export interface AppliedEditsResult {
 	baseContent: string;
 	newContent: string;
-}
-
-export interface EditSourceSplice {
-	start: number;
-	end: number;
-	replacement: string;
 }
 
 /**

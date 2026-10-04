@@ -1,5 +1,5 @@
-import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
 import { abortableSleep } from "@caupulican/pi-ai/abort-signals";
+import { classifyFailure } from "../../kernel/reliability/index.ts";
 import { SystemOneReviewError } from "../review/system-one-review-port.ts";
 import { TypeSafeEvidenceError, TypeSafeInputError } from "../review/typesafe-contract.ts";
 import type { SystemOneAccessResolver } from "./access.ts";

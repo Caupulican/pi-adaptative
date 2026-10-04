@@ -1,9 +1,15 @@
 import { randomUUID } from "node:crypto";
-import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import type { ImageContent } from "@caupulican/pi-ai";
+import type { SessionEntry, SessionManager } from "../kernel/node.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type { ContextArtifactRef } from "./context/context-item.ts";
 import { publishHumanInputActivity } from "./human-input-activity.ts";
+import type {
+	HumanInputCategory,
+	HumanInputQuestion,
+	HumanInputRequest,
+	HumanInputSource,
+} from "./human-input-request.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 import { getActiveSessionBranchEntries, type SessionBranchEntrySource } from "./session-snapshot.ts";
 import { isPlainRecord, isStringArray } from "./util/value-guards.ts";
@@ -18,19 +24,6 @@ const HUMAN_INPUT_PREVIEW_CHARS = 4_000;
 
 export function unansweredOwnerQuestionText(path: string | undefined): string {
 	return `Owner did not answer. The decision remains open${path ? ` in ${path}` : ""}. No decision or authority was granted. Continue only independent authorized work. Do not ask again this turn; if none remains, stop without claiming completion.`;
-}
-
-export interface HumanInputOption {
-	label: string;
-	description: string;
-}
-
-export interface HumanInputQuestion {
-	id: string;
-	header: string;
-	question: string;
-	options: readonly HumanInputOption[];
-	multiSelect?: boolean;
 }
 
 export interface HumanInputAnswerImage {
@@ -71,34 +64,8 @@ export interface HumanInputPresentationResult {
 	imageContents: readonly ImageContent[];
 }
 
-export type HumanInputSource = "tool" | "worker";
-
-/**
- * What the owner is being asked for. Clarification is INFORMATION: none of these values grants
- * authority, and `blocked_by_user_decision` records that the objective is waiting on a decision the
- * owner alone owns -- never that the answer expands what the execution charter allows.
- */
-export type HumanInputCategory = "information" | "ambiguous_requirement" | "blocked_by_user_decision";
-
 export function isHumanInputCategory(value: unknown): value is HumanInputCategory {
 	return value === "information" || value === "ambiguous_requirement" || value === "blocked_by_user_decision";
-}
-
-export interface HumanInputRequest {
-	requestId: string;
-	source: HumanInputSource;
-	toolCallId?: string;
-	toolName?: string;
-	workerRequestId?: string;
-	/**
-	 * Objective this question belongs to, when one was executing at ask time. Optional: snapshots
-	 * persisted before objective correlation existed carry none and decode unchanged.
-	 */
-	objectiveId?: string;
-	category?: HumanInputCategory;
-	questions: readonly HumanInputQuestion[];
-	acceptsImages: boolean;
-	createdAt: string;
 }
 
 export type HumanInputStatus = "pending" | "answered" | "cancelled";

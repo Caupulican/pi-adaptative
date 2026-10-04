@@ -31,10 +31,10 @@
  * ModelRouterControllerDeps.getToolProbeVerdict}).
  */
 
-import type { Agent, AgentMessage, AgentMessageOrigin, ThinkingLevel } from "@caupulican/pi-agent-core";
-import type { SessionManager, SessionMessageBatchEntry } from "@caupulican/pi-agent-core/node";
 import type { Api, Message, Model, Usage } from "@caupulican/pi-ai";
 import { clampThinkingLevel, modelsAreEqual } from "@caupulican/pi-ai/models";
+import type { Agent, AgentMessage, AgentMessageOrigin, ThinkingLevel } from "../kernel/index.ts";
+import type { SessionManager, SessionMessageBatchEntry } from "../kernel/node.ts";
 import type {
 	AgentSessionEvent,
 	IsolatedCompletionOptions,
@@ -54,8 +54,14 @@ import {
 	classifySupersededModels,
 	type RouteChoiceJudge,
 } from "./expert-routing/system-one-choice.ts";
+import type {
+	HmoeIndependence,
+	HmoePreference,
+	HmoePreset,
+	HmoeTeamStrategy,
+	HmoeWeights,
+} from "./expert-routing/vocabulary.ts";
 import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "./model-capability.ts";
-import type { ModelRegistry } from "./model-registry.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import type { AccountModelCatalog } from "./model-router/account-models.ts";
 import {
@@ -99,7 +105,45 @@ import {
 import { isLocalOrManagedRouterModel, shouldEscalateModelRouterTool } from "./model-router/tool-escalation.ts";
 import type { ModelToolProbeVerdict } from "./models/adaptation-store.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
-import type { SettingsManager } from "./settings-manager.ts";
+import type {
+	ModelCapabilitySettings,
+	ModelRouterPoolPreference,
+	ModelRouterSelectionMode,
+} from "./settings/settings-schema.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ModelRouterControllerSettingsSource {
+	getModelCapabilitySettings(): Required<ModelCapabilitySettings>;
+	getModelRouterSettings(): {
+		enabled: boolean;
+		selectionMode: ModelRouterSelectionMode;
+		poolPreference: ModelRouterPoolPreference;
+		cheapModel?: string;
+		mediumModel?: string;
+		expensiveModel?: string;
+		learningModel?: string;
+		executorModel?: string;
+		fitnessGate: boolean;
+		cheapThinking?: ThinkingLevel;
+		mediumThinking?: ThinkingLevel;
+		expensiveThinking?: ThinkingLevel;
+		executorThinking?: ThinkingLevel;
+		hmoePreset?: HmoePreset;
+		hmoeTeamStrategy?: HmoeTeamStrategy;
+		hmoeIndependence?: HmoeIndependence;
+		hmoePreference?: HmoePreference;
+		hmoeWeights?: HmoeWeights;
+	};
+}
+
+/** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
+export interface ModelRouterControllerModelSource {
+	find(provider: string, modelId: string): Model<Api> | undefined;
+	getAll(): Model<Api>[];
+	getAvailable(): Model<Api>[];
+	hasConfiguredAuth(model: Model<Api>): boolean;
+	isUsingSubscription(model: Model<Api>): boolean;
+}
 
 /** Canonical `provider/id` label for a routed/resolved model, as it appears in decisions and status. */
 export function formatModelRouterModel(model: Model<Api>): string {
@@ -158,13 +202,13 @@ export interface ModelRouterControllerDeps {
 	/** Current session model, used to decide whether a routed turn actually swaps the model. */
 	getModel(): Model<Api> | undefined;
 	/** Router/executor/judge/thinking settings + capability mode (all opt-in gates). */
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): ModelRouterControllerSettingsSource;
 	/** Session log: routed-turn message buffering/persistence, decision persistence, recent-decision status. */
 	getSessionManager(): SessionManager;
 	/** Canonical host-owned mixed message batch persistence; one validated publication for lifecycle linking. */
 	appendSessionMessageBatch(batch: readonly SessionMessageBatchEntry[]): string[];
 	/** Resolves configured route/judge/executor model patterns against configured auth. */
-	getModelRegistry(): ModelRegistry;
+	getModelRegistry(): ModelRouterControllerModelSource;
 	/** Session-scoped provider/model quota exhaustion guard. */
 	isModelExhausted(model: Model<Api>): boolean;
 	/** What the owner's provider accounts can use, checked with the providers; absent means unchecked. */

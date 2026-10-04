@@ -8,15 +8,20 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { Agent } from "@caupulican/pi-agent-core/agent";
-import { collectEntriesForBranchSummary, generateBranchSummary } from "@caupulican/pi-agent-core/compaction";
-import type { BranchSummaryEntry, SessionManager } from "@caupulican/pi-agent-core/session";
-import { combineUsage } from "@caupulican/pi-agent-core/usage";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
+import type { Agent } from "../kernel/agent.ts";
+import { collectEntriesForBranchSummary, generateBranchSummary } from "../kernel/compaction/index.ts";
+import type { BranchSummaryEntry } from "../kernel/session/session-entries.ts";
+import type { SessionManager } from "../kernel/session/session-manager.ts";
+import { combineUsage } from "../kernel/usage.ts";
 import type { ExtensionRunner, TreePreparation } from "./extensions/index.ts";
 import type { RequestAuth } from "./request-auth.ts";
-import type { SettingsManager } from "./settings-manager.ts";
 import { reportSpawnedUsage, type SpawnedUsageReporter } from "./spawned-usage.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface SessionTreeNavigatorSettingsSource {
+	getBranchSummarySettings(): { reserveTokens: number; skipPrompt: boolean };
+}
 
 export interface SessionTreeNavigatorDeps extends SpawnedUsageReporter {
 	/** Session log — leaf/branch reads and writes go through this. */
@@ -28,7 +33,7 @@ export interface SessionTreeNavigatorDeps extends SpawnedUsageReporter {
 	/** Resolve request auth for the summarizer call (session-owned, also used by compaction). */
 	getRequiredRequestAuth(model: Model<Api>): Promise<RequestAuth>;
 	/** Settings — branch-summary reserve tokens. */
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): SessionTreeNavigatorSettingsSource;
 	/** The underlying agent — the rebuilt message view is assigned to `agent.state.messages`. */
 	getAgent(): Agent;
 	/** Invalidate branch-dependent host state before notifying asynchronous observers. */

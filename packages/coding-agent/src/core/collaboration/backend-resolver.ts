@@ -6,7 +6,7 @@ import { HerdrBackend } from "./herdr-backend.ts";
 import type { HerdrEventChannel } from "./herdr-channel.ts";
 import { herdrHandle } from "./herdr-codec.ts";
 import { createHerdrBackend, type HerdrServerTerminal, probeHerdrSocket } from "./herdr-runtime.ts";
-import type { CollaborationJob } from "./job-store.ts";
+import type { CollaborationJob } from "./job-record.ts";
 
 export interface HerdrCallerContext {
 	paneId: string;

@@ -1,5 +1,5 @@
-import { DEFAULT_STREAM_IDLE, type StreamIdleOptions } from "@caupulican/pi-agent-core/reliability";
 import * as undici from "undici";
+import { DEFAULT_STREAM_IDLE, type StreamIdleOptions } from "../kernel/reliability/index.ts";
 
 // The default stays strictly greater than the largest default stall-watchdog quiet bound (the
 // local budget's 600s, pi-agent-core DEFAULT_STREAM_IDLE; the cloud budget's is 300s,

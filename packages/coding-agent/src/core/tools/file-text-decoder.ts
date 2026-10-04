@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { AgentToolExecutionError } from "@caupulican/pi-agent-core/types";
+import { AgentToolExecutionError } from "../../kernel/types.ts";
 import { ENCODING_EVIDENCE_REQUIRED, PythonCodecUnavailableError } from "./file-codec-runner.ts";
 import { createFileCodecReadSession } from "./file-codec-stream.ts";
 import { firstInvalidUtf8Offset } from "./file-encoding-policy.ts";

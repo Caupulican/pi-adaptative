@@ -20,8 +20,8 @@
  * payload) counts as an available retrieval path.
  */
 
-import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
+import type { AgentMessage } from "../../kernel/index.ts";
 import type { ArtifactStore } from "./context-artifacts.ts";
 import {
 	type ContextEvidenceRef,

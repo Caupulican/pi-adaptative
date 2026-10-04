@@ -110,7 +110,7 @@ and the project-specific runtime contract is in [AGENTS.md](AGENTS.md).
 | Path | Responsibility |
 | --- | --- |
 | [`packages/coding-agent`](packages/coding-agent) | Standalone CLI, TUI integration, sessions, tools, extensions, and harness policy |
-| [`packages/agent`](packages/agent) | Agent state machine, tool execution, orchestration, and durable runtime primitives |
+| [`packages/coding-agent/src/kernel`](packages/coding-agent/src/kernel) | Agent state machine, tool execution, orchestration, and durable runtime primitives (imports only itself, `ai`, `tui` and Node built-ins) |
 | [`packages/ai`](packages/ai) | Provider-neutral model, streaming, tool-call, usage, and cost interfaces |
 | [`packages/tui`](packages/tui) | Terminal rendering and interactive input components |
 | [`scripts`](scripts) | Build, release, installer, verification, and repository gates |

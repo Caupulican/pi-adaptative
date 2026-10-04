@@ -1,4 +1,4 @@
-import { createCustomMessage } from "@caupulican/pi-agent-core";
+import { createCustomMessage } from "../../kernel/index.ts";
 import { formatActivePipelineContext } from "./context.ts";
 import { type DiscoverPipelineOptions, resolvePipelineDefinitionForRun } from "./discover.ts";
 import { resolveCurrentProjectPipelineRun } from "./run-state.ts";

@@ -1,4 +1,4 @@
-import type { CustomMessage } from "@caupulican/pi-agent-core";
+import type { CustomMessage } from "../kernel/index.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import type { GoalExecutionLease, GoalSessionController } from "./goals/goal-session-controller.ts";
 

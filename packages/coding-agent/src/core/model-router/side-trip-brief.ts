@@ -1,7 +1,7 @@
-import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
-import { DEFAULT_MAX_BYTES } from "@caupulican/pi-agent-core/truncate";
-import type { AgentMessage, AgentTool } from "@caupulican/pi-agent-core/types";
 import { Type } from "typebox";
+import { createCustomMessage } from "../../kernel/messages.ts";
+import type { AgentMessage, AgentTool } from "../../kernel/types.ts";
+import { DEFAULT_MAX_BYTES } from "../../kernel/utils/truncate.ts";
 
 /** Name of the tool a side trip searches the conversation its brief omits with (see `sideTripHistoryTool`). */
 export const SIDE_TRIP_HISTORY_TOOL_NAME = "conversation_history";

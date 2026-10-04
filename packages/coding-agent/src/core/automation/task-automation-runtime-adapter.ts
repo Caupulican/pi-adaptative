@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
+import type { SessionManager } from "../../kernel/node.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { ToolkitScript } from "../toolkit/script-registry.ts";
 import { executeToolkitScript, type ScriptExecution, type ScriptExecutor } from "../toolkit/script-runner.ts";

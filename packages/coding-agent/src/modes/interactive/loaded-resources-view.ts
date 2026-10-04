@@ -1,16 +1,22 @@
 import * as path from "node:path";
 import { type Container, Spacer, Text } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
+import type { ExtensionRunner } from "../../core/extensions/index.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
+import type { SettingsManager } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
+import type { SessionManager } from "../../kernel/node.ts";
+import { type ThemeColor, theme } from "../../presentation/theme-model.ts";
 import { getCwdRelativePath } from "../../utils/paths.ts";
 import { ExpandableText } from "./components/expandable-text.ts";
 import * as resourceDisplay from "./resource-display.ts";
-import { type ThemeColor, theme } from "./theme/theme.ts";
 
 export interface LoadedResourcesViewHost {
 	session: AgentSession;
+	sessionManager: Pick<SessionManager, "getCwd">;
+	settingsManager: Pick<SettingsManager, "getQuietStartup">;
+	extensionRunner: Pick<ExtensionRunner, "getRegisteredCommands" | "getCommandDiagnostics" | "getShortcutDiagnostics">;
 	chatContainer: Container;
 	verbose: boolean;
 	expanded: boolean;
@@ -24,7 +30,7 @@ export interface LoadedResourcesViewOptions {
 
 function getBuiltInCommandConflictDiagnostics(host: LoadedResourcesViewHost): ResourceDiagnostic[] {
 	const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
-	return host.session.extensionRunner
+	return host.extensionRunner
 		.getRegisteredCommands()
 		.filter((command) => builtinNames.has(command.name))
 		.map((command) => ({
@@ -38,14 +44,14 @@ function getBuiltInCommandConflictDiagnostics(host: LoadedResourcesViewHost): Re
 }
 
 function formatContextPath(host: LoadedResourcesViewHost, value: string): string {
-	const cwd = path.resolve(host.session.sessionManager.getCwd());
+	const cwd = path.resolve(host.sessionManager.getCwd());
 	const absolutePath = path.isAbsolute(value) ? path.resolve(value) : path.resolve(cwd, value);
 	return getCwdRelativePath(absolutePath, cwd) ?? resourceDisplay.formatDisplayPath(absolutePath);
 }
 
 /** Render startup resources and diagnostics without making InteractiveMode own their formatting rules. */
 export function renderLoadedResources(host: LoadedResourcesViewHost, options: LoadedResourcesViewOptions = {}): void {
-	const settingsManager = host.session.settingsManager;
+	const settingsManager = host.settingsManager;
 	const resourceLoader = host.session.resourceLoader;
 	const showListing = options.force || host.verbose || !settingsManager.getQuietStartup();
 	const showDiagnostics = showListing || options.showDiagnosticsWhenQuiet === true;
@@ -199,9 +205,9 @@ export function renderLoadedResources(host: LoadedResourcesViewHost, options: Lo
 	const extensionDiagnostics: ResourceDiagnostic[] = resourceLoader
 		.getExtensions()
 		.errors.map((error) => ({ type: "error", message: error.error, path: error.path }));
-	extensionDiagnostics.push(...host.session.extensionRunner.getCommandDiagnostics());
+	extensionDiagnostics.push(...host.extensionRunner.getCommandDiagnostics());
 	extensionDiagnostics.push(...getBuiltInCommandConflictDiagnostics(host));
-	extensionDiagnostics.push(...host.session.extensionRunner.getShortcutDiagnostics());
+	extensionDiagnostics.push(...host.extensionRunner.getShortcutDiagnostics());
 	addDiagnostics("Extension issues", extensionDiagnostics);
 	addDiagnostics("Theme conflicts", themesResult.diagnostics);
 }

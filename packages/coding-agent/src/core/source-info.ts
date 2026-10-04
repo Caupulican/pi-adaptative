@@ -1,7 +1,12 @@
-import type { PathMetadata } from "./package-manager.ts";
-
 export type SourceScope = "user" | "project" | "temporary";
 export type SourceOrigin = "package" | "top-level";
+
+export interface PathMetadata {
+	source: string;
+	scope: SourceScope;
+	origin: SourceOrigin;
+	baseDir?: string;
+}
 
 export interface SourceInfo {
 	path: string;

@@ -10,7 +10,7 @@ export {
 	truncateLine,
 	truncateMiddle,
 	truncateTail,
-} from "@caupulican/pi-agent-core/node";
+} from "../../kernel/node.ts";
 export {
 	type ArtifactRetrieveToolDetails,
 	type ArtifactRetrieveToolInput,
@@ -19,11 +19,8 @@ export {
 	createArtifactRetrieveToolDefinition,
 } from "./artifact-retrieve.ts";
 export {
-	type BashOperations,
 	type BashSpawnContext,
 	type BashSpawnHook,
-	type BashToolDetails,
-	type BashToolInput,
 	type BashToolOptions,
 	createBashTool,
 	createBashToolDefinition,
@@ -50,12 +47,8 @@ export {
 export {
 	createEditTool,
 	createEditToolDefinition,
-	type EditOperations,
-	type EditToolDetails,
-	type EditToolInput,
 	type EditToolOptions,
 	localEditOperations,
-	type OpenEditFile,
 } from "./edit.ts";
 export {
 	createExtensionifyTool,
@@ -89,38 +82,21 @@ export { withFileMutationQueue } from "./file-mutation-queue.ts";
 export {
 	createFindTool,
 	createFindToolDefinition,
-	type FindOperations,
-	type FindToolDetails,
-	type FindToolInput,
 	type FindToolOptions,
 } from "./find.ts";
 export {
 	createGrepTool,
 	createGrepToolDefinition,
-	type GrepOperations,
-	type GrepToolDetails,
-	type GrepToolInput,
 	type GrepToolOptions,
 } from "./grep.ts";
 export {
 	createLsTool,
 	createLsToolDefinition,
-	type LsOperations,
-	type LsToolDetails,
-	type LsToolInput,
 	type LsToolOptions,
 } from "./ls.ts";
 export {
 	createPythonTool,
 	createPythonToolDefinition,
-	DEFAULT_PYTHON_TIMEOUT_SECONDS,
-	MAX_PYTHON_OUTPUT_BYTES,
-	MAX_PYTHON_TIMEOUT_SECONDS,
-	type PythonExecutionRequest,
-	type PythonExecutionResult,
-	type PythonOperations,
-	type PythonToolDetails,
-	type PythonToolInput,
 	type PythonToolOptions,
 	resolvePythonToolPath,
 } from "./python.ts";
@@ -128,8 +104,6 @@ export {
 	createReadTool,
 	createReadToolDefinition,
 	type ReadOperations,
-	type ReadToolDetails,
-	type ReadToolInput,
 	type ReadToolOptions,
 } from "./read.ts";
 export {
@@ -141,6 +115,47 @@ export {
 	type RepoReadToolInput,
 	type RepoReadToolOptions,
 } from "./repo-read.ts";
+export type { BashOperations, BashResult, BashToolDetails, BashToolInput } from "./schemas/bash.ts";
+export type {
+	EditOperations,
+	EditToolDetails,
+	EditToolInput,
+	OpenEditFile,
+} from "./schemas/edit.ts";
+export type {
+	FindOperations,
+	FindToolDetails,
+	FindToolInput,
+} from "./schemas/find.ts";
+export type {
+	GrepOperations,
+	GrepToolDetails,
+	GrepToolInput,
+} from "./schemas/grep.ts";
+export type {
+	LsOperations,
+	LsToolDetails,
+	LsToolInput,
+} from "./schemas/ls.ts";
+export {
+	DEFAULT_PYTHON_TIMEOUT_SECONDS,
+	MAX_PYTHON_OUTPUT_BYTES,
+	MAX_PYTHON_TIMEOUT_SECONDS,
+	type PythonExecutionRequest,
+	type PythonExecutionResult,
+	type PythonOperations,
+	type PythonToolDetails,
+	type PythonToolInput,
+} from "./schemas/python.ts";
+export type {
+	ReadToolDetails,
+	ReadToolInput,
+} from "./schemas/read.ts";
+export type {
+	WriteOperations,
+	WriteToolDetails,
+	WriteToolInput,
+} from "./schemas/write.ts";
 export {
 	createSecretStoreToolDefinition,
 	type SecretStoreStatus,
@@ -175,13 +190,10 @@ export {
 export {
 	createWriteTool,
 	createWriteToolDefinition,
-	type WriteOperations,
-	type WriteToolDetails,
-	type WriteToolInput,
 	type WriteToolOptions,
 } from "./write.ts";
 
-import type { AgentTool } from "@caupulican/pi-agent-core";
+import type { AgentTool } from "../../kernel/index.ts";
 import {
 	type ArtifactRetrieveToolOptions,
 	createArtifactRetrieveTool,

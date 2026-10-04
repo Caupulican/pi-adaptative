@@ -1,5 +1,5 @@
 import type { AgentSession } from "../agent-session.ts";
-import type { AgentSessionRuntimeResource } from "../agent-session-runtime.ts";
+import type { ActiveSessionContext, AgentSessionRuntimeResource } from "../agent-session-runtime.ts";
 import { attachNativePiActivity, type NativePiActivity } from "./native-pi-activity.ts";
 
 /** Owns the native status connection across /new, /resume, /fork, and startup cancellation. */
@@ -26,7 +26,9 @@ export class SessionNativePiActivityRuntime implements AgentSessionRuntimeResour
 	 * the failure is reported through `onError` and the session keeps running standalone. Nothing is
 	 * retried silently; the next session replacement attaches again.
 	 */
-	start(session: AgentSession): Promise<void> {
+	start(session: AgentSession, active: ActiveSessionContext): Promise<void> {
+		// Captured with the session: the runtime is live and moves to the next session on a swap.
+		const sessionManager = active.sessionManager;
 		const generation = ++this.generation;
 		return this.replace(async () => {
 			const port = session.nativeActivity;
@@ -36,7 +38,7 @@ export class SessionNativePiActivityRuntime implements AgentSessionRuntimeResour
 					{
 						...port,
 						isSettled: () => this.activated && port.isSettled(),
-						sessionManager: session.sessionManager,
+						sessionManager,
 						subscribe: (listener) => session.subscribe(listener),
 					},
 					this.options,

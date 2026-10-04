@@ -1,17 +1,10 @@
-import type { VerificationRecord } from "@caupulican/pi-agent-core/verification-obligations";
 import { StreamingLineDecoder } from "@caupulican/pi-ai/streaming-lines";
+import type { VerificationRecord } from "../../kernel/verification-obligations.ts";
 import { NodeVerificationParser } from "./node-verification-parser.ts";
+import type { TestVerificationOutcome, VerificationOutputParser } from "./test-verification-types.ts";
 import { VitestVerificationParser } from "./vitest-verification-parser.ts";
 
 export type VerificationRunner = "vitest" | "node-test" | "command";
-export type TestVerificationOutcome = "passed" | "failed" | "no_tests" | "unconfirmed";
-
-export interface VerificationOutputParser {
-	readonly executionOutcome: NonNullable<VerificationRecord["outcome"]>;
-	observe(line: string): void;
-	finish(expected: number, exitCode: number | null): TestVerificationOutcome;
-}
-
 /** One bounded raw-stream and terminal-evidence lifecycle, independent of runner and display projection. */
 export class TestVerificationOutput {
 	private readonly bytes = new TextDecoder("utf-8", { fatal: true });

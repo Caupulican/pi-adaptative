@@ -1,9 +1,9 @@
 import type { Component } from "@caupulican/pi-tui";
 import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@caupulican/pi-tui";
-import { renderTitleBadge, type TitleBadgeStatus } from "../../modes/interactive/components/tool-title.ts";
-import type { Theme, ThemeColor } from "../../modes/interactive/theme/theme.ts";
-import { isTrustedGoalEvidence } from "../goals/goal-acceptance.ts";
+import type { Theme, ThemeColor } from "../../presentation/theme-model.ts";
+import { renderTitleBadge, type TitleBadgeStatus } from "../../presentation/tool-title.ts";
 import type { GoalEvidenceRef, Requirement } from "../goals/goal-state.ts";
+import { isTrustedGoalEvidence } from "../goals/goal-state.ts";
 import type { TaskStep } from "../tasks/task-state.ts";
 
 export type OrchestrationRowStatus =

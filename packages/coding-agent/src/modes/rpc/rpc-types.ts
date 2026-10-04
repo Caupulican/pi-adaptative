@@ -5,14 +5,14 @@
  * Responses and events are emitted as JSON lines on stdout.
  */
 
-import type { AgentMessage, ThinkingLevel } from "@caupulican/pi-agent-core";
-import type { CompactionResult } from "@caupulican/pi-agent-core/node";
 import type { ImageContent, Model } from "@caupulican/pi-ai";
 import type { SessionStats, ToolProbeReport } from "../../core/agent-session.ts";
-import type { BashResult } from "../../core/bash-executor.ts";
 import type { SelfCompactionInfo, SelfCompactionNowOutcome } from "../../core/compaction/self-compaction-controller.ts";
 import type { HumanInputAnswer, HumanInputPresentationRequest } from "../../core/human-input.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
+import type { BashResult } from "../../core/tools/schemas/bash.ts";
+import type { AgentMessage, ThinkingLevel } from "../../kernel/index.ts";
+import type { CompactionResult } from "../../kernel/node.ts";
 
 // ============================================================================
 // RPC Commands (stdin)

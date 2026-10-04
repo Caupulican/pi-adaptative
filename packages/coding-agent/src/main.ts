@@ -6,9 +6,8 @@
  */
 
 import { createInterface } from "node:readline";
-import { probeProcessLiveness } from "@caupulican/pi-agent-core/process-tree";
-import { assertValidSessionId, SessionManager } from "@caupulican/pi-agent-core/session";
 import { type ImageContent, modelsAreEqual } from "@caupulican/pi-ai";
+import type { Api, Model } from "@caupulican/pi-ai/types";
 import { applyTerminalSettings, ProcessTerminal, setKeybindings, TUI } from "@caupulican/pi-tui";
 import chalk from "chalk";
 import { type AppMode, type Args, type Mode, parseArgs, printHelp, resolveAppMode } from "./cli/args.ts";
@@ -49,7 +48,6 @@ import { dropSessionSecretsFromProcess } from "./core/harness-environment.ts";
 import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import { formatLaneWorkerRefusal } from "./core/model-capability.ts";
-import type { ModelRegistry } from "./core/model-registry.ts";
 import {
 	resolveCliModel,
 	resolveCliProviderDefault,
@@ -91,12 +89,21 @@ import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { startCliPowerShellWarmStart } from "./core/tools/early-powershell-session.ts";
 import { hasProjectTrustInputs, ProjectTrustStore } from "./core/trust-manager.ts";
 import { getBoundWorktreeLaneKey } from "./core/worktree-sync/lane-binding.ts";
+import { probeProcessLiveness } from "./kernel/reliability/process-tree.ts";
+import { assertValidSessionId, SessionManager } from "./kernel/session/session-manager.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { terminalCapabilityOverridesFromSettings } from "./modes/interactive/terminal-capability-settings.ts";
-
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
 import { getProcessWorkRun, getWorkRoot, PI_WORK_ROOT_ENV } from "./utils/work-directory.ts";
+
+/** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
+export interface MainModelSource {
+	find(provider: string, modelId: string): Model<Api> | undefined;
+	getAll(): Model<Api>[];
+	getAvailable(): Model<Api>[];
+	hasConfiguredAuth(model: Model<Api>): boolean;
+}
 
 async function launchResumableWorker(
 	payload: ResumablePayload,
@@ -369,7 +376,7 @@ async function createSessionManager(
 			console.error(chalk.red("Error: --resume requires --session-mode user; use --session <id> for workers."));
 			process.exit(1);
 		}
-		const { initTheme, stopThemeWatcher } = await import("./modes/interactive/theme/theme.ts");
+		const { initTheme, stopThemeWatcher } = await import("./presentation/theme/theme.ts");
 		initTheme(settingsManager.getTheme(), true);
 		try {
 			const selectedPath = await selectSession(
@@ -405,7 +412,7 @@ export function buildSessionOptions(
 	parsed: Args,
 	scopedModels: ScopedModel[],
 	hasExistingSession: boolean,
-	modelRegistry: ModelRegistry,
+	modelRegistry: MainModelSource,
 	settingsManager: SettingsManager,
 	cwd: string,
 ): {
@@ -556,7 +563,7 @@ async function showStartupSelector<T>(
 ): Promise<T | undefined> {
 	const [{ ExtensionSelectorComponent }, { initTheme }] = await Promise.all([
 		import("./modes/interactive/components/extension-selector.ts"),
-		import("./modes/interactive/theme/theme.ts"),
+		import("./presentation/theme/theme.ts"),
 	]);
 	initTheme(settingsManager.getTheme());
 	setKeybindings(KeybindingsManager.create());
@@ -1162,7 +1169,7 @@ export async function main(args: string[], options?: MainOptions) {
 			requestExit: () => disposeRuntimeAndExit(runtime, 0),
 		});
 		runtime.registerSessionResource(supervision);
-		await supervision.start(session);
+		await supervision.start(session, runtime);
 		// Once per main-session process, after this session's process-matrix entry is registered, so
 		// its own and every live peer's bundle is already protected. Bounded; never fails startup.
 		if (getSessionRole() === "main") {
@@ -1176,7 +1183,7 @@ export async function main(args: string[], options?: MainOptions) {
 			};
 			retentionSweep = sweepSessionBundles({
 				agentDir,
-				currentSessionId: session.sessionManager.getSessionId(),
+				currentSessionId: runtime.sessionManager.getSessionId(),
 			}).then(
 				(retention) => {
 					for (const diagnostic of retention.diagnostics) report(diagnostic);
@@ -1229,7 +1236,7 @@ export async function main(args: string[], options?: MainOptions) {
 		stdinContent,
 	);
 	time("prepareInitialMessage");
-	const { initTheme, stopThemeWatcher } = await import("./modes/interactive/theme/theme.ts");
+	const { initTheme, stopThemeWatcher } = await import("./presentation/theme/theme.ts");
 	initTheme(settingsManager.getTheme(), hasHumanUI);
 	time("initTheme");
 
@@ -1270,7 +1277,7 @@ export async function main(args: string[], options?: MainOptions) {
 				console.error(chalk.yellow(`Collaboration activity signal failed: ${String(error).slice(0, 512)}`)),
 		});
 		runtime.registerSessionResource(nativePiRuntime);
-		await nativePiRuntime.start(session);
+		await nativePiRuntime.start(session, runtime);
 		const { InteractiveMode } = await import("./modes/interactive/interactive-mode.ts");
 		const interactiveMode = new InteractiveMode(runtime, {
 			migratedProviders,

@@ -1,7 +1,7 @@
-import type { AgentTool } from "@caupulican/pi-agent-core";
-import { formatSize } from "@caupulican/pi-agent-core/truncate";
 import { type Static, Type } from "typebox";
-import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type { AgentTool } from "../../kernel/index.ts";
+import { formatSize } from "../../kernel/utils/truncate.ts";
+import type { Theme } from "../../presentation/theme-model.ts";
 import {
 	type ArtifactRetrievalMode,
 	type ArtifactSlice,

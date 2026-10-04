@@ -1,6 +1,6 @@
-import { createCustomMessage } from "@caupulican/pi-agent-core/messages";
-import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import type { TextContent } from "@caupulican/pi-ai";
+import { createCustomMessage } from "../../kernel/messages.ts";
+import type { AgentMessage } from "../../kernel/types.ts";
 import { GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
 import { formatGoalClarificationLine, projectGoalRecord } from "./goal-record.ts";
 import { type GoalState, isGoalExecutionActive } from "./goal-state.ts";

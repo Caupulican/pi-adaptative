@@ -12,8 +12,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import type { Agent, AgentToolCall, BeforeToolCallResult } from "@caupulican/pi-agent-core";
 import type { AssistantMessage } from "@caupulican/pi-ai";
+import type { Agent, AgentToolCall, BeforeToolCallResult } from "../kernel/index.ts";
 import type { CapabilityEnvelope, GateOutcome } from "./autonomy/contracts.ts";
 import { classifyAllEdgeOperations, type EdgeClass } from "./autonomy/edge-policy.ts";
 import { evaluateToolGateAsync } from "./autonomy/gates.ts";

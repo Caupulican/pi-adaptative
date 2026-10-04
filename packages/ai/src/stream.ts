@@ -1,5 +1,3 @@
-import "./providers/register-builtins.ts";
-
 import { getApiProvider } from "./api-registry.ts";
 import { getEnvApiKey, getEnvAuthHeaders } from "./env-api-keys.ts";
 import type {

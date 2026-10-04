@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { posix, win32 } from "node:path";
-import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { escapeRegExp } from "@caupulican/pi-ai";
+import type { AgentMessage } from "../../kernel/types.ts";
 import { formatPathRelativeToCwdOrAbsolute, resolvePath } from "../../utils/paths.ts";
 
 const MIN_ALIAS_CHARS = 20;

@@ -1,9 +1,10 @@
-import { killTree } from "@caupulican/pi-agent-core/process-tree";
+import { killTree } from "../../kernel/reliability/process-tree.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
 import { getSelfLaunchTarget } from "../process-matrix/self-launch-target.ts";
 import { resolveCollaborationBackend } from "./backend-resolver.ts";
 import { type CollaborationAnswer, stopCollaborationAgent } from "./coordinator.ts";
-import type { CollaborationAgent, CollaborationJob, CollaborationJobStore } from "./job-store.ts";
+import type { CollaborationAgent, CollaborationJob } from "./job-record.ts";
+import type { CollaborationJobStore } from "./job-store.ts";
 
 /** Detached finite control helper; native model CLIs remain interactive in the backend's PTYs. */
 export async function launchCollaborationTurnProcess(

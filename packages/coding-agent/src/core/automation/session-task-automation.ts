@@ -1,5 +1,5 @@
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { Value } from "typebox/value";
+import type { SessionManager } from "../../kernel/node.ts";
 import {
 	appendSessionSnapshot,
 	decodeSessionSnapshotPayload,

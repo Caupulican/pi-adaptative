@@ -1,5 +1,7 @@
-import { RUNTIME_SUPERVISOR_ENV } from "../cli/runtime-channel.ts";
 import { CHAT_CREDENTIAL_ENV } from "./chat/constants.ts";
+
+/** Carries the supervisor channel description from the runtime supervisor to the generation it launched. */
+export const RUNTIME_SUPERVISOR_ENV = "PI_RUNTIME_SUPERVISOR";
 
 /**
  * Variables the runtime supervisor injects into pi's own process so the generation it launched

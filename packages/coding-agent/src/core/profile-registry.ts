@@ -1,7 +1,6 @@
-import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
-import { isValidThinkingLevel } from "../cli/args.ts";
+import type { ThinkingLevel } from "../kernel/index.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { mergeResourceProfileSettings } from "./resource-profile-blocks.ts";
@@ -11,8 +10,9 @@ import type {
 	ResourceProfileKind,
 	ResourceProfileSettings,
 	Settings,
-} from "./settings-manager.ts";
+} from "./settings/settings-schema.ts";
 import { validateSkillName } from "./skills.ts";
+import { isValidThinkingLevel } from "./thinking-level.ts";
 import { isRecordObject } from "./util/value-guards.ts";
 
 export type ProfileSource =

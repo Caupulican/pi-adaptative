@@ -16,7 +16,7 @@ test("pins the stable TypeScript 7 compiler without the preview package", () => 
 	assert.equal(rootPackage.devDependencies["@typescript/native-preview"], undefined);
 	assert.equal(rootPackage.devDependencies["@typescript/typescript6"], undefined);
 
-	for (const relativePath of ["packages/agent/package.json", "packages/coding-agent/package.json"]) {
+	for (const relativePath of ["packages/coding-agent/package.json"]) {
 		const packageJson = JSON.parse(readFileSync(relativePath, "utf8"));
 		assert.equal(packageJson.devDependencies.typescript, "7.0.2", relativePath);
 	}
@@ -42,10 +42,10 @@ test("has one compiler execution path with no legacy fallback", () => {
 	assert.throws(() => readFileSync(join("scripts", "tsgo-or-tsc.mjs"), "utf8"), { code: "ENOENT" });
 });
 
-test("root typechecking resolves agent compaction subpaths to workspace source", () => {
+test("root typechecking resolves kernel compaction subpaths to workspace source", () => {
 	const rootTsconfig = JSON.parse(readFileSync("tsconfig.json", "utf8"));
 	assert.deepEqual(rootTsconfig.compilerOptions.paths["@caupulican/pi-agent-core/compaction/*"], [
-		"./packages/agent/src/compaction/*.ts",
+		"./packages/coding-agent/src/kernel/compaction/*.ts",
 	]);
 });
 

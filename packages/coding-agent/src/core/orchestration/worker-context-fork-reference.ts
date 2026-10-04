@@ -1,4 +1,4 @@
-import { DEFAULT_MAX_BYTES } from "@caupulican/pi-agent-core/truncate";
+import { DEFAULT_MAX_BYTES } from "../../kernel/utils/truncate.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 export const WORKER_CONTEXT_FORK_REFERENCE_SCHEMA_VERSION = 1 as const;

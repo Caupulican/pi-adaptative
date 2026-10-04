@@ -1,4 +1,6 @@
-import { type Agent, AgentBusyError } from "@caupulican/pi-agent-core/agent";
+import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
+import { isContextOverflow } from "@caupulican/pi-ai/overflow";
+import { type Agent, AgentBusyError } from "../kernel/agent.ts";
 import {
 	type ClassifiedError,
 	classifyFailure,
@@ -6,16 +8,22 @@ import {
 	DEFAULT_RETRY_POLICY,
 	RetryController,
 	RetryDelayExceededError,
-} from "@caupulican/pi-agent-core/reliability";
-import type { AgentEvent, AgentMessage } from "@caupulican/pi-agent-core/types";
-import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
-import { isContextOverflow } from "@caupulican/pi-ai/overflow";
+} from "../kernel/reliability/index.ts";
+import type { AgentEvent, AgentMessage } from "../kernel/types.ts";
 import { BillingFailoverController, ExhaustedProviderRegistry } from "./billing-failover-controller.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { ModelRouterFailoverStatus } from "./model-router/status.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
-import type { SettingsManager } from "./settings-manager.ts";
+import type { AutonomySettings, FailoverSettings } from "./settings/settings-schema.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ForegroundRecoveryControllerSettingsSource {
+	getAutonomySettings(): Required<AutonomySettings>;
+	getFailoverSettings(): Required<FailoverSettings>;
+	getProviderRetrySettings(): { timeoutMs?: number; maxRetries?: number; maxRetryDelayMs: number };
+	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number };
+}
 
 type ForegroundRecoveryEvent =
 	| { type: "warning"; message: string }
@@ -38,7 +46,7 @@ export interface ForegroundRecoveryControllerDeps {
 	applyFailoverModel(failed: Model<Api>, hop: Model<Api>): Model<Api> | undefined;
 	/** See `BillingFailoverControllerDeps.resolveFallbackModel`. */
 	resolveFallbackModel?(failed: Model<Api>): Model<Api> | undefined;
-	settingsManager: SettingsManager;
+	settingsManager: ForegroundRecoveryControllerSettingsSource;
 	modelRegistry: ModelRegistry;
 	failureCorpus: FailureCorpusRecorder;
 	getContextWindow(): number;

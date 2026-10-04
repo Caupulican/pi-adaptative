@@ -4,7 +4,8 @@
  * Implements DIVERSITY_AND_INDEPENDENCE.md and HM11-040 through HM11-044.
  */
 
-import type { ExpertBinding, ExpertIndependenceLevel } from "./contracts.ts";
+import type { ExpertBinding } from "./contracts.ts";
+import type { ExpertIndependenceLevel } from "./vocabulary.ts";
 
 export interface IndependenceValidationResult {
 	readonly valid: boolean;

@@ -3,8 +3,8 @@
  * the interactive host, and a child session never asks. The coordinator (agent-session.ts) only
  * supplies these dependencies; the classification itself is `autonomy/edge-policy.ts`.
  */
-import type { BeforeToolCallResult } from "@caupulican/pi-agent-core";
-import type { SessionEntry } from "@caupulican/pi-agent-core/node";
+import type { BeforeToolCallResult } from "../kernel/index.ts";
+import type { SessionEntry } from "../kernel/node.ts";
 import {
 	classifyAllEdgeOperations,
 	classifyYoloBoundary,

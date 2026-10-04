@@ -1,7 +1,7 @@
-import type { ThinkingLevel } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Model } from "@caupulican/pi-ai";
 import { getAgentDir } from "../config.ts";
+import type { ThinkingLevel } from "../kernel/index.ts";
+import type { SessionManager } from "../kernel/node.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { configFile } from "./agent-paths.ts";
 import { AuthStorage } from "./auth-storage.ts";

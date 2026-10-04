@@ -1,5 +1,5 @@
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions, Spacer, Text } from "@caupulican/pi-tui";
-import { getSelectListTheme, theme } from "../theme/theme.ts";
+import { getSelectListTheme, theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { SelectorNavigationFooter } from "./selector-list.ts";
 

@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { MAX_TOOL_FAILURE_EVIDENCE_CHARS } from "@caupulican/pi-agent-core/tool-failure-memory";
-import { truncateMiddle, truncateTail } from "@caupulican/pi-agent-core/truncate";
-import { AgentToolExecutionError } from "@caupulican/pi-agent-core/types";
 import { type Static, Type } from "typebox";
+import { MAX_TOOL_FAILURE_EVIDENCE_CHARS } from "../../kernel/tool-failure-memory.ts";
+import { AgentToolExecutionError } from "../../kernel/types.ts";
+import { truncateMiddle, truncateTail } from "../../kernel/utils/truncate.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import { formatArtifactNotice, packToolOutput } from "../context/tool-output-packer.ts";
 import type { ToolDefinition } from "../extensions/types.ts";

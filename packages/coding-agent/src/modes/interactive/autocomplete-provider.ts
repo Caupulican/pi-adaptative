@@ -9,19 +9,27 @@
  * chain and installs the provider on the editors) host-side.
  */
 
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { AutocompleteItem, AutocompleteProvider, SlashCommand } from "@caupulican/pi-tui";
 import { CombinedAutocompleteProvider, fuzzyFilter } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
-import type { SettingsManager } from "../../core/settings-manager.ts";
+import type { ExtensionRunner } from "../../core/extensions/index.ts";
+import type { ModelRegistry } from "../../core/model-registry.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
+import type { SessionManager } from "../../kernel/node.ts";
 import { parseGitUrl } from "../../utils/git.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface AutocompleteProviderSettingsSource {
+	getEnableSkillCommands(): boolean;
+}
 
 export interface AutocompleteProviderHost {
 	readonly session: AgentSession;
-	readonly settingsManager: Pick<SettingsManager, "getEnableSkillCommands">;
+	readonly settingsManager: Pick<AutocompleteProviderSettingsSource, "getEnableSkillCommands">;
 	readonly sessionManager: Pick<SessionManager, "getCwd">;
+	readonly modelRegistry: Pick<ModelRegistry, "getAvailable">;
+	readonly extensionRunner: Pick<ExtensionRunner, "getRegisteredCommands">;
 	readonly fdPath: string | undefined;
 	readonly skillCommands: Map<string, string>;
 }
@@ -76,7 +84,7 @@ export function createBaseAutocompleteProvider(host: AutocompleteProviderHost): 
 			const models =
 				host.session.scopedModels.length > 0
 					? host.session.scopedModels.map((s) => s.model)
-					: host.session.modelRegistry.getAvailable();
+					: host.modelRegistry.getAvailable();
 
 			if (models.length === 0) return null;
 
@@ -127,7 +135,7 @@ export function createBaseAutocompleteProvider(host: AutocompleteProviderHost): 
 
 	// Convert extension commands to SlashCommand format
 	const builtinCommandNames = new Set(slashCommands.map((c) => c.name));
-	const extensionCommands: SlashCommand[] = host.session.extensionRunner
+	const extensionCommands: SlashCommand[] = host.extensionRunner
 		.getRegisteredCommands()
 		.filter((cmd) => !builtinCommandNames.has(cmd.name))
 		.map((cmd) => ({

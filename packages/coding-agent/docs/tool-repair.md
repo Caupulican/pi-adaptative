@@ -100,10 +100,10 @@ Confirmed against current source:
 
 - Shared validation and repair choke point: `packages/ai/src/utils/validation.ts`.
 - Repair mode names and standing-rule text: `packages/ai/src/utils/tool-repair/registry.ts`.
-- Agent repair event metadata and teach-note gate: `packages/agent/src/types.ts`, `packages/agent/src/agent-loop.ts`.
-- Bounded execution-failure assessment and retry memory: `packages/agent/src/tool-failure-memory.ts`.
-- Mandatory recovery template: `packages/agent/src/tool-failure-recovery-protocol.ts`.
-- Operation-local replay admission and transcript restoration: `packages/agent/src/tool-failure-recovery-gate.ts`.
+- Agent repair event metadata and teach-note gate: `packages/coding-agent/src/kernel/types.ts`, `packages/coding-agent/src/kernel/agent-loop.ts`.
+- Bounded execution-failure assessment and retry memory: `packages/coding-agent/src/kernel/tool-failure-memory.ts`.
+- Mandatory recovery template: `packages/coding-agent/src/kernel/tool-failure-recovery-protocol.ts`.
+- Operation-local replay admission and transcript restoration: `packages/coding-agent/src/kernel/tool-failure-recovery-gate.ts`.
 - Interactive marker: `packages/coding-agent/src/modes/interactive/components/tool-execution.ts`.
 - Settings/env kill switches: `packages/coding-agent/src/core/settings-manager.ts`, `packages/coding-agent/src/core/tool-repair-settings.ts`.
 - Health, tool probing, rule removal, and protocol reset: `packages/coding-agent/src/core/tool-repair-health.ts`, `packages/coding-agent/src/core/models/adaptation-store.ts`, `packages/coding-agent/src/core/slash-commands.ts`, `packages/coding-agent/src/modes/interactive/interactive-mode.ts`, `packages/coding-agent/src/modes/rpc/rpc-mode.ts`.

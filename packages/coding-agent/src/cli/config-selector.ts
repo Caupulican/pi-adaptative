@@ -4,13 +4,30 @@
 
 import { ProcessTerminal, TUI } from "@caupulican/pi-tui";
 import type { ResolvedPaths } from "../core/package-manager.ts";
-import type { SettingsManager } from "../core/settings-manager.ts";
+import type { PackageSource, Settings } from "../core/settings/settings-schema.ts";
 import { ConfigSelectorComponent } from "../modes/interactive/components/config-selector.ts";
-import { initTheme, stopThemeWatcher } from "../modes/interactive/theme/theme.ts";
+import { initTheme, stopThemeWatcher } from "../presentation/theme/theme.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ConfigSelectorSettingsSource {
+	getGlobalSettings(): Settings;
+	getProjectSettings(): Settings;
+	getTheme(): string | undefined;
+	setExtensionPaths(paths: string[]): void;
+	setPackages(packages: PackageSource[]): void;
+	setProjectExtensionPaths(paths: string[]): void;
+	setProjectPackages(packages: PackageSource[]): void;
+	setProjectPromptTemplatePaths(paths: string[]): void;
+	setProjectSkillPaths(paths: string[]): void;
+	setProjectThemePaths(paths: string[]): void;
+	setPromptTemplatePaths(paths: string[]): void;
+	setSkillPaths(paths: string[]): void;
+	setThemePaths(paths: string[]): void;
+}
 
 export interface ConfigSelectorOptions {
 	resolvedPaths: ResolvedPaths;
-	settingsManager: SettingsManager;
+	settingsManager: ConfigSelectorSettingsSource;
 	cwd: string;
 	agentDir: string;
 }

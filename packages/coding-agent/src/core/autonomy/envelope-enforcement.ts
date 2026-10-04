@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import * as os from "node:os";
-import type { ExecutionPathAuthority } from "@caupulican/pi-agent-core";
-import { type ExecutionPathFlavor, executionPathApi, resolveExecutionPath } from "@caupulican/pi-agent-core/paths";
+import type { ExecutionPathAuthority } from "../../kernel/index.ts";
+import { type ExecutionPathFlavor, executionPathApi, resolveExecutionPath } from "../../kernel/utils/paths.ts";
 import { awaitPreflight, requireSynchronousPreflight } from "../preflight.ts";
 import { isGrantedExtensionToolName, resolveToolCallPathAccess } from "../tool-capability-policy.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";

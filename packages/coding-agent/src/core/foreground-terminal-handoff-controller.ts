@@ -1,4 +1,4 @@
-import type { CustomMessage } from "@caupulican/pi-agent-core";
+import type { CustomMessage } from "../kernel/index.ts";
 import type { LaneTerminalStatus } from "./autonomy/lane-tracker.ts";
 import {
 	type BackgroundToolTaskRecord,

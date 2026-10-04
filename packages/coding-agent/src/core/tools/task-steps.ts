@@ -463,7 +463,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 		// INVESTIGATED, not assumed (turn-economics remediation, TASK 6): this tool previously
 		// declared `executionMode: "sequential"`, which gives a tool call its own barrier group and
 		// guarantees it never shares a batch with any other tool call (see `partitionToolCalls` in
-		// `packages/agent/src/agent-loop.ts`). In two weeks of real logs every one of 4,326 calls ran
+		// `packages/coding-agent/src/kernel/agent-loop.ts`). In two weeks of real logs every one of 4,326 calls ran
 		// with zero other tools in flight, and control-plane-only turns like this one cost 17.9 hours
 		// of wall clock. The barrier is NOT required for this tool's correctness, and removing it does
 		// not introduce a race:

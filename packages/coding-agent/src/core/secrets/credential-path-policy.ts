@@ -3,7 +3,7 @@ import {
 	type ExecutionPathFlavor,
 	executionPathApi,
 	resolveExecutionPath,
-} from "@caupulican/pi-agent-core/paths";
+} from "../../kernel/utils/paths.ts";
 import { isPathWithinScopeWithDialect } from "../autonomy/path-scope.ts";
 import { requireSynchronousPreflight } from "../preflight.ts";
 

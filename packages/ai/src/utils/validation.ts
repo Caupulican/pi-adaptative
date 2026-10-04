@@ -1,4 +1,3 @@
-import { Compile } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import type { Tool, ToolCall } from "../types.ts";
 import { analyzeToolArgumentErrors } from "./tool-repair/analyzer.ts";
@@ -9,8 +8,8 @@ import {
 } from "./tool-repair/registry.ts";
 import { repairToolArguments } from "./tool-repair/repairer.ts";
 import { formatValidationPath, instancePathBase } from "./validation-path.ts";
+import { getValidator } from "./validator-cache.ts";
 
-const validatorCache = new WeakMap<object, ReturnType<typeof Compile>>();
 const EXPECTED_FRAGMENT_MAX_LENGTH = 320;
 const RECEIVED_VALUE_MAX_LENGTH = 200;
 const MINIMAL_EXAMPLE_MAX_STRING_LENGTH = 64;
@@ -126,24 +125,6 @@ function uniqueRepairModes(modes: Iterable<ToolRepairModeName>): ToolRepairModeN
 function uniqueFailureModes(modes: Iterable<ToolRepairModeName>): ToolRepairFailureModeName[] {
 	const uniqueModes = uniqueRepairModes(modes);
 	return uniqueModes.length > 0 ? uniqueModes : ["other"];
-}
-
-/**
- * Compiles (and caches) the TypeBox validator for a tool's parameter schema.
- *
- * This is the ONE validator compile-cache for the repair layer (decision D3, tool-call-repair
- * doctrine): `repairer.ts` imports this instead of keeping a second cache over the same schema
- * objects, so a schema is compiled once and both the validate and repair paths share the result.
- */
-export function getValidator(schema: Tool["parameters"]): ReturnType<typeof Compile> {
-	const key = schema as object;
-	const cached = validatorCache.get(key);
-	if (cached) {
-		return cached;
-	}
-	const validator = Compile(schema);
-	validatorCache.set(key, validator);
-	return validator;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

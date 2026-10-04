@@ -3,6 +3,7 @@ import { existsSync, type FSWatcher, readFileSync, type Stats, statSync, unwatch
 import { dirname, join, resolve } from "path";
 import { closeWatcher, FS_WATCH_RETRY_DELAY_MS, watchWithErrorHandler } from "../utils/fs-watch.ts";
 import { type AutonomyStatusSnapshot, formatAutonomyStatus } from "./autonomy/status.ts";
+import type { ReadonlyFooterDataProvider } from "./footer-data-contract.ts";
 
 type GitPaths = {
 	repoDir: string;
@@ -104,7 +105,7 @@ function readHeadBranch(paths: GitPaths): string {
  * Provides git branch and extension statuses - data not otherwise accessible to extensions.
  * Token stats, model info available via ctx.sessionManager and ctx.model.
  */
-export class FooterDataProvider {
+export class FooterDataProvider implements ReadonlyFooterDataProvider {
 	private cwd: string;
 	private static readonly WATCH_DEBOUNCE_MS = 500;
 
@@ -410,9 +411,3 @@ export class FooterDataProvider {
 		}
 	}
 }
-
-/** Read-only view for extensions - excludes setExtensionStatus, setAvailableProviderCount and dispose */
-export type ReadonlyFooterDataProvider = Pick<
-	FooterDataProvider,
-	"getGitBranch" | "getExtensionStatuses" | "getAvailableProviderCount" | "onBranchChange" | "getAutonomyStatus"
->;

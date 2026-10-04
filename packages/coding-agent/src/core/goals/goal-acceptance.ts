@@ -1,8 +1,5 @@
 import type { GoalEvidenceRef, GoalState, Requirement } from "./goal-state.ts";
-
-export function isTrustedGoalEvidence(evidence: GoalEvidenceRef): boolean {
-	return evidence.verified === true && (evidence.kind !== "test" || evidence.outcome === "succeeded");
-}
+import { isTrustedGoalEvidence } from "./goal-state.ts";
 
 export function getTrustedRequirementEvidence(state: GoalState, requirement: Requirement): GoalEvidenceRef[] {
 	const evidenceIds = new Set(requirement.evidenceIds);

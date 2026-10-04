@@ -1,8 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Agent, StreamFn } from "@caupulican/pi-agent-core";
-import { resolveProviderRequestAuthOptions } from "@caupulican/pi-agent-core/provider-request-planner";
 import {
 	formatVariantEnvelope,
 	generateTextToolProtocolPrimer,
@@ -26,6 +24,8 @@ import type {
 } from "@caupulican/pi-ai/types";
 import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai/validation";
 import { Type } from "typebox";
+import type { Agent, StreamFn } from "../kernel/index.ts";
+import { resolveProviderRequestAuthOptions } from "../kernel/provider-request-planner.ts";
 import { getProcessWorkRun } from "../utils/work-directory.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import {
@@ -43,10 +43,15 @@ import type {
 } from "./models/adaptation-store.ts";
 import type { ModelPerfProfile } from "./models/perf-profile.ts";
 import type { RequestAuth } from "./request-auth.ts";
-import type { SettingsManager } from "./settings-manager.ts";
+import type { Settings } from "./settings/settings-schema.ts";
 import type { ToolRecoveryLoggerStats } from "./tool-recovery-logger.ts";
 import { formatToolRepairHealthReport } from "./tool-repair-health.ts";
 import { resolveCurrentToolRepairSettings } from "./tool-repair-settings.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ToolProtocolControllerSettingsSource {
+	settings: Settings;
+}
 
 const MODEL_ADAPTATION_REPAIR_THRESHOLD = 3;
 const TEXT_TOOL_PROTOCOL_TRIALS_PER_VARIANT = 2;
@@ -119,7 +124,7 @@ export interface ToolProbeReport {
 export interface ToolProtocolControllerDeps {
 	agent: Agent;
 	agentDir: string;
-	settingsManager: SettingsManager;
+	settingsManager: ToolProtocolControllerSettingsSource;
 	getModelRegistry(): ModelRegistry;
 	adaptationStore: ModelAdaptationStore;
 	isRawStreamSimple(fn: StreamFn): boolean;

@@ -12,7 +12,6 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { EditorComponent, TUI } from "@caupulican/pi-tui";
 import { Spacer, Text } from "@caupulican/pi-tui";
 import { getAgentDir, getShareViewerUrl } from "../../config.ts";
@@ -20,6 +19,8 @@ import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import { SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import { MissingSessionCwdError } from "../../core/session-cwd.ts";
+import type { SessionManager } from "../../kernel/node.ts";
+import { theme } from "../../presentation/theme-model.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { copyToClipboard } from "../../utils/clipboard.ts";
 import { acquireWorkRun } from "../../utils/work-directory.ts";
@@ -27,7 +28,6 @@ import { BorderedLoader } from "./components/bordered-loader.ts";
 import type { EditorOverlayHost } from "./editor-overlay-host.ts";
 import type { ExtensionUiHost } from "./extension-ui-host.ts";
 import { handleNonFatalSessionReplacementError } from "./session-replacement-errors.ts";
-import { theme } from "./theme/theme.ts";
 
 type PathCommand = "/export" | "/import";
 

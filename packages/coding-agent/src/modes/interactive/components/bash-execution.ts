@@ -2,18 +2,13 @@
  * Component for displaying bash command execution with streaming output.
  */
 
-import {
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
-	type TruncationResult,
-	truncateTail,
-} from "@caupulican/pi-agent-core/node";
 import { Container, Loader, Spacer, Text, type TUI } from "@caupulican/pi-tui";
 import { formatCollapsedToolOutputHint } from "../../../core/tools/render-utils.ts";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult, truncateTail } from "../../../kernel/node.ts";
+import { keyHint, keyText } from "../../../presentation/keybinding-hints.ts";
+import { theme } from "../../../presentation/theme-model.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
-import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
-import { keyHint, keyText } from "./keybinding-hints.ts";
 
 export class BashExecutionComponent extends Container {
 	private command: string;

@@ -1,13 +1,13 @@
 import { createHash, randomBytes } from "node:crypto";
 import { closeSync, openSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
+import { getAgentDir } from "../../config.ts";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	type TruncationResult,
 	truncateKnownHeadTail,
-} from "@caupulican/pi-agent-core/truncate";
-import { getAgentDir } from "../../config.ts";
+} from "../../kernel/utils/truncate.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import { createShellOutputDecoder, type ShellOutputDecoder } from "./shell-output-decoder.ts";
 

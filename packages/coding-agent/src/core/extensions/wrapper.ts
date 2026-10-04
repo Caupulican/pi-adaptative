@@ -6,7 +6,7 @@
  * Tool call and tool result interception is handled by AgentSession via agent-core hooks.
  */
 
-import type { AgentTool, ExecutionContext } from "@caupulican/pi-agent-core";
+import type { AgentTool, ExecutionContext } from "../../kernel/index.ts";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
 import {
 	applyExtensionSessionHeal,

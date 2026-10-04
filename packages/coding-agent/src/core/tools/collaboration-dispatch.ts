@@ -1,4 +1,4 @@
-import { collaborationLaneId } from "../collaboration/job-store.ts";
+import { collaborationLaneId } from "../collaboration/job-record.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { type LaneWorkerRefusal, laneWorkerRefusalSkipReason } from "../model-capability.ts";
 

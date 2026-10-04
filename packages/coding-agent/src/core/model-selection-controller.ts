@@ -10,10 +10,10 @@
  */
 
 import { totalmem } from "node:os";
-import type { Agent, ThinkingLevel } from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { clampThinkingLevel, getSupportedThinkingLevels, modelsAreEqual } from "@caupulican/pi-ai/models";
+import type { Agent, ThinkingLevel } from "../kernel/index.ts";
+import type { SessionManager } from "../kernel/node.ts";
 import type { AgentSessionEvent, ModelCycleResult } from "./agent-session-contracts.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
@@ -25,7 +25,13 @@ import { OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import type { OllamaRuntime } from "./models/local-runtime.ts";
 import { matchesInstalledLocalModel } from "./models/model-ref.ts";
 import { isProbeAllFailed } from "./research/model-fitness.ts";
-import type { SettingsManager } from "./settings-manager.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ModelSelectionControllerSettingsSource {
+	getDefaultThinkingLevel(): ThinkingLevel | undefined;
+	setDefaultModelAndProvider(provider: string, modelId: string): void;
+	setDefaultThinkingLevel(level: ThinkingLevel): void;
+}
 
 /** Standard thinking levels (fallback set when the current model is unknown). */
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
@@ -36,7 +42,7 @@ export interface ModelSelectionControllerDeps {
 	getThinkingLevel(): ThinkingLevel;
 	getModelRegistry(): ModelRegistry;
 	getSessionManager(): SessionManager;
-	getSettingsManager(): SettingsManager;
+	getSettingsManager(): ModelSelectionControllerSettingsSource;
 	getExtensionRunner(): ExtensionRunner;
 	getAgentDir(): string;
 	/** Scoped models (--models flag), used by the cycle path. */

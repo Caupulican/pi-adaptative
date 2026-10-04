@@ -2,11 +2,7 @@
  * Owns task-directory admission leases and serialized durable binding changes. Filesystem authority
  * stays behind the validation port; waiters wake on lease release, never process-output polling.
  */
-import {
-	createExecutionContext,
-	type ExecutionAttachment,
-	type ExecutionContext,
-} from "@caupulican/pi-agent-core/paths";
+import { createExecutionContext, type ExecutionAttachment, type ExecutionContext } from "../../kernel/utils/paths.ts";
 import { awaitPreflight } from "../preflight.ts";
 import {
 	createTaskDirectoryState,

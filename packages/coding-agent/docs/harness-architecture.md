@@ -1,8 +1,8 @@
 # Harness architecture
 
 Pi Adaptative has one production harness. `AgentSession` is its public facade and composition root;
-the low-level agent loop and provider transports remain separate packages. The deleted
-`packages/agent` `AgentHarness` was a competing implementation and must not be restored.
+the low-level agent loop lives in `src/kernel/` and the provider transports in `packages/ai`. The
+deleted `AgentHarness` was a competing implementation and must not be restored.
 
 ## Package boundaries
 
@@ -14,14 +14,15 @@ coding-agent/AgentSession
   └─ child work coordination        WorkerDelegation, BackgroundLane, Reflection, managed-lane bridge
                  │
                  ▼
-agent                         ai
+src/kernel                    ai
 agent loop + session tree     model metadata + provider transports + wire-format repair
 ```
 
 Provider-specific request and response behavior belongs in `packages/ai`. Provider-neutral choices
 about which model, reasoning level, tools, resources, or lane to use belong in `packages/coding-agent`.
-`packages/agent` owns the reusable loop, session tree, retry primitives, and compaction mechanics; it
-does not own a second application harness.
+`src/kernel/` owns the reusable loop, session tree, retry primitives, and compaction mechanics; it
+does not own a second application harness, and it imports only itself, `packages/ai`, `packages/tui`
+and Node built-ins.
 
 ## Model execution contract
 

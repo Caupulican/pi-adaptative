@@ -4,7 +4,8 @@
  */
 
 import { Worker } from "node:worker_threads";
-import type { MemoryCapabilities, MemoryLifecycleContext, MemoryProvider } from "../memory-provider.ts";
+import type { MemoryProvider } from "../../extensions/types.ts";
+import type { MemoryCapabilities, MemoryLifecycleContext } from "../memory-provider.ts";
 import type { RecallHit } from "../transcript-index.ts";
 import {
 	isTranscriptRecallWorkerResponse,

@@ -1,3 +1,4 @@
+import type { Usage } from "@caupulican/pi-ai";
 import {
 	type BackgroundToolCallCompletion,
 	type BackgroundToolCallContext,
@@ -11,14 +12,13 @@ import {
 	retainedToolInvocation,
 	type ToolInvocationObservation,
 	type ToolInvocationReceipt,
-} from "@caupulican/pi-agent-core";
-import type { SessionManager } from "@caupulican/pi-agent-core/node";
+} from "../kernel/index.ts";
+import type { SessionManager } from "../kernel/node.ts";
 import {
 	ownDataValue,
 	retainedVerificationDetails,
 	type VerificationRecord,
-} from "@caupulican/pi-agent-core/verification-obligations";
-import type { Usage } from "@caupulican/pi-ai";
+} from "../kernel/verification-obligations.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import { formatArtifactNotice, packToolOutput } from "./context/tool-output-packer.ts";
 import { oneLine } from "./provider-tool-text.ts";

@@ -2,7 +2,14 @@ import { basename, dirname, extname } from "node:path";
 import { getBundledExtensionsDir } from "../config.ts";
 import { canonicalizePath } from "../utils/paths.ts";
 import { isResourcePathWithin } from "./resource-traversal.ts";
-import type { SettingsManager } from "./settings-manager.ts";
+import type { ResourceProfileKind } from "./settings/settings-schema.ts";
+
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+export interface ExtensionImportAuthoritySettingsSource {
+	getActiveResourceProfileNames(): string[];
+	isResourceAllowedByProfile(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
+	isResourceExplicitlyDisabled(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
+}
 
 export type ExtensionImportAuthority = "explicit" | "profile" | "default-on";
 
@@ -49,13 +56,13 @@ export function isWorkerAdmittedExtensionPath(
 	return grantedExtensionPaths.some((granted) => canonicalizePath(granted) === canonical);
 }
 
-export function hasProfileExtensionImportAuthority(settingsManager: SettingsManager): boolean {
+export function hasProfileExtensionImportAuthority(settingsManager: ExtensionImportAuthoritySettingsSource): boolean {
 	return settingsManager.getActiveResourceProfileNames().length > 0;
 }
 
 /** Single import-boundary policy shared by startup discovery, reconciliation, and live loading. */
 export function isExtensionPathAllowedForImport(
-	settingsManager: SettingsManager,
+	settingsManager: ExtensionImportAuthoritySettingsSource,
 	extensionPath: string,
 	authority: ExtensionImportAuthority,
 	baseDir = "",

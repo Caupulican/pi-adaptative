@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import type { ThinkingLevel } from "@caupulican/pi-agent-core";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import type { ThinkingLevel } from "../../kernel/index.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { ORCHESTRATION_THINKING_LEVELS } from "../orchestration/contracts.ts";
 import { ORCHESTRATION_THINKING_LEVEL_SCHEMA } from "../orchestration/thinking-level-schema.ts";
