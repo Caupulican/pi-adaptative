@@ -1,6 +1,6 @@
 {
 	"name": "@caupulican/pi-adaptative",
-	"version": "0.102.3",
+	"version": "0.103.0",
 	"private": true,
 	"description": "Reliability-first coding-agent harness with verified tool execution, recovery, and standalone releases",
 	"type": "module",
@@ -84,8 +84,8 @@
 		"eval:autonomy": "node --conditions=pi-source src/core/system-one/evals/autonomy-benchmark-cli.ts"
 	},
 	"dependencies": {
-		"@caupulican/pi-ai": "^0.102.3",
-		"@caupulican/pi-tui": "^0.102.3",
+		"@caupulican/pi-ai": "^0.103.0",
+		"@caupulican/pi-tui": "^0.103.0",
 		"@effect/platform": "0.97.1",
 		"@effect/platform-node": "0.108.1",
 		"@silvia-odwyer/photon-node": "0.3.4",
