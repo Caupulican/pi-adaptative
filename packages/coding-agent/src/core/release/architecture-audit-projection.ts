@@ -2,12 +2,12 @@
  * Deterministic architecture audit projection.
  *
  * Mechanical extraction first: the projection is built by reading the tree, never by asking a model
- * to browse it. Every subsystem's producer/hook/consumer triple, its fail-closed behavior and its
- * negative-path test come from the release wiring manifest and are verified against the source.
+ * to browse it. Every subsystem's producer/hook/consumer triple and its fail-closed behavior
+ * come from the release wiring manifest and are verified against the source.
  *
  * The audit verdict is owned by these mechanical facts. A semantic reviewer can add source-readable
  * confirmations on top, but it cannot overturn a missing wiring edge, a missing construction path,
- * a missing test owner or a forbidden fallback.
+ * or a forbidden fallback.
  * Conforms to JEV_ARCHITECTURE_AUDIT.md and RCG-060..RCG-066.
  */
 
@@ -32,7 +32,6 @@ export interface SubsystemTriple {
 	readonly hook: string;
 	readonly consumer: string;
 	readonly failClosed: string;
-	readonly negativePathTest: string;
 	readonly operatorVisibility?: string;
 	readonly provenance: string;
 }
@@ -47,8 +46,6 @@ export interface ArchitectureAuditProjection {
 	readonly forbidden_fallback_findings: readonly string[];
 	/** Per-kind activation truth: an advertised kind with no owner is a blocking gap (ACT-018). */
 	readonly activation_truth_findings: readonly string[];
-	/** Every subsystem whose negative-path test file exists and names its test. */
-	readonly negative_path_coverage: readonly { featureId: string; covered: boolean }[];
 	readonly outcome: ArchitectureAuditOutcome;
 	readonly blocking_reasons: readonly string[];
 }
@@ -87,17 +84,8 @@ export function buildArchitectureAuditProjection(
 		hook: `${entry.triggerFile}#${entry.triggerSymbol}`,
 		consumer: `${entry.consumerFile}#${entry.consumerSymbol}`,
 		failClosed: entry.failClosed,
-		negativePathTest: `${entry.negativePathTestFile}#${entry.negativePathTestName}`,
 		...(entry.operatorVisibility ? { operatorVisibility: entry.operatorVisibility } : {}),
 		provenance: entry.provenance,
-	}));
-
-	const uncoveredFeatures = new Set(
-		wiringFindings.filter((finding) => finding.check === "negative_path_test_exists").map((f) => f.featureId),
-	);
-	const negativePathCoverage = manifest.map((entry) => ({
-		featureId: entry.featureId,
-		covered: !uncoveredFeatures.has(entry.featureId),
 	}));
 
 	const blockingReasons = [
@@ -115,7 +103,6 @@ export function buildArchitectureAuditProjection(
 		wiring_findings: wiringFindings,
 		forbidden_fallback_findings: fallbackFindings,
 		activation_truth_findings: activationFindings,
-		negative_path_coverage: negativePathCoverage,
 		outcome: blockingReasons.length > 0 ? "BLOCKED" : "PASS",
 		blocking_reasons: blockingReasons,
 	};

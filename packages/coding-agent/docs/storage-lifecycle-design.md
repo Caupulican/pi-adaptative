@@ -182,13 +182,7 @@ the same-host baseline, and a repeatable improvement in the targeted metric. The
 acceptance targets, not measured gains. Keep per-worker budgets and concurrency under existing host
 settings, not new hard-coded worker limits.
 
-Existing focused starting gates (source development only):
-
-```sh
-node_modules/.bin/vitest run --root packages/coding-agent \
-  test/work-directory.test.ts test/agent-paths.test.ts \
-  test/orchestration-event-store.test.ts test/session-root-mailbox.test.ts --pool=forks
-```
+The work-directory, agent-paths, orchestration-event-store and session-root-mailbox tests were removed on 2026-10-04 and are rebuilt by area from git history.
 
 These tests cover existing owners, not the unimplemented preview or SQLite migration. Add failing
 regressions and negative controls for new behavior. Full-suite, native Windows fixture, and packaged

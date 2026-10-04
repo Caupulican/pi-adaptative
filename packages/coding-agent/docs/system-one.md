@@ -203,9 +203,6 @@ path-scoped request still receives model selection without widening its grant. P
 reuse and replay preserve the admitted settings without another question. Worker concurrency and
 independent-work requirements remain governed by their existing host admission policy.
 
-Pinned by the [route choice tests](../test/expert-routing/system-one-allocation.test.ts) and
-[native worker admission tests](../test/suite/worker-route-admission.test.ts).
-
 ## Explicit peer review
 
 The root model can request independent plan or delivery review with the native `peer` tool.
@@ -289,11 +286,6 @@ finding. Typed delivery rechecks obligations immediately before each external ef
 The journal bounds active findings to 32 and receipts to the latest 64 calls. Truncated or evicted
 receipts cannot establish resolution; gather fresh proof within that evidence window.
 
-Pinned by the [peer policy tests](../test/peer-review.test.ts),
-[native session integration tests](../test/suite/agent-session-peer.test.ts),
-[delivery and recovery regressions](../test/suite/mandatory-verification-delivery.test.ts) and
-[verification lifecycle tests](../test/system-one/verification-obligations.test.ts).
-
 ## The decision ledger
 
 `state/decision-ledger.sqlite` (one per agent directory, keyed by session id and working directory,
@@ -327,11 +319,7 @@ or finding resolution. Independent authorized work continues while evidence is g
 
 ## Verification
 
-Pinned by the [primary loop tests](../test/goal-session-primary-loop.test.ts), the [session objective
-runtime tests](../test/session-objective-runtime.test.ts), the [foreground control tests](../test/system-one-foreground-control.test.ts),
-the [worker control tests](../test/system-one-worker-control.test.ts) and the
-[ledger route tests](../test/ledger-route-checkpoints.test.ts); see `docs/doctrine.md`, section
-"System One".
+See `docs/doctrine.md`, section "System One", for the invariants; the tests that pinned them were removed on 2026-10-04 and are rebuilt by area.
 
 ## Where a judgment may stop work
 

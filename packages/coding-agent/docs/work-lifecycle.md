@@ -127,9 +127,7 @@ Codex approval handling is tool/operation scoped rather than a generic “commit
 
 ## Verification map
 
-- Prompt lifecycle and tool-surface gating: `packages/coding-agent/test/system-prompt-builder-tool-selection.test.ts`.
-- Stable compact base prompt: `packages/coding-agent/test/system-prompt.test.ts`.
-- Local commit and approval negative controls: `packages/coding-agent/test/autonomy-risk-assessment.test.ts`.
+- Prompt lifecycle, base prompt and approval negative controls: tests removed on 2026-10-04, rebuilt by area.
 - Existing goal/task/delegate behavior: the focused suites referenced by [Task steps](task-steps.md) and [Goal/Task-Steps/Subagent Fix Cycle](goal-task-subagent-cycle-2026-07-19.md).
 
 ## Documentation scope note

@@ -603,23 +603,7 @@ pi.registerProvider("my-provider", {
 
 ## Testing Your Implementation
 
-Test your provider against the same test suites used by built-in providers. Copy and adapt these test files from [packages/ai/test/](https://github.com/earendil-works/pi-mono/tree/main/packages/ai/test):
-
-| Test | Purpose |
-|------|---------|
-| `stream.test.ts` | Basic streaming, text output |
-| `tokens.test.ts` | Token counting and usage |
-| `abort.test.ts` | AbortSignal handling |
-| `empty.test.ts` | Empty/minimal responses |
-| `context-overflow.test.ts` | Context window limits |
-| `image-limits.test.ts` | Image input handling |
-| `unicode-surrogate.test.ts` | Unicode edge cases |
-| `tool-call-without-result.test.ts` | Tool call edge cases |
-| `image-tool-result.test.ts` | Images in tool results |
-| `total-tokens.test.ts` | Total token calculation |
-| `cross-provider-handoff.test.ts` | Context handoff between providers |
-
-Run tests with your provider/model pairs to verify compatibility.
+The provider test suites (`stream`, `tokens`, `abort`, `empty`, `context-overflow`, `image-limits`, `unicode-surrogate`, `tool-call-without-result`, `image-tool-result`, `total-tokens`, `cross-provider-handoff`) were removed on 2026-10-04 and are rebuilt by area from git history (`git log -- packages/ai/test`). Until then, verify a provider by streaming a text turn, a tool call, an abort and a context-overflow request against it.
 
 ## Config Reference
 

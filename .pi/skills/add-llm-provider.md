@@ -38,10 +38,7 @@ Create a provider file exporting:
 
 ## 5. Tests (`packages/ai/test/`)
 
-- Always add the provider to `stream.test.ts` with at least one representative model, even if it reuses an existing API impl such as `openai-completions`.
-- Add the provider to the broader matrix where applicable: `tokens.test.ts`, `abort.test.ts`, `empty.test.ts`, `context-overflow.test.ts`, `unicode-surrogate.test.ts`, `tool-call-without-result.test.ts`, `image-tool-result.test.ts`, `total-tokens.test.ts`, `cross-provider-handoff.test.ts`.
-- For `cross-provider-handoff.test.ts`, add at least one provider/model pair. If the provider exposes multiple model families (e.g. GPT and Claude), add at least one pair per family.
-- For non-standard auth, create a utility (e.g. `bedrock-utils.ts`) with credential detection.
+The `packages/ai` test suite was removed on 2026-10-04 and is rebuilt by area from git history (`git log -- packages/ai/test`). Do not add provider tests until the owner asks for that area to be rebuilt; verify the provider with `npm run check` and a live streamed turn when live runs are allowed.
 
 ## 6. Coding Agent (`packages/coding-agent/`)
 

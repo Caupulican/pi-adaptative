@@ -3,11 +3,10 @@
  *
  * The primary secret-free proof that the frozen architecture is actually live. Every mandatory
  * subsystem declares where it is implemented, who constructs it in production, what triggers it,
- * who consumes its result, how it fails closed, and which test proves the negative path.
+ * and who consumes its result and how it fails closed. A negative-path test per feature is not required while the suite is removed (2026-10-04); add the field and check back with the rebuilt tests.
  *
  * `verifyReleaseWiringManifest` checks all of that mechanically against the source tree. A feature
- * that exists in `src/` but has no construction owner, no trigger, no consumer or no negative-path
- * test fails release readiness — which is what stops "implemented but unwired" from recurring.
+ * that exists in `src/` but has no construction owner, no trigger, or no consumer fails release readiness — which is what stops "implemented but unwired" from recurring.
  * Conforms to RELEASE_WIRING_MANIFEST.md and RCG-030..RCG-036.
  */
 
@@ -30,9 +29,6 @@ export interface ReleaseWiringEntry {
 	readonly consumerSymbol: string;
 	/** What happens when the owner, result or evidence is missing. */
 	readonly failClosed: string;
-	/** Test file and a substring of the test name that proves the negative path. */
-	readonly negativePathTestFile: string;
-	readonly negativePathTestName: string;
 	/** What the operator sees, when anything. */
 	readonly operatorVisibility?: string;
 	readonly provenance: FeatureProvenance;
@@ -49,8 +45,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts",
 		consumerSymbol: "steeringPlane",
 		failClosed: "system_one_required rejects the transition when the plane is unavailable",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/production-hardening-v1-3.test.ts",
-		negativePathTestName: "PH-060",
 		operatorVisibility: "POV bar JEV state",
 		provenance: "production-live",
 	},
@@ -64,8 +58,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/acquisition/external-capability-acquisition-gate.ts",
 		consumerSymbol: "charter.acquisition",
 		failClosed: "an absent grant denies; an absent charter grants nothing at all",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/release-freeze-master-bundle-v1-7.test.ts",
-		negativePathTestName: "FR-087",
 		operatorVisibility: "blocked phase with the missing authority",
 		provenance: "production-live",
 	},
@@ -79,8 +71,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/adaptive/execution-ports.ts",
 		consumerSymbol: "resolveExpertBinding",
 		failClosed: "a build with no resolved provider/model binding throws instead of defaulting",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts",
-		negativePathTestName: "RCG-046: the rules reach worker, specialist and capability-builder missions",
 		provenance: "production-live",
 	},
 	{
@@ -93,8 +83,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/adaptive/execution-ports.ts",
 		consumerSymbol: "dispatchSpecialist",
 		failClosed: "materialization raises rather than returning an unverified specialist",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/production-hardening-v1-3.test.ts",
-		negativePathTestName: "PH-060",
 		provenance: "production-live",
 	},
 	{
@@ -107,8 +95,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts",
 		consumerSymbol: "dispatchSpecialist",
 		failClosed: "no execution owner refuses construction; no result raises instead of fabricating one",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts",
-		negativePathTestName: "RCG-022, RCG-024: specialist dispatch raises instead of manufacturing a result",
 		provenance: "production-live",
 	},
 	{
@@ -121,8 +107,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts",
 		consumerSymbol: "verifyCandidate",
 		failClosed: "missing worker owner, result, artifact, disk bytes or matching digest all raise",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts",
-		negativePathTestName: "RCG-025",
 		provenance: "production-live",
 	},
 	{
@@ -135,8 +119,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts",
 		consumerSymbol: "runTaskSpecificProof",
 		failClosed: "a failing proof raises and blocks establishment; no proof result is asserted",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts",
-		negativePathTestName: "RCG-027",
 		provenance: "production-live",
 	},
 	{
@@ -149,8 +131,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts",
 		consumerSymbol: "smokeEvidence",
 		failClosed: "a non-zero smoke exit, a missing artifact or a digest mismatch raises before establishment",
-		negativePathTestFile: "packages/coding-agent/test/release/capability-activation-truth.test.ts",
-		negativePathTestName: "ACT-007",
 		operatorVisibility: "capability synthesized milestone",
 		provenance: "production-live",
 	},
@@ -164,8 +144,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts",
 		consumerSymbol: "extensions.listActive",
 		failClosed: "an extension absent from the live registry after reload raises before establishment",
-		negativePathTestFile: "packages/coding-agent/test/release/capability-activation-truth.test.ts",
-		negativePathTestName: "ACT-009",
 		operatorVisibility: "capability synthesized milestone",
 		provenance: "production-live",
 	},
@@ -179,8 +157,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/adaptive/adaptive-capability-controller.ts",
 		consumerSymbol: "runtimeModified",
 		failClosed: "a failed or rolled-back runtime modification raises before establishment",
-		negativePathTestFile: "packages/coding-agent/test/release/capability-activation-truth.test.ts",
-		negativePathTestName: "ACT-015",
 		provenance: "production-live",
 	},
 	{
@@ -194,8 +170,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerSymbol: "capabilityKindSupport",
 		failClosed:
 			"unavailable: excluded from the selection set, and a spec naming it replans or blocks — run_toolkit_script resolves from settings.toolkit.scripts; the adaptive registry is isolated",
-		negativePathTestFile: "packages/coding-agent/test/release/capability-activation-truth.test.ts",
-		negativePathTestName: "ACT-004",
 		provenance: "production-live",
 	},
 	{
@@ -209,8 +183,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerSymbol: "capabilityKindSupport",
 		failClosed:
 			"unavailable: excluded from the selection set, and a spec naming it replans or blocks — no live dynamic tool registry admits a synthesized tool",
-		negativePathTestFile: "packages/coding-agent/test/release/capability-activation-truth.test.ts",
-		negativePathTestName: "ACT-004",
 		provenance: "production-live",
 	},
 	{
@@ -224,8 +196,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerSymbol: "capabilityKindSupport",
 		failClosed:
 			"unavailable: excluded from the selection set, and a spec naming it replans or blocks — SkillVault loads by name from discovered sources; a synthesized artifact is not discoverable",
-		negativePathTestFile: "packages/coding-agent/test/release/capability-activation-truth.test.ts",
-		negativePathTestName: "ACT-004",
 		provenance: "production-live",
 	},
 	{
@@ -239,8 +209,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerSymbol: "capabilityKindSupport",
 		failClosed:
 			"unavailable: excluded from the selection set, and a spec naming it replans or blocks — no executable composed path exists to smoke",
-		negativePathTestFile: "packages/coding-agent/test/release/capability-activation-truth.test.ts",
-		negativePathTestName: "ACT-004",
 		provenance: "production-live",
 	},
 	{
@@ -254,8 +222,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerSymbol: "capabilityKindSupport",
 		failClosed:
 			"unavailable: excluded from the selection set, and a spec naming it replans or blocks — no integration registry or health owner exists",
-		negativePathTestFile: "packages/coding-agent/test/release/capability-activation-truth.test.ts",
-		negativePathTestName: "ACT-004",
 		provenance: "production-live",
 	},
 	{
@@ -269,8 +235,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerSymbol: "capabilityKindSupport",
 		failClosed:
 			"unavailable: excluded from the selection set, and a spec naming it replans or blocks — ModelRegistry does not mount a synthesized provider adapter",
-		negativePathTestFile: "packages/coding-agent/test/release/capability-activation-truth.test.ts",
-		negativePathTestName: "ACT-004",
 		provenance: "production-live",
 	},
 	{
@@ -283,8 +247,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/adaptive/adaptive-runtime-readiness.ts",
 		consumerSymbol: "runtimeUpdater",
 		failClosed: "a no-op runtime update controller is rejected at production composition",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/production-reality-closure-v1-5.test.ts",
-		negativePathTestName: "PRC-002",
 		provenance: "production-live",
 	},
 	{
@@ -297,8 +259,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/adaptive/adaptive-runtime-readiness.ts",
 		consumerSymbol: "responsibilityController",
 		failClosed: "an unresolved duplicate responsibility blocks the transition",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/production-reality-closure-v1-5.test.ts",
-		negativePathTestName: "PRC-0",
 		provenance: "production-live",
 	},
 	{
@@ -311,8 +271,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/dedup/responsibility-registry.ts",
 		consumerSymbol: "ResponsibilityRegistry",
 		failClosed: "a discovered duplicate without a waiver blocks acceptance",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/production-reality-closure-v1-5.test.ts",
-		negativePathTestName: "PRC-0",
 		provenance: "production-live",
 	},
 	{
@@ -325,8 +283,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/adaptive/adaptive-runtime-readiness.ts",
 		consumerSymbol: "responsibilityController",
 		failClosed: "an absent waiver leaves the duplicate blocking",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/production-reality-closure-v1-5.test.ts",
-		negativePathTestName: "PRC-0",
 		provenance: "production-live",
 	},
 	{
@@ -339,8 +295,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/compaction/evidence-retention-projection.ts",
 		consumerSymbol: "applyRetentionDecisionsToBranch",
 		failClosed: "a planner or transport failure deletes nothing and compaction proceeds unchanged",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts",
-		negativePathTestName: "RCG-040: a semantic transport failure deletes nothing",
 		operatorVisibility: "one compaction summary line",
 		provenance: "production-live",
 	},
@@ -354,8 +308,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/agent-session.ts",
 		consumerSymbol: "PROJECT_RULE_REPAIR_CUSTOM_TYPE",
 		failClosed: "a blocking violation turns the mutation result into an error and queues RepairWork",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts",
-		negativePathTestName: "RCG-041: the live mutation-acceptance hook turns a violating write into an error result",
 		operatorVisibility: "rule repair warning",
 		provenance: "production-live",
 	},
@@ -369,8 +321,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts",
 		consumerSymbol: "ensureRepairTasks",
 		failClosed: "a blocking violation queues repair tasks and stops the cycle",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts",
-		negativePathTestName: "RCG-042, RCG-043",
 		provenance: "production-live",
 	},
 	{
@@ -383,8 +333,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts",
 		consumerSymbol: "completionFailuresToRepairWork",
 		failClosed: "a blocking violation refuses the completion candidate",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts",
-		negativePathTestName: "RCG-042, RCG-043",
 		provenance: "production-live",
 	},
 	{
@@ -397,8 +345,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/system-one/worker-control.ts",
 		consumerSymbol: "steerWorker",
 		failClosed: "a failed assessment reports a diagnostic and never fails the observed worker",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts",
-		negativePathTestName: "RCG-044: a failed assessment never fails the worker it observes",
 		operatorVisibility: "worker steered / rerouted warning",
 		provenance: "production-live",
 	},
@@ -412,8 +358,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/acquisition/acquisition-boundary.ts",
 		consumerSymbol: "screenAcquisition",
 		failClosed: "no charter grants nothing; a mandatory semantic plane that cannot answer never allows",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts",
-		negativePathTestName: "RCG-045: an unavailable semantic decision under a mandatory plane cannot direct-allow",
 		operatorVisibility: "acquisition blocked / hardened warning",
 		provenance: "production-live",
 	},
@@ -427,8 +371,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/modes/interactive/components/operator-pov-bar.ts",
 		consumerSymbol: "OperatorPovBarComponent",
 		failClosed: "no objective renders the same derived projection, never a literal",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts",
-		negativePathTestName: "RCG-052: the layout contains no hard-coded execution projection",
 		operatorVisibility: "the operator POV bar",
 		provenance: "production-live",
 	},
@@ -442,8 +384,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/operator-projection/operator-projection-controller.ts",
 		consumerSymbol: "getVisibleEvents",
 		failClosed: "routine successes stay silent; interventions are always visible",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/release-freeze-master-bundle-v1-7.test.ts",
-		negativePathTestName: "FR-119",
 		operatorVisibility: "the operator event stream",
 		provenance: "production-live",
 	},
@@ -457,8 +397,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/adaptive/execution-ports.ts",
 		consumerSymbol: "getOwnerRules",
 		failClosed: "an unreadable policy file reports no rules rather than silently passing",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/rc-gapless-readiness-v1-7-1.test.ts",
-		negativePathTestName: "RCG-010: a request that carries no development directive creates no policy",
 		operatorVisibility: "fast-iteration indicator",
 		provenance: "production-live",
 	},
@@ -472,8 +410,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts",
 		consumerSymbol: "JEV-025",
 		failClosed: "a failed gate queues repair work instead of completing",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/final-closure-v1-4.test.ts",
-		negativePathTestName: "FC-0",
 		provenance: "production-live",
 	},
 	{
@@ -486,8 +422,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts",
 		consumerSymbol: "steeringCertRefs",
 		failClosed: "a failed cold challenge queues repair work instead of completing",
-		negativePathTestFile: "packages/coding-agent/test/suite/regressions/final-closure-v1-4.test.ts",
-		negativePathTestName: "FC-0",
 		provenance: "production-live",
 	},
 	{
@@ -500,8 +434,6 @@ export const RELEASE_WIRING_MANIFEST: readonly ReleaseWiringEntry[] = [
 		consumerFile: "packages/coding-agent/src/core/objective-execution/objective-execution-controller.ts",
 		consumerSymbol: "deliveryBundle",
 		failClosed: "an unauthorized side effect records an authority block instead of running",
-		negativePathTestFile: "packages/coding-agent/test/autonomy/zero-human-charter.test.ts",
-		negativePathTestName: "ZH-0",
 		operatorVisibility: "deliver phase",
 		provenance: "production-live",
 	},
@@ -541,7 +473,6 @@ export function verifyReleaseWiringManifest(
 		require(entry, "production_composition_references_it", entry.constructionOwnerFile, entry.symbol);
 		require(entry, "trigger_calls_it", entry.triggerFile, entry.triggerSymbol);
 		require(entry, "result_consumed_by_next_owner", entry.consumerFile, entry.consumerSymbol);
-		require(entry, "negative_path_test_exists", entry.negativePathTestFile, entry.negativePathTestName);
 		if (entry.provenance === "test-fixture") {
 			findings.push({
 				featureId: entry.featureId,

@@ -1335,21 +1335,7 @@ Create a new provider file (for example `amazon-bedrock.ts`) that exports:
 
 #### 5. Tests (`test/`)
 
-Create or update test files to cover the new provider:
-
-- `stream.test.ts` - Basic streaming and tool use
-- `tokens.test.ts` - Token usage reporting
-- `abort.test.ts` - Request cancellation
-- `empty.test.ts` - Empty message handling
-- `context-overflow.test.ts` - Context limit errors
-- `image-limits.test.ts` - Image support (if applicable)
-- `unicode-surrogate.test.ts` - Unicode handling
-- `tool-call-without-result.test.ts` - Orphaned tool calls
-- `image-tool-result.test.ts` - Images in tool results
-- `total-tokens.test.ts` - Token counting accuracy
-- `cross-provider-handoff.test.ts` - Cross-provider context replay
-
-For `cross-provider-handoff.test.ts`, add at least one provider/model pair. If the provider exposes multiple model families (for example GPT and Claude), add at least one pair per family.
+The provider test suites were removed on 2026-10-04 and are rebuilt by area from git history (`git log -- packages/ai/test`); add provider coverage when the `packages/ai` suite returns.
 
 For providers with non-standard auth (AWS, Google Vertex), create a utility like `bedrock-utils.ts` with credential detection helpers.
 

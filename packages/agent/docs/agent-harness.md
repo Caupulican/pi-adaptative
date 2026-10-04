@@ -222,31 +222,11 @@ Auto-compaction and retry decision points are not implemented in `AgentHarness` 
 
 ## Test organization
 
-Harness tests should stay focused by area instead of growing one large catch-all file.
-
-Current structure:
-
-- `packages/agent/test/harness/agent-harness.test.ts`: core lifecycle and public API behavior.
-- `packages/agent/test/harness/agent-harness-stream.test.ts`: stream options and provider hook semantics.
-
-Preferred future structure:
-
-- `agent-harness-resources.test.ts`: resource snapshot/loading semantics.
-- `agent-harness-tools.test.ts`: tool registry getters, active-tool semantics, and update events.
-- `agent-harness-lifecycle.test.ts`: phase/save-point/settled/reentrancy behavior.
+The harness tests were removed on 2026-10-04 and are rebuilt by area from git history; keep them focused by area (core lifecycle, stream options and provider hooks, resources, tools, phase/save-point/settled/reentrancy) instead of one catch-all file.
 
 Use the `pi-ai` faux provider (`registerFauxProvider`, `fauxAssistantMessage`) for deterministic harness/provider tests. Faux response factories can inspect `StreamOptions`, invoke `options.onPayload`, and return scripted assistant messages without real provider APIs or network access.
 
-Historical `AgentHarness` coverage remains separate from the default package test run:
-
-```bash
-npm run test:harness
-npm run coverage:harness
-```
-
-`coverage:harness` runs `test/harness/**/*.test.ts` and reports coverage for `src/harness/**/*.ts` plus the non-harness runtime files it directly exercises (`src/agent.ts` and `src/agent-loop.ts`) into `coverage/harness`. Type-only dependencies such as `src/types.ts` are not included because they have no meaningful runtime coverage.
-
-The live verification harness is measured and hard-gated separately with `npm run coverage:verification-harness` at the repository root. It runs only the bounded verification, compaction, session, shell, background-task, and goal integration tests; V8 enforces per-file statement, branch, function, and line floors in Linux CI. Its source set and floors live in `packages/agent/vitest.verification-harness.config.ts` and `packages/coding-agent/vitest.verification-harness.config.ts`.
+The `test:harness`, `coverage:harness` and `coverage:verification-harness` scripts were removed with the suite on 2026-10-04.
 
 ## Implementation todo
 
@@ -449,7 +429,7 @@ Done:
 - `getApiKeyAndHeaders()` resolves credentials per provider request.
 - `before_provider_request`, `before_provider_payload`, and `after_provider_response` hooks are implemented.
 - Stream option patching supports explicit field deletion and ordered hook chaining.
-- `agent-harness-stream.test.ts` covers forwarding, auth merge, hook patching/deletion/chaining, payload hooks, and busy/save-point snapshot behavior.
+- Stream hook forwarding, auth merge, hook patching/deletion/chaining, payload hooks and busy/save-point snapshots were covered by tests removed on 2026-10-04 and rebuilt by area.
 
 Remaining:
 

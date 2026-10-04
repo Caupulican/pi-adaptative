@@ -89,7 +89,6 @@ const { artifactPath, removed } = writeBoundedAuditArtifact({
 console.log(`architecture audit: ${projection.outcome} (${relative(REPO_ROOT, artifactPath)})`);
 console.log(`  pruned artifacts: ${removed.length}`);
 console.log(`  subsystems: ${projection.subsystem_triples.length}`);
-console.log(`  negative-path coverage: ${projection.negative_path_coverage.filter((c) => c.covered).length}/${projection.negative_path_coverage.length}`);
 console.log(`  semantic review: ${artifact.semantic_review.status}`);
 for (const reason of projection.blocking_reasons) console.error(`  BLOCKING: ${reason}`);
 

@@ -30,4 +30,4 @@ The session's standard untrusted-content fence applies to the result. Artifact r
 
 ## Verification
 
-Focused coverage lives in `test/webfetch.test.ts`, `test/webfetch-native.test.ts`, `test/webfetch-registration.test.ts`, `test/artifact-retrieve-tool.test.ts`, and `test/suite/agent-session-artifact-lifecycle.test.ts`. The native contract also runs as a compiled Bun executable in binary CI. Tests use controlled transports and faux model responses, not paid provider calls.
+The webfetch tests were removed on 2026-10-04 with the suite and are rebuilt by area. The native contract also runs as a compiled Bun executable in binary CI. Tests use controlled transports and faux model responses, not paid provider calls.

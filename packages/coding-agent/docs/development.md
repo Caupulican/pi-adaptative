@@ -59,11 +59,10 @@ Never use `__dirname` directly for package assets.
 ## Testing
 
 ```bash
-./test.sh packages/coding-agent/test/specific.test.ts
 npm run check
 ```
 
-Run focused tests during development. The full non-e2e suite belongs to GitHub Actions; do not run the full suite locally as part of release preparation.
+The test suite was removed on 2026-10-04 and is rebuilt by area from git history; CI runs build and check. When tests return, run focused tests during development (`./test.sh <path>`) and leave the full suite to GitHub Actions.
 
 ## Project Structure
 
