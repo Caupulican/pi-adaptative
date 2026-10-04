@@ -1,3 +1,4 @@
+// @guards src/core/tool-capability-policy.ts
 import { describe, expect, it } from "vitest";
 import {
 	buildForegroundEnvelope,

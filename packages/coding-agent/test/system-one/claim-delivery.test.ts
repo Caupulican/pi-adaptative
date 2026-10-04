@@ -1,3 +1,4 @@
+// @guards src/core/agent-paths.ts src/core/agent-session.ts
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";

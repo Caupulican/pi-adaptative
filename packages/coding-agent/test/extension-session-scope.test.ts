@@ -1,3 +1,4 @@
+// @guards src/core/extensions/runner.ts src/core/extensions/wrapper.ts
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import {
