@@ -4,6 +4,7 @@ import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { compactToolResultDetailsForRetention } from "@caupulican/pi-agent-core/message-retention";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ownerFollowUpsDir } from "../../src/core/agent-paths.ts";
 import { enforceSessionEdgeOperation, type SessionEdgeDeps } from "../../src/core/agent-session-edge.ts";
 import {
 	AnswerClaimChecker,
@@ -438,7 +439,7 @@ describe("claims against deliveries", () => {
 			});
 			expect(result.authorized).toBe(false);
 			expect(confirm).not.toHaveBeenCalled();
-			const path = join(harness.tempDir, "follow-ups", `${harness.sessionManager.getSessionId()}.md`);
+			const path = join(ownerFollowUpsDir(harness.tempDir), `${harness.sessionManager.getSessionId()}.md`);
 			expect(readFileSync(path, "utf8")).toContain("publish the release");
 			expect(harness.eventsOfType("warning")).toEqual([]);
 		});

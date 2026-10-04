@@ -14,10 +14,12 @@ type RebindHarness = {
 			onExtensionsChanged(callback: () => void): () => void;
 			resumePendingHumanInput(): Promise<void>;
 			resumeSelfCompaction(): boolean;
+			takeRestoredQueuedInputNotice(): string | undefined;
 			settingsManager: { getClipboardImageDirectory(): undefined };
 			sessionManager: { isPersisted(): false };
 		};
 	};
+	autoLearnController: { reofferUnappliedProposals(): Promise<void> };
 	applyRuntimeSettings(): void;
 	bindCurrentSessionExtensions(): Promise<void>;
 	subscribeToAgent(): void;
@@ -44,10 +46,12 @@ function createModeHarness(): { mode: RebindHarness; fireExtensionsChanged: () =
 			},
 			resumePendingHumanInput: vi.fn(async () => {}),
 			resumeSelfCompaction: vi.fn(() => false),
+			takeRestoredQueuedInputNotice: vi.fn(() => undefined),
 			settingsManager: { getClipboardImageDirectory: () => undefined },
 			sessionManager: { isPersisted: () => false },
 		},
 	};
+	mode.autoLearnController = { reofferUnappliedProposals: vi.fn(async () => {}) };
 	mode.applyRuntimeSettings = vi.fn();
 	mode.bindCurrentSessionExtensions = vi.fn(async () => {});
 	mode.subscribeToAgent = vi.fn();

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync, symlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
 import { afterEach, describe, expect, it } from "vitest";
 import { WorkerWriteReservationStore } from "../../src/core/delegation/worker-write-reservation.ts";
@@ -516,7 +516,7 @@ describe("parallel-readiness boundary of the objective loop", () => {
 
 		it.each([
 			["the repository's parent", (workspace: string) => join(workspace, "..")],
-			["a machine root", () => "/"],
+			["a machine root", (workspace: string) => parse(workspace).root],
 		])("an unrelated typed writer scoped to %s is joined", async (_label, scopeOf) => {
 			const f = fixture();
 			f.startRunning("session:other", "session-task", {

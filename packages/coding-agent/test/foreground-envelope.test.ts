@@ -22,7 +22,7 @@ describe("buildForegroundEnvelope", () => {
 			["fetch", "network.http"],
 			["web_search", "network.http"],
 			["skill_audit", "skill.read"],
-			["skillify", "skill.write"],
+			["skillify", "skill.read"],
 			["extensionify", "source.write"],
 			["delegate", "workflow.delegate"],
 			["goal", "memory.mutate"],

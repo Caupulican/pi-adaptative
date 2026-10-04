@@ -109,7 +109,7 @@ describe("extension tool wrap session heal", () => {
 				};
 			},
 		};
-		const runner = { createContext: () => ({}) } as ExtensionRunner;
+		const runner = { createToolContext: () => ({}) } as unknown as ExtensionRunner;
 		const tool = wrapRegisteredTool(
 			{
 				definition,
