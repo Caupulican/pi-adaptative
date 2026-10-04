@@ -1,9 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HostStateStore } from "../src/core/models/host-state-store.ts";
 import { nodeFs } from "../src/core/util/faultable-fs.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const dirs: string[] = [];
 const stores: HostStateStore<string[]>[] = [];
@@ -14,7 +14,7 @@ afterEach(() => {
 });
 
 function fixture(maxPending = 64) {
-	const dir = mkdtempSync(join(tmpdir(), "pi-host-recovery-"));
+	const dir = tempDir("pi-host-recovery-");
 	dirs.push(dir);
 	const path = join(dir, "state.json");
 	const store = new HostStateStore<string[]>({

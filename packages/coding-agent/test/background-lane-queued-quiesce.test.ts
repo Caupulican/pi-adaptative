@@ -1,8 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
@@ -16,11 +14,12 @@ import {
 	createTestWorkerOrchestrationProfile,
 	saveTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const tempDirs: string[] = [];
 
 function createAgentDir(label: string): string {
-	const dir = mkdtempSync(join(tmpdir(), `pi-${label}-`));
+	const dir = tempDir(`pi-${label}-`);
 	tempDirs.push(dir);
 	return dir;
 }

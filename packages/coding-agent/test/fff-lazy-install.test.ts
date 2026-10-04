@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { arch, platform, tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
+import { arch, platform } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * Covers the lazy-install mechanism behind FFF native search (see
@@ -26,7 +26,7 @@ vi.mock("os", async (importOriginal) => {
 });
 
 async function withFreshManagedDir<T>(fn: () => Promise<T>): Promise<T> {
-	const tempAgentDir = mkdtempSync(join(tmpdir(), "pi-agent-fresh-"));
+	const tempAgentDir = tempDir("pi-agent-fresh-");
 	vi.resetModules();
 	const config = await import("../src/config.ts");
 	const envKey = config.ENV_AGENT_DIR;

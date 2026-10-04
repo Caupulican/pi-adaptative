@@ -1,5 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
@@ -8,6 +7,7 @@ import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts
 import { appendGoalStateSnapshot } from "../src/core/goals/session-goal-state.ts";
 import { CHAT_WORK_LIFECYCLE_SYSTEM_RULE, DELEGATION_DECISION_RULE } from "../src/core/provider-prompt-contracts.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 const MINIMAL_ACTIVE_TOOL_NAMES = [
 	"read",
@@ -141,7 +141,7 @@ describe("model capability auto-detection", () => {
 		// budget against a genuinely long, existing cwd rather than this machine's temp dir. The
 		// path is not stripped: the prompt must still print it.
 		const longCwd = join(
-			mkdtempSync(join(tmpdir(), "pi-minimal-long-checkout-")),
+			makeTempDir("pi-minimal-long-checkout-"),
 			"runner-work-pi-adaptative-release-candidate",
 			"pi-adaptative-release-candidate",
 			"packages",
@@ -343,7 +343,7 @@ describe("model capability auto-detection", () => {
 	});
 
 	it("keeps the native lean model session prompt within 11264 characters with a long working directory", async () => {
-		const longTempRoot = mkdtempSync(join(tmpdir(), "pi-windows-long-temp-root-runneradmin-appdata-local-temp-"));
+		const longTempRoot = makeTempDir("pi-windows-long-temp-root-runneradmin-appdata-local-temp-");
 		const prevTemp = process.env.TEMP;
 		const prevTmp = process.env.TMP;
 		const prevTmpdir = process.env.TMPDIR;

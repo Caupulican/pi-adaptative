@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -34,6 +33,7 @@ import {
 } from "../src/core/agent-paths.ts";
 import { getReloadCoordinationDir } from "../src/core/reload-blockers.ts";
 import { getWorkRoot as workDirectoryGetWorkRoot } from "../src/utils/work-directory.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const AGENT_DIR = "/agent";
 
@@ -134,7 +134,7 @@ describe("agent-paths SSOT accessors", () => {
 		expect(reloadCoordinationDir).toBe(getReloadCoordinationDir);
 		// getReloadCoordinationDir performs real I/O (acquires a work-run lease), so it needs a real,
 		// writable agentDir rather than the fake "/agent" the pure builders above use.
-		const realAgentDir = mkdtempSync(join(tmpdir(), "pi-agent-paths-test-"));
+		const realAgentDir = tempDir("pi-agent-paths-test-");
 		tempDirs.push(realAgentDir);
 		expect(reloadCoordinationDir(realAgentDir)).toBe(
 			join(getWorkRoot(realAgentDir), "coordination", "reload", "state"),

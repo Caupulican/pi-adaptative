@@ -1,16 +1,16 @@
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resourceDir } from "../src/core/agent-paths.ts";
 import { IcmProvider } from "../src/core/memory/providers/icm.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 describe("icm memory provider", () => {
 	let tempDir: string;
 	let provider: IcmProvider;
 
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-icm-memory-"));
+		tempDir = makeTempDir("pi-icm-memory-");
 		provider = new IcmProvider();
 	});
 

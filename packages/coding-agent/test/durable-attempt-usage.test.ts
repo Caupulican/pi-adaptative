@@ -1,6 +1,5 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { rmSync } from "node:fs";
+import { basename } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EMPTY_ATTEMPT_USAGE } from "../src/core/orchestration/attempt-usage.ts";
 import { toJsonObject } from "../src/core/orchestration/contracts.ts";
@@ -8,12 +7,13 @@ import { OrchestrationEventStore } from "../src/core/orchestration/event-store.t
 import { DurableTaskRuntime, reduceOrchestrationEvent } from "../src/core/orchestration/task-runtime.ts";
 import { projectionFromSnapshot } from "../src/core/orchestration/task-runtime-codecs.ts";
 import { type FaultableFs, nodeFs } from "../src/core/util/faultable-fs.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const directories: string[] = [];
 const tokens = (totalTokens: number) => ({ ...EMPTY_ATTEMPT_USAGE, inputTokens: totalTokens, totalTokens });
 
 function setup(maxTailEvents?: number, fs?: FaultableFs) {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-attempt-usage-"));
+	const agentDir = tempDir("pi-attempt-usage-");
 	directories.push(agentDir);
 	const clock = { ms: Date.parse("2026-09-18T00:00:00.000Z") };
 	const store = new OrchestrationEventStore({

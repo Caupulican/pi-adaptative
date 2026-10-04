@@ -1,11 +1,10 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { realpathSync, rmSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { executeBashWithOperations } from "../src/core/bash-executor.ts";
 import { createBashTool, createLocalBashOperations, setCommandSilenceMsForTests } from "../src/core/tools/bash.ts";
 import { getTextOutput } from "../src/core/tools/render-utils.ts";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 describe("bash-executor silence sentinel mapping", () => {
 	it("maps the raw silence:<secs> sentinel to the friendly message instead of leaking it", async () => {
@@ -33,7 +32,7 @@ describe("bash-executor silence sentinel mapping", () => {
 describe.skipIf(process.platform === "win32")("bash tool cwd reporting", () => {
 	it("ends a failed result with the exit line and the session-reported cwd after an in-session cd", async () => {
 		const sessionKey = `bash-cwd-report-${Math.random().toString(36).slice(2)}`;
-		const tempDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-bash-cwd-")));
+		const tempDir = realpathSync(makeTempDir("pi-bash-cwd-"));
 		const tool = createBashTool(process.cwd(), { sessionKey });
 		try {
 			await tool.execute("cd-call", { command: `cd '${tempDir}' && true` });
@@ -67,7 +66,7 @@ describe.skipIf(process.platform === "win32")("bash tool cwd reporting", () => {
 
 	it("reports the host cwd on a filtered git failure", async () => {
 		const sessionKey = `bash-cwd-fail-${Math.random().toString(36).slice(2)}`;
-		const tempDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-bash-git-cwd-")));
+		const tempDir = realpathSync(makeTempDir("pi-bash-git-cwd-"));
 		const tool = createBashTool(tempDir, { sessionKey });
 		try {
 			let caught: unknown;

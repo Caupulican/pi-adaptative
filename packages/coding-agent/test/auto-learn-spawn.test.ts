@@ -1,6 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { parseArgs } from "../src/cli/args.ts";
@@ -13,6 +12,7 @@ import {
 	pruneAutoLearnConversationHistory,
 } from "../src/modes/interactive/auto-learn-controller.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const tempDirs: string[] = [];
 
@@ -62,7 +62,7 @@ afterEach(async () => {
 });
 
 function createTempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-auto-learn-spawn-"));
+	const dir = tempDir("pi-auto-learn-spawn-");
 	tempDirs.push(dir);
 	return dir;
 }

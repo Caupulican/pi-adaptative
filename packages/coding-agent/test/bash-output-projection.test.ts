@@ -1,9 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type BashOperations, createBashTool } from "../src/core/tools/bash.ts";
 import { getTextOutput } from "../src/core/tools/render-utils.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cleanupDirectories: string[] = [];
 
@@ -32,7 +32,7 @@ function operationsFor(rawOutput: string, exitCode: number): BashOperations {
 
 describe("bash test-output projection", () => {
 	it("returns a compact result and an immediately readable exact-output path", async () => {
-		const outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-projection-"));
+		const outputDirectory = tempDir("pi-bash-projection-");
 		cleanupDirectories.push(outputDirectory);
 		const rawOutput = noisyTestOutput(false);
 		const tool = createBashTool(process.cwd(), {
@@ -52,7 +52,7 @@ describe("bash test-output projection", () => {
 	});
 
 	it("preserves a verification failure's diagnostics, original exit code, and metadata", async () => {
-		const outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-projection-"));
+		const outputDirectory = tempDir("pi-bash-projection-");
 		cleanupDirectories.push(outputDirectory);
 		const rawOutput = noisyTestOutput(true);
 		const tool = createBashTool(process.cwd(), {
@@ -75,7 +75,7 @@ describe("bash test-output projection", () => {
 	});
 
 	it("falls back to raw output if exact-output persistence fails", async () => {
-		const parentDirectory = mkdtempSync(join(tmpdir(), "pi-bash-projection-"));
+		const parentDirectory = tempDir("pi-bash-projection-");
 		cleanupDirectories.push(parentDirectory);
 		const rawOutput = noisyTestOutput(false);
 		const tool = createBashTool(process.cwd(), {
@@ -90,7 +90,7 @@ describe("bash test-output projection", () => {
 		expect(result.details?.fullOutputError).toBeDefined();
 	});
 	it("projects test output when a spawn hook only adjusts the environment (the live configuration)", async () => {
-		const outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-projection-hook-"));
+		const outputDirectory = tempDir("pi-bash-projection-hook-");
 		cleanupDirectories.push(outputDirectory);
 		const rawOutput = noisyTestOutput(true);
 		const tool = createBashTool(process.cwd(), {

@@ -3,12 +3,11 @@
  * output is persisted first, the model sees the shorter version plus one notice naming the raw path,
  * and the result's details carry the reduction so the census can price it.
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { type BashOperations, createBashTool } from "../src/core/tools/bash.ts";
 import { getTextOutput } from "../src/core/tools/render-utils.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cleanupDirectories: string[] = [];
 afterEach(() => {
@@ -34,7 +33,7 @@ const rgOutput = Array.from(
 
 describe("bash tool: search output reduction", () => {
 	it("reduces rg output to the grouped layout, persists the raw output and reports the reduction", async () => {
-		const outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-reduction-"));
+		const outputDirectory = tempDir("pi-bash-reduction-");
 		cleanupDirectories.push(outputDirectory);
 		const tool = createBashTool(process.cwd(), { operations: operationsFor(rgOutput), outputDirectory });
 		const result = await tool.execute("rg-reduced", { command: "rg -n needle packages/app/src" });
@@ -50,7 +49,7 @@ describe("bash tool: search output reduction", () => {
 	});
 
 	it("passes through output modes the reducer does not understand and explicit verbosity", async () => {
-		const outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-reduction-"));
+		const outputDirectory = tempDir("pi-bash-reduction-");
 		cleanupDirectories.push(outputDirectory);
 		const listing = "packages/app/src/a.ts\npackages/app/src/b.ts\n";
 		const tool = createBashTool(process.cwd(), { operations: operationsFor(listing), outputDirectory });
@@ -63,7 +62,7 @@ describe("bash tool: search output reduction", () => {
 	});
 
 	it("returns the raw output when the model asks for fullOutput or the operator turned reduction off", async () => {
-		const outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-reduction-"));
+		const outputDirectory = tempDir("pi-bash-reduction-");
 		cleanupDirectories.push(outputDirectory);
 		const tool = createBashTool(process.cwd(), { operations: operationsFor(rgOutput), outputDirectory });
 		const full = await tool.execute("rg-full", { command: "rg -n needle packages/app/src", fullOutput: true });
@@ -80,7 +79,7 @@ describe("bash tool: search output reduction", () => {
 	});
 
 	it("leaves a result alone when the reduction would not be materially smaller", async () => {
-		const outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-reduction-"));
+		const outputDirectory = tempDir("pi-bash-reduction-");
 		cleanupDirectories.push(outputDirectory);
 		const sparse = "a.ts:1:x\nb.ts:2:y\n";
 		const tool = createBashTool(process.cwd(), { operations: operationsFor(sparse), outputDirectory });
@@ -92,7 +91,7 @@ describe("bash tool: search output reduction", () => {
 
 describe("bash tool: generic output cleaning", () => {
 	it("cleans any command's output silently and collapses repeats with a persisted raw copy", async () => {
-		const outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-reduction-"));
+		const outputDirectory = tempDir("pi-bash-reduction-");
 		cleanupDirectories.push(outputDirectory);
 		const esc = String.fromCharCode(27);
 		const colored = `${Array.from({ length: 12 }, (_, index) => `${esc}[32mok${esc}[0m step ${index}   `).join("\n")}\n`;
@@ -118,7 +117,7 @@ describe("bash tool: generic output cleaning", () => {
 	});
 
 	it("applies a bundled rule and names it", async () => {
-		const outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-reduction-"));
+		const outputDirectory = tempDir("pi-bash-reduction-");
 		cleanupDirectories.push(outputDirectory);
 		const npm = `${Array.from({ length: 30 }, (_, index) => `npm warn deprecated pkg${index}@1.0.0: no longer supported`).join("\n")}\n\nadded 412 packages in 9s\n\nfound 0 vulnerabilities\n`;
 		const tool = createBashTool(process.cwd(), { operations: operationsFor(npm), outputDirectory });

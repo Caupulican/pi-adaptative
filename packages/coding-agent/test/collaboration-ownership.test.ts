@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readdirSync, readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { expect, it } from "vitest";
+import { tempDir } from "./temp-dir.ts";
 
 it("covers every collaboration production file at the pinned clone sensitivity without internal clones", () => {
 	const repositoryRoot = resolve(import.meta.dirname, "../../..");
@@ -17,7 +17,7 @@ it("covers every collaboration production file at the pinned clone sensitivity w
 		expect(Buffer.byteLength(content)).toBeLessThanOrEqual(2 * 1024 * 1024);
 		return lines >= config.minLines;
 	});
-	const root = mkdtempSync(join(tmpdir(), "pi-collaboration-clones-"));
+	const root = tempDir("pi-collaboration-clones-");
 	try {
 		const args = [
 			join(repositoryRoot, "node_modules/jscpd/run-jscpd.js"),

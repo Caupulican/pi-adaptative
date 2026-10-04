@@ -20,13 +20,13 @@
  * Windows, a directory symlink elsewhere - via the existing portable helper.
  */
 import type * as NodeFs from "node:fs";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { realpathSync, rmSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runCollaborationWorker } from "../src/cli/collaboration-worker.ts";
 import { createDirectoryLink } from "./helpers/filesystem-links.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const ports = vi.hoisted(() => ({
 	claim: vi.fn(),
@@ -128,7 +128,7 @@ afterEach(() => {
 
 /** A real jobs directory plus a real directory alias pointing at its parent. */
 async function aliasedJobsDirectory(): Promise<{ canonical: string; aliased: string; aliasRoot: string }> {
-	const base = mkdtempSync(join(tmpdir(), "pi-worker-watch-"));
+	const base = tempDir("pi-worker-watch-");
 	roots.push(base);
 	const target = join(base, "target");
 	const jobs = join(target, "jobs");
@@ -150,7 +150,7 @@ describe("collaboration worker report watcher path", () => {
 	});
 
 	it("negative control: an already-canonical state root is watched unchanged and closed once", async () => {
-		const base = mkdtempSync(join(tmpdir(), "pi-worker-watch-canonical-"));
+		const base = tempDir("pi-worker-watch-canonical-");
 		roots.push(base);
 		const root = realpathSync.native(base);
 		const jobs = join(root, "jobs");

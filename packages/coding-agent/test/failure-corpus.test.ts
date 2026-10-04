@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -7,11 +6,12 @@ import {
 	FailureCorpusRecorder,
 	redactSecrets,
 } from "../src/core/failure-corpus.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 const cleanups: string[] = [];
 
 function tempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-failure-corpus-"));
+	const dir = makeTempDir("pi-failure-corpus-");
 	cleanups.push(dir);
 	return dir;
 }

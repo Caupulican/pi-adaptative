@@ -1,7 +1,6 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import fsPromises from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { Type } from "typebox";
@@ -16,6 +15,7 @@ import {
 import { createNativeTaskDirectoryBackend } from "../src/core/tasks/native-task-directory-backend.ts";
 import { ToolGateController } from "../src/core/tool-gate-controller.ts";
 import { FILE_SYMLINK_TESTS_SUPPORTED } from "./helpers/filesystem-links.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const root = "/synthetic/project";
 const context = {
@@ -197,7 +197,7 @@ describe("backend path authority review regressions", () => {
 	it.skipIf(!FILE_SYMLINK_TESTS_SUPPORTED)(
 		"real native backend: shell must block a synthetic symlink into a dotenv file",
 		async () => {
-			const scratch = mkdtempSync(join(tmpdir(), "pi-review-alias-"));
+			const scratch = tempDir("pi-review-alias-");
 			try {
 				writeFileSync(join(scratch, ".env"), "SYNTHETIC_FIXTURE=not-a-secret\n");
 				symlinkSync(join(scratch, ".env"), join(scratch, "alias.txt"));
@@ -267,7 +267,7 @@ describe("backend path authority review regressions", () => {
 	it.skipIf(!FILE_SYMLINK_TESTS_SUPPORTED)(
 		"real native envelope wrapper must not follow a symlink into a denied directory",
 		async () => {
-			const scratch = mkdtempSync(join(tmpdir(), "pi-review-envelope-"));
+			const scratch = tempDir("pi-review-envelope-");
 			try {
 				mkdirSync(join(scratch, "private"));
 				writeFileSync(join(scratch, "private", "key.txt"), "synthetic\n");

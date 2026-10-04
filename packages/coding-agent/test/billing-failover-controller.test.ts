@@ -1,11 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { Agent } from "@caupulican/pi-agent-core";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { BillingFailoverController, ExhaustedProviderRegistry } from "../src/core/billing-failover-controller.ts";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const failed = model("codex-spark");
 const fallback = model("gpt-5.6-sol");
@@ -131,7 +130,7 @@ describe("BillingFailoverController", () => {
 	});
 
 	it("shares an expiring exhaustion with every registry on the same store directory", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-exhausted-"));
+		const dir = tempDir("pi-exhausted-");
 		try {
 			const first = new ExhaustedProviderRegistry(dir);
 			const second = new ExhaustedProviderRegistry(dir);

@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
@@ -11,6 +10,7 @@ import {
 	type GoalToolDetails,
 	type GoalToolInput,
 } from "../src/core/tools/goal.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const scratch: string[] = [];
 afterEach(() => {
@@ -18,7 +18,7 @@ afterEach(() => {
 });
 
 function fixture(overrides: Partial<GoalToolDependencies> = {}) {
-	const root = mkdtempSync(join(tmpdir(), "pi-goal-file-directories-"));
+	const root = tempDir("pi-goal-file-directories-");
 	scratch.push(root);
 	const projects = [join(root, "first 日本語"), join(root, "second project")];
 	for (const project of projects) mkdirSync(project);

@@ -7,8 +7,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +15,7 @@ import { ENV_AGENT_DIR } from "../src/config.ts";
 import { getContextStoreDir } from "../src/core/context/context-store-retention.ts";
 import { createSqlitePathAliasStore } from "../src/core/context/sqlite-runtime-index.ts";
 import { exportSessionToHtml } from "../src/core/export-html/index.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 const USAGE = {
 	input: 1,
@@ -86,7 +86,7 @@ async function withAgentDir<T>(agentDir: string, fn: () => Promise<T>): Promise<
 let tempDir: string;
 
 beforeEach(() => {
-	tempDir = mkdtempSync(join(tmpdir(), "pi-export-html-alias-"));
+	tempDir = makeTempDir("pi-export-html-alias-");
 });
 
 afterEach(() => {
@@ -150,8 +150,8 @@ describe("HTML export path-alias expansion", () => {
 		// Simulate the divergence directly: the process-global default points at wrongAgentDir, while
 		// the session's real agent dir (what SessionAnalytics.exportToHtml would pass as
 		// ExportOptions.agentDir) is realAgentDir.
-		const realAgentDir = mkdtempSync(join(tmpdir(), "pi-export-html-alias-real-"));
-		const wrongAgentDir = mkdtempSync(join(tmpdir(), "pi-export-html-alias-wrong-"));
+		const realAgentDir = makeTempDir("pi-export-html-alias-real-");
+		const wrongAgentDir = makeTempDir("pi-export-html-alias-wrong-");
 		try {
 			await withAgentDir(wrongAgentDir, async () => {
 				const session = SessionManager.create(tempDir, realAgentDir, tempDir);

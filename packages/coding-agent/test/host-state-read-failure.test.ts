@@ -1,10 +1,10 @@
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HostStateStore } from "../src/core/models/host-state-store.ts";
 import { nodeFs } from "../src/core/util/faultable-fs.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const dirs: string[] = [];
 const stores: HostStateStore<string[]>[] = [];
@@ -18,7 +18,7 @@ afterEach(() => {
 });
 
 function fixture(writeBehind = false, readOnly = false) {
-	const dir = fs.mkdtempSync(join(tmpdir(), "pi-host-read-failure-"));
+	const dir = tempDir("pi-host-read-failure-");
 	dirs.push(dir);
 	const path = join(dir, "state.json");
 	const store = new HostStateStore<string[]>({

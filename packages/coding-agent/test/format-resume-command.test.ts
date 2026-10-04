@@ -1,10 +1,10 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it } from "vitest";
 import { APP_NAME } from "../src/config.ts";
 import { formatResumeCommand } from "../src/modes/interactive/interactive-mode.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const tempDirs: string[] = [];
 const originalStdoutIsTTY = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
@@ -26,7 +26,7 @@ function setStdoutIsTTY(value: boolean): void {
 }
 
 function createTempFile(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-format-resume-command-"));
+	const dir = tempDir("pi-format-resume-command-");
 	tempDirs.push(dir);
 	const file = join(dir, "session.jsonl");
 	writeFileSync(file, "\n");

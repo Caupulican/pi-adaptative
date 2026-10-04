@@ -1,10 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { latestUserPromptText } from "../src/core/context/message-text.ts";
 import { ContextPipeline, type ContextPipelineDeps } from "../src/core/context-pipeline.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const tempDirs: string[] = [];
 
@@ -30,7 +29,7 @@ function toolResultEntry(id: string, parentId: string | null, toolCallId: string
 }
 
 function createPipeline(sessionManager: SessionManager): ContextPipeline {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-context-entry-lookup-"));
+	const agentDir = tempDir("pi-context-entry-lookup-");
 	tempDirs.push(agentDir);
 	return new ContextPipeline({
 		getTurnIndex: () => 1,

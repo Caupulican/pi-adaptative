@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { Type } from "typebox";
@@ -17,6 +16,7 @@ import {
 	fallbackGateOutcome,
 } from "../src/core/autonomy/gates.ts";
 import { resolveProfileToolCapabilities } from "../src/core/tool-capability-policy.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 describe("Autonomy Gates", () => {
 	let tempDir: string;
@@ -24,7 +24,7 @@ describe("Autonomy Gates", () => {
 	let outsideRoot: string;
 
 	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-autonomy-gates-test-"));
+		tempDir = makeTempDir("pi-autonomy-gates-test-");
 		allowedRoot = path.join(tempDir, "allowed");
 		outsideRoot = path.join(tempDir, "outside");
 

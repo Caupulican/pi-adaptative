@@ -5,12 +5,12 @@
  * These tests drive the real bash tool against a real repository.
  */
 import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createBashTool } from "../src/core/tools/bash.ts";
 import { getTextOutput } from "../src/core/tools/render-utils.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const isWindows = process.platform === "win32";
 
@@ -19,8 +19,8 @@ describe.skipIf(isWindows)("bash tool: git filter in the live configuration", ()
 	let outputDirectory: string;
 
 	beforeEach(() => {
-		repoDir = mkdtempSync(join(tmpdir(), "pi-git-filter-live-"));
-		outputDirectory = mkdtempSync(join(tmpdir(), "pi-git-filter-live-out-"));
+		repoDir = tempDir("pi-git-filter-live-");
+		outputDirectory = tempDir("pi-git-filter-live-out-");
 		execSync("git init -q", { cwd: repoDir });
 		execSync("git config user.email test@example.com", { cwd: repoDir });
 		execSync("git config user.name Test", { cwd: repoDir });

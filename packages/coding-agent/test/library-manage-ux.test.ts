@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
@@ -14,6 +13,7 @@ import {
 } from "../src/modes/interactive/components/profile-resource-editor.ts";
 import { SettingsSelectorComponent } from "../src/modes/interactive/components/settings-selector.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 beforeAll(() => {
 	initTheme("dark");
@@ -269,7 +269,7 @@ describe("Library Manage UX - Increment 2", () => {
 		});
 
 		it("should resolve extension dir index.ts/js or package.json entry", () => {
-			const tempDir = mkdtempSync(join(tmpdir(), "pi-test-ext-"));
+			const tempDir = makeTempDir("pi-test-ext-");
 			try {
 				// Case 1: index.ts exists
 				const extTsDir = join(tempDir, "ext-ts");

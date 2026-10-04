@@ -1,5 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -9,11 +8,12 @@ import {
 	pruneContextStores,
 } from "../src/core/context/context-store-retention.ts";
 import { acquireWorkRun } from "../src/utils/work-directory.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 const tempDirs: string[] = [];
 
 function tempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-context-retention-"));
+	const dir = makeTempDir("pi-context-retention-");
 	tempDirs.push(dir);
 	return dir;
 }

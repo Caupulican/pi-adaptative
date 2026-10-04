@@ -1,10 +1,10 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import { configBackupsDir, directoryProfilesDir, managedMemoryStateFile, stateFile } from "../src/core/agent-paths.ts";
 import { migrateAgentDirLayout, pruneEmptySessionNamespaces, runMigrations } from "../src/migrations.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const originalAgentDir = process.env[ENV_AGENT_DIR];
 
@@ -18,7 +18,7 @@ describe("migrateAgentDirLayout", () => {
 	});
 
 	function createAgentDir(): string {
-		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-dir-layout-migration-test-"));
+		const agentDir = tempDir("pi-agent-dir-layout-migration-test-");
 		tempDirs.push(agentDir);
 		return agentDir;
 	}
@@ -263,7 +263,7 @@ describe("runMigrations wires migrateAgentDirLayout in before any store read", (
 	});
 
 	it("relocates trust.json as part of the normal startup migration pass", () => {
-		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-dir-layout-migration-runmigrations-"));
+		const agentDir = tempDir("pi-agent-dir-layout-migration-runmigrations-");
 		tempDirs.push(agentDir);
 		fs.writeFileSync(path.join(agentDir, "trust.json"), `${JSON.stringify({ "/proj": true })}\n`, "utf-8");
 		process.env[ENV_AGENT_DIR] = agentDir;

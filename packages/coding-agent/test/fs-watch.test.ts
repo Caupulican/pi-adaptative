@@ -1,8 +1,9 @@
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { tempDir } from "./temp-dir.ts";
 
 const { watchSpy } = vi.hoisted(() => ({
 	watchSpy: vi.fn((_path: string, _listener: unknown) => {
@@ -28,7 +29,7 @@ afterEach(() => {
 
 describe.skipIf(process.platform === "win32")("canonicalizeWatchDir", () => {
 	it("resolves a symlinked directory to its realpath", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-fs-watch-canon-"));
+		const dir = tempDir("pi-fs-watch-canon-");
 		cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
 		const realDir = join(dir, "real");
 		mkdirSync(realDir, { recursive: true });
@@ -47,7 +48,7 @@ describe.skipIf(process.platform === "win32")("canonicalizeWatchDir", () => {
 
 describe.skipIf(process.platform === "win32")("watchWithErrorHandler", () => {
 	it("passes fs.watch the realpath of the intended dir, not a symlinked alias", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-fs-watch-target-"));
+		const dir = tempDir("pi-fs-watch-target-");
 		cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
 		const realDir = join(dir, "real");
 		mkdirSync(realDir, { recursive: true });

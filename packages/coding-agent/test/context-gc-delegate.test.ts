@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { applyContextGc, getContextGcSettings } from "../src/core/context-gc.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function delegateResult(toolCallId: string, text: string): ToolResultMessage {
 	return {
@@ -28,7 +28,7 @@ function messageText(message: AgentMessage): string {
 
 describe("delegate context GC", () => {
 	it("includes delegate in both built-in context-GC defaults", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-context-gc-delegate-settings-"));
+		const dir = tempDir("pi-context-gc-delegate-settings-");
 		const agentDir = join(dir, "agent");
 		const projectDir = join(dir, "project");
 		mkdirSync(agentDir, { recursive: true });
@@ -43,7 +43,7 @@ describe("delegate context GC", () => {
 	});
 
 	it("packs only stale delegate output and preserves its exact retrievable payload", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-context-gc-delegate-"));
+		const dir = tempDir("pi-context-gc-delegate-");
 		const staleText = `STALE DELEGATE\n${"old worker evidence ".repeat(120)}`;
 		const recentText = `RECENT DELEGATE\n${"current worker evidence ".repeat(120)}`;
 		const stale = delegateResult("delegate-old", staleText);

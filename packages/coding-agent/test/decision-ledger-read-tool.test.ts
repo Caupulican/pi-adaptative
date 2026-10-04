@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { getDefaultActiveToolNames } from "../src/core/default-tool-surface.ts";
@@ -66,7 +65,7 @@ describe("decision_ledger_read", () => {
 	});
 
 	it("lists recorded sessions of a directory and replays a session's stages and evaluations from the ledger", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-ledger-tool-"));
+		const dir = tempDir("pi-ledger-tool-");
 		dirs.push(dir);
 		const ledger = new DecisionLedgerStore({ databasePath: join(dir, "state", "decision-ledger.sqlite") });
 		const cwd = "/work/project";

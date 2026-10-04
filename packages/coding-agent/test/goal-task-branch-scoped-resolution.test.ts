@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { Agent } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel } from "@caupulican/pi-ai";
@@ -18,6 +16,7 @@ import { appendEvidenceBundleSnapshot } from "../src/core/research/session-evide
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { appendTaskStepsStateSnapshot, getLatestTaskStepsStateSnapshot } from "../src/core/tasks/session-task-state.ts";
 import { addTaskStep, createTaskStepsState } from "../src/core/tasks/task-state.ts";
+import { tempDir } from "./temp-dir.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 function userMsg(text: string) {
@@ -31,7 +30,7 @@ function userMsg(text: string) {
  */
 describe("branch-scoped goal/task state resolution", () => {
 	it("AgentSession operational snapshots stay branch-scoped while diagnostics retain session history", () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-branch-snapshots-"));
+		const agentDir = tempDir("pi-branch-snapshots-");
 		const sessionManager = SessionManager.inMemory();
 		const model = getModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Missing test model");

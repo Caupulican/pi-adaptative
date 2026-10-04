@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createBashTool } from "../src/core/tools/bash.ts";
@@ -10,9 +9,10 @@ import {
 	createWindowsShellEngineOperations,
 	disposeWindowsShellEngineSession,
 } from "../src/core/tools/windows-shell-engine.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function makeRoot(): string {
-	return realpathSync.native(mkdtempSync(join(tmpdir(), "pi-bash-lanes-")));
+	return realpathSync.native(tempDir("pi-bash-lanes-"));
 }
 
 function text(result: { content: Array<{ type: string; text?: string }> }): string {

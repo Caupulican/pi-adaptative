@@ -1,5 +1,4 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { fauxAssistantMessage, registerFauxProvider, type SimpleStreamOptions } from "@caupulican/pi-ai";
@@ -9,6 +8,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { tempDir } from "./temp-dir.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 const originalAwsProfile = process.env.AWS_PROFILE;
@@ -49,7 +49,7 @@ describe("Bedrock SDK scope integration", () => {
 	it("binds us-east-2 before service-layer model resolution", async () => {
 		delete process.env.AWS_PROFILE;
 		delete process.env.AWS_REGION;
-		const cwd = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-bedrock-services-"));
+		const cwd = tempDir("pi-bedrock-services-");
 		try {
 			const services = await createAgentSessionServices({
 				cwd,

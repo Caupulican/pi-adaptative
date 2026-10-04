@@ -1,10 +1,10 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import { defaultImagePasteKeys, KeybindingsManager } from "../src/core/keybindings.ts";
 import { runMigrations } from "../src/migrations.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("keybindings migration", () => {
 	const tempDirs: string[] = [];
@@ -16,7 +16,7 @@ describe("keybindings migration", () => {
 	});
 
 	function createAgentDir(config: Record<string, unknown>): string {
-		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-keybindings-test-"));
+		const agentDir = tempDir("pi-keybindings-test-");
 		tempDirs.push(agentDir);
 		fs.writeFileSync(path.join(agentDir, "keybindings.json"), `${JSON.stringify(config, null, 2)}\n`, "utf-8");
 		return agentDir;

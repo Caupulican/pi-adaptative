@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -25,6 +24,7 @@ import {
 	createTestWorkerOrchestrationProfile,
 	saveTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 function resultFor(
@@ -452,7 +452,7 @@ describe("worker terminal handoffs", () => {
 		// Isolated here by materializing the controller's OWN lifecycle (a real construction-time
 		// sweep, but over an EMPTY ledger, so it finds nothing) BEFORE the task is ever prepared, so
 		// the only thing left that can create the notification during this test is the flush itself.
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-background-lane-restart-replay-"));
+		const agentDir = tempDir("pi-background-lane-restart-replay-");
 		try {
 			const sessionId = "session-restart-replay";
 			let resolveHandoff!: () => void;
@@ -812,7 +812,7 @@ describe("quiesce registry", () => {
 	it.each(["existing", "missing"])(
 		"keeps the quiesce registry empty after a throwing worker with a %s directory",
 		async (directory) => {
-			const agentDir = mkdtempSync(join(tmpdir(), "pi-test-quiesce-worker-throw-"));
+			const agentDir = tempDir("pi-test-quiesce-worker-throw-");
 			const cwd = directory === "existing" ? agentDir : join(agentDir, "missing");
 			const model = { provider: "test", id: "test-model", contextWindow: 128_000 };
 			const settingsManager = SettingsManager.inMemory({

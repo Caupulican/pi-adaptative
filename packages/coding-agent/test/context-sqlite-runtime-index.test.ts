@@ -1,5 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -17,6 +16,7 @@ import {
 	type SqliteMemoryIndexStore,
 } from "../src/core/context/sqlite-runtime-index.ts";
 import { CONTEXT_STORAGE_TABLE_AUTHORITY } from "../src/core/context/storage-authority.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 interface ClosableStore {
 	close(): void;
@@ -76,7 +76,7 @@ describe("SQLite runtime index stores", () => {
 	let stores: ClosableStore[];
 
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-sqlite-runtime-index-"));
+		tempDir = makeTempDir("pi-sqlite-runtime-index-");
 		databasePath = join(tempDir, "nested", "context.sqlite");
 		stores = [];
 	});

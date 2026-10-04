@@ -1,11 +1,11 @@
-import { mkdtempSync, rmSync, unlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { applyContextGc } from "../src/core/context-gc.ts";
 import { createArtifactRetrieveTool } from "../src/core/tools/artifact-retrieve.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * A context-GC packed stub names its original as `artifact_retrieve context:<key>`; the tool resolves
@@ -18,7 +18,7 @@ afterEach(() => {
 });
 
 function gcDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-gc-retrieve-"));
+	const dir = tempDir("pi-gc-retrieve-");
 	dirs.push(dir);
 	return dir;
 }

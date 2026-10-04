@@ -17,13 +17,13 @@
  *   proving moduleCache:false's isolation guarantee survives the fsCache change
  */
 
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import { createEventBus } from "../src/core/event-bus.ts";
 import { createExtensionRuntime, loadExtension } from "../src/core/extensions/loader.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("Extension loader transform cache", () => {
 	let cwdDir: string;
@@ -32,8 +32,8 @@ describe("Extension loader transform cache", () => {
 	let previousAgentDirEnv: string | undefined;
 
 	beforeEach(() => {
-		cwdDir = mkdtempSync(join(tmpdir(), "pi-ext-transform-cache-cwd-"));
-		agentDir = mkdtempSync(join(tmpdir(), "pi-ext-transform-cache-agentdir-"));
+		cwdDir = tempDir("pi-ext-transform-cache-cwd-");
+		agentDir = tempDir("pi-ext-transform-cache-agentdir-");
 		cacheDir = join(agentDir, "cache", "jiti-transforms");
 		previousAgentDirEnv = process.env[ENV_AGENT_DIR];
 		process.env[ENV_AGENT_DIR] = agentDir;

@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import type { VerificationRecord } from "@caupulican/pi-agent-core/verification-obligations";
@@ -24,12 +23,13 @@ import {
 	type GoalToolDetails,
 	type GoalToolInput,
 } from "../src/core/tools/goal.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 const ctx = undefined as unknown as ExtensionContext;
 
 const dirs: string[] = [];
 function tempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-goal-evidence-"));
+	const dir = makeTempDir("pi-goal-evidence-");
 	dirs.push(dir);
 	return dir;
 }

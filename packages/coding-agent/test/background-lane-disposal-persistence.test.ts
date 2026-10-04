@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +14,7 @@ import {
 	createTestWorkerOrchestrationProfile,
 	saveTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 function makeTrackedSessionManager(): {
@@ -44,7 +43,7 @@ describe("background lane disposal persistence", () => {
 	});
 
 	it("suspends a running agent for resume, preserving changed files without terminal parent-session writes", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-test-disposal-persistence-"));
+		const agentDir = tempDir("pi-test-disposal-persistence-");
 		const model = { provider: "test", id: "test-model", contextWindow: 128_000 };
 		const settingsManager = SettingsManager.inMemory({
 			workerDelegation: {
@@ -170,7 +169,7 @@ describe("background lane disposal persistence", () => {
 	});
 
 	it("persists a durable canceled lane record for a queued (never-started) worker, with no fabricated worker-result (no ledger exists for a lane that never ran)", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-test-disposal-queued-"));
+		const agentDir = tempDir("pi-test-disposal-queued-");
 		const model = {
 			provider: "ollama",
 			id: "local-model",

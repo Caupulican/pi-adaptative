@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { defaultFffSearchBackend } from "../src/core/tools/fff-search-backend.ts";
@@ -7,6 +6,7 @@ import { createFindToolDefinition } from "../src/core/tools/find.ts";
 import { createGrepToolDefinition } from "../src/core/tools/grep.ts";
 import { createSearchRouter } from "../src/core/tools/search-router.ts";
 import { getToolPath, loadAvailableFffNodePackage } from "../src/utils/tools-manager.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * Parity tests: prove the FFF search backend returns the SAME results as the
@@ -102,7 +102,7 @@ async function runGrep(root: string, args: Record<string, unknown>, useFff: bool
  * still exercises FFF instead of comparing the fallback with itself.
  */
 function buildParityFixture(): string {
-	const root = mkdtempSync(join(tmpdir(), "pi-fff-parity-"));
+	const root = tempDir("pi-fff-parity-");
 	for (let d = 0; d < 6; d++) {
 		const dir = join(root, "src", `module${d}`);
 		mkdirSync(dir, { recursive: true });

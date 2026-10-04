@@ -1,11 +1,11 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	createFileStoreMemoryProvider,
 	PI_FILE_STORE_MEMORY_PROVIDER_ID,
 } from "../src/core/context/file-store-memory-provider.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 describe("file-store context memory provider", () => {
 	let tempDir: string;
@@ -13,7 +13,7 @@ describe("file-store context memory provider", () => {
 	let userFilePath: string;
 
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-file-store-memory-"));
+		tempDir = makeTempDir("pi-file-store-memory-");
 		memoryFilePath = join(tempDir, "MEMORY.md");
 		userFilePath = join(tempDir, "USER.md");
 	});
@@ -101,7 +101,7 @@ describe("file-store context memory provider", () => {
 
 describe("file-store context memory provider project source", () => {
 	it("searches the project's MEMORY.md with project scope", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-file-store-project-"));
+		const dir = makeTempDir("pi-file-store-project-");
 		try {
 			writeFileSync(join(dir, "MEMORY.md"), "General: prefer explicit git adds\n");
 			writeFileSync(join(dir, "USER.md"), "");

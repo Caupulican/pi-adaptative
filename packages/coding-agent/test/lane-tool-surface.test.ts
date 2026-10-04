@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { AgentContext, AgentTool, ExecutionContext } from "@caupulican/pi-agent-core";
 import {
@@ -24,6 +23,7 @@ import type { NormalizedProfile } from "../src/core/profile-registry.ts";
 import type { ResourceProfileSettings } from "../src/core/settings-manager.ts";
 import { FileMutationIntentController } from "../src/core/tools/file-mutation-intent.ts";
 import { acquirePersistentShellSession, disposePersistentShellSession } from "../src/core/tools/shell-session.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function profile(resources: ResourceProfileSettings): NormalizedProfile {
 	return { name: "lane", resources, source: "inline" };
@@ -41,8 +41,8 @@ describe("classified lane tool surface", () => {
 	let outside: string;
 
 	beforeEach(() => {
-		cwd = mkdtempSync(path.join(tmpdir(), "pi-lane-tools-"));
-		outside = mkdtempSync(path.join(tmpdir(), "pi-lane-tools-outside-"));
+		cwd = tempDir("pi-lane-tools-");
+		outside = tempDir("pi-lane-tools-outside-");
 		mkdirSync(path.join(cwd, "src"), { recursive: true });
 	});
 

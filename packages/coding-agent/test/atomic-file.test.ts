@@ -1,6 +1,5 @@
 import * as fs from "node:fs";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -11,6 +10,7 @@ import {
 	writeFileAtomic,
 	writeFileAtomicSync,
 } from "../src/core/util/atomic-file.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
 
 // `renameSync` is a named export consumed directly by atomic-file.ts (`import { renameSync } from
@@ -30,7 +30,7 @@ vi.mock("node:fs", async (importOriginal) => {
 
 const dirs: string[] = [];
 function tempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-atomic-file-"));
+	const dir = makeTempDir("pi-atomic-file-");
 	dirs.push(dir);
 	return dir;
 }

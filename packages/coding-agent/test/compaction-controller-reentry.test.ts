@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { Agent, AgentMessage } from "@caupulican/pi-agent-core";
 import { type CompactionPreparation, type CompactionResult, SessionManager } from "@caupulican/pi-agent-core/node";
 import {
@@ -22,6 +20,7 @@ import {
 import type { ExtensionRunner } from "../src/core/extensions/index.ts";
 import type { FailureCorpusRecorder } from "../src/core/failure-corpus.ts";
 import type { SettingsManager } from "../src/core/settings-manager.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function createModel(): Model<"openai-completions"> {
 	return {
@@ -275,7 +274,7 @@ describe("CompactionController auto-compaction re-entry", () => {
 	});
 
 	it("adds a durable transcript pointer to an applied session-replacement checkpoint", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-session-replacement-pointer-"));
+		const dir = tempDir("pi-session-replacement-pointer-");
 		try {
 			const sessionManager = SessionManager.create(dir, dir, dir);
 			const subscriptionModel: Model<"openai-responses"> = {

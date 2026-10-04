@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyGoalEvent, createGoalState, type GoalState } from "../src/core/goals/goal-state.ts";
 import { ORCHESTRATION_SCHEMA_VERSION, type OrchestrationProfile } from "../src/core/orchestration/contracts.ts";
@@ -10,11 +8,12 @@ import { projectGoalObjective } from "../src/core/orchestration/work-state-proje
 import { createWorkerExecutionContract } from "../src/core/orchestration/worker-execution-contract.ts";
 import { createWorkerResultContract } from "../src/core/orchestration/worker-result-adapter.ts";
 import { createTestExecutionGrant, createTestWorkerExecutionAuthority } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 
 function root(): string {
-	const directory = mkdtempSync(join(tmpdir(), "pi-delegation-ledger-"));
+	const directory = tempDir("pi-delegation-ledger-");
 	roots.push(directory);
 	return directory;
 }

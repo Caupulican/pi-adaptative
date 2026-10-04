@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -10,6 +9,7 @@ import {
 	safeRealpathSync,
 } from "../src/core/autonomy/path-scope.ts";
 import { createDirectoryLink, FILE_SYMLINK_TESTS_SUPPORTED } from "./helpers/filesystem-links.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 describe("path-scope", () => {
 	let tempDir: string;
@@ -17,7 +17,7 @@ describe("path-scope", () => {
 	let outsideRoot: string;
 
 	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-path-scope-test-"));
+		tempDir = makeTempDir("pi-path-scope-test-");
 		allowedRoot = path.join(tempDir, "allowed");
 		outsideRoot = path.join(tempDir, "outside");
 

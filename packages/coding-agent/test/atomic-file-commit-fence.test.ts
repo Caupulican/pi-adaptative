@@ -1,9 +1,9 @@
-import { promises as fsPromises, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { promises as fsPromises, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { writeFileAtomic, writeFileAtomicSync } from "../src/core/util/atomic-file.ts";
 import { nodeFs } from "../src/core/util/faultable-fs.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const directories: string[] = [];
 
@@ -13,7 +13,7 @@ afterEach(() => {
 });
 
 it.each(["sync", "async"])("%s rejects a failed ownership check without retry and cleans staging", async (mode) => {
-	const directory = mkdtempSync(join(tmpdir(), "pi-atomic-commit-fence-"));
+	const directory = tempDir("pi-atomic-commit-fence-");
 	directories.push(directory);
 	const path = join(directory, "value");
 	writeFileSync(path, "original");
@@ -33,7 +33,7 @@ it.each(["sync", "async"])("%s rejects a failed ownership check without retry an
 });
 
 it.each(["sync", "async"])("%s rechecks ownership after a Windows rename retry", async (mode) => {
-	const directory = mkdtempSync(join(tmpdir(), "pi-atomic-retry-fence-"));
+	const directory = tempDir("pi-atomic-retry-fence-");
 	directories.push(directory);
 	const path = join(directory, "value");
 	writeFileSync(path, "original");

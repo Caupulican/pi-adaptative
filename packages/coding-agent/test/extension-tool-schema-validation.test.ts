@@ -1,13 +1,13 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 describe("extension tool parameter schemas", () => {
 	let tempDir: string;
 	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-ext-schema-"));
+		tempDir = makeTempDir("pi-ext-schema-");
 		fs.mkdirSync(path.join(tempDir, "extensions"), { recursive: true });
 	});
 	afterEach(() => {

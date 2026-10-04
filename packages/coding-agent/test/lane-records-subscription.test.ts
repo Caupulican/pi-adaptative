@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it } from "vitest";
 import { type LaneRecord, LaneTracker } from "../src/core/autonomy/lane-tracker.ts";
@@ -8,11 +6,12 @@ import { BackgroundLaneController, type BackgroundLaneControllerDeps } from "../
 import { FlowTrace } from "../src/core/operator-projection/flow-trace.ts";
 import { resetInFlightWorkRegistryForTests } from "../src/core/reload-blockers.ts";
 import { createTestManagedLaneDispatch } from "./managed-lane-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const dirs: string[] = [];
 
 function controllerAt(): BackgroundLaneController {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-lane-records-"));
+	const agentDir = tempDir("pi-lane-records-");
 	dirs.push(agentDir);
 	const entries: SessionEntry[] = [];
 	const sessionManager = {

@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { createCompactionSummaryMessage } from "@caupulican/pi-agent-core/messages";
@@ -52,6 +51,7 @@ import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
 import { SystemPromptBuilder } from "../src/core/system-prompt-builder.ts";
 import { createSkillVaultToolDefinition } from "../src/core/tools/skill.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function createTempSkill(dir: string, name: string, description: string, body: string): string {
 	const filePath = join(dir, `${name}.md`);
@@ -154,7 +154,7 @@ describe("owner handoff precedence", () => {
 	});
 
 	it("loads stale stop-list skills without promoting them above the owner's handoff", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-handoff-skill-"));
+		const root = tempDir("pi-handoff-skill-");
 		try {
 			const filePath = join(root, "SKILL.md");
 			writeFileSync(
@@ -185,7 +185,7 @@ describe("owner handoff precedence", () => {
 
 describe("SkillVaultController exclusion lifecycle", () => {
 	it("excludes conflicting skills, evicts active slots, and reflects in state", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-exclude-"));
+		const root = tempDir("pi-exclude-");
 		try {
 			const filePath = createTempSkill(root, "stale-skill", "Stale skill", "Stop-list rules.");
 			const skills = [
@@ -213,7 +213,7 @@ describe("SkillVaultController exclusion lifecycle", () => {
 	});
 
 	it("purges excluded skills from available list, search, and snapshot", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-exclude-discovery-"));
+		const root = tempDir("pi-exclude-discovery-");
 		try {
 			const file1 = createTempSkill(root, "skill-a", "Skill A", "Body A");
 			const file2 = createTempSkill(root, "skill-b", "Skill B", "Body B");
@@ -248,7 +248,7 @@ describe("SkillVaultController exclusion lifecycle", () => {
 	});
 
 	it("refuses load and read of excluded skills even after file rewrite and root rescan", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-exclude-refusal-"));
+		const root = tempDir("pi-exclude-refusal-");
 		try {
 			const filePath = createTempSkill(root, "dangerous-skill", "Stale rules", "Always ask for confirmation.");
 			let rescanCalled = false;
@@ -305,7 +305,7 @@ describe("SkillVaultController exclusion lifecycle", () => {
 	});
 
 	it("rejects batch load atomically when one skill is excluded", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-batch-exclude-"));
+		const root = tempDir("pi-batch-exclude-");
 		try {
 			const fileSafe = createTempSkill(root, "safe-skill", "Safe", "Safe guidance");
 			const fileBad = createTempSkill(root, "bad-skill", "Bad", "Bad guidance");
@@ -344,7 +344,7 @@ describe("SkillVaultController exclusion lifecycle", () => {
 
 describe("SessionManager persistence, branch navigation, and fork isolation", () => {
 	it("preserves exclusions across branch navigation and isolates new forks", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-persistence-branch-"));
+		const root = tempDir("pi-persistence-branch-");
 		try {
 			const sm = SessionManager.inMemory(root);
 			const prior = sm.appendCustomEntry("review-baseline", {});
@@ -380,7 +380,7 @@ describe("SessionManager persistence, branch navigation, and fork isolation", ()
 	});
 
 	it("session switch clears active slots and exclusions", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-session-switch-"));
+		const root = tempDir("pi-session-switch-");
 		try {
 			const sm1 = SessionManager.inMemory(root);
 			const sm2 = SessionManager.inMemory(root);
@@ -436,7 +436,7 @@ describe("SessionManager persistence, branch navigation, and fork isolation", ()
 		expect(decoded?.exclusions[0]?.name).toBe("valid");
 
 		// Idempotence
-		const root = mkdtempSync(join(tmpdir(), "pi-idempotence-"));
+		const root = tempDir("pi-idempotence-");
 		try {
 			const sm = SessionManager.inMemory(root);
 			const vault = new SkillVaultController({
@@ -656,7 +656,7 @@ describe("compaction, fork host context projection, and edge grants authority", 
 	});
 
 	it("persists real edge grants on SessionManager branch and replays across compaction", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-edge-grants-branch-"));
+		const root = tempDir("pi-edge-grants-branch-");
 		try {
 			const sm = SessionManager.inMemory(root);
 			const sessionEdgeDeps: SessionEdgeDeps = {
@@ -702,7 +702,7 @@ describe("compaction, fork host context projection, and edge grants authority", 
 
 describe("distinguishing full inventory for repair from model eligibility", () => {
 	it("allows repair of excluded skills via full inventory without restoring model eligibility", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-full-inventory-repair-"));
+		const root = tempDir("pi-full-inventory-repair-");
 		try {
 			const filePath = createTempSkill(root, "blocked-skill", "Old description", "Old body with prompt.");
 			const fullSkills = [
@@ -782,7 +782,7 @@ describe("skill tool exclude and repair actions with self-evolution gating", () 
 		const settingsManager = SettingsManager.inMemory({
 			autonomy: { mode: "off" },
 		});
-		const root = mkdtempSync(join(tmpdir(), "pi-repair-reject-"));
+		const root = tempDir("pi-repair-reject-");
 		try {
 			const filePath = createTempSkill(root, "guarded-skill", "Guard", "Old content");
 			const vault = new SkillVaultController({
@@ -828,7 +828,7 @@ describe("skill tool exclude and repair actions with self-evolution gating", () 
 			autonomy: { mode: "full" },
 			autoLearn: { enabled: true, applyHighConfidence: true },
 		});
-		const root = mkdtempSync(join(tmpdir(), "pi-repair-permit-"));
+		const root = tempDir("pi-repair-permit-");
 		try {
 			const filePath = createTempSkill(root, "evolve-skill", "Old description", "Always ask for confirmation.");
 			let skills = [
@@ -921,7 +921,7 @@ describe("skill tool exclude and repair actions with self-evolution gating", () 
 	});
 
 	it("detects stale source modifications during repair and allows inspecting excluded source", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-stale-repair-"));
+		const root = tempDir("pi-stale-repair-");
 		try {
 			const filePath = createTempSkill(root, "concurrent-skill", "Desc", "Original body");
 			const skills = [
@@ -969,7 +969,7 @@ describe("skill tool exclude and repair actions with self-evolution gating", () 
 	});
 
 	it("inspects and repairs skills through the real tool route with concurrent change detection", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-real-tool-repair-"));
+		const root = tempDir("pi-real-tool-repair-");
 		try {
 			const filePath = createTempSkill(root, "active-skill", "Desc", "Original Body");
 			const skills = [
@@ -1064,7 +1064,7 @@ describe("skill tool exclude and repair actions with self-evolution gating", () 
 	});
 
 	it("detects stale source when content changed even if timestamp was restored, with unchanged negative control", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-restored-mtime-repair-"));
+		const root = tempDir("pi-restored-mtime-repair-");
 		try {
 			const filePath = createTempSkill(root, "digest-skill", "Desc", "Original Body");
 			const originalContent = readFileSync(filePath, "utf-8");
@@ -1225,7 +1225,7 @@ describe("skill tool exclude and repair actions with self-evolution gating", () 
 	});
 
 	it("rejects repair with oversized description leaving original file untouched, with small metadata negative control", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-oversized-desc-"));
+		const root = tempDir("pi-oversized-desc-");
 		try {
 			const filePath = createTempSkill(root, "oversized-skill", "Original Desc", "Original body");
 			const originalContent = readFileSync(filePath, "utf-8");
@@ -1468,7 +1468,7 @@ describe("edge authority, scoped grants, and canonical operation lifecycle", () 
 	});
 
 	it("supports multiple scoped grants, scoped revocation, and broad class override", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-scoped-grants-"));
+		const root = tempDir("pi-scoped-grants-");
 		try {
 			const sm = SessionManager.inMemory(root);
 			const deps: SessionEdgeDeps = {

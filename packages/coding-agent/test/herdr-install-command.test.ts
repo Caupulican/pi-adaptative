@@ -1,17 +1,17 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR, VERSION } from "../src/config.ts";
 import { getManagedToolBinaryPath } from "../src/utils/tools-manager.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
 function fixture() {
 	// Native resolution expands Windows 8.3 temp aliases, matching the provisioner's async realpath.
-	const root = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-herdr-command-")));
+	const root = realpathSync.native(tempDir("pi-herdr-command-"));
 	const home = join(root, "home");
 	const agent = join(home, "agent");
 	const bin = join(home, "bin");

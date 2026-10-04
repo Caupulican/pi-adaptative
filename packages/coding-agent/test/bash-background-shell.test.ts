@@ -1,14 +1,14 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createBashTool } from "../src/core/tools/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function makeRoot(): string {
-	return realpathSync.native(mkdtempSync(join(tmpdir(), "pi-bash-background-shell-")));
+	return realpathSync.native(tempDir("pi-bash-background-shell-"));
 }
 
 function text(result: { content: Array<{ type: string; text?: string }> }): string {

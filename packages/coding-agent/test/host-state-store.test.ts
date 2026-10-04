@@ -1,8 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type HostFingerprint, HostStateStore } from "../src/core/models/host-state-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 interface Counter {
 	count: number;
@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 function createStore(options: { writeBehind?: { debounceMs?: number; maxPending?: number } } = {}) {
-	const dir = mkdtempSync(join(tmpdir(), "pi-host-state-"));
+	const dir = tempDir("pi-host-state-");
 	dirs.push(dir);
 	const filePath = join(dir, "state.json");
 	const store = new HostStateStore<Counter>({
@@ -70,7 +70,7 @@ describe("HostStateStore", () => {
 
 	describe("write-behind", () => {
 		it("does not admit more mutations beyond a failed flush's pending cap", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-host-state-cap-"));
+			const dir = tempDir("pi-host-state-cap-");
 			dirs.push(dir);
 			const blocker = join(dir, "blocked");
 			const filePath = join(blocker, "state.json");
@@ -173,7 +173,7 @@ describe("HostStateStore", () => {
 		});
 
 		it("keeps mutations pending when a flush cannot write, and persists them on the next flush", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-host-state-"));
+			const dir = tempDir("pi-host-state-");
 			dirs.push(dir);
 			const filePath = join(dir, "blocked", "state.json");
 			const store = new HostStateStore<Counter>({

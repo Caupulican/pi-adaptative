@@ -1,11 +1,11 @@
-import { promises as fsPromises, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { promises as fsPromises, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { OAuthRefreshCompletedError, registerOAuthProvider, unregisterOAuthProvider } from "@caupulican/pi-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, expect, it, vi } from "vitest";
 import { ANTIGRAVITY_CATALOG_VERSION } from "../../ai/src/utils/antigravity.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const directories: string[] = [];
 const modelCatalog = { "gemini-fixture": { maxTokens: 10000, maxOutputTokens: 1000 } };
@@ -22,7 +22,7 @@ it.each([
 	{ trigger: "rejection", failure: "project" },
 	{ trigger: "rejection", failure: "catalog" },
 ])("persists the completed $trigger rotation when $failure discovery fails", async ({ trigger, failure }) => {
-	const directory = mkdtempSync(join(tmpdir(), "pi-agy-discovery-"));
+	const directory = tempDir("pi-agy-discovery-");
 	directories.push(directory);
 	const path = join(directory, "auth.json");
 	const storage = AuthStorage.create(path);
@@ -113,7 +113,7 @@ for (const trigger of ["expiry", "rejection"]) {
 	it.each(["compromise", "logout", "replacement", "write-failure"])(
 		`${trigger} discovery failure respects %s at the storage boundary`,
 		async (action) => {
-			const directory = mkdtempSync(join(tmpdir(), "pi-agy-discovery-race-"));
+			const directory = tempDir("pi-agy-discovery-race-");
 			directories.push(directory);
 			const path = join(directory, "auth.json");
 			const storage = AuthStorage.create(path);

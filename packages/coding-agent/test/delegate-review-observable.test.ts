@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -14,6 +13,7 @@ import { isParentReviewRequired } from "../src/core/delegation/worker-claim.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { createDelegateToolDefinition } from "../src/core/tools/delegate.ts";
 import type { DelegateStatusDependencies } from "../src/core/tools/delegate-status.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 const context = {} as ExtensionContext;
 
@@ -55,7 +55,7 @@ describe("isParentReviewRequired (worker-claim.ts)", () => {
 	});
 
 	describe("with real path-scoped changed files", () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-review-marker-test-"));
+		const tempDir = makeTempDir("pi-review-marker-test-");
 		const allowedRoot = path.join(tempDir, "allowed");
 		const deniedPath = path.join(allowedRoot, "denied");
 

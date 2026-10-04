@@ -1,10 +1,9 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { realpathSync, rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { BashOperations } from "../src/core/tools/bash.ts";
 import { createBashTool } from "../src/core/tools/bash.ts";
 import { withExclusiveMutationBarrier } from "../src/core/tools/file-mutation-queue.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cleanupDirectories: string[] = [];
 
@@ -49,7 +48,7 @@ function firstText(result: { content: Array<{ type: string; text?: string }> }):
 }
 
 function makeRoot(): string {
-	const root = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-bash-background-barrier-")));
+	const root = realpathSync.native(tempDir("pi-bash-background-barrier-"));
 	cleanupDirectories.push(root);
 	return root;
 }

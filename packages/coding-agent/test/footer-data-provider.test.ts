@@ -1,6 +1,5 @@
 import { execFile, spawnSync } from "child_process";
-import { existsSync, type FSWatcher, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
+import { existsSync, type FSWatcher, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -38,6 +37,7 @@ vi.mock("child_process", () => ({
 }));
 
 import { FooterDataProvider } from "../src/core/footer-data-provider.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 type WorktreeFixture = {
 	worktreeDir: string;
@@ -93,7 +93,7 @@ describe.skipIf(process.platform === "win32")("FooterDataProvider reftable branc
 
 	beforeEach(() => {
 		originalCwd = process.cwd();
-		tempDir = mkdtempSync(join(tmpdir(), "footer-data-provider-"));
+		tempDir = makeTempDir("footer-data-provider-");
 		resolvedBranch = "main";
 		vi.mocked(spawnSync).mockClear();
 		vi.mocked(execFile).mockClear();
@@ -270,7 +270,7 @@ describe.skipIf(process.platform === "win32")("FooterDataProvider autonomy statu
 
 	beforeEach(() => {
 		originalCwd = process.cwd();
-		tempDir = mkdtempSync(join(tmpdir(), "footer-data-provider-status-"));
+		tempDir = makeTempDir("footer-data-provider-status-");
 	});
 
 	afterEach(() => {
@@ -368,7 +368,7 @@ describe.skipIf(process.platform === "win32")("FooterDataProvider autonomy statu
 	});
 
 	it("watches git only for a watched terminal, and still resolves the branch on demand", () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "footer-unwatched-"));
+		const tempDir = makeTempDir("footer-unwatched-");
 		try {
 			const repoDir = createPlainRepo(tempDir);
 			const unwatched = new FooterDataProvider(repoDir, { watchGit: false });

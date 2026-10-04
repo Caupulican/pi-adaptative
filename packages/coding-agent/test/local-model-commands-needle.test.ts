@@ -1,5 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type {
@@ -15,6 +14,7 @@ import {
 	handleModelsCommand,
 	type LocalModelHost,
 } from "../src/modes/interactive/local-model-commands.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * Orchestration tests for the needle wiring: addNeedleModel's pipeline call-order and stage-failure
@@ -296,8 +296,8 @@ describe("/models needle <query> [tools-json] subcommand", () => {
 
 describe("/models remove for needle", () => {
 	it("full disclosure without deleting anything when not confirmed", async () => {
-		const runtimeDir = mkdtempSync(join(tmpdir(), "pi-needle-remove-runtime-"));
-		const modelsDir = mkdtempSync(join(tmpdir(), "pi-needle-remove-models-"));
+		const runtimeDir = tempDir("pi-needle-remove-runtime-");
+		const modelsDir = tempDir("pi-needle-remove-models-");
 		try {
 			const calls: string[] = [];
 			const runtime = fakeNeedleRuntime({ runtimeDir, modelsDir }, calls);
@@ -316,8 +316,8 @@ describe("/models remove for needle", () => {
 	});
 
 	it("confirmed: actually deletes the runtime and weights directories", async () => {
-		const runtimeDir = mkdtempSync(join(tmpdir(), "pi-needle-remove-runtime-"));
-		const modelsDir = mkdtempSync(join(tmpdir(), "pi-needle-remove-models-"));
+		const runtimeDir = tempDir("pi-needle-remove-runtime-");
+		const modelsDir = tempDir("pi-needle-remove-models-");
 		mkdirSync(join(runtimeDir, "venv", "bin"), { recursive: true });
 		writeFileSync(join(runtimeDir, "venv", "bin", "needle"), "#!/bin/sh\n");
 		mkdirSync(modelsDir, { recursive: true });

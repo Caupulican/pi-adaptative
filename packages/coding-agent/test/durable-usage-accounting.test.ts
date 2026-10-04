@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage, AgentState } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -19,6 +18,7 @@ import type { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionAnalytics } from "../src/core/session-analytics.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { ToolGateController } from "../src/core/tool-gate-controller.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function usage(value: number): Usage {
 	return {
@@ -157,7 +157,7 @@ describe("session usage ownership", () => {
 		expect(cumulative.totalTokens).toBe(60);
 		// File-based child reporting must retain the same paid tool and summary entries as live reporting.
 		expect(aggregateCumulativeUsageFromSessionEntries(entries)).toEqual(cumulative);
-		const sessionDir = mkdtempSync(join(tmpdir(), "pi-child-usage-"));
+		const sessionDir = tempDir("pi-child-usage-");
 		try {
 			const header: SessionHeader = {
 				type: "session",

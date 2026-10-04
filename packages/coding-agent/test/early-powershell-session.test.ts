@@ -1,7 +1,6 @@
 import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -16,6 +15,7 @@ import {
 	POWERSHELL_SESSION_STDERR_READY_MARKER,
 	type ShellSessionExecOptions,
 } from "../src/core/tools/shell-session.ts";
+import { tempDir } from "./temp-dir.ts";
 
 async function run(
 	session: PersistentShellSession,
@@ -60,7 +60,7 @@ describe("early CLI PowerShell session handoff", () => {
 	});
 
 	it("starts before the runtime import, reconciles the final environment, and reuses the same process", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-early-powershell-"));
+		const directory = tempDir("pi-early-powershell-");
 		const fixture = join(directory, "powershell-fixture.mjs");
 		const capture = join(directory, "commands.jsonl");
 		writeFileSync(
@@ -180,7 +180,7 @@ setInterval(() => {}, 1000);
 	}
 
 	it("kills a warm start nobody claimed, so it cannot outlive the CLI", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-warm-unclaimed-"));
+		const directory = tempDir("pi-warm-unclaimed-");
 		try {
 			const fixture = writeIdleFixture(directory);
 			let spawned: ReturnType<typeof spawn> | undefined;
@@ -207,7 +207,7 @@ setInterval(() => {}, 1000);
 	});
 
 	it("leaves a claimed warm start alone, since ownership has transferred", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-warm-claimed-"));
+		const directory = tempDir("pi-warm-claimed-");
 		try {
 			const fixture = writeIdleFixture(directory);
 			let spawned: ReturnType<typeof spawn> | undefined;

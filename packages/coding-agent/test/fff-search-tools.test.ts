@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type {
@@ -15,6 +14,7 @@ import { hasGitignoreInTree, loadFffModule, relativePathInside } from "../src/co
 import { createFindToolDefinition, tryFffFind } from "../src/core/tools/find.ts";
 import { createGrepToolDefinition, tryFffGrep } from "../src/core/tools/grep.ts";
 import { defaultSearchRouter } from "../src/core/tools/search-router.ts";
+import { tempDir } from "./temp-dir.ts";
 
 interface TextToolResult {
 	content: Array<{ type: string; text?: string }>;
@@ -151,7 +151,7 @@ describe("FFF-backed built-in search tools", () => {
 	let tempRoot: string;
 
 	beforeEach(() => {
-		tempRoot = mkdtempSync(join(tmpdir(), "pi-fff-tools-"));
+		tempRoot = tempDir("pi-fff-tools-");
 		mkdirSync(join(tempRoot, "src"), { recursive: true });
 		writeFileSync(join(tempRoot, "src", "placeholder.ts"), "export const placeholder = true;\n");
 	});

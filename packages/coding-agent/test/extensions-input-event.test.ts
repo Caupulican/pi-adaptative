@@ -1,5 +1,4 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -7,13 +6,14 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 describe("Input Event", () => {
 	let tempDir: string;
 	let extensionsDir: string;
 
 	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-input-test-"));
+		tempDir = makeTempDir("pi-input-test-");
 		extensionsDir = path.join(tempDir, "extensions");
 		fs.mkdirSync(extensionsDir);
 		// Clean globalThis test vars

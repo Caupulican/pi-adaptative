@@ -18,13 +18,13 @@
  * provider, no paid model. The same fixture runs unchanged on Windows (named pipe) and POSIX.
  */
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CollaborationBackendError } from "../src/core/collaboration/backend.ts";
 import { connectHerdrChannel, type HerdrEventChannel } from "../src/core/collaboration/herdr-channel.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const DEADLINE_MS = 10_000;
 /** A method this fixture's server accepts and deliberately never answers. */
@@ -70,7 +70,7 @@ afterEach(() => {
  * only `events.subscribe` keeps its socket open after the acknowledgement.
  */
 function serverFixture(): ServerFixture {
-	const directory = mkdtempSync(join(tmpdir(), "pi-herdr-signal-"));
+	const directory = tempDir("pi-herdr-signal-");
 	const path =
 		process.platform === "win32"
 			? `\\\\.\\pipe\\pi-herdr-signal-${process.pid}-${Date.now()}`

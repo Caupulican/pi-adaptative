@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import mergeAndResolve from "../examples/extensions/git-merge-and-resolve.ts";
 import type { ExecResult, ExtensionAPI, ExtensionContext } from "../src/core/extensions/index.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 type AgentEndHandler = (event: { type: "agent_end" }, ctx: ExtensionContext) => Promise<undefined>;
 
@@ -70,7 +70,7 @@ describe("git-merge-and-resolve example", () => {
 	});
 
 	function createTempDir() {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-merge-test-"));
+		tempDir = makeTempDir("pi-merge-test-");
 		return tempDir;
 	}
 

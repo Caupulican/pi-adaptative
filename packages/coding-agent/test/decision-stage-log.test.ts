@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DecisionLedgerStore } from "../src/core/operator-projection/decision-ledger-store.ts";
@@ -16,6 +15,7 @@ import type {
 	OperatorPhase,
 	OperatorProjection,
 } from "../src/core/operator-projection/types.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function projection(overrides: {
 	phase?: OperatorPhase;
@@ -257,7 +257,7 @@ describe("DecisionStageLog", () => {
 	});
 
 	it("leaves the placeholder idle rows an older build wrote out of every read", () => {
-		const dir = mkdtempSync(join(tmpdir(), "decision-ledger-"));
+		const dir = tempDir("decision-ledger-");
 		dirs.push(dir);
 		const store = new DecisionLedgerStore({ databasePath: join(dir, "state", "decision-ledger.sqlite") });
 		// The row the placeholder projection used to write at session start, closed when work began.
@@ -288,7 +288,7 @@ describe("DecisionStageLog", () => {
 	});
 
 	it("persists into the SQLite decision ledger, keyed by session, and reads back per session", () => {
-		const dir = mkdtempSync(join(tmpdir(), "decision-ledger-"));
+		const dir = tempDir("decision-ledger-");
 		dirs.push(dir);
 		const store = new DecisionLedgerStore({ databasePath: join(dir, "state", "decision-ledger.sqlite") });
 		const a = new DecisionStageLog({ sink: store.stageSink("session-a", "/repo") });

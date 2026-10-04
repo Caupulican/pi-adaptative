@@ -1,11 +1,11 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { AssistantImages } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ImageGenerationController, type ImageGenerationOptions } from "../src/core/image-generation.ts";
 import { SessionImageStore } from "../src/core/session-image-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const image = {
 	type: "image" as const,
@@ -14,7 +14,7 @@ const image = {
 };
 let directory: string;
 beforeEach(() => {
-	directory = mkdtempSync(join(tmpdir(), "pi-imagegen-test-"));
+	directory = tempDir("pi-imagegen-test-");
 });
 afterEach(() => {
 	rmSync(directory, { recursive: true, force: true });

@@ -16,9 +16,7 @@
  * the memo is cleared -- not the cumulative count, which would double-count the deliberately
  * cold second call.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { estimateTokens } from "@caupulican/pi-agent-core/compaction/compaction";
 import type { SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
@@ -26,6 +24,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ContextAuditReport } from "../src/core/context/context-audit.ts";
 import { estimateByteLength, estimateTokensFromText } from "../src/core/context/context-item.ts";
 import { ContextPipeline, type ContextPipelineDeps } from "../src/core/context-pipeline.ts";
+import { tempDir } from "./temp-dir.ts";
 
 vi.mock("@caupulican/pi-agent-core/compaction/compaction", { spy: true });
 vi.mock("../src/core/context/context-item.ts", { spy: true });
@@ -38,7 +37,7 @@ afterEach(() => {
 });
 
 function createPipeline(turnIndexRef: { value: number }): ContextPipeline {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-context-incremental-"));
+	const agentDir = tempDir("pi-context-incremental-");
 	tempDirs.push(agentDir);
 	const sessionManager = {
 		getSessionId: () => "session-incremental",

@@ -1,6 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -10,11 +9,12 @@ import {
 	readBoundedTextFileSync,
 	readFilePrefixSync,
 } from "../src/core/util/bounded-file.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 
 function fixtureFile(content: string): string {
-	const root = mkdtempSync(join(tmpdir(), "pi-bounded-file-"));
+	const root = tempDir("pi-bounded-file-");
 	roots.push(root);
 	const file = join(root, "state.json");
 	writeFileSync(file, content);

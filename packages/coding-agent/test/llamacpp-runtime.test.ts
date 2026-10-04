@@ -1,5 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import type { OwnedProcessHandle } from "@caupulican/pi-agent-core/process-tree";
@@ -34,7 +33,7 @@ function fakeChild(pid: number | undefined): ManagedRuntimeChild {
 }
 
 function scratchDir(name: string): string {
-	return mkdtempSync(join(tmpdir(), `pi-prism-${name}-`));
+	return tempDir(`pi-prism-${name}-`);
 }
 
 function writeManifest(

@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { AgentToolExecutionError } from "@caupulican/pi-agent-core/types";
@@ -10,6 +9,7 @@ import {
 	wrapToolWithCredentialExposureGuard,
 } from "../src/core/secrets/credential-exposure-guard.ts";
 import { withExclusiveMutationBarrier } from "../src/core/tools/file-mutation-queue.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const testSchema = Type.Object({ path: Type.Optional(Type.String()), command: Type.Optional(Type.String()) });
 
@@ -36,7 +36,7 @@ describe("credential exposure guard", () => {
 	});
 
 	it("blocks recognizable process reads under a worker private-path boundary", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-worker-private-process-"));
+		const root = tempDir("pi-worker-private-process-");
 		tempDirs.push(root);
 		const agentDir = join(root, "agent");
 		const projectDir = join(root, "project");
@@ -85,7 +85,7 @@ describe("credential exposure guard", () => {
 	});
 
 	it("blocks run_process argv reads under a worker private-path boundary", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-worker-private-run-process-"));
+		const root = tempDir("pi-worker-private-run-process-");
 		tempDirs.push(root);
 		const agentDir = join(root, "agent");
 		const projectDir = join(root, "project");
@@ -131,7 +131,7 @@ describe("credential exposure guard", () => {
 	});
 
 	it("keeps quoted search alternation intact while proving an explicit file scope", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-secret-search-scope-"));
+		const root = tempDir("pi-secret-search-scope-");
 		tempDirs.push(root);
 		const sourcePath = join(root, "module.psm1");
 		const secondSourcePath = join(root, "common.psm1");
@@ -192,7 +192,7 @@ describe("credential exposure guard", () => {
 	});
 
 	it("allows source-only brace globs and explicit source paths even when one path is stale", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-secret-source-scope-"));
+		const root = tempDir("pi-secret-source-scope-");
 		tempDirs.push(root);
 		const rustPath = join(root, "commands.rs");
 		const pythonPath = join(root, "probe.py");
@@ -223,7 +223,7 @@ describe("credential exposure guard", () => {
 
 	it("resolves symlink aliases before read, shell, or Python inspection", () => {
 		if (process.platform === "win32") return;
-		const root = mkdtempSync(join(tmpdir(), "pi-secret-alias-"));
+		const root = tempDir("pi-secret-alias-");
 		tempDirs.push(root);
 		writeFileSync(join(root, ".env"), "TOKEN=hidden\n");
 		symlinkSync(join(root, ".env"), join(root, "credentials.txt"));
@@ -236,7 +236,7 @@ describe("credential exposure guard", () => {
 	});
 
 	it("redacts exact unlocked values from partial, final, and thrown tool output", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-secret-guard-"));
+		const root = tempDir("pi-secret-guard-");
 		tempDirs.push(root);
 		const secret = "opaque-exact-output-marker";
 		const boundary = {
@@ -357,7 +357,7 @@ describe("credential exposure guard", () => {
 	});
 
 	it("enforces the path decision at the wrapped execution boundary", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-secret-execution-boundary-"));
+		const root = tempDir("pi-secret-execution-boundary-");
 		tempDirs.push(root);
 		const protectedFile = join(root, "machine", "bws.env");
 		mkdirSync(join(root, "machine"));
@@ -387,7 +387,7 @@ describe("credential exposure guard", () => {
 	it("mock mode runs a broad search and mocks only the lines attributed to credential files", async () => {
 		// Live friction: every session lost a turn to "Credential-safe shell search requires a narrow
 		// non-dotenv file glob" on plain `rg pattern <dir>` searches.
-		const root = mkdtempSync(join(tmpdir(), "pi-secret-mock-search-"));
+		const root = tempDir("pi-secret-mock-search-");
 		tempDirs.push(root);
 		writeFileSync(join(root, ".env"), "TOKEN=abc123\n");
 		const output = [
@@ -418,7 +418,7 @@ describe("credential exposure guard", () => {
 	});
 
 	it("mock mode returns credential file content with keys kept and values mocked, while deny still refuses", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-secret-mock-content-"));
+		const root = tempDir("pi-secret-mock-content-");
 		tempDirs.push(root);
 		const dotenv = join(root, ".env");
 		writeFileSync(dotenv, "TOKEN=abc123\n");
@@ -447,7 +447,7 @@ describe("credential exposure guard", () => {
 	});
 
 	it("preserves classified tool errors while redacting their messages", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-secret-classified-error-"));
+		const root = tempDir("pi-secret-classified-error-");
 		tempDirs.push(root);
 		const secret = "classified-secret-marker";
 		const boundary = {
@@ -503,7 +503,7 @@ describe("credential exposure guard", () => {
 	});
 
 	it("reports a non-Error thrown value instead of discarding it", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-guard-non-error-"));
+		const root = tempDir("pi-guard-non-error-");
 		tempDirs.push(root);
 		const guarded = wrapToolWithCredentialExposureGuard(
 			{
@@ -526,7 +526,7 @@ describe("credential exposure guard", () => {
 	});
 
 	it("names the abort reason when a parked tool is cancelled mid-execution", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-guard-abort-reason-"));
+		const root = tempDir("pi-guard-abort-reason-");
 		tempDirs.push(root);
 		const guarded = wrapToolWithCredentialExposureGuard(
 			{

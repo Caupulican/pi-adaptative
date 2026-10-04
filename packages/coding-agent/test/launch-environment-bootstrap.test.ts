@@ -1,12 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { tempDir } from "./temp-dir.ts";
 
 describe("test launch bootstrap", () => {
 	it("removes inherited terminal and worker authority before tests can use live host resources", () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-bootstrap-authority-"));
+		const directory = tempDir("pi-bootstrap-authority-");
 		const inherited = {
 			HERDR_ENV: "1",
 			HERDR_SOCKET_PATH: join(directory, "host.sock"),
@@ -45,7 +45,7 @@ describe("test launch bootstrap", () => {
 	});
 
 	it("sanitizes launch metadata before importing config while preserving explicit runtime overrides outside tests", () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-bootstrap-regression-"));
+		const directory = tempDir("pi-bootstrap-regression-");
 		try {
 			writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "poisoned-runtime", version: "0.0.0" }));
 			for (const sanitize of [false, true]) {

@@ -1,11 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { BashExecutionController } from "../src/core/bash-execution-controller.ts";
 import type { BashOperations } from "../src/core/tools/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 const originalBitwardenSession = process.env.BW_SESSION;
 
@@ -241,7 +241,7 @@ describe("BashExecutionController", () => {
 				isStreaming: () => false,
 				getShellSessionKey: () => sessionKey,
 			});
-			const tempDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-controller-cwd-")));
+			const tempDir = realpathSync(makeTempDir("pi-controller-cwd-"));
 			try {
 				const failed = await controller.executeBash(`cd '${tempDir}' && false`, undefined, { platform: "linux" });
 				expect(failed.exitCode).toBe(1);
@@ -259,7 +259,7 @@ describe("BashExecutionController", () => {
 		"keeps POSIX session cwd and exports across managed rg preparation",
 		async () => {
 			const originalEnvironment = { ...process.env };
-			const agentDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-controller-managed-agent-")));
+			const agentDir = realpathSync(makeTempDir("pi-controller-managed-agent-"));
 			const binDir = join(agentDir, "bin");
 			const credentialBinDir = join(agentDir, "credential-bin");
 			const subDir = join(agentDir, "project");

@@ -1,11 +1,11 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { createHarness } from "./suite/harness.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 const readParameters = Type.Object({ path: Type.String() });
 const readTool = {
@@ -171,7 +171,7 @@ describe("AgentSession - Autonomy Gates Harness", () => {
 	});
 
 	it("blocks path-based tools when accessing outside allowed roots", async () => {
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-gates-test-"));
+		const tempDir = makeTempDir("pi-gates-test-");
 		const allowedRoot = path.join(tempDir, "allowed");
 		fs.mkdirSync(allowedRoot);
 

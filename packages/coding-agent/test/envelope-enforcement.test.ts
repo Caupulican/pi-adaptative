@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CapabilityEnvelope } from "../src/core/autonomy/contracts.ts";
@@ -10,6 +9,7 @@ import {
 	wrapToolWithEnvelopeScope,
 } from "../src/core/autonomy/envelope-enforcement.ts";
 import { createDirectoryLink, FILE_SYMLINK_TESTS_SUPPORTED } from "./helpers/filesystem-links.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const envelope = (overrides: Partial<CapabilityEnvelope>): CapabilityEnvelope => ({
 	id: "env-1",
@@ -40,7 +40,7 @@ describe("envelope path scope", () => {
 		let base: string;
 
 		beforeEach(() => {
-			base = mkdtempSync(join(tmpdir(), "envelope-symlink-"));
+			base = tempDir("envelope-symlink-");
 			mkdirSync(join(base, "allowed"));
 			mkdirSync(join(base, "outside"));
 		});

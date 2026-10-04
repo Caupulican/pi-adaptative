@@ -1,5 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createEventBus } from "../src/core/event-bus.ts";
@@ -10,11 +9,12 @@ import {
 } from "../src/core/extensions/loader.ts";
 import type { ExtensionStorage } from "../src/core/extensions/types.ts";
 import { hasActiveWorkRunLease } from "../src/utils/work-directory.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const tempDirs: string[] = [];
 
 function createTempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-extension-storage-"));
+	const dir = tempDir("pi-extension-storage-");
 	tempDirs.push(dir);
 	return dir;
 }

@@ -1,5 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -7,12 +6,13 @@ import {
 	appendBoundedJsonLineSync,
 	type BoundedJsonlLimits,
 } from "../src/core/util/bounded-jsonl.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cleanups: string[] = [];
 const SMALL_LIMITS: BoundedJsonlLimits = { maxBytes: 180, targetBytes: 100, maxRecords: 3 };
 
 function tempFile(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-bounded-jsonl-"));
+	const dir = tempDir("pi-bounded-jsonl-");
 	cleanups.push(dir);
 	return join(dir, "state", "events.jsonl");
 }

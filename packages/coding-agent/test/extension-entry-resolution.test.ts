@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { resolveExtensionIndexEntry } from "../src/core/extensions/entry-resolution.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("extension entry resolution", () => {
 	const directories: string[] = [];
@@ -12,7 +12,7 @@ describe("extension entry resolution", () => {
 	});
 
 	test("loads precompiled Pi-owned extensions while keeping user extensions source-first", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-extension-entry-"));
+		const root = tempDir("pi-extension-entry-");
 		directories.push(root);
 		const bundledRoot = join(root, "dist", "bundled-resources", "extensions");
 		const bundled = join(bundledRoot, "tmux");

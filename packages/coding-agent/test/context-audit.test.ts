@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
 	type ArtifactStore,
@@ -8,6 +6,7 @@ import {
 	createInMemoryArtifactStore,
 } from "../src/core/context/context-artifacts.ts";
 import { buildToolResultContextItem, runContextAudit } from "../src/core/context/context-audit.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function toolResultMessage(overrides: { toolCallId: string; toolName?: string; text?: string; artifactId?: string }) {
 	return {
@@ -166,7 +165,7 @@ describe("context-audit: runContextAudit", () => {
 	});
 
 	it("never calls the store's payload-loading read() against a real file store, only readRef()", () => {
-		const baseDir = mkdtempSync(join(tmpdir(), "pi-context-audit-"));
+		const baseDir = tempDir("pi-context-audit-");
 		try {
 			const fileStore = createFileArtifactStore({ baseDir });
 			let readCalls = 0;

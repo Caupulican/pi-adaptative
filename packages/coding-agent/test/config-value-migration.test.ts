@@ -1,9 +1,9 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import { getMigratedSessionFileName, runMigrations } from "../src/migrations.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("session migration path helpers", () => {
 	it("extracts the basename from Windows-style session paths", () => {
@@ -23,7 +23,7 @@ describe("config value env var syntax migration", () => {
 	});
 
 	function createAgentDir(): string {
-		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-config-value-migration-test-"));
+		const agentDir = tempDir("pi-config-value-migration-test-");
 		tempDirs.push(agentDir);
 		return agentDir;
 	}

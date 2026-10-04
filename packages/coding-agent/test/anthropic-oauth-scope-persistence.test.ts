@@ -1,8 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const directories: string[] = [];
 afterEach(() => {
@@ -44,7 +44,7 @@ describe("Anthropic scope metadata across durable credential refreshes", () => {
 
 	it.each([undefined, "custom-client"])("retains the granted scope and client %s across reload", async (clientId) => {
 		const now = Date.now();
-		const directory = mkdtempSync(join(tmpdir(), "pi-anthropic-scopes-"));
+		const directory = tempDir("pi-anthropic-scopes-");
 		directories.push(directory);
 		const path = join(directory, "auth.json");
 		const first = AuthStorage.create(path);

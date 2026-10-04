@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * Covers the provisioning step that makes FFF native search work inside a release binary.
@@ -16,7 +16,7 @@ import { describe, expect, it, vi } from "vitest";
  */
 
 async function withFreshManagedDir<T>(fn: (managedDir: string) => Promise<T>): Promise<T> {
-	const tempAgentDir = mkdtempSync(join(tmpdir(), "pi-agent-fff-staging-"));
+	const tempAgentDir = tempDir("pi-agent-fff-staging-");
 	vi.resetModules();
 	const config = await import("../src/config.ts");
 	const envKey = config.ENV_AGENT_DIR;

@@ -1,5 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -8,6 +7,7 @@ import {
 	generateArtifactId,
 	isMissingArtifactMarker,
 } from "../src/core/context/context-artifacts.ts";
+import { tempDir } from "./temp-dir.ts";
 import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
 
 function makeRequest(overrides: Partial<ArtifactWriteRequest> = {}): ArtifactWriteRequest {
@@ -28,7 +28,7 @@ describe("createFileArtifactStore", () => {
 	let baseDir: string;
 
 	beforeEach(() => {
-		baseDir = mkdtempSync(join(tmpdir(), "pi-file-artifact-store-"));
+		baseDir = tempDir("pi-file-artifact-store-");
 	});
 
 	afterEach(() => {
@@ -246,7 +246,7 @@ parentPort.postMessage({ done: true });
 		it("never creates any file outside baseDir for a path-traversal-shaped id", () => {
 			// The parent must be PRIVATE to this test: baseDir sits directly in the shared OS
 			// tmpdir, and snapshotting that hot directory races with unrelated processes.
-			const privateParent = mkdtempSync(join(tmpdir(), "pi-file-artifact-parent-"));
+			const privateParent = tempDir("pi-file-artifact-parent-");
 			try {
 				const isolatedBaseDir = join(privateParent, "store");
 				mkdirSync(isolatedBaseDir);

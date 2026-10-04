@@ -3,7 +3,6 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,6 +12,7 @@ import { createExtensionHandlerError, ExtensionRunner } from "../src/core/extens
 import type { ExtensionActions, ExtensionContextActions, ProviderConfig } from "../src/core/extensions/types.ts";
 import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 describe("ExtensionRunner", () => {
 	let tempDir: string;
@@ -22,7 +22,7 @@ describe("ExtensionRunner", () => {
 	const defaultKeybindings = new KeybindingsManager().getEffectiveConfig();
 
 	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-runner-test-"));
+		tempDir = makeTempDir("pi-runner-test-");
 		extensionsDir = path.join(tempDir, "extensions");
 		fs.mkdirSync(extensionsDir);
 		sessionManager = SessionManager.inMemory();

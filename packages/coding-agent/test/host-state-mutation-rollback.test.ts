@@ -1,6 +1,5 @@
-import fs, { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HostStateStore } from "../src/core/models/host-state-store.ts";
@@ -8,6 +7,7 @@ import {
 	type ToolExecutionObservation,
 	ToolPerformanceStore,
 } from "../src/core/tool-selection/tool-performance-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const dirs: string[] = [];
 const stores: HostStateStore<string[]>[] = [];
@@ -19,7 +19,7 @@ afterEach(() => {
 });
 
 function fixture(batched = true) {
-	const dir = mkdtempSync(join(tmpdir(), "pi-host-rollback-"));
+	const dir = tempDir("pi-host-rollback-");
 	dirs.push(dir);
 	const path = join(dir, "state.json");
 	const store = new HostStateStore<string[]>({

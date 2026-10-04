@@ -1,6 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync, rmSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	type BashOperations,
@@ -10,6 +8,7 @@ import {
 	MAX_COMMAND_TIMEOUT_SECONDS,
 } from "../src/core/tools/bash.ts";
 import { assessShellSearchScope, parseShellSearchInvocationScope } from "../src/core/tools/search-command-guard.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("shared shell search invocation scope", () => {
 	it("owns value-taking flags, explicit targets, positive globs, and piped stdin", () => {
@@ -92,7 +91,7 @@ describe("bash broad-search guard", () => {
 	let operations: BashOperations;
 
 	beforeEach(() => {
-		outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-search-guard-"));
+		outputDirectory = tempDir("pi-bash-search-guard-");
 		executedCommands = [];
 		operations = {
 			exec: async (command, _cwd, { onData }) => {

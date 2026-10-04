@@ -1,10 +1,10 @@
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { VerificationObligationTracker } from "@caupulican/pi-agent-core/verification-obligations";
 import { afterEach, describe, expect, it } from "vitest";
 import { type BashOperations, createBashTool } from "../src/core/tools/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cleanupDirectories: string[] = [];
 const cleanupSessionKeys: string[] = [];
@@ -31,7 +31,7 @@ describe("bash verification boundary", () => {
 		["runner interrupted without a summary\n", false],
 	] as const)("links a corrected invocation only to a proved setup failure: %s", async (initialOutput, clears) => {
 		// Windows tmpdir may use RUNNER~1; use the literal long path rather than an opaque tilde spelling.
-		const root = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-bash-setup-repair-")));
+		const root = realpathSync.native(tempDir("pi-bash-setup-repair-"));
 		cleanupDirectories.push(root);
 		const wrong = join(root, "wrong");
 		const corrected = join(root, "corrected");
@@ -77,7 +77,7 @@ describe("bash verification boundary", () => {
 	});
 
 	it.each([false, true])("observes complete raw output independently of fullOutput=%s", async (fullOutput) => {
-		const root = mkdtempSync(join(tmpdir(), "pi-vitest-output-boundary-"));
+		const root = tempDir("pi-vitest-output-boundary-");
 		cleanupDirectories.push(root);
 		for (const passed of [false, true]) {
 			const tool = createBashTool(root, {
@@ -140,7 +140,7 @@ describe("bash verification boundary", () => {
 	it.skipIf(process.platform === "win32")(
 		"preserves identity across a relative cd and corrected rerun, without clearing another project's failure",
 		async () => {
-			const root = mkdtempSync(join(tmpdir(), "pi-bash-verification-cwd-"));
+			const root = tempDir("pi-bash-verification-cwd-");
 			cleanupDirectories.push(root);
 			const repoAPath = join(root, "repo-a");
 			const repoBPath = join(root, "repo-b");
@@ -238,7 +238,7 @@ describe("bash verification boundary", () => {
 	});
 
 	it.skipIf(process.platform === "win32")("checks a real persistent shell's CDPATH redirection", async () => {
-		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-verification-cdpath-")));
+		const root = realpathSync(tempDir("pi-verification-cdpath-"));
 		cleanupDirectories.push(root);
 		const external = join(root, "external");
 		const project = join(external, "package");
@@ -258,7 +258,7 @@ describe("bash verification boundary", () => {
 	});
 
 	it("annotates checker coverage when no files were processed", async () => {
-		const root = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-bash-coverage-")));
+		const root = realpathSync.native(tempDir("pi-bash-coverage-"));
 		cleanupDirectories.push(root);
 		const tool = createBashTool(root, {
 			platform: "linux",
@@ -280,7 +280,7 @@ describe("bash verification boundary", () => {
 	});
 
 	it("does not annotate checker coverage for non-diagnostic commands", async () => {
-		const root = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-bash-coverage-echo-")));
+		const root = realpathSync.native(tempDir("pi-bash-coverage-echo-"));
 		cleanupDirectories.push(root);
 		const tool = createBashTool(root, {
 			platform: "linux",

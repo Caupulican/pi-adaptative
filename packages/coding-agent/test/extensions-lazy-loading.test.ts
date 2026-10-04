@@ -1,5 +1,4 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel } from "@caupulican/pi-ai";
@@ -9,6 +8,7 @@ import { discoverAndLoadExtensions, disposeExtensionEventSubscriptions } from ".
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 const countersKey = "__piLazyExtensionTestCounters";
 
@@ -85,7 +85,7 @@ describe("lazy extension loading", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lazy-ext-"));
+		tempDir = makeTempDir("pi-lazy-ext-");
 		resetCounters();
 	});
 

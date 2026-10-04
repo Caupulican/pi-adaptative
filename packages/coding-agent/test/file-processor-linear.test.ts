@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { processFileArguments } from "../src/cli/file-processor.ts";
 import { resolveReadPath } from "../src/core/tools/path-utils.ts";
+import { tempDir } from "./temp-dir.ts";
 
 vi.mock("../src/core/tools/path-utils.ts", async (importOriginal) => {
 	const original = await importOriginal<{ resolveReadPath: typeof resolveReadPath }>();
@@ -37,7 +37,7 @@ describe("file argument projection", () => {
 	});
 
 	test("joins many immutable attachment blocks once in argument order", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-file-arguments-"));
+		const directory = tempDir("pi-file-arguments-");
 		directories.push(directory);
 		const paths = Array.from({ length: 256 }, (_, index) => {
 			const path = join(directory, `${index}.txt`);

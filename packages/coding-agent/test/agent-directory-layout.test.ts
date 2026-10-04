@@ -1,13 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { inspectAgentDirectoryLayout } from "../src/core/agent-directory-layout.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const tempDirs: string[] = [];
 
 function createTempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-agent-layout-"));
+	const dir = tempDir("pi-agent-layout-");
 	tempDirs.push(dir);
 	return dir;
 }

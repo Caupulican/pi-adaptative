@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -7,6 +6,7 @@ import { defaultFffSearchBackend, type FffFileFinder } from "../src/core/tools/f
 import { createFindToolDefinition } from "../src/core/tools/find.ts";
 import { createGrepToolDefinition } from "../src/core/tools/grep.ts";
 import { getToolPath, loadAvailableFffNodePackage } from "../src/utils/tools-manager.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * Opt-in FFF benchmark harness.
@@ -119,7 +119,7 @@ function parseGrepFiles(text: string): string[] {
 }
 
 function buildBenchmarkFixture(): string {
-	const root = mkdtempSync(join(tmpdir(), "pi-fff-bench-"));
+	const root = tempDir("pi-fff-bench-");
 	const specialStep = Math.max(1, Math.floor(BENCH_DIRS / 10));
 	for (let d = 0; d < BENCH_DIRS; d++) {
 		const dir = join(root, "pkg", `module${d}`);

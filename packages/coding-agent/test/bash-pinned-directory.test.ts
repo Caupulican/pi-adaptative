@@ -1,13 +1,13 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createBashTool } from "../src/core/tools/bash.ts";
 import { announceToolCall, retireToolCall } from "../src/core/tools/file-mutation-queue.ts";
 import { getTextOutput } from "../src/core/tools/render-utils.ts";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function createPinnedTool(root: string, sessionKey: string) {
 	return createBashTool(root, {
@@ -31,7 +31,7 @@ function createPinnedTool(root: string, sessionKey: string) {
 
 describe("Bash tool directory pin", () => {
 	it("applies the host pin on consecutive calls and retains command-local cd", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-bash-pin-"));
+		const scratch = tempDir("pi-bash-pin-");
 		const root = realpathSync(scratch);
 		mkdirSync(join(root, "child"));
 		const sessionKey = `pin-${randomUUID()}`;
@@ -55,7 +55,7 @@ describe("Bash tool directory pin", () => {
 	});
 
 	it("keeps direct Git filtering in the pin after a previous command changed the shell directory", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-git-pin-"));
+		const scratch = tempDir("pi-git-pin-");
 		const root = realpathSync(scratch);
 		const child = join(root, "child");
 		mkdirSync(child);
@@ -110,9 +110,9 @@ async function runAnnouncedBatch(
  */
 describe.skipIf(process.platform === "win32")("Bash tool directory pin across every execution path", () => {
 	it("starts every concurrent lane in the pin after a command changed the shell directory", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-bash-pin-lanes-"));
+		const scratch = tempDir("pi-bash-pin-lanes-");
 		const root = realpathSync(scratch);
-		const away = realpathSync(mkdtempSync(join(tmpdir(), "pi-bash-pin-away-")));
+		const away = realpathSync(tempDir("pi-bash-pin-away-"));
 		const sessionKey = `pin-lanes-${randomUUID()}`;
 		const tool = createPinnedTool(root, sessionKey);
 		try {
@@ -128,9 +128,9 @@ describe.skipIf(process.platform === "win32")("Bash tool directory pin across ev
 	});
 
 	it("never seeds a lane from the pool's remembered directory while pinned", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-bash-pin-pool-"));
+		const scratch = tempDir("pi-bash-pin-pool-");
 		const root = realpathSync(scratch);
-		const away = realpathSync(mkdtempSync(join(tmpdir(), "pi-bash-pin-pool-away-")));
+		const away = realpathSync(tempDir("pi-bash-pin-pool-away-"));
 		const sessionKey = `pin-pool-${randomUUID()}`;
 		const tool = createPinnedTool(root, sessionKey);
 		try {
@@ -153,9 +153,9 @@ describe.skipIf(process.platform === "win32")("Bash tool directory pin across ev
 	});
 
 	it("starts a detached background command in the pin, not where the session was left standing", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-bash-pin-background-"));
+		const scratch = tempDir("pi-bash-pin-background-");
 		const root = realpathSync(scratch);
-		const away = realpathSync(mkdtempSync(join(tmpdir(), "pi-bash-pin-background-away-")));
+		const away = realpathSync(tempDir("pi-bash-pin-background-away-"));
 		const sessionKey = `pin-background-${randomUUID()}`;
 		const tool = createPinnedTool(root, sessionKey);
 		try {
@@ -171,7 +171,7 @@ describe.skipIf(process.platform === "win32")("Bash tool directory pin across ev
 	});
 
 	it("probes a background filtered git call inside the pin and leaves the session in the pin", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-bash-pin-bg-git-"));
+		const scratch = tempDir("pi-bash-pin-bg-git-");
 		const root = realpathSync(scratch);
 		const child = join(root, "sub");
 		mkdirSync(child);
@@ -180,7 +180,7 @@ describe.skipIf(process.platform === "win32")("Bash tool directory pin across ev
 		for (const cwd of [root, child]) execFileSync("git", ["init", "-q"], { cwd });
 		writeFileSync(join(root, "root-marker"), "fixture");
 		writeFileSync(join(child, "child-marker"), "fixture");
-		const away = realpathSync(mkdtempSync(join(tmpdir(), "pi-bash-pin-bg-git-away-")));
+		const away = realpathSync(tempDir("pi-bash-pin-bg-git-away-"));
 		const sessionKey = `pin-bg-git-${randomUUID()}`;
 		const tool = createPinnedTool(root, sessionKey);
 		try {

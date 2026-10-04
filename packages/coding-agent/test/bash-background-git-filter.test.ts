@@ -12,12 +12,12 @@
  * exercise this path at all.
  */
 import { execSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createBashTool } from "../src/core/tools/bash.ts";
 import { getTextOutput } from "../src/core/tools/render-utils.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const isWindows = process.platform === "win32";
 
@@ -27,8 +27,8 @@ describe.skipIf(isWindows)("bash tool: a background filtered git call with a lea
 	let spawnedCommands: string[];
 
 	beforeEach(() => {
-		repoDir = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-bash-bg-git-filter-")));
-		outputDirectory = mkdtempSync(join(tmpdir(), "pi-bash-bg-git-filter-out-"));
+		repoDir = realpathSync.native(tempDir("pi-bash-bg-git-filter-"));
+		outputDirectory = tempDir("pi-bash-bg-git-filter-out-");
 		spawnedCommands = [];
 		execSync("git init -q", { cwd: repoDir });
 		execSync("git config user.email test@example.com", { cwd: repoDir });
@@ -105,8 +105,8 @@ describe.skipIf(isWindows)("bash tool: a background filtered git call on the Pow
 	let commandLog: string;
 
 	beforeEach(() => {
-		repoDir = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-floor-bg-git-")));
-		hostDir = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-floor-pwsh-")));
+		repoDir = realpathSync.native(tempDir("pi-floor-bg-git-"));
+		hostDir = realpathSync.native(tempDir("pi-floor-pwsh-"));
 		commandLog = join(hostDir, "commands.log");
 		pwshPath = join(hostDir, "pwsh");
 		// A stand-in for the PowerShell 7 host: it records the program it was handed and answers the

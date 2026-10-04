@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CacheKnowledge } from "../src/core/context/cache-knowledge.ts";
@@ -19,6 +18,7 @@ import {
 	survivalCurve,
 } from "../src/core/context/cache-survival.ts";
 import { DecisionLedgerStore } from "../src/core/operator-projection/decision-ledger-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const SETTINGS: SurvivalSettings = { halfLifeMs: Number.POSITIVE_INFINITY, poolingWeight: 4, binsPerDecade: 4 };
 const MINUTE = 60_000;
@@ -203,7 +203,7 @@ describe("cache observations across processes", () => {
 	});
 
 	it("measures a resumed session's gap from the ledger and counts its lineages", () => {
-		const dir = mkdtempSync(join(tmpdir(), "cache-survival-"));
+		const dir = tempDir("cache-survival-");
 		dirs.push(dir);
 		const ledger = openLedger(join(dir, "decision-ledger.sqlite"));
 		const key = lane("openrouter", "ling");
@@ -247,7 +247,7 @@ describe("cache knowledge", () => {
 		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 	const ledgerIn = () => {
-		const dir = mkdtempSync(join(tmpdir(), "cache-knowledge-"));
+		const dir = tempDir("cache-knowledge-");
 		dirs.push(dir);
 		return openLedger(join(dir, "decision-ledger.sqlite"));
 	};
@@ -325,7 +325,7 @@ describe("idle holder", () => {
 		expect(idleHolder([{ role: "toolResult" }, { role: "custom" }])).toBe("tool");
 		expect(idleHolder([{ role: "custom" }])).toBe("host");
 		expect(idleHolder([])).toBe("host");
-		const dir = mkdtempSync(join(tmpdir(), "idle-holder-"));
+		const dir = tempDir("idle-holder-");
 		dirs.push(dir);
 		const ledger = openLedger(join(dir, "decision-ledger.sqlite"));
 		const row = (observedAt: number, gapMs: number | undefined, holder: "owner" | "tool") => ({

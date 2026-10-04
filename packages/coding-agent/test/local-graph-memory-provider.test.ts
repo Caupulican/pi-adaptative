@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -7,6 +6,7 @@ import {
 	LOCAL_GRAPH_PROVIDER_ID,
 	resolveLocalGraphPath,
 } from "../src/core/context/local-graph-memory-provider.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("local graph memory provider", () => {
 	const roots: string[] = [];
@@ -16,14 +16,14 @@ describe("local graph memory provider", () => {
 	});
 
 	it("is absent when no local graph exists", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-local-graph-none-"));
+		const root = tempDir("pi-local-graph-none-");
 		roots.push(root);
 		expect(resolveLocalGraphPath(root, join(root, "agent"))).toBeUndefined();
 		expect(createLocalGraphMemoryProvider({ cwd: root, agentDir: join(root, "agent") })).toBeUndefined();
 	});
 
 	it("retrieves local graph nodes without a human prompt", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-local-graph-hit-"));
+		const root = tempDir("pi-local-graph-hit-");
 		roots.push(root);
 		const graphDir = join(root, "graphify-out");
 		mkdirSync(graphDir, { recursive: true });

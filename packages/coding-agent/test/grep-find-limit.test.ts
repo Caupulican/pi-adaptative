@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createFindToolDefinition, type FindOperations } from "../src/core/tools/find.ts";
 import { createGrepToolDefinition } from "../src/core/tools/grep.ts";
+import { tempDir } from "./temp-dir.ts";
 
 interface TextToolResult {
 	content: Array<{ type: string; text?: string }>;
@@ -18,7 +18,7 @@ describe("grep/find result-limit notices", () => {
 	let tempRoot: string;
 
 	beforeEach(() => {
-		tempRoot = mkdtempSync(join(tmpdir(), "pi-grep-find-limit-"));
+		tempRoot = tempDir("pi-grep-find-limit-");
 	});
 
 	afterEach(() => {

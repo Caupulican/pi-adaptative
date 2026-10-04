@@ -1,10 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it } from "vitest";
 import { ContextPipeline, type ContextPipelineDeps, type ContextPolicyLane } from "../src/core/context-pipeline.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * A worker conversation runs the context policy (audit, shadow plan, enforcement) on its own lane: its
@@ -27,7 +26,7 @@ function toolResult(toolCallId: string): AgentMessage {
 }
 
 function createPipeline(): ContextPipeline {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-context-policy-lane-"));
+	const agentDir = tempDir("pi-context-policy-lane-");
 	tempDirs.push(agentDir);
 	const sessionManager = { getLeafId: () => undefined, getBranch: () => [] } as unknown as SessionManager;
 	return new ContextPipeline({

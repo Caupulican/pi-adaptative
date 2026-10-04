@@ -1,10 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { afterEach, describe, expect, it } from "vitest";
 import { type ContextGcReport, getContextGcSettings } from "../src/core/context-gc.ts";
 import { ContextPipeline, type ContextPipelineDeps } from "../src/core/context-pipeline.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const tempDirs: string[] = [];
 
@@ -13,7 +12,7 @@ afterEach(() => {
 });
 
 function createPipeline(): ContextPipeline {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-context-pipeline-artifact-"));
+	const agentDir = tempDir("pi-context-pipeline-artifact-");
 	tempDirs.push(agentDir);
 	return new ContextPipeline({
 		getTurnIndex: () => 1,
