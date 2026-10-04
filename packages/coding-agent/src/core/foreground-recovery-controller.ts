@@ -55,6 +55,8 @@ export interface ForegroundRecoveryControllerDeps {
 	afterRun(): Promise<void>;
 	/** Runs at an idle Agent boundary while foreground submission authority is still held. */
 	settleRuntimeUpdate?(signal?: AbortSignal): Promise<"continue" | "stop" | undefined>;
+	/** Input admitted to the agent's queue that no round could deliver returns to the pending queue, held. */
+	holdUndeliveredQueue?(): void;
 	isCompacting?: () => boolean;
 	isExtendedBusy?: () => boolean;
 }
@@ -195,6 +197,48 @@ export class ForegroundRecoveryController {
 		}
 	}
 
+	/**
+	 * Whether a submission, run, stream or retry is live. Only then does a message handed to the agent's
+	 * queue have a consumer: compaction, an answer under evaluation and an armed continuation make the
+	 * foreground busy without any run that would ever drain that queue.
+	 */
+	get hasLiveConsumer(): boolean {
+		return (
+			this.submissionLease !== undefined || this.isRunActive || this.deps.agent.state.isStreaming || this.isRetrying
+		);
+	}
+
+	/**
+	 * Wait for the foreground to be either free or consumed by a live run, whichever comes first. Returns
+	 * the lease when it was free; "live_consumer" when a run that drains the agent's queue is live (the
+	 * caller queues behind it rather than waiting out that whole run); undefined when `signal` aborts.
+	 * Woken by every foreground activity change, never by polling.
+	 */
+	async acquireSubmissionOrJoinLiveConsumer(
+		signal: AbortSignal,
+	): Promise<ForegroundSubmissionLease | "live_consumer" | undefined> {
+		while (!signal.aborted) {
+			if (this.shutdownReason) throw this.shutdownReason;
+			const lease = this.tryAcquireSubmission();
+			if (lease) return lease;
+			if (this.hasLiveConsumer) return "live_consumer";
+			await new Promise<void>((resolve) => {
+				const stop = (): void => {
+					unsubscribe();
+					this.idleWaiters.delete(stop);
+					signal.removeEventListener("abort", stop);
+					resolve();
+				};
+				const unsubscribe = this.activityListeners.subscribe(stop);
+				this.idleWaiters.add(stop);
+				signal.addEventListener("abort", stop, { once: true });
+				// Register first, then recheck, so a change landing before the registration is not lost.
+				if (signal.aborted || this.shutdownReason || !this.isBusy || this.hasLiveConsumer) stop();
+			});
+		}
+		return undefined;
+	}
+
 	ownsSubmission(lease: ForegroundSubmissionLease | undefined): boolean {
 		return lease !== undefined && lease === this.submissionLease;
 	}
@@ -263,6 +307,9 @@ export class ForegroundRecoveryController {
 			// after this read has a live run to reach, and one that arrived before it is caught by it.
 			if (signal?.aborted) return;
 			let goalLoopRounds = 1;
+			// The runtime-update owner asked this run to end so the runtime can be replaced: no further provider
+			// round starts on its behalf. Admitted input stays in the agent's queue for the next run.
+			let stoppedForRuntimeUpdate = false;
 			if (mode === "prompt") {
 				if (!messages) throw new Error("Foreground prompt execution requires messages.");
 				await this.deps.agent.prompt(messages);
@@ -284,7 +331,10 @@ export class ForegroundRecoveryController {
 					goalLoopRounds++;
 				} else {
 					const update = await this.deps.settleRuntimeUpdate?.(signal);
-					if (update === "stop") break;
+					if (update === "stop") {
+						stoppedForRuntimeUpdate = true;
+						break;
+					}
 					if (update !== "continue") {
 						if (maxGoalLoopRounds !== 0 && goalLoopRounds >= maxGoalLoopRounds) break;
 						if (!(await this.handlePostAgentRun())) break;
@@ -302,6 +352,9 @@ export class ForegroundRecoveryController {
 				}
 				await this.deps.agent.continue();
 			}
+			// Every `break` above is an exit with no further round of its own. Input admitted to the
+			// agent's queue is the owner's and is never left behind it.
+			if (!stoppedForRuntimeUpdate) await this.deliverStrandedInput(signal);
 		} finally {
 			try {
 				await this.deps.afterRun();
@@ -312,6 +365,34 @@ export class ForegroundRecoveryController {
 					this.resolveIdleWaiters();
 				}
 			}
+		}
+	}
+
+	/** Messages that entered the transcript as input (user or custom), the measure of queue delivery. */
+	private countInputMessages(): number {
+		let count = 0;
+		for (const message of this.deps.agent.state.messages) {
+			if (message.role === "user" || message.role === "custom") count++;
+		}
+		return count;
+	}
+
+	/**
+	 * A run ended by an exit that has no round of its own left (no assistant message to classify, a
+	 * handled billing stop, a runtime-update stop, the stall cap) while the agent's queue still holds
+	 * admitted input. Each further round delivers what the agent's queue mode releases at a boundary
+	 * (all, or one per round) until the queue is empty. A round that delivers nothing, or an abort, ends
+	 * it, and whatever is still queued goes back to the pending queue, held, visible and recoverable.
+	 */
+	private async deliverStrandedInput(signal?: AbortSignal): Promise<void> {
+		try {
+			while (this.deps.agent.hasQueuedMessages() && !signal?.aborted) {
+				const before = this.countInputMessages();
+				await this.deps.agent.continue();
+				if (this.countInputMessages() === before) break;
+			}
+		} finally {
+			if (this.deps.agent.hasQueuedMessages()) this.deps.holdUndeliveredQueue?.();
 		}
 	}
 

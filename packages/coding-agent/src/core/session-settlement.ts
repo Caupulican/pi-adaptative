@@ -13,6 +13,8 @@ export interface SessionSettlementState {
 	isStreaming: boolean;
 	isCompacting: boolean;
 	pendingMessageCount: number;
+	/** Pending messages a run will still deliver itself; held input awaiting the owner is excluded. Defaults to `pendingMessageCount`. */
+	deliverablePendingMessageCount?: number;
 	isRetrying?: boolean;
 	isForegroundBusy?: boolean;
 	hasRunningWorker?: boolean;
@@ -54,5 +56,6 @@ export function isSessionSettled(state: SessionSettlementState, hasPendingIdleCo
 	if (state.isRetrying || state.isForegroundBusy || state.hasRunningWorker || state.hasRunningTool) {
 		return false;
 	}
-	return !state.isStreaming && !state.isCompacting && state.pendingMessageCount === 0 && !hasPendingIdleContinuation;
+	const deliverable = state.deliverablePendingMessageCount ?? state.pendingMessageCount;
+	return !state.isStreaming && !state.isCompacting && deliverable === 0 && !hasPendingIdleContinuation;
 }

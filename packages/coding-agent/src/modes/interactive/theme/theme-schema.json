@@ -236,6 +236,18 @@
 					"$ref": "#/$defs/colorValue",
 					"description": "Optional surface tone under removed diff rows"
 				},
+				"codeBlockBg": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Optional surface tone under fenced code blocks (editor and markdown)"
+				},
+				"codeBlockActiveBg": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Optional surface tone under the editor code row that holds the cursor; falls back to codeBlockBg"
+				},
+				"selectionBg": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Optional wash painted over mouse-selected conversation cells; without it selection uses reverse video"
+				},
 				"syntaxComment": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Syntax highlighting: comments"

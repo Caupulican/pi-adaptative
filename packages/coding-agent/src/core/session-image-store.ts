@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, resolve } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 import type { ImageContent } from "@caupulican/pi-ai";
 import { attachmentsDir } from "./agent-paths.ts";
 
@@ -11,6 +11,12 @@ const MAX_STORED_FILES = 512;
 const MAX_TOTAL_BYTES = 512 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 50 * 1024 * 1024;
 const MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+/** A pin is a sidecar file next to a stored image; a pinned image is exempt from pruning while its pin is fresh. */
+const PIN_SUFFIX = ".pin";
+/** A pin never outlives this since its last refresh, so an abandoned session cannot hold images forever. */
+const MAX_PIN_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+/** Pins hold images outside the retention budget, so the held bytes are bounded on their own. */
+const MAX_PINNED_BYTES = 256 * 1024 * 1024;
 const MAX_SEQUENCE = 999_999;
 const FILE_PATTERN = /^pi-clip-([0-9a-f]{16})-(\d{6})-([0-9a-f]{12})\.(png|jpg|webp|gif)$/;
 
@@ -37,10 +43,19 @@ interface StoredImageEntry {
 	mimeType: string;
 	bytes: number;
 	mtimeMs: number;
+	/** A fresh pin holds this image: pruning never deletes it and its size is outside the retention budget. */
+	pinned: boolean;
+}
+
+interface StoredPin {
+	path: string;
+	mtimeMs: number;
 }
 
 interface StoreScan {
 	entries: StoredImageEntry[];
+	/** Pin sidecars by the file name of the image they hold. */
+	pins: Map<string, StoredPin>;
 	complete: boolean;
 }
 
@@ -168,6 +183,48 @@ export class SessionImageStore {
 		return { sequence, path, mimeType: mimeTypeForExtension(extension), bytes: new Uint8Array(bytes) };
 	}
 
+	/**
+	 * Hold this session's images with these sequences against pruning, durably (a sidecar file per image, so
+	 * the hold survives a restart and applies to every process that prunes the shared directory). Refreshes
+	 * an existing pin. Returns the sequences that could not be held because the image is no longer stored.
+	 */
+	pin(sequences: readonly number[]): number[] {
+		if (sequences.length === 0) return [];
+		const scan = this.scan();
+		if (!scan.complete)
+			throw new Error(`Attachment directory exceeds the ${MAX_SCANNED_ENTRIES}-entry inspection bound`);
+		const missing: number[] = [];
+		let pinnedBytes = scan.entries.reduce((total, candidate) => total + (candidate.pinned ? candidate.bytes : 0), 0);
+		for (const sequence of new Set(sequences)) {
+			const entry = scan.entries.find(
+				(candidate) => candidate.sessionKey === this.sessionKey && candidate.sequence === sequence,
+			);
+			// An image beyond the pinned-bytes bound is reported like a missing one: the restore notice names
+			// it, and the owner's queued text is never lost over an attachment.
+			if (!entry || (!entry.pinned && pinnedBytes + entry.bytes > MAX_PINNED_BYTES)) {
+				missing.push(sequence);
+				continue;
+			}
+			if (!entry.pinned) pinnedBytes += entry.bytes;
+			writeFileSync(`${entry.path}${PIN_SUFFIX}`, "", { flag: "w" });
+		}
+		return missing;
+	}
+
+	/** Release every pin this session holds except the given sequences; released images become ordinary prunable files. */
+	unpinExcept(keep: readonly number[]): void {
+		const scan = this.scan();
+		const kept = new Set(keep);
+		for (const entry of scan.entries) {
+			if (entry.sessionKey !== this.sessionKey || kept.has(entry.sequence)) continue;
+			const pin = scan.pins.get(basename(entry.path));
+			if (!pin) continue;
+			try {
+				unlinkSync(pin.path);
+			} catch {}
+		}
+	}
+
 	read(sequence: number): StoredSessionImage | undefined {
 		if (!Number.isSafeInteger(sequence) || sequence < 1 || sequence > MAX_SEQUENCE) return undefined;
 		const scan = this.scan();
@@ -248,8 +305,10 @@ export class SessionImageStore {
 	}
 
 	private scan(): StoreScan {
-		if (!existsSync(this.directory)) return { entries: [], complete: true };
+		if (!existsSync(this.directory)) return { entries: [], pins: new Map(), complete: true };
 		const entries: StoredImageEntry[] = [];
+		const pins = new Map<string, StoredPin>();
+		const now = this.now();
 		let scanned = 0;
 		let complete = true;
 		const handle = opendirSync(this.directory);
@@ -263,6 +322,17 @@ export class SessionImageStore {
 				}
 				scanned++;
 				if (!directoryEntry.isFile() || directoryEntry.isSymbolicLink()) continue;
+				if (directoryEntry.name.endsWith(PIN_SUFFIX)) {
+					const imageName = directoryEntry.name.slice(0, -PIN_SUFFIX.length);
+					if (!FILE_PATTERN.test(imageName)) continue;
+					const pinPath = resolve(this.directory, directoryEntry.name);
+					try {
+						const stats = lstatSync(pinPath);
+						if (stats.isFile() && !stats.isSymbolicLink())
+							pins.set(imageName, { path: pinPath, mtimeMs: stats.mtimeMs });
+					} catch {}
+					continue;
+				}
 				const match = FILE_PATTERN.exec(directoryEntry.name);
 				if (!match) continue;
 				const path = resolve(this.directory, directoryEntry.name);
@@ -277,13 +347,18 @@ export class SessionImageStore {
 						mimeType: mimeTypeForExtension(match[4]!),
 						bytes: stats.size,
 						mtimeMs: stats.mtimeMs,
+						pinned: false,
 					});
 				} catch {}
 			}
 		} finally {
 			handle.closeSync();
 		}
-		return { entries, complete };
+		for (const entry of entries) {
+			const pin = pins.get(basename(entry.path));
+			entry.pinned = pin !== undefined && now - pin.mtimeMs <= MAX_PIN_AGE_MS;
+		}
+		return { entries, pins, complete };
 	}
 
 	private prune(protectedPath: string): void {
@@ -293,18 +368,30 @@ export class SessionImageStore {
 		}
 		const now = this.now();
 		for (const entry of scan.entries) {
-			if (entry.path !== protectedPath && now - entry.mtimeMs > MAX_AGE_MS) {
+			if (entry.path !== protectedPath && !entry.pinned && now - entry.mtimeMs > MAX_AGE_MS) {
 				try {
 					unlinkSync(entry.path);
 				} catch {}
 			}
+		}
+		// A pin whose image is gone or whose last refresh is too old holds nothing: remove it.
+		const stored = new Set(scan.entries.map((entry) => basename(entry.path)));
+		for (const [imageName, pin] of scan.pins) {
+			if (stored.has(imageName) && now - pin.mtimeMs <= MAX_PIN_AGE_MS) continue;
+			try {
+				unlinkSync(pin.path);
+			} catch {}
 		}
 
 		const retained = this.scan();
 		if (!retained.complete) {
 			throw new Error(`Attachment directory exceeds the ${MAX_SCANNED_ENTRIES}-entry inspection bound`);
 		}
-		const oldestFirst = retained.entries.sort((left, right) => left.mtimeMs - right.mtimeMs);
+		// Pinned images are held by a live queued input and sit outside the budget (their count is bounded by
+		// the queued record), so only the remaining files compete for it.
+		const oldestFirst = retained.entries
+			.filter((entry) => !entry.pinned)
+			.sort((left, right) => left.mtimeMs - right.mtimeMs);
 		let totalBytes = oldestFirst.reduce((total, entry) => total + entry.bytes, 0);
 		let totalFiles = oldestFirst.length;
 		for (const entry of oldestFirst) {

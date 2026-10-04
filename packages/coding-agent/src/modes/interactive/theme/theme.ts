@@ -1,6 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+	type ColorDepth,
+	detectColorDepth,
 	type EditorTheme,
 	getCapabilities,
 	type MarkdownTheme,
@@ -18,7 +20,7 @@ import {
 	ANSI_256_GRAY_LEVELS as GRAY_VALUES,
 } from "../../../utils/ansi-colors.ts";
 import { closeWatcher, watchWithErrorHandler } from "../../../utils/fs-watch.ts";
-import { highlight, supportsLanguage } from "../../../utils/syntax-highlight.ts";
+import { detectCodeLanguage, highlight, supportsLanguage } from "../../../utils/syntax-highlight.ts";
 import { stripBom } from "../../../utils/text.ts";
 
 // ============================================================================
@@ -81,6 +83,12 @@ const ThemeJsonSchema = Type.Object({
 		/** Surface tones under added/removed diff rows; optional, rows keep foreground-only colouring without them. */
 		toolDiffAddedBg: Type.Optional(ColorValueSchema),
 		toolDiffRemovedBg: Type.Optional(ColorValueSchema),
+		/** Surface tone under fenced code blocks (editor, markdown); optional, code blocks stay untinted without it. */
+		codeBlockBg: Type.Optional(ColorValueSchema),
+		/** Surface tone under the code row holding the editor cursor; falls back to codeBlockBg. */
+		codeBlockActiveBg: Type.Optional(ColorValueSchema),
+		/** Wash painted over mouse-selected conversation cells; optional, selection falls back to reverse video without it. */
+		selectionBg: Type.Optional(ColorValueSchema),
 		// Syntax Highlighting (9 colors)
 		syntaxComment: ColorValueSchema,
 		syntaxKeyword: ColorValueSchema,
@@ -250,9 +258,12 @@ export type ThemeBg =
 	| "toolErrorBg"
 	| "workbenchSurface"
 	| "toolDiffAddedBg"
-	| "toolDiffRemovedBg";
+	| "toolDiffRemovedBg"
+	| "codeBlockBg"
+	| "codeBlockActiveBg"
+	| "selectionBg";
 
-type ColorMode = "truecolor" | "256color";
+type ColorMode = ColorDepth;
 
 // ============================================================================
 // Color Utilities
@@ -344,34 +355,74 @@ function hexTo256(hex: string): number {
 	return rgbTo256(r, g, b);
 }
 
-function fgAnsi(color: string | number, mode: ColorMode): string {
-	if (color === "") return "\x1b[39m";
-	if (typeof color === "number") return `\x1b[38;5;${color}m`;
-	if (color.startsWith("#")) {
-		if (mode === "truecolor") {
-			const { r, g, b } = hexToRgb(color);
-			return `\x1b[38;2;${r};${g};${b}m`;
-		} else {
-			const index = hexTo256(color);
-			return `\x1b[38;5;${index}m`;
+/** The 16 ANSI colors as most terminals ship them: indexes 0-7 normal, 8-15 bright. */
+const ANSI_16_RGB: ReadonlyArray<readonly [number, number, number]> = [
+	[0, 0, 0],
+	[205, 0, 0],
+	[0, 205, 0],
+	[205, 205, 0],
+	[0, 0, 238],
+	[205, 0, 205],
+	[0, 205, 205],
+	[229, 229, 229],
+	[127, 127, 127],
+	[255, 0, 0],
+	[0, 255, 0],
+	[255, 255, 0],
+	[92, 92, 255],
+	[255, 0, 255],
+	[0, 255, 255],
+	[255, 255, 255],
+];
+
+/** Nearest of the first `count` ANSI colors; backgrounds use only the 8 normal colors. */
+function rgbTo16(r: number, g: number, b: number, count: 8 | 16): number {
+	let best = 0;
+	let bestDistance = Infinity;
+	for (let i = 0; i < count; i++) {
+		const [cr, cg, cb] = ANSI_16_RGB[i]!;
+		const distance = colorDistance(r, g, b, cr, cg, cb);
+		if (distance < bestDistance) {
+			bestDistance = distance;
+			best = i;
 		}
 	}
-	throw new Error(`Invalid color value: ${color}`);
+	return best;
+}
+
+function colorToRgb(color: string | number): { r: number; g: number; b: number } {
+	return hexToRgb(typeof color === "number" ? ansi256ToHex(color) : color);
+}
+
+/** SGR sequence selecting `color` at the given depth. "none" selects nothing: the user opted out of color. */
+function colorAnsi(color: string | number, mode: ColorMode, layer: "fg" | "bg"): string {
+	if (mode === "none") return "";
+	if (color === "") return layer === "fg" ? "\x1b[39m" : "\x1b[49m";
+	if (typeof color !== "number" && !color.startsWith("#")) throw new Error(`Invalid color value: ${color}`);
+	const base = layer === "fg" ? 38 : 48;
+	switch (mode) {
+		case "truecolor": {
+			if (typeof color === "number") return `\x1b[${base};5;${color}m`;
+			const { r, g, b } = hexToRgb(color);
+			return `\x1b[${base};2;${r};${g};${b}m`;
+		}
+		case "256color":
+			return `\x1b[${base};5;${typeof color === "number" ? color : hexTo256(color)}m`;
+		case "16color": {
+			const { r, g, b } = colorToRgb(color);
+			const index = rgbTo16(r, g, b, layer === "fg" ? 16 : 8);
+			const code = index < 8 ? (layer === "fg" ? 30 : 40) + index : 90 + (index - 8);
+			return `\x1b[${code}m`;
+		}
+	}
+}
+
+function fgAnsi(color: string | number, mode: ColorMode): string {
+	return colorAnsi(color, mode, "fg");
 }
 
 function bgAnsi(color: string | number, mode: ColorMode): string {
-	if (color === "") return "\x1b[49m";
-	if (typeof color === "number") return `\x1b[48;5;${color}m`;
-	if (color.startsWith("#")) {
-		if (mode === "truecolor") {
-			const { r, g, b } = hexToRgb(color);
-			return `\x1b[48;2;${r};${g};${b}m`;
-		} else {
-			const index = hexTo256(color);
-			return `\x1b[48;5;${index}m`;
-		}
-	}
-	throw new Error(`Invalid color value: ${color}`);
+	return colorAnsi(color, mode, "bg");
 }
 
 function resolveVarRefs(
@@ -437,13 +488,15 @@ export class Theme {
 
 	fg(color: ThemeColor, text: string): string {
 		const ansi = this.fgColors.get(color);
-		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
+		if (ansi === undefined) throw new Error(`Unknown theme color: ${color}`);
+		if (this.mode === "none") return text;
 		return `${ansi}${text}\x1b[39m`; // Reset only foreground color
 	}
 
 	bg(color: ThemeBg, text: string): string {
 		const ansi = this.bgColors.get(color);
-		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
+		if (ansi === undefined) throw new Error(`Unknown theme background color: ${color}`);
+		if (this.mode === "none") return text;
 		return `${ansi}${text}\x1b[49m`; // Reset only background color
 	}
 
@@ -474,13 +527,13 @@ export class Theme {
 
 	getFgAnsi(color: ThemeColor): string {
 		const ansi = this.fgColors.get(color);
-		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
+		if (ansi === undefined) throw new Error(`Unknown theme color: ${color}`);
 		return ansi;
 	}
 
 	getBgAnsi(color: ThemeBg): string {
 		const ansi = this.bgColors.get(color);
-		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
+		if (ansi === undefined) throw new Error(`Unknown theme background color: ${color}`);
 		return ansi;
 	}
 
@@ -689,7 +742,7 @@ function loadThemeJson(name: string): ThemeJson {
 }
 
 function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string): Theme {
-	const colorMode = mode ?? (getCapabilities().trueColor ? "truecolor" : "256color");
+	const colorMode = mode ?? detectColorDepth(getCapabilities().trueColor);
 	const resolvedColors = resolveThemeColors(themeJson.colors, themeJson.vars);
 	const fgColors: Record<ThemeColor, string | number> = {} as Record<ThemeColor, string | number>;
 	const bgColors: Record<ThemeBg, string | number> = {} as Record<ThemeBg, string | number>;
@@ -703,6 +756,9 @@ function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string
 		"workbenchSurface",
 		"toolDiffAddedBg",
 		"toolDiffRemovedBg",
+		"codeBlockBg",
+		"codeBlockActiveBg",
+		"selectionBg",
 	]);
 	for (const [key, value] of Object.entries(resolvedColors)) {
 		if (bgColorKeys.has(key)) {
@@ -1166,10 +1222,11 @@ function highlightCodeLines(
 ): string[] {
 	const plainLines = () => code.split("\n").map((line) => theme.fg(plainColor ?? "mdCodeBlock", line));
 	// Validate language before highlighting to avoid stderr spam from cli-highlight
-	const validLang = lang && supportsLanguage(lang) ? lang : undefined;
-	// Skip highlighting when no valid language is specified. cli-highlight's
-	// auto-detection is unreliable and can misidentify prose as AppleScript,
-	// LiveCodeServer, etc., coloring random English words as keywords.
+	const language = lang || detectCodeLanguage(code);
+	const validLang = language && supportsLanguage(language) ? language : undefined;
+	// Skip highlighting when no valid language is specified or provable from the text (shebang, JSON
+	// shape). cli-highlight's free-form auto-detection is unreliable and can misidentify prose as
+	// AppleScript, LiveCodeServer, etc., coloring random English words as keywords.
 	if (!validLang) {
 		return plainLines();
 	}
@@ -1275,7 +1332,32 @@ export function getMarkdownTheme(): MarkdownTheme {
 		underline: (text: string) => theme.underline(text),
 		strikethrough: (text: string) => chalk.strikethrough(text),
 		highlightCode: (code: string, lang?: string): string[] => highlightCodeLines(code, lang, "themed"),
+		codeBlockSurface: codeSurface,
+		codeBlockLabel: (text: string) => theme.fg("muted", text),
 	};
+}
+
+/** Surface tone behind code; themes without `codeBlockBg` leave rows untinted. */
+function codeSurface(text: string): string {
+	return theme.hasBg("codeBlockBg") ? theme.bg("codeBlockBg", text) : text;
+}
+
+/**
+ * SGR sequence the conversation window asserts over mouse-selected cells. A background wash keeps every
+ * foreground token color readable; without a `selectionBg` tone, or on 16-color and NO_COLOR terminals where
+ * a tone cannot be shown faithfully, reverse video marks the cells and still keeps each cell's own colors.
+ */
+export function getSelectionStyle(): string {
+	const mode = theme.getColorMode();
+	if ((mode === "truecolor" || mode === "256color") && theme.hasBg("selectionBg")) {
+		return theme.getBgAnsi("selectionBg");
+	}
+	return "\x1b[7m";
+}
+
+function activeCodeSurface(text: string): string {
+	if (theme.hasBg("codeBlockActiveBg")) return theme.bg("codeBlockActiveBg", text);
+	return codeSurface(text);
 }
 
 export function getSelectListTheme(): SelectListTheme {
@@ -1292,6 +1374,15 @@ export function getEditorTheme(): EditorTheme {
 	return {
 		borderColor: (text: string) => theme.fg("borderMuted", text),
 		selectList: getSelectListTheme(),
+		// The same highlighter, tokens and surface the transcript's code blocks use.
+		code: {
+			highlight: (code: string, lang?: string) => highlightCodeLines(code, lang, "themed"),
+			plain: (text: string) => theme.fg("mdCodeBlock", text),
+			fence: (text: string) => theme.fg("mdCodeBlockBorder", text),
+			label: (text: string) => theme.fg("muted", text),
+			surface: codeSurface,
+			activeSurface: activeCodeSurface,
+		},
 	};
 }
 

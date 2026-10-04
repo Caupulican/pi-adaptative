@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Added
+
+- Added render-time colorization of fenced code blocks in the `Editor` through an optional `EditorTheme.code` hook (highlighter, fence, language label, surface, cursor-row surface). The buffer is never changed, the language comes from the fence info string, an unterminated fence colors to the end of the buffer, and highlighting is bounded per render.
+- Added `detectColorDepth` and the `ColorDepth` type: true-color, 256-color, 16-color, and `NO_COLOR` (no color).
+- Added `codeBlockSurface` and `codeBlockLabel` to `MarkdownTheme` so a code block can carry a surface tone behind every row, fence rows included, and a separately styled language label.
+- Added `styleColumnRange`, which paints a column range of an ANSI-styled row with a style (such as a background wash or reverse video) without dropping the row's own colors, weight or surface; it clips to a width and decides membership by grapheme start column like `sliceByColumn`.
+
+### Changed
+
+- Markdown passes only the first word of a fence info string to `highlightCode` as the language.
+
 ## [0.102.2] - 2026-10-02
 
 ## [0.102.1] - 2026-10-01

@@ -193,7 +193,7 @@ export class ExtensionUiHost {
 			abort: () => {
 				this.ui.abort();
 			},
-			hasPendingMessages: () => this.session.pendingMessageCount > 0,
+			hasPendingMessages: () => this.session.deliverablePendingMessageCount > 0,
 			shutdown: () => {
 				this.ui.markShutdownRequested();
 			},

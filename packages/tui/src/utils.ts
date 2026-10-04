@@ -598,6 +598,15 @@ class AnsiCodeTracker {
 	}
 
 	getActiveCodes(): string {
+		let result = this.getActiveSgr();
+		if (this.activeHyperlink) {
+			result += formatOsc8Hyperlink(this.activeHyperlink);
+		}
+		return result;
+	}
+
+	/** The SGR attributes currently active, without any hyperlink state. */
+	getActiveSgr(): string {
 		const codes: string[] = [];
 		if (this.bold) codes.push("1");
 		if (this.dim) codes.push("2");
@@ -610,11 +619,7 @@ class AnsiCodeTracker {
 		if (this.fgColor) codes.push(this.fgColor);
 		if (this.bgColor) codes.push(this.bgColor);
 
-		let result = codes.length > 0 ? `\x1b[${codes.join(";")}m` : "";
-		if (this.activeHyperlink) {
-			result += formatOsc8Hyperlink(this.activeHyperlink);
-		}
-		return result;
+		return codes.length > 0 ? `\x1b[${codes.join(";")}m` : "";
 	}
 
 	hasActiveCodes(): boolean {
@@ -1044,22 +1049,15 @@ export function sliceWithWidth(
 	const resultParts: string[] = [];
 	const pendingAnsi: string[] = [];
 	let resultWidth = 0,
-		currentCol = 0,
-		i = 0;
+		currentCol = 0;
 
-	while (i < line.length) {
-		const ansi = extractAnsiCode(line, i);
-		if (ansi) {
-			if (currentCol >= startCol && currentCol < endCol) resultParts.push(ansi.code);
-			else if (currentCol < startCol) pendingAnsi.push(ansi.code);
-			i += ansi.length;
-			continue;
-		}
-
-		const textEnd = findTextRunEnd(line, i);
-
-		for (const { segment } of graphemeSegmenter.segment(line.slice(i, textEnd))) {
-			const w = graphemeWidth(segment);
+	walkStyledLine(
+		line,
+		(code) => {
+			if (currentCol >= startCol && currentCol < endCol) resultParts.push(code);
+			else if (currentCol < startCol) pendingAnsi.push(code);
+		},
+		(segment, w) => {
 			const inRange = currentCol >= startCol && currentCol < endCol;
 			const fits = !strict || currentCol + w <= endCol;
 			if (inRange && fits) {
@@ -1068,12 +1066,88 @@ export function sliceWithWidth(
 				resultWidth += w;
 			}
 			currentCol += w;
-			if (currentCol >= endCol) break;
+			return currentCol >= endCol;
+		},
+	);
+	return { text: resultParts.join(""), width: resultWidth };
+}
+
+/**
+ * Walk a styled line in order, once: `onAnsi` for each escape sequence, `onGrapheme` for each grapheme with
+ * its display width. `onGrapheme` returns true to stop the walk. One owner for the ANSI/grapheme scan that
+ * slicing, overlay extraction and range styling all build on.
+ */
+function walkStyledLine(
+	line: string,
+	onAnsi: (code: string) => void,
+	onGrapheme: (segment: string, width: number) => boolean,
+): void {
+	let i = 0;
+	while (i < line.length) {
+		const ansi = extractAnsiCode(line, i);
+		if (ansi) {
+			onAnsi(ansi.code);
+			i += ansi.length;
+			continue;
+		}
+		const textEnd = findTextRunEnd(line, i);
+		for (const { segment } of graphemeSegmenter.segment(line.slice(i, textEnd))) {
+			if (onGrapheme(segment, graphemeWidth(segment))) return;
 		}
 		i = textEnd;
-		if (currentCol >= endCol) break;
 	}
-	return { text: resultParts.join(""), width: resultWidth };
+}
+
+/**
+ * Paint a column range of an ANSI-styled row with `on` (an SGR sequence such as a background wash or
+ * reverse video) without dropping the row's own styles. Every style the row sets inside the range
+ * is followed by `on` again, so a theme's background close or a full reset cannot cancel the
+ * highlight, and the row's foreground, bold and italic stay visible. Leaving the range restores the
+ * row's own active styles. Range membership is decided by each grapheme's starting column, the same
+ * rule `sliceByColumn` uses, so the painted cells are exactly the cells a copy of the range returns.
+ * The row is clipped to `maxWidth` columns (a wide character that would cross the edge is dropped).
+ */
+export function styleColumnRange(
+	line: string,
+	startCol: number,
+	endCol: number,
+	on: string,
+	maxWidth: number = Number.POSITIVE_INFINITY,
+): string {
+	const tracker = new AnsiCodeTracker();
+	let out = "";
+	let col = 0;
+	let inside = false as boolean;
+	let clipped = false as boolean;
+	const leave = () => {
+		out += `\x1b[0m${tracker.getActiveSgr()}`;
+		inside = false;
+	};
+	walkStyledLine(
+		line,
+		(code) => {
+			out += code;
+			tracker.process(code);
+			if (inside && code.startsWith("\x1b[") && code.endsWith("m")) out += on;
+		},
+		(segment, w) => {
+			if (col + w > maxWidth) {
+				clipped = true;
+				return true;
+			}
+			const selected = col >= startCol && col < endCol;
+			if (selected && !inside) {
+				out += on;
+				inside = true;
+			} else if (!selected && inside) leave();
+			out += segment;
+			col += w;
+			return false;
+		},
+	);
+	if (inside) leave();
+	if (clipped) out += `\x1b[0m${tracker.getLineEndReset()}`;
+	return out;
 }
 
 // Pooled tracker instance for extractSegments (avoids allocation per call)
@@ -1096,35 +1170,27 @@ export function extractSegments(
 	const pendingAnsiBefore: string[] = [];
 	let beforeWidth = 0,
 		afterWidth = 0;
-	let currentCol = 0,
-		i = 0;
+	let currentCol = 0;
 	let afterStarted = false;
 	const afterEnd = afterStart + afterLen;
 
 	// Track styling state so "after" inherits styling from before the overlay
 	pooledStyleTracker.clear();
 
-	while (i < line.length) {
-		const ansi = extractAnsiCode(line, i);
-		if (ansi) {
+	walkStyledLine(
+		line,
+		(code) => {
 			// Track all SGR codes to know styling state at afterStart
-			pooledStyleTracker.process(ansi.code);
+			pooledStyleTracker.process(code);
 			// Include ANSI codes in their respective segments
 			if (currentCol < beforeEnd) {
-				pendingAnsiBefore.push(ansi.code);
+				pendingAnsiBefore.push(code);
 			} else if (currentCol >= afterStart && currentCol < afterEnd && afterStarted) {
 				// Only include after we've started "after" (styling already prepended)
-				afterParts.push(ansi.code);
+				afterParts.push(code);
 			}
-			i += ansi.length;
-			continue;
-		}
-
-		const textEnd = findTextRunEnd(line, i);
-
-		for (const { segment } of graphemeSegmenter.segment(line.slice(i, textEnd))) {
-			const w = graphemeWidth(segment);
-
+		},
+		(segment, w) => {
 			if (currentCol < beforeEnd) {
 				movePendingParts(beforeParts, pendingAnsiBefore);
 				beforeParts.push(segment);
@@ -1144,11 +1210,9 @@ export function extractSegments(
 
 			currentCol += w;
 			// Early exit: done with "before" only, or done with both segments
-			if (afterLen <= 0 ? currentCol >= beforeEnd : currentCol >= afterEnd) break;
-		}
-		i = textEnd;
-		if (afterLen <= 0 ? currentCol >= beforeEnd : currentCol >= afterEnd) break;
-	}
+			return afterLen <= 0 ? currentCol >= beforeEnd : currentCol >= afterEnd;
+		},
+	);
 
 	return { before: beforeParts.join(""), beforeWidth, after: afterParts.join(""), afterWidth };
 }

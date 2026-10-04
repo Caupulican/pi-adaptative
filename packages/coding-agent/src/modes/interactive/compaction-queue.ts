@@ -21,20 +21,36 @@ export type CompactionQueuedMessage = {
 
 export interface CompactionQueueHost {
 	compactionQueuedMessages: CompactionQueuedMessage[];
-	readonly session: Pick<AgentSession, "isStreaming" | "prompt" | "followUp" | "steer" | "clearQueue">;
+	readonly session: Pick<AgentSession, "prompt">;
 	updatePendingMessagesDisplay(): void;
 	showError(message: string): void;
 	isExtensionCommand(text: string): boolean;
 	refreshAutonomyFooterStatus(): void;
 }
 
-async function submitQueuedMessage(host: CompactionQueueHost, message: CompactionQueuedMessage): Promise<void> {
+/**
+ * Every queued message is submitted the way the editor submits one while work is live: through
+ * `prompt()` with its queue mode. `prompt()` queues the message when the session is busy and runs it
+ * as its own turn when it is not, so the decision never rests on `isStreaming`, which is false while
+ * compaction or a recovery round still owns the foreground.
+ */
+async function submitQueuedMessage(
+	host: CompactionQueueHost,
+	message: CompactionQueuedMessage,
+	accepted: (message: CompactionQueuedMessage) => void,
+): Promise<void> {
+	// The session reports acceptance (queued, or its own turn starting) before the turn it starts ends.
+	const preflightResult = (success: boolean) => {
+		if (success) accepted(message);
+	};
 	if (host.isExtensionCommand(message.text)) {
-		await host.session.prompt(message.text);
-	} else if (message.mode === "followUp") {
-		await host.session.followUp(message.text, message.images);
+		await host.session.prompt(message.text, { preflightResult });
 	} else {
-		await host.session.steer(message.text, message.images);
+		await host.session.prompt(message.text, {
+			images: message.images,
+			streamingBehavior: message.mode,
+			preflightResult,
+		});
 	}
 }
 
@@ -50,14 +66,29 @@ export async function flushCompactionQueue(
 	host.compactionQueuedMessages = [];
 	host.updatePendingMessagesDisplay();
 
+	// Once a submission has failed nothing after it is submitted. What the session accepted stays with the
+	// session (queued or running there); only the messages it never accepted return to the queue, in their
+	// original order. The session's own queue is never cleared: it holds input that is not this batch's.
+	let failed = false;
+	const notAccepted = new Set(queuedMessages);
+	const accepted = (message: CompactionQueuedMessage) => {
+		notAccepted.delete(message);
+		// A submission still in flight when the batch failed can be accepted after its message was returned.
+		if (failed && host.compactionQueuedMessages.includes(message)) {
+			host.compactionQueuedMessages = host.compactionQueuedMessages.filter((candidate) => candidate !== message);
+			host.updatePendingMessagesDisplay();
+		}
+	};
 	const restoreQueue = (error: unknown) => {
-		host.session.clearQueue();
-		host.compactionQueuedMessages = queuedMessages;
+		failed = true;
+		const returned = queuedMessages.filter((message) => notAccepted.has(message));
+		host.compactionQueuedMessages = [...returned, ...host.compactionQueuedMessages];
 		host.updatePendingMessagesDisplay();
+		const detail = error instanceof Error ? error.message : String(error);
 		host.showError(
-			`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${
-				error instanceof Error ? error.message : String(error)
-			}`,
+			returned.length === 0
+				? `A queued message failed after it was accepted: ${detail}`
+				: `Failed to send ${returned.length} queued message${returned.length === 1 ? "" : "s"}; ${returned.length === 1 ? "it is" : "they are"} back in the queue: ${detail}`,
 		);
 	};
 
@@ -65,7 +96,8 @@ export async function flushCompactionQueue(
 		if (options?.willRetry) {
 			// When retry is pending, queue messages for the retry turn
 			for (const message of queuedMessages) {
-				await submitQueuedMessage(host, message);
+				if (failed) return;
+				await submitQueuedMessage(host, message, accepted);
 			}
 			host.updatePendingMessagesDisplay();
 			return;
@@ -76,7 +108,8 @@ export async function flushCompactionQueue(
 		if (firstPromptIndex === -1) {
 			// All extension commands - execute them all
 			for (const message of queuedMessages) {
-				await host.session.prompt(message.text);
+				if (failed) return;
+				await submitQueuedMessage(host, message, accepted);
 			}
 			return;
 		}
@@ -87,17 +120,14 @@ export async function flushCompactionQueue(
 		const rest = queuedMessages.slice(firstPromptIndex + 1);
 
 		for (const message of preCommands) {
-			await host.session.prompt(message.text);
+			if (failed) return;
+			await submitQueuedMessage(host, message, accepted);
 		}
 
-		// Send first prompt (starts streaming). Auto-compaction can finish while the
-		// agent is still processing; in that case, queue the message with the same
-		// steering/follow-up mode instead of surfacing an internal streamingBehavior error.
-		const promptOptions = host.session.isStreaming
-			? { images: firstPrompt.images, streamingBehavior: firstPrompt.mode }
-			: { images: firstPrompt.images };
-		const promptPromise = host.session
-			.prompt(firstPrompt.text, promptOptions)
+		// Send the first prompt (starts streaming). Compaction can end while the foreground is still
+		// owned by a recovery round or by the compaction itself; the message then queues with its own
+		// steering/follow-up mode instead of failing as busy.
+		const promptPromise = submitQueuedMessage(host, firstPrompt, accepted)
 			.catch((error) => {
 				restoreQueue(error);
 			})
@@ -107,7 +137,8 @@ export async function flushCompactionQueue(
 
 		// Queue remaining messages
 		for (const message of rest) {
-			await submitQueuedMessage(host, message);
+			if (failed) return;
+			await submitQueuedMessage(host, message, accepted);
 		}
 		host.updatePendingMessagesDisplay();
 		void promptPromise;

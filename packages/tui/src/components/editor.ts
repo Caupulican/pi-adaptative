@@ -17,6 +17,16 @@ import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "../tui.
 import { UndoStack } from "../undo-stack.ts";
 import { getGraphemeSegmenter, getWordSegmenter, isWhitespaceChar, sliceByColumn, visibleWidth } from "../utils.ts";
 import { findWordBackward, findWordForward } from "../word-navigation.ts";
+import {
+	CodeHighlightCache,
+	chooseHighlightSpan,
+	type EditorCodeTheme,
+	fenceRowRuns,
+	findFenceRegions,
+	paintRange,
+	type StyleRun,
+	styledRuns,
+} from "./editor-code.ts";
 import { SelectList, type SelectListLayoutOptions, type SelectListTheme } from "./select-list.ts";
 
 const graphemeSegmenter = getGraphemeSegmenter();
@@ -232,11 +242,17 @@ interface LayoutLine {
 	text: string;
 	hasCursor: boolean;
 	cursorPos?: number;
+	/** Logical buffer line this row was laid out from. */
+	lineIndex: number;
+	/** Offset of `text` inside that logical line. */
+	startIndex: number;
 }
 
 export interface EditorTheme {
 	borderColor: (str: string) => string;
 	selectList: SelectListTheme;
+	/** Optional colorization of fenced code blocks. Applied at render time only; the buffer is never changed. */
+	code?: EditorCodeTheme;
 }
 
 export interface EditorOptions {
@@ -343,6 +359,9 @@ export class Editor implements Component, Focusable {
 	// Undo support
 	private undoStack = new UndoStack<EditorSnapshot>();
 	private readonly privateContent: boolean;
+
+	// Highlighted spans of fenced code blocks, keyed by exact text (render-time only).
+	private readonly codeCache = new CodeHighlightCache();
 
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
@@ -492,7 +511,56 @@ export class Editor implements Component, Focusable {
 	}
 
 	invalidate(): void {
-		// No cached state to invalidate currently
+		// Highlighted spans carry the previous theme's colors.
+		this.codeCache.clear();
+	}
+
+	/** Replace valid paste markers with same-length filler so the highlighter never lexes them as code. */
+	private maskPasteMarkers(line: string): string {
+		if (this.pastes.size === 0 || !line.includes("[paste #")) return line;
+		return line.replace(PASTE_MARKER_REGEX, (marker, idGroup) =>
+			this.pastes.has(Number(idGroup)) ? "_".repeat(marker.length) : marker,
+		);
+	}
+
+	/**
+	 * Style runs for every visible row that belongs to a fenced code block (fence rows included),
+	 * keyed by logical line. A key with an undefined value is a code row that stays unstyled.
+	 */
+	private resolveCodeRows(visibleLines: LayoutLine[]): Map<number, StyleRun[] | undefined> | undefined {
+		const code = this.theme.code;
+		const lines = this.state.lines;
+		if (!code || this.privateContent || visibleLines.length === 0) return undefined;
+		const regions = findFenceRegions(lines);
+		if (regions.length === 0) return undefined;
+		const firstVisible = visibleLines[0]!.lineIndex;
+		const lastVisible = visibleLines[visibleLines.length - 1]!.lineIndex;
+		const rows = new Map<number, StyleRun[] | undefined>();
+		for (const region of regions) {
+			const bodyStart = region.open + 1;
+			const bodyEnd = region.close ?? lines.length;
+			if (bodyEnd < firstVisible || region.open > lastVisible) continue;
+			rows.set(region.open, fenceRowRuns(lines[region.open]!, true, code));
+			if (region.close !== undefined) rows.set(region.close, fenceRowRuns(lines[region.close]!, false, code));
+			const first = Math.max(bodyStart, firstVisible);
+			const last = Math.min(bodyEnd - 1, lastVisible);
+			if (last < first) continue;
+			const span = chooseHighlightSpan(lines, bodyStart, bodyEnd, first, last);
+			const highlighted = this.codeCache.highlight(
+				lines.slice(span.from, span.to).map((line) => this.maskPasteMarkers(line)),
+				region.lang,
+				code,
+			);
+			for (let row = first; row <= last; row++) {
+				const line = lines[row]!;
+				const runs =
+					row >= span.from && row < span.to
+						? highlighted[row - span.from]
+						: styledRuns(line, [{ start: 0, end: line.length, format: code.plain }]);
+				rows.set(row, runs);
+			}
+		}
+		return rows;
 	}
 
 	render(width: number): string[] {
@@ -548,16 +616,27 @@ export class Editor implements Component, Focusable {
 		// Render each visible layout line
 		// Emit hardware cursor marker only when focused and not showing autocomplete
 		const emitCursorMarker = this.focused && !this.autocompleteState;
+		const codeRows = this.resolveCodeRows(visibleLines);
 
 		for (const layoutLine of visibleLines) {
-			let displayText = layoutLine.text;
+			// Code rows are colored from style runs over the raw buffer line; the text itself is never altered.
+			const isCodeRow = codeRows?.has(layoutLine.lineIndex) ?? false;
+			const runs = isCodeRow ? codeRows?.get(layoutLine.lineIndex) : undefined;
+			const rawLine = this.state.lines[layoutLine.lineIndex] ?? "";
+			const paint = (from: number, to: number): string =>
+				runs
+					? paintRange(rawLine, runs, layoutLine.startIndex + from, layoutLine.startIndex + to)
+					: layoutLine.text.slice(from, to);
+			// A code row keeps its surface tone behind the cursor, so the cursor closes only reverse video.
+			const cursorEnd = isCodeRow ? "\x1b[27m" : "\x1b[0m";
+			let displayText = paint(0, layoutLine.text.length);
 			let lineVisibleWidth = visibleWidth(layoutLine.text);
 			let cursorInPadding = false;
 
 			// Add cursor if this line has it
 			if (layoutLine.hasCursor && layoutLine.cursorPos !== undefined) {
-				const before = displayText.slice(0, layoutLine.cursorPos);
-				const after = displayText.slice(layoutLine.cursorPos);
+				const before = paint(0, layoutLine.cursorPos);
+				const after = layoutLine.text.slice(layoutLine.cursorPos);
 
 				// Hardware cursor marker (zero-width, emitted before fake cursor for IME positioning)
 				const marker = emitCursorMarker ? CURSOR_MARKER : "";
@@ -567,13 +646,13 @@ export class Editor implements Component, Focusable {
 					// Get the first grapheme from 'after'
 					const afterGraphemes = [...this.segment(after, "grapheme")];
 					const firstGrapheme = afterGraphemes[0]?.segment || "";
-					const restAfter = after.slice(firstGrapheme.length);
-					const cursor = `\x1b[7m${firstGrapheme}\x1b[0m`;
+					const restAfter = paint(layoutLine.cursorPos + firstGrapheme.length, layoutLine.text.length);
+					const cursor = `\x1b[7m${firstGrapheme}${cursorEnd}`;
 					displayText = before + marker + cursor + restAfter;
 					// lineVisibleWidth stays the same - we're replacing, not adding
 				} else {
 					// Cursor is at the end - add highlighted space
-					const cursor = "\x1b[7m \x1b[0m";
+					const cursor = `\x1b[7m ${cursorEnd}`;
 					displayText = before + marker + cursor;
 					lineVisibleWidth = lineVisibleWidth + 1;
 					// If cursor overflows content width into the padding, flag it
@@ -588,7 +667,11 @@ export class Editor implements Component, Focusable {
 			const lineRightPadding = cursorInPadding ? rightPadding.slice(1) : rightPadding;
 
 			// Render the line (no side borders, just horizontal lines above and below)
-			result.push(`${leftPadding}${displayText}${padding}${lineRightPadding}`);
+			const row = `${leftPadding}${displayText}${padding}${lineRightPadding}`;
+			const surface = layoutLine.hasCursor
+				? (this.theme.code?.activeSurface ?? this.theme.code?.surface)
+				: this.theme.code?.surface;
+			result.push(isCodeRow && surface ? surface(row) : row);
 		}
 
 		// Render bottom border (with scroll indicator if more content below)
@@ -859,6 +942,8 @@ export class Editor implements Component, Focusable {
 				text: "",
 				hasCursor: true,
 				cursorPos: 0,
+				lineIndex: 0,
+				startIndex: 0,
 			});
 			return layoutLines;
 		}
@@ -876,11 +961,15 @@ export class Editor implements Component, Focusable {
 						text: line,
 						hasCursor: true,
 						cursorPos: this.state.cursorCol,
+						lineIndex: i,
+						startIndex: 0,
 					});
 				} else {
 					layoutLines.push({
 						text: line,
 						hasCursor: false,
+						lineIndex: i,
+						startIndex: 0,
 					});
 				}
 			} else {
@@ -924,11 +1013,15 @@ export class Editor implements Component, Focusable {
 							text: chunk.text,
 							hasCursor: true,
 							cursorPos: adjustedCursorPos,
+							lineIndex: i,
+							startIndex: chunk.startIndex,
 						});
 					} else {
 						layoutLines.push({
 							text: chunk.text,
 							hasCursor: false,
+							lineIndex: i,
+							startIndex: chunk.startIndex,
 						});
 					}
 				}

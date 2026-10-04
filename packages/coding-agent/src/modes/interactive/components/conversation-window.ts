@@ -1,4 +1,11 @@
-import { type Component, Container, isImageLine, sliceByColumn, truncateToWidth } from "@caupulican/pi-tui";
+import {
+	type Component,
+	Container,
+	isImageLine,
+	sliceByColumn,
+	styleColumnRange,
+	truncateToWidth,
+} from "@caupulican/pi-tui";
 import { stripAnsi } from "../../../utils/ansi.ts";
 
 /** OSC 133 prompt-zone marks emitted by the inline transcript components. */
@@ -23,6 +30,7 @@ interface CachedRows {
 export class ConversationWindow {
 	private readonly entries: () => readonly Component[];
 	private readonly byteLimit: number;
+	private readonly selectionStyle: () => string;
 	private readonly cache = new Map<Component, CachedRows>();
 	private anchor?: Anchor;
 	private width = 1;
@@ -34,9 +42,18 @@ export class ConversationWindow {
 	private tail = true;
 	private bytes = 0;
 
-	constructor(entries: () => readonly Component[], byteLimit = 2 * 1024 * 1024) {
+	/**
+	 * `selectionStyle` returns the SGR sequence asserted over selected cells (read on every paint so a theme
+	 * change applies at once). The default is reverse video, which keeps each cell's own colors.
+	 */
+	constructor(
+		entries: () => readonly Component[],
+		byteLimit = 2 * 1024 * 1024,
+		selectionStyle: () => string = () => "\x1b[7m",
+	) {
 		this.entries = entries;
 		this.byteLimit = byteLimit;
+		this.selectionStyle = selectionStyle;
 	}
 
 	get following(): boolean {
@@ -206,17 +223,11 @@ export class ConversationWindow {
 	private highlight(lines: string[]): string[] {
 		return lines.map((line, row) => {
 			const range = this.selectedRange(row);
-			if (!range) return truncateToWidth(line, this.width, "");
-			const start = Math.min(this.width, range[0]);
-			const end = Math.min(this.width, range[1]);
-			const plain = stripAnsi(line);
-			return (
-				sliceByColumn(plain, 0, start) +
-				"\x1b[7m" +
-				sliceByColumn(plain, start, end - start) +
-				"\x1b[27m" +
-				sliceByColumn(plain, end, this.width - end)
-			);
+			const start = range ? Math.min(this.width, range[0]) : 0;
+			const end = range ? Math.min(this.width, range[1]) : 0;
+			if (end <= start) return truncateToWidth(line, this.width, "");
+			// The row keeps its own colors, code surface and weight; only the selected cells gain the wash.
+			return styleColumnRange(line, start, end, this.selectionStyle(), this.width);
 		});
 	}
 }

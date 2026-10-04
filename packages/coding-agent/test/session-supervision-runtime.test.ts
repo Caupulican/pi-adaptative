@@ -82,7 +82,7 @@ describe("SessionSupervisionRuntime", () => {
 		expect(stopSettled).toBe(false);
 
 		worktree.resolve({ stop: stopWorktree });
-		processMatrix.resolve({ stop: stopProcessMatrix, waitForIdle: async () => {} });
+		processMatrix.resolve({ stop: stopProcessMatrix, waitForIdle: async () => "idle" as const });
 		await Promise.all([start, stop]);
 
 		expect(stopWorktree).toHaveBeenCalledOnce();
@@ -108,7 +108,7 @@ describe("SessionSupervisionRuntime", () => {
 		runtimeMocks.startWorktreeSyncRuntime.mockResolvedValueOnce({ stop: stopWorktree });
 		runtimeMocks.startProcessMatrixRuntime.mockResolvedValueOnce({
 			stop: stopProcessMatrix,
-			waitForIdle: async () => {},
+			waitForIdle: async () => "idle" as const,
 		});
 
 		const supervision = createSupervision();

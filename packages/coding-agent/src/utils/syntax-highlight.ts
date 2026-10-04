@@ -198,3 +198,27 @@ export function supportsLanguage(name: string): boolean {
 	ensureLanguageRegistered(name);
 	return hljs.getLanguage(name) !== undefined;
 }
+
+const SHEBANG_LANGUAGES: ReadonlyArray<readonly [RegExp, string]> = [
+	[/^#!.*\b(?:ba|z|da)?sh\b/, "bash"],
+	[/^#!.*\bpython[\d.]*\b/, "python"],
+	[/^#!.*\b(?:node|bun|deno)\b/, "javascript"],
+	[/^#!.*\bruby\b/, "ruby"],
+];
+const JSON_SHAPE = /^\s*[{[][\s\S]{0,2000}?"[^"\n]*"\s*:/;
+
+/**
+ * Language of an unlabeled code block, from evidence in the text itself: an interpreter shebang or
+ * the shape of a JSON object. Free-form auto-detection is deliberately absent because it
+ * misreads prose as code; anything this does not recognize stays plain.
+ */
+export function detectCodeLanguage(code: string): string | undefined {
+	const firstLine = code.slice(0, code.indexOf("\n") === -1 ? undefined : code.indexOf("\n"));
+	if (firstLine.startsWith("#!")) {
+		for (const [pattern, language] of SHEBANG_LANGUAGES) {
+			if (pattern.test(firstLine)) return language;
+		}
+		return undefined;
+	}
+	return JSON_SHAPE.test(code) ? "json" : undefined;
+}

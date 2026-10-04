@@ -107,6 +107,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 				console.warn(`Warning: ${event.message}`);
 			}
 		});
+		session.announceRestoredQueuedInput();
 		session.resumeSelfCompaction();
 	};
 

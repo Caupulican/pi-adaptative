@@ -13,6 +13,7 @@
 		"darkGray": "#505050",
 		"accent": "#8abeb7",
 		"selectedBg": "#3a3a4a",
+		"selectWash": "#34506e",
 		"surfaceBg": "#232329",
 		"userMsgBg": "#343541",
 		"toolPendingBg": "#282832",
@@ -35,6 +36,7 @@
 		"thinkingText": "gray",
 
 		"selectedBg": "selectedBg",
+		"selectionBg": "selectWash",
 		"userMessageBg": "userMsgBg",
 		"userMessageText": "text",
 		"customMessageBg": "customMsgBg",

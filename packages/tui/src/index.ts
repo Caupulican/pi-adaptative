@@ -9,10 +9,12 @@ export {
 	type SlashCommand,
 } from "./autocomplete.ts";
 export { pasteIntoEditor, wrapBracketedPaste } from "./bracketed-paste.ts";
+export { type ColorDepth, detectColorDepth } from "./color-depth.ts";
 // Components
 export { Box } from "./components/box.ts";
 export { CancellableLoader } from "./components/cancellable-loader.ts";
 export { Editor, type EditorOptions, type EditorTheme } from "./components/editor.ts";
+export type { EditorCodeTheme } from "./components/editor-code.ts";
 export { Image, type ImageOptions, type ImageTheme } from "./components/image.ts";
 export { Input, type InputOptions } from "./components/input.ts";
 export { Loader, type LoaderIndicatorOptions } from "./components/loader.ts";
@@ -128,6 +130,7 @@ export {
 	getAmbiguousWidthMode,
 	setAmbiguousWidthMode,
 	sliceByColumn,
+	styleColumnRange,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,

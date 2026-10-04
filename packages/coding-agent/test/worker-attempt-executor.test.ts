@@ -174,6 +174,7 @@ function createExecutorHarness(
 			cwd: process.cwd(),
 			processEnabled: false,
 			shellReadOnly: false,
+			readOnly: false,
 			writeEnabled: false,
 			readMemory: false,
 			readPaths: [process.cwd()],

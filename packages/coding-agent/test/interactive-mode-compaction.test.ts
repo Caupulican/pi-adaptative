@@ -89,7 +89,14 @@ describe("InteractiveMode compaction events", () => {
 		};
 		await flushCompactionQueue(fakeThis, { willRetry: false });
 
-		expect(prompt).toHaveBeenCalledWith("verify the image", { images: undefined, streamingBehavior: "steer" });
+		expect(prompt).toHaveBeenCalledWith(
+			"verify the image",
+			expect.objectContaining({
+				images: undefined,
+				streamingBehavior: "steer",
+				preflightResult: expect.any(Function),
+			}),
+		);
 		expect(fakeThis.showError).not.toHaveBeenCalled();
 		expect(fakeThis.compactionQueuedMessages).toEqual([]);
 	});

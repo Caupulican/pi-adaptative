@@ -187,7 +187,10 @@ function recordSummaryItems(
 		const id = kind === "agent" ? record.laneId : record.taskId;
 		if (typeof id !== "string" || id.length === 0 || typeof record.status !== "string") return undefined;
 		if (kind === "agent") {
-			const claimNeedsReview = isPlainRecord(record.claim) && record.claim.parentReviewRequired === true;
+			const claimNeedsReview =
+				isPlainRecord(record.claim) &&
+				(record.claim.parentReviewRequired === true ||
+					(isPlainRecord(record.claim.verification) && record.claim.verification.verdict === "rejected"));
 			const status =
 				record.status === "failed" || record.status === "timeout" || record.status === "budget_exhausted"
 					? "failed"

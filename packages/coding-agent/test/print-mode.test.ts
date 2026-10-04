@@ -25,6 +25,7 @@ type FakeSession = {
 	extensionRunner: FakeExtensionRunner;
 	bindExtensions: ReturnType<typeof vi.fn>;
 	subscribe: ReturnType<typeof vi.fn>;
+	announceRestoredQueuedInput: ReturnType<typeof vi.fn>;
 	prompt: ReturnType<typeof vi.fn>;
 	waitForForegroundIdle: ReturnType<typeof vi.fn>;
 	resumeSelfCompaction: ReturnType<typeof vi.fn>;
@@ -83,6 +84,7 @@ function createRuntimeHost(...messages: AgentMessage[]): FakeRuntimeHost {
 		extensionRunner,
 		bindExtensions: vi.fn(async () => {}),
 		subscribe: vi.fn(() => () => {}),
+		announceRestoredQueuedInput: vi.fn(),
 		prompt: vi.fn(async () => {}),
 		waitForForegroundIdle: vi.fn(async () => {}),
 		resumeSelfCompaction: vi.fn(() => false),

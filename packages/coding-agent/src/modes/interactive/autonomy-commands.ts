@@ -61,7 +61,7 @@ export function formatAutonomyStatus(
 	const otherTenantRunning = Object.values(autoLearnState.runs ?? {}).filter((run) => run.tenant !== tenant).length;
 	const safety =
 		autonomy.mode === "full"
-			? "standing grant for memory, skills, user/project extensions, autonomy/autoLearn tuning, and authorized selfModification.sourcePath edits"
+			? "read-only learners return proposals; this session applies eligible memory, skill and autoLearn tuning entries and records extension, source and ineligible entries as findings"
 			: "proposal-gated outside configured high-confidence memory policy";
 	const reflectionLine =
 		autonomy.mode === "full"

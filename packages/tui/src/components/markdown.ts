@@ -101,6 +101,10 @@ export interface MarkdownTheme {
 	highlightCode?: (code: string, lang?: string) => string[];
 	/** Prefix applied to each rendered code block line (default: "  ") */
 	codeBlockIndent?: string;
+	/** Surface tone painted behind every row of a code block, fence rows included. */
+	codeBlockSurface?: (text: string) => string;
+	/** Style for the language label after the opening fence (default: styled with codeBlockBorder). */
+	codeBlockLabel?: (text: string) => string;
 }
 
 export interface MarkdownOptions {
@@ -300,20 +304,39 @@ export class Markdown extends CachedTextComponent implements Component {
 
 			case "code": {
 				const indent = this.theme.codeBlockIndent ?? "  ";
-				lines.push(this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`));
+				const label = this.theme.codeBlockLabel;
+				const rows: string[] = [
+					label && token.lang
+						? this.theme.codeBlockBorder("```") + label(token.lang)
+						: this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`),
+				];
 				if (this.theme.highlightCode) {
-					const highlightedLines = this.theme.highlightCode(token.text, token.lang);
-					for (const hlLine of highlightedLines) {
-						lines.push(`${indent}${hlLine}`);
+					// The language is the first word of the info string ("ts title=a.ts" is still ts).
+					const language = token.lang?.trim().split(/\s+/)[0] || undefined;
+					for (const hlLine of this.theme.highlightCode(token.text, language)) {
+						rows.push(`${indent}${hlLine}`);
 					}
 				} else {
 					// Split code by newlines and style each line
-					const codeLines = token.text.split("\n");
-					for (const codeLine of codeLines) {
-						lines.push(`${indent}${this.theme.codeBlock(codeLine)}`);
+					for (const codeLine of token.text.split("\n")) {
+						rows.push(`${indent}${this.theme.codeBlock(codeLine)}`);
 					}
 				}
-				lines.push(this.theme.codeBlockBorder("```"));
+				rows.push(this.theme.codeBlockBorder("```"));
+				const surface = this.theme.codeBlockSurface;
+				if (surface) {
+					// Wrap first so every wrapped row carries the surface out to the content edge.
+					for (const row of rows) {
+						for (const wrapped of wrapTextWithAnsi(row, width)) {
+							const padded = wrapped + " ".repeat(Math.max(0, width - visibleWidth(wrapped)));
+							const painted = surface(padded);
+							// A surface that paints nothing (theme without one, NO_COLOR) leaves the row unpadded.
+							lines.push(painted === padded ? wrapped : painted);
+						}
+					}
+				} else {
+					lines.push(...rows);
+				}
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after code blocks (unless space token follows)
 				}

@@ -203,6 +203,9 @@ Every theme must define all 51 color tokens. There are no optional colors.
 | `toolDiffContext` | Context lines |
 | `toolDiffAddedBg` | Optional surface tone under added rows (a wash makes edits land on palettes where the added colour sits on a tinted panel) |
 | `toolDiffRemovedBg` | Optional surface tone under removed rows |
+| `codeBlockBg` | Optional surface tone under fenced code blocks, in markdown and in the input editor (without it code blocks stay untinted) |
+| `codeBlockActiveBg` | Optional surface tone under the editor code row that holds the cursor (falls back to `codeBlockBg`) |
+| `selectionBg` | Optional wash painted over mouse-selected conversation cells; token colors, bold and italic stay visible on top of it. Without it, and on 16-color or `NO_COLOR` terminals, selection uses reverse video, which also keeps each cell's own colors |
 
 ### Syntax Highlighting (9 colors)
 

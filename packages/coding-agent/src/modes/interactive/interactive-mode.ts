@@ -1173,6 +1173,16 @@ export class InteractiveMode {
 				`Failed to resume pending user input: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
+		// Input the previous run still held queued returns pending, visible and takeable into the editor.
+		const restoredQueueNotice = this.session.takeRestoredQueuedInputNotice();
+		if (restoredQueueNotice) {
+			this.updatePendingMessagesDisplay();
+			this.showWarning(restoredQueueNotice);
+		}
+		// Learner proposals a previous session could not apply are offered once more, under the same gates.
+		void this.autoLearnController.reofferUnappliedProposals().catch((error: unknown) => {
+			this.showWarning(`Auto Learn re-offer failed: ${error instanceof Error ? error.message : String(error)}`);
+		});
 		this.session.resumeSelfCompaction();
 	}
 
@@ -2634,9 +2644,14 @@ export class InteractiveMode {
 			this.updatePendingMessagesDisplay();
 			this.ui.requestRender();
 		}
-		// If not streaming, Alt+Enter acts like regular Enter (trigger onSubmit)
+		// If not streaming, Alt+Enter acts like regular Enter (trigger onSubmit). While the session is
+		// busy without a live stream (an answer under evaluation, a retry backoff, an armed
+		// continuation) Enter would queue the text as steering; the follow-up intent is kept through the
+		// editor's own chord-free ">>" form. Commands are never prefixed: they run as commands.
 		else if (this.editor.onSubmit) {
-			await this.editor.onSubmit(text);
+			const isCommandText = text.startsWith("/") || text.startsWith("!");
+			const keepFollowUp = this.session.getSessionWorkState().busy && !isCommandText;
+			await this.editor.onSubmit(keepFollowUp ? `>>${text}` : text);
 			this.editor.setText("");
 		}
 	}
@@ -2859,11 +2874,11 @@ export class InteractiveMode {
 			`Interrupting to send ${entries.length} queued message${entries.length > 1 ? "s" : ""} now`,
 			"neutral",
 		);
-		await this.session.abort("send now");
-		// The aborted prompt still holds the foreground lease until its tail finishes; a root prompt
-		// submitted before that is refused as busy.
-		await this.session.waitForForegroundIdle();
 		try {
+			await this.session.abort("send now");
+			// The aborted prompt still holds the foreground lease until its tail finishes; a root prompt
+			// submitted before that is refused as busy.
+			await this.session.waitForForegroundIdle();
 			await this.session.prompt(text, { images: images.length ? images : undefined, processSlashCommands: false });
 		} catch (error) {
 			// The operator's words are not lost with the failed submission: they return to the editor

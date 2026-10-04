@@ -397,6 +397,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		unsubscribeBackpressure = session.agent.subscribe(async () => {
 			await waitForRawStdoutBackpressure();
 		});
+		session.announceRestoredQueuedInput();
 	};
 
 	await rebindSession();
