@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createInMemoryArtifactStore } from "../src/core/context/context-artifacts.ts";
 import { reserveSessionBundleDeletion } from "../src/core/orchestration/session-bundle-lifecycle.ts";
@@ -8,6 +6,7 @@ import { TypeSafeEvidenceStore } from "../src/core/review/typesafe-evidence-stor
 import { SystemOneReviewer } from "../src/core/review/typesafe-reviewer.ts";
 import type { SemanticUncertaintyPort } from "../src/core/system-one/semantic-doubts.ts";
 import { createSystemOneToolDefinition } from "../src/core/tools/systemone.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const directories: string[] = [];
 afterEach(() => {
@@ -42,7 +41,7 @@ describe("TypeSafe durable evidence", () => {
 		},
 	);
 	it("retains all large adverse evidence across cleanup/reopen, with complete paging and stable identity", () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-jev-evidence-"));
+		const directory = tempDir("pi-jev-evidence-");
 		directories.push(directory);
 		const archive = TypeSafeEvidenceStore.file(directory, "session");
 		const record = {

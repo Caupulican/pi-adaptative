@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -23,6 +22,7 @@ import {
 import { TaskAutomationController } from "../src/core/automation/task-automation-controller.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { createTaskAutomationToolDefinition } from "../src/core/tools/task-automation.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 function createDeferred<T>() {
 	let resolve!: (value: T | PromiseLike<T>) => void;
@@ -62,7 +62,7 @@ describe("TaskAutomation Comprehensive Unit Suite", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "task-automation-unit-"));
+		tempDir = makeTempDir("task-automation-unit-");
 	});
 
 	afterEach(() => {

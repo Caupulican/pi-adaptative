@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { appendFileSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { WorkerClaim } from "../src/core/autonomy/contracts.ts";
@@ -12,11 +11,12 @@ import {
 	MAX_WORKER_ARTIFACT_HASH_BYTES,
 	MAX_WORKER_ARTIFACT_HASH_TOTAL_BYTES,
 } from "../src/core/orchestration/worker-result-adapter.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 
 function root(): string {
-	const directory = mkdtempSync(join(tmpdir(), "pi-worker-result-adapter-"));
+	const directory = tempDir("pi-worker-result-adapter-");
 	roots.push(directory);
 	return directory;
 }

@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { execCommand } from "../src/core/exec.ts";
@@ -17,6 +16,7 @@ import {
 } from "../src/core/worktree-sync/git-engine.ts";
 import { classifyLaneBashCommand, WorktreeLaneGate } from "../src/core/worktree-sync/lane-gate.ts";
 import { createDirectoryLink } from "./helpers/filesystem-links.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cleanups: string[] = [];
 
@@ -34,7 +34,7 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 }
 
 async function initRepo(): Promise<{ repo: string; deps: WorktreeSyncEngineDeps }> {
-	const root = mkdtempSync(join(tmpdir(), "pi-wt-sync-gate-"));
+	const root = tempDir("pi-wt-sync-gate-");
 	cleanups.push(root);
 	const repo = join(root, "repo");
 	await git(root, "init", "-b", "main", repo);

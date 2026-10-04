@@ -1,9 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ToolPerformanceKey, ToolPerformanceStore } from "../src/core/tool-selection/tool-performance-store.ts";
 import { nodeFs } from "../src/core/util/faultable-fs.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const host = { id: "fixture", cpu: "fixture", cores: 2, totalMemGb: 8 };
 const key: ToolPerformanceKey = { modelRef: "faux/model", intentClass: "read", tool: "read" };
@@ -22,7 +22,7 @@ afterEach(() => {
 });
 
 function fixture(writeBehind = false) {
-	const dir = mkdtempSync(join(tmpdir(), "pi-performance-byte-"));
+	const dir = tempDir("pi-performance-byte-");
 	const path = join(dir, "state", "tool-performance.json");
 	const store = ToolPerformanceStore.forAgentDir(dir, {
 		fingerprint: () => host,

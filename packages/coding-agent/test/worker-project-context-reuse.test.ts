@@ -1,11 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { Context, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai/faux";
 import { afterEach, expect, it } from "vitest";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { createHarness, getMessageText, type Harness } from "./suite/harness.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -13,7 +13,7 @@ afterEach(async () => {
 });
 
 async function project() {
-	const root = mkdtempSync(join(tmpdir(), "pi-project-context-"));
+	const root = tempDir("pi-project-context-");
 	const cwd = join(root, "project");
 	const agentDir = join(root, "state");
 	mkdirSync(cwd);

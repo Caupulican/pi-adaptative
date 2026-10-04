@@ -1,6 +1,5 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { access, readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ImageContent, TextContent } from "@caupulican/pi-ai";
 import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai/faux";
@@ -11,6 +10,7 @@ import type { ToolCallEvent } from "../src/core/extensions/types.ts";
 import { ToolGateController } from "../src/core/tool-gate-controller.ts";
 import { createReadTool } from "../src/core/tools/read.ts";
 import { createHarness } from "./suite/harness.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 describe("post-hook argument authority", () => {
 	it.each(["hook", "direct", "edge", "none"] as const)(
@@ -73,8 +73,8 @@ describe("post-hook argument authority", () => {
 		it.each(["same", "inside", "outside"] as const)(
 			`checks the executed path, not returned metadata (actualOutside=${actualOutside}, decoy=%s)`,
 			async (decoyKind) => {
-				const cwd = mkdtempSync(join(tmpdir(), "pi-gate-actual-"));
-				const outside = mkdtempSync(join(tmpdir(), "pi-gate-decoy-"));
+				const cwd = makeTempDir("pi-gate-actual-");
+				const outside = makeTempDir("pi-gate-decoy-");
 				const initial = { path: join(cwd, "initial.txt") };
 				const actual = { path: join(actualOutside ? outside : cwd, "actual.txt") };
 				const decoy =
@@ -128,7 +128,7 @@ describe("post-hook argument authority", () => {
 	])(
 		"fences actual file access through the real extension runner (outside=$actualOutside, instrumented=$instrumented)",
 		async ({ actualOutside, instrumented }) => {
-			const outside = mkdtempSync(join(tmpdir(), "pi-extension-outside-"));
+			const outside = makeTempDir("pi-extension-outside-");
 			let actualPath = "";
 			let decoyPath = "";
 			const reads = vi.fn((path: string) => readFile(path));

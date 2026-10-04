@@ -1,7 +1,6 @@
 import {
 	appendFileSync,
 	closeSync,
-	mkdtempSync,
 	openSync,
 	readFileSync,
 	renameSync,
@@ -12,7 +11,6 @@ import {
 	writeFileSync,
 	writeSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/session";
 import type { UserMessage } from "@caupulican/pi-ai";
@@ -23,6 +21,7 @@ import {
 	WorkerConversationStore,
 	type WorkerTranscriptCommitCursor,
 } from "../src/core/delegation/worker-conversation-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function userMessage(content: string): UserMessage {
 	return { role: "user", content, timestamp: 1 };
@@ -36,7 +35,7 @@ describe("worker conversation ownership protocol", () => {
 	});
 
 	function createOptions(logicalAgentId = "ownership-agent") {
-		const root = mkdtempSync(join(tmpdir(), "pi-worker-ownership-"));
+		const root = tempDir("pi-worker-ownership-");
 		tempDirs.push(root);
 		return {
 			agentDir: join(root, "agent"),

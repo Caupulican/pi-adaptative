@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -31,6 +30,7 @@ import {
 } from "../src/core/automation/task-automation-controller.ts";
 import type { ScriptExecution, ScriptExecutor } from "../src/core/toolkit/script-runner.ts";
 import type { ToolkitScriptAuthorizer } from "../src/core/tools/run-toolkit-script.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 interface Deferred<T> {
 	promise: Promise<T>;
@@ -80,7 +80,7 @@ describe("TaskAutomationController Adversarial Regression Suite", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "task-automation-adv-"));
+		tempDir = makeTempDir("task-automation-adv-");
 	});
 
 	afterEach(() => {
@@ -1360,8 +1360,8 @@ describe("TaskAutomationController Adversarial Regression Suite", () => {
 
 		it("asserts cwd isolation when the EXACT SAME bytes exist in both directories", async () => {
 			// Invariant (Review § Acceptance #9 & #22): Same-byte script in another cwd must still be scoped!
-			const dir1 = mkdtempSync(join(tmpdir(), "cwd-iso-1-"));
-			const dir2 = mkdtempSync(join(tmpdir(), "cwd-iso-2-"));
+			const dir1 = makeTempDir("cwd-iso-1-");
+			const dir2 = makeTempDir("cwd-iso-2-");
 
 			try {
 				const scriptRelativePath = "work.sh";

@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
@@ -14,12 +12,13 @@ import { WorkerUsageAccounting } from "../src/core/delegation/worker-usage-accou
 import { EMPTY_ATTEMPT_USAGE, providerUsageFromAttemptUsage } from "../src/core/orchestration/attempt-usage.ts";
 import { CapabilityGateway } from "../src/core/orchestration/capability-gateway.ts";
 import { createTestExecutionGrant } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const directories: string[] = [];
 const tokens = (totalTokens: number) => ({ ...EMPTY_ATTEMPT_USAGE, inputTokens: totalTokens, totalTokens });
 
 function fixture() {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-usage-projection-"));
+	const agentDir = tempDir("pi-worker-usage-projection-");
 	directories.push(agentDir);
 	const lifecycle = new WorkerLifecycle({ agentDir, sessionId: "usage-projection" });
 	const runtime = lifecycle.ledger.runtime;

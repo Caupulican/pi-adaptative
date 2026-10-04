@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import {
@@ -25,12 +23,13 @@ import {
 	createTestWorkerExecutionAuthority,
 	createTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 const NOW = Date.now();
 
 function root(): string {
-	const directory = mkdtempSync(join(tmpdir(), "pi-worker-context-fork-dispatch-"));
+	const directory = tempDir("pi-worker-context-fork-dispatch-");
 	roots.push(directory);
 	return directory;
 }

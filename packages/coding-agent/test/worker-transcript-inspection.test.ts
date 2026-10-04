@@ -1,12 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { SessionManager } from "@caupulican/pi-agent-core/session";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkerAgentControlCoordinator } from "../src/core/delegation/worker-agent-control-coordinator.ts";
 import { WorkerConversation, WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("worker transcript inspection", () => {
 	it.each(["input", "output"])("keeps the %s byte ceiling and advances past omissions", (ceiling) => {
@@ -48,7 +47,7 @@ describe("worker transcript inspection", () => {
 		for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 	});
 	it("returns useful persisted output through worker control without changing replay", () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-transcript-control-"));
+		const agentDir = tempDir("pi-transcript-control-");
 		roots.push(agentDir);
 		const parentSessionId = "parent";
 		const store = new WorkerConversationStore();
@@ -117,7 +116,7 @@ describe("worker transcript inspection", () => {
 				resourceProfileNames: [],
 				contextPointers: [],
 			});
-			const root = mkdtempSync(join(tmpdir(), "pi-transcript-inspection-"));
+			const root = tempDir("pi-transcript-inspection-");
 			roots.push(root);
 			const store = new WorkerConversationStore();
 			if (persisted)

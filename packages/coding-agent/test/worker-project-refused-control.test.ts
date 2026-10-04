@@ -1,17 +1,16 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { Context, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai/faux";
 import { expect, it } from "vitest";
 import type { BackgroundLaneController } from "../src/core/background-lane-controller.ts";
 import { MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH } from "../src/core/orchestration/contracts.ts";
 import { createHarness, getMessageText } from "./suite/harness.ts";
+import { tempDir } from "./temp-dir.ts";
 
 it.each(["empty", "oversized", "none"])(
 	"a %s refused control leaves the original context available to the next parent",
 	async (kind) => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-project-refused-control-"));
+		const agentDir = tempDir("pi-project-refused-control-");
 		const provider = registerFauxProvider();
 		const requests: string[] = [];
 		provider.setResponses(

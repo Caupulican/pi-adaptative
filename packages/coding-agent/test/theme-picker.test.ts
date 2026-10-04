@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
@@ -8,6 +7,7 @@ import {
 	getAvailableThemesWithPaths,
 	setRegisteredThemes,
 } from "../src/modes/interactive/theme/theme.ts";
+import { tempDir } from "./temp-dir.ts";
 
 type ThemeFile = {
 	name: string;
@@ -20,7 +20,7 @@ describe("theme picker", () => {
 	let agentDir: string;
 
 	beforeEach(() => {
-		tempRoot = mkdtempSync(join(tmpdir(), "pi-theme-picker-"));
+		tempRoot = tempDir("pi-theme-picker-");
 		agentDir = join(tempRoot, "agent");
 		vi.stubEnv(ENV_AGENT_DIR, agentDir);
 		mkdirSync(join(agentDir, "themes"), { recursive: true });

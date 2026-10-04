@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { getModel } from "@caupulican/pi-ai";
@@ -17,6 +16,7 @@ import { AuthDialogsController } from "../src/modes/interactive/auth-dialogs-con
 import { LoginDialogComponent } from "../src/modes/interactive/components/login-dialog.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { createHarness } from "./suite/harness.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 const dirs: string[] = [];
 beforeAll(() => initTheme("dark"));
@@ -338,7 +338,7 @@ describe("packaged System One tool", () => {
 	);
 	it("is discoverable from a blank profile and reports live credential changes without network", async () => {
 		vi.stubEnv("TYPESAFE_API_KEY", "");
-		const cwd = mkdtempSync(join(tmpdir(), "pi-typesafe-"));
+		const cwd = makeTempDir("pi-typesafe-");
 		dirs.push(cwd);
 		const agentDir = join(cwd, "agent");
 		const authPath = join(agentDir, "auth.json");

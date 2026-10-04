@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -7,6 +6,7 @@ import {
 	ToolPerformanceStore,
 } from "../src/core/tool-selection/tool-performance-store.ts";
 import { nodeFs } from "../src/core/util/faultable-fs.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const host = { id: "fixture", cpu: "fixture", cores: 2, totalMemGb: 8 };
 const key = { modelRef: "faux/model", intentClass: "read" as const, tool: "read" };
@@ -33,7 +33,7 @@ function observation(): ToolExecutionObservation {
 
 describe("tool evidence input capture", () => {
 	it("replays the admitted values once after a failed flush and another foreign write", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-evidence-retry-"));
+		const dir = tempDir("pi-evidence-retry-");
 		const writer = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => host, writeBehind: {} });
 		const peer = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => host });
 		try {
@@ -70,7 +70,7 @@ describe("tool evidence input capture", () => {
 
 	for (const foreignWrite of [false, true]) {
 		it.each([false, true])(`preserves execution evidence (foreign=${foreignWrite}, mutate=%s)`, (mutate) => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-evidence-input-"));
+			const dir = tempDir("pi-evidence-input-");
 			const writer = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => host, writeBehind: {} });
 			const peer = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => host });
 			try {
@@ -125,7 +125,7 @@ describe("tool evidence input capture", () => {
 	}
 
 	it("does not freeze the caller's ranking when its observation is flushed", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-ranking-input-"));
+		const dir = tempDir("pi-ranking-input-");
 		const store = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => host, writeBehind: {} });
 		try {
 			const input = observation();
@@ -142,7 +142,7 @@ describe("tool evidence input capture", () => {
 	});
 
 	it.each([false, true])("captures validation identity before rebase (mutate=%s)", (mutate) => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-validation-input-"));
+		const dir = tempDir("pi-validation-input-");
 		const writer = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => host, writeBehind: {} });
 		const peer = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => host });
 		try {
@@ -162,7 +162,7 @@ describe("tool evidence input capture", () => {
 	});
 
 	it("persists only declared selection and ranking fields", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-selection-fields-"));
+		const dir = tempDir("pi-selection-fields-");
 		const store = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => host });
 		try {
 			const input = observation();
@@ -185,7 +185,7 @@ describe("tool evidence input capture", () => {
 	});
 
 	it("does not traverse undeclared fields or candidates beyond the retained caps", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-evidence-cap-"));
+		const dir = tempDir("pi-evidence-cap-");
 		const store = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => host, writeBehind: {} });
 		try {
 			const input = observation();

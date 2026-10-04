@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentState } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -11,6 +10,7 @@ import { OrchestrationEventStore } from "../src/core/orchestration/event-store.t
 import { DurableTaskRuntime } from "../src/core/orchestration/task-runtime.ts";
 import { SessionAnalytics } from "../src/core/session-analytics.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const directories: string[] = [];
 const deliveries: WorkerUsageReceiptDelivery[] = [];
@@ -30,7 +30,7 @@ function analyticsFor(parent: SessionManager, directory: string): SessionAnalyti
 }
 
 function setup() {
-	const directory = mkdtempSync(join(tmpdir(), "pi-worker-receipt-delivery-"));
+	const directory = tempDir("pi-worker-receipt-delivery-");
 	directories.push(directory);
 	const parent = SessionManager.create(directory, directory, join(directory, "sessions"));
 	const parentSessionId = parent.getSessionId();

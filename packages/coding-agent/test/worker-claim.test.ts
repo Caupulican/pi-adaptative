@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { CapabilityEnvelope, WorkerClaim, WorkerRequest } from "../src/core/autonomy/contracts.ts";
@@ -13,6 +12,7 @@ import {
 	validateWorkerClaim,
 	workerClaimSettlementLines,
 } from "../src/core/delegation/worker-claim.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 describe("Worker Result Validator (Phase 6)", () => {
 	const mockEnvelope: CapabilityEnvelope = {
@@ -155,7 +155,7 @@ describe("Worker Result Validator (Phase 6)", () => {
 		});
 
 		describe("Path Scoping", () => {
-			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-worker-test-"));
+			const tempDir = makeTempDir("pi-worker-test-");
 			const allowedRoot = path.join(tempDir, "allowed");
 			const deniedPath = path.join(allowedRoot, "denied");
 			const outsidePath = path.join(tempDir, "outside");

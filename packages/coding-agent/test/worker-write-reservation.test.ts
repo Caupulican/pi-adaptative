@@ -1,5 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { canonicalPathScopeIdentity } from "../src/core/autonomy/path-scope.ts";
@@ -8,6 +7,7 @@ import {
 	WorkerWriteReservationStore,
 } from "../src/core/delegation/worker-write-reservation.ts";
 import { createDirectoryLink } from "./helpers/filesystem-links.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("WorkerWriteReservationStore", () => {
 	const tempDirs: string[] = [];
@@ -17,7 +17,7 @@ describe("WorkerWriteReservationStore", () => {
 	});
 
 	function fixture(): { agentDir: string; workspace: string; source: string; docs: string; isolated: string } {
-		const root = mkdtempSync(join(tmpdir(), "pi-worker-write-reservation-"));
+		const root = tempDir("pi-worker-write-reservation-");
 		tempDirs.push(root);
 		const workspace = join(root, "workspace");
 		const source = join(workspace, "src");

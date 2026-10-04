@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -12,6 +11,7 @@ import {
 	TASK_DIRECTORY_INITIALIZATION_TIMEOUT_MS,
 	TaskDirectoryRuntime,
 } from "../src/core/tasks/task-directory-runtime.ts";
+import { tempDir } from "./temp-dir.ts";
 
 vi.mock("../src/core/tasks/native-task-directory-backend.ts", async (importOriginal) => {
 	const original = await importOriginal<typeof nativeBackend>();
@@ -27,7 +27,7 @@ describe("task directory initialization lifecycle", () => {
 	let backend: ReturnType<typeof createNativeTaskDirectoryBackend>;
 	const gates: Array<() => void> = [];
 	beforeEach(() => {
-		root = mkdtempSync(join(tmpdir(), "pi-directory-init-"));
+		root = tempDir("pi-directory-init-");
 		project = join(root, "project");
 		mkdirSync(project);
 		session = SessionManager.inMemory(root);

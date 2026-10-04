@@ -1,5 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { LaneRegistration, WorktreeSyncEpoch } from "../src/core/worktree-sync/codes.ts";
@@ -17,11 +16,12 @@ import {
 	writeEpoch,
 	writeLane,
 } from "../src/core/worktree-sync/store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cleanups: string[] = [];
 
 function tempStore() {
-	const dir = mkdtempSync(join(tmpdir(), "pi-wt-sync-store-"));
+	const dir = tempDir("pi-wt-sync-store-");
 	cleanups.push(dir);
 	return syncStorePaths(dir);
 }

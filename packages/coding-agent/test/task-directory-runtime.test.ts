@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, parse } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -8,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TASK_DIRECTORY_STATE_CUSTOM_TYPE } from "../src/core/tasks/session-task-directory-store.ts";
 import { TaskDirectoryController } from "../src/core/tasks/task-directory-controller.ts";
 import { TaskDirectoryRuntime } from "../src/core/tasks/task-directory-runtime.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("native task directory runtime", () => {
 	let root: string;
@@ -23,7 +23,7 @@ describe("native task directory runtime", () => {
 		execute,
 	};
 	beforeEach(() => {
-		root = mkdtempSync(join(tmpdir(), "pi-task-runtime-"));
+		root = tempDir("pi-task-runtime-");
 		session = SessionManager.inMemory(root);
 		activeTaskId = undefined;
 		execute.mockClear();

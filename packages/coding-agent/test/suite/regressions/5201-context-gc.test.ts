@@ -1,5 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { estimateTokens } from "@caupulican/pi-agent-core/compaction/compaction";
@@ -9,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { applyContextGc } from "../../../src/core/context-gc.ts";
 import { createCoreDiagnosticsToolDefinitions } from "../../../src/core/extensions/builtin.ts";
 import { createSyntheticSourceInfo } from "../../../src/core/source-info.ts";
+import { tempDir as makeTempDir } from "../../temp-dir.ts";
 import { createHarness } from "../../test-harness.ts";
 
 const usage: Usage = {
@@ -150,7 +150,7 @@ describe("Context GC", () => {
 	});
 
 	it("writes exact old payloads outside the session context without mutating the original messages", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-context-gc-test-"));
+		const dir = makeTempDir("pi-context-gc-test-");
 		tempDirs.push(dir);
 		const original = large("OLD BASH PAYLOAD");
 		const messages: AgentMessage[] = [
@@ -180,7 +180,7 @@ describe("Context GC", () => {
 	});
 
 	it("acquires context storage only when an eligible payload is written", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-context-gc-lazy-store-"));
+		const root = makeTempDir("pi-context-gc-lazy-store-");
 		tempDirs.push(root);
 		const storageDir = join(root, "gc");
 		const messages: AgentMessage[] = [
@@ -218,7 +218,7 @@ describe("Context GC", () => {
 	});
 
 	it("does not write payload files for relative storage dirs", () => {
-		const repo = mkdtempSync(join(tmpdir(), "pi-context-gc-repo-"));
+		const repo = makeTempDir("pi-context-gc-repo-");
 		tempDirs.push(repo);
 		const oldCwd = process.cwd();
 		const original = large("RELATIVE STORAGE PAYLOAD");

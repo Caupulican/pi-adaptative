@@ -1,10 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * Without an interactive app nobody can be asked to trust a project, so it runs untrusted; the run says
@@ -18,7 +18,7 @@ afterEach(() => {
 });
 
 function run(args: string[]) {
-	const root = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-untrusted-notice-")));
+	const root = realpathSync.native(tempDir("pi-untrusted-notice-"));
 	roots.push(root);
 	const project = join(root, "project");
 	mkdirSync(join(project, ".pi"), { recursive: true });

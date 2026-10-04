@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { workerMachinePathRoots } from "../src/core/delegation/worker-machine-scope.ts";
@@ -8,6 +7,7 @@ import {
 	formatWorkerWriteReservationBlock,
 	WorkerWriteReservationCoordinator,
 } from "../src/core/delegation/worker-write-reservation-coordinator.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("WorkerWriteReservationCoordinator", () => {
 	const tempDirs: string[] = [];
@@ -17,7 +17,7 @@ describe("WorkerWriteReservationCoordinator", () => {
 	});
 
 	function fixture(overrides: { isProcessAlive?: (pid: number) => boolean } = {}) {
-		const root = mkdtempSync(join(tmpdir(), "pi-worker-reservation-coordinator-"));
+		const root = tempDir("pi-worker-reservation-coordinator-");
 		tempDirs.push(root);
 		const workspace = join(root, "workspace");
 		const source = join(workspace, "src");
@@ -282,7 +282,7 @@ describe("WorkerWriteReservationCoordinator", () => {
 	});
 
 	it("contains a throwing queue drain and still wakes reservation waiters", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-worker-reservation-wakeup-"));
+		const root = tempDir("pi-worker-reservation-wakeup-");
 		tempDirs.push(root);
 		const listener = vi.fn();
 		const warn = vi.fn();

@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { workerAgentMailboxFile } from "../src/core/agent-paths.ts";
 import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
 import { acquireFileLockSync } from "../src/core/util/atomic-file.ts";
 import { createReuseHarness } from "./fixtures/specialist-reuse-harness.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 it("holds the mailbox admission lock while publishing an executed specialist as idle", async () => {
 	const context = await createReuseHarness();
@@ -50,7 +50,7 @@ it("holds the mailbox admission lock while publishing an executed specialist as 
 });
 
 it("negative control: the probe acquires an unheld mailbox lock", () => {
-	const directory = mkdtempSync(join(tmpdir(), "pi-mailbox-lock-control-"));
+	const directory = makeTempDir("pi-mailbox-lock-control-");
 	try {
 		const release = acquireFileLockSync(join(directory, "mailbox.json"), { retries: 0 });
 		expect(release).toBeTypeOf("function");

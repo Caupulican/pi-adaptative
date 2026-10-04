@@ -1,10 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { routeShellContract } from "../src/core/tools/shell-contract-router.ts";
 import { discoverGnuToolsDir, isGnuToolsDir } from "../src/utils/shell.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * The Windows shell regression wall (docs/doctrine.md, 2026-09-08).
@@ -113,7 +113,7 @@ describe("Windows shell corpus wall", () => {
 			// The wall's execution leg needs real GNU tools: Git for Windows on Windows, coreutils on Linux.
 			expect(gnuToolsDir, "GNU tools directory (Git for Windows usr/bin or /usr/bin)").not.toBeNull();
 			if (gnuToolsDir === null) throw new Error("unreachable: asserted above");
-			const scratch = mkdtempSync(join(tmpdir(), "pi-corpus-wall-"));
+			const scratch = tempDir("pi-corpus-wall-");
 			// Four levels deep so a shape's `cd ..` chains stay inside the sandbox.
 			const sandbox = join(scratch, "a", "b", "c");
 			mkdirSync(sandbox, { recursive: true });

@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -8,6 +7,7 @@ import {
 	parseConsultReply,
 } from "../../src/core/system-one/owner-question-routing.ts";
 import { quotedIn } from "../../src/core/system-one/unsettled-ladder.ts";
+import { tempDir } from "../temp-dir.ts";
 
 const yes = { type: "noul", noul: 0.97 };
 const unsure = { type: "noul", noul: 0.6 };
@@ -74,7 +74,7 @@ describe("owner question routing", () => {
 	});
 
 	it("appends follow-ups to one document per session, with a header once", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-follow-ups-"));
+		const dir = tempDir("pi-follow-ups-");
 		try {
 			const path = join(dir, "follow-ups", "s.md");
 			appendOwnerFollowUp(path, { question: "Q1?", reason: "scope", request: "R", at: "t1" });
@@ -174,7 +174,7 @@ describe("owner question routing", () => {
 	});
 
 	it("groups follow-ups under one heading per request and never repeats a question", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-follow-ups-group-"));
+		const dir = tempDir("pi-follow-ups-group-");
 		try {
 			const path = join(dir, "s.md");
 			appendOwnerFollowUp(path, { question: "Q1?", reason: "scope", request: "Ship v2", at: "t1" });

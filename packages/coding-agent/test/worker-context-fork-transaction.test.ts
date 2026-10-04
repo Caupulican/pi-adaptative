@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { UserMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
@@ -10,6 +9,7 @@ import {
 	WorkerContextForkStoreError,
 } from "../src/core/delegation/worker-context-fork-store.ts";
 import type { WorkerContextForkReference } from "../src/core/orchestration/worker-context-fork-reference.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const tempDirectories: string[] = [];
 const workerContextForkStoreModuleUrl = new URL("../src/core/delegation/worker-context-fork-store.ts", import.meta.url)
@@ -24,7 +24,7 @@ function fixture(parentSessionId = "parent-session"): {
 	parentSessionId: string;
 	store: WorkerContextForkStore;
 } {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-context-fork-transaction-"));
+	const agentDir = tempDir("pi-context-fork-transaction-");
 	tempDirectories.push(agentDir);
 	return {
 		agentDir,

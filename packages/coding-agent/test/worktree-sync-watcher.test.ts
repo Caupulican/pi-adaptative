@@ -1,10 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { WorktreeSyncEpoch } from "../src/core/worktree-sync/codes.ts";
 import { syncStorePaths, writeEpoch } from "../src/core/worktree-sync/store.ts";
 import { formatEpochNotice, startEpochWatcher } from "../src/core/worktree-sync/watcher.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cleanups: Array<() => void> = [];
 
@@ -44,7 +44,7 @@ describe("epoch watcher", () => {
 	});
 
 	it("notifies on an epoch advance by ANOTHER lane, never for the baseline or its own lands", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-wt-sync-watch-"));
+		const dir = tempDir("pi-wt-sync-watch-");
 		cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
 		const paths = syncStorePaths(dir);
 		mkdirSync(paths.root, { recursive: true });
@@ -87,7 +87,7 @@ describe("epoch watcher", () => {
 	it.skipIf(process.platform === "win32")(
 		"detects an epoch replacement when epochFile resolves through a symlinked directory",
 		async () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-wt-sync-watch-real-"));
+			const dir = tempDir("pi-wt-sync-watch-real-");
 			cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
 			const realDir = join(dir, "real-store");
 			mkdirSync(realDir, { recursive: true });

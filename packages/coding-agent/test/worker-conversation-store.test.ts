@@ -1,14 +1,4 @@
-import {
-	existsSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	statSync,
-	truncateSync,
-	utimesSync,
-	writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, statSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { createDeterministicCompaction } from "@caupulican/pi-agent-core/node";
 import { SessionManager } from "@caupulican/pi-agent-core/session";
@@ -22,6 +12,7 @@ import {
 	WorkerConversation,
 	WorkerConversationStore,
 } from "../src/core/delegation/worker-conversation-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function userMessage(text: string): UserMessage {
 	return { role: "user", content: text, timestamp: 1 };
@@ -61,7 +52,7 @@ describe("WorkerConversationStore", () => {
 	});
 
 	function createOptions() {
-		const root = mkdtempSync(join(tmpdir(), "pi-worker-conversation-"));
+		const root = tempDir("pi-worker-conversation-");
 		tempDirs.push(root);
 		return {
 			agentDir: join(root, "agent"),

@@ -1,8 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { Context, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai/faux";
 import { expect, it, vi } from "vitest";
@@ -11,11 +9,12 @@ import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { createLocalWorkerProcessOwnerId, isLocalProcessAlive } from "../src/core/delegation/worker-process-owner.ts";
 import { WorkerProjectDirectory } from "../src/core/delegation/worker-project-directory.ts";
 import { createHarness } from "./suite/harness.ts";
+import { tempDir } from "./temp-dir.ts";
 
 it.each(["before", "after"].flatMap((phase) => ["crash", "live", "lost-receipt"].map((mode) => ({ phase, mode }))))(
 	"project preparation $phase durable acceptance preserves recovery proof for $mode",
 	async ({ phase, mode }) => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-prepare-recovery-"));
+		const agentDir = tempDir("pi-prepare-recovery-");
 		const provider = registerFauxProvider();
 		let requests = 0;
 		let messages = "";

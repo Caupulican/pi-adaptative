@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type ToolPerformanceKey, ToolPerformanceStore } from "../src/core/tool-selection/tool-performance-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const key: ToolPerformanceKey = { modelRef: "faux/model", intentClass: "read", tool: "read" };
 const selection = {
@@ -26,7 +26,7 @@ afterEach(() => {
 });
 
 function storeFor(hostIndex = 0): ToolPerformanceStore {
-	const dir = mkdtempSync(join(tmpdir(), "pi-tool-performance-"));
+	const dir = tempDir("pi-tool-performance-");
 	dirs.push(dir);
 	return ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => hosts[hostIndex] });
 }
@@ -67,7 +67,7 @@ describe("ToolPerformanceStore", () => {
 	});
 
 	it("keeps snapshots fresh across independent session store instances", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-tool-performance-shared-"));
+		const dir = tempDir("pi-tool-performance-shared-");
 		dirs.push(dir);
 		const first = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => hosts[0] });
 		const second = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => hosts[0] });
@@ -79,7 +79,7 @@ describe("ToolPerformanceStore", () => {
 	});
 
 	it("readOnly:true never creates the state dir/file, but still returns the normally-computed stats (D4)", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-tool-performance-readonly-"));
+		const dir = tempDir("pi-tool-performance-readonly-");
 		dirs.push(dir);
 		const filePath = join(dir, "state", "tool-performance.json");
 		const store = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => hosts[0], readOnly: true });
@@ -129,7 +129,7 @@ describe("ToolPerformanceStore", () => {
 	}, 120_000);
 
 	it("bounds observation history by encoded bytes without losing cumulative evidence", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-tool-performance-byte-bound-"));
+		const dir = tempDir("pi-tool-performance-byte-bound-");
 		dirs.push(dir);
 		const path = join(dir, "state", "tool-performance.json");
 		const seededAt = "2026-08-01T00:00:00.000Z";
@@ -214,7 +214,7 @@ describe("ToolPerformanceStore", () => {
 	});
 
 	it("fails closed on corrupt storage and overwrites it on the next valid save", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-tool-performance-"));
+		const dir = tempDir("pi-tool-performance-");
 		dirs.push(dir);
 		const path = join(dir, "state/tool-performance.json");
 		const store = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => hosts[0] });
@@ -327,7 +327,7 @@ describe("ToolPerformanceStore", () => {
 		});
 
 		it("tolerates a store file written before intentAgreement existed (backward-compatible schema)", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-tool-performance-"));
+			const dir = tempDir("pi-tool-performance-");
 			dirs.push(dir);
 			const path = join(dir, "state/tool-performance.json");
 			mkdirSync(join(dir, "state"), { recursive: true });

@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import { WorkerAgentMailbox, workerAgentMessageId } from "../src/core/delegation/worker-agent-control.ts";
@@ -19,11 +17,12 @@ import {
 	ORCHESTRATION_SCHEMA_VERSION,
 } from "../src/core/orchestration/contracts.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../src/core/orchestration/task-runtime.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 
 function root(): string {
-	const value = mkdtempSync(join(tmpdir(), "pi-worker-agent-control-coordinator-"));
+	const value = tempDir("pi-worker-agent-control-coordinator-");
 	roots.push(value);
 	return value;
 }

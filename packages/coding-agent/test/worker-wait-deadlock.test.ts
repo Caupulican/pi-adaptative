@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
@@ -87,7 +86,7 @@ function waitCoordinator(
 		getAgent: (agentId: string) => ({ caller, child })[agentId as "caller" | "child"],
 		getTaskRuntimeSnapshot: snapshot,
 	} as unknown as WorkerLifecycle;
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-wait-deadlock-"));
+	const agentDir = tempDir("pi-worker-wait-deadlock-");
 	temporaryDirectories.push(agentDir);
 	return new WorkerAgentControlCoordinator({
 		agentDir,
@@ -401,7 +400,7 @@ describe("worker wait deadlock prevention", () => {
 	});
 
 	it("retains exact local reservation blockers and clears them when the blocker releases", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-worker-wait-reservation-"));
+		const root = tempDir("pi-worker-wait-reservation-");
 		temporaryDirectories.push(root);
 		const workspace = join(root, "workspace");
 		const source = join(workspace, "src");
@@ -434,7 +433,7 @@ describe("worker wait deadlock prevention", () => {
 	});
 
 	it("yields and restores the exact caller reservation around a child writer", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-worker-wait-reservation-yield-"));
+		const root = tempDir("pi-worker-wait-reservation-yield-");
 		temporaryDirectories.push(root);
 		const workspace = join(root, "workspace");
 		const source = join(workspace, "src");
@@ -471,7 +470,7 @@ describe("worker wait deadlock prevention", () => {
 	});
 
 	it("wakes a blocked wait restore from the real reservation release event", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-worker-wait-reservation-event-"));
+		const root = tempDir("pi-worker-wait-reservation-event-");
 		temporaryDirectories.push(root);
 		const workspace = join(root, "workspace");
 		const source = join(workspace, "src");
@@ -753,7 +752,7 @@ describe("worker wait deadlock prevention", () => {
 		// ever releasing the underlying durable reservations -- a competitor blocked by one of them
 		// stayed blocked forever (until an unrelated recoverProvenStale() pass eventually proved the
 		// owner dead), even though this process had already explicitly disposed the coordinator.
-		const root = mkdtempSync(join(tmpdir(), "pi-worker-wait-reservation-dispose-"));
+		const root = tempDir("pi-worker-wait-reservation-dispose-");
 		temporaryDirectories.push(root);
 		const workspace = join(root, "workspace");
 		const source = join(workspace, "src");

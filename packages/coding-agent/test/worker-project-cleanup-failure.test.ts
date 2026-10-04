@@ -1,11 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { Context, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai/faux";
 import { expect, it, vi } from "vitest";
 import type * as LaneToolSurfaceModule from "../src/core/autonomy/lane-tool-surface.ts";
 import { createHarness } from "./suite/harness.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const failure = { enabled: false };
 vi.mock("../src/core/autonomy/lane-tool-surface.ts", async (importOriginal) => {
@@ -31,7 +30,7 @@ it.each([
 	{ fails: false, foreign: false },
 	{ fails: false, foreign: true },
 ])("cleanup result gates specialist reuse ($fails, foreign=$foreign)", async ({ fails, foreign }) => {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-project-cleanup-"));
+	const agentDir = tempDir("pi-project-cleanup-");
 	const provider = registerFauxProvider();
 	let workerRequests = 0;
 	provider.setResponses(

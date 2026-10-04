@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -35,6 +35,7 @@ import {
 } from "../../../src/core/index.ts";
 import type { JevAdapter, JevEvaluationRequest, JevEvaluationResponse } from "../../../src/core/system-one/adapter.ts";
 import { ExecutionStore } from "../../../src/core/system-one/execution-state.ts";
+import { tempDir as makeTempDir } from "../../temp-dir.ts";
 
 class MockTypedJevAdapter implements JevAdapter {
 	evaluateCalls: JevEvaluationRequest[] = [];
@@ -425,7 +426,7 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 			const noProofController = new AdaptiveCapabilityController({
 				steering: plane,
 				catalog,
-				capabilityArtifactRoot: mkdtempSync(join(tmpdir(), "pi-ph-capabilities-")),
+				capabilityArtifactRoot: makeTempDir("pi-ph-capabilities-"),
 				// The builder's model binding must be an actual selection; this test's subject is the
 				// activation path, so the selection is a fixed one rather than absent.
 				experts: {
@@ -439,7 +440,7 @@ describe("Production Hardening v1.3 Regressions (PH-001..PH-180)", () => {
 				// task-proof runner, which is what this case is about.
 				builder: {
 					build: async (_spec) => {
-						const directory = mkdtempSync(join(tmpdir(), "pi-ph060-"));
+						const directory = makeTempDir("pi-ph060-");
 						const artifactPath = join(directory, `${_spec.capability_id}.mjs`);
 						const code = "export default async function run() { return true; }\n";
 						writeFileSync(artifactPath, code, "utf-8");

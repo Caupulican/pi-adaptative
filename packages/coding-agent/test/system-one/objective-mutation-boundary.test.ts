@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { closeSync, mkdtempSync, openSync, realpathSync, rmSync, writeSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { closeSync, openSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/session";
 import { fauxAssistantMessage } from "@caupulican/pi-ai/faux";
@@ -16,6 +15,7 @@ import { RepositoryMutationObserver } from "../../src/core/objective-execution/r
 import { resolveObjectiveWorkspaceSafetyMode } from "../../src/core/objective-execution/workspace-safety.ts";
 import { ToolGateController } from "../../src/core/tool-gate-controller.ts";
 import { committedRepo } from "../git-fixture.ts";
+import { tempDir as makeTempDir } from "../temp-dir.ts";
 
 for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"]) {
 	delete process.env[key];
@@ -30,7 +30,7 @@ afterEach(() => {
 });
 
 function tempDir(prefix: string): string {
-	const path = mkdtempSync(join(realpathSync.native(tmpdir()), prefix));
+	const path = makeTempDir(prefix);
 	cleanups.push(path);
 	return path;
 }

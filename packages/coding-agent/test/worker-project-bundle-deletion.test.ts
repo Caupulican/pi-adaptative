@@ -1,10 +1,10 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { orchestrationSessionDir } from "../src/core/agent-paths.ts";
 import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
 import { deleteForegroundSessionBundle } from "../src/core/session-artifact-bundle.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 function fixture() {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-project-delete-"));
+	const agentDir = tempDir("pi-project-delete-");
 	roots.push(agentDir);
 	const parentSessionId = "birth-parent";
 	const sessionPath = join(agentDir, "foreground.jsonl");

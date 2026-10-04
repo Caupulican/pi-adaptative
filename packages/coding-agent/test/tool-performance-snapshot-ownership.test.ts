@@ -1,8 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ToolPerformanceStore } from "../src/core/tool-selection/tool-performance-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const key = { modelRef: "faux/model", intentClass: "read" as const, tool: "read" };
 const host = { id: "fixture", cpu: "fixture", cores: 2, totalMemGb: 8 };
@@ -25,7 +25,7 @@ describe("aggregate evidence snapshot ownership", () => {
 	it.each(["batched", "direct", "read-only"] as const)(
 		"preserves filtered values and caller-owned arrays across %s reads and replay",
 		(mode) => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-snapshot-values-"));
+			const dir = tempDir("pi-snapshot-values-");
 			const path = join(dir, "state", "tool-performance.json");
 			const seed = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => host });
 			const store = ToolPerformanceStore.forAgentDir(dir, {
@@ -99,7 +99,7 @@ describe("aggregate evidence snapshot ownership", () => {
 		it.each(["observation", "ranking"] as const)(
 			`isolates loaded %s metadata in returned logs (mutate=${mutate})`,
 			(location) => {
-				const dir = mkdtempSync(join(tmpdir(), "pi-observation-snapshot-"));
+				const dir = tempDir("pi-observation-snapshot-");
 				const path = join(dir, "state", "tool-performance.json");
 				const store = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => host, writeBehind: {} });
 				type Metadata = { extra?: { payload: string } };
@@ -142,7 +142,7 @@ describe("aggregate evidence snapshot ownership", () => {
 	it.each(["execution", "validation"] as const)(
 		"does not retain undeclared shared-memory fields from %s identity input",
 		(operation) => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-performance-identity-"));
+			const dir = tempDir("pi-performance-identity-");
 			const store = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => host, writeBehind: {} });
 			const extendedKey = { ...key, extra: { shared: new SharedArrayBuffer(1) } };
 			try {
@@ -170,7 +170,7 @@ describe("aggregate evidence snapshot ownership", () => {
 		it.each(["get", "model", "intent", "agreement", "agreements", "execution-result", "validation-result"] as const)(
 			`isolates %s from working-state metadata (mutate=${mutate})`,
 			(method) => {
-				const dir = mkdtempSync(join(tmpdir(), "pi-performance-snapshot-"));
+				const dir = tempDir("pi-performance-snapshot-");
 				const path = join(dir, "state", "tool-performance.json");
 				const store = ToolPerformanceStore.forAgentDir(dir, { fingerprint: () => host, writeBehind: {} });
 				try {

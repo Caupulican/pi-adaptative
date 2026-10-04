@@ -25,9 +25,7 @@
  * The explicit continuation case is the control: `follow_up` on the same objective SHOULD inherit,
  * and that behaviour must survive the fix.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { GoalState } from "../src/core/goals/goal-state.ts";
 import {
@@ -47,6 +45,7 @@ import {
 	createTestWorkerExecutionAuthority,
 	createTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const LEASE_TTL_MS = 60_000;
 const roots: string[] = [];
@@ -59,7 +58,7 @@ afterEach(() => {
 });
 
 function root(): string {
-	const directory = mkdtempSync(join(tmpdir(), "pi-worker-task-goal-correlation-"));
+	const directory = tempDir("pi-worker-task-goal-correlation-");
 	roots.push(directory);
 	return directory;
 }

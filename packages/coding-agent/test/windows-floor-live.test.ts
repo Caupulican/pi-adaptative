@@ -1,12 +1,12 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createBashTool } from "../src/core/tools/bash.ts";
 import { getTextOutput } from "../src/core/tools/render-utils.ts";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * Drives the real Windows PowerShell floor end to end: a live PowerShell process, real cwd/env
@@ -46,7 +46,7 @@ describe.skipIf(process.platform !== "win32")("live Windows PowerShell floor (re
 	const python = findPython();
 
 	it("round-trips single-quote, double-quote, dollar, percent, ampersand, pipe, redirection, and Unicode through echo", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-floor-echo-"));
+		const scratch = tempDir("pi-floor-echo-");
 		const root = realpathSync(scratch);
 		const sessionKey = `floor-echo-${randomUUID()}`;
 		const tool = createFloorTool(root, sessionKey);
@@ -68,7 +68,7 @@ describe.skipIf(process.platform !== "win32")("live Windows PowerShell floor (re
 
 	it.skipIf(!python)("reports the real exit code of a failing external process", async () => {
 		if (!python) throw new Error("unreachable: gated by skipIf");
-		const scratch = mkdtempSync(join(tmpdir(), "pi-floor-exit-"));
+		const scratch = tempDir("pi-floor-exit-");
 		const root = realpathSync(scratch);
 		const sessionKey = `floor-exit-${randomUUID()}`;
 		const tool = createFloorTool(root, sessionKey);
@@ -84,7 +84,7 @@ describe.skipIf(process.platform !== "win32")("live Windows PowerShell floor (re
 
 	it.skipIf(!python)("merges stderr into the returned output", async () => {
 		if (!python) throw new Error("unreachable: gated by skipIf");
-		const scratch = mkdtempSync(join(tmpdir(), "pi-floor-stderr-"));
+		const scratch = tempDir("pi-floor-stderr-");
 		const root = realpathSync(scratch);
 		const sessionKey = `floor-stderr-${randomUUID()}`;
 		const tool = createFloorTool(root, sessionKey);
@@ -101,7 +101,7 @@ describe.skipIf(process.platform !== "win32")("live Windows PowerShell floor (re
 
 	it.skipIf(!python)("passes through UTF-8 output from a Python one-liner", async () => {
 		if (!python) throw new Error("unreachable: gated by skipIf");
-		const scratch = mkdtempSync(join(tmpdir(), "pi-floor-utf8-"));
+		const scratch = tempDir("pi-floor-utf8-");
 		const root = realpathSync(scratch);
 		const sessionKey = `floor-utf8-${randomUUID()}`;
 		const tool = createFloorTool(root, sessionKey);
@@ -117,7 +117,7 @@ describe.skipIf(process.platform !== "win32")("live Windows PowerShell floor (re
 	});
 
 	it("persists the working directory across two calls after a bare cd", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-floor-cwd-"));
+		const scratch = tempDir("pi-floor-cwd-");
 		const root = realpathSync(scratch);
 		mkdirSync(join(root, "sub"));
 		const sessionKey = `floor-cwd-${randomUUID()}`;
@@ -133,7 +133,7 @@ describe.skipIf(process.platform !== "win32")("live Windows PowerShell floor (re
 	});
 
 	it("invokes a generated .cmd script with a quoted, space-containing argument", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-floor-cmd-"));
+		const scratch = tempDir("pi-floor-cmd-");
 		const root = realpathSync(scratch);
 		const scriptPath = join(root, "args-echo.cmd");
 		writeFileSync(scriptPath, "@echo off\r\necho %*\r\n");
@@ -154,7 +154,7 @@ describe.skipIf(process.platform !== "win32")("live Windows PowerShell floor (re
 	});
 
 	it("invokes a generated .ps1 script with a quoted, space-containing argument", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-floor-ps1-"));
+		const scratch = tempDir("pi-floor-ps1-");
 		const root = realpathSync(scratch);
 		const scriptPath = join(root, "args-echo.ps1");
 		writeFileSync(
@@ -175,7 +175,7 @@ describe.skipIf(process.platform !== "win32")("live Windows PowerShell floor (re
 	});
 
 	it("produces a timeout result instead of hanging on a long-running external process", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-floor-timeout-"));
+		const scratch = tempDir("pi-floor-timeout-");
 		const root = realpathSync(scratch);
 		const sessionKey = `floor-timeout-${randomUUID()}`;
 		const tool = createFloorTool(root, sessionKey);
@@ -191,7 +191,7 @@ describe.skipIf(process.platform !== "win32")("live Windows PowerShell floor (re
 
 	it("resolves and runs where.exe through drive-root translation", async () => {
 		// Assumes git is on PATH, as it is on this repo's windows-latest CI runners.
-		const scratch = mkdtempSync(join(tmpdir(), "pi-floor-whereexe-"));
+		const scratch = tempDir("pi-floor-whereexe-");
 		const root = realpathSync(scratch);
 		const sessionKey = `floor-whereexe-${randomUUID()}`;
 		const tool = createFloorTool(root, sessionKey);
@@ -205,7 +205,7 @@ describe.skipIf(process.platform !== "win32")("live Windows PowerShell floor (re
 	});
 
 	it("lists the directory for dir through PowerShell's alias instead of hanging on the cmd builtin", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-floor-dirbuiltin-"));
+		const scratch = tempDir("pi-floor-dirbuiltin-");
 		const root = realpathSync(scratch);
 		writeFileSync(join(root, "marker-file.txt"), "x");
 		const sessionKey = `floor-dirbuiltin-${randomUUID()}`;

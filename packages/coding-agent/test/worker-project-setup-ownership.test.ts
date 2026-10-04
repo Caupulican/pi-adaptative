@@ -1,16 +1,15 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { Context, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai/faux";
 import { expect, it, vi } from "vitest";
 import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
 import { createHarness } from "./suite/harness.ts";
+import { tempDir } from "./temp-dir.ts";
 
 it.each(["corrupt-metadata", "enrolled", "enrolled-no-header", "enrollment-only", "active-commit"])(
 	"failed setup retains project exclusion for %s evidence",
 	async (fault) => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-project-setup-ownership-"));
+		const agentDir = tempDir("pi-project-setup-ownership-");
 		const provider = registerFauxProvider();
 		let requests = 0;
 		provider.setResponses(

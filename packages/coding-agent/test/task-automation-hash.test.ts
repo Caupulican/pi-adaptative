@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -8,6 +7,7 @@ import {
 	defaultTaskAutomationHashPort,
 	MAX_SCRIPT_FILE_BYTES,
 } from "../src/core/automation/task-automation-hash.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("task-automation-hash", () => {
 	let workspaceDir: string;
@@ -15,7 +15,7 @@ describe("task-automation-hash", () => {
 	let externalDir: string;
 
 	beforeEach(() => {
-		const base = mkdtempSync(join(tmpdir(), "pi-hash-test-"));
+		const base = tempDir("pi-hash-test-");
 		workspaceDir = join(base, "ws");
 		siblingDir = join(base, "ws-sibling");
 		externalDir = join(base, "external");

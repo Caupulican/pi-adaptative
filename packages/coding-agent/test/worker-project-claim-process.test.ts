@@ -1,11 +1,11 @@
 import { type ChildProcess, fork } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
 import { withFileLock } from "../src/core/util/atomic-file.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function claimant(inputFile: string) {
 	const child = fork(
@@ -45,7 +45,7 @@ function claimant(inputFile: string) {
 }
 
 it("two native processes racing for one released transcript admit exactly one writer", async () => {
-	const root = mkdtempSync(join(tmpdir(), "pi-project-claim-race-"));
+	const root = tempDir("pi-project-claim-race-");
 	const children: ChildProcess[] = [];
 	try {
 		const store = new WorkerConversationStore();

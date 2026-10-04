@@ -1,6 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { type AssistantMessage, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
@@ -17,11 +15,12 @@ import {
 	createTestWorkerExecutionAuthority,
 	createTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 
 function root(): string {
-	const value = mkdtempSync(join(tmpdir(), "pi-worker-recovery-"));
+	const value = tempDir("pi-worker-recovery-");
 	roots.push(value);
 	return value;
 }

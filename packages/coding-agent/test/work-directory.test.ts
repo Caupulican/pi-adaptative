@@ -1,5 +1,4 @@
-import { Dir, existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { Dir, existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -9,11 +8,12 @@ import {
 	pruneWorkTenant,
 	WORK_RUN_MANIFEST_FILE,
 } from "../src/utils/work-directory.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const tempDirs: string[] = [];
 
 function createAgentDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-work-directory-"));
+	const dir = tempDir("pi-work-directory-");
 	tempDirs.push(dir);
 	return dir;
 }

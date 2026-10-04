@@ -4,7 +4,6 @@ import {
 	copyFileSync,
 	existsSync,
 	mkdirSync,
-	mkdtempSync,
 	readdirSync,
 	readFileSync,
 	realpathSync,
@@ -17,6 +16,7 @@ import { basename, delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { getShellConfig } from "../src/utils/shell.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const isWslHost = process.platform !== "win32" && Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP);
 
@@ -81,7 +81,7 @@ function pathForPowerShell(path: string): string {
 }
 
 function createScratchDirectory(): string {
-	const directory = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-windows-incident-"));
+	const directory = tempDir("pi-windows-incident-");
 	scratchDirectories.push(directory);
 	return directory;
 }

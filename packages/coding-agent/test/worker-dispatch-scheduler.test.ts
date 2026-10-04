@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import {
@@ -9,6 +7,7 @@ import {
 } from "../src/core/delegation/worker-dispatch-scheduler.ts";
 import { DEFAULT_WORKER_FLEET_LIMITS } from "../src/core/delegation/worker-fleet-limits.ts";
 import type { InFlightWorkKind } from "../src/core/reload-blockers.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function record(index: number): LaneRecord {
 	return { laneId: `worker-${index}`, type: "worker", status: "queued" };
@@ -16,7 +15,7 @@ function record(index: number): LaneRecord {
 
 describe("WorkerDispatchScheduler queue bounds", () => {
 	it("keeps dependency-waiting work queued and starts it once readiness changes", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-scheduler-dependency-wait-"));
+		const agentDir = tempDir("pi-worker-scheduler-dependency-wait-");
 		let ready = false;
 		const run = vi.fn(async () => ({ started: true as const }));
 		const scheduler = new WorkerDispatchScheduler({
@@ -46,7 +45,7 @@ describe("WorkerDispatchScheduler queue bounds", () => {
 	});
 
 	it("reaches blocked-dependency cancellation fixed point independent of queue order", () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-scheduler-dependency-cascade-"));
+		const agentDir = tempDir("pi-worker-scheduler-dependency-cascade-");
 		let dependencyCancelled = false;
 		const cancel = vi.fn((laneId: string) => {
 			if (laneId === "worker-1") dependencyCancelled = true;
@@ -82,7 +81,7 @@ describe("WorkerDispatchScheduler queue bounds", () => {
 	});
 
 	it("retains reentrant reservation availability when cancellation releases a fence during drain", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-scheduler-reentrant-reservation-"));
+		const agentDir = tempDir("pi-worker-scheduler-reentrant-reservation-");
 		let reservationAvailable = false;
 		const run = vi.fn(async () => ({ started: true as const }));
 		let scheduler!: WorkerDispatchScheduler;
@@ -120,7 +119,7 @@ describe("WorkerDispatchScheduler queue bounds", () => {
 	});
 
 	it("clears a stale reservation marker when admission changes to another wait reason", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-scheduler-changing-wait-"));
+		const agentDir = tempDir("pi-worker-scheduler-changing-wait-");
 		let admission: "write_reservation" | "capacity" | "start" = "write_reservation";
 		const run = vi.fn(async () => ({ started: true as const }));
 		const scheduler = new WorkerDispatchScheduler({
@@ -365,7 +364,7 @@ describe("WorkerDispatchScheduler queue bounds", () => {
 	);
 
 	it("reserves one bounded slot for priority verifier work", () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-scheduler-"));
+		const agentDir = tempDir("pi-worker-scheduler-");
 		const scheduler = new WorkerDispatchScheduler({
 			agentDir,
 			isDisposed: () => false,
@@ -397,7 +396,7 @@ describe("WorkerDispatchScheduler queue bounds", () => {
 	});
 
 	it("coalesces released queue slots into an event-driven capacity notification", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-scheduler-capacity-"));
+		const agentDir = tempDir("pi-worker-scheduler-capacity-");
 		const scheduler = new WorkerDispatchScheduler({
 			agentDir,
 			isDisposed: () => false,
@@ -522,7 +521,7 @@ describe("WorkerDispatchScheduler queue bounds", () => {
 
 describe("WorkerDispatchScheduler wait state", () => {
 	it("records why a queued lane waits and clears it once the lane starts", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-scheduler-wait-state-"));
+		const agentDir = tempDir("pi-worker-scheduler-wait-state-");
 		let admission: WorkerDispatchAdmission = {
 			action: "wait",
 			reason: "write_reservation",
@@ -567,7 +566,7 @@ describe("WorkerDispatchScheduler wait state", () => {
 
 describe("WorkerDispatchScheduler resume while the previous run settles", () => {
 	function harness() {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-worker-scheduler-resume-"));
+		const agentDir = tempDir("pi-worker-scheduler-resume-");
 		const settle: Array<() => void> = [];
 		const run = vi.fn(
 			() =>

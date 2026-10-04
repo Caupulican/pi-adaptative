@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * The corpus tool (`pi-shell-engine/corpus.py`, driven by `scripts/windows-shell-corpus.mjs`)
@@ -83,7 +83,7 @@ describe.skipIf(!python)("Windows shell corpus tool", () => {
 	let sessions: string;
 
 	beforeEach(() => {
-		root = mkdtempSync(join(tmpdir(), "pi-corpus-tool-"));
+		root = tempDir("pi-corpus-tool-");
 		sessions = join(root, "sessions", "--D%3A%5CAcme--");
 		mkdirSync(sessions, { recursive: true });
 		writeFileSync(

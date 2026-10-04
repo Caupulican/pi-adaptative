@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	DEFAULT_WORKER_FLEET_LIMITS,
@@ -21,11 +19,12 @@ import {
 	createTestWorkerExecutionAuthority,
 	createTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 
 function root(): string {
-	const value = mkdtempSync(join(tmpdir(), "pi-worker-fleet-limits-"));
+	const value = tempDir("pi-worker-fleet-limits-");
 	roots.push(value);
 	return value;
 }

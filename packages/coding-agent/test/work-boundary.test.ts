@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/session";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,6 +6,7 @@ import { priceExecutor } from "../src/core/compaction/early-compaction-economics
 import { isMutatingToolCall, shouldEscalateModelRouterTool } from "../src/core/model-router/tool-escalation.ts";
 import { DecisionLedgerStore } from "../src/core/operator-projection/decision-ledger-store.ts";
 import { currentWorkUnit, openWorkUnit } from "../src/core/work-units.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const owner = (manager: SessionManager, text: string) =>
 	manager.appendMessage({ role: "user", content: text, timestamp: Date.now() });
@@ -157,7 +157,7 @@ describe("learned root route requests", () => {
 	});
 
 	it("counts the requests between a root route's decision and the next decision", () => {
-		const dir = mkdtempSync(join(tmpdir(), "route-requests-"));
+		const dir = tempDir("route-requests-");
 		dirs.push(dir);
 		const ledger = openLedger(join(dir, "decision-ledger.sqlite"));
 		const decide = (cycleId: string, route: string, at: number, executor?: string) => {
@@ -197,7 +197,7 @@ describe("learned root route requests", () => {
 
 describe("learned worker prefix", () => {
 	it("prices a worker on the median fixed prefix its requests actually sent", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-worker-prefix-"));
+		const dir = tempDir("pi-worker-prefix-");
 		try {
 			const ledger = new DecisionLedgerStore({ databasePath: join(dir, "ledger.sqlite") });
 			expect(ledger.medianWorkerPrefixTokens(0)).toBeUndefined();

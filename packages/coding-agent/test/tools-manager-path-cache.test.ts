@@ -14,8 +14,7 @@
  * so the suite skips cleanly (like fff-search-parity.test.ts) on a box where `rg` isn't on PATH.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,6 +28,7 @@ vi.mock("child_process", () => ({
 }));
 
 import { getToolPath } from "../src/utils/tools-manager.ts";
+import { tempDir } from "./temp-dir.ts";
 
 interface CachedEntry {
 	path: string;
@@ -51,7 +51,7 @@ describe.skipIf(!RG_AVAILABLE || process.platform === "win32")("getToolPath cros
 	let previousAgentDirEnv: string | undefined;
 
 	beforeEach(() => {
-		agentDir = mkdtempSync(join(tmpdir(), "pi-tool-path-cache-"));
+		agentDir = tempDir("pi-tool-path-cache-");
 		cacheFile = join(agentDir, "cache", "tool-paths.json");
 		previousAgentDirEnv = process.env[ENV_AGENT_DIR];
 		process.env[ENV_AGENT_DIR] = agentDir;

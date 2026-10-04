@@ -1,12 +1,12 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
 import { deleteForegroundSessionBundle } from "../src/core/session-artifact-bundle.ts";
+import { tempDir } from "./temp-dir.ts";
 
 it.each(["missing", "downgraded", "intact"])("preserves enrolled history with %s ownership metadata", async (mode) => {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-delete-evidence-"));
+	const agentDir = tempDir("pi-delete-evidence-");
 	try {
 		const store = new WorkerConversationStore();
 		const parentSessionId = "birth";

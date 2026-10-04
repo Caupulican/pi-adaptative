@@ -1,5 +1,5 @@
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
+import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { hostname } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { execCommand } from "../src/core/exec.ts";
@@ -28,6 +28,7 @@ import {
 	writeLandingTransaction,
 	writeLane,
 } from "../src/core/worktree-sync/store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * REAL-git integration suite: every scenario runs against actual repositories in temp dirs --
@@ -123,7 +124,7 @@ afterEach(async () => {
 });
 
 async function initRepo(): Promise<Harness> {
-	const root = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-wt-sync-it-"));
+	const root = tempDir("pi-wt-sync-it-");
 	const repo = join(root, "repo");
 	const deps: WorktreeSyncEngineDeps = {
 		exec: createDefaultWorktreeSyncExec(),

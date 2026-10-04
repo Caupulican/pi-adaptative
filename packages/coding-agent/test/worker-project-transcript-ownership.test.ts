@@ -1,9 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createDeterministicCompaction } from "@caupulican/pi-agent-core/compaction/compaction";
 import { afterEach, expect, it } from "vitest";
 import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -11,7 +10,7 @@ afterEach(() => {
 });
 
 function fixture() {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-context-ownership-"));
+	const agentDir = tempDir("pi-context-ownership-");
 	roots.push(agentDir);
 	const store = new WorkerConversationStore();
 	const options = {

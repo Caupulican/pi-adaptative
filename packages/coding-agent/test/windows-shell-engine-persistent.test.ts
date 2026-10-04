@@ -1,10 +1,11 @@
 import { type ChildProcess, type SpawnOptions, spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 import { createWindowsShellEngineOperations } from "../src/core/tools/windows-shell-engine.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const ENGINE_MAIN = join(
 	import.meta.dirname,
@@ -78,7 +79,7 @@ describe("persistent Windows shell engine coordinator", () => {
 	});
 
 	it("restores an explicitly pinned cwd inside serialization without losing exported variables", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-engine-pin-"));
+		const scratch = tempDir("pi-engine-pin-");
 		const root = realpathSync(scratch);
 		mkdirSync(join(root, "child"));
 		const sessionKey = "pinned-engine-fixture";

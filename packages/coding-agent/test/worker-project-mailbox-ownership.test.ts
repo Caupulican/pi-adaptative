@@ -1,14 +1,13 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { expect, it } from "vitest";
 import { WorkerAgentMailbox } from "../src/core/delegation/worker-agent-control.ts";
 import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 it.each(["enqueue", "acknowledge", "discard"])(
 	"rejects old-parent mailbox %s after context transfer, including a fresh constructor",
 	(operation) => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-project-mailbox-"));
+		const agentDir = tempDir("pi-project-mailbox-");
 		try {
 			const store = new WorkerConversationStore();
 			const parentSessionId = "birth-parent";
@@ -52,7 +51,7 @@ it.each(["enqueue", "acknowledge", "discard"])(
 );
 
 it("negative control: an unindexed mailbox still accepts and acknowledges ordinary work", () => {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-project-mailbox-legacy-"));
+	const agentDir = tempDir("pi-project-mailbox-legacy-");
 	try {
 		const mailbox = new WorkerAgentMailbox({ agentDir, parentSessionId: "parent", agentId: "worker-1" });
 		const queued = mailbox.enqueue({ kind: "follow_up", content: "Ordinary work" });

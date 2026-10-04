@@ -1,17 +1,16 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { Context, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai/faux";
 import { expect, it } from "vitest";
 import type { BackgroundLaneController } from "../src/core/background-lane-controller.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { createHarness } from "./suite/harness.ts";
+import { tempDir } from "./temp-dir.ts";
 
 it.each(["cancel", "dispose", "retained"])(
 	"queued specialist ownership follows %s before execution",
 	async (action) => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-project-queued-cancel-"));
+		const agentDir = tempDir("pi-project-queued-cancel-");
 		const provider = registerFauxProvider();
 		let requests = 0;
 		provider.setResponses(

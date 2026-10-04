@@ -1,10 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * Integration (WP-F §3): drives the REAL `bash` tool created by `createBashToolDefinition` with the
@@ -49,7 +49,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 
 	it("(b) cd -> a subsequent pwd observes the new cwd", async () => {
 		const sessionKey = freshSessionKey("cd-state");
-		const sub = mkdtempSync(join(tmpdir(), "pi-win-shell-cd-"));
+		const sub = tempDir("pi-win-shell-cd-");
 		try {
 			const tool = createBashToolDefinition(process.cwd(), { sessionKey });
 			await tool.execute("call-b1", { command: `cd ${sub}` }, undefined, undefined, undefined as never);
@@ -234,7 +234,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 
 	it("(f) executes a .ps1 target through the selected PowerShell host when redirection requires the engine", async () => {
 		const sessionKey = freshSessionKey("powershell-script-adapter");
-		const root = mkdtempSync(join(tmpdir(), "pi-win-shell-ps1-"));
+		const root = tempDir("pi-win-shell-ps1-");
 		const scriptPath = join(root, "probe.ps1");
 		const capturePath = join(root, "capture.txt");
 		writeFileSync(
@@ -273,7 +273,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 
 	it.skipIf(!hasRipgrep)("(g) invokes native rg.exe as a simple command and inside a pipeline", async () => {
 		const sessionKey = freshSessionKey("native-ripgrep");
-		const root = mkdtempSync(join(tmpdir(), "pi-win-shell-rg-"));
+		const root = tempDir("pi-win-shell-rg-");
 		const sourcePath = join(root, "Project 7 (Release).txt");
 		writeFileSync(sourcePath, "needle\nother\nmiss\n", "utf8");
 
@@ -330,7 +330,7 @@ describe("windows shell cross-tier integration (bash tool + python engine on win
 
 	it("(h) retains one engine coordinator across 20 empty searches", async () => {
 		const sessionKey = freshSessionKey("engine-process-lifetime");
-		const root = mkdtempSync(join(tmpdir(), "pi-win-shell-lifetime-"));
+		const root = tempDir("pi-win-shell-lifetime-");
 		const sourcePath = join(root, "source.txt");
 		writeFileSync(sourcePath, "needle\n", "utf8");
 		try {

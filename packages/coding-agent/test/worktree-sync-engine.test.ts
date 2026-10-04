@@ -1,5 +1,5 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { hostname as osHostname, tmpdir } from "node:os";
+import { rmSync } from "node:fs";
+import { hostname as osHostname } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExecResult } from "../src/core/exec.ts";
@@ -25,6 +25,7 @@ import {
 	syncStorePaths,
 	writeLane,
 } from "../src/core/worktree-sync/store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * Scripted faux git: interprets the engine's git invocations against a small in-memory repo
@@ -127,7 +128,7 @@ afterEach(() => {
 });
 
 function fauxRepo(overrides: Partial<FauxRepo> = {}): FauxRepo {
-	const commonDir = mkdtempSync(join(tmpdir(), "pi-wt-sync-engine-"));
+	const commonDir = tempDir("pi-wt-sync-engine-");
 	cleanups.push(commonDir);
 	return {
 		topLevel: "/repo",

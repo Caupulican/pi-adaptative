@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AssistantMessage, UserMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,6 +8,7 @@ import {
 	WorkerConversationStore,
 } from "../src/core/delegation/worker-conversation-store.ts";
 import type { WorkerContextForkReference } from "../src/core/orchestration/worker-context-fork-reference.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 
@@ -37,7 +37,7 @@ function assistantMessage(text: string, timestamp: number): AssistantMessage {
 }
 
 function options(logicalAgentId = "agent-child"): CreateWorkerConversationOptions {
-	const directory = mkdtempSync(join(tmpdir(), "pi-worker-conversation-context-fork-"));
+	const directory = tempDir("pi-worker-conversation-context-fork-");
 	roots.push(directory);
 	return {
 		agentDir: join(directory, "agent"),

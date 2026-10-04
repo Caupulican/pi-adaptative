@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { WorkerClaim } from "../src/core/autonomy/contracts.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
@@ -11,11 +9,12 @@ import {
 	createTestWorkerExecutionAuthority,
 	createTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 
 function root(): string {
-	const value = mkdtempSync(join(tmpdir(), "pi-worker-terminal-finalizer-"));
+	const value = tempDir("pi-worker-terminal-finalizer-");
 	roots.push(value);
 	return value;
 }

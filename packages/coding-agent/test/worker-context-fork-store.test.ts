@@ -1,5 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AssistantMessage, Usage, UserMessage } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
@@ -21,6 +20,7 @@ import {
 	MAX_WORKER_CONTEXT_FORK_MESSAGES,
 	MAX_WORKER_CONTEXT_FORK_TEXT_BLOCKS,
 } from "../src/core/orchestration/worker-context-fork-reference.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const ZERO_USAGE: Usage = {
 	input: 0,
@@ -38,7 +38,7 @@ afterEach(() => {
 });
 
 function makeStore(parentSessionId = "parent-session"): { agentDir: string; store: WorkerContextForkStore } {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-context-fork-store-"));
+	const agentDir = tempDir("pi-context-fork-store-");
 	tempDirectories.push(agentDir);
 	return { agentDir, store: new WorkerContextForkStore({ agentDir, parentSessionId }) };
 }

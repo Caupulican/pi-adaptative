@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
@@ -12,6 +11,7 @@ import {
 	createEmptyToolArgumentValidationStats,
 	readPersistedToolRecoveryStats,
 } from "../src/core/tool-recovery-stats.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const tempDirs: string[] = [];
 
@@ -34,7 +34,7 @@ function event(model: string = "model"): ToolArgumentValidationTelemetryEvent {
 
 describe("tool recovery cumulative stats", () => {
 	it("preserves cumulative totals after detailed event records are removed", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-tool-recovery-stats-"));
+		const dir = tempDir("pi-tool-recovery-stats-");
 		tempDirs.push(dir);
 		const eventLogPath = join(dir, "tool-recovery-events.jsonl");
 		const failureCorpusPath = join(dir, "failure-corpus.jsonl");

@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -8,10 +7,11 @@ import {
 	getToolDownloadKind,
 	installToolArchiveDirectory,
 } from "../src/utils/tools-manager.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("managed collaboration backend release", () => {
 	it("preserves Windows app-local runtime and licenses in one atomic directory installation", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-herdr-directory-"));
+		const dir = tempDir("pi-herdr-directory-");
 		try {
 			const extracted = join(dir, "extracted");
 			mkdirSync(join(extracted, "conpty", "x64"), { recursive: true });

@@ -1,6 +1,5 @@
 import { type ChildProcess, fork } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Message } from "@caupulican/pi-ai";
@@ -8,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
 import type { AgentResumeContext } from "../src/core/orchestration/contracts.ts";
 import { withFileLock } from "../src/core/util/atomic-file.ts";
+import { tempDir } from "./temp-dir.ts";
 
 interface ControlExpectation {
 	messageId: string;
@@ -65,7 +65,7 @@ afterEach(async () => {
 });
 
 function createConversationFixture(label: string): ConversationFixture {
-	const root = mkdtempSync(join(tmpdir(), `pi-worker-process-lock-${label}-`));
+	const root = tempDir(`pi-worker-process-lock-${label}-`);
 	tempDirectories.push(root);
 	const agentDir = join(root, "agent");
 	const conversation = new WorkerConversationStore().create({

@@ -1,9 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { ModelAdaptationStore } from "../src/core/models/adaptation-store.ts";
 import { formatToolRepairHealthReport } from "../src/core/tool-repair-health.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const dirs: string[] = [];
 
@@ -12,7 +11,7 @@ afterEach(() => {
 });
 
 function tempAgentDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-tool-repair-health-"));
+	const dir = tempDir("pi-tool-repair-health-");
 	dirs.push(dir);
 	return dir;
 }

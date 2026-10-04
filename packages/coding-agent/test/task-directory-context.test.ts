@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { fauxAssistantMessage } from "@caupulican/pi-ai/faux";
 import { describe, expect, it } from "vitest";
@@ -20,6 +18,7 @@ import {
 	transitionTaskDirectoryState,
 } from "../src/core/tasks/task-directory-state.ts";
 import { createTaskStepsState, setTaskSteps, updateTaskStep } from "../src/core/tasks/task-state.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function fixture() {
 	const session = SessionManager.inMemory("/fixture");
@@ -36,7 +35,7 @@ function fixture() {
 
 describe("saved directory model context", () => {
 	it("reconstructs pins and the active task from the reopened journal, then follows cursor changes", () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-directory-context-"));
+		const scratch = tempDir("pi-directory-context-");
 		try {
 			const session = SessionManager.create(scratch, scratch, scratch);
 			session.appendMessage(fauxAssistantMessage("Synthetic journal anchor"));

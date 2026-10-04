@@ -1,14 +1,4 @@
-import {
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	realpathSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createToolFailureResult, type ToolFailureMemoryRecord } from "@caupulican/pi-agent-core";
@@ -19,12 +9,13 @@ import {
 	writeToolRecoveryLogRecord,
 } from "../src/core/tool-recovery-log-records.ts";
 import { ToolRecoveryLogger } from "../src/core/tool-recovery-logger.ts";
+import { tempDir } from "./temp-dir.ts";
 import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
 
 const tempDirs: string[] = [];
 
 function makeTempDir(): string {
-	const dir = mkdtempSync(join(realpathSync.native(tmpdir()), "pi-tool-recovery-"));
+	const dir = tempDir("pi-tool-recovery-");
 	tempDirs.push(dir);
 	return dir;
 }

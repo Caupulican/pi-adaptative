@@ -19,9 +19,7 @@
  * Every case owns its scratch ledger directory and removes it even when an assertion fails. No prior
  * test file is imported, and nothing executes a model.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { WorkerAgentTaskStartOptions } from "../src/core/delegation/worker-agent-control.ts";
 import { WorkerAgentControlCoordinator } from "../src/core/delegation/worker-agent-control-coordinator.ts";
@@ -43,6 +41,7 @@ import {
 	createTestWorkerExecutionAuthority,
 	createTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const LEASE_TTL_MS = 60_000;
 const AGENT_ID = "worker-1";
@@ -206,7 +205,7 @@ function buildCoordinator(
 
 /** One specialist whose first task completed under its own goal. */
 function seamWithIdleSpecialist(sessionId: string): Seam {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-specialist-replay-"));
+	const agentDir = tempDir("pi-specialist-replay-");
 	roots.push(agentDir);
 	const lifecycle = new WorkerLifecycle({ agentDir, sessionId });
 	const profile = profileFixture();

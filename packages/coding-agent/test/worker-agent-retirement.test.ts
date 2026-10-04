@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import {
@@ -12,6 +10,7 @@ import {
 import { OrchestrationEventStore } from "../src/core/orchestration/event-store.ts";
 import { DurableTaskRuntime, reduceOrchestrationEvent } from "../src/core/orchestration/task-runtime.ts";
 import { createTestExecutionGrant } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 const NOW = Date.parse("2026-08-07T12:00:00.000Z");
@@ -27,7 +26,7 @@ afterEach(() => {
 });
 
 function createRoot(): string {
-	const root = mkdtempSync(join(tmpdir(), "pi-worker-retirement-"));
+	const root = tempDir("pi-worker-retirement-");
 	roots.push(root);
 	return root;
 }

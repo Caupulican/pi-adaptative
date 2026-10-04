@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { projectToolsForProvider } from "@caupulican/pi-agent-core/provider-tool-projection";
@@ -9,12 +8,13 @@ import { streamOpenAIResponses } from "@caupulican/pi-ai/openai-responses";
 import { describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe.each(["grok-4.5", "grok-4.6", "grok-4.7", "grok-4.7-build-fast"] as const)(
 	"xAI default tool schemas (%s)",
 	(modelId) => {
 		it("serializes every packaged tool with an object root for subscription requests", async () => {
-			const cwd = mkdtempSync(join(tmpdir(), "pi-xai-schema-"));
+			const cwd = tempDir("pi-xai-schema-");
 			const model = xaiOAuthProvider.modifyModels?.([getModel("xai", modelId)], {
 				access: "test-access",
 				refresh: "test-refresh",

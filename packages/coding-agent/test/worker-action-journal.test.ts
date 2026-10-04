@@ -1,8 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { normalizeWorkerActionTarget, WorkerActionJournal } from "../src/core/delegation/worker-action-journal.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("WorkerActionJournal", () => {
 	const tempDirs: string[] = [];
@@ -12,7 +12,7 @@ describe("WorkerActionJournal", () => {
 	});
 
 	function createJournal(fence = 7): WorkerActionJournal {
-		const root = mkdtempSync(join(tmpdir(), "pi-worker-action-journal-"));
+		const root = tempDir("pi-worker-action-journal-");
 		tempDirs.push(root);
 		return new WorkerActionJournal({
 			agentDir: join(root, "agent"),

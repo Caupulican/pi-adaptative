@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { evaluateToolPromotion } from "../src/core/tool-selection/promotion.ts";
 import { ToolPerformanceStore } from "../src/core/tool-selection/tool-performance-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -52,7 +52,7 @@ function fixture(data: {
 	observations?: unknown[];
 	intentAgreement?: Record<string, unknown>;
 }) {
-	const dir = mkdtempSync(join(tmpdir(), "pi-performance-boundaries-"));
+	const dir = tempDir("pi-performance-boundaries-");
 	dirs.push(dir);
 	const path = join(dir, "performance.json");
 	writeFileSync(

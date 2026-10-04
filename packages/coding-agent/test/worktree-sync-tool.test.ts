@@ -1,11 +1,11 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { execCommand } from "../src/core/exec.ts";
 import type { ResolvedWorktreeSyncSettings } from "../src/core/settings-manager.ts";
 import { createWorktreeSyncToolDefinition, type WorktreeSyncToolDeps } from "../src/core/tools/worktree-sync.ts";
 import { createDefaultWorktreeSyncExec, type WorktreeSyncEngineDeps } from "../src/core/worktree-sync/git-engine.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * Drives the `worktree_sync` ToolDefinition itself (not the engine directly) against a real temp
@@ -36,7 +36,7 @@ interface Harness {
 }
 
 async function initRepo(): Promise<Harness> {
-	const root = mkdtempSync(join(tmpdir(), "pi-wt-sync-tool-"));
+	const root = tempDir("pi-wt-sync-tool-");
 	cleanups.push(root);
 	const repo = join(root, "repo");
 	await git(root, "init", "-b", "main", repo);

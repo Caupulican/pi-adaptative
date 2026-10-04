@@ -1,8 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync, rmSync } from "node:fs";
 import { afterEach, expect, it, vi } from "vitest";
 import { WorkerAgentMailbox } from "../src/core/delegation/worker-agent-control.ts";
 import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
@@ -11,6 +9,7 @@ import { createLocalWorkerProcessOwnerId, isLocalProcessAlive } from "../src/cor
 import { WorkerProjectDirectory } from "../src/core/delegation/worker-project-directory.ts";
 import { DurableTaskRuntime } from "../src/core/orchestration/task-runtime.ts";
 import { createTestExecutionGrant } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -19,7 +18,7 @@ afterEach(() => {
 });
 
 function fixture() {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-recovery-fences-"));
+	const agentDir = tempDir("pi-recovery-fences-");
 	roots.push(agentDir);
 	const processResult = spawnSync(process.execPath, ["-p", "process.pid"], { encoding: "utf8" });
 	expect(processResult.status).toBe(0);

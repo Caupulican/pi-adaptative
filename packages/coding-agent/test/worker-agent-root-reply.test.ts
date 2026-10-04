@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	SessionRootMailbox,
@@ -14,11 +12,12 @@ import type { WorkerDispatchScheduler } from "../src/core/delegation/worker-disp
 import type { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { type AgentBindingContract, ORCHESTRATION_SCHEMA_VERSION } from "../src/core/orchestration/contracts.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../src/core/orchestration/task-runtime.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 
 function root(): string {
-	const value = mkdtempSync(join(tmpdir(), "pi-worker-agent-root-reply-"));
+	const value = tempDir("pi-worker-agent-root-reply-");
 	roots.push(value);
 	return value;
 }

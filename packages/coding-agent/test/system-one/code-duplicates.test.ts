@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -12,6 +11,7 @@ import {
 	SemanticUnitIndex,
 	scanSemanticDuplicates,
 } from "../../src/core/system-one/code-duplicates.ts";
+import { tempDir } from "../temp-dir.ts";
 
 const EXISTING = `export function normalizeRepositoryPath(rawPath: string, repositoryRoot: string): string {
 	const trimmed = rawPath.trim().replaceAll("\\\\", "/");
@@ -33,7 +33,7 @@ describe("semantic code deduplication", () => {
 		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
 	function repo(): string {
-		const root = mkdtempSync(join(tmpdir(), "pi-dedup-"));
+		const root = tempDir("pi-dedup-");
 		dirs.push(root);
 		mkdirSync(join(root, "src"), { recursive: true });
 		writeFileSync(join(root, "src", "paths.ts"), EXISTING);

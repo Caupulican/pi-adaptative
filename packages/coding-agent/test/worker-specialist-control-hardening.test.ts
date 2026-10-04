@@ -18,9 +18,7 @@
  * - the anonymous-start replay shortcut matches on the raw replay key alone and returns the original
  *   record without comparing instructions, grant or requested target.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkerAgentTaskStartOptions } from "../src/core/delegation/worker-agent-control.ts";
 import { WorkerAgentMailbox } from "../src/core/delegation/worker-agent-control.ts";
@@ -46,6 +44,7 @@ import {
 	createTestWorkerExecutionAuthority,
 	createTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const LEASE_TTL_MS = 60_000;
 const AGENT_ID = "worker-1";
@@ -199,7 +198,7 @@ function buildCoordinator(agentDir: string, sessionId: string, lifecycle: Worker
 
 /** One idle specialist whose first task completed under its own goal, with a real control seam. */
 function seamWithIdleSpecialist(sessionId: string): Seam {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-specialist-control-"));
+	const agentDir = tempDir("pi-specialist-control-");
 	roots.push(agentDir);
 	const lifecycle = new WorkerLifecycle({ agentDir, sessionId });
 	const profile = profileFixture();

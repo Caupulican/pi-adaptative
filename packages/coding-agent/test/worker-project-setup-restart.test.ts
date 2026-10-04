@@ -1,8 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { Context, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai/faux";
 import { expect, it, vi } from "vitest";
@@ -11,13 +9,14 @@ import { WorkerConversationStore } from "../src/core/delegation/worker-conversat
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { createLocalWorkerProcessOwnerId, isLocalProcessAlive } from "../src/core/delegation/worker-process-owner.ts";
 import { createHarness } from "./suite/harness.ts";
+import { tempDir } from "./temp-dir.ts";
 
 it.each(
 	["ensure-before", "claim-after", "binding-before"].flatMap((fault) =>
 		["dead", "live", "unknown"].map((ownerState) => ({ fault, ownerState })),
 	),
 )("interrupted $fault setup recovers only a proven $ownerState owner", async ({ fault, ownerState }) => {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-project-restart-"));
+	const agentDir = tempDir("pi-project-restart-");
 	const provider = registerFauxProvider();
 	let requests = 0;
 	let providerContext = "";

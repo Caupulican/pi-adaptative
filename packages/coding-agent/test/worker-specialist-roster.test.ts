@@ -25,9 +25,7 @@
  * No resolver or roster API is imported: these assertions are about what the EXISTING public
  * projections return.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
@@ -52,6 +50,7 @@ import {
 	createTestWorkerExecutionAuthority,
 	createTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /** Real clock: WorkerLifecycle forwards `now` only to the runtime, so a frozen past clock would
  * make every lease expire at the moment it is granted. No assertion here depends on elapsed time. */
@@ -78,7 +77,7 @@ afterEach(() => {
 });
 
 function root(): string {
-	const directory = mkdtempSync(join(tmpdir(), "pi-worker-specialist-roster-"));
+	const directory = tempDir("pi-worker-specialist-roster-");
 	roots.push(directory);
 	return directory;
 }

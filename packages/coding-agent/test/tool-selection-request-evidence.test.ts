@@ -1,11 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatToolSelectionHints, renderedToolSelectionHintIntents } from "../src/core/tool-selection/promotion.ts";
 import type { ToolSelectionIntentClass } from "../src/core/tool-selection/tool-performance-store.ts";
 import { ToolPerformanceStore } from "../src/core/tool-selection/tool-performance-store.ts";
 import { ToolSelectionController } from "../src/core/tool-selection/tool-selection-controller.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const prompt = formatToolSelectionHints([
 	{ modelRef: "faux/model", intentClass: "read", tool: "read", sampleCount: 3, entropy: 0, margin: 1 },
@@ -17,7 +16,7 @@ afterEach(() => {
 
 describe("request-bound tool hint evidence", () => {
 	it("keeps explicit model identities through source reuse, request replacement and reversed completion", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-hint-model-"));
+		const dir = tempDir("pi-hint-model-");
 		const store = ToolPerformanceStore.forAgentDir(dir);
 		cleanups.push(() => {
 			store.close();
@@ -75,7 +74,7 @@ describe("request-bound tool hint evidence", () => {
 	});
 
 	it("fences absent, stale, replaced, cross-model and next-turn request evidence", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-hint-request-"));
+		const dir = tempDir("pi-hint-request-");
 		const store = ToolPerformanceStore.forAgentDir(dir);
 		cleanups.push(() => {
 			store.close();
@@ -113,7 +112,7 @@ describe("request-bound tool hint evidence", () => {
 	});
 
 	it("replaces 2,000 request projections without retaining prompt bytes or writing evidence", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-hint-bound-"));
+		const dir = tempDir("pi-hint-bound-");
 		const store = ToolPerformanceStore.forAgentDir(dir);
 		cleanups.push(() => {
 			store.close();
@@ -158,7 +157,7 @@ describe("request-bound tool hint evidence", () => {
 	});
 
 	it("retains admission evidence through prompt replacement, switch changes and delayed completion", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-hint-completion-"));
+		const dir = tempDir("pi-hint-completion-");
 		const store = ToolPerformanceStore.forAgentDir(dir);
 		cleanups.push(() => {
 			store.close();

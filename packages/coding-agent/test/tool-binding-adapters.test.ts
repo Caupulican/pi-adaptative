@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { type AgentTool, captureExecutionContext, type ExecutionContext } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -21,6 +20,7 @@ import { ToolGateController } from "../src/core/tool-gate-controller.ts";
 import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "../src/core/tools/tool-definition-wrapper.ts";
 import { wrapToolExecution } from "../src/core/tools/tool-execution-wrapper.ts";
 import { createHarness } from "./suite/harness.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const parameters = Type.Object({ path: Type.String() });
 
@@ -50,7 +50,7 @@ describe("invocation binding across registry and policy adapters", () => {
 	}
 
 	beforeEach(() => {
-		root = mkdtempSync(join(tmpdir(), "pi-binding-adapters-"));
+		root = tempDir("pi-binding-adapters-");
 		ambient = join(root, "ambient");
 		const pinned = join(root, "pinned");
 		mkdirSync(ambient);

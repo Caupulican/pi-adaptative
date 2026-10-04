@@ -1,5 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WorkerActionJournal } from "../src/core/delegation/worker-action-journal.ts";
@@ -18,6 +17,7 @@ import {
 	type ToolCapabilityManifest,
 } from "../src/core/orchestration/contracts.ts";
 import { createDirectoryLink } from "./helpers/filesystem-links.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("parseWorkerActions", () => {
 	it("rejects an entire action batch when any action is malformed", () => {
@@ -133,7 +133,7 @@ describe("applyWorkerActions (execution-time grant enforcement)", () => {
 	}));
 
 	beforeEach(() => {
-		cwd = mkdtempSync(join(tmpdir(), "worker-actions-test-"));
+		cwd = tempDir("worker-actions-test-");
 		mkdirSync(join(cwd, "src", "secret"), { recursive: true });
 		writeFileSync(join(cwd, "src", "b.ts"), "the foo value", "utf-8");
 		const grant: ExecutionGrant = {

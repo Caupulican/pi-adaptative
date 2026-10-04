@@ -1,15 +1,14 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { Context, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai/faux";
 import { expect, it } from "vitest";
 import { createHarness } from "./suite/harness.ts";
+import { tempDir } from "./temp-dir.ts";
 
 it.each([false, true])(
 	"a busy specialist in another parent requires explicit independent work (parallel: %s)",
 	async (parallel) => {
-		const root = mkdtempSync(join(tmpdir(), "pi-project-busy-"));
+		const root = tempDir("pi-project-busy-");
 		const provider = registerFauxProvider();
 		const entered = Promise.withResolvers<void>();
 		const gate = Promise.withResolvers<void>();

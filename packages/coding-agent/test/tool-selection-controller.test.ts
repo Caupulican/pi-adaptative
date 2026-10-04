@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionRunner } from "../src/core/extensions/index.ts";
@@ -13,6 +12,7 @@ import {
 	type ToolSelectionControllerDeps,
 	type ToolSelectionTool,
 } from "../src/core/tool-selection/tool-selection-controller.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -20,7 +20,7 @@ afterEach(() => {
 });
 
 function makeStore(): ToolPerformanceStore {
-	const dir = mkdtempSync(join(tmpdir(), "pi-tool-selection-"));
+	const dir = tempDir("pi-tool-selection-");
 	dirs.push(dir);
 	return ToolPerformanceStore.forAgentDir(dir, {
 		fingerprint: () => ({ id: "host", cpu: "cpu", cores: 4, totalMemGb: 16 }),
@@ -311,7 +311,7 @@ describe("ToolGateController selector integration", () => {
 	});
 
 	it("preserves a successful result during a real advisory storage failure and recovers without a prompt", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-selection-storage-failure-"));
+		const dir = tempDir("pi-selection-storage-failure-");
 		dirs.push(dir);
 		const store = ToolPerformanceStore.forAgentDir(dir, { writeBehind: { maxPending: 1 } });
 		const controller = makeController(undefined, { store });

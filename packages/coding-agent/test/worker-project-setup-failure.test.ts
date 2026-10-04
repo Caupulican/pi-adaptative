@@ -1,16 +1,15 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { Context, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai/faux";
 import { expect, it, vi } from "vitest";
 import { WorkerConversationStore } from "../src/core/delegation/worker-conversation-store.ts";
 import { createHarness } from "./suite/harness.ts";
+import { tempDir } from "./temp-dir.ts";
 
 it.each(["before", "after", "none"])(
 	"project admission recovers after a %s transcript creation failure",
 	async (phase) => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-project-setup-failure-"));
+		const agentDir = tempDir("pi-project-setup-failure-");
 		const provider = registerFauxProvider();
 		let requests = 0;
 		provider.setResponses(

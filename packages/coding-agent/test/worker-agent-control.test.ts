@@ -1,13 +1,13 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, truncateSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readdirSync, readFileSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkerAgentMailbox } from "../src/core/delegation/worker-agent-control.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 
 function root(): string {
-	const value = mkdtempSync(join(tmpdir(), "pi-worker-agent-control-"));
+	const value = tempDir("pi-worker-agent-control-");
 	roots.push(value);
 	return value;
 }

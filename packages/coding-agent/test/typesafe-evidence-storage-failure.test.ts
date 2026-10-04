@@ -1,10 +1,10 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createFileArtifactStore } from "../src/core/context/context-artifacts.ts";
 import { TypeSafeEvidenceStore } from "../src/core/review/typesafe-evidence-store.ts";
 import { createArtifactRetrieveToolDefinition } from "../src/core/tools/artifact-retrieve.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const directories: string[] = [];
 afterEach(() => {
@@ -23,7 +23,7 @@ describe("Jev disk evidence failure provenance", () => {
 		"payload-directory",
 		"wrong-id",
 	] as const)("does not disguise %s as an inherited record", async (state) => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-jev-storage-"));
+		const directory = tempDir("pi-jev-storage-");
 		directories.push(directory);
 		const parent = new TypeSafeEvidenceStore(createFileArtifactStore({ baseDir: join(directory, "parent") }));
 		const baseDir = join(directory, "child");
