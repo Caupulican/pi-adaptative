@@ -5,6 +5,7 @@ import { GoalSessionController } from "../../src/core/goals/goal-session-control
 import { applyGoalEvent, createGoalState } from "../../src/core/goals/goal-state.ts";
 import { ObjectiveExecutionController } from "../../src/core/objective-execution/objective-execution-controller.ts";
 import { composeObjectiveRoute } from "../../src/core/objective-execution/objective-route-policy.ts";
+import { ORCHESTRATION_SCHEMA_VERSION } from "../../src/core/orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "../../src/core/orchestration/task-runtime-state.ts";
 import { DEFAULT_STEERING_POLICY } from "../../src/core/steering/policy.ts";
 import {
@@ -365,7 +366,26 @@ describe("System One recovery WO-09 production paths", () => {
 				lastOrdinal: 1,
 				agents: {},
 				objectives: {},
-				tasks: {},
+				tasks: {
+					t1: {
+						task: {
+							schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+							taskId: "t1",
+							objectiveId: "goal:fix-parser",
+							title: "Fix parser",
+							description: "Fix the parser",
+							role: "implementer",
+							status: "running",
+							dependsOn: [],
+							requiredCapabilities: [],
+							acceptanceCriterionIds: [],
+							riskBudget: {},
+							createdAt: "T0",
+							updatedAt: "T0",
+						},
+						attemptIds: ["a1"],
+					},
+				},
 				attempts: workerInFlight
 					? {
 							a1: {
@@ -474,6 +494,7 @@ describe("System One recovery WO-09 production paths", () => {
 		const pending = [
 			{
 				signal_id: "sig-verify-priority",
+				objective_id: "goal:fix-parser",
 				action: "request_verifier" as const,
 				reason_codes: ["independent_verification_needed"],
 			},
@@ -531,6 +552,7 @@ describe("System One recovery WO-09 production paths", () => {
 		const pending = [
 			{
 				signal_id: "sig-independent-verifier",
+				objective_id: "goal:fix-parser",
 				action: "request_verifier" as const,
 				reason_codes: ["independent_verification_needed"],
 			},

@@ -156,6 +156,7 @@ import type { SemanticDecisionEngine } from "./decision/engine.ts";
 import {
 	appendWorkerClaimSnapshot,
 	getLatestWorkerClaimSnapshot,
+	getWorkerClaimSnapshotForAttempt,
 	getWorkerClaimSnapshots,
 } from "./delegation/session-worker-claim.ts";
 import type { WorkerResponseObservation } from "./delegation/worker-attempt-executor.ts";
@@ -267,6 +268,7 @@ import {
 	resolveDeliveryBinding,
 	resolveRuleAuthority,
 } from "./objective-execution/local-commit-delivery.ts";
+import { ObjectiveExecutionInterruptedError } from "./objective-execution/objective-execution-controller.ts";
 import { ObjectiveMutationLedger } from "./objective-execution/objective-mutation-ledger.ts";
 import type { ObjectiveRoute } from "./objective-execution/objective-route.ts";
 import {
@@ -1764,9 +1766,16 @@ export class AgentSession {
 			foreground: this._foregroundRecovery,
 			isDisposed: () => this._disposed,
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
-			getWorkerClaimSnapshot: (laneId) =>
-				getLatestWorkerClaimSnapshot(getActiveSessionBranchEntries(this.sessionManager), laneId),
-			getWorkerResult: (laneId) => this._backgroundLanes.getWorkerResult(laneId),
+			getWorkerClaimSnapshot: (laneId, attemptId) => {
+				const entries = getActiveSessionBranchEntries(this.sessionManager);
+				return attemptId === undefined
+					? getLatestWorkerClaimSnapshot(entries, laneId)
+					: getWorkerClaimSnapshotForAttempt(entries, laneId, attemptId);
+			},
+			getWorkerResult: (laneId, attemptId) =>
+				attemptId !== undefined
+					? this._backgroundLanes.getWorkerAttemptResult(attemptId)
+					: this._backgroundLanes.getWorkerResult(laneId),
 			startCustomMessageTurn: (message, lease, goalId) =>
 				this._durableCustomMessageTurns.start(message, lease, goalId),
 			enqueueCustomMessageTurn: (message) => this._durableCustomMessageTurns.enqueue(message),
@@ -2682,17 +2691,27 @@ export class AgentSession {
 		return this._workerControl;
 	}
 
-	/** The objective loop's wait: the running attempts' agents, on the goal's worker-wait bound. */
-	private async _waitForObjectiveWorkers(context: unknown): Promise<void> {
+	/**
+	 * The objective loop's wait: every captured running attempt, in-process or managed, until one of
+	 * them leaves "running", the goal's worker-wait bound elapses, the loop is cancelled or the session
+	 * is disposed. Only a captured terminal is observed; the loop re-reads readiness after a terminal or
+	 * the bound, and stops on disposal.
+	 */
+	private async _waitForObjectiveWorkers(context: unknown, signal?: AbortSignal): Promise<void> {
 		const attempts =
 			context &&
 			typeof context === "object" &&
 			Array.isArray((context as { inFlightAttempts?: unknown }).inFlightAttempts)
-				? ((context as { inFlightAttempts: readonly { agentId?: string }[] }).inFlightAttempts ?? [])
+				? ((context as { inFlightAttempts: readonly { attemptId: string }[] }).inFlightAttempts ?? [])
 				: [];
-		const agentIds = attempts.flatMap((attempt) => (attempt.agentId ? [attempt.agentId] : []));
-		if (!agentIds.length) return;
-		await this._backgroundLanes.waitForWorkerAgents(agentIds, "any", DEFAULT_GOAL_WORKER_WAIT_MS);
+		if (!attempts.length) return;
+		const outcome = await this._backgroundLanes.waitForRunningAttempts(
+			attempts.map((attempt) => attempt.attemptId),
+			{ timeoutMs: DEFAULT_GOAL_WORKER_WAIT_MS, ...(signal ? { signal } : {}) },
+		);
+		// A disposed session ends the loop, whichever event settled the wait first.
+		if (outcome.kind === "disposed" || this._disposed)
+			throw new ObjectiveExecutionInterruptedError("session_disposed");
 	}
 
 	/** The session's compiled ExecutionCharter, once the adaptive runtime bound one. */
@@ -2832,7 +2851,7 @@ export class AgentSession {
 				rootExecutor: this._goals.objectiveRootExecutor(),
 				chooseExecutor: (route) => this._chooseObjectiveExecutor(route),
 				retrieval: { execute: (route, signal) => this._retrieveForObjective(route, signal) },
-				waiter: { wait: (context) => this._waitForObjectiveWorkers(context) },
+				waiter: { wait: (context, signal) => this._waitForObjectiveWorkers(context, signal) },
 				checkpoints: ledgerRoutes,
 				stalls: ledgerRoutes,
 				// The owner's authority is required while a question is open or a blocker stands.

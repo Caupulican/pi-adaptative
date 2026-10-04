@@ -2,12 +2,16 @@ import { execFileSync } from "node:child_process";
 import { closeSync, mkdtempSync, openSync, realpathSync, rmSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SessionManager } from "@caupulican/pi-agent-core/session";
+import { fauxAssistantMessage } from "@caupulican/pi-ai/faux";
 import { afterEach, describe, expect, it } from "vitest";
 import { getDefaultActiveToolNames } from "../../src/core/default-tool-surface.ts";
+import { createGoalState } from "../../src/core/goals/goal-state.ts";
+import { appendGoalStateSnapshot } from "../../src/core/goals/session-goal-state.ts";
 import { classifyDangerousGitBash } from "../../src/core/objective-execution/dangerous-git-bash.ts";
 import { ObjectiveMutationLedger } from "../../src/core/objective-execution/objective-mutation-ledger.ts";
 import { captureRepoDeliveryFingerprint } from "../../src/core/objective-execution/repo-delivery-fingerprint.ts";
-import { repositoryEffectForCall } from "../../src/core/objective-execution/repository-effect.ts";
+import { repositoryEffectForCall, toolRepositoryEffect } from "../../src/core/objective-execution/repository-effect.ts";
 import { RepositoryMutationObserver } from "../../src/core/objective-execution/repository-mutation-observer.ts";
 import { resolveObjectiveWorkspaceSafetyMode } from "../../src/core/objective-execution/workspace-safety.ts";
 import { ToolGateController } from "../../src/core/tool-gate-controller.ts";
@@ -35,7 +39,7 @@ function gitRepo(): string {
 	return committedRepo("pi-mb-");
 }
 
-function gate(cwd: string, hostEffect?: "none" | "observe" | "typed_paths") {
+function gate(cwd: string, hostEffect?: "none" | "observe" | "typed_paths", deliveryActive = true) {
 	const observer = new RepositoryMutationObserver(new ObjectiveMutationLedger());
 	return {
 		observer,
@@ -47,7 +51,7 @@ function gate(cwd: string, hostEffect?: "none" | "observe" | "typed_paths") {
 			getExtensionRunner: () => ({ hasHandlers: () => false }) as never,
 			repositoryObserver: observer,
 			getObjectiveId: () => "obj",
-			deliveryActive: () => true,
+			deliveryActive: () => deliveryActive,
 			...(hostEffect ? { hostRepositoryEffect: () => hostEffect } : {}),
 		}),
 	};
@@ -119,6 +123,156 @@ describe("objective mutation boundary", () => {
 		).toBe("none");
 		expect(getDefaultActiveToolNames()).toContain("repo_read");
 		expect(resolveObjectiveWorkspaceSafetyMode()).toBe("shared_guarded");
+	});
+
+	it("observes calls by the owner's baseline policy while their potential effect stays opaque for readiness", () => {
+		for (const deliveryActive of [true, false]) {
+			for (const toolName of [
+				"fetch",
+				"web_search",
+				"webfetch",
+				"image_generate",
+				"secret_store",
+				"delegate",
+				"peer",
+				"agent_send",
+				"list_peers",
+				"model_fitness",
+				"ask_question",
+				"task_steps",
+				"task_directory",
+				"self_compact",
+			]) {
+				expect(repositoryEffectForCall({ toolName, args: {}, deliveryActive }), toolName).toBe("none");
+				expect(toolRepositoryEffect(toolName), toolName).toBe("opaque");
+			}
+			expect(repositoryEffectForCall({ toolName: "goal", args: { action: "update" }, deliveryActive })).toBe("none");
+			expect(repositoryEffectForCall({ toolName: "pipeline", args: { action: "list" }, deliveryActive })).toBe(
+				"none",
+			);
+			for (const toolName of ["bash", "python", "run_process", "skillify", "extensionify", "worktree_sync"]) {
+				expect(repositoryEffectForCall({ toolName, args: {}, deliveryActive }), toolName).toBe("observe");
+			}
+			expect(repositoryEffectForCall({ toolName: "edit", args: {}, deliveryActive })).toBe("typed_owned_write");
+		}
+		expect(toolRepositoryEffect("goal", { action: "update" })).toBe("opaque");
+		expect(toolRepositoryEffect("pipeline", { action: "list" })).toBe("opaque");
+		expect(toolRepositoryEffect("custom_widget")).toBe("opaque");
+		expect(toolRepositoryEffect("goal", { action: "get" })).toBe("none");
+		expect(toolRepositoryEffect("read")).toBe("none");
+	});
+
+	it("characterization (open gap): an in-repository state mutation by an unobserved call goes unrecorded", async () => {
+		const root = gitRepo();
+		/** A real session whose store is the given directory, flushed to disk by its first reply. */
+		const storedSession = (sessionDir: string) => {
+			const session = SessionManager.create(root, join(sessionDir, "agent"), join(sessionDir, "sessions"));
+			session.appendMessage(fauxAssistantMessage("ready"));
+			return session;
+		};
+		const inRepository = storedSession(join(root, ".pi-state"));
+		const appendGoal = () => {
+			appendGoalStateSnapshot(inRepository, createGoalState({ goalId: "g1", userGoal: "Ship it", now: "T0" }));
+		};
+		// The baseline policy leaves goal and planning calls unobserved: the repository changes and nothing
+		// records it. This gap is open, not fixed.
+		const unobserved = gate(root);
+		await settle(unobserved.gate, "goal-update", "goal", { action: "update" }, appendGoal);
+		expect(unobserved.observer.deliveryBlockReason("obj")).toBeUndefined();
+		// A process call making the same change keeps its baseline evidence requirement.
+		const process = gate(root);
+		await settle(process.gate, "shell-append", "bash", { command: "true" }, appendGoal);
+		expect(process.observer.deliveryBlockReason("obj")).toBe("shell_mutation_unattributed");
+	});
+
+	it("journal outage admits baseline-unobserved calls and still refuses observed ones with the actual diagnostic", async () => {
+		const root = gitRepo();
+		const outage = (deliveryActive: boolean) => {
+			const controller = gate(root, undefined, deliveryActive);
+			controller.observer.setWorkEvidenceJournal({
+				isCurrentBranchAnchor: () => true,
+				ensureBaseline: async () => {
+					throw new Error("journal offline");
+				},
+				recordBaselineDiagnostic: async () => {},
+				openObservation: async () => {},
+				closeObservation: async () => {},
+				recordObservedChange: async () => {},
+				recoverObservations: async () => {},
+				getWorkEvidence: () => [],
+			});
+			return controller.gate;
+		};
+		const admit = async (controller: ToolGateController, name: string, args: Record<string, unknown>) => {
+			const context = {
+				toolCall: { type: "toolCall" as const, id: `${name}-call`, name, arguments: args },
+				args,
+				assistantMessage: { provider: "test", model: "test" } as never,
+				context: {} as never,
+			};
+			return controller
+				.beforeToolCall(context as Parameters<ToolGateController["beforeToolCall"]>[0], undefined)
+				.then(
+					(result) => ({ admitted: result === undefined }),
+					(error: unknown) => ({ refused: error instanceof Error ? error.message : String(error) }),
+				);
+		};
+		for (const deliveryActive of [true, false]) {
+			const controller = outage(deliveryActive);
+			for (const [name, args] of [
+				["fetch", { url: "https://example.invalid" }],
+				["delegate", { action: "list" }],
+				["ask_question", { question: "Which branch?" }],
+				["pipeline", { action: "list" }],
+				["read", { path: "README.md" }],
+			] as const) {
+				expect(await admit(controller, name, args), `${name} delivery=${deliveryActive}`).toEqual({
+					admitted: true,
+				});
+			}
+			const unknownTool = await admit(controller, "custom_widget", {});
+			expect(unknownTool).toEqual(
+				deliveryActive ? { refused: expect.stringContaining("baseline_persistence_failed") } : { admitted: true },
+			);
+			expect(await admit(controller, "bash", { command: "true" })).toEqual({
+				refused: expect.stringContaining("baseline_persistence_failed"),
+			});
+		}
+	});
+
+	it("a no-op fetch overlapping an owned write is not blamed; an overlapping process call still is", async () => {
+		const overlap = async (name: string, args: Record<string, unknown>) => {
+			const root = gitRepo();
+			const controller = gate(root);
+			const open = async (id: string, toolName: string, toolArgs: Record<string, unknown>) => {
+				const context = {
+					toolCall: { type: "toolCall" as const, id, name: toolName, arguments: toolArgs },
+					args: toolArgs,
+					assistantMessage: { provider: "test", model: "test" } as never,
+					context: {} as never,
+				};
+				await controller.gate.beforeToolCall(
+					context as Parameters<ToolGateController["beforeToolCall"]>[0],
+					undefined,
+				);
+				return () =>
+					controller.gate.afterToolCall({
+						...context,
+						result: { content: [{ type: "text", text: "ok" }], details: {} },
+						isError: false,
+					} as Parameters<ToolGateController["afterToolCall"]>[0]);
+			};
+			const concurrent = await open("concurrent", name, args);
+			const write = await open("owned", "write", { path: "owned.md" });
+			const fd = openSync(join(root, "owned.md"), "w");
+			writeSync(fd, "owned\n");
+			closeSync(fd);
+			await write();
+			await concurrent();
+			return controller.observer.deliveryBlockReason("obj");
+		};
+		expect(await overlap("fetch", { url: "https://example.invalid" })).toBeUndefined();
+		expect(await overlap("bash", { command: "true" })).toBe("shell_mutation_unattributed");
 	});
 
 	it("observes python and custom tools, and a trusted none does not", async () => {

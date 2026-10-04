@@ -250,11 +250,13 @@ describe("managed lane host bridge (recordManagedLane)", () => {
 		expect(notifyWorkerTerminalHandoff).toHaveBeenCalledWith([
 			{
 				laneId: terminal?.laneId,
+				attemptId: terminal?.attemptId,
 				status: "succeeded",
 				completedAt: terminal?.completedAt,
 				reasonCode: "worker_completed",
 			},
 		]);
+		expect(terminal?.attemptId).toEqual(expect.stringMatching(/^attempt-/));
 	});
 
 	it("does not materialize the in-process worker runtime to notify a managed worker terminal", async () => {

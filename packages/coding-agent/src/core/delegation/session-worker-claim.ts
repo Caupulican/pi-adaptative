@@ -88,13 +88,35 @@ export function getLatestWorkerClaimSnapshot(
 	entries: readonly SessionEntry[],
 	requestId: string,
 ): WorkerClaimSnapshotPayload | undefined {
+	return latestWorkerClaimSnapshot(entries, (claim) => claim.requestId === requestId);
+}
+
+/**
+ * Latest persisted snapshot of one exact worker generation's claim: its `terminalAttemptId` names
+ * `attemptId`. A claim that names no generation, or another one, is never this generation's.
+ */
+export function getWorkerClaimSnapshotForAttempt(
+	entries: readonly SessionEntry[],
+	requestId: string,
+	attemptId: string,
+): WorkerClaimSnapshotPayload | undefined {
+	return latestWorkerClaimSnapshot(
+		entries,
+		(claim) => claim.requestId === requestId && claim.terminalAttemptId === attemptId,
+	);
+}
+
+function latestWorkerClaimSnapshot(
+	entries: readonly SessionEntry[],
+	matches: (claim: WorkerClaim) => boolean,
+): WorkerClaimSnapshotPayload | undefined {
 	let latest: WorkerClaimSnapshotPayload | undefined;
 	for (const entry of entries) {
 		if (entry.type !== "custom" || entry.customType !== WORKER_CLAIM_CUSTOM_TYPE) continue;
 		const payload = entry.data;
 		if (!isVersionOneSessionSnapshotPayload(payload)) continue;
 		const claim = decodeSessionSnapshotPayload(payload, WORKER_CLAIM_SNAPSHOT_CODEC);
-		if (!claim || claim.requestId !== requestId) continue;
+		if (!claim || !matches(claim)) continue;
 		const request = payload.request;
 		latest = {
 			version: 1,

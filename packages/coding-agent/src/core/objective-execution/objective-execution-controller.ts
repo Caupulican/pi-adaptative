@@ -36,7 +36,7 @@ import type {
 import { buildWorkerCapabilityRequest, NoEligibleExpertError } from "../expert-routing/index.ts";
 import { describeRequirementCheckRefusal, type RequirementCheckProof } from "../goals/prove-requirement-checks.ts";
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
-import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { blocksRuleTransition } from "../project-rules/types.ts";
 import {
 	SteeringJudgmentUnavailableError,
@@ -82,6 +82,7 @@ import { type ApprovedCandidateTree, candidateTreeDigest } from "./delivery-proo
 import { finalizeDelivery } from "./finalization-coordinator.ts";
 import { evidenceMarkerOf } from "./ledger-route-checkpoints.ts";
 import { applyLocalCommitCharter } from "./local-commit-delivery.ts";
+import { objectiveJoinAttempts } from "./objective-readiness.ts";
 import { completionFailuresToRepairWork, type RepairWork } from "./objective-repair-work.ts";
 import {
 	type ObjectiveRoute,
@@ -218,6 +219,8 @@ export interface ObjectiveExecutionControllerDeps {
 	/** Unconsumed specialist/capability/verifier requests from live worker supervision. */
 	pendingSupervisionRequests?(): readonly {
 		readonly signal_id: string;
+		/** The objective of the worker that raised the request; only that objective's route adopts it. */
+		readonly objective_id: string;
 		readonly action: string;
 		readonly reason_codes?: readonly string[];
 	}[];
@@ -426,6 +429,23 @@ function routeStateProjection(
 	});
 }
 
+/**
+ * The loop's host ended underneath it while it waited (the session was disposed). Not a failure of
+ * the objective and not progress: the loop stops, and whoever drives it stops without recording one.
+ */
+export class ObjectiveExecutionInterruptedError extends Error {
+	readonly reason: "session_disposed";
+
+	constructor(reason: "session_disposed") {
+		super(`The objective loop was interrupted: ${reason}.`);
+		this.name = "ObjectiveExecutionInterruptedError";
+		this.reason = reason;
+	}
+}
+
+/** Reason code of a completion route held back because running work exists anywhere in the runtime. */
+export const COMPLETION_FENCED_REASON_CODE = "completion_fenced_by_running_work";
+
 function captureOptionalSnapshot(repoRoot: string | undefined): CandidateSnapshot | undefined {
 	if (!repoRoot) return undefined;
 	try {
@@ -445,6 +465,8 @@ export class ObjectiveExecutionController {
 	private readonly admissionCerts = new Map<string, string[]>();
 	private readonly alternativesTried = new Set<string>();
 	private readonly routeAcknowledgments = new WeakMap<ObjectiveRoute, RouteAcknowledgment>();
+	/** The running attempts a decided `wait_for_worker` route waits on. */
+	private readonly routeWaitAttempts = new WeakMap<ObjectiveRoute, readonly AttemptRuntimeState[]>();
 	private readonly completedVerificationRecoveries = new Map<string, string>();
 	private cycleCounter = 0;
 	private _lastBinding?: ExpertBinding;
@@ -457,6 +479,10 @@ export class ObjectiveExecutionController {
 	 * route of this kind takes on the root is learned from the decision to the next one, whatever the
 	 * route's outcome, so a route that fails or is interrupted still counts.
 	 */
+	private nextCycleId(): string {
+		return `cycle_${++this.cycleCounter}_${randomUUID().slice(0, 8)}`;
+	}
+
 	private async _noteExecutor(route: ObjectiveRoute, executor: string): Promise<void> {
 		this._lastExecutor = executor;
 		await this.deps.checkpoints?.recordRouteOutcome?.(route, executor);
@@ -679,19 +705,9 @@ export class ObjectiveExecutionController {
 		const routeSnapshot = captureOptionalSnapshot(this.deps.repoRoot);
 		const initialDigest = routeSnapshot?.digest ?? "unknown";
 		options?.signal?.throwIfAborted();
-		const cycleId = `cycle_${++this.cycleCounter}_${randomUUID().slice(0, 8)}`;
+		const cycleId = this.nextCycleId();
 
 		const runtime = await this.deps.runtime.reconcileObjective(objectiveId);
-
-		// Check deterministic cancellation and budget invariants
-		const cancelled =
-			this.deps.runtime.isCancelled?.(objectiveId) ??
-			runtime.objectives[objectiveId]?.objective.status === "cancelled";
-		const budgetExhausted = this.deps.runtime.isBudgetExhausted?.(objectiveId);
-
-		// Check in-flight workers / tools
-		const activeAttempts = Object.values(runtime.attempts).filter((a) => a.status === "running");
-		const requiredWorkerInFlight = activeAttempts.length > 0;
 
 		// Reconcile evidence
 		await this.deps.evidence?.reconcile?.(objectiveId);
@@ -823,6 +839,16 @@ export class ObjectiveExecutionController {
 			}
 		}
 
+		// Readiness is read after the asynchronous judgment above, so cancellation, budget and work
+		// admitted while System One was answering all reach this route.
+		const current = await this.deps.runtime.reconcileObjective(objectiveId);
+		const cancelled =
+			this.deps.runtime.isCancelled?.(objectiveId) ??
+			current.objectives[objectiveId]?.objective.status === "cancelled";
+		const budgetExhausted = this.deps.runtime.isBudgetExhausted?.(objectiveId);
+		const activeAttempts = objectiveJoinAttempts(current, objectiveId, this.deps.repoRoot);
+		const requiredWorkerInFlight = activeAttempts.length > 0;
+
 		let pendingDirective = this.deps.systemOne?.peekControlDirective?.();
 		if (
 			pendingDirective === undefined &&
@@ -835,9 +861,11 @@ export class ObjectiveExecutionController {
 			pendingDirective = this.deps.systemOne.consumeControlDirective();
 			if (pendingDirective) this.deps.systemOne.noteControlDirective(pendingDirective);
 		}
-		const pendingSupervision = requiredWorkerInFlight ? undefined : this.deps.pendingSupervisionRequests?.()[0];
+		const pendingSupervision = requiredWorkerInFlight
+			? undefined
+			: this.deps.pendingSupervisionRequests?.().find((request) => request.objective_id === objectiveId);
 		const verificationDirective = isSameLaneVerificationDirective(pendingDirective) ? pendingDirective : undefined;
-		const currentEvidenceMarker = evidenceMarkerOf(runtime, objectiveId);
+		const currentEvidenceMarker = evidenceMarkerOf(current, objectiveId);
 		const repeatedSameLaneVerification =
 			verificationDirective !== undefined &&
 			history.filter(
@@ -852,7 +880,7 @@ export class ObjectiveExecutionController {
 			pendingSupervision?.action === "mark_external_block"
 				? pendingSupervision.action
 				: undefined;
-		const route = composeObjectiveRoute({
+		const composed = composeObjectiveRoute({
 			cycleId,
 			objectiveId,
 			cancelled,
@@ -879,6 +907,24 @@ export class ObjectiveExecutionController {
 					}
 				: {}),
 		});
+		// Completion is fenced by running work anywhere in the runtime, not only this objective's:
+		// repository quiescence and delivery ownership are objective-scoped, so unrelated running work
+		// must never let completion start earlier than it could before that work was scoped out.
+		const completionFence =
+			composed.route === "completion_candidate"
+				? Object.values(current.attempts).filter((attempt) => attempt.status === "running")
+				: [];
+		const route: ObjectiveRoute =
+			completionFence.length > 0
+				? {
+						...composed,
+						route: "wait_for_worker",
+						reason_codes: [COMPLETION_FENCED_REASON_CODE, ...composed.reason_codes],
+					}
+				: composed;
+		if (route.route === "wait_for_worker") {
+			this.routeWaitAttempts.set(route, completionFence.length > 0 ? completionFence : activeAttempts);
+		}
 		let adoptedSupervisionSignalId: string | undefined;
 		if (supervisionAction && pendingSupervision) {
 			const adopted =
@@ -1097,11 +1143,25 @@ export class ObjectiveExecutionController {
 				};
 			}
 
-			// 2. Check required in-flight workers
-			const activeAttempts = Object.values(runtime.attempts).filter((a) => a.status === "running");
+			// 2. Join this objective's in-flight workers and any running work that may mutate its repository.
+			// The join is a decided route: composed, checkpointed and current before the loop waits on it.
+			const activeAttempts = objectiveJoinAttempts(runtime, objectiveId, this.deps.repoRoot);
 			if (activeAttempts.length > 0) {
 				if (this.deps.waiter) {
-					await this.deps.waiter.wait({ inFlightAttempts: activeAttempts }, signal);
+					const waitRoute = composeObjectiveRoute({
+						cycleId: this.nextCycleId(),
+						objectiveId,
+						requiredWorkerInFlight: true,
+					});
+					await this.deps.checkpoints?.recordRoute?.(waitRoute);
+					this._lastRoute = waitRoute;
+					this.rootExecutionRerouted = false;
+					await this._noteExecutor(waitRoute, waitRoute.route);
+					try {
+						await this.deps.waiter.wait({ inFlightAttempts: activeAttempts }, signal);
+					} finally {
+						this._lastExecutor = undefined;
+					}
 					continue;
 				}
 			}
@@ -1941,7 +2001,7 @@ export class ObjectiveExecutionController {
 				}
 
 				case "wait_for_worker":
-				case "wait_for_tool":
+				case "wait_for_tool": {
 					if (!this.deps.waiter?.wait) {
 						const bundle = await this.buildBundle(objectiveId, "unrecoverable", runtime);
 						return {
@@ -1951,8 +2011,10 @@ export class ObjectiveExecutionController {
 							deliveryBundle: bundle,
 						};
 					}
-					await this.deps.waiter.wait(route, signal);
+					const inFlightAttempts = this.routeWaitAttempts.get(route);
+					await this.deps.waiter.wait(inFlightAttempts ? { inFlightAttempts } : route, signal);
 					break;
+				}
 			}
 
 			this.acknowledgeRouteRequests(route);

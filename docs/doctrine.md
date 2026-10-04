@@ -1020,7 +1020,9 @@ Pinned by `packages/coding-agent/test/workbench-decision-graph.test.ts`.
 **The decision ledger is an input, never erased.** Every stage transition, Jev evaluation and route
 is appended to one SQLite database per agent directory, keyed by session id and working directory.
 The objective's recent routes are a history block in the state the judge reads, and "repeated without
-new evidence" is a fact from those rows: one route on one evidence marker, twice. The root reads
+new evidence" is a fact from those rows: one executable route on one evidence marker, twice. A
+repeated `wait_for_worker` or `wait_for_tool` tail is waiting on work in flight, never a repeated
+strategy, so it is never a stall; an executable route repeated after such waits still is. The root reads
 the ledger through `decision_ledger_read`, a bounded query tool never exposed to workers; its
 projected schema costs at most 100 tokens, budgeted separately from the 4,500-token base ceiling
 and the other separately-measured additions (aggregate 5,813 = 4,500 + 350 task_directory +
@@ -1248,3 +1250,4 @@ measurement gains no new surface.
 | 2026-10-01 | `delegate interrupt` is a halt, not a silent stop: the worker is told the parent stopped it, spends one tool-free request on its own report, and ends as a `blocked` `worker_interrupted` result that requires parent review (never completion) whose terminal handoff wakes the parent; a worker that reaches no request boundary in 120 s is cancelled and that is reported. Superseded: `interrupt` pausing the worker with its `message` queued for `resume`; the suspend-and-abort survives only as the internal `force` for System One steering. |
 | 2026-10-01 | A worker the host stops (parent `cancel`, or a halt that misses `workerDelegation.haltReportDeadlineMs`) ends with a host-authored cancelled claim carrying the files it changed and its spend, never a bare `canceled` with no evidence; the settings fixtures in `worker-authority-resolver.test.ts` only gained the new resolved field, so no authority invariant moved. |
 | 2026-10-02 | The completion account (what the model that changed the repository says about scope, assumptions, regression paths and cause, with cited evidence) replaces System One's open-ended completion veto; the goal and update_goal tools advertise it as one bare optional object. Measured schema growth: 18 tokens on `goal` (399 to 417), budgeted as a named allowance that is added to the goal ceiling and removed from the unchanged 4,500 base by its actual cost, so no unrelated growth is hidden. Its shape lives in the goal guidelines and is checked when used. |
+| 2026-10-03 | A repeated `wait_for_worker` / `wait_for_tool` route on unchanged evidence is waiting on work in flight, not a stall; the ledger's stall reading counts only repeated executable routes. Why: objective waits are now checkpointed decided routes, so every wait cycle lands in the ledger and would otherwise read as strategy repetition. |

@@ -22,6 +22,8 @@ const MAX_OBSERVED_TERMINALS = 512;
 
 export interface WorkerTerminalHandoffRecord {
 	laneId: string;
+	/** The exact generation (attempt) that ended; absent only on records that predate it. */
+	attemptId?: string;
 	status: LaneTerminalStatus;
 	completedAt?: string;
 	reasonCode?: string;
@@ -79,8 +81,16 @@ export interface WorkerNotificationCoordinatorOptions {
 	markDurableDelivered(notificationIds: readonly string[]): void;
 }
 
-function terminalIdentity(record: Pick<LaneRecord, "laneId" | "status" | "completedAt" | "reasonCode">): string {
-	return [record.laneId, record.completedAt ?? "", record.status, record.reasonCode ?? ""].join("\0");
+/**
+ * The one identity of a worker terminal generation, shared by terminal observation and foreground
+ * delivery. A record with an attempt is that attempt; a record without one keeps its legacy
+ * lane/time/status/reason identity in a separate namespace, so it can never alias a known attempt.
+ */
+export function workerTerminalGenerationIdentity(
+	record: Pick<LaneRecord, "laneId" | "status" | "completedAt" | "reasonCode" | "attemptId">,
+): string {
+	if (record.attemptId !== undefined) return ["attempt", record.attemptId].join("\0");
+	return ["lane", record.laneId, record.completedAt ?? "", record.status, record.reasonCode ?? ""].join("\0");
 }
 
 /** Event-driven, bounded terminal outbox. Durable worker events can be replayed into it on resume. */
@@ -138,7 +148,7 @@ export class WorkerNotificationCoordinator {
 
 	recordTerminal(record: LaneRecord, durableNotificationId?: string): void {
 		if (record.status === "queued" || record.status === "running") return;
-		const key = durableNotificationId ?? `transient:${record.laneId}:${record.completedAt ?? record.status}`;
+		const key = durableNotificationId ?? `transient:${workerTerminalGenerationIdentity(record)}`;
 		const inFlight = this.inFlight.get(key);
 		if (inFlight) {
 			// A terminal can be observed again while its handoff is still awaiting the parent. Keep
@@ -146,7 +156,7 @@ export class WorkerNotificationCoordinator {
 			// wake as soon as the first delivery settles.
 			return;
 		}
-		const identity = terminalIdentity(record);
+		const identity = workerTerminalGenerationIdentity(record);
 		const observedAt = this.observedTerminals.get(identity);
 		if (observedAt) this.rememberObserved(identity, observedAt);
 		// Consumed exactly once, here, at the same point `goalId` is read off the durable projection --
@@ -158,6 +168,7 @@ export class WorkerNotificationCoordinator {
 			key,
 			record: {
 				laneId: record.laneId,
+				...(record.attemptId ? { attemptId: record.attemptId } : {}),
 				status: record.status,
 				...(record.completedAt ? { completedAt: record.completedAt } : {}),
 				...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
@@ -172,13 +183,14 @@ export class WorkerNotificationCoordinator {
 
 	/** Mark exact terminal generations as already exposed to the parent model. */
 	observeTerminals(
-		records: readonly Pick<LaneRecord, "laneId" | "status" | "completedAt" | "reasonCode">[],
+		records: readonly Pick<LaneRecord, "laneId" | "status" | "completedAt" | "reasonCode" | "attemptId">[],
 		observedAt = new Date().toISOString(),
 	): void {
-		const identities = new Set(records.map(terminalIdentity));
+		const identities = new Set(records.map(workerTerminalGenerationIdentity));
 		for (const identity of identities) this.rememberObserved(identity, observedAt);
 		for (const notification of [...this.pending.values(), ...this.inFlight.values()]) {
-			if (identities.has(terminalIdentity(notification.record))) notification.record.observedAt = observedAt;
+			if (identities.has(workerTerminalGenerationIdentity(notification.record)))
+				notification.record.observedAt = observedAt;
 		}
 	}
 

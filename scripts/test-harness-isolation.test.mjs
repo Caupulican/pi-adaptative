@@ -147,6 +147,7 @@ const codingAgentVerificationCoverageTests = [
 	"test/compaction-support-selection.test.ts",
 	"test/provider-request-compaction-integration.test.ts",
 	"test/auto-compaction-apply.test.ts",
+	"test/worker-terminal-generation-identity.test.ts",
 ];
 const clearedVariables = [
 	"ANTHROPIC_API_KEY",

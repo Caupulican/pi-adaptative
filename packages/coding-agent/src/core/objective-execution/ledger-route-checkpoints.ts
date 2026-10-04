@@ -62,12 +62,16 @@ export class LedgerRouteCheckpoints {
 		}));
 	}
 
-	/** Stalled when the tail of the ledger repeats one route on one evidence marker. */
+	/**
+	 * Stalled when the tail of the ledger repeats one executable route on one evidence marker. A
+	 * repeated wait is waiting on work in flight, never a repeated strategy.
+	 */
 	async evaluate(objectiveId: string): Promise<StallEvaluation> {
 		const history = await this.recentRoutes(objectiveId, 8);
 		const repeated = repeatedRouteCount(history);
 		const last = history.at(-1);
-		const stalled = repeated >= 2;
+		const waiting = last?.route === "wait_for_worker" || last?.route === "wait_for_tool";
+		const stalled = !waiting && repeated >= 2;
 		return {
 			stalled,
 			stallTurns: stalled ? repeated - 1 : 0,

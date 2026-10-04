@@ -420,6 +420,7 @@ describe("next-release hardening", () => {
 		const pending = [
 			{
 				signal_id: "sig-spec-1",
+				objective_id: "o",
 				action: "request_specialist" as const,
 				reason_codes: ["specialist_gap_detected"],
 			},
@@ -460,6 +461,7 @@ describe("next-release hardening", () => {
 		const pending = [
 			{
 				signal_id: "sig-spec-delivery",
+				objective_id: "o",
 				action: "request_specialist" as const,
 				reason_codes: ["specialist_gap_detected"],
 			},
@@ -508,6 +510,7 @@ describe("next-release hardening", () => {
 		const pending = [
 			{
 				signal_id: "sig-ext-1",
+				objective_id: "o",
 				action: "mark_external_block" as const,
 				reason_codes: ["external_block_detected"],
 			},

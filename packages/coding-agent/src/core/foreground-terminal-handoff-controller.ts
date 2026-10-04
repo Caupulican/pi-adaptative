@@ -7,7 +7,10 @@ import {
 } from "./background-tool-task-controller.ts";
 import type { WorkerClaimSnapshotPayload } from "./delegation/session-worker-claim.ts";
 import { workerClaimSettlementLines } from "./delegation/worker-claim.ts";
-import type { WorkerTerminalHandoffRecord } from "./delegation/worker-notification-coordinator.ts";
+import {
+	type WorkerTerminalHandoffRecord,
+	workerTerminalGenerationIdentity,
+} from "./delegation/worker-notification-coordinator.ts";
 import { WORKER_COMPLETION_ERROR_CAVEMAN_GUIDANCE } from "./delegation/worker-terminal-handoff-coordinator.ts";
 import { workerTerminalOutputArtifact } from "./delegation/worker-terminal-output-artifact.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
@@ -85,8 +88,10 @@ interface ForegroundTerminalHandoffControllerDeps {
 	foreground: ForegroundRecoveryController;
 	isDisposed(): boolean;
 	getGoalStateSnapshot(): Pick<GoalState, "goalId" | "status"> | undefined;
-	getWorkerClaimSnapshot?(laneId: string): WorkerClaimSnapshotPayload | undefined;
-	getWorkerResult?(laneId: string): Pick<WorkerResultContract, "artifacts"> | undefined;
+	/** The claim of the exact generation when `attemptId` is given; never another generation's. */
+	getWorkerClaimSnapshot?(laneId: string, attemptId?: string): WorkerClaimSnapshotPayload | undefined;
+	/** The result of the exact generation when `attemptId` is given; never another generation's. */
+	getWorkerResult?(laneId: string, attemptId?: string): Pick<WorkerResultContract, "artifacts"> | undefined;
 	startCustomMessageTurn(
 		message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">,
 		lease: ForegroundSubmissionLease,
@@ -227,8 +232,7 @@ export class ForegroundTerminalHandoffController {
 		this.assertLive("worker terminal handoff was persisted");
 		await this.scheduleUnique(
 			records,
-			(record) =>
-				["worker", record.laneId, record.completedAt ?? "", record.status, record.reasonCode ?? ""].join("\0"),
+			(record) => ["worker", workerTerminalGenerationIdentity(record)].join("\0"),
 			(uniqueRecords) => this.prepareWorkerDelivery(uniqueRecords),
 		);
 	}
@@ -395,16 +399,19 @@ export class ForegroundTerminalHandoffController {
 		const unread = records.filter((record) => record.observedAt === undefined);
 		if (unread.length === 0) return undefined;
 		const prepared = unread.map((record, index) => {
-			const snapshot = this.deps.getWorkerClaimSnapshot?.(record.laneId);
+			const snapshot = this.deps.getWorkerClaimSnapshot?.(record.laneId, record.attemptId);
 			const claim = snapshot?.claim;
 			const outputArtifact =
-				index < 8 ? workerTerminalOutputArtifact(this.deps.getWorkerResult?.(record.laneId)) : undefined;
+				index < 8
+					? workerTerminalOutputArtifact(this.deps.getWorkerResult?.(record.laneId, record.attemptId))
+					: undefined;
 			return {
 				summaryItem: {
 					id: record.laneId,
 					status: workerSummaryStatus(record, claim?.parentReviewRequired === true),
 				},
 				laneId: record.laneId,
+				...(record.attemptId ? { attemptId: record.attemptId } : {}),
 				status: record.status,
 				...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
 				...(outputArtifact ? { outputArtifact } : {}),

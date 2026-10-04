@@ -50,11 +50,13 @@ import type {
 	WorkerAgentWaitResult,
 	WorkerGrantSummary,
 } from "./delegation/worker-agent-control.ts";
+import { boundWorkerWaitTimeoutMs } from "./delegation/worker-agent-control-coordinator.ts";
 import {
 	WorkerDelegationController,
 	type WorkerDelegationControllerDeps,
 } from "./delegation/worker-delegation-controller.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
+import { projectWorkerAttemptLaneRecord } from "./delegation/worker-lane-projection.ts";
 import { WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
 import { WorkerUsageReceiptDelivery } from "./delegation/worker-usage-receipt-delivery.ts";
@@ -105,6 +107,15 @@ export interface BackgroundLaneControllerDeps
 	markGoalToolUnavailable(): void;
 }
 
+/** How one bounded wait on exact running attempts ended. */
+export type RunningAttemptWaitOutcome =
+	/** These captured attempts left "running"; the terminal ones were observed. */
+	| { readonly kind: "changed"; readonly attemptIds: readonly string[] }
+	/** The bound elapsed with every captured attempt still running; nothing was observed. */
+	| { readonly kind: "timed_out" }
+	/** The session was disposed first; nothing about the attempts is implied or observed. */
+	| { readonly kind: "disposed" };
+
 export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Live lane registry — the real source for AutonomyStatusSnapshot.activeLaneCount. */
 	private readonly _laneTracker = new LaneTracker({ onChange: () => this._laneRecordsChanged() });
@@ -123,6 +134,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _workers: WorkerDelegationController | undefined;
 	/** One durable lifecycle shared by every worker execution adapter. */
 	private _workerLifecycle: WorkerLifecycle | undefined;
+	/** The lifecycle's durable event store: every attempt transition commits through it. */
+	private _orchestrationStore: OrchestrationEventStore | undefined;
+	/** Settles each unresolved running-attempt wait when the session is disposed. */
+	private readonly _runningAttemptWaits = new Set<() => void>();
 	/** Durable usage delivery shares the lifecycle's event store, independently of terminal handoffs. */
 	private _workerUsage: WorkerUsageReceiptDelivery | undefined;
 	/** Shared terminal outbox for managed and in-process workers; lazy under UAC omission. */
@@ -192,6 +207,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			store,
 		});
 		this._workerLifecycle = lifecycle;
+		this._orchestrationStore = store;
 		this._unsubscribeLaneRecordStore = store.subscribe(() => this._laneRecordsChanged());
 		this._workerUsage = new WorkerUsageReceiptDelivery({
 			parentSessionId,
@@ -279,8 +295,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * the next construction can only find what was durably enqueued, so it would be lost instead of
 	 * replayed.
 	 */
-	private _ensureDurableNotification(record: Pick<LaneRecord, "laneId">): string | undefined {
-		return this._workerLifecycle?.getTerminalNotification(record.laneId)?.notificationId;
+	private _ensureDurableNotification(record: Pick<LaneRecord, "laneId" | "attemptId">): string | undefined {
+		// A record that names its generation binds to that generation's outbox entry, never the lane's latest.
+		return record.attemptId !== undefined
+			? this._workerLifecycle?.getAttemptTerminalNotification(record.attemptId)?.notificationId
+			: this._workerLifecycle?.getTerminalNotification(record.laneId)?.notificationId;
 	}
 
 	private _getManagedLaneController(): ManagedLaneController {
@@ -364,6 +383,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._workerLifecycle?.getResult(laneId);
 	}
 
+	/** The result of one exact attempt (generation), never a later generation of the same lane. */
+	getWorkerAttemptResult(attemptId: string): WorkerResultContract | undefined {
+		return this._workerLifecycle?.getTaskRuntimeSnapshot().attempts[attemptId]?.result;
+	}
+
 	/** Reconcile only when delegation has already been materialized; UAC omission stays zero-load. */
 	synchronizeGoalState(goal: GoalState): void {
 		this._workers?.synchronizeGoalState(goal);
@@ -432,6 +456,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			}
 		}
 		this._runTeardownStep("release managed lanes", () => this._managedLanes?.release());
+		this._runTeardownStep("settle running-attempt waits", () => {
+			for (const settle of [...this._runningAttemptWaits]) settle();
+		});
 		this._runTeardownStep("abort worker delegation", () => {
 			workerShutdown = this._workers?.abort() ?? Promise.resolve();
 		});
@@ -734,6 +761,98 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this.observeCapturedWorkerTerminals(result.terminalLaneIds);
 			return result;
 		});
+	}
+
+	/**
+	 * Event-driven wait on exact attempts, of in-process and managed workers alike: it settles as soon
+	 * as any captured attempt leaves "running", woken by the durable orchestration store's commit
+	 * events. A captured attempt missing from the runtime is an error, never completion. An abort rejects
+	 * with the signal's reason; the bound and session disposal settle without observing anything.
+	 */
+	waitForRunningAttempts(
+		attemptIds: readonly string[],
+		options: { readonly timeoutMs: number; readonly signal?: AbortSignal },
+	): Promise<RunningAttemptWaitOutcome> {
+		const { signal } = options;
+		if (signal?.aborted) return Promise.reject(signal.reason);
+		const captured = [...new Set(attemptIds)];
+		if (captured.length === 0) return Promise.reject(new Error("A running-attempt wait needs at least one attempt."));
+		if (this.deps.isDisposed()) return Promise.resolve({ kind: "disposed" });
+		const lifecycle = this._workerLifecycle;
+		const store = this._orchestrationStore;
+		if (!lifecycle || !store) {
+			return Promise.reject(
+				new Error(`Running attempts ${captured.join(", ")} are unknown: this session has no worker runtime.`),
+			);
+		}
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			let checkQueued = false;
+			let unsubscribe = (): void => {};
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const finish = (settle: () => void): void => {
+				if (settled) return;
+				settled = true;
+				unsubscribe();
+				signal?.removeEventListener("abort", onAbort);
+				if (timer !== undefined) clearTimeout(timer);
+				this._runningAttemptWaits.delete(onDispose);
+				settle();
+			};
+			const onAbort = (): void => finish(() => reject(signal?.reason));
+			const onDispose = (): void => finish(() => resolve({ kind: "disposed" }));
+			const check = (): void => {
+				checkQueued = false;
+				if (settled) return;
+				let snapshot: TaskRuntimeProjection;
+				try {
+					snapshot = lifecycle.getTaskRuntimeSnapshot();
+				} catch (error) {
+					finish(() => reject(error));
+					return;
+				}
+				const missing = captured.filter((attemptId) => !snapshot.attempts[attemptId]);
+				if (missing.length > 0) {
+					finish(() => reject(new Error(`Running attempts ${missing.join(", ")} are not in the task runtime.`)));
+					return;
+				}
+				const changed = captured.filter((attemptId) => snapshot.attempts[attemptId]?.status !== "running");
+				if (changed.length === 0) return;
+				finish(() => {
+					this._observeExactAttemptTerminals(snapshot, changed);
+					resolve({ kind: "changed", attemptIds: changed });
+				});
+			};
+			// A commit notifies before the runtime adopts it: read the projection after the commit returns.
+			unsubscribe = store.subscribe(() => {
+				if (settled || checkQueued) return;
+				checkQueued = true;
+				queueMicrotask(check);
+			});
+			signal?.addEventListener("abort", onAbort, { once: true });
+			this._runningAttemptWaits.add(onDispose);
+			timer = setTimeout(
+				() => finish(() => resolve({ kind: "timed_out" })),
+				boundWorkerWaitTimeoutMs(options.timeoutMs),
+			);
+			check();
+		});
+	}
+
+	/** Observe terminals of exactly these attempts, never a newer generation of the same lane. */
+	private _observeExactAttemptTerminals(snapshot: TaskRuntimeProjection, attemptIds: readonly string[]): void {
+		try {
+			this.observeWorkerTerminalRecords(
+				attemptIds.flatMap((attemptId) => {
+					const record = projectWorkerAttemptLaneRecord(snapshot, attemptId);
+					return record ? [record] : [];
+				}),
+			);
+		} catch (error) {
+			this._safeWarn(
+				`Worker terminal observation failed after a running-attempt wait: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 
 	broadcastWorkerAgentMessage(

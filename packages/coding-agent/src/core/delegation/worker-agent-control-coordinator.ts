@@ -129,6 +129,13 @@ const MAX_BROADCAST_ERROR_CHARS = 512;
  */
 const WORKER_WAIT_RESTORE_MAX_MS = 300_000;
 
+const WORKER_WAIT_DEFAULT_MS = 30_000;
+
+/** The bounded duration of one worker wait: whole milliseconds in [1, 300s]; non-finite input waits the default. */
+export function boundWorkerWaitTimeoutMs(timeoutMs: number): number {
+	return Number.isFinite(timeoutMs) ? Math.max(1, Math.min(Math.floor(timeoutMs), 300_000)) : WORKER_WAIT_DEFAULT_MS;
+}
+
 export function buildWorkerTerminalHandoffContent(args: {
 	childAgentId: string;
 	record: Pick<LaneRecord, "laneId" | "status" | "reasonCode">;
@@ -1427,7 +1434,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	/** Event-driven wait: durable projection plus one shared state notification, never output polling. */
 	waitForWorkerAgent(
 		agentId: string,
-		timeoutMs = 30_000,
+		timeoutMs = WORKER_WAIT_DEFAULT_MS,
 		scope: WorkerAgentControlScope = {},
 	): ReturnType<WorkerAgentControlPort["waitForWorkerAgent"]> {
 		return this.waitForWorkerAgents([agentId], "all", timeoutMs, scope).then((result) => ({
@@ -1441,7 +1448,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	waitForWorkerAgents(
 		agentIds: readonly string[],
 		mode: WorkerAgentWaitMode,
-		timeoutMs = 30_000,
+		timeoutMs = WORKER_WAIT_DEFAULT_MS,
 		scope: WorkerAgentControlScope = {},
 	): ReturnType<WorkerAgentControlPort["waitForWorkerAgents"]> {
 		this.requireControl();
@@ -1455,9 +1462,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				throw new Error(`Unknown logical worker agent '${callerAgentId}'.`);
 			}
 		}
-		const boundedTimeoutMs = Number.isFinite(timeoutMs)
-			? Math.max(1, Math.min(Math.floor(timeoutMs), 300_000))
-			: 30_000;
+		const boundedTimeoutMs = boundWorkerWaitTimeoutMs(timeoutMs);
 		const statusesFromSnapshot = (snapshot: TaskRuntimeProjection) => {
 			const latestAttempts = this.latestAttemptsByAgent(snapshot);
 			return canonicalAgentIds.map((agentId) => {

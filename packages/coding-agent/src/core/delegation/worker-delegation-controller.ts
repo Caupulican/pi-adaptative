@@ -783,6 +783,7 @@ export class WorkerDelegationController {
 		const reportedUsage = providerUsageFromAttemptUsage(usage);
 		const claim: WorkerClaim = {
 			requestId: ledger.request.id,
+			terminalAttemptId: ledger.handle.attemptId,
 			status: "cancelled",
 			summary,
 			changedFiles: [...ledger.changedFiles],
@@ -4025,28 +4026,32 @@ export class WorkerDelegationController {
 									blockers: [...(settledOutcome.claim.blockers ?? []), ...reportBlockers],
 								},
 							};
-				const outcome: WorkerRunOutcome = {
-					...(verificationRequired
-						? {
-								...reviewedOutcome,
-								accepted: false,
+				const gatedOutcome: WorkerRunOutcome = verificationRequired
+					? {
+							...reviewedOutcome,
+							accepted: false,
+							reasonCode: "independent_verification_required",
+							acceptance: {
+								outcome: "ask-user" as const,
+								gate: "independent_verification",
 								reasonCode: "independent_verification_required",
-								acceptance: {
-									outcome: "ask-user" as const,
-									gate: "independent_verification",
-									reasonCode: "independent_verification_required",
-									message: "The owner-authored profile requires an independent verifier before acceptance.",
-								},
-								claim: {
-									...reviewedOutcome.claim,
-									parentReviewRequired: true,
-									blockers: [
-										...(reviewedOutcome.claim.blockers ?? []),
-										"independent verification is required before acceptance",
-									],
-								},
-							}
-						: reviewedOutcome),
+								message: "The owner-authored profile requires an independent verifier before acceptance.",
+							},
+							claim: {
+								...reviewedOutcome.claim,
+								parentReviewRequired: true,
+								blockers: [
+									...(reviewedOutcome.claim.blockers ?? []),
+									"independent verification is required before acceptance",
+								],
+							},
+						}
+					: reviewedOutcome;
+				// The host names the generation this claim belongs to; an identity the report carried is
+				// never kept. Finalization, the persisted snapshot and the returned outcome share this claim.
+				const outcome: WorkerRunOutcome = {
+					...gatedOutcome,
+					claim: { ...gatedOutcome.claim, terminalAttemptId: durableHandle.attemptId },
 					...(admission.modelPinBypass ? { modelPinBypass: admission.modelPinBypass } : {}),
 				};
 
@@ -4154,11 +4159,13 @@ export class WorkerDelegationController {
 				if (durableState?.status === "running" || durableState?.status === "leased") {
 					const failureClaim: WorkerClaim = {
 						requestId: startedRecord.laneId,
+						terminalAttemptId: durableHandle.attemptId,
 						status: "failed",
 						summary: `Worker delegation failed: ${error instanceof Error ? error.message : String(error)}`,
 						changedFiles: [],
 						createdAt: new Date().toISOString(),
 					};
+					let finalized = false;
 					try {
 						const failureUsage = executor.checkpointUsage(
 							"Persisted cumulative usage while recording worker failure.",
@@ -4177,10 +4184,22 @@ export class WorkerDelegationController {
 							toolCalls: failureUsage.toolCalls,
 							reasonCode: "worker_delegation_error",
 						});
+						finalized = true;
 					} catch (persistError) {
 						this.safeWarn(
 							`Failed to persist durable worker failure ${startedRecord.laneId}: ${persistError instanceof Error ? persistError.message : String(persistError)}`,
 						);
+					}
+					// Saved only once the fenced failure is durable: a snapshot must never claim a terminal
+					// the runtime did not record.
+					if (finalized) {
+						try {
+							this.deps.saveWorkerClaimSnapshot(failureClaim, workerRequest);
+						} catch (saveError) {
+							this.safeWarn(
+								`Failed to persist worker claim ${startedRecord.laneId}: ${saveError instanceof Error ? saveError.message : String(saveError)}`,
+							);
+						}
 					}
 				}
 				let record = lifecycle.getRecord(startedRecord.laneId);

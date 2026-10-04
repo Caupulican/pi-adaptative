@@ -1,5 +1,5 @@
 import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
-import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import type { AttemptRuntimeState, TaskRuntimeProjection, TaskRuntimeState } from "../orchestration/task-runtime.ts";
 import { deriveWorkerTaskLabel } from "./worker-task-label.ts";
 
 export const ACTIVE_WORKER_ATTEMPT_STATUSES: ReadonlySet<string> = new Set(["queued", "leased", "running"]);
@@ -40,13 +40,44 @@ export function selectedWorkerAttempt(
 }
 
 /**
+ * The task's independent verification as it applies to one attempt. A verification is recorded per
+ * task and reconciles a generation that asked for it, so it applies only to an attempt whose own
+ * result asked for independent verification; any other generation keeps its own outcome.
+ */
+export function attemptVerification(
+	snapshot: TaskRuntimeProjection,
+	attempt: AttemptRuntimeState,
+): TaskRuntimeState["verification"] {
+	if (attempt.result?.nextAction !== "independent_verification_required") return undefined;
+	return snapshot.tasks[attempt.taskId]?.verification;
+}
+
+/** An attempt that asked for independent verification and has none reconciled yet is still in flight. */
+export function attemptAwaitsVerification(snapshot: TaskRuntimeProjection, attempt: AttemptRuntimeState): boolean {
+	return (
+		attempt.result?.nextAction === "independent_verification_required" &&
+		attemptVerification(snapshot, attempt) === undefined
+	);
+}
+
+/**
  * One-way compatibility projection from durable orchestration state. A LaneRecord is never read
  * back to decide lifecycle, retry, verification, or notification transitions.
  */
 export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId: string): LaneRecord | undefined {
-	const task = snapshot.tasks[taskId];
 	const attempt = selectedWorkerAttempt(snapshot, taskId);
+	return attempt ? projectWorkerAttemptLaneRecord(snapshot, attempt.attemptId) : undefined;
+}
+
+/** The lane record of one exact attempt (generation), whichever attempt its task now selects. */
+export function projectWorkerAttemptLaneRecord(
+	snapshot: TaskRuntimeProjection,
+	attemptId: string,
+): LaneRecord | undefined {
+	const attempt = snapshot.attempts[attemptId];
+	const task = attempt ? snapshot.tasks[attempt.taskId] : undefined;
 	if (!task || !attempt) return undefined;
+	const taskId = attempt.taskId;
 	const managed = isManagedWorkerAttempt(attempt);
 	// Retire keeps the binding, the transcript, and this record. The binding status lets the Team
 	// blocks tell a retained session from a retired one without dropping the lane for status, review,
@@ -61,12 +92,12 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 				? snapshot.agents[attempt.agentId]?.status
 				: undefined;
 	const objective = snapshot.objectives[task.task.objectiveId];
-	const awaitingVerification =
-		attempt.result?.nextAction === "independent_verification_required" && task.verification === undefined;
+	const verification = attemptVerification(snapshot, attempt);
+	const awaitingVerification = attemptAwaitsVerification(snapshot, attempt);
 	const status = awaitingVerification
 		? "running"
-		: task.verification
-			? task.verification.verdict === "accepted"
+		: verification
+			? verification.verdict === "accepted"
 				? "succeeded"
 				: "failed"
 			: attempt.status === "queued"
@@ -74,7 +105,7 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 				: attempt.status === "leased" || attempt.status === "running" || attempt.status === "suspended"
 					? "running"
 					: terminalStatus(attempt);
-	const reasonCode = task.verification?.reasonCode ?? attempt.result?.reasonCode ?? attempt.reasonCode;
+	const reasonCode = verification?.reasonCode ?? attempt.result?.reasonCode ?? attempt.reasonCode;
 	const genericTitle = `Delegated ${task.task.role} work`;
 	const label = deriveWorkerTaskLabel(
 		task.task.title === genericTitle ? task.task.description : task.task.title,
@@ -93,6 +124,7 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 	return {
 		laneId: managed ? (attempt.dispatch.logicalLaneId ?? taskId) : taskId,
 		type: managed ? "tmux-worker" : "worker",
+		attemptId: attempt.attemptId,
 		...(agentId ? { agentId } : {}),
 		status,
 		label,
@@ -110,7 +142,7 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 		...(attempt.status !== "queued" && attempt.executionStartedAt ? { startedAt: attempt.executionStartedAt } : {}),
 		...(status === "queued" || status === "running"
 			? {}
-			: { completedAt: task.verification?.completedAt ?? attempt.updatedAt }),
+			: { completedAt: verification?.completedAt ?? attempt.updatedAt }),
 		...(costUsd !== undefined ? { costUsd } : {}),
 		...(goalId ? { goalId } : {}),
 		...(agentStatus ? { agentStatus } : {}),

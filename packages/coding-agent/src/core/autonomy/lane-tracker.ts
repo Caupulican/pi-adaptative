@@ -68,6 +68,12 @@ export interface LaneRecord {
 	 */
 	agentId?: string;
 	/**
+	 * Durable identity of the exact attempt (generation) this record projects. A lane can run several
+	 * generations; terminal observation and delivery identify each by this id. Absent on records that
+	 * predate it or do not come from an orchestration attempt.
+	 */
+	attemptId?: string;
+	/**
 	 * Process-local, never persisted: why a `queued` lane has not been dispatched by this controller
 	 * generation (capacity, dependencies, a write reservation held elsewhere, …). Absent for lanes that
 	 * are not queued or whose scheduler has not evaluated them yet.
@@ -132,6 +138,9 @@ export function isLaneRecord(value: unknown): value is LaneRecord {
 		return false;
 	}
 	if (!isOptionalString(record.agentId)) return false;
+	if (record.attemptId !== undefined && (typeof record.attemptId !== "string" || record.attemptId.length === 0)) {
+		return false;
+	}
 	if (!isOptionalString(record.waitReason)) return false;
 	return true;
 }

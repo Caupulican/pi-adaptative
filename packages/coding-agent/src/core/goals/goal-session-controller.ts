@@ -18,6 +18,7 @@ import type { BackgroundToolTaskRef } from "../background-tool-task-controller.t
 import { GoalLoopController } from "../goal-loop-controller.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "../objective-execution/index.ts";
 import type { ObjectiveExecutionControllerDeps } from "../objective-execution/objective-execution-controller.ts";
+import { ObjectiveExecutionInterruptedError } from "../objective-execution/objective-execution-controller.ts";
 import type { ObjectiveTerminalResult } from "../objective-execution/objective-route.ts";
 import { budgetedTokens } from "../orchestration/capability-gateway.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
@@ -925,12 +926,46 @@ export class GoalSessionController {
 		controller: ObjectiveExecutionController,
 		options: GoalContinuationOnceOptions,
 	): Promise<GoalContinuationOnceResult> {
+		return (await this.runPrimaryCycle(controller, options)).result;
+	}
+
+	/**
+	 * The cycle behind `continuePrimaryOnce`, also telling the loop whether the session was disposed
+	 * under it. Disposal is neither a failure nor a terminal: nothing is recorded, saved or scheduled.
+	 */
+	private async runPrimaryCycle(
+		controller: ObjectiveExecutionController,
+		options: GoalContinuationOnceOptions,
+	): Promise<{ result: GoalContinuationOnceResult; disposed: boolean }> {
 		const state = this.getState();
 		const snapshot = () => this.getRuntimeSnapshot({ maxStallTurns: options.maxStallTurns });
-		if (!state || !isGoalExecutionActive(state.status)) return { submitted: false, snapshot: snapshot() };
+		if (!state || !isGoalExecutionActive(state.status)) {
+			return { result: { submitted: false, snapshot: snapshot() }, disposed: false };
+		}
 		const before = this.primaryRootTurns;
 		try {
-			const terminal = await controller.runCycles(goalObjectiveId(state.goalId), 1);
+			return {
+				result: await this.continuePrimaryCycle(controller, state.goalId, before, snapshot),
+				disposed: false,
+			};
+		} catch (error) {
+			if (!(error instanceof ObjectiveExecutionInterruptedError)) throw error;
+			const submitted = this.primaryRootTurns > before;
+			return {
+				result: { submitted, snapshot: snapshot(), ...(submitted ? { turnOutcome: "interrupted" as const } : {}) },
+				disposed: true,
+			};
+		}
+	}
+
+	private async continuePrimaryCycle(
+		controller: ObjectiveExecutionController,
+		goalId: string,
+		before: number,
+		snapshot: () => GoalRuntimeSnapshot,
+	): Promise<GoalContinuationOnceResult> {
+		try {
+			const terminal = await controller.runCycles(goalObjectiveId(goalId), 1);
 			const continuationRestartScheduled = terminal ? await this.applyObjectiveTerminal(terminal) : false;
 			const submitted = this.primaryRootTurns > before;
 			return {
@@ -942,7 +977,7 @@ export class GoalSessionController {
 		} catch (error) {
 			// The auto-continuation owner waits for the foreground lease and retries this admission race.
 			// Recording it here would block the goal before that retry can run.
-			if (error instanceof AgentBusyError) throw error;
+			if (error instanceof AgentBusyError || error instanceof ObjectiveExecutionInterruptedError) throw error;
 			if (error instanceof ObjectiveRootTurnInterruptedError) {
 				return { submitted: true, snapshot: snapshot(), turnOutcome: "interrupted" };
 			}
@@ -987,7 +1022,8 @@ export class GoalSessionController {
 			const state = this.getState();
 			if (!state || !isGoalExecutionActive(state.status)) return stop("continuation_not_allowed");
 			const revisionBefore = this.deps.getTaskRuntimeSnapshot()?.lastOrdinal;
-			const once = await this.continuePrimaryOnce(controller, options);
+			const { result: once, disposed } = await this.runPrimaryCycle(controller, options);
+			if (disposed) return stop("session_disposed");
 			if (once.turnOutcome === "interrupted") return stop("turn_interrupted");
 			if (once.turnOutcome === "errored") return stop("turn_errored");
 			if (once.submitted) turnsSubmitted++;
