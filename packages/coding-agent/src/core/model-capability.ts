@@ -10,11 +10,14 @@
  */
 
 import {
+	type Api,
 	MIN_TOOL_SCHEMA_DISCLOSURE_SEARCHABLE_TOOLS,
+	type Model,
 	supportsToolSchemaDisclosure,
 	TOOL_SCHEMA_SEARCH_NAME,
 } from "@caupulican/pi-ai";
 import { GOAL_LIFECYCLE_TOOL_NAMES } from "./goals/goal-tool-names.ts";
+import type { ModelToolProtocolResolution } from "./model-tool-protocol.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 
 export type ModelCapabilityClass = "full" | "lean" | "minimal" | "chat";
@@ -51,12 +54,12 @@ export const MODEL_CAPABILITY_MINIMAL_MIN_CONTEXT = 8_192;
  */
 export const MODEL_CAPABILITY_SYSTEM_PROMPT_MAX_CHARS: Readonly<Record<ModelCapabilityClass, number | undefined>> = {
 	full: undefined,
-	// 10,240 characters is about 2,500 tokens: 15 % of the 16k window that defines the lean class.
+	// 11,264 characters is about 2,750 tokens: 17 % of the 16k window that defines the lean class.
 	// The previous 8,192 left under 100 characters of margin once tool schemas and a Windows temp
 	// path were in place (bug ledger 155), so any guidance change overflowed it.
-	lean: 10_240,
-	minimal: 4_096,
-	chat: 2_336,
+	lean: 11_264,
+	minimal: 5_120,
+	chat: 3_072,
 };
 
 /**
@@ -75,7 +78,9 @@ export const MODEL_CAPABILITY_TOOL_GUIDELINES_MAX_CHARS: Readonly<Record<ModelCa
 export const MODEL_CAPABILITY_LEAN_BLOCKED_TOOLS: readonly string[] = [
 	"delegate",
 	"context_audit",
+	// Durable goals drive multi-step autonomous continuation: complex agentic work that needs class "full".
 	"goal",
+	...GOAL_LIFECYCLE_TOOL_NAMES,
 	"pipeline",
 	"worktree_sync",
 	"improvement_loop",
@@ -97,17 +102,13 @@ export const MODEL_CAPABILITY_MINIMAL_ALLOWED_TOOLS: readonly string[] = [
 	"powershell",
 	"edit",
 	"write",
-	...GOAL_LIFECYCLE_TOOL_NAMES,
 	"ask_question",
 	// The executor tool: minimal-class models ARE the daily-ops executors, and its schema is tiny.
 	"run_toolkit_script",
 	SYSTEM_ONE_TOOL_NAME,
 ];
 // Independent semantic assistance is available across model classes; authority filters still apply.
-export const MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS: readonly string[] = [
-	...GOAL_LIFECYCLE_TOOL_NAMES,
-	SYSTEM_ONE_TOOL_NAME,
-];
+export const MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS: readonly string[] = [SYSTEM_ONE_TOOL_NAME];
 
 export const DEFAULT_LANE_MAX_OUTPUT_TOKENS = 2048;
 const MIN_LANE_MAX_OUTPUT_TOKENS = 256;
@@ -260,17 +261,19 @@ export function filterToolNamesForCapability(
 }
 
 /**
- * Lane-worker eligibility: a session bound to a worktree-sync lane (`--worktree-lane` /
- * `PI_WORKTREE_LANE`, see worktree-sync/runtime.ts) is expected to drive the FULL multi-step
- * lane-gate/recovery surface -- sync, conflict recovery, land -- unattended. A sub-full capability
- * class or a model with no working native tool-call path cannot reliably drive that surface. This
- * rides the SAME capability system every other adaptation in this file rides (class + context
- * window + the `/toolprobe` verdict) -- no parallel mechanism, no new env var, no new registry field.
+ * Lane-worker eligibility: a worker (a session bound to a worktree-sync lane, a launched collaboration
+ * child, or an in-process delegated worker) is expected to drive complex multi-step agentic work
+ * unattended. A sub-full capability class, a model whose context window or tool-call support is not
+ * declared, or a model with no working native tool-call path cannot do that, so the harness neither
+ * enforces nor allows it. This rides the SAME capability system every other adaptation in this file
+ * rides (class + context window + the tool-protocol resolution) -- no parallel mechanism.
  */
 export type LaneWorkerRefusalReason =
 	| "capability_class_below_full"
+	| "model_unresolved"
 	| "context_window_unknown"
 	| "tool_calling_unadvertised"
+	| "tool_calling_unknown"
 	| "tool_calling_demoted";
 
 export interface LaneWorkerRefusal {
@@ -279,36 +282,129 @@ export interface LaneWorkerRefusal {
 	contextWindow?: number;
 }
 
+/** Whether a model advertises native tool calling: declared yes, declared no (phone-only), or not declared. */
+export type LaneWorkerToolCalling = "advertised" | "unadvertised" | "unknown";
+
 /**
- * Decide whether the model described by `args` may drive a worktree-sync lane worker. First
- * failure wins, in order: capability class below full; an unknown/undeclared context window (the
- * classifier's own registry-derived SSOT -- see `deriveModelCapabilityProfile`; a full class can
- * still carry an undefined window via the `unknown_context_window_defaults` fallback); no
- * ADVERTISED native tool-call path (`Model.textToolCallProtocol` unset/false -- set true means
- * phone-only); or a GRADED `/toolprobe` demotion to "text-protocol"/"none". An UNPROBED model (no
- * verdict on record yet) is eligible on its advertised support alone -- unprobed is never treated
- * as demoted. `undefined` means eligible.
+ * Decide whether the model described by `args` may drive a lane worker. First failure wins, in
+ * order: capability class below full; an unknown/undeclared context window (`undefined`; a
+ * registry-defaulted window is not a declaration); native tool calling the model itself declares
+ * absent (phone-only); a tool-call route the evidence gate or an operator setting demoted off the
+ * native path; or tool-call support that is declared nowhere and proven by no probe. `undefined`
+ * means eligible.
  */
 export function evaluateLaneWorkerRefusal(args: {
 	capabilityClass: ModelCapabilityClass;
 	contextWindow: number | undefined;
-	toolCallingAdvertised: boolean;
+	toolCalling: LaneWorkerToolCalling;
 	toolCallingDemoted: boolean;
 }): LaneWorkerRefusal | undefined {
-	const { capabilityClass, contextWindow, toolCallingAdvertised, toolCallingDemoted } = args;
+	const { capabilityClass, contextWindow, toolCalling, toolCallingDemoted } = args;
 	if (capabilityClass !== "full") return { reason: "capability_class_below_full", capabilityClass, contextWindow };
 	if (contextWindow === undefined) return { reason: "context_window_unknown", capabilityClass, contextWindow };
-	if (!toolCallingAdvertised) return { reason: "tool_calling_unadvertised", capabilityClass, contextWindow };
+	if (toolCalling === "unadvertised") return { reason: "tool_calling_unadvertised", capabilityClass, contextWindow };
 	if (toolCallingDemoted) return { reason: "tool_calling_demoted", capabilityClass, contextWindow };
+	if (toolCalling === "unknown") return { reason: "tool_calling_unknown", capabilityClass, contextWindow };
 	return undefined;
 }
 
+/**
+ * Lane-worker eligibility of one concrete model. The tool-call facts come from the single
+ * transport resolver (`resolveModelToolProtocol`, passed in as its resolution) so settings
+ * overrides, model hints and probe verdicts keep their one precedence order here too: native proven
+ * by a probe or forced by settings is advertised; a model that declares text-only is unadvertised; a
+ * text protocol or no-working-route outcome is demoted; otherwise the model's own declaration
+ * decides, and an undeclared one is unknown.
+ */
+export function evaluateLaneWorkerModelRefusal(args: {
+	model: Pick<Model<Api>, "contextWindow" | "contextWindowDefaulted" | "toolCallingUndeclared">;
+	capabilityMode?: ModelCapabilityMode;
+	toolProtocol: ModelToolProtocolResolution;
+}): LaneWorkerRefusal | undefined {
+	const { model, capabilityMode, toolProtocol } = args;
+	const profile = deriveModelCapabilityProfile({ contextWindow: model.contextWindow, mode: capabilityMode });
+	let toolCalling: LaneWorkerToolCalling = model.toolCallingUndeclared === true ? "unknown" : "advertised";
+	let toolCallingDemoted = false;
+	switch (toolProtocol.reasonCode) {
+		case "settings_disabled":
+		case "probe_native":
+			toolCalling = "advertised";
+			break;
+		case "model_enabled":
+			toolCalling = "unadvertised";
+			break;
+		case "settings_enabled":
+		case "probe_calibrated":
+		case "probe_no_working_path":
+		case "probe_calibration_missing":
+		case "probe_calibration_failed":
+		case "probe_calibration_invalid":
+			toolCallingDemoted = true;
+			break;
+		case "native_default":
+			break;
+	}
+	return evaluateLaneWorkerRefusal({
+		capabilityClass: profile.class,
+		contextWindow: model.contextWindowDefaulted === true ? undefined : profile.contextWindow,
+		toolCalling,
+		toolCallingDemoted,
+	});
+}
+
+/** Stable skip-reason code a refused worker launch/dispatch reports; the granular refusal follows it. */
+export const WORKER_CAPABILITY_INSUFFICIENT_SKIP_REASON = "worker_capability_insufficient";
+
+/** The skip reason for a refused worker: the stable code plus `reason`, `class` and `contextWindow`. */
+export function laneWorkerRefusalSkipReason(refusal: LaneWorkerRefusal): string {
+	const windowText = refusal.contextWindow !== undefined ? String(refusal.contextWindow) : "unknown";
+	return `${WORKER_CAPABILITY_INSUFFICIENT_SKIP_REASON}:reason=${refusal.reason};class=${refusal.capabilityClass};contextWindow=${windowText}`;
+}
+
+/**
+ * The actionable remedy for a skip reason produced by {@link laneWorkerRefusalSkipReason}, or undefined when
+ * the skip reason is not a worker-capability refusal. Lets every surface that renders a skip reason (delegate,
+ * goal dispatch) name what to change without re-deriving the refusal.
+ */
+export function laneWorkerRefusalSkipRemedy(skipReason: string): string | undefined {
+	if (!skipReason.startsWith(WORKER_CAPABILITY_INSUFFICIENT_SKIP_REASON)) return undefined;
+	const field = (name: string): string | undefined => new RegExp(`[:;]${name}=([^;]*)`).exec(skipReason)?.[1];
+	const reason = field("reason") as LaneWorkerRefusalReason | undefined;
+	const capabilityClass = field("class") as ModelCapabilityClass | undefined;
+	if (!reason || !capabilityClass) return undefined;
+	const windowText = field("contextWindow");
+	const contextWindow = windowText !== undefined && windowText !== "unknown" ? Number(windowText) : undefined;
+	return laneWorkerRefusalRemedy({ reason, capabilityClass, contextWindow });
+}
+
+/**
+ * What the owner (or the delegating agent) changes so a refused model can carry a worker. The refusal is
+ * owner doctrine, so its failure mode must be actionable: a reason code alone leaves a long durable run
+ * with a blocked worker and no way forward.
+ */
+export function laneWorkerRefusalRemedy(refusal: LaneWorkerRefusal): string {
+	switch (refusal.reason) {
+		case "capability_class_below_full":
+			return `Workers need a full-class model (declared context window of at least ${MODEL_CAPABILITY_FULL_MIN_CONTEXT}). Start the worker on a larger-window model (delegate \`model\`, workerDelegation.modelPins, or the launched agent's --model), or, if the window is under-declared, raise \`contextWindow\` for that model in models.json.`;
+		case "model_unresolved":
+			return "No model could be resolved for the worker. Name a model explicitly (delegate `model`, the launched agent's --model) or set a default model.";
+		case "context_window_unknown":
+			return "The model has no declared context window (the registry default is not a declaration). Declare `contextWindow` for it in models.json (or modelOverrides) to make it eligible as a worker.";
+		case "tool_calling_unadvertised":
+			return "The model declares text-only tool calling (`textToolCallProtocol: true`), so it cannot drive worker tools natively. Use a model with native tool calling, or run /toolprobe if it does support native calls.";
+		case "tool_calling_unknown":
+			return "The model declares neither native nor text tool calling. Declare `textToolCallProtocol: false` for it in models.json if it supports native tool calls, or run /toolprobe to prove it.";
+		case "tool_calling_demoted":
+			return "The model's native tool-call path was demoted (probe verdict or toolRepair.textProtocol). Run /toolprobe to re-prove native calls, clear the verdict with /toolprotocol-reset <provider/model>, or use another model.";
+	}
+}
+
 /** Stable, greppable prefix for {@link formatLaneWorkerRefusal}'s output. */
-export const LANE_WORKER_REFUSAL_PREFIX = "worktree-sync lane-worker refusal:";
+export const LANE_WORKER_REFUSAL_PREFIX = "lane-worker refusal:";
 
 /** Format a refusal into one deterministic, greppable line naming the lane, class, window, and reason. */
 export function formatLaneWorkerRefusal(refusal: LaneWorkerRefusal, laneKey?: string): string {
 	const laneSuffix = laneKey !== undefined ? ` lane=${laneKey}` : "";
 	const windowText = refusal.contextWindow !== undefined ? String(refusal.contextWindow) : "unknown";
-	return `${LANE_WORKER_REFUSAL_PREFIX}${laneSuffix} class=${refusal.capabilityClass} contextWindow=${windowText} reason=${refusal.reason}`;
+	return `${LANE_WORKER_REFUSAL_PREFIX}${laneSuffix} class=${refusal.capabilityClass} contextWindow=${windowText} reason=${refusal.reason}. ${laneWorkerRefusalRemedy(refusal)}`;
 }

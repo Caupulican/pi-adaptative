@@ -38,10 +38,14 @@ import {
 } from "./core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
+import { exportWorkerCommitterIdentity } from "./core/autonomy/worker-git-identity.ts";
 import { SessionNativePiActivityRuntime } from "./core/collaboration/native-pi-runtime.ts";
+import { createCollaborationPeerContext } from "./core/collaboration/peer-context.ts";
 import { formatDoctorReport, runDoctor, runUpdatePreflight } from "./core/doctor.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
+import { onToolOnlyIgnored } from "./core/extensions/tool-only-api.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
+import { dropSessionSecretsFromProcess } from "./core/harness-environment.ts";
 import { configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import { formatLaneWorkerRefusal } from "./core/model-capability.ts";
@@ -58,12 +62,14 @@ import type { OrchestrationProfile } from "./core/orchestration/contracts.ts";
 import { resolveConfiguredOrchestrationModel } from "./core/orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "./core/orchestration/profile-store.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
+import { getOrchestrationAgentId } from "./core/process-identity.ts";
 import type { ResumablePayload } from "./core/process-matrix/codes.ts";
 import { launchResumablePiAgent } from "./core/process-matrix/resume-launcher.ts";
 import type { ResumeWorkerLaunchOutcome } from "./core/process-matrix/runtime.ts";
 import { getSelfLaunchTarget } from "./core/process-matrix/self-launch-target.ts";
 import { parseResourceProfileInput } from "./core/resource-profile-blocks.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
+import { sweepSessionBundles } from "./core/session-bundle-retention.ts";
 import {
 	formatMissingSessionCwdPrompt,
 	getMissingSessionCwdIssue,
@@ -1063,21 +1069,75 @@ export async function main(args: string[], options?: MainOptions) {
 		session.restoreGoalRuntimeAfterResume();
 	}
 
-	// A lane-bound session refuses AUTHORITATIVELY at its own startup when its model cannot reliably
-	// drive the lane-gate/recovery surface unattended (full capability class, a declared context
-	// window, an advertised native tool-call path, no graded /toolprobe demotion -- see
-	// model-capability.ts's evaluateLaneWorkerRefusal). This is the authoritative check regardless of
-	// how the lane binding arrived (--worktree-lane, PI_WORKTREE_LANE, or a launcher-set env): the
-	// goal collaboration dispatch's own pre-check (tools/collaboration-dispatch.ts) is the parent's best-effort guess
-	// only and can race a model swap between dispatch and child startup. No silent unbinding -- an
-	// ineligible model exits before the lane gate or epoch watcher ever start.
-	const boundWorktreeLaneKey = getBoundWorktreeLaneKey();
-	if (boundWorktreeLaneKey) {
-		const laneWorkerRefusal = session.getLaneWorkerRefusal();
+	// A worker session (lane-bound, collaboration child, or any launcher-declared worker) refuses
+	// AUTHORITATIVELY at its own startup when the model it actually resolved cannot reliably drive
+	// complex agentic work unattended (full capability class, a declared context window, a working
+	// native tool-call path -- see model-capability.ts's evaluateLaneWorkerModelRefusal). The parent's
+	// pre-launch check is a best-effort guess that cannot see every selection input. The refusal is
+	// recorded on the collaboration job (when this worker belongs to one) before exiting, so the parent
+	// hears a blocked turn with the granular reason instead of a bare pane exit. No silent unbinding --
+	// an ineligible model exits before the lane gate or epoch watcher ever start.
+	if (getSessionRole() === "worker") {
+		dropSessionSecretsFromProcess();
+		// Every repository write this worker makes (its shell, python, run_process and the worktree_sync engine's
+		// own git calls all inherit this process environment) records the worker as committer.
+		exportWorkerCommitterIdentity();
+		// The model rule is for lane workers: a worktree lane, a collaboration job member or an orchestration
+		// agent. Other worker-role children (the read-only Auto Learn learner) carry no complex agentic work.
+		const isLaneWorker =
+			getBoundWorktreeLaneKey() !== undefined ||
+			getOrchestrationAgentId() !== undefined ||
+			process.env.PI_COLLABORATION_JOB_ID !== undefined;
+		const laneWorkerRefusal = isLaneWorker ? session.getLaneWorkerRefusal() : undefined;
 		if (laneWorkerRefusal) {
-			console.error(chalk.red(formatLaneWorkerRefusal(laneWorkerRefusal, boundWorktreeLaneKey)));
+			const message = formatLaneWorkerRefusal(laneWorkerRefusal, getBoundWorktreeLaneKey());
+			console.error(chalk.red(message));
+			try {
+				createCollaborationPeerContext()?.refuse({
+					reason: laneWorkerRefusal.reason,
+					capabilityClass: laneWorkerRefusal.capabilityClass,
+					...(laneWorkerRefusal.contextWindow !== undefined
+						? { contextWindow: laneWorkerRefusal.contextWindow }
+						: {}),
+					message,
+				});
+			} catch (error) {
+				console.error(
+					chalk.red(
+						`Could not record the lane-worker refusal: ${error instanceof Error ? error.message : String(error)}`,
+					),
+				);
+			}
 			await disposeRuntimeAndExit(runtime, 1);
 			return;
+		}
+		// What a tool-only extension grant ignores, at startup or later during a tool call, is recorded on the
+		// collaboration job the moment it first happens (once per distinct label), so the parent hears it in
+		// the turn's terminal summary. A job that cannot be reached is reported, never silently dropped.
+		try {
+			const peer = createCollaborationPeerContext();
+			if (peer) {
+				let reportedFailure = false;
+				onToolOnlyIgnored((notice) => {
+					try {
+						peer.notice(notice);
+					} catch (error) {
+						if (reportedFailure) return;
+						reportedFailure = true;
+						console.error(
+							chalk.red(
+								`Could not record an ignored-by-grant notice: ${error instanceof Error ? error.message : String(error)}`,
+							),
+						);
+					}
+				});
+			}
+		} catch (error) {
+			console.error(
+				chalk.red(
+					`Ignored-by-grant notices will not reach the parent: ${error instanceof Error ? error.message : String(error)}`,
+				),
+			);
 		}
 	}
 
@@ -1089,6 +1149,7 @@ export async function main(args: string[], options?: MainOptions) {
 	// Session-owned supervision is replaced with /new, /resume, and /fork. This keeps notices,
 	// process identity, orphan recovery, and worktree watchers bound to the active session instead
 	// of retaining the initial session after it has been disposed.
+	let retentionSweep: Promise<void> | undefined;
 	if (!isReadOnlyCommand) {
 		const supervision = new SessionSupervisionRuntime({
 			agentDir,
@@ -1102,6 +1163,35 @@ export async function main(args: string[], options?: MainOptions) {
 		});
 		runtime.registerSessionResource(supervision);
 		await supervision.start(session);
+		// Once per main-session process, after this session's process-matrix entry is registered, so
+		// its own and every live peer's bundle is already protected. Bounded; never fails startup.
+		if (getSessionRole() === "main") {
+			// Interactive startup never waits for the sweep (up to 1,024 bundles); its diagnostics reach the session
+			// as warnings, since stderr output would corrupt the running UI. Every other mode awaits it, so an exit
+			// cannot cut a removal short.
+			const interactiveStart = appMode === "interactive";
+			const report = (message: string): void => {
+				if (appMode === "interactive") session.emitHostWarning(message);
+				else console.error(chalk.yellow(`Warning: ${message}`));
+			};
+			retentionSweep = sweepSessionBundles({
+				agentDir,
+				currentSessionId: session.sessionManager.getSessionId(),
+			}).then(
+				(retention) => {
+					for (const diagnostic of retention.diagnostics) report(diagnostic);
+				},
+				(error: unknown) => {
+					report(
+						`session bundle retention failed: ${error instanceof Error ? error.message : String(error)}`.slice(
+							0,
+							240,
+						),
+					);
+				},
+			);
+			if (!interactiveStart) await retentionSweep;
+		}
 	}
 
 	if (parsed.help) {
@@ -1127,6 +1217,8 @@ export async function main(args: string[], options?: MainOptions) {
 		if (stdinContent !== undefined && appMode === "interactive") {
 			appMode = "print";
 			hasHumanUI = false;
+			// Piped input turned this run non-interactive: warnings go to stderr and exit must not cut the sweep.
+			await retentionSweep;
 		}
 	}
 	time("readPipedStdin");

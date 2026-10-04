@@ -15,6 +15,7 @@ import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import { DEFAULT_STALE_EXTENSION_CONTEXT_MESSAGE } from "./stale-context.ts";
+import { createToolOnlyExtensionContext } from "./tool-only-api.ts";
 import { snapshotToolResultData } from "./tool-result-snapshot.ts";
 import type {
 	BeforeAgentStartEvent,
@@ -270,6 +271,7 @@ export class ExtensionRunner {
 	}
 	private runtime: ExtensionRuntime;
 	private uiContext: ExtensionUIContext;
+	private readonly uiContextBoundListeners = new Set<() => void>();
 	private mode: ExtensionContext["mode"] = "print";
 	private cwd: string;
 	private sessionManager: SessionManager;
@@ -439,6 +441,22 @@ export class ExtensionRunner {
 
 	setUIContext(uiContext?: ExtensionUIContext): void {
 		this.uiContext = uiContext ?? noOpUIContext;
+		if (!this.hasUI()) return;
+		for (const listener of [...this.uiContextBoundListeners]) {
+			try {
+				listener();
+			} catch {
+				// A host listener cannot break extension binding.
+			}
+		}
+	}
+
+	/** Host-side wake-up for work that needs the owner and started before a UI was bound. */
+	onUIContextBound(listener: () => void): () => void {
+		this.uiContextBoundListeners.add(listener);
+		return () => {
+			this.uiContextBoundListeners.delete(listener);
+		};
 	}
 
 	setMode(mode: ExtensionContext["mode"]): void {
@@ -820,6 +838,40 @@ export class ExtensionRunner {
 				return runner.getSystemPromptFn();
 			},
 		};
+	}
+
+	/**
+	 * The context a registered tool's `execute` receives. A tool provided by an extension that a worker
+	 * launch profile loaded tool-only gets the restricted context (`createToolOnlyExtensionContext`): the
+	 * grant admitted that one tool, not the session behind it. Every other tool gets the full context. The
+	 * owner is found by the extension's own source identity; if a tool-only owner's restricted context cannot
+	 * be built the call fails with an actionable error, never with the full context.
+	 */
+	createToolContext(registeredTool: RegisteredTool, executionContext?: ExecutionContext): ExtensionContext {
+		const sourceInfo = registeredTool.sourceInfo;
+		const owner = this.extensions.find(
+			(extension) =>
+				extension.sourceInfo === sourceInfo ||
+				(extension.toolOnly !== undefined && extension.sourceInfo.path === sourceInfo.path),
+		);
+		if (!owner?.toolOnly) return this.createContext(executionContext);
+		try {
+			return createToolOnlyExtensionContext(
+				owner.toolOnly,
+				{
+					assertActive: () => this.assertActive(),
+					getCwd: () => this.cwd,
+					getSignal: () => this.getSignalFn(),
+					inertUI: noOpUIContext,
+				},
+				executionContext,
+			);
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			throw new Error(
+				`Granted worker extension tool "${registeredTool.definition.name}" (${owner.path}) was not run: its restricted tool context could not be built (${reason}). The worker's full context is never substituted; report this to the parent.`,
+			);
+		}
 	}
 
 	createCommandContext(): ExtensionCommandContext {

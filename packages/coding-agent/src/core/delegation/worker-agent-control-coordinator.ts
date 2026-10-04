@@ -1594,7 +1594,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		// A root wait on a worker the scheduler holds for the foreground turn can never be satisfied inside
 		// this turn: the hold lifts only when the turn ends, and a model waiting through it burns its own
 		// turn. Return at once and say so. Workers waiting on a sibling keep the ordinary wait.
-		if (callerAgentId === undefined) {
+		if (callerAgentId === undefined && scope.returnWhenForegroundHeld === true) {
 			const latestAttempts = this.latestAttemptsByAgent(baselineSnapshot);
 			const activeIds = baselineStatuses.filter(({ status }) => status === "active").map(({ agentId }) => agentId);
 			const heldIds = activeIds.filter((agentId) => {

@@ -13,6 +13,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { ownerRulesDir } from "../agent-paths.ts";
 import type { RuleConsequence, SemanticRule } from "./types.ts";
 
 export const OWNER_RULE_SCHEMA_VERSION = "1.0" as const;
@@ -218,7 +219,7 @@ export class DurableOwnerRuleStore {
 
 	constructor(options: { agentDir: string; projectKey: string }) {
 		const digest = createHash("sha256").update(options.projectKey).digest("hex").slice(0, 16);
-		this.filePath = join(options.agentDir, "owner-rules", `${digest}.json`);
+		this.filePath = join(ownerRulesDir(options.agentDir), `${digest}.json`);
 		this.load();
 	}
 

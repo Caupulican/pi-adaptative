@@ -401,10 +401,7 @@ export interface ReplacedSessionContext extends ExtensionCommandContext {
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<void>;
 
-	sendUserMessage(
-		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp"; processSlashCommands?: boolean },
-	): Promise<void>;
+	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): Promise<void>;
 }
 
 // ============================================================================
@@ -1308,9 +1305,18 @@ interface ManagedLaneEventBase {
 	goalId?: string;
 	/**
 	 * Worktree-sync lane key this managed lane was dispatched into. A caller claim like every other
-	 * field here; the host retains it for routing/review but does not treat it as verified authority.
+	 * field here, so it is never verified authority by itself: the managed-lane ledger binds it to the lane
+	 * at dispatch and a closure releases a lane only when that binding matches (`expectBoundLaneId`), so the
+	 * claim can never release another lane.
 	 */
 	worktreeLaneKey?: string;
+	/**
+	 * The lane's own worktree path, reported with the lane key. It only tells the host which repository the lane
+	 * belongs to (a task directory can sit in another repository than the session's), so the lane is bound and
+	 * released there. A caller claim like the key: a wrong path can never release a lane, because release still
+	 * requires the lane registered in that repository to be bound to this exact worker.
+	 */
+	worktreeLanePath?: string;
 }
 
 export const MAX_MANAGED_LANE_SUMMARY_BYTES = 8 * 1024;
@@ -1476,10 +1482,7 @@ export interface ExtensionAPI {
 	 * Send a user message to the agent. Always triggers a turn.
 	 * When the agent is streaming, use deliverAs to specify how to queue the message.
 	 */
-	sendUserMessage(
-		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp"; processSlashCommands?: boolean },
-	): void;
+	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): void;
 
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
@@ -1757,9 +1760,39 @@ export type SendMessageHandler = <T = unknown>(
 	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 ) => void;
 
+/**
+ * What the owner sees for a message an extension sends on behalf of a third party (a peer message), when the
+ * delivered text is a prompt the extension framed around it. The agent still receives the framed text; the
+ * queue, the durable record and the editor hold this owner-visible form instead of the frame.
+ */
+export interface SendUserMessageOrigin {
+	/** The extension's own channel name, such as `pi-chat`. */
+	channel: string;
+	/** The sender's label. It is self-declared by the sender: shown to the owner, never an identity. */
+	sender: string;
+	/** Whether the channel's own broker verified the sender. */
+	verified: boolean;
+	/** The third party's message exactly as received, without the extension's framing. */
+	text: string;
+}
+
+/** How an extension sends a user message, and how it learns the message was accepted. */
+export interface SendUserMessageOptions {
+	deliverAs?: "steer" | "followUp";
+	processSlashCommands?: boolean;
+	/** Owner-visible form of a framed third-party message; see {@link SendUserMessageOrigin}. */
+	origin?: SendUserMessageOrigin;
+	/**
+	 * Called exactly once. `true` when the message is held by the session (queued behind the running
+	 * turn, or its own turn is starting); `false` when it was refused, cancelled or taken back before
+	 * that. An extension that acknowledges a sender acknowledges from here, never before.
+	 */
+	onAccepted?: (accepted: boolean) => void;
+}
+
 export type SendUserMessageHandler = (
 	content: string | (TextContent | ImageContent)[],
-	options?: { deliverAs?: "steer" | "followUp"; processSlashCommands?: boolean },
+	options?: SendUserMessageOptions,
 ) => void;
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
@@ -1921,10 +1954,26 @@ export interface Extension {
 		loading?: Promise<void>;
 		load(): Promise<void>;
 	};
+	/**
+	 * Present when this extension was loaded only for a tool grant (a worker process's launch profile): the
+	 * factory saw a restricted API (`tool-only-api.ts`) in which only the granted tools register and every
+	 * other registration or session action was ignored and recorded here, bounded.
+	 */
+	toolOnly?: ExtensionToolOnlyView;
 	/** Unsubscribe callbacks for pi.events subscriptions, disposed when this generation is replaced (reload). */
 	eventUnsubscribes: Array<() => void>;
 	/** Cleanup callbacks registered via onDispose, run when extension is unloaded/reloaded. */
 	disposers: Array<() => void | Promise<void>>;
+}
+
+/** What a tool-only extension view admitted and what it ignored (distinct labels with counts, bounded). */
+export interface ExtensionToolOnlyView {
+	/** The extension file the grant loaded; every ignored label is attributed to it. */
+	readonly extensionPath: string;
+	readonly grantedTools: ReadonlySet<string>;
+	readonly ignored: Map<string, number>;
+	/** Distinct ignored labels dropped once the bound was reached. */
+	omitted: number;
 }
 
 /** Result of loading extensions. */

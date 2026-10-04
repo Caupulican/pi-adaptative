@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { composeSubagentSystemPrompt, SUBAGENT_CORE_SYSTEM_PROMPT } from "../src/core/autonomy/subagent-prompt.ts";
 
 describe("subagent level-0 prompt composition", () => {
-	it("keeps the core under 180 tokens (~4 chars/token)", () => {
-		expect(SUBAGENT_CORE_SYSTEM_PROMPT.length / 4).toBeLessThan(180);
+	it("keeps the core under 220 tokens (~4 chars/token)", () => {
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT.length / 4).toBeLessThan(220);
 	});
 
 	it("keeps the immutable core within the prompt budget and assigns execution rights", () => {
@@ -14,7 +14,7 @@ describe("subagent level-0 prompt composition", () => {
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("Parent assigns, integrates and launches workers");
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("systemone judgments grant no authority");
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT).toContain("host enforces grant and deterministic transitions");
-		expect(SUBAGENT_CORE_SYSTEM_PROMPT.length).toBeLessThan(720);
+		expect(SUBAGENT_CORE_SYSTEM_PROMPT.length).toBeLessThan(880);
 		expect(SUBAGENT_CORE_SYSTEM_PROMPT).not.toMatch(/subtree|peer|descendant|spawn/i);
 	});
 

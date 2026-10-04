@@ -11,7 +11,7 @@ import type { TSchema } from "typebox";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { isPathWithinEnvelope } from "../autonomy/envelope-enforcement.ts";
 import { awaitPreflight } from "../preflight.ts";
-import { getToolCapabilityPolicy } from "../tool-capability-policy.ts";
+import { getToolCapabilityPolicy, isGrantedExtensionToolName } from "../tool-capability-policy.ts";
 import { disposeShellExecutionSession, disposeShellExecutionSessionAndWait } from "../tools/shell-execution-session.ts";
 import { createNativeTaskDirectoryBackend } from "./native-task-directory-backend.ts";
 import { createSessionTaskDirectoryStore } from "./session-task-directory-store.ts";
@@ -196,9 +196,14 @@ export class TaskDirectoryRuntime {
 					const context = lease.context;
 					// File tools authorize the concrete accessed resource at their existing gate. Requiring
 					// their parent cwd to be readable would incorrectly reject file-only grants. Process
-					// and unknown extension backends expose cwd itself, so admit that resource here too.
+					// and unknown extension backends (including a granted extension tool, which the policy classifies
+					// only for its path arguments) expose cwd itself, so admit that resource here too.
 					const policy = getToolCapabilityPolicy(tool.name);
-					if (!policy || policy.enforcements.includes("process-launcher")) {
+					if (
+						!policy ||
+						isGrantedExtensionToolName(tool.name) ||
+						policy.enforcements.includes("process-launcher")
+					) {
 						for (const envelope of this.options.getEnvelopes()) {
 							if (!isPathWithinEnvelope(envelope, context.cwd, this.options.getCwd()))
 								throw new Error("Task process directory is outside the existing capability grant");

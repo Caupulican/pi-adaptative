@@ -1,6 +1,8 @@
 /**
- * Lane WIP git stays on `classifyDangerousGitBash`, with a quote-aware lexer.
- * Root bash runs git. The operator is asked only for extreme destruction, and that
+ * `classifyDangerousGitBash`: a pure, quote-aware classifier of dangerous git in a bash command. It has
+ * no production caller; lane WIP git is held structurally by the typed `worktree_sync` `git_add` /
+ * `git_commit` actions (explicit in-lane paths, literal message) and the lane gate's main-mutation
+ * refusal. Root bash runs git. The operator is asked only for extreme destruction, and that
  * check lives on the edge, not here.
  */
 import { isGitExecutableToken, lexShellCommand } from "./git-shell-lexer.ts";

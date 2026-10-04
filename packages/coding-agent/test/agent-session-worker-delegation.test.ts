@@ -2063,7 +2063,8 @@ describe("AgentSession worker delegation", () => {
 				),
 			);
 			await subjectSettled;
-			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2);
+			// Implementation claim, verifier claim, and the subject claim re-saved without its pending-verification blocker.
+			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(3);
 			expect(harness.session.getLaneRecords().find((record) => record.laneId === subjectLaneId)).toMatchObject({
 				status: "succeeded",
 				reasonCode: "independent_verification_accepted",
@@ -2507,7 +2508,8 @@ describe("AgentSession worker delegation", () => {
 			if (!run.started || !run.record) throw new Error("Expected implementation worker to start");
 			const subjectLaneId = run.record.laneId;
 			await rejected;
-			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(2);
+			// Implementation claim, verifier claim, and the subject claim re-saved without its pending-verification blocker.
+			expect(harness.session.getWorkerClaimSnapshots()).toHaveLength(3);
 			expect(harness.session.getLaneRecords().find((record) => record.laneId === subjectLaneId)).toMatchObject({
 				status: "failed",
 				reasonCode: "independent_verification_rejected:focused_checks_failed",

@@ -28,7 +28,7 @@ import { redactKnownSecrets } from "../security/secret-text.ts";
 import { matchesResourceProfilePattern } from "../settings-manager.ts";
 import { wrapToolWithVerification } from "../system-one/session-verification-host.ts";
 import type { VerificationCoordinator } from "../system-one/verification-coordinator.ts";
-import { READ_ONLY_SHELL_TOOL_NAMES } from "../tool-capability-policy.ts";
+import { READ_ONLY_SHELL_TOOL_NAMES, toolSurvivesReadOnly } from "../tool-capability-policy.ts";
 import { type BashToolOptions, createBashTool } from "../tools/bash.ts";
 import { createEditTool, type EditToolOptions } from "../tools/edit.ts";
 import { FileMutationIntentController } from "../tools/file-mutation-intent.ts";
@@ -39,7 +39,7 @@ import { createLsTool } from "../tools/ls.ts";
 import { createPythonTool, type PythonToolOptions } from "../tools/python.ts";
 import { createReadTool, type ReadToolOptions } from "../tools/read.ts";
 import { createRepoReadTool } from "../tools/repo-read.ts";
-import { createRunProcessTool } from "../tools/run-process.ts";
+import { createRunProcessTool, type RunProcessToolOptions } from "../tools/run-process.ts";
 import { disposeShellExecutionSession } from "../tools/shell-execution-session.ts";
 import { createToolSchemaSearchDefinition } from "../tools/tool_search.ts";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
@@ -49,7 +49,13 @@ import type { CapabilityEnvelope } from "./contracts.ts";
 import { classifyYoloBoundary } from "./edge-policy.ts";
 import { evaluateToolGate } from "./gates.ts";
 import { LaneToolUsage } from "./lane-tool-usage.ts";
+import type { ProtectedPathWatch } from "./protected-path-watch.ts";
+import { createWorkerRunEnvironment } from "./worker-run-environment.ts";
 import type { WorkerToolAdapterRegistry } from "./worker-tool-adapter-registry.ts";
+
+/** What a worker does when a write lands outside its scope: it never routes around the grant, it reports. */
+export const WORKER_WRITE_SCOPE_GUIDANCE =
+	"A worker writes only inside its working directory plus the roots its dispatcher granted with writePaths. Do not route around this: finish what is in scope and report to the parent the absolute path you need to write and why, so it can start a new worker with writePaths for it (a worker's own write scope cannot be widened).";
 
 /**
  * The tool mechanics every agent shares with root: output reduction, the command prefix and shell,
@@ -69,8 +75,10 @@ export interface SharedLaneToolOptions {
 		| "platform"
 		| "windowsShellPythonEngine"
 		| "windowsShellEngineOptions"
+		| "spawnHook"
 	>;
-	readonly python?: Pick<PythonToolOptions, "outputReduction" | "omitEnvironmentVariables">;
+	readonly python?: Pick<PythonToolOptions, "outputReduction" | "omitEnvironmentVariables" | "environment">;
+	readonly runProcess?: Pick<RunProcessToolOptions, "attributionEnvironment">;
 	readonly read?: ReadToolOptions;
 	readonly edit?: Pick<EditToolOptions, "fileEncodings">;
 	/**
@@ -93,6 +101,7 @@ const laneMemorySchema = Type.Object({
 });
 type LaneMemoryParams = Static<typeof laneMemorySchema>;
 const WRITE_LANE_TOOL_NAME_SET = new Set<string>(WRITE_LANE_TOOL_NAMES);
+const PROCESS_TOOL_NAMES = new Set<string>([STABLE_SHELL_TOOL_NAME, PYTHON_LANE_TOOL_NAME, PROCESS_LANE_TOOL_NAME]);
 
 export interface LaneToolSurface {
 	/** Fresh tools owned by this lane only; no foreground tool instances or extension state leak in. */
@@ -116,12 +125,23 @@ export interface LaneToolSurfaceOptions {
 	/** Bypass harness tool, path and edge permission gates for this lane; private state stays denied. */
 	yolo?: boolean;
 	denyCommands?: readonly string[];
+	/**
+	 * A `readOnly` grant: the lane keeps only the tools a read-only grant keeps, in every mode. Independent of
+	 * `shellReadOnly`, which is about the shell tool's own commands and is false for a lane without a shell.
+	 */
+	readOnly?: boolean;
 	/** A `readOnly` grant: shell commands may not edit anything that exists. */
 	shellReadOnly?: boolean;
 	cwd: string;
 	profile?: NormalizedProfile;
 	/** Private harness state that generic file tools must never traverse. */
 	deniedPaths?: readonly string[];
+	/**
+	 * Harness resources the lane may read but never write (skills, extensions, hooks, git config, ...;
+	 * `getHarnessWriteProtectedPaths`). Enforced before the YOLO, gateway and envelope branches alike,
+	 * so no mode and no explicit write scope can reach them.
+	 */
+	writeProtectedPaths?: readonly string[];
 	/** Orchestrator-requested, policy-filtered read-only memory retrieval. Omitted means no memory tool. */
 	readMemory?: (query: string) => Promise<string>;
 	/** Research never sets this. Workers require both this flag and at least one write path. */
@@ -132,6 +152,19 @@ export interface LaneToolSurfaceOptions {
 	processMaxWallClockMs?: number;
 	/** Stable per-agent shell identity. Omitted when the compiled plan does not grant a host shell. */
 	shellSessionKey?: string;
+	/**
+	 * The worker's own id, the label its commands and git commits carry (committer `pi-worker <label>`). Falls back to
+	 * the shell session key, which is longer and gets truncated.
+	 */
+	workerLabel?: string;
+	/**
+	 * Fingerprints the harness write-protected set around every process-tool call (bash, python, run_process): a
+	 * change is recorded as an attributed finding for the parent's review, never refused or reverted. The caller
+	 * reads its findings after the run, before the claim is built.
+	 */
+	protectedPathWatch?: ProtectedPathWatch;
+	/** Told which processes were still running (and so ended) when the worker's tool surface was disposed. */
+	onWorkerProcessesReaped?: (processes: readonly string[]) => void;
 	/** Host-owned managed directory for complete shell output; never inferred from process-global config. */
 	shellOutputDirectory?: string;
 	/** Compiled policy path. When present, it is the only authorization source for this surface. */
@@ -213,7 +246,11 @@ function createLaneTools(
 	]);
 	if (executionPolicy) {
 		factories.set(PROCESS_LANE_TOOL_NAME, () =>
-			createRunProcessTool(cwd, { policy: executionPolicy, maxWallClockMs: processMaxWallClockMs }),
+			createRunProcessTool(cwd, {
+				...shared.runProcess,
+				policy: executionPolicy,
+				maxWallClockMs: processMaxWallClockMs,
+			}),
 		);
 	}
 	if (shellSessionKey) {
@@ -306,7 +343,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		...(options.shellSessionKey ? { mutationAnnouncer: options.shellSessionKey } : {}),
 	});
 	// YOLO widens a lane to every tool except where the lane is read-only: that is the parent's promise.
-	const yoloWrites = options.yolo === true && options.shellReadOnly !== true;
+	const yoloWrites = options.yolo === true && options.readOnly !== true;
 	const writeCapable = yoloWrites || (options.writeEnabled === true && (options.writePaths?.length ?? 0) > 0);
 	const pythonCapable =
 		yoloWrites || options.toolManifests?.some((manifest) => manifest.toolName === PYTHON_LANE_TOOL_NAME) === true;
@@ -334,10 +371,16 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	if (unmaterializedGrantTool) {
 		throw new Error(`Compiled lane grant references unmaterializable tool '${unmaterializedGrantTool}'.`);
 	}
+	// YOLO skips permission gates, never the role ceiling: a readOnly lane (the parent's promise that it
+	// edits nothing) keeps only what a read-only grant keeps, whatever the mode.
+	const readOnlyDropped =
+		options.readOnly === true ? candidateNames.filter((name) => !toolSurvivesReadOnly(name)) : [];
 	const deniedTools = options.yolo
-		? []
-		: candidateNames.filter((name) =>
-				options.grant ? !compiledToolNames.has(name) : matchesResourceProfilePattern(name, patterns.block),
+		? readOnlyDropped
+		: candidateNames.filter(
+				(name) =>
+					readOnlyDropped.includes(name) ||
+					(options.grant ? !compiledToolNames.has(name) : matchesResourceProfilePattern(name, patterns.block)),
 			);
 	const unboundAllowPatterns =
 		options.yolo || options.grant
@@ -346,13 +389,14 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 					(pattern) => !candidateNames.some((name) => matchesResourceProfilePattern(name, [pattern])),
 				);
 	const allowedTools = options.yolo
-		? candidateNames
+		? candidateNames.filter((name) => !readOnlyDropped.includes(name))
 		: options.grant
-			? candidateNames.filter((name) => compiledToolNames.has(name))
+			? candidateNames.filter((name) => compiledToolNames.has(name) && !readOnlyDropped.includes(name))
 			: candidateNames.filter(
 					(name) =>
 						(patterns.allow.length === 0 || matchesResourceProfilePattern(name, patterns.allow)) &&
-						!matchesResourceProfilePattern(name, patterns.block),
+						!matchesResourceProfilePattern(name, patterns.block) &&
+						!readOnlyDropped.includes(name),
 				);
 	const allowedToolSet = new Set<string>(allowedTools);
 	const manifestsByName = new Map(options.toolManifests?.map((manifest) => [manifest.toolName, manifest]) ?? []);
@@ -393,6 +437,14 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		allowedPaths: [path.resolve(options.cwd)],
 		...(deniedPaths && deniedPaths.length > 0 ? { deniedPaths } : {}),
 	};
+	const writeProtectionEnvelope: CapabilityEnvelope | undefined =
+		options.writeProtectedPaths && options.writeProtectedPaths.length > 0
+			? {
+					id: "isolated-lane-harness-write-protection",
+					capabilities: ["filesystem.write"],
+					deniedPaths: options.writeProtectedPaths.map((entry) => path.resolve(entry)),
+				}
+			: undefined;
 	const writeEnvelope: CapabilityEnvelope = {
 		id: "isolated-lane-write-tools",
 		capabilities: ["filesystem.write"],
@@ -402,6 +454,54 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		...(deniedPaths && deniedPaths.length > 0 ? { deniedPaths } : {}),
 	};
 
+	// YOLO skips permission prompts, never the role ceiling: a YOLO lane writes inside its own cwd plus the
+	// roots its dispatcher granted with writePaths, exactly like a guarded lane's default scope.
+	const yoloWriteScopeEnvelope: CapabilityEnvelope | undefined = options.yolo
+		? {
+				id: "isolated-lane-yolo-write-scope",
+				capabilities: ["filesystem.write"],
+				allowedPaths: [
+					...new Set([path.resolve(options.cwd), ...resolveWriteRoots(options.cwd, options.writePaths ?? [])]),
+				],
+			}
+		: undefined;
+
+	// A worker's commands run in the worker run environment (per-worker temp directory, no inherited
+	// credentials, an ownership marker): disposal ends every process still carrying the marker and removes
+	// the scratch directory, so a shell lane leaves nothing behind.
+	// Every route a worker has to a process (bash, python, run_process) gets the same environment, so no tool is
+	// the unattributed or credential-bearing one; a worker with none of them has nothing to run and no scratch.
+	const runsProcesses =
+		options.shellSessionKey !== undefined ||
+		allowedToolSet.has(PYTHON_LANE_TOOL_NAME) ||
+		allowedToolSet.has(PROCESS_LANE_TOOL_NAME);
+	const runEnvironment = runsProcesses
+		? createWorkerRunEnvironment(
+				options.workerLabel ?? options.shellSessionKey ?? mutationScope,
+				options.onWorkerProcessesReaped,
+			)
+		: undefined;
+	const sharedToolOptions: SharedLaneToolOptions | undefined = runEnvironment
+		? {
+				...options.sharedToolOptions,
+				bash: { ...options.sharedToolOptions?.bash, spawnHook: runEnvironment.spawnHook },
+				python: {
+					...options.sharedToolOptions?.python,
+					environment: (cwd) => ({
+						...options.sharedToolOptions?.python?.environment?.(cwd),
+						...runEnvironment.attributionEnvironment,
+					}),
+					omitEnvironmentVariables: [
+						...(options.sharedToolOptions?.python?.omitEnvironmentVariables ?? []),
+						...runEnvironment.omittedEnvironmentVariables,
+					],
+				},
+				runProcess: {
+					...options.sharedToolOptions?.runProcess,
+					attributionEnvironment: runEnvironment.attributionEnvironment,
+				},
+			}
+		: options.sharedToolOptions;
 	const rawTools = createLaneTools(
 		options.cwd,
 		allowedTools,
@@ -416,13 +516,29 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		options.shellOutputDirectory,
 		options.workerToolAdapters,
 		options.bindTool,
-		options.sharedToolOptions,
+		sharedToolOptions,
 	);
 	const getPathAliasTable = options.getPathAliasTable;
 	const wrappedTools = new WeakSet<AgentTool>();
-	const tools = getPathAliasTable
-		? rawTools.map((tool) => wrapToolWithPathAliasExpansion(tool, getPathAliasTable, wrappedTools, () => options.cwd))
+	const protectedPathWatch = options.protectedPathWatch;
+	// Process tools are host-trust boundaries (see protected-path-watch.ts): each call runs between two
+	// fingerprints of the harness write-protected set, and a change is recorded, never refused or reverted.
+	const watchedTools = protectedPathWatch
+		? rawTools.map((tool) =>
+				PROCESS_TOOL_NAMES.has(tool.name)
+					? wrapToolExecution(tool, (executor) => ({
+							...executor,
+							execute: (toolCallId, ...args) =>
+								protectedPathWatch.guard(() => executor.execute(toolCallId, ...args)),
+						}))
+					: tool,
+			)
 		: rawTools;
+	const tools = getPathAliasTable
+		? watchedTools.map((tool) =>
+				wrapToolWithPathAliasExpansion(tool, getPathAliasTable, wrappedTools, () => options.cwd),
+			)
+		: watchedTools;
 
 	return {
 		tools,
@@ -433,8 +549,12 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				try {
 					if (options.shellSessionKey) disposeShellExecutionSession(options.shellSessionKey);
 				} finally {
-					// Billing or shell failure cannot retain the lane's hold on the worktree scope.
-					await fileMutationIntents.dispose();
+					try {
+						runEnvironment?.dispose();
+					} finally {
+						// Billing or shell failure cannot retain the lane's hold on the worktree scope.
+						await fileMutationIntents.dispose();
+					}
 				}
 			}
 		},
@@ -458,6 +578,20 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 					};
 				}
 			}
+			if (writeProtectionEnvelope && WRITE_LANE_TOOL_NAME_SET.has(toolCall.name)) {
+				const protection = evaluateToolGate({
+					toolName: toolCall.name,
+					args,
+					cwd: options.cwd,
+					envelope: writeProtectionEnvelope,
+				});
+				if (protection.outcome !== "allow") {
+					return {
+						block: true,
+						reason: `Harness resource is write-protected (${protection.reasonCode}): ${protection.message ?? "write refused"}`,
+					};
+				}
+			}
 			if (options.yolo) {
 				const boundary = classifyYoloBoundary({
 					toolName: toolCall.name,
@@ -475,6 +609,20 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 								: `YOLO hardline: ${boundary.reason}`,
 					};
 				}
+				if (yoloWriteScopeEnvelope && WRITE_LANE_TOOL_NAME_SET.has(toolCall.name)) {
+					const scope = evaluateToolGate({
+						toolName: toolCall.name,
+						args,
+						cwd: options.cwd,
+						envelope: yoloWriteScopeEnvelope,
+					});
+					if (scope.outcome !== "allow") {
+						return {
+							block: true,
+							reason: `Lane tool blocked (${scope.reasonCode}): ${scope.message ?? "write is outside this worker's scope"} ${WORKER_WRITE_SCOPE_GUIDANCE}`,
+						};
+					}
+				}
 				// checkEdge keeps the owner's local-commit branch rule; every permission gate below is skipped.
 				return options.checkEdge ? await options.checkEdge(toolCall.name, args, options.cwd) : undefined;
 			}
@@ -488,7 +636,10 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				} catch (error) {
 					if (error instanceof CapabilityGatewayDeniedError) {
 						if (error.status === "budget_exhausted") throw error;
-						return { block: true, reason: `Lane tool blocked (${error.reasonCode}): ${error.message}` };
+						return {
+							block: true,
+							reason: `Lane tool blocked (${error.reasonCode}): ${error.message}${error.reasonCode === "scope_denied" ? ` ${WORKER_WRITE_SCOPE_GUIDANCE}` : ""}`,
+						};
 					}
 					throw error;
 				}
@@ -502,7 +653,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				if (outcome.outcome !== "allow") {
 					return {
 						block: true,
-						reason: `Lane tool blocked (${outcome.reasonCode}): ${outcome.message ?? "capability gate denied it"}`,
+						reason: `Lane tool blocked (${outcome.reasonCode}): ${outcome.message ?? "capability gate denied it"}${WRITE_LANE_TOOL_NAME_SET.has(toolCall.name) && outcome.reasonCode.includes("path") ? ` ${WORKER_WRITE_SCOPE_GUIDANCE}` : ""}`,
 					};
 				}
 			}

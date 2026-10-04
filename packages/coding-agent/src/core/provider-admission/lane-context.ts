@@ -24,3 +24,24 @@ export function currentProviderLane(): ProviderRequestLane {
 export function providerLaneForIsolatedLaneKind(laneKind: string | undefined): ProviderRequestLane {
 	return laneKind?.startsWith("worker") ? "worker" : "background";
 }
+
+/** Suffix that marks an adaptation-store key as the worker lane's measurements of a model. */
+const WORKER_LANE_KEY_SUFFIX = "#lane:worker";
+
+/**
+ * The adaptation-store key a request's perf samples are recorded under. A delegated worker's
+ * requests run through the owner session's chain but are a different workload (parallel,
+ * contended, differently sized prompts), so they are attributed to their own `#lane:worker` key
+ * instead of skewing the model profile the owner's own stall budgets read. Still recorded, never
+ * dropped: the host-measured telemetry stays available per lane.
+ */
+export function perfAttributionKey(modelKey: string, lane: ProviderRequestLane): string {
+	return lane === "worker" ? `${modelKey}${WORKER_LANE_KEY_SUFFIX}` : modelKey;
+}
+
+/** The model and lane an adaptation-store key stands for; the inverse of {@link perfAttributionKey}. */
+export function splitPerfAttributionKey(key: string): { model: string; lane: "worker" | undefined } {
+	return key.endsWith(WORKER_LANE_KEY_SUFFIX)
+		? { model: key.slice(0, -WORKER_LANE_KEY_SUFFIX.length), lane: "worker" }
+		: { model: key, lane: undefined };
+}

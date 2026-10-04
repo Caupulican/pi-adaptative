@@ -161,6 +161,7 @@ import {
 } from "./delegation/session-worker-claim.ts";
 import type { WorkerResponseObservation } from "./delegation/worker-attempt-executor.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
+import { fanoutNoteForLane } from "./delegation/worker-fanout.ts";
 import { DurableCustomMessageTurnController } from "./durable-custom-message-turn-controller.ts";
 import type { ExpertSelectionService } from "./expert-routing/service.ts";
 import { ExtensionBindingController } from "./extension-binding-controller.ts";
@@ -173,6 +174,7 @@ import type {
 	ExtensionRunner,
 	ExtensionUIContext,
 	ReplacedSessionContext,
+	SendUserMessageOptions,
 	SessionStartEvent,
 	ShutdownHandler,
 	ToolDefinition,
@@ -204,6 +206,11 @@ import { HostTurnReasoningController } from "./host-turn-reasoning.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
 import { subscribeHumanInputActivity } from "./human-input-activity.ts";
 import { HumanInputController } from "./human-input-controller.ts";
+import {
+	type AutoLearnProposalSet,
+	type AutoLearnReportEntry,
+	applyAutoLearnProposals as decideAutoLearnProposals,
+} from "./learning/auto-learn-proposals.ts";
 import { DURABLE_LEARNING_MEMORY_POLICY_VERSION, DurableLearningState } from "./learning/durable-learning-state.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
 import type { DemandSignals, ReflectionResult } from "./learning/reflection-engine.ts";
@@ -223,12 +230,13 @@ import {
 } from "./minion-gathering.ts";
 import {
 	deriveModelCapabilityProfile,
-	evaluateLaneWorkerRefusal,
+	evaluateLaneWorkerModelRefusal,
 	filterToolNamesForCapability,
 	type LaneWorkerRefusal,
 	type ModelCapabilityProfile,
 } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
+import { resolveLaunchedChildModel } from "./model-resolver.ts";
 import { AccountModelCatalog } from "./model-router/account-models.ts";
 import {
 	isModelInRouterPool,
@@ -290,6 +298,7 @@ import { resolveConfiguredOrchestrationModel } from "./orchestration/model-bindi
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
 import {
 	type PendingInputHandle,
+	type PendingInputHoldReason,
 	PendingInputQueueController,
 	type QueuedInput,
 } from "./pending-input-queue-controller.ts";
@@ -315,6 +324,7 @@ import { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import { buildProviderLoadView, type ProviderLoadView } from "./provider-admission/load-view.ts";
 import { ProviderRequestContextController } from "./provider-request-context-controller.ts";
 import { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
+import { appendQueuedInputRecord, type RecordableQueuedInput, readQueuedInputRecord } from "./queued-input-record.ts";
 import { ReflectionController } from "./reflection-controller.ts";
 import { ReflectionTurnLifecycle } from "./reflection-turn-lifecycle.ts";
 import {
@@ -352,6 +362,8 @@ import type {
 	SettingsScope,
 } from "./settings-manager.ts";
 import { resolveActiveSkillBodyByteLimit, SkillVaultController } from "./skill-vault.ts";
+import { skillWorkPathsFromToolCall } from "./skill-work-paths.ts";
+import { skillsForSessionRole, workerEligibleSkills } from "./skills.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import { WorkerSemanticSupervisor } from "./supervision/worker-semantic-supervisor.ts";
 import { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
@@ -1047,8 +1059,8 @@ export class AgentSession {
 		reportGithubOriginPinForSession(this._cwd, this._isChildSession, this.sessionManager);
 		this._durableLearningState = this._isChildSession ? undefined : DurableLearningState.forAgentDir(agentDir);
 		this._skillVault = new SkillVaultController({
-			getSkills: () => this._resourceLoader.getActiveSkills(),
-			getFullSkills: () => this._resourceLoader.getSkills().skills,
+			getSkills: () => skillsForSessionRole(this._resourceLoader.getActiveSkills()),
+			getFullSkills: () => skillsForSessionRole(this._resourceLoader.getSkills().skills),
 			refreshSkills: () => this._resourceLoader.refreshSkills?.(),
 			getSkillDiagnostics: () => this._resourceLoader.getSkills().diagnostics.map((d) => `${d.path}: ${d.message}`),
 			getMaxBodyBytes: () =>
@@ -1202,8 +1214,10 @@ export class AgentSession {
 			isInputContextCurrent: (context) =>
 				context.sessionId === this.sessionManager.getSessionId() &&
 				context.branchGeneration === this._branchGeneration,
-			onInputHeld: (input) => this._noteHeldQueuedInput(input.text),
+			onInputHeld: (input, reason) => this._noteHeldQueuedInput(input.text, reason),
+			onQueueChanged: (inputs) => this._recordQueuedInput(inputs),
 		});
+		this._restoreRecordedQueuedInput();
 		this._backgroundLanes = new BackgroundLaneController({
 			isDisposed: () => this._disposed,
 			isChildSession: () => this._isChildSession,
@@ -1347,18 +1361,28 @@ export class AgentSession {
 			markGoalToolUnavailable: () => this._goals.markToolUnavailable(),
 			getEvidenceBundleSnapshot: () => this.getEvidenceBundleSnapshot(),
 			saveEvidenceBundleSnapshot: (bundle) => this.saveEvidenceBundleSnapshot(bundle),
-			saveWorkerClaimSnapshot: (claim, request) => this.saveWorkerClaimSnapshot(claim, request),
+			saveWorkerClaimSnapshot: (claim, request, options) => this.saveWorkerClaimSnapshot(claim, request, options),
 			recordUnsettledForOwner: (items) => this._deliverToOwner(items),
+			notifyWorktreeLane: (text) => this._steerSessionNotice("worktree-sync-notice", text),
+			notifyParentSession: (customType, text) => this._steerSessionNotice(customType, text),
 			readMemoryForLane: (query) => this._memory.readMemoryForLane(query),
 			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
 			getContextGcStoreDir: () => this._pipeline.contextGcStorageDir(),
 			getArtifactStore: () => this._getToolArtifactStore(),
+			// An in-process worker holds no effect grant: skills that declare one are neither listed nor readable.
 			getSkillReadBroker: () => ({
-				search: (query) => this._skillVault.search(query),
-				read: (name) => this._skillVault.read(name),
+				search: (query) => {
+					const result = this._skillVault.search(query);
+					const withheld = this._effectfulSkillNames();
+					return { ...result, candidates: result.candidates.filter((candidate) => !withheld.has(candidate.name)) };
+				},
+				read: (name) =>
+					this._effectfulSkillNames().has(name)
+						? { ok: false, reason: "not_found", message: `No eligible skill named ${JSON.stringify(name)}.` }
+						: this._skillVault.read(name),
 			}),
 			getSkillAuditSource: () => ({
-				getSkills: () => this._skillVault.getSkillsSnapshot(),
+				getSkills: () => workerEligibleSkills(this._skillVault.getSkillsSnapshot()),
 				redactPath: (path: string) => `skill:${createHash("sha256").update(path).digest("hex").slice(0, 12)}`,
 			}),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
@@ -1737,6 +1761,10 @@ export class AgentSession {
 			onUsageLimitReached: (message) => void this._offerSubscriptionReset(message),
 			onSuccessfulAssistant: () => this._compaction.resetOverflowRecovery(),
 			settleRuntimeUpdate: (signal) => this.runtimeUpdates.settle(signal),
+			holdUndeliveredQueue: () => {
+				this._pendingQueue.holdUndelivered();
+				this._emitQueueUpdate();
+			},
 			isCompacting: () => this._compaction.isCompacting,
 			isExtendedBusy: () => {
 				return (
@@ -1764,11 +1792,19 @@ export class AgentSession {
 		const unsubscribeOwnerAnswers = subscribeHumanInputActivity(this.sessionManager, (activity) => {
 			if (activity.phase === "settled") this._selfCompaction.schedule();
 		});
+		// A queued worker that contended with the foreground model is held until the foreground goes
+		// idle. Every foreground turn driver (prompt, custom-message and handoff turns, goal and
+		// continuation runs) releases its submission lease when it ends, so that release is the idle
+		// event; the end of `prompt()` is only one of the paths that reach it.
+		const unsubscribeQueuedWorkers = this._foregroundRecovery.subscribeActivity(() => {
+			if (!this._isForegroundPhaseBusy()) this._backgroundLanes.drainQueuedWorkerDelegations();
+		});
 		this._systemOneController?.setEvaluationIdleListener(wakeIdleOccupancy);
 		this._unsubscribeIdleOccupancy = () => {
 			unsubscribeSemantic();
 			unsubscribeContinuation();
 			unsubscribeOwnerAnswers();
+			unsubscribeQueuedWorkers();
 			this._systemOneController?.setEvaluationIdleListener(undefined);
 		};
 		this._durableCustomMessageTurns = new DurableCustomMessageTurnController({
@@ -1801,6 +1837,7 @@ export class AgentSession {
 				attemptId !== undefined
 					? this._backgroundLanes.getWorkerAttemptResult(attemptId)
 					: this._backgroundLanes.getWorkerResult(laneId),
+			getWorkerFanoutNote: (laneId) => fanoutNoteForLane(this._backgroundLanes.getWorkerFanoutGroups(), laneId),
 			startCustomMessageTurn: (message, lease, goalId) =>
 				this._durableCustomMessageTurns.start(message, lease, goalId),
 			enqueueCustomMessageTurn: (message) => this._durableCustomMessageTurns.enqueue(message),
@@ -2054,7 +2091,7 @@ export class AgentSession {
 			resolveCurationModelIfFit: () => this._resolveCurationModelIfFit(),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
-			getLaneWorkerRefusal: () => this.getLaneWorkerRefusal(),
+			getLaneWorkerRefusal: (selection) => this.getLaunchedWorkerLaneRefusal(selection),
 			createAgentContextSnapshot: () => this._createAgentContextSnapshot(),
 			getContextUsage: () => this.getContextUsage(),
 			isStreaming: () => this.isStreaming,
@@ -2099,7 +2136,7 @@ export class AgentSession {
 			recordManagedLane: (event) => this._backgroundLanes.recordManagedLane(event),
 			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
 			isForegroundBusy: () => this.getSessionWorkState().busy,
-			getPendingMessageCount: () => this.pendingMessageCount,
+			getPendingMessageCount: () => this.deliverablePendingMessageCount,
 			isStreaming: () => this.isStreaming,
 			isCompacting: () => this.isCompacting,
 			getContextUsage: () => this.getContextUsage(),
@@ -3066,6 +3103,13 @@ export class AgentSession {
 		return review.steer;
 	}
 
+	/** Names of the skills that declare an effect: an in-process worker is never offered them. */
+	private _effectfulSkillNames(): Set<string> {
+		const snapshot = this._skillVault.getSkillsSnapshot();
+		const eligible = new Set(workerEligibleSkills(snapshot).map((skill) => skill.name));
+		return new Set(snapshot.map((skill) => skill.name).filter((name) => !eligible.has(name)));
+	}
+
 	/** A model that cannot take work now: its quota is exhausted, or the owner's account does not offer it. */
 	private _isModelUnusable(model: Model<Api>): boolean {
 		return (
@@ -3720,15 +3764,22 @@ export class AgentSession {
 		return this._pipeline.getToolArtifactStore();
 	}
 
+	private _imageStoreCache: { key: string; store: SessionImageStore } | undefined;
+
+	/** The session's image store, built once per (session, cwd, directory) so queue changes do not rebuild it. */
 	private _getSessionImageStore(): SessionImageStore | undefined {
 		const directory = this.settingsManager.getClipboardImageDirectory();
 		if (!this.sessionManager.isPersisted() && !directory) return undefined;
-		return new SessionImageStore({
+		const key = JSON.stringify([this.sessionId, this._cwd, this._agentDir, directory ?? null]);
+		if (this._imageStoreCache?.key === key) return this._imageStoreCache.store;
+		const store = new SessionImageStore({
 			agentDir: this._agentDir,
 			cwd: this._cwd,
 			sessionId: this.sessionId,
 			directory,
 		});
+		this._imageStoreCache = { key, store };
+		return store;
 	}
 
 	/**
@@ -4023,6 +4074,14 @@ export class AgentSession {
 	 * Read-only: uses the GC report path (writePayloads=false), never mutates anything.
 	 */
 	/**
+	 * Surface one bounded host warning to the session's subscribers (a UI shows it; it never changes the run).
+	 * One raised before anyone subscribes is kept for the first subscriber.
+	 */
+	emitHostWarning(message: string): void {
+		this._foregroundLifecycle.warn(message.slice(0, 500));
+	}
+
+	/**
 	 * The live path-alias table, for expanding aliases back to real paths on any surface a person
 	 * reads (see context/path-alias-display.ts). Aliases are a wire-format token optimization; the
 	 * operator always sees their own paths.
@@ -4251,6 +4310,19 @@ export class AgentSession {
 	// =========================================================================
 
 	/** Emit an event to all listeners */
+	/** Steer a displayed custom notice to this session's model (may trigger a turn); a delivery failure is a visible warning. */
+	private _steerSessionNotice(customType: string, text: string): void {
+		void this.sendCustomMessage(
+			{ customType, content: text, display: true },
+			{ triggerTurn: true, deliverAs: "steer" },
+		).catch((error: unknown) => {
+			this._emit({
+				type: "warning",
+				message: `${customType}: failed to notify session: ${error instanceof Error ? error.message : String(error)}`,
+			});
+		});
+	}
+
 	private _emit(event: AgentSessionEvent): void {
 		for (const listener of [...this._eventListeners]) {
 			try {
@@ -4297,6 +4369,11 @@ export class AgentSession {
 		}
 		if (event.type === "turn_end" || event.type === "tool_execution_start" || event.type === "tool_execution_end") {
 			this._skillVault.noteActivity();
+		}
+		if (event.type === "tool_execution_start") {
+			this._skillVault.noteWorkPaths(
+				skillWorkPathsFromToolCall(event.toolName, event.args, this._pipeline.peekPathAliasTable(), this._cwd),
+			);
 		}
 		if (event.type === "tool_execution_end" && event.isError) {
 			this._toolRecoveryLogger.recordToolExecutionFailure({
@@ -5328,33 +5405,38 @@ export class AgentSession {
 		// The owner's submission order, fixed now: every judgment of this submission carries it.
 		const acceptedOrder =
 			options?.internalContextType || options?.source === "extension" ? undefined : ++this._ownerSubmissionOrder;
-		// A queued owner submission is pending from this moment, in submission order, before anything
-		// below can await: it is visible, takeable, and cancelled with the pending queue.
+		// A queued submission (the owner's, or an extension's such as a peer message) is pending from this
+		// moment, in submission order, before anything below can await: it is visible, takeable, and
+		// cancelled with the pending queue. Only the owner's words are classified as owner intent.
 		const queuedOwnerInput =
-			this.getSessionWorkState().busy &&
-			options?.streamingBehavior &&
-			!options.internalContextType &&
-			options.source !== "extension"
-				? this._pendingQueue.register(options.streamingBehavior, text, options.images)
+			this.getSessionWorkState().busy && options?.streamingBehavior && !options.internalContextType
+				? this._pendingQueue.register(options.streamingBehavior, text, options.images, options.origin)
 				: undefined;
 		if (queuedOwnerInput) this._emitQueueUpdate();
-		const queuedOwnerClassification = queuedOwnerInput
-			? this._classifyOwnerRequest(
-					text,
-					"",
-					false,
-					options?.signal ? AbortSignal.any([options.signal, queuedOwnerInput.signal]) : queuedOwnerInput.signal,
-					acceptedOrder,
-				)
-			: undefined;
+		const queuedOwnerClassification =
+			queuedOwnerInput && acceptedOrder !== undefined
+				? this._classifyOwnerRequest(
+						text,
+						"",
+						false,
+						options?.signal
+							? AbortSignal.any([options.signal, queuedOwnerInput.signal])
+							: queuedOwnerInput.signal,
+						acceptedOrder,
+					)
+				: undefined;
 		try {
 			// The owner spoke: a summary being prepared while the lane idled never makes them wait.
 			this._compaction.cancelIdlePreparation();
-			// An owner development directive is policy, not prompt text: it is captured durably here,
-			// before the turn that carried it can be compacted away.
-			this._ownerRules.record(text);
-			// The owner spoke: an operator blocker waited for exactly that.
-			if (this._operatorBlocker !== undefined) this.setOperatorBlocker(undefined);
+			// Only the owner's own words are policy and answer a blocker: an extension's message (a peer's)
+			// or a host-authored internal turn is neither (`acceptedOrder` is defined for owner input only).
+			if (acceptedOrder !== undefined) {
+				// An owner development directive is policy, not prompt text: it is captured durably here,
+				// before the turn that carried it can be compacted away.
+				this._ownerRules.record(text);
+				// The owner spoke: an operator blocker waited for exactly that.
+				if (this._operatorBlocker !== undefined) this.setOperatorBlocker(undefined);
+			}
 			if (options?.autoContinueGoal !== false) {
 				this._backgroundLanes.clearGoalAutoContinueTimer();
 			}
@@ -5563,14 +5645,29 @@ export class AgentSession {
 			if (!submission.lease) {
 				submission.lease = this._foregroundRecovery.tryAcquireSubmission();
 			}
+			if (!submission.lease && options?.streamingBehavior && !this._foregroundRecovery.hasLiveConsumer) {
+				// Busy, but with no run that would drain the agent's queue (compaction, an answer under
+				// evaluation): a message handed over now would wait for an unrelated later turn and could be
+				// delivered after a later submission. It waits for the foreground, still pending, and runs as
+				// its own turn; later submissions queue into that turn behind it. If a run that drains the
+				// queue starts while it waits, it queues behind that run instead of waiting the whole run out.
+				const cancelled = [submissionSignal, queuedOwnerInput?.signal].filter(
+					(signal): signal is AbortSignal => signal !== undefined,
+				);
+				const acquired = await this._foregroundRecovery.acquireSubmissionOrJoinLiveConsumer(
+					AbortSignal.any(cancelled),
+				);
+				if (acquired === undefined) return;
+				if (acquired !== "live_consumer") submission.lease = acquired;
+			}
 			if (!submission.lease) {
 				if (!options?.streamingBehavior) {
 					throw new AgentBusyError(
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 					);
 				}
-				const ownerOriginalText = !options.internalContextType && options.source !== "extension" ? text : undefined;
-				if (ownerOriginalText === undefined) {
+				if (options.internalContextType) {
+					// A hidden internal turn is no one's input: it goes straight to the agent's queue.
 					if (options.streamingBehavior === "followUp") {
 						this._pendingQueue.queueFollowUp(expandedText, currentImages, goalToolStartAuthority);
 					} else {
@@ -5580,34 +5677,45 @@ export class AgentSession {
 					preflightResult?.(true);
 					return;
 				}
-				// An owner submission that became queued only after prompt() returned to its caller's turn
-				// registers here; one registered at submission keeps its original place.
+				// Only the owner's words carry owner evidence and are judged as owner intent; an extension's
+				// message (a peer's, say) is held in the same pending queue, but never classified.
+				const ownerOriginalText = options.source !== "extension" ? text : undefined;
+				// An input that became queued only after prompt() returned to its caller's turn registers
+				// here; one registered at submission keeps its original place.
 				const pending =
-					queuedOwnerInput ?? this._pendingQueue.register(options.streamingBehavior, text, options.images);
+					queuedOwnerInput ??
+					this._pendingQueue.register(options.streamingBehavior, text, options.images, options.origin);
+				let admitted = false;
 				try {
-					const classified = await (queuedOwnerClassification ??
-						this._classifyOwnerRequest(
-							ownerOriginalText,
-							"",
-							false,
-							submissionSignal ? AbortSignal.any([submissionSignal, pending.signal]) : pending.signal,
-							lifecycle?.acceptedOrder,
-						));
-					if ("cancelled" in classified && classified.cancelled && classified.contextChanged)
-						this._pendingQueue.hold(pending);
-					if (submissionSignal?.aborted || ("cancelled" in classified && classified.cancelled)) return;
+					if (ownerOriginalText !== undefined) {
+						const classified = await (queuedOwnerClassification ??
+							this._classifyOwnerRequest(
+								ownerOriginalText,
+								"",
+								false,
+								submissionSignal ? AbortSignal.any([submissionSignal, pending.signal]) : pending.signal,
+								lifecycle?.acceptedOrder,
+							));
+						if ("cancelled" in classified && classified.cancelled && classified.contextChanged)
+							this._pendingQueue.hold(pending);
+						if (submissionSignal?.aborted || ("cancelled" in classified && classified.cancelled)) return;
+					} else if (submissionSignal?.aborted || pending.signal.aborted) {
+						return;
+					}
 					if (this._disposed) return;
-					this._pendingQueue.admit(pending, {
+					admitted = this._pendingQueue.admit(pending, {
 						text: expandedText,
 						...(currentImages ? { images: currentImages } : {}),
 						...(goalToolStartAuthority ? { queuedGoalAuthority: goalToolStartAuthority } : {}),
-						ownerOriginalText,
+						...(ownerOriginalText !== undefined ? { ownerOriginalText } : {}),
 					});
 				} finally {
 					this._withdrawQueuedOwnerInput(pending);
 					this._emitQueueUpdate();
 				}
-				preflightResult?.(true);
+				// An owner submission was accepted when it was submitted; an extension's message is accepted
+				// only once the pending queue holds it, so its sender is never told of a message that is gone.
+				preflightResult?.(ownerOriginalText !== undefined || admitted);
 				return;
 			}
 			// This submission would run as its own turn now. Only an input still pending here may: one the
@@ -6117,13 +6225,96 @@ export class AgentSession {
 		}
 	}
 
-	/** A queued input whose context changed is held in full in the pending queue, never sent elsewhere. */
-	private _noteHeldQueuedInput(text: string): void {
+	/** A held queued input is kept in full in the pending queue, never sent elsewhere. */
+	private _noteHeldQueuedInput(text: string, reason: PendingInputHoldReason): void {
 		const preview = text.length > 200 ? `${text.slice(0, 200)}...` : text;
+		const why =
+			reason === "context_changed"
+				? "the session context changed before it was admitted"
+				: "the run that held it ended before it could be delivered";
 		this._emit({
 			type: "warning",
-			message: `A queued message was not delivered because the session context changed before it was admitted. It is kept in full in the pending queue; restore it to the editor to send it again: ${preview}`,
+			message: `A queued message was not delivered because ${why}. It is kept in full in the pending queue; restore it to the editor to send it again: ${preview}`,
 		});
+	}
+
+	/** The serialized queued-input record last written or restored, so an unchanged queue is not rewritten. */
+	private _queuedInputRecordKey: string | undefined;
+	/** Inputs the last record left out for its count/byte bound; a warning is raised when this becomes non-zero. */
+	private _queuedInputOmitted = 0;
+
+	/**
+	 * Keep the queue of undelivered steering and follow-up input in the session file, the same session-entry
+	 * mechanism the human-input snapshots use, so a resumed session restores exactly what was still queued.
+	 * A failed write is reported, never swallowed: the queue itself is unaffected.
+	 */
+	private _recordQueuedInput(inputs: readonly RecordableQueuedInput[]): void {
+		if (this._disposed || !this.sessionManager.isPersisted()) return;
+		try {
+			const written = appendQueuedInputRecord(
+				this.sessionManager,
+				this._getSessionImageStore(),
+				inputs,
+				this._queuedInputRecordKey,
+			);
+			if (!written) return;
+			this._queuedInputRecordKey = written.key;
+			if (written.omitted > 0 && this._queuedInputOmitted === 0) {
+				this._emit({
+					type: "warning",
+					message: `${written.omitted} queued message${written.omitted > 1 ? "s" : ""} beyond the durable record's bound will not survive a restart.`,
+				});
+			}
+			this._queuedInputOmitted = written.omitted;
+		} catch (error) {
+			this._emit({
+				type: "warning",
+				message: `Queued input could not be recorded for restart recovery: ${error instanceof Error ? error.message : String(error)}`,
+			});
+		}
+	}
+
+	/**
+	 * A resumed session restores the queue its predecessor still held, as held pending input: visible in the
+	 * queue display and takeable into the editor, never delivered on its own. The record already holds exactly
+	 * these inputs, so nothing is written until the queue next changes.
+	 */
+	private _restoreRecordedQueuedInput(): void {
+		if (!this.sessionManager.isPersisted()) return;
+		const restored = readQueuedInputRecord(this.sessionManager, this._getSessionImageStore());
+		if (!restored) return;
+		this._pendingQueue.restore(restored.inputs);
+		this._queuedInputRecordKey = restored.key;
+		const fromPeers = restored.inputs.filter((input) => input.origin).length;
+		this._restoredQueuedInputNotice = {
+			head:
+				`Restored ${restored.inputs.length} queued message${restored.inputs.length > 1 ? "s" : ""} from the previous run` +
+				`${fromPeers > 0 ? ` (${fromPeers} from other senders, shown under who sent them)` : ""}`,
+			tail:
+				`${restored.missingImages > 0 ? ` (${restored.missingImages} attached image${restored.missingImages > 1 ? "s were" : " was"} no longer available)` : ""}` +
+				`${restored.pinError ? `; its images could not be held against pruning: ${restored.pinError}` : ""}.`,
+		};
+	}
+
+	private _restoredQueuedInputNotice: { head: string; tail: string } | undefined;
+
+	/**
+	 * The one-time notice for input restored on resume. `editor` (the interactive default) tells the user to take
+	 * the held input back into the editor; `headless` is for hosts with no editor, where the input stays held.
+	 */
+	takeRestoredQueuedInputNotice(surface: "editor" | "headless" = "editor"): string | undefined {
+		const notice = this._restoredQueuedInputNotice;
+		this._restoredQueuedInputNotice = undefined;
+		if (!notice) return undefined;
+		return surface === "editor"
+			? `${notice.head}; take them back into the editor to send them again${notice.tail}`
+			: `${notice.head}; they are held, not delivered, and stay held for the next interactive session on this session (RPC: pendingMessageCount in get_state counts them, clear_queue drops them)${notice.tail}`;
+	}
+
+	/** Surface held restored input as a session warning for hosts with no editor (print, JSON, RPC), so it is never silent. */
+	announceRestoredQueuedInput(): void {
+		const notice = this.takeRestoredQueuedInputNotice("headless");
+		if (notice) this._emit({ type: "warning", message: notice });
 	}
 
 	// Steering/follow-up/extension-command queue mechanics (parsing, skill-command expansion,
@@ -6227,7 +6418,7 @@ export class AgentSession {
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp"; processSlashCommands?: boolean },
+		options?: SendUserMessageOptions,
 	): Promise<void> {
 		// Normalize content to text string + optional images
 		let text: string;
@@ -6252,13 +6443,27 @@ export class AgentSession {
 		// Skip skill/template expansion by default. Extensions that intentionally
 		// want slash commands to execute (for example self-maintenance reloads)
 		// can opt in with processSlashCommands.
-		await this.prompt(text, {
-			expandPromptTemplates: false,
-			processSlashCommands: options?.processSlashCommands ?? false,
-			streamingBehavior: options?.deliverAs,
-			images,
-			source: "extension",
-		});
+		// The sender hears exactly one acceptance verdict: the prompt's own preflight verdict, or a
+		// refusal when the submission ended (returned or threw) without reaching one.
+		let verdictGiven = false;
+		const giveVerdict = (accepted: boolean): void => {
+			if (verdictGiven) return;
+			verdictGiven = true;
+			options?.onAccepted?.(accepted);
+		};
+		try {
+			await this.prompt(text, {
+				expandPromptTemplates: false,
+				processSlashCommands: options?.processSlashCommands ?? false,
+				streamingBehavior: options?.deliverAs,
+				images,
+				source: "extension",
+				...(options?.origin ? { origin: options.origin } : {}),
+				preflightResult: giveVerdict,
+			});
+		} finally {
+			giveVerdict(false);
+		}
 	}
 
 	/**
@@ -6289,6 +6494,11 @@ export class AgentSession {
 	/** Number of pending messages (includes steering, follow-up, and queued extension commands) */
 	get pendingMessageCount(): number {
 		return this._pendingQueue.count;
+	}
+
+	/** Pending messages a run will still deliver itself: `pendingMessageCount` minus held input awaiting the owner. */
+	get deliverablePendingMessageCount(): number {
+		return this._pendingQueue.deliverableCount;
 	}
 
 	/** Get pending steering messages (read-only) */
@@ -6866,8 +7076,8 @@ export class AgentSession {
 		return this._autonomyTelemetry.getGateOutcomeHistory();
 	}
 
-	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string {
-		return appendWorkerClaimSnapshot(this.sessionManager, claim, request);
+	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest, options?: { cwd?: string }): string {
+		return appendWorkerClaimSnapshot(this.sessionManager, claim, request, options);
 	}
 
 	getWorkerClaimSnapshots(): WorkerClaim[] {
@@ -6919,22 +7129,44 @@ export class AgentSession {
 	}
 
 	/**
-	 * Whether the CURRENT session model may drive a worktree-sync lane worker (see
-	 * `evaluateLaneWorkerRefusal` in model-capability.ts): full capability class, a DECLARED
-	 * (registry) context window, an ADVERTISED native tool-call path (`Model.textToolCallProtocol`
-	 * unset/false -- `true` means phone-only), and no graded `/toolprobe` demotion to
-	 * "text-protocol"/"none" on record. An unprobed model (no verdict on record yet) is eligible on
-	 * its advertised support alone. `undefined` means eligible.
+	 * Whether the CURRENT session model may drive a lane worker. This is the authoritative check a
+	 * launched worker runs on the model it actually resolved; see {@link laneWorkerRefusalFor}.
 	 */
 	getLaneWorkerRefusal(): LaneWorkerRefusal | undefined {
-		const profile = this.getModelCapabilityProfile();
-		const model = this.model;
-		const verdict = model ? this._toolProtocol.getToolProbeVerdict(model) : undefined;
-		return evaluateLaneWorkerRefusal({
-			capabilityClass: profile.class,
-			contextWindow: profile.contextWindow,
-			toolCallingAdvertised: model?.textToolCallProtocol !== true,
-			toolCallingDemoted: verdict === "text-protocol" || verdict === "none",
+		return this.laneWorkerRefusalFor(this.model);
+	}
+
+	/**
+	 * Parent-side pre-launch check for a child `pi` process: the model the CHILD will resolve (its
+	 * explicit selection, else its own startup resolution), never this session's model.
+	 */
+	async getLaunchedWorkerLaneRefusal(
+		selection: { provider?: string; model?: string } = {},
+	): Promise<LaneWorkerRefusal | undefined> {
+		const child = await resolveLaunchedChildModel({
+			cliProvider: selection.provider,
+			cliModel: selection.model,
+			enabledModels: this.settingsManager.getEnabledModels(),
+			defaultProvider: this.settingsManager.getDefaultProvider(),
+			defaultModelId: this.settingsManager.getDefaultModel(),
+			modelRegistry: this._modelRegistry,
+		});
+		return child ? this.laneWorkerRefusalFor(child) : { reason: "model_unresolved", capabilityClass: "chat" };
+	}
+
+	/**
+	 * Lane-worker eligibility of `model` (see `evaluateLaneWorkerModelRefusal` in model-capability.ts):
+	 * full capability class, a DECLARED (not registry-defaulted) context window, and a native tool-call
+	 * path that is declared or probe-proven and not demoted -- the transport facts come from the single
+	 * `resolveModelToolProtocol` resolver. Unknown metadata or a missing model refuses. `undefined`
+	 * means eligible.
+	 */
+	private laneWorkerRefusalFor(model: Model<Api> | undefined): LaneWorkerRefusal | undefined {
+		if (!model) return { reason: "model_unresolved", capabilityClass: "chat" };
+		return evaluateLaneWorkerModelRefusal({
+			model,
+			capabilityMode: this.settingsManager.getModelCapabilitySettings().mode,
+			toolProtocol: this._resolveModelToolProtocol(model),
 		});
 	}
 
@@ -7224,6 +7456,18 @@ export class AgentSession {
 	/** Roll back one applied durable learning change. Delegates to {@link ReflectionController}. */
 	async rollbackLearningWrite(auditId: string): Promise<{ ok: boolean; reason: string }> {
 		return this._reflection.rollbackLearningWrite(auditId);
+	}
+
+	/**
+	 * Decide and apply a background learner's returned proposals under this session's autonomy mode
+	 * and autoLearn eligibility. The learner process wrote nothing; every entry gets a report row.
+	 */
+	applyAutoLearnProposals(set: AutoLearnProposalSet, runId: string): Promise<AutoLearnReportEntry[]> {
+		return decideAutoLearnProposals(set, runId, {
+			settingsManager: this.settingsManager,
+			skillVault: this._skillVault,
+			applyWrites: (rawWrites, id) => this._reflection.applyLearnerWrites(rawWrites, { runId: id }),
+		});
 	}
 
 	getSelfCompactionView(): SelfCompactionView {

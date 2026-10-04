@@ -46,6 +46,18 @@ const PIDFD_WAIT = [
 	"",
 ].join("\n");
 
+/**
+ * Authority for the two `process.kill(-pid, "SIGKILL")` sites below. They signal a process GROUP, and
+ * the group is owned by construction: `pid` is the pid of a leader this harness spawned detached
+ * (`ownedPid`; callers pass `child.pid`), so the group id is the leader's own pid. By the time the
+ * group is waited on the leader has usually exited, so a handle-based kill (`killTree(child)` /
+ * `killTreeNow(child)`) would refuse an already-terminal handle and cannot reach the survivors;
+ * `killTreeNow(pid)` would instead apply the bare-pid ancestry gate to a target that is not a bare
+ * pid, and its direct-pid fallback could hit a recycled non-leader. While any member lives the kernel
+ * never reissues the id, so the signal can only reach this tree. After the group empties the signal
+ * answers ESRCH, which both sites treat as "gone". The abort site is detached when its wait ends; the
+ * reap site runs once, immediately after its shell's exit event.
+ */
 const untrackedDirectories = new Set<string>();
 const NO_IGNORED_PROCESS_IDS: ReadonlySet<number> = new Set<number>();
 

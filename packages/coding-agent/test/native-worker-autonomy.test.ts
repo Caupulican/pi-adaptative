@@ -42,7 +42,8 @@ describe("native worker autonomy", () => {
 
 		expect(properties).not.toHaveProperty("authority");
 		expect(properties).not.toHaveProperty("readPaths");
-		expect(properties).not.toHaveProperty("writePaths");
+		// The root widens a worker's write scope (default: its own cwd) with an explicit grant.
+		expect(properties).toHaveProperty("writePaths");
 		expect(properties).not.toHaveProperty("resourceProfileNames");
 		expect(properties).toHaveProperty("model");
 		expect(properties).toHaveProperty("thinkingLevel");
@@ -75,7 +76,7 @@ describe("native worker autonomy", () => {
 		});
 	});
 
-	it("inherits machine-wide read/write authority while keeping the parent cwd and no delegate tool", async () => {
+	it("inherits machine-wide read authority and a cwd-only write scope while keeping the parent cwd and no delegate tool", async () => {
 		const harness = await createHarness({
 			models: [
 				{
@@ -106,8 +107,9 @@ describe("native worker autonomy", () => {
 				instructions: "Write the requested artifact outside the parent project.",
 			});
 
-			expect(run.record?.status).toBe("partial");
-			expect(readFileSync(output, "utf-8")).toBe("machine-wide");
+			expect(run.record).toBeDefined();
+			// A write beyond the worker's own working directory is an explicit grant, so this one is refused.
+			expect(existsSync(output)).toBe(false);
 			const worker = firstExecutionContract(harness);
 			const machineRoots = workerMachinePathRoots(harness.tempDir);
 			expect(machineRoots).toContain(parse(resolve(harness.tempDir)).root);
@@ -117,7 +119,7 @@ describe("native worker autonomy", () => {
 			expect(worker?.authority).toMatchObject({
 				cwd: resolve(harness.tempDir),
 				readPaths: machineRoots,
-				writePaths: machineRoots,
+				writePaths: [resolve(harness.tempDir)],
 			});
 			expect(worker?.authority.toolNames).not.toContain("delegate");
 			expect(worker?.authority.capabilities).not.toContain("workflow.delegate");
@@ -482,7 +484,8 @@ describe("native worker autonomy", () => {
 			settings: { workerDelegation: { enabled: true, orchestrationProfile: undefined } },
 		});
 		const outside = externalWorkspace(harness.tempDir, "private-negative-control");
-		const output = join(outside, "allowed.txt");
+		// An ordinary write inside the worker's own working directory continues; private state stays denied.
+		const output = join(harness.tempDir, "workspace-output", "allowed.txt");
 		const privateFiles = [
 			[join(harness.tempDir, "auth.json"), "PRIVATE_AUTH_MARKER_MUST_NOT_LEAK"],
 			[join(harness.tempDir, "MEMORY.md"), "RAW_MEMORY_MARKER_MUST_NOT_LEAK"],

@@ -62,18 +62,20 @@ describe("Worker Result Validator (Phase 6)", () => {
 		});
 
 		it("tells the parent what System One settled and routes what is open to the owner", () => {
-			expect(
-				workerClaimSettlementLines({
-					systemOneSettled: ["confirmed: the suite passes (system_one)"],
-					inconclusive,
-				}),
-			).toEqual([
-				"System One settled: confirmed: the suite passes (system_one)",
-				`Inconclusive, never treat as confirmed: ${inconclusive[0]}. Ask the owner (ask_question) before relying on it.`,
-			]);
-			expect(workerClaimSettlementLines({ inconclusive, ownerFollowUp: "/f/s.md" })[0]).toContain(
-				"recorded for the owner in /f/s.md",
+			const lines = workerClaimSettlementLines({
+				systemOneSettled: ["confirmed: the suite passes (system_one)"],
+				inconclusive,
+			});
+			expect(lines).toHaveLength(2);
+			expect(lines[0]).toMatch(
+				/^System One settled \(untrusted worker evidence\):\n<untrusted_content id="[a-f0-9]+" source="worker-claim">\nconfirmed: the suite passes \(system_one\)\n<\/untrusted_content>$/,
 			);
+			expect(lines[1]).toContain("Inconclusive, never treat as confirmed. Ask the owner (ask_question)");
+			expect(lines[1]).toContain(`\n${inconclusive[0]}\n</untrusted_content>`);
+			expect(workerClaimSettlementLines({ inconclusive, ownerFollowUp: "/f/s.md" })[0]).toContain(
+				"recorded for the owner",
+			);
+			expect(workerClaimSettlementLines({ inconclusive, ownerFollowUp: "/f/s.md" })[0]).toContain("\n/f/s.md\n");
 			expect(workerClaimSettlementLines({})).toEqual([]);
 		});
 

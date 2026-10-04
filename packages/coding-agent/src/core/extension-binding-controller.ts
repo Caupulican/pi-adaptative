@@ -36,6 +36,7 @@ import type {
 	ExtensionErrorListener,
 	ExtensionRunner,
 	ExtensionUIContext,
+	SendUserMessageOptions,
 	SessionStartEvent,
 	ShutdownHandler,
 	ToolInfo,
@@ -44,6 +45,7 @@ import type { ManagedLaneEvent } from "./extensions/types.ts";
 import type { MemoryProvider } from "./memory/memory-provider.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
+import { QUEUED_INPUT_CUSTOM_TYPE } from "./queued-input-record.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import type { ResourceProfileSettings, SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
@@ -74,10 +76,7 @@ export interface ExtensionBindingControllerDeps {
 		message: Pick<CustomMessage, "customType" | "content" | "display" | "details">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<void>;
-	sendUserMessage(
-		content: string | (TextContent | ImageContent)[],
-		options?: { deliverAs?: "steer" | "followUp"; processSlashCommands?: boolean },
-	): Promise<void>;
+	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): Promise<void>;
 	setSessionName(name: string): void;
 	registerMemoryProvider(provider: MemoryProvider): void;
 	registerContextMemoryProvider(provider: ContextMemoryProvider): void;
@@ -282,6 +281,8 @@ export class ExtensionBindingController {
 						throw new Error("Mandatory verification is a host-owned evidence checkpoint");
 					if (customType === OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)
 						throw new Error("Optional integration intent is a host-owned classification checkpoint");
+					if (customType === QUEUED_INPUT_CUSTOM_TYPE)
+						throw new Error("Queued input is a host-owned restart record");
 					this.deps.getSessionManager().appendCustomEntry(customType, data);
 				},
 				setSessionName: (name) => {

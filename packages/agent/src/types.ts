@@ -1307,6 +1307,13 @@ export interface AgentContext {
 	 * loop made on purpose from one nobody sanctioned.
 	 */
 	surfaceChange?: string;
+	/**
+	 * The request's literal tail is a host-authored instruction the model must act on (a halt message
+	 * asking for its own report). The planner then appends no trailing MUST-protocol record (the
+	 * failure ledger, verification obligations) after it, so the instruction stays the last thing the
+	 * model reads. Records already in the transcript are untouched.
+	 */
+	instructionTail?: boolean;
 }
 
 /**

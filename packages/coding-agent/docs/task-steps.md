@@ -47,7 +47,7 @@ Example:
   "steps": [
     { "content": "Reproduce the issue", "status": "in_progress" },
     { "content": "Implement the smallest fix" },
-    { "content": "Run focused regression tests" }
+    { "content": "Run the build and checks" }
   ]
 }
 ```

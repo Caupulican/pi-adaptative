@@ -64,9 +64,13 @@ import {
 	resolveToolkitScriptScope,
 } from "./autonomy/edge-policy.ts";
 import { isPathWithinEnvelope, wrapToolWithEnvelopeScope } from "./autonomy/envelope-enforcement.ts";
-import type { SharedLaneToolOptions } from "./autonomy/lane-tool-surface.ts";
+import { type SharedLaneToolOptions, WORKER_WRITE_SCOPE_GUIDANCE } from "./autonomy/lane-tool-surface.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
-import { buildWorkerSessionPrivatePathEnvelope } from "./autonomy/worker-session-private-scope.ts";
+import {
+	buildWorkerSessionDefaultWriteScopeEnvelope,
+	buildWorkerSessionHarnessWriteEnvelope,
+	buildWorkerSessionPrivatePathEnvelope,
+} from "./autonomy/worker-session-private-scope.ts";
 import type { CapabilityTierPolicy } from "./capability-tier.ts";
 import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
 import type { SelfCompactionView } from "./compaction/self-compaction-controller.ts";
@@ -184,7 +188,7 @@ import { createRunProcessToolDefinition } from "./tools/run-process.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
 import { createSecretStoreToolDefinition } from "./tools/secret-store.ts";
 import { disposeShellExecutionSession } from "./tools/shell-execution-session.ts";
-import { createSkillVaultToolDefinition } from "./tools/skill.ts";
+import { createSkillVaultToolDefinition, createWorkerSkillVaultToolDefinition } from "./tools/skill.ts";
 import { createSystemOneToolDefinition } from "./tools/systemone.ts";
 import { createTaskDirectoryToolDefinition } from "./tools/task-directory.ts";
 import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
@@ -199,8 +203,9 @@ import { wrapToolExecution } from "./tools/tool-execution-wrapper.ts";
 import { createToolTaskToolDefinition, type ToolTaskDependencies } from "./tools/tool-task.ts";
 import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
 import { countFileLinesSync } from "./util/bounded-file.ts";
-import { WORKER_FORBIDDEN_TOOLS } from "./worker-tool-ceiling.ts";
-import { createLane } from "./worktree-sync/git-engine.ts";
+import { readWorkerExtensionToolGrants, registerWorkerExtensionToolPolicies } from "./worker-extension-grants.ts";
+import { isWorkerProcessToolAllowed } from "./worker-tool-ceiling.ts";
+import { createLane, releaseLane } from "./worktree-sync/git-engine.ts";
 import { getBoundWorktreeLaneKey } from "./worktree-sync/lane-binding.ts";
 import { WorktreeLaneGate } from "./worktree-sync/lane-gate.ts";
 import { buildWorktreeSyncEngineDeps } from "./worktree-sync/runtime.ts";
@@ -466,11 +471,15 @@ export interface RuntimeBuilderDeps {
 		usage: Usage,
 		opts: { label?: string; sourceSessionId?: string; reportId: string },
 	): string | undefined;
-	/** Whether the CURRENT session model may drive a worktree-sync lane worker (`AgentSession.
-	 * getLaneWorkerRefusal`) -- consulted BEFORE a goal→tmux dispatch so an ineligible model's
-	 * dispatch is refused before any lane/pane side effect (`tools/collaboration-dispatch.ts`'s
-	 * `evaluateWorkerLaneRefusal`). `undefined` means eligible. */
-	getLaneWorkerRefusal(): LaneWorkerRefusal | undefined;
+	/** Whether the model a launched child `pi` process will resolve (its explicit `selection`, else its
+	 * own startup resolution -- `AgentSession.getLaunchedWorkerLaneRefusal`) may drive a lane worker --
+	 * consulted BEFORE a goal→collaboration dispatch so an ineligible model's dispatch is refused before
+	 * any lane/pane side effect (`tools/collaboration-dispatch.ts`'s `evaluateWorkerLaneRefusal`).
+	 * `undefined` means eligible. */
+	getLaneWorkerRefusal(selection?: {
+		provider?: string;
+		model?: string;
+	}): LaneWorkerRefusal | undefined | Promise<LaneWorkerRefusal | undefined>;
 
 	/** Post-rebuild doctor helpers (validate the rebuilt runtime can render a context). */
 	createAgentContextSnapshot(): AgentContext;
@@ -538,6 +547,10 @@ export class RuntimeBuilder {
 	private readonly _credentialDiscoveryRoots: readonly string[];
 	private readonly _fileMutationIntents: FileMutationIntentController;
 	private readonly _workerSessionPrivatePathEnvelope: CapabilityEnvelope | undefined;
+	private readonly _workerSessionHarnessWriteEnvelope: CapabilityEnvelope | undefined;
+	private readonly _workerSessionDefaultWriteScopeEnvelope: CapabilityEnvelope | undefined;
+	/** Extension tools the launcher explicitly granted this worker process (never a builtin name). */
+	private readonly _workerExtensionToolNames: ReadonlySet<string>;
 	private readonly _taskDirectories: TaskDirectoryRuntime;
 
 	/** The directory task tools (and requirement checks) run in. */
@@ -559,8 +572,23 @@ export class RuntimeBuilder {
 
 	constructor(deps: RuntimeBuilderDeps) {
 		this.deps = deps;
+		const builtinToolNames: ReadonlySet<string> = allToolNames;
+		const workerExtensionGrants = isWorkerSession()
+			? readWorkerExtensionToolGrants().filter((grant) => !builtinToolNames.has(grant.tool))
+			: [];
+		// The harness cannot judge what a granted extension's code opens: classify the granted tools so the
+		// worker's path envelopes (private paths, harness write protection, default write scope) govern their
+		// path arguments exactly as they govern the builtin file tools.
+		registerWorkerExtensionToolPolicies(workerExtensionGrants);
+		this._workerExtensionToolNames = new Set(workerExtensionGrants.map((grant) => grant.tool));
 		this._workerSessionPrivatePathEnvelope = isWorkerSession()
 			? buildWorkerSessionPrivatePathEnvelope(deps.getCwd(), deps.getAgentDir())
+			: undefined;
+		this._workerSessionHarnessWriteEnvelope = isWorkerSession()
+			? buildWorkerSessionHarnessWriteEnvelope(deps.getCwd(), deps.getAgentDir())
+			: undefined;
+		this._workerSessionDefaultWriteScopeEnvelope = isWorkerSession()
+			? buildWorkerSessionDefaultWriteScopeEnvelope(deps.getCwd())
 			: undefined;
 		this._taskDirectories = new TaskDirectoryRuntime({
 			getSessionManager: () => deps.getSessionManager(),
@@ -644,6 +672,7 @@ export class RuntimeBuilder {
 	 */
 	private _createToolAccessPolicy(): RuntimeToolAccessPolicy {
 		const role = getSessionRole();
+		const grantedExtensionTools = this._workerExtensionToolNames;
 		const configuredAllowedToolNames = this.deps.getAllowedToolNames();
 		const allowedToolNames = configuredAllowedToolNames
 			? new Set(mapToolNamesForPlatform([...configuredAllowedToolNames]))
@@ -663,8 +692,9 @@ export class RuntimeBuilder {
 			allowedToolNames,
 			toolProfileFilter,
 			allows: (name) => {
-				// Strict worker UAC ceiling wins over every explicit grant.
-				if (role === "worker" && WORKER_FORBIDDEN_TOOLS.has(name)) return false;
+				// Strict worker UAC ceiling wins over every explicit grant: a worker process holds only the
+				// allow-listed surface, so catalogue and extension tools are never inherited by default.
+				if (role === "worker" && !isWorkerProcessToolAllowed(name, grantedExtensionTools)) return false;
 				if (allowedToolNames && !allowedToolNames.has(name)) return false;
 				if (excludedToolNames?.has(name)) return false;
 				if (!toolProfileFilter) return true;
@@ -911,9 +941,25 @@ export class RuntimeBuilder {
 				this._credentialExposureBoundary,
 				this.credentialExposureMode(),
 			);
-			const scoped = this._workerSessionPrivatePathEnvelope
+			const privateScoped = this._workerSessionPrivatePathEnvelope
 				? wrapToolWithEnvelopeScope(guarded, this._workerSessionPrivatePathEnvelope, this.deps.getCwd())
 				: guarded;
+			const writeScoped = this._workerSessionDefaultWriteScopeEnvelope
+				? wrapToolWithEnvelopeScope(
+						privateScoped,
+						this._workerSessionDefaultWriteScopeEnvelope,
+						this.deps.getCwd(),
+						WORKER_WRITE_SCOPE_GUIDANCE,
+					)
+				: privateScoped;
+			const scoped = this._workerSessionHarnessWriteEnvelope
+				? wrapToolWithEnvelopeScope(
+						writeScoped,
+						this._workerSessionHarnessWriteEnvelope,
+						this.deps.getCwd(),
+						"Harness resources (skills, extensions, prompts, settings, hooks, git config) are owner-only for a worker. Report the change you want to the parent as a proposal; the parent applies it.",
+					)
+				: writeScoped;
 			toolRegistry.set(
 				scoped.name,
 				wrapToolWithVerification(
@@ -1192,7 +1238,7 @@ export class RuntimeBuilder {
 			},
 			webfetch: { artifactStore: toolArtifactStore },
 			skill_audit: { getSkills: () => resourceLoader.getSkills().skills },
-			skillify: { getSkills: () => resourceLoader.getSkills().skills },
+			skillify: { getSkills: () => resourceLoader.getSkills().skills, agentDir: this.deps.getAgentDir() },
 			extensionify: {
 				agentDir: this.deps.getAgentDir(),
 				loadExtension: async ({ extensionPath, cwd }) => {
@@ -1334,9 +1380,11 @@ export class RuntimeBuilder {
 				if (definition) this._baseToolDefinitions.set(definition.name, definition);
 			}
 			if (toolAccess.allows("skill")) {
-				const definition = createSkillVaultToolDefinition(this.deps.getSkillVault(), {
-					getSettingsManager: () => this.deps.getSettingsManager(),
-				});
+				const skillOptions = { getSettingsManager: () => this.deps.getSettingsManager() };
+				// Skill sources are the owner's: a worker session's tool schema carries no `repair`.
+				const definition = isWorkerSession()
+					? createWorkerSkillVaultToolDefinition(this.deps.getSkillVault(), skillOptions)
+					: createSkillVaultToolDefinition(this.deps.getSkillVault(), skillOptions);
 				this._baseToolDefinitions.set(definition.name, definition);
 			}
 			if (toolAccess.allows("run_process")) {
@@ -1469,6 +1517,12 @@ export class RuntimeBuilder {
 											// "worktree_create_failed" skip reason before any fire_task call runs.
 											if (created.code !== "ok") return { skipReason: created.code };
 											return { laneKey: created.lane.laneKey, worktreePath: created.lane.worktreePath };
+										}
+									: undefined,
+								releaseLaneWorktree: worktreeSyncSettings?.enabled
+									? async (laneKey) => {
+											const released = await releaseLane(worktreeSyncEngineDeps(), { laneKey });
+											return released.code === "released" ? undefined : released.code;
 										}
 									: undefined,
 							},

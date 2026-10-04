@@ -146,11 +146,14 @@ describe("objective mutation boundary", () => {
 				expect(repositoryEffectForCall({ toolName, args: {}, deliveryActive }), toolName).toBe("none");
 				expect(toolRepositoryEffect(toolName), toolName).toBe("opaque");
 			}
+			// skillify only validates a draft and proposes a path: it holds read authority, so no effect on the repository.
+			expect(repositoryEffectForCall({ toolName: "skillify", args: {}, deliveryActive })).toBe("none");
+			expect(toolRepositoryEffect("skillify")).toBe("none");
 			expect(repositoryEffectForCall({ toolName: "goal", args: { action: "update" }, deliveryActive })).toBe("none");
 			expect(repositoryEffectForCall({ toolName: "pipeline", args: { action: "list" }, deliveryActive })).toBe(
 				"none",
 			);
-			for (const toolName of ["bash", "python", "run_process", "skillify", "extensionify", "worktree_sync"]) {
+			for (const toolName of ["bash", "python", "run_process", "extensionify", "worktree_sync"]) {
 				expect(repositoryEffectForCall({ toolName, args: {}, deliveryActive }), toolName).toBe("observe");
 			}
 			expect(repositoryEffectForCall({ toolName: "edit", args: {}, deliveryActive })).toBe("typed_owned_write");

@@ -16,9 +16,6 @@ const MINIMAL_ACTIVE_TOOL_NAMES = [
 	"python",
 	"edit",
 	"write",
-	"create_goal",
-	"get_goal",
-	"update_goal",
 	"ask_question",
 	"systemone",
 	"run_toolkit_script",
@@ -84,7 +81,7 @@ describe("model capability auto-detection", () => {
 			expect(profile.backgroundLanesEnabled).toBe(false);
 			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative focused coding executor\./);
 			expect(harness.session.systemPrompt).not.toContain("n-plus-2-architecture");
-			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(4_096);
+			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(5_120);
 			const composition = harness.session.getContextCompositionReport();
 			// The owner approved additional capacity for the canonical Jev schema: its live
 			// provider framing grew from 358 to 828 tokens. The advisory uncertainty actions add
@@ -93,14 +90,16 @@ describe("model capability auto-detection", () => {
 			const priorJevSchemaTokens = 358;
 			const advisoryUncertaintyAllowance = 104;
 			const canonicalSchemaAllowance = 470 + advisoryUncertaintyAllowance;
+			// The standing ASD-STE100 explanation rule and the output-format routing line (owner-approved).
+			const explanationStyleAllowance = 40;
 			const jevSchemaTokens = composition.tools.find((tool) => tool.name === "systemone")!.schemaTokens;
 			expect(jevSchemaTokens).toBeGreaterThan(0);
 			expect(jevSchemaTokens).toBeLessThanOrEqual(priorJevSchemaTokens + canonicalSchemaAllowance);
 			expect(composition.systemPromptTokens + composition.toolSchemaTokens).toBeLessThanOrEqual(
-				profile.contextWindow! * 0.35 + canonicalSchemaAllowance,
+				profile.contextWindow! * 0.35 + canonicalSchemaAllowance + explanationStyleAllowance,
 			);
 			expect(composition.systemPromptTokens + composition.toolSchemaTokens - jevSchemaTokens).toBeLessThanOrEqual(
-				profile.contextWindow! * 0.35 - priorJevSchemaTokens,
+				profile.contextWindow! * 0.35 - priorJevSchemaTokens + explanationStyleAllowance,
 			);
 			// Prompt shaping is orthogonal to transport selection. An unflagged model still uses
 			// provider-native tool calls; capability reduction must never switch on the phone protocol.
@@ -122,11 +121,11 @@ describe("model capability auto-detection", () => {
 		}
 	});
 
-	it("keeps goal lifecycle and independent review tools on a chat-class (<8k) model", async () => {
+	it("keeps only the independent review tool on a chat-class (<8k) model; goals need class full", async () => {
 		const harness = await createHarness({ models: [{ id: "tiny-model", contextWindow: 4_096 }] });
 		try {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("chat");
-			expect(harness.session.getActiveToolNames()).toEqual(["create_goal", "get_goal", "update_goal", "systemone"]);
+			expect(harness.session.getActiveToolNames()).toEqual(["systemone"]);
 			expect(harness.session.systemPrompt).toMatch(/^Pi-Adaptative concise chat assistant\./);
 			expect(harness.session.systemPrompt).toContain(CHAT_WORK_LIFECYCLE_SYSTEM_RULE);
 			expect(harness.session.systemPrompt).not.toContain("Current working directory:");
@@ -136,7 +135,7 @@ describe("model capability auto-detection", () => {
 		}
 	});
 
-	it("keeps the minimal prompt under its 4,096-character budget on a long live checkout path", async () => {
+	it("keeps the minimal prompt under its 5,120-character budget on a long live checkout path", async () => {
 		// The minimal prompt embeds the live cwd (lean drops it; minimal keeps it). Hosted runners
 		// nest the repository name twice and Windows temp roots are deeper still, so measure the
 		// budget against a genuinely long, existing cwd rather than this machine's temp dir. The
@@ -160,7 +159,7 @@ describe("model capability auto-detection", () => {
 			expect(harness.session.getModelCapabilityProfile().class).toBe("minimal");
 			expect(harness.session.systemPrompt).toContain(`Current working directory: ${longCwd.replace(/\\/g, "/")}`);
 			expect(longCwd.length).toBeGreaterThanOrEqual(120);
-			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(4_096);
+			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(5_120);
 		} finally {
 			harness.cleanup();
 			rmSync(longCwd, { recursive: true, force: true });
@@ -203,7 +202,7 @@ describe("model capability auto-detection", () => {
 			]);
 
 			await expect(harness.session.prompt("hello")).rejects.toThrow(
-				"minimal system prompt exceeds its 4096-character capability budget",
+				"minimal system prompt exceeds its 5120-character capability budget",
 			);
 			expect(providerCalled).toBe(false);
 		} finally {
@@ -324,7 +323,7 @@ describe("model capability auto-detection", () => {
 			settings: { researchLane: { enabled: true }, autonomy: { mode: "balanced" } },
 		});
 		try {
-			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(10_240);
+			expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(11_264);
 			expect(harness.session.systemPrompt).not.toContain("Current working directory:");
 			seedActiveGoal(harness);
 			let seenMaxTokens: number | undefined;
@@ -343,7 +342,7 @@ describe("model capability auto-detection", () => {
 		}
 	});
 
-	it("keeps the native lean model session prompt within 10240 characters with a long working directory", async () => {
+	it("keeps the native lean model session prompt within 11264 characters with a long working directory", async () => {
 		const longTempRoot = mkdtempSync(join(tmpdir(), "pi-windows-long-temp-root-runneradmin-appdata-local-temp-"));
 		const prevTemp = process.env.TEMP;
 		const prevTmp = process.env.TMP;
@@ -362,7 +361,7 @@ describe("model capability auto-detection", () => {
 					settings: { researchLane: { enabled: true }, autonomy: { mode: "balanced" } },
 				});
 				expect(harness.tempDir.startsWith(realpathSync.native(longTempRoot))).toBe(true);
-				expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(10_240);
+				expect(harness.session.systemPrompt.length).toBeLessThanOrEqual(11_264);
 				expect(harness.session.systemPrompt).toContain("Pi-Adaptative bounded coding agent");
 				expect(harness.session.systemPrompt).not.toContain("Current working directory:");
 			} finally {

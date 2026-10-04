@@ -8,7 +8,12 @@ import {
 	TOOL_FAILURE_LEDGER_CLEARED_TEXT,
 	TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
 } from "./tool-failure-memory.ts";
-import { adaptHostTransients, commitTransientRecords, reconcileTransientRecords } from "./transient-records.ts";
+import {
+	adaptHostTransients,
+	commitTransientRecords,
+	reconcileTransientRecords,
+	type TransientRecordSlot,
+} from "./transient-records.ts";
 import type {
 	AgentContext,
 	AgentContextPlan,
@@ -416,20 +421,27 @@ export async function startPlannedAgentProviderRequestWithId(
 			// themselves is irrelevant; obligation then ledger are the MUST-protocol pair, in the same
 			// order the pre-append-on-change design pushed them, so the ledger - not the obligation -
 			// reclaims the literal last position whenever both are active.
+			// A request whose tail is a host instruction (a halt report request) takes no trailing
+			// record: anything appended after the instruction would dilute it.
+			const trailingSlots: TransientRecordSlot[] = sourceContext.instructionTail
+				? []
+				: [
+						{
+							kind: VERIFICATION_OBLIGATION_TRANSIENT_KIND,
+							content: sourceContext.trailingInstruction,
+							clearedText: VERIFICATION_OBLIGATIONS_CLEARED_TEXT,
+							trailing: true,
+						},
+						{
+							kind: TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
+							content: sanitized.ledger,
+							clearedText: TOOL_FAILURE_LEDGER_CLEARED_TEXT,
+							trailing: true,
+						},
+					];
 			const pendingTransientRecords = reconcileTransientRecords(sourceContext.messages, [
 				...hostTransients.slots,
-				{
-					kind: VERIFICATION_OBLIGATION_TRANSIENT_KIND,
-					content: sourceContext.trailingInstruction,
-					clearedText: VERIFICATION_OBLIGATIONS_CLEARED_TEXT,
-					trailing: true,
-				},
-				{
-					kind: TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
-					content: sanitized.ledger,
-					clearedText: TOOL_FAILURE_LEDGER_CLEARED_TEXT,
-					trailing: true,
-				},
+				...trailingSlots,
 			]);
 			const compactableMessages = await config.convertToLlm(plan.messages);
 			// `pendingTransientRecords` (this turn's new-or-changed-or-displaced durable records - empty

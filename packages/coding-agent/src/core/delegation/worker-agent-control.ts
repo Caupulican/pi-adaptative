@@ -278,6 +278,12 @@ export type WorkerAgentReplyResult =
 
 export interface WorkerAgentControlScope {
 	callerAgentId?: string;
+	/**
+	 * Set by the model-facing `delegate` tool, whose caller is the foreground turn itself: a wait on a worker held
+	 * for that turn can never finish inside it, so the wait returns at once instead. Other callers (goal loops,
+	 * hosts) wait through the hold: the turn that holds it ends on its own.
+	 */
+	returnWhenForegroundHeld?: boolean;
 }
 
 export interface WorkerAgentTaskStartOptions extends WorkerAgentControlScope {

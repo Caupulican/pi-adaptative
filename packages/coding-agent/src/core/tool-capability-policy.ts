@@ -61,9 +61,13 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 		"image_generate",
 		policy([["network.http"], ["credentials.use"], ["filesystem.read"]], ["service-proxy", "path-scope"]),
 	],
+	// `skill` reads and loads by default; its `repair` action rewrites a skill file and requires
+	// skill.write (toolCapabilityRequirementClauses resolves the action).
 	["skill", policy([["skill.read"]], "path-scope")],
 	["skill_audit", policy([["skill.read"]], "path-scope")],
-	["skillify", policy([["skill.write"]], "path-scope")],
+	// Pure analysis: validates a draft against the existing skills and proposes a path; writes nothing.
+	["skillify", policy([["skill.read"]], "path-scope")],
+	// Executes the draft's factory with host privileges in a throwaway runtime, so it keeps write authority.
 	["extensionify", policy([["source.write"]], "path-scope")],
 	["runtime_update", policy([["source.write"], ["process.exec"]], "control-plane")],
 	["goal", policy([["memory.mutate", "memory.query"]], "memory-broker")],
@@ -100,8 +104,49 @@ export const POLICY_OWNED_RUNTIME_TOOL_NAMES: readonly string[] = Object.freeze(
 	[...TOOL_CAPABILITY_POLICIES.keys()].filter((toolName) => !NON_CANONICAL_POLICY_TOOL_NAMES.has(toolName)),
 );
 
+/**
+ * The classification of an extension tool a worker launch profile granted to this worker PROCESS. The harness
+ * does not know what the extension's code opens, so it is classified conservatively as filesystem authority
+ * governed by the path envelopes: every path-looking argument is checked as a write (the clause lists write
+ * first, so an envelope holding either filesystem capability, including the write-only default-scope and
+ * harness-protection envelopes, selects it and applies). A tool whose arguments carry no path is unaffected.
+ */
+const GRANTED_EXTENSION_TOOL_POLICY = policy([["filesystem.write", "filesystem.read"]], "path-scope");
+
+/**
+ * Granted extension tools registered at worker startup. Process-local and worker-only (written by
+ * {@link registerGrantedExtensionToolPolicies}); it never shadows the catalogue above, which stays the sole
+ * owner of builtin classifications.
+ */
+const GRANTED_EXTENSION_TOOL_POLICIES = new Map<string, ToolCapabilityPolicy>();
+
+/**
+ * Classify the extension tools a worker process was granted. A name the catalogue already classifies is a
+ * defect (a grant can never carry builtin authority) and throws; the caller does not start with that grant.
+ */
+export function registerGrantedExtensionToolPolicies(toolNames: Iterable<string>): void {
+	for (const toolName of toolNames) {
+		const name = toolName.toLowerCase();
+		if (TOOL_CAPABILITY_POLICIES.has(name)) {
+			throw new Error(`Extension tool grant '${toolName}' names a capability-catalogued tool.`);
+		}
+		GRANTED_EXTENSION_TOOL_POLICIES.set(name, GRANTED_EXTENSION_TOOL_POLICY);
+	}
+}
+
+/** Whether `toolName` is an extension tool this worker process was granted (registered, never catalogued). */
+export function isGrantedExtensionToolName(toolName: string): boolean {
+	return GRANTED_EXTENSION_TOOL_POLICIES.has(toolName.toLowerCase());
+}
+
+/** Whether the harness catalogue itself classifies `toolName` (granted extension tools are not catalogued). */
+export function hasCataloguedToolCapabilityPolicy(toolName: string): boolean {
+	return TOOL_CAPABILITY_POLICIES.has(toolName.toLowerCase());
+}
+
 export function getToolCapabilityPolicy(toolName: string): ToolCapabilityPolicy | undefined {
-	return TOOL_CAPABILITY_POLICIES.get(toolName.toLowerCase());
+	const name = toolName.toLowerCase();
+	return TOOL_CAPABILITY_POLICIES.get(name) ?? GRANTED_EXTENSION_TOOL_POLICIES.get(name);
 }
 
 export function hasToolCapabilityPolicy(toolName: string): boolean {
@@ -137,6 +182,8 @@ export const READ_ONLY_SHELL_TOOL_NAMES: ReadonlySet<string> = new Set(["bash", 
 export function toolSurvivesReadOnly(toolName: string): boolean {
 	const policy = getToolCapabilityPolicy(toolName);
 	if (!policy) return false;
+	// The harness cannot judge what a granted extension's code writes, so a read-only lane never keeps it.
+	if (isGrantedExtensionToolName(toolName)) return false;
 	if (policy === PROCESS_POLICY && !READ_ONLY_SHELL_TOOL_NAMES.has(toolName.toLowerCase())) return false;
 	return policy.capabilityClauses.every((clause) => clause.some(capabilitySurvivesReadOnly));
 }
@@ -187,6 +234,13 @@ export function toolCapabilityRequirementClauses(
 				? (args as { action: unknown }).action
 				: undefined;
 		return action === "get" ? [["memory.query"]] : [["memory.mutate"]];
+	}
+	if (name === "skill" && args !== undefined) {
+		const action =
+			args && typeof args === "object" && !Array.isArray(args) && "action" in args
+				? (args as { action: unknown }).action
+				: undefined;
+		return action === "repair" ? [["skill.write"]] : [["skill.read"]];
 	}
 	if (name === "pipeline") {
 		const action =

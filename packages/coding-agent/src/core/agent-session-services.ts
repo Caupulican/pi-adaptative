@@ -8,6 +8,7 @@ import { AuthStorage } from "./auth-storage.ts";
 import { bindSavedBedrockScope } from "./bedrock-scope.ts";
 import { isDefaultOnBundledExtension, isExtensionPathAllowedForImport } from "./extension-import-authority.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+import { describeToolOnlyIgnored } from "./extensions/tool-only-api.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import { DefaultResourceLoader, type DefaultResourceLoaderOptions, type ResourceLoader } from "./resource-loader.ts";
 import { parseResourceProfileInput } from "./resource-profile-blocks.ts";
@@ -205,6 +206,12 @@ export async function createAgentSessionServices(
 	}
 	extensionsResult.runtime.pendingProviderRegistrations = [];
 	diagnostics.push(...applyExtensionFlagValues(resourceLoader, options.extensionFlagValues));
+	// A worker's tool-grant extension runs whole but only its granted tools take effect; name what it asked for
+	// beyond that so the narrowing is visible, not silent.
+	for (const extension of extensionsResult.extensions) {
+		const ignored = describeToolOnlyIgnored(extension);
+		if (ignored) diagnostics.push({ type: "warning", message: ignored });
+	}
 
 	return {
 		cwd,

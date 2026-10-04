@@ -50,6 +50,11 @@ export interface RunProcessToolOptions {
 	spawn?: typeof spawnProcess;
 	/** Additional environment resolved for the execution cwd; the policy allowlist still applies. */
 	environment?: (cwd: string) => NodeJS.ProcessEnv;
+	/**
+	 * Host attribution a command always carries (worker marker, role, label, committer identity, scratch). Applied
+	 * after the policy allowlist, so it never widens what the process may read of the owner's environment.
+	 */
+	attributionEnvironment?: Readonly<NodeJS.ProcessEnv>;
 }
 
 const SAFE_ENVIRONMENT_VARIABLES = [
@@ -192,7 +197,10 @@ export function createRunProcessToolDefinition(cwd: string, options: RunProcessT
 			const child = (options.spawn ?? spawnProcess)(input.executable, [...args], {
 				cwd,
 				detached: process.platform !== "win32",
-				env: scopedEnvironment(options.policy.allowedEnvironmentVariables, options.environment?.(cwd) ?? {}),
+				env: {
+					...scopedEnvironment(options.policy.allowedEnvironmentVariables, options.environment?.(cwd) ?? {}),
+					...options.attributionEnvironment,
+				},
 				stdio: ["ignore", "pipe", "pipe"],
 				windowsHide: true,
 			});

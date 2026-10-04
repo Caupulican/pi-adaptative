@@ -73,6 +73,11 @@ export interface CapabilityEnvelope {
 	deniedTools?: readonly string[];
 	allowedPaths?: readonly string[];
 	deniedPaths?: readonly string[];
+	/**
+	 * Exact files exempt from `deniedPaths`: an explicit grant by whoever launched the session (the file
+	 * itself, never its siblings). Other envelopes on the same tool, such as a write scope, still apply.
+	 */
+	exemptPaths?: readonly string[];
 	maxEstimatedUsd?: number;
 	createdAt?: string;
 }

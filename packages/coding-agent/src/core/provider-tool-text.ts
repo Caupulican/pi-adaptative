@@ -1,7 +1,7 @@
 /** Provider-bound tool prose budgets. Structural schemas remain separate and exact. */
 export const MAX_PROVIDER_TOOL_SNIPPET_CHARS = 120;
 export const MAX_PROVIDER_TOOL_GUIDELINE_CHARS = 140;
-export const MAX_PROVIDER_TOOL_GUIDELINES_CHARS = 1_200;
+export const MAX_PROVIDER_TOOL_GUIDELINES_CHARS = 1_600;
 
 export function oneLine(text: string): string {
 	return text

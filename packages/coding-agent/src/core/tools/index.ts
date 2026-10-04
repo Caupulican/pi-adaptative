@@ -150,6 +150,7 @@ export {
 } from "./secret-store.ts";
 export {
 	createSkillVaultToolDefinition,
+	createWorkerSkillVaultToolDefinition,
 	type SkillToolDetails,
 	type SkillToolInput,
 } from "./skill.ts";

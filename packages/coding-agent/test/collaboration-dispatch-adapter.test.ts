@@ -413,7 +413,9 @@ describe("dispatchCollaborationWorker (faux collaboration tool end-to-end, real 
 
 		const outcome = await dispatchCollaborationWorker(deps, { requirementId: "req-1", instructions: "do it" });
 		expect(outcome.laneId).toBeUndefined();
-		expect(outcome.skipReason).toBe("worker_capability_insufficient");
+		expect(outcome.skipReason).toBe(
+			"worker_capability_insufficient:reason=capability_class_below_full;class=lean;contextWindow=16384",
+		);
 		expect(createLaneWorktreeCalled).toBe(false);
 		expect(toolExecuted).toBe(false);
 	});

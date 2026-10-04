@@ -2,7 +2,6 @@ import type { AgentTool } from "@caupulican/pi-agent-core";
 import type { Usage } from "@caupulican/pi-ai";
 import type { TSchema } from "typebox";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
-import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_READ_TOOL_NAME } from "../memory/worker-memory-tools.ts";
 import { TypeSafeEvidenceMaterializer } from "../review/typesafe-evidence-materializer.ts";
 import type { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
 import { SystemOneReviewer } from "../review/typesafe-reviewer.ts";
@@ -23,6 +22,7 @@ import {
 } from "../tools/skill-audit.ts";
 import { createSystemOneToolDefinition } from "../tools/systemone.ts";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
+import { WORKER_FORBIDDEN_TOOLS, WORKER_LEAF_LANE_ONLY_FORBIDDEN_TOOLS } from "../worker-tool-ceiling.ts";
 
 /**
  * Host-owned inputs available while constructing one fresh worker tool.
@@ -48,28 +48,8 @@ export interface WorkerToolAdapter {
 
 /** Root/session controls are never brokered into a leaf, even when a host registers factories. */
 export const WORKER_TOOL_ADAPTER_FORBIDDEN_NAMES: ReadonlySet<string> = new Set([
-	"delegate",
-	"pi_collaboration",
-	"context_scout",
-	"peer",
-	ROOT_MEMORY_TOOL_NAME,
-	WORKER_MEMORY_READ_TOOL_NAME,
-	"goal",
-	"get_goal",
-	"update_goal",
-	"task_steps",
-	"pipeline",
-	"tool_task",
-	"ask_question",
-	"secret_store",
-	"settings",
-	"session",
-	"credential",
-	"model_fitness",
-	"improvement_loop",
-	"skillify",
-	"extensionify",
-	"worktree_sync",
+	...WORKER_FORBIDDEN_TOOLS,
+	...WORKER_LEAF_LANE_ONLY_FORBIDDEN_TOOLS,
 ]);
 
 /** Adapter names with host-owned factories; explicit profiles must have these active in foreground. */

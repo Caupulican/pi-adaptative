@@ -222,9 +222,9 @@ describe("delegate session-root reply routing", () => {
 			workerCompletionMissed: false,
 			reasonCode: "worker_suspended",
 		});
-		expect(payload.cavemanDirective).toContain("suspended is durable nonterminal state");
-		expect(payload.cavemanDirective).toContain("not missed completion or harness failure");
-		expect(payload.cavemanDirective).toContain("host-owned transient retry resumes automatically");
+		expect(payload.cavemanDirective).toContain("A suspended worker is in a durable nonterminal state");
+		expect(payload.cavemanDirective).toContain("It is not a missed completion or a harness failure");
+		expect(payload.cavemanDirective).toContain("the host resumes a transient retry automatically");
 		expect(result.details).toMatchObject({
 			started: true,
 			action: "wait",

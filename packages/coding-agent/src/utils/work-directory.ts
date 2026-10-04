@@ -444,6 +444,15 @@ export function pruneWorkTenant(
 	return removed;
 }
 
+/**
+ * Release a run's lease and delete its directory. Nothing is removed while another live process
+ * still leases the run. Returns whether the directory is gone.
+ */
+export function removeWorkRun(lease: WorkRunLease): boolean {
+	lease.release();
+	return removeRunIfInactive(lease.path, Date.now());
+}
+
 export function getProcessWorkRun(agentDir: string, category: string, tenant: string, runId?: string): WorkRunLease {
 	const key = `${agentDir}\0${category}\0${tenant}\0${runId ?? ""}`;
 	const existing = processWorkRuns.get(key);

@@ -755,6 +755,43 @@ export async function findInitialModel(options: {
 }
 
 /**
+ * The model a freshly launched child `pi` process resolves for itself, evaluated by its parent before
+ * launch. An explicit `--provider`/`--model` selection wins; otherwise the child uses the same
+ * enabled-model scope, saved default and first-available fallback its own startup uses. `undefined`
+ * means the child would resolve no model. Resource-profile model pins are not visible here; the child
+ * re-checks its own resolved model authoritatively at startup.
+ */
+export async function resolveLaunchedChildModel(options: {
+	cliProvider?: string;
+	cliModel?: string;
+	enabledModels?: string[];
+	defaultProvider?: string;
+	defaultModelId?: string;
+	modelRegistry: ModelRegistry;
+}): Promise<Model<Api> | undefined> {
+	const { cliProvider, cliModel, enabledModels, defaultProvider, defaultModelId, modelRegistry } = options;
+	if (cliProvider || cliModel) {
+		return (
+			cliModel
+				? resolveCliModel({ cliProvider, cliModel, modelRegistry })
+				: resolveCliProviderDefault({ cliProvider, modelRegistry })
+		).model;
+	}
+	const scopedModels =
+		enabledModels && enabledModels.length > 0
+			? (await resolveModelScopeWithDiagnostics(enabledModels, modelRegistry)).scopedModels
+			: [];
+	if (scopedModels.length > 0) {
+		const saved = defaultProvider && defaultModelId ? modelRegistry.find(defaultProvider, defaultModelId) : undefined;
+		const savedInScope = saved ? scopedModels.find((scoped) => modelsAreEqual(scoped.model, saved)) : undefined;
+		return (savedInScope ?? scopedModels[0]).model;
+	}
+	return (
+		await findInitialModel({ scopedModels: [], isContinuing: false, defaultProvider, defaultModelId, modelRegistry })
+	).model;
+}
+
+/**
  * Restore model from session, with fallback to available models
  */
 export async function restoreModelFromSession(

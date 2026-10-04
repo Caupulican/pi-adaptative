@@ -23,6 +23,11 @@ import {
 	type ProviderAdmissionWaitEvent,
 	withProviderAdmission,
 } from "./provider-admission/gate.ts";
+import {
+	currentProviderLane,
+	type ProviderRequestLane,
+	perfAttributionKey,
+} from "./provider-admission/lane-context.ts";
 import type { ProviderAdmissionLedger } from "./provider-admission/ledger.ts";
 import type { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import { isCredentialSecretKey } from "./secrets/credential-content-mock.ts";
@@ -242,12 +247,23 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 							input.authStorage.getOAuthRequestHeaders(model.provider, apiKey),
 					})
 			: redactedBase;
-	const profiled = withModelPerfProfile(credentialed, {
-		modelKey: (model) => formatModelRouterModel(model),
-		recordSample: (modelKey, sample) => {
-			modelAdaptationStore.recordPerfSample(modelKey, sample);
-		},
-	});
+	// Perf profiling is attributed per provider lane. The lane is read once, where the request
+	// starts, because the samples are recorded later from stream callbacks.
+	const profiledByLane = new Map<ProviderRequestLane, StreamFn>();
+	const profiled: StreamFn = (model, context, options) => {
+		const lane = currentProviderLane();
+		let profile = profiledByLane.get(lane);
+		if (!profile) {
+			profile = withModelPerfProfile(credentialed, {
+				modelKey: (target) => perfAttributionKey(formatModelRouterModel(target), lane),
+				recordSample: (modelKey, sample) => {
+					modelAdaptationStore.recordPerfSample(modelKey, sample);
+				},
+			});
+			profiledByLane.set(lane, profile);
+		}
+		return profile(model, context, options);
+	};
 	const watched = withStreamIdleWatchdog(profiled, (model, context) => {
 		const stallBudget = resolveStreamStallBudget(model, settingsManager);
 		const testOverride = input.getStreamIdleOptionsOverride();
@@ -259,7 +275,12 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 		};
 		const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
 		const httpBounded = constrainStreamIdleToHttpTimeout(configured, httpIdleTimeoutMs);
-		const profile = modelAdaptationStore.get(formatModelRouterModel(model)).perf;
+		const modelKey = formatModelRouterModel(model);
+		const lane = currentProviderLane();
+		// A worker request reads its own lane's profile once it has one, else the model's.
+		const profile =
+			(lane === "worker" ? modelAdaptationStore.get(perfAttributionKey(modelKey, lane)).perf : undefined) ??
+			modelAdaptationStore.get(modelKey).perf;
 		const adaptive = resolveAdaptiveStreamIdleOptions({
 			base: httpBounded.options,
 			profile,

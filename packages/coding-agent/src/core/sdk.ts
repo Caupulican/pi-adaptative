@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
 import { Agent } from "@caupulican/pi-agent-core/agent";
 import { convertToLlm } from "@caupulican/pi-agent-core/messages";
 import { getDefaultSessionDir, SessionManager } from "@caupulican/pi-agent-core/session";
@@ -24,7 +24,7 @@ import {
 	RealScriptRegistry,
 	RealWorkerDispatcher,
 } from "./adaptive/index.ts";
-import { configFile } from "./agent-paths.ts";
+import { capabilityArtifactsDir, configFile, steeringCertificatesFile } from "./agent-paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { SEMANTIC_USAGE_CUSTOM_TYPE } from "./agent-session-contracts.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
@@ -865,7 +865,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// Phase B — Adaptive runtime late binding to live session-owned ports
 	if ((steeringPlane || systemOneController) && !options.adaptiveReadiness) {
-		const persistentPath = join(agentDir, "certificates.json");
+		const persistentPath = steeringCertificatesFile(agentDir);
 		const certificates = steeringPlane?.certificates ?? new SteeringCertificateStore(persistentPath);
 		if (!steeringPlane && systemOneController) {
 			steeringPlane = new SystemOneSteeringPlane({
@@ -1041,7 +1041,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		// Synthesized capability artifacts are agent runtime state keyed to the session that built
 		// them, so a synthesis never shows up as a project change.
-		const capabilityArtifactRoot = join(agentDir, "runtime", "capabilities", sessionManager.getSessionId());
+		const capabilityArtifactRoot = capabilityArtifactsDir(agentDir, sessionManager.getSessionId());
 
 		const capabilityBuilder = new RealCapabilityBuilder({
 			taskRuntime: durableTaskRuntime,

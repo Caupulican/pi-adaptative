@@ -535,7 +535,8 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 		provider,
 		baseUrl: DEFAULT_BASE_URL,
 		reasoning: definition.reasoning ?? false,
-		textToolCallProtocol: definition.textToolCallProtocol,
+		// The faux provider speaks native tool calls; a model declares that unless a test asks for text-only.
+		textToolCallProtocol: definition.textToolCallProtocol ?? false,
 		defaultThinkingLevel: definition.defaultThinkingLevel,
 		thinkingLevelMap: definition.thinkingLevelMap ? { ...definition.thinkingLevelMap } : undefined,
 		input: definition.input ?? ["text", "image"],

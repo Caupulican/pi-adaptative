@@ -1,6 +1,7 @@
 import type { ClassifiedError } from "@caupulican/pi-agent-core";
 import type { ToolFailurePhase } from "@caupulican/pi-ai/tool-repair-registry";
 import { redactKnownSecrets } from "./security/secret-text.ts";
+import { isWorkerSession } from "./session-role.ts";
 import { appendBoundedJsonLineSync, type BoundedJsonlLimits } from "./util/bounded-jsonl.ts";
 
 export interface ProviderFailureCorpusRecord {
@@ -116,7 +117,13 @@ export function createToolExecutionFailureCorpusRecord(args: {
 	};
 }
 
-export function writeFailureCorpusRecord(filePath: string, record: FailureCorpusRecord): void {
+/** Zero-footprint: a worker session never appends to the shared corpus (same default as every other store). */
+export function writeFailureCorpusRecord(
+	filePath: string,
+	record: FailureCorpusRecord,
+	options?: { readOnly?: boolean },
+): void {
+	if (options?.readOnly ?? isWorkerSession()) return;
 	appendBoundedJsonLineSync(filePath, record, FAILURE_CORPUS_LIMITS);
 }
 

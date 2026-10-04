@@ -568,7 +568,12 @@ describe("classified lane tool surface", () => {
 		const yolo = createLaneToolSurface({ ...options, yolo: true, shellSessionKey });
 		try {
 			expect(yolo.allowedTools).toEqual(expect.arrayContaining(["read", "write", "edit", "bash"]));
-			expect(await gate(yolo, "write", { path: path.join(outside, "test.txt"), content: "ok" })).toBeUndefined();
+			// YOLO skips permission gates, never the scope: a write inside the lane's cwd continues, one outside is refused.
+			expect(await gate(yolo, "write", { path: path.join(cwd, "test.txt"), content: "ok" })).toBeUndefined();
+			expect(await gate(yolo, "write", { path: path.join(outside, "test.txt"), content: "ok" })).toMatchObject({
+				block: true,
+				reason: expect.stringContaining("path_outside_allowed_roots"),
+			});
 			expect(await gate(yolo, "bash", { command: "git push" })).toMatchObject({
 				block: true,
 				reason: "local commit branch",
@@ -588,6 +593,7 @@ describe("classified lane tool surface", () => {
 				profile: profile({ tools: { allow: ["bash"] } }),
 				shellSessionKey,
 				shellReadOnly: true,
+				readOnly: true,
 				yolo,
 			});
 			try {

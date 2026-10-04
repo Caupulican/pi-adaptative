@@ -1,9 +1,8 @@
 import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withoutInheritedGitLocation } from "../exec.ts";
+import { createProcessScratchDirectory, removeProcessScratchDirectory } from "../process-scratch.ts";
 import type { CommitReceipt, PublishReceipt, PushReceipt, SideEffectReceipt } from "./delivery-bundle.ts";
 
 /**
@@ -370,7 +369,7 @@ async function porcelainPaths(repoRoot: string, signal?: AbortSignal): Promise<s
 }
 
 async function treeForPaths(repoRoot: string, paths: readonly string[], signal?: AbortSignal): Promise<string> {
-	const directory = mkdtempSync(join(tmpdir(), "pi-delivery-index-"));
+	const directory = createProcessScratchDirectory("pi-delivery-index-");
 	const index = join(directory, "index");
 	try {
 		const env = { GIT_INDEX_FILE: index };
@@ -378,7 +377,7 @@ async function treeForPaths(repoRoot: string, paths: readonly string[], signal?:
 		if (paths.length > 0) await gitText(repoRoot, ["add", "--", ...paths], { signal, env });
 		return await gitText(repoRoot, ["write-tree"], { signal, env });
 	} finally {
-		rmSync(directory, { recursive: true, force: true });
+		removeProcessScratchDirectory(directory);
 	}
 }
 

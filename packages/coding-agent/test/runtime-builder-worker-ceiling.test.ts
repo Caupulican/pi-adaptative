@@ -53,20 +53,11 @@ const WORKER_ROOT_ONLY_OR_AGENT_LAUNCHING_TOOLS = [
 	"context_scout",
 ] as const;
 
+/** Ordinary capabilities on the worker process allow-list (`WORKER_PROCESS_ALLOWED_TOOLS`). */
 const WORKER_INHERITED_TOOLS = [
-	"create_goal",
-	"get_goal",
-	"update_goal",
-	"task_steps",
-	"pipeline",
-	"tool_task",
 	"worktree_sync",
-	"ask_question",
 	"skill",
 	"skill_audit",
-	"extensionify",
-	"skillify",
-	"run_toolkit_script",
 	"fetch",
 	"web_search",
 	"artifact_retrieve",
@@ -81,7 +72,25 @@ const WORKER_INHERITED_TOOLS = [
 	"ls",
 ] as const;
 
-const WORKER_CEILING_TEST_TOOLS = [...WORKER_ROOT_ONLY_OR_AGENT_LAUNCHING_TOOLS, ...WORKER_INHERITED_TOOLS];
+/** Tools no allow-list names: a worker process never instantiates them, whatever the override grants. */
+const WORKER_UNLISTED_TOOLS = [
+	"create_goal",
+	"get_goal",
+	"update_goal",
+	"task_steps",
+	"pipeline",
+	"tool_task",
+	"ask_question",
+	"extensionify",
+	"skillify",
+	"run_toolkit_script",
+] as const;
+
+const WORKER_CEILING_TEST_TOOLS = [
+	...WORKER_ROOT_ONLY_OR_AGENT_LAUNCHING_TOOLS,
+	...WORKER_UNLISTED_TOOLS,
+	...WORKER_INHERITED_TOOLS,
+];
 
 function fakeTools(names: readonly string[], observe?: (tool: AgentTool) => AgentTool): Record<string, AgentTool> {
 	return Object.fromEntries(
@@ -262,6 +271,7 @@ describe("RuntimeBuilder worker UAC ceiling (D2)", () => {
 			const runtimeBuilder = new RuntimeBuilder(
 				makeDeps("/tmp/pi-worker-ceiling-test", () => ({
 					...fakeTools(WORKER_ROOT_ONLY_OR_AGENT_LAUNCHING_TOOLS, observeReads),
+					...fakeTools(WORKER_UNLISTED_TOOLS),
 					...fakeTools(WORKER_INHERITED_TOOLS),
 				})),
 			);
@@ -273,6 +283,9 @@ describe("RuntimeBuilder worker UAC ceiling (D2)", () => {
 			for (const name of WORKER_ROOT_ONLY_OR_AGENT_LAUNCHING_TOOLS) {
 				expect(runtimeBuilder.getToolDefinition(name)).toBeUndefined();
 				expect(runtimeBuilder.getAllTools().map((tool) => tool.name)).not.toContain(name);
+			}
+			for (const name of WORKER_UNLISTED_TOOLS) {
+				expect(runtimeBuilder.getToolDefinition(name)).toBeUndefined();
 			}
 			for (const name of WORKER_INHERITED_TOOLS) {
 				expect(runtimeBuilder.getToolDefinition(name)).toBeDefined();

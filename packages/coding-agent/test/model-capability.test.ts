@@ -53,9 +53,9 @@ describe("deriveModelCapabilityProfile", () => {
 
 	it("owns the aggregate system-prompt envelope in the same derived profile", () => {
 		expect(deriveModelCapabilityProfile({ contextWindow: 200_000 }).systemPromptMaxChars).toBeUndefined();
-		expect(deriveModelCapabilityProfile({ contextWindow: 16_384 }).systemPromptMaxChars).toBe(10_240);
-		expect(deriveModelCapabilityProfile({ contextWindow: 8_192 }).systemPromptMaxChars).toBe(4_096);
-		expect(deriveModelCapabilityProfile({ contextWindow: 4_096 }).systemPromptMaxChars).toBe(2_336);
+		expect(deriveModelCapabilityProfile({ contextWindow: 16_384 }).systemPromptMaxChars).toBe(11_264);
+		expect(deriveModelCapabilityProfile({ contextWindow: 8_192 }).systemPromptMaxChars).toBe(5_120);
+		expect(deriveModelCapabilityProfile({ contextWindow: 4_096 }).systemPromptMaxChars).toBe(3_072);
 	});
 
 	it("falls back to full defaults when the window is unknown (defaults are for missing info)", () => {
@@ -139,10 +139,15 @@ describe("filterToolNamesForCapability", () => {
 		expect(filtered).toContain("task_steps");
 	});
 
-	it("keeps compact goal lifecycle controls in every model class", () => {
-		for (const contextWindow of [200_000, 16_384, 8_192, 4_096]) {
+	it("offers compact goal lifecycle controls only to the full class", () => {
+		const full = filterToolNamesForCapability(
+			DEFAULT_ACTIVE,
+			deriveModelCapabilityProfile({ contextWindow: 200_000 }),
+		);
+		expect(full).toEqual(expect.arrayContaining(["create_goal", "get_goal", "update_goal"]));
+		for (const contextWindow of [16_384, 8_192, 4_096]) {
 			const filtered = filterToolNamesForCapability(DEFAULT_ACTIVE, deriveModelCapabilityProfile({ contextWindow }));
-			expect(filtered).toEqual(expect.arrayContaining(["create_goal", "get_goal", "update_goal"]));
+			for (const name of ["goal", "create_goal", "get_goal", "update_goal"]) expect(filtered).not.toContain(name);
 		}
 	});
 
@@ -155,9 +160,6 @@ describe("filterToolNamesForCapability", () => {
 			"python",
 			"edit",
 			"write",
-			"create_goal",
-			"get_goal",
-			"update_goal",
 			"ask_question",
 			"run_toolkit_script",
 			"systemone",
@@ -165,12 +167,7 @@ describe("filterToolNamesForCapability", () => {
 
 		const chat = deriveModelCapabilityProfile({ contextWindow: 4_096 });
 		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, chat)).toEqual([...MODEL_CAPABILITY_CHAT_ALLOWED_TOOLS]);
-		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, chat)).toEqual([
-			"create_goal",
-			"get_goal",
-			"update_goal",
-			"systemone",
-		]);
+		expect(filterToolNamesForCapability(DEFAULT_ACTIVE, chat)).toEqual(["systemone"]);
 	});
 	it.each([200_000, 16_384, 8_192, 4_096])(
 		"makes Jev available at window %s without inventing an unrequested tool",
@@ -192,7 +189,6 @@ describe("filterToolNamesForCapability", () => {
 		const minimal = deriveModelCapabilityProfile({ contextWindow: 8_192 });
 		expect(filterToolNamesForCapability(["write", "goal", "update_goal", "read"], minimal)).toEqual([
 			"write",
-			"update_goal",
 			"read",
 		]);
 		expect(filterToolNamesForCapability([], minimal)).toEqual([]);
@@ -245,7 +241,7 @@ describe("evaluateLaneWorkerRefusal", () => {
 	const eligible = {
 		capabilityClass: "full" as const,
 		contextWindow: 200_000,
-		toolCallingAdvertised: true,
+		toolCalling: "advertised" as const,
 		toolCallingDemoted: false,
 	};
 
@@ -272,7 +268,7 @@ describe("evaluateLaneWorkerRefusal", () => {
 	});
 
 	it("refuses tool_calling_unadvertised when native tool calling is not advertised (textToolCallProtocol: true)", () => {
-		expect(evaluateLaneWorkerRefusal({ ...eligible, toolCallingAdvertised: false })).toEqual({
+		expect(evaluateLaneWorkerRefusal({ ...eligible, toolCalling: "unadvertised" })).toEqual({
 			reason: "tool_calling_unadvertised",
 			capabilityClass: "full",
 			contextWindow: 200_000,
@@ -297,7 +293,7 @@ describe("evaluateLaneWorkerRefusal", () => {
 		const refusal = evaluateLaneWorkerRefusal({
 			capabilityClass: "lean",
 			contextWindow: undefined,
-			toolCallingAdvertised: false,
+			toolCalling: "unadvertised",
 			toolCallingDemoted: true,
 		});
 		expect(refusal?.reason).toBe("capability_class_below_full");

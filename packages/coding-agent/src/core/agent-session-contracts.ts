@@ -26,6 +26,7 @@ import type {
 	ExtensionRunner,
 	ExtensionUIContext,
 	InputSource,
+	SendUserMessageOrigin,
 	SessionStartEvent,
 	ShutdownHandler,
 	ToolDefinition,
@@ -180,6 +181,8 @@ export interface PromptOptions {
 	/** Required queue behavior when a foreground turn is already streaming. */
 	streamingBehavior?: "steer" | "followUp";
 	source?: InputSource;
+	/** Owner-visible form of an extension's framed third-party message (a peer message); see {@link SendUserMessageOrigin}. */
+	origin?: SendUserMessageOrigin;
 	/** Observe whether prompt preflight accepted the request. */
 	preflightResult?: (success: boolean) => void;
 	/** Permit idle goal continuation after this prompt settles. Defaults to true. */

@@ -1,6 +1,6 @@
 import { type Component, Container, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
-import { theme } from "../theme/theme.ts";
+import { getSelectionStyle, theme } from "../theme/theme.ts";
 import { ActionTranscriptComponent } from "./action-transcript.ts";
 import { BashExecutionComponent } from "./bash-execution.ts";
 import { ConversationWindow } from "./conversation-window.ts";
@@ -279,16 +279,20 @@ export class WorkbenchComponent extends Container {
 		]) {
 			if (child) this.addChild(child);
 		}
-		this.conversation = new ConversationWindow(() => [
-			...(options.header ? [options.header] : []),
-			...options.conversation.children.flatMap((child) =>
-				child instanceof ActionTranscriptComponent
-					? [...child.conversationComponents()]
-					: child instanceof BashExecutionComponent
-						? []
-						: [child],
-			),
-		]);
+		this.conversation = new ConversationWindow(
+			() => [
+				...(options.header ? [options.header] : []),
+				...options.conversation.children.flatMap((child) =>
+					child instanceof ActionTranscriptComponent
+						? [...child.conversationComponents()]
+						: child instanceof BashExecutionComponent
+							? []
+							: [child],
+				),
+			],
+			undefined,
+			getSelectionStyle,
+		);
 	}
 
 	get isCollapsed(): boolean {

@@ -4,8 +4,8 @@
  * Implements PRODUCTION_COMPOSITION.md, PRC-001..PRC-010, PRC-020..PRC-025.
  */
 
-import path from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
+import { steeringCertificatesFile } from "../agent-paths.ts";
 import { compileExecutionCharter, type ExecutionCharter } from "../autonomy/execution-charter.ts";
 import { CandidateDiscoveryService } from "../dedup/candidate-discovery.ts";
 import { ResponsibilityRegistry } from "../dedup/responsibility-registry.ts";
@@ -262,7 +262,7 @@ export function createProductionAdaptiveRuntimeStack(options: CreateAdaptiveRunt
 	// PRC-008, ERC-002: Live readiness assertion enforced before completion of construction
 	const hasDurableBackend = Boolean(
 		options.persistentPath ||
-			(options.agentDir && path.join(options.agentDir, "certificates.json")) ||
+			(options.agentDir && steeringCertificatesFile(options.agentDir)) ||
 			options.steeringPlane?.certificates?.hasDurableBackend(),
 	);
 	stack.readiness.assertReady({
@@ -306,7 +306,7 @@ function assembleAdaptiveRuntimeStack(
 ): AdaptiveRuntimeStack {
 	// 1. Steering certificate store and steering plane
 	const persistentPath =
-		options.persistentPath ?? (options.agentDir ? path.join(options.agentDir, "certificates.json") : undefined);
+		options.persistentPath ?? (options.agentDir ? steeringCertificatesFile(options.agentDir) : undefined);
 	const certificateStore = options.steeringPlane?.certificates ?? new SteeringCertificateStore(persistentPath);
 	const steeringPlane =
 		options.steeringPlane ??

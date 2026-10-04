@@ -16,7 +16,7 @@ Pi uses this one five-phase spine:
 4. **Execute**
 5. **Prove/Deliver**
 
-The phase list is source-owned by `WORK_LIFECYCLE_PHASES`. Every root prompt receives the phase contract; the owner-specific line appears only when a goal or planning tool is active, and child workers keep their narrower contract (`packages/coding-agent/src/core/provider-prompt-contracts.ts`; `packages/coding-agent/src/core/system-prompt-builder.ts`). Chat and minimal-class models receive the same five phases in a 56-character compact form so their stable prompts remain inside their 2,048- and 4,096-character capability envelopes; larger root profiles retain the full contract (`packages/coding-agent/src/core/model-capability.ts`). Short or read-only work may collapse phases, but it must not invent a sixth phase or another workflow state machine.
+The phase list is source-owned by `WORK_LIFECYCLE_PHASES`. Every root prompt receives the phase contract; the owner-specific line appears only when a goal or planning tool is active, and child workers keep their narrower contract (`packages/coding-agent/src/core/provider-prompt-contracts.ts`; `packages/coding-agent/src/core/system-prompt-builder.ts`). Chat and minimal-class models receive the same five phases in a 56-character compact form so their stable prompts remain inside their 3,072- and 5,120-character capability envelopes; larger root profiles retain the full contract (`packages/coding-agent/src/core/model-capability.ts`). Short or read-only work may collapse phases, but it must not invent a sixth phase or another workflow state machine.
 
 State ownership stays singular:
 

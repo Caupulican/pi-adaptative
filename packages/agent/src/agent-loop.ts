@@ -592,6 +592,7 @@ async function runLoop(
 					previousAssistantForDegenerateCollapse,
 					verificationObligations,
 					haltRequest.closingPrompt,
+					true,
 				);
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
@@ -871,6 +872,7 @@ async function streamToollessClosingTurn(
 	previousAssistant?: AssistantMessage,
 	verificationObligations?: VerificationObligationTracker,
 	closingPrompt: string = RUNAWAY_STOP_CLOSING_SYSTEM_PROMPT,
+	instructionTail = false,
 ): Promise<void> {
 	if (signal?.aborted) return;
 	if (providerTurnLimit > 0 && continuationState.providerTurns >= providerTurnLimit) return;
@@ -886,6 +888,7 @@ async function streamToollessClosingTurn(
 		trailingInstruction: verificationObligations?.requestInstruction(),
 		tools: [],
 		surfaceChange: "the tool-free closing request withholds every tool",
+		...(instructionTail ? { instructionTail } : {}),
 	};
 	const response = await streamAssistantResponse(
 		closingContext,

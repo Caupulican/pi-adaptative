@@ -24,8 +24,11 @@ import {
 	extensionStateDir,
 	isCanonicalAgentRootEntry,
 	managedMemoryStateFile,
+	ownerFollowUpsDir,
+	ownerRulesDir,
 	sessionsDir,
 	stateFile,
+	steeringCertificatesFile,
 } from "./core/agent-paths.ts";
 import { migrateLegacyContextStores, pruneContextStores } from "./core/context/context-store-retention.ts";
 import { migrateKeybindingsConfig } from "./core/keybindings.ts";
@@ -578,6 +581,21 @@ export function migrateAgentDirLayout(agentDir: string): void {
 	for (const fileName of ["MEMORY.md", "USER.md"] as const) {
 		try {
 			migrateLegacyAgentFile(agentDir, `${fileName}.pi-managed.json`, managedMemoryStateFile(agentDir, fileName));
+		} catch {}
+	}
+	// Machine-written stores that older builds kept loose at the agent root. They must land in state/
+	// BEFORE the generic unexpected-root sweep below, which would otherwise archive them under
+	// legacy-layout/ on every start and leave the live store empty.
+	try {
+		migrateLegacyAgentFile(agentDir, "certificates.json", steeringCertificatesFile(agentDir));
+	} catch {}
+	for (const [legacyName, canonicalDir] of [
+		["follow-ups", ownerFollowUpsDir(agentDir)],
+		["owner-rules", ownerRulesDir(agentDir)],
+		["runtime", stateFile(agentDir, "runtime")],
+	] as const) {
+		try {
+			migrateLegacyAgentDirectory(agentDir, legacyName, canonicalDir);
 		} catch {}
 	}
 	try {

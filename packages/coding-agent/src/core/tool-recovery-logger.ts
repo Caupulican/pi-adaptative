@@ -2,6 +2,7 @@ import { Worker } from "node:worker_threads";
 import { readToolFailureTelemetry } from "@caupulican/pi-agent-core/tool-failure-memory";
 import type { ToolArgumentValidationTelemetryEvent } from "@caupulican/pi-ai";
 import type { ToolFailurePhase } from "@caupulican/pi-ai/tool-repair-registry";
+import { isWorkerSession } from "./session-role.ts";
 import {
 	createToolArgumentValidationLogRecord,
 	createToolExecutionFailureLogRecord,
@@ -35,6 +36,12 @@ export interface ToolRecoveryLoggerOptions {
 	sessionId: string;
 	eventLogPath: string;
 	failureCorpusPath: string;
+	/**
+	 * Zero-footprint: a read-only logger still classifies and counts in memory but never starts the
+	 * log worker, so the shared event log, the failure corpus and the per-session stats file are never
+	 * written. Defaults to `isWorkerSession()`, like every other state store.
+	 */
+	readOnly?: boolean;
 	maxQueue?: number;
 	batchSize?: number;
 	now?: () => Date;
@@ -70,6 +77,7 @@ export class ToolRecoveryLogger {
 	private readonly sessionId: string;
 	private readonly eventLogPath: string;
 	private readonly failureCorpusPath: string;
+	private readonly readOnly: boolean;
 	private readonly maxQueue: number;
 	private readonly batchSize: number;
 	private readonly now: () => Date;
@@ -98,6 +106,7 @@ export class ToolRecoveryLogger {
 		this.sessionId = options.sessionId;
 		this.eventLogPath = options.eventLogPath;
 		this.failureCorpusPath = options.failureCorpusPath;
+		this.readOnly = options.readOnly ?? isWorkerSession();
 		this.maxQueue = options.maxQueue ?? DEFAULT_MAX_QUEUE;
 		this.batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
 		this.now = options.now ?? (() => new Date());
@@ -209,7 +218,7 @@ export class ToolRecoveryLogger {
 	}
 
 	private enqueue(record: ToolRecoveryLogWorkerRecord): void {
-		if (!this.enabled) return;
+		if (!this.enabled || this.readOnly) return;
 		this.queue.push(record);
 		while (this.queue.length > this.maxQueue) {
 			this.queue.shift();

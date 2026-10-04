@@ -10,6 +10,8 @@
  * <agentDir>/
  *   auth.json settings.json models.json keybindings.json MEMORY.md USER.md SYSTEM.md …   user CONFIG/MEMORY (root, kept)
  *   okf-memory/                                                                            authored OKF memory (root, kept)
+ *   graph-memory/                                                                          operator-supplied graph (root, kept; read-only to the harness)
+ *   ESTOP AGENTS.md CLAUDE.md GEMINI.md                                                    operator-owned root files (kept)
  *   memory/                                                                                project hot MEMORY.md + ICM bundles (root, kept)
  *   skills/ extensions/ prompts/ themes/ profiles/                                        user RESOURCES (root, kept)
  *     profiles/directories/<workspace-hash>/settings.json                                 directory overlays
@@ -65,12 +67,23 @@ export const AGENT_ROOT_FILE_NAMES = [
 	"USER.md",
 	"SYSTEM.md",
 	"APPEND_SYSTEM.md",
+	// Global context files the resource loader reads from the agent root (any casing it accepts).
+	"AGENTS.md",
+	"AGENTS.MD",
+	"CLAUDE.md",
+	"CLAUDE.MD",
+	"GEMINI.md",
+	"GEMINI.MD",
+	// Operator-owned machine-wide emergency-stop sentinel (`/estop`, or `touch`); see provider-admission/emergency-stop.ts.
+	"ESTOP",
 ] as const;
 
 /** Root entries reserved for user resources and machine-managed storage classes. */
 export const AGENT_ROOT_DIRECTORY_NAMES = [
 	"okf-memory",
 	"memory",
+	// Optional operator-supplied knowledge graph (`graph-memory/graph.json`); the harness only reads it.
+	"graph-memory",
 	"skills",
 	"extensions",
 	"prompts",
@@ -148,6 +161,26 @@ export function stateDir(agentDir: string): string {
 /** `<agentDir>/state/<segments…>` */
 export function stateFile(agentDir: string, ...segments: string[]): string {
 	return join(stateDir(agentDir), ...segments);
+}
+
+/** `<agentDir>/state/steering/certificates.json` -- durable System One steering certificates. */
+export function steeringCertificatesFile(agentDir: string): string {
+	return stateFile(agentDir, "steering", "certificates.json");
+}
+
+/** `<agentDir>/state/follow-ups` -- per-session owner follow-up documents. */
+export function ownerFollowUpsDir(agentDir: string): string {
+	return stateFile(agentDir, "follow-ups");
+}
+
+/** `<agentDir>/state/owner-rules` -- durable owner rules, one file per project. */
+export function ownerRulesDir(agentDir: string): string {
+	return stateFile(agentDir, "owner-rules");
+}
+
+/** `<agentDir>/state/runtime/capabilities/<sessionId>` -- per-session capability artifacts. */
+export function capabilityArtifactsDir(agentDir: string, sessionId: string): string {
+	return stateFile(agentDir, "runtime", "capabilities", sessionId);
 }
 
 export type ManagedMemoryFileName = "MEMORY.md" | "USER.md";

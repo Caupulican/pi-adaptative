@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { statSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 const GH_RESOLVED_LINE = /^remote\.(.+)\.gh-resolved(?:\s+(.*))?$/;
 const MAX_PIN_REASON_CHARS = 240;
@@ -95,10 +97,27 @@ function defaultGit(cwd: string): GithubOriginGitRunner {
  * Runtime owner of unattended `gh` origin pinning. The precommit CLI remains
  * `scripts/github-origin.mjs`; this module ships inside the coding-agent package.
  */
+/**
+ * Whether `cwd` is inside a linked worktree: the nearest `.git` entry above it is a file (`gitdir: ...`),
+ * not the primary checkout's directory. The pin lives in the config every worktree shares, so a session
+ * inside a lane worktree must not rewrite it.
+ */
+function insideLinkedWorktree(cwd: string): boolean {
+	for (let dir = cwd; ; dir = dirname(dir)) {
+		try {
+			return statSync(join(dir, ".git")).isFile();
+		} catch {
+			// No `.git` entry at this level.
+		}
+		if (dirname(dir) === dir) return false;
+	}
+}
+
 export function pinGithubOriginForSession(
 	cwd: string,
 	git: GithubOriginGitRunner = defaultGit(cwd),
 ): GithubOriginPinResult {
+	if (insideLinkedWorktree(cwd)) return { status: "skipped", reason: "linked worktree" };
 	try {
 		const originUrl = git(["remote", "get-url", "origin"]).trim();
 		if (!originUrl) return { status: "skipped", reason: "no origin remote" };

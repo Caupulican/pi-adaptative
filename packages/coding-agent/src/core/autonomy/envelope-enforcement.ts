@@ -1,7 +1,9 @@
+import { existsSync } from "node:fs";
+import * as os from "node:os";
 import type { ExecutionPathAuthority } from "@caupulican/pi-agent-core";
 import { type ExecutionPathFlavor, executionPathApi, resolveExecutionPath } from "@caupulican/pi-agent-core/paths";
 import { awaitPreflight, requireSynchronousPreflight } from "../preflight.ts";
-import { resolveToolCallPathAccess } from "../tool-capability-policy.ts";
+import { isGrantedExtensionToolName, resolveToolCallPathAccess } from "../tool-capability-policy.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { isPathWithinScopeWithDialect, safeRealpathSync } from "./path-scope.ts";
@@ -37,10 +39,94 @@ export function extractPathArguments(params: unknown): string[] {
 	return found;
 }
 
+const GRANTED_TOOL_PATH_KEY_WORDS: ReadonlySet<string> = new Set([
+	"path",
+	"paths",
+	"file",
+	"files",
+	"filename",
+	"dir",
+	"dirs",
+	"directory",
+	"directories",
+	"folder",
+	"folders",
+	"root",
+	"cwd",
+	"dest",
+	"destination",
+	"target",
+	"targets",
+	"workdir",
+]);
+const MAX_GRANTED_TOOL_PATH_ARGUMENTS = 64;
+const MAX_GRANTED_TOOL_ARGUMENT_DEPTH = 4;
+
+/** Whether an argument NAME says it carries a path: the key, or its last camelCase/snake_case word, is a path word. */
+function isPathNamedKey(key: string): boolean {
+	const lower = key.toLowerCase();
+	if (GRANTED_TOOL_PATH_KEY_WORDS.has(lower)) return true;
+	const words = key.split(/[_-]|(?<=[a-z0-9])(?=[A-Z])/u);
+	const last = words[words.length - 1]?.toLowerCase();
+	return last !== undefined && GRANTED_TOOL_PATH_KEY_WORDS.has(last);
+}
+
+/**
+ * A posix-absolute value only counts as a path when its first segment is a real top-level entry: a URL route
+ * such as `/api/x` or a flag-like value is not a file the tool could open, so it is never denied as one.
+ */
+function posixRootEntryExists(value: string): boolean {
+	const first = value.split("/")[1];
+	return first === undefined || first === "" || existsSync(`/${first}`);
+}
+
+/** Whether a string VALUE is spelled as a filesystem path: absolute, drive/UNC, dot-relative or home-relative. */
+function isPathSpelledValue(value: string): boolean {
+	if (value.length === 0 || value.length > 4096 || value.includes("\0") || /[\r\n]/u.test(value)) return false;
+	const spelled =
+		value === "~" || value === "." || value === ".." || /^(?:\/|\\|~[\\/]|\.{1,2}[\\/]|[A-Za-z]:[\\/])/u.test(value);
+	if (!spelled) return false;
+	if (process.platform !== "win32" && value.startsWith("/") && !value.startsWith("//"))
+		return posixRootEntryExists(value);
+	return true;
+}
+
+/**
+ * The path-looking arguments of a granted extension tool call. The harness knows nothing about the tool's
+ * schema, so a string counts when its key is path-named (`path`, `outputDir`, `target_file`, ...) or its value
+ * is spelled as a path, at any nesting up to a small depth, in arrays and objects alike. Home-relative values
+ * are expanded so the envelope judges the file the tool would really open.
+ */
+function extractGrantedToolPathArguments(params: unknown): string[] {
+	const found: string[] = [];
+	const visit = (value: unknown, pathNamed: boolean, depth: number): void => {
+		if (found.length >= MAX_GRANTED_TOOL_PATH_ARGUMENTS) return;
+		if (typeof value === "string") {
+			if (value.length > 0 && (pathNamed || isPathSpelledValue(value))) {
+				found.push(value === "~" || /^~[\\/]/u.test(value) ? `${os.homedir()}${value.slice(1)}` : value);
+			}
+			return;
+		}
+		if (depth >= MAX_GRANTED_TOOL_ARGUMENT_DEPTH || value === null || typeof value !== "object") return;
+		if (Array.isArray(value)) {
+			for (const entry of value) visit(entry, pathNamed, depth + 1);
+			return;
+		}
+		for (const [key, entry] of Object.entries(value)) visit(entry, isPathNamedKey(key), depth + 1);
+	};
+	visit(params, false, 0);
+	return found;
+}
+
 /** Tool-aware path projection shared by every envelope/gateway enforcement boundary. */
 export function extractToolPathArguments(toolName: string, params: unknown): string[] {
 	const normalizedToolName = toolName.toLowerCase();
 	const paths = extractPathArguments(params);
+	if (isGrantedExtensionToolName(normalizedToolName)) {
+		for (const granted of extractGrantedToolPathArguments(params)) {
+			if (!paths.includes(granted)) paths.push(granted);
+		}
+	}
 	if (normalizedToolName === "secret_store" && params && typeof params === "object") {
 		const record = params as Record<string, unknown>;
 		if (record.action === "migrate" && Array.isArray(record.sources)) {
@@ -173,6 +259,7 @@ function initEnvelopeContext(envelope: CapabilityEnvelope, rawPath: string, opti
 		lexicalTarget: resolveExecutionPath(rawPath, options.cwd, flavor),
 		allowed: envelope.allowedPaths ?? [],
 		denied: envelope.deniedPaths ?? [],
+		exempt: envelope.exemptPaths ?? [],
 	};
 }
 
@@ -205,7 +292,15 @@ function* assessEnvelopeScope(
 	const { resolved: target } = yield ctx.lexicalTarget;
 	if (!target) return { allowed: false, reasonCode: "path_outside_allowed_roots" };
 
-	for (const denied of ctx.denied) {
+	let exempt = false;
+	for (const exemptPath of ctx.exempt) {
+		const { resolved } = yield resolveExecutionPath(exemptPath, ctx.scopeCwd, ctx.flavor);
+		if (matchesEnvelopeCandidate(target, exemptPath, ctx.scopeCwd, ctx.flavor, ctx.caseSensitive, resolved)) {
+			exempt = true;
+			break;
+		}
+	}
+	for (const denied of exempt ? [] : ctx.denied) {
 		const { resolved, unavailable } = yield resolveExecutionPath(denied, ctx.scopeCwd, ctx.flavor);
 		if (
 			unavailable ||
@@ -309,6 +404,8 @@ export function wrapToolWithEnvelopeScope<T extends EnvelopeScopedTool>(
 	tool: T,
 	envelope: CapabilityEnvelope,
 	cwd: string,
+	/** Appended to the denial text: what the denied agent does next (the grant it lacks, who to report to). */
+	denialGuidance?: string,
 ): T {
 	return wrapToolExecution(tool, (executor, executionContext, pathAuthority) => {
 		type Execute = T["execute"];
@@ -316,7 +413,7 @@ export function wrapToolWithEnvelopeScope<T extends EnvelopeScopedTool>(
 			content: [
 				{
 					type: "text",
-					text: `envelope_path_denied: "${rawPath}" is outside envelope ${envelope.id}'s path scope. The tool was NOT run.`,
+					text: `envelope_path_denied: "${rawPath}" is outside envelope ${envelope.id}'s path scope. The tool was NOT run.${denialGuidance ? ` ${denialGuidance}` : ""}`,
 				},
 			],
 			details: {

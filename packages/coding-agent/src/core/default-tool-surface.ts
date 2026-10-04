@@ -7,7 +7,8 @@
  *
  * `bash` is the stable agent shell contract on every platform; its finite grammar routes to
  * PowerShell on Windows. `python` is a separate bounded, uv-managed execution contract.
- * Root git reads are `repo_read`. Root bash does not admit a git invocation.
+ * Root git reads have the bounded `repo_read` tool; root bash also runs git as ordinary work
+ * (autonomy/edge-policy.ts asks the operator only before extreme destruction).
  */
 
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";

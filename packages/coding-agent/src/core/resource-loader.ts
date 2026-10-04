@@ -14,6 +14,8 @@ import {
 	hasProfileExtensionImportAuthority,
 	isDefaultOnBundledExtension,
 	isExtensionPathAllowedForImport,
+	isWorkerAdmittedExtensionPath,
+	isWorkerSafeExtensionPath,
 } from "./extension-import-authority.ts";
 import {
 	createExtensionRuntime,
@@ -33,6 +35,7 @@ import {
 } from "./resource-profile-blocks.ts";
 import { collectResourceFilesRecursively, isResourcePathWithin, readResourceDirectory } from "./resource-traversal.ts";
 import { scanContextFileThreats, stripInvisibleUnicode } from "./security/context-threat-scanner.ts";
+import { isWorkerSession } from "./session-role.ts";
 import {
 	matchesResourceProfilePattern,
 	type ResourceProfileKind,
@@ -42,6 +45,7 @@ import {
 import type { Skill } from "./skills.ts";
 import { loadSkills } from "./skills.ts";
 import { createSourceInfo, type SourceInfo } from "./source-info.ts";
+import { readWorkerExtensionToolGrants } from "./worker-extension-grants.ts";
 
 export {
 	hasInvisibleUnicode,
@@ -129,6 +133,9 @@ interface ResourceLoaderSnapshot {
 	lastPromptPaths: string[];
 	lastThemePaths: string[];
 }
+
+const WORKER_EXTENSION_CEILING_MESSAGE =
+	"Worker sessions load only passive bundled extensions and extensions their launch profile granted a tool from; this extension was not loaded.";
 
 const PROJECT_CONTEXT_FILENAMES = new Set(["agents.md", "claude.md", "gemini.md"]);
 const PROJECT_ROOT_MARKERS = [
@@ -697,6 +704,28 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return { extension: null, error: refusedProjectInstructionMessage(extensionPath) };
 	}
 
+	private workerCeilingLoadResult(): { extension: Extension | null; error: string | null } {
+		return { extension: null, error: WORKER_EXTENSION_CEILING_MESSAGE };
+	}
+
+	/** Extension files this worker process's launch profile explicitly granted a tool from (none outside a worker). */
+	private workerGrantedExtensionPaths(): string[] {
+		return isWorkerSession() ? readWorkerExtensionToolGrants().map((grant) => grant.extensionPath) : [];
+	}
+
+	/**
+	 * The tool names a worker-role process may take from this extension file, or undefined when the file loads
+	 * whole (not a worker process, or a passive bundled extension). A worker-admitted file that is neither
+	 * passive nor granted yields an empty list, which the loader refuses: a granted file is never loaded whole.
+	 */
+	private workerToolOnlyGrant(extensionPath: string): readonly string[] | undefined {
+		if (!isWorkerSession() || isWorkerSafeExtensionPath(extensionPath)) return undefined;
+		const canonical = canonicalizePath(extensionPath);
+		return readWorkerExtensionToolGrants()
+			.filter((grant) => canonicalizePath(grant.extensionPath) === canonical)
+			.map((grant) => grant.tool);
+	}
+
 	/** Explicitly supplied paths the project-instruction boundary refuses, so each refusal is reported, never silent. */
 	private refusedInstructionPaths(paths: string[]): string[] {
 		return paths
@@ -786,11 +815,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 	 * Returns the loaded extension or null with error details.
 	 */
 	async loadSingleExtension(extensionPath: string): Promise<{ extension: Extension | null; error: string | null }> {
-		if (!this.isInstructionPathAdmitted(extensionPath)) return this.blockedExtensionLoadResult(extensionPath);
-		const result = await loadExtension(extensionPath, this.cwd, this.eventBus, this.extensionsResult.runtime, {
-			fresh: true,
-			agentDir: this.agentDir,
-		});
+		const result = await this.loadAdmittedExtension(
+			extensionPath,
+			this.cwd,
+			this.eventBus,
+			this.extensionsResult.runtime,
+		);
 		if (result.extension && !result.error) {
 			const loaded = result.extension;
 			// Drop any stale generation at the same path, then register the freshly loaded one so
@@ -807,10 +837,24 @@ export class DefaultResourceLoader implements ResourceLoader {
 		extensionPath: string,
 		cwd: string,
 	): Promise<{ extension: Extension | null; error: string | null }> {
+		return this.loadAdmittedExtension(extensionPath, cwd, createEventBus(), createExtensionRuntime());
+	}
+
+	/** One fresh load behind the project-instruction boundary and the worker ceiling (a granted file loads tool-only). */
+	private async loadAdmittedExtension(
+		extensionPath: string,
+		cwd: string,
+		eventBus: EventBus,
+		runtime: ExtensionRuntime,
+	): Promise<{ extension: Extension | null; error: string | null }> {
 		if (!this.isInstructionPathAdmitted(extensionPath)) return this.blockedExtensionLoadResult(extensionPath);
-		return loadExtension(extensionPath, cwd, createEventBus(), createExtensionRuntime(), {
+		if (isWorkerSession() && !isWorkerAdmittedExtensionPath(extensionPath, this.workerGrantedExtensionPaths()))
+			return this.workerCeilingLoadResult();
+		const toolOnly = this.workerToolOnlyGrant(extensionPath);
+		return loadExtension(extensionPath, cwd, eventBus, runtime, {
 			fresh: true,
 			agentDir: this.agentDir,
+			...(toolOnly ? { toolOnly } : {}),
 		});
 	}
 
@@ -1080,10 +1124,22 @@ export class DefaultResourceLoader implements ResourceLoader {
 				? filterPathsByProfile(externalExtensions, "extensions")
 				: [];
 
+			// A worker process's launch profile may grant tools from specific extension files; those files are
+			// loaded as explicit grants (the launcher's authority), still bounded by the active profile and the
+			// project-instruction boundary.
+			const workerGrantedExtensionPaths = this.workerGrantedExtensionPaths();
+			for (const grantedPath of workerGrantedExtensionPaths) {
+				if (!metadataByPath.has(grantedPath)) {
+					metadataByPath.set(grantedPath, { source: "cli", scope: "temporary", origin: "top-level" });
+				}
+			}
+			const profileFilteredGrantedExtensions = filterPathsByProfile(workerGrantedExtensionPaths, "extensions");
+
 			const extensionPaths = this.filterInstructionPaths(
 				this.noExtensions
-					? profileFilteredCliExtensions
+					? this.mergePaths(profileFilteredCliExtensions, profileFilteredGrantedExtensions)
 					: this.mergePaths(profileFilteredCliExtensions, [
+							...profileFilteredGrantedExtensions,
 							...defaultOnBundledExtensions,
 							...profileFilteredBundledExtensions,
 							...profileFilteredConfiguredExtensions,
@@ -1092,9 +1148,42 @@ export class DefaultResourceLoader implements ResourceLoader {
 				metadataByPath,
 			);
 
-			const extensionsResult = await loadExtensions(extensionPaths, this.cwd, this.eventBus, {
+			// A worker-role process imports only passive bundled extensions and the extension files its launch
+			// profile granted a tool from. The decision is the role's, taken before any module is imported; an
+			// explicitly requested or granted path that is refused or not loaded is reported.
+			const workerCeiling = isWorkerSession();
+			// A granted file loads tool-only (a restricted extension API); a passive bundled one loads whole.
+			const admittedExtensionPaths = workerCeiling
+				? extensionPaths
+						.filter((entry) => isWorkerAdmittedExtensionPath(entry, workerGrantedExtensionPaths))
+						.map((entry) => {
+							const toolOnly = this.workerToolOnlyGrant(entry);
+							return toolOnly ? { path: entry, toolOnly } : entry;
+						})
+				: extensionPaths;
+			const extensionsResult = await loadExtensions(admittedExtensionPaths, this.cwd, this.eventBus, {
 				agentDir: this.agentDir,
 			});
+			if (workerCeiling) {
+				for (const path of cliEnabledExtensions.filter(
+					(entry) => !isWorkerAdmittedExtensionPath(entry, workerGrantedExtensionPaths),
+				)) {
+					extensionsResult.errors.push({ path, error: WORKER_EXTENSION_CEILING_MESSAGE });
+				}
+				const reported = new Set(
+					[
+						...extensionsResult.extensions.flatMap((ext) => [ext.path, ext.resolvedPath]),
+						...extensionsResult.errors.map((entry) => entry.path),
+					].map((entry) => canonicalizePath(entry)),
+				);
+				for (const grant of readWorkerExtensionToolGrants()) {
+					if (reported.has(canonicalizePath(grant.extensionPath))) continue;
+					extensionsResult.errors.push({
+						path: grant.extensionPath,
+						error: `Granted worker extension tool '${grant.tool}' is unavailable: its extension file was refused by the active resource profile or the project-instruction boundary, or does not exist.`,
+					});
+				}
+			}
 			const inlineExtensions = await this.loadExtensionFactories(extensionsResult.runtime);
 			extensionsResult.extensions.push(...inlineExtensions.extensions);
 			extensionsResult.errors.push(...inlineExtensions.errors);

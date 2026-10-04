@@ -736,6 +736,18 @@ export interface Model<TApi extends Api> {
 	cost: ModelCost;
 	contextWindow: number;
 	/**
+	 * True when `contextWindow` was filled from a registry default because the model's own definition
+	 * declared none. A defaulted window is a placeholder, not metadata; absent means it was declared.
+	 */
+	contextWindowDefaulted?: boolean;
+	/**
+	 * True when a user-configured model declares nothing about its tool-call transport
+	 * (`textToolCallProtocol` unset), so native tool calling is neither advertised nor denied. Absent
+	 * means the tool-call path is declared: by the built-in catalog, or by an explicit
+	 * `textToolCallProtocol`.
+	 */
+	toolCallingUndeclared?: boolean;
+	/**
 	 * Optional usage threshold where auto-compaction should trigger for this model.
 	 * Use this when a provider has a cost or quality boundary before the hard context window.
 	 */

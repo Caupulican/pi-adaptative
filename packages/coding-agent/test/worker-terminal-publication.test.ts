@@ -45,8 +45,10 @@ function terminalPublicationHarness(failureEdge?: "snapshot" | "telemetry") {
 	const controller = Object.create(WorkerDelegationController.prototype) as WorkerDelegationController;
 	Object.assign(controller as object, {
 		publishedTerminalAttemptIds: new Set<string>(),
+		raceCancelFailures: new Map(),
 		recovery: { clearScheduledRetry: vi.fn() },
 		lifecycle: {
+			getTaskRuntimeSnapshot: () => ({ agents: {}, tasks: {}, attempts: {} }),
 			getActiveAttempt: () => ({
 				attemptId: "attempt-child-terminal",
 				agentId: "child",

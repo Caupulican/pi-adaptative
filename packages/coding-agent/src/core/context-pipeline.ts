@@ -107,7 +107,9 @@ import { evaluateSurfaceFitness } from "./model-router/fitness-gate.ts";
 import { FitnessStore } from "./models/fitness-store.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
 import type { CacheDecisionRow } from "./operator-projection/decision-ledger-store.ts";
+import { createProcessScratchDirectory, removeProcessScratchDirectory } from "./process-scratch.ts";
 import { LatestCompactionEntryScan, resolveSessionEntryIndex } from "./session-entry-index.ts";
+import { isWorkerSession } from "./session-role.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { reportSpawnedUsage } from "./spawned-usage.ts";
 
@@ -313,16 +315,31 @@ export class ContextPipeline {
 	private readonly _tokenMemo: TokenMemo = new Map();
 	private readonly _latestCompactionScan = new LatestCompactionEntryScan();
 
+	private _ephemeralContextRoot: string | undefined;
 	private readonly deps: ContextPipelineDeps;
 
 	constructor(deps: ContextPipelineDeps) {
 		this.deps = deps;
 	}
 
+	/**
+	 * Where this session's payload stores (`gc`, `artifacts`, `index`) live. A worker session leaves
+	 * no footprint under the shared agent directory, so its stores sit in a root inside the process's
+	 * leased scratch run (`process-scratch.ts`): disposal removes it, and a process killed before
+	 * disposal leaves a root the next process's scratch sweep removes. Packed originals stay retrievable
+	 * for the life of the session, and the retention sweep that acquiring a store runs can only ever see
+	 * this session's own root.
+	 */
+	private _contextStoreRoot(): string {
+		if (!isWorkerSession()) return this.deps.getAgentDir();
+		this._ephemeralContextRoot ??= createProcessScratchDirectory("pi-worker-context-");
+		return this._ephemeralContextRoot;
+	}
+
 	private _ensureContextStoreRetention(): ContextStoreRetentionLease {
 		if (!this._contextStoreRetentionLease) {
 			this._contextStoreRetentionLease = acquireContextStoreRetention(
-				this.deps.getAgentDir(),
+				this._contextStoreRoot(),
 				this.deps.getSessionManager().getSessionId(),
 			);
 		}
@@ -335,16 +352,16 @@ export class ContextPipeline {
 	}
 
 	private _contextGcStorageDir(): string {
-		return getContextStoreDir(this.deps.getAgentDir(), "gc", this.deps.getSessionManager().getSessionId());
+		return getContextStoreDir(this._contextStoreRoot(), "gc", this.deps.getSessionManager().getSessionId());
 	}
 
 	private _toolArtifactsDir(): string {
-		return getContextStoreDir(this.deps.getAgentDir(), "artifacts", this.deps.getSessionManager().getSessionId());
+		return getContextStoreDir(this._contextStoreRoot(), "artifacts", this.deps.getSessionManager().getSessionId());
 	}
 
 	private _indexDir(): string {
 		this._ensureContextStoreRetention();
-		return getContextStoreDir(this.deps.getAgentDir(), "index", this.deps.getSessionManager().getSessionId());
+		return getContextStoreDir(this._contextStoreRoot(), "index", this.deps.getSessionManager().getSessionId());
 	}
 
 	applyPathAliases(messages: AgentMessage[]): {
@@ -391,7 +408,7 @@ export class ContextPipeline {
 		this._toolArtifactStore ??= createFileArtifactStore({
 			baseDir: this._toolArtifactsDir(),
 			prepareBaseDir: () =>
-				migrateLegacyContextStores(this.deps.getAgentDir(), this.deps.getSessionManager().getSessionId()),
+				migrateLegacyContextStores(this._contextStoreRoot(), this.deps.getSessionManager().getSessionId()),
 			acquireBaseDir: () => this._ensureContextStoreRetention().artifactsDir,
 		});
 		return this._toolArtifactStore;
@@ -408,6 +425,10 @@ export class ContextPipeline {
 		this._pathAliasRuntime = undefined;
 		this._contextStoreRetentionLease?.release();
 		this._contextStoreRetentionLease = undefined;
+		if (this._ephemeralContextRoot) {
+			removeProcessScratchDirectory(this._ephemeralContextRoot);
+			this._ephemeralContextRoot = undefined;
+		}
 		// Release memoized message references promptly so a disposed session's messages are
 		// GC-eligible even if this ContextPipeline instance itself briefly lingers.
 		this._auditMemo.clear();

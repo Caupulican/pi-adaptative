@@ -30,7 +30,8 @@ describe("parseWorkerDelegationAuthorityRequest", () => {
 	it.each([
 		[{ hiddenAuthority: true }, "unsupported field"],
 		[{ readPaths: ["."] }, "unsupported field"],
-		[{ writePaths: ["src"] }, "unsupported field"],
+		[{ writePaths: ["src", "src"] }, "unique"],
+		[{ writePaths: ["bad\0path"] }, "bounded, non-empty strings"],
 		[{ toolNames: ["read", "read"] }, "unique"],
 		[{ capabilities: ["host.root"] }, "unknown capability"],
 		[{ model: { provider: "faux" } }, "model is invalid"],

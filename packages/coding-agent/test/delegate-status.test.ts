@@ -188,9 +188,9 @@ describe("delegate status", () => {
 		);
 
 		expect(result.content[0]?.text).toContain(
-			"CAVEMAN MODE - MANDATORY: queued is admitted durable nonterminal state",
+			"CAVEMAN MODE - MANDATORY: A queued worker is admitted, durable, and nonterminal",
 		);
-		expect(result.content[0]?.text).toContain("not stall or harness failure");
+		expect(result.content[0]?.text).toContain("It is not a stall or harness failure");
 		expect(result.content[0]?.text).toContain(
 			"Never poll, interrupt, or cancel a healthy running worker to force the queue",
 		);

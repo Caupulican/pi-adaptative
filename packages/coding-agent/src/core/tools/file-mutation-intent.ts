@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
-import { constants, rmSync } from "node:fs";
-import { access, copyFile, lstat, mkdtemp, open, readFile, stat, unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { constants, existsSync, rmSync } from "node:fs";
+import { access, copyFile, lstat, open, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { assertExecutionAbsolutePath, executionPathApi, type PathInputOptions } from "@caupulican/pi-agent-core/paths";
+import { createProcessScratchDirectory } from "../process-scratch.ts";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
 import {
 	disposeMutationLockScope,
@@ -261,24 +261,31 @@ async function hashLocalFile(path: string, signal?: AbortSignal): Promise<string
 }
 
 async function getLocalMutationPayloadDirectory(): Promise<string> {
-	localMutationPayloadDirectoryPromise ??= mkdtemp(join(tmpdir(), LOCAL_MUTATION_PAYLOAD_DIRECTORY_PREFIX)).then(
-		(path) => {
-			localMutationPayloadDirectory = path;
-			if (!localMutationPayloadCleanupRegistered) {
-				localMutationPayloadCleanupRegistered = true;
-				process.once("exit", () => {
-					if (localMutationPayloadDirectory) {
-						try {
-							rmSync(localMutationPayloadDirectory, { recursive: true, force: true });
-						} catch {
-							// Process shutdown cannot safely retry filesystem cleanup.
-						}
+	// A long-lived session outlives anything that clears its scratch run (the work root was purged, a
+	// sweep ran): the memoized directory is then gone and every later mutation would fail on it, so a
+	// vanished directory is recreated, never reused.
+	if (localMutationPayloadDirectory && !existsSync(localMutationPayloadDirectory)) {
+		localMutationPayloadDirectoryPromise = undefined;
+		localMutationPayloadDirectory = undefined;
+	}
+	localMutationPayloadDirectoryPromise ??= Promise.resolve(
+		createProcessScratchDirectory(LOCAL_MUTATION_PAYLOAD_DIRECTORY_PREFIX),
+	).then((path) => {
+		localMutationPayloadDirectory = path;
+		if (!localMutationPayloadCleanupRegistered) {
+			localMutationPayloadCleanupRegistered = true;
+			process.once("exit", () => {
+				if (localMutationPayloadDirectory) {
+					try {
+						rmSync(localMutationPayloadDirectory, { recursive: true, force: true });
+					} catch {
+						// Process shutdown cannot safely retry filesystem cleanup.
 					}
-				});
-			}
-			return path;
-		},
-	);
+				}
+			});
+		}
+		return path;
+	});
 	return localMutationPayloadDirectoryPromise;
 }
 

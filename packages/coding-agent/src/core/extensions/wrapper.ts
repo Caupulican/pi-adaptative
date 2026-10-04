@@ -18,7 +18,8 @@ import type { RegisteredTool } from "./types.ts";
 
 /**
  * Wrap a RegisteredTool into an AgentTool.
- * Uses the runner's createContext() for consistent context across tools and event handlers.
+ * Uses the runner's createToolContext(): the full context for every tool except one granted to a worker
+ * process from a tool-only extension, which gets the restricted context.
  */
 export function wrapRegisteredTool(
 	registeredTool: RegisteredTool,
@@ -30,7 +31,7 @@ export function wrapRegisteredTool(
 		ownerKey === undefined
 			? registeredTool.definition
 			: applyExtensionSessionHeal(registeredTool.definition, ownerKey, extensionSessionScopeFor(runner));
-	return wrapToolDefinition(definition, () => runner.createContext(getExecutionContext?.()));
+	return wrapToolDefinition(definition, () => runner.createToolContext(registeredTool, getExecutionContext?.()));
 }
 
 /**

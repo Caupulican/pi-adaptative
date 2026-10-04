@@ -24,7 +24,15 @@ import {
 	snapshotExtensionLoadRuntime,
 } from "./factory-runtime.ts";
 import { disposeExtensionEventSubscriptions, isExtensionGenerationInactive } from "./lifecycle.ts";
-import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResult, ToolDefinition } from "./types.ts";
+import { createToolOnlyExtensionAPI, markToolOnlyExtension } from "./tool-only-api.ts";
+import type {
+	Extension,
+	ExtensionAPI,
+	ExtensionFactory,
+	ExtensionRuntime,
+	LoadExtensionsResult,
+	ToolDefinition,
+} from "./types.ts";
 import {
 	getHostExtensionModules,
 	PI_AGENT_CORE_EXTENSION_SUBPATHS,
@@ -217,12 +225,44 @@ async function loadExtensionModule(
 	}
 }
 
+/**
+ * The API a factory receives. With `toolOnly` (the tool names a worker launch profile granted from this
+ * file) it is the restricted view of `tool-only-api.ts`; if that view cannot be built the load is refused,
+ * never served the full API.
+ */
+function createFactoryAPI(
+	extension: Extension,
+	runtime: ExtensionRuntime,
+	cwd: string,
+	eventBus: EventBus,
+	agentDir: string,
+	toolOnly: readonly string[] | undefined,
+): ExtensionAPI {
+	const api = createExtensionAPI(extension, runtime, cwd, eventBus, agentDir);
+	if (toolOnly === undefined) return api;
+	try {
+		return createToolOnlyExtensionAPI(api, extension, toolOnly);
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		throw new Error(
+			`Granted worker extension ${extension.path} was refused: its tool-only extension view could not be built (${reason}). The grant was not widened; fix the launch profile's extensionToolGrants entry.`,
+		);
+	}
+}
+
 export async function loadExtension(
 	extensionPath: string,
 	cwd: string,
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
-	opts?: { fresh?: boolean; factoryTimeoutMs?: number; moduleTimeoutMs?: number; agentDir?: string },
+	opts?: {
+		fresh?: boolean;
+		factoryTimeoutMs?: number;
+		moduleTimeoutMs?: number;
+		agentDir?: string;
+		/** Tool names a worker launch profile granted from this file; the extension then loads tool-only. */
+		toolOnly?: readonly string[];
+	},
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const resolvedPath = resolvePath(extensionPath, cwd, { normalizeUnicodeSpaces: true });
 	const resolvedAgentDir = resolvePath(opts?.agentDir ?? getAgentDir());
@@ -235,7 +275,7 @@ export async function loadExtension(
 		}
 
 		const extension = createExtension(extensionPath, resolvedPath);
-		const api = createExtensionAPI(extension, runtime, cwd, eventBus, resolvedAgentDir);
+		const api = createFactoryAPI(extension, runtime, cwd, eventBus, resolvedAgentDir, opts?.toolOnly);
 		const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime, extension);
 		try {
 			await runExtensionFactory(factory, api, opts?.factoryTimeoutMs);
@@ -296,8 +336,11 @@ function createLazyExtension(
 	agentDir: string,
 	transformCacheAgentDir: string | undefined,
 	lazyTools: LazyToolManifest[],
+	toolOnly: readonly string[] | undefined,
 ): Extension {
 	const extension = createExtension(extensionPath, resolvedPath);
+	// Marked before the factory has run: a granted lazy tool's very first call already gets the restricted context.
+	if (toolOnly !== undefined) markToolOnlyExtension(extension, toolOnly);
 	let restoreLazyToolPlaceholders = (): void => {};
 	const load = async (): Promise<void> => {
 		if (isExtensionGenerationInactive(extension)) {
@@ -311,7 +354,7 @@ function createLazyExtension(
 			if (!factory) {
 				throw new Error(`Extension does not export a valid factory function: ${extensionPath}`);
 			}
-			const api = createExtensionAPI(extension, runtime, cwd, eventBus, agentDir);
+			const api = createFactoryAPI(extension, runtime, cwd, eventBus, agentDir, toolOnly);
 			const runtimeSnapshot = snapshotExtensionLoadRuntime(runtime, extension);
 			try {
 				await runExtensionFactory(factory, api);
@@ -380,9 +423,11 @@ export async function loadExtensions(
 		const normalized = typeof spec === "string" ? { path: spec } : spec;
 		const extPath = normalized.path;
 		const resolvedPath = resolvePath(extPath, resolvedCwd, { normalizeUnicodeSpaces: true });
-		const lazyTools = (normalized.lazyTools ?? inferLazyToolsForExtensionPath(resolvedPath))?.filter(
-			(tool) => typeof tool.name === "string" && tool.name.trim(),
-		);
+		const toolOnly = normalized.toolOnly;
+		const lazyTools = (normalized.lazyTools ?? inferLazyToolsForExtensionPath(resolvedPath))
+			?.filter((tool) => typeof tool.name === "string" && tool.name.trim())
+			// A tool-only load never presents another tool of the file, not even as a lazy placeholder.
+			.filter((tool) => toolOnly === undefined || toolOnly.includes(String(tool.name).trim()));
 		// Extension imports can be CPU-heavy under jiti. Yield around each load so
 		// interactive reloads can repaint/status-update instead of freezing the TUI
 		// for the whole extension set. Lazy tool manifests skip import entirely here.
@@ -398,19 +443,17 @@ export async function loadExtensions(
 					resolvedAgentDir,
 					transformCacheAgentDir,
 					lazyTools,
+					toolOnly,
 				),
 			);
 			await yieldToEventLoop();
 			continue;
 		}
 
-		const { extension, error } = await loadExtension(
-			extPath,
-			resolvedCwd,
-			resolvedEventBus,
-			runtime,
-			options.agentDir ? { agentDir: resolvedAgentDir } : undefined,
-		);
+		const { extension, error } = await loadExtension(extPath, resolvedCwd, resolvedEventBus, runtime, {
+			...(options.agentDir ? { agentDir: resolvedAgentDir } : {}),
+			...(toolOnly ? { toolOnly } : {}),
+		});
 		await yieldToEventLoop();
 
 		if (error) {
@@ -420,6 +463,16 @@ export async function loadExtensions(
 
 		if (extension) {
 			extensions.push(extension);
+			// A grant names a tool the file must provide; a granted tool the file never registered is reported
+			// (the grant stays unfulfilled, nothing else of the file was admitted in its place).
+			for (const tool of toolOnly ?? []) {
+				if (!extension.tools.has(tool)) {
+					errors.push({
+						path: extPath,
+						error: `Granted worker extension tool '${tool}' was not registered by its extension file.`,
+					});
+				}
+			}
 		}
 	}
 
@@ -430,7 +483,7 @@ export async function loadExtensions(
 	};
 }
 
-interface LazyToolManifest {
+export interface LazyToolManifest {
 	name?: unknown;
 	label?: unknown;
 	description?: unknown;
@@ -453,9 +506,11 @@ interface PiManifest {
 	lazy?: { tools?: LazyToolManifest[] } | boolean;
 }
 
-interface ExtensionLoadSpec {
+export interface ExtensionLoadSpec {
 	path: string;
 	lazyTools?: LazyToolManifest[];
+	/** Tool names a worker launch profile granted from this file; the extension then loads tool-only. */
+	toolOnly?: readonly string[];
 }
 
 function getManifestLazyTools(manifest: PiManifest | null): LazyToolManifest[] | undefined {

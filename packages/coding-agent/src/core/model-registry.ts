@@ -167,6 +167,27 @@ const ProviderCompatSchema = Type.Union([
 // Schema for custom model definition
 const DEFAULT_MODEL_CONTEXT_WINDOW = 128000;
 const DEFAULT_MODEL_MAX_TOKENS = 16384;
+/**
+ * Context window, tool-call transport and output cap of a user-configured model definition. A value
+ * the definition does not declare is filled with a default AND marked as such, so lane-worker
+ * eligibility can tell a declared window / tool-call path from a placeholder.
+ */
+function resolveModelLimitsAndToolCalling(modelDef: {
+	contextWindow?: number;
+	textToolCallProtocol?: boolean;
+	maxTokens?: number;
+}): Pick<
+	Model<Api>,
+	"contextWindow" | "contextWindowDefaulted" | "textToolCallProtocol" | "toolCallingUndeclared" | "maxTokens"
+> {
+	return {
+		contextWindow: modelDef.contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW,
+		...(modelDef.contextWindow === undefined ? { contextWindowDefaulted: true } : {}),
+		textToolCallProtocol: modelDef.textToolCallProtocol,
+		...(modelDef.textToolCallProtocol === undefined ? { toolCallingUndeclared: true } : {}),
+		maxTokens: modelDef.maxTokens ?? DEFAULT_MODEL_MAX_TOKENS,
+	};
+}
 const ModelCostTierSchema = Type.Object({
 	inputTokensAbove: Type.Number(),
 	input: Type.Optional(Type.Number()),
@@ -382,8 +403,14 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 		result.thinkingLevelMap = { ...model.thinkingLevelMap, ...override.thinkingLevelMap };
 	}
 	if (override.input !== undefined) result.input = override.input as ("text" | "image")[];
-	if (override.contextWindow !== undefined) result.contextWindow = override.contextWindow;
-	if (override.textToolCallProtocol !== undefined) result.textToolCallProtocol = override.textToolCallProtocol;
+	if (override.contextWindow !== undefined) {
+		result.contextWindow = override.contextWindow;
+		delete result.contextWindowDefaulted;
+	}
+	if (override.textToolCallProtocol !== undefined) {
+		result.textToolCallProtocol = override.textToolCallProtocol;
+		delete result.toolCallingUndeclared;
+	}
 	if (override.maxTokens !== undefined) result.maxTokens = override.maxTokens;
 	if (override.samplingParams !== undefined) {
 		result.samplingParams = { ...model.samplingParams, ...override.samplingParams };
@@ -686,9 +713,7 @@ export class ModelRegistry {
 					thinkingLevelMap: modelDef.thinkingLevelMap,
 					input: (modelDef.input ?? ["text"]) as ("text" | "image")[],
 					cost: modelDef.cost ?? defaultCost,
-					contextWindow: modelDef.contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW,
-					textToolCallProtocol: modelDef.textToolCallProtocol,
-					maxTokens: modelDef.maxTokens ?? DEFAULT_MODEL_MAX_TOKENS,
+					...resolveModelLimitsAndToolCalling(modelDef),
 					samplingParams: modelDef.samplingParams,
 					headers: undefined,
 					compat,
@@ -1167,9 +1192,7 @@ export class ModelRegistry {
 					thinkingLevelMap: modelDef.thinkingLevelMap,
 					input: modelDef.input as ("text" | "image")[],
 					cost: modelDef.cost,
-					contextWindow: modelDef.contextWindow ?? DEFAULT_MODEL_CONTEXT_WINDOW,
-					textToolCallProtocol: modelDef.textToolCallProtocol,
-					maxTokens: modelDef.maxTokens ?? DEFAULT_MODEL_MAX_TOKENS,
+					...resolveModelLimitsAndToolCalling(modelDef),
 					headers: undefined,
 					compat: modelDef.compat,
 				} as Model<Api>;

@@ -671,9 +671,9 @@ describe("worker runtime construction", () => {
 		const controller = new BackgroundLaneController({ isDelegateToolActive: () => true } as never);
 		(
 			controller as unknown as {
-				_workers: { getAgentControl(): typeof agentControl };
+				_workers: { getAgentControl(): typeof agentControl; releaseRetiredAgentLane(agentId: string): void };
 			}
-		)._workers = { getAgentControl: () => agentControl };
+		)._workers = { getAgentControl: () => agentControl, releaseRetiredAgentLane: vi.fn() };
 		const scope = { callerAgentId: "parent" };
 
 		controller.listWorkerAgents(scope);
@@ -718,9 +718,9 @@ describe("worker runtime construction", () => {
 		const controller = new BackgroundLaneController({ isDelegateToolActive: () => true } as never);
 		(
 			controller as unknown as {
-				_workers: { getAgentControl(): typeof agentControl };
+				_workers: { getAgentControl(): typeof agentControl; releaseRetiredAgentLane(agentId: string): void };
 			}
-		)._workers = { getAgentControl: () => agentControl };
+		)._workers = { getAgentControl: () => agentControl, releaseRetiredAgentLane: vi.fn() };
 
 		expect(() => controller.waitForWorkerAgent("child")).toThrow("worker wait unavailable");
 		expect(() => controller.waitForWorkerAgents(["child", "peer"], "all")).toThrow("worker waits unavailable");
