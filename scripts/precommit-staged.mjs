@@ -6,19 +6,10 @@
  * commit (about two minutes, most of it on files the commit never touched). This gate looks only at
  * what is staged: the exclude/lockfile guards, biome on the staged files biome.json covers, the
  * contract-doctrine gate (already staged-aware), the browser smoke check when its inputs are staged,
- * the staged test files themselves, and one project type check when a TypeScript source is staged
- * (per-file type checking is unsound: an importer of the changed file can break). Everything else in
- * `npm run check` stays a CI and release gate.
- *
- * Tests belong to CI. A commit used to run the staged test files and every test that imports a staged
- * source, which made most of a working day test time. CI already runs exactly that set per pushed
- * commit (see ci-affected.mjs), on Linux and Windows, so the hook runs it only on request:
- * `PI_PRECOMMIT_TESTS=1` or `--with-tests` restores the staged and importing-test batches
- * (see affected-tests.mjs; hub modules narrow to their named tests). One test obligation stays
- * unconditional, because it is the fix loop and not a speculative run: when the branch's last
- * recorded CI verdict is red (see ci-status.mjs), its failing test files are carried into every commit
- * on top of it and the commit is refused until they pass, so a red main is fixed before new work
- * lands on it.
+ * and one project type check when a TypeScript source is staged (per-file type checking is unsound:
+ * an importer of the changed file can break). Everything else in `npm run check` stays a CI and
+ * release gate. The hook runs no tests; it reports the branch's last recorded CI verdict (see
+ * ci-status.mjs) as a warning.
  *
  * `--dry-run` prints the plan for the current staged set without running anything.
  */
@@ -26,7 +17,6 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { findCommitTests } from "./affected-tests.mjs";
 import { commitObligation, describeStatus, readCiStatus } from "./ci-status.mjs";
 import { pinGithubOriginGhDefault } from "./github-origin.mjs";
 
@@ -35,8 +25,6 @@ const repoRoot = resolve(scriptsDir, "..");
 
 export const BROWSER_SMOKE_INPUTS = /^(packages\/ai\/|packages\/web-ui\/|package\.json$|package-lock\.json$)/;
 const TYPESCRIPT_SOURCE = /^packages\/[^/]+\/.*\.(?:ts|tsx|mts|cts)$/;
-const NODE_TEST_WORKSPACES = new Set(["packages/tui"]);
-const VITEST_WORKSPACES = new Set(["packages/ai", "packages/agent", "packages/coding-agent"]);
 
 /** Translate one biome.json `files.includes` entry into a path regex (`!` and `!!` negate). */
 export function globToRegExp(pattern) {
@@ -76,11 +64,6 @@ export function biomeCoveredFiles(staged, includes) {
 	});
 }
 
-function workspaceOf(path) {
-	const match = /^(packages\/[^/]+)\//.exec(path);
-	return match?.[1];
-}
-
 /**
  * Split biome's staged files into the ones whose working copy equals the index (biome may format
  * them in place and the gate restages them) and the partially staged ones (unstaged hunks on top
@@ -95,18 +78,6 @@ export function partitionBiomeFiles(biomeFiles, unstagedChangedFiles) {
 	};
 }
 
-const HOOK_GIT_LOCATION_KEYS = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"];
-
-/**
- * The commit hook exports its own git location. A staged test that runs git must not inherit it,
- * or `git add` rewrites the index the hook is committing.
- */
-export function withoutHookGitLocation(base = process.env) {
-	const env = { ...base };
-	for (const key of HOOK_GIT_LOCATION_KEYS) delete env[key];
-	return env;
-}
-
 /** Where a partially staged file's staged blob is checked: a sibling with the same extension, never committed. */
 export function stagedCopyPath(path) {
 	const slash = path.lastIndexOf("/");
@@ -115,71 +86,14 @@ export function stagedCopyPath(path) {
 	return `${directory}.precommit-staged-${name}`;
 }
 
-/**
- * Pure planner: staged repo-relative paths plus biome includes → the gates this commit buys.
- * `findRelated(workspace, stagedFiles)` returns the repo-relative tests that import a staged source.
- */
+/** Pure planner: staged repo-relative paths plus biome includes → the gates this commit buys. */
 export function planStagedGates(staged, options) {
 	const files = staged.map((path) => path.replaceAll("\\", "/"));
-	const plan = {
+	return {
 		biome: biomeCoveredFiles(files, options.biomeIncludes),
 		browserSmoke: files.some((path) => BROWSER_SMOKE_INPUTS.test(path)),
 		typecheck: files.some((path) => TYPESCRIPT_SOURCE.test(path)),
-		tests: [],
-		relatedTests: [],
 	};
-	for (const path of files) {
-		if (/^scripts\/[^/]+\.test\.mjs$/.test(path)) {
-			plan.tests.push({ cwd: ".", runner: "node-test", file: path });
-			continue;
-		}
-		const workspace = workspaceOf(path);
-		if (!workspace || !path.endsWith(".test.ts")) continue;
-		const relative = path.slice(workspace.length + 1);
-		// The destructive suite has its own vitest config and never runs from a hook.
-		if (relative.startsWith("test-destructive/")) continue;
-		if (NODE_TEST_WORKSPACES.has(workspace)) plan.tests.push({ cwd: workspace, runner: "node-test", file: relative });
-		else if (VITEST_WORKSPACES.has(workspace)) plan.tests.push({ cwd: workspace, runner: "vitest", file: relative });
-	}
-	if (options.findRelated) {
-		const stagedTests = new Set(plan.tests.map((entry) => `${entry.cwd}/${entry.file}`));
-		for (const workspace of VITEST_WORKSPACES) {
-			const related = options
-				.findRelated(workspace, files)
-				.filter((path) => !stagedTests.has(path) && !path.slice(workspace.length + 1).startsWith("test-destructive/"));
-			if (related.length > 0) {
-				plan.relatedTests.push({
-					cwd: workspace,
-					runner: "vitest",
-					files: related.map((path) => path.slice(workspace.length + 1)),
-				});
-			}
-		}
-	}
-	return plan;
-}
-
-/** The CI platform name (as ci-status.mjs records it) for this machine. */
-export function ciPlatform(platform = process.platform) {
-	return platform === "win32" ? "windows" : platform === "darwin" ? "macos" : "ubuntu";
-}
-
-/**
- * Group carried failing tests (from a red CI verdict) into one batched run per workspace. Files that
- * failed only on other platforms still run here, but are listed in `elsewhere`: a pass on this
- * platform cannot clear them; only the next CI run can.
- */
-export function planCarriedTests(tests, fileExists, platform = ciPlatform()) {
-	const byWorkspace = new Map();
-	for (const test of tests) {
-		if (!VITEST_WORKSPACES.has(test.workspace) || !fileExists(`${test.workspace}/${test.file}`)) continue;
-		const entry = byWorkspace.get(test.workspace) ?? { cwd: test.workspace, runner: "vitest", files: [], elsewhere: [] };
-		entry.files.push(test.file);
-		const platforms = test.platforms ?? [];
-		if (platforms.length > 0 && !platforms.includes(platform)) entry.elsewhere.push({ file: test.file, platforms });
-		byWorkspace.set(test.workspace, entry);
-	}
-	return [...byWorkspace.values()];
 }
 
 function stagedFiles() {
@@ -212,12 +126,6 @@ function run(label, command, args, cwd = repoRoot, env = process.env) {
 	process.stdout.write(`precommit: ${label} ok (${seconds}s)\n`);
 }
 
-function testCommand(entry) {
-	const files = entry.files ?? [entry.file];
-	if (entry.runner === "vitest") return [process.execPath, [join(repoRoot, "node_modules/vitest/vitest.mjs"), "run", ...files]];
-	return [process.execPath, ["--test", ...files]];
-}
-
 function currentBranch() {
 	return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoRoot, encoding: "utf8" }).trim();
 }
@@ -226,55 +134,22 @@ function isAncestorOfHead(sha) {
 	return spawnSync("git", ["merge-base", "--is-ancestor", sha, "HEAD"], { cwd: repoRoot }).status === 0;
 }
 
-/** Hold this commit to the branch's last recorded CI verdict (written by ci-status.mjs after a push). */
-function runCarriedObligation() {
+/** Report the branch's last recorded CI verdict (written by ci-status.mjs after a push). */
+function reportCiVerdict() {
 	const branch = currentBranch();
 	const obligation = commitObligation(readCiStatus(branch), isAncestorOfHead);
 	if (obligation.kind === "pending") {
 		process.stdout.write(`precommit: CI for ${branch} is still running (${obligation.status.sha.slice(0, 9)}); its verdict applies to the next commit\n`);
-		return;
-	}
-	if (obligation.kind === "unknown") {
+	} else if (obligation.kind === "unknown") {
 		process.stdout.write(`⚠ precommit: the CI verdict for ${branch} is unknown:\n${describeStatus(obligation.status)}\n  Check it with: gh run list --workflow ci.yml --branch ${branch}\n`);
-		return;
+	} else if (obligation.kind === "red") {
+		process.stdout.write(`⚠ precommit: ${branch} is red in CI:\n${describeStatus(obligation.status)}\n`);
 	}
-	if (obligation.kind !== "red") return;
-	process.stdout.write(`⚠ precommit: ${branch} is red in CI; its failing tests are carried into this commit:\n${describeStatus(obligation.status)}\n`);
-	for (const entry of planCarriedTests(obligation.tests, (path) => existsSync(join(repoRoot, path)))) {
-		const [command, args] = testCommand(entry);
-		const label = `carried failing tests from red CI (${entry.files.length} file(s) in ${entry.cwd})`;
-		process.stdout.write(`precommit: ${label}\n`);
-		const result = spawnSync(command, args, { cwd: resolve(repoRoot, entry.cwd), stdio: "inherit", env: withoutHookGitLocation() });
-		if (result.status !== 0) {
-			console.error(
-				`❌ precommit: ${branch} is red in CI (${obligation.status.url ?? obligation.status.sha}) and these tests still fail here. Fix them first: nothing lands on a red branch until its failures pass.`,
-			);
-			process.exit(result.status ?? 1);
-		}
-		if (entry.elsewhere.length > 0) {
-			process.stdout.write(
-				`⚠ precommit: these failed in CI only on another platform; passing on ${ciPlatform()} does not clear them, the next CI run decides:\n${entry.elsewhere.map((item) => `  ${entry.cwd}/${item.file} (${item.platforms.join(", ")})`).join("\n")}\n`,
-			);
-		}
-	}
-	if (obligation.untestedFailures.length > 0) {
-		process.stdout.write(
-			`⚠ precommit: CI failures this hook cannot rerun (check, coverage, or a job without a report): ${obligation.untestedFailures.join("; ")}. Reproduce them before pushing.\n`,
-		);
-	}
-}
-
-/** Whether this commit runs the staged and importing tests itself instead of leaving them to CI. */
-export function withTests(argv = [], env = process.env) {
-	return argv.includes("--with-tests") || env.PI_PRECOMMIT_TESTS === "1";
 }
 
 export function main(argv = process.argv.slice(2)) {
 	const staged = stagedFiles();
-	const plan = planStagedGates(staged, {
-		biomeIncludes: readBiomeIncludes(),
-		findRelated: (workspace, files) => findCommitTests(repoRoot, workspace, files),
-	});
+	const plan = planStagedGates(staged, { biomeIncludes: readBiomeIncludes() });
 	if (argv.includes("--dry-run")) {
 		process.stdout.write(`${JSON.stringify({ staged, plan }, null, 2)}\n`);
 		return;
@@ -332,20 +207,7 @@ export function main(argv = process.argv.slice(2)) {
 	}
 	run("contract-doctrine gate", process.execPath, [join(scriptsDir, "check-contract-doctrine.mjs")]);
 	if (plan.browserSmoke) run("browser smoke check", "npm", ["run", "check:browser-smoke"]);
-	if (withTests(argv)) {
-		for (const entry of plan.tests) {
-			const [command, args] = testCommand(entry);
-			run(`${entry.runner} ${entry.cwd}/${entry.file}`, command, args, entry.cwd, withoutHookGitLocation());
-		}
-		for (const entry of plan.relatedTests) {
-			const [command, args] = testCommand(entry);
-			run(`tests importing staged source (${entry.files.length} file(s) in ${entry.cwd})`, command, args, entry.cwd, withoutHookGitLocation());
-		}
-	} else if (plan.tests.length + plan.relatedTests.length > 0) {
-		const count = plan.tests.length + plan.relatedTests.reduce((sum, entry) => sum + entry.files.length, 0);
-		process.stdout.write(`precommit: ${count} affected test file(s) left to CI (PI_PRECOMMIT_TESTS=1 runs them here)\n`);
-	}
-	runCarriedObligation();
+	reportCiVerdict();
 	if (plan.typecheck) run("project type check (staged TypeScript source)", process.execPath, [join(scriptsDir, "run-tsc.mjs"), "--noEmit"]);
 	process.stdout.write(`✅ precommit: staged gates passed in ${((Date.now() - started) / 1000).toFixed(1)}s\n`);
 }

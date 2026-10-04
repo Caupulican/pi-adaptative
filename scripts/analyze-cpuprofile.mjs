@@ -3,7 +3,7 @@
  * Rank a V8 .cpuprofile by SELF time -- the function actually burning CPU, not the one that
  * happens to be on the stack -- by function and by file, as Markdown. Pairs with
  * scripts/profile-coding-agent-turn.mjs, scripts/profile-coding-agent-node.mjs and the
- * coding-agent long-session profile (packages/coding-agent/test/profiling/), all of which write
+ * coding-agent long-session profile (a test, removed 2026-10-04), all of which write
  * the format Node's own --cpu-prof writes.
  *
  * Usage: node scripts/analyze-cpuprofile.mjs <file.cpuprofile> [--top <n>] [--title <text>] [--callers <functionName>] [--inclusive <functionName>] [--owner <functionName>]

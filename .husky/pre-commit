@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Staged-scoped gates only (guards, biome on staged files, contract doctrine, staged test files,
-# one project type check when TypeScript source is staged). The full `npm run check` chain and
-# the complete test suite run in CI and before a release, never here.
+# Staged-scoped gates only (guards, biome on staged files, contract doctrine, one project type
+# check when TypeScript source is staged). No tests run here. The full `npm run check` chain runs in
+# CI and before a release, never here.
 node scripts/precommit-staged.mjs

@@ -3,19 +3,17 @@
  * The push-side half of the commit/CI loop.
  *
  * `pre-push` starts one detached watcher per pushed branch head. The watcher follows that exact
- * commit's ci.yml run to its end and records the verdict (and, when it failed, the failing test
- * files from the runs' vitest reports) in `<git-common-dir>/pi-ci/<branch>.json`. That file is the
- * terminal signal and the bounded handoff: the next commit on any session in this clone reads it,
- * reruns the carried failing tests, and refuses to commit on top of a red branch until they pass.
- * Nothing polls it; it is read when git is next used.
+ * commit's ci.yml run to its end and records the verdict and its failed jobs in
+ * `<git-common-dir>/pi-ci/<branch>.json`. That file is the terminal signal and the bounded handoff:
+ * the next commit on any session in this clone reads it and reports a red branch. Nothing polls it;
+ * it is read when git is next used.
  *
  *   node scripts/ci-status.mjs pre-push <remote> <url>   (git pre-push hook; refs on stdin)
  *   node scripts/ci-status.mjs watch <sha> <branch>      (the detached watcher)
  *   node scripts/ci-status.mjs show [branch]             (print the recorded verdict)
  */
 import { execFileSync, spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -26,7 +24,6 @@ const ZERO_SHA = /^0+$/u;
 /** A just-pushed commit's run takes a moment to register; after this, "missing" is the verdict. */
 const REGISTRATION_GRACE_MS = 5 * 60_000;
 const REGISTRATION_INTERVAL_MS = 20_000;
-const MAX_CARRIED_TESTS = 200;
 
 function git(args, options = {}) {
 	return execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], ...options }).trim();
@@ -68,27 +65,6 @@ export function pickDecisiveRun(runs, sha) {
 	);
 }
 
-/** Repo-relative failing test files from vitest JSON reports, with the platforms each failed on. */
-export function failingTestsFromReports(reports) {
-	const byFile = new Map();
-	for (const { artifact, report } of reports) {
-		const platform = /(ubuntu|windows|macos)/u.exec(artifact)?.[1] ?? "unknown";
-		for (const result of report?.testResults ?? []) {
-			if (result.status !== "failed" || typeof result.name !== "string") continue;
-			const normalized = result.name.replaceAll("\\", "/");
-			const index = normalized.indexOf("packages/");
-			if (index === -1) continue;
-			const path = normalized.slice(index);
-			const workspace = /^packages\/[^/]+/u.exec(path)?.[0];
-			if (!workspace) continue;
-			const entry = byFile.get(path) ?? { workspace, file: path.slice(workspace.length + 1), platforms: [] };
-			if (!entry.platforms.includes(platform)) entry.platforms.push(platform);
-			byFile.set(path, entry);
-		}
-	}
-	return [...byFile.values()].sort((a, b) => `${a.workspace}/${a.file}`.localeCompare(`${b.workspace}/${b.file}`));
-}
-
 /**
  * What a new commit must do about the branch's recorded verdict. `isAncestorOfHead(sha)` says
  * whether the recorded commit is in this commit's history; a verdict about unrelated history
@@ -100,17 +76,7 @@ export function commitObligation(status, isAncestorOfHead) {
 	if (status.state === "pending") return { kind: "pending", status };
 	if (status.state === "watch_failed" || status.state === "unreadable") return { kind: "unknown", status };
 	if (status.state !== "completed" || status.conclusion === "success") return { kind: "none" };
-	return {
-		kind: "red",
-		status,
-		tests: status.failingTests ?? [],
-		// Test jobs are covered by rerunning their failing files; anything else (check, coverage,
-		// or a test job whose report was unavailable) can only be named.
-		untestedFailures:
-			(status.failingTests ?? []).length > 0
-				? (status.failedJobs ?? []).filter((job) => !job.startsWith("Coding-agent test"))
-				: (status.failedJobs ?? []),
-	};
+	return { kind: "red", status, failedJobs: status.failedJobs ?? [] };
 }
 
 function writeStatus(branch, requestedStatus) {
@@ -145,25 +111,6 @@ function sleep(ms) {
 	return new Promise((done) => setTimeout(done, ms));
 }
 
-function reportsFor(runId) {
-	const directory = mkdtempSync(join(tmpdir(), "pi-ci-reports-"));
-	try {
-		// A red run without reports still records its failed jobs; commitObligation then reports
-		// every one of them as unverifiable instead of pretending the tests passed.
-		try {
-			gh(["run", "download", String(runId), "-p", "test-report-*", "-D", directory]);
-		} catch {
-			return [];
-		}
-		return readdirSync(directory).flatMap((artifact) => {
-			const path = join(directory, artifact, "test-report.json");
-			return existsSync(path) ? [{ artifact, report: JSON.parse(readFileSync(path, "utf8")) }] : [];
-		});
-	} finally {
-		rmSync(directory, { recursive: true, force: true });
-	}
-}
-
 export async function watch(sha, branch) {
 	const base = { sha, branch, workflow: WORKFLOW };
 	writeStatus(branch, { ...base, state: "pending", startedAt: new Date().toISOString() });
@@ -191,7 +138,6 @@ export async function watch(sha, branch) {
 			}
 			const jobs = JSON.parse(gh(["run", "view", String(decisive.databaseId), "--json", "jobs"])).jobs ?? [];
 			const failedJobs = jobs.filter((job) => job.conclusion === "failure").map((job) => job.name);
-			const failingTests = decisive.conclusion === "success" ? [] : failingTestsFromReports(reportsFor(decisive.databaseId));
 			writeStatus(branch, {
 				...base,
 				state: "completed",
@@ -199,8 +145,6 @@ export async function watch(sha, branch) {
 				runId: decisive.databaseId,
 				url: decisive.url,
 				failedJobs,
-				failingTests: failingTests.slice(0, MAX_CARRIED_TESTS),
-				omittedFailingTests: Math.max(0, failingTests.length - MAX_CARRIED_TESTS),
 				completedAt: new Date().toISOString(),
 			});
 			return;
@@ -242,7 +186,6 @@ export function describeStatus(status) {
 	if (status.state !== "completed") return `${status.branch} ${status.sha?.slice(0, 9)}: ${status.state}${status.error ? ` (${status.error})` : ""}`;
 	const lines = [`${status.branch} ${status.sha.slice(0, 9)}: ${WORKFLOW} ${status.conclusion}${status.url ? ` ${status.url}` : ""}`];
 	for (const job of status.failedJobs ?? []) lines.push(`  failed job: ${job}`);
-	for (const test of status.failingTests ?? []) lines.push(`  failing test: ${test.workspace}/${test.file} (${test.platforms.join(", ")})`);
 	return lines.join("\n");
 }
 

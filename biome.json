@@ -19,18 +19,6 @@
 			}
 		}
 	},
-	"overrides": [
-		{
-			"includes": ["packages/coding-agent/test/pi-shell-engine/**"],
-			"linter": {
-				"rules": {
-					"suspicious": {
-						"noTemplateCurlyInString": "off"
-					}
-				}
-			}
-		}
-	],
 	"formatter": {
 		"enabled": true,
 		"formatWithErrors": false,
@@ -42,12 +30,10 @@
 		"includes": [
 			"packages/*/src/**/*.ts",
 			"packages/*/test/**/*.ts",
-			"packages/coding-agent/test-destructive/**/*.ts",
 			"packages/coding-agent/examples/**/*.ts",
 			"!.worktrees",
 			"!!.claude",
 			"!**/node_modules/**/*",
-			"!**/test-sessions.ts",
 			"!**/models.generated.ts",
 			"!packages/mom/data/**/*",
 			"!!**/node_modules"

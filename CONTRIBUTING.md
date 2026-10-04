@@ -53,14 +53,11 @@ Before submitting a PR:
 
 ```bash
 npm run check
-./test.sh
 ```
 
-Both must pass.
+It must pass. The test suite was removed on 2026-10-04 and is rebuilt by area, so there are no tests to run yet.
 
 Do not edit `CHANGELOG.md`. Changelog entries are added by maintainers.
-
-If you are adding a new provider to `packages/ai`, see `AGENTS.md` for required tests.
 
 ## Philosophy
 

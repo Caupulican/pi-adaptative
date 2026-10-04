@@ -257,12 +257,7 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		segments.push({
 			id: "ci",
 			label: "CI",
-			value:
-				ci.state === "red" && ci.failingTests > 0
-					? `red ${ci.failingTests}`
-					: ci.state === "unknown"
-						? "?"
-						: ci.state,
+			value: ci.state === "unknown" ? "?" : ci.state,
 			// A red branch is the fact to keep in view; a green or running one yields width early.
 			dropOrder: ci.state === "red" ? 50 : 12,
 			...(ci.state === "red"

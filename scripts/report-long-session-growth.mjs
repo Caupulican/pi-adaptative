@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Turn the long-session profile report (host-session-profile.txt, written by
- * packages/coding-agent/test/profiling/host-long-session.profile.test.ts) into Markdown plus
+ * the host long-session profile test, removed 2026-10-04 and rebuilt by area) into Markdown plus
  * ADVISORY GitHub warning annotations. Never fails: the profile job is a monitor the owner fires
  * on demand to see where the harness stands, not a merge gate.
  *

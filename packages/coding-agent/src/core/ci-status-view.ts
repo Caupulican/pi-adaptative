@@ -14,8 +14,6 @@ export type CiVerdictState = "running" | "green" | "red" | "unknown";
 
 export interface CiStatusView {
 	readonly state: CiVerdictState;
-	/** Failing test files the red run named (0 when it named none or is not red). */
-	readonly failingTests: number;
 	readonly branch: string;
 }
 
@@ -50,13 +48,10 @@ function gitDirs(cwd: string): GitDirs | null {
 /** The record's meaning for display. Pure. */
 export function ciStatusViewFromRecord(record: unknown, branch: string): CiStatusView | undefined {
 	if (!record || typeof record !== "object") return undefined;
-	const value = record as { state?: unknown; conclusion?: unknown; failingTests?: unknown };
-	const failing = Array.isArray(value.failingTests) ? value.failingTests.length : 0;
-	if (value.state === "pending") return { state: "running", failingTests: 0, branch };
-	if (value.state !== "completed") return { state: "unknown", failingTests: 0, branch };
-	return value.conclusion === "success"
-		? { state: "green", failingTests: 0, branch }
-		: { state: "red", failingTests: failing, branch };
+	const value = record as { state?: unknown; conclusion?: unknown };
+	if (value.state === "pending") return { state: "running", branch };
+	if (value.state !== "completed") return { state: "unknown", branch };
+	return value.conclusion === "success" ? { state: "green", branch } : { state: "red", branch };
 }
 
 /** The current branch's recorded CI verdict, or undefined when there is none to show. */
@@ -85,7 +80,7 @@ export function readCiStatusView(cwd: string): CiStatusView | undefined {
 	try {
 		view = ciStatusViewFromRecord(JSON.parse(readFileSync(path, "utf8")), branch);
 	} catch {
-		view = { state: "unknown", failingTests: 0, branch };
+		view = { state: "unknown", branch };
 	}
 	recordCache.set(path, { mtimeMs, view });
 	return view;

@@ -1,7 +1,5 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { configDefaults, defineConfig } from "vitest/config";
+import { defineConfig } from "vitest/config";
 import { piAiSourceAliases } from "../agent/vitest-ai-source-aliases.ts";
 
 const codingAgentSrcIndex = fileURLToPath(new URL("./src/index.ts", import.meta.url));
@@ -46,109 +44,18 @@ const agentSrcTypes = fileURLToPath(new URL("../agent/src/types.ts", import.meta
 const agentSrcUsage = fileURLToPath(new URL("../agent/src/usage.ts", import.meta.url));
 const tuiSrcIndex = fileURLToPath(new URL("../tui/src/index.ts", import.meta.url));
 
-const defaultTestExcludes = [
-	...configDefaults.exclude,
-	...(process.env.PI_RUN_SCRATCH === "1" ? [] : ["**/scratch-*.test.ts"]),
-	// A rebuilt destructive suite lives in `test-destructive/` with its own config and never joins the
-	// default `vitest --run`.
-	"test-destructive/**",
-];
-
-// Vitest's native module runner cannot replace several ESM/CJS boundary modules used by these
-// tests (Node built-ins, Photon, and resettable theme modules). Keep that bounded compatibility
-// surface on Vite 8 while every other coding-agent test uses Node's native TypeScript loader.
-const viteMockCompatibilityTests: string[] = [];
-
-/**
- * Test files that share one module cache per worker (`isolate: false`). Isolation re-imports the
- * module graph and re-runs setup for every file: measured on 787 such files, 406 s isolated against
- * 80 s shared, with import and setup at 80% of the isolated time. A file shares only when nothing in it
- * holds process-wide state another file could see: no session harness or faux provider, no module
- * mocks or stubbed globals/env, no env/cwd/process mutation, no fake timers, no child processes, and
- * no `// @isolated: <reason>` marker (for state the scan cannot see, such as a process-wide budget).
- * New test files are classified by the same rule, so the split maintains itself.
- */
-const PROCESS_STATE_RE =
-	/createHarness|createTestHarness|createReuseHarness|createHarnessWithExtensions|registerFauxProvider|vi\.mock\(|vi\.doMock\(|vi\.hoisted\(|vi\.stubEnv|vi\.stubGlobal|vi\.useFakeTimers|process\.env\[[^\]]+\]\s*=|process\.env\.[A-Za-z_]+\s*=|delete process\.env|process\.chdir|Object\.defineProperty\(process|globalThis\.[A-Za-z_]+\s*=|spawn|exec(File)?(Sync)?\(|fork\(|Worker\(|^\s*\/\/\s*@isolated\b/mu;
-
-function sharedModuleCacheTests(): string[] {
-	const root = fileURLToPath(new URL("./test", import.meta.url));
-	const shared: string[] = [];
-	const walk = (directory: string, relative: string) => {
-		for (const entry of readdirSync(directory, { withFileTypes: true })) {
-			const path = relative ? `${relative}/${entry.name}` : entry.name;
-			if (entry.isDirectory()) walk(join(directory, entry.name), path);
-			else if (entry.name.endsWith(".test.ts")) {
-				const file = `test/${path}`;
-				if (viteMockCompatibilityTests.includes(file)) continue;
-				if (!PROCESS_STATE_RE.test(readFileSync(join(directory, entry.name), "utf8"))) shared.push(file);
-			}
-		}
-	};
-	walk(root, "");
-	return shared;
-}
-const sharedModuleCache = sharedModuleCacheTests();
-
 export default defineConfig({
 	test: {
 		globals: true,
 		environment: "node",
 		testTimeout: 30000,
-		// Windows: provision uv and the shell engine's Python once per run (see the file).
-		globalSetup: ["./test/global-test-runtimes.ts"],
-		setupFiles: [
-			"./test/test-agent-dir-isolation-setup.ts",
-			// Windows CI only (see the file): evidence for tests that stall on the runner.
-			...(process.env.PI_CI_HANG_DIAGNOSTICS === "1" ? ["./test/ci-hang-diagnostics-setup.ts"] : []),
-		],
+		setupFiles: ["../../scripts/vitest-worker-parent-exit.ts"],
 		execArgv: ["--conditions=pi-source"],
 		experimental: {
 			// Node 24 executes this repository's erasable TypeScript directly. Keep Vitest's loader
 			// for vi.mock/import.meta.vitest, but skip the whole-graph Vite transform pass.
 			viteModuleRunner: false,
 		},
-		// Many files spawn additional Node processes. Unbounded CPU-based parallelism exhausts
-		// memory on development and CI hosts, making unrelated 30s tests fail nondeterministically.
-		// Windows runs the same 4 workers: the win32 crashes that once motivated maxWorkers: 1
-		// were libuv fs-event path-canonicalization failures (fixed at the root via
-		// realpathSync.native temp dirs and fixture portability), not parallel load.
-		maxWorkers: 4,
-		projects: [
-			{
-				extends: true,
-				test: {
-					name: "native-source",
-					exclude: [...defaultTestExcludes, ...viteMockCompatibilityTests, ...sharedModuleCache],
-					experimental: { viteModuleRunner: false },
-				},
-			},
-			{
-				extends: true,
-				test: {
-					name: "shared-module-cache",
-					include: sharedModuleCache,
-					exclude: defaultTestExcludes,
-					isolate: false,
-					experimental: { viteModuleRunner: false },
-				},
-			},
-			{
-				extends: true,
-				test: {
-					name: "vite-mock-compatibility",
-					include: viteMockCompatibilityTests,
-					experimental: { viteModuleRunner: true },
-				},
-			},
-		],
-		// Scratch/live-model tests (test/scratch-*.test.ts) are OPT-IN. They gate on a reachable
-		// local Ollama and, when it is reachable, run real model generations that time out under CI
-		// or parallel load — so a plain `vitest --run` was non-deterministic (runs flipped between
-		// green and timeout-failures purely on machine load, which repeatedly muddied verification).
-		// Excluded by default so the suite is deterministic and needs no manual --exclude; set
-		// PI_RUN_SCRATCH=1 to run them deliberately.
-		exclude: defaultTestExcludes,
 		server: {
 			deps: {
 				external: [/@silvia-odwyer\/photon-node/],

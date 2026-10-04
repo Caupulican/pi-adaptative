@@ -62,7 +62,7 @@ Never use `__dirname` directly for package assets.
 npm run check
 ```
 
-The test suite was removed on 2026-10-04 and is rebuilt by area from git history; CI runs build and check. When tests return, run focused tests during development (`./test.sh <path>`) and leave the full suite to GitHub Actions.
+The test suite was removed on 2026-10-04 and is rebuilt by area from git history; CI runs build and check. Vitest remains the runner for the packages; there are no tests to run until an area is rebuilt.
 
 ## Project Structure
 

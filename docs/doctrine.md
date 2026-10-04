@@ -1,9 +1,10 @@
 # Doctrine
 
-The invariants this harness enforces on itself. Each entry names the rule, why it holds, and the
-contract test that pins it. A contract test listed in `contracts.json` may only change in a commit
-that also changes this file (`npm run check:contract-doctrine` refuses anything else), so a
-superseded rule is superseded here, in words, before its test moves.
+The invariants this harness enforces on itself. Each entry names the rule and why it holds. The test
+suite was removed on 2026-10-04 and is rebuilt by area, so no entry is pinned by a test until a rebuilt
+test is registered in `contracts.json`. A contract test listed there may only change in a commit that
+also changes this file (`npm run check:contract-doctrine` refuses anything else), so a superseded rule
+is superseded here, in words, before its test moves.
 
 Behavior tests, everything not listed in `contracts.json`, follow the design and may be rewritten
 freely when the design changes.
@@ -15,10 +16,7 @@ goal context, skill context, the failure ledger, the alias legend) are durable r
 once per change, never rebuilt at the tail; the only rewrites are context-GC packs and compaction
 summaries the harness makes on purpose. Why: the provider prefills against the longest
 byte-identical prefix, and a rewrite anywhere re-prefills everything after it; measured on real
-sessions, losing this took cache reuse from 0.97 to 0.11. Pinned by
-`packages/agent/test/provider-request-prefix-stability.test.ts`,
-`packages/coding-agent/test/provider-prefix-stability.test.ts`, and the long-session contract gate
-(`PI_PROFILE_GATE=1` on `test/profiling/host-long-session.profile.test.ts`). The ordinary workload
+sessions, losing this took cache reuse from 0.97 to 0.11. The ordinary workload
 requires reuse p50 at or above 0.98 and no more rewrites than grid crossings of the context-GC
 boundary plus one. The large-output workload cannot use that ratio as a correctness gate because
 newly appended tool bytes are legitimately uncached; it instead requires every append to retain
@@ -30,9 +28,7 @@ because a rewrite 30 messages deep and one 300 messages deep are not the same co
 
 **Sent bytes are never rewritten.** Deduplication and erasure act only on history the provider has
 not seen (`sentPrefixCount`); host records are opaque to path aliasing so their bytes are the same
-on the request that introduces them and every request after. Pinned by
-`packages/agent/test/provider-request-prefix-stability.test.ts` and
-`packages/coding-agent/test/path-alias-session.test.ts`.
+on the request that introduces them and every request after.
 
 **Query visibility preserves prefix custody and reports its signed cost.** A relevance verdict is
 scoped to the exact query and bounded evidence revision it judged. An unsent stale result may become
@@ -41,9 +37,7 @@ already packed returns only as a request-tail projection. A bounded tail project
 GC retrieval key only after the original is readable; until then it fails open to the full evidence.
 Missing judgments also fail open, and a changed verdict invalidates the request plan before send.
 The context dashboard subtracts only in-place reductions, adds tail-projection tokens, and counts an
-advisory eviction only when high-confidence irrelevant evidence was actually hidden. Pinned by
-`packages/coding-agent/test/provider-prefix-stability.test.ts` and
-`packages/coding-agent/test/context-composition.test.ts`.
+advisory eviction only when high-confidence irrelevant evidence was actually hidden.
 
 **A host record carries only what changed, and the sent prefix survives a new prompt.** Append
 once per change was not enough: measured on the owner's 0.97.25 sessions the alias legend was
@@ -69,11 +63,7 @@ declined batch stays as sent and is offered again, larger, at the next crossing;
 stays packed while frozen. Rewrites therefore happen at most once per stride, never per turn and never
 because a run started; the long-session gate counts them against the number of crossings instead of a
 flat append share. Compaction summarizes the packed projection, and a deterministic checkpoint is
-recorded as `fallback` with its cause, never `success`. Pinned by `packages/coding-agent/test/path-alias-session.test.ts` (delta and budget),
-`packages/agent/test/transient-records-index.test.ts` (pointer and cumulative kinds),
-`packages/coding-agent/test/context-gc-frozen-prefix.test.ts` (priced crossing batches, frozen stubs,
-declined batches staying as sent), `packages/coding-agent/test/compact-goal-context.test.ts`, and
-`packages/agent/test/session/lifecycle-ledger.test.ts` (fallback outcome).
+recorded as `fallback` with its cause, never `success`.
 
 **A cache break passes the custody gate, or it is a defect.** Every foreground and worker request is
 classified against its lane's previous one: an append, the lane's first request, a break the gate
@@ -88,10 +78,7 @@ and the prompt's date, which is pinned per session and advances only then. Reaso
 a lane keeps the level it last sent against a host adjustment (host-turn and bookkeeping lowering)
 while its cache is warm; the owner's own level, a return to it, and the owner's cost ceiling always
 pass. Why: measured on the owner's sessions a reasoning-only change made a cold cache five times as
-likely (47% against a 9% baseline). Pinned by `packages/coding-agent/test/cache-custody-contract.test.ts`
-(a tool loop, a 12-call parallel batch, a bookkeeping turn and an extension prompt change leave every
-request an append, one reasoning level, and no unsanctioned break in the ledger; a worker's tool loop
-leaves no unsanctioned break and is observed on its own conversation).
+likely (47% against a 9% baseline).
 
 **Every owner message reaches the selected root model.** Greetings, substantive requests and
 toolkit names enter the root's full conversation with its tool surface. The host does not pre-route
@@ -101,10 +88,7 @@ worker authority, and a worker reads a brief instead of silently becoming the ow
 A selected local root boots its managed runtime or fails visibly; it is not silently replaced by a
 configured cloud tier. An explicitly routed local model may use the configured tier fallback when
 its runtime is unavailable. Why: automatic foreground model swaps re-send the conversation and
-override the owner's selected root. Pinned by
-`packages/coding-agent/test/agent-session-model-router.test.ts`,
-`packages/coding-agent/test/agent-session-local-runtime.test.ts`, and
-`packages/coding-agent/test/interactive-mode-ollama-install-smoke.test.ts`.
+override the owner's selected root.
 
 **A discretionary retrieve fan-out is priced as the execution it will actually launch.** The root
 pays its learned request count against its warm prefix. The worker alternative freezes one question
@@ -112,7 +96,7 @@ list for both the decision and execution, then prices every independent worker's
 brief, repeated cache reads, and generated bounded report; the combined bounded evidence is charged
 once when it returns to the root. Missing prices, learned request counts, worker-prefix evidence, or
 a valid fan-out count keep work on the root. Capability-required workers and failure recovery remain
-constraints, not cost-vetoed choices. Pinned by `packages/coding-agent/test/work-boundary.test.ts`.
+constraints, not cost-vetoed choices.
 
 **Every agent runs the conversation mechanics; only the head orchestrates.** A worker plans each
 request with root's own request-context controller (context GC on its own lane, path aliases, the
@@ -124,16 +108,13 @@ model routing, System One intake and report acceptance, spawning, goals, reflect
 self-adaptation, memory writes, extensions and the owner surface. A worker prices on its own lane's
 inputs, never on root's. A routed worker whose account runs out of quota moves to its next routing
 candidate on retry (its contract's ordered-fallback policy), and the attempt records the model it ran on.
-Pinned by `packages/coding-agent/test/cache-custody-contract.test.ts` (the worker leg).
 
 **Per-request host work is bounded.** Every request-time scan resumes from the history prefix it
 already covered; the profiler's last decile of pre-request time may not exceed twice its first.
 Path aliasing resumes from the message contents it already scanned (fingerprints persisted in
 `path_alias_scanned`), not from a timestamp mark: a mark skipped a message stamped in the same
 millisecond, a replaced message, and an older unscanned message reached by a branch switch or
-restart. A message sent while minting is paused is not marked scanned. Pinned by the long-session
-contract gate, `packages/agent/test/tool-failure-memory.test.ts` and
-`packages/coding-agent/test/path-alias-session.test.ts` (scan cursor).
+restart. A message sent while minting is paused is not marked scanned.
 
 **A profile measures executed work, not skipped or failed synthetic actions.** Valid scripted
 actions must execute with zero tool errors and the exact expected foreground action count. Each
@@ -141,14 +122,12 @@ configured delegation must perform its assigned read, return a valid claim, be a
 the succeeded state. Summary requests use their own response path; consuming foreground or worker
 responses during compaction would silently remove work from the measurement. This strengthens the
 workload evidence without changing the cache or latency thresholds. Synthetic runs do not prove
-real-provider behavior or indefinite memory boundedness. Pinned by
-`packages/coding-agent/test/profiling/host-long-session.profile.test.ts` and
-`packages/coding-agent/test/profiling/host-response-script.test.ts`.
+real-provider behavior or indefinite memory boundedness.
 
 **Every request carries an output cap.** `maxOutputTokens` narrows the model's registry limit, the
 capability tier narrows it further, a goal budget further still; nothing widens a model's limit.
 Why: one full-class model streamed a single sentence for twenty-three minutes against a 500,000
-token limit. Pinned by `packages/coding-agent/test/agent-session-retry.test.ts`.
+token limit.
 
 **A turn the host starts for itself runs one rung cheaper, and the live row says where the time
 went.** The request that answers a host-delivered completion (`background-tool-completion`,
@@ -169,10 +148,7 @@ stamps `AssistantMessage.firstTokenAt` and splits the model perf profile - and s
 renders exactly the elapsed figure it always did. Why: on a slow-first-token provider the first
 token is p50 11.5 s, about 40 % of a turn's active time, and the operator could not tell "waiting
 for the provider" from "generating" while paying full reasoning effort for a turn that only had to
-quote a finished result. Pinned by `packages/coding-agent/test/host-turn-reasoning.test.ts`,
-`packages/coding-agent/test/suite/agent-session-host-turn-reasoning.test.ts`,
-`packages/coding-agent/test/activity-lane.test.ts` and
-`packages/coding-agent/test/interactive-event-controller.test.ts`.
+quote a finished result.
 
 **The agent sees its context gauge and hands itself off at a clean checkpoint.** The root reads
 its usage and three lines through `self_compact` without a note and `context_audit`: notice and
@@ -198,10 +174,6 @@ the note ends the handoff instead of looping. Host early, idle and hard compacti
 cancelled. `self_compact` is root-only: worker compaction is inline in the worker's request planning
 with no idle checkpoint, so the tool is in the worker forbidden set rather than silently inert.
 Its projected schema has a separate 140-token allowance (aggregate 5,953 = 5,813 + 140 self_compact).
-Pinned by `packages/coding-agent/test/context-composition.test.ts`,
-`packages/coding-agent/test/self-compaction.test.ts`,
-`packages/coding-agent/test/self-compaction-controller.test.ts` and
-`packages/coding-agent/test/suite/self-compaction.test.ts`.
 
 ## Tool surfaces
 
@@ -216,13 +188,7 @@ is the message, `agentId` on `status`/`review` is that agent's latest lane, `mes
 and takes `force: true` — while a plural on a singular action or two selectors still refuse. An
 invented `sN-<slug>` or `sN-<uuid>` task-step selector names the one step carrying that number; a
 trailing numeric fragment (`s1-2`) still refuses. When an exact `step-N` is absent and not archived, an
-ordinal position selector resolves to the open step at that 1-based index. Pinned by
-`packages/coding-agent/test/delegate-exact-input-corrections.test.ts`,
-`packages/coding-agent/test/worker-authority-resolver.test.ts`,
-`packages/coding-agent/test/task-state.test.ts`,
-`packages/coding-agent/test/goal-tool-core.test.ts`,
-`packages/coding-agent/test/goal-evidence-verification.test.ts`, and
-`packages/coding-agent/test/bash-search-guard.test.ts`.
+ordinal position selector resolves to the open step at that 1-based index.
 
 **A cited command matches its producing call on what was executed, and a miss says what to cite.**
 Tool evidence compares the citation and the call's `command` (bash, `run_process`) or `code` /
@@ -236,9 +202,7 @@ evidence id, and the reply names what it satisfied; evidence that does not verif
 nothing; an unknown requirement keeps the evidence and the satisfies that already landed and names
 the miss. A directory cited as file evidence is refused naming a file inside it. Why: a re-typed
 command with a collapsed run of spaces cost a rejected goal turn each time, and every verified
-evidence entry cost a second request just to satisfy its requirement. Pinned by
-`packages/coding-agent/test/goal-evidence-verification.test.ts` and
-`packages/coding-agent/test/goal-tool.test.ts`.
+evidence entry cost a second request just to satisfy its requirement.
 
 **Tool output is a shorter version of the real output, never a different one; the original is one
 read away.** Every reducer only removes lines, collapses repeats or regroups what the command
@@ -251,12 +215,7 @@ persisted file, so the omitted records are one jq call away, never a full read),
 bypasses every stage with `fullOutput: true`. Reduction
 is byte-stable: the same output reduces to the same bytes, so a re-sent result never re-prefills.
 Measured on live sessions (`scripts/output-reduction-census.mjs`): search results save a quarter of
-their bytes, compiler reports three quarters. Pinned by
-`packages/coding-agent/test/output-reduction.test.ts`,
-`packages/coding-agent/test/generic-output-reducer.test.ts`,
-`packages/coding-agent/test/search-output-reducer.test.ts`,
-`packages/coding-agent/test/diagnostics-output-reducer.test.ts` and
-`packages/coding-agent/test/json-output-reducer.test.ts`.
+their bytes, compiler reports three quarters.
 
 **A NUL never reaches a text file through `edit` or `write`.** U+0000 in a replacement or in
 written content is a transport defect, not content: an editing model has been observed sending it in
@@ -270,9 +229,7 @@ re-sent without that character, never the file written through a shell instead. 
 the string: guessing which character the NUL replaced is how a corrupted space becomes a corrupted
 file. `edit` skips the check for a replacement whose own `oldText` also carries U+0000, so this guard
 never becomes the layer that refuses a NUL-bearing source; that stays the edit encoding contract's
-decision. Repair codes `nul_in_replacement` and `nul_in_content` carry the guidance. Pinned by
-`packages/coding-agent/test/edit-nul-guard.test.ts`,
-`packages/coding-agent/test/write-nul-guard.test.ts` and `packages/ai/test/tool-repair.test.ts`.
+decision. Repair codes `nul_in_replacement` and `nul_in_content` carry the guidance.
 
 **The tool list stays stable between explicit runtime or provider transitions.** It sits before
 the messages in every prompt, so ordinary turns must not churn disclosed schemas. Explicit reload
@@ -305,12 +262,7 @@ tools, including `peer`, and the measured growth of `goal` and `create_goal` ove
 330-token and 84-token baselines. Every pre-existing aggregate component and individual schema
 ceiling stays unchanged; the peer allowance cannot subsidize unrelated tool growth. The additions address
 reproduced wrong-directory execution and safe task automation without widening worker grants or introducing
-per-turn schema churn. Pinned by
-`packages/coding-agent/test/context-composition.test.ts`,
-`packages/coding-agent/test/session-task-directories.test.ts`,
-`packages/coding-agent/test/task-directory-status.test.ts`,
-`packages/coding-agent/test/suite/runtime-update.test.ts`, and
-`packages/coding-agent/test/suite/image-generation-provider-surface.test.ts`.
+per-turn schema churn.
 
 **Deferred tool schemas remain bound to the model and surface that will execute them.** A verified
 Anthropic model and endpoint may expose the stateless, zero-authority `tool_search` only when the
@@ -320,27 +272,22 @@ re-evaluate that rule against the selected worker model, so an inherited Claude 
 lend search to another provider. Search results reference only the exact current request's deferred
 set. `/context` reports the latest accepted disclosure counts, estimated hidden schema tokens,
 misses, and latency as historical evidence without subtracting them from the current request
-estimate. Pinned by `packages/coding-agent/test/worker-authority-resolver.test.ts` and
-`packages/coding-agent/test/context-composition.test.ts`.
+estimate.
 
 **Equivalent action branches compact only at the provider boundary.** Identical `anyOf` branches
 may share an enum discriminator when every other validation constraint matches. Exclusive unions
 remain intact; local validation retains the original branches and their actionable repair text.
-This preserves the schema budgets without weakening execution validation. Pinned by
-`packages/agent/test/provider-tool-projection.test.ts` and
-`packages/coding-agent/test/suite/regressions/delegate-action-preflight.test.ts`.
+This preserves the schema budgets without weakening execution validation.
 
 **A tool failure record resolves after two later calls of the same tool executed without
 retrying it; one later call keeps it.** Why: one corrective call may precede the retry a record
-asks for; a record kept forever re-appended the trailing ledger on every request. Pinned by
-`packages/agent/test/tool-failure-memory.test.ts`.
+asks for; a record kept forever re-appended the trailing ledger on every request.
 
 **A cancelled call never enters the failure ledger.** An abort (operator interrupt, send now,
 compaction, dispose) stops a call that was doing what it was asked; a tool that throws while the
 run's signal is aborted finalizes as `aborted` with the abort's name in its text, is not a kind
 mistake, and is not an active failure. Why: a 30-minute hang ended with two killed siblings charged
-to the model as mistakes with no diagnostic. Pinned by `packages/agent/test/agent-loop.test.ts`
-(cancellation cases) and `packages/agent/test/tool-failure-memory.test.ts`.
+to the model as mistakes with no diagnostic.
 
 **A background command occupies neither the exclusive mutation barrier nor the agent's shell
 session.** `background: true` waits only for the file writes its own message emitted before it,
@@ -350,10 +297,7 @@ coordinator); a clock or manual handoff releases the barrier the moment the call
 task; a call still queued on the barrier unwinds at once when its signal aborts. Why: a background
 `svnproject` held the process-wide writer lock AND the one-command-at-a-time persistent shell for
 its whole life, every sibling bash/python parked behind it, the turn hung 30 minutes and Escape did
-nothing; the shell half was only found by a live run after the barrier half was fixed. Pinned by
-`packages/coding-agent/test/bash-edit-write-race.test.ts`,
-`packages/coding-agent/test/background-handoff-barrier.test.ts` and
-`packages/coding-agent/test/bash-background-shell.test.ts`.
+nothing; the shell half was only found by a live run after the barrier half was fixed.
 
 **Commands emitted together run together.** Foreground bash calls take lanes from an elastic pool
 of reusable persistent shells (three kept warm per session, more created on demand up to eight,
@@ -365,23 +309,18 @@ exclusive. Shutdown starts every independent lane/resource close, waits for all 
 then reports one failure or their aggregate; a fast failed close cannot let session disposal finish
 while a slower sibling still owns a process. Why: one persistent shell plus a FIFO writer lock turned
 three commands emitted in one message into three sequential waits, and fail-fast cleanup later let a
-session terminal race a sibling shell close. Pinned by `packages/coding-agent/test/shell-lane-pool.test.ts`,
-`packages/coding-agent/test/task-shell-sessions.test.ts`,
-`packages/coding-agent/test/bash-concurrent-lanes.test.ts` and
-`packages/coding-agent/test/bash-edit-write-race.test.ts`.
+session terminal race a sibling shell close.
 
 **A maintenance terminal covers every durable mutation it admitted.** Independent reconciliation
 mutations all start, all settle, and only then report one failure or their aggregate; `waitForIdle`
 and session shutdown cannot finish while a sibling durable write is still pending. Why: fail-fast
 process-matrix startup reconciliation let a failed prune settle the master maintenance promise while
-an interrupted-worker recovery write could still land after stop. Pinned by
-`packages/coding-agent/test/process-matrix-reconciliation-settlement.test.ts`.
+an interrupted-worker recovery write could still land after stop.
 
 **Integrity hooks inspect snapshots; they never borrow execution state.** One point-in-time context
 snapshot is captured per hook run, and every extension receives its own detached copy. A timed-out
 hook may finish late but cannot rewrite the caller's admitted tool arguments; one extension cannot
-change the evidence a later extension evaluates. High-impact timeout remains fail-closed. Pinned by
-`packages/coding-agent/test/system-one/integrity-hook-context-isolation.test.ts`.
+change the evidence a later extension evaluates. High-impact timeout remains fail-closed.
 
 **The group lock belongs to the worktree; emission order belongs to the session; the per-path
 queue belongs to the process.** The barrier's holders and waiters live in a scope keyed by the
@@ -395,9 +334,7 @@ take turns whatever tree they think they are in. A scope is held open by every s
 constructed in it and disposed when the last one leaves; callers that name no scope share one
 default scope, which is what a single-session process always had. Why: every piece of that state
 used to be a module global (a parent and its lanes shared one announcement table), and a first
-per-session cut removed the interlock along with the bug. Pinned by
-`packages/coding-agent/test/mutation-lock-scope.test.ts` and
-`packages/coding-agent/test/bash-edit-write-race.test.ts`.
+per-session cut removed the interlock along with the bug.
 
 **An export on any lane is an export of the session.** Every bash lane reports its `export -p`
 listing in the command sentinel (frame v2) only when the listing changed since that lane's previous
@@ -408,9 +345,7 @@ in either order both contribute and a sibling's stale snapshot can never erase a
 behind the ledger replays the `declare -x` lines it lacks and `unset -v` for names the session no
 longer exports before its next command. Windows engine lanes share one `WindowsShellState` and need
 no ledger; the PowerShell floor stays lane-local. Why: with the lane pool, `export FOO=1` in one
-command and `$FOO` two commands later could land on different shells. Pinned by
-`packages/coding-agent/test/shell-export-sync.test.ts` and
-`packages/coding-agent/test/bash-concurrent-lanes.test.ts`.
+command and `$FOO` two commands later could land on different shells.
 
 **A file's encoding is the harness's problem, never the model's.** Read and edit resolve it in
 this order: the `encoding` argument, the `fileEncodings` setting (glob to codec), the nearest
@@ -422,22 +357,15 @@ replacement the codec cannot represent fails before any byte is written and name
 The only encoding failure a model can see is "Python is unavailable". Why: eleven read failures in
 one live session told the model that "exact UTF-8 replacement is unsafe" and it abandoned the tool
 for shell decoding; the owner's rule is that Python is applied to do the edit safely, mandatorily.
-Pinned by `packages/coding-agent/test/edit-detected-encoding.test.ts`,
-`packages/coding-agent/test/read-encoding-recovery.test.ts`,
-`packages/coding-agent/test/edit-byte-preservation.test.ts` and, for the ledger guidance text,
-`packages/agent/test/tool-failure-memory.test.ts`.
 
 **The sanitizer keeps a rejected attempt out of the agent's context.** Measured on the request
 after an omission, the server prompt cache still hit almost fully; the omission costs one request
-without the transport delta, not a re-prefill. Pinned by `packages/agent/test/tool-failure-memory.test.ts`
-and `packages/coding-agent/test/phone-filesystem-workflow.test.ts`.
+without the transport delta, not a re-prefill.
 
 **A read miss locates; it does not invite create.** `read` file_not_found publishes
 `filesystem.file.exists` plus ancestor locate evidence. Write-create is
 `filesystem.file.missing.create` and is not loaded from that observation. A later same-path write
-is still a different tool and can re-admit the read. Pinned by
-`packages/coding-agent/test/phone-filesystem-workflow.test.ts` and
-`packages/coding-agent/test/tool-failure-recovery-contract.test.ts`.
+is still a different tool and can re-admit the read.
 
 ## Guards
 
@@ -470,8 +398,7 @@ semantic classification; an existing owner decision cannot be vetoed or delayed 
 call. Scoped grants retain their exact operation identity and never become blanket authority.
 Cancellation, capability envelopes, path boundaries and mandatory verification remain authoritative.
 Verdicts for ungranted work are cached for identical calls within a turn; a session without System One keeps
-the deterministic gates alone. Pinned by `packages/coding-agent/test/edge-policy.test.ts` and
-`packages/coding-agent/test/system-one/operation-gate.test.ts`.
+the deterministic gates alone.
 
 **System One checks a plan when it is published or changed.** After a `task_steps` set, intake or
 add, the whole current plan and the owner's request go to System One as three questions, each naming
@@ -479,7 +406,7 @@ one defect: a requested part no step does, a step that needs a later step's resu
 checks the result. A defect at the noul hard-fail band (0.8) is appended to the tool result as a
 steer, so the model revises the plan before working from it; a defect above an even chance is a
 doubt shown to the operator; a failing System One is a doubt, never a block. Status updates are not
-reviewed. Pinned by `packages/coding-agent/test/system-one/plan-review.test.ts`.
+reviewed.
 
 **One classification is conditional on live state, not on the command alone.** Several pi sessions
 share one worktree, so `git reset --hard`, `git clean -f`, `git checkout -- …`, `git restore` and
@@ -526,19 +453,14 @@ allowed roots) and the literal edge classes above — and `bash`/`python` stay e
 execution boundaries (`session-role.ts`): no gate reads Python source or shell text for intent, and
 none claims to contain arbitrary process code. The session proof of an ungranted class uses
 `npm publish` (`package.publish`). Root bash refuses a git invocation before the edge confirmer,
-so that proof is not a git command. Pinned by
-`packages/coding-agent/test/python-tool-registration.test.ts`,
-`packages/coding-agent/test/edge-policy.test.ts` and
-`packages/coding-agent/test/agent-session-edge.test.ts` and
-`packages/coding-agent/test/autonomy-default-authority.test.ts`.
+so that proof is not a git command.
 
 **A failed admission cannot erase already-executed work.** The scheduler drains dispatched siblings
 before terminating after reservation failure or cancellation. Completed tool results remain in
 source order, agree with message callbacks, and precede the unsuccessful terminal signal. Calls
 whose bodies never started are not fabricated as successful results. A cancelled batch never
 issues another provider request. This supersedes the old scheduler characterization that returned
-only one synthetic abort and discarded earlier evidence. Pinned by
-`packages/agent/test/tool-batch-settlement.test.ts` and `packages/agent/test/agent-loop.test.ts`.
+only one synthetic abort and discarded earlier evidence.
 
 **Progress observation cannot change execution.** A listener throwing or rejecting cannot interrupt
 the tool body or erase its returned result. Admitted observations drain before finalization; late
@@ -548,16 +470,13 @@ and operation status from progress/after-hook failure tags. A generic throw leav
 an explicit operation-outcome exception is completed-negative. Foreground delivery failure stops
 after retaining results. Background persistence and notification retain request-bound execution
 facts; unavailable completion remains unknown. Tools and hooks cannot manufacture those facts.
-Pinned by `packages/agent/test/tool-progress-delivery.test.ts` and
-`packages/agent/test/tool-progress-settlement.test.ts`.
 
 **Reporting dimensions keep their scope.** `ToolInvocationReport` owns receipt classification and
 replay reconciliation. A background terminal updates the original call and cycle, not a second
 action. Completed-negative operations, unknown effects, rejection, postprocessing faults, and raw
 error results remain distinct. The workbench labels cycle calls separately from retained error
 results; their quotient is never a failure rate. Bounded retention discloses saturation as partial,
-and missing or conflicting evidence never certifies success. Pinned by
-`packages/agent/test/tool-invocation-report.test.ts` and the workbench controller regressions.
+and missing or conflicting evidence never certifies success.
 
 **Verification is a typed host receipt, not a claim in prose.** Goal test evidence must resolve
 to a passing receipt on the active branch; complete user quotations resolve only to user-role
@@ -574,13 +493,7 @@ executed or unknown failures cannot be downgraded into setup failures. Compactio
 relationships. Historical receipts without that proof remain unresolved.
 The executor's receipt is captured before hooks and survives hook mutation, replacement, failure,
 and background handoff. A hook cannot turn an executed failure into a passing witness or invent
-a witness for an opaque result; ordinary content and policy overrides remain available. Pinned by
-`packages/coding-agent/test/goal-evidence-verification.test.ts`,
-`packages/coding-agent/test/bash-verification-boundary.test.ts`, and
-`packages/agent/test/tool-terminal-evidence.test.ts`,
-`packages/agent/test/verification-setup-repair.test.ts`,
-`packages/coding-agent/test/node-verification-boundary.test.ts`, and
-`packages/coding-agent/test/test-verification-output.test.ts`.
+a witness for an opaque result; ordinary content and policy overrides remain available.
 
 **An unresolved obligation marks the run that produced it and blocks completion; it never
 errors a later answer.** The host preserves the answer of the run whose own check failed and
@@ -594,33 +507,25 @@ obligation with `/verify dismiss`, a user-plane record the tracker honours and g
 counts as a pass. The host does not erase prose or spend extra provider turns demanding opaque-ID
 grammar. Reflection cannot claim a cancelled submission or unsuccessful terminal turn, and it buys
 no turn while goal work is open (an active goal or an in-progress task step): the cue stays due
-until the work closes. Pinned by
-`packages/coding-agent/test/suite/regressions/unresolved-verification-handoff.test.ts` and
-`packages/coding-agent/test/reflection-turn-lifecycle.test.ts`.
+until the work closes.
 
 **A repair survives first failure and replay.** The adapter supplies the bounded correction;
 the shared recovery path retains it independently of optional diagnostic text. Action-dependent
-required fields reject before execution and report the missing field. Pinned by
-`packages/agent/test/tool-failure-replay-correction.test.ts`,
-`packages/coding-agent/test/suite/regressions/credential-repair-projection.test.ts`, and
-`packages/coding-agent/test/suite/regressions/delegate-action-preflight.test.ts`.
+required fields reject before execution and report the missing field.
 
 **Reordering unchanged results does not create progress.** A bounded history of matching
 operations and result signatures detects stagnant batches even when their order or membership
 changes. New operations and changed results reset the counter. Existing recovery admission and
-call fuses remain authoritative. Pinned by `packages/agent/test/tool-result-progress.test.ts`
-and `packages/agent/test/runaway-loop.test.ts`.
+call fuses remain authoritative.
 
 **Protocols are mechanisms, prose points at them.** The readmission gate and the ledger resolution
 enforce the failure protocol; the protocol text lives once in the stable system prompt and an
-active record carries one pointer line (the constrained tier keeps the full text). Pinned by
-`packages/agent/test/tool-failure-memory.test.ts`.
+active record carries one pointer line (the constrained tier keeps the full text).
 
 **A degenerate output loop ends before the cap.** The stream guard ends a response whose trailing
 window repeats the tier's number of times, classified as a runaway, never retried unchanged. The
 comparison collapses ordered-list markers, so an enumerated loop whose only change is its number
 is still a loop, while rows that differ only in their numbers are still output.
-Pinned by `packages/agent/test/reliability/stream-idle.test.ts`.
 
 **Caller cancellation owns outer-stream settlement.** Before provider setup completes, cancellation
 settles immediately. After setup, the provider has a bounded grace period to publish its own abort
@@ -628,15 +533,13 @@ terminal; if it ignores abort and remains silent, the watchdog publishes an `abo
 itself. A cooperative provider terminal wins during that grace, and cancellation is never reported
 as a retryable stream stall. Why: once setup had completed, caller abort disabled both the setup
 fallback and the idle-stall fallback, so an abort-ignoring iterator could keep the harness pending
-forever. Pinned by `packages/agent/test/reliability/stream-idle.test.ts`.
+forever.
 
 **A tool-loop runaway is evidence.** A repeated tool call, a stagnant tool cycle, or the
 provider-turn limit records a runaway stop, demotes the model to the strong tier for thirty days,
 and the goal continues on a recovery path. An output runaway from the stream guard ends the
 response and leaves the goal to change approach, but does not demote on its own: the guard is
 measured against one real loop and a legitimately repetitive output must not cost a model a month.
-Pinned by `packages/coding-agent/test/agent-session-runaway-escalation.test.ts` and
-`packages/coding-agent/test/capability-tier.test.ts`.
 
 **A stall budget belongs to a model class, never to every provider at once.** Local and
 pi-managed models draw on `retry.stall.local` (the legacy top-level `connectMs` / `activeIdleMs` /
@@ -647,18 +550,14 @@ class default rather than falling through the HTTP clamp to the local default. W
 are set without a `cloud` entry the settings diagnostics say so once at startup. Why: a CPU-served
 local model legitimately sits silent for minutes while it loads, a hosted stream silent that long
 is dead, and one shared budget raised for the first left dead cloud streams running for fifteen
-minutes. Pinned by `packages/coding-agent/test/stream-stall-model-class.test.ts` and
-`packages/coding-agent/test/settings-manager.test.ts`.
+minutes.
 
 **An expired credential is never reported as a missing one.** A stored OAuth credential that is
 past its expiry and cannot be refreshed fails as `OAuthCredentialUnusableError`: the provider,
 the expiry date, the redacted refresh failure and `Run pi login <provider>`; lower-priority key
 sources never stand in for the credential the user chose, and only a provider with no stored
 credential at all reads `No API key`. Why: a four-day-stale token surfaced as "No API key for
-provider: xai", which points at the wrong fix. Pinned by
-`packages/coding-agent/test/auth-storage.test.ts`,
-`packages/coding-agent/test/auth-storage-oauth-only.test.ts` and
-`packages/coding-agent/test/agent-session-oauth-credential-expired.test.ts`.
+provider: xai", which points at the wrong fix.
 
 ## Workers
 
@@ -693,11 +592,6 @@ Status exposes only validated permission names bound to the selected
 attempt, never permission guesses or raw resource grants. Inspection pages omit opaque provider
 replay signatures before output sizing; raw replay remains exact and both input and output are
 bounded. Unsupported status selectors refuse instead of expanding the selection.
-Pinned by `packages/coding-agent/test/worker-authority-resolver.test.ts`,
-`packages/coding-agent/test/native-worker-autonomy.test.ts`,
-`packages/coding-agent/test/repo-read.test.ts`,
-`packages/coding-agent/test/worker-task-view.test.ts`, and
-`packages/coding-agent/test/worker-transcript-inspection.test.ts`.
 
 **A fresh worker captures the task directory without re-anchoring authority.** Native delegate and
 goal dispatch inherit the caller's admitted task cwd before queueing. An explicit relative worker
@@ -706,10 +600,7 @@ scope. Default permission roots remain anchored to the granting session, includi
 selection moves to a UNC share. Queued and reused workers keep their admitted cwd, and unavailable
 foreground directories cannot block status or cancellation. Why: resolving every fresh request from
 the launch directory dispatched work into the wrong project; treating the execution directory as
-the grant anchor could silently add a new share. Pinned by
-`packages/coding-agent/test/worker-authority-resolver.test.ts`,
-`packages/coding-agent/test/worker-execution-policy.test.ts`, and
-`packages/coding-agent/test/session-worker-directories.test.ts`.
+the grant anchor could silently add a new share.
 
 **A fresh, unpinned worker runs on another account than the foreground when one is authenticated,
 and inherits the foreground thinking level one notch down; authored choices are never moved.**
@@ -726,9 +617,7 @@ a profile binding and a model pin are authored choices and are applied exactly a
 measured on the owner's sessions of 2026-09-04..11, workers inherited `xhigh`, and a wave of five
 to seven workers each spending the foreground's full reasoning budget at once was the largest
 single source of shared-account load (277 of the 334 xAI requests that overlapped another were
-workers), while the owner's own request waited behind them. Pinned by
-`packages/coding-agent/test/worker-authority-resolver.test.ts` and
-`packages/coding-agent/test/native-worker-autonomy.test.ts`.
+workers), while the owner's own request waited behind them.
 
 **A provider limit one process learns is a limit every process honours; the owner's foreground
 request never waits for capacity or the stop; workers and background lanes yield at the provider's
@@ -762,9 +651,7 @@ perf profiler, so waiting is neither a connect stall nor time to first token. Wh
 2026-09-04..11 across several pi sessions, Codex CLI and Claude Code on one box, a second Codex
 request in flight from any process cut generation from 97.7 to 62.2 tokens per second, and no
 process knew what its siblings were sending; the census did not measure the count at which a cap
-pays for itself, so the ledger records by default and a limit is the owner's choice. Pinned by
-`packages/coding-agent/test/provider-admission.test.ts` and
-`packages/coding-agent/test/provider-admission-completion.test.ts`.
+pays for itself, so the ledger records by default and a limit is the owner's choice.
 
 **Queue validation cannot substitute a directory or start an attempt twice.** Fresh worker and
 verifier contracts capture native directory identity before durable dispatch. Queued and resumed
@@ -775,10 +662,7 @@ Mailbox recovery runs before queue ownership transfers, so it cannot rediscover 
 the attempt being started. Historical contracts retain explicitly admitted path-only recovery with
 a diagnostic: identity never recorded cannot be reconstructed, and that limitation cannot bypass
 a saved binding. Synthetic foreground and worker response scripts are independent of scheduling
-order. Pinned by `packages/coding-agent/test/worker-directory-admission.test.ts`,
-`packages/coding-agent/test/worker-dispatch-preflight.test.ts`,
-`packages/coding-agent/test/session-worker-directories.test.ts`, and
-`packages/coding-agent/test/agent-session-worker-delegation.test.ts`.
+order.
 
 **A foreground call is handed off only on the model's request or the operator's clock.** A tool
 declares which calls are foreground waits (never handed off) and which ask for a background task
@@ -786,9 +670,7 @@ up front (`backgroundRequested`, handed off at once); every other call blocks up
 unless the operator configured a clock (`backgroundTool.callAfterMs`, off by default) or moved the
 call by hand. The handoff stub names which of the three moved the call (`started as session task
 … (background requested)`, `exceeded Ns; running as session task`, `moved to session task … by the
-operator`). Pinned by `packages/agent/test/agent-loop.test.ts` (foreground by default) and
-`packages/coding-agent/test/background-tool-task-controller.test.ts` and
-`packages/coding-agent/test/tool-task.test.ts`.
+operator`).
 
 **The completion wake-up carries the result.** When a background task ends, its wake-up lists each
 finished record's status line followed by its bounded final output verbatim, in emission order,
@@ -810,9 +692,7 @@ terminal-notification backoff and resolves its waiter before draining. The termi
 durable, so a failed notifier can neither hold session disposal until its retry clock expires nor
 erase the completion that the next owner must recover. Why: the completion wake-up already delivers
 the result; replaying output-derived summaries from a later list wastes context and can reintroduce
-stale failure diagnostics. Pinned by
-`packages/coding-agent/test/background-tool-task-controller.test.ts` and
-`packages/coding-agent/test/tool-task.test.ts`.
+stale failure diagnostics.
 
 ## System One
 
@@ -824,9 +704,6 @@ rechecked at queued/recovered dispatch and after asynchronous selection; a stale
 only its own capacity leases. Manual root selection remains available, and disabling routing disables
 automatic worker profile judgment while preserving explicit manual configuration. This replaces the
 previous all-authenticated default and outside-pool pin exception.
-Pinned by `packages/coding-agent/test/model-router-selection-modes.test.ts`,
-`packages/coding-agent/test/suite/worker-route-admission.test.ts` and
-`packages/coding-agent/test/expert-routing/system-one-allocation.test.ts`.
 
 **Model classification publishes only complete, bounded evaluations.** Independent lightweight
 questions carry only their targets' full facts, with stable global answer identities across batches.
@@ -836,8 +713,6 @@ and does not claim to measure provider tokens. An oversized individual or compar
 before transport and records a diagnostic. Cancellation or a failed batch publishes no partial pool;
 every actual request retains its own evaluation and usage. Structured provider rejection codes enter
 default diagnostics only through the allowlist; arbitrary provider detail values remain concealed.
-Pinned by `packages/coding-agent/test/system-one/model-evaluation-batches.test.ts` and
-`packages/coding-agent/test/system-one-failure-observability.test.ts`.
 
 **The host routes the loop from System One judgments; the root owns execution.** System One is the
 provider-neutral judgment contract, exposed through `systemone`; TypeSafe is a provider adapter.
@@ -855,7 +730,6 @@ operations retain semantic recovery judgment; a routing heuristic alone cannot p
 Operation refusals distinguish stale ownership/candidates from low or invalid probabilities. Resolution
 reports its confidence and next action; missing or invalid probabilities remain evaluator diagnostics
 and do not consume the same proof's retry. These paths preserve active findings and completion gates.
-Pinned by `packages/coding-agent/test/system-one/verification-coordinator.test.ts`.
 Worker supervision checks the original objective, task and live attempt before delivering control,
 so late judgments cannot affect a persistent worker's next assignment.
 Whenever System One is bound the
@@ -877,8 +751,6 @@ coordination boundary, not an objective failure: when automatic continuation rac
 owner, `AgentBusyError` returns to the auto-continuation owner for its idle wait and retry without
 blocking the goal or advancing its system-failure streak. Why: recording the admission race as an
 objective failure made the retry find an already-blocked goal and terminate reliable autonomous work.
-Pinned by `packages/coding-agent/test/goal-session-primary-loop.test.ts` and
-`packages/coding-agent/test/session-objective-runtime.test.ts`.
 
 **System One has the operator's two levers over every executor.** Cancel fires immediately (the Esc
 path, a named abort). A steer is either queued for the next model turn or delivered now by
@@ -894,8 +766,6 @@ against a real step or goal, never against an empty objective. A
 System One cancel of the root's own turn inside the objective loop is a re-route, not a stop; only
 the operator's interruption stops the loop. A worker judged off the mission is redirected now, a
 stalled one at its next turn, a repeated stall rerouted. The off-step cancel proof uses `echo status`.
-Pinned by `packages/coding-agent/test/system-one-foreground-control.test.ts` and
-`packages/coding-agent/test/system-one-worker-control.test.ts`.
 
 **The authority line says where a judgment may stop work** (`system-one/authority-line.ts`). Reversible
 work proceeds past a doubt or an outage with the doubt visible; an ambiguous judgment asks for
@@ -904,13 +774,11 @@ evidence at most twice per evidence revision, then reversible work proceeds. An 
 goes to the operator (root) or is refused (worker). A Noul has no confidence of its own (its
 probability is the certainty), so only Choice and Score answers are gated on confidence, and a
 low-confidence answer is a doubt routed to `gather_more`, never an exception that ends the run.
-Pinned by `packages/coding-agent/test/system-one/authority-line.test.ts`.
 
 **An owner question is observable before presentation and stays open on timeout.** The host
 publishes `waiting` before it invokes the presenter, then publishes `settled` even when presentation
 fails. An unanswered deadline leaves a pending snapshot and grants no authority; an external owner
-message may later resolve it. Pinned by `packages/coding-agent/test/human-input-activity.test.ts`
-and `packages/coding-agent/test/human-input.test.ts`.
+message may later resolve it.
 
 **Every answer's claims are checked against the turn's receipts** (`system-one/claim-delivery.ts`), with or
 without a live objective. System One classifies test-success claims as current success, historical-only,
@@ -920,8 +788,7 @@ a publish, or changed files. Code combines each settled answer with the
 turn's mechanical receipts. A claim the receipts contradict buys one correction turn; one no receipt
 backs is an unverified-claim warning. An enforced work unit is anchored to the assistant message that
 owns its first mutating call; provider lifecycle records written between that message and tool admission
-cannot cut the call out of the receipt window. Pinned by
-`packages/coding-agent/test/system-one/claim-delivery.test.ts`.
+cannot cut the call out of the receipt window.
 
 **Repository outcome evidence belongs to the receiving objective and its actual task repositories.**
 The mutation observer captures the dirty working tree before the first effect in each repository,
@@ -941,18 +808,13 @@ path sets rather than completed-call histories; undeclared mutations remain unow
 a delta observed by that successful call; a later no-op cannot validate an earlier failed partial write. Every admitted
 repository receives terminal cleanup even when a sibling's finalization fails. Missing baseline or
 snapshot evidence is an infrastructure diagnostic that requires recovery,
-never an empty patch or a manufactured production finding. Pinned by
-`packages/coding-agent/test/system-one/work-diff.test.ts`,
-`packages/coding-agent/test/system-one/session-work-diff.test.ts`,
-`packages/coding-agent/test/system-one/repository-mutation-work-evidence.test.ts`, and
-`packages/coding-agent/test/agent-session-system-one-task-directory.test.ts` and
-`packages/coding-agent/test/tool-gate-repository-scope.test.ts`.
+never an empty patch or a manufactured production finding.
 
 **Credential redaction applies to model-facing evidence metadata as well as text.** Paths, commands,
 source locators, repository identities, and work-diff diagnostics pass through the projector's existing
 redaction owner before evaluation. Projection does not change the authoritative local evidence or
 credentials used by authorized local operations. The transport's final credential check remains in
-place. Pinned by `packages/coding-agent/test/system-one/projector.test.ts`.
+place.
 
 **Mandatory findings remain active while the root changes its verification approach.** Repeated
 receiving-lane verification without new evidence routes to root replanning, retaining the original
@@ -964,18 +826,12 @@ Hydration timestamps and projection revisions do not count as new evidence. New 
 explicit owner resume permit another bounded attempt; cancellation and System One rerouting do
 not consume completed recovery. This bounds repeated replanning without inventing verification.
 Resolution reports identify selected receipts and uncertain proof conditions in the same judgment;
-diagnostic answers do not create an additional acceptance gate. Pinned by
-`packages/coding-agent/test/objective-execution/objective-execution-controller.test.ts` and
-`packages/coding-agent/test/objective-execution/same-lane-recovery-bound.test.ts`,
-`packages/coding-agent/test/goal-session-primary-loop.test.ts`, and
-`packages/coding-agent/test/system-one/verification-coordinator.test.ts`.
+diagnostic answers do not create an additional acceptance gate.
 
 **The TUI reads unresolved items from their lifecycle owners.** Deterministic checks, mandatory peer
 findings, and advisory doubts have separate live counts. Resolving or replacing a finding updates
 the existing projection; evaluation history does not create new active rows. Peer tool completion
-and session reload refresh the view. Pinned by
-`packages/coding-agent/test/system-one/peer-finding-ui-projection.test.ts` and
-`packages/coding-agent/test/agent-session-semantic-verification-obligations.test.ts`.
+and session reload refresh the view.
 
 **What no agent could settle climbs a ladder, then reaches the owner** (`system-one/unsettled-ladder.ts`).
 A worker reports findings it could not confirm as `inconclusive`, never rounded up. System One judges
@@ -983,9 +839,7 @@ each against the worker's own tool results; then a stronger model names the sett
 One judges it; each pass carries new evidence, at most two. The model finds, System One decides. What stays
 open goes to the owner: asked through the parent with the owner in the loop, written to the follow-up
 document under a handoff while the run continues around it. `systemone` is authorized by
-`semantic.judge`, which read-only grants keep. Pinned by
-`packages/coding-agent/test/system-one/unsettled-ladder.test.ts` and
-`packages/coding-agent/test/worker-inconclusive-ladder.test.ts`.
+`semantic.judge`, which read-only grants keep.
 
 **System One catches logic that is duplicated but written differently** (`system-one/code-duplicates.ts`). Token
 clone detection finds copies; it cannot see two functions that do the same job with different names
@@ -994,7 +848,6 @@ fingerprints, with rarity measured from the index, never listed by hand; identic
 candidate but is not the same job. System One judges every (new unit, candidate) pair of an edit in one
 request and a decisive duplicate is reported in the edit's result, naming the function to reuse.
 `npm run scan:semantic-duplicates` runs the same judgment over every production unit.
-Pinned by `packages/coding-agent/test/system-one/code-duplicates.test.ts`.
 
 **A noul answer is a probability with a direction, never a boolean.** Noul is P(the proposition is
 true). The decision is the pair (direction, band): `required_true` needs the high end,
@@ -1008,14 +861,13 @@ doubt routes to `gather_more` — look again — instead of passing or rejecting
 carries those predicates as `unsure_semantic_predicates`. A per-question numeric threshold
 (JEV-004's 0.75, JEV-013's 0.7) is a deliberate calibration and reads the probability directly; a
 0.5 cutoff is not a calibration and appears nowhere. The pane prints `P(yes)=0.55 · unsure`, never
-`true (p=0.55)`. Pinned by `packages/coding-agent/test/noul-bands.test.ts`.
+`true (p=0.55)`.
 
 **The Decision graph draws doubt, not just pass and fail.** An unsettled judgment is an open doubt:
 it is named in the list and in the diagram, it holds `goal satisfied?` at `not closed · N doubts`
 exactly as an unmet check does, and it blocks the `DELIVER` node. Doubts travel as prefixed reason
 lines on the evaluation record, so they reach the pane and the durable ledger by the route every
 other reason already takes. The running clock is the current visit only and restarts on resume.
-Pinned by `packages/coding-agent/test/workbench-decision-graph.test.ts`.
 
 **The decision ledger is an input, never erased.** Every stage transition, Jev evaluation and route
 is appended to one SQLite database per agent directory, keyed by session id and working directory.
@@ -1030,8 +882,6 @@ and the other separately-measured additions (aggregate 5,813 = 4,500 + 350 task_
 accounting), so the ledger surface cannot hide growth in the pre-existing tools. `repo_read` is a bounded git read, measured at 143 tokens, and is budgeted the same way.
 Root bash also runs git. The operator is asked only before deleting the repository, a directory
 that contains it, the home directory, a filesystem root, or a disk.
-Pinned by `packages/coding-agent/test/ledger-route-checkpoints.test.ts` and
-`packages/coding-agent/test/context-composition.test.ts`.
 
 ## Structure
 
@@ -1051,12 +901,7 @@ removed, so an identical failure is identical. Why: measured live, one invented 
 failed 28 times in 22 minutes inside batches whose other calls varied, and no guard fired. A slip
 the resolver can name normalizes instead of refusing: an ordinal prefix followed by uuid-like or
 parenthetical noise resolves to the one step carrying that number and the result says so; a short
-numeric fragment still refuses with the open-step list. A compacted ordinal that is no longer among current steps names archive counts and says that id's historical status is unknown; it does not redirect to another step. Goal unknown-requirement and unknown-evidence refusals name the live catalogs. `tool_task` wait/invalid-id errors classify `errorKind` so completed waits stay operation outcomes and lookup misses stay tool failures. Why (2026-09-15): a live session spent 29 tool errors retrying selector `7` after compact, citing unknown evidence, and treating vitest/biome exits as MUST ledger mistakes. Pinned by
-`packages/agent/test/runaway-loop.test.ts`, `packages/agent/test/tool-failure-memory.test.ts`
-(envelope-stable signatures, corrective diagnostic tail),
-`packages/coding-agent/test/task-state.test.ts`,
-`packages/coding-agent/test/goal-tool-core.test.ts`, and
-`packages/coding-agent/test/tool-task.test.ts`.
+numeric fragment still refuses with the open-step list. A compacted ordinal that is no longer among current steps names archive counts and says that id's historical status is unknown; it does not redirect to another step. Goal unknown-requirement and unknown-evidence refusals name the live catalogs. `tool_task` wait/invalid-id errors classify `errorKind` so completed waits stay operation outcomes and lookup misses stay tool failures. Why (2026-09-15): a live session spent 29 tool errors retrying selector `7` after compact, citing unknown evidence, and treating vitest/biome exits as MUST ledger mistakes.
 
 **An alias names a path that exists, or it does not exist.** A candidate is minted only when it
 resolves to something on disk from the table's cwd; git refs, revision ranges, numeric or
@@ -1065,17 +910,13 @@ parameters can be refused as unminted aliases, never code, commands or prose. Mo
 listings print absolute paths. Why: measured live, a repo-root-relative git line became
 `p/Engine.cpp=(Release/Source/Engine.cpp` and three reads failed with ENOENT, a memory listing's
 root-relative names did the same, `ls` output minted 759 legend lines nothing mentioned, and a
-Python `f = p/name` was refused as an invented alias. Pinned by
-`packages/coding-agent/test/path-alias-table.test.ts`,
-`packages/coding-agent/test/path-alias-tool-wrap.test.ts` and
-`packages/coding-agent/test/path-alias-session.test.ts` (existence gate).
+Python `f = p/name` was refused as an invented alias.
 
 **A skill on disk is loadable in the session that wrote it.** A `skill` load, read or search that
 misses re-scans the skill roots once before refusing, the refusal says the roots were re-scanned,
 and search names the skills the loader could not index. Why: measured live, a skill written by
 `skillify` mid-session was refused twice, 45 minutes apart, while its SKILL.md existed the whole
-time. Pinned by `packages/coding-agent/test/skill-vault.test.ts` and
-`packages/coding-agent/test/resource-loader.test.ts` (refreshSkills).
+time.
 
 **Credentials remain local execution data.** The host may read and use authorized credentials;
 model-facing text contains redacted values rather than credentials. The credential boundary gathers
@@ -1083,8 +924,6 @@ stored API and OAuth values, runtime overrides and configured provider values wi
 OAuth or executing credential commands merely to redact. Root and worker requests, isolated review
 and compaction, tool results and System One evidence use that boundary. Authentication headers and
 local source remain usable; redaction preserves ordinary text and unchanged request references.
-Pinned by `packages/coding-agent/test/session-model-credential-boundary.test.ts` and
-`packages/coding-agent/test/system-one-credential-boundary.test.ts`.
 
 **A refusal names a real ambiguity or a real risk, never a shape the harness can absorb.** The
 credential guard accepts a literal filename prefix as a narrow glob, treats the harness's own
@@ -1100,11 +939,7 @@ several files and combined flags, `head`/`tail -c` and several files, `grep -r/-
 --include/--exclude`), reads heredocs and here-strings, and spawns nested shells and scripts as
 external processes; there is no cap on the emulated surface, an unsupported construct names
 itself. Why: measured live, refusals rose to 12 to 30 per 100 turns on the new versions and 132 of
-5,049 Windows bash calls were refused for ordinary flags. Pinned by
-`packages/coding-agent/test/credential-exposure-guard.test.ts`,
-`packages/coding-agent/test/goal-tool-core.test.ts`, `packages/ai/test/validation.test.ts`, and
-the `packages/coding-agent/test/pi-shell-engine` suite (conformance, commands-fs, commands-search,
-commands-text).
+5,049 Windows bash calls were refused for ordinary flags.
 
 **The general memory holds facts true in any task; a project's facts live in its own file.**
 `<agentDir>/MEMORY.md` (1,200 chars) carries cross-project facts; each project has
@@ -1116,34 +951,25 @@ selects only that file, an over-budget general file puts a triage
 note in the memory block (move project lines, never delete), and workers cannot write any project
 memory. Why: on both owner machines the single global file was full of ticket and build facts,
 refused writes four times in a row, and sent every project's facts to every other project's
-sessions. Pinned by `packages/coding-agent/test/memory-subsystem.test.ts` (project-scoped hot
-memory), `packages/coding-agent/test/file-store-memory-provider.test.ts` (project scope search)
-and `packages/coding-agent/test/lane-private-paths.test.ts`.
+sessions.
 
-**A managed memory file can always be recovered, and only the operator adopts an external edit.** The managed state stores the committed content with its digest; an empty file against a non-empty managed revision is restored on start and before a write (nothing of anyone's is in an empty file); any other drift refuses the model's write and names `/memory accept` and `/memory restore`, which only the operator can run. Pinned by `packages/coding-agent/test/memory-drift-recovery.test.ts`.
+**A managed memory file can always be recovered, and only the operator adopts an external edit.** The managed state stores the committed content with its digest; an empty file against a non-empty managed revision is restored on start and before a write (nothing of anyone's is in an empty file); any other drift refuses the model's write and names `/memory accept` and `/memory restore`, which only the operator can run.
 
 **Memory projections share the final prompt allowance.** Static memory receives only the capacity
 left after the core contract, tool surface, paths, and caller instructions. The 5,120-character
 minimal limit remains unchanged; omitted preferences arrive through the existing persona record,
 whose model budget charges its complete wire framing. Without a model budget, static and persona
 projections select the same whole preference lines. Reload retains the bounded notice identity for
-each target and kind, so an unchanged drift revision is reported once. Pinned by
-`packages/coding-agent/test/system-prompt-builder-tool-selection.test.ts`,
-`packages/coding-agent/test/memory-user-persona.test.ts`, and
-`packages/coding-agent/test/suite/agent-session-user-persona.test.ts`.
+each target and kind, so an unchanged drift revision is reported once.
 
 **Memory and skill admission preserve ownership.** Bounded OKF discovery visits the selected
 project first without crossing symlink boundaries. External memory edits remain protected by
 revision checks. A skill batch validates its entire requested set before one commit; an accepted
-batch cannot evict a member of that same batch. Pinned by
-`packages/coding-agent/test/okf-memory-provider.test.ts`,
-`packages/coding-agent/test/memory-recovery.test.ts`, and
-`packages/coding-agent/test/skill-vault.test.ts`.
+batch cannot evict a member of that same batch.
 
 **Admitted project rules are fenced by their source bytes, not their apparent size.** The live
 semantic-rule controller keys reuse by the ordered instruction paths and complete contents, so an
-AGENTS-family edit takes effect even when its byte count does not change. Pinned by
-`packages/coding-agent/test/session-project-rules.test.ts`.
+AGENTS-family edit takes effect even when its byte count does not change.
 
 **Goal accounting starts at ownership, and instructions scale to intent.** A goal created during
 a foreground run acquires that run's lease at creation; earlier unrelated usage stays outside it.
@@ -1161,10 +987,7 @@ neither provider successes nor trusted evidence reopen a consumed signature. Onl
 prompt resets both allowances: it resumes any system-blocked goal (`resume_goal` without
 `source: "system"`) and clears the streak and the collection; automatic resumes never impersonate
 owner intent. Explicit owner pause, block, stop and `autoContinueGoal: false` are untouched.
-These contracts fit the 3,700-byte core prompt budget (the full-profile pin in `system-prompt.test.ts`, measured with the live package root and cwd, including a deterministic long hosted checkout) and the 5,120-character minimal-profile ceiling (`agent-session-model-capability.test.ts`, measured with a long live cwd). Pinned by
-`packages/coding-agent/test/goal-execution-budget.test.ts`,
-`packages/coding-agent/test/agent-session-goal-continuation-loop.test.ts`, and
-`packages/coding-agent/test/system-prompt.test.ts`.
+These contracts fit the 3,700-byte core prompt budget and the 5,120-character minimal-profile ceiling.
 
 **A feature earns its tokens or is gated by tier, never removed.** `scripts/feature-ledger.mjs`
 measures each subsystem's cost and benefit from session files; a subsystem without a benefit
@@ -1245,13 +1068,13 @@ measurement gains no new surface.
 | 2026-09-25 | Goal completion judges the outcome the goal promised: per-criterion outcome evidence, a requirement's check rerun by the harness, the repository diff and code-only questions only when the goal changed the repository. Completion bounds are measured on the real System One (`npm run eval:completion`, calibration and held-out sets): a defect fails above 0.50, an outcome holds at 0.70, the verdict must be `complete` at confidence 0.70. JEV-025/JEV-026 judge the same view through the same policy function. |
 | 2026-09-25 | Tool surfaces aggregate ceiling grows by a named 162-token goal-checks allowance for requirement checks and owner amendments (the check object on `goal` and in `create_goal` requirements, `amend_goal`, `set_requirement_check`); `goal` (399) and `create_goal` (177) carry exact ceilings, and the base 4,500 subtotal removes only their measured growth over 330 and 84. |
 | 2026-09-25 | The read-only shell line judges `env` by the command it wraps and admits `node` only for `--version` and `--check`; a requirement check additionally admits a run of the project's tests (named runners, no snapshot-update, fix or watch option), while read-only lanes do not. `satisfy_requirement` with `requirementIds` is all or nothing. The tool-surface budget test declares the sources it measures (`@guards`), so the commit gate runs it whenever a tool definition is staged. |
-| 2026-10-01 | A policy-phase failure record (a block, a denial; never `owner_authorization_required`) names a restriction the model cannot repair, so it resolves after two later executed calls of any tool, not only of the blocked tool; a blocked tool the model rightly never retries no longer rides every later request in the failure ledger. Pinned by `packages/agent/test/tool-failure-memory.test.ts`. |
-| 2026-10-01 | A `worker_specialist_busy` delegate skip tells the orchestrator how to proceed (wait for the running worker, or `parallelWork { independentOf, justification }` for independent work) instead of a bare reason code; no routing invariant moved. Pinned by `packages/coding-agent/test/delegate-exact-input-corrections.test.ts`. |
+| 2026-10-01 | A policy-phase failure record (a block, a denial; never `owner_authorization_required`) names a restriction the model cannot repair, so it resolves after two later executed calls of any tool, not only of the blocked tool; a blocked tool the model rightly never retries no longer rides every later request in the failure ledger. |
+| 2026-10-01 | A `worker_specialist_busy` delegate skip tells the orchestrator how to proceed (wait for the running worker, or `parallelWork { independentOf, justification }` for independent work) instead of a bare reason code; no routing invariant moved. |
 | 2026-10-01 | `delegate interrupt` is a halt, not a silent stop: the worker is told the parent stopped it, spends one tool-free request on its own report, and ends as a `blocked` `worker_interrupted` result that requires parent review (never completion) whose terminal handoff wakes the parent; a worker that reaches no request boundary in 120 s is cancelled and that is reported. Superseded: `interrupt` pausing the worker with its `message` queued for `resume`; the suspend-and-abort survives only as the internal `force` for System One steering. |
 | 2026-10-01 | A worker the host stops (parent `cancel`, or a halt that misses `workerDelegation.haltReportDeadlineMs`) ends with a host-authored cancelled claim carrying the files it changed and its spend, never a bare `canceled` with no evidence; the settings fixtures in `worker-authority-resolver.test.ts` only gained the new resolved field, so no authority invariant moved. |
 | 2026-10-02 | The completion account (what the model that changed the repository says about scope, assumptions, regression paths and cause, with cited evidence) replaces System One's open-ended completion veto; the goal and update_goal tools advertise it as one bare optional object. Measured schema growth: 18 tokens on `goal` (399 to 417), budgeted as a named allowance that is added to the goal ceiling and removed from the unchanged 4,500 base by its actual cost, so no unrelated growth is hidden. Its shape lives in the goal guidelines and is checked when used. |
 | 2026-10-03 | A repeated `wait_for_worker` / `wait_for_tool` route on unchanged evidence is waiting on work in flight, not a stall; the ledger's stall reading counts only repeated executable routes. Why: objective waits are now checkpointed decided routes, so every wait cycle lands in the ledger and would otherwise read as strategy repetition. |
-| 2026-10-04 | A root `delegate wait`/`wait_many` returns early with the parked-lane state instead of blocking when the foreground turn that holds a same-local-model worker is the caller, because that wait would deadlock the turn the worker waits for; worker callers and non-held waits keep the blocking contract. An attempt admitted while the foreground was idle keeps its clearance when a later foreground turn begins during preflight. Pinned by `packages/coding-agent/test/delegate-exact-input-corrections.test.ts`, whose wait expectations gained the `returnWhenForegroundHeld` scope. |
+| 2026-10-04 | A root `delegate wait`/`wait_many` returns early with the parked-lane state instead of blocking when the foreground turn that holds a same-local-model worker is the caller, because that wait would deadlock the turn the worker waits for; worker callers and non-held waits keep the blocking contract. An attempt admitted while the foreground was idle keeps its clearance when a later foreground turn begins during preflight. |
 | 2026-10-04 | A worker's write scope defaults to its own working directory; reads stay machine-wide, and writing elsewhere is an explicit `writePaths` grant the root names (guarded mode; YOLO and `readOnly` keep their own rules). This replaces the earlier machine-wide write inheritance; `native-worker-autonomy.test.ts` now expects the refused out-of-cwd write and the granted one. A worker process also runs with secret-bearing environment names removed, a run marker, and its own temp scratch, and its tree is reaped through the owned handle. |
 | 2026-10-04 | The long-session profile gate's growth contract is unchanged (the last-decile median of per-request host work may not exceed twice the first decile's); only its noise floor moved from one to four milliseconds, because gaps are whole-millisecond timestamp differences and a shared CI runner's scheduler jitter failed 3 ms vs 1 ms on unchanged source. |
 | 2026-10-04 | No invariant moved: contract tests create their scratch directories through `tempDir` (removed when the test ends) instead of raw `mkdtempSync`, so a failed or crashed test no longer leaves directories in the OS temp root. |

@@ -19,7 +19,7 @@ run its GC, path-alias and enforcement passes three times per request.
 
 ## Instruments
 
-- **Host long-session profile** — `packages/coding-agent/test/profiling/host-long-session.profile.test.ts`.
+- **Host long-session profile** — `packages/coding-agent/test/profiling/host-long-session.profile.test.ts`. It was a test and was removed with the test suite on 2026-10-04; it returns when the profiling area is rebuilt, and the sections below that name `PI_PROFILE_*` describe it.
   Drives a REAL `AgentSession` through the faux provider for N tool turns, records every tool call
   and every request's host assembly time from the session-log markers above, prints them by session
   decile, and writes a V8 `.cpuprofile`. Skipped unless opted in. `PI_PROFILE_SCENARIO` picks the
@@ -35,11 +35,6 @@ run its GC, path-alias and enforcement passes three times per request.
 ## Running locally
 
 ```bash
-# host long-session profile (from packages/coding-agent); --pool=forks so node:inspector is available
-PI_PROFILE_LONG_SESSION=1 PI_PROFILE_TURNS=1500 PI_PROFILE_DIR=/tmp/pi-profile \
-  npx vitest run test/profiling/host-long-session.profile.test.ts --pool=forks
-# other mixes: PI_PROFILE_SCENARIO=tools (bash/grep/read) or PI_PROFILE_SCENARIO=delegate
-
 # rank a profile by self time (the function burning CPU, not the one merely on the stack)
 node scripts/analyze-cpuprofile.mjs /tmp/pi-profile/host-session.cpuprofile --top 40
 
@@ -47,7 +42,7 @@ node scripts/analyze-cpuprofile.mjs /tmp/pi-profile/host-session.cpuprofile --to
 node scripts/report-long-session-growth.mjs /tmp/pi-profile/host-session-profile.txt
 ```
 
-Or from the repo root: `npm run profile:long-session`, `npm run profile:analyze -- <file.cpuprofile>`,
+Or from the repo root: `npm run profile:analyze -- <file.cpuprofile>`,
 `npm run profile:growth -- <host-session-profile.txt>`.
 
 ## Reading the results
