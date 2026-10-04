@@ -108,6 +108,7 @@
 - Fixed host findings (concurrent-write overlap, protected-path changes) being capped at 8 per claim without saying so, and missing from a worker cancelled by the parent or by session dispose: a final line states how many were omitted, and a cancelled claim carries the same bounded findings.
 - Fixed a worker claim's parent-review marker being re-derived against the process directory instead of the worker's own execution directory, so a worker in a task directory or a worktree lane had its relative changed files judged outside scope and the marker stamped false.
 - Fixed worktree lane binding and release using the session's directory when a task directory sits in another repository: the dispatch record carries the lane's worktree path (`worktreeLanePath`) and both bind and closure release act in that repository.
+- Fixed a worker admitted while the foreground was idle being parked again when a foreground turn began during its asynchronous start preflight: the attempt keeps its clearance past the local-model hold until it starts running, so the worker's own provider call is no longer starved by the next turn.
 
 ### Removed
 
