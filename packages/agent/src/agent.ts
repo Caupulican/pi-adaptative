@@ -215,6 +215,14 @@ class PendingMessageQueue {
 	clear(): void {
 		this.messages = [];
 	}
+
+	/** Remove one exact queued message; false when it is not queued (already consumed, or never queued). */
+	remove(message: AgentMessage): boolean {
+		const index = this.messages.indexOf(message);
+		if (index === -1) return false;
+		this.messages.splice(index, 1);
+		return true;
+	}
 }
 
 type ActiveRun = {
@@ -434,6 +442,14 @@ export class Agent {
 	/** Remove all queued follow-up messages. */
 	clearFollowUpQueue(): void {
 		this.followUpQueue.clear();
+	}
+
+	/**
+	 * Withdraw one exact queued steering or follow-up message before any run consumes it. Every other
+	 * queued message keeps its place. False when the message is no longer queued.
+	 */
+	withdrawQueuedMessage(message: AgentMessage): boolean {
+		return this.steeringQueue.remove(message) || this.followUpQueue.remove(message);
 	}
 
 	/** Remove all queued steering and follow-up messages. */

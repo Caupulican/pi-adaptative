@@ -19,6 +19,41 @@ export interface QueuedInput {
 	images?: ImageContent[];
 }
 
+/** The admitted form of a queued input: the text, images and owner evidence the agent receives. */
+export interface QueuedInputAdmission {
+	text: string;
+	images?: ImageContent[];
+	queuedGoalAuthority?: ExplicitGoalStartAuthority;
+	ownerOriginalText?: string;
+}
+
+/**
+ * One accepted queued input, from the moment it was submitted. It is pending (visible, takeable)
+ * while it awaits admission and after it is admitted into the agent's queue. Taking or clearing it
+ * cancels whatever is still deciding its admission, so a late decision can never enqueue it.
+ */
+export interface PendingInputHandle {
+	readonly id: number;
+	/** Aborted when the input is taken, cleared or cancelled before admission. */
+	readonly signal: AbortSignal;
+}
+
+interface PendingEntry extends QueuedInput {
+	readonly id: number;
+	/** The input exactly as submitted: what recovery returns, whatever its delivered form became. */
+	readonly original: QueuedInput;
+	readonly abort: AbortController;
+	readonly context?: PendingInputContext;
+	admission?: QueuedInputAdmission;
+	/** Set when handed to the agent: from here it is the agent's queued message. */
+	message?: AgentMessage;
+	/** Its context changed before it was handed on: kept in full for recovery, never handed on. */
+	held?: boolean;
+}
+
+/** Abort reason of a pending input the operator took back, cleared or cancelled before admission. */
+export const PENDING_INPUT_WITHDRAWN = new Error("The pending input was withdrawn before admission.");
+
 export interface PendingInputQueueDeps {
 	readonly agent: Agent;
 	readonly skillVault: SkillVaultController;
@@ -32,6 +67,19 @@ export interface PendingInputQueueDeps {
 	 * words before skill/template expansion: owner evidence once the message is persisted.
 	 */
 	noteOwnerAuthoredMessage?(message: AgentMessage, originalText: string): void;
+	/** The session and branch an input is accepted in; omitted, every context is current. */
+	getInputContext?(): PendingInputContext;
+	/** Whether an input accepted in `context` still belongs to the session's current context. */
+	isInputContextCurrent?(context: PendingInputContext): boolean;
+	/** An input whose context changed before it was handed on: it is held, complete and recoverable. */
+	onInputHeld?(input: QueuedInput): void;
+}
+
+/** Where an input was accepted: its session and that session's branch generation. */
+export interface PendingInputContext {
+	readonly sessionId: string;
+	/** Advanced by every branch navigation; ordinary turns and compaction leave it unchanged. */
+	readonly branchGeneration: number;
 }
 
 /**
@@ -46,9 +94,13 @@ export interface PendingInputQueueDeps {
  * controller for the underlying queue mechanics; this class has no event/emit dependency.
  */
 export class PendingInputQueueController {
-	private _steering: QueuedInput[] = [];
-	private _followUp: QueuedInput[] = [];
+	/** Submission order per kind; an entry admits only after every earlier entry of its kind. */
+	private _steering: PendingEntry[] = [];
+	private _followUp: PendingEntry[] = [];
 	private _queuedExtensionCommands: string[] = [];
+	private _nextEntryId = 1;
+	/** Set at disposal: nothing is handed to the agent afterwards. */
+	private _closed = false;
 	private readonly deps: PendingInputQueueDeps;
 
 	constructor(deps: PendingInputQueueDeps) {
@@ -173,8 +225,7 @@ export class PendingInputQueueController {
 		queuedGoalAuthority?: ExplicitGoalStartAuthority,
 		ownerOriginalText?: string,
 	): void {
-		this._steering.push({ text, images });
-		this.deps.agent.steer(this._createQueuedUserMessage(text, images, queuedGoalAuthority, ownerOriginalText));
+		this.admit(this.register("steer", text, images), { text, images, queuedGoalAuthority, ownerOriginalText });
 	}
 
 	/** Queue a follow-up message (already expanded, no extension command check). */
@@ -184,8 +235,163 @@ export class PendingInputQueueController {
 		queuedGoalAuthority?: ExplicitGoalStartAuthority,
 		ownerOriginalText?: string,
 	): void {
-		this._followUp.push({ text, images });
-		this.deps.agent.followUp(this._createQueuedUserMessage(text, images, queuedGoalAuthority, ownerOriginalText));
+		this.admit(this.register("followUp", text, images), { text, images, queuedGoalAuthority, ownerOriginalText });
+	}
+
+	/**
+	 * Accept a queued input now, as submitted, before anything decides its admission. It is pending
+	 * from here: counted, projected, takeable and clearable. Its place in its kind's order is fixed.
+	 */
+	register(kind: "steer" | "followUp", text: string, images?: ImageContent[]): PendingInputHandle {
+		const context = this.deps.getInputContext?.();
+		const entry: PendingEntry = {
+			id: this._nextEntryId++,
+			text,
+			images,
+			original: { text, ...(images ? { images } : {}) },
+			abort: new AbortController(),
+			...(context ? { context } : {}),
+		};
+		(kind === "steer" ? this._steering : this._followUp).push(entry);
+		return { id: entry.id, signal: entry.abort.signal };
+	}
+
+	/**
+	 * Admit a registered input into the agent's queue, after every earlier input of its kind. Returns
+	 * false when the input is no longer pending (taken, cleared or withdrawn): it is never enqueued.
+	 */
+	admit(handle: PendingInputHandle, admission: QueuedInputAdmission): boolean {
+		const entry = this._findEntry(handle.id);
+		if (!entry || entry.admission || entry.held || this._closed) return false;
+		entry.admission = admission;
+		this._admitInOrder();
+		return true;
+	}
+
+	/**
+	 * The input runs as its own turn instead of joining the queue: ownership moves to that turn. Its
+	 * signal is NOT aborted -- the turn is valid. False when the input is no longer pending here (taken,
+	 * cleared, withdrawn, held, or the queue closed); the caller must not run it then.
+	 */
+	promote(handle: PendingInputHandle): boolean {
+		const entry = this._findEntry(handle.id);
+		if (!entry || entry.admission || entry.held || this._closed) return false;
+		if (!this._contextCurrent(entry)) {
+			this._hold(entry);
+			return false;
+		}
+		this._removeEntry(entry);
+		this._admitInOrder();
+		return true;
+	}
+
+	/** Keep an input whose context changed: complete, pending and recoverable, never handed on. */
+	hold(handle: PendingInputHandle): void {
+		const entry = this._findEntry(handle.id);
+		if (entry && !entry.message && !entry.held) this._hold(entry);
+		this._admitInOrder();
+	}
+
+	/** Drop a registered input that will not be admitted (cancelled, handled, or run as its own turn). A
+	 * decided or held input is never withdrawn: it keeps its place in the queue. */
+	withdraw(handle: PendingInputHandle): boolean {
+		const entry = this._findEntry(handle.id);
+		if (!entry || entry.admission || entry.held) return false;
+		this._removeEntry(entry);
+		entry.abort.abort(PENDING_INPUT_WITHDRAWN);
+		this._admitInOrder();
+		return true;
+	}
+
+	/** Cancel every input whose admission is still undecided; decided and held inputs keep their place. */
+	cancelAwaiting(): void {
+		for (const entry of [...this._steering, ...this._followUp]) {
+			if (entry.admission || entry.held) continue;
+			this._removeEntry(entry);
+			entry.abort.abort(PENDING_INPUT_WITHDRAWN);
+		}
+		this._admitInOrder();
+	}
+
+	/**
+	 * The session is disposed: every input not yet handed to the agent is cancelled and dropped, and
+	 * nothing is handed on afterwards. Input the agent already holds is the agent's to discard.
+	 */
+	close(): void {
+		this._closed = true;
+		for (const entry of [...this._steering, ...this._followUp]) {
+			if (entry.message) continue;
+			this._removeEntry(entry);
+			entry.abort.abort(PENDING_INPUT_WITHDRAWN);
+		}
+	}
+
+	/**
+	 * The session's context changed (a branch navigation): every input accepted in the old context and
+	 * not yet consumed is held, complete, including one already handed to the agent -- that exact
+	 * message is withdrawn from the agent's queue, every other queued message keeps its place. Input a
+	 * run already consumed belongs to that run's history and is left alone.
+	 */
+	reconcileContext(): void {
+		for (const entry of [...this._steering, ...this._followUp]) {
+			if (entry.held || this._contextCurrent(entry)) continue;
+			if (entry.message) {
+				if (!this.deps.agent.withdrawQueuedMessage(entry.message)) continue;
+				entry.message = undefined;
+				entry.text = entry.original.text;
+				entry.images = entry.original.images;
+			}
+			this._hold(entry);
+		}
+		this._admitInOrder();
+	}
+
+	private _contextCurrent(entry: PendingEntry): boolean {
+		return !entry.context || (this.deps.isInputContextCurrent?.(entry.context) ?? true);
+	}
+
+	private _hold(entry: PendingEntry): void {
+		entry.held = true;
+		entry.abort.abort(PENDING_INPUT_WITHDRAWN);
+		this.deps.onInputHeld?.({ ...entry.original });
+	}
+
+	private _findEntry(id: number): PendingEntry | undefined {
+		return this._steering.find((entry) => entry.id === id) ?? this._followUp.find((entry) => entry.id === id);
+	}
+
+	private _removeEntry(entry: PendingEntry): void {
+		this._steering = this._steering.filter((candidate) => candidate !== entry);
+		this._followUp = this._followUp.filter((candidate) => candidate !== entry);
+	}
+
+	/** Enqueue each kind's decided inputs up to the first one still awaiting its decision. */
+	private _admitInOrder(): void {
+		if (this._closed) return;
+		for (const [entries, enqueue] of [
+			[this._steering, (message: AgentMessage) => this.deps.agent.steer(message)],
+			[this._followUp, (message: AgentMessage) => this.deps.agent.followUp(message)],
+		] as const) {
+			for (const entry of entries) {
+				if (entry.message || entry.held) continue;
+				const admission = entry.admission;
+				if (!admission) break;
+				// The handoff to the agent is the delivery point: the input's context is checked here.
+				if (!this._contextCurrent(entry)) {
+					this._hold(entry);
+					continue;
+				}
+				entry.text = admission.text;
+				entry.images = admission.images;
+				entry.message = this._createQueuedUserMessage(
+					admission.text,
+					admission.images,
+					admission.queuedGoalAuthority,
+					admission.ownerOriginalText,
+				);
+				enqueue(entry.message);
+			}
+		}
 	}
 
 	/** Queue an extension command to execute after the current agent run. */
@@ -203,16 +409,27 @@ export class PendingInputQueueController {
 	 * matching prior behavior). Returns which queue it was removed from, or undefined if it was not
 	 * queued -- callers use that to decide whether a queue_update event is warranted.
 	 */
-	removeIfPending(messageText: string): "steering" | "followUp" | undefined {
-		const steeringIndex = this._steering.findIndex((entry) => entry.text === messageText);
-		if (steeringIndex !== -1) {
-			this._steering.splice(steeringIndex, 1);
-			return "steering";
+	removeIfPending(messageText: string, message?: AgentMessage): "steering" | "followUp" | undefined {
+		// Only an admitted input can be delivered; the exact queued message wins over equal text.
+		for (const [entries, queue] of [
+			[this._steering, "steering"],
+			[this._followUp, "followUp"],
+		] as const) {
+			const exact = message ? entries.findIndex((entry) => entry.message === message) : -1;
+			if (exact !== -1) {
+				entries.splice(exact, 1);
+				return queue;
+			}
 		}
-		const followUpIndex = this._followUp.findIndex((entry) => entry.text === messageText);
-		if (followUpIndex !== -1) {
-			this._followUp.splice(followUpIndex, 1);
-			return "followUp";
+		for (const [entries, queue] of [
+			[this._steering, "steering"],
+			[this._followUp, "followUp"],
+		] as const) {
+			const index = entries.findIndex((entry) => entry.message !== undefined && entry.text === messageText);
+			if (index !== -1) {
+				entries.splice(index, 1);
+				return queue;
+			}
 		}
 		return undefined;
 	}
@@ -223,20 +440,37 @@ export class PendingInputQueueController {
 	 * against the session, not as prompt text.
 	 */
 	takeMessages(): { steering: QueuedInput[]; followUp: QueuedInput[] } {
-		const taken = { steering: this._steering, followUp: this._followUp };
+		const taken = { steering: this._takeEntries(this._steering), followUp: this._takeEntries(this._followUp) };
 		this._steering = [];
 		this._followUp = [];
 		this.deps.agent.clearAllQueues();
 		return taken;
 	}
 
+	/** Take every queued input with its images, and every queued extension command, emptying all queues. */
+	takeAll(): { steering: QueuedInput[]; followUp: QueuedInput[]; commands: string[] } {
+		const commands = this._queuedExtensionCommands;
+		this._queuedExtensionCommands = [];
+		return { ...this.takeMessages(), commands };
+	}
+
 	/** Clear all three queues (including the agent's own mirrored queues) and return what was cleared. */
 	clear(): PendingQueueSnapshot {
 		const result = this.snapshot();
+		this._takeEntries(this._steering);
+		this._takeEntries(this._followUp);
 		this._steering = [];
 		this._followUp = [];
 		this._queuedExtensionCommands = [];
 		this.deps.agent.clearAllQueues();
 		return result;
+	}
+
+	/** The inputs as submitted; anything still deciding an input's admission is cancelled. */
+	private _takeEntries(entries: readonly PendingEntry[]): QueuedInput[] {
+		return entries.map((entry) => {
+			if (!entry.message) entry.abort.abort(PENDING_INPUT_WITHDRAWN);
+			return entry.message ? { text: entry.text, images: entry.images } : { ...entry.original };
+		});
 	}
 }

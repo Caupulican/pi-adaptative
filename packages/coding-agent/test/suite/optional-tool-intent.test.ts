@@ -1,6 +1,6 @@
 // @guards src/core/tool-applicability-gate.ts src/core/system-one/controller.ts src/core/system-one/catalog.ts src/core/agent-session.ts
 import type { AgentTool } from "@caupulican/pi-agent-core/types";
-import { fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
+import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { JevEvaluationRequest } from "../../src/core/system-one/adapter.ts";
@@ -462,8 +462,33 @@ describe("trusted optional tool task intent", () => {
 		await harness.session.steer("Stop using secret store.");
 		release?.();
 		await older;
+		// The stale judgment grants nothing; the owner's older words are still owner input, delivered first.
 		expect(latestIntent(harness)?.allowedTools).toEqual([]);
-		expect(harness.session.getSteeringMessages()).toEqual(["Stop using secret store."]);
+		expect(harness.session.getSteeringMessages()).toEqual([
+			"Use secret store for this task.",
+			"Stop using secret store.",
+		]);
+		const delivered: unknown[][] = [];
+		let attempted = false;
+		const record: FauxResponseFactory = (context) => {
+			const users = context.messages.filter((message) => message.role === "user").map((message) => message.content);
+			delivered.push(users);
+			// Once both steers are visible, the model actually tries the tool the newer words stopped.
+			if (!attempted && JSON.stringify(users).includes("Stop using secret store.")) {
+				attempted = true;
+				return fauxAssistantMessage(fauxToolCall("secret_store", {}), { stopReason: "toolUse" });
+			}
+			return fauxAssistantMessage("done");
+		};
+		harness.setResponses([record, record, record, record, record]);
+		// The stale judgment may still be finishing; it never blocks the owner, but a direct prompt waits for idle.
+		await (
+			harness.session as unknown as { _foregroundRecovery: { waitForIdle(): Promise<void> } }
+		)._foregroundRecovery.waitForIdle();
+		await harness.session.prompt("Continue.");
+		expect(JSON.stringify(delivered.at(-1))).toMatch(/Use secret store for this task\..*Stop using secret store\./);
+		expect(attempted).toBe(true);
+		expect(runs).toEqual([]);
 	});
 
 	it("reserves the host intent checkpoint from extension appendEntry while permitting ordinary extension data", async () => {

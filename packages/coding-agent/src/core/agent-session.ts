@@ -288,7 +288,11 @@ import { type DeliveryState, SessionOperatorProjection } from "./operator-projec
 import type { AdaptationProjection } from "./operator-projection/types.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
 import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
-import { PendingInputQueueController, type QueuedInput } from "./pending-input-queue-controller.ts";
+import {
+	type PendingInputHandle,
+	PendingInputQueueController,
+	type QueuedInput,
+} from "./pending-input-queue-controller.ts";
 import {
 	appendPipelineRunSnapshot,
 	createActivePipelineContextMessage,
@@ -461,6 +465,13 @@ function sincePreviousReply(messages: readonly AgentMessage[], reply: AgentMessa
 	return before.slice(start);
 }
 
+/**
+ * Abort reason of an owner intent classification replaced by a newer owner request. It makes that
+ * JUDGMENT stale; the request it was judging is still the owner's input and is still admitted. Any
+ * other abort (the owner's interrupt, disposal, the caller's signal) cancels the submission itself.
+ */
+const OWNER_INTENT_SUPERSEDED = new Error("Owner intent classification was superseded by a newer owner request.");
+
 /** An owner interrupt arrived while a submission was still preparing its turn (see `prompt`). */
 class SubmissionPreflightAborted extends Error {
 	constructor() {
@@ -598,6 +609,11 @@ export class AgentSession {
 	private _disposeCompletion: Promise<void> | undefined;
 	private readonly _reflectionAbort = new AbortController();
 	private _optionalIntentAbort: AbortController | undefined;
+	/** Acceptance order of owner submissions, and the newest whose judgment has started. */
+	private _ownerSubmissionOrder = 0;
+	/** Advanced by every branch navigation: the context generation queued owner input is bound to. */
+	private _branchGeneration = 0;
+	private _newestJudgedOwnerOrder = 0;
 	/** The last "integrations stay available" warning raised, so an unchanged state warns once. */
 	private _lastOptionalIntentWarning: string | undefined;
 	/** Owns the lifetime of the one detached end-of-work reflection turn; see reflection-turn-lifecycle.ts. */
@@ -1178,6 +1194,15 @@ export class AgentSession {
 			getExtensionRunner: () => this._extensionRunner,
 			getPromptTemplates: () => this.promptTemplates,
 			noteOwnerAuthoredMessage: (message, originalText) => this._reflection.markOwnerInput(message, originalText),
+			getInputContext: () => ({
+				sessionId: this.sessionManager.getSessionId(),
+				branchGeneration: this._branchGeneration,
+			}),
+			// Navigation is the only owner that changes the branch an input was written against.
+			isInputContextCurrent: (context) =>
+				context.sessionId === this.sessionManager.getSessionId() &&
+				context.branchGeneration === this._branchGeneration,
+			onInputHeld: (input) => this._noteHeldQueuedInput(input.text),
 		});
 		this._backgroundLanes = new BackgroundLaneController({
 			isDisposed: () => this._disposed,
@@ -2143,6 +2168,10 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			getAgent: () => this.agent,
 			onBranchChanged: () => {
+				this._branchGeneration++;
+				// Owner input accepted on the old branch is held in full, never delivered on the new one.
+				this._pendingQueue.reconcileContext();
+				this._emitQueueUpdate();
 				this._reflection.invalidateCurrentTurnCueStateCache({ releaseActiveClaim: true });
 				this._selfCompaction.resetBranchState();
 				this._selfCompaction.schedule();
@@ -3358,18 +3387,22 @@ export class AgentSession {
 		request: string,
 		signal?: AbortSignal,
 		trustedOwner = true,
+		acceptedOrder?: number,
 	): Promise<string | undefined> {
 		const controller = this._systemOneController;
 		if (!controller) return undefined;
 		const granted = new Set(this.getEdgeGrants().map((grant) => grant.class));
 		const capabilitiesPending = EDGE_CLASSES.some((edgeClass) => !granted.has(edgeClass));
 		const outcome = trustedOwner
-			? await this._classifyOwnerRequest(request, this.writtenRuleText(), capabilitiesPending, signal)
+			? await this._classifyOwnerRequest(request, this.writtenRuleText(), capabilitiesPending, signal, acceptedOrder)
 			: await controller.classifyUserRequest(request, this.writtenRuleText(), {
 					capabilitiesPending,
 					...(signal ? { signal } : {}),
 				});
 		if (outcome.status === "skipped") return undefined;
+		// A newer owner request owns the policy: this judgment is stale, not an evaluator outage. The
+		// request itself still runs; only its judgment is set aside.
+		if ("superseded" in outcome && outcome.superseded) return undefined;
 		if (outcome.status === "unavailable") {
 			// Unknown is not a handoff: an owner question goes to the owner.
 			this._handoff = false;
@@ -3409,16 +3442,36 @@ export class AgentSession {
 	}
 
 	/** Same user-request classification owner for ordinary submissions and trusted queued input. */
-	private async _classifyOwnerRequest(request: string, rules = "", capabilitiesPending = false, signal?: AbortSignal) {
+	private async _classifyOwnerRequest(
+		request: string,
+		rules = "",
+		capabilitiesPending = false,
+		signal?: AbortSignal,
+		acceptedOrder?: number,
+	) {
 		if (signal?.aborted || this._disposed)
 			return {
 				status: "unavailable" as const,
-				superseded: true,
+				cancelled: true,
+				contextChanged: false,
 				reason: "Owner intent classification was cancelled",
 			};
-		this._optionalIntentAbort?.abort();
+		// A judgment is as fresh as the submission it judges. One whose submission is older than a
+		// submission already being judged would overwrite newer owner policy if it applied, so it is
+		// stale before it starts: it neither runs nor cancels the newer judgment.
+		if (acceptedOrder !== undefined) {
+			if (acceptedOrder < this._newestJudgedOwnerOrder)
+				return {
+					status: "unavailable" as const,
+					superseded: true,
+					reason: "Owner intent classification was superseded by a newer owner request",
+				};
+			this._newestJudgedOwnerOrder = acceptedOrder;
+		}
+		this._optionalIntentAbort?.abort(OWNER_INTENT_SUPERSEDED);
 		const intentAbort = new AbortController();
 		this._optionalIntentAbort = intentAbort;
+		const callerSignal = signal;
 		signal = AbortSignal.any([this._reflectionAbort.signal, intentAbort.signal, ...(signal ? [signal] : [])]);
 		const manager = this.sessionManager;
 		const sessionId = manager.getSessionId();
@@ -3445,17 +3498,36 @@ export class AgentSession {
 		};
 		const pendingId = manager.appendCustomEntry(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE, pendingIntent);
 		const controller = this._systemOneController;
-		const outcome = controller
-			? await controller.classifyUserRequest(request, rules, {
-					capabilitiesPending,
-					optionalTools: {
-						candidates,
-						previous: recoverable ? previous : undefined,
-						pendingRequests: recoverable ? pendingRequests : [],
-					},
-					...(signal ? { signal } : {}),
-				})
-			: { status: "unavailable" as const, reason: "System One classification is not configured" };
+		const classification = controller?.classifyUserRequest(request, rules, {
+			capabilitiesPending,
+			optionalTools: {
+				candidates,
+				previous: recoverable ? previous : undefined,
+				pendingRequests: recoverable ? pendingRequests : [],
+			},
+			signal,
+		});
+		// An aborted judgment decides nothing, so its request does not wait for the evaluator to notice.
+		classification?.catch(() => undefined);
+		const aborted = signal;
+		let stopWatchingAbort = (): void => {};
+		let outcome: Awaited<NonNullable<typeof classification>> | { status: "unavailable"; reason: string };
+		try {
+			outcome = classification
+				? await Promise.race([
+						classification,
+						new Promise<{ status: "unavailable"; reason: string }>((resolve) => {
+							const settle = () =>
+								resolve({ status: "unavailable", reason: "Owner intent classification was aborted" });
+							if (aborted.aborted) return settle();
+							aborted.addEventListener("abort", settle, { once: true });
+							stopWatchingAbort = () => aborted.removeEventListener("abort", settle);
+						}),
+					])
+				: { status: "unavailable" as const, reason: "System One classification is not configured" };
+		} finally {
+			stopWatchingAbort();
+		}
 		if (
 			signal.aborted &&
 			manager.getSessionId() === sessionId &&
@@ -3470,15 +3542,36 @@ export class AgentSession {
 				allowedTools: [],
 			});
 		if (
-			signal?.aborted ||
-			this._disposed ||
+			callerSignal?.aborted ||
+			this._reflectionAbort.signal.aborted ||
+			(intentAbort.signal.aborted && intentAbort.signal.reason !== OWNER_INTENT_SUPERSEDED) ||
+			this._disposed
+		)
+			return {
+				status: "unavailable" as const,
+				cancelled: true,
+				contextChanged: false,
+				reason: "Owner intent classification was cancelled",
+			};
+		// A newer owner request owns the policy now: this stale judgment applies nothing, but its request
+		// remains owner input for the caller to admit.
+		if (intentAbort.signal.aborted)
+			return {
+				status: "unavailable" as const,
+				superseded: true,
+				reason: "Owner intent classification was superseded by a newer owner request",
+			};
+		// No newer request replaced this one, yet its checkpoint is no longer the branch's latest: the
+		// session or branch moved under it. Its request belongs to the old context, not the new one.
+		if (
 			manager.getSessionId() !== sessionId ||
 			manager.getLatestCustomEntryOnBranch(OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)?.id !== pendingId
 		)
 			return {
 				status: "unavailable" as const,
-				superseded: true,
-				reason: "Owner intent classification was cancelled or superseded",
+				cancelled: true,
+				contextChanged: true,
+				reason: "The session context changed while the owner request was classified",
 			};
 		const classifiedIntent =
 			outcome.status === "classified" && outcome.classification.optionalToolIntent?.status === "classified"
@@ -4197,7 +4290,7 @@ export class AgentSession {
 		if (event.type === "message_start" && event.message.role === "user") {
 			this._compaction.resetOverflowRecovery();
 			const messageText = this._getUserMessageText(event.message);
-			if (messageText && this._pendingQueue.removeIfPending(messageText) !== undefined) {
+			if (messageText && this._pendingQueue.removeIfPending(messageText, event.message) !== undefined) {
 				this._emitQueueUpdate();
 			}
 			this._goals.activateQueuedOwnerChatGoal(event.message, this.agent.state.messages);
@@ -4503,6 +4596,8 @@ export class AgentSession {
 		if (this._disposed) return;
 		this._disposed = true;
 		this._compaction.cancelIdlePreparation();
+		// Queued input not yet handed to the agent belongs to this session and is never handed on after it.
+		this._pendingQueue.close();
 		// Every in-flight admission entry this session still owns is released; a sibling process
 		// would otherwise count it until the heartbeat went stale.
 		this._providerAdmissionLedger.releaseAll();
@@ -5230,35 +5325,77 @@ export class AgentSession {
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
-		const queuedOwnerClassification =
+		// The owner's submission order, fixed now: every judgment of this submission carries it.
+		const acceptedOrder =
+			options?.internalContextType || options?.source === "extension" ? undefined : ++this._ownerSubmissionOrder;
+		// A queued owner submission is pending from this moment, in submission order, before anything
+		// below can await: it is visible, takeable, and cancelled with the pending queue.
+		const queuedOwnerInput =
 			this.getSessionWorkState().busy &&
 			options?.streamingBehavior &&
 			!options.internalContextType &&
 			options.source !== "extension"
-				? this._classifyOwnerRequest(text, "", false, options.signal)
+				? this._pendingQueue.register(options.streamingBehavior, text, options.images)
 				: undefined;
-		// The owner spoke: a summary being prepared while the lane idled never makes them wait.
-		this._compaction.cancelIdlePreparation();
-		// An owner development directive is policy, not prompt text: it is captured durably here,
-		// before the turn that carried it can be compacted away.
-		this._ownerRules.record(text);
-		// The owner spoke: an operator blocker waited for exactly that.
-		if (this._operatorBlocker !== undefined) this.setOperatorBlocker(undefined);
-		if (options?.autoContinueGoal !== false) {
-			this._backgroundLanes.clearGoalAutoContinueTimer();
+		if (queuedOwnerInput) this._emitQueueUpdate();
+		const queuedOwnerClassification = queuedOwnerInput
+			? this._classifyOwnerRequest(
+					text,
+					"",
+					false,
+					options?.signal ? AbortSignal.any([options.signal, queuedOwnerInput.signal]) : queuedOwnerInput.signal,
+					acceptedOrder,
+				)
+			: undefined;
+		try {
+			// The owner spoke: a summary being prepared while the lane idled never makes them wait.
+			this._compaction.cancelIdlePreparation();
+			// An owner development directive is policy, not prompt text: it is captured durably here,
+			// before the turn that carried it can be compacted away.
+			this._ownerRules.record(text);
+			// The owner spoke: an operator blocker waited for exactly that.
+			if (this._operatorBlocker !== undefined) this.setOperatorBlocker(undefined);
+			if (options?.autoContinueGoal !== false) {
+				this._backgroundLanes.clearGoalAutoContinueTimer();
+			}
+			await this._reflectionTurnLifecycle.preemptFor(options);
+		} catch (error) {
+			if (queuedOwnerInput) this._withdrawQueuedOwnerInput(queuedOwnerInput);
+			throw error;
 		}
-		await this._reflectionTurnLifecycle.preemptFor(options);
-
 		const submissionLease = this._foregroundRecovery.tryAcquireSubmission();
 		if (!submissionLease && this.getSessionWorkState().busy && options?.streamingBehavior) {
-			const run = this._streamingPromptSubmissionTail.then(
-				() => this._runPromptSubmission(text, options, undefined, queuedOwnerClassification),
-				() => this._runPromptSubmission(text, options, undefined, queuedOwnerClassification),
-			);
-			this._streamingPromptSubmissionTail = run.catch(() => {});
+			// Queued submissions prepare one at a time, in submission order, but the next one waits only
+			// for this one's PREPARATION (queued, withdrawn, or its own turn started), never its whole turn.
+			const { promise: preparedGate, resolve: prepared } = Promise.withResolvers<void>();
+			const start = () =>
+				this._runPromptSubmission(
+					text,
+					options,
+					undefined,
+					queuedOwnerClassification,
+					queuedOwnerInput,
+					prepared,
+					acceptedOrder,
+				);
+			const run = this._streamingPromptSubmissionTail.then(start, start);
+			this._streamingPromptSubmissionTail = preparedGate;
 			return run;
 		}
-		return this._runPromptSubmission(text, options, submissionLease, queuedOwnerClassification);
+		return this._runPromptSubmission(
+			text,
+			options,
+			submissionLease,
+			queuedOwnerClassification,
+			queuedOwnerInput,
+			undefined,
+			acceptedOrder,
+		);
+	}
+
+	/** Withdraw a queued owner input that will not be admitted; a no-op once it is decided or taken. */
+	private _withdrawQueuedOwnerInput(input: PendingInputHandle): void {
+		if (this._pendingQueue.withdraw(input)) this._emitQueueUpdate();
 	}
 
 	private async _runPromptSubmission(
@@ -5266,19 +5403,44 @@ export class AgentSession {
 		options?: PromptOptions,
 		initialSubmissionLease?: ForegroundSubmissionLease,
 		queuedOwnerClassification?: ReturnType<AgentSession["_classifyOwnerRequest"]>,
+		queuedOwnerInput?: PendingInputHandle,
+		prepared?: () => void,
+		acceptedOrder?: number,
 	): Promise<void> {
 		const submission = { lease: initialSubmissionLease };
 		if (submission.lease) this._foregroundPromptLease = submission.lease;
 		// The submission's own abort: before its run exists (routing, System One classification) an owner
-		// interrupt reaches it through `abort()`; the caller's signal still aborts it too.
+		// interrupt reaches it through `abort()`; the caller's signal still aborts it too. A queued
+		// submission prepares while another turn may own the foreground, so it takes the interrupt slot
+		// only once it owns the foreground itself; until then the pending queue cancels it.
 		const submissionAbort = new AbortController();
-		this._submissionAbort = submissionAbort;
+		const ownsForeground = (): void => {
+			this._submissionAbort = submissionAbort;
+		};
+		if (submission.lease) ownsForeground();
 		const signal = options?.signal
 			? AbortSignal.any([options.signal, submissionAbort.signal])
 			: submissionAbort.signal;
 		try {
-			await this._promptUnserialized(text, { ...options, signal }, submission, queuedOwnerClassification);
+			await this._promptUnserialized(
+				text,
+				{ ...options, signal },
+				submission,
+				queuedOwnerClassification,
+				queuedOwnerInput,
+				{
+					acceptedOrder,
+					ownsForeground: () => {
+						ownsForeground();
+						// Its preparation is complete: the next queued submission may prepare while this turn runs.
+						prepared?.();
+					},
+				},
+			);
 		} finally {
+			prepared?.();
+			// Every exit that did not admit it (cancelled, handled, a command, an error) withdraws it.
+			if (queuedOwnerInput) this._withdrawQueuedOwnerInput(queuedOwnerInput);
 			if (this._submissionAbort === submissionAbort) this._submissionAbort = undefined;
 			if (submission.lease) {
 				if (this._foregroundPromptLease === submission.lease) this._foregroundPromptLease = undefined;
@@ -5301,6 +5463,8 @@ export class AgentSession {
 		options: PromptOptions | undefined,
 		submission: { lease?: ForegroundSubmissionLease },
 		queuedOwnerClassification?: ReturnType<AgentSession["_classifyOwnerRequest"]>,
+		queuedOwnerInput?: PendingInputHandle,
+		lifecycle?: { acceptedOrder?: number; ownsForeground(): void },
 	): Promise<void> {
 		const submissionSignal = options?.signal;
 		// Fast path for a submission cancelled before it ever started: nothing has been built, painted or
@@ -5338,7 +5502,9 @@ export class AgentSession {
 		try {
 			if (queuedOwnerClassification) {
 				const classified = await queuedOwnerClassification;
-				if (submissionSignal?.aborted || ("superseded" in classified && classified.superseded)) return;
+				if ("cancelled" in classified && classified.cancelled && classified.contextChanged && queuedOwnerInput)
+					this._pendingQueue.hold(queuedOwnerInput);
+				if (submissionSignal?.aborted || ("cancelled" in classified && classified.cancelled)) return;
 			}
 			// Handle extension commands first. Programmatic extension messages may opt
 			// into command handling; if the agent is currently streaming, queue the
@@ -5404,20 +5570,58 @@ export class AgentSession {
 					);
 				}
 				const ownerOriginalText = !options.internalContextType && options.source !== "extension" ? text : undefined;
-				if (ownerOriginalText !== undefined) {
+				if (ownerOriginalText === undefined) {
+					if (options.streamingBehavior === "followUp") {
+						this._pendingQueue.queueFollowUp(expandedText, currentImages, goalToolStartAuthority);
+					} else {
+						this._pendingQueue.queueSteer(expandedText, currentImages, goalToolStartAuthority);
+					}
+					this._emitQueueUpdate();
+					preflightResult?.(true);
+					return;
+				}
+				// An owner submission that became queued only after prompt() returned to its caller's turn
+				// registers here; one registered at submission keeps its original place.
+				const pending =
+					queuedOwnerInput ?? this._pendingQueue.register(options.streamingBehavior, text, options.images);
+				try {
 					const classified = await (queuedOwnerClassification ??
-						this._classifyOwnerRequest(ownerOriginalText, "", false, submissionSignal));
-					if (submissionSignal?.aborted || ("superseded" in classified && classified.superseded)) return;
+						this._classifyOwnerRequest(
+							ownerOriginalText,
+							"",
+							false,
+							submissionSignal ? AbortSignal.any([submissionSignal, pending.signal]) : pending.signal,
+							lifecycle?.acceptedOrder,
+						));
+					if ("cancelled" in classified && classified.cancelled && classified.contextChanged)
+						this._pendingQueue.hold(pending);
+					if (submissionSignal?.aborted || ("cancelled" in classified && classified.cancelled)) return;
+					if (this._disposed) return;
+					this._pendingQueue.admit(pending, {
+						text: expandedText,
+						...(currentImages ? { images: currentImages } : {}),
+						...(goalToolStartAuthority ? { queuedGoalAuthority: goalToolStartAuthority } : {}),
+						ownerOriginalText,
+					});
+				} finally {
+					this._withdrawQueuedOwnerInput(pending);
+					this._emitQueueUpdate();
 				}
-				if (options.streamingBehavior === "followUp") {
-					this._pendingQueue.queueFollowUp(expandedText, currentImages, goalToolStartAuthority, ownerOriginalText);
-				} else {
-					this._pendingQueue.queueSteer(expandedText, currentImages, goalToolStartAuthority, ownerOriginalText);
-				}
-				this._emitQueueUpdate();
 				preflightResult?.(true);
 				return;
 			}
+			// This submission would run as its own turn now. Only an input still pending here may: one the
+			// owner took back, cleared or that changed context meanwhile never runs. Ownership moves to
+			// the turn without cancelling it.
+			if (queuedOwnerInput) {
+				if (!this._pendingQueue.promote(queuedOwnerInput)) {
+					this._emitQueueUpdate();
+					preflightResult?.(false);
+					return;
+				}
+				this._emitQueueUpdate();
+			}
+			lifecycle?.ownsForeground();
 			this._foregroundPromptLease = submission.lease;
 
 			if (!options?.internalContextType) {
@@ -5733,14 +5937,20 @@ export class AgentSession {
 				if (options?.source !== "extension") {
 					if (this._systemOneController)
 						requestNote = await this._runtimeBuilder.withTaskDirectoryContext(
-							() => this._enableCapabilitiesAuthorizedByUser(text, submissionSignal),
+							() =>
+								this._enableCapabilitiesAuthorizedByUser(
+									text,
+									submissionSignal,
+									true,
+									lifecycle?.acceptedOrder,
+								),
 							submissionSignal,
 							(error) => {
 								noteTaskDirectoryUnavailable(error);
 								return undefined;
 							},
 						);
-					else await this._classifyOwnerRequest(text, "", false, submissionSignal);
+					else await this._classifyOwnerRequest(text, "", false, submissionSignal, lifecycle?.acceptedOrder);
 				} else if (this._systemOneController) {
 					requestNote = await this._runtimeBuilder.withTaskDirectoryContext(
 						() => this._enableCapabilitiesAuthorizedByUser(userRequest, submissionSignal, false),
@@ -5861,10 +6071,7 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async steer(text: string, images?: ImageContent[]): Promise<void> {
-		const classified = await this._classifyOwnerRequest(text);
-		if ("superseded" in classified && classified.superseded) return;
-		this._pendingQueue.queueSteer(this._pendingQueue.prepareQueuedMessageText(text), images, undefined, text);
-		this._emitQueueUpdate();
+		await this._admitQueuedOwnerInput("steer", text, images, ++this._ownerSubmissionOrder);
 	}
 
 	/**
@@ -5875,10 +6082,48 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async followUp(text: string, images?: ImageContent[]): Promise<void> {
-		const classified = await this._classifyOwnerRequest(text);
-		if ("superseded" in classified && classified.superseded) return;
-		this._pendingQueue.queueFollowUp(this._pendingQueue.prepareQueuedMessageText(text), images, undefined, text);
+		await this._admitQueuedOwnerInput("followUp", text, images, ++this._ownerSubmissionOrder);
+	}
+
+	/**
+	 * A queued owner input is pending from the moment it is submitted, in submission order, and is
+	 * classified before it is admitted. A newer request supersedes the judgment, never the input; a
+	 * cancellation (interrupt, take, clear, disposal, context change) withdraws it.
+	 */
+	private async _admitQueuedOwnerInput(
+		kind: "steer" | "followUp",
+		text: string,
+		images: ImageContent[] | undefined,
+		acceptedOrder: number,
+	): Promise<void> {
+		const pending = this._pendingQueue.register(kind, text, images);
 		this._emitQueueUpdate();
+		let admitted = false;
+		try {
+			const classified = await this._classifyOwnerRequest(text, "", false, pending.signal, acceptedOrder);
+			if ("cancelled" in classified && classified.cancelled) {
+				if (classified.contextChanged) this._pendingQueue.hold(pending);
+				return;
+			}
+			if (this._disposed) return;
+			admitted = this._pendingQueue.admit(pending, {
+				text: this._pendingQueue.prepareQueuedMessageText(text),
+				images,
+				ownerOriginalText: text,
+			});
+		} finally {
+			if (!admitted) this._pendingQueue.withdraw(pending);
+			this._emitQueueUpdate();
+		}
+	}
+
+	/** A queued input whose context changed is held in full in the pending queue, never sent elsewhere. */
+	private _noteHeldQueuedInput(text: string): void {
+		const preview = text.length > 200 ? `${text.slice(0, 200)}...` : text;
+		this._emit({
+			type: "warning",
+			message: `A queued message was not delivered because the session context changed before it was admitted. It is kept in full in the pending queue; restore it to the editor to send it again: ${preview}`,
+		});
 	}
 
 	// Steering/follow-up/extension-command queue mechanics (parsing, skill-command expansion,
@@ -6027,6 +6272,13 @@ export class AgentSession {
 		return result;
 	}
 
+	/** Take every queued input with its images and every queued extension command, emptying the queues. */
+	takeAllQueuedInput(): { steering: QueuedInput[]; followUp: QueuedInput[]; commands: string[] } {
+		const result = this._pendingQueue.takeAll();
+		this._emitQueueUpdate();
+		return result;
+	}
+
 	/** Take queued steering and follow-up messages (text and images) to send them another way. */
 	takeQueuedMessages(): { steering: QueuedInput[]; followUp: QueuedInput[] } {
 		const result = this._pendingQueue.takeMessages();
@@ -6064,6 +6316,9 @@ export class AgentSession {
 	 */
 	async abort(reason: string): Promise<void> {
 		this._optionalIntentAbort?.abort();
+		// The interrupt cancels queued input whose admission is still undecided; admitted input stays queued.
+		this._pendingQueue.cancelAwaiting();
+		this._emitQueueUpdate();
 		// A submission still preparing has no run to abort: cancel the submission itself.
 		if (!this.agent.state.isStreaming) this._submissionAbort?.abort(reason);
 		this.runtimeUpdates.cancel();

@@ -2807,17 +2807,20 @@ export class InteractiveMode {
 	 * Clears both session queue and compaction queue.
 	 */
 	private clearAllQueues(): { steering: string[]; followUp: string[] } {
-		const { steering, followUp, commands } = this.session.clearQueue();
-		const compactionSteering = this.compactionQueuedMessages
-			.filter((msg) => msg.mode === "steer")
-			.map((msg) => msg.text);
-		const compactionFollowUp = this.compactionQueuedMessages
-			.filter((msg) => msg.mode === "followUp")
-			.map((msg) => msg.text);
+		const { steering, followUp, commands } = this.session.takeAllQueuedInput();
+		const compactionSteering = this.compactionQueuedMessages.filter((msg) => msg.mode === "steer");
+		const compactionFollowUp = this.compactionQueuedMessages.filter((msg) => msg.mode === "followUp");
 		this.compactionQueuedMessages = [];
+		// The text returns to the editor and the images to the pending clipboard queue, so a resubmit
+		// sends the complete input again.
+		const restore = (inputs: readonly clipboardInput.UserInputSubmission[]) =>
+			clipboardInput.restoreClipboardImages(
+				clipboardInput.bindClipboardQueue(this.clipboardQueue, { clipboardImageStore: this.clipboardImageStore }),
+				inputs,
+			);
 		return {
-			steering: [...steering, ...compactionSteering],
-			followUp: [...followUp, ...commands, ...compactionFollowUp],
+			steering: restore([...steering, ...compactionSteering]),
+			followUp: [...restore(followUp), ...commands, ...restore(compactionFollowUp)],
 		};
 	}
 

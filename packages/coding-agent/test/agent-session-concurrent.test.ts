@@ -383,6 +383,7 @@ describe("AgentSession concurrent prompt guard", () => {
 	it("should preserve FIFO order for streaming prompt steering even when input handlers finish out of order", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const assistantResponses: string[] = [];
+		const requestUserTexts: string[][] = [];
 
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -403,6 +404,7 @@ describe("AgentSession concurrent prompt guard", () => {
 							.map((part) => part.text)
 							.join("\n");
 					});
+				requestUserTexts.push(userTexts);
 				const stream = new MockAssistantStream();
 				queueMicrotask(() => {
 					if (userTexts.includes("second steer")) {
@@ -484,7 +486,16 @@ describe("AgentSession concurrent prompt guard", () => {
 						.join("\n");
 				}),
 		).toEqual(["start", "first steer", "second steer"]);
-		expect(assistantResponses).toEqual(["first", "second"]);
+		// The second steer no longer waits for the first one's whole turn: it joins the first steer's run
+		// at its next provider boundary, so it may share that request. It never arrives before the first.
+		for (const texts of requestUserTexts) {
+			if (texts.includes("second steer"))
+				expect(texts.indexOf("first steer")).toBeLessThan(texts.indexOf("second steer"));
+			if (texts.includes("second steer")) expect(texts).toContain("first steer");
+		}
+		const ownerTexts = ["start", "first steer", "second steer"];
+		expect(requestUserTexts.at(-1)?.filter((text) => ownerTexts.includes(text))).toEqual(ownerTexts);
+		expect(assistantResponses.at(-1)).toBe("second");
 		expect(session.pendingMessageCount).toBe(0);
 	});
 

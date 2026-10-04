@@ -164,6 +164,84 @@ export function takeClipboardImagesForText(host: ClipboardQueueHost, text: strin
 	return images.length > 0 ? images : undefined;
 }
 
+const IMAGE_LABEL = /\[Image #(\d+)\]/g;
+
+function imageLabelNumber(label: string): number {
+	return Number(/\[Image #(\d+)\]/.exec(label)?.[1] ?? 0);
+}
+
+function sameImage(stored: { mimeType: string; bytes: Uint8Array } | undefined, image: ImageContent): boolean {
+	return (
+		stored !== undefined &&
+		stored.mimeType === image.mimeType &&
+		Buffer.from(stored.bytes).equals(Buffer.from(image.data, "base64"))
+	);
+}
+
+/** A queue host that can also give restored images a durable identity in the session image store. */
+export interface ClipboardRestoreHost extends ClipboardQueueState {
+	readonly clipboardImageStore?: Pick<SessionImageStore, "resolveReferences" | "retainContent" | "read">;
+}
+
+/**
+ * Hand restored inputs' images back to the pending clipboard queue, ahead of the editor's own
+ * images (the restored text precedes the editor's text), under labels that resolve to exactly
+ * those images when the text is submitted again. A label is kept when it already names these bytes
+ * in the session image store, or names nothing yet; otherwise the store's own allocator gives the
+ * image a sequence, and every reference to the old label in that input's text is renamed.
+ */
+export function restoreClipboardImages(host: ClipboardRestoreHost, inputs: readonly UserInputSubmission[]): string[] {
+	const store = host.clipboardImageStore;
+	const restored: PendingClipboardImage[] = [];
+	const labelTaken = (label: string, image: ImageContent) =>
+		[...restored, ...host.pendingClipboardImages].some(
+			(pending) =>
+				pending.label === label &&
+				(pending.content.data !== image.data || pending.content.mimeType !== image.mimeType),
+		) ||
+		(store !== undefined &&
+			store.read(imageLabelNumber(label)) !== undefined &&
+			!sameImage(store.read(imageLabelNumber(label)), image));
+	const freeNumber = (): number => {
+		let candidate =
+			Math.max(
+				host.clipboardImageCounter,
+				...[...restored, ...host.pendingClipboardImages].map((pending) => imageLabelNumber(pending.label)),
+			) + 1;
+		while (store?.read(candidate) !== undefined) candidate++;
+		return candidate;
+	};
+	const texts = inputs.map((input) => {
+		let text = input.text;
+		const available = [...new Set([...text.matchAll(IMAGE_LABEL)].map((match) => match[0]))];
+		for (const image of input.images ?? []) {
+			let label =
+				available.find(
+					(candidate) => store !== undefined && sameImage(store.read(imageLabelNumber(candidate)), image),
+				) ?? available.find((candidate) => !labelTaken(candidate, image));
+			if (label) {
+				available.splice(available.indexOf(label), 1);
+			} else {
+				let sequence: number;
+				try {
+					sequence = store ? store.retainContent(image).sequence : freeNumber();
+				} catch {
+					// Durable retention is an optimization of identity, not a condition of recovery.
+					sequence = freeNumber();
+				}
+				label = `[Image #${sequence}]`;
+				const replaced = available.shift();
+				text = replaced ? text.split(replaced).join(label) : `${text} ${label}`;
+			}
+			restored.push({ label, content: image });
+			host.clipboardImageCounter = Math.max(host.clipboardImageCounter, imageLabelNumber(label));
+		}
+		return text;
+	});
+	host.pendingClipboardImages = [...restored, ...host.pendingClipboardImages];
+	return texts;
+}
+
 export function buildUserInputSubmission(host: BuildSubmissionHost, text: string): UserInputSubmission {
 	const images = host.takeClipboardImagesForText(text);
 	return images ? { text, images } : { text };
