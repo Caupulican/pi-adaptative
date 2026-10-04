@@ -44,6 +44,7 @@ import {
 	type WorkerModelPinsSettings,
 } from "./orchestration/worker-model-pins.ts";
 import { ProfileRegistry } from "./profile-registry.ts";
+import { normalizeSteStrictness } from "./provider-prompt-contracts.ts";
 import {
 	mergeResourceProfileMap,
 	mergeResourceProfileSettings,
@@ -870,6 +871,8 @@ export interface Settings {
 	/** Globally pinned model identities. Identity is the provider and model id pair, not id alone. */
 	modelFavorites?: ModelFavorite[];
 	memorySystem?: MemorySystem;
+	/** ASD-STE100 explanation strictness 0-10 (0 off); default 9. */
+	steStrictness?: number;
 	/** Provider-scoped fast-mode preferences. Concrete providers own the supported modes. */
 	fastMode?: Record<string, FastModePreference>;
 	transport?: TransportSetting; // default: "auto"
@@ -2681,8 +2684,10 @@ export class SettingsManager {
 			? parseProfileFileDefinition(readFileSync(path, "utf-8"), name)
 			: { name, resources: {} };
 		const payload = this.mergeProfileDefinition(name, definition, resources, existing);
-		mkdirSync(dirname(path), { recursive: true });
-		writeFileSync(path, JSON.stringify(payload, null, 2), "utf-8");
+		this.mutateProfileFiles(() => {
+			mkdirSync(dirname(path), { recursive: true });
+			writeFileSync(path, JSON.stringify(payload, null, 2), "utf-8");
+		});
 	}
 
 	/**
@@ -2774,7 +2779,7 @@ export class SettingsManager {
 		if (!existsSync(profilePath)) {
 			throw new Error(`Profile not found: ${name}`);
 		}
-		rmSync(profilePath, { force: true });
+		this.mutateProfileFiles(() => rmSync(profilePath, { force: true }));
 		this.rewriteReusableProfileSelections(name, undefined);
 	}
 
@@ -2837,8 +2842,10 @@ export class SettingsManager {
 		}
 		const parsed = parseProfileFileDefinition(readFileSync(oldPath, "utf-8"), oldName);
 		parsed.name = newName;
-		writeFileSync(newPath, JSON.stringify(parsed, null, 2), "utf-8");
-		rmSync(oldPath, { force: true });
+		this.mutateProfileFiles(() => {
+			writeFileSync(newPath, JSON.stringify(parsed, null, 2), "utf-8");
+			rmSync(oldPath, { force: true });
+		});
 		this.rewriteReusableProfileSelections(oldName, newName);
 	}
 
@@ -2986,6 +2993,16 @@ export class SettingsManager {
 
 		this.modifiedProjectFields.clear();
 		this.modifiedProjectNestedFields.clear();
+	}
+
+	/**
+	 * Reusable profile files (`profiles/<name>.json`) are the one settings artifact written outside the
+	 * queued scopes: callers read them straight back, so the write stays synchronous and touches no
+	 * scope's pending-field bookkeeping. They get the same worker suppression as `enqueueWrite`.
+	 */
+	private mutateProfileFiles(task: () => void): void {
+		if (isWorkerSession()) return;
+		task();
 	}
 
 	private enqueueWrite(scope: SettingsScope, task: () => void): void {
@@ -4087,6 +4104,19 @@ export class SettingsManager {
 		}
 		this.globalSettings.memorySystem = system;
 		this.markModified("memorySystem");
+		this.save();
+	}
+
+	getSteStrictness(): number {
+		return normalizeSteStrictness(this.settings.steStrictness);
+	}
+
+	setSteStrictness(strictness: number): void {
+		if (!Number.isInteger(strictness) || strictness < 0 || strictness > 10) {
+			throw new Error(`Invalid steStrictness '${strictness}'. Must be an integer from 0 (off) to 10.`);
+		}
+		this.globalSettings.steStrictness = strictness;
+		this.markModified("steStrictness");
 		this.save();
 	}
 

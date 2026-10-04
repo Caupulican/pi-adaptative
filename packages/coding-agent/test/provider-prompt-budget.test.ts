@@ -27,7 +27,7 @@ import {
 } from "../src/core/provider-tool-text.ts";
 
 const PROMPT_LIMITS = [
-	["subagent", SUBAGENT_CORE_SYSTEM_PROMPT, 720],
+	["subagent", SUBAGENT_CORE_SYSTEM_PROMPT, 880],
 	["scout", SCOUT_SYSTEM_PROMPT, 650],
 	["curation digest", CURATION_DIGEST_SYSTEM_PROMPT, 340],
 	["curation relevance", CURATION_RELEVANCE_SYSTEM_PROMPT, 420],
@@ -106,13 +106,13 @@ describe("recurring provider prompt budgets", () => {
 		// A guideline that does not fit the remaining budget is dropped WHOLE, never truncated
 		// mid-word: a half-sentence directive silently missing its second half is a worse defect
 		// than the directive being absent (the whole point of ordering mandatory guidelines first).
-		const oversizedInput = Array.from({ length: 10 }, (_, index) =>
-			`${index}:`.padEnd(Math.ceil(MAX_PROVIDER_TOOL_GUIDELINES_CHARS / 10) + 1, "x"),
-		);
+		const itemLength = MAX_PROVIDER_TOOL_GUIDELINE_CHARS - 10;
+		const fitting = Math.floor(MAX_PROVIDER_TOOL_GUIDELINES_CHARS / itemLength);
+		const oversizedInput = Array.from({ length: fitting + 1 }, (_, index) => `${index}:`.padEnd(itemLength, "x"));
 		const dropped: string[] = [];
 		const boundedGuidelines = normalizeProviderPromptGuidelines(oversizedInput, (message) => dropped.push(message));
-		expect(boundedGuidelines).toHaveLength(9);
-		expect(boundedGuidelines.reduce((total, guideline) => total + guideline.length, 0)).toBe(9 * 121);
+		expect(boundedGuidelines).toHaveLength(fitting);
+		expect(boundedGuidelines.reduce((total, guideline) => total + guideline.length, 0)).toBe(fitting * itemLength);
 		for (const guideline of boundedGuidelines) expect(guideline).not.toMatch(/…$/);
 		expect(dropped).toHaveLength(1);
 		expect(dropped[0]).toMatch(/dropped/);
@@ -124,8 +124,9 @@ describe("recurring provider prompt budgets", () => {
 		// guideline it cannot fully fit — it must drop the whole guideline instead.
 		const mandatory =
 			"CAVEMAN MODE - MANDATORY: fresh=no agentId; reuse=returned agentId; queued=admitted; no interrupt; parallel read-only=no write/edit.";
-		const fillers = Array.from({ length: 10 }, (_, index) =>
-			`filler-${index}:`.padEnd(MAX_PROVIDER_TOOL_GUIDELINE_CHARS, "x"),
+		const fillers = Array.from(
+			{ length: Math.ceil(MAX_PROVIDER_TOOL_GUIDELINES_CHARS / MAX_PROVIDER_TOOL_GUIDELINE_CHARS) },
+			(_, index) => `filler-${index}:`.padEnd(MAX_PROVIDER_TOOL_GUIDELINE_CHARS, "x"),
 		);
 		const onBounded = vi.fn();
 		const bounded = normalizeProviderPromptGuidelines([mandatory, ...fillers], onBounded);

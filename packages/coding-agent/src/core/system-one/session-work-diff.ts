@@ -5,12 +5,14 @@ import type {
 } from "../objective-execution/repository-mutation-observer.ts";
 import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import type { AddedSuppression } from "./suppression-scan.ts";
 import {
 	captureWorkBaseline,
 	discoverWorkRepository,
 	readWorkDiff,
 	retainWorkBaseline,
 	WORK_DIFF_PATCH_LIMIT,
+	WORK_DIFF_SUPPRESSION_LIMIT,
 	WORK_DIFF_UNTRACKED_LIMIT,
 	type WorkBaseline,
 	type WorkDiff,
@@ -243,6 +245,7 @@ export function readGoalWorkDiff(scopes: readonly RepositoryWorkEvidenceScope[])
 	let patch = "";
 	let omittedChars = 0;
 	const untracked: string[] = [];
+	const suppressions: AddedSuppression[] = [];
 	const diagnostics: string[] = [];
 	for (const scope of changed) {
 		if (!scope.baseline || scope.diagnostic) {
@@ -259,6 +262,9 @@ export function readGoalWorkDiff(scopes: readonly RepositoryWorkEvidenceScope[])
 		const available = Math.max(0, WORK_DIFF_PATCH_LIMIT - patch.length);
 		patch += section.slice(0, available);
 		omittedChars += work.omittedChars + Math.max(0, section.length - available);
+		for (const hit of work.suppressions ?? []) {
+			if (suppressions.length < WORK_DIFF_SUPPRESSION_LIMIT) suppressions.push(hit);
+		}
 		for (const path of work.untracked) {
 			if (untracked.length < WORK_DIFF_UNTRACKED_LIMIT) untracked.push(`${scope.repositoryRoot}:${path}`);
 		}
@@ -268,6 +274,7 @@ export function readGoalWorkDiff(scopes: readonly RepositoryWorkEvidenceScope[])
 		patch,
 		omittedChars,
 		untracked,
+		suppressions,
 		repositories,
 		...(diagnostics.length ? { diagnostic: diagnostics.join("\n").slice(0, 2048) } : {}),
 	};

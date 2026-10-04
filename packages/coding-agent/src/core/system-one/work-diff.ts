@@ -6,12 +6,13 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstatSync, mkdtempSync, readlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { lstatSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
 import { withoutInheritedGitLocation } from "../exec.ts";
 import { parseRepositoryHeadRecord } from "../objective-execution/repository-head-state.ts";
+import { createProcessScratchDirectory } from "../process-scratch.ts";
 import { removeTreeSync } from "../util/remove-tree.ts";
+import { type AddedSuppression, addedSuppressions } from "./suppression-scan.ts";
 
 export interface WorkBaseline {
 	readonly root: string;
@@ -29,6 +30,12 @@ export interface WorkDiff {
 	readonly omittedChars: number;
 	/** New files git does not track yet, which `git diff` does not show. */
 	readonly untracked: readonly string[];
+	/**
+	 * Lint and type-check suppressions the work adds, scanned over the whole diff: the content of new files and
+	 * every change past the {@link WORK_DIFF_PATCH_LIMIT} patch bound, which `patch` itself does not carry.
+	 * Absent when the source did not scan (the check then reads `patch`).
+	 */
+	readonly suppressions?: readonly AddedSuppression[];
 	/** A failed snapshot after an observed mutation is missing evidence, never an empty outcome. */
 	readonly diagnostic?: string;
 	readonly repositories?: readonly { root: string; base: string }[];
@@ -50,6 +57,8 @@ export function hasRepositoryOutcome(work: WorkDiff | undefined, recordedChanges
 /** Enough for any focused change; larger work is judged on its first part and the file list. */
 export const WORK_DIFF_PATCH_LIMIT = 24_000;
 export const WORK_DIFF_UNTRACKED_LIMIT = 50;
+/** Suppression hits kept; every path with a hit is still listed before the cap is reached. */
+export const WORK_DIFF_SUPPRESSION_LIMIT = 500;
 
 function git(
 	cwd: string,
@@ -106,7 +115,7 @@ export function captureWorkBaseline(cwd: string): WorkBaseline | undefined {
 				.find((head) => head !== undefined);
 		const revision = readHead();
 		if (!revision) return undefined;
-		scratch = mkdtempSync(join(tmpdir(), "pi-work-snapshot-"));
+		scratch = createProcessScratchDirectory("pi-work-snapshot-");
 		const env = { ...withoutInheritedGitLocation(), GIT_INDEX_FILE: join(scratch, "index") };
 		git(root, revision === "unborn" ? ["read-tree", "--empty"] : ["read-tree", revision], undefined, env);
 		const paths = new Set([
@@ -205,6 +214,9 @@ export function readWorkDiff(cwd: string, baseline: WorkBaseline, paths?: readon
 			patch: full.slice(0, WORK_DIFF_PATCH_LIMIT),
 			omittedChars: Math.max(0, full.length - WORK_DIFF_PATCH_LIMIT),
 			untracked: untracked.slice(0, WORK_DIFF_UNTRACKED_LIMIT),
+			// The whole diff, not the bounded patch: a new file's content is in it, and so is everything the
+			// patch bound cuts off. Prose files are skipped by the scan itself.
+			suppressions: addedSuppressions(full).slice(0, WORK_DIFF_SUPPRESSION_LIMIT),
 		};
 	} catch {
 		return {

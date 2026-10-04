@@ -29,10 +29,13 @@ Ask these questions in order:
    semantics, authentication flow, or model capability? Change the **provider
    adapter/model metadata** rather than global core behavior.
 
-A regression test, benchmark, fixture, or telemetry counter accompanies the
-owning layer. It is evidence, not a replacement behavior layer.
+A benchmark, fixture, or telemetry counter (and a regression test only when the owner
+asked for tests) accompanies the owning layer. It is evidence, not a replacement behavior layer.
 
 ## Layer matrix
+
+Proof cells that name tests apply only when the owner explicitly asked for tests; otherwise the
+proof is reading, build/check, or live evidence the owner allows.
 
 | Layer | Use when | Typical artifact | Required proof | Reject when |
 | --- | --- | --- | --- | --- |

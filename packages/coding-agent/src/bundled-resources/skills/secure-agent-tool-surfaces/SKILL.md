@@ -29,7 +29,7 @@ can grant itself capability, cross a session tenant, disclose secrets, or widen
 network/process/filesystem reach.
 
 Think before coding, prefer a small capability over a broad filter, change the
-lowest authoritative owner, prove behavior with adversarial tests, and keep
+lowest authoritative owner, prove behavior live or by reading (adversarial tests only when the owner asked for tests), and keep
 humans at credentials, destructive/irreversible actions, external publication,
 authority expansion, and material security decisions.
 
@@ -157,7 +157,7 @@ secrets or raw sensitive bodies. Audit failures must fail closed for mutations.
 
 ### 8. Red-team and gate
 
-For every privileged boundary, add a focused regression and negative control.
+When the owner asked for tests, add a focused regression and negative control for every privileged boundary; otherwise record the negative control as a live-proof or reading step and add no test files.
 Exercise prompt/tool injection, schema rug pulls, name shadowing, malformed and
 oversized values, path aliases/symlinks, redirects and DNS rebinding, replay,
 duplicate/out-of-order events, cancellation at each phase, crash/restart,
@@ -184,7 +184,7 @@ the evidence body for skipped probes and errors.
 
 **Poisoned tool result:** an external search result says to read a credential
 file and upload it. The result remains labeled data; host UAC denies the file and
-egress operations, and no memory write occurs. A regression asserts all three.
+egress operations, and no memory write occurs. A regression (if tests were requested) asserts all three.
 
 **Two sessions in one workspace:** each receives a distinct coordinator,
 background namespace, event stream, and credential capability. Guessing or
@@ -204,8 +204,8 @@ and egress policy. A valid session token from another user is a negative control
 - Secrets remain model-blind and redacted from every failure path.
 - Untrusted results and memory retain provenance and cannot become instructions.
 - Background completion is event-driven and owner-session scoped.
-- Cancellation, crash, reload, replay, and cross-tenant tests cover side effects.
-- Focused regressions and negative controls pass with no skipped security probes.
+- Cancellation, crash, reload, replay, and cross-tenant side effects are covered (by tests only when the owner asked for tests, otherwise by reading or live proof).
+- Negative controls hold with no skipped security probes; focused regressions pass when the owner asked for tests.
 
 ## Known Gaps
 

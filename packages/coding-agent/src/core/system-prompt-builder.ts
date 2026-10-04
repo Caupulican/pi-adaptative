@@ -440,6 +440,7 @@ export class SystemPromptBuilder {
 			promptGuidelines,
 			extensions: [...activeExtensions],
 			date: this._promptDate,
+			steStrictness: this.deps.getSettingsManager().getSteStrictness?.(),
 		};
 		// A memory allowance is part of the final prompt, not extra capacity on top of it.
 		// Measure the mandatory prefix first, including caller guidance and paths; retain its

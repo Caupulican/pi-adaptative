@@ -1123,7 +1123,7 @@ and `packages/coding-agent/test/lane-private-paths.test.ts`.
 **A managed memory file can always be recovered, and only the operator adopts an external edit.** The managed state stores the committed content with its digest; an empty file against a non-empty managed revision is restored on start and before a write (nothing of anyone's is in an empty file); any other drift refuses the model's write and names `/memory accept` and `/memory restore`, which only the operator can run. Pinned by `packages/coding-agent/test/memory-drift-recovery.test.ts`.
 
 **Memory projections share the final prompt allowance.** Static memory receives only the capacity
-left after the core contract, tool surface, paths, and caller instructions. The 4,096-character
+left after the core contract, tool surface, paths, and caller instructions. The 5,120-character
 minimal limit remains unchanged; omitted preferences arrive through the existing persona record,
 whose model budget charges its complete wire framing. Without a model budget, static and persona
 projections select the same whole preference lines. Reload retains the bounded notice identity for
@@ -1161,7 +1161,7 @@ neither provider successes nor trusted evidence reopen a consumed signature. Onl
 prompt resets both allowances: it resumes any system-blocked goal (`resume_goal` without
 `source: "system"`) and clears the streak and the collection; automatic resumes never impersonate
 owner intent. Explicit owner pause, block, stop and `autoContinueGoal: false` are untouched.
-These contracts fit the 3,300-byte core prompt budget (the full-profile pin in `system-prompt.test.ts`, measured with the live package root and cwd, including a deterministic long hosted checkout) and the 4,096-character minimal-profile ceiling (`agent-session-model-capability.test.ts`, measured with a long live cwd). Pinned by
+These contracts fit the 3,700-byte core prompt budget (the full-profile pin in `system-prompt.test.ts`, measured with the live package root and cwd, including a deterministic long hosted checkout) and the 5,120-character minimal-profile ceiling (`agent-session-model-capability.test.ts`, measured with a long live cwd). Pinned by
 `packages/coding-agent/test/goal-execution-budget.test.ts`,
 `packages/coding-agent/test/agent-session-goal-continuation-loop.test.ts`, and
 `packages/coding-agent/test/system-prompt.test.ts`.

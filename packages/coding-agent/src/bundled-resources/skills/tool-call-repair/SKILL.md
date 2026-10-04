@@ -152,7 +152,7 @@ file; take them as separate items, not riders.
 
 ## Output contract
 
-Code and fixtures land in `packages/ai` (validation + provider tests).
+Code lands in `packages/ai` (validation + provider code); fixtures and tests only when the owner asked for tests.
 Per-model observations and new failure modes append to the model-notes table
 in `references/repair-catalogue.md`. Durable findings go to the AGENTS.md
 ledger. Never chat-only.
@@ -161,5 +161,5 @@ ledger. Never chat-only.
 
 - Never loosen a schema or delete a test to make a call pass.
 - Repairs are pure, deterministic, bounded (~100 lines each, one re-Check).
-- A repair without a fixture per provider it claims to fix does not merge.
+- A repair without evidence per provider it claims to fix (a fixture when the owner asked for tests) does not merge.
 - Do not repair relational failures; the model must decide values.

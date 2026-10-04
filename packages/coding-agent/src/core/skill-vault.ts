@@ -1,6 +1,7 @@
 import { type Stats, statSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { composeRequestSystemPrompt } from "@caupulican/pi-agent-core/provider-request-planner";
+import { minimatch } from "minimatch";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { OWNER_PRECEDENCE_POLICY } from "./provider-prompt-contracts.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
@@ -36,6 +37,10 @@ export const MAX_LOADED_SKILLS = 3;
 export const MAX_PINNED_SKILLS = 2;
 const MAX_SEARCH_RESULTS = 5;
 const MAX_SEARCH_DESCRIPTION_CHARS = 240;
+/** Recent working-tree files the vault remembers for path-scoped skill ranking (most recent kept). */
+export const MAX_SKILL_WORK_PATHS = 64;
+/** Rank bonus for a text match whose skill declares `paths` matching the session's recent file work. */
+const PATH_MATCH_SCORE = 10;
 
 type SkillVaultRequester = "model" | "user";
 type SkillVaultUnloadReason = "explicit" | "idle_expired" | "resource_unavailable" | "budget_exceeded";
@@ -79,7 +84,12 @@ export interface SkillVaultStatus {
 }
 
 export interface SkillSearchResult {
-	candidates: Array<{ name: string; description: string }>;
+	candidates: Array<{
+		name: string;
+		description: string;
+		/** The query names one output format and this bundled skill produces it; listed first, never loaded for the model. */
+		recommended?: true;
+	}>;
 	/** Skills on disk the loader could not index (`<path>: <reason>`), so a broken SKILL.md is visible. */
 	diagnostics?: string[];
 }
@@ -161,6 +171,69 @@ function searchScore(skill: Skill, query: string, tokens: readonly string[]): nu
 	return score;
 }
 
+/** Verbs that ask for an artifact to be produced; a format word beside none of them names a topic, not a demand. */
+const OUTPUT_VERBS = "(?:make|build|create|generate|produce|write|draw|render|design|show|give|visuali[sz]e|present)";
+/** Words that make a format word the name of a subject (an html parsing bug, a video player) instead of an artifact. */
+const SUBJECT_FOLLOWER =
+	"(?!\\s+(?:parsing|parser|player|codec|decoder|encoder|driver|stream|streaming|call|buffer|element|tag|api|playback|bug|renderer|rendering|library|loader|loading|handler|error|crash|syntax))";
+
+/** A demand for the artifact `noun` names: a producing verb, then at most four words, then the noun. */
+function makeDemand(noun: string): RegExp {
+	return new RegExp(`\\b${OUTPUT_VERBS}\\b(?:\\s+[\\w'-]+){0,4}?\\s+${noun}\\b${SUBJECT_FOLLOWER}`, "i");
+}
+
+/** A demand that names the format as the output ("as an html page", "in html", "into mermaid"). */
+function formatDemand(noun: string): RegExp {
+	return new RegExp(`\\b(?:as|in|into)\\s+(?:an?\\s+|the\\s+)?${noun}\\b${SUBJECT_FOLLOWER}`, "i");
+}
+
+const DIAGRAM_NOUN = "(?:diagrams?|flow ?charts?|mermaid|svg|sequence charts?|concept maps?)";
+const HTML_ARTIFACT_NOUN = "(?:html\\s+(?:pages?|files?|documents?|explainers?|reports?|slides?)|web ?pages?)";
+const HTML_FORMAT_NOUN = "(?:html(?:\\s+(?:pages?|files?|documents?))?|web ?pages?)";
+const VIDEO_NOUN = "(?:videos?|screencasts?)";
+
+/**
+ * The output formats an owner can demand and the bundled skill that produces each. The prompt line
+ * (`OUTPUT_FORMAT_ROUTING_RULE`) tells the model to load these skills; this table is what lets the search
+ * itself answer a format query with that skill first, whatever other skills mention the same words.
+ * A demand is an output verb or phrase ("make a diagram", "explain it in HTML", "explainer video", "draw
+ * the flow"), never the bare format word: "html parsing bug" asks for no page.
+ */
+const OUTPUT_FORMAT_SKILL_ROUTES: ReadonlyArray<{ readonly skill: string; readonly demands: readonly RegExp[] }> = [
+	{
+		skill: "explain-diagram",
+		demands: [
+			makeDemand(DIAGRAM_NOUN),
+			formatDemand(DIAGRAM_NOUN),
+			/\bdraw\s+(?:me\s+|up\s+|out\s+)?(?:an?|the|how|what|this|that|it)\b/i,
+		],
+	},
+	{
+		skill: "explain-html",
+		demands: [makeDemand(HTML_ARTIFACT_NOUN), formatDemand(HTML_FORMAT_NOUN)],
+	},
+	{
+		skill: "explain-video",
+		demands: [
+			makeDemand(VIDEO_NOUN),
+			formatDemand(VIDEO_NOUN),
+			/\b(?:explainer|narrated)\s+(?:videos?|walkthroughs?|explainers?)\b/i,
+			/\bscreencasts?\b/i,
+			/\b3b1b\b/i,
+			/\b(?:as|into|to)\s+(?:an?\s+)?mp4\b/i,
+		],
+	},
+];
+
+/**
+ * The one format skill a query demands. A query that names several formats has no single answer, so it
+ * returns nothing and the model chooses (prompt rule: several fit means a System One choice).
+ */
+function demandedFormatSkill(query: string): string | undefined {
+	const matches = OUTPUT_FORMAT_SKILL_ROUTES.filter((route) => route.demands.some((demand) => demand.test(query)));
+	return matches.length === 1 ? matches[0]?.skill : undefined;
+}
+
 function activeSkillContext(skill: Skill, body: string): string {
 	return [
 		`ACTIVE SKILL ${skill.name}`,
@@ -228,6 +301,8 @@ export class SkillVaultController {
 	private lastReplayedIndex = 0;
 	private exclusions = new Map<string, SkillExclusionRecord>();
 	private slots = new Map<string, SkillSlotState>();
+	/** Recent working-tree file paths (cwd-relative, `/` separators), oldest first; ranks path-scoped skills. */
+	private workPaths = new Set<string>();
 	private unloadReason: SkillVaultUnloadReason | undefined;
 	private contextRevision = 0;
 
@@ -291,6 +366,32 @@ export class SkillVaultController {
 				this.contextRevision++;
 			}
 		}
+	}
+
+	/**
+	 * Record working-tree files the session just touched (cwd-relative, `/` separators). Host-observed from
+	 * tool calls, so it needs no model cooperation; only the most recent {@link MAX_SKILL_WORK_PATHS} are kept.
+	 */
+	noteWorkPaths(paths: readonly string[]): void {
+		for (const path of paths) {
+			if (path.length === 0) continue;
+			this.workPaths.delete(path);
+			this.workPaths.add(path);
+		}
+		while (this.workPaths.size > MAX_SKILL_WORK_PATHS) {
+			const oldest = this.workPaths.values().next().value;
+			if (oldest === undefined) break;
+			this.workPaths.delete(oldest);
+		}
+	}
+
+	private matchesWorkPaths(skill: Skill): boolean {
+		if (!skill.paths || skill.paths.length === 0 || this.workPaths.size === 0) return false;
+		const recent = [...this.workPaths];
+		// matchBase makes a slash-free pattern (`*.rs`) match in any directory, like a gitignore line.
+		return skill.paths.some((pattern) =>
+			recent.some((path) => minimatch(path, pattern, { dot: true, matchBase: true })),
+		);
 	}
 
 	isExcluded(name: string): boolean {
@@ -419,13 +520,30 @@ export class SkillVaultController {
 	}
 
 	private searchCandidates(query: string, tokens: readonly string[]): SkillSearchResult["candidates"] {
-		return this.getSkills()
-			.filter((skill) => !skill.disableModelInvocation && !this.isExcluded(skill.name))
+		const eligible = this.getSkills().filter(
+			(skill) => !skill.disableModelInvocation && !this.isExcluded(skill.name),
+		);
+		// A path match only reorders skills the query already matched; it never adds a candidate.
+		const pathMatched = new Set<Skill>();
+		const ranked = eligible
 			.map((skill) => ({ skill, score: searchScore(skill, query, tokens) }))
 			.filter((entry) => entry.score > 0)
+			.map((entry) => {
+				if (!this.matchesWorkPaths(entry.skill)) return entry;
+				pathMatched.add(entry.skill);
+				return { skill: entry.skill, score: entry.score + PATH_MATCH_SCORE };
+			})
 			.sort((left, right) => right.score - left.score || left.skill.name.localeCompare(right.skill.name))
-			.slice(0, MAX_SEARCH_RESULTS)
-			.map(({ skill }) => ({ name: skill.name, description: compactDescription(skill.description) }));
+			.map(({ skill }) => skill);
+		const demanded = demandedFormatSkill(query);
+		const recommended = demanded === undefined ? undefined : eligible.find((skill) => skill.name === demanded);
+		const ordered = recommended ? [recommended, ...ranked.filter((skill) => skill !== recommended)] : ranked;
+		return ordered.slice(0, MAX_SEARCH_RESULTS).map((skill) => ({
+			name: skill.name,
+			description: compactDescription(skill.description),
+			...(skill === recommended ? { recommended: true as const } : {}),
+			...(pathMatched.has(skill) ? { pathMatch: true as const } : {}),
+		}));
 	}
 
 	/** The named eligible skill, after one re-scan of the roots when the first lookup misses. */

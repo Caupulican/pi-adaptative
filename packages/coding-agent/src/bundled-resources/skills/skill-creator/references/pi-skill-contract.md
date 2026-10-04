@@ -54,6 +54,9 @@ but do not create empty documentation merely to satisfy a layout convention.
 
 ## Validation layers
 
+Layer 1 (the validator) is always allowed. Layers 2 to 4 are tests: write and run them
+only when the owner explicitly asked for tests.
+
 1. `validate-skill.mjs`: package shape, safe name, quoted frontmatter, line
    bound, required header order, provider neutrality, and linked-resource paths.
 2. Discovery test: a blank Pi profile finds the bundled skill and its source

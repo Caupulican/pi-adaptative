@@ -1,7 +1,8 @@
-import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { type Static, Type } from "typebox";
+import { getAgentDir } from "../../config.ts";
+import { resourceDir } from "../agent-paths.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { MAX_ACTIVE_SKILL_BODY_BYTES } from "../skill-vault.ts";
 import { MAX_SKILL_DESCRIPTION_LENGTH, MAX_SKILL_NAME_LENGTH, type Skill, validateSkillName } from "../skills.ts";
@@ -37,6 +38,8 @@ export interface SkillifyToolDetails {
 export interface SkillifyToolOptions {
 	/** Host-admitted skill universe; omitting it retains standalone backwards compatibility. */
 	getSkills?: () => readonly Skill[];
+	/** Agent directory whose skills/ the proposal targets; defaults to the process agent directory. */
+	agentDir?: string;
 }
 
 export function createSkillifyToolDefinition(
@@ -92,7 +95,7 @@ export function createSkillifyToolDefinition(
 					: runSkillAudit(cwd, { name, description, body }, admittedSkills);
 
 			const valid = errors.length === 0;
-			const proposedPath = join(homedir(), ".pi", "agent", "skills", name, "SKILL.md");
+			const proposedPath = join(resourceDir("skills", options?.agentDir ?? getAgentDir()), name, "SKILL.md");
 
 			const report: SkillifyReport = {
 				valid,

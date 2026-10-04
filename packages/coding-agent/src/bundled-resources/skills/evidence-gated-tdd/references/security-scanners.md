@@ -15,9 +15,9 @@
 - Keep server logs and scanner reports together as evidence.
 - Treat connection failures, timeouts, skipped tools, missing dependencies, and report-render failures as an incomplete run.
 - Inspect structured findings; do not equate exit code zero with no findings.
-- Reproduce each material finding with a focused project-owned test and negative control.
+- Reproduce each material finding with a negative control (as a focused project-owned test only when the owner asked for tests).
 - Check common false positives: generic application fallbacks, catch-all routes, static assets, authentication redirects, cache-busting parameters, proxy-generated errors, and local HTTP runs missing production transport policy.
-- Rerun the focused scanner probe after the fix, then run the local regression suite.
+- Rerun the focused scanner probe after the fix; run the local regression suite only when the owner asked for tests.
 
 ## Tool-specific notes
 

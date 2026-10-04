@@ -78,7 +78,7 @@ For project-level Claude Code skills, add to `.pi/settings.json`:
 1. At startup, Pi reads a bounded frontmatter prefix from each skill. It retains routing metadata, not the body.
 2. When the `skill` tool is active, the stable system prompt carries one brief rule: search the vault if, and only if, specialist focus would help. It contains no skill catalog, paths, bodies, or XML wrappers.
 3. The agent searches metadata with `skill { action: "search", query: "..." }`, then loads an exact name. `/skill:name` performs the same load when the user selects a skill explicitly.
-4. The host keeps one loaded skill. Its body rides one hidden durable record in the message stream (`active_skill_context`), appended once per change and cached like any other message; when the last skill leaves, one cleared record says so. The body never enters the system prompt: a system-prompt change would invalidate the provider's cached prefix for the whole conversation on every load, unload, or expiry.
+4. The host keeps up to three loaded skills. Their bodies ride one hidden durable record in the message stream (`active_skill_context`), appended once per change and cached like any other message; when the last skill leaves, one cleared record says so. The body never enters the system prompt: a system-prompt change would invalidate the provider's cached prefix for the whole conversation on every load, unload, or expiry.
 5. The host moves the skill from `loaded_pending` to `active` on the first provider request. It records monotonic time on provider projections, completed model turns, tool execution; invalidates changed or profile-blocked resources; expires ten minutes of observed inactivity before the next host event. No polling timer runs.
 6. Loading another skill replaces the current one. Explicit unload is optional; host expiry and invalidation do not depend on model cooperation.
 
@@ -174,7 +174,20 @@ Per the [Agent Skills specification](https://agentskills.io/specification#frontm
 | `compatibility` | No | Max 500 chars. Environment requirements. |
 | `metadata` | No | Arbitrary key-value mapping. |
 | `allowed-tools` | No | Space-delimited list of pre-approved tools (experimental). |
+| `paths` | No | Working-tree globs the skill is for (a YAML list, or a comma-separated string; commas inside `{a,b}` stay in the glob), for example `["src/**/*.ts", "*.rs"]`. A pattern without a slash matches in any directory. Up to 16 patterns of at most 200 characters; absolute, negated and over-limit entries are ignored with a load warning. See [Path-scoped skills](#path-scoped-skills). |
 | `disable-model-invocation` | No | When `true`, skill is hidden from model search and cannot be model-loaded. Users may still use `/skill:name`. For full project/user unload, prefer `disabledResources.skills` in settings. |
+
+### Path-scoped skills
+
+A skill that declares `paths` ranks higher in `skill { action: "search" }` when the session's recent file work matches one
+of its globs, and the result carries a `[matches these paths]` marker. The host records the files the session's path-scoped
+tool calls name (read, edit, write, search and similar; the 64 most recent, relative to the working directory, aliases
+expanded) as the calls start, so no model cooperation is needed. The match only reorders skills the query already matched;
+it never adds a candidate, loads a skill, or makes a model call. A skill without `paths` ranks as before.
+
+A query that demands one output format with a producing phrase ("make a diagram", "explain it in HTML", "explainer video",
+"draw how it flows") lists the matching bundled `explain-*` skill first with a `[recommended]` marker. The bare format word
+is not a demand ("html parsing bug" names a topic), and a query that demands several formats gets no marker.
 
 ### Name Rules
 

@@ -34,7 +34,7 @@ Human edge: if an explicitly requested reusable preset needs unavailable credent
 
 1. Call `delegate` with `action: "profile_create"`; never supply or invent a profile ID.
 2. Confirm `created: true`, the expected base, and the reported changed fields.
-3. Pass the returned `profileId` unchanged to one bounded `delegate` task with explicit acceptance criteria.
+3. Pass the returned `profileId` unchanged to one bounded `delegate` task with explicit acceptance criteria and the owner's test rule: no tests, no test files, no test runs unless the owner asked.
 4. Wait for the terminal handoff, retrieve once with `delegate { action: "status", laneId }`, independently verify worker claims.
 5. Treat rejection before persistence as a successful safety boundary. Change the approach or request authority; do not retry the same expansion with different wording.
 

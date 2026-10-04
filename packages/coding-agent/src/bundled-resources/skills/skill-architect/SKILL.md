@@ -112,8 +112,8 @@ When a skill or prompt orchestrates iterative/autonomous work, add a compact loo
 - **State over steps**: dynamic placements, decisions, assets, and timings live in JSON/config/state artifacts, not hardcoded logic.
 - **Compound Knowledge**: reread project conventions and prior state on each pass; do not re-derive architecture from zero.
 - **Independent QA**: never let the implementer grade its own output; route worker/subagent output to a fresh clean-context verifier when stakes are non-trivial.
-- **Hard Stops**: stop for human review after 5 consecutive failed repair attempts on one blocker or 2 cycles with no output/test improvement.
-- **Definition of Done**: all declared tests, schema validators, linters, and artifact checks pass, or the skill reports BLOCKED with the exact missing evidence.
+- **Hard Stops**: stop for human review after 5 consecutive failed repair attempts on one blocker or 2 cycles with no output/check improvement.
+- **Definition of Done**: all declared schema validators, linters, and artifact checks pass (declared tests only when the owner asked for tests), or the skill reports BLOCKED with the exact missing evidence.
 
 ## Anti-Patterns
 

@@ -22,7 +22,8 @@ export function operationGateLedgerBindings(input: {
 			if (!ledger) return undefined;
 			return {
 				read: (cacheKey, notBefore) => ledger.readOperationEffects(cacheKey, notBefore),
-				write: (cacheKey, model, readings, now) => ledger.writeOperationEffects(cacheKey, model, readings, now),
+				write: (cacheKey, model, readings, now) =>
+					ledger.writeOperationEffects(cacheKey, model, readings, now, input.getSessionId()),
 			};
 		},
 		recordDecision(decision) {

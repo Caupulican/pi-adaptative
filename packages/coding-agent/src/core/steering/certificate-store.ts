@@ -6,6 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { isWorkerSession } from "../session-role.ts";
 import { canonicalJson } from "./canonical.ts";
 import type { CertificateLookupQuery, SteeringCertificate } from "./types.ts";
 
@@ -48,9 +49,12 @@ export const MAX_RETAINED_CERTIFICATES = 512;
 export class SteeringCertificateStore {
 	private readonly certificatesById = new Map<string, SteeringCertificate>();
 	readonly persistentPath?: string;
+	/** Zero-footprint: a worker session reads the shared store but never rewrites it. */
+	private readonly readOnly: boolean;
 
-	constructor(persistentPath?: string) {
+	constructor(persistentPath?: string, options?: { readOnly?: boolean }) {
 		this.persistentPath = persistentPath;
+		this.readOnly = options?.readOnly ?? isWorkerSession();
 		if (this.persistentPath && existsSync(this.persistentPath)) {
 			this.loadFromDisk();
 		}
@@ -79,7 +83,7 @@ export class SteeringCertificateStore {
 	}
 
 	private saveToDisk(): void {
-		if (!this.persistentPath) return;
+		if (!this.persistentPath || this.readOnly) return;
 		const dir = dirname(this.persistentPath);
 		if (!existsSync(dir)) {
 			mkdirSync(dir, { recursive: true });

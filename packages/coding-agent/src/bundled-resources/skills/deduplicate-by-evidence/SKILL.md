@@ -12,7 +12,7 @@ Use Detect → Verify → Score → Gate. Treat scanner output as candidate evid
 Select the strongest mode authorized by the request:
 
 - **Audit**: inspect without changing files; return an evidence-ranked ownership map.
-- **Enforce**: harden scanner coverage and add a regression gate. Leave the gate failing while real clones remain.
+- **Enforce**: harden scanner coverage and add the clone gate (a regression test for its configuration only when the owner asked for tests). Leave the gate failing while real clones remain.
 - **Remediate**: enforce, centralize one bounded clone family, and verify behavior.
 - **Continuous**: repeat bounded green slices until owned production code reaches the agreed zero-clone gate.
 
@@ -53,7 +53,7 @@ For jscpd:
 3. Write ad-hoc configs and full reports only under Pi-managed work storage or the OS temporary directory. Do not create repository reports, configs, lockfiles, manifests, or `node_modules` without an explicit request.
 4. Verify the pinned major version before relying on its Rust-native CLI. Do not silently fall back to the v4 Node engine.
 5. Explicitly configure `maxLines` and `maxSize`; defaults can omit god units. Keep both far above the largest legitimate owned file.
-6. Pin `minLines`, `minTokens`, `mode`, formats, cross-format policy, exact ignores, JSON reporter, and zero threshold in a regression test.
+6. Pin `minLines`, `minTokens`, `mode`, formats, cross-format policy, exact ignores, JSON reporter, and zero threshold in the scanner configuration (a regression test over it only when the owner asked for tests).
 7. Reconcile every owned candidate with the analyzed count. Account for below-minimum files by exact path and proof that they cannot contain the configured block size.
 8. Keep console projection bounded and retain the complete JSON report out of model context for explicit inspection.
 
@@ -67,7 +67,7 @@ Do not merge intentionally distinct trust, security, timing, provider, public/pr
 
 ### 4. Verify and classify
 
-For every candidate, record exact locations and behavior, classification, intended owner, divergence risk, and fix direction. Reproduce divergent behavior with a deterministic test and negative control before promoting a scanner/static finding to a confirmed defect.
+For every candidate, record exact locations and behavior, classification, intended owner, divergence risk, and fix direction. Reproduce divergent behavior deterministically with a negative control (a test only when the owner asked for tests) before promoting a scanner/static finding to a confirmed defect.
 
 Prefer a domain-named owner:
 
@@ -88,12 +88,12 @@ Work order (regression tests only when the user asks for them):
 1. **Scan**: preserve the hardened scan as the gate.
 2. **Centralize**: move the invariant to the lowest authoritative owner and route all callers through it.
 3. **Refactor**: remove replaced paths, aliases, fallbacks, and duplicate transitions in the same migration.
-4. **Focused gate**: prove the behavior live, run affected existing tests, type/build checks required by the repository, and the clone scan.
+4. **Focused gate**: prove the behavior live when the owner allows live runs, run the type/build checks required by the repository and the clone scan; run affected existing tests only when the owner asked for tests.
 5. **Release gate**: run the declared broader suite and inspect the report body, diff, and worktree scope.
 
 ### 6. Gate and hand off
 
-Do not claim completion until scanner coverage reconciles, the owned production gate reports zero textual clones at pinned sensitivity, verified rules have one owner or tested intentional separation, required tests/checks pass, and unrelated work remains untouched.
+Do not claim completion until scanner coverage reconciles, the owned production gate reports zero textual clones at pinned sensitivity, verified rules have one owner or documented intentional separation, required checks pass (tests only when the owner asked for them), and unrelated work remains untouched.
 
 Report confirmed-and-fixed families, rejected candidates and why, incomplete probes, scanner coverage, remaining risks, and commit identifiers only when a commit was authorized and created.
 
@@ -110,7 +110,7 @@ Report confirmed-and-fixed families, rejected candidates and why, incomplete pro
 
 ## Examples
 
-**Oversized coordinator:** enumerate all production files, raise explicit scanner caps with 2× or greater headroom, add a coverage regression, preserve the red report, then split only verified duplicated responsibilities behind named owners.
+**Oversized coordinator:** enumerate all production files, raise explicit scanner caps with 2× or greater headroom, add scanner coverage (a regression test only when the owner asked for tests), preserve the red report, then split only verified duplicated responsibilities behind named owners.
 
 **Provider adapters:** two providers share ranking/error/cache policy but differ in transport. Centralize provider-neutral policy while leaving unique I/O in adapters; test both shared behavior and distinct failure semantics.
 
@@ -122,8 +122,8 @@ Report confirmed-and-fixed families, rejected candidates and why, incomplete pro
 - Generated/vendor exclusions have exact proof.
 - Largest line/byte sizes fit with large headroom.
 - Candidate/analyzed counts reconcile without unexplained omissions.
-- jscpd is pinned to v5 Rust with sensitivity/config regression coverage.
-- Every promoted defect has a deterministic reproduction and negative control.
+- jscpd is pinned to v5 Rust with sensitivity/config pinned (regression coverage only when the owner asked for tests).
+- Every promoted defect has a deterministic reproduction and negative control (a test only when the owner asked for tests).
 - One authoritative owner replaces all competing paths.
 - Focused and repository-required gates were inspected, not inferred from exit status.
 - Output is bounded while full evidence remains retrievable.

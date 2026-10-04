@@ -335,11 +335,23 @@ describe("AgentSession.getContextCompositionReport", () => {
 			// owner-uncertainty actions and their validated disposition object add 104 measured tokens
 			// (canonical schema 932), budgeted only as this feature's schema growth.
 			const canonicalSchemaAllowance = 574;
+			// The delegate tool's write-scope grant (`writePaths`) and fan-out primitive (`slices`, `race`) add
+			// 108 measured tokens over the previous ceiling (delegate 1,058).
+			const delegateFanoutAllowance = 120;
 			expect(
 				report.toolSchemaTokens,
 				JSON.stringify(report.tools.map(({ name, schemaTokens }) => ({ name, schemaTokens }))),
 			).toBeLessThanOrEqual(
-				4_500 + 350 + 720 + 100 + 143 + 140 + goalChecksAllowance + peerAllowance + canonicalSchemaAllowance,
+				4_500 +
+					350 +
+					720 +
+					100 +
+					143 +
+					140 +
+					goalChecksAllowance +
+					peerAllowance +
+					canonicalSchemaAllowance +
+					delegateFanoutAllowance,
 			);
 			const toolTokens = new Map(report.tools.map((tool) => [tool.name, tool.schemaTokens]));
 			expect(toolTokens.get("goal")).toBeLessThanOrEqual(399 + completionAccountAllowance);
@@ -368,7 +380,7 @@ describe("AgentSession.getContextCompositionReport", () => {
 					toolTokens.get("self_compact")! -
 					toolTokens.get("peer")! -
 					goalChecksGrowth,
-			).toBeLessThanOrEqual(4_500);
+			).toBeLessThanOrEqual(4_500 + delegateFanoutAllowance);
 			expect(toolTokens.get("skill")).toBeLessThanOrEqual(160);
 			// Explicit independent work adds one bounded object to delegate's wire contract. Keep
 			// the old surface's 875-token ceiling and budget this addition independently.
@@ -384,12 +396,12 @@ describe("AgentSession.getContextCompositionReport", () => {
 				providerReportedTokens: null,
 				contextWindow: null,
 			});
-			expect(priorReport.tools[0].schemaTokens).toBeLessThanOrEqual(875);
+			expect(priorReport.tools[0].schemaTokens).toBeLessThanOrEqual(875 + delegateFanoutAllowance);
 			const parallelTokens = Math.ceil(
 				(JSON.stringify({ parallelWork: projectToolSchemaForProvider(parallelWork) }).length - 1) / 4,
 			);
 			expect(parallelTokens).toBeLessThanOrEqual(75);
-			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875 + parallelTokens);
+			expect(toolTokens.get("delegate")).toBeLessThanOrEqual(875 + parallelTokens + delegateFanoutAllowance);
 			expect(toolTokens.get("task_steps")).toBeLessThanOrEqual(1_200);
 			expect(toolTokens.get("secret_store")).toBeLessThanOrEqual(330);
 			expect(toolTokens.get("pipeline")).toBeLessThanOrEqual(220);

@@ -123,7 +123,7 @@ remain `needs_review`.
 ### 5. Fix and report defensively
 
 Fix the lowest authoritative validation, authorization, parsing, or state owner.
-Add a focused regression and negative control before changing behavior. Remove
+Prove the defect and a negative control before changing behavior (as a focused regression only when the owner asked for tests). Remove
 the competing unsafe path once the mandatory path is proven.
 
 Reports must separate confirmed, rejected, incomplete, and residual findings.

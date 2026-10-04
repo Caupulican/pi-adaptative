@@ -113,18 +113,18 @@ intersection and repository instructions.
 
 ### 5. Add evidence before implementation
 
-For a bundled skill, first add a focused discovery/content test that fails for
-the missing skill or contract. For scripts, add valid input, malformed negative
-control, path/traversal, existing-destination, and cross-platform cases in
-proportion to risk.
-
-Do not test only keyword presence when runtime discovery or executable behavior
+Verify by reading the skill against its contract and by running the validator. Add
+discovery, content or script tests only when the owner explicitly asked for tests; then
+write them after the skill, with valid input, malformed negative control,
+path/traversal, existing-destination, and cross-platform cases in proportion to
+risk. Do not test only keyword presence when runtime discovery or executable behavior
 is the invariant. Avoid executing external providers or paid APIs in skill tests.
 
 ### 6. Validate and forward-test
 
-Run `scripts/validate-skill.mjs` on the completed directory, then the repository's
-focused discovery and script tests. Inspect output, not only exit status.
+Run `scripts/validate-skill.mjs` on the completed directory (and the repository's
+focused discovery and script tests only when the owner asked for tests). Inspect output,
+not only exit status.
 
 Forward-test at least these prompts against the description:
 
@@ -133,14 +133,14 @@ Forward-test at least these prompts against the description:
 - one ambiguous request whose safest behavior is explicit;
 - one request exercising each linked reference or script.
 
-Run the repository-required broader checks after the focused tests. If the skill
+Run the repository-required broader checks the owner's current mode allows. If the skill
 is bundled, verify it loads from a blank profile and that the packaged asset copy
 includes every linked resource.
 
 ### 7. Hand off precisely
 
-Report the skill name/path, ownership decision, created resources, focused test,
-validator result, overlap decision, rejected candidates, and known gaps. Mention
+Report the skill name/path, ownership decision, created resources, focused test
+(only if requested), validator result, overlap decision, rejected candidates, and known gaps. Mention
 provider neutrality explicitly. Do not claim a skill is installed in an already
 released binary until the package was built/released and tested there.
 
@@ -158,9 +158,9 @@ released binary until the package was built/released and tested there.
 ## Examples
 
 **New narrow workflow:** no existing skill owns authorized web assessment.
-Scaffold `authorized-web-security-audit`, write a focused discovery test, keep
-the assessment contract in `references/`, validate, and forward-test an
-authorized and an unauthorized prompt.
+Scaffold `authorized-web-security-audit`, keep the assessment contract in
+`references/`, validate, and forward-test an authorized and an unauthorized
+prompt (a focused discovery test only if the owner asked for tests).
 
 **Overlap found:** a requested "prompt writer" duplicates `skill-architect`.
 Refine that owner instead of creating `prompt-writer`.
@@ -176,7 +176,7 @@ initializer. Choose `security-review`; never normalize traversal into a path.
 - No provider-specific metadata exists.
 - Required headers are present in order and `SKILL.md` is under 500 lines.
 - Every linked resource exists and has an explicit load/run trigger.
-- Discovery, executable negative controls, validator, and forward-routing tests pass.
+- The validator and forward-routing checks pass; discovery and executable negative-control tests pass when the owner asked for tests.
 - Bundled versus installed/released status is reported accurately.
 
 ## Known Gaps

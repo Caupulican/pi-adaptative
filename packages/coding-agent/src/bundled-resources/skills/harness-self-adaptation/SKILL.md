@@ -62,9 +62,9 @@ moves work or tokens elsewhere is not an improvement.
 Before diagnosing the harness:
 
 1. Restate the requested outcome and scope.
-2. Define an **oracle** that can prove the outcome: a focused test, fixture,
-   benchmark, transcript invariant, type check, rendered state, or explicit user
-   acceptance criterion.
+2. Define an **oracle** that can prove the outcome: a fixture, benchmark,
+   transcript invariant, type check, rendered state, or explicit user acceptance
+   criterion. A focused test is an oracle only when the owner asked for tests.
 3. Read the applicable `AGENTS.md`, relevant source in full before broad edits,
    existing tests, and the narrow Pi docs/examples required by the task.
 4. Search for an existing skill, prompt, setting, tool, extension, test helper,
@@ -161,10 +161,10 @@ Mandatory selection rules:
   are required.
 - Use core source only for a cross-cutting invariant or capability that lower
   layers cannot reliably enforce.
-- Treat tests, benchmarks, telemetry, and changelog entries as proof and
-  durability support, not substitutes for the behavior fix.
-- Change one causal mechanism per experiment. Adjacent test and observability
-  work may travel with it.
+- Treat benchmarks, telemetry, and changelog entries (and tests, only when the owner
+  asked for them) as proof and durability support, not substitutes for the behavior fix.
+- Change one causal mechanism per experiment. Adjacent observability work may
+  travel with it; test work travels only on an explicit owner request.
 
 ### 5. Design the intervention and rollback
 
@@ -177,8 +177,8 @@ should move <metric/invariant> from <baseline> to <target> while preserving
 ```
 
 Inspect external API types rather than guessing. Follow project conventions and
-use existing seams. Add or update the narrow regression test that fails for the
-old mechanism and passes for the new one. Do not remove intentional behavior,
+use existing seams. Prove the new mechanism on the real system; add or update a
+narrow regression test only when the owner asked for tests. Do not remove intentional behavior,
 weaken validation, suppress warnings, enlarge timeouts blindly, or lower quality
 thresholds merely to make the metric green.
 
@@ -212,7 +212,7 @@ Retain the intervention only when all applicable conditions pass:
 
 - the active task oracle passes;
 - the causal reproduction is fixed or the primary metric improves materially;
-- focused regression coverage passes;
+- focused regression coverage passes (when the owner asked for tests);
 - broader checks required by project policy pass;
 - safety, quality, compatibility, cost, and latency guardrails do not regress;
 - no authority or persistent setting changed outside the active grant;
@@ -270,14 +270,14 @@ Harness adaptation:
 
 A model emits the same repairable argument shape in independent turns. Reproduce
 it with a provider fixture, locate the shared validation choke point, load
-`tool-call-repair`, add one guarded repair mode and regression fixture, then
+`tool-call-repair`, add one guarded repair mode (and a regression fixture only if the owner asked for tests), then
 compare repaired execution and false-positive behavior. Do not add a tool-specific
 pre-coercion shim or teach every prompt the malformed shape.
 
 **Long-session slowdown**
 
 A source benchmark and profile show repeated full-prefix serialization. Fix the
-owning cache or transport path, add a scale-sensitive regression/benchmark, and
+owning cache or transport path, measure with a scale-sensitive benchmark, and
 compare equivalent long inputs. Do not tell users to compact more often or raise
 a timeout to hide quadratic work.
 

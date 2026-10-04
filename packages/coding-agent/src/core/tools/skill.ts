@@ -15,39 +15,43 @@ import {
 	type SkillVaultStatus,
 } from "../skill-vault.ts";
 
+const skillLifecycleActions = [
+	Type.Literal("search"),
+	Type.Literal("load"),
+	Type.Literal("unload"),
+	Type.Literal("status"),
+	Type.Literal("exclude"),
+	Type.Literal("inspect"),
+] as const;
+
+const skillLifecycleProperties = {
+	query: Type.Optional(Type.String({ description: "search query" })),
+	name: Type.Optional(Type.String({ description: "exact skill name; unload without it unloads all" })),
+	names: Type.Optional(
+		Type.Array(Type.String({ minLength: 1 }), {
+			minItems: 1,
+			maxItems: MAX_LOADED_SKILLS,
+			description: "exact skill names to load together in ONE atomic call; the complete set must fit the vault",
+		}),
+	),
+	pin: Type.Optional(
+		Type.Boolean({
+			description: `prioritize retention while loaded; at most ${MAX_PINNED_SKILLS} pins, further requests load unpinned`,
+		}),
+	),
+	reason: Type.Optional(
+		Type.String({
+			description: "exact explanation of conflict with owner instructions (required for exclude)",
+		}),
+	),
+};
+
 const skillSchema = Type.Object(
 	{
-		action: Type.Union(
-			[
-				Type.Literal("search"),
-				Type.Literal("load"),
-				Type.Literal("unload"),
-				Type.Literal("status"),
-				Type.Literal("exclude"),
-				Type.Literal("inspect"),
-				Type.Literal("repair"),
-			],
-			{ description: "search | load | unload | status | exclude | inspect | repair" },
-		),
-		query: Type.Optional(Type.String({ description: "search query" })),
-		name: Type.Optional(Type.String({ description: "exact skill name; unload without it unloads all" })),
-		names: Type.Optional(
-			Type.Array(Type.String({ minLength: 1 }), {
-				minItems: 1,
-				maxItems: MAX_LOADED_SKILLS,
-				description: "exact skill names to load together in ONE atomic call; the complete set must fit the vault",
-			}),
-		),
-		pin: Type.Optional(
-			Type.Boolean({
-				description: `prioritize retention while loaded; at most ${MAX_PINNED_SKILLS} pins, further requests load unpinned`,
-			}),
-		),
-		reason: Type.Optional(
-			Type.String({
-				description: "exact explanation of conflict with owner instructions (required for exclude)",
-			}),
-		),
+		action: Type.Union([...skillLifecycleActions, Type.Literal("repair")], {
+			description: "search | load | unload | status | exclude | inspect | repair",
+		}),
+		...skillLifecycleProperties,
 		body: Type.Optional(
 			Type.String({
 				description: "repaired markdown body without frontmatter (required for repair)",
@@ -63,6 +67,18 @@ const skillSchema = Type.Object(
 				description: "expected source version token from inspect (required for repair)",
 			}),
 		),
+	},
+	{ additionalProperties: false },
+);
+
+const SKILL_VAULT_DESCRIPTION = `Skill vault, up to ${MAX_LOADED_SKILLS} concurrent skills under one byte budget. Search, then load exact names before work. A batch loads every requested skill or rejects without partial admission. Load may evict previously loaded skills and reports them, preferring the oldest unpinned. Pin prioritizes retention; pinned skills still expire idle. Host injects bodies starting next request; unload one name or all. On detecting a loaded or available skill conflicts with owner instructions: invoke skill exclude with exact name and reason immediately (unloads skill and excludes from session skill mapping), continue authorized work`;
+
+const workerSkillSchema = Type.Object(
+	{
+		action: Type.Union([...skillLifecycleActions], {
+			description: "search | load | unload | status | exclude | inspect",
+		}),
+		...skillLifecycleProperties,
 	},
 	{ additionalProperties: false },
 );
@@ -148,7 +164,10 @@ function searchText(result: SkillSearchResult): string {
 	const lines =
 		result.candidates.length === 0
 			? ["skill search: no match"]
-			: result.candidates.map((candidate) => `${candidate.name}: ${candidate.description}`);
+			: result.candidates.map(
+					(candidate) =>
+						`${candidate.recommended ? "[recommended: the query names the output format this skill produces] " : ""}${candidate.name}: ${candidate.description}`,
+				);
 	// A skill the loader could not index is otherwise invisible; naming it here is what lets the
 	// model (or the owner) fix the SKILL.md instead of retrying a name that will never load.
 	for (const diagnostic of result.diagnostics ?? []) lines.push(`skipped ${diagnostic}`);
@@ -200,7 +219,7 @@ export function createSkillVaultToolDefinition(
 	return {
 		name: "skill",
 		label: "Skill",
-		description: `Skill vault, up to ${MAX_LOADED_SKILLS} concurrent skills under one byte budget. Search, then load exact names before work. A batch loads every requested skill or rejects without partial admission. Load may evict previously loaded skills and reports them, preferring the oldest unpinned. Pin prioritizes retention; pinned skills still expire idle. Host injects bodies starting next request; unload one name or all. On detecting a loaded or available skill conflicts with owner instructions: invoke skill exclude with exact name and reason immediately (unloads skill and excludes from session skill mapping), continue authorized work; optional repair only if configured eligible.`,
+		description: `${SKILL_VAULT_DESCRIPTION}; optional repair only if configured eligible.`,
 		promptSnippet: "Search/load/exclude skill; exclude on owner-instruction conflict.",
 		parameters: skillSchema,
 		async execute(_toolCallId, input) {
@@ -436,5 +455,25 @@ export function createSkillVaultToolDefinition(
 				}
 			}
 		},
+	};
+}
+
+/**
+ * The skill surface of a worker session. Workers load, unload, inspect and exclude skills exactly as
+ * main does, but the skill source is the owner's: the schema offers no `repair` action (and none of
+ * its body/version fields), so a worker cannot rewrite a skill file. Decided by session role at
+ * registration, not by prompt.
+ */
+export function createWorkerSkillVaultToolDefinition(
+	vault: SkillVaultController,
+	options?: SkillVaultToolOptions,
+): ToolDefinition<typeof workerSkillSchema> {
+	const full = createSkillVaultToolDefinition(vault, options);
+	return {
+		...full,
+		prepareArguments: undefined,
+		description: `${SKILL_VAULT_DESCRIPTION}.`,
+		parameters: workerSkillSchema,
+		execute: (toolCallId, input, signal, onUpdate, ctx) => full.execute(toolCallId, input, signal, onUpdate, ctx),
 	};
 }

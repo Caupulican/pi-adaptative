@@ -1192,43 +1192,6 @@ export class SystemOneController {
 	}
 
 	/**
-	 * Patch-review stage pack. Production owner is SteeringPlane JEV-025 / completion challenge.
-	 */
-	async validatePatchReview(changeIds: string[]): Promise<{
-		addressesNeed: boolean;
-		masksSymptomOnly: boolean;
-		architectureFitScore: number;
-		regressionSurfaceScore: number;
-		decision: ValidationDecision;
-	}> {
-		this.syncCanonicalTruth();
-		const projection = this.projector.patchReview(this.store.snapshot(), changeIds);
-		const { decision, answers, evaluationId } = await this.runStageValidation("patch_review", projection);
-
-		const needAns = (answers.addresses_evidenced_need as { noul?: number } | undefined)?.noul ?? 0;
-		const addressesNeed = evaluateNoul(needAns, "required_true", this.config.thresholds) !== "hard_fail";
-
-		const symptomAns = (answers.masks_symptom_only as { noul?: number } | undefined)?.noul ?? 0;
-		const masksSymptomOnly = evaluateNoul(symptomAns, "required_false", this.config.thresholds) === "hard_fail";
-
-		const archAns = answers.architecture_fit as { score?: number } | undefined;
-		const architectureFitScore = archAns?.score ?? 0;
-
-		const regAns = answers.regression_surface as { score?: number } | undefined;
-		const regressionSurfaceScore = regAns?.score ?? 0;
-
-		this.sealDecision(decision, addressesNeed && !masksSymptomOnly ? "pass" : "rework", evaluationId);
-
-		return {
-			addressesNeed,
-			masksSymptomOnly,
-			architectureFitScore,
-			regressionSurfaceScore,
-			decision,
-		};
-	}
-
-	/**
 	 * Drift stage pack. Production owner is ObjectiveStallDetector + JEV-004 strategy_repetition.
 	 */
 	async validateDriftLoop(): Promise<{
@@ -1420,6 +1383,7 @@ export class SystemOneController {
 					]),
 				],
 				patch: work?.patch ?? "",
+				...(work?.suppressions ? { suppressions: work.suppressions } : {}),
 				state: snapshot,
 			},
 			{ repositoryOutcome, isBugFix },

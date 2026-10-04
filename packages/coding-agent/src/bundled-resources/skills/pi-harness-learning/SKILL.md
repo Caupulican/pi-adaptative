@@ -52,7 +52,7 @@ Use when the user asks why the agent behaved a certain way or wants an
    - memory to record,
    - skill/prompt wording to refine,
    - extension/tool guardrail to add,
-   - validation or test to create.
+   - validation to create (a test only if the owner explicitly asked for tests).
 6. If a durable lesson is clear, follow the Automata recording workflow before
    or after proposing harness changes.
 
@@ -107,11 +107,18 @@ history. This is not single-session summarization.
 7. An explicit `/auto-learn run` may launch one bounded background learner with
    the selected active/in-use model. Learners must share the Auto Learn state
    file, use per-session tenant leases, renew/complete their lease, and avoid
-   colliding with learners from other sessions.
-8. Auto Learn learners must look for memory. If Automata/user memory is enabled
-   and contains rules, preferences, corrections, or project facts, query it
-   before judging candidates and use it to polish proposals, avoid duplicates,
-   and improve behavioral/tooling accuracy.
+   colliding with learners from other sessions. A learner is a read-only worker
+   (read, grep, find, ls): it never writes memory, skills, extensions, settings
+   or source. It returns one bounded `<auto_learn_proposals>` block as untrusted
+   evidence; its exit is the terminal signal, and the main session validates the
+   block, applies eligible entries through its own owner paths, persists a
+   bounded handoff record, and notifies the session. Entries it cannot apply
+   (ineligible, malformed, extension or source changes) are recorded as
+   findings, never as success.
+8. Memory confrontation happens in the main session. If Automata/user memory is
+   enabled and contains rules, preferences, corrections, or project facts, main
+   checks every learner memory proposal against it at apply time, so duplicates
+   and conflicts are held as proposals instead of written.
 9. Apply policy gates: memory may be auto-applied only after overlap checks;
    safe low-risk user-level skill/prompt changes may be applied when the current
    request or standing grant authorizes self-improvement. A direct request to
@@ -172,7 +179,7 @@ Use when a session reveals a repeatable process worth turning into a skill, prom
    - **Pulse**: one term per concept, no time-stamped language, concrete examples, honest known gaps, and a self-check before final output.
 5. For any skill/prompt/tool instruction that tells an agent how to help, include or inherit the core engineering principles: think before coding, surface assumptions/confusion/tradeoffs, simplicity first, surgical changes only, goal-driven execution with verifiable success criteria, and loop until proof.
 6. Preserve the human-on-the-edge mandate in durable instructions: humans approve credentials, destructive operations, push/tag/release/publish, authority expansion, and material product-choice changes.
-7. If the skill/prompt manages autonomous or iterative work, include an explicit loop contract: verifiable end state, active roadmap/phase selection, state/config artifacts over hardcoded behavior, compound-knowledge reads each pass, independent clean-context QA for worker output, hard stops after 5 failed repair attempts or 2 no-progress cycles, and a Definition of Done tied to tests/schema/lint/artifact checks.
+7. If the skill/prompt manages autonomous or iterative work, include an explicit loop contract: verifiable end state, active roadmap/phase selection, state/config artifacts over hardcoded behavior, compound-knowledge reads each pass, independent clean-context QA for worker output, hard stops after 5 failed repair attempts or 2 no-progress cycles, and a Definition of Done tied to schema/lint/artifact checks (and tests only when the owner asked for tests).
 8. Always quote the frontmatter `description` as a YAML string; unquoted descriptions containing `:` or other YAML metacharacters can break discovery. Use double quotes by default and escape embedded `"` or `\`.
 9. Save user-level skills under `~/.pi/agent/skills/<name>/SKILL.md` by default. Use project-local skills only when the user asks.
 10. Validate the skill name matches the directory, frontmatter parses with `name` and `description`, line count is under 500, and `learning_skill_audit` reports no harmful overlap.
@@ -209,9 +216,9 @@ agent-runtime surfaces, notifications, or TUI widgets:
   delivered through immediate TUI/status updates plus durable state. Avoid
   delayed transcript messages for routine completions because they can arrive
   after later user input and mislead the user.
-- Validate these invariants with same-cwd/two-session tests and width-constrained
-  render tests whenever the asset touches UI, notifications, task state, agents,
-  tools, or background processing.
+- Validate these invariants by reading the code and, only when the owner asked for
+  tests, with same-cwd/two-session tests and width-constrained render tests, whenever
+  the asset touches UI, notifications, task state, agents, tools, or background processing.
 
 ## Output format
 

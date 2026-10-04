@@ -7,6 +7,7 @@ import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import type { ResourceDiagnostic } from "./diagnostics.ts";
 import { isResourcePathWithin } from "./resource-traversal.ts";
+import { isWorkerSession } from "./session-role.ts";
 import { discoverSkillFiles } from "./skill-discovery.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { sameFileVersion } from "./util/bounded-file.ts";
@@ -29,9 +30,89 @@ function isSkillThinkingLevel(value: unknown): value is ThinkingLevel {
 	return typeof value === "string" && (VALID_SKILL_THINKING_LEVELS as readonly string[]).includes(value);
 }
 
+/**
+ * What a skill's instructions make the agent do beyond reading and editing inside its own working tree.
+ * A worker holds no effect grant: the host never offers it a skill that declares one.
+ */
+export const SKILL_EFFECTS = ["external-write", "network", "external-binary", "secret"] as const;
+export type SkillEffect = (typeof SKILL_EFFECTS)[number];
+
+function isSkillEffect(value: unknown): value is SkillEffect {
+	return typeof value === "string" && (SKILL_EFFECTS as readonly string[]).includes(value);
+}
+
+/** Frontmatter `effects`: a YAML list or a comma-separated string. Unknown names are reported, never kept. */
+function parseSkillEffects(value: unknown): { effects: SkillEffect[]; unknown: string[] } {
+	const names = Array.isArray(value)
+		? value.map((entry) => String(entry).trim())
+		: typeof value === "string"
+			? value.split(",").map((entry) => entry.trim())
+			: [];
+	const wanted = names.filter((name) => name.length > 0);
+	return {
+		effects: [...new Set(wanted.filter(isSkillEffect))],
+		unknown: wanted.filter((name) => !isSkillEffect(name)),
+	};
+}
+
+/** Bounds for frontmatter `paths`: a skill names a handful of short working-tree globs, never a catalog. */
+export const MAX_SKILL_PATH_PATTERNS = 16;
+export const MAX_SKILL_PATH_PATTERN_LENGTH = 200;
+
+/** Why a `paths` entry cannot be a working-tree glob, or undefined when it can. */
+function skillPathPatternProblem(pattern: string): string | undefined {
+	if (pattern.length > MAX_SKILL_PATH_PATTERN_LENGTH) {
+		return `longer than ${MAX_SKILL_PATH_PATTERN_LENGTH} characters`;
+	}
+	if (pattern.includes("\0")) return "contains a NUL character";
+	if (pattern.startsWith("!")) return "negation is not supported";
+	if (pattern.startsWith("/") || /^[A-Za-z]:[\\/]/.test(pattern)) {
+		return "must be relative to the working directory";
+	}
+	return undefined;
+}
+
+/**
+ * Frontmatter `paths`: working-tree globs (`src/**\/*.ts`, `*.rs`, `docs/**`) naming the work a skill is for.
+ * A YAML list or a comma-separated string (commas inside `{a,b}` braces stay part of the glob). A pattern
+ * that cannot match a working-tree path, and every pattern past the cap, is reported and never kept.
+ */
+function parseSkillPaths(value: unknown): { paths: string[]; rejected: Array<{ pattern: string; reason: string }> } {
+	const names: string[] = [];
+	if (Array.isArray(value)) {
+		for (const entry of value) names.push(String(entry).trim());
+	} else if (typeof value === "string") {
+		let depth = 0;
+		let start = 0;
+		for (let index = 0; index <= value.length; index++) {
+			const char = value[index];
+			if (char === "{") depth++;
+			else if (char === "}" && depth > 0) depth--;
+			if (index === value.length || (char === "," && depth === 0)) {
+				names.push(value.slice(start, index).trim());
+				start = index + 1;
+			}
+		}
+	}
+	const paths: string[] = [];
+	const rejected: Array<{ pattern: string; reason: string }> = [];
+	for (const pattern of new Set(names.filter((name) => name.length > 0))) {
+		const problem = skillPathPatternProblem(pattern);
+		if (problem !== undefined) rejected.push({ pattern: pattern.slice(0, 80), reason: problem });
+		else if (paths.length >= MAX_SKILL_PATH_PATTERNS) {
+			rejected.push({ pattern: pattern.slice(0, 80), reason: `more than ${MAX_SKILL_PATH_PATTERNS} patterns` });
+		} else paths.push(pattern);
+	}
+	return { paths, rejected };
+}
+
 export interface SkillFrontmatter {
 	name?: string;
 	description?: string;
+	/** Declared effects beyond the working tree (see {@link SKILL_EFFECTS}). */
+	effects?: unknown;
+	/** Working-tree globs the skill is for (see {@link parseSkillPaths}). */
+	paths?: unknown;
 	"disable-model-invocation"?: boolean;
 	/** Optional thinking-level hint (R1 follow-up); see Skill.thinking. */
 	thinking?: string;
@@ -48,6 +129,13 @@ export interface Skill {
 	sourceInfo: SourceInfo;
 	disableModelInvocation: boolean;
 	promoted?: boolean;
+	/** Declared effects beyond the working tree; absent or empty means none. */
+	effects?: readonly SkillEffect[];
+	/**
+	 * Working-tree globs the skill is for (frontmatter `paths`). Search ranks the skill higher and marks it
+	 * when the session's recent file work matches one; it is never loaded or applied because of a match.
+	 */
+	paths?: readonly string[];
 	/**
 	 * Optional thinking-level hint parsed from frontmatter (R1 follow-up: skill-surfaced thinking
 	 * governance, alongside resource-profile thinking). Core only parses and surfaces this value —
@@ -59,6 +147,18 @@ export interface Skill {
 	 * extension) via the existing ctx.setThinkingLevel() extension API.
 	 */
 	thinking?: ThinkingLevel;
+}
+
+/** Skills a worker may be offered: those that declare no effect (a worker holds no effect grant). */
+export function workerEligibleSkills<T extends { effects?: readonly SkillEffect[] }>(skills: readonly T[]): T[] {
+	return skills.filter((skill) => (skill.effects?.length ?? 0) === 0);
+}
+
+/** The skills visible to the current process: a worker-role process sees only worker-eligible ones. */
+export function skillsForSessionRole<T extends { effects?: readonly SkillEffect[] }>(
+	skills: readonly T[],
+): readonly T[] {
+	return isWorkerSession() ? workerEligibleSkills(skills) : skills;
 }
 
 export interface LoadSkillsResult {
@@ -240,6 +340,20 @@ function loadSkillFromFile(
 			diagnostics.push({ type: "warning", message: error, path: filePath });
 		}
 
+		const { effects, unknown: unknownEffects } = parseSkillEffects(frontmatter.effects);
+		for (const effect of unknownEffects) {
+			diagnostics.push({
+				type: "warning",
+				message: `unknown effect "${effect}" (expected ${SKILL_EFFECTS.join(", ")})`,
+				path: filePath,
+			});
+		}
+
+		const { paths, rejected: rejectedPaths } = parseSkillPaths(frontmatter.paths);
+		for (const { pattern, reason } of rejectedPaths) {
+			diagnostics.push({ type: "warning", message: `ignored paths entry "${pattern}": ${reason}`, path: filePath });
+		}
+
 		// Still load the skill even with warnings (unless description is completely missing)
 		if (!frontmatter.description || frontmatter.description.trim() === "") {
 			return { skill: null, diagnostics };
@@ -254,6 +368,8 @@ function loadSkillFromFile(
 				sourceInfo: createSkillSourceInfo(filePath, skillDir, source),
 				disableModelInvocation: frontmatter["disable-model-invocation"] === true,
 				promoted: frontmatter.promoted === true,
+				...(effects.length > 0 ? { effects } : {}),
+				...(paths.length > 0 ? { paths } : {}),
 				thinking: isSkillThinkingLevel(frontmatter.thinking) ? frontmatter.thinking : undefined,
 			},
 			diagnostics,

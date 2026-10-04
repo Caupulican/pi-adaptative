@@ -17,6 +17,7 @@ import { Value } from "typebox/value";
 import { GATHER_MORE_LIMIT } from "./authority-line.ts";
 import { DEFAULT_SYSTEM_ONE_CONFIG, type SystemOneConfig } from "./config.ts";
 import type { CompletionRejectionDetail } from "./policy.ts";
+import { type AddedSuppression, addedSuppressions } from "./suppression-scan.ts";
 import type { ExecutionState } from "./types.ts";
 import { unsettledQuestionId, verdictAt } from "./unsettled-ladder.ts";
 
@@ -142,7 +143,7 @@ export function parseCompletionAccount(
 	};
 }
 
-export type AccountTopic = "scope" | "assumption" | "regression" | "cause";
+export type AccountTopic = "scope" | "assumption" | "regression" | "cause" | "mask";
 
 /** One stated claim and the evidence System One reads it against. */
 export interface AccountClaim {
@@ -161,6 +162,8 @@ export interface AccountContext {
 	readonly acceptance: readonly { readonly id: string; readonly text: string }[];
 	readonly changedPaths: readonly string[];
 	readonly patch: string;
+	/** Suppressions the whole work adds, scanned past the patch bound; read from `patch` when absent. */
+	readonly suppressions?: readonly AddedSuppression[];
 	readonly state: Pick<ExecutionState, "observations" | "verification">;
 }
 
@@ -229,6 +232,12 @@ function citedEvidenceIds(state: AccountContext["state"]): string[] {
 	].slice(0, COMPLETION_ACCOUNT_LIMITS.listedEvidenceIds);
 }
 
+/** An assumption accounts for a changed file when its claim names the file. */
+function claimNamesPath(claim: string, path: string): boolean {
+	const name = normalizePath(path).split("/").pop() ?? path;
+	return claim.replaceAll("\\", "/").includes(name);
+}
+
 const ACCOUNT_SHAPE =
 	"Call goal complete again with `account`: { changes: [{ path, reason, serves: [requirement id or the file it supports] }] for every changed file, assumptions: [{ claim, evidenceIds }], regressions: [{ path, evidenceIds }], cause: { claim, evidenceIds } for a bug fix }. Cite evidence ids from `get`.";
 
@@ -277,7 +286,7 @@ export function checkCompletionAccount(
 	}
 
 	const patchHeader = (path: string) =>
-		diffForPath(context.patch, path) ?? "(new file: its content is not in the patch)";
+		diffForPath(context.patch, path) ?? "(this file is not in the captured patch, so its content was not captured)";
 	for (const entry of account.changes) {
 		if (!context.changedPaths.some((changed) => samePath(entry.path, changed))) continue;
 		// Which requirement a change serves is the model's call; that the requirement exists is code's.
@@ -344,7 +353,7 @@ export function checkCompletionAccount(
 		statement: string,
 		ids: readonly string[],
 		extraEvidence = "",
-	): void => {
+	): AccountClaim | undefined => {
 		const resolved = ids.map((id) => ({ id, found: resolveEvidence(id, context.state) }));
 		const unknown = resolved.filter((entry) => !entry.found).map((entry) => entry.id);
 		if (unknown.length) {
@@ -353,7 +362,7 @@ export function checkCompletionAccount(
 				reason: `${label}: no evidence has the id ${unknown.join(", ")}.`,
 				required_next_proof: `Cite ids that exist${known.length ? `: ${known.join(", ")}` : "; record evidence first (add_evidence)"}.`,
 			});
-			return;
+			return undefined;
 		}
 		const found = resolved.flatMap((entry) => (entry.found ? [entry.found] : []));
 		if (!found.some((entry) => entry.verified)) {
@@ -362,17 +371,46 @@ export function checkCompletionAccount(
 				reason: `${label}: none of the cited evidence is verified (a passing check, a verified tool, test or file result).`,
 				required_next_proof: "Cite evidence the harness verified, or run the check that shows it.",
 			});
-			return;
+			return undefined;
 		}
 		const evidence = [
 			...found.map((entry) => `${entry.id}: ${entry.text.slice(0, COMPLETION_ACCOUNT_LIMITS.evidenceChars)}`),
 			...(extraEvidence ? [extraEvidence] : []),
 		].join("\n");
-		claims.push({ topic, label, statement, evidence, fingerprint: fingerprintOf(statement, evidence) });
+		const claim: AccountClaim = {
+			topic,
+			label,
+			statement,
+			evidence,
+			fingerprint: fingerprintOf(statement, evidence),
+		};
+		claims.push(claim);
+		return claim;
 	};
 
+	// A suppression hides what a check found. Code decides that each one is accounted for; System One reads the
+	// assumption that accounts for it like any other, shown which suppression it answers.
+	const suppressions = context.suppressions ?? addedSuppressions(context.patch);
+	for (const path of new Set(suppressions.map((hit) => hit.path)))
+		if (!account.assumptions.some((assumption) => claimNamesPath(assumption.claim, path))) {
+			const hits = suppressions.filter((hit) => hit.path === path);
+			failures.push({
+				id: `account_suppression_unaccounted:${normalizePath(path)}`,
+				reason: `\`${path}\` adds ${hits.length} lint or type-check suppression${hits.length === 1 ? "" : "s"}, first \`${hits[0]?.text}\`.`,
+				required_next_proof: `Fix what the suppression silences and remove it, or add an assumption that names \`${path}\` with evidenceIds showing why the silenced rule does not apply here (skill root-cause-debugging).`,
+			});
+		}
 	for (const assumption of account.assumptions)
-		cited("assumption", `assumption "${assumption.claim.slice(0, 80)}"`, assumption.claim, assumption.evidenceIds);
+		cited(
+			"assumption",
+			`assumption "${assumption.claim.slice(0, 80)}"`,
+			assumption.claim,
+			assumption.evidenceIds,
+			suppressions
+				.filter((hit) => claimNamesPath(assumption.claim, hit.path))
+				.map((hit) => `The change adds the suppression \`${hit.directive}\` to ${hit.path}.`)
+				.join("\n"),
+		);
 	for (const regression of account.regressions)
 		cited(
 			"regression",
@@ -385,10 +423,10 @@ export function checkCompletionAccount(
 			failures.push({
 				id: "account_cause_missing",
 				reason: "A bug fix needs the defect's cause and how the change removes it.",
-				required_next_proof: "Add account.cause: { claim, evidenceIds }.",
+				required_next_proof: "Add account.cause: { claim, evidenceIds } (skill root-cause-debugging).",
 			});
-		else
-			cited(
+		else {
+			const cause = cited(
 				"cause",
 				"the stated cause",
 				account.cause.claim,
@@ -398,6 +436,19 @@ export function checkCompletionAccount(
 					.filter((diff) => diff.length > 0)
 					.join("\n")}`,
 			);
+			// A fix that only silences the symptom leaves the stated cause in place. The same cited evidence and diff
+			// are read against that second claim, in the same System One request: no extra call.
+			if (cause) {
+				const statement = `The diff changes the mechanism that the stated cause describes: "${account.cause.claim.slice(0, 300)}".`;
+				claims.push({
+					topic: "mask",
+					label: "removal of the cause (the change is not only a symptom mask)",
+					statement,
+					evidence: cause.evidence,
+					fingerprint: fingerprintOf(statement, cause.evidence),
+				});
+			}
+		}
 	}
 	return { failures, claims };
 }
@@ -468,7 +519,10 @@ export function accountOutcome(
 	const failures: CompletionRejectionDetail[] = judged.refuted.map((claim) => ({
 		id: `account_contradicted:${claim.topic}`,
 		reason: `The evidence cited for the ${claim.label} contradicts the claim.`,
-		required_next_proof: "Correct the claim, or fix the work it describes.",
+		required_next_proof:
+			claim.topic === "mask"
+				? "Reproduce the defect against the current code, revise the change so it removes the cause rather than silencing the symptom, run the check again, and cite that run."
+				: "Correct the claim, or fix the work it describes.",
 	}));
 	const advisories: CompletionRejectionDetail[] = [];
 	for (const claim of judged.unsettled) {
@@ -481,7 +535,9 @@ export function accountOutcome(
 				required_next_proof:
 					claim.topic === "scope"
 						? "Add evidenceIds to that change (evidence that shows it does what it serves), or rewrite its reason to say what its diff does."
-						: "Cite evidence that shows it directly, or run the check that does.",
+						: claim.topic === "mask"
+							? "Cite a run that reproduces the defect before the change and passes after it, so the cause is shown removed."
+							: "Cite evidence that shows it directly, or run the check that does.",
 			});
 		else
 			advisories.push({

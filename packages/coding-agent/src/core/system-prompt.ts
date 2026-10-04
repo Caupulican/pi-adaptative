@@ -9,8 +9,12 @@ import { getExtensionDescription, getExtensionDisplayName } from "./extension-me
 import type { Extension } from "./extensions/types.ts";
 import { enforceModelCapabilitySystemPromptBudget, type ModelCapabilityProfile } from "./model-capability.ts";
 import {
+	ENGINEERING_SKILL_ROUTING_RULE,
+	normalizeSteStrictness,
 	ORIENTATION_SURVEY_RULE,
+	OUTPUT_FORMAT_ROUTING_RULE,
 	OWNER_AUTHORIZATION_RULE,
+	renderExplanationStyleRule,
 	SKILL_VAULT_SYSTEM_RULE,
 } from "./provider-prompt-contracts.ts";
 import type { Skill } from "./skills.ts";
@@ -43,6 +47,8 @@ export interface BuildSystemPromptOptions {
 	 * advances it only at a cold moment, so a day rollover never breaks a warm cache on its own.
 	 */
 	date?: string;
+	/** ASD-STE100 explanation strictness, 0 (off) to 10; invalid or missing means the default 9. */
+	steStrictness?: number;
 }
 
 const MODEL_BLIND_CREDENTIAL_AUTHORITY =
@@ -52,9 +58,9 @@ const ULTRA_TERSE_OUTPUT_POLICY = `
 
 ULTRA-TERSE OUTPUT
 
-- Drop articles/filler/pleasantries/hedging; fragments valid; each fact once.
+- Status/ops replies: drop articles/filler/pleasantries/hedging; fragments valid; each fact once.
 - Never drop not/never/no/only/except; never invent abbreviations or use causal arrows. Preserve numbers, units, code symbols, function/API names, commands, errors.
-- No self-reference/tool narration/tables/emoji/log dumps. Keep user language. Full grammar: security, irreversible actions, ambiguous order. Replies terse; artifacts normal prose.
+- No self-reference/tool narration/tables/emoji/log dumps. Keep user language. Full grammar: security, irreversible actions, ambiguous order. Artifacts normal prose.
 - Status/ops terse; analysis/review/evaluation gets complete structured answers. Never substitute harness protocol text or failure-record JSON for an answer.
 
 REFERENCE POINTS
@@ -71,7 +77,8 @@ OPERATING CONTRACT
 
 - Clear conversational outcome is goal; persist progress/evidence through compaction; finish or report blocker.
 - Hold scope; verify unknowns at primary sources; simplest proven design, one owner/path per invariant.
-- User outcome governs, method does not. Outcome risk: show evidence, test when practical, offer safest effective path, execute.
+- Fix root causes, never a guard or suppression that hides a failure; an added suppression needs evidence in the completion account. Label claims measured, inferred or guess.
+- User outcome governs, method does not. Outcome risk: show evidence, verify when practical (no tests unless the user asks), offer safest effective path, execute.
 - Work over 15 seconds: managed background run, event terminal, bounded handoff, owner notice; never poll.
 - Emit independent tool calls in one message; serialize only dependent, same-file, or stateful calls.
 - Facts: memory; specialization: skills; behavior: source. Discard noise.
@@ -277,9 +284,14 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			: capabilityClass === "minimal"
 				? PI_ADAPTATIVE_MINIMAL_CORE_SECTION
 				: PI_ADAPTATIVE_CHAT_CORE_SECTION;
-	const skillVaultContract = activeTools.includes("skill") ? `\n\n${SKILL_VAULT_SYSTEM_RULE}` : "";
+	const skillVaultContract = activeTools.includes("skill")
+		? `\n\n${SKILL_VAULT_SYSTEM_RULE}\n${OUTPUT_FORMAT_ROUTING_RULE}${fullPrompt ? `\n${ENGINEERING_SKILL_ROUTING_RULE}` : ""}`
+		: "";
 	const pathAliasRule = capabilityClass === "chat" ? "" : PATH_ALIAS_PROMPT_RULE;
-	const styleContract = capabilityClass === "chat" ? "" : ULTRA_TERSE_OUTPUT_POLICY;
+	const explanationStyle = renderExplanationStyleRule(normalizeSteStrictness(options.steStrictness));
+	const explanationSection = explanationStyle ? `\n\n${explanationStyle}` : "";
+	const styleContract =
+		capabilityClass === "chat" ? explanationSection : `${ULTRA_TERSE_OUTPUT_POLICY}${explanationSection}`;
 	const scopeContract = capabilityClass === "chat" ? "" : `\n- ${ORIENTATION_SURVEY_RULE}`;
 	const operatingContract = `${coreSection}${scopeContract}${skillVaultContract}${styleContract}${pathAliasRule}`;
 

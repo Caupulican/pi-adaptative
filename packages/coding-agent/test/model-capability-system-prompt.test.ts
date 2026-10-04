@@ -13,7 +13,7 @@ function buildForCapability(capabilityClass: ModelCapabilityClass): string {
 				? 16_384
 				: capabilityClass === "minimal"
 					? 8_192
-					: 4_096;
+					: 5_120;
 	const options: BuildSystemPromptOptions = {
 		modelCapability: deriveModelCapabilityProfile({ contextWindow }),
 		selectedTools: capabilityClass === "chat" ? [] : ["read", "bash", "edit", "write"],
@@ -48,7 +48,7 @@ describe("capability-shaped system prompts", () => {
 		expect(prompt).not.toContain(OVERSIZED_CONTEXT_TAIL);
 		expect(prompt).not.toContain("n-plus-2-architecture");
 		expect(prompt).toContain("Current working directory: /repo");
-		expect(prompt.length).toBeLessThanOrEqual(4_096);
+		expect(prompt.length).toBeLessThanOrEqual(5_120);
 	});
 
 	it("keeps the rich prompt and eager project instructions for a full-capability model", () => {
@@ -66,7 +66,7 @@ describe("capability-shaped system prompts", () => {
 		expect(prompt).toContain(CONTEXT_PATH);
 		expect(prompt).not.toContain(OVERSIZED_CONTEXT_TAIL);
 		expect(prompt).not.toContain("n-plus-2-architecture");
-		expect(prompt.length).toBeLessThanOrEqual(10_240);
+		expect(prompt.length).toBeLessThanOrEqual(11_264);
 	});
 
 	it("uses a concise no-execution role for a chat-class model", () => {
@@ -78,7 +78,7 @@ describe("capability-shaped system prompts", () => {
 		expect(prompt).not.toContain(OVERSIZED_CONTEXT_TAIL);
 		expect(prompt).not.toContain("n-plus-2-architecture");
 		expect(prompt).not.toContain("Current working directory:");
-		expect(prompt.length).toBeLessThanOrEqual(2_336);
+		expect(prompt.length).toBeLessThanOrEqual(3_072);
 	});
 
 	it.each(["full", "lean", "minimal"] as const)(
@@ -117,7 +117,7 @@ describe("capability-shaped system prompts", () => {
 		expect(prompt).not.toContain("<omitted");
 		expect(prompt).toContain("Do not mutate until the omitted instruction paths are supplied");
 		expect(prompt).not.toContain("ignoredignored");
-		expect(prompt.length).toBeLessThanOrEqual(4_096);
+		expect(prompt.length).toBeLessThanOrEqual(5_120);
 	});
 
 	it("rejects aggregate harness expansion beyond a constrained profile budget but leaves full profiles unbounded", () => {
@@ -132,7 +132,7 @@ describe("capability-shaped system prompts", () => {
 		};
 
 		expect(() => buildSystemPrompt(constrainedOptions)).toThrow(
-			"minimal system prompt exceeds its 4096-character capability budget",
+			"minimal system prompt exceeds its 5120-character capability budget",
 		);
 
 		const fullPrompt = buildSystemPrompt({

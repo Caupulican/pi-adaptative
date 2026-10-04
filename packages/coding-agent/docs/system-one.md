@@ -130,6 +130,13 @@ What needs reasoning about a change belongs to the model that made it. When a go
   the evidence ids (from `get`) that establish it or the checks that exercise it; empty when there are none;
 - `cause`, for a bug fix: the defect's cause and how the change removes it, with evidence ids.
 
+For a bug fix, code also adds one derived claim to the same System One request: that the diff changes the mechanism the stated
+cause describes (a change that only suppresses the symptom does not), read against the cause's cited evidence and the diff. It costs no extra call. A
+contradicted claim refuses completion until the model reproduces the defect against the current code, revises the change so
+it removes the cause, runs the check again and cites that run; an unsettled one asks for a run that fails before the change
+and passes after it, with the same two-pass bound as every other claim. It replaces the former stand-alone patch-review
+stage, which no code called and which saw only file paths and diff hashes.
+
 Code checks everything it can: that the account exists, that every changed path is explained, that every
 requirement or file a change serves exists, that every cited id exists, that each claim rests on at least one
 verified piece of evidence, and that a bug fix states its cause. System One then decides each stated claim
@@ -140,6 +147,15 @@ claim; a claim the evidence does not settle asks for better evidence, twice for 
 evidence, after which it stands as a recorded doubt. A failure in the account opens no verification obligation: it
 is answered with evidence, not with a hold on every other operation. An account missing or incomplete is one
 refusal that lists what is missing and the evidence ids the model can cite.
+
+A lint or type-check suppression the patch adds (a `ts-ignore`, `eslint-disable`, `biome-ignore`, `noqa` or `nolint` comment, an
+`allow` attribute, or a cast to `any` in a script file) hides what a check found, so code requires each one to be accounted for:
+an assumption in the account must name the changed file and cite verified evidence that the silenced rule does not apply there.
+That assumption is judged like any other, and System One reads which suppression it answers, never the author's own comment.
+Removing the suppression and fixing its cause also satisfies the check. Prose files (`.md`, `.mdx`, `.txt`, `.rst`, `.adoc`)
+are skipped, because they describe a directive and never apply one. The scan reads the whole work diff, not the bounded
+patch the model sees: the content of new untracked files and every change past the patch limit are scanned (at most 500
+hits are kept).
 
 The count of unsettled claims is kept in the decision ledger per session, so a resumed session continues it. The completion's
 evidence-matrix stages and the account's claims wait on System One together, in one round trip's time.

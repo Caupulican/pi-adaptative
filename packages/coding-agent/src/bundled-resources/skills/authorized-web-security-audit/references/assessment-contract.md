@@ -62,7 +62,7 @@ Confidence:
 Severity:
 Disposition: confirmed | rejected | incomplete | needs_review
 Reason:
-Regression test:
+Regression test (only when the owner asked for tests; otherwise "not requested"):
 Cleanup status:
 ```
 

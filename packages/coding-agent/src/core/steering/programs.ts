@@ -445,7 +445,12 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 		case "JEV-019": {
 			decisions.push(
 				{ kind: "boolean", id: "bug_reproduced", instruction: "Was the defect reproduced before fix?" },
-				{ kind: "boolean", id: "fix_verified", instruction: "Is fix verified by targeted regression test?" },
+				{
+					kind: "boolean",
+					id: "fix_verified",
+					instruction:
+						"Does the evidence show the original reproduction, or an equivalent live check, passing on the fixed code?",
+				},
 				{ kind: "boolean", id: "causal_link_proven", instruction: "Is causal link between change and fix proven?" },
 			);
 			break;

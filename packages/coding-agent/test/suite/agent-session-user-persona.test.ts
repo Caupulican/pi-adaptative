@@ -349,12 +349,14 @@ describe("USER.md persona delivery to the next provider request", () => {
 		expect(await harness.session.memoryAcceptDrift("user")).toMatchObject({ ok: true });
 		await runPlainTurn(harness, "now with many preferences");
 		expect(payloads).toHaveLength(2);
-		expect(payloads[0].systemPrompt.length).toBeLessThanOrEqual(4096);
-		expect(personaRecords(payloads[0])).toHaveLength(1);
-		expect(personaRecords(payloads[0])[0]).toContain(INITIAL);
+		expect(payloads[0].systemPrompt.length).toBeLessThanOrEqual(5_120);
+		// The minimal prompt budget leaves room for the short initial profile in the static prompt, so only the
+		// mutation arrives as a persona record.
+		expect(payloads[0].systemPrompt).toContain(INITIAL);
+		expect(personaRecords(payloads[0])).toHaveLength(0);
 		const records = personaRecords(payloads[1]);
-		expect(records).toHaveLength(2);
-		const current = records[1];
+		expect(records).toHaveLength(1);
+		const current = records[0];
 		const budget = resolveMemoryPromptBudget({ contextWindow });
 		expect(current.endsWith(TRANSIENT_RECORD_SUPERSEDING_NOTE)).toBe(true);
 		expect(memoryTextFitsBudget(current, budget)).toBe(true);

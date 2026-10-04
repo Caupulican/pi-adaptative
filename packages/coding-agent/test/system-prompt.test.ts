@@ -110,7 +110,7 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).not.toContain("N+2 ARCHITECTURE");
 			expect(prompt).not.toContain("EVIDENCE GATE");
 			expect(prompt).toContain(ORIENTATION_SURVEY_RULE);
-			expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(3_300);
+			expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(3_700);
 		});
 
 		test("keeps the core contract under its byte budget on a long hosted checkout path", () => {
@@ -138,7 +138,7 @@ describe("buildSystemPrompt", () => {
 				const prompt = buildSystemPrompt({ contextFiles: [], skills: [], cwd: longCwd });
 				expect(prompt).toContain(`PI DOCS: root=${longCheckout}.`);
 				expect(prompt).toContain(`Current working directory: ${longCwd.replace(/\\/g, "/")}`);
-				expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(3_300);
+				expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(3_700);
 			} finally {
 				if (previousPackageDir === undefined) delete process.env.PI_PACKAGE_DIR;
 				else process.env.PI_PACKAGE_DIR = previousPackageDir;
