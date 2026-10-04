@@ -23,7 +23,16 @@ import { pinGithubOriginGhDefault } from "./github-origin.mjs";
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptsDir, "..");
 
-export const BROWSER_SMOKE_INPUTS = /^(packages\/ai\/|packages\/web-ui\/|package\.json$|package-lock\.json$)/;
+// AI docs and CLI identity scripts do not enter the browser bundle.
+export const BROWSER_SMOKE_INPUTS =
+	/^(packages\/ai\/(src\/|package\.json$|tsconfig[^/]*\.json$)|packages\/web-ui\/|package\.json$|package-lock\.json$)/;
+// These generated files contain literal request metadata only. They still receive formatting and
+// project type checks; reconsider this exemption if their generators start emitting runtime code.
+const CLI_IDENTITY_CONFIGS = new Set([
+	"packages/ai/src/providers/anthropic-client-config.generated.ts",
+	"packages/ai/src/providers/antigravity-client-config.generated.ts",
+	"packages/ai/src/providers/xai-client-config.generated.ts",
+]);
 const TYPESCRIPT_SOURCE = /^packages\/[^/]+\/.*\.(?:ts|tsx|mts|cts)$/;
 
 /** Translate one biome.json `files.includes` entry into a path regex (`!` and `!!` negate). */
@@ -91,7 +100,7 @@ export function planStagedGates(staged, options) {
 	const files = staged.map((path) => path.replaceAll("\\", "/"));
 	return {
 		biome: biomeCoveredFiles(files, options.biomeIncludes),
-		browserSmoke: files.some((path) => BROWSER_SMOKE_INPUTS.test(path)),
+		browserSmoke: files.some((path) => BROWSER_SMOKE_INPUTS.test(path) && !CLI_IDENTITY_CONFIGS.has(path)),
 		typecheck: files.some((path) => TYPESCRIPT_SOURCE.test(path)),
 	};
 }

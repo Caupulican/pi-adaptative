@@ -8,6 +8,11 @@
 ### Fixed
 
 - An xAI build-tier request whose build model is missing from the catalog now fails through the stream error path instead of throwing out of the stream function.
+- Grok CLI identity synchronization accepts the installed CLI's release-channel suffix.
+
+### Changed
+
+- Refreshed Antigravity and Anthropic OAuth request identities from the inspected AGY 1.2.16 and Claude Code 2.1.289 binaries.
 
 ## [0.102.3] - 2026-10-04
 
