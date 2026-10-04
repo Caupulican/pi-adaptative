@@ -54,25 +54,33 @@ export class WorkerDirectoryAdmission {
 			}
 			const cwd = profile.authority.cwd;
 			if (!cwd) throw new Error("Worker directory is unknown; explicitly select a directory before dispatch");
-			const attachmentId = await this.backend.createAttachmentId(cwd, undefined, signal);
-			const executionContext = createExecutionContext({
-				attachment: {
-					workspaceId: "worker",
-					attachmentId,
-					root: cwd,
-					flavor: this.backend.flavor,
-					caseSensitive: this.backend.flavor !== "win32",
-				},
-				cwd,
-				sessionId,
-				generation: 0,
-			});
-			await this.validateContext(executionContext, signal);
-			return { ...profile, executionContext };
+			return { ...profile, executionContext: await this.contextForDirectory(cwd, sessionId, signal) };
 		};
 		const worker = await captureProfile(contract.worker);
 		const verifier = contract.verifier ? await captureProfile(contract.verifier) : undefined;
 		return parseWorkerExecutionContract({ ...contract, worker, ...(verifier ? { verifier } : {}) });
+	}
+
+	/**
+	 * A validated execution context for `cwd`, the same identity `capture` records for a worker's directory. Used to
+	 * move a fresh worker into its own worktree lane before admission, so the contract pins the lane.
+	 */
+	async contextForDirectory(cwd: string, sessionId: string, signal: AbortSignal): Promise<ExecutionContext> {
+		const attachmentId = await this.backend.createAttachmentId(cwd, undefined, signal);
+		const executionContext = createExecutionContext({
+			attachment: {
+				workspaceId: "worker",
+				attachmentId,
+				root: cwd,
+				flavor: this.backend.flavor,
+				caseSensitive: this.backend.flavor !== "win32",
+			},
+			cwd,
+			sessionId,
+			generation: 0,
+		});
+		await this.validateContext(executionContext, signal);
+		return executionContext;
 	}
 
 	/**

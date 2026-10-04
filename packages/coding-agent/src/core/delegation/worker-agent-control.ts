@@ -22,6 +22,7 @@ import type {
 	SessionRootReplyWaitResult,
 } from "./session-root-mailbox.ts";
 import { WorkerConversationStore } from "./worker-conversation-store.ts";
+import type { FanoutGroupReport } from "./worker-fanout.ts";
 import { readWorkerMailboxRecord, workerMailboxPath, writeWorkerMailboxRecord } from "./worker-mailbox-record.ts";
 import type { WorkerTaskSessionView } from "./worker-task-view.ts";
 
@@ -135,6 +136,42 @@ export interface WorkerAgentMessage {
 	failureReason?: string;
 }
 
+/** Which open obligation an expiry settled; see {@link WorkerAgentMailbox.expireOpenObligations}. */
+export type ExpiredWorkerObligationState = "undelivered" | "awaiting_reply" | "unconfirmed_reply";
+
+/** Bounded, attributed evidence of one obligation settled as expired. */
+export interface ExpiredWorkerObligation {
+	messageId: string;
+	kind: WorkerAgentMessageKind;
+	state: ExpiredWorkerObligationState;
+	createdAt: string;
+	senderAgentId?: string;
+	contentHead: string;
+	/** The reply text of an unconfirmed reply: the rollback removes its only other copy. */
+	replyHead?: string;
+}
+
+const EXPIRED_OBLIGATION_CONTENT_HEAD_CHARS = 160;
+
+/** Bounded, attributed evidence of one message about to be settled as failed; never its full content. */
+export function obligationEvidence(
+	message: WorkerAgentMessage,
+	state: ExpiredWorkerObligationState,
+	replyContent?: string,
+): ExpiredWorkerObligation {
+	return {
+		messageId: message.messageId,
+		kind: message.kind,
+		state,
+		createdAt: message.createdAt,
+		...(message.senderAgentId ? { senderAgentId: message.senderAgentId } : {}),
+		contentHead: message.content.slice(0, EXPIRED_OBLIGATION_CONTENT_HEAD_CHARS),
+		...(state === "unconfirmed_reply"
+			? { replyHead: replyContent?.slice(0, EXPIRED_OBLIGATION_CONTENT_HEAD_CHARS) }
+			: {}),
+	};
+}
+
 export interface WorkerReplyReceipt {
 	replyMessageId: string;
 	requestSenderId: string;
@@ -163,6 +200,20 @@ interface WorkerControlReplayReceipt {
 	messageId: string;
 	intentDigest: string;
 	deliveredAt?: string;
+	/** The message was dead-lettered before delivery: a replay of its key reports the failure, never an acceptance. */
+	failed?: true;
+}
+
+/** A replayed control message that was dead-lettered or expired before it was ever delivered. */
+export class WorkerControlDeadLetteredError extends Error {
+	readonly failureReason: string | undefined;
+	constructor(messageId: string, failureReason?: string) {
+		super(
+			`Worker control message ${messageId} was dead-lettered before delivery${failureReason ? ` (${failureReason})` : ""}; send it again under a new idempotency key if it is still needed.`,
+		);
+		this.name = "WorkerControlDeadLetteredError";
+		this.failureReason = failureReason;
+	}
 }
 
 interface WorkerReplyReplayReceipt extends WorkerReplyReceipt {
@@ -270,11 +321,18 @@ export interface WorkerAgentWaitResult {
 	timedOut: boolean;
 	/** Exact terminal generations included in this wait result; absent means no observation receipt. */
 	terminalLaneIds?: string[];
+	/**
+	 * Targets admitted but held until the foreground turn ends (they share its local model). The wait
+	 * returned at once because nothing can satisfy it inside this turn; they start on the turn's release.
+	 */
+	foregroundHeldAgentIds?: string[];
 }
 
 export interface WorkerAgentSingleWaitResult {
 	status: WorkerAgentActivity;
 	timedOut: boolean;
+	/** True when the wait returned at once because this worker is held until the foreground turn ends. */
+	foregroundHeld?: boolean;
 	/** Exact terminal generation included in this wait result; absent means no observation receipt. */
 	terminalLaneIds?: string[];
 }
@@ -402,10 +460,11 @@ export interface WorkerAgentControlPort {
 		scope?: WorkerAgentControlScope,
 		options?: { message?: string; force?: boolean },
 	): { interrupted: boolean; mode?: "halt" | "suspend"; reason?: string };
+	/** `waitReason` is set when the resume is admitted but waits (for example for the foreground turn to end). */
 	resumeWorkerAgent(
 		agentId: string,
 		scope?: WorkerAgentControlScope,
-	): { started: boolean; record?: LaneRecord; skipReason?: string };
+	): { started: boolean; record?: LaneRecord; skipReason?: string; waitReason?: string };
 	cancelWorkerAgent(agentId: string, reasonCode?: string, scope?: WorkerAgentControlScope): LaneRecord | undefined;
 	/** Retire one idle leaf without deleting its durable binding, lineage, transcript, or attempt history. */
 	retireWorkerAgent(
@@ -420,6 +479,8 @@ export interface WorkerAgentControlPort {
 	 * before a cancellation or failure that left no completion claim. Undefined when there is none.
 	 */
 	readWorkerAgentLastText?(agentId: string, laneId: string, scope?: WorkerAgentControlScope): string | undefined;
+	/** Root view of every fan-out group (partition coverage, race winner), read from the durable ledger. */
+	getWorkerFanoutGroups?(): readonly FanoutGroupReport[];
 	waitForWorkerAgent(
 		agentId: string,
 		timeoutMs?: number,
@@ -505,8 +566,32 @@ function controlReplayReceipt(
 	messageId: string,
 	intentDigest: string,
 	deliveredAt?: string,
+	failed?: true,
 ): WorkerControlReplayReceipt {
-	return { kind: "control", messageId, intentDigest, ...(deliveredAt ? { deliveredAt } : {}) };
+	return {
+		kind: "control",
+		messageId,
+		intentDigest,
+		...(deliveredAt ? { deliveredAt } : {}),
+		...(failed ? { failed } : {}),
+	};
+}
+
+/**
+ * Mark the receipts of messages that were just dead-lettered while undelivered, so the failure outlives
+ * the message when delivered history is pruned. A message that was already delivered keeps its receipt:
+ * its replay is an idempotent "already delivered", and only its awaited reply was abandoned.
+ */
+function failUndeliveredControlReceipts(
+	receipts: readonly WorkerMailboxReplayReceipt[],
+	failedUndeliveredIds: ReadonlySet<string>,
+): WorkerMailboxReplayReceipt[] {
+	if (failedUndeliveredIds.size === 0) return [...receipts];
+	return receipts.map((receipt) =>
+		receipt.kind === "control" && failedUndeliveredIds.has(receipt.messageId) && receipt.deliveredAt === undefined
+			? controlReplayReceipt(receipt.messageId, receipt.intentDigest, undefined, true)
+			: receipt,
+	);
 }
 
 function controlReplayReceiptFor(
@@ -699,13 +784,14 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 		if (failedAt !== undefined && Date.parse(failedAt) < Date.parse(createdAt)) {
 			throw new Error("Worker agent mailbox message failure timestamp predates creation.");
 		}
+		// A message fails while undelivered, or after delivery only when its awaited reply was abandoned.
 		if (
 			(failedAt === undefined) !== (message.failureReason === undefined) ||
-			(failedAt !== undefined && deliveredAt !== undefined)
+			(failedAt !== undefined && deliveredAt !== undefined && message.expectReply !== true)
 		) {
 			throw new Error("Worker agent mailbox contains invalid task failure state.");
 		}
-		if (failedAt !== undefined && (task === undefined || repliedAt !== undefined || replyReceipt !== undefined)) {
+		if (failedAt !== undefined && (repliedAt !== undefined || replyReceipt !== undefined)) {
 			throw new Error("Worker agent mailbox contains invalid task failure state.");
 		}
 		if ((repliedAt === undefined) !== (replyReceipt === undefined)) {
@@ -812,8 +898,13 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 				!CONTENT_DIGEST_PATTERN.test(receipt.intentDigest) ||
 				!Object.keys(receipt).every(
 					(field) =>
-						field === "kind" || field === "messageId" || field === "intentDigest" || field === "deliveredAt",
-				)
+						field === "kind" ||
+						field === "messageId" ||
+						field === "intentDigest" ||
+						field === "deliveredAt" ||
+						field === "failed",
+				) ||
+				(receipt.failed !== undefined && (receipt.failed !== true || receipt.deliveredAt !== undefined))
 			) {
 				throw new Error("Worker agent mailbox contains invalid control replay receipt state.");
 			}
@@ -821,7 +912,12 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 				receipt.deliveredAt === undefined
 					? undefined
 					: requiredMailboxTimestamp(receipt.deliveredAt, "replay delivery timestamp");
-			return controlReplayReceipt(receipt.messageId, receipt.intentDigest, deliveredAt);
+			return controlReplayReceipt(
+				receipt.messageId,
+				receipt.intentDigest,
+				deliveredAt,
+				receipt.failed === true ? true : undefined,
+			);
 		}
 		if (
 			receipt.kind !== "reply" ||
@@ -856,11 +952,7 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 	if (replayReceipts.filter((receipt) => receipt.kind === "control").length > MAX_REPLAY_EVIDENCE_SLOTS) {
 		throw new Error("Worker agent mailbox exceeds its control replay receipt bound.");
 	}
-	if (
-		replayReceipts.length +
-			messages.filter((message) => message.expectReply === true && message.repliedAt === undefined).length >
-		MAX_MAILBOX_REPLAY_RECEIPTS
-	) {
+	if (projectedReplayEvidenceSlots({ messages, replayReceipts }) > MAX_MAILBOX_REPLAY_RECEIPTS) {
 		throw new Error("Worker agent mailbox exceeds its projected replay evidence bound.");
 	}
 	for (const message of messages) {
@@ -1029,11 +1121,13 @@ function usesMandatoryRetainedReserve(message: WorkerAgentMessage): boolean {
 	return isPendingMessage(message) && hasExternalReplayAuthority(message);
 }
 
-function projectedReplayEvidenceSlots(state: WorkerAgentMailboxState): number {
-	return (
-		state.replayReceipts.length +
-		state.messages.filter((message) => message.expectReply === true && message.repliedAt === undefined).length
-	);
+/** A request still owed a reply will write one reply receipt; a failed request never will. */
+function awaitsReplyReceipt(message: Pick<WorkerAgentMessage, "expectReply" | "repliedAt" | "failedAt">): boolean {
+	return message.expectReply === true && message.repliedAt === undefined && message.failedAt === undefined;
+}
+
+function projectedReplayEvidenceSlots(state: Pick<WorkerAgentMailboxState, "messages" | "replayReceipts">): number {
+	return state.replayReceipts.length + state.messages.filter(awaitsReplyReceipt).length;
 }
 
 function normalizeReplyAcknowledgement(
@@ -1071,10 +1165,7 @@ function pruneDeliveredHistory(
 ): { messages: WorkerAgentMessage[]; replayReceipts: WorkerMailboxReplayReceipt[] } {
 	const protectedReplyIds = new Set(replyAcknowledgements.map((acknowledgement) => acknowledgement.messageId));
 	const protectedMessages = messages.filter(
-		(message) =>
-			isPendingMessage(message) ||
-			(message.expectReply === true && message.repliedAt === undefined) ||
-			protectedReplyIds.has(message.messageId),
+		(message) => isPendingMessage(message) || awaitsReplyReceipt(message) || protectedReplyIds.has(message.messageId),
 	);
 	const protectedMandatory = protectedMessages.filter(usesMandatoryRetainedReserve);
 	const protectedOrdinary = protectedMessages.filter((message) => !usesMandatoryRetainedReserve(message));
@@ -1115,6 +1206,87 @@ function pruneDeliveredHistory(
 		break;
 	}
 	return { messages: retained, replayReceipts: retainedReplayReceipts };
+}
+
+/**
+ * A mailbox owes work while any message is undelivered and unfailed, a delivered request still awaits
+ * its reply, or a reply acknowledgement is mid-flight. Quiescence and bundle retention share this rule.
+ */
+export function workerMailboxHasOpenObligation(
+	state: Pick<WorkerAgentMailboxState, "messages" | "replyAcknowledgements">,
+): boolean {
+	return (
+		state.replyAcknowledgements.length > 0 ||
+		state.messages.some(
+			(message) =>
+				(message.deliveredAt === undefined && message.failedAt === undefined) ||
+				(message.deliveredAt !== undefined &&
+					message.expectReply === true &&
+					message.repliedAt === undefined &&
+					message.failedAt === undefined),
+		)
+	);
+}
+
+/**
+ * The one rule for settling expired obligations: what {@link WorkerAgentMailbox.expireOpenObligations} writes and
+ * what {@link WorkerAgentMailbox.settlesEveryOpenObligation} predicts. Pure; the input is never modified.
+ */
+function expireObligationsInState(
+	state: WorkerAgentMailboxState,
+	cutoffMs: number,
+	failureReason: string,
+): { state: WorkerAgentMailboxState; expired: ExpiredWorkerObligation[] } {
+	const expired: ExpiredWorkerObligation[] = [];
+	const acknowledgements = new Map(
+		state.replyAcknowledgements.map((acknowledgement) => [acknowledgement.messageId, acknowledgement]),
+	);
+	const rolledBackIds = new Set<string>();
+	const undeliveredIds = new Set<string>();
+	const messages = state.messages.map((message): WorkerAgentMessage => {
+		if (message.failedAt !== undefined) return message;
+		let obligation: ExpiredWorkerObligationState | undefined;
+		if (message.deliveredAt === undefined) {
+			if (Date.parse(message.createdAt) < cutoffMs) obligation = "undelivered";
+		} else if (message.expectReply === true) {
+			if (message.repliedAt === undefined) {
+				if (Date.parse(message.deliveredAt) < cutoffMs) obligation = "awaiting_reply";
+			} else if (acknowledgements.has(message.messageId) && Date.parse(message.repliedAt) < cutoffMs) {
+				obligation = "unconfirmed_reply";
+			}
+		}
+		if (!obligation) return message;
+		expired.push(
+			obligationEvidence(
+				message,
+				obligation,
+				obligation === "unconfirmed_reply" ? acknowledgements.get(message.messageId)?.replyContent : undefined,
+			),
+		);
+		if (obligation === "undelivered") undeliveredIds.add(message.messageId);
+		const settled = { ...message, failedAt: transitionTimestamp(message.createdAt), failureReason };
+		if (obligation === "unconfirmed_reply") {
+			rolledBackIds.add(message.messageId);
+			delete settled.repliedAt;
+			delete settled.replyReceipt;
+		}
+		return settled;
+	});
+	if (expired.length === 0) return { state, expired };
+	return {
+		state: {
+			...state,
+			messages,
+			replyAcknowledgements: state.replyAcknowledgements.filter(
+				(acknowledgement) => !rolledBackIds.has(acknowledgement.messageId),
+			),
+			replayReceipts: failUndeliveredControlReceipts(
+				state.replayReceipts.filter((receipt) => receipt.kind !== "reply" || !rolledBackIds.has(receipt.messageId)),
+				undeliveredIds,
+			),
+		},
+		expired,
+	};
 }
 
 function encodedStateBytes(state: WorkerAgentMailboxState): number {
@@ -1177,18 +1349,7 @@ export class WorkerAgentMailbox {
 	/** Exclude admission until the owner finishes publishing availability under its transcript lock. */
 	withQuiescentMailbox(release: () => void): boolean {
 		return withFileLockSync(this.file, () => {
-			const state = this.read();
-			if (
-				state.replyAcknowledgements.length > 0 ||
-				state.messages.some(
-					(message) =>
-						(message.deliveredAt === undefined && message.failedAt === undefined) ||
-						(message.deliveredAt !== undefined &&
-							message.expectReply === true &&
-							message.repliedAt === undefined),
-				)
-			)
-				return false;
+			if (workerMailboxHasOpenObligation(this.read())) return false;
 			// The callback validates the exact claim while holding the transcript lock. Taking it
 			// here too would recursively lock the same file. Admission uses this same lock order.
 			release();
@@ -1299,6 +1460,10 @@ export class WorkerAgentMailbox {
 					if (intentDigest && replayReceipt && replayReceipt.intentDigest !== intentDigest) {
 						throw new Error("Worker control idempotency identity conflicts with its durable replay receipt.");
 					}
+					// A receipt-owned message that failed before delivery is reported as failed, never as accepted.
+					if (!externallyReplayOwned && existing.failedAt !== undefined && existing.deliveredAt === undefined) {
+						throw new WorkerControlDeadLetteredError(existing.messageId, existing.failureReason);
+					}
 					queued = existing;
 					return intentDigest && !externallyReplayOwned && !replayReceipt
 						? {
@@ -1314,6 +1479,7 @@ export class WorkerAgentMailbox {
 					if (!intentDigest || replayReceipt.intentDigest !== intentDigest) {
 						throw new Error("Worker control idempotency identity conflicts with its durable replay receipt.");
 					}
+					if (replayReceipt.failed) throw new WorkerControlDeadLetteredError(message.messageId);
 					completedReplay = true;
 					return state;
 				}
@@ -1379,7 +1545,10 @@ export class WorkerAgentMailbox {
 		return this.read()
 			.messages.filter(
 				(message) =>
-					message.deliveredAt !== undefined && message.expectReply === true && message.repliedAt === undefined,
+					message.deliveredAt !== undefined &&
+					message.expectReply === true &&
+					message.repliedAt === undefined &&
+					message.failedAt === undefined,
 			)
 			.map((message) => structuredClone(message));
 	}
@@ -1484,7 +1653,13 @@ export class WorkerAgentMailbox {
 		let changed = false;
 		this.update((state) => {
 			const request = state.messages.find((message) => message.messageId === normalized.messageId);
-			if (!request || request.deliveredAt === undefined || request.expectReply !== true) return state;
+			if (
+				!request ||
+				request.deliveredAt === undefined ||
+				request.expectReply !== true ||
+				request.failedAt !== undefined
+			)
+				return state;
 			if (!request.senderAgentId) {
 				throw new Error("Worker reply request has no routable requester.");
 			}
@@ -1558,55 +1733,178 @@ export class WorkerAgentMailbox {
 			throw new TypeError("A worker task failure reason is invalid.");
 		}
 		let changed = false;
-		this.update(
-			(state) => ({
-				...state,
-				messages: state.messages.map((message) => {
-					if (
-						message.messageId !== normalized ||
-						message.task?.kind !== "agent_turn" ||
-						message.replyToMessageId !== undefined ||
-						message.expectReply === true ||
-						message.deliveredAt !== undefined ||
-						message.failedAt !== undefined
-					) {
-						return message;
+		// A failure is a terminal transition of an already accepted message, not a new admission: it must
+		// never be refused for the ordinary-admission byte reserve, which exists for new ordinary traffic.
+		this.update((state) => {
+			changed = false;
+			const messages = state.messages.map((message) => {
+				if (
+					message.messageId !== normalized ||
+					message.task?.kind !== "agent_turn" ||
+					message.replyToMessageId !== undefined ||
+					message.expectReply === true ||
+					message.deliveredAt !== undefined ||
+					message.failedAt !== undefined
+				) {
+					return message;
+				}
+				changed = true;
+				return { ...message, failedAt: transitionTimestamp(message.createdAt), failureReason };
+			});
+			return changed
+				? {
+						...state,
+						messages,
+						replayReceipts: failUndeliveredControlReceipts(state.replayReceipts, new Set([normalized])),
 					}
-					changed = true;
-					return { ...message, failedAt: transitionTimestamp(message.createdAt), failureReason };
-				}),
-			}),
-			true,
-		);
+				: state;
+		});
 		if (changed) this.notify();
 		return changed;
 	}
 
-	/** Fail every undelivered control message (a forced retire). Delivered history and replies are untouched. */
-	deadLetterPending(reason: string): number {
+	/**
+	 * Fail every undelivered control message (a forced retire). Delivered history and replies are untouched.
+	 * `recordBeforeSettling` runs inside the transaction, before the write, with bounded attributed
+	 * evidence of exactly what is about to be discarded; if it throws, nothing is settled. Failing is a
+	 * terminal transition, so it is never refused for the ordinary-admission byte reserve.
+	 */
+	deadLetterPending(
+		reason: string,
+		recordBeforeSettling?: (discarded: readonly ExpiredWorkerObligation[]) => void,
+	): ExpiredWorkerObligation[] {
 		const failureReason = reason.trim();
 		if (!failureReason || failureReason.length > MAX_MAILBOX_IDENTITY_CHARS) {
 			throw new TypeError("A worker task failure reason is invalid.");
 		}
-		let count = 0;
+		let discarded: ExpiredWorkerObligation[] = [];
 		this.update(
-			(state) => ({
-				...state,
-				messages: state.messages.map((message) => {
+			(state) => {
+				discarded = [];
+				const failedIds = new Set<string>();
+				const messages = state.messages.map((message) => {
 					if (message.deliveredAt !== undefined || message.failedAt !== undefined) return message;
-					count++;
+					discarded.push(obligationEvidence(message, "undelivered"));
+					failedIds.add(message.messageId);
 					return { ...message, failedAt: transitionTimestamp(message.createdAt), failureReason };
-				}),
-			}),
-			true,
+				});
+				if (discarded.length === 0) return state;
+				return {
+					...state,
+					messages,
+					replayReceipts: failUndeliveredControlReceipts(state.replayReceipts, failedIds),
+				};
+			},
+			false,
+			false,
+			() => {
+				if (discarded.length > 0) recordBeforeSettling?.(discarded);
+			},
 		);
-		if (count > 0) this.notify();
-		return count;
+		if (discarded.length > 0) this.notify();
+		return discarded;
+	}
+
+	/**
+	 * Whether {@link expireOpenObligations} at `cutoffMs` would leave nothing open: every open obligation of this
+	 * mailbox is expired and settleable. Read-only, so a caller can decide before any mailbox is written.
+	 */
+	settlesEveryOpenObligation(cutoffMs: number, reason: string): boolean {
+		const failureReason = reason.trim();
+		if (!failureReason || failureReason.length > MAX_MAILBOX_IDENTITY_CHARS) {
+			throw new TypeError("A worker task failure reason is invalid.");
+		}
+		return !workerMailboxHasOpenObligation(expireObligationsInState(this.read(), cutoffMs, failureReason).state);
+	}
+
+	/**
+	 * Settle every open obligation last touched before `cutoffMs` as failed with `reason`: an undelivered
+	 * message, a delivered request still awaiting its reply, and a reply acknowledgement that never
+	 * committed (rolled back to an unreplied request first, so no reply is ever claimed delivered).
+	 * Nothing is marked delivered or replied. `recordBeforeSettling` runs inside the transaction, before
+	 * the write, with exactly what is about to be settled; if it throws, nothing is settled.
+	 */
+	expireOpenObligations(
+		cutoffMs: number,
+		reason: string,
+		recordBeforeSettling: (settled: readonly ExpiredWorkerObligation[]) => void,
+	): ExpiredWorkerObligation[] {
+		const failureReason = reason.trim();
+		if (!failureReason || failureReason.length > MAX_MAILBOX_IDENTITY_CHARS) {
+			throw new TypeError("A worker task failure reason is invalid.");
+		}
+		let expired: ExpiredWorkerObligation[] = [];
+		this.update(
+			(state) => {
+				const settled = expireObligationsInState(state, cutoffMs, failureReason);
+				expired = settled.expired;
+				return settled.state;
+			},
+			false,
+			false,
+			() => recordBeforeSettling(expired),
+		);
+		if (expired.length > 0) this.notify();
+		return expired;
 	}
 
 	/** Commit one exact reply acknowledgement and release its protected history slot. */
 	commitReplyAcknowledgement(messageId: string, acknowledgementId: string): boolean {
 		return this.finishReplyAcknowledgement(messageId, acknowledgementId, false);
+	}
+
+	/**
+	 * Settle a request whose reply can never be delivered as failed, in one transaction: the open reply
+	 * acknowledgement and the reply receipt are removed and the request becomes terminal with `reason`. It
+	 * is never marked replied or delivered-as-answered, and it stops being an awaited reply that nothing can
+	 * answer. `recordBeforeSettling` runs before the write with bounded evidence; if it throws, nothing is
+	 * settled. Returns the evidence, or undefined when no such acknowledgement is open.
+	 */
+	abandonReplyAcknowledgement(
+		messageId: string,
+		acknowledgementId: string,
+		reason: string,
+		recordBeforeSettling?: (settled: ExpiredWorkerObligation) => void,
+	): ExpiredWorkerObligation | undefined {
+		const normalized = normalizeReplyAcknowledgement(messageId, acknowledgementId);
+		const failureReason = reason.trim();
+		if (!failureReason || failureReason.length > MAX_MAILBOX_IDENTITY_CHARS) {
+			throw new TypeError("A worker task failure reason is invalid.");
+		}
+		let evidence: ExpiredWorkerObligation | undefined;
+		this.update(
+			(state) => {
+				evidence = undefined;
+				const acknowledgement = state.replyAcknowledgements.find(
+					(candidate) =>
+						candidate.messageId === normalized.messageId &&
+						candidate.acknowledgementId === normalized.acknowledgementId,
+				);
+				const request = acknowledgement
+					? state.messages.find((message) => message.messageId === normalized.messageId)
+					: undefined;
+				if (!acknowledgement || !request || request.failedAt !== undefined) return state;
+				evidence = obligationEvidence(request, "unconfirmed_reply", acknowledgement.replyContent);
+				const settled = { ...request, failedAt: transitionTimestamp(request.createdAt), failureReason };
+				delete settled.repliedAt;
+				delete settled.replyReceipt;
+				return {
+					...state,
+					messages: state.messages.map((message) => (message === request ? settled : message)),
+					replyAcknowledgements: state.replyAcknowledgements.filter((candidate) => candidate !== acknowledgement),
+					replayReceipts: state.replayReceipts.filter(
+						(receipt) => receipt.kind !== "reply" || receipt.messageId !== normalized.messageId,
+					),
+				};
+			},
+			false,
+			false,
+			() => {
+				if (evidence) recordBeforeSettling?.(evidence);
+			},
+		);
+		if (evidence) this.notify();
+		return evidence;
 	}
 
 	/** Roll back one exact reply acknowledgement without clearing a later or unrelated reply. */

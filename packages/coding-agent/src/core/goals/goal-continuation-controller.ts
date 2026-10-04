@@ -2,6 +2,10 @@ import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
 import { isSystemBlockedGoal } from "./goal-lifecycle.ts";
 import type { GoalState, Requirement } from "./goal-state.ts";
 
+/** Repeated failure under one premise is evidence about the premise: both stall steers carry this request. */
+const SHARED_PREMISE_CHECK =
+	"Name the one assumption every failed attempt shared and test that assumption directly before another attempt.";
+
 function getBoundInFlightRequirements(
 	requirements: readonly Requirement[],
 	inFlightGoalLaneIds: ReadonlySet<string> | undefined,
@@ -278,7 +282,7 @@ export function evaluateGoalContinuation(args: {
 				...baseDecision,
 				action: "continue",
 				reasonCode: "stall_limit_reached",
-				message: `Requirement '${reqId}' has been blocked ${blockCount} times. Inspect the blocker evidence and use a distinct recovery approach; ask the owner only when the blocker is a verified owner/approval boundary.`,
+				message: `Requirement '${reqId}' has been blocked ${blockCount} times. Inspect the blocker evidence and use a distinct recovery approach; ask the owner only when the blocker is a verified owner/approval boundary. ${SHARED_PREMISE_CHECK}`,
 			};
 		}
 	}
@@ -441,7 +445,7 @@ export function evaluateGoalContinuation(args: {
 			...baseDecision,
 			action: "continue",
 			reasonCode: "stall_limit_reached",
-			message: `The goal has reached the recovery threshold of ${args.settings.maxStallTurns} unchanged turns. Do not repeat the same operation: inspect failure evidence, use a different approach, tool, or route, and keep working unless a true owner/approval boundary is proven.`,
+			message: `The goal has reached the recovery threshold of ${args.settings.maxStallTurns} unchanged turns. Do not repeat the same operation: inspect failure evidence, use a different approach, tool, or route, and keep working unless a true owner/approval boundary is proven. ${SHARED_PREMISE_CHECK}`,
 		};
 	}
 

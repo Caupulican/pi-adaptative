@@ -559,6 +559,15 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 				requestedWorkspacePath,
 			)
 		: undefined;
+	// Extra write roots are an explicit grant the caller (or an owner profile) names; the worker's own
+	// cwd is always writable, everything else is not unless it appears here.
+	const writeRootBase = (input.authority?.path ? input.executionCwd : undefined) ?? input.cwd ?? process.cwd();
+	const writePaths = [
+		...new Set([
+			...(input.base?.profile.writePaths ?? []),
+			...(input.authority?.writePaths ?? []).map((entry) => resolveWorkerWorkspacePath(writeRootBase, entry)),
+		]),
+	];
 	const now = new Date().toISOString();
 	const descriptor = {
 		baseProfileId: input.base?.profile.profileId ?? null,
@@ -571,6 +580,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		budget,
 		delegationLimits: delegationLimits ?? null,
 		workspacePath: workspacePath ?? null,
+		...(writePaths.length > 0 ? { writePaths } : {}),
 		resourceProfileNames: input.base?.profile.resourceProfileNames ?? [],
 		dispatchProfileIds: input.base?.profile.dispatchProfileIds ?? [],
 		executionPolicy: input.base?.profile.executionPolicy ?? null,
@@ -593,6 +603,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		toolNames,
 		...(readOnly ? { readOnly: true } : {}),
 		...(workspacePath ? { workspacePath } : {}),
+		...(writePaths.length > 0 ? { writePaths } : {}),
 		resourceProfileNames: [...(input.base?.profile.resourceProfileNames ?? [])],
 		dispatchProfileIds: [...(input.base?.profile.dispatchProfileIds ?? [])],
 		...(input.base?.profile.executionPolicy ? { executionPolicy: input.base.profile.executionPolicy } : {}),

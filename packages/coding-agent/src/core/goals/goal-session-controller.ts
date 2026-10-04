@@ -731,7 +731,7 @@ export class GoalSessionController {
 	markToolUnavailable(): void {
 		this.stopActiveGoal(
 			"blocked",
-			"goal_tool_unavailable: the active capability surface cannot update durable goal state",
+			"goal_tool_unavailable: the active capability surface cannot update durable goal state (goal tools need a full-class model; select one with /model and the goal resumes on its own)",
 		);
 	}
 

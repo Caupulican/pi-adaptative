@@ -56,6 +56,8 @@ import {
 	type WorkerDelegationControllerDeps,
 } from "./delegation/worker-delegation-controller.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
+import { deriveFanoutGroups, type FanoutGroupReport } from "./delegation/worker-fanout.ts";
+import { WorkerLaneIsolation } from "./delegation/worker-lane-isolation.ts";
 import { projectWorkerAttemptLaneRecord } from "./delegation/worker-lane-projection.ts";
 import { WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
@@ -80,6 +82,9 @@ import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
 import { ResearchLaneController, type ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
+import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
+import { WorktreeLaneLifecycle } from "./worktree-sync/lane-lifecycle.ts";
+import { buildWorktreeSyncEngineDeps } from "./worktree-sync/runtime.ts";
 
 export { isLocalExecutionModel } from "./delegation/worker-delegation-controller.ts";
 export { clampLaneMaxUsd } from "./research/lane-model-resolver.ts";
@@ -105,6 +110,8 @@ export interface BackgroundLaneControllerDeps
 	waitForForegroundIdle(): Promise<void>;
 	/** Persist an explicit stopped state when the selected surface cannot drive the active goal. */
 	markGoalToolUnavailable(): void;
+	/** Tell the parent session that a closed worker's worktree lane was kept because it holds work. */
+	notifyWorktreeLane?(text: string): void;
 }
 
 /** How one bounded wait on exact running attempts ended. */
@@ -193,8 +200,31 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this.deps,
 			this._getWorkerNotificationCoordinator(),
 			this._getWorkerLifecycle(),
+			new WorkerLaneIsolation(this._worktreeLaneHostDeps()),
 		);
 		return this._workers;
+	}
+
+	/** What the worktree lane lifecycles need from this session: engine deps, a way to tell the parent, a warning sink. */
+	private _worktreeLaneHostDeps() {
+		return {
+			engineDeps: (cwd?: string) => this._worktreeEngineDeps(cwd),
+			notifyParent: (text: string) => this.deps.notifyWorktreeLane?.(text),
+			warn: (message: string) => this._safeWarn(message),
+		};
+	}
+
+	/** Worktree-sync engine deps rooted at `cwd` (the session's directory when omitted); undefined when disabled. */
+	private _worktreeEngineDeps(cwd?: string): WorktreeSyncEngineDeps | undefined {
+		const settingsManager = this.deps.getSettingsManager();
+		if (!settingsManager.getWorktreeSyncSettings().enabled) return undefined;
+		return buildWorktreeSyncEngineDeps({
+			cwd: cwd ?? this.deps.getCwd(),
+			agentDir: this.deps.getAgentDir(),
+			settingsManager,
+			sessionId: this.deps.getSessionId(),
+			integrationBranch: () => this.deps.localCommitBranch?.() || undefined,
+		});
 	}
 
 	private _getWorkerLifecycle(): WorkerLifecycle {
@@ -309,6 +339,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			(record, notificationId) => this._recordWorkerTerminal(record, notificationId),
 			(message) => this._safeWarn(message),
 			(laneId, ownerEpoch) => this._getWorkerNotificationCoordinator().noteLaneOwnerEpoch(laneId, ownerEpoch),
+			new WorktreeLaneLifecycle(this._worktreeLaneHostDeps()),
 		);
 		return this._managedLanes;
 	}
@@ -381,6 +412,13 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	getWorkerResult(laneId: string): WorkerResultContract | undefined {
 		return this._workerLifecycle?.getResult(laneId);
+	}
+
+	/** Fan-out groups read from the durable ledger; zero-load when delegation was never materialized. */
+	getWorkerFanoutGroups(): FanoutGroupReport[] {
+		if (this._workers) return this._workers.getFanoutGroups();
+		const snapshot = this._workerLifecycle?.getTaskRuntimeSnapshot();
+		return snapshot ? deriveFanoutGroups(snapshot) : [];
 	}
 
 	/** The result of one exact attempt (generation), never a later generation of the same lane. */
@@ -699,7 +737,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	resumeWorkerAgent(
 		agentId: string,
 		scope?: WorkerAgentControlScope,
-	): { started: boolean; record?: LaneRecord; skipReason?: string } {
+	): { started: boolean; record?: LaneRecord; skipReason?: string; waitReason?: string } {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
 		return this._getWorkerController().getAgentControl().resumeWorkerAgent(agentId, scope);
@@ -718,8 +756,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	): WorkerAgentRetireResult {
 		if (!this.deps.isDelegateToolActive())
 			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		const control = this._getWorkerController().getAgentControl();
-		return options ? control.retireWorkerAgent(agentId, scope, options) : control.retireWorkerAgent(agentId, scope);
+		const workers = this._getWorkerController();
+		const control = workers.getAgentControl();
+		const retired = options
+			? control.retireWorkerAgent(agentId, scope, options)
+			: control.retireWorkerAgent(agentId, scope);
+		// The retirement is the event that frees the worker's worktree lane, when it had one.
+		if (!retired.replayed) workers.releaseRetiredAgentLane(agentId);
+		return retired;
 	}
 
 	resolveWorkerAgentLane(agentId: string, scope?: WorkerAgentControlScope): WorkerAgentLaneResolution | undefined {

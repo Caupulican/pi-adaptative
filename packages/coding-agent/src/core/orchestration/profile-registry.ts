@@ -161,6 +161,16 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 	) {
 		throw new OrchestrationProfileError(`Profile '${profile.profileId}' workspacePath must be an absolute path.`);
 	}
+	if (
+		profile.writePaths?.some(
+			(entry) =>
+				!entry.trim() ||
+				entry.length > MAX_WORKER_AUTHORITY_PATH_LENGTH ||
+				(!path.isAbsolute(entry) && !path.win32.isAbsolute(entry)),
+		)
+	) {
+		throw new OrchestrationProfileError(`Profile '${profile.profileId}' writePaths must be absolute paths.`);
+	}
 	for (const [label, values] of [
 		["capabilityCeiling", profile.capabilityCeiling],
 		["toolNames", profile.toolNames],
@@ -324,6 +334,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 			"toolNames",
 			"readOnly",
 			"workspacePath",
+			"writePaths",
 			"resourceProfileNames",
 			"dispatchProfileIds",
 			"executionPolicy",
@@ -406,6 +417,15 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 				!value.workspacePath.trim() ||
 				value.workspacePath.length > MAX_WORKER_AUTHORITY_PATH_LENGTH ||
 				(!path.isAbsolute(value.workspacePath) && !path.win32.isAbsolute(value.workspacePath)))) ||
+		(value.writePaths !== undefined &&
+			(!isStringArray(value.writePaths) ||
+				value.writePaths.length > MAX_ORCHESTRATION_COLLECTION_LENGTH ||
+				!value.writePaths.every(
+					(entry) =>
+						entry.trim().length > 0 &&
+						entry.length <= MAX_WORKER_AUTHORITY_PATH_LENGTH &&
+						(path.isAbsolute(entry) || path.win32.isAbsolute(entry)),
+				))) ||
 		!isStringArray(value.resourceProfileNames) ||
 		!isStringArray(value.dispatchProfileIds) ||
 		!Number.isSafeInteger(value.maxConcurrent) ||
@@ -434,6 +454,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 		toolNames: value.toolNames,
 		...(value.readOnly === true ? { readOnly: true } : {}),
 		...(typeof value.workspacePath === "string" ? { workspacePath: value.workspacePath } : {}),
+		...(Array.isArray(value.writePaths) && value.writePaths.length > 0 ? { writePaths: value.writePaths } : {}),
 		resourceProfileNames: value.resourceProfileNames,
 		dispatchProfileIds: value.dispatchProfileIds,
 		...(executionPolicy

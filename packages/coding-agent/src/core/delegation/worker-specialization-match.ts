@@ -199,6 +199,16 @@ export interface WorkerSpecialistReuseInput {
 	independentParallelIntent?: boolean;
 	/** Resolved workspace identity for a root the caller already asked the directory backend about. */
 	namespaceKeyOf(root: string | undefined): string;
+	/**
+	 * Whether a specialist's specialization is the candidate's. Defaults to exact equality; a caller that knows a
+	 * specialist lives in a directory derived from the candidate's (its own worktree lane) widens only that
+	 * directory comparison, never the rest of the specialization, and never across specialists.
+	 */
+	matches?(
+		specialization: WorkerSpecializationFingerprint,
+		candidate: WorkerSpecializationFingerprint,
+		specialistId: string,
+	): boolean;
 }
 
 function attemptSpecialization(
@@ -241,7 +251,9 @@ export function selectReusableWorkerSpecialist(input: WorkerSpecialistReuseInput
 		const attempt = latestAgentAttemptByDurableOrder(input.snapshot, specialistId);
 		if (!attempt) continue;
 		const specialization = attemptSpecialization(attempt, input.namespaceKeyOf);
-		if (!specialization || !sameWorkerSpecialization(specialization, input.candidate)) continue;
+		if (!specialization) continue;
+		const matches = input.matches ?? sameWorkerSpecialization;
+		if (!matches(specialization, input.candidate, specialistId)) continue;
 		if (!input.isInitializationCompatible(agent, attempt)) continue;
 		if (
 			agent?.status === "active" ||

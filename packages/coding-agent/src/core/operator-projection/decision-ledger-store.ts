@@ -11,12 +11,15 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { openSqliteDatabase, type SqliteDatabase } from "../context/sqlite-database.ts";
+import { getParentPid } from "../process-identity.ts";
+import { getSessionRole, type SessionRole } from "../session-role.ts";
 import type { SemanticDoubtDecision } from "../system-one/semantic-doubts.ts";
 import type {
 	SemanticEvaluationOutcome,
 	SemanticEvaluationScope,
 	SemanticQuestionState,
 } from "../system-one/semantic-evaluation-ledger.ts";
+import { getBoundWorktreeLaneKey } from "../worktree-sync/lane-binding.ts";
 import type {
 	DecisionStage,
 	DecisionStageSink,
@@ -155,9 +158,20 @@ export interface OperationGateDecisionRow {
 	readonly durationMs: number;
 }
 
+/** Who wrote a session's rows: the ledger is shared by every session, worker sessions included. */
+export interface DecisionLedgerAttribution {
+	readonly role: SessionRole;
+	/** Worktree-sync lane the writing session is bound to, when it is one. */
+	readonly laneKey?: string;
+	/** Parent process of a managed child session. */
+	readonly parentPid?: number;
+}
+
 export interface DecisionLedgerStoreOptions {
 	readonly databasePath: string;
 	readonly busyTimeoutMs?: number;
+	/** Defaults to the writing process's own role, lane and parent (`session-role.ts`). */
+	readonly attribution?: DecisionLedgerAttribution;
 }
 
 const STAGE_SET: ReadonlySet<string> = new Set([
@@ -183,8 +197,17 @@ function asText(value: unknown): string | undefined {
 
 export class DecisionLedgerStore {
 	private readonly database: SqliteDatabase;
+	private readonly attribution: DecisionLedgerAttribution;
+	private readonly attributedSessions = new Set<string>();
 
 	constructor(options: DecisionLedgerStoreOptions) {
+		const laneKey = getBoundWorktreeLaneKey();
+		const parentPid = getParentPid();
+		this.attribution = options.attribution ?? {
+			role: getSessionRole(),
+			...(laneKey !== undefined ? { laneKey } : {}),
+			...(parentPid !== undefined ? { parentPid } : {}),
+		};
 		// The driver opens files, not directories: the state dir is ours to create.
 		mkdirSync(dirname(options.databasePath), { recursive: true });
 		this.database = openSqliteDatabase({
@@ -304,7 +327,8 @@ export class DecisionLedgerStore {
 				cache_key TEXT PRIMARY KEY,
 				model TEXT NOT NULL,
 				readings TEXT NOT NULL,
-				updated_at INTEGER NOT NULL
+				updated_at INTEGER NOT NULL,
+				session_id TEXT
 			);
 			CREATE TABLE IF NOT EXISTS operation_gate_decisions (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -320,6 +344,13 @@ export class DecisionLedgerStore {
 				duration_ms INTEGER NOT NULL
 			);
 			CREATE INDEX IF NOT EXISTS operation_gate_decisions_session ON operation_gate_decisions (session_id, decided_at);
+			CREATE TABLE IF NOT EXISTS session_attribution (
+				session_id TEXT PRIMARY KEY,
+				role TEXT NOT NULL,
+				lane_key TEXT,
+				parent_pid INTEGER,
+				first_seen_at INTEGER NOT NULL
+			);
 			CREATE TABLE IF NOT EXISTS account_claim_passes (
 				session_id TEXT NOT NULL,
 				fingerprint TEXT NOT NULL,
@@ -350,9 +381,56 @@ export class DecisionLedgerStore {
 		for (const column of ["scope_kind", "scope_id", "question_namespace", "question_states"])
 			if (!evaluationColumns.has(column))
 				this.database.exec(`ALTER TABLE semantic_evaluations ADD COLUMN ${column} TEXT`);
+		// Effect readings are a shared cache, but each now records the session that wrote it; earlier rows stay unassigned.
+		const effectColumns = new Set(
+			this.database
+				.prepare("PRAGMA table_info(operation_effects)")
+				.all()
+				.map((column) => column.name),
+		);
+		if (!effectColumns.has("session_id"))
+			this.database.exec("ALTER TABLE operation_effects ADD COLUMN session_id TEXT");
 		this.database
 			.prepare("INSERT OR IGNORE INTO ledger_meta (key, value) VALUES ('schema_version', ?)")
 			.run(String(DECISION_LEDGER_SCHEMA_VERSION));
+	}
+
+	/**
+	 * Every row is keyed by session id, so one row per session saying who wrote it attributes them
+	 * all: a worker session's rows stay in the ledger (it is an analysis asset) but are separable
+	 * from the main session's by role, lane and parent. First write wins; nothing is rewritten.
+	 */
+	private attributeSession(sessionId: string): void {
+		if (this.attributedSessions.has(sessionId)) return;
+		this.database
+			.prepare(
+				"INSERT OR IGNORE INTO session_attribution (session_id, role, lane_key, parent_pid, first_seen_at) VALUES (?, ?, ?, ?, ?)",
+			)
+			.run(
+				sessionId,
+				this.attribution.role,
+				this.attribution.laneKey ?? null,
+				this.attribution.parentPid ?? null,
+				Date.now(),
+			);
+		this.attributedSessions.add(sessionId);
+	}
+
+	/** Who wrote a session's rows, or undefined for a session recorded before attribution existed. */
+	sessionAttribution(sessionId: string): DecisionLedgerAttribution | undefined {
+		const row = this.database
+			.prepare("SELECT role, lane_key, parent_pid FROM session_attribution WHERE session_id = ?")
+			.get(sessionId);
+		if (!row) return undefined;
+		const role = asText(row.role);
+		if (role !== "main" && role !== "worker") return undefined;
+		const laneKey = asText(row.lane_key);
+		const parentPid = asInteger(row.parent_pid);
+		return {
+			role,
+			...(laneKey !== undefined ? { laneKey } : {}),
+			...(parentPid !== undefined ? { parentPid } : {}),
+		};
 	}
 
 	/** A sink bound to one session, for the stage log. */
@@ -366,6 +444,7 @@ export class DecisionLedgerStore {
 	}
 
 	openStage(sessionId: string, cwd: string, entry: DecisionStageSinkEntry): number {
+		this.attributeSession(sessionId);
 		const result = this.database
 			.prepare(
 				`INSERT INTO stage_entries (session_id, cwd, objective_id, stage, entered_at, loop, reason_code, note)
@@ -446,6 +525,7 @@ export class DecisionLedgerStore {
 	startSemanticEvaluation(
 		row: Omit<SemanticEvaluationLedgerRow, "endedAt" | "outcome" | "verdict" | "reasons" | "questionStates">,
 	): void {
+		this.attributeSession(row.sessionId);
 		this.database
 			.prepare(
 				`INSERT OR IGNORE INTO semantic_evaluations
@@ -544,6 +624,7 @@ export class DecisionLedgerStore {
 
 	/** Records one provider response's cache outcome (see {@link CacheObservationRow}). */
 	recordCacheObservation(row: CacheObservationRow): void {
+		this.attributeSession(row.sessionId);
 		this.database
 			.prepare(
 				`INSERT INTO cache_observations
@@ -577,6 +658,7 @@ export class DecisionLedgerStore {
 
 	/** Records one priced cache decision (see {@link CacheDecisionRow}). */
 	recordCacheDecision(row: CacheDecisionRow): void {
+		this.attributeSession(row.sessionId);
 		this.database
 			.prepare(
 				`INSERT INTO cache_decisions (session_id, cwd, kind, decided_at, admit, reason, saving_usd, cost_usd, detail)
@@ -638,13 +720,24 @@ export class DecisionLedgerStore {
 		}
 	}
 
-	writeOperationEffects(cacheKey: string, model: string, readings: Record<string, number | null>, now: number): void {
+	/**
+	 * Keeps a reading for `cacheKey`. The cache is shared across sessions, but the row names the session that
+	 * last wrote it, so `sessionAttribution(sessionId)` separates a worker's readings from the main session's.
+	 */
+	writeOperationEffects(
+		cacheKey: string,
+		model: string,
+		readings: Record<string, number | null>,
+		now: number,
+		sessionId?: string,
+	): void {
+		if (sessionId !== undefined) this.attributeSession(sessionId);
 		this.database
 			.prepare(
-				`INSERT INTO operation_effects (cache_key, model, readings, updated_at) VALUES (?, ?, ?, ?)
-				 ON CONFLICT(cache_key) DO UPDATE SET model = excluded.model, readings = excluded.readings, updated_at = excluded.updated_at`,
+				`INSERT INTO operation_effects (cache_key, model, readings, updated_at, session_id) VALUES (?, ?, ?, ?, ?)
+				 ON CONFLICT(cache_key) DO UPDATE SET model = excluded.model, readings = excluded.readings, updated_at = excluded.updated_at, session_id = excluded.session_id`,
 			)
-			.run(cacheKey, model, JSON.stringify(readings), now);
+			.run(cacheKey, model, JSON.stringify(readings), now, sessionId ?? null);
 	}
 
 	/** How many times each completion-account claim was left unsettled in a session, by claim fingerprint. */
@@ -662,6 +755,7 @@ export class DecisionLedgerStore {
 	}
 
 	writeAccountClaimPasses(sessionId: string, fingerprint: string, passes: number, now: number): void {
+		this.attributeSession(sessionId);
 		this.database
 			.prepare(
 				`INSERT INTO account_claim_passes (session_id, fingerprint, passes, updated_at) VALUES (?, ?, ?, ?)
@@ -672,6 +766,7 @@ export class DecisionLedgerStore {
 
 	/** Records one shell-gate decision (see {@link OperationGateDecisionRow}). */
 	recordOperationGateDecision(row: OperationGateDecisionRow): void {
+		this.attributeSession(row.sessionId);
 		this.database
 			.prepare(
 				`INSERT INTO operation_gate_decisions
@@ -694,6 +789,7 @@ export class DecisionLedgerStore {
 
 	/** Records one applied compaction's measured effect (see {@link CompactionOutcomeRow}). */
 	recordCompactionOutcome(row: CompactionOutcomeRow): void {
+		this.attributeSession(row.sessionId);
 		this.database
 			.prepare(
 				`INSERT INTO compaction_outcomes (session_id, lane, observed_at, tokens_before, tokens_after, output_tokens)
@@ -707,6 +803,7 @@ export class DecisionLedgerStore {
 	 * worker pays before its brief, learned from what workers actually sent.
 	 */
 	recordWorkerPrefix(row: { sessionId: string; lane: string; observedAt: number; prefixTokens: number }): void {
+		this.attributeSession(row.sessionId);
 		this.database
 			.prepare("INSERT INTO worker_prefixes (session_id, lane, observed_at, prefix_tokens) VALUES (?, ?, ?, ?)")
 			.run(row.sessionId, row.lane, row.observedAt, row.prefixTokens);
@@ -882,6 +979,7 @@ export class DecisionLedgerStore {
 
 	/** Records a route System One decided; the executor is noted once the route ran. */
 	recordRoute(row: Omit<RouteDecisionRow, "executor">): void {
+		this.attributeSession(row.sessionId);
 		this.database
 			.prepare(
 				`INSERT INTO route_decisions (session_id, cwd, objective_id, cycle_id, route, reason_codes, decided_at, evidence_marker)
@@ -972,6 +1070,7 @@ export class DecisionLedgerStore {
 
 	/** Appends one immutable advisory choice for a live doubt; exact retries are idempotent. */
 	recordSemanticDoubtDecision(sessionId: string, decision: SemanticDoubtDecision): void {
+		this.attributeSession(sessionId);
 		this.database
 			.prepare(
 				`INSERT INTO semantic_doubt_decisions

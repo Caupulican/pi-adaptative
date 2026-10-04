@@ -56,7 +56,9 @@ describe("delegation validation recovery", () => {
 		expect(getMessageText(rejected)).toContain("mode");
 		expect(execute).toHaveBeenCalledOnce();
 		expect(waitForWorkerAgents).toHaveBeenCalledOnce();
-		expect(waitForWorkerAgents).toHaveBeenCalledWith(["worker"], "all", undefined);
+		expect(waitForWorkerAgents).toHaveBeenCalledWith(["worker"], "all", undefined, {
+			returnWhenForegroundHeld: true,
+		});
 		expect(results.find((message) => message.toolCallId === "corrected")).toMatchObject({ isError: false });
 	});
 });

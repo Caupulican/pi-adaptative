@@ -3,6 +3,7 @@ import type { Usage } from "@caupulican/pi-ai";
 import type { CapabilityEnvelope, WorkerClaim, WorkerClaimStatus, WorkerRequest } from "../autonomy/contracts.ts";
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
 import { isLaneTerminalStatus, type LaneRecord, type LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
+import { getTamperWatchedPaths, ProtectedPathWatch } from "../autonomy/protected-path-watch.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "../autonomy/session-lane-record.ts";
 import {
 	MAX_MANAGED_LANE_SUMMARY_BYTES,
@@ -15,6 +16,7 @@ import type { ExecutionGrant } from "../orchestration/contracts.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
+import type { WorktreeLaneLifecycle } from "../worktree-sync/lane-lifecycle.ts";
 import { getLatestWorkerClaimSnapshot } from "./session-worker-claim.ts";
 import {
 	inconclusiveLinesIn,
@@ -94,7 +96,15 @@ export class ManagedLaneController {
 	private readonly recordTerminal: (record: LaneRecord, durableNotificationId: string) => void;
 	private readonly noteLaneOwnerEpoch: (laneId: string, ownerEpoch: number) => void;
 	private readonly warn: (message: string) => void;
+	private readonly worktreeLanes: WorktreeLaneLifecycle | undefined;
 	private readonly deregisterByLane = new Map<string, () => void>();
+	/**
+	 * Parent-side fingerprints of the harness write-protected set, taken when a managed worker is dispatched and
+	 * compared at its terminal report. The worker is a separate process whose own tool calls this host cannot
+	 * see, and a detector inside it would be under the control of what it watches, so the comparison runs here.
+	 */
+	private readonly protectedPathWatches = new Map<string, ProtectedPathWatch>();
+	private readonly worktreeLaneSteps = new Map<string, Promise<void>>();
 	private hydrated = false;
 
 	constructor(
@@ -103,12 +113,14 @@ export class ManagedLaneController {
 		recordTerminal: (record: LaneRecord, durableNotificationId: string) => void,
 		warn: (message: string) => void = () => {},
 		noteLaneOwnerEpoch: (laneId: string, ownerEpoch: number) => void = () => {},
+		worktreeLanes?: WorktreeLaneLifecycle,
 	) {
 		this.deps = deps;
 		this.lifecycle = lifecycle;
 		this.recordTerminal = recordTerminal;
 		this.warn = warn;
 		this.noteLaneOwnerEpoch = noteLaneOwnerEpoch;
+		this.worktreeLanes = worktreeLanes;
 	}
 
 	ensureHydrated(): void {
@@ -180,8 +192,10 @@ export class ManagedLaneController {
 					: {}),
 				...(event.goalId ? { goalId: event.goalId } : {}),
 				...(event.worktreeLaneKey ? { worktreeLaneKey: event.worktreeLaneKey } : {}),
+				...(event.worktreeLaneKey && event.worktreeLanePath ? { worktreeLanePath: event.worktreeLanePath } : {}),
 			});
 			if (!prepared.created) return undefined;
+			this.watchProtectedPaths(event.laneId, event.worktreeLanePath);
 			this.ensureRegistration(event.laneId);
 			appendLaneRecordSnapshot(this.deps.getSessionManager(), prepared.record);
 			// Genuine dispatch (guarded by `prepared.created` above -- a replayed/idempotent dispatch of
@@ -190,6 +204,13 @@ export class ManagedLaneController {
 			// for the same laneId.
 			const ownerEpoch = this.deps.getCurrentSubmissionEpoch?.();
 			if (ownerEpoch !== undefined) this.noteLaneOwnerEpoch(event.laneId, ownerEpoch);
+			if (event.worktreeLaneKey) {
+				const worktreeLaneKey = event.worktreeLaneKey;
+				const worktreeLanePath = event.worktreeLanePath;
+				this.runWorktreeLaneStep(event.laneId, () =>
+					this.worktreeLanes?.bind(worktreeLaneKey, event.laneId, worktreeLanePath),
+				);
+			}
 			return prepared.record;
 		}
 
@@ -197,6 +218,10 @@ export class ManagedLaneController {
 			// "retained" is the state every dispatched lane already starts in, so only a closure carries
 			// new information. Nothing here touches the turn: no claim, no usage, no parent handoff.
 			if (event.agentLifecycle !== "retired") return undefined;
+			// The lane key is read from the host-retained dispatch, never from this closure report.
+			const dispatched = this.lifecycle.getManagedAttempt(event.laneId)?.dispatch;
+			const worktreeLaneKey = dispatched?.worktreeLaneKey;
+			const worktreeLanePath = dispatched?.worktreeLanePath;
 			let record: LaneRecord | undefined;
 			try {
 				record = this.lifecycle.retireManaged(event.laneId, event.dispatchSequence);
@@ -210,6 +235,11 @@ export class ManagedLaneController {
 			}
 			if (record) appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
 			this.releaseRegistration(event.laneId);
+			if (worktreeLaneKey) {
+				this.runWorktreeLaneStep(event.laneId, () =>
+					this.worktreeLanes?.retire(worktreeLaneKey, event.laneId, worktreeLanePath),
+				);
+			}
 			return record;
 		}
 
@@ -254,6 +284,7 @@ export class ManagedLaneController {
 			);
 			throw error;
 		}
+		const tamper = this.protectedPathWatches.get(event.laneId)?.finishBlockers() ?? [];
 		const review = reviewManagedLaneChangedFiles({
 			changedFiles: claim.changedFiles,
 			envelope: this.deps.getCapabilityEnvelope() ?? {},
@@ -269,7 +300,8 @@ export class ManagedLaneController {
 			summary: `${claim.summary}${
 				review.reviewRequired ? ` Changed files require parent review (${review.reasonCode}).` : ""
 			}`,
-			parentReviewRequired: review.reviewRequired || inconclusive.length > 0,
+			parentReviewRequired: review.reviewRequired || inconclusive.length > 0 || tamper.length > 0,
+			...(tamper.length > 0 ? { blockers: [...(claim.blockers ?? []), ...tamper] } : {}),
 			...(inconclusive.length > 0 ? { inconclusive } : {}),
 			...(ownerFollowUp ? { ownerFollowUp } : {}),
 		});
@@ -317,13 +349,54 @@ export class ManagedLaneController {
 			this.warn(`Managed worker ${event.laneId} terminal processing failed and remains retryable: ${message}`);
 			throw error;
 		} finally {
-			if (finalized) this.releaseRegistration(event.laneId);
+			if (finalized) {
+				this.releaseRegistration(event.laneId);
+				this.protectedPathWatches.delete(event.laneId);
+			}
 		}
 		return record;
 	}
 
+	/** Take the dispatch-time fingerprint for one managed worker. Detection only: it can never fail a dispatch. */
+	private watchProtectedPaths(laneId: string, worktreeLanePath?: string): void {
+		try {
+			const watch = new ProtectedPathWatch({
+				workerId: laneId,
+				// A lane's repository is the one whose hooks and config its worker could change.
+				paths: getTamperWatchedPaths(worktreeLanePath ?? this.deps.getCwd(), this.deps.getAgentDir()),
+			});
+			watch.start();
+			this.protectedPathWatches.set(laneId, watch);
+		} catch (error) {
+			this.warn(
+				`Protected-path watch for managed worker ${laneId} unavailable: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	/**
+	 * Lane bookkeeping is best-effort and must never fail the ledger transition that triggered it. Steps
+	 * of one managed lane run in the order their reports arrived: a closure that follows a dispatch
+	 * closely must find the lane already bound to this worker, never race the binding.
+	 */
+	private runWorktreeLaneStep(laneId: string, step: () => Promise<void> | undefined): void {
+		const previous = this.worktreeLaneSteps.get(laneId) ?? Promise.resolve();
+		const next: Promise<void> = previous
+			.then(step)
+			.catch((error: unknown) => {
+				this.warn(
+					`Managed worker ${laneId} worktree lane step failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			})
+			.finally(() => {
+				if (this.worktreeLaneSteps.get(laneId) === next) this.worktreeLaneSteps.delete(laneId);
+			});
+		this.worktreeLaneSteps.set(laneId, next);
+	}
+
 	release(): void {
 		for (const laneId of [...this.deregisterByLane.keys()]) this.releaseRegistration(laneId);
+		this.protectedPathWatches.clear();
 	}
 
 	private ensureRegistration(laneId: string): void {

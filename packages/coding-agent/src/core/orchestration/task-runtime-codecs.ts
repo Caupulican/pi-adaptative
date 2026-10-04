@@ -217,6 +217,9 @@ function isoDate(value: unknown, label: string): string {
 	return date;
 }
 
+/** A filesystem path in a dispatch record (a worktree lane's directory); longer than an identifier. */
+const MAX_DISPATCH_PATH_LENGTH = 4_096;
+
 function optionalDispatchIdentifier(
 	value: unknown,
 	label: string,
@@ -311,6 +314,7 @@ const DISPATCH_FIELDS = new Set([
 	"provider",
 	"authorizationId",
 	"worktreeLaneKey",
+	"worktreeLanePath",
 	"birthContextForkReference",
 	"executionContract",
 	"modelRouteSource",
@@ -336,6 +340,11 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 	);
 	const authorizationId = optionalDispatchIdentifier(dispatch.authorizationId, `${label}.authorizationId`);
 	const worktreeLaneKey = optionalDispatchIdentifier(dispatch.worktreeLaneKey, `${label}.worktreeLaneKey`);
+	const worktreeLanePath = optionalDispatchIdentifier(
+		dispatch.worktreeLanePath,
+		`${label}.worktreeLanePath`,
+		MAX_DISPATCH_PATH_LENGTH,
+	);
 	const modelRouteSource = optionalDispatchIdentifier(dispatch.modelRouteSource, `${label}.modelRouteSource`);
 	if (
 		modelRouteSource !== undefined &&
@@ -387,6 +396,7 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 		...(provider ? { provider } : {}),
 		...(authorizationId ? { authorizationId } : {}),
 		...(worktreeLaneKey ? { worktreeLaneKey } : {}),
+		...(worktreeLanePath ? { worktreeLanePath } : {}),
 		...(birthContextForkReference ? { birthContextForkReference } : {}),
 		...(executionContract ? { executionContract } : {}),
 		...(modelRouteSource ? { modelRouteSource: modelRouteSource as WorkerModelRouteSource } : {}),

@@ -5,7 +5,7 @@ import { registerInFlightWork } from "../reload-blockers.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { workerQueueHasCapacity } from "./worker-fleet-limits.ts";
 
-export type WorkerDispatchWaitReason = "capacity" | "dependencies" | "objective" | "write_reservation";
+export type WorkerDispatchWaitReason = "capacity" | "dependencies" | "objective" | "write_reservation" | "foreground";
 
 export type WorkerDispatchAdmission =
 	| { action: "start" }
@@ -79,6 +79,8 @@ export class WorkerDispatchScheduler {
 	private readonly queued = new Map<string, WorkerDelegationRequest>();
 	private readonly queuedDispatchTokens = new Map<string, string | undefined>();
 	private readonly queuedDeregisters = new Map<string, () => void>();
+	/** Queued lanes admitted as priority work; they keep arrival order among themselves ahead of ordinary work. */
+	private readonly queuedPriority = new Set<string>();
 	private readonly running = new Map<string, Promise<WorkerDelegationRunOutcome>>();
 	private readonly runningDispatchTokens = new Map<string, string | undefined>();
 	/** Lanes enqueued while their previous run was still settling; queued when that run finishes. */
@@ -160,10 +162,18 @@ export class WorkerDispatchScheduler {
 		}
 		if (!this.hasQueueCapacity(priority)) throw new Error("worker_dispatch_queue_full");
 		if (priority) {
+			// Priority work runs ahead of ordinary work but not ahead of older priority work, so an
+			// earlier mandatory verifier is never overtaken by a later one.
 			const waiting = [...this.queued];
 			this.queued.clear();
+			for (const [laneId, queuedRequest] of waiting) {
+				if (this.queuedPriority.has(laneId)) this.queued.set(laneId, queuedRequest);
+			}
 			this.queued.set(record.laneId, request);
-			for (const [laneId, queuedRequest] of waiting) this.queued.set(laneId, queuedRequest);
+			for (const [laneId, queuedRequest] of waiting) {
+				if (!this.queuedPriority.has(laneId)) this.queued.set(laneId, queuedRequest);
+			}
+			this.queuedPriority.add(record.laneId);
 		} else {
 			this.queued.set(record.laneId, request);
 		}
@@ -181,6 +191,7 @@ export class WorkerDispatchScheduler {
 			// Queue insertion and reload-gate registration are one process-local transition. A failed
 			// registration must not leave a lane that appears queued but has no matching blocker.
 			this.queued.delete(record.laneId);
+			this.queuedPriority.delete(record.laneId);
 			this.queuedDispatchTokens.delete(record.laneId);
 			this.reservationBlocked.delete(record.laneId);
 			throw error;
@@ -677,6 +688,7 @@ export class WorkerDispatchScheduler {
 		this.preflights.delete(laneId);
 		this.validated.delete(laneId);
 		const removed = this.queued.delete(laneId);
+		this.queuedPriority.delete(laneId);
 		this.queuedDispatchTokens.delete(laneId);
 		this.reservationBlocked.delete(laneId);
 		this.waitStates.delete(laneId);

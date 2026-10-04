@@ -279,6 +279,11 @@ export interface OrchestrationProfile {
 	readOnly?: boolean;
 	/** Optional worker cwd and symmetric filesystem focus. Omitted means host-level machine scope. */
 	workspacePath?: string;
+	/**
+	 * Explicit extra write roots beyond the worker's cwd, absolute. A worker writes inside its cwd only;
+	 * every other root is a grant the root names (delegate `writePaths`, or this field). Reads are unaffected.
+	 */
+	writePaths?: readonly string[];
 	resourceProfileNames: readonly string[];
 	/** Optional preset-routing metadata retained for authored profiles; never an admission allowlist. */
 	dispatchProfileIds: readonly string[];
@@ -366,6 +371,8 @@ export interface OrchestrationDispatchRequest {
 	authorizationId?: string;
 	/** Worktree-sync lane claimed by the external dispatcher. */
 	worktreeLaneKey?: string;
+	/** That lane's worktree path: names the repository the lane lives in, so closure releases it there. */
+	worktreeLanePath?: string;
 	/** Immutable sanitized parent context captured for this persistent logical worker at birth. */
 	birthContextForkReference?: WorkerContextForkReference;
 	/** Runtime-owned immutable worker materialization. Never accepted from a model tool call. */

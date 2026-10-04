@@ -89,9 +89,12 @@ export class WorkerWriteReservationCoordinator {
 	acquire(
 		laneId: string,
 		attempt: Pick<AttemptRuntimeState, "attemptId" | "lease">,
-		plan: Pick<WorkerExecutionPlan, "writeEnabled" | "writePaths"> & Partial<Pick<WorkerExecutionPlan, "cwd">>,
+		plan: Pick<WorkerExecutionPlan, "writeEnabled" | "writePaths"> &
+			Partial<Pick<WorkerExecutionPlan, "cwd" | "writeReservationPaths">>,
 	): WorkerWriteReservationAdmission {
-		if (!plan.writeEnabled || plan.writePaths.length === 0) {
+		// Only explicit scopes fence other lanes; a plan's bare cwd default reserves nothing.
+		const reservedPaths = plan.writeReservationPaths ?? plan.writePaths;
+		if (!plan.writeEnabled || reservedPaths.length === 0) {
 			this.blockedByLocalLaneIds.delete(laneId);
 			return { kind: "granted" };
 		}
@@ -103,7 +106,7 @@ export class WorkerWriteReservationCoordinator {
 		}
 		const planCwd = plan.cwd ?? this.options.getCwd();
 		const machineRoots = workerMachinePathRoots(planCwd);
-		const requestedScopes = new Set(plan.writePaths.map(canonicalPathScopeIdentity));
+		const requestedScopes = new Set(reservedPaths.map(canonicalPathScopeIdentity));
 		const machineWide =
 			requestedScopes.size === machineRoots.length &&
 			machineRoots.every((root) => requestedScopes.has(canonicalPathScopeIdentity(root)));
@@ -124,7 +127,7 @@ export class WorkerWriteReservationCoordinator {
 				fencingToken,
 				access: "write",
 				workspace,
-				writeScopes: plan.writePaths,
+				writeScopes: reservedPaths,
 			},
 			"Worker write reservation denied",
 			true,

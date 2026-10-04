@@ -66,6 +66,7 @@ export interface PrepareManagedDelegationInput {
 	goal?: GoalState;
 	goalId?: string;
 	worktreeLaneKey?: string;
+	worktreeLanePath?: string;
 }
 
 export interface StartedDelegationAttempt {
@@ -202,6 +203,7 @@ export class DelegationOrchestrationLedger {
 				provider: input.provider,
 				authorizationId: input.authorizationId,
 				...(input.worktreeLaneKey ? { worktreeLaneKey: input.worktreeLaneKey } : {}),
+				...(input.worktreeLanePath ? { worktreeLanePath: input.worktreeLanePath } : {}),
 			},
 		});
 	}
@@ -373,6 +375,7 @@ export class DelegationOrchestrationLedger {
 			| "provider"
 			| "authorizationId"
 			| "worktreeLaneKey"
+			| "worktreeLanePath"
 			| "birthContextForkReference"
 			| "modelRouteSource"
 			| "modelPinSource"

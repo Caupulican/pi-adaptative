@@ -106,14 +106,19 @@ export interface RepoContext {
 const GIT_TIMEOUT_MS = 60_000;
 const GIT_MAX_BUFFER = 1024 * 1024;
 
-/** Production exec: `exec.ts`'s bounded `execCommand` (rolling-tail output, timeout, abort). */
+/**
+ * Production exec: `exec.ts`'s bounded `execCommand` (rolling-tail output, timeout, abort). Every
+ * call -- engine, tool-layer `execInLane`, lane-gate diff -- resolves its repository from its own
+ * `cwd`, so the inherited git location (`GIT_DIR`, `GIT_INDEX_FILE`, ...) is stripped at this one
+ * seam instead of at each call site: an exported hook location would otherwise point git at the wrong repo.
+ */
 export function createDefaultWorktreeSyncExec(): WorktreeSyncExec {
 	return (command, args, options) =>
 		execCommand(command, args, options.cwd, {
 			timeout: options.timeout,
 			signal: options.signal,
 			maxBuffer: options.maxBuffer,
-			env: options.env,
+			env: withoutInheritedGitLocation(options.env ?? process.env),
 		});
 }
 
@@ -329,27 +334,6 @@ export async function deriveLaneFacts(
 	};
 }
 
-/** One-time repo git config (D7): shared rerere + zdiff3 conflict hunks -- the deterministic
- * conflict-resolution substrate for every lane (the rr-cache lives in the common dir, so one
- * resolution replays identically in all worktrees). Idempotent; only actual changes are audited. */
-export async function ensureRepoGitConfig(deps: WorktreeSyncEngineDeps, ctx: RepoContext): Promise<void> {
-	const wanted: Array<[string, string]> = [
-		["rerere.enabled", "true"],
-		["rerere.autoUpdate", "true"],
-		["merge.conflictStyle", "zdiff3"],
-	];
-	const changed: string[] = [];
-	for (const [key, value] of wanted) {
-		const current = await runGit(deps, ctx.topLevel, ["config", "--get", key]);
-		if (current.code === 0 && current.stdout.trim() === value) continue;
-		const set = await runGit(deps, ctx.topLevel, ["config", key, value]);
-		if (set.code === 0) changed.push(`${key}=${value}`);
-	}
-	if (changed.length > 0) {
-		await appendAuditEvent(ctx.paths, { event: "config_set", changed }, nowIso(deps));
-	}
-}
-
 function sanitizeScope(scope: string): string {
 	const cleaned = scope
 		.toLowerCase()
@@ -410,8 +394,6 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 			while (!(await isFree(`${scope}-${n}`))) n++;
 			laneKey = `${scope}-${n}`;
 		}
-
-		await ensureRepoGitConfig(deps, ctx);
 
 		const branch = laneBranch(laneKey);
 		const worktreePath = join(deps.worktreesBaseDir, ctx.slug, laneKey);
@@ -494,6 +476,12 @@ export interface ReleaseLaneArgs {
 	laneKey: string;
 	/** Required as exactly "yes-discard-lane" to release a lane with unlanded commits or dirty files (G11). */
 	confirm?: string;
+	/**
+	 * Release only a lane bound to exactly this host lane id. A managed worker's closure releases the
+	 * lane it was dispatched into; the lane key it names is a caller claim, so a lane bound to another
+	 * worker (or to none) is refused rather than removed under its owner.
+	 */
+	expectBoundLaneId?: string;
 }
 
 export async function releaseLane(deps: WorktreeSyncEngineDeps, args: ReleaseLaneArgs): Promise<ReleaseLaneResult> {
@@ -501,6 +489,12 @@ export async function releaseLane(deps: WorktreeSyncEngineDeps, args: ReleaseLan
 		const lane = await readLane(ctx.paths, args.laneKey);
 		if (!lane) return { code: "lane_not_found", message: `no registered lane '${args.laneKey}'` };
 		if (lane.status === "released") return { code: "released", laneKey: lane.laneKey };
+		if (args.expectBoundLaneId !== undefined && lane.boundLaneId !== args.expectBoundLaneId) {
+			return {
+				code: "lane_bound_elsewhere",
+				message: `lane '${lane.laneKey}' is ${lane.boundLaneId ? `bound to worker ${lane.boundLaneId}` : "not bound to a worker"}, not ${args.expectBoundLaneId}; it was not released`,
+			};
+		}
 		if (ownerConflicts(deps, lane)) {
 			return {
 				code: "lane_owner_conflict",
@@ -666,8 +660,8 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 	// git repo must never create `<git-common-dir>/pi-worktree-sync/`. When the store does not exist
 	// yet and git shows nothing to recover, there is genuinely nothing to reconcile -- one early
 	// determination, then skip every write below (writeLane/appendAuditEvent/releaseIntegrationLock)
-	// rather than guarding each call individually. Once the store exists, or findings occur, behavior
-	// is unchanged below (including the reconcile_summary audit append).
+	// rather than guarding each call individually. Once the store exists, or findings occur, the pass
+	// runs below; its reconcile_summary audit is appended only when it changed something.
 	if (!fileExists(deps, ctx.paths.root) && unregisteredWorktrees.length === 0) {
 		return {
 			code: "reconciled",
@@ -734,27 +728,51 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 		staleLockReleased = await releaseIntegrationLock(ctx.paths, holder.token, { now: deps.now });
 	}
 
-	await appendAuditEvent(
-		ctx.paths,
-		{
-			event: "reconcile_summary",
-			orphaned: orphanedLaneKeys,
-			reRegistered: reRegisteredLaneKeys,
-			ownersCleared: ownerClearedLaneKeys,
-			staleLockReleased,
-		},
-		at,
-	);
+	// Audit only a reconcile that changed something: every session start runs this pass, and an
+	// unconditional summary grew events.jsonl on each open of an already-consistent repository.
+	if (
+		orphanedLaneKeys.length > 0 ||
+		reRegisteredLaneKeys.length > 0 ||
+		ownerClearedLaneKeys.length > 0 ||
+		staleLockReleased
+	) {
+		await appendAuditEvent(
+			ctx.paths,
+			{
+				event: "reconcile_summary",
+				orphaned: orphanedLaneKeys,
+				reRegistered: reRegisteredLaneKeys,
+				ownersCleared: ownerClearedLaneKeys,
+				staleLockReleased,
+			},
+			at,
+		);
+	}
 	return { code: "reconciled", orphanedLaneKeys, reRegisteredLaneKeys, ownerClearedLaneKeys, staleLockReleased };
 }
 
+/**
+ * Deterministic conflict-resolution substrate (D7): rerere replay (the rr-cache lives in the common
+ * dir, so one resolution replays identically in every worktree) and zdiff3 hunks. Passed per
+ * rebase-driving command with `git -c`, never persisted: writing it into the shared `.git/config`
+ * changed the owner's repository for every checkout and was never reverted on release.
+ */
+const CONFLICT_SUBSTRATE_CONFIG = [
+	"-c",
+	"rerere.enabled=true",
+	"-c",
+	"rerere.autoUpdate=true",
+	"-c",
+	"merge.conflictStyle=zdiff3",
+] as const;
+
 /** Rebase env for every rebase-driving call: never let git open an editor mid-automation. */
 function rebaseEnv(): NodeJS.ProcessEnv {
-	return { ...process.env, GIT_EDITOR: "true", GIT_SEQUENCE_EDITOR: "true" };
+	return { ...withoutInheritedGitLocation(), GIT_EDITOR: "true", GIT_SEQUENCE_EDITOR: "true" };
 }
 
 function runGitEnv(deps: WorktreeSyncEngineDeps, cwd: string, args: string[]): Promise<ExecResult> {
-	return deps.exec("git", args, {
+	return deps.exec("git", [...CONFLICT_SUBSTRATE_CONFIG, ...args], {
 		cwd,
 		timeout: GIT_TIMEOUT_MS,
 		signal: deps.signal,

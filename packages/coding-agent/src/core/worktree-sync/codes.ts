@@ -47,7 +47,8 @@ export type WorktreeSyncCode =
 	| "git_error"
 	| "role_forbidden"
 	| "path_outside_lane"
-	| "lane_owner_conflict";
+	| "lane_owner_conflict"
+	| "lane_bound_elsewhere";
 
 /**
  * A refusal/failure outcome. `message` is deterministic text assembled from facts (safe to show a
@@ -176,6 +177,7 @@ export type ReleaseLaneResult =
 			| "lane_not_found"
 			| "lane_unlanded_work"
 			| "lane_owner_conflict"
+			| "lane_bound_elsewhere"
 			| "git_error"
 	  >;
 

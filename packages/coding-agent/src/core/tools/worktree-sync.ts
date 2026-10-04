@@ -1,5 +1,6 @@
 import { isAbsolute, relative } from "node:path";
 import { type Static, Type } from "typebox";
+import { workerAuthorIdentity } from "../autonomy/worker-git-identity.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { ResolvedWorktreeSyncSettings } from "../settings-manager.ts";
 import type { ConflictWorklist, SyncStatus } from "../worktree-sync/codes.ts";
@@ -233,6 +234,10 @@ export function createWorktreeSyncToolDefinition(deps: WorktreeSyncToolDeps): To
 						}
 						command = "git";
 						args = ["commit", "-m", input.message];
+						// A session committing the work of the worker bound to this lane records that worker as the
+						// author; the committer stays the committing session. A worker's own commits already name it.
+						if (lane.boundLaneId && !deps.isWorker())
+							args.push("--author", workerAuthorIdentity(lane.boundLaneId));
 						break;
 					case "check": {
 						const trustedCommand = settings.gateCommand?.trim();

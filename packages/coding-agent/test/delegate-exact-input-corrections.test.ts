@@ -463,7 +463,9 @@ describe("delegate exact-action input corrections", () => {
 		);
 
 		expect(result.isError).not.toBe(true);
-		expect(waitForWorkerAgents).toHaveBeenCalledWith(["worker-1", "worker-2"], "all", 300_000);
+		expect(waitForWorkerAgents).toHaveBeenCalledWith(["worker-1", "worker-2"], "all", 300_000, {
+			returnWhenForegroundHeld: true,
+		});
 		expect(spies.waitForWorkerAgent).not.toHaveBeenCalled();
 		expect(result.details).toMatchObject({ started: true, action: "wait_many", agentIds: ["worker-1", "worker-2"] });
 	});

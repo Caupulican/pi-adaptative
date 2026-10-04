@@ -48,7 +48,7 @@ export function projectClaimFindings(findings: readonly Finding[] | undefined): 
 }
 
 export const WORKER_QUEUED_CAVEMAN_GUIDANCE =
-	"CAVEMAN MODE - MANDATORY: queued is admitted durable nonterminal state, not stall or harness failure. Host starts it event-driven when dependencies, capacity, or explicit workspace reservations clear; the waiting line names which one and since when. A write reservation held by a dead owner is released automatically; one held by a live worker of another session clears only when that worker finishes. Never poll, interrupt, or cancel a healthy running worker to force the queue. Independent machine-scope workers may run in parallel; an explicit path preserves collision fencing. If you start a fresh narrower replacement, cancel this queued agent after the replacement starts; otherwise both tasks will run.";
+	"CAVEMAN MODE - MANDATORY: A queued worker is admitted, durable, and nonterminal. It is not a stall or harness failure. The host starts it event-driven when dependencies, capacity, or explicit workspace reservations clear (the waiting line names which one and since when), or when the foreground turn ends if the worker and the foreground share a local model. A write reservation held by a dead owner is released automatically; one held by a live worker of another session clears only when that worker finishes. Never poll, interrupt, or cancel a healthy running worker to force the queue. Independent machine-scope workers may run in parallel; an explicit path preserves collision fencing. If you start a fresh narrower replacement, cancel this queued agent after the replacement starts; otherwise both tasks will run.";
 
 export const DELEGATE_STATUS_ACTIONS = ["status", "review"] as const;
 
@@ -285,7 +285,13 @@ function formatRecord(
 	if (claim.usageReportId) {
 		headerLines.push(`usageReportId: ${claim.usageReportId.slice(0, 256)}`);
 	}
-	for (const line of workerClaimSettlementLines(claim)) headerLines.push(utf8PrefixByBytes(line, 1_024));
+	// The fenced block must stay whole, so each item is bounded before it is fenced rather than the line after.
+	for (const line of workerClaimSettlementLines(
+		claim,
+		(item) => utf8PrefixByBytes(item, 120),
+		`worker-claim:${boundedLaneId}`,
+	))
+		headerLines.push(line);
 	if (isUnreviewed(claim)) {
 		headerLines.push(
 			`UNREVIEWED CLAIM - this worker's claim requires explicit parent review. Acknowledge with delegate { action: "review", laneId: "${boundedLaneId}" }.`,

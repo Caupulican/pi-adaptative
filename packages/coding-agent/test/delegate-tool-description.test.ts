@@ -12,7 +12,7 @@ import {
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createDelegateToolDefinition, DELEGATE_ACTIONS } from "../src/core/tools/delegate.ts";
 
-const EXPECTED_AUTHORITY_GUIDELINE = "Optional model/thinkingLevel/path/toolNames only";
+const EXPECTED_AUTHORITY_GUIDELINE = "Optional model/thinkingLevel/path/writePaths/toolNames only";
 
 describe("delegate tool capability description", () => {
 	it("derives the tool action schema from the canonical action registry", () => {
@@ -286,7 +286,7 @@ describe("delegate tool capability description", () => {
 		};
 		expect(parameters.properties?.forkTurns?.description).toContain("Omitted starts use none");
 		expect(parameters.properties?.forkTurns?.description).not.toContain("inherit bounded all");
-		expect(parameters.properties?.instructions?.description).toContain("machine-wide project access");
+		expect(parameters.properties?.instructions?.description).toContain("machine-wide read access");
 		expect(parameters.properties?.instructions?.description).toContain("leaf-worker task");
 		expect(parameters.properties?.message?.description).toContain("reply");
 		expect(parameters.properties?.maxMessages?.description).toContain("inbox");
@@ -295,12 +295,12 @@ describe("delegate tool capability description", () => {
 		expect(parameters.properties?.toolNames?.description).toContain("inherits every compatible foreground tool");
 		expect(parameters.properties).not.toHaveProperty("authority");
 		const promptGuidelines = (definition.promptGuidelines ?? []).join("\n");
-		expect(promptGuidelines).toContain("Optional model/thinkingLevel/path/toolNames only");
-		expect(promptGuidelines).toContain("CAVEMAN MODE - MANDATORY: start=automatic reuse");
-		expect(promptGuidelines).toContain("agentId=select specialist");
-		expect(promptGuidelines).toContain("task=instructions");
+		expect(promptGuidelines).toContain("Optional model/thinkingLevel/path/writePaths/toolNames only");
+		expect(promptGuidelines).toContain("CAVEMAN MODE - MANDATORY: Start reuses compatible idle workers");
+		expect(promptGuidelines).toContain("agentId picks one");
+		expect(promptGuidelines).toContain("Task goes in instructions");
 		expect(promptGuidelines.toLowerCase()).toContain("compiles and persists grant");
-		expect(promptGuidelines).toContain("queued=admitted");
+		expect(promptGuidelines).toContain("A queued worker is admitted");
 		expect(parameters.properties).not.toHaveProperty("memoryRead");
 	});
 

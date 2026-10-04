@@ -54,7 +54,22 @@ export interface SessionRootReply {
 	ackToken: string;
 	sourceReconciledAt?: string;
 	acknowledgedAt?: string;
+	/** Settled as expired, never as reconciled or acknowledged: nothing was ever read or delivered. */
+	expiredAt?: string;
+	expiredReason?: string;
 }
+
+/** Bounded, attributed evidence of one reply settled as expired. */
+export interface ExpiredSessionRootReply {
+	messageId: string;
+	sourceAgentId: string;
+	requestMessageId: string;
+	state: "unreconciled" | "unacknowledged";
+	createdAt: string;
+	contentHead: string;
+}
+
+const EXPIRED_REPLY_CONTENT_HEAD_CHARS = 160;
 
 interface SessionRootMailboxState {
 	version: 1;
@@ -238,7 +253,19 @@ function sameReplayIntent(receipt: SessionRootReplyReplayReceipt, reply: Session
 }
 
 function isMandatory(reply: SessionRootReply): boolean {
-	return reply.sourceReconciledAt === undefined || reply.acknowledgedAt === undefined;
+	return (
+		reply.expiredAt === undefined && (reply.sourceReconciledAt === undefined || reply.acknowledgedAt === undefined)
+	);
+}
+
+/** A mandatory reply created before the cutoff can never be answered: expiry settles it. */
+function isExpirableReply(reply: SessionRootReply, cutoffMs: number): boolean {
+	return isMandatory(reply) && Date.parse(reply.createdAt) < cutoffMs;
+}
+
+/** A root inbox still owes the session work while any reply is unreconciled or unacknowledged. */
+export function sessionRootMailboxHasMandatoryReply(state: { replies: readonly SessionRootReply[] }): boolean {
+	return state.replies.some(isMandatory);
 }
 
 function pruneRetainedReplies(replies: readonly SessionRootReply[]): SessionRootReply[] {
@@ -259,22 +286,30 @@ function encodedStateBytes(state: SessionRootMailboxState): number {
 function lifecycleProjectedEncodedBytes(state: SessionRootMailboxState): number {
 	return encodedStateBytes({
 		...state,
-		replies: state.replies.map((reply) => ({
-			...reply,
-			sourceReconciledAt: reply.sourceReconciledAt ?? MAX_TRANSITION_TIMESTAMP,
-			acknowledgedAt: reply.acknowledgedAt ?? MAX_TRANSITION_TIMESTAMP,
-		})),
+		// An expired reply is final: no later transition adds a lifecycle field to it.
+		replies: state.replies.map((reply) =>
+			reply.expiredAt === undefined
+				? {
+						...reply,
+						sourceReconciledAt: reply.sourceReconciledAt ?? MAX_TRANSITION_TIMESTAMP,
+						acknowledgedAt: reply.acknowledgedAt ?? MAX_TRANSITION_TIMESTAMP,
+					}
+				: reply,
+		),
 	});
 }
 
 function assertReplyEncodedByteBound(reply: SessionRootReply): void {
 	// Reserve both lifecycle fields before accepting content so every durable reply can still fit as
 	// one whole entry in the delegate inbox's 16 KiB result envelope after later transitions.
-	const transitioned = {
-		...reply,
-		sourceReconciledAt: reply.sourceReconciledAt ?? reply.createdAt,
-		acknowledgedAt: reply.acknowledgedAt ?? reply.createdAt,
-	};
+	const transitioned =
+		reply.expiredAt === undefined
+			? {
+					...reply,
+					sourceReconciledAt: reply.sourceReconciledAt ?? reply.createdAt,
+					acknowledgedAt: reply.acknowledgedAt ?? reply.createdAt,
+				}
+			: reply;
 	if (Buffer.byteLength(JSON.stringify(transitioned), "utf-8") > MAX_REPLY_ENCODED_BYTES) {
 		throw new Error(`Session root reply exceeds its ${MAX_REPLY_ENCODED_BYTES}-byte encoded byte bound.`);
 	}
@@ -319,6 +354,17 @@ function parseReply(value: unknown, parentSessionId: string): SessionRootReply {
 	const ackToken = requiredAckToken(candidate.ackToken);
 	const sourceReconciledAt = optionalTimestamp(candidate.sourceReconciledAt, "source reconciliation timestamp");
 	const acknowledgedAt = optionalTimestamp(candidate.acknowledgedAt, "acknowledgement timestamp");
+	const expiredAt = optionalTimestamp(candidate.expiredAt, "expiry timestamp");
+	const expiredReason =
+		candidate.expiredReason === undefined
+			? undefined
+			: requiredBoundedString(candidate.expiredReason, MAX_IDENTITY_CHARS, "expiry reason");
+	if ((expiredAt === undefined) !== (expiredReason === undefined)) {
+		throw new Error("Session root mailbox reply expiry state is incomplete.");
+	}
+	if (expiredAt !== undefined && expiredAt < createdAt) {
+		throw new Error("Session root mailbox reply expiry timestamp predates creation.");
+	}
 	if (sourceReconciledAt !== undefined && sourceReconciledAt < createdAt) {
 		throw new Error("Session root mailbox reply source reconciliation timestamp predates creation.");
 	}
@@ -344,6 +390,7 @@ function parseReply(value: unknown, parentSessionId: string): SessionRootReply {
 		ackToken,
 		...(sourceReconciledAt ? { sourceReconciledAt } : {}),
 		...(acknowledgedAt ? { acknowledgedAt } : {}),
+		...(expiredAt && expiredReason ? { expiredAt, expiredReason } : {}),
 	};
 	assertReplyEncodedByteBound(reply);
 	return reply;
@@ -559,6 +606,7 @@ export class SessionRootMailbox {
 			.replies.filter(
 				(reply) =>
 					reply.acknowledgedAt === undefined &&
+					reply.expiredAt === undefined &&
 					(normalized.sourceAgentId === undefined || reply.sourceAgentId === normalized.sourceAgentId) &&
 					(normalized.requestMessageId === undefined || reply.requestMessageId === normalized.requestMessageId),
 			)
@@ -566,8 +614,11 @@ export class SessionRootMailbox {
 			.map((reply) => structuredClone(reply));
 	}
 
+	/** Replies the source reconciler may still owe work on; an expired reply is final and excluded. */
 	retainedReplies(): SessionRootReply[] {
-		return this.read().replies.map((reply) => structuredClone(reply));
+		return this.read()
+			.replies.filter((reply) => reply.expiredAt === undefined)
+			.map((reply) => structuredClone(reply));
 	}
 
 	getReply(messageId: string): SessionRootReply | undefined {
@@ -584,7 +635,7 @@ export class SessionRootMailbox {
 			const existing = state.replies.find((reply) => reply.messageId === normalized);
 			if (!existing) return state;
 			accepted = true;
-			if (existing.sourceReconciledAt !== undefined) return state;
+			if (existing.sourceReconciledAt !== undefined || existing.expiredAt !== undefined) return state;
 			changed = true;
 			return {
 				...state,
@@ -597,6 +648,50 @@ export class SessionRootMailbox {
 		});
 		if (changed) this.notify();
 		return accepted;
+	}
+
+	/**
+	 * Whether {@link expireMandatoryReplies} at `cutoffMs` would leave no mandatory reply: every one is
+	 * expired. Read-only, so a caller can decide before any mailbox is written.
+	 */
+	expiresEveryMandatoryReply(cutoffMs: number): boolean {
+		return !this.read().replies.some((reply) => isMandatory(reply) && !isExpirableReply(reply, cutoffMs));
+	}
+
+	/**
+	 * Settle every mandatory reply created before `cutoffMs` as expired with `reason`. A reply is never
+	 * marked reconciled or acknowledged by expiry. `recordBeforeSettling` runs inside the transaction,
+	 * before the write, with exactly what is about to be settled; if it throws, nothing is settled.
+	 */
+	expireMandatoryReplies(
+		cutoffMs: number,
+		reason: string,
+		recordBeforeSettling: (settled: readonly ExpiredSessionRootReply[]) => void,
+	): ExpiredSessionRootReply[] {
+		const expiredReason = requiredBoundedString(reason.trim(), MAX_IDENTITY_CHARS, "expiry reason");
+		let expired: ExpiredSessionRootReply[] = [];
+		this.update(
+			(state) => {
+				expired = [];
+				const replies = state.replies.map((reply) => {
+					if (!isExpirableReply(reply, cutoffMs)) return reply;
+					expired.push({
+						messageId: reply.messageId,
+						sourceAgentId: reply.sourceAgentId,
+						requestMessageId: reply.requestMessageId,
+						state: reply.sourceReconciledAt === undefined ? "unreconciled" : "unacknowledged",
+						createdAt: reply.createdAt,
+						contentHead: reply.content.slice(0, EXPIRED_REPLY_CONTENT_HEAD_CHARS),
+					});
+					return { ...reply, expiredAt: transitionTimestamp(reply.createdAt), expiredReason };
+				});
+				return expired.length === 0 ? state : { ...state, replies };
+			},
+			false,
+			() => recordBeforeSettling(expired),
+		);
+		if (expired.length > 0) this.notify();
+		return expired;
 	}
 
 	releaseSourceReplayReceipt(messageId: string): boolean {
@@ -621,7 +716,7 @@ export class SessionRootMailbox {
 		let changed = false;
 		this.update((state) => {
 			const existing = state.replies.find((reply) => reply.messageId === normalizedMessageId);
-			if (!existing) return state;
+			if (!existing || existing.expiredAt !== undefined) return state;
 			if (existing.ackToken !== normalizedToken) {
 				throw new Error("Session root reply acknowledgement token does not match.");
 			}
@@ -763,6 +858,7 @@ export class SessionRootMailbox {
 	private update(
 		mutator: (state: SessionRootMailboxState) => SessionRootMailboxState,
 		defaultAdmission = false,
+		beforeWrite?: () => void,
 	): void {
 		withFileLockSync(this.file, () => {
 			const state = this.read();
@@ -806,6 +902,7 @@ export class SessionRootMailbox {
 			const encodedNext = JSON.stringify(next);
 			if (encodedNext !== JSON.stringify(state)) {
 				const text = `${encodedNext}\n`;
+				beforeWrite?.();
 				writeFileAtomicSync(this.file, text, { mode: 0o600 });
 				// What was just written is what the next read will find, unless someone else writes first.
 				this.parsed = { text, state: next };

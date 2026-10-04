@@ -9,6 +9,7 @@
  */
 
 import { worktreesDir } from "../agent-paths.ts";
+import { isWorkerSession } from "../session-role.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import {
 	createDefaultWorktreeSyncExec,
@@ -64,7 +65,9 @@ const NOOP_HANDLE: WorktreeSyncRuntimeHandle = { stop: () => {} };
 /**
  * Start the per-session worktree-sync runtime (main.ts composition root):
  * 1. one startup reconcile pass (registry vs git reality -- orphans marked, lost lanes
- *    re-registered, dead owners cleared, provably-stale lock released), and
+ *    re-registered, dead owners cleared, provably-stale lock released) in a MAIN session only: the
+ *    pass appends the audit log and rewrites other lanes' registrations, and a worker session
+ *    leaves no footprint outside its own lane (a worker is read-only here), and
  * 2. for a LANE-BOUND session, the epoch watcher: a land anywhere on this machine injects a
  *    deterministic staleness notice into this session promptly (the pull-guaranteed channel is
  *    still the lane gate + turn-start checks -- enforcement never rides on the watcher).
@@ -77,27 +80,30 @@ export async function startWorktreeSyncRuntime(config: WorktreeSyncRuntimeConfig
 	if (!settings.enabled) return NOOP_HANDLE;
 	const deps = buildWorktreeSyncEngineDeps(config);
 
-	try {
-		const reconciled = await reconcile(deps);
-		if (reconciled.code === "reconciled") {
-			const findings: string[] = [];
-			if (reconciled.orphanedLaneKeys.length > 0)
-				findings.push(`orphaned: ${reconciled.orphanedLaneKeys.join(", ")}`);
-			if (reconciled.reRegisteredLaneKeys.length > 0) {
-				findings.push(`re-registered: ${reconciled.reRegisteredLaneKeys.join(", ")}`);
+	// Worker session: registry repair belongs to the owning main session; the pass is skipped, not stubbed.
+	if (!isWorkerSession()) {
+		try {
+			const reconciled = await reconcile(deps);
+			if (reconciled.code === "reconciled") {
+				const findings: string[] = [];
+				if (reconciled.orphanedLaneKeys.length > 0)
+					findings.push(`orphaned: ${reconciled.orphanedLaneKeys.join(", ")}`);
+				if (reconciled.reRegisteredLaneKeys.length > 0) {
+					findings.push(`re-registered: ${reconciled.reRegisteredLaneKeys.join(", ")}`);
+				}
+				if (reconciled.staleLockReleased) findings.push("released a stale integration lock");
+				if (findings.length > 0) config.onDiagnostic?.(`worktree-sync reconcile: ${findings.join("; ")}`);
+			} else if (reconciled.code !== "not_a_git_repo" && reconciled.code !== "default_branch_unresolved") {
+				// Now that the runtime starts in every session, these two codes are benign absence, not a
+				// problem to surface: a non-repo cwd, or a repo whose default branch isn't named main/master.
+				// Every other refusal still gets a diagnostic.
+				config.onDiagnostic?.(`worktree-sync reconcile skipped: [${reconciled.code}] ${reconciled.message}`);
 			}
-			if (reconciled.staleLockReleased) findings.push("released a stale integration lock");
-			if (findings.length > 0) config.onDiagnostic?.(`worktree-sync reconcile: ${findings.join("; ")}`);
-		} else if (reconciled.code !== "not_a_git_repo" && reconciled.code !== "default_branch_unresolved") {
-			// Now that the runtime starts in every session, these two codes are benign absence, not a
-			// problem to surface: a non-repo cwd, or a repo whose default branch isn't named main/master.
-			// Every other refusal still gets a diagnostic.
-			config.onDiagnostic?.(`worktree-sync reconcile skipped: [${reconciled.code}] ${reconciled.message}`);
+		} catch (error) {
+			config.onDiagnostic?.(
+				`worktree-sync reconcile failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
 		}
-	} catch (error) {
-		config.onDiagnostic?.(
-			`worktree-sync reconcile failed: ${error instanceof Error ? error.message : String(error)}`,
-		);
 	}
 
 	const laneKey = getBoundWorktreeLaneKey();

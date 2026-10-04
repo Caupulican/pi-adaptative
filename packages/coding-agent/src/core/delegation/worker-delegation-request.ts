@@ -15,6 +15,9 @@ import {
 import { parseRiskBudget } from "../orchestration/risk-budget.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 
+/** Upper bound on extra write roots one delegation may name. */
+const MAX_WORKER_AUTHORITY_WRITE_PATHS = 16;
+
 /** Runtime-owned task correlation retained with a durable worker dispatch. Never model-settable. */
 export interface WorkerDelegationTaskContext {
 	requirementIds: readonly string[];
@@ -47,6 +50,11 @@ export interface WorkerDelegationAuthorityRequest {
 	readOnly?: boolean;
 	/** One model-selectable workspace focus. The host derives cwd plus symmetric read/write scope. */
 	path?: string;
+	/**
+	 * Explicit extra write roots beside the worker's cwd (sibling repositories, output directories). A worker
+	 * writes only inside its cwd unless the caller names more here; reads are unaffected.
+	 */
+	writePaths?: readonly string[];
 	budget?: RiskBudget;
 }
 
@@ -71,7 +79,17 @@ function uniqueStringArray(value: unknown, label: string, options: { maxEntries?
 export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDelegationAuthorityRequest {
 	if (!isPlainRecord(value)) throw new WorkerDelegationRequestError("Delegation authority must be an object.");
 	if (
-		!hasOnlyKeys(value, ["role", "model", "thinkingLevel", "capabilities", "toolNames", "readOnly", "path", "budget"])
+		!hasOnlyKeys(value, [
+			"role",
+			"model",
+			"thinkingLevel",
+			"capabilities",
+			"toolNames",
+			"readOnly",
+			"path",
+			"writePaths",
+			"budget",
+		])
 	) {
 		throw new WorkerDelegationRequestError("Delegation authority contains an unsupported field.");
 	}
@@ -125,6 +143,16 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 	if (value.path !== undefined && workspacePath === undefined) {
 		throw new WorkerDelegationRequestError("Delegation authority path must be a bounded, non-empty string.");
 	}
+	const writePaths =
+		value.writePaths === undefined
+			? undefined
+			: uniqueStringArray(value.writePaths, "Delegation authority writePaths", {
+					maxEntries: MAX_WORKER_AUTHORITY_WRITE_PATHS,
+					maxLength: MAX_WORKER_AUTHORITY_PATH_LENGTH,
+				});
+	if (writePaths?.some((entry) => entry.includes("\0"))) {
+		throw new WorkerDelegationRequestError("Delegation authority writePaths must be bounded, non-empty strings.");
+	}
 	let budget: RiskBudget | undefined;
 	try {
 		budget = value.budget === undefined ? undefined : parseRiskBudget(value.budget, "Delegation authority budget");
@@ -139,6 +167,7 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 		...(toolNames ? { toolNames } : {}),
 		...(value.readOnly !== undefined ? { readOnly: value.readOnly } : {}),
 		...(workspacePath ? { path: workspacePath } : {}),
+		...(writePaths && writePaths.length > 0 ? { writePaths } : {}),
 		...(budget ? { budget } : {}),
 	};
 }
@@ -204,4 +233,10 @@ export interface WorkerDelegationRequest {
 	 * describe different work, which is refused rather than silently started somewhere else.
 	 */
 	reuseAgentId?: string;
+	/**
+	 * Host-owned: this start is one member of a fan-out whose remaining members (this one included) all
+	 * still need an agent identity and, possibly, a queue slot. Admission judges fleet headroom for all
+	 * of them before this member starts, so a group does not start half of its members and then hit a cap.
+	 */
+	fanoutRemaining?: number;
 }

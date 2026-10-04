@@ -6,7 +6,7 @@ import {
 	projectBackgroundToolTerminalDelivery,
 } from "./background-tool-task-controller.ts";
 import type { WorkerClaimSnapshotPayload } from "./delegation/session-worker-claim.ts";
-import { workerClaimSettlementLines } from "./delegation/worker-claim.ts";
+import { fenceWorkerClaimValues, workerClaimSettlementLines } from "./delegation/worker-claim.ts";
 import {
 	type WorkerTerminalHandoffRecord,
 	workerTerminalGenerationIdentity,
@@ -92,6 +92,8 @@ interface ForegroundTerminalHandoffControllerDeps {
 	getWorkerClaimSnapshot?(laneId: string, attemptId?: string): WorkerClaimSnapshotPayload | undefined;
 	/** The result of the exact generation when `attemptId` is given; never another generation's. */
 	getWorkerResult?(laneId: string, attemptId?: string): Pick<WorkerResultContract, "artifacts"> | undefined;
+	/** The fan-out group line (coverage, race winner) for a lane that belongs to a group; undefined otherwise. */
+	getWorkerFanoutNote?(laneId: string): string | undefined;
 	startCustomMessageTurn(
 		message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">,
 		lease: ForegroundSubmissionLease,
@@ -145,6 +147,8 @@ export function buildForegroundWorkerTerminalHandoffContent(
 		status: LaneTerminalStatus;
 		reasonCode?: string;
 		outputArtifact?: ArtifactContract;
+		/** Host-written fan-out group line; reason codes inside it are already identifier-sanitized. */
+		fanout?: string;
 		claim?: {
 			summary?: string;
 			status?: string;
@@ -154,6 +158,7 @@ export function buildForegroundWorkerTerminalHandoffContent(
 			systemOneSettled?: readonly string[];
 			ownerFollowUp?: string;
 			parentReviewRequired?: boolean;
+			verification?: { subjectTaskId: string; verdict: "accepted" | "rejected"; reasonCodes: readonly string[] };
 		};
 	}[],
 	options?: { wakeParent?: boolean; totalCount?: number },
@@ -165,8 +170,11 @@ export function buildForegroundWorkerTerminalHandoffContent(
 	return [
 		"Background worker terminal handoff:",
 		...included.flatMap((record) => {
-			const reason = record.reasonCode ? ` reason=${sanitize(record.reasonCode)}` : "";
+			// A verifier's reason codes ride in the lane reason, so only identifier characters pass: the header
+			// line cannot carry free text a worker chose.
+			const reason = record.reasonCode ? ` reason=${sanitize(record.reasonCode).replace(/[^\w.:,-]/g, "_")}` : "";
 			const lines = [`- ${record.laneId}: ${record.status}${reason}`];
+			if (record.fanout) lines.push(`  Fan-out: ${record.fanout.replace(/[\r\n]+/g, " ").slice(0, 600)}`);
 			if (record.outputArtifact) {
 				lines.push(
 					`  Full Output: ${record.outputArtifact.uri}${record.outputArtifact.sizeBytes === undefined ? "" : ` (${record.outputArtifact.sizeBytes} bytes)`}`,
@@ -174,19 +182,32 @@ export function buildForegroundWorkerTerminalHandoffContent(
 			}
 			if (record.claim?.summary) {
 				lines.push(`  Claim Status: ${record.claim.status || record.status}`);
-				const summary = ATTENTION_CLAIM_STATUSES.has(record.status)
-					? utf8PrefixByBytes(record.claim.summary, MAX_ATTENTION_CLAIM_SUMMARY_BYTES)
-					: sanitize(record.claim.summary);
+				// A verifier's rejection is the finding the receiving agent must reproduce: it is carried
+				// as fully as a blocked or partial claim, never cut to the one-line success form.
+				const summary =
+					ATTENTION_CLAIM_STATUSES.has(record.status) || record.claim.verification?.verdict === "rejected"
+						? utf8PrefixByBytes(record.claim.summary, MAX_ATTENTION_CLAIM_SUMMARY_BYTES)
+						: sanitize(record.claim.summary);
 				lines.push(
 					`  Claim Summary (untrusted worker evidence):\n${wrapUntrustedText(summary, `worker-claim:${record.laneId}`)}`,
 				);
+				// Every worker-supplied value is data: each list sits in its own nonce fence, bounded per value.
+				const fence = (values: readonly string[]): string =>
+					fenceWorkerClaimValues(values, sanitize, `worker-claim:${record.laneId}`);
 				if (record.claim.changedFiles && record.claim.changedFiles.length > 0) {
-					lines.push(`  Changed Files: ${record.claim.changedFiles.map((f) => sanitize(f)).join(", ")}`);
+					lines.push(`  Changed Files (untrusted worker evidence):\n${fence(record.claim.changedFiles)}`);
 				}
 				if (record.claim.blockers && record.claim.blockers.length > 0) {
-					lines.push(`  Blockers: ${record.claim.blockers.map((b) => sanitize(b)).join("; ")}`);
+					lines.push(`  Blockers (untrusted worker evidence):\n${fence(record.claim.blockers)}`);
 				}
-				for (const line of workerClaimSettlementLines(record.claim, sanitize)) lines.push(`  ${line}`);
+				if (record.claim.verification) {
+					const { subjectTaskId, verdict, reasonCodes } = record.claim.verification;
+					lines.push(
+						`  Verification verdict: ${verdict} (subject and reason codes, untrusted worker evidence):\n${fence([subjectTaskId, ...reasonCodes])}`,
+					);
+				}
+				for (const line of workerClaimSettlementLines(record.claim, sanitize, `worker-claim:${record.laneId}`))
+					lines.push(`  ${line}`);
 			}
 			return lines;
 		}),
@@ -405,23 +426,30 @@ export class ForegroundTerminalHandoffController {
 				index < 8
 					? workerTerminalOutputArtifact(this.deps.getWorkerResult?.(record.laneId, record.attemptId))
 					: undefined;
+			const fanout = index < 8 ? this.deps.getWorkerFanoutNote?.(record.laneId) : undefined;
 			return {
 				summaryItem: {
 					id: record.laneId,
-					status: workerSummaryStatus(record, claim?.parentReviewRequired === true),
+					status: workerSummaryStatus(
+						record,
+						claim?.parentReviewRequired === true || claim?.verification?.verdict === "rejected",
+					),
 				},
 				laneId: record.laneId,
 				...(record.attemptId ? { attemptId: record.attemptId } : {}),
 				status: record.status,
 				...(record.reasonCode ? { reasonCode: record.reasonCode } : {}),
 				...(outputArtifact ? { outputArtifact } : {}),
+				...(fanout ? { fanout } : {}),
 				...(claim
 					? {
 							claim: {
 								status: claim.status,
 								summary: utf8PrefixByBytes(
 									claim.summary,
-									ATTENTION_CLAIM_STATUSES.has(record.status) ? MAX_ATTENTION_CLAIM_SUMMARY_BYTES : 1000,
+									ATTENTION_CLAIM_STATUSES.has(record.status) || claim.verification?.verdict === "rejected"
+										? MAX_ATTENTION_CLAIM_SUMMARY_BYTES
+										: 1000,
 								),
 								changedFiles: claim.changedFiles,
 								...(claim.blockers ? { blockers: claim.blockers } : {}),
@@ -429,6 +457,7 @@ export class ForegroundTerminalHandoffController {
 								...(claim.systemOneSettled ? { systemOneSettled: claim.systemOneSettled } : {}),
 								...(claim.ownerFollowUp ? { ownerFollowUp: claim.ownerFollowUp } : {}),
 								...(claim.parentReviewRequired ? { parentReviewRequired: true } : {}),
+								...(claim.verification ? { verification: claim.verification } : {}),
 							},
 						}
 					: {}),

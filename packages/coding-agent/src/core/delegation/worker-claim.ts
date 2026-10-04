@@ -1,9 +1,11 @@
 import path from "node:path";
 import { DEFAULT_MAX_BYTES } from "@caupulican/pi-agent-core/truncate";
 import type { CapabilityEnvelope, GateOutcome, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
+import { HOST_FINDING_BLOCKER_PREFIXES } from "../autonomy/host-finding-prefixes.ts";
 import { checkPathScope } from "../autonomy/path-scope.ts";
 import { INCONCLUSIVE_LINE_PREFIX } from "../extensions/types.ts";
 import { normalizeEvidenceBundleForStorage } from "../research/evidence-bundle.ts";
+import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { utf8PrefixByBytes } from "../util/bounded-value.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
@@ -20,6 +22,9 @@ export const MAX_WORKER_CLAIM_TIMESTAMP_CHARS = 128;
 export const MAX_WORKER_CLAIM_VERIFICATION_SUBJECT_ID_CHARS = 256;
 export const MAX_WORKER_CLAIM_REASON_CODES = 32;
 export const MAX_WORKER_CLAIM_REASON_CODE_CHARS = 128;
+
+/** The blocker a claim carries while its owner-required independent verification has not settled. */
+export const INDEPENDENT_VERIFICATION_PENDING_BLOCKER = "independent verification is required before acceptance";
 
 export interface BoundedWorkerClaimStrings {
 	values: string[];
@@ -157,22 +162,40 @@ export function inconclusiveLinesIn(text: string | undefined): string[] {
 }
 
 /**
+ * One nonce-fenced untrusted block holding worker-supplied values, one per line, each bounded by the
+ * caller's `sanitize`. A deliverer whose content is replayed against a durable record passes a fixed
+ * `nonce` so the replayed text is byte-identical.
+ */
+export function fenceWorkerClaimValues(
+	values: readonly string[],
+	sanitize: (value: string) => string,
+	source: string,
+	nonce?: string,
+): string {
+	return wrapUntrustedText(values.map(sanitize).join("\n"), source, nonce ? { nonce } : undefined);
+}
+
+/**
  * What the parent is told about a worker's unsettled findings: what System One settled, and what is
  * still open with the owner route that applies. One wording for every surface that shows a claim.
+ * Every worker-supplied value (items and the follow-up path) sits inside a nonce-fenced untrusted
+ * block; only the host's own guidance sentences stand outside it.
  */
 export function workerClaimSettlementLines(
 	claim: Pick<WorkerClaim, "inconclusive" | "systemOneSettled" | "ownerFollowUp">,
 	sanitize: (value: string) => string = (value) => value,
+	source = "worker-claim",
+	nonce?: string,
 ): string[] {
+	const fenced = (values: readonly string[]): string => fenceWorkerClaimValues(values, sanitize, source, nonce);
 	const lines: string[] = [];
 	if (claim.systemOneSettled && claim.systemOneSettled.length > 0)
-		lines.push(`System One settled: ${claim.systemOneSettled.map(sanitize).join("; ")}`);
+		lines.push(`System One settled (untrusted worker evidence):\n${fenced(claim.systemOneSettled)}`);
 	if (claim.inconclusive && claim.inconclusive.length > 0) {
-		const items = claim.inconclusive.map(sanitize).join("; ");
 		lines.push(
 			claim.ownerFollowUp
-				? `Inconclusive, recorded for the owner in ${sanitize(claim.ownerFollowUp)}: ${items}. Continue with what does not depend on it and list it in your final answer.`
-				: `Inconclusive, never treat as confirmed: ${items}. Ask the owner (ask_question) before relying on it.`,
+				? `Inconclusive, recorded for the owner (follow-up path first, then the items). Continue with what does not depend on it and list it in your final answer (untrusted worker evidence):\n${fenced([claim.ownerFollowUp, ...claim.inconclusive])}`
+				: `Inconclusive, never treat as confirmed. Ask the owner (ask_question) before relying on it (untrusted worker evidence):\n${fenced(claim.inconclusive)}`,
 		);
 	}
 	return lines;
@@ -371,7 +394,16 @@ export function requiresParentReview(claim: WorkerClaim): boolean {
  */
 export function isParentReviewRequired(args: { request: WorkerRequest; claim: WorkerClaim; cwd?: string }): boolean {
 	const acceptance = validateWorkerClaim(args);
-	return acceptance.outcome === "ask-user" && acceptance.reasonCode === "parent_review_required";
+	if (acceptance.outcome === "ask-user" && acceptance.reasonCode === "parent_review_required") return true;
+	// A claim that did not complete (cancelled, failed, blocked) is not an ask-user outcome of the gate, but what the
+	// host itself observed about the worker is evidence the parent must review. The marker is still derived from
+	// the claim as it stands, never carried over, so it cannot outlive the findings that justify it.
+	return args.claim.status !== "completed" && (args.claim.blockers ?? []).some(isHostFindingBlocker);
+}
+
+/** Blocker lines the host itself writes about a worker: see {@link HOST_FINDING_BLOCKER_PREFIXES}. */
+function isHostFindingBlocker(blocker: unknown): boolean {
+	return typeof blocker === "string" && HOST_FINDING_BLOCKER_PREFIXES.some((prefix) => blocker.startsWith(prefix));
 }
 
 export function validateWorkerClaim(args: {

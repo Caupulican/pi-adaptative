@@ -395,7 +395,7 @@ describe("delegate logical-agent controls", () => {
 			workerHarnessFailureProven: false,
 		});
 		expect(payload.cavemanDirective).toContain(
-			"CAVEMAN MODE - MANDATORY: queued is admitted durable nonterminal state",
+			"CAVEMAN MODE - MANDATORY: A queued worker is admitted, durable, and nonterminal",
 		);
 	});
 
@@ -587,7 +587,7 @@ describe("delegate logical-agent controls", () => {
 
 		const guidelines = tool.promptGuidelines ?? [];
 		expect(guidelines.every((guideline) => guideline.length <= 140)).toBe(true);
-		expect(guidelines.reduce((total, guideline) => total + guideline.length, 0)).toBeLessThanOrEqual(1_200);
+		expect(guidelines.reduce((total, guideline) => total + guideline.length, 0)).toBeLessThanOrEqual(1_600);
 		expect(guidelines.join("\n")).toContain("Worker profiles: 40");
 		expect(guidelines.join("\n")).toContain("39 omitted");
 	});
@@ -784,7 +784,7 @@ describe("delegate logical-agent controls", () => {
 			});
 			expect(payload.nextAction).toContain("Never interrupt solely");
 			expect(payload.cavemanDirective).toBe(
-				"CAVEMAN MODE - MANDATORY: timeout is not failure. idle means finished/reusable; read transcript. active means continue or wait again. inbox never reports completion. Never claim stall, lost state, or missed completion from this result.",
+				"CAVEMAN MODE - MANDATORY: A timeout is not a failure. Idle means the worker finished and can be reused, so read its transcript. Active means you continue or wait again. The inbox never reports completion. Never claim a stall, lost state, or missed completion from this result.",
 			);
 		}
 		expect(one.details).toMatchObject({ action: "wait", timedOut: true });
@@ -817,7 +817,7 @@ describe("delegate logical-agent controls", () => {
 		});
 		expect(payload.nextAction).toContain("now idle");
 		expect(payload.nextAction).not.toContain("still running");
-		expect(payload.cavemanDirective).toContain("idle means finished/reusable");
+		expect(payload.cavemanDirective).toContain("Idle means the worker finished and can be reused");
 	});
 
 	it("projects a non-timeout idle wait as terminal activity with mandatory claim retrieval", async () => {
@@ -863,10 +863,10 @@ describe("delegate logical-agent controls", () => {
 			});
 			expect(payload.nextAction).toContain("every bounded transcript page");
 			expect(payload.nextAction).toContain("delegate status");
-			expect(payload.cavemanDirective).toContain("idle means task terminal and worker reusable");
-			expect(payload.cavemanDirective).toContain("idle is activity, not the task outcome");
-			expect(payload.cavemanDirective).toContain("status/transcript");
-			expect(payload.cavemanDirective).toContain("not inbox");
+			expect(payload.cavemanDirective).toContain("Idle means the task is terminal and the worker is reusable");
+			expect(payload.cavemanDirective).toContain("Idle is an activity state, not the task outcome");
+			expect(payload.cavemanDirective).toContain("status and the transcript");
+			expect(payload.cavemanDirective).toContain("not in the inbox");
 			expect(payload.cavemanDirective).toContain(
 				"Never claim missing completion, lost state, or harness failure from idle",
 			);
@@ -903,10 +903,10 @@ describe("delegate logical-agent controls", () => {
 			workerStallProven: false,
 			updatedAgentIds: ["agent-a"],
 		});
-		expect(payload.cavemanDirective).toContain("idle means finished/reusable");
-		expect(payload.cavemanDirective).toContain("active means continue or wait again");
-		expect(payload.cavemanDirective).toContain("inbox never reports completion");
-		expect(payload.cavemanDirective).toContain("Never claim stall, lost state, or missed completion");
+		expect(payload.cavemanDirective).toContain("Idle means the worker finished and can be reused");
+		expect(payload.cavemanDirective).toContain("Active means you continue or wait again");
+		expect(payload.cavemanDirective).toContain("The inbox never reports completion");
+		expect(payload.cavemanDirective).toContain("Never claim a stall, lost state, or missed completion");
 	});
 
 	it("bounds wait_many detail identities with explicit omission disclosure", async () => {
@@ -1285,7 +1285,7 @@ describe("delegate wait and status", () => {
 			undefined,
 			context,
 		);
-		expect(waitForWorkerAgent).toHaveBeenCalledWith("agent-1", 1_000);
+		expect(waitForWorkerAgent).toHaveBeenCalledWith("agent-1", 1_000, { returnWhenForegroundHeld: true });
 		expect(result.details).toMatchObject({ started: true, action: "wait", agentId: "agent-1" });
 		expect(tool.description).toContain("event-driven");
 		expect(tool.description).toContain("Do not poll");

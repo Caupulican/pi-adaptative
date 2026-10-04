@@ -27,9 +27,10 @@ import {
 	edgeBlockReason,
 	isEdgeOperationGranted,
 } from "../autonomy/edge-policy.ts";
-import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
+import { getHarnessWriteProtectedPaths, getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
 import { createLaneToolSurface, type SharedLaneToolOptions } from "../autonomy/lane-tool-surface.ts";
 import { isLaneTerminalStatus, type LaneRecord } from "../autonomy/lane-tracker.ts";
+import { getTamperWatchedPaths, ProtectedPathWatch } from "../autonomy/protected-path-watch.ts";
 import { appendLaneRecordSnapshot } from "../autonomy/session-lane-record.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "../autonomy/telemetry-events.ts";
 import {
@@ -103,7 +104,7 @@ import { disposeShellExecutionSessionAndWait } from "../tools/shell-execution-se
 import type { ReadOnlySkillBroker } from "../tools/skill.ts";
 import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
 import { selectSanitizedContextFork } from "./sanitized-context-fork.ts";
-import { getLatestWorkerClaimSnapshot } from "./session-worker-claim.ts";
+import { getLatestWorkerClaimSnapshot, getWorkerClaimSnapshotForAttempt } from "./session-worker-claim.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
 import { type WorkerAgentControlPort, type WorkerGrantSummary, workerAgentMessageId } from "./worker-agent-control.ts";
 import { WorkerAgentControlCoordinator } from "./worker-agent-control-coordinator.ts";
@@ -121,7 +122,13 @@ import {
 	type WorkerAuthorityResolution,
 	type WorkerAuthorityResolutionInput,
 } from "./worker-authority-resolver.ts";
-import { normalizeWorkerClaimForHost, validateWorkerClaim } from "./worker-claim.ts";
+import {
+	INDEPENDENT_VERIFICATION_PENDING_BLOCKER,
+	MAX_WORKER_CLAIM_BLOCKER_CHARS,
+	MAX_WORKER_CLAIM_BLOCKERS,
+	normalizeWorkerClaimForHost,
+	validateWorkerClaim,
+} from "./worker-claim.ts";
 import { WorkerContextForkStore, WorkerContextForkStoreError } from "./worker-context-fork-store.ts";
 import { resolveWorkerContextInheritanceMode } from "./worker-context-inheritance-policy.ts";
 import {
@@ -148,6 +155,13 @@ import {
 	workerExecutionAuthorityFromPlan,
 } from "./worker-execution-policy.ts";
 import {
+	deriveFanoutGroups,
+	type FanoutGroupReport,
+	fanoutGroupOfLane,
+	raceLosersToCancel,
+	raceLostReasonCode,
+} from "./worker-fanout.ts";
+import {
 	DEFAULT_WORKER_FLEET_LIMITS,
 	evaluateNewWorkerAdmission,
 	evaluateReusableWorkerTaskAdmission,
@@ -155,7 +169,8 @@ import {
 	pendingVerifierSubjectTaskIds,
 	resolveWorkerFleetLimits,
 } from "./worker-fleet-limits.ts";
-import { NONTERMINAL_WORKER_ATTEMPT_STATUSES } from "./worker-lane-projection.ts";
+import type { WorkerLaneIsolation } from "./worker-lane-isolation.ts";
+import { attemptVerification, NONTERMINAL_WORKER_ATTEMPT_STATUSES } from "./worker-lane-projection.ts";
 import { WorkerLeaseHeartbeat } from "./worker-lease-heartbeat.ts";
 import { type PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
 import type { WorkerNotificationCoordinator, WorkerTerminalHandoffRecord } from "./worker-notification-coordinator.ts";
@@ -192,6 +207,7 @@ import {
 	WorkerTreeBudgetCoordinator,
 	workerTreeCanAdmitAttempt,
 } from "./worker-tree-budget-coordinator.ts";
+import { boundHostFindings, WorkerWriteOverlapTracker } from "./worker-write-overlap.ts";
 import {
 	formatWorkerWriteReservationBlock,
 	WorkerWriteReservationCoordinator,
@@ -244,6 +260,23 @@ function workerConversationRetentionPolicy(
 				}
 			: {}),
 	};
+}
+
+const REAPED_PROCESS_NOTICE_MAX_LISTED = 5;
+const REAPED_PROCESS_NOTICE_MAX_ENTRY_CHARS = 160;
+
+/** Bounded, worker-attributed description of processes stopped when a worker ended. */
+function describeReapedWorkerProcesses(laneId: string, processes: readonly string[]): string {
+	const listed = processes
+		.slice(0, REAPED_PROCESS_NOTICE_MAX_LISTED)
+		.map((entry) =>
+			entry.length > REAPED_PROCESS_NOTICE_MAX_ENTRY_CHARS
+				? `${entry.slice(0, REAPED_PROCESS_NOTICE_MAX_ENTRY_CHARS)}...`
+				: entry,
+		);
+	const omitted = processes.length - listed.length;
+	const detail = `${listed.join("; ")}${omitted > 0 ? `; and ${omitted} more` : ""}`;
+	return `Worker ${laneId} ended with ${processes.length} process(es) still running; they were stopped (${detail}). A worker leaves nothing behind: start a durable long-running process from the root (bash with background: true; tool_task inspects it), or have the worker report that it needs one.`;
 }
 
 export interface WorkerDelegationControllerDeps {
@@ -311,6 +344,8 @@ export interface WorkerDelegationControllerDeps {
 	/** Each worker provider response, as a cache observation on the worker conversation's own history. */
 	observeWorkerResponse?(message: AssistantMessage, observation: WorkerResponseObservation): void;
 	emit(event: AgentSessionEvent): void;
+	/** Steer a notice to the owning parent session (a custom message that may trigger a turn). */
+	notifyParentSession?(customType: string, text: string): void;
 	notifyWorkerTerminalHandoff(records: readonly WorkerTerminalHandoffRecord[]): Promise<void>;
 	emitAutonomyTelemetry(event: AutonomyTelemetryEvent): void;
 	getGoalStateSnapshot(): GoalState | undefined;
@@ -318,7 +353,12 @@ export interface WorkerDelegationControllerDeps {
 	 * lane-creation time in `prepareWorkerAttempt`, to stamp the new lane's owner epoch via
 	 * `WorkerNotificationCoordinator.noteLaneOwnerEpoch` -- see that method's doc comment. */
 	getCurrentSubmissionEpoch?(): number | undefined;
-	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest): string;
+	/**
+	 * `options.cwd` is the directory the claim's relative `changedFiles` resolve against (the worker's own
+	 * execution directory); the parent-review marker is re-derived against it, so a worker in a task directory or a
+	 * worktree lane is judged against its own scope and not the process's.
+	 */
+	saveWorkerClaimSnapshot(claim: WorkerClaim, request?: WorkerRequest, options?: { cwd?: string }): string;
 	readMemoryForLane(query: string): Promise<string>;
 	/** Bounded applicable owner working preferences for a handoff, or undefined when there are none. */
 	getHandoffPersonaGuidance?(): string | undefined;
@@ -465,6 +505,8 @@ type InFlightWorkerLedger = {
 	changedFiles: Set<string>;
 	sealChangedFiles: () => readonly string[];
 	getUsage: () => AttemptUsageSnapshot;
+	/** What the host observed about this worker so far (concurrent-write overlap, protected-path changes). */
+	getHostFindings: () => readonly string[];
 	request: WorkerRequest;
 	handle: StartedDelegationAttempt;
 	cwd: string;
@@ -484,6 +526,12 @@ export class WorkerDelegationController {
 	private readonly notifications: WorkerNotificationCoordinator;
 	private readonly scheduler: WorkerDispatchScheduler;
 	private readonly laneAbortControllers = new Map<string, AbortController>();
+	/**
+	 * Attempts admission already cleared past the local-foreground hold. Preflight finishes after the
+	 * clearance, so a foreground turn that began in between must not park an attempt that was admitted
+	 * while the foreground was idle. Dropped when the attempt starts running.
+	 */
+	private readonly foregroundHoldCleared = new Set<string>();
 	private readonly shellSessionKeys = new Set<string>();
 	/** Sole logical-agent control/mailbox owner; execution only calls its narrow delivery hooks. */
 	private readonly agentControl: WorkerAgentControlCoordinator;
@@ -508,15 +556,26 @@ export class WorkerDelegationController {
 	private readonly treeBudgets = new WorkerTreeBudgetCoordinator();
 	private readonly writeReservations: WorkerWriteReservationCoordinator;
 	private readonly inFlightLedgers = new Map<string, InFlightWorkerLedger>();
+	/** Attributes files two concurrently running workers both changed (never blocks either). */
+	private readonly writeOverlaps = new WorkerWriteOverlapTracker();
+	/** Lane-repository lookups of one start (it decides reuse more than once), keyed by the request. */
+	private readonly laneRepositoryMemos = new WeakMap<
+		WorkerDelegationRequest,
+		Map<string, Promise<string | undefined>>
+	>();
+	/** Gives a fresh writing worker its own worktree lane when worktree-sync is enabled; absent otherwise. */
+	private readonly laneIsolation: WorkerLaneIsolation | undefined;
 
 	constructor(
 		deps: WorkerDelegationControllerDeps,
 		notifications: WorkerNotificationCoordinator,
 		lifecycle: WorkerLifecycle,
+		laneIsolation?: WorkerLaneIsolation,
 	) {
 		this.deps = deps;
 		this.notifications = notifications;
 		this.lifecycle = lifecycle;
+		this.laneIsolation = laneIsolation;
 		this.projectDirectory = new WorkerProjectDirectory(this.deps.getAgentDir(), this.conversations);
 		this.contextForks = new WorkerContextForkStore({
 			agentDir: this.deps.getAgentDir(),
@@ -781,6 +840,7 @@ export class WorkerDelegationController {
 	): LaneRecord {
 		const usage = ledger.getUsage();
 		const reportedUsage = providerUsageFromAttemptUsage(usage);
+		const hostFindings = boundHostFindings(ledger.getHostFindings());
 		const claim: WorkerClaim = {
 			requestId: ledger.request.id,
 			terminalAttemptId: ledger.handle.attemptId,
@@ -789,6 +849,8 @@ export class WorkerDelegationController {
 			changedFiles: [...ledger.changedFiles],
 			usageReportId: `worker:${this.deps.getSessionId()}:${laneId}`,
 			createdAt: new Date().toISOString(),
+			// What the host observed before it stopped the worker is attributed and bounded like a finished claim's.
+			...(hostFindings.length > 0 ? { blockers: hostFindings, parentReviewRequired: true } : {}),
 		};
 		const canceled = finalizeWorkerClaim(this.getWorkerLifecycle(), {
 			handle: ledger.handle,
@@ -804,7 +866,7 @@ export class WorkerDelegationController {
 			reasonCode,
 		}).record;
 		// The claim describes execution; durable usage receipts own parent charge delivery.
-		this.deps.saveWorkerClaimSnapshot(claim, ledger.request);
+		this.deps.saveWorkerClaimSnapshot(claim, ledger.request, { cwd: ledger.cwd });
 		return canceled;
 	}
 
@@ -1647,8 +1709,139 @@ export class WorkerDelegationController {
 		for (const record of directRecords) this.publishTerminalRecord(record);
 	}
 
+	/**
+	 * A subject's claim was stored while its independent verification was pending. Once a verifier has
+	 * settled it, that pending blocker no longer holds: restate it from the verdict, re-judged by the
+	 * same gate, so the parent's handoff, status and goal evidence read the review state that is true.
+	 */
+	private settleVerifiedSubjectClaim(record: LaneRecord): void {
+		if (!record.attemptId) return;
+		const snapshot = this.lifecycle.getTaskRuntimeSnapshot();
+		const attempt = snapshot.attempts[record.attemptId];
+		const verification = attempt ? attemptVerification(snapshot, attempt) : undefined;
+		if (!verification) return;
+		const stored = getWorkerClaimSnapshotForAttempt(
+			getActiveSessionBranchEntries(this.deps.getSessionManager()),
+			record.laneId,
+			record.attemptId,
+		);
+		if (!stored?.claim.blockers?.includes(INDEPENDENT_VERIFICATION_PENDING_BLOCKER)) return;
+		const blockers = [
+			...stored.claim.blockers.filter((blocker) => blocker !== INDEPENDENT_VERIFICATION_PENDING_BLOCKER),
+			...(verification.verdict === "accepted"
+				? []
+				: [
+						`independent verification ${verification.verdict}: ${verification.reasonCode.replace(/^independent_verification_[a-z]+:?/, "") || "no reason recorded"}`.slice(
+							0,
+							MAX_WORKER_CLAIM_BLOCKER_CHARS,
+						),
+					]),
+		];
+		const { blockers: _pending, ...claim } = stored.claim;
+		try {
+			this.deps.saveWorkerClaimSnapshot({ ...claim, ...(blockers.length > 0 ? { blockers } : {}) }, stored.request, {
+				cwd: attempt?.dispatch.executionContract?.worker.authority.cwd,
+			});
+		} catch (error) {
+			this.safeWarn(
+				`Failed to settle verified worker claim ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	/** Every fan-out group in the durable ledger, derived on demand; there is no second record of a group. */
+	getFanoutGroups(): FanoutGroupReport[] {
+		return deriveFanoutGroups(this.getWorkerLifecycle().getTaskRuntimeSnapshot()).map((group) => {
+			const failures = [...this.raceCancelFailures.values()].filter((failure) => failure.groupId === group.groupId);
+			return failures.length === 0
+				? group
+				: {
+						...group,
+						cancelFailures: failures.map(({ memberId, laneId, attempts, reason }) => ({
+							memberId,
+							laneId,
+							attempts,
+							reason,
+						})),
+					};
+		});
+	}
+
+	/** Race losers whose cancel threw; keyed by lane. Event-driven retry once, then a standing finding. */
+	private readonly raceCancelFailures = new Map<
+		string,
+		{ groupId: string; memberId: string; laneId: string; agentId: string; attempts: number; reason: string }
+	>();
+
+	private cancelRaceLoser(
+		loser: { groupId: string; memberId: string; laneId: string; agentId: string },
+		reasonCode: string,
+		attempts: number,
+	): void {
+		try {
+			this.agentControl.cancelWorkerAgent(loser.agentId, reasonCode);
+			this.raceCancelFailures.delete(loser.laneId);
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : String(error);
+			this.raceCancelFailures.set(loser.laneId, { ...loser, attempts, reason });
+			this.safeWarn(
+				`Fan-out ${loser.groupId} candidate ${loser.memberId} could not be cancelled after the race was won (attempt ${attempts}); it keeps running: ${reason}`,
+			);
+		}
+	}
+
+	/**
+	 * The one retry of a failed race-loser cancel, taken on the next terminal or drain event (never a timer).
+	 * A loser that has since ended is forgotten; one that survives the retry stays a finding on the group
+	 * (`delegate status` and every member's handoff) until it ends.
+	 */
+	private retryRaceCancels(): void {
+		if (this.raceCancelFailures.size === 0) return;
+		const groups = deriveFanoutGroups(this.getWorkerLifecycle().getTaskRuntimeSnapshot());
+		for (const failure of [...this.raceCancelFailures.values()]) {
+			const group = groups.find((candidate) => candidate.groupId === failure.groupId);
+			const member = group?.members.find((candidate) => candidate.laneId === failure.laneId);
+			const winner = group?.winner;
+			if (!group || !winner || member?.state !== "pending") {
+				this.raceCancelFailures.delete(failure.laneId);
+				continue;
+			}
+			if (failure.attempts >= 2) continue;
+			this.cancelRaceLoser(failure, raceLostReasonCode(winner.laneId as string), failure.attempts + 1);
+		}
+	}
+
+	/**
+	 * A race member's accepted result wins: the candidates still queued or running are cancelled through
+	 * the ordinary cancel path, with the winner's lane in the reason so each one's own terminal handoff
+	 * attributes it. Only an accepted terminal triggers this (a result awaiting independent verification
+	 * projects as running), a later accepted candidate that finished anyway is attributed, never
+	 * cancelled, and the sweep is idempotent because it acts only on candidates that are still pending.
+	 */
+	private settleFanoutRace(record: LaneRecord): void {
+		if (record.status !== "succeeded") return;
+		const group = fanoutGroupOfLane(this.getFanoutGroups(), record.laneId);
+		if (group?.kind !== "race" || group.winner?.laneId !== record.laneId) return;
+		const reasonCode = raceLostReasonCode(record.laneId);
+		for (const loser of raceLosersToCancel(group)) {
+			this.cancelRaceLoser(
+				{
+					groupId: group.groupId,
+					memberId: loser.memberId,
+					laneId: loser.laneId as string,
+					agentId: loser.agentId as string,
+				},
+				reasonCode,
+				1,
+			);
+		}
+	}
+
 	private publishTerminalRecord(record: LaneRecord): void {
 		if (!isLaneTerminalStatus(record.status)) return;
+		this.settleVerifiedSubjectClaim(record);
+		this.retryRaceCancels();
+		this.settleFanoutRace(record);
 		this.recovery.clearScheduledRetry(record.laneId);
 		const attempt = this.lifecycle.getActiveAttempt(record.laneId);
 		const attemptId = attempt?.attemptId;
@@ -1839,6 +2032,23 @@ export class WorkerDelegationController {
 				detail: `paused by the machine-wide emergency stop (${emergencyStopPath(this.deps.getAgentDir())})`,
 			};
 		}
+		// An attempt on the foreground's local model waits for the foreground turn to end, whichever
+		// entrance admitted it (fresh start, follow_up, resume of a suspended attempt, retry, restart
+		// recovery) and whichever signal drains the queue. The turn's release is the wake: it drains the
+		// scheduler, so a held resume still starts when the turn ends.
+		if (attempt.status === "queued" || attempt.status === "suspended") {
+			if (
+				!this.foregroundHoldCleared.has(attempt.attemptId) &&
+				this.holdsForLocalForeground(admission.shipment.model)
+			) {
+				return {
+					action: "wait",
+					reason: "foreground",
+					detail: "starts when the foreground turn ends; both use the same local model",
+				};
+			}
+			this.foregroundHoldCleared.add(attempt.attemptId);
+		}
 		if (!this.hasWorkerCapacity(admission.settings)) {
 			return {
 				action: "wait",
@@ -1859,7 +2069,8 @@ export class WorkerDelegationController {
 	/** Attach this generation's dispatch wait state to queued records; durable records never carry it. */
 	private withWaitReasons(records: LaneRecord[]): LaneRecord[] {
 		return records.map((record) => {
-			if (record.status !== "queued") return record;
+			// A suspended attempt waiting to resume projects as running; only a queue entry has a wait state.
+			if (record.status !== "queued" && record.status !== "running") return record;
 			const wait = this.scheduler.getWaitState(record.laneId);
 			if (!wait) return record;
 			return { ...record, waitReason: formatWorkerDispatchWait(wait) };
@@ -2147,15 +2358,17 @@ export class WorkerDelegationController {
 		if (admitted.dispatch.instructions !== request.instructions) return false;
 		const admittedContract = admitted.dispatch.executionContract;
 		if (!admittedContract) return false;
+		const admittedSpecialization = describeWorkerSpecialization(
+			admittedContract,
+			admitted.dispatch.resourcePointerIds,
+			namespaceKeyOf,
+			admitted.dispatch.worktreeLaneKey,
+		);
 		if (
+			!sameWorkerSpecialization(admittedSpecialization, candidate) &&
 			!sameWorkerSpecialization(
-				describeWorkerSpecialization(
-					admittedContract,
-					admitted.dispatch.resourcePointerIds,
-					namespaceKeyOf,
-					admitted.dispatch.worktreeLaneKey,
-				),
-				candidate,
+				admittedSpecialization,
+				this.withAdmittedLaneDirectory(admittedSpecialization, candidate),
 			)
 		) {
 			return false;
@@ -2178,6 +2391,71 @@ export class WorkerDelegationController {
 				[...(requested?.acceptanceCriterionIds ?? [])],
 			)
 		);
+	}
+
+	/**
+	 * A worker moved into its own worktree lane runs in the lane's directory, never the caller's, so the replay of
+	 * the command that created it differs from the fresh admission in exactly the directory-derived fields (cwd,
+	 * write scope, workspace identity). Those take the admitted values; every other field must still match.
+	 */
+	private withAdmittedLaneDirectory(
+		admitted: WorkerSpecializationFingerprint,
+		candidate: WorkerSpecializationFingerprint,
+	): WorkerSpecializationFingerprint {
+		if (!this.laneIsolation?.isLaneDirectory(admitted.cwd)) return candidate;
+		// The caller's own directory becomes the lane in the candidate's write scope; any other granted write root
+		// stays, so a request with a different grant is never taken for the same specialization.
+		const inLane = <T extends Omit<WorkerSpecializationFingerprint, "verifier">>(side: T, lane: T): T => ({
+			...side,
+			cwd: lane.cwd,
+			namespaceKey: lane.namespaceKey,
+			writePaths: [...new Set(side.writePaths.map((entry) => (entry === side.cwd ? lane.cwd : entry)))].sort(),
+		});
+		return {
+			...inLane(candidate, admitted),
+			...(candidate.verifier && admitted.verifier
+				? { verifier: inLane(candidate.verifier, admitted.verifier) }
+				: {}),
+		};
+	}
+
+	/**
+	 * Which specialists live in their own worktree lane, and the repository each lane (and the candidate's own
+	 * directory) belongs to. A specialist counts only when its lane's registration is bound to that same
+	 * specialist, so a lane is never matched through another worker. Resolved before the decision because it reads git.
+	 */
+	private async laneSpecialistRepositories(
+		admission: Extract<WorkerAdmission, { ok: true }>,
+		memo: Map<string, Promise<string | undefined>>,
+	): Promise<{ candidate: string | undefined; specialists: Map<string, string> }> {
+		// Each lane path (and the candidate's directory) is resolved through git at most once per start.
+		const once = (key: string, resolve: () => Promise<string | undefined>): Promise<string | undefined> => {
+			let pending = memo.get(key);
+			if (!pending) {
+				pending = resolve();
+				memo.set(key, pending);
+			}
+			return pending;
+		};
+		const isolation = this.laneIsolation;
+		const specialists = new Map<string, string>();
+		if (!isolation) return { candidate: undefined, specialists };
+		for (const agentId of Object.keys(this.lifecycle.getTaskRuntimeSnapshot().agents)) {
+			const cwd = this.lifecycle.getLatestAgentAttempt(agentId)?.dispatch.executionContract?.worker.authority.cwd;
+			if (!cwd || !isolation.isLaneDirectory(cwd)) continue;
+			const repository = await once(`lane\0${agentId}\0${cwd}`, () =>
+				isolation.boundLaneRepositoryKey(cwd, agentId),
+			);
+			if (repository) specialists.set(agentId, repository);
+		}
+		if (specialists.size === 0) return { candidate: undefined, specialists };
+		const candidateCwd = admission.executionContract.worker.authority.cwd;
+		return {
+			candidate: candidateCwd
+				? await once(`repo\0${candidateCwd}`, () => isolation.repositoryKey(candidateCwd))
+				: undefined,
+			specialists,
+		};
 	}
 
 	private prepareWorkerAttempt(
@@ -2665,6 +2943,12 @@ export class WorkerDelegationController {
 				return { outcome: "unavailable", skipReason: "worker_specialist_namespace_unavailable" };
 			}
 		}
+		let laneMemo = this.laneRepositoryMemos.get(request);
+		if (!laneMemo) {
+			laneMemo = new Map();
+			this.laneRepositoryMemos.set(request, laneMemo);
+		}
+		const laneRepositories = await this.laneSpecialistRepositories(admission, laneMemo);
 		// Every await above could have outlived this request: recheck the owner's live state before the
 		// decision is allowed to bind anything.
 		if (this.deps.isDisposed() || sessionId !== this.deps.getSessionId()) {
@@ -2725,6 +3009,14 @@ export class WorkerDelegationController {
 				}
 			},
 			namespaceKeyOf,
+			// A specialist that was started in its own worktree lane is matched by everything but its directory,
+			// and only when its bound lane was made from the candidate's repository. Reusing it continues the
+			// worker in its own lane; no other worker's lane can be reached this way.
+			matches: (specialization, specialist, specialistId) =>
+				sameWorkerSpecialization(specialization, specialist) ||
+				(laneRepositories.specialists.get(specialistId) !== undefined &&
+					laneRepositories.specialists.get(specialistId) === laneRepositories.candidate &&
+					sameWorkerSpecialization(specialization, this.withAdmittedLaneDirectory(specialization, specialist))),
 			isSettled: (agentId) => this.isSpecialistSettled(agentId),
 			isContextReadable: (agent) => this.isSpecialistContextReadable(agent),
 			...(independentParallelIntent ? { independentParallelIntent: true } : {}),
@@ -3028,6 +3320,99 @@ export class WorkerDelegationController {
 		return checked.ok ? { ...checked, modelRouteSource: "inherited" } : checked;
 	}
 
+	/**
+	 * A command that targets a worker already living in its own worktree lane (a named `agentId`, or the replay of
+	 * the command that created it) is admitted in that lane's directory, so the comparison against the worker's
+	 * pinned contract, and any reuse of it, see one directory. When the lane is gone the caller's directory stays
+	 * and the comparison reports the difference.
+	 */
+	private async adoptPriorLaneDirectory(
+		request: WorkerDelegationRequest,
+		prior: AttemptRuntimeState | undefined,
+		signal?: AbortSignal,
+	): Promise<void> {
+		const cwd = prior?.dispatch.executionContract?.worker.authority.cwd;
+		if (!cwd || !this.laneIsolation?.isLaneDirectory(cwd)) return;
+		try {
+			request.executionContext = await this.directories.contextForDirectory(
+				cwd,
+				this.deps.getSessionId(),
+				AbortSignal.any([
+					this.workerAbort.signal,
+					AbortSignal.timeout(WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS),
+					...(signal ? [signal] : []),
+				]),
+			);
+		} catch {
+			// The lane directory no longer exists or cannot be validated; the caller's directory is kept.
+		}
+	}
+
+	/**
+	 * Move a fresh writing worker into its own worktree lane. The lane becomes the worker's execution directory
+	 * (the caller's `request.executionContext` is replaced) and the directory admission is redone for it, so the
+	 * immutable execution contract pins the lane and a restarted worker resumes there. Returns `shared` unchanged
+	 * (the worker keeps the shared checkout) when isolation is off, not applicable, or cannot be completed; an
+	 * unusable lane is removed first, so a failed isolation leaves no lane behind.
+	 */
+	private async isolateFreshWriter(
+		request: WorkerDelegationRequest,
+		shared: Extract<WorkerAdmission, { ok: true }>,
+		signal?: AbortSignal,
+	): Promise<Extract<WorkerAdmission, { ok: true }>> {
+		const isolation = this.laneIsolation;
+		const plan = shared.executionPlan;
+		if (!isolation || !plan.writeEnabled || request.verificationOfTaskId || request.reuseAgentId) return shared;
+		const lane = await isolation.create(plan.cwd);
+		if (!lane) return shared;
+		let failure: string;
+		try {
+			const boundedSignal = AbortSignal.any([
+				this.workerAbort.signal,
+				AbortSignal.timeout(WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS),
+				...(signal ? [signal] : []),
+			]);
+			const executionContext = await this.directories.contextForDirectory(
+				lane.worktreePath,
+				this.deps.getSessionId(),
+				boundedSignal,
+			);
+			const admitted = await this.admitWorkerDirectory({ ...request, executionContext }, signal, {
+				freshIdentity: false,
+				selectedBinding: shared.shipment.modelBinding,
+			});
+			if (!admitted.ok) {
+				failure = admitted.skipReason;
+			} else if (
+				admitted.shipment.profile.profileId !== shared.shipment.profile.profileId ||
+				!isDeepStrictEqual(admitted.shipment.modelBinding, shared.shipment.modelBinding)
+			) {
+				failure = "the lane admission chose a different worker profile or model";
+			} else if (
+				![admitted.executionPlan.cwd, ...admitted.executionPlan.writePaths].every((entry) =>
+					isolation.isInsideLane(lane.worktreePath, entry),
+				)
+			) {
+				// The root granted write roots outside the lane: it means this worker to write the shared checkout.
+				failure = "the worker's workspace or granted write roots are outside the lane";
+			} else {
+				request.executionContext = executionContext;
+				return {
+					...admitted,
+					modelRouteSource: shared.modelRouteSource,
+					...(shared.modelPinBypass ? { modelPinBypass: shared.modelPinBypass } : {}),
+				};
+			}
+		} catch (error) {
+			failure = error instanceof Error ? error.message : String(error);
+		}
+		this.safeWarn(
+			`Worker lane '${lane.laneKey}' could not carry this worker (${failure}); it runs in the shared checkout.`,
+		);
+		await isolation.discard(lane.worktreePath);
+		return shared;
+	}
+
 	/** One fresh/replay/reuse transition shared by both native public entrances. */
 	private async admitWorkerStart(
 		request: WorkerDelegationRequest,
@@ -3036,6 +3421,7 @@ export class WorkerDelegationController {
 		const prior = request.reuseAgentId
 			? this.lifecycle.getLatestAgentAttempt(request.reuseAgentId)
 			: this.replayedWorkerAttempt(request.messageReplayKey);
+		await this.adoptPriorLaneDirectory(request, prior, signal);
 		let selectedBinding: OrchestrationModelBinding | undefined;
 		if (prior && !request.profileId && !request.authority?.model && request.authority?.thinkingLevel === undefined) {
 			const current = this.resolveWorkerAdmission(request);
@@ -3118,6 +3504,9 @@ export class WorkerDelegationController {
 				return { kind: "refused", skipReason: "worker_route_selection_stale" };
 			}
 		}
+		// A fresh writing worker works in its own worktree lane when worktree-sync is enabled and the checkout
+		// allows it, so its repository writes cannot land on the shared checkout's branch or race another worker.
+		shared = await this.isolateFreshWriter(request, shared, signal);
 		const prepared = this.admitNewWorkerRequest(
 			{ ...request, profileId: shared.executionContract.worker.profile.profileId },
 			shared.executionContract,
@@ -3137,8 +3526,25 @@ export class WorkerDelegationController {
 		};
 	}
 
+	/** Fleet identity and queue headroom for `remaining` fan-out members, judged before any of them starts. */
+	private fanoutHeadroomSkipReason(request: WorkerDelegationRequest, remaining: number): string | undefined {
+		const pendingVerifiers = pendingVerifierSubjectTaskIds(this.lifecycle.getTaskRuntimeSnapshot());
+		if (request.verificationOfTaskId) pendingVerifiers.delete(request.verificationOfTaskId);
+		const fleetSkipReason = this.newWorkerFleetSkipReason(request, remaining + pendingVerifiers.size);
+		if (fleetSkipReason) return fleetSkipReason;
+		const settings = this.deps.getSettingsManager().getWorkerDelegationSettings();
+		const freeConcurrency = Math.max(0, settings.maxConcurrent - this.getWorkerLifecycle().getRunningCount());
+		const queueSlotsNeeded = Math.max(0, remaining - freeConcurrency) + pendingVerifiers.size;
+		const queueSlotsFree = DEFAULT_WORKER_FLEET_LIMITS.maxQueuedDispatches - this.scheduler.queuedCount;
+		return queueSlotsNeeded > queueSlotsFree ? "worker_dispatch_queue_full" : undefined;
+	}
+
 	async start(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<QueuedWorkerAttemptOutcome> {
 		const capturedRequest = structuredClone(request);
+		if (capturedRequest.fanoutRemaining !== undefined && capturedRequest.fanoutRemaining > 1) {
+			const headroomSkipReason = this.fanoutHeadroomSkipReason(capturedRequest, capturedRequest.fanoutRemaining);
+			if (headroomSkipReason) return { started: false, skipReason: headroomSkipReason };
+		}
 		const selected = await this.admitWorkerStart(capturedRequest, signal);
 		if (selected.kind === "refused") return { started: false, skipReason: selected.skipReason };
 		if (selected.kind === "existing") return { started: true, record: selected.record };
@@ -3152,7 +3558,11 @@ export class WorkerDelegationController {
 		} finally {
 			selected.releaseAllocation?.();
 		}
-		if (!outcome.started) return outcome;
+		if (!outcome.started) {
+			// A start that never ran leaves its fresh worktree lane unused: remove it.
+			void this.laneIsolation?.discard(selected.admission.executionPlan.cwd);
+			return outcome;
+		}
 		return {
 			...outcome,
 			record: this.withWaitReasons([outcome.record])[0] ?? outcome.record,
@@ -3201,6 +3611,36 @@ export class WorkerDelegationController {
 		}
 	}
 
+	/**
+	 * One local model serves one request at a time: a worker on the same local runtime as the
+	 * foreground waits for the foreground turn to end instead of starting mid-turn. Every dispatch
+	 * entrance (fresh start, reused start, follow_up, resume) asks this one question.
+	 */
+	private contendsWithLocalForeground(workerModel: Model<Api>): boolean {
+		const foreground = this.deps.getModel();
+		return foreground !== undefined && isLocalExecutionModel(foreground) && isLocalExecutionModel(workerModel);
+	}
+
+	/**
+	 * The one local-model hold predicate: the worker's model contends with the local foreground and a
+	 * foreground turn is held right now. Admission parks a queued or suspended attempt on it; the turn's
+	 * release is the wake.
+	 */
+	private holdsForLocalForeground(workerModel: Model<Api>): boolean {
+		return this.contendsWithLocalForeground(workerModel) && this.deps.getCurrentSubmissionEpoch?.() !== undefined;
+	}
+
+	/** Would admission park this lane's current attempt on the foreground hold? Resolves the model as admission does. */
+	private laneHeldForLocalForeground(laneId: string): boolean {
+		const attempt = this.getWorkerLifecycle().getActiveAttempt(laneId);
+		if (!attempt || (attempt.status !== "queued" && attempt.status !== "suspended")) return false;
+		const admission = this.resolveWorkerAdmission(
+			this.recovery.recoveredRequest(attempt),
+			attempt.dispatch.executionContract,
+		);
+		return admission.ok && this.holdsForLocalForeground(admission.shipment.model);
+	}
+
 	private startInternal(
 		request: WorkerDelegationRequest,
 		pinnedContract?: WorkerExecutionContract,
@@ -3209,10 +3649,18 @@ export class WorkerDelegationController {
 		const admission = preparedAdmission ?? this.admitNewWorkerRequest(request, pinnedContract);
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
 		const { settings, shipment } = admission;
+		// A prepared admission was judged before the caller's async hop. Concurrent starts each passed
+		// that judgement against the same fleet snapshot, so identity headroom is judged again in this
+		// same synchronous step that persists the agent, never trusted from the earlier snapshot.
+		if (preparedAdmission) {
+			const fleetSkipReason = this.newWorkerFleetSkipReason(
+				request,
+				this.requiredAgentSlotsForAdmission(request, admission),
+			);
+			if (fleetSkipReason) return { started: false, skipReason: fleetSkipReason };
+		}
 
-		const foreground = this.deps.getModel();
-		const contendsWithLocalForeground =
-			foreground !== undefined && isLocalExecutionModel(foreground) && isLocalExecutionModel(shipment.model);
+		const contendsWithLocalForeground = this.contendsWithLocalForeground(shipment.model);
 		const dependencyGated = (request.taskContext?.dependsOnTaskIds.length ?? 0) > 0;
 		if (!preparedAdmission || dependencyGated || contendsWithLocalForeground || !this.hasWorkerCapacity(settings)) {
 			// A mandatory verifier is the continuation of an already admitted implementation, not a
@@ -3234,6 +3682,9 @@ export class WorkerDelegationController {
 				);
 				return { started: false, skipReason: "orchestration_ledger_error" };
 			}
+			// A contending worker waits for the foreground turn's end, and that end drains the queue (the
+			// activity listener and the end of `prompt()` are the wake). A worker queued with no foreground
+			// turn at all waits for the next one: that queued state is a pinned contract.
 			return this.queuePreparedWorkerAttempt(prepared, request, admission, {
 				drain: dependencyGated || !contendsWithLocalForeground,
 			});
@@ -3253,6 +3704,14 @@ export class WorkerDelegationController {
 		record: LaneRecord,
 		onStarted?: (record: LaneRecord) => void,
 	): Promise<WorkerDelegationRunOutcome> {
+		// This call runs inside the foreground turn that the local-model contention hold waits for, so
+		// awaiting a lane the scheduler will park on that hold would be a deadlock. The decision is the
+		// hold's own contention predicate, not the lane's wait reason at this instant: a lane first
+		// waiting on a dependency or an unwinding run is parked on the foreground the moment that clears.
+		// A held lane is reported as the queued acceptance; the turn's release starts it.
+		if (this.laneHeldForLocalForeground(record.laneId)) {
+			return { started: true, record: this.getWorkerLifecycle().getRecord(record.laneId) ?? record };
+		}
 		const observed = this.scheduler.observeLane(record.laneId, {
 			...(onStarted ? { onStarted } : {}),
 		});
@@ -3284,6 +3743,8 @@ export class WorkerDelegationController {
 		let admission: Extract<WorkerAdmission, { ok: true }> | undefined;
 		let releaseAllocation: (() => void) | undefined;
 		if (existingRecord) {
+			const startingAttempt = this.lifecycle.getActiveAttempt(existingRecord.laneId);
+			if (startingAttempt) this.foregroundHoldCleared.delete(startingAttempt.attemptId);
 			if (!directoryValidated) {
 				const deregister = registerInFlightWork(
 					this.deps.getAgentDir(),
@@ -3318,6 +3779,7 @@ export class WorkerDelegationController {
 			releaseAllocation?.();
 		}
 		const { completion, ...settled } = outcome;
+		if (!settled.started && admission) void this.laneIsolation?.discard(admission.executionPlan.cwd);
 		return completion ?? settled;
 	}
 
@@ -3678,21 +4140,46 @@ export class WorkerDelegationController {
 				}
 			: undefined;
 		const sharedToolOptions = this.deps.getSharedLaneToolOptions?.();
+		// A process tool (bash, python, run_process) is a host-trust boundary the structural write protection does
+		// not cover: its changes to the harness write-protected set are attributed to this worker and reach the
+		// parent through the claim, never refused (see autonomy/protected-path-watch.ts).
+		const protectedPathWatch = executionPlan.processEnabled
+			? new ProtectedPathWatch({
+					workerId: startedRecord.laneId,
+					paths: getTamperWatchedPaths(executionPlan.cwd, this.deps.getAgentDir()),
+				})
+			: undefined;
+		// The run-wide baseline is the state at the worker's start, not at its first command.
+		protectedPathWatch?.start();
 		const toolSurface = createLaneToolSurface({
+			workerLabel: agentId,
+			...(protectedPathWatch ? { protectedPathWatch } : {}),
 			yolo: this.deps.getSettingsManager().getEdgeSettings().mode === "yolo",
 			denyCommands: this.deps.getSettingsManager().getEdgeSettings().deny,
+			readOnly: executionPlan.readOnly,
 			shellReadOnly: executionPlan.shellReadOnly,
 			cwd: executionPlan.cwd,
 			...(sharedToolOptions ? { sharedToolOptions } : {}),
 			...(this.deps.getPathAliasTable ? { getPathAliasTable: this.deps.getPathAliasTable } : {}),
 			...(executionContext ? { bindTool: (tool) => this.directories.bindTool(tool, executionContext) } : {}),
 			deniedPaths: executionPlan.deniedPaths,
+			writeProtectedPaths: getHarnessWriteProtectedPaths(executionPlan.cwd, this.deps.getAgentDir()),
 			readMemory: executionPlan.readMemory ? (query) => this.deps.readMemoryForLane(query) : undefined,
 			writeEnabled: executionPlan.writeEnabled,
 			writePaths: executionPlan.writePaths,
 			...(executionPlan.processEnabled && executionPolicy ? { executionPolicy } : {}),
 			processMaxWallClockMs: grant.budget.maxWallClockMs ?? 0,
 			...(shellSessionKey ? { shellSessionKey } : {}),
+			onWorkerProcessesReaped: (processes) => {
+				const message = describeReapedWorkerProcesses(startedRecord.laneId, processes);
+				this.safeWarn(message);
+				// The UI warning is not enough: the parent model also needs to know a worker's process was stopped.
+				try {
+					this.deps.notifyParentSession?.("process-matrix-notice", message);
+				} catch {
+					// Notification delivery must never fail the worker's own terminal path.
+				}
+			},
 			...(shellOutputDirectory ? { shellOutputDirectory } : {}),
 			grant,
 			toolManifests: executionPlan.toolManifests,
@@ -3886,8 +4373,18 @@ export class WorkerDelegationController {
 		const completion = (async (): Promise<WorkerDelegationRunOutcome> => {
 			try {
 				// Register before the first execution await: disposal sees the live mutable ledger.
+				this.writeOverlaps.begin({
+					laneId: startedRecord.laneId,
+					agentId,
+					cwd: executionPlan.cwd,
+					changedFiles: () => executor.ledger.changedFiles,
+				});
 				this.inFlightLedgers.set(startedRecord.laneId, {
 					changedFiles: executor.ledger.changedFiles,
+					getHostFindings: () => [
+						...this.writeOverlaps.findingsFor(startedRecord.laneId),
+						...(protectedPathWatch?.finishBlockers() ?? []),
+					],
 					sealChangedFiles: executor.ledger.sealChangedFiles,
 					getUsage: executor.ledger.getUsage,
 					request: workerRequest,
@@ -3895,6 +4392,8 @@ export class WorkerDelegationController {
 					cwd: executionPlan.cwd,
 				});
 				leaseHeartbeat.start();
+				// The lane's registration records which worker owns it (a no-op when the cwd is not a lane).
+				await this.laneIsolation?.bind(executionPlan.cwd, agentId);
 				const observer = this.deps.repositoryObserver;
 				const objectiveId = this.deps.getObjectiveId?.();
 				const sessionCwd = this.deps.getSessionCwd?.() ?? executionPlan.cwd;
@@ -4007,7 +4506,7 @@ export class WorkerDelegationController {
 								})
 								.catch(() => [])) ?? [])
 						: [];
-				const reviewedOutcome: WorkerRunOutcome =
+				const reportReviewedOutcome: WorkerRunOutcome =
 					reportBlockers.length === 0
 						? settledOutcome
 						: {
@@ -4026,6 +4525,41 @@ export class WorkerDelegationController {
 									blockers: [...(settledOutcome.claim.blockers ?? []), ...reportBlockers],
 								},
 							};
+				// What the host itself observed, attributed to this worker and never blocking it: a file another
+				// concurrently running worker also changed, and a change to the harness write-protected set made
+				// while one of its process tools ran. Both reach the parent as blockers and require its review.
+				const laneFinding = await this.laneIsolation?.claimFinding(executionPlan.cwd);
+				const hostFindings = [
+					...(laneFinding ? [laneFinding] : []),
+					...this.writeOverlaps.findingsFor(startedRecord.laneId),
+					...(protectedPathWatch?.finishBlockers() ?? []),
+				];
+				const reviewedOutcome: WorkerRunOutcome =
+					hostFindings.length === 0
+						? reportReviewedOutcome
+						: {
+								...reportReviewedOutcome,
+								...(reportReviewedOutcome.accepted
+									? {
+											accepted: false,
+											reasonCode: "worker_host_findings",
+											acceptance: {
+												outcome: "ask-user" as const,
+												gate: "worker_host_findings",
+												reasonCode: "worker_host_findings",
+												message: hostFindings.join("; ").slice(0, MAX_WORKER_CLAIM_BLOCKER_CHARS),
+											},
+										}
+									: {}),
+								claim: {
+									...reportReviewedOutcome.claim,
+									parentReviewRequired: true,
+									blockers: [
+										...boundHostFindings(hostFindings),
+										...(reportReviewedOutcome.claim.blockers ?? []),
+									].slice(0, MAX_WORKER_CLAIM_BLOCKERS),
+								},
+							};
 				const gatedOutcome: WorkerRunOutcome = verificationRequired
 					? {
 							...reviewedOutcome,
@@ -4040,10 +4574,7 @@ export class WorkerDelegationController {
 							claim: {
 								...reviewedOutcome.claim,
 								parentReviewRequired: true,
-								blockers: [
-									...(reviewedOutcome.claim.blockers ?? []),
-									"independent verification is required before acceptance",
-								],
+								blockers: [...(reviewedOutcome.claim.blockers ?? []), INDEPENDENT_VERIFICATION_PENDING_BLOCKER],
 							},
 						}
 					: reviewedOutcome;
@@ -4088,7 +4619,7 @@ export class WorkerDelegationController {
 					notify: !verificationRequired,
 				}).record;
 				try {
-					this.deps.saveWorkerClaimSnapshot(outcome.claim, workerRequest);
+					this.deps.saveWorkerClaimSnapshot(outcome.claim, workerRequest, { cwd: executionPlan.cwd });
 				} catch (error) {
 					this.safeWarn(
 						`Failed to persist worker claim ${startedRecord.laneId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -4194,7 +4725,7 @@ export class WorkerDelegationController {
 					// the runtime did not record.
 					if (finalized) {
 						try {
-							this.deps.saveWorkerClaimSnapshot(failureClaim, workerRequest);
+							this.deps.saveWorkerClaimSnapshot(failureClaim, workerRequest, { cwd: executionPlan.cwd });
 						} catch (saveError) {
 							this.safeWarn(
 								`Failed to persist worker claim ${startedRecord.laneId}: ${saveError instanceof Error ? saveError.message : String(saveError)}`,
@@ -4215,6 +4746,7 @@ export class WorkerDelegationController {
 				this.writeReservations.release(startedRecord.laneId, durableHandle.attemptId, durableHandle.fencingToken);
 				this.yieldedCapacityAttemptIds.delete(durableHandle.attemptId);
 				this.yieldedWriteReservations.delete(durableHandle.attemptId);
+				this.writeOverlaps.end(startedRecord.laneId);
 				this.inFlightLedgers.delete(startedRecord.laneId);
 				this.laneAbortControllers.delete(startedRecord.laneId);
 				this.agentControl.clearLaneHalt(startedRecord.laneId);
@@ -4244,8 +4776,20 @@ export class WorkerDelegationController {
 		};
 	}
 
+	/**
+	 * A retired worker no longer needs the worktree lane it worked in: release it when nothing would be lost. Driven
+	 * by the retirement itself (never polled); the lane is found from the worker's pinned execution directory.
+	 */
+	releaseRetiredAgentLane(agentId: string): void {
+		const isolation = this.laneIsolation;
+		const cwd = this.lifecycle.getLatestAgentAttempt(agentId)?.dispatch.executionContract?.worker.authority.cwd;
+		if (!isolation || !cwd) return;
+		void isolation.release(cwd, agentId);
+	}
+
 	/** Start every capacity-eligible queued worker at the owner session's foreground-idle boundary. */
 	drain(): void {
+		this.retryRaceCancels();
 		this.recovery.recover();
 		this.scheduler.drain();
 		this.terminalHandoffs.signal();

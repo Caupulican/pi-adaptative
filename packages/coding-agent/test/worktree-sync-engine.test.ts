@@ -223,7 +223,7 @@ describe("resolveRepoContext", () => {
 });
 
 describe("createLane", () => {
-	it("creates a lane: deterministic key, worktree add from main, registration, config, audit", async () => {
+	it("creates a lane: deterministic key, worktree add from main, registration, no persisted config, audit", async () => {
 		const repo = fauxRepo();
 		const calls: ExecCall[] = [];
 		const deps = engineDeps(repo, { calls });
@@ -240,11 +240,11 @@ describe("createLane", () => {
 		const addCall = calls.find((call) => call.args[0] === "worktree" && call.args[1] === "add");
 		expect(addCall?.args).toEqual(["worktree", "add", "-b", "pi/wt/adhoc-1", result.lane.worktreePath, "main"]);
 
-		// Registration persisted; deterministic conflict substrate configured (D7).
+		// Registration persisted; the conflict substrate (D7) is per-command `-c`, never persisted config.
 		const paths = syncStorePaths(repo.commonDir);
 		expect(await readLane(paths, "adhoc-1")).toMatchObject({ status: "active", branch: "pi/wt/adhoc-1" });
-		expect(repo.config.get("rerere.enabled")).toBe("true");
-		expect(repo.config.get("merge.conflictStyle")).toBe("zdiff3");
+		expect(repo.config.has("rerere.enabled")).toBe(false);
+		expect(repo.config.has("merge.conflictStyle")).toBe(false);
 	});
 
 	it("allocates the lowest free goal-scoped key, skipping registrations and existing branches", async () => {

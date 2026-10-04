@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { AgentHaltRequest, AgentMessage } from "@caupulican/pi-agent-core";
 import type { UserMessage } from "@caupulican/pi-ai";
@@ -16,6 +17,7 @@ import type { SpecialistContextClaim } from "../orchestration/specialist-context
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { terminalAttemptStatus } from "../orchestration/task-runtime-state.ts";
 import { DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS } from "../settings-manager.ts";
+import { recordDiscardedObligations } from "./obligation-ledger.ts";
 import {
 	SessionRootMailbox,
 	type SessionRootReply,
@@ -48,10 +50,11 @@ import {
 	type WorkerAgentTranscriptOptions,
 	type WorkerAgentView,
 	type WorkerAgentWaitMode,
+	WorkerControlDeadLetteredError,
 	workerAgentBroadcastTargetIdempotencyKey,
 	workerAgentMessageId,
 } from "./worker-agent-control.ts";
-import { workerClaimSettlementLines } from "./worker-claim.ts";
+import { fenceWorkerClaimValues, workerClaimSettlementLines } from "./worker-claim.ts";
 import {
 	MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES,
 	type WorkerConversation,
@@ -61,6 +64,7 @@ import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { formatWorkerDispatchWait, type WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
 import { evaluateReusableWorkerTaskAdmission } from "./worker-fleet-limits.ts";
 import { normalizeWorkerHaltReason, WorkerLaneHalts } from "./worker-halt.ts";
+import { attemptVerification } from "./worker-lane-projection.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { isWorkerTaskPrompt } from "./worker-runner.ts";
 import { projectWorkerTaskSessionView } from "./worker-task-view.ts";
@@ -120,6 +124,9 @@ type QueuedPeerMessage = ReturnType<WorkerAgentMailbox["enqueueWithReceipt"]>;
 
 const MAX_BROADCAST_ERROR_CHARS = 512;
 
+/** Attempt statuses whose task has not reached a terminal outcome. */
+const LIVE_ATTEMPT_STATUSES: ReadonlySet<string> = new Set(["queued", "leased", "running", "suspended"]);
+
 /**
  * Independent bound on how long a blocked restore may wait for a reservation-availability event,
  * deliberately NOT derived from the caller's own (possibly very short, e.g. test-only 1ms) wait
@@ -151,26 +158,34 @@ export function buildWorkerTerminalHandoffContent(args: {
 	};
 }): string {
 	const sanitize = (value: string): string => value.replace(/[\r\n]+/g, " ").slice(0, 120);
+	// This content is stored and replayed against a durable mailbox record, so the fence nonce is fixed per
+	// child and lane rather than random. A literal nonce inside worker text is still neutralized.
+	const source = `worker-claim:${args.record.laneId}`;
+	const nonce = createHash("sha256")
+		.update(`worker-terminal-handoff\0${args.childAgentId}\0${args.record.laneId}`)
+		.digest("hex")
+		.slice(0, 32);
+	const fence = (values: readonly string[]): string => fenceWorkerClaimValues(values, sanitize, source, nonce);
 	return [
 		"Worker terminal handoff",
 		`childAgentId=${args.childAgentId}`,
 		`laneId=${args.record.laneId}`,
 		`status=${args.record.status}`,
-		...(args.record.reasonCode ? [`reasonCode=${args.record.reasonCode}`] : []),
+		...(args.record.reasonCode ? [`reasonCode=${sanitize(args.record.reasonCode).replace(/[^\w.:,-]/g, "_")}`] : []),
 		...(args.outputArtifact
 			? [
 					`fullOutput=${args.outputArtifact.uri}${args.outputArtifact.sizeBytes === undefined ? "" : ` (${args.outputArtifact.sizeBytes} bytes)`}`,
 				]
 			: []),
 		...(args.claim?.summary ? [`claimStatus=${args.claim.status || args.record.status}`] : []),
-		...(args.claim?.summary ? [`claimSummary=${sanitize(args.claim.summary)}`] : []),
+		...(args.claim?.summary ? [`claimSummary (untrusted worker evidence):\n${fence([args.claim.summary])}`] : []),
 		...(args.claim?.changedFiles && args.claim.changedFiles.length > 0
-			? [`changedFiles=${args.claim.changedFiles.join(", ")}`]
+			? [`changedFiles (untrusted worker evidence):\n${fence(args.claim.changedFiles)}`]
 			: []),
 		...(args.claim?.blockers && args.claim.blockers.length > 0
-			? [`blockers=${args.claim.blockers.map((b) => sanitize(b)).join("; ")}`]
+			? [`blockers (untrusted worker evidence):\n${fence(args.claim.blockers)}`]
 			: []),
-		...(args.claim ? workerClaimSettlementLines(args.claim, sanitize) : []),
+		...(args.claim ? workerClaimSettlementLines(args.claim, sanitize, source, nonce) : []),
 		"CAVEMAN MODE - MANDATORY: terminal handoff means worker state was retained. Read the full transcript, verify the claim, then continue or replan within the admitted grant. Do not call this lost state or harness failure.",
 		"MANDATORY: read every transcript page before judging this result.",
 		`Start with delegate action="transcript" agentId="${args.childAgentId}" cursor=0.`,
@@ -914,6 +929,19 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		if (queued.messageId !== replyMessageId) {
 			throw new Error("Worker reply target returned a divergent deterministic message identity.");
 		}
+		if (
+			queued.status === "retained" &&
+			queued.message.failedAt !== undefined &&
+			queued.message.deliveredAt === undefined
+		) {
+			this.abandonDeadLetteredReply(
+				sourceAgentId,
+				sourceMailbox,
+				request,
+				replyMessageId,
+				new WorkerControlDeadLetteredError(queued.messageId, queued.message.failureReason),
+			);
+		}
 		if (queued.status === "completed_replay") {
 			if (!targetMailbox.hasDeliveredControlReceipt(queued.messageId)) {
 				throw new Error("Worker reply target replay has no durable delivery evidence.");
@@ -1305,7 +1333,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	resumeWorkerAgent(
 		agentId: string,
 		scope: WorkerAgentControlScope = {},
-	): { started: boolean; record?: LaneRecord; skipReason?: string } {
+	): { started: boolean; record?: LaneRecord; skipReason?: string; waitReason?: string } {
 		const { attempt } = this.controlledAgentAttempt(agentId, scope);
 		if (attempt?.status !== "suspended") return { started: false, skipReason: "agent_not_suspended" };
 		const record = this.options.getLifecycle().getRecord(attempt.taskId);
@@ -1330,7 +1358,9 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			};
 		}
 		this.signalStateChanged();
-		return { started: true, record };
+		// The scheduler holds the resume when it cannot start yet; say why instead of reporting a run.
+		const waitState = this.options.scheduler.getWaitState?.(record.laneId);
+		return { started: true, record, ...(waitState ? { waitReason: formatWorkerDispatchWait(waitState) } : {}) };
 	}
 
 	cancelWorkerAgent(
@@ -1338,12 +1368,32 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		reasonCode = "agent_cancelled",
 		scope: WorkerAgentControlScope = {},
 	): LaneRecord | undefined {
-		const { attempt } = this.controlledAgentAttempt(agentId, scope);
+		const { agent, attempt } = this.controlledAgentAttempt(agentId, scope);
 		if (!attempt) return undefined;
+		// Steers were addressed to the task being cancelled. They settle with it, before the terminal
+		// record publishes: publishing reconciles the mailbox, and an undelivered steer would otherwise
+		// start as a brand-new turn the owner just cancelled.
+		if (LIVE_ATTEMPT_STATUSES.has(attempt.status)) this.deadLetterUndeliveredSteers(agent, reasonCode);
 		this.options.abortLane(attempt.taskId, reasonCode);
 		const record = this.options.cancelLane(attempt.taskId, reasonCode);
 		this.signalStateChanged();
 		return record;
+	}
+
+	/**
+	 * Fail every ordinary steer the cancelled task never received. A steer that carries a reply
+	 * obligation is kept: its reply is owed regardless of the task it was addressed to.
+	 */
+	private deadLetterUndeliveredSteers(agent: AgentBindingContract, reasonCode: string): void {
+		const mailbox = this.getMailbox(agent.agentId);
+		for (const message of mailbox.pendingTaskBearing()) {
+			if (message.kind !== "steer") continue;
+			if (this.reconcileTaskBearingTranscriptDelivery(agent, message)) continue;
+			mailbox.deadLetterOrdinaryTask(
+				message.messageId,
+				`worker_task_cancelled:${reasonCode}`.slice(0, MAX_BROADCAST_ERROR_CHARS),
+			);
+		}
 	}
 
 	resolveWorkerAgentLane(agentId: string, scope: WorkerAgentControlScope = {}): WorkerAgentLaneResolution | undefined {
@@ -1418,8 +1468,33 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 					`Logical worker agent '${target.agentId}' has ${pendingMessages.length} pending control message${pendingMessages.length === 1 ? "" : "s"}: ${listed}${more}. Deliver them (resume or follow_up) or retire with force: true to discard them.`,
 				);
 			}
-			mailbox.deadLetterPending("retired_with_force");
+			// The owner chose to discard these. Each is recorded first (bounded, attributed, content head) in the
+			// obligation ledger the retention sweep also uses. An unwritable ledger never blocks the owner's
+			// retire: the discard proceeds and the same bounded evidence goes to the warning channel instead.
+			mailbox.deadLetterPending("retired_with_force", (discarded) => {
+				try {
+					recordDiscardedObligations({
+						agentDir: this.options.agentDir,
+						parentSessionId: this.options.parentSessionId,
+						kind: "forced_retire",
+						agentId: target.agentId,
+						reason: "retired_with_force",
+						settled: discarded,
+					});
+				} catch (error) {
+					const heads = discarded
+						.slice(0, 4)
+						.map((item) => `${item.messageId}: ${item.contentHead.slice(0, 60)}`)
+						.join(" | ");
+					this.options.warn?.(
+						`Forced retire of ${target.agentId} discarded ${discarded.length} pending message(s) but could not write the obligation ledger (${error instanceof Error ? error.message : String(error)}): ${heads}`,
+					);
+				}
+			});
 		}
+		// Replies other workers sent to this one were just dead-lettered; their sources' open acknowledgements
+		// are settled now, after the mailbox lock scope ended, instead of waiting for a later event.
+		if (pendingMessages.length > 0) this.reconcileWorkerReplyOutboxesBestEffort();
 		const unresolvedReplyCount = mailbox.awaitingReplies().length + mailbox.listReplyAcknowledgements().length;
 		if (unresolvedReplyCount > 0) {
 			throw new Error(
@@ -1441,6 +1516,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			status: result.statuses[0]?.status ?? "unknown",
 			timedOut: result.timedOut,
 			...(result.terminalLaneIds ? { terminalLaneIds: result.terminalLaneIds } : {}),
+			...(result.foregroundHeldAgentIds ? { foregroundHeld: true } : {}),
 		}));
 	}
 
@@ -1513,6 +1589,25 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				throw new Error(
 					`Worker wait would deadlock: logical worker '${callerAgentId}' cannot wait for itself. Finish the caller task instead.`,
 				);
+			}
+		}
+		// A root wait on a worker the scheduler holds for the foreground turn can never be satisfied inside
+		// this turn: the hold lifts only when the turn ends, and a model waiting through it burns its own
+		// turn. Return at once and say so. Workers waiting on a sibling keep the ordinary wait.
+		if (callerAgentId === undefined) {
+			const latestAttempts = this.latestAttemptsByAgent(baselineSnapshot);
+			const activeIds = baselineStatuses.filter(({ status }) => status === "active").map(({ agentId }) => agentId);
+			const heldIds = activeIds.filter((agentId) => {
+				const attempt = latestAttempts.get(agentId);
+				return (
+					attempt !== undefined && this.options.scheduler.getWaitState?.(attempt.taskId)?.reason === "foreground"
+				);
+			});
+			if (heldIds.length > 0 && (mode === "all" || heldIds.length === activeIds.length)) {
+				return Promise.resolve({
+					...result(baselineStatuses, false, baselineSnapshot),
+					foregroundHeldAgentIds: heldIds,
+				});
 			}
 		}
 		return new Promise((resolve, reject) => {
@@ -1726,12 +1821,50 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				this.routeWorkerReplyToAgent(target, source.agentId, request, acknowledgement.replyContent);
 				this.workerReplyReconciliationFailures.delete(failureKey);
 			} catch (error) {
+				if (error instanceof WorkerControlDeadLetteredError) {
+					// Already settled at the routing step; the obligation is closed, not a recurring failure.
+					this.workerReplyReconciliationFailures.delete(failureKey);
+					continue;
+				}
 				this.recordWorkerReplyReconciliationFailure(
 					failureKey,
 					error instanceof Error ? error.message : String(error),
 				);
 			}
 		}
+	}
+
+	/**
+	 * A reply whose target copy was dead-lettered can never be delivered, and answering the request again
+	 * would hit the same failed identity. Settle the source request as failed (`reply_dead_lettered`),
+	 * terminal and attributed in the obligation ledger, never replied or acknowledged, then report it to
+	 * the replier. An unwritable ledger never keeps the obligation open: the discard proceeds with a warning.
+	 */
+	private abandonDeadLetteredReply(
+		sourceAgentId: string,
+		sourceMailbox: WorkerAgentMailbox,
+		request: WorkerAgentMessage,
+		replyMessageId: string,
+		cause: WorkerControlDeadLetteredError,
+	): never {
+		sourceMailbox.abandonReplyAcknowledgement(request.messageId, replyMessageId, "reply_dead_lettered", (settled) => {
+			try {
+				recordDiscardedObligations({
+					agentDir: this.options.agentDir,
+					parentSessionId: this.options.parentSessionId,
+					kind: "reply_dead_lettered",
+					agentId: sourceAgentId,
+					reason: "reply_dead_lettered",
+					settled: [settled],
+				});
+			} catch (error) {
+				this.options.warn?.(
+					`Reply ${replyMessageId} from ${sourceAgentId} was dead-lettered at its target; the obligation ledger could not be written: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		});
+		this.notifyStateChangedBestEffort();
+		throw cause;
 	}
 
 	private recordWorkerReplyReconciliationFailure(failureKey: string, reason: string): void {
@@ -2341,8 +2474,17 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const attempt = resolvedAttempt === undefined ? this.latestAgentAttempt(agent) : (resolvedAttempt ?? undefined);
 		// `activity` folds queued into active for control flow. The view still owes the parent the
 		// durable dispatch status and, for a queued attempt, the reason it has not started.
+		// A suspended attempt waiting in the queue to resume (a retry, or a resume held for the foreground)
+		// has a wait state too.
 		const waitState =
-			attempt?.status === "queued" ? this.options.scheduler.getWaitState?.(attempt.taskId) : undefined;
+			attempt?.status === "queued" || attempt?.status === "suspended"
+				? this.options.scheduler.getWaitState?.(attempt.taskId)
+				: undefined;
+		// The reconciled independent verification of this exact generation, when its result asked for one.
+		const verification =
+			attempt?.result?.nextAction === "independent_verification_required"
+				? attemptVerification(this.options.getLifecycle().getTaskRuntimeSnapshot(), attempt)
+				: undefined;
 		return {
 			agentId: agent.agentId,
 			...(agent.parentAgentId ? { parentAgentId: agent.parentAgentId } : {}),
@@ -2355,9 +2497,21 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			...(attempt ? { dispatch: attempt.status } : {}),
 			...(waitState ? { waitReason: formatWorkerDispatchWait(waitState) } : {}),
 			...(attempt?.result
-				? { lastResult: { status: attempt.result.status, reasonCode: attempt.result.reasonCode } }
+				? {
+						lastResult: verification
+							? {
+									status: verification.verdict === "accepted" ? "completed" : "failed",
+									reasonCode: verification.reasonCode,
+								}
+							: { status: attempt.result.status, reasonCode: attempt.result.reasonCode },
+					}
 				: {}),
-			...(activity === "idle" && agent.status === "registered" && attempt?.result?.nextAction === "parent_review"
+			// A rejected or inconclusive independent verification settles the generation as needing the
+			// parent exactly as a blocked claim does; only an accepted one releases it.
+			...(activity === "idle" &&
+			agent.status === "registered" &&
+			(attempt?.result?.nextAction === "parent_review" ||
+				(verification !== undefined && verification.verdict !== "accepted"))
 				? { awaitingParent: true as const }
 				: {}),
 			controllable: !callerAgentId || this.agentIsInCallerSubtree(agent, callerAgentId),

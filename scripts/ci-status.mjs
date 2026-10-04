@@ -113,7 +113,11 @@ export function commitObligation(status, isAncestorOfHead) {
 	};
 }
 
-function writeStatus(branch, status) {
+function writeStatus(branch, requestedStatus) {
+	// A worker's push reaches the hook with its worker label in the environment; the verdict records who
+	// pushed, so a red branch is attributable. A push by the owner carries no label and records none.
+	const pushedBy = process.env.PI_WORKER_LABEL?.trim();
+	const status = pushedBy ? { ...requestedStatus, pushedBy } : requestedStatus;
 	const path = statusFile(branch);
 	mkdirSync(dirname(path), { recursive: true });
 	// Never let a slower watcher for an older commit overwrite a newer commit's verdict.
@@ -129,7 +133,7 @@ function writeStatus(branch, status) {
 	const temporary = `${path}.${process.pid}.tmp`;
 	writeFileSync(temporary, `${JSON.stringify(status, null, 2)}\n`);
 	renameSync(temporary, path);
-	writeFileSync(join(dirname(path), "events.log"), `${new Date().toISOString()} ${branch} ${status.sha} ${status.state} ${status.conclusion ?? ""}\n`, { flag: "a" });
+	writeFileSync(join(dirname(path), "events.log"), `${new Date().toISOString()} ${branch} ${status.sha} ${status.state} ${status.conclusion ?? ""}${pushedBy ? ` pushed-by=${pushedBy}` : ""}\n`, { flag: "a" });
 	return true;
 }
 

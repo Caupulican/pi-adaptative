@@ -14,7 +14,7 @@ it.each([false, true])(
 		expect(tool.description).toContain("agentId");
 		expect(tool.description).not.toContain("PREFER REUSE");
 		expect(tool.promptGuidelines?.join(" ")).not.toContain("fresh=no agentId");
-		expect(tool.promptGuidelines?.join(" ")).toContain("automatic reuse");
+		expect(tool.promptGuidelines?.join(" ")).toContain("Start reuses compatible idle workers");
 		expect(JSON.stringify(tool.parameters)).not.toContain("Fresh workers only");
 	},
 );

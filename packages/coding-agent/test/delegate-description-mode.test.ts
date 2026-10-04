@@ -9,7 +9,7 @@ describe("delegate tool description varies by wiring mode", () => {
 		});
 
 		expect(definition.description).toContain(
-			"inherit foreground model, reasoning, compatible tools and machine access",
+			"inherit foreground model, reasoning, compatible tools and machine-wide read access",
 		);
 		expect(definition.description).toContain("persistent leaf workers");
 		expect(definition.description).toContain(
@@ -40,14 +40,16 @@ describe("delegate tool description varies by wiring mode", () => {
 		const guidelines = definition.promptGuidelines ?? [];
 		expect(guidelines.some((line) => line.includes("delegate_status"))).toBe(false);
 		expect(guidelines.some((line) => line.includes("untrusted evidence"))).toBe(true);
-		expect(guidelines.some((line) => line.includes("Optional model/thinkingLevel/path/toolNames only"))).toBe(true);
+		expect(
+			guidelines.some((line) => line.includes("Optional model/thinkingLevel/path/writePaths/toolNames only")),
+		).toBe(true);
 		expect(guidelines.some((line) => line.includes("leaf specialists"))).toBe(true);
 		expect(guidelines.join("\n")).not.toMatch(/depth|descendant|recursive/i);
 		expect(guidelines.some((line) => line.includes("64") && line.includes("retry"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("Completion: wait/wait_many"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("Timeout alone") && line.includes("never interrupt"))).toBe(true);
 		expect(guidelines).toContain(
-			"CAVEMAN MODE - MANDATORY: start=automatic reuse; agentId=select specialist; parallelWork=justified independent copy; task=instructions.",
+			"CAVEMAN MODE - MANDATORY: Start reuses compatible idle workers. agentId picks one. parallelWork justifies a copy. Task goes in instructions.",
 		);
 		expect(guidelines.some((line) => line.includes("Host compiles and persists"))).toBe(true);
 	});
@@ -64,7 +66,7 @@ describe("delegate tool description varies by wiring mode", () => {
 
 		// Core capability wording is preserved alongside the async addendum.
 		expect(definition.description).toContain(
-			"inherit foreground model, reasoning, compatible tools and machine access",
+			"inherit foreground model, reasoning, compatible tools and machine-wide read access",
 		);
 		expect(definition.description).toContain("persistent leaf workers");
 		expect(definition.description).toContain(
@@ -85,14 +87,16 @@ describe("delegate tool description varies by wiring mode", () => {
 		const guidelines = definition.promptGuidelines ?? [];
 		expect(guidelines.some((line) => line.includes("Transcript pages are bounded"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("terminal handoff") && line.includes("never poll"))).toBe(true);
-		expect(guidelines.some((line) => line.includes("Optional model/thinkingLevel/path/toolNames only"))).toBe(true);
+		expect(
+			guidelines.some((line) => line.includes("Optional model/thinkingLevel/path/writePaths/toolNames only")),
+		).toBe(true);
 		expect(guidelines.some((line) => line.includes("leaf specialists"))).toBe(true);
 		expect(guidelines.join("\n")).not.toMatch(/depth|descendant|recursive/i);
 		expect(guidelines.some((line) => line.includes("64") && line.includes("retry"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("Completion: wait/wait_many"))).toBe(true);
 		expect(guidelines.some((line) => line.includes("Timeout alone") && line.includes("never interrupt"))).toBe(true);
 		expect(guidelines).toContain(
-			"CAVEMAN MODE - MANDATORY: start=automatic reuse; agentId=select specialist; parallelWork=justified independent copy; task=instructions.",
+			"CAVEMAN MODE - MANDATORY: Start reuses compatible idle workers. agentId picks one. parallelWork justifies a copy. Task goes in instructions.",
 		);
 		expect(guidelines.some((line) => line.includes("Host compiles and persists"))).toBe(true);
 	});
@@ -169,7 +173,7 @@ describe("delegate tool description varies by wiring mode", () => {
 		const guidelines = definition.promptGuidelines ?? [];
 
 		expect(guidelines.every((guideline) => guideline.length <= 140)).toBe(true);
-		expect(guidelines.reduce((total, guideline) => total + guideline.length, 0)).toBeLessThanOrEqual(1_200);
+		expect(guidelines.reduce((total, guideline) => total + guideline.length, 0)).toBeLessThanOrEqual(1_600);
 	});
 
 	it("leaves the execute path unchanged in synchronous mode", async () => {
@@ -240,7 +244,7 @@ describe("delegate tool description varies by wiring mode", () => {
 			.map((content) => content.text)
 			.join("\n");
 		expect(text).toBe(
-			"delegate started (queued) — stable agentId worker-1, task laneId worker-1; the owning parent will receive its terminal handoff, then use delegate status or bounded raw transcript pages\nCAVEMAN MODE - MANDATORY: queued is admitted durable nonterminal state, not stall or harness failure. Host starts it event-driven when dependencies, capacity, or explicit workspace reservations clear; the waiting line names which one and since when. A write reservation held by a dead owner is released automatically; one held by a live worker of another session clears only when that worker finishes. Never poll, interrupt, or cancel a healthy running worker to force the queue. Independent machine-scope workers may run in parallel; an explicit path preserves collision fencing. If you start a fresh narrower replacement, cancel this queued agent after the replacement starts; otherwise both tasks will run.",
+			"delegate started (queued) — stable agentId worker-1, task laneId worker-1; the owning parent will receive its terminal handoff, then use delegate status or bounded raw transcript pages\nCAVEMAN MODE - MANDATORY: A queued worker is admitted, durable, and nonterminal. It is not a stall or harness failure. The host starts it event-driven when dependencies, capacity, or explicit workspace reservations clear (the waiting line names which one and since when), or when the foreground turn ends if the worker and the foreground share a local model. A write reservation held by a dead owner is released automatically; one held by a live worker of another session clears only when that worker finishes. Never poll, interrupt, or cancel a healthy running worker to force the queue. Independent machine-scope workers may run in parallel; an explicit path preserves collision fencing. If you start a fresh narrower replacement, cancel this queued agent after the replacement starts; otherwise both tasks will run.",
 		);
 		expect(result.details).toEqual({ started: true, agentId: "worker-1", laneId: "worker-1", status: "queued" });
 	});

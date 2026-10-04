@@ -1,6 +1,6 @@
 import { collaborationLaneId } from "../collaboration/job-store.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
-import type { LaneWorkerRefusal } from "../model-capability.ts";
+import { type LaneWorkerRefusal, laneWorkerRefusalSkipReason } from "../model-capability.ts";
 
 /**
  * Dependencies for {@link dispatchCollaborationWorker}, injected from the construction site
@@ -42,14 +42,22 @@ export interface CollaborationDispatchDeps {
 		requirementId: string;
 	}) => Promise<{ laneKey: string; worktreePath: string } | { skipReason: string }>;
 	/**
+	 * Release a lane `createLaneWorktree` created when the dispatch then fails (opt-in, wired next to
+	 * `createLaneWorktree`). The lane is freshly created and clean, so the engine's own release (no
+	 * discard confirmation) removes it; a lane that somehow holds work is kept by that same rule. Every
+	 * failure after creation calls this, so a failed dispatch never leaves a lane behind. Resolves
+	 * `undefined` when the lane is gone, else the refusal code that kept it.
+	 */
+	releaseLaneWorktree?: (laneKey: string) => Promise<string | undefined>;
+	/**
 	 * Lane-worker capability eligibility (opt-in -- wired only from `runtime-builder.ts`, backed by
 	 * `AgentSession.getLaneWorkerRefusal`): checked FIRST, before `createLaneWorktree`, so an
 	 * ineligible model's dispatch is refused before any lane/pane side effect ever runs. This is the
 	 * parent's best-effort check only -- the dispatched child session refuses authoritatively at its
-	 * own startup (main.ts) regardless of what the parent decides here. Absent dep -> no capability
-	 * check runs, byte-identical to before this field existed.
+	 * own startup (main.ts) regardless of what the parent decides here. The dep evaluates the model the
+	 * CHILD will resolve, not the parent's. Absent dep -> no capability check runs.
 	 */
-	evaluateWorkerLaneRefusal?: () => LaneWorkerRefusal | undefined;
+	evaluateWorkerLaneRefusal?: () => LaneWorkerRefusal | undefined | Promise<LaneWorkerRefusal | undefined>;
 }
 
 interface FireTaskResultDetails {
@@ -77,12 +85,10 @@ export async function dispatchCollaborationWorker(
 ): Promise<{ laneId?: string; skipReason?: string }> {
 	// Capability check FIRST -- before the tool-definition lookup and before createLaneWorktree --
 	// so an ineligible model's dispatch is refused with zero lane/pane/tool side effect. The coarse
-	// "worker_capability_insufficient" skip reason is the stable contract code on the goal tool's
-	// response; the granular reason (class/window/tool-calling) lives only in the refusal object
-	// itself, surfaced by the caller for logging (see model-capability.ts's formatLaneWorkerRefusal).
-	if (deps.evaluateWorkerLaneRefusal?.() !== undefined) {
-		return { skipReason: "worker_capability_insufficient" };
-	}
+	// "worker_capability_insufficient" skip-reason code carries the granular refusal
+	// (reason/class/window) so the caller can surface exactly why.
+	const refusal = await deps.evaluateWorkerLaneRefusal?.();
+	if (refusal !== undefined) return { skipReason: laneWorkerRefusalSkipReason(refusal) };
 	const toolDef = deps.getToolDefinition("pi_collaboration");
 	if (!toolDef) return { skipReason: "collaboration_extension_not_loaded" };
 
@@ -112,6 +118,22 @@ export async function dispatchCollaborationWorker(
 		laneWorktree = created;
 	}
 
+	// A failure after the lane exists releases it. The lane is freshly created and clean, so the engine's
+	// own release (no discard confirmation) removes it; a lane that cannot be released is kept and named
+	// in the skip reason so the caller sees it, never hidden behind the dispatch failure.
+	const failAfterLane = async (skipReason: string): Promise<{ skipReason: string }> => {
+		if (!laneWorktree || !deps.releaseLaneWorktree) return { skipReason };
+		let kept: string | undefined;
+		try {
+			kept = await deps.releaseLaneWorktree(laneWorktree.laneKey);
+		} catch (error) {
+			kept = error instanceof Error ? error.message : String(error);
+		}
+		return {
+			skipReason:
+				kept === undefined ? skipReason : `${skipReason};worktree_lane_kept=${laneWorktree.laneKey}(${kept})`,
+		};
+	};
 	// Single-agent 1:1 mapping: a bare fire_task with no `agents` defaults to a THREE-agent
 	// team (pi/agy/codex -- `DEFAULT_AGENT_PROVIDERS`), which would mint three lanes for one
 	// requirement. A goal-bound dispatch must map to exactly one lane, so `agents` is always
@@ -135,17 +157,17 @@ export async function dispatchCollaborationWorker(
 	try {
 		result = await toolDef.execute(toolCallId, params, ctx.signal, undefined, ctx);
 	} catch {
-		return { skipReason: "collaboration_dispatch_failed" };
+		return failAfterLane("collaboration_dispatch_failed");
 	}
-	if (result.isError) return { skipReason: "collaboration_dispatch_failed" };
+	if (result.isError) return failAfterLane("collaboration_dispatch_failed");
 
 	// The extension and this adapter use the same identity owner. Confirm that exactly one
 	// matching dispatch reached the host's managed-lane ledger before binding the requirement.
 	const job = (result.details as FireTaskResultDetails | undefined)?.job;
 	const primary = job?.agents?.[0];
-	if (!job?.id || !primary?.id || job.agents?.length !== 1) return { skipReason: "collaboration_dispatch_incomplete" };
+	if (!job?.id || !primary?.id || job.agents?.length !== 1) return failAfterLane("collaboration_dispatch_incomplete");
 
 	const callerLaneId = collaborationLaneId(job.id, primary.id);
 	const registeredLaneId = deps.resolveManagedLaneId(callerLaneId);
-	return registeredLaneId === callerLaneId ? { laneId: callerLaneId } : { skipReason: "lane_correlation_failed" };
+	return registeredLaneId === callerLaneId ? { laneId: callerLaneId } : failAfterLane("lane_correlation_failed");
 }

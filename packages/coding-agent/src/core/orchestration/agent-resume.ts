@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { PI_ORCHESTRATION_AGENT_ID_ENV } from "../process-identity.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { WORKER_PROCESS_ALLOWED_TOOLS } from "../worker-tool-ceiling.ts";
 import { type AgentIdentityContract, type AgentResumeContext, isResourcePointerKind } from "./contracts.ts";
 
 export interface PiResumeLaunchSpec {
@@ -100,8 +101,13 @@ export function buildPiResumeLaunchSpec(
 	if (context.worktreeLaneKey) args.push("--worktree-lane", context.worktreeLaneKey);
 	if (context.orchestrationProfileId) {
 		args.push("--orchestration-profile", context.orchestrationProfileId);
-	} else if (context.resourceProfileNames.length > 0) {
-		args.push("--resource-profile", context.resourceProfileNames.join(","));
+	} else {
+		// Without an orchestration profile the resumed child still gets the worker allow-list, never
+		// whatever the registry happens to hold (extension tools included).
+		args.push("--tools", [...WORKER_PROCESS_ALLOWED_TOOLS].join(","));
+		if (context.resourceProfileNames.length > 0) {
+			args.push("--resource-profile", context.resourceProfileNames.join(","));
+		}
 	}
 	if (options.wakePrompt?.trim()) args.push("--print", options.wakePrompt.trim());
 	return {

@@ -33,6 +33,7 @@ import {
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import { describeRequirementCheckRefusal, proveRequirementChecks } from "../goals/prove-requirement-checks.ts";
 import { type RequirementCheckResult, requirementCheckViolation } from "../goals/requirement-checks.ts";
+import { laneWorkerRefusalSkipRemedy, WORKER_CAPABILITY_INSUFFICIENT_SKIP_REASON } from "../model-capability.ts";
 import { awaitPreflight } from "../preflight.ts";
 import { TYPESAFE_API_CREDENTIAL } from "../review/typesafe-contract.ts";
 import { requestsBugFix } from "../system-one/bug-fix.ts";
@@ -334,11 +335,12 @@ export interface GoalToolDependencies {
 	 * `collaboration_dispatch_failed`, `collaboration_dispatch_incomplete`, `lane_correlation_failed`,
 	 * `worktree_create_failed` (worktree-sync is enabled but the lane-first `create_lane` call was
 	 * refused -- e.g. max lanes reached -- so no fire_task call was ever attempted),
-	 * `worker_capability_insufficient` (the model is sub-full class, has an unknown context window,
-	 * does not advertise a native tool-call path, or is graded-demoted to text-protocol/none -- see
-	 * `model-capability.ts`'s `evaluateLaneWorkerRefusal`; this is the parent's best-effort check
-	 * only, refused before any lane/pane side effect -- the dispatched child still refuses
-	 * authoritatively at its own startup regardless).
+	 * `worker_capability_insufficient:reason=...;class=...;contextWindow=...` (the model the child will
+	 * resolve is sub-full class, has an undeclared context window, does not declare or prove a native
+	 * tool-call path, or is demoted off it -- see `model-capability.ts`'s `evaluateLaneWorkerModelRefusal`;
+	 * the goal result is then a blocked outcome, never a success. This is the parent's best-effort check,
+	 * refused before any lane/pane side effect -- the dispatched child still refuses authoritatively at
+	 * its own startup regardless, and reports that refusal as a blocked turn).
 	 */
 	dispatchCollaborationWorker?: (args: {
 		requirementId: string;
@@ -1062,7 +1064,8 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 				} else {
 					const wired = useCollaboration ? deps.dispatchCollaborationWorker : deps.startWorkerDelegation;
 					dispatchSkipReason = dispatched?.skipReason ?? (wired ? "declined" : "dependency_unwired");
-					dispatchNote = `${collaborationFallbackReason ? `Collaboration route returned ${collaborationFallbackReason}; ` : ""}No worker was dispatched (${dispatchSkipReason}); requirement '${action.requirementId}' is recorded but not bound to a lane.`;
+					const capabilityRemedy = laneWorkerRefusalSkipRemedy(dispatchSkipReason);
+					dispatchNote = `${collaborationFallbackReason ? `Collaboration route returned ${collaborationFallbackReason}; ` : ""}No worker was dispatched (${dispatchSkipReason}); requirement '${action.requirementId}' is recorded but not bound to a lane.${capabilityRemedy ? ` ${capabilityRemedy}` : ""}`;
 				}
 			}
 
@@ -1306,6 +1309,11 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					...(action.action === "dispatch_worker" && action.laneId ? { dispatchedLaneId: action.laneId } : {}),
 					...(action.action === "dispatch_worker" && !action.laneId ? { dispatchSkipReason } : {}),
 				},
+				// A worker refused for its model's capability is a blocked outcome, never a success: the
+				// requirement stays unbound and the granular reason reaches the model verbatim.
+				...(dispatchSkipReason?.startsWith(WORKER_CAPABILITY_INSUFFICIENT_SKIP_REASON)
+					? { isError: true as const, errorKind: "operation_outcome" as const }
+					: {}),
 			});
 		},
 	};

@@ -64,6 +64,7 @@ straggler:
              learning observations, trust decisions, failure corpus, config backups, …
     state/backups/config/                                                              explicit config snapshots
     state/extensions/<namespace>/                                                      extension durable state
+    state/orchestration/sessions/<session-key>/                                        one session's control-plane bundle (swept after 180 days, see below)
   cache/     rebuildable, safe to delete: tool-path probes, jiti transform cache, uv    -- cacheDir/cacheFile
     cache/extensions/<namespace>/                                                      extension rebuildable cache
   bin/       managed executable helpers (fd, rg, jq, uv)                               -- binDir (legacy getBinDir accessor)
@@ -71,6 +72,16 @@ straggler:
     work/extensions/<namespace>/<run-id>/                                              extension leased work
   runtimes/<kind>  models/<kind>  sessions/  npm/  git/  worktrees/                    -- runtimesDir/modelsDir/sessionsDir/npmDir/gitDir/worktreesDir
 ```
+
+### Session bundle retention
+
+`state/orchestration/sessions/<session-key>/` holds one foreground session's worker transcripts, mailboxes, context forks, and event history. Once per main-session startup (never in a worker, never on a timer), `sweepSessionBundles` (`src/core/session-bundle-retention.ts`) removes bundles that have expired. The limits are constants beside the sweep, not settings: a bundle whose session transcript still exists is kept until both are older than 180 days (a paused session can be resumed with its persistent-worker context for that long), a bundle whose transcript is gone is not held by that rule, and no bundle with a file newer than 24 hours is touched. An interactive start runs the sweep in the background and never waits for it; its warnings reach the session as host warnings. Print, JSON and RPC modes await it, so an exit cannot cut a removal short. Each startup removes at most 8 bundles and stops starting new ones after 256 MiB; the remainder waits for the next startup.
+
+A bundle is skipped, never forced, when a live or resumable process-matrix entry names its session, when `WorkerConversationStore.reserveBundleDeletion` refuses (live claim, busy or enrolled specialist context, unreadable transcript), or when a worker or session-root mailbox still owes work. Removal runs under the same deletion reservation as explicit session deletion and reopens worker admission for that session once the bundle is gone. A failed or partial removal keeps the reservation and is retried at the next startup. Problems appear as bounded startup warnings and never stop startup.
+
+An obligation older than 30 days (an undelivered message, a delivered request still awaiting its reply, a reply acknowledgement that never committed, a session-root reply nobody acknowledged) can never be answered, because the session that owed it is gone. After every other gate passes and before a bundle is refused for it, the sweep settles it as failed with the reason `obligation_expired`, through the mailbox's own state machine: it is never marked delivered, replied, or acknowledged, and a late reply to an expired request is refused. A bounded record (bundle, session id, agent id, message id, state, creation time, the first 160 characters) is appended to `state/orchestration/expired-obligations.jsonl` (at most 1 MiB and 2,000 records, oldest dropped) inside the mailbox transaction before the mailbox is written, so an unwritable ledger settles nothing. The next startup warning names the count and the ledger. Settlement is all or nothing per bundle and is decided read-only before any write: when one obligation is younger than 30 days, or one cannot be settled (a project-bound or unreadable mailbox), nothing in the bundle is written and the bundle stays refused. A partial settlement would refresh the bundle's newest file time and postpone its removal by the full retention age. An I/O failure part-way through settling several mailboxes can still leave a bundle partly settled; the next sweep retries it. The settlement is not routed through the owner follow-up document: that document records decisions the owner can make for the current session, and an expired obligation is not one.
+
+Each startup scans at most 1,024 bundles, starting at a different bundle each time (chosen from the clock, nothing is remembered), so bundles that stay refused cannot starve the ones behind them.
 
 `state/` holds durable history — deleting it loses real data, not just cache. `cache/` is always safe
 to delete; the next run re-probes or recomputes it. A startup migration (`migrateAgentDirLayout`,

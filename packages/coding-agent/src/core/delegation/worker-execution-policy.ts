@@ -18,8 +18,12 @@ import { buildLaneToolManifests } from "../orchestration/lane-tool-manifests.ts"
 import { ExecutionPolicyCompiler } from "../orchestration/policy-compiler.ts";
 import { intersectRiskBudgets } from "../orchestration/risk-budget.ts";
 import type { ResolvedWorkerDelegationSettings } from "../settings-manager.ts";
-import { getToolCapabilityPolicy, requiredEnvelopeCapabilities } from "../tool-capability-policy.ts";
-import { WORKER_FORBIDDEN_TOOLS } from "../worker-tool-ceiling.ts";
+import {
+	getToolCapabilityPolicy,
+	requiredEnvelopeCapabilities,
+	toolSurvivesReadOnly,
+} from "../tool-capability-policy.ts";
+import { isWorkerProcessToolAllowed } from "../worker-tool-ceiling.ts";
 import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-machine-scope.ts";
 
 const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
@@ -52,10 +56,18 @@ export interface WorkerExecutionPlan {
 	requiredCapabilities: readonly HarnessCapability[];
 	readPaths: readonly string[];
 	writePaths: readonly string[];
+	/**
+	 * The subset of `writePaths` that fences other lanes. Absent means all of `writePaths`. The default
+	 * scope (the worker's own cwd with no explicit workspace or grant) is deliberately unreserved: reserving
+	 * it would serialize every default worker sharing a repository.
+	 */
+	writeReservationPaths?: readonly string[];
 	deniedPaths: readonly string[];
 	readMemory: boolean;
 	writeEnabled: boolean;
 	processEnabled: boolean;
+	/** A `readOnly` grant: the lane keeps only tools that edit nothing, in every mode, whether or not it has a shell. */
+	readOnly: boolean;
 	/** A `readOnly` grant: the lane's shell may run only commands that edit nothing that exists. */
 	shellReadOnly: boolean;
 	budget: RiskBudget;
@@ -107,6 +119,13 @@ export function narrowWorkerExecutionPlan(
 		requiredCapabilities,
 		readPaths: readEnabled ? intersectPathScopes(admitted.readPaths, current.readPaths) : [],
 		writePaths: writeEnabled ? intersectPathScopes(admitted.writePaths, current.writePaths) : [],
+		...(current.writeReservationPaths
+			? {
+					writeReservationPaths: writeEnabled
+						? intersectPathScopes(admitted.writePaths, current.writeReservationPaths)
+						: [],
+				}
+			: {}),
 		deniedPaths: [
 			...new Set(
 				[...admitted.deniedPaths, ...current.deniedPaths].map((entry) =>
@@ -121,6 +140,7 @@ export function narrowWorkerExecutionPlan(
 			grantedTools.has("run_process") ||
 			grantedTools.has(STABLE_SHELL_TOOL_NAME) ||
 			grantedTools.has("run_toolkit_script"),
+		readOnly: current.readOnly,
 		shellReadOnly: current.shellReadOnly,
 		budget: intersectRiskBudgets(admitted.budget, current.budget),
 	};
@@ -142,7 +162,13 @@ export function buildWorkerExecutionPlan(args: {
 	const cwd = args.profile.workspacePath
 		? resolveWorkerWorkspacePath(parentCwd, args.profile.workspacePath)
 		: resolveWorkerWorkspacePath(parentCwd, args.executionCwd ?? parentCwd);
-	const pathScopes = args.yolo || !args.profile.workspacePath ? workerMachinePathRoots(parentCwd) : [cwd];
+	// Reads keep the host's machine scope unless an explicit workspace focuses them. Writes never default to
+	// the machine: a worker writes inside its own cwd, plus only the extra roots the root's grant names.
+	const readScopes = args.yolo || !args.profile.workspacePath ? workerMachinePathRoots(parentCwd) : [cwd];
+	const grantedWriteRoots = (args.profile.writePaths ?? []).map((entry) => resolveWorkerWorkspacePath(cwd, entry));
+	const writeScopes = [...new Set([cwd, ...grantedWriteRoots])];
+	// Only an explicit workspace or granted root fences other lanes; the bare cwd default does not.
+	const writeReservationScopes = args.profile.workspacePath ? writeScopes : grantedWriteRoots;
 	// A readOnly grant stays read-only in YOLO too: YOLO removes permission prompts, not the parent's
 	// promise that this worker edits nothing.
 	const readOnly = args.profile.readOnly === true;
@@ -179,10 +205,10 @@ export function buildWorkerExecutionPlan(args: {
 				...(profileToolNames.has("python") ? (["python"] as const) : []),
 				...(args.profile.executionPolicy && profileToolNames.has("run_process") ? (["run_process"] as const) : []),
 				...(profileToolNames.has(STABLE_SHELL_TOOL_NAME) ? [STABLE_SHELL_TOOL_NAME] : []),
-			]
+			].filter((name) => !readOnly || toolSurvivesReadOnly(name))
 		: [];
 	const enabledAdapterToolNames = (args.workerToolAdapterNames ?? []).filter(
-		(name) => args.yolo || profileToolNames.has(name),
+		(name) => (args.yolo || profileToolNames.has(name)) && (!readOnly || toolSurvivesReadOnly(name)),
 	);
 	const enabledZeroAuthorityToolNames = profileToolNames.has(TOOL_SCHEMA_SEARCH_NAME) ? [TOOL_SCHEMA_SEARCH_NAME] : [];
 	const enabledToolNames = [
@@ -224,8 +250,9 @@ export function buildWorkerExecutionPlan(args: {
 		cwd,
 		toolManifests,
 		requiredCapabilities: [...new Set(toolManifests.flatMap((manifest) => manifest.capabilities))],
-		readPaths: readEnabled ? pathScopes : [],
-		writePaths: writeEnabled ? pathScopes : [],
+		readPaths: readEnabled ? readScopes : [],
+		writePaths: writeEnabled ? writeScopes : [],
+		writeReservationPaths: writeEnabled ? writeReservationScopes : [],
 		// Private harness state (credentials, sessions) stays denied in YOLO; only the project settings
 		// file, which guarded mode protects as settings authority, opens up.
 		deniedPaths: [
@@ -238,6 +265,7 @@ export function buildWorkerExecutionPlan(args: {
 		readMemory: memoryEligible && grantedTools.has(WORKER_MEMORY_READ_TOOL_NAME),
 		writeEnabled,
 		processEnabled,
+		readOnly,
 		shellReadOnly: processEnabled && readOnly,
 		budget,
 	};
@@ -288,13 +316,15 @@ export function compileManagedProcessExecutionGrant(args: {
 	const manifests: ToolCapabilityManifest[] = [];
 	const unknownTools: string[] = [];
 	for (const toolName of [...new Set(args.allowedTools)]) {
-		if (WORKER_FORBIDDEN_TOOLS.has(toolName) || toolName === WORKER_MEMORY_READ_TOOL_NAME) {
+		if (!isWorkerProcessToolAllowed(toolName)) {
 			unknownTools.push(toolName);
 			continue;
 		}
 		const policy = getToolCapabilityPolicy(toolName);
 		const capabilities = delegatedToolCapabilities(toolName);
-		if (!policy || capabilities.length === 0) {
+		// A zero-authority tool (tool_search) is classified with no capability clauses; only an
+		// unclassified tool is unknown.
+		if (!policy) {
 			unknownTools.push(toolName);
 			continue;
 		}
@@ -314,7 +344,10 @@ export function compileManagedProcessExecutionGrant(args: {
 	);
 	const cwd = resolveWorkerWorkspacePath(args.cwd, args.cwd);
 	const explicitScopes = args.writePaths.map((entry) => resolveWorkerWorkspacePath(cwd, entry));
-	const pathScopes = explicitScopes.length > 0 ? explicitScopes : workerMachinePathRoots(cwd);
+	// Reads default to the machine scope; writes default to the worker's cwd. Widening a write root is
+	// an explicit grant: the dispatch names it in `writePaths`.
+	const readScopes = explicitScopes.length > 0 ? explicitScopes : workerMachinePathRoots(cwd);
+	const writeScopes = explicitScopes.length > 0 ? explicitScopes : [cwd];
 	const compiled = new ExecutionPolicyCompiler().compile({
 		...args.target,
 		subjectId: `managed:${args.laneId}:${args.authorizationId}`,
@@ -324,8 +357,8 @@ export function compileManagedProcessExecutionGrant(args: {
 		authorityCapabilities: capabilities,
 		requestedTools: manifests.map((manifest) => manifest.toolName),
 		toolManifests: manifests,
-		readPaths: readEnabled ? pathScopes : [],
-		writePaths: writeEnabled ? pathScopes : [],
+		readPaths: readEnabled ? readScopes : [],
+		writePaths: writeEnabled ? writeScopes : [],
 		deniedPaths: args.deniedPaths.map((entry) => resolveWorkerWorkspacePath(cwd, entry)),
 		requestedBudget: args.budget,
 		authorityBudget: args.budget,
