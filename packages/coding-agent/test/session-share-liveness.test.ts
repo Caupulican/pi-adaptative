@@ -1,9 +1,9 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { handleShareCommand } from "../src/modes/interactive/session-io-commands.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 describe("session share process liveness", () => {
 	let tempDir: string;
@@ -12,7 +12,7 @@ describe("session share process liveness", () => {
 
 	beforeEach(() => {
 		initTheme("dark");
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-share-liveness-"));
+		tempDir = makeTempDir("pi-share-liveness-");
 		ghPidFile = path.join(tempDir, "gh.pid");
 		previousPath = process.env.PATH;
 		const gh = path.join(tempDir, "gh");

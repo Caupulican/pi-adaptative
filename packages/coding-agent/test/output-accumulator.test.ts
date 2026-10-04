@@ -1,13 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { readFileSync, rmSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { OutputAccumulator } from "../src/core/tools/output-accumulator.ts";
+import { tempDir } from "./temp-dir.ts";
 
 let tempDirectory = "";
 
 beforeEach(() => {
-	tempDirectory = mkdtempSync(join(tmpdir(), "pi-output-accumulator-"));
+	tempDirectory = tempDir("pi-output-accumulator-");
 });
 
 afterEach(() => {

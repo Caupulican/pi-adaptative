@@ -1,9 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { afterEach, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const directories: string[] = [];
 
@@ -15,7 +15,7 @@ afterEach(() => {
 it.each(["expiry", "rejection"])(
 	"recovers a built-in Claude %s rotation through the real OAuth adapter",
 	async (trigger) => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-claude-lock-recovery-"));
+		const directory = tempDir("pi-claude-lock-recovery-");
 		directories.push(directory);
 		const path = join(directory, "auth.json");
 		const storage = AuthStorage.create(path);

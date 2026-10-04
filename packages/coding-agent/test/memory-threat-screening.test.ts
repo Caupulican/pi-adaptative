@@ -1,14 +1,14 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createFileStoreMemoryProvider } from "../src/core/context/file-store-memory-provider.ts";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { FileStoreProvider } from "../src/core/memory/providers/file-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("memory threat screening across write and retrieval", () => {
 	it("retains the historical provider note while refusing an actual credential-upload instruction", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-memory-threat-"));
+		const root = tempDir("pi-memory-threat-");
 		try {
 			const agentDir = join(root, "agent");
 			const provider = new FileStoreProvider();

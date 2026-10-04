@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { createEmptyUsage } from "@caupulican/pi-agent-core/usage";
 import { describe, expect, it } from "vitest";
@@ -9,6 +7,7 @@ import {
 	TASK_DIRECTORY_STATE_CUSTOM_TYPE,
 } from "../src/core/tasks/session-task-directory-store.ts";
 import { createTaskDirectoryState, transitionTaskDirectoryState } from "../src/core/tasks/task-directory-state.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function state() {
 	return createTaskDirectoryState({
@@ -78,7 +77,7 @@ describe("session task directory store", () => {
 	});
 
 	it("restores pinned state after closing and reopening the actual session journal", () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-directory-store-"));
+		const scratch = tempDir("pi-directory-store-");
 		try {
 			const session = SessionManager.create(scratch, scratch, scratch);
 			session.appendMessage({

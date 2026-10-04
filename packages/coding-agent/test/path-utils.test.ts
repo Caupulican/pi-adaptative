@@ -1,5 +1,5 @@
 import type * as fs from "node:fs";
-import { accessSync, constants, mkdtempSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, constants, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,7 @@ import {
 	resolveReadPath,
 	resolveToCwd,
 } from "../src/core/tools/path-utils.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 vi.mock("node:fs", async (importOriginal) => {
 	const original = await importOriginal<typeof fs>();
@@ -63,7 +64,7 @@ describe("path-utils", () => {
 		let tempDir: string;
 
 		beforeEach(() => {
-			tempDir = mkdtempSync(join(tmpdir(), "path-utils-test-"));
+			tempDir = makeTempDir("path-utils-test-");
 		});
 
 		afterEach(() => {
@@ -210,7 +211,7 @@ describe("path-utils", () => {
 		let locateDir: string;
 
 		beforeEach(() => {
-			locateDir = mkdtempSync(join(tmpdir(), "pi-path-locate-"));
+			locateDir = makeTempDir("pi-path-locate-");
 			writeFileSync(join(locateDir, "visible.txt"), "ok");
 		});
 

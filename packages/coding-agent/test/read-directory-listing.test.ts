@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createReadTool } from "../src/core/tools/read.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -18,7 +18,7 @@ describe("read tool directory listing", () => {
 	});
 
 	function fixture(): string {
-		const root = mkdtempSync(join(tmpdir(), "read-directory-"));
+		const root = tempDir("read-directory-");
 		roots.push(root);
 		mkdirSync(join(root, "src", "nested"), { recursive: true });
 		mkdirSync(join(root, "empty"));

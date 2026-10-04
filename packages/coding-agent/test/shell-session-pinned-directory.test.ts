@@ -1,14 +1,14 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { PersistentShellSession, type ShellSessionExecOptions } from "../src/core/tools/shell-session.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const windows = process.platform === "win32";
 
 describe("pinned persistent shell directory", () => {
 	it("restores pinned cwd while preserving shell variables and unpinned cd behavior", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-shell-pin-"));
+		const scratch = tempDir("pi-shell-pin-");
 		const root = realpathSync(scratch);
 		const child = join(root, "child");
 		mkdirSync(child);
@@ -48,7 +48,7 @@ describe("pinned persistent shell directory", () => {
 	});
 
 	it("does not execute the submitted command when pinned cwd cannot be restored", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-shell-pin-missing-"));
+		const scratch = tempDir("pi-shell-pin-missing-");
 		const session = new PersistentShellSession("missing-pin-fixture", windows ? "powershell" : "bash");
 		const chunks: Buffer[] = [];
 		const options: ShellSessionExecOptions = {

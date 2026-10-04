@@ -1,16 +1,16 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { MemoryLifecycleContext } from "../src/core/memory/memory-provider.ts";
 import { FileStoreProvider } from "../src/core/memory/providers/file-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("managed memory drift recovery", () => {
 	let testDir: string;
 	let agentDir: string;
 
 	beforeEach(() => {
-		testDir = mkdtempSync(join(tmpdir(), "pi-memory-drift-"));
+		testDir = tempDir("pi-memory-drift-");
 		agentDir = join(testDir, "agent");
 	});
 	afterEach(() => {

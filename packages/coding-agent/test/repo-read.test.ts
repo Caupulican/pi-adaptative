@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { credentialToolBlockReason } from "../src/core/secrets/credential-exposure-guard.ts";
@@ -11,6 +10,7 @@ import {
 	validateRepoReadRevisions,
 } from "../src/core/tools/repo-read.ts";
 import { spawnProcessSync } from "../src/utils/child-process.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function git(cwd: string, ...args: string[]): string {
 	const result = spawnProcessSync("git", args, {
@@ -39,8 +39,8 @@ describe("repo_read", () => {
 	let repo: string;
 	let outside: string;
 	beforeAll(() => {
-		repo = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-repo-read-")));
-		outside = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-repo-read-outside-")));
+		repo = realpathSync.native(tempDir("pi-repo-read-"));
+		outside = realpathSync.native(tempDir("pi-repo-read-outside-"));
 		git(repo, "init", "-q", "-b", "main");
 		mkdirSync(join(repo, "src"));
 		writeFileSync(join(repo, "src", "a.ts"), "export const a = 1;\n");

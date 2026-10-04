@@ -1,9 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { registerOAuthProvider, unregisterOAuthProvider } from "@caupulican/pi-ai/oauth";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage, FileAuthStorageBackend } from "../src/core/auth-storage.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const providerId = "oauth-file-ownership-test";
 const directories: string[] = [];
@@ -23,7 +23,7 @@ describe("OAuth refresh ownership across actual file commit and unlock", () => {
 		["rejection", "replacement"],
 		["rejection", "unrelated"],
 	])("respects %s completion after a newer %s write", async (trigger, action) => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-oauth-file-ownership-"));
+		const directory = tempDir("pi-oauth-file-ownership-");
 		directories.push(directory);
 		const path = join(directory, "auth.json");
 		const backend = new FileAuthStorageBackend(path);

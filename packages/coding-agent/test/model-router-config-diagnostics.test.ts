@@ -1,12 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { Model } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import type { ModelRegistry } from "../src/core/model-registry.ts";
 import { collectModelRouterConfigDiagnostics } from "../src/core/model-router/config-diagnostics.ts";
 import { FitnessStore } from "../src/core/models/fitness-store.ts";
 import type { LaneFitnessScore, ModelFitnessReport } from "../src/core/research/model-fitness.ts";
+import { tempDir } from "./temp-dir.ts";
 
 type RegistryStub = {
 	getAll: () => Model<any>[];
@@ -103,7 +102,7 @@ describe("model router config diagnostics", () => {
 	});
 
 	it("warns about fitness-gated configured models with failed relevant lanes", () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-router-diagnostics-"));
+		const agentDir = tempDir("pi-router-diagnostics-");
 		try {
 			FitnessStore.forAgentDir(agentDir).save("anthropic/claude-haiku-4-5", report({ research: lane(1, 3) }));
 			expect(

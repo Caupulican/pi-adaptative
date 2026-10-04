@@ -1,10 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { priceSentPrefixRewrite } from "../src/core/compaction/early-compaction-economics.ts";
 import { lineageRemainingRequests } from "../src/core/context/cache-survival.ts";
 import { DecisionLedgerStore } from "../src/core/operator-projection/decision-ledger-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 // deepseek-v4-flash catalog prices (USD per million): cold 0.088606, cache read 0.0177212.
 const PRICES = { cacheReadUsdPerMillion: 0.0177212, coldUsdPerMillion: 0.088606 };
@@ -79,7 +79,7 @@ describe("cache decisions in the ledger", () => {
 	});
 
 	it("round-trips a priced gc_pack verdict", () => {
-		const dir = mkdtempSync(join(tmpdir(), "cache-decisions-"));
+		const dir = tempDir("cache-decisions-");
 		dirs.push(dir);
 		const ledger = openLedger(join(dir, "decision-ledger.sqlite"));
 		ledger.recordCacheDecision({

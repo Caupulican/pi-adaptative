@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { projectToolsForProvider } from "@caupulican/pi-agent-core";
 import { generateTextToolProtocolPrimer } from "@caupulican/pi-ai";
@@ -7,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SkillVaultController, type SkillVaultStatus } from "../src/core/skill-vault.ts";
 import { loadSkillsFromDir, type Skill } from "../src/core/skills.ts";
 import { createSkillVaultToolDefinition } from "../src/core/tools/skill.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("SkillVaultController", () => {
 	let root = "";
@@ -25,7 +25,7 @@ describe("SkillVaultController", () => {
 			promoted?: boolean;
 		}>,
 	): Skill[] {
-		root = mkdtempSync(join(tmpdir(), "pi-skill-vault-"));
+		root = tempDir("pi-skill-vault-");
 		for (const entry of entries) {
 			const dir = join(root, entry.name);
 			mkdirSync(dir);
@@ -934,7 +934,7 @@ describe("SkillVaultController refresh on miss", () => {
 	}
 
 	it("re-scans once on a load or search miss so a skill written mid-session is eligible", () => {
-		root = mkdtempSync(join(tmpdir(), "pi-skill-vault-refresh-"));
+		root = tempDir("pi-skill-vault-refresh-");
 		writeSkill("first-skill", "Handles the first thing");
 		let skills = loadSkillsFromDir({ dir: root, source: "user" }).skills;
 		const refreshSkills = vi.fn(() => {
@@ -952,7 +952,7 @@ describe("SkillVaultController refresh on miss", () => {
 	});
 
 	it("names the rescan in the refusal and lists skills the loader could not index", () => {
-		root = mkdtempSync(join(tmpdir(), "pi-skill-vault-diag-"));
+		root = tempDir("pi-skill-vault-diag-");
 		writeSkill("first-skill", "Handles the first thing");
 		const skills = loadSkillsFromDir({ dir: root, source: "user" }).skills;
 		const vault = new SkillVaultController({

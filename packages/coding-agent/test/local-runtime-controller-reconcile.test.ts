@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
@@ -26,7 +25,7 @@ import { tempDir } from "./temp-dir.ts";
  */
 
 function scratchDir(name: string): string {
-	return mkdtempSync(join(tmpdir(), `pi-controller-reconcile-${name}-`));
+	return tempDir(`pi-controller-reconcile-${name}-`);
 }
 
 function ollamaModel(id: string, overrides: Partial<Model<Api>> = {}): Model<Api> {

@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AgentToolResult } from "../src/core/extensions/types.ts";
 import { FileStoreProvider } from "../src/core/memory/providers/file-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function digest(content: string): string {
 	return createHash("sha256").update(content, "utf8").digest("hex");
@@ -30,7 +30,7 @@ describe("FileStoreProvider recovery evidence", () => {
 	let statePath: string;
 
 	beforeEach(() => {
-		root = mkdtempSync(join(tmpdir(), "pi-memory-recovery-"));
+		root = tempDir("pi-memory-recovery-");
 		agentDir = join(root, "agent");
 		mkdirSync(agentDir);
 		memoryPath = join(agentDir, "MEMORY.md");

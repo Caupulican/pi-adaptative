@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { RuntimeCommandResult, RuntimeCommandRunner } from "../src/core/models/local-runtime.ts";
@@ -12,6 +11,7 @@ import {
 	type NeedleRuntimeDeps,
 	NeedleRuntime as ProductionNeedleRuntime,
 } from "../src/core/models/needle-runtime.ts";
+import { tempDir } from "./temp-dir.ts";
 
 class NeedleRuntime extends ProductionNeedleRuntime {
 	constructor(args: ConstructorParameters<typeof ProductionNeedleRuntime>[0]) {
@@ -20,7 +20,7 @@ class NeedleRuntime extends ProductionNeedleRuntime {
 }
 
 function scratchDir(name: string): string {
-	return mkdtempSync(join(tmpdir(), `pi-needle-${name}-`));
+	return tempDir(`pi-needle-${name}-`);
 }
 
 function sha256(content: string): string {

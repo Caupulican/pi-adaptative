@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -13,6 +12,7 @@ import { writeJsonLinesSync } from "../src/core/session-jsonl-writer.ts";
 import { deriveSpawnedUsageReportId, reportSpawnedUsage } from "../src/core/spawned-usage.ts";
 import { runReflexInterpreterCompletion } from "../src/core/toolkit/reflex-interpreter.ts";
 import type { ToolkitScript } from "../src/core/toolkit/script-registry.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function usage(totalTokens: number, totalCost: number): Usage {
 	return {
@@ -123,7 +123,7 @@ describe("assistant text projection", () => {
 
 describe("session JSONL projection", () => {
 	it("consumes a one-pass iterable and writes one record per line", () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-session-jsonl-owner-"));
+		const directory = tempDir("pi-session-jsonl-owner-");
 		const filePath = join(directory, "session.jsonl");
 		let consumed = 0;
 		function* records(): Generator<unknown> {
@@ -143,7 +143,7 @@ describe("session JSONL projection", () => {
 	});
 
 	it("writes an oversized record directly before continuing bounded batches", () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-session-jsonl-large-"));
+		const directory = tempDir("pi-session-jsonl-large-");
 		const filePath = join(directory, "session.jsonl");
 		try {
 			writeJsonLinesSync(filePath, [{ text: "x".repeat(300_000) }, { tail: true }]);

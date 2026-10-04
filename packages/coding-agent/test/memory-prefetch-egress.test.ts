@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -10,6 +9,7 @@ import type {
 import type { MemoryProvider, MemoryProviderEgress } from "../src/core/memory/memory-provider.ts";
 import { MemoryController } from "../src/core/memory-controller.ts";
 import type { SettingsManager } from "../src/core/settings-manager.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 type ResolvedMemorySettings = ReturnType<SettingsManager["getMemoryRetrievalSettings"]>;
 
@@ -90,7 +90,7 @@ describe("memory retrieval egress policy", () => {
 	});
 
 	async function createController(settings: ResolvedMemorySettings): Promise<MemoryController> {
-		const tempDir = mkdtempSync(join(tmpdir(), "pi-memory-egress-"));
+		const tempDir = makeTempDir("pi-memory-egress-");
 		const agentDir = join(tempDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
 		tempDirs.push(tempDir);

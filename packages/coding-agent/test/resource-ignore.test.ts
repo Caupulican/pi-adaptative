@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { addResourceIgnoreRules, createResourceIgnoreMatcher } from "../src/core/resource-ignore.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("resource ignore rules", () => {
 	const roots: string[] = [];
@@ -11,7 +11,7 @@ describe("resource ignore rules", () => {
 	});
 
 	it("owns root, nested, comment, escaped marker, and negation semantics", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-resource-ignore-"));
+		const root = tempDir("pi-resource-ignore-");
 		roots.push(root);
 		const nested = join(root, "nested");
 		mkdirSync(nested);

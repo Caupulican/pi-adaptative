@@ -10,18 +10,18 @@
  * The fences matter as much as the rejection: a repo with a REAL `p/` tree must keep working.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentTool } from "@caupulican/pi-agent-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { collectUnknownAliasTokens, type PathAliasTable } from "../src/core/context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../src/core/context/path-alias-tool-wrap.ts";
+import { tempDir } from "./temp-dir.ts";
 
 let dir: string;
 
 beforeEach(() => {
-	dir = mkdtempSync(join(tmpdir(), "pi-unminted-alias-"));
+	dir = tempDir("pi-unminted-alias-");
 });
 
 afterEach(() => {

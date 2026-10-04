@@ -1,11 +1,11 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { CapabilityEnvelope, EvidenceRef, Finding } from "../src/core/autonomy/contracts.ts";
 import { isAutomataAvailable } from "../src/core/research/automata-provider.ts";
 import { createEvidenceBundle } from "../src/core/research/evidence-bundle.ts";
 import { evaluateResearchRequest } from "../src/core/research/research-gate.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 describe("Research Gate (Phase 5)", () => {
 	describe("createEvidenceBundle", () => {
@@ -141,7 +141,7 @@ describe("Research Gate (Phase 5)", () => {
 		let dbPath: string;
 
 		beforeEach(() => {
-			tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-automata-test-"));
+			tempDir = makeTempDir("pi-automata-test-");
 			execPath = path.join(tempDir, "automata");
 			dbPath = path.join(tempDir, "db.sqlite");
 		});

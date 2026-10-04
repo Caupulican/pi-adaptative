@@ -34,9 +34,7 @@
  * gated at the existing ProcessMatrixStorePort; `waitForIdle` is used instead of timing guesses, and
  * every scratch directory is removed even when an assertion fails.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentIdentityContract } from "../src/core/orchestration/contracts.ts";
 import type { ProcessMatrixEntry } from "../src/core/process-matrix/codes.ts";
@@ -53,6 +51,7 @@ import {
 import { buildEntryId, readEntry, writeEntry } from "../src/core/process-matrix/store.ts";
 import { applyAdoption, beginWindDown } from "../src/core/process-matrix/supervisor.ts";
 import { PI_WORKTREE_LANE_ENV } from "../src/core/worktree-sync/lane-binding.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const POLL_MS = 1_000;
 const HEARTBEAT_MS = 5_000;
@@ -145,7 +144,7 @@ interface Harness {
 const cleanups: string[] = [];
 
 function makeHarness(): Harness {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-process-matrix-write-lifetime-"));
+	const agentDir = tempDir("pi-process-matrix-write-lifetime-");
 	cleanups.push(agentDir);
 	const store = gatedStore();
 	const harness: Harness = {

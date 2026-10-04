@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { SessionManager } from "@caupulican/pi-agent-core/session";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
@@ -13,6 +12,7 @@ import {
 } from "../../src/core/memory/user-preference-metadata.ts";
 import { ReflectionController, type ReflectionControllerDeps } from "../../src/core/reflection-controller.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
+import { tempDir as makeTempDir } from "../temp-dir.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 const directories: string[] = [];
@@ -22,7 +22,7 @@ afterEach(async () => {
 	for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 function directory(): string {
-	const path = mkdtempSync(join(tmpdir(), "pi-persona-independent-"));
+	const path = makeTempDir("pi-persona-independent-");
 	directories.push(path);
 	return path;
 }

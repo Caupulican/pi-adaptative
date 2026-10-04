@@ -1,9 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { MAX_RETAINED_CERTIFICATES, SteeringCertificateStore } from "../src/core/steering/certificate-store.ts";
 import type { SteeringCertificate } from "../src/core/steering/types.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function certificate(index: number): SteeringCertificate {
 	return {
@@ -27,7 +27,7 @@ describe("steering certificate store bound", () => {
 	});
 
 	it("keeps the newest certificates only, in memory and on disk, and a reload obeys the same bound", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-cert-bound-"));
+		const dir = tempDir("pi-cert-bound-");
 		dirs.push(dir);
 		const path = join(dir, "certificates.json");
 		const store = new SteeringCertificateStore(path);

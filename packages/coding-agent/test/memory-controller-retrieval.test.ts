@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -9,6 +8,7 @@ import { formatOkfMemoryDocument } from "../src/core/context/okf-memory.ts";
 import type { MemoryProvider as LegacyMemoryProvider } from "../src/core/memory/memory-provider.ts";
 import { MemoryController } from "../src/core/memory-controller.ts";
 import { getDirectoryResourceProfileInfo, type SettingsManager } from "../src/core/settings-manager.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 function settings(): SettingsManager {
 	return {
@@ -70,7 +70,7 @@ describe("MemoryController context retrieval", () => {
 	let agentDir: string;
 
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-memory-controller-"));
+		tempDir = makeTempDir("pi-memory-controller-");
 		agentDir = join(tempDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
 		writeFileSync(join(agentDir, "USER.md"), "User prefers compact memory.\n", "utf8");

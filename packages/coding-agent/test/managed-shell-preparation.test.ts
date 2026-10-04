@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -11,6 +11,7 @@ import {
 import { disposeShellExecutionSessionAndWait } from "../src/core/tools/shell-execution-session.ts";
 import { getShellEnv } from "../src/utils/shell.ts";
 import type { ManagedToolResolver } from "../src/utils/tools-manager.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function availableResolver(path = "/managed/bin/rg.exe"): ManagedToolResolver {
 	return vi.fn(async () => ({ status: "available" as const, path }));
@@ -105,7 +106,7 @@ describe("managed shell preparation", () => {
 
 	it("normalizes duplicate PATH casing using the caller's override and prepends managed bin", () => {
 		const originalEnvironment = { ...process.env };
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-shell-env-"));
+		const agentDir = tempDir("pi-shell-env-");
 		const systemPath = join(agentDir, "system-bin");
 		const credentialEntries = [join(agentDir, "credential-bin"), join(agentDir, "credential-tools")];
 		const credentialPath = credentialEntries.join(delimiter);
@@ -128,7 +129,7 @@ describe("managed shell preparation", () => {
 
 	it("keeps POSIX PATH casing distinct while injecting only the canonical PATH", () => {
 		const originalEnvironment = { ...process.env };
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-shell-posix-env-"));
+		const agentDir = tempDir("pi-shell-posix-env-");
 		const executablePath = join(agentDir, "system-bin");
 		const credentialValue = join(agentDir, "credential-bin");
 		const input = { PATH: executablePath, Path: credentialValue, KEEP: "yes" };
@@ -192,7 +193,7 @@ describe("managed shell preparation", () => {
 	});
 
 	it("provisions the direct controller path for a clean-PATH pipeline and preserves no-match exit 1", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-managed-rg-controller-"));
+		const directory = tempDir("pi-managed-rg-controller-");
 		try {
 			const rgPath = writeFakeRipgrep(directory);
 			writeFileSync(join(directory, "needle.txt"), "needle\nother\n");
@@ -218,7 +219,7 @@ describe("managed shell preparation", () => {
 	});
 
 	it("provisions the bash-tool path while leaving custom operations remote", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-managed-rg-tool-"));
+		const directory = tempDir("pi-managed-rg-tool-");
 		const sessionKey = `managed-rg-tool:${Math.random().toString(36).slice(2)}`;
 		try {
 			const rgPath = writeFakeRipgrep(directory);

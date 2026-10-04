@@ -1,10 +1,10 @@
-import fs, { mkdtempSync, rmSync } from "node:fs";
+import fs, { rmSync } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ModelAdaptationStore } from "../src/core/models/adaptation-store.ts";
 import { nodeFs } from "../src/core/util/faultable-fs.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const dirs: string[] = [];
 const stores: ModelAdaptationStore[] = [];
@@ -21,7 +21,7 @@ afterEach(() => {
 });
 
 function fixture() {
-	const dir = mkdtempSync(join(tmpdir(), "pi-adaptation-recovery-"));
+	const dir = tempDir("pi-adaptation-recovery-");
 	dirs.push(dir);
 	const path = join(dir, "adaptation.json");
 	const store = new ModelAdaptationStore(path, { fingerprint, readOnly: false, deferPerfSamples: true });

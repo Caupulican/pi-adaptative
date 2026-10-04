@@ -5,9 +5,7 @@
  * wall-clock gap is far larger than its own interval is the observation that separates the two: it
  * is recorded in the session log as `clock_jump`.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type ClockJumpRecord,
@@ -20,6 +18,7 @@ import {
 	startProcessMatrixRuntime,
 } from "../src/core/process-matrix/runtime.ts";
 import { PI_WORKTREE_LANE_ENV } from "../src/core/worktree-sync/lane-binding.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const HEARTBEAT_MS = 5_000;
 const T0 = Date.parse("2026-09-11T09:00:00.000Z");
@@ -33,7 +32,7 @@ interface Harness {
 }
 
 function makeHarness(): Harness {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-process-matrix-clock-jump-"));
+	const agentDir = tempDir("pi-process-matrix-clock-jump-");
 	cleanups.push(agentDir);
 	const clock = { ms: T0 };
 	const jumps: ClockJumpRecord[] = [];

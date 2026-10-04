@@ -1,11 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { applyGoalEvent, createGoalState } from "../src/core/goals/goal-state.ts";
 import { repairTaskId, SessionObjectiveRuntime } from "../src/core/objective-execution/session-objective-runtime.ts";
 import { DelegationOrchestrationLedger } from "../src/core/orchestration/delegation-ledger.ts";
 import { goalObjectiveId } from "../src/core/orchestration/work-state-projection.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("SessionObjectiveRuntime", () => {
 	const dirs: string[] = [];
@@ -14,7 +13,7 @@ describe("SessionObjectiveRuntime", () => {
 	});
 
 	it("reconciles the live goal into its durable objective, records repairs once, and reads budget and limitations from the session", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-objective-runtime-"));
+		const agentDir = tempDir("pi-objective-runtime-");
 		dirs.push(agentDir);
 		const ledger = new DelegationOrchestrationLedger({ agentDir, sessionId: "session-1" });
 		const now = "2026-09-21T00:00:00.000Z";

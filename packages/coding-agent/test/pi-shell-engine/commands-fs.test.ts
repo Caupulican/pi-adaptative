@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { tempDir } from "../temp-dir.ts";
 
 const ENGINE_DIR = join(import.meta.dirname, "..", "..", "src", "bundled-resources", "runtimes", "pi-shell-engine");
 
@@ -59,7 +59,7 @@ describeOrSkip("pi-shell-engine commands/fs.py", () => {
 	let root: string;
 
 	beforeEach(() => {
-		root = mkdtempSync(join(tmpdir(), "pi-shell-fs-"));
+		root = tempDir("pi-shell-fs-");
 	});
 
 	afterEach(() => {
@@ -553,7 +553,7 @@ describeOrSkip("pi-shell-engine commands/fs.py", () => {
 	// Verify paths are resolved against ctx.cwd only, never via os.chdir / process-global state:
 	// two concurrent calls with different cwd values must not interfere with each other.
 	it("resolves paths against ctx.cwd without mutating process state", () => {
-		const otherRoot = mkdtempSync(join(tmpdir(), "pi-shell-fs-other-"));
+		const otherRoot = tempDir("pi-shell-fs-other-");
 		try {
 			writeFileSync(join(root, "here.txt"), "");
 			writeFileSync(join(otherRoot, "there.txt"), "");

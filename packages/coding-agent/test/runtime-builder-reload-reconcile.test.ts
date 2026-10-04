@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { Agent, AgentContext } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -18,6 +17,7 @@ import { SettingsManager } from "../src/core/settings-manager.ts";
 import { SkillVaultController } from "../src/core/skill-vault.ts";
 import type { LoadExtensionsResult, ResourceLoader } from "../src/index.ts";
 import { createTestResourceLoader } from "./suite/test-resources.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 /**
  * RuntimeBuilder's reload path must call the optional `reconcileLocalRuntimes` hook
@@ -168,7 +168,7 @@ describe("RuntimeBuilder.reload — local-runtime reconcile hook", () => {
 	});
 
 	it("invokes reconcileLocalRuntimes exactly once after a successful reload", async () => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-reconcile-"));
+		tempDir = makeTempDir("pi-runtime-builder-reconcile-");
 		let extensionsResult: LoadExtensionsResult = { extensions: [], errors: [], runtime: createExtensionRuntime() };
 		const resourceLoader: ResourceLoader = {
 			getExtensions: () => extensionsResult,
@@ -204,7 +204,7 @@ describe("RuntimeBuilder.reload — local-runtime reconcile hook", () => {
 	});
 
 	it("does not invoke reconcileLocalRuntimes when a reload fails and rolls back", async () => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-reconcile-fail-"));
+		tempDir = makeTempDir("pi-runtime-builder-reconcile-fail-");
 		let extensionsResult: LoadExtensionsResult = { extensions: [], errors: [], runtime: createExtensionRuntime() };
 		let reloadCount = 0;
 		const resourceLoader: ResourceLoader = {
@@ -250,7 +250,7 @@ describe("RuntimeBuilder.reload — local-runtime reconcile hook", () => {
 	it.each(["initializeMemory", "reconcileLocalRuntimes"] as const)(
 		"does not roll back an accepted resource commit when %s fails afterward",
 		async (hook) => {
-			tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-committed-"));
+			tempDir = makeTempDir("pi-runtime-builder-committed-");
 			const loader = createTestResourceLoader();
 			loader.reload = async () => {
 				const result = { extensions: [], errors: [], runtime: createExtensionRuntime() };
@@ -290,7 +290,7 @@ describe("RuntimeBuilder.reconcileLoadedExtensions — import authority", () => 
 	});
 
 	it("does not import discoverable extensions without an active profile grant", async () => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-no-profile-"));
+		tempDir = makeTempDir("pi-runtime-builder-no-profile-");
 		const discoverablePath = join(tempDir, "discovered-extension", "index.ts");
 		let loadCalls = 0;
 		const extensionsResult: LoadExtensionsResult = {
@@ -379,7 +379,7 @@ describe("RuntimeBuilder.reload — unified quiesce registry", () => {
 	}
 
 	it("refuses reload() while a background lane is registered, and proceeds once it deregisters", async () => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-quiesce-"));
+		tempDir = makeTempDir("pi-runtime-builder-quiesce-");
 		const { deps, getCalls } = makeDeps(tempDir, makeTrivialResourceLoader());
 		const runtimeBuilder = new RuntimeBuilder(deps);
 
@@ -393,7 +393,7 @@ describe("RuntimeBuilder.reload — unified quiesce registry", () => {
 	});
 
 	it("refuses reload() while a scout run is registered", async () => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-quiesce-scout-"));
+		tempDir = makeTempDir("pi-runtime-builder-quiesce-scout-");
 		const { deps } = makeDeps(tempDir, makeTrivialResourceLoader());
 		const runtimeBuilder = new RuntimeBuilder(deps);
 
@@ -404,7 +404,7 @@ describe("RuntimeBuilder.reload — unified quiesce registry", () => {
 	});
 
 	it("refuses reconcileLoadedExtensions() while background work is in flight (same gate, all call sites)", async () => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-quiesce-reconcile-"));
+		tempDir = makeTempDir("pi-runtime-builder-quiesce-reconcile-");
 		const { deps } = makeDeps(tempDir, makeTrivialResourceLoader());
 		const runtimeBuilder = new RuntimeBuilder(deps);
 
@@ -416,7 +416,7 @@ describe("RuntimeBuilder.reload — unified quiesce registry", () => {
 	});
 
 	it("streaming/compacting refusals stay unchanged (checked before the registry, unaffected by it)", async () => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-runtime-builder-quiesce-streaming-"));
+		tempDir = makeTempDir("pi-runtime-builder-quiesce-streaming-");
 		const { deps } = makeDeps(tempDir, makeTrivialResourceLoader());
 		const streamingDeps: RuntimeBuilderDeps = { ...deps, isStreaming: () => true };
 		const runtimeBuilder = new RuntimeBuilder(streamingDeps);

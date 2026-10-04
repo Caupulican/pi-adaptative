@@ -1,12 +1,12 @@
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAssistantMessageEventStream, fauxAssistantMessage, getModel } from "@caupulican/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { withProviderAdmission } from "../src/core/provider-admission/gate.ts";
 import { ProviderAdmissionLedger, providerAdmissionDir } from "../src/core/provider-admission/ledger.ts";
 import { ProviderLimitedError, ProviderLimitStore } from "../src/core/provider-admission/limit-state.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const directories: string[] = [];
 afterEach(() => {
@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 function fixture() {
-	const directory = fs.mkdtempSync(join(tmpdir(), "pi-limit-read-"));
+	const directory = tempDir("pi-limit-read-");
 	directories.push(directory);
 	let now = 1_000;
 	const store = new ProviderLimitStore(directory, { now: () => now });

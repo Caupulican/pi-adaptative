@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { FileStoreProvider } from "../src/core/memory/providers/file-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("memory list target selection", () => {
 	const roots: string[] = [];
@@ -11,7 +11,7 @@ describe("memory list target selection", () => {
 		for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 	});
 	it("restores a user preference into standing context after restarting the provider", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-memory-user-context-"));
+		const root = tempDir("pi-memory-user-context-");
 		roots.push(root);
 		const options = { agentDir: join(root, "agent"), cwd: root, isChildSession: false };
 		const writer = new FileStoreProvider();
@@ -41,7 +41,7 @@ describe("memory list target selection", () => {
 	it.each(["memory", "project", "user", undefined] as const)(
 		"lists only the requested %s target, or every hot file when omitted",
 		async (target) => {
-			const root = mkdtempSync(join(tmpdir(), "pi-memory-list-target-"));
+			const root = tempDir("pi-memory-list-target-");
 			roots.push(root);
 			const provider = new FileStoreProvider();
 			await provider.initialize("list-target", { agentDir: join(root, "agent"), cwd: root, isChildSession: false });

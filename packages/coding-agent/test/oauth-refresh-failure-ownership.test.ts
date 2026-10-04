@@ -1,9 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { registerOAuthProvider, unregisterOAuthProvider } from "@caupulican/pi-ai/oauth";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage, FileAuthStorageBackend, OAuthCredentialUnusableError } from "../src/core/auth-storage.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const providerId = "oauth-failure-ownership-test";
 const directories: string[] = [];
@@ -16,7 +16,7 @@ afterEach(() => {
 
 describe("OAuth failed-refresh recovery preserves concurrent local intent", () => {
 	it.each(["sibling", "unreadable"])("handles %s storage after the failed transaction releases", async (action) => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-oauth-failure-recovery-"));
+		const directory = tempDir("pi-oauth-failure-recovery-");
 		directories.push(directory);
 		const path = join(directory, "auth.json");
 		const backend = new FileAuthStorageBackend(path);
@@ -72,7 +72,7 @@ describe("OAuth failed-refresh recovery preserves concurrent local intent", () =
 	it.each(["logout", "replacement", "unrelated", "none"])(
 		"does not undo %s intent while reloading after a failed refresh",
 		async (action) => {
-			const directory = mkdtempSync(join(tmpdir(), "pi-oauth-failure-ownership-"));
+			const directory = tempDir("pi-oauth-failure-ownership-");
 			directories.push(directory);
 			const path = join(directory, "auth.json");
 			const storage = AuthStorage.create(path);

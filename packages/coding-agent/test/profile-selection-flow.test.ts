@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { type ResourceProfileSettings, SettingsManager } from "../src/core/settings-manager.ts";
@@ -8,6 +7,7 @@ import {
 	ProfileMenuController,
 } from "../src/modes/interactive/profile-menu-controller.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { tempDir } from "./temp-dir.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 beforeAll(() => {
@@ -156,7 +156,7 @@ describe("profile selection persistence", () => {
 	});
 
 	it("persists /profiles none across restart instead of falling back to default or external-root profiles", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-profile-none-"));
+		const root = tempDir("pi-profile-none-");
 		try {
 			const agentDir = join(root, "agent");
 			const projectDir = join(root, "project");
@@ -305,7 +305,7 @@ describe("profile selection persistence", () => {
 	});
 
 	it("restores a deleted definition before reversing a later selection-write failure", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-profile-delete-rollback-"));
+		const root = tempDir("pi-profile-delete-rollback-");
 		try {
 			const agentDir = join(root, "agent");
 			const projectDir = join(root, "project");
@@ -335,7 +335,7 @@ describe("profile selection persistence", () => {
 	});
 
 	it("deleting an active directory profile persists none over lower-scope defaults", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-profile-delete-none-"));
+		const root = tempDir("pi-profile-delete-none-");
 		try {
 			const agentDir = join(root, "agent");
 			const projectDir = join(root, "project");
@@ -370,7 +370,7 @@ describe("profile selection persistence", () => {
 	});
 
 	it("deletes a project-settings profile from the project definition that owns it", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-profile-project-delete-"));
+		const root = tempDir("pi-profile-project-delete-");
 		try {
 			const agentDir = join(root, "agent");
 			const projectDir = join(root, "project");
@@ -392,7 +392,7 @@ describe("profile selection persistence", () => {
 	});
 
 	it("refuses deletion when the winning definition belongs to an external settings source", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-profile-external-delete-"));
+		const root = tempDir("pi-profile-external-delete-");
 		try {
 			const agentDir = join(root, "agent");
 			const projectDir = join(root, "project");
@@ -552,7 +552,7 @@ describe("active profile library edits", () => {
 	});
 
 	it("restores the persistent definition before reversing a post-doctor commit failure", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-profile-edit-rollback-"));
+		const root = tempDir("pi-profile-edit-rollback-");
 		try {
 			const agentDir = join(root, "agent");
 			const projectDir = join(root, "project");

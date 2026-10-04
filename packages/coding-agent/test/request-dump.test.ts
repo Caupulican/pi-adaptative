@@ -1,10 +1,10 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Context } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { dumpProviderRequest } from "../src/core/request-dump.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const originalDumpDir = process.env.PI_REQUEST_DUMP_DIR;
 const tempDirs: string[] = [];
@@ -23,7 +23,7 @@ function readDumpedPayload(dir: string): any {
 
 describe("dumpProviderRequest", () => {
 	it("records the full projected tool payload, including the parameters schema, not just name/description", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-request-dump-"));
+		const dir = tempDir("pi-request-dump-");
 		tempDirs.push(dir);
 		process.env.PI_REQUEST_DUMP_DIR = dir;
 
@@ -50,7 +50,7 @@ describe("dumpProviderRequest", () => {
 
 	it("does nothing when PI_REQUEST_DUMP_DIR is unset (opt-in only)", () => {
 		delete process.env.PI_REQUEST_DUMP_DIR;
-		const dir = mkdtempSync(join(tmpdir(), "pi-request-dump-unset-"));
+		const dir = tempDir("pi-request-dump-unset-");
 		tempDirs.push(dir);
 		// Never referenced by the call below, so nothing should be written to it or anywhere else --
 		// this just proves the call is a no-op, not a crash, absent the env var.
@@ -65,7 +65,7 @@ describe("dumpProviderRequest", () => {
 
 	it("never throws into the request it observes, even when the dump directory cannot be created", () => {
 		// A file where a directory is expected: mkdirSync(..., {recursive:true}) fails underneath it.
-		const dir = mkdtempSync(join(tmpdir(), "pi-request-dump-blocked-"));
+		const dir = tempDir("pi-request-dump-blocked-");
 		tempDirs.push(dir);
 		const blockedPath = join(dir, "not-a-directory");
 		writeFileSync(blockedPath, "occupied");

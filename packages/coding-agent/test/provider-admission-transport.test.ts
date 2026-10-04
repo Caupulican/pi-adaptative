@@ -1,11 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { type Api, createAssistantMessageEventStream, fauxAssistantMessage, type Model } from "@caupulican/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withProviderAdmission } from "../src/core/provider-admission/gate.ts";
 import { ProviderAdmissionLedger } from "../src/core/provider-admission/ledger.ts";
 import { ProviderLimitedError, ProviderLimitStore } from "../src/core/provider-admission/limit-state.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const model = { api: "faux", provider: "anthropic", id: "fixture" } as Model<Api>;
 const policy = { enabled: true, limits: { anthropic: 1 }, maxWaitMs: 10_000, foregroundLimitWaitMs: 10_000 };
@@ -15,7 +14,7 @@ let ledger: ProviderAdmissionLedger;
 let limits: ProviderLimitStore;
 
 beforeEach(() => {
-	dir = mkdtempSync(join(tmpdir(), "pi-admission-transport-"));
+	dir = tempDir("pi-admission-transport-");
 	now = 1_000;
 	ledger = new ProviderAdmissionLedger(dir, { now: () => now });
 	limits = new ProviderLimitStore(dir, { now: () => now });

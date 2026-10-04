@@ -14,8 +14,7 @@
  * turn).
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -27,6 +26,7 @@ import {
 	ProviderRequestContextController,
 } from "../src/core/provider-request-context-controller.ts";
 import type { SkillVaultController } from "../src/core/skill-vault.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const CWD = "/repo";
 
@@ -44,7 +44,7 @@ describe("path alias projection is append-only across requests", () => {
 	let turn = 0;
 
 	beforeEach(() => {
-		dir = mkdtempSync(join(tmpdir(), "pi-prefix-stability-"));
+		dir = tempDir("pi-prefix-stability-");
 		turn = 0;
 		runtime = new PathAliasRuntime(
 			() => CWD,

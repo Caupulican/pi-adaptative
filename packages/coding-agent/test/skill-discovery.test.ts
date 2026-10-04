@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { discoverSkillFiles } from "../src/core/skill-discovery.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("skill file discovery", () => {
 	const roots: string[] = [];
@@ -11,7 +11,7 @@ describe("skill file discovery", () => {
 	});
 
 	it("owns root markdown, skill-root stopping, agents mode, and ignore traversal", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-skill-discovery-"));
+		const root = tempDir("pi-skill-discovery-");
 		roots.push(root);
 		mkdirSync(join(root, "alpha", "nested"), { recursive: true });
 		mkdirSync(join(root, "ignored"));
@@ -26,7 +26,7 @@ describe("skill file discovery", () => {
 	});
 
 	it("discovers nested bare .md files in agents mode while ignoring root .md (F16)", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-skill-discovery-agents-"));
+		const root = tempDir("pi-skill-discovery-agents-");
 		roots.push(root);
 		mkdirSync(join(root, "vendor", "sub"), { recursive: true });
 		mkdirSync(join(root, "standalone-skill"));

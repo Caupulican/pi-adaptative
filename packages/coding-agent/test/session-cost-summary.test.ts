@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentMessage, AgentState } from "@caupulican/pi-agent-core";
 import type { FileEntry, SessionEntry, SessionManager } from "@caupulican/pi-agent-core/node";
@@ -270,7 +269,7 @@ describe("session cost summary", () => {
 	});
 
 	it("does not rescan the session log on unchanged footer redraws", () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-cost-cache-"));
+		const tempDir = sessionScratch("pi-session-cost-cache-");
 		try {
 			const now = new Date();
 			const entries = [assistant("one", now, 0.4)];
@@ -299,7 +298,7 @@ describe("session cost summary", () => {
 	});
 
 	it("bounds live tool-recovery telemetry retained by a long session", () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-tool-recovery-cap-"));
+		const tempDir = sessionScratch("pi-session-tool-recovery-cap-");
 		try {
 			const analytics = createAnalytics(tempDir, []);
 			for (let index = 0; index < 1_001; index++) {
@@ -326,7 +325,7 @@ describe("session cost summary", () => {
 	});
 
 	it("rolls TODAY at local midnight without changing CURRENT mid-session", () => {
-		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-cost-summary-"));
+		const tempDir = sessionScratch("pi-session-cost-summary-");
 		try {
 			const dayOne = new Date(2026, 5, 28, 12);
 			const dayTwo = new Date(2026, 5, 29, 12);

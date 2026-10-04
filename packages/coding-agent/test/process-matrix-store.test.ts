@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ProcessMatrixEntry } from "../src/core/process-matrix/codes.ts";
@@ -15,11 +14,12 @@ import {
 	writeEntryIfUnchanged,
 	writeEntryIfUnchangedSync,
 } from "../src/core/process-matrix/store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cleanups: string[] = [];
 
 function tempAgentDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-process-matrix-store-"));
+	const dir = tempDir("pi-process-matrix-store-");
 	cleanups.push(dir);
 	return dir;
 }

@@ -15,9 +15,7 @@
  * explicit stale-handoff rejection. Baseline behaviour reaches the first; a corrected owner reaches
  * the second; a persistence or delivery failure rejects the gate instead of hanging.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentIdentityContract } from "../src/core/orchestration/contracts.ts";
 import type { ProcessMatrixEntry } from "../src/core/process-matrix/codes.ts";
@@ -27,6 +25,7 @@ import {
 	type ProcessMatrixStorePort,
 	startProcessMatrixRuntime,
 } from "../src/core/process-matrix/runtime.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const MASTER_SESSION = "resume-ownership-master";
 const WORKER_SESSION = "resume-ownership-worker";
@@ -150,7 +149,7 @@ interface ResumeHarness {
 }
 
 function createResumeHarness(): ResumeHarness {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-resume-ownership-"));
+	const agentDir = tempDir("pi-resume-ownership-");
 	scratchRoots.push(agentDir);
 	const notices: string[] = [];
 	const diagnostics: string[] = [];

@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createFindToolDefinition } from "../../../src/core/tools/find.ts";
+import { tempDir } from "../../temp-dir.ts";
 
 /**
  * Regression test for https://github.com/earendil-works/pi-mono/issues/3302
@@ -20,7 +20,7 @@ describe("issue #3302 find returns no results for path-based glob patterns", () 
 	let tempRoot: string;
 
 	beforeEach(() => {
-		tempRoot = mkdtempSync(join(tmpdir(), "pi-3302-"));
+		tempRoot = tempDir("pi-3302-");
 		mkdirSync(join(tempRoot, "some", "parent", "child"), { recursive: true });
 		mkdirSync(join(tempRoot, "src", "foo", "bar"), { recursive: true });
 		writeFileSync(join(tempRoot, "some", "parent", "child", "file.ext"), "");

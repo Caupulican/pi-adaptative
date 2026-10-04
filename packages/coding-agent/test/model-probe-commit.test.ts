@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -8,6 +7,7 @@ import {
 	type ModelToolProbe,
 } from "../src/core/models/adaptation-store.ts";
 import { nodeFs } from "../src/core/util/faultable-fs.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const dirs: string[] = [];
 const key = "fixture/model";
@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 function fixture() {
-	const dir = mkdtempSync(join(tmpdir(), "pi-probe-commit-"));
+	const dir = tempDir("pi-probe-commit-");
 	dirs.push(dir);
 	const path = join(dir, "adaptation.json");
 	const store = new ModelAdaptationStore(path, { fingerprint, readOnly: false });

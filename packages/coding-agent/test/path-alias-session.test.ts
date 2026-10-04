@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve as pathResolve } from "node:path";
 import type { AgentMessage } from "@caupulican/pi-agent-core/types";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadPathAliasTableReadOnly, PathAliasRuntime } from "../src/core/context/path-alias-session.ts";
 import { PATH_ALIAS_LEGEND_CUSTOM_TYPE } from "../src/core/context/path-alias-table.ts";
 import { createSqlitePathAliasStore } from "../src/core/context/sqlite-runtime-index.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function toolResult(text: string, timestamp: number): AgentMessage {
 	return {
@@ -30,7 +30,7 @@ describe("PathAliasRuntime", () => {
 	});
 
 	it("resumes frozen aliases from sqlite without rescanning older messages", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-runtime-"));
+		const dir = tempDir("pi-path-alias-runtime-");
 		tempDirs.push(dir);
 		const databasePath = join(dir, "runtime.sqlite");
 		const first = new PathAliasRuntime(
@@ -62,14 +62,14 @@ describe("PathAliasRuntime", () => {
 	});
 
 	it("keeps alias meaning anchored to the original file when resumed under a different cwd", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-runtime-"));
+		const dir = tempDir("pi-path-alias-runtime-");
 		tempDirs.push(dir);
 		// Real OS-absolute directories (drive-letter-bearing on Windows) rather than a
 		// literal posix "/repoA" string, which node:path treats as current-drive-relative
 		// on Windows and so is not actually absolute there.
-		const cwdA = mkdtempSync(join(tmpdir(), "pi-path-alias-repoA-"));
+		const cwdA = tempDir("pi-path-alias-repoA-");
 		tempDirs.push(cwdA);
-		const cwdB = mkdtempSync(join(tmpdir(), "pi-path-alias-repoB-"));
+		const cwdB = tempDir("pi-path-alias-repoB-");
 		tempDirs.push(cwdB);
 		const databasePath = join(dir, "runtime.sqlite");
 		const first = new PathAliasRuntime(
@@ -99,7 +99,7 @@ describe("PathAliasRuntime", () => {
 	});
 
 	it("interprets legacy relative rows and reserves p/ tokens from already-scanned history", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-runtime-"));
+		const dir = tempDir("pi-path-alias-runtime-");
 		tempDirs.push(dir);
 		const databasePath = join(dir, "runtime.sqlite");
 		// Legacy database: relative fullPath row, advanced scan timestamp, no cwd or
@@ -129,7 +129,7 @@ describe("PathAliasRuntime", () => {
 		// The mark is a resume optimization, and writing it per request was one journaled SQLite
 		// commit per provider request. A lagging mark only means the next process rescans a few more
 		// messages, which the table extension makes idempotent.
-		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-runtime-"));
+		const dir = tempDir("pi-path-alias-runtime-");
 		tempDirs.push(dir);
 		const databasePath = join(dir, "runtime.sqlite");
 		const runtime = new PathAliasRuntime(
@@ -179,7 +179,7 @@ describe("PathAliasRuntime", () => {
 			);
 		}
 		function databaseIn(): string {
-			const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-runtime-"));
+			const dir = tempDir("pi-path-alias-runtime-");
 			tempDirs.push(dir);
 			return join(dir, "runtime.sqlite");
 		}
@@ -235,7 +235,7 @@ describe("PathAliasRuntime", () => {
 	});
 
 	it("avoids alias ids that collide with an on-disk p/ directory", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-runtime-"));
+		const dir = tempDir("pi-path-alias-runtime-");
 		tempDirs.push(dir);
 		const cwd = join(dir, "repo");
 		mkdirSync(join(cwd, "p"), { recursive: true });
@@ -254,7 +254,7 @@ describe("PathAliasRuntime", () => {
 	});
 
 	it("reserves observed real p/ paths durably across sessions", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-runtime-"));
+		const dir = tempDir("pi-path-alias-runtime-");
 		tempDirs.push(dir);
 		const databasePath = join(dir, "runtime.sqlite");
 		const first = new PathAliasRuntime(
@@ -279,7 +279,7 @@ describe("PathAliasRuntime", () => {
 	});
 
 	it("leaves host records opaque: their bytes never change and their paths mint nothing", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-runtime-"));
+		const dir = tempDir("pi-path-alias-runtime-");
 		tempDirs.push(dir);
 		const runtime = new PathAliasRuntime(
 			() => "/repo",
@@ -312,7 +312,7 @@ describe("PathAliasRuntime", () => {
 	});
 
 	it("persists a new path when every suffix alias_id is already stored", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-runtime-"));
+		const dir = tempDir("pi-path-alias-runtime-");
 		tempDirs.push(dir);
 		const databasePath = join(dir, "runtime.sqlite");
 		const runtime = new PathAliasRuntime(
@@ -333,7 +333,7 @@ describe("PathAliasRuntime", () => {
 
 	describe("sync memoization", () => {
 		it("returns the exact same result object on a repeated call with the same message-list identity", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-memo-"));
+			const dir = tempDir("pi-path-alias-memo-");
 			tempDirs.push(dir);
 			const runtime = new PathAliasRuntime(
 				() => "/repo",
@@ -355,7 +355,7 @@ describe("PathAliasRuntime", () => {
 
 			// And the content itself matches a fresh, unmemoized runtime computing the same input in a
 			// single call -- the memo must never change the answer, only how often it's computed.
-			const freshDir = mkdtempSync(join(tmpdir(), "pi-path-alias-memo-fresh-"));
+			const freshDir = tempDir("pi-path-alias-memo-fresh-");
 			tempDirs.push(freshDir);
 			const fresh = new PathAliasRuntime(
 				() => "/repo",
@@ -371,7 +371,7 @@ describe("PathAliasRuntime", () => {
 		});
 
 		it("misses the cache and recomputes correctly when the transcript grows", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-memo-grow-"));
+			const dir = tempDir("pi-path-alias-memo-grow-");
 			tempDirs.push(dir);
 			const runtime = new PathAliasRuntime(
 				() => "/repo",
@@ -391,7 +391,7 @@ describe("PathAliasRuntime", () => {
 			expect(grownResult.legend).toContain("p/bar.ts=packages/coding-agent/src/bar.ts");
 
 			// Matches a fresh, unmemoized runtime computing the grown transcript directly in one call.
-			const freshDir = mkdtempSync(join(tmpdir(), "pi-path-alias-memo-grow-fresh-"));
+			const freshDir = tempDir("pi-path-alias-memo-grow-fresh-");
 			tempDirs.push(freshDir);
 			const fresh = new PathAliasRuntime(
 				() => "/repo",
@@ -407,7 +407,7 @@ describe("PathAliasRuntime", () => {
 		});
 
 		it("mints a new path correctly mid-session after an earlier cache hit", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-memo-new-path-"));
+			const dir = tempDir("pi-path-alias-memo-new-path-");
 			tempDirs.push(dir);
 			const runtime = new PathAliasRuntime(
 				() => "/repo",
@@ -432,7 +432,7 @@ describe("PathAliasRuntime", () => {
 		});
 
 		it("recomputes instead of returning a stale result when the caller mutates the array in place", () => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-memo-mutate-"));
+			const dir = tempDir("pi-path-alias-memo-mutate-");
 			tempDirs.push(dir);
 			const runtime = new PathAliasRuntime(
 				() => "/repo",
@@ -473,7 +473,7 @@ describe("loadPathAliasTableReadOnly", () => {
 	});
 
 	it("returns undefined and creates nothing when the database file does not exist", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-readonly-"));
+		const dir = tempDir("pi-path-alias-readonly-");
 		tempDirs.push(dir);
 		const databasePath = join(dir, "missing", "runtime.sqlite");
 
@@ -485,7 +485,7 @@ describe("loadPathAliasTableReadOnly", () => {
 	});
 
 	it("reads rows already on disk without minting, extending, or writing back the table_cwd backfill", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-readonly-"));
+		const dir = tempDir("pi-path-alias-readonly-");
 		tempDirs.push(dir);
 		const databasePath = join(dir, "runtime.sqlite");
 		// A legacy row with no table_cwd meta set — ensureLoaded() would normally backfill that key
@@ -509,7 +509,7 @@ describe("loadPathAliasTableReadOnly", () => {
 	});
 
 	it("propagates a non-ENOENT read failure instead of silently degrading", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-readonly-"));
+		const dir = tempDir("pi-path-alias-readonly-");
 		tempDirs.push(dir);
 		const databasePath = join(dir, "runtime.sqlite");
 		// A file that exists but is not a valid sqlite database at all: this must not be confused
@@ -528,7 +528,7 @@ describe("PathAliasRuntime incremental render", () => {
 	});
 
 	it("keeps the rendered prefix and renders only what was appended, with earlier spellings frozen", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-render-"));
+		const dir = tempDir("pi-path-alias-render-");
 		tempDirs.push(dir);
 		const runtime = new PathAliasRuntime(
 			() => "/repo",
@@ -556,7 +556,7 @@ describe("PathAliasRuntime incremental render", () => {
 	});
 
 	it("never rewrites the legend record's own text", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-legend-"));
+		const dir = tempDir("pi-path-alias-legend-");
 		tempDirs.push(dir);
 		const runtime = new PathAliasRuntime(
 			() => "/repo",
@@ -602,7 +602,7 @@ describe("PathAliasRuntime legend delta records", () => {
 		} as AgentMessage;
 	}
 	function runtime(): PathAliasRuntime {
-		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-delta-"));
+		const dir = tempDir("pi-path-alias-delta-");
 		tempDirs.push(dir);
 		const opened = new PathAliasRuntime(
 			() => "/repo",
@@ -717,7 +717,7 @@ describe("PathAliasRuntime branch switch to older messages", () => {
 	});
 
 	function databaseIn(): string {
-		const dir = mkdtempSync(join(tmpdir(), "pi-path-alias-branch-"));
+		const dir = tempDir("pi-path-alias-branch-");
 		tempDirs.push(dir);
 		return join(dir, "runtime.sqlite");
 	}
@@ -765,7 +765,7 @@ describe("PathAliasRuntime branch switch to older messages", () => {
 	});
 
 	it("does not rescan history already scanned on the same branch, in process or after a restart (control)", () => {
-		const cwd = mkdtempSync(join(tmpdir(), "pi-path-alias-branch-"));
+		const cwd = tempDir("pi-path-alias-branch-");
 		tempDirs.push(cwd);
 		const databasePath = join(cwd, "runtime.sqlite");
 		const live = () =>
@@ -789,7 +789,7 @@ describe("PathAliasRuntime branch switch to older messages", () => {
 	});
 
 	it("keeps the shared prefix's spelling and existing alias ids when a branch switch mints", () => {
-		const cwd = mkdtempSync(join(tmpdir(), "pi-path-alias-branch-"));
+		const cwd = tempDir("pi-path-alias-branch-");
 		tempDirs.push(cwd);
 		mkdirSync(join(cwd, "packages", "app", "src"), { recursive: true });
 		writeFileSync(join(cwd, "packages", "app", "src", "kept.ts"), "export {};\n");
@@ -821,7 +821,7 @@ describe("PathAliasRuntime existence gate", () => {
 	});
 
 	it("mints only paths that exist from cwd, so a repo-root-relative spelling never becomes an alias", () => {
-		const cwd = mkdtempSync(join(tmpdir(), "pi-path-alias-exists-"));
+		const cwd = tempDir("pi-path-alias-exists-");
 		tempDirs.push(cwd);
 		mkdirSync(join(cwd, "packages", "coding-agent", "src"), { recursive: true });
 		writeFileSync(join(cwd, "packages", "coding-agent", "src", "real.ts"), "export {};\n");

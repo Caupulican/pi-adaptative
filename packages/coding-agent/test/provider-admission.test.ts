@@ -1,5 +1,4 @@
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { StreamFn } from "@caupulican/pi-agent-core";
 import { classifyFailure } from "@caupulican/pi-agent-core/reliability";
@@ -37,6 +36,7 @@ import {
 	providerLimitFromFailure,
 	usageWindowLimit,
 } from "../src/core/provider-admission/limit-state.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -44,7 +44,7 @@ afterEach(() => {
 });
 
 function agentDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-provider-admission-"));
+	const dir = tempDir("pi-provider-admission-");
 	tempDirs.push(dir);
 	return dir;
 }

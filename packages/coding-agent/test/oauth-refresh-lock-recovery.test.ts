@@ -1,10 +1,10 @@
-import { promises as fsPromises, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { promises as fsPromises, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { registerOAuthProvider, unregisterOAuthProvider } from "@caupulican/pi-ai/oauth";
 import lockfile from "proper-lockfile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage, FileAuthStorageBackend, OAuthCredentialUnusableError } from "../src/core/auth-storage.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const providerId = "oauth-lock-recovery-test";
 const directories: string[] = [];
@@ -17,7 +17,7 @@ afterEach(() => {
 
 describe("OAuth rotation survives loss of the refresh lock", () => {
 	it.each(["expiry", "rejection"])("saves rotated %s credentials after reacquiring ownership", async (trigger) => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-oauth-lock-recovery-"));
+		const directory = tempDir("pi-oauth-lock-recovery-");
 		directories.push(directory);
 		const path = join(directory, "auth.json");
 		const backend = new FileAuthStorageBackend(path);
@@ -60,7 +60,7 @@ describe("OAuth rotation survives loss of the refresh lock", () => {
 	});
 
 	it("keeps ordinary successful refresh to one transaction", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-oauth-lock-control-"));
+		const directory = tempDir("pi-oauth-lock-control-");
 		directories.push(directory);
 		const storage = AuthStorage.create(join(directory, "auth.json"));
 		storage.set(providerId, { type: "oauth", access: "expired", refresh: "original-refresh", expires: 0 });
@@ -101,7 +101,7 @@ describe("OAuth rotation survives loss of the refresh lock", () => {
 			"already-committed",
 			"provider-failure",
 		])(`${trigger} recovery respects %s without another provider call`, async (action) => {
-			const directory = mkdtempSync(join(tmpdir(), "pi-oauth-lock-races-"));
+			const directory = tempDir("pi-oauth-lock-races-");
 			directories.push(directory);
 			const path = join(directory, "auth.json");
 			const storage = AuthStorage.create(path);

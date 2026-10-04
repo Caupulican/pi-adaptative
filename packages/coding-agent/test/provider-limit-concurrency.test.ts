@@ -1,10 +1,9 @@
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { realpathSync, rmSync } from "node:fs";
 import { Worker } from "node:worker_threads";
 import { describe, expect, it } from "vitest";
 import { ProviderLimitStore } from "../src/core/provider-admission/limit-state.ts";
 import type { LimitContenderInput } from "./fixtures/provider-limit-contender.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function contender(input: LimitContenderInput) {
 	const worker = new Worker(new URL("./fixtures/provider-limit-contender.ts", import.meta.url), {
@@ -52,7 +51,7 @@ describe("provider cooldown serialization", () => {
 	it.each(["record", "clear", "read", "list"] as const)(
 		"%s cannot overwrite or remove a sibling's later limit after reading older state",
 		async (operation) => {
-			const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-limit-race-")));
+			const dir = realpathSync.native(tempDir("pi-limit-race-"));
 			const barrier = new SharedArrayBuffer(4);
 			const workers: Worker[] = [];
 			try {
@@ -103,7 +102,7 @@ describe("provider cooldown serialization", () => {
 	);
 
 	it("preserves a longer existing reset and respects reason-scoped clear without contention", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-limit-control-"));
+		const dir = tempDir("pi-limit-control-");
 		try {
 			const store = new ProviderLimitStore(dir, { now: () => 1_000 });
 			store.record("anthropic", { limitedUntil: 9_000, reason: "usage_window" });
@@ -118,7 +117,7 @@ describe("provider cooldown serialization", () => {
 	});
 
 	it("releases the path lock when the protected read throws", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-limit-unwind-"));
+		const dir = tempDir("pi-limit-unwind-");
 		try {
 			const healthy = new ProviderLimitStore(dir, { now: () => 1_000 });
 			healthy.record("anthropic", { limitedUntil: 2_000, reason: "rate_limit" });
@@ -140,7 +139,7 @@ describe("provider cooldown serialization", () => {
 	});
 
 	it("does not hold an unrelated account behind a paused cooldown update", async () => {
-		const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "pi-limit-account-")));
+		const dir = realpathSync.native(tempDir("pi-limit-account-"));
 		const barrier = new SharedArrayBuffer(4);
 		const workers: Worker[] = [];
 		try {

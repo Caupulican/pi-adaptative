@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import { waitForChildProcessWithTermination } from "../src/utils/child-process.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cliPath = resolve(import.meta.dirname, "../src/cli.ts");
 const tempDirs: string[] = [];
@@ -16,7 +16,7 @@ afterEach(() => {
 });
 
 function createTempDir(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-session-id-readonly-"));
+	const dir = tempDir("pi-session-id-readonly-");
 	tempDirs.push(dir);
 	return dir;
 }

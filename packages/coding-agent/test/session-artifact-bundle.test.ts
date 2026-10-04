@@ -1,5 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { orchestrationSessionDir } from "../src/core/agent-paths.ts";
@@ -7,6 +6,7 @@ import {
 	deleteForegroundSessionBundle,
 	type SessionArtifactPathDeletion,
 } from "../src/core/session-artifact-bundle.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const tempDirs: string[] = [];
 
@@ -16,7 +16,7 @@ function createSessionBundle(sessionId: string): {
 	artifactPath: string;
 	unrelatedPath: string;
 } {
-	const root = mkdtempSync(join(tmpdir(), "pi-session-artifact-bundle-"));
+	const root = tempDir("pi-session-artifact-bundle-");
 	tempDirs.push(root);
 	const agentDir = join(root, "agent");
 	const sessionPath = join(root, "sessions", `${sessionId}.jsonl`);

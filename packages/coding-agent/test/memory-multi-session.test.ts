@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionContext, ToolDefinition } from "../src/core/extensions/types.ts";
 import type { MemoryLifecycleContext } from "../src/core/memory/memory-provider.ts";
 import { FileStoreProvider } from "../src/core/memory/providers/file-store.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function getMemoryTool(provider: FileStoreProvider): ToolDefinition {
 	const tool = provider.getToolDefinitions().find((candidate) => candidate.name === "memory");
@@ -31,7 +31,7 @@ describe("FileStoreProvider multi-session ownership", () => {
 	});
 
 	it("serializes concurrent writes from two legitimate sessions without treating either as drift", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-memory-multi-session-"));
+		const root = tempDir("pi-memory-multi-session-");
 		tempDirs.push(root);
 		const agentDir = join(root, "agent");
 		const context: MemoryLifecycleContext = { agentDir, cwd: root, isChildSession: false };
@@ -52,7 +52,7 @@ describe("FileStoreProvider multi-session ownership", () => {
 	});
 
 	it("recovers a managed write interrupted after the content rename without reporting false drift", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-memory-pending-recovery-"));
+		const root = tempDir("pi-memory-pending-recovery-");
 		tempDirs.push(root);
 		const agentDir = join(root, "agent");
 		const context: MemoryLifecycleContext = { agentDir, cwd: root, isChildSession: false };

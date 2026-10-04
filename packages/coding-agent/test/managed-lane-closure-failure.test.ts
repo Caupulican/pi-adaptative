@@ -12,9 +12,7 @@
  * keeps its own control here; the frozen managed-lane suite owns the missing-generation semantics
  * and is not duplicated.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { WorkerClaim } from "../src/core/autonomy/contracts.ts";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
@@ -24,6 +22,7 @@ import type { ManagedLaneEvent } from "../src/core/extensions/types.ts";
 import type { AppendOrchestrationEventInput, OrchestrationEvent } from "../src/core/orchestration/contracts.ts";
 import { OrchestrationEventStore } from "../src/core/orchestration/event-store.ts";
 import { isRetainedWorkerLane } from "../src/modes/interactive/components/agents-overlay.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const LANE_ID = "collaboration:team:reviewer";
 const roots: string[] = [];
@@ -94,7 +93,7 @@ interface Harness {
 }
 
 function harness(sessionId: string): Harness {
-	const root = mkdtempSync(join(tmpdir(), "pi-managed-closure-failure-"));
+	const root = tempDir("pi-managed-closure-failure-");
 	roots.push(root);
 	const store = new FaultInjectingEventStore({ agentDir: root, sessionId });
 	const lifecycle = new WorkerLifecycle({ agentDir: root, sessionId, store });

@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { JsonObject } from "../src/core/autonomy/contracts.ts";
 import {
@@ -45,12 +43,13 @@ import {
 	createTestWorkerExecutionAuthority,
 	createTestWorkerOrchestrationProfile,
 } from "./orchestration-profile-fixture.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 const NOW = "2026-08-07T15:00:00.000Z";
 
 function root(): string {
-	const directory = mkdtempSync(join(tmpdir(), "pi-orchestration-projection-limits-"));
+	const directory = tempDir("pi-orchestration-projection-limits-");
 	roots.push(directory);
 	return directory;
 }

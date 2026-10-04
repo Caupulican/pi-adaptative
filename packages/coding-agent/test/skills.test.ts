@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "os";
 import { join, resolve } from "path";
 import { describe, expect, it } from "vitest";
 import type { ResourceDiagnostic } from "../src/core/diagnostics.ts";
 import { loadSkills, loadSkillsFromDir, readSkillFrontmatterFile, type Skill } from "../src/core/skills.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const fixturesDir = resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = resolve(import.meta.dirname, "fixtures/skills-collision");
@@ -245,7 +246,7 @@ describe("skills", () => {
 		});
 
 		it("reads only bounded frontmatter during discovery, regardless of body size", () => {
-			const root = mkdtempSync(join(tmpdir(), "pi-skill-frontmatter-"));
+			const root = tempDir("pi-skill-frontmatter-");
 			try {
 				const skillDir = join(root, "large-skill");
 				mkdirSync(skillDir);
@@ -356,7 +357,7 @@ describe("skills", () => {
 
 	describe("BOM handling and undeclared skill ignore (F15 & F17)", () => {
 		it("loads a skill with UTF-8 BOM frontmatter (F15)", () => {
-			const root = mkdtempSync(join(tmpdir(), "pi-skill-bom-"));
+			const root = tempDir("pi-skill-bom-");
 			try {
 				const skillDir = join(root, "bom-skill");
 				mkdirSync(skillDir);
@@ -382,7 +383,7 @@ describe("skills", () => {
 		});
 
 		it("silently ignores root README.md and AGENTS.md without frontmatter (F17)", () => {
-			const root = mkdtempSync(join(tmpdir(), "pi-skill-undeclared-"));
+			const root = tempDir("pi-skill-undeclared-");
 			try {
 				writeFileSync(join(root, "README.md"), "# Project Readme\nNo frontmatter here.", "utf8");
 				writeFileSync(join(root, "AGENTS.md"), "# Project Agents\nJust documentation.", "utf8");
@@ -400,7 +401,7 @@ describe("skills", () => {
 		});
 
 		it("loads single-file root skill with valid frontmatter (F17 feature protection)", () => {
-			const root = mkdtempSync(join(tmpdir(), "pi-skill-single-file-"));
+			const root = tempDir("pi-skill-single-file-");
 			try {
 				writeFileSync(
 					join(root, "my-skill.md"),
@@ -423,7 +424,7 @@ describe("skills", () => {
 		});
 
 		it("emits diagnostic on malformed SKILL.md (F17 regression)", () => {
-			const root = mkdtempSync(join(tmpdir(), "pi-skill-malformed-"));
+			const root = tempDir("pi-skill-malformed-");
 			try {
 				const skillDir = join(root, "bad-skill");
 				mkdirSync(skillDir);

@@ -1,5 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Component } from "@caupulican/pi-tui";
 import { Container } from "@caupulican/pi-tui";
@@ -8,6 +7,7 @@ import { handleConfigRestoreCommand } from "../src/modes/interactive/config-back
 import { EditorOverlayHost } from "../src/modes/interactive/editor-overlay-host.ts";
 import { handleInstallResourcesCommand } from "../src/modes/interactive/resource-shell-commands.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function component(label: string): Component {
 	return {
@@ -134,7 +134,7 @@ describe("selector supersession liveness", () => {
 	});
 
 	it("settles a restore confirmation when another overlay supersedes it", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-config-restore-supersession-"));
+		const root = tempDir("pi-config-restore-supersession-");
 		try {
 			const backupFile = join(root, "backup.json");
 			writeFileSync(

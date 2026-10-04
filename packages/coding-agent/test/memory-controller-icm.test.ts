@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MemoryProvider } from "../src/core/memory/memory-provider.ts";
@@ -8,6 +7,7 @@ import { IcmProvider } from "../src/core/memory/providers/icm.ts";
 import { TranscriptRecallProvider } from "../src/core/memory/providers/transcript-recall.ts";
 import { MemoryController } from "../src/core/memory-controller.ts";
 import type { MemorySystem, SettingsManager } from "../src/core/settings-manager.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("MemoryController system isolation", () => {
 	let root: string;
@@ -16,7 +16,7 @@ describe("MemoryController system isolation", () => {
 	let refresh: () => void;
 
 	beforeEach(() => {
-		root = mkdtempSync(join(tmpdir(), "pi-memory-isolation-"));
+		root = tempDir("pi-memory-isolation-");
 		system = "icm";
 		refresh = vi.fn(() => {});
 		const settings = {

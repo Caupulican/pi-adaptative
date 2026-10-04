@@ -1,5 +1,4 @@
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { copyFileSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -180,7 +179,7 @@ describe.skipIf(process.platform === "win32")("TransformersRuntime", () => {
 	});
 
 	it("repairs an orphaned venv by bootstrapping pip before package installation", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-transformers-orphan-"));
+		const agentDir = tempDir("pi-transformers-orphan-");
 		const venvDir = join(agentDir, "runtimes", "hf-transformers", "venv");
 		const pythonPath = join(venvDir, "bin", "python");
 		mkdirSync(venvDir, { recursive: true });
@@ -219,7 +218,7 @@ describe.skipIf(process.platform === "win32")("TransformersRuntime", () => {
 	});
 
 	it("recreates a stale venv whose pyvenv.cfg points at a different interpreter", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-transformers-stale-"));
+		const agentDir = tempDir("pi-transformers-stale-");
 		const venvDir = join(agentDir, "runtimes", "hf-transformers", "venv");
 		const pythonPath = join(venvDir, "bin", "python");
 		mkdirSync(venvDir, { recursive: true });
@@ -253,7 +252,7 @@ describe.skipIf(process.platform === "win32")("TransformersRuntime", () => {
 	});
 
 	it("returns an actionable venv package command when Python cannot create a venv", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-transformers-no-venv-"));
+		const agentDir = tempDir("pi-transformers-no-venv-");
 		const runtime = new TransformersRuntime({
 			agentDir,
 			modelId: "openbmb/MiniCPM5-1B",
@@ -727,7 +726,7 @@ describe.skipIf(process.platform === "win32")("OllamaRuntime", () => {
 	it("starts an isolated acceptance server against one explicit model store without changing the profile", async () => {
 		let serveEnv: NodeJS.ProcessEnv | undefined;
 		let up = false;
-		const storeDir = mkdtempSync(join(tmpdir(), "pi-acceptance-model-store-"));
+		const storeDir = tempDir("pi-acceptance-model-store-");
 		const runtime = new OllamaRuntime({
 			agentDir: "/agent",
 			profileMode: "low-impact",
@@ -835,7 +834,7 @@ describe.skipIf(process.platform === "win32")("OllamaRuntime", () => {
 	});
 
 	it("detect identifies the active store for owned and explicit user-store serves", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-ollama-active-store-"));
+		const root = tempDir("pi-ollama-active-store-");
 		async function startRuntime(useOwnedStore: boolean) {
 			let up = false;
 			const runtime = new OllamaRuntime({
@@ -882,7 +881,7 @@ describe.skipIf(process.platform === "win32")("OllamaRuntime", () => {
 	});
 
 	it("imports user Ollama models into the pi-owned store with idempotent hardlink-or-copy transfer", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-ollama-import-"));
+		const root = tempDir("pi-ollama-import-");
 		try {
 			const homeDir = join(root, "home");
 			const agentDir = join(root, "agent");
@@ -922,7 +921,7 @@ describe.skipIf(process.platform === "win32")("OllamaRuntime", () => {
 	});
 
 	it("falls back to blob copies when hardlinking crosses filesystems", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-ollama-import-copy-"));
+		const root = tempDir("pi-ollama-import-copy-");
 		try {
 			const homeDir = join(root, "home");
 			const agentDir = join(root, "agent");

@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -11,11 +10,12 @@ import {
 	registerInFlightWork,
 	resetInFlightWorkRegistryForTests,
 } from "../src/core/reload-blockers.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 let tempDir = "";
 
 function createTempAgentDir(): string {
-	tempDir = mkdtempSync(join(tmpdir(), "pi-reload-blockers-"));
+	tempDir = makeTempDir("pi-reload-blockers-");
 	mkdirSync(tempDir, { recursive: true });
 	return tempDir;
 }

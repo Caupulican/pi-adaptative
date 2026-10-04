@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { type StreamFn, type StreamIdleOptions, withStreamIdleWatchdog } from "@caupulican/pi-agent-core";
 import { createAssistantMessageEventStream } from "@caupulican/pi-ai/event-stream";
 import type { Api, AssistantMessage, Context, Model } from "@caupulican/pi-ai/types";
@@ -12,6 +10,7 @@ import {
 	updateModelPerfProfile,
 	withModelPerfProfile,
 } from "../src/core/models/perf-profile.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const MODEL = { api: "openai-completions", provider: "faux", id: "slow-local" } as Model<Api>;
 const CONTEXT = { messages: [{ role: "user", content: "hello" }] } as Context;
@@ -307,7 +306,7 @@ describe("model perf profile", () => {
 	});
 
 	it("persists the first-progress retry ladder across store instances", () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-perf-profile-"));
+		const agentDir = tempDir("pi-perf-profile-");
 		dirs.push(agentDir);
 		const options = {
 			fingerprint: () => ({ id: "host-a", cpu: "cpu", cores: 8, totalMemGb: 32 }),
@@ -355,7 +354,7 @@ describe("model perf profile", () => {
 
 	it("records a successful stream sample so the next request uses profiled bounds", async () => {
 		vi.useFakeTimers();
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-perf-profile-"));
+		const agentDir = tempDir("pi-perf-profile-");
 		dirs.push(agentDir);
 		const store = ModelAdaptationStore.forAgentDir(agentDir, {
 			fingerprint: () => ({ id: "host-a", cpu: "cpu", cores: 8, totalMemGb: 32 }),
@@ -531,7 +530,7 @@ describe("model perf profile", () => {
 
 	it("falls back to request-to-first-token timing when headers are deferred until the first token", async () => {
 		vi.useFakeTimers();
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-perf-profile-"));
+		const agentDir = tempDir("pi-perf-profile-");
 		dirs.push(agentDir);
 		const store = ModelAdaptationStore.forAgentDir(agentDir, {
 			fingerprint: () => ({ id: "host-a", cpu: "cpu", cores: 8, totalMemGb: 32 }),

@@ -1,16 +1,16 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type ModelAdaptationRule, ModelAdaptationStore } from "../src/core/models/adaptation-store.ts";
 import type { HostFingerprint } from "../src/core/models/host-state-store.ts";
+import { tempDir } from "./temp-dir.ts";
 import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
 
 const hostA: HostFingerprint = { id: "host-a", cpu: "cpu-a", cores: 8, totalMemGb: 32 };
 const hostB: HostFingerprint = { id: "host-b", cpu: "cpu-b", cores: 4, totalMemGb: 16 };
 
 function tempAgentDir(): string {
-	return mkdtempSync(join(tmpdir(), "pi-adaptation-store-"));
+	return tempDir("pi-adaptation-store-");
 }
 
 function store(agentDir: string, host: HostFingerprint = hostA): ModelAdaptationStore {
@@ -325,8 +325,8 @@ describe("ModelAdaptationStore deferred perf samples", () => {
 	});
 
 	it("keeps every other mutation immediately visible to a fresh instance, and folds deferred samples exactly", () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "pi-adaptation-deferred-"));
-		const immediateDir = mkdtempSync(join(tmpdir(), "pi-adaptation-immediate-"));
+		const agentDir = tempDir("pi-adaptation-deferred-");
+		const immediateDir = tempDir("pi-adaptation-immediate-");
 		deferredDirs.push(agentDir, immediateDir);
 		const deferred = ModelAdaptationStore.forAgentDir(agentDir, { deferPerfSamples: true, fingerprint: () => hostA });
 		const immediate = ModelAdaptationStore.forAgentDir(immediateDir, { fingerprint: () => hostA });

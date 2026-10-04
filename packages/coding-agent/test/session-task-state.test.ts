@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -9,6 +7,7 @@ import {
 	TASK_STEPS_STATE_CUSTOM_TYPE,
 } from "../src/core/tasks/session-task-state.ts";
 import { addTaskStep, createTaskStepsState } from "../src/core/tasks/task-state.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const tempDirs: string[] = [];
 
@@ -51,7 +50,7 @@ describe("session task step state", () => {
 	});
 
 	it("restores a snapshot after reopening a persisted session", () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-task-steps-"));
+		const directory = tempDir("pi-task-steps-");
 		tempDirs.push(directory);
 		const session = SessionManager.create(directory, directory, directory);
 		session.appendMessage({

@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { Agent } from "@caupulican/pi-agent-core/agent";
 import { convertToLlm } from "@caupulican/pi-agent-core/messages";
 import { SessionManager } from "@caupulican/pi-agent-core/session";
@@ -19,6 +17,7 @@ import { AuthStorage } from "../../src/core/auth-storage.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
 import type { LocalRuntimeDeps } from "../../src/core/models/local-runtime.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
+import { tempDir as makeTempDir } from "../temp-dir.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 
 interface StreamCall {
@@ -114,7 +113,7 @@ function createSession(
 	calls: StreamCall[],
 	localRuntimeDeps?: LocalRuntimeDeps,
 ): { session: AgentSession; tempDir: string } {
-	const tempDir = mkdtempSync(join(tmpdir(), "pi-prefix-warmer-"));
+	const tempDir = makeTempDir("pi-prefix-warmer-");
 	const authStorage = AuthStorage.inMemory();
 	const modelRegistry = ModelRegistry.inMemory(authStorage);
 	registerModel(modelRegistry, authStorage, model);

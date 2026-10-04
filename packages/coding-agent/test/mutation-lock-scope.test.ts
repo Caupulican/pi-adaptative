@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -18,6 +18,7 @@ import {
 	withExclusiveMutationBarrier,
 	withFileMutationQueue,
 } from "../src/core/tools/file-mutation-queue.ts";
+import { tempDir } from "./temp-dir.ts";
 
 async function waitUntil(predicate: () => boolean): Promise<void> {
 	for (let i = 0; i < 100; i++) {
@@ -405,7 +406,7 @@ describe("mutation scope wiring", () => {
 	let cwd: string;
 
 	beforeEach(() => {
-		cwd = mkdtempSync(path.join(tmpdir(), "pi-mutation-scope-"));
+		cwd = tempDir("pi-mutation-scope-");
 		mkdirSync(path.join(cwd, "src"), { recursive: true });
 	});
 
@@ -442,7 +443,7 @@ describe("mutation scope wiring", () => {
 	});
 
 	it("a lane's write tool takes its worktree's lock: another worktree's run never blocks it, its own does", async () => {
-		const otherCwd = mkdtempSync(path.join(tmpdir(), "pi-mutation-scope-other-"));
+		const otherCwd = tempDir("pi-mutation-scope-other-");
 		mkdirSync(path.join(otherCwd, "src"), { recursive: true });
 		const surfaces: LaneToolSurface[] = [];
 		const createLane = (laneCwd: string, shellSessionKey: string): LaneToolSurface => {

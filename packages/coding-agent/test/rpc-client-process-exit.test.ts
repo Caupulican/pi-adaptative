@@ -1,13 +1,13 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { RpcClient } from "../src/modes/rpc/rpc-client.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const tempDirs: string[] = [];
 
 function writeChildScript(contents: string): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-rpc-client-exit-"));
+	const dir = tempDir("pi-rpc-client-exit-");
 	tempDirs.push(dir);
 	const path = join(dir, "child.mjs");
 	writeFileSync(path, contents);

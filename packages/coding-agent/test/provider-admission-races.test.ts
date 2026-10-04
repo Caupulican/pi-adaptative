@@ -1,10 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { admitProviderRequest, type ProviderAdmissionPolicy } from "../src/core/provider-admission/gate.ts";
 import { ProviderAdmissionLedger } from "../src/core/provider-admission/ledger.ts";
 import { ProviderLimitedError, ProviderLimitStore } from "../src/core/provider-admission/limit-state.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -13,7 +12,7 @@ afterEach(() => {
 const policy: ProviderAdmissionPolicy = { enabled: true, limits: {}, maxWaitMs: 10_000, foregroundLimitWaitMs: 10_000 };
 
 function harness() {
-	const dir = mkdtempSync(join(tmpdir(), "pi-admission-races-"));
+	const dir = tempDir("pi-admission-races-");
 	let now = 1_000;
 	const ledger = new ProviderAdmissionLedger(dir, { now: () => now, heartbeatMs: 60_000 });
 	const limits = new ProviderLimitStore(dir, { now: () => now });

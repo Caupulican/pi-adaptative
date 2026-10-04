@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { requiredCapabilitiesForTool } from "../src/core/autonomy/approval-gate.ts";
@@ -22,6 +22,7 @@ import {
 	POWERSHELL_BOOTSTRAP,
 } from "../src/utils/powershell-session-protocol.ts";
 import { getPlatformShellToolName, getShellConfig, POWERSHELL_STARTUP_PROBE_TIMEOUT_MS } from "../src/utils/shell.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("automatic platform shell contract", () => {
 	it("keeps one Bash-like agent contract while selecting the backend by platform", () => {
@@ -62,7 +63,7 @@ describe("automatic platform shell contract", () => {
 	});
 
 	it("uses headless PowerShell launch flags without overriding command encoding", () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-pwsh-flags-"));
+		const directory = tempDir("pi-pwsh-flags-");
 		const pwsh = join(directory, "pwsh.exe");
 		writeFileSync(pwsh, "official");
 		try {
@@ -112,7 +113,7 @@ describe("automatic platform shell contract", () => {
 	});
 
 	it("rejects a legacy Windows PowerShell path and accepts only pwsh as a custom PowerShell host", () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-official-pwsh-"));
+		const directory = tempDir("pi-official-pwsh-");
 		const legacyPowerShell = join(directory, "powershell.exe");
 		const officialPowerShell = join(directory, "pwsh.exe");
 		try {
@@ -236,7 +237,7 @@ describe("automatic platform shell contract", () => {
 
 	it("preserves routed statuses through the explicit per-command PowerShell fallback", async () => {
 		if (process.platform !== "win32") return;
-		const cwd = mkdtempSync(join(tmpdir(), "pi-powershell-per-command-"));
+		const cwd = tempDir("pi-powershell-per-command-");
 		try {
 			writeFileSync(join(cwd, "visible.txt"), "needle\n");
 			const tool = createBashToolDefinition(cwd, { shellPath: getShellConfig(undefined, "powershell").shell });
@@ -253,7 +254,7 @@ describe("automatic platform shell contract", () => {
 
 	it("preserves routed builtin status and flag semantics through native PowerShell", async () => {
 		if (process.platform !== "win32") return;
-		const cwd = mkdtempSync(join(tmpdir(), "pi-powershell-contract-"));
+		const cwd = tempDir("pi-powershell-contract-");
 		// An explicit sessionKey lets `finally` dispose the persistent shell session (killing its
 		// process) before removing `cwd` below — the process's own cwd. Without this the live
 		// process keeps the directory locked and `rmSync` races it (EPERM on Windows).

@@ -1,6 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { discoverGnuToolsDir } from "../../src/utils/shell.ts";
@@ -54,6 +53,8 @@ except UnsupportedConstruct as exc:
 print(json.dumps({"stdout": merged.getvalue().decode("utf-8", errors="replace"), "exitCode": exit_code}))
 `;
 
+import { tempDir } from "../temp-dir.ts";
+
 interface RunResult {
 	stdout: string;
 	exitCode: number;
@@ -100,7 +101,7 @@ describeOrSkip("pi-shell-engine GNU-first dispatch (real tools before Python bui
 	let toolsDir: string;
 
 	beforeEach(() => {
-		root = mkdtempSync(join(tmpdir(), "pi-gnu-"));
+		root = tempDir("pi-gnu-");
 		toolsDir = join(root, "usr", "bin");
 		mkdirSync(toolsDir, { recursive: true });
 		writeFileSync(join(root, "a.txt"), "alpha\nbeta\n");

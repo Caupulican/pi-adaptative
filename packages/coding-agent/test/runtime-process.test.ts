@@ -1,5 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { PassThrough, Readable, Transform } from "node:stream";
 import { describe, expect, it } from "vitest";
@@ -78,7 +77,7 @@ describe("runtime process ownership", () => {
 			sleepFn,
 		]);
 
-		const root = mkdtempSync(join(tmpdir(), "pi-runtime-extract-"));
+		const root = tempDir("pi-runtime-extract-");
 		const input = {} as NodeJS.ReadableStream;
 		try {
 			const response = { ok: true, status: 200, body: input } as unknown as Response;
@@ -115,7 +114,7 @@ describe("runtime process ownership", () => {
 	});
 
 	it("owns runtime file probes and best-effort partial cleanup", () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-runtime-process-"));
+		const root = tempDir("pi-runtime-process-");
 		const file = join(root, "partial.bin");
 		try {
 			writeFileSync(file, "runtime-bytes");
@@ -138,7 +137,7 @@ describe("runtime process ownership", () => {
 	});
 
 	it("streams runtime payloads and removes a partial file after transform failure", async () => {
-		const root = mkdtempSync(join(tmpdir(), "pi-runtime-write-"));
+		const root = tempDir("pi-runtime-write-");
 		const complete = join(root, "complete.bin");
 		const partial = join(root, "partial.bin");
 		try {

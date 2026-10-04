@@ -1,9 +1,9 @@
-import { promises as fsPromises, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { promises as fsPromises, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import lockfile from "proper-lockfile";
 import { afterEach, expect, it, vi } from "vitest";
 import { AuthStorage, FileAuthStorageBackend } from "../src/core/auth-storage.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const directories: string[] = [];
 
@@ -13,7 +13,7 @@ afterEach(() => {
 });
 
 it.each([false, true])("fences a prepared auth write when compromise=%s before rename", async (compromised) => {
-	const directory = mkdtempSync(join(tmpdir(), "pi-auth-write-fence-"));
+	const directory = tempDir("pi-auth-write-fence-");
 	directories.push(directory);
 	const path = join(directory, "auth.json");
 	const backend = new FileAuthStorageBackend(path);

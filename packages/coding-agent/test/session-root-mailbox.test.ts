@@ -1,6 +1,5 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sessionRootMailboxFile } from "../src/core/agent-paths.ts";
 import {
@@ -9,11 +8,12 @@ import {
 	sessionRootReplyMessageId,
 } from "../src/core/delegation/session-root-mailbox.ts";
 import { loadedSuiteTimeout } from "./loaded-suite-timeout.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 
 function root(): string {
-	const value = mkdtempSync(join(tmpdir(), "pi-session-root-mailbox-"));
+	const value = tempDir("pi-session-root-mailbox-");
 	roots.push(value);
 	return value;
 }

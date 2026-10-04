@@ -1,8 +1,7 @@
 import type * as fs from "node:fs";
-import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import type * as fsPromises from "node:fs/promises";
 import { stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { createExecutionContext } from "@caupulican/pi-agent-core/paths";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -10,6 +9,7 @@ import {
 	createNativeTaskDirectoryBackend,
 	resolveNativeLinkTarget,
 } from "../src/core/tasks/native-task-directory-backend.ts";
+import { tempDir } from "./temp-dir.ts";
 
 vi.mock("node:fs", async (importOriginal) => {
 	const original = await importOriginal<typeof fs>();
@@ -26,7 +26,7 @@ describe("native task directory backend", () => {
 		vi.mocked(stat).mockReset();
 	});
 	it("never uses synchronous metadata I/O and cancels a stalled identity read", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-directory-async-"));
+		const scratch = tempDir("pi-directory-async-");
 		try {
 			const info = statSync(scratch, { bigint: true });
 			const completion = Promise.withResolvers<typeof info>();
@@ -46,7 +46,7 @@ describe("native task directory backend", () => {
 		}
 	});
 	it("resolves directories and junctions without accepting files or missing roots", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-directory-backend-"));
+		const scratch = tempDir("pi-directory-backend-");
 		try {
 			const directory = join(scratch, "project 資料");
 			const link = join(scratch, "linked project");
@@ -67,7 +67,7 @@ describe("native task directory backend", () => {
 	});
 
 	it("does not treat mutable or unavailable birthtime metadata as directory identity", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-directory-identity-"));
+		const scratch = tempDir("pi-directory-identity-");
 		try {
 			const backend = createNativeTaskDirectoryBackend();
 			const info = statSync(scratch, { bigint: true });
@@ -106,7 +106,7 @@ describe("native task directory backend", () => {
 
 describe("native directory canonical spelling", () => {
 	it("keeps the filesystem root spelling and resolves symlink chains component by component", async () => {
-		const scratch = mkdtempSync(join(tmpdir(), "pi-directory-root-"));
+		const scratch = tempDir("pi-directory-root-");
 		try {
 			const backend = createNativeTaskDirectoryBackend();
 			const root = parse(scratch).root;

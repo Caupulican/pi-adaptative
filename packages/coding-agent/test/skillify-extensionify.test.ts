@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { MAX_ACTIVE_SKILL_BODY_BYTES } from "../src/core/skill-vault.ts";
 import { createExtensionifyToolDefinition } from "../src/core/tools/extensionify.ts";
 import { createSkillifyToolDefinition } from "../src/core/tools/skillify.ts";
+import { tempDir } from "./temp-dir.ts";
 
 // Minimal mock ExtensionContext for testing
 const createMockContext = (): ExtensionContext =>
@@ -51,7 +51,7 @@ describe("skillify", () => {
 	});
 
 	it("audits only the host-admitted skill set instead of rediscovering cwd project skills", async () => {
-		const root = mkdtempSync(join(tmpdir(), "skillify-global-only-"));
+		const root = tempDir("skillify-global-only-");
 		try {
 			const projectSkill = join(root, ".pi", "skills", "project-only");
 			mkdirSync(projectSkill, { recursive: true });

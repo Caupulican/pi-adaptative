@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ChildProcess, type SpawnOptions, spawn, spawnSync } from "child_process";
@@ -20,6 +20,7 @@ import {
 } from "../src/core/tools/shell-session.ts";
 import { getOrCreateWindowsShellState } from "../src/core/tools/windows-shell-state.ts";
 import { POWERSHELL_STARTUP_PROBE_TIMEOUT_MS } from "../src/utils/shell.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -113,7 +114,7 @@ describe("PersistentShellSession startup", () => {
 	});
 
 	it("prewarms one usable PowerShell process and falls back without a disposable probe", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-shell-prewarm-"));
+		const directory = makeTempDir("pi-shell-prewarm-");
 		const badFixture = join(directory, "bad-powershell.mjs");
 		const goodFixture = join(directory, "good-powershell.mjs");
 		writeFileSync(badFixture, "process.exit(9);\n");
@@ -192,7 +193,7 @@ for (;;) {
 	});
 
 	it("waits for delayed PowerShell stderr before resolving a command", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-shell-stderr-barrier-"));
+		const directory = makeTempDir("pi-shell-stderr-barrier-");
 		const fixture = join(directory, "powershell-fixture.mjs");
 		writeFileSync(
 			fixture,
@@ -252,7 +253,7 @@ describe("PersistentShellSession sentinel cwd parsing", () => {
 	}
 
 	it("degrades a missing or empty cwd segment to undefined without failing the exec", async () => {
-		const directory = mkdtempSync(join(tmpdir(), "pi-shell-cwd-degrade-"));
+		const directory = makeTempDir("pi-shell-cwd-degrade-");
 		const fixture = join(directory, "degrade-fixture.mjs");
 		writeFileSync(
 			fixture,
@@ -301,7 +302,7 @@ for (;;) {
 
 	it("reassembles a length-framed sentinel with separator bytes and multibyte cwd split across chunks", async () => {
 		const expectedCwd = `/tmp/pi split:colon \u001e é${"x".repeat(2000)}`;
-		const directory = mkdtempSync(join(tmpdir(), "pi-shell-cwd-split-"));
+		const directory = makeTempDir("pi-shell-cwd-split-");
 		const fixture = join(directory, "split-fixture.mjs");
 		writeFileSync(
 			fixture,
@@ -360,7 +361,7 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 
 	it("persists environment variables and cwd across commands", async () => {
 		const session = makeSession("bash");
-		const tempDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-shell-session-")));
+		const tempDir = realpathSync(makeTempDir("pi-shell-session-"));
 		try {
 			expect(await run(session, "export PI_SESSION_PROBE=alive", cwd)).toEqual({ exitCode: 0, output: "" });
 			expect((await run(session, "echo $PI_SESSION_PROBE", cwd)).output.trim()).toBe("alive");
@@ -407,7 +408,7 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 
 	it("reports the shell-reported cwd with the exit code after an in-session cd", async () => {
 		const session = makeSession("bash");
-		const tempDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-shell-cwd-")));
+		const tempDir = realpathSync(makeTempDir("pi-shell-cwd-"));
 		try {
 			const result = await session.exec(`cd '${tempDir}' && false`, cwd, { onData: () => {} });
 			expect(result).toEqual({ exitCode: 1, initialCwd: cwd, cwd: tempDir });
@@ -421,7 +422,7 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 
 	it("parses a cwd containing colons and the sentinel delimiter whole", async () => {
 		const session = makeSession("bash");
-		const base = realpathSync(mkdtempSync(join(tmpdir(), "pi-shell-colon-")));
+		const base = realpathSync(makeTempDir("pi-shell-colon-"));
 		const colonDir = join(base, "a:b\u001ec");
 		mkdirSync(colonDir);
 		try {
@@ -434,14 +435,14 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 
 	it("reports the stale $PWD when the current directory was deleted before a failure", async () => {
 		const session = makeSession("bash");
-		const doomed = realpathSync(mkdtempSync(join(tmpdir(), "pi-shell-doomed-")));
+		const doomed = realpathSync(makeTempDir("pi-shell-doomed-"));
 		const result = await session.exec(`cd '${doomed}' && rmdir '${doomed}' && false`, cwd, { onData: () => {} });
 		expect(result).toEqual({ exitCode: 1, initialCwd: cwd, cwd: doomed });
 	});
 
 	it("passes nonce-like fake sentinels through as data and still parses the real one", async () => {
 		const session = makeSession("bash");
-		const tempDir = realpathSync(mkdtempSync(join(tmpdir(), "pi-shell-fake-")));
+		const tempDir = realpathSync(makeTempDir("pi-shell-fake-"));
 		try {
 			const chunks: Buffer[] = [];
 			const result = await session.exec(
@@ -528,7 +529,7 @@ describe.skipIf(IS_WINDOWS)("PersistentShellSession (bash)", () => {
 
 	it("captures each queued command's starting cwd after earlier work and resets it after shell exit", async () => {
 		const session = makeSession("bash");
-		const target = realpathSync(mkdtempSync(join(tmpdir(), "pi-shell-admission-cwd-")));
+		const target = realpathSync(makeTempDir("pi-shell-admission-cwd-"));
 		try {
 			const [moved, queued] = await Promise.all([
 				session.exec(`cd '${target}'`, cwd, { onData: () => {} }),

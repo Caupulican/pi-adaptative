@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import type { StreamFn } from "@caupulican/pi-agent-core";
 import { fauxAssistantMessage, type Model } from "@caupulican/pi-ai";
 import { streamSimpleAnthropic } from "@caupulican/pi-ai/anthropic";
@@ -12,6 +10,7 @@ import {
 	ProviderLimitStore,
 	usageWindowLimit,
 } from "../src/core/provider-admission/limit-state.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const model: Model<"anthropic-messages"> = {
 	id: "claude-fixture",
@@ -34,7 +33,7 @@ let limits: ProviderLimitStore;
 beforeEach(() => {
 	vi.useFakeTimers();
 	vi.setSystemTime(now);
-	dir = mkdtempSync(join(tmpdir(), "pi-claude-reset-handoff-"));
+	dir = tempDir("pi-claude-reset-handoff-");
 	ledger = new ProviderAdmissionLedger(dir);
 	limits = new ProviderLimitStore(dir);
 });

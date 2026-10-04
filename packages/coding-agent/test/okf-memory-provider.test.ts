@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { MemoryScope } from "../src/core/context/context-item.ts";
@@ -10,6 +9,7 @@ import {
 	listOkfMemoryScopes,
 	loadOkfMemoryBundle,
 } from "../src/core/context/okf-memory-provider.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 function okfDocument(
 	title: string,
@@ -33,7 +33,7 @@ describe("Pi OKF memory provider", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-okf-memory-provider-"));
+		tempDir = makeTempDir("pi-okf-memory-provider-");
 	});
 
 	afterEach(() => {
@@ -91,7 +91,7 @@ describe("Pi OKF memory provider", () => {
 	it.skipIf(process.platform === "win32").each(["projects", "selected"])(
 		"does not prioritize a symlinked %s directory",
 		(boundary) => {
-			const outside = mkdtempSync(join(tmpdir(), "pi-okf-priority-outside-"));
+			const outside = makeTempDir("pi-okf-priority-outside-");
 			try {
 				const projectId = "aaaaaaaaaaaaaaaa";
 				writeFileSync(
@@ -273,7 +273,7 @@ describe("Pi OKF memory provider", () => {
 	});
 
 	it.skipIf(process.platform === "win32")("skips symlinked files and directories", () => {
-		const outside = mkdtempSync(join(tmpdir(), "pi-okf-memory-outside-"));
+		const outside = makeTempDir("pi-okf-memory-outside-");
 		try {
 			writeFileSync(
 				join(outside, "outside.okf.md"),

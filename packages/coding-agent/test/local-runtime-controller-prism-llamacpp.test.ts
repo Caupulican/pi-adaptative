@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { describe, expect, it, vi } from "vitest";
@@ -10,6 +9,7 @@ import {
 	type PrismLlamaCppDeps,
 } from "../src/core/models/llamacpp-runtime.ts";
 import type { ManagedRuntimeChild } from "../src/core/models/runtime-process.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * Readiness-gate tests for pi-managed prism llama.cpp models: "usable when needed" (self-healing
@@ -21,7 +21,7 @@ import type { ManagedRuntimeChild } from "../src/core/models/runtime-process.ts"
  */
 
 function scratchDir(name: string): string {
-	return mkdtempSync(join(tmpdir(), `pi-controller-prism-${name}-`));
+	return tempDir(`pi-controller-prism-${name}-`);
 }
 
 function writeManifest(

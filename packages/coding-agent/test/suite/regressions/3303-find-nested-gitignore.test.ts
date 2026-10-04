@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createFindToolDefinition } from "../../../src/core/tools/find.ts";
+import { tempDir } from "../../temp-dir.ts";
 
 /**
  * Regression test for https://github.com/earendil-works/pi-mono/issues/3303
@@ -46,7 +46,7 @@ describe("issue #3303 nested .gitignore rules leak into sibling directories", ()
 
 	describe("flat sibling case", () => {
 		beforeEach(() => {
-			tempRoot = mkdtempSync(join(tmpdir(), "pi-3303-flat-"));
+			tempRoot = tempDir("pi-3303-flat-");
 			mkdirSync(join(tempRoot, "a"), { recursive: true });
 			mkdirSync(join(tempRoot, "b"), { recursive: true });
 			writeFileSync(join(tempRoot, "a", ".gitignore"), "ignored.txt\n");
@@ -65,7 +65,7 @@ describe("issue #3303 nested .gitignore rules leak into sibling directories", ()
 
 	describe("deeply nested case", () => {
 		beforeEach(() => {
-			tempRoot = mkdtempSync(join(tmpdir(), "pi-3303-deep-"));
+			tempRoot = tempDir("pi-3303-deep-");
 			mkdirSync(join(tempRoot, "a", "deep"), { recursive: true });
 			mkdirSync(join(tempRoot, "b"), { recursive: true });
 			writeFileSync(join(tempRoot, "a", ".gitignore"), "ignored.txt\n");

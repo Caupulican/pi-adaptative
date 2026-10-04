@@ -1,5 +1,4 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { Agent, AgentContext, AgentTool } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -16,6 +15,7 @@ import { RuntimeBuilder, type RuntimeBuilderDeps } from "../src/core/runtime-bui
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { SkillVaultController } from "../src/core/skill-vault.ts";
 import type { LoadExtensionsResult, ResourceLoader } from "../src/index.ts";
+import { tempDir } from "./temp-dir.ts";
 
 /**
  * D2: the worker UAC ceiling (WORKER_FORBIDDEN_TOOLS, session-role.ts) must win even when an
@@ -327,7 +327,7 @@ describe("RuntimeBuilder worker UAC ceiling (D2)", () => {
 
 	it("denies structural private-path access without pretending bash or python are path confined", async () => {
 		process.env[PI_SESSION_ROLE_ENV] = "worker";
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-worker-private-scope-"));
+		const root = tempDir("pi-worker-private-scope-");
 		const cwd = path.join(root, "project");
 		const agentDir = path.join(root, "agent");
 		fs.mkdirSync(cwd, { recursive: true });
@@ -459,7 +459,7 @@ describe("RuntimeBuilder worker UAC ceiling (D2)", () => {
 
 	it("enforces an immutable explicit worker path for structural filesystem tools", async () => {
 		process.env[PI_SESSION_ROLE_ENV] = "worker";
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-worker-explicit-scope-"));
+		const root = tempDir("pi-worker-explicit-scope-");
 		const cwd = path.join(root, "assigned-project");
 		const sibling = path.join(root, "other-project", "source.ts");
 		fs.mkdirSync(cwd, { recursive: true });

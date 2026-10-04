@@ -1,15 +1,14 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentResumeContext } from "../src/core/orchestration/contracts.ts";
 import { OrchestrationEventStore } from "../src/core/orchestration/event-store.ts";
 import { DurableTaskRuntime } from "../src/core/orchestration/task-runtime.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const roots: string[] = [];
 
 function createRoot(): string {
-	const root = mkdtempSync(join(tmpdir(), "pi-agent-lineage-"));
+	const root = tempDir("pi-agent-lineage-");
 	roots.push(root);
 	return root;
 }

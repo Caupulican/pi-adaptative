@@ -1,5 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentState } from "@caupulican/pi-agent-core";
 import { SessionManager } from "@caupulican/pi-agent-core/node";
@@ -8,11 +7,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SPAWNED_USAGE_CUSTOM_TYPE } from "../src/core/agent-session-contracts.ts";
 import { SessionAnalytics } from "../src/core/session-analytics.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const directories: string[] = [];
 
 function setup() {
-	const directory = mkdtempSync(join(tmpdir(), "pi-parent-usage-receipt-"));
+	const directory = tempDir("pi-parent-usage-receipt-");
 	directories.push(directory);
 	const manager = SessionManager.create(directory, directory, join(directory, "sessions"));
 	const analyticsFor = (session: SessionManager) =>

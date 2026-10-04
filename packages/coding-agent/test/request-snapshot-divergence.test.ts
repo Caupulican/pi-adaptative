@@ -1,10 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CacheObservationRecorder, cacheLaneKey } from "../src/core/context/cache-observation-recorder.ts";
 import { DecisionLedgerStore } from "../src/core/operator-projection/decision-ledger-store.ts";
 import { compareRequestPrefix, messageFingerprint } from "../src/core/request-snapshot-fingerprints.ts";
+import { tempDir } from "./temp-dir.ts";
 
 function user(text: string) {
 	return { role: "user", content: text, timestamp: 0 };
@@ -86,7 +86,7 @@ describe("cache observations", () => {
 	});
 
 	it("round-trips through the decision ledger, newest first", () => {
-		const dir = mkdtempSync(join(tmpdir(), "cache-observations-"));
+		const dir = tempDir("cache-observations-");
 		dirs.push(dir);
 		const ledger = openLedger(join(dir, "decision-ledger.sqlite"));
 		const lane = cacheLaneKey("openai-codex-responses", "openai-codex", "gpt-5.6-sol");

@@ -1,10 +1,9 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, rmSync } from "node:fs";
 import { type FauxProviderRegistration, fauxAssistantMessage, registerFauxProvider } from "@caupulican/pi-ai/faux";
 import { afterEach, expect, it } from "vitest";
 import { OrchestrationProfileStore } from "../src/core/orchestration/profile-store.ts";
 import { createHarness, type HarnessOptions } from "./suite/harness.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => {
@@ -12,7 +11,7 @@ afterEach(async () => {
 });
 
 function sharedOptions(): HarnessOptions & { agentDir: string; sharedFauxProvider: FauxProviderRegistration } {
-	const agentDir = mkdtempSync(join(tmpdir(), "pi-shared-specialists-"));
+	const agentDir = tempDir("pi-shared-specialists-");
 	const sharedFauxProvider = registerFauxProvider();
 	cleanups.push(() => {
 		sharedFauxProvider.unregister();

@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ExtensionContext } from "../src/core/extensions/types.ts";
@@ -25,6 +24,7 @@ import {
 } from "../src/core/pipelines/index.ts";
 import { createTaskStepsState } from "../src/core/tasks/task-state.ts";
 import { createPipelineToolDefinition } from "../src/core/tools/pipeline.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 import { runSignaledWorkerThreads } from "./worker-thread-fixture.ts";
 
 const ctx = undefined as unknown as ExtensionContext;
@@ -106,7 +106,7 @@ describe("pipeline discovery and increment", () => {
 	});
 
 	function tempDir(): string {
-		const dir = mkdtempSync(join(tmpdir(), "pi-pipeline-"));
+		const dir = makeTempDir("pi-pipeline-");
 		dirs.push(dir);
 		return dir;
 	}
@@ -895,7 +895,7 @@ describe("pipeline on-demand context mode", () => {
 	let cwd: string;
 
 	beforeEach(() => {
-		tempDir = mkdtempSync(join(tmpdir(), "pi-pipeline-ondemand-"));
+		tempDir = makeTempDir("pi-pipeline-ondemand-");
 		cwd = tempDir;
 	});
 

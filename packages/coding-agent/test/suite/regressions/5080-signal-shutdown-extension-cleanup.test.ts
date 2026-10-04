@@ -1,11 +1,11 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SessionManager } from "@caupulican/pi-agent-core/node";
 import chalk from "chalk";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { APP_NAME } from "../../../src/config.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import { tempDir } from "../../temp-dir.ts";
 
 // Regression for https://github.com/earendil-works/pi/issues/5080
 //
@@ -46,7 +46,7 @@ function createSessionManager(options: { sessionFile?: string } = {}): SessionMa
 }
 
 function createTempFile(): string {
-	const dir = mkdtempSync(join(tmpdir(), "pi-shutdown-resume-hint-"));
+	const dir = tempDir("pi-shutdown-resume-hint-");
 	tempDirs.push(dir);
 	const file = join(dir, "session.jsonl");
 	writeFileSync(file, "\n");

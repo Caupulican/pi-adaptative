@@ -10,9 +10,7 @@
  * Driven through the real `ManagedLaneController` -> `WorkerLifecycle` -> durable runtime seam with
  * an owned scratch ledger. No Herdr CLI, no external process, and no invented current ownership.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import type { WorkerClaim } from "../src/core/autonomy/contracts.ts";
 import type { LaneRecord } from "../src/core/autonomy/lane-tracker.ts";
@@ -20,6 +18,7 @@ import { ManagedLaneController } from "../src/core/delegation/managed-lane-contr
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import type { ManagedLaneEvent } from "../src/core/extensions/types.ts";
 import { isRetainedWorkerLane } from "../src/modes/interactive/components/agents-overlay.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const LANE_ID = "collaboration:team:reviewer";
 const roots: string[] = [];
@@ -61,7 +60,7 @@ interface Harness {
 }
 
 function harness(sessionId: string): Harness {
-	const root = mkdtempSync(join(tmpdir(), "pi-managed-generation-"));
+	const root = tempDir("pi-managed-generation-");
 	roots.push(root);
 	const lifecycle = new WorkerLifecycle({ agentDir: root, sessionId });
 	const claims: WorkerClaim[] = [];

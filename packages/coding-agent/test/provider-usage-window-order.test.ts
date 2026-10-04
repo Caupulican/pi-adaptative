@@ -1,6 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { fauxAssistantMessage } from "@caupulican/pi-ai";
 import { describe, expect, it } from "vitest";
 import { admitProviderRequest } from "../src/core/provider-admission/gate.ts";
@@ -10,6 +8,7 @@ import {
 	ProviderLimitStore,
 	usageWindowLimit,
 } from "../src/core/provider-admission/limit-state.ts";
+import { tempDir } from "./temp-dir.ts";
 
 describe("exhausted subscription window admission", () => {
 	it.each([false, true])("waits for every exhausted window regardless of snapshot order (reverse=%s)", (reverse) => {
@@ -51,7 +50,7 @@ describe("exhausted subscription window admission", () => {
 	it.each(["foreground", "worker", "background"] as const)(
 		"holds the %s lane until both windows reset",
 		async (lane) => {
-			const dir = mkdtempSync(join(tmpdir(), "pi-usage-admission-"));
+			const dir = tempDir("pi-usage-admission-");
 			let now = 1_000;
 			const ledger = new ProviderAdmissionLedger(dir, { now: () => now });
 			try {
@@ -87,7 +86,7 @@ describe("exhausted subscription window admission", () => {
 	);
 
 	it("persists the longest exhausted reset for actual admission consumers", () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-usage-window-"));
+		const dir = tempDir("pi-usage-window-");
 		try {
 			const store = new ProviderLimitStore(dir, { now: () => 1_000 });
 			observeProviderResult(

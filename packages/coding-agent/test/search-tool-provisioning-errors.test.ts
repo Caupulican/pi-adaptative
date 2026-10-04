@@ -1,15 +1,14 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { createFindToolDefinition } from "../src/core/tools/find.ts";
 import { createGrepToolDefinition } from "../src/core/tools/grep.ts";
 import type { ManagedToolResolution } from "../src/utils/tools-manager.ts";
+import { tempDir as makeTempDir } from "./temp-dir.ts";
 
 const tempDirs: string[] = [];
 
 function tempDir(): string {
-	const directory = mkdtempSync(join(tmpdir(), "pi-search-provisioning-"));
+	const directory = makeTempDir("pi-search-provisioning-");
 	tempDirs.push(directory);
 	return directory;
 }

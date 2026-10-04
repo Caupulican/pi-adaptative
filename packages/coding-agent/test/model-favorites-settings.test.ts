@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
-import { tmpdir } from "os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getDirectoryResourceProfileInfo, SettingsManager } from "../src/core/settings-manager.ts";
+import { tempDir } from "./temp-dir.ts";
 
 let root: string;
 let agentDir: string;
@@ -10,7 +10,7 @@ let projectDir: string;
 
 describe("model favorites persistence", () => {
 	beforeEach(() => {
-		root = mkdtempSync(join(tmpdir(), "pi-model-favorites-"));
+		root = tempDir("pi-model-favorites-");
 		agentDir = join(root, "agent");
 		projectDir = join(root, "project");
 		mkdirSync(agentDir, { recursive: true });

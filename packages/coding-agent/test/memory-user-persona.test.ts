@@ -9,8 +9,7 @@
  * snapshot with the rule.
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	type AgentMessage,
@@ -25,6 +24,7 @@ import { parseUserPreferenceLine } from "../src/core/memory/user-preference-meta
 import { MemoryController } from "../src/core/memory-controller.ts";
 import { PERSONA_PROJECTION_RULE } from "../src/core/provider-prompt-contracts.ts";
 import type { SettingsManager } from "../src/core/settings-manager.ts";
+import { tempDir } from "./temp-dir.ts";
 
 type MemoryToolParams = {
 	action: "add" | "replace" | "remove";
@@ -44,7 +44,7 @@ describe("USER.md persona projection (file-store owner)", () => {
 	let agentDir: string;
 
 	beforeEach(() => {
-		testDir = mkdtempSync(join(tmpdir(), "pi-user-persona-"));
+		testDir = tempDir("pi-user-persona-");
 		agentDir = join(testDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
 	});
@@ -303,7 +303,7 @@ describe("USER.md persona delivery (memory controller owner)", () => {
 	let contextWindow: number | undefined;
 
 	beforeEach(() => {
-		testDir = mkdtempSync(join(tmpdir(), "pi-user-persona-controller-"));
+		testDir = tempDir("pi-user-persona-controller-");
 		agentDir = join(testDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
 		warnings = [];

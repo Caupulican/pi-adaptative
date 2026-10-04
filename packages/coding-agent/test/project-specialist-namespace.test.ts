@@ -12,11 +12,11 @@
  * through the same helper shape the existing backend suite uses, so both platforms run the same
  * assertions with no skips. Every scratch directory is removed even when an assertion fails.
  */
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createNativeTaskDirectoryBackend } from "../src/core/tasks/native-task-directory-backend.ts";
+import { tempDir } from "./temp-dir.ts";
 
 const STABLE_NONCE = "specialist-namespace-fixture";
 const roots: string[] = [];
@@ -29,7 +29,7 @@ afterEach(() => {
 });
 
 function scratch(): string {
-	const directory = mkdtempSync(join(tmpdir(), "pi-project-namespace-"));
+	const directory = tempDir("pi-project-namespace-");
 	roots.push(directory);
 	return directory;
 }
