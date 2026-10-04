@@ -52,6 +52,9 @@ const TOOLS_CHUNK = 8;
 const SCENARIO = (process.env.PI_PROFILE_SCENARIO ?? "goal") as "goal" | "tools" | "delegate";
 const DELEGATE_EVERY = 30;
 
+/** Median gaps below this are timer and scheduler noise on a shared runner, not host work. */
+const TIMER_NOISE_FLOOR_MS = 4;
+
 function median(values: number[]): number {
 	if (values.length === 0) return Number.NaN;
 	const sorted = [...values].sort((a, b) => a - b);
@@ -594,13 +597,17 @@ describe.skipIf(process.env.PI_PROFILE_LONG_SESSION !== "1")("host long-session 
 			);
 			log(`host pre-request ms by decile: ${deciles(snapshotGaps)}  (n=${snapshotGaps.length})`);
 			// The contract gate: per-request host work must not grow with history. The last decile's
-			// median may not exceed twice the first decile's (both floored at one millisecond so a
-			// fast machine cannot fail on timer granularity).
+			// median may not exceed twice the first decile's. Gaps are whole-millisecond timestamp
+			// differences, so both medians are floored at the noise a shared CI runner adds to a
+			// sub-millisecond step (scheduler jitter of a few ms): a floor of one failed at 3 ms vs 1 ms
+			// on unchanged source, while growth with history is far above this floor.
 			if (process.env.PI_PROFILE_GATE === "1" && snapshotGaps.length >= 100) {
 				const slice = Math.floor(snapshotGaps.length / 10);
 				const firstDecile = median(snapshotGaps.slice(0, slice));
 				const lastDecile = median(snapshotGaps.slice(-slice));
-				expect(Math.max(1, lastDecile)).toBeLessThanOrEqual(2 * Math.max(1, firstDecile));
+				expect(Math.max(TIMER_NOISE_FLOOR_MS, lastDecile)).toBeLessThanOrEqual(
+					2 * Math.max(TIMER_NOISE_FLOOR_MS, firstDecile),
+				);
 			}
 			for (const [tool, values] of [...byTool.entries()].sort((a, b) => b[1].length - a[1].length)) {
 				log(`tool ${tool.padEnd(12)} n=${String(values.length).padStart(4)} ms by decile: ${deciles(values)}`);
