@@ -77,7 +77,16 @@ export const VALIDATION_CHURN_DIRECTIVE = [
 ].join(" ");
 
 const STALL_DIRECTIVE =
-	"Progress has stalled or the same strategy is repeating. Change approach before the next tool call.";
+	"Progress has stalled or the same strategy is repeating. Choose a different approach, your own, and keep working toward the mission's open requirements.";
+/** How much of the mission a steer repeats: enough to point the worker back at the goal, never the whole brief. */
+const STEER_MISSION_CHARS = 400;
+
+/** A steer names the mission it steers toward, so a corrected worker resumes on the goal and not just away from the problem. */
+function towardMission(directive: string, mission: string | undefined): string {
+	const text = mission?.replace(/\s+/g, " ").trim();
+	if (!text) return directive;
+	return `${directive} Mission: ${text.length > STEER_MISSION_CHARS ? `${text.slice(0, STEER_MISSION_CHARS - 1)}…` : text}`;
+}
 /** A worker judged off track is interrupted and redirected now; waiting for its next turn wastes the turn. */
 const OFF_TRACK_DIRECTIVE =
 	"System One: the current work is off the mission. Stop the current line of work, return to the mission's open requirements, and say what you are doing next.";
@@ -286,10 +295,19 @@ export class WorkerSupervisionCoordinator {
 		if (action === "continue") return;
 
 		// The worker receives the directive; the signal's explanation is the operator's label for it.
+		// The churn correction is the owner's rule verbatim; the others also name the mission they steer toward.
+		const directive =
+			steerDirective === VALIDATION_CHURN_DIRECTIVE
+				? steerDirective
+				: towardMission(steerDirective, observation.mission);
 		if (action === "steer_once") {
-			await this.deps.control.steerWorker(observation.agentId, steerDirective, "queue");
+			await this.deps.control.steerWorker(observation.agentId, directive, "queue");
 		} else if (action === "steer_now") {
-			await this.deps.control.steerWorker(observation.agentId, OFF_TRACK_DIRECTIVE, "now");
+			await this.deps.control.steerWorker(
+				observation.agentId,
+				towardMission(OFF_TRACK_DIRECTIVE, observation.mission),
+				"now",
+			);
 		} else if (action === "stop_and_reroute") {
 			await this.deps.control.cancelWorker(
 				observation.agentId,

@@ -11,6 +11,7 @@ import type { NoulBand } from "../decision/noul.ts";
 import type { Consequence } from "../decision/primitives.ts";
 import { findPackForCheckpoint } from "../steering/programs.ts";
 import type { SteeringCertificate } from "../steering/types.ts";
+import { isAdverseAnswer } from "./policy.ts";
 import type { ValidationStage } from "./types.ts";
 
 export type SemanticEvaluationOutcome = "ok" | "failed" | "cancelled";
@@ -263,8 +264,19 @@ export function verdictFromCertificate(certificate: SteeringCertificate): {
 	const questionStates: SemanticQuestionState[] = [];
 	const failed = certificate.failed_semantic_predicates ?? [];
 	const unsure = certificate.unsure_semantic_predicates ?? [];
-	const settled = certificate.semantic_outcome === "pass" && failed.length === 0 && unsure.length === 0;
-	if (!settled) reasons.push(bounded(`directive: ${certificate.directive}`, REASON_LIMIT));
+	// A supervision judgment completes with a pass whatever it found: its answers are judgments, not protocol
+	// failures. What it found is which questions came back decisively adverse, and that belongs on the row.
+	const adverse =
+		certificate.checkpoint_id === "JEV-WORKER-SUPERVISION"
+			? Object.entries(certificate.answers ?? {}).flatMap(([id, answer]) => (isAdverseAnswer(answer) ? [id] : []))
+			: [];
+	const settled =
+		certificate.semantic_outcome === "pass" && failed.length === 0 && unsure.length === 0 && adverse.length === 0;
+	if (!settled && adverse.length === 0) reasons.push(bounded(`directive: ${certificate.directive}`, REASON_LIMIT));
+	for (const id of adverse) {
+		questionStates.push({ question: id, uncertain: false, text: bounded(`${id}: adverse`, REASON_LIMIT) });
+		if (reasons.length < MAX_EVALUATION_REASONS) reasons.push(bounded(`adverse: ${id}`, REASON_LIMIT));
+	}
 	for (const predicate of failed) {
 		questionStates.push({ question: predicate, uncertain: false, text: bounded(predicate, REASON_LIMIT) });
 		if (reasons.length < MAX_EVALUATION_REASONS) reasons.push(bounded(predicate, REASON_LIMIT));

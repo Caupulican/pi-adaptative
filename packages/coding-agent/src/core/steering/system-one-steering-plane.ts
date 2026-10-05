@@ -13,7 +13,7 @@ import { isForbiddenRequiredProvenance } from "../decision/policy.ts";
 import type { DecisionProgram } from "../decision/program.ts";
 import type { JevAdapter } from "../system-one/adapter.ts";
 import { type AuthorityKind, authorityForCheckpoint, decideByAuthority } from "../system-one/authority-line.ts";
-import { completionPackFailures, evaluateNoul, noulFromAnswer } from "../system-one/policy.ts";
+import { completionPackFailures, evaluateNoul, isAdverseAnswer, noulFromAnswer } from "../system-one/policy.ts";
 import {
 	type SemanticEvaluationObserver,
 	semanticWorkerTaskScope,
@@ -277,47 +277,16 @@ export class SystemOneSteeringPlane {
 		}
 
 		if (checkpointId === "JEV-WORKER-SUPERVISION") {
-			// Each of these asks whether a problem is present, so the required end is "no". A decisive
-			// yes -- the hard_fail band -- is what moves a worker. A coin flip used to be enough, which
-			// rerouted healthy workers on ignorance; an undecided signal now leaves the work alone and
-			// is carried as a doubt instead.
-			const risk = (answer: unknown): boolean =>
-				evaluateNoul(noulFromAnswer(answer, false), "required_false") === "hard_fail";
-
-			if (risk(answers.specialist_gap_present)) {
-				return {
-					action: "reroute_expert",
-					reasonCodes: ["specialist_gap_detected"],
-					metadata: { dimension: "specialist" },
-				};
-			}
-			if (risk(answers.capability_gap_present)) {
-				return {
-					action: "resolve_capability",
-					reasonCodes: ["capability_gap_detected"],
-					metadata: { dimension: "capability" },
-				};
-			}
-			if (risk(answers.needs_independent_verification)) {
-				return {
-					action: "independent_review",
-					reasonCodes: ["independent_verification_needed"],
-				};
-			}
-			// meaningful_progress asks the opposite way round: a decisive NO is the adverse answer.
-			const noProgress =
-				evaluateNoul(noulFromAnswer(answers.meaningful_progress, true), "required_true") === "hard_fail";
-			const reasons: string[] = [];
-			if (risk(answers.work_off_track)) reasons.push("worker_off_track");
-			if (risk(answers.worker_stuck)) reasons.push("worker_stuck");
-			if (risk(answers.strategy_repetition)) reasons.push("strategy_repetition");
-			if (noProgress) reasons.push("meaningful_progress_insufficient");
-			if (reasons.length > 0) {
-				return { action: "replan", reasonCodes: reasons };
-			}
+			// The plane records the judgment and does not act on it: the supervisor owns the mapping from
+			// answers to a worker action (it holds the steer history the mapping depends on). Which answers
+			// were adverse is read from their bands, which the decisions' declared directions made correct;
+			// they are carried as reason codes so the certificate and the evaluation ledger show them.
+			const adverse = Object.entries(answers)
+				.filter(([, answer]) => isAdverseAnswer(answer))
+				.map(([id]) => `adverse_${id}`);
 			return {
 				action: "continue_current_work",
-				reasonCodes: ["worker_progressing_normally"],
+				reasonCodes: adverse.length > 0 ? adverse : ["worker_progressing_normally"],
 			};
 		}
 

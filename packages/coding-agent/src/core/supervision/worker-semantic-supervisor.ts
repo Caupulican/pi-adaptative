@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
+import type { NoulDirection } from "../decision/noul.ts";
 import { compileDecisionProgramForCheckpoint } from "../steering/programs.ts";
-import { evaluateNoul, noulFromAnswer } from "../system-one/policy.ts";
+import { type BandedNoulAnswer, bandedNoulAnswer, isAdverseAnswer } from "../system-one/policy.ts";
 import { type SemanticEvaluationScope, semanticWorkerTaskScope } from "../system-one/semantic-evaluation-ledger.ts";
 import type {
 	LiveWorkerAttempt,
@@ -61,30 +62,28 @@ export const WORKER_SUPERVISION_DECISION_IDS = [
 	"external_block_present",
 ] as const;
 
-function noulOf(value: unknown): number | undefined {
-	if (typeof value === "number" && Number.isFinite(value)) return value;
-	if (value === true) return 1;
-	if (value === false) return 0;
-	if (value && typeof value === "object") {
-		const record = value as { probabilityTrue?: unknown; noul?: unknown; value?: unknown };
-		if (typeof record.probabilityTrue === "number" && Number.isFinite(record.probabilityTrue))
-			return record.probabilityTrue;
-		if (typeof record.noul === "number" && Number.isFinite(record.noul)) return record.noul;
-		if (typeof record.value === "number" && Number.isFinite(record.value)) return record.value;
-		if (record.value === true) return 1;
-		if (record.value === false) return 0;
+/** The end each supervision question requires, as the program declares it: the one place polarity lives. */
+function supervisionDirections(state: unknown): Record<string, NoulDirection> {
+	const program = compileDecisionProgramForCheckpoint("JEV-WORKER-SUPERVISION", state);
+	const directions: Record<string, NoulDirection> = {};
+	for (const decision of program.decisions) {
+		if (decision.kind === "boolean" && decision.direction) directions[decision.id] = decision.direction;
 	}
-	return undefined;
+	return directions;
 }
 
-function requireSupervisionAnswers(raw: Record<string, unknown>): Record<string, number> {
-	const answers: Record<string, number> = {};
+/** Every question's answer, banded against the direction its decision declares. */
+function requireSupervisionAnswers(
+	raw: Record<string, unknown>,
+	directions: Readonly<Record<string, NoulDirection>>,
+): Record<string, BandedNoulAnswer> {
+	const answers: Record<string, BandedNoulAnswer> = {};
 	for (const id of WORKER_SUPERVISION_DECISION_IDS) {
-		const noul = noulOf(raw[id]);
-		if (noul === undefined) {
-			throw new Error(`Missing answer for boolean decision '${id}'`);
-		}
-		answers[id] = noul;
+		const direction = directions[id];
+		if (!direction) throw new Error(`Supervision decision '${id}' declares no direction`);
+		const answer = bandedNoulAnswer(raw[id], direction);
+		if (answer === undefined) throw new Error(`Missing answer for boolean decision '${id}'`);
+		answers[id] = answer;
 	}
 	return answers;
 }
@@ -263,7 +262,8 @@ export class WorkerSemanticSupervisor {
 
 		try {
 			let certId = `cert-supervision-${Date.now()}`;
-			let answers: Record<string, number>;
+			let answers: Record<string, BandedNoulAnswer>;
+			const directions = supervisionDirections(state);
 
 			try {
 				if (this.steering) {
@@ -274,7 +274,7 @@ export class WorkerSemanticSupervisor {
 						signal,
 					});
 					certId = cert.certificate_id;
-					answers = requireSupervisionAnswers((cert.answers ?? {}) as Record<string, unknown>);
+					answers = requireSupervisionAnswers((cert.answers ?? {}) as Record<string, unknown>, directions);
 				} else if (this.decisionEngine) {
 					// The same canonical program the steering plane compiles; never an inline copy.
 					const evalRes = await this.decisionEngine.evaluate(
@@ -292,19 +292,22 @@ export class WorkerSemanticSupervisor {
 					for (const id of WORKER_SUPERVISION_DECISION_IDS) {
 						merged[id] = evalRes.results?.[id] ?? evalRes.answers?.[id];
 					}
-					answers = requireSupervisionAnswers(merged);
+					answers = requireSupervisionAnswers(merged, directions);
 				} else {
-					// Unbound supervisor (tests / no plane): local stall/repeat heuristics, never empty answers.
-					answers = {
-						meaningful_progress: attempt.isStalled ? 0.1 : 0.9,
-						worker_stuck: attempt.isStalled ? 0.9 : 0.1,
-						strategy_repetition: attempt.isRepeating ? 0.9 : 0.1,
-						work_off_track: 0.1,
-						needs_independent_verification: 0.1,
-						specialist_gap_present: 0.1,
-						capability_gap_present: 0.1,
-						external_block_present: 0.1,
-					};
+					// Unbound supervisor (no plane): local stall/repeat heuristics, never empty answers.
+					answers = requireSupervisionAnswers(
+						{
+							meaningful_progress: attempt.isStalled ? 0.1 : 0.9,
+							worker_stuck: attempt.isStalled ? 0.9 : 0.1,
+							strategy_repetition: attempt.isRepeating ? 0.9 : 0.1,
+							work_off_track: 0.1,
+							needs_independent_verification: 0.1,
+							specialist_gap_present: 0.1,
+							capability_gap_present: 0.1,
+							external_block_present: 0.1,
+						},
+						directions,
+					);
 				}
 				this.consecutiveFailures.delete(attempt.attemptId);
 			} catch (err) {
@@ -324,53 +327,52 @@ export class WorkerSemanticSupervisor {
 			let summaryEvent: string | undefined;
 			const reasonCodes: string[] = [];
 
-			// Every one of these asks whether a problem is present: the required end is "no", and only a
-			// decisive yes moves a worker. Intervening on a coin flip reroutes healthy work.
-			const risk = (probability: number | undefined): boolean =>
-				evaluateNoul(noulFromAnswer(probability, false), "required_false") === "hard_fail";
-			// meaningful_progress asks the opposite way round: a decisive NO is the adverse answer.
-			const noProgress = (probability: number | undefined): boolean =>
-				evaluateNoul(noulFromAnswer(probability, true), "required_true") === "hard_fail";
+			// Adverse is read from the band the decision's declared direction gave the answer: only a decisive
+			// answer moves a worker, and intervening on a coin flip would reroute healthy work.
+			const adverse = (id: (typeof WORKER_SUPERVISION_DECISION_IDS)[number]): boolean =>
+				isAdverseAnswer(answers[id]);
 
-			if (risk(answers.specialist_gap_present)) {
+			if (adverse("specialist_gap_present")) {
 				action = "request_specialist";
 				summaryEvent = "Specialist requested · worker mission requires specialist domain";
 				reasonCodes.push("specialist_gap_detected");
-			} else if (risk(answers.external_block_present)) {
+			} else if (adverse("external_block_present")) {
 				action = "mark_external_block";
 				summaryEvent = "External block detected · worker is waiting on external dependencies";
 				reasonCodes.push("external_block_detected");
-			} else if (risk(answers.capability_gap_present)) {
+			} else if (adverse("capability_gap_present")) {
 				action = "request_capability";
 				summaryEvent = "Capability requested · worker mission requires synthesized capability";
 				reasonCodes.push("capability_gap_detected");
-			} else if (risk(answers.needs_independent_verification)) {
+			} else if (adverse("needs_independent_verification")) {
 				action = "request_verifier";
 				summaryEvent = "Verification requested · implementation complete, independent proof missing";
 				reasonCodes.push("independent_verification_needed");
 			} else if (
-				risk(answers.worker_stuck) ||
-				risk(answers.strategy_repetition) ||
-				risk(answers.work_off_track) ||
-				noProgress(answers.meaningful_progress)
+				adverse("worker_stuck") ||
+				adverse("strategy_repetition") ||
+				adverse("work_off_track") ||
+				adverse("meaningful_progress")
 			) {
-				if (noProgress(answers.meaningful_progress)) {
+				if (adverse("meaningful_progress")) {
 					reasonCodes.push("meaningful_progress_insufficient");
 				}
 				// FR-065: Anti-oscillation (one steer + grace period, then stop and reroute). Off-track
 				// work is redirected now, not at the worker's next turn; a stall waits for that turn.
-				if (priorSteeringCount === 0 && risk(answers.work_off_track)) {
+				if (priorSteeringCount === 0 && adverse("work_off_track")) {
 					action = "steer_now";
 					summaryEvent = "Worker redirected now · work off the mission";
 					reasonCodes.push("worker_off_track_steer_now");
 				} else if (priorSteeringCount === 0) {
 					action = "steer_once";
 					summaryEvent =
-						answers.meaningful_progress < 0.3
+						answers.meaningful_progress.noul < 0.3
 							? "Worker steering initiated · insufficient meaningful progress"
 							: "Worker steering initiated · progress stalled or strategy repeating";
 					reasonCodes.push(
-						answers.meaningful_progress < 0.3 ? "meaningful_progress_insufficient" : "worker_stuck_steer_once",
+						answers.meaningful_progress.noul < 0.3
+							? "meaningful_progress_insufficient"
+							: "worker_stuck_steer_once",
 					);
 				} else if (!this.steerGraceElapsed(attempt.attemptId, attempt.toolCalls)) {
 					// The worker has not yet had a window to act on the steer it was sent.
@@ -378,7 +380,7 @@ export class WorkerSemanticSupervisor {
 					summaryEvent = undefined;
 					reasonCodes.push("steer_grace_pending");
 				} else if (
-					!risk(answers.work_off_track) &&
+					!adverse("work_off_track") &&
 					!attempt.isStalled &&
 					!attempt.isRepeating &&
 					(attempt.recentFailures?.length ?? 0) === 0

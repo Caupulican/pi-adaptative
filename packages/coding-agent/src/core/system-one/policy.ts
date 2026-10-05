@@ -75,6 +75,56 @@ export function evaluateNoul(
 	return noulBand(probability as number, direction, noulBandThresholds(thresholds));
 }
 
+/** A yes/no probability read against the end its decision declares. */
+export interface BandedNoulAnswer {
+	readonly noul: number;
+	readonly direction: NoulDirection;
+	readonly band: NoulBand;
+}
+
+const NOUL_BANDS: ReadonlySet<unknown> = new Set(["hard_pass", "soft_pass", "ambiguous", "hard_fail"]);
+
+/**
+ * An answer banded against the direction its decision declares, or undefined when it holds no
+ * probability. A band the engine already computed is kept only when it was computed against the same
+ * direction; otherwise it is recomputed from the probability, so a band made against a different end
+ * is never trusted.
+ */
+export function bandedNoulAnswer(
+	answer: unknown,
+	direction: NoulDirection,
+	thresholds: SystemOneThresholds = DEFAULT_SYSTEM_ONE_CONFIG.thresholds,
+): BandedNoulAnswer | undefined {
+	let probability: number | undefined;
+	if (typeof answer === "boolean") probability = answer ? 1 : 0;
+	else if (typeof answer === "number") probability = answer;
+	else if (answer && typeof answer === "object") {
+		const record = answer as { noul?: unknown; probabilityTrue?: unknown; value?: unknown; boolean?: unknown };
+		if (typeof record.noul === "number") probability = record.noul;
+		else if (typeof record.probabilityTrue === "number") probability = record.probabilityTrue;
+		else if (typeof record.value === "number") probability = record.value;
+		else if (typeof record.value === "boolean") probability = record.value ? 1 : 0;
+		else if (typeof record.boolean === "boolean") probability = record.boolean ? 1 : 0;
+	}
+	if (probability === undefined || !Number.isFinite(probability)) return undefined;
+	const given = answer && typeof answer === "object" ? (answer as { band?: unknown; direction?: unknown }) : undefined;
+	const band =
+		given && given.direction === direction && NOUL_BANDS.has(given.band)
+			? (given.band as NoulBand)
+			: evaluateNoul(probability, direction, thresholds);
+	return { noul: probability, direction, band };
+}
+
+/**
+ * Whether a banded answer is adverse: decisively the opposite of the end its decision requires.
+ * A decision declares its required end once (`direction`), the engine bands every answer against
+ * it, and every reader asks this instead of re-deriving cutoffs from the probability. An answer
+ * with no band is not adverse: an unknown never moves work.
+ */
+export function isAdverseAnswer(answer: unknown): boolean {
+	return answer !== null && typeof answer === "object" && (answer as { band?: unknown }).band === "hard_fail";
+}
+
 /**
  * The yes/no a noul answer settles on, or undefined when it settles nothing.
  * The one sanctioned way to get a boolean out of a probability: there is no 0.5 cutoff anywhere.

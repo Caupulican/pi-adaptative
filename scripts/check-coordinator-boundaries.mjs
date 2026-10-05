@@ -59,6 +59,14 @@ export const boundaries = [
 		required: ['from "../orchestration/attempt-usage.ts"'],
 		forbidden: ["const EMPTY_ATTEMPT_USAGE", "function gatewayUsage(", "function mergeUsage("],
 	},
+	{
+		// Which supervision answer is adverse is declared once, as each decision's `direction` in
+		// steering/programs.ts; the engine bands every answer against it and the supervisor reads the band
+		// through `isAdverseAnswer`. It never re-derives cutoffs or directions from a probability.
+		path: "packages/coding-agent/src/core/supervision/worker-semantic-supervisor.ts",
+		required: ["isAdverseAnswer"],
+		forbidden: ["evaluateNoul(", "noulBand(", "noulFromAnswer("],
+	},
 ];
 
 const GOAL_STATUS_SCAN_ROOT = resolve(root, "packages/coding-agent/src");

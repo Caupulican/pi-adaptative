@@ -868,10 +868,15 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 		}
 
 		case "JEV-WORKER-SUPERVISION": {
+			// Direction is the end each question requires: the first asks whether work advances (the required end is
+			// "yes", so a decisive "no" is adverse); the rest ask whether a problem is present (the required end is
+			// "no", so a decisive "yes" is adverse). The engine bands every answer against it, and a reader asks
+			// `isAdverseAnswer`, never the probability.
 			decisions.push(
 				{
 					kind: "boolean",
 					id: "meaningful_progress",
+					direction: "required_true",
 					instruction:
 						"Is the worker making meaningful progress on its mission for its `role`? An explorer or verifier progresses by reading, searching and reporting; only an implementer is expected to change files.",
 					criteria: {
@@ -882,6 +887,7 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 				{
 					kind: "boolean",
 					id: "worker_stuck",
+					direction: "required_false",
 					instruction:
 						"Is the worker stuck or making no progress for its `role`? Distinct reads and searches are progress for an explorer or verifier.",
 					criteria: {
@@ -892,6 +898,7 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 				{
 					kind: "boolean",
 					id: "work_off_track",
+					direction: "required_false",
 					instruction: "Has the worker drifted off-track from the mission?",
 					criteria: {
 						true: "The paths edited or read, the commands run and the outputTail concern a different subject than the mission, and the mission's own subject appears in none of them. Example: the mission is to fix a login test but the worker restyles a landing page; es: la misión trata de impuestos pero el trabajo es sobre la configuración de Kubernetes; a verifier whose mission says do not modify code but who rewrites the code.",
@@ -901,6 +908,7 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 				{
 					kind: "boolean",
 					id: "strategy_repetition",
+					direction: "required_false",
 					instruction: "Is the worker repeating failing strategies without modification?",
 					criteria: {
 						true: "The same error text appears after two or more attempts and the attempts apply the same change or a trivially varied one: the same patch re-applied, only a number or a delay value increased, the same pattern reformatted, the same wrapper re-added, or the same command re-run with another flag. Example: 'timeout 50ms' then '100ms' then '200ms' with the same failing test each time; ja: 待機時間を100ms、200ms、300msと変えても同じテストが失敗する; pt: aplica a mesma correção e o mesmo erro volta.",
@@ -910,6 +918,7 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 				{
 					kind: "boolean",
 					id: "needs_independent_verification",
+					direction: "required_false",
 					instruction:
 						"Is the implementation finished and ready for independent verification? An explorer or verifier writes no implementation, so for those roles the answer is no.",
 					criteria: {
@@ -920,6 +929,7 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 				{
 					kind: "boolean",
 					id: "specialist_gap_present",
+					direction: "required_false",
 					instruction: "Does this require a different domain specialist?",
 					criteria: {
 						true: "The mission or outputTail says the task needs expertise from a different domain that this worker's role does not have. Example: 'this needs a cryptography review', 'requires a legal specialist', 'GPU kernel tuning is outside my area'.",
@@ -929,6 +939,7 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 				{
 					kind: "boolean",
 					id: "capability_gap_present",
+					direction: "required_false",
 					instruction: "Is the worker missing an essential capability?",
 					criteria: {
 						true: "The outputTail says the worker lacks a tool, permission or ability it needs to continue. Example: 'I have no tool to run a browser', 'I cannot execute this binary here', 'no write access to this directory'.",
@@ -938,6 +949,7 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 				{
 					kind: "boolean",
 					id: "external_block_present",
+					direction: "required_false",
 					instruction: "Is the worker blocked by an external dependency or system?",
 					criteria: {
 						true: "The outputTail or recentFailures show an outside service, network, registry, credential or owner-controlled system as unavailable or denying access (HTTP 401, 403, 502, 503, connection timed out, token expired, service down) and the worker says it cannot continue until that recovers. Example: 'registry returns 503, waiting for the owners'; de: 'Zugriff verweigert (HTTP 403), warte auf Freigabe'; es: 'el servicio no responde'.",

@@ -109,7 +109,14 @@ A deterministic check runs first: repeated broad validation with no new implemen
 rerouted after a grace window of three calls. Otherwise one System One request asks eight closed questions
 (progress, stuck, off-track, repeating strategy, needs independent verification, specialist gap, capability
 gap, external block), each with criteria and examples in several languages, and code maps the answers to an
-action; only a decisive answer moves a worker. The same evidence is not assessed again, but the evidence is
+action; only a decisive answer moves a worker. Which answer is adverse is declared once: each question carries
+its required end (`direction`) in the program, the engine bands every answer against it (`hard_fail` is the
+decisive opposite), and the supervisor, the steering plane and the evaluation ledger read the band through
+`isAdverseAnswer` instead of re-deriving cutoffs from the probability (a boundary gate keeps the supervisor
+from importing the band arithmetic). An undecided answer is never adverse. The ledger row for a supervision
+judgment names the questions that came back adverse. A steer names the mission it steers toward and leaves
+the approach to the worker; steering is advisory, one steer and a grace window before a reroute, and a
+reroute needs an observed stall, repetition or failure. The same evidence is not assessed again, but the evidence is
 everything the questions read: the tool-call count (every four calls), the failures and the changed files
 count, not only the output tail and the stall flags. A worker that fails three evaluations on an attempt
 stops being assessed and keeps running.
