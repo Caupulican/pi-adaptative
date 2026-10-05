@@ -902,7 +902,18 @@ export class AgentSession {
 			},
 			onIntervention: (signal) => {
 				if (!signal.summaryEvent) return;
-				this._emit({ type: "warning", message: signal.summaryEvent });
+				// A request to the root (verifier, specialist, capability, external block) is work flowing, not a
+				// problem with the worker; only steering and stopping are warnings.
+				const requestsRoot =
+					signal.action === "request_verifier" ||
+					signal.action === "request_specialist" ||
+					signal.action === "request_capability" ||
+					signal.action === "mark_external_block";
+				this._emit({
+					type: "warning",
+					message: signal.summaryEvent,
+					...(requestsRoot ? { severity: "info" as const } : {}),
+				});
 				this._operatorProjection.eventBridge.recordSupervisorIntervention(
 					signal.attempt_id,
 					signal.explanation ?? signal.summaryEvent,

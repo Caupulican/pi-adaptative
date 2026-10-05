@@ -104,7 +104,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 			if (mode === "json") {
 				writeRawStdout(`${JSON.stringify(projectSessionEventForJson(event))}\n`);
 			} else if (event.type === "warning") {
-				console.warn(`Warning: ${event.message}`);
+				console.warn(event.severity === "info" ? event.message : `Warning: ${event.message}`);
 			}
 		});
 		session.announceRestoredQueuedInput();

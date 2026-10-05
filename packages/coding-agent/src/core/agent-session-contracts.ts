@@ -63,7 +63,8 @@ export type AgentSessionEvent =
 	| { type: "compaction_start"; reason: "manual" | AutoCompactionReason }
 	| { type: "session_info_changed"; name: string | undefined }
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
-	| { type: "warning"; message: string }
+	/** `severity: "info"` marks routine work flow that is announced but is not a problem (a request to the root). */
+	| { type: "warning"; message: string; severity?: "info" }
 	| { type: "background_tools"; tasks: readonly BackgroundToolTaskLiveView[] }
 	| {
 			type: "compaction_end";

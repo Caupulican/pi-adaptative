@@ -303,7 +303,7 @@ export class InteractiveEventController {
 			case "warning":
 				// AgentSession warnings are operational diagnostics. Keep them in the transient status lane;
 				// direct local UI validation still uses InteractiveMode.showWarning() and remains chat-local.
-				this.port.activityLane?.announce(event.message, "warning");
+				this.port.activityLane?.announce(event.message, event.severity === "info" ? "neutral" : "warning");
 				break;
 
 			case "delegate_workers":
