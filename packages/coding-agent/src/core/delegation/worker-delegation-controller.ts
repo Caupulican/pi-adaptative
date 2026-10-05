@@ -205,7 +205,7 @@ import {
 import { type WorkerProjectAdmission, WorkerProjectDirectory } from "./worker-project-directory.ts";
 import { assertQueuedWorkerContextRecoverable } from "./worker-queued-context-recovery.ts";
 import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./worker-recovery-coordinator.ts";
-import { workerReportClaimText } from "./worker-report.ts";
+import { hostVerifiedChecks, workerReportClaimText } from "./worker-report.ts";
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
 import { materializeWorkerResourceBundle } from "./worker-resource-materializer.ts";
 import type { WorkerRunOutcome } from "./worker-runner.ts";
@@ -288,6 +288,32 @@ export interface WorkerDelegationControllerSettingsSource {
 	getWorkerModelPinPolicy(): WorkerModelPinPolicy;
 	getWorkerThinkingPolicy(): WorkerThinkingPolicy;
 	isProjectTrusted(): boolean;
+}
+
+type WorkerDispatchWait = Extract<WorkerDispatchAdmission, { action: "wait" }>;
+
+const FOREGROUND_HOLD_WAIT: WorkerDispatchWait = {
+	action: "wait",
+	reason: "foreground",
+	detail: "starts when the foreground turn ends; both use the same local model",
+};
+
+function readinessWait(reasonCode: string): WorkerDispatchWait {
+	return {
+		action: "wait",
+		reason: reasonCode === "objective_paused" ? "objective" : "dependencies",
+		detail: reasonCode,
+	};
+}
+
+function reservationWait(
+	detail: Parameters<typeof formatWorkerWriteReservationBlock>[0] | undefined,
+): WorkerDispatchWait {
+	return {
+		action: "wait",
+		reason: "write_reservation",
+		...(detail ? { detail: formatWorkerWriteReservationBlock(detail) } : {}),
+	};
 }
 
 function workerConversationRetentionPolicy(
@@ -469,6 +495,7 @@ export interface WorkerDelegationControllerDeps {
 		summary: string;
 		messages: readonly Message[];
 		verifierVerdict?: "accepted" | "rejected";
+		hostVerifiedChecks?: { passed: number; failed: number };
 	}): Promise<readonly string[]>;
 	/**
 	 * The unsettled-item ladder for a worker's `inconclusive` findings: System One, then a stronger
@@ -2086,11 +2113,7 @@ export class WorkerDelegationController {
 		if (attempt.status === "queued" || attempt.status === "suspended") {
 			const readiness = lifecycle.getAttemptDispatchReadiness(attempt.attemptId);
 			if (readiness.state === "waiting") {
-				return {
-					action: "wait",
-					reason: readiness.reasonCode === "objective_paused" ? "objective" : "dependencies",
-					detail: readiness.reasonCode,
-				};
+				return readinessWait(readiness.reasonCode);
 			}
 			if (readiness.state === "blocked") return { action: "cancel", reasonCode: readiness.reasonCode };
 		}
@@ -2113,11 +2136,7 @@ export class WorkerDelegationController {
 				!this.foregroundHoldCleared.has(attempt.attemptId) &&
 				this.holdsForLocalForeground(admission.shipment.model)
 			) {
-				return {
-					action: "wait",
-					reason: "foreground",
-					detail: "starts when the foreground turn ends; both use the same local model",
-				};
+				return FOREGROUND_HOLD_WAIT;
 			}
 			this.foregroundHoldCleared.add(attempt.attemptId);
 		}
@@ -2131,11 +2150,7 @@ export class WorkerDelegationController {
 		const reservation = this.writeReservations.acquire(record.laneId, attempt, admission.executionPlan);
 		if (reservation.kind === "denied") return { action: "cancel", reasonCode: reservation.reasonCode };
 		if (reservation.kind === "granted") return { action: "start" };
-		return {
-			action: "wait",
-			reason: "write_reservation",
-			...(reservation.detail ? { detail: formatWorkerWriteReservationBlock(reservation.detail) } : {}),
-		};
+		return reservationWait(reservation.detail);
 	}
 
 	/** Attach this generation's dispatch wait state to queued records; durable records never carry it. */
@@ -2688,6 +2703,8 @@ export class WorkerDelegationController {
 		options: {
 			ensureAgent?: boolean;
 			drain?: boolean;
+			/** Why the lane waits, for an entrance that queues it without draining: no drain, no other explanation. */
+			wait?: WorkerDispatchWait;
 			onStarted?: (record: LaneRecord) => void;
 		} = {},
 	): QueuedWorkerAttemptOutcome {
@@ -2717,6 +2734,7 @@ export class WorkerDelegationController {
 			priority,
 		);
 		if (enqueueSkipReason) return { started: false, skipReason: enqueueSkipReason };
+		if (options.wait) this.scheduler.noteWait(prepared.record.laneId, options.wait);
 		this.notifications.statusChanged();
 		options.onStarted?.(prepared.record);
 		if (options.drain) this.scheduler.drain();
@@ -3757,8 +3775,10 @@ export class WorkerDelegationController {
 			// A contending worker waits for the foreground turn's end, and that end drains the queue (the
 			// activity listener and the end of `prompt()` are the wake). A worker queued with no foreground
 			// turn at all waits for the next one: that queued state is a pinned contract.
+			const drain = dependencyGated || !contendsWithLocalForeground;
 			return this.queuePreparedWorkerAttempt(prepared, request, admission, {
-				drain: dependencyGated || !contendsWithLocalForeground,
+				drain,
+				...(drain ? {} : { wait: FOREGROUND_HOLD_WAIT }),
 			});
 		}
 		const { completion, ...outcome } = this.runOnceWithAdmission(request, undefined, undefined, admission, true);
@@ -3960,7 +3980,10 @@ export class WorkerDelegationController {
 				return { started: false, skipReason: readiness.reasonCode };
 			}
 			if (readiness.state === "waiting") {
-				return this.queuePreparedWorkerAttempt(prepared, request, admission, { onStarted });
+				return this.queuePreparedWorkerAttempt(prepared, request, admission, {
+					onStarted,
+					wait: readinessWait(readiness.reasonCode),
+				});
 			}
 		}
 		let preparedAgent: PreparedWorkerAgent;
@@ -4039,6 +4062,7 @@ export class WorkerDelegationController {
 			return this.queuePreparedWorkerAttempt(prepared, request, admission, {
 				ensureAgent: false,
 				onStarted,
+				wait: reservationWait(reservation.detail),
 			});
 		}
 		let durableHandle: StartedDelegationAttempt;
@@ -4594,6 +4618,9 @@ export class WorkerDelegationController {
 									messages: conversation.getRawTranscript().slice(transcriptStart),
 									...(settledOutcome.claim.verification
 										? { verifierVerdict: settledOutcome.claim.verification.verdict }
+										: {}),
+									...(hostVerifiedChecks(settledOutcome.claim)
+										? { hostVerifiedChecks: hostVerifiedChecks(settledOutcome.claim) }
 										: {}),
 								})
 								.catch(() => [])) ?? [])

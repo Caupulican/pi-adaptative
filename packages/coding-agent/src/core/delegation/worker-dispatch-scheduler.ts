@@ -5,7 +5,13 @@ import { registerInFlightWork } from "../reload-blockers.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { workerQueueHasCapacity } from "./worker-fleet-limits.ts";
 
-export type WorkerDispatchWaitReason = "capacity" | "dependencies" | "objective" | "write_reservation" | "foreground";
+export type WorkerDispatchWaitReason =
+	| "capacity"
+	| "dependencies"
+	| "objective"
+	| "write_reservation"
+	| "foreground"
+	| "preflight";
 
 export type WorkerDispatchAdmission =
 	| { action: "start" }
@@ -122,6 +128,14 @@ export class WorkerDispatchScheduler {
 	/** Why a queued lane is still waiting, or undefined once it left the queue or was never admitted. */
 	getWaitState(laneId: string): WorkerDispatchWaitState | undefined {
 		return this.queued.has(laneId) ? this.waitStates.get(laneId) : undefined;
+	}
+
+	/**
+	 * Record why a lane just enqueued is not being dispatched, for entrances that queue it without a drain
+	 * (the first drain would otherwise be the only thing that ever explained the wait).
+	 */
+	noteWait(laneId: string, wait: Extract<WorkerDispatchAdmission, { action: "wait" }>): void {
+		if (this.queued.has(laneId)) this.recordWait(laneId, wait);
 	}
 
 	private recordWait(laneId: string, admission: Extract<WorkerDispatchAdmission, { action: "wait" }>): void {
@@ -618,6 +632,13 @@ export class WorkerDispatchScheduler {
 					// available again), holding a reservation it never used.
 					this.reservationBlocked.delete(laneId);
 					if (this.options.preflight && !this.validated.has(laneId)) {
+						// Admitted, and not waiting on anything: it is validating its start. Say so, so a status view never
+						// shows a queued lane with no reason.
+						this.waitStates.set(laneId, {
+							reason: "preflight",
+							detail: "admitted, validating its start before it runs",
+							since: this.waitStates.get(laneId)?.since ?? new Date().toISOString(),
+						});
 						this.beginPreflight(request, record);
 						continue;
 					}

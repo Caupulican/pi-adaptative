@@ -37,10 +37,10 @@ export type WorkerWriteReservationAdmission =
 /** One line a queue view can print for a blocked write admission. */
 export function formatWorkerWriteReservationBlock(detail: WorkerWriteReservationBlockDetail): string {
 	if (detail.reasonCode === "reservation_capacity_reached") {
-		return `write_reservation: ${detail.repositoryRoot} reservation store is full`;
+		return `${detail.repositoryRoot} reservation store is full`;
 	}
 	if (detail.reasonCode === "attempt_reservation_conflict") {
-		return `write_reservation: ${detail.repositoryRoot} already reserved by this attempt with a different scope`;
+		return `${detail.repositoryRoot} already reserved by this attempt with a different scope`;
 	}
 	const conflict = detail.conflicts[0];
 	const others = detail.conflicts.length > 1 ? ` and ${detail.conflicts.length - 1} more` : "";
@@ -48,9 +48,9 @@ export function formatWorkerWriteReservationBlock(detail: WorkerWriteReservation
 		detail.reapedReservationIds.length > 0
 			? `; released ${detail.reapedReservationIds.length} dead-owner reservation${detail.reapedReservationIds.length === 1 ? "" : "s"}`
 			: "";
-	if (!conflict) return `write_reservation: ${detail.repositoryRoot} overlapping scope${reaped}`;
+	if (!conflict) return `${detail.repositoryRoot} overlapping scope${reaped}`;
 	const holder = conflict.local ? "a worker of this session" : `session ${conflict.parentSessionId}`;
-	return `write_reservation: ${detail.repositoryRoot} held by ${holder} (${conflict.ownerId}, owner ${conflict.ownerLiveness}, since ${conflict.createdAt})${others}${reaped}`;
+	return `${detail.repositoryRoot} held by ${holder} (${conflict.ownerId}, owner ${conflict.ownerLiveness}, since ${conflict.createdAt})${others}${reaped}`;
 }
 
 export interface WorkerWriteReservationWaitYield {

@@ -25,11 +25,13 @@
 
 ## Noticed Items (mandatory, owner rule 2026-10-05)
 
-- Keep a running list of everything noticed beyond the ask: defects a live run exposes, measured costs, risks, config that fights the goal, misleading results, stale contracts. Rank it by relevance to the task's objective, not by how easy an item is.
+- Keep a running list of everything noticed beyond the ask: defects a live run exposes, measured costs, risks, config that fights the goal, misleading results, stale contracts. Rank it by relevance to the task's objective, never by how easy or small an item is.
+- An item is relevant when it blocks, weakens, endangers or misrepresents the delivery; or it surfaced in the output of the task's own proof (a warning, noise, misleading or contradictory text, wrong number or odd behavior seen while running, probing or demonstrating the delivery live); or it lives in the subsystem, file or flow the delivery touches. Surfacing during the task's own live runs is enough by itself. When in doubt, it is relevant. Small or cosmetic items are not exempt.
 - A relevant item is part of the scope without the owner asking: fix the root cause, prove it live (or by the proof the task allows), commit and push it with the rest. A workaround does not count; if the real fix is out of reach, stop and report the root cause and the real-fix plan.
-- A not-relevant item is disclosed, not fixed: one or two lines with the evidence and the concrete fix, and written into the plan file's open list.
+- A not-relevant item (a different subsystem, never surfaced during this work, no effect on what the owner experiences of this delivery) is disclosed with that one-line reason, the evidence and the concrete fix, and written into the plan file's open list.
+- Pre-final sweep: before any final report or completion claim, re-read the output of every live proof, probe and check you ran and classify every warning, error, odd number or confusing line. A warning scrolled past in your own proof output is a skipped noticed item.
 - Completion gate: a delivery is not confirmed complete, and a goal is not declared done, until every noticed item is ranked and every relevant one is resolved or reported blocked with its root cause. This holds for every agent, worker and subagent; briefs and work orders carry it.
-- Every final report ends with a Noticed section: the relevant items and what was done about each, then the not-relevant ones disclosed.
+- Every final report ends with a Noticed section: the relevant items and what was done about each, then the not-relevant ones disclosed with their reason.
 
 ## Code Quality
 

@@ -344,9 +344,25 @@ export class AnswerClaimChecker {
 		readonly summary: string;
 		readonly messages: readonly AgentMessage[];
 		readonly verifierVerdict?: "accepted" | "rejected";
+		/** Checks the report cites against the host's command receipts: they back a "checks passed" claim. */
+		readonly hostVerifiedChecks?: { readonly passed: number; readonly failed: number };
 	}): Promise<string[]> {
 		const blockers: string[] = [];
-		for (const finding of (await this.findings(input.summary, input.messages)) ?? []) {
+		const checks = input.hostVerifiedChecks;
+		const checkReceipts: ClaimReceipts[] = checks
+			? [
+					{
+						tests: { passed: checks.passed, failed: checks.failed, lastPassed: checks.failed === 0 },
+						commits: { succeeded: 0, failed: 0 },
+						pushes: { succeeded: 0, failed: 0 },
+						publishes: { succeeded: 0, failed: 0 },
+						filesChanged: [],
+						toolCalls: 0,
+						succeededToolCalls: 0,
+					},
+				]
+			: [];
+		for (const finding of (await this.findings(input.summary, input.messages, checkReceipts)) ?? []) {
 			if (finding.verdict === "contradicted")
 				blockers.push(`claim contradicted by the worker's own tool results: ${finding.reason}`);
 			else this.deps.warn(`Unverified worker claim: ${finding.reason}`);

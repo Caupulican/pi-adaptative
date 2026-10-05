@@ -457,6 +457,29 @@ export function judgeSubmittedReport(input: {
 }
 
 /**
+ * The checks a submitted report states as passed or failed, counted from the host's own receipts: a check
+ * counts as passed only when the receipt it cites exited zero, and as failed when that receipt shows a
+ * failure. This is what backs a "the checks passed" claim in the claim check, which otherwise counts only
+ * recognized test-suite runs and so flags an honest report of an ad-hoc command as unsupported.
+ */
+export function hostVerifiedChecks(claim: {
+	readonly report?: WorkerSubmittedReport;
+	readonly commandReceipts?: readonly WorkerCommandReceipt[];
+}): { passed: number; failed: number } | undefined {
+	if (!claim.report || !claim.commandReceipts) return undefined;
+	const receipts = receiptIndex(claim.commandReceipts);
+	let passed = 0;
+	let failed = 0;
+	for (const check of claim.report.checks) {
+		const receipt = check.receiptId ? receipts.get(check.receiptId) : undefined;
+		if (!receipt) continue;
+		if (receipt.isError || (receipt.exitCode !== undefined && receipt.exitCode !== 0)) failed += 1;
+		else passed += 1;
+	}
+	return passed + failed > 0 ? { passed, failed } : undefined;
+}
+
+/**
  * What System One's claim check reads for a claim: the summary, plus every statement a submitted report
  * makes about its requirements and changes. The check already judges a worker's stated claims against the
  * worker's own tool results; a structured report adds claims it should see, and no second judge is built.

@@ -201,7 +201,7 @@ export function buildWorkerSystemPrompt(capabilities: {
 			: []),
 		"STRICT JSON only:",
 		resultShape,
-		"Done: call submit_report (same fields, plus requirements, checks, changes; cite host receipt ids as proof). A text answer in the shape above stays accepted.",
+		"Done: answer in the shape above. The host may then ask for a structured report (submit_report) and gives you the receipt ids of the commands it recorded; you cannot see them before that, so never rerun a command to get one and never list a finding as inconclusive for want of one.",
 		...(capabilities.write ? ["Keep edits exact. Do not repeat tool-applied changes in fallback actions."] : []),
 		'If blocked by the grant, return status "blocked" with blockers. Never invent facts or output.',
 		"Unconfirmed findings go in inconclusive, never findings.",

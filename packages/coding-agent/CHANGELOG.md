@@ -1,13 +1,5 @@
 ## [Unreleased]
 
-## [0.103.1] - 2026-10-05
-
-### Added
-
-- `systemone` action `locate` finds the file that holds something: the caller gives a target and queries, the host searches with `rg`, builds a card per file (leading comment, declared names, the best hit) and System One answers one closed question per card. On 20 held-out targets the right file is first 85% of the time (35% for the same candidates in lexical order) and in the first three 95% (65%), for about 1.15 requests, 6.7k judged tokens and 465 ms per call. Session owner only; an outage returns the lexical order marked unjudged.
-- The Decision graph's Lanes view is a sequence diagram: one lifeline per actor (you, System One, root, each worker by name), arrows between lifelines for hand-overs, activation bars for running spans, and a moving carrier on in-flight and just-settled arrows. A settled edge is solid, an in-flight one dashed, a claimed one dotted, so state survives without color; settled System One judgments show their result as the label's evidence. `PI_REDUCE_MOTION=1` collapses carriers to the settled state.
-- The Diagram view draws one carrier along the stage spine when the loop moves to another stage.
-
 ### Changed
 
 - The root system prompt and the goal tool now carry the noticed-items rule: rank what is noticed by relevance to the task, deliver relevant items without being asked, and never call work done or complete a goal with a relevant one unresolved.
@@ -15,9 +7,6 @@
 - A requirement is covered when a completed claim with an accepted host verdict lists it and its review is settled; that coverage becomes verified `worker` goal evidence for the completion account to cite. A claim whose verdict is `needs_more`, `rejected` or `blocked` can no longer verify a requirement as `worker` evidence.
 - `getFollowUpMessages` receives the run's provider-turn state, so a host does not offer a message that costs another request when the limit leaves none. Bash results report their exit code in their details.
 - The semantic supervision judgment starts at five tool calls instead of firing at the first: it was measured on workers with at least five, and a live run called a healthy worker with one status call "no progress".
-- An owner message is classified by System One where its outcome is read, not in front of every turn: before the first tool call is admitted (the classification starts when the model begins that call and runs while its arguments finish), before the next turn is routed, and where a handoff decides delivery. A turn that uses no tool, such as a greeting, makes no System One request and waits for none. Messages left from earlier tool-free turns are screened together in one request and set aside only on a hard pass; an unsure screen classifies them in full, in the owner's order.
-- The question that decides whether an owner message directs work (and so grants the edge capabilities) is reworded. Measured against the live model, the old wording reached the 0.93 hard floor for only 2 of 15 plain directives in English, Portuguese and Spanish (most scored 0.59 to 0.92); the new wording scores all 15 at 0.97 or higher, ten languages at 0.98 to 0.99, with no explanation, greeting, hypothetical or hold-back message above 0.15.
-- The optional-tool task-relation question is asked only when the previous intent holds a tool decision; otherwise it could fall below the confidence floor and leave the whole intent unresolved with a warning.
 
 ### Fixed
 
@@ -29,6 +18,26 @@
 - The supervision questions declare which end each requires (`direction`), so the engine's band for a risk question is no longer inverted, and the supervisor, the steering plane and the evaluation ledger read that band through one helper instead of each re-deriving cutoffs from the probability. The ledger row for a supervision judgment (always "pass" before) now names the questions that came back adverse. Replaying 216 recorded state results through the new reading gives identical actions and reason codes.
 - A supervision steer names the mission it steers toward (bounded to 400 characters) and leaves the approach to the worker; the validation-churn correction stays verbatim.
 - Every supervision verdict and its outcome (applied, refused, stale) is recorded in the decision ledger's `supervision_actions` table.
+- A worker's passing report no longer draws "Unverified worker claim: the answer says tests pass": the claim check's question covers test, check, lint, compile and build, but only recognized test-suite runs counted as receipts. Report checks whose cited receipt the host recorded with exit code 0 now back that claim; a check against a failing receipt counts as a failure.
+- A queued worker lane shows why it waits: a lane queued without a drain (it contends with the foreground's model, waits on dependencies, or on a write reservation at start) had a queued status with no `waiting:` reason until the first drain, while the queue text promised one. The start paths now record the wait they know, and a lane validating its start reports `preflight`. The write-reservation wait no longer repeats its name (`write_reservation: write_reservation: …`).
+- The worker prompt no longer tells workers to cite receipt ids they cannot see: it said to call `submit_report` and cite host receipt ids, but the tool and the ids only reach the worker in the host's report request, so a worker asked itself for a receipt id, reported it missing as an inconclusive finding and ended blocked. The prompt now describes the real flow.
+
+## [0.103.1] - 2026-10-05
+
+### Added
+
+- `systemone` action `locate` finds the file that holds something: the caller gives a target and queries, the host searches with `rg`, builds a card per file (leading comment, declared names, the best hit) and System One answers one closed question per card. On 20 held-out targets the right file is first 85% of the time (35% for the same candidates in lexical order) and in the first three 95% (65%), for about 1.15 requests, 6.7k judged tokens and 465 ms per call. Session owner only; an outage returns the lexical order marked unjudged.
+- The Decision graph's Lanes view is a sequence diagram: one lifeline per actor (you, System One, root, each worker by name), arrows between lifelines for hand-overs, activation bars for running spans, and a moving carrier on in-flight and just-settled arrows. A settled edge is solid, an in-flight one dashed, a claimed one dotted, so state survives without color; settled System One judgments show their result as the label's evidence. `PI_REDUCE_MOTION=1` collapses carriers to the settled state.
+- The Diagram view draws one carrier along the stage spine when the loop moves to another stage.
+
+### Changed
+
+- An owner message is classified by System One where its outcome is read, not in front of every turn: before the first tool call is admitted (the classification starts when the model begins that call and runs while its arguments finish), before the next turn is routed, and where a handoff decides delivery. A turn that uses no tool, such as a greeting, makes no System One request and waits for none. Messages left from earlier tool-free turns are screened together in one request and set aside only on a hard pass; an unsure screen classifies them in full, in the owner's order.
+- The question that decides whether an owner message directs work (and so grants the edge capabilities) is reworded. Measured against the live model, the old wording reached the 0.93 hard floor for only 2 of 15 plain directives in English, Portuguese and Spanish (most scored 0.59 to 0.92); the new wording scores all 15 at 0.97 or higher, ten languages at 0.98 to 0.99, with no explanation, greeting, hypothetical or hold-back message above 0.15.
+- The optional-tool task-relation question is asked only when the previous intent holds a tool decision; otherwise it could fall below the confidence floor and leave the whole intent unresolved with a warning.
+
+### Fixed
+
 - A session-replacement compaction prepared while the lane is idle keeps messages that arrive after the summarized history, including the owner message that opens the next turn.
 - Reloading a session-replacement checkpoint written before that boundary keeps the same unsummarized messages when the applied summary is still the `compaction_prepared` entry on the branch.
 - When a user message arrives after the summarized history but before the checkpoint is applied, the provider sees that message as the current task. The stored summary remains the summary of the history it covered, and messages after the checkpoint never rewrite it, so the cached prefix holds across user turns.
