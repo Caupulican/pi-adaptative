@@ -407,11 +407,13 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		if (changedFiles.size > changedFileCountAtChurnWindowStart) {
 			changedFileCountAtChurnWindowStart = changedFiles.size;
 		}
-		try {
-			await options.observeWorkerProgress(observation, options.signal);
-		} catch {
-			// Supervision must not fail the worker it observes.
-		}
+		// Supervision runs beside the worker, never in front of it: the assessment is a System One round trip and
+		// the worker's next tool call does not wait for it. A steer it decides reaches the worker through the
+		// session's worker control at its next turn boundary (or interrupts it now); a verdict that settles after
+		// its attempt ended is fenced at that control boundary. Supervision must not fail the worker it observes.
+		void Promise.resolve()
+			.then(() => options.observeWorkerProgress?.(observation, options.signal))
+			.catch(() => undefined);
 	};
 	const recordChangedFile = (filePath: string): void => {
 		changedFiles.add(filePath);

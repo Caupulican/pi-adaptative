@@ -874,43 +874,75 @@ export function compileDecisionProgramForCheckpoint(checkpointId: string, state:
 					id: "meaningful_progress",
 					instruction:
 						"Is the worker making meaningful progress on its mission for its `role`? An explorer or verifier progresses by reading, searching and reporting; only an implementer is expected to change files.",
+					criteria: {
+						true: "The recent tools and outputTail advance the mission for the worker's role. Implementer: changedFiles grows, or a check goes from failing to passing, or the work moves to the next step; one earlier failure that a later edit fixed is still progress. Explorer: distinct files are read or searched and findings are reported (for example 'Findings so far', 'Encontrado:', 'Gefunden:'). Verifier: it runs each check once and reports results.",
+						false: "The same command fails with the same error again and again, or edits do not change the failing output, or the tools and output have nothing to do with the mission. Example: the outputTail shows three identical 'Cannot find module' errors; ja: 同じエラーが繰り返される; pt: o mesmo erro se repete.",
+					},
 				},
 				{
 					kind: "boolean",
 					id: "worker_stuck",
 					instruction:
 						"Is the worker stuck or making no progress for its `role`? Distinct reads and searches are progress for an explorer or verifier.",
+					criteria: {
+						true: "recentFailures or outputTail show the same command ending in the same error several times, and changedFiles is empty or the edit tool itself keeps failing; the worker repeats the command instead of changing anything. Example: 'npm run build' three times with the same missing-module error and no files changed; de: derselbe Fehler bei jedem Lauf.",
+						false: "The worker uses distinct tools, reads distinct files, grows changedFiles, or each failure is different from the previous one. Distinct reads and searches are progress for an explorer or verifier; a verifier that runs each check once is not stuck.",
+					},
 				},
 				{
 					kind: "boolean",
 					id: "work_off_track",
 					instruction: "Has the worker drifted off-track from the mission?",
+					criteria: {
+						true: "The paths edited or read, the commands run and the outputTail concern a different subject than the mission, and the mission's own subject appears in none of them. Example: the mission is to fix a login test but the worker restyles a landing page; es: la misión trata de impuestos pero el trabajo es sobre la configuración de Kubernetes; a verifier whose mission says do not modify code but who rewrites the code.",
+						false: "The recent paths, commands and output concern the subject named in the mission, even when the attempt is failing or repeating. A worker that fails on the correct subject is on track.",
+					},
 				},
 				{
 					kind: "boolean",
 					id: "strategy_repetition",
 					instruction: "Is the worker repeating failing strategies without modification?",
+					criteria: {
+						true: "The same error text appears after two or more attempts and the attempts apply the same change or a trivially varied one: the same patch re-applied, only a number or a delay value increased, the same pattern reformatted, the same wrapper re-added, or the same command re-run with another flag. Example: 'timeout 50ms' then '100ms' then '200ms' with the same failing test each time; ja: 待機時間を100ms、200ms、300msと変えても同じテストが失敗する; pt: aplica a mesma correção e o mesmo erro volta.",
+						false: "Each attempt changes the approach and the error text or the failing set changes, or the failures decrease, or the worker has only failed once.",
+					},
 				},
 				{
 					kind: "boolean",
 					id: "needs_independent_verification",
 					instruction:
 						"Is the implementation finished and ready for independent verification? An explorer or verifier writes no implementation, so for those roles the answer is no.",
+					criteria: {
+						true: "The role is implementer, changedFiles is not empty, and the outputTail states that the work is done or complete with no remaining steps, usually with passing checks. Example: 'Implementation complete', 'All tests pass, task finished', 'Ready for review'; es: 'Implementación terminada'; pt: 'Implementação concluída'; de: 'Implementierung abgeschlossen'; ja: '実装完了'.",
+						false: "The role is explorer or verifier, or changedFiles is empty, or the outputTail lists remaining work ('Next:', 'Remaining:', 'Pendiente', 'Próximo') or shows failing checks, or the worker is still in the middle of editing.",
+					},
 				},
 				{
 					kind: "boolean",
 					id: "specialist_gap_present",
 					instruction: "Does this require a different domain specialist?",
+					criteria: {
+						true: "The mission or outputTail says the task needs expertise from a different domain that this worker's role does not have. Example: 'this needs a cryptography review', 'requires a legal specialist', 'GPU kernel tuning is outside my area'.",
+						false: "Ordinary coding, build, test, search or configuration work. A failing build, a missing import or a failing test is not a specialist gap.",
+					},
 				},
 				{
 					kind: "boolean",
 					id: "capability_gap_present",
 					instruction: "Is the worker missing an essential capability?",
+					criteria: {
+						true: "The outputTail says the worker lacks a tool, permission or ability it needs to continue. Example: 'I have no tool to run a browser', 'I cannot execute this binary here', 'no write access to this directory'.",
+						false: "The worker's tools work and its errors come from the project's own code, build or tests. A compile error, import error or failing test is not a capability gap.",
+					},
 				},
 				{
 					kind: "boolean",
 					id: "external_block_present",
 					instruction: "Is the worker blocked by an external dependency or system?",
+					criteria: {
+						true: "The outputTail or recentFailures show an outside service, network, registry, credential or owner-controlled system as unavailable or denying access (HTTP 401, 403, 502, 503, connection timed out, token expired, service down) and the worker says it cannot continue until that recovers. Example: 'registry returns 503, waiting for the owners'; de: 'Zugriff verweigert (HTTP 403), warte auf Freigabe'; es: 'el servicio no responde'.",
+						false: "The failures come from the project's own code, build or tests (type errors, import errors, failing tests, missing files, lint). One network retry that then succeeded is not a block.",
+					},
 				},
 			);
 			break;

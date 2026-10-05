@@ -158,6 +158,26 @@ export interface OperationGateDecisionRow {
 	readonly durationMs: number;
 }
 
+/**
+ * One worker-supervision verdict and what became of it: the action System One's answers (or the
+ * deterministic churn check) led to, whether the control surface accepted it, and the evidence size it
+ * rested on. The measurement for how often supervision intervenes and whether the interventions landed.
+ */
+export interface SupervisionActionRow {
+	readonly sessionId: string;
+	readonly cwd: string;
+	readonly decidedAt: number;
+	readonly attemptId: string;
+	readonly role: string;
+	readonly action: string;
+	/** `applied`: the control surface took it (or nothing was needed). `failed`: it refused. `stale`: its attempt had moved on. */
+	readonly outcome: "applied" | "failed" | "stale";
+	readonly reasonCodes: readonly string[];
+	readonly certificateId: string;
+	readonly toolCalls: number;
+	readonly elapsedMs: number;
+}
+
 /** Who wrote a session's rows: the ledger is shared by every session, worker sessions included. */
 export interface DecisionLedgerAttribution {
 	readonly role: SessionRole;
@@ -344,6 +364,21 @@ export class DecisionLedgerStore {
 				duration_ms INTEGER NOT NULL
 			);
 			CREATE INDEX IF NOT EXISTS operation_gate_decisions_session ON operation_gate_decisions (session_id, decided_at);
+			CREATE TABLE IF NOT EXISTS supervision_actions (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				session_id TEXT NOT NULL,
+				cwd TEXT NOT NULL,
+				decided_at INTEGER NOT NULL,
+				attempt_id TEXT NOT NULL,
+				role TEXT NOT NULL,
+				action TEXT NOT NULL,
+				outcome TEXT NOT NULL,
+				reason_codes TEXT NOT NULL,
+				certificate_id TEXT NOT NULL,
+				tool_calls INTEGER NOT NULL,
+				elapsed_ms INTEGER NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS supervision_actions_session ON supervision_actions (session_id, decided_at);
 			CREATE TABLE IF NOT EXISTS session_attribution (
 				session_id TEXT PRIMARY KEY,
 				role TEXT NOT NULL,
@@ -784,6 +819,30 @@ export class DecisionLedgerStore {
 				row.notable ? 1 : 0,
 				row.finding.slice(0, 240),
 				Math.round(row.durationMs),
+			);
+	}
+
+	/** Records one worker-supervision verdict and its outcome (see {@link SupervisionActionRow}). */
+	recordSupervisionAction(row: SupervisionActionRow): void {
+		this.attributeSession(row.sessionId);
+		this.database
+			.prepare(
+				`INSERT INTO supervision_actions
+				 (session_id, cwd, decided_at, attempt_id, role, action, outcome, reason_codes, certificate_id, tool_calls, elapsed_ms)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				row.sessionId,
+				row.cwd,
+				row.decidedAt,
+				row.attemptId,
+				row.role,
+				row.action,
+				row.outcome,
+				JSON.stringify(row.reasonCodes),
+				row.certificateId,
+				row.toolCalls,
+				Math.round(row.elapsedMs),
 			);
 	}
 

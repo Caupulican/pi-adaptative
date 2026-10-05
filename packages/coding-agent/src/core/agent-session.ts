@@ -911,6 +911,13 @@ export class AgentSession {
 				const message = error instanceof Error ? error.message : String(error);
 				this._emit({ type: "warning", message: `Worker supervision degraded: ${message}` });
 			},
+			recordAction: (record) =>
+				this.getDecisionLedger()?.recordSupervisionAction({
+					sessionId: this.sessionManager.getSessionId(),
+					cwd: this._cwd,
+					decidedAt: Date.now(),
+					...record,
+				}),
 			// Stale only when the attempt is known to have ended; an unknown status is not evidence of that.
 			isAttemptLive: (attemptId) => {
 				const status = this._backgroundLanes.getTaskRuntimeSnapshot()?.attempts[attemptId]?.status;

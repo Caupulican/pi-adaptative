@@ -36,6 +36,20 @@ export interface WorkerSupervisionCoordinatorDeps {
 	onSupervisionError?(error: unknown): void;
 	/** Whether an attempt is still live (not terminal); a request from a finished attempt is stale. */
 	isAttemptLive?(attemptId: string): boolean;
+	/** Every verdict and what became of it, for measuring how often supervision intervenes and lands. */
+	recordAction?(record: SupervisionActionRecord): void;
+}
+
+/** One supervision verdict with its outcome (see `SupervisionActionRow` in the decision ledger). */
+export interface SupervisionActionRecord {
+	readonly attemptId: string;
+	readonly role: string;
+	readonly action: WorkerSupervisionAction;
+	readonly outcome: "applied" | "failed" | "stale";
+	readonly reasonCodes: readonly string[];
+	readonly certificateId: string;
+	readonly toolCalls: number;
+	readonly elapsedMs: number;
 }
 
 /** One live worker observation, assembled by the lane that is actually running the worker. */
@@ -127,6 +141,8 @@ export class WorkerSupervisionCoordinator {
 	private readonly lastErrorTimestamp = new Map<string, number>();
 	private readonly pendingRootRequests = new Map<string, WorkerSupervisionSignal>();
 	private nextDeterministicSignalSequence = 0;
+	/** Attempts with an observation being assessed or applied: one at a time, so a steer is never sent twice. */
+	private readonly observing = new Set<string>();
 
 	constructor(deps: WorkerSupervisionCoordinatorDeps) {
 		this.deps = deps;
@@ -192,6 +208,21 @@ export class WorkerSupervisionCoordinator {
 		signal?: AbortSignal,
 	): Promise<WorkerSupervisionSignal | undefined> {
 		if (signal?.aborted) return undefined;
+		// Observations arrive after every tool call and run beside the worker, not in front of it. While one
+		// is being assessed or applied the next is dropped: its evidence is already the newer one's window.
+		if (this.observing.has(observation.attemptId)) return undefined;
+		this.observing.add(observation.attemptId);
+		try {
+			return await this.observeOne(observation, signal);
+		} finally {
+			this.observing.delete(observation.attemptId);
+		}
+	}
+
+	private async observeOne(
+		observation: WorkerProgressObservation,
+		signal?: AbortSignal,
+	): Promise<WorkerSupervisionSignal | undefined> {
 		// The deterministic churn check needs no semantic judgment and runs first. It applies to the role
 		// whose job is building: re-running validation is a verifier's or explorer's work, not churn.
 		if (observation.role === "implementer" && isValidationChurn(observation)) {
@@ -267,6 +298,28 @@ export class WorkerSupervisionCoordinator {
 		}
 	}
 
+	private recordAction(
+		verdict: WorkerSupervisionSignal,
+		observation: WorkerProgressObservation,
+		outcome: SupervisionActionRecord["outcome"],
+	): void {
+		try {
+			this.deps.recordAction?.({
+				attemptId: observation.attemptId,
+				role: observation.role,
+				action: verdict.action,
+				outcome,
+				reasonCodes: verdict.reason_codes ?? [],
+				certificateId: verdict.certificate_id,
+				toolCalls: observation.toolCalls,
+				elapsedMs: observation.elapsedMs,
+			});
+		} catch (error) {
+			// A measurement sink is outside supervision authority and cannot fail the worker.
+			this.reportError(observation.attemptId, error);
+		}
+	}
+
 	private async applyAndRecord(
 		verdict: WorkerSupervisionSignal,
 		observation: WorkerProgressObservation,
@@ -282,6 +335,7 @@ export class WorkerSupervisionCoordinator {
 			signal?.aborted ||
 			(this.deps.isAttemptLive && !this.deps.isAttemptLive(observation.attemptId))
 		) {
+			this.recordAction(verdict, observation, "stale");
 			return undefined;
 		}
 		try {
@@ -291,8 +345,10 @@ export class WorkerSupervisionCoordinator {
 			// completed reroute, and identical evidence must remain eligible for a safe retry.
 			this.deps.supervisor.invalidateAssessment(observation.attemptId);
 			this.reportError(observation.attemptId, error);
+			this.recordAction(verdict, observation, "failed");
 			return undefined;
 		}
+		this.recordAction(verdict, observation, "applied");
 		if (verdict.action === "steer_once" || verdict.action === "steer_now") {
 			this.deps.supervisor.noteSteering(observation.attemptId, observation.toolCalls);
 		}

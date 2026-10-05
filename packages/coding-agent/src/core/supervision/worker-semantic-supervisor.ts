@@ -43,6 +43,13 @@ export interface WorkerSemanticSupervisorDeps {
  */
 export const STEER_GRACE_TOOL_CALLS = 3;
 
+/**
+ * Tool calls between assessments of otherwise unchanged evidence. The state System One judges carries the tool
+ * calls, the failures and the changed files, so a worker that keeps working changes what is being judged; one
+ * assessment per window keeps the cost to a round trip every few calls while a worker never goes unseen for long.
+ */
+export const ASSESSMENT_TOOL_CALL_STEP = 4;
+
 export const WORKER_SUPERVISION_DECISION_IDS = [
 	"meaningful_progress",
 	"worker_stuck",
@@ -175,6 +182,9 @@ export class WorkerSemanticSupervisor {
 			Boolean(attempt.isRepeating),
 			this.getPriorSteeringCount(attempt.attemptId),
 			this.steerGraceElapsed(attempt.attemptId, attempt.toolCalls),
+			Math.floor(attempt.toolCalls / ASSESSMENT_TOOL_CALL_STEP),
+			attempt.recentFailures?.length ?? 0,
+			attempt.changedFiles?.length ?? 0,
 		].join(":");
 	}
 

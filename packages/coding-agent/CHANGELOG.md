@@ -16,6 +16,8 @@
 
 ### Fixed
 
+- Worker supervision no longer holds the worker's next tool call while System One assesses it, and it assesses a worker again as its work changes (every four tool calls, new failures, changed files) instead of only when the output tail or the stall flags change; a worker that failed repeatedly after one early assessment went unseen. The supervision questions now carry criteria with examples in several languages: on 48 independently written states the expected action was chosen 47 times (37 before; strategy repetition 0 of 6 and finished work 0 of 5 before), with no false intervention on healthy workers.
+- Every supervision verdict and its outcome (applied, refused, stale) is recorded in the decision ledger's `supervision_actions` table.
 - A session-replacement compaction prepared while the lane is idle keeps messages that arrive after the summarized history, including the owner message that opens the next turn.
 - Reloading a session-replacement checkpoint written before that boundary keeps the same unsummarized messages when the applied summary is still the `compaction_prepared` entry on the branch.
 - When a user message arrives after the summarized history but before the checkpoint is applied, the provider sees that message as the current task. The stored summary remains the summary of the history it covered, and messages after the checkpoint never rewrite it, so the cached prefix holds across user turns.

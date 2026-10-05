@@ -97,6 +97,39 @@ completion. Evaluator outages retain their actual diagnostics without inventing 
 Other `SystemOneController` stage packs for intake, claim check, duplicate
 logic, patch review and drift remain callable for tests/hooks.
 
+## Worker supervision
+
+Every executed worker tool call is one observation of its attempt. It runs beside the worker, not in front
+of it: the worker's next call does not wait for the assessment, one observation per attempt is in flight at
+a time (the next is dropped, its window is already the newer one's), and a verdict that settles after its
+attempt ended is fenced at the control boundary. A steer then reaches the worker at its next turn boundary
+(`steer_once`, queued) or interrupts it now (`steer_now`, off-track work).
+
+A deterministic check runs first: repeated broad validation with no new implementation is steered, then
+rerouted after a grace window of three calls. Otherwise one System One request asks eight closed questions
+(progress, stuck, off-track, repeating strategy, needs independent verification, specialist gap, capability
+gap, external block), each with criteria and examples in several languages, and code maps the answers to an
+action; only a decisive answer moves a worker. The same evidence is not assessed again, but the evidence is
+everything the questions read: the tool-call count (every four calls), the failures and the changed files
+count, not only the output tail and the stall flags. A worker that fails three evaluations on an attempt
+stops being assessed and keeps running.
+
+Every verdict, `continue` included, is a row in the decision ledger's `supervision_actions` table with its
+outcome (`applied`, `failed` when the control surface refused, `stale` when its attempt had moved on), so how
+often supervision intervenes and whether it landed is measurable.
+
+Measured on live System One with the production decision code: on 48 states written independently of the
+wording (seven healthy implementers, five explorers, four verifiers, five hard negatives, six stuck, six
+repeating, six off-track, five finished, four externally blocked; eight non-English) the earlier wording
+chose the expected action for 37 (strategy repetition 0 of 6, finished work 0 of 5, because
+`needs_independent_verification` never cleared the 0.8 bound); the criteria wording chose it for 47, with no
+false intervention on the 21 healthy states. In a live run a worker told to repeat broad validations was
+observed, steered, received the steer as a worker-control message from the session root, and stopped.
+
+Limits: a worker is observed at tool-call boundaries only, so one stuck inside a single long call or a
+silent model turn is not seen until its next call; and a worker that finishes without saying so can be
+missed by the verification question.
+
 ## The shell-command gate
 
 Code decides everything it can before System One is asked: the capability envelope, path bounds, the edge
