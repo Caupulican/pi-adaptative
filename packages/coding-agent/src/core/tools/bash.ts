@@ -1412,7 +1412,7 @@ function createShellToolDefinition(
 								),
 							},
 						],
-						details: verificationDetails,
+						details: { ...verificationDetails, exitCode },
 						isError: true,
 						errorKind: "operation_outcome",
 					};
@@ -1426,7 +1426,7 @@ function createShellToolDefinition(
 									text: appendStatus(outputText, `Final ${expectedNoMatch} search completed with no matches.`),
 								},
 							],
-							details,
+							details: { ...details, exitCode },
 						};
 					}
 					if (verification) {
@@ -1437,7 +1437,7 @@ function createShellToolDefinition(
 									text: appendStatus(outputText, `Command exited with code ${exitCode}\ncwd: ${reportedCwd}`),
 								},
 							],
-							details: verificationDetails,
+							details: { ...verificationDetails, exitCode },
 							isError: true,
 							errorKind: "operation_outcome",
 						};
@@ -1446,7 +1446,7 @@ function createShellToolDefinition(
 				}
 				return {
 					content: [{ type: "text", text: outputText }],
-					details: verificationDetails,
+					details: { ...verificationDetails, exitCode },
 				};
 			} finally {
 				clearUpdateTimer();

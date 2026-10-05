@@ -1,5 +1,12 @@
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
-import type { EvidenceBundle, EvidenceRef, GateOutcome, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
+import type {
+	EvidenceBundle,
+	EvidenceRef,
+	GateOutcome,
+	WorkerClaim,
+	WorkerCommandReceipt,
+	WorkerRequest,
+} from "../autonomy/contracts.ts";
 import {
 	type EvidenceFindingDraft,
 	normalizeEvidenceFinding,
@@ -56,6 +63,8 @@ export interface WorkerCompletion {
 	changedFiles?: readonly string[];
 	/** Capability refusals or execution failures observed inside the worker tool loop. */
 	blockers?: readonly string[];
+	/** Commands the worker ran, as the host recorded them. */
+	commandReceipts?: readonly WorkerCommandReceipt[];
 }
 
 export interface WorkerRunnerOptions {
@@ -498,7 +507,11 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		completionChangedFilesReport.overflowed ||
 		mergedChangedFilesReport.overflowed;
 	const completionChangedFiles = mergedChangedFilesReport.values;
-	const completionBaseClaim = { ...baseClaim, changedFiles: completionChangedFiles };
+	const completionBaseClaim = {
+		...baseClaim,
+		changedFiles: completionChangedFiles,
+		...(completion?.commandReceipts?.length ? { commandReceipts: completion.commandReceipts } : {}),
+	};
 	if (!completion || completion.stopReason === "error" || completion.stopReason === "aborted") {
 		const modelErrorEvidence = completion?.text?.trim()
 			? buildWorkerEvidenceBundle({

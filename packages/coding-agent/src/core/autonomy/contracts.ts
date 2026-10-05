@@ -141,7 +141,83 @@ export interface WorkerRequest {
 
 export type WorkerClaimStatus = "completed" | "partial" | "blocked" | "failed" | "cancelled";
 
-export type WorkerClaimOutputFormat = "structured" | "plain_text";
+/**
+ * How a worker's report reached the host: `structured` is the JSON envelope in its final text,
+ * `plain_text` a read-only worker's prose, `report` the arguments of the `submit_report` tool the host
+ * asked for when the worker declared itself done, and `unstructured_after_request` a worker that was
+ * asked for that report and answered in text anyway (its text is still parsed and stands).
+ */
+export type WorkerClaimOutputFormat = "structured" | "plain_text" | "report" | "unstructured_after_request";
+
+/** A command a worker ran, as the host recorded it: what the worker later claims about it is checked against this. */
+export interface WorkerCommandReceipt {
+	/** The tool call id; a report cites it as the evidence for a check. */
+	readonly id: string;
+	readonly tool: string;
+	/** The command's head, bounded and never carrying a credential. */
+	readonly command: string;
+	readonly isError: boolean;
+	/** Absent when the tool reported none (killed, or a tool that does not run a process). */
+	readonly exitCode?: number;
+	readonly durationMs?: number;
+	/** Where the full output was persisted, when it was. */
+	readonly outputRef?: string;
+}
+
+export type WorkerReportRequirementStatus = "met" | "partial" | "not_met" | "not_applicable";
+
+/** What a worker reports against one requirement id of its task, and what it cites as proof. */
+export interface WorkerReportRequirement {
+	readonly id: string;
+	readonly status: WorkerReportRequirementStatus;
+	/** Receipt ids, changed file paths or finding ids. */
+	readonly evidence: readonly string[];
+	readonly note?: string;
+}
+
+export interface WorkerReportCheck {
+	readonly command: string;
+	readonly receiptId?: string;
+	readonly result: "passed" | "failed" | "not_run";
+	readonly note?: string;
+}
+
+export interface WorkerReportChange {
+	readonly file: string;
+	readonly what: string;
+	/** Requirement ids this change serves. */
+	readonly serves?: readonly string[];
+}
+
+/** The structured sections of a submitted report beyond the envelope fields every claim already carries. */
+export interface WorkerSubmittedReport {
+	readonly requirements: readonly WorkerReportRequirement[];
+	readonly checks: readonly WorkerReportCheck[];
+	readonly changes: readonly WorkerReportChange[];
+	readonly assumptions: readonly string[];
+	readonly regressions: readonly string[];
+	readonly remaining: readonly string[];
+}
+
+/**
+ * The host's judgment of a worker's claim. `accepted`: the stated claims are shown by the receipts.
+ * `needs_more`: named proof is missing (one follow-up turn is allowed). `rejected`: a stated claim is
+ * contradicted. `blocked`: the worker reported a blocker. `unverified`: nothing was checked (a report
+ * that never took the structured form). The verdict is advice to the root, which owns the worker's
+ * lifecycle; it never closes, cancels or retires anything.
+ */
+export type WorkerHostVerdictKind = "accepted" | "needs_more" | "rejected" | "blocked" | "unverified";
+
+export interface WorkerHostVerdict {
+	readonly verdict: WorkerHostVerdictKind;
+	/** Requirement ids the worker reported met and the host's checks left standing. */
+	readonly coveredRequirementIds: readonly string[];
+	/** The proof a `needs_more` or `rejected` verdict names. */
+	readonly missing: readonly string[];
+	readonly reasonCodes: readonly string[];
+	readonly judgedBy: "code" | "system_one";
+	readonly at: string;
+}
 
 export interface WorkerClaimVerificationDecision {
 	subjectTaskId: string;
@@ -180,6 +256,12 @@ export interface WorkerClaim {
 	parentReviewedAt?: string;
 	/** Typed semantic verdict emitted only by a verifier-profile worker. */
 	verification?: WorkerClaimVerificationDecision;
+	/** Commands the worker ran, recorded by the host (bounded; the most recent are kept). */
+	commandReceipts?: readonly WorkerCommandReceipt[];
+	/** The structured sections of a report submitted through `submit_report`. */
+	report?: WorkerSubmittedReport;
+	/** The host's judgment of this claim against the receipts. */
+	hostVerdict?: WorkerHostVerdict;
 }
 
 export type LearningDecisionKind = "no-op" | "proposal" | "apply";

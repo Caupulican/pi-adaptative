@@ -16,7 +16,7 @@ import type { AgentMessage, ThinkingLevel } from "../../kernel/types.ts";
 import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
-import type { WorkerRequest } from "../autonomy/contracts.ts";
+import type { WorkerCommandReceipt, WorkerRequest } from "../autonomy/contracts.ts";
 import type { LaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { type LastSentRequest, sessionLaneSummarizerRequest } from "../compaction-support.ts";
@@ -41,6 +41,7 @@ import type {
 import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { WorkerCompletionProtocolError, WorkerProviderTurnProtocol } from "./worker-provider-turn-protocol.ts";
+import { appendCommandReceipt, commandReceiptFor } from "./worker-receipts.ts";
 import { runWorker, type WorkerRunOutcome } from "./worker-runner.ts";
 import { buildWorkerSystemPrompt } from "./worker-system-prompt.ts";
 import { captureWorkerTerminalOutputArtifact } from "./worker-terminal-output-artifact.ts";
@@ -340,6 +341,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	 * not this attempt's output.
 	 */
 	let attemptTranscriptStart = 0;
+	const commandReceipts: WorkerCommandReceipt[] = [];
 	const recentToolNames: string[] = [];
 	const recentToolCalls: { name: string; args: unknown }[] = [];
 	const recentToolOutcomes: { name: string; failed: boolean }[] = [];
@@ -949,6 +951,14 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 														cwd: options.cwd,
 													});
 												signal.throwIfAborted();
+												const receipt = commandReceiptFor({
+													toolCallId: toolCall.id,
+													toolName: toolCall.name,
+													args,
+													isError,
+													result,
+												});
+												if (receipt) appendCommandReceipt(commandReceipts, receipt);
 												await observeToolCall(toolCall.name, args, isError);
 												return duplicateNote
 													? {
@@ -1201,6 +1211,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							stopReason: String(completion.stopReason),
 							changedFiles: [...changedFiles],
 							blockers: [...toolIssues],
+							commandReceipts: [...commandReceipts],
 						};
 					},
 				});

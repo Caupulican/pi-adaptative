@@ -1,6 +1,15 @@
 import path from "node:path";
 import { DEFAULT_MAX_BYTES } from "../../kernel/utils/truncate.ts";
-import type { CapabilityEnvelope, GateOutcome, WorkerClaim, WorkerRequest } from "../autonomy/contracts.ts";
+import type {
+	CapabilityEnvelope,
+	GateOutcome,
+	WorkerClaim,
+	WorkerCommandReceipt,
+	WorkerHostVerdict,
+	WorkerReportRequirementStatus,
+	WorkerRequest,
+	WorkerSubmittedReport,
+} from "../autonomy/contracts.ts";
 import { HOST_FINDING_BLOCKER_PREFIXES } from "../autonomy/host-finding-prefixes.ts";
 import { checkPathScope } from "../autonomy/path-scope.ts";
 import { INCONCLUSIVE_LINE_PREFIX } from "../extensions/managed-lane-records.ts";
@@ -22,6 +31,12 @@ export const MAX_WORKER_CLAIM_TIMESTAMP_CHARS = 128;
 export const MAX_WORKER_CLAIM_VERIFICATION_SUBJECT_ID_CHARS = 256;
 export const MAX_WORKER_CLAIM_REASON_CODES = 32;
 export const MAX_WORKER_CLAIM_REASON_CODE_CHARS = 128;
+export const MAX_WORKER_CLAIM_COMMAND_RECEIPTS = 64;
+export const MAX_WORKER_CLAIM_COMMAND_CHARS = 240;
+export const MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS = 512;
+export const MAX_WORKER_REPORT_ENTRIES = 64;
+export const MAX_WORKER_REPORT_TEXT_CHARS = 2_000;
+export const MAX_WORKER_REPORT_REFS = 32;
 
 /** The blocker a claim carries while its owner-required independent verification has not settled. */
 export const INDEPENDENT_VERIFICATION_PENDING_BLOCKER = "independent verification is required before acceptance";
@@ -214,6 +229,144 @@ export function boundedWorkerClaimChangedFiles(values: readonly string[]): strin
  * artifact inspection. Host-built/native reports have already bounded their model output; foreign
  * reports must fit the exact same envelope and are rejected before cloning or getter invocation.
  */
+const REPORT_REQUIREMENT_STATUSES: ReadonlySet<unknown> = new Set<WorkerReportRequirementStatus>([
+	"met",
+	"partial",
+	"not_met",
+	"not_applicable",
+]);
+const HOST_VERDICT_KINDS: ReadonlySet<unknown> = new Set([
+	"accepted",
+	"needs_more",
+	"rejected",
+	"blocked",
+	"unverified",
+]);
+
+function workerClaimRecordArray(value: unknown, label: string, maximumCount: number): Record<string, unknown>[] {
+	if (!Array.isArray(value)) invalidWorkerClaim(`${label} must be an array.`);
+	if (value.length > maximumCount) invalidWorkerClaim(`${label} exceeds ${maximumCount} entries.`);
+	return value.map((entry, index) => ownWorkerClaimDataRecord(entry, `${label}[${index}]`));
+}
+
+function optionalWorkerClaimInteger(value: unknown, label: string): number | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "number" || !Number.isInteger(value)) invalidWorkerClaim(`${label} must be an integer.`);
+	return value;
+}
+
+function normalizeCommandReceipts(value: unknown): WorkerCommandReceipt[] {
+	return workerClaimRecordArray(value, "claim.commandReceipts", MAX_WORKER_CLAIM_COMMAND_RECEIPTS).map(
+		(entry, index) => {
+			const label = `claim.commandReceipts[${index}]`;
+			if (typeof entry.isError !== "boolean") invalidWorkerClaim(`${label}.isError must be boolean.`);
+			const exitCode = optionalWorkerClaimInteger(entry.exitCode, `${label}.exitCode`);
+			const durationMs = optionalWorkerClaimInteger(entry.durationMs, `${label}.durationMs`);
+			const outputRef = optionalWorkerClaimString(
+				entry.outputRef,
+				`${label}.outputRef`,
+				MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS,
+			);
+			return {
+				id: requiredWorkerClaimString(entry.id, `${label}.id`, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS),
+				tool: requiredWorkerClaimString(entry.tool, `${label}.tool`, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS),
+				command: requiredWorkerClaimString(entry.command, `${label}.command`, MAX_WORKER_CLAIM_COMMAND_CHARS),
+				isError: entry.isError,
+				...(exitCode !== undefined ? { exitCode } : {}),
+				...(durationMs !== undefined ? { durationMs } : {}),
+				...(outputRef !== undefined ? { outputRef } : {}),
+			};
+		},
+	);
+}
+
+function normalizeSubmittedReport(value: unknown): WorkerSubmittedReport {
+	const report = ownWorkerClaimDataRecord(value, "claim.report");
+	const refs = (entry: unknown, label: string) =>
+		workerClaimStringArray(entry ?? [], label, MAX_WORKER_REPORT_REFS, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS);
+	const texts = (entry: unknown, label: string) =>
+		workerClaimStringArray(entry ?? [], label, MAX_WORKER_REPORT_ENTRIES, MAX_WORKER_REPORT_TEXT_CHARS);
+	return {
+		requirements: workerClaimRecordArray(
+			report.requirements ?? [],
+			"claim.report.requirements",
+			MAX_WORKER_REPORT_ENTRIES,
+		).map((entry, index) => {
+			const label = `claim.report.requirements[${index}]`;
+			if (!REPORT_REQUIREMENT_STATUSES.has(entry.status)) invalidWorkerClaim(`${label}.status is invalid.`);
+			const note = optionalWorkerClaimString(entry.note, `${label}.note`, MAX_WORKER_REPORT_TEXT_CHARS);
+			return {
+				id: requiredWorkerClaimString(entry.id, `${label}.id`, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS),
+				status: entry.status as WorkerReportRequirementStatus,
+				evidence: refs(entry.evidence, `${label}.evidence`),
+				...(note !== undefined ? { note } : {}),
+			};
+		}),
+		checks: workerClaimRecordArray(report.checks ?? [], "claim.report.checks", MAX_WORKER_REPORT_ENTRIES).map(
+			(entry, index) => {
+				const label = `claim.report.checks[${index}]`;
+				if (entry.result !== "passed" && entry.result !== "failed" && entry.result !== "not_run")
+					invalidWorkerClaim(`${label}.result is invalid.`);
+				const receiptId = optionalWorkerClaimString(
+					entry.receiptId,
+					`${label}.receiptId`,
+					MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS,
+				);
+				const note = optionalWorkerClaimString(entry.note, `${label}.note`, MAX_WORKER_REPORT_TEXT_CHARS);
+				return {
+					command: requiredWorkerClaimString(entry.command, `${label}.command`, MAX_WORKER_CLAIM_COMMAND_CHARS),
+					...(receiptId !== undefined ? { receiptId } : {}),
+					result: entry.result,
+					...(note !== undefined ? { note } : {}),
+				};
+			},
+		),
+		changes: workerClaimRecordArray(report.changes ?? [], "claim.report.changes", MAX_WORKER_REPORT_ENTRIES).map(
+			(entry, index) => {
+				const label = `claim.report.changes[${index}]`;
+				return {
+					file: requiredWorkerClaimString(entry.file, `${label}.file`, MAX_WORKER_CLAIM_CHANGED_FILE_CHARS),
+					what: requiredWorkerClaimString(entry.what, `${label}.what`, MAX_WORKER_REPORT_TEXT_CHARS),
+					...(entry.serves !== undefined ? { serves: refs(entry.serves, `${label}.serves`) } : {}),
+				};
+			},
+		),
+		assumptions: texts(report.assumptions, "claim.report.assumptions"),
+		regressions: texts(report.regressions, "claim.report.regressions"),
+		remaining: texts(report.remaining, "claim.report.remaining"),
+	};
+}
+
+function normalizeHostVerdict(value: unknown): WorkerHostVerdict {
+	const verdict = ownWorkerClaimDataRecord(value, "claim.hostVerdict");
+	if (!HOST_VERDICT_KINDS.has(verdict.verdict)) invalidWorkerClaim("claim.hostVerdict.verdict is invalid.");
+	if (verdict.judgedBy !== "code" && verdict.judgedBy !== "system_one")
+		invalidWorkerClaim("claim.hostVerdict.judgedBy is invalid.");
+	return {
+		verdict: verdict.verdict as WorkerHostVerdict["verdict"],
+		coveredRequirementIds: workerClaimStringArray(
+			verdict.coveredRequirementIds ?? [],
+			"claim.hostVerdict.coveredRequirementIds",
+			MAX_WORKER_REPORT_ENTRIES,
+			MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS,
+		),
+		missing: workerClaimStringArray(
+			verdict.missing ?? [],
+			"claim.hostVerdict.missing",
+			MAX_WORKER_REPORT_ENTRIES,
+			MAX_WORKER_REPORT_TEXT_CHARS,
+		),
+		reasonCodes: workerClaimStringArray(
+			verdict.reasonCodes ?? [],
+			"claim.hostVerdict.reasonCodes",
+			MAX_WORKER_CLAIM_REASON_CODES,
+			MAX_WORKER_CLAIM_REASON_CODE_CHARS,
+		),
+		judgedBy: verdict.judgedBy,
+		at: requiredWorkerClaimString(verdict.at, "claim.hostVerdict.at", MAX_WORKER_CLAIM_TIMESTAMP_CHARS),
+	};
+}
+
 export function normalizeWorkerClaimForHost(value: unknown): WorkerClaim {
 	const claim = ownWorkerClaimDataRecord(value, "claim");
 	const status = claim.status;
@@ -226,7 +379,13 @@ export function normalizeWorkerClaimForHost(value: unknown): WorkerClaim {
 	) {
 		invalidWorkerClaim("claim.status is invalid.");
 	}
-	if (claim.outputFormat !== undefined && claim.outputFormat !== "structured" && claim.outputFormat !== "plain_text") {
+	if (
+		claim.outputFormat !== undefined &&
+		claim.outputFormat !== "structured" &&
+		claim.outputFormat !== "plain_text" &&
+		claim.outputFormat !== "report" &&
+		claim.outputFormat !== "unstructured_after_request"
+	) {
 		invalidWorkerClaim("claim.outputFormat is invalid.");
 	}
 	if (claim.parentReviewRequired !== undefined && typeof claim.parentReviewRequired !== "boolean") {
@@ -345,6 +504,11 @@ export function normalizeWorkerClaimForHost(value: unknown): WorkerClaim {
 				}
 			: {}),
 		...(normalizedVerification ? { verification: normalizedVerification } : {}),
+		...(claim.commandReceipts !== undefined
+			? { commandReceipts: normalizeCommandReceipts(claim.commandReceipts) }
+			: {}),
+		...(claim.report !== undefined ? { report: normalizeSubmittedReport(claim.report) } : {}),
+		...(claim.hostVerdict !== undefined ? { hostVerdict: normalizeHostVerdict(claim.hostVerdict) } : {}),
 	};
 }
 

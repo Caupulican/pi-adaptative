@@ -65,6 +65,8 @@ export interface BashToolDetails {
 	/** Present when a family reducer produced the text; `rawPath` names the persisted raw output. */
 	outputReduction?: OutputReductionDetails;
 	piVerification?: VerificationRecord;
+	/** The process's exit code when the command ran to completion; a worker's report is checked against it. */
+	exitCode?: number;
 }
 
 /**
