@@ -612,11 +612,15 @@ export class WorkerDispatchScheduler {
 						this.redrainRequested = true;
 						continue;
 					}
+					// Admission said start, and for a lane that had waited on a write reservation it just acquired that
+					// reservation. The lane is no longer blocked on it: clearing the flag only after preflight left the
+					// lane skipped by the redrain that preflight's completion triggers (nothing signals the reservation
+					// available again), holding a reservation it never used.
+					this.reservationBlocked.delete(laneId);
 					if (this.options.preflight && !this.validated.has(laneId)) {
 						this.beginPreflight(request, record);
 						continue;
 					}
-					this.reservationBlocked.delete(laneId);
 					const dispatchToken = this.queuedDispatchTokens.get(laneId);
 					this.removeQueued(laneId);
 					let run: Promise<WorkerDelegationRunOutcome>;

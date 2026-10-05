@@ -493,6 +493,15 @@ const EXACT_ACTION_FIELD_CORRECTIONS: ReadonlyArray<{
 			`delegate ${action} does not accept field agentIds. Nothing was executed. Use singular agentId — one call per worker.`,
 		counterpart: { field: "agentId", conflict: "Both agentIds and agentId were sent; keep only agentId." },
 	},
+	// follow_up and send continue the worker's current task and carry only a message. A task field sent
+	// with one would change what the call means, so it is refused rather than deleted: deleting it ran the
+	// next task under the previous task's requirement ids, and its report was checked against the wrong ones.
+	...(["requirementId", "requirementIds", "dependsOn"] as const).map((field) => ({
+		actions: ["follow_up", "send"] as readonly DelegateAction[],
+		field,
+		correction: (action: DelegateAction) =>
+			`delegate ${action} does not accept ${field}: it carries a message on the worker's current task and cannot change what that task is correlated to. Nothing was queued. For new work on this worker with its own requirement ids or dependencies, call delegate start with its agentId and ${field}.`,
+	})),
 ];
 
 /**

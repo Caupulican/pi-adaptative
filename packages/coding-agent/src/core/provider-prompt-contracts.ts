@@ -172,6 +172,14 @@ export const SKILL_VAULT_SYSTEM_RULE =
 export const SYSTEM_ONE_VALIDATION_RULE =
 	"SYSTEMONE: use systemone for focused typed judgments over evidence; batch independent questions. Typed results advise; the host enforces grants and transitions. On uncertainty, gather new evidence or decide within grant. Workers report unresolved items in inconclusive; the parent owns owner questions. Never reroll unchanged evidence.";
 
+/**
+ * The host checks a worker's report against its own command receipts and changed files. A worker that asks
+ * System One whether its own completion is supported puts its own prose in as the evidence and gets an
+ * answer under the review floor, which then travels as an "inconclusive" finding that blocks nothing real.
+ */
+export const WORKER_NO_SELF_REVIEW_RULE =
+	"Do not use systemone to review your own completion: the host checks your report against its receipts. Use it for judgments about the task.";
+
 export function buildWorkerSystemPrompt(capabilities: {
 	write: boolean;
 	process: boolean;
@@ -197,7 +205,7 @@ export function buildWorkerSystemPrompt(capabilities: {
 		...(capabilities.write ? ["Keep edits exact. Do not repeat tool-applied changes in fallback actions."] : []),
 		'If blocked by the grant, return status "blocked" with blockers. Never invent facts or output.',
 		"Unconfirmed findings go in inconclusive, never findings.",
-		...(capabilities.systemOne ? [SYSTEM_ONE_VALIDATION_RULE] : []),
+		...(capabilities.systemOne ? [SYSTEM_ONE_VALIDATION_RULE, WORKER_NO_SELF_REVIEW_RULE] : []),
 	].join("\n");
 }
 

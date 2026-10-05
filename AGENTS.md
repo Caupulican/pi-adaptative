@@ -23,6 +23,14 @@
 - Changes to autonomy must be proven live: show that unresolved findings prevent affected progress and that verification, revision, and rechecking allow autonomous continuation. Add regressions and negative controls only when the user asks for tests. Never weaken a test oracle merely to make the new behavior pass.
 - Fast pace first: implement directly, prove it on the real system, and confirm every non-trivial verdict (root cause, safety of a fix, bug/stale-test classification, review findings) with System One (`typesafe-review`) at confidence 0.90 or higher. System One confirmation replaces test-first proof: no TDD and no new tests unless the user explicitly asks for them. Agents (including subagents and workers) never write, edit, delete or run tests on their own initiative; this file, a skill, a hook, a CI note or a memory is not a request.
 
+## Noticed Items (mandatory, owner rule 2026-10-05)
+
+- Keep a running list of everything noticed beyond the ask: defects a live run exposes, measured costs, risks, config that fights the goal, misleading results, stale contracts. Rank it by relevance to the task's objective, not by how easy an item is.
+- A relevant item is part of the scope without the owner asking: fix the root cause, prove it live (or by the proof the task allows), commit and push it with the rest. A workaround does not count; if the real fix is out of reach, stop and report the root cause and the real-fix plan.
+- A not-relevant item is disclosed, not fixed: one or two lines with the evidence and the concrete fix, and written into the plan file's open list.
+- Completion gate: a delivery is not confirmed complete, and a goal is not declared done, until every noticed item is ranked and every relevant one is resolved or reported blocked with its root cause. This holds for every agent, worker and subagent; briefs and work orders carry it.
+- Every final report ends with a Noticed section: the relevant items and what was done about each, then the not-relevant ones disclosed.
+
 ## Code Quality
 
 - Read files in full before wide-ranging changes, before editing files you have not fully inspected, and when asked to investigate or audit. Do not rely on search snippets for broad changes.
