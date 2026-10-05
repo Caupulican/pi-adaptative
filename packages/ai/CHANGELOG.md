@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Refreshed the text and image model catalogs against live upstream data, including current prices and limits, nine new image models, and the removal of one retired free text model.
+
 ## [0.103.1] - 2026-10-05
 
 ## [0.103.0] - 2026-10-04
