@@ -11,6 +11,7 @@
 - Preserved issued encrypted reasoning details in OpenAI-compatible Completions histories and payload hooks without exempting ordinary user or tool content.
 - Retained files, index and commits after failed release preparation or repair instead of destructively resetting the shared worktree; separated tag-promotion messages from artifact-publication status.
 - Required successful provider-regression evidence on Linux and Windows before release publication, including guards against omitted or skipped regression steps.
+- Kept pre-commit diagnostics in plain technical text while retaining explicit error and warning severity.
 
 ## [0.103.2] - 2026-10-05
 

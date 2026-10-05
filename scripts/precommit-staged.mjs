@@ -129,7 +129,7 @@ function run(label, command, args, cwd = repoRoot, env = process.env) {
 	});
 	const seconds = ((Date.now() - started) / 1000).toFixed(1);
 	if (result.status !== 0) {
-		console.error(`❌ precommit: ${label} failed after ${seconds}s`);
+		console.error(`precommit: error: ${label} failed after ${seconds}s`);
 		process.exit(result.status ?? 1);
 	}
 	process.stdout.write(`precommit: ${label} ok (${seconds}s)\n`);
@@ -150,9 +150,9 @@ function reportCiVerdict() {
 	if (obligation.kind === "pending") {
 		process.stdout.write(`precommit: CI for ${branch} is still running (${obligation.status.sha.slice(0, 9)}); its verdict applies to the next commit\n`);
 	} else if (obligation.kind === "unknown") {
-		process.stdout.write(`⚠ precommit: the CI verdict for ${branch} is unknown:\n${describeStatus(obligation.status)}\n  Check it with: gh run list --workflow ci.yml --branch ${branch}\n`);
+		process.stdout.write(`precommit: warning: the CI verdict for ${branch} is unknown:\n${describeStatus(obligation.status)}\n  Check it with: gh run list --workflow ci.yml --branch ${branch}\n`);
 	} else if (obligation.kind === "red") {
-		process.stdout.write(`⚠ precommit: ${branch} is red in CI:\n${describeStatus(obligation.status)}\n`);
+		process.stdout.write(`precommit: warning: ${branch} is red in CI:\n${describeStatus(obligation.status)}\n`);
 	}
 }
 
@@ -208,7 +208,7 @@ export function main(argv = process.argv.slice(2)) {
 			}
 			if (result.status !== 0) {
 				console.error(
-					`❌ precommit: ${label} failed. Stage the formatted content (format the file, then stage the hunks you mean) or stage the whole file.`,
+					`precommit: error: ${label} failed. Stage the formatted content (format the file, then stage the hunks you mean) or stage the whole file.`,
 				);
 				process.exit(result.status ?? 1);
 			}
@@ -218,7 +218,7 @@ export function main(argv = process.argv.slice(2)) {
 	if (plan.browserSmoke) run("browser smoke check", "npm", ["run", "check:browser-smoke"]);
 	reportCiVerdict();
 	if (plan.typecheck) run("project type check (staged TypeScript source)", process.execPath, [join(scriptsDir, "run-tsc.mjs"), "--noEmit"]);
-	process.stdout.write(`✅ precommit: staged gates passed in ${((Date.now() - started) / 1000).toFixed(1)}s\n`);
+	process.stdout.write(`precommit: staged gates passed in ${((Date.now() - started) / 1000).toFixed(1)}s\n`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main();
