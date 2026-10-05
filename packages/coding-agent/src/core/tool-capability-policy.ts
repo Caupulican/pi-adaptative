@@ -242,6 +242,11 @@ export function toolCapabilityRequirementClauses(
 				: undefined;
 		return action === "repair" ? [["skill.write"]] : [["skill.read"]];
 	}
+	if (name === SYSTEM_ONE_TOOL_NAME && args && typeof args === "object" && !Array.isArray(args)) {
+		// Locate reads repository excerpts before judging them, so it needs read authority as well.
+		if ((args as { action?: unknown }).action === "locate")
+			return [["semantic.judge"], ["filesystem.read", "worktree.read"]];
+	}
 	if (name === "pipeline") {
 		const action =
 			args && typeof args === "object" && "action" in args ? (args as { action: unknown }).action : undefined;

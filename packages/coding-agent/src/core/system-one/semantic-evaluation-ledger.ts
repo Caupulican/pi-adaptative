@@ -93,6 +93,7 @@ const HOST_PROGRAM_FAMILIES: readonly { pattern: RegExp; label: string; namespac
 	{ pattern: /^retention_eval_/, label: "retention", namespace: "retention" },
 	{ pattern: /^supervision_eval_/, label: "worker supervision", namespace: "worker-supervision" },
 	{ pattern: /^objective-route-v2$/, label: "objective route", namespace: "objective-route" },
+	{ pattern: /^system-one:locate$/, label: "file locate", namespace: "file-locate" },
 ];
 
 /** Checkpoints whose registered pack is the synthesized fallback but whose call site names them. */

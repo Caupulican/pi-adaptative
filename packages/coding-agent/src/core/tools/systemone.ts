@@ -23,12 +23,21 @@ import {
 } from "../review/typesafe-evidence-materializer.ts";
 import type { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
 import { type PricedTypeSafeUsage, priceTypeSafeUsage } from "../review/typesafe-usage.ts";
+import type { FileLocator } from "../system-one/locate.ts";
+import {
+	LocateInputError,
+	MAX_LOCATE_LIMIT,
+	MAX_LOCATE_PATHS,
+	MAX_LOCATE_QUERIES,
+	MAX_LOCATE_QUERY_CHARS,
+	MAX_LOCATE_TARGET_CHARS,
+} from "../system-one/locate-input.ts";
 import type { SemanticUncertaintyPort } from "../system-one/semantic-doubts.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 
 const schema = Type.Object(
 	{
-		action: Type.Enum(["status", "evaluate", "review", "evidence", "uncertainties", "resolve_uncertainty"]),
+		action: Type.Enum(["status", "evaluate", "review", "evidence", "uncertainties", "resolve_uncertainty", "locate"]),
 		id: Type.Optional(Type.String()),
 		offset: Type.Optional(Type.Integer({ minimum: 0 })),
 		evidenceRefs: Type.Optional(
@@ -36,6 +45,20 @@ const schema = Type.Object(
 		),
 		evaluation: Type.Optional(evaluationInputSchema),
 		review: Type.Optional(reviewInputSchema),
+		locate: Type.Optional(
+			Type.Object(
+				{
+					target: Type.String({ minLength: 1, maxLength: MAX_LOCATE_TARGET_CHARS }),
+					queries: Type.Array(Type.String({ minLength: 1, maxLength: MAX_LOCATE_QUERY_CHARS }), {
+						minItems: 1,
+						maxItems: MAX_LOCATE_QUERIES,
+					}),
+					paths: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { maxItems: MAX_LOCATE_PATHS })),
+					limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LOCATE_LIMIT })),
+				},
+				{ additionalProperties: false },
+			),
+		),
 		uncertainty: Type.Optional(
 			Type.Object(
 				{
@@ -98,6 +121,7 @@ export function createSystemOneToolDefinition(
 	reportUsage?: (toolCallId: string, usage: Usage) => void,
 	evidenceMaterializer?: TypeSafeEvidenceMaterializer,
 	uncertainties?: SemanticUncertaintyPort,
+	locator?: Pick<FileLocator, "locate">,
 ) {
 	const uncertaintyPrompt = uncertainties
 		? "At turn entry and before delivery, inspect active uncertainties. For worker-task questions, gather evidence from the responsible worker and steer it as needed; after reviewing that evidence, the owning session may record an advisory disposition for any current question in its own journal. Include a conservative path or evidence-based decision with concise evidence and reason. Keep mandatory same-lane verification and recheck requirements active. This disposition is not a System One pass, verification proof, certificate proof, or permission. Reject stale questions and questions explicitly scoped to a foreign root session."
@@ -106,11 +130,12 @@ export function createSystemOneToolDefinition(
 		name: SYSTEM_ONE_TOOL_NAME,
 		label: "System One",
 		readOnly: true,
-		description: `Use System One for semantic decisions and independent verification. Status checks setup. Evaluate batched Choice, Noul and Score questions. Review gates claims at high (0.95) or max (0.99) confidence. evidenceRefs snapshots scoped files, artifacts, or git diffs. Evidence reads retained records by id and offset. ${uncertainties ? "The session owner can list and disposition advisory uncertainties; this never proves verification or grants permission." : "Workers report unresolved task questions to their owner and recheck mandatory findings in their own lane."} Does not execute or authorize actions.`,
+		description: `Use System One for semantic decisions and independent verification. Status checks setup. Evaluate batched Choice, Noul and Score questions. Review gates claims at high (0.95) or max (0.99) confidence. evidenceRefs snapshots scoped files, artifacts, or git diffs. Evidence reads retained records by id and offset. Locate ranks files by whether their code defines what a target describes. ${uncertainties ? "The session owner can list and disposition advisory uncertainties; this never proves verification or grants permission." : "Workers report unresolved task questions to their owner and recheck mandatory findings in their own lane."} Does not execute or authorize actions.`,
 		promptSnippet: "System One: semantic judgments and high/max claim review.",
 		promptGuidelines: [
 			'For review, use an option map and a declared expected key, for example: {"action":"review","review":{"state":"relevant source and check results","questions":{"claim":{"instructions":"Does this evidence support the claim?","criteria":{"supports":"Supported","contradicts":"Contradicted","insufficient":"Missing evidence"},"expected":"supports"}}}}.',
 			"Check systemone status at work start. When the systemone skill is listed and the skill tool is available, load the systemone skill. Use System One for semantic decisions and reviews throughout work, in any domain.",
+			"Find where code lives: systemone locate, target in words + 1-8 literal/regex queries; read top hits before editing. Known token: grep.",
 			"Batch independent narrow questions with complete relevant source, tests, prior findings and limitations; never hide adverse evidence. Reproduce bug candidates before fixing.",
 			"Approval requires every expected verdict and high/max confidence; fix findings or add missing evidence. Never reroll unchanged evidence for a better score. Use the configured provider login flow reported by systemone status; never put credentials in tool arguments.",
 			uncertaintyPrompt,
@@ -185,6 +210,32 @@ export function createSystemOneToolDefinition(
 						details: record,
 					};
 				}
+				if (input.action === "locate") {
+					if (!locator) {
+						return {
+							isError: true,
+							content: [
+								{ type: "text" as const, text: "systemone locate is available to the session owner only." },
+							],
+							details: { advisoryOnly: true },
+						};
+					}
+					if (!input.locate) throw new Error("locate is required for the locate action");
+					const outcome = await locator.locate(input.locate, signal);
+					return {
+						content: [{ type: "text" as const, text: outcome.text }],
+						details: {
+							kind: "system_one_locate",
+							judged: outcome.judged,
+							candidates: outcome.candidates,
+							filesMatched: outcome.filesMatched,
+							requests: outcome.requests,
+							matches: [...outcome.matches, ...outcome.closest]
+								.slice(0, MAX_LOCATE_LIMIT)
+								.map(({ path, line, probability }) => ({ path, line, probability })),
+						},
+					};
+				}
 				if (input.action === "evidence") {
 					const page = evidenceStore.read(input.id ?? "", input.offset);
 					return {
@@ -222,6 +273,13 @@ export function createSystemOneToolDefinition(
 				};
 				transportAttempts = result.transportAttempts;
 			} catch (error) {
+				if (error instanceof LocateInputError) {
+					return {
+						isError: true,
+						content: [{ type: "text" as const, text: error.message }],
+						details: { kind: "system_one_locate", judged: false },
+					};
+				}
 				const message = signal?.aborted
 					? "System One review cancelled"
 					: error instanceof Error

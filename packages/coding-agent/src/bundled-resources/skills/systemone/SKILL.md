@@ -70,6 +70,22 @@ settle to its parent; the parent reviews the evidence before the root asks the o
 full handoff, reserved owner decisions go to the session's follow-up document. No answer means
 the decision remains open; silence is never approval or cancellation.
 
+### Locate files by judgment
+
+Use `action: "locate"` to find where something lives or which file defines it, when the exact token is not known:
+`{"action":"locate","locate":{"target":"where the shell operation gate decides a command's edge class","queries":["operation gate","classifyOperation","edge class"],"paths":["packages/coding-agent/src"],"limit":5}}`.
+You choose 1-8 literal or regex queries (smart case) and may scope with `paths`. The host searches, orders files by how many of your
+queries they match, and builds a short card for the best 24: the file's leading comment, the names it declares and a few lines around its
+best hit. System One answers one closed question per card ("is this the code the target asks about?") and the host returns
+`path:line  p=0.97  matched line`, highest probability first, plus a count of the rest. Measured on this repository (hold-out of 20 targets):
+the right file is first in 0.85 of calls and in the top 3 in 0.95, against 0.35 and 0.65 for the lexical order alone, for about one request,
+7k judged tokens and half a second.
+Probabilities are coarse: a right file often scores 0.4-0.8, below the 0.85 acceptance floor, so the list is topped up to three with the best
+candidates below it, labeled `(below floor)`. Rely on the order, not the number. A ranking is not proof: read the file before editing it.
+Prefer several distinct queries (names, verbs, nouns from the target) over one broad pattern: files are chosen by lexical coverage first, and a
+file outside the best 24 is never judged ("N further matching files were not judged"). If System One is unavailable the result is the lexical
+ranking marked `unjudged`, never a claim that nothing exists. Use `grep` or `find` when the exact token or path is already known.
+
 ### Design focused approval checks
 
 Use `action: "review"` and a `review` object containing `state`, `questions`

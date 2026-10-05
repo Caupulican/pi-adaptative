@@ -169,6 +169,8 @@ import type { SystemOneProviderChoice } from "./system-one/access.ts";
 import { systemOneAccessFromSession } from "./system-one/access.ts";
 import type { ClarificationDecisionEngine } from "./system-one/clarification.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
+import { FileLocator } from "./system-one/locate.ts";
+import { redactSecrets } from "./system-one/projector.ts";
 import type { SemanticUncertaintyPort } from "./system-one/semantic-doubts.ts";
 import { createSessionVerificationHost, wrapToolWithVerification } from "./system-one/session-verification-host.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
@@ -1391,6 +1393,16 @@ export class RuntimeBuilder {
 							credentialBoundary: this._credentialExposureBoundary,
 						}),
 						this.deps.getSemanticUncertainties?.(),
+						new FileLocator({
+							getCwd: () => this._taskDirectories.cwd,
+							getAdapter: () => this.deps.getSystemOneController?.()?.adapter,
+							getObserver: () => this.deps.getSystemOneController?.()?.getEvaluationObserver(),
+							redact: (text) => {
+								const controller = this.deps.getSystemOneController?.();
+								return controller ? controller.projector.redactText(text) : redactSecrets(text);
+							},
+							credentialBoundary: this._credentialExposureBoundary,
+						}),
 					),
 				);
 			}
