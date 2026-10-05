@@ -409,6 +409,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				context: reportContext,
 				receipts: commandReceipts,
 				changedFiles: [...changedFiles],
+				cwd: options.cwd,
 			});
 			if (
 				(hostVerdict.verdict === "needs_more" || hostVerdict.verdict === "rejected") &&

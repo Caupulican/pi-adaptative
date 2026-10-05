@@ -80,35 +80,41 @@ export function deriveWorkerDisposition(input: WorkerDispositionInput): WorkerDi
 	if (claim.inconclusive && claim.inconclusive.length > 0) {
 		return advice("needs_follow_up", `The claim carries ${claim.inconclusive.length} inconclusive finding(s).`);
 	}
-	if (claim.parentReviewRequired === true && claim.parentReviewedAt === undefined) {
-		return advice("needs_follow_up", "The claim awaits your review acknowledgement.");
-	}
-	if (claim.verification?.verdict === "rejected") {
-		return advice("needs_follow_up", "Independent verification rejected the claim.");
-	}
-	if (claim.ownerFollowUp) return advice("needs_follow_up", "An owner follow-up was recorded for open findings.");
-	if (claim.status === "partial" || claim.status === "blocked" || claim.status === "failed") {
-		return advice("needs_follow_up", `The claim status is ${claim.status}.`);
-	}
-	if (claim.status === "cancelled") return advice("idle", "The task was cancelled; the worker keeps its transcript.");
-	if (verdict === "unverified") {
-		return advice("idle", "The host could not check this claim; verify it before retiring the worker.");
-	}
-	const open = input.openTasksForSameProfile;
-	if (open !== undefined && open > 0) {
-		return advice("idle", `${open} open task(s) would route to ${input.profileId ?? "this profile"}.`);
-	}
-	const uncovered = input.uncoveredRequirementIds;
-	if (uncovered !== undefined && uncovered.length > 0) {
-		return advice(
-			"idle",
-			`${uncovered.length} goal requirement(s) remain uncovered: ${uncovered.slice(0, 3).join(", ")}.`,
-		);
-	}
-	if (open === undefined || uncovered === undefined) {
-		return advice("idle", "Remaining work for this profile is unknown; keep it reusable until you decide.");
-	}
-	return advice("retire", "No open task or uncovered requirement remains for this profile.");
+	// A change flagged for review holds no problem with the work itself: the root acknowledges it with
+	// `delegate review`, and the advice that follows is about what to do with the worker afterwards.
+	const reviewPending = claim.parentReviewRequired === true && claim.parentReviewedAt === undefined;
+	const settled = (() => {
+		if (claim.verification?.verdict === "rejected") {
+			return advice("needs_follow_up", "Independent verification rejected the claim.");
+		}
+		if (claim.ownerFollowUp) return advice("needs_follow_up", "An owner follow-up was recorded for open findings.");
+		if (claim.status === "partial" || claim.status === "blocked" || claim.status === "failed") {
+			return advice("needs_follow_up", `The claim status is ${claim.status}.`);
+		}
+		if (claim.status === "cancelled")
+			return advice("idle", "The task was cancelled; the worker keeps its transcript.");
+		if (verdict === "unverified") {
+			return advice("idle", "The host could not check this claim; verify it before retiring the worker.");
+		}
+		const open = input.openTasksForSameProfile;
+		if (open !== undefined && open > 0) {
+			return advice("idle", `${open} open task(s) would route to ${input.profileId ?? "this profile"}.`);
+		}
+		const uncovered = input.uncoveredRequirementIds;
+		if (uncovered !== undefined && uncovered.length > 0) {
+			return advice(
+				"idle",
+				`${uncovered.length} goal requirement(s) remain uncovered: ${uncovered.slice(0, 3).join(", ")}.`,
+			);
+		}
+		if (open === undefined || uncovered === undefined) {
+			return advice("idle", "Remaining work for this profile is unknown; keep it reusable until you decide.");
+		}
+		return advice("retire", "No open task or uncovered requirement remains for this profile.");
+	})();
+	return reviewPending
+		? advice(settled.disposition, `Acknowledge the change with delegate review first. ${settled.reason}`)
+		: settled;
 }
 
 /**
@@ -118,7 +124,8 @@ export function deriveWorkerDisposition(input: WorkerDispositionInput): WorkerDi
  * root's call and needs the live facts.
  */
 export function deriveClaimOnlyWorkerDisposition(claim: WorkerDispositionClaim | undefined): WorkerDispositionAdvice {
-	return deriveWorkerDisposition({ claim: claim ? { ...claim, parentReviewedAt: undefined } : undefined });
+	// A worker parent cannot acknowledge a review, and the review state changes between delivery and replay.
+	return deriveWorkerDisposition({ claim: claim ? { ...claim, parentReviewRequired: false } : undefined });
 }
 
 const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
@@ -249,7 +256,7 @@ export function workerDispositionGuidance(
 		case "retire":
 			return "retire it";
 		case "idle":
-			return "leave it idle for the next task";
+			return "leave it idle; a delegate start with its agentId gives it the next task (a follow_up continues the same task)";
 		case "needs_follow_up":
 			return hostVerdict && hostVerdict.missing.length > 0
 				? `follow_up with the missing proof (${verdictList(hostVerdict.missing)})`

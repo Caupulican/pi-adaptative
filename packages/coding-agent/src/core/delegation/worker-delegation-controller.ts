@@ -205,6 +205,7 @@ import {
 import { type WorkerProjectAdmission, WorkerProjectDirectory } from "./worker-project-directory.ts";
 import { assertQueuedWorkerContextRecoverable } from "./worker-queued-context-recovery.ts";
 import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./worker-recovery-coordinator.ts";
+import { workerReportClaimText } from "./worker-report.ts";
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
 import { materializeWorkerResourceBundle } from "./worker-resource-materializer.ts";
 import type { WorkerRunOutcome } from "./worker-runner.ts";
@@ -4589,7 +4590,7 @@ export class WorkerDelegationController {
 					settledOutcome.claim.status === "completed"
 						? ((await this.deps
 								.reviewWorkerReport?.({
-									summary: settledOutcome.claim.summary,
+									summary: workerReportClaimText(settledOutcome.claim),
 									messages: conversation.getRawTranscript().slice(transcriptStart),
 									...(settledOutcome.claim.verification
 										? { verifierVerdict: settledOutcome.claim.verification.verdict }

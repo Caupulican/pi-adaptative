@@ -13,6 +13,7 @@
  * advice to the root, which owns the worker's lifecycle.
  */
 
+import { isAbsolute, resolve } from "node:path";
 import { type Static, Type } from "typebox";
 import type { AgentTool } from "../../kernel/index.ts";
 import type {
@@ -343,6 +344,8 @@ export function judgeSubmittedReport(input: {
 	context: WorkerReportContext;
 	receipts: readonly WorkerCommandReceipt[];
 	changedFiles: readonly string[];
+	/** The worker's working directory: a path is the same file whether it was spelled absolute or relative. */
+	cwd: string;
 	now?: () => string;
 }): WorkerHostVerdict {
 	const now = input.now ?? (() => new Date().toISOString());
@@ -351,7 +354,8 @@ export function judgeSubmittedReport(input: {
 		return verdict("blocked", { reasonCodes: ["worker_reported_blocker"] }, now);
 	}
 	const receipts = receiptIndex(input.receipts);
-	const changed = new Set(input.changedFiles);
+	const spelled = (file: string): string => (isAbsolute(file) ? resolve(file) : resolve(input.cwd, file));
+	const changed = new Set(input.changedFiles.map(spelled));
 	const contradicted: string[] = [];
 	const missing: string[] = [];
 	const reasons: string[] = [];
@@ -373,21 +377,21 @@ export function judgeSubmittedReport(input: {
 		}
 	}
 	for (const change of submitted.report.changes) {
-		if (!changed.has(change.file)) {
+		if (!changed.has(spelled(change.file))) {
 			contradicted.push(`change to ${change.file} is reported but the host recorded no change to it`);
 			reasons.push("change_not_recorded");
 		}
 	}
 	if (context.writeCapable) {
-		const reported = new Set(submitted.report.changes.map((change) => change.file));
-		const unreported = input.changedFiles.filter((file) => !reported.has(file));
+		const reported = new Set(submitted.report.changes.map((change) => spelled(change.file)));
+		const unreported = input.changedFiles.filter((file) => !reported.has(spelled(file)));
 		if (unreported.length > 0) {
 			missing.push(`changed files with no explanation: ${unreported.slice(0, 12).join(", ")}`);
 			reasons.push("unreported_changes");
 		}
 	}
 
-	const evidenceKnown = (ref: string) => receipts.has(ref) || changed.has(ref);
+	const evidenceKnown = (ref: string) => receipts.has(ref) || changed.has(spelled(ref));
 	const entries = new Map(submitted.report.requirements.map((entry) => [entry.id, entry]));
 	const covered: string[] = [];
 	for (const id of context.requirementIds) {
@@ -425,4 +429,28 @@ export function judgeSubmittedReport(input: {
 		return verdict("rejected", { covered, missing: [...contradicted, ...missing], reasonCodes: reasons }, now);
 	if (missing.length > 0) return verdict("needs_more", { covered, missing, reasonCodes: reasons }, now);
 	return verdict("accepted", { covered, reasonCodes: ["report_matches_receipts"] }, now);
+}
+
+/**
+ * What System One's claim check reads for a claim: the summary, plus every statement a submitted report
+ * makes about its requirements and changes. The check already judges a worker's stated claims against the
+ * worker's own tool results; a structured report adds claims it should see, and no second judge is built.
+ */
+export function workerReportClaimText(claim: {
+	readonly summary: string;
+	readonly report?: WorkerSubmittedReport;
+}): string {
+	const report = claim.report;
+	if (!report) return claim.summary;
+	const lines = [claim.summary];
+	for (const requirement of report.requirements) {
+		lines.push(
+			`Requirement ${requirement.id} is ${requirement.status.replace("_", " ")}${requirement.note ? `: ${requirement.note}` : "."}`,
+		);
+	}
+	for (const change of report.changes) lines.push(`Changed ${change.file}: ${change.what}`);
+	for (const check of report.checks) {
+		if (check.note) lines.push(`Check "${check.command}" ${check.result.replace("_", " ")}: ${check.note}`);
+	}
+	return lines.join("\n").slice(0, 16_000);
 }
