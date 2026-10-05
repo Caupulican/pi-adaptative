@@ -445,6 +445,8 @@ export interface WorkerDelegationControllerDeps {
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** Parent admitted edge grants for worker edge authorization without interactive prompts. */
 	getEdgeGrants?(): readonly EdgeGrantView[];
+	/** Settles the owner's queued words before a worker call reads the parent's grants or delivery limit. */
+	settleOwnerPolicy?(): Promise<void>;
 	/** System One's operation gate for a worker's call the deterministic gates cannot decide (refused unless granted). */
 	checkOperation?(toolName: string, args: unknown, cwd: string): Promise<{ block: true; reason: string } | undefined>;
 	/** Set when the parent task is bound to local commits. Workers refuse git push on this branch. */
@@ -4251,7 +4253,8 @@ export class WorkerDelegationController {
 			grant,
 			toolManifests: executionPlan.toolManifests,
 			...(workerToolAdapters ? { workerToolAdapters } : {}),
-			checkEdge: (toolName, args, executionCwd) => {
+			checkEdge: async (toolName, args, executionCwd) => {
+				await this.deps.settleOwnerPolicy?.();
 				// A local-commit branch is the owner's integration setup, not a permission prompt: YOLO keeps it.
 				const refusedPush = refuseLocalPush(
 					this.deps.localCommitBranch ? { branch: () => this.deps.localCommitBranch?.() } : undefined,

@@ -24,6 +24,7 @@ import {
 	modelPoolFollowUp,
 	modelPoolQuestions,
 	optionalToolRequestQuestions,
+	ownerWordsScreenQuestion,
 	type QuestionDefinition,
 	type QuestionPack,
 	SYSTEM_ONE_CATALOG_VERSION,
@@ -266,6 +267,11 @@ export class SystemOneController {
 		this.evaluationObserver = observer;
 	}
 
+	/** The session's evaluation sink, for host programs that judge outside a catalog stage (file locate). */
+	getEvaluationObserver(): SemanticEvaluationObserver | undefined {
+		return this.evaluationObserver;
+	}
+
 	/** Late-bound like the truth source. */
 	setWorkDiffSource(source: (() => WorkDiff | undefined) | undefined): void {
 		this.workDiffSource = source;
@@ -420,6 +426,41 @@ export class SystemOneController {
 	}
 
 	/**
+	 * One read-only request about the owner's words, reported on the session's evaluation sink. A failure
+	 * is `unavailable` and settles the record; the caller settles a successful one once it has read the
+	 * answers.
+	 */
+	private async evaluateIntake(
+		programId: string,
+		state: Record<string, unknown>,
+		questions: QuestionPack,
+		signal: AbortSignal | undefined,
+	): Promise<
+		| { status: "evaluated"; response: Awaited<ReturnType<JevAdapter["evaluate"]>>; evaluationId: string | undefined }
+		| { status: "unavailable"; reason: string }
+	> {
+		const model = this.config.model.production || SYSTEM_ONE_PINNED_MODEL;
+		const evaluationId = this.evaluationObserver?.start({
+			programId,
+			consequence: consequenceForImpact("read_only"),
+			model,
+		});
+		try {
+			const response = await this.adapter.evaluate(
+				{ model, state, questions: toTypeSafeEvaluationQuestions(questions) },
+				{ impact: "read_only", timeoutMs: SYSTEM_ONE_STAGE_DEADLINE_MS, ...(signal ? { signal } : {}) },
+			);
+			return { status: "evaluated", response, evaluationId };
+		} catch (error) {
+			if (evaluationId !== undefined) {
+				if (signal?.aborted) this.evaluationObserver?.settleCancelled(evaluationId);
+				else this.evaluationObserver?.settleFailed(evaluationId, error);
+			}
+			return { status: "unavailable", reason: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	/**
 	 * One classification of the user request: whether it authorizes work, whether delivery is local
 	 * commits with push forbidden, and how it stands against the written rules.
 	 *
@@ -441,7 +482,7 @@ export class SystemOneController {
 		if (!userRequest) return { status: "skipped" };
 		const rules = writtenRules.trim().slice(0, USER_REQUEST_RULE_BUDGET);
 		const askCapabilities = options.capabilitiesPending !== false;
-		const asked: Record<string, unknown> = {};
+		const asked: QuestionPack = {};
 		for (const [id, question] of Object.entries(USER_AUTHORIZATION_QUESTIONS)) {
 			if (id === "capabilities_authorized" && !askCapabilities) continue;
 			if (RULE_AUTHORITY_QUESTION_IDS.has(id) && !rules) continue;
@@ -454,43 +495,24 @@ export class SystemOneController {
 			optionalTools.candidates.length <= MAX_OPTIONAL_TOOL_INTENT_TOOLS;
 		if (optionalToolsFit) Object.assign(asked, optionalToolRequestQuestions(optionalTools));
 		if (Object.keys(asked).length === 0) return { status: "skipped" };
-		const model = this.config.model.production || SYSTEM_ONE_PINNED_MODEL;
-		const evaluationId = this.evaluationObserver?.start({
-			programId: "system-one:intake",
-			consequence: consequenceForImpact("read_only"),
-			model,
-		});
-		let response: Awaited<ReturnType<JevAdapter["evaluate"]>>;
-		try {
-			response = await this.adapter.evaluate(
-				{
-					model,
-					state: {
-						user_request: userRequest.slice(0, 4_000),
-						written_rules: rules || "(none)",
-						...(optionalToolsFit
-							? {
-									optional_tools: optionalTools.candidates,
-									previous_optional_tool_intent: optionalTools.previous ?? null,
-									pending_owner_requests: optionalTools.pendingRequests ?? [],
-								}
-							: {}),
-					},
-					questions: toTypeSafeEvaluationQuestions(asked as typeof USER_AUTHORIZATION_QUESTIONS),
-				},
-				{
-					impact: "read_only",
-					timeoutMs: SYSTEM_ONE_STAGE_DEADLINE_MS,
-					...(options.signal ? { signal: options.signal } : {}),
-				},
-			);
-		} catch (error) {
-			if (evaluationId !== undefined) {
-				if (options.signal?.aborted) this.evaluationObserver?.settleCancelled(evaluationId);
-				else this.evaluationObserver?.settleFailed(evaluationId, error);
-			}
-			return { status: "unavailable", reason: error instanceof Error ? error.message : String(error) };
-		}
+		const evaluated = await this.evaluateIntake(
+			"system-one:intake",
+			{
+				user_request: userRequest.slice(0, 4_000),
+				written_rules: rules || "(none)",
+				...(optionalToolsFit
+					? {
+							optional_tools: optionalTools.candidates,
+							previous_optional_tool_intent: optionalTools.previous ?? null,
+							pending_owner_requests: optionalTools.pendingRequests ?? [],
+						}
+					: {}),
+			},
+			asked,
+			options.signal,
+		);
+		if (evaluated.status === "unavailable") return evaluated;
+		const { response, evaluationId } = evaluated;
 		const intentFloor = this.config.thresholds.choice.hard_gate_auto_confidence;
 		const optionalToolIntent = optionalTools
 			? optionalToolIntentFromAnswers(userRequest, optionalTools, response.answers, intentFloor)
@@ -533,6 +555,41 @@ export class SystemOneController {
 				requestHolds: hardYes("request_holds"),
 			},
 		};
+	}
+
+	/**
+	 * Which of the queued owner messages may carry an instruction: one request, one question per message.
+	 * A message is reported as not carrying one only when the screen's "only small talk" answer is a hard pass; an unsure
+	 * answer or an outage reports it as carrying, so the caller classifies it in full. The screen can
+	 * cost a call, never lose an instruction.
+	 */
+	async screenOwnerWords(
+		messages: readonly string[],
+		options: { signal?: AbortSignal } = {},
+	): Promise<{ status: "screened"; carriesInstruction: boolean[] } | { status: "unavailable"; reason: string }> {
+		if (messages.length === 0) return { status: "screened", carriesInstruction: [] };
+		const asked: QuestionPack = {};
+		messages.forEach((_message, index) => {
+			asked[`carries_${index}`] = ownerWordsScreenQuestion(index);
+		});
+		const evaluated = await this.evaluateIntake(
+			"system-one:intake-screen",
+			{ owner_messages: messages.map((message) => message.trim().slice(0, 1_000)) },
+			asked,
+			options.signal,
+		);
+		if (evaluated.status === "unavailable") return evaluated;
+		const { response, evaluationId } = evaluated;
+		const carriesInstruction = messages.map(
+			(_message, index) =>
+				evaluateNoul(
+					noulFromAnswer(response.answers[`carries_${index}`], false),
+					"required_true",
+					this.config.thresholds,
+				) !== "hard_pass",
+		);
+		if (evaluationId !== undefined) this.evaluationObserver?.settleOk(evaluationId, "owner words screened", [], []);
+		return { status: "screened", carriesInstruction };
 	}
 
 	/**

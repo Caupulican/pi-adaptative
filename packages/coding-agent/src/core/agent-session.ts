@@ -367,6 +367,7 @@ import { type SystemOneController, USER_REQUEST_RULE_BUDGET } from "./system-one
 import { createSessionForegroundControl, type SystemOneForegroundControl } from "./system-one/foreground-control.ts";
 import { OperationGate } from "./system-one/operation-gate.ts";
 import { operationGateLedgerBindings, prewarmOperationGate } from "./system-one/operation-gate-wiring.ts";
+import { OwnerPolicyQueue } from "./system-one/owner-policy-queue.ts";
 import {
 	appendOwnerFollowUp,
 	consultMessage,
@@ -655,6 +656,27 @@ export class AgentSession {
 	private readonly _subscriptionResetOffered = new Set<string>();
 	/** System One's gate for operations the deterministic gates cannot decide (created on first use). */
 	private _operationGateInstance?: OperationGate;
+	/** Owner words wait here until a tool call, a routing decision or a handoff needs what they decide. */
+	private readonly _ownerPolicy = new OwnerPolicyQueue({
+		classify: async (words) => {
+			const note = await this._runtimeBuilder.withTaskDirectoryContext(
+				() => this._enableCapabilitiesAuthorizedByUser(words.text, words.signal, true, words.acceptedOrder),
+				words.signal,
+				(error) => {
+					this._noteSystemOneTaskDirectoryUnavailable(error);
+					return undefined;
+				},
+			);
+			if (note)
+				this._pendingNextTurnMessages.push(
+					createCustomMessage("request_authority", note, false, undefined, new Date().toISOString()),
+				);
+		},
+		screen: async (texts, signal) => {
+			const outcome = await this._systemOneController?.screenOwnerWords(texts, signal ? { signal } : {});
+			return outcome?.status === "screened" ? outcome.carriesInstruction : undefined;
+		},
+	});
 	/** Providers whose reset check is in flight, so two limit answers do not ask twice at once. */
 	private readonly _subscriptionResetChecking = new Set<string>();
 	private _executionLoopMode?: ExecutionLoopMode;
@@ -1334,6 +1356,7 @@ export class AgentSession {
 			},
 			isGoalToolActive: () => hasGoalContinuationControl(this.getActiveToolNames()),
 			getEdgeGrants: () => this.getEdgeGrants(),
+			settleOwnerPolicy: () => this._ownerPolicy.settle("latest"),
 			checkOperation: (tool, args, cwd) => this._operationGate.check(tool, args, cwd, "worker"),
 			localCommitBranch: () => this._localCommitBranch,
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
@@ -1889,10 +1912,18 @@ export class AgentSession {
 					context.systemPrompt ?? "",
 				);
 			},
-			(calls, signal) =>
-				this.settingsManager.getEdgeSettings().mode === "yolo"
-					? undefined
-					: prewarmOperationGate(this._operationGate, calls, this._cwd, signal),
+			(calls, signal) => {
+				if (this.settingsManager.getEdgeSettings().mode === "yolo") return undefined;
+				// The first tool call starts the owner-words classification, which then runs while the call's
+				// arguments finish; the gate is pre-warmed once the grants it reads are known.
+				if (this._ownerPolicy.size === 0)
+					return prewarmOperationGate(this._operationGate, calls, this._cwd, signal);
+				void this._ownerPolicy
+					.settle("latest", signal)
+					.then(() => prewarmOperationGate(this._operationGate, calls, this._cwd, signal))
+					.catch(() => undefined);
+				return undefined;
+			},
 		);
 		this._foregroundLifecycle.start();
 		this._reflection = new ReflectionController({
@@ -2269,6 +2300,7 @@ export class AgentSession {
 			},
 		});
 		this._toolGate = new ToolGateController({
+			settleOwnerPolicy: (signal) => this._ownerPolicy.settle("latest", signal),
 			getExecutionMode: () => this.settingsManager.getEdgeSettings().mode,
 			gateSelfCompaction: (toolName, assistantMessage) =>
 				this._selfCompaction.gateToolCall(toolName, assistantMessage),
@@ -2991,6 +3023,7 @@ export class AgentSession {
 
 	private get _operationGate(): OperationGate {
 		this._operationGateInstance ??= new OperationGate({
+			settleOwnerPolicy: (signal) => this._ownerPolicy.settle("latest", signal),
 			getEngine: () => this._semanticDecisionEngine(),
 			getRequest: () => this._lastUserRequest,
 			getScopeCwd: () => this._cwd,
@@ -5769,6 +5802,10 @@ export class AgentSession {
 			routingStarted = true;
 			this._emit({ type: "routing_start" });
 
+			// Words left from earlier turns that used no tool are read before this turn is routed, so a model
+			// pool change they make holds for this turn's allocation as it did when every turn classified.
+			await this._ownerPolicy.settle("backlog", submissionSignal);
+
 			// Before anything is routed or sent: what the owner's accounts actually offer.
 			await this._accountModels.ready(submissionSignal);
 			if (submissionSignal?.aborted) throw new SubmissionPreflightAborted();
@@ -6024,21 +6061,14 @@ export class AgentSession {
 			if (!options?.internalContextType) {
 				this._lastUserRequest = userRequest;
 				if (options?.source !== "extension") {
+					// The owner's words are classified where their outcome is read (see OwnerPolicyQueue): a
+					// turn that uses no tool never waits for, or pays for, the classification.
 					if (this._systemOneController)
-						requestNote = await this._runtimeBuilder.withTaskDirectoryContext(
-							() =>
-								this._enableCapabilitiesAuthorizedByUser(
-									text,
-									submissionSignal,
-									true,
-									lifecycle?.acceptedOrder,
-								),
-							submissionSignal,
-							(error) => {
-								noteTaskDirectoryUnavailable(error);
-								return undefined;
-							},
-						);
+						this._ownerPolicy.enqueue({
+							text,
+							...(lifecycle?.acceptedOrder !== undefined ? { acceptedOrder: lifecycle.acceptedOrder } : {}),
+							...(submissionSignal ? { signal: submissionSignal } : {}),
+						});
 					else await this._classifyOwnerRequest(text, "", false, submissionSignal, lifecycle?.acceptedOrder);
 				} else if (this._systemOneController) {
 					requestNote = await this._runtimeBuilder.withTaskDirectoryContext(
@@ -7329,6 +7359,8 @@ export class AgentSession {
 	/** Post this turn's unsettled items to the owner as one displayed message, then clear them. */
 	private async _flushOwnerItems(lease: ForegroundSubmissionLease | undefined): Promise<void> {
 		if (this._pendingOwnerItems.length === 0) return;
+		// Whether the owner handed decisions off decides where these items go.
+		await this._ownerPolicy.settle("latest");
 		if (this.getGoalStateSnapshot()?.status === "paused") return;
 		const items = this._pendingOwnerItems;
 		if (this._handoff) {

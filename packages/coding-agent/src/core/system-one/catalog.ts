@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { type OptionalToolRequestContext, optionalToolRelationAsked } from "../tool-applicability-gate.ts";
 import type { ValidationStage } from "./types.ts";
 
-export const SYSTEM_ONE_CATALOG_VERSION = "1.3.0";
+export const SYSTEM_ONE_CATALOG_VERSION = "1.4.0";
 export const SYSTEM_ONE_PINNED_MODEL = "jev-1.13.0";
 export const SYSTEM_ONE_PREVIEW_MODEL = "jev-preview";
 
@@ -33,10 +33,10 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 	capabilities_authorized: Object.freeze({
 		type: "boolean",
 		instructions:
-			"Does `user_request` explicitly tell the harness to carry out the work, including the tools that work needs?",
+			"Does `user_request` tell the harness to do work, such as fix, change, add, remove, run, continue, commit or push, rather than only ask a question, discuss, or hold back?",
 		criteria: Object.freeze({
-			true: "The user directs the harness to do the work, continue, commit, push, edit, or run commands.",
-			false: "The user is greeting, asking for an explanation, or withholding permission to act.",
+			true: "The owner tells the harness to do something: 'fix the build', 'add a flag and update the docs', 'continue with the migration', 'rename it everywhere', 'commit and push', 'arruma o bug', 'arregla el bug'.",
+			false: "The owner only greets, thanks, asks a question, asks for an explanation, discusses an option, or withholds permission to act: 'hi', 'what does this do?', 'should we fix it?', 'explain how it works', \"don't change anything yet\", 'you must not edit any files'.",
 		}),
 	}),
 	local_commits_only: Object.freeze({
@@ -91,6 +91,24 @@ export const USER_AUTHORIZATION_QUESTIONS: Readonly<QuestionPack> = Object.freez
 		}),
 	}),
 });
+
+/**
+ * Screens one owner message before it earns the full classification above. One question per message,
+ * asked for every message queued since the last judgment in a single request. The question asks for the
+ * safe-to-skip case (small talk or a request to understand something) and a message is set aside only
+ * on a hard pass: an unsure answer or an outage classifies it in full, so the screen can cost a call
+ * but never lose an instruction. Measured on 70 messages in ten languages (docs/system-one.md).
+ */
+export function ownerWordsScreenQuestion(index: number): QuestionDefinition {
+	return {
+		type: "boolean",
+		instructions: `Is owner_messages[${index}] only small talk or a request to understand something, with no instruction to do, change, stop, allow, avoid or prefer anything? Read it in whatever language it is written.`,
+		criteria: {
+			true: "The message only greets, thanks, reacts, or asks what something means or does. 'hi', 'thanks, that helps', 'ok', 'oi, tudo bem?', 'hola', '你好', 'what does this function do?' and 'why does it work like that?' contain no instruction.",
+			false: "The message instructs, forbids, permits or prefers anything about work, tools, git, rules, models or asking the user. 'fix the bug', 'do not push', 'you can push now', 'you decide, don't ask me', 'arruma o bug', '全部由你决定' and 'only use local models' are instructions.",
+		},
+	};
+}
 
 /**
  * Host-selected tools share the same finite intent contract; names are data, never instructions.

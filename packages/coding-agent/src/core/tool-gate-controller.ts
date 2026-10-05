@@ -102,6 +102,11 @@ export interface ToolGateControllerDeps {
 		executionCwd: string | undefined,
 		signal: AbortSignal | undefined,
 	): Promise<BeforeToolCallResult | undefined>;
+	/**
+	 * The owner's words decide what a call may do (grants, a delivery limit, a forbidden tool). They are
+	 * classified lazily, so this settles them before the first gate reads any of that state.
+	 */
+	settleOwnerPolicy?(signal: AbortSignal | undefined): Promise<void>;
 	/** An admitted tool call that may change the world (see `isMutatingToolCall`): the work boundary. */
 	noteMutatingCall?(toolName: string, assistantMessage: AssistantMessage): void;
 	/** The tool's own `readOnly` declaration, when it made one. */
@@ -275,6 +280,8 @@ export class ToolGateController {
 		{ toolCall, args, executionContext, pathAuthority, requestId, assistantMessage, registerCleanup },
 		signal,
 	) => {
+		signal?.throwIfAborted();
+		await this.deps.settleOwnerPolicy?.(signal);
 		signal?.throwIfAborted();
 		const yolo = this.deps.getExecutionMode?.() === "yolo";
 		const selfCompactionBlock = this.deps.gateSelfCompaction?.(toolCall.name, assistantMessage);

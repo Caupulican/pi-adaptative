@@ -62,6 +62,8 @@ export interface OperationGateDeps {
 	getScopeCwd(): string;
 	/** Identity of the current user turn; a new one forgets cached verdicts. */
 	getTurnKey(): string;
+	/** The owner's words are classified lazily; they are settled before the standing authority is read. */
+	settleOwnerPolicy?(signal?: AbortSignal): Promise<void>;
 	/** Whether the operator granted `operation.irreversible` (standing authority). */
 	isGranted(): boolean;
 	/** Ask the operator at the edge; never used for a worker, which is refused instead. */
@@ -110,6 +112,8 @@ export class OperationGate {
 		actor: "root" | "worker",
 		signal?: AbortSignal,
 	): Promise<{ block: true; reason: string } | undefined> {
+		signal?.throwIfAborted();
+		await this.deps.settleOwnerPolicy?.(signal);
 		signal?.throwIfAborted();
 		if (this.deps.isGranted()) return undefined;
 		// No semantic engine means deterministic gates own the call. Avoid filesystem identity work

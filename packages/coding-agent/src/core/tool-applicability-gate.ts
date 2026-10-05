@@ -125,9 +125,18 @@ export const DEFAULT_INTENT_CONFIDENCE_FLOOR = DEFAULT_SYSTEM_ONE_CONFIG.thresho
 const TASK_RELATIONS = ["continue", "replace", "end", "uncertain"];
 const TOOL_DECISIONS = ["request", "revoke", "unchanged", "uncertain"];
 
-/** The task relation is judged only against a previous classified intent; with none it is `replace` by definition. */
+/**
+ * The task relation is judged only against a previous classified intent that holds a tool decision: a
+ * tool the task asked for or one it forbade. With none the relation changes nothing a tool reads (the
+ * intent would carry no tools whichever way it was answered), so it is `replace` by definition and
+ * asking would only add a judgment that can fall below the floor and leave the whole intent unresolved.
+ */
 export function optionalToolRelationAsked(context: Pick<OptionalToolRequestContext, "previous">): boolean {
-	return context.previous?.status === "classified";
+	const previous = context.previous;
+	return (
+		previous?.status === "classified" &&
+		(previous.allowedTools.length > 0 || (previous.revokedTools?.length ?? 0) > 0)
+	);
 }
 
 /** Confidence is checked once at this intent owner; malformed choices are not semantic approval. */
