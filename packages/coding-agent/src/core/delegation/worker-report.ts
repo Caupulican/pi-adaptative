@@ -309,6 +309,31 @@ export function buildReportRequest(input: {
 	return lines.join("\n");
 }
 
+/** Reasons that name proof a worker can still supply or a claim it can still correct. */
+const ACTIONABLE_REASON_CODES: ReadonlySet<string> = new Set([
+	"check_without_receipt",
+	"check_unknown_receipt",
+	"check_contradicted_by_receipt",
+	"change_not_recorded",
+	"unreported_changes",
+	"requirement_missing",
+	"requirement_without_evidence",
+	"requirement_unknown_evidence",
+	"verifier_without_verdict",
+]);
+
+/**
+ * Whether a verdict is worth one more worker turn. Only missing or contradicted proof is: a requirement
+ * the worker honestly reports as partial or not met has nothing left to prove, and pressing it for more
+ * would push a truthful report toward a different one. That verdict still reaches the root as it is.
+ */
+export function worthAFollowUpTurn(verdict: WorkerHostVerdict): boolean {
+	return (
+		(verdict.verdict === "needs_more" || verdict.verdict === "rejected") &&
+		verdict.reasonCodes.some((code) => ACTIONABLE_REASON_CODES.has(code))
+	);
+}
+
 /** The follow-up the host sends once when its checks find named proof missing. */
 export function buildNeedsMoreRequest(verdict: WorkerHostVerdict): string {
 	return [

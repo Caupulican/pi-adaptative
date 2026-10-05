@@ -53,6 +53,7 @@ import {
 	SUBMIT_REPORT_TOOL_NAME,
 	type WorkerReportCapture,
 	type WorkerReportContext,
+	worthAFollowUpTurn,
 } from "./worker-report.ts";
 import { runWorker, type WorkerRunOutcome } from "./worker-runner.ts";
 import { buildWorkerSystemPrompt } from "./worker-system-prompt.ts";
@@ -411,11 +412,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				changedFiles: [...changedFiles],
 				cwd: options.cwd,
 			});
-			if (
-				(hostVerdict.verdict === "needs_more" || hostVerdict.verdict === "rejected") &&
-				needsMoreRounds < MAX_NEEDS_MORE_ROUNDS &&
-				budgetLeft
-			) {
+			if (worthAFollowUpTurn(hostVerdict) && needsMoreRounds < MAX_NEEDS_MORE_ROUNDS && budgetLeft) {
 				needsMoreRounds++;
 				reportCapture.submitted = undefined;
 				return message(buildNeedsMoreRequest(hostVerdict));
