@@ -164,6 +164,124 @@ The account is held for the session: the objective loop's completion reads the l
 does not explain asks for an update. The evidence-matrix questions (is each required outcome shown, is each
 claim supported, is a requirement missing) are unchanged and still judged through the measured completion bounds.
 
+## Decision engineering in this harness
+
+The rule: text stays with the model, a label goes to System One, and the branch on the label is code.
+A step that answers with one word from a fixed list (yes or no, one option of a few, a score) is a
+decision; it is not asked of the generative model, and what happens after the label is never a second
+model call. The harness applies the rule at these sites; the last block lists the decisions that are still
+heuristic.
+
+| Decision | Program | Where |
+|---|---|---|
+| Is this operation harmful or off-request | `JEV-OPERATION-EFFECT` | shell-command gate |
+| Which route next | `JEV-004`, `objective-route-v2` | objective loop |
+| Is the goal complete, is each claim shown | `JEV-024..026`, completion account | goal completion |
+| Does the answer's claim stand | claim check | after every answer |
+| Does new code duplicate existing code | `system-one:code_duplicate` | edit review |
+| Which tool results to keep when compacting | `retention_eval_*` | compaction |
+| Which model pool or model | `system-one:route_choice` | model router |
+| Does an owner message grant, limit or hand off | `system-one:intake` | owner words |
+| Which file holds what the model is looking for | `system-one:locate` | `systemone locate` |
+
+How a new decision is written here, from the practice's own rules:
+
+- **Closed question, facts as state.** The state carries the evidence (an excerpt, a diff, a list of
+  candidates), never a conclusion the model already reached; questions cannot see each other's answers.
+- **Batch what shares a state.** Questions about one snapshot go in one request (up to 25 questions, 24 KiB
+  of state), and independent requests run in parallel under the machine-scaled concurrency bound.
+- **Code owns the threshold and the branch.** A hard decision needs the 0.93 hard pass; an unsure answer is
+  never treated as a yes or a no: it takes the fuller path (a full classification, the lexical order, the
+  operator) and an outage returns the deterministic result marked unjudged. A judgment orders, annotates
+  and routes; it never refuses work the model could do another way.
+- **The label is not proof.** A located file is read before it is edited, an "allowed" operation is verified
+  by its own result, and completion is proven by the goal's checks, not by a confident label.
+- **The option list is rebuilt every turn** from the live tools, workers and candidates.
+- **Wording is measured, not guessed.** System One reads the supplied text and pattern-matches; a question
+  that scores below the floor on a clear case is a badly formed question. Every question in the catalog is
+  checked on labelled messages in more than one language before it ships (see Owner words).
+
+Constraints this harness adds to the practice: the sent prefix is frozen for the prompt cache, so a
+relevance filter acts on the compaction summarizer's input or on fresh tool output and never rewrites
+history already sent; compaction's own verification (gated facts, read paths, open errors) must still
+hold, so a keep or drop never removes an entry the verifier requires; and nothing here reduces the model's
+freedom, a judgment only reorders what it sees.
+
+Decisions that are still heuristic, ranked by expected gain, each to be moved only with a measurement
+first (precision on a labelled set, requests, latency, tokens against the baseline):
+
+1. Compaction's keep or drop per tool pair already batches, but the judge sees only the tool name and call
+   id, never the result; giving it a bounded excerpt of each result and chunking the request is the
+   largest unused lever.
+2. `context-gc` decides a stale tool result by size, recency and "latest read per path"; "is this result
+   still relevant to the current task" is a closed question per entry, run in parallel on the summarizer's
+   input.
+3. `grep` and `find` rank by lexical score and cap hits per file; ranking the capped remainder by "does this
+   excerpt do what is being looked for" is the same question `locate` asks.
+4. `context_scout` runs a generative read-only subagent to find candidate files; a choice over the
+   candidate list from `locate` is a cheaper first step.
+5. Memory recall ranks by token overlap; "does this memory bear on the task" per page.
+6. Test failure triage ("flake or real regression") over the failure text and the recent diff.
+
+## File location
+
+`systemone locate` answers "which file holds X" for the session owner (workers do not have it). The caller
+states what it is looking for (`target`) and 1 to 8 literal or regex `queries` of its own choosing; the host
+does the rest, in code except for the judgment:
+
+1. The queries run through the managed `rg` (ignore rules, scope and protected credential files respected)
+   and are united by file. Files are ordered by how many distinct queries they match, then hit count.
+2. The top 24 files each become a card: the leading comment, up to ten declared names, and three lines
+   around the best hit, redacted like any other System One state.
+3. One closed Noul per card ("is this the code the target asks about") goes out, up to 25 per request, in
+   parallel under the machine-scaled bound; the answers rank the files by probability, path ascending on a tie.
+4. The model gets a short ranked list with `path:line`, the matched line and the probability, the files
+   below the floor topped up to three and labelled, and a count of files not judged. It still reads the
+   file it will edit: a label is not proof. An outage returns the lexical order marked `unjudged`.
+
+Measured on 20 targets written down before any run (hold-out, two identical runs): the file the model was
+looking for is first in 85% of calls (lexical order of the same candidates: 35%; a plain `rg` ordered by hit
+count: 20%) and among the first three in 95% (65%; 30%). A call takes 1.15 System One requests, about 6.7k
+judged input tokens and 465 ms of wall time, and returns about 170 tokens; the baseline the model would
+otherwise read is the hit lines (about 3.6k tokens capped, 340k uncapped) plus the top files. Judgments
+tuned on a separate 30-target set reached 83% and 93%. The expected file is among the 24 judged candidates
+in 95% of targets; the misses are generic queries, so wording the queries from identifiers lifts recall.
+Labels, every run and the method are in the release's audit directory.
+
+## Owner words
+
+An owner message is classified by System One where its outcome is read, never in front of the turn. The
+classification answers what the words do to standing policy: grant capabilities, limit git delivery, lift
+a limit, override a written rule, hand decisions off, change model pools, forbid an optional tool. A
+message is queued on arrival (`OwnerPolicyQueue`) and the queue is settled at the first reader:
+
+- the first tool call of a turn, before any gate reads grants, a delivery limit or a tool forbidding, and
+  before the shell-command gate decides whether the operator's standing grant applies (the settle starts
+  when the model begins its first tool call, so it runs while the arguments finish);
+- the next turn's routing, so a model pool change made in an earlier tool-free turn holds for that
+  allocation;
+- the end of a turn that left items for the owner, where a handoff decides delivery.
+
+A turn that uses no tool never settles it: a greeting costs no System One request and no wait. Messages
+left over from earlier tool-free turns are screened together in one request, one closed question per
+message ("only small talk or a request to understand something, with no instruction"). A message is set
+aside only on a hard pass of that question; an unsure answer or an outage classifies it in full, in the
+order the owner wrote it, because a delivery limit and its lifting are order dependent. The newest message
+is always classified in full. A failed classification keeps the messages it did not reach. Notes the
+classification produces (a rule conflict, a settled rule) reach the model at the start of the next turn.
+
+Measured on 70 messages in ten languages (English, Portuguese, Spanish, French, German, Chinese, Japanese,
+Russian, Arabic, Hindi; seven kinds each) against the live model: the full classification answered the
+same in every language as in English (each language 21 to 23 of 25 expected answers at the 0.93 floor, the
+misses being the same borderline readings in English). The screen at the 0.93 hard pass lost no
+instruction and set aside 14 of 30 small-talk and explanation messages; the closest instruction scored
+0.84 (a German handoff), so the margin is real but narrow, and the screen is weakest in Chinese, Russian,
+Arabic and Spanish. The first wording of the screen (a "does it carry an instruction" question read at a
+0.2 cut-off) lost a Japanese handoff; asking for the safe-to-skip case and requiring a hard pass did not.
+The question that decides whether a message directs work was reworded after the same kind of measurement: the old wording reached the 0.93 hard floor for 2 of 15 plain directives (13 scored 0.59 to 0.92, so most directed work did not grant the edge capabilities), the new one scores all 15 at 0.97 or higher and a directive in each of the ten languages at 0.98 to 0.99, with no greeting, thanks, explanation, hypothetical or hold-back message above 0.15.
+The task-relation question for optional tools is asked only when the previous intent holds a tool decision;
+it was otherwise a judgment that could fall below the floor and leave the whole intent unresolved.
+
 ## Optional tools
 
 A tool that is not built in or bundled (an extension or an integration) runs unless the owner forbade it. Each owner message

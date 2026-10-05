@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- `systemone` action `locate` finds the file that holds something: the caller gives a target and queries, the host searches with `rg`, builds a card per file (leading comment, declared names, the best hit) and System One answers one closed question per card. On 20 held-out targets the right file is first 85% of the time (35% for the same candidates in lexical order) and in the first three 95% (65%), for about 1.15 requests, 6.7k judged tokens and 465 ms per call. Session owner only; an outage returns the lexical order marked unjudged.
+- The Decision graph's Lanes view is a sequence diagram: one lifeline per actor (you, System One, root, each worker by name), arrows between lifelines for hand-overs, activation bars for running spans, and a moving carrier on in-flight and just-settled arrows. A settled edge is solid, an in-flight one dashed, a claimed one dotted, so state survives without color; settled System One judgments show their result as the label's evidence. `PI_REDUCE_MOTION=1` collapses carriers to the settled state.
+- The Diagram view draws one carrier along the stage spine when the loop moves to another stage.
+
+### Changed
+
+- An owner message is classified by System One where its outcome is read, not in front of every turn: before the first tool call is admitted (the classification starts when the model begins that call and runs while its arguments finish), before the next turn is routed, and where a handoff decides delivery. A turn that uses no tool, such as a greeting, makes no System One request and waits for none. Messages left from earlier tool-free turns are screened together in one request and set aside only on a hard pass; an unsure screen classifies them in full, in the owner's order.
+- The question that decides whether an owner message directs work (and so grants the edge capabilities) is reworded. Measured against the live model, the old wording reached the 0.93 hard floor for only 2 of 15 plain directives in English, Portuguese and Spanish (most scored 0.59 to 0.92); the new wording scores all 15 at 0.97 or higher, ten languages at 0.98 to 0.99, with no explanation, greeting, hypothetical or hold-back message above 0.15.
+- The optional-tool task-relation question is asked only when the previous intent holds a tool decision; otherwise it could fall below the confidence floor and leave the whole intent unresolved with a warning.
+
 ### Fixed
 
 - A session-replacement compaction prepared while the lane is idle keeps messages that arrive after the summarized history, including the owner message that opens the next turn.
