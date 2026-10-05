@@ -8,6 +8,7 @@ import { ConversationWindow } from "./conversation-window.ts";
 import type { DecisionGraphModel } from "./decision-graph-model.ts";
 import type { WorkbenchGraphView } from "./decision-graph-pane.ts";
 import { DecisionGraphPane, GRAPH_PANE_TITLE } from "./decision-graph-pane.ts";
+import { FlowAnimator } from "./flow-animator.ts";
 import {
 	fitRow,
 	labelRow,
@@ -179,6 +180,8 @@ export class WorkbenchComponent extends Container {
 	private graphSource?: () => DecisionGraphModel | undefined;
 	/** Told after every frame whether the drawn graph carries a running clock (the lane's ticker). */
 	private graphClock?: (running: boolean) => void;
+	/** The one timer that moves the flow views' carriers; present while the graph has a render trigger. */
+	private graphAnimator?: FlowAnimator;
 	/** The conversation zone of the last frame; the graph gutter drag resolves against it. */
 	private zoneLeft = 0;
 	private zoneWidth = 0;
@@ -338,13 +341,20 @@ export class WorkbenchComponent extends Container {
 	setDecisionGraph(
 		source: (() => DecisionGraphModel | undefined) | undefined,
 		clock?: (running: boolean) => void,
+		requestRender?: () => void,
 	): void {
 		this.graphSource = source;
 		this.graphClock = clock;
+		this.graphAnimator?.dispose();
+		this.graphAnimator = source && requestRender ? new FlowAnimator({ requestRender }) : undefined;
 		if (!source) {
 			this.graphPane.reset();
 			clock?.(false);
 		}
+	}
+	/** Stops the carrier timer; the controller calls it when the workbench is disposed. */
+	disposeGraphMotion(): void {
+		this.graphAnimator?.dispose();
 	}
 	/** The graph was drawn in the last frame (shown, sourced, and wide enough). */
 	get graphShown(): boolean {
@@ -891,6 +901,7 @@ export class WorkbenchComponent extends Container {
 		const model = graphWidth > 0 ? this.graphSource?.() : undefined;
 		this.graphClock?.(model?.hasRunningClock === true);
 		if (!model) {
+			this.graphAnimator?.settled();
 			this.graphPane.hide();
 			const inner = Math.max(1, zoneWidth - 2);
 			this.conversationLeft = originX + 1;
@@ -913,7 +924,12 @@ export class WorkbenchComponent extends Container {
 			graphWidth,
 			height + 1,
 			this.graphTitleButtons(graphWidth),
+			this.graphAnimator?.enabled ?? false,
 		);
+		// The frame says whether it drew a carrier: the timer runs only while one is needed.
+		const motionUntil = this.graphPane.motionUntil;
+		if (motionUntil === undefined) this.graphAnimator?.settled();
+		else this.graphAnimator?.request(motionUntil);
 		const body = this.conversation.render(inner, height).map((line) => gutter(line, inner));
 		while (body.length < height) body.push("");
 		const right = [this.conversationHeader(rightWidth, originX + rightX), ...body];

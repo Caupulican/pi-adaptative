@@ -54,6 +54,8 @@ export interface FlowEvent {
 	/** Absent while the action is running. An instant action ends when it starts. */
 	readonly endedAt?: number;
 	readonly outcome?: FlowOutcome;
+	/** Short handle of the ledger row behind the action (`#a1b2`), so a view can ground the edge in its evidence. */
+	readonly evidence?: string;
 }
 
 /** Oldest finished actions are dropped past this; running ones are always kept. */
@@ -222,6 +224,7 @@ export class FlowTrace {
 				startedAt: record.startedAt,
 				endedAt: record.endedAt,
 				outcome: record.outcome === "ok" ? "ok" : record.outcome,
+				evidence: `#${record.evaluationId.slice(0, 4)}`,
 			},
 			`judgment:${record.evaluationId}`,
 		);

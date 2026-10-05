@@ -7,7 +7,7 @@
 
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { DecisionGraphModel } from "./decision-graph-model.ts";
-import { renderDecisionDiagram, renderDecisionList } from "./decision-graph-render.ts";
+import { renderDecisionDiagram, renderDecisionList, type StageTransition } from "./decision-graph-render.ts";
 import { renderFlowLanes } from "./flow-lanes-render.ts";
 import { WorkbenchPane, type WorkbenchPaneTitleButton } from "./workbench-pane.ts";
 
@@ -16,6 +16,38 @@ export const GRAPH_PANE_TITLE = "Decision graph";
 export class DecisionGraphPane extends WorkbenchPane {
 	private selectedStage?: DecisionStage;
 	private stageAt: readonly (DecisionStage | undefined)[] = [];
+	/** Where the loop was at the last frame; a change between frames is a stage transition. */
+	private seenObjective?: string;
+	private seenStage?: DecisionStage;
+	private transition?: StageTransition;
+	/** The moment the last frame's carrier is no longer needed; undefined when it drew none. */
+	private motion?: number;
+
+	/** When the last drawn frame needs its carrier until (Infinity while in flight); undefined: nothing moves. */
+	get motionUntil(): number | undefined {
+		return this.motion;
+	}
+
+	/** A frame that is not drawn (graph hidden or folded) needs no carrier. */
+	override hide(): void {
+		this.motion = undefined;
+		super.hide();
+	}
+
+	/** The stage the loop entered since the last frame, as one transition; a new objective starts over. */
+	private trackStage(model: DecisionGraphModel): void {
+		const stage = model.current?.stage;
+		if (model.objectiveId !== this.seenObjective) {
+			this.seenObjective = model.objectiveId;
+			this.seenStage = stage;
+			this.transition = undefined;
+			return;
+		}
+		if (stage === undefined) return;
+		if (this.seenStage !== undefined && stage !== this.seenStage)
+			this.transition = { from: this.seenStage, to: stage, at: model.nowMs };
+		this.seenStage = stage;
+	}
 
 	/** The stage whose detail is open in the List view. */
 	getSelectedStage(): DecisionStage | undefined {
@@ -42,15 +74,18 @@ export class DecisionGraphPane extends WorkbenchPane {
 		width: number,
 		height: number,
 		actions: readonly WorkbenchPaneTitleButton[],
+		motion = true,
 	): string[] {
 		const inner = Math.max(1, width - 2);
+		this.trackStage(model);
 		const composed =
 			view === "list"
 				? renderDecisionList(model, inner, this.selectedStage)
 				: view === "lanes"
-					? renderFlowLanes(model.flow, inner, model.nowMs)
-					: renderDecisionDiagram(model, inner);
+					? renderFlowLanes(model.flow, inner, model.nowMs, motion)
+					: renderDecisionDiagram(model, inner, motion ? this.transition : undefined);
 		this.stageAt = composed.stageAt;
+		this.motion = composed.motionUntil;
 		const meta = model.current
 			? `${model.current.stage}${model.loop > 1 ? ` · loop ${model.loop}` : ""}`
 			: model.goal.branch === "delivered"

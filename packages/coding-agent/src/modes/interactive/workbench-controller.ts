@@ -134,7 +134,7 @@ export class WorkbenchController {
 		this.view = view;
 		this.ports = ports;
 		this.workspace = workspace;
-		if (ports.graph) view.setDecisionGraph(ports.graph, ports.clock);
+		if (ports.graph) view.setDecisionGraph(ports.graph, ports.clock, ports.requestRender);
 	}
 
 	/** Receipts of the current cycle: completed actions, observed file effects, negative outcomes. */
@@ -171,6 +171,7 @@ export class WorkbenchController {
 
 	dispose(): void {
 		this.disposed = true;
+		this.view.disposeGraphMotion();
 		this.reset();
 	}
 

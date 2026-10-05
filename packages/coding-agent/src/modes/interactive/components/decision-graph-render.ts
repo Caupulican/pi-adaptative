@@ -11,6 +11,7 @@ import type { DecisionStage } from "../../../core/operator-projection/decision-s
 import { evaluationResultText } from "../../../core/system-one/semantic-evaluation-ledger.ts";
 import { type ThemeColor, theme } from "../../../presentation/theme-model.ts";
 import type { DecisionGraphModel, DecisionParticipant } from "./decision-graph-model.ts";
+import { CARRIER_GLYPH, carrierActiveUntil, carrierIndex } from "./flow-carrier.ts";
 
 export interface DecisionGraphRows {
 	readonly rows: readonly string[];
@@ -20,6 +21,15 @@ export interface DecisionGraphRows {
 	readonly currentRow: number;
 	/** Semantic focus identity; row number alone is not stable across a reflow. */
 	readonly focusKey: string;
+	/** When a carrier is drawn: the moment it is no longer needed (Infinity while in flight). Absent: no motion. */
+	readonly motionUntil?: number;
+}
+
+/** The loop moved from one stage to another at `at`: one carrier travels the spine between them. */
+export interface StageTransition {
+	readonly from: DecisionStage;
+	readonly to: DecisionStage;
+	readonly at: number;
 }
 
 /** The decider's tone: the label tone marks System One everywhere in the Workbench. */
@@ -599,9 +609,16 @@ interface Part {
 	readonly bold?: boolean;
 }
 
-export function renderDecisionDiagram(model: DecisionGraphModel, width: number): DecisionGraphRows {
+export function renderDecisionDiagram(
+	model: DecisionGraphModel,
+	width: number,
+	transition?: StageTransition,
+): DecisionGraphRows {
 	const levels = composeDecisionDiagram(model);
 	const rows: string[] = [];
+	const partsAt: Part[][] = [];
+	/** The stage rows of the spine, in order: where each stage's glyph sits, for the transition carrier. */
+	const spine: { readonly stage: DecisionStage; readonly row: number }[] = [];
 	const stageAt: (DecisionStage | undefined)[] = [];
 	let currentRow = 0;
 	const inner = Math.max(20, width - 2);
@@ -630,6 +647,7 @@ export function renderDecisionDiagram(model: DecisionGraphModel, width: number):
 	};
 	const push = (parts: Part[], stage?: DecisionStage, isCurrent = false): void => {
 		if (isCurrent) currentRow = rows.length;
+		partsAt.push(parts);
 		rows.push(place(parts));
 		stageAt.push(stage);
 	};
@@ -741,6 +759,7 @@ export function renderDecisionDiagram(model: DecisionGraphModel, width: number):
 				]);
 				level.items.forEach((item, index) => {
 					const last = index === level.items.length - 1;
+					if (item.stage !== undefined) spine.push({ stage: item.stage, row: rows.length });
 					const clockText = item.clock ?? "";
 					const room = Math.max(1, pad + inner - (C + 5));
 					const label = `${truncateToWidth(item.text, Math.max(1, room - visibleWidth(clockText)), "…")}${clockText}`;
@@ -886,5 +905,33 @@ export function renderDecisionDiagram(model: DecisionGraphModel, width: number):
 			}
 		}
 	}
-	return { rows, stageAt, currentRow, focusKey: graphFocusKey(model) };
+	// One carrier travels the spine's stage glyphs from the stage the loop left to the one it entered.
+	let motionUntil: number | undefined;
+	if (transition) {
+		const from = spine.findIndex((entry) => entry.stage === transition.from);
+		const to = spine.findIndex((entry) => entry.stage === transition.to);
+		if (from !== -1 && to !== -1 && from !== to) {
+			const path = from < to ? spine.slice(from, to + 1) : spine.slice(to, from + 1).reverse();
+			const timing = { startedAt: transition.at, endedAt: transition.at };
+			const step = carrierIndex(path.length, timing, model.nowMs);
+			const hop = step === undefined ? undefined : path[step];
+			if (hop) {
+				rows[hop.row] = place(
+					partsAt[hop.row]!.map((part) =>
+						part.col === C + 3
+							? { ...part, text: CARRIER_GLYPH, tone: "accent" as ThemeColor, bold: true }
+							: part,
+					),
+				);
+			}
+			motionUntil = carrierActiveUntil(timing, model.nowMs);
+		}
+	}
+	return {
+		rows,
+		stageAt,
+		currentRow,
+		focusKey: graphFocusKey(model),
+		...(motionUntil !== undefined ? { motionUntil } : {}),
+	};
 }
